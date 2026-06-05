@@ -63,6 +63,7 @@ export interface ProfileManagerApi {
   getState(): Promise<AppState>;
   createProfile(name: string): Promise<AppState>;
   launchProfile(id: string): Promise<AppState>;
+  closeProfile(id: string): Promise<AppState>;
   openProfileFolder(id: string): Promise<AppState>;
   deleteProfile(id: string): Promise<DeleteProfileResult>;
 }

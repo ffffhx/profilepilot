@@ -128,6 +128,32 @@ export class ProfileManager {
     await this.launchIsolatedProfile(ref.id);
   }
 
+  async closeProfile(profileId: string): Promise<void> {
+    const ref = parseProfileId(profileId);
+    const expectedId = ref.source === "native" ? makeNativeProfileId(ref.dirName) : makeIsolatedProfileId(ref.id);
+    const state = await this.getState();
+    const profile = state.profiles.find((item) => item.id === expectedId);
+
+    if (!profile) {
+      throw new ProfileManagerError("Profile not found.", "PROFILE_NOT_FOUND");
+    }
+    if (!profile.running || !profile.pids.length) {
+      throw new ProfileManagerError("Profile is not running.", "PROFILE_NOT_RUNNING");
+    }
+
+    for (const pid of profile.pids) {
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch (error) {
+        if (!isProcessGoneError(error)) {
+          throw error;
+        }
+      }
+    }
+
+    await this.waitUntilProfileStops(expectedId, 1800);
+  }
+
   async openProfileFolder(profileId: string): Promise<void> {
     const ref = parseProfileId(profileId);
     const profilePath = await this.pathForRef(ref);
@@ -429,6 +455,19 @@ export class ProfileManager {
     await fs.rename(sourcePath, targetPath);
     return targetPath;
   }
+
+  private async waitUntilProfileStops(profileId: string, timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+      await sleep(150);
+      const state = await this.getState();
+      const profile = state.profiles.find((item) => item.id === profileId);
+      if (!profile?.running) {
+        return;
+      }
+    }
+  }
 }
 
 export function createProfileManager(): ProfileManager {
@@ -485,6 +524,16 @@ async function exists(filePath: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function isProcessGoneError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ESRCH";
 }
 
 function normalizeProfile(profile: unknown): StoredProfile | null {

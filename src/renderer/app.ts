@@ -54,6 +54,7 @@ interface ProfileManagerApi {
   getState(): Promise<AppState>;
   createProfile(name: string): Promise<AppState>;
   launchProfile(id: string): Promise<AppState>;
+  closeProfile(id: string): Promise<AppState>;
   openProfileFolder(id: string): Promise<AppState>;
   deleteProfile(id: string): Promise<DeleteProfileResult>;
 }
@@ -62,7 +63,15 @@ interface Window {
   profileManager: ProfileManagerApi;
 }
 
-type ModalState = "new" | null;
+type ConfirmAction = "close" | "delete";
+type ModalState =
+  | { kind: "new" }
+  | {
+      kind: "confirm";
+      action: ConfirmAction;
+      profileId: string;
+    }
+  | null;
 type ToastKind = "normal" | "error";
 
 const root = document.querySelector<HTMLDivElement>("#app");
@@ -204,7 +213,8 @@ function render(): void {
         ${renderDetails(selected)}
       </main>
     </div>
-    ${modal === "new" ? renderNewModal() : ""}
+    ${modal?.kind === "new" ? renderNewModal() : ""}
+    ${modal?.kind === "confirm" ? renderConfirmModal(modal) : ""}
     ${toast ? `<div class="toast ${toastKind === "error" ? "error" : ""}" role="status">${escapeHtml(toast)}</div>` : ""}
   `;
 }
@@ -233,6 +243,7 @@ function renderTable(profiles: PublicProfile[]): string {
 function renderProfileRow(profile: PublicProfile): string {
   const selected = profile.id === selectedId;
   const launchDisabled = busy || profile.running;
+  const closeDisabled = busy || !profile.running;
   const deleteDisabled = busy || profile.running || !profile.deletable;
   return `
     <tr class="${selected ? "selected" : ""}">
@@ -257,9 +268,10 @@ function renderProfileRow(profile: PublicProfile): string {
       <td class="date-cell">${formatDate(profile.lastLaunchedAt)}</td>
       <td>
         <div class="row-actions">
-          <button type="button" data-action="launch" data-id="${profile.id}" title="${escapeHtml(launchButtonTitle(profile))}" ${launchDisabled ? "disabled" : ""}>启动</button>
-          <button type="button" data-action="open-folder" data-id="${profile.id}" ${busy ? "disabled" : ""}>目录</button>
-          <button type="button" class="danger" data-action="delete" data-id="${profile.id}" title="${escapeHtml(deleteButtonTitle(profile))}" ${deleteDisabled ? "disabled" : ""}>删除</button>
+          <button type="button" class="action-button" data-action="launch" data-id="${profile.id}" title="${escapeHtml(launchButtonTitle(profile))}" ${launchDisabled ? "disabled" : ""}>启动</button>
+          <button type="button" class="action-button warn" data-action="close-profile" data-id="${profile.id}" title="${escapeHtml(closeButtonTitle(profile))}" ${closeDisabled ? "disabled" : ""}>关闭</button>
+          <button type="button" class="action-button" data-action="open-folder" data-id="${profile.id}" ${busy ? "disabled" : ""}>目录</button>
+          <button type="button" class="action-button danger" data-action="delete" data-id="${profile.id}" title="${escapeHtml(deleteButtonTitle(profile))}" ${deleteDisabled ? "disabled" : ""}>删除</button>
         </div>
       </td>
     </tr>
@@ -352,12 +364,56 @@ function renderNewModal(): string {
   `;
 }
 
+function renderConfirmModal(confirm: Extract<ModalState, { kind: "confirm" }>): string {
+  const profile = state?.profiles.find((item) => item.id === confirm.profileId);
+  if (!profile) {
+    return "";
+  }
+
+  const copy = confirm.action === "close" ? closeConfirmCopy(profile) : deleteConfirmCopy(profile);
+  const confirmClass = confirm.action === "delete" ? "danger solid" : "warn solid";
+
+  return `
+    <div class="modal-backdrop" data-action="close-modal">
+      <section class="modal confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+        <span class="modal-kicker">二次确认</span>
+        <h2 id="confirm-title">${escapeHtml(copy.title)}</h2>
+        <p class="modal-copy">${escapeHtml(copy.body)}</p>
+        <div class="confirm-summary">
+          <div>
+            <span>Profile</span>
+            <strong>${escapeHtml(profile.name)}</strong>
+          </div>
+          <div>
+            <span>类型</span>
+            <strong>${profile.source === "native" ? "本机 Chrome" : "独立 Profile"}</strong>
+          </div>
+          <div>
+            <span>状态</span>
+            <strong>${profileStatusLabel(profile)}</strong>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button type="button" data-action="close-modal">取消</button>
+          <button type="button" class="${confirmClass}" data-action="confirm-profile-action">
+            ${escapeHtml(copy.confirmLabel)}
+          </button>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
 function profileStatusLabel(profile: PublicProfile): string {
   return profile.running ? "运行中" : "未运行";
 }
 
 function launchButtonTitle(profile: PublicProfile): string {
   return profile.running ? "这个 Profile 已经在运行中" : "启动这个 Profile";
+}
+
+function closeButtonTitle(profile: PublicProfile): string {
+  return profile.running ? "关闭这个 Profile 的 Chrome 实例" : "这个 Profile 当前未运行";
 }
 
 function deleteButtonTitle(profile: PublicProfile): string {
@@ -372,6 +428,30 @@ function deleteButtonTitle(profile: PublicProfile): string {
   }
 
   return "删除这个 Profile";
+}
+
+function closeConfirmCopy(profile: PublicProfile): { title: string; body: string; confirmLabel: string } {
+  if (profile.source === "native" && profile.isDefault) {
+    return {
+      title: `关闭 ${profile.name}`,
+      body: "这会退出当前本机 Google Chrome 实例。未保存的网页内容可能会丢失。",
+      confirmLabel: "确认关闭"
+    };
+  }
+
+  return {
+    title: `关闭 ${profile.name}`,
+    body: "这会结束这个 Profile 对应的 Chrome 实例。未保存的网页内容可能会丢失。",
+    confirmLabel: "确认关闭"
+  };
+}
+
+function deleteConfirmCopy(profile: PublicProfile): { title: string; body: string; confirmLabel: string } {
+  return {
+    title: `删除 ${profile.name}`,
+    body: "这个 Profile 的目录会先移到废纸篓。删除前请确认它没有正在运行的 Chrome 窗口。",
+    confirmLabel: "确认删除"
+  };
 }
 
 function formatDate(value: string | null): string {
@@ -407,7 +487,7 @@ appRoot.addEventListener("click", (event) => {
   const id = actionTarget.dataset.id || null;
 
   if (action === "new-profile") {
-    modal = "new";
+    modal = { kind: "new" };
     render();
     window.setTimeout(() => document.querySelector<HTMLInputElement>("#profile-name")?.focus(), 0);
     return;
@@ -418,6 +498,26 @@ appRoot.addEventListener("click", (event) => {
       modal = null;
       render();
     }
+    return;
+  }
+
+  if (action === "confirm-profile-action" && modal?.kind === "confirm") {
+    const profileId = modal.profileId;
+    const confirmAction = modal.action;
+    const profile = state.profiles.find((item) => item.id === profileId);
+    modal = null;
+
+    if (!profile) {
+      render();
+      return;
+    }
+
+    if (confirmAction === "close") {
+      void withBusy(() => profileApi().closeProfile(profile.id), `已请求关闭 ${profile.name}`);
+      return;
+    }
+
+    void withBusy(() => profileApi().deleteProfile(profile.id), `已删除 ${profile.name}`);
     return;
   }
 
@@ -442,6 +542,21 @@ appRoot.addEventListener("click", (event) => {
     return;
   }
 
+  if (action === "close-profile" && id) {
+    const profile = state.profiles.find((item) => item.id === id);
+    if (!profile) {
+      return;
+    }
+    if (!profile.running) {
+      setToast(`${profile.name} 当前未运行`);
+      return;
+    }
+
+    modal = { kind: "confirm", action: "close", profileId: id };
+    render();
+    return;
+  }
+
   if (action === "open-folder" && id) {
     void withBusy(() => profileApi().openProfileFolder(id), "已打开目录");
     return;
@@ -461,12 +576,8 @@ appRoot.addEventListener("click", (event) => {
       return;
     }
 
-    const confirmed = window.confirm(`删除 "${profile.name}"？目录会先移到废纸篓。`);
-    if (!confirmed) {
-      return;
-    }
-
-    void withBusy(() => profileApi().deleteProfile(id), `已删除 ${profile.name}`);
+    modal = { kind: "confirm", action: "delete", profileId: id };
+    render();
   }
 });
 

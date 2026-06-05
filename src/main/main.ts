@@ -38,6 +38,7 @@ function createMainWindow(): void {
                   title: document.title,
                   h1: document.querySelector("h1")?.textContent || null,
                   hasBridge: Boolean(window.profileManager),
+                  hasCloseProfile: typeof window.profileManager?.closeProfile === "function",
                   buttonCount: document.querySelectorAll("button").length,
                   nativeProfileCount: null,
                   firstNativeProfile: null,
@@ -111,6 +112,11 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.launchProfile, async (_event, id: string): Promise<AppState> => {
     await profileManager.launchProfile(id);
+    return profileManager.getState();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.closeProfile, async (_event, id: string): Promise<AppState> => {
+    await profileManager.closeProfile(id);
     return profileManager.getState();
   });
 

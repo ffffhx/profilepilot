@@ -132,18 +132,29 @@ h3 {
 .row-actions {
   justify-content: flex-start;
   flex-wrap: nowrap;
-  gap: 6px;
+  gap: 5px;
 }
 
 .row-actions button {
-  min-width: 44px;
-  padding: 0 6px;
+  min-width: 40px;
+  padding: 0 5px;
   font-size: 12px;
   white-space: nowrap;
 }
 
 .action-button {
   background: #fbfcfd;
+}
+
+.action-button.accent {
+  border-color: #9fcebc;
+  background: #eefaf5;
+  color: var(--accent-dark);
+}
+
+.action-button.accent:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
 }
 
 .action-button.warn {
@@ -296,12 +307,12 @@ h3 {
 
 .profiles-table th:nth-child(1),
 .profiles-table td:nth-child(1) {
-  width: 25%;
+  width: 23%;
 }
 
 .profiles-table th:nth-child(2),
 .profiles-table td:nth-child(2) {
-  width: 15%;
+  width: 14%;
 }
 
 .profiles-table th:nth-child(3),
@@ -311,12 +322,12 @@ h3 {
 
 .profiles-table th:nth-child(4),
 .profiles-table td:nth-child(4) {
-  width: 14%;
+  width: 13%;
 }
 
 .profiles-table th:nth-child(5),
 .profiles-table td:nth-child(5) {
-  width: 34%;
+  width: 38%;
 }
 
 .profiles-table th,

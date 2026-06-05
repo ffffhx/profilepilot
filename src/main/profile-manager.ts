@@ -129,14 +129,7 @@ export class ProfileManager {
   }
 
   async closeProfile(profileId: string): Promise<void> {
-    const ref = parseProfileId(profileId);
-    const expectedId = ref.source === "native" ? makeNativeProfileId(ref.dirName) : makeIsolatedProfileId(ref.id);
-    const state = await this.getState();
-    const profile = state.profiles.find((item) => item.id === expectedId);
-
-    if (!profile) {
-      throw new ProfileManagerError("Profile not found.", "PROFILE_NOT_FOUND");
-    }
+    const profile = await this.getPublicProfile(profileId);
     if (!profile.running || !profile.pids.length) {
       throw new ProfileManagerError("Profile is not running.", "PROFILE_NOT_RUNNING");
     }
@@ -151,7 +144,16 @@ export class ProfileManager {
       }
     }
 
-    await this.waitUntilProfileStops(expectedId, 1800);
+    await this.waitUntilProfileStops(profile.id, 1800);
+  }
+
+  async focusProfile(profileId: string): Promise<void> {
+    const profile = await this.getPublicProfile(profileId);
+    if (!profile.running || !profile.pids.length) {
+      throw new ProfileManagerError("Profile is not running.", "PROFILE_NOT_RUNNING");
+    }
+
+    await focusProfileWindow(profile.pids);
   }
 
   async openProfileFolder(profileId: string): Promise<void> {
@@ -419,6 +421,19 @@ export class ProfileManager {
     return path.join(this.profilesDir, profile.dirName);
   }
 
+  private async getPublicProfile(profileId: string): Promise<PublicProfile> {
+    const ref = parseProfileId(profileId);
+    const expectedId = ref.source === "native" ? makeNativeProfileId(ref.dirName) : makeIsolatedProfileId(ref.id);
+    const state = await this.getState();
+    const profile = state.profiles.find((item) => item.id === expectedId);
+
+    if (!profile) {
+      throw new ProfileManagerError("Profile not found.", "PROFILE_NOT_FOUND");
+    }
+
+    return profile;
+  }
+
   private getLauncherLabel(): string {
     if (process.env.CHROME_BINARY) {
       return process.env.CHROME_BINARY;
@@ -534,6 +549,56 @@ function sleep(ms: number): Promise<void> {
 
 function isProcessGoneError(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ESRCH";
+}
+
+async function focusProfileWindow(pids: number[]): Promise<void> {
+  if (process.platform !== "darwin") {
+    throw new ProfileManagerError("Bringing a profile window forward is currently supported on macOS.", "FOCUS_UNSUPPORTED");
+  }
+
+  let lastError: unknown = null;
+  for (const pid of pids) {
+    try {
+      await focusMacProcess(pid);
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  const detail = lastError instanceof Error && lastError.message ? ` ${lastError.message}` : "";
+  throw new ProfileManagerError(
+    `Could not bring this Chrome profile to the front.${detail}`,
+    "FOCUS_PROFILE_FAILED"
+  );
+}
+
+async function focusMacProcess(pid: number): Promise<void> {
+  const script = `
+tell application "System Events"
+  set targetProcesses to every process whose unix id is ${pid}
+  if (count of targetProcesses) is 0 then error "Process not found"
+  set targetProcess to item 1 of targetProcesses
+  tell targetProcess
+    set visible to true
+    try
+      repeat with targetWindow in windows
+        try
+          set value of attribute "AXMinimized" of targetWindow to false
+        end try
+      end repeat
+    end try
+    set frontmost to true
+    if (count of windows) is greater than 0 then
+      perform action "AXRaise" of window 1
+    else
+      error "Process has no windows"
+    end if
+  end tell
+end tell
+`;
+
+  await execFileAsync("osascript", ["-e", script]);
 }
 
 function normalizeProfile(profile: unknown): StoredProfile | null {

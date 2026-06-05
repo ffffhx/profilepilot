@@ -54,6 +54,7 @@ interface ProfileManagerApi {
   getState(): Promise<AppState>;
   createProfile(name: string): Promise<AppState>;
   launchProfile(id: string): Promise<AppState>;
+  focusProfile(id: string): Promise<AppState>;
   closeProfile(id: string): Promise<AppState>;
   openProfileFolder(id: string): Promise<AppState>;
   deleteProfile(id: string): Promise<DeleteProfileResult>;
@@ -243,6 +244,7 @@ function renderTable(profiles: PublicProfile[]): string {
 function renderProfileRow(profile: PublicProfile): string {
   const selected = profile.id === selectedId;
   const launchDisabled = busy || profile.running;
+  const focusDisabled = busy || !profile.running;
   const closeDisabled = busy || !profile.running;
   const deleteDisabled = busy || profile.running || !profile.deletable;
   return `
@@ -269,6 +271,7 @@ function renderProfileRow(profile: PublicProfile): string {
       <td>
         <div class="row-actions">
           <button type="button" class="action-button" data-action="launch" data-id="${profile.id}" title="${escapeHtml(launchButtonTitle(profile))}" ${launchDisabled ? "disabled" : ""}>启动</button>
+          <button type="button" class="action-button accent" data-action="focus-profile" data-id="${profile.id}" title="${escapeHtml(focusButtonTitle(profile))}" ${focusDisabled ? "disabled" : ""}>显示</button>
           <button type="button" class="action-button warn" data-action="close-profile" data-id="${profile.id}" title="${escapeHtml(closeButtonTitle(profile))}" ${closeDisabled ? "disabled" : ""}>关闭</button>
           <button type="button" class="action-button" data-action="open-folder" data-id="${profile.id}" ${busy ? "disabled" : ""}>目录</button>
           <button type="button" class="action-button danger" data-action="delete" data-id="${profile.id}" title="${escapeHtml(deleteButtonTitle(profile))}" ${deleteDisabled ? "disabled" : ""}>删除</button>
@@ -412,6 +415,10 @@ function launchButtonTitle(profile: PublicProfile): string {
   return profile.running ? "这个 Profile 已经在运行中" : "启动这个 Profile";
 }
 
+function focusButtonTitle(profile: PublicProfile): string {
+  return profile.running ? "把这个 Profile 的 Chrome 窗口显示到最前面" : "这个 Profile 当前未运行";
+}
+
 function closeButtonTitle(profile: PublicProfile): string {
   return profile.running ? "关闭这个 Profile 的 Chrome 实例" : "这个 Profile 当前未运行";
 }
@@ -539,6 +546,20 @@ appRoot.addEventListener("click", (event) => {
       return;
     }
     void withBusy(() => profileApi().launchProfile(id), `已启动 ${profile?.name || "Profile"}`);
+    return;
+  }
+
+  if (action === "focus-profile" && id) {
+    const profile = state.profiles.find((item) => item.id === id);
+    if (!profile) {
+      return;
+    }
+    if (!profile.running) {
+      setToast(`${profile.name} 当前未运行`);
+      return;
+    }
+
+    void withBusy(() => profileApi().focusProfile(id), `已显示 ${profile.name}`);
     return;
   }
 

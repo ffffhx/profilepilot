@@ -249,7 +249,7 @@ function renderProfileRow(profile: PublicProfile): string {
       </td>
       <td>
         <span class="state-pill ${profile.running ? "running" : ""}">
-          ${profile.running ? "运行中" : "已停止"}
+          ${profileStatusLabel(profile)}
         </span>
       </td>
       <td class="date-cell">${formatDate(profile.lastLaunchedAt)}</td>
@@ -295,7 +295,7 @@ function renderDetails(profile: PublicProfile | null): string {
       <div class="detail-title">
         <h2>${escapeHtml(profile.name)}</h2>
         <span class="detail-status ${profile.running ? "running" : ""}">
-          ${profile.running ? "运行中" : "已停止"}
+          ${profileStatusLabel(profile)}
         </span>
       </div>
       <div class="detail-list">
@@ -348,6 +348,10 @@ function renderNewModal(): string {
       </form>
     </div>
   `;
+}
+
+function profileStatusLabel(profile: PublicProfile): string {
+  return profile.running ? "运行中" : "未运行";
 }
 
 function formatDate(value: string | null): string {

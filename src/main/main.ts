@@ -41,12 +41,19 @@ function createMainWindow(): void {
                   buttonCount: document.querySelectorAll("button").length,
                   nativeProfileCount: null,
                   firstNativeProfile: null,
+                  runningProfileIds: [],
+                  defaultProfileRunning: null,
+                  defaultProfilePids: [],
                   crud: null
                 };
 
                 const visibleState = await window.profileManager.getState();
                 smokeResult.nativeProfileCount = visibleState.nativeChromeProfiles.length;
                 smokeResult.firstNativeProfile = visibleState.nativeChromeProfiles[0]?.dirName || null;
+                smokeResult.runningProfileIds = visibleState.runningProfiles.map((profile) => profile.id);
+                const defaultProfile = visibleState.profiles.find((profile) => profile.id === "native:Default");
+                smokeResult.defaultProfileRunning = defaultProfile?.running ?? null;
+                smokeResult.defaultProfilePids = defaultProfile?.pids ?? [];
 
                 if (${JSON.stringify(runCrud)}) {
                   const initial = visibleState;

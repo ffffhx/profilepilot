@@ -286,6 +286,7 @@ export class ProfileManager {
 
   private async getRuntime(profilePaths: string[], nativeDirNames: string[]): Promise<Map<string, number[]>> {
     const runtime = new Map<string, number[]>();
+    const defaultNativeKey = nativeDirNames.includes("Default") ? makeNativeRuntimeKey("Default") : null;
 
     if (!profilePaths.length && !nativeDirNames.length) {
       return runtime;
@@ -309,6 +310,13 @@ export class ProfileManager {
 
         const pid = Number(match[1]);
         const command = match[2];
+
+        // A normally opened Chrome often does not include --profile-directory.
+        // Treat that main browser process as the Default profile.
+        if (defaultNativeKey && isImplicitDefaultChromeProcess(command)) {
+          addRuntimePid(runtime, defaultNativeKey, pid);
+        }
+
         for (const profilePath of profilePaths) {
           if (!command.includes("--user-data-dir=") || !command.includes(profilePath)) {
             continue;
@@ -335,7 +343,10 @@ export class ProfileManager {
     registry: Registry,
     runtime: Map<string, number[]>
   ): PublicProfile {
-    const pids = runtime.get(profile.path) || runtime.get(makeNativeRuntimeKey(profile.dirName)) || [];
+    const pids = uniqueNumbers([
+      ...(runtime.get(profile.path) || []),
+      ...(runtime.get(makeNativeRuntimeKey(profile.dirName)) || [])
+    ]);
 
     return {
       id: makeNativeProfileId(profile.dirName),
@@ -612,6 +623,36 @@ function addRuntimePid(runtime: Map<string, number[]>, key: string, pid: number)
   const pids = runtime.get(key) || [];
   pids.push(pid);
   runtime.set(key, pids);
+}
+
+function uniqueNumbers(values: number[]): number[] {
+  return [...new Set(values)];
+}
+
+function isImplicitDefaultChromeProcess(command: string): boolean {
+  return (
+    isGoogleChromeMainProcess(command) &&
+    !command.includes("--profile-directory=") &&
+    !command.includes("--user-data-dir=")
+  );
+}
+
+function isGoogleChromeMainProcess(command: string): boolean {
+  if (command.includes("--type=") || command.includes("chrome_crashpad_handler")) {
+    return false;
+  }
+
+  if (process.platform === "darwin") {
+    return command.includes("/Google Chrome.app/Contents/MacOS/Google Chrome");
+  }
+
+  if (process.platform === "win32") {
+    return /(^|[\\\s])chrome\.exe(\s|$)/i.test(command);
+  }
+
+  return /(^|\s)(\/\S+\/)?(google-chrome|google-chrome-stable|chromium|chromium-browser|chrome)(\s|$)/.test(
+    command
+  );
 }
 
 async function isChromeRunning(): Promise<boolean> {

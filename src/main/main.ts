@@ -43,6 +43,7 @@ function createMainWindow(): void {
                   firstNativeProfile: null,
                   runningProfileIds: [],
                   defaultProfileRunning: null,
+                  defaultProfileLastLaunchedAt: null,
                   defaultProfilePids: [],
                   crud: null
                 };
@@ -53,6 +54,7 @@ function createMainWindow(): void {
                 smokeResult.runningProfileIds = visibleState.runningProfiles.map((profile) => profile.id);
                 const defaultProfile = visibleState.profiles.find((profile) => profile.id === "native:Default");
                 smokeResult.defaultProfileRunning = defaultProfile?.running ?? null;
+                smokeResult.defaultProfileLastLaunchedAt = defaultProfile?.lastLaunchedAt ?? null;
                 smokeResult.defaultProfilePids = defaultProfile?.pids ?? [];
 
                 if (${JSON.stringify(runCrud)}) {

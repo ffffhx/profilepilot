@@ -21,6 +21,11 @@ export const APP_TITLE = "Codex Chrome Profile Manager";
 
 type ProfileRef = { source: "native"; dirName: string } | { source: "isolated"; id: string };
 
+interface RuntimeProfile {
+  pids: number[];
+  startedAt: string | null;
+}
+
 interface ChromeLocalState {
   profile?: {
     info_cache?: Record<
@@ -284,8 +289,8 @@ export class ProfileManager {
     await fs.rename(tmpPath, this.registryPath);
   }
 
-  private async getRuntime(profilePaths: string[], nativeDirNames: string[]): Promise<Map<string, number[]>> {
-    const runtime = new Map<string, number[]>();
+  private async getRuntime(profilePaths: string[], nativeDirNames: string[]): Promise<Map<string, RuntimeProfile>> {
+    const runtime = new Map<string, RuntimeProfile>();
     const defaultNativeKey = nativeDirNames.includes("Default") ? makeNativeRuntimeKey("Default") : null;
 
     if (!profilePaths.length && !nativeDirNames.length) {
@@ -293,42 +298,36 @@ export class ProfileManager {
     }
 
     try {
-      const { stdout } = await execFileAsync("ps", ["-axo", "pid=,command="], {
+      const { stdout } = await execFileAsync("ps", ["-axo", "pid=,lstart=,command="], {
         maxBuffer: 1024 * 1024 * 8
       });
 
       for (const line of stdout.split("\n")) {
-        const trimmed = line.trim();
-        if (!trimmed) {
+        const processInfo = parseRuntimeProcess(line);
+        if (!processInfo) {
           continue;
         }
 
-        const match = trimmed.match(/^(\d+)\s+(.*)$/);
-        if (!match) {
-          continue;
-        }
-
-        const pid = Number(match[1]);
-        const command = match[2];
+        const { command } = processInfo;
 
         // A normally opened Chrome often does not include --profile-directory.
         // Treat that main browser process as the Default profile.
         if (defaultNativeKey && isImplicitDefaultChromeProcess(command)) {
-          addRuntimePid(runtime, defaultNativeKey, pid);
+          addRuntimeProcess(runtime, defaultNativeKey, processInfo);
         }
 
         for (const profilePath of profilePaths) {
           if (!command.includes("--user-data-dir=") || !command.includes(profilePath)) {
             continue;
           }
-          addRuntimePid(runtime, profilePath, pid);
+          addRuntimeProcess(runtime, profilePath, processInfo);
         }
 
         for (const dirName of nativeDirNames) {
           if (!command.includes("--profile-directory=") || !command.includes(`--profile-directory=${dirName}`)) {
             continue;
           }
-          addRuntimePid(runtime, makeNativeRuntimeKey(dirName), pid);
+          addRuntimeProcess(runtime, makeNativeRuntimeKey(dirName), processInfo);
         }
       }
     } catch {
@@ -341,12 +340,9 @@ export class ProfileManager {
   private toNativePublicProfile(
     profile: NativeChromeProfile,
     registry: Registry,
-    runtime: Map<string, number[]>
+    runtime: Map<string, RuntimeProfile>
   ): PublicProfile {
-    const pids = uniqueNumbers([
-      ...(runtime.get(profile.path) || []),
-      ...(runtime.get(makeNativeRuntimeKey(profile.dirName)) || [])
-    ]);
+    const runtimeProfile = mergeRuntimeProfiles(runtime.get(profile.path), runtime.get(makeNativeRuntimeKey(profile.dirName)));
 
     return {
       id: makeNativeProfileId(profile.dirName),
@@ -355,18 +351,18 @@ export class ProfileManager {
       dirName: profile.dirName,
       path: profile.path,
       createdAt: null,
-      lastLaunchedAt: registry.nativeProfiles?.[profile.dirName]?.lastLaunchedAt || null,
+      lastLaunchedAt: runtimeProfile.startedAt || registry.nativeProfiles?.[profile.dirName]?.lastLaunchedAt || null,
       userName: profile.userName,
       isDefault: profile.isDefault,
       deletable: !profile.isDefault,
-      running: pids.length > 0,
-      pids
+      running: runtimeProfile.pids.length > 0,
+      pids: runtimeProfile.pids
     };
   }
 
-  private toIsolatedPublicProfile(profile: StoredProfile, runtime: Map<string, number[]>): PublicProfile {
+  private toIsolatedPublicProfile(profile: StoredProfile, runtime: Map<string, RuntimeProfile>): PublicProfile {
     const profilePath = this.isolatedProfilePath(profile);
-    const pids = runtime.get(profilePath) || [];
+    const runtimeProfile = runtime.get(profilePath) || { pids: [], startedAt: null };
 
     return {
       id: makeIsolatedProfileId(profile.id),
@@ -375,12 +371,12 @@ export class ProfileManager {
       dirName: profile.dirName,
       path: profilePath,
       createdAt: profile.createdAt,
-      lastLaunchedAt: profile.lastLaunchedAt,
+      lastLaunchedAt: runtimeProfile.startedAt || profile.lastLaunchedAt,
       userName: null,
       isDefault: false,
       deletable: true,
-      running: pids.length > 0,
-      pids
+      running: runtimeProfile.pids.length > 0,
+      pids: runtimeProfile.pids
     };
   }
 
@@ -619,14 +615,77 @@ function makeNativeRuntimeKey(dirName: string): string {
   return `native:${dirName}`;
 }
 
-function addRuntimePid(runtime: Map<string, number[]>, key: string, pid: number): void {
-  const pids = runtime.get(key) || [];
-  pids.push(pid);
-  runtime.set(key, pids);
+function parseRuntimeProcess(line: string): (RuntimeProfile & { pid: number; command: string }) | null {
+  const match = line.match(
+    /^\s*(\d+)\s+([A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.*)$/
+  );
+  if (!match) {
+    return null;
+  }
+
+  const pid = Number(match[1]);
+  const startedAt = parsePsStartTime(match[2]);
+  const command = match[3];
+
+  return {
+    pid,
+    pids: [pid],
+    startedAt,
+    command
+  };
+}
+
+function parsePsStartTime(value: string): string | null {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+
+  return date.toISOString();
+}
+
+function addRuntimeProcess(
+  runtime: Map<string, RuntimeProfile>,
+  key: string,
+  processInfo: RuntimeProfile & { pid: number }
+): void {
+  const profile = runtime.get(key) || { pids: [], startedAt: null };
+  if (!profile.pids.includes(processInfo.pid)) {
+    profile.pids.push(processInfo.pid);
+  }
+  profile.startedAt = earlierIsoDate(profile.startedAt, processInfo.startedAt);
+  runtime.set(key, profile);
+}
+
+function mergeRuntimeProfiles(...profiles: Array<RuntimeProfile | undefined>): RuntimeProfile {
+  return profiles.reduce<RuntimeProfile>(
+    (merged, profile) => {
+      if (!profile) {
+        return merged;
+      }
+
+      return {
+        pids: uniqueNumbers(merged.pids.concat(profile.pids)),
+        startedAt: earlierIsoDate(merged.startedAt, profile.startedAt)
+      };
+    },
+    { pids: [], startedAt: null }
+  );
 }
 
 function uniqueNumbers(values: number[]): number[] {
   return [...new Set(values)];
+}
+
+function earlierIsoDate(current: string | null, next: string | null): string | null {
+  if (!current) {
+    return next;
+  }
+  if (!next) {
+    return current;
+  }
+
+  return Date.parse(next) < Date.parse(current) ? next : current;
 }
 
 function isImplicitDefaultChromeProcess(command: string): boolean {

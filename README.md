@@ -1,15 +1,16 @@
 # Chrome Profile Manager
 
-A small Electron desktop app for managing isolated Chrome profile directories.
+A small Electron desktop app for managing Chrome profiles on this machine.
 
-It follows the safer "managed profiles" model:
+The app treats Chrome's own local profiles as first-class profiles:
 
-- Profiles live outside Chrome's own default profile store.
-- Launching uses `--user-data-dir` so each profile is isolated.
-- Deleting a profile moves its directory to the trash-style location first.
-- The UI shows running profiles by inspecting Chrome processes that were launched with a managed `--user-data-dir`.
+- Chrome's `Default` / `Profile N` profiles are discovered from Chrome's local `Local State`.
+- The default Chrome profile is protected from deletion.
+- Extra isolated profiles can still be created for sandboxed test sessions.
+- Isolated profiles launch with `--user-data-dir` so each one is separated from Chrome's own default profile store.
+- Deleting a deletable profile moves its directory to the trash-style location first.
+- The UI shows running profiles by inspecting Chrome processes launched with `--profile-directory` or `--user-data-dir`.
 - The renderer talks to native capabilities through an Electron preload bridge.
-- Chrome's own `Default` / `Profile N` profiles are shown separately as read-only native profiles and are not counted as managed profiles.
 
 ## Run
 

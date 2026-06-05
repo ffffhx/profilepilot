@@ -6,12 +6,28 @@ export interface StoredProfile {
   lastLaunchedAt: string | null;
 }
 
-export interface Registry {
-  profiles: StoredProfile[];
+export interface NativeProfileMetadata {
+  lastLaunchedAt: string | null;
 }
 
-export interface PublicProfile extends StoredProfile {
+export interface Registry {
+  profiles: StoredProfile[];
+  nativeProfiles?: Record<string, NativeProfileMetadata>;
+}
+
+export type ProfileSource = "native" | "isolated";
+
+export interface PublicProfile {
+  id: string;
+  source: ProfileSource;
+  name: string;
+  dirName: string;
   path: string;
+  createdAt: string | null;
+  lastLaunchedAt: string | null;
+  userName: string | null;
+  isDefault: boolean;
+  deletable: boolean;
   running: boolean;
   pids: number[];
 }
@@ -29,6 +45,8 @@ export interface AppState {
   dataDir: string;
   profilesDir: string;
   profiles: PublicProfile[];
+  nativeProfileCount: number;
+  isolatedProfileCount: number;
   nativeChromeProfiles: NativeChromeProfile[];
   runningProfiles: PublicProfile[];
   currentProfile: PublicProfile | null;
@@ -36,7 +54,7 @@ export interface AppState {
 }
 
 export interface DeleteProfileResult {
-  deletedProfile: StoredProfile;
+  deletedProfile: PublicProfile;
   trashPath: string | null;
   state: AppState;
 }

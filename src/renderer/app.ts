@@ -6,11 +6,22 @@ interface StoredProfile {
   lastLaunchedAt: string | null;
 }
 
-interface PublicProfile extends StoredProfile {
+interface PublicProfile {
+  id: string;
+  source: ProfileSource;
+  name: string;
+  dirName: string;
   path: string;
+  createdAt: string | null;
+  lastLaunchedAt: string | null;
+  userName: string | null;
+  isDefault: boolean;
+  deletable: boolean;
   running: boolean;
   pids: number[];
 }
+
+type ProfileSource = "native" | "isolated";
 
 interface NativeChromeProfile {
   dirName: string;
@@ -25,6 +36,8 @@ interface AppState {
   dataDir: string;
   profilesDir: string;
   profiles: PublicProfile[];
+  nativeProfileCount: number;
+  isolatedProfileCount: number;
   nativeChromeProfiles: NativeChromeProfile[];
   runningProfiles: PublicProfile[];
   currentProfile: PublicProfile | null;
@@ -32,7 +45,7 @@ interface AppState {
 }
 
 interface DeleteProfileResult {
-  deletedProfile: StoredProfile;
+  deletedProfile: PublicProfile;
   trashPath: string | null;
   state: AppState;
 }
@@ -134,7 +147,6 @@ function render(): void {
   }
 
   const profiles = state.profiles || [];
-  const nativeProfiles = state.nativeChromeProfiles || [];
   const selected = profiles.find((profile) => profile.id === selectedId) || null;
   const runningNames = state.runningProfiles.map((profile) => profile.name).join(", ");
   const currentLabel = state.runningProfiles.length ? runningNames : state.currentProfile?.name || "未启动";
@@ -154,25 +166,25 @@ function render(): void {
         </div>
         <div class="header-actions">
           <button type="button" data-action="refresh" ${busy ? "disabled" : ""}>刷新</button>
-          <button type="button" class="primary" data-action="new-profile" ${busy ? "disabled" : ""}>新建 Profile</button>
+          <button type="button" class="primary" data-action="new-profile" ${busy ? "disabled" : ""}>新建独立 Profile</button>
         </div>
       </header>
 
       <section class="status-grid" aria-label="Profile status">
         <div class="status-item current">
-          <span class="status-label">当前托管</span>
+          <span class="status-label">当前</span>
           <strong class="status-value">${escapeHtml(currentLabel)}</strong>
           <span class="status-note">${escapeHtml(currentNote)}</span>
         </div>
         <div class="status-item">
-          <span class="status-label">托管 Profiles</span>
-          <strong class="status-value">${profiles.length}</strong>
-          <span class="status-note">${escapeHtml(state.profilesDir)}</span>
+          <span class="status-label">本机 Chrome</span>
+          <strong class="status-value">${state.nativeProfileCount}</strong>
+          <span class="status-note">来自 Google Chrome 的 Default / Profile N</span>
         </div>
         <div class="status-item">
-          <span class="status-label">Chrome 原生</span>
-          <strong class="status-value">${nativeProfiles.length}</strong>
-          <span class="status-note">只读显示，不参与新建/删除</span>
+          <span class="status-label">独立 Profiles</span>
+          <strong class="status-value">${state.isolatedProfileCount}</strong>
+          <span class="status-note">${escapeHtml(state.profilesDir)}</span>
         </div>
         <div class="status-item">
           <span class="status-label">Chrome</span>
@@ -184,17 +196,10 @@ function render(): void {
       <main class="layout">
         <section>
           <div class="section-head">
-            <h2>托管 Profiles</h2>
+            <h2>Profiles</h2>
             <span class="count">${profiles.length}</span>
           </div>
           ${profiles.length ? renderTable(profiles) : renderEmpty()}
-          <div class="native-section">
-            <div class="section-head">
-              <h2>Chrome 原生 Profiles</h2>
-              <span class="count">${nativeProfiles.length}</span>
-            </div>
-            ${nativeProfiles.length ? renderNativeTable(nativeProfiles) : renderNativeEmpty()}
-          </div>
         </section>
         ${renderDetails(selected)}
       </main>
@@ -211,6 +216,7 @@ function renderTable(profiles: PublicProfile[]): string {
         <thead>
           <tr>
             <th>名称</th>
+            <th>类型</th>
             <th>状态</th>
             <th>最近启动</th>
             <th>操作</th>
@@ -231,11 +237,15 @@ function renderProfileRow(profile: PublicProfile): string {
       <td>
         <button type="button" class="profile-pick" data-action="select" data-id="${profile.id}">
           <span class="profile-name-line">
-            <span class="status-dot ${profile.running ? "running" : ""}"></span>
+            <span class="status-dot ${profile.running ? "running" : profile.source === "native" ? "native" : ""}"></span>
             <span class="profile-name">${escapeHtml(profile.name)}</span>
+            ${profile.isDefault ? '<span class="native-badge">Default</span>' : ""}
           </span>
-          <span class="profile-dir">${escapeHtml(profile.dirName)}</span>
+          <span class="profile-dir">${escapeHtml(profile.userName || profile.dirName)}</span>
         </button>
+      </td>
+      <td>
+        <span class="source-pill ${profile.source}">${profile.source === "native" ? "本机 Chrome" : "独立"}</span>
       </td>
       <td>
         <span class="state-pill ${profile.running ? "running" : ""}">
@@ -247,7 +257,7 @@ function renderProfileRow(profile: PublicProfile): string {
         <div class="row-actions">
           <button type="button" data-action="launch" data-id="${profile.id}" ${busy ? "disabled" : ""}>启动</button>
           <button type="button" data-action="open-folder" data-id="${profile.id}" ${busy ? "disabled" : ""}>目录</button>
-          <button type="button" class="danger" data-action="delete" data-id="${profile.id}" ${busy || profile.running ? "disabled" : ""}>删除</button>
+          <button type="button" class="danger" data-action="delete" data-id="${profile.id}" ${busy || profile.running || !profile.deletable ? "disabled" : ""}>删除</button>
         </div>
       </td>
     </tr>
@@ -257,53 +267,8 @@ function renderProfileRow(profile: PublicProfile): string {
 function renderEmpty(): string {
   return `
     <div class="empty-state">
-      <strong>还没有托管 Profile</strong>
-      <button type="button" class="primary" data-action="new-profile">新建 Profile</button>
-    </div>
-  `;
-}
-
-function renderNativeTable(profiles: NativeChromeProfile[]): string {
-  return `
-    <div class="profiles-table-wrap native-table-wrap">
-      <table class="profiles-table">
-        <thead>
-          <tr>
-            <th>名称</th>
-            <th>目录</th>
-            <th>账号</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${profiles.map(renderNativeProfileRow).join("")}
-        </tbody>
-      </table>
-    </div>
-  `;
-}
-
-function renderNativeProfileRow(profile: NativeChromeProfile): string {
-  return `
-    <tr>
-      <td>
-        <span class="profile-name-line">
-          <span class="status-dot native"></span>
-          <span class="profile-name">${escapeHtml(profile.name)}</span>
-          ${profile.isDefault ? '<span class="native-badge">Default</span>' : ""}
-        </span>
-      </td>
-      <td>
-        <span class="profile-dir">${escapeHtml(profile.dirName)}</span>
-      </td>
-      <td class="date-cell">${escapeHtml(profile.userName || "未登录")}</td>
-    </tr>
-  `;
-}
-
-function renderNativeEmpty(): string {
-  return `
-    <div class="empty-state compact">
-      <strong>未发现 Chrome 原生 Profile</strong>
+      <strong>还没有 Profile</strong>
+      <button type="button" class="primary" data-action="new-profile">新建独立 Profile</button>
     </div>
   `;
 }
@@ -335,12 +300,20 @@ function renderDetails(profile: PublicProfile | null): string {
       </div>
       <div class="detail-list">
         <div class="detail-row">
+          <span>类型</span>
+          <strong>${profile.source === "native" ? "本机 Chrome Profile" : "独立 Profile"}</strong>
+        </div>
+        <div class="detail-row">
           <span>ID</span>
           <strong>${escapeHtml(profile.id)}</strong>
         </div>
         <div class="detail-row">
+          <span>账号</span>
+          <strong>${escapeHtml(profile.userName || "未登录")}</strong>
+        </div>
+        <div class="detail-row">
           <span>创建时间</span>
-          <strong>${formatDate(profile.createdAt)}</strong>
+          <strong>${profile.createdAt ? formatDate(profile.createdAt) : "由 Chrome 管理"}</strong>
         </div>
         <div class="detail-row">
           <span>最近启动</span>
@@ -363,7 +336,7 @@ function renderNewModal(): string {
   return `
     <div class="modal-backdrop" data-action="close-modal">
       <form class="modal" data-create-form>
-        <h2>新建 Profile</h2>
+        <h2>新建独立 Profile</h2>
         <div class="field">
           <label for="profile-name">名称</label>
           <input id="profile-name" name="name" type="text" maxlength="80" autocomplete="off" required />

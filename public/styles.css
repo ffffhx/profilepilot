@@ -214,7 +214,7 @@ h3 {
 
 .profiles-table {
   width: 100%;
-  min-width: 760px;
+  min-width: 860px;
   border-collapse: collapse;
 }
 
@@ -310,14 +310,6 @@ h3 {
   color: var(--accent-dark);
 }
 
-.native-section {
-  margin-top: 24px;
-}
-
-.native-table-wrap .profiles-table {
-  min-width: 620px;
-}
-
 .native-badge {
   display: inline-flex;
   align-items: center;
@@ -329,6 +321,31 @@ h3 {
   color: #735100;
   font-size: 11px;
   font-weight: 800;
+}
+
+.source-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 76px;
+  border-radius: 999px;
+  padding: 5px 9px;
+  background: #eef1f4;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.source-pill.native {
+  border: 1px solid #e1c88a;
+  background: #fff6dd;
+  color: #735100;
+}
+
+.source-pill.isolated {
+  border: 1px solid #b9daca;
+  background: var(--accent-soft);
+  color: var(--accent-dark);
 }
 
 .date-cell {

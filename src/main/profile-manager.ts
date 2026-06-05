@@ -9,6 +9,7 @@ import type {
   AppState,
   DeleteProfileResult,
   NativeChromeProfile,
+  NativeProfileMetadata,
   PublicProfile,
   Registry,
   StoredProfile
@@ -17,6 +18,21 @@ import type {
 const execFileAsync = promisify(execFile);
 
 export const APP_TITLE = "Codex Chrome Profile Manager";
+
+type ProfileRef = { source: "native"; dirName: string } | { source: "isolated"; id: string };
+
+interface ChromeLocalState {
+  profile?: {
+    info_cache?: Record<
+      string,
+      {
+        name?: unknown;
+        user_name?: unknown;
+        is_using_default_name?: unknown;
+      }
+    >;
+  };
+}
 
 export class ProfileManagerError extends Error {
   constructor(
@@ -39,15 +55,20 @@ export class ProfileManager {
 
   async getState(): Promise<AppState> {
     const registry = await this.loadRegistry();
-    const profilePaths = registry.profiles.map((profile) => this.profilePath(profile));
-    const runtime = await this.getRuntimeByPath(profilePaths);
-    const profiles = registry.profiles
-      .map((profile) => this.toPublicProfile(profile, runtime))
+    const nativeChromeProfiles = await scanNativeChromeProfiles();
+    const nativePaths = nativeChromeProfiles.map((profile) => profile.path);
+    const isolatedPaths = registry.profiles.map((profile) => this.isolatedProfilePath(profile));
+    const runtime = await this.getRuntime(nativePaths.concat(isolatedPaths), nativeChromeProfiles.map((profile) => profile.dirName));
+
+    const nativeProfiles = nativeChromeProfiles.map((profile) => this.toNativePublicProfile(profile, registry, runtime));
+    const isolatedProfiles = registry.profiles
+      .map((profile) => this.toIsolatedPublicProfile(profile, runtime))
       .sort((a, b) => {
-        const aTime = a.lastLaunchedAt || a.createdAt;
-        const bTime = b.lastLaunchedAt || b.createdAt;
+        const aTime = a.lastLaunchedAt || a.createdAt || "";
+        const bTime = b.lastLaunchedAt || b.createdAt || "";
         return bTime.localeCompare(aTime);
       });
+    const profiles = [...nativeProfiles, ...isolatedProfiles];
 
     const runningProfiles = profiles.filter((profile) => profile.running);
     const lastLaunchedProfile = profiles.find((profile) => profile.lastLaunchedAt) || null;
@@ -57,7 +78,9 @@ export class ProfileManager {
       dataDir: this.dataDir,
       profilesDir: this.profilesDir,
       profiles,
-      nativeChromeProfiles: await scanNativeChromeProfiles(),
+      nativeProfileCount: nativeProfiles.length,
+      isolatedProfileCount: isolatedProfiles.length,
+      nativeChromeProfiles,
       runningProfiles,
       currentProfile: runningProfiles[0] || lastLaunchedProfile,
       chromeLauncher: this.getLauncherLabel()
@@ -82,64 +105,97 @@ export class ProfileManager {
       lastLaunchedAt: null
     };
 
-    await fs.mkdir(this.profilePath(profile), { recursive: false });
+    await fs.mkdir(this.isolatedProfilePath(profile), { recursive: false });
     registry.profiles.push(profile);
     await this.saveRegistry(registry);
 
     return profile;
   }
 
-  async launchProfile(id: string): Promise<StoredProfile> {
-    const registry = await this.loadRegistry();
-    const profile = this.findProfile(registry, id);
-    const profilePath = this.profilePath(profile);
-    await fs.mkdir(profilePath, { recursive: true });
+  async launchProfile(profileId: string): Promise<void> {
+    const ref = parseProfileId(profileId);
 
-    const args = [`--user-data-dir=${profilePath}`, "--no-first-run"];
-
-    if (process.env.CHROME_BINARY) {
-      launchDetached(process.env.CHROME_BINARY, args);
-    } else if (process.platform === "darwin") {
-      await execFileAsync("open", ["-na", process.env.CHROME_APP_NAME || "Google Chrome", "--args", ...args]);
-    } else if (process.platform === "win32") {
-      await execFileAsync("cmd", ["/c", "start", "", "chrome", ...args]);
-    } else {
-      launchDetached("google-chrome", args);
+    if (ref.source === "native") {
+      await this.launchNativeProfile(ref.dirName);
+      return;
     }
 
-    profile.lastLaunchedAt = new Date().toISOString();
-    await this.saveRegistry(registry);
-
-    return profile;
+    await this.launchIsolatedProfile(ref.id);
   }
 
-  async openProfileFolder(id: string): Promise<StoredProfile> {
-    const registry = await this.loadRegistry();
-    const profile = this.findProfile(registry, id);
-    const profilePath = this.profilePath(profile);
+  async openProfileFolder(profileId: string): Promise<void> {
+    const ref = parseProfileId(profileId);
+    const profilePath = await this.pathForRef(ref);
     await fs.mkdir(profilePath, { recursive: true });
 
     const error = await shell.openPath(profilePath);
     if (error) {
       throw new ProfileManagerError(error, "OPEN_FOLDER_FAILED");
     }
-
-    return profile;
   }
 
-  async deleteProfile(id: string): Promise<DeleteProfileResult> {
-    const registry = await this.loadRegistry();
-    const profile = this.findProfile(registry, id);
+  async deleteProfile(profileId: string): Promise<DeleteProfileResult> {
+    const ref = parseProfileId(profileId);
 
+    if (ref.source === "native") {
+      return this.deleteNativeProfile(ref.dirName);
+    }
+
+    return this.deleteIsolatedProfile(ref.id);
+  }
+
+  private async launchNativeProfile(dirName: string): Promise<void> {
+    const profiles = await scanNativeChromeProfiles();
+    const profile = profiles.find((item) => item.dirName === dirName);
+    if (!profile) {
+      throw new ProfileManagerError("Chrome profile not found.", "PROFILE_NOT_FOUND");
+    }
+
+    await launchChrome([`--profile-directory=${profile.dirName}`, "--no-first-run"]);
+    const registry = await this.loadRegistry();
+    registry.nativeProfiles = {
+      ...(registry.nativeProfiles || {}),
+      [profile.dirName]: {
+        lastLaunchedAt: new Date().toISOString()
+      }
+    };
+    await this.saveRegistry(registry);
+  }
+
+  private async launchIsolatedProfile(id: string): Promise<void> {
+    const registry = await this.loadRegistry();
+    const profile = this.findIsolatedProfile(registry, id);
+    const profilePath = this.isolatedProfilePath(profile);
+    await fs.mkdir(profilePath, { recursive: true });
+
+    await launchChrome([`--user-data-dir=${profilePath}`, "--no-first-run"]);
+    profile.lastLaunchedAt = new Date().toISOString();
+    await this.saveRegistry(registry);
+  }
+
+  private async deleteNativeProfile(dirName: string): Promise<DeleteProfileResult> {
     const state = await this.getState();
-    const current = state.profiles.find((item) => item.id === id);
-    if (current?.running) {
+    const profile = state.profiles.find((item) => item.source === "native" && item.dirName === dirName);
+    if (!profile) {
+      throw new ProfileManagerError("Chrome profile not found.", "PROFILE_NOT_FOUND");
+    }
+    if (profile.isDefault) {
+      throw new ProfileManagerError("Default Chrome profile is protected.", "DEFAULT_PROFILE_PROTECTED");
+    }
+    if (await isChromeRunning()) {
+      throw new ProfileManagerError("Quit Chrome before deleting a Chrome profile.", "CHROME_RUNNING");
+    }
+    if (profile.running) {
       throw new ProfileManagerError("Close this Chrome profile before deleting it.", "PROFILE_RUNNING");
     }
 
-    const trashPath = await this.moveToTrash(this.profilePath(profile), profile.dirName);
-    const nextProfiles = registry.profiles.filter((item) => item.id !== id);
-    await this.saveRegistry({ profiles: nextProfiles });
+    const trashPath = await this.moveToTrash(profile.path, profile.dirName);
+    await removeNativeProfileFromLocalState(profile.dirName);
+    const registry = await this.loadRegistry();
+    if (registry.nativeProfiles) {
+      delete registry.nativeProfiles[profile.dirName];
+      await this.saveRegistry(registry);
+    }
 
     return {
       deletedProfile: profile,
@@ -148,13 +204,48 @@ export class ProfileManager {
     };
   }
 
+  private async deleteIsolatedProfile(id: string): Promise<DeleteProfileResult> {
+    const registry = await this.loadRegistry();
+    const storedProfile = this.findIsolatedProfile(registry, id);
+    const state = await this.getState();
+    const profile = state.profiles.find((item) => item.source === "isolated" && item.id === makeIsolatedProfileId(id));
+    if (profile?.running) {
+      throw new ProfileManagerError("Close this Chrome profile before deleting it.", "PROFILE_RUNNING");
+    }
+
+    const publicProfile = profile || this.toIsolatedPublicProfile(storedProfile, new Map());
+    const trashPath = await this.moveToTrash(this.isolatedProfilePath(storedProfile), storedProfile.dirName);
+    const nextProfiles = registry.profiles.filter((item) => item.id !== id);
+    await this.saveRegistry({ ...registry, profiles: nextProfiles });
+
+    return {
+      deletedProfile: publicProfile,
+      trashPath,
+      state: await this.getState()
+    };
+  }
+
+  private async pathForRef(ref: ProfileRef): Promise<string> {
+    if (ref.source === "native") {
+      const profile = (await scanNativeChromeProfiles()).find((item) => item.dirName === ref.dirName);
+      if (!profile) {
+        throw new ProfileManagerError("Chrome profile not found.", "PROFILE_NOT_FOUND");
+      }
+
+      return profile.path;
+    }
+
+    const registry = await this.loadRegistry();
+    return this.isolatedProfilePath(this.findIsolatedProfile(registry, ref.id));
+  }
+
   private async ensureStore(): Promise<void> {
     await fs.mkdir(this.profilesDir, { recursive: true });
 
     try {
       await fs.access(this.registryPath);
     } catch {
-      await this.saveRegistry({ profiles: [] });
+      await this.saveRegistry({ profiles: [], nativeProfiles: {} });
     }
   }
 
@@ -164,12 +255,16 @@ export class ProfileManager {
     try {
       const raw = await fs.readFile(this.registryPath, "utf8");
       const parsed = JSON.parse(raw) as Partial<Registry>;
-      if (!Array.isArray(parsed.profiles)) {
-        return { profiles: [] };
-      }
+      const nativeProfiles =
+        parsed.nativeProfiles && typeof parsed.nativeProfiles === "object"
+          ? normalizeNativeProfileMetadata(parsed.nativeProfiles)
+          : {};
 
       return {
-        profiles: parsed.profiles.map(normalizeProfile).filter(Boolean) as StoredProfile[]
+        profiles: Array.isArray(parsed.profiles)
+          ? (parsed.profiles.map(normalizeProfile).filter(Boolean) as StoredProfile[])
+          : [],
+        nativeProfiles
       };
     } catch {
       const backup = `${this.registryPath}.broken-${Date.now()}`;
@@ -178,7 +273,7 @@ export class ProfileManager {
       } catch {
         // Start clean if the broken registry cannot be backed up.
       }
-      return { profiles: [] };
+      return { profiles: [], nativeProfiles: {} };
     }
   }
 
@@ -189,10 +284,10 @@ export class ProfileManager {
     await fs.rename(tmpPath, this.registryPath);
   }
 
-  private async getRuntimeByPath(profilePaths: string[]): Promise<Map<string, number[]>> {
+  private async getRuntime(profilePaths: string[], nativeDirNames: string[]): Promise<Map<string, number[]>> {
     const runtime = new Map<string, number[]>();
 
-    if (!profilePaths.length) {
+    if (!profilePaths.length && !nativeDirNames.length) {
       return runtime;
     }
 
@@ -218,10 +313,14 @@ export class ProfileManager {
           if (!command.includes("--user-data-dir=") || !command.includes(profilePath)) {
             continue;
           }
+          addRuntimePid(runtime, profilePath, pid);
+        }
 
-          const pids = runtime.get(profilePath) || [];
-          pids.push(pid);
-          runtime.set(profilePath, pids);
+        for (const dirName of nativeDirNames) {
+          if (!command.includes("--profile-directory=") || !command.includes(`--profile-directory=${dirName}`)) {
+            continue;
+          }
+          addRuntimePid(runtime, makeNativeRuntimeKey(dirName), pid);
         }
       }
     } catch {
@@ -231,19 +330,50 @@ export class ProfileManager {
     return runtime;
   }
 
-  private toPublicProfile(profile: StoredProfile, runtime: Map<string, number[]>): PublicProfile {
-    const profilePath = this.profilePath(profile);
-    const pids = runtime.get(profilePath) || [];
+  private toNativePublicProfile(
+    profile: NativeChromeProfile,
+    registry: Registry,
+    runtime: Map<string, number[]>
+  ): PublicProfile {
+    const pids = runtime.get(profile.path) || runtime.get(makeNativeRuntimeKey(profile.dirName)) || [];
 
     return {
-      ...profile,
-      path: profilePath,
+      id: makeNativeProfileId(profile.dirName),
+      source: "native",
+      name: profile.name,
+      dirName: profile.dirName,
+      path: profile.path,
+      createdAt: null,
+      lastLaunchedAt: registry.nativeProfiles?.[profile.dirName]?.lastLaunchedAt || null,
+      userName: profile.userName,
+      isDefault: profile.isDefault,
+      deletable: !profile.isDefault,
       running: pids.length > 0,
       pids
     };
   }
 
-  private findProfile(registry: Registry, id: string): StoredProfile {
+  private toIsolatedPublicProfile(profile: StoredProfile, runtime: Map<string, number[]>): PublicProfile {
+    const profilePath = this.isolatedProfilePath(profile);
+    const pids = runtime.get(profilePath) || [];
+
+    return {
+      id: makeIsolatedProfileId(profile.id),
+      source: "isolated",
+      name: profile.name,
+      dirName: profile.dirName,
+      path: profilePath,
+      createdAt: profile.createdAt,
+      lastLaunchedAt: profile.lastLaunchedAt,
+      userName: null,
+      isDefault: false,
+      deletable: true,
+      running: pids.length > 0,
+      pids
+    };
+  }
+
+  private findIsolatedProfile(registry: Registry, id: string): StoredProfile {
     const profile = registry.profiles.find((item) => item.id === id);
     if (!profile) {
       throw new ProfileManagerError("Profile not found.", "PROFILE_NOT_FOUND");
@@ -252,7 +382,7 @@ export class ProfileManager {
     return profile;
   }
 
-  private profilePath(profile: StoredProfile): string {
+  private isolatedProfilePath(profile: StoredProfile): string {
     return path.join(this.profilesDir, profile.dirName);
   }
 
@@ -321,6 +451,18 @@ function makeSlug(name: string): string {
   return slug || "profile";
 }
 
+async function launchChrome(args: string[]): Promise<void> {
+  if (process.env.CHROME_BINARY) {
+    launchDetached(process.env.CHROME_BINARY, args);
+  } else if (process.platform === "darwin") {
+    await execFileAsync("open", ["-na", process.env.CHROME_APP_NAME || "Google Chrome", "--args", ...args]);
+  } else if (process.platform === "win32") {
+    await execFileAsync("cmd", ["/c", "start", "", "chrome", ...args]);
+  } else {
+    launchDetached("google-chrome", args);
+  }
+}
+
 function launchDetached(command: string, args: string[]): void {
   const child = spawn(command, args, {
     detached: true,
@@ -362,43 +504,72 @@ function normalizeProfile(profile: unknown): StoredProfile | null {
   };
 }
 
+function normalizeNativeProfileMetadata(input: Record<string, unknown>): Record<string, NativeProfileMetadata> {
+  return Object.fromEntries(
+    Object.entries(input).map(([dirName, value]) => {
+      const metadata = value && typeof value === "object" ? (value as Partial<NativeProfileMetadata>) : {};
+      return [
+        dirName,
+        {
+          lastLaunchedAt: typeof metadata.lastLaunchedAt === "string" ? metadata.lastLaunchedAt : null
+        }
+      ];
+    })
+  );
+}
+
 async function scanNativeChromeProfiles(): Promise<NativeChromeProfile[]> {
   const userDataDir = nativeChromeUserDataDir();
-  const localStatePath = path.join(userDataDir, "Local State");
+  const localState = await readChromeLocalState();
+  const infoCache = localState.profile?.info_cache || {};
 
+  return Object.entries(infoCache)
+    .map(([dirName, profile]) => ({
+      dirName,
+      name: typeof profile.name === "string" && profile.name.trim() ? profile.name : dirName,
+      userName: typeof profile.user_name === "string" && profile.user_name.trim() ? profile.user_name : null,
+      path: path.join(userDataDir, dirName),
+      isDefault: dirName === "Default"
+    }))
+    .sort((a, b) => {
+      if (a.isDefault !== b.isDefault) {
+        return a.isDefault ? -1 : 1;
+      }
+      return a.name.localeCompare(b.name);
+    });
+}
+
+async function readChromeLocalState(): Promise<ChromeLocalState> {
   try {
-    const raw = await fs.readFile(localStatePath, "utf8");
-    const localState = JSON.parse(raw) as {
-      profile?: {
-        info_cache?: Record<
-          string,
-          {
-            name?: unknown;
-            user_name?: unknown;
-            is_using_default_name?: unknown;
-          }
-        >;
-      };
-    };
-    const infoCache = localState.profile?.info_cache || {};
-
-    return Object.entries(infoCache)
-      .map(([dirName, profile]) => ({
-        dirName,
-        name: typeof profile.name === "string" && profile.name.trim() ? profile.name : dirName,
-        userName: typeof profile.user_name === "string" && profile.user_name.trim() ? profile.user_name : null,
-        path: path.join(userDataDir, dirName),
-        isDefault: dirName === "Default"
-      }))
-      .sort((a, b) => {
-        if (a.isDefault !== b.isDefault) {
-          return a.isDefault ? -1 : 1;
-        }
-        return a.name.localeCompare(b.name);
-      });
+    const raw = await fs.readFile(nativeChromeLocalStatePath(), "utf8");
+    return JSON.parse(raw) as ChromeLocalState;
   } catch {
-    return [];
+    return {};
   }
+}
+
+async function writeChromeLocalState(localState: ChromeLocalState): Promise<void> {
+  const localStatePath = nativeChromeLocalStatePath();
+  const backupPath = `${localStatePath}.cpm-backup-${Date.now()}`;
+  const raw = await fs.readFile(localStatePath, "utf8");
+  await fs.writeFile(backupPath, raw, "utf8");
+  const tmpPath = `${localStatePath}.tmp-${Date.now()}`;
+  await fs.writeFile(tmpPath, `${JSON.stringify(localState, null, 2)}\n`, "utf8");
+  await fs.rename(tmpPath, localStatePath);
+}
+
+async function removeNativeProfileFromLocalState(dirName: string): Promise<void> {
+  const localState = await readChromeLocalState();
+  if (!localState.profile?.info_cache?.[dirName]) {
+    return;
+  }
+
+  delete localState.profile.info_cache[dirName];
+  await writeChromeLocalState(localState);
+}
+
+function nativeChromeLocalStatePath(): string {
+  return path.join(nativeChromeUserDataDir(), "Local State");
 }
 
 function nativeChromeUserDataDir(): string {
@@ -411,4 +582,47 @@ function nativeChromeUserDataDir(): string {
   }
 
   return path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "google-chrome");
+}
+
+function parseProfileId(profileId: string): ProfileRef {
+  if (profileId.startsWith("native:")) {
+    return { source: "native", dirName: profileId.slice("native:".length) };
+  }
+
+  if (profileId.startsWith("isolated:")) {
+    return { source: "isolated", id: profileId.slice("isolated:".length) };
+  }
+
+  return { source: "isolated", id: profileId };
+}
+
+function makeNativeProfileId(dirName: string): string {
+  return `native:${dirName}`;
+}
+
+function makeIsolatedProfileId(id: string): string {
+  return `isolated:${id}`;
+}
+
+function makeNativeRuntimeKey(dirName: string): string {
+  return `native:${dirName}`;
+}
+
+function addRuntimePid(runtime: Map<string, number[]>, key: string, pid: number): void {
+  const pids = runtime.get(key) || [];
+  pids.push(pid);
+  runtime.set(key, pids);
+}
+
+async function isChromeRunning(): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync("ps", ["-axo", "command="], {
+      maxBuffer: 1024 * 1024 * 8
+    });
+    return stdout
+      .split("\n")
+      .some((line) => line.includes("Google Chrome.app/Contents/MacOS/Google Chrome") || line.includes("Google Chrome Helper"));
+  } catch {
+    return true;
+  }
 }

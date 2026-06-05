@@ -9,6 +9,7 @@ It follows the safer "managed profiles" model:
 - Deleting a profile moves its directory to the trash-style location first.
 - The UI shows running profiles by inspecting Chrome processes that were launched with a managed `--user-data-dir`.
 - The renderer talks to native capabilities through an Electron preload bridge.
+- Chrome's own `Default` / `Profile N` profiles are shown separately as read-only native profiles and are not counted as managed profiles.
 
 ## Run
 

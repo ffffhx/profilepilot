@@ -39,11 +39,17 @@ function createMainWindow(): void {
                   h1: document.querySelector("h1")?.textContent || null,
                   hasBridge: Boolean(window.profileManager),
                   buttonCount: document.querySelectorAll("button").length,
+                  nativeProfileCount: null,
+                  firstNativeProfile: null,
                   crud: null
                 };
 
+                const visibleState = await window.profileManager.getState();
+                smokeResult.nativeProfileCount = visibleState.nativeChromeProfiles.length;
+                smokeResult.firstNativeProfile = visibleState.nativeChromeProfiles[0]?.dirName || null;
+
                 if (${JSON.stringify(runCrud)}) {
-                  const initial = await window.profileManager.getState();
+                  const initial = visibleState;
                   const createdState = await window.profileManager.createProfile("Smoke Test");
                   const created = createdState.profiles.find((profile) => profile.name === "Smoke Test");
                   if (!created) {

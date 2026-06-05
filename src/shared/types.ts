@@ -16,11 +16,20 @@ export interface PublicProfile extends StoredProfile {
   pids: number[];
 }
 
+export interface NativeChromeProfile {
+  dirName: string;
+  name: string;
+  userName: string | null;
+  path: string;
+  isDefault: boolean;
+}
+
 export interface AppState {
   appTitle: string;
   dataDir: string;
   profilesDir: string;
   profiles: PublicProfile[];
+  nativeChromeProfiles: NativeChromeProfile[];
   runningProfiles: PublicProfile[];
   currentProfile: PublicProfile | null;
   chromeLauncher: string;

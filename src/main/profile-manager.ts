@@ -5,7 +5,14 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { shell } from "electron";
-import type { AppState, DeleteProfileResult, PublicProfile, Registry, StoredProfile } from "../shared/types";
+import type {
+  AppState,
+  DeleteProfileResult,
+  NativeChromeProfile,
+  PublicProfile,
+  Registry,
+  StoredProfile
+} from "../shared/types";
 
 const execFileAsync = promisify(execFile);
 
@@ -50,6 +57,7 @@ export class ProfileManager {
       dataDir: this.dataDir,
       profilesDir: this.profilesDir,
       profiles,
+      nativeChromeProfiles: await scanNativeChromeProfiles(),
       runningProfiles,
       currentProfile: runningProfiles[0] || lastLaunchedProfile,
       chromeLauncher: this.getLauncherLabel()
@@ -352,4 +360,55 @@ function normalizeProfile(profile: unknown): StoredProfile | null {
     createdAt: candidate.createdAt,
     lastLaunchedAt: typeof candidate.lastLaunchedAt === "string" ? candidate.lastLaunchedAt : null
   };
+}
+
+async function scanNativeChromeProfiles(): Promise<NativeChromeProfile[]> {
+  const userDataDir = nativeChromeUserDataDir();
+  const localStatePath = path.join(userDataDir, "Local State");
+
+  try {
+    const raw = await fs.readFile(localStatePath, "utf8");
+    const localState = JSON.parse(raw) as {
+      profile?: {
+        info_cache?: Record<
+          string,
+          {
+            name?: unknown;
+            user_name?: unknown;
+            is_using_default_name?: unknown;
+          }
+        >;
+      };
+    };
+    const infoCache = localState.profile?.info_cache || {};
+
+    return Object.entries(infoCache)
+      .map(([dirName, profile]) => ({
+        dirName,
+        name: typeof profile.name === "string" && profile.name.trim() ? profile.name : dirName,
+        userName: typeof profile.user_name === "string" && profile.user_name.trim() ? profile.user_name : null,
+        path: path.join(userDataDir, dirName),
+        isDefault: dirName === "Default"
+      }))
+      .sort((a, b) => {
+        if (a.isDefault !== b.isDefault) {
+          return a.isDefault ? -1 : 1;
+        }
+        return a.name.localeCompare(b.name);
+      });
+  } catch {
+    return [];
+  }
+}
+
+function nativeChromeUserDataDir(): string {
+  if (process.platform === "darwin") {
+    return path.join(os.homedir(), "Library", "Application Support", "Google", "Chrome");
+  }
+
+  if (process.platform === "win32") {
+    return path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "Google", "Chrome", "User Data");
+  }
+
+  return path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "google-chrome");
 }

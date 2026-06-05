@@ -12,11 +12,20 @@ interface PublicProfile extends StoredProfile {
   pids: number[];
 }
 
+interface NativeChromeProfile {
+  dirName: string;
+  name: string;
+  userName: string | null;
+  path: string;
+  isDefault: boolean;
+}
+
 interface AppState {
   appTitle: string;
   dataDir: string;
   profilesDir: string;
   profiles: PublicProfile[];
+  nativeChromeProfiles: NativeChromeProfile[];
   runningProfiles: PublicProfile[];
   currentProfile: PublicProfile | null;
   chromeLauncher: string;
@@ -125,6 +134,7 @@ function render(): void {
   }
 
   const profiles = state.profiles || [];
+  const nativeProfiles = state.nativeChromeProfiles || [];
   const selected = profiles.find((profile) => profile.id === selectedId) || null;
   const runningNames = state.runningProfiles.map((profile) => profile.name).join(", ");
   const currentLabel = state.runningProfiles.length ? runningNames : state.currentProfile?.name || "未启动";
@@ -150,14 +160,19 @@ function render(): void {
 
       <section class="status-grid" aria-label="Profile status">
         <div class="status-item current">
-          <span class="status-label">当前</span>
+          <span class="status-label">当前托管</span>
           <strong class="status-value">${escapeHtml(currentLabel)}</strong>
           <span class="status-note">${escapeHtml(currentNote)}</span>
         </div>
         <div class="status-item">
-          <span class="status-label">Profile 数据</span>
+          <span class="status-label">托管 Profiles</span>
           <strong class="status-value">${profiles.length}</strong>
           <span class="status-note">${escapeHtml(state.profilesDir)}</span>
+        </div>
+        <div class="status-item">
+          <span class="status-label">Chrome 原生</span>
+          <strong class="status-value">${nativeProfiles.length}</strong>
+          <span class="status-note">只读显示，不参与新建/删除</span>
         </div>
         <div class="status-item">
           <span class="status-label">Chrome</span>
@@ -169,10 +184,17 @@ function render(): void {
       <main class="layout">
         <section>
           <div class="section-head">
-            <h2>Profiles</h2>
+            <h2>托管 Profiles</h2>
             <span class="count">${profiles.length}</span>
           </div>
           ${profiles.length ? renderTable(profiles) : renderEmpty()}
+          <div class="native-section">
+            <div class="section-head">
+              <h2>Chrome 原生 Profiles</h2>
+              <span class="count">${nativeProfiles.length}</span>
+            </div>
+            ${nativeProfiles.length ? renderNativeTable(nativeProfiles) : renderNativeEmpty()}
+          </div>
         </section>
         ${renderDetails(selected)}
       </main>
@@ -235,8 +257,53 @@ function renderProfileRow(profile: PublicProfile): string {
 function renderEmpty(): string {
   return `
     <div class="empty-state">
-      <strong>还没有 Profile</strong>
+      <strong>还没有托管 Profile</strong>
       <button type="button" class="primary" data-action="new-profile">新建 Profile</button>
+    </div>
+  `;
+}
+
+function renderNativeTable(profiles: NativeChromeProfile[]): string {
+  return `
+    <div class="profiles-table-wrap native-table-wrap">
+      <table class="profiles-table">
+        <thead>
+          <tr>
+            <th>名称</th>
+            <th>目录</th>
+            <th>账号</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${profiles.map(renderNativeProfileRow).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderNativeProfileRow(profile: NativeChromeProfile): string {
+  return `
+    <tr>
+      <td>
+        <span class="profile-name-line">
+          <span class="status-dot native"></span>
+          <span class="profile-name">${escapeHtml(profile.name)}</span>
+          ${profile.isDefault ? '<span class="native-badge">Default</span>' : ""}
+        </span>
+      </td>
+      <td>
+        <span class="profile-dir">${escapeHtml(profile.dirName)}</span>
+      </td>
+      <td class="date-cell">${escapeHtml(profile.userName || "未登录")}</td>
+    </tr>
+  `;
+}
+
+function renderNativeEmpty(): string {
+  return `
+    <div class="empty-state compact">
+      <strong>未发现 Chrome 原生 Profile</strong>
     </div>
   `;
 }

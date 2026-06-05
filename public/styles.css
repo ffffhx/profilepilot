@@ -139,7 +139,7 @@ h3 {
 
 .status-grid {
   display: grid;
-  grid-template-columns: 1.2fr 1fr 1fr;
+  grid-template-columns: 1.15fr 0.85fr 0.85fr 1fr;
   gap: 1px;
   overflow: hidden;
   border: 1px solid var(--line);
@@ -269,6 +269,10 @@ h3 {
   background: var(--accent);
 }
 
+.status-dot.native {
+  background: var(--warn);
+}
+
 .profile-name {
   display: block;
   min-width: 0;
@@ -304,6 +308,27 @@ h3 {
 .state-pill.running {
   background: var(--accent-soft);
   color: var(--accent-dark);
+}
+
+.native-section {
+  margin-top: 24px;
+}
+
+.native-table-wrap .profiles-table {
+  min-width: 620px;
+}
+
+.native-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #e1c88a;
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: #fff6dd;
+  color: #735100;
+  font-size: 11px;
+  font-weight: 800;
 }
 
 .date-cell {
@@ -379,6 +404,15 @@ h3 {
   padding: 28px;
   background: var(--panel);
   text-align: center;
+}
+
+.empty-state.compact {
+  padding: 20px;
+}
+
+.empty-state.compact strong {
+  margin-bottom: 0;
+  font-size: 15px;
 }
 
 .empty-state strong {

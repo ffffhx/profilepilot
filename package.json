@@ -1,0 +1,15 @@
+{
+  "name": "chrome-profile-manager",
+  "version": "0.1.0",
+  "description": "A local Chrome profile manager that launches isolated Chrome user-data directories.",
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node server.mjs",
+    "check": "node --check server.mjs && node --check public/app.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

@@ -1,11 +1,63 @@
-const app = document.querySelector("#app");
+interface StoredProfile {
+  id: string;
+  name: string;
+  dirName: string;
+  createdAt: string;
+  lastLaunchedAt: string | null;
+}
 
-let state = null;
-let selectedId = null;
-let modal = null;
+interface PublicProfile extends StoredProfile {
+  path: string;
+  running: boolean;
+  pids: number[];
+}
+
+interface AppState {
+  appTitle: string;
+  dataDir: string;
+  profilesDir: string;
+  profiles: PublicProfile[];
+  runningProfiles: PublicProfile[];
+  currentProfile: PublicProfile | null;
+  chromeLauncher: string;
+}
+
+interface DeleteProfileResult {
+  deletedProfile: StoredProfile;
+  trashPath: string | null;
+  state: AppState;
+}
+
+interface ProfileManagerApi {
+  getState(): Promise<AppState>;
+  createProfile(name: string): Promise<AppState>;
+  launchProfile(id: string): Promise<AppState>;
+  openProfileFolder(id: string): Promise<AppState>;
+  deleteProfile(id: string): Promise<DeleteProfileResult>;
+}
+
+interface Window {
+  profileManager: ProfileManagerApi;
+}
+
+type ModalState = "new" | null;
+type ToastKind = "normal" | "error";
+
+const root = document.querySelector<HTMLDivElement>("#app");
+
+if (!root) {
+  throw new Error("Missing #app root.");
+}
+
+const appRoot: HTMLDivElement = root;
+
+let state: AppState | null = null;
+let selectedId: string | null = null;
+let modal: ModalState = null;
 let busy = false;
-let toast = null;
-let toastKind = "normal";
+let toast: string | null = null;
+let toastKind: ToastKind = "normal";
+let toastTimer: number | undefined;
 
 const dateFormatter = new Intl.DateTimeFormat("zh-CN", {
   month: "2-digit",
@@ -14,25 +66,16 @@ const dateFormatter = new Intl.DateTimeFormat("zh-CN", {
   minute: "2-digit"
 });
 
-async function api(path, options = {}) {
-  const response = await fetch(path, {
-    headers: {
-      "content-type": "application/json",
-      ...(options.headers || {})
-    },
-    ...options
-  });
-
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(payload.error || `Request failed: ${response.status}`);
+function profileApi(): ProfileManagerApi {
+  if (!window.profileManager) {
+    throw new Error("Desktop bridge is not available.");
   }
 
-  return payload;
+  return window.profileManager;
 }
 
-async function loadState() {
-  state = await api("/api/state");
+async function loadState(): Promise<void> {
+  state = await profileApi().getState();
   const profiles = state.profiles || [];
 
   if (!profiles.some((profile) => profile.id === selectedId)) {
@@ -42,19 +85,19 @@ async function loadState() {
   render();
 }
 
-function setToast(message, kind = "normal") {
+function setToast(message: string, kind: ToastKind = "normal"): void {
   toast = message;
   toastKind = kind;
   render();
 
-  window.clearTimeout(setToast.timer);
-  setToast.timer = window.setTimeout(() => {
+  window.clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => {
     toast = null;
     render();
   }, 3200);
 }
 
-async function withBusy(work, successMessage) {
+async function withBusy(work: () => Promise<unknown>, successMessage?: string): Promise<void> {
   if (busy) {
     return;
   }
@@ -68,16 +111,16 @@ async function withBusy(work, successMessage) {
       setToast(successMessage);
     }
   } catch (error) {
-    setToast(error.message, "error");
+    setToast(error instanceof Error ? error.message : String(error), "error");
   } finally {
     busy = false;
-    await loadState().catch((error) => setToast(error.message, "error"));
+    await loadState().catch((error: unknown) => setToast(error instanceof Error ? error.message : String(error), "error"));
   }
 }
 
-function render() {
+function render(): void {
   if (!state) {
-    app.innerHTML = '<div class="app-loading">Loading...</div>';
+    appRoot.innerHTML = '<div class="app-loading">Loading...</div>';
     return;
   }
 
@@ -91,12 +134,12 @@ function render() {
       ? `最近启动 ${formatDate(state.currentProfile.lastLaunchedAt)}`
       : "暂无记录";
 
-  app.className = "";
-  app.innerHTML = `
+  appRoot.className = "";
+  appRoot.innerHTML = `
     <div class="shell">
       <header class="app-header">
         <div>
-          <p class="eyebrow">Local Chrome Tool</p>
+          <p class="eyebrow">Desktop Chrome Tool</p>
           <h1>Chrome Profile Manager</h1>
         </div>
         <div class="header-actions">
@@ -139,7 +182,7 @@ function render() {
   `;
 }
 
-function renderTable(profiles) {
+function renderTable(profiles: PublicProfile[]): string {
   return `
     <div class="profiles-table-wrap">
       <table class="profiles-table">
@@ -159,7 +202,7 @@ function renderTable(profiles) {
   `;
 }
 
-function renderProfileRow(profile) {
+function renderProfileRow(profile: PublicProfile): string {
   const selected = profile.id === selectedId;
   return `
     <tr class="${selected ? "selected" : ""}">
@@ -189,7 +232,7 @@ function renderProfileRow(profile) {
   `;
 }
 
-function renderEmpty() {
+function renderEmpty(): string {
   return `
     <div class="empty-state">
       <strong>还没有 Profile</strong>
@@ -198,7 +241,7 @@ function renderEmpty() {
   `;
 }
 
-function renderDetails(profile) {
+function renderDetails(profile: PublicProfile | null): string {
   if (!profile) {
     return `
       <aside class="details">
@@ -249,7 +292,7 @@ function renderDetails(profile) {
   `;
 }
 
-function renderNewModal() {
+function renderNewModal(): string {
   return `
     <div class="modal-backdrop" data-action="close-modal">
       <form class="modal" data-create-form>
@@ -267,7 +310,7 @@ function renderNewModal() {
   `;
 }
 
-function formatDate(value) {
+function formatDate(value: string | null): string {
   if (!value) {
     return "从未";
   }
@@ -280,7 +323,7 @@ function formatDate(value) {
   return dateFormatter.format(date);
 }
 
-function escapeHtml(value) {
+function escapeHtml(value: unknown): string {
   return String(value ?? "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -289,19 +332,20 @@ function escapeHtml(value) {
     .replace(/'/g, "&#039;");
 }
 
-app.addEventListener("click", (event) => {
-  const actionTarget = event.target.closest("[data-action]");
-  if (!actionTarget) {
+appRoot.addEventListener("click", (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  const actionTarget = target?.closest<HTMLElement>("[data-action]");
+  if (!actionTarget || !state) {
     return;
   }
 
   const action = actionTarget.dataset.action;
-  const id = actionTarget.dataset.id;
+  const id = actionTarget.dataset.id || null;
 
   if (action === "new-profile") {
     modal = "new";
     render();
-    window.setTimeout(() => document.querySelector("#profile-name")?.focus(), 0);
+    window.setTimeout(() => document.querySelector<HTMLInputElement>("#profile-name")?.focus(), 0);
     return;
   }
 
@@ -314,42 +358,28 @@ app.addEventListener("click", (event) => {
   }
 
   if (action === "refresh") {
-    withBusy(() => loadState(), "已刷新");
+    void withBusy(() => loadState(), "已刷新");
     return;
   }
 
-  if (action === "select") {
+  if (action === "select" && id) {
     selectedId = id;
     render();
     return;
   }
 
-  if (action === "launch") {
+  if (action === "launch" && id) {
     const profile = state.profiles.find((item) => item.id === id);
-    withBusy(
-      () =>
-        api(`/api/profiles/${encodeURIComponent(id)}/launch`, {
-          method: "POST",
-          body: "{}"
-        }),
-      `已启动 ${profile?.name || "Profile"}`
-    );
+    void withBusy(() => profileApi().launchProfile(id), `已启动 ${profile?.name || "Profile"}`);
     return;
   }
 
-  if (action === "open-folder") {
-    withBusy(
-      () =>
-        api(`/api/profiles/${encodeURIComponent(id)}/open-folder`, {
-          method: "POST",
-          body: "{}"
-        }),
-      "已打开目录"
-    );
+  if (action === "open-folder" && id) {
+    void withBusy(() => profileApi().openProfileFolder(id), "已打开目录");
     return;
   }
 
-  if (action === "delete") {
+  if (action === "delete" && id) {
     const profile = state.profiles.find((item) => item.id === id);
     if (!profile) {
       return;
@@ -360,18 +390,13 @@ app.addEventListener("click", (event) => {
       return;
     }
 
-    withBusy(
-      () =>
-        api(`/api/profiles/${encodeURIComponent(id)}`, {
-          method: "DELETE"
-        }),
-      `已删除 ${profile.name}`
-    );
+    void withBusy(() => profileApi().deleteProfile(id), `已删除 ${profile.name}`);
   }
 });
 
-app.addEventListener("submit", (event) => {
-  const form = event.target.closest("[data-create-form]");
+appRoot.addEventListener("submit", (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  const form = target?.closest<HTMLFormElement>("[data-create-form]");
   if (!form) {
     return;
   }
@@ -380,17 +405,14 @@ app.addEventListener("submit", (event) => {
   const data = new FormData(form);
   const name = String(data.get("name") || "").trim();
 
-  withBusy(async () => {
-    const nextState = await api("/api/profiles", {
-      method: "POST",
-      body: JSON.stringify({ name })
-    });
+  void withBusy(async () => {
+    const nextState = await profileApi().createProfile(name);
     state = nextState;
     selectedId = state.profiles[0]?.id || null;
     modal = null;
   }, `已创建 ${name}`);
 });
 
-loadState().catch((error) => {
-  app.innerHTML = `<div class="app-loading">${escapeHtml(error.message)}</div>`;
+loadState().catch((error: unknown) => {
+  appRoot.innerHTML = `<div class="app-loading">${escapeHtml(error instanceof Error ? error.message : String(error))}</div>`;
 });

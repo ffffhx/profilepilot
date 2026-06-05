@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "rootDir": "src",
+    "outDir": "dist",
+    "strict": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "noEmitOnError": true,
+    "ignoreDeprecations": "6.0",
+    "lib": ["ES2022", "DOM"],
+    "types": ["node", "electron"]
+  },
+  "include": ["src/**/*.ts"]
+}

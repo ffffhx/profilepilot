@@ -1,6 +1,6 @@
 # Chrome Profile Manager
 
-A small local web tool for managing isolated Chrome profile directories.
+A small Electron desktop app for managing isolated Chrome profile directories.
 
 It follows the safer "managed profiles" model:
 
@@ -8,18 +8,29 @@ It follows the safer "managed profiles" model:
 - Launching uses `--user-data-dir` so each profile is isolated.
 - Deleting a profile moves its directory to the trash-style location first.
 - The UI shows running profiles by inspecting Chrome processes that were launched with a managed `--user-data-dir`.
+- The renderer talks to native capabilities through an Electron preload bridge.
 
 ## Run
 
 ```bash
+npm install
 npm start
 ```
 
-Open:
+This compiles the TypeScript sources and opens the Electron app.
 
-```text
-http://127.0.0.1:5177
+## Development
+
+```bash
+npm run check
+npm run build
 ```
+
+Source files live in `src/`:
+
+- `src/main/` contains the Electron main process and local profile management logic.
+- `src/preload.ts` exposes the safe desktop API to the renderer.
+- `src/renderer/app.ts` renders the UI.
 
 ## Data Directory
 

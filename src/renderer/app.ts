@@ -232,6 +232,8 @@ function renderTable(profiles: PublicProfile[]): string {
 
 function renderProfileRow(profile: PublicProfile): string {
   const selected = profile.id === selectedId;
+  const launchDisabled = busy || profile.running;
+  const deleteDisabled = busy || profile.running || !profile.deletable;
   return `
     <tr class="${selected ? "selected" : ""}">
       <td>
@@ -255,9 +257,9 @@ function renderProfileRow(profile: PublicProfile): string {
       <td class="date-cell">${formatDate(profile.lastLaunchedAt)}</td>
       <td>
         <div class="row-actions">
-          <button type="button" data-action="launch" data-id="${profile.id}" ${busy ? "disabled" : ""}>启动</button>
+          <button type="button" data-action="launch" data-id="${profile.id}" title="${escapeHtml(launchButtonTitle(profile))}" ${launchDisabled ? "disabled" : ""}>启动</button>
           <button type="button" data-action="open-folder" data-id="${profile.id}" ${busy ? "disabled" : ""}>目录</button>
-          <button type="button" class="danger" data-action="delete" data-id="${profile.id}" ${busy || profile.running || !profile.deletable ? "disabled" : ""}>删除</button>
+          <button type="button" class="danger" data-action="delete" data-id="${profile.id}" title="${escapeHtml(deleteButtonTitle(profile))}" ${deleteDisabled ? "disabled" : ""}>删除</button>
         </div>
       </td>
     </tr>
@@ -354,6 +356,24 @@ function profileStatusLabel(profile: PublicProfile): string {
   return profile.running ? "运行中" : "未运行";
 }
 
+function launchButtonTitle(profile: PublicProfile): string {
+  return profile.running ? "这个 Profile 已经在运行中" : "启动这个 Profile";
+}
+
+function deleteButtonTitle(profile: PublicProfile): string {
+  if (profile.running) {
+    return "先关闭这个 Profile 的 Chrome 窗口，再刷新后删除";
+  }
+  if (profile.isDefault) {
+    return "Default 本机 Chrome Profile 受保护，不能删除";
+  }
+  if (!profile.deletable) {
+    return "这个 Profile 不能删除";
+  }
+
+  return "删除这个 Profile";
+}
+
 function formatDate(value: string | null): string {
   if (!value) {
     return "从未";
@@ -414,6 +434,10 @@ appRoot.addEventListener("click", (event) => {
 
   if (action === "launch" && id) {
     const profile = state.profiles.find((item) => item.id === id);
+    if (profile?.running) {
+      setToast(`${profile.name} 已经在运行中`);
+      return;
+    }
     void withBusy(() => profileApi().launchProfile(id), `已启动 ${profile?.name || "Profile"}`);
     return;
   }
@@ -426,6 +450,14 @@ appRoot.addEventListener("click", (event) => {
   if (action === "delete" && id) {
     const profile = state.profiles.find((item) => item.id === id);
     if (!profile) {
+      return;
+    }
+    if (profile.running) {
+      setToast(`先关闭 ${profile.name} 的 Chrome 窗口，再刷新后删除`, "error");
+      return;
+    }
+    if (!profile.deletable) {
+      setToast(deleteButtonTitle(profile), "error");
       return;
     }
 

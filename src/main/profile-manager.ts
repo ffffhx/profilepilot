@@ -1,6 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { existsSync, promises as fs } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
@@ -10,16 +10,32 @@ import { shell } from "electron";
 import type {
   AppState,
   DeleteProfileResult,
+  ExtensionDeleteResult,
+  ExtensionDataPath,
+  ExtensionMigrationBackupMetadata,
+  ExtensionMigrationBackupSummary,
+  ExtensionMigrationCopiedExtension,
+  ExtensionMigrationDataCopy,
+  ExtensionMigrationRequest,
+  ExtensionMigrationRestoreResult,
+  ExtensionMigrationResult,
+  ExtensionMigrationSkippedExtension,
+  ExtensionScanResult,
   NativeChromeProfile,
   NativeProfileMetadata,
+  ProfileExtensionInfo,
+  ProfileExtensionInstallType,
   PublicProfile,
   Registry,
+  StoredMigratedExtension,
   StoredProfile
 } from "../shared/types";
 
 const execFileAsync = promisify(execFile);
 
-export const APP_TITLE = "Codex Chrome Profile Manager";
+export const APP_TITLE = "ProfilePilot";
+const APP_DATA_DIR_NAME = "ProfilePilot";
+const LEGACY_APP_DATA_DIR_NAME = "Codex Chrome Profile Manager";
 
 type ProfileRef = { source: "native"; dirName: string } | { source: "isolated"; id: string };
 
@@ -43,6 +59,30 @@ interface ChromeLocalState {
   };
 }
 
+interface ChromePreferences {
+  extensions?: {
+    settings?: Record<string, ChromeExtensionSetting>;
+  };
+}
+
+interface ChromeExtensionSetting {
+  state?: unknown;
+  disable_reasons?: unknown;
+  disable_reason?: unknown;
+  from_webstore?: unknown;
+  location?: unknown;
+  path?: unknown;
+  manifest?: ChromeExtensionManifest;
+}
+
+interface ChromeExtensionManifest {
+  name?: unknown;
+  version?: unknown;
+  description?: unknown;
+  default_locale?: unknown;
+  update_url?: unknown;
+}
+
 export class ProfileManagerError extends Error {
   constructor(
     message: string,
@@ -56,10 +96,12 @@ export class ProfileManagerError extends Error {
 export class ProfileManager {
   private readonly profilesDir: string;
   private readonly registryPath: string;
+  private readonly extensionBackupDir: string;
 
   constructor(private readonly dataDir = defaultDataDir()) {
     this.profilesDir = path.join(dataDir, "profiles");
     this.registryPath = path.join(dataDir, "profiles.json");
+    this.extensionBackupDir = path.join(dataDir, "extension-migration-backups");
   }
 
   async getState(): Promise<AppState> {
@@ -97,10 +139,7 @@ export class ProfileManager {
   }
 
   async createProfile(nameInput: string): Promise<StoredProfile> {
-    const name = String(nameInput || "").trim();
-    if (!name || name.length > 80) {
-      throw new ProfileManagerError("Profile name must be 1-80 characters.", "INVALID_PROFILE_NAME");
-    }
+    const name = normalizeProfileName(nameInput);
 
     const registry = await this.loadRegistry();
     const id = randomUUID();
@@ -121,6 +160,34 @@ export class ProfileManager {
     return profile;
   }
 
+  async renameProfile(profileId: string, nameInput: string): Promise<void> {
+    const ref = parseProfileId(profileId);
+    const name = normalizeProfileName(nameInput);
+    const registry = await this.loadRegistry();
+
+    if (ref.source === "native") {
+      const profile = (await scanNativeChromeProfiles()).find((item) => item.dirName === ref.dirName);
+      if (!profile) {
+        throw new ProfileManagerError("没有找到这个 Chrome Profile。", "PROFILE_NOT_FOUND");
+      }
+
+      registry.nativeProfiles = {
+        ...(registry.nativeProfiles || {}),
+        [profile.dirName]: {
+          ...(registry.nativeProfiles?.[profile.dirName] || {}),
+          lastLaunchedAt: registry.nativeProfiles?.[profile.dirName]?.lastLaunchedAt || null,
+          name
+        }
+      };
+      await this.saveRegistry(registry);
+      return;
+    }
+
+    const profile = this.findIsolatedProfile(registry, ref.id);
+    profile.name = name;
+    await this.saveRegistry(registry);
+  }
+
   async launchProfile(profileId: string): Promise<void> {
     const ref = parseProfileId(profileId);
 
@@ -136,7 +203,7 @@ export class ProfileManager {
     const ref = parseProfileId(profileId);
     if (ref.source === "native") {
       throw new ProfileManagerError(
-        "CDP launch is only available for isolated profiles. Create an isolated Profile for agent/browser automation.",
+        "CDP 启动只支持工具独立 Profile。请先创建独立 Profile，再用于 Agent/browser 自动化。",
         "CDP_NATIVE_UNSUPPORTED"
       );
     }
@@ -147,7 +214,7 @@ export class ProfileManager {
   async closeProfile(profileId: string): Promise<void> {
     const profile = await this.getPublicProfile(profileId);
     if (!profile.running || !profile.pids.length) {
-      throw new ProfileManagerError("Profile is not running.", "PROFILE_NOT_RUNNING");
+      throw new ProfileManagerError("这个 Profile 当前未运行。", "PROFILE_NOT_RUNNING");
     }
 
     for (const pid of profile.pids) {
@@ -166,10 +233,19 @@ export class ProfileManager {
   async focusProfile(profileId: string): Promise<void> {
     const profile = await this.getPublicProfile(profileId);
     if (!profile.running || !profile.pids.length) {
-      throw new ProfileManagerError("Profile is not running.", "PROFILE_NOT_RUNNING");
+      throw new ProfileManagerError("这个 Profile 当前未运行。", "PROFILE_NOT_RUNNING");
     }
 
-    await focusProfileWindow(profile.pids);
+    const raisedWindow = await focusProfileWindow(profile.pids);
+    if (raisedWindow || profile.source !== "isolated" || (await hasRendererProcessForProfile(profile.path))) {
+      return;
+    }
+
+    await requestIsolatedProfileWindow(profile);
+    await sleep(700);
+
+    const refreshedProfile = await this.getPublicProfile(profileId);
+    await focusProfileWindow(refreshedProfile.pids.length ? refreshedProfile.pids : profile.pids);
   }
 
   async openProfileFolder(profileId: string): Promise<void> {
@@ -179,7 +255,7 @@ export class ProfileManager {
 
     const error = await shell.openPath(profilePath);
     if (error) {
-      throw new ProfileManagerError(error, "OPEN_FOLDER_FAILED");
+      throw new ProfileManagerError(`打开目录失败：${error}`, "OPEN_FOLDER_FAILED");
     }
   }
 
@@ -193,11 +269,258 @@ export class ProfileManager {
     return this.deleteIsolatedProfile(ref.id);
   }
 
+  async scanProfileExtensions(profileId: string): Promise<ExtensionScanResult> {
+    const profile = await this.getPublicProfile(profileId);
+    const extensions = await scanProfileExtensions(profile.path);
+
+    return {
+      profileId: profile.id,
+      profileName: profile.name,
+      profilePath: profile.path,
+      extensions
+    };
+  }
+
+  async migrateExtensions(request: ExtensionMigrationRequest): Promise<ExtensionMigrationResult> {
+    const sourceProfileId = String(request.sourceProfileId || "");
+    const targetProfileId = String(request.targetProfileId || "");
+    const extensionIds = uniqueStrings(request.extensionIds || []).filter(isLikelyExtensionId);
+    const includeData = Boolean(request.includeData);
+    const openInstallPages = Boolean(request.openInstallPages);
+
+    if (!sourceProfileId || !targetProfileId || sourceProfileId === targetProfileId) {
+      throw new ProfileManagerError("请选择两个不同的 Profile 进行插件迁移。", "INVALID_MIGRATION_PROFILES");
+    }
+    if (!extensionIds.length) {
+      throw new ProfileManagerError("请至少选择一个要迁移的插件。", "NO_EXTENSIONS_SELECTED");
+    }
+
+    const state = await this.getState();
+    const sourceProfile = state.profiles.find((profile) => profile.id === sourceProfileId);
+    const targetProfile = state.profiles.find((profile) => profile.id === targetProfileId);
+    if (!sourceProfile || !targetProfile) {
+      throw new ProfileManagerError("没有找到源 Profile 或目标 Profile。", "PROFILE_NOT_FOUND");
+    }
+    if (targetProfile.running) {
+      throw new ProfileManagerError("迁移插件前请先关闭目标 Profile。", "TARGET_PROFILE_RUNNING");
+    }
+    if (includeData && sourceProfile.running) {
+      throw new ProfileManagerError("迁移插件数据前请先关闭源 Profile，或取消勾选“同时迁移插件数据”。", "SOURCE_PROFILE_RUNNING");
+    }
+
+    const scan = await this.scanProfileExtensions(sourceProfileId);
+    const selectedExtensions = extensionIds
+      .map((id) => scan.extensions.find((extension) => extension.id === id))
+      .filter(Boolean) as ProfileExtensionInfo[];
+    if (!selectedExtensions.length) {
+      throw new ProfileManagerError("在源 Profile 里没有找到已选择的插件。", "EXTENSIONS_NOT_FOUND");
+    }
+
+    const backup = await this.createExtensionMigrationBackup(targetProfile, selectedExtensions);
+    const copiedExtensions: ExtensionMigrationCopiedExtension[] = [];
+    const dataCopies: ExtensionMigrationDataCopy[] = [];
+    const skippedExtensions: ExtensionMigrationSkippedExtension[] = [];
+    const webStoreInstallUrls: string[] = [];
+    const now = new Date().toISOString();
+    const copiedForRegistry: StoredMigratedExtension[] = [];
+
+    try {
+      for (const extension of selectedExtensions) {
+        if (extension.canCopyLocally && extension.path) {
+          if (targetProfile.source !== "isolated") {
+            if (extension.fromWebStore && extension.storeUrl) {
+              webStoreInstallUrls.push(extension.storeUrl);
+            }
+
+            skippedExtensions.push({
+              id: extension.id,
+              name: extension.name,
+              reason: extension.fromWebStore
+                ? "商店插件静默挂载需要目标是工具独立 Profile"
+                : "本地插件只能持久挂载到工具独立 Profile"
+            });
+          } else {
+            const copiedPath = await this.copyLocalExtensionToIsolatedProfile(extension, targetProfile);
+            copiedExtensions.push({
+              id: extension.id,
+              name: extension.name,
+              version: extension.version,
+              path: copiedPath,
+              fromWebStore: extension.fromWebStore
+            });
+            copiedForRegistry.push({
+              id: makeStoredMigratedExtensionId(extension.id),
+              sourceProfileId,
+              sourceExtensionId: extension.id,
+              name: extension.name,
+              version: extension.version,
+              path: copiedPath,
+              migratedAt: now,
+              includeData
+            });
+          }
+        } else if (extension.fromWebStore && extension.storeUrl) {
+          webStoreInstallUrls.push(extension.storeUrl);
+          skippedExtensions.push({
+            id: extension.id,
+            name: extension.name,
+            reason: "源 Profile 里没有找到可静默复制的插件目录"
+          });
+        } else if (!extension.fromWebStore) {
+          skippedExtensions.push({
+            id: extension.id,
+            name: extension.name,
+            reason: "没有找到可复制的插件目录"
+          });
+        }
+
+        if (includeData) {
+          for (const dataPath of extension.dataPaths) {
+            const copied = await copyExtensionDataPath(sourceProfile.path, targetProfile.path, dataPath.relativePath);
+            if (copied) {
+              dataCopies.push({
+                id: extension.id,
+                name: extension.name,
+                relativePath: dataPath.relativePath
+              });
+            }
+          }
+        }
+      }
+
+      if (copiedForRegistry.length) {
+        await this.mergeMigratedExtensions(targetProfile, copiedForRegistry);
+      }
+
+      let openedInstallPages = false;
+      if (openInstallPages && webStoreInstallUrls.length) {
+        await this.launchProfileWithUrls(targetProfile.id, uniqueStrings(webStoreInstallUrls));
+        openedInstallPages = true;
+      }
+
+      return {
+        sourceProfileId,
+        targetProfileId,
+        selectedCount: selectedExtensions.length,
+        copiedExtensions,
+        dataCopies,
+        webStoreInstallUrls: uniqueStrings(webStoreInstallUrls),
+        skippedExtensions,
+        backup,
+        openedInstallPages,
+        state: await this.getState()
+      };
+    } catch (error) {
+      try {
+        await this.restoreBackupMetadata(await this.readExtensionMigrationBackupMetadata(backup.id));
+        await this.discardMigratedExtensions(targetProfile, copiedForRegistry);
+      } catch {
+        // Keep the original migration error as the visible failure.
+      }
+      throw error;
+    }
+  }
+
+  async deleteProfileExtension(profileIdInput: string, extensionIdInput: string): Promise<ExtensionDeleteResult> {
+    const profileId = String(profileIdInput || "");
+    const extensionId = String(extensionIdInput || "");
+    if (!profileId || !isLikelyExtensionId(extensionId)) {
+      throw new ProfileManagerError("请选择要删除的 Profile 和插件。", "INVALID_EXTENSION_DELETE_REQUEST");
+    }
+
+    const state = await this.getState();
+    const profile = state.profiles.find((item) => item.id === profileId);
+    if (!profile) {
+      throw new ProfileManagerError("没有找到这个 Profile。", "PROFILE_NOT_FOUND");
+    }
+    if (profile.running) {
+      throw new ProfileManagerError("删除插件前请先关闭这个 Profile，然后刷新列表。", "PROFILE_RUNNING");
+    }
+
+    const scan = await this.scanProfileExtensions(profileId);
+    const extension = scan.extensions.find((item) => item.id === extensionId);
+    if (!extension) {
+      throw new ProfileManagerError("没有在这个 Profile 里找到要删除的插件。", "EXTENSION_NOT_FOUND");
+    }
+
+    const backup = await this.createExtensionMigrationBackup(profile, [extension]);
+    const deletedPaths: string[] = [];
+
+    try {
+      for (const relativePath of extensionDeleteRelativePaths(extensionId)) {
+        const targetPath = path.join(profile.path, normalizeSafeRelativePath(relativePath));
+        if (await exists(targetPath)) {
+          await fs.rm(targetPath, { recursive: true, force: true });
+          deletedPaths.push(targetPath);
+        }
+      }
+
+      await removeExtensionReferencesFromProfilePreferences(profile.path, extensionId);
+      await this.removeMigratedExtensionReference(profile, extensionId);
+
+      return {
+        profileId: profile.id,
+        profileName: profile.name,
+        extensionId,
+        extensionName: extension.name,
+        deletedPaths,
+        backup,
+        scan: await this.scanProfileExtensions(profileId),
+        state: await this.getState()
+      };
+    } catch (error) {
+      try {
+        await this.restoreBackupMetadata(await this.readExtensionMigrationBackupMetadata(backup.id));
+      } catch {
+        // Keep the original delete error visible.
+      }
+      throw error;
+    }
+  }
+
+  async listExtensionMigrationBackups(): Promise<ExtensionMigrationBackupSummary[]> {
+    await fs.mkdir(this.extensionBackupDir, { recursive: true });
+    const entries = await fs.readdir(this.extensionBackupDir, { withFileTypes: true }).catch(() => []);
+    const backups = await Promise.all(
+      entries
+        .filter((entry) => entry.isDirectory())
+        .map(async (entry): Promise<ExtensionMigrationBackupSummary | null> => {
+          try {
+            return summarizeExtensionMigrationBackup(
+              await this.readExtensionMigrationBackupMetadata(entry.name)
+            );
+          } catch {
+            return null;
+          }
+        })
+    );
+
+    return backups
+      .filter((backup): backup is ExtensionMigrationBackupSummary => Boolean(backup))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  async restoreExtensionMigrationBackup(backupId: string): Promise<ExtensionMigrationRestoreResult> {
+    const metadata = await this.readExtensionMigrationBackupMetadata(backupId);
+    const state = await this.getState();
+    const targetProfile = state.profiles.find((profile) => profile.id === metadata.targetProfileId);
+    if (targetProfile?.running) {
+      throw new ProfileManagerError("恢复备份前请先关闭目标 Profile。", "TARGET_PROFILE_RUNNING");
+    }
+
+    await this.restoreBackupMetadata(metadata);
+
+    return {
+      backup: summarizeExtensionMigrationBackup(metadata),
+      state: await this.getState()
+    };
+  }
+
   private async launchNativeProfile(dirName: string): Promise<void> {
     const profiles = await scanNativeChromeProfiles();
     const profile = profiles.find((item) => item.dirName === dirName);
     if (!profile) {
-      throw new ProfileManagerError("Chrome profile not found.", "PROFILE_NOT_FOUND");
+      throw new ProfileManagerError("没有找到这个 Chrome Profile。", "PROFILE_NOT_FOUND");
     }
 
     await launchChrome([`--profile-directory=${profile.dirName}`, "--no-first-run"]);
@@ -205,6 +528,7 @@ export class ProfileManager {
     registry.nativeProfiles = {
       ...(registry.nativeProfiles || {}),
       [profile.dirName]: {
+        ...(registry.nativeProfiles?.[profile.dirName] || {}),
         lastLaunchedAt: new Date().toISOString()
       }
     };
@@ -217,7 +541,7 @@ export class ProfileManager {
     const profilePath = this.isolatedProfilePath(profile);
     await fs.mkdir(profilePath, { recursive: true });
 
-    await launchChrome([`--user-data-dir=${profilePath}`, "--no-first-run"]);
+    await launchChrome([`--user-data-dir=${profilePath}`, "--no-first-run", ...(await getMigratedExtensionLaunchArgs(profile))]);
     profile.lastLaunchedAt = new Date().toISOString();
     await this.saveRegistry(registry);
   }
@@ -228,7 +552,7 @@ export class ProfileManager {
     const currentState = await this.getState();
     const currentProfile = currentState.profiles.find((item) => item.id === makeIsolatedProfileId(id));
     if (currentProfile?.running) {
-      throw new ProfileManagerError("Close this Profile before starting it with CDP.", "PROFILE_RUNNING");
+      throw new ProfileManagerError("请先关闭这个 Profile，再用 CDP 模式启动。", "PROFILE_RUNNING");
     }
 
     const profilePath = this.isolatedProfilePath(profile);
@@ -238,13 +562,14 @@ export class ProfileManager {
     const cdpPort = requestedPort ?? (await findAvailableCdpPort(profile.lastCdpPort || 9222));
     if (!(await isPortAvailable(cdpPort))) {
       const owner = await describePortOwner(cdpPort);
-      const detail = owner ? ` by ${owner}` : "";
-      throw new ProfileManagerError(`CDP port ${cdpPort} is already in use${detail}.`, "CDP_PORT_IN_USE");
+      const detail = owner ? `，占用者：${owner}` : "";
+      throw new ProfileManagerError(`CDP 端口 ${cdpPort} 已被占用${detail}。`, "CDP_PORT_IN_USE");
     }
 
     await launchChrome([
       `--user-data-dir=${profilePath}`,
       "--no-first-run",
+      ...(await getMigratedExtensionLaunchArgs(profile)),
       "--remote-debugging-address=127.0.0.1",
       `--remote-debugging-port=${cdpPort}`
     ]);
@@ -255,20 +580,69 @@ export class ProfileManager {
     await waitForCdp(cdpPort, 6000);
   }
 
+  private async launchProfileWithUrls(profileId: string, urls: string[]): Promise<void> {
+    const ref = parseProfileId(profileId);
+    if (!urls.length) {
+      return;
+    }
+
+    if (ref.source === "native") {
+      await this.launchNativeProfileWithUrls(ref.dirName, urls);
+      return;
+    }
+
+    await this.launchIsolatedProfileWithUrls(ref.id, urls);
+  }
+
+  private async launchNativeProfileWithUrls(dirName: string, urls: string[]): Promise<void> {
+    const profiles = await scanNativeChromeProfiles();
+    const profile = profiles.find((item) => item.dirName === dirName);
+    if (!profile) {
+      throw new ProfileManagerError("没有找到这个 Chrome Profile。", "PROFILE_NOT_FOUND");
+    }
+
+    await launchChrome([`--profile-directory=${profile.dirName}`, "--no-first-run", ...urls]);
+    const registry = await this.loadRegistry();
+    registry.nativeProfiles = {
+      ...(registry.nativeProfiles || {}),
+      [profile.dirName]: {
+        ...(registry.nativeProfiles?.[profile.dirName] || {}),
+        lastLaunchedAt: new Date().toISOString()
+      }
+    };
+    await this.saveRegistry(registry);
+  }
+
+  private async launchIsolatedProfileWithUrls(id: string, urls: string[]): Promise<void> {
+    const registry = await this.loadRegistry();
+    const profile = this.findIsolatedProfile(registry, id);
+    const profilePath = this.isolatedProfilePath(profile);
+    await fs.mkdir(profilePath, { recursive: true });
+
+    await launchChrome([
+      `--user-data-dir=${profilePath}`,
+      "--no-first-run",
+      ...(await getMigratedExtensionLaunchArgs(profile)),
+      ...urls
+    ]);
+    profile.lastLaunchedAt = new Date().toISOString();
+    await this.saveRegistry(registry);
+  }
+
   private async deleteNativeProfile(dirName: string): Promise<DeleteProfileResult> {
     const state = await this.getState();
     const profile = state.profiles.find((item) => item.source === "native" && item.dirName === dirName);
     if (!profile) {
-      throw new ProfileManagerError("Chrome profile not found.", "PROFILE_NOT_FOUND");
+      throw new ProfileManagerError("没有找到这个 Chrome Profile。", "PROFILE_NOT_FOUND");
     }
     if (profile.isDefault) {
-      throw new ProfileManagerError("Default Chrome profile is protected.", "DEFAULT_PROFILE_PROTECTED");
+      throw new ProfileManagerError("默认 Chrome Profile 受保护，不能删除。", "DEFAULT_PROFILE_PROTECTED");
     }
     if (await isChromeRunning()) {
-      throw new ProfileManagerError("Quit Chrome before deleting a Chrome profile.", "CHROME_RUNNING");
+      throw new ProfileManagerError("删除 Chrome Profile 前请先退出 Chrome。", "CHROME_RUNNING");
     }
     if (profile.running) {
-      throw new ProfileManagerError("Close this Chrome profile before deleting it.", "PROFILE_RUNNING");
+      throw new ProfileManagerError("删除前请先关闭这个 Chrome Profile。", "PROFILE_RUNNING");
     }
 
     const trashPath = await this.moveToTrash(profile.path, profile.dirName);
@@ -292,7 +666,7 @@ export class ProfileManager {
     const state = await this.getState();
     const profile = state.profiles.find((item) => item.source === "isolated" && item.id === makeIsolatedProfileId(id));
     if (profile?.running) {
-      throw new ProfileManagerError("Close this Chrome profile before deleting it.", "PROFILE_RUNNING");
+      throw new ProfileManagerError("删除前请先关闭这个 Chrome Profile。", "PROFILE_RUNNING");
     }
 
     const publicProfile = profile || this.toIsolatedPublicProfile(storedProfile, new Map());
@@ -311,7 +685,7 @@ export class ProfileManager {
     if (ref.source === "native") {
       const profile = (await scanNativeChromeProfiles()).find((item) => item.dirName === ref.dirName);
       if (!profile) {
-        throw new ProfileManagerError("Chrome profile not found.", "PROFILE_NOT_FOUND");
+        throw new ProfileManagerError("没有找到这个 Chrome Profile。", "PROFILE_NOT_FOUND");
       }
 
       return profile.path;
@@ -426,7 +800,7 @@ export class ProfileManager {
     return {
       id: makeNativeProfileId(profile.dirName),
       source: "native",
-      name: profile.name,
+      name: registry.nativeProfiles?.[profile.dirName]?.name || profile.name,
       dirName: profile.dirName,
       path: profile.path,
       createdAt: null,
@@ -465,10 +839,214 @@ export class ProfileManager {
     };
   }
 
+  private async createExtensionMigrationBackup(
+    targetProfile: PublicProfile,
+    selectedExtensions: ProfileExtensionInfo[]
+  ): Promise<ExtensionMigrationBackupSummary> {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const id = `${stamp}-${makeSlug(targetProfile.name || targetProfile.dirName)}`;
+    const backupPath = path.join(this.extensionBackupDir, id);
+    const snapshotPath = path.join(backupPath, "snapshot");
+    await fs.mkdir(snapshotPath, { recursive: true });
+
+    const itemRelativePaths = uniqueStrings(
+      [
+        "Preferences",
+        "Secure Preferences",
+        "Extensions",
+        "Migrated Extensions",
+        ...selectedExtensions.flatMap((extension) => extensionDataRelativePaths(extension.id))
+      ].filter(Boolean)
+    );
+
+    const items = await Promise.all(
+      itemRelativePaths.map(async (relativePath) => {
+        const sourcePath = path.join(targetProfile.path, relativePath);
+        const existed = await exists(sourcePath);
+        if (existed) {
+          await copyPath(sourcePath, path.join(snapshotPath, relativePath));
+        }
+
+        return {
+          relativePath,
+          existed
+        };
+      })
+    );
+
+    const metadata: ExtensionMigrationBackupMetadata = {
+      id,
+      createdAt: new Date().toISOString(),
+      path: backupPath,
+      targetProfileId: targetProfile.id,
+      targetProfileName: targetProfile.name,
+      targetProfilePath: targetProfile.path,
+      itemCount: items.length,
+      items,
+      targetMigratedExtensions: await this.getMigratedExtensionsSnapshot(targetProfile)
+    };
+
+    await fs.writeFile(path.join(backupPath, "backup.json"), `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
+    return summarizeExtensionMigrationBackup(metadata);
+  }
+
+  private async copyLocalExtensionToIsolatedProfile(
+    extension: ProfileExtensionInfo,
+    targetProfile: PublicProfile
+  ): Promise<string> {
+    if (!extension.path) {
+      throw new ProfileManagerError(`插件 ${extension.name} 没有可复制的插件包目录。`, "EXTENSION_PATH_MISSING");
+    }
+
+    const versionSlug = makePathSegment(extension.version || "unknown-version");
+    const targetPath = path.join(targetProfile.path, "Migrated Extensions", extension.id, versionSlug);
+    await fs.rm(targetPath, { recursive: true, force: true });
+    await copyPath(extension.path, targetPath);
+    return targetPath;
+  }
+
+  private async mergeMigratedExtensions(
+    targetProfile: PublicProfile,
+    copiedExtensions: StoredMigratedExtension[]
+  ): Promise<void> {
+    if (targetProfile.source !== "isolated") {
+      return;
+    }
+
+    const ref = parseProfileId(targetProfile.id);
+    if (ref.source !== "isolated") {
+      return;
+    }
+
+    const registry = await this.loadRegistry();
+    const storedProfile = this.findIsolatedProfile(registry, ref.id);
+    const existing = storedProfile.migratedExtensions || [];
+    const copiedIds = new Set(copiedExtensions.map((extension) => extension.id));
+    storedProfile.migratedExtensions = [
+      ...existing.filter((extension) => !copiedIds.has(extension.id)),
+      ...copiedExtensions
+    ].sort((a, b) => a.name.localeCompare(b.name));
+    await this.saveRegistry(registry);
+  }
+
+  private async getMigratedExtensionsSnapshot(targetProfile: PublicProfile): Promise<StoredMigratedExtension[]> {
+    if (targetProfile.source !== "isolated") {
+      return [];
+    }
+
+    const ref = parseProfileId(targetProfile.id);
+    if (ref.source !== "isolated") {
+      return [];
+    }
+
+    const registry = await this.loadRegistry();
+    const storedProfile = this.findIsolatedProfile(registry, ref.id);
+    return [...(storedProfile.migratedExtensions || [])];
+  }
+
+  private async discardMigratedExtensions(
+    targetProfile: PublicProfile,
+    copiedExtensions: StoredMigratedExtension[]
+  ): Promise<void> {
+    if (targetProfile.source !== "isolated" || !copiedExtensions.length) {
+      return;
+    }
+
+    const ref = parseProfileId(targetProfile.id);
+    if (ref.source !== "isolated") {
+      return;
+    }
+
+    const registry = await this.loadRegistry();
+    const storedProfile = this.findIsolatedProfile(registry, ref.id);
+    const copiedIds = new Set(copiedExtensions.map((extension) => extension.id));
+    storedProfile.migratedExtensions = (storedProfile.migratedExtensions || []).filter(
+      (extension) => !copiedIds.has(extension.id)
+    );
+    await this.saveRegistry(registry);
+  }
+
+  private async removeMigratedExtensionReference(profile: PublicProfile, extensionId: string): Promise<void> {
+    if (profile.source !== "isolated") {
+      return;
+    }
+
+    const ref = parseProfileId(profile.id);
+    if (ref.source !== "isolated") {
+      return;
+    }
+
+    const registry = await this.loadRegistry();
+    const storedProfile = this.findIsolatedProfile(registry, ref.id);
+    const beforeCount = storedProfile.migratedExtensions?.length || 0;
+    storedProfile.migratedExtensions = (storedProfile.migratedExtensions || []).filter(
+      (extension) => extension.sourceExtensionId !== extensionId && extension.id !== makeStoredMigratedExtensionId(extensionId)
+    );
+    if ((storedProfile.migratedExtensions || []).length !== beforeCount) {
+      await this.saveRegistry(registry);
+    }
+  }
+
+  private async readExtensionMigrationBackupMetadata(backupId: string): Promise<ExtensionMigrationBackupMetadata> {
+    const safeId = path.basename(String(backupId || ""));
+    if (!safeId || safeId !== backupId) {
+      throw new ProfileManagerError("备份 ID 无效。", "INVALID_BACKUP_ID");
+    }
+
+    const raw = await fs.readFile(path.join(this.extensionBackupDir, safeId, "backup.json"), "utf8");
+    const parsed = JSON.parse(raw) as ExtensionMigrationBackupMetadata;
+    if (
+      !parsed ||
+      typeof parsed.id !== "string" ||
+      typeof parsed.targetProfilePath !== "string" ||
+      !Array.isArray(parsed.items)
+    ) {
+      throw new ProfileManagerError("备份元数据无效。", "INVALID_BACKUP_METADATA");
+    }
+
+    return parsed;
+  }
+
+  private async restoreBackupMetadata(metadata: ExtensionMigrationBackupMetadata): Promise<void> {
+    const snapshotPath = path.join(metadata.path, "snapshot");
+    for (const item of metadata.items) {
+      const relativePath = normalizeSafeRelativePath(item.relativePath);
+      const targetPath = path.join(metadata.targetProfilePath, relativePath);
+      const backupItemPath = path.join(snapshotPath, relativePath);
+
+      await fs.rm(targetPath, { recursive: true, force: true });
+      if (item.existed && (await exists(backupItemPath))) {
+        await copyPath(backupItemPath, targetPath);
+      }
+    }
+
+    await this.restoreMigratedExtensionsSnapshot(metadata);
+  }
+
+  private async restoreMigratedExtensionsSnapshot(metadata: ExtensionMigrationBackupMetadata): Promise<void> {
+    if (!metadata.targetProfileId.startsWith("isolated:") || !metadata.targetMigratedExtensions) {
+      return;
+    }
+
+    const ref = parseProfileId(metadata.targetProfileId);
+    if (ref.source !== "isolated") {
+      return;
+    }
+
+    const registry = await this.loadRegistry();
+    const storedProfile = registry.profiles.find((profile) => profile.id === ref.id);
+    if (!storedProfile) {
+      return;
+    }
+
+    storedProfile.migratedExtensions = metadata.targetMigratedExtensions;
+    await this.saveRegistry(registry);
+  }
+
   private findIsolatedProfile(registry: Registry, id: string): StoredProfile {
     const profile = registry.profiles.find((item) => item.id === id);
     if (!profile) {
-      throw new ProfileManagerError("Profile not found.", "PROFILE_NOT_FOUND");
+      throw new ProfileManagerError("没有找到这个 Profile。", "PROFILE_NOT_FOUND");
     }
 
     return profile;
@@ -485,7 +1063,7 @@ export class ProfileManager {
     const profile = state.profiles.find((item) => item.id === expectedId);
 
     if (!profile) {
-      throw new ProfileManagerError("Profile not found.", "PROFILE_NOT_FOUND");
+      throw new ProfileManagerError("没有找到这个 Profile。", "PROFILE_NOT_FOUND");
     }
 
     return profile;
@@ -547,15 +1125,25 @@ export function createProfileManager(): ProfileManager {
 }
 
 function defaultDataDir(): string {
+  const preferred = appDataDir(APP_DATA_DIR_NAME);
+  const legacy = appDataDir(LEGACY_APP_DATA_DIR_NAME);
+  if (existsSync(path.join(legacy, "profiles.json"))) {
+    return legacy;
+  }
+
+  return preferred;
+}
+
+function appDataDir(name: string): string {
   if (process.platform === "darwin") {
-    return path.join(os.homedir(), "Library", "Application Support", APP_TITLE);
+    return path.join(os.homedir(), "Library", "Application Support", name);
   }
 
   if (process.platform === "win32") {
-    return path.join(process.env.APPDATA || os.homedir(), APP_TITLE);
+    return path.join(process.env.APPDATA || os.homedir(), name);
   }
 
-  return path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "codex-chrome-profile-manager");
+  return path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), makeSlug(name));
 }
 
 function makeSlug(name: string): string {
@@ -567,6 +1155,15 @@ function makeSlug(name: string): string {
     .slice(0, 36);
 
   return slug || "profile";
+}
+
+function normalizeProfileName(nameInput: string): string {
+  const name = String(nameInput || "").trim();
+  if (!name || name.length > 80) {
+    throw new ProfileManagerError("Profile 名称长度必须是 1-80 个字符。", "INVALID_PROFILE_NAME");
+  }
+
+  return name;
 }
 
 async function launchChrome(args: string[]): Promise<void> {
@@ -608,29 +1205,37 @@ function isProcessGoneError(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ESRCH";
 }
 
-async function focusProfileWindow(pids: number[]): Promise<void> {
+async function focusProfileWindow(pids: number[]): Promise<boolean> {
   if (process.platform !== "darwin") {
-    throw new ProfileManagerError("Bringing a profile window forward is currently supported on macOS.", "FOCUS_UNSUPPORTED");
+    throw new ProfileManagerError("当前只支持在 macOS 上把 Profile 窗口显示到最前面。", "FOCUS_UNSUPPORTED");
   }
 
   let lastError: unknown = null;
+  let activatedAnyProcess = false;
   for (const pid of pids) {
     try {
-      await focusMacProcess(pid);
-      return;
+      const raisedWindow = await focusMacProcess(pid);
+      activatedAnyProcess = true;
+      if (raisedWindow) {
+        return true;
+      }
     } catch (error) {
       lastError = error;
     }
   }
 
+  if (activatedAnyProcess) {
+    return false;
+  }
+
   const detail = lastError instanceof Error && lastError.message ? ` ${lastError.message}` : "";
   throw new ProfileManagerError(
-    `Could not bring this Chrome profile to the front.${detail}`,
+    `无法把这个 Chrome Profile 窗口显示到最前面。${detail}`,
     "FOCUS_PROFILE_FAILED"
   );
 }
 
-async function focusMacProcess(pid: number): Promise<void> {
+async function focusMacProcess(pid: number): Promise<boolean> {
   await activateMacProcess(pid);
 
   const script = `
@@ -638,23 +1243,78 @@ tell application "System Events"
   set targetProcesses to every process whose unix id is ${pid}
   if (count of targetProcesses) is 0 then error "Process not found"
   set targetProcess to item 1 of targetProcesses
-  tell targetProcess
-    set visible to true
-    try
-      repeat with targetWindow in windows
-        try
-          set value of attribute "AXMinimized" of targetWindow to false
-        end try
+	  tell targetProcess
+	    set visible to true
+	    set raisedWindow to false
+	    try
+	      repeat with targetWindow in windows
+	        try
+	          set value of attribute "AXMinimized" of targetWindow to false
+	        end try
       end repeat
-    end try
-    if (count of windows) is greater than 0 then
-      perform action "AXRaise" of window 1
-    end if
-  end tell
-end tell
+	    end try
+	    if (count of windows) is greater than 0 then
+	      perform action "AXRaise" of window 1
+	      set raisedWindow to true
+	    end if
+	    return raisedWindow
+	  end tell
+	end tell
 `;
 
-  await execFileAsync("osascript", ["-e", script]);
+  try {
+    const { stdout } = await execFileAsync("osascript", ["-e", script]);
+    return stdout.trim().toLowerCase() === "true";
+  } catch {
+    // NSRunningApplication activation already brought the app process forward.
+    // Window enumeration can fail for Chrome's separate profile instances on macOS.
+    return false;
+  }
+}
+
+async function hasRendererProcessForProfile(profilePath: string): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync("ps", ["-axo", "command="], {
+      maxBuffer: 1024 * 1024 * 8
+    });
+
+    return stdout.split("\n").some((command) => {
+      return (
+        command.includes("Google Chrome Helper (Renderer)") &&
+        command.includes("--type=renderer") &&
+        command.includes(`--user-data-dir=${profilePath}`)
+      );
+    });
+  } catch {
+    return true;
+  }
+}
+
+async function requestIsolatedProfileWindow(profile: PublicProfile): Promise<void> {
+  if (process.platform !== "darwin") {
+    return;
+  }
+
+  const command = getDirectChromeCommand();
+  if (!command) {
+    throw new ProfileManagerError("找不到可直接唤起窗口的 Chrome 二进制。", "FOCUS_PROFILE_FAILED");
+  }
+
+  launchDetached(command, [`--user-data-dir=${profile.path}`, "--no-first-run"]);
+}
+
+function getDirectChromeCommand(): string | null {
+  if (process.env.CHROME_BINARY) {
+    return process.env.CHROME_BINARY;
+  }
+
+  if (process.platform !== "darwin") {
+    return null;
+  }
+
+  const appName = process.env.CHROME_APP_NAME || "Google Chrome";
+  const command = `/Applications/${appName}.app/Contents/MacOS/${appName}`;
+  return existsSync(command) ? command : null;
 }
 
 async function activateMacProcess(pid: number): Promise<void> {
@@ -699,8 +1359,513 @@ function normalizeProfile(profile: unknown): StoredProfile | null {
     lastCdpPort:
       typeof candidate.lastCdpPort === "number" && Number.isInteger(candidate.lastCdpPort)
         ? candidate.lastCdpPort
-        : null
+        : null,
+    migratedExtensions: Array.isArray(candidate.migratedExtensions)
+      ? candidate.migratedExtensions
+          .map(normalizeStoredMigratedExtension)
+          .filter((item): item is StoredMigratedExtension => Boolean(item))
+      : []
   };
+}
+
+function normalizeStoredMigratedExtension(extension: unknown): StoredMigratedExtension | null {
+  if (!extension || typeof extension !== "object") {
+    return null;
+  }
+
+  const candidate = extension as Partial<StoredMigratedExtension>;
+  if (
+    typeof candidate.id !== "string" ||
+    typeof candidate.sourceProfileId !== "string" ||
+    typeof candidate.sourceExtensionId !== "string" ||
+    typeof candidate.name !== "string" ||
+    typeof candidate.version !== "string" ||
+    typeof candidate.path !== "string" ||
+    typeof candidate.migratedAt !== "string"
+  ) {
+    return null;
+  }
+
+  return {
+    id: candidate.id,
+    sourceProfileId: candidate.sourceProfileId,
+    sourceExtensionId: candidate.sourceExtensionId,
+    name: candidate.name,
+    version: candidate.version,
+    path: candidate.path,
+    migratedAt: candidate.migratedAt,
+    includeData: Boolean(candidate.includeData)
+  };
+}
+
+async function scanProfileExtensions(profilePath: string): Promise<ProfileExtensionInfo[]> {
+  const preferences = await readChromePreferences(profilePath);
+  const securePreferences = await readChromeSecurePreferences(profilePath);
+  const settings = {
+    ...(securePreferences.extensions?.settings || {}),
+    ...(preferences.extensions?.settings || {})
+  };
+  const directoryIds = await readExtensionDirectoryIds(profilePath);
+  const extensionIds = uniqueStrings([...Object.keys(settings), ...directoryIds]).filter(isLikelyExtensionId);
+  const extensions = await Promise.all(
+    extensionIds.map((extensionId) => scanProfileExtension(profilePath, extensionId, settings[extensionId]))
+  );
+
+  return extensions
+    .filter((extension): extension is ProfileExtensionInfo => Boolean(extension))
+    .filter(isUserManageableExtension)
+    .sort((a, b) => {
+      if (a.enabled !== b.enabled) {
+        return a.enabled ? -1 : 1;
+      }
+      return a.name.localeCompare(b.name);
+    });
+}
+
+function isUserManageableExtension(extension: ProfileExtensionInfo): boolean {
+  return extension.installType !== "component";
+}
+
+async function scanProfileExtension(
+  profilePath: string,
+  extensionId: string,
+  setting?: ChromeExtensionSetting
+): Promise<ProfileExtensionInfo | null> {
+  const extensionPath = await findExtensionManifestDirectory(profilePath, extensionId, setting);
+  const diskManifest = extensionPath ? await readManifest(extensionPath) : null;
+  const prefManifest = isRecord(setting?.manifest) ? (setting?.manifest as ChromeExtensionManifest) : null;
+  const manifest = diskManifest || prefManifest || {};
+  const rawName = stringValue(manifest.name) || extensionId;
+  const name = extensionPath ? await resolveManifestText(rawName, extensionPath, manifest) : rawName;
+  const rawDescription = stringValue(manifest.description);
+  const description = rawDescription && extensionPath ? await resolveManifestText(rawDescription, extensionPath, manifest) : rawDescription;
+  const version = stringValue(manifest.version) || versionFromExtensionPath(extensionPath) || "未知";
+  const updateUrl = stringValue(manifest.update_url) || stringValue(prefManifest?.update_url);
+  const fromWebStore = Boolean(
+    setting?.from_webstore === true || (updateUrl && updateUrl.includes("clients2.google.com/service/update2/crx"))
+  );
+  const installType = detectInstallType(profilePath, extensionPath, setting, fromWebStore);
+  const dataPaths = await collectExtensionDataPaths(profilePath, extensionId);
+
+  if (!extensionPath && !prefManifest) {
+    return null;
+  }
+
+  return {
+    id: extensionId,
+    name,
+    version,
+    description: description || null,
+    enabled: isExtensionEnabled(setting),
+    fromWebStore,
+    installType,
+    storeUrl: fromWebStore ? chromeWebStoreUrl(extensionId) : null,
+    path: extensionPath,
+    hasLocalData: dataPaths.length > 0,
+    dataPaths,
+    canCopyLocally: Boolean(extensionPath && installType !== "component")
+  };
+}
+
+async function readChromePreferences(profilePath: string): Promise<ChromePreferences> {
+  return (await readJsonFile<ChromePreferences>(path.join(profilePath, "Preferences"))) || {};
+}
+
+async function readChromeSecurePreferences(profilePath: string): Promise<ChromePreferences> {
+  return (await readJsonFile<ChromePreferences>(path.join(profilePath, "Secure Preferences"))) || {};
+}
+
+async function readExtensionDirectoryIds(profilePath: string): Promise<string[]> {
+  const extensionsPath = path.join(profilePath, "Extensions");
+  const entries = await fs.readdir(extensionsPath, { withFileTypes: true }).catch(() => []);
+  return entries.filter((entry) => entry.isDirectory() && isLikelyExtensionId(entry.name)).map((entry) => entry.name);
+}
+
+async function findExtensionManifestDirectory(
+  profilePath: string,
+  extensionId: string,
+  setting?: ChromeExtensionSetting
+): Promise<string | null> {
+  const candidates: string[] = [];
+  const settingPath = stringValue(setting?.path);
+  if (settingPath) {
+    if (path.isAbsolute(settingPath)) {
+      candidates.push(settingPath);
+    } else {
+      candidates.push(path.join(profilePath, settingPath));
+      candidates.push(path.join(profilePath, "Extensions", extensionId, settingPath));
+    }
+  }
+
+  candidates.push(path.join(profilePath, "Extensions", extensionId));
+
+  for (const candidate of uniqueStrings(candidates)) {
+    const resolved = await resolveManifestDirectory(candidate);
+    if (resolved) {
+      return resolved;
+    }
+  }
+
+  return null;
+}
+
+async function resolveManifestDirectory(candidatePath: string): Promise<string | null> {
+  if (await exists(path.join(candidatePath, "manifest.json"))) {
+    return candidatePath;
+  }
+
+  const entries = await fs.readdir(candidatePath, { withFileTypes: true }).catch(() => []);
+  const versionDirs = entries
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort(compareVersionDirectoryNames)
+    .reverse();
+
+  for (const dirName of versionDirs) {
+    const versionPath = path.join(candidatePath, dirName);
+    if (await exists(path.join(versionPath, "manifest.json"))) {
+      return versionPath;
+    }
+  }
+
+  return null;
+}
+
+async function readManifest(extensionPath: string): Promise<ChromeExtensionManifest | null> {
+  const manifest = await readJsonFile<ChromeExtensionManifest>(path.join(extensionPath, "manifest.json"));
+  return isRecord(manifest) ? manifest : null;
+}
+
+async function resolveManifestText(value: string, extensionPath: string, manifest: ChromeExtensionManifest): Promise<string> {
+  const messageKey = parseManifestMessageKey(value);
+  if (!messageKey) {
+    return value;
+  }
+
+  const defaultLocale = stringValue(manifest.default_locale);
+  const locales = uniqueStrings([defaultLocale, "zh_CN", "zh", "en", "en_US"].filter(Boolean) as string[]);
+  for (const locale of locales) {
+    const message = await readLocaleMessage(extensionPath, locale, messageKey);
+    if (message) {
+      return message;
+    }
+  }
+
+  return value;
+}
+
+function parseManifestMessageKey(value: string): string | null {
+  const match = value.match(/^__MSG_([A-Za-z0-9_@]+)__$/);
+  return match ? match[1] : null;
+}
+
+async function readLocaleMessage(extensionPath: string, locale: string, messageKey: string): Promise<string | null> {
+  const messages = await readJsonFile<Record<string, { message?: unknown }>>(
+    path.join(extensionPath, "_locales", locale, "messages.json")
+  );
+  if (!messages || typeof messages !== "object") {
+    return null;
+  }
+
+  const directMessage = stringValue(messages[messageKey]?.message);
+  if (directMessage) {
+    return directMessage;
+  }
+
+  const lowerKey = messageKey.toLowerCase();
+  const matchingKey = Object.keys(messages).find((key) => key.toLowerCase() === lowerKey);
+  return matchingKey ? stringValue(messages[matchingKey]?.message) : null;
+}
+
+function detectInstallType(
+  profilePath: string,
+  extensionPath: string | null,
+  setting: ChromeExtensionSetting | undefined,
+  fromWebStore: boolean
+): ProfileExtensionInstallType {
+  const location = numberValue(setting?.location);
+  // Chrome stores built-in services as extensions, but they are not user-manageable in chrome://extensions.
+  if (location === 5 || location === 10) {
+    return "component";
+  }
+
+  if (fromWebStore) {
+    return "web_store";
+  }
+
+  if (!extensionPath) {
+    return "unknown";
+  }
+
+  const relative = path.relative(path.join(profilePath, "Extensions"), extensionPath);
+  if (relative && !relative.startsWith("..") && !path.isAbsolute(relative)) {
+    return "profile";
+  }
+
+  return "local";
+}
+
+function isExtensionEnabled(setting: ChromeExtensionSetting | undefined): boolean {
+  if (!setting) {
+    return false;
+  }
+
+  const state = numberValue(setting.state);
+  if (state !== null) {
+    return state === 1;
+  }
+
+  return !hasDisableReason(setting.disable_reasons) && !hasDisableReason(setting.disable_reason);
+}
+
+function hasDisableReason(value: unknown): boolean {
+  if (Array.isArray(value)) {
+    return value.some(hasDisableReason);
+  }
+
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+
+  if (typeof value === "string") {
+    const normalized = value.trim();
+    return Boolean(normalized && normalized !== "0");
+  }
+
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  return false;
+}
+
+async function collectExtensionDataPaths(profilePath: string, extensionId: string): Promise<ExtensionDataPath[]> {
+  const specs = extensionDataRelativePaths(extensionId).map((relativePath) => ({
+    label: extensionDataLabel(relativePath),
+    relativePath,
+    path: path.join(profilePath, relativePath)
+  }));
+  const existing = await Promise.all(specs.map(async (spec) => ((await exists(spec.path)) ? spec : null)));
+
+  return existing.filter((spec): spec is ExtensionDataPath => Boolean(spec));
+}
+
+function extensionDataRelativePaths(extensionId: string): string[] {
+  return [
+    path.join("Local Extension Settings", extensionId),
+    path.join("Sync Extension Settings", extensionId),
+    path.join("Managed Extension Settings", extensionId),
+    path.join("IndexedDB", `chrome-extension_${extensionId}_0.indexeddb.leveldb`),
+    path.join("File System", `chrome-extension_${extensionId}`),
+    path.join("databases", `chrome-extension_${extensionId}_0`)
+  ];
+}
+
+function extensionDeleteRelativePaths(extensionId: string): string[] {
+  return uniqueStrings([
+    path.join("Extensions", extensionId),
+    path.join("Migrated Extensions", extensionId),
+    ...extensionDataRelativePaths(extensionId)
+  ]);
+}
+
+function extensionDataLabel(relativePath: string): string {
+  return relativePath.split(path.sep)[0] || relativePath;
+}
+
+async function copyExtensionDataPath(
+  sourceProfilePath: string,
+  targetProfilePath: string,
+  relativePath: string
+): Promise<boolean> {
+  const safeRelativePath = normalizeSafeRelativePath(relativePath);
+  const sourcePath = path.join(sourceProfilePath, safeRelativePath);
+  if (!(await exists(sourcePath))) {
+    return false;
+  }
+
+  const targetPath = path.join(targetProfilePath, safeRelativePath);
+  await fs.rm(targetPath, { recursive: true, force: true });
+  await copyPath(sourcePath, targetPath);
+  return true;
+}
+
+async function removeExtensionReferencesFromProfilePreferences(profilePath: string, extensionId: string): Promise<void> {
+  await Promise.all(
+    ["Preferences", "Secure Preferences"].map(async (fileName) => {
+      const filePath = path.join(profilePath, fileName);
+      const preferences = await readJsonFile<Record<string, unknown>>(filePath);
+      if (!preferences) {
+        return;
+      }
+
+      let changed = false;
+      if (isRecord(preferences.extensions)) {
+        changed = removeExtensionReferences(preferences.extensions, extensionId) || changed;
+      }
+      if (isRecord(preferences.protection)) {
+        changed = removeExtensionReferences(preferences.protection, extensionId) || changed;
+      }
+
+      if (changed) {
+        await writeJsonFileAtomic(filePath, preferences);
+      }
+    })
+  );
+}
+
+function removeExtensionReferences(value: unknown, extensionId: string): boolean {
+  if (Array.isArray(value)) {
+    let changed = false;
+    for (let index = value.length - 1; index >= 0; index -= 1) {
+      const item = value[index];
+      if (item === extensionId || item === `chrome-extension://${extensionId}`) {
+        value.splice(index, 1);
+        changed = true;
+        continue;
+      }
+      changed = removeExtensionReferences(item, extensionId) || changed;
+    }
+    return changed;
+  }
+
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  let changed = false;
+  for (const [key, item] of Object.entries(value)) {
+    if (key === extensionId) {
+      delete value[key];
+      changed = true;
+      continue;
+    }
+    changed = removeExtensionReferences(item, extensionId) || changed;
+  }
+
+  return changed;
+}
+
+async function getMigratedExtensionLaunchArgs(profile: StoredProfile): Promise<string[]> {
+  const extensionPaths = uniqueStrings((profile.migratedExtensions || []).map((extension) => extension.path));
+  const existingPaths: string[] = [];
+  for (const extensionPath of extensionPaths) {
+    if (await exists(path.join(extensionPath, "manifest.json"))) {
+      existingPaths.push(extensionPath);
+    }
+  }
+
+  return existingPaths.length ? [`--load-extension=${existingPaths.join(",")}`] : [];
+}
+
+function summarizeExtensionMigrationBackup(metadata: ExtensionMigrationBackupMetadata): ExtensionMigrationBackupSummary {
+  return {
+    id: metadata.id,
+    createdAt: metadata.createdAt,
+    path: metadata.path,
+    targetProfileId: metadata.targetProfileId,
+    targetProfileName: metadata.targetProfileName,
+    targetProfilePath: metadata.targetProfilePath,
+    itemCount: metadata.itemCount
+  };
+}
+
+function chromeWebStoreUrl(extensionId: string): string {
+  return `https://chromewebstore.google.com/detail/${extensionId}`;
+}
+
+function makeStoredMigratedExtensionId(extensionId: string): string {
+  return `migrated:${extensionId}`;
+}
+
+function makePathSegment(value: string): string {
+  return (
+    value
+      .trim()
+      .replace(/[^a-zA-Z0-9._-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 80) || "item"
+  );
+}
+
+function versionFromExtensionPath(extensionPath: string | null): string | null {
+  if (!extensionPath) {
+    return null;
+  }
+
+  return path.basename(extensionPath).replace(/_\d+$/, "") || null;
+}
+
+function compareVersionDirectoryNames(a: string, b: string): number {
+  const aVersion = a.replace(/_\d+$/, "");
+  const bVersion = b.replace(/_\d+$/, "");
+  const aParts = aVersion.split(".").map((part) => Number(part));
+  const bParts = bVersion.split(".").map((part) => Number(part));
+  const maxLength = Math.max(aParts.length, bParts.length);
+
+  for (let index = 0; index < maxLength; index += 1) {
+    const aPart = Number.isFinite(aParts[index]) ? aParts[index] : 0;
+    const bPart = Number.isFinite(bParts[index]) ? bParts[index] : 0;
+    if (aPart !== bPart) {
+      return aPart - bPart;
+    }
+  }
+
+  return a.localeCompare(b);
+}
+
+function isLikelyExtensionId(value: string): boolean {
+  return /^[a-p]{32}$/.test(value);
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function numberValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+async function readJsonFile<T>(filePath: string): Promise<T | null> {
+  try {
+    return JSON.parse(await fs.readFile(filePath, "utf8")) as T;
+  } catch {
+    return null;
+  }
+}
+
+async function writeJsonFileAtomic(filePath: string, value: unknown): Promise<void> {
+  const tmpPath = `${filePath}.tmp-${Date.now()}`;
+  await fs.writeFile(tmpPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+  await fs.rename(tmpPath, filePath);
+}
+
+async function copyPath(sourcePath: string, targetPath: string): Promise<void> {
+  await fs.mkdir(path.dirname(targetPath), { recursive: true });
+  await fs.cp(sourcePath, targetPath, { recursive: true, force: true });
+}
+
+function normalizeSafeRelativePath(relativePath: string): string {
+  const normalized = path.normalize(relativePath);
+  if (
+    !normalized ||
+    normalized === "." ||
+    path.isAbsolute(normalized) ||
+    normalized === ".." ||
+    normalized.startsWith(`..${path.sep}`)
+  ) {
+    throw new ProfileManagerError("备份路径不安全，已停止操作。", "UNSAFE_PATH");
+  }
+
+  return normalized;
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.filter((value) => typeof value === "string" && value.length > 0))];
 }
 
 function normalizeNativeProfileMetadata(input: Record<string, unknown>): Record<string, NativeProfileMetadata> {
@@ -710,7 +1875,8 @@ function normalizeNativeProfileMetadata(input: Record<string, unknown>): Record<
       return [
         dirName,
         {
-          lastLaunchedAt: typeof metadata.lastLaunchedAt === "string" ? metadata.lastLaunchedAt : null
+          lastLaunchedAt: typeof metadata.lastLaunchedAt === "string" ? metadata.lastLaunchedAt : null,
+          name: typeof metadata.name === "string" && metadata.name.trim() ? metadata.name.trim() : null
         }
       ];
     })
@@ -963,7 +2129,7 @@ function normalizeCdpPortInput(portInput?: number | null): number | null {
 
   const port = Number(portInput);
   if (!isValidCdpPort(port)) {
-    throw new ProfileManagerError("CDP port must be an integer between 1024 and 65535.", "INVALID_CDP_PORT");
+    throw new ProfileManagerError("CDP 端口必须是 1024-65535 之间的整数。", "INVALID_CDP_PORT");
   }
 
   return port;
@@ -989,7 +2155,7 @@ async function findAvailableCdpPort(startPort: number): Promise<number> {
     }
   }
 
-  throw new ProfileManagerError("No available CDP port found.", "NO_CDP_PORT_AVAILABLE");
+  throw new ProfileManagerError("没有找到可用的 CDP 端口。", "NO_CDP_PORT_AVAILABLE");
 }
 
 function isPortAvailable(port: number): Promise<boolean> {
@@ -1065,9 +2231,9 @@ async function waitForCdp(port: number, timeoutMs: number): Promise<void> {
     }
   }
 
-  const detail = lastError instanceof Error && lastError.message ? ` ${lastError.message}` : "";
+  const detail = lastError instanceof Error && lastError.message ? `最后一次错误：${lastError.message}` : "";
   throw new ProfileManagerError(
-    `Chrome started, but CDP did not respond on 127.0.0.1:${port}.${detail}`,
+    `Chrome 已启动，但 CDP 没有在 127.0.0.1:${port} 响应。${detail}`,
     "CDP_NOT_READY"
   );
 }

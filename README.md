@@ -1,6 +1,6 @@
-# Chrome Profile Manager
+# ProfilePilot
 
-A small Electron desktop app for managing Chrome profiles on this machine.
+ProfilePilot is a small Electron desktop app for managing Chrome profiles and extensions on this machine.
 
 The app treats Chrome's own local profiles as first-class profiles:
 
@@ -37,6 +37,12 @@ Source files live in `src/`:
 ## Data Directory
 
 On macOS, managed profile data is stored at:
+
+```text
+~/Library/Application Support/ProfilePilot
+```
+
+Existing local installs may continue reading the legacy data directory if it already exists:
 
 ```text
 ~/Library/Application Support/Codex Chrome Profile Manager

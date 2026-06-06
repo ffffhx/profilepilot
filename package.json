@@ -1,7 +1,7 @@
 {
-  "name": "chrome-profile-manager",
+  "name": "profilepilot",
   "version": "0.1.0",
-  "description": "A local Chrome profile manager that launches isolated Chrome user-data directories.",
+  "description": "A local desktop control desk for managing Chrome profiles and extensions.",
   "main": "dist/main/main.js",
   "scripts": {
     "build": "tsc",

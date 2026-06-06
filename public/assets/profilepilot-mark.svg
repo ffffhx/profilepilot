@@ -1,0 +1,15 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="ProfilePilot">
+  <rect x="18" y="18" width="220" height="220" rx="52" fill="#0F5F48"/>
+  <path d="M62 88C62 70.3269 76.3269 56 94 56H178C195.673 56 210 70.3269 210 88V166C210 183.673 195.673 198 178 198H94C76.3269 198 62 183.673 62 166V88Z" fill="#F8FCFB"/>
+  <path d="M62 91C62 71.67 77.67 56 97 56H175C194.33 56 210 71.67 210 91V104H62V91Z" fill="#DFF3EC"/>
+  <circle cx="86" cy="80" r="7" fill="#13795B"/>
+  <circle cx="108" cy="80" r="7" fill="#38A3A5"/>
+  <circle cx="130" cy="80" r="7" fill="#276EF1"/>
+  <path d="M91 146C91 121.699 110.699 102 135 102C159.301 102 179 121.699 179 146V160C179 165.523 174.523 170 169 170H101C95.4772 170 91 165.523 91 160V146Z" fill="#13795B"/>
+  <circle cx="135" cy="126" r="18" fill="#F8FCFB"/>
+  <path d="M46 118C46 108.059 54.0589 100 64 100H82V136H64C54.0589 136 46 127.941 46 118Z" fill="#38A3A5"/>
+  <path d="M174 118H192C201.941 118 210 126.059 210 136C210 145.941 201.941 154 192 154H174V118Z" fill="#276EF1"/>
+  <path d="M67 136C83.4771 136 93.6364 136 108 136" stroke="#38A3A5" stroke-width="12" stroke-linecap="round"/>
+  <path d="M162 136C176.364 136 186.523 136 203 136" stroke="#276EF1" stroke-width="12" stroke-linecap="round"/>
+  <path d="M111 186H159" stroke="#DFF3EC" stroke-width="12" stroke-linecap="round"/>
+</svg>

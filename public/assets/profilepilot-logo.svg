@@ -1,0 +1,17 @@
+<svg width="760" height="180" viewBox="0 0 760 180" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="ProfilePilot">
+  <rect x="18" y="18" width="144" height="144" rx="34" fill="#0F5F48"/>
+  <path d="M47 65C47 53.402 56.402 44 68 44H121C132.598 44 142 53.402 142 65V115C142 126.598 132.598 136 121 136H68C56.402 136 47 126.598 47 115V65Z" fill="#F8FCFB"/>
+  <path d="M47 66C47 53.85 56.85 44 69 44H120C132.15 44 142 53.85 142 66V75H47V66Z" fill="#DFF3EC"/>
+  <circle cx="63" cy="60" r="4.8" fill="#13795B"/>
+  <circle cx="78" cy="60" r="4.8" fill="#38A3A5"/>
+  <circle cx="93" cy="60" r="4.8" fill="#276EF1"/>
+  <path d="M64 103C64 85.327 78.327 71 96 71C113.673 71 128 85.327 128 103V111C128 116.523 123.523 121 118 121H74C68.477 121 64 116.523 64 111V103Z" fill="#13795B"/>
+  <circle cx="96" cy="88" r="13" fill="#F8FCFB"/>
+  <path d="M36 87C36 80.373 41.373 75 48 75H61V99H48C41.373 99 36 93.627 36 87Z" fill="#38A3A5"/>
+  <path d="M126 87H139C145.627 87 151 92.373 151 99C151 105.627 145.627 111 139 111H126V87Z" fill="#276EF1"/>
+  <path d="M49 99H76" stroke="#38A3A5" stroke-width="8" stroke-linecap="round"/>
+  <path d="M116 99H143" stroke="#276EF1" stroke-width="8" stroke-linecap="round"/>
+  <path d="M79 130H113" stroke="#DFF3EC" stroke-width="8" stroke-linecap="round"/>
+  <text x="194" y="91" fill="#15191F" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="54" font-weight="800" letter-spacing="0">ProfilePilot</text>
+  <text x="198" y="129" fill="#616B78" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="20" font-weight="700" letter-spacing="0">Browser profile control desk</text>
+</svg>

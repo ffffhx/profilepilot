@@ -1,11 +1,21 @@
 import { app, BrowserWindow, ipcMain } from "electron";
 import path from "node:path";
 import { IPC_CHANNELS } from "../shared/ipc";
-import type { AppState, DeleteProfileResult } from "../shared/types";
+import type {
+  AppState,
+  DeleteProfileResult,
+  ExtensionDeleteResult,
+  ExtensionMigrationBackupSummary,
+  ExtensionMigrationRequest,
+  ExtensionMigrationRestoreResult,
+  ExtensionMigrationResult,
+  ExtensionScanResult
+} from "../shared/types";
 import { APP_TITLE, createProfileManager } from "./profile-manager";
 
 const profileManager = createProfileManager();
 let mainWindow: BrowserWindow | null = null;
+const APP_ICON_PATH = path.join(__dirname, "../../public/assets/profilepilot-icon-512.png");
 
 function createMainWindow(): void {
   const smokeTest = process.env.CPM_ELECTRON_SMOKE_TEST === "1";
@@ -17,6 +27,7 @@ function createMainWindow(): void {
     minHeight: 620,
     show: !smokeTest,
     title: APP_TITLE,
+    icon: APP_ICON_PATH,
     backgroundColor: "#f6f7f9",
     webPreferences: {
       preload: path.join(__dirname, "../preload.js"),
@@ -38,12 +49,27 @@ function createMainWindow(): void {
                   title: document.title,
                   h1: document.querySelector("h1")?.textContent || null,
                   hasBridge: Boolean(window.profileManager),
+                  hasRenameProfile: typeof window.profileManager?.renameProfile === "function",
                   hasFocusProfile: typeof window.profileManager?.focusProfile === "function",
                   hasCloseProfile: typeof window.profileManager?.closeProfile === "function",
                   hasLaunchProfileWithCdp: typeof window.profileManager?.launchProfileWithCdp === "function",
+                  hasScanProfileExtensions: typeof window.profileManager?.scanProfileExtensions === "function",
+                  hasMigrateExtensions: typeof window.profileManager?.migrateExtensions === "function",
+                  hasDeleteProfileExtension: typeof window.profileManager?.deleteProfileExtension === "function",
+                  hasRestoreExtensionMigrationBackup: typeof window.profileManager?.restoreExtensionMigrationBackup === "function",
                   buttonCount: document.querySelectorAll("button").length,
                   statusLabels: Array.from(document.querySelectorAll(".status-label")).map((item) => item.textContent),
                   statusValues: Array.from(document.querySelectorAll(".status-value")).map((item) => item.textContent),
+                  migrationTitle: document.querySelector("[data-extension-migration] h2")?.textContent || null,
+                  migrationSelectCount: document.querySelectorAll("[data-extension-migration] select").length,
+                  shellWidthRatio: (() => {
+                    const shell = document.querySelector(".shell");
+                    return shell ? Math.round((shell.clientWidth / window.innerWidth) * 100) / 100 : null;
+                  })(),
+                  profileTableHasHorizontalOverflow: (() => {
+                    const tableWrap = document.querySelector(".profiles-table-wrap");
+                    return tableWrap ? tableWrap.scrollWidth > tableWrap.clientWidth + 1 : null;
+                  })(),
                   sourcePills: Array.from(document.querySelectorAll(".source-pill")).map((item) => item.textContent),
                   cdpTooltips: Array.from(document.querySelectorAll(".action-tooltip")).map((item) => item.getAttribute("data-tooltip")),
                   detailTitleBeforeSelection: document.querySelector(".details h2")?.textContent || null,
@@ -51,6 +77,8 @@ function createMainWindow(): void {
                     Array.from(document.querySelectorAll(".detail-row")).find((row) => row.querySelector("span")?.textContent?.includes("进程"))?.querySelector("span")?.textContent || null,
                   detailListeningPortsBeforeSelection:
                     Array.from(document.querySelectorAll(".detail-row")).find((row) => row.querySelector("span")?.textContent === "本机监听端口")?.querySelector("strong")?.textContent || null,
+                  profilePrimaryActions: Array.from(document.querySelectorAll(".profiles-table tbody tr:first-child .profile-actions > .action-button")).map((item) => item.textContent),
+                  profileMenuLabels: [],
                   detailTitleAfterSecondRowClick: null,
                   detailSourceAfterSecondRowClick: null,
                   detailProcessLabelAfterSecondRowClick: null,
@@ -64,6 +92,8 @@ function createMainWindow(): void {
                   defaultProfileLastLaunchedAt: null,
                   defaultProfilePids: [],
                   defaultProfileListeningPorts: [],
+                  firstProfileExtensionCount: null,
+                  backupCount: null,
                   crud: null
                 };
 
@@ -76,6 +106,18 @@ function createMainWindow(): void {
                 smokeResult.defaultProfileLastLaunchedAt = defaultProfile?.lastLaunchedAt ?? null;
                 smokeResult.defaultProfilePids = defaultProfile?.pids ?? [];
                 smokeResult.defaultProfileListeningPorts = defaultProfile?.listeningPorts ?? [];
+                smokeResult.backupCount = (await window.profileManager.listExtensionMigrationBackups()).length;
+                const firstProfileForScan = visibleState.profiles[0];
+                if (firstProfileForScan) {
+                  const scan = await window.profileManager.scanProfileExtensions(firstProfileForScan.id);
+                  smokeResult.firstProfileExtensionCount = scan.extensions.length;
+                }
+                const firstMenuButton = document.querySelector(".profiles-table tbody tr:first-child .menu-button");
+                if (firstMenuButton) {
+                  firstMenuButton.click();
+                  await new Promise((done) => window.setTimeout(done, 0));
+                  smokeResult.profileMenuLabels = Array.from(document.querySelectorAll(".action-menu button")).map((item) => item.textContent);
+                }
 
                 const secondRow = document.querySelectorAll("[data-profile-row]")[1];
                 if (secondRow) {
@@ -145,6 +187,11 @@ function registerIpcHandlers(): void {
     return profileManager.getState();
   });
 
+  ipcMain.handle(IPC_CHANNELS.renameProfile, async (_event, id: string, name: string): Promise<AppState> => {
+    await profileManager.renameProfile(id, name);
+    return profileManager.getState();
+  });
+
   ipcMain.handle(IPC_CHANNELS.launchProfile, async (_event, id: string): Promise<AppState> => {
     await profileManager.launchProfile(id);
     return profileManager.getState();
@@ -173,10 +220,44 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.deleteProfile, async (_event, id: string): Promise<DeleteProfileResult> => {
     return profileManager.deleteProfile(id);
   });
+
+  ipcMain.handle(IPC_CHANNELS.scanProfileExtensions, async (_event, id: string): Promise<ExtensionScanResult> => {
+    return profileManager.scanProfileExtensions(id);
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.migrateExtensions,
+    async (_event, request: ExtensionMigrationRequest): Promise<ExtensionMigrationResult> => {
+      return profileManager.migrateExtensions(request);
+    }
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.deleteProfileExtension,
+    async (_event, profileId: string, extensionId: string): Promise<ExtensionDeleteResult> => {
+      return profileManager.deleteProfileExtension(profileId, extensionId);
+    }
+  );
+
+  ipcMain.handle(IPC_CHANNELS.listExtensionMigrationBackups, async (): Promise<ExtensionMigrationBackupSummary[]> => {
+    return profileManager.listExtensionMigrationBackups();
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.restoreExtensionMigrationBackup,
+    async (_event, backupId: string): Promise<ExtensionMigrationRestoreResult> => {
+      return profileManager.restoreExtensionMigrationBackup(backupId);
+    }
+  );
 }
 
 app.name = APP_TITLE;
+app.setName(APP_TITLE);
 app.whenReady().then(() => {
+  if (process.platform === "darwin") {
+    app.dock?.setIcon(APP_ICON_PATH);
+  }
+
   registerIpcHandlers();
   createMainWindow();
 

@@ -5,6 +5,18 @@ interface StoredProfile {
   createdAt: string;
   lastLaunchedAt: string | null;
   lastCdpPort?: number | null;
+  migratedExtensions?: StoredMigratedExtension[];
+}
+
+interface StoredMigratedExtension {
+  id: string;
+  sourceProfileId: string;
+  sourceExtensionId: string;
+  name: string;
+  version: string;
+  path: string;
+  migratedAt: string;
+  includeData: boolean;
 }
 
 interface PublicProfile {
@@ -54,15 +66,118 @@ interface DeleteProfileResult {
   state: AppState;
 }
 
+interface ExtensionDataPath {
+  label: string;
+  relativePath: string;
+  path: string;
+}
+
+type ProfileExtensionInstallType = "web_store" | "local" | "profile" | "component" | "unknown";
+
+interface ProfileExtensionInfo {
+  id: string;
+  name: string;
+  version: string;
+  description: string | null;
+  enabled: boolean;
+  fromWebStore: boolean;
+  installType: ProfileExtensionInstallType;
+  storeUrl: string | null;
+  path: string | null;
+  hasLocalData: boolean;
+  dataPaths: ExtensionDataPath[];
+  canCopyLocally: boolean;
+}
+
+interface ExtensionScanResult {
+  profileId: string;
+  profileName: string;
+  profilePath: string;
+  extensions: ProfileExtensionInfo[];
+}
+
+interface ExtensionMigrationRequest {
+  sourceProfileId: string;
+  targetProfileId: string;
+  extensionIds: string[];
+  includeData: boolean;
+  openInstallPages: boolean;
+}
+
+interface ExtensionMigrationBackupSummary {
+  id: string;
+  createdAt: string;
+  path: string;
+  targetProfileId: string;
+  targetProfileName: string;
+  targetProfilePath: string;
+  itemCount: number;
+}
+
+interface ExtensionMigrationCopiedExtension {
+  id: string;
+  name: string;
+  version: string;
+  path: string;
+  fromWebStore: boolean;
+}
+
+interface ExtensionMigrationDataCopy {
+  id: string;
+  name: string;
+  relativePath: string;
+}
+
+interface ExtensionMigrationSkippedExtension {
+  id: string;
+  name: string;
+  reason: string;
+}
+
+interface ExtensionMigrationResult {
+  sourceProfileId: string;
+  targetProfileId: string;
+  selectedCount: number;
+  copiedExtensions: ExtensionMigrationCopiedExtension[];
+  dataCopies: ExtensionMigrationDataCopy[];
+  webStoreInstallUrls: string[];
+  skippedExtensions: ExtensionMigrationSkippedExtension[];
+  backup: ExtensionMigrationBackupSummary;
+  openedInstallPages: boolean;
+  state: AppState;
+}
+
+interface ExtensionDeleteResult {
+  profileId: string;
+  profileName: string;
+  extensionId: string;
+  extensionName: string;
+  deletedPaths: string[];
+  backup: ExtensionMigrationBackupSummary;
+  scan: ExtensionScanResult;
+  state: AppState;
+}
+
+interface ExtensionMigrationRestoreResult {
+  backup: ExtensionMigrationBackupSummary;
+  state: AppState;
+}
+
 interface ProfileManagerApi {
   getState(): Promise<AppState>;
   createProfile(name: string): Promise<AppState>;
+  renameProfile(id: string, name: string): Promise<AppState>;
   launchProfile(id: string): Promise<AppState>;
   launchProfileWithCdp(id: string, port?: number | null): Promise<AppState>;
   focusProfile(id: string): Promise<AppState>;
   closeProfile(id: string): Promise<AppState>;
   openProfileFolder(id: string): Promise<AppState>;
   deleteProfile(id: string): Promise<DeleteProfileResult>;
+  scanProfileExtensions(profileId: string): Promise<ExtensionScanResult>;
+  migrateExtensions(request: ExtensionMigrationRequest): Promise<ExtensionMigrationResult>;
+  deleteProfileExtension(profileId: string, extensionId: string): Promise<ExtensionDeleteResult>;
+  listExtensionMigrationBackups(): Promise<ExtensionMigrationBackupSummary[]>;
+  restoreExtensionMigrationBackup(backupId: string): Promise<ExtensionMigrationRestoreResult>;
 }
 
 interface Window {
@@ -72,7 +187,9 @@ interface Window {
 type ConfirmAction = "close" | "delete";
 type ModalState =
   | { kind: "new" }
+  | { kind: "rename"; profileId: string }
   | { kind: "cdp"; profileId: string }
+  | { kind: "extension-migration" }
   | {
       kind: "confirm";
       action: ConfirmAction;
@@ -96,6 +213,16 @@ let busy = false;
 let toast: string | null = null;
 let toastKind: ToastKind = "normal";
 let toastTimer: number | undefined;
+let migrationSourceId: string | null = null;
+let migrationTargetId: string | null = null;
+let extensionScan: ExtensionScanResult | null = null;
+let selectedExtensionIds = new Set<string>();
+let includeExtensionData = false;
+let openInstallPages = true;
+let extensionMigrationResult: ExtensionMigrationResult | null = null;
+let extensionMigrationBackups: ExtensionMigrationBackupSummary[] = [];
+let openProfileMenuId: string | null = null;
+let migrationSourceMenuOpen = false;
 
 const dateFormatter = new Intl.DateTimeFormat("zh-CN", {
   month: "2-digit",
@@ -113,14 +240,46 @@ function profileApi(): ProfileManagerApi {
 }
 
 async function loadState(): Promise<void> {
-  state = await profileApi().getState();
+  const [nextState, backups] = await Promise.all([
+    profileApi().getState(),
+    profileApi().listExtensionMigrationBackups()
+  ]);
+  state = nextState;
+  extensionMigrationBackups = backups;
   const profiles = state.profiles || [];
 
   if (!profiles.some((profile) => profile.id === selectedId)) {
     selectedId = state.currentProfile?.id || profiles[0]?.id || null;
   }
+  if (openProfileMenuId && !profiles.some((profile) => profile.id === openProfileMenuId)) {
+    openProfileMenuId = null;
+  }
+
+  normalizeMigrationProfileSelection(profiles);
 
   render();
+}
+
+function normalizeMigrationProfileSelection(profiles: PublicProfile[]): void {
+  if (!profiles.length) {
+    migrationSourceId = null;
+    migrationTargetId = null;
+    extensionScan = null;
+    selectedExtensionIds.clear();
+    migrationSourceMenuOpen = false;
+    return;
+  }
+
+  if (!profiles.some((profile) => profile.id === migrationSourceId)) {
+    migrationSourceId = selectedId || profiles[0].id;
+    extensionScan = null;
+    selectedExtensionIds.clear();
+    migrationSourceMenuOpen = false;
+  }
+
+  if (!profiles.some((profile) => profile.id === migrationTargetId) || migrationTargetId === migrationSourceId) {
+    migrationTargetId = profiles.find((profile) => profile.id !== migrationSourceId)?.id || null;
+  }
 }
 
 function setToast(message: string, kind: ToastKind = "normal"): void {
@@ -149,11 +308,20 @@ async function withBusy(work: () => Promise<unknown>, successMessage?: string): 
       setToast(successMessage);
     }
   } catch (error) {
-    setToast(error instanceof Error ? error.message : String(error), "error");
+    setToast(formatErrorMessage(error), "error");
   } finally {
     busy = false;
-    await loadState().catch((error: unknown) => setToast(error instanceof Error ? error.message : String(error), "error"));
+    await loadState().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
   }
+}
+
+function formatErrorMessage(error: unknown): string {
+  const rawMessage = error instanceof Error ? error.message : String(error);
+  const ipcPrefix = /^Error invoking remote method '[^']+':\s*/;
+  const classPrefix = /^(ProfileManagerError|Error):\s*/;
+  const cleaned = rawMessage.replace(ipcPrefix, "").replace(classPrefix, "").trim();
+
+  return cleaned || "操作失败，请稍后重试。";
 }
 
 function render(): void {
@@ -174,9 +342,12 @@ function render(): void {
   appRoot.innerHTML = `
     <div class="shell">
       <header class="app-header">
-        <div>
-          <p class="eyebrow">Desktop Chrome Tool</p>
-          <h1>Chrome Profile Manager</h1>
+        <div class="brand-lockup">
+          <img class="brand-mark" src="./assets/profilepilot-mark.svg" alt="" />
+          <div class="brand-copy">
+            <p class="eyebrow">Browser Profile Desk</p>
+            <h1>ProfilePilot</h1>
+          </div>
         </div>
         <div class="header-actions">
           <button type="button" data-action="refresh" ${busy ? "disabled" : ""}>刷新</button>
@@ -202,6 +373,8 @@ function render(): void {
         </div>
       </section>
 
+      ${renderExtensionMigrationPanel(profiles)}
+
       <main class="layout">
         <section>
           <div class="section-head">
@@ -214,7 +387,9 @@ function render(): void {
       </main>
     </div>
     ${modal?.kind === "new" ? renderNewModal() : ""}
+    ${modal?.kind === "rename" ? renderRenameModal(modal.profileId) : ""}
     ${modal?.kind === "cdp" ? renderCdpModal(modal.profileId) : ""}
+    ${modal?.kind === "extension-migration" ? renderExtensionMigrationModal(profiles) : ""}
     ${modal?.kind === "confirm" ? renderConfirmModal(modal) : ""}
     ${toast ? `<div class="toast ${toastKind === "error" ? "error" : ""}" role="status">${escapeHtml(toast)}</div>` : ""}
   `;
@@ -243,11 +418,6 @@ function renderTable(profiles: PublicProfile[]): string {
 
 function renderProfileRow(profile: PublicProfile): string {
   const selected = profile.id === selectedId;
-  const launchDisabled = busy || profile.running;
-  const cdpLaunchDisabled = busy || profile.running || profile.source !== "isolated";
-  const focusDisabled = busy || !profile.running;
-  const closeDisabled = busy || !profile.running;
-  const deleteDisabled = busy || profile.running || !profile.deletable;
   return `
     <tr class="${selected ? "selected" : ""}" data-action="select" data-id="${profile.id}" data-profile-row tabindex="0" aria-selected="${selected ? "true" : "false"}">
       <td>
@@ -270,18 +440,53 @@ function renderProfileRow(profile: PublicProfile): string {
       </td>
       <td class="date-cell">${formatDate(profile.lastLaunchedAt)}</td>
       <td>
-        <div class="row-actions">
-          <button type="button" class="action-button" data-action="launch" data-id="${profile.id}" title="${escapeHtml(launchButtonTitle(profile))}" ${launchDisabled ? "disabled" : ""}>启动</button>
-          <span class="action-tooltip" data-tooltip="${escapeHtml(cdpLaunchButtonTitle(profile))}">
-            <button type="button" class="action-button cdp" data-action="launch-cdp" data-id="${profile.id}" ${cdpLaunchDisabled ? "disabled" : ""}>CDP启动</button>
-          </span>
-          <button type="button" class="action-button accent" data-action="focus-profile" data-id="${profile.id}" title="${escapeHtml(focusButtonTitle(profile))}" ${focusDisabled ? "disabled" : ""}>显示</button>
-          <button type="button" class="action-button warn" data-action="close-profile" data-id="${profile.id}" title="${escapeHtml(closeButtonTitle(profile))}" ${closeDisabled ? "disabled" : ""}>关闭</button>
-          <button type="button" class="action-button" data-action="open-folder" data-id="${profile.id}" ${busy ? "disabled" : ""}>目录</button>
-          <button type="button" class="action-button danger" data-action="delete" data-id="${profile.id}" title="${escapeHtml(deleteButtonTitle(profile))}" ${deleteDisabled ? "disabled" : ""}>删除</button>
-        </div>
+        ${renderProfileActions(profile)}
       </td>
     </tr>
+  `;
+}
+
+function renderProfileActions(profile: PublicProfile): string {
+  const menuOpen = openProfileMenuId === profile.id;
+  const cdpLaunchDisabled = busy || profile.running || profile.source !== "isolated";
+  const deleteDisabled = busy || profile.running || !profile.deletable;
+
+  return `
+    <div class="profile-actions" data-profile-actions>
+      ${
+        profile.running
+          ? `
+            <span class="action-tooltip" data-tooltip="${escapeHtml(focusButtonTitle(profile))}">
+              <button type="button" class="action-button accent" data-action="focus-profile" data-id="${profile.id}" ${busy ? "disabled" : ""}>显示</button>
+            </span>
+            <span class="action-tooltip" data-tooltip="${escapeHtml(closeButtonTitle(profile))}">
+              <button type="button" class="action-button warn" data-action="close-profile" data-id="${profile.id}" ${busy ? "disabled" : ""}>关闭</button>
+            </span>
+          `
+          : `
+            <span class="action-tooltip" data-tooltip="${escapeHtml(launchButtonTitle(profile))}">
+              <button type="button" class="action-button accent" data-action="launch" data-id="${profile.id}" ${busy ? "disabled" : ""}>启动</button>
+            </span>
+          `
+      }
+      <button type="button" class="action-button menu-button" data-action="toggle-profile-menu" data-id="${profile.id}" aria-expanded="${menuOpen ? "true" : "false"}" ${busy ? "disabled" : ""}>更多</button>
+      ${
+        menuOpen
+          ? `
+            <div class="action-menu" role="menu">
+              <span class="action-tooltip" data-tooltip="${escapeHtml(cdpLaunchButtonTitle(profile))}">
+                <button type="button" data-action="launch-cdp" data-id="${profile.id}" ${cdpLaunchDisabled ? "disabled" : ""}>CDP启动</button>
+              </span>
+              <button type="button" data-action="open-folder" data-id="${profile.id}" ${busy ? "disabled" : ""}>打开目录</button>
+              <button type="button" data-action="rename-profile" data-id="${profile.id}" ${busy ? "disabled" : ""}>修改名称</button>
+              <span class="action-tooltip" data-tooltip="${escapeHtml(deleteButtonTitle(profile))}">
+                <button type="button" class="danger" data-action="delete" data-id="${profile.id}" ${deleteDisabled ? "disabled" : ""}>删除 Profile</button>
+              </span>
+            </div>
+          `
+          : ""
+      }
+    </div>
   `;
 }
 
@@ -290,6 +495,290 @@ function renderEmpty(): string {
     <div class="empty-state">
       <strong>还没有 Profile</strong>
       <button type="button" class="primary" data-action="new-profile">新建独立 Profile</button>
+    </div>
+  `;
+}
+
+function renderExtensionMigrationPanel(profiles: PublicProfile[]): string {
+  const sourceId = migrationSourceId || profiles[0]?.id || "";
+  const sourceProfile = profiles.find((profile) => profile.id === sourceId) || null;
+  const activeScan = extensionScan?.profileId === sourceId ? extensionScan : null;
+  const selectedCount = activeScan
+    ? activeScan.extensions.filter((extension) => selectedExtensionIds.has(extension.id)).length
+    : 0;
+  const allSelected = Boolean(
+    activeScan?.extensions.length && activeScan.extensions.every((extension) => selectedExtensionIds.has(extension.id))
+  );
+  const hasAvailableTarget = profiles.some((profile) => profile.id !== sourceId);
+  const canMigrate = Boolean(sourceProfile && activeScan && selectedCount && hasAvailableTarget);
+
+  return `
+    <section class="migration-panel" data-extension-migration>
+      <div class="section-head">
+        <div>
+          <h2>插件迁移</h2>
+          <span class="section-subtitle">Extensions</span>
+        </div>
+      </div>
+
+      <div class="migration-source-bar">
+        <div class="migration-source-field">
+          <span id="migration-source-label">源 Profile</span>
+          ${renderMigrationSourcePicker(profiles, sourceId, sourceProfile)}
+        </div>
+        <button type="button" data-action="scan-extensions" ${busy || !sourceProfile ? "disabled" : ""}>扫描源 Profile 插件</button>
+        ${sourceProfile ? renderMigrationSourceSummary(sourceProfile, activeScan) : ""}
+      </div>
+
+      ${activeScan ? renderExtensionScan(activeScan, selectedCount, allSelected, canMigrate) : renderExtensionScanEmpty()}
+      ${extensionMigrationResult ? renderExtensionMigrationResult(extensionMigrationResult) : ""}
+      ${renderExtensionBackups()}
+    </section>
+  `;
+}
+
+function renderMigrationSourcePicker(
+  profiles: PublicProfile[],
+  selectedProfileId: string,
+  selectedProfile: PublicProfile | null
+): string {
+  const expanded = migrationSourceMenuOpen && profiles.length > 0;
+
+  return `
+    <div class="profile-select ${expanded ? "open" : ""}" data-migration-source-select>
+      <button
+        type="button"
+        class="profile-select-trigger"
+        data-action="toggle-migration-source-menu"
+        aria-haspopup="listbox"
+        aria-expanded="${expanded ? "true" : "false"}"
+        aria-labelledby="migration-source-label"
+        ${busy || !profiles.length ? "disabled" : ""}
+      >
+        <span class="profile-select-trigger-copy">
+          <strong>${escapeHtml(selectedProfile?.name || "无可用 Profile")}</strong>
+          <span>${selectedProfile ? `${sourceLabel(selectedProfile)} · ${profileStatusLabel(selectedProfile)}` : "先创建 Profile"}</span>
+        </span>
+        <span class="profile-select-caret" aria-hidden="true"></span>
+      </button>
+      ${expanded ? renderMigrationSourceMenu(profiles, selectedProfileId) : ""}
+    </div>
+  `;
+}
+
+function renderMigrationSourceMenu(profiles: PublicProfile[], selectedProfileId: string): string {
+  return `
+    <div class="profile-select-menu" id="migration-source-menu" role="listbox" aria-labelledby="migration-source-label">
+      ${profiles.map((profile) => renderMigrationSourceOption(profile, selectedProfileId)).join("")}
+    </div>
+  `;
+}
+
+function renderMigrationSourceOption(profile: PublicProfile, selectedProfileId: string): string {
+  const selected = profile.id === selectedProfileId;
+
+  return `
+    <button
+      type="button"
+      class="profile-select-option ${selected ? "selected" : ""}"
+      data-action="select-migration-source"
+      data-id="${escapeHtml(profile.id)}"
+      role="option"
+      aria-selected="${selected ? "true" : "false"}"
+      ${busy ? "disabled" : ""}
+    >
+      <span class="profile-select-option-main">
+        <span class="status-dot ${profile.running ? "running" : profile.source === "native" ? "native" : ""}"></span>
+        <strong>${escapeHtml(profile.name)}</strong>
+        ${profile.isDefault ? '<span class="native-badge">Default</span>' : ""}
+      </span>
+      <span class="profile-select-option-meta">
+        ${sourceLabel(profile)} · ${profileStatusLabel(profile)} · ${formatDate(profile.lastLaunchedAt)}
+      </span>
+    </button>
+  `;
+}
+
+function renderMigrationSourceSummary(profile: PublicProfile, scan: ExtensionScanResult | null): string {
+  const extensionCount = scan ? `${scan.extensions.length} 个插件` : "未扫描";
+
+  return `
+    <div class="migration-source-summary">
+      <strong>${escapeHtml(profile.name)}</strong>
+      <span>${sourceLabel(profile)} · ${profileStatusLabel(profile)} · ${extensionCount}</span>
+    </div>
+  `;
+}
+
+function renderProfileOptions(profiles: PublicProfile[], selectedProfileId: string, excludedProfileId?: string): string {
+  const options = profiles
+    .filter((profile) => profile.id !== excludedProfileId)
+    .map(
+      (profile) =>
+        `<option value="${escapeHtml(profile.id)}" ${profile.id === selectedProfileId ? "selected" : ""}>${escapeHtml(profile.name)} · ${sourceLabel(profile)}</option>`
+    )
+    .join("");
+
+  return options || '<option value="">无可用 Profile</option>';
+}
+
+function renderExtensionScanEmpty(): string {
+  return `
+    <div class="extension-scan-empty">
+      <strong>未扫描</strong>
+      <span>选择源 Profile 后扫描插件。</span>
+    </div>
+  `;
+}
+
+function renderExtensionScan(
+  scan: ExtensionScanResult,
+  selectedCount: number,
+  allSelected: boolean,
+  canMigrate: boolean
+): string {
+  if (!scan.extensions.length) {
+    return `
+      <div class="extension-scan-empty">
+        <strong>${escapeHtml(scan.profileName)}</strong>
+        <span>没有扫描到可迁移插件。</span>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="extension-scan-head">
+      <div>
+        <strong>${escapeHtml(scan.profileName)}</strong>
+        <span>${scan.extensions.length} 个插件 · 已选 ${selectedCount}</span>
+      </div>
+      <div class="migration-actions">
+        <button type="button" data-action="select-all-extensions" ${busy ? "disabled" : ""}>${allSelected ? "取消全选" : "一键全选"}</button>
+        <button type="button" class="primary" data-action="migrate-extensions" ${busy || !canMigrate ? "disabled" : ""}>迁移所选插件</button>
+      </div>
+    </div>
+    <div class="extensions-table-wrap">
+      <table class="extensions-table">
+        <thead>
+          <tr>
+            <th>选择</th>
+            <th>插件</th>
+            <th>状态</th>
+            <th>来源</th>
+            <th>数据</th>
+            <th>迁移能力</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${scan.extensions.map(renderExtensionRow).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderExtensionRow(extension: ProfileExtensionInfo): string {
+  const selected = selectedExtensionIds.has(extension.id);
+  const dataLabels = extension.dataPaths.map((item) => item.label).join("、");
+
+  return `
+    <tr>
+      <td>
+        <input type="checkbox" data-extension-select data-extension-id="${escapeHtml(extension.id)}" ${selected ? "checked" : ""} ${busy ? "disabled" : ""} />
+      </td>
+      <td>
+        <strong class="extension-name">${escapeHtml(extension.name)}</strong>
+        <code class="extension-id">${escapeHtml(extension.id)}</code>
+      </td>
+      <td>
+        <span class="state-pill ${extension.enabled ? "running" : ""}">${extension.enabled ? "启用" : "停用"}</span>
+        <small class="extension-meta">${escapeHtml(extension.version)}</small>
+      </td>
+      <td>
+        <span class="source-pill ${extension.fromWebStore ? "native" : "isolated"}">${extensionInstallTypeLabel(extension)}</span>
+      </td>
+      <td>
+        <strong class="extension-data-state">${extension.hasLocalData ? "有数据" : "无数据"}</strong>
+        ${dataLabels ? `<small class="extension-meta">${escapeHtml(dataLabels)}</small>` : ""}
+      </td>
+      <td>
+        <strong class="extension-plan">${escapeHtml(extensionMigrationCapabilityLabel(extension))}</strong>
+      </td>
+      <td>
+        <button type="button" class="action-button danger" data-action="delete-extension" data-extension-id="${escapeHtml(extension.id)}" ${busy ? "disabled" : ""}>删除</button>
+      </td>
+    </tr>
+  `;
+}
+
+function renderExtensionMigrationResult(result: ExtensionMigrationResult): string {
+  const copiedWebStoreCount = result.copiedExtensions.filter((extension) => extension.fromWebStore).length;
+  const copiedLocalCount = result.copiedExtensions.length - copiedWebStoreCount;
+
+  return `
+    <div class="migration-result">
+      <div class="migration-result-grid">
+        <div>
+          <span>已选</span>
+          <strong>${result.selectedCount}</strong>
+        </div>
+        <div>
+          <span>商店静默</span>
+          <strong>${copiedWebStoreCount}</strong>
+        </div>
+        <div>
+          <span>本地挂载</span>
+          <strong>${copiedLocalCount}</strong>
+        </div>
+        <div>
+          <span>安装页兜底</span>
+          <strong>${result.webStoreInstallUrls.length}</strong>
+        </div>
+      </div>
+      <div class="migration-result-body">
+        <div>
+          <strong>备份</strong>
+          <code class="path-box compact">${escapeHtml(result.backup.path)}</code>
+        </div>
+        <button type="button" class="action-button warn" data-action="restore-extension-backup" data-backup-id="${escapeHtml(result.backup.id)}" ${busy ? "disabled" : ""}>恢复这个备份</button>
+      </div>
+      ${result.skippedExtensions.length ? renderSkippedExtensions(result.skippedExtensions) : ""}
+    </div>
+  `;
+}
+
+function renderSkippedExtensions(skippedExtensions: ExtensionMigrationSkippedExtension[]): string {
+  return `
+    <div class="skipped-list">
+      ${skippedExtensions
+        .map(
+          (extension) =>
+            `<span><strong>${escapeHtml(extension.name)}</strong> ${escapeHtml(extension.reason)}</span>`
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function renderExtensionBackups(): string {
+  const backups = extensionMigrationBackups.slice(0, 4);
+  if (!backups.length) {
+    return "";
+  }
+
+  return `
+    <div class="backup-strip">
+      <span class="backup-strip-title">最近备份</span>
+      ${backups
+        .map(
+          (backup) => `
+            <button type="button" class="backup-chip" data-action="restore-extension-backup" data-backup-id="${escapeHtml(backup.id)}" ${busy ? "disabled" : ""}>
+              ${escapeHtml(backup.targetProfileName)} · ${formatDate(backup.createdAt)}
+            </button>
+          `
+        )
+        .join("")}
     </div>
   `;
 }
@@ -378,6 +867,30 @@ function renderNewModal(): string {
   `;
 }
 
+function renderRenameModal(profileId: string): string {
+  const profile = state?.profiles.find((item) => item.id === profileId);
+  if (!profile) {
+    return "";
+  }
+
+  return `
+    <div class="modal-backdrop" data-action="close-modal">
+      <form class="modal" data-rename-form data-profile-id="${escapeHtml(profile.id)}">
+        <h2>修改 Profile 名称</h2>
+        <div class="field">
+          <label for="profile-rename">名称</label>
+          <input id="profile-rename" name="name" type="text" maxlength="80" autocomplete="off" required value="${escapeHtml(profile.name)}" />
+          <span class="field-note">只修改本工具里的显示名称，不改变 Profile 目录。</span>
+        </div>
+        <div class="modal-actions">
+          <button type="button" data-action="close-modal">取消</button>
+          <button type="submit" class="primary" ${busy ? "disabled" : ""}>保存</button>
+        </div>
+      </form>
+    </div>
+  `;
+}
+
 function renderCdpModal(profileId: string): string {
   const profile = state?.profiles.find((item) => item.id === profileId);
   if (!profile) {
@@ -398,6 +911,66 @@ function renderCdpModal(profileId: string): string {
         <div class="modal-actions">
           <button type="button" data-action="close-modal">取消</button>
           <button type="submit" class="solid" ${busy ? "disabled" : ""}>启动 CDP</button>
+        </div>
+      </form>
+    </div>
+  `;
+}
+
+function renderExtensionMigrationModal(profiles: PublicProfile[]): string {
+  const sourceId = migrationSourceId || profiles[0]?.id || "";
+  const activeScan = extensionScan?.profileId === sourceId ? extensionScan : null;
+  const sourceProfile = profiles.find((profile) => profile.id === sourceId) || null;
+  const targetId =
+    migrationTargetId && migrationTargetId !== sourceId
+      ? migrationTargetId
+      : profiles.find((profile) => profile.id !== sourceId)?.id || "";
+  const selectedExtensions = activeScan?.extensions.filter((extension) => selectedExtensionIds.has(extension.id)) || [];
+  const selectedWithData = selectedExtensions.filter((extension) => extension.hasLocalData).length;
+
+  if (!sourceProfile || !activeScan || !selectedExtensions.length) {
+    return "";
+  }
+
+  return `
+    <div class="modal-backdrop" data-action="close-modal">
+      <form class="modal migration-modal" data-extension-migration-form>
+        <span class="modal-kicker">插件迁移</span>
+        <h2>选择目标 Profile</h2>
+        <p class="modal-copy">从 ${escapeHtml(sourceProfile.name)} 迁移 ${selectedExtensions.length} 个已选插件。</p>
+        <div class="migration-modal-summary">
+          <div>
+            <span>源 Profile</span>
+            <strong>${escapeHtml(sourceProfile.name)}</strong>
+          </div>
+          <div>
+            <span>已选插件</span>
+            <strong>${selectedExtensions.length}</strong>
+          </div>
+          <div>
+            <span>含本地数据</span>
+            <strong>${selectedWithData}</strong>
+          </div>
+        </div>
+        <div class="field">
+          <label for="migration-target">目标 Profile</label>
+          <select id="migration-target" name="targetProfileId" data-migration-target ${busy ? "disabled" : ""}>
+            ${renderProfileOptions(profiles, targetId, sourceId)}
+          </select>
+        </div>
+        <div class="migration-modal-options">
+          <label class="check-control">
+            <input type="checkbox" name="includeData" data-include-extension-data ${includeExtensionData ? "checked" : ""} ${busy ? "disabled" : ""} />
+            <span>同时迁移插件数据</span>
+          </label>
+          <label class="check-control">
+            <input type="checkbox" name="openInstallPages" data-open-install-pages ${openInstallPages ? "checked" : ""} ${busy ? "disabled" : ""} />
+            <span>无法静默时打开安装页</span>
+          </label>
+        </div>
+        <div class="modal-actions">
+          <button type="button" data-action="close-modal">取消</button>
+          <button type="submit" class="primary" ${busy || !targetId ? "disabled" : ""}>开始迁移</button>
         </div>
       </form>
     </div>
@@ -474,6 +1047,42 @@ function sourceLabel(profile: PublicProfile): string {
 
 function sourceDetail(profile: PublicProfile): string {
   return profile.source === "native" ? "系统 Profile（由 Google Chrome 管理）" : "工具独立 Profile（由本工具创建）";
+}
+
+function extensionInstallTypeLabel(extension: ProfileExtensionInfo): string {
+  if (extension.fromWebStore) {
+    return "商店";
+  }
+
+  if (extension.installType === "local") {
+    return "本地";
+  }
+
+  if (extension.installType === "profile") {
+    return "Profile";
+  }
+
+  if (extension.installType === "component") {
+    return "组件";
+  }
+
+  return "未知";
+}
+
+function extensionMigrationCapabilityLabel(extension: ProfileExtensionInfo): string {
+  if (extension.fromWebStore && extension.canCopyLocally) {
+    return "可静默复制";
+  }
+
+  if (extension.canCopyLocally) {
+    return "可复制挂载";
+  }
+
+  if (extension.fromWebStore) {
+    return "可打开安装页";
+  }
+
+  return "不可自动迁移";
 }
 
 function processLabel(profile: PublicProfile): string {
@@ -591,13 +1200,42 @@ function escapeHtml(value: unknown): string {
 
 appRoot.addEventListener("click", (event) => {
   const target = event.target instanceof Element ? event.target : null;
+  const hadOpenProfileMenu = Boolean(openProfileMenuId);
+  const hadMigrationSourceMenu = migrationSourceMenuOpen;
+  if (openProfileMenuId && !target?.closest("[data-profile-actions]")) {
+    openProfileMenuId = null;
+  }
+  if (migrationSourceMenuOpen && !target?.closest("[data-migration-source-select]")) {
+    migrationSourceMenuOpen = false;
+  }
+
   const actionTarget = target?.closest<HTMLElement>("[data-action]");
   if (!actionTarget || !state) {
+    if ((hadOpenProfileMenu && !openProfileMenuId) || (hadMigrationSourceMenu && !migrationSourceMenuOpen)) {
+      render();
+    }
     return;
   }
 
   const action = actionTarget.dataset.action;
   const id = actionTarget.dataset.id || null;
+  if (action !== "toggle-profile-menu" && actionTarget.closest("[data-profile-actions]")) {
+    openProfileMenuId = null;
+  }
+
+  if (action === "toggle-migration-source-menu") {
+    migrationSourceMenuOpen = !migrationSourceMenuOpen;
+    openProfileMenuId = null;
+    render();
+    return;
+  }
+
+  if (action === "select-migration-source" && id) {
+    setMigrationSource(id);
+    migrationSourceMenuOpen = false;
+    render();
+    return;
+  }
 
   if (action === "new-profile") {
     modal = { kind: "new" };
@@ -634,8 +1272,144 @@ appRoot.addEventListener("click", (event) => {
     return;
   }
 
+  if (action === "scan-extensions") {
+    const sourceId = migrationSourceId;
+    if (!sourceId) {
+      setToast("先选择源 Profile", "error");
+      return;
+    }
+
+    void withBusy(async () => {
+      const scan = await profileApi().scanProfileExtensions(sourceId);
+      extensionScan = scan;
+      selectedExtensionIds = new Set(scan.extensions.map((extension) => extension.id));
+      extensionMigrationResult = null;
+    }, "已扫描插件");
+    return;
+  }
+
+  if (action === "select-all-extensions") {
+    const activeScan = extensionScan?.profileId === migrationSourceId ? extensionScan : null;
+    if (!activeScan) {
+      return;
+    }
+
+    const allSelected = activeScan.extensions.every((extension) => selectedExtensionIds.has(extension.id));
+    selectedExtensionIds = allSelected ? new Set() : new Set(activeScan.extensions.map((extension) => extension.id));
+    render();
+    return;
+  }
+
+  if (action === "migrate-extensions") {
+    const activeScan = extensionScan?.profileId === migrationSourceId ? extensionScan : null;
+    if (!migrationSourceId || !activeScan) {
+      setToast("先扫描源 Profile 的插件", "error");
+      return;
+    }
+
+    const selectedCount = activeScan.extensions.filter((extension) => selectedExtensionIds.has(extension.id)).length;
+    if (!selectedCount) {
+      setToast("先选择要迁移的插件", "error");
+      return;
+    }
+
+    const targetId =
+      migrationTargetId && migrationTargetId !== migrationSourceId
+        ? migrationTargetId
+        : state.profiles.find((profile) => profile.id !== migrationSourceId)?.id || null;
+    if (!targetId) {
+      setToast("没有可用的目标 Profile", "error");
+      return;
+    }
+
+    migrationTargetId = targetId;
+    modal = { kind: "extension-migration" };
+    render();
+    window.setTimeout(() => document.querySelector<HTMLSelectElement>("#migration-target")?.focus(), 0);
+    return;
+  }
+
+  if (action === "delete-extension") {
+    const profileId = extensionScan?.profileId || migrationSourceId;
+    const extensionId = actionTarget.dataset.extensionId;
+    const extension = extensionScan?.extensions.find((item) => item.id === extensionId);
+    if (!profileId || !extensionId || !extension) {
+      setToast("请先扫描并选择要删除的插件", "error");
+      return;
+    }
+
+    const profile = state.profiles.find((item) => item.id === profileId);
+    if (!profile) {
+      setToast("没有找到这个 Profile", "error");
+      return;
+    }
+    if (profile.running) {
+      setToast("删除插件前请先关闭这个 Profile，然后刷新列表。", "error");
+      return;
+    }
+    if (!window.confirm(`从 ${profile.name} 删除插件“${extension.name}”？删除前会自动创建备份。`)) {
+      return;
+    }
+
+    void withBusy(async () => {
+      const result = await profileApi().deleteProfileExtension(profileId, extensionId);
+      extensionScan = result.scan;
+      selectedExtensionIds.delete(extensionId);
+      extensionMigrationResult = null;
+      state = result.state;
+      selectedId = result.profileId;
+      extensionMigrationBackups = await profileApi().listExtensionMigrationBackups();
+    }, `已删除插件 ${extension.name}`);
+    return;
+  }
+
+  if (action === "restore-extension-backup") {
+    const backupId = actionTarget.dataset.backupId;
+    if (!backupId) {
+      return;
+    }
+
+    const backup = extensionMigrationBackups.find((item) => item.id === backupId) || extensionMigrationResult?.backup;
+    const label = backup ? `${backup.targetProfileName} ${formatDate(backup.createdAt)}` : backupId;
+    if (!window.confirm(`恢复备份 ${label}？目标 Profile 当前改动会被替换。`)) {
+      return;
+    }
+
+    void withBusy(async () => {
+      const result = await profileApi().restoreExtensionMigrationBackup(backupId);
+      state = result.state;
+      selectedId = result.backup.targetProfileId;
+      extensionMigrationResult = null;
+      extensionMigrationBackups = await profileApi().listExtensionMigrationBackups();
+    }, "已恢复备份");
+    return;
+  }
+
   if (action === "refresh") {
     void withBusy(() => loadState(), "已刷新");
+    return;
+  }
+
+  if (action === "toggle-profile-menu" && id) {
+    openProfileMenuId = openProfileMenuId === id ? null : id;
+    selectedId = id;
+    render();
+    return;
+  }
+
+  if (action === "rename-profile" && id) {
+    const profile = state.profiles.find((item) => item.id === id);
+    if (!profile) {
+      return;
+    }
+
+    modal = { kind: "rename", profileId: id };
+    render();
+    window.setTimeout(() => {
+      const input = document.querySelector<HTMLInputElement>("#profile-rename");
+      input?.focus();
+      input?.select();
+    }, 0);
     return;
   }
 
@@ -685,7 +1459,11 @@ appRoot.addEventListener("click", (event) => {
       return;
     }
 
-    void withBusy(() => profileApi().focusProfile(id), `已显示 ${profile.name}`);
+    selectedId = id;
+    void withBusy(async () => {
+      state = await profileApi().focusProfile(id);
+      selectedId = id;
+    }, `已显示 ${profile.name}`);
     return;
   }
 
@@ -728,7 +1506,80 @@ appRoot.addEventListener("click", (event) => {
   }
 });
 
+function setMigrationSource(sourceId: string): void {
+  migrationSourceId = sourceId || null;
+  if (!state) {
+    return;
+  }
+
+  if (migrationTargetId === migrationSourceId) {
+    migrationTargetId = state.profiles.find((profile) => profile.id !== migrationSourceId)?.id || null;
+  }
+
+  extensionScan = null;
+  selectedExtensionIds.clear();
+  extensionMigrationResult = null;
+}
+
+appRoot.addEventListener("change", (event) => {
+  const target = event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement ? event.target : null;
+  if (!target || !state) {
+    return;
+  }
+
+  if (target instanceof HTMLSelectElement && target.matches("[data-migration-source]")) {
+    migrationSourceId = target.value || null;
+    if (migrationTargetId === migrationSourceId) {
+      migrationTargetId = state.profiles.find((profile) => profile.id !== migrationSourceId)?.id || null;
+    }
+    extensionScan = null;
+    selectedExtensionIds.clear();
+    extensionMigrationResult = null;
+    render();
+    return;
+  }
+
+  if (target instanceof HTMLSelectElement && target.matches("[data-migration-target]")) {
+    migrationTargetId = target.value || null;
+    extensionMigrationResult = null;
+    render();
+    return;
+  }
+
+  if (target instanceof HTMLInputElement && target.matches("[data-extension-select]")) {
+    const extensionId = target.dataset.extensionId;
+    if (!extensionId) {
+      return;
+    }
+    if (target.checked) {
+      selectedExtensionIds.add(extensionId);
+    } else {
+      selectedExtensionIds.delete(extensionId);
+    }
+    extensionMigrationResult = null;
+    render();
+    return;
+  }
+
+  if (target instanceof HTMLInputElement && target.matches("[data-include-extension-data]")) {
+    includeExtensionData = target.checked;
+    render();
+    return;
+  }
+
+  if (target instanceof HTMLInputElement && target.matches("[data-open-install-pages]")) {
+    openInstallPages = target.checked;
+    render();
+  }
+});
+
 appRoot.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && migrationSourceMenuOpen) {
+    migrationSourceMenuOpen = false;
+    render();
+    return;
+  }
+
   const target = event.target instanceof Element ? event.target : null;
   const row = target?.closest<HTMLElement>("[data-profile-row]");
   if (!row || !state || (event.key !== "Enter" && event.key !== " ")) {
@@ -746,12 +1597,57 @@ appRoot.addEventListener("keydown", (event) => {
 appRoot.addEventListener("submit", (event) => {
   const target = event.target instanceof Element ? event.target : null;
   const createForm = target?.closest<HTMLFormElement>("[data-create-form]");
+  const renameForm = target?.closest<HTMLFormElement>("[data-rename-form]");
   const cdpForm = target?.closest<HTMLFormElement>("[data-cdp-form]");
-  if (!createForm && !cdpForm) {
+  const extensionMigrationForm = target?.closest<HTMLFormElement>("[data-extension-migration-form]");
+  if (!createForm && !renameForm && !cdpForm && !extensionMigrationForm) {
     return;
   }
 
   event.preventDefault();
+
+  if (extensionMigrationForm) {
+    const sourceId = migrationSourceId;
+    const activeScan = extensionScan?.profileId === sourceId ? extensionScan : null;
+    const data = new FormData(extensionMigrationForm);
+    const targetProfileId = String(data.get("targetProfileId") || "").trim();
+    const extensionIds = activeScan?.extensions
+      .filter((extension) => selectedExtensionIds.has(extension.id))
+      .map((extension) => extension.id) || [];
+
+    if (!sourceId || !activeScan) {
+      setToast("先扫描源 Profile 的插件", "error");
+      return;
+    }
+    if (!targetProfileId || targetProfileId === sourceId) {
+      setToast("请选择一个不同的目标 Profile", "error");
+      return;
+    }
+    if (!extensionIds.length) {
+      setToast("先选择要迁移的插件", "error");
+      return;
+    }
+
+    includeExtensionData = data.has("includeData");
+    openInstallPages = data.has("openInstallPages");
+    migrationTargetId = targetProfileId;
+    modal = null;
+
+    void withBusy(async () => {
+      const result = await profileApi().migrateExtensions({
+        sourceProfileId: sourceId,
+        targetProfileId,
+        extensionIds,
+        includeData: includeExtensionData,
+        openInstallPages
+      });
+      extensionMigrationResult = result;
+      state = result.state;
+      selectedId = result.targetProfileId;
+      extensionMigrationBackups = await profileApi().listExtensionMigrationBackups();
+    }, "插件迁移完成");
+    return;
+  }
 
   if (cdpForm) {
     const profileId = cdpForm.dataset.profileId;
@@ -777,6 +1673,25 @@ appRoot.addEventListener("submit", (event) => {
     return;
   }
 
+  if (renameForm) {
+    const profileId = renameForm.dataset.profileId;
+    const profile = state?.profiles.find((item) => item.id === profileId);
+    if (!profileId || !profile) {
+      return;
+    }
+
+    const data = new FormData(renameForm);
+    const name = String(data.get("name") || "").trim();
+
+    void withBusy(async () => {
+      const nextState = await profileApi().renameProfile(profileId, name);
+      state = nextState;
+      selectedId = profileId;
+      modal = null;
+    }, `已改名为 ${name}`);
+    return;
+  }
+
   const data = new FormData(createForm as HTMLFormElement);
   const name = String(data.get("name") || "").trim();
 
@@ -789,5 +1704,5 @@ appRoot.addEventListener("submit", (event) => {
 });
 
 loadState().catch((error: unknown) => {
-  appRoot.innerHTML = `<div class="app-loading">${escapeHtml(error instanceof Error ? error.message : String(error))}</div>`;
+  appRoot.innerHTML = `<div class="app-loading">${escapeHtml(formatErrorMessage(error))}</div>`;
 });

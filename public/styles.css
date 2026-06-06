@@ -142,6 +142,66 @@ h3 {
   white-space: nowrap;
 }
 
+.action-tooltip {
+  position: relative;
+  display: inline-flex;
+}
+
+.action-tooltip::after {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  z-index: 30;
+  width: max-content;
+  max-width: 260px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: #15191f;
+  color: #ffffff;
+  content: attr(data-tooltip);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.45;
+  opacity: 0;
+  padding: 8px 10px;
+  pointer-events: none;
+  transform: translate(-50%, 4px);
+  transition:
+    opacity 0.12s ease,
+    transform 0.12s ease;
+  white-space: normal;
+}
+
+.action-tooltip::before {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 3px);
+  z-index: 31;
+  width: 8px;
+  height: 8px;
+  background: #15191f;
+  content: "";
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, 4px) rotate(45deg);
+  transition:
+    opacity 0.12s ease,
+    transform 0.12s ease;
+}
+
+.action-tooltip:hover::after,
+.action-tooltip:focus-within::after,
+.action-tooltip:hover::before,
+.action-tooltip:focus-within::before {
+  opacity: 1;
+  transform: translate(-50%, 0) rotate(0);
+}
+
+.action-tooltip:hover::before,
+.action-tooltip:focus-within::before {
+  transform: translate(-50%, 0) rotate(45deg);
+}
+
 .action-button {
   background: #fbfcfd;
 }
@@ -155,6 +215,17 @@ h3 {
 .action-button.accent:hover:not(:disabled) {
   border-color: var(--accent);
   background: var(--accent-soft);
+}
+
+.action-button.cdp {
+  border-color: #9cb7e6;
+  background: #eef4ff;
+  color: #214f9b;
+}
+
+.action-button.cdp:hover:not(:disabled) {
+  border-color: #356dcc;
+  background: #dfeaff;
 }
 
 .action-button.warn {
@@ -225,7 +296,7 @@ h3 {
 
 .status-grid {
   display: grid;
-  grid-template-columns: 1.15fr 0.85fr 0.85fr 1fr;
+  grid-template-columns: minmax(0, 1.6fr) repeat(2, minmax(130px, 0.7fr));
   gap: 1px;
   overflow: hidden;
   border: 1px solid var(--line);
@@ -300,7 +371,7 @@ h3 {
 
 .profiles-table {
   width: 100%;
-  min-width: 800px;
+  min-width: 880px;
   border-collapse: collapse;
   table-layout: fixed;
 }
@@ -348,6 +419,10 @@ h3 {
   border-bottom: 0;
 }
 
+.profiles-table tbody tr {
+  cursor: pointer;
+}
+
 .profiles-table tr.selected td {
   background: #f3faf7;
 }
@@ -356,13 +431,15 @@ h3 {
   background: #f8fbfa;
 }
 
+.profiles-table tbody tr:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: -3px;
+}
+
 .profile-pick {
   width: 100%;
   min-height: auto;
-  border: 0;
-  border-radius: 6px;
   padding: 6px;
-  background: transparent;
   text-align: left;
 }
 
@@ -443,7 +520,7 @@ h3 {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 76px;
+  min-width: 46px;
   border-radius: 999px;
   padding: 5px 9px;
   background: #eef1f4;
@@ -520,6 +597,14 @@ h3 {
   font-size: 14px;
 }
 
+.detail-note {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .path-box {
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -530,6 +615,10 @@ h3 {
     ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
     monospace;
   line-height: 1.45;
+}
+
+.path-box.compact {
+  padding: 8px 10px;
 }
 
 .empty-state {
@@ -655,6 +744,12 @@ h3 {
   color: var(--muted);
   font-size: 13px;
   font-weight: 800;
+}
+
+.field-note {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .field input {

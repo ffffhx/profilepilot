@@ -40,13 +40,30 @@ function createMainWindow(): void {
                   hasBridge: Boolean(window.profileManager),
                   hasFocusProfile: typeof window.profileManager?.focusProfile === "function",
                   hasCloseProfile: typeof window.profileManager?.closeProfile === "function",
+                  hasLaunchProfileWithCdp: typeof window.profileManager?.launchProfileWithCdp === "function",
                   buttonCount: document.querySelectorAll("button").length,
+                  statusLabels: Array.from(document.querySelectorAll(".status-label")).map((item) => item.textContent),
+                  statusValues: Array.from(document.querySelectorAll(".status-value")).map((item) => item.textContent),
+                  sourcePills: Array.from(document.querySelectorAll(".source-pill")).map((item) => item.textContent),
+                  cdpTooltips: Array.from(document.querySelectorAll(".action-tooltip")).map((item) => item.getAttribute("data-tooltip")),
+                  detailTitleBeforeSelection: document.querySelector(".details h2")?.textContent || null,
+                  detailProcessLabelBeforeSelection:
+                    Array.from(document.querySelectorAll(".detail-row")).find((row) => row.querySelector("span")?.textContent?.includes("进程"))?.querySelector("span")?.textContent || null,
+                  detailListeningPortsBeforeSelection:
+                    Array.from(document.querySelectorAll(".detail-row")).find((row) => row.querySelector("span")?.textContent === "本机监听端口")?.querySelector("strong")?.textContent || null,
+                  detailTitleAfterSecondRowClick: null,
+                  detailSourceAfterSecondRowClick: null,
+                  detailProcessLabelAfterSecondRowClick: null,
+                  detailProcessNoteAfterSecondRowClick: null,
+                  detailListeningPortsAfterSecondRowClick: null,
+                  detailCdpValueAfterSecondRowClick: null,
                   nativeProfileCount: null,
                   firstNativeProfile: null,
                   runningProfileIds: [],
                   defaultProfileRunning: null,
                   defaultProfileLastLaunchedAt: null,
                   defaultProfilePids: [],
+                  defaultProfileListeningPorts: [],
                   crud: null
                 };
 
@@ -58,6 +75,23 @@ function createMainWindow(): void {
                 smokeResult.defaultProfileRunning = defaultProfile?.running ?? null;
                 smokeResult.defaultProfileLastLaunchedAt = defaultProfile?.lastLaunchedAt ?? null;
                 smokeResult.defaultProfilePids = defaultProfile?.pids ?? [];
+                smokeResult.defaultProfileListeningPorts = defaultProfile?.listeningPorts ?? [];
+
+                const secondRow = document.querySelectorAll("[data-profile-row]")[1];
+                if (secondRow) {
+                  secondRow.click();
+                  await new Promise((done) => window.setTimeout(done, 0));
+                  smokeResult.detailTitleAfterSecondRowClick = document.querySelector(".details h2")?.textContent || null;
+                  smokeResult.detailSourceAfterSecondRowClick =
+                    Array.from(document.querySelectorAll(".detail-row")).find((row) => row.querySelector("span")?.textContent === "来源")?.querySelector("strong")?.textContent || null;
+                  const processRow = Array.from(document.querySelectorAll(".detail-row")).find((row) => row.querySelector("span")?.textContent?.includes("进程"));
+                  smokeResult.detailProcessLabelAfterSecondRowClick = processRow?.querySelector("span")?.textContent || null;
+                  smokeResult.detailProcessNoteAfterSecondRowClick = processRow?.querySelector(".detail-note")?.textContent || null;
+                  smokeResult.detailListeningPortsAfterSecondRowClick =
+                    Array.from(document.querySelectorAll(".detail-row")).find((row) => row.querySelector("span")?.textContent === "本机监听端口")?.querySelector("strong")?.textContent || null;
+                  const cdpRow = Array.from(document.querySelectorAll(".detail-row")).find((row) => row.querySelector("span")?.textContent === "CDP 地址");
+                  smokeResult.detailCdpValueAfterSecondRowClick = cdpRow?.querySelector("strong, code")?.textContent || null;
+                }
 
                 if (${JSON.stringify(runCrud)}) {
                   const initial = visibleState;
@@ -113,6 +147,11 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.launchProfile, async (_event, id: string): Promise<AppState> => {
     await profileManager.launchProfile(id);
+    return profileManager.getState();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.launchProfileWithCdp, async (_event, id: string, port?: number | null): Promise<AppState> => {
+    await profileManager.launchProfileWithCdp(id, port);
     return profileManager.getState();
   });
 

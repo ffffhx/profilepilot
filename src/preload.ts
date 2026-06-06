@@ -6,6 +6,8 @@ const profileManagerApi: ProfileManagerApi = {
   getState: (): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.getState),
   createProfile: (name: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.createProfile, name),
   launchProfile: (id: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.launchProfile, id),
+  launchProfileWithCdp: (id: string, port?: number | null): Promise<AppState> =>
+    ipcRenderer.invoke(IPC_CHANNELS.launchProfileWithCdp, id, port),
   focusProfile: (id: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.focusProfile, id),
   closeProfile: (id: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.closeProfile, id),
   openProfileFolder: (id: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.openProfileFolder, id),

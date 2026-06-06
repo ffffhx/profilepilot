@@ -1,6 +1,8 @@
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
+import http from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -24,6 +26,8 @@ type ProfileRef = { source: "native"; dirName: string } | { source: "isolated"; 
 interface RuntimeProfile {
   pids: number[];
   startedAt: string | null;
+  cdpPort: number | null;
+  listeningPorts: number[];
 }
 
 interface ChromeLocalState {
@@ -128,6 +132,18 @@ export class ProfileManager {
     await this.launchIsolatedProfile(ref.id);
   }
 
+  async launchProfileWithCdp(profileId: string, portInput?: number | null): Promise<void> {
+    const ref = parseProfileId(profileId);
+    if (ref.source === "native") {
+      throw new ProfileManagerError(
+        "CDP launch is only available for isolated profiles. Create an isolated Profile for agent/browser automation.",
+        "CDP_NATIVE_UNSUPPORTED"
+      );
+    }
+
+    await this.launchIsolatedProfileWithCdp(ref.id, portInput);
+  }
+
   async closeProfile(profileId: string): Promise<void> {
     const profile = await this.getPublicProfile(profileId);
     if (!profile.running || !profile.pids.length) {
@@ -204,6 +220,39 @@ export class ProfileManager {
     await launchChrome([`--user-data-dir=${profilePath}`, "--no-first-run"]);
     profile.lastLaunchedAt = new Date().toISOString();
     await this.saveRegistry(registry);
+  }
+
+  private async launchIsolatedProfileWithCdp(id: string, portInput?: number | null): Promise<void> {
+    const registry = await this.loadRegistry();
+    const profile = this.findIsolatedProfile(registry, id);
+    const currentState = await this.getState();
+    const currentProfile = currentState.profiles.find((item) => item.id === makeIsolatedProfileId(id));
+    if (currentProfile?.running) {
+      throw new ProfileManagerError("Close this Profile before starting it with CDP.", "PROFILE_RUNNING");
+    }
+
+    const profilePath = this.isolatedProfilePath(profile);
+    await fs.mkdir(profilePath, { recursive: true });
+
+    const requestedPort = normalizeCdpPortInput(portInput);
+    const cdpPort = requestedPort ?? (await findAvailableCdpPort(profile.lastCdpPort || 9222));
+    if (!(await isPortAvailable(cdpPort))) {
+      const owner = await describePortOwner(cdpPort);
+      const detail = owner ? ` by ${owner}` : "";
+      throw new ProfileManagerError(`CDP port ${cdpPort} is already in use${detail}.`, "CDP_PORT_IN_USE");
+    }
+
+    await launchChrome([
+      `--user-data-dir=${profilePath}`,
+      "--no-first-run",
+      "--remote-debugging-address=127.0.0.1",
+      `--remote-debugging-port=${cdpPort}`
+    ]);
+
+    profile.lastLaunchedAt = new Date().toISOString();
+    profile.lastCdpPort = cdpPort;
+    await this.saveRegistry(registry);
+    await waitForCdp(cdpPort, 6000);
   }
 
   private async deleteNativeProfile(dirName: string): Promise<DeleteProfileResult> {
@@ -358,6 +407,8 @@ export class ProfileManager {
           addRuntimeProcess(runtime, makeNativeRuntimeKey(dirName), processInfo);
         }
       }
+
+      await attachListeningPorts(runtime);
     } catch {
       return runtime;
     }
@@ -384,13 +435,16 @@ export class ProfileManager {
       isDefault: profile.isDefault,
       deletable: !profile.isDefault,
       running: runtimeProfile.pids.length > 0,
-      pids: runtimeProfile.pids
+      pids: runtimeProfile.pids,
+      cdpPort: runtimeProfile.cdpPort,
+      cdpUrl: makeCdpUrl(runtimeProfile.cdpPort),
+      listeningPorts: runtimeProfile.listeningPorts
     };
   }
 
   private toIsolatedPublicProfile(profile: StoredProfile, runtime: Map<string, RuntimeProfile>): PublicProfile {
     const profilePath = this.isolatedProfilePath(profile);
-    const runtimeProfile = runtime.get(profilePath) || { pids: [], startedAt: null };
+    const runtimeProfile = runtime.get(profilePath) || emptyRuntimeProfile();
 
     return {
       id: makeIsolatedProfileId(profile.id),
@@ -404,7 +458,10 @@ export class ProfileManager {
       isDefault: false,
       deletable: true,
       running: runtimeProfile.pids.length > 0,
-      pids: runtimeProfile.pids
+      pids: runtimeProfile.pids,
+      cdpPort: runtimeProfile.cdpPort,
+      cdpUrl: makeCdpUrl(runtimeProfile.cdpPort),
+      listeningPorts: runtimeProfile.listeningPorts
     };
   }
 
@@ -638,7 +695,11 @@ function normalizeProfile(profile: unknown): StoredProfile | null {
     name: candidate.name,
     dirName: candidate.dirName,
     createdAt: candidate.createdAt,
-    lastLaunchedAt: typeof candidate.lastLaunchedAt === "string" ? candidate.lastLaunchedAt : null
+    lastLaunchedAt: typeof candidate.lastLaunchedAt === "string" ? candidate.lastLaunchedAt : null,
+    lastCdpPort:
+      typeof candidate.lastCdpPort === "number" && Number.isInteger(candidate.lastCdpPort)
+        ? candidate.lastCdpPort
+        : null
   };
 }
 
@@ -762,6 +823,8 @@ function parseRuntimeProcess(line: string): (RuntimeProfile & { pid: number; com
     pid,
     pids: [pid],
     startedAt,
+    cdpPort: parseRemoteDebuggingPort(command),
+    listeningPorts: [],
     command
   };
 }
@@ -780,12 +843,81 @@ function addRuntimeProcess(
   key: string,
   processInfo: RuntimeProfile & { pid: number }
 ): void {
-  const profile = runtime.get(key) || { pids: [], startedAt: null };
+  const profile = runtime.get(key) || emptyRuntimeProfile();
   if (!profile.pids.includes(processInfo.pid)) {
     profile.pids.push(processInfo.pid);
   }
   profile.startedAt = earlierIsoDate(profile.startedAt, processInfo.startedAt);
+  profile.cdpPort = profile.cdpPort || processInfo.cdpPort;
+  profile.listeningPorts = uniqueNumbers(profile.listeningPorts.concat(processInfo.listeningPorts)).sort(compareNumbers);
   runtime.set(key, profile);
+}
+
+async function attachListeningPorts(runtime: Map<string, RuntimeProfile>): Promise<void> {
+  const knownPids = new Set<number>();
+  for (const profile of runtime.values()) {
+    for (const pid of profile.pids) {
+      knownPids.add(pid);
+    }
+  }
+
+  if (!knownPids.size) {
+    return;
+  }
+
+  const portsByPid = await getListeningPortsByPid(knownPids);
+  for (const profile of runtime.values()) {
+    const listeningPorts = profile.pids.flatMap((pid) => portsByPid.get(pid) || []);
+    profile.listeningPorts = uniqueNumbers(profile.listeningPorts.concat(listeningPorts)).sort(compareNumbers);
+  }
+}
+
+async function getListeningPortsByPid(targetPids: Set<number>): Promise<Map<number, number[]>> {
+  const portsByPid = new Map<number, number[]>();
+
+  try {
+    const { stdout } = await execFileAsync("lsof", ["-nP", "-iTCP", "-sTCP:LISTEN"], {
+      maxBuffer: 1024 * 1024 * 8
+    });
+
+    for (const line of stdout.split("\n")) {
+      const pid = parseLsofPid(line);
+      if (!pid || !targetPids.has(pid)) {
+        continue;
+      }
+
+      const port = parseLsofListeningPort(line);
+      if (!port) {
+        continue;
+      }
+
+      portsByPid.set(pid, uniqueNumbers([...(portsByPid.get(pid) || []), port]).sort(compareNumbers));
+    }
+  } catch {
+    return portsByPid;
+  }
+
+  return portsByPid;
+}
+
+function parseLsofPid(line: string): number | null {
+  const match = line.trim().match(/^\S+\s+(\d+)\s+/);
+  if (!match || line.trim().startsWith("COMMAND")) {
+    return null;
+  }
+
+  const pid = Number(match[1]);
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+function parseLsofListeningPort(line: string): number | null {
+  const match = line.match(/TCP\s+.*:(\d+)\s+\(LISTEN\)$/);
+  if (!match) {
+    return null;
+  }
+
+  const port = Number(match[1]);
+  return isValidTcpPort(port) ? port : null;
 }
 
 function mergeRuntimeProfiles(...profiles: Array<RuntimeProfile | undefined>): RuntimeProfile {
@@ -797,11 +929,175 @@ function mergeRuntimeProfiles(...profiles: Array<RuntimeProfile | undefined>): R
 
       return {
         pids: uniqueNumbers(merged.pids.concat(profile.pids)),
-        startedAt: earlierIsoDate(merged.startedAt, profile.startedAt)
+        startedAt: earlierIsoDate(merged.startedAt, profile.startedAt),
+        cdpPort: merged.cdpPort || profile.cdpPort,
+        listeningPorts: uniqueNumbers(merged.listeningPorts.concat(profile.listeningPorts)).sort(compareNumbers)
       };
     },
-    { pids: [], startedAt: null }
+    emptyRuntimeProfile()
   );
+}
+
+function emptyRuntimeProfile(): RuntimeProfile {
+  return { pids: [], startedAt: null, cdpPort: null, listeningPorts: [] };
+}
+
+function parseRemoteDebuggingPort(command: string): number | null {
+  const match = command.match(/--remote-debugging-port(?:=|\s+)(\d{1,5})(?:\s|$)/);
+  if (!match) {
+    return null;
+  }
+
+  const port = Number(match[1]);
+  return isValidCdpPort(port) ? port : null;
+}
+
+function makeCdpUrl(port: number | null): string | null {
+  return port ? `http://127.0.0.1:${port}` : null;
+}
+
+function normalizeCdpPortInput(portInput?: number | null): number | null {
+  if (portInput === undefined || portInput === null) {
+    return null;
+  }
+
+  const port = Number(portInput);
+  if (!isValidCdpPort(port)) {
+    throw new ProfileManagerError("CDP port must be an integer between 1024 and 65535.", "INVALID_CDP_PORT");
+  }
+
+  return port;
+}
+
+function isValidCdpPort(port: number): boolean {
+  return Number.isInteger(port) && port >= 1024 && port <= 65535;
+}
+
+function isValidTcpPort(port: number): boolean {
+  return Number.isInteger(port) && port >= 1 && port <= 65535;
+}
+
+function compareNumbers(a: number, b: number): number {
+  return a - b;
+}
+
+async function findAvailableCdpPort(startPort: number): Promise<number> {
+  const firstPort = isValidCdpPort(startPort) ? startPort : 9222;
+  for (let port = firstPort; port <= 65535; port += 1) {
+    if (await isPortAvailable(port)) {
+      return port;
+    }
+  }
+
+  throw new ProfileManagerError("No available CDP port found.", "NO_CDP_PORT_AVAILABLE");
+}
+
+function isPortAvailable(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+
+    server.once("error", () => {
+      resolve(false);
+    });
+    server.once("listening", () => {
+      server.close(() => resolve(true));
+    });
+    server.listen({ host: "127.0.0.1", port });
+  });
+}
+
+async function describePortOwner(port: number): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN"], {
+      maxBuffer: 1024 * 1024
+    });
+    const ownerLine = stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .find((line) => line && !line.startsWith("COMMAND"));
+    const match = ownerLine?.match(/^(\S+)\s+(\d+)\s+/);
+    if (!match) {
+      return null;
+    }
+
+    const commandName = match[1];
+    const pid = Number(match[2]);
+    const label = await processLabelForPid(pid, commandName);
+    return `${label} (PID ${pid})`;
+  } catch {
+    return null;
+  }
+}
+
+async function processLabelForPid(pid: number, fallback: string): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "command="], {
+      maxBuffer: 1024 * 1024
+    });
+    const command = stdout.trim();
+    if (command.includes("Google Chrome.app")) {
+      return "Google Chrome";
+    }
+    if (command.includes("Electron.app")) {
+      return "Electron";
+    }
+    if (command.includes("node")) {
+      return "node";
+    }
+  } catch {
+    // Fall through to lsof's command name.
+  }
+
+  return fallback;
+}
+
+async function waitForCdp(port: number, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError: unknown = null;
+
+  while (Date.now() < deadline) {
+    try {
+      await requestCdpVersion(port);
+      return;
+    } catch (error) {
+      lastError = error;
+      await sleep(200);
+    }
+  }
+
+  const detail = lastError instanceof Error && lastError.message ? ` ${lastError.message}` : "";
+  throw new ProfileManagerError(
+    `Chrome started, but CDP did not respond on 127.0.0.1:${port}.${detail}`,
+    "CDP_NOT_READY"
+  );
+}
+
+function requestCdpVersion(port: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const request = http.get(
+      {
+        hostname: "127.0.0.1",
+        port,
+        path: "/json/version",
+        timeout: 700
+      },
+      (response) => {
+        response.resume();
+        response.on("end", () => {
+          if (response.statusCode && response.statusCode >= 200 && response.statusCode < 300) {
+            resolve();
+          } else {
+            reject(new Error(`HTTP ${response.statusCode || "unknown"}`));
+          }
+        });
+      }
+    );
+
+    request.on("timeout", () => {
+      request.destroy(new Error("timeout"));
+    });
+    request.on("error", reject);
+  });
 }
 
 function uniqueNumbers(values: number[]): number[] {

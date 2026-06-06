@@ -574,6 +574,8 @@ async function focusProfileWindow(pids: number[]): Promise<void> {
 }
 
 async function focusMacProcess(pid: number): Promise<void> {
+  await activateMacProcess(pid);
+
   const script = `
 tell application "System Events"
   set targetProcesses to every process whose unix id is ${pid}
@@ -588,17 +590,32 @@ tell application "System Events"
         end try
       end repeat
     end try
-    set frontmost to true
     if (count of windows) is greater than 0 then
       perform action "AXRaise" of window 1
-    else
-      error "Process has no windows"
     end if
   end tell
 end tell
 `;
 
   await execFileAsync("osascript", ["-e", script]);
+}
+
+async function activateMacProcess(pid: number): Promise<void> {
+  const script = `
+ObjC.import("AppKit");
+const app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(${pid});
+if (!app) {
+  throw new Error("Process not found");
+}
+const activated = app.activateWithOptions(
+  $.NSApplicationActivateIgnoringOtherApps | $.NSApplicationActivateAllWindows
+);
+if (!activated) {
+  throw new Error("Activate failed");
+}
+`;
+
+  await execFileAsync("osascript", ["-l", "JavaScript", "-e", script]);
 }
 
 function normalizeProfile(profile: unknown): StoredProfile | null {

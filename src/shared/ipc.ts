@@ -12,5 +12,8 @@ export const IPC_CHANNELS = {
   migrateExtensions: "profiles:extensions:migrate",
   deleteProfileExtension: "profiles:extensions:delete",
   listExtensionMigrationBackups: "profiles:extensions:backups",
-  restoreExtensionMigrationBackup: "profiles:extensions:restore-backup"
+  restoreExtensionMigrationBackup: "profiles:extensions:restore-backup",
+  syncAccount: "profiles:account:sync",
+  listAccountSyncBackups: "profiles:account:backups",
+  restoreAccountSyncBackup: "profiles:account:restore-backup"
 } as const;

@@ -8,6 +8,13 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { shell } from "electron";
 import type {
+  AccountSyncBackupMetadata,
+  AccountSyncBackupSummary,
+  AccountSyncCopiedItem,
+  AccountSyncRequest,
+  AccountSyncRestoreResult,
+  AccountSyncResult,
+  AccountSyncSkippedItem,
   AppState,
   DeleteProfileResult,
   ExtensionDeleteResult,
@@ -83,6 +90,16 @@ interface ChromeExtensionManifest {
   update_url?: unknown;
 }
 
+interface AccountSyncPathSpec {
+  label: string;
+  relativePath: string;
+}
+
+interface AccountSyncDataLocation {
+  userDataPath: string;
+  profilePath: string;
+}
+
 export class ProfileManagerError extends Error {
   constructor(
     message: string,
@@ -97,11 +114,13 @@ export class ProfileManager {
   private readonly profilesDir: string;
   private readonly registryPath: string;
   private readonly extensionBackupDir: string;
+  private readonly accountSyncBackupDir: string;
 
   constructor(private readonly dataDir = defaultDataDir()) {
     this.profilesDir = path.join(dataDir, "profiles");
     this.registryPath = path.join(dataDir, "profiles.json");
     this.extensionBackupDir = path.join(dataDir, "extension-migration-backups");
+    this.accountSyncBackupDir = path.join(dataDir, "account-sync-backups");
   }
 
   async getState(): Promise<AppState> {
@@ -112,9 +131,9 @@ export class ProfileManager {
     const runtime = await this.getRuntime(nativePaths.concat(isolatedPaths), nativeChromeProfiles.map((profile) => profile.dirName));
 
     const nativeProfiles = nativeChromeProfiles.map((profile) => this.toNativePublicProfile(profile, registry, runtime));
-    const isolatedProfiles = registry.profiles
-      .map((profile) => this.toIsolatedPublicProfile(profile, runtime))
-      .sort((a, b) => {
+    const isolatedProfiles = (await Promise.all(
+      registry.profiles.map((profile) => this.toIsolatedPublicProfile(profile, runtime))
+    )).sort((a, b) => {
         const aTime = a.lastLaunchedAt || a.createdAt || "";
         const bTime = b.lastLaunchedAt || b.createdAt || "";
         return bTime.localeCompare(aTime);
@@ -271,12 +290,13 @@ export class ProfileManager {
 
   async scanProfileExtensions(profileId: string): Promise<ExtensionScanResult> {
     const profile = await this.getPublicProfile(profileId);
-    const extensions = await scanProfileExtensions(profile.path);
+    const profileDataPath = await this.resolveChromeProfileDataPath(profile);
+    const extensions = await scanProfileExtensions(profileDataPath);
 
     return {
       profileId: profile.id,
       profileName: profile.name,
-      profilePath: profile.path,
+      profilePath: profileDataPath,
       extensions
     };
   }
@@ -309,6 +329,8 @@ export class ProfileManager {
     }
 
     const scan = await this.scanProfileExtensions(sourceProfileId);
+    const sourceProfileDataPath = await this.resolveChromeProfileDataPath(sourceProfile);
+    const targetProfileDataPath = await this.resolveChromeProfileDataPath(targetProfile, true);
     const selectedExtensions = extensionIds
       .map((id) => scan.extensions.find((extension) => extension.id === id))
       .filter(Boolean) as ProfileExtensionInfo[];
@@ -316,7 +338,7 @@ export class ProfileManager {
       throw new ProfileManagerError("在源 Profile 里没有找到已选择的插件。", "EXTENSIONS_NOT_FOUND");
     }
 
-    const backup = await this.createExtensionMigrationBackup(targetProfile, selectedExtensions);
+    const backup = await this.createExtensionMigrationBackup(targetProfile, selectedExtensions, targetProfileDataPath);
     const copiedExtensions: ExtensionMigrationCopiedExtension[] = [];
     const dataCopies: ExtensionMigrationDataCopy[] = [];
     const skippedExtensions: ExtensionMigrationSkippedExtension[] = [];
@@ -376,7 +398,7 @@ export class ProfileManager {
 
         if (includeData) {
           for (const dataPath of extension.dataPaths) {
-            const copied = await copyExtensionDataPath(sourceProfile.path, targetProfile.path, dataPath.relativePath);
+            const copied = await copyExtensionDataPath(sourceProfileDataPath, targetProfileDataPath, dataPath.relativePath);
             if (copied) {
               dataCopies.push({
                 id: extension.id,
@@ -443,19 +465,28 @@ export class ProfileManager {
       throw new ProfileManagerError("没有在这个 Profile 里找到要删除的插件。", "EXTENSION_NOT_FOUND");
     }
 
-    const backup = await this.createExtensionMigrationBackup(profile, [extension]);
+    const profileDataPath = await this.resolveChromeProfileDataPath(profile);
+    const backup = await this.createExtensionMigrationBackup(profile, [extension], profileDataPath);
     const deletedPaths: string[] = [];
 
     try {
       for (const relativePath of extensionDeleteRelativePaths(extensionId)) {
-        const targetPath = path.join(profile.path, normalizeSafeRelativePath(relativePath));
+        const targetPath = path.join(profileDataPath, normalizeSafeRelativePath(relativePath));
         if (await exists(targetPath)) {
           await fs.rm(targetPath, { recursive: true, force: true });
           deletedPaths.push(targetPath);
         }
       }
 
-      await removeExtensionReferencesFromProfilePreferences(profile.path, extensionId);
+      if (profile.source === "isolated") {
+        const migratedExtensionPath = path.join(profile.path, "Migrated Extensions", extensionId);
+        if (await exists(migratedExtensionPath)) {
+          await fs.rm(migratedExtensionPath, { recursive: true, force: true });
+          deletedPaths.push(migratedExtensionPath);
+        }
+      }
+
+      await removeExtensionReferencesFromProfilePreferences(profileDataPath, extensionId);
       await this.removeMigratedExtensionReference(profile, extensionId);
 
       return {
@@ -512,6 +543,139 @@ export class ProfileManager {
 
     return {
       backup: summarizeExtensionMigrationBackup(metadata),
+      state: await this.getState()
+    };
+  }
+
+  async syncAccount(request: AccountSyncRequest): Promise<AccountSyncResult> {
+    const sourceProfileId = String(request.sourceProfileId || "");
+    const targetProfileId = String(request.targetProfileId || "");
+    const launchTarget = Boolean(request.launchTarget);
+
+    if (!sourceProfileId || !targetProfileId || sourceProfileId === targetProfileId) {
+      throw new ProfileManagerError("请选择两个不同的 Profile 进行账号同步。", "INVALID_ACCOUNT_SYNC_PROFILES");
+    }
+
+    const state = await this.getState();
+    const sourceProfile = state.profiles.find((profile) => profile.id === sourceProfileId);
+    const targetProfile = state.profiles.find((profile) => profile.id === targetProfileId);
+    if (!sourceProfile || !targetProfile) {
+      throw new ProfileManagerError("没有找到源 Profile 或目标 Profile。", "PROFILE_NOT_FOUND");
+    }
+    if (targetProfile.running) {
+      throw new ProfileManagerError(
+        "同步账号前请先关闭目标 Profile，然后刷新列表。Chrome 运行时写入目标登录数据库可能造成数据不一致。",
+        "PROFILE_RUNNING"
+      );
+    }
+
+    const sourceLocation = await this.resolveAccountSyncLocation(sourceProfile, false);
+    const targetLocation = await this.resolveAccountSyncLocation(targetProfile, true);
+    const availableSpecs = await existingAccountSyncSpecs(sourceLocation.profilePath);
+    const hasSourcePreferences = await exists(path.join(sourceLocation.profilePath, "Preferences"));
+    if (!availableSpecs.length && !hasSourcePreferences) {
+      throw new ProfileManagerError("源 Profile 里没有找到可同步的账号数据。", "ACCOUNT_SYNC_SOURCE_EMPTY");
+    }
+
+    const backup = await this.createAccountSyncBackup(targetProfile, targetLocation);
+    const copiedItems: AccountSyncCopiedItem[] = [];
+    const skippedItems: AccountSyncSkippedItem[] = [];
+
+    try {
+      for (const spec of accountSyncCopySpecs()) {
+        const sourcePath = path.join(sourceLocation.profilePath, spec.relativePath);
+        if (!(await exists(sourcePath))) {
+          skippedItems.push({
+            label: spec.label,
+            relativePath: spec.relativePath,
+            reason: "源 Profile 中不存在"
+          });
+          continue;
+        }
+
+        const targetPath = path.join(targetLocation.profilePath, normalizeSafeRelativePath(spec.relativePath));
+        await fs.rm(targetPath, { recursive: true, force: true });
+        await copyAccountSyncPath(sourcePath, targetPath);
+        copiedItems.push({
+          label: spec.label,
+          relativePath: spec.relativePath
+        });
+      }
+
+      const preferencesMerged = await mergeAccountPreferenceValues(
+        sourceLocation.profilePath,
+        targetLocation.profilePath
+      );
+      if (preferencesMerged) {
+        copiedItems.push({
+          label: "账号偏好",
+          relativePath: "Preferences"
+        });
+      } else {
+        skippedItems.push({
+          label: "账号偏好",
+          relativePath: "Preferences",
+          reason: "源 Profile 中不存在可合并的账号偏好"
+        });
+      }
+
+      let launchedTarget = false;
+      if (launchTarget) {
+        await this.launchProfile(targetProfileId);
+        launchedTarget = true;
+      }
+
+      return {
+        sourceProfileId,
+        targetProfileId,
+        copiedItems,
+        skippedItems,
+        backup,
+        launchedTarget,
+        state: await this.getState()
+      };
+    } catch (error) {
+      try {
+        await this.restoreAccountSyncBackupMetadata(await this.readAccountSyncBackupMetadata(backup.id));
+      } catch {
+        // Keep the original account sync error visible.
+      }
+      throw error;
+    }
+  }
+
+  async listAccountSyncBackups(): Promise<AccountSyncBackupSummary[]> {
+    await fs.mkdir(this.accountSyncBackupDir, { recursive: true });
+    const entries = await fs.readdir(this.accountSyncBackupDir, { withFileTypes: true }).catch(() => []);
+    const backups = await Promise.all(
+      entries
+        .filter((entry) => entry.isDirectory())
+        .map(async (entry): Promise<AccountSyncBackupSummary | null> => {
+          try {
+            return summarizeAccountSyncBackup(await this.readAccountSyncBackupMetadata(entry.name));
+          } catch {
+            return null;
+          }
+        })
+    );
+
+    return backups
+      .filter((backup): backup is AccountSyncBackupSummary => Boolean(backup))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  async restoreAccountSyncBackup(backupId: string): Promise<AccountSyncRestoreResult> {
+    const metadata = await this.readAccountSyncBackupMetadata(backupId);
+    const state = await this.getState();
+    const targetProfile = state.profiles.find((profile) => profile.id === metadata.targetProfileId);
+    if (targetProfile?.running) {
+      throw new ProfileManagerError("恢复账号同步备份前请先关闭目标 Profile。", "TARGET_PROFILE_RUNNING");
+    }
+
+    await this.restoreAccountSyncBackupMetadata(metadata);
+
+    return {
+      backup: summarizeAccountSyncBackup(metadata),
       state: await this.getState()
     };
   }
@@ -669,7 +833,7 @@ export class ProfileManager {
       throw new ProfileManagerError("删除前请先关闭这个 Chrome Profile。", "PROFILE_RUNNING");
     }
 
-    const publicProfile = profile || this.toIsolatedPublicProfile(storedProfile, new Map());
+    const publicProfile = profile || (await this.toIsolatedPublicProfile(storedProfile, new Map()));
     const trashPath = await this.moveToTrash(this.isolatedProfilePath(storedProfile), storedProfile.dirName);
     const nextProfiles = registry.profiles.filter((item) => item.id !== id);
     await this.saveRegistry({ ...registry, profiles: nextProfiles });
@@ -816,9 +980,10 @@ export class ProfileManager {
     };
   }
 
-  private toIsolatedPublicProfile(profile: StoredProfile, runtime: Map<string, RuntimeProfile>): PublicProfile {
+  private async toIsolatedPublicProfile(profile: StoredProfile, runtime: Map<string, RuntimeProfile>): Promise<PublicProfile> {
     const profilePath = this.isolatedProfilePath(profile);
     const runtimeProfile = runtime.get(profilePath) || emptyRuntimeProfile();
+    const userName = await readIsolatedProfileUserName(profilePath);
 
     return {
       id: makeIsolatedProfileId(profile.id),
@@ -828,7 +993,7 @@ export class ProfileManager {
       path: profilePath,
       createdAt: profile.createdAt,
       lastLaunchedAt: runtimeProfile.startedAt || profile.lastLaunchedAt,
-      userName: null,
+      userName,
       isDefault: false,
       deletable: true,
       running: runtimeProfile.pids.length > 0,
@@ -841,7 +1006,8 @@ export class ProfileManager {
 
   private async createExtensionMigrationBackup(
     targetProfile: PublicProfile,
-    selectedExtensions: ProfileExtensionInfo[]
+    selectedExtensions: ProfileExtensionInfo[],
+    targetProfileDataPath: string
   ): Promise<ExtensionMigrationBackupSummary> {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const id = `${stamp}-${makeSlug(targetProfile.name || targetProfile.dirName)}`;
@@ -854,14 +1020,13 @@ export class ProfileManager {
         "Preferences",
         "Secure Preferences",
         "Extensions",
-        "Migrated Extensions",
         ...selectedExtensions.flatMap((extension) => extensionDataRelativePaths(extension.id))
       ].filter(Boolean)
     );
 
     const items = await Promise.all(
       itemRelativePaths.map(async (relativePath) => {
-        const sourcePath = path.join(targetProfile.path, relativePath);
+        const sourcePath = path.join(targetProfileDataPath, relativePath);
         const existed = await exists(sourcePath);
         if (existed) {
           await copyPath(sourcePath, path.join(snapshotPath, relativePath));
@@ -880,7 +1045,7 @@ export class ProfileManager {
       path: backupPath,
       targetProfileId: targetProfile.id,
       targetProfileName: targetProfile.name,
-      targetProfilePath: targetProfile.path,
+      targetProfilePath: targetProfileDataPath,
       itemCount: items.length,
       items,
       targetMigratedExtensions: await this.getMigratedExtensionsSnapshot(targetProfile)
@@ -888,6 +1053,19 @@ export class ProfileManager {
 
     await fs.writeFile(path.join(backupPath, "backup.json"), `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
     return summarizeExtensionMigrationBackup(metadata);
+  }
+
+  private async resolveChromeProfileDataPath(profile: PublicProfile, ensureProfilePath = false): Promise<string> {
+    if (profile.source === "native") {
+      return profile.path;
+    }
+
+    const profileDataPath = await resolveIsolatedProfileDataPath(profile.path);
+    if (ensureProfilePath) {
+      await fs.mkdir(profileDataPath, { recursive: true });
+    }
+
+    return profileDataPath;
   }
 
   private async copyLocalExtensionToIsolatedProfile(
@@ -1041,6 +1219,110 @@ export class ProfileManager {
 
     storedProfile.migratedExtensions = metadata.targetMigratedExtensions;
     await this.saveRegistry(registry);
+  }
+
+  private async resolveAccountSyncLocation(
+    profile: PublicProfile,
+    ensureProfilePath: boolean
+  ): Promise<AccountSyncDataLocation> {
+    if (profile.source === "native") {
+      return {
+        userDataPath: nativeChromeUserDataDir(),
+        profilePath: profile.path
+      };
+    }
+
+    const rootPath = profile.path;
+    const defaultProfilePath = path.join(rootPath, "Default");
+    const rootScore = await accountSyncDataScore(rootPath);
+    const defaultScore = await accountSyncDataScore(defaultProfilePath);
+    const profilePath = defaultScore > 0 || rootScore === 0 ? defaultProfilePath : rootPath;
+
+    if (ensureProfilePath) {
+      await fs.mkdir(profilePath, { recursive: true });
+    }
+
+    return {
+      userDataPath: rootPath,
+      profilePath
+    };
+  }
+
+  private async createAccountSyncBackup(
+    targetProfile: PublicProfile,
+    targetLocation: AccountSyncDataLocation
+  ): Promise<AccountSyncBackupSummary> {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const id = `${stamp}-${makeSlug(targetProfile.name || targetProfile.dirName)}`;
+    const backupPath = path.join(this.accountSyncBackupDir, id);
+    const snapshotPath = path.join(backupPath, "snapshot");
+    await fs.mkdir(snapshotPath, { recursive: true });
+
+    const itemRelativePaths = accountSyncBackupRelativePaths();
+    const items = await Promise.all(
+      itemRelativePaths.map(async (relativePath) => {
+        const sourcePath = path.join(targetLocation.profilePath, relativePath);
+        const existed = await exists(sourcePath);
+        if (existed) {
+          await copyAccountSyncPath(sourcePath, path.join(snapshotPath, relativePath));
+        }
+
+        return {
+          relativePath,
+          existed
+        };
+      })
+    );
+
+    const metadata: AccountSyncBackupMetadata = {
+      id,
+      createdAt: new Date().toISOString(),
+      path: backupPath,
+      targetProfileId: targetProfile.id,
+      targetProfileName: targetProfile.name,
+      targetProfilePath: targetLocation.profilePath,
+      targetUserDataPath: targetLocation.userDataPath,
+      itemCount: items.length,
+      items
+    };
+
+    await fs.writeFile(path.join(backupPath, "backup.json"), `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
+    return summarizeAccountSyncBackup(metadata);
+  }
+
+  private async readAccountSyncBackupMetadata(backupId: string): Promise<AccountSyncBackupMetadata> {
+    const safeId = path.basename(String(backupId || ""));
+    if (!safeId || safeId !== backupId) {
+      throw new ProfileManagerError("账号同步备份 ID 无效。", "INVALID_BACKUP_ID");
+    }
+
+    const raw = await fs.readFile(path.join(this.accountSyncBackupDir, safeId, "backup.json"), "utf8");
+    const parsed = JSON.parse(raw) as AccountSyncBackupMetadata;
+    if (
+      !parsed ||
+      typeof parsed.id !== "string" ||
+      typeof parsed.targetProfilePath !== "string" ||
+      typeof parsed.targetUserDataPath !== "string" ||
+      !Array.isArray(parsed.items)
+    ) {
+      throw new ProfileManagerError("账号同步备份元数据无效。", "INVALID_BACKUP_METADATA");
+    }
+
+    return parsed;
+  }
+
+  private async restoreAccountSyncBackupMetadata(metadata: AccountSyncBackupMetadata): Promise<void> {
+    const snapshotPath = path.join(metadata.path, "snapshot");
+    for (const item of metadata.items) {
+      const relativePath = normalizeSafeRelativePath(item.relativePath);
+      const targetPath = path.join(metadata.targetProfilePath, relativePath);
+      const backupItemPath = path.join(snapshotPath, relativePath);
+
+      await fs.rm(targetPath, { recursive: true, force: true });
+      if (item.existed && (await exists(backupItemPath))) {
+        await copyAccountSyncPath(backupItemPath, targetPath);
+      }
+    }
   }
 
   private findIsolatedProfile(registry: Registry, id: string): StoredProfile {
@@ -1398,6 +1680,70 @@ function normalizeStoredMigratedExtension(extension: unknown): StoredMigratedExt
   };
 }
 
+async function readIsolatedProfileUserName(profileRootPath: string): Promise<string | null> {
+  const profileDataPath = await resolveIsolatedProfileDataPath(profileRootPath);
+  const preferences = await readJsonFile<Record<string, unknown>>(path.join(profileDataPath, "Preferences"));
+  if (!preferences) {
+    return null;
+  }
+
+  return accountDisplayNameFromPreferences(preferences);
+}
+
+async function resolveIsolatedProfileDataPath(profileRootPath: string): Promise<string> {
+  const defaultProfilePath = path.join(profileRootPath, "Default");
+  const [rootScore, defaultScore] = await Promise.all([
+    accountSyncDataScore(profileRootPath),
+    accountSyncDataScore(defaultProfilePath)
+  ]);
+
+  if (defaultScore > 0 || (await exists(defaultProfilePath)) || rootScore === 0) {
+    return defaultProfilePath;
+  }
+
+  return profileRootPath;
+}
+
+function accountDisplayNameFromPreferences(preferences: Record<string, unknown>): string | null {
+  const accountInfoValue = preferences.account_info;
+  if (Array.isArray(accountInfoValue)) {
+    for (const accountInfo of accountInfoValue) {
+      const label = accountDisplayNameFromRecord(accountInfo);
+      if (label) {
+        return label;
+      }
+    }
+  } else {
+    const label = accountDisplayNameFromRecord(accountInfoValue);
+    if (label) {
+      return label;
+    }
+  }
+
+  return (
+    stringValue(getNestedValue(preferences, ["profile", "user_name"])) ||
+    stringValue(getNestedValue(preferences, ["profile", "gaia_name"])) ||
+    stringValue(getNestedValue(preferences, ["google", "services", "username"])) ||
+    stringValue(getNestedValue(preferences, ["google", "services", "last_username"])) ||
+    null
+  );
+}
+
+function accountDisplayNameFromRecord(value: unknown): string | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  return (
+    stringValue(value.email) ||
+    stringValue(value.account_email) ||
+    stringValue(value.full_name) ||
+    stringValue(value.gaia_name) ||
+    stringValue(value.name) ||
+    null
+  );
+}
+
 async function scanProfileExtensions(profilePath: string): Promise<ProfileExtensionInfo[]> {
   const preferences = await readChromePreferences(profilePath);
   const securePreferences = await readChromeSecurePreferences(profilePath);
@@ -1690,6 +2036,191 @@ async function copyExtensionDataPath(
   return true;
 }
 
+function accountSyncCopySpecs(): AccountSyncPathSpec[] {
+  return [
+    { label: "Cookies", relativePath: "Cookies" },
+    { label: "Cookies journal", relativePath: "Cookies-journal" },
+    { label: "Cookies WAL", relativePath: "Cookies-wal" },
+    { label: "Cookies SHM", relativePath: "Cookies-shm" },
+    { label: "Network Cookies", relativePath: path.join("Network", "Cookies") },
+    { label: "Network Cookies journal", relativePath: path.join("Network", "Cookies-journal") },
+    { label: "Network Cookies WAL", relativePath: path.join("Network", "Cookies-wal") },
+    { label: "Network Cookies SHM", relativePath: path.join("Network", "Cookies-shm") },
+    { label: "Extension Cookies", relativePath: "Extension Cookies" },
+    { label: "Extension Cookies journal", relativePath: "Extension Cookies-journal" },
+    { label: "Local Storage", relativePath: "Local Storage" },
+    { label: "Session Storage", relativePath: "Session Storage" },
+    { label: "IndexedDB", relativePath: "IndexedDB" },
+    { label: "Storage", relativePath: "Storage" },
+    { label: "File System", relativePath: "File System" },
+    { label: "Service Worker", relativePath: "Service Worker" },
+    { label: "WebStorage", relativePath: "WebStorage" },
+    { label: "Databases", relativePath: "databases" },
+    { label: "Web Data", relativePath: "Web Data" },
+    { label: "Web Data journal", relativePath: "Web Data-journal" },
+    { label: "Account Web Data", relativePath: "Account Web Data" },
+    { label: "Account Web Data journal", relativePath: "Account Web Data-journal" },
+    { label: "Accounts", relativePath: "Accounts" },
+    { label: "Sync Data", relativePath: "Sync Data" },
+    { label: "Sync App Settings", relativePath: "Sync App Settings" },
+    { label: "Sync Extension Settings", relativePath: "Sync Extension Settings" },
+    { label: "Trusted Vault", relativePath: "trusted_vault.pb" },
+    { label: "Trust Tokens", relativePath: "Trust Tokens" },
+    { label: "Trust Tokens journal", relativePath: "Trust Tokens-journal" },
+    { label: "DIPS", relativePath: "DIPS" },
+    { label: "DIPS WAL", relativePath: "DIPS-wal" },
+    { label: "DIPS SHM", relativePath: "DIPS-shm" },
+    { label: "SharedStorage", relativePath: "SharedStorage" },
+    { label: "SharedStorage WAL", relativePath: "SharedStorage-wal" },
+    { label: "SharedStorage SHM", relativePath: "SharedStorage-shm" },
+    { label: "GCM Store", relativePath: "GCM Store" },
+    { label: "Network Persistent State", relativePath: "Network Persistent State" },
+    { label: "Transport Security", relativePath: "TransportSecurity" }
+  ];
+}
+
+function accountSyncBackupRelativePaths(): string[] {
+  return uniqueStrings(["Preferences", ...accountSyncCopySpecs().map((spec) => spec.relativePath)]);
+}
+
+async function existingAccountSyncSpecs(profilePath: string): Promise<AccountSyncPathSpec[]> {
+  const specs = accountSyncCopySpecs();
+  const existing = await Promise.all(
+    specs.map(async (spec): Promise<AccountSyncPathSpec | null> => ((await exists(path.join(profilePath, spec.relativePath))) ? spec : null))
+  );
+
+  return existing.filter((spec): spec is AccountSyncPathSpec => Boolean(spec));
+}
+
+async function accountSyncDataScore(profilePath: string): Promise<number> {
+  const markers = [
+    "Preferences",
+    "Cookies",
+    path.join("Network", "Cookies"),
+    "Local Storage",
+    "Account Web Data",
+    "Accounts",
+    "Sync Data"
+  ];
+  const existing = await Promise.all(markers.map((marker) => exists(path.join(profilePath, marker))));
+  return existing.filter(Boolean).length;
+}
+
+async function mergeAccountPreferenceValues(sourceProfilePath: string, targetProfilePath: string): Promise<boolean> {
+  const sourcePath = path.join(sourceProfilePath, "Preferences");
+  const targetPath = path.join(targetProfilePath, "Preferences");
+  const sourcePreferences = await readJsonFile<Record<string, unknown>>(sourcePath);
+  if (!sourcePreferences) {
+    return false;
+  }
+
+  const targetPreferences = (await readJsonFile<Record<string, unknown>>(targetPath)) || {};
+  let changed = false;
+
+  for (const preferencePath of accountPreferencePaths()) {
+    changed = copyPreferencePath(sourcePreferences, targetPreferences, preferencePath) || changed;
+  }
+
+  if (changed) {
+    await writeJsonFileAtomic(targetPath, targetPreferences);
+  }
+
+  return changed;
+}
+
+function accountPreferencePaths(): string[] {
+  return [
+    "account_info",
+    "account_tracker_service_last_update",
+    "account_values",
+    "dual_layer_user_pref_store.user_selected_sync_types",
+    "gaia_cookie",
+    "google.services",
+    "profile.avatar_index",
+    "profile.gaia_info_picture_file_name",
+    "profile.gaia_info_picture_url",
+    "profile.gaia_name",
+    "profile.managed_user_id",
+    "profile.user_name",
+    "signin",
+    "sync",
+    "trusted_vault"
+  ];
+}
+
+function copyPreferencePath(
+  sourcePreferences: Record<string, unknown>,
+  targetPreferences: Record<string, unknown>,
+  preferencePath: string
+): boolean {
+  const pathParts = preferencePath.split(".");
+  const sourceValue = getNestedValue(sourcePreferences, pathParts);
+  if (sourceValue === undefined) {
+    return deleteNestedValue(targetPreferences, pathParts);
+  }
+
+  setNestedValue(targetPreferences, pathParts, cloneJsonValue(sourceValue));
+  return true;
+}
+
+function getNestedValue(value: Record<string, unknown>, pathParts: string[]): unknown {
+  let current: unknown = value;
+  for (const pathPart of pathParts) {
+    if (!isRecord(current) || !Object.prototype.hasOwnProperty.call(current, pathPart)) {
+      return undefined;
+    }
+    current = current[pathPart];
+  }
+
+  return current;
+}
+
+function setNestedValue(target: Record<string, unknown>, pathParts: string[], value: unknown): void {
+  let current: Record<string, unknown> = target;
+  for (const pathPart of pathParts.slice(0, -1)) {
+    if (!isRecord(current[pathPart])) {
+      current[pathPart] = {};
+    }
+    current = current[pathPart] as Record<string, unknown>;
+  }
+
+  current[pathParts[pathParts.length - 1]] = value;
+}
+
+function deleteNestedValue(target: Record<string, unknown>, pathParts: string[]): boolean {
+  let current: Record<string, unknown> = target;
+  for (const pathPart of pathParts.slice(0, -1)) {
+    if (!isRecord(current[pathPart])) {
+      return false;
+    }
+    current = current[pathPart] as Record<string, unknown>;
+  }
+
+  const finalPart = pathParts[pathParts.length - 1];
+  if (!Object.prototype.hasOwnProperty.call(current, finalPart)) {
+    return false;
+  }
+
+  delete current[finalPart];
+  return true;
+}
+
+function cloneJsonValue(value: unknown): unknown {
+  return JSON.parse(JSON.stringify(value)) as unknown;
+}
+
+function summarizeAccountSyncBackup(metadata: AccountSyncBackupMetadata): AccountSyncBackupSummary {
+  return {
+    id: metadata.id,
+    createdAt: metadata.createdAt,
+    path: metadata.path,
+    targetProfileId: metadata.targetProfileId,
+    targetProfileName: metadata.targetProfileName,
+    targetProfilePath: metadata.targetProfilePath,
+    itemCount: metadata.itemCount
+  };
+}
+
 async function removeExtensionReferencesFromProfilePreferences(profilePath: string, extensionId: string): Promise<void> {
   await Promise.all(
     ["Preferences", "Secure Preferences"].map(async (fileName) => {
@@ -1847,6 +2378,15 @@ async function writeJsonFileAtomic(filePath: string, value: unknown): Promise<vo
 async function copyPath(sourcePath: string, targetPath: string): Promise<void> {
   await fs.mkdir(path.dirname(targetPath), { recursive: true });
   await fs.cp(sourcePath, targetPath, { recursive: true, force: true });
+}
+
+async function copyAccountSyncPath(sourcePath: string, targetPath: string): Promise<void> {
+  await fs.mkdir(path.dirname(targetPath), { recursive: true });
+  await fs.cp(sourcePath, targetPath, {
+    recursive: true,
+    force: true,
+    filter: (source) => path.basename(source) !== "LOCK"
+  });
 }
 
 function normalizeSafeRelativePath(relativePath: string): string {

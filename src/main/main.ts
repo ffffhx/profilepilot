@@ -2,6 +2,10 @@ import { app, BrowserWindow, ipcMain } from "electron";
 import path from "node:path";
 import { IPC_CHANNELS } from "../shared/ipc";
 import type {
+  AccountSyncBackupSummary,
+  AccountSyncRequest,
+  AccountSyncRestoreResult,
+  AccountSyncResult,
   AppState,
   DeleteProfileResult,
   ExtensionDeleteResult,
@@ -57,9 +61,13 @@ function createMainWindow(): void {
                   hasMigrateExtensions: typeof window.profileManager?.migrateExtensions === "function",
                   hasDeleteProfileExtension: typeof window.profileManager?.deleteProfileExtension === "function",
                   hasRestoreExtensionMigrationBackup: typeof window.profileManager?.restoreExtensionMigrationBackup === "function",
+                  hasSyncAccount: typeof window.profileManager?.syncAccount === "function",
+                  hasRestoreAccountSyncBackup: typeof window.profileManager?.restoreAccountSyncBackup === "function",
                   buttonCount: document.querySelectorAll("button").length,
                   statusLabels: Array.from(document.querySelectorAll(".status-label")).map((item) => item.textContent),
                   statusValues: Array.from(document.querySelectorAll(".status-value")).map((item) => item.textContent),
+                  accountSyncTitle: document.querySelector("[data-account-sync] h2")?.textContent || null,
+                  accountSyncSelectCount: document.querySelectorAll("[data-account-sync] select").length,
                   migrationTitle: document.querySelector("[data-extension-migration] h2")?.textContent || null,
                   migrationSelectCount: document.querySelectorAll("[data-extension-migration] select").length,
                   shellWidthRatio: (() => {
@@ -94,6 +102,7 @@ function createMainWindow(): void {
                   defaultProfileListeningPorts: [],
                   firstProfileExtensionCount: null,
                   backupCount: null,
+                  accountSyncBackupCount: null,
                   crud: null
                 };
 
@@ -107,6 +116,7 @@ function createMainWindow(): void {
                 smokeResult.defaultProfilePids = defaultProfile?.pids ?? [];
                 smokeResult.defaultProfileListeningPorts = defaultProfile?.listeningPorts ?? [];
                 smokeResult.backupCount = (await window.profileManager.listExtensionMigrationBackups()).length;
+                smokeResult.accountSyncBackupCount = (await window.profileManager.listAccountSyncBackups()).length;
                 const firstProfileForScan = visibleState.profiles[0];
                 if (firstProfileForScan) {
                   const scan = await window.profileManager.scanProfileExtensions(firstProfileForScan.id);
@@ -247,6 +257,21 @@ function registerIpcHandlers(): void {
     IPC_CHANNELS.restoreExtensionMigrationBackup,
     async (_event, backupId: string): Promise<ExtensionMigrationRestoreResult> => {
       return profileManager.restoreExtensionMigrationBackup(backupId);
+    }
+  );
+
+  ipcMain.handle(IPC_CHANNELS.syncAccount, async (_event, request: AccountSyncRequest): Promise<AccountSyncResult> => {
+    return profileManager.syncAccount(request);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.listAccountSyncBackups, async (): Promise<AccountSyncBackupSummary[]> => {
+    return profileManager.listAccountSyncBackups();
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.restoreAccountSyncBackup,
+    async (_event, backupId: string): Promise<AccountSyncRestoreResult> => {
+      return profileManager.restoreAccountSyncBackup(backupId);
     }
   );
 }

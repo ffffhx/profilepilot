@@ -183,6 +183,58 @@ export interface ExtensionMigrationRestoreResult {
   state: AppState;
 }
 
+export interface AccountSyncRequest {
+  sourceProfileId: string;
+  targetProfileId: string;
+  launchTarget: boolean;
+}
+
+export interface AccountSyncCopiedItem {
+  label: string;
+  relativePath: string;
+}
+
+export interface AccountSyncSkippedItem {
+  label: string;
+  relativePath: string;
+  reason: string;
+}
+
+export interface AccountSyncBackupItem {
+  relativePath: string;
+  existed: boolean;
+}
+
+export interface AccountSyncBackupSummary {
+  id: string;
+  createdAt: string;
+  path: string;
+  targetProfileId: string;
+  targetProfileName: string;
+  targetProfilePath: string;
+  itemCount: number;
+}
+
+export interface AccountSyncBackupMetadata extends AccountSyncBackupSummary {
+  targetUserDataPath: string;
+  items: AccountSyncBackupItem[];
+}
+
+export interface AccountSyncResult {
+  sourceProfileId: string;
+  targetProfileId: string;
+  copiedItems: AccountSyncCopiedItem[];
+  skippedItems: AccountSyncSkippedItem[];
+  backup: AccountSyncBackupSummary;
+  launchedTarget: boolean;
+  state: AppState;
+}
+
+export interface AccountSyncRestoreResult {
+  backup: AccountSyncBackupSummary;
+  state: AppState;
+}
+
 export interface ProfileManagerApi {
   getState(): Promise<AppState>;
   createProfile(name: string): Promise<AppState>;
@@ -198,4 +250,7 @@ export interface ProfileManagerApi {
   deleteProfileExtension(profileId: string, extensionId: string): Promise<ExtensionDeleteResult>;
   listExtensionMigrationBackups(): Promise<ExtensionMigrationBackupSummary[]>;
   restoreExtensionMigrationBackup(backupId: string): Promise<ExtensionMigrationRestoreResult>;
+  syncAccount(request: AccountSyncRequest): Promise<AccountSyncResult>;
+  listAccountSyncBackups(): Promise<AccountSyncBackupSummary[]>;
+  restoreAccountSyncBackup(backupId: string): Promise<AccountSyncRestoreResult>;
 }

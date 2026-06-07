@@ -1,6 +1,10 @@
 import { contextBridge, ipcRenderer } from "electron";
 import { IPC_CHANNELS } from "./shared/ipc";
 import type {
+  AccountSyncBackupSummary,
+  AccountSyncRequest,
+  AccountSyncRestoreResult,
+  AccountSyncResult,
   AppState,
   DeleteProfileResult,
   ExtensionDeleteResult,
@@ -32,7 +36,13 @@ const profileManagerApi: ProfileManagerApi = {
   listExtensionMigrationBackups: (): Promise<ExtensionMigrationBackupSummary[]> =>
     ipcRenderer.invoke(IPC_CHANNELS.listExtensionMigrationBackups),
   restoreExtensionMigrationBackup: (backupId: string): Promise<ExtensionMigrationRestoreResult> =>
-    ipcRenderer.invoke(IPC_CHANNELS.restoreExtensionMigrationBackup, backupId)
+    ipcRenderer.invoke(IPC_CHANNELS.restoreExtensionMigrationBackup, backupId),
+  syncAccount: (request: AccountSyncRequest): Promise<AccountSyncResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.syncAccount, request),
+  listAccountSyncBackups: (): Promise<AccountSyncBackupSummary[]> =>
+    ipcRenderer.invoke(IPC_CHANNELS.listAccountSyncBackups),
+  restoreAccountSyncBackup: (backupId: string): Promise<AccountSyncRestoreResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.restoreAccountSyncBackup, backupId)
 };
 
 contextBridge.exposeInMainWorld("profileManager", profileManagerApi);

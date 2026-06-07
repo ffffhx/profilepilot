@@ -163,6 +163,48 @@ interface ExtensionMigrationRestoreResult {
   state: AppState;
 }
 
+interface AccountSyncRequest {
+  sourceProfileId: string;
+  targetProfileId: string;
+  launchTarget: boolean;
+}
+
+interface AccountSyncCopiedItem {
+  label: string;
+  relativePath: string;
+}
+
+interface AccountSyncSkippedItem {
+  label: string;
+  relativePath: string;
+  reason: string;
+}
+
+interface AccountSyncBackupSummary {
+  id: string;
+  createdAt: string;
+  path: string;
+  targetProfileId: string;
+  targetProfileName: string;
+  targetProfilePath: string;
+  itemCount: number;
+}
+
+interface AccountSyncResult {
+  sourceProfileId: string;
+  targetProfileId: string;
+  copiedItems: AccountSyncCopiedItem[];
+  skippedItems: AccountSyncSkippedItem[];
+  backup: AccountSyncBackupSummary;
+  launchedTarget: boolean;
+  state: AppState;
+}
+
+interface AccountSyncRestoreResult {
+  backup: AccountSyncBackupSummary;
+  state: AppState;
+}
+
 interface ProfileManagerApi {
   getState(): Promise<AppState>;
   createProfile(name: string): Promise<AppState>;
@@ -178,6 +220,9 @@ interface ProfileManagerApi {
   deleteProfileExtension(profileId: string, extensionId: string): Promise<ExtensionDeleteResult>;
   listExtensionMigrationBackups(): Promise<ExtensionMigrationBackupSummary[]>;
   restoreExtensionMigrationBackup(backupId: string): Promise<ExtensionMigrationRestoreResult>;
+  syncAccount(request: AccountSyncRequest): Promise<AccountSyncResult>;
+  listAccountSyncBackups(): Promise<AccountSyncBackupSummary[]>;
+  restoreAccountSyncBackup(backupId: string): Promise<AccountSyncRestoreResult>;
 }
 
 interface Window {
@@ -185,6 +230,13 @@ interface Window {
 }
 
 type ConfirmAction = "close" | "delete";
+type BusyState = {
+  key: string;
+  message: string;
+  profileId?: string;
+  extensionId?: string;
+  backupId?: string;
+};
 type ModalState =
   | { kind: "new" }
   | { kind: "rename"; profileId: string }
@@ -210,6 +262,7 @@ let state: AppState | null = null;
 let selectedId: string | null = null;
 let modal: ModalState = null;
 let busy = false;
+let busyState: BusyState | null = null;
 let toast: string | null = null;
 let toastKind: ToastKind = "normal";
 let toastTimer: number | undefined;
@@ -223,6 +276,11 @@ let extensionMigrationResult: ExtensionMigrationResult | null = null;
 let extensionMigrationBackups: ExtensionMigrationBackupSummary[] = [];
 let openProfileMenuId: string | null = null;
 let migrationSourceMenuOpen = false;
+let accountSyncSourceId: string | null = null;
+let accountSyncTargetId: string | null = null;
+let launchSyncedProfile = true;
+let accountSyncResult: AccountSyncResult | null = null;
+let accountSyncBackups: AccountSyncBackupSummary[] = [];
 
 const dateFormatter = new Intl.DateTimeFormat("zh-CN", {
   month: "2-digit",
@@ -240,12 +298,14 @@ function profileApi(): ProfileManagerApi {
 }
 
 async function loadState(): Promise<void> {
-  const [nextState, backups] = await Promise.all([
+  const [nextState, backups, accountBackups] = await Promise.all([
     profileApi().getState(),
-    profileApi().listExtensionMigrationBackups()
+    profileApi().listExtensionMigrationBackups(),
+    profileApi().listAccountSyncBackups()
   ]);
   state = nextState;
   extensionMigrationBackups = backups;
+  accountSyncBackups = accountBackups;
   const profiles = state.profiles || [];
 
   if (!profiles.some((profile) => profile.id === selectedId)) {
@@ -256,6 +316,7 @@ async function loadState(): Promise<void> {
   }
 
   normalizeMigrationProfileSelection(profiles);
+  normalizeAccountSyncProfileSelection(profiles);
 
   render();
 }
@@ -282,6 +343,26 @@ function normalizeMigrationProfileSelection(profiles: PublicProfile[]): void {
   }
 }
 
+function normalizeAccountSyncProfileSelection(profiles: PublicProfile[]): void {
+  if (!profiles.length) {
+    accountSyncSourceId = null;
+    accountSyncTargetId = null;
+    accountSyncResult = null;
+    return;
+  }
+
+  if (!profiles.some((profile) => profile.id === accountSyncSourceId)) {
+    accountSyncSourceId = profiles.find((profile) => profile.userName)?.id || selectedId || profiles[0].id;
+  }
+
+  if (!profiles.some((profile) => profile.id === accountSyncTargetId) || accountSyncTargetId === accountSyncSourceId) {
+    accountSyncTargetId =
+      profiles.find((profile) => profile.id !== accountSyncSourceId && profile.source === "isolated")?.id ||
+      profiles.find((profile) => profile.id !== accountSyncSourceId)?.id ||
+      null;
+  }
+}
+
 function setToast(message: string, kind: ToastKind = "normal"): void {
   toast = message;
   toastKind = kind;
@@ -294,12 +375,16 @@ function setToast(message: string, kind: ToastKind = "normal"): void {
   }, 3200);
 }
 
-async function withBusy(work: () => Promise<unknown>, successMessage?: string): Promise<void> {
+async function withBusy(work: () => Promise<unknown>, successMessage?: string, nextBusyState?: BusyState): Promise<void> {
   if (busy) {
     return;
   }
 
   busy = true;
+  busyState = nextBusyState || {
+    key: "generic",
+    message: "正在处理…"
+  };
   render();
 
   try {
@@ -311,8 +396,39 @@ async function withBusy(work: () => Promise<unknown>, successMessage?: string): 
     setToast(formatErrorMessage(error), "error");
   } finally {
     busy = false;
+    busyState = null;
     await loadState().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
   }
+}
+
+function isBusyAction(key: string, match: Partial<Omit<BusyState, "key" | "message">> = {}): boolean {
+  const activeBusyState = busyState;
+  if (!activeBusyState || activeBusyState.key !== key) {
+    return false;
+  }
+
+  return Object.entries(match).every(([field, value]) => activeBusyState[field as keyof BusyState] === value);
+}
+
+function renderBusyBanner(): string {
+  if (!busyState) {
+    return "";
+  }
+
+  return `
+    <div class="busy-banner" role="status" aria-live="polite">
+      <span class="sync-spinner" aria-hidden="true"></span>
+      <span>${escapeHtml(busyState.message)}</span>
+    </div>
+  `;
+}
+
+function renderButtonLabel(isLoading: boolean, idleLabel: string, loadingLabel: string): string {
+  if (!isLoading) {
+    return escapeHtml(idleLabel);
+  }
+
+  return `<span class="inline-spinner" aria-hidden="true"></span><span>${escapeHtml(loadingLabel)}</span>`;
 }
 
 function formatErrorMessage(error: unknown): string {
@@ -337,6 +453,7 @@ function render(): void {
   const currentNote = state.runningProfiles.length
     ? `${state.runningProfiles.length} 个 Profile 正在运行`
     : "当前没有正在运行的 Profile";
+  const refreshing = isBusyAction("refresh");
 
   appRoot.className = "";
   appRoot.innerHTML = `
@@ -350,10 +467,14 @@ function render(): void {
           </div>
         </div>
         <div class="header-actions">
-          <button type="button" data-action="refresh" ${busy ? "disabled" : ""}>刷新</button>
+          <button type="button" class="${refreshing ? "loading" : ""}" data-action="refresh" ${busy ? "disabled" : ""}>
+            ${renderButtonLabel(refreshing, "刷新", "刷新中…")}
+          </button>
           <button type="button" class="primary" data-action="new-profile" ${busy ? "disabled" : ""}>新建独立 Profile</button>
         </div>
       </header>
+
+      ${renderBusyBanner()}
 
       <section class="status-grid" aria-label="Profile status">
         <div class="status-item current">
@@ -373,6 +494,7 @@ function render(): void {
         </div>
       </section>
 
+      ${renderAccountSyncPanel(profiles)}
       ${renderExtensionMigrationPanel(profiles)}
 
       <main class="layout">
@@ -392,6 +514,164 @@ function render(): void {
     ${modal?.kind === "extension-migration" ? renderExtensionMigrationModal(profiles) : ""}
     ${modal?.kind === "confirm" ? renderConfirmModal(modal) : ""}
     ${toast ? `<div class="toast ${toastKind === "error" ? "error" : ""}" role="status">${escapeHtml(toast)}</div>` : ""}
+  `;
+}
+
+function renderAccountSyncPanel(profiles: PublicProfile[]): string {
+  const sourceId = accountSyncSourceId || profiles[0]?.id || "";
+  const sourceProfile = profiles.find((profile) => profile.id === sourceId) || null;
+  const targetId =
+    accountSyncTargetId && accountSyncTargetId !== sourceId
+      ? accountSyncTargetId
+      : profiles.find((profile) => profile.id !== sourceId)?.id || "";
+  const targetProfile = profiles.find((profile) => profile.id === targetId) || null;
+  const runningBlocker = targetProfile?.running ? targetProfile : null;
+  const canSync = Boolean(sourceProfile && targetProfile && sourceProfile.id !== targetProfile.id && !runningBlocker);
+  const syncingAccount = isBusyAction("account-sync");
+
+  return `
+    <section class="account-sync-panel" data-account-sync aria-busy="${syncingAccount ? "true" : "false"}">
+      <div class="section-head">
+        <div>
+          <h2>账号同步</h2>
+          <span class="section-subtitle">Account session</span>
+        </div>
+      </div>
+
+      <div class="account-sync-grid">
+        <div class="field compact">
+          <label for="account-sync-source">源 Profile</label>
+          <select id="account-sync-source" data-account-sync-source ${busy || !profiles.length ? "disabled" : ""}>
+            ${renderProfileOptions(profiles, sourceId)}
+          </select>
+        </div>
+        <div class="field compact">
+          <label for="account-sync-target">目标 Profile</label>
+          <select id="account-sync-target" data-account-sync-target ${busy || profiles.length < 2 ? "disabled" : ""}>
+            ${renderProfileOptions(profiles, targetId, sourceId)}
+          </select>
+        </div>
+        <label class="check-control account-sync-launch">
+          <input type="checkbox" data-launch-synced-profile ${launchSyncedProfile ? "checked" : ""} ${busy ? "disabled" : ""} />
+          <span>同步后启动目标</span>
+        </label>
+        <button type="button" class="primary ${syncingAccount ? "loading" : ""}" data-action="sync-account" ${busy || !canSync ? "disabled" : ""}>
+          ${renderButtonLabel(syncingAccount, "同步账号", "同步中…")}
+        </button>
+      </div>
+
+      ${syncingAccount ? renderAccountSyncLoading(sourceProfile, targetProfile) : ""}
+
+      <div class="account-sync-note ${runningBlocker ? "warn" : ""}">
+        ${escapeHtml(accountSyncNote(sourceProfile, targetProfile, runningBlocker))}
+      </div>
+
+      ${accountSyncResult ? renderAccountSyncResult(accountSyncResult) : ""}
+      ${renderAccountSyncBackups()}
+    </section>
+  `;
+}
+
+function renderAccountSyncLoading(sourceProfile: PublicProfile | null, targetProfile: PublicProfile | null): string {
+  const sourceName = sourceProfile?.name || "源 Profile";
+  const targetName = targetProfile?.name || "目标 Profile";
+
+  return `
+    <div class="account-sync-loading" role="status" aria-live="polite">
+      <span class="sync-spinner" aria-hidden="true"></span>
+      <span>正在同步 ${escapeHtml(sourceName)} 到 ${escapeHtml(targetName)}…</span>
+    </div>
+  `;
+}
+
+function accountSyncNote(
+  sourceProfile: PublicProfile | null,
+  targetProfile: PublicProfile | null,
+  runningBlocker: PublicProfile | null
+): string {
+  if (!sourceProfile || !targetProfile) {
+    return "至少需要两个 Profile 才能同步账号。";
+  }
+
+  if (runningBlocker) {
+    return `请先关闭目标 ${runningBlocker.name}，再刷新后同步。`;
+  }
+
+  if (sourceProfile.running) {
+    return `会同步 ${sourceProfile.name} 当前已落盘的登录态到 ${targetProfile.name}，并自动创建目标备份。`;
+  }
+
+  return `会用 ${sourceProfile.name} 的登录态覆盖 ${targetProfile.name} 的登录态，并自动创建目标备份。`;
+}
+
+function renderAccountSyncResult(result: AccountSyncResult): string {
+  const restoring = isBusyAction("restore-account-backup", { backupId: result.backup.id });
+
+  return `
+    <div class="account-sync-result">
+      <div class="migration-result-grid account-sync-result-grid">
+        <div>
+          <span>已同步</span>
+          <strong>${result.copiedItems.length}</strong>
+        </div>
+        <div>
+          <span>跳过</span>
+          <strong>${result.skippedItems.length}</strong>
+        </div>
+        <div>
+          <span>目标启动</span>
+          <strong>${result.launchedTarget ? "是" : "否"}</strong>
+        </div>
+      </div>
+      <div class="migration-result-body">
+        <div>
+          <strong>备份</strong>
+          <code class="path-box compact">${escapeHtml(result.backup.path)}</code>
+        </div>
+        <button type="button" class="action-button warn ${restoring ? "loading" : ""}" data-action="restore-account-backup" data-backup-id="${escapeHtml(result.backup.id)}" ${busy ? "disabled" : ""}>
+          ${renderButtonLabel(restoring, "恢复这个备份", "恢复中…")}
+        </button>
+      </div>
+      ${result.skippedItems.length ? renderAccountSyncSkippedItems(result.skippedItems) : ""}
+    </div>
+  `;
+}
+
+function renderAccountSyncSkippedItems(items: AccountSyncSkippedItem[]): string {
+  return `
+    <div class="skipped-list">
+      ${items
+        .slice(0, 8)
+        .map((item) => `<span><strong>${escapeHtml(item.label)}</strong> ${escapeHtml(item.reason)}</span>`)
+        .join("")}
+      ${items.length > 8 ? `<span>还有 ${items.length - 8} 项未在源 Profile 中找到。</span>` : ""}
+    </div>
+  `;
+}
+
+function renderAccountSyncBackups(): string {
+  const backups = accountSyncBackups.slice(0, 4);
+  if (!backups.length) {
+    return "";
+  }
+
+  return `
+    <div class="backup-strip">
+      <span class="backup-strip-title">账号备份</span>
+      ${backups
+        .map(
+          (backup) => {
+            const restoring = isBusyAction("restore-account-backup", { backupId: backup.id });
+
+            return `
+            <button type="button" class="backup-chip ${restoring ? "loading" : ""}" data-action="restore-account-backup" data-backup-id="${escapeHtml(backup.id)}" ${busy ? "disabled" : ""}>
+              ${renderButtonLabel(restoring, `${backup.targetProfileName} · ${formatDate(backup.createdAt)}`, "恢复中…")}
+            </button>
+          `;
+          }
+        )
+        .join("")}
+    </div>
   `;
 }
 
@@ -450,6 +730,13 @@ function renderProfileActions(profile: PublicProfile): string {
   const menuOpen = openProfileMenuId === profile.id;
   const cdpLaunchDisabled = busy || profile.running || profile.source !== "isolated";
   const deleteDisabled = busy || profile.running || !profile.deletable;
+  const focusing = isBusyAction("focus-profile", { profileId: profile.id });
+  const closing = isBusyAction("close-profile", { profileId: profile.id });
+  const launching = isBusyAction("launch-profile", { profileId: profile.id });
+  const launchingCdp = isBusyAction("launch-cdp", { profileId: profile.id });
+  const openingFolder = isBusyAction("open-folder", { profileId: profile.id });
+  const renaming = isBusyAction("rename-profile", { profileId: profile.id });
+  const deleting = isBusyAction("delete-profile", { profileId: profile.id });
 
   return `
     <div class="profile-actions" data-profile-actions>
@@ -457,15 +744,21 @@ function renderProfileActions(profile: PublicProfile): string {
         profile.running
           ? `
             <span class="action-tooltip" data-tooltip="${escapeHtml(focusButtonTitle(profile))}">
-              <button type="button" class="action-button accent" data-action="focus-profile" data-id="${profile.id}" ${busy ? "disabled" : ""}>显示</button>
+              <button type="button" class="action-button accent ${focusing ? "loading" : ""}" data-action="focus-profile" data-id="${profile.id}" ${busy ? "disabled" : ""}>
+                ${renderButtonLabel(focusing, "显示", "显示中…")}
+              </button>
             </span>
             <span class="action-tooltip" data-tooltip="${escapeHtml(closeButtonTitle(profile))}">
-              <button type="button" class="action-button warn" data-action="close-profile" data-id="${profile.id}" ${busy ? "disabled" : ""}>关闭</button>
+              <button type="button" class="action-button warn ${closing ? "loading" : ""}" data-action="close-profile" data-id="${profile.id}" ${busy ? "disabled" : ""}>
+                ${renderButtonLabel(closing, "关闭", "关闭中…")}
+              </button>
             </span>
           `
           : `
             <span class="action-tooltip" data-tooltip="${escapeHtml(launchButtonTitle(profile))}">
-              <button type="button" class="action-button accent" data-action="launch" data-id="${profile.id}" ${busy ? "disabled" : ""}>启动</button>
+              <button type="button" class="action-button accent ${launching ? "loading" : ""}" data-action="launch" data-id="${profile.id}" ${busy ? "disabled" : ""}>
+                ${renderButtonLabel(launching, "启动", "启动中…")}
+              </button>
             </span>
           `
       }
@@ -475,12 +768,20 @@ function renderProfileActions(profile: PublicProfile): string {
           ? `
             <div class="action-menu" role="menu">
               <span class="action-tooltip" data-tooltip="${escapeHtml(cdpLaunchButtonTitle(profile))}">
-                <button type="button" data-action="launch-cdp" data-id="${profile.id}" ${cdpLaunchDisabled ? "disabled" : ""}>CDP启动</button>
+                <button type="button" class="${launchingCdp ? "loading" : ""}" data-action="launch-cdp" data-id="${profile.id}" ${cdpLaunchDisabled ? "disabled" : ""}>
+                  ${renderButtonLabel(launchingCdp, "CDP启动", "启动中…")}
+                </button>
               </span>
-              <button type="button" data-action="open-folder" data-id="${profile.id}" ${busy ? "disabled" : ""}>打开目录</button>
-              <button type="button" data-action="rename-profile" data-id="${profile.id}" ${busy ? "disabled" : ""}>修改名称</button>
+              <button type="button" class="${openingFolder ? "loading" : ""}" data-action="open-folder" data-id="${profile.id}" ${busy ? "disabled" : ""}>
+                ${renderButtonLabel(openingFolder, "打开目录", "打开中…")}
+              </button>
+              <button type="button" class="${renaming ? "loading" : ""}" data-action="rename-profile" data-id="${profile.id}" ${busy ? "disabled" : ""}>
+                ${renderButtonLabel(renaming, "修改名称", "保存中…")}
+              </button>
               <span class="action-tooltip" data-tooltip="${escapeHtml(deleteButtonTitle(profile))}">
-                <button type="button" class="danger" data-action="delete" data-id="${profile.id}" ${deleteDisabled ? "disabled" : ""}>删除 Profile</button>
+                <button type="button" class="danger ${deleting ? "loading" : ""}" data-action="delete" data-id="${profile.id}" ${deleteDisabled ? "disabled" : ""}>
+                  ${renderButtonLabel(deleting, "删除 Profile", "删除中…")}
+                </button>
               </span>
             </div>
           `
@@ -511,6 +812,7 @@ function renderExtensionMigrationPanel(profiles: PublicProfile[]): string {
   );
   const hasAvailableTarget = profiles.some((profile) => profile.id !== sourceId);
   const canMigrate = Boolean(sourceProfile && activeScan && selectedCount && hasAvailableTarget);
+  const scanning = isBusyAction("scan-extensions");
 
   return `
     <section class="migration-panel" data-extension-migration>
@@ -526,7 +828,9 @@ function renderExtensionMigrationPanel(profiles: PublicProfile[]): string {
           <span id="migration-source-label">源 Profile</span>
           ${renderMigrationSourcePicker(profiles, sourceId, sourceProfile)}
         </div>
-        <button type="button" data-action="scan-extensions" ${busy || !sourceProfile ? "disabled" : ""}>扫描源 Profile 插件</button>
+        <button type="button" class="${scanning ? "loading" : ""}" data-action="scan-extensions" ${busy || !sourceProfile ? "disabled" : ""}>
+          ${renderButtonLabel(scanning, "扫描源 Profile 插件", "扫描中…")}
+        </button>
         ${sourceProfile ? renderMigrationSourceSummary(sourceProfile, activeScan) : ""}
       </div>
 
@@ -681,6 +985,7 @@ function renderExtensionScan(
 function renderExtensionRow(extension: ProfileExtensionInfo): string {
   const selected = selectedExtensionIds.has(extension.id);
   const dataLabels = extension.dataPaths.map((item) => item.label).join("、");
+  const deleting = isBusyAction("delete-extension", { extensionId: extension.id });
 
   return `
     <tr>
@@ -706,7 +1011,9 @@ function renderExtensionRow(extension: ProfileExtensionInfo): string {
         <strong class="extension-plan">${escapeHtml(extensionMigrationCapabilityLabel(extension))}</strong>
       </td>
       <td>
-        <button type="button" class="action-button danger" data-action="delete-extension" data-extension-id="${escapeHtml(extension.id)}" ${busy ? "disabled" : ""}>删除</button>
+        <button type="button" class="action-button danger ${deleting ? "loading" : ""}" data-action="delete-extension" data-extension-id="${escapeHtml(extension.id)}" ${busy ? "disabled" : ""}>
+          ${renderButtonLabel(deleting, "删除", "删除中…")}
+        </button>
       </td>
     </tr>
   `;
@@ -715,6 +1022,7 @@ function renderExtensionRow(extension: ProfileExtensionInfo): string {
 function renderExtensionMigrationResult(result: ExtensionMigrationResult): string {
   const copiedWebStoreCount = result.copiedExtensions.filter((extension) => extension.fromWebStore).length;
   const copiedLocalCount = result.copiedExtensions.length - copiedWebStoreCount;
+  const restoring = isBusyAction("restore-extension-backup", { backupId: result.backup.id });
 
   return `
     <div class="migration-result">
@@ -741,7 +1049,9 @@ function renderExtensionMigrationResult(result: ExtensionMigrationResult): strin
           <strong>备份</strong>
           <code class="path-box compact">${escapeHtml(result.backup.path)}</code>
         </div>
-        <button type="button" class="action-button warn" data-action="restore-extension-backup" data-backup-id="${escapeHtml(result.backup.id)}" ${busy ? "disabled" : ""}>恢复这个备份</button>
+        <button type="button" class="action-button warn ${restoring ? "loading" : ""}" data-action="restore-extension-backup" data-backup-id="${escapeHtml(result.backup.id)}" ${busy ? "disabled" : ""}>
+          ${renderButtonLabel(restoring, "恢复这个备份", "恢复中…")}
+        </button>
       </div>
       ${result.skippedExtensions.length ? renderSkippedExtensions(result.skippedExtensions) : ""}
     </div>
@@ -772,11 +1082,15 @@ function renderExtensionBackups(): string {
       <span class="backup-strip-title">最近备份</span>
       ${backups
         .map(
-          (backup) => `
-            <button type="button" class="backup-chip" data-action="restore-extension-backup" data-backup-id="${escapeHtml(backup.id)}" ${busy ? "disabled" : ""}>
-              ${escapeHtml(backup.targetProfileName)} · ${formatDate(backup.createdAt)}
+          (backup) => {
+            const restoring = isBusyAction("restore-extension-backup", { backupId: backup.id });
+
+            return `
+            <button type="button" class="backup-chip ${restoring ? "loading" : ""}" data-action="restore-extension-backup" data-backup-id="${escapeHtml(backup.id)}" ${busy ? "disabled" : ""}>
+              ${renderButtonLabel(restoring, `${backup.targetProfileName} · ${formatDate(backup.createdAt)}`, "恢复中…")}
             </button>
-          `
+          `;
+          }
         )
         .join("")}
     </div>
@@ -850,6 +1164,8 @@ function renderDetails(profile: PublicProfile | null): string {
 }
 
 function renderNewModal(): string {
+  const creating = isBusyAction("create-profile");
+
   return `
     <div class="modal-backdrop" data-action="close-modal">
       <form class="modal" data-create-form>
@@ -860,7 +1176,9 @@ function renderNewModal(): string {
         </div>
         <div class="modal-actions">
           <button type="button" data-action="close-modal">取消</button>
-          <button type="submit" class="primary" ${busy ? "disabled" : ""}>创建</button>
+          <button type="submit" class="primary ${creating ? "loading" : ""}" ${busy ? "disabled" : ""}>
+            ${renderButtonLabel(creating, "创建", "创建中…")}
+          </button>
         </div>
       </form>
     </div>
@@ -872,6 +1190,7 @@ function renderRenameModal(profileId: string): string {
   if (!profile) {
     return "";
   }
+  const renaming = isBusyAction("rename-profile", { profileId });
 
   return `
     <div class="modal-backdrop" data-action="close-modal">
@@ -884,7 +1203,9 @@ function renderRenameModal(profileId: string): string {
         </div>
         <div class="modal-actions">
           <button type="button" data-action="close-modal">取消</button>
-          <button type="submit" class="primary" ${busy ? "disabled" : ""}>保存</button>
+          <button type="submit" class="primary ${renaming ? "loading" : ""}" ${busy ? "disabled" : ""}>
+            ${renderButtonLabel(renaming, "保存", "保存中…")}
+          </button>
         </div>
       </form>
     </div>
@@ -896,6 +1217,7 @@ function renderCdpModal(profileId: string): string {
   if (!profile) {
     return "";
   }
+  const launching = isBusyAction("launch-cdp", { profileId });
 
   return `
     <div class="modal-backdrop" data-action="close-modal">
@@ -910,7 +1232,9 @@ function renderCdpModal(profileId: string): string {
         </div>
         <div class="modal-actions">
           <button type="button" data-action="close-modal">取消</button>
-          <button type="submit" class="solid" ${busy ? "disabled" : ""}>启动 CDP</button>
+          <button type="submit" class="solid ${launching ? "loading" : ""}" ${busy ? "disabled" : ""}>
+            ${renderButtonLabel(launching, "启动 CDP", "启动中…")}
+          </button>
         </div>
       </form>
     </div>
@@ -927,6 +1251,7 @@ function renderExtensionMigrationModal(profiles: PublicProfile[]): string {
       : profiles.find((profile) => profile.id !== sourceId)?.id || "";
   const selectedExtensions = activeScan?.extensions.filter((extension) => selectedExtensionIds.has(extension.id)) || [];
   const selectedWithData = selectedExtensions.filter((extension) => extension.hasLocalData).length;
+  const migrating = isBusyAction("migrate-extensions");
 
   if (!sourceProfile || !activeScan || !selectedExtensions.length) {
     return "";
@@ -970,7 +1295,9 @@ function renderExtensionMigrationModal(profiles: PublicProfile[]): string {
         </div>
         <div class="modal-actions">
           <button type="button" data-action="close-modal">取消</button>
-          <button type="submit" class="primary" ${busy || !targetId ? "disabled" : ""}>开始迁移</button>
+          <button type="submit" class="primary ${migrating ? "loading" : ""}" ${busy || !targetId ? "disabled" : ""}>
+            ${renderButtonLabel(migrating, "开始迁移", "迁移中…")}
+          </button>
         </div>
       </form>
     </div>
@@ -1264,11 +1591,84 @@ appRoot.addEventListener("click", (event) => {
     }
 
     if (confirmAction === "close") {
-      void withBusy(() => profileApi().closeProfile(profile.id), `已请求关闭 ${profile.name}`);
+      void withBusy(() => profileApi().closeProfile(profile.id), `已请求关闭 ${profile.name}`, {
+        key: "close-profile",
+        message: `正在关闭 ${profile.name}…`,
+        profileId: profile.id
+      });
       return;
     }
 
-    void withBusy(() => profileApi().deleteProfile(profile.id), `已删除 ${profile.name}`);
+    void withBusy(() => profileApi().deleteProfile(profile.id), `已删除 ${profile.name}`, {
+      key: "delete-profile",
+      message: `正在删除 ${profile.name}…`,
+      profileId: profile.id
+    });
+    return;
+  }
+
+  if (action === "sync-account") {
+    const sourceId = accountSyncSourceId;
+    const targetId = accountSyncTargetId;
+    const sourceProfile = state.profiles.find((profile) => profile.id === sourceId);
+    const targetProfile = state.profiles.find((profile) => profile.id === targetId);
+    if (!sourceId || !targetId || !sourceProfile || !targetProfile || sourceId === targetId) {
+      setToast("请选择两个不同的 Profile", "error");
+      return;
+    }
+    if (targetProfile.running) {
+      setToast("同步前请先关闭目标 Profile，然后刷新列表。", "error");
+      return;
+    }
+    if (
+      !window.confirm(
+        `用 ${sourceProfile.name} 的登录态覆盖 ${targetProfile.name}？目标 Profile 会先自动备份。`
+      )
+    ) {
+      return;
+    }
+
+    void withBusy(async () => {
+      const result = await profileApi().syncAccount({
+        sourceProfileId: sourceId,
+        targetProfileId: targetId,
+        launchTarget: launchSyncedProfile
+      });
+      accountSyncResult = result;
+      state = result.state;
+      selectedId = result.targetProfileId;
+      accountSyncBackups = await profileApi().listAccountSyncBackups();
+    }, launchSyncedProfile ? "账号同步完成，已启动目标 Profile" : "账号同步完成", {
+      key: "account-sync",
+      message: `正在同步 ${sourceProfile.name} 到 ${targetProfile.name}…`,
+      profileId: targetProfile.id
+    });
+    return;
+  }
+
+  if (action === "restore-account-backup") {
+    const backupId = actionTarget.dataset.backupId;
+    if (!backupId) {
+      return;
+    }
+
+    const backup = accountSyncBackups.find((item) => item.id === backupId) || accountSyncResult?.backup;
+    const label = backup ? `${backup.targetProfileName} ${formatDate(backup.createdAt)}` : backupId;
+    if (!window.confirm(`恢复账号备份 ${label}？目标 Profile 当前登录态会被替换。`)) {
+      return;
+    }
+
+    void withBusy(async () => {
+      const result = await profileApi().restoreAccountSyncBackup(backupId);
+      state = result.state;
+      selectedId = result.backup.targetProfileId;
+      accountSyncResult = null;
+      accountSyncBackups = await profileApi().listAccountSyncBackups();
+    }, "已恢复账号同步备份", {
+      key: "restore-account-backup",
+      message: `正在恢复账号备份 ${label}…`,
+      backupId
+    });
     return;
   }
 
@@ -1284,7 +1684,10 @@ appRoot.addEventListener("click", (event) => {
       extensionScan = scan;
       selectedExtensionIds = new Set(scan.extensions.map((extension) => extension.id));
       extensionMigrationResult = null;
-    }, "已扫描插件");
+    }, "已扫描插件", {
+      key: "scan-extensions",
+      message: "正在扫描源 Profile 插件…"
+    });
     return;
   }
 
@@ -1359,7 +1762,12 @@ appRoot.addEventListener("click", (event) => {
       state = result.state;
       selectedId = result.profileId;
       extensionMigrationBackups = await profileApi().listExtensionMigrationBackups();
-    }, `已删除插件 ${extension.name}`);
+    }, `已删除插件 ${extension.name}`, {
+      key: "delete-extension",
+      message: `正在删除插件 ${extension.name}…`,
+      profileId,
+      extensionId
+    });
     return;
   }
 
@@ -1381,12 +1789,19 @@ appRoot.addEventListener("click", (event) => {
       selectedId = result.backup.targetProfileId;
       extensionMigrationResult = null;
       extensionMigrationBackups = await profileApi().listExtensionMigrationBackups();
-    }, "已恢复备份");
+    }, "已恢复备份", {
+      key: "restore-extension-backup",
+      message: `正在恢复插件备份 ${label}…`,
+      backupId
+    });
     return;
   }
 
   if (action === "refresh") {
-    void withBusy(() => loadState(), "已刷新");
+    void withBusy(() => loadState(), "已刷新", {
+      key: "refresh",
+      message: "正在刷新 Profile 状态…"
+    });
     return;
   }
 
@@ -1425,7 +1840,11 @@ appRoot.addEventListener("click", (event) => {
       setToast(`${profile.name} 已经在运行中`);
       return;
     }
-    void withBusy(() => profileApi().launchProfile(id), `已启动 ${profile?.name || "Profile"}`);
+    void withBusy(() => profileApi().launchProfile(id), `已启动 ${profile?.name || "Profile"}`, {
+      key: "launch-profile",
+      message: `正在启动 ${profile?.name || "Profile"}…`,
+      profileId: id
+    });
     return;
   }
 
@@ -1463,7 +1882,11 @@ appRoot.addEventListener("click", (event) => {
     void withBusy(async () => {
       state = await profileApi().focusProfile(id);
       selectedId = id;
-    }, `已显示 ${profile.name}`);
+    }, `已显示 ${profile.name}`, {
+      key: "focus-profile",
+      message: `正在显示 ${profile.name}…`,
+      profileId: id
+    });
     return;
   }
 
@@ -1483,7 +1906,13 @@ appRoot.addEventListener("click", (event) => {
   }
 
   if (action === "open-folder" && id) {
-    void withBusy(() => profileApi().openProfileFolder(id), "已打开目录");
+    const profile = state.profiles.find((item) => item.id === id);
+
+    void withBusy(() => profileApi().openProfileFolder(id), "已打开目录", {
+      key: "open-folder",
+      message: `正在打开 ${profile?.name || "Profile"} 的目录…`,
+      profileId: id
+    });
     return;
   }
 
@@ -1535,6 +1964,29 @@ appRoot.addEventListener("change", (event) => {
     extensionScan = null;
     selectedExtensionIds.clear();
     extensionMigrationResult = null;
+    render();
+    return;
+  }
+
+  if (target instanceof HTMLSelectElement && target.matches("[data-account-sync-source]")) {
+    accountSyncSourceId = target.value || null;
+    if (accountSyncTargetId === accountSyncSourceId) {
+      accountSyncTargetId = state.profiles.find((profile) => profile.id !== accountSyncSourceId)?.id || null;
+    }
+    accountSyncResult = null;
+    render();
+    return;
+  }
+
+  if (target instanceof HTMLSelectElement && target.matches("[data-account-sync-target]")) {
+    accountSyncTargetId = target.value || null;
+    accountSyncResult = null;
+    render();
+    return;
+  }
+
+  if (target instanceof HTMLInputElement && target.matches("[data-launch-synced-profile]")) {
+    launchSyncedProfile = target.checked;
     render();
     return;
   }
@@ -1645,7 +2097,11 @@ appRoot.addEventListener("submit", (event) => {
       state = result.state;
       selectedId = result.targetProfileId;
       extensionMigrationBackups = await profileApi().listExtensionMigrationBackups();
-    }, "插件迁移完成");
+    }, "插件迁移完成", {
+      key: "migrate-extensions",
+      message: "正在迁移插件…",
+      profileId: targetProfileId
+    });
     return;
   }
 
@@ -1669,7 +2125,11 @@ appRoot.addEventListener("submit", (event) => {
     }
 
     modal = null;
-    void withBusy(() => profileApi().launchProfileWithCdp(profileId, port), `已以 CDP 启动 ${profile?.name || "Profile"}`);
+    void withBusy(() => profileApi().launchProfileWithCdp(profileId, port), `已以 CDP 启动 ${profile?.name || "Profile"}`, {
+      key: "launch-cdp",
+      message: `正在以 CDP 启动 ${profile?.name || "Profile"}…`,
+      profileId
+    });
     return;
   }
 
@@ -1688,7 +2148,11 @@ appRoot.addEventListener("submit", (event) => {
       state = nextState;
       selectedId = profileId;
       modal = null;
-    }, `已改名为 ${name}`);
+    }, `已改名为 ${name}`, {
+      key: "rename-profile",
+      message: "正在保存名称…",
+      profileId
+    });
     return;
   }
 
@@ -1700,7 +2164,10 @@ appRoot.addEventListener("submit", (event) => {
     state = nextState;
     selectedId = state.profiles[0]?.id || null;
     modal = null;
-  }, `已创建 ${name}`);
+  }, `已创建 ${name}`, {
+    key: "create-profile",
+    message: `正在创建 ${name}…`
+  });
 });
 
 loadState().catch((error: unknown) => {

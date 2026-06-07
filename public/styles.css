@@ -70,6 +70,17 @@ button:focus-visible {
   outline: 3px solid var(--focus);
 }
 
+button.loading {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+button.loading:disabled {
+  opacity: 0.84;
+}
+
 select {
   min-height: 38px;
   border: 1px solid var(--line-strong);
@@ -88,6 +99,21 @@ input[type="checkbox"]:focus-visible {
 .app-loading {
   padding: 32px;
   color: var(--muted);
+}
+
+.busy-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 14px;
+  border: 1px solid #b9daca;
+  border-radius: 7px;
+  background: #eefaf5;
+  color: var(--accent-dark);
+  padding: 11px 13px;
+  font-size: 13px;
+  font-weight: 800;
+  box-shadow: 0 10px 24px rgba(19, 121, 91, 0.08);
 }
 
 .shell {
@@ -178,6 +204,11 @@ h3 {
   padding: 0 8px;
   font-size: 12px;
   white-space: nowrap;
+}
+
+.profile-actions > .action-button.loading,
+.profile-actions > .action-tooltip > .action-button.loading {
+  min-width: 86px;
 }
 
 .profile-actions > .menu-button {
@@ -432,6 +463,7 @@ h3 {
   font-size: 12px;
 }
 
+.account-sync-panel,
 .migration-panel {
   margin-top: 20px;
   border: 1px solid var(--line);
@@ -440,12 +472,94 @@ h3 {
   padding: 18px;
 }
 
+.account-sync-panel {
+  background: #fbfcfd;
+}
+
 .section-subtitle {
   display: block;
   margin-top: 4px;
   color: var(--muted);
   font-size: 12px;
   font-weight: 700;
+}
+
+.account-sync-grid {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr) auto auto;
+  gap: 12px;
+  align-items: end;
+  margin-top: 14px;
+}
+
+.field.compact {
+  margin: 0;
+}
+
+.account-sync-launch {
+  align-self: end;
+}
+
+.account-sync-note {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.account-sync-note.warn {
+  color: var(--warn);
+}
+
+.account-sync-loading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  border: 1px solid #b9daca;
+  border-radius: 8px;
+  background: #eefaf5;
+  color: var(--accent-dark);
+  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.sync-spinner,
+.inline-spinner {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spinner-rotate 0.8s linear infinite;
+}
+
+.inline-spinner {
+  width: 14px;
+  height: 14px;
+}
+
+@keyframes spinner-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.account-sync-result {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+  border: 1px solid #c9d7ee;
+  border-radius: 8px;
+  background: #f4f8ff;
+  padding: 14px;
+}
+
+.account-sync-result-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .migration-actions {
@@ -1375,6 +1489,7 @@ h3 {
   }
 
   .status-grid,
+  .account-sync-grid,
   .migration-source-bar,
   .layout {
     grid-template-columns: 1fr;
@@ -1394,6 +1509,7 @@ h3 {
   }
 
   .migration-result-grid,
+  .account-sync-result-grid,
   .migration-result-body,
   .migration-modal-summary {
     grid-template-columns: 1fr;

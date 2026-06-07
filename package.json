@@ -7,7 +7,8 @@
     "build": "tsc",
     "start": "npm run build && electron .",
     "dev": "npm run build && electron .",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "site": "node site/server.mjs"
   },
   "engines": {
     "node": ">=20"

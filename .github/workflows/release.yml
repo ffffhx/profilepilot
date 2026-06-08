@@ -2,20 +2,22 @@ name: Build Release Packages
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*.*.*"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to publish"
+        description: "Release tag to publish. Use latest for the rolling website download."
         required: true
-        default: "v0.1.0"
+        default: "latest"
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref_name || github.event.inputs.tag }}
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -76,6 +78,40 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release metadata
+        id: release_meta
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            tag="${GITHUB_REF#refs/tags/}"
+          elif [[ -n "${{ github.event.inputs.tag }}" ]]; then
+            tag="${{ github.event.inputs.tag }}"
+          else
+            tag="latest"
+          fi
+
+          if [[ "$tag" == "latest" ]]; then
+            name="ProfilePilot latest"
+          else
+            name="ProfilePilot $tag"
+          fi
+
+          {
+            echo "tag=$tag"
+            echo "name=$name"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Move rolling latest tag
+        if: steps.release_meta.outputs.tag == 'latest'
+        run: |
+          git tag -f latest "$GITHUB_SHA"
+          git push -f origin latest
+
       - name: Download package artifacts
         uses: actions/download-artifact@v4
         with:
@@ -85,7 +121,11 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          name: ProfilePilot ${{ github.event.inputs.tag || github.ref_name }}
+          tag_name: ${{ steps.release_meta.outputs.tag }}
+          name: ${{ steps.release_meta.outputs.name }}
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
+          make_latest: true
+          overwrite_files: true
+          fail_on_unmatched_files: true
           files: release-assets/*

@@ -46,7 +46,11 @@ npm run dist:mac
 npm run dist:win
 ```
 
-Release builds are published by `.github/workflows/release.yml` when a `v*.*.*` tag is pushed.
+Release builds are published by `.github/workflows/release.yml`:
+
+- Pushes to `main` publish a rolling `latest` release for the website download links.
+- Pushing a `v*.*.*` tag publishes that versioned release.
+- Manual workflow runs default to the rolling `latest` release unless another tag is provided.
 
 Source files live in `src/`:
 

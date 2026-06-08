@@ -14,6 +14,17 @@ The app treats Chrome's own local profiles as first-class profiles:
 
 ## Run
 
+Download the latest packaged app:
+
+- [macOS Apple Silicon](https://github.com/ffffhx/profilepilot/releases/latest/download/ProfilePilot-mac-arm64.dmg)
+- [macOS Intel](https://github.com/ffffhx/profilepilot/releases/latest/download/ProfilePilot-mac-x64.dmg)
+- [Windows x64](https://github.com/ffffhx/profilepilot/releases/latest/download/ProfilePilot-win-x64.exe)
+- [All release files](https://github.com/ffffhx/profilepilot/releases/latest)
+
+These builds are not commercially code-signed yet, so macOS or Windows may ask for an extra confirmation on first launch.
+
+Run from source:
+
 ```bash
 npm install
 npm start
@@ -27,6 +38,15 @@ This compiles the TypeScript sources and opens the Electron app.
 npm run check
 npm run build
 ```
+
+Create local packages:
+
+```bash
+npm run dist:mac
+npm run dist:win
+```
+
+Release builds are published by `.github/workflows/release.yml` when a `v*.*.*` tag is pushed.
 
 Source files live in `src/`:
 

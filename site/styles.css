@@ -519,6 +519,7 @@ p {
 
 .section,
 .compare-section,
+.download-section,
 .install-section {
   padding: clamp(72px, 10vw, 128px) clamp(20px, 5vw, 64px);
 }
@@ -759,18 +760,95 @@ p {
   color: #fff;
 }
 
+.download-section,
 .install-section {
   display: grid;
   grid-template-columns: minmax(260px, 0.75fr) minmax(280px, 0.7fr);
   gap: clamp(28px, 7vw, 92px);
   align-items: center;
+}
+
+.download-section {
   background:
     linear-gradient(90deg, rgba(39, 110, 241, 0.08), transparent 42%),
     var(--paper-strong);
 }
 
+.install-section {
+  border-top: 1px solid var(--line);
+  background: #eef6f1;
+}
+
 .install-copy h2 {
   margin-top: 12px;
+}
+
+.download-panel {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.download-card,
+.download-link {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.88);
+}
+
+.download-card {
+  display: grid;
+  gap: 7px;
+  min-height: 136px;
+  padding: 20px;
+  box-shadow: 0 18px 42px rgba(7, 59, 50, 0.1);
+}
+
+.download-card.primary {
+  border-color: rgba(15, 95, 72, 0.45);
+  background: var(--deep);
+  color: #fff;
+}
+
+.download-card span,
+.download-card small,
+.download-note {
+  color: var(--muted);
+}
+
+.download-card.primary span,
+.download-card.primary small {
+  color: #b9e4d4;
+}
+
+.download-card span {
+  font-size: 12px;
+  font-weight: 950;
+  text-transform: uppercase;
+}
+
+.download-card strong {
+  font-size: clamp(22px, 3vw, 32px);
+  line-height: 1;
+}
+
+.download-card small {
+  font-weight: 850;
+}
+
+.download-link {
+  display: inline-flex;
+  min-height: 52px;
+  align-items: center;
+  justify-content: center;
+  color: var(--deep);
+  font-weight: 950;
+}
+
+.download-note {
+  margin: 4px 0 0;
+  font-size: 13px;
+  line-height: 1.55;
 }
 
 .terminal {
@@ -867,6 +945,7 @@ p {
   .workflow-board,
   .compare-section,
   .safety-layout,
+  .download-section,
   .install-section {
     grid-template-columns: 1fr;
   }
@@ -1029,6 +1108,7 @@ p {
   .hero,
   .section,
   .compare-section,
+  .download-section,
   .install-section {
     padding-inline: 16px;
   }
@@ -1067,5 +1147,9 @@ p {
 
   .hero-actions .button {
     width: 100%;
+  }
+
+  .download-panel {
+    grid-template-columns: 1fr;
   }
 }

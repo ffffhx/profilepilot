@@ -21,9 +21,9 @@
         <a href="#workflows">工作流</a>
         <a href="#features">能力</a>
         <a href="#compare">对比</a>
-        <a href="#install">安装</a>
+        <a href="#download">下载</a>
       </nav>
-      <a class="nav-cta" href="#install">本机运行</a>
+      <a class="nav-cta" href="https://github.com/ffffhx/profilepilot/releases/latest">下载最新版</a>
     </header>
 
     <main id="top">
@@ -93,7 +93,8 @@
             一个给真实 Chrome Profile 用的本机控制台。管理原生 Profile，创建隔离测试环境，迁移扩展和登录态，再把干净的浏览器交给 Agent 或人工测试。
           </p>
           <div class="hero-actions">
-            <a class="button primary" href="#install">立即本机运行</a>
+            <a class="button primary" href="https://github.com/ffffhx/profilepilot/releases/latest/download/ProfilePilot-mac-arm64.dmg">下载 macOS 版</a>
+            <a class="button secondary" href="#download">更多下载</a>
             <a class="button secondary" href="#workflows">查看工作流</a>
           </div>
           <dl class="proof-strip" aria-label="ProfilePilot 关键承诺">
@@ -259,11 +260,38 @@
         </div>
       </section>
 
+      <section class="download-section" id="download">
+        <div class="install-copy">
+          <div class="section-kicker">Download</div>
+          <h2>从官网直接下载 ProfilePilot。</h2>
+          <p>安装包发布在 GitHub Release。macOS 提供 Apple Silicon 和 Intel 版本，Windows 提供 x64 安装器。</p>
+        </div>
+        <div class="download-panel" aria-label="ProfilePilot 下载链接">
+          <a class="download-card primary" href="https://github.com/ffffhx/profilepilot/releases/latest/download/ProfilePilot-mac-arm64.dmg">
+            <span>macOS</span>
+            <strong>Apple Silicon</strong>
+            <small>下载 .dmg</small>
+          </a>
+          <a class="download-card" href="https://github.com/ffffhx/profilepilot/releases/latest/download/ProfilePilot-mac-x64.dmg">
+            <span>macOS</span>
+            <strong>Intel</strong>
+            <small>下载 .dmg</small>
+          </a>
+          <a class="download-card" href="https://github.com/ffffhx/profilepilot/releases/latest/download/ProfilePilot-win-x64.exe">
+            <span>Windows</span>
+            <strong>x64</strong>
+            <small>下载安装器</small>
+          </a>
+          <a class="download-link" href="https://github.com/ffffhx/profilepilot/releases/latest">查看全部 Release 文件</a>
+          <p class="download-note">当前安装包未做商业代码签名。macOS 首次打开可能需要在系统安全设置中确认。</p>
+        </div>
+      </section>
+
       <section class="install-section" id="install">
         <div class="install-copy">
-          <div class="section-kicker">Run locally</div>
-          <h2>两条命令打开 ProfilePilot。</h2>
-          <p>官网本身是静态站点，桌面应用仍然按 Electron 项目运行。</p>
+          <div class="section-kicker">Source run</div>
+          <h2>也可以从源码运行。</h2>
+          <p>适合开发调试，或者想在本机直接验证最新代码时使用。</p>
         </div>
         <div class="terminal" aria-label="安装命令">
           <div class="terminal-bar">

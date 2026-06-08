@@ -2,21 +2,109 @@
   "name": "profilepilot",
   "version": "0.1.0",
   "description": "A local desktop control desk for managing Chrome profiles and extensions.",
+  "homepage": "https://ffffhx.github.io/profilepilot/",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ffffhx/profilepilot.git"
+  },
   "main": "dist/main/main.js",
   "scripts": {
     "build": "tsc",
     "start": "npm run build && electron .",
     "dev": "npm run build && electron .",
     "check": "tsc --noEmit",
+    "pack": "npm run build && electron-builder --dir --publish never",
+    "dist": "npm run build && electron-builder --publish never",
+    "dist:mac": "npm run build && electron-builder --mac dmg zip --arm64 --x64 --publish never",
+    "dist:mac:arm64": "npm run build && electron-builder --mac dmg zip --arm64 --publish never",
+    "dist:mac:x64": "npm run build && electron-builder --mac dmg zip --x64 --publish never",
+    "dist:win": "npm run build && electron-builder --win nsis zip --x64 --publish never",
     "site": "node site/server.mjs"
   },
   "engines": {
     "node": ">=20"
   },
+  "author": "ffffhx",
   "license": "MIT",
+  "build": {
+    "appId": "io.github.ffffhx.profilepilot",
+    "productName": "ProfilePilot",
+    "copyright": "Copyright 2026 ffffhx",
+    "asar": true,
+    "directories": {
+      "buildResources": "build",
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "public/**/*",
+      "README.md",
+      "LICENSE",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "build/icon.icns",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "ProfilePilot-mac-${arch}.${ext}"
+    },
+    "dmg": {
+      "artifactName": "ProfilePilot-mac-${arch}.${ext}"
+    },
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "ProfilePilot-win-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "ProfilePilot",
+      "artifactName": "ProfilePilot-win-${arch}.${ext}"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "ffffhx",
+        "repo": "profilepilot"
+      }
+    ]
+  },
   "devDependencies": {
     "@types/node": "^25.9.1",
     "electron": "^42.3.3",
+    "electron-builder": "^26.15.2",
     "typescript": "^6.0.3"
   }
 }

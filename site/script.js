@@ -2,7 +2,7 @@ const topbar = document.querySelector("[data-topbar]");
 const workflowButtons = document.querySelectorAll("[data-workflow]");
 const workflowCopy = document.querySelector("[data-workflow-copy]");
 const workflowVisual = document.querySelector("[data-workflow-visual]");
-const copyButton = document.querySelector("[data-copy-command]");
+const copyButtons = document.querySelectorAll("[data-copy-command]");
 
 const workflows = {
   native: {
@@ -69,9 +69,10 @@ workflowButtons.forEach((button) => {
   button.addEventListener("click", () => setWorkflow(button.dataset.workflow || "native"));
 });
 
-if (copyButton) {
+copyButtons.forEach((copyButton) => {
   copyButton.addEventListener("click", async () => {
     const command = copyButton.dataset.copyCommand || "";
+    const defaultLabel = copyButton.textContent || "复制";
     const copyWithFallback = () => {
       const textarea = document.createElement("textarea");
       textarea.value = command;
@@ -93,20 +94,20 @@ if (copyButton) {
       }
       copyButton.textContent = "已复制";
       window.setTimeout(() => {
-        copyButton.textContent = "复制";
+        copyButton.textContent = defaultLabel;
       }, 1400);
     } catch {
       if (copyWithFallback()) {
         copyButton.textContent = "已复制";
         window.setTimeout(() => {
-          copyButton.textContent = "复制";
+          copyButton.textContent = defaultLabel;
         }, 1400);
       } else {
         copyButton.textContent = "手动复制";
       }
     }
   });
-}
+});
 
 window.addEventListener("scroll", syncTopbar, { passive: true });
 syncTopbar();

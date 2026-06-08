@@ -284,6 +284,33 @@
           </a>
           <a class="download-link" href="https://github.com/ffffhx/profilepilot/releases/latest">查看全部 Release 文件</a>
           <p class="download-note">当前安装包未做商业代码签名。macOS 首次打开可能需要在系统安全设置中确认。</p>
+          <article class="macos-help" aria-labelledby="macos-help-title">
+            <div class="macos-help-copy">
+              <span>macOS 安装提示</span>
+              <h3 id="macos-help-title">如果提示“已损坏，无法打开”</h3>
+              <p>这是 macOS Gatekeeper 对未签名、未公证应用的拦截。确认安装包来自本页 Release 后，可以在终端执行下面这条命令。</p>
+            </div>
+            <div class="terminal macos-command" aria-label="解除 macOS 隔离标记命令">
+              <div class="terminal-bar">
+                <span></span>
+                <span></span>
+                <span></span>
+                <button type="button" data-copy-command="xattr -dr com.apple.quarantine /Applications/ProfilePilot.app">复制</button>
+              </div>
+              <pre><code>xattr -dr com.apple.quarantine /Applications/ProfilePilot.app</code></pre>
+            </div>
+            <div class="macos-help-grid">
+              <div>
+                <strong>这条命令做什么</strong>
+                <p>删除 ProfilePilot.app 上的 <code>com.apple.quarantine</code> 隔离标记，让 macOS 不再把它当作刚从网络下载且未确认的应用。</p>
+              </div>
+              <div>
+                <strong>为什么需要执行</strong>
+                <p>当前安装包还没有 Apple Developer ID 签名和 notarization 公证。Chrome 下载后会加隔离标记，系统可能把未签名应用显示成“已损坏”。</p>
+              </div>
+            </div>
+            <p class="macos-help-note">这是自用测试版的临时处理方式。面向普通用户的正式版本应完成 Apple 签名和公证。</p>
+          </article>
         </div>
       </section>
 

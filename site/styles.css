@@ -846,9 +846,85 @@ p {
 }
 
 .download-note {
+  grid-column: 1 / -1;
   margin: 4px 0 0;
   font-size: 13px;
   line-height: 1.55;
+}
+
+.macos-help {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 18px;
+  border: 1px solid rgba(15, 95, 72, 0.2);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.92);
+  padding: clamp(18px, 3vw, 24px);
+  box-shadow: 0 18px 42px rgba(7, 59, 50, 0.08);
+}
+
+.macos-help-copy span {
+  color: var(--evergreen);
+  font-size: 12px;
+  font-weight: 950;
+  text-transform: uppercase;
+}
+
+.macos-help-copy h3 {
+  margin: 8px 0 8px;
+  font-size: clamp(22px, 3vw, 30px);
+}
+
+.macos-help-copy p,
+.macos-help-grid p,
+.macos-help-note {
+  color: var(--muted);
+  line-height: 1.65;
+}
+
+.macos-command {
+  box-shadow: none;
+}
+
+.macos-command pre {
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.macos-command code {
+  font-size: 13px;
+}
+
+.macos-help-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.macos-help-grid div {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f7fbf8;
+  padding: 16px;
+}
+
+.macos-help-grid strong {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--ink);
+}
+
+.macos-help-grid code {
+  color: var(--deep);
+  font-size: 0.95em;
+  overflow-wrap: anywhere;
+}
+
+.macos-help-note {
+  margin: 0;
+  border-left: 3px solid var(--evergreen);
+  padding-left: 12px;
+  font-size: 13px;
 }
 
 .terminal {
@@ -1150,6 +1226,10 @@ p {
   }
 
   .download-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .macos-help-grid {
     grid-template-columns: 1fr;
   }
 }

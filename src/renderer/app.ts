@@ -1149,7 +1149,7 @@ function renderDetails(profile: PublicProfile | null): string {
           <small class="detail-note">${processNote(profile)}</small>
         </div>
         <div class="detail-row">
-          <span>本机监听端口</span>
+          <span>关联进程监听端口</span>
           <strong>${profile.listeningPorts.length ? profile.listeningPorts.join(", ") : "无"}</strong>
           <small class="detail-note">${listeningPortsNote(profile)}</small>
         </div>
@@ -1426,7 +1426,7 @@ function processNote(profile: PublicProfile): string {
 
 function listeningPortsNote(profile: PublicProfile): string {
   if (!profile.running) {
-    return "Profile 未运行时不会占用本机监听端口。";
+    return "Profile 未运行时不会占用本机 TCP 监听端口。";
   }
 
   if (!profile.listeningPorts.length) {
@@ -1434,10 +1434,14 @@ function listeningPortsNote(profile: PublicProfile): string {
   }
 
   if (profile.cdpPort && profile.listeningPorts.includes(profile.cdpPort)) {
-    return `其中 ${profile.cdpPort} 是当前可用于 CDP 连接的调试端口。`;
+    return `其中 ${profile.cdpPort} 是 ProfilePilot 以 CDP 模式启动并验证过的调试端口。`;
   }
 
-  return "这些端口由该 Profile 关联的 Chrome 进程占用；它们不一定是可用的 CDP 调试端口。";
+  if (profile.source === "native") {
+    return "这些只是系统 Chrome 主进程占用的本机 TCP 端口；它们不是 ProfilePilot 已验证的 CDP 地址。";
+  }
+
+  return "这些端口由该独立 Profile 的 Chrome 进程占用；只有通过 CDP 启动并显示 CDP 地址的端口才可用于调试连接。";
 }
 
 function launchButtonTitle(profile: PublicProfile): string {

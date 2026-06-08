@@ -84,7 +84,7 @@ function createMainWindow(): void {
                   detailProcessLabelBeforeSelection:
                     Array.from(document.querySelectorAll(".detail-row")).find((row) => row.querySelector("span")?.textContent?.includes("进程"))?.querySelector("span")?.textContent || null,
                   detailListeningPortsBeforeSelection:
-                    Array.from(document.querySelectorAll(".detail-row")).find((row) => row.querySelector("span")?.textContent === "本机监听端口")?.querySelector("strong")?.textContent || null,
+                    Array.from(document.querySelectorAll(".detail-row")).find((row) => row.querySelector("span")?.textContent?.includes("监听端口"))?.querySelector("strong")?.textContent || null,
                   profilePrimaryActions: Array.from(document.querySelectorAll(".profiles-table tbody tr:first-child .profile-actions > .action-button")).map((item) => item.textContent),
                   profileMenuLabels: [],
                   detailTitleAfterSecondRowClick: null,
@@ -140,7 +140,7 @@ function createMainWindow(): void {
                   smokeResult.detailProcessLabelAfterSecondRowClick = processRow?.querySelector("span")?.textContent || null;
                   smokeResult.detailProcessNoteAfterSecondRowClick = processRow?.querySelector(".detail-note")?.textContent || null;
                   smokeResult.detailListeningPortsAfterSecondRowClick =
-                    Array.from(document.querySelectorAll(".detail-row")).find((row) => row.querySelector("span")?.textContent === "本机监听端口")?.querySelector("strong")?.textContent || null;
+                    Array.from(document.querySelectorAll(".detail-row")).find((row) => row.querySelector("span")?.textContent?.includes("监听端口"))?.querySelector("strong")?.textContent || null;
                   const cdpRow = Array.from(document.querySelectorAll(".detail-row")).find((row) => row.querySelector("span")?.textContent === "CDP 地址");
                   smokeResult.detailCdpValueAfterSecondRowClick = cdpRow?.querySelector("strong, code")?.textContent || null;
                 }

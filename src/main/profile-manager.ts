@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, promises as fs } from "node:fs";
 import http from "node:http";
 import net from "node:net";
@@ -8,28 +8,30 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { shell } from "electron";
 import type {
-  AccountSyncBackupMetadata,
-  AccountSyncBackupSummary,
   AccountSyncCopiedItem,
+  AccountSyncDiffItem,
+  AccountSyncDiffResult,
+  AccountSyncRecord,
   AccountSyncRequest,
-  AccountSyncRestoreResult,
   AccountSyncResult,
   AccountSyncSkippedItem,
   AppState,
   DeleteProfileResult,
   ExtensionDeleteResult,
   ExtensionDataPath,
-  ExtensionMigrationBackupMetadata,
-  ExtensionMigrationBackupSummary,
   ExtensionMigrationCopiedExtension,
   ExtensionMigrationDataCopy,
+  ExtensionMigrationDiffItem,
+  ExtensionMigrationDiffResult,
+  ExtensionMigrationDiffStatus,
   ExtensionMigrationRequest,
-  ExtensionMigrationRestoreResult,
   ExtensionMigrationResult,
   ExtensionMigrationSkippedExtension,
   ExtensionScanResult,
   NativeChromeProfile,
   NativeProfileMetadata,
+  OperationPauseSignal,
+  OperationProgressUpdate,
   ProfileExtensionInfo,
   ProfileExtensionInstallType,
   PublicProfile,
@@ -58,11 +60,16 @@ interface ChromeLocalState {
     info_cache?: Record<
       string,
       {
+        [key: string]: unknown;
         name?: unknown;
         user_name?: unknown;
         is_using_default_name?: unknown;
       }
     >;
+    last_active_profiles?: unknown;
+    last_used?: unknown;
+    profiles_order?: unknown;
+    [key: string]: unknown;
   };
 }
 
@@ -98,7 +105,17 @@ interface AccountSyncPathSpec {
 interface AccountSyncDataLocation {
   userDataPath: string;
   profilePath: string;
+  profileDirName: string;
 }
+
+interface CopyStats {
+  files: number;
+  bytes: number;
+}
+
+const ACCOUNT_SYNC_WORK_PREFIX = ".profilepilot-sync-";
+const ACCOUNT_SYNC_PARTIAL_SUFFIX = ".partial";
+const ACCOUNT_SYNC_PREVIOUS_SUFFIX = ".previous";
 
 export class ProfileManagerError extends Error {
   constructor(
@@ -113,14 +130,10 @@ export class ProfileManagerError extends Error {
 export class ProfileManager {
   private readonly profilesDir: string;
   private readonly registryPath: string;
-  private readonly extensionBackupDir: string;
-  private readonly accountSyncBackupDir: string;
 
   constructor(private readonly dataDir = defaultDataDir()) {
     this.profilesDir = path.join(dataDir, "profiles");
     this.registryPath = path.join(dataDir, "profiles.json");
-    this.extensionBackupDir = path.join(dataDir, "extension-migration-backups");
-    this.accountSyncBackupDir = path.join(dataDir, "account-sync-backups");
   }
 
   async getState(): Promise<AppState> {
@@ -153,7 +166,8 @@ export class ProfileManager {
       nativeChromeProfiles,
       runningProfiles,
       currentProfile: runningProfiles[0] || lastLaunchedProfile,
-      chromeLauncher: this.getLauncherLabel()
+      chromeLauncher: this.getLauncherLabel(),
+      accountSyncRecords: Object.values(registry.accountSyncRecords || {}).sort((a, b) => b.syncedAt.localeCompare(a.syncedAt))
     };
   }
 
@@ -208,6 +222,7 @@ export class ProfileManager {
   }
 
   async launchProfile(profileId: string): Promise<void> {
+    await this.recoverAccountSyncArtifactsBeforeLaunch(profileId);
     const ref = parseProfileId(profileId);
 
     if (ref.source === "native") {
@@ -227,6 +242,7 @@ export class ProfileManager {
       );
     }
 
+    await this.recoverAccountSyncArtifactsBeforeLaunch(profileId);
     await this.launchIsolatedProfileWithCdp(ref.id, portInput);
   }
 
@@ -301,18 +317,139 @@ export class ProfileManager {
     };
   }
 
-  async migrateExtensions(request: ExtensionMigrationRequest): Promise<ExtensionMigrationResult> {
+  async inspectAccountSyncDiff(request: AccountSyncRequest): Promise<AccountSyncDiffResult> {
+    const sourceProfileId = String(request.sourceProfileId || "");
+    const targetProfileId = String(request.targetProfileId || "");
+    if (!sourceProfileId || !targetProfileId || sourceProfileId === targetProfileId) {
+      throw new ProfileManagerError("请选择两个不同的 Profile 进行账号同步。", "INVALID_ACCOUNT_SYNC_PROFILES");
+    }
+
+    const state = await this.getState();
+    const sourceProfile = state.profiles.find((profile) => profile.id === sourceProfileId);
+    const targetProfile = state.profiles.find((profile) => profile.id === targetProfileId);
+    if (!sourceProfile || !targetProfile) {
+      throw new ProfileManagerError("没有找到源 Profile 或目标 Profile。", "PROFILE_NOT_FOUND");
+    }
+
+    const sourceLocation = await this.resolveAccountSyncLocation(sourceProfile, false);
+    const targetLocation = await this.resolveAccountSyncLocation(targetProfile, false);
+    const accountSyncRecord =
+      request.onlyChanged !== false
+        ? state.accountSyncRecords.find((record) => record.sourceProfileId === sourceProfileId && record.targetProfileId === targetProfileId) ||
+          null
+        : null;
+    const fileItems = await Promise.all(
+      accountSyncCopySpecs().map((spec) => inspectAccountSyncPathDiff(sourceLocation, targetLocation, spec))
+    );
+    const preferenceItems = await Promise.all([
+      inspectAccountPreferenceDiff(
+        "账号偏好",
+        "Preferences",
+        sourceLocation.profilePath,
+        targetLocation.profilePath,
+        accountPreferencePaths()
+      ),
+      inspectAccountPreferenceDiff(
+        "受保护账号偏好",
+        "Secure Preferences",
+        sourceLocation.profilePath,
+        targetLocation.profilePath,
+        secureAccountPreferencePaths()
+      ),
+      inspectAccountLocalStateDiff(sourceLocation, targetLocation)
+    ]);
+    const items = accountSyncRecord
+      ? await applyAccountSyncRecordBaseline([...fileItems, ...preferenceItems], sourceLocation, accountSyncRecord)
+      : [...fileItems, ...preferenceItems];
+
+    return {
+      sourceProfileId,
+      targetProfileId,
+      items,
+      summary: summarizeAccountSyncDiff(items)
+    };
+  }
+
+  async inspectExtensionMigrationDiff(request: ExtensionMigrationRequest): Promise<ExtensionMigrationDiffResult> {
+    const sourceProfileId = String(request.sourceProfileId || "");
+    const targetProfileId = String(request.targetProfileId || "");
+    const includeData = Boolean(request.includeData);
+    const openInstallPages = Boolean(request.openInstallPages);
+    const requestedExtensionIds = uniqueStrings(request.extensionIds || []).filter(isLikelyExtensionId);
+
+    if (!sourceProfileId || !targetProfileId || sourceProfileId === targetProfileId) {
+      throw new ProfileManagerError("请选择两个不同的 Profile 进行插件同步。", "INVALID_MIGRATION_PROFILES");
+    }
+
+    const state = await this.getState();
+    const sourceProfile = state.profiles.find((profile) => profile.id === sourceProfileId);
+    const targetProfile = state.profiles.find((profile) => profile.id === targetProfileId);
+    if (!sourceProfile || !targetProfile) {
+      throw new ProfileManagerError("没有找到源 Profile 或目标 Profile。", "PROFILE_NOT_FOUND");
+    }
+
+    const sourceProfileDataPath = await this.resolveChromeProfileDataPath(sourceProfile);
+    const targetProfileDataPath = await this.resolveChromeProfileDataPath(targetProfile);
+    const [sourceScan, targetScan] = await Promise.all([
+      this.scanProfileExtensions(sourceProfileId),
+      this.scanProfileExtensions(targetProfileId)
+    ]);
+    const selectedExtensions = (requestedExtensionIds.length
+      ? requestedExtensionIds
+          .map((id) => sourceScan.extensions.find((extension) => extension.id === id))
+          .filter(Boolean)
+      : sourceScan.extensions) as ProfileExtensionInfo[];
+    const targetById = new Map(targetScan.extensions.map((extension) => [extension.id, extension]));
+    const items: ExtensionMigrationDiffItem[] = [];
+
+    for (const extension of selectedExtensions) {
+      const targetExtension = targetById.get(extension.id) || null;
+      const dataChanged = includeData
+        ? await extensionDataDiffers(sourceProfileDataPath, targetProfileDataPath, extension)
+        : false;
+      items.push(inspectExtensionMigrationItem(extension, targetExtension, targetProfile, dataChanged, openInstallPages));
+    }
+
+    const selectedIds = new Set(selectedExtensions.map((extension) => extension.id));
+    const targetOnlyItems = targetScan.extensions
+      .filter((extension) => !selectedIds.has(extension.id))
+      .map((extension) => ({
+        id: extension.id,
+        name: extension.name,
+        version: extension.version
+      }));
+
+    return {
+      sourceProfileId,
+      targetProfileId,
+      includeData,
+      items,
+      targetOnlyItems,
+      summary: summarizeExtensionMigrationDiff(items, targetOnlyItems.length)
+    };
+  }
+
+  async migrateExtensions(
+    request: ExtensionMigrationRequest,
+    onProgress?: (progress: OperationProgressUpdate) => void
+  ): Promise<ExtensionMigrationResult> {
     const sourceProfileId = String(request.sourceProfileId || "");
     const targetProfileId = String(request.targetProfileId || "");
     const extensionIds = uniqueStrings(request.extensionIds || []).filter(isLikelyExtensionId);
     const includeData = Boolean(request.includeData);
     const openInstallPages = Boolean(request.openInstallPages);
+    const onlyChanged = request.onlyChanged !== false;
+    const report = (message: string, step: string, stepIndex: number, stepCount = 6): void => {
+      onProgress?.({ message, step, stepIndex, stepCount });
+    };
+
+    report("正在检查源 Profile 和目标 Profile…", "检查 Profile", 1);
 
     if (!sourceProfileId || !targetProfileId || sourceProfileId === targetProfileId) {
-      throw new ProfileManagerError("请选择两个不同的 Profile 进行插件迁移。", "INVALID_MIGRATION_PROFILES");
+      throw new ProfileManagerError("请选择两个不同的 Profile 进行插件同步。", "INVALID_MIGRATION_PROFILES");
     }
     if (!extensionIds.length) {
-      throw new ProfileManagerError("请至少选择一个要迁移的插件。", "NO_EXTENSIONS_SELECTED");
+      throw new ProfileManagerError("请至少选择一个要同步的插件。", "NO_EXTENSIONS_SELECTED");
     }
 
     const state = await this.getState();
@@ -322,12 +459,13 @@ export class ProfileManager {
       throw new ProfileManagerError("没有找到源 Profile 或目标 Profile。", "PROFILE_NOT_FOUND");
     }
     if (targetProfile.running) {
-      throw new ProfileManagerError("迁移插件前请先关闭目标 Profile。", "TARGET_PROFILE_RUNNING");
+      throw new ProfileManagerError("同步插件前请先关闭目标 Profile。", "TARGET_PROFILE_RUNNING");
     }
     if (includeData && sourceProfile.running) {
-      throw new ProfileManagerError("迁移插件数据前请先关闭源 Profile，或取消勾选“同时迁移插件数据”。", "SOURCE_PROFILE_RUNNING");
+      throw new ProfileManagerError("同步插件数据前请先关闭源 Profile，或取消勾选“同时同步插件数据”。", "SOURCE_PROFILE_RUNNING");
     }
 
+    report("正在扫描源 Profile 的插件列表…", "扫描插件", 2);
     const scan = await this.scanProfileExtensions(sourceProfileId);
     const sourceProfileDataPath = await this.resolveChromeProfileDataPath(sourceProfile);
     const targetProfileDataPath = await this.resolveChromeProfileDataPath(targetProfile, true);
@@ -338,7 +476,9 @@ export class ProfileManager {
       throw new ProfileManagerError("在源 Profile 里没有找到已选择的插件。", "EXTENSIONS_NOT_FOUND");
     }
 
-    const backup = await this.createExtensionMigrationBackup(targetProfile, selectedExtensions, targetProfileDataPath);
+    report(`已确认覆盖 ${targetProfile.name}，正在准备同步插件…`, "确认覆盖", 3);
+    const migrationDiff = onlyChanged ? await this.inspectExtensionMigrationDiff(request) : null;
+    const migrationDiffById = new Map((migrationDiff?.items || []).map((item) => [item.id, item]));
     const copiedExtensions: ExtensionMigrationCopiedExtension[] = [];
     const dataCopies: ExtensionMigrationDataCopy[] = [];
     const skippedExtensions: ExtensionMigrationSkippedExtension[] = [];
@@ -347,7 +487,18 @@ export class ProfileManager {
     const copiedForRegistry: StoredMigratedExtension[] = [];
 
     try {
-      for (const extension of selectedExtensions) {
+      for (const [index, extension] of selectedExtensions.entries()) {
+        report(`正在同步插件 ${index + 1}/${selectedExtensions.length}：${extension.name}`, "同步插件", 4);
+        const diffItem = migrationDiffById.get(extension.id) || null;
+        if (onlyChanged && diffItem?.status === "same") {
+          skippedExtensions.push({
+            id: extension.id,
+            name: extension.name,
+            reason: "目标已一致，本次无需同步"
+          });
+          continue;
+        }
+
         if (extension.canCopyLocally && extension.path) {
           if (targetProfile.source !== "isolated") {
             if (extension.fromWebStore && extension.storeUrl) {
@@ -398,6 +549,7 @@ export class ProfileManager {
 
         if (includeData) {
           for (const dataPath of extension.dataPaths) {
+            report(`正在同步插件数据：${extension.name} · ${dataPath.label}`, "同步插件", 4);
             const copied = await copyExtensionDataPath(sourceProfileDataPath, targetProfileDataPath, dataPath.relativePath);
             if (copied) {
               dataCopies.push({
@@ -411,15 +563,18 @@ export class ProfileManager {
       }
 
       if (copiedForRegistry.length) {
+        report(`正在写入 ${targetProfile.name} 的插件启动配置…`, "写入配置", 5);
         await this.mergeMigratedExtensions(targetProfile, copiedForRegistry);
       }
 
       let openedInstallPages = false;
       if (openInstallPages && webStoreInstallUrls.length) {
+        report(`正在打开 ${webStoreInstallUrls.length} 个商店安装页…`, "写入配置", 5);
         await this.launchProfileWithUrls(targetProfile.id, uniqueStrings(webStoreInstallUrls));
         openedInstallPages = true;
       }
 
+      report("正在刷新同步结果…", "完成", 6);
       return {
         sourceProfileId,
         targetProfileId,
@@ -428,13 +583,11 @@ export class ProfileManager {
         dataCopies,
         webStoreInstallUrls: uniqueStrings(webStoreInstallUrls),
         skippedExtensions,
-        backup,
         openedInstallPages,
         state: await this.getState()
       };
     } catch (error) {
       try {
-        await this.restoreBackupMetadata(await this.readExtensionMigrationBackupMetadata(backup.id));
         await this.discardMigratedExtensions(targetProfile, copiedForRegistry);
       } catch {
         // Keep the original migration error as the visible failure.
@@ -466,91 +619,55 @@ export class ProfileManager {
     }
 
     const profileDataPath = await this.resolveChromeProfileDataPath(profile);
-    const backup = await this.createExtensionMigrationBackup(profile, [extension], profileDataPath);
     const deletedPaths: string[] = [];
 
-    try {
-      for (const relativePath of extensionDeleteRelativePaths(extensionId)) {
-        const targetPath = path.join(profileDataPath, normalizeSafeRelativePath(relativePath));
-        if (await exists(targetPath)) {
-          await fs.rm(targetPath, { recursive: true, force: true });
-          deletedPaths.push(targetPath);
-        }
+    for (const relativePath of extensionDeleteRelativePaths(extensionId)) {
+      const targetPath = path.join(profileDataPath, normalizeSafeRelativePath(relativePath));
+      if (await exists(targetPath)) {
+        await fs.rm(targetPath, { recursive: true, force: true });
+        deletedPaths.push(targetPath);
       }
-
-      if (profile.source === "isolated") {
-        const migratedExtensionPath = path.join(profile.path, "Migrated Extensions", extensionId);
-        if (await exists(migratedExtensionPath)) {
-          await fs.rm(migratedExtensionPath, { recursive: true, force: true });
-          deletedPaths.push(migratedExtensionPath);
-        }
-      }
-
-      await removeExtensionReferencesFromProfilePreferences(profileDataPath, extensionId);
-      await this.removeMigratedExtensionReference(profile, extensionId);
-
-      return {
-        profileId: profile.id,
-        profileName: profile.name,
-        extensionId,
-        extensionName: extension.name,
-        deletedPaths,
-        backup,
-        scan: await this.scanProfileExtensions(profileId),
-        state: await this.getState()
-      };
-    } catch (error) {
-      try {
-        await this.restoreBackupMetadata(await this.readExtensionMigrationBackupMetadata(backup.id));
-      } catch {
-        // Keep the original delete error visible.
-      }
-      throw error;
-    }
-  }
-
-  async listExtensionMigrationBackups(): Promise<ExtensionMigrationBackupSummary[]> {
-    await fs.mkdir(this.extensionBackupDir, { recursive: true });
-    const entries = await fs.readdir(this.extensionBackupDir, { withFileTypes: true }).catch(() => []);
-    const backups = await Promise.all(
-      entries
-        .filter((entry) => entry.isDirectory())
-        .map(async (entry): Promise<ExtensionMigrationBackupSummary | null> => {
-          try {
-            return summarizeExtensionMigrationBackup(
-              await this.readExtensionMigrationBackupMetadata(entry.name)
-            );
-          } catch {
-            return null;
-          }
-        })
-    );
-
-    return backups
-      .filter((backup): backup is ExtensionMigrationBackupSummary => Boolean(backup))
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  }
-
-  async restoreExtensionMigrationBackup(backupId: string): Promise<ExtensionMigrationRestoreResult> {
-    const metadata = await this.readExtensionMigrationBackupMetadata(backupId);
-    const state = await this.getState();
-    const targetProfile = state.profiles.find((profile) => profile.id === metadata.targetProfileId);
-    if (targetProfile?.running) {
-      throw new ProfileManagerError("恢复备份前请先关闭目标 Profile。", "TARGET_PROFILE_RUNNING");
     }
 
-    await this.restoreBackupMetadata(metadata);
+    if (profile.source === "isolated") {
+      const migratedExtensionPath = path.join(profile.path, "Migrated Extensions", extensionId);
+      if (await exists(migratedExtensionPath)) {
+        await fs.rm(migratedExtensionPath, { recursive: true, force: true });
+        deletedPaths.push(migratedExtensionPath);
+      }
+    }
+
+    await removeExtensionReferencesFromProfilePreferences(profileDataPath, extensionId);
+    await this.removeMigratedExtensionReference(profile, extensionId);
 
     return {
-      backup: summarizeExtensionMigrationBackup(metadata),
+      profileId: profile.id,
+      profileName: profile.name,
+      extensionId,
+      extensionName: extension.name,
+      deletedPaths,
+      scan: await this.scanProfileExtensions(profileId),
       state: await this.getState()
     };
   }
 
-  async syncAccount(request: AccountSyncRequest): Promise<AccountSyncResult> {
+  async syncAccount(
+    request: AccountSyncRequest,
+    onProgress?: (progress: OperationProgressUpdate) => void,
+    abortSignal?: AbortSignal,
+    pauseSignal?: OperationPauseSignal
+  ): Promise<AccountSyncResult> {
     const sourceProfileId = String(request.sourceProfileId || "");
     const targetProfileId = String(request.targetProfileId || "");
     const launchTarget = Boolean(request.launchTarget);
+    const onlyChanged = request.onlyChanged !== false;
+    const report = (message: string, step: string, stepIndex: number, stepCount = 6): void => {
+      onProgress?.({ message, step, stepIndex, stepCount });
+    };
+
+    report("正在检查源 Profile 和目标 Profile…", "检查 Profile", 1);
+    throwIfAborted(abortSignal);
+    await waitIfPaused(pauseSignal, abortSignal);
 
     if (!sourceProfileId || !targetProfileId || sourceProfileId === targetProfileId) {
       throw new ProfileManagerError("请选择两个不同的 Profile 进行账号同步。", "INVALID_ACCOUNT_SYNC_PROFILES");
@@ -571,111 +688,144 @@ export class ProfileManager {
 
     const sourceLocation = await this.resolveAccountSyncLocation(sourceProfile, false);
     const targetLocation = await this.resolveAccountSyncLocation(targetProfile, true);
-    const availableSpecs = await existingAccountSyncSpecs(sourceLocation.profilePath);
-    const hasSourcePreferences = await exists(path.join(sourceLocation.profilePath, "Preferences"));
-    if (!availableSpecs.length && !hasSourcePreferences) {
+    await recoverInterruptedAccountSyncArtifactsForProfile(targetLocation.profilePath);
+    const accountDiff = await this.inspectAccountSyncDiff(request);
+    const accountDiffByPath = new Map(accountDiff.items.map((item) => [item.relativePath, item]));
+    if (!accountDiff.items.some((item) => item.status !== "source_missing")) {
       throw new ProfileManagerError("源 Profile 里没有找到可同步的账号数据。", "ACCOUNT_SYNC_SOURCE_EMPTY");
     }
 
-    const backup = await this.createAccountSyncBackup(targetProfile, targetLocation);
+    report(`已确认覆盖 ${targetProfile.name}，正在准备复制账号数据…`, "确认覆盖", 2);
     const copiedItems: AccountSyncCopiedItem[] = [];
     const skippedItems: AccountSyncSkippedItem[] = [];
+    const copySpecs = accountSyncCopySpecs();
 
-    try {
-      for (const spec of accountSyncCopySpecs()) {
-        const sourcePath = path.join(sourceLocation.profilePath, spec.relativePath);
-        if (!(await exists(sourcePath))) {
-          skippedItems.push({
-            label: spec.label,
-            relativePath: spec.relativePath,
-            reason: "源 Profile 中不存在"
-          });
-          continue;
-        }
-
-        const targetPath = path.join(targetLocation.profilePath, normalizeSafeRelativePath(spec.relativePath));
-        await fs.rm(targetPath, { recursive: true, force: true });
-        await copyAccountSyncPath(sourcePath, targetPath);
-        copiedItems.push({
-          label: spec.label,
-          relativePath: spec.relativePath
-        });
-      }
-
-      const preferencesMerged = await mergeAccountPreferenceValues(
-        sourceLocation.profilePath,
-        targetLocation.profilePath
-      );
-      if (preferencesMerged) {
-        copiedItems.push({
-          label: "账号偏好",
-          relativePath: "Preferences"
-        });
-      } else {
-        skippedItems.push({
-          label: "账号偏好",
-          relativePath: "Preferences",
-          reason: "源 Profile 中不存在可合并的账号偏好"
-        });
-      }
-
-      let launchedTarget = false;
-      if (launchTarget) {
-        await this.launchProfile(targetProfileId);
-        launchedTarget = true;
-      }
-
-      return {
-        sourceProfileId,
-        targetProfileId,
-        copiedItems,
-        skippedItems,
-        backup,
-        launchedTarget,
-        state: await this.getState()
+    for (const [index, spec] of copySpecs.entries()) {
+      throwIfAborted(abortSignal);
+      await waitIfPaused(pauseSignal, abortSignal);
+      const itemPosition = `${index + 1}/${copySpecs.length}`;
+      const reportCopyProgress = (detail: string): void => {
+        report(`正在复制账号数据 ${itemPosition}：${spec.label}${detail ? ` · ${detail}` : ""}`, "复制账号数据", 3);
       };
-    } catch (error) {
-      try {
-        await this.restoreAccountSyncBackupMetadata(await this.readAccountSyncBackupMetadata(backup.id));
-      } catch {
-        // Keep the original account sync error visible.
+      reportCopyProgress("准备中");
+      const sourcePath = path.join(sourceLocation.profilePath, spec.relativePath);
+      const diffItem = accountDiffByPath.get(spec.relativePath) || null;
+      if (diffItem?.status === "source_missing" || !(await exists(sourcePath))) {
+        skippedItems.push({
+          label: spec.label,
+          relativePath: spec.relativePath,
+          reason: diffItem?.reason || "源 Profile 中没有生成，本次无需同步"
+        });
+        continue;
       }
-      throw error;
-    }
-  }
 
-  async listAccountSyncBackups(): Promise<AccountSyncBackupSummary[]> {
-    await fs.mkdir(this.accountSyncBackupDir, { recursive: true });
-    const entries = await fs.readdir(this.accountSyncBackupDir, { withFileTypes: true }).catch(() => []);
-    const backups = await Promise.all(
-      entries
-        .filter((entry) => entry.isDirectory())
-        .map(async (entry): Promise<AccountSyncBackupSummary | null> => {
-          try {
-            return summarizeAccountSyncBackup(await this.readAccountSyncBackupMetadata(entry.name));
-          } catch {
-            return null;
-          }
-        })
-    );
+      if (onlyChanged && diffItem?.status === "same") {
+        skippedItems.push({
+          label: spec.label,
+          relativePath: spec.relativePath,
+          reason: "已一致，本次无需同步"
+        });
+        continue;
+      }
 
-    return backups
-      .filter((backup): backup is AccountSyncBackupSummary => Boolean(backup))
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  }
-
-  async restoreAccountSyncBackup(backupId: string): Promise<AccountSyncRestoreResult> {
-    const metadata = await this.readAccountSyncBackupMetadata(backupId);
-    const state = await this.getState();
-    const targetProfile = state.profiles.find((profile) => profile.id === metadata.targetProfileId);
-    if (targetProfile?.running) {
-      throw new ProfileManagerError("恢复账号同步备份前请先关闭目标 Profile。", "TARGET_PROFILE_RUNNING");
+      const targetPath = path.join(targetLocation.profilePath, normalizeSafeRelativePath(spec.relativePath));
+      await waitIfPaused(pauseSignal, abortSignal);
+      await copyAccountSyncPath(sourcePath, targetPath, reportCopyProgress, abortSignal, pauseSignal);
+      copiedItems.push({
+        label: spec.label,
+        relativePath: spec.relativePath
+      });
     }
 
-    await this.restoreAccountSyncBackupMetadata(metadata);
+    throwIfAborted(abortSignal);
+    await waitIfPaused(pauseSignal, abortSignal);
+    report("正在合并账号偏好…", "合并偏好", 4);
+    const preferenceDiff = accountDiffByPath.get("Preferences") || null;
+    const shouldMergePreferences = shouldApplyAccountDiffItem(preferenceDiff, onlyChanged);
+    const preferencesMerged = shouldMergePreferences
+      ? await mergeAccountPreferenceValues(sourceLocation.profilePath, targetLocation.profilePath)
+      : false;
+    if (preferencesMerged || (shouldMergePreferences && preferenceDiff?.status === "target_missing")) {
+      copiedItems.push({
+        label: "账号偏好",
+        relativePath: "Preferences"
+      });
+    } else {
+      skippedItems.push({
+        label: "账号偏好",
+        relativePath: "Preferences",
+        reason: preferenceDiff?.reason || "源 Profile 中没有生成，本次无需同步"
+      });
+    }
+
+    throwIfAborted(abortSignal);
+    await waitIfPaused(pauseSignal, abortSignal);
+    const securePreferenceDiff = accountDiffByPath.get("Secure Preferences") || null;
+    const shouldMergeSecurePreferences = shouldApplyAccountDiffItem(securePreferenceDiff, onlyChanged);
+    const securePreferencesMerged = shouldMergeSecurePreferences
+      ? await mergeAccountSecurePreferenceValues(sourceLocation.profilePath, targetLocation.profilePath)
+      : false;
+    if (securePreferencesMerged || (shouldMergeSecurePreferences && securePreferenceDiff?.status === "target_missing")) {
+      copiedItems.push({
+        label: "受保护账号偏好",
+        relativePath: "Secure Preferences"
+      });
+    } else if (securePreferenceDiff?.status === "source_missing" || (onlyChanged && securePreferenceDiff?.status === "same")) {
+      skippedItems.push({
+        label: "受保护账号偏好",
+        relativePath: "Secure Preferences",
+        reason: securePreferenceDiff.reason
+      });
+    }
+
+    throwIfAborted(abortSignal);
+    await waitIfPaused(pauseSignal, abortSignal);
+    report("正在写入浏览器账号状态…", "写入浏览器状态", 5);
+    const localStateDiff = accountDiffByPath.get("Local State") || null;
+    const shouldMergeLocalState = shouldApplyAccountDiffItem(localStateDiff, onlyChanged);
+    const localStateMerged = shouldMergeLocalState
+      ? await mergeAccountLocalStateValues(sourceLocation, targetLocation)
+      : false;
+    if (localStateMerged || (shouldMergeLocalState && localStateDiff?.status === "target_missing")) {
+      copiedItems.push({
+        label: "浏览器账号状态",
+        relativePath: "Local State"
+      });
+    } else {
+      skippedItems.push({
+        label: "浏览器账号状态",
+        relativePath: "Local State",
+        reason: localStateDiff?.reason || "源 Profile 中没有生成，本次无需同步"
+      });
+    }
+
+    let launchedTarget = false;
+    if (launchTarget) {
+      throwIfAborted(abortSignal);
+      await waitIfPaused(pauseSignal, abortSignal);
+      report(`正在启动 ${targetProfile.name}…`, "完成", 6);
+      await this.launchProfile(targetProfileId);
+      launchedTarget = true;
+    } else {
+      report("正在刷新同步结果…", "完成", 6);
+    }
+
+    await this.recordAccountSync({
+      sourceProfileId,
+      targetProfileId,
+      syncedAt: new Date().toISOString(),
+      copiedCount: copiedItems.length,
+      skippedCount: skippedItems.length,
+      launchedTarget,
+      sourceFingerprints: await snapshotAccountSyncSourceFingerprints(sourceLocation)
+    });
 
     return {
-      backup: summarizeAccountSyncBackup(metadata),
+      sourceProfileId,
+      targetProfileId,
+      copiedItems,
+      skippedItems,
+      launchedTarget,
       state: await this.getState()
     };
   }
@@ -836,7 +986,13 @@ export class ProfileManager {
     const publicProfile = profile || (await this.toIsolatedPublicProfile(storedProfile, new Map()));
     const trashPath = await this.moveToTrash(this.isolatedProfilePath(storedProfile), storedProfile.dirName);
     const nextProfiles = registry.profiles.filter((item) => item.id !== id);
-    await this.saveRegistry({ ...registry, profiles: nextProfiles });
+    const deletedProfileId = makeIsolatedProfileId(id);
+    const accountSyncRecords = Object.fromEntries(
+      Object.entries(registry.accountSyncRecords || {}).filter(
+        ([, record]) => record.sourceProfileId !== deletedProfileId && record.targetProfileId !== deletedProfileId
+      )
+    );
+    await this.saveRegistry({ ...registry, profiles: nextProfiles, accountSyncRecords });
 
     return {
       deletedProfile: publicProfile,
@@ -865,7 +1021,7 @@ export class ProfileManager {
     try {
       await fs.access(this.registryPath);
     } catch {
-      await this.saveRegistry({ profiles: [], nativeProfiles: {} });
+      await this.saveRegistry({ profiles: [], nativeProfiles: {}, accountSyncRecords: {} });
     }
   }
 
@@ -879,12 +1035,17 @@ export class ProfileManager {
         parsed.nativeProfiles && typeof parsed.nativeProfiles === "object"
           ? normalizeNativeProfileMetadata(parsed.nativeProfiles)
           : {};
+      const accountSyncRecords =
+        parsed.accountSyncRecords && typeof parsed.accountSyncRecords === "object"
+          ? normalizeAccountSyncRecords(parsed.accountSyncRecords)
+          : {};
 
       return {
         profiles: Array.isArray(parsed.profiles)
           ? (parsed.profiles.map(normalizeProfile).filter(Boolean) as StoredProfile[])
           : [],
-        nativeProfiles
+        nativeProfiles,
+        accountSyncRecords
       };
     } catch {
       const backup = `${this.registryPath}.broken-${Date.now()}`;
@@ -893,7 +1054,7 @@ export class ProfileManager {
       } catch {
         // Start clean if the broken registry cannot be backed up.
       }
-      return { profiles: [], nativeProfiles: {} };
+      return { profiles: [], nativeProfiles: {}, accountSyncRecords: {} };
     }
   }
 
@@ -902,6 +1063,27 @@ export class ProfileManager {
     const tmpPath = `${this.registryPath}.tmp`;
     await fs.writeFile(tmpPath, `${JSON.stringify(registry, null, 2)}\n`, "utf8");
     await fs.rename(tmpPath, this.registryPath);
+  }
+
+  private async recordAccountSync(record: AccountSyncRecord): Promise<void> {
+    const registry = await this.loadRegistry();
+    await this.saveRegistry({
+      ...registry,
+      accountSyncRecords: {
+        ...(registry.accountSyncRecords || {}),
+        [accountSyncRecordKey(record.sourceProfileId, record.targetProfileId)]: record
+      }
+    });
+  }
+
+  private async recoverAccountSyncArtifactsBeforeLaunch(profileId: string): Promise<void> {
+    const profile = await this.getPublicProfile(profileId);
+    if (profile.running) {
+      return;
+    }
+
+    const location = await this.resolveAccountSyncLocation(profile, false);
+    await recoverInterruptedAccountSyncArtifactsForProfile(location.profilePath);
   }
 
   private async getRuntime(profilePaths: string[], nativeDirNames: string[]): Promise<Map<string, RuntimeProfile>> {
@@ -1004,57 +1186,6 @@ export class ProfileManager {
     };
   }
 
-  private async createExtensionMigrationBackup(
-    targetProfile: PublicProfile,
-    selectedExtensions: ProfileExtensionInfo[],
-    targetProfileDataPath: string
-  ): Promise<ExtensionMigrationBackupSummary> {
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const id = `${stamp}-${makeSlug(targetProfile.name || targetProfile.dirName)}`;
-    const backupPath = path.join(this.extensionBackupDir, id);
-    const snapshotPath = path.join(backupPath, "snapshot");
-    await fs.mkdir(snapshotPath, { recursive: true });
-
-    const itemRelativePaths = uniqueStrings(
-      [
-        "Preferences",
-        "Secure Preferences",
-        "Extensions",
-        ...selectedExtensions.flatMap((extension) => extensionDataRelativePaths(extension.id))
-      ].filter(Boolean)
-    );
-
-    const items = await Promise.all(
-      itemRelativePaths.map(async (relativePath) => {
-        const sourcePath = path.join(targetProfileDataPath, relativePath);
-        const existed = await exists(sourcePath);
-        if (existed) {
-          await copyPath(sourcePath, path.join(snapshotPath, relativePath));
-        }
-
-        return {
-          relativePath,
-          existed
-        };
-      })
-    );
-
-    const metadata: ExtensionMigrationBackupMetadata = {
-      id,
-      createdAt: new Date().toISOString(),
-      path: backupPath,
-      targetProfileId: targetProfile.id,
-      targetProfileName: targetProfile.name,
-      targetProfilePath: targetProfileDataPath,
-      itemCount: items.length,
-      items,
-      targetMigratedExtensions: await this.getMigratedExtensionsSnapshot(targetProfile)
-    };
-
-    await fs.writeFile(path.join(backupPath, "backup.json"), `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
-    return summarizeExtensionMigrationBackup(metadata);
-  }
-
   private async resolveChromeProfileDataPath(profile: PublicProfile, ensureProfilePath = false): Promise<string> {
     if (profile.source === "native") {
       return profile.path;
@@ -1076,10 +1207,17 @@ export class ProfileManager {
       throw new ProfileManagerError(`插件 ${extension.name} 没有可复制的插件包目录。`, "EXTENSION_PATH_MISSING");
     }
 
+    const sourcePath = extension.path;
     const versionSlug = makePathSegment(extension.version || "unknown-version");
     const targetPath = path.join(targetProfile.path, "Migrated Extensions", extension.id, versionSlug);
+    if (await isSameFilesystemPath(sourcePath, targetPath)) {
+      return targetPath;
+    }
+
     await fs.rm(targetPath, { recursive: true, force: true });
-    await copyPath(extension.path, targetPath);
+    await copyPath(sourcePath, targetPath, {
+      shouldCopy: (candidatePath) => shouldCopyLocalExtensionPackagePath(sourcePath, candidatePath)
+    });
     return targetPath;
   }
 
@@ -1105,21 +1243,6 @@ export class ProfileManager {
       ...copiedExtensions
     ].sort((a, b) => a.name.localeCompare(b.name));
     await this.saveRegistry(registry);
-  }
-
-  private async getMigratedExtensionsSnapshot(targetProfile: PublicProfile): Promise<StoredMigratedExtension[]> {
-    if (targetProfile.source !== "isolated") {
-      return [];
-    }
-
-    const ref = parseProfileId(targetProfile.id);
-    if (ref.source !== "isolated") {
-      return [];
-    }
-
-    const registry = await this.loadRegistry();
-    const storedProfile = this.findIsolatedProfile(registry, ref.id);
-    return [...(storedProfile.migratedExtensions || [])];
   }
 
   private async discardMigratedExtensions(
@@ -1165,62 +1288,6 @@ export class ProfileManager {
     }
   }
 
-  private async readExtensionMigrationBackupMetadata(backupId: string): Promise<ExtensionMigrationBackupMetadata> {
-    const safeId = path.basename(String(backupId || ""));
-    if (!safeId || safeId !== backupId) {
-      throw new ProfileManagerError("备份 ID 无效。", "INVALID_BACKUP_ID");
-    }
-
-    const raw = await fs.readFile(path.join(this.extensionBackupDir, safeId, "backup.json"), "utf8");
-    const parsed = JSON.parse(raw) as ExtensionMigrationBackupMetadata;
-    if (
-      !parsed ||
-      typeof parsed.id !== "string" ||
-      typeof parsed.targetProfilePath !== "string" ||
-      !Array.isArray(parsed.items)
-    ) {
-      throw new ProfileManagerError("备份元数据无效。", "INVALID_BACKUP_METADATA");
-    }
-
-    return parsed;
-  }
-
-  private async restoreBackupMetadata(metadata: ExtensionMigrationBackupMetadata): Promise<void> {
-    const snapshotPath = path.join(metadata.path, "snapshot");
-    for (const item of metadata.items) {
-      const relativePath = normalizeSafeRelativePath(item.relativePath);
-      const targetPath = path.join(metadata.targetProfilePath, relativePath);
-      const backupItemPath = path.join(snapshotPath, relativePath);
-
-      await fs.rm(targetPath, { recursive: true, force: true });
-      if (item.existed && (await exists(backupItemPath))) {
-        await copyPath(backupItemPath, targetPath);
-      }
-    }
-
-    await this.restoreMigratedExtensionsSnapshot(metadata);
-  }
-
-  private async restoreMigratedExtensionsSnapshot(metadata: ExtensionMigrationBackupMetadata): Promise<void> {
-    if (!metadata.targetProfileId.startsWith("isolated:") || !metadata.targetMigratedExtensions) {
-      return;
-    }
-
-    const ref = parseProfileId(metadata.targetProfileId);
-    if (ref.source !== "isolated") {
-      return;
-    }
-
-    const registry = await this.loadRegistry();
-    const storedProfile = registry.profiles.find((profile) => profile.id === ref.id);
-    if (!storedProfile) {
-      return;
-    }
-
-    storedProfile.migratedExtensions = metadata.targetMigratedExtensions;
-    await this.saveRegistry(registry);
-  }
-
   private async resolveAccountSyncLocation(
     profile: PublicProfile,
     ensureProfilePath: boolean
@@ -1228,7 +1295,8 @@ export class ProfileManager {
     if (profile.source === "native") {
       return {
         userDataPath: nativeChromeUserDataDir(),
-        profilePath: profile.path
+        profilePath: profile.path,
+        profileDirName: profile.dirName
       };
     }
 
@@ -1244,85 +1312,9 @@ export class ProfileManager {
 
     return {
       userDataPath: rootPath,
-      profilePath
+      profilePath,
+      profileDirName: chromeProfileDirName(rootPath, profilePath)
     };
-  }
-
-  private async createAccountSyncBackup(
-    targetProfile: PublicProfile,
-    targetLocation: AccountSyncDataLocation
-  ): Promise<AccountSyncBackupSummary> {
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const id = `${stamp}-${makeSlug(targetProfile.name || targetProfile.dirName)}`;
-    const backupPath = path.join(this.accountSyncBackupDir, id);
-    const snapshotPath = path.join(backupPath, "snapshot");
-    await fs.mkdir(snapshotPath, { recursive: true });
-
-    const itemRelativePaths = accountSyncBackupRelativePaths();
-    const items = await Promise.all(
-      itemRelativePaths.map(async (relativePath) => {
-        const sourcePath = path.join(targetLocation.profilePath, relativePath);
-        const existed = await exists(sourcePath);
-        if (existed) {
-          await copyAccountSyncPath(sourcePath, path.join(snapshotPath, relativePath));
-        }
-
-        return {
-          relativePath,
-          existed
-        };
-      })
-    );
-
-    const metadata: AccountSyncBackupMetadata = {
-      id,
-      createdAt: new Date().toISOString(),
-      path: backupPath,
-      targetProfileId: targetProfile.id,
-      targetProfileName: targetProfile.name,
-      targetProfilePath: targetLocation.profilePath,
-      targetUserDataPath: targetLocation.userDataPath,
-      itemCount: items.length,
-      items
-    };
-
-    await fs.writeFile(path.join(backupPath, "backup.json"), `${JSON.stringify(metadata, null, 2)}\n`, "utf8");
-    return summarizeAccountSyncBackup(metadata);
-  }
-
-  private async readAccountSyncBackupMetadata(backupId: string): Promise<AccountSyncBackupMetadata> {
-    const safeId = path.basename(String(backupId || ""));
-    if (!safeId || safeId !== backupId) {
-      throw new ProfileManagerError("账号同步备份 ID 无效。", "INVALID_BACKUP_ID");
-    }
-
-    const raw = await fs.readFile(path.join(this.accountSyncBackupDir, safeId, "backup.json"), "utf8");
-    const parsed = JSON.parse(raw) as AccountSyncBackupMetadata;
-    if (
-      !parsed ||
-      typeof parsed.id !== "string" ||
-      typeof parsed.targetProfilePath !== "string" ||
-      typeof parsed.targetUserDataPath !== "string" ||
-      !Array.isArray(parsed.items)
-    ) {
-      throw new ProfileManagerError("账号同步备份元数据无效。", "INVALID_BACKUP_METADATA");
-    }
-
-    return parsed;
-  }
-
-  private async restoreAccountSyncBackupMetadata(metadata: AccountSyncBackupMetadata): Promise<void> {
-    const snapshotPath = path.join(metadata.path, "snapshot");
-    for (const item of metadata.items) {
-      const relativePath = normalizeSafeRelativePath(item.relativePath);
-      const targetPath = path.join(metadata.targetProfilePath, relativePath);
-      const backupItemPath = path.join(snapshotPath, relativePath);
-
-      await fs.rm(targetPath, { recursive: true, force: true });
-      if (item.existed && (await exists(backupItemPath))) {
-        await copyAccountSyncPath(backupItemPath, targetPath);
-      }
-    }
   }
 
   private findIsolatedProfile(registry: Registry, id: string): StoredProfile {
@@ -2019,6 +2011,433 @@ function extensionDataLabel(relativePath: string): string {
   return relativePath.split(path.sep)[0] || relativePath;
 }
 
+async function inspectAccountSyncPathDiff(
+  sourceLocation: AccountSyncDataLocation,
+  targetLocation: AccountSyncDataLocation,
+  spec: AccountSyncPathSpec
+): Promise<AccountSyncDiffItem> {
+  const sourcePath = path.join(sourceLocation.profilePath, spec.relativePath);
+  const targetPath = path.join(targetLocation.profilePath, normalizeSafeRelativePath(spec.relativePath));
+  const [sourceFingerprint, targetFingerprint] = await Promise.all([
+    pathMetadataFingerprint(sourcePath, isAccountSyncComparablePath),
+    pathMetadataFingerprint(targetPath, isAccountSyncComparablePath)
+  ]);
+
+  if (!sourceFingerprint) {
+    return accountSyncDiffItem(spec.label, spec.relativePath, "source_missing");
+  }
+  if (!targetFingerprint) {
+    return accountSyncDiffItem(spec.label, spec.relativePath, "target_missing");
+  }
+
+  return accountSyncDiffItem(spec.label, spec.relativePath, sourceFingerprint === targetFingerprint ? "same" : "changed");
+}
+
+async function inspectAccountPreferenceDiff(
+  label: string,
+  relativePath: string,
+  sourceProfilePath: string,
+  targetProfilePath: string,
+  preferencePaths: string[]
+): Promise<AccountSyncDiffItem> {
+  const sourcePath = path.join(sourceProfilePath, relativePath);
+  const targetPath = path.join(targetProfilePath, relativePath);
+  const sourcePreferences = await readJsonFile<Record<string, unknown>>(sourcePath);
+  if (!sourcePreferences) {
+    return accountSyncDiffItem(label, relativePath, "source_missing");
+  }
+
+  const targetExists = await exists(targetPath);
+  const targetPreferences = (await readJsonFile<Record<string, unknown>>(targetPath)) || {};
+  const sourceHasRelevantValues = hasNestedPreferenceValue(sourcePreferences, preferencePaths);
+  const targetHasRelevantValues = hasNestedPreferenceValue(targetPreferences, preferencePaths);
+  if (!sourceHasRelevantValues && !targetHasRelevantValues) {
+    return accountSyncDiffItem(label, relativePath, "source_missing");
+  }
+
+  const simulatedTarget = cloneJsonValue(targetPreferences) as Record<string, unknown>;
+  for (const preferencePath of preferencePaths) {
+    copyPreferencePath(sourcePreferences, simulatedTarget, preferencePath);
+  }
+
+  if (stableJsonStringify(simulatedTarget) === stableJsonStringify(targetPreferences)) {
+    return accountSyncDiffItem(label, relativePath, "same");
+  }
+
+  return accountSyncDiffItem(label, relativePath, targetExists ? "changed" : "target_missing");
+}
+
+async function inspectAccountLocalStateDiff(
+  sourceLocation: AccountSyncDataLocation,
+  targetLocation: AccountSyncDataLocation
+): Promise<AccountSyncDiffItem> {
+  const sourceLocalStatePath = path.join(sourceLocation.userDataPath, "Local State");
+  const targetLocalStatePath = path.join(targetLocation.userDataPath, "Local State");
+  const sourceLocalState = await readJsonFile<ChromeLocalState>(sourceLocalStatePath);
+  if (!sourceLocalState) {
+    return accountSyncDiffItem("浏览器账号状态", "Local State", "source_missing");
+  }
+
+  const sourceInfo = localStateProfileInfo(sourceLocalState, sourceLocation.profileDirName);
+  if (!sourceInfo) {
+    return accountSyncDiffItem("浏览器账号状态", "Local State", "source_missing");
+  }
+
+  const targetExists = await exists(targetLocalStatePath);
+  const targetLocalState = (await readJsonFile<ChromeLocalState>(targetLocalStatePath)) || {};
+  const targetProfile = targetLocalState.profile;
+  const targetInfoCache = isRecord(targetProfile?.info_cache) ? targetProfile.info_cache : {};
+  const targetInfo = isRecord(targetInfoCache[targetLocation.profileDirName])
+    ? (targetInfoCache[targetLocation.profileDirName] as Record<string, unknown>)
+    : {};
+  if (!hasAccountLocalStateValues(sourceInfo) && !hasAccountLocalStateValues(targetInfo)) {
+    return accountSyncDiffItem("浏览器账号状态", "Local State", "source_missing");
+  }
+
+  const simulatedTarget = cloneJsonValue(targetLocalState) as ChromeLocalState;
+  const simulatedProfile = ensureLocalStateProfile(simulatedTarget);
+  const simulatedInfoCache = ensureLocalStateInfoCache(simulatedProfile);
+  const existingTargetInfo = isRecord(simulatedInfoCache[targetLocation.profileDirName])
+    ? simulatedInfoCache[targetLocation.profileDirName]
+    : {};
+  simulatedInfoCache[targetLocation.profileDirName] = mergeLocalStateProfileAccountInfo(sourceInfo, existingTargetInfo);
+  simulatedProfile.last_used = targetLocation.profileDirName;
+  simulatedProfile.last_active_profiles = moveStringToFront(
+    stringArrayValue(simulatedProfile.last_active_profiles),
+    targetLocation.profileDirName
+  );
+  simulatedProfile.profiles_order = moveStringToFront(
+    uniqueStrings([...stringArrayValue(simulatedProfile.profiles_order), ...Object.keys(simulatedInfoCache)]),
+    targetLocation.profileDirName
+  );
+
+  if (stableJsonStringify(simulatedTarget) === stableJsonStringify(targetLocalState)) {
+    return accountSyncDiffItem("浏览器账号状态", "Local State", "same");
+  }
+
+  return accountSyncDiffItem("浏览器账号状态", "Local State", targetExists ? "changed" : "target_missing");
+}
+
+function accountSyncDiffItem(
+  label: string,
+  relativePath: string,
+  status: AccountSyncDiffItem["status"]
+): AccountSyncDiffItem {
+  return {
+    label,
+    relativePath,
+    status,
+    reason: accountSyncDiffReason(status)
+  };
+}
+
+function accountSyncDiffReason(status: AccountSyncDiffItem["status"]): string {
+  switch (status) {
+    case "changed":
+      return "源和目标不同，本次会同步";
+    case "same":
+      return "已一致，本次无需同步";
+    case "target_missing":
+      return "目标缺少，本次会同步";
+    case "source_missing":
+    default:
+      return "源 Profile 中没有生成，本次无需同步";
+  }
+}
+
+function summarizeAccountSyncDiff(items: AccountSyncDiffItem[]): AccountSyncDiffResult["summary"] {
+  const changedCount = items.filter((item) => item.status === "changed").length;
+  const targetMissingCount = items.filter((item) => item.status === "target_missing").length;
+  return {
+    changedCount,
+    sameCount: items.filter((item) => item.status === "same").length,
+    sourceMissingCount: items.filter((item) => item.status === "source_missing").length,
+    targetMissingCount,
+    syncableCount: changedCount + targetMissingCount
+  };
+}
+
+async function applyAccountSyncRecordBaseline(
+  items: AccountSyncDiffItem[],
+  sourceLocation: AccountSyncDataLocation,
+  record: AccountSyncRecord
+): Promise<AccountSyncDiffItem[]> {
+  return Promise.all(
+    items.map(async (item) => {
+      if (item.status !== "changed") {
+        return item;
+      }
+
+      const currentFingerprint = await accountSyncSourceFingerprint(sourceLocation, item.relativePath);
+      const recordedFingerprint = record.sourceFingerprints?.[item.relativePath];
+      if (recordedFingerprint !== undefined) {
+        if (currentFingerprint === recordedFingerprint) {
+          return accountSyncBaselineSameItem(item);
+        }
+        return item;
+      }
+
+      if (!(await accountSyncSourcePathChangedAfterRecord(sourceLocation, item.relativePath, record))) {
+        return accountSyncBaselineSameItem(item);
+      }
+
+      return item;
+    })
+  );
+}
+
+function accountSyncBaselineSameItem(item: AccountSyncDiffItem): AccountSyncDiffItem {
+  return {
+    ...item,
+    status: "same",
+    reason: "上次同步后源 Profile 没有新变化，本次无需同步"
+  };
+}
+
+function shouldApplyAccountDiffItem(item: AccountSyncDiffItem | null, onlyChanged: boolean): boolean {
+  if (!item || item.status === "source_missing") {
+    return false;
+  }
+
+  return !onlyChanged || item.status !== "same";
+}
+
+function inspectExtensionMigrationItem(
+  extension: ProfileExtensionInfo,
+  targetExtension: ProfileExtensionInfo | null,
+  targetProfile: PublicProfile,
+  dataChanged: boolean,
+  openInstallPages: boolean
+): ExtensionMigrationDiffItem {
+  const canCopyLocally = Boolean(extension.canCopyLocally && extension.path && targetProfile.source === "isolated");
+  const canOpenInstallPage = Boolean(extension.fromWebStore && extension.storeUrl);
+  const targetVersion = targetExtension?.version || null;
+  let status: ExtensionMigrationDiffStatus;
+
+  if (!targetExtension) {
+    status = canCopyLocally ? "missing" : canOpenInstallPage ? "needs_install_page" : "unsupported";
+  } else if (extension.version !== targetExtension.version) {
+    status = canCopyLocally ? "version_changed" : canOpenInstallPage ? "needs_install_page" : "unsupported";
+  } else if (dataChanged) {
+    status = "data_changed";
+  } else {
+    status = "same";
+  }
+
+  return {
+    id: extension.id,
+    name: extension.name,
+    sourceVersion: extension.version,
+    targetVersion,
+    status,
+    reason: extensionMigrationDiffReason(status, Boolean(targetExtension), openInstallPages),
+    willCopyLocally: (status === "missing" || status === "version_changed") && canCopyLocally,
+    willOpenInstallPage: status === "needs_install_page" && canOpenInstallPage && openInstallPages
+  };
+}
+
+function extensionMigrationDiffReason(
+  status: ExtensionMigrationDiffStatus,
+  hasTargetExtension: boolean,
+  openInstallPages: boolean
+): string {
+  switch (status) {
+    case "missing":
+      return "目标缺少，本次会同步";
+    case "version_changed":
+      return "版本不同，本次会更新";
+    case "data_changed":
+      return "插件数据不同，本次会同步数据";
+    case "same":
+      return "已一致，本次无需同步";
+    case "needs_install_page":
+      if (!openInstallPages) {
+        return hasTargetExtension ? "版本不同，需要安装页，当前不会自动打开" : "目标缺少，需要安装页，当前不会自动打开";
+      }
+      return hasTargetExtension ? "版本不同，本次会打开安装页" : "目标缺少，本次会打开安装页";
+    case "unsupported":
+    default:
+      return "没有可自动同步的插件目录";
+  }
+}
+
+function summarizeExtensionMigrationDiff(
+  items: ExtensionMigrationDiffItem[],
+  targetOnlyCount: number
+): ExtensionMigrationDiffResult["summary"] {
+  return {
+    missingCount: items.filter((item) => item.status === "missing").length,
+    changedCount: items.filter((item) => item.status === "version_changed" || item.status === "data_changed").length,
+    sameCount: items.filter((item) => item.status === "same").length,
+    needsInstallPageCount: items.filter((item) => item.status === "needs_install_page").length,
+    unsupportedCount: items.filter((item) => item.status === "unsupported").length,
+    targetOnlyCount
+  };
+}
+
+async function extensionDataDiffers(
+  sourceProfilePath: string,
+  targetProfilePath: string,
+  extension: ProfileExtensionInfo
+): Promise<boolean> {
+  for (const dataPath of extension.dataPaths) {
+    const relativePath = normalizeSafeRelativePath(dataPath.relativePath);
+    const [sourceFingerprint, targetFingerprint] = await Promise.all([
+      pathMetadataFingerprint(path.join(sourceProfilePath, relativePath)),
+      pathMetadataFingerprint(path.join(targetProfilePath, relativePath))
+    ]);
+    if (sourceFingerprint !== targetFingerprint) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function hasNestedPreferenceValue(preferences: Record<string, unknown>, preferencePaths: string[]): boolean {
+  return preferencePaths.some((preferencePath) => getNestedValue(preferences, preferencePath.split(".")) !== undefined);
+}
+
+function hasAccountLocalStateValues(info: Record<string, unknown>): boolean {
+  return Object.keys(info).some(isAccountLocalStateProfileInfoKey);
+}
+
+async function pathMetadataFingerprint(
+  filePath: string,
+  shouldInclude: (candidatePath: string) => boolean = () => true
+): Promise<string | null> {
+  if (!(await exists(filePath)) || !shouldInclude(filePath)) {
+    return null;
+  }
+
+  const hash = createHash("sha256");
+  await appendPathMetadataFingerprint(hash, filePath, filePath, shouldInclude);
+  return hash.digest("hex");
+}
+
+async function appendPathMetadataFingerprint(
+  hash: ReturnType<typeof createHash>,
+  rootPath: string,
+  filePath: string,
+  shouldInclude: (candidatePath: string) => boolean
+): Promise<void> {
+  if (!shouldInclude(filePath)) {
+    return;
+  }
+
+  const stat = await fs.lstat(filePath);
+  const relativePath = path.relative(rootPath, filePath) || ".";
+  if (stat.isDirectory()) {
+    hash.update(`dir:${relativePath}\n`);
+    const children = (await fs.readdir(filePath)).sort((a, b) => a.localeCompare(b));
+    for (const child of children) {
+      await appendPathMetadataFingerprint(hash, rootPath, path.join(filePath, child), shouldInclude);
+    }
+    return;
+  }
+
+  if (stat.isSymbolicLink()) {
+    const linkTarget = await fs.readlink(filePath);
+    hash.update(`symlink:${relativePath}:${linkTarget}\n`);
+    return;
+  }
+
+  hash.update(`file:${relativePath}:${stat.size}:${Math.trunc(stat.mtimeMs)}\n`);
+}
+
+async function snapshotAccountSyncSourceFingerprints(
+  sourceLocation: AccountSyncDataLocation
+): Promise<Record<string, string | null>> {
+  const relativePaths = uniqueStrings([
+    ...accountSyncCopySpecs().map((spec) => spec.relativePath),
+    "Preferences",
+    "Secure Preferences",
+    "Local State"
+  ]);
+  const entries = await Promise.all(
+    relativePaths.map(async (relativePath) => [relativePath, await accountSyncSourceFingerprint(sourceLocation, relativePath)] as const)
+  );
+
+  return Object.fromEntries(entries);
+}
+
+async function accountSyncSourceFingerprint(
+  sourceLocation: AccountSyncDataLocation,
+  relativePath: string
+): Promise<string | null> {
+  return pathMetadataFingerprint(accountSyncSourcePath(sourceLocation, relativePath), isAccountSyncComparablePath);
+}
+
+async function accountSyncSourcePathChangedAfterRecord(
+  sourceLocation: AccountSyncDataLocation,
+  relativePath: string,
+  record: AccountSyncRecord
+): Promise<boolean> {
+  const recordTime = Date.parse(record.syncedAt);
+  if (!Number.isFinite(recordTime)) {
+    return true;
+  }
+
+  const latestMtime = await latestPathMtimeMs(accountSyncSourcePath(sourceLocation, relativePath), isAccountSyncComparablePath);
+  return latestMtime === null || latestMtime > recordTime + 1000;
+}
+
+function accountSyncSourcePath(sourceLocation: AccountSyncDataLocation, relativePath: string): string {
+  if (relativePath === "Local State") {
+    return path.join(sourceLocation.userDataPath, "Local State");
+  }
+
+  return path.join(sourceLocation.profilePath, normalizeSafeRelativePath(relativePath));
+}
+
+async function latestPathMtimeMs(
+  filePath: string,
+  shouldInclude: (candidatePath: string) => boolean = () => true
+): Promise<number | null> {
+  if (!(await exists(filePath)) || !shouldInclude(filePath)) {
+    return null;
+  }
+
+  const stat = await fs.lstat(filePath);
+  let latest = stat.mtimeMs;
+  if (!stat.isDirectory()) {
+    return latest;
+  }
+
+  const children = await fs.readdir(filePath);
+  for (const child of children) {
+    const childMtime = await latestPathMtimeMs(path.join(filePath, child), shouldInclude);
+    if (childMtime !== null && childMtime > latest) {
+      latest = childMtime;
+    }
+  }
+
+  return latest;
+}
+
+function isAccountSyncComparablePath(candidatePath: string): boolean {
+  const name = path.basename(candidatePath);
+  return name !== "LOCK" && !isAccountSyncWorkArtifactName(name);
+}
+
+function stableJsonStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableJsonStringify).join(",")}]`;
+  }
+  if (isRecord(value)) {
+    const body = Object.keys(value)
+      .sort((a, b) => a.localeCompare(b))
+      .map((key) => `${JSON.stringify(key)}:${stableJsonStringify(value[key])}`)
+      .join(",");
+    return `{${body}}`;
+  }
+  if (value === undefined) {
+    return "undefined";
+  }
+
+  return JSON.stringify(value) ?? "null";
+}
+
 async function copyExtensionDataPath(
   sourceProfilePath: string,
   targetProfilePath: string,
@@ -2038,6 +2457,7 @@ async function copyExtensionDataPath(
 
 function accountSyncCopySpecs(): AccountSyncPathSpec[] {
   return [
+    { label: "Google Profile Picture", relativePath: "Google Profile Picture.png" },
     { label: "Cookies", relativePath: "Cookies" },
     { label: "Cookies journal", relativePath: "Cookies-journal" },
     { label: "Cookies WAL", relativePath: "Cookies-wal" },
@@ -2077,10 +2497,6 @@ function accountSyncCopySpecs(): AccountSyncPathSpec[] {
     { label: "Network Persistent State", relativePath: "Network Persistent State" },
     { label: "Transport Security", relativePath: "TransportSecurity" }
   ];
-}
-
-function accountSyncBackupRelativePaths(): string[] {
-  return uniqueStrings(["Preferences", ...accountSyncCopySpecs().map((spec) => spec.relativePath)]);
 }
 
 async function existingAccountSyncSpecs(profilePath: string): Promise<AccountSyncPathSpec[]> {
@@ -2128,6 +2544,67 @@ async function mergeAccountPreferenceValues(sourceProfilePath: string, targetPro
   return changed;
 }
 
+async function mergeAccountSecurePreferenceValues(sourceProfilePath: string, targetProfilePath: string): Promise<boolean> {
+  const sourcePath = path.join(sourceProfilePath, "Secure Preferences");
+  const targetPath = path.join(targetProfilePath, "Secure Preferences");
+  const sourcePreferences = await readJsonFile<Record<string, unknown>>(sourcePath);
+  if (!sourcePreferences) {
+    return false;
+  }
+
+  const targetPreferences = (await readJsonFile<Record<string, unknown>>(targetPath)) || {};
+  let changed = false;
+
+  for (const preferencePath of secureAccountPreferencePaths()) {
+    changed = copyPreferencePath(sourcePreferences, targetPreferences, preferencePath) || changed;
+  }
+
+  if (changed) {
+    await writeJsonFileAtomic(targetPath, targetPreferences);
+  }
+
+  return changed;
+}
+
+async function mergeAccountLocalStateValues(
+  sourceLocation: AccountSyncDataLocation,
+  targetLocation: AccountSyncDataLocation
+): Promise<boolean> {
+  const sourceLocalStatePath = path.join(sourceLocation.userDataPath, "Local State");
+  const targetLocalStatePath = path.join(targetLocation.userDataPath, "Local State");
+  const sourceLocalState = await readJsonFile<ChromeLocalState>(sourceLocalStatePath);
+  if (!sourceLocalState) {
+    return false;
+  }
+
+  const sourceInfo = localStateProfileInfo(sourceLocalState, sourceLocation.profileDirName);
+  if (!sourceInfo) {
+    return false;
+  }
+
+  const targetLocalState = (await readJsonFile<ChromeLocalState>(targetLocalStatePath)) || {};
+  const before = JSON.stringify(targetLocalState);
+  const targetProfile = ensureLocalStateProfile(targetLocalState);
+  const targetInfoCache = ensureLocalStateInfoCache(targetProfile);
+  const targetDirName = targetLocation.profileDirName;
+  const existingTargetInfo = isRecord(targetInfoCache[targetDirName]) ? targetInfoCache[targetDirName] : {};
+
+  targetInfoCache[targetDirName] = mergeLocalStateProfileAccountInfo(sourceInfo, existingTargetInfo);
+  targetProfile.last_used = targetDirName;
+  targetProfile.last_active_profiles = moveStringToFront(stringArrayValue(targetProfile.last_active_profiles), targetDirName);
+  targetProfile.profiles_order = moveStringToFront(
+    uniqueStrings([...stringArrayValue(targetProfile.profiles_order), ...Object.keys(targetInfoCache)]),
+    targetDirName
+  );
+
+  if (JSON.stringify(targetLocalState) === before) {
+    return false;
+  }
+
+  await writeJsonFileAtomic(targetLocalStatePath, targetLocalState);
+  return true;
+}
+
 function accountPreferencePaths(): string[] {
   return [
     "account_info",
@@ -2145,6 +2622,13 @@ function accountPreferencePaths(): string[] {
     "signin",
     "sync",
     "trusted_vault"
+  ];
+}
+
+function secureAccountPreferencePaths(): string[] {
+  return [
+    "google.services",
+    "protection.macs.google.services"
   ];
 }
 
@@ -2205,20 +2689,94 @@ function deleteNestedValue(target: Record<string, unknown>, pathParts: string[])
   return true;
 }
 
-function cloneJsonValue(value: unknown): unknown {
-  return JSON.parse(JSON.stringify(value)) as unknown;
+function localStateProfileInfo(localState: ChromeLocalState, dirName: string): Record<string, unknown> | null {
+  const infoCache = localState.profile?.info_cache;
+  if (!isRecord(infoCache)) {
+    return null;
+  }
+
+  const directInfo = infoCache[dirName];
+  if (isRecord(directInfo)) {
+    return directInfo;
+  }
+
+  const defaultInfo = infoCache.Default;
+  return isRecord(defaultInfo) ? defaultInfo : null;
 }
 
-function summarizeAccountSyncBackup(metadata: AccountSyncBackupMetadata): AccountSyncBackupSummary {
-  return {
-    id: metadata.id,
-    createdAt: metadata.createdAt,
-    path: metadata.path,
-    targetProfileId: metadata.targetProfileId,
-    targetProfileName: metadata.targetProfileName,
-    targetProfilePath: metadata.targetProfilePath,
-    itemCount: metadata.itemCount
-  };
+function ensureLocalStateProfile(localState: ChromeLocalState): NonNullable<ChromeLocalState["profile"]> {
+  if (!isRecord(localState.profile)) {
+    localState.profile = {};
+  }
+
+  return localState.profile;
+}
+
+function ensureLocalStateInfoCache(
+  profile: NonNullable<ChromeLocalState["profile"]>
+): NonNullable<NonNullable<ChromeLocalState["profile"]>["info_cache"]> {
+  if (!isRecord(profile.info_cache)) {
+    profile.info_cache = {};
+  }
+
+  return profile.info_cache;
+}
+
+function mergeLocalStateProfileAccountInfo(
+  sourceInfo: Record<string, unknown>,
+  targetInfo: Record<string, unknown>
+): Record<string, unknown> {
+  const next = cloneJsonValue(targetInfo) as Record<string, unknown>;
+
+  for (const key of Object.keys(next)) {
+    if (isAccountLocalStateProfileInfoKey(key) && !Object.prototype.hasOwnProperty.call(sourceInfo, key)) {
+      delete next[key];
+    }
+  }
+
+  for (const [key, value] of Object.entries(sourceInfo)) {
+    if (isAccountLocalStateProfileInfoKey(key)) {
+      next[key] = cloneJsonValue(value);
+    }
+  }
+
+  return next;
+}
+
+function isAccountLocalStateProfileInfoKey(key: string): boolean {
+  return (
+    [
+      "account_id",
+      "account_name",
+      "avatar_icon",
+      "enterprise_label",
+      "force_signin_profile_locked",
+      "hosted_domain",
+      "is_consented_primary_account",
+      "is_managed",
+      "is_using_default_avatar",
+      "is_using_default_name",
+      "managed_user_id",
+      "name",
+      "user_accepted_account_management",
+      "user_name"
+    ].includes(key) ||
+    key.startsWith("gaia_") ||
+    key.startsWith("signin.") ||
+    key.startsWith("last_downloaded_gaia_picture_url")
+  );
+}
+
+function stringArrayValue(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.length > 0) : [];
+}
+
+function moveStringToFront(values: string[], item: string): string[] {
+  return uniqueStrings([item, ...values.filter((value) => value !== item)]);
+}
+
+function cloneJsonValue(value: unknown): unknown {
+  return JSON.parse(JSON.stringify(value)) as unknown;
 }
 
 async function removeExtensionReferencesFromProfilePreferences(profilePath: string, extensionId: string): Promise<void> {
@@ -2287,18 +2845,6 @@ async function getMigratedExtensionLaunchArgs(profile: StoredProfile): Promise<s
   }
 
   return existingPaths.length ? [`--load-extension=${existingPaths.join(",")}`] : [];
-}
-
-function summarizeExtensionMigrationBackup(metadata: ExtensionMigrationBackupMetadata): ExtensionMigrationBackupSummary {
-  return {
-    id: metadata.id,
-    createdAt: metadata.createdAt,
-    path: metadata.path,
-    targetProfileId: metadata.targetProfileId,
-    targetProfileName: metadata.targetProfileName,
-    targetProfilePath: metadata.targetProfilePath,
-    itemCount: metadata.itemCount
-  };
 }
 
 function chromeWebStoreUrl(extensionId: string): string {
@@ -2375,18 +2921,322 @@ async function writeJsonFileAtomic(filePath: string, value: unknown): Promise<vo
   await fs.rename(tmpPath, filePath);
 }
 
-async function copyPath(sourcePath: string, targetPath: string): Promise<void> {
-  await fs.mkdir(path.dirname(targetPath), { recursive: true });
-  await fs.cp(sourcePath, targetPath, { recursive: true, force: true });
+async function isSameFilesystemPath(pathA: string, pathB: string): Promise<boolean> {
+  const [resolvedA, resolvedB] = await Promise.all([
+    resolveComparablePath(pathA),
+    resolveComparablePath(pathB)
+  ]);
+  return resolvedA === resolvedB;
 }
 
-async function copyAccountSyncPath(sourcePath: string, targetPath: string): Promise<void> {
+async function resolveComparablePath(filePath: string): Promise<string> {
+  try {
+    return await fs.realpath(filePath);
+  } catch {
+    return path.resolve(filePath);
+  }
+}
+
+function shouldCopyLocalExtensionPackagePath(sourceRootPath: string, candidatePath: string): boolean {
+  const relativePath = path.relative(sourceRootPath, candidatePath);
+  return !relativePath.split(path.sep).includes(".git");
+}
+
+async function copyPath(
+  sourcePath: string,
+  targetPath: string,
+  options: { shouldCopy?: (sourcePath: string) => boolean } = {}
+): Promise<void> {
   await fs.mkdir(path.dirname(targetPath), { recursive: true });
-  await fs.cp(sourcePath, targetPath, {
-    recursive: true,
-    force: true,
-    filter: (source) => path.basename(source) !== "LOCK"
-  });
+  await copyPathWithProgress(sourcePath, targetPath, options.shouldCopy || (() => true), () => undefined);
+}
+
+async function copyAccountSyncPath(
+  sourcePath: string,
+  targetPath: string,
+  onProgress?: (detail: string) => void,
+  abortSignal?: AbortSignal,
+  pauseSignal?: OperationPauseSignal
+): Promise<void> {
+  throwIfAborted(abortSignal);
+  await waitIfPaused(pauseSignal, abortSignal);
+  await fs.mkdir(path.dirname(targetPath), { recursive: true });
+  await recoverInterruptedAccountSyncPath(targetPath);
+  const shouldCopy = (source: string): boolean => {
+    const name = path.basename(source);
+    return name !== "LOCK" && !isAccountSyncWorkArtifactName(name);
+  };
+  onProgress?.("正在统计文件");
+  const stats = await collectCopyStats(sourcePath, shouldCopy, abortSignal, pauseSignal);
+  const stagingPath = makeAccountSyncWorkPath(targetPath, ACCOUNT_SYNC_PARTIAL_SUFFIX);
+  if (!stats.files) {
+    throwIfAborted(abortSignal);
+    await waitIfPaused(pauseSignal, abortSignal);
+    const sourceStat = await fs.lstat(sourcePath);
+    if (sourceStat.isDirectory()) {
+      await fs.rm(stagingPath, { recursive: true, force: true });
+      await fs.mkdir(stagingPath, { recursive: true });
+      await preserveTimestamps(stagingPath, sourceStat);
+      await replacePathWithStagedCopy(stagingPath, targetPath);
+    }
+    onProgress?.("没有需要复制的文件");
+    return;
+  }
+
+  let copiedFiles = 0;
+  let copiedBytes = 0;
+  let lastReportAt = 0;
+  const reportCopied = (force = false): void => {
+    const now = Date.now();
+    if (!force && now - lastReportAt < 250 && copiedFiles < stats.files) {
+      return;
+    }
+    lastReportAt = now;
+    onProgress?.(
+      `已复制 ${copiedFiles}/${stats.files} 个文件，${formatByteSize(copiedBytes)}/${formatByteSize(stats.bytes)}`
+    );
+  };
+
+  reportCopied(true);
+  try {
+    await fs.rm(stagingPath, { recursive: true, force: true });
+    await copyPathWithProgress(
+      sourcePath,
+      stagingPath,
+      shouldCopy,
+      (bytes) => {
+        copiedFiles += 1;
+        copiedBytes += bytes;
+        reportCopied();
+      },
+      abortSignal,
+      pauseSignal
+    );
+    throwIfAborted(abortSignal);
+    await waitIfPaused(pauseSignal, abortSignal);
+    onProgress?.("正在替换目标数据");
+    await replacePathWithStagedCopy(stagingPath, targetPath);
+  } catch (error) {
+    await fs.rm(stagingPath, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
+  }
+  reportCopied(true);
+}
+
+async function recoverInterruptedAccountSyncArtifactsForProfile(profilePath: string): Promise<void> {
+  for (const spec of accountSyncCopySpecs()) {
+    await recoverInterruptedAccountSyncPath(path.join(profilePath, normalizeSafeRelativePath(spec.relativePath)));
+  }
+}
+
+async function recoverInterruptedAccountSyncPath(targetPath: string): Promise<void> {
+  const parentPath = path.dirname(targetPath);
+  const entries = await fs.readdir(parentPath).catch(() => []);
+  if (!entries.length) {
+    return;
+  }
+
+  const prefix = accountSyncWorkPrefixForTarget(targetPath);
+  const partialPaths = entries
+    .filter((entry) => entry.startsWith(prefix) && entry.endsWith(ACCOUNT_SYNC_PARTIAL_SUFFIX))
+    .map((entry) => path.join(parentPath, entry));
+  const previousPaths = entries
+    .filter((entry) => entry.startsWith(prefix) && entry.endsWith(ACCOUNT_SYNC_PREVIOUS_SUFFIX))
+    .sort()
+    .map((entry) => path.join(parentPath, entry));
+
+  await Promise.all(partialPaths.map((partialPath) => fs.rm(partialPath, { recursive: true, force: true })));
+
+  if (!previousPaths.length) {
+    return;
+  }
+
+  if (!(await exists(targetPath))) {
+    const latestPreviousPath = previousPaths[previousPaths.length - 1];
+    await fs.rename(latestPreviousPath, targetPath).catch(async () => {
+      await fs.rm(latestPreviousPath, { recursive: true, force: true }).catch(() => undefined);
+    });
+    previousPaths.pop();
+  }
+
+  await Promise.all(previousPaths.map((previousPath) => fs.rm(previousPath, { recursive: true, force: true })));
+}
+
+async function replacePathWithStagedCopy(stagingPath: string, targetPath: string): Promise<void> {
+  await fs.mkdir(path.dirname(targetPath), { recursive: true });
+
+  const previousPath = makeAccountSyncWorkPath(targetPath, ACCOUNT_SYNC_PREVIOUS_SUFFIX);
+  const targetExists = await exists(targetPath);
+  if (targetExists) {
+    await fs.rm(previousPath, { recursive: true, force: true });
+    await fs.rename(targetPath, previousPath);
+  }
+
+  try {
+    await fs.rename(stagingPath, targetPath);
+  } catch (error) {
+    if (targetExists && !(await exists(targetPath)) && (await exists(previousPath))) {
+      await fs.rename(previousPath, targetPath).catch(() => undefined);
+    }
+    throw error;
+  }
+
+  if (targetExists) {
+    await fs.rm(previousPath, { recursive: true, force: true });
+  }
+}
+
+function makeAccountSyncWorkPath(targetPath: string, suffix: string): string {
+  return path.join(path.dirname(targetPath), `${accountSyncWorkPrefixForTarget(targetPath)}${Date.now()}-${randomUUID()}${suffix}`);
+}
+
+function accountSyncWorkPrefixForTarget(targetPath: string): string {
+  return `${ACCOUNT_SYNC_WORK_PREFIX}${path.basename(targetPath)}-`;
+}
+
+function isAccountSyncWorkArtifactName(name: string): boolean {
+  return name.startsWith(ACCOUNT_SYNC_WORK_PREFIX);
+}
+
+async function collectCopyStats(
+  sourcePath: string,
+  shouldCopy: (source: string) => boolean,
+  abortSignal?: AbortSignal,
+  pauseSignal?: OperationPauseSignal
+): Promise<CopyStats> {
+  throwIfAborted(abortSignal);
+  await waitIfPaused(pauseSignal, abortSignal);
+  if (!shouldCopy(sourcePath)) {
+    return { files: 0, bytes: 0 };
+  }
+
+  const stat = await fs.lstat(sourcePath);
+  if (!isCopyableFilesystemEntry(stat)) {
+    return { files: 0, bytes: 0 };
+  }
+
+  if (stat.isDirectory()) {
+    const children = await fs.readdir(sourcePath);
+    const childStats = await Promise.all(
+      children.map((child) => collectCopyStats(path.join(sourcePath, child), shouldCopy, abortSignal, pauseSignal))
+    );
+    return childStats.reduce(
+      (total, item) => ({
+        files: total.files + item.files,
+        bytes: total.bytes + item.bytes
+      }),
+      { files: 0, bytes: 0 }
+    );
+  }
+
+  return {
+    files: 1,
+    bytes: stat.isFile() ? stat.size : 0
+  };
+}
+
+async function copyPathWithProgress(
+  sourcePath: string,
+  targetPath: string,
+  shouldCopy: (source: string) => boolean,
+  onFileCopied: (bytes: number) => void,
+  abortSignal?: AbortSignal,
+  pauseSignal?: OperationPauseSignal
+): Promise<void> {
+  throwIfAborted(abortSignal);
+  await waitIfPaused(pauseSignal, abortSignal);
+  if (!shouldCopy(sourcePath)) {
+    return;
+  }
+
+  const stat = await fs.lstat(sourcePath);
+  if (!isCopyableFilesystemEntry(stat)) {
+    return;
+  }
+
+  if (stat.isDirectory()) {
+    await fs.mkdir(targetPath, { recursive: true });
+    const children = await fs.readdir(sourcePath);
+    for (const child of children) {
+      await waitIfPaused(pauseSignal, abortSignal);
+      await copyPathWithProgress(
+        path.join(sourcePath, child),
+        path.join(targetPath, child),
+        shouldCopy,
+        onFileCopied,
+        abortSignal,
+        pauseSignal
+      );
+    }
+    await preserveTimestamps(targetPath, stat);
+    return;
+  }
+
+  throwIfAborted(abortSignal);
+  await waitIfPaused(pauseSignal, abortSignal);
+  await fs.mkdir(path.dirname(targetPath), { recursive: true });
+  if (stat.isSymbolicLink()) {
+    const linkTarget = await fs.readlink(sourcePath);
+    throwIfAborted(abortSignal);
+    await waitIfPaused(pauseSignal, abortSignal);
+    await fs.rm(targetPath, { force: true });
+    await fs.symlink(linkTarget, targetPath);
+    onFileCopied(0);
+    return;
+  }
+
+  throwIfAborted(abortSignal);
+  await waitIfPaused(pauseSignal, abortSignal);
+  await fs.copyFile(sourcePath, targetPath);
+  await preserveTimestamps(targetPath, stat);
+  onFileCopied(stat.isFile() ? stat.size : 0);
+}
+
+function isCopyableFilesystemEntry(stat: Awaited<ReturnType<typeof fs.lstat>>): boolean {
+  return stat.isDirectory() || stat.isFile() || stat.isSymbolicLink();
+}
+
+async function preserveTimestamps(targetPath: string, stat: Awaited<ReturnType<typeof fs.lstat>>): Promise<void> {
+  try {
+    await fs.utimes(targetPath, stat.atime, stat.mtime);
+  } catch {
+    // Some filesystems reject timestamp preservation for special entries; copied data is still usable.
+  }
+}
+
+function throwIfAborted(abortSignal?: AbortSignal): void {
+  if (abortSignal?.aborted) {
+    throw new ProfileManagerError(
+      "已终止同步。已完成替换的数据会保留，未完成的临时数据会在下次同步前恢复或清理，重新同步会继续覆盖补齐。",
+      "OPERATION_CANCELLED"
+    );
+  }
+}
+
+async function waitIfPaused(pauseSignal?: OperationPauseSignal, abortSignal?: AbortSignal): Promise<void> {
+  throwIfAborted(abortSignal);
+  if (!pauseSignal?.paused) {
+    return;
+  }
+
+  await pauseSignal.waitIfPaused();
+  throwIfAborted(abortSignal);
+}
+
+function formatByteSize(bytes: number): string {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes / 1024;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
 function normalizeSafeRelativePath(relativePath: string): string {
@@ -2398,14 +3248,27 @@ function normalizeSafeRelativePath(relativePath: string): string {
     normalized === ".." ||
     normalized.startsWith(`..${path.sep}`)
   ) {
-    throw new ProfileManagerError("备份路径不安全，已停止操作。", "UNSAFE_PATH");
+    throw new ProfileManagerError("路径不安全，已停止操作。", "UNSAFE_PATH");
   }
 
   return normalized;
 }
 
+function chromeProfileDirName(userDataPath: string, profilePath: string): string {
+  const relativePath = path.relative(userDataPath, profilePath);
+  if (!relativePath || relativePath === "." || relativePath.startsWith(`..${path.sep}`) || path.isAbsolute(relativePath)) {
+    return "Default";
+  }
+
+  return relativePath.split(path.sep).filter(Boolean)[0] || "Default";
+}
+
 function uniqueStrings(values: string[]): string[] {
   return [...new Set(values.filter((value) => typeof value === "string" && value.length > 0))];
+}
+
+function accountSyncRecordKey(sourceProfileId: string, targetProfileId: string): string {
+  return `${sourceProfileId}::${targetProfileId}`;
 }
 
 function normalizeNativeProfileMetadata(input: Record<string, unknown>): Record<string, NativeProfileMetadata> {
@@ -2421,6 +3284,55 @@ function normalizeNativeProfileMetadata(input: Record<string, unknown>): Record<
       ];
     })
   );
+}
+
+function normalizeAccountSyncRecords(input: Record<string, unknown>): Record<string, AccountSyncRecord> {
+  return Object.fromEntries(
+    Object.entries(input)
+      .map(([targetProfileId, value]) => {
+        const record = value && typeof value === "object" ? (value as Partial<AccountSyncRecord>) : null;
+        if (
+          !record ||
+          typeof record.sourceProfileId !== "string" ||
+          typeof record.targetProfileId !== "string" ||
+          typeof record.syncedAt !== "string"
+        ) {
+          return null;
+        }
+
+        const sourceFingerprints = normalizeAccountSyncSourceFingerprints(record.sourceFingerprints);
+        return [
+          targetProfileId,
+          {
+            sourceProfileId: record.sourceProfileId,
+            targetProfileId: record.targetProfileId,
+            syncedAt: record.syncedAt,
+            copiedCount: typeof record.copiedCount === "number" ? record.copiedCount : 0,
+            skippedCount: typeof record.skippedCount === "number" ? record.skippedCount : 0,
+            launchedTarget: Boolean(record.launchedTarget),
+            ...(sourceFingerprints ? { sourceFingerprints } : {})
+          }
+        ] as const;
+      })
+      .filter((entry): entry is readonly [string, AccountSyncRecord] => Boolean(entry))
+  );
+}
+
+function normalizeAccountSyncSourceFingerprints(input: unknown): Record<string, string | null> | undefined {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return undefined;
+  }
+
+  const entries = Object.entries(input as Record<string, unknown>)
+    .map(([relativePath, fingerprint]) => {
+      if (typeof fingerprint === "string" || fingerprint === null) {
+        return [relativePath, fingerprint] as const;
+      }
+      return null;
+    })
+    .filter((entry): entry is readonly [string, string | null] => Boolean(entry));
+
+  return entries.length ? Object.fromEntries(entries) : undefined;
 }
 
 async function scanNativeChromeProfiles(): Promise<NativeChromeProfile[]> {

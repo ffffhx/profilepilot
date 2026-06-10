@@ -1,18 +1,19 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
 import { IPC_CHANNELS } from "./shared/ipc";
 import type {
-  AccountSyncBackupSummary,
+  AccountSyncDiffResult,
   AccountSyncRequest,
-  AccountSyncRestoreResult,
   AccountSyncResult,
   AppState,
+  CancelOperationRequest,
+  ControlOperationRequest,
   DeleteProfileResult,
   ExtensionDeleteResult,
-  ExtensionMigrationBackupSummary,
+  ExtensionMigrationDiffResult,
   ExtensionMigrationRequest,
-  ExtensionMigrationRestoreResult,
   ExtensionMigrationResult,
   ExtensionScanResult,
+  OperationProgress,
   ProfileManagerApi
 } from "./shared/types";
 
@@ -27,22 +28,30 @@ const profileManagerApi: ProfileManagerApi = {
   closeProfile: (id: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.closeProfile, id),
   openProfileFolder: (id: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.openProfileFolder, id),
   deleteProfile: (id: string): Promise<DeleteProfileResult> => ipcRenderer.invoke(IPC_CHANNELS.deleteProfile, id),
+  inspectAccountSyncDiff: (request: AccountSyncRequest): Promise<AccountSyncDiffResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.inspectAccountSyncDiff, request),
   scanProfileExtensions: (profileId: string): Promise<ExtensionScanResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.scanProfileExtensions, profileId),
+  inspectExtensionMigrationDiff: (request: ExtensionMigrationRequest): Promise<ExtensionMigrationDiffResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.inspectExtensionMigrationDiff, request),
   migrateExtensions: (request: ExtensionMigrationRequest): Promise<ExtensionMigrationResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.migrateExtensions, request),
   deleteProfileExtension: (profileId: string, extensionId: string): Promise<ExtensionDeleteResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.deleteProfileExtension, profileId, extensionId),
-  listExtensionMigrationBackups: (): Promise<ExtensionMigrationBackupSummary[]> =>
-    ipcRenderer.invoke(IPC_CHANNELS.listExtensionMigrationBackups),
-  restoreExtensionMigrationBackup: (backupId: string): Promise<ExtensionMigrationRestoreResult> =>
-    ipcRenderer.invoke(IPC_CHANNELS.restoreExtensionMigrationBackup, backupId),
   syncAccount: (request: AccountSyncRequest): Promise<AccountSyncResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.syncAccount, request),
-  listAccountSyncBackups: (): Promise<AccountSyncBackupSummary[]> =>
-    ipcRenderer.invoke(IPC_CHANNELS.listAccountSyncBackups),
-  restoreAccountSyncBackup: (backupId: string): Promise<AccountSyncRestoreResult> =>
-    ipcRenderer.invoke(IPC_CHANNELS.restoreAccountSyncBackup, backupId)
+  cancelOperation: (request: CancelOperationRequest): Promise<boolean> =>
+    ipcRenderer.invoke(IPC_CHANNELS.cancelOperation, request),
+  controlOperation: (request: ControlOperationRequest): Promise<boolean> =>
+    ipcRenderer.invoke(IPC_CHANNELS.controlOperation, request),
+  onOperationProgress: (listener: (progress: OperationProgress) => void): (() => void) => {
+    const handler = (_event: IpcRendererEvent, progress: OperationProgress): void => {
+      listener(progress);
+    };
+
+    ipcRenderer.on(IPC_CHANNELS.operationProgress, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.operationProgress, handler);
+  }
 };
 
 contextBridge.exposeInMainWorld("profileManager", profileManagerApi);

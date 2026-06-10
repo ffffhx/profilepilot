@@ -8,12 +8,13 @@ export const IPC_CHANNELS = {
   closeProfile: "profiles:close",
   openProfileFolder: "profiles:open-folder",
   deleteProfile: "profiles:delete",
+  inspectAccountSyncDiff: "profiles:account:inspect-diff",
   scanProfileExtensions: "profiles:extensions:scan",
+  inspectExtensionMigrationDiff: "profiles:extensions:inspect-diff",
   migrateExtensions: "profiles:extensions:migrate",
   deleteProfileExtension: "profiles:extensions:delete",
-  listExtensionMigrationBackups: "profiles:extensions:backups",
-  restoreExtensionMigrationBackup: "profiles:extensions:restore-backup",
   syncAccount: "profiles:account:sync",
-  listAccountSyncBackups: "profiles:account:backups",
-  restoreAccountSyncBackup: "profiles:account:restore-backup"
+  cancelOperation: "profiles:operation:cancel",
+  controlOperation: "profiles:operation:control",
+  operationProgress: "profiles:operation-progress"
 } as const;

@@ -47,6 +47,16 @@ interface NativeChromeProfile {
   isDefault: boolean;
 }
 
+interface AccountSyncRecord {
+  sourceProfileId: string;
+  targetProfileId: string;
+  syncedAt: string;
+  copiedCount: number;
+  skippedCount: number;
+  launchedTarget: boolean;
+  sourceFingerprints?: Record<string, string | null>;
+}
+
 interface AppState {
   appTitle: string;
   dataDir: string;
@@ -58,6 +68,7 @@ interface AppState {
   runningProfiles: PublicProfile[];
   currentProfile: PublicProfile | null;
   chromeLauncher: string;
+  accountSyncRecords: AccountSyncRecord[];
 }
 
 interface DeleteProfileResult {
@@ -102,16 +113,48 @@ interface ExtensionMigrationRequest {
   extensionIds: string[];
   includeData: boolean;
   openInstallPages: boolean;
+  onlyChanged?: boolean;
 }
 
-interface ExtensionMigrationBackupSummary {
+type ExtensionMigrationDiffStatus =
+  | "missing"
+  | "version_changed"
+  | "data_changed"
+  | "same"
+  | "needs_install_page"
+  | "unsupported";
+
+interface ExtensionMigrationDiffItem {
   id: string;
-  createdAt: string;
-  path: string;
+  name: string;
+  sourceVersion: string;
+  targetVersion: string | null;
+  status: ExtensionMigrationDiffStatus;
+  reason: string;
+  willCopyLocally: boolean;
+  willOpenInstallPage: boolean;
+}
+
+interface ExtensionMigrationDiffTargetOnlyItem {
+  id: string;
+  name: string;
+  version: string;
+}
+
+interface ExtensionMigrationDiffResult {
+  sourceProfileId: string;
   targetProfileId: string;
-  targetProfileName: string;
-  targetProfilePath: string;
-  itemCount: number;
+  includeData: boolean;
+  items: ExtensionMigrationDiffItem[];
+  targetOnlyItems: ExtensionMigrationDiffTargetOnlyItem[];
+  summary: {
+    missingCount: number;
+    changedCount: number;
+    sameCount: number;
+    needsInstallPageCount: number;
+    unsupportedCount: number;
+    targetOnlyCount: number;
+  };
 }
 
 interface ExtensionMigrationCopiedExtension {
@@ -142,7 +185,6 @@ interface ExtensionMigrationResult {
   dataCopies: ExtensionMigrationDataCopy[];
   webStoreInstallUrls: string[];
   skippedExtensions: ExtensionMigrationSkippedExtension[];
-  backup: ExtensionMigrationBackupSummary;
   openedInstallPages: boolean;
   state: AppState;
 }
@@ -153,13 +195,7 @@ interface ExtensionDeleteResult {
   extensionId: string;
   extensionName: string;
   deletedPaths: string[];
-  backup: ExtensionMigrationBackupSummary;
   scan: ExtensionScanResult;
-  state: AppState;
-}
-
-interface ExtensionMigrationRestoreResult {
-  backup: ExtensionMigrationBackupSummary;
   state: AppState;
 }
 
@@ -167,6 +203,51 @@ interface AccountSyncRequest {
   sourceProfileId: string;
   targetProfileId: string;
   launchTarget: boolean;
+  onlyChanged?: boolean;
+}
+
+type AccountSyncDiffStatus = "changed" | "same" | "source_missing" | "target_missing";
+
+interface AccountSyncDiffItem {
+  label: string;
+  relativePath: string;
+  status: AccountSyncDiffStatus;
+  reason: string;
+}
+
+interface AccountSyncDiffResult {
+  sourceProfileId: string;
+  targetProfileId: string;
+  items: AccountSyncDiffItem[];
+  summary: {
+    changedCount: number;
+    sameCount: number;
+    sourceMissingCount: number;
+    targetMissingCount: number;
+    syncableCount: number;
+  };
+}
+
+interface AccountSyncDiffMonitorState {
+  sourceProfileId: string;
+  targetProfileId: string;
+  loading: boolean;
+  checkedAt: string | null;
+  diff: AccountSyncDiffResult | null;
+  error: string | null;
+}
+
+interface CancelOperationRequest {
+  key: string;
+  profileId?: string;
+}
+
+type ControlOperationAction = "pause" | "resume";
+
+interface ControlOperationRequest {
+  key: string;
+  profileId?: string;
+  action: ControlOperationAction;
 }
 
 interface AccountSyncCopiedItem {
@@ -180,29 +261,23 @@ interface AccountSyncSkippedItem {
   reason: string;
 }
 
-interface AccountSyncBackupSummary {
-  id: string;
-  createdAt: string;
-  path: string;
-  targetProfileId: string;
-  targetProfileName: string;
-  targetProfilePath: string;
-  itemCount: number;
-}
-
 interface AccountSyncResult {
   sourceProfileId: string;
   targetProfileId: string;
   copiedItems: AccountSyncCopiedItem[];
   skippedItems: AccountSyncSkippedItem[];
-  backup: AccountSyncBackupSummary;
   launchedTarget: boolean;
   state: AppState;
 }
 
-interface AccountSyncRestoreResult {
-  backup: AccountSyncBackupSummary;
-  state: AppState;
+interface OperationProgress {
+  key: string;
+  message: string;
+  profileId?: string;
+  step?: string;
+  stepIndex?: number;
+  stepCount?: number;
+  paused?: boolean;
 }
 
 interface ProfileManagerApi {
@@ -215,27 +290,65 @@ interface ProfileManagerApi {
   closeProfile(id: string): Promise<AppState>;
   openProfileFolder(id: string): Promise<AppState>;
   deleteProfile(id: string): Promise<DeleteProfileResult>;
+  inspectAccountSyncDiff(request: AccountSyncRequest): Promise<AccountSyncDiffResult>;
   scanProfileExtensions(profileId: string): Promise<ExtensionScanResult>;
+  inspectExtensionMigrationDiff(request: ExtensionMigrationRequest): Promise<ExtensionMigrationDiffResult>;
   migrateExtensions(request: ExtensionMigrationRequest): Promise<ExtensionMigrationResult>;
   deleteProfileExtension(profileId: string, extensionId: string): Promise<ExtensionDeleteResult>;
-  listExtensionMigrationBackups(): Promise<ExtensionMigrationBackupSummary[]>;
-  restoreExtensionMigrationBackup(backupId: string): Promise<ExtensionMigrationRestoreResult>;
   syncAccount(request: AccountSyncRequest): Promise<AccountSyncResult>;
-  listAccountSyncBackups(): Promise<AccountSyncBackupSummary[]>;
-  restoreAccountSyncBackup(backupId: string): Promise<AccountSyncRestoreResult>;
+  cancelOperation(request: CancelOperationRequest): Promise<boolean>;
+  controlOperation(request: ControlOperationRequest): Promise<boolean>;
+  onOperationProgress(listener: (progress: OperationProgress) => void): () => void;
 }
 
 interface Window {
   profileManager: ProfileManagerApi;
 }
 
-type ConfirmAction = "close" | "delete";
+type ConfirmIntent =
+  | {
+      kind: "profile";
+      action: "close" | "delete";
+      profileId: string;
+    }
+  | {
+      kind: "account-sync";
+      sourceProfileId: string;
+      targetProfileId: string;
+      shouldCloseTarget: boolean;
+      existingRecordSyncedAt: string | null;
+      launchTarget: boolean;
+      onlyChanged: boolean;
+    }
+  | {
+      kind: "delete-extension";
+      profileId: string;
+      extensionId: string;
+    }
+  | {
+      kind: "extension-migration";
+      sourceProfileId: string;
+      targetProfileId: string;
+      extensionIds: string[];
+      includeData: boolean;
+      openInstallPages: boolean;
+      onlyChanged: boolean;
+      shouldCloseTarget: boolean;
+    };
 type BusyState = {
   key: string;
   message: string;
   profileId?: string;
   extensionId?: string;
-  backupId?: string;
+  steps?: BusyProgressStep[];
+  stepIndex?: number;
+  stepCount?: number;
+  cancelRequested?: boolean;
+  paused?: boolean;
+};
+type BusyProgressStep = {
+  label: string;
+  status: "pending" | "active" | "done";
 };
 type ModalState =
   | { kind: "new" }
@@ -244,8 +357,8 @@ type ModalState =
   | { kind: "extension-migration" }
   | {
       kind: "confirm";
-      action: ConfirmAction;
-      profileId: string;
+      intent: ConfirmIntent;
+      returnTo?: "extension-migration";
     }
   | null;
 type ToastKind = "normal" | "error";
@@ -272,15 +385,27 @@ let extensionScan: ExtensionScanResult | null = null;
 let selectedExtensionIds = new Set<string>();
 let includeExtensionData = false;
 let openInstallPages = true;
+let extensionSyncOnlyChanged = true;
+let extensionMigrationDiff: ExtensionMigrationDiffResult | null = null;
+let extensionMigrationDiffLoading = false;
+let extensionMigrationDiffKey = "";
+let extensionMigrationDiffRequestId = 0;
 let extensionMigrationResult: ExtensionMigrationResult | null = null;
-let extensionMigrationBackups: ExtensionMigrationBackupSummary[] = [];
 let openProfileMenuId: string | null = null;
 let migrationSourceMenuOpen = false;
 let accountSyncSourceId: string | null = null;
 let accountSyncTargetId: string | null = null;
 let launchSyncedProfile = true;
+let accountSyncOnlyChanged = true;
+let accountSyncDiff: AccountSyncDiffResult | null = null;
+let accountSyncDiffLoading = false;
+let accountSyncDiffKey = "";
+let accountSyncDiffRequestId = 0;
+let accountSyncDiffExpanded = false;
+let accountSyncIgnoredExpanded = false;
+let accountSyncDiffMonitor: AccountSyncDiffMonitorState | null = null;
+let accountSyncDiffMonitorRequestId = 0;
 let accountSyncResult: AccountSyncResult | null = null;
-let accountSyncBackups: AccountSyncBackupSummary[] = [];
 
 const dateFormatter = new Intl.DateTimeFormat("zh-CN", {
   month: "2-digit",
@@ -297,15 +422,46 @@ function profileApi(): ProfileManagerApi {
   return window.profileManager;
 }
 
+profileApi().onOperationProgress((progress) => {
+  if (!busyState || busyState.key !== progress.key) {
+    return;
+  }
+  if (progress.profileId && busyState.profileId && progress.profileId !== busyState.profileId) {
+    return;
+  }
+
+  const previousStepIndex = busyState.stepIndex;
+  const previousStepCount = busyState.stepCount;
+  const previousPaused = busyState.paused;
+  const previousStepsKey = busyStepsKey(busyState.steps);
+  const nextSteps = progress.step ? activateBusyStep(busyState.steps || [], progress.step) : busyState.steps;
+  const activeStepIndex = progress.step
+    ? nextSteps?.findIndex((step) => step.label === progress.step)
+    : -1;
+
+  busyState = {
+    ...busyState,
+    message: progress.message || busyState.message,
+    stepIndex: activeStepIndex !== undefined && activeStepIndex >= 0 ? activeStepIndex + 1 : progress.stepIndex || busyState.stepIndex,
+    stepCount: nextSteps?.length || progress.stepCount || busyState.stepCount,
+    steps: nextSteps,
+    paused: progress.paused ?? busyState.paused
+  };
+
+  const nextStepsKey = busyStepsKey(busyState.steps);
+  if (
+    previousStepIndex !== busyState.stepIndex ||
+    previousStepCount !== busyState.stepCount ||
+    previousPaused !== busyState.paused ||
+    previousStepsKey !== nextStepsKey ||
+    !updateBusyProgressDom()
+  ) {
+    render();
+  }
+});
+
 async function loadState(): Promise<void> {
-  const [nextState, backups, accountBackups] = await Promise.all([
-    profileApi().getState(),
-    profileApi().listExtensionMigrationBackups(),
-    profileApi().listAccountSyncBackups()
-  ]);
-  state = nextState;
-  extensionMigrationBackups = backups;
-  accountSyncBackups = accountBackups;
+  state = await profileApi().getState();
   const profiles = state.profiles || [];
 
   if (!profiles.some((profile) => profile.id === selectedId)) {
@@ -317,8 +473,16 @@ async function loadState(): Promise<void> {
 
   normalizeMigrationProfileSelection(profiles);
   normalizeAccountSyncProfileSelection(profiles);
+  if (
+    accountSyncDiffMonitor &&
+    (!profiles.some((profile) => profile.id === accountSyncDiffMonitor?.sourceProfileId) ||
+      !profiles.some((profile) => profile.id === accountSyncDiffMonitor?.targetProfileId))
+  ) {
+    clearAccountSyncDiffMonitor(false);
+  }
 
   render();
+  void refreshAccountSyncDiff();
 }
 
 function normalizeMigrationProfileSelection(profiles: PublicProfile[]): void {
@@ -348,6 +512,10 @@ function normalizeAccountSyncProfileSelection(profiles: PublicProfile[]): void {
     accountSyncSourceId = null;
     accountSyncTargetId = null;
     accountSyncResult = null;
+    accountSyncDiff = null;
+    accountSyncDiffKey = "";
+    accountSyncDiffExpanded = false;
+    accountSyncIgnoredExpanded = false;
     return;
   }
 
@@ -363,6 +531,198 @@ function normalizeAccountSyncProfileSelection(profiles: PublicProfile[]): void {
   }
 }
 
+async function refreshAccountSyncDiff(): Promise<void> {
+  if (!state || !accountSyncSourceId || !accountSyncTargetId || accountSyncSourceId === accountSyncTargetId) {
+    accountSyncDiff = null;
+    accountSyncDiffLoading = false;
+    accountSyncDiffKey = "";
+    accountSyncDiffExpanded = false;
+    accountSyncIgnoredExpanded = false;
+    render();
+    return;
+  }
+
+  const key = `${accountSyncSourceId}::${accountSyncTargetId}`;
+  if (accountSyncDiffKey === key && (accountSyncDiff || accountSyncDiffLoading)) {
+    return;
+  }
+
+  const requestId = accountSyncDiffRequestId + 1;
+  accountSyncDiffRequestId = requestId;
+  accountSyncDiffKey = key;
+  accountSyncDiffLoading = true;
+  accountSyncDiffExpanded = false;
+  accountSyncIgnoredExpanded = false;
+  render();
+
+  try {
+    const diff = await profileApi().inspectAccountSyncDiff({
+      sourceProfileId: accountSyncSourceId,
+      targetProfileId: accountSyncTargetId,
+      launchTarget: launchSyncedProfile,
+      onlyChanged: accountSyncOnlyChanged
+    });
+    if (accountSyncDiffRequestId !== requestId) {
+      return;
+    }
+    accountSyncDiff = diff;
+  } catch {
+    if (accountSyncDiffRequestId !== requestId) {
+      return;
+    }
+    accountSyncDiff = null;
+  } finally {
+    if (accountSyncDiffRequestId === requestId) {
+      accountSyncDiffLoading = false;
+      render();
+    }
+  }
+}
+
+function accountSyncDiffMonitorMatches(sourceProfileId: string, targetProfileId: string): boolean {
+  return (
+    Boolean(accountSyncDiffMonitor) &&
+    accountSyncDiffMonitor?.sourceProfileId === sourceProfileId &&
+    accountSyncDiffMonitor?.targetProfileId === targetProfileId
+  );
+}
+
+function clearAccountSyncDiffMonitor(shouldRender = true): void {
+  accountSyncDiffMonitorRequestId += 1;
+  accountSyncDiffMonitor = null;
+  if (shouldRender) {
+    render();
+  }
+}
+
+async function inspectCurrentAccountSyncDiff(): Promise<void> {
+  if (!state || !accountSyncSourceId || !accountSyncTargetId || accountSyncSourceId === accountSyncTargetId) {
+    setToast("请选择两个不同的 Profile 后再监测差异。", "error");
+    return;
+  }
+
+  const sourceProfileId = accountSyncSourceId;
+  const targetProfileId = accountSyncTargetId;
+  const requestId = accountSyncDiffMonitorRequestId + 1;
+  accountSyncDiffMonitorRequestId = requestId;
+  accountSyncDiffMonitor = {
+    sourceProfileId,
+    targetProfileId,
+    loading: true,
+    checkedAt: null,
+    diff: null,
+    error: null
+  };
+  render();
+
+  try {
+    const diff = await profileApi().inspectAccountSyncDiff({
+      sourceProfileId,
+      targetProfileId,
+      launchTarget: launchSyncedProfile,
+      onlyChanged: true
+    });
+    if (accountSyncDiffMonitorRequestId !== requestId || !accountSyncDiffMonitorMatches(sourceProfileId, targetProfileId)) {
+      return;
+    }
+    accountSyncDiffMonitor = {
+      sourceProfileId,
+      targetProfileId,
+      loading: false,
+      checkedAt: new Date().toISOString(),
+      diff,
+      error: null
+    };
+  } catch (error) {
+    if (accountSyncDiffMonitorRequestId !== requestId || !accountSyncDiffMonitorMatches(sourceProfileId, targetProfileId)) {
+      return;
+    }
+    accountSyncDiffMonitor = {
+      sourceProfileId,
+      targetProfileId,
+      loading: false,
+      checkedAt: new Date().toISOString(),
+      diff: null,
+      error: formatErrorMessage(error)
+    };
+  } finally {
+    if (accountSyncDiffMonitorRequestId === requestId) {
+      render();
+    }
+  }
+}
+
+async function refreshExtensionMigrationDiff(): Promise<void> {
+  const activeScan = extensionScan?.profileId === migrationSourceId ? extensionScan : null;
+  const extensionIds = activeScan?.extensions
+    .filter((extension) => selectedExtensionIds.has(extension.id))
+    .map((extension) => extension.id) || [];
+  if (!state || !migrationSourceId || !migrationTargetId || migrationSourceId === migrationTargetId || !extensionIds.length) {
+    extensionMigrationDiff = null;
+    extensionMigrationDiffLoading = false;
+    extensionMigrationDiffKey = "";
+    render();
+    return;
+  }
+
+  const key = [
+    migrationSourceId,
+    migrationTargetId,
+    includeExtensionData ? "data" : "nodata",
+    openInstallPages ? "openpages" : "noopenpages",
+    extensionIds.slice().sort().join(",")
+  ].join("::");
+  if (extensionMigrationDiffKey === key && (extensionMigrationDiff || extensionMigrationDiffLoading)) {
+    return;
+  }
+
+  const requestId = extensionMigrationDiffRequestId + 1;
+  extensionMigrationDiffRequestId = requestId;
+  extensionMigrationDiffKey = key;
+  extensionMigrationDiffLoading = true;
+  render();
+
+  try {
+    const diff = await profileApi().inspectExtensionMigrationDiff({
+      sourceProfileId: migrationSourceId,
+      targetProfileId: migrationTargetId,
+      extensionIds,
+      includeData: includeExtensionData,
+      openInstallPages,
+      onlyChanged: extensionSyncOnlyChanged
+    });
+    if (extensionMigrationDiffRequestId !== requestId) {
+      return;
+    }
+    extensionMigrationDiff = diff;
+  } catch {
+    if (extensionMigrationDiffRequestId !== requestId) {
+      return;
+    }
+    extensionMigrationDiff = null;
+  } finally {
+    if (extensionMigrationDiffRequestId === requestId) {
+      extensionMigrationDiffLoading = false;
+      render();
+    }
+  }
+}
+
+function invalidateAccountSyncDiff(): void {
+  accountSyncDiffRequestId += 1;
+  accountSyncDiff = null;
+  accountSyncDiffKey = "";
+  accountSyncDiffExpanded = false;
+  accountSyncIgnoredExpanded = false;
+  clearAccountSyncDiffMonitor(false);
+}
+
+function invalidateExtensionMigrationDiff(): void {
+  extensionMigrationDiffRequestId += 1;
+  extensionMigrationDiff = null;
+  extensionMigrationDiffKey = "";
+}
+
 function setToast(message: string, kind: ToastKind = "normal"): void {
   toast = message;
   toastKind = kind;
@@ -373,6 +733,55 @@ function setToast(message: string, kind: ToastKind = "normal"): void {
     toast = null;
     render();
   }, 3200);
+}
+
+function activateBusyStep(steps: BusyProgressStep[], activeLabel: string): BusyProgressStep[] {
+  const existingIndex = steps.findIndex((step) => step.label === activeLabel);
+  const nextSteps = existingIndex >= 0 ? [...steps] : [...steps, { label: activeLabel, status: "pending" as const }];
+  const activeIndex = existingIndex >= 0 ? existingIndex : nextSteps.length - 1;
+
+  return nextSteps.map((step, index) => ({
+    ...step,
+    status: index < activeIndex ? "done" : index === activeIndex ? "active" : "pending"
+  }));
+}
+
+function pendingBusySteps(labels: string[]): BusyProgressStep[] {
+  return labels.map((label, index) => ({ label, status: index === 0 ? "active" : "pending" }));
+}
+
+function doneBusySteps(labels: string[]): BusyProgressStep[] {
+  return labels.map((label) => ({ label, status: "done" }));
+}
+
+function accountSyncProgressSteps(): string[] {
+  return ["检查 Profile", "确认覆盖", "复制账号数据", "合并偏好", "写入浏览器状态", "完成"];
+}
+
+function accountSyncProgressStepsForTarget(targetProfile: PublicProfile | null): string[] {
+  const steps = accountSyncProgressSteps();
+  return targetProfile?.running ? ["关闭目标", ...steps] : steps;
+}
+
+function extensionSyncProgressSteps(): string[] {
+  return ["检查 Profile", "扫描插件", "确认覆盖", "同步插件", "写入配置", "完成"];
+}
+
+function extensionSyncProgressStepsForTarget(targetProfile: PublicProfile | null): string[] {
+  const steps = extensionSyncProgressSteps();
+  return targetProfile?.running ? ["关闭目标", ...steps] : steps;
+}
+
+function updateBusyState(patch: Partial<BusyState>): void {
+  if (!busyState) {
+    return;
+  }
+
+  busyState = {
+    ...busyState,
+    ...patch
+  };
+  render();
 }
 
 async function withBusy(work: () => Promise<unknown>, successMessage?: string, nextBusyState?: BusyState): Promise<void> {
@@ -390,6 +799,14 @@ async function withBusy(work: () => Promise<unknown>, successMessage?: string, n
   try {
     await work();
     if (successMessage) {
+      if (busyState?.steps?.length) {
+        busyState = {
+          ...busyState,
+          message: successMessage,
+          steps: doneBusySteps(busyState.steps.map((step) => step.label))
+        };
+        render();
+      }
       setToast(successMessage);
     }
   } catch (error) {
@@ -410,16 +827,81 @@ function isBusyAction(key: string, match: Partial<Omit<BusyState, "key" | "messa
   return Object.entries(match).every(([field, value]) => activeBusyState[field as keyof BusyState] === value);
 }
 
+function busyStepsKey(steps: BusyProgressStep[] | undefined): string {
+  return steps?.map((step) => `${step.label}:${step.status}`).join("|") || "";
+}
+
+function updateBusyProgressDom(): boolean {
+  if (!busyState) {
+    return false;
+  }
+
+  const messageNodes = appRoot.querySelectorAll<HTMLElement>("[data-busy-message]");
+  if (!messageNodes.length) {
+    return false;
+  }
+
+  messageNodes.forEach((node) => {
+    node.textContent = busyState?.message || "";
+  });
+
+  const countText = busyState.stepIndex && busyState.stepCount ? `${busyState.stepIndex}/${busyState.stepCount}` : "";
+  appRoot.querySelectorAll<HTMLElement>("[data-busy-count]").forEach((node) => {
+    node.textContent = countText;
+  });
+
+  return true;
+}
+
 function renderBusyBanner(): string {
   if (!busyState) {
     return "";
   }
 
   return `
-    <div class="busy-banner" role="status" aria-live="polite">
+    <div class="busy-banner ${busyState.paused ? "paused" : ""}" role="status" aria-live="polite">
       <span class="sync-spinner" aria-hidden="true"></span>
-      <span>${escapeHtml(busyState.message)}</span>
+      <span data-busy-message>${escapeHtml(busyState.message)}</span>
+      ${busyState.stepIndex && busyState.stepCount ? `<span class="busy-step-count" data-busy-count>${busyState.stepIndex}/${busyState.stepCount}</span>` : ""}
     </div>
+  `;
+}
+
+function renderOperationProgress(key: string, title: string): string {
+  const activeBusyState = busyState?.key === key ? busyState : null;
+  if (!activeBusyState) {
+    return "";
+  }
+
+  return `
+    <div class="operation-progress ${activeBusyState.paused ? "paused" : ""}" role="status" aria-live="polite">
+      <div class="operation-progress-head">
+        <span class="sync-spinner" aria-hidden="true"></span>
+        <div>
+          <strong>${escapeHtml(title)}</strong>
+          <span data-busy-message>${escapeHtml(activeBusyState.message)}</span>
+        </div>
+        ${activeBusyState.stepIndex && activeBusyState.stepCount ? `<em data-busy-count>${activeBusyState.stepIndex}/${activeBusyState.stepCount}</em>` : ""}
+      </div>
+      ${activeBusyState.steps?.length ? renderOperationProgressSteps(activeBusyState.steps) : ""}
+    </div>
+  `;
+}
+
+function renderOperationProgressSteps(steps: BusyProgressStep[]): string {
+  return `
+    <ol class="operation-progress-steps">
+      ${steps
+        .map(
+          (step) => `
+            <li class="${step.status}">
+              <span aria-hidden="true"></span>
+              <strong>${escapeHtml(step.label)}</strong>
+            </li>
+          `
+        )
+        .join("")}
+    </ol>
   `;
 }
 
@@ -436,6 +918,9 @@ function formatErrorMessage(error: unknown): string {
   const ipcPrefix = /^Error invoking remote method '[^']+':\s*/;
   const classPrefix = /^(ProfileManagerError|Error):\s*/;
   const cleaned = rawMessage.replace(ipcPrefix, "").replace(classPrefix, "").trim();
+  if (cleaned.includes("ENOENT") && cleaned.includes(".profilepilot-sync-")) {
+    return "同步临时文件已被系统清理或上次任务中断，请重新点击同步，ProfilePilot 会先恢复临时状态再继续。";
+  }
 
   return cleaned || "操作失败，请稍后重试。";
 }
@@ -454,6 +939,7 @@ function render(): void {
     ? `${state.runningProfiles.length} 个 Profile 正在运行`
     : "当前没有正在运行的 Profile";
   const refreshing = isBusyAction("refresh");
+  const busyHasEmbeddedProgress = busyState?.key === "account-sync" || busyState?.key === "migrate-extensions";
 
   appRoot.className = "";
   appRoot.innerHTML = `
@@ -474,7 +960,7 @@ function render(): void {
         </div>
       </header>
 
-      ${renderBusyBanner()}
+      ${busyHasEmbeddedProgress ? "" : renderBusyBanner()}
 
       <section class="status-grid" aria-label="Profile status">
         <div class="status-item current">
@@ -526,8 +1012,16 @@ function renderAccountSyncPanel(profiles: PublicProfile[]): string {
       : profiles.find((profile) => profile.id !== sourceId)?.id || "";
   const targetProfile = profiles.find((profile) => profile.id === targetId) || null;
   const runningBlocker = targetProfile?.running ? targetProfile : null;
-  const canSync = Boolean(sourceProfile && targetProfile && sourceProfile.id !== targetProfile.id && !runningBlocker);
+  const canSync = Boolean(sourceProfile && targetProfile && sourceProfile.id !== targetProfile.id);
   const syncingAccount = isBusyAction("account-sync");
+  const accountSyncRecord =
+    state?.accountSyncRecords.find((record) => record.sourceProfileId === sourceId && record.targetProfileId === targetId) ||
+    null;
+  const syncButtonLabel = "同步";
+  const syncingLabel = runningBlocker ? "关闭并同步中…" : "同步中…";
+  const launchLabel = runningBlocker ? "同步后重新启动目标" : "同步后启动目标";
+  const cancelRequested = Boolean(syncingAccount && busyState?.cancelRequested);
+  const pausedAccountSync = Boolean(syncingAccount && busyState?.paused);
 
   return `
     <section class="account-sync-panel" data-account-sync aria-busy="${syncingAccount ? "true" : "false"}">
@@ -538,36 +1032,62 @@ function renderAccountSyncPanel(profiles: PublicProfile[]): string {
         </div>
       </div>
 
-      <div class="account-sync-grid">
-        <div class="field compact">
-          <label for="account-sync-source">源 Profile</label>
-          <select id="account-sync-source" data-account-sync-source ${busy || !profiles.length ? "disabled" : ""}>
-            ${renderProfileOptions(profiles, sourceId)}
-          </select>
+      <div class="account-sync-layout ${syncingAccount ? "syncing" : ""}">
+        <div class="account-sync-fields">
+          <div class="field compact">
+            <label for="account-sync-source">源 Profile</label>
+            <select id="account-sync-source" data-account-sync-source ${busy || !profiles.length ? "disabled" : ""}>
+              ${renderProfileOptions(profiles, sourceId)}
+            </select>
+          </div>
+          <div class="field compact">
+            <label for="account-sync-target">目标 Profile</label>
+            <select id="account-sync-target" data-account-sync-target ${busy || profiles.length < 2 ? "disabled" : ""}>
+              ${renderProfileOptions(profiles, targetId, sourceId)}
+            </select>
+          </div>
         </div>
-        <div class="field compact">
-          <label for="account-sync-target">目标 Profile</label>
-          <select id="account-sync-target" data-account-sync-target ${busy || profiles.length < 2 ? "disabled" : ""}>
-            ${renderProfileOptions(profiles, targetId, sourceId)}
-          </select>
+
+        <div class="account-sync-controls">
+          <div class="account-sync-options">
+            <label class="check-control account-sync-mode">
+              <input type="checkbox" data-account-sync-only-changed ${accountSyncOnlyChanged ? "checked" : ""} ${busy ? "disabled" : ""} />
+              <span>仅同步变更项</span>
+            </label>
+            <label class="check-control account-sync-launch">
+              <input type="checkbox" data-launch-synced-profile ${launchSyncedProfile ? "checked" : ""} ${busy ? "disabled" : ""} />
+              <span>${launchLabel}</span>
+            </label>
+          </div>
+
+          <div class="account-sync-actions">
+            <button type="button" class="primary ${syncingAccount ? "loading" : ""}" data-action="sync-account" ${busy || !canSync ? "disabled" : ""}>
+              ${renderButtonLabel(syncingAccount, syncButtonLabel, syncingLabel)}
+            </button>
+            ${
+              syncingAccount
+                ? `<button type="button" class="action-button account-sync-pause ${pausedAccountSync ? "accent" : "cdp"}" data-action="toggle-account-sync-pause" ${cancelRequested ? "disabled" : ""}>
+                    ${pausedAccountSync ? "继续同步" : "暂停同步"}
+                  </button>
+                  <button type="button" class="action-button warn account-sync-cancel ${cancelRequested ? "loading" : ""}" data-action="cancel-account-sync" ${cancelRequested ? "disabled" : ""}>
+                    ${renderButtonLabel(cancelRequested, "终止同步", "正在终止…")}
+                  </button>`
+                : ""
+            }
+          </div>
         </div>
-        <label class="check-control account-sync-launch">
-          <input type="checkbox" data-launch-synced-profile ${launchSyncedProfile ? "checked" : ""} ${busy ? "disabled" : ""} />
-          <span>同步后启动目标</span>
-        </label>
-        <button type="button" class="primary ${syncingAccount ? "loading" : ""}" data-action="sync-account" ${busy || !canSync ? "disabled" : ""}>
-          ${renderButtonLabel(syncingAccount, "同步账号", "同步中…")}
-        </button>
       </div>
 
       ${syncingAccount ? renderAccountSyncLoading(sourceProfile, targetProfile) : ""}
+      ${renderAccountSyncDiffPreview(sourceProfile, targetProfile, accountSyncRecord)}
 
       <div class="account-sync-note ${runningBlocker ? "warn" : ""}">
-        ${escapeHtml(accountSyncNote(sourceProfile, targetProfile, runningBlocker))}
+        ${escapeHtml(accountSyncNote(sourceProfile, targetProfile, runningBlocker, accountSyncRecord))}
       </div>
 
+      ${renderAccountSyncScope()}
+
       ${accountSyncResult ? renderAccountSyncResult(accountSyncResult) : ""}
-      ${renderAccountSyncBackups()}
     </section>
   `;
 }
@@ -575,11 +1095,159 @@ function renderAccountSyncPanel(profiles: PublicProfile[]): string {
 function renderAccountSyncLoading(sourceProfile: PublicProfile | null, targetProfile: PublicProfile | null): string {
   const sourceName = sourceProfile?.name || "源 Profile";
   const targetName = targetProfile?.name || "目标 Profile";
+  return renderOperationProgress("account-sync", `账号同步：${sourceName} 到 ${targetName}`);
+}
+
+function renderAccountSyncDiffPreview(
+  sourceProfile: PublicProfile | null,
+  targetProfile: PublicProfile | null,
+  accountSyncRecord: AccountSyncRecord | null
+): string {
+  if (!sourceProfile || !targetProfile || sourceProfile.id === targetProfile.id) {
+    return "";
+  }
+
+  if (accountSyncOnlyChanged && accountSyncRecord && targetProfile.running) {
+    return `
+      <div class="diff-preview compact">
+        <div class="diff-preview-head">
+          <strong>差异预览</strong>
+          <span>目标运行中，暂不计数</span>
+        </div>
+        <p class="diff-help">
+          目标 ${escapeHtml(targetProfile.name)} 已在 ${escapeHtml(formatDate(accountSyncRecord.syncedAt))} 从 ${escapeHtml(sourceProfile.name)} 同步过。Chrome 运行时会继续改写 Cookie、Storage 和 Service Worker 这类文件，所以此时差异预览容易误判。再次同步会先关闭目标，再检查源 Profile 是否有新变化。
+        </p>
+        ${renderAccountSyncDiffMonitor(sourceProfile, targetProfile)}
+      </div>
+    `;
+  }
+
+  if (accountSyncDiffLoading) {
+    return `
+      <div class="diff-preview compact" aria-live="polite">
+        <div class="diff-preview-head">
+          <strong>差异预览</strong>
+          <span><span class="inline-spinner" aria-hidden="true"></span> 正在检查本次需要同步的账号数据…</span>
+        </div>
+      </div>
+    `;
+  }
+
+  if (!accountSyncDiff) {
+    return `
+      <div class="diff-preview compact">
+        <div class="diff-preview-head">
+          <strong>差异预览</strong>
+          <span>暂时无法读取差异，点击同步时仍会再次检查。</span>
+        </div>
+      </div>
+    `;
+  }
+
+  const syncableItems = accountSyncDiff.items.filter((item) => item.status === "changed" || item.status === "target_missing");
+  const sameItems = accountSyncDiff.items.filter((item) => item.status === "same");
+  const sourceMissingItems = accountSyncDiff.items.filter((item) => item.status === "source_missing");
+  const primaryItems = syncableItems.length ? syncableItems : sameItems;
+  const visibleItems = accountSyncDiffExpanded ? primaryItems : primaryItems.slice(0, 5);
+  const hiddenPrimaryCount = Math.max(primaryItems.length - visibleItems.length, 0);
+  const modeText = accountSyncOnlyChanged ? "已一致项会跳过" : "已关闭，仅用于预览；同步时会覆盖源中已有项目";
+  const ignoredButtonText = accountSyncIgnoredExpanded
+    ? "收起已自动忽略项"
+    : `查看已自动忽略项（${sourceMissingItems.length}）`;
 
   return `
-    <div class="account-sync-loading" role="status" aria-live="polite">
-      <span class="sync-spinner" aria-hidden="true"></span>
-      <span>正在同步 ${escapeHtml(sourceName)} 到 ${escapeHtml(targetName)}…</span>
+    <div class="diff-preview compact">
+      <div class="diff-preview-head">
+        <strong>差异预览</strong>
+        <span>${escapeHtml(modeText)}</span>
+      </div>
+      <div class="diff-summary-grid account-diff-summary">
+        <div>
+          <span>待同步</span>
+          <strong>${accountSyncDiff.summary.syncableCount}</strong>
+        </div>
+        <div>
+          <span>已一致</span>
+          <strong>${accountSyncDiff.summary.sameCount}</strong>
+        </div>
+        <div>
+          <span>目标缺少</span>
+          <strong>${accountSyncDiff.summary.targetMissingCount}</strong>
+        </div>
+      </div>
+      ${
+        visibleItems.length
+          ? `<div class="diff-item-list">
+              ${visibleItems.map((item) => renderDiffItem(item.label, item.reason, item.status)).join("")}
+              ${
+                hiddenPrimaryCount
+                  ? `<button type="button" class="diff-more-button" data-action="toggle-account-diff-expanded">加载更多（还有 ${hiddenPrimaryCount} 项${syncableItems.length ? "会同步" : "已一致"}）</button>`
+                  : primaryItems.length > 5
+                    ? `<button type="button" class="diff-more-button" data-action="toggle-account-diff-expanded">收起</button>`
+                    : ""
+              }
+            </div>`
+          : `<p class="diff-help">当前没有需要同步的账号数据。</p>`
+      }
+      ${
+        sourceMissingItems.length
+          ? `<div class="diff-ignored">
+              <button type="button" class="diff-more-button muted" data-action="toggle-account-diff-ignored">${ignoredButtonText}</button>
+              ${
+                accountSyncIgnoredExpanded
+                  ? `<p class="diff-help">
+                      <strong>已自动忽略</strong> 表示源 Profile 里当前没有这些数据文件或目录，比如没有对应的 Cookie、站点存储或 Service Worker 数据；这里没有内容可复制，不是同步失败。
+                    </p>
+                    <div class="diff-item-list muted">
+                      ${sourceMissingItems.map((item) => renderDiffItem(item.label, item.reason, item.status)).join("")}
+                    </div>`
+                  : ""
+              }
+            </div>`
+          : ""
+      }
+    </div>
+  `;
+}
+
+function renderAccountSyncDiffMonitor(sourceProfile: PublicProfile, targetProfile: PublicProfile): string {
+  const monitor = accountSyncDiffMonitorMatches(sourceProfile.id, targetProfile.id) ? accountSyncDiffMonitor : null;
+  const syncableItems = monitor?.diff?.items.filter((item) => item.status === "changed" || item.status === "target_missing") || [];
+  const visibleItems = syncableItems.slice(0, 3);
+  let body = `<p class="diff-help">点一次只检查当前这一次，用来确认源 Profile 是否出现上次同步后新增的账号数据变化。</p>`;
+
+  if (monitor?.error) {
+    body = `<p class="diff-help warn">检查失败：${escapeHtml(monitor.error)}</p>`;
+  } else if (monitor?.loading) {
+    body = `<p class="diff-help"><span class="inline-spinner" aria-hidden="true"></span> 正在检查当前差异…</p>`;
+  } else if (monitor?.diff) {
+    const checkedAt = monitor.checkedAt ? formatDate(monitor.checkedAt) : "刚刚";
+    body = syncableItems.length
+      ? `
+        <div class="account-diff-monitor-result">
+          <p class="diff-help strong">已在 ${escapeHtml(checkedAt)} 检查当前状态，发现 ${syncableItems.length} 项源 Profile 新变化。</p>
+          <div class="diff-item-list">
+            ${visibleItems.map((item) => renderDiffItem(item.label, item.reason, item.status)).join("")}
+            ${
+              syncableItems.length > visibleItems.length
+                ? `<span class="diff-help">还有 ${syncableItems.length - visibleItems.length} 项会在下次同步时覆盖到目标。</span>`
+                : ""
+            }
+          </div>
+        </div>
+      `
+      : `<p class="diff-help strong">已在 ${escapeHtml(checkedAt)} 检查当前状态，源 Profile 暂无新变化。</p>`;
+  }
+
+  return `
+    <div class="account-diff-monitor ${monitor?.loading ? "active" : ""}">
+      <div class="account-diff-monitor-actions">
+        <button type="button" class="diff-more-button" data-action="inspect-current-account-diff" ${monitor?.loading ? "disabled" : ""}>
+          ${monitor?.loading ? "检查中…" : "监测当前差异"}
+        </button>
+        <span>不会后台轮询</span>
+      </div>
+      ${body}
     </div>
   `;
 }
@@ -587,28 +1255,72 @@ function renderAccountSyncLoading(sourceProfile: PublicProfile | null, targetPro
 function accountSyncNote(
   sourceProfile: PublicProfile | null,
   targetProfile: PublicProfile | null,
-  runningBlocker: PublicProfile | null
+  runningBlocker: PublicProfile | null,
+  accountSyncRecord: AccountSyncRecord | null
 ): string {
   if (!sourceProfile || !targetProfile) {
     return "至少需要两个 Profile 才能同步账号。";
   }
 
   if (runningBlocker) {
-    return `请先关闭目标 ${runningBlocker.name}，再刷新后同步。`;
+    if (accountSyncRecord) {
+      return `目标 ${runningBlocker.name} 正在运行，且上次已在 ${formatDate(accountSyncRecord.syncedAt)} 从 ${sourceProfile.name} 同步过。重新同步会先关闭目标再覆盖刷新，不会重复叠加。`;
+    }
+
+    return `目标 ${runningBlocker.name} 正在运行。同步时会先关闭目标，写入完成后再按设置重新启动。`;
+  }
+
+  if (accountSyncRecord) {
+    return `上次已在 ${formatDate(accountSyncRecord.syncedAt)} 从 ${sourceProfile.name} 同步到 ${targetProfile.name}。再次同步会重新覆盖目标，不会重复叠加。`;
   }
 
   if (sourceProfile.running) {
-    return `会同步 ${sourceProfile.name} 当前已落盘的登录态到 ${targetProfile.name}，并自动创建目标备份。`;
+    return `会同步 ${sourceProfile.name} 当前已落盘的登录态到 ${targetProfile.name}，目标当前登录态会被覆盖。`;
   }
 
-  return `会用 ${sourceProfile.name} 的登录态覆盖 ${targetProfile.name} 的登录态，并自动创建目标备份。`;
+  return `会用 ${sourceProfile.name} 的登录态覆盖 ${targetProfile.name} 的登录态。`;
+}
+
+function renderAccountSyncScope(): string {
+  const syncedItems = [
+    "Google 登录态、Cookie、头像和账号身份状态",
+    "站点会话数据：Local/Session Storage、IndexedDB、Service Worker、WebStorage",
+    "账号与同步数据：Accounts、Sync Data、Sync App/Extension Settings、Trusted Vault",
+    "账号相关偏好：Preferences、Secure Preferences、Local State 中的登录字段"
+  ];
+  const excludedItems = [
+    "书签、历史记录、下载记录、打开的标签页或窗口",
+    "保存的密码库 Login Data、证书、系统钥匙串权限",
+    "扩展安装包本体、插件本地数据和插件列表迁移",
+    "完整浏览器设置、主题、快捷方式，以及尚未落盘的数据"
+  ];
+
+  return `
+    <div class="account-sync-scope" aria-label="账号同步范围">
+      ${renderAccountSyncScopeGroup("会同步", syncedItems)}
+      ${renderAccountSyncScopeGroup("不会同步", excludedItems)}
+    </div>
+  `;
+}
+
+function renderAccountSyncScopeGroup(title: string, items: string[]): string {
+  return `
+    <div class="account-sync-scope-group">
+      <strong>${escapeHtml(title)}</strong>
+      <ul>
+        ${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
+      </ul>
+    </div>
+  `;
 }
 
 function renderAccountSyncResult(result: AccountSyncResult): string {
-  const restoring = isBusyAction("restore-account-backup", { backupId: result.backup.id });
-
   return `
     <div class="account-sync-result">
+      <div class="result-complete">
+        <strong>账号同步完成</strong>
+        <span>${result.launchedTarget ? "目标 Profile 已启动。" : "目标 Profile 已更新。"}</span>
+      </div>
       <div class="migration-result-grid account-sync-result-grid">
         <div>
           <span>已同步</span>
@@ -623,15 +1335,6 @@ function renderAccountSyncResult(result: AccountSyncResult): string {
           <strong>${result.launchedTarget ? "是" : "否"}</strong>
         </div>
       </div>
-      <div class="migration-result-body">
-        <div>
-          <strong>备份</strong>
-          <code class="path-box compact">${escapeHtml(result.backup.path)}</code>
-        </div>
-        <button type="button" class="action-button warn ${restoring ? "loading" : ""}" data-action="restore-account-backup" data-backup-id="${escapeHtml(result.backup.id)}" ${busy ? "disabled" : ""}>
-          ${renderButtonLabel(restoring, "恢复这个备份", "恢复中…")}
-        </button>
-      </div>
       ${result.skippedItems.length ? renderAccountSyncSkippedItems(result.skippedItems) : ""}
     </div>
   `;
@@ -640,37 +1343,12 @@ function renderAccountSyncResult(result: AccountSyncResult): string {
 function renderAccountSyncSkippedItems(items: AccountSyncSkippedItem[]): string {
   return `
     <div class="skipped-list">
+      <span>未复制项目</span>
       ${items
         .slice(0, 8)
         .map((item) => `<span><strong>${escapeHtml(item.label)}</strong> ${escapeHtml(item.reason)}</span>`)
         .join("")}
-      ${items.length > 8 ? `<span>还有 ${items.length - 8} 项未在源 Profile 中找到。</span>` : ""}
-    </div>
-  `;
-}
-
-function renderAccountSyncBackups(): string {
-  const backups = accountSyncBackups.slice(0, 4);
-  if (!backups.length) {
-    return "";
-  }
-
-  return `
-    <div class="backup-strip">
-      <span class="backup-strip-title">账号备份</span>
-      ${backups
-        .map(
-          (backup) => {
-            const restoring = isBusyAction("restore-account-backup", { backupId: backup.id });
-
-            return `
-            <button type="button" class="backup-chip ${restoring ? "loading" : ""}" data-action="restore-account-backup" data-backup-id="${escapeHtml(backup.id)}" ${busy ? "disabled" : ""}>
-              ${renderButtonLabel(restoring, `${backup.targetProfileName} · ${formatDate(backup.createdAt)}`, "恢复中…")}
-            </button>
-          `;
-          }
-        )
-        .join("")}
+      ${items.length > 8 ? `<span>还有 ${items.length - 8} 项未复制。</span>` : ""}
     </div>
   `;
 }
@@ -682,9 +1360,7 @@ function renderTable(profiles: PublicProfile[]): string {
         <thead>
           <tr>
             <th>名称</th>
-            <th>类型</th>
             <th>状态</th>
-            <th>最近启动</th>
             <th>操作</th>
           </tr>
         </thead>
@@ -711,14 +1387,10 @@ function renderProfileRow(profile: PublicProfile): string {
         </div>
       </td>
       <td>
-        <span class="source-pill ${profile.source}">${sourceLabel(profile)}</span>
-      </td>
-      <td>
         <span class="state-pill ${profile.running ? "running" : ""}">
           ${profileStatusLabel(profile)}
         </span>
       </td>
-      <td class="date-cell">${formatDate(profile.lastLaunchedAt)}</td>
       <td>
         ${renderProfileActions(profile)}
       </td>
@@ -748,11 +1420,6 @@ function renderProfileActions(profile: PublicProfile): string {
                 ${renderButtonLabel(focusing, "显示", "显示中…")}
               </button>
             </span>
-            <span class="action-tooltip" data-tooltip="${escapeHtml(closeButtonTitle(profile))}">
-              <button type="button" class="action-button warn ${closing ? "loading" : ""}" data-action="close-profile" data-id="${profile.id}" ${busy ? "disabled" : ""}>
-                ${renderButtonLabel(closing, "关闭", "关闭中…")}
-              </button>
-            </span>
           `
           : `
             <span class="action-tooltip" data-tooltip="${escapeHtml(launchButtonTitle(profile))}">
@@ -762,16 +1429,21 @@ function renderProfileActions(profile: PublicProfile): string {
             </span>
           `
       }
+      <span class="action-tooltip" data-tooltip="${escapeHtml(closeButtonTitle(profile))}">
+        <button type="button" class="action-button warn ${closing ? "loading" : ""}" data-action="close-profile" data-id="${profile.id}" ${busy || !profile.running ? "disabled" : ""}>
+          ${renderButtonLabel(closing, "关闭", "关闭中…")}
+        </button>
+      </span>
+      <span class="action-tooltip" data-tooltip="${escapeHtml(cdpLaunchButtonTitle(profile))}">
+        <button type="button" class="action-button cdp ${launchingCdp ? "loading" : ""}" data-action="launch-cdp" data-id="${profile.id}" ${cdpLaunchDisabled ? "disabled" : ""}>
+          ${renderButtonLabel(launchingCdp, "CDP启动", "启动中…")}
+        </button>
+      </span>
       <button type="button" class="action-button menu-button" data-action="toggle-profile-menu" data-id="${profile.id}" aria-expanded="${menuOpen ? "true" : "false"}" ${busy ? "disabled" : ""}>更多</button>
       ${
         menuOpen
           ? `
             <div class="action-menu" role="menu">
-              <span class="action-tooltip" data-tooltip="${escapeHtml(cdpLaunchButtonTitle(profile))}">
-                <button type="button" class="${launchingCdp ? "loading" : ""}" data-action="launch-cdp" data-id="${profile.id}" ${cdpLaunchDisabled ? "disabled" : ""}>
-                  ${renderButtonLabel(launchingCdp, "CDP启动", "启动中…")}
-                </button>
-              </span>
               <button type="button" class="${openingFolder ? "loading" : ""}" data-action="open-folder" data-id="${profile.id}" ${busy ? "disabled" : ""}>
                 ${renderButtonLabel(openingFolder, "打开目录", "打开中…")}
               </button>
@@ -813,12 +1485,13 @@ function renderExtensionMigrationPanel(profiles: PublicProfile[]): string {
   const hasAvailableTarget = profiles.some((profile) => profile.id !== sourceId);
   const canMigrate = Boolean(sourceProfile && activeScan && selectedCount && hasAvailableTarget);
   const scanning = isBusyAction("scan-extensions");
+  const migrating = isBusyAction("migrate-extensions");
 
   return `
-    <section class="migration-panel" data-extension-migration>
+    <section class="migration-panel" data-extension-migration aria-busy="${migrating ? "true" : "false"}">
       <div class="section-head">
         <div>
-          <h2>插件迁移</h2>
+          <h2>插件同步</h2>
           <span class="section-subtitle">Extensions</span>
         </div>
       </div>
@@ -834,9 +1507,9 @@ function renderExtensionMigrationPanel(profiles: PublicProfile[]): string {
         ${sourceProfile ? renderMigrationSourceSummary(sourceProfile, activeScan) : ""}
       </div>
 
+      ${migrating ? renderOperationProgress("migrate-extensions", "插件同步进度") : ""}
       ${activeScan ? renderExtensionScan(activeScan, selectedCount, allSelected, canMigrate) : renderExtensionScanEmpty()}
       ${extensionMigrationResult ? renderExtensionMigrationResult(extensionMigrationResult) : ""}
-      ${renderExtensionBackups()}
     </section>
   `;
 }
@@ -945,7 +1618,7 @@ function renderExtensionScan(
     return `
       <div class="extension-scan-empty">
         <strong>${escapeHtml(scan.profileName)}</strong>
-        <span>没有扫描到可迁移插件。</span>
+        <span>没有扫描到可同步插件。</span>
       </div>
     `;
   }
@@ -958,7 +1631,7 @@ function renderExtensionScan(
       </div>
       <div class="migration-actions">
         <button type="button" data-action="select-all-extensions" ${busy ? "disabled" : ""}>${allSelected ? "取消全选" : "一键全选"}</button>
-        <button type="button" class="primary" data-action="migrate-extensions" ${busy || !canMigrate ? "disabled" : ""}>迁移所选插件</button>
+        <button type="button" class="primary" data-action="migrate-extensions" ${busy || !canMigrate ? "disabled" : ""}>同步所选插件</button>
       </div>
     </div>
     <div class="extensions-table-wrap">
@@ -970,7 +1643,7 @@ function renderExtensionScan(
             <th>状态</th>
             <th>来源</th>
             <th>数据</th>
-            <th>迁移能力</th>
+            <th>同步能力</th>
             <th>操作</th>
           </tr>
         </thead>
@@ -1022,10 +1695,13 @@ function renderExtensionRow(extension: ProfileExtensionInfo): string {
 function renderExtensionMigrationResult(result: ExtensionMigrationResult): string {
   const copiedWebStoreCount = result.copiedExtensions.filter((extension) => extension.fromWebStore).length;
   const copiedLocalCount = result.copiedExtensions.length - copiedWebStoreCount;
-  const restoring = isBusyAction("restore-extension-backup", { backupId: result.backup.id });
 
   return `
     <div class="migration-result">
+      <div class="result-complete">
+        <strong>插件同步完成</strong>
+        <span>${result.openedInstallPages ? "已打开需要手动确认的安装页。" : "目标 Profile 已更新。"}</span>
+      </div>
       <div class="migration-result-grid">
         <div>
           <span>已选</span>
@@ -1044,15 +1720,6 @@ function renderExtensionMigrationResult(result: ExtensionMigrationResult): strin
           <strong>${result.webStoreInstallUrls.length}</strong>
         </div>
       </div>
-      <div class="migration-result-body">
-        <div>
-          <strong>备份</strong>
-          <code class="path-box compact">${escapeHtml(result.backup.path)}</code>
-        </div>
-        <button type="button" class="action-button warn ${restoring ? "loading" : ""}" data-action="restore-extension-backup" data-backup-id="${escapeHtml(result.backup.id)}" ${busy ? "disabled" : ""}>
-          ${renderButtonLabel(restoring, "恢复这个备份", "恢复中…")}
-        </button>
-      </div>
       ${result.skippedExtensions.length ? renderSkippedExtensions(result.skippedExtensions) : ""}
     </div>
   `;
@@ -1065,32 +1732,6 @@ function renderSkippedExtensions(skippedExtensions: ExtensionMigrationSkippedExt
         .map(
           (extension) =>
             `<span><strong>${escapeHtml(extension.name)}</strong> ${escapeHtml(extension.reason)}</span>`
-        )
-        .join("")}
-    </div>
-  `;
-}
-
-function renderExtensionBackups(): string {
-  const backups = extensionMigrationBackups.slice(0, 4);
-  if (!backups.length) {
-    return "";
-  }
-
-  return `
-    <div class="backup-strip">
-      <span class="backup-strip-title">最近备份</span>
-      ${backups
-        .map(
-          (backup) => {
-            const restoring = isBusyAction("restore-extension-backup", { backupId: backup.id });
-
-            return `
-            <button type="button" class="backup-chip ${restoring ? "loading" : ""}" data-action="restore-extension-backup" data-backup-id="${escapeHtml(backup.id)}" ${busy ? "disabled" : ""}>
-              ${renderButtonLabel(restoring, `${backup.targetProfileName} · ${formatDate(backup.createdAt)}`, "恢复中…")}
-            </button>
-          `;
-          }
         )
         .join("")}
     </div>
@@ -1249,6 +1890,7 @@ function renderExtensionMigrationModal(profiles: PublicProfile[]): string {
     migrationTargetId && migrationTargetId !== sourceId
       ? migrationTargetId
       : profiles.find((profile) => profile.id !== sourceId)?.id || "";
+  const targetProfile = profiles.find((profile) => profile.id === targetId) || null;
   const selectedExtensions = activeScan?.extensions.filter((extension) => selectedExtensionIds.has(extension.id)) || [];
   const selectedWithData = selectedExtensions.filter((extension) => extension.hasLocalData).length;
   const migrating = isBusyAction("migrate-extensions");
@@ -1260,9 +1902,9 @@ function renderExtensionMigrationModal(profiles: PublicProfile[]): string {
   return `
     <div class="modal-backdrop" data-action="close-modal">
       <form class="modal migration-modal" data-extension-migration-form>
-        <span class="modal-kicker">插件迁移</span>
+        <span class="modal-kicker">插件同步</span>
         <h2>选择目标 Profile</h2>
-        <p class="modal-copy">从 ${escapeHtml(sourceProfile.name)} 迁移 ${selectedExtensions.length} 个已选插件。</p>
+        <p class="modal-copy">从 ${escapeHtml(sourceProfile.name)} 同步 ${selectedExtensions.length} 个已选插件。目标 Profile 的同名插件信息会被覆盖。</p>
         <div class="migration-modal-summary">
           <div>
             <span>源 Profile</span>
@@ -1282,24 +1924,112 @@ function renderExtensionMigrationModal(profiles: PublicProfile[]): string {
           <select id="migration-target" name="targetProfileId" data-migration-target ${busy ? "disabled" : ""}>
             ${renderProfileOptions(profiles, targetId, sourceId)}
           </select>
+          ${
+            targetProfile?.running
+              ? `<p class="modal-note warn">目标 ${escapeHtml(targetProfile.name)} 正在运行。开始同步后会先关闭目标 Profile，写入完成后再继续。</p>`
+              : ""
+          }
         </div>
         <div class="migration-modal-options">
           <label class="check-control">
+            <input type="checkbox" name="onlyChanged" data-extension-only-changed ${extensionSyncOnlyChanged ? "checked" : ""} ${busy ? "disabled" : ""} />
+            <span>仅同步变更插件</span>
+          </label>
+          <label class="check-control">
             <input type="checkbox" name="includeData" data-include-extension-data ${includeExtensionData ? "checked" : ""} ${busy ? "disabled" : ""} />
-            <span>同时迁移插件数据</span>
+            <span>同时同步插件数据</span>
           </label>
           <label class="check-control">
             <input type="checkbox" name="openInstallPages" data-open-install-pages ${openInstallPages ? "checked" : ""} ${busy ? "disabled" : ""} />
             <span>无法静默时打开安装页</span>
           </label>
         </div>
+        ${renderExtensionMigrationDiffPreview()}
         <div class="modal-actions">
           <button type="button" data-action="close-modal">取消</button>
           <button type="submit" class="primary ${migrating ? "loading" : ""}" ${busy || !targetId ? "disabled" : ""}>
-            ${renderButtonLabel(migrating, "开始迁移", "迁移中…")}
+            ${renderButtonLabel(migrating, "开始同步", "同步中…")}
           </button>
         </div>
       </form>
+    </div>
+  `;
+}
+
+function renderExtensionMigrationDiffPreview(): string {
+  if (extensionMigrationDiffLoading) {
+    return `
+      <div class="diff-preview modal-diff-preview" aria-live="polite">
+        <div class="diff-preview-head">
+          <strong>插件差异预览</strong>
+          <span><span class="inline-spinner" aria-hidden="true"></span> 正在检查插件差异…</span>
+        </div>
+      </div>
+    `;
+  }
+
+  if (!extensionMigrationDiff) {
+    return `
+      <div class="diff-preview modal-diff-preview">
+        <div class="diff-preview-head">
+          <strong>插件差异预览</strong>
+          <span>选择目标或同步选项后会检查本次差异。</span>
+        </div>
+      </div>
+    `;
+  }
+
+  const changedItems = extensionMigrationDiff.items.filter((item) =>
+    ["missing", "version_changed", "data_changed", "needs_install_page"].includes(item.status)
+  );
+  const visibleItems = (changedItems.length ? changedItems : extensionMigrationDiff.items).slice(0, 5);
+  const syncableCount =
+    extensionMigrationDiff.summary.missingCount +
+    extensionMigrationDiff.summary.changedCount +
+    extensionMigrationDiff.summary.needsInstallPageCount;
+  const modeText = extensionSyncOnlyChanged ? "已一致插件会跳过" : "已关闭，仅用于预览；同步时会重新覆盖可同步插件";
+
+  return `
+    <div class="diff-preview modal-diff-preview">
+      <div class="diff-preview-head">
+        <strong>插件差异预览</strong>
+        <span>${escapeHtml(modeText)}</span>
+      </div>
+      <div class="diff-summary-grid extension-diff-summary">
+        <div>
+          <span>待处理</span>
+          <strong>${syncableCount}</strong>
+        </div>
+        <div>
+          <span>目标缺少</span>
+          <strong>${extensionMigrationDiff.summary.missingCount}</strong>
+        </div>
+        <div>
+          <span>有变化</span>
+          <strong>${extensionMigrationDiff.summary.changedCount}</strong>
+        </div>
+        <div>
+          <span>安装页</span>
+          <strong>${extensionMigrationDiff.summary.needsInstallPageCount}</strong>
+        </div>
+        <div>
+          <span>已一致</span>
+          <strong>${extensionMigrationDiff.summary.sameCount}</strong>
+        </div>
+        <div>
+          <span>目标独有</span>
+          <strong>${extensionMigrationDiff.summary.targetOnlyCount}</strong>
+        </div>
+      </div>
+      ${
+        visibleItems.length
+          ? `<div class="diff-item-list">
+              ${visibleItems.map((item) => renderDiffItem(item.name, item.reason, item.status)).join("")}
+              ${changedItems.length > visibleItems.length ? `<span>还有 ${changedItems.length - visibleItems.length} 个插件会处理。</span>` : ""}
+              ${extensionMigrationDiff.summary.unsupportedCount ? `<span>${extensionMigrationDiff.summary.unsupportedCount} 个插件没有可自动同步的插件目录。</span>` : ""}
+            </div>`
+          : ""
+      }
     </div>
   `;
 }
@@ -1324,44 +2054,342 @@ function renderCdpDetail(profile: PublicProfile): string {
   `;
 }
 
+type ConfirmModalTone = "primary" | "warn" | "danger";
+
+interface ConfirmModalView {
+  kicker: string;
+  title: string;
+  body: string[];
+  confirmLabel: string;
+  tone: ConfirmModalTone;
+  summary: Array<{ label: string; value: string }>;
+}
+
 function renderConfirmModal(confirm: Extract<ModalState, { kind: "confirm" }>): string {
-  const profile = state?.profiles.find((item) => item.id === confirm.profileId);
-  if (!profile) {
+  const view = confirmModalView(confirm.intent);
+  if (!view) {
     return "";
   }
 
-  const copy = confirm.action === "close" ? closeConfirmCopy(profile) : deleteConfirmCopy(profile);
-  const confirmClass = confirm.action === "delete" ? "danger solid" : "warn solid";
+  const confirmClass = `${view.tone === "primary" ? "solid" : `${view.tone} solid`}`;
 
   return `
-    <div class="modal-backdrop" data-action="close-modal">
-      <section class="modal confirm-modal" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
-        <span class="modal-kicker">二次确认</span>
-        <h2 id="confirm-title">${escapeHtml(copy.title)}</h2>
-        <p class="modal-copy">${escapeHtml(copy.body)}</p>
-        <div class="confirm-summary">
+    <div class="modal-backdrop app-modal-backdrop" data-action="close-modal">
+      <section class="modal confirm-modal confirm-dialog ${view.tone}" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+        <div class="confirm-dialog-head">
+          <span class="confirm-dialog-icon" aria-hidden="true"></span>
           <div>
-            <span>Profile</span>
-            <strong>${escapeHtml(profile.name)}</strong>
-          </div>
-          <div>
-            <span>来源</span>
-            <strong>${sourceDetail(profile)}</strong>
-          </div>
-          <div>
-            <span>状态</span>
-            <strong>${profileStatusLabel(profile)}</strong>
+            <span class="modal-kicker">${escapeHtml(view.kicker)}</span>
+            <h2 id="confirm-title">${escapeHtml(view.title)}</h2>
           </div>
         </div>
+        <div class="modal-copy confirm-copy">
+          ${view.body.map((line) => `<p>${escapeHtml(line)}</p>`).join("")}
+        </div>
+        <div class="confirm-summary">
+          ${view.summary
+            .map(
+              (item) => `
+                <div>
+                  <span>${escapeHtml(item.label)}</span>
+                  <strong>${escapeHtml(item.value)}</strong>
+                </div>
+              `
+            )
+            .join("")}
+        </div>
         <div class="modal-actions">
-          <button type="button" data-action="close-modal">取消</button>
-          <button type="button" class="${confirmClass}" data-action="confirm-profile-action">
-            ${escapeHtml(copy.confirmLabel)}
+          <button type="button" class="ghost" data-action="close-modal">取消</button>
+          <button type="button" class="${confirmClass}" data-action="confirm-modal-action">
+            ${escapeHtml(view.confirmLabel)}
           </button>
         </div>
       </section>
     </div>
   `;
+}
+
+function confirmModalView(intent: ConfirmIntent): ConfirmModalView | null {
+  if (!state) {
+    return null;
+  }
+
+  if (intent.kind === "profile") {
+    const profile = state.profiles.find((item) => item.id === intent.profileId);
+    if (!profile) {
+      return null;
+    }
+    const copy = intent.action === "close" ? closeConfirmCopy(profile) : deleteConfirmCopy(profile);
+    return {
+      kicker: intent.action === "close" ? "关闭 Profile" : "删除 Profile",
+      title: copy.title,
+      body: [copy.body],
+      confirmLabel: copy.confirmLabel,
+      tone: intent.action === "delete" ? "danger" : "warn",
+      summary: [
+        { label: "Profile", value: profile.name },
+        { label: "来源", value: sourceDetail(profile) },
+        { label: "状态", value: profileStatusLabel(profile) }
+      ]
+    };
+  }
+
+  if (intent.kind === "account-sync") {
+    const sourceProfile = state.profiles.find((profile) => profile.id === intent.sourceProfileId);
+    const targetProfile = state.profiles.find((profile) => profile.id === intent.targetProfileId);
+    if (!sourceProfile || !targetProfile) {
+      return null;
+    }
+
+    const overwriteLine = intent.existingRecordSyncedAt
+      ? `上次已在 ${formatDate(intent.existingRecordSyncedAt)} 从 ${sourceProfile.name} 同步到 ${targetProfile.name}。继续会覆盖刷新目标登录态，不会重复叠加。`
+      : `${targetProfile.name} 当前登录态会被 ${sourceProfile.name} 的登录态替换。`;
+    const closeLine = intent.shouldCloseTarget
+      ? `目标 ${targetProfile.name} 正在运行。开始同步前会先帮你关闭目标，写入完成后再按设置处理启动。`
+      : "同步开始后会写入目标 Profile 的账号数据。";
+    const modeLine = intent.onlyChanged ? "本次只同步差异项，已一致项会跳过。" : "本次会重新覆盖所有可同步的账号数据。";
+
+    return {
+      kicker: "账号同步确认",
+      title: `同步 ${sourceProfile.name} 到 ${targetProfile.name}`,
+      body: [closeLine, overwriteLine, modeLine],
+      confirmLabel: intent.shouldCloseTarget ? "关闭后同步" : "开始同步",
+      tone: "warn",
+      summary: [
+        { label: "源 Profile", value: sourceProfile.name },
+        { label: "目标 Profile", value: targetProfile.name },
+        { label: "同步方式", value: intent.onlyChanged ? "仅同步变更项" : "覆盖可同步项" },
+        { label: "完成后", value: intent.launchTarget ? "启动目标" : "不启动目标" }
+      ]
+    };
+  }
+
+  if (intent.kind === "delete-extension") {
+    const profile = state.profiles.find((item) => item.id === intent.profileId);
+    const extension = extensionScan?.extensions.find((item) => item.id === intent.extensionId);
+    if (!profile || !extension) {
+      return null;
+    }
+
+    return {
+      kicker: "删除插件",
+      title: `删除 ${extension.name}`,
+      body: [`将从 ${profile.name} 移除这个插件文件和相关配置。此操作只影响这个 Profile。`],
+      confirmLabel: "确认删除插件",
+      tone: "danger",
+      summary: [
+        { label: "Profile", value: profile.name },
+        { label: "插件", value: extension.name },
+        { label: "版本", value: extension.version || "未知" }
+      ]
+    };
+  }
+
+  const sourceProfile = state.profiles.find((profile) => profile.id === intent.sourceProfileId);
+  const targetProfile = state.profiles.find((profile) => profile.id === intent.targetProfileId);
+  const activeScan = extensionScan?.profileId === intent.sourceProfileId ? extensionScan : null;
+  if (!sourceProfile || !targetProfile || !activeScan) {
+    return null;
+  }
+
+  const selectedExtensions = activeScan.extensions.filter((extension) => intent.extensionIds.includes(extension.id));
+  const selectedWithData = selectedExtensions.filter((extension) => extension.hasLocalData).length;
+  const closeLine = intent.shouldCloseTarget
+    ? `目标 ${targetProfile.name} 正在运行。开始同步前会先帮你关闭目标，写入完成后再继续。`
+    : "同步开始后会写入目标 Profile 的插件配置。";
+  const dataLine = intent.includeData ? "同名插件配置和插件数据会被源 Profile 覆盖。" : "同名插件配置会被源 Profile 覆盖，插件数据不会同步。";
+  const modeLine = intent.onlyChanged ? "已一致插件会跳过。" : "会重新覆盖所有可同步的已选插件。";
+
+  return {
+    kicker: "插件同步确认",
+    title: `同步 ${intent.extensionIds.length} 个插件到 ${targetProfile.name}`,
+    body: [closeLine, dataLine, modeLine],
+    confirmLabel: intent.shouldCloseTarget ? "关闭后同步" : "开始同步",
+    tone: "warn",
+    summary: [
+      { label: "源 Profile", value: sourceProfile.name },
+      { label: "目标 Profile", value: targetProfile.name },
+      { label: "已选插件", value: String(intent.extensionIds.length) },
+      { label: "含数据", value: String(selectedWithData) }
+    ]
+  };
+}
+
+function closeModalFromUi(): void {
+  if (modal?.kind === "confirm" && modal.returnTo === "extension-migration") {
+    modal = { kind: "extension-migration" };
+  } else {
+    modal = null;
+  }
+  render();
+}
+
+function executeConfirmIntent(intent: ConfirmIntent): void {
+  if (intent.kind === "profile") {
+    executeProfileConfirm(intent);
+    return;
+  }
+
+  if (intent.kind === "account-sync") {
+    executeAccountSyncConfirm(intent);
+    return;
+  }
+
+  if (intent.kind === "delete-extension") {
+    executeDeleteExtensionConfirm(intent);
+    return;
+  }
+
+  executeExtensionMigrationConfirm(intent);
+}
+
+function executeProfileConfirm(intent: Extract<ConfirmIntent, { kind: "profile" }>): void {
+  const profile = state?.profiles.find((item) => item.id === intent.profileId);
+  modal = null;
+
+  if (!profile) {
+    render();
+    return;
+  }
+
+  if (intent.action === "close") {
+    void withBusy(() => profileApi().closeProfile(profile.id), `已请求关闭 ${profile.name}`, {
+      key: "close-profile",
+      message: `正在关闭 ${profile.name}…`,
+      profileId: profile.id
+    });
+    return;
+  }
+
+  void withBusy(() => profileApi().deleteProfile(profile.id), `已删除 ${profile.name}`, {
+    key: "delete-profile",
+    message: `正在删除 ${profile.name}…`,
+    profileId: profile.id
+  });
+}
+
+function executeAccountSyncConfirm(intent: Extract<ConfirmIntent, { kind: "account-sync" }>): void {
+  const sourceProfile = state?.profiles.find((profile) => profile.id === intent.sourceProfileId);
+  const targetProfile = state?.profiles.find((profile) => profile.id === intent.targetProfileId);
+  modal = null;
+
+  if (!sourceProfile || !targetProfile) {
+    render();
+    setToast("请选择两个不同的 Profile", "error");
+    return;
+  }
+
+  const progressSteps = accountSyncProgressStepsForTarget(targetProfile);
+  void withBusy(async () => {
+    if (intent.shouldCloseTarget) {
+      await profileApi().closeProfile(intent.targetProfileId);
+      const nextSteps = activateBusyStep(busyState?.steps || [], "检查 Profile");
+      updateBusyState({
+        message: `已关闭 ${targetProfile.name}，正在开始同步…`,
+        stepIndex: nextSteps.findIndex((step) => step.label === "检查 Profile") + 1,
+        stepCount: nextSteps.length,
+        steps: nextSteps
+      });
+    }
+
+    const result = await profileApi().syncAccount({
+      sourceProfileId: intent.sourceProfileId,
+      targetProfileId: intent.targetProfileId,
+      launchTarget: intent.launchTarget,
+      onlyChanged: intent.onlyChanged
+    });
+    accountSyncResult = result;
+    invalidateAccountSyncDiff();
+    state = result.state;
+    selectedId = result.targetProfileId;
+  }, intent.launchTarget
+    ? intent.existingRecordSyncedAt
+      ? "账号重新同步完成，已启动目标 Profile"
+      : "账号同步完成，已启动目标 Profile"
+    : intent.existingRecordSyncedAt
+      ? "账号重新同步完成"
+      : "账号同步完成", {
+    key: "account-sync",
+    message: intent.shouldCloseTarget ? `正在关闭 ${targetProfile.name} 后同步账号…` : "正在同步账号…",
+    profileId: intent.targetProfileId,
+    stepIndex: 1,
+    stepCount: progressSteps.length,
+    steps: pendingBusySteps(progressSteps)
+  });
+}
+
+function executeDeleteExtensionConfirm(intent: Extract<ConfirmIntent, { kind: "delete-extension" }>): void {
+  const profile = state?.profiles.find((item) => item.id === intent.profileId);
+  const extension = extensionScan?.extensions.find((item) => item.id === intent.extensionId);
+  modal = null;
+
+  if (!profile || !extension) {
+    render();
+    setToast("没有找到要删除的插件", "error");
+    return;
+  }
+
+  void withBusy(async () => {
+    const result = await profileApi().deleteProfileExtension(intent.profileId, intent.extensionId);
+    extensionScan = result.scan;
+    selectedExtensionIds.delete(intent.extensionId);
+    extensionMigrationResult = null;
+    invalidateExtensionMigrationDiff();
+    state = result.state;
+    selectedId = result.profileId;
+  }, `已删除插件 ${extension.name}`, {
+    key: "delete-extension",
+    message: `正在删除插件 ${extension.name}…`,
+    profileId: intent.profileId,
+    extensionId: intent.extensionId
+  });
+}
+
+function executeExtensionMigrationConfirm(intent: Extract<ConfirmIntent, { kind: "extension-migration" }>): void {
+  const targetProfile = state?.profiles.find((profile) => profile.id === intent.targetProfileId);
+  modal = null;
+
+  if (!targetProfile) {
+    render();
+    setToast("没有找到目标 Profile", "error");
+    return;
+  }
+
+  migrationTargetId = intent.targetProfileId;
+  const progressSteps = extensionSyncProgressStepsForTarget(targetProfile);
+
+  void withBusy(async () => {
+    if (intent.shouldCloseTarget) {
+      state = await profileApi().closeProfile(intent.targetProfileId);
+      const nextSteps = activateBusyStep(busyState?.steps || [], "检查 Profile");
+      updateBusyState({
+        message: `已关闭 ${targetProfile.name}，正在开始同步插件…`,
+        stepIndex: nextSteps.findIndex((step) => step.label === "检查 Profile") + 1,
+        stepCount: nextSteps.length,
+        steps: nextSteps
+      });
+    }
+
+    const result = await profileApi().migrateExtensions({
+      sourceProfileId: intent.sourceProfileId,
+      targetProfileId: intent.targetProfileId,
+      extensionIds: intent.extensionIds,
+      includeData: intent.includeData,
+      openInstallPages: intent.openInstallPages,
+      onlyChanged: intent.onlyChanged
+    });
+    extensionMigrationResult = result;
+    invalidateExtensionMigrationDiff();
+    state = result.state;
+    selectedId = result.targetProfileId;
+  }, "插件同步完成", {
+    key: "migrate-extensions",
+    message: intent.shouldCloseTarget ? `正在关闭 ${targetProfile.name} 后同步插件…` : "正在同步插件…",
+    profileId: intent.targetProfileId,
+    stepIndex: 1,
+    stepCount: progressSteps.length,
+    steps: pendingBusySteps(progressSteps)
+  });
 }
 
 function profileStatusLabel(profile: PublicProfile): string {
@@ -1409,7 +2437,30 @@ function extensionMigrationCapabilityLabel(extension: ProfileExtensionInfo): str
     return "可打开安装页";
   }
 
-  return "不可自动迁移";
+  return "不可自动同步";
+}
+
+function renderDiffItem(label: string, reason: string, status: string): string {
+  return `
+    <span class="diff-item ${diffStatusClass(status)}">
+      <strong>${escapeHtml(label)}</strong>
+      <em>${escapeHtml(reason)}</em>
+    </span>
+  `;
+}
+
+function diffStatusClass(status: string): string {
+  if (status === "same") {
+    return "same";
+  }
+  if (status === "source_missing" || status === "unsupported") {
+    return "muted";
+  }
+  if (status === "needs_install_page") {
+    return "warn";
+  }
+
+  return "changed";
 }
 
 function processLabel(profile: PublicProfile): string {
@@ -1577,37 +2628,30 @@ appRoot.addEventListener("click", (event) => {
 
   if (action === "close-modal") {
     if (event.target === actionTarget || actionTarget.tagName === "BUTTON") {
-      modal = null;
-      render();
+      closeModalFromUi();
     }
     return;
   }
 
-  if (action === "confirm-profile-action" && modal?.kind === "confirm") {
-    const profileId = modal.profileId;
-    const confirmAction = modal.action;
-    const profile = state.profiles.find((item) => item.id === profileId);
-    modal = null;
+  if (action === "confirm-modal-action" && modal?.kind === "confirm") {
+    executeConfirmIntent(modal.intent);
+    return;
+  }
 
-    if (!profile) {
-      render();
-      return;
-    }
+  if (action === "toggle-account-diff-expanded") {
+    accountSyncDiffExpanded = !accountSyncDiffExpanded;
+    render();
+    return;
+  }
 
-    if (confirmAction === "close") {
-      void withBusy(() => profileApi().closeProfile(profile.id), `已请求关闭 ${profile.name}`, {
-        key: "close-profile",
-        message: `正在关闭 ${profile.name}…`,
-        profileId: profile.id
-      });
-      return;
-    }
+  if (action === "toggle-account-diff-ignored") {
+    accountSyncIgnoredExpanded = !accountSyncIgnoredExpanded;
+    render();
+    return;
+  }
 
-    void withBusy(() => profileApi().deleteProfile(profile.id), `已删除 ${profile.name}`, {
-      key: "delete-profile",
-      message: `正在删除 ${profile.name}…`,
-      profileId: profile.id
-    });
+  if (action === "inspect-current-account-diff") {
+    void inspectCurrentAccountSyncDiff();
     return;
   }
 
@@ -1620,59 +2664,76 @@ appRoot.addEventListener("click", (event) => {
       setToast("请选择两个不同的 Profile", "error");
       return;
     }
-    if (targetProfile.running) {
-      setToast("同步前请先关闭目标 Profile，然后刷新列表。", "error");
-      return;
-    }
-    if (
-      !window.confirm(
-        `用 ${sourceProfile.name} 的登录态覆盖 ${targetProfile.name}？目标 Profile 会先自动备份。`
-      )
-    ) {
-      return;
-    }
-
-    void withBusy(async () => {
-      const result = await profileApi().syncAccount({
+    const shouldCloseTarget = targetProfile.running;
+    const existingRecord =
+      state.accountSyncRecords.find((record) => record.sourceProfileId === sourceId && record.targetProfileId === targetId) ||
+      null;
+    modal = {
+      kind: "confirm",
+      intent: {
+        kind: "account-sync",
         sourceProfileId: sourceId,
         targetProfileId: targetId,
-        launchTarget: launchSyncedProfile
-      });
-      accountSyncResult = result;
-      state = result.state;
-      selectedId = result.targetProfileId;
-      accountSyncBackups = await profileApi().listAccountSyncBackups();
-    }, launchSyncedProfile ? "账号同步完成，已启动目标 Profile" : "账号同步完成", {
-      key: "account-sync",
-      message: `正在同步 ${sourceProfile.name} 到 ${targetProfile.name}…`,
-      profileId: targetProfile.id
-    });
+        shouldCloseTarget,
+        existingRecordSyncedAt: existingRecord?.syncedAt || null,
+        launchTarget: launchSyncedProfile,
+        onlyChanged: accountSyncOnlyChanged
+      }
+    };
+    render();
     return;
   }
 
-  if (action === "restore-account-backup") {
-    const backupId = actionTarget.dataset.backupId;
-    if (!backupId) {
+  if (action === "cancel-account-sync") {
+    const activeBusyState = busyState;
+    if (!activeBusyState || activeBusyState.key !== "account-sync") {
       return;
     }
 
-    const backup = accountSyncBackups.find((item) => item.id === backupId) || accountSyncResult?.backup;
-    const label = backup ? `${backup.targetProfileName} ${formatDate(backup.createdAt)}` : backupId;
-    if (!window.confirm(`恢复账号备份 ${label}？目标 Profile 当前登录态会被替换。`)) {
-      return;
-    }
-
-    void withBusy(async () => {
-      const result = await profileApi().restoreAccountSyncBackup(backupId);
-      state = result.state;
-      selectedId = result.backup.targetProfileId;
-      accountSyncResult = null;
-      accountSyncBackups = await profileApi().listAccountSyncBackups();
-    }, "已恢复账号同步备份", {
-      key: "restore-account-backup",
-      message: `正在恢复账号备份 ${label}…`,
-      backupId
+    updateBusyState({
+      cancelRequested: true,
+      message: "正在终止同步…未完成的临时数据会在下次同步前恢复或清理。"
     });
+
+    void profileApi()
+      .cancelOperation({ key: "account-sync", profileId: activeBusyState.profileId })
+      .then((cancelled) => {
+        if (!cancelled) {
+          setToast("同步已经结束，未找到可终止的任务。", "error");
+        }
+      })
+      .catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+    return;
+  }
+
+  if (action === "toggle-account-sync-pause") {
+    const activeBusyState = busyState;
+    if (!activeBusyState || activeBusyState.key !== "account-sync" || activeBusyState.cancelRequested) {
+      return;
+    }
+
+    const nextPaused = !activeBusyState.paused;
+    updateBusyState({
+      paused: nextPaused,
+      message: nextPaused ? "正在暂停同步…当前文件复制完成后会停住。" : "正在继续同步…"
+    });
+
+    void profileApi()
+      .controlOperation({
+        key: "account-sync",
+        profileId: activeBusyState.profileId,
+        action: nextPaused ? "pause" : "resume"
+      })
+      .then((controlled) => {
+        if (!controlled) {
+          updateBusyState({
+            paused: !nextPaused,
+            message: "同步已经结束，未找到可控制的任务。"
+          });
+          setToast("同步已经结束，未找到可控制的任务。", "error");
+        }
+      })
+      .catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
     return;
   }
 
@@ -1688,6 +2749,7 @@ appRoot.addEventListener("click", (event) => {
       extensionScan = scan;
       selectedExtensionIds = new Set(scan.extensions.map((extension) => extension.id));
       extensionMigrationResult = null;
+      invalidateExtensionMigrationDiff();
     }, "已扫描插件", {
       key: "scan-extensions",
       message: "正在扫描源 Profile 插件…"
@@ -1703,7 +2765,11 @@ appRoot.addEventListener("click", (event) => {
 
     const allSelected = activeScan.extensions.every((extension) => selectedExtensionIds.has(extension.id));
     selectedExtensionIds = allSelected ? new Set() : new Set(activeScan.extensions.map((extension) => extension.id));
+    invalidateExtensionMigrationDiff();
     render();
+    if (modal?.kind === "extension-migration") {
+      void refreshExtensionMigrationDiff();
+    }
     return;
   }
 
@@ -1716,7 +2782,7 @@ appRoot.addEventListener("click", (event) => {
 
     const selectedCount = activeScan.extensions.filter((extension) => selectedExtensionIds.has(extension.id)).length;
     if (!selectedCount) {
-      setToast("先选择要迁移的插件", "error");
+      setToast("先选择要同步的插件", "error");
       return;
     }
 
@@ -1732,6 +2798,7 @@ appRoot.addEventListener("click", (event) => {
     migrationTargetId = targetId;
     modal = { kind: "extension-migration" };
     render();
+    void refreshExtensionMigrationDiff();
     window.setTimeout(() => document.querySelector<HTMLSelectElement>("#migration-target")?.focus(), 0);
     return;
   }
@@ -1754,50 +2821,15 @@ appRoot.addEventListener("click", (event) => {
       setToast("删除插件前请先关闭这个 Profile，然后刷新列表。", "error");
       return;
     }
-    if (!window.confirm(`从 ${profile.name} 删除插件“${extension.name}”？删除前会自动创建备份。`)) {
-      return;
-    }
-
-    void withBusy(async () => {
-      const result = await profileApi().deleteProfileExtension(profileId, extensionId);
-      extensionScan = result.scan;
-      selectedExtensionIds.delete(extensionId);
-      extensionMigrationResult = null;
-      state = result.state;
-      selectedId = result.profileId;
-      extensionMigrationBackups = await profileApi().listExtensionMigrationBackups();
-    }, `已删除插件 ${extension.name}`, {
-      key: "delete-extension",
-      message: `正在删除插件 ${extension.name}…`,
-      profileId,
-      extensionId
-    });
-    return;
-  }
-
-  if (action === "restore-extension-backup") {
-    const backupId = actionTarget.dataset.backupId;
-    if (!backupId) {
-      return;
-    }
-
-    const backup = extensionMigrationBackups.find((item) => item.id === backupId) || extensionMigrationResult?.backup;
-    const label = backup ? `${backup.targetProfileName} ${formatDate(backup.createdAt)}` : backupId;
-    if (!window.confirm(`恢复备份 ${label}？目标 Profile 当前改动会被替换。`)) {
-      return;
-    }
-
-    void withBusy(async () => {
-      const result = await profileApi().restoreExtensionMigrationBackup(backupId);
-      state = result.state;
-      selectedId = result.backup.targetProfileId;
-      extensionMigrationResult = null;
-      extensionMigrationBackups = await profileApi().listExtensionMigrationBackups();
-    }, "已恢复备份", {
-      key: "restore-extension-backup",
-      message: `正在恢复插件备份 ${label}…`,
-      backupId
-    });
+    modal = {
+      kind: "confirm",
+      intent: {
+        kind: "delete-extension",
+        profileId,
+        extensionId
+      }
+    };
+    render();
     return;
   }
 
@@ -1904,7 +2936,14 @@ appRoot.addEventListener("click", (event) => {
       return;
     }
 
-    modal = { kind: "confirm", action: "close", profileId: id };
+    modal = {
+      kind: "confirm",
+      intent: {
+        kind: "profile",
+        action: "close",
+        profileId: id
+      }
+    };
     render();
     return;
   }
@@ -1934,7 +2973,14 @@ appRoot.addEventListener("click", (event) => {
       return;
     }
 
-    modal = { kind: "confirm", action: "delete", profileId: id };
+    modal = {
+      kind: "confirm",
+      intent: {
+        kind: "profile",
+        action: "delete",
+        profileId: id
+      }
+    };
     render();
   }
 });
@@ -1952,6 +2998,7 @@ function setMigrationSource(sourceId: string): void {
   extensionScan = null;
   selectedExtensionIds.clear();
   extensionMigrationResult = null;
+  invalidateExtensionMigrationDiff();
 }
 
 appRoot.addEventListener("change", (event) => {
@@ -1968,6 +3015,7 @@ appRoot.addEventListener("change", (event) => {
     extensionScan = null;
     selectedExtensionIds.clear();
     extensionMigrationResult = null;
+    invalidateExtensionMigrationDiff();
     render();
     return;
   }
@@ -1978,14 +3026,18 @@ appRoot.addEventListener("change", (event) => {
       accountSyncTargetId = state.profiles.find((profile) => profile.id !== accountSyncSourceId)?.id || null;
     }
     accountSyncResult = null;
+    invalidateAccountSyncDiff();
     render();
+    void refreshAccountSyncDiff();
     return;
   }
 
   if (target instanceof HTMLSelectElement && target.matches("[data-account-sync-target]")) {
     accountSyncTargetId = target.value || null;
     accountSyncResult = null;
+    invalidateAccountSyncDiff();
     render();
+    void refreshAccountSyncDiff();
     return;
   }
 
@@ -1995,10 +3047,18 @@ appRoot.addEventListener("change", (event) => {
     return;
   }
 
+  if (target instanceof HTMLInputElement && target.matches("[data-account-sync-only-changed]")) {
+    accountSyncOnlyChanged = target.checked;
+    render();
+    return;
+  }
+
   if (target instanceof HTMLSelectElement && target.matches("[data-migration-target]")) {
     migrationTargetId = target.value || null;
     extensionMigrationResult = null;
+    invalidateExtensionMigrationDiff();
     render();
+    void refreshExtensionMigrationDiff();
     return;
   }
 
@@ -2013,19 +3073,33 @@ appRoot.addEventListener("change", (event) => {
       selectedExtensionIds.delete(extensionId);
     }
     extensionMigrationResult = null;
+    invalidateExtensionMigrationDiff();
     render();
+    if (modal?.kind === "extension-migration") {
+      void refreshExtensionMigrationDiff();
+    }
     return;
   }
 
   if (target instanceof HTMLInputElement && target.matches("[data-include-extension-data]")) {
     includeExtensionData = target.checked;
+    invalidateExtensionMigrationDiff();
+    render();
+    void refreshExtensionMigrationDiff();
+    return;
+  }
+
+  if (target instanceof HTMLInputElement && target.matches("[data-extension-only-changed]")) {
+    extensionSyncOnlyChanged = target.checked;
     render();
     return;
   }
 
   if (target instanceof HTMLInputElement && target.matches("[data-open-install-pages]")) {
     openInstallPages = target.checked;
+    invalidateExtensionMigrationDiff();
     render();
+    void refreshExtensionMigrationDiff();
   }
 });
 
@@ -2080,32 +3154,40 @@ appRoot.addEventListener("submit", (event) => {
       return;
     }
     if (!extensionIds.length) {
-      setToast("先选择要迁移的插件", "error");
+      setToast("先选择要同步的插件", "error");
       return;
     }
 
     includeExtensionData = data.has("includeData");
     openInstallPages = data.has("openInstallPages");
+    extensionSyncOnlyChanged = data.has("onlyChanged");
+    const sourceProfile = state?.profiles.find((profile) => profile.id === sourceId) || null;
+    const targetProfile = state?.profiles.find((profile) => profile.id === targetProfileId) || null;
+    if (!targetProfile) {
+      setToast("没有找到目标 Profile", "error");
+      return;
+    }
+    if (includeExtensionData && sourceProfile?.running) {
+      setToast("同步插件数据前请先关闭源 Profile，或取消勾选“同时同步插件数据”。", "error");
+      return;
+    }
+    const shouldCloseTarget = targetProfile.running;
     migrationTargetId = targetProfileId;
-    modal = null;
-
-    void withBusy(async () => {
-      const result = await profileApi().migrateExtensions({
+    modal = {
+      kind: "confirm",
+      returnTo: "extension-migration",
+      intent: {
+        kind: "extension-migration",
         sourceProfileId: sourceId,
         targetProfileId,
         extensionIds,
         includeData: includeExtensionData,
-        openInstallPages
-      });
-      extensionMigrationResult = result;
-      state = result.state;
-      selectedId = result.targetProfileId;
-      extensionMigrationBackups = await profileApi().listExtensionMigrationBackups();
-    }, "插件迁移完成", {
-      key: "migrate-extensions",
-      message: "正在迁移插件…",
-      profileId: targetProfileId
-    });
+        openInstallPages,
+        onlyChanged: extensionSyncOnlyChanged,
+        shouldCloseTarget
+      }
+    };
+    render();
     return;
   }
 

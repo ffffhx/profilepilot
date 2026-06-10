@@ -24,9 +24,20 @@ export interface NativeProfileMetadata {
   name?: string | null;
 }
 
+export interface AccountSyncRecord {
+  sourceProfileId: string;
+  targetProfileId: string;
+  syncedAt: string;
+  copiedCount: number;
+  skippedCount: number;
+  launchedTarget: boolean;
+  sourceFingerprints?: Record<string, string | null>;
+}
+
 export interface Registry {
   profiles: StoredProfile[];
   nativeProfiles?: Record<string, NativeProfileMetadata>;
+  accountSyncRecords?: Record<string, AccountSyncRecord>;
 }
 
 export type ProfileSource = "native" | "isolated";
@@ -68,6 +79,7 @@ export interface AppState {
   runningProfiles: PublicProfile[];
   currentProfile: PublicProfile | null;
   chromeLauncher: string;
+  accountSyncRecords: AccountSyncRecord[];
 }
 
 export interface DeleteProfileResult {
@@ -112,26 +124,48 @@ export interface ExtensionMigrationRequest {
   extensionIds: string[];
   includeData: boolean;
   openInstallPages: boolean;
+  onlyChanged?: boolean;
 }
 
-export interface ExtensionMigrationBackupItem {
-  relativePath: string;
-  existed: boolean;
-}
+export type ExtensionMigrationDiffStatus =
+  | "missing"
+  | "version_changed"
+  | "data_changed"
+  | "same"
+  | "needs_install_page"
+  | "unsupported";
 
-export interface ExtensionMigrationBackupSummary {
+export interface ExtensionMigrationDiffItem {
   id: string;
-  createdAt: string;
-  path: string;
-  targetProfileId: string;
-  targetProfileName: string;
-  targetProfilePath: string;
-  itemCount: number;
+  name: string;
+  sourceVersion: string;
+  targetVersion: string | null;
+  status: ExtensionMigrationDiffStatus;
+  reason: string;
+  willCopyLocally: boolean;
+  willOpenInstallPage: boolean;
 }
 
-export interface ExtensionMigrationBackupMetadata extends ExtensionMigrationBackupSummary {
-  items: ExtensionMigrationBackupItem[];
-  targetMigratedExtensions?: StoredMigratedExtension[];
+export interface ExtensionMigrationDiffTargetOnlyItem {
+  id: string;
+  name: string;
+  version: string;
+}
+
+export interface ExtensionMigrationDiffResult {
+  sourceProfileId: string;
+  targetProfileId: string;
+  includeData: boolean;
+  items: ExtensionMigrationDiffItem[];
+  targetOnlyItems: ExtensionMigrationDiffTargetOnlyItem[];
+  summary: {
+    missingCount: number;
+    changedCount: number;
+    sameCount: number;
+    needsInstallPageCount: number;
+    unsupportedCount: number;
+    targetOnlyCount: number;
+  };
 }
 
 export interface ExtensionMigrationCopiedExtension {
@@ -162,7 +196,6 @@ export interface ExtensionMigrationResult {
   dataCopies: ExtensionMigrationDataCopy[];
   webStoreInstallUrls: string[];
   skippedExtensions: ExtensionMigrationSkippedExtension[];
-  backup: ExtensionMigrationBackupSummary;
   openedInstallPages: boolean;
   state: AppState;
 }
@@ -173,13 +206,7 @@ export interface ExtensionDeleteResult {
   extensionId: string;
   extensionName: string;
   deletedPaths: string[];
-  backup: ExtensionMigrationBackupSummary;
   scan: ExtensionScanResult;
-  state: AppState;
-}
-
-export interface ExtensionMigrationRestoreResult {
-  backup: ExtensionMigrationBackupSummary;
   state: AppState;
 }
 
@@ -187,6 +214,29 @@ export interface AccountSyncRequest {
   sourceProfileId: string;
   targetProfileId: string;
   launchTarget: boolean;
+  onlyChanged?: boolean;
+}
+
+export type AccountSyncDiffStatus = "changed" | "same" | "source_missing" | "target_missing";
+
+export interface AccountSyncDiffItem {
+  label: string;
+  relativePath: string;
+  status: AccountSyncDiffStatus;
+  reason: string;
+}
+
+export interface AccountSyncDiffResult {
+  sourceProfileId: string;
+  targetProfileId: string;
+  items: AccountSyncDiffItem[];
+  summary: {
+    changedCount: number;
+    sameCount: number;
+    sourceMissingCount: number;
+    targetMissingCount: number;
+    syncableCount: number;
+  };
 }
 
 export interface AccountSyncCopiedItem {
@@ -200,39 +250,43 @@ export interface AccountSyncSkippedItem {
   reason: string;
 }
 
-export interface AccountSyncBackupItem {
-  relativePath: string;
-  existed: boolean;
-}
-
-export interface AccountSyncBackupSummary {
-  id: string;
-  createdAt: string;
-  path: string;
-  targetProfileId: string;
-  targetProfileName: string;
-  targetProfilePath: string;
-  itemCount: number;
-}
-
-export interface AccountSyncBackupMetadata extends AccountSyncBackupSummary {
-  targetUserDataPath: string;
-  items: AccountSyncBackupItem[];
-}
-
 export interface AccountSyncResult {
   sourceProfileId: string;
   targetProfileId: string;
   copiedItems: AccountSyncCopiedItem[];
   skippedItems: AccountSyncSkippedItem[];
-  backup: AccountSyncBackupSummary;
   launchedTarget: boolean;
   state: AppState;
 }
 
-export interface AccountSyncRestoreResult {
-  backup: AccountSyncBackupSummary;
-  state: AppState;
+export interface OperationProgress {
+  key: string;
+  message: string;
+  profileId?: string;
+  step?: string;
+  stepIndex?: number;
+  stepCount?: number;
+  paused?: boolean;
+}
+
+export type OperationProgressUpdate = Omit<OperationProgress, "key" | "profileId">;
+
+export interface CancelOperationRequest {
+  key: string;
+  profileId?: string;
+}
+
+export type ControlOperationAction = "pause" | "resume";
+
+export interface ControlOperationRequest {
+  key: string;
+  profileId?: string;
+  action: ControlOperationAction;
+}
+
+export interface OperationPauseSignal {
+  readonly paused: boolean;
+  waitIfPaused(): Promise<void>;
 }
 
 export interface ProfileManagerApi {
@@ -245,12 +299,13 @@ export interface ProfileManagerApi {
   closeProfile(id: string): Promise<AppState>;
   openProfileFolder(id: string): Promise<AppState>;
   deleteProfile(id: string): Promise<DeleteProfileResult>;
+  inspectAccountSyncDiff(request: AccountSyncRequest): Promise<AccountSyncDiffResult>;
   scanProfileExtensions(profileId: string): Promise<ExtensionScanResult>;
+  inspectExtensionMigrationDiff(request: ExtensionMigrationRequest): Promise<ExtensionMigrationDiffResult>;
   migrateExtensions(request: ExtensionMigrationRequest): Promise<ExtensionMigrationResult>;
   deleteProfileExtension(profileId: string, extensionId: string): Promise<ExtensionDeleteResult>;
-  listExtensionMigrationBackups(): Promise<ExtensionMigrationBackupSummary[]>;
-  restoreExtensionMigrationBackup(backupId: string): Promise<ExtensionMigrationRestoreResult>;
   syncAccount(request: AccountSyncRequest): Promise<AccountSyncResult>;
-  listAccountSyncBackups(): Promise<AccountSyncBackupSummary[]>;
-  restoreAccountSyncBackup(backupId: string): Promise<AccountSyncRestoreResult>;
+  cancelOperation(request: CancelOperationRequest): Promise<boolean>;
+  controlOperation(request: ControlOperationRequest): Promise<boolean>;
+  onOperationProgress(listener: (progress: OperationProgress) => void): () => void;
 }

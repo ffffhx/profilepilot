@@ -24,6 +24,8 @@ import type {
   ExtensionMigrationDiffItem,
   ExtensionMigrationDiffResult,
   ExtensionMigrationDiffStatus,
+  ExtensionMigrationLoadedExtension,
+  ExtensionMigrationManualLoadExtension,
   ExtensionMigrationRequest,
   ExtensionMigrationResult,
   ExtensionMigrationSkippedExtension,
@@ -53,6 +55,31 @@ interface RuntimeProfile {
   startedAt: string | null;
   cdpPort: number | null;
   listeningPorts: number[];
+}
+
+interface MigratedExtensionLaunchPlan {
+  launchArgs: string[];
+  runtimeLoadPaths: string[];
+}
+
+interface CdpVersionInfo {
+  webSocketDebuggerUrl?: string;
+}
+
+interface CdpResponse<T> {
+  id?: number;
+  result?: T;
+  error?: {
+    code?: number;
+    message?: string;
+    data?: unknown;
+  };
+}
+
+interface CdpPendingRequest<T = unknown> {
+  resolve: (value: T) => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
 }
 
 interface ChromeLocalState {
@@ -294,6 +321,25 @@ export class ProfileManager {
     }
   }
 
+  async openProfileExtensionsPage(profileId: string): Promise<void> {
+    await this.launchProfileWithUrls(profileId, ["chrome://extensions/"]);
+  }
+
+  async openPath(targetPathInput: string): Promise<void> {
+    const targetPath = String(targetPathInput || "").trim();
+    if (!targetPath) {
+      throw new ProfileManagerError("没有可打开的路径。", "INVALID_PATH");
+    }
+    if (!(await exists(targetPath))) {
+      throw new ProfileManagerError(`路径不存在：${targetPath}`, "PATH_NOT_FOUND");
+    }
+
+    const error = await shell.openPath(targetPath);
+    if (error) {
+      throw new ProfileManagerError(`打开路径失败：${error}`, "OPEN_PATH_FAILED");
+    }
+  }
+
   async deleteProfile(profileId: string): Promise<DeleteProfileResult> {
     const ref = parseProfileId(profileId);
 
@@ -341,23 +387,7 @@ export class ProfileManager {
     const fileItems = await Promise.all(
       accountSyncCopySpecs().map((spec) => inspectAccountSyncPathDiff(sourceLocation, targetLocation, spec))
     );
-    const preferenceItems = await Promise.all([
-      inspectAccountPreferenceDiff(
-        "账号偏好",
-        "Preferences",
-        sourceLocation.profilePath,
-        targetLocation.profilePath,
-        accountPreferencePaths()
-      ),
-      inspectAccountPreferenceDiff(
-        "受保护账号偏好",
-        "Secure Preferences",
-        sourceLocation.profilePath,
-        targetLocation.profilePath,
-        secureAccountPreferencePaths()
-      ),
-      inspectAccountLocalStateDiff(sourceLocation, targetLocation)
-    ]);
+    const preferenceItems = await Promise.all([inspectAccountLocalStateDiff(sourceLocation, targetLocation)]);
     const items = accountSyncRecord
       ? await applyAccountSyncRecordBaseline([...fileItems, ...preferenceItems], sourceLocation, accountSyncRecord)
       : [...fileItems, ...preferenceItems];
@@ -401,13 +431,23 @@ export class ProfileManager {
       : sourceScan.extensions) as ProfileExtensionInfo[];
     const targetById = new Map(targetScan.extensions.map((extension) => [extension.id, extension]));
     const items: ExtensionMigrationDiffItem[] = [];
+    const canAutoLoadUnpacked = await canAutoLoadUnpackedExtensions();
 
     for (const extension of selectedExtensions) {
       const targetExtension = targetById.get(extension.id) || null;
       const dataChanged = includeData
         ? await extensionDataDiffers(sourceProfileDataPath, targetProfileDataPath, extension)
         : false;
-      items.push(inspectExtensionMigrationItem(extension, targetExtension, targetProfile, dataChanged, openInstallPages));
+      items.push(
+        inspectExtensionMigrationItem(
+          extension,
+          targetExtension,
+          targetProfile,
+          dataChanged,
+          openInstallPages,
+          canAutoLoadUnpacked
+        )
+      );
     }
 
     const selectedIds = new Set(selectedExtensions.map((extension) => extension.id));
@@ -479,16 +519,85 @@ export class ProfileManager {
     report(`已确认覆盖 ${targetProfile.name}，正在准备同步插件…`, "确认覆盖", 3);
     const migrationDiff = onlyChanged ? await this.inspectExtensionMigrationDiff(request) : null;
     const migrationDiffById = new Map((migrationDiff?.items || []).map((item) => [item.id, item]));
+    const actionExtensionIds = new Set((migrationDiff?.items || []).filter(isExtensionMigrationActionItem).map((item) => item.id));
+    const effectiveExtensions = onlyChanged
+      ? selectedExtensions.filter((extension) => actionExtensionIds.has(extension.id))
+      : selectedExtensions;
     const copiedExtensions: ExtensionMigrationCopiedExtension[] = [];
+    const loadedLocalExtensions: ExtensionMigrationLoadedExtension[] = [];
     const dataCopies: ExtensionMigrationDataCopy[] = [];
-    const skippedExtensions: ExtensionMigrationSkippedExtension[] = [];
+    const skippedExtensions: ExtensionMigrationSkippedExtension[] = onlyChanged
+      ? selectedExtensions
+          .filter((extension) => !actionExtensionIds.has(extension.id))
+          .map((extension) => ({
+            id: extension.id,
+            name: extension.name,
+            reason: migrationDiffById.get(extension.id)?.reason || "目标已一致，本次无需同步"
+          }))
+      : [];
+    const manualLoadExtensions: ExtensionMigrationManualLoadExtension[] = [];
     const webStoreInstallUrls: string[] = [];
     const now = new Date().toISOString();
-    const copiedForRegistry: StoredMigratedExtension[] = [];
+    const extensionsForRegistry: StoredMigratedExtension[] = [];
+    const canAutoLoadUnpacked = await canAutoLoadUnpackedExtensions();
+
+    const recordManualLoadExtension = async (
+      extension: ProfileExtensionInfo,
+      reason = manualLoadExtensionReason(extension)
+    ): Promise<void> => {
+      await this.removeMigratedExtensionReference(targetProfile, extension.id);
+      if (extension.path && !manualLoadExtensions.some((item) => item.id === extension.id)) {
+        manualLoadExtensions.push({
+          id: extension.id,
+          name: extension.name,
+          path: extension.path
+        });
+      }
+      skippedExtensions.push({
+        id: extension.id,
+        name: extension.name,
+        reason
+      });
+    };
+
+    const registerLocalExtensionForRuntimeLoad = async (extension: ProfileExtensionInfo): Promise<boolean> => {
+      if (!extension.path) {
+        return false;
+      }
+      if (!(await exists(path.join(extension.path, "manifest.json")))) {
+        skippedExtensions.push({
+          id: extension.id,
+          name: extension.name,
+          reason: "源插件目录缺少 manifest.json，无法登记为运行时加载"
+        });
+        return false;
+      }
+
+      report(`正在登记本地插件运行时加载：${extension.name}`, "同步插件", 4);
+      loadedLocalExtensions.push({
+        id: extension.id,
+        loadedId: extension.id,
+        name: extension.name,
+        version: extension.version,
+        path: extension.path,
+        via: "cdp_runtime"
+      });
+      extensionsForRegistry.push({
+        id: makeStoredMigratedExtensionId(extension.id),
+        sourceProfileId,
+        sourceExtensionId: extension.id,
+        name: extension.name,
+        version: extension.version,
+        path: extension.path,
+        migratedAt: now,
+        includeData
+      });
+      return true;
+    };
 
     try {
-      for (const [index, extension] of selectedExtensions.entries()) {
-        report(`正在同步插件 ${index + 1}/${selectedExtensions.length}：${extension.name}`, "同步插件", 4);
+      for (const [index, extension] of effectiveExtensions.entries()) {
+        report(`正在同步插件 ${index + 1}/${effectiveExtensions.length}：${extension.name}`, "同步插件", 4);
         const diffItem = migrationDiffById.get(extension.id) || null;
         if (onlyChanged && diffItem?.status === "same") {
           skippedExtensions.push({
@@ -496,6 +605,55 @@ export class ProfileManager {
             name: extension.name,
             reason: "目标已一致，本次无需同步"
           });
+          continue;
+        }
+
+        if (diffItem?.status === "manual_load_required") {
+          await recordManualLoadExtension(extension);
+          continue;
+        }
+
+        if (diffItem?.status === "needs_install_page") {
+          if (extension.storeUrl) {
+            webStoreInstallUrls.push(extension.storeUrl);
+          }
+          skippedExtensions.push({
+            id: extension.id,
+            name: extension.name,
+            reason: openInstallPages ? "需要在打开的安装页确认安装" : "需要打开安装页后手动确认安装"
+          });
+          continue;
+        }
+
+        if (diffItem?.willLoadViaCdp || (!canAutoLoadUnpacked && canLoadLocalExtensionViaCdp(extension, targetProfile))) {
+          if (includeData) {
+            for (const dataPath of extension.dataPaths) {
+              report(`正在同步插件数据：${extension.name} · ${dataPath.label}`, "同步插件", 4);
+              const copied = await copyExtensionDataPath(sourceProfileDataPath, targetProfileDataPath, dataPath.relativePath);
+              if (copied) {
+                dataCopies.push({
+                  id: extension.id,
+                  name: extension.name,
+                  relativePath: dataPath.relativePath
+                });
+              }
+            }
+          }
+          await registerLocalExtensionForRuntimeLoad(extension);
+          continue;
+        }
+
+        if (extension.path && !canAutoLoadUnpacked) {
+          if (extension.fromWebStore && extension.storeUrl) {
+            webStoreInstallUrls.push(extension.storeUrl);
+            skippedExtensions.push({
+              id: extension.id,
+              name: extension.name,
+              reason: openInstallPages ? "官方 Chrome 不支持静默挂载，已打开安装页确认安装" : "官方 Chrome 不支持静默挂载，需要打开安装页确认安装"
+            });
+          } else {
+            await recordManualLoadExtension(extension);
+          }
           continue;
         }
 
@@ -521,7 +679,7 @@ export class ProfileManager {
               path: copiedPath,
               fromWebStore: extension.fromWebStore
             });
-            copiedForRegistry.push({
+            extensionsForRegistry.push({
               id: makeStoredMigratedExtensionId(extension.id),
               sourceProfileId,
               sourceExtensionId: extension.id,
@@ -562,15 +720,17 @@ export class ProfileManager {
         }
       }
 
-      if (copiedForRegistry.length) {
+      if (extensionsForRegistry.length) {
         report(`正在写入 ${targetProfile.name} 的插件启动配置…`, "写入配置", 5);
-        await this.mergeMigratedExtensions(targetProfile, copiedForRegistry);
+        await this.mergeMigratedExtensions(targetProfile, extensionsForRegistry);
       }
 
       let openedInstallPages = false;
-      if (openInstallPages && webStoreInstallUrls.length) {
-        report(`正在打开 ${webStoreInstallUrls.length} 个商店安装页…`, "写入配置", 5);
-        await this.launchProfileWithUrls(targetProfile.id, uniqueStrings(webStoreInstallUrls));
+      const manualLoadNeeded = skippedExtensions.some((extension) => isManualLoadSkipReason(extension.reason));
+      const pagesToOpen = uniqueStrings([...webStoreInstallUrls, ...(manualLoadNeeded ? ["chrome://extensions/"] : [])]);
+      if (openInstallPages && pagesToOpen.length) {
+        report(`正在打开 ${targetProfile.name} 需要确认的页面…`, "写入配置", 5);
+        await this.launchProfileWithUrls(targetProfile.id, pagesToOpen);
         openedInstallPages = true;
       }
 
@@ -578,17 +738,19 @@ export class ProfileManager {
       return {
         sourceProfileId,
         targetProfileId,
-        selectedCount: selectedExtensions.length,
+        selectedCount: effectiveExtensions.length,
         copiedExtensions,
+        loadedLocalExtensions,
         dataCopies,
         webStoreInstallUrls: uniqueStrings(webStoreInstallUrls),
+        manualLoadExtensions,
         skippedExtensions,
         openedInstallPages,
         state: await this.getState()
       };
     } catch (error) {
       try {
-        await this.discardMigratedExtensions(targetProfile, copiedForRegistry);
+        await this.discardMigratedExtensions(targetProfile, extensionsForRegistry);
       } catch {
         // Keep the original migration error as the visible failure.
       }
@@ -739,47 +901,6 @@ export class ProfileManager {
 
     throwIfAborted(abortSignal);
     await waitIfPaused(pauseSignal, abortSignal);
-    report("正在合并账号偏好…", "合并偏好", 4);
-    const preferenceDiff = accountDiffByPath.get("Preferences") || null;
-    const shouldMergePreferences = shouldApplyAccountDiffItem(preferenceDiff, onlyChanged);
-    const preferencesMerged = shouldMergePreferences
-      ? await mergeAccountPreferenceValues(sourceLocation.profilePath, targetLocation.profilePath)
-      : false;
-    if (preferencesMerged || (shouldMergePreferences && preferenceDiff?.status === "target_missing")) {
-      copiedItems.push({
-        label: "账号偏好",
-        relativePath: "Preferences"
-      });
-    } else {
-      skippedItems.push({
-        label: "账号偏好",
-        relativePath: "Preferences",
-        reason: preferenceDiff?.reason || "源 Profile 中没有生成，本次无需同步"
-      });
-    }
-
-    throwIfAborted(abortSignal);
-    await waitIfPaused(pauseSignal, abortSignal);
-    const securePreferenceDiff = accountDiffByPath.get("Secure Preferences") || null;
-    const shouldMergeSecurePreferences = shouldApplyAccountDiffItem(securePreferenceDiff, onlyChanged);
-    const securePreferencesMerged = shouldMergeSecurePreferences
-      ? await mergeAccountSecurePreferenceValues(sourceLocation.profilePath, targetLocation.profilePath)
-      : false;
-    if (securePreferencesMerged || (shouldMergeSecurePreferences && securePreferenceDiff?.status === "target_missing")) {
-      copiedItems.push({
-        label: "受保护账号偏好",
-        relativePath: "Secure Preferences"
-      });
-    } else if (securePreferenceDiff?.status === "source_missing" || (onlyChanged && securePreferenceDiff?.status === "same")) {
-      skippedItems.push({
-        label: "受保护账号偏好",
-        relativePath: "Secure Preferences",
-        reason: securePreferenceDiff.reason
-      });
-    }
-
-    throwIfAborted(abortSignal);
-    await waitIfPaused(pauseSignal, abortSignal);
     report("正在写入浏览器账号状态…", "写入浏览器状态", 5);
     const localStateDiff = accountDiffByPath.get("Local State") || null;
     const shouldMergeLocalState = shouldApplyAccountDiffItem(localStateDiff, onlyChanged);
@@ -852,11 +973,11 @@ export class ProfileManager {
   private async launchIsolatedProfile(id: string): Promise<void> {
     const registry = await this.loadRegistry();
     const profile = this.findIsolatedProfile(registry, id);
-    const profilePath = this.isolatedProfilePath(profile);
-    await fs.mkdir(profilePath, { recursive: true });
-
-    await launchChrome([`--user-data-dir=${profilePath}`, "--no-first-run", ...(await getMigratedExtensionLaunchArgs(profile))]);
+    const cdpPort = await this.launchStoredIsolatedProfile(profile);
     profile.lastLaunchedAt = new Date().toISOString();
+    if (cdpPort !== null) {
+      profile.lastCdpPort = cdpPort;
+    }
     await this.saveRegistry(registry);
   }
 
@@ -869,29 +990,11 @@ export class ProfileManager {
       throw new ProfileManagerError("请先关闭这个 Profile，再用 CDP 模式启动。", "PROFILE_RUNNING");
     }
 
-    const profilePath = this.isolatedProfilePath(profile);
-    await fs.mkdir(profilePath, { recursive: true });
-
     const requestedPort = normalizeCdpPortInput(portInput);
-    const cdpPort = requestedPort ?? (await findAvailableCdpPort(profile.lastCdpPort || 9222));
-    if (!(await isPortAvailable(cdpPort))) {
-      const owner = await describePortOwner(cdpPort);
-      const detail = owner ? `，占用者：${owner}` : "";
-      throw new ProfileManagerError(`CDP 端口 ${cdpPort} 已被占用${detail}。`, "CDP_PORT_IN_USE");
-    }
-
-    await launchChrome([
-      `--user-data-dir=${profilePath}`,
-      "--no-first-run",
-      ...(await getMigratedExtensionLaunchArgs(profile)),
-      "--remote-debugging-address=127.0.0.1",
-      `--remote-debugging-port=${cdpPort}`
-    ]);
-
+    const cdpPort = await this.launchStoredIsolatedProfile(profile, { cdpPort: requestedPort, forceCdp: true });
     profile.lastLaunchedAt = new Date().toISOString();
     profile.lastCdpPort = cdpPort;
     await this.saveRegistry(registry);
-    await waitForCdp(cdpPort, 6000);
   }
 
   private async launchProfileWithUrls(profileId: string, urls: string[]): Promise<void> {
@@ -930,17 +1033,52 @@ export class ProfileManager {
   private async launchIsolatedProfileWithUrls(id: string, urls: string[]): Promise<void> {
     const registry = await this.loadRegistry();
     const profile = this.findIsolatedProfile(registry, id);
+    const cdpPort = await this.launchStoredIsolatedProfile(profile, { urls });
+    profile.lastLaunchedAt = new Date().toISOString();
+    if (cdpPort !== null) {
+      profile.lastCdpPort = cdpPort;
+    }
+    await this.saveRegistry(registry);
+  }
+
+  private async launchStoredIsolatedProfile(
+    profile: StoredProfile,
+    options: { urls?: string[]; cdpPort?: number | null; forceCdp?: boolean } = {}
+  ): Promise<number | null> {
     const profilePath = this.isolatedProfilePath(profile);
     await fs.mkdir(profilePath, { recursive: true });
+    const launchPlan = await getMigratedExtensionLaunchPlan(profile);
+    const needsRuntimeCdp = launchPlan.runtimeLoadPaths.length > 0;
+    const shouldStartCdp = Boolean(options.forceCdp || needsRuntimeCdp);
+    let cdpPort: number | null = null;
+    const cdpArgs: string[] = [];
+
+    if (shouldStartCdp) {
+      cdpPort = options.cdpPort ?? (await findAvailableCdpPort(profile.lastCdpPort || 9222));
+      if (!(await isPortAvailable(cdpPort))) {
+        const owner = await describePortOwner(cdpPort);
+        const detail = owner ? `，占用者：${owner}` : "";
+        throw new ProfileManagerError(`CDP 端口 ${cdpPort} 已被占用${detail}。`, "CDP_PORT_IN_USE");
+      }
+      cdpArgs.push("--remote-debugging-address=127.0.0.1", `--remote-debugging-port=${cdpPort}`);
+    }
 
     await launchChrome([
       `--user-data-dir=${profilePath}`,
       "--no-first-run",
-      ...(await getMigratedExtensionLaunchArgs(profile)),
-      ...urls
+      ...launchPlan.launchArgs,
+      ...cdpArgs,
+      ...(options.urls || [])
     ]);
-    profile.lastLaunchedAt = new Date().toISOString();
-    await this.saveRegistry(registry);
+
+    if (cdpPort !== null) {
+      await waitForCdp(cdpPort, 6000);
+      if (launchPlan.runtimeLoadPaths.length) {
+        await loadUnpackedExtensionsOverCdp(cdpPort, launchPlan.runtimeLoadPaths);
+      }
+    }
+
+    return cdpPort;
   }
 
   private async deleteNativeProfile(dirName: string): Promise<DeleteProfileResult> {
@@ -1396,6 +1534,142 @@ export class ProfileManager {
 
 export function createProfileManager(): ProfileManager {
   return new ProfileManager(process.env.CPM_DATA_DIR || defaultDataDir());
+}
+
+class CdpBrowserClient {
+  private nextId = 1;
+  private readonly pending = new Map<number, CdpPendingRequest>();
+
+  private constructor(private readonly socket: WebSocket) {
+    this.socket.addEventListener("message", (event) => {
+      this.handleMessage(event);
+    });
+    this.socket.addEventListener("close", () => {
+      this.rejectPending(new Error("CDP 连接已关闭"));
+    });
+  }
+
+  static connect(url: string, timeoutMs: number): Promise<CdpBrowserClient> {
+    const WebSocketCtor = globalThis.WebSocket;
+    if (typeof WebSocketCtor !== "function") {
+      throw new ProfileManagerError("当前运行环境没有 WebSocket，无法连接 Chrome CDP。", "CDP_WEBSOCKET_UNAVAILABLE");
+    }
+
+    return new Promise((resolve, reject) => {
+      const socket = new WebSocketCtor(url);
+      const timer = setTimeout(() => {
+        socket.close();
+        reject(new ProfileManagerError("连接 Chrome CDP 超时。", "CDP_CONNECT_TIMEOUT"));
+      }, timeoutMs);
+
+      const cleanup = (): void => {
+        clearTimeout(timer);
+        socket.removeEventListener("open", handleOpen);
+        socket.removeEventListener("error", handleError);
+      };
+      const handleOpen = (): void => {
+        cleanup();
+        resolve(new CdpBrowserClient(socket));
+      };
+      const handleError = (): void => {
+        cleanup();
+        reject(new ProfileManagerError("连接 Chrome CDP 失败。", "CDP_CONNECT_FAILED"));
+      };
+
+      socket.addEventListener("open", handleOpen);
+      socket.addEventListener("error", handleError);
+    });
+  }
+
+  send<T>(method: string, params?: Record<string, unknown>, timeoutMs = 15000): Promise<T> {
+    if (this.socket.readyState !== 1) {
+      return Promise.reject(new ProfileManagerError("Chrome CDP 连接未打开。", "CDP_NOT_CONNECTED"));
+    }
+
+    const id = this.nextId;
+    this.nextId += 1;
+
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new ProfileManagerError(`Chrome CDP 调用 ${method} 超时。`, "CDP_COMMAND_TIMEOUT"));
+      }, timeoutMs);
+
+      this.pending.set(id, {
+        resolve: resolve as (value: unknown) => void,
+        reject,
+        timer
+      });
+
+      try {
+        this.socket.send(JSON.stringify({ id, method, params: params || {} }));
+      } catch (error) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  }
+
+  close(): void {
+    this.rejectPending(new Error("CDP 连接已关闭"));
+    try {
+      this.socket.close();
+    } catch {
+      // The browser may already be closed.
+    }
+  }
+
+  private handleMessage(event: MessageEvent): void {
+    const message = parseCdpMessage(event.data);
+    if (!message || typeof message.id !== "number") {
+      return;
+    }
+
+    const pending = this.pending.get(message.id);
+    if (!pending) {
+      return;
+    }
+
+    clearTimeout(pending.timer);
+    this.pending.delete(message.id);
+
+    if (message.error) {
+      const detail = message.error.message || `CDP error ${message.error.code ?? ""}`.trim();
+      pending.reject(new ProfileManagerError(detail, "CDP_COMMAND_FAILED"));
+      return;
+    }
+
+    pending.resolve(message.result);
+  }
+
+  private rejectPending(error: Error): void {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.pending.clear();
+  }
+}
+
+function parseCdpMessage(data: unknown): CdpResponse<unknown> | null {
+  try {
+    let text: string;
+    if (typeof data === "string") {
+      text = data;
+    } else if (data instanceof ArrayBuffer) {
+      text = Buffer.from(data).toString("utf8");
+    } else if (ArrayBuffer.isView(data)) {
+      text = Buffer.from(data.buffer, data.byteOffset, data.byteLength).toString("utf8");
+    } else {
+      text = String(data);
+    }
+
+    const parsed = JSON.parse(text);
+    return isRecord(parsed) ? (parsed as CdpResponse<unknown>) : null;
+  } catch {
+    return null;
+  }
 }
 
 function defaultDataDir(): string {
@@ -2033,40 +2307,6 @@ async function inspectAccountSyncPathDiff(
   return accountSyncDiffItem(spec.label, spec.relativePath, sourceFingerprint === targetFingerprint ? "same" : "changed");
 }
 
-async function inspectAccountPreferenceDiff(
-  label: string,
-  relativePath: string,
-  sourceProfilePath: string,
-  targetProfilePath: string,
-  preferencePaths: string[]
-): Promise<AccountSyncDiffItem> {
-  const sourcePath = path.join(sourceProfilePath, relativePath);
-  const targetPath = path.join(targetProfilePath, relativePath);
-  const sourcePreferences = await readJsonFile<Record<string, unknown>>(sourcePath);
-  if (!sourcePreferences) {
-    return accountSyncDiffItem(label, relativePath, "source_missing");
-  }
-
-  const targetExists = await exists(targetPath);
-  const targetPreferences = (await readJsonFile<Record<string, unknown>>(targetPath)) || {};
-  const sourceHasRelevantValues = hasNestedPreferenceValue(sourcePreferences, preferencePaths);
-  const targetHasRelevantValues = hasNestedPreferenceValue(targetPreferences, preferencePaths);
-  if (!sourceHasRelevantValues && !targetHasRelevantValues) {
-    return accountSyncDiffItem(label, relativePath, "source_missing");
-  }
-
-  const simulatedTarget = cloneJsonValue(targetPreferences) as Record<string, unknown>;
-  for (const preferencePath of preferencePaths) {
-    copyPreferencePath(sourcePreferences, simulatedTarget, preferencePath);
-  }
-
-  if (stableJsonStringify(simulatedTarget) === stableJsonStringify(targetPreferences)) {
-    return accountSyncDiffItem(label, relativePath, "same");
-  }
-
-  return accountSyncDiffItem(label, relativePath, targetExists ? "changed" : "target_missing");
-}
-
 async function inspectAccountLocalStateDiff(
   sourceLocation: AccountSyncDataLocation,
   targetLocation: AccountSyncDataLocation
@@ -2207,17 +2447,34 @@ function inspectExtensionMigrationItem(
   targetExtension: ProfileExtensionInfo | null,
   targetProfile: PublicProfile,
   dataChanged: boolean,
-  openInstallPages: boolean
+  openInstallPages: boolean,
+  canAutoLoadUnpacked: boolean
 ): ExtensionMigrationDiffItem {
-  const canCopyLocally = Boolean(extension.canCopyLocally && extension.path && targetProfile.source === "isolated");
+  const canCopyLocally = Boolean(
+    extension.canCopyLocally && extension.path && targetProfile.source === "isolated" && canAutoLoadUnpacked
+  );
+  const canLoadViaCdp = canLoadLocalExtensionViaCdp(extension, targetProfile);
   const canOpenInstallPage = Boolean(extension.fromWebStore && extension.storeUrl);
+  const needsManualLoad = Boolean(extension.path && !extension.fromWebStore && !canCopyLocally && !canLoadViaCdp);
   const targetVersion = targetExtension?.version || null;
   let status: ExtensionMigrationDiffStatus;
 
   if (!targetExtension) {
-    status = canCopyLocally ? "missing" : canOpenInstallPage ? "needs_install_page" : "unsupported";
+    status = canCopyLocally || canLoadViaCdp
+      ? "missing"
+      : needsManualLoad
+        ? "manual_load_required"
+        : canOpenInstallPage
+          ? "needs_install_page"
+          : "unsupported";
   } else if (extension.version !== targetExtension.version) {
-    status = canCopyLocally ? "version_changed" : canOpenInstallPage ? "needs_install_page" : "unsupported";
+    status = canCopyLocally || canLoadViaCdp
+      ? "version_changed"
+      : needsManualLoad
+        ? "manual_load_required"
+        : canOpenInstallPage
+          ? "needs_install_page"
+          : "unsupported";
   } else if (dataChanged) {
     status = "data_changed";
   } else {
@@ -2230,8 +2487,9 @@ function inspectExtensionMigrationItem(
     sourceVersion: extension.version,
     targetVersion,
     status,
-    reason: extensionMigrationDiffReason(status, Boolean(targetExtension), openInstallPages),
+    reason: extensionMigrationDiffReason(status, Boolean(targetExtension), openInstallPages, canLoadViaCdp),
     willCopyLocally: (status === "missing" || status === "version_changed") && canCopyLocally,
+    willLoadViaCdp: (status === "missing" || status === "version_changed") && canLoadViaCdp,
     willOpenInstallPage: status === "needs_install_page" && canOpenInstallPage && openInstallPages
   };
 }
@@ -2239,12 +2497,19 @@ function inspectExtensionMigrationItem(
 function extensionMigrationDiffReason(
   status: ExtensionMigrationDiffStatus,
   hasTargetExtension: boolean,
-  openInstallPages: boolean
+  openInstallPages: boolean,
+  willLoadViaCdp = false
 ): string {
   switch (status) {
     case "missing":
+      if (willLoadViaCdp) {
+        return "目标缺少，本次会登记为启动时自动加载";
+      }
       return "目标缺少，本次会同步";
     case "version_changed":
+      if (willLoadViaCdp) {
+        return "版本不同，本次会更新启动时自动加载配置";
+      }
       return "版本不同，本次会更新";
     case "data_changed":
       return "插件数据不同，本次会同步数据";
@@ -2255,10 +2520,24 @@ function extensionMigrationDiffReason(
         return hasTargetExtension ? "版本不同，需要安装页，当前不会自动打开" : "目标缺少，需要安装页，当前不会自动打开";
       }
       return hasTargetExtension ? "版本不同，本次会打开安装页" : "目标缺少，本次会打开安装页";
+    case "manual_load_required":
+      return hasTargetExtension
+        ? "本地未打包插件不能自动更新，需要在目标手动重新加载原目录"
+        : "目标缺少本地未打包插件，需要在目标手动加载原目录";
     case "unsupported":
     default:
       return "没有可自动同步的插件目录";
   }
+}
+
+function isExtensionMigrationActionItem(item: ExtensionMigrationDiffItem): boolean {
+  return (
+    item.status === "missing" ||
+    item.status === "version_changed" ||
+    item.status === "data_changed" ||
+    item.status === "manual_load_required" ||
+    item.willOpenInstallPage
+  );
 }
 
 function summarizeExtensionMigrationDiff(
@@ -2270,9 +2549,24 @@ function summarizeExtensionMigrationDiff(
     changedCount: items.filter((item) => item.status === "version_changed" || item.status === "data_changed").length,
     sameCount: items.filter((item) => item.status === "same").length,
     needsInstallPageCount: items.filter((item) => item.status === "needs_install_page").length,
+    cdpLoadCount: items.filter((item) => item.willLoadViaCdp).length,
+    manualLoadCount: items.filter((item) => item.status === "manual_load_required").length,
     unsupportedCount: items.filter((item) => item.status === "unsupported").length,
     targetOnlyCount
   };
+}
+
+function canLoadLocalExtensionViaCdp(extension: ProfileExtensionInfo, targetProfile: PublicProfile): boolean {
+  return Boolean(extension.path && !extension.fromWebStore && targetProfile.source === "isolated");
+}
+
+function manualLoadExtensionReason(extension: ProfileExtensionInfo): string {
+  const sourcePath = extension.path || "源插件目录";
+  return `需要在目标 chrome://extensions 手动加载未打包目录：${sourcePath}`;
+}
+
+function isManualLoadSkipReason(reason: string): boolean {
+  return reason.includes("手动加载未打包目录") || reason.includes("手动加载源目录");
 }
 
 async function extensionDataDiffers(
@@ -2292,10 +2586,6 @@ async function extensionDataDiffers(
   }
 
   return false;
-}
-
-function hasNestedPreferenceValue(preferences: Record<string, unknown>, preferencePaths: string[]): boolean {
-  return preferencePaths.some((preferencePath) => getNestedValue(preferences, preferencePath.split(".")) !== undefined);
 }
 
 function hasAccountLocalStateValues(info: Record<string, unknown>): boolean {
@@ -2348,12 +2638,7 @@ async function appendPathMetadataFingerprint(
 async function snapshotAccountSyncSourceFingerprints(
   sourceLocation: AccountSyncDataLocation
 ): Promise<Record<string, string | null>> {
-  const relativePaths = uniqueStrings([
-    ...accountSyncCopySpecs().map((spec) => spec.relativePath),
-    "Preferences",
-    "Secure Preferences",
-    "Local State"
-  ]);
+  const relativePaths = uniqueStrings([...accountSyncCopySpecs().map((spec) => spec.relativePath), "Local State"]);
   const entries = await Promise.all(
     relativePaths.map(async (relativePath) => [relativePath, await accountSyncSourceFingerprint(sourceLocation, relativePath)] as const)
   );
@@ -2458,6 +2743,27 @@ async function copyExtensionDataPath(
 function accountSyncCopySpecs(): AccountSyncPathSpec[] {
   return [
     { label: "Google Profile Picture", relativePath: "Google Profile Picture.png" },
+    { label: "书签", relativePath: "Bookmarks" },
+    { label: "书签备份", relativePath: "Bookmarks.bak" },
+    { label: "历史记录和下载记录", relativePath: "History" },
+    { label: "历史记录和下载记录 journal", relativePath: "History-journal" },
+    { label: "历史记录和下载记录 WAL", relativePath: "History-wal" },
+    { label: "历史记录和下载记录 SHM", relativePath: "History-shm" },
+    { label: "下载服务数据", relativePath: "Download Service" },
+    { label: "浏览器设置和主题", relativePath: "Preferences" },
+    { label: "受保护浏览器设置", relativePath: "Secure Preferences" },
+    { label: "快捷方式", relativePath: "Shortcuts" },
+    { label: "快捷方式 journal", relativePath: "Shortcuts-journal" },
+    { label: "快捷方式 WAL", relativePath: "Shortcuts-wal" },
+    { label: "快捷方式 SHM", relativePath: "Shortcuts-shm" },
+    { label: "常用网站", relativePath: "Top Sites" },
+    { label: "常用网站 journal", relativePath: "Top Sites-journal" },
+    { label: "常用网站 WAL", relativePath: "Top Sites-wal" },
+    { label: "常用网站 SHM", relativePath: "Top Sites-shm" },
+    { label: "网站图标", relativePath: "Favicons" },
+    { label: "网站图标 journal", relativePath: "Favicons-journal" },
+    { label: "网站图标 WAL", relativePath: "Favicons-wal" },
+    { label: "网站图标 SHM", relativePath: "Favicons-shm" },
     { label: "Cookies", relativePath: "Cookies" },
     { label: "Cookies journal", relativePath: "Cookies-journal" },
     { label: "Cookies WAL", relativePath: "Cookies-wal" },
@@ -2522,50 +2828,6 @@ async function accountSyncDataScore(profilePath: string): Promise<number> {
   return existing.filter(Boolean).length;
 }
 
-async function mergeAccountPreferenceValues(sourceProfilePath: string, targetProfilePath: string): Promise<boolean> {
-  const sourcePath = path.join(sourceProfilePath, "Preferences");
-  const targetPath = path.join(targetProfilePath, "Preferences");
-  const sourcePreferences = await readJsonFile<Record<string, unknown>>(sourcePath);
-  if (!sourcePreferences) {
-    return false;
-  }
-
-  const targetPreferences = (await readJsonFile<Record<string, unknown>>(targetPath)) || {};
-  let changed = false;
-
-  for (const preferencePath of accountPreferencePaths()) {
-    changed = copyPreferencePath(sourcePreferences, targetPreferences, preferencePath) || changed;
-  }
-
-  if (changed) {
-    await writeJsonFileAtomic(targetPath, targetPreferences);
-  }
-
-  return changed;
-}
-
-async function mergeAccountSecurePreferenceValues(sourceProfilePath: string, targetProfilePath: string): Promise<boolean> {
-  const sourcePath = path.join(sourceProfilePath, "Secure Preferences");
-  const targetPath = path.join(targetProfilePath, "Secure Preferences");
-  const sourcePreferences = await readJsonFile<Record<string, unknown>>(sourcePath);
-  if (!sourcePreferences) {
-    return false;
-  }
-
-  const targetPreferences = (await readJsonFile<Record<string, unknown>>(targetPath)) || {};
-  let changed = false;
-
-  for (const preferencePath of secureAccountPreferencePaths()) {
-    changed = copyPreferencePath(sourcePreferences, targetPreferences, preferencePath) || changed;
-  }
-
-  if (changed) {
-    await writeJsonFileAtomic(targetPath, targetPreferences);
-  }
-
-  return changed;
-}
-
 async function mergeAccountLocalStateValues(
   sourceLocation: AccountSyncDataLocation,
   targetLocation: AccountSyncDataLocation
@@ -2605,48 +2867,6 @@ async function mergeAccountLocalStateValues(
   return true;
 }
 
-function accountPreferencePaths(): string[] {
-  return [
-    "account_info",
-    "account_tracker_service_last_update",
-    "account_values",
-    "dual_layer_user_pref_store.user_selected_sync_types",
-    "gaia_cookie",
-    "google.services",
-    "profile.avatar_index",
-    "profile.gaia_info_picture_file_name",
-    "profile.gaia_info_picture_url",
-    "profile.gaia_name",
-    "profile.managed_user_id",
-    "profile.user_name",
-    "signin",
-    "sync",
-    "trusted_vault"
-  ];
-}
-
-function secureAccountPreferencePaths(): string[] {
-  return [
-    "google.services",
-    "protection.macs.google.services"
-  ];
-}
-
-function copyPreferencePath(
-  sourcePreferences: Record<string, unknown>,
-  targetPreferences: Record<string, unknown>,
-  preferencePath: string
-): boolean {
-  const pathParts = preferencePath.split(".");
-  const sourceValue = getNestedValue(sourcePreferences, pathParts);
-  if (sourceValue === undefined) {
-    return deleteNestedValue(targetPreferences, pathParts);
-  }
-
-  setNestedValue(targetPreferences, pathParts, cloneJsonValue(sourceValue));
-  return true;
-}
-
 function getNestedValue(value: Record<string, unknown>, pathParts: string[]): unknown {
   let current: unknown = value;
   for (const pathPart of pathParts) {
@@ -2657,36 +2877,6 @@ function getNestedValue(value: Record<string, unknown>, pathParts: string[]): un
   }
 
   return current;
-}
-
-function setNestedValue(target: Record<string, unknown>, pathParts: string[], value: unknown): void {
-  let current: Record<string, unknown> = target;
-  for (const pathPart of pathParts.slice(0, -1)) {
-    if (!isRecord(current[pathPart])) {
-      current[pathPart] = {};
-    }
-    current = current[pathPart] as Record<string, unknown>;
-  }
-
-  current[pathParts[pathParts.length - 1]] = value;
-}
-
-function deleteNestedValue(target: Record<string, unknown>, pathParts: string[]): boolean {
-  let current: Record<string, unknown> = target;
-  for (const pathPart of pathParts.slice(0, -1)) {
-    if (!isRecord(current[pathPart])) {
-      return false;
-    }
-    current = current[pathPart] as Record<string, unknown>;
-  }
-
-  const finalPart = pathParts[pathParts.length - 1];
-  if (!Object.prototype.hasOwnProperty.call(current, finalPart)) {
-    return false;
-  }
-
-  delete current[finalPart];
-  return true;
 }
 
 function localStateProfileInfo(localState: ChromeLocalState, dirName: string): Record<string, unknown> | null {
@@ -2835,7 +3025,80 @@ function removeExtensionReferences(value: unknown, extensionId: string): boolean
   return changed;
 }
 
-async function getMigratedExtensionLaunchArgs(profile: StoredProfile): Promise<string[]> {
+let cachedCanAutoLoadUnpackedExtensions: boolean | null = null;
+
+async function canAutoLoadUnpackedExtensions(): Promise<boolean> {
+  if (cachedCanAutoLoadUnpackedExtensions !== null) {
+    return cachedCanAutoLoadUnpackedExtensions;
+  }
+
+  cachedCanAutoLoadUnpackedExtensions = await detectAutoLoadUnpackedExtensionSupport();
+  return cachedCanAutoLoadUnpackedExtensions;
+}
+
+async function detectAutoLoadUnpackedExtensionSupport(): Promise<boolean> {
+  const launcherName = (process.env.CHROME_BINARY
+    ? path.basename(process.env.CHROME_BINARY)
+    : process.env.CHROME_APP_NAME || "Google Chrome"
+  ).toLowerCase();
+
+  if (launcherName.includes("chromium") || launcherName.includes("chrome for testing")) {
+    return true;
+  }
+
+  const majorVersion = await readChromeMajorVersion();
+  if (launcherName.includes("google chrome") || majorVersion !== null) {
+    return majorVersion !== null ? majorVersion < 137 : false;
+  }
+
+  return true;
+}
+
+async function readChromeMajorVersion(): Promise<number | null> {
+  const versionOutputs: string[] = [];
+
+  const command = getDirectChromeCommand();
+  if (command) {
+    const output = await readCommandVersion(command, ["--version"]);
+    if (output) {
+      versionOutputs.push(output);
+    }
+  }
+
+  if (!versionOutputs.length && process.platform === "darwin" && !process.env.CHROME_BINARY) {
+    const appName = process.env.CHROME_APP_NAME || "Google Chrome";
+    const plistPath = `/Applications/${appName}.app/Contents/Info.plist`;
+    const output = await readCommandVersion("/usr/libexec/PlistBuddy", [
+      "-c",
+      "Print :CFBundleShortVersionString",
+      plistPath
+    ]);
+    if (output) {
+      versionOutputs.push(output);
+    }
+  }
+
+  for (const output of versionOutputs) {
+    const match = output.match(/(?:Chrome|Chromium)?\s*(\d+)(?:\.|$)/i);
+    const version = match ? Number.parseInt(match[1], 10) : Number.NaN;
+    if (Number.isFinite(version)) {
+      return version;
+    }
+  }
+
+  return null;
+}
+
+async function readCommandVersion(command: string, args: string[]): Promise<string | null> {
+  try {
+    const { stdout, stderr } = await execFileAsync(command, args, { timeout: 2000 });
+    return `${stdout || ""}${stderr || ""}`.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+async function getMigratedExtensionLaunchPlan(profile: StoredProfile): Promise<MigratedExtensionLaunchPlan> {
   const extensionPaths = uniqueStrings((profile.migratedExtensions || []).map((extension) => extension.path));
   const existingPaths: string[] = [];
   for (const extensionPath of extensionPaths) {
@@ -2844,7 +3107,35 @@ async function getMigratedExtensionLaunchArgs(profile: StoredProfile): Promise<s
     }
   }
 
-  return existingPaths.length ? [`--load-extension=${existingPaths.join(",")}`] : [];
+  if (!existingPaths.length) {
+    return { launchArgs: [], runtimeLoadPaths: [] };
+  }
+
+  if (await canAutoLoadUnpackedExtensions()) {
+    return { launchArgs: [`--load-extension=${existingPaths.join(",")}`], runtimeLoadPaths: [] };
+  }
+
+  return { launchArgs: [], runtimeLoadPaths: existingPaths };
+}
+
+async function loadUnpackedExtensionsOverCdp(port: number, extensionPaths: string[]): Promise<void> {
+  if (!extensionPaths.length) {
+    return;
+  }
+
+  const version = await requestCdpVersionInfo(port);
+  if (!version.webSocketDebuggerUrl) {
+    throw new ProfileManagerError("目标 Profile 的 CDP 没有返回 browser WebSocket 地址。", "CDP_NOT_READY");
+  }
+
+  const client = await CdpBrowserClient.connect(version.webSocketDebuggerUrl, 5000);
+  try {
+    for (const extensionPath of extensionPaths) {
+      await client.send("Extensions.loadUnpacked", { path: extensionPath }, 15000);
+    }
+  } finally {
+    client.close();
+  }
 }
 
 function chromeWebStoreUrl(extensionId: string): string {
@@ -3691,6 +3982,10 @@ async function waitForCdp(port: number, timeoutMs: number): Promise<void> {
 }
 
 function requestCdpVersion(port: number): Promise<void> {
+  return requestCdpVersionInfo(port).then(() => undefined);
+}
+
+function requestCdpVersionInfo(port: number): Promise<CdpVersionInfo> {
   return new Promise((resolve, reject) => {
     const request = http.get(
       {
@@ -3700,12 +3995,23 @@ function requestCdpVersion(port: number): Promise<void> {
         timeout: 700
       },
       (response) => {
-        response.resume();
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer | string) => {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        });
         response.on("end", () => {
-          if (response.statusCode && response.statusCode >= 200 && response.statusCode < 300) {
-            resolve();
-          } else {
+          if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
             reject(new Error(`HTTP ${response.statusCode || "unknown"}`));
+            return;
+          }
+
+          try {
+            const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
+            resolve({
+              webSocketDebuggerUrl: isRecord(parsed) ? stringValue(parsed.webSocketDebuggerUrl) || undefined : undefined
+            });
+          } catch (error) {
+            reject(error instanceof Error ? error : new Error(String(error)));
           }
         });
       }

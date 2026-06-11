@@ -142,9 +142,6 @@ function createMainWindow(): void {
                   accountSyncSelectCount: document.querySelectorAll("[data-account-sync] select").length,
                   accountSyncScopeHeadings: Array.from(document.querySelectorAll(".account-sync-scope-group strong")).map((item) => item.textContent),
                   accountSyncScopeItems: Array.from(document.querySelectorAll(".account-sync-scope-group li")).map((item) => item.textContent),
-                  accountDiffHelp: null,
-                  accountDiffMoreButton: null,
-                  accountDiffIgnoredButton: null,
                   accountConfirmTitle: null,
                   accountConfirmButton: null,
                   accountConfirmSummary: [],
@@ -188,15 +185,6 @@ function createMainWindow(): void {
                 };
 
                 const visibleState = await window.profileManager.getState();
-                await waitForSmokeCondition(() => document.querySelector(".diff-summary-grid") || document.querySelector(".diff-preview-head span")?.textContent?.includes("暂时无法读取差异"), 5000);
-                smokeResult.accountDiffMoreButton = document.querySelector('[data-action="toggle-account-diff-expanded"]')?.textContent || null;
-                smokeResult.accountDiffIgnoredButton = document.querySelector('[data-action="toggle-account-diff-ignored"]')?.textContent || null;
-                const ignoredButton = document.querySelector('[data-action="toggle-account-diff-ignored"]');
-                if (ignoredButton instanceof HTMLButtonElement) {
-                  ignoredButton.click();
-                  await waitForSmokeCondition(() => document.querySelector(".diff-ignored .diff-help"), 1000);
-                }
-                smokeResult.accountDiffHelp = document.querySelector(".diff-ignored .diff-help")?.textContent || null;
                 const syncAccountButton = document.querySelector('[data-action="sync-account"]');
                 if (syncAccountButton instanceof HTMLButtonElement && !syncAccountButton.disabled) {
                   syncAccountButton.click();
@@ -369,6 +357,16 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.openProfileFolder, async (_event, id: string): Promise<AppState> => {
     await profileManager.openProfileFolder(id);
     return profileManager.getState();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.openProfileExtensionsPage, async (_event, id: string): Promise<AppState> => {
+    await profileManager.openProfileExtensionsPage(id);
+    return profileManager.getState();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.openPath, async (_event, targetPath: string): Promise<boolean> => {
+    await profileManager.openPath(targetPath);
+    return true;
   });
 
   ipcMain.handle(IPC_CHANNELS.deleteProfile, async (_event, id: string): Promise<DeleteProfileResult> => {

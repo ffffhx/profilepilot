@@ -7,6 +7,8 @@ export const IPC_CHANNELS = {
   focusProfile: "profiles:focus",
   closeProfile: "profiles:close",
   openProfileFolder: "profiles:open-folder",
+  openProfileExtensionsPage: "profiles:open-extensions-page",
+  openPath: "profiles:open-path",
   deleteProfile: "profiles:delete",
   inspectAccountSyncDiff: "profiles:account:inspect-diff",
   scanProfileExtensions: "profiles:extensions:scan",

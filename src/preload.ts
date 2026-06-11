@@ -27,6 +27,9 @@ const profileManagerApi: ProfileManagerApi = {
   focusProfile: (id: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.focusProfile, id),
   closeProfile: (id: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.closeProfile, id),
   openProfileFolder: (id: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.openProfileFolder, id),
+  openProfileExtensionsPage: (id: string): Promise<AppState> =>
+    ipcRenderer.invoke(IPC_CHANNELS.openProfileExtensionsPage, id),
+  openPath: (targetPath: string): Promise<boolean> => ipcRenderer.invoke(IPC_CHANNELS.openPath, targetPath),
   deleteProfile: (id: string): Promise<DeleteProfileResult> => ipcRenderer.invoke(IPC_CHANNELS.deleteProfile, id),
   inspectAccountSyncDiff: (request: AccountSyncRequest): Promise<AccountSyncDiffResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.inspectAccountSyncDiff, request),

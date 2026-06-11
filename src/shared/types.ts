@@ -133,6 +133,7 @@ export type ExtensionMigrationDiffStatus =
   | "data_changed"
   | "same"
   | "needs_install_page"
+  | "manual_load_required"
   | "unsupported";
 
 export interface ExtensionMigrationDiffItem {
@@ -143,6 +144,7 @@ export interface ExtensionMigrationDiffItem {
   status: ExtensionMigrationDiffStatus;
   reason: string;
   willCopyLocally: boolean;
+  willLoadViaCdp: boolean;
   willOpenInstallPage: boolean;
 }
 
@@ -163,6 +165,8 @@ export interface ExtensionMigrationDiffResult {
     changedCount: number;
     sameCount: number;
     needsInstallPageCount: number;
+    cdpLoadCount: number;
+    manualLoadCount: number;
     unsupportedCount: number;
     targetOnlyCount: number;
   };
@@ -182,10 +186,25 @@ export interface ExtensionMigrationDataCopy {
   relativePath: string;
 }
 
+export interface ExtensionMigrationLoadedExtension {
+  id: string;
+  loadedId: string;
+  name: string;
+  version: string;
+  path: string;
+  via: "cdp_runtime";
+}
+
 export interface ExtensionMigrationSkippedExtension {
   id: string;
   name: string;
   reason: string;
+}
+
+export interface ExtensionMigrationManualLoadExtension {
+  id: string;
+  name: string;
+  path: string;
 }
 
 export interface ExtensionMigrationResult {
@@ -193,8 +212,10 @@ export interface ExtensionMigrationResult {
   targetProfileId: string;
   selectedCount: number;
   copiedExtensions: ExtensionMigrationCopiedExtension[];
+  loadedLocalExtensions: ExtensionMigrationLoadedExtension[];
   dataCopies: ExtensionMigrationDataCopy[];
   webStoreInstallUrls: string[];
+  manualLoadExtensions: ExtensionMigrationManualLoadExtension[];
   skippedExtensions: ExtensionMigrationSkippedExtension[];
   openedInstallPages: boolean;
   state: AppState;
@@ -298,6 +319,8 @@ export interface ProfileManagerApi {
   focusProfile(id: string): Promise<AppState>;
   closeProfile(id: string): Promise<AppState>;
   openProfileFolder(id: string): Promise<AppState>;
+  openProfileExtensionsPage(id: string): Promise<AppState>;
+  openPath(path: string): Promise<boolean>;
   deleteProfile(id: string): Promise<DeleteProfileResult>;
   inspectAccountSyncDiff(request: AccountSyncRequest): Promise<AccountSyncDiffResult>;
   scanProfileExtensions(profileId: string): Promise<ExtensionScanResult>;

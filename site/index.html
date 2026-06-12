@@ -23,7 +23,15 @@
         <a href="#compare">对比</a>
         <a href="#download">下载</a>
       </nav>
-      <a class="nav-cta" href="https://github.com/ffffhx/profilepilot/releases/latest">下载最新版</a>
+      <div class="topbar-actions">
+        <a class="nav-github" href="https://github.com/ffffhx/profilepilot" target="_blank" rel="noopener" aria-label="GitHub 仓库">
+          <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true">
+            <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/>
+          </svg>
+          <span>GitHub</span>
+        </a>
+        <a class="nav-cta" href="https://github.com/ffffhx/profilepilot/releases/latest">下载最新版</a>
+      </div>
     </header>
 
     <main id="top">
@@ -111,19 +119,6 @@
               <dd>隔离测试 Profile</dd>
             </div>
           </dl>
-        </div>
-      </section>
-
-      <section class="signal-band" aria-label="定位说明">
-        <div class="signal-copy">
-          <span>不是反检测浏览器。</span>
-          <strong>ProfilePilot 站在你已经使用的 Chrome 数据上工作。</strong>
-        </div>
-        <div class="signal-tags" aria-label="适用场景">
-          <span>开发调试</span>
-          <span>账号回归</span>
-          <span>扩展 QA</span>
-          <span>Agent 浏览器</span>
         </div>
       </section>
 
@@ -314,30 +309,17 @@
         </div>
       </section>
 
-      <section class="install-section" id="install">
-        <div class="install-copy">
-          <div class="section-kicker">Source run</div>
-          <h2>也可以从源码运行。</h2>
-          <p>适合开发调试，或者想在本机直接验证最新代码时使用。</p>
-        </div>
-        <div class="terminal" aria-label="安装命令">
-          <div class="terminal-bar">
-            <span></span>
-            <span></span>
-            <span></span>
-            <button type="button" data-copy-command="npm install&#10;npm start">复制</button>
-          </div>
-          <pre><code>npm install
-npm start</code></pre>
-        </div>
-      </section>
     </main>
 
     <footer class="site-footer">
       <img src="public/assets/profilepilot-mark.svg" alt="" />
       <strong>ProfilePilot</strong>
       <p>Browser profile control desk. Built for local Chrome workflows, extension QA, and agent-ready browsing.</p>
-      <a href="#top">回到顶部</a>
+      <div class="footer-links">
+        <a href="https://github.com/ffffhx/profilepilot" target="_blank" rel="noopener">GitHub 仓库</a>
+        <a href="https://github.com/ffffhx/profilepilot/issues" target="_blank" rel="noopener">反馈问题</a>
+        <a href="#top">回到顶部</a>
+      </div>
     </footer>
 
     <script src="site/script.js"></script>

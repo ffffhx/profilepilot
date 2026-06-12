@@ -176,8 +176,6 @@ h3 {
 .nav-links,
 .hero-actions,
 .proof-strip,
-.signal-band,
-.signal-tags,
 .workflow-tabs,
 .terminal-bar,
 .site-footer {
@@ -223,6 +221,33 @@ h3 {
 .nav-links a:hover {
   color: var(--accent-bright);
   border-color: var(--accent-line);
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 16px;
+}
+
+.nav-github {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  transition: color 0.16s ease;
+}
+
+.nav-github:hover {
+  color: var(--accent-bright);
+}
+
+.nav-github svg {
+  flex: 0 0 auto;
 }
 
 .nav-cta {
@@ -715,62 +740,11 @@ h3 {
   letter-spacing: 0.05em;
 }
 
-/* ---- signal band ---- */
-
-.signal-band {
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 14px;
-  width: min(1280px, calc(100% - clamp(40px, 10vw, 128px)));
-  margin: 0 auto;
-  border: 1px solid var(--warn-line);
-  border-left-width: 4px;
-  border-radius: 10px;
-  background: linear-gradient(180deg, rgba(242, 177, 62, 0.07), rgba(242, 177, 62, 0.02));
-  padding: 16px clamp(16px, 3vw, 26px);
-}
-
-.signal-copy {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-}
-
-.signal-copy span {
-  color: var(--warn-bright);
-  font-family: var(--mono);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-}
-
-.signal-copy strong {
-  font-size: 15px;
-}
-
-.signal-tags {
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.signal-tags span {
-  border: 1px solid var(--line-strong);
-  border-radius: 999px;
-  padding: 5px 12px;
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-}
-
 /* ---- sections ---- */
 
 .section,
 .compare-section,
-.download-section,
-.install-section {
+.download-section {
   width: min(1280px, 100%);
   margin: 0 auto;
   padding: clamp(48px, 7vw, 88px) clamp(20px, 5vw, 64px) 0;
@@ -1341,11 +1315,7 @@ h3 {
   content: "";
 }
 
-.install-section {
-  display: grid;
-  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
-  gap: clamp(24px, 4vw, 48px);
-  align-items: center;
+.download-section {
   padding-bottom: clamp(48px, 7vw, 88px);
 }
 
@@ -1383,6 +1353,14 @@ h3 {
   line-height: 1.7;
 }
 
+.footer-links {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 18px;
+}
+
 .site-footer a {
   color: var(--accent-bright);
   font-family: var(--mono);
@@ -1391,6 +1369,11 @@ h3 {
   letter-spacing: 0.08em;
   border-bottom: 1px solid var(--accent-line);
   padding-bottom: 2px;
+  transition: color 0.16s ease;
+}
+
+.site-footer a:hover {
+  color: var(--text);
 }
 
 /* ---- motion preferences ---- */
@@ -1438,8 +1421,7 @@ h3 {
 
   .compare-section,
   .safety-layout,
-  .download-section,
-  .install-section {
+  .download-section {
     grid-template-columns: 1fr;
   }
 

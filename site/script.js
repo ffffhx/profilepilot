@@ -111,3 +111,22 @@ copyButtons.forEach((copyButton) => {
 
 window.addEventListener("scroll", syncTopbar, { passive: true });
 syncTopbar();
+
+const revealTargets = document.querySelectorAll("main > section, .site-footer");
+if ("IntersectionObserver" in window) {
+  const revealObserver = new IntersectionObserver(
+    (entries) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add("revealed");
+          revealObserver.unobserve(entry.target);
+        }
+      });
+    },
+    { threshold: 0.1, rootMargin: "0px 0px -40px" }
+  );
+  revealTargets.forEach((element) => {
+    element.classList.add("reveal");
+    revealObserver.observe(element);
+  });
+}

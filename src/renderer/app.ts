@@ -1109,7 +1109,7 @@ function renderProfileRow(profile: PublicProfile): string {
 
 function renderProfileActions(profile: PublicProfile): string {
   const menuOpen = openProfileMenuId === profile.id;
-  const cdpLaunchDisabled = busy || profile.running || profile.source !== "isolated";
+  const cdpLaunchDisabled = busy || (profile.source === "isolated" && profile.running);
   const deleteDisabled = busy || profile.running || !profile.deletable;
   const focusing = isBusyAction("focus-profile", { profileId: profile.id });
   const closing = isBusyAction("close-profile", { profileId: profile.id });
@@ -1823,6 +1823,11 @@ function renderCdpModal(profileId: string): string {
         <span class="modal-kicker">Chrome DevTools Protocol</span>
         <h2>启动 ${escapeHtml(profile.name)} 的 CDP</h2>
         <p class="modal-copy">留空会从 9222 开始自动选择可用端口；填写端口则按你指定的端口启动。</p>
+        ${
+          profile.source !== "isolated"
+            ? `<p class="modal-note warn">系统 Profile 开启 CDP 会先完全退出 Chrome（关闭所有窗口，标签页按 Chrome 的会话恢复设置处理），再带调试端口重新启动。重启后 Chrome 会弹出授权对话框，需要你点击“允许”，CDP 才会生效。</p>`
+            : ""
+        }
         <div class="field">
           <label for="cdp-port">监听端口</label>
           <input id="cdp-port" name="port" type="number" min="1024" max="65535" inputmode="numeric" placeholder="自动选择（默认从 9222 起）" />
@@ -1830,8 +1835,8 @@ function renderCdpModal(profileId: string): string {
         </div>
         <div class="modal-actions">
           <button type="button" data-action="close-modal">取消</button>
-          <button type="submit" class="solid ${launching ? "loading" : ""}" ${busy ? "disabled" : ""}>
-            ${renderButtonLabel(launching, "启动 CDP", "启动中…")}
+          <button type="submit" class="solid ${profile.source !== "isolated" ? "warn" : ""} ${launching ? "loading" : ""}" ${busy ? "disabled" : ""}>
+            ${renderButtonLabel(launching, profile.source !== "isolated" ? "退出 Chrome 并启动 CDP" : "启动 CDP", "启动中…")}
           </button>
         </div>
       </form>
@@ -2539,7 +2544,10 @@ function launchButtonTitle(profile: PublicProfile): string {
 
 function cdpLaunchButtonTitle(profile: PublicProfile): string {
   if (profile.source !== "isolated") {
-    return "CDP 启动仅支持工具独立 Profile；系统 Profile 请先新建独立 Profile";
+    if (profile.cdpUrl) {
+      return `CDP 已开启：${profile.cdpUrl}`;
+    }
+    return "完全退出 Chrome 后带调试端口重启系统 Profile；需要在 Chrome 弹出的授权对话框中点击“允许”";
   }
   if (profile.running) {
     return profile.cdpUrl
@@ -3030,13 +3038,16 @@ appRoot.addEventListener("click", (event) => {
     if (!profile) {
       return;
     }
-    if (profile.source !== "isolated") {
-      setToast("CDP 启动仅支持工具独立 Profile", "error");
-      return;
-    }
     if (profile.running) {
-      setToast(profile.cdpUrl ? `${profile.name} 已开启 CDP：${profile.cdpUrl}` : `先关闭 ${profile.name}，再以 CDP 模式启动`, profile.cdpUrl ? "normal" : "error");
-      return;
+      if (profile.cdpUrl) {
+        setToast(`${profile.name} 已开启 CDP：${profile.cdpUrl}`);
+        return;
+      }
+      if (profile.source === "isolated") {
+        setToast(`先关闭 ${profile.name}，再以 CDP 模式启动`, "error");
+        return;
+      }
+      // 系统 Profile 运行中也允许发起：流程本身会先完全退出 Chrome 再重启。
     }
 
     modal = { kind: "cdp", profileId: id };
@@ -3353,9 +3364,12 @@ appRoot.addEventListener("submit", (event) => {
     }
 
     modal = null;
+    const isNativeCdpLaunch = profile ? profile.source !== "isolated" : false;
     void withBusy(() => profileApi().launchProfileWithCdp(profileId, port), `已以 CDP 启动 ${profile?.name || "Profile"}`, {
       key: "launch-cdp",
-      message: `正在以 CDP 启动 ${profile?.name || "Profile"}…`,
+      message: isNativeCdpLaunch
+        ? `正在重启系统 Chrome，请在 Chrome 弹出的授权对话框中点击“允许”…`
+        : `正在以 CDP 启动 ${profile?.name || "Profile"}…`,
       profileId
     });
     return;

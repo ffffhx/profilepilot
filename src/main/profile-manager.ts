@@ -274,43 +274,14 @@ export class ProfileManager {
   async launchProfileWithCdp(profileId: string, portInput?: number | null): Promise<void> {
     const ref = parseProfileId(profileId);
     if (ref.source === "native") {
-      await this.launchNativeProfileWithCdp(ref.dirName, portInput);
-      return;
+      throw new ProfileManagerError(
+        "CDP 启动只支持工具独立 Profile。请先创建独立 Profile，再用于 Agent/browser 自动化。",
+        "CDP_NATIVE_UNSUPPORTED"
+      );
     }
 
     await this.recoverAccountSyncArtifactsBeforeLaunch(profileId);
     await this.launchIsolatedProfileWithCdp(ref.id, portInput);
-  }
-
-  // 系统 Profile 开 CDP 走 Chrome 的授权流程：默认数据目录的调试端口需要用户
-  // 在 Chrome 弹出的对话框中点击“允许”才会生效，且要求带参数重新启动 Chrome。
-  private async launchNativeProfileWithCdp(dirName: string, portInput?: number | null): Promise<void> {
-    const requestedPort = normalizeCdpPortInput(portInput);
-    const cdpPort = requestedPort ?? (await findAvailableCdpPort(9222));
-    if (!(await isPortAvailable(cdpPort))) {
-      const owner = await describePortOwner(cdpPort);
-      const detail = owner ? `（被 ${owner} 占用）` : "";
-      throw new ProfileManagerError(`CDP 端口 ${cdpPort} 已被占用${detail}。`, "CDP_PORT_IN_USE");
-    }
-
-    await quitSystemChrome();
-    await launchChrome([
-      `--profile-directory=${dirName}`,
-      "--no-first-run",
-      "--remote-debugging-address=127.0.0.1",
-      `--remote-debugging-port=${cdpPort}`
-    ]);
-
-    try {
-      // 等待用户在 Chrome 的授权对话框中点击“允许”，给足操作时间。
-      await waitForCdp(cdpPort, 90000);
-    } catch {
-      throw new ProfileManagerError(
-        `没有等到 CDP 在 127.0.0.1:${cdpPort} 就绪。系统 Profile 开启调试需要在 Chrome 弹出的授权对话框中点击“允许”；` +
-          `如果点了“拒绝”、关闭了弹窗或超时，请重新点击“CDP启动”并完成授权。`,
-        "CDP_CONSENT_TIMEOUT"
-      );
-    }
   }
 
   async closeProfile(profileId: string): Promise<void> {
@@ -1813,58 +1784,6 @@ function launchDetached(command: string, args: string[]): void {
     stdio: "ignore"
   });
   child.unref();
-}
-
-// 默认数据目录的 Chrome 主进程（不带 --user-data-dir 的那个单实例）。
-async function listSystemChromeMainPids(): Promise<number[]> {
-  const { stdout } = await execFileAsync("ps", ["-axo", "pid=,command="], {
-    maxBuffer: 1024 * 1024 * 8,
-    env: POSIX_LOCALE_ENV
-  });
-
-  const pids: number[] = [];
-  for (const line of stdout.split("\n")) {
-    const match = line.match(/^\s*(\d+)\s+(.*)$/);
-    if (!match) {
-      continue;
-    }
-    const command = match[2];
-    if (!isGoogleChromeMainProcess(command) || command.includes("--user-data-dir=")) {
-      continue;
-    }
-    pids.push(Number(match[1]));
-  }
-
-  return pids;
-}
-
-// Chrome 对同一数据目录有单实例锁，带新参数重启前必须完全退出系统 Chrome。
-async function quitSystemChrome(): Promise<void> {
-  const pids = await listSystemChromeMainPids();
-  for (const pid of pids) {
-    try {
-      process.kill(pid, "SIGTERM");
-    } catch (error) {
-      if (!isProcessGoneError(error)) {
-        throw error;
-      }
-    }
-  }
-
-  const deadline = Date.now() + 10000;
-  while (Date.now() < deadline) {
-    if (!(await listSystemChromeMainPids()).length) {
-      // 主进程退出后给残留的 Helper/锁文件一点收尾时间，避免新实例移交给将死进程。
-      await sleep(500);
-      return;
-    }
-    await sleep(250);
-  }
-
-  throw new ProfileManagerError(
-    "没能在限定时间内完全退出系统 Chrome。请手动退出 Chrome（⌘Q）后再点击“CDP启动”。",
-    "CHROME_QUIT_TIMEOUT"
-  );
 }
 
 async function exists(filePath: string): Promise<boolean> {

@@ -44,6 +44,10 @@ import type {
 
 const execFileAsync = promisify(execFile);
 
+// ps 的 lstart 等列会跟随系统语言输出（中文环境下是“四  6/11 17:13:50 2026”），
+// 而解析逻辑依赖英文格式，所以调用 ps 时统一强制 POSIX locale。
+const POSIX_LOCALE_ENV: NodeJS.ProcessEnv = { ...process.env, LC_ALL: "C" };
+
 export const APP_TITLE = "ProfilePilot";
 const APP_DATA_DIR_NAME = "ProfilePilot";
 const LEGACY_APP_DATA_DIR_NAME = "Codex Chrome Profile Manager";
@@ -1234,7 +1238,8 @@ export class ProfileManager {
 
     try {
       const { stdout } = await execFileAsync("ps", ["-axo", "pid=,lstart=,command="], {
-        maxBuffer: 1024 * 1024 * 8
+        maxBuffer: 1024 * 1024 * 8,
+        env: POSIX_LOCALE_ENV
       });
 
       for (const line of stdout.split("\n")) {
@@ -1823,7 +1828,8 @@ tell application "System Events"
 async function hasRendererProcessForProfile(profilePath: string): Promise<boolean> {
   try {
     const { stdout } = await execFileAsync("ps", ["-axo", "command="], {
-      maxBuffer: 1024 * 1024 * 8
+      maxBuffer: 1024 * 1024 * 8,
+      env: POSIX_LOCALE_ENV
     });
 
     return stdout.split("\n").some((command) => {
@@ -3941,7 +3947,8 @@ async function describePortOwner(port: number): Promise<string | null> {
 async function processLabelForPid(pid: number, fallback: string): Promise<string> {
   try {
     const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "command="], {
-      maxBuffer: 1024 * 1024
+      maxBuffer: 1024 * 1024,
+      env: POSIX_LOCALE_ENV
     });
     const command = stdout.trim();
     if (command.includes("Google Chrome.app")) {
@@ -3976,7 +3983,9 @@ async function waitForCdp(port: number, timeoutMs: number): Promise<void> {
 
   const detail = lastError instanceof Error && lastError.message ? `最后一次错误：${lastError.message}` : "";
   throw new ProfileManagerError(
-    `Chrome 已启动，但 CDP 没有在 127.0.0.1:${port} 响应。${detail}`,
+    `Chrome 已启动，但 CDP 没有在 127.0.0.1:${port} 响应。` +
+      `如果这个 Profile 已有 Chrome 实例在运行（包括之前 CDP 启动后未关闭的窗口），` +
+      `新进程会移交给旧实例导致新端口不生效，请先关闭该 Profile 再重试。${detail}`,
     "CDP_NOT_READY"
   );
 }
@@ -4068,7 +4077,8 @@ function isGoogleChromeMainProcess(command: string): boolean {
 async function isChromeRunning(): Promise<boolean> {
   try {
     const { stdout } = await execFileAsync("ps", ["-axo", "command="], {
-      maxBuffer: 1024 * 1024 * 8
+      maxBuffer: 1024 * 1024 * 8,
+      env: POSIX_LOCALE_ENV
     });
     return stdout
       .split("\n")

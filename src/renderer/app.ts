@@ -385,6 +385,8 @@ let extensionMigrationResult: ExtensionMigrationResult | null = null;
 let extensionScanPreviewCollapsed = false;
 let openProfileMenuId: string | null = null;
 let migrationSourceMenuOpen = false;
+let migrationTargetMenuOpen = false;
+let accountSyncMenuOpen: "source" | "target" | null = null;
 let accountSyncSourceId: string | null = null;
 let accountSyncTargetId: string | null = null;
 let launchSyncedProfile = true;
@@ -489,6 +491,7 @@ function normalizeAccountSyncProfileSelection(profiles: PublicProfile[]): void {
     accountSyncSourceId = null;
     accountSyncTargetId = null;
     accountSyncResult = null;
+    accountSyncMenuOpen = null;
     return;
   }
 
@@ -878,16 +881,12 @@ function renderAccountSyncPanel(profiles: PublicProfile[]): string {
       <div class="account-sync-layout ${syncingAccount ? "syncing" : ""}">
         <div class="account-sync-fields">
           <div class="field compact">
-            <label for="account-sync-source">源 Profile</label>
-            <select id="account-sync-source" data-account-sync-source ${busy || !profiles.length ? "disabled" : ""}>
-              ${renderProfileOptions(profiles, sourceId)}
-            </select>
+            <span class="picker-label" id="account-sync-source-label">源 Profile</span>
+            ${renderAccountSyncPicker("source", profiles, sourceId)}
           </div>
           <div class="field compact">
-            <label for="account-sync-target">目标 Profile</label>
-            <select id="account-sync-target" data-account-sync-target ${busy || profiles.length < 2 ? "disabled" : ""}>
-              ${renderProfileOptions(profiles, targetId, sourceId)}
-            </select>
+            <span class="picker-label" id="account-sync-target-label">目标 Profile</span>
+            ${renderAccountSyncPicker("target", profiles, targetId, sourceId)}
           </div>
         </div>
 
@@ -1283,16 +1282,136 @@ function renderMigrationSourceSummary(profile: PublicProfile, scan: ExtensionSca
   `;
 }
 
-function renderProfileOptions(profiles: PublicProfile[], selectedProfileId: string, excludedProfileId?: string): string {
-  const options = profiles
-    .filter((profile) => profile.id !== excludedProfileId)
-    .map(
-      (profile) =>
-        `<option value="${escapeHtml(profile.id)}" ${profile.id === selectedProfileId ? "selected" : ""}>${escapeHtml(profile.name)} · ${sourceLabel(profile)}</option>`
-    )
-    .join("");
+function renderAccountSyncPicker(
+  kind: "source" | "target",
+  profiles: PublicProfile[],
+  selectedProfileId: string,
+  excludedProfileId?: string
+): string {
+  const options = profiles.filter((profile) => profile.id !== excludedProfileId);
+  const selectedProfile = profiles.find((profile) => profile.id === selectedProfileId) || null;
+  const disabled = busy || (kind === "source" ? !profiles.length : profiles.length < 2);
+  const expanded = accountSyncMenuOpen === kind && options.length > 0 && !disabled;
+  const labelId = `account-sync-${kind}-label`;
 
-  return options || '<option value="">无可用 Profile</option>';
+  return `
+    <div class="profile-select ${expanded ? "open" : ""}" data-account-sync-select="${kind}">
+      <button
+        type="button"
+        class="profile-select-trigger"
+        data-action="toggle-account-sync-menu"
+        data-kind="${kind}"
+        aria-haspopup="listbox"
+        aria-expanded="${expanded ? "true" : "false"}"
+        aria-labelledby="${labelId}"
+        ${disabled ? "disabled" : ""}
+      >
+        <span class="profile-select-trigger-copy">
+          <strong>${escapeHtml(selectedProfile?.name || "无可用 Profile")}</strong>
+          <span>${selectedProfile ? `${sourceLabel(selectedProfile)} · ${profileStatusLabel(selectedProfile)}` : "先创建 Profile"}</span>
+        </span>
+        <span class="profile-select-caret" aria-hidden="true"></span>
+      </button>
+      ${expanded ? renderAccountSyncMenu(kind, options, selectedProfileId, labelId) : ""}
+    </div>
+  `;
+}
+
+function renderAccountSyncMenu(
+  kind: "source" | "target",
+  options: PublicProfile[],
+  selectedProfileId: string,
+  labelId: string
+): string {
+  return `
+    <div class="profile-select-menu" role="listbox" aria-labelledby="${labelId}">
+      ${options.map((profile) => renderAccountSyncOption(kind, profile, selectedProfileId)).join("")}
+    </div>
+  `;
+}
+
+function renderAccountSyncOption(kind: "source" | "target", profile: PublicProfile, selectedProfileId: string): string {
+  const selected = profile.id === selectedProfileId;
+
+  return `
+    <button
+      type="button"
+      class="profile-select-option ${selected ? "selected" : ""}"
+      data-action="select-account-sync-profile"
+      data-kind="${kind}"
+      data-id="${escapeHtml(profile.id)}"
+      role="option"
+      aria-selected="${selected ? "true" : "false"}"
+      ${busy ? "disabled" : ""}
+    >
+      <span class="profile-select-option-main">
+        <span class="status-dot ${profile.running ? "running" : profile.source === "native" ? "native" : ""}"></span>
+        <strong>${escapeHtml(profile.name)}</strong>
+        ${profile.isDefault ? '<span class="native-badge">Default</span>' : ""}
+      </span>
+      <span class="profile-select-option-meta">
+        ${sourceLabel(profile)} · ${profileStatusLabel(profile)} · ${formatDate(profile.lastLaunchedAt)}
+      </span>
+    </button>
+  `;
+}
+
+function renderMigrationTargetPicker(profiles: PublicProfile[], targetId: string, excludedProfileId?: string): string {
+  const options = profiles.filter((profile) => profile.id !== excludedProfileId);
+  const selectedProfile = profiles.find((profile) => profile.id === targetId) || null;
+  const expanded = migrationTargetMenuOpen && options.length > 0 && !busy;
+
+  return `
+    <div class="profile-select ${expanded ? "open" : ""}" data-migration-target-select>
+      <button
+        type="button"
+        class="profile-select-trigger"
+        data-action="toggle-migration-target-menu"
+        aria-haspopup="listbox"
+        aria-expanded="${expanded ? "true" : "false"}"
+        aria-labelledby="migration-target-label"
+        ${busy || !options.length ? "disabled" : ""}
+      >
+        <span class="profile-select-trigger-copy">
+          <strong>${escapeHtml(selectedProfile?.name || "无可用 Profile")}</strong>
+          <span>${selectedProfile ? `${sourceLabel(selectedProfile)} · ${profileStatusLabel(selectedProfile)}` : "先创建 Profile"}</span>
+        </span>
+        <span class="profile-select-caret" aria-hidden="true"></span>
+      </button>
+      ${
+        expanded
+          ? `<div class="profile-select-menu" role="listbox" aria-labelledby="migration-target-label">
+              ${options.map((profile) => renderMigrationTargetOption(profile, targetId)).join("")}
+            </div>`
+          : ""
+      }
+    </div>
+  `;
+}
+
+function renderMigrationTargetOption(profile: PublicProfile, targetId: string): string {
+  const selected = profile.id === targetId;
+
+  return `
+    <button
+      type="button"
+      class="profile-select-option ${selected ? "selected" : ""}"
+      data-action="select-migration-target"
+      data-id="${escapeHtml(profile.id)}"
+      role="option"
+      aria-selected="${selected ? "true" : "false"}"
+      ${busy ? "disabled" : ""}
+    >
+      <span class="profile-select-option-main">
+        <span class="status-dot ${profile.running ? "running" : profile.source === "native" ? "native" : ""}"></span>
+        <strong>${escapeHtml(profile.name)}</strong>
+        ${profile.isDefault ? '<span class="native-badge">Default</span>' : ""}
+      </span>
+      <span class="profile-select-option-meta">
+        ${sourceLabel(profile)} · ${profileStatusLabel(profile)} · ${formatDate(profile.lastLaunchedAt)}
+      </span>
+    </button>
+  `;
 }
 
 function renderExtensionScanEmpty(): string {
@@ -1703,10 +1822,8 @@ function renderExtensionMigrationModal(profiles: PublicProfile[]): string {
           </div>
         </div>
         <div class="field">
-          <label for="migration-target">目标 Profile</label>
-          <select id="migration-target" name="targetProfileId" data-migration-target ${busy ? "disabled" : ""}>
-            ${renderProfileOptions(profiles, targetId, sourceId)}
-          </select>
+          <span class="picker-label" id="migration-target-label">目标 Profile</span>
+          ${renderMigrationTargetPicker(profiles, targetId, sourceId)}
           ${
             targetProfile?.running
               ? `<p class="modal-note warn">目标 ${escapeHtml(targetProfile.name)} 正在运行。开始同步后会先关闭目标 Profile，写入完成后再继续。</p>`
@@ -2064,6 +2181,7 @@ function closeModalFromUi(): void {
   } else {
     modal = null;
   }
+  migrationTargetMenuOpen = false;
   render();
 }
 
@@ -2440,16 +2558,29 @@ appRoot.addEventListener("click", (event) => {
   const target = event.target instanceof Element ? event.target : null;
   const hadOpenProfileMenu = Boolean(openProfileMenuId);
   const hadMigrationSourceMenu = migrationSourceMenuOpen;
+  const hadAccountSyncMenu = Boolean(accountSyncMenuOpen);
   if (openProfileMenuId && !target?.closest("[data-profile-actions]")) {
     openProfileMenuId = null;
   }
   if (migrationSourceMenuOpen && !target?.closest("[data-migration-source-select]")) {
     migrationSourceMenuOpen = false;
   }
+  const hadMigrationTargetMenu = migrationTargetMenuOpen;
+  if (migrationTargetMenuOpen && !target?.closest("[data-migration-target-select]")) {
+    migrationTargetMenuOpen = false;
+  }
+  if (accountSyncMenuOpen && !target?.closest(`[data-account-sync-select="${accountSyncMenuOpen}"]`)) {
+    accountSyncMenuOpen = null;
+  }
 
   const actionTarget = target?.closest<HTMLElement>("[data-action]");
   if (!actionTarget || !state) {
-    if ((hadOpenProfileMenu && !openProfileMenuId) || (hadMigrationSourceMenu && !migrationSourceMenuOpen)) {
+    if (
+      (hadOpenProfileMenu && !openProfileMenuId) ||
+      (hadMigrationSourceMenu && !migrationSourceMenuOpen) ||
+      (hadMigrationTargetMenu && !migrationTargetMenuOpen) ||
+      (hadAccountSyncMenu && !accountSyncMenuOpen)
+    ) {
       render();
     }
     return;
@@ -2463,6 +2594,7 @@ appRoot.addEventListener("click", (event) => {
 
   if (action === "toggle-migration-source-menu") {
     migrationSourceMenuOpen = !migrationSourceMenuOpen;
+    accountSyncMenuOpen = null;
     openProfileMenuId = null;
     render();
     return;
@@ -2471,6 +2603,46 @@ appRoot.addEventListener("click", (event) => {
   if (action === "select-migration-source" && id) {
     setMigrationSource(id);
     migrationSourceMenuOpen = false;
+    render();
+    return;
+  }
+
+  if (action === "toggle-migration-target-menu") {
+    migrationTargetMenuOpen = !migrationTargetMenuOpen;
+    render();
+    return;
+  }
+
+  if (action === "select-migration-target" && id) {
+    migrationTargetId = id;
+    migrationTargetMenuOpen = false;
+    extensionMigrationResult = null;
+    invalidateExtensionMigrationDiff();
+    render();
+    void refreshExtensionMigrationDiff();
+    return;
+  }
+
+  if (action === "toggle-account-sync-menu") {
+    const kind = actionTarget.dataset.kind === "target" ? "target" : "source";
+    accountSyncMenuOpen = accountSyncMenuOpen === kind ? null : kind;
+    migrationSourceMenuOpen = false;
+    openProfileMenuId = null;
+    render();
+    return;
+  }
+
+  if (action === "select-account-sync-profile" && id) {
+    if (actionTarget.dataset.kind === "target") {
+      accountSyncTargetId = id;
+    } else {
+      accountSyncSourceId = id;
+      if (accountSyncTargetId === accountSyncSourceId) {
+        accountSyncTargetId = state.profiles.find((profile) => profile.id !== accountSyncSourceId)?.id || null;
+      }
+    }
+    accountSyncResult = null;
+    accountSyncMenuOpen = null;
     render();
     return;
   }
@@ -2647,10 +2819,14 @@ appRoot.addEventListener("click", (event) => {
     }
 
     migrationTargetId = targetId;
+    migrationTargetMenuOpen = false;
     modal = { kind: "extension-migration" };
     render();
     void refreshExtensionMigrationDiff();
-    window.setTimeout(() => document.querySelector<HTMLSelectElement>("#migration-target")?.focus(), 0);
+    window.setTimeout(
+      () => document.querySelector<HTMLButtonElement>("[data-migration-target-select] .profile-select-trigger")?.focus(),
+      0
+    );
     return;
   }
 
@@ -2909,49 +3085,9 @@ appRoot.addEventListener("change", (event) => {
     return;
   }
 
-  if (target instanceof HTMLSelectElement && target.matches("[data-migration-source]")) {
-    migrationSourceId = target.value || null;
-    if (migrationTargetId === migrationSourceId) {
-      migrationTargetId = state.profiles.find((profile) => profile.id !== migrationSourceId)?.id || null;
-    }
-    extensionScan = null;
-    selectedExtensionIds.clear();
-    extensionScanPreviewCollapsed = false;
-    extensionMigrationResult = null;
-    invalidateExtensionMigrationDiff();
-    render();
-    return;
-  }
-
-  if (target instanceof HTMLSelectElement && target.matches("[data-account-sync-source]")) {
-    accountSyncSourceId = target.value || null;
-    if (accountSyncTargetId === accountSyncSourceId) {
-      accountSyncTargetId = state.profiles.find((profile) => profile.id !== accountSyncSourceId)?.id || null;
-    }
-    accountSyncResult = null;
-    render();
-    return;
-  }
-
-  if (target instanceof HTMLSelectElement && target.matches("[data-account-sync-target]")) {
-    accountSyncTargetId = target.value || null;
-    accountSyncResult = null;
-    render();
-    return;
-  }
-
   if (target instanceof HTMLInputElement && target.matches("[data-launch-synced-profile]")) {
     launchSyncedProfile = target.checked;
     render();
-    return;
-  }
-
-  if (target instanceof HTMLSelectElement && target.matches("[data-migration-target]")) {
-    migrationTargetId = target.value || null;
-    extensionMigrationResult = null;
-    invalidateExtensionMigrationDiff();
-    render();
-    void refreshExtensionMigrationDiff();
     return;
   }
 
@@ -2997,8 +3133,10 @@ appRoot.addEventListener("change", (event) => {
 });
 
 appRoot.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && migrationSourceMenuOpen) {
+  if (event.key === "Escape" && (migrationSourceMenuOpen || migrationTargetMenuOpen || accountSyncMenuOpen)) {
     migrationSourceMenuOpen = false;
+    migrationTargetMenuOpen = false;
+    accountSyncMenuOpen = null;
     render();
     return;
   }

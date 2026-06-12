@@ -57,6 +57,16 @@ interface AccountSyncRecord {
   sourceFingerprints?: Record<string, string | null>;
 }
 
+interface ExternalChromeInstance {
+  userDataDir: string;
+  label: string;
+  browser: string;
+  pid: number;
+  startedAt: string | null;
+  cdpPort: number | null;
+  cdpUrl: string | null;
+}
+
 interface AppState {
   appTitle: string;
   dataDir: string;
@@ -69,6 +79,7 @@ interface AppState {
   currentProfile: PublicProfile | null;
   chromeLauncher: string;
   accountSyncRecords: AccountSyncRecord[];
+  externalInstances: ExternalChromeInstance[];
 }
 
 interface DeleteProfileResult {
@@ -836,6 +847,7 @@ function render(): void {
             <span class="count">${profiles.length}</span>
           </div>
           ${profiles.length ? renderTable(profiles) : renderEmpty()}
+          ${renderExternalInstances(state.externalInstances || [])}
         </section>
         ${renderDetails(selected)}
       </main>
@@ -1163,6 +1175,46 @@ function renderEmpty(): string {
     <div class="empty-state">
       <strong>还没有 Profile</strong>
       <button type="button" class="primary" data-action="new-profile">新建独立 Profile</button>
+    </div>
+  `;
+}
+
+function renderExternalInstances(instances: ExternalChromeInstance[]): string {
+  if (!instances.length) {
+    return "";
+  }
+
+  return `
+    <section class="external-panel" aria-label="外部 Chrome 实例">
+      <div class="external-panel-head">
+        <div>
+          <h3>外部 Chrome 实例</h3>
+          <span>由其他工具自管的 Chromium 实例（agent-browser 等），仅供查看，不支持迁移和同步。</span>
+        </div>
+        <span class="count">${instances.length}</span>
+      </div>
+      <div class="external-list">
+        ${instances.map((instance) => renderExternalInstance(instance)).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderExternalInstance(instance: ExternalChromeInstance): string {
+  const cdpNote =
+    instance.cdpPort !== null && !instance.cdpUrl ? ` · 声明 CDP 端口 ${instance.cdpPort}（当前未响应）` : "";
+
+  return `
+    <div class="external-item">
+      <div class="external-item-head">
+        <span class="status-dot running"></span>
+        <strong>${escapeHtml(instance.label)}</strong>
+        <span class="source-pill">${escapeHtml(instance.browser)}</span>
+        ${instance.cdpUrl ? '<span class="source-pill isolated">CDP 可连接</span>' : ""}
+      </div>
+      <span class="external-item-meta">PID ${instance.pid} · 启动于 ${formatDate(instance.startedAt)}${escapeHtml(cdpNote)}</span>
+      ${instance.cdpUrl ? `<code class="path-box compact accent">${escapeHtml(instance.cdpUrl)}</code>` : ""}
+      <code class="path-box compact">${escapeHtml(instance.userDataDir)}</code>
     </div>
   `;
 }

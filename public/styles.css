@@ -2100,6 +2100,92 @@ body:not(.booted) .layout {
   color: var(--accent-bright);
 }
 
+/* ---- external instances ---- */
+
+.external-panel {
+  margin-top: 16px;
+  border: 1px solid var(--info-line);
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(95, 182, 255, 0.05), rgba(95, 182, 255, 0.01));
+  padding: 14px 16px;
+}
+
+.external-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.external-panel-head h3 {
+  margin-bottom: 4px;
+}
+
+.external-panel-head > div > span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.external-list {
+  display: grid;
+  gap: 12px;
+}
+
+.external-item {
+  display: grid;
+  gap: 7px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.external-item-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.external-item-head .status-dot.running {
+  animation: none;
+}
+
+.external-item-head strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.external-item-head .source-pill {
+  border-color: var(--info-line);
+  color: var(--info-bright);
+  background: var(--info-soft);
+}
+
+.external-item-head .source-pill.isolated {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent-bright);
+}
+
+.external-item-meta {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.path-box.accent {
+  border-color: var(--accent-line);
+  color: var(--accent-bright);
+}
+
 /* ---- details sidebar ---- */
 
 .details {

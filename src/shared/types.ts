@@ -68,6 +68,16 @@ export interface NativeChromeProfile {
   isDefault: boolean;
 }
 
+export interface ExternalChromeInstance {
+  userDataDir: string;
+  label: string;
+  browser: string;
+  pid: number;
+  startedAt: string | null;
+  cdpPort: number | null;
+  cdpUrl: string | null;
+}
+
 export interface AppState {
   appTitle: string;
   dataDir: string;
@@ -80,6 +90,7 @@ export interface AppState {
   currentProfile: PublicProfile | null;
   chromeLauncher: string;
   accountSyncRecords: AccountSyncRecord[];
+  externalInstances: ExternalChromeInstance[];
 }
 
 export interface DeleteProfileResult {

@@ -30,6 +30,7 @@ import type {
   ExtensionMigrationResult,
   ExtensionMigrationSkippedExtension,
   ExtensionScanResult,
+  ExternalChromeInstance,
   NativeChromeProfile,
   NativeProfileMetadata,
   OperationPauseSignal,
@@ -186,6 +187,11 @@ export class ProfileManager {
 
     const runningProfiles = profiles.filter((profile) => profile.running);
     const lastLaunchedProfile = profiles.find((profile) => profile.lastLaunchedAt) || null;
+    const externalInstances = await findExternalChromeInstances([
+      ...isolatedPaths,
+      nativeChromeUserDataDir(),
+      this.dataDir
+    ]);
 
     return {
       appTitle: APP_TITLE,
@@ -198,7 +204,8 @@ export class ProfileManager {
       runningProfiles,
       currentProfile: runningProfiles[0] || lastLaunchedProfile,
       chromeLauncher: this.getLauncherLabel(),
-      accountSyncRecords: Object.values(registry.accountSyncRecords || {}).sort((a, b) => b.syncedAt.localeCompare(a.syncedAt))
+      accountSyncRecords: Object.values(registry.accountSyncRecords || {}).sort((a, b) => b.syncedAt.localeCompare(a.syncedAt)),
+      externalInstances
     };
   }
 
@@ -4072,6 +4079,124 @@ function isGoogleChromeMainProcess(command: string): boolean {
   return /(^|\s)(\/\S+\/)?(google-chrome|google-chrome-stable|chromium|chromium-browser|chrome)(\s|$)/.test(
     command
   );
+}
+
+const GENERIC_DIR_SEGMENTS = new Set([
+  "user-data",
+  "user_data",
+  "userdata",
+  "user data",
+  "data",
+  "default",
+  "profile",
+  "profiles",
+  "browser",
+  "browsers",
+  "chrome",
+  "chromium",
+  "tmp"
+]);
+
+// 识别非本工具、非系统 Chrome 的 Chromium 系浏览器主进程（agent-browser、bb-browser 等
+// 工具会用自带的 Chrome for Testing / Chromium 加自管 user-data-dir 启动）。
+function isChromiumBrowserMainProcess(command: string): boolean {
+  if (command.includes("--type=") || command.includes("chrome_crashpad_handler")) {
+    return false;
+  }
+
+  if (process.platform === "darwin") {
+    return /\/Contents\/MacOS\/(Google Chrome( for Testing| Beta| Dev| Canary)?|Chromium|Microsoft Edge|Brave Browser)(\s|$)/.test(
+      command
+    );
+  }
+
+  return isGoogleChromeMainProcess(command);
+}
+
+function parseExternalBrowserName(command: string): string {
+  const match = command.match(
+    /\/Contents\/MacOS\/(Google Chrome( for Testing| Beta| Dev| Canary)?|Chromium|Microsoft Edge|Brave Browser)(\s|$)/
+  );
+  return match ? match[1] : "Chromium";
+}
+
+// ps 输出不带引号，路径里可能有空格；取到下一个“ --flag”或行尾为止。
+function parseUserDataDirFlag(command: string): string | null {
+  const match = command.match(/--user-data-dir=(.*?)(?=\s+--|$)/);
+  const value = match?.[1]?.trim();
+  return value || null;
+}
+
+function externalInstanceLabel(userDataDir: string): string {
+  const segments = userDataDir.split(path.sep).filter(Boolean);
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    const segment = segments[index];
+    const normalized = segment.replace(/^\./, "").toLowerCase();
+    if (!GENERIC_DIR_SEGMENTS.has(normalized)) {
+      return segment.replace(/^\./, "");
+    }
+  }
+
+  return path.basename(userDataDir) || userDataDir;
+}
+
+async function findExternalChromeInstances(knownUserDataDirs: string[]): Promise<ExternalChromeInstance[]> {
+  const known = new Set(knownUserDataDirs.map((dir) => dir.replace(/\/+$/, "")));
+
+  let stdout = "";
+  try {
+    ({ stdout } = await execFileAsync("ps", ["-axo", "pid=,lstart=,command="], {
+      maxBuffer: 1024 * 1024 * 8,
+      env: POSIX_LOCALE_ENV
+    }));
+  } catch {
+    return [];
+  }
+
+  const byDir = new Map<string, ExternalChromeInstance>();
+  for (const line of stdout.split("\n")) {
+    const processInfo = parseRuntimeProcess(line);
+    if (!processInfo || !isChromiumBrowserMainProcess(processInfo.command)) {
+      continue;
+    }
+
+    const userDataDir = parseUserDataDirFlag(processInfo.command);
+    if (!userDataDir || known.has(userDataDir.replace(/\/+$/, ""))) {
+      continue;
+    }
+
+    const existing = byDir.get(userDataDir);
+    if (existing) {
+      continue;
+    }
+
+    byDir.set(userDataDir, {
+      userDataDir,
+      label: externalInstanceLabel(userDataDir),
+      browser: parseExternalBrowserName(processInfo.command),
+      pid: processInfo.pid,
+      startedAt: processInfo.startedAt,
+      cdpPort: processInfo.cdpPort,
+      cdpUrl: null
+    });
+  }
+
+  const instances = [...byDir.values()];
+  await Promise.all(
+    instances.map(async (instance) => {
+      if (instance.cdpPort === null) {
+        return;
+      }
+      try {
+        await requestCdpVersionInfo(instance.cdpPort);
+        instance.cdpUrl = makeCdpUrl(instance.cdpPort);
+      } catch {
+        // 声明了端口但当前不可达，保留端口号、不给出可用地址。
+      }
+    })
+  );
+
+  return instances.sort((a, b) => (b.startedAt || "").localeCompare(a.startedAt || ""));
 }
 
 async function isChromeRunning(): Promise<boolean> {

@@ -398,6 +398,18 @@ h3 {
   min-width: 0;
 }
 
+/* 定宽操作按钮放不下“xx中…”加载文案，加载态只保留 spinner */
+.profile-actions > .action-button.loading span:not(.inline-spinner),
+.profile-actions > .action-tooltip > .action-button.loading span:not(.inline-spinner) {
+  display: none;
+}
+
+.profile-actions > .action-button.loading .inline-spinner,
+.profile-actions > .action-tooltip > .action-button.loading .inline-spinner {
+  width: 15px;
+  height: 15px;
+}
+
 .profile-actions > .menu-button {
   width: 60px;
 }

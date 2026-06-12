@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, type IpcMainInvokeEvent } from "electron";
+import { app, BrowserWindow, ipcMain, nativeTheme, type IpcMainInvokeEvent } from "electron";
 import path from "node:path";
 import { IPC_CHANNELS } from "../shared/ipc";
 import type {
@@ -82,6 +82,9 @@ function createProgressReporter(
 function createMainWindow(): void {
   const smokeTest = process.env.CPM_ELECTRON_SMOKE_TEST === "1";
 
+  // UI 是深色仪表台主题，原生控件（select 弹出菜单、滚动条等）必须跟随深色
+  nativeTheme.themeSource = "dark";
+
   mainWindow = new BrowserWindow({
     width: 1120,
     height: 760,
@@ -90,7 +93,7 @@ function createMainWindow(): void {
     show: !smokeTest,
     title: APP_TITLE,
     icon: APP_ICON_PATH,
-    backgroundColor: "#f6f7f9",
+    backgroundColor: "#0a1014",
     webPreferences: {
       preload: path.join(__dirname, "../preload.js"),
       contextIsolation: true,

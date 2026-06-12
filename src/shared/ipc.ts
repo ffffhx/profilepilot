@@ -6,6 +6,8 @@ export const IPC_CHANNELS = {
   launchProfileWithCdp: "profiles:launch-cdp",
   focusProfile: "profiles:focus",
   closeProfile: "profiles:close",
+  focusExternalInstance: "profiles:external:focus",
+  closeExternalInstance: "profiles:external:close",
   openProfileFolder: "profiles:open-folder",
   openProfileExtensionsPage: "profiles:open-extensions-page",
   openPath: "profiles:open-path",

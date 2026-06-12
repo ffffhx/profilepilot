@@ -329,6 +329,8 @@ export interface ProfileManagerApi {
   launchProfileWithCdp(id: string, port?: number | null): Promise<AppState>;
   focusProfile(id: string): Promise<AppState>;
   closeProfile(id: string): Promise<AppState>;
+  focusExternalInstance(userDataDir: string): Promise<AppState>;
+  closeExternalInstance(userDataDir: string): Promise<AppState>;
   openProfileFolder(id: string): Promise<AppState>;
   openProfileExtensionsPage(id: string): Promise<AppState>;
   openPath(path: string): Promise<boolean>;

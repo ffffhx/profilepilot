@@ -2174,6 +2174,20 @@ body:not(.booted) .layout {
   color: var(--accent-bright);
 }
 
+.external-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.external-item-actions .action-button {
+  min-height: 30px;
+  padding: 0 12px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .external-item-meta {
   color: var(--muted);
   font-family: var(--font-mono);

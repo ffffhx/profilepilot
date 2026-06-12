@@ -289,6 +289,8 @@ interface ProfileManagerApi {
   launchProfileWithCdp(id: string, port?: number | null): Promise<AppState>;
   focusProfile(id: string): Promise<AppState>;
   closeProfile(id: string): Promise<AppState>;
+  focusExternalInstance(userDataDir: string): Promise<AppState>;
+  closeExternalInstance(userDataDir: string): Promise<AppState>;
   openProfileFolder(id: string): Promise<AppState>;
   openProfileExtensionsPage(id: string): Promise<AppState>;
   openPath(path: string): Promise<boolean>;
@@ -1203,6 +1205,8 @@ function renderExternalInstances(instances: ExternalChromeInstance[]): string {
 function renderExternalInstance(instance: ExternalChromeInstance): string {
   const cdpNote =
     instance.cdpPort !== null && !instance.cdpUrl ? ` · 声明 CDP 端口 ${instance.cdpPort}（当前未响应）` : "";
+  const focusing = isBusyAction("focus-external", { profileId: instance.userDataDir });
+  const closing = isBusyAction("close-external", { profileId: instance.userDataDir });
 
   return `
     <div class="external-item">
@@ -1211,6 +1215,14 @@ function renderExternalInstance(instance: ExternalChromeInstance): string {
         <strong>${escapeHtml(instance.label)}</strong>
         <span class="source-pill">${escapeHtml(instance.browser)}</span>
         ${instance.cdpUrl ? '<span class="source-pill isolated">CDP 可连接</span>' : ""}
+        <div class="external-item-actions">
+          <button type="button" class="action-button accent ${focusing ? "loading" : ""}" data-action="focus-external" data-dir="${escapeHtml(instance.userDataDir)}" ${busy ? "disabled" : ""}>
+            ${renderButtonLabel(focusing, "显示", "显示中…")}
+          </button>
+          <button type="button" class="action-button warn ${closing ? "loading" : ""}" data-action="close-external" data-dir="${escapeHtml(instance.userDataDir)}" ${busy ? "disabled" : ""}>
+            ${renderButtonLabel(closing, "关闭", "关闭中…")}
+          </button>
+        </div>
       </div>
       <span class="external-item-meta">PID ${instance.pid} · 启动于 ${formatDate(instance.startedAt)}${escapeHtml(cdpNote)}</span>
       ${instance.cdpUrl ? `<code class="path-box compact accent">${escapeHtml(instance.cdpUrl)}</code>` : ""}
@@ -3030,6 +3042,34 @@ appRoot.addEventListener("click", (event) => {
     modal = { kind: "cdp", profileId: id };
     render();
     window.setTimeout(() => document.querySelector<HTMLInputElement>("#cdp-port")?.focus(), 0);
+    return;
+  }
+
+  if (action === "focus-external" || action === "close-external") {
+    const dir = actionTarget.dataset.dir;
+    const instance = state.externalInstances?.find((item) => item.userDataDir === dir);
+    if (!dir || !instance) {
+      setToast("这个外部实例已不在运行");
+      return;
+    }
+
+    if (action === "focus-external") {
+      void withBusy(async () => {
+        state = await profileApi().focusExternalInstance(dir);
+      }, `已显示 ${instance.label}`, {
+        key: "focus-external",
+        message: `正在显示 ${instance.label}…`,
+        profileId: dir
+      });
+    } else {
+      void withBusy(async () => {
+        state = await profileApi().closeExternalInstance(dir);
+      }, `已请求关闭 ${instance.label}`, {
+        key: "close-external",
+        message: `正在关闭 ${instance.label}…`,
+        profileId: dir
+      });
+    }
     return;
   }
 

@@ -357,6 +357,16 @@ function registerIpcHandlers(): void {
     return profileManager.getState();
   });
 
+  ipcMain.handle(IPC_CHANNELS.focusExternalInstance, async (_event, userDataDir: string): Promise<AppState> => {
+    await profileManager.focusExternalInstance(userDataDir);
+    return profileManager.getState();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.closeExternalInstance, async (_event, userDataDir: string): Promise<AppState> => {
+    await profileManager.closeExternalInstance(userDataDir);
+    return profileManager.getState();
+  });
+
   ipcMain.handle(IPC_CHANNELS.openProfileFolder, async (_event, id: string): Promise<AppState> => {
     await profileManager.openProfileFolder(id);
     return profileManager.getState();

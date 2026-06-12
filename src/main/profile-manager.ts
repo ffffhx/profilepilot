@@ -321,6 +321,46 @@ export class ProfileManager {
     await focusProfileWindow(refreshedProfile.pids.length ? refreshedProfile.pids : profile.pids);
   }
 
+  async focusExternalInstance(userDataDir: string): Promise<void> {
+    const instance = await this.locateExternalInstance(userDataDir);
+    if (!instance) {
+      throw new ProfileManagerError("这个外部实例已不在运行。", "EXTERNAL_INSTANCE_NOT_RUNNING");
+    }
+
+    await focusProfileWindow([instance.pid]);
+  }
+
+  async closeExternalInstance(userDataDir: string): Promise<void> {
+    const instance = await this.locateExternalInstance(userDataDir);
+    if (!instance) {
+      throw new ProfileManagerError("这个外部实例已不在运行。", "EXTERNAL_INSTANCE_NOT_RUNNING");
+    }
+
+    try {
+      process.kill(instance.pid, "SIGTERM");
+    } catch (error) {
+      if (!isProcessGoneError(error)) {
+        throw error;
+      }
+    }
+
+    const deadline = Date.now() + 1800;
+    while (Date.now() < deadline) {
+      if (!(await this.locateExternalInstance(userDataDir))) {
+        return;
+      }
+      await sleep(200);
+    }
+  }
+
+  // 操作前重新扫描，按 user-data-dir 拿最新 PID，避免界面里的旧 PID 误伤无关进程。
+  private async locateExternalInstance(userDataDir: string): Promise<ExternalChromeInstance | null> {
+    const registry = await this.loadRegistry();
+    const isolatedPaths = registry.profiles.map((profile) => this.isolatedProfilePath(profile));
+    const instances = await findExternalChromeInstances([...isolatedPaths, nativeChromeUserDataDir(), this.dataDir]);
+    return instances.find((instance) => instance.userDataDir === userDataDir) || null;
+  }
+
   async openProfileFolder(profileId: string): Promise<void> {
     const ref = parseProfileId(profileId);
     const profilePath = await this.pathForRef(ref);

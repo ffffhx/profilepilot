@@ -2039,6 +2039,16 @@ function renderCdpDetail(profile: PublicProfile): string {
     `;
   }
 
+  if (profile.source !== "isolated") {
+    return `
+      <div class="detail-row">
+        <span>CDP 地址</span>
+        <strong>不可用</strong>
+        <small class="detail-note">Chrome 不允许在默认数据目录上开启 remote debugging（不会弹授权框，端口也不会监听）。要用 agent 调试带此登录态的浏览器，请用“账号同步”把登录态复制到独立 Profile，再对它“CDP启动”。</small>
+      </div>
+    `;
+  }
+
   return `
     <div class="detail-row">
       <span>CDP 地址</span>
@@ -2539,7 +2549,7 @@ function launchButtonTitle(profile: PublicProfile): string {
 
 function cdpLaunchButtonTitle(profile: PublicProfile): string {
   if (profile.source !== "isolated") {
-    return "CDP 启动仅支持工具独立 Profile；系统 Profile 请先新建独立 Profile";
+    return "Chrome 不允许在默认数据目录上开 CDP（无授权弹窗，端口不会监听）；请用“账号同步”把登录态同步到独立 Profile，再对它 CDP 启动";
   }
   if (profile.running) {
     return profile.cdpUrl
@@ -3031,7 +3041,7 @@ appRoot.addEventListener("click", (event) => {
       return;
     }
     if (profile.source !== "isolated") {
-      setToast("CDP 启动仅支持工具独立 Profile", "error");
+      setToast("Chrome 不允许在默认数据目录上开 CDP；请用“账号同步”把登录态同步到独立 Profile，再对它 CDP 启动", "error");
       return;
     }
     if (profile.running) {

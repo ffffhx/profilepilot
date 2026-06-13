@@ -850,8 +850,11 @@ function render(): void {
             <h2>Profiles</h2>
             <span class="count">${profiles.length}</span>
           </div>
-          ${profiles.length ? renderTable(profiles) : renderEmpty()}
-          ${renderExternalInstances(state.externalInstances || [])}
+          ${
+            profiles.length || (state.externalInstances?.length ?? 0)
+              ? renderProfilesPanel(profiles, state.externalInstances || [])
+              : renderEmpty()
+          }
         </section>
         ${renderDetails(selected)}
       </main>
@@ -1064,10 +1067,14 @@ function renderAccountSyncSkippedItems(items: AccountSyncSkippedItem[]): string 
   `;
 }
 
-function renderTable(profiles: PublicProfile[]): string {
+// 受管 Profile 表格与外部实例放进同一个框：它们本质都是 Profile，只是
+// 来源不同；外部实例仍只读（仅显示/关闭），用框内分隔段和类型标签区分。
+function renderProfilesPanel(profiles: PublicProfile[], externalInstances: ExternalChromeInstance[]): string {
   return `
     <div class="profiles-table-wrap">
-      <table class="profiles-table">
+      ${
+        profiles.length
+          ? `<table class="profiles-table">
         <thead>
           <tr>
             <th>名称</th>
@@ -1078,7 +1085,10 @@ function renderTable(profiles: PublicProfile[]): string {
         <tbody>
           ${profiles.map(renderProfileRow).join("")}
         </tbody>
-      </table>
+      </table>`
+          : ""
+      }
+      ${externalInstances.length ? renderExternalSection(externalInstances) : ""}
     </div>
   `;
 }
@@ -1197,24 +1207,17 @@ function renderEmpty(): string {
   `;
 }
 
-function renderExternalInstances(instances: ExternalChromeInstance[]): string {
-  if (!instances.length) {
-    return "";
-  }
-
+function renderExternalSection(instances: ExternalChromeInstance[]): string {
   return `
-    <section class="external-panel" aria-label="外部 Chrome 实例">
-      <div class="external-panel-head">
-        <div>
-          <h3>外部 Chrome 实例</h3>
-          <span>由其他工具自管的 Chromium 实例（agent-browser 等），仅供查看，不支持迁移和同步。</span>
-        </div>
+    <div class="external-section" aria-label="外部 Chrome 实例">
+      <div class="external-section-head">
+        <span>外部实例 · 其他工具（agent-browser 等）自管，仅支持显示 / 关闭</span>
         <span class="count">${instances.length}</span>
       </div>
       <div class="external-list">
         ${instances.map((instance) => renderExternalInstance(instance)).join("")}
       </div>
-    </section>
+    </div>
   `;
 }
 

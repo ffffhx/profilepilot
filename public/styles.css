@@ -2103,31 +2103,25 @@ body:not(.booted) .layout {
 
 /* ---- external instances ---- */
 
-.external-panel {
-  margin-top: 16px;
-  border: 1px solid var(--info-line);
-  border-radius: 10px;
-  background: linear-gradient(180deg, rgba(95, 182, 255, 0.05), rgba(95, 182, 255, 0.01));
-  padding: 14px 16px;
+/* 外部实例作为 Profiles 表格框内的延续分段，而非独立面板 */
+.external-section {
+  border-top: 1px solid var(--line);
+  border-radius: 0 0 10px 10px;
+  background: rgba(95, 182, 255, 0.03);
+  padding: 13px 16px 16px;
 }
 
-.external-panel-head {
+.external-section-head {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 12px;
-}
-
-.external-panel-head h3 {
-  margin-bottom: 4px;
-}
-
-.external-panel-head > div > span {
-  display: block;
   color: var(--muted);
-  font-size: 12px;
-  line-height: 1.5;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
 }
 
 .external-list {
@@ -2138,6 +2132,9 @@ body:not(.booted) .layout {
 .external-item {
   display: grid;
   gap: 7px;
+}
+
+.external-item + .external-item {
   border-top: 1px solid var(--line);
   padding-top: 12px;
 }

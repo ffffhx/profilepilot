@@ -335,8 +335,16 @@ export class ProfileManager {
       throw new ProfileManagerError("这个 Profile 当前未运行。", "PROFILE_NOT_RUNNING");
     }
 
+    if (profile.source === "native") {
+      // 系统 Chrome 是 LaunchServices 注册的默认实例，open -a 走 LaunchServices
+      // 可靠置顶且不需要任何权限；再尽力用 AXRaise 精确提升窗口（无权限则静默跳过）。
+      await bringChromeAppToFront();
+      await focusProfileWindow(profile.pids);
+      return;
+    }
+
     const raisedWindow = await focusProfileWindow(profile.pids);
-    if (raisedWindow || profile.source !== "isolated" || (await hasRendererProcessForProfile(profile.path))) {
+    if (raisedWindow || (await hasRendererProcessForProfile(profile.path))) {
       return;
     }
 
@@ -1840,6 +1848,15 @@ function launchDetached(command: string, args: string[]): void {
   child.unref();
 }
 
+// 把系统默认 Chrome 实例带到屏幕最前。走 LaunchServices（open -a），不需要
+// 辅助功能权限，且比 NSRunningApplication.activate 在新版 macOS 上更可靠。
+async function bringChromeAppToFront(): Promise<void> {
+  if (process.platform !== "darwin") {
+    return;
+  }
+  await execFileAsync("open", ["-a", process.env.CHROME_APP_NAME || "Google Chrome"]);
+}
+
 async function exists(filePath: string): Promise<boolean> {
   try {
     await fs.access(filePath);
@@ -1920,8 +1937,8 @@ tell application "System Events"
     const { stdout } = await execFileAsync("osascript", ["-e", script]);
     return stdout.trim().toLowerCase() === "true";
   } catch {
-    // NSRunningApplication activation already brought the app process forward.
-    // Window enumeration can fail for Chrome's separate profile instances on macOS.
+    // 窗口级 AXRaise 可能因多 profile 实例或缺少辅助功能权限失败，这属正常；
+    // 调用方已用 NSRunningApplication / open -a 把 app 带到前台，不影响主流程。
     return false;
   }
 }

@@ -410,12 +410,18 @@ h3 {
   height: 15px;
 }
 
-.profile-actions > .menu-button {
+.profile-actions .menu-button {
   width: 60px;
 }
 
 .profile-actions > .action-tooltip > .action-button.cdp {
   width: 78px;
+}
+
+/* “更多”按钮与其菜单的定位锚点：菜单贴按钮弹出，不受操作列宽度影响 */
+.menu-anchor {
+  position: relative;
+  display: inline-flex;
 }
 
 /* ---- action menu ---- */

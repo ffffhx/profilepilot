@@ -1181,6 +1181,7 @@ function renderProfileActions(profile: PublicProfile): string {
             </span>
           `
       }
+      <span class="menu-anchor">
       <button type="button" class="action-button menu-button" data-action="toggle-profile-menu" data-id="${profile.id}" aria-expanded="${menuOpen ? "true" : "false"}" ${busy ? "disabled" : ""}>更多</button>
       ${
         menuOpen
@@ -1212,6 +1213,7 @@ function renderProfileActions(profile: PublicProfile): string {
           `
           : ""
       }
+      </span>
     </div>
   `;
 }

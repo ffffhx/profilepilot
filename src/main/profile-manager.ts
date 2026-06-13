@@ -52,6 +52,7 @@ const POSIX_LOCALE_ENV: NodeJS.ProcessEnv = { ...process.env, LC_ALL: "C" };
 export const APP_TITLE = "ProfilePilot";
 const APP_DATA_DIR_NAME = "ProfilePilot";
 const LEGACY_APP_DATA_DIR_NAME = "Codex Chrome Profile Manager";
+const CHROME_REMOTE_DEBUGGING_URL = "chrome://inspect/#remote-debugging";
 
 type ProfileRef = { source: "native"; dirName: string } | { source: "isolated"; id: string };
 
@@ -282,6 +283,31 @@ export class ProfileManager {
 
     await this.recoverAccountSyncArtifactsBeforeLaunch(profileId);
     await this.launchIsolatedProfileWithCdp(ref.id, portInput);
+  }
+
+  async connectRunningSystemChrome(profileId: string): Promise<void> {
+    const ref = parseProfileId(profileId);
+    if (ref.source !== "native") {
+      throw new ProfileManagerError("连接已运行系统 Chrome 只支持系统 Profile。", "NATIVE_PROFILE_REQUIRED");
+    }
+
+    const state = await this.getState();
+    const profile = state.profiles.find((item) => item.id === makeNativeProfileId(ref.dirName));
+    if (!profile) {
+      throw new ProfileManagerError("没有找到这个 Chrome Profile。", "PROFILE_NOT_FOUND");
+    }
+    if (!profile.running) {
+      throw new ProfileManagerError("请先启动这个系统 Profile，再连接已运行系统 Chrome。", "PROFILE_NOT_RUNNING");
+    }
+
+    if (process.platform === "darwin") {
+      await this.focusProfile(profileId);
+      await sleep(250);
+      await openChromeUrl(CHROME_REMOTE_DEBUGGING_URL);
+      return;
+    }
+
+    await this.launchProfileWithUrls(profileId, [CHROME_REMOTE_DEBUGGING_URL]);
   }
 
   async closeProfile(profileId: string): Promise<void> {
@@ -1776,6 +1802,34 @@ async function launchChrome(args: string[]): Promise<void> {
   } else {
     launchDetached("google-chrome", args);
   }
+}
+
+async function openChromeUrl(url: string): Promise<void> {
+  if (process.env.CHROME_BINARY) {
+    launchDetached(process.env.CHROME_BINARY, [url]);
+  } else if (process.platform === "darwin") {
+    await setFrontMacChromeTabUrl(url);
+  } else if (process.platform === "win32") {
+    await execFileAsync("cmd", ["/c", "start", "", "chrome", url]);
+  } else {
+    launchDetached("google-chrome", [url]);
+  }
+}
+
+async function setFrontMacChromeTabUrl(url: string): Promise<void> {
+  const appName = process.env.CHROME_APP_NAME || "Google Chrome";
+  const script = `
+tell application ${toAppleScriptString(appName)}
+  if (count of windows) is 0 then make new window
+  set URL of active tab of front window to ${toAppleScriptString(url)}
+  activate
+end tell
+`;
+  await execFileAsync("osascript", ["-e", script]);
+}
+
+function toAppleScriptString(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
 function launchDetached(command: string, args: string[]): void {

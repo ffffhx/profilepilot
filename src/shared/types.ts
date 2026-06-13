@@ -327,6 +327,7 @@ export interface ProfileManagerApi {
   renameProfile(id: string, name: string): Promise<AppState>;
   launchProfile(id: string): Promise<AppState>;
   launchProfileWithCdp(id: string, port?: number | null): Promise<AppState>;
+  connectRunningSystemChrome(id: string): Promise<AppState>;
   focusProfile(id: string): Promise<AppState>;
   closeProfile(id: string): Promise<AppState>;
   focusExternalInstance(userDataDir: string): Promise<AppState>;

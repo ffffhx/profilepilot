@@ -287,6 +287,7 @@ interface ProfileManagerApi {
   renameProfile(id: string, name: string): Promise<AppState>;
   launchProfile(id: string): Promise<AppState>;
   launchProfileWithCdp(id: string, port?: number | null): Promise<AppState>;
+  connectRunningSystemChrome(id: string): Promise<AppState>;
   focusProfile(id: string): Promise<AppState>;
   closeProfile(id: string): Promise<AppState>;
   focusExternalInstance(userDataDir: string): Promise<AppState>;
@@ -1110,11 +1111,13 @@ function renderProfileRow(profile: PublicProfile): string {
 function renderProfileActions(profile: PublicProfile): string {
   const menuOpen = openProfileMenuId === profile.id;
   const cdpLaunchDisabled = busy || profile.running || profile.source !== "isolated";
+  const nativeConnectDisabled = busy || !profile.running;
   const deleteDisabled = busy || profile.running || !profile.deletable;
   const focusing = isBusyAction("focus-profile", { profileId: profile.id });
   const closing = isBusyAction("close-profile", { profileId: profile.id });
   const launching = isBusyAction("launch-profile", { profileId: profile.id });
   const launchingCdp = isBusyAction("launch-cdp", { profileId: profile.id });
+  const connectingSystemChrome = isBusyAction("connect-system-chrome", { profileId: profile.id });
   const openingFolder = isBusyAction("open-folder", { profileId: profile.id });
   const renaming = isBusyAction("rename-profile", { profileId: profile.id });
   const deleting = isBusyAction("delete-profile", { profileId: profile.id });
@@ -1143,11 +1146,23 @@ function renderProfileActions(profile: PublicProfile): string {
           ${renderButtonLabel(closing, "关闭", "关闭中…")}
         </button>
       </span>
-      <span class="action-tooltip" data-tooltip="${escapeHtml(cdpLaunchButtonTitle(profile))}">
-        <button type="button" class="action-button cdp ${launchingCdp ? "loading" : ""}" data-action="launch-cdp" data-id="${profile.id}" ${cdpLaunchDisabled ? "disabled" : ""}>
-          ${renderButtonLabel(launchingCdp, "CDP启动", "启动中…")}
-        </button>
-      </span>
+      ${
+        profile.source === "native"
+          ? `
+            <span class="action-tooltip" data-tooltip="${escapeHtml(systemChromeConnectButtonTitle(profile))}">
+              <button type="button" class="action-button cdp ${connectingSystemChrome ? "loading" : ""}" data-action="connect-system-chrome" data-id="${profile.id}" ${nativeConnectDisabled ? "disabled" : ""}>
+                ${renderButtonLabel(connectingSystemChrome, "连接", "连接中…")}
+              </button>
+            </span>
+          `
+          : `
+            <span class="action-tooltip" data-tooltip="${escapeHtml(cdpLaunchButtonTitle(profile))}">
+              <button type="button" class="action-button cdp ${launchingCdp ? "loading" : ""}" data-action="launch-cdp" data-id="${profile.id}" ${cdpLaunchDisabled ? "disabled" : ""}>
+                ${renderButtonLabel(launchingCdp, "CDP启动", "启动中…")}
+              </button>
+            </span>
+          `
+      }
       <button type="button" class="action-button menu-button" data-action="toggle-profile-menu" data-id="${profile.id}" aria-expanded="${menuOpen ? "true" : "false"}" ${busy ? "disabled" : ""}>更多</button>
       ${
         menuOpen
@@ -1751,7 +1766,7 @@ function renderDetails(profile: PublicProfile | null): string {
           <strong>${profile.listeningPorts.length ? profile.listeningPorts.join(", ") : "无"}</strong>
           <small class="detail-note">${listeningPortsNote(profile)}</small>
         </div>
-        ${profile.source === "isolated" ? renderCdpDetail(profile) : ""}
+        ${renderConnectionDetail(profile)}
         <div class="detail-row">
           <span>目录</span>
           <code class="path-box">${escapeHtml(profile.path)}</code>
@@ -2028,6 +2043,28 @@ function renderExtensionMigrationDiffPreview(): string {
   `;
 }
 
+function renderConnectionDetail(profile: PublicProfile): string {
+  if (profile.source === "native") {
+    return renderSystemChromeConnectionDetail(profile);
+  }
+
+  return renderCdpDetail(profile);
+}
+
+function renderSystemChromeConnectionDetail(profile: PublicProfile): string {
+  return `
+    <div class="detail-row">
+      <span>连接方式</span>
+      <strong>${profile.running ? "Chrome 授权连接" : "未运行"}</strong>
+      <small class="detail-note">${
+        profile.running
+          ? "点击“连接”会打开 chrome://inspect/#remote-debugging；先启用入口，Agent Browser --auto-connect 真正接入时再在 Chrome 中点允许。"
+          : "先启动系统 Chrome，再连接已运行系统 Chrome。"
+      }</small>
+    </div>
+  `;
+}
+
 function renderCdpDetail(profile: PublicProfile): string {
   if (profile.cdpUrl) {
     return `
@@ -2035,16 +2072,6 @@ function renderCdpDetail(profile: PublicProfile): string {
         <span>CDP 地址</span>
         <code class="path-box compact">${escapeHtml(profile.cdpUrl)}</code>
         <small class="detail-note">AI/browser agent 工具可以通过这个本机地址连接该 Profile。</small>
-      </div>
-    `;
-  }
-
-  if (profile.source !== "isolated") {
-    return `
-      <div class="detail-row">
-        <span>CDP 地址</span>
-        <strong>不可用</strong>
-        <small class="detail-note">Chrome 不允许在默认数据目录上开启 remote debugging（不会弹授权框，端口也不会监听）。要用 agent 调试带此登录态的浏览器，请用“账号同步”把登录态复制到独立 Profile，再对它“CDP启动”。</small>
       </div>
     `;
   }
@@ -2548,9 +2575,6 @@ function launchButtonTitle(profile: PublicProfile): string {
 }
 
 function cdpLaunchButtonTitle(profile: PublicProfile): string {
-  if (profile.source !== "isolated") {
-    return "Chrome 不允许在默认数据目录上开 CDP（无授权弹窗，端口不会监听）；请用“账号同步”把登录态同步到独立 Profile，再对它 CDP 启动";
-  }
   if (profile.running) {
     return profile.cdpUrl
       ? `CDP 已开启：${profile.cdpUrl}`
@@ -2558,6 +2582,12 @@ function cdpLaunchButtonTitle(profile: PublicProfile): string {
   }
 
   return "启动这个 Profile，并开启本机 CDP 监听端口";
+}
+
+function systemChromeConnectButtonTitle(profile: PublicProfile): string {
+  return profile.running
+    ? "打开 Chrome 远程调试入口；真正授权会在 Agent Browser --auto-connect 连接时弹出"
+    : "先启动系统 Chrome，再连接已运行系统 Chrome";
 }
 
 function focusButtonTitle(profile: PublicProfile): string {
@@ -2734,6 +2764,7 @@ appRoot.addEventListener("click", (event) => {
     }
     return;
   }
+
 
   if (action === "confirm-modal-action" && modal?.kind === "confirm") {
     executeConfirmIntent(modal.intent);
@@ -3041,7 +3072,7 @@ appRoot.addEventListener("click", (event) => {
       return;
     }
     if (profile.source !== "isolated") {
-      setToast("Chrome 不允许在默认数据目录上开 CDP；请用“账号同步”把登录态同步到独立 Profile，再对它 CDP 启动", "error");
+      setToast("系统 Profile 不支持端口式 CDP 启动，请使用“连接”接入已运行系统 Chrome", "error");
       return;
     }
     if (profile.running) {
@@ -3052,6 +3083,32 @@ appRoot.addEventListener("click", (event) => {
     modal = { kind: "cdp", profileId: id };
     render();
     window.setTimeout(() => document.querySelector<HTMLInputElement>("#cdp-port")?.focus(), 0);
+    return;
+  }
+
+  if (action === "connect-system-chrome" && id) {
+    const profile = state.profiles.find((item) => item.id === id);
+    if (!profile) {
+      return;
+    }
+    if (profile.source !== "native") {
+      setToast("连接已运行系统 Chrome 只支持系统 Profile", "error");
+      return;
+    }
+    if (!profile.running) {
+      setToast("请先启动系统 Chrome，再连接已运行系统 Chrome", "error");
+      return;
+    }
+
+    void withBusy(
+      () => profileApi().connectRunningSystemChrome(id),
+      "已打开 Chrome 远程调试入口；Agent Browser --auto-connect 接入时再在 Chrome 中点允许",
+      {
+        key: "connect-system-chrome",
+        message: `正在打开 ${profile.name} 的连接授权入口…`,
+        profileId: id
+      }
+    );
     return;
   }
 

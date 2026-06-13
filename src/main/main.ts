@@ -129,6 +129,8 @@ function createMainWindow(): void {
                   hasFocusProfile: typeof window.profileManager?.focusProfile === "function",
                   hasCloseProfile: typeof window.profileManager?.closeProfile === "function",
                   hasLaunchProfileWithCdp: typeof window.profileManager?.launchProfileWithCdp === "function",
+                  hasConnectRunningSystemChrome:
+                    typeof window.profileManager?.connectRunningSystemChrome === "function",
                   hasScanProfileExtensions: typeof window.profileManager?.scanProfileExtensions === "function",
                   hasMigrateExtensions: typeof window.profileManager?.migrateExtensions === "function",
                   hasDeleteProfileExtension: typeof window.profileManager?.deleteProfileExtension === "function",
@@ -344,6 +346,11 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.launchProfileWithCdp, async (_event, id: string, port?: number | null): Promise<AppState> => {
     await profileManager.launchProfileWithCdp(id, port);
+    return profileManager.getState();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.connectRunningSystemChrome, async (_event, id: string): Promise<AppState> => {
+    await profileManager.connectRunningSystemChrome(id);
     return profileManager.getState();
   });
 

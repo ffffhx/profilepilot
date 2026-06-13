@@ -4,6 +4,7 @@ export const IPC_CHANNELS = {
   renameProfile: "profiles:rename",
   launchProfile: "profiles:launch",
   launchProfileWithCdp: "profiles:launch-cdp",
+  connectRunningSystemChrome: "profiles:system:connect-running-chrome",
   focusProfile: "profiles:focus",
   closeProfile: "profiles:close",
   focusExternalInstance: "profiles:external:focus",

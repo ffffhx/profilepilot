@@ -20,6 +20,12 @@
 
 ---
 
+<div align="center">
+  <img src="docs/screenshots/overview.png" alt="账号同步与扩展迁移面板" width="860" />
+  <br/><br/>
+  <img src="docs/screenshots/profiles.png" alt="Profile 管理与详情面板" width="860" />
+</div>
+
 ## ✨ 这是什么
 
 ProfilePilot 是一个**本机优先（local-first）**的桌面工具，给你日常在用的真实 Chrome 补上一块缺失的控制面。

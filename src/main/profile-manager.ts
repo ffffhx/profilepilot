@@ -186,6 +186,15 @@ export class ProfileManager {
       });
     const profiles = [...nativeProfiles, ...isolatedProfiles];
 
+    // 标记当前写入全局 CLAUDE.md 的 Agent 调试端点指向哪个 Profile。
+    const agentConfig = await readAgentBrowserConfig();
+    if (agentConfig) {
+      const target = profiles.find((profile) => profile.id === agentConfig.profileId);
+      if (target) {
+        target.agentConfigPort = agentConfig.port;
+      }
+    }
+
     const runningProfiles = profiles.filter((profile) => profile.running);
     const lastLaunchedProfile = profiles.find((profile) => profile.lastLaunchedAt) || null;
     const externalInstances = await findExternalChromeInstances([
@@ -308,6 +317,30 @@ export class ProfileManager {
     }
 
     await this.launchProfileWithUrls(profileId, [CHROME_REMOTE_DEBUGGING_URL]);
+  }
+
+  // 把该独立 Profile 绑定为固定调试端口，并写入全局 CLAUDE.md，
+  // 让 Claude Code 在用浏览器时优先连这个常驻 CDP 端点。
+  async setAgentBrowserConfig(profileId: string, port: number): Promise<void> {
+    const ref = parseProfileId(profileId);
+    if (ref.source !== "isolated") {
+      throw new ProfileManagerError("只有工具独立 Profile 才能设为 Agent 调试端点。", "ISOLATED_PROFILE_REQUIRED");
+    }
+    if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+      throw new ProfileManagerError("调试端口必须是 1024-65535 之间的整数。", "INVALID_CDP_PORT");
+    }
+
+    const registry = await this.loadRegistry();
+    const profile = this.findIsolatedProfile(registry, ref.id);
+    profile.fixedCdpPort = port;
+    await this.saveRegistry(registry);
+
+    await writeAgentBrowserConfigFile({ profileId: makeIsolatedProfileId(profile.id), name: profile.name, port });
+  }
+
+  async clearAgentBrowserConfig(_profileId: string): Promise<void> {
+    // 只移除 CLAUDE.md 里的指令块；Profile 的固定端口设置保留。
+    await removeAgentBrowserConfigFile();
   }
 
   async closeProfile(profileId: string): Promise<void> {
@@ -1075,7 +1108,8 @@ export class ProfileManager {
       throw new ProfileManagerError("请先关闭这个 Profile，再用 CDP 模式启动。", "PROFILE_RUNNING");
     }
 
-    const requestedPort = normalizeCdpPortInput(portInput);
+    // 用户没显式填端口时，回落到该 Profile 绑定的固定端口（用于 Agent 调试的恒定端点）。
+    const requestedPort = normalizeCdpPortInput(portInput) ?? profile.fixedCdpPort ?? null;
     const cdpPort = await this.launchStoredIsolatedProfile(profile, { cdpPort: requestedPort, forceCdp: true });
     profile.lastLaunchedAt = new Date().toISOString();
     profile.lastCdpPort = cdpPort;
@@ -1382,6 +1416,8 @@ export class ProfileManager {
       pids: runtimeProfile.pids,
       cdpPort: runtimeProfile.cdpPort,
       cdpUrl: makeCdpUrl(runtimeProfile.cdpPort),
+      fixedCdpPort: null,
+      agentConfigPort: null,
       listeningPorts: runtimeProfile.listeningPorts
     };
   }
@@ -1406,6 +1442,8 @@ export class ProfileManager {
       pids: runtimeProfile.pids,
       cdpPort: runtimeProfile.cdpPort,
       cdpUrl: makeCdpUrl(runtimeProfile.cdpPort),
+      fixedCdpPort: profile.fixedCdpPort ?? null,
+      agentConfigPort: null,
       listeningPorts: runtimeProfile.listeningPorts
     };
   }
@@ -1848,6 +1886,77 @@ function launchDetached(command: string, args: string[]): void {
   child.unref();
 }
 
+// ---- 全局 CLAUDE.md 里的 Agent 调试端点配置 ----
+
+function claudeMemoryPath(): string {
+  return path.join(os.homedir(), ".claude", "CLAUDE.md");
+}
+
+const AGENT_CDP_BLOCK_RE =
+  /\n*<!-- profilepilot:agent-cdp[^>]*-->[\s\S]*?<!-- \/profilepilot:agent-cdp -->\n*/;
+
+function agentBrowserConfigBlock(profileId: string, name: string, port: number): string {
+  return [
+    `<!-- profilepilot:agent-cdp profile=${profileId} port=${port} -->`,
+    `## 浏览器调试 / 自动化（由 ProfilePilot 维护，请勿手改本块）`,
+    ``,
+    `需要用浏览器调试或自动化（agent-browser 等）时，优先复用 ProfilePilot 准备好的调试浏览器，不要新起空白浏览器：`,
+    ``,
+    `- CDP 端点：\`http://127.0.0.1:${port}\``,
+    `- Profile：${name}（ProfilePilot 管理的独立 Profile，已含登录态）`,
+    `- 接入：先 \`agent-browser connect ${port}\`，再正常操作。`,
+    `- 若连接失败：在 ProfilePilot 中对「${name}」点「CDP启动」（会固定使用 ${port} 端口）后重试。`,
+    ``,
+    `<!-- /profilepilot:agent-cdp -->`
+  ].join("\n");
+}
+
+async function writeClaudeMemoryAtomic(content: string): Promise<void> {
+  const target = claudeMemoryPath();
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  const tmpPath = `${target}.cpm-tmp-${process.pid}`;
+  await fs.writeFile(tmpPath, content, "utf8");
+  await fs.rename(tmpPath, target);
+}
+
+async function writeAgentBrowserConfigFile(input: { profileId: string; name: string; port: number }): Promise<void> {
+  let content = "";
+  try {
+    content = await fs.readFile(claudeMemoryPath(), "utf8");
+  } catch {
+    content = "";
+  }
+
+  const withoutBlock = content.replace(AGENT_CDP_BLOCK_RE, "\n").trimEnd();
+  const block = agentBrowserConfigBlock(input.profileId, input.name, input.port);
+  const next = (withoutBlock ? `${withoutBlock}\n\n` : "") + block + "\n";
+  await writeClaudeMemoryAtomic(next);
+}
+
+async function removeAgentBrowserConfigFile(): Promise<void> {
+  let content: string;
+  try {
+    content = await fs.readFile(claudeMemoryPath(), "utf8");
+  } catch {
+    return;
+  }
+
+  const next = content.replace(AGENT_CDP_BLOCK_RE, "\n").replace(/\n{3,}/g, "\n\n").trimEnd();
+  await writeClaudeMemoryAtomic(next ? `${next}\n` : "");
+}
+
+async function readAgentBrowserConfig(): Promise<{ profileId: string; port: number } | null> {
+  let content: string;
+  try {
+    content = await fs.readFile(claudeMemoryPath(), "utf8");
+  } catch {
+    return null;
+  }
+
+  const match = content.match(/<!-- profilepilot:agent-cdp profile=(\S+) port=(\d+) -->/);
+  return match ? { profileId: match[1], port: Number(match[2]) } : null;
+}
+
 // 把系统默认 Chrome 实例带到屏幕最前。走 LaunchServices（open -a），不需要
 // 辅助功能权限，且比 NSRunningApplication.activate 在新版 macOS 上更可靠。
 async function bringChromeAppToFront(): Promise<void> {
@@ -2031,6 +2140,10 @@ function normalizeProfile(profile: unknown): StoredProfile | null {
     lastCdpPort:
       typeof candidate.lastCdpPort === "number" && Number.isInteger(candidate.lastCdpPort)
         ? candidate.lastCdpPort
+        : null,
+    fixedCdpPort:
+      typeof candidate.fixedCdpPort === "number" && Number.isInteger(candidate.fixedCdpPort)
+        ? candidate.fixedCdpPort
         : null,
     migratedExtensions: Array.isArray(candidate.migratedExtensions)
       ? candidate.migratedExtensions

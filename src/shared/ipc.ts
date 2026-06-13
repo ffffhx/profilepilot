@@ -5,6 +5,8 @@ export const IPC_CHANNELS = {
   launchProfile: "profiles:launch",
   launchProfileWithCdp: "profiles:launch-cdp",
   connectRunningSystemChrome: "profiles:system:connect-running-chrome",
+  setAgentBrowserConfig: "profiles:agent:set-config",
+  clearAgentBrowserConfig: "profiles:agent:clear-config",
   focusProfile: "profiles:focus",
   closeProfile: "profiles:close",
   focusExternalInstance: "profiles:external:focus",

@@ -34,6 +34,8 @@ interface PublicProfile {
   pids: number[];
   cdpPort: number | null;
   cdpUrl: string | null;
+  fixedCdpPort: number | null;
+  agentConfigPort: number | null;
   listeningPorts: number[];
 }
 
@@ -289,6 +291,8 @@ interface ProfileManagerApi {
   launchProfile(id: string): Promise<AppState>;
   launchProfileWithCdp(id: string, port?: number | null): Promise<AppState>;
   connectRunningSystemChrome(id: string): Promise<AppState>;
+  setAgentBrowserConfig(id: string, port: number): Promise<AppState>;
+  clearAgentBrowserConfig(id: string): Promise<AppState>;
   focusProfile(id: string): Promise<AppState>;
   closeProfile(id: string): Promise<AppState>;
   focusExternalInstance(userDataDir: string): Promise<AppState>;
@@ -361,6 +365,7 @@ type ModalState =
   | { kind: "rename"; profileId: string }
   | { kind: "cdp"; profileId: string }
   | { kind: "extension-migration" }
+  | { kind: "agent-config"; profileId: string }
   | {
       kind: "confirm";
       intent: ConfirmIntent;
@@ -862,6 +867,7 @@ function render(): void {
     ${modal?.kind === "new" ? renderNewModal() : ""}
     ${modal?.kind === "rename" ? renderRenameModal(modal.profileId) : ""}
     ${modal?.kind === "cdp" ? renderCdpModal(modal.profileId) : ""}
+    ${modal?.kind === "agent-config" ? renderAgentConfigModal(modal.profileId) : ""}
     ${modal?.kind === "extension-migration" ? renderExtensionMigrationModal(profiles) : ""}
     ${modal?.kind === "confirm" ? renderConfirmModal(modal) : ""}
     ${toast ? `<div class="toast ${toastKind === "error" ? "error" : ""}" role="status">${escapeHtml(toast)}</div>` : ""}
@@ -1863,6 +1869,36 @@ function renderCdpModal(profileId: string): string {
   `;
 }
 
+function renderAgentConfigModal(profileId: string): string {
+  const profile = state?.profiles.find((item) => item.id === profileId);
+  if (!profile) {
+    return "";
+  }
+  const saving = isBusyAction("agent-config", { profileId });
+  const defaultPort = profile.fixedCdpPort ?? profile.cdpPort ?? 9223;
+
+  return `
+    <div class="modal-backdrop" data-action="close-modal">
+      <form class="modal" data-agent-config-form data-profile-id="${escapeHtml(profile.id)}">
+        <span class="modal-kicker">Agent 调试端点</span>
+        <h2>把 ${escapeHtml(profile.name)} 设为 Agent 默认调试浏览器</h2>
+        <p class="modal-copy">会给这个 Profile 绑定一个固定调试端口，并写入全局 <code>~/.claude/CLAUDE.md</code>，让 Claude Code 调试浏览器时优先用 <code>agent-browser connect</code> 接入它。</p>
+        <div class="field">
+          <label for="agent-port">固定调试端口</label>
+          <input id="agent-port" name="port" type="number" min="1024" max="65535" inputmode="numeric" value="${defaultPort}" />
+          <span class="field-note">以后对该 Profile「CDP启动」会固定使用这个端口。常用 9222 / 9223。</span>
+        </div>
+        <div class="modal-actions">
+          <button type="button" data-action="close-modal">取消</button>
+          <button type="submit" class="solid ${saving ? "loading" : ""}" ${busy ? "disabled" : ""}>
+            ${renderButtonLabel(saving, "写入配置", "写入中…")}
+          </button>
+        </div>
+      </form>
+    </div>
+  `;
+}
+
 function renderExtensionMigrationModal(profiles: PublicProfile[]): string {
   const sourceId = migrationSourceId || profiles[0]?.id || "";
   const activeScan = extensionScan?.profileId === sourceId ? extensionScan : null;
@@ -2075,21 +2111,49 @@ function renderSystemChromeConnectionDetail(profile: PublicProfile): string {
 }
 
 function renderCdpDetail(profile: PublicProfile): string {
-  if (profile.cdpUrl) {
-    return `
-      <div class="detail-row">
+  const cdpRow = profile.cdpUrl
+    ? `<div class="detail-row">
         <span>CDP 地址</span>
         <code class="path-box compact">${escapeHtml(profile.cdpUrl)}</code>
         <small class="detail-note">AI/browser agent 工具可以通过这个本机地址连接该 Profile。</small>
+      </div>`
+    : `<div class="detail-row">
+        <span>CDP 地址</span>
+        <strong>未开启</strong>
+        <small class="detail-note">点击“CDP启动”后会显示本机连接地址。</small>
+      </div>`;
+
+  return cdpRow + renderAgentConfigDetail(profile);
+}
+
+function renderAgentConfigDetail(profile: PublicProfile): string {
+  const busying = isBusyAction("agent-config", { profileId: profile.id });
+
+  if (profile.agentConfigPort !== null) {
+    return `
+      <div class="detail-row">
+        <span>Agent 调试配置</span>
+        <strong>已写入全局 CLAUDE.md</strong>
+        <small class="detail-note">Claude 调试浏览器时会优先连接 <code>http://127.0.0.1:${profile.agentConfigPort}</code>（本 Profile，固定端口 ${profile.fixedCdpPort ?? profile.agentConfigPort}）。</small>
+        <div class="detail-actions">
+          <button type="button" class="action-button warn ${busying ? "loading" : ""}" data-action="clear-agent-config" data-id="${profile.id}" ${busy ? "disabled" : ""}>
+            ${renderButtonLabel(busying, "移除配置", "移除中…")}
+          </button>
+        </div>
       </div>
     `;
   }
 
   return `
     <div class="detail-row">
-      <span>CDP 地址</span>
-      <strong>未开启</strong>
-      <small class="detail-note">点击“CDP启动”后会显示本机连接地址。</small>
+      <span>Agent 调试配置</span>
+      <strong>未写入</strong>
+      <small class="detail-note">写入后，Claude Code 调试浏览器时会优先连接此 Profile 的固定调试端口（而不是新起空白浏览器）。</small>
+      <div class="detail-actions">
+        <button type="button" class="action-button accent ${busying ? "loading" : ""}" data-action="write-agent-config" data-id="${profile.id}" ${busy ? "disabled" : ""}>
+          ${renderButtonLabel(busying, "写入 Agent 配置", "写入中…")}
+        </button>
+      </div>
     </div>
   `;
 }
@@ -3095,6 +3159,28 @@ appRoot.addEventListener("click", (event) => {
     return;
   }
 
+  if (action === "write-agent-config" && id) {
+    const profile = state.profiles.find((item) => item.id === id);
+    if (!profile || profile.source !== "isolated") {
+      setToast("只有工具独立 Profile 才能设为 Agent 调试端点", "error");
+      return;
+    }
+    modal = { kind: "agent-config", profileId: id };
+    render();
+    window.setTimeout(() => document.querySelector<HTMLInputElement>("#agent-port")?.focus(), 0);
+    return;
+  }
+
+  if (action === "clear-agent-config" && id) {
+    const profile = state.profiles.find((item) => item.id === id);
+    void withBusy(() => profileApi().clearAgentBrowserConfig(id), `已从 CLAUDE.md 移除 ${profile?.name || "Profile"} 的 Agent 配置`, {
+      key: "agent-config",
+      message: "正在移除 Agent 配置…",
+      profileId: id
+    });
+    return;
+  }
+
   if (action === "connect-system-chrome" && id) {
     const profile = state.profiles.find((item) => item.id === id);
     if (!profile) {
@@ -3332,12 +3418,34 @@ appRoot.addEventListener("submit", (event) => {
   const createForm = target?.closest<HTMLFormElement>("[data-create-form]");
   const renameForm = target?.closest<HTMLFormElement>("[data-rename-form]");
   const cdpForm = target?.closest<HTMLFormElement>("[data-cdp-form]");
+  const agentConfigForm = target?.closest<HTMLFormElement>("[data-agent-config-form]");
   const extensionMigrationForm = target?.closest<HTMLFormElement>("[data-extension-migration-form]");
-  if (!createForm && !renameForm && !cdpForm && !extensionMigrationForm) {
+  if (!createForm && !renameForm && !cdpForm && !agentConfigForm && !extensionMigrationForm) {
     return;
   }
 
   event.preventDefault();
+
+  if (agentConfigForm) {
+    const profileId = agentConfigForm.dataset.profileId;
+    const profile = state?.profiles.find((item) => item.id === profileId);
+    if (!profileId || !profile) {
+      return;
+    }
+    const data = new FormData(agentConfigForm);
+    const parsedPort = Number(String(data.get("port") || "").trim());
+    if (!Number.isInteger(parsedPort) || parsedPort < 1024 || parsedPort > 65535) {
+      setToast("调试端口必须是 1024-65535 之间的整数", "error");
+      return;
+    }
+    modal = null;
+    void withBusy(
+      () => profileApi().setAgentBrowserConfig(profileId, parsedPort),
+      `已写入全局 CLAUDE.md：Agent 优先连接 ${profile.name}（端口 ${parsedPort}）`,
+      { key: "agent-config", message: "正在写入 Agent 配置…", profileId }
+    );
+    return;
+  }
 
   if (extensionMigrationForm) {
     const sourceId = migrationSourceId;

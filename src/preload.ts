@@ -26,6 +26,10 @@ const profileManagerApi: ProfileManagerApi = {
     ipcRenderer.invoke(IPC_CHANNELS.launchProfileWithCdp, id, port),
   connectRunningSystemChrome: (id: string): Promise<AppState> =>
     ipcRenderer.invoke(IPC_CHANNELS.connectRunningSystemChrome, id),
+  setAgentBrowserConfig: (id: string, port: number): Promise<AppState> =>
+    ipcRenderer.invoke(IPC_CHANNELS.setAgentBrowserConfig, id, port),
+  clearAgentBrowserConfig: (id: string): Promise<AppState> =>
+    ipcRenderer.invoke(IPC_CHANNELS.clearAgentBrowserConfig, id),
   focusProfile: (id: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.focusProfile, id),
   closeProfile: (id: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.closeProfile, id),
   focusExternalInstance: (userDataDir: string): Promise<AppState> =>

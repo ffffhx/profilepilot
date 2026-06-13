@@ -354,6 +354,16 @@ function registerIpcHandlers(): void {
     return profileManager.getState();
   });
 
+  ipcMain.handle(IPC_CHANNELS.setAgentBrowserConfig, async (_event, id: string, port: number): Promise<AppState> => {
+    await profileManager.setAgentBrowserConfig(id, port);
+    return profileManager.getState();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.clearAgentBrowserConfig, async (_event, id: string): Promise<AppState> => {
+    await profileManager.clearAgentBrowserConfig(id);
+    return profileManager.getState();
+  });
+
   ipcMain.handle(IPC_CHANNELS.focusProfile, async (_event, id: string): Promise<AppState> => {
     await profileManager.focusProfile(id);
     return profileManager.getState();

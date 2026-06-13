@@ -5,6 +5,7 @@ export interface StoredProfile {
   createdAt: string;
   lastLaunchedAt: string | null;
   lastCdpPort?: number | null;
+  fixedCdpPort?: number | null;
   migratedExtensions?: StoredMigratedExtension[];
 }
 
@@ -57,6 +58,8 @@ export interface PublicProfile {
   pids: number[];
   cdpPort: number | null;
   cdpUrl: string | null;
+  fixedCdpPort: number | null;
+  agentConfigPort: number | null;
   listeningPorts: number[];
 }
 
@@ -329,6 +332,8 @@ export interface ProfileManagerApi {
   launchProfile(id: string): Promise<AppState>;
   launchProfileWithCdp(id: string, port?: number | null): Promise<AppState>;
   connectRunningSystemChrome(id: string): Promise<AppState>;
+  setAgentBrowserConfig(id: string, port: number): Promise<AppState>;
+  clearAgentBrowserConfig(id: string): Promise<AppState>;
   focusProfile(id: string): Promise<AppState>;
   closeProfile(id: string): Promise<AppState>;
   focusExternalInstance(userDataDir: string): Promise<AppState>;

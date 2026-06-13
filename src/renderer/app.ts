@@ -1138,6 +1138,7 @@ function renderProfileActions(profile: PublicProfile): string {
   const openingFolder = isBusyAction("open-folder", { profileId: profile.id });
   const renaming = isBusyAction("rename-profile", { profileId: profile.id });
   const deleting = isBusyAction("delete-profile", { profileId: profile.id });
+  const agentConfigBusy = isBusyAction("agent-config", { profileId: profile.id });
 
   return `
     <div class="profile-actions" data-profile-actions>
@@ -1191,6 +1192,17 @@ function renderProfileActions(profile: PublicProfile): string {
               <button type="button" class="${renaming ? "loading" : ""}" data-action="rename-profile" data-id="${profile.id}" ${busy ? "disabled" : ""}>
                 ${renderButtonLabel(renaming, "修改名称", "保存中…")}
               </button>
+              ${
+                profile.source === "isolated"
+                  ? profile.agentConfigPort !== null
+                    ? `<button type="button" class="${agentConfigBusy ? "loading" : ""}" data-action="clear-agent-config" data-id="${profile.id}" ${busy ? "disabled" : ""}>
+                ${renderButtonLabel(agentConfigBusy, "移除 Agent 配置", "移除中…")}
+              </button>`
+                    : `<button type="button" class="${agentConfigBusy ? "loading" : ""}" data-action="write-agent-config" data-id="${profile.id}" ${busy ? "disabled" : ""}>
+                ${renderButtonLabel(agentConfigBusy, "设为 Agent 端点", "处理中…")}
+              </button>`
+                  : ""
+              }
               <span class="action-tooltip" data-tooltip="${escapeHtml(deleteButtonTitle(profile))}">
                 <button type="button" class="danger ${deleting ? "loading" : ""}" data-action="delete" data-id="${profile.id}" ${deleteDisabled ? "disabled" : ""}>
                   ${renderButtonLabel(deleting, "删除 Profile", "删除中…")}
@@ -1756,20 +1768,8 @@ function renderDetails(profile: PublicProfile | null): string {
           <strong>${sourceDetail(profile)}</strong>
         </div>
         <div class="detail-row">
-          <span>ID</span>
-          <strong>${escapeHtml(profile.id)}</strong>
-        </div>
-        <div class="detail-row">
           <span>账号</span>
           <strong>${escapeHtml(profile.userName || "未登录")}</strong>
-        </div>
-        <div class="detail-row">
-          <span>创建时间</span>
-          <strong>${profile.createdAt ? formatDate(profile.createdAt) : "由 Chrome 管理"}</strong>
-        </div>
-        <div class="detail-row">
-          <span>最近启动</span>
-          <strong>${formatDate(profile.lastLaunchedAt)}</strong>
         </div>
         <div class="detail-row">
           <span>${processLabel(profile)}</span>
@@ -2127,19 +2127,13 @@ function renderCdpDetail(profile: PublicProfile): string {
 }
 
 function renderAgentConfigDetail(profile: PublicProfile): string {
-  const busying = isBusyAction("agent-config", { profileId: profile.id });
-
+  // 操作入口在「更多」菜单里；这里只展示当前状态。
   if (profile.agentConfigPort !== null) {
     return `
       <div class="detail-row">
         <span>Agent 调试配置</span>
         <strong>已写入全局 CLAUDE.md</strong>
-        <small class="detail-note">Claude 调试浏览器时会优先连接 <code>http://127.0.0.1:${profile.agentConfigPort}</code>（本 Profile，固定端口 ${profile.fixedCdpPort ?? profile.agentConfigPort}）。</small>
-        <div class="detail-actions">
-          <button type="button" class="action-button warn ${busying ? "loading" : ""}" data-action="clear-agent-config" data-id="${profile.id}" ${busy ? "disabled" : ""}>
-            ${renderButtonLabel(busying, "移除配置", "移除中…")}
-          </button>
-        </div>
+        <small class="detail-note">Claude 调试浏览器时会优先连接 <code>http://127.0.0.1:${profile.agentConfigPort}</code>（本 Profile，固定端口 ${profile.fixedCdpPort ?? profile.agentConfigPort}）。在「更多」里可移除。</small>
       </div>
     `;
   }
@@ -2148,12 +2142,7 @@ function renderAgentConfigDetail(profile: PublicProfile): string {
     <div class="detail-row">
       <span>Agent 调试配置</span>
       <strong>未写入</strong>
-      <small class="detail-note">写入后，Claude Code 调试浏览器时会优先连接此 Profile 的固定调试端口（而不是新起空白浏览器）。</small>
-      <div class="detail-actions">
-        <button type="button" class="action-button accent ${busying ? "loading" : ""}" data-action="write-agent-config" data-id="${profile.id}" ${busy ? "disabled" : ""}>
-          ${renderButtonLabel(busying, "写入 Agent 配置", "写入中…")}
-        </button>
-      </div>
+      <small class="detail-note">在「更多」里「设为 Agent 端点」后，Claude Code 调试浏览器会优先连接此 Profile 的固定调试端口。</small>
     </div>
   `;
 }

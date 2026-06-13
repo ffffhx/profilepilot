@@ -1404,7 +1404,11 @@ export class ProfileManager {
     return {
       id: makeNativeProfileId(profile.dirName),
       source: "native",
-      name: registry.nativeProfiles?.[profile.dirName]?.name || profile.name,
+      // 默认 Profile 统一显示为“系统默认 Profile”（除非用户在本工具里手动重命名过）；
+      // 其它系统 Profile 仍沿用 Chrome 自己的名字。
+      name:
+        registry.nativeProfiles?.[profile.dirName]?.name ||
+        (profile.isDefault ? "系统默认 Profile" : profile.name),
       dirName: profile.dirName,
       path: profile.path,
       createdAt: null,

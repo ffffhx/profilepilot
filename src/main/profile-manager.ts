@@ -4288,7 +4288,9 @@ async function findExternalChromeInstances(knownUserDataDirs: string[]): Promise
       pid: processInfo.pid,
       startedAt: processInfo.startedAt,
       cdpPort: processInfo.cdpPort,
-      cdpUrl: null
+      cdpUrl: null,
+      // 无头实例（agent-browser 默认 --headless=new）没有可见窗口，无法“显示”。
+      headless: /--headless(=|\s|$)/.test(processInfo.command)
     });
   }
 

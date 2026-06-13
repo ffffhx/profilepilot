@@ -65,6 +65,7 @@ interface ExternalChromeInstance {
   startedAt: string | null;
   cdpPort: number | null;
   cdpUrl: string | null;
+  headless: boolean;
 }
 
 interface AppState {
@@ -1230,16 +1231,21 @@ function renderExternalInstance(instance: ExternalChromeInstance): string {
         <strong>${escapeHtml(instance.label)}</strong>
         <span class="source-pill">${escapeHtml(instance.browser)}</span>
         ${instance.cdpUrl ? '<span class="source-pill isolated">CDP 可连接</span>' : ""}
+        ${instance.headless ? '<span class="source-pill warn">无头 · 无窗口</span>' : ""}
         <div class="external-item-actions">
-          <button type="button" class="action-button accent ${focusing ? "loading" : ""}" data-action="focus-external" data-dir="${escapeHtml(instance.userDataDir)}" ${busy ? "disabled" : ""}>
+          ${
+            instance.headless
+              ? ""
+              : `<button type="button" class="action-button accent ${focusing ? "loading" : ""}" data-action="focus-external" data-dir="${escapeHtml(instance.userDataDir)}" ${busy ? "disabled" : ""}>
             ${renderButtonLabel(focusing, "显示", "显示中…")}
-          </button>
+          </button>`
+          }
           <button type="button" class="action-button warn ${closing ? "loading" : ""}" data-action="close-external" data-dir="${escapeHtml(instance.userDataDir)}" ${busy ? "disabled" : ""}>
             ${renderButtonLabel(closing, "关闭", "关闭中…")}
           </button>
         </div>
       </div>
-      <span class="external-item-meta">PID ${instance.pid} · 启动于 ${formatDate(instance.startedAt)}${escapeHtml(cdpNote)}</span>
+      <span class="external-item-meta">PID ${instance.pid} · 启动于 ${formatDate(instance.startedAt)}${escapeHtml(cdpNote)}${instance.headless ? " · 无头模式运行，没有可见窗口" : ""}</span>
       ${instance.cdpUrl ? `<code class="path-box compact accent">${escapeHtml(instance.cdpUrl)}</code>` : ""}
       <code class="path-box compact">${escapeHtml(instance.userDataDir)}</code>
     </div>
@@ -3121,6 +3127,10 @@ appRoot.addEventListener("click", (event) => {
     }
 
     if (action === "focus-external") {
+      if (instance.headless) {
+        setToast(`${instance.label} 是无头实例，没有可见窗口，无法显示`, "error");
+        return;
+      }
       void withBusy(async () => {
         state = await profileApi().focusExternalInstance(dir);
       }, `已显示 ${instance.label}`, {

@@ -76,6 +76,7 @@ export interface ExternalChromeInstance {
   startedAt: string | null;
   cdpPort: number | null;
   cdpUrl: string | null;
+  headless: boolean;
 }
 
 export interface AppState {

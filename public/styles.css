@@ -2088,7 +2088,8 @@ body:not(.booted) .layout {
   white-space: nowrap;
 }
 
-.source-pill.native {
+.source-pill.native,
+.source-pill.warn {
   border-color: var(--warn-line);
   background: var(--warn-soft);
   color: var(--warn-bright);

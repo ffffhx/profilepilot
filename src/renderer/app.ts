@@ -677,7 +677,10 @@ async function withBusy(work: () => Promise<unknown>, successMessage?: string, n
       setToast(successMessage);
     }
   } catch (error) {
-    setToast(formatErrorMessage(error), "error");
+    // 用户主动终止（OPERATION_CANCELLED）不是错误，用中性提示而非红色报错。
+    const message = formatErrorMessage(error);
+    const cancelled = message.startsWith("已终止同步") || message.startsWith("已取消");
+    setToast(message, cancelled ? "normal" : "error");
   } finally {
     busy = false;
     busyState = null;

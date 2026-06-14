@@ -384,6 +384,7 @@ const appRoot: HTMLDivElement = root;
 
 let state: AppState | null = null;
 let selectedId: string | null = null;
+let selectedExternalDir: string | null = null;
 let modal: ModalState = null;
 let busy = false;
 let busyState: BusyState | null = null;
@@ -799,6 +800,8 @@ function render(): void {
 
   const profiles = state.profiles || [];
   const selected = profiles.find((profile) => profile.id === selectedId) || null;
+  const selectedExternal =
+    (state.externalInstances || []).find((instance) => instance.userDataDir === selectedExternalDir) || null;
   const runningNames = state.runningProfiles.map((profile) => profile.name).join("、");
   const currentLabel = state.runningProfiles.length ? runningNames : "无";
   const currentNote = state.runningProfiles.length
@@ -861,7 +864,7 @@ function render(): void {
               : renderEmpty()
           }
         </section>
-        ${renderDetails(selected)}
+        ${selectedExternal ? renderExternalDetails(selectedExternal) : renderDetails(selected)}
       </main>
     </div>
     ${modal?.kind === "new" ? renderNewModal() : ""}
@@ -1247,11 +1250,14 @@ function renderExternalInstance(instance: ExternalChromeInstance): string {
   const focusing = isBusyAction("focus-external", { profileId: instance.userDataDir });
   const closing = isBusyAction("close-external", { profileId: instance.userDataDir });
 
+  const isSelected = instance.userDataDir === selectedExternalDir;
+
   return `
-    <div class="external-item">
+    <div class="external-item ${isSelected ? "selected" : ""}" data-action="select-external" data-dir="${escapeHtml(instance.userDataDir)}" tabindex="0" aria-selected="${isSelected ? "true" : "false"}">
       <div class="external-item-head">
         <span class="status-dot running"></span>
         <strong>${escapeHtml(instance.label)}</strong>
+        <span class="state-pill running">运行中</span>
         <span class="source-pill">${escapeHtml(instance.browser)}</span>
         ${instance.cdpUrl ? '<span class="source-pill isolated">CDP 可连接</span>' : ""}
         ${instance.headless ? '<span class="source-pill warn">无头 · 无窗口</span>' : ""}
@@ -1272,6 +1278,56 @@ function renderExternalInstance(instance: ExternalChromeInstance): string {
       ${instance.cdpUrl ? `<code class="path-box compact accent">${escapeHtml(instance.cdpUrl)}</code>` : ""}
       <code class="path-box compact">${escapeHtml(instance.userDataDir)}</code>
     </div>
+  `;
+}
+
+function renderExternalDetails(instance: ExternalChromeInstance): string {
+  const cdpRow = instance.cdpUrl
+    ? `<div class="detail-row">
+        <span>CDP 地址</span>
+        <code class="path-box compact accent">${escapeHtml(instance.cdpUrl)}</code>
+        <small class="detail-note">由其他工具开启的调试端点，可直接连接，但本工具不接管它的生命周期。</small>
+      </div>`
+    : `<div class="detail-row">
+        <span>CDP 地址</span>
+        <strong>${instance.cdpPort !== null ? `声明端口 ${instance.cdpPort}（当前未响应）` : "未开启"}</strong>
+      </div>`;
+
+  return `
+    <aside class="details">
+      <div class="detail-title">
+        <h2>${escapeHtml(instance.label)}</h2>
+        <span class="detail-status running">运行中</span>
+      </div>
+      <div class="detail-list">
+        <div class="detail-row">
+          <span>来源</span>
+          <strong>外部实例（其他工具自管）</strong>
+          <small class="detail-note">不是 ProfilePilot 创建或管理的 Profile，仅支持显示 / 关闭。</small>
+        </div>
+        <div class="detail-row">
+          <span>浏览器内核</span>
+          <strong>${escapeHtml(instance.browser)}</strong>
+        </div>
+        <div class="detail-row">
+          <span>窗口</span>
+          <strong>${instance.headless ? "无头模式（无可见窗口）" : "有可见窗口"}</strong>
+        </div>
+        <div class="detail-row">
+          <span>主进程 PID</span>
+          <strong>${instance.pid}</strong>
+        </div>
+        <div class="detail-row">
+          <span>启动时间</span>
+          <strong>${formatDate(instance.startedAt)}</strong>
+        </div>
+        ${cdpRow}
+        <div class="detail-row">
+          <span>数据目录</span>
+          <code class="path-box">${escapeHtml(instance.userDataDir)}</code>
+        </div>
+      </div>
+    </aside>
   `;
 }
 
@@ -3112,7 +3168,18 @@ appRoot.addEventListener("click", (event) => {
 
   if (action === "select" && id) {
     selectedId = id;
+    selectedExternalDir = null;
     render();
+    return;
+  }
+
+  if (action === "select-external") {
+    const dir = actionTarget.dataset.dir;
+    if (dir) {
+      selectedExternalDir = dir;
+      selectedId = null;
+      render();
+    }
     return;
   }
 

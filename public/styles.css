@@ -2132,17 +2132,33 @@ body:not(.booted) .layout {
 
 .external-list {
   display: grid;
-  gap: 12px;
+  gap: 8px;
 }
 
 .external-item {
   display: grid;
   gap: 7px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 9px 10px;
+  transition:
+    background 0.14s ease,
+    border-color 0.14s ease;
 }
 
-.external-item + .external-item {
-  border-top: 1px solid var(--line);
-  padding-top: 12px;
+.external-item:hover {
+  background: rgba(143, 161, 173, 0.05);
+}
+
+.external-item.selected {
+  border-color: var(--accent-line);
+  background: rgba(56, 225, 160, 0.06);
+}
+
+.external-item:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: -1px;
 }
 
 .external-item-head {

@@ -2127,17 +2127,10 @@ body:not(.booted) .layout {
   margin-left: 10px;
 }
 
-/* 外部实例行的浏览器内核标签用信息蓝，和受管 Profile 的来源标签区分 */
-.external-row .source-pill {
-  border-color: var(--info-line);
-  color: var(--info-bright);
-  background: var(--info-soft);
-}
-
-.external-row .source-pill.warn {
-  border-color: var(--warn-line);
-  background: var(--warn-soft);
-  color: var(--warn-bright);
+/* 名称行里的标签固定宽度，不被长名字挤压重叠 */
+.profile-name-line .source-pill,
+.profile-name-line .native-badge {
+  flex: 0 0 auto;
 }
 
 .external-row .profile-dir {

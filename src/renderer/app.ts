@@ -1250,10 +1250,9 @@ function renderExternalRow(instance: ExternalChromeInstance): string {
           <span class="profile-name-line">
             <span class="status-dot running"></span>
             <span class="profile-name">${escapeHtml(instance.label)}</span>
-            <span class="source-pill">${escapeHtml(instance.browser)}</span>
             ${instance.headless ? '<span class="source-pill warn">无头</span>' : ""}
           </span>
-          <span class="profile-dir">PID ${instance.pid} · ${escapeHtml(instance.userDataDir)}</span>
+          <span class="profile-dir">${escapeHtml(instance.browser)} · PID ${instance.pid} · ${escapeHtml(instance.userDataDir)}</span>
         </div>
       </td>
       <td>

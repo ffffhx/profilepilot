@@ -1081,9 +1081,7 @@ function renderAccountSyncSkippedItems(items: AccountSyncSkippedItem[]): string 
 function renderProfilesPanel(profiles: PublicProfile[], externalInstances: ExternalChromeInstance[]): string {
   return `
     <div class="profiles-table-wrap">
-      ${
-        profiles.length
-          ? `<table class="profiles-table">
+      <table class="profiles-table">
         <thead>
           <tr>
             <th>名称</th>
@@ -1093,11 +1091,9 @@ function renderProfilesPanel(profiles: PublicProfile[], externalInstances: Exter
         </thead>
         <tbody>
           ${profiles.map(renderProfileRow).join("")}
+          ${externalInstances.length ? renderExternalRows(externalInstances) : ""}
         </tbody>
-      </table>`
-          : ""
-      }
-      ${externalInstances.length ? renderExternalSection(externalInstances) : ""}
+      </table>
     </div>
   `;
 }
@@ -1230,54 +1226,58 @@ function renderEmpty(): string {
   `;
 }
 
-function renderExternalSection(instances: ExternalChromeInstance[]): string {
+function renderExternalRows(instances: ExternalChromeInstance[]): string {
   return `
-    <div class="external-section" aria-label="外部 Chrome 实例">
-      <div class="external-section-head">
+    <tr class="table-group-row">
+      <td colspan="3">
         <span>外部实例 · 其他工具（agent-browser 等）自管，仅支持显示 / 关闭</span>
         <span class="count">${instances.length}</span>
-      </div>
-      <div class="external-list">
-        ${instances.map((instance) => renderExternalInstance(instance)).join("")}
-      </div>
-    </div>
+      </td>
+    </tr>
+    ${instances.map((instance) => renderExternalRow(instance)).join("")}
   `;
 }
 
-function renderExternalInstance(instance: ExternalChromeInstance): string {
-  const cdpNote =
-    instance.cdpPort !== null && !instance.cdpUrl ? ` · 声明 CDP 端口 ${instance.cdpPort}（当前未响应）` : "";
+function renderExternalRow(instance: ExternalChromeInstance): string {
+  const selected = instance.userDataDir === selectedExternalDir;
   const focusing = isBusyAction("focus-external", { profileId: instance.userDataDir });
   const closing = isBusyAction("close-external", { profileId: instance.userDataDir });
 
-  const isSelected = instance.userDataDir === selectedExternalDir;
-
   return `
-    <div class="external-item ${isSelected ? "selected" : ""}" data-action="select-external" data-dir="${escapeHtml(instance.userDataDir)}" tabindex="0" aria-selected="${isSelected ? "true" : "false"}">
-      <div class="external-item-head">
-        <span class="status-dot running"></span>
-        <strong>${escapeHtml(instance.label)}</strong>
+    <tr class="external-row ${selected ? "selected" : ""}" data-action="select-external" data-dir="${escapeHtml(instance.userDataDir)}" tabindex="0" aria-selected="${selected ? "true" : "false"}">
+      <td>
+        <div class="profile-pick">
+          <span class="profile-name-line">
+            <span class="status-dot running"></span>
+            <span class="profile-name">${escapeHtml(instance.label)}</span>
+            <span class="source-pill">${escapeHtml(instance.browser)}</span>
+            ${instance.headless ? '<span class="source-pill warn">无头</span>' : ""}
+          </span>
+          <span class="profile-dir">PID ${instance.pid} · ${escapeHtml(instance.userDataDir)}</span>
+        </div>
+      </td>
+      <td>
         <span class="state-pill running">运行中</span>
-        <span class="source-pill">${escapeHtml(instance.browser)}</span>
-        ${instance.cdpUrl ? '<span class="source-pill isolated">CDP 可连接</span>' : ""}
-        ${instance.headless ? '<span class="source-pill warn">无头 · 无窗口</span>' : ""}
-        <div class="external-item-actions">
+      </td>
+      <td>
+        <div class="profile-actions">
           ${
             instance.headless
               ? ""
-              : `<button type="button" class="action-button accent ${focusing ? "loading" : ""}" data-action="focus-external" data-dir="${escapeHtml(instance.userDataDir)}" ${busy ? "disabled" : ""}>
-            ${renderButtonLabel(focusing, "显示", "显示中…")}
-          </button>`
+              : `<span class="action-tooltip" data-tooltip="把这个窗口显示到最前面">
+            <button type="button" class="action-button accent ${focusing ? "loading" : ""}" data-action="focus-external" data-dir="${escapeHtml(instance.userDataDir)}" ${busy ? "disabled" : ""}>
+              ${renderButtonLabel(focusing, "显示", "显示中…")}
+            </button>
+          </span>`
           }
-          <button type="button" class="action-button warn ${closing ? "loading" : ""}" data-action="close-external" data-dir="${escapeHtml(instance.userDataDir)}" ${busy ? "disabled" : ""}>
-            ${renderButtonLabel(closing, "关闭", "关闭中…")}
-          </button>
+          <span class="action-tooltip" data-tooltip="结束这个外部实例进程">
+            <button type="button" class="action-button warn ${closing ? "loading" : ""}" data-action="close-external" data-dir="${escapeHtml(instance.userDataDir)}" ${busy ? "disabled" : ""}>
+              ${renderButtonLabel(closing, "关闭", "关闭中…")}
+            </button>
+          </span>
         </div>
-      </div>
-      <span class="external-item-meta">PID ${instance.pid} · 启动于 ${formatDate(instance.startedAt)}${escapeHtml(cdpNote)}${instance.headless ? " · 无头模式运行，没有可见窗口" : ""}</span>
-      ${instance.cdpUrl ? `<code class="path-box compact accent">${escapeHtml(instance.cdpUrl)}</code>` : ""}
-      <code class="path-box compact">${escapeHtml(instance.userDataDir)}</code>
-    </div>
+      </td>
+    </tr>
   `;
 }
 

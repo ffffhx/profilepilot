@@ -2107,112 +2107,41 @@ body:not(.booted) .layout {
   color: var(--accent-bright);
 }
 
-/* ---- external instances ---- */
+/* ---- external instances (作为 Profiles 表格内的分组与行) ---- */
 
-/* 外部实例作为 Profiles 表格框内的延续分段，而非独立面板 */
-.external-section {
+.table-group-row td {
   border-top: 1px solid var(--line);
-  border-radius: 0 0 10px 10px;
   background: rgba(95, 182, 255, 0.03);
-  padding: 13px 16px 16px;
+  padding: 10px 12px;
 }
 
-.external-section-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
+.table-group-row td > span:first-child {
   color: var(--muted);
   font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.06em;
 }
 
-.external-list {
-  display: grid;
-  gap: 8px;
+.table-group-row .count {
+  margin-left: 10px;
 }
 
-.external-item {
-  display: grid;
-  gap: 7px;
-  cursor: pointer;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  padding: 9px 10px;
-  transition:
-    background 0.14s ease,
-    border-color 0.14s ease;
-}
-
-.external-item:hover {
-  background: rgba(143, 161, 173, 0.05);
-}
-
-.external-item.selected {
-  border-color: var(--accent-line);
-  background: rgba(56, 225, 160, 0.06);
-}
-
-.external-item:focus-visible {
-  outline: 3px solid var(--focus);
-  outline-offset: -1px;
-}
-
-.external-item-head {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  min-width: 0;
-}
-
-.external-item-head .status-dot.running {
-  animation: none;
-}
-
-.external-item-head strong {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 14px;
-  font-weight: 650;
-}
-
-.external-item-head .source-pill {
+/* 外部实例行的浏览器内核标签用信息蓝，和受管 Profile 的来源标签区分 */
+.external-row .source-pill {
   border-color: var(--info-line);
   color: var(--info-bright);
   background: var(--info-soft);
 }
 
-.external-item-head .source-pill.isolated {
-  border-color: var(--accent-line);
-  background: var(--accent-soft);
-  color: var(--accent-bright);
+.external-row .source-pill.warn {
+  border-color: var(--warn-line);
+  background: var(--warn-soft);
+  color: var(--warn-bright);
 }
 
-.external-item-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-left: auto;
-}
-
-.external-item-actions .action-button {
-  min-height: 30px;
-  padding: 0 12px;
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.external-item-meta {
-  color: var(--muted);
+.external-row .profile-dir {
   font-family: var(--font-mono);
-  font-size: 11px;
-  letter-spacing: 0.04em;
 }
 
 .path-box.accent {

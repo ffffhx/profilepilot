@@ -163,10 +163,33 @@ export class ProfileManagerError extends Error {
 export class ProfileManager {
   private readonly profilesDir: string;
   private readonly registryPath: string;
+  // 防止同一 Profile 被并发启动（两次快速点击各自通过“未运行”检查后同时拉起 Chrome）。
+  private readonly inFlightLaunches = new Set<string>();
+  // 串行化 registry 写入，避免并发写交错或临时文件相互覆盖。
+  private registryWriteChain: Promise<unknown> = Promise.resolve();
 
   constructor(private readonly dataDir = defaultDataDir()) {
     this.profilesDir = path.join(dataDir, "profiles");
     this.registryPath = path.join(dataDir, "profiles.json");
+  }
+
+  private acquireLaunchLock(profileId: string): void {
+    if (this.inFlightLaunches.has(profileId)) {
+      throw new ProfileManagerError("这个 Profile 正在启动中，请稍候再试。", "PROFILE_LAUNCH_IN_FLIGHT");
+    }
+    this.inFlightLaunches.add(profileId);
+  }
+
+  private signalPids(pids: number[], signal: NodeJS.Signals): void {
+    for (const pid of pids) {
+      try {
+        process.kill(pid, signal);
+      } catch (error) {
+        if (!isProcessGoneError(error)) {
+          throw error;
+        }
+      }
+    }
   }
 
   async getState(): Promise<AppState> {
@@ -234,9 +257,16 @@ export class ProfileManager {
       lastLaunchedAt: null
     };
 
-    await fs.mkdir(this.isolatedProfilePath(profile), { recursive: false });
-    registry.profiles.push(profile);
-    await this.saveRegistry(registry);
+    const profilePath = this.isolatedProfilePath(profile);
+    await fs.mkdir(profilePath, { recursive: false });
+    try {
+      registry.profiles.push(profile);
+      await this.saveRegistry(registry);
+    } catch (error) {
+      // 登记失败时清理刚建好的目录，避免留下未登记的孤儿 Profile 目录。
+      await fs.rm(profilePath, { recursive: true, force: true }).catch(() => undefined);
+      throw error;
+    }
 
     return profile;
   }
@@ -270,15 +300,20 @@ export class ProfileManager {
   }
 
   async launchProfile(profileId: string): Promise<void> {
-    await this.recoverAccountSyncArtifactsBeforeLaunch(profileId);
-    const ref = parseProfileId(profileId);
+    this.acquireLaunchLock(profileId);
+    try {
+      await this.recoverAccountSyncArtifactsBeforeLaunch(profileId);
+      const ref = parseProfileId(profileId);
 
-    if (ref.source === "native") {
-      await this.launchNativeProfile(ref.dirName);
-      return;
+      if (ref.source === "native") {
+        await this.launchNativeProfile(ref.dirName);
+        return;
+      }
+
+      await this.launchIsolatedProfile(ref.id);
+    } finally {
+      this.inFlightLaunches.delete(profileId);
     }
-
-    await this.launchIsolatedProfile(ref.id);
   }
 
   async launchProfileWithCdp(profileId: string, portInput?: number | null): Promise<void> {
@@ -290,8 +325,13 @@ export class ProfileManager {
       );
     }
 
-    await this.recoverAccountSyncArtifactsBeforeLaunch(profileId);
-    await this.launchIsolatedProfileWithCdp(ref.id, portInput);
+    this.acquireLaunchLock(profileId);
+    try {
+      await this.recoverAccountSyncArtifactsBeforeLaunch(profileId);
+      await this.launchIsolatedProfileWithCdp(ref.id, portInput);
+    } finally {
+      this.inFlightLaunches.delete(profileId);
+    }
   }
 
   async connectRunningSystemChrome(profileId: string): Promise<void> {
@@ -349,17 +389,20 @@ export class ProfileManager {
       throw new ProfileManagerError("这个 Profile 当前未运行。", "PROFILE_NOT_RUNNING");
     }
 
-    for (const pid of profile.pids) {
-      try {
-        process.kill(pid, "SIGTERM");
-      } catch (error) {
-        if (!isProcessGoneError(error)) {
-          throw error;
-        }
-      }
+    this.signalPids(profile.pids, "SIGTERM");
+    if (await this.waitUntilProfileStops(profile.id, 1800)) {
+      return;
     }
 
-    await this.waitUntilProfileStops(profile.id, 1800);
+    // 优雅关闭超时，强制结束残留进程，避免 UI 误报“已关闭”但 Chrome 仍在运行。
+    const still = await this.getPublicProfile(profileId);
+    if (!still.running || !still.pids.length) {
+      return;
+    }
+    this.signalPids(still.pids, "SIGKILL");
+    if (!(await this.waitUntilProfileStops(profile.id, 1500))) {
+      throw new ProfileManagerError("无法结束这个 Profile 的 Chrome 进程，请手动关闭后重试。", "PROFILE_CLOSE_FAILED");
+    }
   }
 
   async focusProfile(profileId: string): Promise<void> {
@@ -403,21 +446,28 @@ export class ProfileManager {
       throw new ProfileManagerError("这个外部实例已不在运行。", "EXTERNAL_INSTANCE_NOT_RUNNING");
     }
 
-    try {
-      process.kill(instance.pid, "SIGTERM");
-    } catch (error) {
-      if (!isProcessGoneError(error)) {
-        throw error;
-      }
+    this.signalPids([instance.pid], "SIGTERM");
+    if (await this.waitUntilExternalStops(userDataDir, 1800)) {
+      return;
     }
 
-    const deadline = Date.now() + 1800;
+    // 优雅关闭超时，强制结束。
+    const still = await this.locateExternalInstance(userDataDir);
+    if (still) {
+      this.signalPids([still.pid], "SIGKILL");
+      await this.waitUntilExternalStops(userDataDir, 1200);
+    }
+  }
+
+  private async waitUntilExternalStops(userDataDir: string, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       if (!(await this.locateExternalInstance(userDataDir))) {
-        return;
+        return true;
       }
       await sleep(200);
     }
+    return false;
   }
 
   // 操作前重新扫描，按 user-data-dir 拿最新 PID，避免界面里的旧 PID 误伤无关进程。
@@ -448,11 +498,21 @@ export class ProfileManager {
     if (!targetPath) {
       throw new ProfileManagerError("没有可打开的路径。", "INVALID_PATH");
     }
-    if (!(await exists(targetPath))) {
-      throw new ProfileManagerError(`路径不存在：${targetPath}`, "PATH_NOT_FOUND");
+
+    // 渲染层传入的路径不可信：限制只能打开用户目录或本工具数据目录内的路径，
+    // 防止被构造成打开系统任意位置。
+    const resolved = path.resolve(targetPath);
+    const allowedRoots = [path.resolve(os.homedir()), path.resolve(this.dataDir)];
+    const allowed = allowedRoots.some((root) => resolved === root || resolved.startsWith(root + path.sep));
+    if (!allowed) {
+      throw new ProfileManagerError("只允许打开用户目录内的路径。", "PATH_NOT_ALLOWED");
     }
 
-    const error = await shell.openPath(targetPath);
+    if (!(await exists(resolved))) {
+      throw new ProfileManagerError(`路径不存在：${resolved}`, "PATH_NOT_FOUND");
+    }
+
+    const error = await shell.openPath(resolved);
     if (error) {
       throw new ProfileManagerError(`打开路径失败：${error}`, "OPEN_PATH_FAILED");
     }
@@ -869,8 +929,9 @@ export class ProfileManager {
     } catch (error) {
       try {
         await this.discardMigratedExtensions(targetProfile, extensionsForRegistry);
-      } catch {
-        // Keep the original migration error as the visible failure.
+      } catch (rollbackError) {
+        // 回滚失败不掩盖原始迁移错误，但记录下来，便于排查残留状态。
+        console.error("[profilepilot] 插件迁移回滚失败：", rollbackError);
       }
       throw error;
     }
@@ -1304,22 +1365,36 @@ export class ProfileManager {
         nativeProfiles,
         accountSyncRecords
       };
-    } catch {
+    } catch (error) {
       const backup = `${this.registryPath}.broken-${Date.now()}`;
+      // 注册表损坏不静默吞掉：记录并把损坏文件备份到 .broken-<ts>，数据仍可人工恢复。
+      console.error(`[profilepilot] profiles.json 解析失败，已备份到 ${backup} 并以空注册表启动：`, error);
       try {
         await fs.rename(this.registryPath, backup);
       } catch {
-        // Start clean if the broken registry cannot be backed up.
+        // 无法备份损坏文件时也只能干净启动。
       }
       return { profiles: [], nativeProfiles: {}, accountSyncRecords: {} };
     }
   }
 
   private async saveRegistry(registry: Registry): Promise<void> {
-    await fs.mkdir(this.dataDir, { recursive: true });
-    const tmpPath = `${this.registryPath}.tmp`;
-    await fs.writeFile(tmpPath, `${JSON.stringify(registry, null, 2)}\n`, "utf8");
-    await fs.rename(tmpPath, this.registryPath);
+    const snapshot = `${JSON.stringify(registry, null, 2)}\n`;
+    const run = async (): Promise<void> => {
+      await fs.mkdir(this.dataDir, { recursive: true });
+      const tmpPath = `${this.registryPath}.tmp-${process.pid}`;
+      try {
+        await fs.writeFile(tmpPath, snapshot, "utf8");
+        await fs.rename(tmpPath, this.registryPath);
+      } finally {
+        // rename 成功后 tmp 已不存在；失败时清理残留临时文件。
+        await fs.rm(tmpPath, { force: true }).catch(() => undefined);
+      }
+    };
+    // 串行接到写入链上：并发的 saveRegistry 排队执行，不交错、不抢同名临时文件。
+    const next = this.registryWriteChain.then(run, run);
+    this.registryWriteChain = next.catch(() => undefined);
+    return next;
   }
 
   private async recordAccountSync(record: AccountSyncRecord): Promise<void> {
@@ -1646,7 +1721,7 @@ export class ProfileManager {
     return targetPath;
   }
 
-  private async waitUntilProfileStops(profileId: string, timeoutMs: number): Promise<void> {
+  private async waitUntilProfileStops(profileId: string, timeoutMs: number): Promise<boolean> {
     const deadline = Date.now() + timeoutMs;
 
     while (Date.now() < deadline) {
@@ -1654,9 +1729,11 @@ export class ProfileManager {
       const state = await this.getState();
       const profile = state.profiles.find((item) => item.id === profileId);
       if (!profile?.running) {
-        return;
+        return true;
       }
     }
+
+    return false;
   }
 }
 
@@ -1887,6 +1964,11 @@ function launchDetached(command: string, args: string[]): void {
     detached: true,
     stdio: "ignore"
   });
+  // spawn 失败（如可执行文件不存在）会异步触发 error；监听以免未处理错误并留下线索，
+  // 同时让 CDP 等待超时时能区分“没起来”而不是被静默吞掉。
+  child.once("error", (error) => {
+    console.error(`[profilepilot] 启动 ${command} 失败：`, error);
+  });
   child.unref();
 }
 
@@ -1919,8 +2001,12 @@ async function writeClaudeMemoryAtomic(content: string): Promise<void> {
   const target = claudeMemoryPath();
   await fs.mkdir(path.dirname(target), { recursive: true });
   const tmpPath = `${target}.cpm-tmp-${process.pid}`;
-  await fs.writeFile(tmpPath, content, "utf8");
-  await fs.rename(tmpPath, target);
+  try {
+    await fs.writeFile(tmpPath, content, "utf8");
+    await fs.rename(tmpPath, target);
+  } finally {
+    await fs.rm(tmpPath, { force: true }).catch(() => undefined);
+  }
 }
 
 async function writeAgentBrowserConfigFile(input: { profileId: string; name: string; port: number }): Promise<void> {
@@ -2343,10 +2429,19 @@ async function findExtensionManifestDirectory(
   const settingPath = stringValue(setting?.path);
   if (settingPath) {
     if (path.isAbsolute(settingPath)) {
+      // 绝对路径来自 unpacked 扩展，是合法用法，保留。
       candidates.push(settingPath);
     } else {
-      candidates.push(path.join(profilePath, settingPath));
-      candidates.push(path.join(profilePath, "Extensions", extensionId, settingPath));
+      // 相对路径来自 Preferences（用户可写），限制在 profile / 扩展目录内，防 ../ 遍历。
+      const withinProfile = resolveWithinBase(profilePath, settingPath);
+      if (withinProfile) {
+        candidates.push(withinProfile);
+      }
+      const extBase = path.join(profilePath, "Extensions", extensionId);
+      const withinExt = resolveWithinBase(extBase, settingPath);
+      if (withinExt) {
+        candidates.push(withinExt);
+      }
     }
   }
 
@@ -3707,15 +3802,6 @@ async function copyPathWithProgress(
   throwIfAborted(abortSignal);
   await waitIfPaused(pauseSignal, abortSignal);
   await fs.mkdir(path.dirname(targetPath), { recursive: true });
-  if (stat.isSymbolicLink()) {
-    const linkTarget = await fs.readlink(sourcePath);
-    throwIfAborted(abortSignal);
-    await waitIfPaused(pauseSignal, abortSignal);
-    await fs.rm(targetPath, { force: true });
-    await fs.symlink(linkTarget, targetPath);
-    onFileCopied(0);
-    return;
-  }
 
   throwIfAborted(abortSignal);
   await waitIfPaused(pauseSignal, abortSignal);
@@ -3724,8 +3810,10 @@ async function copyPathWithProgress(
   onFileCopied(stat.isFile() ? stat.size : 0);
 }
 
+// 不复制符号链接：避免把指向 profile 之外（如 /etc/hosts）的链接传播到隔离 profile，
+// 破坏隔离。profile 数据中符号链接极罕见，跳过是安全的。
 function isCopyableFilesystemEntry(stat: Awaited<ReturnType<typeof fs.lstat>>): boolean {
-  return stat.isDirectory() || stat.isFile() || stat.isSymbolicLink();
+  return stat.isDirectory() || stat.isFile();
 }
 
 async function preserveTimestamps(targetPath: string, stat: Awaited<ReturnType<typeof fs.lstat>>): Promise<void> {
@@ -3867,12 +3955,34 @@ function normalizeAccountSyncSourceFingerprints(input: unknown): Record<string, 
   return entries.length ? Object.fromEntries(entries) : undefined;
 }
 
+// ---- 从 Chrome 数据（Local State / Preferences）读入的路径片段是不可信的，
+// 必须防 ../、绝对路径等导致读/写/删到 Chrome 数据目录之外。 ----
+
+function isSafePathSegment(value: string): boolean {
+  return Boolean(value) && !value.includes("/") && !value.includes("\\") && value !== "." && value !== "..";
+}
+
+// 把一个相对路径解析到 base 内；若是绝对路径或会逃出 base，返回 null。
+function resolveWithinBase(base: string, relative: string): string | null {
+  if (!relative || path.isAbsolute(relative)) {
+    return null;
+  }
+  const baseResolved = path.resolve(base);
+  const resolved = path.resolve(baseResolved, relative);
+  if (resolved !== baseResolved && !resolved.startsWith(baseResolved + path.sep)) {
+    return null;
+  }
+  return resolved;
+}
+
 async function scanNativeChromeProfiles(): Promise<NativeChromeProfile[]> {
   const userDataDir = nativeChromeUserDataDir();
   const localState = await readChromeLocalState();
   const infoCache = localState.profile?.info_cache || {};
 
   return Object.entries(infoCache)
+    // dirName 来自 Chrome 的 Local State，过滤掉含 ../ 或路径分隔符的恶意目录名。
+    .filter(([dirName]) => isSafePathSegment(dirName))
     .map(([dirName, profile]) => ({
       dirName,
       name: typeof profile.name === "string" && profile.name.trim() ? profile.name : dirName,
@@ -3899,12 +4009,18 @@ async function readChromeLocalState(): Promise<ChromeLocalState> {
 
 async function writeChromeLocalState(localState: ChromeLocalState): Promise<void> {
   const localStatePath = nativeChromeLocalStatePath();
-  const backupPath = `${localStatePath}.cpm-backup-${Date.now()}`;
   const raw = await fs.readFile(localStatePath, "utf8");
-  await fs.writeFile(backupPath, raw, "utf8");
-  const tmpPath = `${localStatePath}.tmp-${Date.now()}`;
-  await fs.writeFile(tmpPath, `${JSON.stringify(localState, null, 2)}\n`, "utf8");
-  await fs.rename(tmpPath, localStatePath);
+  const tmpPath = `${localStatePath}.cpm-tmp-${process.pid}`;
+  try {
+    // 先把新内容写到临时文件——这步失败时原文件和备份都未改动，状态保持一致。
+    await fs.writeFile(tmpPath, `${JSON.stringify(localState, null, 2)}\n`, "utf8");
+    // 临时文件写成功后再落备份，避免出现“有备份但没写成功”的孤儿备份。
+    const backupPath = `${localStatePath}.cpm-backup-${Date.now()}`;
+    await fs.writeFile(backupPath, raw, "utf8");
+    await fs.rename(tmpPath, localStatePath);
+  } finally {
+    await fs.rm(tmpPath, { force: true }).catch(() => undefined);
+  }
 }
 
 async function removeNativeProfileFromLocalState(dirName: string): Promise<void> {

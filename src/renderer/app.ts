@@ -274,6 +274,21 @@ interface AccountSyncResult {
   state: AppState;
 }
 
+interface SetupAgentBrowserRequest {
+  sourceProfileId: string;
+  targetName?: string;
+  port: number;
+}
+
+interface SetupAgentBrowserResult {
+  profileId: string;
+  profileName: string;
+  port: number;
+  cdpUrl: string | null;
+  copiedItems: AccountSyncCopiedItem[];
+  state: AppState;
+}
+
 interface OperationProgress {
   key: string;
   message: string;
@@ -306,6 +321,7 @@ interface ProfileManagerApi {
   migrateExtensions(request: ExtensionMigrationRequest): Promise<ExtensionMigrationResult>;
   deleteProfileExtension(profileId: string, extensionId: string): Promise<ExtensionDeleteResult>;
   syncAccount(request: AccountSyncRequest): Promise<AccountSyncResult>;
+  setupAgentBrowser(request: SetupAgentBrowserRequest): Promise<SetupAgentBrowserResult>;
   cancelOperation(request: CancelOperationRequest): Promise<boolean>;
   controlOperation(request: ControlOperationRequest): Promise<boolean>;
   onOperationProgress(listener: (progress: OperationProgress) => void): () => void;
@@ -366,6 +382,7 @@ type ModalState =
   | { kind: "cdp"; profileId: string }
   | { kind: "extension-migration" }
   | { kind: "agent-config"; profileId: string }
+  | { kind: "agent-browser-setup" }
   | {
       kind: "confirm";
       intent: ConfirmIntent;
@@ -874,6 +891,7 @@ function render(): void {
     ${modal?.kind === "rename" ? renderRenameModal(modal.profileId) : ""}
     ${modal?.kind === "cdp" ? renderCdpModal(modal.profileId) : ""}
     ${modal?.kind === "agent-config" ? renderAgentConfigModal(modal.profileId) : ""}
+    ${modal?.kind === "agent-browser-setup" ? renderAgentBrowserSetupModal() : ""}
     ${modal?.kind === "extension-migration" ? renderExtensionMigrationModal(profiles) : ""}
     ${modal?.kind === "confirm" ? renderConfirmModal(modal) : ""}
     ${toast ? `<div class="toast ${toastKind === "error" ? "error" : ""}" role="status">${escapeHtml(toast)}</div>` : ""}
@@ -907,6 +925,9 @@ function renderAccountSyncPanel(profiles: PublicProfile[]): string {
           <h2>账号同步</h2>
           <span class="section-subtitle">Account session</span>
         </div>
+        <button type="button" class="primary agent-browser-cta" data-action="open-agent-browser-setup" ${busy ? "disabled" : ""}>
+          ⚡ 一键造 Agent 浏览器
+        </button>
       </div>
 
       <div class="account-sync-layout ${syncingAccount ? "syncing" : ""}">
@@ -1922,6 +1943,50 @@ function renderCdpModal(profileId: string): string {
           <button type="button" data-action="close-modal">取消</button>
           <button type="submit" class="solid ${launching ? "loading" : ""}" ${busy ? "disabled" : ""}>
             ${renderButtonLabel(launching, "启动 CDP", "启动中…")}
+          </button>
+        </div>
+      </form>
+    </div>
+  `;
+}
+
+function renderAgentBrowserSetupModal(): string {
+  const profiles = state?.profiles || [];
+  // 登录态来源默认取系统默认 Profile，否则第一个有登录账号的 Profile。
+  const source =
+    profiles.find((item) => item.source === "native" && item.isDefault) ||
+    profiles.find((item) => item.userName) ||
+    profiles[0];
+  if (!source) {
+    return "";
+  }
+  const settingUp = isBusyAction("setup-agent-browser");
+  const defaultName = `agent-${source.name}`;
+
+  return `
+    <div class="modal-backdrop" data-action="close-modal">
+      <form class="modal" data-agent-browser-form data-source-id="${escapeHtml(source.id)}">
+        <span class="modal-kicker">Agent 浏览器</span>
+        <h2>一键造 Agent 浏览器</h2>
+        <p class="modal-copy">新建一个独立 Profile，把下面这个源的登录态同步进去，绑定固定端口以 CDP 模式启动，并写入全局 <code>~/.claude/CLAUDE.md</code>——完成后直接 <code>agent-browser connect</code> 就能接入一个登录态就绪的浏览器。</p>
+        <div class="field">
+          <label>登录态来源</label>
+          <strong class="agent-source-name">${escapeHtml(source.name)}</strong>
+          <span class="field-note">只读复制它的登录态，不会改动来源 Profile。</span>
+        </div>
+        <div class="field">
+          <label for="agent-name">Agent Profile 名称</label>
+          <input id="agent-name" name="name" type="text" value="${escapeHtml(defaultName)}" maxlength="80" />
+        </div>
+        <div class="field">
+          <label for="agent-setup-port">固定调试端口</label>
+          <input id="agent-setup-port" name="port" type="number" min="1024" max="65535" inputmode="numeric" value="9223" />
+          <span class="field-note">以后对该 Profile「CDP启动」会固定用这个端口。常用 9222 / 9223。</span>
+        </div>
+        <div class="modal-actions">
+          <button type="button" data-action="close-modal">取消</button>
+          <button type="submit" class="primary ${settingUp ? "loading" : ""}" ${busy ? "disabled" : ""}>
+            ${renderButtonLabel(settingUp, "开始", "进行中…")}
           </button>
         </div>
       </form>
@@ -3219,6 +3284,17 @@ appRoot.addEventListener("click", (event) => {
     return;
   }
 
+  if (action === "open-agent-browser-setup") {
+    if (!state.profiles.length) {
+      setToast("还没有可用的 Profile 作为登录态来源", "error");
+      return;
+    }
+    modal = { kind: "agent-browser-setup" };
+    render();
+    window.setTimeout(() => document.querySelector<HTMLInputElement>("#agent-name")?.focus(), 0);
+    return;
+  }
+
   if (action === "write-agent-config" && id) {
     const profile = state.profiles.find((item) => item.id === id);
     if (!profile || profile.source !== "isolated") {
@@ -3479,12 +3555,42 @@ appRoot.addEventListener("submit", (event) => {
   const renameForm = target?.closest<HTMLFormElement>("[data-rename-form]");
   const cdpForm = target?.closest<HTMLFormElement>("[data-cdp-form]");
   const agentConfigForm = target?.closest<HTMLFormElement>("[data-agent-config-form]");
+  const agentBrowserForm = target?.closest<HTMLFormElement>("[data-agent-browser-form]");
   const extensionMigrationForm = target?.closest<HTMLFormElement>("[data-extension-migration-form]");
-  if (!createForm && !renameForm && !cdpForm && !agentConfigForm && !extensionMigrationForm) {
+  if (!createForm && !renameForm && !cdpForm && !agentConfigForm && !agentBrowserForm && !extensionMigrationForm) {
     return;
   }
 
   event.preventDefault();
+
+  if (agentBrowserForm) {
+    const sourceId = agentBrowserForm.dataset.sourceId;
+    if (!sourceId) {
+      return;
+    }
+    const data = new FormData(agentBrowserForm);
+    const name = String(data.get("name") || "").trim();
+    const port = Number(String(data.get("port") || "").trim());
+    if (!name) {
+      setToast("请填写 Agent Profile 名称", "error");
+      return;
+    }
+    if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+      setToast("调试端口必须是 1024-65535 之间的整数", "error");
+      return;
+    }
+    modal = null;
+    void withBusy(
+      async () => {
+        const result = await profileApi().setupAgentBrowser({ sourceProfileId: sourceId, targetName: name, port });
+        state = result.state;
+        setToast(`Agent 浏览器已就绪：agent-browser connect ${result.port}`);
+      },
+      undefined,
+      { key: "setup-agent-browser", message: "正在准备 Agent 浏览器…" }
+    );
+    return;
+  }
 
   if (agentConfigForm) {
     const profileId = agentConfigForm.dataset.profileId;

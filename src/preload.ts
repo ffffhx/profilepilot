@@ -4,6 +4,8 @@ import type {
   AccountSyncDiffResult,
   AccountSyncRequest,
   AccountSyncResult,
+  SetupAgentBrowserRequest,
+  SetupAgentBrowserResult,
   AppState,
   CancelOperationRequest,
   ControlOperationRequest,
@@ -53,6 +55,8 @@ const profileManagerApi: ProfileManagerApi = {
     ipcRenderer.invoke(IPC_CHANNELS.deleteProfileExtension, profileId, extensionId),
   syncAccount: (request: AccountSyncRequest): Promise<AccountSyncResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.syncAccount, request),
+  setupAgentBrowser: (request: SetupAgentBrowserRequest): Promise<SetupAgentBrowserResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.setupAgentBrowser, request),
   cancelOperation: (request: CancelOperationRequest): Promise<boolean> =>
     ipcRenderer.invoke(IPC_CHANNELS.cancelOperation, request),
   controlOperation: (request: ControlOperationRequest): Promise<boolean> =>

@@ -5,6 +5,8 @@ import type {
   AccountSyncDiffResult,
   AccountSyncRequest,
   AccountSyncResult,
+  SetupAgentBrowserRequest,
+  SetupAgentBrowserResult,
   AppState,
   CancelOperationRequest,
   ControlOperationRequest,
@@ -462,6 +464,27 @@ function registerIpcHandlers(): void {
       activeOperations.delete(id);
     }
   });
+
+  ipcMain.handle(
+    IPC_CHANNELS.setupAgentBrowser,
+    async (event, request: SetupAgentBrowserRequest): Promise<SetupAgentBrowserResult> => {
+      const id = operationId("setup-agent-browser");
+      const controller = new AbortController();
+      const pause = new OperationPauseController();
+      activeOperations.set(id, { controller, pause });
+
+      try {
+        return await profileManager.setupAgentBrowser(
+          request,
+          createProgressReporter(event, { key: "setup-agent-browser" }),
+          controller.signal,
+          pause
+        );
+      } finally {
+        activeOperations.delete(id);
+      }
+    }
+  );
 
   ipcMain.handle(IPC_CHANNELS.cancelOperation, async (_event, request: CancelOperationRequest): Promise<boolean> => {
     const id = operationId(String(request.key || ""), request.profileId ? String(request.profileId) : undefined);

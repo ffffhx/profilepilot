@@ -1899,6 +1899,18 @@ body:not(.booted) .layout {
   margin-bottom: 12px;
 }
 
+.agent-browser-cta {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.agent-source-name {
+  display: block;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--accent-bright);
+}
+
 .count {
   border: 1px solid var(--line-strong);
   border-radius: 999px;

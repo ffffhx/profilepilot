@@ -31,6 +31,8 @@ import type {
   ExtensionMigrationSkippedExtension,
   ExtensionScanResult,
   ExternalChromeInstance,
+  SetupAgentBrowserRequest,
+  SetupAgentBrowserResult,
   NativeChromeProfile,
   NativeProfileMetadata,
   OperationPauseSignal,
@@ -1135,6 +1137,70 @@ export class ProfileManager {
       skippedItems,
       launchedTarget,
       state: await this.getState()
+    };
+  }
+
+  // “一键造 Agent 浏览器”：新建独立 Profile → 从源同步登录态 → 绑定固定端口并写入
+  // 全局 CLAUDE.md → 以 CDP 模式启动，得到一个登录态就绪、可直接给 agent 连接的浏览器。
+  async setupAgentBrowser(
+    request: SetupAgentBrowserRequest,
+    onProgress?: (progress: OperationProgressUpdate) => void,
+    abortSignal?: AbortSignal,
+    pauseSignal?: OperationPauseSignal
+  ): Promise<SetupAgentBrowserResult> {
+    const sourceProfileId = String(request.sourceProfileId || "");
+    const port = normalizeCdpPortInput(request.port);
+    if (port === null) {
+      throw new ProfileManagerError("固定调试端口必须是 1024-65535 之间的整数。", "INVALID_CDP_PORT");
+    }
+
+    const TOTAL = 4;
+    const report = (message: string, step: string, stepIndex: number): void => {
+      onProgress?.({ message, step, stepIndex, stepCount: TOTAL });
+    };
+
+    const state = await this.getState();
+    const source = state.profiles.find((profile) => profile.id === sourceProfileId);
+    if (!source) {
+      throw new ProfileManagerError("没有找到作为登录态来源的 Profile。", "PROFILE_NOT_FOUND");
+    }
+
+    report("正在创建 Agent 专用 Profile…", "创建 Profile", 1);
+    const name = normalizeProfileName(request.targetName || `agent-${source.name}`);
+    const created = await this.createProfile(name);
+    const targetId = makeIsolatedProfileId(created.id);
+
+    let copiedItems: AccountSyncCopiedItem[] = [];
+    try {
+      report("正在从源 Profile 同步登录态…", "同步登录态", 2);
+      const syncResult = await this.syncAccount(
+        { sourceProfileId, targetProfileId: targetId, launchTarget: false, onlyChanged: false },
+        (update) => report(update.message, "同步登录态", 2),
+        abortSignal,
+        pauseSignal
+      );
+      copiedItems = syncResult.copiedItems;
+
+      report("正在写入 Agent 调试配置（CLAUDE.md）…", "写入配置", 3);
+      await this.setAgentBrowserConfig(targetId, port);
+
+      report("正在以 CDP 模式启动…", "CDP 启动", 4);
+      await this.launchProfileWithCdp(targetId, port);
+    } catch (error) {
+      // 任何一步失败（含用户中止）都清理掉这个半成品 Agent Profile，避免留下垃圾。
+      await this.deleteProfile(targetId).catch(() => undefined);
+      throw error;
+    }
+
+    const finalState = await this.getState();
+    const profile = finalState.profiles.find((item) => item.id === targetId) || null;
+    return {
+      profileId: targetId,
+      profileName: name,
+      port,
+      cdpUrl: profile?.cdpUrl || makeCdpUrl(port),
+      copiedItems,
+      state: finalState
     };
   }
 

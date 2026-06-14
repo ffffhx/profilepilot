@@ -295,6 +295,21 @@ export interface AccountSyncResult {
   state: AppState;
 }
 
+export interface SetupAgentBrowserRequest {
+  sourceProfileId: string;
+  targetName?: string;
+  port: number;
+}
+
+export interface SetupAgentBrowserResult {
+  profileId: string;
+  profileName: string;
+  port: number;
+  cdpUrl: string | null;
+  copiedItems: AccountSyncCopiedItem[];
+  state: AppState;
+}
+
 export interface OperationProgress {
   key: string;
   message: string;
@@ -348,6 +363,7 @@ export interface ProfileManagerApi {
   migrateExtensions(request: ExtensionMigrationRequest): Promise<ExtensionMigrationResult>;
   deleteProfileExtension(profileId: string, extensionId: string): Promise<ExtensionDeleteResult>;
   syncAccount(request: AccountSyncRequest): Promise<AccountSyncResult>;
+  setupAgentBrowser(request: SetupAgentBrowserRequest): Promise<SetupAgentBrowserResult>;
   cancelOperation(request: CancelOperationRequest): Promise<boolean>;
   controlOperation(request: ControlOperationRequest): Promise<boolean>;
   onOperationProgress(listener: (progress: OperationProgress) => void): () => void;

@@ -165,6 +165,8 @@ export class ProfileManager {
   private readonly registryPath: string;
   // 防止同一 Profile 被并发启动（两次快速点击各自通过“未运行”检查后同时拉起 Chrome）。
   private readonly inFlightLaunches = new Set<string>();
+  // 防止同一 Profile 被并发删除（并发删除时回滚会把对方已删的条目错误恢复，造成 registry 与磁盘不一致）。
+  private readonly inFlightDeletions = new Set<string>();
   // 串行化 registry 写入，避免并发写交错或临时文件相互覆盖。
   private registryWriteChain: Promise<unknown> = Promise.resolve();
 
@@ -519,13 +521,19 @@ export class ProfileManager {
   }
 
   async deleteProfile(profileId: string): Promise<DeleteProfileResult> {
-    const ref = parseProfileId(profileId);
-
-    if (ref.source === "native") {
-      return this.deleteNativeProfile(ref.dirName);
+    if (this.inFlightDeletions.has(profileId)) {
+      throw new ProfileManagerError("这个 Profile 正在删除中，请稍候。", "PROFILE_DELETE_IN_FLIGHT");
     }
-
-    return this.deleteIsolatedProfile(ref.id);
+    this.inFlightDeletions.add(profileId);
+    try {
+      const ref = parseProfileId(profileId);
+      if (ref.source === "native") {
+        return await this.deleteNativeProfile(ref.dirName);
+      }
+      return await this.deleteIsolatedProfile(ref.id);
+    } finally {
+      this.inFlightDeletions.delete(profileId);
+    }
   }
 
   async scanProfileExtensions(profileId: string): Promise<ExtensionScanResult> {
@@ -1302,7 +1310,6 @@ export class ProfileManager {
     }
 
     const publicProfile = profile || (await this.toIsolatedPublicProfile(storedProfile, new Map()));
-    const trashPath = await this.moveToTrash(this.isolatedProfilePath(storedProfile), storedProfile.dirName);
     const nextProfiles = registry.profiles.filter((item) => item.id !== id);
     const deletedProfileId = makeIsolatedProfileId(id);
     const accountSyncRecords = Object.fromEntries(
@@ -1310,7 +1317,18 @@ export class ProfileManager {
         ([, record]) => record.sourceProfileId !== deletedProfileId && record.targetProfileId !== deletedProfileId
       )
     );
+
+    // 先从 registry 移除条目（含同步记录），再移到废纸篓：
+    // 这样即便移废纸篓后崩溃，剩下的也只是无害的孤儿目录，而不是“界面里有但目录已没”的孤儿条目。
     await this.saveRegistry({ ...registry, profiles: nextProfiles, accountSyncRecords });
+    let trashPath: string | null;
+    try {
+      trashPath = await this.moveToTrash(this.isolatedProfilePath(storedProfile), storedProfile.dirName);
+    } catch (error) {
+      // 移废纸篓失败：把刚移除的条目回滚回去，保持 registry 与磁盘一致。
+      await this.saveRegistry(registry).catch(() => undefined);
+      throw error;
+    }
 
     return {
       deletedProfile: publicProfile,
@@ -1599,6 +1617,7 @@ export class ProfileManager {
       return;
     }
 
+    // 先以 registry 为真相源移除条目，成功后再尽力清理磁盘——避免“磁盘已清但 registry 还在”的不一致。
     const registry = await this.loadRegistry();
     const storedProfile = this.findIsolatedProfile(registry, ref.id);
     const copiedIds = new Set(copiedExtensions.map((extension) => extension.id));
@@ -1606,6 +1625,24 @@ export class ProfileManager {
       (extension) => !copiedIds.has(extension.id)
     );
     await this.saveRegistry(registry);
+
+    // registry 已更新，再清理磁盘上已复制的扩展目录（失败仅告警，不影响已完成的回滚）。
+    const migratedExtensionsDir = path.join(targetProfile.path, "Migrated Extensions");
+    for (const extension of copiedExtensions) {
+      // 防御：扩展 id 来自扫描结果，跳过异常格式，避免拼出越界路径。
+      if (!isSafePathSegment(extension.sourceExtensionId)) {
+        continue;
+      }
+      const extensionDir = path.join(migratedExtensionsDir, extension.sourceExtensionId);
+      try {
+        await fs.rm(extensionDir, { recursive: true, force: true });
+      } catch (error) {
+        console.warn(
+          `[profilepilot] 回滚迁移时清理磁盘文件失败：${extension.name} (${extension.sourceExtensionId})`,
+          error
+        );
+      }
+    }
   }
 
   private async removeMigratedExtensionReference(profile: PublicProfile, extensionId: string): Promise<void> {
@@ -3071,8 +3108,19 @@ async function copyExtensionDataPath(
   }
 
   const targetPath = path.join(targetProfilePath, safeRelativePath);
-  await fs.rm(targetPath, { recursive: true, force: true });
-  await copyPath(sourcePath, targetPath);
+  await fs.mkdir(path.dirname(targetPath), { recursive: true });
+  // 复用账号同步成熟的 staging 模式：先复制到临时目录，成功后再原子替换（旧数据先移到
+  // previous 备份），避免“先删目标再复制、中途失败丢失 IndexedDB/LocalStorage 等不可再生数据”。
+  await recoverInterruptedAccountSyncPath(targetPath);
+  const stagingPath = makeAccountSyncWorkPath(targetPath, ACCOUNT_SYNC_PARTIAL_SUFFIX);
+  try {
+    await fs.rm(stagingPath, { recursive: true, force: true });
+    await copyPath(sourcePath, stagingPath);
+    await replacePathWithStagedCopy(stagingPath, targetPath);
+  } catch (error) {
+    await fs.rm(stagingPath, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
+  }
   return true;
 }
 
@@ -3678,14 +3726,20 @@ async function recoverInterruptedAccountSyncPath(targetPath: string): Promise<vo
     return;
   }
 
-  if (!(await exists(targetPath))) {
-    const latestPreviousPath = previousPaths[previousPaths.length - 1];
-    await fs.rename(latestPreviousPath, targetPath).catch(async () => {
-      await fs.rm(latestPreviousPath, { recursive: true, force: true }).catch(() => undefined);
-    });
-    previousPaths.pop();
+  if (!(await exists(targetPath)) && previousPaths.length) {
+    // 取出最新一份备份用于恢复；无论成功失败，它都不再进入下面的“清理更旧备份”列表。
+    const latestPreviousPath = previousPaths.pop() as string;
+    try {
+      await fs.rename(latestPreviousPath, targetPath);
+    } catch {
+      // 恢复失败：保留这份最新备份（不删，下次启动再试），但仍继续清理更旧的备份，避免无限堆积。
+      console.warn(
+        `[profilepilot] 恢复备份 ${latestPreviousPath} 到 ${targetPath} 失败，已保留待下次重试。`
+      );
+    }
   }
 
+  // 清理剩余（更旧的）备份，避免 .previous 文件随多次中断无限堆积。
   await Promise.all(previousPaths.map((previousPath) => fs.rm(previousPath, { recursive: true, force: true })));
 }
 
@@ -3702,8 +3756,19 @@ async function replacePathWithStagedCopy(stagingPath: string, targetPath: string
   try {
     await fs.rename(stagingPath, targetPath);
   } catch (error) {
+    // staging→target 失败：尽力把刚移走的旧数据从 previous 恢复回 target。
     if (targetExists && !(await exists(targetPath)) && (await exists(previousPath))) {
-      await fs.rename(previousPath, targetPath).catch(() => undefined);
+      try {
+        await fs.rename(previousPath, targetPath);
+      } catch (restoreError) {
+        // 恢复也失败：旧数据仍完整保存在 previousPath，抛出带真实原因的明确错误，便于排查，
+        // 不静默吞掉，也不删除 previousPath。
+        const reason = restoreError instanceof Error ? restoreError.message : String(restoreError);
+        throw new ProfileManagerError(
+          `替换数据失败且未能自动恢复（${reason}）。原数据已备份在 ${previousPath}（可手动改名回 ${path.basename(targetPath)} 恢复）。`,
+          "STAGED_REPLACE_RECOVERY_FAILED"
+        );
+      }
     }
     throw error;
   }

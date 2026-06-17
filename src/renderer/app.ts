@@ -608,6 +608,23 @@ function invalidateExtensionMigrationDiff(): void {
   extensionMigrationDiffKey = "";
 }
 
+// Toast 文案里需要高亮的名字（如 Profile 名）用这对私有控制符包起来，
+// 渲染时整体转义后再把控制符替换成带样式的 <span>，避免 HTML 注入。
+const TOAST_NAME_START = String.fromCharCode(1);
+const TOAST_NAME_END = String.fromCharCode(2);
+
+function emphasizeName(name: string): string {
+  return `${TOAST_NAME_START}${name}${TOAST_NAME_END}`;
+}
+
+function renderToastBody(message: string): string {
+  return escapeHtml(message)
+    .split(TOAST_NAME_START)
+    .join('<span class="toast-name">')
+    .split(TOAST_NAME_END)
+    .join("</span>");
+}
+
 function setToast(message: string, kind: ToastKind = "normal"): void {
   toast = message;
   toastKind = kind;
@@ -895,7 +912,7 @@ function render(): void {
     ${modal?.kind === "agent-browser-setup" ? renderAgentBrowserSetupModal() : ""}
     ${modal?.kind === "extension-migration" ? renderExtensionMigrationModal(profiles) : ""}
     ${modal?.kind === "confirm" ? renderConfirmModal(modal) : ""}
-    ${toast ? `<div class="toast ${toastKind === "error" ? "error" : ""}" role="status">${escapeHtml(toast)}</div>` : ""}
+    ${toast ? `<div class="toast ${toastKind === "error" ? "error" : ""}" role="status">${renderToastBody(toast)}</div>` : ""}
   `;
 }
 
@@ -2509,7 +2526,7 @@ function executeProfileConfirm(intent: Extract<ConfirmIntent, { kind: "profile" 
   }
 
   if (intent.action === "close") {
-    void withBusy(() => profileApi().closeProfile(profile.id), `已请求关闭 ${profile.name}`, {
+    void withBusy(() => profileApi().closeProfile(profile.id), `已关闭 ${emphasizeName(profile.name)}`, {
       key: "close-profile",
       message: `正在关闭 ${profile.name}…`,
       profileId: profile.id
@@ -3387,7 +3404,7 @@ appRoot.addEventListener("click", (event) => {
     } else {
       void withBusy(async () => {
         state = await profileApi().closeExternalInstance(dir);
-      }, `已请求关闭 ${instance.label}`, {
+      }, `已关闭 ${emphasizeName(instance.label)}`, {
         key: "close-external",
         message: `正在关闭 ${instance.label}…`,
         profileId: dir

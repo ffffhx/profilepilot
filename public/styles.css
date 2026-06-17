@@ -2301,6 +2301,24 @@ body:not(.booted) .layout {
   box-shadow: 0 18px 50px rgba(2, 6, 9, 0.7), 0 0 18px rgba(255, 113, 100, 0.25);
 }
 
+/* Toast 里高亮的名字（Profile 名等）：换等宽字体 + 强调色 + 浅底，让人一眼看清是哪个 */
+.toast-name {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--accent-bright);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-line);
+  border-radius: 5px;
+  padding: 1px 6px;
+  margin: 0 1px;
+}
+
+.toast.error .toast-name {
+  color: var(--danger-bright);
+  background: var(--danger-soft);
+  border-color: var(--danger-line);
+}
+
 /* ---- modals ---- */
 
 .modal-backdrop {

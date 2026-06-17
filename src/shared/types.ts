@@ -124,6 +124,7 @@ export interface ProfileExtensionInfo {
   hasLocalData: boolean;
   dataPaths: ExtensionDataPath[];
   canCopyLocally: boolean;
+  canPersistInstall: boolean;
 }
 
 export interface ExtensionScanResult {

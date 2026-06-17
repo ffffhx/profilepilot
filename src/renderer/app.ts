@@ -112,6 +112,7 @@ interface ProfileExtensionInfo {
   hasLocalData: boolean;
   dataPaths: ExtensionDataPath[];
   canCopyLocally: boolean;
+  canPersistInstall: boolean;
 }
 
 interface ExtensionScanResult {
@@ -1713,13 +1714,19 @@ function renderExtensionRow(extension: ProfileExtensionInfo): string {
 
 function renderExtensionMigrationResult(result: ExtensionMigrationResult): string {
   const copiedWebStoreCount = result.copiedExtensions.filter((extension) => extension.fromWebStore).length;
+  const persistedLocalCount = result.copiedExtensions.filter((extension) => !extension.fromWebStore).length;
+  const persistedCount = result.copiedExtensions.length;
   const runtimeLoadCount = result.loadedLocalExtensions.length;
   const autoWrittenCount = result.copiedExtensions.length + result.dataCopies.length + runtimeLoadCount;
   const manualLoadCount = result.manualLoadExtensions.length;
   const hasManualOnlyResult = manualLoadCount > 0 && autoWrittenCount === 0 && result.webStoreInstallUrls.length === 0;
   const title = hasManualOnlyResult ? "插件同步需要手动处理" : "插件同步已处理";
   let detail = result.openedInstallPages ? "已打开需要手动确认的页面。" : "目标 Profile 已更新。";
-  if (runtimeLoadCount && manualLoadCount) {
+  if (persistedCount && manualLoadCount) {
+    detail = `已持久写入 ${persistedCount} 个插件；仍有 ${manualLoadCount} 个需要手动处理。`;
+  } else if (persistedCount) {
+    detail = `已持久写入 ${persistedCount} 个插件。离开 ProfilePilot 正常启动 Chrome 也会加载。`;
+  } else if (runtimeLoadCount && manualLoadCount) {
     detail = `已登记 ${runtimeLoadCount} 个本地插件为运行时自动加载；仍有 ${manualLoadCount} 个需要手动处理。`;
   } else if (runtimeLoadCount) {
     detail = `已登记 ${runtimeLoadCount} 个本地插件。目标 Profile 下次由 ProfilePilot 启动时会自动加载。`;
@@ -1743,21 +1750,43 @@ function renderExtensionMigrationResult(result: ExtensionMigrationResult): strin
           <strong>${autoWrittenCount}</strong>
         </div>
         <div>
-          <span>运行时加载</span>
-          <strong>${runtimeLoadCount}</strong>
+          <span>持久写入</span>
+          <strong>${persistedCount}</strong>
         </div>
         <div>
           <span>需手动加载</span>
           <strong>${manualLoadCount}</strong>
         </div>
         <div>
-          <span>安装页</span>
-          <strong>${copiedWebStoreCount + result.webStoreInstallUrls.length}</strong>
+          <span>商店插件</span>
+          <strong>${copiedWebStoreCount}</strong>
         </div>
       </div>
+      ${persistedCount ? renderPersistedExtensions(result.copiedExtensions, persistedLocalCount) : ""}
       ${result.loadedLocalExtensions.length ? renderLoadedLocalExtensions(result.loadedLocalExtensions) : ""}
       ${result.manualLoadExtensions.length ? renderManualLoadExtensions(result) : ""}
       ${result.skippedExtensions.length ? renderSkippedExtensions(result.skippedExtensions) : ""}
+    </div>
+  `;
+}
+
+function renderPersistedExtensions(extensions: ExtensionMigrationCopiedExtension[], localCount: number): string {
+  return `
+    <div class="loaded-local-panel">
+      <strong>已持久写入目标 Profile</strong>
+      <div class="loaded-local-list">
+        ${extensions
+          .map(
+            (extension) => `
+              <span>
+                <strong>${escapeHtml(extension.name)}</strong>
+                <code>${escapeHtml(extension.id)}</code>
+              </span>
+            `
+          )
+          .join("")}
+      </div>
+      <small>${localCount ? "本地未打包插件会继续引用源目录；源目录删除或移动后需要重新同步。" : "商店插件包和安装记录已写入目标 Profile。"}</small>
     </div>
   `;
 }
@@ -1778,7 +1807,7 @@ function renderLoadedLocalExtensions(extensions: ExtensionMigrationLoadedExtensi
           )
           .join("")}
       </div>
-      <small>Chrome 137+ 不支持静默持久安装本地未打包插件。ProfilePilot 会在启动目标 Profile 时通过 CDP 加载这些源插件目录。</small>
+      <small>这是持久写入不可用时的回退路径；只有从 ProfilePilot 启动目标 Profile 时才会加载。</small>
     </div>
   `;
 }
@@ -2194,8 +2223,8 @@ function renderExtensionMigrationDiffPreview(): string {
           <strong>${extensionMigrationDiff.summary.changedCount}</strong>
         </div>
         <div>
-          <span>运行时加载</span>
-          <strong>${extensionMigrationDiff.summary.cdpLoadCount}</strong>
+          <span>持久写入</span>
+          <strong>${extensionMigrationDiff.items.filter((item) => item.willCopyLocally).length}</strong>
         </div>
         <div>
           <span>需手动</span>
@@ -2430,12 +2459,13 @@ function confirmModalView(intent: ConfirmIntent): ConfirmModalView | null {
   const selectedExtensions = activeScan.extensions.filter((extension) => intent.extensionIds.includes(extension.id));
   const selectedWithData = selectedExtensions.filter((extension) => extension.hasLocalData).length;
   const plannedDiffItems = extensionMigrationDiff?.items.filter((item) => intent.extensionIds.includes(item.id)) || [];
-  const cdpLoadCount = plannedDiffItems.length
-    ? plannedDiffItems.filter((item) => item.willLoadViaCdp).length
-    : selectedExtensions.filter((extension) => extension.installType === "local" && extension.path && targetProfile.source === "isolated").length;
+  const persistCount = plannedDiffItems.length
+    ? plannedDiffItems.filter((item) => item.willCopyLocally).length
+    : selectedExtensions.filter((extension) => extension.canPersistInstall).length;
+  const cdpLoadCount = plannedDiffItems.length ? plannedDiffItems.filter((item) => item.willLoadViaCdp).length : 0;
   const manualLoadCount = plannedDiffItems.length
     ? plannedDiffItems.filter((item) => item.status === "manual_load_required").length
-    : selectedExtensions.filter((extension) => extension.installType === "local" && targetProfile.source !== "isolated").length;
+    : selectedExtensions.filter((extension) => extension.installType === "local" && !extension.canPersistInstall).length;
   const plannedCount = intent.extensionIds.length;
   const closeLine = intent.shouldCloseTarget
     ? `目标 ${targetProfile.name} 正在运行。开始同步前会先帮你关闭目标，写入完成后再继续。`
@@ -2446,7 +2476,7 @@ function confirmModalView(intent: ConfirmIntent): ConfirmModalView | null {
         tone: "danger"
       }
     : null;
-  const dataLine = extensionMigrationConfirmDataLine(cdpLoadCount, manualLoadCount, intent.includeData);
+  const dataLine = extensionMigrationConfirmDataLine(persistCount, cdpLoadCount, manualLoadCount, intent.includeData);
   const modeLine = intent.onlyChanged
     ? `本次只同步 ${plannedCount} 个变更插件，${Math.max(intent.selectedCount - plannedCount, 0)} 个已一致插件会跳过。`
     : "会重新覆盖所有可同步的已选插件。";
@@ -2462,18 +2492,25 @@ function confirmModalView(intent: ConfirmIntent): ConfirmModalView | null {
       { label: "目标 Profile", value: targetProfile.name },
       { label: "待同步", value: String(plannedCount) },
       { label: "已选插件", value: String(intent.selectedCount) },
-      { label: "运行时加载", value: String(cdpLoadCount) },
+      { label: "持久写入", value: String(persistCount) },
       { label: "含数据", value: String(selectedWithData) }
     ]
   };
 }
 
 function extensionMigrationConfirmDataLine(
+  persistCount: number,
   cdpLoadCount: number,
   manualLoadCount: number,
   includeData: boolean
 ): string {
   const dataText = includeData ? "插件配置和插件数据会被源 Profile 覆盖。" : "插件配置会被源 Profile 覆盖，插件数据不会同步。";
+  if (persistCount && manualLoadCount) {
+    return `${dataText} ${persistCount} 个插件会持久写入目标 Profile，${manualLoadCount} 个仍需要手动加载源目录。`;
+  }
+  if (persistCount) {
+    return `${dataText} ${persistCount} 个插件会持久写入目标 Profile，离开 ProfilePilot 启动也会加载。`;
+  }
   if (cdpLoadCount && manualLoadCount) {
     return `${dataText} ${cdpLoadCount} 个本地插件会登记为目标启动时自动加载，${manualLoadCount} 个仍需要手动加载源目录。`;
   }
@@ -2721,12 +2758,16 @@ function extensionInstallTypeLabel(extension: ProfileExtensionInfo): string {
 }
 
 function extensionMigrationCapabilityLabel(extension: ProfileExtensionInfo): string {
+  if (extension.canPersistInstall) {
+    return extension.fromWebStore ? "可一键迁移" : "可持久写入";
+  }
+
   if (extension.installType === "local") {
     return "本地目录";
   }
 
   if (extension.fromWebStore && extension.canCopyLocally) {
-    return "可静默复制";
+    return "可复制包体";
   }
 
   if (extension.canCopyLocally) {

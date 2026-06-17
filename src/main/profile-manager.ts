@@ -74,6 +74,19 @@ interface CdpVersionInfo {
   webSocketDebuggerUrl?: string;
 }
 
+interface CdpTargetListEntry {
+  type?: string;
+  url?: string;
+  webSocketDebuggerUrl?: string;
+}
+
+interface CdpRuntimeEvaluateResult {
+  result?: {
+    value?: unknown;
+  };
+  exceptionDetails?: unknown;
+}
+
 interface CdpResponse<T> {
   id?: number;
   result?: T;
@@ -111,10 +124,25 @@ interface ChromeLocalState {
 interface ChromePreferences {
   extensions?: {
     settings?: Record<string, ChromeExtensionSetting>;
+    ui?: Record<string, unknown>;
+    [key: string]: unknown;
+  };
+  protection?: {
+    macs?: {
+      extensions?: {
+        settings?: Record<string, unknown>;
+        settings_encrypted_hash?: Record<string, unknown>;
+        ui?: Record<string, unknown>;
+        [key: string]: unknown;
+      };
+      [key: string]: unknown;
+    };
+    [key: string]: unknown;
   };
 }
 
 interface ChromeExtensionSetting {
+  [key: string]: unknown;
   state?: unknown;
   disable_reasons?: unknown;
   disable_reason?: unknown;
@@ -130,6 +158,18 @@ interface ChromeExtensionManifest {
   description?: unknown;
   default_locale?: unknown;
   update_url?: unknown;
+}
+
+interface ProtectedExtensionInstallRecord {
+  setting: ChromeExtensionSetting;
+  settingMac: string;
+  encryptedHashMac: string;
+}
+
+interface ProtectedDeveloperModeRecord {
+  developerMode: true;
+  developerModeMac: string;
+  encryptedHashMac: string;
 }
 
 interface AccountSyncPathSpec {
@@ -657,8 +697,6 @@ export class ProfileManager {
       : sourceScan.extensions) as ProfileExtensionInfo[];
     const targetById = new Map(targetScan.extensions.map((extension) => [extension.id, extension]));
     const items: ExtensionMigrationDiffItem[] = [];
-    const canAutoLoadUnpacked = await canAutoLoadUnpackedExtensions();
-
     for (const extension of selectedExtensions) {
       const targetExtension = targetById.get(extension.id) || null;
       const dataChanged = includeData
@@ -670,8 +708,7 @@ export class ProfileManager {
           targetExtension,
           targetProfile,
           dataChanged,
-          openInstallPages,
-          canAutoLoadUnpacked
+          openInstallPages
         )
       );
     }
@@ -821,6 +858,46 @@ export class ProfileManager {
       return true;
     };
 
+    const persistExtensionInstall = async (extension: ProfileExtensionInfo): Promise<boolean> => {
+      if (!extension.path) {
+        return false;
+      }
+      if (!(await exists(path.join(extension.path, "manifest.json")))) {
+        skippedExtensions.push({
+          id: extension.id,
+          name: extension.name,
+          reason: "源插件目录缺少 manifest.json，无法写入持久安装记录"
+        });
+        return false;
+      }
+
+      const installRecord = await readProtectedExtensionInstallRecord(sourceProfileDataPath, extension.id);
+      if (!installRecord) {
+        return false;
+      }
+
+      report(`正在写入插件持久安装记录：${extension.name}`, "同步插件", 4);
+      let installedPath = extension.path;
+      if (extension.fromWebStore || isProfileRelativeExtensionSetting(installRecord.setting)) {
+        installedPath = await copyExtensionPackageToProfile(extension, sourceProfileDataPath, targetProfileDataPath);
+      }
+
+      const developerModeRecord = extension.fromWebStore ? null : await getProtectedDeveloperModeRecord(targetProfileDataPath);
+      await removeExtensionReferencesFromProfilePreferences(targetProfileDataPath, extension.id);
+      await writeProtectedExtensionInstallRecord(targetProfileDataPath, extension.id, installRecord, developerModeRecord);
+      await this.removeMigratedExtensionReference(targetProfile, extension.id);
+
+      copiedExtensions.push({
+        id: extension.id,
+        name: extension.name,
+        version: extension.version,
+        path: installedPath,
+        fromWebStore: extension.fromWebStore
+      });
+      await copyExtensionData(extension);
+      return true;
+    };
+
     // 复制插件的可同步数据（Local/Sync Extension Settings、IndexedDB 等）。
     // 商店重装后扩展 ID 与源一致，预先铺好数据目录，装完即可读到原配置。
     const copyExtensionData = async (extension: ProfileExtensionInfo): Promise<void> => {
@@ -858,6 +935,12 @@ export class ProfileManager {
           continue;
         }
 
+        if (canPersistExtensionInstall(extension)) {
+          if (await persistExtensionInstall(extension)) {
+            continue;
+          }
+        }
+
         if (diffItem?.status === "needs_install_page") {
           if (extension.storeUrl) {
             webStoreInstallUrls.push(extension.storeUrl);
@@ -872,10 +955,6 @@ export class ProfileManager {
           continue;
         }
 
-        // 本地（非商店）解压扩展一律登记“源目录”，不再拷贝副本：
-        // 启动计划会按 Chrome 版本决定用 --load-extension（旧版）还是 CDP（新版 137+）加载，
-        // 但都从源目录现读，源更新后自动生效，也不在 Profile 里留快照。
-        // 商店扩展（fromWebStore）走不到这里，仍按原有策略处理（旧版拷贝侧载 / 新版安装页）。
         if (canLoadLocalExtensionViaCdp(extension, targetProfile)) {
           await copyExtensionData(extension);
           await registerLocalExtensionForRuntimeLoad(extension);
@@ -2485,13 +2564,20 @@ async function scanProfileExtensions(profilePath: string): Promise<ProfileExtens
   const preferences = await readChromePreferences(profilePath);
   const securePreferences = await readChromeSecurePreferences(profilePath);
   const settings = {
-    ...(securePreferences.extensions?.settings || {}),
-    ...(preferences.extensions?.settings || {})
+    ...(preferences.extensions?.settings || {}),
+    ...(securePreferences.extensions?.settings || {})
   };
   const directoryIds = await readExtensionDirectoryIds(profilePath);
   const extensionIds = uniqueStrings([...Object.keys(settings), ...directoryIds]).filter(isLikelyExtensionId);
   const extensions = await Promise.all(
-    extensionIds.map((extensionId) => scanProfileExtension(profilePath, extensionId, settings[extensionId]))
+    extensionIds.map((extensionId) =>
+      scanProfileExtension(
+        profilePath,
+        extensionId,
+        settings[extensionId],
+        hasProtectedExtensionInstallRecord(securePreferences, extensionId)
+      )
+    )
   );
 
   return extensions
@@ -2512,7 +2598,8 @@ function isUserManageableExtension(extension: ProfileExtensionInfo): boolean {
 async function scanProfileExtension(
   profilePath: string,
   extensionId: string,
-  setting?: ChromeExtensionSetting
+  setting?: ChromeExtensionSetting,
+  hasProtectedInstallRecord = false
 ): Promise<ProfileExtensionInfo | null> {
   const extensionPath = await findExtensionManifestDirectory(profilePath, extensionId, setting);
   const diskManifest = extensionPath ? await readManifest(extensionPath) : null;
@@ -2546,7 +2633,8 @@ async function scanProfileExtension(
     path: extensionPath,
     hasLocalData: dataPaths.length > 0,
     dataPaths,
-    canCopyLocally: Boolean(extensionPath && installType !== "component")
+    canCopyLocally: Boolean(extensionPath && installType !== "component"),
+    canPersistInstall: Boolean(extensionPath && installType !== "component" && hasProtectedInstallRecord)
   };
 }
 
@@ -2765,6 +2853,414 @@ function extensionDataLabel(relativePath: string): string {
   return relativePath.split(path.sep)[0] || relativePath;
 }
 
+function hasProtectedExtensionInstallRecord(preferences: ChromePreferences, extensionId: string): boolean {
+  return Boolean(
+    preferences.extensions?.settings?.[extensionId] &&
+      stringValue(
+        getNestedValue(preferences as unknown as Record<string, unknown>, [
+          "protection",
+          "macs",
+          "extensions",
+          "settings",
+          extensionId
+        ])
+      ) &&
+      stringValue(
+        getNestedValue(preferences as unknown as Record<string, unknown>, [
+          "protection",
+          "macs",
+          "extensions",
+          "settings_encrypted_hash",
+          extensionId
+        ])
+      )
+  );
+}
+
+async function readProtectedExtensionInstallRecord(
+  profilePath: string,
+  extensionId: string
+): Promise<ProtectedExtensionInstallRecord | null> {
+  const securePreferences = await readChromeSecurePreferences(profilePath);
+  const setting = securePreferences.extensions?.settings?.[extensionId];
+  const settingMac = stringValue(
+    getNestedValue(securePreferences as unknown as Record<string, unknown>, [
+      "protection",
+      "macs",
+      "extensions",
+      "settings",
+      extensionId
+    ])
+  );
+  const encryptedHashMac = stringValue(
+    getNestedValue(securePreferences as unknown as Record<string, unknown>, [
+      "protection",
+      "macs",
+      "extensions",
+      "settings_encrypted_hash",
+      extensionId
+    ])
+  );
+
+  if (!setting || !settingMac || !encryptedHashMac) {
+    return null;
+  }
+
+  return {
+    setting: cloneJsonValue(setting) as ChromeExtensionSetting,
+    settingMac,
+    encryptedHashMac
+  };
+}
+
+function isProfileRelativeExtensionSetting(setting: ChromeExtensionSetting): boolean {
+  const settingPath = stringValue(setting.path);
+  return Boolean(settingPath && !path.isAbsolute(settingPath));
+}
+
+async function copyExtensionPackageToProfile(
+  extension: ProfileExtensionInfo,
+  sourceProfilePath: string,
+  targetProfilePath: string
+): Promise<string> {
+  if (!extension.path) {
+    throw new ProfileManagerError(`插件 ${extension.name} 没有可复制的插件包目录。`, "EXTENSION_PATH_MISSING");
+  }
+
+  const sourcePath = extension.path;
+  const sourceExtensionsRoot = path.join(sourceProfilePath, "Extensions");
+  const relativeFromExtensions = path.relative(sourceExtensionsRoot, sourcePath);
+  const packageRelativePath =
+    relativeFromExtensions &&
+    !relativeFromExtensions.startsWith("..") &&
+    !path.isAbsolute(relativeFromExtensions)
+      ? normalizeSafeRelativePath(relativeFromExtensions)
+      : path.join(extension.id, makePathSegment(path.basename(sourcePath)));
+  const targetPath = path.join(targetProfilePath, "Extensions", packageRelativePath);
+
+  if (await isSameFilesystemPath(sourcePath, targetPath)) {
+    return targetPath;
+  }
+
+  await fs.rm(targetPath, { recursive: true, force: true });
+  await copyPath(sourcePath, targetPath, {
+    shouldCopy: (candidatePath) => shouldCopyLocalExtensionPackagePath(sourcePath, candidatePath)
+  });
+  return targetPath;
+}
+
+let cachedProtectedDeveloperModeRecord: ProtectedDeveloperModeRecord | null = null;
+
+async function getProtectedDeveloperModeRecord(targetProfilePath: string): Promise<ProtectedDeveloperModeRecord> {
+  const existing = await readProtectedDeveloperModeRecord(targetProfilePath);
+  if (existing) {
+    return existing;
+  }
+
+  if (!cachedProtectedDeveloperModeRecord) {
+    cachedProtectedDeveloperModeRecord = await createProtectedDeveloperModeRecordWithChrome();
+  }
+  return cachedProtectedDeveloperModeRecord;
+}
+
+async function readProtectedDeveloperModeRecord(profilePath: string): Promise<ProtectedDeveloperModeRecord | null> {
+  const securePreferences = await readChromeSecurePreferences(profilePath);
+  const developerMode = securePreferences.extensions?.ui?.developer_mode;
+  const developerModeMac = stringValue(
+    getNestedValue(securePreferences as unknown as Record<string, unknown>, [
+      "protection",
+      "macs",
+      "extensions",
+      "ui",
+      "developer_mode"
+    ])
+  );
+  const encryptedHashMac = stringValue(
+    getNestedValue(securePreferences as unknown as Record<string, unknown>, [
+      "protection",
+      "macs",
+      "extensions",
+      "ui",
+      "developer_mode_encrypted_hash"
+    ])
+  );
+
+  if (developerMode !== true || !developerModeMac || !encryptedHashMac) {
+    return null;
+  }
+
+  return {
+    developerMode: true,
+    developerModeMac,
+    encryptedHashMac
+  };
+}
+
+async function writeProtectedExtensionInstallRecord(
+  profilePath: string,
+  extensionId: string,
+  installRecord: ProtectedExtensionInstallRecord,
+  developerModeRecord: ProtectedDeveloperModeRecord | null
+): Promise<void> {
+  const securePreferencesPath = path.join(profilePath, "Secure Preferences");
+  const securePreferences =
+    (await readJsonFile<Record<string, unknown>>(securePreferencesPath)) || ({} as Record<string, unknown>);
+  const extensions = ensureRecordProperty(securePreferences, "extensions");
+  const settings = ensureRecordProperty(extensions, "settings");
+  settings[extensionId] = cloneJsonValue(installRecord.setting);
+
+  const protection = ensureRecordProperty(securePreferences, "protection");
+  const macs = ensureRecordProperty(protection, "macs");
+  const protectedExtensions = ensureRecordProperty(macs, "extensions");
+  const settingsMacs = ensureRecordProperty(protectedExtensions, "settings");
+  const settingsEncryptedHashMacs = ensureRecordProperty(protectedExtensions, "settings_encrypted_hash");
+  settingsMacs[extensionId] = installRecord.settingMac;
+  settingsEncryptedHashMacs[extensionId] = installRecord.encryptedHashMac;
+
+  if (developerModeRecord) {
+    const ui = ensureRecordProperty(extensions, "ui");
+    ui.developer_mode = true;
+
+    const uiMacs = ensureRecordProperty(protectedExtensions, "ui");
+    uiMacs.developer_mode = developerModeRecord.developerModeMac;
+    uiMacs.developer_mode_encrypted_hash = developerModeRecord.encryptedHashMac;
+  }
+
+  await fs.mkdir(profilePath, { recursive: true });
+  await writeJsonFileAtomic(securePreferencesPath, securePreferences);
+}
+
+function ensureRecordProperty(parent: Record<string, unknown>, key: string): Record<string, unknown> {
+  const current = parent[key];
+  if (isRecord(current)) {
+    return current;
+  }
+
+  const next: Record<string, unknown> = {};
+  parent[key] = next;
+  return next;
+}
+
+async function createProtectedDeveloperModeRecordWithChrome(): Promise<ProtectedDeveloperModeRecord> {
+  const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), "profilepilot-devmode-"));
+  let launch: TemporaryChromeCdpLaunch | null = null;
+  try {
+    launch = await launchTemporaryChromeWithCdp(userDataDir);
+    await enableDeveloperModeOverCdp(launch.port);
+    await closeTemporaryChromeWithCdp(launch);
+    launch = null;
+
+    const record = await readProtectedDeveloperModeRecord(path.join(userDataDir, "Default"));
+    if (!record) {
+      throw new ProfileManagerError("Chrome 没有写入可复用的开发者模式保护记录。", "DEVELOPER_MODE_RECORD_MISSING");
+    }
+    return record;
+  } finally {
+    if (launch) {
+      await closeTemporaryChromeWithCdp(launch).catch(() => undefined);
+    }
+    await fs.rm(userDataDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+interface TemporaryChromeCdpLaunch {
+  child: ReturnType<typeof spawn>;
+  port: number;
+  stderr: () => string;
+}
+
+async function launchTemporaryChromeWithCdp(userDataDir: string): Promise<TemporaryChromeCdpLaunch> {
+  const command = directChromeCommandForMaintenance();
+  await fs.mkdir(userDataDir, { recursive: true });
+  const activePortPath = path.join(userDataDir, "DevToolsActivePort");
+  await fs.rm(activePortPath, { force: true }).catch(() => undefined);
+
+  const args = [
+    `--user-data-dir=${userDataDir}`,
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-default-apps",
+    "--disable-component-update",
+    "--remote-debugging-address=127.0.0.1",
+    "--remote-debugging-port=0"
+  ];
+  const child = spawn(command, args, { stdio: ["ignore", "ignore", "pipe"] });
+  let stderr = "";
+  let spawnError: Error | null = null;
+  child.stderr?.on("data", (chunk: Buffer | string) => {
+    stderr += Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
+  });
+  child.once("error", (error) => {
+    spawnError = error instanceof Error ? error : new Error(String(error));
+  });
+
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    if (spawnError) {
+      throw spawnError;
+    }
+    if (child.exitCode !== null) {
+      throw new ProfileManagerError(
+        `临时 Chrome 启动失败，退出码 ${child.exitCode}。${stderr}`,
+        "TEMP_CHROME_EXITED"
+      );
+    }
+    if (await exists(activePortPath)) {
+      const [portText] = (await fs.readFile(activePortPath, "utf8")).trim().split(/\n/);
+      const port = Number(portText);
+      if (Number.isInteger(port) && port > 0) {
+        return { child, port, stderr: () => stderr };
+      }
+    }
+    await sleep(100);
+  }
+
+  throw new ProfileManagerError(`临时 Chrome 没有返回 CDP 端口。${stderr}`, "TEMP_CHROME_CDP_NOT_READY");
+}
+
+function directChromeCommandForMaintenance(): string {
+  const direct = getDirectChromeCommand();
+  if (direct) {
+    return direct;
+  }
+  if (process.platform === "win32") {
+    return "chrome";
+  }
+  return "google-chrome";
+}
+
+async function closeTemporaryChromeWithCdp(launch: TemporaryChromeCdpLaunch): Promise<void> {
+  try {
+    const version = await requestCdpVersionInfo(launch.port);
+    if (version.webSocketDebuggerUrl) {
+      const client = await CdpBrowserClient.connect(version.webSocketDebuggerUrl, 3000);
+      try {
+        await client.send("Browser.close", {}, 3000).catch(() => undefined);
+      } finally {
+        client.close();
+      }
+    } else {
+      launch.child.kill("SIGTERM");
+    }
+  } catch {
+    launch.child.kill("SIGTERM");
+  }
+
+  const exited = await waitForChildExit(launch.child, 5000);
+  if (!exited) {
+    launch.child.kill("SIGKILL");
+    await waitForChildExit(launch.child, 3000);
+  }
+}
+
+function waitForChildExit(child: ReturnType<typeof spawn>, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve(true);
+  }
+
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      child.off("exit", handleExit);
+      resolve(false);
+    }, timeoutMs);
+    const handleExit = (): void => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    child.once("exit", handleExit);
+  });
+}
+
+async function enableDeveloperModeOverCdp(port: number): Promise<void> {
+  const pageClient = await openInspectablePageOverCdp(port, "chrome://extensions/");
+  try {
+    const expression = `
+new Promise((resolve) => {
+  chrome.developerPrivate.updateProfileConfiguration({ inDeveloperMode: true }, () => {
+    resolve(chrome.runtime.lastError ? { error: chrome.runtime.lastError.message } : { ok: true });
+  });
+})
+`;
+    const result = await pageClient.send<CdpRuntimeEvaluateResult>(
+      "Runtime.evaluate",
+      { expression, awaitPromise: true, returnByValue: true },
+      10000
+    );
+    if (result.exceptionDetails) {
+      throw new ProfileManagerError("开启 Chrome 开发者模式时 WebUI 执行失败。", "DEVELOPER_MODE_UPDATE_FAILED");
+    }
+    const value = result.result?.value;
+    if (!isRecord(value) || value.ok !== true) {
+      const detail = isRecord(value) && typeof value.error === "string" ? value.error : "unknown error";
+      throw new ProfileManagerError(`开启 Chrome 开发者模式失败：${detail}`, "DEVELOPER_MODE_UPDATE_FAILED");
+    }
+    await sleep(500);
+  } finally {
+    pageClient.close();
+  }
+}
+
+async function openInspectablePageOverCdp(port: number, url: string): Promise<CdpBrowserClient> {
+  let target = await firstPageTarget(port);
+  if (!target) {
+    const version = await requestCdpVersionInfo(port);
+    if (!version.webSocketDebuggerUrl) {
+      throw new ProfileManagerError("临时 Chrome 没有返回 browser WebSocket 地址。", "CDP_NOT_READY");
+    }
+    const browserClient = await CdpBrowserClient.connect(version.webSocketDebuggerUrl, 3000);
+    try {
+      await browserClient.send("Target.createTarget", { url: "about:blank" }, 5000);
+    } finally {
+      browserClient.close();
+    }
+    target = await waitForFirstPageTarget(port, 5000);
+  }
+
+  if (!target.webSocketDebuggerUrl) {
+    throw new ProfileManagerError("临时 Chrome 页面没有返回 WebSocket 地址。", "CDP_NOT_READY");
+  }
+
+  const pageClient = await CdpBrowserClient.connect(target.webSocketDebuggerUrl, 5000);
+  try {
+    await pageClient.send("Page.enable", {}, 5000);
+    await pageClient.send("Page.navigate", { url }, 5000);
+    await waitForPageUrl(port, url, 5000);
+    await sleep(500);
+    return pageClient;
+  } catch (error) {
+    pageClient.close();
+    throw error;
+  }
+}
+
+async function firstPageTarget(port: number): Promise<CdpTargetListEntry | null> {
+  const targets = await requestCdpTargets(port).catch(() => []);
+  return targets.find((target) => target.type === "page" && target.webSocketDebuggerUrl) || null;
+}
+
+async function waitForFirstPageTarget(port: number, timeoutMs: number): Promise<CdpTargetListEntry> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const target = await firstPageTarget(port);
+    if (target) {
+      return target;
+    }
+    await sleep(100);
+  }
+  throw new ProfileManagerError("临时 Chrome 没有创建可调试页面。", "CDP_NOT_READY");
+}
+
+async function waitForPageUrl(port: number, url: string, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const targets = await requestCdpTargets(port).catch(() => []);
+    if (targets.some((target) => target.type === "page" && target.url === url)) {
+      return;
+    }
+    await sleep(100);
+  }
+}
+
 async function inspectAccountSyncPathDiff(
   sourceLocation: AccountSyncDataLocation,
   targetLocation: AccountSyncDataLocation,
@@ -2927,21 +3423,17 @@ function inspectExtensionMigrationItem(
   targetExtension: ProfileExtensionInfo | null,
   targetProfile: PublicProfile,
   dataChanged: boolean,
-  openInstallPages: boolean,
-  canAutoLoadUnpacked: boolean
+  openInstallPages: boolean
 ): ExtensionMigrationDiffItem {
-  const canLoadViaCdp = canLoadLocalExtensionViaCdp(extension, targetProfile);
-  // 能从源目录加载的本地扩展不再算作“复制”：拷贝侧载只留给无法源加载的商店扩展（且仅旧版 Chrome）。
-  const canCopyLocally = Boolean(
-    extension.canCopyLocally && extension.path && targetProfile.source === "isolated" && canAutoLoadUnpacked && !canLoadViaCdp
-  );
+  const canPersistInstall = canPersistExtensionInstall(extension);
+  const canLoadViaCdp = !canPersistInstall && canLoadLocalExtensionViaCdp(extension, targetProfile);
   const canOpenInstallPage = Boolean(extension.fromWebStore && extension.storeUrl);
-  const needsManualLoad = Boolean(extension.path && !extension.fromWebStore && !canCopyLocally && !canLoadViaCdp);
+  const needsManualLoad = Boolean(extension.path && !extension.fromWebStore && !canPersistInstall && !canLoadViaCdp);
   const targetVersion = targetExtension?.version || null;
   let status: ExtensionMigrationDiffStatus;
 
   if (!targetExtension) {
-    status = canCopyLocally || canLoadViaCdp
+    status = canPersistInstall || canLoadViaCdp
       ? "missing"
       : needsManualLoad
         ? "manual_load_required"
@@ -2949,7 +3441,7 @@ function inspectExtensionMigrationItem(
           ? "needs_install_page"
           : "unsupported";
   } else if (extension.version !== targetExtension.version) {
-    status = canCopyLocally || canLoadViaCdp
+    status = canPersistInstall || canLoadViaCdp
       ? "version_changed"
       : needsManualLoad
         ? "manual_load_required"
@@ -2968,8 +3460,8 @@ function inspectExtensionMigrationItem(
     sourceVersion: extension.version,
     targetVersion,
     status,
-    reason: extensionMigrationDiffReason(status, Boolean(targetExtension), openInstallPages, canLoadViaCdp),
-    willCopyLocally: (status === "missing" || status === "version_changed") && canCopyLocally,
+    reason: extensionMigrationDiffReason(status, Boolean(targetExtension), openInstallPages, canLoadViaCdp, canPersistInstall),
+    willCopyLocally: (status === "missing" || status === "version_changed") && canPersistInstall,
     willLoadViaCdp: (status === "missing" || status === "version_changed") && canLoadViaCdp,
     willOpenInstallPage: status === "needs_install_page" && canOpenInstallPage && openInstallPages
   };
@@ -2979,15 +3471,22 @@ function extensionMigrationDiffReason(
   status: ExtensionMigrationDiffStatus,
   hasTargetExtension: boolean,
   openInstallPages: boolean,
-  willLoadViaCdp = false
+  willLoadViaCdp = false,
+  willPersistInstall = false
 ): string {
   switch (status) {
     case "missing":
+      if (willPersistInstall) {
+        return "目标缺少，本次会写入持久安装记录";
+      }
       if (willLoadViaCdp) {
         return "目标缺少，本次会登记为启动时自动加载";
       }
       return "目标缺少，本次会同步";
     case "version_changed":
+      if (willPersistInstall) {
+        return "版本不同，本次会更新持久安装记录";
+      }
       if (willLoadViaCdp) {
         return "版本不同，本次会更新启动时自动加载配置";
       }
@@ -3039,6 +3538,10 @@ function summarizeExtensionMigrationDiff(
 
 function canLoadLocalExtensionViaCdp(extension: ProfileExtensionInfo, targetProfile: PublicProfile): boolean {
   return Boolean(extension.path && !extension.fromWebStore && targetProfile.source === "isolated");
+}
+
+function canPersistExtensionInstall(extension: ProfileExtensionInfo): boolean {
+  return Boolean(extension.path && extension.canPersistInstall);
 }
 
 function manualLoadExtensionReason(extension: ProfileExtensionInfo): string {
@@ -4519,12 +5022,32 @@ function requestCdpVersion(port: number): Promise<void> {
 }
 
 function requestCdpVersionInfo(port: number): Promise<CdpVersionInfo> {
+  return requestCdpJson<unknown>(port, "/json/version").then((parsed) => ({
+    webSocketDebuggerUrl: isRecord(parsed) ? stringValue(parsed.webSocketDebuggerUrl) || undefined : undefined
+  }));
+}
+
+function requestCdpTargets(port: number): Promise<CdpTargetListEntry[]> {
+  return requestCdpJson<unknown>(port, "/json/list").then((parsed) => {
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed.filter(isRecord).map((target) => ({
+      type: stringValue(target.type) || undefined,
+      url: stringValue(target.url) || undefined,
+      webSocketDebuggerUrl: stringValue(target.webSocketDebuggerUrl) || undefined
+    }));
+  });
+}
+
+function requestCdpJson<T>(port: number, requestPath: string): Promise<T> {
   return new Promise((resolve, reject) => {
     const request = http.get(
       {
         hostname: "127.0.0.1",
         port,
-        path: "/json/version",
+        path: requestPath,
         timeout: 700
       },
       (response) => {
@@ -4539,10 +5062,7 @@ function requestCdpVersionInfo(port: number): Promise<CdpVersionInfo> {
           }
 
           try {
-            const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
-            resolve({
-              webSocketDebuggerUrl: isRecord(parsed) ? stringValue(parsed.webSocketDebuggerUrl) || undefined : undefined
-            });
+            resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")) as T);
           } catch (error) {
             reject(error instanceof Error ? error : new Error(String(error)));
           }

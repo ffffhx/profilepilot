@@ -360,6 +360,7 @@ type ConfirmIntent =
       openInstallPages: boolean;
       onlyChanged: boolean;
       shouldCloseTarget: boolean;
+      shouldCloseSource: boolean;
     };
 type BusyState = {
   key: string;
@@ -970,8 +971,8 @@ function renderAccountSyncPanel(profiles: PublicProfile[]): string {
 
       ${syncingAccount ? renderAccountSyncLoading(sourceProfile, targetProfile) : ""}
 
-      <div class="account-sync-note ${runningBlocker ? "warn" : ""}">
-        ${escapeHtml(accountSyncNote(sourceProfile, targetProfile, runningBlocker, accountSyncRecord))}
+      <div class="account-sync-note">
+        ${escapeHtml(accountSyncNote(sourceProfile, targetProfile, accountSyncRecord))}
       </div>
 
       ${renderAccountSyncScopeToggle()}
@@ -991,19 +992,10 @@ function renderAccountSyncLoading(sourceProfile: PublicProfile | null, targetPro
 function accountSyncNote(
   sourceProfile: PublicProfile | null,
   targetProfile: PublicProfile | null,
-  runningBlocker: PublicProfile | null,
   accountSyncRecord: AccountSyncRecord | null
 ): string {
   if (!sourceProfile || !targetProfile) {
     return "至少需要两个 Profile 才能同步账号。";
-  }
-
-  if (runningBlocker) {
-    if (accountSyncRecord) {
-      return `目标 ${runningBlocker.name} 正在运行，且上次已在 ${formatDate(accountSyncRecord.syncedAt)} 从 ${sourceProfile.name} 同步过。重新同步会先关闭目标再覆盖刷新，不会重复叠加。`;
-    }
-
-    return `目标 ${runningBlocker.name} 正在运行。同步时会先关闭目标，写入完成后再按设置重新启动。`;
   }
 
   if (accountSyncRecord) {
@@ -1390,8 +1382,8 @@ function renderExtensionMigrationPanel(profiles: PublicProfile[]): string {
       </div>
 
       ${migrating ? renderOperationProgress("migrate-extensions", "插件同步进度") : ""}
-      ${activeScan ? renderExtensionScan(activeScan, selectedCount, allSelected, canMigrate) : renderExtensionScanEmpty()}
       ${extensionMigrationResult ? renderExtensionMigrationResult(extensionMigrationResult) : ""}
+      ${activeScan ? renderExtensionScan(activeScan, selectedCount, allSelected, canMigrate) : renderExtensionScanEmpty()}
     </section>
   `;
 }
@@ -1550,6 +1542,7 @@ function renderMigrationTargetPicker(profiles: PublicProfile[], targetId: string
 
   return `
     <div class="profile-select ${expanded ? "open" : ""}" data-migration-target-select>
+      <input type="hidden" name="targetProfileId" value="${escapeHtml(selectedProfile?.id || "")}" />
       <button
         type="button"
         class="profile-select-trigger"
@@ -2274,10 +2267,12 @@ function renderAgentConfigDetail(profile: PublicProfile): string {
 
 type ConfirmModalTone = "primary" | "warn" | "danger";
 
+type ConfirmBodyLine = string | { text: string; tone: "danger" };
+
 interface ConfirmModalView {
   kicker: string;
   title: string;
-  body: string[];
+  body: ConfirmBodyLine[];
   confirmLabel: string;
   tone: ConfirmModalTone;
   summary: Array<{ label: string; value: string }>;
@@ -2302,7 +2297,13 @@ function renderConfirmModal(confirm: Extract<ModalState, { kind: "confirm" }>): 
           </div>
         </div>
         <div class="modal-copy confirm-copy">
-          ${view.body.map((line) => `<p>${escapeHtml(line)}</p>`).join("")}
+          ${view.body
+            .map((line) =>
+              typeof line === "string"
+                ? `<p>${escapeHtml(line)}</p>`
+                : `<p class="${line.tone}-line">${escapeHtml(line.text)}</p>`
+            )
+            .join("")}
         </div>
         <div class="confirm-summary">
           ${view.summary
@@ -2422,6 +2423,12 @@ function confirmModalView(intent: ConfirmIntent): ConfirmModalView | null {
   const closeLine = intent.shouldCloseTarget
     ? `目标 ${targetProfile.name} 正在运行。开始同步前会先帮你关闭目标，写入完成后再继续。`
     : "同步开始后会写入目标 Profile 的插件配置。";
+  const sourceCloseLine: ConfirmBodyLine | null = intent.shouldCloseSource
+    ? {
+        text: `源 ${sourceProfile.name} 正在运行。读取插件数据前需要先关闭它，确认后会帮你关闭，同步完成后再重新启动。`,
+        tone: "danger"
+      }
+    : null;
   const dataLine = extensionMigrationConfirmDataLine(cdpLoadCount, manualLoadCount, intent.includeData);
   const modeLine = intent.onlyChanged
     ? `本次只同步 ${plannedCount} 个变更插件，${Math.max(intent.selectedCount - plannedCount, 0)} 个已一致插件会跳过。`
@@ -2430,7 +2437,7 @@ function confirmModalView(intent: ConfirmIntent): ConfirmModalView | null {
   return {
     kicker: "插件同步确认",
     title: `同步 ${plannedCount} 个插件到 ${targetProfile.name}`,
-    body: [closeLine, dataLine, modeLine],
+    body: [closeLine, sourceCloseLine, dataLine, modeLine].filter((line): line is ConfirmBodyLine => Boolean(line)),
     confirmLabel: "同步",
     tone: "warn",
     summary: [
@@ -2595,6 +2602,7 @@ function executeDeleteExtensionConfirm(intent: Extract<ConfirmIntent, { kind: "d
 
 function executeExtensionMigrationConfirm(intent: Extract<ConfirmIntent, { kind: "extension-migration" }>): void {
   const targetProfile = state?.profiles.find((profile) => profile.id === intent.targetProfileId);
+  const sourceProfile = state?.profiles.find((profile) => profile.id === intent.sourceProfileId);
   modal = null;
 
   if (!targetProfile) {
@@ -2603,6 +2611,7 @@ function executeExtensionMigrationConfirm(intent: Extract<ConfirmIntent, { kind:
     return;
   }
 
+  const shouldCloseSource = intent.shouldCloseSource && Boolean(sourceProfile);
   migrationTargetId = intent.targetProfileId;
   const progressSteps = extensionSyncProgressStepsForTarget(targetProfile);
 
@@ -2616,6 +2625,11 @@ function executeExtensionMigrationConfirm(intent: Extract<ConfirmIntent, { kind:
         stepCount: nextSteps.length,
         steps: nextSteps
       });
+    }
+
+    if (shouldCloseSource && sourceProfile) {
+      updateBusyState({ message: `正在关闭源 ${sourceProfile.name} 以读取插件数据…` });
+      state = await profileApi().closeProfile(intent.sourceProfileId);
     }
 
     const result = await profileApi().migrateExtensions({
@@ -2639,6 +2653,13 @@ function executeExtensionMigrationConfirm(intent: Extract<ConfirmIntent, { kind:
         ? await profileApi().launchProfileWithCdp(intent.targetProfileId, targetProfile.cdpPort)
         : await profileApi().launchProfile(intent.targetProfileId);
       selectedId = result.targetProfileId;
+    }
+
+    if (shouldCloseSource && sourceProfile) {
+      updateBusyState({ message: `同步完成，正在重新启动源 ${sourceProfile.name}…` });
+      state = sourceProfile.cdpPort
+        ? await profileApi().launchProfileWithCdp(intent.sourceProfileId, sourceProfile.cdpPort)
+        : await profileApi().launchProfile(intent.sourceProfileId);
     }
   }, "插件同步完成", {
     key: "migrate-extensions",
@@ -3645,10 +3666,7 @@ appRoot.addEventListener("submit", (event) => {
       setToast("没有找到目标 Profile", "error");
       return;
     }
-    if (includeExtensionData && sourceProfile?.running) {
-      setToast("同步插件数据前请先关闭源 Profile，或取消勾选“同时同步插件数据”。", "error");
-      return;
-    }
+    const shouldCloseSource = Boolean(includeExtensionData && sourceProfile?.running);
 
     if (extensionSyncOnlyChanged) {
       if (extensionMigrationDiffLoading || !extensionMigrationDiff) {
@@ -3680,7 +3698,8 @@ appRoot.addEventListener("submit", (event) => {
         includeData: includeExtensionData,
         openInstallPages,
         onlyChanged: extensionSyncOnlyChanged,
-        shouldCloseTarget
+        shouldCloseTarget,
+        shouldCloseSource
       }
     };
     render();

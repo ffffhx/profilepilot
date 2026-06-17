@@ -2429,6 +2429,11 @@ body:not(.booted) .layout {
   margin: 0 0 8px;
 }
 
+.confirm-copy p.danger-line {
+  color: var(--danger-bright);
+  font-weight: 700;
+}
+
 .modal-note {
   margin: 8px 0 0;
   color: var(--muted);

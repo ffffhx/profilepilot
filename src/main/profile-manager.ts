@@ -393,20 +393,58 @@ export class ProfileManager {
       throw new ProfileManagerError("这个 Profile 当前未运行。", "PROFILE_NOT_RUNNING");
     }
 
-    this.signalPids(profile.pids, "SIGTERM");
-    if (await this.waitUntilProfileStops(profile.id, 1800)) {
+    // 优雅关闭：让 Chrome 自己把 Cookies / 登录态 / 会话落盘并合并 WAL 后再退出，
+    // 避免强杀打断写入导致登录态丢失（需要手动重开才恢复）。给足时间窗口。
+    await this.requestGracefulClose(profile);
+    if (await this.waitUntilProfileStops(profile.id, 9000)) {
+      await this.settleAfterClose();
       return;
     }
 
-    // 优雅关闭超时，强制结束残留进程，避免 UI 误报“已关闭”但 Chrome 仍在运行。
+    // 优雅退出超时（可能卡在 beforeunload 弹窗等）：补发 SIGTERM 再等一会。
+    const afterGraceful = await this.getPublicProfile(profileId);
+    if (!afterGraceful.running || !afterGraceful.pids.length) {
+      await this.settleAfterClose();
+      return;
+    }
+    this.signalPids(afterGraceful.pids, "SIGTERM");
+    if (await this.waitUntilProfileStops(profile.id, 4000)) {
+      await this.settleAfterClose();
+      return;
+    }
+
+    // 仍未退出，强制结束残留进程，避免 UI 误报“已关闭”但 Chrome 仍在运行。
     const still = await this.getPublicProfile(profileId);
     if (!still.running || !still.pids.length) {
+      await this.settleAfterClose();
       return;
     }
     this.signalPids(still.pids, "SIGKILL");
     if (!(await this.waitUntilProfileStops(profile.id, 1500))) {
       throw new ProfileManagerError("无法结束这个 Profile 的 Chrome 进程，请手动关闭后重试。", "PROFILE_CLOSE_FAILED");
     }
+    await this.settleAfterClose();
+  }
+
+  // 发起一次优雅关闭请求。macOS 上的系统 Chrome 优先用 AppleScript `quit`
+  //（等同 ⌘Q 的干净退出），失败再退回 SIGTERM；其它情况直接发 SIGTERM。
+  private async requestGracefulClose(profile: PublicProfile): Promise<void> {
+    if (profile.source === "native" && process.platform === "darwin") {
+      try {
+        const appName = process.env.CHROME_APP_NAME || "Google Chrome";
+        await execFileAsync("osascript", ["-e", `tell application "${appName}" to quit`], { timeout: 4000 });
+        return;
+      } catch {
+        // AppleScript 退出失败或超时，退回信号方式。
+      }
+    }
+    this.signalPids(profile.pids, "SIGTERM");
+  }
+
+  // Chrome 进程从进程表消失，不代表文件锁已释放、Cookies WAL 已合并完成。
+  // 关闭后稍作等待再返回，避免随后的重新启动读到尚未落盘的半成品状态。
+  private async settleAfterClose(): Promise<void> {
+    await sleep(900);
   }
 
   async focusProfile(profileId: string): Promise<void> {
@@ -783,6 +821,25 @@ export class ProfileManager {
       return true;
     };
 
+    // 复制插件的可同步数据（Local/Sync Extension Settings、IndexedDB 等）。
+    // 商店重装后扩展 ID 与源一致，预先铺好数据目录，装完即可读到原配置。
+    const copyExtensionData = async (extension: ProfileExtensionInfo): Promise<void> => {
+      if (!includeData) {
+        return;
+      }
+      for (const dataPath of extension.dataPaths) {
+        report(`正在同步插件数据：${extension.name} · ${dataPath.label}`, "同步插件", 4);
+        const copied = await copyExtensionDataPath(sourceProfileDataPath, targetProfileDataPath, dataPath.relativePath);
+        if (copied) {
+          dataCopies.push({
+            id: extension.id,
+            name: extension.name,
+            relativePath: dataPath.relativePath
+          });
+        }
+      }
+    };
+
     try {
       for (const [index, extension] of effectiveExtensions.entries()) {
         report(`正在同步插件 ${index + 1}/${effectiveExtensions.length}：${extension.name}`, "同步插件", 4);
@@ -805,6 +862,8 @@ export class ProfileManager {
           if (extension.storeUrl) {
             webStoreInstallUrls.push(extension.storeUrl);
           }
+          // 即便走商店安装，也先把配置数据铺好，避免装完是一个空配置的插件。
+          await copyExtensionData(extension);
           skippedExtensions.push({
             id: extension.id,
             name: extension.name,
@@ -813,20 +872,12 @@ export class ProfileManager {
           continue;
         }
 
-        if (diffItem?.willLoadViaCdp || (!canAutoLoadUnpacked && canLoadLocalExtensionViaCdp(extension, targetProfile))) {
-          if (includeData) {
-            for (const dataPath of extension.dataPaths) {
-              report(`正在同步插件数据：${extension.name} · ${dataPath.label}`, "同步插件", 4);
-              const copied = await copyExtensionDataPath(sourceProfileDataPath, targetProfileDataPath, dataPath.relativePath);
-              if (copied) {
-                dataCopies.push({
-                  id: extension.id,
-                  name: extension.name,
-                  relativePath: dataPath.relativePath
-                });
-              }
-            }
-          }
+        // 本地（非商店）解压扩展一律登记“源目录”，不再拷贝副本：
+        // 启动计划会按 Chrome 版本决定用 --load-extension（旧版）还是 CDP（新版 137+）加载，
+        // 但都从源目录现读，源更新后自动生效，也不在 Profile 里留快照。
+        // 商店扩展（fromWebStore）走不到这里，仍按原有策略处理（旧版拷贝侧载 / 新版安装页）。
+        if (canLoadLocalExtensionViaCdp(extension, targetProfile)) {
+          await copyExtensionData(extension);
           await registerLocalExtensionForRuntimeLoad(extension);
           continue;
         }
@@ -834,6 +885,8 @@ export class ProfileManager {
         if (extension.path && !canAutoLoadUnpacked) {
           if (extension.fromWebStore && extension.storeUrl) {
             webStoreInstallUrls.push(extension.storeUrl);
+            // 官方 Chrome 只能从商店重装，但配置数据仍可预先复制（ID 一致）。
+            await copyExtensionData(extension);
             skippedExtensions.push({
               id: extension.id,
               name: extension.name,
@@ -893,19 +946,7 @@ export class ProfileManager {
           });
         }
 
-        if (includeData) {
-          for (const dataPath of extension.dataPaths) {
-            report(`正在同步插件数据：${extension.name} · ${dataPath.label}`, "同步插件", 4);
-            const copied = await copyExtensionDataPath(sourceProfileDataPath, targetProfileDataPath, dataPath.relativePath);
-            if (copied) {
-              dataCopies.push({
-                id: extension.id,
-                name: extension.name,
-                relativePath: dataPath.relativePath
-              });
-            }
-          }
-        }
+        await copyExtensionData(extension);
       }
 
       if (extensionsForRegistry.length) {
@@ -2889,10 +2930,11 @@ function inspectExtensionMigrationItem(
   openInstallPages: boolean,
   canAutoLoadUnpacked: boolean
 ): ExtensionMigrationDiffItem {
-  const canCopyLocally = Boolean(
-    extension.canCopyLocally && extension.path && targetProfile.source === "isolated" && canAutoLoadUnpacked
-  );
   const canLoadViaCdp = canLoadLocalExtensionViaCdp(extension, targetProfile);
+  // 能从源目录加载的本地扩展不再算作“复制”：拷贝侧载只留给无法源加载的商店扩展（且仅旧版 Chrome）。
+  const canCopyLocally = Boolean(
+    extension.canCopyLocally && extension.path && targetProfile.source === "isolated" && canAutoLoadUnpacked && !canLoadViaCdp
+  );
   const canOpenInstallPage = Boolean(extension.fromWebStore && extension.storeUrl);
   const needsManualLoad = Boolean(extension.path && !extension.fromWebStore && !canCopyLocally && !canLoadViaCdp);
   const targetVersion = targetExtension?.version || null;

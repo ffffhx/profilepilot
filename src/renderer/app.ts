@@ -2534,7 +2534,7 @@ function executeProfileConfirm(intent: Extract<ConfirmIntent, { kind: "profile" 
     return;
   }
 
-  void withBusy(() => profileApi().deleteProfile(profile.id), `已删除 ${profile.name}`, {
+  void withBusy(() => profileApi().deleteProfile(profile.id), `已删除 ${emphasizeName(profile.name)}`, {
     key: "delete-profile",
     message: `正在删除 ${profile.name}…`,
     profileId: profile.id
@@ -2609,7 +2609,7 @@ function executeDeleteExtensionConfirm(intent: Extract<ConfirmIntent, { kind: "d
     invalidateExtensionMigrationDiff();
     state = result.state;
     selectedId = result.profileId;
-  }, `已删除插件 ${extension.name}`, {
+  }, `已删除插件 ${emphasizeName(extension.name)}`, {
     key: "delete-extension",
     message: `正在删除插件 ${extension.name}…`,
     profileId: intent.profileId,
@@ -3291,10 +3291,10 @@ appRoot.addEventListener("click", (event) => {
   if (action === "launch" && id) {
     const profile = state.profiles.find((item) => item.id === id);
     if (profile?.running) {
-      setToast(`${profile.name} 已经在运行中`);
+      setToast(`${emphasizeName(profile.name)} 已经在运行中`);
       return;
     }
-    void withBusy(() => profileApi().launchProfile(id), `已启动 ${profile?.name || "Profile"}`, {
+    void withBusy(() => profileApi().launchProfile(id), `已启动 ${emphasizeName(profile?.name || "Profile")}`, {
       key: "launch-profile",
       message: `正在启动 ${profile?.name || "Profile"}…`,
       profileId: id
@@ -3312,7 +3312,7 @@ appRoot.addEventListener("click", (event) => {
       return;
     }
     if (profile.running) {
-      setToast(profile.cdpUrl ? `${profile.name} 已开启 CDP：${profile.cdpUrl}` : `先关闭 ${profile.name}，再以 CDP 模式启动`, profile.cdpUrl ? "normal" : "error");
+      setToast(profile.cdpUrl ? `${emphasizeName(profile.name)} 已开启 CDP：${profile.cdpUrl}` : `先关闭 ${emphasizeName(profile.name)}，再以 CDP 模式启动`, profile.cdpUrl ? "normal" : "error");
       return;
     }
 
@@ -3347,7 +3347,7 @@ appRoot.addEventListener("click", (event) => {
 
   if (action === "clear-agent-config" && id) {
     const profile = state.profiles.find((item) => item.id === id);
-    void withBusy(() => profileApi().clearAgentBrowserConfig(id), `已从 CLAUDE.md 移除 ${profile?.name || "Profile"} 的 Agent 配置`, {
+    void withBusy(() => profileApi().clearAgentBrowserConfig(id), `已从 CLAUDE.md 移除 ${emphasizeName(profile?.name || "Profile")} 的 Agent 配置`, {
       key: "agent-config",
       message: "正在移除 Agent 配置…",
       profileId: id
@@ -3391,12 +3391,12 @@ appRoot.addEventListener("click", (event) => {
 
     if (action === "focus-external") {
       if (instance.headless) {
-        setToast(`${instance.label} 是无头实例，没有可见窗口，无法显示`, "error");
+        setToast(`${emphasizeName(instance.label)} 是无头实例，没有可见窗口，无法显示`, "error");
         return;
       }
       void withBusy(async () => {
         state = await profileApi().focusExternalInstance(dir);
-      }, `已显示 ${instance.label}`, {
+      }, `已显示 ${emphasizeName(instance.label)}`, {
         key: "focus-external",
         message: `正在显示 ${instance.label}…`,
         profileId: dir
@@ -3419,7 +3419,7 @@ appRoot.addEventListener("click", (event) => {
       return;
     }
     if (!profile.running) {
-      setToast(`${profile.name} 当前未运行`);
+      setToast(`${emphasizeName(profile.name)} 当前未运行`);
       return;
     }
 
@@ -3427,7 +3427,7 @@ appRoot.addEventListener("click", (event) => {
     void withBusy(async () => {
       state = await profileApi().focusProfile(id);
       selectedId = id;
-    }, `已显示 ${profile.name}`, {
+    }, `已显示 ${emphasizeName(profile.name)}`, {
       key: "focus-profile",
       message: `正在显示 ${profile.name}…`,
       profileId: id
@@ -3441,7 +3441,7 @@ appRoot.addEventListener("click", (event) => {
       return;
     }
     if (!profile.running) {
-      setToast(`${profile.name} 当前未运行`);
+      setToast(`${emphasizeName(profile.name)} 当前未运行`);
       return;
     }
 
@@ -3474,7 +3474,7 @@ appRoot.addEventListener("click", (event) => {
       return;
     }
     if (profile.running) {
-      setToast(`先关闭 ${profile.name} 的 Chrome 窗口，再刷新后删除`, "error");
+      setToast(`先关闭 ${emphasizeName(profile.name)} 的 Chrome 窗口，再刷新后删除`, "error");
       return;
     }
     if (!profile.deletable) {
@@ -3645,7 +3645,7 @@ appRoot.addEventListener("submit", (event) => {
     modal = null;
     void withBusy(
       () => profileApi().setAgentBrowserConfig(profileId, parsedPort),
-      `已写入全局 CLAUDE.md：Agent 优先连接 ${profile.name}（端口 ${parsedPort}）`,
+      `已写入全局 CLAUDE.md：Agent 优先连接 ${emphasizeName(profile.name)}（端口 ${parsedPort}）`,
       { key: "agent-config", message: "正在写入 Agent 配置…", profileId }
     );
     return;
@@ -3743,7 +3743,7 @@ appRoot.addEventListener("submit", (event) => {
     }
 
     modal = null;
-    void withBusy(() => profileApi().launchProfileWithCdp(profileId, port), `已以 CDP 启动 ${profile?.name || "Profile"}`, {
+    void withBusy(() => profileApi().launchProfileWithCdp(profileId, port), `已以 CDP 启动 ${emphasizeName(profile?.name || "Profile")}`, {
       key: "launch-cdp",
       message: `正在以 CDP 启动 ${profile?.name || "Profile"}…`,
       profileId

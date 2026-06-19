@@ -371,6 +371,10 @@ function registerIpcHandlers(): void {
     return profileManager.getState();
   });
 
+  ipcMain.handle(IPC_CHANNELS.isProfileFrontmost, async (_event, id: string): Promise<boolean> => {
+    return profileManager.isProfileFrontmost(id);
+  });
+
   ipcMain.handle(IPC_CHANNELS.closeProfile, async (_event, id: string): Promise<AppState> => {
     await profileManager.closeProfile(id);
     return profileManager.getState();

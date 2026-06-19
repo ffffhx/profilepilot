@@ -8,6 +8,7 @@ export const IPC_CHANNELS = {
   setAgentBrowserConfig: "profiles:agent:set-config",
   clearAgentBrowserConfig: "profiles:agent:clear-config",
   focusProfile: "profiles:focus",
+  isProfileFrontmost: "profiles:is-frontmost",
   closeProfile: "profiles:close",
   focusExternalInstance: "profiles:external:focus",
   closeExternalInstance: "profiles:external:close",

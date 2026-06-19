@@ -1320,7 +1320,8 @@ body:not(.booted) .migration-panel {
 
 .migration-source-bar {
   display: grid;
-  grid-template-columns: repeat(2, minmax(240px, 360px)) minmax(180px, 1fr);
+  grid-template-columns: minmax(240px, 360px) auto;
+  justify-content: start;
   column-gap: 12px;
   row-gap: 10px;
   align-items: end;
@@ -1378,6 +1379,21 @@ body:not(.booted) .migration-panel {
 }
 
 .profile-select-trigger-copy {
+  min-width: 0;
+}
+
+/* 迁移源下拉：单行（状态点 + 名字），高度与「扫描源 Profile 插件」按钮一致 */
+[data-migration-source-select] .profile-select-trigger {
+  height: 44px;
+}
+
+[data-migration-source-select] .profile-select-trigger-copy {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+[data-migration-source-select] .profile-select-trigger-copy strong {
   min-width: 0;
 }
 
@@ -1482,18 +1498,49 @@ body:not(.booted) .migration-panel {
   white-space: nowrap;
 }
 
+/* 迁移源下拉选项：单行（点 + 名字 …… 右侧运行状态），去掉第二行小字 */
+[data-migration-source-select] .profile-select-option {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 40px;
+}
+
+[data-migration-source-select] .profile-select-option-main {
+  flex: 1 1 auto;
+}
+
+.profile-select-option-state {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.profile-select-option-state.running {
+  color: var(--accent);
+}
+
 .migration-source-bar > button {
-  width: 100%;
-  height: 54px;
+  height: 44px;
+  padding: 0 22px;
+  white-space: nowrap;
 }
 
 .migration-source-summary {
   min-width: 0;
-  min-height: 42px;
-  align-self: end;
   display: flex;
   flex-direction: column;
   justify-content: center;
+}
+
+/* 摘要移到标题行右侧时：右对齐、不再撑高 */
+.section-head .migration-source-summary {
+  align-items: flex-end;
+  text-align: right;
+  flex: 0 1 auto;
 }
 
 .migration-source-summary strong,
@@ -1656,28 +1703,11 @@ body:not(.booted) .migration-panel {
   height: 16px;
 }
 
-.extension-name,
-.extension-data-state,
-.extension-plan {
+.extension-name {
   display: block;
   min-width: 0;
   overflow-wrap: anywhere;
   font-size: 13px;
-}
-
-.extension-id,
-.extension-meta {
-  display: block;
-  margin-top: 5px;
-  overflow: hidden;
-  color: var(--muted);
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.extension-id {
-  font-family: var(--font-mono);
 }
 
 .migration-result {
@@ -2041,17 +2071,6 @@ body:not(.booted) .layout {
   line-height: 1.25;
 }
 
-.profile-dir {
-  display: block;
-  margin-top: 4px;
-  overflow: hidden;
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .state-pill {
   display: inline-flex;
   align-items: center;
@@ -2143,10 +2162,6 @@ body:not(.booted) .layout {
 .profile-name-line .source-pill,
 .profile-name-line .native-badge {
   flex: 0 0 auto;
-}
-
-.external-row .profile-dir {
-  font-family: var(--font-mono);
 }
 
 .path-box.accent {

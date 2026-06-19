@@ -6,7 +6,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { shell } from "electron";
+import { app, shell } from "electron";
 import type {
   AccountSyncCopiedItem,
   AccountSyncDiffItem,
@@ -78,6 +78,13 @@ interface CdpTargetListEntry {
   type?: string;
   url?: string;
   webSocketDebuggerUrl?: string;
+}
+
+interface ProfileRestartPlan {
+  profileId: string;
+  profileName: string;
+  cdpPort: number | null;
+  urls: string[];
 }
 
 interface CdpRuntimeEvaluateResult {
@@ -487,30 +494,108 @@ export class ProfileManager {
     await sleep(900);
   }
 
+  private async captureProfileRestartPlan(profile: PublicProfile): Promise<ProfileRestartPlan> {
+    const urls = profile.cdpPort ? await snapshotRestorableTabUrls(profile.cdpPort).catch(() => []) : [];
+    return {
+      profileId: profile.id,
+      profileName: profile.name,
+      cdpPort: profile.cdpPort,
+      urls
+    };
+  }
+
+  private async closeProfileIfRunning(profileId: string): Promise<void> {
+    const profile = await this.getPublicProfile(profileId);
+    if (!profile.running || !profile.pids.length) {
+      return;
+    }
+
+    await this.closeProfile(profileId);
+  }
+
+  private async restoreProfileFromRestartPlan(plan: ProfileRestartPlan, extraUrls: string[] = []): Promise<number> {
+    await this.recoverAccountSyncArtifactsBeforeLaunch(plan.profileId);
+    this.acquireLaunchLock(plan.profileId);
+    try {
+      const urls = appendUniqueExtraUrls(plan.urls, extraUrls);
+      const ref = parseProfileId(plan.profileId);
+
+      if (ref.source === "native") {
+        if (urls.length) {
+          await this.launchNativeProfileWithUrls(ref.dirName, urls);
+        } else {
+          await this.launchNativeProfile(ref.dirName);
+        }
+        return plan.urls.length;
+      }
+
+      if (urls.length) {
+        await this.launchIsolatedProfileWithUrls(ref.id, urls, {
+          cdpPort: plan.cdpPort,
+          forceCdp: Boolean(plan.cdpPort)
+        });
+      } else if (plan.cdpPort) {
+        await this.launchIsolatedProfileWithCdp(ref.id, plan.cdpPort);
+      } else {
+        await this.launchIsolatedProfile(ref.id);
+      }
+      return plan.urls.length;
+    } finally {
+      this.inFlightLaunches.delete(plan.profileId);
+    }
+  }
+
   async focusProfile(profileId: string): Promise<void> {
     const profile = await this.getPublicProfile(profileId);
     if (!profile.running || !profile.pids.length) {
       throw new ProfileManagerError("这个 Profile 当前未运行。", "PROFILE_NOT_RUNNING");
     }
 
+    if (profile.cdpPort) {
+      await bringCdpPageToFront(profile.cdpPort).catch(() => false);
+    }
+
     if (profile.source === "native") {
-      // 系统 Chrome 是 LaunchServices 注册的默认实例，open -a 走 LaunchServices
-      // 可靠置顶且不需要任何权限；再尽力用 AXRaise 精确提升窗口（无权限则静默跳过）。
-      await bringChromeAppToFront();
-      await focusProfileWindow(profile.pids);
-      return;
+      const raisedWindow = await focusProfileWindow(profile.pids);
+      if (raisedWindow) {
+        return;
+      }
+
+      throw new ProfileManagerError(
+        "macOS 没有把这个系统 Chrome Profile 精确显示到最前面。多个 Google Chrome.app 实例同时运行时，系统的应用级激活可能会落到其它 Profile；请给 ProfilePilot 授予“辅助功能”权限，或先关闭其它 Chrome 实例后重试。",
+        "FOCUS_PROFILE_UNCONFIRMED"
+      );
     }
 
     const raisedWindow = await focusProfileWindow(profile.pids);
-    if (raisedWindow || (await hasRendererProcessForProfile(profile.path))) {
+    if (raisedWindow) {
       return;
     }
 
-    await requestIsolatedProfileWindow(profile);
+    if (!(await hasRendererProcessForProfile(profile.path))) {
+      await requestIsolatedProfileWindow(profile);
+    }
     await sleep(700);
 
     const refreshedProfile = await this.getPublicProfile(profileId);
-    await focusProfileWindow(refreshedProfile.pids.length ? refreshedProfile.pids : profile.pids);
+    const raisedAfterRequest = await focusProfileWindow(refreshedProfile.pids.length ? refreshedProfile.pids : profile.pids);
+    if (raisedAfterRequest) {
+      return;
+    }
+
+    throw new ProfileManagerError(
+      "macOS 没有把这个独立 Profile 精确显示到最前面。若同一个 Google Chrome.app 同时开了多个实例，请先用 CDP 启动这个 Profile，或给 ProfilePilot 授予“辅助功能”权限后重试。",
+      "FOCUS_PROFILE_UNCONFIRMED"
+    );
+  }
+
+  async isProfileFrontmost(profileId: string): Promise<boolean> {
+    const profile = await this.getPublicProfile(profileId);
+    if (!profile.running || !profile.pids.length) {
+      return false;
+    }
+
+    return isAnyMacProcessFrontmost(profile.pids);
   }
 
   async focusExternalInstance(userDataDir: string): Promise<void> {
@@ -762,10 +847,17 @@ export class ProfileManager {
       throw new ProfileManagerError("没有找到源 Profile 或目标 Profile。", "PROFILE_NOT_FOUND");
     }
     if (targetProfile.running) {
-      throw new ProfileManagerError("同步插件前请先关闭目标 Profile。", "TARGET_PROFILE_RUNNING");
+      report(`正在记录并关闭目标 ${targetProfile.name}…`, "关闭目标", 2);
+    }
+    const targetRestartPlan = targetProfile.running ? await this.captureProfileRestartPlan(targetProfile) : null;
+    const sourceRestartPlan =
+      includeData && sourceProfile.running ? await this.captureProfileRestartPlan(sourceProfile) : null;
+    if (targetProfile.running) {
+      await this.closeProfileIfRunning(targetProfileId);
     }
     if (includeData && sourceProfile.running) {
-      throw new ProfileManagerError("同步插件数据前请先关闭源 Profile，或取消勾选“同时同步插件数据”。", "SOURCE_PROFILE_RUNNING");
+      report(`正在记录并关闭源 ${sourceProfile.name} 以读取插件数据…`, "关闭源", 2);
+      await this.closeProfileIfRunning(sourceProfileId);
     }
 
     report("正在扫描源 Profile 的插件列表…", "扫描插件", 2);
@@ -1034,12 +1126,35 @@ export class ProfileManager {
       }
 
       let openedInstallPages = false;
+      let reopenedTarget = false;
+      let reopenedSource = false;
+      let restoredTargetTabs = 0;
+      let restoredSourceTabs = 0;
       const manualLoadNeeded = skippedExtensions.some((extension) => isManualLoadSkipReason(extension.reason));
       const pagesToOpen = uniqueStrings([...webStoreInstallUrls, ...(manualLoadNeeded ? ["chrome://extensions/"] : [])]);
-      if (openInstallPages && pagesToOpen.length) {
+      const installPagesToOpen = openInstallPages ? pagesToOpen : [];
+      if (targetRestartPlan) {
+        report(
+          installPagesToOpen.length
+            ? `正在恢复 ${targetProfile.name} 的标签页并打开确认页面…`
+            : `正在重新打开 ${targetProfile.name} 并恢复标签页…`,
+          "完成",
+          6
+        );
+        restoredTargetTabs = await this.restoreProfileFromRestartPlan(targetRestartPlan, installPagesToOpen);
+        reopenedTarget = true;
+        openedInstallPages = installPagesToOpen.length > 0;
+      } else if (installPagesToOpen.length) {
         report(`正在打开 ${targetProfile.name} 需要确认的页面…`, "写入配置", 5);
-        await this.launchProfileWithUrls(targetProfile.id, pagesToOpen);
+        await this.launchProfileWithUrls(targetProfile.id, installPagesToOpen);
+        reopenedTarget = true;
         openedInstallPages = true;
+      }
+
+      if (sourceRestartPlan) {
+        report(`正在重新打开源 ${sourceProfile.name} 并恢复标签页…`, "完成", 6);
+        restoredSourceTabs = await this.restoreProfileFromRestartPlan(sourceRestartPlan);
+        reopenedSource = true;
       }
 
       report("正在刷新同步结果…", "完成", 6);
@@ -1054,6 +1169,10 @@ export class ProfileManager {
         manualLoadExtensions,
         skippedExtensions,
         openedInstallPages,
+        reopenedTarget,
+        reopenedSource,
+        restoredTargetTabs,
+        restoredSourceTabs,
         state: await this.getState()
       };
     } catch (error) {
@@ -1150,11 +1269,12 @@ export class ProfileManager {
     if (!sourceProfile || !targetProfile) {
       throw new ProfileManagerError("没有找到源 Profile 或目标 Profile。", "PROFILE_NOT_FOUND");
     }
+
+    const targetRestartPlan =
+      targetProfile.running && launchTarget ? await this.captureProfileRestartPlan(targetProfile) : null;
     if (targetProfile.running) {
-      throw new ProfileManagerError(
-        "同步账号前请先关闭目标 Profile，然后刷新列表。Chrome 运行时写入目标登录数据库可能造成数据不一致。",
-        "PROFILE_RUNNING"
-      );
+      report(`正在关闭 ${targetProfile.name} 以写入账号数据…`, "关闭目标", 2, 7);
+      await this.closeProfileIfRunning(targetProfileId);
     }
 
     const sourceLocation = await this.resolveAccountSyncLocation(sourceProfile, false);
@@ -1230,11 +1350,22 @@ export class ProfileManager {
     }
 
     let launchedTarget = false;
+    let restoredTargetTabs = 0;
     if (launchTarget) {
       throwIfAborted(abortSignal);
       await waitIfPaused(pauseSignal, abortSignal);
-      report(`正在启动 ${targetProfile.name}…`, "完成", 6);
-      await this.launchProfile(targetProfileId);
+      report(
+        targetRestartPlan
+          ? `正在重新打开 ${targetProfile.name} 并恢复标签页…`
+          : `正在启动 ${targetProfile.name}…`,
+        "完成",
+        6
+      );
+      if (targetRestartPlan) {
+        restoredTargetTabs = await this.restoreProfileFromRestartPlan(targetRestartPlan);
+      } else {
+        await this.launchProfile(targetProfileId);
+      }
       launchedTarget = true;
     } else {
       report("正在刷新同步结果…", "完成", 6);
@@ -1256,6 +1387,7 @@ export class ProfileManager {
       copiedItems,
       skippedItems,
       launchedTarget,
+      restoredTargetTabs,
       state: await this.getState()
     };
   }
@@ -1404,10 +1536,18 @@ export class ProfileManager {
     await this.saveRegistry(registry);
   }
 
-  private async launchIsolatedProfileWithUrls(id: string, urls: string[]): Promise<void> {
+  private async launchIsolatedProfileWithUrls(
+    id: string,
+    urls: string[],
+    options: { cdpPort?: number | null; forceCdp?: boolean } = {}
+  ): Promise<void> {
     const registry = await this.loadRegistry();
     const profile = this.findIsolatedProfile(registry, id);
-    const cdpPort = await this.launchStoredIsolatedProfile(profile, { urls });
+    const cdpPort = await this.launchStoredIsolatedProfile(profile, {
+      urls,
+      cdpPort: options.cdpPort,
+      forceCdp: options.forceCdp
+    });
     profile.lastLaunchedAt = new Date().toISOString();
     if (cdpPort !== null) {
       profile.lastCdpPort = cdpPort;
@@ -2270,15 +2410,6 @@ async function readAgentBrowserConfig(): Promise<{ profileId: string; port: numb
   return match ? { profileId: match[1], port: Number(match[2]) } : null;
 }
 
-// 把系统默认 Chrome 实例带到屏幕最前。走 LaunchServices（open -a），不需要
-// 辅助功能权限，且比 NSRunningApplication.activate 在新版 macOS 上更可靠。
-async function bringChromeAppToFront(): Promise<void> {
-  if (process.platform !== "darwin") {
-    return;
-  }
-  await execFileAsync("open", ["-a", process.env.CHROME_APP_NAME || "Google Chrome"]);
-}
-
 async function exists(filePath: string): Promise<boolean> {
   try {
     await fs.access(filePath);
@@ -2330,6 +2461,9 @@ async function focusProfileWindow(pids: number[]): Promise<boolean> {
 
 async function focusMacProcess(pid: number): Promise<boolean> {
   await activateMacProcess(pid);
+  if (await isFrontmostMacProcess(pid)) {
+    return true;
+  }
 
   const script = `
 tell application "System Events"
@@ -2357,10 +2491,42 @@ tell application "System Events"
 
   try {
     const { stdout } = await execFileAsync("osascript", ["-e", script]);
+    const raisedWindow = stdout.trim().toLowerCase() === "true";
+    return raisedWindow || (await isFrontmostMacProcess(pid));
+  } catch {
+    // 窗口级 AXRaise 可能因多 profile 实例或缺少辅助功能权限失败。
+    // 只有能确认目标 PID 已成为前台进程时才算成功，避免把其它 Profile 当成已显示。
+    return isFrontmostMacProcess(pid);
+  }
+}
+
+async function isFrontmostMacProcess(pid: number): Promise<boolean> {
+  return isAnyMacProcessFrontmost([pid]);
+}
+
+async function isAnyMacProcessFrontmost(pids: number[]): Promise<boolean> {
+  if (process.platform !== "darwin") {
+    return false;
+  }
+  const normalizedPids = uniqueNumbers(pids.filter((pid) => Number.isInteger(pid) && pid > 0));
+  if (!normalizedPids.length) {
+    return false;
+  }
+
+  const script = `
+ObjC.import("AppKit");
+const front = $.NSWorkspace.sharedWorkspace.frontmostApplication;
+if (!front) {
+  false;
+} else {
+  [${normalizedPids.join(",")}].includes(front.processIdentifier);
+}
+`;
+
+  try {
+    const { stdout } = await execFileAsync("osascript", ["-l", "JavaScript", "-e", script]);
     return stdout.trim().toLowerCase() === "true";
   } catch {
-    // 窗口级 AXRaise 可能因多 profile 实例或缺少辅助功能权限失败，这属正常；
-    // 调用方已用 NSRunningApplication / open -a 把 app 带到前台，不影响主流程。
     return false;
   }
 }
@@ -2722,8 +2888,12 @@ async function resolveManifestText(value: string, extensionPath: string, manifes
     return value;
   }
 
+  // 和 Chrome 一致：先按浏览器/系统 UI 语言解析（这才是用户在 Chrome 里看到的名字），
+  // 解析不到再回退到扩展自己的 default_locale，最后兜底英文。
   const defaultLocale = stringValue(manifest.default_locale);
-  const locales = uniqueStrings([defaultLocale, "zh_CN", "zh", "en", "en_US"].filter(Boolean) as string[]);
+  const locales = uniqueStrings(
+    [...uiLocaleCandidates(), defaultLocale, "zh_CN", "zh", "en", "en_US"].filter(Boolean) as string[]
+  );
   for (const locale of locales) {
     const message = await readLocaleMessage(extensionPath, locale, messageKey);
     if (message) {
@@ -2732,6 +2902,21 @@ async function resolveManifestText(value: string, extensionPath: string, manifes
   }
 
   return value;
+}
+
+// ProfilePilot（Electron）的 UI 语言候选，用作扩展 __MSG__ 名称的首选解析语言。
+// Chrome 扩展 _locales 目录用下划线（zh_CN / en_US），这里把 "zh-CN" normalize 成 "zh_CN"，
+// 并补上基础语言段 "zh"。
+function uiLocaleCandidates(): string[] {
+  let uiLocale = "";
+  try {
+    uiLocale = app.getLocale() || "";
+  } catch {
+    uiLocale = "";
+  }
+  const normalized = uiLocale.replace(/-/g, "_");
+  const base = normalized.split("_")[0];
+  return uniqueStrings([normalized, base].filter(Boolean));
 }
 
 function parseManifestMessageKey(value: string): string | null {
@@ -3258,6 +3443,76 @@ async function waitForPageUrl(port: number, url: string, timeoutMs: number): Pro
       return;
     }
     await sleep(100);
+  }
+}
+
+async function snapshotRestorableTabUrls(port: number): Promise<string[]> {
+  const targets = await requestCdpTargets(port);
+  return targets
+    .filter((target) => target.type === "page")
+    .map((target) => target.url || "")
+    .filter(isRestorableTabUrl);
+}
+
+function isRestorableTabUrl(url: string): boolean {
+  const trimmed = url.trim();
+  if (
+    !trimmed ||
+    trimmed === "about:blank" ||
+    trimmed.startsWith("chrome://newtab") ||
+    trimmed.startsWith("chrome://new-tab-page") ||
+    trimmed.startsWith("devtools://") ||
+    trimmed.startsWith("chrome-error://")
+  ) {
+    return false;
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    return ["http:", "https:", "file:", "chrome:", "chrome-extension:"].includes(parsed.protocol);
+  } catch {
+    return false;
+  }
+}
+
+function appendUniqueExtraUrls(baseUrls: string[], extraUrls: string[]): string[] {
+  const urls = [...baseUrls];
+  const seen = new Set(baseUrls);
+  for (const url of extraUrls) {
+    if (!seen.has(url)) {
+      urls.push(url);
+      seen.add(url);
+    }
+  }
+  return urls;
+}
+
+async function bringCdpPageToFront(port: number): Promise<boolean> {
+  let target = await firstPageTarget(port);
+  if (!target) {
+    const version = await requestCdpVersionInfo(port);
+    if (!version.webSocketDebuggerUrl) {
+      return false;
+    }
+    const browserClient = await CdpBrowserClient.connect(version.webSocketDebuggerUrl, 3000);
+    try {
+      await browserClient.send("Target.createTarget", { url: "about:blank" }, 5000);
+    } finally {
+      browserClient.close();
+    }
+    target = await waitForFirstPageTarget(port, 5000).catch(() => null);
+  }
+
+  if (!target?.webSocketDebuggerUrl) {
+    return false;
+  }
+
+  const pageClient = await CdpBrowserClient.connect(target.webSocketDebuggerUrl, 3000);
+  try {
+    await pageClient.send("Page.bringToFront", {}, 5000);
+    return true;
+  } finally {
+    pageClient.close();
   }
 }
 

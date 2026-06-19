@@ -234,6 +234,10 @@ export interface ExtensionMigrationResult {
   manualLoadExtensions: ExtensionMigrationManualLoadExtension[];
   skippedExtensions: ExtensionMigrationSkippedExtension[];
   openedInstallPages: boolean;
+  reopenedTarget: boolean;
+  reopenedSource: boolean;
+  restoredTargetTabs: number;
+  restoredSourceTabs: number;
   state: AppState;
 }
 
@@ -293,6 +297,7 @@ export interface AccountSyncResult {
   copiedItems: AccountSyncCopiedItem[];
   skippedItems: AccountSyncSkippedItem[];
   launchedTarget: boolean;
+  restoredTargetTabs: number;
   state: AppState;
 }
 
@@ -351,6 +356,7 @@ export interface ProfileManagerApi {
   setAgentBrowserConfig(id: string, port: number): Promise<AppState>;
   clearAgentBrowserConfig(id: string): Promise<AppState>;
   focusProfile(id: string): Promise<AppState>;
+  isProfileFrontmost(id: string): Promise<boolean>;
   closeProfile(id: string): Promise<AppState>;
   focusExternalInstance(userDataDir: string): Promise<AppState>;
   closeExternalInstance(userDataDir: string): Promise<AppState>;

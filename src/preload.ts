@@ -33,6 +33,7 @@ const profileManagerApi: ProfileManagerApi = {
   clearAgentBrowserConfig: (id: string): Promise<AppState> =>
     ipcRenderer.invoke(IPC_CHANNELS.clearAgentBrowserConfig, id),
   focusProfile: (id: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.focusProfile, id),
+  isProfileFrontmost: (id: string): Promise<boolean> => ipcRenderer.invoke(IPC_CHANNELS.isProfileFrontmost, id),
   closeProfile: (id: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.closeProfile, id),
   focusExternalInstance: (userDataDir: string): Promise<AppState> =>
     ipcRenderer.invoke(IPC_CHANNELS.focusExternalInstance, userDataDir),

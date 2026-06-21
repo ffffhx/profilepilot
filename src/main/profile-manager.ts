@@ -16,6 +16,7 @@ import type {
   AccountSyncResult,
   AccountSyncSkippedItem,
   AppState,
+  CdpPortSuggestion,
   DeleteProfileResult,
   ExtensionDeleteResult,
   ExtensionDataPath,
@@ -148,6 +149,22 @@ interface ChromePreferences {
   };
 }
 
+interface JsonPropertySnapshot {
+  exists: boolean;
+  value: unknown;
+}
+
+interface AccountSyncExtensionPreferenceFileSnapshot {
+  extensions: JsonPropertySnapshot;
+  protectedExtensions: JsonPropertySnapshot;
+}
+
+type AccountSyncPreferenceFileName = "Preferences" | "Secure Preferences";
+type AccountSyncExtensionPreferencesSnapshot = Record<
+  AccountSyncPreferenceFileName,
+  AccountSyncExtensionPreferenceFileSnapshot
+>;
+
 interface ChromeExtensionSetting {
   [key: string]: unknown;
   state?: unknown;
@@ -195,9 +212,21 @@ interface CopyStats {
   bytes: number;
 }
 
+interface AccountSyncCopyPlan {
+  spec: AccountSyncPathSpec;
+  index: number;
+  sourcePath: string;
+  targetPath: string;
+  stats: CopyStats;
+}
+
 const ACCOUNT_SYNC_WORK_PREFIX = ".profilepilot-sync-";
 const ACCOUNT_SYNC_PARTIAL_SUFFIX = ".partial";
 const ACCOUNT_SYNC_PREVIOUS_SUFFIX = ".previous";
+const ACCOUNT_SYNC_PREFERENCE_FILES: AccountSyncPreferenceFileName[] = ["Preferences", "Secure Preferences"];
+const ACCOUNT_SYNC_DISK_SPACE_BUFFER_RATIO = 0.05;
+const ACCOUNT_SYNC_DISK_SPACE_MIN_BUFFER_BYTES = 64 * 1024 * 1024;
+const ACCOUNT_SYNC_DISK_SPACE_MAX_BUFFER_BYTES = 512 * 1024 * 1024;
 
 export class ProfileManagerError extends Error {
   constructor(
@@ -408,6 +437,18 @@ export class ProfileManager {
     }
 
     await this.launchProfileWithUrls(profileId, [CHROME_REMOTE_DEBUGGING_URL]);
+  }
+
+  async suggestCdpPort(preferredPortInput?: number | null): Promise<CdpPortSuggestion> {
+    const preferredPort = normalizeCdpPortInput(preferredPortInput) ?? 9223;
+    const port = await findAvailableCdpPort(preferredPort);
+    const preferredAvailable = port === preferredPort;
+    return {
+      preferredPort,
+      port,
+      preferredAvailable,
+      preferredOwner: preferredAvailable ? null : await describePortOwner(preferredPort)
+    };
   }
 
   // 把该独立 Profile 绑定为固定调试端口，并写入全局 CLAUDE.md，
@@ -1290,15 +1331,14 @@ export class ProfileManager {
     const copiedItems: AccountSyncCopiedItem[] = [];
     const skippedItems: AccountSyncSkippedItem[] = [];
     const copySpecs = accountSyncCopySpecs();
+    const targetExtensionPreferences = await snapshotAccountSyncExtensionPreferences(targetLocation.profilePath);
+    const copyPlans: AccountSyncCopyPlan[] = [];
 
     for (const [index, spec] of copySpecs.entries()) {
       throwIfAborted(abortSignal);
       await waitIfPaused(pauseSignal, abortSignal);
       const itemPosition = `${index + 1}/${copySpecs.length}`;
-      const reportCopyProgress = (detail: string): void => {
-        report(`正在复制账号数据 ${itemPosition}：${spec.label}${detail ? ` · ${detail}` : ""}`, "复制账号数据", 3);
-      };
-      reportCopyProgress("准备中");
+      report(`正在预估账号数据大小 ${itemPosition}：${spec.label}…`, "磁盘预检测", 3);
       const sourcePath = path.join(sourceLocation.profilePath, spec.relativePath);
       const diffItem = accountDiffByPath.get(spec.relativePath) || null;
       if (diffItem?.status === "source_missing" || !(await exists(sourcePath))) {
@@ -1321,10 +1361,25 @@ export class ProfileManager {
 
       const targetPath = path.join(targetLocation.profilePath, normalizeSafeRelativePath(spec.relativePath));
       await waitIfPaused(pauseSignal, abortSignal);
-      await copyAccountSyncPath(sourcePath, targetPath, reportCopyProgress, abortSignal, pauseSignal);
+      const stats = await collectAccountSyncPathStats(sourcePath, abortSignal, pauseSignal);
+      copyPlans.push({ spec, index, sourcePath, targetPath, stats });
+    }
+
+    report("正在检查目标磁盘空间…", "磁盘预检测", 3);
+    await assertAccountSyncDiskSpace(targetLocation.profilePath, copyPlans, abortSignal, pauseSignal);
+
+    for (const plan of copyPlans) {
+      throwIfAborted(abortSignal);
+      await waitIfPaused(pauseSignal, abortSignal);
+      const itemPosition = `${plan.index + 1}/${copySpecs.length}`;
+      const reportCopyProgress = (detail: string): void => {
+        report(`正在复制账号数据 ${itemPosition}：${plan.spec.label}${detail ? ` · ${detail}` : ""}`, "复制账号数据", 3);
+      };
+      reportCopyProgress("准备中");
+      await copyAccountSyncPath(plan.sourcePath, plan.targetPath, reportCopyProgress, abortSignal, pauseSignal, plan.stats);
       copiedItems.push({
-        label: spec.label,
-        relativePath: spec.relativePath
+        label: plan.spec.label,
+        relativePath: plan.spec.relativePath
       });
     }
 
@@ -1348,6 +1403,19 @@ export class ProfileManager {
         reason: localStateDiff?.reason || "源 Profile 中没有生成，本次无需同步"
       });
     }
+
+    report("正在保留目标插件状态…", "写入浏览器状态", 5);
+    const restoredExtensionPreferences = await restoreAccountSyncExtensionPreferences(
+      targetLocation.profilePath,
+      targetExtensionPreferences
+    );
+    skippedItems.push({
+      label: "插件安装状态",
+      relativePath: "Preferences / Secure Preferences",
+      reason: restoredExtensionPreferences
+        ? "账号同步已保留目标 Profile 原有插件状态，未复制源 Profile 的插件安装记录"
+        : "账号同步不会复制源 Profile 的插件安装记录"
+    });
 
     let launchedTarget = false;
     let restoredTargetTabs = 0;
@@ -1392,8 +1460,8 @@ export class ProfileManager {
     };
   }
 
-  // “一键造 Agent 浏览器”：新建独立 Profile → 从源同步登录态 → 绑定固定端口并写入
-  // 全局 CLAUDE.md → 以 CDP 模式启动，得到一个登录态就绪、可直接给 agent 连接的浏览器。
+  // “一键造 Agent 浏览器”：新建独立 Profile → 从源同步登录态 → 按需同步插件 →
+  // 绑定固定端口并写入全局 CLAUDE.md → 以 CDP 模式启动，得到一个登录态就绪、可直接给 agent 连接的浏览器。
   async setupAgentBrowser(
     request: SetupAgentBrowserRequest,
     onProgress?: (progress: OperationProgressUpdate) => void,
@@ -1401,12 +1469,14 @@ export class ProfileManager {
     pauseSignal?: OperationPauseSignal
   ): Promise<SetupAgentBrowserResult> {
     const sourceProfileId = String(request.sourceProfileId || "");
-    const port = normalizeCdpPortInput(request.port);
-    if (port === null) {
+    const requestedPort = normalizeCdpPortInput(request.port);
+    let port = requestedPort === null ? null : await findAvailableCdpPort(requestedPort);
+    const includeExtensions = request.includeExtensions !== false;
+    if (requestedPort === null || port === null) {
       throw new ProfileManagerError("固定调试端口必须是 1024-65535 之间的整数。", "INVALID_CDP_PORT");
     }
 
-    const TOTAL = 4;
+    const TOTAL = includeExtensions ? 5 : 4;
     const report = (message: string, step: string, stepIndex: number): void => {
       onProgress?.({ message, step, stepIndex, stepCount: TOTAL });
     };
@@ -1418,11 +1488,15 @@ export class ProfileManager {
     }
 
     report("正在创建 Agent 专用 Profile…", "创建 Profile", 1);
+    if (port !== requestedPort) {
+      report(`端口 ${requestedPort} 已被占用，已自动改用 ${port}。`, "创建 Profile", 1);
+    }
     const name = normalizeProfileName(request.targetName || `agent-${source.name}`);
     const created = await this.createProfile(name);
     const targetId = makeIsolatedProfileId(created.id);
 
     let copiedItems: AccountSyncCopiedItem[] = [];
+    let extensionResult: ExtensionMigrationResult | null = null;
     try {
       report("正在从源 Profile 同步登录态…", "同步登录态", 2);
       const syncResult = await this.syncAccount(
@@ -1433,10 +1507,36 @@ export class ProfileManager {
       );
       copiedItems = syncResult.copiedItems;
 
-      report("正在写入 Agent 调试配置（CLAUDE.md）…", "写入配置", 3);
+      if (includeExtensions) {
+        report("正在扫描并同步插件…", "同步插件", 3);
+        const scan = await this.scanProfileExtensions(sourceProfileId);
+        const extensionIds = scan.extensions.map((extension) => extension.id);
+        if (extensionIds.length) {
+          extensionResult = await this.migrateExtensions(
+            {
+              sourceProfileId,
+              targetProfileId: targetId,
+              extensionIds,
+              includeData: false,
+              openInstallPages: false,
+              onlyChanged: false
+            },
+            (update) => report(update.message, "同步插件", 3)
+          );
+        }
+      }
+
+      const configStep = includeExtensions ? 4 : 3;
+      const launchStep = includeExtensions ? 5 : 4;
+      const latestAvailablePort = await findAvailableCdpPort(port);
+      if (latestAvailablePort !== port) {
+        report(`端口 ${port} 已被占用，已自动改用 ${latestAvailablePort}。`, "写入配置", configStep);
+        port = latestAvailablePort;
+      }
+      report("正在写入 Agent 调试配置（CLAUDE.md）…", "写入配置", configStep);
       await this.setAgentBrowserConfig(targetId, port);
 
-      report("正在以 CDP 模式启动…", "CDP 启动", 4);
+      report("正在以 CDP 模式启动…", "CDP 启动", launchStep);
       await this.launchProfileWithCdp(targetId, port);
     } catch (error) {
       // 任何一步失败（含用户中止）都清理掉这个半成品 Agent Profile，避免留下垃圾。
@@ -1452,6 +1552,7 @@ export class ProfileManager {
       port,
       cdpUrl: profile?.cdpUrl || makeCdpUrl(port),
       copiedItems,
+      extensionResult,
       state: finalState
     };
   }
@@ -1604,11 +1705,11 @@ export class ProfileManager {
     if (profile.isDefault) {
       throw new ProfileManagerError("默认 Chrome Profile 受保护，不能删除。", "DEFAULT_PROFILE_PROTECTED");
     }
+    if (profile.running) {
+      await this.closeProfileIfRunning(profile.id);
+    }
     if (await isChromeRunning()) {
       throw new ProfileManagerError("删除 Chrome Profile 前请先退出 Chrome。", "CHROME_RUNNING");
-    }
-    if (profile.running) {
-      throw new ProfileManagerError("删除前请先关闭这个 Chrome Profile。", "PROFILE_RUNNING");
     }
 
     const trashPath = await this.moveToTrash(profile.path, profile.dirName);
@@ -1632,7 +1733,7 @@ export class ProfileManager {
     const state = await this.getState();
     const profile = state.profiles.find((item) => item.source === "isolated" && item.id === makeIsolatedProfileId(id));
     if (profile?.running) {
-      throw new ProfileManagerError("删除前请先关闭这个 Chrome Profile。", "PROFILE_RUNNING");
+      await this.closeProfileIfRunning(profile.id);
     }
 
     const publicProfile = profile || (await this.toIsolatedPublicProfile(storedProfile, new Map()));
@@ -4022,8 +4123,6 @@ function accountSyncCopySpecs(): AccountSyncPathSpec[] {
     { label: "Network Cookies journal", relativePath: path.join("Network", "Cookies-journal") },
     { label: "Network Cookies WAL", relativePath: path.join("Network", "Cookies-wal") },
     { label: "Network Cookies SHM", relativePath: path.join("Network", "Cookies-shm") },
-    { label: "Extension Cookies", relativePath: "Extension Cookies" },
-    { label: "Extension Cookies journal", relativePath: "Extension Cookies-journal" },
     { label: "Local Storage", relativePath: "Local Storage" },
     { label: "Session Storage", relativePath: "Session Storage" },
     { label: "IndexedDB", relativePath: "IndexedDB" },
@@ -4039,7 +4138,6 @@ function accountSyncCopySpecs(): AccountSyncPathSpec[] {
     { label: "Accounts", relativePath: "Accounts" },
     { label: "Sync Data", relativePath: "Sync Data" },
     { label: "Sync App Settings", relativePath: "Sync App Settings" },
-    { label: "Sync Extension Settings", relativePath: "Sync Extension Settings" },
     { label: "Trusted Vault", relativePath: "trusted_vault.pb" },
     { label: "Trust Tokens", relativePath: "Trust Tokens" },
     { label: "Trust Tokens journal", relativePath: "Trust Tokens-journal" },
@@ -4217,6 +4315,107 @@ function moveStringToFront(values: string[], item: string): string[] {
 
 function cloneJsonValue(value: unknown): unknown {
   return JSON.parse(JSON.stringify(value)) as unknown;
+}
+
+async function snapshotAccountSyncExtensionPreferences(
+  profilePath: string
+): Promise<AccountSyncExtensionPreferencesSnapshot> {
+  const entries = await Promise.all(
+    ACCOUNT_SYNC_PREFERENCE_FILES.map(async (fileName) => {
+      const preferences = (await readJsonFile<Record<string, unknown>>(path.join(profilePath, fileName))) || {};
+      return [
+        fileName,
+        {
+          extensions: snapshotJsonProperty(preferences, ["extensions"]),
+          protectedExtensions: snapshotJsonProperty(preferences, ["protection", "macs", "extensions"])
+        }
+      ] as const;
+    })
+  );
+
+  return Object.fromEntries(entries) as AccountSyncExtensionPreferencesSnapshot;
+}
+
+async function restoreAccountSyncExtensionPreferences(
+  profilePath: string,
+  snapshot: AccountSyncExtensionPreferencesSnapshot
+): Promise<boolean> {
+  let changedAny = false;
+
+  for (const fileName of ACCOUNT_SYNC_PREFERENCE_FILES) {
+    const filePath = path.join(profilePath, fileName);
+    const preferences = await readJsonFile<Record<string, unknown>>(filePath);
+    if (!preferences) {
+      continue;
+    }
+
+    const before = JSON.stringify(preferences);
+    restoreJsonProperty(preferences, ["extensions"], snapshot[fileName].extensions);
+    restoreJsonProperty(preferences, ["protection", "macs", "extensions"], snapshot[fileName].protectedExtensions);
+
+    if (JSON.stringify(preferences) !== before) {
+      await writeJsonFileAtomic(filePath, preferences);
+      changedAny = true;
+    }
+  }
+
+  return changedAny;
+}
+
+function snapshotJsonProperty(root: Record<string, unknown>, pathParts: string[]): JsonPropertySnapshot {
+  const parent = getJsonPropertyParent(root, pathParts, false);
+  const key = pathParts[pathParts.length - 1];
+  if (!parent || !(key in parent)) {
+    return { exists: false, value: null };
+  }
+
+  return { exists: true, value: cloneJsonValue(parent[key]) };
+}
+
+function restoreJsonProperty(
+  root: Record<string, unknown>,
+  pathParts: string[],
+  snapshot: JsonPropertySnapshot
+): void {
+  const key = pathParts[pathParts.length - 1];
+  if (snapshot.exists) {
+    const parent = getJsonPropertyParent(root, pathParts, true);
+    if (parent) {
+      parent[key] = cloneJsonValue(snapshot.value);
+    }
+    return;
+  }
+
+  const parent = getJsonPropertyParent(root, pathParts, false);
+  if (parent && key in parent) {
+    delete parent[key];
+  }
+}
+
+function getJsonPropertyParent(
+  root: Record<string, unknown>,
+  pathParts: string[],
+  create: boolean
+): Record<string, unknown> | null {
+  let current: Record<string, unknown> = root;
+
+  for (const pathPart of pathParts.slice(0, -1)) {
+    const next = current[pathPart];
+    if (isRecord(next)) {
+      current = next;
+      continue;
+    }
+
+    if (!create) {
+      return null;
+    }
+
+    const created: Record<string, unknown> = {};
+    current[pathPart] = created;
+    current = created;
+  }
+
+  return current;
 }
 
 async function removeExtensionReferencesFromProfilePreferences(profilePath: string, extensionId: string): Promise<void> {
@@ -4483,6 +4682,26 @@ function shouldCopyLocalExtensionPackagePath(sourceRootPath: string, candidatePa
   return !relativePath.split(path.sep).includes(".git");
 }
 
+function shouldCopyAccountSyncPathEntry(sourceRootPath: string, candidatePath: string): boolean {
+  const name = path.basename(candidatePath);
+  if (name === "LOCK" || isAccountSyncWorkArtifactName(name)) {
+    return false;
+  }
+
+  const rootName = path.basename(sourceRootPath);
+  const relativePath = path.relative(sourceRootPath, candidatePath);
+  const firstPart = relativePath.split(path.sep).find(Boolean) || "";
+  return !isAccountSyncExtensionStoreEntry(rootName, firstPart);
+}
+
+function isAccountSyncExtensionStoreEntry(rootName: string, firstPart: string): boolean {
+  return (
+    Boolean(firstPart) &&
+    ["IndexedDB", "File System", "databases"].includes(rootName) &&
+    firstPart.startsWith("chrome-extension_")
+  );
+}
+
 async function copyPath(
   sourcePath: string,
   targetPath: string,
@@ -4492,23 +4711,109 @@ async function copyPath(
   await copyPathWithProgress(sourcePath, targetPath, options.shouldCopy || (() => true), () => undefined);
 }
 
-async function copyAccountSyncPath(
+async function collectAccountSyncPathStats(
   sourcePath: string,
-  targetPath: string,
-  onProgress?: (detail: string) => void,
+  abortSignal?: AbortSignal,
+  pauseSignal?: OperationPauseSignal
+): Promise<CopyStats> {
+  const shouldCopy = (source: string): boolean => shouldCopyAccountSyncPathEntry(sourcePath, source);
+  return collectCopyStats(sourcePath, shouldCopy, abortSignal, pauseSignal);
+}
+
+async function assertAccountSyncDiskSpace(
+  targetProfilePath: string,
+  copyPlans: AccountSyncCopyPlan[],
   abortSignal?: AbortSignal,
   pauseSignal?: OperationPauseSignal
 ): Promise<void> {
   throwIfAborted(abortSignal);
   await waitIfPaused(pauseSignal, abortSignal);
+  const plannedStats = sumAccountSyncCopyPlanStats(copyPlans);
+  if (plannedStats.bytes <= 0) {
+    return;
+  }
+
+  const safetyBytes = accountSyncDiskSpaceBufferBytes(plannedStats.bytes);
+  const requiredBytes = plannedStats.bytes + safetyBytes;
+  const availableBytes = await getAvailableDiskBytes(targetProfilePath);
+  if (availableBytes >= requiredBytes) {
+    return;
+  }
+
+  const largestItems = copyPlans
+    .filter((plan) => plan.stats.bytes > 0)
+    .sort((a, b) => b.stats.bytes - a.stats.bytes)
+    .slice(0, 3)
+    .map((plan) => `${plan.spec.label} ${formatByteSize(plan.stats.bytes)}`)
+    .join("、");
+  const largestDetail = largestItems ? `最大项目：${largestItems}。` : "";
+  throw new ProfileManagerError(
+    `磁盘空间不足，已停止账号同步，尚未开始复制数据。预计至少需要 ${formatByteSize(requiredBytes)}（待复制 ${formatByteSize(plannedStats.bytes)} + 安全余量 ${formatByteSize(safetyBytes)}），当前可用 ${formatByteSize(availableBytes)}。${largestDetail}请先释放空间，或清理源 Profile 的缓存/Service Worker 后重试。`,
+    "INSUFFICIENT_DISK_SPACE"
+  );
+}
+
+function sumAccountSyncCopyPlanStats(copyPlans: AccountSyncCopyPlan[]): CopyStats {
+  return copyPlans.reduce(
+    (total, plan) => ({
+      files: total.files + plan.stats.files,
+      bytes: total.bytes + plan.stats.bytes
+    }),
+    { files: 0, bytes: 0 }
+  );
+}
+
+function accountSyncDiskSpaceBufferBytes(plannedBytes: number): number {
+  if (!Number.isFinite(plannedBytes) || plannedBytes <= 0) {
+    return 0;
+  }
+
+  const proportionalBuffer = Math.ceil(plannedBytes * ACCOUNT_SYNC_DISK_SPACE_BUFFER_RATIO);
+  const minimumBuffer = Math.min(ACCOUNT_SYNC_DISK_SPACE_MIN_BUFFER_BYTES, plannedBytes);
+  return Math.min(
+    ACCOUNT_SYNC_DISK_SPACE_MAX_BUFFER_BYTES,
+    Math.max(minimumBuffer, proportionalBuffer)
+  );
+}
+
+async function getAvailableDiskBytes(targetPath: string): Promise<number> {
+  const probePath = await nearestExistingPath(targetPath);
+  try {
+    const stats = (await fs.statfs(probePath)) as { bavail: number | bigint; bsize: number | bigint };
+    return Number(stats.bavail) * Number(stats.bsize);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new ProfileManagerError(`无法读取目标磁盘可用空间：${reason}`, "DISK_SPACE_CHECK_FAILED");
+  }
+}
+
+async function nearestExistingPath(targetPath: string): Promise<string> {
+  let current = path.resolve(targetPath);
+  while (!(await exists(current))) {
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return current;
+    }
+    current = parent;
+  }
+  return current;
+}
+
+async function copyAccountSyncPath(
+  sourcePath: string,
+  targetPath: string,
+  onProgress?: (detail: string) => void,
+  abortSignal?: AbortSignal,
+  pauseSignal?: OperationPauseSignal,
+  precomputedStats?: CopyStats
+): Promise<void> {
+  throwIfAborted(abortSignal);
+  await waitIfPaused(pauseSignal, abortSignal);
   await fs.mkdir(path.dirname(targetPath), { recursive: true });
   await recoverInterruptedAccountSyncPath(targetPath);
-  const shouldCopy = (source: string): boolean => {
-    const name = path.basename(source);
-    return name !== "LOCK" && !isAccountSyncWorkArtifactName(name);
-  };
-  onProgress?.("正在统计文件");
-  const stats = await collectCopyStats(sourcePath, shouldCopy, abortSignal, pauseSignal);
+  const shouldCopy = (source: string): boolean => shouldCopyAccountSyncPathEntry(sourcePath, source);
+  onProgress?.(precomputedStats ? "正在准备复制" : "正在统计文件");
+  const stats = precomputedStats || (await collectCopyStats(sourcePath, shouldCopy, abortSignal, pauseSignal));
   const stagingPath = makeAccountSyncWorkPath(targetPath, ACCOUNT_SYNC_PARTIAL_SUFFIX);
   if (!stats.files) {
     throwIfAborted(abortSignal);
@@ -4527,6 +4832,7 @@ async function copyAccountSyncPath(
   let copiedFiles = 0;
   let copiedBytes = 0;
   let lastReportAt = 0;
+  const copyStartedAt = Date.now();
   const reportCopied = (force = false): void => {
     const now = Date.now();
     if (!force && now - lastReportAt < 250 && copiedFiles < stats.files) {
@@ -4534,7 +4840,13 @@ async function copyAccountSyncPath(
     }
     lastReportAt = now;
     onProgress?.(
-      `已复制 ${copiedFiles}/${stats.files} 个文件，${formatByteSize(copiedBytes)}/${formatByteSize(stats.bytes)}`
+      `已复制 ${copiedFiles}/${stats.files} 个文件，${formatByteSize(copiedBytes)}/${formatByteSize(stats.bytes)} · 已用 ${formatDuration(now - copyStartedAt)} · 本项预计剩余 ${formatCopyRemainingTime({
+        copiedFiles,
+        totalFiles: stats.files,
+        copiedBytes,
+        totalBytes: stats.bytes,
+        elapsedMs: now - copyStartedAt
+      })}`
     );
   };
 
@@ -4788,6 +5100,57 @@ function formatByteSize(bytes: number): string {
   }
 
   return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+}
+
+function formatDuration(durationMs: number): string {
+  if (!Number.isFinite(durationMs) || durationMs <= 0) {
+    return "0 秒";
+  }
+  if (durationMs < 1000) {
+    return "不足 1 秒";
+  }
+
+  const totalSeconds = Math.ceil(durationMs / 1000);
+  if (totalSeconds < 60) {
+    return `${totalSeconds} 秒`;
+  }
+
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) {
+    return seconds ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分`;
+  }
+
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes ? `${hours} 小时 ${remainingMinutes} 分` : `${hours} 小时`;
+}
+
+function formatCopyRemainingTime(progress: {
+  copiedFiles: number;
+  totalFiles: number;
+  copiedBytes: number;
+  totalBytes: number;
+  elapsedMs: number;
+}): string {
+  const total = progress.totalBytes > 0 ? progress.totalBytes : progress.totalFiles;
+  const copied = progress.totalBytes > 0 ? progress.copiedBytes : progress.copiedFiles;
+
+  if (total <= 0 || copied <= 0 || progress.elapsedMs < 1000) {
+    return "计算中";
+  }
+
+  const remaining = Math.max(0, total - copied);
+  if (remaining === 0) {
+    return "0 秒";
+  }
+
+  const ratePerMs = copied / progress.elapsedMs;
+  if (!Number.isFinite(ratePerMs) || ratePerMs <= 0) {
+    return "计算中";
+  }
+
+  return formatDuration(remaining / ratePerMs);
 }
 
 function normalizeSafeRelativePath(relativePath: string): string {

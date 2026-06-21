@@ -2229,6 +2229,11 @@ body:not(.booted) .layout {
   font-size: 14px;
 }
 
+.detail-row-disabled strong {
+  color: var(--muted);
+  opacity: 0.7;
+}
+
 .detail-note {
   display: block;
   margin-top: 6px;
@@ -2344,6 +2349,7 @@ body:not(.booted) .layout {
   width: min(440px, 100%);
   max-height: calc(100vh - 36px);
   overflow: auto;
+  overflow-x: hidden;
   border: 1px solid var(--line-strong);
   border-radius: 10px;
   background: linear-gradient(180deg, var(--panel-raise), var(--panel));
@@ -2359,6 +2365,10 @@ body:not(.booted) .layout {
 
 .migration-modal {
   width: min(640px, 100%);
+}
+
+.agent-browser-modal {
+  width: min(520px, 100%);
 }
 
 .confirm-dialog {
@@ -2444,6 +2454,11 @@ body:not(.booted) .layout {
   color: var(--muted);
   font-size: 14px;
   line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.modal code {
+  overflow-wrap: anywhere;
 }
 
 .confirm-copy {
@@ -2578,7 +2593,7 @@ body:not(.booted) .layout {
   line-height: 1.45;
 }
 
-.field input {
+.field input:not([type="checkbox"]) {
   width: 100%;
   min-height: 42px;
   border: 1px solid var(--line-strong);
@@ -2588,11 +2603,11 @@ body:not(.booted) .layout {
   padding: 0 12px;
 }
 
-.field input::placeholder {
+.field input:not([type="checkbox"])::placeholder {
   color: #5b6b77;
 }
 
-.field input:focus {
+.field input:not([type="checkbox"]):focus {
   border-color: var(--accent);
   outline: 3px solid var(--focus);
 }

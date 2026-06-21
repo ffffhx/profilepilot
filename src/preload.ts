@@ -8,6 +8,7 @@ import type {
   SetupAgentBrowserResult,
   AppState,
   CancelOperationRequest,
+  CdpPortSuggestion,
   ControlOperationRequest,
   DeleteProfileResult,
   ExtensionDeleteResult,
@@ -28,6 +29,8 @@ const profileManagerApi: ProfileManagerApi = {
     ipcRenderer.invoke(IPC_CHANNELS.launchProfileWithCdp, id, port),
   connectRunningSystemChrome: (id: string): Promise<AppState> =>
     ipcRenderer.invoke(IPC_CHANNELS.connectRunningSystemChrome, id),
+  suggestCdpPort: (preferredPort?: number | null): Promise<CdpPortSuggestion> =>
+    ipcRenderer.invoke(IPC_CHANNELS.suggestCdpPort, preferredPort),
   setAgentBrowserConfig: (id: string, port: number): Promise<AppState> =>
     ipcRenderer.invoke(IPC_CHANNELS.setAgentBrowserConfig, id, port),
   clearAgentBrowserConfig: (id: string): Promise<AppState> =>

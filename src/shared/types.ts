@@ -305,6 +305,7 @@ export interface SetupAgentBrowserRequest {
   sourceProfileId: string;
   targetName?: string;
   port: number;
+  includeExtensions?: boolean;
 }
 
 export interface SetupAgentBrowserResult {
@@ -313,7 +314,15 @@ export interface SetupAgentBrowserResult {
   port: number;
   cdpUrl: string | null;
   copiedItems: AccountSyncCopiedItem[];
+  extensionResult: ExtensionMigrationResult | null;
   state: AppState;
+}
+
+export interface CdpPortSuggestion {
+  preferredPort: number;
+  port: number;
+  preferredAvailable: boolean;
+  preferredOwner: string | null;
 }
 
 export interface OperationProgress {
@@ -353,6 +362,7 @@ export interface ProfileManagerApi {
   launchProfile(id: string): Promise<AppState>;
   launchProfileWithCdp(id: string, port?: number | null): Promise<AppState>;
   connectRunningSystemChrome(id: string): Promise<AppState>;
+  suggestCdpPort(preferredPort?: number | null): Promise<CdpPortSuggestion>;
   setAgentBrowserConfig(id: string, port: number): Promise<AppState>;
   clearAgentBrowserConfig(id: string): Promise<AppState>;
   focusProfile(id: string): Promise<AppState>;

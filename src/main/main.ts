@@ -356,6 +356,10 @@ function registerIpcHandlers(): void {
     return profileManager.getState();
   });
 
+  ipcMain.handle(IPC_CHANNELS.suggestCdpPort, async (_event, preferredPort?: number | null) => {
+    return profileManager.suggestCdpPort(preferredPort);
+  });
+
   ipcMain.handle(IPC_CHANNELS.setAgentBrowserConfig, async (_event, id: string, port: number): Promise<AppState> => {
     await profileManager.setAgentBrowserConfig(id, port);
     return profileManager.getState();

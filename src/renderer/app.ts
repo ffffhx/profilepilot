@@ -284,6 +284,7 @@ interface SetupAgentBrowserRequest {
   sourceProfileId: string;
   targetName?: string;
   port: number;
+  includeExtensions?: boolean;
 }
 
 interface SetupAgentBrowserResult {
@@ -292,7 +293,15 @@ interface SetupAgentBrowserResult {
   port: number;
   cdpUrl: string | null;
   copiedItems: AccountSyncCopiedItem[];
+  extensionResult: ExtensionMigrationResult | null;
   state: AppState;
+}
+
+interface CdpPortSuggestion {
+  preferredPort: number;
+  port: number;
+  preferredAvailable: boolean;
+  preferredOwner: string | null;
 }
 
 interface OperationProgress {
@@ -312,6 +321,7 @@ interface ProfileManagerApi {
   launchProfile(id: string): Promise<AppState>;
   launchProfileWithCdp(id: string, port?: number | null): Promise<AppState>;
   connectRunningSystemChrome(id: string): Promise<AppState>;
+  suggestCdpPort(preferredPort?: number | null): Promise<CdpPortSuggestion>;
   setAgentBrowserConfig(id: string, port: number): Promise<AppState>;
   clearAgentBrowserConfig(id: string): Promise<AppState>;
   focusProfile(id: string): Promise<AppState>;
@@ -389,8 +399,8 @@ type ModalState =
   | { kind: "rename"; profileId: string }
   | { kind: "cdp"; profileId: string }
   | { kind: "extension-migration" }
-  | { kind: "agent-config"; profileId: string }
-  | { kind: "agent-browser-setup" }
+  | { kind: "agent-config"; profileId: string; portSuggestion: CdpPortSuggestion | null }
+  | { kind: "agent-browser-setup"; portSuggestion: CdpPortSuggestion }
   | {
       kind: "confirm";
       intent: ConfirmIntent;
@@ -869,6 +879,15 @@ function renderButtonLabel(isLoading: boolean, idleLabel: string, loadingLabel: 
   return `<span class="inline-spinner" aria-hidden="true"></span><span>${escapeHtml(loadingLabel)}</span>`;
 }
 
+function formatCdpPortSuggestionNote(suggestion: CdpPortSuggestion): string {
+  if (suggestion.preferredAvailable) {
+    return `已检测端口 ${suggestion.port} 可用。`;
+  }
+
+  const owner = suggestion.preferredOwner ? `，占用者：${suggestion.preferredOwner}` : "";
+  return `端口 ${suggestion.preferredPort} 已被占用${owner}，已自动改用 ${suggestion.port}。`;
+}
+
 function formatErrorMessage(error: unknown): string {
   const rawMessage = error instanceof Error ? error.message : String(error);
   const ipcPrefix = /^Error invoking remote method '[^']+':\s*/;
@@ -959,8 +978,8 @@ function render(): void {
     ${modal?.kind === "new" ? renderNewModal() : ""}
     ${modal?.kind === "rename" ? renderRenameModal(modal.profileId) : ""}
     ${modal?.kind === "cdp" ? renderCdpModal(modal.profileId) : ""}
-    ${modal?.kind === "agent-config" ? renderAgentConfigModal(modal.profileId) : ""}
-    ${modal?.kind === "agent-browser-setup" ? renderAgentBrowserSetupModal() : ""}
+    ${modal?.kind === "agent-config" ? renderAgentConfigModal(modal.profileId, modal.portSuggestion) : ""}
+    ${modal?.kind === "agent-browser-setup" ? renderAgentBrowserSetupModal(modal.portSuggestion) : ""}
     ${modal?.kind === "extension-migration" ? renderExtensionMigrationModal(profiles) : ""}
     ${modal?.kind === "confirm" ? renderConfirmModal(modal) : ""}
     ${toast ? `<div class="toast ${toastKind === "error" ? "error" : ""}" role="status">${renderToastBody(toast)}</div>` : ""}
@@ -1081,14 +1100,14 @@ function renderAccountSyncScope(): string {
   const syncedItems = [
     "Google 登录态、Cookie、头像和账号身份状态",
     "站点会话数据：Local/Session Storage、IndexedDB、Service Worker、WebStorage",
-    "账号与同步数据：Accounts、Sync Data、Sync App/Extension Settings、Trusted Vault",
+    "账号与同步数据：Accounts、Sync Data、Sync App Settings、Trusted Vault",
     "书签、历史记录、下载记录、快捷方式、常用网站和网站图标",
     "浏览器设置和主题：Preferences、Secure Preferences，以及 Local State 中的登录字段"
   ];
   const excludedItems = [
     "打开的标签页或窗口",
     "保存的密码库 Login Data、证书、系统钥匙串权限",
-    "扩展安装包本体、插件本地数据和插件列表迁移",
+    "扩展安装列表、启停状态、安装包本体和可单独识别的插件数据（需要插件请用「插件同步」）",
     "尚未落盘的数据"
   ];
 
@@ -1219,13 +1238,11 @@ function renderProfileRow(profile: PublicProfile): string {
 function renderProfileActions(profile: PublicProfile): string {
   const menuOpen = openProfileMenuId === profile.id;
   const cdpLaunchDisabled = busy || profile.running || profile.source !== "isolated";
-  const nativeConnectDisabled = busy || !profile.running;
-  const deleteDisabled = busy || profile.running || !profile.deletable;
+  const deleteDisabled = busy || !profile.deletable;
   const focusing = isBusyAction("focus-profile", { profileId: profile.id });
   const closing = isBusyAction("close-profile", { profileId: profile.id });
   const launching = isBusyAction("launch-profile", { profileId: profile.id });
   const launchingCdp = isBusyAction("launch-cdp", { profileId: profile.id });
-  const connectingSystemChrome = isBusyAction("connect-system-chrome", { profileId: profile.id });
   const openingFolder = isBusyAction("open-folder", { profileId: profile.id });
   const renaming = isBusyAction("rename-profile", { profileId: profile.id });
   const deleting = isBusyAction("delete-profile", { profileId: profile.id });
@@ -1255,23 +1272,11 @@ function renderProfileActions(profile: PublicProfile): string {
           ${renderButtonLabel(closing, "关闭", "关闭中…")}
         </button>
       </span>
-      ${
-        profile.source === "native"
-          ? `
-            <span class="action-tooltip" data-tooltip="${escapeHtml(systemChromeConnectButtonTitle(profile))}">
-              <button type="button" class="action-button cdp ${connectingSystemChrome ? "loading" : ""}" data-action="connect-system-chrome" data-id="${profile.id}" ${nativeConnectDisabled ? "disabled" : ""}>
-                ${renderButtonLabel(connectingSystemChrome, "连接", "连接中…")}
-              </button>
-            </span>
-          `
-          : `
-            <span class="action-tooltip" data-tooltip="${escapeHtml(cdpLaunchButtonTitle(profile))}">
-              <button type="button" class="action-button cdp ${launchingCdp ? "loading" : ""}" data-action="launch-cdp" data-id="${profile.id}" ${cdpLaunchDisabled ? "disabled" : ""}>
-                ${renderButtonLabel(launchingCdp, "CDP启动", "启动中…")}
-              </button>
-            </span>
-          `
-      }
+      <span class="action-tooltip" data-tooltip="${escapeHtml(cdpLaunchButtonTitle(profile))}">
+        <button type="button" class="action-button cdp ${launchingCdp ? "loading" : ""}" data-action="launch-cdp" data-id="${profile.id}" ${cdpLaunchDisabled ? "disabled" : ""}>
+          ${renderButtonLabel(launchingCdp, "CDP启动", "启动中…")}
+        </button>
+      </span>
       <span class="menu-anchor">
       <button type="button" class="action-button menu-button" data-action="toggle-profile-menu" data-id="${profile.id}" aria-expanded="${menuOpen ? "true" : "false"}" ${busy ? "disabled" : ""}>更多</button>
       ${
@@ -1402,10 +1407,6 @@ function renderExternalDetails(instance: ExternalChromeInstance): string {
         <div class="detail-row">
           <span>窗口</span>
           <strong>${instance.headless ? "无头模式（无可见窗口）" : "有可见窗口"}</strong>
-        </div>
-        <div class="detail-row">
-          <span>主进程 PID</span>
-          <strong>${instance.pid}</strong>
         </div>
         <div class="detail-row">
           <span>启动时间</span>
@@ -1938,16 +1939,7 @@ function renderDetails(profile: PublicProfile | null): string {
           <span>账号</span>
           <strong>${escapeHtml(profile.userName || "未登录")}</strong>
         </div>
-        <div class="detail-row">
-          <span>${processLabel(profile)}</span>
-          <strong>${profile.pids.length ? profile.pids.join(", ") : "无"}</strong>
-          <small class="detail-note">${processNote(profile)}</small>
-        </div>
-        <div class="detail-row">
-          <span>关联进程监听端口</span>
-          <strong>${profile.listeningPorts.length ? profile.listeningPorts.join(", ") : "无"}</strong>
-          <small class="detail-note">${listeningPortsNote(profile)}</small>
-        </div>
+        ${renderListeningPortsDetail(profile)}
         ${renderConnectionDetail(profile)}
         <div class="detail-row">
           <span>目录</span>
@@ -2036,7 +2028,7 @@ function renderCdpModal(profileId: string): string {
   `;
 }
 
-function renderAgentBrowserSetupModal(): string {
+function renderAgentBrowserSetupModal(portSuggestion: CdpPortSuggestion): string {
   const profiles = state?.profiles || [];
   // 登录态来源默认取系统默认 Profile，否则第一个有登录账号的 Profile。
   const source =
@@ -2048,13 +2040,14 @@ function renderAgentBrowserSetupModal(): string {
   }
   const settingUp = isBusyAction("setup-agent-browser");
   const defaultName = `agent-${source.name}`;
+  const portNote = formatCdpPortSuggestionNote(portSuggestion);
 
   return `
     <div class="modal-backdrop" data-action="close-modal">
-      <form class="modal" data-agent-browser-form data-source-id="${escapeHtml(source.id)}">
+      <form class="modal agent-browser-modal" data-agent-browser-form data-source-id="${escapeHtml(source.id)}">
         <span class="modal-kicker">Agent 浏览器</span>
-        <h2>一键造 Agent 浏览器</h2>
-        <p class="modal-copy">新建一个独立 Profile，把下面这个源的登录态同步进去，绑定固定端口以 CDP 模式启动，并写入全局 <code>~/.claude/CLAUDE.md</code>——完成后直接 <code>agent-browser connect</code> 就能接入一个登录态就绪的浏览器。</p>
+        <h2>创建 Agent 浏览器</h2>
+        <p class="modal-copy">新建独立 Profile，复制登录态，绑定固定 CDP 端口，并写入全局 <code>~/.claude/CLAUDE.md</code>。完成后可直接用 <code>agent-browser connect</code> 接入。</p>
         <div class="field">
           <label>登录态来源</label>
           <strong class="agent-source-name">${escapeHtml(source.name)}</strong>
@@ -2066,8 +2059,15 @@ function renderAgentBrowserSetupModal(): string {
         </div>
         <div class="field">
           <label for="agent-setup-port">固定调试端口</label>
-          <input id="agent-setup-port" name="port" type="number" min="1024" max="65535" inputmode="numeric" value="9223" />
-          <span class="field-note">以后对该 Profile「CDP启动」会固定用这个端口。常用 9222 / 9223。</span>
+          <input id="agent-setup-port" name="port" type="number" min="1024" max="65535" inputmode="numeric" value="${portSuggestion.port}" />
+          <span class="field-note">${escapeHtml(portNote)} 以后对该 Profile「CDP启动」会固定用这个端口。</span>
+        </div>
+        <div class="field">
+          <label class="check-control">
+            <input type="checkbox" name="includeExtensions" data-agent-include-extensions checked ${busy ? "disabled" : ""} />
+            <span>同时同步插件</span>
+          </label>
+          <span class="field-note">默认带上可迁移插件的安装和启停状态；取消后只同步登录态。无法静默处理的插件可之后用「插件同步」补齐。</span>
         </div>
         <div class="modal-actions">
           <button type="button" data-action="close-modal">取消</button>
@@ -2080,13 +2080,18 @@ function renderAgentBrowserSetupModal(): string {
   `;
 }
 
-function renderAgentConfigModal(profileId: string): string {
+function renderAgentConfigModal(profileId: string, portSuggestion: CdpPortSuggestion | null): string {
   const profile = state?.profiles.find((item) => item.id === profileId);
   if (!profile) {
     return "";
   }
   const saving = isBusyAction("agent-config", { profileId });
-  const defaultPort = profile.fixedCdpPort ?? profile.cdpPort ?? 9223;
+  const defaultPort = profile.cdpPort ?? portSuggestion?.port ?? profile.fixedCdpPort ?? 9223;
+  const portNote = profile.cdpPort
+    ? `当前 Profile 已在端口 ${profile.cdpPort} 提供 CDP，直接沿用这个端口。`
+    : portSuggestion
+      ? formatCdpPortSuggestionNote(portSuggestion)
+      : `沿用已绑定端口 ${defaultPort}。`;
 
   return `
     <div class="modal-backdrop" data-action="close-modal">
@@ -2097,7 +2102,7 @@ function renderAgentConfigModal(profileId: string): string {
         <div class="field">
           <label for="agent-port">固定调试端口</label>
           <input id="agent-port" name="port" type="number" min="1024" max="65535" inputmode="numeric" value="${defaultPort}" />
-          <span class="field-note">以后对该 Profile「CDP启动」会固定使用这个端口。常用 9222 / 9223。</span>
+          <span class="field-note">${escapeHtml(portNote)} 以后对该 Profile「CDP启动」会固定使用这个端口。</span>
         </div>
         <div class="modal-actions">
           <button type="button" data-action="close-modal">取消</button>
@@ -2299,6 +2304,22 @@ function renderExtensionMigrationDiffPreview(): string {
   `;
 }
 
+function renderListeningPortsDetail(profile: PublicProfile): string {
+  // 独立 Profile 下方已展示 CDP 地址，监听端口属重复信息；
+  // 系统 Profile 走 Chrome 授权连接、没有 CDP 行，才在这里展示监听端口。
+  if (profile.source !== "native") {
+    return "";
+  }
+
+  return `
+    <div class="detail-row">
+      <span>关联进程监听端口</span>
+      <strong>${profile.listeningPorts.length ? profile.listeningPorts.join(", ") : "无"}</strong>
+      <small class="detail-note">${listeningPortsNote(profile)}</small>
+    </div>
+  `;
+}
+
 function renderConnectionDetail(profile: PublicProfile): string {
   if (profile.source === "native") {
     return renderSystemChromeConnectionDetail(profile);
@@ -2307,16 +2328,12 @@ function renderConnectionDetail(profile: PublicProfile): string {
   return renderCdpDetail(profile);
 }
 
-function renderSystemChromeConnectionDetail(profile: PublicProfile): string {
+function renderSystemChromeConnectionDetail(_profile: PublicProfile): string {
   return `
-    <div class="detail-row">
-      <span>连接方式</span>
-      <strong>${profile.running ? "Chrome 授权连接" : "未运行"}</strong>
-      <small class="detail-note">${
-        profile.running
-          ? "点击“连接”会打开 chrome://inspect/#remote-debugging；先启用入口，Agent Browser --auto-connect 真正接入时再在 Chrome 中点允许。"
-          : "先启动系统 Chrome，再连接已运行系统 Chrome。"
-      }</small>
+    <div class="detail-row detail-row-disabled">
+      <span>CDP 地址</span>
+      <strong>不支持</strong>
+      <small class="detail-note">${NATIVE_CDP_UNSUPPORTED_NOTE}</small>
     </div>
   `;
 }
@@ -2618,9 +2635,11 @@ function executeProfileConfirm(intent: Extract<ConfirmIntent, { kind: "profile" 
     return;
   }
 
-  void withBusy(() => profileApi().deleteProfile(profile.id), `已删除 ${emphasizeName(profile.name)}`, {
+  void withBusy(() => profileApi().deleteProfile(profile.id), profile.running
+    ? `已关闭并删除 ${emphasizeName(profile.name)}`
+    : `已删除 ${emphasizeName(profile.name)}`, {
     key: "delete-profile",
-    message: `正在删除 ${profile.name}…`,
+    message: profile.running ? `正在关闭并删除 ${profile.name}…` : `正在删除 ${profile.name}…`,
     profileId: profile.id
   });
 }
@@ -2782,18 +2801,6 @@ function diffStatusClass(status: string): string {
   return "changed";
 }
 
-function processLabel(profile: PublicProfile): string {
-  return profile.source === "native" ? "主进程 PID" : "关联进程 PID";
-}
-
-function processNote(profile: PublicProfile): string {
-  if (profile.source === "native") {
-    return "系统 Profile 仅展示可安全确认的 Chrome 主进程；Chrome Helper 子进程可能由多个系统 Profile 共享。";
-  }
-
-  return "这些是带有同一独立目录标记的 Chrome 主进程和 Helper 进程，不是端口号。";
-}
-
 function listeningPortsNote(profile: PublicProfile): string {
   if (!profile.running) {
     return "Profile 未运行时不会占用本机 TCP 监听端口。";
@@ -2818,7 +2825,16 @@ function launchButtonTitle(profile: PublicProfile): string {
   return profile.running ? "这个 Profile 已经在运行中" : "启动这个 Profile";
 }
 
+// 系统默认 Profile 用的是 Chrome 默认数据目录，从 Chrome 136 起会静默拒绝
+// --remote-debugging-port，所以无法像独立 Profile 那样开 CDP 调试端口。
+const NATIVE_CDP_UNSUPPORTED_NOTE =
+  "这是系统默认 Profile，没法开 CDP 调试端口。Agent 仍可连接，但需要你先在网页里完成一次授权。";
+
 function cdpLaunchButtonTitle(profile: PublicProfile): string {
+  if (profile.source === "native") {
+    return NATIVE_CDP_UNSUPPORTED_NOTE;
+  }
+
   if (profile.running) {
     return profile.cdpUrl
       ? `CDP 已开启：${profile.cdpUrl}`
@@ -2826,12 +2842,6 @@ function cdpLaunchButtonTitle(profile: PublicProfile): string {
   }
 
   return "启动这个 Profile，并开启本机 CDP 监听端口";
-}
-
-function systemChromeConnectButtonTitle(profile: PublicProfile): string {
-  return profile.running
-    ? "打开 Chrome 远程调试入口；真正授权会在 Agent Browser --auto-connect 连接时弹出"
-    : "先启动系统 Chrome，再连接已运行系统 Chrome";
 }
 
 function focusButtonTitle(profile: PublicProfile): string {
@@ -2843,14 +2853,14 @@ function closeButtonTitle(profile: PublicProfile): string {
 }
 
 function deleteButtonTitle(profile: PublicProfile): string {
-  if (profile.running) {
-    return "先关闭这个 Profile 的 Chrome 窗口，再刷新后删除";
-  }
   if (profile.isDefault) {
     return "Default 本机 Chrome Profile 受保护，不能删除";
   }
   if (!profile.deletable) {
     return "这个 Profile 不能删除";
+  }
+  if (profile.running) {
+    return "删除这个 Profile，会先关闭它的 Chrome 窗口";
   }
 
   return "删除这个 Profile";
@@ -2873,9 +2883,17 @@ function closeConfirmCopy(profile: PublicProfile): { title: string; body: string
 }
 
 function deleteConfirmCopy(profile: PublicProfile): { title: string; body: string; confirmLabel: string } {
+  if (profile.running) {
+    return {
+      title: `删除 ${profile.name}`,
+      body: "删除会先关闭这个 Profile 的 Chrome 窗口，未保存的网页内容可能会丢失；随后会把 Profile 目录移到废纸篓。",
+      confirmLabel: "关闭并删除"
+    };
+  }
+
   return {
     title: `删除 ${profile.name}`,
-    body: "这个 Profile 的目录会先移到废纸篓。删除前请确认它没有正在运行的 Chrome 窗口。",
+    body: "这个 Profile 的目录会移到废纸篓。",
     confirmLabel: "确认删除"
   };
 }
@@ -3346,9 +3364,14 @@ appRoot.addEventListener("click", (event) => {
       setToast("还没有可用的 Profile 作为登录态来源", "error");
       return;
     }
-    modal = { kind: "agent-browser-setup" };
-    render();
-    window.setTimeout(() => document.querySelector<HTMLInputElement>("#agent-name")?.focus(), 0);
+    void profileApi()
+      .suggestCdpPort(9223)
+      .then((portSuggestion) => {
+        modal = { kind: "agent-browser-setup", portSuggestion };
+        render();
+        window.setTimeout(() => document.querySelector<HTMLInputElement>("#agent-name")?.focus(), 0);
+      })
+      .catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
     return;
   }
 
@@ -3358,9 +3381,21 @@ appRoot.addEventListener("click", (event) => {
       setToast("只有工具独立 Profile 才能设为 Agent 调试端点", "error");
       return;
     }
-    modal = { kind: "agent-config", profileId: id };
-    render();
-    window.setTimeout(() => document.querySelector<HTMLInputElement>("#agent-port")?.focus(), 0);
+    const preferredPort = profile.cdpPort ?? profile.fixedCdpPort ?? 9223;
+    if (profile.cdpPort) {
+      modal = { kind: "agent-config", profileId: id, portSuggestion: null };
+      render();
+      window.setTimeout(() => document.querySelector<HTMLInputElement>("#agent-port")?.focus(), 0);
+      return;
+    }
+    void profileApi()
+      .suggestCdpPort(preferredPort)
+      .then((portSuggestion) => {
+        modal = { kind: "agent-config", profileId: id, portSuggestion };
+        render();
+        window.setTimeout(() => document.querySelector<HTMLInputElement>("#agent-port")?.focus(), 0);
+      })
+      .catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
     return;
   }
 
@@ -3371,32 +3406,6 @@ appRoot.addEventListener("click", (event) => {
       message: "正在移除 Agent 配置…",
       profileId: id
     });
-    return;
-  }
-
-  if (action === "connect-system-chrome" && id) {
-    const profile = state.profiles.find((item) => item.id === id);
-    if (!profile) {
-      return;
-    }
-    if (profile.source !== "native") {
-      setToast("连接已运行系统 Chrome 只支持系统 Profile", "error");
-      return;
-    }
-    if (!profile.running) {
-      setToast("请先启动系统 Chrome，再连接已运行系统 Chrome", "error");
-      return;
-    }
-
-    void withBusy(
-      () => profileApi().connectRunningSystemChrome(id),
-      "已打开 Chrome 远程调试入口；Agent Browser --auto-connect 接入时再在 Chrome 中点允许",
-      {
-        key: "connect-system-chrome",
-        message: `正在打开 ${profile.name} 的连接授权入口…`,
-        profileId: id
-      }
-    );
     return;
   }
 
@@ -3485,13 +3494,12 @@ appRoot.addEventListener("click", (event) => {
     if (!profile) {
       return;
     }
-    if (profile.running) {
-      setToast(`先关闭 ${emphasizeName(profile.name)} 的 Chrome 窗口，再刷新后删除`, "error");
-      return;
-    }
     if (!profile.deletable) {
       setToast(deleteButtonTitle(profile), "error");
       return;
+    }
+    if (profile.running) {
+      setToast(`删除 ${emphasizeName(profile.name)} 会先关闭浏览器，请确认`);
     }
 
     modal = {
@@ -3630,11 +3638,24 @@ appRoot.addEventListener("submit", (event) => {
       return;
     }
     modal = null;
+    const includeExtensions = data.has("includeExtensions");
     void withBusy(
       async () => {
-        const result = await profileApi().setupAgentBrowser({ sourceProfileId: sourceId, targetName: name, port });
+        const result = await profileApi().setupAgentBrowser({
+          sourceProfileId: sourceId,
+          targetName: name,
+          port,
+          includeExtensions
+        });
         state = result.state;
-        setToast(`Agent 浏览器已就绪：agent-browser connect ${result.port}`);
+        const extensionCount =
+          (result.extensionResult?.copiedExtensions.length || 0) +
+          (result.extensionResult?.loadedLocalExtensions.length || 0);
+        setToast(
+          includeExtensions && result.extensionResult
+            ? `Agent 浏览器已就绪：agent-browser connect ${result.port}，已同步 ${extensionCount} 个插件`
+            : `Agent 浏览器已就绪：agent-browser connect ${result.port}`
+        );
       },
       undefined,
       { key: "setup-agent-browser", message: "正在准备 Agent 浏览器…" }

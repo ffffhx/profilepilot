@@ -1,9 +1,8 @@
 name: Build Release Packages
 
 on:
+  # 不再随 push 到 main 自动构建发布；仅在打 v*.*.* tag 或手动触发时发布。
   push:
-    branches:
-      - main
     tags:
       - "v*.*.*"
   workflow_dispatch:

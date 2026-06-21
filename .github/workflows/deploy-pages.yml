@@ -1,9 +1,7 @@
 name: Deploy GitHub Pages
 
 on:
-  push:
-    branches:
-      - main
+  # 不再随 push 到 main 自动部署；只手动触发（gh workflow run deploy-pages.yml）。
   workflow_dispatch:
 
 permissions:

@@ -9,7 +9,8 @@
   },
   "main": "dist/main/main.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && npm run bundle:renderer",
+    "bundle:renderer": "esbuild src/renderer/main.ts --bundle --outfile=dist/renderer/app.js --platform=browser --format=iife --target=es2022 --log-level=warning",
     "start": "npm run build && electron .",
     "dev": "npm run build && electron .",
     "check": "tsc --noEmit",
@@ -105,6 +106,7 @@
     "@types/node": "^25.9.1",
     "electron": "^42.3.3",
     "electron-builder": "^26.15.2",
+    "esbuild": "^0.28.1",
     "typescript": "^6.0.3"
   }
 }

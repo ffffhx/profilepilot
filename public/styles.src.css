@@ -1,3 +1,7 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
 /* ProfilePilot — flight-deck instrument theme */
 
 @font-face {

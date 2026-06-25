@@ -6,3 +6,6 @@ release/
 .env
 .cpm-data/
 npm-debug.log*
+
+# Tailwind CSS build output
+public/app.css

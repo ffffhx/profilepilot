@@ -28,6 +28,8 @@ import { APP_TITLE, createProfileManager } from "./profile-manager";
 const profileManager = createProfileManager();
 let mainWindow: BrowserWindow | null = null;
 const APP_ICON_PATH = path.join(__dirname, "../../public/assets/profilepilot-icon-512.png");
+// 整个界面的统一缩放系数（等比例放大字号/间距/控件）。想再大/再小只改这一个数。
+const UI_ZOOM_FACTOR = 1.0;
 const activeOperations = new Map<string, ActiveOperation>();
 
 interface ActiveOperation {
@@ -90,9 +92,10 @@ function createMainWindow(): void {
   // UI 是深色仪表台主题，原生控件（select 弹出菜单、滚动条等）必须跟随深色
   nativeTheme.themeSource = "dark";
 
+  // 默认窗口尺寸随 UI_ZOOM_FACTOR 一起放大，保证缩放后二栏布局仍有原来的可用空间。
   mainWindow = new BrowserWindow({
-    width: 1120,
-    height: 760,
+    width: Math.round(1120 * UI_ZOOM_FACTOR),
+    height: Math.round(760 * UI_ZOOM_FACTOR),
     minWidth: 860,
     minHeight: 620,
     show: !smokeTest,
@@ -362,6 +365,12 @@ function createMainWindow(): void {
       }
     });
   }
+
+  // 整体 UI 缩放：样式表保持原始的紧凑基准字号/间距，这里用一个统一的缩放系数
+  // 等比例放大整个界面（字号、间距、控件一起放大），比逐条加 px 更协调，调一个数即可。
+  mainWindow.webContents.on("did-finish-load", () => {
+    mainWindow?.webContents.setZoomFactor(UI_ZOOM_FACTOR);
+  });
 
   mainWindow.loadFile(path.join(__dirname, "../../public/index.html"));
   mainWindow.on("closed", () => {

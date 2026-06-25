@@ -2371,6 +2371,274 @@ body:not(.booted) .layout {
   width: min(520px, 100%);
 }
 
+.global-instructions-modal {
+  width: min(860px, 100%);
+}
+
+.global-instructions-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.global-instruction-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  margin-bottom: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--line);
+}
+
+.global-instruction-tab {
+  display: grid;
+  min-width: 0;
+  min-height: 58px;
+  justify-items: start;
+  gap: 5px;
+  border: 0;
+  border-radius: 0;
+  background: var(--panel-soft);
+  padding: 11px 13px;
+  box-shadow: none;
+  text-align: left;
+}
+
+.global-instruction-tab:hover:not(:disabled) {
+  box-shadow: none;
+}
+
+.global-instruction-tab.selected {
+  background:
+    linear-gradient(180deg, rgba(56, 225, 160, 0.12), rgba(56, 225, 160, 0.04)),
+    var(--panel-soft);
+  color: var(--accent-bright);
+}
+
+.global-instruction-tab.missing {
+  color: var(--warn-bright);
+}
+
+.global-instruction-tab.error {
+  color: var(--danger-bright);
+}
+
+.global-instruction-tab span,
+.global-instruction-tab small {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.global-instruction-tab span {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.global-instruction-tab small {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.global-instruction-meta {
+  display: grid;
+  grid-template-columns: minmax(0, 1.8fr) minmax(132px, 0.7fr) minmax(88px, 0.45fr);
+  gap: 1px;
+  overflow: hidden;
+  margin-bottom: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--line);
+}
+
+.global-instruction-meta div {
+  min-width: 0;
+  background: var(--panel-soft);
+  padding: 11px 12px;
+}
+
+.global-instruction-meta span {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.global-instruction-meta strong,
+.global-instruction-meta code {
+  display: block;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.global-instruction-meta code {
+  color: var(--accent-bright);
+  font-family: var(--font-mono);
+}
+
+.global-instruction-role-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0 0 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  padding: 10px 12px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.global-instruction-role-note strong {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.global-instruction-role-note span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.global-instruction-role-note code {
+  color: var(--accent-bright);
+  font-family: var(--font-mono);
+}
+
+.global-instruction-role-note.primary {
+  border-color: var(--accent-line);
+  background: rgba(56, 225, 160, 0.07);
+}
+
+.global-instruction-role-note.primary strong,
+.global-instruction-role-note.reference strong {
+  color: var(--accent-bright);
+}
+
+.global-instruction-role-note.warn {
+  border-color: var(--warn-line);
+  background: var(--warn-soft);
+}
+
+.global-instruction-role-note.warn strong {
+  color: var(--warn-bright);
+}
+
+.global-instruction-content {
+  min-height: 300px;
+  max-height: min(55vh, 560px);
+  overflow: auto;
+  margin: 0 0 18px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background:
+    linear-gradient(90deg, rgba(56, 225, 160, 0.08) 0 3px, transparent 3px),
+    var(--bg-deep);
+  padding: 14px 14px 14px 17px;
+  color: #d6e5de;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.global-instruction-content code {
+  font-family: inherit;
+}
+
+.global-instruction-editor {
+  width: 100%;
+  min-height: 360px;
+  max-height: min(58vh, 620px);
+  resize: vertical;
+  overflow: auto;
+  margin: 0 0 10px;
+  border: 1px solid var(--accent-line);
+  border-radius: 8px;
+  background:
+    linear-gradient(90deg, rgba(56, 225, 160, 0.1) 0 3px, transparent 3px),
+    #071015;
+  color: #e6f8ef;
+  padding: 14px 14px 14px 17px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  caret-color: var(--accent-bright);
+}
+
+.global-instruction-editor:focus {
+  border-color: var(--accent);
+  outline: 3px solid var(--focus);
+}
+
+.global-instruction-editor:disabled {
+  opacity: 0.72;
+}
+
+.global-instruction-edit-note {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 18px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.global-instruction-edit-note span {
+  flex: 0 0 auto;
+  color: var(--accent-bright);
+  font-family: var(--font-mono);
+}
+
+.global-instruction-edit-note strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--warn-bright);
+  font-weight: 700;
+  text-align: right;
+}
+
+.global-instruction-empty,
+.global-instruction-message {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 180px;
+  margin: 0 0 18px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  padding: 16px;
+}
+
+.global-instruction-message.error {
+  border-color: var(--danger-line);
+  color: var(--danger-bright);
+}
+
 .confirm-dialog {
   padding: 0;
   overflow: hidden;
@@ -2680,6 +2948,23 @@ body:not(.booted) .layout {
     flex-wrap: wrap;
   }
 
+  .global-instructions-head {
+    flex-direction: column;
+  }
+
+  .global-instruction-edit-note {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .global-instruction-role-note {
+    flex-direction: column;
+  }
+
+  .global-instruction-edit-note strong {
+    text-align: left;
+  }
+
   .profile-select {
     max-width: none;
   }
@@ -2702,7 +2987,9 @@ body:not(.booted) .layout {
   .extension-diff-summary,
   .migration-result-body,
   .operation-progress-steps,
-  .migration-modal-summary {
+  .migration-modal-summary,
+  .global-instruction-tabs,
+  .global-instruction-meta {
     grid-template-columns: 1fr;
   }
 

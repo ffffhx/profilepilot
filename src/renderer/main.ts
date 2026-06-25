@@ -3,7 +3,7 @@ import { activateBusyStep, busyStepsKey, emphasizeName, focusProfileFromUi, setT
 import { closeModalFromUi, executeConfirmIntent } from "./confirm";
 import { isExtensionMigrationActionItem } from "./render/extensions";
 import { render } from "./render/render-root";
-import { invalidateExtensionMigrationDiff, loadState, refreshExtensionMigrationDiff, setMigrationSource } from "./state-actions";
+import { invalidateExtensionMigrationDiff, loadState, refreshExtensionMigrationDiff, refreshGlobalInstructions, repairClaudeInstructionShell, saveGlobalInstruction, setMigrationSource } from "./state-actions";
 import { appRoot, store } from "./state";
 import { deleteButtonTitle, escapeHtml, formatErrorMessage } from "./util";
 
@@ -147,8 +147,120 @@ appRoot.addEventListener("click", (event) => {
 
   if (action === "close-modal") {
     if (event.target === actionTarget || actionTarget.tagName === "BUTTON") {
+      if (store.modal?.kind === "global-instructions" && store.editingGlobalInstructionId) {
+        setToast("先保存或取消当前编辑", "error");
+        return;
+      }
       closeModalFromUi();
     }
+    return;
+  }
+
+  if (action === "open-global-instructions") {
+    store.modal = { kind: "global-instructions" };
+    store.editingGlobalInstructionId = null;
+    store.globalInstructionDraft = "";
+    store.openProfileMenuId = null;
+    store.migrationSourceMenuOpen = false;
+    store.migrationTargetMenuOpen = false;
+    store.accountSyncMenuOpen = null;
+    render();
+    void refreshGlobalInstructions().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+    return;
+  }
+
+  if (action === "refresh-global-instructions") {
+    if (store.editingGlobalInstructionId) {
+      setToast("先保存或取消当前编辑", "error");
+      return;
+    }
+    void refreshGlobalInstructions().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+    return;
+  }
+
+  if (action === "select-global-instruction" && id) {
+    if (store.editingGlobalInstructionId && store.editingGlobalInstructionId !== id) {
+      setToast("先保存或取消当前编辑", "error");
+      return;
+    }
+    const file = store.globalInstructions?.files.find((item) => item.id === id);
+    if (file) {
+      store.activeGlobalInstructionId = file.id;
+      render();
+    }
+    return;
+  }
+
+  if (action === "edit-global-instruction") {
+    const file = store.globalInstructions?.files.find((item) => item.id === store.activeGlobalInstructionId);
+    if (!file) {
+      setToast("没有可编辑的全局指令文件", "error");
+      return;
+    }
+    if (!file.editable) {
+      setToast("CLAUDE.md 是引用壳，请编辑 AGENTS.md", "error");
+      return;
+    }
+
+    store.editingGlobalInstructionId = file.id;
+    store.globalInstructionDraft = file.content;
+    render();
+    window.setTimeout(() => document.querySelector<HTMLTextAreaElement>("[data-global-instruction-editor]")?.focus(), 0);
+    return;
+  }
+
+  if (action === "cancel-global-instruction-edit") {
+    store.editingGlobalInstructionId = null;
+    store.globalInstructionDraft = "";
+    render();
+    return;
+  }
+
+  if (action === "save-global-instruction") {
+    const file = store.globalInstructions?.files.find((item) => item.id === store.editingGlobalInstructionId);
+    const fileName = file?.fileName || "全局指令";
+    void saveGlobalInstruction()
+      .then(() => setToast(`已保存 ${fileName}`))
+      .catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+    return;
+  }
+
+  if (action === "repair-global-instruction-shell") {
+    void repairClaudeInstructionShell()
+      .then(() => setToast("已恢复 CLAUDE.md 引用壳"))
+      .catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+    return;
+  }
+
+  if (action === "copy-global-instruction") {
+    const file = store.globalInstructions?.files.find((item) => item.id === store.activeGlobalInstructionId);
+    if (!file?.content) {
+      setToast("当前文件没有可复制的内容", "error");
+      return;
+    }
+    if (!navigator.clipboard?.writeText) {
+      setToast("当前环境不能直接复制，请手动选中文本复制", "error");
+      return;
+    }
+
+    void navigator.clipboard
+      .writeText(file.content)
+      .then(() => setToast(`已复制 ${file.fileName}`))
+      .catch(() => setToast("复制失败，请手动选中文本复制", "error"));
+    return;
+  }
+
+  if (action === "open-global-instruction") {
+    const file = store.globalInstructions?.files.find((item) => item.id === store.activeGlobalInstructionId);
+    if (!file?.exists) {
+      setToast("当前文件不存在", "error");
+      return;
+    }
+
+    void profileApi()
+      .openPath(file.path)
+      .then(() => setToast(`已打开 ${file.fileName}`))
+      .catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
     return;
   }
 
@@ -526,7 +638,7 @@ appRoot.addEventListener("click", (event) => {
 
   if (action === "clear-agent-config" && id) {
     const profile = store.state.profiles.find((item) => item.id === id);
-    void withBusy(() => profileApi().clearAgentBrowserConfig(id), `已从 CLAUDE.md 移除 ${emphasizeName(profile?.name || "Profile")} 的 Agent 配置`, {
+    void withBusy(() => profileApi().clearAgentBrowserConfig(id), `已从 AGENTS.md 移除 ${emphasizeName(profile?.name || "Profile")} 的 Agent 配置，并保持 CLAUDE.md 引用壳`, {
       key: "agent-config",
       message: "正在移除 Agent 配置…",
       profileId: id
@@ -692,6 +804,19 @@ appRoot.addEventListener("change", (event) => {
   }
 });
 
+appRoot.addEventListener("input", (event) => {
+  const target = event.target instanceof HTMLTextAreaElement ? event.target : null;
+  if (!target?.matches("[data-global-instruction-editor]")) {
+    return;
+  }
+
+  store.globalInstructionDraft = target.value;
+  const count = document.querySelector("[data-global-instruction-draft-count]");
+  if (count) {
+    count.textContent = `${target.value.length} 字符`;
+  }
+});
+
 appRoot.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && (store.migrationSourceMenuOpen || store.migrationTargetMenuOpen || store.accountSyncMenuOpen)) {
     store.migrationSourceMenuOpen = false;
@@ -786,7 +911,7 @@ appRoot.addEventListener("submit", (event) => {
     store.modal = null;
     void withBusy(
       () => profileApi().setAgentBrowserConfig(profileId, parsedPort),
-      `已写入全局 CLAUDE.md：Agent 优先连接 ${emphasizeName(profile.name)}（端口 ${parsedPort}）`,
+      `已写入全局 AGENTS.md：Agent 优先连接 ${emphasizeName(profile.name)}（端口 ${parsedPort}），CLAUDE.md 保持引用壳`,
       { key: "agent-config", message: "正在写入 Agent 配置…", profileId }
     );
     return;

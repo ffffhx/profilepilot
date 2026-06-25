@@ -318,6 +318,36 @@ export interface SetupAgentBrowserResult {
   state: AppState;
 }
 
+export type GlobalInstructionFileId = "codex-agents" | "claude-memory";
+export type GlobalInstructionFileRole = "primary" | "reference";
+
+export interface GlobalInstructionFile {
+  id: GlobalInstructionFileId;
+  title: string;
+  fileName: string;
+  path: string;
+  role: GlobalInstructionFileRole;
+  editable: boolean;
+  referenceTargetPath: string | null;
+  referenceShellContent: string | null;
+  isReferenceShell: boolean | null;
+  exists: boolean;
+  content: string;
+  sizeBytes: number;
+  updatedAt: string | null;
+  error: string | null;
+}
+
+export interface GlobalInstructionsSnapshot {
+  readAt: string;
+  files: GlobalInstructionFile[];
+}
+
+export interface GlobalInstructionUpdateRequest {
+  id: GlobalInstructionFileId;
+  content: string;
+}
+
 export interface CdpPortSuggestion {
   preferredPort: number;
   port: number;
@@ -365,6 +395,9 @@ export interface ProfileManagerApi {
   suggestCdpPort(preferredPort?: number | null): Promise<CdpPortSuggestion>;
   setAgentBrowserConfig(id: string, port: number): Promise<AppState>;
   clearAgentBrowserConfig(id: string): Promise<AppState>;
+  readGlobalInstructions(): Promise<GlobalInstructionsSnapshot>;
+  writeGlobalInstruction(request: GlobalInstructionUpdateRequest): Promise<GlobalInstructionsSnapshot>;
+  ensureClaudeInstructionShell(): Promise<GlobalInstructionsSnapshot>;
   focusProfile(id: string): Promise<AppState>;
   isProfileFrontmost(id: string): Promise<boolean>;
   closeProfile(id: string): Promise<AppState>;

@@ -16,6 +16,8 @@ import type {
   ExtensionMigrationRequest,
   ExtensionMigrationResult,
   ExtensionScanResult,
+  GlobalInstructionUpdateRequest,
+  GlobalInstructionsSnapshot,
   OperationProgress,
   ProfileManagerApi
 } from "./shared/types";
@@ -35,6 +37,12 @@ const profileManagerApi: ProfileManagerApi = {
     ipcRenderer.invoke(IPC_CHANNELS.setAgentBrowserConfig, id, port),
   clearAgentBrowserConfig: (id: string): Promise<AppState> =>
     ipcRenderer.invoke(IPC_CHANNELS.clearAgentBrowserConfig, id),
+  readGlobalInstructions: (): Promise<GlobalInstructionsSnapshot> =>
+    ipcRenderer.invoke(IPC_CHANNELS.readGlobalInstructions),
+  writeGlobalInstruction: (request: GlobalInstructionUpdateRequest): Promise<GlobalInstructionsSnapshot> =>
+    ipcRenderer.invoke(IPC_CHANNELS.writeGlobalInstruction, request),
+  ensureClaudeInstructionShell: (): Promise<GlobalInstructionsSnapshot> =>
+    ipcRenderer.invoke(IPC_CHANNELS.ensureClaudeInstructionShell),
   focusProfile: (id: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.focusProfile, id),
   isProfileFrontmost: (id: string): Promise<boolean> => ipcRenderer.invoke(IPC_CHANNELS.isProfileFrontmost, id),
   closeProfile: (id: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.closeProfile, id),

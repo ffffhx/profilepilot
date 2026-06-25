@@ -16,10 +16,13 @@ import type {
   ExtensionMigrationRequest,
   ExtensionMigrationResult,
   ExtensionScanResult,
+  GlobalInstructionUpdateRequest,
+  GlobalInstructionsSnapshot,
   OperationPauseSignal,
   OperationProgress,
   OperationProgressUpdate
 } from "../shared/types";
+import { ensureClaudeInstructionShell, readGlobalInstructions, writeGlobalInstruction } from "./global-instructions";
 import { APP_TITLE, createProfileManager } from "./profile-manager";
 
 const profileManager = createProfileManager();
@@ -123,6 +126,8 @@ function createMainWindow(): void {
                   return false;
                 };
 
+                await waitForSmokeCondition(() => document.querySelector("h1") && document.querySelector('[data-action="open-global-instructions"]'), 5000);
+
                 const smokeResult = {
                   title: document.title,
                   h1: document.querySelector("h1")?.textContent || null,
@@ -141,6 +146,9 @@ function createMainWindow(): void {
                   hasSyncAccount: typeof window.profileManager?.syncAccount === "function",
                   hasCancelOperation: typeof window.profileManager?.cancelOperation === "function",
                   hasControlOperation: typeof window.profileManager?.controlOperation === "function",
+                  hasReadGlobalInstructions: typeof window.profileManager?.readGlobalInstructions === "function",
+                  hasWriteGlobalInstruction: typeof window.profileManager?.writeGlobalInstruction === "function",
+                  hasEnsureClaudeInstructionShell: typeof window.profileManager?.ensureClaudeInstructionShell === "function",
                   hasOperationProgress: typeof window.profileManager?.onOperationProgress === "function",
                   buttonCount: document.querySelectorAll("button").length,
                   statusLabels: Array.from(document.querySelectorAll(".status-label")).map((item) => item.textContent),
@@ -188,10 +196,43 @@ function createMainWindow(): void {
                   defaultProfileListeningPorts: [],
                   firstProfileExtensionCount: null,
                   extensionDataGuard: null,
+                  globalInstructionFiles: [],
+                  globalInstructionHasContent: false,
+                  globalInstructionsModalTitle: null,
+                  globalInstructionsModalTabs: [],
+                  globalInstructionsModalPath: null,
+                  globalInstructionsModalHasContent: false,
+                  globalInstructionsEditorReady: false,
+                  globalInstructionsEditorDraftLength: null,
                   crud: null
                 };
 
                 const visibleState = await window.profileManager.getState();
+                const globalInstructions = await window.profileManager.readGlobalInstructions();
+                smokeResult.globalInstructionFiles = globalInstructions.files.map((file) => file.fileName);
+                smokeResult.globalInstructionHasContent = globalInstructions.files.some((file) => file.exists && file.content.length > 0);
+                const globalInstructionsButton = document.querySelector('[data-action="open-global-instructions"]');
+                if (globalInstructionsButton instanceof HTMLButtonElement) {
+                  globalInstructionsButton.click();
+                  await waitForSmokeCondition(() => document.querySelector(".global-instructions-modal"), 1000);
+                  await waitForSmokeCondition(() => document.querySelector(".global-instruction-content, .global-instruction-message"), 2500);
+                  smokeResult.globalInstructionsModalTitle = document.querySelector(".global-instructions-modal h2")?.textContent || null;
+                  smokeResult.globalInstructionsModalTabs = Array.from(document.querySelectorAll(".global-instruction-tab span")).map((item) => item.textContent);
+                  smokeResult.globalInstructionsModalPath = document.querySelector(".global-instruction-meta code")?.textContent || null;
+                  smokeResult.globalInstructionsModalHasContent = Boolean(document.querySelector(".global-instruction-content")?.textContent?.length);
+                  const editButton = document.querySelector('[data-action="edit-global-instruction"]');
+                  if (editButton instanceof HTMLButtonElement && !editButton.disabled) {
+                    editButton.click();
+                    await waitForSmokeCondition(() => document.querySelector("[data-global-instruction-editor]"), 1000);
+                    const editor = document.querySelector("[data-global-instruction-editor]");
+                    smokeResult.globalInstructionsEditorReady = editor instanceof HTMLTextAreaElement;
+                    smokeResult.globalInstructionsEditorDraftLength = editor instanceof HTMLTextAreaElement ? editor.value.length : null;
+                    document.querySelector('[data-action="cancel-global-instruction-edit"]')?.click();
+                    await new Promise((done) => window.setTimeout(done, 0));
+                  }
+                  document.querySelector('.global-instructions-modal [data-action="close-modal"]')?.click();
+                  await new Promise((done) => window.setTimeout(done, 0));
+                }
                 const syncAccountButton = document.querySelector('[data-action="sync-account"]');
                 if (syncAccountButton instanceof HTMLButtonElement && !syncAccountButton.disabled) {
                   syncAccountButton.click();
@@ -368,6 +409,21 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.clearAgentBrowserConfig, async (_event, id: string): Promise<AppState> => {
     await profileManager.clearAgentBrowserConfig(id);
     return profileManager.getState();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.readGlobalInstructions, async (): Promise<GlobalInstructionsSnapshot> => {
+    return readGlobalInstructions();
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.writeGlobalInstruction,
+    async (_event, request: GlobalInstructionUpdateRequest): Promise<GlobalInstructionsSnapshot> => {
+      return writeGlobalInstruction(request);
+    }
+  );
+
+  ipcMain.handle(IPC_CHANNELS.ensureClaudeInstructionShell, async (): Promise<GlobalInstructionsSnapshot> => {
+    return ensureClaudeInstructionShell();
   });
 
   ipcMain.handle(IPC_CHANNELS.focusProfile, async (_event, id: string): Promise<AppState> => {

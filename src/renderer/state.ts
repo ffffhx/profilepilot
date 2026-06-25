@@ -1,4 +1,4 @@
-import { AccountSyncResult, AppState, BusyState, ExtensionMigrationDiffResult, ExtensionMigrationResult, ExtensionScanResult, ModalState, ToastKind } from "./types";
+import { AccountSyncResult, AppState, BusyState, ExtensionMigrationDiffResult, ExtensionMigrationResult, ExtensionScanResult, GlobalInstructionFileId, GlobalInstructionsSnapshot, ModalState, ToastKind } from "./types";
 
 export const root = document.querySelector<HTMLDivElement>("#app");
 
@@ -40,6 +40,12 @@ export interface RendererState {
   launchSyncedProfile: boolean;
   accountSyncScopeExpanded: boolean;
   accountSyncResult: AccountSyncResult | null;
+  globalInstructions: GlobalInstructionsSnapshot | null;
+  globalInstructionsLoading: boolean;
+  globalInstructionsSaving: boolean;
+  activeGlobalInstructionId: GlobalInstructionFileId;
+  editingGlobalInstructionId: GlobalInstructionFileId | null;
+  globalInstructionDraft: string;
 }
 
 export const store: RendererState = {
@@ -73,7 +79,13 @@ export const store: RendererState = {
   accountSyncTargetId: null,
   launchSyncedProfile: true,
   accountSyncScopeExpanded: false,
-  accountSyncResult: null
+  accountSyncResult: null,
+  globalInstructions: null,
+  globalInstructionsLoading: false,
+  globalInstructionsSaving: false,
+  activeGlobalInstructionId: "codex-agents",
+  editingGlobalInstructionId: null,
+  globalInstructionDraft: ""
 };
 
 export const dateFormatter = new Intl.DateTimeFormat("zh-CN", {

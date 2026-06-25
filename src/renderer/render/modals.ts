@@ -1,8 +1,203 @@
 import { isBusyAction } from "../busy";
 import { plannedExtensionMigrationExtensions, renderExtensionMigrationDiffPreview, renderMigrationTargetPicker } from "./extensions";
 import { store } from "../state";
-import { CdpPortSuggestion, PublicProfile } from "../types";
-import { escapeHtml, formatCdpPortSuggestionNote, renderButtonLabel } from "../util";
+import { CdpPortSuggestion, GlobalInstructionFile, PublicProfile } from "../types";
+import { escapeHtml, formatCdpPortSuggestionNote, formatDate, renderButtonLabel } from "../util";
+
+export function renderGlobalInstructionsModal(): string {
+  const files = store.globalInstructions?.files || [];
+  const active = files.find((file) => file.id === store.activeGlobalInstructionId) || files[0] || null;
+  const loading = store.globalInstructionsLoading;
+  const editing = Boolean(active && store.editingGlobalInstructionId === active.id);
+  const saving = store.globalInstructionsSaving;
+
+  return `
+    <div class="modal-backdrop" data-action="close-modal">
+      <section class="modal global-instructions-modal" role="dialog" aria-modal="true" aria-labelledby="global-instructions-title">
+        <div class="global-instructions-head">
+          <div>
+            <span class="modal-kicker">Agent Instructions</span>
+            <h2 id="global-instructions-title">全局指令</h2>
+          </div>
+          <button type="button" class="${loading ? "loading" : ""}" data-action="refresh-global-instructions" ${loading || editing || saving ? "disabled" : ""}>
+            ${renderButtonLabel(loading, "刷新", "读取中…")}
+          </button>
+        </div>
+        <div class="global-instruction-tabs" role="tablist" aria-label="Global instruction files">
+          ${
+            files.length
+              ? files.map((file) => renderGlobalInstructionTab(file, active?.id === file.id)).join("")
+              : ["AGENTS.md", "CLAUDE.md"]
+                  .map((fileName) => `<button type="button" class="global-instruction-tab" disabled>${fileName}</button>`)
+                  .join("")
+          }
+        </div>
+        ${renderGlobalInstructionBody(active, loading, editing)}
+        ${renderGlobalInstructionActions(active, editing, saving)}
+      </section>
+    </div>
+  `;
+}
+
+function renderGlobalInstructionTab(file: GlobalInstructionFile, selected: boolean): string {
+  const status = globalInstructionStatus(file);
+  return `
+    <button
+      type="button"
+      class="global-instruction-tab ${selected ? "selected" : ""} ${file.error ? "error" : file.exists ? "" : "missing"}"
+      data-action="select-global-instruction"
+      data-id="${escapeHtml(file.id)}"
+      role="tab"
+      aria-selected="${selected ? "true" : "false"}"
+    >
+      <span>${escapeHtml(file.fileName)}</span>
+      <small>${escapeHtml(status)}</small>
+    </button>
+  `;
+}
+
+function renderGlobalInstructionBody(file: GlobalInstructionFile | null, loading: boolean, editing: boolean): string {
+  if (loading && !file) {
+    return `
+      <div class="global-instruction-empty">
+        <span class="sync-spinner" aria-hidden="true"></span>
+        <strong>正在读取全局指令…</strong>
+      </div>
+    `;
+  }
+
+  if (!file) {
+    return `
+      <div class="global-instruction-empty">
+        <strong>还没有读取结果</strong>
+      </div>
+    `;
+  }
+
+  const roleNotice = renderGlobalInstructionRoleNotice(file);
+  const body = editing
+    ? `
+        <textarea
+          class="global-instruction-editor"
+          data-global-instruction-editor
+          spellcheck="false"
+          aria-label="${escapeHtml(file.fileName)} 内容"
+          ${store.globalInstructionsSaving ? "disabled" : ""}
+        >${escapeHtml(store.globalInstructionDraft)}</textarea>
+        <div class="global-instruction-edit-note">
+          <span data-global-instruction-draft-count>${escapeHtml(String(store.globalInstructionDraft.length))} 字符</span>
+          <strong>保存会直接覆盖 ${escapeHtml(file.path)}</strong>
+        </div>
+      `
+    : file.error
+      ? `<p class="global-instruction-message error">读取失败：${escapeHtml(file.error)}</p>`
+      : file.exists
+        ? `<pre class="global-instruction-content"><code>${escapeHtml(file.content)}</code></pre>`
+        : file.editable
+          ? `<p class="global-instruction-message">这个文件还不存在，可以点击“编辑”创建。</p>`
+          : `<p class="global-instruction-message">这个引用壳还不存在，可以点击“修复引用壳”创建。</p>`;
+
+  return `
+    <div class="global-instruction-meta">
+      <div>
+        <span>路径</span>
+        <code>${escapeHtml(file.path)}</code>
+      </div>
+      <div>
+        <span>修改时间</span>
+        <strong>${escapeHtml(file.updatedAt ? formatDate(file.updatedAt) : file.exists ? "未知" : "未找到")}</strong>
+      </div>
+      <div>
+        <span>大小</span>
+        <strong>${escapeHtml(formatBytes(file.sizeBytes))}</strong>
+      </div>
+    </div>
+    ${roleNotice}
+    ${body}
+  `;
+}
+
+function renderGlobalInstructionActions(file: GlobalInstructionFile | null, editing: boolean, saving: boolean): string {
+  if (editing) {
+    return `
+      <div class="modal-actions">
+        <button type="button" data-action="cancel-global-instruction-edit" ${saving ? "disabled" : ""}>取消编辑</button>
+        <button type="button" class="primary ${saving ? "loading" : ""}" data-action="save-global-instruction" ${saving ? "disabled" : ""}>
+          ${renderButtonLabel(saving, "保存", "保存中…")}
+        </button>
+      </div>
+    `;
+  }
+
+  if (file && !file.editable) {
+    return `
+      <div class="modal-actions">
+        <button type="button" data-action="close-modal">关闭</button>
+        <button type="button" data-action="open-global-instruction" ${!file.exists ? "disabled" : ""}>打开文件</button>
+        <button type="button" data-action="copy-global-instruction" ${!file.content ? "disabled" : ""}>复制内容</button>
+        <button type="button" class="solid ${saving ? "loading" : ""}" data-action="repair-global-instruction-shell" ${saving || file.isReferenceShell ? "disabled" : ""}>
+          ${renderButtonLabel(saving, "修复引用壳", "修复中…")}
+        </button>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="modal-actions">
+      <button type="button" data-action="close-modal">关闭</button>
+      <button type="button" data-action="open-global-instruction" ${!file?.exists ? "disabled" : ""}>打开文件</button>
+      <button type="button" data-action="copy-global-instruction" ${!file?.content ? "disabled" : ""}>复制内容</button>
+      <button type="button" class="solid" data-action="edit-global-instruction" ${!file?.editable ? "disabled" : ""}>${file?.exists ? "编辑主源" : "创建并编辑主源"}</button>
+    </div>
+  `;
+}
+
+function globalInstructionStatus(file: GlobalInstructionFile): string {
+  if (file.error) {
+    return "读取失败";
+  }
+  if (file.role === "primary") {
+    return file.exists ? "唯一主源" : "主源未创建";
+  }
+  if (!file.exists) {
+    return "引用壳未创建";
+  }
+  return file.isReferenceShell ? "引用壳正常" : "需要修复";
+}
+
+function renderGlobalInstructionRoleNotice(file: GlobalInstructionFile): string {
+  if (file.role === "primary") {
+    return `
+      <p class="global-instruction-role-note primary">
+        <strong>唯一主源</strong>
+        <span>请在这里维护真实规则；保存后 ProfilePilot 会自动确保 CLAUDE.md 继续引用这个文件。</span>
+      </p>
+    `;
+  }
+
+  const target = file.referenceTargetPath || "/Users/bytedance/.codex/AGENTS.md";
+  return `
+    <p class="global-instruction-role-note ${file.isReferenceShell ? "reference" : "warn"}">
+      <strong>${file.isReferenceShell ? "引用壳正常" : "引用壳需要修复"}</strong>
+      <span>CLAUDE.md 不直接维护规则，只通过 <code>@${escapeHtml(target)}</code> 引用主源。</span>
+    </p>
+  `;
+}
+
+function formatBytes(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) {
+    return "0 B";
+  }
+  if (value < 1024) {
+    return `${value} B`;
+  }
+  const kb = value / 1024;
+  if (kb < 1024) {
+    return `${kb.toFixed(kb >= 10 ? 0 : 1)} KB`;
+  }
+  const mb = kb / 1024;
+  return `${mb.toFixed(mb >= 10 ? 0 : 1)} MB`;
+}
 
 export function renderNewModal(): string {
   const creating = isBusyAction("create-profile");
@@ -101,7 +296,7 @@ export function renderAgentBrowserSetupModal(portSuggestion: CdpPortSuggestion):
       <form class="modal agent-browser-modal" data-agent-browser-form data-source-id="${escapeHtml(source.id)}">
         <span class="modal-kicker">Agent 浏览器</span>
         <h2>创建 Agent 浏览器</h2>
-        <p class="modal-copy">新建独立 Profile，复制登录态，绑定固定 CDP 端口，并写入全局 <code>~/.claude/CLAUDE.md</code>。完成后可直接用 <code>agent-browser connect</code> 接入。</p>
+        <p class="modal-copy">新建独立 Profile，复制登录态，绑定固定 CDP 端口，并写入全局 <code>~/.codex/AGENTS.md</code>；<code>~/.claude/CLAUDE.md</code> 只保持引用壳。完成后可直接用 <code>agent-browser connect</code> 接入。</p>
         <div class="field">
           <label>登录态来源</label>
           <strong class="agent-source-name">${escapeHtml(source.name)}</strong>
@@ -152,7 +347,7 @@ export function renderAgentConfigModal(profileId: string, portSuggestion: CdpPor
       <form class="modal" data-agent-config-form data-profile-id="${escapeHtml(profile.id)}">
         <span class="modal-kicker">Agent 调试端点</span>
         <h2>把 ${escapeHtml(profile.name)} 设为 Agent 默认调试浏览器</h2>
-        <p class="modal-copy">会给这个 Profile 绑定一个固定调试端口，并写入全局 <code>~/.claude/CLAUDE.md</code>，让 Claude Code 调试浏览器时优先用 <code>agent-browser connect</code> 接入它。</p>
+        <p class="modal-copy">会给这个 Profile 绑定一个固定调试端口，并写入全局 <code>~/.codex/AGENTS.md</code>，让 Agent 工具调试浏览器时优先用 <code>agent-browser connect</code> 接入它；<code>~/.claude/CLAUDE.md</code> 只保持引用壳。</p>
         <div class="field">
           <label for="agent-port">固定调试端口</label>
           <input id="agent-port" name="port" type="number" min="1024" max="65535" inputmode="numeric" value="${defaultPort}" />

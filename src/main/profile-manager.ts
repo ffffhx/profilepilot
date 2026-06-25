@@ -104,7 +104,7 @@ export class ProfileManager {
       });
     const profiles = [...nativeProfiles, ...isolatedProfiles];
 
-    // 标记当前写入全局 CLAUDE.md 的 Agent 调试端点指向哪个 Profile。
+    // 标记当前写入全局 AGENTS.md 的 Agent 调试端点指向哪个 Profile。
     const agentConfig = await readAgentBrowserConfig();
     if (agentConfig) {
       const target = profiles.find((profile) => profile.id === agentConfig.profileId);
@@ -266,7 +266,7 @@ export class ProfileManager {
     };
   }
 
-  // 把该独立 Profile 绑定为固定调试端口，并写入全局 CLAUDE.md，
+  // 把该独立 Profile 绑定为固定调试端口，并写入全局 AGENTS.md，
   // 让 Claude Code 在用浏览器时优先连这个常驻 CDP 端点。
   async setAgentBrowserConfig(profileId: string, port: number): Promise<void> {
     const ref = parseProfileId(profileId);
@@ -286,7 +286,7 @@ export class ProfileManager {
   }
 
   async clearAgentBrowserConfig(_profileId: string): Promise<void> {
-    // 只移除 CLAUDE.md 里的指令块；Profile 的固定端口设置保留。
+    // 只移除 AGENTS.md 里的指令块；Profile 的固定端口设置保留。
     await removeAgentBrowserConfigFile();
   }
 
@@ -1276,7 +1276,7 @@ export class ProfileManager {
   }
 
   // “一键造 Agent 浏览器”：新建独立 Profile → 从源同步登录态 → 按需同步插件 →
-  // 绑定固定端口并写入全局 CLAUDE.md → 以 CDP 模式启动，得到一个登录态就绪、可直接给 agent 连接的浏览器。
+  // 绑定固定端口并写入全局 AGENTS.md → 以 CDP 模式启动，得到一个登录态就绪、可直接给 agent 连接的浏览器。
   async setupAgentBrowser(
     request: SetupAgentBrowserRequest,
     onProgress?: (progress: OperationProgressUpdate) => void,
@@ -1348,7 +1348,7 @@ export class ProfileManager {
         report(`端口 ${port} 已被占用，已自动改用 ${latestAvailablePort}。`, "写入配置", configStep);
         port = latestAvailablePort;
       }
-      report("正在写入 Agent 调试配置（CLAUDE.md）…", "写入配置", configStep);
+      report("正在写入 Agent 调试配置（AGENTS.md）…", "写入配置", configStep);
       await this.setAgentBrowserConfig(targetId, port);
 
       report("正在以 CDP 模式启动…", "CDP 启动", launchStep);

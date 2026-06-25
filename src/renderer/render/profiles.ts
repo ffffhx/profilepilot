@@ -338,8 +338,8 @@ export function renderAgentConfigDetail(profile: PublicProfile): string {
     return `
       <div class="detail-row">
         <span>Agent 调试配置</span>
-        <strong>已写入全局 CLAUDE.md</strong>
-        <small class="detail-note">Claude 调试浏览器时会优先连接 <code>http://127.0.0.1:${profile.agentConfigPort}</code>（本 Profile，固定端口 ${profile.fixedCdpPort ?? profile.agentConfigPort}）。在「更多」里可移除。</small>
+        <strong>已写入全局 AGENTS.md</strong>
+        <small class="detail-note">Agent 工具调试浏览器时会优先连接 <code>http://127.0.0.1:${profile.agentConfigPort}</code>（本 Profile，固定端口 ${profile.fixedCdpPort ?? profile.agentConfigPort}）。CLAUDE.md 只引用 AGENTS.md；在「更多」里可移除。</small>
       </div>
     `;
   }
@@ -348,7 +348,7 @@ export function renderAgentConfigDetail(profile: PublicProfile): string {
     <div class="detail-row">
       <span>Agent 调试配置</span>
       <strong>未写入</strong>
-      <small class="detail-note">在「更多」里「设为 Agent 端点」后，Claude Code 调试浏览器会优先连接此 Profile 的固定调试端口。</small>
+      <small class="detail-note">在「更多」里「设为 Agent 端点」后，Agent 工具会优先连接此 Profile 的固定调试端口。</small>
     </div>
   `;
 }

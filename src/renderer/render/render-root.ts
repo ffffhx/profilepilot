@@ -2,7 +2,7 @@ import { isBusyAction, renderToastBody } from "../busy";
 import { renderConfirmModal } from "../confirm";
 import { renderAccountSyncPanel } from "./account-sync";
 import { renderExtensionMigrationPanel } from "./extensions";
-import { renderAgentBrowserSetupModal, renderAgentConfigModal, renderCdpModal, renderExtensionMigrationModal, renderNewModal, renderRenameModal } from "./modals";
+import { renderAgentBrowserSetupModal, renderAgentConfigModal, renderCdpModal, renderExtensionMigrationModal, renderGlobalInstructionsModal, renderNewModal, renderRenameModal } from "./modals";
 import { renderDetails, renderEmpty, renderExternalDetails, renderProfilesPanel } from "./profiles";
 import { appRoot, store } from "../state";
 import { escapeHtml, renderBusyBanner, renderButtonLabel } from "../util";
@@ -37,6 +37,7 @@ export function render(): void {
           </div>
         </div>
         <div class="header-actions">
+          <button type="button" data-action="open-global-instructions">全局指令</button>
           <button type="button" class="${refreshing ? "loading" : ""}" data-action="refresh" ${store.busy ? "disabled" : ""}>
             ${renderButtonLabel(refreshing, "刷新", "刷新中…")}
           </button>
@@ -87,6 +88,7 @@ export function render(): void {
     ${store.modal?.kind === "cdp" ? renderCdpModal(store.modal.profileId) : ""}
     ${store.modal?.kind === "agent-config" ? renderAgentConfigModal(store.modal.profileId, store.modal.portSuggestion) : ""}
     ${store.modal?.kind === "agent-browser-setup" ? renderAgentBrowserSetupModal(store.modal.portSuggestion) : ""}
+    ${store.modal?.kind === "global-instructions" ? renderGlobalInstructionsModal() : ""}
     ${store.modal?.kind === "extension-migration" ? renderExtensionMigrationModal(profiles) : ""}
     ${store.modal?.kind === "confirm" ? renderConfirmModal(store.modal) : ""}
     ${store.toast ? `<div class="toast ${store.toastKind === "error" ? "error" : ""}" role="status">${renderToastBody(store.toast)}</div>` : ""}

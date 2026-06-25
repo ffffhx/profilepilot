@@ -19,6 +19,62 @@ export async function loadState(): Promise<void> {
   render();
 }
 
+export async function refreshGlobalInstructions(): Promise<void> {
+  store.globalInstructionsLoading = true;
+  render();
+
+  try {
+    const snapshot = await profileApi().readGlobalInstructions();
+    store.globalInstructions = snapshot;
+    if (!snapshot.files.some((file) => file.id === store.activeGlobalInstructionId)) {
+      store.activeGlobalInstructionId = snapshot.files[0]?.id || "codex-agents";
+    }
+  } finally {
+    store.globalInstructionsLoading = false;
+    render();
+  }
+}
+
+export async function saveGlobalInstruction(): Promise<void> {
+  const editingId = store.editingGlobalInstructionId;
+  if (!editingId) {
+    return;
+  }
+
+  store.globalInstructionsSaving = true;
+  render();
+
+  try {
+    const snapshot = await profileApi().writeGlobalInstruction({
+      id: editingId,
+      content: store.globalInstructionDraft
+    });
+    store.globalInstructions = snapshot;
+    store.activeGlobalInstructionId = editingId;
+    store.editingGlobalInstructionId = null;
+    store.globalInstructionDraft = "";
+  } finally {
+    store.globalInstructionsSaving = false;
+    render();
+  }
+}
+
+export async function repairClaudeInstructionShell(): Promise<void> {
+  store.globalInstructionsSaving = true;
+  render();
+
+  try {
+    const snapshot = await profileApi().ensureClaudeInstructionShell();
+    store.globalInstructions = snapshot;
+    store.activeGlobalInstructionId = "claude-memory";
+    store.editingGlobalInstructionId = null;
+    store.globalInstructionDraft = "";
+  } finally {
+    store.globalInstructionsSaving = false;
+    render();
+  }
+}
+
 export function normalizeMigrationProfileSelection(profiles: PublicProfile[]): void {
   if (!profiles.length) {
     store.migrationSourceId = null;

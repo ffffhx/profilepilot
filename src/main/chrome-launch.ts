@@ -10,6 +10,7 @@ import { accountSyncDataScore } from "./account-sync";
 import { CdpBrowserClient, requestCdpVersionInfo } from "./cdp-client";
 import { openInspectablePageOverCdp } from "./cdp-page";
 import { POSIX_LOCALE_ENV, execFileAsync, exists, getNestedValue, isRecord, isSafePathSegment, readJsonFile, sleep, stringValue, uniqueNumbers } from "./fs-util";
+import { CLAUDE_INSTRUCTION_PATH, CODEX_AGENTS_PATH, claudeInstructionShellContent } from "./global-instructions";
 import { CdpRuntimeEvaluateResult, ChromeLocalState, ProfileRef, TemporaryChromeCdpLaunch } from "./internal-types";
 import { ProfileManagerError } from "./profile-manager-error";
 
@@ -66,10 +67,10 @@ export function launchDetached(command: string, args: string[]): void {
   child.unref();
 }
 
-// ---- 全局 CLAUDE.md 里的 Agent 调试端点配置 ----
+// ---- 全局 AGENTS.md 里的 Agent 调试端点配置 ----
 
-export function claudeMemoryPath(): string {
-  return path.join(os.homedir(), ".claude", "CLAUDE.md");
+export function globalAgentInstructionsPath(): string {
+  return CODEX_AGENTS_PATH;
 }
 
 export const AGENT_CDP_BLOCK_RE =
@@ -91,8 +92,8 @@ export function agentBrowserConfigBlock(profileId: string, name: string, port: n
   ].join("\n");
 }
 
-export async function writeClaudeMemoryAtomic(content: string): Promise<void> {
-  const target = claudeMemoryPath();
+export async function writeGlobalAgentInstructionsAtomic(content: string): Promise<void> {
+  const target = globalAgentInstructionsPath();
   await fs.mkdir(path.dirname(target), { recursive: true });
   const tmpPath = `${target}.cpm-tmp-${process.pid}`;
   try {
@@ -103,10 +104,21 @@ export async function writeClaudeMemoryAtomic(content: string): Promise<void> {
   }
 }
 
+async function ensureClaudeInstructionShellFile(): Promise<void> {
+  await fs.mkdir(path.dirname(CLAUDE_INSTRUCTION_PATH), { recursive: true });
+  const tmpPath = `${CLAUDE_INSTRUCTION_PATH}.cpm-tmp-${process.pid}`;
+  try {
+    await fs.writeFile(tmpPath, claudeInstructionShellContent(), "utf8");
+    await fs.rename(tmpPath, CLAUDE_INSTRUCTION_PATH);
+  } finally {
+    await fs.rm(tmpPath, { force: true }).catch(() => undefined);
+  }
+}
+
 export async function writeAgentBrowserConfigFile(input: { profileId: string; name: string; port: number }): Promise<void> {
   let content = "";
   try {
-    content = await fs.readFile(claudeMemoryPath(), "utf8");
+    content = await fs.readFile(globalAgentInstructionsPath(), "utf8");
   } catch {
     content = "";
   }
@@ -114,25 +126,28 @@ export async function writeAgentBrowserConfigFile(input: { profileId: string; na
   const withoutBlock = content.replace(AGENT_CDP_BLOCK_RE, "\n").trimEnd();
   const block = agentBrowserConfigBlock(input.profileId, input.name, input.port);
   const next = (withoutBlock ? `${withoutBlock}\n\n` : "") + block + "\n";
-  await writeClaudeMemoryAtomic(next);
+  await writeGlobalAgentInstructionsAtomic(next);
+  await ensureClaudeInstructionShellFile();
 }
 
 export async function removeAgentBrowserConfigFile(): Promise<void> {
   let content: string;
   try {
-    content = await fs.readFile(claudeMemoryPath(), "utf8");
+    content = await fs.readFile(globalAgentInstructionsPath(), "utf8");
   } catch {
+    await ensureClaudeInstructionShellFile();
     return;
   }
 
   const next = content.replace(AGENT_CDP_BLOCK_RE, "\n").replace(/\n{3,}/g, "\n\n").trimEnd();
-  await writeClaudeMemoryAtomic(next ? `${next}\n` : "");
+  await writeGlobalAgentInstructionsAtomic(next ? `${next}\n` : "");
+  await ensureClaudeInstructionShellFile();
 }
 
 export async function readAgentBrowserConfig(): Promise<{ profileId: string; port: number } | null> {
   let content: string;
   try {
-    content = await fs.readFile(claudeMemoryPath(), "utf8");
+    content = await fs.readFile(globalAgentInstructionsPath(), "utf8");
   } catch {
     return null;
   }

@@ -590,9 +590,34 @@ appRoot.addEventListener("click", (event) => {
       return;
     }
 
-    store.modal = { kind: "cdp", profileId: id };
-    render();
-    window.setTimeout(() => document.querySelector<HTMLInputElement>("#cdp-port")?.focus(), 0);
+    // 默认预填一个端口：优先用该 Profile 绑定的固定端口，否则取当前所有已用
+    // CDP 端口里最大的 +1（选不选随用户，但要先给到一个合理默认值）。
+    const usedPorts: number[] = [];
+    for (const item of store.state.profiles) {
+      for (const port of [item.cdpPort, item.fixedCdpPort, item.agentConfigPort]) {
+        if (port) {
+          usedPorts.push(port);
+        }
+      }
+    }
+    for (const instance of store.state.externalInstances || []) {
+      if (instance.cdpPort) {
+        usedPorts.push(instance.cdpPort);
+      }
+    }
+    const preferredPort = profile.fixedCdpPort ?? (usedPorts.length ? Math.max(...usedPorts) + 1 : 9222);
+    void profileApi()
+      .suggestCdpPort(preferredPort)
+      .then((portSuggestion) => {
+        store.modal = { kind: "cdp", profileId: id, portSuggestion };
+        render();
+        window.setTimeout(() => {
+          const input = document.querySelector<HTMLInputElement>("#cdp-port");
+          input?.focus();
+          input?.select();
+        }, 0);
+      })
+      .catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
     return;
   }
 

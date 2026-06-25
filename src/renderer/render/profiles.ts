@@ -13,6 +13,7 @@ export function renderProfilesPanel(profiles: PublicProfile[], externalInstances
           <tr>
             <th>名称</th>
             <th>状态</th>
+            <th>CDP 地址</th>
             <th>操作</th>
           </tr>
         </thead>
@@ -44,10 +45,44 @@ export function renderProfileRow(profile: PublicProfile): string {
         </span>
       </td>
       <td>
+        ${renderProfileCdpCell(profile)}
+      </td>
+      <td>
         ${renderProfileActions(profile)}
       </td>
     </tr>
   `;
+}
+
+// 表格里直接展示该 Profile 的 CDP 连接地址：正在以 CDP 运行时显示实时地址（live）；
+// 绑定了固定端口但未运行时显示该端口地址（bound · 待启动）；系统 Profile 不支持（off）。
+export function renderProfileCdpCell(profile: PublicProfile): string {
+  if (profile.cdpUrl) {
+    return cdpChip("live", stripScheme(profile.cdpUrl), profile.cdpUrl, null);
+  }
+  if (profile.source === "native") {
+    return cdpChip("off", "不支持", null, null);
+  }
+  if (profile.fixedCdpPort) {
+    const url = `http://127.0.0.1:${profile.fixedCdpPort}`;
+    return cdpChip("bound", `127.0.0.1:${profile.fixedCdpPort}`, url, "待启动");
+  }
+  return cdpChip("off", "未开启", null, null);
+}
+
+// CDP 状态芯片：前导指示灯 + 地址 + 可选状态标签，沿用全局信号灯语言。
+// live=实时(绿) / bound=已绑定待启动(蓝) / stale=声明端口未响应(琥珀) / off=无(灰)。
+export function cdpChip(
+  kind: "live" | "bound" | "stale" | "off",
+  addr: string,
+  fullTitle: string | null,
+  tag: string | null
+): string {
+  return `<span class="cdp-cell ${kind}"${fullTitle ? ` title="${escapeHtml(fullTitle)}"` : ""}><span class="cdp-addr">${escapeHtml(addr)}</span>${tag ? `<em class="cdp-tag">${escapeHtml(tag)}</em>` : ""}</span>`;
+}
+
+function stripScheme(url: string): string {
+  return url.replace(/^https?:\/\//, "");
 }
 
 export function renderProfileActions(profile: PublicProfile): string {
@@ -141,7 +176,7 @@ export function renderEmpty(): string {
 export function renderExternalRows(instances: ExternalChromeInstance[]): string {
   return `
     <tr class="table-group-row">
-      <td colspan="3">
+      <td colspan="4">
         <span>外部实例 · 其他工具（agent-browser 等）自管，仅支持显示 / 关闭</span>
         <span class="count">${instances.length}</span>
       </td>
@@ -168,6 +203,15 @@ export function renderExternalRow(instance: ExternalChromeInstance): string {
       </td>
       <td>
         <span class="state-pill running">运行中</span>
+      </td>
+      <td>
+        ${
+          instance.cdpUrl
+            ? cdpChip("live", stripScheme(instance.cdpUrl), instance.cdpUrl, null)
+            : instance.cdpPort
+              ? cdpChip("stale", `127.0.0.1:${instance.cdpPort}`, `http://127.0.0.1:${instance.cdpPort}`, "未响应")
+              : cdpChip("off", "未开启", null, null)
+        }
       </td>
       <td>
         <div class="profile-actions">

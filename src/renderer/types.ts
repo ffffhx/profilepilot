@@ -426,7 +426,7 @@ export type BusyProgressStep = {
 export type ModalState =
   | { kind: "new" }
   | { kind: "rename"; profileId: string }
-  | { kind: "cdp"; profileId: string }
+  | { kind: "cdp"; profileId: string; portSuggestion: CdpPortSuggestion | null }
   | { kind: "extension-migration" }
   | { kind: "agent-config"; profileId: string; portSuggestion: CdpPortSuggestion | null }
   | { kind: "agent-browser-setup"; portSuggestion: CdpPortSuggestion }

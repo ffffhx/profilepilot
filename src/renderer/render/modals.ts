@@ -248,23 +248,29 @@ export function renderRenameModal(profileId: string): string {
   `;
 }
 
-export function renderCdpModal(profileId: string): string {
+export function renderCdpModal(profileId: string, portSuggestion: CdpPortSuggestion | null): string {
   const profile = store.state?.profiles.find((item) => item.id === profileId);
   if (!profile) {
     return "";
   }
   const launching = isBusyAction("launch-cdp", { profileId });
+  const defaultPort = profile.fixedCdpPort ?? portSuggestion?.port ?? null;
+  const portNote = profile.fixedCdpPort
+    ? `已预填该 Profile 绑定的固定端口 ${profile.fixedCdpPort}。`
+    : portSuggestion
+      ? formatCdpPortSuggestionNote(portSuggestion)
+      : "";
 
   return `
     <div class="modal-backdrop" data-action="close-modal">
       <form class="modal" data-cdp-form data-profile-id="${escapeHtml(profile.id)}">
         <span class="modal-kicker">Chrome DevTools Protocol</span>
         <h2>启动 ${escapeHtml(profile.name)} 的 CDP</h2>
-        <p class="modal-copy">留空会从 9222 开始自动选择可用端口；填写端口则按你指定的端口启动。</p>
+        <p class="modal-copy">已为你预填下一个可用端口，可直接启动，也可以改成你想要的端口；留空则从 9222 起自动选择。</p>
         <div class="field">
           <label for="cdp-port">监听端口</label>
-          <input id="cdp-port" name="port" type="number" min="1024" max="65535" inputmode="numeric" placeholder="自动选择（默认从 9222 起）" />
-          <span class="field-note">启动后会监听在 127.0.0.1，仅供本机 CDP / Agent Browser 工具连接。</span>
+          <input id="cdp-port" name="port" type="number" min="1024" max="65535" inputmode="numeric" placeholder="自动选择（默认从 9222 起）"${defaultPort !== null ? ` value="${defaultPort}"` : ""} />
+          <span class="field-note">${portNote ? `${escapeHtml(portNote)} ` : ""}启动后会监听在 127.0.0.1，仅供本机 CDP / Agent Browser 工具连接。</span>
         </div>
         <div class="modal-actions">
           <button type="button" data-action="close-modal">取消</button>

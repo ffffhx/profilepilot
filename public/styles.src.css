@@ -88,6 +88,18 @@
   box-sizing: border-box;
 }
 
+/* Tailwind 边框基线：preflight 已关闭，这里手动补上 border 复位。
+   视觉上对现有规则完全惰性（默认 border-style:none 本就不渲染，宽度归零等价），
+   但让 border / border-b 等工具类能正确只在指定边显示 1px，而非让其余三边
+   回落到默认 medium 宽度产生幽灵边框。 */
+*,
+::before,
+::after {
+  border-width: 0;
+  border-style: solid;
+  border-color: currentColor;
+}
+
 ::selection {
   background: rgba(56, 225, 160, 0.3);
   color: #f4fffa;
@@ -264,58 +276,8 @@ input[type="checkbox"] {
 
 /* ---- shell & masthead ---- */
 
-.shell {
-  width: min(1760px, calc(100vw - clamp(24px, 3vw, 56px)));
-  margin: 0 auto;
-  padding: 28px 0 40px;
-}
-
-.app-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 20px;
-  padding: 8px 0 22px;
-  border-bottom: 1px solid var(--line);
-}
-
 body:not(.booted) .app-header {
   animation: rise-in 0.45s ease both;
-}
-
-.brand-lockup {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  min-width: 0;
-}
-
-.brand-mark {
-  width: 58px;
-  height: 58px;
-  flex: 0 0 auto;
-  border-radius: 14px;
-  box-shadow:
-    0 0 0 1px rgba(56, 225, 160, 0.25),
-    0 12px 32px rgba(2, 6, 9, 0.55),
-    var(--glow-accent);
-}
-
-.brand-copy {
-  min-width: 0;
-}
-
-.eyebrow {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0 0 8px;
-  color: var(--accent);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.22em;
-  text-transform: uppercase;
 }
 
 .eyebrow::before {
@@ -667,27 +629,8 @@ h3 {
 
 /* ---- status grid: instrument cluster ---- */
 
-.status-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.6fr) repeat(2, minmax(130px, 0.7fr));
-  gap: 1px;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--line);
-  margin-top: 22px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 18px 44px rgba(2, 6, 9, 0.4);
-}
-
 body:not(.booted) .status-grid {
   animation: rise-in 0.45s 0.06s ease both;
-}
-
-.status-item {
-  position: relative;
-  min-width: 0;
-  padding: 16px 16px 16px 20px;
-  background: var(--panel);
 }
 
 .status-item::before {
@@ -708,35 +651,6 @@ body:not(.booted) .status-grid {
 .status-item.current::before {
   background: var(--accent);
   box-shadow: 0 0 10px rgba(56, 225, 160, 0.7);
-}
-
-.status-label {
-  display: block;
-  margin-bottom: 8px;
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-}
-
-.status-value {
-  display: block;
-  overflow-wrap: anywhere;
-  font-family: var(--font-display);
-  font-size: 21px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.01em;
-}
-
-.status-note {
-  display: block;
-  margin-top: 8px;
-  overflow-wrap: anywhere;
-  color: var(--muted);
-  font-size: 12px;
 }
 
 /* ---- panels ---- */
@@ -1912,14 +1826,6 @@ body:not(.booted) .migration-panel {
 }
 
 /* ---- main layout ---- */
-
-.layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 360px);
-  gap: 24px;
-  margin-top: 24px;
-  align-items: start;
-}
 
 body:not(.booted) .layout {
   animation: rise-in 0.45s 0.24s ease both;

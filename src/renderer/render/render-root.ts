@@ -27,12 +27,12 @@ export function render(): void {
 
   appRoot.className = "";
   appRoot.innerHTML = `
-    <div class="shell">
-      <header class="app-header">
-        <div class="brand-lockup">
-          <img class="brand-mark" src="./assets/profilepilot-mark.svg" alt="" />
-          <div class="brand-copy">
-            <p class="eyebrow">Browser Profile Desk</p>
+    <div class="shell w-[min(1760px,calc(100vw-clamp(24px,3vw,56px)))] mx-auto my-0 pt-[28px] px-0 pb-[40px]">
+      <header class="app-header flex items-start justify-between gap-5 pt-2 px-0 pb-[22px] border-solid border-b border-line">
+        <div class="brand-lockup flex items-center gap-4 min-w-0">
+          <img class="brand-mark w-[58px] h-[58px] flex-[0_0_auto] rounded-[14px] [box-shadow:0_0_0_1px_rgba(56,225,160,0.25),0_12px_32px_rgba(2,6,9,0.55),var(--glow-accent)]" src="./assets/profilepilot-mark.svg" alt="" />
+          <div class="brand-copy min-w-0">
+            <p class="eyebrow flex items-center gap-2 mt-0 mb-2 mx-0 text-accent font-mono text-[11px] font-semibold tracking-[0.22em] uppercase">Browser Profile Desk</p>
             <h1>ProfilePilot</h1>
           </div>
         </div>
@@ -47,32 +47,32 @@ export function render(): void {
 
       ${busyHasEmbeddedProgress ? "" : renderBusyBanner()}
 
-      <section class="status-grid" aria-label="Profile status">
-        <div class="status-item current">
-          <span class="status-label">当前运行</span>
-          <strong class="status-value">${escapeHtml(currentLabel)}</strong>
-          <span class="status-note">${escapeHtml(currentNote)}</span>
+      <section class="status-grid grid grid-cols-[minmax(0,1.6fr)_repeat(2,minmax(130px,0.7fr))] gap-px overflow-hidden border-solid border border-line rounded-xl bg-line mt-[22px] shadow-status-grid" aria-label="Profile status">
+        <div class="status-item current relative min-w-0 pt-4 pr-4 pb-4 pl-5 bg-panel">
+          <span class="status-label block mb-2 text-muted font-mono text-[11px] font-semibold tracking-[0.16em] uppercase">当前运行</span>
+          <strong class="status-value block [overflow-wrap:anywhere] font-display text-[21px] font-semibold tabular-nums tracking-[0.01em]">${escapeHtml(currentLabel)}</strong>
+          <span class="status-note block mt-2 [overflow-wrap:anywhere] text-muted text-[12px]">${escapeHtml(currentNote)}</span>
         </div>
-        <div class="status-item">
-          <span class="status-label">Profiles</span>
-          <strong class="status-value">${profiles.length}</strong>
-          <span class="status-note">本机所有可管理的 Chrome Profile</span>
+        <div class="status-item relative min-w-0 pt-4 pr-4 pb-4 pl-5 bg-panel">
+          <span class="status-label block mb-2 text-muted font-mono text-[11px] font-semibold tracking-[0.16em] uppercase">Profiles</span>
+          <strong class="status-value block [overflow-wrap:anywhere] font-display text-[21px] font-semibold tabular-nums tracking-[0.01em]">${profiles.length}</strong>
+          <span class="status-note block mt-2 [overflow-wrap:anywhere] text-muted text-[12px]">本机所有可管理的 Chrome Profile</span>
         </div>
-        <div class="status-item">
-          <span class="status-label">运行中</span>
-          <strong class="status-value">${store.state.runningProfiles.length}</strong>
-          <span class="status-note">可以点击“显示”拉到屏幕最前面</span>
+        <div class="status-item relative min-w-0 pt-4 pr-4 pb-4 pl-5 bg-panel">
+          <span class="status-label block mb-2 text-muted font-mono text-[11px] font-semibold tracking-[0.16em] uppercase">运行中</span>
+          <strong class="status-value block [overflow-wrap:anywhere] font-display text-[21px] font-semibold tabular-nums tracking-[0.01em]">${store.state.runningProfiles.length}</strong>
+          <span class="status-note block mt-2 [overflow-wrap:anywhere] text-muted text-[12px]">可以点击“显示”拉到屏幕最前面</span>
         </div>
       </section>
 
       ${renderAccountSyncPanel(profiles)}
       ${renderExtensionMigrationPanel(profiles)}
 
-      <main class="layout">
+      <main class="layout grid grid-cols-[minmax(0,1fr)_minmax(320px,360px)] gap-6 mt-6 items-start">
         <section>
-          <div class="section-head">
+          <div class="section-head flex items-center justify-between gap-[14px] mb-3">
             <h2>Profiles</h2>
-            <span class="count">${profiles.length}</span>
+            <span class="count border-solid border border-line-strong rounded-full px-2.5 py-1 text-muted font-mono text-[11px] font-semibold tabular-nums">${profiles.length}</span>
           </div>
           ${
             profiles.length || (store.state.externalInstances?.length ?? 0)

@@ -1709,24 +1709,26 @@ body:not(.booted) .layout {
   font-variant-numeric: tabular-nums;
 }
 
+/* 状态与操作列用固定宽度：操作列恰好容纳四个定宽按钮(≈288px+单元内边距)，
+   保证窗口变窄时按钮不会溢出到详情面板；名称/CDP 列自适应剩余空间并省略。 */
 .profiles-table th:nth-child(1),
 .profiles-table td:nth-child(1) {
-  width: 30%;
+  width: auto;
 }
 
 .profiles-table th:nth-child(2),
 .profiles-table td:nth-child(2) {
-  width: 10%;
+  width: 92px;
 }
 
 .profiles-table th:nth-child(3),
 .profiles-table td:nth-child(3) {
-  width: 28%;
+  width: auto;
 }
 
 .profiles-table th:nth-child(4),
 .profiles-table td:nth-child(4) {
-  width: 32%;
+  width: 316px;
 }
 
 .cdp-cell::before {
@@ -2573,6 +2575,18 @@ body:not(.booted) .layout {
 
 /* ---- responsive ---- */
 
+/* 窗口宽度不足以让表格四列(含定宽操作按钮)与详情面板舒适并排时，改为上下堆叠：
+   详情置顶、Profiles 表格占满整行，避免名称/CDP 列被挤成省略号。 */
+@media (max-width: 1100px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+
+  .details {
+    order: -1;
+  }
+}
+
 @media (max-width: 880px) {
   .shell {
     width: min(100vw - 20px, 760px);
@@ -2598,13 +2612,8 @@ body:not(.booted) .layout {
   .account-sync-layout,
   .account-sync-fields,
   .account-sync-scope,
-  .migration-source-bar,
-  .layout {
+  .migration-source-bar {
     grid-template-columns: 1fr;
-  }
-
-  .details {
-    order: -1;
   }
 
   .account-sync-controls {

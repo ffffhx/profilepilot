@@ -47,7 +47,7 @@ export function render(): void {
 
       ${busyHasEmbeddedProgress ? "" : renderBusyBanner()}
 
-      <section class="status-grid grid grid-cols-[minmax(0,1.6fr)_repeat(2,minmax(130px,0.7fr))] gap-px overflow-hidden border-solid border border-line rounded-xl bg-line mt-[22px] shadow-status-grid" aria-label="Profile status">
+      <section class="status-grid grid grid-cols-[minmax(0,1.6fr)_repeat(2,minmax(130px,0.7fr))] gap-px overflow-hidden border-solid border border-line rounded-xl bg-line mt-[22px] [box-shadow:inset_0_1px_0_rgba(255,255,255,0.04),0_18px_44px_rgba(2,6,9,0.4)]" aria-label="Profile status">
         <div class="status-item current relative min-w-0 pt-4 pr-4 pb-4 pl-5 bg-panel">
           <span class="status-label block mb-2 text-muted font-mono text-[11px] font-semibold tracking-[0.16em] uppercase">当前运行</span>
           <strong class="status-value block [overflow-wrap:anywhere] font-display text-[21px] font-semibold tabular-nums tracking-[0.01em]">${escapeHtml(currentLabel)}</strong>

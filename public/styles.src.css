@@ -1862,20 +1862,6 @@ body:not(.booted) .layout {
   font-variant-numeric: tabular-nums;
 }
 
-.profiles-table-wrap {
-  overflow: visible;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--panel);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 18px 44px rgba(2, 6, 9, 0.35);
-}
-
-.profiles-table {
-  width: 100%;
-  border-collapse: collapse;
-  table-layout: fixed;
-}
-
 .profiles-table th:nth-child(1),
 .profiles-table td:nth-child(1) {
   width: 30%;
@@ -1896,23 +1882,6 @@ body:not(.booted) .layout {
   width: 32%;
 }
 
-.cdp-cell {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  max-width: 100%;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  padding: 4px 9px;
-  background: var(--panel-soft);
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 12px;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
-
 .cdp-cell::before {
   flex: 0 0 auto;
   width: 8px;
@@ -1920,22 +1889,6 @@ body:not(.booted) .layout {
   border-radius: 50%;
   background: var(--line-strong);
   content: "";
-}
-
-.cdp-addr {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.cdp-tag {
-  flex: 0 0 auto;
-  font-size: 10px;
-  font-style: normal;
-  font-weight: 600;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  opacity: 0.85;
 }
 
 .cdp-cell.live {
@@ -2029,20 +1982,8 @@ body:not(.booted) .layout {
   outline-offset: -3px;
 }
 
-.profile-pick {
-  width: 100%;
-  min-height: auto;
-  padding: 4px 2px;
-  text-align: left;
-}
-
-.profile-name-line {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
+/* 基础态保留为 CSS：该 class 仍被 profile-select 下拉等其它视图复用，
+   profiles 表格里的同类元素已叠加等值工具类，二者数值一致不冲突。 */
 .status-dot {
   width: 9px;
   height: 9px;
@@ -2062,33 +2003,6 @@ body:not(.booted) .layout {
   box-shadow: 0 0 7px rgba(242, 177, 62, 0.6);
 }
 
-.profile-name {
-  display: block;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 15px;
-  font-weight: 650;
-  line-height: 1.25;
-}
-
-.state-pill {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 58px;
-  border: 1px solid var(--line-strong);
-  border-radius: 999px;
-  padding: 4px 9px;
-  background: transparent;
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-}
-
 .state-pill.running {
   border-color: var(--accent-line);
   background: var(--accent-soft);
@@ -2096,21 +2010,7 @@ body:not(.booted) .layout {
   box-shadow: 0 0 12px rgba(56, 225, 160, 0.15);
 }
 
-.native-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--warn-line);
-  border-radius: 999px;
-  padding: 3px 8px;
-  background: var(--warn-soft);
-  color: var(--warn-bright);
-  font-family: var(--font-mono);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-}
-
+/* 基础态保留为 CSS：仍被 extensions 面板复用，profiles 处已叠加等值工具类。 */
 .source-pill {
   display: inline-flex;
   align-items: center;
@@ -2160,6 +2060,22 @@ body:not(.booted) .layout {
   margin-left: 10px;
 }
 
+/* 基础态保留为 CSS：仍被 extensions/account-sync 复用，profiles 处已叠加等值工具类。 */
+.native-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--warn-line);
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: var(--warn-soft);
+  color: var(--warn-bright);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+}
+
 /* 名称行里的标签固定宽度，不被长名字挤压重叠 */
 .profile-name-line .source-pill,
 .profile-name-line .native-badge {
@@ -2173,40 +2089,10 @@ body:not(.booted) .layout {
 
 /* ---- details sidebar ---- */
 
-.details {
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: linear-gradient(180deg, var(--panel), var(--panel-soft));
-  padding: 18px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 18px 44px rgba(2, 6, 9, 0.35);
-}
-
-.detail-title {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 18px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid var(--line);
-}
-
-.detail-status {
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  letter-spacing: 0.08em;
-}
-
 .detail-status.running {
   color: var(--accent-bright);
   font-weight: 600;
   text-shadow: 0 0 12px rgba(56, 225, 160, 0.5);
-}
-
-.detail-list {
-  display: grid;
-  gap: 14px;
 }
 
 .detail-row {
@@ -2937,6 +2823,10 @@ body:not(.booted) .layout {
     grid-template-columns: 1fr;
   }
 
+  .details {
+    order: -1;
+  }
+
   .account-sync-controls {
     justify-items: start;
   }
@@ -3034,10 +2924,6 @@ body:not(.booted) .layout {
   .extension-scan-head {
     align-items: flex-start;
     flex-direction: column;
-  }
-
-  .details {
-    order: -1;
   }
 
   .confirm-summary {

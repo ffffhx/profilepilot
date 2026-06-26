@@ -7,8 +7,8 @@ import { NATIVE_CDP_UNSUPPORTED_NOTE, cdpLaunchButtonTitle, closeButtonTitle, de
 // 来源不同；外部实例仍只读（仅显示/关闭），用框内分隔段和类型标签区分。
 export function renderProfilesPanel(profiles: PublicProfile[], externalInstances: ExternalChromeInstance[]): string {
   return `
-    <div class="profiles-table-wrap">
-      <table class="profiles-table">
+    <div class="profiles-table-wrap overflow-visible border-solid border border-line rounded-xl bg-panel [box-shadow:inset_0_1px_0_rgba(255,255,255,0.04),0_18px_44px_rgba(2,6,9,0.35)]">
+      <table class="profiles-table w-full border-collapse table-fixed">
         <thead>
           <tr>
             <th>名称</th>
@@ -31,16 +31,16 @@ export function renderProfileRow(profile: PublicProfile): string {
   return `
     <tr class="${selected ? "selected" : ""}" data-action="select" data-id="${profile.id}" data-profile-row tabindex="0" aria-selected="${selected ? "true" : "false"}">
       <td>
-        <div class="profile-pick">
-          <span class="profile-name-line">
-            <span class="status-dot ${profile.running ? "running" : profile.source === "native" ? "native" : ""}"></span>
-            <span class="profile-name">${escapeHtml(profile.name)}</span>
-            ${profile.isDefault ? '<span class="native-badge">Default</span>' : ""}
+        <div class="profile-pick w-full min-h-[auto] py-1 px-0.5 text-left">
+          <span class="profile-name-line flex items-center gap-2 min-w-0">
+            <span class="status-dot w-[9px] h-[9px] flex-[0_0_auto] rounded-full bg-line-strong ${profile.running ? "running" : profile.source === "native" ? "native" : ""}"></span>
+            <span class="profile-name block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[15px] font-[650] leading-[1.25]">${escapeHtml(profile.name)}</span>
+            ${profile.isDefault ? '<span class="native-badge inline-flex items-center justify-center border-solid border border-warn-line rounded-full px-2 py-[3px] bg-warn-soft text-warn-bright font-mono text-[10px] font-semibold tracking-[0.06em]">Default</span>' : ""}
           </span>
         </div>
       </td>
       <td>
-        <span class="state-pill ${profile.running ? "running" : ""}">
+        <span class="state-pill inline-flex items-center justify-center min-w-[58px] border-solid border border-line-strong rounded-full px-[9px] py-1 bg-transparent text-muted font-mono text-[11px] font-semibold tracking-[0.06em] ${profile.running ? "running" : ""}">
           ${profileStatusLabel(profile)}
         </span>
       </td>
@@ -78,7 +78,7 @@ export function cdpChip(
   fullTitle: string | null,
   tag: string | null
 ): string {
-  return `<span class="cdp-cell ${kind}"${fullTitle ? ` title="${escapeHtml(fullTitle)}"` : ""}><span class="cdp-addr">${escapeHtml(addr)}</span>${tag ? `<em class="cdp-tag">${escapeHtml(tag)}</em>` : ""}</span>`;
+  return `<span class="cdp-cell inline-flex items-center gap-2 max-w-full overflow-hidden border-solid border border-line rounded-md px-[9px] py-1 bg-panel-soft text-muted font-mono text-[12px] font-semibold tabular-nums ${kind}"${fullTitle ? ` title="${escapeHtml(fullTitle)}"` : ""}><span class="cdp-addr overflow-hidden text-ellipsis whitespace-nowrap">${escapeHtml(addr)}</span>${tag ? `<em class="cdp-tag flex-[0_0_auto] not-italic text-[10px] font-semibold tracking-[0.12em] uppercase opacity-[0.85]">${escapeHtml(tag)}</em>` : ""}</span>`;
 }
 
 function stripScheme(url: string): string {
@@ -193,16 +193,16 @@ export function renderExternalRow(instance: ExternalChromeInstance): string {
   return `
     <tr class="external-row ${selected ? "selected" : ""}" data-action="select-external" data-dir="${escapeHtml(instance.userDataDir)}" tabindex="0" aria-selected="${selected ? "true" : "false"}">
       <td>
-        <div class="profile-pick">
-          <span class="profile-name-line">
-            <span class="status-dot running"></span>
-            <span class="profile-name">${escapeHtml(instance.label)}</span>
-            ${instance.headless ? '<span class="source-pill warn">无头</span>' : ""}
+        <div class="profile-pick w-full min-h-[auto] py-1 px-0.5 text-left">
+          <span class="profile-name-line flex items-center gap-2 min-w-0">
+            <span class="status-dot w-[9px] h-[9px] flex-[0_0_auto] rounded-full bg-line-strong running"></span>
+            <span class="profile-name block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[15px] font-[650] leading-[1.25]">${escapeHtml(instance.label)}</span>
+            ${instance.headless ? '<span class="source-pill inline-flex items-center justify-center min-w-[46px] border-solid border border-line-strong rounded-full px-[9px] py-1 bg-transparent text-muted font-mono text-[11px] font-semibold whitespace-nowrap warn">无头</span>' : ""}
           </span>
         </div>
       </td>
       <td>
-        <span class="state-pill running">运行中</span>
+        <span class="state-pill inline-flex items-center justify-center min-w-[58px] border-solid border border-line-strong rounded-full px-[9px] py-1 bg-transparent text-muted font-mono text-[11px] font-semibold tracking-[0.06em] running">运行中</span>
       </td>
       <td>
         ${
@@ -248,12 +248,12 @@ export function renderExternalDetails(instance: ExternalChromeInstance): string 
       </div>`;
 
   return `
-    <aside class="details">
-      <div class="detail-title">
+    <aside class="details border-solid border border-line rounded-xl bg-[linear-gradient(180deg,var(--panel),var(--panel-soft))] p-[18px] [box-shadow:inset_0_1px_0_rgba(255,255,255,0.04),0_18px_44px_rgba(2,6,9,0.35)]">
+      <div class="detail-title flex items-center justify-between gap-3 mb-[18px] pb-3 border-solid border-b border-line">
         <h2>${escapeHtml(instance.label)}</h2>
-        <span class="detail-status running">运行中</span>
+        <span class="detail-status text-muted font-mono text-[11px] tracking-[0.08em] running">运行中</span>
       </div>
-      <div class="detail-list">
+      <div class="detail-list grid gap-[14px]">
         <div class="detail-row">
           <span>来源</span>
           <strong>外部实例（其他工具自管）</strong>
@@ -284,11 +284,11 @@ export function renderExternalDetails(instance: ExternalChromeInstance): string 
 export function renderDetails(profile: PublicProfile | null): string {
   if (!profile) {
     return `
-      <aside class="details">
-        <div class="detail-title">
+      <aside class="details border-solid border border-line rounded-xl bg-[linear-gradient(180deg,var(--panel),var(--panel-soft))] p-[18px] [box-shadow:inset_0_1px_0_rgba(255,255,255,0.04),0_18px_44px_rgba(2,6,9,0.35)]">
+        <div class="detail-title flex items-center justify-between gap-3 mb-[18px] pb-3 border-solid border-b border-line">
           <h2>详情</h2>
         </div>
-        <div class="detail-list">
+        <div class="detail-list grid gap-[14px]">
           <div class="detail-row">
             <span>状态</span>
             <strong>未选择</strong>
@@ -299,14 +299,14 @@ export function renderDetails(profile: PublicProfile | null): string {
   }
 
   return `
-    <aside class="details">
-      <div class="detail-title">
+    <aside class="details border-solid border border-line rounded-xl bg-[linear-gradient(180deg,var(--panel),var(--panel-soft))] p-[18px] [box-shadow:inset_0_1px_0_rgba(255,255,255,0.04),0_18px_44px_rgba(2,6,9,0.35)]">
+      <div class="detail-title flex items-center justify-between gap-3 mb-[18px] pb-3 border-solid border-b border-line">
         <h2>${escapeHtml(profile.name)}</h2>
-        <span class="detail-status ${profile.running ? "running" : ""}">
+        <span class="detail-status text-muted font-mono text-[11px] tracking-[0.08em] ${profile.running ? "running" : ""}">
           ${profileStatusLabel(profile)}
         </span>
       </div>
-      <div class="detail-list">
+      <div class="detail-list grid gap-[14px]">
         <div class="detail-row">
           <span>来源</span>
           <strong>${sourceDetail(profile)}</strong>

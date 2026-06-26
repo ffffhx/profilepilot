@@ -1740,6 +1740,17 @@ body:not(.booted) .layout {
   content: "";
 }
 
+/* CDP 地址提示气泡的宿主：撑满单元格宽度，并让内部 cdp-cell 正常省略。
+   气泡样式复用 .action-tooltip（::after 气泡 + ::before 箭头）。 */
+.cdp-tip {
+  max-width: 100%;
+}
+
+.cdp-tip > .cdp-cell {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .cdp-cell.live {
   border-color: var(--accent-line);
   background: linear-gradient(180deg, rgba(56, 225, 160, 0.1), rgba(56, 225, 160, 0.03));

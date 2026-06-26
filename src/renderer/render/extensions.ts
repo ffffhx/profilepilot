@@ -23,13 +23,13 @@ export function renderExtensionMigrationPanel(profiles: PublicProfile[]): string
       <div class="section-head">
         <div>
           <h2>插件同步</h2>
-          <span class="section-subtitle">Extensions</span>
+          <span class="section-subtitle block mt-1 text-muted font-mono text-[11px] font-semibold tracking-[0.18em] uppercase">Extensions</span>
         </div>
         ${sourceProfile ? renderMigrationSourceSummary(sourceProfile, activeScan) : ""}
       </div>
 
-      <div class="migration-source-bar">
-        <div class="migration-source-field">
+      <div class="migration-source-bar grid grid-cols-[minmax(240px,360px)_auto] [justify-content:start] [column-gap:12px] [row-gap:10px] items-end mt-[14px]">
+        <div class="migration-source-field min-w-0 relative">
           <span id="migration-source-label">源 Profile</span>
           ${renderMigrationSourcePicker(profiles, sourceId, sourceProfile)}
         </div>
@@ -177,7 +177,7 @@ export function renderMigrationTargetOption(profile: PublicProfile, targetId: st
 
 export function renderExtensionScanEmpty(): string {
   return `
-    <div class="extension-scan-empty">
+    <div class="extension-scan-empty flex items-center justify-between gap-3 mt-[14px] border border-dashed border-line-strong rounded-lg p-[14px] text-muted">
       <strong>未扫描</strong>
       <span>选择源 Profile 后扫描插件。</span>
     </div>
@@ -192,7 +192,7 @@ export function renderExtensionScan(
 ): string {
   if (!scan.extensions.length) {
     return `
-      <div class="extension-scan-empty">
+      <div class="extension-scan-empty flex items-center justify-between gap-3 mt-[14px] border border-dashed border-line-strong rounded-lg p-[14px] text-muted">
         <strong>${escapeHtml(scan.profileName)}</strong>
         <span>没有扫描到可同步插件。</span>
       </div>
@@ -200,7 +200,7 @@ export function renderExtensionScan(
   }
 
   return `
-    <div class="extension-scan-head ${store.extensionScanPreviewCollapsed ? "collapsed" : ""}">
+    <div class="extension-scan-head flex items-center justify-between gap-[14px] mt-4 mb-2.5 ${store.extensionScanPreviewCollapsed ? "collapsed" : ""}">
       <div>
         <strong>${escapeHtml(scan.profileName)}</strong>
         <span>${scan.extensions.length} 个插件 · 已选 ${selectedCount}</span>

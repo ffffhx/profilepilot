@@ -28,7 +28,7 @@ export function renderAccountSyncPanel(profiles: PublicProfile[]): string {
       <div class="section-head">
         <div>
           <h2>账号同步</h2>
-          <span class="section-subtitle">Account session</span>
+          <span class="section-subtitle block mt-1 text-muted font-mono text-[11px] font-semibold tracking-[0.18em] uppercase">Account session</span>
         </div>
         <button type="button" class="primary agent-browser-cta" data-action="open-agent-browser-setup" ${store.busy ? "disabled" : ""}>
           ⚡ 一键造 Agent 浏览器

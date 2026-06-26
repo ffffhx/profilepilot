@@ -215,33 +215,7 @@ input[type="checkbox"] {
   accent-color: var(--accent);
 }
 
-.app-loading {
-  padding: 32px;
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 13px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
 /* ---- busy banner: live operation strip ---- */
-
-.busy-banner {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  overflow: hidden;
-  margin: 0 0 14px;
-  border: 1px solid var(--accent-line);
-  border-radius: 8px;
-  background: linear-gradient(180deg, rgba(56, 225, 160, 0.12), rgba(56, 225, 160, 0.05));
-  color: var(--accent-bright);
-  padding: 11px 13px;
-  font-size: 13px;
-  font-weight: 700;
-  box-shadow: inset 0 1px 0 rgba(111, 242, 192, 0.12), var(--glow-accent);
-}
 
 .busy-banner::after {
   position: absolute;
@@ -264,14 +238,6 @@ input[type="checkbox"] {
   to {
     background-position: -130% 0;
   }
-}
-
-.busy-step-count {
-  margin-left: auto;
-  color: var(--accent);
-  font-family: var(--font-mono);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
 }
 
 /* ---- shell & masthead ---- */
@@ -385,27 +351,7 @@ h3 {
 }
 
 /* “更多”按钮与其菜单的定位锚点：菜单贴按钮弹出，不受操作列宽度影响 */
-.menu-anchor {
-  position: relative;
-  display: inline-flex;
-}
-
 /* ---- action menu ---- */
-
-.action-menu {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  z-index: 40;
-  display: grid;
-  width: 160px;
-  overflow: visible;
-  border: 1px solid var(--line-strong);
-  border-radius: 8px;
-  background: var(--panel-raise);
-  box-shadow: var(--shadow);
-  padding: 5px;
-}
 
 .action-menu button {
   display: flex;
@@ -2136,20 +2082,6 @@ body:not(.booted) .layout {
 
 /* ---- toast ---- */
 
-.toast {
-  position: fixed;
-  right: 18px;
-  bottom: 18px;
-  z-index: 20;
-  max-width: min(420px, calc(100vw - 36px));
-  border: 1px solid var(--accent-line);
-  border-radius: 8px;
-  background: #0a1411;
-  color: #dcfff1;
-  padding: 12px 14px;
-  box-shadow: 0 18px 50px rgba(2, 6, 9, 0.7), var(--glow-accent);
-}
-
 .toast.error {
   border-color: var(--danger-line);
   background: #1c0d0b;
@@ -2158,12 +2090,6 @@ body:not(.booted) .layout {
 }
 
 /* Toast 里高亮的名字（Profile 名等）：只用等宽字体 + 强调色突出，不再加框/底纹 */
-.toast-name {
-  font-family: var(--font-mono);
-  font-weight: 600;
-  color: var(--accent-bright);
-}
-
 .toast.error .toast-name {
   color: var(--danger-bright);
 }

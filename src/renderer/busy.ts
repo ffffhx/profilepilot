@@ -17,7 +17,7 @@ export function emphasizeName(name: string): string {
 export function renderToastBody(message: string): string {
   return escapeHtml(message)
     .split(TOAST_NAME_START)
-    .join('<span class="toast-name">')
+    .join('<span class="toast-name font-mono font-semibold text-accent-bright">')
     .split(TOAST_NAME_END)
     .join("</span>");
 }

@@ -1080,5 +1080,5 @@ appRoot.addEventListener("submit", (event) => {
 });
 
 loadState().catch((error: unknown) => {
-  appRoot.innerHTML = `<div class="app-loading">${escapeHtml(formatErrorMessage(error))}</div>`;
+  appRoot.innerHTML = `<div class="app-loading p-8 text-muted font-mono text-[13px] tracking-[0.08em] uppercase">${escapeHtml(formatErrorMessage(error))}</div>`;
 });

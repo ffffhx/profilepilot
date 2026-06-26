@@ -7,10 +7,10 @@ export function renderBusyBanner(): string {
   }
 
   return `
-    <div class="busy-banner ${store.busyState.paused ? "paused" : ""}" role="status" aria-live="polite">
+    <div class="busy-banner relative flex items-center gap-2.5 overflow-hidden mt-0 mb-[14px] mx-0 border-solid border border-accent-line rounded-lg bg-[linear-gradient(180deg,rgba(56,225,160,0.12),rgba(56,225,160,0.05))] text-accent-bright px-[13px] py-[11px] text-[13px] font-bold [box-shadow:inset_0_1px_0_rgba(111,242,192,0.12),var(--glow-accent)] ${store.busyState.paused ? "paused" : ""}" role="status" aria-live="polite">
       <span class="sync-spinner" aria-hidden="true"></span>
       <span data-busy-message>${escapeHtml(store.busyState.message)}</span>
-      ${store.busyState.stepIndex && store.busyState.stepCount ? `<span class="busy-step-count" data-busy-count>${store.busyState.stepIndex}/${store.busyState.stepCount}</span>` : ""}
+      ${store.busyState.stepIndex && store.busyState.stepCount ? `<span class="busy-step-count ml-auto text-accent font-mono text-[12px] tabular-nums" data-busy-count>${store.busyState.stepIndex}/${store.busyState.stepCount}</span>` : ""}
     </div>
   `;
 }

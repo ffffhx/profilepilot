@@ -127,12 +127,12 @@ export function renderProfileActions(profile: PublicProfile): string {
           ${renderButtonLabel(launchingCdp, "CDP启动", "启动中…")}
         </button>
       </span>
-      <span class="menu-anchor">
+      <span class="menu-anchor relative inline-flex">
       <button type="button" class="action-button menu-button" data-action="toggle-profile-menu" data-id="${profile.id}" aria-expanded="${menuOpen ? "true" : "false"}" ${store.busy ? "disabled" : ""}>更多</button>
       ${
         menuOpen
           ? `
-            <div class="action-menu" role="menu">
+            <div class="action-menu absolute top-[calc(100%+6px)] right-0 z-40 grid w-40 overflow-visible border-solid border border-line-strong rounded-lg bg-panel-raise [box-shadow:var(--shadow)] p-[5px]" role="menu">
               <button type="button" class="${openingFolder ? "loading" : ""}" data-action="open-folder" data-id="${profile.id}" ${store.busy ? "disabled" : ""}>
                 ${renderButtonLabel(openingFolder, "打开目录", "打开中…")}
               </button>

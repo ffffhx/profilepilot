@@ -9,7 +9,7 @@ import { escapeHtml, renderBusyBanner, renderButtonLabel } from "../util";
 
 export function render(): void {
   if (!store.state) {
-    appRoot.innerHTML = '<div class="app-loading">Loading...</div>';
+    appRoot.innerHTML = '<div class="app-loading p-8 text-muted font-mono text-[13px] tracking-[0.08em] uppercase">Loading...</div>';
     return;
   }
 
@@ -91,6 +91,6 @@ export function render(): void {
     ${store.modal?.kind === "global-instructions" ? renderGlobalInstructionsModal() : ""}
     ${store.modal?.kind === "extension-migration" ? renderExtensionMigrationModal(profiles) : ""}
     ${store.modal?.kind === "confirm" ? renderConfirmModal(store.modal) : ""}
-    ${store.toast ? `<div class="toast ${store.toastKind === "error" ? "error" : ""}" role="status">${renderToastBody(store.toast)}</div>` : ""}
+    ${store.toast ? `<div class="toast fixed right-[18px] bottom-[18px] z-20 max-w-[min(420px,calc(100vw-36px))] border-solid border border-accent-line rounded-lg bg-[#0a1411] text-[#dcfff1] px-[14px] py-3 [box-shadow:0_18px_50px_rgba(2,6,9,0.7),var(--glow-accent)] ${store.toastKind === "error" ? "error" : ""}" role="status">${renderToastBody(store.toast)}</div>` : ""}
   `;
 }

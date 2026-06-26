@@ -695,49 +695,9 @@ body:not(.booted) .migration-panel {
   text-transform: uppercase;
 }
 
-.account-sync-layout {
-  display: grid;
-  grid-template-columns: minmax(420px, 1fr) minmax(360px, auto);
-  gap: 16px;
-  align-items: end;
-  margin-top: 14px;
-}
-
-.account-sync-fields {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(210px, 1fr));
-  gap: 12px;
-  min-width: 0;
-}
-
-.account-sync-controls {
-  display: grid;
-  gap: 10px;
-  justify-items: end;
-  min-width: 0;
-}
-
-.account-sync-options,
-.account-sync-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
-  min-width: 0;
-}
-
-.account-sync-options {
-  flex-wrap: wrap;
-  row-gap: 6px;
-}
-
 .account-sync-options .check-control {
   min-height: 30px;
   white-space: nowrap;
-}
-
-.account-sync-actions {
-  flex-wrap: nowrap;
 }
 
 .account-sync-actions > button {
@@ -767,18 +727,6 @@ body:not(.booted) .migration-panel {
 
 .account-sync-fields .profile-select {
   max-width: none;
-}
-
-.account-sync-launch {
-  align-self: end;
-}
-
-.account-sync-note {
-  margin-top: 10px;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1.45;
 }
 
 .account-sync-note.warn {

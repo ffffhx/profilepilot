@@ -35,8 +35,8 @@ export function renderAccountSyncPanel(profiles: PublicProfile[]): string {
         </button>
       </div>
 
-      <div class="account-sync-layout ${syncingAccount ? "syncing" : ""}">
-        <div class="account-sync-fields">
+      <div class="account-sync-layout grid grid-cols-[minmax(420px,1fr)_minmax(360px,auto)] gap-4 items-end mt-[14px] ${syncingAccount ? "syncing" : ""}">
+        <div class="account-sync-fields grid grid-cols-[repeat(2,minmax(210px,1fr))] gap-3 min-w-0">
           <div class="field compact">
             <span class="picker-label" id="account-sync-source-label">源 Profile</span>
             ${renderAccountSyncPicker("source", profiles, sourceId)}
@@ -47,15 +47,15 @@ export function renderAccountSyncPanel(profiles: PublicProfile[]): string {
           </div>
         </div>
 
-        <div class="account-sync-controls">
-          <div class="account-sync-options">
-            <label class="check-control account-sync-launch">
+        <div class="account-sync-controls grid gap-2.5 justify-items-end min-w-0">
+          <div class="account-sync-options flex items-center justify-end gap-2.5 min-w-0 flex-wrap [row-gap:6px]">
+            <label class="check-control account-sync-launch self-end">
               <input type="checkbox" data-launch-synced-profile ${store.launchSyncedProfile ? "checked" : ""} ${store.busy ? "disabled" : ""} />
               <span>${launchLabel}</span>
             </label>
           </div>
 
-          <div class="account-sync-actions">
+          <div class="account-sync-actions flex items-center justify-end gap-2.5 min-w-0 flex-nowrap">
             <button type="button" class="primary ${syncingAccount ? "loading" : ""}" data-action="sync-account" ${store.busy || !canSync ? "disabled" : ""}>
               ${renderButtonLabel(syncingAccount, syncButtonLabel, syncingLabel)}
             </button>
@@ -75,7 +75,7 @@ export function renderAccountSyncPanel(profiles: PublicProfile[]): string {
 
       ${syncingAccount ? renderAccountSyncLoading(sourceProfile, targetProfile) : ""}
 
-      <div class="account-sync-note">
+      <div class="account-sync-note mt-2.5 text-muted text-[12px] font-semibold leading-[1.45]">
         ${escapeHtml(accountSyncNote(sourceProfile, targetProfile, accountSyncRecord))}
       </div>
 

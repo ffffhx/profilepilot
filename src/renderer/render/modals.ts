@@ -13,10 +13,10 @@ export function renderGlobalInstructionsModal(): string {
 
   return `
     <div class="modal-backdrop" data-action="close-modal">
-      <section class="modal global-instructions-modal" role="dialog" aria-modal="true" aria-labelledby="global-instructions-title">
+      <section class="modal max-h-[calc(100vh-36px)] overflow-auto overflow-x-hidden border-solid border border-line-strong rounded-xl bg-[linear-gradient(180deg,var(--panel-raise),var(--panel))] p-5 [box-shadow:0_30px_90px_rgba(2,6,9,0.8),0_0_0_1px_rgba(56,225,160,0.06)] global-instructions-modal" role="dialog" aria-modal="true" aria-labelledby="global-instructions-title">
         <div class="global-instructions-head">
           <div>
-            <span class="modal-kicker">Agent Instructions</span>
+            <span class="modal-kicker inline-flex mb-2 text-accent font-mono text-[11px] font-semibold tracking-[0.18em] uppercase">Agent Instructions</span>
             <h2 id="global-instructions-title">全局指令</h2>
           </div>
           <button type="button" class="${loading ? "loading" : ""}" data-action="refresh-global-instructions" ${loading || editing || saving ? "disabled" : ""}>
@@ -204,9 +204,9 @@ export function renderNewModal(): string {
 
   return `
     <div class="modal-backdrop" data-action="close-modal">
-      <form class="modal" data-create-form>
+      <form class="modal max-h-[calc(100vh-36px)] overflow-auto overflow-x-hidden border-solid border border-line-strong rounded-xl bg-[linear-gradient(180deg,var(--panel-raise),var(--panel))] p-5 [box-shadow:0_30px_90px_rgba(2,6,9,0.8),0_0_0_1px_rgba(56,225,160,0.06)]" data-create-form>
         <h2>新建独立 Profile</h2>
-        <div class="field">
+        <div class="field grid gap-2 my-[18px]">
           <label for="profile-name">名称</label>
           <input id="profile-name" name="name" type="text" maxlength="80" autocomplete="off" required />
         </div>
@@ -230,12 +230,12 @@ export function renderRenameModal(profileId: string): string {
 
   return `
     <div class="modal-backdrop" data-action="close-modal">
-      <form class="modal" data-rename-form data-profile-id="${escapeHtml(profile.id)}">
+      <form class="modal max-h-[calc(100vh-36px)] overflow-auto overflow-x-hidden border-solid border border-line-strong rounded-xl bg-[linear-gradient(180deg,var(--panel-raise),var(--panel))] p-5 [box-shadow:0_30px_90px_rgba(2,6,9,0.8),0_0_0_1px_rgba(56,225,160,0.06)]" data-rename-form data-profile-id="${escapeHtml(profile.id)}">
         <h2>修改 Profile 名称</h2>
-        <div class="field">
+        <div class="field grid gap-2 my-[18px]">
           <label for="profile-rename">名称</label>
           <input id="profile-rename" name="name" type="text" maxlength="80" autocomplete="off" required value="${escapeHtml(profile.name)}" />
-          <span class="field-note">只修改本工具里的显示名称，不改变 Profile 目录。</span>
+          <span class="field-note text-muted text-[12px] leading-[1.45]">只修改本工具里的显示名称，不改变 Profile 目录。</span>
         </div>
         <div class="modal-actions">
           <button type="button" data-action="close-modal">取消</button>
@@ -263,14 +263,14 @@ export function renderCdpModal(profileId: string, portSuggestion: CdpPortSuggest
 
   return `
     <div class="modal-backdrop" data-action="close-modal">
-      <form class="modal" data-cdp-form data-profile-id="${escapeHtml(profile.id)}">
-        <span class="modal-kicker">Chrome DevTools Protocol</span>
+      <form class="modal max-h-[calc(100vh-36px)] overflow-auto overflow-x-hidden border-solid border border-line-strong rounded-xl bg-[linear-gradient(180deg,var(--panel-raise),var(--panel))] p-5 [box-shadow:0_30px_90px_rgba(2,6,9,0.8),0_0_0_1px_rgba(56,225,160,0.06)]" data-cdp-form data-profile-id="${escapeHtml(profile.id)}">
+        <span class="modal-kicker inline-flex mb-2 text-accent font-mono text-[11px] font-semibold tracking-[0.18em] uppercase">Chrome DevTools Protocol</span>
         <h2>启动 ${escapeHtml(profile.name)} 的 CDP</h2>
-        <p class="modal-copy">已为你预填下一个可用端口，可直接启动，也可以改成你想要的端口；留空则从 9222 起自动选择。</p>
-        <div class="field">
+        <p class="modal-copy mt-[10px] mb-4 mx-0 text-muted text-[14px] leading-[1.6] [overflow-wrap:anywhere]">已为你预填下一个可用端口，可直接启动，也可以改成你想要的端口；留空则从 9222 起自动选择。</p>
+        <div class="field grid gap-2 my-[18px]">
           <label for="cdp-port">监听端口</label>
           <input id="cdp-port" name="port" type="number" min="1024" max="65535" inputmode="numeric" placeholder="自动选择（默认从 9222 起）"${defaultPort !== null ? ` value="${defaultPort}"` : ""} />
-          <span class="field-note">${portNote ? `${escapeHtml(portNote)} ` : ""}启动后会监听在 127.0.0.1，仅供本机 CDP / Agent Browser 工具连接。</span>
+          <span class="field-note text-muted text-[12px] leading-[1.45]">${portNote ? `${escapeHtml(portNote)} ` : ""}启动后会监听在 127.0.0.1，仅供本机 CDP / Agent Browser 工具连接。</span>
         </div>
         <div class="modal-actions">
           <button type="button" data-action="close-modal">取消</button>
@@ -299,30 +299,30 @@ export function renderAgentBrowserSetupModal(portSuggestion: CdpPortSuggestion):
 
   return `
     <div class="modal-backdrop" data-action="close-modal">
-      <form class="modal agent-browser-modal" data-agent-browser-form data-source-id="${escapeHtml(source.id)}">
-        <span class="modal-kicker">Agent 浏览器</span>
+      <form class="modal max-h-[calc(100vh-36px)] overflow-auto overflow-x-hidden border-solid border border-line-strong rounded-xl bg-[linear-gradient(180deg,var(--panel-raise),var(--panel))] p-5 [box-shadow:0_30px_90px_rgba(2,6,9,0.8),0_0_0_1px_rgba(56,225,160,0.06)] agent-browser-modal" data-agent-browser-form data-source-id="${escapeHtml(source.id)}">
+        <span class="modal-kicker inline-flex mb-2 text-accent font-mono text-[11px] font-semibold tracking-[0.18em] uppercase">Agent 浏览器</span>
         <h2>创建 Agent 浏览器</h2>
-        <p class="modal-copy">新建独立 Profile，复制登录态，绑定固定 CDP 端口，并写入全局 <code>~/.codex/AGENTS.md</code>；<code>~/.claude/CLAUDE.md</code> 只保持引用壳。完成后可直接用 <code>agent-browser connect</code> 接入。</p>
-        <div class="field">
+        <p class="modal-copy mt-[10px] mb-4 mx-0 text-muted text-[14px] leading-[1.6] [overflow-wrap:anywhere]">新建独立 Profile，复制登录态，绑定固定 CDP 端口，并写入全局 <code>~/.codex/AGENTS.md</code>；<code>~/.claude/CLAUDE.md</code> 只保持引用壳。完成后可直接用 <code>agent-browser connect</code> 接入。</p>
+        <div class="field grid gap-2 my-[18px]">
           <label>登录态来源</label>
           <strong class="agent-source-name">${escapeHtml(source.name)}</strong>
-          <span class="field-note">只读复制它的登录态，不会改动来源 Profile。</span>
+          <span class="field-note text-muted text-[12px] leading-[1.45]">只读复制它的登录态，不会改动来源 Profile。</span>
         </div>
-        <div class="field">
+        <div class="field grid gap-2 my-[18px]">
           <label for="agent-name">Agent Profile 名称</label>
           <input id="agent-name" name="name" type="text" value="${escapeHtml(defaultName)}" maxlength="80" />
         </div>
-        <div class="field">
+        <div class="field grid gap-2 my-[18px]">
           <label for="agent-setup-port">固定调试端口</label>
           <input id="agent-setup-port" name="port" type="number" min="1024" max="65535" inputmode="numeric" value="${portSuggestion.port}" />
-          <span class="field-note">${escapeHtml(portNote)} 以后对该 Profile「CDP启动」会固定用这个端口。</span>
+          <span class="field-note text-muted text-[12px] leading-[1.45]">${escapeHtml(portNote)} 以后对该 Profile「CDP启动」会固定用这个端口。</span>
         </div>
-        <div class="field">
+        <div class="field grid gap-2 my-[18px]">
           <label class="check-control">
             <input type="checkbox" name="includeExtensions" data-agent-include-extensions checked ${store.busy ? "disabled" : ""} />
             <span>同时同步插件</span>
           </label>
-          <span class="field-note">默认带上可迁移插件的安装和启停状态；取消后只同步登录态。无法静默处理的插件可之后用「插件同步」补齐。</span>
+          <span class="field-note text-muted text-[12px] leading-[1.45]">默认带上可迁移插件的安装和启停状态；取消后只同步登录态。无法静默处理的插件可之后用「插件同步」补齐。</span>
         </div>
         <div class="modal-actions">
           <button type="button" data-action="close-modal">取消</button>
@@ -350,14 +350,14 @@ export function renderAgentConfigModal(profileId: string, portSuggestion: CdpPor
 
   return `
     <div class="modal-backdrop" data-action="close-modal">
-      <form class="modal" data-agent-config-form data-profile-id="${escapeHtml(profile.id)}">
-        <span class="modal-kicker">Agent 调试端点</span>
+      <form class="modal max-h-[calc(100vh-36px)] overflow-auto overflow-x-hidden border-solid border border-line-strong rounded-xl bg-[linear-gradient(180deg,var(--panel-raise),var(--panel))] p-5 [box-shadow:0_30px_90px_rgba(2,6,9,0.8),0_0_0_1px_rgba(56,225,160,0.06)]" data-agent-config-form data-profile-id="${escapeHtml(profile.id)}">
+        <span class="modal-kicker inline-flex mb-2 text-accent font-mono text-[11px] font-semibold tracking-[0.18em] uppercase">Agent 调试端点</span>
         <h2>把 ${escapeHtml(profile.name)} 设为 Agent 默认调试浏览器</h2>
-        <p class="modal-copy">会给这个 Profile 绑定一个固定调试端口，并写入全局 <code>~/.codex/AGENTS.md</code>，让 Agent 工具调试浏览器时优先用 <code>agent-browser connect</code> 接入它；<code>~/.claude/CLAUDE.md</code> 只保持引用壳。</p>
-        <div class="field">
+        <p class="modal-copy mt-[10px] mb-4 mx-0 text-muted text-[14px] leading-[1.6] [overflow-wrap:anywhere]">会给这个 Profile 绑定一个固定调试端口，并写入全局 <code>~/.codex/AGENTS.md</code>，让 Agent 工具调试浏览器时优先用 <code>agent-browser connect</code> 接入它；<code>~/.claude/CLAUDE.md</code> 只保持引用壳。</p>
+        <div class="field grid gap-2 my-[18px]">
           <label for="agent-port">固定调试端口</label>
           <input id="agent-port" name="port" type="number" min="1024" max="65535" inputmode="numeric" value="${defaultPort}" />
-          <span class="field-note">${escapeHtml(portNote)} 以后对该 Profile「CDP启动」会固定使用这个端口。</span>
+          <span class="field-note text-muted text-[12px] leading-[1.45]">${escapeHtml(portNote)} 以后对该 Profile「CDP启动」会固定使用这个端口。</span>
         </div>
         <div class="modal-actions">
           <button type="button" data-action="close-modal">取消</button>
@@ -392,10 +392,10 @@ export function renderExtensionMigrationModal(profiles: PublicProfile[]): string
 
   return `
     <div class="modal-backdrop" data-action="close-modal">
-      <form class="modal migration-modal" data-extension-migration-form>
-        <span class="modal-kicker">插件同步</span>
+      <form class="modal max-h-[calc(100vh-36px)] overflow-auto overflow-x-hidden border-solid border border-line-strong rounded-xl bg-[linear-gradient(180deg,var(--panel-raise),var(--panel))] p-5 [box-shadow:0_30px_90px_rgba(2,6,9,0.8),0_0_0_1px_rgba(56,225,160,0.06)] migration-modal" data-extension-migration-form>
+        <span class="modal-kicker inline-flex mb-2 text-accent font-mono text-[11px] font-semibold tracking-[0.18em] uppercase">插件同步</span>
         <h2>选择目标 Profile</h2>
-        <p class="modal-copy">
+        <p class="modal-copy mt-[10px] mb-4 mx-0 text-muted text-[14px] leading-[1.6] [overflow-wrap:anywhere]">
           ${
             store.extensionSyncOnlyChanged
               ? `从 ${escapeHtml(sourceProfile.name)} 同步 ${plannedExtensions ? plannedCount : "正在检查"} 个变更插件。已选 ${selectedExtensions.length} 个，已一致插件会跳过。`
@@ -416,12 +416,12 @@ export function renderExtensionMigrationModal(profiles: PublicProfile[]): string
             <strong>${store.extensionSyncOnlyChanged ? (plannedExtensions ? plannedCount : "检查中") : selectedExtensions.filter((extension) => extension.hasLocalData).length}</strong>
           </div>
         </div>
-        <div class="field">
+        <div class="field grid gap-2 my-[18px]">
           <span class="picker-label" id="migration-target-label">目标 Profile</span>
           ${renderMigrationTargetPicker(profiles, targetId, sourceId)}
           ${
             targetProfile?.running
-              ? `<p class="modal-note warn">目标 ${escapeHtml(targetProfile.name)} 正在运行。开始同步后会先关闭目标 Profile；若能读取到 CDP 页签列表，完成后会恢复原标签页。</p>`
+              ? `<p class="modal-note mt-2 mb-0 mx-0 text-muted text-[12px] font-semibold leading-[1.45] warn">目标 ${escapeHtml(targetProfile.name)} 正在运行。开始同步后会先关闭目标 Profile；若能读取到 CDP 页签列表，完成后会恢复原标签页。</p>`
               : ""
           }
         </div>
@@ -442,7 +442,7 @@ export function renderExtensionMigrationModal(profiles: PublicProfile[]): string
         ${renderExtensionMigrationDiffPreview()}
         ${
           store.extensionSyncOnlyChanged && plannedExtensions && plannedCount === 0
-            ? `<p class="modal-note">当前没有需要同步的变更插件。需要强制覆盖时，可以取消勾选“仅同步变更插件”。</p>`
+            ? `<p class="modal-note mt-2 mb-0 mx-0 text-muted text-[12px] font-semibold leading-[1.45]">当前没有需要同步的变更插件。需要强制覆盖时，可以取消勾选“仅同步变更插件”。</p>`
             : ""
         }
         <div class="modal-actions">

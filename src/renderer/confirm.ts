@@ -20,11 +20,11 @@ export function renderConfirmModal(confirm: Extract<ModalState, { kind: "confirm
         <div class="confirm-dialog-head">
           <span class="confirm-dialog-icon" aria-hidden="true"></span>
           <div>
-            <span class="modal-kicker">${escapeHtml(view.kicker)}</span>
+            <span class="modal-kicker inline-flex mb-2 text-accent font-mono text-[11px] font-semibold tracking-[0.18em] uppercase">${escapeHtml(view.kicker)}</span>
             <h2 id="confirm-title">${escapeHtml(view.title)}</h2>
           </div>
         </div>
-        <div class="modal-copy confirm-copy">
+        <div class="modal-copy mt-[10px] mb-4 mx-0 text-muted text-[14px] leading-[1.6] [overflow-wrap:anywhere] confirm-copy">
           ${view.body
             .map((line) =>
               typeof line === "string"

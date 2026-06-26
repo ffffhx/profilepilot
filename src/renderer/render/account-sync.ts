@@ -37,11 +37,11 @@ export function renderAccountSyncPanel(profiles: PublicProfile[]): string {
 
       <div class="account-sync-layout grid grid-cols-[minmax(420px,1fr)_minmax(360px,auto)] gap-4 items-end mt-[14px] ${syncingAccount ? "syncing" : ""}">
         <div class="account-sync-fields grid grid-cols-[repeat(2,minmax(210px,1fr))] gap-3 min-w-0">
-          <div class="field compact">
+          <div class="field grid gap-2 my-[18px] compact">
             <span class="picker-label" id="account-sync-source-label">源 Profile</span>
             ${renderAccountSyncPicker("source", profiles, sourceId)}
           </div>
-          <div class="field compact">
+          <div class="field grid gap-2 my-[18px] compact">
             <span class="picker-label" id="account-sync-target-label">目标 Profile</span>
             ${renderAccountSyncPicker("target", profiles, targetId, sourceId)}
           </div>

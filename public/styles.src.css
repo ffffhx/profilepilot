@@ -2181,18 +2181,10 @@ body:not(.booted) .layout {
   backdrop-filter: blur(4px);
 }
 
+/* 仅保留宽度在 CSS（各 modal 变体覆盖宽度，避免两个 w-[] 工具类顺序冲突）；
+   其余外观已迁为 .modal 元素上的工具类。 */
 .modal {
   width: min(440px, 100%);
-  max-height: calc(100vh - 36px);
-  overflow: auto;
-  overflow-x: hidden;
-  border: 1px solid var(--line-strong);
-  border-radius: 10px;
-  background: linear-gradient(180deg, var(--panel-raise), var(--panel));
-  padding: 20px;
-  box-shadow:
-    0 30px 90px rgba(2, 6, 9, 0.8),
-    0 0 0 1px rgba(56, 225, 160, 0.06);
 }
 
 .confirm-modal {
@@ -2534,31 +2526,12 @@ body:not(.booted) .layout {
   box-shadow: inset 0 0 0 1px var(--danger-line);
 }
 
-.modal-kicker {
-  display: inline-flex;
-  margin-bottom: 8px;
-  color: var(--accent);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-}
-
 .confirm-dialog.warn .modal-kicker {
   color: var(--warn);
 }
 
 .confirm-dialog.danger .modal-kicker {
   color: var(--danger);
-}
-
-.modal-copy {
-  margin: 10px 0 16px;
-  color: var(--muted);
-  font-size: 14px;
-  line-height: 1.6;
-  overflow-wrap: anywhere;
 }
 
 .modal code {
@@ -2577,14 +2550,6 @@ body:not(.booted) .layout {
 .confirm-copy p.danger-line {
   color: var(--danger-bright);
   font-weight: 700;
-}
-
-.modal-note {
-  margin: 8px 0 0;
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 1.45;
 }
 
 .modal-note.warn {
@@ -2679,22 +2644,10 @@ body:not(.booted) .layout {
 
 /* ---- form fields ---- */
 
-.field {
-  display: grid;
-  gap: 8px;
-  margin: 18px 0;
-}
-
 .field label {
   color: var(--muted);
   font-size: 13px;
   font-weight: 700;
-}
-
-.field-note {
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.45;
 }
 
 .field input:not([type="checkbox"]) {

@@ -169,7 +169,9 @@ function raiseMiniWindow(windowRef = miniWindow): void {
     return;
   }
 
-  windowRef.setAlwaysOnTop(true, "pop-up-menu");
+  // 用 "floating" 而不是 "pop-up-menu"：后者层级过高，会把整个 App 变成 UIElement（无 Dock 图标）。
+  // "floating" 既能保持悬浮在普通窗口之上，又不会让 App 从程序坞消失。
+  windowRef.setAlwaysOnTop(true, "floating");
   (windowRef as BrowserWindow & { moveTop?: () => void }).moveTop?.();
 }
 
@@ -243,6 +245,7 @@ function showMiniOutsideClickWindows(): void {
     return;
   }
 
+
   const html = encodeURIComponent(`<!doctype html>
 <html>
   <head>
@@ -291,7 +294,7 @@ function showMiniOutsideClickWindows(): void {
     });
 
     overlayWindow.setAlwaysOnTop(true, "floating");
-    overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    overlayWindow.setVisibleOnAllWorkspaces(true);
     overlayWindow.on("closed", () => {
       miniOutsideClickWindows = miniOutsideClickWindows.filter((item) => item !== overlayWindow);
     });
@@ -390,15 +393,12 @@ async function createMiniWindow(): Promise<BrowserWindow> {
   });
 
   raiseMiniWindow(miniWindow);
-  miniWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  miniWindow.setVisibleOnAllWorkspaces(true);
   miniWindow.webContents.on("did-finish-load", () => {
     notifyMiniWindowPanelOpen(miniWindowPanelOpen);
   });
-  miniWindow.on("blur", () => {
-    if (miniWindowPanelOpen) {
-      notifyMiniWindowPanelOpen(false);
-    }
-  });
+  // 注意：不再用 blur 自动收起面板。失焦的来源太多（点“显示”把 Chrome 拉前、切窗口、
+  // 展开时重排窗口等），会导致面板被意外收起。收起只由：① 点“收起”；② 点面板外面（覆盖窗）触发。
   miniWindow.on("moved", () => {
     const windowRef = miniWindow;
     if (windowRef && !windowRef.isDestroyed()) {
@@ -1185,10 +1185,10 @@ app.whenReady().then(() => {
   registerGlobalShortcuts();
   createMainWindow();
 
+  // 点击 Dock 图标：始终把主控制台拉回来（必要时重建），并收起悬浮窗。
+  // 覆盖“主窗口已关闭、只剩悬浮窗”的情况——此时旧逻辑会因为还有窗口而什么都不做。
   app.on("activate", () => {
-    if (!BrowserWindow.getAllWindows().length) {
-      createMainWindow();
-    }
+    void showMainWindow();
   });
 });
 

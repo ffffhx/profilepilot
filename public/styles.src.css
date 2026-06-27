@@ -195,7 +195,8 @@ body.mini-mode #app,
   border: 0;
   background: transparent;
   padding: 0;
-  cursor: grab;
+  /* 悬停显示手型（可点击）；真正拖动时 .mini-dragging 会切到 grabbing */
+  cursor: pointer;
   -webkit-app-region: no-drag;
   user-select: none;
 }
@@ -533,6 +534,31 @@ body.mini-collapsing .mini-shell {
   border-radius: 50%;
   border: 2px solid #45606c;
   background: var(--bg-deep);
+}
+
+/* 操作进行中：节点位置显示一个旋转 spinner，配合右侧读数“显示中…/启动中…” */
+.mini-spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid rgba(56, 225, 160, 0.25);
+  border-top-color: var(--accent);
+  animation: mini-spin 0.7s linear infinite;
+}
+
+@keyframes mini-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 让进行中的那一行保持清晰（即便按钮处于 disabled），并把读数高亮成进行中色 */
+.mini-profile-card.busy .mini-profile-main:disabled {
+  opacity: 1;
+}
+
+.mini-profile-card.busy .mini-readout {
+  color: var(--accent-bright);
 }
 
 .mini-profile-card.bound .mini-node.ring {

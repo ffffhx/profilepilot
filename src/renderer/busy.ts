@@ -154,6 +154,8 @@ export async function focusProfileFromUi(profile: PublicProfile): Promise<void> 
         `${emphasizeName(profile.name)} 已请求显示，但 macOS 没有把它放到最前面。请检查辅助功能权限，或先关闭其它 Chrome 实例后重试。`,
         "error"
       );
+    } else {
+      setToast(`已将 ${emphasizeName(profile.name)} 显示到当前屏幕`);
     }
   } catch (error) {
     setToast(formatErrorMessage(error), "error");

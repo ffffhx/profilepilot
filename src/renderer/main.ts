@@ -1310,7 +1310,22 @@ if (store.viewMode === "mini") {
       return false;
     }
 
-    return !target.closest(".mini-profile-menu");
+    if (target.closest(".mini-profile-menu")) {
+      return false;
+    }
+
+    // 折叠态的圆 logo 整块可拖拽（它本身是按钮）。
+    if (target.closest(".mini-logo-dock")) {
+      return true;
+    }
+
+    // 展开态里点按钮（查看更多 / 收起 / 展开 / 行操作 / ⋯）只能是点击，不应触发拖拽——
+    // 否则拖拽的 start/end 会关闭并重建覆盖窗，导致面板瞬间失焦被收起。
+    if (target.closest("button")) {
+      return false;
+    }
+
+    return true;
   };
   const sendMiniDrag = (screenX: number, screenY: number, phase: "start" | "move" | "end"): void => {
     void profileApi().dragMiniWindow(screenX, screenY, phase).catch(() => {

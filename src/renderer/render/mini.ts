@@ -136,13 +136,23 @@ function renderMiniProfileCard(profile: PublicProfile): string {
   const launching = isBusyAction("launch-profile", { profileId: profile.id });
   const launchingCdp = isBusyAction("launch-cdp", { profileId: profile.id });
   const closing = isBusyAction("close-profile", { profileId: profile.id });
+  const busyHere = focusing || launching || launchingCdp || closing;
+  const busyLabel = focusing
+    ? "显示中…"
+    : launching
+      ? "启动中…"
+      : launchingCdp
+        ? "CDP 启动中…"
+        : closing
+          ? "关闭中…"
+          : "";
 
   return `
-    <article class="mini-profile-card ${port.kind}">
+    <article class="mini-profile-card ${port.kind} ${busyHere ? "busy" : ""}">
       <button type="button" class="mini-profile-main" data-action="${action}" data-id="${profile.id}" ${store.busy ? "disabled" : ""}>
-        <span class="mini-node ${port.kind === "live" ? "plane" : "ring"}" aria-hidden="true">${port.kind === "live" ? MINI_NODE_PLANE : ""}</span>
+        <span class="mini-node ${busyHere ? "loading" : port.kind === "live" ? "plane" : "ring"}" aria-hidden="true">${busyHere ? '<span class="mini-spinner"></span>' : port.kind === "live" ? MINI_NODE_PLANE : ""}</span>
         <span class="mini-profile-name">${escapeHtml(profile.name)}</span>
-        <span class="mini-readout">${escapeHtml(port.label)}</span>
+        <span class="mini-readout">${busyHere ? escapeHtml(busyLabel) : escapeHtml(port.label)}</span>
       </button>
       <div class="mini-menu-anchor" data-profile-actions>
         <button type="button" class="mini-menu-button ${menuOpen ? "active" : ""}" data-action="toggle-profile-menu" data-id="${profile.id}" aria-expanded="${menuOpen ? "true" : "false"}" ${store.busy ? "disabled" : ""}>...</button>

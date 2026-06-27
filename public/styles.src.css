@@ -119,6 +119,596 @@ body {
   color: var(--text);
 }
 
+html.mini-document:not(.mini-rendered),
+html.mini-document:not(.mini-rendered) body {
+  width: 64px;
+  height: 64px;
+  min-width: 64px;
+  min-height: 64px;
+  overflow: hidden;
+  background: transparent;
+}
+
+html.mini-document:not(.mini-rendered) #app.app-loading {
+  position: relative;
+  display: grid;
+  width: 64px;
+  height: 64px;
+  place-items: center;
+  overflow: hidden;
+  padding: 0;
+  color: transparent;
+  font-size: 0;
+}
+
+html.mini-document:not(.mini-rendered) #app.app-loading::before,
+html.mini-document:not(.mini-rendered) #app.app-loading::after {
+  position: absolute;
+  width: 46px;
+  height: 46px;
+  content: "";
+}
+
+html.mini-document:not(.mini-rendered) #app.app-loading::before {
+  background: linear-gradient(180deg, #82f5c9 0%, #2bbd86 100%);
+  clip-path: polygon(50% 19%, 75% 83%, 50% 68%, 25% 83%);
+}
+
+html.mini-document:not(.mini-rendered) #app.app-loading::after {
+  background: rgba(39, 168, 119, 0.55);
+  clip-path: polygon(50% 19%, 50% 68%, 25% 83%);
+}
+
+body.mini-mode {
+  min-width: 64px;
+  min-height: 64px;
+  overflow: hidden;
+  /* 始终透明：面板自身（.mini-shell）提供背景。
+     若这里给不透明底色，收起动画把 shell 缩小时会露出整块底色 → 黑色闪屏。 */
+  background: transparent;
+}
+
+body.mini-mode #app,
+.mini-root {
+  width: 100vw;
+  height: 100vh;
+}
+
+.mini-root-collapsed {
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  -webkit-app-region: no-drag;
+}
+
+.mini-dragging,
+.mini-dragging * {
+  cursor: grabbing !important;
+}
+
+.mini-logo-dock {
+  position: relative;
+  display: grid;
+  width: 100%;
+  height: 100%;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  cursor: grab;
+  -webkit-app-region: no-drag;
+  user-select: none;
+}
+
+/* 深色圆盘 + 青绿描边；呼吸效果做在描边明暗 + 收紧的辉光上（不是宽虚光晕） */
+.mini-logo-dock::after {
+  content: "";
+  position: absolute;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 35%, #16242d, #080f13);
+  border: 2px solid rgba(56, 225, 160, 0.85);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45);
+  animation: mini-dock-breathe 1.8s ease-in-out infinite;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.mini-logo-glyph {
+  position: relative;
+  z-index: 1;
+  width: 34px;
+  height: 34px;
+  display: block;
+  pointer-events: none;
+  filter: drop-shadow(0 0 3px rgba(56, 225, 160, 0.55));
+}
+
+/* 呼吸：描边在暗绿↔亮绿之间明灭 + 一圈收紧的辉光忽明忽暗，明显但不发虚 */
+@keyframes mini-dock-breathe {
+  0%,
+  100% {
+    border-color: rgba(56, 225, 160, 0.45);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45), 0 0 5px rgba(56, 225, 160, 0.25);
+  }
+
+  50% {
+    border-color: rgba(110, 242, 192, 1);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45), 0 0 14px rgba(56, 225, 160, 0.85);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mini-logo-dock::after {
+    animation: none;
+    border-color: rgba(56, 225, 160, 0.85);
+  }
+}
+
+.mini-mark-button {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+  flex: none;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+}
+
+.mini-loading {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  place-items: center;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.mini-shell {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 6px;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  background:
+    radial-gradient(118% 78% at 84% -14%, rgba(56, 225, 160, 0.1), transparent 52%),
+    linear-gradient(180deg, rgba(16, 25, 32, 0.98), rgba(8, 15, 20, 0.98));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  padding: 10px;
+  cursor: grab;
+  transform-origin: right top;
+  user-select: none;
+  /* 拖拽由渲染层的指针事件（dragMiniWindow）统一处理，
+     不要用 -webkit-app-region: drag —— 它会吞掉刚渲染出的按钮的首次点击。 */
+  /* 斜切左下 / 右上两角，打破方正轮廓，呼应 logo 的飞行斜角 */
+  clip-path: polygon(
+    0 0,
+    calc(100% - 14px) 0,
+    100% 14px,
+    100% 100%,
+    14px 100%,
+    0 calc(100% - 14px)
+  );
+}
+
+body.mini-expanding .mini-shell {
+  animation: mini-panel-in 0.15s cubic-bezier(0.18, 0.9, 0.24, 1) both;
+}
+
+body.mini-collapsing .mini-shell {
+  animation: mini-panel-out 0.13s cubic-bezier(0.46, 0, 0.2, 1) both;
+  pointer-events: none;
+}
+
+/* 收/展只做轻微缩放 + 淡入淡出（围绕中心），
+   不再向右上角大幅位移，避免左侧 header logo 在收起时被"扫"出来闪一下。 */
+@keyframes mini-panel-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes mini-panel-out {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+
+  to {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body.mini-expanding .mini-shell,
+  body.mini-collapsing .mini-shell {
+    animation-duration: 1ms;
+  }
+}
+
+.mini-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  height: 32px;
+}
+
+.mini-brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.mini-mark {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  filter: drop-shadow(0 0 6px rgba(56, 225, 160, 0.28));
+  pointer-events: none;
+}
+
+.mini-brand-text {
+  min-width: 0;
+}
+
+.mini-titlebar strong {
+  display: block;
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.mini-titlebar span {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.mini-window-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.mini-window-actions button,
+.mini-menu-button {
+  min-height: 26px;
+  border-radius: 6px;
+  padding: 0 8px;
+  font-size: 11px;
+}
+
+.mini-profile-list {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: 3px;
+}
+
+.mini-profile-list.expanded {
+  overflow-y: auto;
+  padding-right: 3px;
+}
+
+/* ---- 航线卡片：去盒子，靠"航线 + 节点 + 内光条"区分状态 ---- */
+.mini-profile-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 30px;
+  row-gap: 4px;
+  min-height: 44px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+}
+
+/* 贯穿的虚线航线（dim 底线，连接各节点中心） */
+.mini-profile-card::before {
+  content: "";
+  position: absolute;
+  left: 18px;
+  top: -3px;
+  bottom: -3px;
+  width: 2px;
+  background: repeating-linear-gradient(180deg, #2f4651 0 4px, transparent 4px 9px);
+  z-index: 0;
+}
+
+.mini-profile-card:first-child::before {
+  top: 22px;
+}
+
+.mini-profile-card:last-child::before {
+  bottom: 22px;
+}
+
+/* 运行中（live）：把该行的航段点亮成实心绿光，与节点同一条线 */
+.mini-profile-card.live::after {
+  content: "";
+  position: absolute;
+  left: 18px;
+  top: 7px;
+  bottom: 7px;
+  width: 2px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--accent), rgba(56, 225, 160, 0.4));
+  box-shadow: 0 0 7px rgba(56, 225, 160, 0.5);
+  z-index: 1;
+}
+
+/* 运行中整行铺一层渐隐青光，把左侧节点和右侧读数连成一片 */
+.mini-profile-card.live {
+  background: linear-gradient(
+    90deg,
+    rgba(56, 225, 160, 0.14),
+    rgba(56, 225, 160, 0.02) 56%,
+    transparent 80%
+  );
+}
+
+.mini-profile-card.bound {
+  background: linear-gradient(
+    90deg,
+    rgba(95, 182, 255, 0.12),
+    rgba(95, 182, 255, 0.02) 56%,
+    transparent 80%
+  );
+}
+
+.mini-profile-main {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-height: 44px;
+  border: 0;
+  border-radius: 9px 0 0 9px;
+  background: transparent;
+  box-shadow: none;
+  padding: 0 6px 0 12px;
+  text-align: left;
+}
+
+.mini-profile-main:hover:not(:disabled) {
+  border-color: transparent;
+  background: rgba(255, 255, 255, 0.04);
+  box-shadow: none;
+}
+
+/* 航点节点：运行=朝右机头（嵌在暗色圆点里，从光条中清晰浮出），未运行=空心环 */
+.mini-node {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+
+.mini-node.plane {
+  color: var(--accent);
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 50%, var(--bg-deep) 56%, rgba(7, 11, 14, 0) 62%);
+}
+
+.mini-node.plane svg {
+  width: 12px;
+  height: 12px;
+  display: block;
+  filter: drop-shadow(0 0 4px rgba(56, 225, 160, 0.85));
+}
+
+.mini-node.ring {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid #45606c;
+  background: var(--bg-deep);
+}
+
+.mini-profile-card.bound .mini-node.ring {
+  border-color: var(--info);
+  box-shadow: 0 0 7px rgba(95, 182, 255, 0.5);
+}
+
+.mini-profile-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 右侧仪表读数：端口/CDP 右对齐，填满原本的空白区 */
+.mini-readout {
+  flex: none;
+  max-width: 55%;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mini-profile-card.live .mini-readout {
+  color: var(--accent-bright);
+}
+
+.mini-profile-card.bound .mini-readout {
+  color: var(--info-bright);
+}
+
+.mini-menu-anchor {
+  position: relative;
+  z-index: 4;
+  display: grid;
+  align-self: stretch;
+  place-items: center;
+}
+
+.mini-menu-button {
+  width: 26px;
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  letter-spacing: 1px;
+}
+
+.mini-menu-button:hover:not(:disabled) {
+  border-color: var(--line);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+  box-shadow: none;
+}
+
+.mini-menu-button.active {
+  border-color: var(--accent-line);
+  background: rgba(56, 225, 160, 0.08);
+  color: var(--accent-bright);
+}
+
+.mini-profile-menu {
+  position: relative;
+  z-index: 3;
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 4px;
+  width: auto;
+  margin: -1px 0 3px 29px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: rgba(12, 21, 28, 0.96);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 10px 24px rgba(2, 6, 9, 0.28);
+  padding: 4px;
+}
+
+.mini-profile-menu button {
+  justify-content: center;
+  min-width: 0;
+  min-height: 26px;
+  border-radius: 6px;
+  padding: 0 4px;
+  overflow: hidden;
+  font-size: 10.5px;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mini-load-more {
+  display: block;
+  min-height: 24px;
+  border-top: 1px solid var(--line);
+  padding-top: 4px;
+}
+
+.mini-load-more button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 28px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  box-shadow: none;
+  padding: 0 10px 0 11px;
+  color: var(--info-bright);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  text-align: left;
+}
+
+/* 与航点同源的 ↳ 回勾，呼应"航线"主题 */
+.mini-load-more button::before {
+  content: "\21B3";
+  color: var(--info);
+  font-size: 13px;
+  line-height: 1;
+}
+
+.mini-load-more button:hover:not(:disabled) {
+  background: rgba(95, 182, 255, 0.08);
+  color: var(--accent-bright);
+  box-shadow: none;
+}
+
+.mini-empty {
+  display: grid;
+  min-height: 132px;
+  place-items: center;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.mini-toast {
+  position: fixed;
+  right: 10px;
+  bottom: 10px;
+  left: 10px;
+  z-index: 50;
+  overflow: hidden;
+  border: 1px solid var(--accent-line);
+  border-radius: 8px;
+  background: #0a1411;
+  color: #dcfff1;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  box-shadow: 0 18px 50px rgba(2, 6, 9, 0.7), var(--glow-accent);
+}
+
+.mini-toast.error {
+  border-color: var(--danger-line);
+  background: #1d0d0d;
+  color: #ffe5e1;
+}
+
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
@@ -178,6 +768,21 @@ button:focus-visible {
   border-color: var(--accent);
   outline: 3px solid var(--focus);
   outline-offset: 1px;
+}
+
+.mini-logo-dock,
+.mini-mark-button {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  box-shadow: none;
+}
+
+.mini-logo-dock:hover:not(:disabled),
+.mini-mark-button:hover:not(:disabled) {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
 }
 
 button.loading {
@@ -455,6 +1060,32 @@ h3 {
 .action-tooltip:hover::before,
 .action-tooltip:focus-within::before {
   transform: translate(-50%, 0) rotate(45deg);
+}
+
+.path-tooltip {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.path-tooltip::after {
+  max-width: min(560px, calc(100vw - 48px));
+  color: var(--accent-bright);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.path-tooltip > code {
+  width: 100%;
+}
+
+.profile-root-path-tip {
+  width: 100%;
+}
+
+.profile-path-tip {
+  flex: 1 1 auto;
 }
 
 /* ---- button variants ---- */
@@ -1713,7 +2344,7 @@ body:not(.booted) .layout {
    保证窗口变窄时按钮不会溢出到详情面板；名称/CDP 列自适应剩余空间并省略。 */
 .profiles-table th:nth-child(1),
 .profiles-table td:nth-child(1) {
-  width: auto;
+  width: 34%;
 }
 
 .profiles-table th:nth-child(2),
@@ -1817,6 +2448,14 @@ body:not(.booted) .layout {
   cursor: pointer;
 }
 
+.profiles-table tbody tr.table-group-row {
+  cursor: default;
+}
+
+.profiles-table tbody tr.profile-child-row {
+  position: relative;
+}
+
 .profiles-table tr.selected td {
   background: rgba(56, 225, 160, 0.07);
 }
@@ -1861,6 +2500,87 @@ body:not(.booted) .layout {
 .status-dot.native {
   background: var(--warn);
   box-shadow: 0 0 7px rgba(242, 177, 62, 0.6);
+}
+
+.profile-name-cell {
+  position: relative;
+}
+
+.profile-child-row .profile-name-cell {
+  padding-left: 40px;
+}
+
+.profile-child-row .profile-pick {
+  position: relative;
+  z-index: 1;
+}
+
+.tree-branch {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 18px;
+  width: 20px;
+  pointer-events: none;
+}
+
+.tree-branch::before,
+.tree-branch::after {
+  position: absolute;
+  content: "";
+}
+
+.tree-branch::before {
+  top: 0;
+  bottom: 0;
+  left: 8px;
+  border-left: 1px solid rgba(143, 161, 173, 0.28);
+}
+
+.profile-child-row.last-in-group .tree-branch::before {
+  bottom: 50%;
+}
+
+.tree-branch::after {
+  top: 50%;
+  left: 8px;
+  width: 14px;
+  border-top: 1px solid rgba(143, 161, 173, 0.34);
+}
+
+.profile-child-row.selected .tree-branch::before,
+.profile-child-row.selected .tree-branch::after {
+  border-color: rgba(56, 225, 160, 0.58);
+}
+
+.profile-path-line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  margin-top: 5px;
+  padding-left: 17px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.profile-path-line span {
+  flex: 0 0 auto;
+  color: rgba(143, 161, 173, 0.78);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.profile-path-line code {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--accent-dark);
+  font-family: var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .state-pill.running {
@@ -1918,6 +2638,81 @@ body:not(.booted) .layout {
 
 .table-group-row .count {
   margin-left: 10px;
+}
+
+.profile-root-row td {
+  color: var(--muted);
+}
+
+.profile-root-content {
+  display: grid;
+  grid-template-columns: minmax(220px, auto) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.profile-root-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+}
+
+.profile-root-node {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 4px;
+  background: linear-gradient(180deg, rgba(95, 182, 255, 0.14), rgba(95, 182, 255, 0.03));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.profile-root-node::before {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 8px;
+  height: 2px;
+  border-radius: 99px;
+  background: var(--accent-dark);
+  content: "";
+}
+
+.profile-root-node::after {
+  position: absolute;
+  top: 6px;
+  left: 3px;
+  width: 10px;
+  height: 2px;
+  border-radius: 99px;
+  background: rgba(157, 239, 201, 0.72);
+  content: "";
+}
+
+.profile-root-content code {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(2, 6, 9, 0.35);
+  padding: 5px 8px;
+  color: var(--accent-dark);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-root-content .count {
+  margin-left: 0;
 }
 
 /* 基础态保留为 CSS：仍被 extensions/account-sync 复用，profiles 处已叠加等值工具类。 */

@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import path from "node:path";
 import type {
   ExternalChromeInstance
@@ -9,6 +10,17 @@ import { RuntimeProfile } from "./internal-types";
 export function makeNativeRuntimeKey(dirName: string): string {
   return `native:${dirName}`;
 }
+
+const PROFILE_OPEN_FILE_RELATIVE_PATHS = [
+  "History",
+  "Cookies",
+  "Web Data",
+  "Login Data",
+  "Favicons",
+  "Top Sites",
+  path.join("Local Storage", "leveldb", "LOCK"),
+  path.join("Session Storage", "LOCK")
+];
 
 export function parseRuntimeProcess(line: string): (RuntimeProfile & { pid: number; command: string }) | null {
   const match = line.match(
@@ -101,6 +113,55 @@ export async function getListeningPortsByPid(targetPids: Set<number>): Promise<M
   }
 
   return portsByPid;
+}
+
+export async function getOpenProfilePidsByPath(profilePaths: string[]): Promise<Map<string, number[]>> {
+  const profileByCandidatePath = new Map<string, string>();
+  for (const profilePath of profilePaths) {
+    for (const relativePath of PROFILE_OPEN_FILE_RELATIVE_PATHS) {
+      const candidatePath = path.join(profilePath, relativePath);
+      if (existsSync(candidatePath)) {
+        profileByCandidatePath.set(candidatePath, profilePath);
+      }
+    }
+  }
+
+  if (!profileByCandidatePath.size) {
+    return new Map();
+  }
+
+  let stdout = "";
+  try {
+    ({ stdout } = await execFileAsync(
+      "lsof",
+      ["-nP", "-F", "pn", "--", ...profileByCandidatePath.keys()],
+      { maxBuffer: 1024 * 1024 * 8 }
+    ));
+  } catch {
+    return new Map();
+  }
+
+  const pidsByProfile = new Map<string, number[]>();
+  let currentPid: number | null = null;
+  for (const line of stdout.split("\n")) {
+    if (line.startsWith("p")) {
+      const pid = Number(line.slice(1));
+      currentPid = Number.isInteger(pid) && pid > 0 ? pid : null;
+      continue;
+    }
+
+    if (!line.startsWith("n") || currentPid === null) {
+      continue;
+    }
+
+    const profilePath = profileByCandidatePath.get(line.slice(1));
+    if (!profilePath) {
+      continue;
+    }
+    pidsByProfile.set(profilePath, uniqueNumbers([...(pidsByProfile.get(profilePath) || []), currentPid]));
+  }
+
+  return pidsByProfile;
 }
 
 export function parseLsofPid(line: string): number | null {
@@ -302,5 +363,36 @@ export async function isChromeRunning(): Promise<boolean> {
       .some((line) => line.includes("Google Chrome.app/Contents/MacOS/Google Chrome") || line.includes("Google Chrome Helper"));
   } catch {
     return true;
+  }
+}
+
+export async function getChromeProcessPids(): Promise<number[]> {
+  try {
+    const { stdout } = await execFileAsync("ps", ["-axo", "pid=,command="], {
+      maxBuffer: 1024 * 1024 * 8,
+      env: POSIX_LOCALE_ENV
+    });
+
+    return uniqueNumbers(
+      stdout
+        .split("\n")
+        .map((line) => {
+          const match = line.trim().match(/^(\d+)\s+(.*)$/);
+          if (!match) {
+            return null;
+          }
+
+          const command = match[2];
+          if (!command.includes("Google Chrome.app/Contents/MacOS/Google Chrome") && !command.includes("Google Chrome Helper")) {
+            return null;
+          }
+
+          const pid = Number(match[1]);
+          return Number.isInteger(pid) && pid > 0 ? pid : null;
+        })
+        .filter((pid): pid is number => pid !== null)
+    );
+  } catch {
+    return [];
   }
 }

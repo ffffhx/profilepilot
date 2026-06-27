@@ -2,12 +2,20 @@ import { isBusyAction, renderToastBody } from "../busy";
 import { renderConfirmModal } from "../confirm";
 import { renderAccountSyncPanel } from "./account-sync";
 import { renderExtensionMigrationPanel } from "./extensions";
+import { renderMini } from "./mini";
 import { renderAgentBrowserSetupModal, renderAgentConfigModal, renderCdpModal, renderExtensionMigrationModal, renderGlobalInstructionsModal, renderNewModal, renderRenameModal } from "./modals";
 import { renderDetails, renderEmpty, renderExternalDetails, renderProfilesPanel } from "./profiles";
 import { appRoot, store } from "../state";
 import { escapeHtml, renderBusyBanner, renderButtonLabel } from "../util";
 
 export function render(): void {
+  if (store.viewMode === "mini") {
+    renderMini();
+    return;
+  }
+
+  document.body.classList.remove("mini-mode", "mini-panel-open");
+
   if (!store.state) {
     appRoot.innerHTML = '<div class="app-loading p-8 text-muted font-mono text-[13px] tracking-[0.08em] uppercase">Loading...</div>';
     return;
@@ -37,6 +45,7 @@ export function render(): void {
           </div>
         </div>
         <div class="header-actions">
+          <button type="button" data-action="open-mini-window" title="切换到悬浮窗">悬浮窗</button>
           <button type="button" data-action="open-global-instructions">全局指令</button>
           <button type="button" class="${refreshing ? "loading" : ""}" data-action="refresh" ${store.busy ? "disabled" : ""}>
             ${renderButtonLabel(refreshing, "刷新", "刷新中…")}

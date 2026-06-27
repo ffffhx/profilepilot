@@ -5,6 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ProfilePilot</title>
     <link rel="icon" href="./assets/profilepilot-mark.svg" type="image/svg+xml" />
+    <script>
+      if (new URLSearchParams(window.location.search).get("mode") === "mini") {
+        document.documentElement.classList.add("mini-document");
+      }
+    </script>
     <link rel="stylesheet" href="./app.css" />
   </head>
   <body>

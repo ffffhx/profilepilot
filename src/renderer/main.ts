@@ -156,6 +156,24 @@ appRoot.addEventListener("click", (event) => {
     return;
   }
 
+  if (action === "open-mini-window") {
+    void profileApi().showMiniWindow().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+    return;
+  }
+
+  if (action === "show-main-window") {
+    void profileApi().showMainWindow().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+    return;
+  }
+
+  if (action === "toggle-mini-expanded") {
+    store.miniExpanded = !store.miniExpanded;
+    store.miniScrollTop = 0;
+    store.openProfileMenuId = null;
+    render();
+    return;
+  }
+
   if (action === "open-global-instructions") {
     store.modal = { kind: "global-instructions" };
     store.editingGlobalInstructionId = null;
@@ -529,6 +547,22 @@ appRoot.addEventListener("click", (event) => {
     return;
   }
 
+  if ((action === "pin-mini-profile" || action === "unpin-mini-profile") && id) {
+    const profile = store.state.profiles.find((item) => item.id === id);
+    if (!profile) {
+      return;
+    }
+    const pinned = action === "pin-mini-profile";
+    void withBusy(async () => {
+      store.state = await profileApi().setMiniProfilePinned(id, pinned);
+    }, pinned ? `已固定 ${emphasizeName(profile.name)} 到悬浮窗` : `已取消 ${emphasizeName(profile.name)} 的悬浮窗固定`, {
+      key: "mini-pin",
+      message: pinned ? `正在固定 ${profile.name}…` : `正在取消固定 ${profile.name}…`,
+      profileId: id
+    });
+    return;
+  }
+
   if (action === "rename-profile" && id) {
     const profile = store.state.profiles.find((item) => item.id === id);
     if (!profile) {
@@ -573,6 +607,90 @@ appRoot.addEventListener("click", (event) => {
       message: `正在启动 ${profile?.name || "Profile"}…`,
       profileId: id
     });
+    return;
+  }
+
+  if ((action === "mini-focus-profile" || action === "mini-launch" || action === "mini-launch-cdp" || action === "mini-close-profile" || action === "mini-copy-port") && id) {
+    const profile = store.state.profiles.find((item) => item.id === id);
+    if (!profile) {
+      setToast("这个 Profile 已不存在", "error");
+      return;
+    }
+
+    store.openProfileMenuId = null;
+
+    if (action === "mini-focus-profile") {
+      if (!profile.running) {
+        setToast(`${emphasizeName(profile.name)} 当前未运行`);
+        return;
+      }
+      void focusProfileFromUi(profile);
+      return;
+    }
+
+    if (action === "mini-launch") {
+      if (profile.running) {
+        setToast(`${emphasizeName(profile.name)} 已经在运行中`);
+        return;
+      }
+      void withBusy(async () => {
+        store.state = await profileApi().launchProfile(id);
+      }, `已启动 ${emphasizeName(profile.name)}`, {
+        key: "launch-profile",
+        message: `正在启动 ${profile.name}…`,
+        profileId: id
+      });
+      return;
+    }
+
+    if (action === "mini-launch-cdp") {
+      if (profile.source !== "isolated") {
+        setToast("系统 Profile 不支持端口式 CDP 启动", "error");
+        return;
+      }
+      if (profile.running) {
+        setToast(profile.cdpUrl ? `${emphasizeName(profile.name)} 已开启 CDP：${profile.cdpUrl}` : `先关闭 ${emphasizeName(profile.name)}，再以 CDP 模式启动`, profile.cdpUrl ? "normal" : "error");
+        return;
+      }
+      void withBusy(async () => {
+        const port = profile.fixedCdpPort ?? (await profileApi().suggestCdpPort(9223)).port;
+        store.state = await profileApi().launchProfileWithCdp(id, port);
+      }, `已以 CDP 启动 ${emphasizeName(profile.name)}`, {
+        key: "launch-cdp",
+        message: `正在以 CDP 启动 ${profile.name}…`,
+        profileId: id
+      });
+      return;
+    }
+
+    if (action === "mini-close-profile") {
+      if (!profile.running) {
+        setToast(`${emphasizeName(profile.name)} 当前未运行`);
+        return;
+      }
+      void withBusy(async () => {
+        store.state = await profileApi().closeProfile(id);
+      }, `已关闭 ${emphasizeName(profile.name)}`, {
+        key: "close-profile",
+        message: `正在关闭 ${profile.name}…`,
+        profileId: id
+      });
+      return;
+    }
+
+    const copyValue = profile.cdpUrl || (profile.fixedCdpPort ? `http://127.0.0.1:${profile.fixedCdpPort}` : null);
+    if (!copyValue) {
+      setToast("这个 Profile 当前没有可复制的端口", "error");
+      return;
+    }
+    if (!navigator.clipboard?.writeText) {
+      setToast("当前环境不能直接复制，请手动选中文本复制", "error");
+      return;
+    }
+    void navigator.clipboard
+      .writeText(copyValue)
+      .then(() => setToast(`已复制 ${copyValue.replace(/^https?:\/\//, "")}`))
+      .catch(() => setToast("复制失败，请手动选中文本复制", "error"));
     return;
   }
 
@@ -1079,6 +1197,245 @@ appRoot.addEventListener("submit", (event) => {
   });
 });
 
+if (store.viewMode === "mini") {
+  render();
+}
+
 loadState().catch((error: unknown) => {
   appRoot.innerHTML = `<div class="app-loading p-8 text-muted font-mono text-[13px] tracking-[0.08em] uppercase">${escapeHtml(formatErrorMessage(error))}</div>`;
 });
+
+if (store.viewMode === "mini") {
+  let lastMiniScrollAt = 0;
+  let miniPanelTransitionId = 0;
+  let miniPanelClosing = false;
+  let suppressMiniClick = false;
+  let miniDragState: {
+    pointerId: number;
+    startScreenX: number;
+    startScreenY: number;
+    dragging: boolean;
+  } | null = null;
+  const miniDragThreshold = 4;
+  const miniPanelAnimationMs = 180;
+  const clearMiniPanelAnimation = (): void => {
+    document.body.classList.remove("mini-expanding", "mini-collapsing");
+  };
+  const markMiniPanelAnimation = (className: "mini-expanding" | "mini-collapsing"): void => {
+    clearMiniPanelAnimation();
+    // Force the class transition to start from a clean frame after repeated quick toggles.
+    void document.body.offsetWidth;
+    document.body.classList.add(className);
+    window.setTimeout(() => {
+      document.body.classList.remove(className);
+    }, miniPanelAnimationMs + 80);
+  };
+  const applyMiniPanelOpen = (open: boolean): void => {
+    if (store.miniPanelOpen === open) {
+      return;
+    }
+
+    store.miniPanelOpen = open;
+    if (!open) {
+      store.openProfileMenuId = null;
+    }
+    render();
+  };
+  const setMiniPanelOpen = (open: boolean): void => {
+    if (store.miniPanelOpen === open && !miniPanelClosing) {
+      return;
+    }
+
+    if (!open) {
+      if (!store.miniPanelOpen || miniPanelClosing) {
+        return;
+      }
+
+      const transitionId = ++miniPanelTransitionId;
+      miniPanelClosing = true;
+      store.openProfileMenuId = null;
+      render();
+      markMiniPanelAnimation("mini-collapsing");
+      window.setTimeout(() => {
+        if (miniPanelTransitionId !== transitionId) {
+          return;
+        }
+        void profileApi()
+          .setMiniWindowPanelOpen(false)
+          .then(() => {
+            if (miniPanelTransitionId !== transitionId) {
+              return;
+            }
+
+            miniPanelClosing = false;
+            // 先渲染出 dock（替换掉 shell），再清除动画类，
+            // 避免清除动画的瞬间 shell 以 opacity:1 在 64px 窗口里闪一下。
+            applyMiniPanelOpen(false);
+            clearMiniPanelAnimation();
+          })
+          .catch((error: unknown) => {
+            if (miniPanelTransitionId === transitionId) {
+              miniPanelClosing = false;
+              clearMiniPanelAnimation();
+            }
+            setToast(formatErrorMessage(error), "error");
+          });
+      }, miniPanelAnimationMs);
+      return;
+    }
+
+    const transitionId = ++miniPanelTransitionId;
+    miniPanelClosing = false;
+    clearMiniPanelAnimation();
+    void profileApi()
+      .setMiniWindowPanelOpen(true)
+      .then(() => {
+        if (miniPanelTransitionId === transitionId) {
+          markMiniPanelAnimation("mini-expanding");
+          applyMiniPanelOpen(true);
+        }
+      })
+      .catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+  };
+  const markMiniScroll = (event: Event): void => {
+    const target = event.target instanceof Element ? event.target : null;
+    const list = target?.closest<HTMLElement>(".mini-profile-list");
+    if (list) {
+      lastMiniScrollAt = Date.now();
+      store.miniScrollTop = list.scrollTop;
+    }
+  };
+  const isMiniDragTarget = (target: Element | null): boolean => {
+    if (!target?.closest(".mini-root")) {
+      return false;
+    }
+
+    return !target.closest(".mini-profile-menu");
+  };
+  const sendMiniDrag = (screenX: number, screenY: number, phase: "start" | "move" | "end"): void => {
+    void profileApi().dragMiniWindow(screenX, screenY, phase).catch(() => {
+      // Dragging is best-effort; failures should not interrupt normal mini controls.
+    });
+  };
+  const finishMiniDrag = (event: PointerEvent): void => {
+    if (!miniDragState || miniDragState.pointerId !== event.pointerId) {
+      return;
+    }
+
+    if (miniDragState.dragging) {
+      suppressMiniClick = true;
+      event.preventDefault();
+      event.stopPropagation();
+    }
+    sendMiniDrag(event.screenX, event.screenY, "end");
+    miniDragState = null;
+    document.body.classList.remove("mini-dragging");
+  };
+
+  appRoot.addEventListener(
+    "click",
+    (event) => {
+      if (!suppressMiniClick) {
+        return;
+      }
+
+      suppressMiniClick = false;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    },
+    { capture: true }
+  );
+  appRoot.addEventListener(
+    "pointerdown",
+    (event) => {
+      if (event.button !== 0) {
+        return;
+      }
+
+      const target = event.target instanceof Element ? event.target : null;
+      if (!isMiniDragTarget(target)) {
+        return;
+      }
+
+      miniDragState = {
+        pointerId: event.pointerId,
+        startScreenX: event.screenX,
+        startScreenY: event.screenY,
+        dragging: false
+      };
+      try {
+        target?.setPointerCapture(event.pointerId);
+      } catch {
+        // Some SVG children cannot capture; pointer events still work while inside the window.
+      }
+      sendMiniDrag(event.screenX, event.screenY, "start");
+    },
+    { capture: true }
+  );
+  appRoot.addEventListener(
+    "pointermove",
+    (event) => {
+      if (!miniDragState || miniDragState.pointerId !== event.pointerId) {
+        return;
+      }
+
+      const deltaX = event.screenX - miniDragState.startScreenX;
+      const deltaY = event.screenY - miniDragState.startScreenY;
+      if (!miniDragState.dragging && Math.hypot(deltaX, deltaY) < miniDragThreshold) {
+        return;
+      }
+
+      miniDragState.dragging = true;
+      document.body.classList.add("mini-dragging");
+      event.preventDefault();
+      event.stopPropagation();
+      sendMiniDrag(event.screenX, event.screenY, "move");
+    },
+    { capture: true }
+  );
+  appRoot.addEventListener("pointerup", finishMiniDrag, { capture: true });
+  appRoot.addEventListener("pointercancel", finishMiniDrag, { capture: true });
+  appRoot.addEventListener(
+    "click",
+    (event) => {
+      const target = event.target instanceof Element ? event.target : null;
+      const toggle = target?.closest<HTMLElement>('[data-action="toggle-mini-panel"]');
+      if (!toggle) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      setMiniPanelOpen(!store.miniPanelOpen);
+    },
+    { capture: true }
+  );
+  appRoot.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && store.miniPanelOpen) {
+      setMiniPanelOpen(false);
+    }
+  });
+  profileApi().onMiniWindowPanelOpenChanged((open) => {
+    if (!open) {
+      if (miniPanelClosing || !store.miniPanelOpen) {
+        return;
+      }
+
+      setMiniPanelOpen(false);
+      return;
+    }
+
+    miniPanelTransitionId += 1;
+    miniPanelClosing = false;
+    markMiniPanelAnimation("mini-expanding");
+    applyMiniPanelOpen(true);
+  });
+  appRoot.addEventListener("wheel", markMiniScroll, { passive: true });
+  appRoot.addEventListener("scroll", markMiniScroll, { capture: true, passive: true });
+
+  window.setInterval(() => {
+    if (!store.busy && !miniDragState && Date.now() - lastMiniScrollAt > 900) {
+      void loadState().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+    }
+  }, 2500);
+}

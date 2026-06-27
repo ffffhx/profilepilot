@@ -3,9 +3,18 @@ import { store } from "../state";
 import { ExternalChromeInstance, PublicProfile } from "../types";
 import { NATIVE_CDP_UNSUPPORTED_NOTE, cdpLaunchButtonTitle, closeButtonTitle, deleteButtonTitle, escapeHtml, focusButtonTitle, formatDate, launchButtonTitle, listeningPortsNote, profileStatusLabel, renderButtonLabel, sourceDetail } from "../util";
 
+interface ProfileRootGroup {
+  key: string;
+  label: string;
+  userDataDir: string;
+  profiles: PublicProfile[];
+}
+
 // 受管 Profile 表格与外部实例放进同一个框：它们本质都是 Profile，只是
 // 来源不同；外部实例仍只读（仅显示/关闭），用框内分隔段和类型标签区分。
 export function renderProfilesPanel(profiles: PublicProfile[], externalInstances: ExternalChromeInstance[]): string {
+  const profileGroups = groupProfilesByUserDataDir(profiles);
+
   return `
     <div class="profiles-table-wrap overflow-visible border-solid border border-line rounded-xl bg-panel [box-shadow:inset_0_1px_0_rgba(255,255,255,0.04),0_18px_44px_rgba(2,6,9,0.35)]">
       <table class="profiles-table w-full border-collapse table-fixed">
@@ -18,7 +27,7 @@ export function renderProfilesPanel(profiles: PublicProfile[], externalInstances
           </tr>
         </thead>
         <tbody>
-          ${profiles.map(renderProfileRow).join("")}
+          ${profileGroups.map(renderProfileRootGroup).join("")}
           ${externalInstances.length ? renderExternalRows(externalInstances) : ""}
         </tbody>
       </table>
@@ -26,16 +35,70 @@ export function renderProfilesPanel(profiles: PublicProfile[], externalInstances
   `;
 }
 
-export function renderProfileRow(profile: PublicProfile): string {
-  const selected = profile.id === store.selectedId;
+export function groupProfilesByUserDataDir(profiles: PublicProfile[]): ProfileRootGroup[] {
+  const groups: ProfileRootGroup[] = [];
+  const indexByKey = new Map<string, number>();
+
+  profiles.forEach((profile) => {
+    const key = `${profile.source}:${profile.userDataDir}`;
+    const existingIndex = indexByKey.get(key);
+    if (existingIndex !== undefined) {
+      groups[existingIndex].profiles.push(profile);
+      return;
+    }
+
+    indexByKey.set(key, groups.length);
+    groups.push({
+      key,
+      label: profile.source === "native" ? "系统 Chrome User Data" : "ProfilePilot User Data",
+      userDataDir: profile.userDataDir,
+      profiles: [profile]
+    });
+  });
+
+  return groups;
+}
+
+export function renderProfileRootGroup(group: ProfileRootGroup): string {
+  const countLabel = group.profiles.length === 1 ? "1 Profile" : `${group.profiles.length} Profiles`;
+  return (
+    renderProfileRootRow(group.label, group.userDataDir, countLabel) +
+    group.profiles.map((profile, index) => renderProfileRow(profile, index === group.profiles.length - 1)).join("")
+  );
+}
+
+export function renderProfileRootRow(label: string, pathLabel: string, countLabel: string): string {
   return `
-    <tr class="${selected ? "selected" : ""}" data-action="select" data-id="${profile.id}" data-profile-row tabindex="0" aria-selected="${selected ? "true" : "false"}">
-      <td>
+    <tr class="table-group-row profile-root-row">
+      <td colspan="4">
+        <div class="profile-root-content">
+          <span class="profile-root-label"><span class="profile-root-node" aria-hidden="true"></span>${escapeHtml(label)}</span>
+          ${renderPathTooltip(pathLabel, pathLabel, "profile-root-path-tip")}
+          <span class="count">${escapeHtml(countLabel)}</span>
+        </div>
+      </td>
+    </tr>
+  `;
+}
+
+export function renderProfileRow(profile: PublicProfile, lastInGroup = false): string {
+  const selected = profile.id === store.selectedId;
+  const pathKind = profile.source === "native" ? "Profile Dir" : "Profile Data";
+  const pathLabel = profile.source === "native" ? profile.dirName : profileDataLabel(profile);
+  const fullPath = profile.profileDataPath;
+  return `
+    <tr class="profile-child-row ${lastInGroup ? "last-in-group" : ""} ${selected ? "selected" : ""}" data-action="select" data-id="${profile.id}" data-profile-row tabindex="0" aria-selected="${selected ? "true" : "false"}">
+      <td class="profile-name-cell">
+        <span class="tree-branch" aria-hidden="true"></span>
         <div class="profile-pick w-full min-h-[auto] py-1 px-0.5 text-left">
           <span class="profile-name-line flex items-center gap-2 min-w-0">
             <span class="status-dot w-[9px] h-[9px] flex-[0_0_auto] rounded-full bg-line-strong ${profile.running ? "running" : profile.source === "native" ? "native" : ""}"></span>
             <span class="profile-name block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[15px] font-[650] leading-[1.25]">${escapeHtml(profile.name)}</span>
             ${profile.isDefault ? '<span class="native-badge inline-flex items-center justify-center border-solid border border-warn-line rounded-full px-2 py-[3px] bg-warn-soft text-warn-bright font-mono text-[10px] font-semibold tracking-[0.06em]">Default</span>' : ""}
+          </span>
+          <span class="profile-path-line">
+            <span>${pathKind}</span>
+            ${renderPathTooltip(pathLabel, fullPath, "profile-path-tip")}
           </span>
         </div>
       </td>
@@ -52,6 +115,23 @@ export function renderProfileRow(profile: PublicProfile): string {
       </td>
     </tr>
   `;
+}
+
+function renderPathTooltip(label: string, fullPath: string, className: string): string {
+  const escapedFullPath = escapeHtml(fullPath);
+  return `<span class="action-tooltip path-tooltip ${className}" data-tooltip="${escapedFullPath}" title="${escapedFullPath}"><code>${escapeHtml(label)}</code></span>`;
+}
+
+export function profileDataLabel(profile: PublicProfile): string {
+  const root = profile.userDataDir.replace(/\/+$/, "");
+  const dataPath = profile.profileDataPath.replace(/\/+$/, "");
+  if (dataPath === root) {
+    return ".";
+  }
+  if (dataPath.startsWith(`${root}/`)) {
+    return dataPath.slice(root.length + 1);
+  }
+  return profile.profileDataPath;
 }
 
 // 表格里直接展示该 Profile 的 CDP 连接地址：正在以 CDP 运行时显示实时地址（live）；
@@ -103,6 +183,8 @@ export function renderProfileActions(profile: PublicProfile): string {
   const renaming = isBusyAction("rename-profile", { profileId: profile.id });
   const deleting = isBusyAction("delete-profile", { profileId: profile.id });
   const agentConfigBusy = isBusyAction("agent-config", { profileId: profile.id });
+  const miniPinnedBusy = isBusyAction("mini-pin", { profileId: profile.id });
+  const miniPinDisabled = store.busy || (!profile.pinnedToMini && (store.state?.miniProfileIds.length || 0) >= 3);
 
   return `
     <div class="profile-actions" data-profile-actions>
@@ -144,6 +226,9 @@ export function renderProfileActions(profile: PublicProfile): string {
               </button>
               <button type="button" class="${renaming ? "loading" : ""}" data-action="rename-profile" data-id="${profile.id}" ${store.busy ? "disabled" : ""}>
                 ${renderButtonLabel(renaming, "修改名称", "保存中…")}
+              </button>
+              <button type="button" class="${miniPinnedBusy ? "loading" : ""}" data-action="${profile.pinnedToMini ? "unpin-mini-profile" : "pin-mini-profile"}" data-id="${profile.id}" ${miniPinDisabled ? "disabled" : ""}>
+                ${renderButtonLabel(miniPinnedBusy, profile.pinnedToMini ? "取消悬浮窗固定" : "固定到悬浮窗", "保存中…")}
               </button>
               ${
                 profile.source === "isolated"
@@ -323,12 +408,34 @@ export function renderDetails(profile: PublicProfile | null): string {
         </div>
         ${renderListeningPortsDetail(profile)}
         ${renderConnectionDetail(profile)}
-        <div class="detail-row">
-          <span>目录</span>
-          <code class="path-box">${escapeHtml(profile.path)}</code>
-        </div>
+        ${renderProfilePathDetails(profile)}
       </div>
     </aside>
+  `;
+}
+
+export function renderProfilePathDetails(profile: PublicProfile): string {
+  const userDataNote =
+    profile.source === "native"
+      ? "这一层是系统 Chrome 的父级 User Data 目录；Default、test 等系统个人资料共享这一层。"
+      : "ProfilePilot 启动 Chrome 时把 --user-data-dir 指向这一层；固定 CDP 端口绑定这个运行实例。";
+  const profileDataLabel = profile.source === "native" ? "Profile 子目录" : "Chrome Profile 数据目录";
+  const profileDataNote =
+    profile.source === "native"
+      ? "当前行对应的 Chrome 个人资料子目录。"
+      : "Chrome 在这个独立 User Data 目录下存放实际浏览数据的位置。";
+
+  return `
+    <div class="detail-row">
+      <span>用户数据目录</span>
+      <code class="path-box">${escapeHtml(profile.userDataDir)}</code>
+      <small class="detail-note">${escapeHtml(userDataNote)}</small>
+    </div>
+    <div class="detail-row">
+      <span>${profileDataLabel}</span>
+      <code class="path-box">${escapeHtml(profile.profileDataPath)}</code>
+      <small class="detail-note">${escapeHtml(profileDataNote)}</small>
+    </div>
   `;
 }
 

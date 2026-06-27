@@ -12,6 +12,7 @@ import type {
   AccountSyncSkippedItem,
   AppState,
   CdpPortSuggestion,
+  DeleteProfileOptions,
   DeleteProfileResult,
   ExtensionDeleteResult,
   ExtensionMigrationCopiedExtension,
@@ -45,13 +46,14 @@ import { extensionDeleteRelativePaths, isLikelyExtensionId, scanProfileExtension
 import { copyPath, throwIfAborted, waitIfPaused } from "./fs-copy";
 import { POSIX_LOCALE_ENV, chromeProfileDirName, defaultDataDir, execFileAsync, exists, isProcessGoneError, isSafePathSegment, isSameFilesystemPath, makePathSegment, makeSlug, normalizeAccountSyncRecords, normalizeNativeProfileMetadata, normalizeProfile, normalizeProfileName, normalizeSafeRelativePath, shouldCopyLocalExtensionPackagePath, sleep, uniqueStrings } from "./fs-util";
 import { AccountSyncCopyPlan, AccountSyncDataLocation, ProfileRef, ProfileRestartPlan, RuntimeProfile } from "./internal-types";
-import { addRuntimeProcess, attachListeningPorts, emptyRuntimeProfile, findExternalChromeInstances, isChromeRunning, isImplicitDefaultChromeProcess, makeNativeRuntimeKey, mergeRuntimeProfiles, parseRuntimeProcess } from "./process-scan";
+import { addRuntimeProcess, attachListeningPorts, emptyRuntimeProfile, findExternalChromeInstances, getChromeProcessPids, getOpenProfilePidsByPath, isChromeRunning, isImplicitDefaultChromeProcess, makeNativeRuntimeKey, mergeRuntimeProfiles, parseRuntimeProcess } from "./process-scan";
 import { ProfileManagerError } from "./profile-manager-error";
 
 export { ProfileManagerError } from "./profile-manager-error";
 
 export const APP_TITLE = "ProfilePilot";
 const CHROME_REMOTE_DEBUGGING_URL = "chrome://inspect/#remote-debugging";
+const MINI_PROFILE_LIMIT = 3;
 
 export class ProfileManager {
   private readonly profilesDir: string;
@@ -92,7 +94,7 @@ export class ProfileManager {
     const nativeChromeProfiles = await scanNativeChromeProfiles();
     const nativePaths = nativeChromeProfiles.map((profile) => profile.path);
     const isolatedPaths = registry.profiles.map((profile) => this.isolatedProfilePath(profile));
-    const runtime = await this.getRuntime(nativePaths.concat(isolatedPaths), nativeChromeProfiles.map((profile) => profile.dirName));
+    const runtime = await this.getRuntime(nativePaths.concat(isolatedPaths), nativeChromeProfiles);
 
     const nativeProfiles = nativeChromeProfiles.map((profile) => this.toNativePublicProfile(profile, registry, runtime));
     const isolatedProfiles = (await Promise.all(
@@ -120,6 +122,12 @@ export class ProfileManager {
       nativeChromeUserDataDir(),
       this.dataDir
     ]);
+    const validProfileIds = new Set(profiles.map((profile) => profile.id));
+    const miniProfileIds = normalizeMiniProfileIds(registry.miniProfileIds, validProfileIds);
+    const miniProfileIdSet = new Set(miniProfileIds);
+    profiles.forEach((profile) => {
+      profile.pinnedToMini = miniProfileIdSet.has(profile.id);
+    });
 
     return {
       appTitle: APP_TITLE,
@@ -133,7 +141,8 @@ export class ProfileManager {
       currentProfile: runningProfiles[0] || lastLaunchedProfile,
       chromeLauncher: this.getLauncherLabel(),
       accountSyncRecords: Object.values(registry.accountSyncRecords || {}).sort((a, b) => b.syncedAt.localeCompare(a.syncedAt)),
-      externalInstances
+      externalInstances,
+      miniProfileIds
     };
   }
 
@@ -290,6 +299,32 @@ export class ProfileManager {
     await removeAgentBrowserConfigFile();
   }
 
+  async setMiniProfilePinned(profileId: string, pinned: boolean): Promise<void> {
+    const state = await this.getState();
+    const validProfileIds = new Set(state.profiles.map((profile) => profile.id));
+    if (!validProfileIds.has(profileId)) {
+      throw new ProfileManagerError("没有找到这个 Profile。", "PROFILE_NOT_FOUND");
+    }
+
+    const registry = await this.loadRegistry();
+    const current = normalizeMiniProfileIds(registry.miniProfileIds, validProfileIds);
+    const hasProfile = current.includes(profileId);
+    const next = pinned
+      ? hasProfile
+        ? current
+        : [...current, profileId]
+      : current.filter((id) => id !== profileId);
+
+    if (next.length > MINI_PROFILE_LIMIT) {
+      throw new ProfileManagerError(`Mini 最多只能固定 ${MINI_PROFILE_LIMIT} 个 Profile。`, "MINI_PROFILE_LIMIT");
+    }
+
+    await this.saveRegistry({
+      ...registry,
+      miniProfileIds: next
+    });
+  }
+
   async closeProfile(profileId: string): Promise<void> {
     const profile = await this.getPublicProfile(profileId);
     if (!profile.running || !profile.pids.length) {
@@ -348,6 +383,66 @@ export class ProfileManager {
   // 关闭后稍作等待再返回，避免随后的重新启动读到尚未落盘的半成品状态。
   private async settleAfterClose(): Promise<void> {
     await sleep(900);
+  }
+
+  private async closeChromeBeforeNativeDelete(): Promise<void> {
+    const state = await this.getState();
+    for (const profile of state.profiles.filter((item) => item.running)) {
+      await this.closeProfileIfRunning(profile.id);
+    }
+
+    for (const instance of state.externalInstances.filter((item) => item.browser.startsWith("Google Chrome"))) {
+      await this.closeExternalInstance(instance.userDataDir).catch((error) => {
+        if (error instanceof ProfileManagerError && error.code === "EXTERNAL_INSTANCE_NOT_RUNNING") {
+          return;
+        }
+        throw error;
+      });
+    }
+
+    if (process.platform === "darwin") {
+      try {
+        const appName = process.env.CHROME_APP_NAME || "Google Chrome";
+        await execFileAsync("osascript", ["-e", `tell application "${appName}" to quit`], { timeout: 4000 });
+      } catch {
+        // 若 AppleScript 没有权限或超时，继续用进程信号兜底。
+      }
+    }
+
+    if (await this.waitUntilChromeStops(7000)) {
+      await this.settleAfterClose();
+      return;
+    }
+
+    const remainingPids = await getChromeProcessPids();
+    if (remainingPids.length) {
+      this.signalPids(remainingPids, "SIGTERM");
+    }
+    if (await this.waitUntilChromeStops(4000)) {
+      await this.settleAfterClose();
+      return;
+    }
+
+    const stuckPids = await getChromeProcessPids();
+    if (stuckPids.length) {
+      this.signalPids(stuckPids, "SIGKILL");
+    }
+    if (!(await this.waitUntilChromeStops(1500))) {
+      throw new ProfileManagerError("无法结束正在运行的 Chrome，请手动关闭后重试。", "CHROME_CLOSE_FAILED");
+    }
+    await this.settleAfterClose();
+  }
+
+  private async waitUntilChromeStops(timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (!(await isChromeRunning())) {
+        return true;
+      }
+      await sleep(250);
+    }
+
+    return !(await isChromeRunning());
   }
 
   private async captureProfileRestartPlan(profile: PublicProfile): Promise<ProfileRestartPlan> {
@@ -541,7 +636,7 @@ export class ProfileManager {
     }
   }
 
-  async deleteProfile(profileId: string): Promise<DeleteProfileResult> {
+  async deleteProfile(profileId: string, options: DeleteProfileOptions = {}): Promise<DeleteProfileResult> {
     if (this.inFlightDeletions.has(profileId)) {
       throw new ProfileManagerError("这个 Profile 正在删除中，请稍候。", "PROFILE_DELETE_IN_FLIGHT");
     }
@@ -549,7 +644,7 @@ export class ProfileManager {
     try {
       const ref = parseProfileId(profileId);
       if (ref.source === "native") {
-        return await this.deleteNativeProfile(ref.dirName);
+        return await this.deleteNativeProfile(ref.dirName, options);
       }
       return await this.deleteIsolatedProfile(ref.id);
     } finally {
@@ -1511,7 +1606,7 @@ export class ProfileManager {
     return cdpPort;
   }
 
-  private async deleteNativeProfile(dirName: string): Promise<DeleteProfileResult> {
+  private async deleteNativeProfile(dirName: string, options: DeleteProfileOptions): Promise<DeleteProfileResult> {
     const state = await this.getState();
     const profile = state.profiles.find((item) => item.source === "native" && item.dirName === dirName);
     if (!profile) {
@@ -1524,14 +1619,29 @@ export class ProfileManager {
       await this.closeProfileIfRunning(profile.id);
     }
     if (await isChromeRunning()) {
+      if (!options.quitChromeBeforeDelete) {
+        throw new ProfileManagerError("删除 Chrome Profile 前请先退出 Chrome。", "CHROME_RUNNING");
+      }
+      await this.closeChromeBeforeNativeDelete();
+    }
+    if (await isChromeRunning()) {
       throw new ProfileManagerError("删除 Chrome Profile 前请先退出 Chrome。", "CHROME_RUNNING");
     }
 
     const trashPath = await this.moveToTrash(profile.path, profile.dirName);
     await removeNativeProfileFromLocalState(profile.dirName);
     const registry = await this.loadRegistry();
+    let registryChanged = false;
     if (registry.nativeProfiles) {
       delete registry.nativeProfiles[profile.dirName];
+      registryChanged = true;
+    }
+    const nextMiniProfileIds = (registry.miniProfileIds || []).filter((id) => id !== profile.id);
+    if (nextMiniProfileIds.length !== (registry.miniProfileIds || []).length) {
+      registry.miniProfileIds = nextMiniProfileIds;
+      registryChanged = true;
+    }
+    if (registryChanged) {
       await this.saveRegistry(registry);
     }
 
@@ -1562,7 +1672,12 @@ export class ProfileManager {
 
     // 先从 registry 移除条目（含同步记录），再移到废纸篓：
     // 这样即便移废纸篓后崩溃，剩下的也只是无害的孤儿目录，而不是“界面里有但目录已没”的孤儿条目。
-    await this.saveRegistry({ ...registry, profiles: nextProfiles, accountSyncRecords });
+    await this.saveRegistry({
+      ...registry,
+      profiles: nextProfiles,
+      accountSyncRecords,
+      miniProfileIds: (registry.miniProfileIds || []).filter((profileId) => profileId !== deletedProfileId)
+    });
     let trashPath: string | null;
     try {
       trashPath = await this.moveToTrash(this.isolatedProfilePath(storedProfile), storedProfile.dirName);
@@ -1623,7 +1738,8 @@ export class ProfileManager {
           ? (parsed.profiles.map(normalizeProfile).filter(Boolean) as StoredProfile[])
           : [],
         nativeProfiles,
-        accountSyncRecords
+        accountSyncRecords,
+        miniProfileIds: normalizeMiniProfileIds(parsed.miniProfileIds)
       };
     } catch (error) {
       const backup = `${this.registryPath}.broken-${Date.now()}`;
@@ -1634,7 +1750,7 @@ export class ProfileManager {
       } catch {
         // 无法备份损坏文件时也只能干净启动。
       }
-      return { profiles: [], nativeProfiles: {}, accountSyncRecords: {} };
+      return { profiles: [], nativeProfiles: {}, accountSyncRecords: {}, miniProfileIds: [] };
     }
   }
 
@@ -1678,8 +1794,9 @@ export class ProfileManager {
     await recoverInterruptedAccountSyncArtifactsForProfile(location.profilePath);
   }
 
-  private async getRuntime(profilePaths: string[], nativeDirNames: string[]): Promise<Map<string, RuntimeProfile>> {
+  private async getRuntime(profilePaths: string[], nativeProfiles: NativeChromeProfile[]): Promise<Map<string, RuntimeProfile>> {
     const runtime = new Map<string, RuntimeProfile>();
+    const nativeDirNames = nativeProfiles.map((profile) => profile.dirName);
     const defaultNativeKey = nativeDirNames.includes("Default") ? makeNativeRuntimeKey("Default") : null;
 
     if (!profilePaths.length && !nativeDirNames.length) {
@@ -1692,11 +1809,13 @@ export class ProfileManager {
         env: POSIX_LOCALE_ENV
       });
 
+      const processesByPid = new Map<number, RuntimeProfile & { pid: number; command: string }>();
       for (const line of stdout.split("\n")) {
         const processInfo = parseRuntimeProcess(line);
         if (!processInfo) {
           continue;
         }
+        processesByPid.set(processInfo.pid, processInfo);
 
         const { command } = processInfo;
 
@@ -1718,6 +1837,21 @@ export class ProfileManager {
             continue;
           }
           addRuntimeProcess(runtime, makeNativeRuntimeKey(dirName), processInfo);
+        }
+      }
+
+      const nativeProfilesByPath = new Map(nativeProfiles.map((profile) => [profile.path, profile]));
+      const openProfilePids = await getOpenProfilePidsByPath(nativeProfiles.map((profile) => profile.path));
+      for (const [profilePath, pids] of openProfilePids) {
+        const profile = nativeProfilesByPath.get(profilePath);
+        if (!profile) {
+          continue;
+        }
+        for (const pid of pids) {
+          const processInfo = processesByPid.get(pid);
+          if (processInfo) {
+            addRuntimeProcess(runtime, makeNativeRuntimeKey(profile.dirName), processInfo);
+          }
         }
       }
 
@@ -1746,6 +1880,8 @@ export class ProfileManager {
         (profile.isDefault ? "系统默认 Profile" : profile.name),
       dirName: profile.dirName,
       path: profile.path,
+      userDataDir: profile.userDataDir,
+      profileDataPath: profile.path,
       createdAt: null,
       lastLaunchedAt: runtimeProfile.startedAt || registry.nativeProfiles?.[profile.dirName]?.lastLaunchedAt || null,
       userName: profile.userName,
@@ -1757,7 +1893,8 @@ export class ProfileManager {
       cdpUrl: makeCdpUrl(runtimeProfile.cdpPort),
       fixedCdpPort: null,
       agentConfigPort: null,
-      listeningPorts: runtimeProfile.listeningPorts
+      listeningPorts: runtimeProfile.listeningPorts,
+      pinnedToMini: false
     };
   }
 
@@ -1765,6 +1902,7 @@ export class ProfileManager {
     const profilePath = this.isolatedProfilePath(profile);
     const runtimeProfile = runtime.get(profilePath) || emptyRuntimeProfile();
     const userName = await readIsolatedProfileUserName(profilePath);
+    const profileDataPath = await resolveIsolatedProfileDataPath(profilePath);
 
     return {
       id: makeIsolatedProfileId(profile.id),
@@ -1772,6 +1910,8 @@ export class ProfileManager {
       name: profile.name,
       dirName: profile.dirName,
       path: profilePath,
+      userDataDir: profilePath,
+      profileDataPath,
       createdAt: profile.createdAt,
       lastLaunchedAt: runtimeProfile.startedAt || profile.lastLaunchedAt,
       userName,
@@ -1783,7 +1923,8 @@ export class ProfileManager {
       cdpUrl: makeCdpUrl(runtimeProfile.cdpPort),
       fixedCdpPort: profile.fixedCdpPort ?? null,
       agentConfigPort: null,
-      listeningPorts: runtimeProfile.listeningPorts
+      listeningPorts: runtimeProfile.listeningPorts,
+      pinnedToMini: false
     };
   }
 
@@ -2018,4 +2159,10 @@ export class ProfileManager {
 
 export function createProfileManager(): ProfileManager {
   return new ProfileManager(process.env.CPM_DATA_DIR || defaultDataDir());
+}
+
+function normalizeMiniProfileIds(input: unknown, validProfileIds?: Set<string>): string[] {
+  const ids = Array.isArray(input) ? uniqueStrings(input.filter((id): id is string => typeof id === "string")) : [];
+  const validIds = validProfileIds ? ids.filter((id) => validProfileIds.has(id)) : ids;
+  return validIds.slice(0, MINI_PROFILE_LIMIT);
 }

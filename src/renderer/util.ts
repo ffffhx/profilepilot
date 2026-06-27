@@ -91,7 +91,9 @@ export function sourceLabel(profile: PublicProfile): string {
 }
 
 export function sourceDetail(profile: PublicProfile): string {
-  return profile.source === "native" ? "系统 Profile（由 Google Chrome 管理）" : "工具独立 Profile（由本工具创建）";
+  return profile.source === "native"
+    ? "系统 Profile（Google Chrome User Data 下的子 Profile）"
+    : "工具独立 Profile（独立 User Data Dir）";
 }
 
 export function extensionInstallTypeLabel(extension: ProfileExtensionInfo): string {
@@ -164,7 +166,7 @@ export function launchButtonTitle(profile: PublicProfile): string {
 // 系统默认 Profile 用的是 Chrome 默认数据目录，从 Chrome 136 起会静默拒绝
 // --remote-debugging-port，所以无法像独立 Profile 那样开 CDP 调试端口。
 export const NATIVE_CDP_UNSUPPORTED_NOTE =
-  "这是系统默认 Profile，没法开 CDP 调试端口。Agent 仍可连接，但需要你先在网页里完成一次授权。";
+  "这是系统 Chrome Profile，没法由 ProfilePilot 开端口式 CDP 调试。Agent 仍可连接，但需要你先在网页里完成一次授权。";
 
 export function cdpLaunchButtonTitle(profile: PublicProfile): string {
   if (profile.source === "native") {

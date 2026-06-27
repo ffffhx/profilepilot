@@ -39,6 +39,7 @@ export interface Registry {
   profiles: StoredProfile[];
   nativeProfiles?: Record<string, NativeProfileMetadata>;
   accountSyncRecords?: Record<string, AccountSyncRecord>;
+  miniProfileIds?: string[];
 }
 
 export type ProfileSource = "native" | "isolated";
@@ -49,6 +50,8 @@ export interface PublicProfile {
   name: string;
   dirName: string;
   path: string;
+  userDataDir: string;
+  profileDataPath: string;
   createdAt: string | null;
   lastLaunchedAt: string | null;
   userName: string | null;
@@ -61,6 +64,7 @@ export interface PublicProfile {
   fixedCdpPort: number | null;
   agentConfigPort: number | null;
   listeningPorts: number[];
+  pinnedToMini: boolean;
 }
 
 export interface NativeChromeProfile {
@@ -68,6 +72,7 @@ export interface NativeChromeProfile {
   name: string;
   userName: string | null;
   path: string;
+  userDataDir: string;
   isDefault: boolean;
 }
 
@@ -95,12 +100,17 @@ export interface AppState {
   chromeLauncher: string;
   accountSyncRecords: AccountSyncRecord[];
   externalInstances: ExternalChromeInstance[];
+  miniProfileIds: string[];
 }
 
 export interface DeleteProfileResult {
   deletedProfile: PublicProfile;
   trashPath: string | null;
   state: AppState;
+}
+
+export interface DeleteProfileOptions {
+  quitChromeBeforeDelete?: boolean;
 }
 
 export interface ExtensionDataPath {
@@ -395,6 +405,14 @@ export interface ProfileManagerApi {
   suggestCdpPort(preferredPort?: number | null): Promise<CdpPortSuggestion>;
   setAgentBrowserConfig(id: string, port: number): Promise<AppState>;
   clearAgentBrowserConfig(id: string): Promise<AppState>;
+  setMiniProfilePinned(id: string, pinned: boolean): Promise<AppState>;
+  showMiniWindow(): Promise<void>;
+  showMainWindow(): Promise<void>;
+  setMiniWindowPanelOpen(open: boolean): Promise<void>;
+  requestMiniWindowPanelClose(): Promise<void>;
+  dragMiniWindow(screenX: number, screenY: number, phase: "start" | "move" | "end"): Promise<void>;
+  isMiniWindowPointerInside(): Promise<boolean>;
+  onMiniWindowPanelOpenChanged(listener: (open: boolean) => void): () => void;
   readGlobalInstructions(): Promise<GlobalInstructionsSnapshot>;
   writeGlobalInstruction(request: GlobalInstructionUpdateRequest): Promise<GlobalInstructionsSnapshot>;
   ensureClaudeInstructionShell(): Promise<GlobalInstructionsSnapshot>;
@@ -406,7 +424,7 @@ export interface ProfileManagerApi {
   openProfileFolder(id: string): Promise<AppState>;
   openProfileExtensionsPage(id: string): Promise<AppState>;
   openPath(path: string): Promise<boolean>;
-  deleteProfile(id: string): Promise<DeleteProfileResult>;
+  deleteProfile(id: string, options?: DeleteProfileOptions): Promise<DeleteProfileResult>;
   inspectAccountSyncDiff(request: AccountSyncRequest): Promise<AccountSyncDiffResult>;
   scanProfileExtensions(profileId: string): Promise<ExtensionScanResult>;
   inspectExtensionMigrationDiff(request: ExtensionMigrationRequest): Promise<ExtensionMigrationDiffResult>;

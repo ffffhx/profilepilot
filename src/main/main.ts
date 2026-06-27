@@ -1,4 +1,5 @@
-import { app, BrowserWindow, ipcMain, nativeTheme, type IpcMainInvokeEvent } from "electron";
+import { promises as fs } from "node:fs";
+import { app, BrowserWindow, globalShortcut, ipcMain, nativeTheme, screen, type IpcMainInvokeEvent, type Rectangle } from "electron";
 import path from "node:path";
 import { IPC_CHANNELS } from "../shared/ipc";
 import type {
@@ -10,6 +11,7 @@ import type {
   AppState,
   CancelOperationRequest,
   ControlOperationRequest,
+  DeleteProfileOptions,
   DeleteProfileResult,
   ExtensionDeleteResult,
   ExtensionMigrationDiffResult,
@@ -22,15 +24,28 @@ import type {
   OperationProgress,
   OperationProgressUpdate
 } from "../shared/types";
+import { defaultDataDir } from "./fs-util";
 import { ensureClaudeInstructionShell, readGlobalInstructions, writeGlobalInstruction } from "./global-instructions";
 import { APP_TITLE, createProfileManager } from "./profile-manager";
 
 const profileManager = createProfileManager();
 let mainWindow: BrowserWindow | null = null;
+let miniWindow: BrowserWindow | null = null;
+let miniOutsideClickWindows: BrowserWindow[] = [];
+let miniOutsideClickUpdateTimer: NodeJS.Timeout | null = null;
+let miniWindowSaveTimer: NodeJS.Timeout | null = null;
 const APP_ICON_PATH = path.join(__dirname, "../../public/assets/profilepilot-icon-512.png");
 // 整个界面的统一缩放系数（等比例放大字号/间距/控件）。想再大/再小只改这一个数。
 const UI_ZOOM_FACTOR = 1.0;
+const MINI_DOCK_SIZE = 80;
+// 一键唤起 / 聚焦 Mini 面板的全局快捷键（macOS = Cmd+Shift+P）
+const MINI_SUMMON_SHORTCUT = "CommandOrControl+Shift+P";
+const MINI_PANEL_WIDTH = 360;
+const MINI_PANEL_HEIGHT = 250;
+const MINI_WINDOW_MARGIN = 16;
 const activeOperations = new Map<string, ActiveOperation>();
+let miniWindowPanelOpen = false;
+let miniWindowDragState: { offsetX: number; offsetY: number } | null = null;
 
 interface ActiveOperation {
   controller: AbortController;
@@ -72,6 +87,526 @@ class OperationPauseController implements OperationPauseSignal {
 
 function operationId(key: string, profileId?: string): string {
   return `${key}:${profileId || "*"}`;
+}
+
+function miniWindowStatePath(): string {
+  return path.join(process.env.CPM_DATA_DIR || defaultDataDir(), "mini-window.json");
+}
+
+interface MiniWindowPosition {
+  x: number;
+  y: number;
+  dock?: boolean;
+}
+
+function defaultMiniWindowDockBounds(): Rectangle {
+  const workArea = screen.getPrimaryDisplay().workArea;
+  return {
+    x: workArea.x + workArea.width - MINI_DOCK_SIZE - MINI_WINDOW_MARGIN,
+    y: workArea.y + MINI_WINDOW_MARGIN,
+    width: MINI_DOCK_SIZE,
+    height: MINI_DOCK_SIZE
+  };
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
+function normalizeMiniWindowDockBounds(saved: MiniWindowPosition | null): Rectangle {
+  if (!saved) {
+    return defaultMiniWindowDockBounds();
+  }
+
+  const savedX = saved.dock === false ? saved.x + MINI_PANEL_WIDTH - MINI_DOCK_SIZE : saved.x;
+  const candidate = { x: savedX, y: saved.y, width: MINI_DOCK_SIZE, height: MINI_DOCK_SIZE };
+  const workArea = screen.getDisplayMatching(candidate).workArea;
+  return {
+    x: clamp(candidate.x, workArea.x, workArea.x + workArea.width - MINI_DOCK_SIZE),
+    y: clamp(candidate.y, workArea.y, workArea.y + workArea.height - MINI_DOCK_SIZE),
+    width: MINI_DOCK_SIZE,
+    height: MINI_DOCK_SIZE
+  };
+}
+
+function miniDockBoundsFromWindowBounds(bounds: Rectangle): Rectangle {
+  return {
+    x: bounds.width > MINI_DOCK_SIZE ? bounds.x + bounds.width - MINI_DOCK_SIZE : bounds.x,
+    y: bounds.y,
+    width: MINI_DOCK_SIZE,
+    height: MINI_DOCK_SIZE
+  };
+}
+
+function miniPanelBoundsFromDockBounds(dockBounds: Rectangle): Rectangle {
+  const candidate = {
+    x: dockBounds.x - (MINI_PANEL_WIDTH - MINI_DOCK_SIZE),
+    y: dockBounds.y,
+    width: MINI_PANEL_WIDTH,
+    height: MINI_PANEL_HEIGHT
+  };
+  const workArea = screen.getDisplayMatching(dockBounds).workArea;
+  return {
+    x: clamp(candidate.x, workArea.x, workArea.x + workArea.width - MINI_PANEL_WIDTH),
+    y: clamp(candidate.y, workArea.y, workArea.y + workArea.height - MINI_PANEL_HEIGHT),
+    width: MINI_PANEL_WIDTH,
+    height: MINI_PANEL_HEIGHT
+  };
+}
+
+function clampMiniWindowBoundsToPoint(bounds: Rectangle, point: { x: number; y: number }): Rectangle {
+  const workArea = screen.getDisplayNearestPoint(point).workArea;
+  return {
+    x: clamp(bounds.x, workArea.x, workArea.x + workArea.width - bounds.width),
+    y: clamp(bounds.y, workArea.y, workArea.y + workArea.height - bounds.height),
+    width: bounds.width,
+    height: bounds.height
+  };
+}
+
+function raiseMiniWindow(windowRef = miniWindow): void {
+  if (!windowRef || windowRef.isDestroyed()) {
+    return;
+  }
+
+  windowRef.setAlwaysOnTop(true, "pop-up-menu");
+  (windowRef as BrowserWindow & { moveTop?: () => void }).moveTop?.();
+}
+
+function closeMiniOutsideClickWindows(): void {
+  if (miniOutsideClickUpdateTimer) {
+    clearTimeout(miniOutsideClickUpdateTimer);
+    miniOutsideClickUpdateTimer = null;
+  }
+
+  const windows = miniOutsideClickWindows.splice(0);
+  windows.forEach((windowRef) => {
+    if (!windowRef.isDestroyed()) {
+      windowRef.close();
+    }
+  });
+}
+
+function clearMiniWindowBoundsSave(): void {
+  if (miniWindowSaveTimer) {
+    clearTimeout(miniWindowSaveTimer);
+    miniWindowSaveTimer = null;
+  }
+}
+
+function miniOutsideClickBounds(panelBounds: Rectangle): Rectangle[] {
+  const workArea = screen.getDisplayMatching(panelBounds).workArea;
+  const panelRight = panelBounds.x + panelBounds.width;
+  const panelBottom = panelBounds.y + panelBounds.height;
+  const workRight = workArea.x + workArea.width;
+  const workBottom = workArea.y + workArea.height;
+  const candidates: Rectangle[] = [
+    {
+      x: workArea.x,
+      y: workArea.y,
+      width: workArea.width,
+      height: panelBounds.y - workArea.y
+    },
+    {
+      x: workArea.x,
+      y: panelBounds.y,
+      width: panelBounds.x - workArea.x,
+      height: panelBounds.height
+    },
+    {
+      x: panelRight,
+      y: panelBounds.y,
+      width: workRight - panelRight,
+      height: panelBounds.height
+    },
+    {
+      x: workArea.x,
+      y: panelBottom,
+      width: workArea.width,
+      height: workBottom - panelBottom
+    }
+  ];
+
+  return candidates.filter((bounds) => bounds.width > 0 && bounds.height > 0);
+}
+
+function requestMiniWindowPanelClose(): void {
+  if (miniWindowPanelOpen) {
+    notifyMiniWindowPanelOpen(false);
+  }
+}
+
+function showMiniOutsideClickWindows(): void {
+  const windowRef = miniWindow;
+  closeMiniOutsideClickWindows();
+  if (!windowRef || windowRef.isDestroyed() || !windowRef.isVisible() || !miniWindowPanelOpen) {
+    return;
+  }
+
+  const html = encodeURIComponent(`<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        background: transparent;
+        cursor: default;
+      }
+    </style>
+  </head>
+  <body>
+    <script>
+      window.addEventListener("pointerdown", () => {
+        window.profileManager?.requestMiniWindowPanelClose?.();
+      });
+    </script>
+  </body>
+</html>`);
+  const overlayUrl = `data:text/html;charset=utf-8,${html}`;
+  miniOutsideClickWindows = miniOutsideClickBounds(windowRef.getBounds()).map((bounds) => {
+    const overlayWindow = new BrowserWindow({
+      ...bounds,
+      frame: false,
+      transparent: true,
+      hasShadow: false,
+      resizable: false,
+      movable: false,
+      minimizable: false,
+      maximizable: false,
+      fullscreenable: false,
+      skipTaskbar: true,
+      show: false,
+      alwaysOnTop: true,
+      backgroundColor: "#00000000",
+      webPreferences: {
+        preload: path.join(__dirname, "../preload.js"),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false
+      }
+    });
+
+    overlayWindow.setAlwaysOnTop(true, "floating");
+    overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    overlayWindow.on("closed", () => {
+      miniOutsideClickWindows = miniOutsideClickWindows.filter((item) => item !== overlayWindow);
+    });
+    void overlayWindow.loadURL(overlayUrl).then(() => {
+      if (!overlayWindow.isDestroyed()) {
+        overlayWindow.showInactive();
+      }
+      if (!windowRef.isDestroyed()) {
+        windowRef.show();
+        raiseMiniWindow(windowRef);
+        windowRef.focus();
+      }
+    });
+
+    return overlayWindow;
+  });
+}
+
+function scheduleMiniOutsideClickWindowsUpdate(): void {
+  if (!miniWindowPanelOpen) {
+    closeMiniOutsideClickWindows();
+    return;
+  }
+
+  if (miniOutsideClickUpdateTimer) {
+    clearTimeout(miniOutsideClickUpdateTimer);
+  }
+  miniOutsideClickUpdateTimer = setTimeout(() => {
+    miniOutsideClickUpdateTimer = null;
+    showMiniOutsideClickWindows();
+  }, 80);
+}
+
+async function readMiniWindowPosition(): Promise<MiniWindowPosition | null> {
+  try {
+    const raw = await fs.readFile(miniWindowStatePath(), "utf8");
+    const parsed = JSON.parse(raw) as Partial<MiniWindowPosition>;
+    if (Number.isFinite(parsed.x) && Number.isFinite(parsed.y)) {
+      return { x: Number(parsed.x), y: Number(parsed.y), dock: parsed.dock === true };
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+async function saveMiniWindowBounds(bounds: Rectangle): Promise<void> {
+  const statePath = miniWindowStatePath();
+  await fs.mkdir(path.dirname(statePath), { recursive: true });
+  await fs.writeFile(
+    statePath,
+    `${JSON.stringify({ x: Math.round(bounds.x), y: Math.round(bounds.y), dock: true }, null, 2)}\n`,
+    "utf8"
+  );
+}
+
+function saveMiniWindowBoundsSoon(bounds: Rectangle): void {
+  clearMiniWindowBoundsSave();
+  miniWindowSaveTimer = setTimeout(() => {
+    miniWindowSaveTimer = null;
+    void saveMiniWindowBounds(bounds);
+  }, 180);
+}
+
+async function createMiniWindow(): Promise<BrowserWindow> {
+  if (miniWindow && !miniWindow.isDestroyed()) {
+    return miniWindow;
+  }
+
+  const bounds = normalizeMiniWindowDockBounds(await readMiniWindowPosition());
+  miniWindow = new BrowserWindow({
+    ...bounds,
+    width: MINI_DOCK_SIZE,
+    height: MINI_DOCK_SIZE,
+    minWidth: MINI_DOCK_SIZE,
+    minHeight: MINI_DOCK_SIZE,
+    maxWidth: MINI_PANEL_WIDTH,
+    maxHeight: MINI_PANEL_HEIGHT,
+    resizable: false,
+    frame: false,
+    transparent: true,
+    hasShadow: false,
+    show: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    title: `${APP_TITLE} Mini`,
+    icon: APP_ICON_PATH,
+    backgroundColor: "#00000000",
+    webPreferences: {
+      preload: path.join(__dirname, "../preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false
+    }
+  });
+
+  raiseMiniWindow(miniWindow);
+  miniWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  miniWindow.webContents.on("did-finish-load", () => {
+    notifyMiniWindowPanelOpen(miniWindowPanelOpen);
+  });
+  miniWindow.on("blur", () => {
+    if (miniWindowPanelOpen) {
+      notifyMiniWindowPanelOpen(false);
+    }
+  });
+  miniWindow.on("moved", () => {
+    const windowRef = miniWindow;
+    if (windowRef && !windowRef.isDestroyed()) {
+      if (miniWindowDragState) {
+        return;
+      }
+
+      saveMiniWindowBoundsSoon(miniDockBoundsFromWindowBounds(windowRef.getBounds()));
+      scheduleMiniOutsideClickWindowsUpdate();
+    }
+  });
+  miniWindow.on("closed", () => {
+    closeMiniOutsideClickWindows();
+    clearMiniWindowBoundsSave();
+    miniWindow = null;
+  });
+
+  await miniWindow.loadFile(path.join(__dirname, "../../public/index.html"), { query: { mode: "mini" } });
+  await waitForMiniWindowFirstPaint(miniWindow, ".mini-logo-glyph");
+
+  return miniWindow;
+}
+
+async function waitForMiniWindowFirstPaint(windowRef: BrowserWindow, selector = ".mini-logo-glyph, .mini-shell"): Promise<void> {
+  if (windowRef.isDestroyed() || windowRef.webContents.isDestroyed()) {
+    return;
+  }
+
+  try {
+    await Promise.race([
+      windowRef.webContents.executeJavaScript(
+        `new Promise((resolve) => {
+          const selector = ${JSON.stringify(selector)};
+          const started = performance.now();
+          const wait = () => {
+            const ready = Boolean(document.querySelector(selector));
+            if (ready || performance.now() - started > 500) {
+              requestAnimationFrame(() => resolve(true));
+              return;
+            }
+            requestAnimationFrame(wait);
+          };
+          wait();
+        })`,
+        true
+      ),
+      new Promise((resolve) => setTimeout(resolve, 650))
+    ]);
+  } catch {
+    // Showing a hidden mini window is still safe if the renderer was reloaded or closed mid-wait.
+  }
+}
+
+function notifyMiniWindowPanelOpen(open: boolean): void {
+  const windowRef = miniWindow;
+  if (!windowRef || windowRef.isDestroyed() || windowRef.webContents.isDestroyed()) {
+    return;
+  }
+
+  windowRef.webContents.send(IPC_CHANNELS.miniWindowPanelOpenChanged, open);
+}
+
+function setMiniWindowPanelOpen(open: boolean): void {
+  const windowRef = miniWindow;
+  if (!windowRef || windowRef.isDestroyed()) {
+    miniWindowPanelOpen = open;
+    return;
+  }
+
+  const currentBounds = windowRef.getBounds();
+  const expectedWidth = open ? MINI_PANEL_WIDTH : MINI_DOCK_SIZE;
+  const expectedHeight = open ? MINI_PANEL_HEIGHT : MINI_DOCK_SIZE;
+  if (miniWindowPanelOpen === open && currentBounds.width === expectedWidth && currentBounds.height === expectedHeight) {
+    notifyMiniWindowPanelOpen(open);
+    if (open) {
+      showMiniOutsideClickWindows();
+      raiseMiniWindow(windowRef);
+    } else {
+      closeMiniOutsideClickWindows();
+    }
+    return;
+  }
+
+  const dockBounds = miniDockBoundsFromWindowBounds(currentBounds);
+  miniWindowPanelOpen = open;
+  windowRef.setBounds(open ? miniPanelBoundsFromDockBounds(dockBounds) : normalizeMiniWindowDockBounds(dockBounds), false);
+  notifyMiniWindowPanelOpen(open);
+  if (open) {
+    showMiniOutsideClickWindows();
+    raiseMiniWindow(windowRef);
+  } else {
+    closeMiniOutsideClickWindows();
+  }
+  void saveMiniWindowBounds(dockBounds);
+}
+
+function isMiniWindowPointerInside(): boolean {
+  const windowRef = miniWindow;
+  if (!windowRef || windowRef.isDestroyed() || !windowRef.isVisible()) {
+    return false;
+  }
+
+  const bounds = windowRef.getBounds();
+  const point = screen.getCursorScreenPoint();
+  return point.x >= bounds.x && point.y >= bounds.y && point.x < bounds.x + bounds.width && point.y < bounds.y + bounds.height;
+}
+
+function dragMiniWindow(event: IpcMainInvokeEvent, screenX: number, screenY: number, phase: "start" | "move" | "end"): void {
+  const windowRef = miniWindow;
+  if (!windowRef || windowRef.isDestroyed() || windowRef.webContents !== event.sender) {
+    return;
+  }
+
+  if (phase === "end") {
+    miniWindowDragState = null;
+    clearMiniWindowBoundsSave();
+    void saveMiniWindowBounds(miniDockBoundsFromWindowBounds(windowRef.getBounds()));
+    scheduleMiniOutsideClickWindowsUpdate();
+    return;
+  }
+
+  const pointerX = Number(screenX);
+  const pointerY = Number(screenY);
+  if (!Number.isFinite(pointerX) || !Number.isFinite(pointerY)) {
+    return;
+  }
+
+  const currentBounds = windowRef.getBounds();
+  if (phase === "start" || !miniWindowDragState) {
+    miniWindowDragState = {
+      offsetX: pointerX - currentBounds.x,
+      offsetY: pointerY - currentBounds.y
+    };
+    closeMiniOutsideClickWindows();
+  }
+
+  if (phase === "start") {
+    return;
+  }
+
+  const nextBounds = clampMiniWindowBoundsToPoint(
+    {
+      x: Math.round(pointerX - miniWindowDragState.offsetX),
+      y: Math.round(pointerY - miniWindowDragState.offsetY),
+      width: currentBounds.width,
+      height: currentBounds.height
+    },
+    { x: pointerX, y: pointerY }
+  );
+  windowRef.setBounds(nextBounds, false);
+}
+
+async function showMiniWindow(): Promise<void> {
+  const windowRef = await createMiniWindow();
+  setMiniWindowPanelOpen(false);
+  await waitForMiniWindowFirstPaint(windowRef, ".mini-logo-glyph");
+  windowRef.show();
+  raiseMiniWindow(windowRef);
+  windowRef.focus();
+  mainWindow?.hide();
+}
+
+// 全局快捷键触发：把 Mini 面板唤到眼前。
+// 已展开且在前台 → 收起；否则 → 确保可见、展开、置顶并聚焦（类似 Spotlight 行为）。
+async function summonMiniWindowViaHotkey(): Promise<void> {
+  if (!miniWindow || miniWindow.isDestroyed()) {
+    await showMiniWindow();
+  } else if (!miniWindow.isVisible()) {
+    miniWindow.show();
+    mainWindow?.hide();
+  } else if (mainWindow?.isVisible()) {
+    mainWindow.hide();
+  }
+
+  const windowRef = miniWindow;
+  if (!windowRef || windowRef.isDestroyed()) {
+    return;
+  }
+
+  if (miniWindowPanelOpen && windowRef.isFocused()) {
+    setMiniWindowPanelOpen(false);
+    return;
+  }
+
+  setMiniWindowPanelOpen(true);
+  raiseMiniWindow(windowRef);
+  windowRef.focus();
+}
+
+function registerGlobalShortcuts(): void {
+  globalShortcut.unregister(MINI_SUMMON_SHORTCUT);
+  const registered = globalShortcut.register(MINI_SUMMON_SHORTCUT, () => {
+    void summonMiniWindowViaHotkey();
+  });
+  if (!registered) {
+    console.warn(`[mini] 全局快捷键注册失败（可能被占用）：${MINI_SUMMON_SHORTCUT}`);
+  }
+}
+
+async function showMainWindow(): Promise<void> {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createMainWindow();
+  }
+
+  mainWindow?.show();
+  mainWindow?.focus();
+  closeMiniOutsideClickWindows();
+  miniWindow?.hide();
 }
 
 function createProgressReporter(
@@ -181,7 +716,7 @@ function createMainWindow(): void {
                   detailListeningPortsBeforeSelection:
                     Array.from(document.querySelectorAll(".detail-row")).find((row) => row.querySelector("span")?.textContent?.includes("监听端口"))?.querySelector("strong")?.textContent || null,
                   profilePrimaryActions: Array.from(
-                    document.querySelectorAll(".profiles-table tbody tr:first-child .profile-actions > .action-button, .profiles-table tbody tr:first-child .profile-actions > .action-tooltip > .action-button")
+                    document.querySelectorAll("[data-profile-row] .profile-actions > .action-button, [data-profile-row] .profile-actions > .action-tooltip > .action-button")
                   ).map((item) => item.textContent),
                   profileMenuLabels: [],
                   detailTitleAfterSecondRowClick: null,
@@ -305,7 +840,7 @@ function createMainWindow(): void {
                     await new Promise((done) => window.setTimeout(done, 0));
                   }
                 }
-                const firstMenuButton = document.querySelector(".profiles-table tbody tr:first-child .menu-button");
+                const firstMenuButton = document.querySelector("[data-profile-row] .menu-button");
                 if (firstMenuButton) {
                   firstMenuButton.click();
                   await new Promise((done) => window.setTimeout(done, 0));
@@ -420,6 +955,42 @@ function registerIpcHandlers(): void {
     return profileManager.getState();
   });
 
+  ipcMain.handle(IPC_CHANNELS.setMiniProfilePinned, async (_event, id: string, pinned: boolean): Promise<AppState> => {
+    await profileManager.setMiniProfilePinned(id, Boolean(pinned));
+    return profileManager.getState();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.showMiniWindow, async (): Promise<void> => {
+    await showMiniWindow();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.showMainWindow, async (): Promise<void> => {
+    await showMainWindow();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.setMiniWindowPanelOpen, async (_event, open: boolean): Promise<void> => {
+    setMiniWindowPanelOpen(Boolean(open));
+  });
+
+  ipcMain.handle(IPC_CHANNELS.requestMiniWindowPanelClose, async (): Promise<void> => {
+    requestMiniWindowPanelClose();
+  });
+
+  ipcMain.handle(
+    IPC_CHANNELS.dragMiniWindow,
+    async (event, screenX: number, screenY: number, phase: "start" | "move" | "end"): Promise<void> => {
+      if (phase !== "start" && phase !== "move" && phase !== "end") {
+        return;
+      }
+
+      dragMiniWindow(event, screenX, screenY, phase);
+    }
+  );
+
+  ipcMain.handle(IPC_CHANNELS.isMiniWindowPointerInside, async (): Promise<boolean> => {
+    return isMiniWindowPointerInside();
+  });
+
   ipcMain.handle(IPC_CHANNELS.readGlobalInstructions, async (): Promise<GlobalInstructionsSnapshot> => {
     return readGlobalInstructions();
   });
@@ -474,8 +1045,8 @@ function registerIpcHandlers(): void {
     return true;
   });
 
-  ipcMain.handle(IPC_CHANNELS.deleteProfile, async (_event, id: string): Promise<DeleteProfileResult> => {
-    return profileManager.deleteProfile(id);
+  ipcMain.handle(IPC_CHANNELS.deleteProfile, async (_event, id: string, options?: DeleteProfileOptions): Promise<DeleteProfileResult> => {
+    return profileManager.deleteProfile(id, options);
   });
 
   ipcMain.handle(
@@ -611,6 +1182,7 @@ app.whenReady().then(() => {
   }
 
   registerIpcHandlers();
+  registerGlobalShortcuts();
   createMainWindow();
 
   app.on("activate", () => {
@@ -624,4 +1196,8 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {
     app.quit();
   }
+});
+
+app.on("will-quit", () => {
+  globalShortcut.unregisterAll();
 });

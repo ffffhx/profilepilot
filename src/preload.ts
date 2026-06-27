@@ -10,6 +10,7 @@ import type {
   CancelOperationRequest,
   CdpPortSuggestion,
   ControlOperationRequest,
+  DeleteProfileOptions,
   DeleteProfileResult,
   ExtensionDeleteResult,
   ExtensionMigrationDiffResult,
@@ -37,6 +38,24 @@ const profileManagerApi: ProfileManagerApi = {
     ipcRenderer.invoke(IPC_CHANNELS.setAgentBrowserConfig, id, port),
   clearAgentBrowserConfig: (id: string): Promise<AppState> =>
     ipcRenderer.invoke(IPC_CHANNELS.clearAgentBrowserConfig, id),
+  setMiniProfilePinned: (id: string, pinned: boolean): Promise<AppState> =>
+    ipcRenderer.invoke(IPC_CHANNELS.setMiniProfilePinned, id, pinned),
+  showMiniWindow: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.showMiniWindow),
+  showMainWindow: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.showMainWindow),
+  setMiniWindowPanelOpen: (open: boolean): Promise<void> =>
+    ipcRenderer.invoke(IPC_CHANNELS.setMiniWindowPanelOpen, open),
+  requestMiniWindowPanelClose: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.requestMiniWindowPanelClose),
+  dragMiniWindow: (screenX: number, screenY: number, phase: "start" | "move" | "end"): Promise<void> =>
+    ipcRenderer.invoke(IPC_CHANNELS.dragMiniWindow, screenX, screenY, phase),
+  isMiniWindowPointerInside: (): Promise<boolean> => ipcRenderer.invoke(IPC_CHANNELS.isMiniWindowPointerInside),
+  onMiniWindowPanelOpenChanged: (listener: (open: boolean) => void): (() => void) => {
+    const handler = (_event: IpcRendererEvent, open: boolean): void => {
+      listener(Boolean(open));
+    };
+
+    ipcRenderer.on(IPC_CHANNELS.miniWindowPanelOpenChanged, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.miniWindowPanelOpenChanged, handler);
+  },
   readGlobalInstructions: (): Promise<GlobalInstructionsSnapshot> =>
     ipcRenderer.invoke(IPC_CHANNELS.readGlobalInstructions),
   writeGlobalInstruction: (request: GlobalInstructionUpdateRequest): Promise<GlobalInstructionsSnapshot> =>
@@ -54,7 +73,8 @@ const profileManagerApi: ProfileManagerApi = {
   openProfileExtensionsPage: (id: string): Promise<AppState> =>
     ipcRenderer.invoke(IPC_CHANNELS.openProfileExtensionsPage, id),
   openPath: (targetPath: string): Promise<boolean> => ipcRenderer.invoke(IPC_CHANNELS.openPath, targetPath),
-  deleteProfile: (id: string): Promise<DeleteProfileResult> => ipcRenderer.invoke(IPC_CHANNELS.deleteProfile, id),
+  deleteProfile: (id: string, options?: DeleteProfileOptions): Promise<DeleteProfileResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.deleteProfile, id, options),
   inspectAccountSyncDiff: (request: AccountSyncRequest): Promise<AccountSyncDiffResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.inspectAccountSyncDiff, request),
   scanProfileExtensions: (profileId: string): Promise<ExtensionScanResult> =>

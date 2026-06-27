@@ -574,6 +574,7 @@ export async function scanNativeChromeProfiles(): Promise<NativeChromeProfile[]>
       name: typeof profile.name === "string" && profile.name.trim() ? profile.name : dirName,
       userName: typeof profile.user_name === "string" && profile.user_name.trim() ? profile.user_name : null,
       path: path.join(userDataDir, dirName),
+      userDataDir,
       isDefault: dirName === "Default"
     }))
     .sort((a, b) => {

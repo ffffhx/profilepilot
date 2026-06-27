@@ -1,10 +1,10 @@
 import { profileApi } from "./api";
 import { accountSyncProgressStepsForTarget, emphasizeName, extensionSyncProgressStepsForProfiles, pendingBusySteps, setToast, withBusy } from "./busy";
 import { render } from "./render/render-root";
-import { invalidateExtensionMigrationDiff } from "./state-actions";
+import { invalidateExtensionMigrationDiff, loadState } from "./state-actions";
 import { store } from "./state";
-import { ConfirmBodyLine, ConfirmIntent, ConfirmModalView, ModalState } from "./types";
-import { closeConfirmCopy, deleteConfirmCopy, escapeHtml, formatDate, profileStatusLabel, sourceDetail } from "./util";
+import { ConfirmBodyLine, ConfirmIntent, ConfirmModalView, ModalState, PublicProfile } from "./types";
+import { closeConfirmCopy, deleteConfirmCopy, escapeHtml, formatDate, formatErrorMessage, profileStatusLabel, sourceDetail } from "./util";
 
 export function renderConfirmModal(confirm: Extract<ModalState, { kind: "confirm" }>): string {
   const view = confirmModalView(confirm.intent);
@@ -65,6 +65,26 @@ export function confirmModalView(intent: ConfirmIntent): ConfirmModalView | null
     const profile = store.state.profiles.find((item) => item.id === intent.profileId);
     if (!profile) {
       return null;
+    }
+    if (intent.action === "delete-after-chrome-exit") {
+      return {
+        kicker: "退出 Chrome 后删除",
+        title: `退出 Chrome 并删除 ${profile.name}`,
+        body: [
+          "还有 Chrome 正在运行。删除系统 Chrome Profile 前需要先退出 Chrome，否则本地配置可能仍被占用。",
+          {
+            text: "同意后 ProfilePilot 会直接退出 Google Chrome，再把这个 Profile 目录移到废纸篓；未保存的网页内容可能会丢失。",
+            tone: "danger"
+          }
+        ],
+        confirmLabel: "退出并删除",
+        tone: "danger",
+        summary: [
+          { label: "Profile", value: profile.name },
+          { label: "将退出", value: "Google Chrome" },
+          { label: "目录", value: profile.dirName }
+        ]
+      };
     }
     const copy = intent.action === "close" ? closeConfirmCopy(profile) : deleteConfirmCopy(profile);
     return {
@@ -253,13 +273,58 @@ export function executeProfileConfirm(intent: Extract<ConfirmIntent, { kind: "pr
     return;
   }
 
-  void withBusy(() => profileApi().deleteProfile(profile.id), profile.running
-    ? `已关闭并删除 ${emphasizeName(profile.name)}`
-    : `已删除 ${emphasizeName(profile.name)}`, {
+  void executeProfileDeleteConfirm(profile, intent.action === "delete-after-chrome-exit");
+}
+
+export async function executeProfileDeleteConfirm(profile: PublicProfile, quitChromeBeforeDelete: boolean): Promise<void> {
+  if (store.busy) {
+    return;
+  }
+
+  store.busy = true;
+  store.busyState = {
     key: "delete-profile",
-    message: profile.running ? `正在关闭并删除 ${profile.name}…` : `正在删除 ${profile.name}…`,
+    message: quitChromeBeforeDelete
+      ? `正在退出 Chrome 并删除 ${profile.name}…`
+      : profile.running
+        ? `正在关闭并删除 ${profile.name}…`
+        : `正在删除 ${profile.name}…`,
     profileId: profile.id
-  });
+  };
+  render();
+
+  try {
+    await profileApi().deleteProfile(profile.id, { quitChromeBeforeDelete });
+    setToast(
+      quitChromeBeforeDelete
+        ? `已退出 Chrome 并删除 ${emphasizeName(profile.name)}`
+        : profile.running
+          ? `已关闭并删除 ${emphasizeName(profile.name)}`
+          : `已删除 ${emphasizeName(profile.name)}`
+    );
+  } catch (error) {
+    const message = formatErrorMessage(error);
+    if (!quitChromeBeforeDelete && profile.source === "native" && isChromeRunningDeleteError(message)) {
+      store.modal = {
+        kind: "confirm",
+        intent: {
+          kind: "profile",
+          action: "delete-after-chrome-exit",
+          profileId: profile.id
+        }
+      };
+      return;
+    }
+    setToast(message, "error");
+  } finally {
+    store.busy = false;
+    store.busyState = null;
+    await loadState().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+  }
+}
+
+function isChromeRunningDeleteError(message: string): boolean {
+  return message.includes("删除 Chrome Profile 前请先退出 Chrome");
 }
 
 export function executeAccountSyncConfirm(intent: Extract<ConfirmIntent, { kind: "account-sync" }>): void {

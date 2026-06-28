@@ -44,6 +44,7 @@ const profileManagerApi: ProfileManagerApi = {
   showMainWindow: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.showMainWindow),
   setMiniWindowPanelOpen: (open: boolean): Promise<void> =>
     ipcRenderer.invoke(IPC_CHANNELS.setMiniWindowPanelOpen, open),
+  resizeMiniPanel: (height: number): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.resizeMiniPanel, height),
   requestMiniWindowPanelClose: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.requestMiniWindowPanelClose),
   dragMiniWindow: (screenX: number, screenY: number, phase: "start" | "move" | "end"): Promise<void> =>
     ipcRenderer.invoke(IPC_CHANNELS.dragMiniWindow, screenX, screenY, phase),

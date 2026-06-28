@@ -12,6 +12,7 @@ export const IPC_CHANNELS = {
   showMiniWindow: "profiles:window:show-mini",
   showMainWindow: "profiles:window:show-main",
   setMiniWindowPanelOpen: "profiles:window:set-mini-panel-open",
+  resizeMiniPanel: "profiles:window:resize-mini-panel",
   requestMiniWindowPanelClose: "profiles:window:request-mini-panel-close",
   dragMiniWindow: "profiles:window:drag-mini",
   isMiniWindowPointerInside: "profiles:window:is-mini-pointer-inside",

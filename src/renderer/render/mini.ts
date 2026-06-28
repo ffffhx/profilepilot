@@ -1,3 +1,4 @@
+import { profileApi } from "../api";
 import { isBusyAction, renderToastBody } from "../busy";
 import { appRoot, store } from "../state";
 import { PublicProfile } from "../types";
@@ -43,12 +44,18 @@ export function renderMini(): void {
   const previousScrollTop = store.miniExpanded ? store.miniScrollTop : 0;
 
   if (!store.miniPanelOpen) {
-    appRoot.className = "mini-root mini-root-collapsed";
-    appRoot.innerHTML = `
-      <button type="button" class="mini-logo-dock" data-action="toggle-mini-panel" title="展开悬浮窗" aria-label="展开悬浮窗">
-        ${MINI_LOGO_GLYPH}
-      </button>
-    `;
+    // dock 没有动态内容；已经渲染过就不重建，否则每次 render（含 2.5s 轮询）都会
+    // 重建 .mini-logo-dock 元素，导致呼吸灯 CSS 动画被重置、看起来一卡一顿。
+    if (!appRoot.querySelector(".mini-logo-dock")) {
+      appRoot.className = "mini-root mini-root-collapsed";
+      appRoot.innerHTML = `
+        <button type="button" class="mini-logo-dock" data-action="toggle-mini-panel" title="展开悬浮窗" aria-label="展开悬浮窗">
+          ${MINI_LOGO_GLYPH}
+        </button>
+      `;
+    } else if (appRoot.className !== "mini-root mini-root-collapsed") {
+      appRoot.className = "mini-root mini-root-collapsed";
+    }
     return;
   }
 
@@ -107,6 +114,45 @@ export function renderMini(): void {
       if (list) {
         list.scrollTop = previousScrollTop;
       }
+    });
+  }
+
+  // 内容渲染完后，量出面板真实内容高度，请求主进程把窗口高度自适应（不写死）。
+  window.requestAnimationFrame(adjustMiniPanelHeight);
+}
+
+// 测量 .mini-shell 的自然内容高度（含 padding/border/gap），通知主进程 resize 窗口。
+// 用临时把列表高度收成内容高度 + shell 设为 auto 的方式精确量取，量完即复原（含滚动位置）。
+function adjustMiniPanelHeight(): void {
+  const shell = appRoot.querySelector<HTMLElement>(".mini-shell");
+  if (!shell) {
+    return;
+  }
+
+  const list = appRoot.querySelector<HTMLElement>(".mini-profile-list");
+  const prevShellH = shell.style.height;
+  let desired: number;
+
+  if (list) {
+    const prevScroll = list.scrollTop;
+    const prevListH = list.style.height;
+    list.style.height = "0px";
+    const listContent = list.scrollHeight;
+    list.style.height = `${listContent}px`;
+    shell.style.height = "auto";
+    desired = shell.offsetHeight;
+    shell.style.height = prevShellH;
+    list.style.height = prevListH;
+    list.scrollTop = prevScroll;
+  } else {
+    shell.style.height = "auto";
+    desired = shell.offsetHeight;
+    shell.style.height = prevShellH;
+  }
+
+  if (desired > 0) {
+    void profileApi().resizeMiniPanel(desired).catch(() => {
+      // 高度自适应是尽力而为，失败不影响功能。
     });
   }
 }

@@ -367,6 +367,7 @@ export interface ProfileManagerApi {
   showMiniWindow(): Promise<void>;
   showMainWindow(): Promise<void>;
   setMiniWindowPanelOpen(open: boolean): Promise<void>;
+  resizeMiniPanel(height: number): Promise<void>;
   requestMiniWindowPanelClose(): Promise<void>;
   dragMiniWindow(screenX: number, screenY: number, phase: "start" | "move" | "end"): Promise<void>;
   isMiniWindowPointerInside(): Promise<boolean>;

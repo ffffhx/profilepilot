@@ -41,10 +41,15 @@ const MINI_DOCK_SIZE = 80;
 // 一键唤起 / 聚焦 Mini 面板的全局快捷键（macOS = Cmd+Shift+P）
 const MINI_SUMMON_SHORTCUT = "CommandOrControl+Shift+P";
 const MINI_PANEL_WIDTH = 360;
-const MINI_PANEL_HEIGHT = 250;
+// 面板高度自适应内容：初始用这个值（约 3 行的常见高度，尽量贴近首屏避免首次展开跳一下），
+// 渲染端量好真实内容高度后通过 resizeMiniPanel 精确调整。
+const MINI_PANEL_HEIGHT = 210;
+const MINI_PANEL_MIN_HEIGHT = 120;
 const MINI_WINDOW_MARGIN = 16;
 const activeOperations = new Map<string, ActiveOperation>();
 let miniWindowPanelOpen = false;
+// 当前面板高度（自适应）；resizeMiniPanel 会更新它，并被 miniPanelBoundsFromDockBounds 使用。
+let miniPanelHeight = MINI_PANEL_HEIGHT;
 let miniWindowDragState: { offsetX: number; offsetY: number } | null = null;
 
 interface ActiveOperation {
@@ -138,19 +143,26 @@ function miniDockBoundsFromWindowBounds(bounds: Rectangle): Rectangle {
   };
 }
 
+function clampMiniPanelHeight(height: number, dockBounds: Rectangle): number {
+  const workArea = screen.getDisplayMatching(dockBounds).workArea;
+  const maxHeight = workArea.height - MINI_WINDOW_MARGIN * 2;
+  return Math.round(clamp(height, MINI_PANEL_MIN_HEIGHT, maxHeight));
+}
+
 function miniPanelBoundsFromDockBounds(dockBounds: Rectangle): Rectangle {
+  const height = clampMiniPanelHeight(miniPanelHeight, dockBounds);
   const candidate = {
     x: dockBounds.x - (MINI_PANEL_WIDTH - MINI_DOCK_SIZE),
     y: dockBounds.y,
     width: MINI_PANEL_WIDTH,
-    height: MINI_PANEL_HEIGHT
+    height
   };
   const workArea = screen.getDisplayMatching(dockBounds).workArea;
   return {
     x: clamp(candidate.x, workArea.x, workArea.x + workArea.width - MINI_PANEL_WIDTH),
-    y: clamp(candidate.y, workArea.y, workArea.y + workArea.height - MINI_PANEL_HEIGHT),
+    y: clamp(candidate.y, workArea.y, workArea.y + workArea.height - height),
     width: MINI_PANEL_WIDTH,
-    height: MINI_PANEL_HEIGHT
+    height
   };
 }
 
@@ -270,7 +282,7 @@ function showMiniOutsideClickWindows(): void {
   </body>
 </html>`);
   const overlayUrl = `data:text/html;charset=utf-8,${html}`;
-  miniOutsideClickWindows = miniOutsideClickBounds(windowRef.getBounds()).map((bounds) => {
+  const overlays = miniOutsideClickBounds(windowRef.getBounds()).map((bounds) => {
     const overlayWindow = new BrowserWindow({
       ...bounds,
       frame: false,
@@ -298,18 +310,30 @@ function showMiniOutsideClickWindows(): void {
     overlayWindow.on("closed", () => {
       miniOutsideClickWindows = miniOutsideClickWindows.filter((item) => item !== overlayWindow);
     });
-    void overlayWindow.loadURL(overlayUrl).then(() => {
-      if (!overlayWindow.isDestroyed()) {
-        overlayWindow.showInactive();
-      }
-      if (!windowRef.isDestroyed()) {
-        windowRef.show();
-        raiseMiniWindow(windowRef);
-        windowRef.focus();
-      }
-    });
 
     return overlayWindow;
+  });
+  miniOutsideClickWindows = overlays;
+
+  // 先把 4 个覆盖窗都加载+显示（showInactive 不抢焦点），全部就绪后再把悬浮窗 raise 一次。
+  // 之前是每个覆盖窗各 raise/focus 一次（共 4 次）→ 第一次展开会闪好几下。
+  void Promise.all(
+    overlays.map((overlayWindow) =>
+      overlayWindow
+        .loadURL(overlayUrl)
+        .then(() => {
+          if (!overlayWindow.isDestroyed()) {
+            overlayWindow.showInactive();
+          }
+        })
+        .catch(() => {
+          // 覆盖窗是尽力而为，加载失败不影响主流程。
+        })
+    )
+  ).then(() => {
+    if (windowRef && !windowRef.isDestroyed()) {
+      raiseMiniWindow(windowRef);
+    }
   });
 }
 
@@ -474,8 +498,9 @@ function setMiniWindowPanelOpen(open: boolean): void {
   if (miniWindowPanelOpen === open && currentBounds.width === expectedWidth && currentBounds.height === expectedHeight) {
     notifyMiniWindowPanelOpen(open);
     if (open) {
-      showMiniOutsideClickWindows();
       raiseMiniWindow(windowRef);
+      // 覆盖窗较重（4 个全屏窗口），延后创建，避免阻塞面板展开造成卡顿。
+      scheduleMiniOutsideClickWindowsUpdate();
     } else {
       closeMiniOutsideClickWindows();
     }
@@ -487,12 +512,39 @@ function setMiniWindowPanelOpen(open: boolean): void {
   windowRef.setBounds(open ? miniPanelBoundsFromDockBounds(dockBounds) : normalizeMiniWindowDockBounds(dockBounds), false);
   notifyMiniWindowPanelOpen(open);
   if (open) {
-    showMiniOutsideClickWindows();
     raiseMiniWindow(windowRef);
+    // 覆盖窗较重（4 个全屏窗口），延后创建，避免阻塞面板展开造成卡顿。
+    scheduleMiniOutsideClickWindowsUpdate();
   } else {
     closeMiniOutsideClickWindows();
   }
   void saveMiniWindowBounds(dockBounds);
+}
+
+// 渲染端量好面板内容真实高度后调用：把窗口高度调成内容高度（封顶到屏幕可用高度，超出则内部滚动）。
+function resizeMiniPanel(height: number): void {
+  if (!Number.isFinite(height)) {
+    return;
+  }
+
+  const windowRef = miniWindow;
+  if (!windowRef || windowRef.isDestroyed() || !miniWindowPanelOpen) {
+    // 面板未开时先记下期望高度，下次展开即用。
+    miniPanelHeight = height;
+    return;
+  }
+
+  const currentBounds = windowRef.getBounds();
+  const workArea = screen.getDisplayMatching(currentBounds).workArea;
+  const clamped = clampMiniPanelHeight(height, currentBounds);
+  miniPanelHeight = clamped;
+  if (currentBounds.height === clamped) {
+    return;
+  }
+
+  // 保持当前 x/y（顶部锚点不动），只改高度；y 需保证面板仍在工作区内。
+  const y = clamp(currentBounds.y, workArea.y, workArea.y + workArea.height - clamped);
+  windowRef.setBounds({ x: currentBounds.x, y, width: MINI_PANEL_WIDTH, height: clamped }, false);
 }
 
 function isMiniWindowPointerInside(): boolean {
@@ -970,6 +1022,10 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.setMiniWindowPanelOpen, async (_event, open: boolean): Promise<void> => {
     setMiniWindowPanelOpen(Boolean(open));
+  });
+
+  ipcMain.handle(IPC_CHANNELS.resizeMiniPanel, async (_event, height: number): Promise<void> => {
+    resizeMiniPanel(Number(height));
   });
 
   ipcMain.handle(IPC_CHANNELS.requestMiniWindowPanelClose, async (): Promise<void> => {

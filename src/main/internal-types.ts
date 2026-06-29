@@ -19,8 +19,11 @@ export interface CdpVersionInfo {
 }
 
 export interface CdpTargetListEntry {
+  id?: string;
   type?: string;
+  title?: string;
   url?: string;
+  faviconUrl?: string;
   webSocketDebuggerUrl?: string;
 }
 

@@ -184,6 +184,68 @@ export function parseLsofListeningPort(line: string): number | null {
   return isValidTcpPort(port) ? port : null;
 }
 
+// 检测“谁在持久连接这些 CDP 端口”：找连向 127.0.0.1:<端口> 的 ESTABLISHED 客户端 socket
+// （形如 本地:xxxx->127.0.0.1:<端口>），持有方就是 agent-browser / Playwright / DevTools 等驱动工具。
+// 工具无关：任何 CDP 客户端都走同一个本机 TCP 端口；WebSocket 长连接常驻 ESTABLISHED，能稳定抓到。
+export async function getCdpClientsByPort(ports: number[]): Promise<Map<number, { pid: number; label: string }[]>> {
+  const result = new Map<number, { pid: number; label: string }[]>();
+  const targetPorts = uniqueNumbers(ports.filter((port) => isValidTcpPort(port)));
+  if (!targetPorts.length) {
+    return result;
+  }
+  const portSet = new Set(targetPorts);
+
+  // 注意：不要按 `-iTCP:<port>` 逐端口过滤——只要其中某个端口当前没有连接，
+  // lsof 就会以非零码退出（即便其它端口有有效输出），execFileAsync 会因此 reject 把有效结果一起丢掉。
+  // 这里列出全部 ESTABLISHED TCP，再用下面的 portSet 在代码里过滤，稳。
+  let stdout = "";
+  try {
+    ({ stdout } = await execFileAsync("lsof", ["-nP", "-iTCP", "-sTCP:ESTABLISHED", "-Fpcn"], {
+      maxBuffer: 1024 * 1024 * 8
+    }));
+  } catch {
+    return result;
+  }
+
+  let pid: number | null = null;
+  let label = "";
+  for (const line of stdout.split("\n")) {
+    if (line.startsWith("p")) {
+      pid = Number(line.slice(1)) || null;
+      label = "";
+      continue;
+    }
+    if (line.startsWith("c")) {
+      label = line.slice(1).trim();
+      continue;
+    }
+    if (line.startsWith("n") && pid !== null) {
+      const port = parseCdpClientRemotePort(line.slice(1));
+      if (port === null || !portSet.has(port)) {
+        continue;
+      }
+      const clients = result.get(port) || [];
+      if (!clients.some((client) => client.pid === pid)) {
+        clients.push({ pid, label: label || "unknown" });
+      }
+      result.set(port, clients);
+    }
+  }
+
+  return result;
+}
+
+// 只认“客户端那一端”：本地:xxxx->远端:<port>，远端端口才是被连接的 CDP 端口。
+// Chrome 自己的 accept socket 是 <port>->对端:xxxx，远端端口不是 CDP 端口，会被排除。
+export function parseCdpClientRemotePort(name: string): number | null {
+  const match = name.match(/->\S*?:(\d+)$/);
+  if (!match) {
+    return null;
+  }
+  const port = Number(match[1]);
+  return isValidTcpPort(port) ? port : null;
+}
+
 export function mergeRuntimeProfiles(...profiles: Array<RuntimeProfile | undefined>): RuntimeProfile {
   return profiles.reduce<RuntimeProfile>(
     (merged, profile) => {

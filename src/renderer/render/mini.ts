@@ -2,7 +2,7 @@ import { profileApi } from "../api";
 import { isBusyAction, renderToastBody } from "../busy";
 import { appRoot, store } from "../state";
 import { PublicProfile } from "../types";
-import { escapeHtml, renderButtonLabel } from "../util";
+import { escapeHtml, liveAddrLabel, renderButtonLabel } from "../util";
 
 const MINI_PROFILE_LIMIT = 3;
 
@@ -192,13 +192,16 @@ function renderMiniProfileCard(profile: PublicProfile): string {
         : closing
           ? "关闭中…"
           : "";
+  const liveHost = profile.running && profile.livePrimaryUrl ? liveAddrLabel(profile) : "";
+  const driving = profile.running && profile.cdpClients.length > 0;
+  const readout = busyHere ? busyLabel : liveHost || (driving ? "驱动中" : port.label);
 
   return `
-    <article class="mini-profile-card ${port.kind} ${busyHere ? "busy" : ""}">
+    <article class="mini-profile-card ${port.kind} ${driving ? "driving" : ""} ${busyHere ? "busy" : ""}">
       <button type="button" class="mini-profile-main" data-action="${action}" data-id="${profile.id}" ${store.busy ? "disabled" : ""}>
         <span class="mini-node ${busyHere ? "loading" : port.kind === "live" ? "plane" : "ring"}" aria-hidden="true">${busyHere ? '<span class="mini-spinner"></span>' : port.kind === "live" ? MINI_NODE_PLANE : ""}</span>
         <span class="mini-profile-name">${escapeHtml(profile.name)}</span>
-        <span class="mini-readout">${busyHere ? escapeHtml(busyLabel) : escapeHtml(port.label)}</span>
+        <span class="mini-readout">${escapeHtml(readout)}</span>
       </button>
       <div class="mini-menu-anchor" data-profile-actions>
         <button type="button" class="mini-menu-button ${menuOpen ? "active" : ""}" data-action="toggle-profile-menu" data-id="${profile.id}" aria-expanded="${menuOpen ? "true" : "false"}" ${store.busy ? "disabled" : ""}>...</button>

@@ -109,6 +109,12 @@ export function normalizeProfile(profile: unknown): StoredProfile | null {
       typeof candidate.fixedCdpPort === "number" && Number.isInteger(candidate.fixedCdpPort)
         ? candidate.fixedCdpPort
         : null,
+    clonedFromProfileId:
+      typeof candidate.clonedFromProfileId === "string" && candidate.clonedFromProfileId
+        ? candidate.clonedFromProfileId
+        : null,
+    projectTag:
+      typeof candidate.projectTag === "string" && candidate.projectTag.trim() ? candidate.projectTag.trim() : null,
     migratedExtensions: Array.isArray(candidate.migratedExtensions)
       ? candidate.migratedExtensions
           .map(normalizeStoredMigratedExtension)

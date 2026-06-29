@@ -248,6 +248,34 @@ export function renderRenameModal(profileId: string): string {
   `;
 }
 
+export function renderCloneTagModal(profileId: string): string {
+  const profile = store.state?.profiles.find((item) => item.id === profileId);
+  if (!profile) {
+    return "";
+  }
+  const saving = isBusyAction("set-clone-tag", { profileId });
+
+  return `
+    <div class="modal-backdrop" data-action="close-modal">
+      <form class="modal max-h-[calc(100vh-36px)] overflow-auto overflow-x-hidden border-solid border border-line-strong rounded-xl bg-[linear-gradient(180deg,var(--panel-raise),var(--panel))] p-5 [box-shadow:0_30px_90px_rgba(2,6,9,0.8),0_0_0_1px_rgba(56,225,160,0.06)]" data-clone-tag-form data-profile-id="${escapeHtml(profile.id)}">
+        <span class="modal-kicker inline-flex mb-2 text-accent font-mono text-[11px] font-semibold tracking-[0.18em] uppercase">副本标签</span>
+        <h2>给 ${escapeHtml(profile.name)} 设置项目标签</h2>
+        <div class="field grid gap-2 my-[18px]">
+          <label for="clone-tag">项目标签</label>
+          <input id="clone-tag" name="tag" type="text" maxlength="40" autocomplete="off" placeholder="例如：coze 验证 / boe" value="${escapeHtml(profile.projectTag || "")}" />
+          <span class="field-note text-muted text-[12px] leading-[1.45]">只是个展示标记，标注这个副本当前在干哪个项目的活；留空即清除标签。</span>
+        </div>
+        <div class="modal-actions">
+          <button type="button" data-action="close-modal">取消</button>
+          <button type="submit" class="primary ${saving ? "loading" : ""}" ${store.busy ? "disabled" : ""}>
+            ${renderButtonLabel(saving, "保存标签", "保存中…")}
+          </button>
+        </div>
+      </form>
+    </div>
+  `;
+}
+
 export function renderCdpModal(profileId: string, portSuggestion: CdpPortSuggestion | null): string {
   const profile = store.state?.profiles.find((item) => item.id === profileId);
   if (!profile) {

@@ -1,4 +1,4 @@
-import { AccountSyncResult, AppState, BusyState, ExtensionMigrationDiffResult, ExtensionMigrationResult, ExtensionScanResult, GlobalInstructionFileId, GlobalInstructionsSnapshot, ModalState, ToastKind } from "./types";
+import { AccountSyncResult, AppState, BusyState, CdpLiveView, ExtensionMigrationDiffResult, ExtensionMigrationResult, ExtensionScanResult, GlobalInstructionFileId, GlobalInstructionsSnapshot, ModalState, ToastKind } from "./types";
 
 export const root = document.querySelector<HTMLDivElement>("#app");
 
@@ -7,6 +7,14 @@ if (!root) {
 }
 
 export const appRoot: HTMLDivElement = root;
+
+// 单个 Profile 的实时观测缓存条目（独立于 AppState，不进全局轮询）。
+export interface LiveViewEntry {
+  data: CdpLiveView | null;
+  loading: boolean;
+  error: string | null;
+  fetchedAt: number;
+}
 
 export interface RendererState {
   viewMode: "main" | "mini";
@@ -44,12 +52,24 @@ export interface RendererState {
   launchSyncedProfile: boolean;
   accountSyncScopeExpanded: boolean;
   accountSyncResult: AccountSyncResult | null;
+  clonePoolSourceId: string | null;
+  clonePoolMenuOpen: boolean;
+  clonePoolCount: number;
+  clonePoolIncludeExtensions: boolean;
+  clonePoolLaunchAfter: boolean;
+  clonePoolSetEndpoint: boolean;
+  clonePoolRecycleDays: number;
   globalInstructions: GlobalInstructionsSnapshot | null;
   globalInstructionsLoading: boolean;
   globalInstructionsSaving: boolean;
   activeGlobalInstructionId: GlobalInstructionFileId;
   editingGlobalInstructionId: GlobalInstructionFileId | null;
   globalInstructionDraft: string;
+  // profileId -> 实时观测缓存；按需拉取，主轮询全量重渲染时从这里恢复，避免截图闪烁。
+  liveView: Record<string, LiveViewEntry>;
+  liveViewShowScreenshot: boolean;
+  // 表格/卡片当前页摘要：false=显示域名，true=显示 IP（点击切换，全局）。
+  liveShowIp: boolean;
 }
 
 export const store: RendererState = {
@@ -88,12 +108,22 @@ export const store: RendererState = {
   launchSyncedProfile: true,
   accountSyncScopeExpanded: false,
   accountSyncResult: null,
+  clonePoolSourceId: null,
+  clonePoolMenuOpen: false,
+  clonePoolCount: 3,
+  clonePoolIncludeExtensions: false,
+  clonePoolLaunchAfter: false,
+  clonePoolSetEndpoint: false,
+  clonePoolRecycleDays: 7,
   globalInstructions: null,
   globalInstructionsLoading: false,
   globalInstructionsSaving: false,
   activeGlobalInstructionId: "codex-agents",
   editingGlobalInstructionId: null,
-  globalInstructionDraft: ""
+  globalInstructionDraft: "",
+  liveView: {},
+  liveViewShowScreenshot: true,
+  liveShowIp: false
 };
 
 export const dateFormatter = new Intl.DateTimeFormat("zh-CN", {

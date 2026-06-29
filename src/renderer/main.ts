@@ -1,7 +1,9 @@
 import { profileApi } from "./api";
 import { activateBusyStep, busyStepsKey, emphasizeName, focusProfileFromUi, setToast, updateBusyProgressDom, updateBusyState, withBusy } from "./busy";
 import { closeModalFromUi, executeConfirmIntent } from "./confirm";
+import { clampCloneCount } from "./render/clone-pool";
 import { isExtensionMigrationActionItem } from "./render/extensions";
+import { refreshLiveViewNow, requestLiveViewNow, startLiveViewLoop, toggleLiveScreenshot } from "./render/live-view";
 import { render } from "./render/render-root";
 import { invalidateExtensionMigrationDiff, loadState, refreshExtensionMigrationDiff, refreshGlobalInstructions, repairClaudeInstructionShell, saveGlobalInstruction, setMigrationSource } from "./state-actions";
 import { appRoot, store } from "./state";
@@ -63,6 +65,10 @@ appRoot.addEventListener("click", (event) => {
   if (store.accountSyncMenuOpen && !target?.closest(`[data-account-sync-select="${store.accountSyncMenuOpen}"]`)) {
     store.accountSyncMenuOpen = null;
   }
+  const hadClonePoolMenu = store.clonePoolMenuOpen;
+  if (store.clonePoolMenuOpen && !target?.closest("[data-clone-pool-select]")) {
+    store.clonePoolMenuOpen = false;
+  }
 
   const actionTarget = target?.closest<HTMLElement>("[data-action]");
   if (!actionTarget || !store.state) {
@@ -70,7 +76,8 @@ appRoot.addEventListener("click", (event) => {
       (hadOpenProfileMenu && !store.openProfileMenuId) ||
       (hadMigrationSourceMenu && !store.migrationSourceMenuOpen) ||
       (hadMigrationTargetMenu && !store.migrationTargetMenuOpen) ||
-      (hadAccountSyncMenu && !store.accountSyncMenuOpen)
+      (hadAccountSyncMenu && !store.accountSyncMenuOpen) ||
+      (hadClonePoolMenu && !store.clonePoolMenuOpen)
     ) {
       render();
     }
@@ -134,6 +141,133 @@ appRoot.addEventListener("click", (event) => {
     }
     store.accountSyncResult = null;
     store.accountSyncMenuOpen = null;
+    render();
+    return;
+  }
+
+  if (action === "toggle-clone-pool-menu") {
+    store.clonePoolMenuOpen = !store.clonePoolMenuOpen;
+    store.accountSyncMenuOpen = null;
+    store.migrationSourceMenuOpen = false;
+    store.migrationTargetMenuOpen = false;
+    store.openProfileMenuId = null;
+    render();
+    return;
+  }
+
+  if (action === "select-clone-pool-source" && id) {
+    store.clonePoolSourceId = id;
+    store.clonePoolMenuOpen = false;
+    render();
+    return;
+  }
+
+  if (action === "clone-profiles") {
+    const sourceId =
+      store.clonePoolSourceId && store.state.profiles.some((profile) => profile.id === store.clonePoolSourceId)
+        ? store.clonePoolSourceId
+        : store.state.profiles[0]?.id || null;
+    const sourceProfile = store.state.profiles.find((profile) => profile.id === sourceId) || null;
+    if (!sourceProfile) {
+      setToast("先选择一个源 Profile", "error");
+      return;
+    }
+    const count = clampCloneCount(store.clonePoolCount);
+    store.modal = {
+      kind: "confirm",
+      returnTo: "clone-pool",
+      intent: {
+        kind: "clone-profiles",
+        sourceProfileId: sourceProfile.id,
+        count,
+        namePrefix: sourceProfile.name,
+        includeExtensions: store.clonePoolIncludeExtensions,
+        launchAfter: store.clonePoolLaunchAfter,
+        setAgentEndpoint: store.clonePoolSetEndpoint
+      }
+    };
+    render();
+    return;
+  }
+
+  if (action === "refresh-clones" && id) {
+    const sourceProfile = store.state.profiles.find((profile) => profile.id === id);
+    if (!sourceProfile) {
+      return;
+    }
+    if (!store.state.profiles.some((profile) => profile.clonedFromProfileId === id)) {
+      setToast("这个源还没有副本", "error");
+      return;
+    }
+    store.modal = { kind: "confirm", returnTo: "clone-pool", intent: { kind: "refresh-clones", sourceProfileId: id } };
+    render();
+    return;
+  }
+
+  if (action === "launch-clones" && id) {
+    const idleClones = store.state.profiles.filter(
+      (profile) => profile.source === "isolated" && profile.clonedFromProfileId === id && !profile.running
+    );
+    if (!idleClones.length) {
+      setToast("没有可启动的空闲副本", "error");
+      return;
+    }
+    void withBusy(
+      async () => {
+        const result = await profileApi().launchClones(id);
+        store.state = result.state;
+        setToast(
+          result.failed.length
+            ? `已启动 ${result.launched.length} 个副本，${result.failed.length} 个失败`
+            : `已批量启动 ${result.launched.length} 个副本`,
+          result.failed.length ? "error" : "normal"
+        );
+      },
+      undefined,
+      { key: "launch-clones", message: "正在批量启动副本…" }
+    );
+    return;
+  }
+
+  if (action === "reset-clone" && id) {
+    const clone = store.state.profiles.find((profile) => profile.id === id);
+    if (!clone) {
+      return;
+    }
+    if (!clone.clonedFromProfileId) {
+      setToast("这个 Profile 不是副本，没有可重置回去的源", "error");
+      return;
+    }
+    store.modal = { kind: "confirm", returnTo: "clone-pool", intent: { kind: "reset-clone", profileId: id } };
+    render();
+    return;
+  }
+
+  if (action === "set-clone-tag" && id) {
+    const clone = store.state.profiles.find((profile) => profile.id === id);
+    if (!clone) {
+      return;
+    }
+    store.modal = { kind: "clone-tag", profileId: id };
+    render();
+    window.setTimeout(() => {
+      const input = document.querySelector<HTMLInputElement>("#clone-tag");
+      input?.focus();
+      input?.select();
+    }, 0);
+    return;
+  }
+
+  if (action === "recycle-clones") {
+    const days = Number.isFinite(store.clonePoolRecycleDays) ? Math.max(0, Math.round(store.clonePoolRecycleDays)) : 7;
+    const candidates = store.state.profiles.filter(
+      (profile) => profile.source === "isolated" && profile.clonedFromProfileId && !profile.running
+    );
+    if (!candidates.length) {
+      setToast("当前没有空闲副本可清理", "error");
+      return;
+    }
+    store.modal = { kind: "confirm", returnTo: "clone-pool", intent: { kind: "recycle-clones", days } };
     render();
     return;
   }
@@ -540,6 +674,39 @@ appRoot.addEventListener("click", (event) => {
     return;
   }
 
+  if (action === "refresh-live-view") {
+    refreshLiveViewNow();
+    return;
+  }
+
+  if (action === "toggle-live-screenshot") {
+    toggleLiveScreenshot();
+    return;
+  }
+
+  if (action === "toggle-live-addr") {
+    store.liveShowIp = !store.liveShowIp;
+    render();
+    return;
+  }
+
+  if (action === "copy-live-url") {
+    const url = actionTarget.dataset.url;
+    if (!url) {
+      setToast("没有可复制的链接", "error");
+      return;
+    }
+    if (!navigator.clipboard?.writeText) {
+      setToast("当前环境不能直接复制，请手动选中复制", "error");
+      return;
+    }
+    void navigator.clipboard
+      .writeText(url)
+      .then(() => setToast("已复制当前标签页链接"))
+      .catch(() => setToast("复制失败，请手动选中复制", "error"));
+    return;
+  }
+
   if (action === "toggle-profile-menu" && id) {
     store.openProfileMenuId = store.openProfileMenuId === id ? null : id;
     store.selectedId = id;
@@ -583,6 +750,7 @@ appRoot.addEventListener("click", (event) => {
     store.selectedId = id;
     store.selectedExternalDir = null;
     render();
+    requestLiveViewNow(id);
     return;
   }
 
@@ -744,14 +912,17 @@ appRoot.addEventListener("click", (event) => {
       setToast("还没有可用的 Profile 作为登录态来源", "error");
       return;
     }
-    void profileApi()
-      .suggestCdpPort(9223)
-      .then((portSuggestion) => {
-        store.modal = { kind: "agent-browser-setup", portSuggestion };
-        render();
-        window.setTimeout(() => document.querySelector<HTMLInputElement>("#agent-name")?.focus(), 0);
-      })
-      .catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+    // 默认源：系统默认 Profile → 第一个已登录 Profile → 第一个。
+    if (!store.clonePoolSourceId || !store.state.profiles.some((profile) => profile.id === store.clonePoolSourceId)) {
+      const defaultSource =
+        store.state.profiles.find((profile) => profile.source === "native" && profile.isDefault) ||
+        store.state.profiles.find((profile) => profile.userName) ||
+        store.state.profiles[0];
+      store.clonePoolSourceId = defaultSource?.id || null;
+    }
+    store.clonePoolMenuOpen = false;
+    store.modal = { kind: "clone-pool" };
+    render();
     return;
   }
 
@@ -832,6 +1003,7 @@ appRoot.addEventListener("click", (event) => {
     }
 
     store.selectedId = id;
+    requestLiveViewNow(id);
     void focusProfileFromUi(profile);
     return;
   }
@@ -903,6 +1075,33 @@ appRoot.addEventListener("change", (event) => {
   if (target instanceof HTMLInputElement && target.matches("[data-launch-synced-profile]")) {
     store.launchSyncedProfile = target.checked;
     render();
+    return;
+  }
+
+  if (target instanceof HTMLInputElement && target.matches("[data-clone-pool-count]")) {
+    store.clonePoolCount = clampCloneCount(Number(target.value));
+    render();
+    return;
+  }
+
+  if (target instanceof HTMLInputElement && target.matches("[data-clone-pool-include-ext]")) {
+    store.clonePoolIncludeExtensions = target.checked;
+    return;
+  }
+
+  if (target instanceof HTMLInputElement && target.matches("[data-clone-pool-launch]")) {
+    store.clonePoolLaunchAfter = target.checked;
+    return;
+  }
+
+  if (target instanceof HTMLInputElement && target.matches("[data-clone-pool-set-endpoint]")) {
+    store.clonePoolSetEndpoint = target.checked;
+    return;
+  }
+
+  if (target instanceof HTMLInputElement && target.matches("[data-clone-pool-recycle-days]")) {
+    const parsed = Math.round(Number(target.value));
+    store.clonePoolRecycleDays = Number.isFinite(parsed) && parsed >= 0 ? parsed : 7;
     return;
   }
 
@@ -980,6 +1179,7 @@ appRoot.addEventListener("keydown", (event) => {
   if (id) {
     store.selectedId = id;
     render();
+    requestLiveViewNow(id);
   }
 });
 
@@ -991,11 +1191,33 @@ appRoot.addEventListener("submit", (event) => {
   const agentConfigForm = target?.closest<HTMLFormElement>("[data-agent-config-form]");
   const agentBrowserForm = target?.closest<HTMLFormElement>("[data-agent-browser-form]");
   const extensionMigrationForm = target?.closest<HTMLFormElement>("[data-extension-migration-form]");
-  if (!createForm && !renameForm && !cdpForm && !agentConfigForm && !agentBrowserForm && !extensionMigrationForm) {
+  const cloneTagForm = target?.closest<HTMLFormElement>("[data-clone-tag-form]");
+  if (!createForm && !renameForm && !cdpForm && !agentConfigForm && !agentBrowserForm && !extensionMigrationForm && !cloneTagForm) {
     return;
   }
 
   event.preventDefault();
+
+  if (cloneTagForm) {
+    const profileId = cloneTagForm.dataset.profileId;
+    const profile = store.state?.profiles.find((item) => item.id === profileId);
+    if (!profileId || !profile) {
+      return;
+    }
+    const data = new FormData(cloneTagForm);
+    const tag = String(data.get("tag") || "").trim();
+    // 标签弹窗是从副本池弹窗里打开的，保存后回到副本池而不是回主页。
+    store.modal = { kind: "clone-pool" };
+    void withBusy(
+      async () => {
+        store.state = await profileApi().setProfileTag(profileId, tag);
+        store.selectedId = profileId;
+      },
+      tag ? `已给 ${emphasizeName(profile.name)} 设置标签「${tag}」` : `已清除 ${emphasizeName(profile.name)} 的标签`,
+      { key: "set-clone-tag", message: "正在保存标签…", profileId }
+    );
+    return;
+  }
 
   if (agentBrowserForm) {
     const sourceId = agentBrowserForm.dataset.sourceId;
@@ -1218,7 +1440,12 @@ if (store.viewMode === "mini") {
   } | null = null;
   const miniDragThreshold = 4;
   const miniPanelAnimationMs = 180;
+  let miniPanelAnimationTimer: number | null = null;
   const clearMiniPanelAnimation = (): void => {
+    if (miniPanelAnimationTimer !== null) {
+      window.clearTimeout(miniPanelAnimationTimer);
+      miniPanelAnimationTimer = null;
+    }
     document.body.classList.remove("mini-expanding", "mini-collapsing");
   };
   const markMiniPanelAnimation = (className: "mini-expanding" | "mini-collapsing"): void => {
@@ -1226,7 +1453,8 @@ if (store.viewMode === "mini") {
     // Force the class transition to start from a clean frame after repeated quick toggles.
     void document.body.offsetWidth;
     document.body.classList.add(className);
-    window.setTimeout(() => {
+    miniPanelAnimationTimer = window.setTimeout(() => {
+      miniPanelAnimationTimer = null;
       document.body.classList.remove(className);
     }, miniPanelAnimationMs + 80);
   };
@@ -1256,6 +1484,13 @@ if (store.viewMode === "mini") {
       store.openProfileMenuId = null;
       render();
       markMiniPanelAnimation("mini-collapsing");
+      // 收起时让 mini-collapsing 一直保留到下面 .then 里渲染出 dock 再清除：
+      // 取消“安全兜底”自动移除，否则它会在窗口已缩小、dock 还没渲染出来之前抢先摘掉这个类，
+      // shell 的 opacity 从 0 弹回 1，被裁进 80px 窗口里闪出一个方框。
+      if (miniPanelAnimationTimer !== null) {
+        window.clearTimeout(miniPanelAnimationTimer);
+        miniPanelAnimationTimer = null;
+      }
       window.setTimeout(() => {
         if (miniPanelTransitionId !== transitionId) {
           return;
@@ -1453,4 +1688,27 @@ if (store.viewMode === "mini") {
       void loadState().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
     }
   }, 2500);
+}
+
+// 主窗口轻量轮询：让“驱动中 / 运行状态 / CDP 地址”等实时刷新。
+// 跳过条件：正忙、窗口隐藏（切到悬浮窗）、有弹窗、或页面上有下拉菜单展开——避免打断正在进行的操作或输入。
+if (store.viewMode === "main") {
+  startLiveViewLoop();
+
+  window.setInterval(() => {
+    if (store.busy || document.hidden || store.modal) {
+      return;
+    }
+    if (
+      store.openProfileMenuId ||
+      store.migrationSourceMenuOpen ||
+      store.migrationTargetMenuOpen ||
+      store.accountSyncMenuOpen ||
+      store.clonePoolMenuOpen
+    ) {
+      return;
+    }
+
+    void loadState().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+  }, 3000);
 }

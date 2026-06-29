@@ -1014,6 +1014,24 @@ h3 {
   background: var(--danger-soft);
 }
 
+.action-menu button.menu-warn {
+  color: var(--warn-bright);
+}
+
+.action-menu button.menu-warn:hover:not(:disabled),
+.action-menu button.menu-warn:focus-visible {
+  background: var(--warn-soft);
+}
+
+.action-menu button.menu-accent {
+  color: var(--accent-bright);
+}
+
+.action-menu button.menu-accent:hover:not(:disabled),
+.action-menu button.menu-accent:focus-visible {
+  background: rgba(56, 225, 160, 0.12);
+}
+
 /* ---- tooltips: HUD readout ---- */
 
 .action-tooltip {
@@ -1323,6 +1341,247 @@ body:not(.booted) .migration-panel {
 
 .account-sync-note.warn {
   color: var(--warn-bright);
+}
+
+/* ---- 副本池（Clone Pool） ---- */
+.clone-pool-overview {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.clone-pool-stat {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  padding: 4px 10px;
+  color: var(--muted);
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.clone-pool-stat strong {
+  color: var(--text);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.clone-pool-stat.running strong {
+  color: var(--accent-bright);
+}
+
+.clone-pool-modal {
+  width: min(640px, calc(100vw - 36px));
+}
+
+.clone-pool-modal-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.clone-pool-create {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.clone-pool-count-field {
+  margin: 0;
+}
+
+.clone-pool-count-field .clone-pool-input {
+  max-width: 120px;
+}
+
+.clone-pool-create .primary {
+  justify-self: start;
+  min-width: 140px;
+}
+
+.clone-pool-input {
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  color: var(--text);
+  padding: 9px 10px;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  width: 100%;
+}
+
+.clone-pool-input:focus-visible {
+  outline: none;
+  border-color: var(--accent-line);
+  box-shadow: var(--glow-accent);
+}
+
+.clone-pool-days {
+  width: 56px;
+  padding: 4px 6px;
+  font-size: 13px;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.clone-pool-create-options {
+  display: grid;
+  gap: 6px;
+}
+
+.clone-pool-create .primary {
+  min-width: 110px;
+  min-height: 38px;
+  white-space: nowrap;
+}
+
+.clone-pool-empty {
+  margin-top: 14px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  padding: 14px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.clone-group {
+  margin-top: 16px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+.clone-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.clone-group-title {
+  color: var(--text);
+  font-weight: 650;
+  font-size: 14px;
+}
+
+.clone-group-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.clone-list {
+  display: grid;
+  gap: 8px;
+}
+
+.clone-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  padding: 8px 12px;
+  min-width: 0;
+}
+
+.clone-row.running {
+  border-color: var(--accent-line);
+  box-shadow: var(--glow-accent);
+}
+
+.clone-row-dot {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--line-strong);
+}
+
+.clone-row-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.clone-tag-pill {
+  flex: 0 0 auto;
+  border: 1px solid var(--accent-line);
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: var(--accent-soft);
+  color: var(--accent-bright);
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.clone-row-port {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.clone-row-port.live {
+  color: var(--accent-bright);
+}
+
+.clone-row-state {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11px;
+  min-width: 48px;
+  text-align: right;
+}
+
+.clone-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.clone-pool-recycle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.clone-pool-recycle-copy {
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+@media (max-width: 900px) {
+  .clone-pool-create {
+    grid-template-columns: 1fr;
+  }
 }
 
 .account-sync-scope-toggle {
@@ -2366,11 +2625,11 @@ body:not(.booted) .layout {
   font-variant-numeric: tabular-nums;
 }
 
-/* 状态与操作列用固定宽度：操作列恰好容纳四个定宽按钮(≈288px+单元内边距)，
-   保证窗口变窄时按钮不会溢出到详情面板；名称/CDP 列自适应剩余空间并省略。 */
+/* 状态/连接/操作列用固定宽度：操作列只留两个按钮（主操作 + 更多；关闭、CDP启动都收进“更多”菜单），
+   比原来窄约 145px，把空间让给 CDP 地址 / 名称列；名称、CDP 列自适应并省略。 */
 .profiles-table th:nth-child(1),
 .profiles-table td:nth-child(1) {
-  width: 34%;
+  width: 30%;
 }
 
 .profiles-table th:nth-child(2),
@@ -2378,6 +2637,7 @@ body:not(.booted) .layout {
   width: 92px;
 }
 
+/* CDP 地址列自适应剩余空间并省略；连接、操作列定宽。 */
 .profiles-table th:nth-child(3),
 .profiles-table td:nth-child(3) {
   width: auto;
@@ -2385,7 +2645,78 @@ body:not(.booted) .layout {
 
 .profiles-table th:nth-child(4),
 .profiles-table td:nth-child(4) {
-  width: 316px;
+  width: 88px;
+}
+
+.profiles-table th:nth-child(5),
+.profiles-table td:nth-child(5) {
+  width: 172px;
+}
+
+/* 表头单行并裁切省略：窄列下文字不再溢出盖到相邻列（修复表头“挤在一块”）。 */
+.profiles-table th {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 「连接」列状态点：克制、图标前置、三态层次。
+   驱动中=亮绿脉冲点（有工具长连接）；空闲=静态暗绿点（CDP 开但无人连）；—=未开 CDP。 */
+.conn-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-width: 0;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.conn-pill .conn-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--line-strong);
+}
+
+.conn-pill .conn-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conn-pill.attached {
+  border-color: var(--accent-line);
+  background: linear-gradient(180deg, rgba(56, 225, 160, 0.16), rgba(56, 225, 160, 0.05));
+  color: var(--accent-bright);
+}
+
+.conn-pill.attached .conn-dot {
+  background: var(--accent-bright);
+  box-shadow: 0 0 9px rgba(56, 225, 160, 0.9);
+  animation: beacon 1.2s ease-in-out infinite;
+}
+
+.conn-pill.idle .conn-dot {
+  background: var(--accent);
+  opacity: 0.5;
+}
+
+.conn-pill.none {
+  color: var(--muted);
+  opacity: 0.55;
+}
+
+.conn-pill.none .conn-dot {
+  display: none;
 }
 
 .cdp-cell::before {
@@ -2447,6 +2778,38 @@ body:not(.booted) .layout {
   border-color: var(--line);
   background: transparent;
   color: var(--muted);
+}
+
+/* CDP 被外部工具持久连接（agent-browser 等正在驱动）：比 live 更亮、脉冲更快。 */
+.cdp-cell.attached {
+  border-color: var(--accent);
+  background: linear-gradient(180deg, rgba(56, 225, 160, 0.2), rgba(56, 225, 160, 0.06));
+  color: var(--accent-bright);
+}
+
+.cdp-cell.attached::before {
+  background: var(--accent-bright);
+  box-shadow: 0 0 12px rgba(56, 225, 160, 0.95);
+  animation: beacon 1.2s ease-in-out infinite;
+}
+
+.cdp-cell.attached .cdp-tag {
+  color: var(--accent-bright);
+  opacity: 1;
+}
+
+.detail-row-attached strong {
+  color: var(--accent-bright);
+}
+
+/* 悬浮窗卡片：被工具驱动时高亮读数并加快机头脉冲。 */
+.mini-profile-card.driving .mini-readout {
+  color: var(--accent-bright);
+  font-weight: 700;
+}
+
+.mini-profile-card.driving .mini-node.plane {
+  animation: beacon 1.2s ease-in-out infinite;
 }
 
 .profiles-table th,
@@ -2671,10 +3034,24 @@ body:not(.booted) .layout {
 }
 
 .profile-root-content {
-  display: grid;
-  grid-template-columns: minmax(220px, auto) minmax(0, 1fr) auto;
+  display: flex;
   align-items: center;
   gap: 12px;
+}
+
+.profile-root-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+/* 路径框按内容宽度（短尾部不拉满），过长才省略；计数靠 margin-left:auto 顶到最右。 */
+.profile-root-head .profile-root-path-tip {
+  width: auto;
+  max-width: 100%;
+  min-width: 0;
 }
 
 .profile-root-label {
@@ -2738,7 +3115,8 @@ body:not(.booted) .layout {
 }
 
 .profile-root-content .count {
-  margin-left: 0;
+  flex: 0 0 auto;
+  margin-left: auto;
 }
 
 /* 基础态保留为 CSS：仍被 extensions/account-sync 复用，profiles 处已叠加等值工具类。 */
@@ -3550,4 +3928,325 @@ body:not(.booted) .layout {
   .confirm-summary {
     grid-template-columns: 1fr;
   }
+}
+
+/* ===== 实时观测 · Cockpit（详情侧栏：看 Agent 浏览器“正飞在哪”）===== */
+.live-view {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 12px;
+}
+
+.live-view-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.live-view-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.live-pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent-bright);
+  box-shadow: 0 0 9px rgba(56, 225, 160, 0.9);
+  animation: beacon 1.6s ease-in-out infinite;
+}
+
+.live-pulse.loading {
+  animation-duration: 0.7s;
+}
+
+.live-view-actions {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.live-view-actions button {
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 4px 9px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.live-view-actions button:hover {
+  border-color: var(--accent-line);
+  color: var(--accent-bright);
+}
+
+.live-view-toggle.on {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent-bright);
+}
+
+.live-view-refresh.loading {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.live-screen {
+  position: relative;
+  aspect-ratio: 16 / 10;
+  width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--accent-line);
+  border-radius: 12px;
+  background:
+    radial-gradient(120% 80% at 50% 0%, rgba(56, 225, 160, 0.08), transparent 60%),
+    var(--bg-deep);
+  box-shadow: inset 0 0 0 1px rgba(56, 225, 160, 0.05), inset 0 14px 40px rgba(2, 6, 9, 0.6);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.live-screen-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: top center;
+}
+
+.live-screen-flag {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  z-index: 2;
+  max-width: calc(100% - 16px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 3px 8px;
+  border-radius: 7px;
+  border: 1px solid var(--accent-line);
+  background: rgba(5, 10, 8, 0.78);
+  color: var(--accent-bright);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  backdrop-filter: blur(4px);
+}
+
+.live-screen-hint {
+  z-index: 1;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+}
+
+.live-screen-sub {
+  z-index: 1;
+  max-width: 80%;
+  text-align: center;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+  opacity: 0.8;
+  overflow-wrap: anywhere;
+}
+
+.live-screen.error {
+  border-color: var(--warn-line);
+}
+
+.live-screen.error .live-screen-hint {
+  color: var(--warn-bright);
+}
+
+/* 等待态：一道青绿扫描线缓缓掠过，像雷达在找信号 */
+.live-screen-scan {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, transparent 0%, rgba(56, 225, 160, 0.16) 50%, transparent 100%);
+  transform: translateY(-100%);
+  animation: live-scan 2.4s linear infinite;
+}
+
+@keyframes live-scan {
+  0% {
+    transform: translateY(-100%);
+  }
+  100% {
+    transform: translateY(100%);
+  }
+}
+
+.live-tabs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.live-tab {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--panel-soft);
+}
+
+.live-tab.primary {
+  border-color: var(--accent-line);
+  background: linear-gradient(180deg, rgba(56, 225, 160, 0.1), rgba(56, 225, 160, 0.03));
+}
+
+.live-tab-favicon {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  object-fit: contain;
+}
+
+.live-tab-favicon.empty {
+  background: var(--line-strong);
+  opacity: 0.5;
+}
+
+.live-tab-copy {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.live-tab-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.live-tab-host {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+}
+
+.live-tab-action {
+  flex: 0 0 auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 3px 7px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.live-tab:hover .live-tab-action,
+.live-tab.primary .live-tab-action {
+  opacity: 1;
+}
+
+.live-tab-action:hover {
+  border-color: var(--accent-line);
+  color: var(--accent-bright);
+}
+
+.live-tabs-empty {
+  padding: 10px 12px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 9px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.live-view-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  opacity: 0.85;
+}
+
+.live-view-meta span {
+  white-space: nowrap;
+}
+
+/* 表格“连接”列：驱动状态 + 当前停在哪个域名的航点 */
+.conn-cell-stack {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* 当前页摘要的 tooltip 容器：承载 HUD 气泡，自身不裁剪（裁剪交给内层 .conn-live） */
+.conn-live-tip {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.conn-live {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+  opacity: 0.92;
+}
+
+.conn-live.toggleable {
+  cursor: pointer;
+}
+
+.conn-live.toggleable:hover {
+  color: var(--accent-bright);
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }

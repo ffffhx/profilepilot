@@ -1,9 +1,10 @@
 import { isBusyAction, renderToastBody } from "../busy";
 import { renderConfirmModal } from "../confirm";
 import { renderAccountSyncPanel } from "./account-sync";
+import { renderClonePoolModal } from "./clone-pool";
 import { renderExtensionMigrationPanel } from "./extensions";
 import { renderMini } from "./mini";
-import { renderAgentBrowserSetupModal, renderAgentConfigModal, renderCdpModal, renderExtensionMigrationModal, renderGlobalInstructionsModal, renderNewModal, renderRenameModal } from "./modals";
+import { renderAgentBrowserSetupModal, renderAgentConfigModal, renderCdpModal, renderCloneTagModal, renderExtensionMigrationModal, renderGlobalInstructionsModal, renderNewModal, renderRenameModal } from "./modals";
 import { renderDetails, renderEmpty, renderExternalDetails, renderProfilesPanel } from "./profiles";
 import { appRoot, store } from "../state";
 import { escapeHtml, renderBusyBanner, renderButtonLabel } from "../util";
@@ -97,6 +98,8 @@ export function render(): void {
     ${store.modal?.kind === "cdp" ? renderCdpModal(store.modal.profileId, store.modal.portSuggestion) : ""}
     ${store.modal?.kind === "agent-config" ? renderAgentConfigModal(store.modal.profileId, store.modal.portSuggestion) : ""}
     ${store.modal?.kind === "agent-browser-setup" ? renderAgentBrowserSetupModal(store.modal.portSuggestion) : ""}
+    ${store.modal?.kind === "clone-pool" ? renderClonePoolModal(profiles) : ""}
+    ${store.modal?.kind === "clone-tag" ? renderCloneTagModal(store.modal.profileId) : ""}
     ${store.modal?.kind === "global-instructions" ? renderGlobalInstructionsModal() : ""}
     ${store.modal?.kind === "extension-migration" ? renderExtensionMigrationModal(profiles) : ""}
     ${store.modal?.kind === "confirm" ? renderConfirmModal(store.modal) : ""}

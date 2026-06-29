@@ -6,8 +6,15 @@ import type {
   AccountSyncResult,
   SetupAgentBrowserRequest,
   SetupAgentBrowserResult,
+  CloneProfilesRequest,
+  CloneProfilesResult,
+  RefreshClonesResult,
+  RecycleIdleClonesResult,
+  LaunchClonesResult,
   AppState,
   CancelOperationRequest,
+  CdpLiveView,
+  CdpLiveViewOptions,
   CdpPortSuggestion,
   ControlOperationRequest,
   DeleteProfileOptions,
@@ -90,10 +97,24 @@ const profileManagerApi: ProfileManagerApi = {
     ipcRenderer.invoke(IPC_CHANNELS.syncAccount, request),
   setupAgentBrowser: (request: SetupAgentBrowserRequest): Promise<SetupAgentBrowserResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.setupAgentBrowser, request),
+  cloneProfiles: (request: CloneProfilesRequest): Promise<CloneProfilesResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.cloneProfiles, request),
+  refreshClones: (sourceProfileId: string): Promise<RefreshClonesResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.refreshClones, sourceProfileId),
+  resetClone: (profileId: string): Promise<AccountSyncResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.resetClone, profileId),
+  recycleIdleClones: (days: number): Promise<RecycleIdleClonesResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.recycleIdleClones, days),
+  setProfileTag: (profileId: string, tag: string): Promise<AppState> =>
+    ipcRenderer.invoke(IPC_CHANNELS.setProfileTag, profileId, tag),
+  launchClones: (sourceProfileId: string): Promise<LaunchClonesResult> =>
+    ipcRenderer.invoke(IPC_CHANNELS.launchClones, sourceProfileId),
   cancelOperation: (request: CancelOperationRequest): Promise<boolean> =>
     ipcRenderer.invoke(IPC_CHANNELS.cancelOperation, request),
   controlOperation: (request: ControlOperationRequest): Promise<boolean> =>
     ipcRenderer.invoke(IPC_CHANNELS.controlOperation, request),
+  getCdpLiveView: (port: number, options?: CdpLiveViewOptions): Promise<CdpLiveView> =>
+    ipcRenderer.invoke(IPC_CHANNELS.getCdpLiveView, port, options),
   onOperationProgress: (listener: (progress: OperationProgress) => void): (() => void) => {
     const handler = (_event: IpcRendererEvent, progress: OperationProgress): void => {
       listener(progress);

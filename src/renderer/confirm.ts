@@ -151,6 +151,105 @@ export function confirmModalView(intent: ConfirmIntent): ConfirmModalView | null
     };
   }
 
+  if (intent.kind === "clone-profiles") {
+    const source = store.state.profiles.find((profile) => profile.id === intent.sourceProfileId);
+    if (!source) {
+      return null;
+    }
+    return {
+      kicker: "批量克隆确认",
+      title: `克隆 ${source.name} 为 ${intent.count} 份`,
+      body: [
+        `会新建 ${intent.count} 个隔离副本，逐个从 ${source.name} 复制登录态${intent.includeExtensions ? "并同步插件" : ""}，各分配一个独立的固定 CDP 端口。`,
+        intent.launchAfter ? "克隆完成后会逐个以 CDP 模式启动。" : "克隆完成后不会自动启动，可稍后在副本池里批量启动。",
+        ...(intent.setAgentEndpoint ? ["完成后会把第一份副本写入全局 AGENTS.md，作为 Agent 的固定调试端点。"] : []),
+        "克隆较耗时（每份都要复制账号数据），请耐心等待。"
+      ],
+      confirmLabel: `克隆 ${intent.count} 份`,
+      tone: "primary",
+      summary: [
+        { label: "源 Profile", value: source.name },
+        { label: "份数", value: String(intent.count) },
+        { label: "含插件", value: intent.includeExtensions ? "是" : "否" },
+        { label: "克隆后启动", value: intent.launchAfter ? "是" : "否" },
+        { label: "Agent 端点", value: intent.setAgentEndpoint ? "写入第一份" : "不写入" }
+      ]
+    };
+  }
+
+  if (intent.kind === "refresh-clones") {
+    const source = store.state.profiles.find((profile) => profile.id === intent.sourceProfileId);
+    if (!source) {
+      return null;
+    }
+    const clones = store.state.profiles.filter((profile) => profile.clonedFromProfileId === intent.sourceProfileId);
+    const runningCount = clones.filter((clone) => clone.running).length;
+    return {
+      kicker: "刷新副本登录态",
+      title: `刷新 ${source.name} 的 ${clones.length} 个副本`,
+      body: [
+        `会以 ${source.name} 为准，把它的全部副本登录态增量刷新一遍。`,
+        runningCount
+          ? `其中 ${runningCount} 个副本正在运行，刷新前会先关闭它们（不会自动重开）。`
+          : "副本会逐个写入最新登录态。"
+      ],
+      confirmLabel: "刷新登录态",
+      tone: "warn",
+      summary: [
+        { label: "源 Profile", value: source.name },
+        { label: "副本数", value: String(clones.length) },
+        { label: "运行中", value: String(runningCount) }
+      ]
+    };
+  }
+
+  if (intent.kind === "reset-clone") {
+    const clone = store.state.profiles.find((profile) => profile.id === intent.profileId);
+    if (!clone) {
+      return null;
+    }
+    const source = clone.clonedFromProfileId
+      ? store.state.profiles.find((profile) => profile.id === clone.clonedFromProfileId)
+      : null;
+    return {
+      kicker: "重置副本",
+      title: `重置 ${clone.name}`,
+      body: [
+        source
+          ? `会以源 ${source.name} 为准，重新覆盖 ${clone.name} 的登录态（全量）。`
+          : "会以记录的源为准，重新覆盖这个副本的登录态。",
+        clone.running ? "副本正在运行，重置前会先关闭它。" : "重置只覆盖登录态，不会清空本地浏览数据。"
+      ],
+      confirmLabel: "重置登录态",
+      tone: "warn",
+      summary: [
+        { label: "副本", value: clone.name },
+        { label: "源", value: source?.name || clone.clonedFromName || "未知" },
+        { label: "状态", value: profileStatusLabel(clone) }
+      ]
+    };
+  }
+
+  if (intent.kind === "recycle-clones") {
+    const candidates = store.state.profiles.filter(
+      (profile) => profile.source === "isolated" && profile.clonedFromProfileId && !profile.running
+    );
+    return {
+      kicker: "清理闲置副本",
+      title: `清理 ${intent.days} 天未使用的副本`,
+      body: [
+        `会把所有副本里、未运行、且最近启动/创建时间早于 ${intent.days} 天前的，移到废纸篓。`,
+        "运行中的副本不会被清理；移到废纸篓的目录仍可恢复。"
+      ],
+      confirmLabel: "清理闲置副本",
+      tone: "danger",
+      summary: [
+        { label: "天数阈值", value: `${intent.days} 天` },
+        { label: "当前空闲副本", value: String(candidates.length) }
+      ]
+    };
+  }
+
   const sourceProfile = store.state.profiles.find((profile) => profile.id === intent.sourceProfileId);
   const targetProfile = store.state.profiles.find((profile) => profile.id === intent.targetProfileId);
   const activeScan = store.extensionScan?.profileId === intent.sourceProfileId ? store.extensionScan : null;
@@ -229,6 +328,11 @@ export function extensionMigrationConfirmDataLine(
 export function closeModalFromUi(): void {
   if (store.modal?.kind === "confirm" && store.modal.returnTo === "extension-migration") {
     store.modal = { kind: "extension-migration" };
+  } else if (store.modal?.kind === "confirm" && store.modal.returnTo === "clone-pool") {
+    store.modal = { kind: "clone-pool" };
+  } else if (store.modal?.kind === "clone-tag") {
+    // 标签弹窗是从副本池弹窗打开的，取消后回到副本池。
+    store.modal = { kind: "clone-pool" };
   } else {
     store.modal = null;
   }
@@ -252,7 +356,116 @@ export function executeConfirmIntent(intent: ConfirmIntent): void {
     return;
   }
 
+  if (intent.kind === "clone-profiles") {
+    executeCloneProfilesConfirm(intent);
+    return;
+  }
+
+  if (intent.kind === "refresh-clones") {
+    executeRefreshClonesConfirm(intent);
+    return;
+  }
+
+  if (intent.kind === "reset-clone") {
+    executeResetCloneConfirm(intent);
+    return;
+  }
+
+  if (intent.kind === "recycle-clones") {
+    executeRecycleClonesConfirm(intent);
+    return;
+  }
+
   executeExtensionMigrationConfirm(intent);
+}
+
+export function executeCloneProfilesConfirm(intent: Extract<ConfirmIntent, { kind: "clone-profiles" }>): void {
+  const source = store.state?.profiles.find((profile) => profile.id === intent.sourceProfileId);
+  // 保持副本池弹窗开着，过程中显示进度，完成后直接看到新副本列表。
+  store.modal = { kind: "clone-pool" };
+  if (!source) {
+    render();
+    setToast("没有找到源 Profile", "error");
+    return;
+  }
+
+  void withBusy(
+    async () => {
+      const result = await profileApi().cloneProfiles({
+        sourceProfileId: intent.sourceProfileId,
+        count: intent.count,
+        namePrefix: intent.namePrefix,
+        includeExtensions: intent.includeExtensions,
+        launchAfter: intent.launchAfter,
+        setAgentEndpoint: intent.setAgentEndpoint
+      });
+      store.state = result.state;
+      store.clonePoolSourceId = intent.sourceProfileId;
+      setToast(
+        intent.setAgentEndpoint
+          ? `已克隆 ${result.created.length} 个副本，并把第一份写入 AGENTS.md 作为 Agent 端点`
+          : `已克隆 ${result.created.length} 个副本`
+      );
+    },
+    undefined,
+    { key: "clone-profiles", message: `正在克隆 ${intent.count} 份…` }
+  );
+}
+
+export function executeRefreshClonesConfirm(intent: Extract<ConfirmIntent, { kind: "refresh-clones" }>): void {
+  const source = store.state?.profiles.find((profile) => profile.id === intent.sourceProfileId);
+  store.modal = { kind: "clone-pool" };
+  if (!source) {
+    render();
+    setToast("没有找到源 Profile", "error");
+    return;
+  }
+
+  void withBusy(
+    async () => {
+      const result = await profileApi().refreshClones(intent.sourceProfileId);
+      store.state = result.state;
+      store.clonePoolSourceId = intent.sourceProfileId;
+      setToast(
+        `已刷新 ${result.refreshedCount} 个副本登录态${result.skippedCount ? `，跳过 ${result.skippedCount} 个` : ""}`
+      );
+    },
+    undefined,
+    { key: "refresh-clones", message: "正在刷新副本登录态…" }
+  );
+}
+
+export function executeResetCloneConfirm(intent: Extract<ConfirmIntent, { kind: "reset-clone" }>): void {
+  const clone = store.state?.profiles.find((profile) => profile.id === intent.profileId);
+  store.modal = { kind: "clone-pool" };
+  if (!clone) {
+    render();
+    setToast("没有找到这个副本", "error");
+    return;
+  }
+
+  void withBusy(
+    async () => {
+      const result = await profileApi().resetClone(intent.profileId);
+      store.state = result.state;
+      store.selectedId = intent.profileId;
+    },
+    `已重置 ${emphasizeName(clone.name)} 的登录态`,
+    { key: "reset-clone", message: `正在重置 ${clone.name}…`, profileId: intent.profileId }
+  );
+}
+
+export function executeRecycleClonesConfirm(intent: Extract<ConfirmIntent, { kind: "recycle-clones" }>): void {
+  store.modal = { kind: "clone-pool" };
+  void withBusy(
+    async () => {
+      const result = await profileApi().recycleIdleClones(intent.days);
+      store.state = result.state;
+      setToast(result.deleted.length ? `已清理 ${result.deleted.length} 个闲置副本` : "没有符合条件的闲置副本");
+    },
+    undefined,
+    { key: "recycle-clones", message: "正在清理闲置副本…" }
+  );
 }
 
 export function executeProfileConfirm(intent: Extract<ConfirmIntent, { kind: "profile" }>): void {

@@ -249,6 +249,29 @@ export function formatDate(value: string | null): string {
   return dateFormatter.format(date);
 }
 
+// 把 URL 收成一个简短的“航点”：优先域名；chrome:// 等特殊协议退回主机名/路径；解析失败截断原串。
+export function hostOf(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname) {
+      return parsed.hostname;
+    }
+    const tail = parsed.pathname.replace(/^\/+/, "").split("/")[0];
+    return `${parsed.protocol}${tail}` || url;
+  } catch {
+    return url.length > 56 ? `${url.slice(0, 56)}…` : url;
+  }
+}
+
+// 当前页“域名 / IP”二选一的展示标签：随全局 store.liveShowIp 切换；某一种解析不到时回退到另一种或 URL 主机名。
+export function liveAddrLabel(profile: PublicProfile): string {
+  const fallback = profile.livePrimaryUrl ? hostOf(profile.livePrimaryUrl) : "";
+  if (store.liveShowIp) {
+    return profile.liveIp || profile.liveHost || fallback;
+  }
+  return profile.liveHost || profile.liveIp || fallback;
+}
+
 export function escapeHtml(value: unknown): string {
   return String(value ?? "")
     .replace(/&/g, "&amp;")

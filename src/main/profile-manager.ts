@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, promises as fs } from "node:fs";
 import os from "node:os";
+import { promises as dnsPromises } from "node:dns";
+import net from "node:net";
 import path from "node:path";
 import { app, shell } from "electron";
 import type {
@@ -12,8 +14,14 @@ import type {
   AccountSyncSkippedItem,
   AppState,
   CdpPortSuggestion,
+  ClonedProfileInfo,
+  CloneProfilesRequest,
+  CloneProfilesResult,
   DeleteProfileOptions,
   DeleteProfileResult,
+  LaunchClonesResult,
+  RecycleIdleClonesResult,
+  RefreshClonesResult,
   ExtensionDeleteResult,
   ExtensionMigrationCopiedExtension,
   ExtensionMigrationDataCopy,
@@ -38,7 +46,7 @@ import type {
   StoredProfile
 } from "../shared/types";
 import { accountSyncCopySpecs, accountSyncDataScore, accountSyncRecordKey, applyAccountSyncRecordBaseline, assertAccountSyncDiskSpace, collectAccountSyncPathStats, copyAccountSyncPath, inspectAccountLocalStateDiff, inspectAccountSyncPathDiff, mergeAccountLocalStateValues, recoverInterruptedAccountSyncArtifactsForProfile, restoreAccountSyncExtensionPreferences, shouldApplyAccountDiffItem, snapshotAccountSyncExtensionPreferences, snapshotAccountSyncSourceFingerprints, summarizeAccountSyncDiff } from "./account-sync";
-import { describePortOwner, findAvailableCdpPort, isPortAvailable, makeCdpUrl, normalizeCdpPortInput, waitForCdp } from "./cdp-client";
+import { describePortOwner, findAvailableCdpPort, isPortAvailable, makeCdpUrl, normalizeCdpPortInput, requestCdpTargets, waitForCdp } from "./cdp-client";
 import { appendUniqueExtraUrls, bringCdpPageToFront, loadUnpackedExtensionsOverCdp, snapshotRestorableTabUrls } from "./cdp-page";
 import { focusProfileWindow, hasRendererProcessForProfile, isAnyMacProcessFrontmost, launchChrome, makeIsolatedProfileId, makeNativeProfileId, nativeChromeUserDataDir, openChromeUrl, parseProfileId, readAgentBrowserConfig, readIsolatedProfileUserName, removeAgentBrowserConfigFile, removeNativeProfileFromLocalState, requestIsolatedProfileWindow, resolveIsolatedProfileDataPath, scanNativeChromeProfiles, writeAgentBrowserConfigFile } from "./chrome-launch";
 import { canAutoLoadUnpackedExtensions, canLoadLocalExtensionViaCdp, canPersistExtensionInstall, copyExtensionDataPath, copyExtensionPackageToProfile, extensionDataDiffers, getMigratedExtensionLaunchPlan, getProtectedDeveloperModeRecord, inspectExtensionMigrationItem, isExtensionMigrationActionItem, isManualLoadSkipReason, isProfileRelativeExtensionSetting, makeStoredMigratedExtensionId, manualLoadExtensionReason, readProtectedExtensionInstallRecord, removeExtensionReferencesFromProfilePreferences, summarizeExtensionMigrationDiff, writeProtectedExtensionInstallRecord } from "./extension-migration";
@@ -46,7 +54,7 @@ import { extensionDeleteRelativePaths, isLikelyExtensionId, scanProfileExtension
 import { copyPath, throwIfAborted, waitIfPaused } from "./fs-copy";
 import { POSIX_LOCALE_ENV, chromeProfileDirName, defaultDataDir, execFileAsync, exists, isProcessGoneError, isSafePathSegment, isSameFilesystemPath, makePathSegment, makeSlug, normalizeAccountSyncRecords, normalizeNativeProfileMetadata, normalizeProfile, normalizeProfileName, normalizeSafeRelativePath, shouldCopyLocalExtensionPackagePath, sleep, uniqueStrings } from "./fs-util";
 import { AccountSyncCopyPlan, AccountSyncDataLocation, ProfileRef, ProfileRestartPlan, RuntimeProfile } from "./internal-types";
-import { addRuntimeProcess, attachListeningPorts, emptyRuntimeProfile, findExternalChromeInstances, getChromeProcessPids, getOpenProfilePidsByPath, isChromeRunning, isImplicitDefaultChromeProcess, makeNativeRuntimeKey, mergeRuntimeProfiles, parseRuntimeProcess } from "./process-scan";
+import { addRuntimeProcess, attachListeningPorts, emptyRuntimeProfile, findExternalChromeInstances, getCdpClientsByPort, getChromeProcessPids, getOpenProfilePidsByPath, isChromeRunning, isImplicitDefaultChromeProcess, makeNativeRuntimeKey, mergeRuntimeProfiles, parseRuntimeProcess } from "./process-scan";
 import { ProfileManagerError } from "./profile-manager-error";
 
 export { ProfileManagerError } from "./profile-manager-error";
@@ -54,6 +62,51 @@ export { ProfileManagerError } from "./profile-manager-error";
 export const APP_TITLE = "ProfilePilot";
 const CHROME_REMOTE_DEBUGGING_URL = "chrome://inspect/#remote-debugging";
 const MINI_PROFILE_LIMIT = 3;
+
+// 实时摘要的“域名 ↔ IP”解析缓存：getState 高频调用，缓存解析结果，避免每轮都打 DNS。
+const liveAddrCache = new Map<string, { value: { host: string | null; ip: string | null }; at: number }>();
+const LIVE_ADDR_TTL_MS = 5 * 60 * 1000;
+
+// 把当前页 URL 的主机名解析成“域名 + IP”两种表示，供前端点击切换：
+// URL 用域名 → lookup 出 IP；URL 用 IP → reverse(PTR) 反查域名（公网 IP 多半反查到云厂商 PTR，不保证是访问的域名）。
+// 带超时与 5 分钟缓存，任一步失败即返回 null，绝不阻塞 getState。
+async function resolveLiveAddr(url: string | null): Promise<{ host: string | null; ip: string | null }> {
+  if (!url) {
+    return { host: null, ip: null };
+  }
+  let hostname: string;
+  try {
+    hostname = new URL(url).hostname;
+  } catch {
+    return { host: null, ip: null };
+  }
+  if (!hostname) {
+    return { host: null, ip: null };
+  }
+
+  const cached = liveAddrCache.get(hostname);
+  if (cached && Date.now() - cached.at < LIVE_ADDR_TTL_MS) {
+    return cached.value;
+  }
+
+  const withTimeout = <T>(promise: Promise<T>, ms: number): Promise<T | null> =>
+    Promise.race([promise.catch(() => null), new Promise<null>((resolve) => setTimeout(() => resolve(null), ms))]);
+
+  let value: { host: string | null; ip: string | null };
+  if (net.isIP(hostname)) {
+    const names = await withTimeout(dnsPromises.reverse(hostname), 900);
+    value = { host: names && names.length ? names[0] : null, ip: hostname };
+  } else {
+    // 优先 IPv4（更短、更眼熟）；没有 A 记录再退回系统默认（可能是 IPv6）。
+    const lookup =
+      (await withTimeout(dnsPromises.lookup(hostname, { family: 4 }), 900)) ||
+      (await withTimeout(dnsPromises.lookup(hostname), 900));
+    value = { host: hostname, ip: lookup ? lookup.address : null };
+  }
+
+  liveAddrCache.set(hostname, { value, at: Date.now() });
+  return value;
+}
 
 export class ProfileManager {
   private readonly profilesDir: string;
@@ -105,6 +158,62 @@ export class ProfileManager {
         return bTime.localeCompare(aTime);
       });
     const profiles = [...nativeProfiles, ...isolatedProfiles];
+
+    // 补算副本组信息：每个副本解析出源名，每个源统计有多少副本指向它。
+    const profileNameById = new Map(profiles.map((profile) => [profile.id, profile.name]));
+    const cloneCountBySource = new Map<string, number>();
+    for (const profile of profiles) {
+      if (profile.clonedFromProfileId) {
+        cloneCountBySource.set(profile.clonedFromProfileId, (cloneCountBySource.get(profile.clonedFromProfileId) || 0) + 1);
+      }
+    }
+    profiles.forEach((profile) => {
+      profile.clonedFromName = profile.clonedFromProfileId ? profileNameById.get(profile.clonedFromProfileId) || null : null;
+      profile.cloneCount = cloneCountBySource.get(profile.id) || 0;
+    });
+
+    // 标记“谁在持久连接这些 Profile 的 CDP 端口”（agent-browser 等驱动工具）。
+    const cdpPorts = profiles
+      .filter((profile) => profile.cdpPort !== null)
+      .map((profile) => profile.cdpPort as number);
+    const cdpClientsByPort = await getCdpClientsByPort(cdpPorts);
+    // ProfilePilot 自己也会连这些 CDP 端口去抓实时观测数据（标签页 / 截图），
+    // 这些自连接不是“外部驱动工具”，必须排除，否则会把自己显示成“驱动中：Electron”。
+    const selfPids = new Set(app.getAppMetrics().map((metric) => metric.pid));
+    profiles.forEach((profile) => {
+      if (profile.cdpPort === null) {
+        return;
+      }
+      const profilePids = new Set(profile.pids);
+      // 排除 Chrome 自己的 socket 和 ProfilePilot 自身进程，只留真正的外部驱动工具（agent-browser 等）。
+      profile.cdpClients = (cdpClientsByPort.get(profile.cdpPort) || []).filter(
+        (client) => !profilePids.has(client.pid) && !selfPids.has(client.pid)
+      );
+    });
+
+    // 实时摘要：每个有 CDP 端口的 Profile 当前停在哪个页面、开了几个标签（轻量，不抓截图）。
+    // 给表格行 / 悬浮窗卡片 / 「在飞中」总览统一供数；详情侧栏的画面截图仍走独立的 getCdpLiveView。
+    const liveSummaryByPort = new Map<number, { primaryUrl: string | null; tabCount: number }>();
+    await Promise.all(
+      [...new Set(cdpPorts)].map(async (port) => {
+        const targets = await requestCdpTargets(port).catch(() => []);
+        const pages = targets.filter((target) => target.type === "page");
+        liveSummaryByPort.set(port, { primaryUrl: pages[0]?.url || null, tabCount: pages.length });
+      })
+    );
+    await Promise.all(
+      profiles.map(async (profile) => {
+        if (profile.cdpPort === null) {
+          return;
+        }
+        const summary = liveSummaryByPort.get(profile.cdpPort);
+        profile.livePrimaryUrl = summary?.primaryUrl ?? null;
+        profile.liveTabCount = summary?.tabCount ?? null;
+        const addr = await resolveLiveAddr(summary?.primaryUrl ?? null);
+        profile.liveHost = addr.host;
+        profile.liveIp = addr.ip;
+      })
+    );
 
     // 标记当前写入全局 AGENTS.md 的 Agent 调试端点指向哪个 Profile。
     const agentConfig = await readAgentBrowserConfig();
@@ -1467,6 +1576,263 @@ export class ProfileManager {
     };
   }
 
+  // 副本池：把一个登录态 Profile 批量克隆成 N 份隔离副本，每份独立 CDP 端口、登录态一致。
+  // 复用单份链路 createProfile → syncAccount →（可选）migrateExtensions，再绑定固定端口与副本来源。
+  async cloneProfiles(
+    request: CloneProfilesRequest,
+    onProgress?: (progress: OperationProgressUpdate) => void,
+    abortSignal?: AbortSignal,
+    pauseSignal?: OperationPauseSignal
+  ): Promise<CloneProfilesResult> {
+    const sourceProfileId = String(request.sourceProfileId || "");
+    const count = Math.floor(Number(request.count));
+    if (!Number.isInteger(count) || count < 1 || count > 20) {
+      throw new ProfileManagerError("副本份数必须是 1-20 之间的整数。", "INVALID_CLONE_COUNT");
+    }
+    const includeExtensions = Boolean(request.includeExtensions);
+    const launchAfter = Boolean(request.launchAfter);
+    const setAgentEndpoint = Boolean(request.setAgentEndpoint);
+
+    const state = await this.getState();
+    const source = state.profiles.find((profile) => profile.id === sourceProfileId);
+    if (!source) {
+      throw new ProfileManagerError("没有找到作为登录态来源的 Profile。", "PROFILE_NOT_FOUND");
+    }
+
+    const prefix = normalizeProfileName(request.namePrefix || source.name).slice(0, 70);
+    let nextPortSeed = normalizeCdpPortInput(request.basePort) ?? (await findAvailableCdpPort(9223));
+    const report = (message: string, stepIndex: number): void => {
+      onProgress?.({ message, step: `克隆 ${stepIndex}/${count}`, stepIndex, stepCount: count });
+    };
+
+    const created: ClonedProfileInfo[] = [];
+    const usedNames = new Set(state.profiles.map((profile) => profile.name));
+
+    for (let i = 0; i < count; i += 1) {
+      throwIfAborted(abortSignal);
+      await waitIfPaused(pauseSignal, abortSignal);
+      const name = nextUniqueCloneName(prefix, usedNames);
+      usedNames.add(name);
+      report(`正在创建副本 ${i + 1}/${count}：${name}…`, i + 1);
+      const createdProfile = await this.createProfile(name);
+      const targetId = makeIsolatedProfileId(createdProfile.id);
+      try {
+        report(`正在为 ${name} 同步登录态（${i + 1}/${count}）…`, i + 1);
+        await this.syncAccount(
+          { sourceProfileId, targetProfileId: targetId, launchTarget: false, onlyChanged: false },
+          (update) => report(update.message, i + 1),
+          abortSignal,
+          pauseSignal
+        );
+
+        if (includeExtensions) {
+          report(`正在为 ${name} 同步插件（${i + 1}/${count}）…`, i + 1);
+          const scan = await this.scanProfileExtensions(sourceProfileId);
+          const extensionIds = scan.extensions.map((extension) => extension.id);
+          if (extensionIds.length) {
+            await this.migrateExtensions(
+              {
+                sourceProfileId,
+                targetProfileId: targetId,
+                extensionIds,
+                includeData: false,
+                openInstallPages: false,
+                onlyChanged: false
+              },
+              (update) => report(update.message, i + 1)
+            );
+          }
+        }
+
+        const port = await findAvailableCdpPort(nextPortSeed);
+        nextPortSeed = port + 1;
+        await this.setStoredCloneMeta(targetId, { fixedCdpPort: port, clonedFromProfileId: sourceProfileId });
+
+        let launched = false;
+        if (launchAfter) {
+          report(`正在以 CDP 启动 ${name}（${i + 1}/${count}）…`, i + 1);
+          await this.launchProfileWithCdp(targetId, port);
+          launched = true;
+          nextPortSeed = port + 1;
+        }
+        created.push({ profileId: targetId, name, port, launched });
+      } catch (error) {
+        // 当前这份失败（含用户中止）：清理半成品；前面已成功的副本保留。
+        await this.deleteProfile(targetId).catch(() => undefined);
+        throw error;
+      }
+    }
+
+    // 可选：把第一份副本写入全局 AGENTS.md，作为 Agent 的固定调试端点（等同旧「一键造 Agent 浏览器」）。
+    if (setAgentEndpoint && created[0]?.port) {
+      await this.setAgentBrowserConfig(created[0].profileId, created[0].port);
+    }
+
+    return { sourceProfileId, created, state: await this.getState() };
+  }
+
+  // 副本池：以源为准，把该源的全部副本登录态刷新一遍（onlyChanged 走增量，快）。
+  async refreshClones(
+    sourceProfileId: string,
+    onProgress?: (progress: OperationProgressUpdate) => void,
+    abortSignal?: AbortSignal,
+    pauseSignal?: OperationPauseSignal
+  ): Promise<RefreshClonesResult> {
+    const sourceId = String(sourceProfileId || "");
+    const registry = await this.loadRegistry();
+    const clones = registry.profiles.filter((profile) => profile.clonedFromProfileId === sourceId);
+    if (!clones.length) {
+      throw new ProfileManagerError("这个源 Profile 还没有任何副本。", "NO_CLONES");
+    }
+
+    const refreshed: RefreshClonesResult["refreshed"] = [];
+    let skippedCount = 0;
+    for (const [index, clone] of clones.entries()) {
+      throwIfAborted(abortSignal);
+      await waitIfPaused(pauseSignal, abortSignal);
+      const targetId = makeIsolatedProfileId(clone.id);
+      const report = (message: string): void => {
+        onProgress?.({ message, step: `刷新 ${index + 1}/${clones.length}`, stepIndex: index + 1, stepCount: clones.length });
+      };
+      report(`正在刷新副本 ${index + 1}/${clones.length}：${clone.name}…`);
+      try {
+        const result = await this.syncAccount(
+          { sourceProfileId: sourceId, targetProfileId: targetId, launchTarget: false, onlyChanged: true },
+          (update) => report(update.message),
+          abortSignal,
+          pauseSignal
+        );
+        refreshed.push({ profileId: targetId, name: clone.name, copiedCount: result.copiedItems.length });
+      } catch (error) {
+        if (error instanceof ProfileManagerError && error.code === "ACCOUNT_SYNC_SOURCE_EMPTY") {
+          skippedCount += 1;
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    return { sourceProfileId: sourceId, refreshedCount: refreshed.length, skippedCount, refreshed, state: await this.getState() };
+  }
+
+  // 副本池：把某个副本重置为干净态——以它记录的源为准，重新覆盖一次登录态（onlyChanged:false）。
+  async resetClone(
+    profileId: string,
+    onProgress?: (progress: OperationProgressUpdate) => void,
+    abortSignal?: AbortSignal,
+    pauseSignal?: OperationPauseSignal
+  ): Promise<AccountSyncResult> {
+    const ref = parseProfileId(profileId);
+    if (ref.source !== "isolated") {
+      throw new ProfileManagerError("只有副本（独立 Profile）支持重置。", "ISOLATED_PROFILE_REQUIRED");
+    }
+    const registry = await this.loadRegistry();
+    const stored = this.findIsolatedProfile(registry, ref.id);
+    if (!stored.clonedFromProfileId) {
+      throw new ProfileManagerError("这个 Profile 不是副本，没有可重置回去的源。", "NOT_A_CLONE");
+    }
+
+    return this.syncAccount(
+      { sourceProfileId: stored.clonedFromProfileId, targetProfileId: profileId, launchTarget: false, onlyChanged: false },
+      onProgress,
+      abortSignal,
+      pauseSignal
+    );
+  }
+
+  // 副本池：回收 N 天未使用的空闲副本（未运行、且最近启动/创建时间早于截止）。
+  async recycleIdleClones(daysInput: number): Promise<RecycleIdleClonesResult> {
+    const days = Math.floor(Number(daysInput));
+    if (!Number.isInteger(days) || days < 0) {
+      throw new ProfileManagerError("天数必须是大于等于 0 的整数。", "INVALID_RECYCLE_DAYS");
+    }
+
+    const state = await this.getState();
+    const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+    const candidates = state.profiles.filter((profile) => {
+      if (profile.source !== "isolated" || !profile.clonedFromProfileId || profile.running) {
+        return false;
+      }
+      const reference = Date.parse(profile.lastLaunchedAt || profile.createdAt || "");
+      return Number.isFinite(reference) && reference <= cutoff;
+    });
+
+    const deleted: RecycleIdleClonesResult["deleted"] = [];
+    for (const profile of candidates) {
+      try {
+        await this.deleteProfile(profile.id);
+        deleted.push({ profileId: profile.id, name: profile.name });
+      } catch (error) {
+        console.warn(`[profilepilot] 回收闲置副本失败：${profile.name}`, error);
+      }
+    }
+
+    return { days, deleted, state: await this.getState() };
+  }
+
+  // 副本池：给某个副本设置/清除项目标签（纯展示，不影响登录态）。
+  async setProfileTag(profileId: string, tagInput: string): Promise<void> {
+    const tag = String(tagInput || "").trim().slice(0, 40);
+    await this.setStoredCloneMeta(profileId, { projectTag: tag || null });
+  }
+
+  // 副本池：批量以 CDP 启动该源下所有未运行的副本（各用自己的固定端口）。
+  async launchClones(
+    sourceProfileId: string,
+    onProgress?: (progress: OperationProgressUpdate) => void
+  ): Promise<LaunchClonesResult> {
+    const sourceId = String(sourceProfileId || "");
+    const state = await this.getState();
+    const clones = state.profiles.filter(
+      (profile) => profile.source === "isolated" && profile.clonedFromProfileId === sourceId && !profile.running
+    );
+    if (!clones.length) {
+      throw new ProfileManagerError("没有可启动的空闲副本。", "NO_IDLE_CLONES");
+    }
+
+    const launched: LaunchClonesResult["launched"] = [];
+    const failed: LaunchClonesResult["failed"] = [];
+    for (const [index, clone] of clones.entries()) {
+      onProgress?.({
+        message: `正在启动副本 ${index + 1}/${clones.length}：${clone.name}…`,
+        step: `启动 ${index + 1}/${clones.length}`,
+        stepIndex: index + 1,
+        stepCount: clones.length
+      });
+      try {
+        await this.launchProfileWithCdp(clone.id, clone.fixedCdpPort ?? null);
+        launched.push({ profileId: clone.id, name: clone.name, port: clone.fixedCdpPort ?? null });
+      } catch (error) {
+        failed.push({ profileId: clone.id, name: clone.name, reason: error instanceof Error ? error.message : String(error) });
+      }
+    }
+
+    return { sourceProfileId: sourceId, launched, failed, state: await this.getState() };
+  }
+
+  // 改写独立 Profile 的副本元数据（固定端口 / 克隆来源 / 项目标签），只动 registry，不写 AGENTS.md。
+  private async setStoredCloneMeta(
+    profileId: string,
+    meta: { fixedCdpPort?: number | null; clonedFromProfileId?: string | null; projectTag?: string | null }
+  ): Promise<void> {
+    const ref = parseProfileId(profileId);
+    if (ref.source !== "isolated") {
+      throw new ProfileManagerError("只有工具独立 Profile 才支持副本元数据。", "ISOLATED_PROFILE_REQUIRED");
+    }
+    const registry = await this.loadRegistry();
+    const profile = this.findIsolatedProfile(registry, ref.id);
+    if (meta.fixedCdpPort !== undefined) {
+      profile.fixedCdpPort = meta.fixedCdpPort;
+    }
+    if (meta.clonedFromProfileId !== undefined) {
+      profile.clonedFromProfileId = meta.clonedFromProfileId;
+    }
+    if (meta.projectTag !== undefined) {
+      profile.projectTag = meta.projectTag;
+    }
+    await this.saveRegistry(registry);
+  }
+
   private async launchNativeProfile(dirName: string): Promise<void> {
     const profiles = await scanNativeChromeProfiles();
     const profile = profiles.find((item) => item.dirName === dirName);
@@ -1894,7 +2260,16 @@ export class ProfileManager {
       fixedCdpPort: null,
       agentConfigPort: null,
       listeningPorts: runtimeProfile.listeningPorts,
-      pinnedToMini: false
+      pinnedToMini: false,
+      clonedFromProfileId: null,
+      clonedFromName: null,
+      cloneCount: 0,
+      projectTag: null,
+      cdpClients: [],
+      livePrimaryUrl: null,
+      liveTabCount: null,
+      liveHost: null,
+      liveIp: null
     };
   }
 
@@ -1924,7 +2299,16 @@ export class ProfileManager {
       fixedCdpPort: profile.fixedCdpPort ?? null,
       agentConfigPort: null,
       listeningPorts: runtimeProfile.listeningPorts,
-      pinnedToMini: false
+      pinnedToMini: false,
+      clonedFromProfileId: profile.clonedFromProfileId ?? null,
+      clonedFromName: null,
+      cloneCount: 0,
+      projectTag: profile.projectTag ?? null,
+      cdpClients: [],
+      livePrimaryUrl: null,
+      liveTabCount: null,
+      liveHost: null,
+      liveIp: null
     };
   }
 
@@ -2159,6 +2543,17 @@ export class ProfileManager {
 
 export function createProfileManager(): ProfileManager {
   return new ProfileManager(process.env.CPM_DATA_DIR || defaultDataDir());
+}
+
+// 为副本生成不与现有名字冲突的编号名：prefix-1、prefix-2…
+function nextUniqueCloneName(prefix: string, used: Set<string>): string {
+  let n = 1;
+  let candidate = `${prefix}-${n}`;
+  while (used.has(candidate)) {
+    n += 1;
+    candidate = `${prefix}-${n}`;
+  }
+  return candidate;
 }
 
 function normalizeMiniProfileIds(input: unknown, validProfileIds?: Set<string>): string[] {

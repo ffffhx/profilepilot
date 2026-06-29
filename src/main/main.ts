@@ -8,8 +8,15 @@ import type {
   AccountSyncResult,
   SetupAgentBrowserRequest,
   SetupAgentBrowserResult,
+  CloneProfilesRequest,
+  CloneProfilesResult,
+  RefreshClonesResult,
+  RecycleIdleClonesResult,
+  LaunchClonesResult,
   AppState,
   CancelOperationRequest,
+  CdpLiveView,
+  CdpLiveViewOptions,
   ControlOperationRequest,
   DeleteProfileOptions,
   DeleteProfileResult,
@@ -24,6 +31,7 @@ import type {
   OperationProgress,
   OperationProgressUpdate
 } from "../shared/types";
+import { captureCdpLiveView } from "./cdp-live-view";
 import { defaultDataDir } from "./fs-util";
 import { ensureClaudeInstructionShell, readGlobalInstructions, writeGlobalInstruction } from "./global-instructions";
 import { APP_TITLE, createProfileManager } from "./profile-manager";
@@ -502,7 +510,9 @@ function setMiniWindowPanelOpen(open: boolean): void {
       // 覆盖窗较重（4 个全屏窗口），延后创建，避免阻塞面板展开造成卡顿。
       scheduleMiniOutsideClickWindowsUpdate();
     } else {
-      closeMiniOutsideClickWindows();
+      // 关闭 4 个全屏覆盖窗较慢（~100ms），同步执行会拖住本次 IPC 返回，
+      // 让渲染端迟迟渲染不出 dock（窗口已缩小却空着 → 卡顿）。延后关闭即可。
+      setImmediate(closeMiniOutsideClickWindows);
     }
     return;
   }
@@ -516,7 +526,8 @@ function setMiniWindowPanelOpen(open: boolean): void {
     // 覆盖窗较重（4 个全屏窗口），延后创建，避免阻塞面板展开造成卡顿。
     scheduleMiniOutsideClickWindowsUpdate();
   } else {
-    closeMiniOutsideClickWindows();
+    // 同上：延后关闭覆盖窗，避免阻塞 IPC 返回导致收起后 dock 迟迟不出现。
+    setImmediate(closeMiniOutsideClickWindows);
   }
   void saveMiniWindowBounds(dockBounds);
 }
@@ -655,6 +666,11 @@ async function showMainWindow(): Promise<void> {
     createMainWindow();
   }
 
+  // 收成悬浮窗时主窗口可能仍带着最小化标记（minimize 事件里只 hide 没 restore），
+  // 恢复前先 restore 清掉，避免 show() 后窗口仍处于最小化态。
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
   mainWindow?.show();
   mainWindow?.focus();
   closeMiniOutsideClickWindows();
@@ -959,6 +975,17 @@ function createMainWindow(): void {
     mainWindow?.webContents.setZoomFactor(UI_ZOOM_FACTOR);
   });
 
+  // 点最小化（黄色按钮）不缩进 Dock，而是收成悬浮窗：只 hide()，绝不 restore()。
+  mainWindow.on("minimize", () => {
+    const windowRef = mainWindow;
+    if (!windowRef || windowRef.isDestroyed()) {
+      return;
+    }
+
+    windowRef.hide();
+    void showMiniWindow();
+  });
+
   mainWindow.loadFile(path.join(__dirname, "../../public/index.html"));
   mainWindow.on("closed", () => {
     mainWindow = null;
@@ -1186,6 +1213,73 @@ function registerIpcHandlers(): void {
     }
   );
 
+  ipcMain.handle(IPC_CHANNELS.cloneProfiles, async (event, request: CloneProfilesRequest): Promise<CloneProfilesResult> => {
+    const id = operationId("clone-profiles");
+    const controller = new AbortController();
+    const pause = new OperationPauseController();
+    activeOperations.set(id, { controller, pause });
+
+    try {
+      return await profileManager.cloneProfiles(
+        request,
+        createProgressReporter(event, { key: "clone-profiles" }),
+        controller.signal,
+        pause
+      );
+    } finally {
+      activeOperations.delete(id);
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.refreshClones, async (event, sourceProfileId: string): Promise<RefreshClonesResult> => {
+    const id = operationId("refresh-clones");
+    const controller = new AbortController();
+    const pause = new OperationPauseController();
+    activeOperations.set(id, { controller, pause });
+
+    try {
+      return await profileManager.refreshClones(
+        sourceProfileId,
+        createProgressReporter(event, { key: "refresh-clones" }),
+        controller.signal,
+        pause
+      );
+    } finally {
+      activeOperations.delete(id);
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.resetClone, async (event, profileId: string): Promise<AccountSyncResult> => {
+    const id = operationId("reset-clone", profileId);
+    const controller = new AbortController();
+    const pause = new OperationPauseController();
+    activeOperations.set(id, { controller, pause });
+
+    try {
+      return await profileManager.resetClone(
+        profileId,
+        createProgressReporter(event, { key: "reset-clone", profileId }),
+        controller.signal,
+        pause
+      );
+    } finally {
+      activeOperations.delete(id);
+    }
+  });
+
+  ipcMain.handle(IPC_CHANNELS.launchClones, async (event, sourceProfileId: string): Promise<LaunchClonesResult> => {
+    return profileManager.launchClones(sourceProfileId, createProgressReporter(event, { key: "launch-clones" }));
+  });
+
+  ipcMain.handle(IPC_CHANNELS.recycleIdleClones, async (_event, days: number): Promise<RecycleIdleClonesResult> => {
+    return profileManager.recycleIdleClones(days);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.setProfileTag, async (_event, profileId: string, tag: string): Promise<AppState> => {
+    await profileManager.setProfileTag(profileId, tag);
+    return profileManager.getState();
+  });
+
   ipcMain.handle(IPC_CHANNELS.cancelOperation, async (_event, request: CancelOperationRequest): Promise<boolean> => {
     const id = operationId(String(request.key || ""), request.profileId ? String(request.profileId) : undefined);
     const operation = activeOperations.get(id);
@@ -1227,6 +1321,13 @@ function registerIpcHandlers(): void {
     } satisfies OperationProgress);
     return true;
   });
+
+  // 实时观测：按端口抓一份当前标签页 + 主标签截图。无状态、按需调用，不进全局 getState 轮询。
+  ipcMain.handle(
+    IPC_CHANNELS.getCdpLiveView,
+    async (_event, port: number, options?: CdpLiveViewOptions): Promise<CdpLiveView> =>
+      captureCdpLiveView(Number(port), options || {})
+  );
 
 }
 

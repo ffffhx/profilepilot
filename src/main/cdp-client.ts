@@ -286,8 +286,11 @@ export function requestCdpTargets(port: number): Promise<CdpTargetListEntry[]> {
     }
 
     return parsed.filter(isRecord).map((target) => ({
+      id: stringValue(target.id) || undefined,
       type: stringValue(target.type) || undefined,
+      title: stringValue(target.title) || undefined,
       url: stringValue(target.url) || undefined,
+      faviconUrl: stringValue(target.faviconUrl) || undefined,
       webSocketDebuggerUrl: stringValue(target.webSocketDebuggerUrl) || undefined
     }));
   });

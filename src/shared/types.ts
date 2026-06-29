@@ -6,6 +6,11 @@ export interface StoredProfile {
   lastLaunchedAt: string | null;
   lastCdpPort?: number | null;
   fixedCdpPort?: number | null;
+  // 该独立 Profile 是从哪个源 Profile 克隆出来的（存源的 public id，可为 native:/isolated:）。
+  // 用来定义“副本组”：批量刷新登录态、重置、回收都按这个字段聚合。
+  clonedFromProfileId?: string | null;
+  // 纯展示用的项目标签，标记这个副本当前在干哪个项目的活。
+  projectTag?: string | null;
   migratedExtensions?: StoredMigratedExtension[];
 }
 
@@ -42,6 +47,40 @@ export interface Registry {
   miniProfileIds?: string[];
 }
 
+// 当前持有该 Profile CDP 端口持久连接的客户端（agent-browser / Playwright / DevTools 等）。
+export interface CdpClientInfo {
+  pid: number;
+  label: string;
+}
+
+// 实时观测：一个正在以 CDP 运行的 Profile 当前“飞在哪”。
+export interface CdpLiveTab {
+  targetId: string;
+  title: string;
+  url: string;
+  faviconUrl: string | null;
+  // /json/list 里排在最前、被当作主标签（也是截图来源）的那一个。
+  primary: boolean;
+}
+
+export interface CdpLiveView {
+  port: number;
+  capturedAt: string;
+  tabCount: number;
+  tabs: CdpLiveTab[];
+  primaryTitle: string | null;
+  primaryUrl: string | null;
+  // 主标签页的一帧 JPEG 画面（data: URL）；关掉截图或抓取失败时为 null。
+  screenshot: string | null;
+  screenshotError: string | null;
+  // 整体读取失败（端口没响应、浏览器已关闭等）时的原因；成功时为 null。
+  error: string | null;
+}
+
+export interface CdpLiveViewOptions {
+  screenshot?: boolean;
+}
+
 export type ProfileSource = "native" | "isolated";
 
 export interface PublicProfile {
@@ -65,6 +104,19 @@ export interface PublicProfile {
   agentConfigPort: number | null;
   listeningPorts: number[];
   pinnedToMini: boolean;
+  // 副本池字段：克隆来源、来源名（已解析）、作为源时有多少副本指向它、项目标签。
+  clonedFromProfileId: string | null;
+  clonedFromName: string | null;
+  cloneCount: number;
+  projectTag: string | null;
+  // 正驱动这个 Profile 的 CDP 客户端（持久连接到其调试端口的外部工具）；空数组=没有工具连接。
+  cdpClients: CdpClientInfo[];
+  // 实时观测摘要：当前主标签页 URL 与打开的标签数（不含截图，随 getState 轮询刷新）；未运行/无 CDP 时为 null。
+  livePrimaryUrl: string | null;
+  liveTabCount: number | null;
+  // 当前页主机名的两种表示，供前端点击切换：liveHost=域名形式、liveIp=IP 形式；解析不到为 null。
+  liveHost: string | null;
+  liveIp: string | null;
 }
 
 export interface NativeChromeProfile {
@@ -328,6 +380,50 @@ export interface SetupAgentBrowserResult {
   state: AppState;
 }
 
+export interface CloneProfilesRequest {
+  sourceProfileId: string;
+  count: number;
+  namePrefix?: string;
+  basePort?: number | null;
+  includeExtensions?: boolean;
+  launchAfter?: boolean;
+  setAgentEndpoint?: boolean;
+}
+
+export interface ClonedProfileInfo {
+  profileId: string;
+  name: string;
+  port: number | null;
+  launched: boolean;
+}
+
+export interface CloneProfilesResult {
+  sourceProfileId: string;
+  created: ClonedProfileInfo[];
+  state: AppState;
+}
+
+export interface RefreshClonesResult {
+  sourceProfileId: string;
+  refreshedCount: number;
+  skippedCount: number;
+  refreshed: Array<{ profileId: string; name: string; copiedCount: number }>;
+  state: AppState;
+}
+
+export interface RecycleIdleClonesResult {
+  days: number;
+  deleted: Array<{ profileId: string; name: string }>;
+  state: AppState;
+}
+
+export interface LaunchClonesResult {
+  sourceProfileId: string;
+  launched: Array<{ profileId: string; name: string; port: number | null }>;
+  failed: Array<{ profileId: string; name: string; reason: string }>;
+  state: AppState;
+}
+
 export type GlobalInstructionFileId = "codex-agents" | "claude-memory";
 export type GlobalInstructionFileRole = "primary" | "reference";
 
@@ -433,7 +529,14 @@ export interface ProfileManagerApi {
   deleteProfileExtension(profileId: string, extensionId: string): Promise<ExtensionDeleteResult>;
   syncAccount(request: AccountSyncRequest): Promise<AccountSyncResult>;
   setupAgentBrowser(request: SetupAgentBrowserRequest): Promise<SetupAgentBrowserResult>;
+  cloneProfiles(request: CloneProfilesRequest): Promise<CloneProfilesResult>;
+  refreshClones(sourceProfileId: string): Promise<RefreshClonesResult>;
+  resetClone(profileId: string): Promise<AccountSyncResult>;
+  recycleIdleClones(days: number): Promise<RecycleIdleClonesResult>;
+  setProfileTag(profileId: string, tag: string): Promise<AppState>;
+  launchClones(sourceProfileId: string): Promise<LaunchClonesResult>;
   cancelOperation(request: CancelOperationRequest): Promise<boolean>;
   controlOperation(request: ControlOperationRequest): Promise<boolean>;
+  getCdpLiveView(port: number, options?: CdpLiveViewOptions): Promise<CdpLiveView>;
   onOperationProgress(listener: (progress: OperationProgress) => void): () => void;
 }

@@ -5,6 +5,9 @@ export interface StoredProfile {
   createdAt: string;
   lastLaunchedAt: string | null;
   lastCdpPort?: number | null;
+  fixedCdpPort?: number | null;
+  clonedFromProfileId?: string | null;
+  projectTag?: string | null;
   migratedExtensions?: StoredMigratedExtension[];
 }
 
@@ -40,6 +43,44 @@ export interface PublicProfile {
   agentConfigPort: number | null;
   listeningPorts: number[];
   pinnedToMini: boolean;
+  clonedFromProfileId: string | null;
+  clonedFromName: string | null;
+  cloneCount: number;
+  projectTag: string | null;
+  cdpClients: CdpClientInfo[];
+  livePrimaryUrl: string | null;
+  liveTabCount: number | null;
+  liveHost: string | null;
+  liveIp: string | null;
+}
+
+export interface CdpClientInfo {
+  pid: number;
+  label: string;
+}
+
+export interface CdpLiveTab {
+  targetId: string;
+  title: string;
+  url: string;
+  faviconUrl: string | null;
+  primary: boolean;
+}
+
+export interface CdpLiveView {
+  port: number;
+  capturedAt: string;
+  tabCount: number;
+  tabs: CdpLiveTab[];
+  primaryTitle: string | null;
+  primaryUrl: string | null;
+  screenshot: string | null;
+  screenshotError: string | null;
+  error: string | null;
+}
+
+export interface CdpLiveViewOptions {
+  screenshot?: boolean;
 }
 
 export type ProfileSource = "native" | "isolated";
@@ -306,6 +347,50 @@ export interface SetupAgentBrowserResult {
   state: AppState;
 }
 
+export interface CloneProfilesRequest {
+  sourceProfileId: string;
+  count: number;
+  namePrefix?: string;
+  basePort?: number | null;
+  includeExtensions?: boolean;
+  launchAfter?: boolean;
+  setAgentEndpoint?: boolean;
+}
+
+export interface ClonedProfileInfo {
+  profileId: string;
+  name: string;
+  port: number | null;
+  launched: boolean;
+}
+
+export interface CloneProfilesResult {
+  sourceProfileId: string;
+  created: ClonedProfileInfo[];
+  state: AppState;
+}
+
+export interface RefreshClonesResult {
+  sourceProfileId: string;
+  refreshedCount: number;
+  skippedCount: number;
+  refreshed: Array<{ profileId: string; name: string; copiedCount: number }>;
+  state: AppState;
+}
+
+export interface RecycleIdleClonesResult {
+  days: number;
+  deleted: Array<{ profileId: string; name: string }>;
+  state: AppState;
+}
+
+export interface LaunchClonesResult {
+  sourceProfileId: string;
+  launched: Array<{ profileId: string; name: string; port: number | null }>;
+  failed: Array<{ profileId: string; name: string; reason: string }>;
+  state: AppState;
+}
+
 export type GlobalInstructionFileId = "codex-agents" | "claude-memory";
 export type GlobalInstructionFileRole = "primary" | "reference";
 
@@ -390,8 +475,15 @@ export interface ProfileManagerApi {
   deleteProfileExtension(profileId: string, extensionId: string): Promise<ExtensionDeleteResult>;
   syncAccount(request: AccountSyncRequest): Promise<AccountSyncResult>;
   setupAgentBrowser(request: SetupAgentBrowserRequest): Promise<SetupAgentBrowserResult>;
+  cloneProfiles(request: CloneProfilesRequest): Promise<CloneProfilesResult>;
+  refreshClones(sourceProfileId: string): Promise<RefreshClonesResult>;
+  resetClone(profileId: string): Promise<AccountSyncResult>;
+  recycleIdleClones(days: number): Promise<RecycleIdleClonesResult>;
+  setProfileTag(profileId: string, tag: string): Promise<AppState>;
+  launchClones(sourceProfileId: string): Promise<LaunchClonesResult>;
   cancelOperation(request: CancelOperationRequest): Promise<boolean>;
   controlOperation(request: ControlOperationRequest): Promise<boolean>;
+  getCdpLiveView(port: number, options?: CdpLiveViewOptions): Promise<CdpLiveView>;
   onOperationProgress(listener: (progress: OperationProgress) => void): () => void;
 }
 
@@ -425,6 +517,27 @@ export type ConfirmIntent =
       onlyChanged: boolean;
       shouldCloseTarget: boolean;
       shouldCloseSource: boolean;
+    }
+  | {
+      kind: "clone-profiles";
+      sourceProfileId: string;
+      count: number;
+      namePrefix: string;
+      includeExtensions: boolean;
+      launchAfter: boolean;
+      setAgentEndpoint: boolean;
+    }
+  | {
+      kind: "refresh-clones";
+      sourceProfileId: string;
+    }
+  | {
+      kind: "reset-clone";
+      profileId: string;
+    }
+  | {
+      kind: "recycle-clones";
+      days: number;
     };
 export type BusyState = {
   key: string;
@@ -448,11 +561,13 @@ export type ModalState =
   | { kind: "extension-migration" }
   | { kind: "agent-config"; profileId: string; portSuggestion: CdpPortSuggestion | null }
   | { kind: "agent-browser-setup"; portSuggestion: CdpPortSuggestion }
+  | { kind: "clone-pool" }
+  | { kind: "clone-tag"; profileId: string }
   | { kind: "global-instructions" }
   | {
       kind: "confirm";
       intent: ConfirmIntent;
-      returnTo?: "extension-migration";
+      returnTo?: "extension-migration" | "clone-pool";
     }
   | null;
 export type ToastKind = "normal" | "error";

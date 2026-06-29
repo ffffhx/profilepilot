@@ -62,6 +62,21 @@ export function toggleLiveScreenshot(): void {
   }
 }
 
+// 点 Cockpit 标签列表里的某一项：把浏览器真正切到那个标签，并让实时画面切到它。
+export function focusLiveTab(profileId: string, targetId: string): void {
+  if (!store.state || !targetId) {
+    return;
+  }
+  const profile = store.state.profiles.find((item) => item.id === profileId);
+  if (!profile || !liveViewEligible(profile) || profile.cdpPort == null) {
+    return;
+  }
+  store.liveActiveTab[profileId] = targetId;
+  // 只切 Cockpit 查看的标签：在后台直接抓它的画面，不激活浏览器标签——
+  // 这样浏览器窗口纹丝不动、零抢焦点（CDP 的 activateTarget 必然抢前台，故不用）。
+  void fetchLiveView(profile);
+}
+
 function currentLiveProfile(): PublicProfile | null {
   if (!store.state || !store.selectedId) {
     return null;
@@ -94,7 +109,10 @@ async function fetchLiveView(profile: PublicProfile): Promise<void> {
   updateLiveViewDom(profile.id);
 
   try {
-    const data = await profileApi().getCdpLiveView(port, { screenshot: store.liveViewShowScreenshot });
+    const data = await profileApi().getCdpLiveView(port, {
+      screenshot: store.liveViewShowScreenshot,
+      targetId: store.liveActiveTab[profile.id]
+    });
     store.liveView[profile.id] = { data, loading: false, error: data.error, fetchedAt: Date.now() };
   } catch (error) {
     // 端口刚关 / 浏览器退出等：保留上一帧画面，只把错误标出来。
@@ -201,8 +219,12 @@ function renderLiveTab(tab: CdpLiveTab): string {
   const copyButton = tab.url
     ? `<button type="button" class="live-tab-action" data-action="copy-live-url" data-url="${escapeHtml(tab.url)}" title="复制链接">复制</button>`
     : "";
+  // 整行可点：切到这个标签（激活浏览器里的它 + 画面切过去）；复制按钮单独处理，不触发切换。
+  const focusAttrs = tab.targetId
+    ? ` data-action="focus-live-tab" data-target-id="${escapeHtml(tab.targetId)}" role="button" title="切到这个标签页（激活并查看画面）"`
+    : "";
   return `
-    <li class="live-tab ${tab.primary ? "primary" : ""}">
+    <li class="live-tab ${tab.primary ? "primary" : ""}"${focusAttrs}>
       ${favicon}
       <span class="live-tab-copy">
         <span class="live-tab-title">${escapeHtml(tab.title)}</span>

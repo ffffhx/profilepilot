@@ -121,9 +121,12 @@ function rootDisplayPath(userDataDir: string, commonPrefix: string): string {
 
 export function renderProfileRow(profile: PublicProfile, lastInGroup = false): string {
   const selected = profile.id === store.selectedId;
-  const pathKind = profile.source === "native" ? "Profile Dir" : "Profile Data";
-  const pathLabel = profile.source === "native" ? profile.dirName : profileDataLabel(profile);
-  const fullPath = profile.profileDataPath;
+  // isolated：显示独立数据目录名（如 test03-00064815，即去掉公共前缀后“不一样”的那段），hover 看完整 user-data-dir；
+  // native：仍显示 Chrome 个人资料子目录名（Default 等）。
+  const isNative = profile.source === "native";
+  const pathKind = isNative ? "Profile Dir" : "数据目录";
+  const pathLabel = profile.dirName;
+  const fullPath = isNative ? profile.profileDataPath : profile.userDataDir;
   return `
     <tr class="profile-child-row ${lastInGroup ? "last-in-group" : ""} ${selected ? "selected" : ""}" data-action="select" data-id="${profile.id}" data-profile-row tabindex="0" aria-selected="${selected ? "true" : "false"}">
       <td class="profile-name-cell">
@@ -161,18 +164,6 @@ export function renderProfileRow(profile: PublicProfile, lastInGroup = false): s
 function renderPathTooltip(label: string, fullPath: string, className: string): string {
   const escapedFullPath = escapeHtml(fullPath);
   return `<span class="action-tooltip path-tooltip ${className}" data-tooltip="${escapedFullPath}" title="${escapedFullPath}"><code>${escapeHtml(label)}</code></span>`;
-}
-
-export function profileDataLabel(profile: PublicProfile): string {
-  const root = profile.userDataDir.replace(/\/+$/, "");
-  const dataPath = profile.profileDataPath.replace(/\/+$/, "");
-  if (dataPath === root) {
-    return ".";
-  }
-  if (dataPath.startsWith(`${root}/`)) {
-    return dataPath.slice(root.length + 1);
-  }
-  return profile.profileDataPath;
 }
 
 // 表格里直接展示该 Profile 的 CDP 连接地址：正在以 CDP 运行时显示实时地址（live）；
@@ -222,25 +213,13 @@ export function renderProfileConnectionCell(profile: PublicProfile): string {
   }
   const label = liveAddrLabel(profile);
   const tabs = profile.liveTabCount && profile.liveTabCount > 1 ? ` · ${profile.liveTabCount} 标签` : "";
-  // 只有域名与 IP 都解析到、且不相同时，才允许点击切换（否则切了也没区别）。
-  const canToggle = Boolean(profile.liveHost && profile.liveIp && profile.liveHost !== profile.liveIp);
-  const toggleAttrs = canToggle ? ` data-action="toggle-live-addr" role="button"` : "";
-  // 完整地址 tooltip 必须挂在【外层 wrapper】：conn-live 自身有 overflow:hidden（用于把长地址截断成 …），
-  // 会把 ::after 气泡一起裁掉，所以气泡放在不裁剪的外层 .conn-live-tip 上；内层 conn-live 再加原生 title 兜底。
-  const tip = liveAddrTooltip(profile);
-  return `<span class="conn-cell-stack">${pill}<span class="conn-live-tip action-tooltip" data-tooltip="${escapeHtml(tip)}"><span class="conn-live ${canToggle ? "toggleable" : ""}" title="${escapeHtml(tip)}"${toggleAttrs}>▸ ${escapeHtml(`${label}${tabs}`)}</span></span></span>`;
+  // 只显示当前页域名；hover 给完整 URL（含路径）。tooltip 挂在外层 .conn-live-tip 上，
+  // 否则会被 conn-live 自身的 overflow:hidden（用于截断长地址）连同 ::after 气泡一起裁掉。
+  const tip = profile.livePrimaryUrl || label;
+  return `<span class="conn-cell-stack">${pill}<span class="conn-live-tip action-tooltip" data-tooltip="${escapeHtml(tip)}"><span class="conn-live" title="${escapeHtml(tip)}">▸ ${escapeHtml(`${label}${tabs}`)}</span></span></span>`;
 }
 
 // 当前页的完整地址提示：优先“域名（IP）”，否则完整 IP/域名，再不行退回完整 URL。
-function liveAddrTooltip(profile: PublicProfile): string {
-  const host = profile.liveHost;
-  const ip = profile.liveIp;
-  if (host && ip && host !== ip) {
-    return `${host}（${ip}）`;
-  }
-  return host || ip || profile.livePrimaryUrl || "";
-}
-
 function renderConnPill(profile: PublicProfile): string {
   if (profile.cdpClients.length) {
     const clientText = profile.cdpClients.map((client) => `${client.label}(${client.pid})`).join("、");
@@ -489,35 +468,9 @@ export function renderDetails(profile: PublicProfile | null): string {
         </div>
         ${renderListeningPortsDetail(profile)}
         ${renderConnectionDetail(profile)}
-        ${renderProfilePathDetails(profile)}
       </div>
       ${renderLiveViewSection(profile)}
     </aside>
-  `;
-}
-
-export function renderProfilePathDetails(profile: PublicProfile): string {
-  const userDataNote =
-    profile.source === "native"
-      ? "这一层是系统 Chrome 的父级 User Data 目录；Default、test 等系统个人资料共享这一层。"
-      : "ProfilePilot 启动 Chrome 时把 --user-data-dir 指向这一层；固定 CDP 端口绑定这个运行实例。";
-  const profileDataLabel = profile.source === "native" ? "Profile 子目录" : "Chrome Profile 数据目录";
-  const profileDataNote =
-    profile.source === "native"
-      ? "当前行对应的 Chrome 个人资料子目录。"
-      : "Chrome 在这个独立 User Data 目录下存放实际浏览数据的位置。";
-
-  return `
-    <div class="detail-row">
-      <span>用户数据目录</span>
-      <code class="path-box">${escapeHtml(profile.userDataDir)}</code>
-      <small class="detail-note">${escapeHtml(userDataNote)}</small>
-    </div>
-    <div class="detail-row">
-      <span>${profileDataLabel}</span>
-      <code class="path-box">${escapeHtml(profile.profileDataPath)}</code>
-      <small class="detail-note">${escapeHtml(profileDataNote)}</small>
-    </div>
   `;
 }
 
@@ -568,7 +521,7 @@ export function renderCdpDetail(profile: PublicProfile): string {
         <small class="detail-note">点击“CDP启动”后会显示本机连接地址。</small>
       </div>`;
 
-  return cdpRow + renderCdpClientsDetail(profile) + renderAgentConfigDetail(profile);
+  return cdpRow + renderCdpClientsDetail(profile);
 }
 
 // 显示当前正持久连接该 CDP 端口的驱动工具（agent-browser / Playwright / DevTools 等）。
@@ -591,23 +544,3 @@ export function renderCdpClientsDetail(profile: PublicProfile): string {
   `;
 }
 
-export function renderAgentConfigDetail(profile: PublicProfile): string {
-  // 操作入口在「更多」菜单里；这里只展示当前状态。
-  if (profile.agentConfigPort !== null) {
-    return `
-      <div class="detail-row">
-        <span>Agent 调试配置</span>
-        <strong>已写入全局 AGENTS.md</strong>
-        <small class="detail-note">Agent 工具调试浏览器时会优先连接 <code>http://127.0.0.1:${profile.agentConfigPort}</code>（本 Profile，固定端口 ${profile.fixedCdpPort ?? profile.agentConfigPort}）。CLAUDE.md 只引用 AGENTS.md；在「更多」里可移除。</small>
-      </div>
-    `;
-  }
-
-  return `
-    <div class="detail-row">
-      <span>Agent 调试配置</span>
-      <strong>未写入</strong>
-      <small class="detail-note">在「更多」里「设为 Agent 端点」后，Agent 工具会优先连接此 Profile 的固定调试端口。</small>
-    </div>
-  `;
-}

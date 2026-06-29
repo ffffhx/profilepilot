@@ -4115,6 +4115,12 @@ body:not(.booted) .layout {
   border: 1px solid var(--line);
   border-radius: 9px;
   background: var(--panel-soft);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.live-tab:hover {
+  border-color: var(--accent-line);
 }
 
 .live-tab.primary {
@@ -4241,12 +4247,4 @@ body:not(.booted) .layout {
   opacity: 0.92;
 }
 
-.conn-live.toggleable {
-  cursor: pointer;
-}
-
-.conn-live.toggleable:hover {
-  color: var(--accent-bright);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
+/* (域名/IP 切换已移除：当前页摘要只显示域名) */

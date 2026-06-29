@@ -68,8 +68,8 @@ export interface RendererState {
   // profileId -> 实时观测缓存；按需拉取，主轮询全量重渲染时从这里恢复，避免截图闪烁。
   liveView: Record<string, LiveViewEntry>;
   liveViewShowScreenshot: boolean;
-  // 表格/卡片当前页摘要：false=显示域名，true=显示 IP（点击切换，全局）。
-  liveShowIp: boolean;
+  // Cockpit 当前查看/激活的标签页：profileId -> targetId（用户在标签列表里点选的那个）。
+  liveActiveTab: Record<string, string>;
 }
 
 export const store: RendererState = {
@@ -123,7 +123,7 @@ export const store: RendererState = {
   globalInstructionDraft: "",
   liveView: {},
   liveViewShowScreenshot: true,
-  liveShowIp: false
+  liveActiveTab: {}
 };
 
 export const dateFormatter = new Intl.DateTimeFormat("zh-CN", {

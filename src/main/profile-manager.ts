@@ -1,8 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, promises as fs } from "node:fs";
 import os from "node:os";
-import { promises as dnsPromises } from "node:dns";
-import net from "node:net";
 import path from "node:path";
 import { app, shell } from "electron";
 import type {
@@ -62,51 +60,6 @@ export { ProfileManagerError } from "./profile-manager-error";
 export const APP_TITLE = "ProfilePilot";
 const CHROME_REMOTE_DEBUGGING_URL = "chrome://inspect/#remote-debugging";
 const MINI_PROFILE_LIMIT = 3;
-
-// 实时摘要的“域名 ↔ IP”解析缓存：getState 高频调用，缓存解析结果，避免每轮都打 DNS。
-const liveAddrCache = new Map<string, { value: { host: string | null; ip: string | null }; at: number }>();
-const LIVE_ADDR_TTL_MS = 5 * 60 * 1000;
-
-// 把当前页 URL 的主机名解析成“域名 + IP”两种表示，供前端点击切换：
-// URL 用域名 → lookup 出 IP；URL 用 IP → reverse(PTR) 反查域名（公网 IP 多半反查到云厂商 PTR，不保证是访问的域名）。
-// 带超时与 5 分钟缓存，任一步失败即返回 null，绝不阻塞 getState。
-async function resolveLiveAddr(url: string | null): Promise<{ host: string | null; ip: string | null }> {
-  if (!url) {
-    return { host: null, ip: null };
-  }
-  let hostname: string;
-  try {
-    hostname = new URL(url).hostname;
-  } catch {
-    return { host: null, ip: null };
-  }
-  if (!hostname) {
-    return { host: null, ip: null };
-  }
-
-  const cached = liveAddrCache.get(hostname);
-  if (cached && Date.now() - cached.at < LIVE_ADDR_TTL_MS) {
-    return cached.value;
-  }
-
-  const withTimeout = <T>(promise: Promise<T>, ms: number): Promise<T | null> =>
-    Promise.race([promise.catch(() => null), new Promise<null>((resolve) => setTimeout(() => resolve(null), ms))]);
-
-  let value: { host: string | null; ip: string | null };
-  if (net.isIP(hostname)) {
-    const names = await withTimeout(dnsPromises.reverse(hostname), 900);
-    value = { host: names && names.length ? names[0] : null, ip: hostname };
-  } else {
-    // 优先 IPv4（更短、更眼熟）；没有 A 记录再退回系统默认（可能是 IPv6）。
-    const lookup =
-      (await withTimeout(dnsPromises.lookup(hostname, { family: 4 }), 900)) ||
-      (await withTimeout(dnsPromises.lookup(hostname), 900));
-    value = { host: hostname, ip: lookup ? lookup.address : null };
-  }
-
-  liveAddrCache.set(hostname, { value, at: Date.now() });
-  return value;
-}
 
 export class ProfileManager {
   private readonly profilesDir: string;
@@ -201,19 +154,14 @@ export class ProfileManager {
         liveSummaryByPort.set(port, { primaryUrl: pages[0]?.url || null, tabCount: pages.length });
       })
     );
-    await Promise.all(
-      profiles.map(async (profile) => {
-        if (profile.cdpPort === null) {
-          return;
-        }
-        const summary = liveSummaryByPort.get(profile.cdpPort);
-        profile.livePrimaryUrl = summary?.primaryUrl ?? null;
-        profile.liveTabCount = summary?.tabCount ?? null;
-        const addr = await resolveLiveAddr(summary?.primaryUrl ?? null);
-        profile.liveHost = addr.host;
-        profile.liveIp = addr.ip;
-      })
-    );
+    profiles.forEach((profile) => {
+      if (profile.cdpPort === null) {
+        return;
+      }
+      const summary = liveSummaryByPort.get(profile.cdpPort);
+      profile.livePrimaryUrl = summary?.primaryUrl ?? null;
+      profile.liveTabCount = summary?.tabCount ?? null;
+    });
 
     // 标记当前写入全局 AGENTS.md 的 Agent 调试端点指向哪个 Profile。
     const agentConfig = await readAgentBrowserConfig();
@@ -2267,9 +2215,7 @@ export class ProfileManager {
       projectTag: null,
       cdpClients: [],
       livePrimaryUrl: null,
-      liveTabCount: null,
-      liveHost: null,
-      liveIp: null
+      liveTabCount: null
     };
   }
 
@@ -2306,9 +2252,7 @@ export class ProfileManager {
       projectTag: profile.projectTag ?? null,
       cdpClients: [],
       livePrimaryUrl: null,
-      liveTabCount: null,
-      liveHost: null,
-      liveIp: null
+      liveTabCount: null
     };
   }
 

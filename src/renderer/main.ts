@@ -3,7 +3,7 @@ import { activateBusyStep, busyStepsKey, emphasizeName, focusProfileFromUi, setT
 import { closeModalFromUi, executeConfirmIntent } from "./confirm";
 import { clampCloneCount } from "./render/clone-pool";
 import { isExtensionMigrationActionItem } from "./render/extensions";
-import { refreshLiveViewNow, requestLiveViewNow, startLiveViewLoop, toggleLiveScreenshot } from "./render/live-view";
+import { focusLiveTab, refreshLiveViewNow, requestLiveViewNow, startLiveViewLoop, toggleLiveScreenshot } from "./render/live-view";
 import { render } from "./render/render-root";
 import { invalidateExtensionMigrationDiff, loadState, refreshExtensionMigrationDiff, refreshGlobalInstructions, repairClaudeInstructionShell, saveGlobalInstruction, setMigrationSource } from "./state-actions";
 import { appRoot, store } from "./state";
@@ -684,9 +684,11 @@ appRoot.addEventListener("click", (event) => {
     return;
   }
 
-  if (action === "toggle-live-addr") {
-    store.liveShowIp = !store.liveShowIp;
-    render();
+  if (action === "focus-live-tab") {
+    const targetId = actionTarget.dataset.targetId;
+    if (targetId && store.selectedId) {
+      focusLiveTab(store.selectedId, targetId);
+    }
     return;
   }
 

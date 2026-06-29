@@ -263,13 +263,9 @@ export function hostOf(url: string): string {
   }
 }
 
-// 当前页“域名 / IP”二选一的展示标签：随全局 store.liveShowIp 切换；某一种解析不到时回退到另一种或 URL 主机名。
+// 当前页的展示标签：只显示域名（URL 主机名）。
 export function liveAddrLabel(profile: PublicProfile): string {
-  const fallback = profile.livePrimaryUrl ? hostOf(profile.livePrimaryUrl) : "";
-  if (store.liveShowIp) {
-    return profile.liveIp || profile.liveHost || fallback;
-  }
-  return profile.liveHost || profile.liveIp || fallback;
+  return profile.livePrimaryUrl ? hostOf(profile.livePrimaryUrl) : "";
 }
 
 export function escapeHtml(value: unknown): string {

@@ -50,8 +50,6 @@ export interface PublicProfile {
   cdpClients: CdpClientInfo[];
   livePrimaryUrl: string | null;
   liveTabCount: number | null;
-  liveHost: string | null;
-  liveIp: string | null;
 }
 
 export interface CdpClientInfo {
@@ -81,6 +79,7 @@ export interface CdpLiveView {
 
 export interface CdpLiveViewOptions {
   screenshot?: boolean;
+  targetId?: string;
 }
 
 export type ProfileSource = "native" | "isolated";

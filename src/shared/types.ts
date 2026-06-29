@@ -79,6 +79,7 @@ export interface CdpLiveView {
 
 export interface CdpLiveViewOptions {
   screenshot?: boolean;
+  targetId?: string;
 }
 
 export type ProfileSource = "native" | "isolated";
@@ -114,9 +115,6 @@ export interface PublicProfile {
   // 实时观测摘要：当前主标签页 URL 与打开的标签数（不含截图，随 getState 轮询刷新）；未运行/无 CDP 时为 null。
   livePrimaryUrl: string | null;
   liveTabCount: number | null;
-  // 当前页主机名的两种表示，供前端点击切换：liveHost=域名形式、liveIp=IP 形式；解析不到为 null。
-  liveHost: string | null;
-  liveIp: string | null;
 }
 
 export interface NativeChromeProfile {

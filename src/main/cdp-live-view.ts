@@ -9,6 +9,8 @@ const SCREENSHOT_COMMAND_TIMEOUT = 4000;
 
 interface CaptureLiveViewOptions {
   screenshot?: boolean;
+  // 指定要展示/截图的标签页（targetId）；缺省用 /json/list 的第一个 page。
+  targetId?: string;
 }
 
 // 对一个正在以 CDP 运行的 Profile 端口，抓一份“当前在飞哪”的实时快照：
@@ -40,22 +42,23 @@ export async function captureCdpLiveView(port: number, options: CaptureLiveViewO
   }
 
   const pageTargets = targets.filter((target) => target.type === "page" && Boolean(target.webSocketDebuggerUrl));
-  const tabs: CdpLiveTab[] = pageTargets.map((target, index) => ({
+  // 选中要展示/截图的标签：优先调用方指定的 targetId（用户在 Cockpit 里点的那个），否则用第一个。
+  const active = (options.targetId && pageTargets.find((target) => target.id === options.targetId)) || pageTargets[0] || null;
+  const tabs: CdpLiveTab[] = pageTargets.map((target) => ({
     targetId: target.id || "",
     title: (target.title || "").trim() || "(无标题)",
     url: target.url || "",
     faviconUrl: target.faviconUrl || null,
-    // /json/list 把最近活跃的页面排在最前；用它作为“主标签”——也是截图来源。
-    primary: index === 0
+    // 标记当前正在展示（被截图）的那个标签，前端据此高亮。
+    primary: Boolean(active && target.id === active.id)
   }));
 
-  const primary = pageTargets[0] || null;
   let screenshot: string | null = null;
   let screenshotError: string | null = null;
 
-  if (options.screenshot && primary?.webSocketDebuggerUrl) {
+  if (options.screenshot && active?.webSocketDebuggerUrl) {
     try {
-      screenshot = await captureTargetScreenshot(primary.webSocketDebuggerUrl);
+      screenshot = await captureTargetScreenshot(active.webSocketDebuggerUrl);
     } catch (error) {
       screenshotError = describeError(error);
     }
@@ -65,8 +68,8 @@ export async function captureCdpLiveView(port: number, options: CaptureLiveViewO
     ...base,
     tabCount: tabs.length,
     tabs,
-    primaryTitle: primary ? (primary.title || "").trim() || "(无标题)" : null,
-    primaryUrl: primary?.url || null,
+    primaryTitle: active ? (active.title || "").trim() || "(无标题)" : null,
+    primaryUrl: active?.url || null,
     screenshot,
     screenshotError
   };

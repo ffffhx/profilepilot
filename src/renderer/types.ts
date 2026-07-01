@@ -563,6 +563,7 @@ export type ModalState =
   | { kind: "clone-pool" }
   | { kind: "clone-tag"; profileId: string }
   | { kind: "global-instructions" }
+  | { kind: "live-zoom"; profileId: string }
   | {
       kind: "confirm";
       intent: ConfirmIntent;

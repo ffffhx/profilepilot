@@ -3,7 +3,7 @@ import { activateBusyStep, busyStepsKey, emphasizeName, focusProfileFromUi, setT
 import { closeModalFromUi, executeConfirmIntent } from "./confirm";
 import { clampCloneCount } from "./render/clone-pool";
 import { isExtensionMigrationActionItem } from "./render/extensions";
-import { focusLiveTab, refreshLiveViewNow, requestLiveViewNow, startLiveViewLoop, toggleLiveScreenshot } from "./render/live-view";
+import { focusLiveTab, openLiveZoom, refreshLiveViewNow, requestLiveViewNow, startLiveViewLoop, toggleLiveScreenshot } from "./render/live-view";
 import { render } from "./render/render-root";
 import { invalidateExtensionMigrationDiff, loadState, refreshExtensionMigrationDiff, refreshGlobalInstructions, repairClaudeInstructionShell, saveGlobalInstruction, setMigrationSource } from "./state-actions";
 import { appRoot, store } from "./state";
@@ -1161,7 +1161,46 @@ appRoot.addEventListener("input", (event) => {
   }
 });
 
+appRoot.addEventListener("dblclick", (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target) {
+    return;
+  }
+
+  if (target.closest("[data-live-zoom-frame]")) {
+    closeModalFromUi();
+    return;
+  }
+
+  const liveScreen = target.closest<HTMLElement>("[data-live-zoom-profile-id]");
+  if (!liveScreen) {
+    return;
+  }
+
+  event.preventDefault();
+  const profileId = liveScreen.dataset.liveZoomProfileId || null;
+  openLiveZoom(profileId);
+  render();
+  requestLiveViewNow(profileId);
+});
+
 appRoot.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && store.modal?.kind === "live-zoom") {
+    closeModalFromUi();
+    return;
+  }
+
+  const target = event.target instanceof Element ? event.target : null;
+  const liveScreen = target?.closest<HTMLElement>("[data-live-zoom-profile-id]");
+  if (liveScreen && (event.key === "Enter" || event.key === " ")) {
+    event.preventDefault();
+    const profileId = liveScreen.dataset.liveZoomProfileId || null;
+    openLiveZoom(profileId);
+    render();
+    requestLiveViewNow(profileId);
+    return;
+  }
+
   if (event.key === "Escape" && (store.migrationSourceMenuOpen || store.migrationTargetMenuOpen || store.accountSyncMenuOpen)) {
     store.migrationSourceMenuOpen = false;
     store.migrationTargetMenuOpen = false;
@@ -1170,7 +1209,6 @@ appRoot.addEventListener("keydown", (event) => {
     return;
   }
 
-  const target = event.target instanceof Element ? event.target : null;
   const row = target?.closest<HTMLElement>("[data-profile-row]");
   if (!row || !store.state || (event.key !== "Enter" && event.key !== " ")) {
     return;

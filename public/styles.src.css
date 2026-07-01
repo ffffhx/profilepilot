@@ -1113,11 +1113,30 @@ h3 {
 }
 
 .path-tooltip::after {
-  max-width: min(560px, calc(100vw - 48px));
+  left: 0;
+  max-width: min(680px, calc(100vw - 180px));
   color: var(--accent-bright);
   font-family: var(--font-mono);
   font-size: 11px;
+  letter-spacing: 0;
   overflow-wrap: anywhere;
+  text-transform: none;
+  transform: translate(0, 4px);
+}
+
+.path-tooltip::before {
+  left: 18px;
+  transform: translate(0, 4px) rotate(45deg);
+}
+
+.path-tooltip:hover::after,
+.path-tooltip:focus-within::after {
+  transform: translate(0, 0);
+}
+
+.path-tooltip:hover::before,
+.path-tooltip:focus-within::before {
+  transform: translate(0, 0) rotate(45deg);
 }
 
 .path-tooltip > code {
@@ -2956,11 +2975,18 @@ body:not(.booted) .layout {
   line-height: 1.2;
 }
 
-.profile-path-line span {
+.profile-path-line > span:first-child {
   flex: 0 0 auto;
   color: rgba(143, 161, 173, 0.78);
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+.profile-path-line .path-tooltip {
+  flex: 1 1 auto;
+  min-width: 0;
+  letter-spacing: 0;
+  text-transform: none;
 }
 
 .profile-path-line code {
@@ -4008,7 +4034,7 @@ body:not(.booted) .layout {
 
 .live-screen {
   position: relative;
-  aspect-ratio: 16 / 10;
+  aspect-ratio: 16 / 9;
   width: 100%;
   overflow: hidden;
   border: 1px solid var(--accent-line);
@@ -4029,8 +4055,17 @@ body:not(.booted) .layout {
   inset: 0;
   width: 100%;
   height: 100%;
-  object-fit: cover;
-  object-position: top center;
+  object-fit: contain;
+  object-position: center center;
+}
+
+.live-screen.zoomable {
+  cursor: zoom-in;
+}
+
+.live-screen.zoomable:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 3px;
 }
 
 .live-screen-flag {
@@ -4216,6 +4251,115 @@ body:not(.booted) .layout {
 
 .live-view-meta span {
   white-space: nowrap;
+}
+
+.live-zoom-backdrop {
+  z-index: 35;
+  padding: clamp(14px, 2.5vw, 28px);
+  background:
+    radial-gradient(900px 520px at 50% 8%, rgba(56, 225, 160, 0.1), transparent 65%),
+    rgba(2, 6, 9, 0.88);
+  backdrop-filter: blur(8px);
+}
+
+.live-zoom-modal {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  width: min(1280px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  border: 1px solid var(--accent-line);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(16, 25, 32, 0.98), rgba(7, 11, 14, 0.98));
+  padding: 14px;
+  box-shadow: 0 30px 90px rgba(2, 6, 9, 0.86), var(--glow-accent);
+}
+
+.live-zoom-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  min-width: 0;
+}
+
+.live-zoom-title {
+  min-width: 0;
+}
+
+.live-zoom-title span,
+.live-zoom-meta {
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.live-zoom-title h2 {
+  max-width: 100%;
+  margin: 3px 0 0;
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.live-zoom-head button {
+  flex: 0 0 auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--panel-soft);
+  padding: 7px 12px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.live-zoom-head button:hover,
+.live-zoom-head button:focus-visible {
+  border-color: var(--accent-line);
+  color: var(--accent-bright);
+}
+
+.live-zoom-frame {
+  display: grid;
+  min-height: 0;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: #020507;
+  cursor: zoom-out;
+}
+
+.live-zoom-frame img {
+  display: block;
+  max-width: 100%;
+  max-height: calc(100vh - 172px);
+  object-fit: contain;
+}
+
+.live-zoom-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  color: var(--muted);
+  letter-spacing: 0.08em;
+}
+
+.live-zoom-empty {
+  display: grid;
+  min-height: min(420px, 50vh);
+  place-items: center;
+  border: 1px dashed var(--line-strong);
+  border-radius: 12px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
 }
 
 /* 表格“连接”列：驱动状态 + 当前停在哪个域名的航点 */

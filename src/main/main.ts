@@ -42,6 +42,8 @@ let miniWindow: BrowserWindow | null = null;
 let miniOutsideClickWindows: BrowserWindow[] = [];
 let miniOutsideClickUpdateTimer: NodeJS.Timeout | null = null;
 let miniWindowSaveTimer: NodeJS.Timeout | null = null;
+// 主窗口失焦后延后判定“是否整个 App 退到后台”的定时器（防止内部换焦误触发）。
+let mainWindowBlurTimer: NodeJS.Timeout | null = null;
 const APP_ICON_PATH = path.join(__dirname, "../../public/assets/profilepilot-icon-512.png");
 // 整个界面的统一缩放系数（等比例放大字号/间距/控件）。想再大/再小只改这一个数。
 const UI_ZOOM_FACTOR = 1.0;
@@ -614,13 +616,21 @@ function dragMiniWindow(event: IpcMainInvokeEvent, screenX: number, screenY: num
   windowRef.setBounds(nextBounds, false);
 }
 
-async function showMiniWindow(): Promise<void> {
+// focus=false：收成悬浮窗但不抢焦点（用于“切到别的 App / 切 Space”这类被动退后台场景，
+// 否则会把焦点从用户刚切过去的窗口（如 Chrome 副本）夺回来）。
+async function showMiniWindow(options?: { focus?: boolean }): Promise<void> {
+  const focusMini = options?.focus !== false;
   const windowRef = await createMiniWindow();
   setMiniWindowPanelOpen(false);
   await waitForMiniWindowFirstPaint(windowRef, ".mini-logo-glyph");
-  windowRef.show();
-  raiseMiniWindow(windowRef);
-  windowRef.focus();
+  if (focusMini) {
+    windowRef.show();
+    raiseMiniWindow(windowRef);
+    windowRef.focus();
+  } else {
+    windowRef.showInactive();
+    raiseMiniWindow(windowRef);
+  }
   mainWindow?.hide();
 }
 
@@ -662,6 +672,11 @@ function registerGlobalShortcuts(): void {
 }
 
 async function showMainWindow(): Promise<void> {
+  if (mainWindowBlurTimer) {
+    clearTimeout(mainWindowBlurTimer);
+    mainWindowBlurTimer = null;
+  }
+
   if (!mainWindow || mainWindow.isDestroyed()) {
     createMainWindow();
   }
@@ -984,6 +999,32 @@ function createMainWindow(): void {
 
     windowRef.hide();
     void showMiniWindow();
+  });
+
+  // 很多人不点最小化，而是「点屏幕别处 / 四本指切 Space」把窗口放到后台——这不会触发 minimize，
+  // 悬浮窗就出不来。这里补上：主窗口在前台可见时失焦，稍等片刻若整个 App 都没有窗口在聚焦
+  // （= 切到别的 App 或切了 Space，而不是内部换焦），就同样收成悬浮窗（不抢焦点）。
+  mainWindow.on("blur", () => {
+    const windowRef = mainWindow;
+    if (!windowRef || windowRef.isDestroyed() || !windowRef.isVisible() || windowRef.isMinimized()) {
+      return;
+    }
+
+    if (mainWindowBlurTimer) {
+      clearTimeout(mainWindowBlurTimer);
+    }
+    mainWindowBlurTimer = setTimeout(() => {
+      mainWindowBlurTimer = null;
+      const ref = mainWindow;
+      if (!ref || ref.isDestroyed() || !ref.isVisible() || ref.isMinimized()) {
+        return;
+      }
+      // 本 App 仍有任意窗口聚焦 → 只是内部换焦（开 DevTools、悬浮窗展开重排等），不处理。
+      if (BrowserWindow.getFocusedWindow()) {
+        return;
+      }
+      void showMiniWindow({ focus: false });
+    }, 150);
   });
 
   mainWindow.loadFile(path.join(__dirname, "../../public/index.html"));
@@ -1345,6 +1386,12 @@ app.whenReady().then(() => {
   // 点击 Dock 图标：始终把主控制台拉回来（必要时重建），并收起悬浮窗。
   // 覆盖“主窗口已关闭、只剩悬浮窗”的情况——此时旧逻辑会因为还有窗口而什么都不做。
   app.on("activate", () => {
+    // 若这次激活来自点击悬浮窗本身（App 在后台时点小球 → 光标落在悬浮窗内），
+    // 交给悬浮窗自己展开面板，不要抢回主窗口，否则一点小球就变回大窗口。
+    if (miniWindow && !miniWindow.isDestroyed() && miniWindow.isVisible() && isMiniWindowPointerInside()) {
+      raiseMiniWindow(miniWindow);
+      return;
+    }
     void showMainWindow();
   });
 });

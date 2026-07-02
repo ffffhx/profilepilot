@@ -316,7 +316,8 @@ function showMiniOutsideClickWindows(): void {
     });
 
     overlayWindow.setAlwaysOnTop(true, "floating");
-    overlayWindow.setVisibleOnAllWorkspaces(true);
+    // 与悬浮窗一致：全屏 App 下也要能盖住，否则展开面板后「点外面收起」在全屏 Space 里失效。
+    overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
     overlayWindow.on("closed", () => {
       miniOutsideClickWindows = miniOutsideClickWindows.filter((item) => item !== overlayWindow);
     });
@@ -427,7 +428,9 @@ async function createMiniWindow(): Promise<BrowserWindow> {
   });
 
   raiseMiniWindow(miniWindow);
-  miniWindow.setVisibleOnAllWorkspaces(true);
+  // visibleOnFullScreen：让悬浮窗也能浮在「原生全屏 App（绿色按钮，独占一个 Space）」之上，
+  // 否则用户全屏某个软件时悬浮窗就看不见了。层级仍用 "floating"（见 raiseMiniWindow 说明）。
+  miniWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   miniWindow.webContents.on("did-finish-load", () => {
     notifyMiniWindowPanelOpen(miniWindowPanelOpen);
   });

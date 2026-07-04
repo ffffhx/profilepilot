@@ -2,7 +2,7 @@ import { isBusyAction } from "../busy";
 import { store } from "../state";
 import { ExternalChromeInstance, PublicProfile } from "../types";
 import { renderLiveViewSection } from "./live-view";
-import { NATIVE_CDP_UNSUPPORTED_NOTE, cdpLaunchButtonTitle, deleteButtonTitle, escapeHtml, focusButtonTitle, formatDate, launchButtonTitle, listeningPortsNote, liveAddrLabel, profileStatusLabel, renderButtonLabel, sourceDetail } from "../util";
+import { NATIVE_CDP_UNSUPPORTED_NOTE, cdpLaunchButtonTitle, cdpPortLabel, deleteButtonTitle, escapeHtml, focusButtonTitle, formatDate, launchButtonTitle, listeningPortsNote, liveAddrLabel, profileStatusLabel, renderButtonLabel, sourceDetail } from "../util";
 
 interface ProfileRootGroup {
   key: string;
@@ -170,14 +170,14 @@ function renderPathTooltip(label: string, fullPath: string, className: string): 
 // 绑定了固定端口但未运行时显示该端口地址（bound · 待启动）；系统 Profile 不支持（off）。
 export function renderProfileCdpCell(profile: PublicProfile): string {
   if (profile.cdpUrl) {
-    return cdpChip("live", stripScheme(profile.cdpUrl), profile.cdpUrl, null);
+    return cdpChip("live", cdpPortLabel(profile.cdpUrl), profile.cdpUrl, null);
   }
   if (profile.source === "native") {
     return cdpChip("off", "不支持", null, null);
   }
   if (profile.fixedCdpPort) {
     const url = `http://127.0.0.1:${profile.fixedCdpPort}`;
-    return cdpChip("bound", `127.0.0.1:${profile.fixedCdpPort}`, url, "待启动");
+    return cdpChip("bound", `:${profile.fixedCdpPort}`, url, "待启动");
   }
   return cdpChip("off", "未开启", null, null);
 }
@@ -197,10 +197,6 @@ export function cdpChip(
     return chip;
   }
   return `<span class="action-tooltip cdp-tip max-w-full min-w-0" data-tooltip="${escapeHtml(fullTitle)}">${chip}</span>`;
-}
-
-function stripScheme(url: string): string {
-  return url.replace(/^https?:\/\//, "");
 }
 
 // 「连接」列：显示该 Profile 的 CDP 是否正被外部工具（agent-browser 等）持久连接驱动。
@@ -355,9 +351,9 @@ export function renderExternalRow(instance: ExternalChromeInstance): string {
       <td>
         ${
           instance.cdpUrl
-            ? cdpChip("live", stripScheme(instance.cdpUrl), instance.cdpUrl, null)
+            ? cdpChip("live", cdpPortLabel(instance.cdpUrl), instance.cdpUrl, null)
             : instance.cdpPort
-              ? cdpChip("stale", `127.0.0.1:${instance.cdpPort}`, `http://127.0.0.1:${instance.cdpPort}`, "未响应")
+              ? cdpChip("stale", `:${instance.cdpPort}`, `http://127.0.0.1:${instance.cdpPort}`, "未响应")
               : cdpChip("off", "未开启", null, null)
         }
       </td>

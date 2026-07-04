@@ -566,13 +566,34 @@ body.mini-collapsing .mini-shell {
   box-shadow: 0 0 7px rgba(95, 182, 255, 0.5);
 }
 
-.mini-profile-name {
+.mini-profile-text {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.mini-profile-name {
   min-width: 0;
   overflow: hidden;
   color: var(--text);
   font-size: 13.5px;
   font-weight: 700;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 被工具驱动时的副行：工具进程名 ▸ 受控页面域名 */
+.mini-profile-sub {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--accent-bright);
+  opacity: 0.75;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
   line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;

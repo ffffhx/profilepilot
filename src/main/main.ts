@@ -191,9 +191,11 @@ function raiseMiniWindow(windowRef = miniWindow): void {
     return;
   }
 
-  // 用 "floating" 而不是 "pop-up-menu"：后者层级过高，会把整个 App 变成 UIElement（无 Dock 图标）。
-  // "floating" 既能保持悬浮在普通窗口之上，又不会让 App 从程序坞消失。
-  windowRef.setAlwaysOnTop(true, "floating");
+  // 层级说明：floating 盖不住原生全屏 Space（skipTransformProcessType 保住 Dock 图标后，
+  // App 是普通 Foreground 类型，floating 级窗口会被全屏 Space 挡掉）；screen-saver 层级
+  // 足够高，配合 FullScreenAuxiliary 集合行为可以浮在全屏 App 之上。
+  // 不用 "pop-up-menu"：之前实测它会把整个 App 变成 UIElement（无 Dock 图标）。
+  windowRef.setAlwaysOnTop(true, "screen-saver");
   (windowRef as BrowserWindow & { moveTop?: () => void }).moveTop?.();
 }
 
@@ -295,6 +297,8 @@ function showMiniOutsideClickWindows(): void {
   const overlays = miniOutsideClickBounds(windowRef.getBounds()).map((bounds) => {
     const overlayWindow = new BrowserWindow({
       ...bounds,
+      // 同悬浮窗：面板类型才能盖住原生全屏 Space（见 createMiniWindow 说明）。
+      type: "panel",
       frame: false,
       transparent: true,
       hasShadow: false,
@@ -315,9 +319,11 @@ function showMiniOutsideClickWindows(): void {
       }
     });
 
-    overlayWindow.setAlwaysOnTop(true, "floating");
+    // 覆盖窗要垫在悬浮窗（screen-saver 层）之下、又要盖住全屏 App，跟随同一层级。
+    overlayWindow.setAlwaysOnTop(true, "screen-saver");
     // 与悬浮窗一致：全屏 App 下也要能盖住，否则展开面板后「点外面收起」在全屏 Space 里失效。
-    overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    // skipTransformProcessType 同悬浮窗：避免 App 被切成 UIElement 丢掉 Dock 图标。
+    overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
     overlayWindow.on("closed", () => {
       miniOutsideClickWindows = miniOutsideClickWindows.filter((item) => item !== overlayWindow);
     });
@@ -403,6 +409,9 @@ async function createMiniWindow(): Promise<BrowserWindow> {
   const bounds = normalizeMiniWindowDockBounds(await readMiniWindowPosition());
   miniWindow = new BrowserWindow({
     ...bounds,
+    // NSPanel：普通 Dock 应用的常规窗口无论层级多高都盖不住别人的原生全屏 Space，
+    // 只有面板类窗口（Spotlight/Raycast 同款）可以，且不需要把 App 降级成无 Dock 图标的 Accessory。
+    type: "panel",
     width: MINI_DOCK_SIZE,
     height: MINI_DOCK_SIZE,
     minWidth: MINI_DOCK_SIZE,
@@ -430,7 +439,10 @@ async function createMiniWindow(): Promise<BrowserWindow> {
   raiseMiniWindow(miniWindow);
   // visibleOnFullScreen：让悬浮窗也能浮在「原生全屏 App（绿色按钮，独占一个 Space）」之上，
   // 否则用户全屏某个软件时悬浮窗就看不见了。层级仍用 "floating"（见 raiseMiniWindow 说明）。
-  miniWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  // skipTransformProcessType：Electron 默认实现 visibleOnFullScreen 时会把整个 App 切成
+  // Accessory（UIElement），导致 Dock 图标消失；其实窗口只需要 FullScreenAuxiliary 集合行为，
+  // 跳过进程类型转换即可保住 Dock 图标。
+  miniWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
   miniWindow.webContents.on("did-finish-load", () => {
     notifyMiniWindowPanelOpen(miniWindowPanelOpen);
   });

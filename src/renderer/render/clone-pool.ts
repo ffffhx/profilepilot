@@ -1,7 +1,7 @@
 import { isBusyAction } from "../busy";
 import { store } from "../state";
 import { PublicProfile } from "../types";
-import { escapeHtml, formatDate, profileStatusLabel, renderButtonLabel, renderOperationProgress, sourceLabel } from "../util";
+import { cdpPortLabel, escapeHtml, formatDate, profileStatusLabel, renderButtonLabel, renderOperationProgress, sourceLabel } from "../util";
 
 const CLONE_COUNT_MIN = 1;
 const CLONE_COUNT_MAX = 20;
@@ -173,9 +173,9 @@ function renderCloneRow(clone: PublicProfile): string {
   const closing = isBusyAction("close-profile", { profileId: clone.id });
   const resetting = isBusyAction("reset-clone", { profileId: clone.id });
   const portLabel = clone.cdpUrl
-    ? clone.cdpUrl.replace(/^https?:\/\//, "")
+    ? cdpPortLabel(clone.cdpUrl)
     : clone.fixedCdpPort
-      ? `127.0.0.1:${clone.fixedCdpPort}`
+      ? `:${clone.fixedCdpPort}`
       : "无端口";
 
   return `

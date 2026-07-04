@@ -2,7 +2,7 @@ import { profileApi } from "../api";
 import { isBusyAction, renderToastBody } from "../busy";
 import { appRoot, store } from "../state";
 import { PublicProfile } from "../types";
-import { escapeHtml, liveAddrLabel, renderButtonLabel } from "../util";
+import { cdpPortLabel, escapeHtml, liveAddrLabel, renderButtonLabel } from "../util";
 
 const MINI_PROFILE_LIMIT = 3;
 
@@ -194,13 +194,31 @@ function renderMiniProfileCard(profile: PublicProfile): string {
           : "";
   const liveHost = profile.running && profile.livePrimaryUrl ? liveAddrLabel(profile) : "";
   const driving = profile.running && profile.cdpClients.length > 0;
-  const readout = busyHere ? busyLabel : liveHost || (driving ? "驱动中" : port.label);
+  // 右侧读数覆盖三个维度：浏览器开没开（图标颜色 + 未启动/已启动字样）、
+  // CDP 端口开没开（:端口 / 无 CDP）、有没有工具连着驱动（已连接/未连接）。
+  // 忙碌 > 端口·已连接 > 端口·未连接 > 已启动·无 CDP > 未启动。
+  const cdpPort = profile.cdpUrl ? cdpPortLabel(profile.cdpUrl) : "";
+  const readout = busyHere
+    ? busyLabel
+    : driving
+      ? `${cdpPort} · 已连接`
+      : profile.running && profile.cdpUrl
+        ? `${cdpPort} · 未连接`
+        : port.label;
+  // 被连接时在名字下加一行小字：谁连着（工具进程名，多个时 ×N）▸ 正控制哪个页面（域名）。
+  const toolLabel = driving
+    ? `${profile.cdpClients[0].label}${profile.cdpClients.length > 1 ? ` ×${profile.cdpClients.length}` : ""}`
+    : "";
+  const subLine = !busyHere && driving ? [toolLabel, liveHost].filter(Boolean).join(" ▸ ") : "";
 
   return `
     <article class="mini-profile-card ${port.kind} ${driving ? "driving" : ""} ${busyHere ? "busy" : ""}">
       <button type="button" class="mini-profile-main" data-action="${action}" data-id="${profile.id}" ${store.busy ? "disabled" : ""}>
         <span class="mini-node ${busyHere ? "loading" : port.kind === "live" ? "plane" : "ring"}" aria-hidden="true">${busyHere ? '<span class="mini-spinner"></span>' : port.kind === "live" ? MINI_NODE_PLANE : ""}</span>
-        <span class="mini-profile-name">${escapeHtml(profile.name)}</span>
+        <span class="mini-profile-text">
+          <span class="mini-profile-name">${escapeHtml(profile.name)}</span>
+          ${subLine ? `<span class="mini-profile-sub">${escapeHtml(subLine)}</span>` : ""}
+        </span>
         <span class="mini-readout">${escapeHtml(readout)}</span>
       </button>
       <div class="mini-menu-anchor" data-profile-actions>
@@ -259,7 +277,7 @@ export function miniPortInfo(profile: PublicProfile): {
   if (profile.running) {
     return {
       kind: "live",
-      label: "no cdp",
+      label: "已启动 · 无 CDP",
       copyValue: null
     };
   }
@@ -267,14 +285,14 @@ export function miniPortInfo(profile: PublicProfile): {
   if (profile.source === "isolated" && profile.fixedCdpPort) {
     return {
       kind: "bound",
-      label: `bound ${profile.fixedCdpPort}`,
+      label: `:${profile.fixedCdpPort} · 未启动`,
       copyValue: `http://127.0.0.1:${profile.fixedCdpPort}`
     };
   }
 
   return {
     kind: "off",
-    label: "off",
+    label: "未启动",
     copyValue: null
   };
 }

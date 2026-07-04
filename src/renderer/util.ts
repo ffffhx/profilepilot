@@ -268,6 +268,13 @@ export function liveAddrLabel(profile: PublicProfile): string {
   return profile.livePrimaryUrl ? hostOf(profile.livePrimaryUrl) : "";
 }
 
+// CDP 地址固定是 127.0.0.1，端口才是拿去 --cdp 连接的关键信息，
+// 展示时只取 :端口；解析不出端口时退回去掉协议的完整地址兜底。
+export function cdpPortLabel(url: string): string {
+  const match = /:(\d+)(?:[/?#]|$)/.exec(url);
+  return match ? `:${match[1]}` : url.replace(/^https?:\/\//, "");
+}
+
 export function escapeHtml(value: unknown): string {
   return String(value ?? "")
     .replace(/&/g, "&amp;")

@@ -268,6 +268,16 @@ export function liveAddrLabel(profile: PublicProfile): string {
   return profile.livePrimaryUrl ? hostOf(profile.livePrimaryUrl) : "";
 }
 
+// CDP 客户端标签来自 lsof 的进程名，像 agent-browser-darwin-arm64、chrome-devtools.exe，
+// 展示时去掉平台/架构后缀和 .exe，留下工具本名。
+export function prettyCdpClientLabel(label: string): string {
+  return (
+    label
+      .replace(/\.exe$/i, "")
+      .replace(/-(?:darwin|linux|win32|windows|macos)(?:-(?:arm64|x64|amd64|aarch64|ia32))?$/i, "") || label
+  );
+}
+
 // CDP 地址固定是 127.0.0.1，端口才是拿去 --cdp 连接的关键信息，
 // 展示时只取 :端口；解析不出端口时退回去掉协议的完整地址兜底。
 export function cdpPortLabel(url: string): string {

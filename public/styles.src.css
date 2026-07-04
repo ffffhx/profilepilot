@@ -395,8 +395,7 @@ body.mini-collapsing .mini-shell {
   gap: 5px;
 }
 
-.mini-window-actions button,
-.mini-menu-button {
+.mini-window-actions button {
   min-height: 26px;
   border-radius: 6px;
   padding: 0 8px;
@@ -422,8 +421,7 @@ body.mini-collapsing .mini-shell {
 .mini-profile-card {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 30px;
-  row-gap: 4px;
+  grid-template-columns: minmax(0, 1fr);
   min-height: 44px;
   border: 0;
   border-radius: 9px;
@@ -491,7 +489,7 @@ body.mini-collapsing .mini-shell {
   gap: 11px;
   min-height: 44px;
   border: 0;
-  border-radius: 9px 0 0 9px;
+  border-radius: 9px;
   background: transparent;
   box-shadow: none;
   padding: 0 6px 0 12px;
@@ -570,11 +568,13 @@ body.mini-collapsing .mini-shell {
   flex: 1;
   min-width: 0;
   display: flex;
-  flex-direction: column;
-  gap: 1px;
+  align-items: baseline;
+  gap: 8px;
 }
 
 .mini-profile-name {
+  flex: none;
+  max-width: 60%;
   min-width: 0;
   overflow: hidden;
   color: var(--text);
@@ -585,8 +585,9 @@ body.mini-collapsing .mini-shell {
   white-space: nowrap;
 }
 
-/* 被工具驱动时的副行：工具进程名 ▸ 受控页面域名 */
+/* 被工具驱动时跟在名字右侧的小字：端口 ▸ 受控页面域名 */
 .mini-profile-sub {
+  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   color: var(--accent-bright);
@@ -619,67 +620,6 @@ body.mini-collapsing .mini-shell {
 
 .mini-profile-card.bound .mini-readout {
   color: var(--info-bright);
-}
-
-.mini-menu-anchor {
-  position: relative;
-  z-index: 4;
-  display: grid;
-  align-self: stretch;
-  place-items: center;
-}
-
-.mini-menu-button {
-  width: 26px;
-  padding: 0;
-  border-color: transparent;
-  background: transparent;
-  box-shadow: none;
-  color: var(--muted);
-  font-family: var(--font-mono);
-  letter-spacing: 1px;
-}
-
-.mini-menu-button:hover:not(:disabled) {
-  border-color: var(--line);
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--text);
-  box-shadow: none;
-}
-
-.mini-menu-button.active {
-  border-color: var(--accent-line);
-  background: rgba(56, 225, 160, 0.08);
-  color: var(--accent-bright);
-}
-
-.mini-profile-menu {
-  position: relative;
-  z-index: 3;
-  grid-column: 1 / -1;
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 4px;
-  width: auto;
-  margin: -1px 0 3px 29px;
-  border: 1px solid var(--line-strong);
-  border-radius: 8px;
-  background: rgba(12, 21, 28, 0.96);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 10px 24px rgba(2, 6, 9, 0.28);
-  padding: 4px;
-}
-
-.mini-profile-menu button {
-  justify-content: center;
-  min-width: 0;
-  min-height: 26px;
-  border-radius: 6px;
-  padding: 0 4px;
-  overflow: hidden;
-  font-size: 10.5px;
-  line-height: 1;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .mini-load-more {

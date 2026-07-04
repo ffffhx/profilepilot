@@ -780,7 +780,7 @@ appRoot.addEventListener("click", (event) => {
     return;
   }
 
-  if ((action === "mini-focus-profile" || action === "mini-launch" || action === "mini-launch-cdp" || action === "mini-close-profile" || action === "mini-copy-port") && id) {
+  if ((action === "mini-focus-profile" || action === "mini-launch" || action === "mini-launch-cdp") && id) {
     const profile = store.state.profiles.find((item) => item.id === id);
     if (!profile) {
       setToast("这个 Profile 已不存在", "error");
@@ -833,34 +833,6 @@ appRoot.addEventListener("click", (event) => {
       return;
     }
 
-    if (action === "mini-close-profile") {
-      if (!profile.running) {
-        setToast(`${emphasizeName(profile.name)} 当前未运行`);
-        return;
-      }
-      void withBusy(async () => {
-        store.state = await profileApi().closeProfile(id);
-      }, `已关闭 ${emphasizeName(profile.name)}`, {
-        key: "close-profile",
-        message: `正在关闭 ${profile.name}…`,
-        profileId: id
-      });
-      return;
-    }
-
-    const copyValue = profile.cdpUrl || (profile.fixedCdpPort ? `http://127.0.0.1:${profile.fixedCdpPort}` : null);
-    if (!copyValue) {
-      setToast("这个 Profile 当前没有可复制的端口", "error");
-      return;
-    }
-    if (!navigator.clipboard?.writeText) {
-      setToast("当前环境不能直接复制，请手动选中文本复制", "error");
-      return;
-    }
-    void navigator.clipboard
-      .writeText(copyValue)
-      .then(() => setToast(`已复制 ${copyValue.replace(/^https?:\/\//, "")}`))
-      .catch(() => setToast("复制失败，请手动选中文本复制", "error"));
     return;
   }
 

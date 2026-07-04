@@ -2,7 +2,7 @@ import { profileApi } from "../api";
 import { isBusyAction, renderToastBody } from "../busy";
 import { appRoot, store } from "../state";
 import { PublicProfile } from "../types";
-import { cdpPortLabel, escapeHtml, liveAddrLabel, renderButtonLabel } from "../util";
+import { cdpPortLabel, escapeHtml, liveAddrLabel, prettyCdpClientLabel, renderButtonLabel } from "../util";
 
 const MINI_PROFILE_LIMIT = 3;
 
@@ -70,9 +70,10 @@ export function renderMini(): void {
   const totalProfiles = store.state.profiles.length;
   const canExpand = totalProfiles > MINI_PROFILE_LIMIT;
   const visibleCount = Math.min(profiles.length, totalProfiles);
+  const refreshing = isBusyAction("refresh");
   appRoot.className = "mini-root mini-root-panel";
   appRoot.innerHTML = `
-    <div class="mini-shell ${store.openProfileMenuId ? "menu-open" : ""}">
+    <div class="mini-shell">
       <header class="mini-titlebar">
         <div class="mini-brand">
           <button type="button" class="mini-mark-button" data-action="toggle-mini-panel" title="收起为悬浮图标" aria-label="收起为悬浮图标">
@@ -84,6 +85,9 @@ export function renderMini(): void {
           </div>
         </div>
         <div class="mini-window-actions">
+          <button type="button" class="${refreshing ? "loading" : ""}" data-action="refresh" title="刷新 Profile 状态" ${store.busy ? "disabled" : ""}>
+            ${renderButtonLabel(refreshing, "刷新", "刷新")}
+          </button>
           <button type="button" data-action="toggle-mini-panel" title="收起为悬浮图标">收起</button>
           <button type="button" data-action="show-main-window" title="展开完整控制台">展开</button>
         </div>
@@ -175,7 +179,6 @@ function miniProfiles(): PublicProfile[] {
 }
 
 function renderMiniProfileCard(profile: PublicProfile): string {
-  const menuOpen = store.openProfileMenuId === profile.id;
   const port = miniPortInfo(profile);
   const action = miniPrimaryAction(profile);
   const focusing = isBusyAction("focus-profile", { profileId: profile.id });
@@ -195,25 +198,25 @@ function renderMiniProfileCard(profile: PublicProfile): string {
   const liveHost = profile.running && profile.livePrimaryUrl ? liveAddrLabel(profile) : "";
   const driving = profile.running && profile.cdpClients.length > 0;
   // 右侧读数覆盖三个维度：浏览器开没开（图标颜色 + 未启动/已启动字样）、
-  // CDP 端口开没开（:端口 / 无 CDP）、有没有工具连着驱动（已连接/未连接）。
-  // 忙碌 > 端口·已连接 > 端口·未连接 > 已启动·无 CDP > 未启动。
+  // CDP 端口开没开（:端口 / 无 CDP）、有没有工具连着驱动（工具名·已连接/未连接）。
+  // 忙碌 > 工具名·已连接 > 端口·未连接 > 已启动·无 CDP > 未启动。
   const cdpPort = profile.cdpUrl ? cdpPortLabel(profile.cdpUrl) : "";
+  const toolLabel = driving
+    ? `${prettyCdpClientLabel(profile.cdpClients[0].label)}${profile.cdpClients.length > 1 ? ` ×${profile.cdpClients.length}` : ""}`
+    : "";
   const readout = busyHere
     ? busyLabel
     : driving
-      ? `${cdpPort} · 已连接`
+      ? `${toolLabel} 已连接`
       : profile.running && profile.cdpUrl
         ? `${cdpPort} · 未连接`
         : port.label;
-  // 被连接时在名字下加一行小字：谁连着（工具进程名，多个时 ×N）▸ 正控制哪个页面（域名）。
-  const toolLabel = driving
-    ? `${profile.cdpClients[0].label}${profile.cdpClients.length > 1 ? ` ×${profile.cdpClients.length}` : ""}`
-    : "";
-  const subLine = !busyHere && driving ? [toolLabel, liveHost].filter(Boolean).join(" ▸ ") : "";
+  // 被连接时在名字右侧跟一段小字：端口 ▸ 正控制哪个页面（域名）。工具名在右侧读数。
+  const subLine = !busyHere && driving ? [cdpPort, liveHost].filter(Boolean).join(" ▸ ") : "";
 
   return `
     <article class="mini-profile-card ${port.kind} ${driving ? "driving" : ""} ${busyHere ? "busy" : ""}">
-      <button type="button" class="mini-profile-main" data-action="${action}" data-id="${profile.id}" ${store.busy ? "disabled" : ""}>
+      <button type="button" class="mini-profile-main" data-action="${action}" data-id="${profile.id}" title="${escapeHtml(profile.running ? "显示 Chrome 窗口" : "启动 Profile")}" ${store.busy ? "disabled" : ""}>
         <span class="mini-node ${busyHere ? "loading" : port.kind === "live" ? "plane" : "ring"}" aria-hidden="true">${busyHere ? '<span class="mini-spinner"></span>' : port.kind === "live" ? MINI_NODE_PLANE : ""}</span>
         <span class="mini-profile-text">
           <span class="mini-profile-name">${escapeHtml(profile.name)}</span>
@@ -221,30 +224,6 @@ function renderMiniProfileCard(profile: PublicProfile): string {
         </span>
         <span class="mini-readout">${escapeHtml(readout)}</span>
       </button>
-      <div class="mini-menu-anchor" data-profile-actions>
-        <button type="button" class="mini-menu-button ${menuOpen ? "active" : ""}" data-action="toggle-profile-menu" data-id="${profile.id}" aria-expanded="${menuOpen ? "true" : "false"}" ${store.busy ? "disabled" : ""}>...</button>
-      </div>
-      ${
-        menuOpen
-          ? `
-            <div class="mini-profile-menu" role="menu" aria-label="${escapeHtml(profile.name)} 操作" data-profile-actions>
-              <button type="button" class="${focusing ? "loading" : ""}" data-action="mini-focus-profile" data-id="${profile.id}" title="显示 Chrome 窗口" ${store.busy || !profile.running ? "disabled" : ""}>
-                ${renderButtonLabel(focusing, "显示", "显示中")}
-              </button>
-              <button type="button" class="${launching ? "loading" : ""}" data-action="mini-launch" data-id="${profile.id}" title="启动 Profile" ${store.busy || profile.running ? "disabled" : ""}>
-                ${renderButtonLabel(launching, "启动", "启动中")}
-              </button>
-              <button type="button" class="${launchingCdp ? "loading" : ""}" data-action="mini-launch-cdp" data-id="${profile.id}" title="以 CDP 启动" ${store.busy || profile.running || profile.source !== "isolated" ? "disabled" : ""}>
-                ${renderButtonLabel(launchingCdp, "CDP", "启动中")}
-              </button>
-              <button type="button" class="${closing ? "loading" : ""}" data-action="mini-close-profile" data-id="${profile.id}" title="关闭 Profile" ${store.busy || !profile.running ? "disabled" : ""}>
-                ${renderButtonLabel(closing, "关闭", "关闭中")}
-              </button>
-              <button type="button" data-action="mini-copy-port" data-id="${profile.id}" title="复制 CDP 地址" ${!port.copyValue ? "disabled" : ""}>复制</button>
-            </div>
-          `
-          : ""
-      }
     </article>
   `;
 }

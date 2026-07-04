@@ -46,7 +46,7 @@ import type {
 import { accountSyncCopySpecs, accountSyncDataScore, accountSyncRecordKey, applyAccountSyncRecordBaseline, assertAccountSyncDiskSpace, collectAccountSyncPathStats, copyAccountSyncPath, inspectAccountLocalStateDiff, inspectAccountSyncPathDiff, mergeAccountLocalStateValues, recoverInterruptedAccountSyncArtifactsForProfile, restoreAccountSyncExtensionPreferences, shouldApplyAccountDiffItem, snapshotAccountSyncExtensionPreferences, snapshotAccountSyncSourceFingerprints, summarizeAccountSyncDiff } from "./account-sync";
 import { describePortOwner, findAvailableCdpPort, isPortAvailable, makeCdpUrl, normalizeCdpPortInput, requestCdpTargets, waitForCdp } from "./cdp-client";
 import { appendUniqueExtraUrls, bringCdpPageToFront, loadUnpackedExtensionsOverCdp, snapshotRestorableTabUrls } from "./cdp-page";
-import { focusProfileWindow, hasRendererProcessForProfile, isAnyMacProcessFrontmost, launchChrome, makeIsolatedProfileId, makeNativeProfileId, nativeChromeUserDataDir, openChromeUrl, parseProfileId, readAgentBrowserConfig, readIsolatedProfileUserName, removeAgentBrowserConfigFile, removeNativeProfileFromLocalState, requestIsolatedProfileWindow, resolveIsolatedProfileDataPath, scanNativeChromeProfiles, writeAgentBrowserConfigFile } from "./chrome-launch";
+import { focusProfileWindow, getDirectChromeCommand, hasRendererProcessForProfile, isAnyMacProcessFrontmost, launchChrome, launchDetached, makeIsolatedProfileId, makeNativeProfileId, nativeChromeUserDataDir, openChromeUrl, parseProfileId, readAgentBrowserConfig, readIsolatedProfileUserName, removeAgentBrowserConfigFile, removeNativeProfileFromLocalState, requestIsolatedProfileWindow, resolveIsolatedProfileDataPath, scanNativeChromeProfiles, writeAgentBrowserConfigFile } from "./chrome-launch";
 import { canAutoLoadUnpackedExtensions, canLoadLocalExtensionViaCdp, canPersistExtensionInstall, copyExtensionDataPath, copyExtensionPackageToProfile, extensionDataDiffers, getMigratedExtensionLaunchPlan, getProtectedDeveloperModeRecord, inspectExtensionMigrationItem, isExtensionMigrationActionItem, isManualLoadSkipReason, isProfileRelativeExtensionSetting, makeStoredMigratedExtensionId, manualLoadExtensionReason, readProtectedExtensionInstallRecord, removeExtensionReferencesFromProfilePreferences, summarizeExtensionMigrationDiff, writeProtectedExtensionInstallRecord } from "./extension-migration";
 import { extensionDeleteRelativePaths, isLikelyExtensionId, scanProfileExtensions } from "./extension-scan";
 import { copyPath, throwIfAborted, waitIfPaused } from "./fs-copy";
@@ -563,6 +563,14 @@ export class ProfileManager {
       await bringCdpPageToFront(profile.cdpPort).catch(() => false);
     }
 
+    // macOS 对同一个 Google Chrome.app 的多实例做应用级激活不可靠：请求激活实例 B 时，
+    // 系统可能把前台给同一 bundle 的实例 A（连 Chrome 自己 Page.bringToFront 的自激活也会被路由错）。
+    // 所以优先走 Chrome 自己的单例握手通道：对同一 user-data-dir / profile-directory 再拉一次
+    // 启动命令，运行中的实例收到握手后会自己把窗口带到最前；已有窗口时不会新开窗口或标签。
+    if (await this.focusViaChromeSingleton(profile)) {
+      return;
+    }
+
     if (profile.source === "native") {
       const raisedWindow = await focusProfileWindow(profile.pids);
       if (raisedWindow) {
@@ -595,6 +603,34 @@ export class ProfileManager {
       "macOS 没有把这个独立 Profile 精确显示到最前面。若同一个 Google Chrome.app 同时开了多个实例，请先用 CDP 启动这个 Profile，或给 ProfilePilot 授予“辅助功能”权限后重试。",
       "FOCUS_PROFILE_UNCONFIRMED"
     );
+  }
+
+  // 单例握手置前：向目标实例的 user-data-dir（隔离 Profile）或 profile-directory（系统 Profile）
+  // 再发一次启动命令。新进程发现单例已存在，把参数转交给运行中的实例后退出；实例随即自我激活。
+  // 返回是否确认目标实例已到前台；确认不了时由调用方走原有的系统激活兜底。
+  private async focusViaChromeSingleton(profile: PublicProfile): Promise<boolean> {
+    if (process.platform !== "darwin") {
+      return false;
+    }
+    const command = getDirectChromeCommand();
+    if (!command) {
+      return false;
+    }
+
+    const args =
+      profile.source === "isolated"
+        ? [`--user-data-dir=${profile.path}`, "--no-first-run"]
+        : [`--profile-directory=${profile.dirName}`, "--no-first-run"];
+    launchDetached(command, args);
+
+    const deadline = Date.now() + 2500;
+    while (Date.now() < deadline) {
+      if (await isAnyMacProcessFrontmost(profile.pids)) {
+        return true;
+      }
+      await sleep(250);
+    }
+    return false;
   }
 
   async isProfileFrontmost(profileId: string): Promise<boolean> {

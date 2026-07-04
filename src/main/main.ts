@@ -50,7 +50,8 @@ const UI_ZOOM_FACTOR = 1.0;
 const MINI_DOCK_SIZE = 80;
 // 一键唤起 / 聚焦 Mini 面板的全局快捷键（macOS = Cmd+Shift+P）
 const MINI_SUMMON_SHORTCUT = "CommandOrControl+Shift+P";
-const MINI_PANEL_WIDTH = 360;
+// 名字 + 端口▸域名 + 「工具名 已连接」现在同排展示，360 不够放，加宽到 440。
+const MINI_PANEL_WIDTH = 440;
 // 面板高度自适应内容：初始用这个值（约 3 行的常见高度，尽量贴近首屏避免首次展开跳一下），
 // 渲染端量好真实内容高度后通过 resizeMiniPanel 精确调整。
 const MINI_PANEL_HEIGHT = 210;

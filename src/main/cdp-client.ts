@@ -296,6 +296,35 @@ export function requestCdpTargets(port: number): Promise<CdpTargetListEntry[]> {
   });
 }
 
+// /json/close/<id> 返回纯文本（"Target is closing"），不能走 JSON 解析，只看状态码。
+export function requestCdpCloseTarget(port: number, targetId: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const request = http.get(
+      {
+        hostname: "127.0.0.1",
+        port,
+        path: `/json/close/${targetId}`,
+        timeout: 700
+      },
+      (response) => {
+        response.resume();
+        response.on("end", () => {
+          if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
+            reject(new Error(`HTTP ${response.statusCode || "unknown"}`));
+            return;
+          }
+          resolve();
+        });
+      }
+    );
+
+    request.on("timeout", () => {
+      request.destroy(new Error("timeout"));
+    });
+    request.on("error", reject);
+  });
+}
+
 export function requestCdpJson<T>(port: number, requestPath: string): Promise<T> {
   return new Promise((resolve, reject) => {
     const request = http.get(

@@ -1,4 +1,4 @@
-import { CdpBrowserClient, requestCdpTargets, requestCdpVersionInfo } from "./cdp-client";
+import { CdpBrowserClient, requestCdpCloseTarget, requestCdpTargets, requestCdpVersionInfo } from "./cdp-client";
 import { sleep } from "./fs-util";
 import { CdpTargetListEntry } from "./internal-types";
 import { ProfileManagerError } from "./profile-manager-error";
@@ -103,6 +103,47 @@ export function appendUniqueExtraUrls(baseUrls: string[], extraUrls: string[]): 
     }
   }
   return urls;
+}
+
+export async function snapshotPageTargetIds(port: number): Promise<Set<string>> {
+  const targets = await requestCdpTargets(port).catch(() => []);
+  return new Set(
+    targets.filter((target) => target.type === "page" && target.id).map((target) => target.id as string)
+  );
+}
+
+export function isBlankStartupUrl(url: string | undefined): boolean {
+  const trimmed = (url || "").trim();
+  return (
+    !trimmed ||
+    trimmed === "about:blank" ||
+    trimmed.startsWith("chrome://newtab") ||
+    trimmed.startsWith("chrome://new-tab-page")
+  );
+}
+
+// Chrome 单例握手会把命令行当一次新启动处理：已有窗口时在窗口里多开一个新标签页（NTP）。
+// 这个标签是置前动作的纯副作用——等它出现后关掉，让窗口回到用户原来的标签。
+export async function closeFreshBlankPagesOverCdp(
+  port: number,
+  knownPageIds: Set<string>,
+  timeoutMs = 2000
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const targets = await requestCdpTargets(port).catch(() => []);
+    const freshBlankPages = targets.filter(
+      (target) => target.type === "page" && target.id && !knownPageIds.has(target.id) && isBlankStartupUrl(target.url)
+    );
+    if (freshBlankPages.length) {
+      await Promise.all(
+        freshBlankPages.map((target) => requestCdpCloseTarget(port, target.id as string).catch(() => undefined))
+      );
+      return true;
+    }
+    await sleep(120);
+  }
+  return false;
 }
 
 export async function bringCdpPageToFront(port: number): Promise<boolean> {

@@ -45,8 +45,8 @@ import type {
 } from "../shared/types";
 import { accountSyncCopySpecs, accountSyncDataScore, accountSyncRecordKey, applyAccountSyncRecordBaseline, assertAccountSyncDiskSpace, collectAccountSyncPathStats, copyAccountSyncPath, inspectAccountLocalStateDiff, inspectAccountSyncPathDiff, mergeAccountLocalStateValues, recoverInterruptedAccountSyncArtifactsForProfile, restoreAccountSyncExtensionPreferences, shouldApplyAccountDiffItem, snapshotAccountSyncExtensionPreferences, snapshotAccountSyncSourceFingerprints, summarizeAccountSyncDiff } from "./account-sync";
 import { describePortOwner, findAvailableCdpPort, isPortAvailable, makeCdpUrl, normalizeCdpPortInput, requestCdpTargets, waitForCdp } from "./cdp-client";
-import { appendUniqueExtraUrls, bringCdpPageToFront, loadUnpackedExtensionsOverCdp, snapshotRestorableTabUrls } from "./cdp-page";
-import { focusProfileWindow, getDirectChromeCommand, hasRendererProcessForProfile, isAnyMacProcessFrontmost, launchChrome, launchDetached, makeIsolatedProfileId, makeNativeProfileId, nativeChromeUserDataDir, openChromeUrl, parseProfileId, readAgentBrowserConfig, readIsolatedProfileUserName, removeAgentBrowserConfigFile, removeNativeProfileFromLocalState, requestIsolatedProfileWindow, resolveIsolatedProfileDataPath, scanNativeChromeProfiles, writeAgentBrowserConfigFile } from "./chrome-launch";
+import { appendUniqueExtraUrls, bringCdpPageToFront, closeFreshBlankPagesOverCdp, loadUnpackedExtensionsOverCdp, snapshotPageTargetIds, snapshotRestorableTabUrls } from "./cdp-page";
+import { focusProfileWindow, getDirectChromeCommand, isAnyMacProcessFrontmost, launchChrome, launchDetached, makeIsolatedProfileId, makeNativeProfileId, nativeChromeUserDataDir, openChromeUrl, parseProfileId, readAgentBrowserConfig, readIsolatedProfileUserName, removeAgentBrowserConfigFile, removeNativeProfileFromLocalState, resolveIsolatedProfileDataPath, scanNativeChromeProfiles, writeAgentBrowserConfigFile } from "./chrome-launch";
 import { canAutoLoadUnpackedExtensions, canLoadLocalExtensionViaCdp, canPersistExtensionInstall, copyExtensionDataPath, copyExtensionPackageToProfile, extensionDataDiffers, getMigratedExtensionLaunchPlan, getProtectedDeveloperModeRecord, inspectExtensionMigrationItem, isExtensionMigrationActionItem, isManualLoadSkipReason, isProfileRelativeExtensionSetting, makeStoredMigratedExtensionId, manualLoadExtensionReason, readProtectedExtensionInstallRecord, removeExtensionReferencesFromProfilePreferences, summarizeExtensionMigrationDiff, writeProtectedExtensionInstallRecord } from "./extension-migration";
 import { extensionDeleteRelativePaths, isLikelyExtensionId, scanProfileExtensions } from "./extension-scan";
 import { copyPath, throwIfAborted, waitIfPaused } from "./fs-copy";
@@ -579,40 +579,27 @@ export class ProfileManager {
       await bringCdpPageToFront(profile.cdpPort).catch(() => false);
     }
 
+    // 先试无副作用的系统级激活，并确认真的到了前台才算成功。
+    // 只开一个 Chrome 实例时这条路通常就够了，不产生任何副作用。
+    const raisedQuietly = await focusProfileWindow(profile.pids).catch(() => false);
+    if (raisedQuietly && (await isAnyMacProcessFrontmost(profile.pids))) {
+      return;
+    }
+
     // macOS 对同一个 Google Chrome.app 的多实例做应用级激活不可靠：请求激活实例 B 时，
     // 系统可能把前台给同一 bundle 的实例 A（连 Chrome 自己 Page.bringToFront 的自激活也会被路由错）。
-    // 所以优先走 Chrome 自己的单例握手通道：对同一 user-data-dir / profile-directory 再拉一次
-    // 启动命令，运行中的实例收到握手后会自己把窗口带到最前；已有窗口时不会新开窗口或标签。
+    // 此时走 Chrome 自己的单例握手通道：对同一 user-data-dir / profile-directory 再拉一次
+    // 启动命令，运行中的实例收到握手后会自己把窗口带到最前。
     if (await this.focusViaChromeSingleton(profile)) {
       return;
     }
 
+    // 静默激活和单例握手都试过了，走到这里说明确认不了前台，直接报错给出指引。
     if (profile.source === "native") {
-      const raisedWindow = await focusProfileWindow(profile.pids);
-      if (raisedWindow) {
-        return;
-      }
-
       throw new ProfileManagerError(
         "macOS 没有把这个系统 Chrome Profile 精确显示到最前面。多个 Google Chrome.app 实例同时运行时，系统的应用级激活可能会落到其它 Profile；请给 ProfilePilot 授予“辅助功能”权限，或先关闭其它 Chrome 实例后重试。",
         "FOCUS_PROFILE_UNCONFIRMED"
       );
-    }
-
-    const raisedWindow = await focusProfileWindow(profile.pids);
-    if (raisedWindow) {
-      return;
-    }
-
-    if (!(await hasRendererProcessForProfile(profile.path))) {
-      await requestIsolatedProfileWindow(profile);
-    }
-    await sleep(700);
-
-    const refreshedProfile = await this.getPublicProfile(profileId);
-    const raisedAfterRequest = await focusProfileWindow(refreshedProfile.pids.length ? refreshedProfile.pids : profile.pids);
-    if (raisedAfterRequest) {
-      return;
     }
 
     throw new ProfileManagerError(
@@ -623,7 +610,11 @@ export class ProfileManager {
 
   // 单例握手置前：向目标实例的 user-data-dir（隔离 Profile）或 profile-directory（系统 Profile）
   // 再发一次启动命令。新进程发现单例已存在，把参数转交给运行中的实例后退出；实例随即自我激活。
-  // 返回是否确认目标实例已到前台；确认不了时由调用方走原有的系统激活兜底。
+  // 副作用：实例会把握手当一次新启动——已有窗口时在窗口里多开一个新标签页（NTP）。
+  // 对带 CDP 的实例：握手前记下已有页面，握手后把新冒出来的空白标签关掉，恢复用户原来的标签；
+  // 原本没有窗口时新开的窗口正是我们要的，不清理。无 CDP 的实例（系统 Profile）无法清理，
+  // 好在上层已先试过无副作用的系统级激活，只有多实例互切失败时才落到这里。
+  // 返回是否确认目标实例已到前台。
   private async focusViaChromeSingleton(profile: PublicProfile): Promise<boolean> {
     if (process.platform !== "darwin") {
       return false;
@@ -633,6 +624,8 @@ export class ProfileManager {
       return false;
     }
 
+    const knownPageIds = profile.cdpPort ? await snapshotPageTargetIds(profile.cdpPort) : null;
+
     const args =
       profile.source === "isolated"
         ? [`--user-data-dir=${profile.path}`, "--no-first-run"]
@@ -640,13 +633,20 @@ export class ProfileManager {
     launchDetached(command, args);
 
     const deadline = Date.now() + 2500;
+    let confirmed = false;
     while (Date.now() < deadline) {
       if (await isAnyMacProcessFrontmost(profile.pids)) {
-        return true;
+        confirmed = true;
+        break;
       }
       await sleep(250);
     }
-    return false;
+
+    if (profile.cdpPort && knownPageIds && knownPageIds.size > 0) {
+      await closeFreshBlankPagesOverCdp(profile.cdpPort, knownPageIds).catch(() => undefined);
+    }
+
+    return confirmed;
   }
 
   async isProfileFrontmost(profileId: string): Promise<boolean> {

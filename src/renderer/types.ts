@@ -128,6 +128,7 @@ export interface AppState {
   accountSyncRecords: AccountSyncRecord[];
   externalInstances: ExternalChromeInstance[];
   miniProfileIds: string[];
+  miniProfileOrder: string[];
 }
 
 export interface DeleteProfileResult {
@@ -448,6 +449,9 @@ export interface ProfileManagerApi {
   setAgentBrowserConfig(id: string, port: number): Promise<AppState>;
   clearAgentBrowserConfig(id: string): Promise<AppState>;
   setMiniProfilePinned(id: string, pinned: boolean): Promise<AppState>;
+  setMiniProfileOrder(ids: string[]): Promise<AppState>;
+  setMiniPanelPinned(pinned: boolean): Promise<void>;
+  onMiniPanelPinnedChanged(listener: (pinned: boolean) => void): () => void;
   showMiniWindow(): Promise<void>;
   showMainWindow(): Promise<void>;
   setMiniWindowPanelOpen(open: boolean): Promise<void>;

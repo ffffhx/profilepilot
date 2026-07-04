@@ -45,6 +45,8 @@ export interface Registry {
   nativeProfiles?: Record<string, NativeProfileMetadata>;
   accountSyncRecords?: Record<string, AccountSyncRecord>;
   miniProfileIds?: string[];
+  // 悬浮窗里 Profile 行的自定义排序（拖拽调整）；不在列表里的 Profile 排在末尾，保持自然顺序。
+  miniProfileOrder?: string[];
 }
 
 // 当前持有该 Profile CDP 端口持久连接的客户端（agent-browser / Playwright / DevTools 等）。
@@ -151,6 +153,7 @@ export interface AppState {
   accountSyncRecords: AccountSyncRecord[];
   externalInstances: ExternalChromeInstance[];
   miniProfileIds: string[];
+  miniProfileOrder: string[];
 }
 
 export interface DeleteProfileResult {
@@ -500,6 +503,9 @@ export interface ProfileManagerApi {
   setAgentBrowserConfig(id: string, port: number): Promise<AppState>;
   clearAgentBrowserConfig(id: string): Promise<AppState>;
   setMiniProfilePinned(id: string, pinned: boolean): Promise<AppState>;
+  setMiniProfileOrder(ids: string[]): Promise<AppState>;
+  setMiniPanelPinned(pinned: boolean): Promise<void>;
+  onMiniPanelPinnedChanged(listener: (pinned: boolean) => void): () => void;
   showMiniWindow(): Promise<void>;
   showMainWindow(): Promise<void>;
   setMiniWindowPanelOpen(open: boolean): Promise<void>;

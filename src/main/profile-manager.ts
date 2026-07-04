@@ -181,6 +181,7 @@ export class ProfileManager {
     ]);
     const validProfileIds = new Set(profiles.map((profile) => profile.id));
     const miniProfileIds = normalizeMiniProfileIds(registry.miniProfileIds, validProfileIds);
+    const miniProfileOrder = normalizeMiniProfileOrder(registry.miniProfileOrder, validProfileIds);
     const miniProfileIdSet = new Set(miniProfileIds);
     profiles.forEach((profile) => {
       profile.pinnedToMini = miniProfileIdSet.has(profile.id);
@@ -199,7 +200,8 @@ export class ProfileManager {
       chromeLauncher: this.getLauncherLabel(),
       accountSyncRecords: Object.values(registry.accountSyncRecords || {}).sort((a, b) => b.syncedAt.localeCompare(a.syncedAt)),
       externalInstances,
-      miniProfileIds
+      miniProfileIds,
+      miniProfileOrder
     };
   }
 
@@ -379,6 +381,20 @@ export class ProfileManager {
     await this.saveRegistry({
       ...registry,
       miniProfileIds: next
+    });
+  }
+
+  // 持久化悬浮窗里 Profile 行的拖拽排序。传入的是期望的完整显示顺序（可只含一部分，
+  // 未列出的 Profile 展示时排在后面、保持自然顺序）。
+  async setMiniProfileOrder(ids: string[]): Promise<void> {
+    const state = await this.getState();
+    const validProfileIds = new Set(state.profiles.map((profile) => profile.id));
+    const order = normalizeMiniProfileOrder(ids, validProfileIds);
+
+    const registry = await this.loadRegistry();
+    await this.saveRegistry({
+      ...registry,
+      miniProfileOrder: order
     });
   }
 
@@ -1991,6 +2007,11 @@ export class ProfileManager {
       registry.miniProfileIds = nextMiniProfileIds;
       registryChanged = true;
     }
+    const nextMiniProfileOrder = (registry.miniProfileOrder || []).filter((id) => id !== profile.id);
+    if (nextMiniProfileOrder.length !== (registry.miniProfileOrder || []).length) {
+      registry.miniProfileOrder = nextMiniProfileOrder;
+      registryChanged = true;
+    }
     if (registryChanged) {
       await this.saveRegistry(registry);
     }
@@ -2026,7 +2047,8 @@ export class ProfileManager {
       ...registry,
       profiles: nextProfiles,
       accountSyncRecords,
-      miniProfileIds: (registry.miniProfileIds || []).filter((profileId) => profileId !== deletedProfileId)
+      miniProfileIds: (registry.miniProfileIds || []).filter((profileId) => profileId !== deletedProfileId),
+      miniProfileOrder: (registry.miniProfileOrder || []).filter((profileId) => profileId !== deletedProfileId)
     });
     let trashPath: string | null;
     try {
@@ -2089,7 +2111,8 @@ export class ProfileManager {
           : [],
         nativeProfiles,
         accountSyncRecords,
-        miniProfileIds: normalizeMiniProfileIds(parsed.miniProfileIds)
+        miniProfileIds: normalizeMiniProfileIds(parsed.miniProfileIds),
+        miniProfileOrder: normalizeMiniProfileOrder(parsed.miniProfileOrder)
       };
     } catch (error) {
       const backup = `${this.registryPath}.broken-${Date.now()}`;
@@ -2100,7 +2123,7 @@ export class ProfileManager {
       } catch {
         // 无法备份损坏文件时也只能干净启动。
       }
-      return { profiles: [], nativeProfiles: {}, accountSyncRecords: {}, miniProfileIds: [] };
+      return { profiles: [], nativeProfiles: {}, accountSyncRecords: {}, miniProfileIds: [], miniProfileOrder: [] };
     }
   }
 
@@ -2540,4 +2563,10 @@ function normalizeMiniProfileIds(input: unknown, validProfileIds?: Set<string>):
   const ids = Array.isArray(input) ? uniqueStrings(input.filter((id): id is string => typeof id === "string")) : [];
   const validIds = validProfileIds ? ids.filter((id) => validProfileIds.has(id)) : ids;
   return validIds.slice(0, MINI_PROFILE_LIMIT);
+}
+
+// 悬浮窗自定义排序不限数量（覆盖全部 Profile 行），只做去重和有效性过滤。
+function normalizeMiniProfileOrder(input: unknown, validProfileIds?: Set<string>): string[] {
+  const ids = Array.isArray(input) ? uniqueStrings(input.filter((id): id is string => typeof id === "string")) : [];
+  return validProfileIds ? ids.filter((id) => validProfileIds.has(id)) : ids;
 }

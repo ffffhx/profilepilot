@@ -4,6 +4,7 @@ import { closeModalFromUi, executeConfirmIntent } from "./confirm";
 import { clampCloneCount } from "./render/clone-pool";
 import { isExtensionMigrationActionItem } from "./render/extensions";
 import { focusLiveTab, openLiveZoom, refreshLiveViewNow, requestLiveViewNow, startLiveViewLoop, toggleLiveScreenshot } from "./render/live-view";
+import { sortByMiniOrder } from "./render/mini";
 import { render } from "./render/render-root";
 import { invalidateExtensionMigrationDiff, loadState, refreshExtensionMigrationDiff, refreshGlobalInstructions, repairClaudeInstructionShell, saveGlobalInstruction, setMigrationSource } from "./state-actions";
 import { appRoot, store } from "./state";
@@ -671,6 +672,20 @@ appRoot.addEventListener("click", (event) => {
       key: "refresh",
       message: "正在刷新 Profile 状态…"
     });
+    return;
+  }
+
+  if (action === "toggle-mini-pinned") {
+    const next = !store.miniPanelPinned;
+    store.miniPanelPinned = next;
+    render();
+    void profileApi()
+      .setMiniPanelPinned(next)
+      .catch((error: unknown) => {
+        store.miniPanelPinned = !next;
+        render();
+        setToast(formatErrorMessage(error), "error");
+      });
     return;
   }
 
@@ -1561,6 +1576,11 @@ if (store.viewMode === "mini") {
       return false;
     }
 
+    // Profile 卡片整行留给 HTML5 拖拽排序，不做窗口拖动。
+    if (target.closest(".mini-profile-card")) {
+      return false;
+    }
+
     // 折叠态的圆 logo 整块可拖拽（它本身是按钮）。
     if (target.closest(".mini-logo-dock")) {
       return true;
@@ -1692,11 +1712,108 @@ if (store.viewMode === "mini") {
     markMiniPanelAnimation("mini-expanding");
     applyMiniPanelOpen(true);
   });
+  profileApi().onMiniPanelPinnedChanged((pinned) => {
+    if (store.miniPanelPinned !== pinned) {
+      store.miniPanelPinned = pinned;
+      render();
+    }
+  });
   appRoot.addEventListener("wheel", markMiniScroll, { passive: true });
   appRoot.addEventListener("scroll", markMiniScroll, { capture: true, passive: true });
 
+  // —— Profile 行拖拽排序（HTML5 DnD；卡片区域已从窗口拖动逻辑里排除） ——
+  let draggingProfileId: string | null = null;
+  const clearDropMarkers = (): void => {
+    appRoot.querySelectorAll(".mini-profile-card.drop-above, .mini-profile-card.drop-below").forEach((card) => {
+      card.classList.remove("drop-above", "drop-below");
+    });
+  };
+  const applyMiniProfileReorder = (draggedId: string, targetId: string, insertBefore: boolean): void => {
+    if (!store.state) {
+      return;
+    }
+
+    // 以当前生效顺序（自定义顺序 + 自然顺序兜底）为基准挪动一行，保存完整顺序。
+    const fullOrder = sortByMiniOrder(store.state.profiles).map((profile) => profile.id);
+    const withoutDragged = fullOrder.filter((id) => id !== draggedId);
+    const targetIndex = withoutDragged.indexOf(targetId);
+    if (targetIndex < 0) {
+      return;
+    }
+
+    const insertAt = insertBefore ? targetIndex : targetIndex + 1;
+    const nextOrder = [...withoutDragged.slice(0, insertAt), draggedId, ...withoutDragged.slice(insertAt)];
+    store.state.miniProfileOrder = nextOrder;
+    render();
+    void profileApi()
+      .setMiniProfileOrder(nextOrder)
+      .then((state) => {
+        store.state = state;
+        render();
+      })
+      .catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+  };
+  appRoot.addEventListener("dragstart", (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const card = target?.closest<HTMLElement>(".mini-profile-card");
+    if (!card?.dataset.id) {
+      return;
+    }
+
+    draggingProfileId = card.dataset.id;
+    card.classList.add("dragging");
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", draggingProfileId);
+    }
+  });
+  appRoot.addEventListener("dragover", (event) => {
+    if (!draggingProfileId) {
+      return;
+    }
+
+    const target = event.target instanceof Element ? event.target : null;
+    const card = target?.closest<HTMLElement>(".mini-profile-card");
+    if (!card?.dataset.id || card.dataset.id === draggingProfileId) {
+      clearDropMarkers();
+      return;
+    }
+
+    event.preventDefault();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = "move";
+    }
+    const rect = card.getBoundingClientRect();
+    const insertBefore = event.clientY < rect.top + rect.height / 2;
+    clearDropMarkers();
+    card.classList.add(insertBefore ? "drop-above" : "drop-below");
+  });
+  appRoot.addEventListener("drop", (event) => {
+    if (!draggingProfileId) {
+      return;
+    }
+
+    const target = event.target instanceof Element ? event.target : null;
+    const card = target?.closest<HTMLElement>(".mini-profile-card");
+    const targetId = card?.dataset.id;
+    if (!targetId || targetId === draggingProfileId) {
+      return;
+    }
+
+    event.preventDefault();
+    const rect = card.getBoundingClientRect();
+    const insertBefore = event.clientY < rect.top + rect.height / 2;
+    applyMiniProfileReorder(draggingProfileId, targetId, insertBefore);
+  });
+  appRoot.addEventListener("dragend", () => {
+    draggingProfileId = null;
+    clearDropMarkers();
+    appRoot.querySelectorAll(".mini-profile-card.dragging").forEach((card) => card.classList.remove("dragging"));
+  });
+
   window.setInterval(() => {
-    if (!store.busy && !miniDragState && Date.now() - lastMiniScrollAt > 900) {
+    // 拖拽排序过程中暂停轮询重渲染，否则 DOM 被重建会打断 DnD。
+    if (!store.busy && !miniDragState && !draggingProfileId && Date.now() - lastMiniScrollAt > 900) {
       void loadState().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
     }
   }, 2500);

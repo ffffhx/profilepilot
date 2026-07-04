@@ -85,6 +85,9 @@ export function renderMini(): void {
           </div>
         </div>
         <div class="mini-window-actions">
+          <button type="button" class="${store.miniPanelPinned ? "active" : ""}" data-action="toggle-mini-pinned" title="${store.miniPanelPinned ? "取消固定：点击面板外恢复收起为悬浮图标" : "固定面板：点击面板外不再收起为悬浮图标"}" aria-pressed="${store.miniPanelPinned ? "true" : "false"}">
+            ${store.miniPanelPinned ? "已固定" : "固定"}
+          </button>
           <button type="button" class="${refreshing ? "loading" : ""}" data-action="refresh" title="刷新 Profile 状态" ${store.busy ? "disabled" : ""}>
             ${renderButtonLabel(refreshing, "刷新", "刷新")}
           </button>
@@ -166,16 +169,27 @@ function miniProfiles(): PublicProfile[] {
     return [];
   }
 
-  const profiles = store.state.profiles || [];
-  const pinnedProfiles = store.state.miniProfileIds
-    .map((id) => profiles.find((profile) => profile.id === id))
-    .filter((profile): profile is PublicProfile => Boolean(profile));
+  const profiles = sortByMiniOrder(store.state.profiles || []);
+  const pinnedProfiles = profiles.filter((profile) => store.state?.miniProfileIds.includes(profile.id));
 
   if (store.miniExpanded) {
     return profiles;
   }
 
   return (pinnedProfiles.length ? pinnedProfiles : profiles).slice(0, MINI_PROFILE_LIMIT);
+}
+
+// 应用用户拖拽出来的自定义顺序：排序表里的靠前，不在表里的排在后面、保持自然顺序（sort 稳定）。
+export function sortByMiniOrder(profiles: PublicProfile[]): PublicProfile[] {
+  const order = store.state?.miniProfileOrder || [];
+  if (!order.length) {
+    return [...profiles];
+  }
+
+  const orderIndex = new Map(order.map((id, index) => [id, index]));
+  return [...profiles].sort(
+    (a, b) => (orderIndex.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (orderIndex.get(b.id) ?? Number.MAX_SAFE_INTEGER)
+  );
 }
 
 function renderMiniProfileCard(profile: PublicProfile): string {
@@ -215,7 +229,7 @@ function renderMiniProfileCard(profile: PublicProfile): string {
   const subLine = !busyHere && driving ? [cdpPort, liveHost].filter(Boolean).join(" ▸ ") : "";
 
   return `
-    <article class="mini-profile-card ${port.kind} ${driving ? "driving" : ""} ${busyHere ? "busy" : ""}">
+    <article class="mini-profile-card ${port.kind} ${driving ? "driving" : ""} ${busyHere ? "busy" : ""}" data-id="${profile.id}" draggable="true">
       <button type="button" class="mini-profile-main" data-action="${action}" data-id="${profile.id}" title="${escapeHtml(profile.running ? "显示 Chrome 窗口" : "启动 Profile")}" ${store.busy ? "disabled" : ""}>
         <span class="mini-node ${busyHere ? "loading" : port.kind === "live" ? "plane" : "ring"}" aria-hidden="true">${busyHere ? '<span class="mini-spinner"></span>' : port.kind === "live" ? MINI_NODE_PLANE : ""}</span>
         <span class="mini-profile-text">

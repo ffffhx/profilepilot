@@ -59,6 +59,8 @@ const MINI_PANEL_MIN_HEIGHT = 120;
 const MINI_WINDOW_MARGIN = 16;
 const activeOperations = new Map<string, ActiveOperation>();
 let miniWindowPanelOpen = false;
+// 面板固定：开启后点击面板外不再收成 logo（不建覆盖窗），只有点「收起」/Esc 才收。随窗口位置一起持久化。
+let miniPanelPinned = false;
 // 当前面板高度（自适应）；resizeMiniPanel 会更新它，并被 miniPanelBoundsFromDockBounds 使用。
 let miniPanelHeight = MINI_PANEL_HEIGHT;
 let miniWindowDragState: { offsetX: number; offsetY: number } | null = null;
@@ -113,6 +115,7 @@ interface MiniWindowPosition {
   x: number;
   y: number;
   dock?: boolean;
+  panelPinned?: boolean;
 }
 
 function defaultMiniWindowDockBounds(): Rectangle {
@@ -258,15 +261,50 @@ function miniOutsideClickBounds(panelBounds: Rectangle): Rectangle[] {
 }
 
 function requestMiniWindowPanelClose(): void {
+  // 面板固定时点外面不收起（此时本不该有覆盖窗，这里兜底）。
+  if (miniPanelPinned) {
+    return;
+  }
   if (miniWindowPanelOpen) {
     notifyMiniWindowPanelOpen(false);
+  }
+}
+
+function notifyMiniPanelPinned(): void {
+  const windowRef = miniWindow;
+  if (!windowRef || windowRef.isDestroyed() || windowRef.webContents.isDestroyed()) {
+    return;
+  }
+
+  windowRef.webContents.send(IPC_CHANNELS.miniPanelPinnedChanged, miniPanelPinned);
+}
+
+function setMiniPanelPinned(pinned: boolean): void {
+  if (miniPanelPinned === pinned) {
+    notifyMiniPanelPinned();
+    return;
+  }
+
+  miniPanelPinned = pinned;
+  notifyMiniPanelPinned();
+  // 固定 → 撤掉全屏覆盖窗（否则会吃掉点面板外的第一下点击）；取消固定 → 恢复覆盖窗。
+  if (miniWindowPanelOpen) {
+    if (pinned) {
+      closeMiniOutsideClickWindows();
+    } else {
+      scheduleMiniOutsideClickWindowsUpdate();
+    }
+  }
+  const windowRef = miniWindow;
+  if (windowRef && !windowRef.isDestroyed()) {
+    void saveMiniWindowBounds(miniDockBoundsFromWindowBounds(windowRef.getBounds()));
   }
 }
 
 function showMiniOutsideClickWindows(): void {
   const windowRef = miniWindow;
   closeMiniOutsideClickWindows();
-  if (!windowRef || windowRef.isDestroyed() || !windowRef.isVisible() || !miniWindowPanelOpen) {
+  if (!windowRef || windowRef.isDestroyed() || !windowRef.isVisible() || !miniWindowPanelOpen || miniPanelPinned) {
     return;
   }
 
@@ -375,7 +413,7 @@ async function readMiniWindowPosition(): Promise<MiniWindowPosition | null> {
     const raw = await fs.readFile(miniWindowStatePath(), "utf8");
     const parsed = JSON.parse(raw) as Partial<MiniWindowPosition>;
     if (Number.isFinite(parsed.x) && Number.isFinite(parsed.y)) {
-      return { x: Number(parsed.x), y: Number(parsed.y), dock: parsed.dock === true };
+      return { x: Number(parsed.x), y: Number(parsed.y), dock: parsed.dock === true, panelPinned: parsed.panelPinned === true };
     }
   } catch {
     return null;
@@ -389,7 +427,7 @@ async function saveMiniWindowBounds(bounds: Rectangle): Promise<void> {
   await fs.mkdir(path.dirname(statePath), { recursive: true });
   await fs.writeFile(
     statePath,
-    `${JSON.stringify({ x: Math.round(bounds.x), y: Math.round(bounds.y), dock: true }, null, 2)}\n`,
+    `${JSON.stringify({ x: Math.round(bounds.x), y: Math.round(bounds.y), dock: true, panelPinned: miniPanelPinned }, null, 2)}\n`,
     "utf8"
   );
 }
@@ -407,7 +445,9 @@ async function createMiniWindow(): Promise<BrowserWindow> {
     return miniWindow;
   }
 
-  const bounds = normalizeMiniWindowDockBounds(await readMiniWindowPosition());
+  const savedPosition = await readMiniWindowPosition();
+  miniPanelPinned = savedPosition?.panelPinned === true;
+  const bounds = normalizeMiniWindowDockBounds(savedPosition);
   miniWindow = new BrowserWindow({
     ...bounds,
     // NSPanel：普通 Dock 应用的常规窗口无论层级多高都盖不住别人的原生全屏 Space，
@@ -446,6 +486,7 @@ async function createMiniWindow(): Promise<BrowserWindow> {
   miniWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
   miniWindow.webContents.on("did-finish-load", () => {
     notifyMiniWindowPanelOpen(miniWindowPanelOpen);
+    notifyMiniPanelPinned();
   });
   // 注意：不再用 blur 自动收起面板。失焦的来源太多（点“显示”把 Chrome 拉前、切窗口、
   // 展开时重排窗口等），会导致面板被意外收起。收起只由：① 点“收起”；② 点面板外面（覆盖窗）触发。
@@ -1094,6 +1135,15 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.setMiniProfilePinned, async (_event, id: string, pinned: boolean): Promise<AppState> => {
     await profileManager.setMiniProfilePinned(id, Boolean(pinned));
     return profileManager.getState();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.setMiniProfileOrder, async (_event, ids: string[]): Promise<AppState> => {
+    await profileManager.setMiniProfileOrder(Array.isArray(ids) ? ids : []);
+    return profileManager.getState();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.setMiniPanelPinned, async (_event, pinned: boolean): Promise<void> => {
+    setMiniPanelPinned(Boolean(pinned));
   });
 
   ipcMain.handle(IPC_CHANNELS.showMiniWindow, async (): Promise<void> => {

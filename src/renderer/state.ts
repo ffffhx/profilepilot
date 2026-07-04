@@ -20,6 +20,7 @@ export interface RendererState {
   viewMode: "main" | "mini";
   miniExpanded: boolean;
   miniPanelOpen: boolean;
+  miniPanelPinned: boolean;
   miniScrollTop: number;
   state: AppState | null;
   selectedId: string | null;
@@ -76,6 +77,7 @@ export const store: RendererState = {
   viewMode: new URLSearchParams(window.location.search).get("mode") === "mini" ? "mini" : "main",
   miniExpanded: false,
   miniPanelOpen: false,
+  miniPanelPinned: false,
   miniScrollTop: 0,
   state: null,
   selectedId: null,

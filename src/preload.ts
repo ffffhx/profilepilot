@@ -47,6 +47,18 @@ const profileManagerApi: ProfileManagerApi = {
     ipcRenderer.invoke(IPC_CHANNELS.clearAgentBrowserConfig, id),
   setMiniProfilePinned: (id: string, pinned: boolean): Promise<AppState> =>
     ipcRenderer.invoke(IPC_CHANNELS.setMiniProfilePinned, id, pinned),
+  setMiniProfileOrder: (ids: string[]): Promise<AppState> =>
+    ipcRenderer.invoke(IPC_CHANNELS.setMiniProfileOrder, ids),
+  setMiniPanelPinned: (pinned: boolean): Promise<void> =>
+    ipcRenderer.invoke(IPC_CHANNELS.setMiniPanelPinned, pinned),
+  onMiniPanelPinnedChanged: (listener: (pinned: boolean) => void): (() => void) => {
+    const handler = (_event: IpcRendererEvent, pinned: boolean): void => {
+      listener(Boolean(pinned));
+    };
+
+    ipcRenderer.on(IPC_CHANNELS.miniPanelPinnedChanged, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.miniPanelPinnedChanged, handler);
+  },
   showMiniWindow: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.showMiniWindow),
   showMainWindow: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.showMainWindow),
   setMiniWindowPanelOpen: (open: boolean): Promise<void> =>

@@ -1208,6 +1208,11 @@ function registerIpcHandlers(): void {
     return profileManager.getState();
   });
 
+  ipcMain.handle(IPC_CHANNELS.disconnectCdpClient, async (_event, profileId: string, pid: number): Promise<AppState> => {
+    await profileManager.disconnectCdpClient(profileId, pid);
+    return profileManager.getState();
+  });
+
   ipcMain.handle(IPC_CHANNELS.openProfileFolder, async (_event, id: string): Promise<AppState> => {
     await profileManager.openProfileFolder(id);
     return profileManager.getState();

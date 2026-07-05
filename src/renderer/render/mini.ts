@@ -2,7 +2,15 @@ import { profileApi } from "../api";
 import { isBusyAction, renderToastBody } from "../busy";
 import { appRoot, store } from "../state";
 import { PublicProfile } from "../types";
-import { cdpPortLabel, escapeHtml, liveAddrLabel, prettyCdpClientLabel, renderButtonLabel } from "../util";
+import {
+  cdpPortLabel,
+  cdpSessionText,
+  escapeHtml,
+  formatRelativeTime,
+  liveAddrLabel,
+  prettyCdpClientLabel,
+  renderButtonLabel
+} from "../util";
 
 const MINI_PROFILE_LIMIT = 3;
 
@@ -22,6 +30,9 @@ function cdpClientTooltip(clients: PublicProfile["cdpClients"]): string {
   }
   if (clients.length > 1) {
     lines.push(`共 ${clients.length} 个连接`);
+  }
+  if (primary.lastActive) {
+    lines.push(`最近活动：${formatRelativeTime(primary.lastActive)}`);
   }
   // 只有工具名一行时没多少信息，但仍给一个 tooltip 兜底（起码点明是谁）。
   return lines.join("\n");
@@ -250,17 +261,34 @@ function renderMiniProfileCard(profile: PublicProfile): string {
   const subLine = !busyHere && driving ? [cdpPort, liveHost].filter(Boolean).join(" ▸ ") : "";
   // 读数悬停 tooltip：这条连接背后是哪个工具的哪个项目/会话（解析得到才显示）。
   const readoutTip = !busyHere && driving ? cdpClientTooltip(profile.cdpClients) : "";
+  // 卡片正文可见的会话身份行：哪个项目 / 哪个会话在驱动（解析到才显示）。
+  // 文案会截断，但“最近活动”固定在右侧不被吃掉——它是判断“活会话 vs 残留连接”的关键信号。
+  const primaryClient = driving ? profile.cdpClients[0] : undefined;
+  const sessionText = !busyHere && primaryClient ? cdpSessionText(primaryClient) : "";
+  const sessionAge = !busyHere && primaryClient ? formatRelativeTime(primaryClient.lastActive) : "";
 
   return `
     <article class="mini-profile-card ${port.kind} ${driving ? "driving" : ""} ${busyHere ? "busy" : ""}" data-id="${profile.id}" draggable="true">
       <button type="button" class="mini-profile-main" data-action="${action}" data-id="${profile.id}" title="${escapeHtml(profile.running ? "显示 Chrome 窗口" : "启动 Profile")}" ${store.busy ? "disabled" : ""}>
         <span class="mini-node ${busyHere ? "loading" : port.kind === "live" ? "plane" : "ring"}" aria-hidden="true">${busyHere ? '<span class="mini-spinner"></span>' : port.kind === "live" ? MINI_NODE_PLANE : ""}</span>
         <span class="mini-profile-text">
-          <span class="mini-profile-name">${escapeHtml(profile.name)}</span>
-          ${subLine ? `<span class="mini-profile-sub">${escapeHtml(subLine)}</span>` : ""}
+          <span class="mini-profile-head">
+            <span class="mini-profile-name">${escapeHtml(profile.name)}</span>
+            ${subLine ? `<span class="mini-profile-sub">${escapeHtml(subLine)}</span>` : ""}
+          </span>
+          ${
+            sessionText || sessionAge
+              ? `<span class="mini-profile-session"${readoutTip ? ` title="${escapeHtml(readoutTip)}"` : ""}>${sessionText ? `<span class="mini-profile-session-main">${escapeHtml(sessionText)}</span>` : ""}${sessionAge ? `<span class="mini-profile-session-age">${escapeHtml(sessionAge)}</span>` : ""}</span>`
+              : ""
+          }
         </span>
         <span class="mini-readout"${readoutTip ? ` title="${escapeHtml(readoutTip)}"` : ""}>${escapeHtml(readout)}</span>
       </button>
+      ${
+        !busyHere && primaryClient
+          ? `<button type="button" class="mini-disconnect" data-action="disconnect-client" data-id="${profile.id}" data-pid="${primaryClient.pid}" ${store.busy ? "disabled" : ""} title="结束这条驱动连接，不影响 Chrome" aria-label="结束驱动连接">✕</button>`
+          : ""
+      }
     </article>
   `;
 }

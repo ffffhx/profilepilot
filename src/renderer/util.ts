@@ -1,5 +1,5 @@
 import { dateFormatter, store } from "./state";
-import { BusyProgressStep, CdpPortSuggestion, ProfileExtensionInfo, PublicProfile } from "./types";
+import { BusyProgressStep, CdpClientInfo, CdpPortSuggestion, ProfileExtensionInfo, PublicProfile } from "./types";
 
 export function renderBusyBanner(): string {
   if (!store.busyState) {
@@ -247,6 +247,37 @@ export function formatDate(value: string | null): string {
   }
 
   return dateFormatter.format(date);
+}
+
+// 会话档案最后活动时间（ISO）→ 相对时间。用来区分“活会话”和“残留连接”：
+// 一个连着 CDP 但会话档案很久没动的，多半是残留进程，而非有人正在驱动。
+// 刚刚 / n分钟前 / n小时前 / n天前；解析不出时返回空串。
+export function formatRelativeTime(value?: string | null): string {
+  if (!value) {
+    return "";
+  }
+  const then = new Date(value).getTime();
+  if (Number.isNaN(then)) {
+    return "";
+  }
+  const min = Math.floor((Date.now() - then) / 60000);
+  if (min < 1) {
+    return "刚刚";
+  }
+  if (min < 60) {
+    return `${min}分钟前`;
+  }
+  const hr = Math.floor(min / 60);
+  if (hr < 24) {
+    return `${hr}小时前`;
+  }
+  return `${Math.floor(hr / 24)}天前`;
+}
+
+// CDP 客户端 → 卡片正文可见的会话身份文案「项目 · 标题」。工具名在读数/药丸里已给，
+// 这里只补项目和会话标题（最近活动时间另外拼，避免被截断吃掉）；都解析不出时返回空串。
+export function cdpSessionText(client: CdpClientInfo): string {
+  return [client.project, client.title].filter(Boolean).join(" · ");
 }
 
 // 把 URL 收成一个简短的“航点”：优先域名；chrome:// 等特殊协议退回主机名/路径；解析失败截断原串。

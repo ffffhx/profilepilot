@@ -58,6 +58,8 @@ export interface CdpClientInfo {
   agent?: string;
   project?: string;
   title?: string;
+  // 会话档案最后活动时间（ISO）＝该会话最近一次动静，用来区分活会话与残留连接。
+  lastActive?: string;
 }
 
 // 实时观测：一个正在以 CDP 运行的 Profile 当前“飞在哪”。
@@ -506,6 +508,8 @@ export interface ProfileManagerApi {
   closeProfile(id: string): Promise<AppState>;
   focusExternalInstance(userDataDir: string): Promise<AppState>;
   closeExternalInstance(userDataDir: string): Promise<AppState>;
+  // 结束某条 CDP 驱动连接：对该客户端进程发信号使其断开，不动 Chrome。
+  disconnectCdpClient(profileId: string, pid: number): Promise<AppState>;
   openProfileFolder(id: string): Promise<AppState>;
   openProfileExtensionsPage(id: string): Promise<AppState>;
   openPath(path: string): Promise<boolean>;

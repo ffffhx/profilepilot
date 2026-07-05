@@ -588,8 +588,93 @@ body.mini-collapsing .mini-shell {
   flex: 1;
   min-width: 0;
   display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+}
+
+/* 名字那一行：名字 + 端口▸域名小字并排；会话行竖排在它下面 */
+.mini-profile-head {
+  display: flex;
   align-items: baseline;
   gap: 8px;
+  min-width: 0;
+}
+
+/* 会话身份行：哪个项目 / 哪个会话在驱动，直接可见（工具名在右侧读数）。
+   ⇁ 标记 + 项目·标题（截断）+ 最近活动（固定不截）三段横排。 */
+.mini-profile-session {
+  display: flex;
+  align-items: baseline;
+  min-width: 0;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.mini-profile-session::before {
+  content: "⇁";
+  flex: none;
+  margin-right: 5px;
+  color: var(--accent-bright);
+  opacity: 0.7;
+}
+
+/* 项目·标题：占满剩余宽度，超长截断 */
+.mini-profile-session-main {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 最近活动：固定在末尾不参与截断——判断“活会话 vs 残留连接”的关键信号 */
+.mini-profile-session-age {
+  flex: none;
+  margin-left: 6px;
+  color: var(--accent-bright);
+  opacity: 0.8;
+  white-space: nowrap;
+}
+
+/* 悬浮窗卡片上的「结束驱动连接」✕：默认藏起，hover 卡片时右侧浮现 */
+.mini-disconnect {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: var(--danger-soft);
+  color: var(--danger-bright);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease, background 0.12s ease;
+}
+
+.mini-profile-card:hover .mini-disconnect {
+  opacity: 1;
+}
+
+.mini-disconnect:hover:not(:disabled) {
+  background: var(--danger-line);
+}
+
+.mini-disconnect:disabled {
+  opacity: 0;
+  cursor: default;
 }
 
 .mini-profile-name {
@@ -2703,6 +2788,31 @@ body:not(.booted) .layout {
   color: var(--accent-bright);
 }
 
+/* 「驱动中」药丸末尾的结束连接 ✕ */
+.conn-disconnect {
+  flex: 0 0 auto;
+  margin-left: 2px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+
+.conn-disconnect:hover:not(:disabled) {
+  background: var(--danger-soft);
+  color: var(--danger-bright);
+}
+
+.conn-disconnect:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 .conn-pill.attached .conn-dot {
   background: var(--accent-bright);
   box-shadow: 0 0 9px rgba(56, 225, 160, 0.9);
@@ -3204,6 +3314,31 @@ body:not(.booted) .layout {
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--accent-dark);
+}
+
+/* Agent 连接下的会话身份行：项目·标题 + 最近活动，紧跟“驱动中 · 工具”下方 */
+.detail-session {
+  display: block;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.detail-session-age {
+  margin-left: 8px;
+  color: var(--accent-bright);
+  font-weight: 600;
+}
+
+/* Agent 连接下的「结束连接」按钮行（每条驱动连接一个） */
+.detail-session-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
 }
 
 .detail-actions {

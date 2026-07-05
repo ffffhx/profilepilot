@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { access } from "node:fs/promises";
+import { access, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import readline from "node:readline";
@@ -13,6 +13,10 @@ export interface CdpClientContext {
   agent?: string;
   project?: string;
   title?: string;
+  // 会话档案路径（内部用，不出 UI）：每轮 stat 它的 mtime 当“最后活动时间”。
+  sessionFile?: string;
+  // 会话档案最后修改时间（ISO）＝会话最近一次活动，用于区分活会话与残留连接。
+  lastActive?: string;
 }
 
 // 同一 pid = 同一会话，解析结果不变：按 pid 缓存，轮询时零成本复用；进程消失即清理。
@@ -45,7 +49,29 @@ export async function resolveClientContexts(
       }
     })
   );
-  return contextByPid;
+  // 静态信息（工具/项目/标题）按 pid 缓存即可；但“最后活动时间”会随会话进行不断变，
+  // 必须每轮重新 stat 会话档案，不能被 pid 缓存冻住——否则一个活会话会一直显示成很久没动。
+  const result = new Map<number, CdpClientContext>();
+  await Promise.all(
+    clients.map(async (client) => {
+      const base = contextByPid.get(client.pid);
+      if (!base) {
+        return;
+      }
+      const lastActive = base.sessionFile ? await fileMtimeIso(base.sessionFile) : undefined;
+      result.set(client.pid, lastActive ? { ...base, lastActive } : base);
+    })
+  );
+  return result;
+}
+
+async function fileMtimeIso(file: string): Promise<string | undefined> {
+  try {
+    const stats = await stat(file);
+    return new Date(stats.mtimeMs).toISOString();
+  } catch {
+    return undefined;
+  }
 }
 
 async function resolveOne(pid: number, comm: string): Promise<CdpClientContext> {
@@ -54,12 +80,13 @@ async function resolveOne(pid: number, comm: string): Promise<CdpClientContext> 
   // Codex：连 CDP 的是它自带 cua_node 内核，命令行直接带 --working-dir，据此反查活跃 rollout 拿标题。
   const workingDir = command ? codexWorkingDir(command) : null;
   if (workingDir) {
-    const info = await codexSessionInfo(workingDir);
+    const found = await codexSessionInfo(workingDir);
     return {
       label: "Codex",
       agent: "Codex",
       project: path.basename(workingDir) || workingDir,
-      title: info?.title
+      title: found?.info.title,
+      sessionFile: found?.file
     };
   }
 
@@ -73,12 +100,27 @@ async function resolveOne(pid: number, comm: string): Promise<CdpClientContext> 
       label: GENERIC_RUNTIME_COMMS.has(comm) ? "Claude Code" : comm,
       agent: "Claude Code",
       project: info?.project,
-      title: info?.title
+      title: info?.title,
+      // 档案不存在（info 为空）就别挂路径，免得 stat 白跑；存在才拿去算最后活动时间。
+      sessionFile: info ? sessionFile : undefined
     };
   }
 
-  // 认不出会话：至少把通用运行时名升级成真身（Codex.app / Playwright…），无会话信息。
-  return { label: command ? driverLabelFromCommand(command, comm) : comm };
+  // 认不出具体会话（如独立启动、非某个 Claude 会话派生的 agent-browser）：至少把运行时名
+  // 升级成工具真名，并用它的工作目录名当“项目”，让用户知道是哪个工具、在哪个目录跑。
+  // 没有会话档案可追，故不给 sessionFile/lastActive——不伪造活跃度。
+  return {
+    label: command ? driverLabelFromCommand(command, comm) : comm,
+    project: cwd ? projectFromCwd(cwd) : undefined
+  };
+}
+
+// 拿工作目录名当“项目”兜底；根目录/家目录太泛，不当项目。
+function projectFromCwd(cwd: string): string | undefined {
+  if (cwd === "/" || cwd === homedir()) {
+    return undefined;
+  }
+  return path.basename(cwd) || undefined;
 }
 
 async function psCommand(pid: number): Promise<string | null> {
@@ -124,7 +166,7 @@ function claudeSessionFile(cwd: string): string | null {
 
 // codex app-server 是共享进程，会同时开着多个会话的 rollout；用 lsof 只挑“当前打开着”的，
 // 再按 session_meta.cwd 匹配 working-dir、取文件名时间戳最新的一个（=正在用的那个会话）。
-async function codexSessionInfo(workingDir: string): Promise<SessionInfo | null> {
+async function codexSessionInfo(workingDir: string): Promise<{ file: string; info: SessionInfo } | null> {
   let rollouts: string[];
   try {
     const { stdout } = await execFileAsync("lsof", ["-c", "codex", "-Fn"], {
@@ -149,7 +191,7 @@ async function codexSessionInfo(workingDir: string): Promise<SessionInfo | null>
   for (const file of rollouts) {
     const info = await readSessionInfo(file, "codex");
     if (info?.cwd === workingDir) {
-      return info;
+      return { file, info };
     }
   }
   return null;

@@ -33,6 +33,7 @@ export const IPC_CHANNELS = {
   closeProfile: "profiles:close",
   focusExternalInstance: "profiles:external:focus",
   closeExternalInstance: "profiles:external:close",
+  disconnectCdpClient: "profiles:cdp:disconnect-client",
   openProfileFolder: "profiles:open-folder",
   openProfileExtensionsPage: "profiles:open-extensions-page",
   openPath: "profiles:open-path",

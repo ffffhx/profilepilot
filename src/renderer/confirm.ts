@@ -4,7 +4,7 @@ import { render } from "./render/render-root";
 import { invalidateExtensionMigrationDiff, loadState } from "./state-actions";
 import { store } from "./state";
 import { ConfirmBodyLine, ConfirmIntent, ConfirmModalView, ModalState, PublicProfile } from "./types";
-import { closeConfirmCopy, deleteConfirmCopy, escapeHtml, formatDate, formatErrorMessage, profileStatusLabel, sourceDetail } from "./util";
+import { cdpSessionText, closeConfirmCopy, deleteConfirmCopy, escapeHtml, formatDate, formatErrorMessage, formatRelativeTime, prettyCdpClientLabel, profileStatusLabel, sourceDetail } from "./util";
 
 export function renderConfirmModal(confirm: Extract<ModalState, { kind: "confirm" }>): string {
   const view = confirmModalView(confirm.intent);
@@ -247,6 +247,36 @@ export function confirmModalView(intent: ConfirmIntent): ConfirmModalView | null
     };
   }
 
+  if (intent.kind === "disconnect-client") {
+    const profile = store.state.profiles.find((item) => item.id === intent.profileId);
+    const client = profile?.cdpClients.find((item) => item.pid === intent.pid);
+    if (!profile || !client) {
+      return null;
+    }
+    const tool = client.agent || prettyCdpClientLabel(client.label);
+    const session = cdpSessionText(client);
+    const age = formatRelativeTime(client.lastActive);
+    return {
+      kicker: "结束驱动连接",
+      title: `结束 ${tool} 的驱动连接`,
+      body: [
+        `会向这个客户端进程（PID ${client.pid}）发送结束信号，断开它对 ${profile.name} 的 CDP 连接。Chrome 本身不受影响，不会关闭。`,
+        {
+          text: "如果这个会话其实还在用，结束后它需要重新连接才能继续；请确认它确实是空挂的再操作。",
+          tone: "danger"
+        }
+      ],
+      confirmLabel: "结束连接",
+      tone: "warn",
+      summary: [
+        { label: "工具", value: tool },
+        { label: "会话", value: session || "—" },
+        { label: "最近活动", value: age || "未知" },
+        { label: "PID", value: String(client.pid) }
+      ]
+    };
+  }
+
   if (intent.kind === "recycle-clones") {
     const candidates = store.state.profiles.filter(
       (profile) => profile.source === "isolated" && profile.clonedFromProfileId && !profile.running
@@ -393,7 +423,33 @@ export function executeConfirmIntent(intent: ConfirmIntent): void {
     return;
   }
 
+  if (intent.kind === "disconnect-client") {
+    executeDisconnectClientConfirm(intent);
+    return;
+  }
+
   executeExtensionMigrationConfirm(intent);
+}
+
+export function executeDisconnectClientConfirm(intent: Extract<ConfirmIntent, { kind: "disconnect-client" }>): void {
+  const profile = store.state?.profiles.find((item) => item.id === intent.profileId);
+  const client = profile?.cdpClients.find((item) => item.pid === intent.pid);
+  store.modal = null;
+
+  if (!profile || !client) {
+    render();
+    setToast("这个驱动连接已经不在了", "error");
+    return;
+  }
+
+  const tool = client.agent || prettyCdpClientLabel(client.label);
+  void withBusy(
+    async () => {
+      store.state = await profileApi().disconnectCdpClient(intent.profileId, intent.pid);
+    },
+    `已结束 ${emphasizeName(tool)} 的驱动连接`,
+    { key: "disconnect-client", message: `正在结束 ${tool} 的连接…`, profileId: intent.profileId }
+  );
 }
 
 export function executeCloneProfilesConfirm(intent: Extract<ConfirmIntent, { kind: "clone-profiles" }>): void {

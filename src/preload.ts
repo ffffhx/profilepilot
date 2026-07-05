@@ -83,6 +83,8 @@ const profileManagerApi: ProfileManagerApi = {
     ipcRenderer.invoke(IPC_CHANNELS.focusExternalInstance, userDataDir),
   closeExternalInstance: (userDataDir: string): Promise<AppState> =>
     ipcRenderer.invoke(IPC_CHANNELS.closeExternalInstance, userDataDir),
+  disconnectCdpClient: (profileId: string, pid: number): Promise<AppState> =>
+    ipcRenderer.invoke(IPC_CHANNELS.disconnectCdpClient, profileId, pid),
   openProfileFolder: (id: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.openProfileFolder, id),
   openProfileExtensionsPage: (id: string): Promise<AppState> =>
     ipcRenderer.invoke(IPC_CHANNELS.openProfileExtensionsPage, id),

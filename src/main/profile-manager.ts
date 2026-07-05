@@ -402,6 +402,43 @@ export class ProfileManager {
     await this.settleAfterClose();
   }
 
+  // 结束某条 CDP 驱动连接：只对持有连接的那个客户端进程（agent-browser / Codex 内核等）
+  // 发信号让它退出，从而断开对该 Profile CDP 端口的连接；Chrome 本身不受影响、不会关闭。
+  async disconnectCdpClient(profileId: string, pid: number): Promise<void> {
+    const profile = await this.getPublicProfile(profileId);
+    // 只允许结束“当前确实连着这个 Profile CDP 端口的外部驱动”——cdpClients 已排除
+    // Chrome 自身与 ProfilePilot 自连接，据此校验，避免被传入任意 pid 误杀无关进程。
+    if (!profile.cdpClients.some((client) => client.pid === pid)) {
+      throw new ProfileManagerError("这个驱动连接已经不在了。", "CDP_CLIENT_NOT_CONNECTED");
+    }
+
+    this.signalPids([pid], "SIGTERM");
+    if (await this.waitUntilPidGone(pid, 2500)) {
+      return;
+    }
+
+    // 优雅退出超时，强制结束。
+    this.signalPids([pid], "SIGKILL");
+    if (!(await this.waitUntilPidGone(pid, 1500))) {
+      throw new ProfileManagerError("无法结束这个驱动连接对应的进程，请手动处理。", "CDP_CLIENT_DISCONNECT_FAILED");
+    }
+  }
+
+  private async waitUntilPidGone(pid: number, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        process.kill(pid, 0);
+      } catch (error) {
+        if (isProcessGoneError(error)) {
+          return true;
+        }
+      }
+      await sleep(150);
+    }
+    return false;
+  }
+
   // 发起一次优雅关闭请求。macOS 上的系统 Chrome 优先用 AppleScript `quit`
   //（等同 ⌘Q 的干净退出），失败再退回 SIGTERM；其它情况直接发 SIGTERM。
   private async requestGracefulClose(profile: PublicProfile): Promise<void> {

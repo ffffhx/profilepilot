@@ -995,6 +995,16 @@ appRoot.addEventListener("click", (event) => {
     return;
   }
 
+  if (action === "disconnect-client") {
+    const pid = Number(actionTarget.dataset.pid);
+    if (!id || !Number.isInteger(pid)) {
+      return;
+    }
+    store.modal = { kind: "confirm", intent: { kind: "disconnect-client", profileId: id, pid } };
+    render();
+    return;
+  }
+
   if (action === "focus-profile" && id) {
     const profile = store.state.profiles.find((item) => item.id === id);
     if (!profile) {

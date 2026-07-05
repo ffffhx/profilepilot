@@ -2,7 +2,7 @@ import { isBusyAction } from "../busy";
 import { store } from "../state";
 import { ExternalChromeInstance, PublicProfile } from "../types";
 import { renderLiveViewSection } from "./live-view";
-import { NATIVE_CDP_UNSUPPORTED_NOTE, cdpLaunchButtonTitle, cdpPortLabel, deleteButtonTitle, escapeHtml, focusButtonTitle, formatDate, launchButtonTitle, listeningPortsNote, liveAddrLabel, profileStatusLabel, renderButtonLabel, sourceDetail } from "../util";
+import { NATIVE_CDP_UNSUPPORTED_NOTE, cdpLaunchButtonTitle, cdpPortLabel, cdpSessionText, deleteButtonTitle, escapeHtml, focusButtonTitle, formatDate, formatRelativeTime, launchButtonTitle, listeningPortsNote, liveAddrLabel, prettyCdpClientLabel, profileStatusLabel, renderButtonLabel, sourceDetail } from "../util";
 
 interface ProfileRootGroup {
   key: string;
@@ -220,7 +220,13 @@ function renderConnPill(profile: PublicProfile): string {
   if (profile.cdpClients.length) {
     const clientText = profile.cdpClients.map((client) => `${client.label}(${client.pid})`).join("、");
     const extra = profile.cdpClients.length > 1 ? ` ×${profile.cdpClients.length}` : "";
-    return `<span class="conn-pill attached action-tooltip" data-tooltip="${escapeHtml(`驱动中：${clientText}`)}"><span class="conn-dot" aria-hidden="true"></span><span class="conn-label">驱动中${extra}</span></span>`;
+    // tooltip 补上首个连接的会话身份与最近活动，一眼看出是哪个 session、是否还活着。
+    const primary = profile.cdpClients[0];
+    const sessionDesc = [cdpSessionText(primary), formatRelativeTime(primary.lastActive)].filter(Boolean).join(" · ");
+    const tip = sessionDesc ? `驱动中：${clientText} · ${sessionDesc}` : `驱动中：${clientText}`;
+    // 药丸末尾挂个 ✕：结束首个驱动连接（多条连接时其余去详情页逐条断）。
+    const disconnect = `<button type="button" class="conn-disconnect" data-action="disconnect-client" data-id="${escapeHtml(profile.id)}" data-pid="${primary.pid}" ${store.busy ? "disabled" : ""} title="结束这条驱动连接，不影响 Chrome" aria-label="结束驱动连接">✕</button>`;
+    return `<span class="conn-pill attached action-tooltip" data-tooltip="${escapeHtml(tip)}"><span class="conn-dot" aria-hidden="true"></span><span class="conn-label">驱动中${extra}</span>${disconnect}</span>`;
   }
   if (profile.cdpUrl) {
     return `<span class="conn-pill idle action-tooltip" data-tooltip="CDP 已开启，当前没有工具连接"><span class="conn-dot" aria-hidden="true"></span><span class="conn-label">空闲</span></span>`;
@@ -519,11 +525,35 @@ export function renderCdpClientsDetail(profile: PublicProfile): string {
     ? `驱动中 · ${profile.cdpClients.map((client) => `${client.label}(${client.pid})`).join("、")}`
     : "当前没有工具连接";
 
+  // 首个连接的会话身份行：哪个项目 / 哪个会话在驱动 + 最近活动时间（区分活会话与残留连接）。
+  const primary = attached ? profile.cdpClients[0] : undefined;
+  const sessionText = primary ? cdpSessionText(primary) : "";
+  const sessionAge = primary ? formatRelativeTime(primary.lastActive) : "";
+  const sessionRow =
+    sessionText || sessionAge
+      ? `<small class="detail-session">⇁ ${escapeHtml(sessionText)}${
+          sessionAge ? `<span class="detail-session-age">${escapeHtml(sessionAge)}</span>` : ""
+        }</small>`
+      : "";
+
+  // 每条连接给一个「结束连接」按钮：对该客户端进程发信号断开，不动 Chrome。
+  const disconnecting = isBusyAction("disconnect-client", { profileId: profile.id });
+  const disconnectRow = attached
+    ? `<div class="detail-session-actions">${profile.cdpClients
+        .map((client) => {
+          const tool = client.agent || prettyCdpClientLabel(client.label);
+          return `<button type="button" class="action-button warn ${disconnecting ? "loading" : ""}" data-action="disconnect-client" data-id="${escapeHtml(profile.id)}" data-pid="${client.pid}" ${store.busy ? "disabled" : ""} title="结束这条驱动连接，不影响 Chrome">结束 ${escapeHtml(tool)} 连接</button>`;
+        })
+        .join("")}</div>`
+    : "";
+
   return `
     <div class="detail-row${attached ? " detail-row-attached" : ""}">
       <span>Agent 连接</span>
       <strong>${escapeHtml(value)}</strong>
-      <small class="detail-note">检测连到本机 CDP 端口的持久连接；有工具保持长连接（如 agent-browser）时会标为“驱动中”。</small>
+      ${sessionRow}
+      ${disconnectRow}
+      <small class="detail-note">检测连到本机 CDP 端口的持久连接；有工具保持长连接（如 agent-browser）时会标为“驱动中”。会话行显示是哪个项目/会话在驱动，以及它最近一次活动时间——很久没动的多半是残留连接，可用「结束连接」断开它（不影响 Chrome）。</small>
     </div>
   `;
 }

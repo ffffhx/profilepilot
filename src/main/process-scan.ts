@@ -258,6 +258,7 @@ async function applyClientContexts(byPort: Map<number, CdpClientInfo[]>): Promis
     client.agent = context.agent;
     client.project = context.project;
     client.title = context.title;
+    client.lastActive = context.lastActive;
   }
 }
 

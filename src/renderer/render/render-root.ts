@@ -9,8 +9,13 @@ import { renderDetails, renderEmpty, renderExternalDetails, renderProfilesPanel 
 import { appRoot, store } from "../state";
 import { escapeHtml, renderBusyBanner, renderButtonLabel } from "../util";
 
+// 上一次写入的主视图 HTML。定时轮询（3s）本会每次整段 innerHTML 重建，把用户正 hover
+// 的节点换掉，导致 tooltip / :hover 状态一闪一闪。内容没变时据此跳过重建。
+let lastMainHtml = "";
+
 export function render(): void {
   if (store.viewMode === "mini") {
+    lastMainHtml = "";
     renderMini();
     return;
   }
@@ -18,6 +23,7 @@ export function render(): void {
   document.body.classList.remove("mini-mode", "mini-panel-open");
 
   if (!store.state) {
+    lastMainHtml = "";
     appRoot.innerHTML = '<div class="app-loading p-8 text-muted font-mono text-[13px] tracking-[0.08em] uppercase">Loading...</div>';
     return;
   }
@@ -34,8 +40,7 @@ export function render(): void {
   const refreshing = isBusyAction("refresh");
   const busyHasEmbeddedProgress = store.busyState?.key === "account-sync" || store.busyState?.key === "migrate-extensions";
 
-  appRoot.className = "";
-  appRoot.innerHTML = `
+  const html = `
     <div class="shell w-[min(1760px,calc(100vw-clamp(24px,3vw,56px)))] mx-auto my-0 pt-[28px] px-0 pb-[40px]">
       <header class="app-header flex items-start justify-between gap-5 pt-2 px-0 pb-[22px] border-solid border-b border-line">
         <div class="brand-lockup flex items-center gap-4 min-w-0">
@@ -103,4 +108,12 @@ export function render(): void {
     ${store.modal?.kind === "confirm" ? renderConfirmModal(store.modal) : ""}
     ${store.toast ? `<div class="toast fixed right-[18px] bottom-[18px] z-20 max-w-[min(420px,calc(100vw-36px))] border-solid border border-accent-line rounded-lg bg-[#0a1411] text-[#dcfff1] px-[14px] py-3 [box-shadow:0_18px_50px_rgba(2,6,9,0.7),var(--glow-accent)] ${store.toastKind === "error" ? "error" : ""}" role="status">${renderToastBody(store.toast)}</div>` : ""}
   `;
+
+  // 内容没变就别重刷 DOM：避免轮询把正 hover 的节点换掉，造成 tooltip / :hover 闪烁。
+  if (lastMainHtml === html) {
+    return;
+  }
+  lastMainHtml = html;
+  appRoot.className = "";
+  appRoot.innerHTML = html;
 }

@@ -69,6 +69,10 @@ const MINI_LOGO_GLYPH = `
 // 航点节点：运行中朝右的小机头
 const MINI_NODE_PLANE = `<svg viewBox="0 0 13 13" aria-hidden="true"><path d="M1 1 L12 6.5 L1 12 L4 6.5 Z" fill="currentColor" /></svg>`;
 
+// 上一次渲染的展开面板 HTML。定时轮询（2.5s）本会每次整段 innerHTML 重建，把用户正
+// hover 的节点换掉，导致 tooltip / 呼吸灯一闪一闪。内容没变时据此跳过重建。
+let lastMiniPanelHtml = "";
+
 export function renderMini(): void {
   document.documentElement.classList.add("mini-rendered");
   document.body.classList.add("mini-mode");
@@ -78,6 +82,7 @@ export function renderMini(): void {
   if (!store.miniPanelOpen) {
     // dock 没有动态内容；已经渲染过就不重建，否则每次 render（含 2.5s 轮询）都会
     // 重建 .mini-logo-dock 元素，导致呼吸灯 CSS 动画被重置、看起来一卡一顿。
+    lastMiniPanelHtml = "";
     if (!appRoot.querySelector(".mini-logo-dock")) {
       appRoot.className = "mini-root mini-root-collapsed";
       appRoot.innerHTML = `
@@ -92,6 +97,7 @@ export function renderMini(): void {
   }
 
   if (!store.state) {
+    lastMiniPanelHtml = "";
     appRoot.className = "mini-root mini-root-panel";
     appRoot.innerHTML = '<div class="mini-shell"><div class="mini-loading">Loading...</div></div>';
     return;
@@ -103,8 +109,7 @@ export function renderMini(): void {
   const canExpand = totalProfiles > MINI_PROFILE_LIMIT;
   const visibleCount = Math.min(profiles.length, totalProfiles);
   const refreshing = isBusyAction("refresh");
-  appRoot.className = "mini-root mini-root-panel";
-  appRoot.innerHTML = `
+  const html = `
     <div class="mini-shell">
       <header class="mini-titlebar">
         <div class="mini-brand">
@@ -146,6 +151,14 @@ export function renderMini(): void {
       ${store.toast ? `<div class="mini-toast ${store.toastKind === "error" ? "error" : ""}" role="status">${renderToastBody(store.toast)}</div>` : ""}
     </div>
   `;
+
+  // 内容没变就别重刷 DOM（面板已处于展开态时）：避免轮询把正 hover 的节点换掉造成闪烁。
+  if (appRoot.className === "mini-root mini-root-panel" && lastMiniPanelHtml === html) {
+    return;
+  }
+  lastMiniPanelHtml = html;
+  appRoot.className = "mini-root mini-root-panel";
+  appRoot.innerHTML = html;
 
   if (store.miniExpanded && previousScrollTop > 0) {
     window.requestAnimationFrame(() => {

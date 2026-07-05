@@ -10,7 +10,6 @@ import { accountSyncDataScore } from "./account-sync";
 import { CdpBrowserClient, requestCdpVersionInfo } from "./cdp-client";
 import { openInspectablePageOverCdp } from "./cdp-page";
 import { POSIX_LOCALE_ENV, execFileAsync, exists, getNestedValue, isRecord, isSafePathSegment, readJsonFile, sleep, stringValue, uniqueNumbers } from "./fs-util";
-import { CLAUDE_INSTRUCTION_PATH, CODEX_AGENTS_PATH, claudeInstructionShellContent } from "./global-instructions";
 import { CdpRuntimeEvaluateResult, ChromeLocalState, ProfileRef, TemporaryChromeCdpLaunch } from "./internal-types";
 import { ProfileManagerError } from "./profile-manager-error";
 
@@ -65,95 +64,6 @@ export function launchDetached(command: string, args: string[]): void {
     console.error(`[profilepilot] 启动 ${command} 失败：`, error);
   });
   child.unref();
-}
-
-// ---- 全局 AGENTS.md 里的 Agent 调试端点配置 ----
-
-export function globalAgentInstructionsPath(): string {
-  return CODEX_AGENTS_PATH;
-}
-
-export const AGENT_CDP_BLOCK_RE =
-  /\n*<!-- profilepilot:agent-cdp[^>]*-->[\s\S]*?<!-- \/profilepilot:agent-cdp -->\n*/;
-
-export function agentBrowserConfigBlock(profileId: string, name: string, port: number): string {
-  return [
-    `<!-- profilepilot:agent-cdp profile=${profileId} port=${port} -->`,
-    `## 浏览器调试 / 自动化（由 ProfilePilot 维护，请勿手改本块）`,
-    ``,
-    `需要用浏览器调试或自动化（agent-browser 等）时，优先复用 ProfilePilot 准备好的调试浏览器，不要新起空白浏览器：`,
-    ``,
-    `- CDP 端点：\`http://127.0.0.1:${port}\``,
-    `- Profile：${name}（ProfilePilot 管理的独立 Profile，已含登录态）`,
-    `- 接入：先 \`agent-browser connect ${port}\`，再正常操作。`,
-    `- 若连接失败：在 ProfilePilot 中对「${name}」点「CDP启动」（会固定使用 ${port} 端口）后重试。`,
-    ``,
-    `<!-- /profilepilot:agent-cdp -->`
-  ].join("\n");
-}
-
-export async function writeGlobalAgentInstructionsAtomic(content: string): Promise<void> {
-  const target = globalAgentInstructionsPath();
-  await fs.mkdir(path.dirname(target), { recursive: true });
-  const tmpPath = `${target}.cpm-tmp-${process.pid}`;
-  try {
-    await fs.writeFile(tmpPath, content, "utf8");
-    await fs.rename(tmpPath, target);
-  } finally {
-    await fs.rm(tmpPath, { force: true }).catch(() => undefined);
-  }
-}
-
-async function ensureClaudeInstructionShellFile(): Promise<void> {
-  await fs.mkdir(path.dirname(CLAUDE_INSTRUCTION_PATH), { recursive: true });
-  const tmpPath = `${CLAUDE_INSTRUCTION_PATH}.cpm-tmp-${process.pid}`;
-  try {
-    await fs.writeFile(tmpPath, claudeInstructionShellContent(), "utf8");
-    await fs.rename(tmpPath, CLAUDE_INSTRUCTION_PATH);
-  } finally {
-    await fs.rm(tmpPath, { force: true }).catch(() => undefined);
-  }
-}
-
-export async function writeAgentBrowserConfigFile(input: { profileId: string; name: string; port: number }): Promise<void> {
-  let content = "";
-  try {
-    content = await fs.readFile(globalAgentInstructionsPath(), "utf8");
-  } catch {
-    content = "";
-  }
-
-  const withoutBlock = content.replace(AGENT_CDP_BLOCK_RE, "\n").trimEnd();
-  const block = agentBrowserConfigBlock(input.profileId, input.name, input.port);
-  const next = (withoutBlock ? `${withoutBlock}\n\n` : "") + block + "\n";
-  await writeGlobalAgentInstructionsAtomic(next);
-  await ensureClaudeInstructionShellFile();
-}
-
-export async function removeAgentBrowserConfigFile(): Promise<void> {
-  let content: string;
-  try {
-    content = await fs.readFile(globalAgentInstructionsPath(), "utf8");
-  } catch {
-    await ensureClaudeInstructionShellFile();
-    return;
-  }
-
-  const next = content.replace(AGENT_CDP_BLOCK_RE, "\n").replace(/\n{3,}/g, "\n\n").trimEnd();
-  await writeGlobalAgentInstructionsAtomic(next ? `${next}\n` : "");
-  await ensureClaudeInstructionShellFile();
-}
-
-export async function readAgentBrowserConfig(): Promise<{ profileId: string; port: number } | null> {
-  let content: string;
-  try {
-    content = await fs.readFile(globalAgentInstructionsPath(), "utf8");
-  } catch {
-    return null;
-  }
-
-  const match = content.match(/<!-- profilepilot:agent-cdp profile=(\S+) port=(\d+) -->/);
-  return match ? { profileId: match[1], port: Number(match[2]) } : null;
 }
 
 export async function focusProfileWindow(pids: number[]): Promise<boolean> {

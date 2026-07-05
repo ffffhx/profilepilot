@@ -40,7 +40,6 @@ export interface PublicProfile {
   cdpPort: number | null;
   cdpUrl: string | null;
   fixedCdpPort: number | null;
-  agentConfigPort: number | null;
   listeningPorts: number[];
   pinnedToMini: boolean;
   clonedFromProfileId: string | null;
@@ -296,6 +295,28 @@ export interface AccountSyncRequest {
   onlyChanged?: boolean;
 }
 
+export type AccountSyncDiffStatus = "changed" | "same" | "source_missing" | "target_missing";
+
+export interface AccountSyncDiffItem {
+  label: string;
+  relativePath: string;
+  status: AccountSyncDiffStatus;
+  reason: string;
+}
+
+export interface AccountSyncDiffResult {
+  sourceProfileId: string;
+  targetProfileId: string;
+  items: AccountSyncDiffItem[];
+  summary: {
+    changedCount: number;
+    sameCount: number;
+    sourceMissingCount: number;
+    targetMissingCount: number;
+    syncableCount: number;
+  };
+}
+
 export interface CancelOperationRequest {
   key: string;
   profileId?: string;
@@ -330,23 +351,6 @@ export interface AccountSyncResult {
   state: AppState;
 }
 
-export interface SetupAgentBrowserRequest {
-  sourceProfileId: string;
-  targetName?: string;
-  port: number;
-  includeExtensions?: boolean;
-}
-
-export interface SetupAgentBrowserResult {
-  profileId: string;
-  profileName: string;
-  port: number;
-  cdpUrl: string | null;
-  copiedItems: AccountSyncCopiedItem[];
-  extensionResult: ExtensionMigrationResult | null;
-  state: AppState;
-}
-
 export interface CloneProfilesRequest {
   sourceProfileId: string;
   count: number;
@@ -354,7 +358,6 @@ export interface CloneProfilesRequest {
   basePort?: number | null;
   includeExtensions?: boolean;
   launchAfter?: boolean;
-  setAgentEndpoint?: boolean;
 }
 
 export interface ClonedProfileInfo {
@@ -446,8 +449,6 @@ export interface ProfileManagerApi {
   launchProfileWithCdp(id: string, port?: number | null): Promise<AppState>;
   connectRunningSystemChrome(id: string): Promise<AppState>;
   suggestCdpPort(preferredPort?: number | null): Promise<CdpPortSuggestion>;
-  setAgentBrowserConfig(id: string, port: number): Promise<AppState>;
-  clearAgentBrowserConfig(id: string): Promise<AppState>;
   setMiniProfilePinned(id: string, pinned: boolean): Promise<AppState>;
   setMiniProfileOrder(ids: string[]): Promise<AppState>;
   setMiniPanelPinned(pinned: boolean): Promise<void>;
@@ -477,7 +478,7 @@ export interface ProfileManagerApi {
   migrateExtensions(request: ExtensionMigrationRequest): Promise<ExtensionMigrationResult>;
   deleteProfileExtension(profileId: string, extensionId: string): Promise<ExtensionDeleteResult>;
   syncAccount(request: AccountSyncRequest): Promise<AccountSyncResult>;
-  setupAgentBrowser(request: SetupAgentBrowserRequest): Promise<SetupAgentBrowserResult>;
+  inspectAccountSyncDiff(request: AccountSyncRequest): Promise<AccountSyncDiffResult>;
   cloneProfiles(request: CloneProfilesRequest): Promise<CloneProfilesResult>;
   refreshClones(sourceProfileId: string): Promise<RefreshClonesResult>;
   resetClone(profileId: string): Promise<AccountSyncResult>;
@@ -497,9 +498,11 @@ export type ConfirmIntent =
       profileId: string;
     }
   | {
-      kind: "account-sync";
+      kind: "profile-sync";
       sourceProfileId: string;
       targetProfileId: string;
+      syncAccount: boolean;
+      syncExtensions: boolean;
       shouldCloseTarget: boolean;
       existingRecordSyncedAt: string | null;
       launchTarget: boolean;
@@ -528,7 +531,6 @@ export type ConfirmIntent =
       namePrefix: string;
       includeExtensions: boolean;
       launchAfter: boolean;
-      setAgentEndpoint: boolean;
     }
   | {
       kind: "refresh-clones";
@@ -562,8 +564,6 @@ export type ModalState =
   | { kind: "rename"; profileId: string }
   | { kind: "cdp"; profileId: string; portSuggestion: CdpPortSuggestion | null }
   | { kind: "extension-migration" }
-  | { kind: "agent-config"; profileId: string; portSuggestion: CdpPortSuggestion | null }
-  | { kind: "agent-browser-setup"; portSuggestion: CdpPortSuggestion }
   | { kind: "clone-pool" }
   | { kind: "clone-tag"; profileId: string }
   | { kind: "global-instructions" }

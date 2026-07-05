@@ -53,7 +53,7 @@ export function renderClonePoolModal(profiles: PublicProfile[]): string {
         </div>
 
         <p class="modal-copy mt-[10px] mb-3 mx-0 text-muted text-[13px] leading-[1.6] [overflow-wrap:anywhere]">
-          把一份登录态的浏览器复制成 N 份隔离副本，每份独立 CDP 端口、登录态一致，供多个项目并行驱动。份数填 1 + 勾选「设为 Agent 端点」即等同造一个 Agent 浏览器。
+          把一份登录态的浏览器复制成 N 份隔离副本，每份独立 CDP 端口、登录态一致，供多个项目并行驱动。份数填 1 即等同造一个 Agent 浏览器。
         </p>
 
         <div class="clone-pool-create">
@@ -73,10 +73,6 @@ export function renderClonePoolModal(profiles: PublicProfile[]): string {
             <label class="check-control">
               <input type="checkbox" data-clone-pool-launch ${store.clonePoolLaunchAfter ? "checked" : ""} ${store.busy ? "disabled" : ""} />
               <span>克隆后以 CDP 启动</span>
-            </label>
-            <label class="check-control">
-              <input type="checkbox" data-clone-pool-set-endpoint ${store.clonePoolSetEndpoint ? "checked" : ""} ${store.busy ? "disabled" : ""} />
-              <span>把第一份设为 Agent 端点（写 AGENTS.md）</span>
             </label>
           </div>
           <button type="button" class="primary ${cloning ? "loading" : ""}" data-action="clone-profiles" ${!canClone ? "disabled" : ""}>

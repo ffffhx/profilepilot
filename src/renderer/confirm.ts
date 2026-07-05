@@ -101,30 +101,49 @@ export function confirmModalView(intent: ConfirmIntent): ConfirmModalView | null
     };
   }
 
-  if (intent.kind === "account-sync") {
+  if (intent.kind === "profile-sync") {
     const sourceProfile = store.state.profiles.find((profile) => profile.id === intent.sourceProfileId);
     const targetProfile = store.state.profiles.find((profile) => profile.id === intent.targetProfileId);
     if (!sourceProfile || !targetProfile) {
       return null;
     }
 
-    const overwriteLine = intent.existingRecordSyncedAt
-      ? `上次已在 ${formatDate(intent.existingRecordSyncedAt)} 从 ${sourceProfile.name} 同步到 ${targetProfile.name}。继续会覆盖刷新目标登录态，不会重复叠加。`
-      : `${targetProfile.name} 当前登录态会被 ${sourceProfile.name} 的登录态替换。`;
-    const closeLine = intent.shouldCloseTarget
-      ? `目标 ${targetProfile.name} 正在运行。开始同步前会先帮你关闭目标；若勾选重新启动，完成后会恢复能读取到的原标签页。`
-      : "同步开始后会写入目标 Profile 的账号数据。";
-    const modeLine = "本次会用源 Profile 重新覆盖目标中可同步的账号数据。";
+    const parts = [intent.syncAccount ? "账号登录态" : null, intent.syncExtensions ? "插件" : null]
+      .filter(Boolean)
+      .join(" + ");
+    const body: string[] = [];
+    if (intent.shouldCloseTarget) {
+      body.push(`目标 ${targetProfile.name} 正在运行。开始同步前会先帮你关闭目标${intent.launchTarget ? "，完成后会重新启动" : ""}。`);
+    }
+    if (intent.syncAccount) {
+      body.push(
+        intent.existingRecordSyncedAt
+          ? `上次已在 ${formatDate(intent.existingRecordSyncedAt)} 从 ${sourceProfile.name} 同步到 ${targetProfile.name}。继续会覆盖刷新目标登录态，不会重复叠加。`
+          : `${targetProfile.name} 当前登录态会被 ${sourceProfile.name} 的登录态覆盖。`
+      );
+    }
+    if (intent.syncExtensions) {
+      const activeScan = store.extensionScan?.profileId === intent.sourceProfileId ? store.extensionScan : null;
+      const selectedCount = activeScan
+        ? activeScan.extensions.filter((extension) => store.selectedExtensionIds.has(extension.id)).length
+        : 0;
+      body.push(
+        activeScan
+          ? `会同步插件明细里已勾选的 ${selectedCount} 个插件到目标。`
+          : "会自动扫描源 Profile 的全部插件并同步到目标；无法静默处理的插件会跳过，可稍后在插件明细里手动补齐。"
+      );
+    }
 
     return {
-      kicker: "账号同步确认",
+      kicker: "同步确认",
       title: `同步 ${sourceProfile.name} 到 ${targetProfile.name}`,
-      body: [closeLine, overwriteLine, modeLine],
+      body,
       confirmLabel: "同步",
       tone: "warn",
       summary: [
         { label: "源 Profile", value: sourceProfile.name },
         { label: "目标 Profile", value: targetProfile.name },
+        { label: "同步内容", value: parts },
         { label: "完成后", value: intent.launchTarget ? "启动目标" : "不启动目标" }
       ]
     };
@@ -162,7 +181,6 @@ export function confirmModalView(intent: ConfirmIntent): ConfirmModalView | null
       body: [
         `会新建 ${intent.count} 个隔离副本，逐个从 ${source.name} 复制登录态${intent.includeExtensions ? "并同步插件" : ""}，各分配一个独立的固定 CDP 端口。`,
         intent.launchAfter ? "克隆完成后会逐个以 CDP 模式启动。" : "克隆完成后不会自动启动，可稍后在副本池里批量启动。",
-        ...(intent.setAgentEndpoint ? ["完成后会把第一份副本写入全局 AGENTS.md，作为 Agent 的固定调试端点。"] : []),
         "克隆较耗时（每份都要复制账号数据），请耐心等待。"
       ],
       confirmLabel: `克隆 ${intent.count} 份`,
@@ -171,8 +189,7 @@ export function confirmModalView(intent: ConfirmIntent): ConfirmModalView | null
         { label: "源 Profile", value: source.name },
         { label: "份数", value: String(intent.count) },
         { label: "含插件", value: intent.includeExtensions ? "是" : "否" },
-        { label: "克隆后启动", value: intent.launchAfter ? "是" : "否" },
-        { label: "Agent 端点", value: intent.setAgentEndpoint ? "写入第一份" : "不写入" }
+        { label: "克隆后启动", value: intent.launchAfter ? "是" : "否" }
       ]
     };
   }
@@ -346,8 +363,8 @@ export function executeConfirmIntent(intent: ConfirmIntent): void {
     return;
   }
 
-  if (intent.kind === "account-sync") {
-    executeAccountSyncConfirm(intent);
+  if (intent.kind === "profile-sync") {
+    executeProfileSyncConfirm(intent);
     return;
   }
 
@@ -396,16 +413,11 @@ export function executeCloneProfilesConfirm(intent: Extract<ConfirmIntent, { kin
         count: intent.count,
         namePrefix: intent.namePrefix,
         includeExtensions: intent.includeExtensions,
-        launchAfter: intent.launchAfter,
-        setAgentEndpoint: intent.setAgentEndpoint
+        launchAfter: intent.launchAfter
       });
       store.state = result.state;
       store.clonePoolSourceId = intent.sourceProfileId;
-      setToast(
-        intent.setAgentEndpoint
-          ? `已克隆 ${result.created.length} 个副本，并把第一份写入 AGENTS.md 作为 Agent 端点`
-          : `已克隆 ${result.created.length} 个副本`
-      );
+      setToast(`已克隆 ${result.created.length} 个副本`);
     },
     undefined,
     { key: "clone-profiles", message: `正在克隆 ${intent.count} 份…` }
@@ -540,7 +552,10 @@ function isChromeRunningDeleteError(message: string): boolean {
   return message.includes("删除 Chrome Profile 前请先退出 Chrome");
 }
 
-export function executeAccountSyncConfirm(intent: Extract<ConfirmIntent, { kind: "account-sync" }>): void {
+// 合并同步：按勾选串行执行「账号登录态 → 插件 → 启动目标」。
+// 每个阶段沿用各自的 busy key（account-sync / migrate-extensions），
+// 这样主进程按 key 上报的进度、暂停/终止按钮都能照常工作。
+export function executeProfileSyncConfirm(intent: Extract<ConfirmIntent, { kind: "profile-sync" }>): void {
   const sourceProfile = store.state?.profiles.find((profile) => profile.id === intent.sourceProfileId);
   const targetProfile = store.state?.profiles.find((profile) => profile.id === intent.targetProfileId);
   store.modal = null;
@@ -551,31 +566,103 @@ export function executeAccountSyncConfirm(intent: Extract<ConfirmIntent, { kind:
     return;
   }
 
-  const progressSteps = accountSyncProgressStepsForTarget(targetProfile);
-  void withBusy(async () => {
-    const result = await profileApi().syncAccount({
-      sourceProfileId: intent.sourceProfileId,
-      targetProfileId: intent.targetProfileId,
-      launchTarget: intent.launchTarget,
-      onlyChanged: false
-    });
-    store.accountSyncResult = result;
-    store.state = result.state;
-    store.selectedId = result.targetProfileId;
-  }, intent.launchTarget
-    ? intent.existingRecordSyncedAt
-      ? "账号重新同步完成，已启动目标 Profile"
-      : "账号同步完成，已启动目标 Profile"
-    : intent.existingRecordSyncedAt
-      ? "账号重新同步完成"
-      : "账号同步完成", {
-    key: "account-sync",
-    message: intent.shouldCloseTarget ? `正在关闭 ${targetProfile.name} 后同步账号…` : "正在同步账号…",
-    profileId: intent.targetProfileId,
-    stepIndex: 1,
-    stepCount: progressSteps.length,
-    steps: pendingBusySteps(progressSteps)
-  });
+  // 只同步账号时沿用 syncAccount 自带的“同步后启动 + 恢复标签页”；
+  // 带插件阶段时改为最后统一启动，避免账号阶段刚启动目标、插件阶段又要关闭它。
+  const launchViaAccountSync = intent.syncAccount && !intent.syncExtensions && intent.launchTarget;
+
+  void (async () => {
+    if (intent.syncAccount) {
+      let accountDone = false;
+      const progressSteps = accountSyncProgressStepsForTarget(targetProfile);
+      await withBusy(async () => {
+        const result = await profileApi().syncAccount({
+          sourceProfileId: intent.sourceProfileId,
+          targetProfileId: intent.targetProfileId,
+          launchTarget: launchViaAccountSync,
+          onlyChanged: false
+        });
+        store.accountSyncResult = result;
+        // 同步完成后源目标已一致，之前扫出的差异作废。
+        store.accountSyncDiff = null;
+        store.state = result.state;
+        store.selectedId = result.targetProfileId;
+        accountDone = true;
+      }, launchViaAccountSync
+        ? intent.existingRecordSyncedAt
+          ? "账号重新同步完成，已启动目标 Profile"
+          : "账号同步完成，已启动目标 Profile"
+        : intent.existingRecordSyncedAt
+          ? "账号重新同步完成"
+          : "账号同步完成", {
+        key: "account-sync",
+        message: intent.shouldCloseTarget ? `正在关闭 ${targetProfile.name} 后同步账号…` : "正在同步账号…",
+        profileId: intent.targetProfileId,
+        stepIndex: 1,
+        stepCount: progressSteps.length,
+        steps: pendingBusySteps(progressSteps)
+      });
+      // 账号阶段失败或被终止时，不再继续插件和启动阶段。
+      if (!accountDone) {
+        return;
+      }
+    }
+
+    if (intent.syncExtensions) {
+      let extensionsDone = false;
+      const progressSteps = extensionSyncProgressStepsForProfiles(sourceProfile, targetProfile, false);
+      await withBusy(async () => {
+        // 已在插件明细里扫描过就尊重勾选结果；没扫描过则自动扫描并同步全部插件。
+        const hadScan = store.extensionScan?.profileId === intent.sourceProfileId;
+        const scan = hadScan ? store.extensionScan! : await profileApi().scanProfileExtensions(intent.sourceProfileId);
+        const extensionIds = hadScan
+          ? scan.extensions.filter((extension) => store.selectedExtensionIds.has(extension.id)).map((extension) => extension.id)
+          : scan.extensions.map((extension) => extension.id);
+        if (!hadScan) {
+          store.migrationSourceId = intent.sourceProfileId;
+          store.extensionScan = scan;
+          store.selectedExtensionIds = new Set(extensionIds);
+        }
+        if (!extensionIds.length) {
+          extensionsDone = true;
+          return;
+        }
+        const result = await profileApi().migrateExtensions({
+          sourceProfileId: intent.sourceProfileId,
+          targetProfileId: intent.targetProfileId,
+          extensionIds,
+          includeData: false,
+          openInstallPages: false,
+          onlyChanged: false
+        });
+        store.extensionMigrationResult = result;
+        invalidateExtensionMigrationDiff();
+        store.state = result.state;
+        store.selectedId = result.targetProfileId;
+        extensionsDone = true;
+      }, "插件同步完成", {
+        key: "migrate-extensions",
+        message: "正在同步插件…",
+        profileId: intent.targetProfileId,
+        stepIndex: 1,
+        stepCount: progressSteps.length,
+        steps: pendingBusySteps(progressSteps)
+      });
+      if (!extensionsDone) {
+        return;
+      }
+    }
+
+    if (intent.launchTarget && !launchViaAccountSync) {
+      await withBusy(async () => {
+        store.state = await profileApi().launchProfile(intent.targetProfileId);
+        store.selectedId = intent.targetProfileId;
+      }, `已启动 ${emphasizeName(targetProfile.name)}`, {
+        key: "launch-profile",
+        message: `正在启动 ${targetProfile.name}…`,
+        profileId: intent.targetProfileId
+      });
+    }
+  })();
 }
 
 export function executeDeleteExtensionConfirm(intent: Extract<ConfirmIntent, { kind: "delete-extension" }>): void {

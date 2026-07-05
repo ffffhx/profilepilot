@@ -6,8 +6,6 @@ import type {
   AccountSyncDiffResult,
   AccountSyncRequest,
   AccountSyncResult,
-  SetupAgentBrowserRequest,
-  SetupAgentBrowserResult,
   CloneProfilesRequest,
   CloneProfilesResult,
   RefreshClonesResult,
@@ -833,12 +831,12 @@ function createMainWindow(): void {
                   statusValues: Array.from(document.querySelectorAll(".status-value")).map((item) => item.textContent),
                   accountSyncTitle: document.querySelector("[data-account-sync] h2")?.textContent || null,
                   accountSyncSelectCount: document.querySelectorAll("[data-account-sync] select").length,
-                  accountSyncScopeHeadings: Array.from(document.querySelectorAll(".account-sync-scope-group strong")).map((item) => item.textContent),
-                  accountSyncScopeItems: Array.from(document.querySelectorAll(".account-sync-scope-group li")).map((item) => item.textContent),
+                  accountSyncDiffButton: document.querySelector('[data-action="scan-account-diff"]')?.textContent?.trim() || null,
+                  extensionScanButton: document.querySelector('[data-action="scan-extensions"]')?.textContent?.trim() || null,
                   accountConfirmTitle: null,
                   accountConfirmButton: null,
                   accountConfirmSummary: [],
-                  migrationTitle: document.querySelector("[data-extension-migration] h2")?.textContent || null,
+                  migrationTitle: document.querySelector("[data-extension-migration] strong")?.textContent || null,
                   migrationSelectCount: document.querySelectorAll("[data-extension-migration] select").length,
                   shellWidthRatio: (() => {
                     const shell = document.querySelector(".shell");
@@ -911,7 +909,7 @@ function createMainWindow(): void {
                   document.querySelector('.global-instructions-modal [data-action="close-modal"]')?.click();
                   await new Promise((done) => window.setTimeout(done, 0));
                 }
-                const syncAccountButton = document.querySelector('[data-action="sync-account"]');
+                const syncAccountButton = document.querySelector('[data-action="run-sync"]');
                 if (syncAccountButton instanceof HTMLButtonElement && !syncAccountButton.disabled) {
                   syncAccountButton.click();
                   await waitForSmokeCondition(() => document.querySelector(".confirm-dialog"), 1000);
@@ -1122,16 +1120,6 @@ function registerIpcHandlers(): void {
     return profileManager.suggestCdpPort(preferredPort);
   });
 
-  ipcMain.handle(IPC_CHANNELS.setAgentBrowserConfig, async (_event, id: string, port: number): Promise<AppState> => {
-    await profileManager.setAgentBrowserConfig(id, port);
-    return profileManager.getState();
-  });
-
-  ipcMain.handle(IPC_CHANNELS.clearAgentBrowserConfig, async (_event, id: string): Promise<AppState> => {
-    await profileManager.clearAgentBrowserConfig(id);
-    return profileManager.getState();
-  });
-
   ipcMain.handle(IPC_CHANNELS.setMiniProfilePinned, async (_event, id: string, pinned: boolean): Promise<AppState> => {
     await profileManager.setMiniProfilePinned(id, Boolean(pinned));
     return profileManager.getState();
@@ -1298,27 +1286,6 @@ function registerIpcHandlers(): void {
       activeOperations.delete(id);
     }
   });
-
-  ipcMain.handle(
-    IPC_CHANNELS.setupAgentBrowser,
-    async (event, request: SetupAgentBrowserRequest): Promise<SetupAgentBrowserResult> => {
-      const id = operationId("setup-agent-browser");
-      const controller = new AbortController();
-      const pause = new OperationPauseController();
-      activeOperations.set(id, { controller, pause });
-
-      try {
-        return await profileManager.setupAgentBrowser(
-          request,
-          createProgressReporter(event, { key: "setup-agent-browser" }),
-          controller.signal,
-          pause
-        );
-      } finally {
-        activeOperations.delete(id);
-      }
-    }
-  );
 
   ipcMain.handle(IPC_CHANNELS.cloneProfiles, async (event, request: CloneProfilesRequest): Promise<CloneProfilesResult> => {
     const id = operationId("clone-profiles");

@@ -51,13 +51,9 @@ profileApi().onOperationProgress((progress) => {
 appRoot.addEventListener("click", (event) => {
   const target = event.target instanceof Element ? event.target : null;
   const hadOpenProfileMenu = Boolean(store.openProfileMenuId);
-  const hadMigrationSourceMenu = store.migrationSourceMenuOpen;
   const hadAccountSyncMenu = Boolean(store.accountSyncMenuOpen);
   if (store.openProfileMenuId && !target?.closest("[data-profile-actions]")) {
     store.openProfileMenuId = null;
-  }
-  if (store.migrationSourceMenuOpen && !target?.closest("[data-migration-source-select]")) {
-    store.migrationSourceMenuOpen = false;
   }
   const hadMigrationTargetMenu = store.migrationTargetMenuOpen;
   if (store.migrationTargetMenuOpen && !target?.closest("[data-migration-target-select]")) {
@@ -75,7 +71,6 @@ appRoot.addEventListener("click", (event) => {
   if (!actionTarget || !store.state) {
     if (
       (hadOpenProfileMenu && !store.openProfileMenuId) ||
-      (hadMigrationSourceMenu && !store.migrationSourceMenuOpen) ||
       (hadMigrationTargetMenu && !store.migrationTargetMenuOpen) ||
       (hadAccountSyncMenu && !store.accountSyncMenuOpen) ||
       (hadClonePoolMenu && !store.clonePoolMenuOpen)
@@ -89,21 +84,6 @@ appRoot.addEventListener("click", (event) => {
   const id = actionTarget.dataset.id || null;
   if (action !== "toggle-profile-menu" && actionTarget.closest("[data-profile-actions]")) {
     store.openProfileMenuId = null;
-  }
-
-  if (action === "toggle-migration-source-menu") {
-    store.migrationSourceMenuOpen = !store.migrationSourceMenuOpen;
-    store.accountSyncMenuOpen = null;
-    store.openProfileMenuId = null;
-    render();
-    return;
-  }
-
-  if (action === "select-migration-source" && id) {
-    setMigrationSource(id);
-    store.migrationSourceMenuOpen = false;
-    render();
-    return;
   }
 
   if (action === "toggle-migration-target-menu") {
@@ -125,7 +105,6 @@ appRoot.addEventListener("click", (event) => {
   if (action === "toggle-account-sync-menu") {
     const kind = actionTarget.dataset.kind === "target" ? "target" : "source";
     store.accountSyncMenuOpen = store.accountSyncMenuOpen === kind ? null : kind;
-    store.migrationSourceMenuOpen = false;
     store.openProfileMenuId = null;
     render();
     return;
@@ -134,12 +113,23 @@ appRoot.addEventListener("click", (event) => {
   if (action === "select-account-sync-profile" && id) {
     if (actionTarget.dataset.kind === "target") {
       store.accountSyncTargetId = id;
+      // 插件差异是相对目标算的：换目标后重算。
+      if (store.migrationTargetId !== id && store.migrationSourceId !== id) {
+        store.migrationTargetId = id;
+        invalidateExtensionMigrationDiff();
+        void refreshExtensionMigrationDiff();
+      }
     } else {
       store.accountSyncSourceId = id;
       if (store.accountSyncTargetId === store.accountSyncSourceId) {
         store.accountSyncTargetId = store.state.profiles.find((profile) => profile.id !== store.accountSyncSourceId)?.id || null;
       }
+      // 插件明细与账号同步共用源 Profile：换源时同步重置扫描状态和插件目标。
+      if (store.migrationSourceId !== id) {
+        setMigrationSource(id);
+      }
     }
+    store.accountSyncDiff = null;
     store.accountSyncResult = null;
     store.accountSyncMenuOpen = null;
     render();
@@ -149,7 +139,6 @@ appRoot.addEventListener("click", (event) => {
   if (action === "toggle-clone-pool-menu") {
     store.clonePoolMenuOpen = !store.clonePoolMenuOpen;
     store.accountSyncMenuOpen = null;
-    store.migrationSourceMenuOpen = false;
     store.migrationTargetMenuOpen = false;
     store.openProfileMenuId = null;
     render();
@@ -183,8 +172,7 @@ appRoot.addEventListener("click", (event) => {
         count,
         namePrefix: sourceProfile.name,
         includeExtensions: store.clonePoolIncludeExtensions,
-        launchAfter: store.clonePoolLaunchAfter,
-        setAgentEndpoint: store.clonePoolSetEndpoint
+        launchAfter: store.clonePoolLaunchAfter
       }
     };
     render();
@@ -314,7 +302,6 @@ appRoot.addEventListener("click", (event) => {
     store.editingGlobalInstructionId = null;
     store.globalInstructionDraft = "";
     store.openProfileMenuId = null;
-    store.migrationSourceMenuOpen = false;
     store.migrationTargetMenuOpen = false;
     store.accountSyncMenuOpen = null;
     render();
@@ -423,9 +410,34 @@ appRoot.addEventListener("click", (event) => {
     return;
   }
 
-  if (action === "toggle-account-sync-scope") {
-    store.accountSyncScopeExpanded = !store.accountSyncScopeExpanded;
+  if (action === "scan-account-diff") {
+    const profiles = store.state.profiles;
+    const sourceId =
+      store.accountSyncSourceId && profiles.some((profile) => profile.id === store.accountSyncSourceId)
+        ? store.accountSyncSourceId
+        : profiles[0]?.id || null;
+    const targetId =
+      store.accountSyncTargetId && store.accountSyncTargetId !== sourceId
+        ? store.accountSyncTargetId
+        : profiles.find((profile) => profile.id !== sourceId)?.id || null;
+    if (!sourceId || !targetId || sourceId === targetId) {
+      setToast("请选择两个不同的 Profile", "error");
+      return;
+    }
+    store.accountSyncDiff = null;
+    store.accountSyncDiffCollapsed = false;
+    store.accountSyncDiffLoading = true;
     render();
+    void profileApi()
+      .inspectAccountSyncDiff({ sourceProfileId: sourceId, targetProfileId: targetId, launchTarget: false })
+      .then((diff) => {
+        store.accountSyncDiff = diff;
+      })
+      .catch((error: unknown) => setToast(formatErrorMessage(error), "error"))
+      .finally(() => {
+        store.accountSyncDiffLoading = false;
+        render();
+      });
     return;
   }
 
@@ -435,13 +447,31 @@ appRoot.addEventListener("click", (event) => {
     return;
   }
 
-  if (action === "sync-account") {
-    const sourceId = store.accountSyncSourceId;
-    const targetId = store.accountSyncTargetId;
-    const sourceProfile = store.state.profiles.find((profile) => profile.id === sourceId);
-    const targetProfile = store.state.profiles.find((profile) => profile.id === targetId);
+  if (action === "toggle-account-diff-preview") {
+    store.accountSyncDiffCollapsed = !store.accountSyncDiffCollapsed;
+    render();
+    return;
+  }
+
+  if (action === "run-sync") {
+    const profiles = store.state.profiles;
+    // 与面板展示保持同一套回落逻辑：源默认第一个，目标默认第一个不同于源的。
+    const sourceId =
+      store.accountSyncSourceId && profiles.some((profile) => profile.id === store.accountSyncSourceId)
+        ? store.accountSyncSourceId
+        : profiles[0]?.id || null;
+    const targetId =
+      store.accountSyncTargetId && store.accountSyncTargetId !== sourceId
+        ? store.accountSyncTargetId
+        : profiles.find((profile) => profile.id !== sourceId)?.id || null;
+    const sourceProfile = profiles.find((profile) => profile.id === sourceId);
+    const targetProfile = profiles.find((profile) => profile.id === targetId);
     if (!sourceId || !targetId || !sourceProfile || !targetProfile || sourceId === targetId) {
       setToast("请选择两个不同的 Profile", "error");
+      return;
+    }
+    if (!store.syncAccountPart && !store.syncExtensionsPart) {
+      setToast("至少勾选一项同步内容（账号登录态或插件）", "error");
       return;
     }
     const shouldCloseTarget = targetProfile.running;
@@ -451,9 +481,11 @@ appRoot.addEventListener("click", (event) => {
     store.modal = {
       kind: "confirm",
       intent: {
-        kind: "account-sync",
+        kind: "profile-sync",
         sourceProfileId: sourceId,
         targetProfileId: targetId,
+        syncAccount: store.syncAccountPart,
+        syncExtensions: store.syncExtensionsPart,
         shouldCloseTarget,
         existingRecordSyncedAt: existingRecord?.syncedAt || null,
         launchTarget: store.launchSyncedProfile
@@ -517,11 +549,24 @@ appRoot.addEventListener("click", (event) => {
   }
 
   if (action === "scan-extensions") {
-    const sourceId = store.migrationSourceId;
+    // 插件明细与账号同步共用源 Profile（面板顶部的「源 Profile」选择器）。
+    const profiles = store.state.profiles;
+    const sourceId =
+      store.accountSyncSourceId && profiles.some((profile) => profile.id === store.accountSyncSourceId)
+        ? store.accountSyncSourceId
+        : profiles[0]?.id || null;
     if (!sourceId) {
       setToast("先选择源 Profile", "error");
       return;
     }
+    if (store.migrationSourceId !== sourceId) {
+      setMigrationSource(sourceId);
+    }
+    // 差异相对共享的目标 Profile 计算。
+    const diffTargetId =
+      store.accountSyncTargetId && store.accountSyncTargetId !== sourceId
+        ? store.accountSyncTargetId
+        : profiles.find((profile) => profile.id !== sourceId)?.id || null;
 
     void withBusy(async () => {
       const scan = await profileApi().scanProfileExtensions(sourceId);
@@ -529,10 +574,13 @@ appRoot.addEventListener("click", (event) => {
       store.selectedExtensionIds = new Set(scan.extensions.map((extension) => extension.id));
       store.extensionScanPreviewCollapsed = false;
       store.extensionMigrationResult = null;
+      store.migrationTargetId = diffTargetId;
       invalidateExtensionMigrationDiff();
-    }, "已扫描插件", {
+    }, "已扫描插件，正在比对与目标的差异…", {
       key: "scan-extensions",
       message: "正在扫描源 Profile 插件…"
+    }).then(() => {
+      void refreshExtensionMigrationDiff();
     });
     return;
   }
@@ -547,9 +595,7 @@ appRoot.addEventListener("click", (event) => {
     store.selectedExtensionIds = allSelected ? new Set() : new Set(activeScan.extensions.map((extension) => extension.id));
     invalidateExtensionMigrationDiff();
     render();
-    if (store.modal?.kind === "extension-migration") {
-      void refreshExtensionMigrationDiff();
-    }
+    void refreshExtensionMigrationDiff();
     return;
   }
 
@@ -569,7 +615,9 @@ appRoot.addEventListener("click", (event) => {
     const targetId =
       store.migrationTargetId && store.migrationTargetId !== store.migrationSourceId
         ? store.migrationTargetId
-        : store.state.profiles.find((profile) => profile.id !== store.migrationSourceId)?.id || null;
+        : store.accountSyncTargetId && store.accountSyncTargetId !== store.migrationSourceId
+          ? store.accountSyncTargetId
+          : store.state.profiles.find((profile) => profile.id !== store.migrationSourceId)?.id || null;
     if (!targetId) {
       setToast("没有可用的目标 Profile", "error");
       return;
@@ -869,7 +917,7 @@ appRoot.addEventListener("click", (event) => {
     // CDP 端口里最大的 +1（选不选随用户，但要先给到一个合理默认值）。
     const usedPorts: number[] = [];
     for (const item of store.state.profiles) {
-      for (const port of [item.cdpPort, item.fixedCdpPort, item.agentConfigPort]) {
+      for (const port of [item.cdpPort, item.fixedCdpPort]) {
         if (port) {
           usedPorts.push(port);
         }
@@ -912,40 +960,6 @@ appRoot.addEventListener("click", (event) => {
     store.clonePoolMenuOpen = false;
     store.modal = { kind: "clone-pool" };
     render();
-    return;
-  }
-
-  if (action === "write-agent-config" && id) {
-    const profile = store.state.profiles.find((item) => item.id === id);
-    if (!profile || profile.source !== "isolated") {
-      setToast("只有工具独立 Profile 才能设为 Agent 调试端点", "error");
-      return;
-    }
-    const preferredPort = profile.cdpPort ?? profile.fixedCdpPort ?? 9223;
-    if (profile.cdpPort) {
-      store.modal = { kind: "agent-config", profileId: id, portSuggestion: null };
-      render();
-      window.setTimeout(() => document.querySelector<HTMLInputElement>("#agent-port")?.focus(), 0);
-      return;
-    }
-    void profileApi()
-      .suggestCdpPort(preferredPort)
-      .then((portSuggestion) => {
-        store.modal = { kind: "agent-config", profileId: id, portSuggestion };
-        render();
-        window.setTimeout(() => document.querySelector<HTMLInputElement>("#agent-port")?.focus(), 0);
-      })
-      .catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
-    return;
-  }
-
-  if (action === "clear-agent-config" && id) {
-    const profile = store.state.profiles.find((item) => item.id === id);
-    void withBusy(() => profileApi().clearAgentBrowserConfig(id), `已从 AGENTS.md 移除 ${emphasizeName(profile?.name || "Profile")} 的 Agent 配置，并保持 CLAUDE.md 引用壳`, {
-      key: "agent-config",
-      message: "正在移除 Agent 配置…",
-      profileId: id
-    });
     return;
   }
 
@@ -1067,6 +1081,18 @@ appRoot.addEventListener("change", (event) => {
     return;
   }
 
+  if (target instanceof HTMLInputElement && target.matches("[data-sync-part-account]")) {
+    store.syncAccountPart = target.checked;
+    render();
+    return;
+  }
+
+  if (target instanceof HTMLInputElement && target.matches("[data-sync-part-extensions]")) {
+    store.syncExtensionsPart = target.checked;
+    render();
+    return;
+  }
+
   if (target instanceof HTMLInputElement && target.matches("[data-clone-pool-count]")) {
     store.clonePoolCount = clampCloneCount(Number(target.value));
     render();
@@ -1080,11 +1106,6 @@ appRoot.addEventListener("change", (event) => {
 
   if (target instanceof HTMLInputElement && target.matches("[data-clone-pool-launch]")) {
     store.clonePoolLaunchAfter = target.checked;
-    return;
-  }
-
-  if (target instanceof HTMLInputElement && target.matches("[data-clone-pool-set-endpoint]")) {
-    store.clonePoolSetEndpoint = target.checked;
     return;
   }
 
@@ -1107,9 +1128,7 @@ appRoot.addEventListener("change", (event) => {
     store.extensionMigrationResult = null;
     invalidateExtensionMigrationDiff();
     render();
-    if (store.modal?.kind === "extension-migration") {
-      void refreshExtensionMigrationDiff();
-    }
+    void refreshExtensionMigrationDiff();
     return;
   }
 
@@ -1188,8 +1207,7 @@ appRoot.addEventListener("keydown", (event) => {
     return;
   }
 
-  if (event.key === "Escape" && (store.migrationSourceMenuOpen || store.migrationTargetMenuOpen || store.accountSyncMenuOpen)) {
-    store.migrationSourceMenuOpen = false;
+  if (event.key === "Escape" && (store.migrationTargetMenuOpen || store.accountSyncMenuOpen)) {
     store.migrationTargetMenuOpen = false;
     store.accountSyncMenuOpen = null;
     render();
@@ -1215,11 +1233,9 @@ appRoot.addEventListener("submit", (event) => {
   const createForm = target?.closest<HTMLFormElement>("[data-create-form]");
   const renameForm = target?.closest<HTMLFormElement>("[data-rename-form]");
   const cdpForm = target?.closest<HTMLFormElement>("[data-cdp-form]");
-  const agentConfigForm = target?.closest<HTMLFormElement>("[data-agent-config-form]");
-  const agentBrowserForm = target?.closest<HTMLFormElement>("[data-agent-browser-form]");
   const extensionMigrationForm = target?.closest<HTMLFormElement>("[data-extension-migration-form]");
   const cloneTagForm = target?.closest<HTMLFormElement>("[data-clone-tag-form]");
-  if (!createForm && !renameForm && !cdpForm && !agentConfigForm && !agentBrowserForm && !extensionMigrationForm && !cloneTagForm) {
+  if (!createForm && !renameForm && !cdpForm && !extensionMigrationForm && !cloneTagForm) {
     return;
   }
 
@@ -1242,69 +1258,6 @@ appRoot.addEventListener("submit", (event) => {
       },
       tag ? `已给 ${emphasizeName(profile.name)} 设置标签「${tag}」` : `已清除 ${emphasizeName(profile.name)} 的标签`,
       { key: "set-clone-tag", message: "正在保存标签…", profileId }
-    );
-    return;
-  }
-
-  if (agentBrowserForm) {
-    const sourceId = agentBrowserForm.dataset.sourceId;
-    if (!sourceId) {
-      return;
-    }
-    const data = new FormData(agentBrowserForm);
-    const name = String(data.get("name") || "").trim();
-    const port = Number(String(data.get("port") || "").trim());
-    if (!name) {
-      setToast("请填写 Agent Profile 名称", "error");
-      return;
-    }
-    if (!Number.isInteger(port) || port < 1024 || port > 65535) {
-      setToast("调试端口必须是 1024-65535 之间的整数", "error");
-      return;
-    }
-    store.modal = null;
-    const includeExtensions = data.has("includeExtensions");
-    void withBusy(
-      async () => {
-        const result = await profileApi().setupAgentBrowser({
-          sourceProfileId: sourceId,
-          targetName: name,
-          port,
-          includeExtensions
-        });
-        store.state = result.state;
-        const extensionCount =
-          (result.extensionResult?.copiedExtensions.length || 0) +
-          (result.extensionResult?.loadedLocalExtensions.length || 0);
-        setToast(
-          includeExtensions && result.extensionResult
-            ? `Agent 浏览器已就绪：agent-browser connect ${result.port}，已同步 ${extensionCount} 个插件`
-            : `Agent 浏览器已就绪：agent-browser connect ${result.port}`
-        );
-      },
-      undefined,
-      { key: "setup-agent-browser", message: "正在准备 Agent 浏览器…" }
-    );
-    return;
-  }
-
-  if (agentConfigForm) {
-    const profileId = agentConfigForm.dataset.profileId;
-    const profile = store.state?.profiles.find((item) => item.id === profileId);
-    if (!profileId || !profile) {
-      return;
-    }
-    const data = new FormData(agentConfigForm);
-    const parsedPort = Number(String(data.get("port") || "").trim());
-    if (!Number.isInteger(parsedPort) || parsedPort < 1024 || parsedPort > 65535) {
-      setToast("调试端口必须是 1024-65535 之间的整数", "error");
-      return;
-    }
-    store.modal = null;
-    void withBusy(
-      () => profileApi().setAgentBrowserConfig(profileId, parsedPort),
-      `已写入全局 AGENTS.md：Agent 优先连接 ${emphasizeName(profile.name)}（端口 ${parsedPort}），CLAUDE.md 保持引用壳`,
-      { key: "agent-config", message: "正在写入 Agent 配置…", profileId }
     );
     return;
   }
@@ -1830,7 +1783,6 @@ if (store.viewMode === "main") {
     }
     if (
       store.openProfileMenuId ||
-      store.migrationSourceMenuOpen ||
       store.migrationTargetMenuOpen ||
       store.accountSyncMenuOpen ||
       store.clonePoolMenuOpen

@@ -104,7 +104,6 @@ export interface PublicProfile {
   cdpPort: number | null;
   cdpUrl: string | null;
   fixedCdpPort: number | null;
-  agentConfigPort: number | null;
   listeningPorts: number[];
   pinnedToMini: boolean;
   // 副本池字段：克隆来源、来源名（已解析）、作为源时有多少副本指向它、项目标签。
@@ -364,23 +363,6 @@ export interface AccountSyncResult {
   state: AppState;
 }
 
-export interface SetupAgentBrowserRequest {
-  sourceProfileId: string;
-  targetName?: string;
-  port: number;
-  includeExtensions?: boolean;
-}
-
-export interface SetupAgentBrowserResult {
-  profileId: string;
-  profileName: string;
-  port: number;
-  cdpUrl: string | null;
-  copiedItems: AccountSyncCopiedItem[];
-  extensionResult: ExtensionMigrationResult | null;
-  state: AppState;
-}
-
 export interface CloneProfilesRequest {
   sourceProfileId: string;
   count: number;
@@ -388,7 +370,6 @@ export interface CloneProfilesRequest {
   basePort?: number | null;
   includeExtensions?: boolean;
   launchAfter?: boolean;
-  setAgentEndpoint?: boolean;
 }
 
 export interface ClonedProfileInfo {
@@ -500,8 +481,6 @@ export interface ProfileManagerApi {
   launchProfileWithCdp(id: string, port?: number | null): Promise<AppState>;
   connectRunningSystemChrome(id: string): Promise<AppState>;
   suggestCdpPort(preferredPort?: number | null): Promise<CdpPortSuggestion>;
-  setAgentBrowserConfig(id: string, port: number): Promise<AppState>;
-  clearAgentBrowserConfig(id: string): Promise<AppState>;
   setMiniProfilePinned(id: string, pinned: boolean): Promise<AppState>;
   setMiniProfileOrder(ids: string[]): Promise<AppState>;
   setMiniPanelPinned(pinned: boolean): Promise<void>;
@@ -532,7 +511,6 @@ export interface ProfileManagerApi {
   migrateExtensions(request: ExtensionMigrationRequest): Promise<ExtensionMigrationResult>;
   deleteProfileExtension(profileId: string, extensionId: string): Promise<ExtensionDeleteResult>;
   syncAccount(request: AccountSyncRequest): Promise<AccountSyncResult>;
-  setupAgentBrowser(request: SetupAgentBrowserRequest): Promise<SetupAgentBrowserResult>;
   cloneProfiles(request: CloneProfilesRequest): Promise<CloneProfilesResult>;
   refreshClones(sourceProfileId: string): Promise<RefreshClonesResult>;
   resetClone(profileId: string): Promise<AccountSyncResult>;

@@ -1,11 +1,10 @@
 import { isBusyAction, renderToastBody } from "../busy";
 import { renderConfirmModal } from "../confirm";
-import { renderAccountSyncPanel } from "./account-sync";
+import { renderSyncPanel } from "./account-sync";
 import { renderClonePoolModal } from "./clone-pool";
-import { renderExtensionMigrationPanel } from "./extensions";
 import { renderLiveZoomModal } from "./live-view";
 import { renderMini } from "./mini";
-import { renderAgentBrowserSetupModal, renderAgentConfigModal, renderCdpModal, renderCloneTagModal, renderExtensionMigrationModal, renderGlobalInstructionsModal, renderNewModal, renderRenameModal } from "./modals";
+import { renderCdpModal, renderCloneTagModal, renderExtensionMigrationModal, renderGlobalInstructionsModal, renderNewModal, renderRenameModal } from "./modals";
 import { renderDetails, renderEmpty, renderExternalDetails, renderProfilesPanel } from "./profiles";
 import { appRoot, store } from "../state";
 import { escapeHtml, renderBusyBanner, renderButtonLabel } from "../util";
@@ -76,8 +75,7 @@ export function render(): void {
         </div>
       </section>
 
-      ${renderAccountSyncPanel(profiles)}
-      ${renderExtensionMigrationPanel(profiles)}
+      ${renderSyncPanel(profiles)}
 
       <main class="layout grid grid-cols-[minmax(0,1fr)_minmax(320px,360px)] gap-6 mt-6 items-start">
         <section>
@@ -97,8 +95,6 @@ export function render(): void {
     ${store.modal?.kind === "new" ? renderNewModal() : ""}
     ${store.modal?.kind === "rename" ? renderRenameModal(store.modal.profileId) : ""}
     ${store.modal?.kind === "cdp" ? renderCdpModal(store.modal.profileId, store.modal.portSuggestion) : ""}
-    ${store.modal?.kind === "agent-config" ? renderAgentConfigModal(store.modal.profileId, store.modal.portSuggestion) : ""}
-    ${store.modal?.kind === "agent-browser-setup" ? renderAgentBrowserSetupModal(store.modal.portSuggestion) : ""}
     ${store.modal?.kind === "clone-pool" ? renderClonePoolModal(profiles) : ""}
     ${store.modal?.kind === "clone-tag" ? renderCloneTagModal(store.modal.profileId) : ""}
     ${store.modal?.kind === "global-instructions" ? renderGlobalInstructionsModal() : ""}

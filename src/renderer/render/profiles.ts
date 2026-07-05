@@ -239,7 +239,6 @@ export function renderProfileActions(profile: PublicProfile): string {
   const openingFolder = isBusyAction("open-folder", { profileId: profile.id });
   const renaming = isBusyAction("rename-profile", { profileId: profile.id });
   const deleting = isBusyAction("delete-profile", { profileId: profile.id });
-  const agentConfigBusy = isBusyAction("agent-config", { profileId: profile.id });
   const miniPinnedBusy = isBusyAction("mini-pin", { profileId: profile.id });
   const miniPinDisabled = store.busy || (!profile.pinnedToMini && (store.state?.miniProfileIds.length || 0) >= 3);
 
@@ -283,17 +282,6 @@ export function renderProfileActions(profile: PublicProfile): string {
               <button type="button" class="${miniPinnedBusy ? "loading" : ""}" data-action="${profile.pinnedToMini ? "unpin-mini-profile" : "pin-mini-profile"}" data-id="${profile.id}" ${miniPinDisabled ? "disabled" : ""}>
                 ${renderButtonLabel(miniPinnedBusy, profile.pinnedToMini ? "取消悬浮窗固定" : "固定到悬浮窗", "保存中…")}
               </button>
-              ${
-                profile.source === "isolated"
-                  ? profile.agentConfigPort !== null
-                    ? `<button type="button" class="${agentConfigBusy ? "loading" : ""}" data-action="clear-agent-config" data-id="${profile.id}" ${store.busy ? "disabled" : ""}>
-                ${renderButtonLabel(agentConfigBusy, "移除 Agent 配置", "移除中…")}
-              </button>`
-                    : `<button type="button" class="${agentConfigBusy ? "loading" : ""}" data-action="write-agent-config" data-id="${profile.id}" ${store.busy ? "disabled" : ""}>
-                ${renderButtonLabel(agentConfigBusy, "设为 Agent 端点", "处理中…")}
-              </button>`
-                  : ""
-              }
               <span class="action-tooltip" data-tooltip="${escapeHtml(deleteButtonTitle(profile))}">
                 <button type="button" class="danger ${deleting ? "loading" : ""}" data-action="delete" data-id="${profile.id}" ${deleteDisabled ? "disabled" : ""}>
                   ${renderButtonLabel(deleting, "删除 Profile", "删除中…")}

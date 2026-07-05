@@ -1,9 +1,12 @@
 import { isBusyAction } from "../busy";
 import { store } from "../state";
 import { AccountSyncRecord, AccountSyncResult, AccountSyncSkippedItem, PublicProfile } from "../types";
-import { escapeHtml, formatDate, profileStatusLabel, renderButtonLabel, renderOperationProgress, sourceLabel } from "../util";
+import { escapeHtml, formatDate, profileStatusLabel, renderButtonLabel, renderDiffItem, renderOperationProgress, sourceLabel } from "../util";
+import { renderExtensionDetail } from "./extensions";
 
-export function renderAccountSyncPanel(profiles: PublicProfile[]): string {
+// 合并同步面板：账号登录态 + 插件共用一对源/目标 Profile，
+// 默认两项都同步，也可以只勾其中一项。
+export function renderSyncPanel(profiles: PublicProfile[]): string {
   const sourceId = store.accountSyncSourceId || profiles[0]?.id || "";
   const sourceProfile = profiles.find((profile) => profile.id === sourceId) || null;
   const targetId =
@@ -12,7 +15,9 @@ export function renderAccountSyncPanel(profiles: PublicProfile[]): string {
       : profiles.find((profile) => profile.id !== sourceId)?.id || "";
   const targetProfile = profiles.find((profile) => profile.id === targetId) || null;
   const runningBlocker = targetProfile?.running ? targetProfile : null;
-  const canSync = Boolean(sourceProfile && targetProfile && sourceProfile.id !== targetProfile.id);
+  const partAccount = store.syncAccountPart;
+  const partExtensions = store.syncExtensionsPart;
+  const canSync = Boolean(sourceProfile && targetProfile && sourceProfile.id !== targetProfile.id) && (partAccount || partExtensions);
   const syncingAccount = isBusyAction("account-sync");
   const accountSyncRecord =
     store.state?.accountSyncRecords.find((record) => record.sourceProfileId === sourceId && record.targetProfileId === targetId) ||
@@ -27,8 +32,8 @@ export function renderAccountSyncPanel(profiles: PublicProfile[]): string {
     <section class="account-sync-panel" data-account-sync aria-busy="${syncingAccount ? "true" : "false"}">
       <div class="section-head">
         <div>
-          <h2>账号同步</h2>
-          <span class="section-subtitle block mt-1 text-muted font-mono text-[11px] font-semibold tracking-[0.18em] uppercase">Account session</span>
+          <h2>同步</h2>
+          <span class="section-subtitle block mt-1 text-muted font-mono text-[11px] font-semibold tracking-[0.18em] uppercase">Account + Extensions</span>
         </div>
         <button type="button" class="primary agent-browser-cta" data-action="open-agent-browser-setup" ${store.busy ? "disabled" : ""}>
           ⚡ 一键造 Agent 浏览器
@@ -49,6 +54,14 @@ export function renderAccountSyncPanel(profiles: PublicProfile[]): string {
 
         <div class="account-sync-controls grid gap-2.5 justify-items-end min-w-0">
           <div class="account-sync-options flex items-center justify-end gap-2.5 min-w-0 flex-wrap [row-gap:6px]">
+            <label class="check-control self-end">
+              <input type="checkbox" data-sync-part-account ${partAccount ? "checked" : ""} ${store.busy ? "disabled" : ""} />
+              <span>账号登录态</span>
+            </label>
+            <label class="check-control self-end">
+              <input type="checkbox" data-sync-part-extensions ${partExtensions ? "checked" : ""} ${store.busy ? "disabled" : ""} />
+              <span>插件</span>
+            </label>
             <label class="check-control account-sync-launch self-end">
               <input type="checkbox" data-launch-synced-profile ${store.launchSyncedProfile ? "checked" : ""} ${store.busy ? "disabled" : ""} />
               <span>${launchLabel}</span>
@@ -56,7 +69,7 @@ export function renderAccountSyncPanel(profiles: PublicProfile[]): string {
           </div>
 
           <div class="account-sync-actions flex items-center justify-end gap-2.5 min-w-0 flex-nowrap">
-            <button type="button" class="primary ${syncingAccount ? "loading" : ""}" data-action="sync-account" ${store.busy || !canSync ? "disabled" : ""}>
+            <button type="button" class="primary ${syncingAccount ? "loading" : ""}" data-action="run-sync" ${store.busy || !canSync ? "disabled" : ""}>
               ${renderButtonLabel(syncingAccount, syncButtonLabel, syncingLabel)}
             </button>
             ${
@@ -75,15 +88,36 @@ export function renderAccountSyncPanel(profiles: PublicProfile[]): string {
 
       ${syncingAccount ? renderAccountSyncLoading(sourceProfile, targetProfile) : ""}
 
-      <div class="account-sync-note mt-2.5 text-muted text-[12px] font-semibold leading-[1.45]">
-        ${escapeHtml(accountSyncNote(sourceProfile, targetProfile, accountSyncRecord))}
-      </div>
+      ${partAccount ? renderAccountDetail(sourceProfile, targetProfile, accountSyncRecord) : ""}
 
-      ${renderAccountSyncScopeToggle()}
-      ${store.accountSyncScopeExpanded ? renderAccountSyncScope() : ""}
-
-      ${store.accountSyncResult ? renderAccountSyncResult(store.accountSyncResult) : ""}
+      ${partExtensions ? renderExtensionDetail(sourceProfile) : ""}
     </section>
+  `;
+}
+
+// 「账号明细」区块：与下方「插件明细」结构对称——左侧标题+说明，右侧差异扫描按钮，
+// 下面依次是差异预览和最近一次同步结果。
+function renderAccountDetail(
+  sourceProfile: PublicProfile | null,
+  targetProfile: PublicProfile | null,
+  accountSyncRecord: AccountSyncRecord | null
+): string {
+  const scanning = store.accountSyncDiffLoading;
+
+  return `
+    <div class="account-detail mt-7 pt-5 border-solid border-t border-line">
+      <div class="account-detail-head flex items-end justify-between gap-3 flex-wrap [row-gap:8px]">
+        <div class="min-w-0">
+          <strong>账号明细</strong>
+          <span class="block mt-1 text-muted text-[12px] leading-[1.45]">${escapeHtml(accountSyncNote(sourceProfile, targetProfile, accountSyncRecord))}</span>
+        </div>
+        <button type="button" class="${scanning ? "loading" : ""}" data-action="scan-account-diff" ${store.busy || scanning || !sourceProfile || !targetProfile ? "disabled" : ""}>
+          ${renderButtonLabel(scanning, "扫描账号差异", "扫描中…")}
+        </button>
+      </div>
+      ${renderAccountSyncDiffPreview()}
+      ${store.accountSyncResult ? renderAccountSyncResult(store.accountSyncResult) : ""}
+    </div>
   `;
 }
 
@@ -113,46 +147,76 @@ export function accountSyncNote(
   return `会用 ${sourceProfile.name} 的登录态覆盖 ${targetProfile.name} 的登录态。`;
 }
 
-export function renderAccountSyncScope(): string {
-  const syncedItems = [
-    "Google 登录态、Cookie、头像和账号身份状态",
-    "站点会话数据：Local/Session Storage、IndexedDB、Service Worker、WebStorage",
-    "账号与同步数据：Accounts、Sync Data、Sync App Settings、Trusted Vault",
-    "书签、历史记录、下载记录、快捷方式、常用网站和网站图标",
-    "浏览器设置和主题：Preferences、Secure Preferences，以及 Local State 中的登录字段"
-  ];
-  const excludedItems = [
-    "打开的标签页或窗口",
-    "保存的密码库 Login Data、证书、系统钥匙串权限",
-    "扩展安装列表、启停状态、安装包本体和可单独识别的插件数据（需要插件请用「插件同步」）",
-    "尚未落盘的数据"
-  ];
+export function renderAccountSyncDiffPreview(): string {
+  if (store.accountSyncDiffLoading) {
+    return `
+      <div class="diff-preview compact" aria-live="polite">
+        <div class="diff-preview-head">
+          <strong>账号差异预览</strong>
+          <span><span class="inline-spinner" aria-hidden="true"></span> 正在比对源与目标的账号数据…</span>
+        </div>
+      </div>
+    `;
+  }
+
+  const diff = store.accountSyncDiff;
+  if (!diff) {
+    return "";
+  }
+
+  const collapsed = store.accountSyncDiffCollapsed;
+  const changedItems = diff.items.filter((item) => item.status !== "same");
+  const visibleItems = changedItems.slice(0, 8);
+  const statusText =
+    diff.summary.changedCount || diff.summary.targetMissingCount
+      ? `${diff.summary.syncableCount} 项待同步`
+      : "源与目标的可同步账号数据当前一致。";
 
   return `
-    <div class="account-sync-scope" aria-label="账号同步范围">
-      ${renderAccountSyncScopeGroup("会同步", syncedItems)}
-      ${renderAccountSyncScopeGroup("不会同步", excludedItems)}
-    </div>
-  `;
-}
-
-export function renderAccountSyncScopeToggle(): string {
-  return `
-    <div class="account-sync-scope-toggle">
-      <button type="button" class="diff-more-button" data-action="toggle-account-sync-scope" aria-expanded="${store.accountSyncScopeExpanded ? "true" : "false"}">
-        ${store.accountSyncScopeExpanded ? "收起同步范围" : "查看同步范围"}
-      </button>
-    </div>
-  `;
-}
-
-export function renderAccountSyncScopeGroup(title: string, items: string[]): string {
-  return `
-    <div class="account-sync-scope-group">
-      <strong>${escapeHtml(title)}</strong>
-      <ul>
-        ${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
-      </ul>
+    <div class="diff-preview compact ${collapsed ? "collapsed" : ""}">
+      <div class="diff-preview-head">
+        <strong>账号差异预览</strong>
+        <div class="diff-preview-head-actions">
+          <span>${escapeHtml(statusText)}</span>
+          <button type="button" class="diff-more-button muted" data-action="toggle-account-diff-preview" aria-expanded="${collapsed ? "false" : "true"}">
+            ${collapsed ? "展开预览" : "收起预览"}
+          </button>
+        </div>
+      </div>
+      ${
+        collapsed
+          ? ""
+          : `<div class="diff-summary-grid account-diff-summary">
+        <div>
+          <span>待同步</span>
+          <strong>${diff.summary.syncableCount}</strong>
+        </div>
+        <div>
+          <span>有变化</span>
+          <strong>${diff.summary.changedCount}</strong>
+        </div>
+        <div>
+          <span>目标缺少</span>
+          <strong>${diff.summary.targetMissingCount}</strong>
+        </div>
+        <div>
+          <span>源缺少</span>
+          <strong>${diff.summary.sourceMissingCount}</strong>
+        </div>
+        <div>
+          <span>已一致</span>
+          <strong>${diff.summary.sameCount}</strong>
+        </div>
+      </div>
+      ${
+        visibleItems.length
+          ? `<div class="diff-item-list">
+              ${visibleItems.map((item) => renderDiffItem(item.label, item.reason, item.status)).join("")}
+              ${changedItems.length > visibleItems.length ? `<span>还有 ${changedItems.length - visibleItems.length} 项有差异。</span>` : ""}
+            </div>`
+          : ""
+      }`
+      }
     </div>
   `;
 }

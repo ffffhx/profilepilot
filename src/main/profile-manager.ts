@@ -38,15 +38,13 @@ import type {
   ProfileExtensionInfo,
   PublicProfile,
   Registry,
-  SetupAgentBrowserRequest,
-  SetupAgentBrowserResult,
   StoredMigratedExtension,
   StoredProfile
 } from "../shared/types";
 import { accountSyncCopySpecs, accountSyncDataScore, accountSyncRecordKey, applyAccountSyncRecordBaseline, assertAccountSyncDiskSpace, collectAccountSyncPathStats, copyAccountSyncPath, inspectAccountLocalStateDiff, inspectAccountSyncPathDiff, mergeAccountLocalStateValues, recoverInterruptedAccountSyncArtifactsForProfile, restoreAccountSyncExtensionPreferences, shouldApplyAccountDiffItem, snapshotAccountSyncExtensionPreferences, snapshotAccountSyncSourceFingerprints, summarizeAccountSyncDiff } from "./account-sync";
 import { describePortOwner, findAvailableCdpPort, isPortAvailable, makeCdpUrl, normalizeCdpPortInput, requestCdpTargets, waitForCdp } from "./cdp-client";
 import { appendUniqueExtraUrls, bringCdpPageToFront, closeFreshBlankPagesOverCdp, loadUnpackedExtensionsOverCdp, snapshotPageTargetIds, snapshotRestorableTabUrls } from "./cdp-page";
-import { focusProfileWindow, getDirectChromeCommand, isAnyMacProcessFrontmost, launchChrome, launchDetached, makeIsolatedProfileId, makeNativeProfileId, nativeChromeUserDataDir, openChromeUrl, parseProfileId, readAgentBrowserConfig, readIsolatedProfileUserName, removeAgentBrowserConfigFile, removeNativeProfileFromLocalState, resolveIsolatedProfileDataPath, scanNativeChromeProfiles, writeAgentBrowserConfigFile } from "./chrome-launch";
+import { focusProfileWindow, getDirectChromeCommand, isAnyMacProcessFrontmost, launchChrome, launchDetached, makeIsolatedProfileId, makeNativeProfileId, nativeChromeUserDataDir, openChromeUrl, parseProfileId, readIsolatedProfileUserName, removeNativeProfileFromLocalState, resolveIsolatedProfileDataPath, scanNativeChromeProfiles } from "./chrome-launch";
 import { canAutoLoadUnpackedExtensions, canLoadLocalExtensionViaCdp, canPersistExtensionInstall, copyExtensionDataPath, copyExtensionPackageToProfile, extensionDataDiffers, getMigratedExtensionLaunchPlan, getProtectedDeveloperModeRecord, inspectExtensionMigrationItem, isExtensionMigrationActionItem, isManualLoadSkipReason, isProfileRelativeExtensionSetting, makeStoredMigratedExtensionId, manualLoadExtensionReason, readProtectedExtensionInstallRecord, removeExtensionReferencesFromProfilePreferences, summarizeExtensionMigrationDiff, writeProtectedExtensionInstallRecord } from "./extension-migration";
 import { extensionDeleteRelativePaths, isLikelyExtensionId, scanProfileExtensions } from "./extension-scan";
 import { copyPath, throwIfAborted, waitIfPaused } from "./fs-copy";
@@ -162,15 +160,6 @@ export class ProfileManager {
       profile.livePrimaryUrl = summary?.primaryUrl ?? null;
       profile.liveTabCount = summary?.tabCount ?? null;
     });
-
-    // 标记当前写入全局 AGENTS.md 的 Agent 调试端点指向哪个 Profile。
-    const agentConfig = await readAgentBrowserConfig();
-    if (agentConfig) {
-      const target = profiles.find((profile) => profile.id === agentConfig.profileId);
-      if (target) {
-        target.agentConfigPort = agentConfig.port;
-      }
-    }
 
     const runningProfiles = profiles.filter((profile) => profile.running);
     const lastLaunchedProfile = profiles.find((profile) => profile.lastLaunchedAt) || null;
@@ -332,30 +321,6 @@ export class ProfileManager {
       preferredAvailable,
       preferredOwner: preferredAvailable ? null : await describePortOwner(preferredPort)
     };
-  }
-
-  // 把该独立 Profile 绑定为固定调试端口，并写入全局 AGENTS.md，
-  // 让 Claude Code 在用浏览器时优先连这个常驻 CDP 端点。
-  async setAgentBrowserConfig(profileId: string, port: number): Promise<void> {
-    const ref = parseProfileId(profileId);
-    if (ref.source !== "isolated") {
-      throw new ProfileManagerError("只有工具独立 Profile 才能设为 Agent 调试端点。", "ISOLATED_PROFILE_REQUIRED");
-    }
-    if (!Number.isInteger(port) || port < 1024 || port > 65535) {
-      throw new ProfileManagerError("调试端口必须是 1024-65535 之间的整数。", "INVALID_CDP_PORT");
-    }
-
-    const registry = await this.loadRegistry();
-    const profile = this.findIsolatedProfile(registry, ref.id);
-    profile.fixedCdpPort = port;
-    await this.saveRegistry(registry);
-
-    await writeAgentBrowserConfigFile({ profileId: makeIsolatedProfileId(profile.id), name: profile.name, port });
-  }
-
-  async clearAgentBrowserConfig(_profileId: string): Promise<void> {
-    // 只移除 AGENTS.md 里的指令块；Profile 的固定端口设置保留。
-    await removeAgentBrowserConfigFile();
   }
 
   async setMiniProfilePinned(profileId: string, pinned: boolean): Promise<void> {
@@ -1479,103 +1444,6 @@ export class ProfileManager {
     };
   }
 
-  // “一键造 Agent 浏览器”：新建独立 Profile → 从源同步登录态 → 按需同步插件 →
-  // 绑定固定端口并写入全局 AGENTS.md → 以 CDP 模式启动，得到一个登录态就绪、可直接给 agent 连接的浏览器。
-  async setupAgentBrowser(
-    request: SetupAgentBrowserRequest,
-    onProgress?: (progress: OperationProgressUpdate) => void,
-    abortSignal?: AbortSignal,
-    pauseSignal?: OperationPauseSignal
-  ): Promise<SetupAgentBrowserResult> {
-    const sourceProfileId = String(request.sourceProfileId || "");
-    const requestedPort = normalizeCdpPortInput(request.port);
-    let port = requestedPort === null ? null : await findAvailableCdpPort(requestedPort);
-    const includeExtensions = request.includeExtensions !== false;
-    if (requestedPort === null || port === null) {
-      throw new ProfileManagerError("固定调试端口必须是 1024-65535 之间的整数。", "INVALID_CDP_PORT");
-    }
-
-    const TOTAL = includeExtensions ? 5 : 4;
-    const report = (message: string, step: string, stepIndex: number): void => {
-      onProgress?.({ message, step, stepIndex, stepCount: TOTAL });
-    };
-
-    const state = await this.getState();
-    const source = state.profiles.find((profile) => profile.id === sourceProfileId);
-    if (!source) {
-      throw new ProfileManagerError("没有找到作为登录态来源的 Profile。", "PROFILE_NOT_FOUND");
-    }
-
-    report("正在创建 Agent 专用 Profile…", "创建 Profile", 1);
-    if (port !== requestedPort) {
-      report(`端口 ${requestedPort} 已被占用，已自动改用 ${port}。`, "创建 Profile", 1);
-    }
-    const name = normalizeProfileName(request.targetName || `agent-${source.name}`);
-    const created = await this.createProfile(name);
-    const targetId = makeIsolatedProfileId(created.id);
-
-    let copiedItems: AccountSyncCopiedItem[] = [];
-    let extensionResult: ExtensionMigrationResult | null = null;
-    try {
-      report("正在从源 Profile 同步登录态…", "同步登录态", 2);
-      const syncResult = await this.syncAccount(
-        { sourceProfileId, targetProfileId: targetId, launchTarget: false, onlyChanged: false },
-        (update) => report(update.message, "同步登录态", 2),
-        abortSignal,
-        pauseSignal
-      );
-      copiedItems = syncResult.copiedItems;
-
-      if (includeExtensions) {
-        report("正在扫描并同步插件…", "同步插件", 3);
-        const scan = await this.scanProfileExtensions(sourceProfileId);
-        const extensionIds = scan.extensions.map((extension) => extension.id);
-        if (extensionIds.length) {
-          extensionResult = await this.migrateExtensions(
-            {
-              sourceProfileId,
-              targetProfileId: targetId,
-              extensionIds,
-              includeData: false,
-              openInstallPages: false,
-              onlyChanged: false
-            },
-            (update) => report(update.message, "同步插件", 3)
-          );
-        }
-      }
-
-      const configStep = includeExtensions ? 4 : 3;
-      const launchStep = includeExtensions ? 5 : 4;
-      const latestAvailablePort = await findAvailableCdpPort(port);
-      if (latestAvailablePort !== port) {
-        report(`端口 ${port} 已被占用，已自动改用 ${latestAvailablePort}。`, "写入配置", configStep);
-        port = latestAvailablePort;
-      }
-      report("正在写入 Agent 调试配置（AGENTS.md）…", "写入配置", configStep);
-      await this.setAgentBrowserConfig(targetId, port);
-
-      report("正在以 CDP 模式启动…", "CDP 启动", launchStep);
-      await this.launchProfileWithCdp(targetId, port);
-    } catch (error) {
-      // 任何一步失败（含用户中止）都清理掉这个半成品 Agent Profile，避免留下垃圾。
-      await this.deleteProfile(targetId).catch(() => undefined);
-      throw error;
-    }
-
-    const finalState = await this.getState();
-    const profile = finalState.profiles.find((item) => item.id === targetId) || null;
-    return {
-      profileId: targetId,
-      profileName: name,
-      port,
-      cdpUrl: profile?.cdpUrl || makeCdpUrl(port),
-      copiedItems,
-      extensionResult,
-      state: finalState
-    };
-  }
-
   // 副本池：把一个登录态 Profile 批量克隆成 N 份隔离副本，每份独立 CDP 端口、登录态一致。
   // 复用单份链路 createProfile → syncAccount →（可选）migrateExtensions，再绑定固定端口与副本来源。
   async cloneProfiles(
@@ -1591,7 +1459,6 @@ export class ProfileManager {
     }
     const includeExtensions = Boolean(request.includeExtensions);
     const launchAfter = Boolean(request.launchAfter);
-    const setAgentEndpoint = Boolean(request.setAgentEndpoint);
 
     const state = await this.getState();
     const source = state.profiles.find((profile) => profile.id === sourceProfileId);
@@ -1661,11 +1528,6 @@ export class ProfileManager {
         await this.deleteProfile(targetId).catch(() => undefined);
         throw error;
       }
-    }
-
-    // 可选：把第一份副本写入全局 AGENTS.md，作为 Agent 的固定调试端点（等同旧「一键造 Agent 浏览器」）。
-    if (setAgentEndpoint && created[0]?.port) {
-      await this.setAgentBrowserConfig(created[0].profileId, created[0].port);
     }
 
     return { sourceProfileId, created, state: await this.getState() };
@@ -1810,7 +1672,7 @@ export class ProfileManager {
     return { sourceProfileId: sourceId, launched, failed, state: await this.getState() };
   }
 
-  // 改写独立 Profile 的副本元数据（固定端口 / 克隆来源 / 项目标签），只动 registry，不写 AGENTS.md。
+  // 改写独立 Profile 的副本元数据（固定端口 / 克隆来源 / 项目标签），只动 registry。
   private async setStoredCloneMeta(
     profileId: string,
     meta: { fixedCdpPort?: number | null; clonedFromProfileId?: string | null; projectTag?: string | null }
@@ -2265,7 +2127,6 @@ export class ProfileManager {
       cdpPort: runtimeProfile.cdpPort,
       cdpUrl: makeCdpUrl(runtimeProfile.cdpPort),
       fixedCdpPort: null,
-      agentConfigPort: null,
       listeningPorts: runtimeProfile.listeningPorts,
       pinnedToMini: false,
       clonedFromProfileId: null,
@@ -2302,7 +2163,6 @@ export class ProfileManager {
       cdpPort: runtimeProfile.cdpPort,
       cdpUrl: makeCdpUrl(runtimeProfile.cdpPort),
       fixedCdpPort: profile.fixedCdpPort ?? null,
-      agentConfigPort: null,
       listeningPorts: runtimeProfile.listeningPorts,
       pinnedToMini: false,
       clonedFromProfileId: profile.clonedFromProfileId ?? null,

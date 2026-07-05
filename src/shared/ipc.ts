@@ -7,8 +7,6 @@ export const IPC_CHANNELS = {
   connectRunningSystemChrome: "profiles:system:connect-running-chrome",
   suggestCdpPort: "profiles:cdp:suggest-port",
   getCdpLiveView: "profiles:cdp:live-view",
-  setAgentBrowserConfig: "profiles:agent:set-config",
-  clearAgentBrowserConfig: "profiles:agent:clear-config",
   cloneProfiles: "profiles:clone:create",
   refreshClones: "profiles:clone:refresh",
   resetClone: "profiles:clone:reset",
@@ -45,7 +43,6 @@ export const IPC_CHANNELS = {
   migrateExtensions: "profiles:extensions:migrate",
   deleteProfileExtension: "profiles:extensions:delete",
   syncAccount: "profiles:account:sync",
-  setupAgentBrowser: "profiles:agent:setup-browser",
   cancelOperation: "profiles:operation:cancel",
   controlOperation: "profiles:operation:control",
   operationProgress: "profiles:operation-progress"

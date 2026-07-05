@@ -4,8 +4,6 @@ import type {
   AccountSyncDiffResult,
   AccountSyncRequest,
   AccountSyncResult,
-  SetupAgentBrowserRequest,
-  SetupAgentBrowserResult,
   CloneProfilesRequest,
   CloneProfilesResult,
   RefreshClonesResult,
@@ -41,10 +39,6 @@ const profileManagerApi: ProfileManagerApi = {
     ipcRenderer.invoke(IPC_CHANNELS.connectRunningSystemChrome, id),
   suggestCdpPort: (preferredPort?: number | null): Promise<CdpPortSuggestion> =>
     ipcRenderer.invoke(IPC_CHANNELS.suggestCdpPort, preferredPort),
-  setAgentBrowserConfig: (id: string, port: number): Promise<AppState> =>
-    ipcRenderer.invoke(IPC_CHANNELS.setAgentBrowserConfig, id, port),
-  clearAgentBrowserConfig: (id: string): Promise<AppState> =>
-    ipcRenderer.invoke(IPC_CHANNELS.clearAgentBrowserConfig, id),
   setMiniProfilePinned: (id: string, pinned: boolean): Promise<AppState> =>
     ipcRenderer.invoke(IPC_CHANNELS.setMiniProfilePinned, id, pinned),
   setMiniProfileOrder: (ids: string[]): Promise<AppState> =>
@@ -107,8 +101,6 @@ const profileManagerApi: ProfileManagerApi = {
     ipcRenderer.invoke(IPC_CHANNELS.deleteProfileExtension, profileId, extensionId),
   syncAccount: (request: AccountSyncRequest): Promise<AccountSyncResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.syncAccount, request),
-  setupAgentBrowser: (request: SetupAgentBrowserRequest): Promise<SetupAgentBrowserResult> =>
-    ipcRenderer.invoke(IPC_CHANNELS.setupAgentBrowser, request),
   cloneProfiles: (request: CloneProfilesRequest): Promise<CloneProfilesResult> =>
     ipcRenderer.invoke(IPC_CHANNELS.cloneProfiles, request),
   refreshClones: (sourceProfileId: string): Promise<RefreshClonesResult> =>

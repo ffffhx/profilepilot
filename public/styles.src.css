@@ -1701,6 +1701,10 @@ body:not(.booted) .migration-panel {
   grid-template-columns: repeat(7, minmax(0, 1fr));
 }
 
+.account-diff-summary {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
 .diff-summary-grid div {
   min-width: 0;
   background: var(--panel);
@@ -3883,6 +3887,7 @@ body:not(.booted) .layout {
   .migration-result-grid,
   .account-sync-result-grid,
   .extension-diff-summary,
+  .account-diff-summary,
   .migration-result-body,
   .operation-progress-steps,
   .migration-modal-summary,

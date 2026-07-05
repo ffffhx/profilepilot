@@ -82,7 +82,6 @@ export function normalizeMigrationProfileSelection(profiles: PublicProfile[]): v
     store.extensionScan = null;
     store.selectedExtensionIds.clear();
     store.extensionScanPreviewCollapsed = false;
-    store.migrationSourceMenuOpen = false;
     return;
   }
 
@@ -91,7 +90,6 @@ export function normalizeMigrationProfileSelection(profiles: PublicProfile[]): v
     store.extensionScan = null;
     store.selectedExtensionIds.clear();
     store.extensionScanPreviewCollapsed = false;
-    store.migrationSourceMenuOpen = false;
   }
 
   if (!profiles.some((profile) => profile.id === store.migrationTargetId) || store.migrationTargetId === store.migrationSourceId) {

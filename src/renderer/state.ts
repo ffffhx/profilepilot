@@ -1,4 +1,4 @@
-import { AccountSyncResult, AppState, BusyState, CdpLiveView, ExtensionMigrationDiffResult, ExtensionMigrationResult, ExtensionScanResult, GlobalInstructionFileId, GlobalInstructionsSnapshot, ModalState, ToastKind } from "./types";
+import { AccountSyncDiffResult, AccountSyncResult, AppState, BusyState, CdpLiveView, ExtensionMigrationDiffResult, ExtensionMigrationResult, ExtensionScanResult, GlobalInstructionFileId, GlobalInstructionsSnapshot, ModalState, ToastKind } from "./types";
 
 export const root = document.querySelector<HTMLDivElement>("#app");
 
@@ -45,20 +45,24 @@ export interface RendererState {
   extensionMigrationResult: ExtensionMigrationResult | null;
   extensionScanPreviewCollapsed: boolean;
   openProfileMenuId: string | null;
-  migrationSourceMenuOpen: boolean;
   migrationTargetMenuOpen: boolean;
   accountSyncMenuOpen: "source" | "target" | null;
   accountSyncSourceId: string | null;
   accountSyncTargetId: string | null;
   launchSyncedProfile: boolean;
-  accountSyncScopeExpanded: boolean;
+  // 合并同步面板的内容开关：默认账号登录态和插件都同步，允许只勾其一。
+  syncAccountPart: boolean;
+  syncExtensionsPart: boolean;
+  // 账号同步差异扫描（源 vs 目标）：手动触发，换源/换目标/同步完成后清空。
+  accountSyncDiff: AccountSyncDiffResult | null;
+  accountSyncDiffLoading: boolean;
+  accountSyncDiffCollapsed: boolean;
   accountSyncResult: AccountSyncResult | null;
   clonePoolSourceId: string | null;
   clonePoolMenuOpen: boolean;
   clonePoolCount: number;
   clonePoolIncludeExtensions: boolean;
   clonePoolLaunchAfter: boolean;
-  clonePoolSetEndpoint: boolean;
   clonePoolRecycleDays: number;
   globalInstructions: GlobalInstructionsSnapshot | null;
   globalInstructionsLoading: boolean;
@@ -102,20 +106,22 @@ export const store: RendererState = {
   extensionMigrationResult: null,
   extensionScanPreviewCollapsed: false,
   openProfileMenuId: null,
-  migrationSourceMenuOpen: false,
   migrationTargetMenuOpen: false,
   accountSyncMenuOpen: null,
   accountSyncSourceId: null,
   accountSyncTargetId: null,
   launchSyncedProfile: true,
-  accountSyncScopeExpanded: false,
+  syncAccountPart: true,
+  syncExtensionsPart: true,
+  accountSyncDiff: null,
+  accountSyncDiffLoading: false,
+  accountSyncDiffCollapsed: false,
   accountSyncResult: null,
   clonePoolSourceId: null,
   clonePoolMenuOpen: false,
   clonePoolCount: 3,
   clonePoolIncludeExtensions: false,
   clonePoolLaunchAfter: false,
-  clonePoolSetEndpoint: false,
   clonePoolRecycleDays: 7,
   globalInstructions: null,
   globalInstructionsLoading: false,

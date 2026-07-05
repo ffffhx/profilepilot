@@ -3,9 +3,11 @@ import { store } from "../state";
 import { ExtensionMigrationCopiedExtension, ExtensionMigrationDiffItem, ExtensionMigrationLoadedExtension, ExtensionMigrationResult, ExtensionMigrationSkippedExtension, ExtensionScanResult, ProfileExtensionInfo, PublicProfile } from "../types";
 import { escapeHtml, extensionInstallTypeLabel, formatDate, profileStatusLabel, renderButtonLabel, renderDiffItem, renderOperationProgress, sourceLabel } from "../util";
 
-export function renderExtensionMigrationPanel(profiles: PublicProfile[]): string {
-  const sourceId = store.migrationSourceId || profiles[0]?.id || "";
-  const sourceProfile = profiles.find((profile) => profile.id === sourceId) || null;
+// 合并同步面板里的「插件明细」区块：与账号同步共用源/目标 Profile。
+// 默认整块可不展开操作（一键同步会自动扫描并同步全部插件）；
+// 扫描后可勾选只同步部分插件、单独同步所选插件，或删除插件。
+export function renderExtensionDetail(sourceProfile: PublicProfile | null): string {
+  const sourceId = sourceProfile?.id || "";
   const activeScan = store.extensionScan?.profileId === sourceId ? store.extensionScan : null;
   const selectedCount = activeScan
     ? activeScan.extensions.filter((extension) => store.selectedExtensionIds.has(extension.id)).length
@@ -13,105 +15,31 @@ export function renderExtensionMigrationPanel(profiles: PublicProfile[]): string
   const allSelected = Boolean(
     activeScan?.extensions.length && activeScan.extensions.every((extension) => store.selectedExtensionIds.has(extension.id))
   );
-  const hasAvailableTarget = profiles.some((profile) => profile.id !== sourceId);
-  const canMigrate = Boolean(sourceProfile && activeScan && selectedCount && hasAvailableTarget);
   const scanning = isBusyAction("scan-extensions");
   const migrating = isBusyAction("migrate-extensions");
 
   return `
-    <section class="migration-panel" data-extension-migration aria-busy="${migrating ? "true" : "false"}">
-      <div class="section-head">
-        <div>
-          <h2>插件同步</h2>
-          <span class="section-subtitle block mt-1 text-muted font-mono text-[11px] font-semibold tracking-[0.18em] uppercase">Extensions</span>
+    <div class="extension-detail mt-7 pt-5 border-solid border-t border-line" data-extension-migration aria-busy="${migrating ? "true" : "false"}">
+      <div class="extension-detail-head flex items-end justify-between gap-3 flex-wrap [row-gap:8px]">
+        <div class="min-w-0">
+          <strong>插件明细</strong>
+          <span class="block mt-1 text-muted text-[12px] leading-[1.45]">一键同步默认带上源 Profile 的全部插件；扫描差异后可勾选只同步部分插件，或删除插件。</span>
         </div>
-        ${sourceProfile ? renderMigrationSourceSummary(sourceProfile, activeScan) : ""}
-      </div>
-
-      <div class="migration-source-bar grid grid-cols-[minmax(240px,360px)_auto] [justify-content:start] [column-gap:12px] [row-gap:10px] items-end mt-[14px]">
-        <div class="migration-source-field min-w-0 relative">
-          <span id="migration-source-label">源 Profile</span>
-          ${renderMigrationSourcePicker(profiles, sourceId, sourceProfile)}
+        <div class="flex items-center gap-3 flex-wrap">
+          <label class="check-control" title="勾选后差异对比和同步都会带上插件数据（chrome.storage / IndexedDB 等）">
+            <input type="checkbox" data-include-extension-data ${store.includeExtensionData ? "checked" : ""} ${store.busy ? "disabled" : ""} />
+            <span>包含插件数据</span>
+          </label>
+          <button type="button" class="${scanning ? "loading" : ""}" data-action="scan-extensions" ${store.busy || !sourceProfile ? "disabled" : ""}>
+            ${renderButtonLabel(scanning, "扫描插件差异", "扫描中…")}
+          </button>
         </div>
-        <button type="button" class="${scanning ? "loading" : ""}" data-action="scan-extensions" ${store.busy || !sourceProfile ? "disabled" : ""}>
-          ${renderButtonLabel(scanning, "扫描源 Profile 插件", "扫描中…")}
-        </button>
       </div>
 
       ${migrating ? renderOperationProgress("migrate-extensions", "插件同步进度") : ""}
       ${store.extensionMigrationResult ? renderExtensionMigrationResult(store.extensionMigrationResult) : ""}
-      ${activeScan ? renderExtensionScan(activeScan, selectedCount, allSelected, canMigrate) : renderExtensionScanEmpty()}
-    </section>
-  `;
-}
-
-export function renderMigrationSourcePicker(
-  profiles: PublicProfile[],
-  selectedProfileId: string,
-  selectedProfile: PublicProfile | null
-): string {
-  const expanded = store.migrationSourceMenuOpen && profiles.length > 0;
-
-  return `
-    <div class="profile-select ${expanded ? "open" : ""}" data-migration-source-select>
-      <button
-        type="button"
-        class="profile-select-trigger"
-        data-action="toggle-migration-source-menu"
-        aria-haspopup="listbox"
-        aria-expanded="${expanded ? "true" : "false"}"
-        aria-labelledby="migration-source-label"
-        ${store.busy || !profiles.length ? "disabled" : ""}
-      >
-        <span class="profile-select-trigger-copy">
-          <span class="status-dot ${selectedProfile?.running ? "running" : ""}"></span>
-          <strong>${escapeHtml(selectedProfile?.name || "无可用 Profile")}</strong>
-        </span>
-        <span class="profile-select-caret" aria-hidden="true"></span>
-      </button>
-      ${expanded ? renderMigrationSourceMenu(profiles, selectedProfileId) : ""}
-    </div>
-  `;
-}
-
-export function renderMigrationSourceMenu(profiles: PublicProfile[], selectedProfileId: string): string {
-  return `
-    <div class="profile-select-menu" id="migration-source-menu" role="listbox" aria-labelledby="migration-source-label">
-      ${profiles.map((profile) => renderMigrationSourceOption(profile, selectedProfileId)).join("")}
-    </div>
-  `;
-}
-
-export function renderMigrationSourceOption(profile: PublicProfile, selectedProfileId: string): string {
-  const selected = profile.id === selectedProfileId;
-
-  return `
-    <button
-      type="button"
-      class="profile-select-option ${selected ? "selected" : ""}"
-      data-action="select-migration-source"
-      data-id="${escapeHtml(profile.id)}"
-      role="option"
-      aria-selected="${selected ? "true" : "false"}"
-      ${store.busy ? "disabled" : ""}
-    >
-      <span class="profile-select-option-main">
-        <span class="status-dot ${profile.running ? "running" : profile.source === "native" ? "native" : ""}"></span>
-        <strong>${escapeHtml(profile.name)}</strong>
-        ${profile.isDefault ? '<span class="native-badge">Default</span>' : ""}
-      </span>
-      <span class="profile-select-option-state ${profile.running ? "running" : ""}">${profile.running ? "运行中" : "未运行"}</span>
-    </button>
-  `;
-}
-
-export function renderMigrationSourceSummary(profile: PublicProfile, scan: ExtensionScanResult | null): string {
-  const extensionCount = scan ? `${scan.extensions.length} 个插件` : "未扫描";
-
-  return `
-    <div class="migration-source-summary">
-      <strong>${escapeHtml(profile.name)}</strong>
-      <span>${sourceLabel(profile)} · ${profileStatusLabel(profile)} · ${extensionCount}</span>
+      ${activeScan ? renderExtensionMigrationDiffPreview("panel") : ""}
+      ${activeScan ? renderExtensionScan(activeScan, selectedCount, allSelected) : ""}
     </div>
   `;
 }
@@ -175,20 +103,10 @@ export function renderMigrationTargetOption(profile: PublicProfile, targetId: st
   `;
 }
 
-export function renderExtensionScanEmpty(): string {
-  return `
-    <div class="extension-scan-empty flex items-center justify-between gap-3 mt-[14px] border border-dashed border-line-strong rounded-lg p-[14px] text-muted">
-      <strong>未扫描</strong>
-      <span>选择源 Profile 后扫描插件。</span>
-    </div>
-  `;
-}
-
 export function renderExtensionScan(
   scan: ExtensionScanResult,
   selectedCount: number,
-  allSelected: boolean,
-  canMigrate: boolean
+  allSelected: boolean
 ): string {
   if (!scan.extensions.length) {
     return `
@@ -210,7 +128,6 @@ export function renderExtensionScan(
           ${store.extensionScanPreviewCollapsed ? "展开预览" : "收起预览"}
         </button>
         <button type="button" data-action="select-all-extensions" ${store.busy ? "disabled" : ""}>${allSelected ? "取消全选" : "一键全选"}</button>
-        <button type="button" class="primary" data-action="migrate-extensions" ${store.busy || !canMigrate ? "disabled" : ""}>同步所选插件</button>
       </div>
     </div>
     ${
@@ -438,10 +355,11 @@ export function isExtensionMigrationActionItem(item: ExtensionMigrationDiffItem)
   );
 }
 
-export function renderExtensionMigrationDiffPreview(): string {
+export function renderExtensionMigrationDiffPreview(context: "modal" | "panel" = "modal"): string {
+  const variantClass = context === "modal" ? "modal-diff-preview" : "compact";
   if (store.extensionMigrationDiffLoading) {
     return `
-      <div class="diff-preview modal-diff-preview" aria-live="polite">
+      <div class="diff-preview ${variantClass}" aria-live="polite">
         <div class="diff-preview-head">
           <strong>插件差异预览</strong>
           <span><span class="inline-spinner" aria-hidden="true"></span> 正在检查插件差异…</span>
@@ -451,8 +369,11 @@ export function renderExtensionMigrationDiffPreview(): string {
   }
 
   if (!store.extensionMigrationDiff) {
+    if (context === "panel") {
+      return "";
+    }
     return `
-      <div class="diff-preview modal-diff-preview">
+      <div class="diff-preview ${variantClass}">
         <div class="diff-preview-head">
           <strong>插件差异预览</strong>
           <span>选择目标或同步选项后会检查本次差异。</span>
@@ -467,7 +388,7 @@ export function renderExtensionMigrationDiffPreview(): string {
   const modeText = store.extensionSyncOnlyChanged ? "已一致插件会跳过" : "已关闭，仅用于预览；同步时会重新覆盖可同步插件";
 
   return `
-    <div class="diff-preview modal-diff-preview">
+    <div class="diff-preview ${variantClass}">
       <div class="diff-preview-head">
         <strong>插件差异预览</strong>
         <span>${escapeHtml(modeText)}</span>

@@ -223,27 +223,47 @@ export async function describePortOwner(port: number): Promise<string | null> {
   }
 }
 
+// 把一整条命令行翻成“人话工具名”。很多 CDP 驱动工具是借通用运行时（node 等）启动的，
+// 单看进程名只有 "node"，对用户没信息量——这里从命令行里认出它到底是谁。
+// 认不出时退回 fallback（通常是 lsof 抓到的进程名），保证至少有个名字。
+export function driverLabelFromCommand(command: string, fallback: string): string {
+  if (command.includes("Google Chrome.app")) {
+    return "Google Chrome";
+  }
+  // Codex 的浏览器驱动跑在自带的 cua_node 运行时里，进程名只是 node，靠 Codex.app / cua_node 认出来。
+  if (command.includes("Codex.app") || command.includes("cua_node")) {
+    return "Codex";
+  }
+  if (/[\\/ ]playwright/i.test(command)) {
+    return "Playwright";
+  }
+  if (/[\\/ ]puppeteer/i.test(command)) {
+    return "Puppeteer";
+  }
+  if (command.includes("agent-browser")) {
+    return "agent-browser";
+  }
+  if (command.includes("Electron.app")) {
+    return "Electron";
+  }
+  if (command.includes("node")) {
+    return "node";
+  }
+
+  return fallback;
+}
+
 export async function processLabelForPid(pid: number, fallback: string): Promise<string> {
   try {
     const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "command="], {
       maxBuffer: 1024 * 1024,
       env: POSIX_LOCALE_ENV
     });
-    const command = stdout.trim();
-    if (command.includes("Google Chrome.app")) {
-      return "Google Chrome";
-    }
-    if (command.includes("Electron.app")) {
-      return "Electron";
-    }
-    if (command.includes("node")) {
-      return "node";
-    }
+    return driverLabelFromCommand(stdout.trim(), fallback);
   } catch {
     // Fall through to lsof's command name.
+    return fallback;
   }
-
-  return fallback;
 }
 
 export async function waitForCdp(port: number, timeoutMs: number): Promise<void> {

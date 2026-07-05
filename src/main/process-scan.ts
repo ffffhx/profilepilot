@@ -1,11 +1,13 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 import type {
+  CdpClientInfo,
   ExternalChromeInstance
 } from "../shared/types";
 import { isValidTcpPort, makeCdpUrl, parseRemoteDebuggingPort, requestCdpVersionInfo } from "./cdp-client";
 import { POSIX_LOCALE_ENV, compareNumbers, earlierIsoDate, execFileAsync, uniqueNumbers } from "./fs-util";
 import { RuntimeProfile } from "./internal-types";
+import { resolveClientContexts } from "./session-context";
 
 export function makeNativeRuntimeKey(dirName: string): string {
   return `native:${dirName}`;
@@ -187,8 +189,8 @@ export function parseLsofListeningPort(line: string): number | null {
 // 检测“谁在持久连接这些 CDP 端口”：找连向 127.0.0.1:<端口> 的 ESTABLISHED 客户端 socket
 // （形如 本地:xxxx->127.0.0.1:<端口>），持有方就是 agent-browser / Playwright / DevTools 等驱动工具。
 // 工具无关：任何 CDP 客户端都走同一个本机 TCP 端口；WebSocket 长连接常驻 ESTABLISHED，能稳定抓到。
-export async function getCdpClientsByPort(ports: number[]): Promise<Map<number, { pid: number; label: string }[]>> {
-  const result = new Map<number, { pid: number; label: string }[]>();
+export async function getCdpClientsByPort(ports: number[]): Promise<Map<number, CdpClientInfo[]>> {
+  const result = new Map<number, CdpClientInfo[]>();
   const targetPorts = uniqueNumbers(ports.filter((port) => isValidTcpPort(port)));
   if (!targetPorts.length) {
     return result;
@@ -232,7 +234,31 @@ export async function getCdpClientsByPort(ports: number[]): Promise<Map<number, 
     }
   }
 
+  await applyClientContexts(result);
   return result;
+}
+
+// lsof 抓到的进程名往往没信息量（node）或只是驱动名（agent-browser）。这里翻命令行/cwd/会话档案，
+// 把每条连接补成“工具名 + 项目 + 会话标题”，供 UI 显示与悬停 tooltip。
+async function applyClientContexts(byPort: Map<number, CdpClientInfo[]>): Promise<void> {
+  const clients: CdpClientInfo[] = [];
+  for (const list of byPort.values()) {
+    clients.push(...list);
+  }
+  if (!clients.length) {
+    return;
+  }
+  const contexts = await resolveClientContexts(clients);
+  for (const client of clients) {
+    const context = contexts.get(client.pid);
+    if (!context) {
+      continue;
+    }
+    client.label = context.label;
+    client.agent = context.agent;
+    client.project = context.project;
+    client.title = context.title;
+  }
 }
 
 // 只认“客户端那一端”：本地:xxxx->远端:<port>，远端端口才是被连接的 CDP 端口。

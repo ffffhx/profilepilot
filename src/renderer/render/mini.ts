@@ -6,6 +6,27 @@ import { cdpPortLabel, escapeHtml, liveAddrLabel, prettyCdpClientLabel, renderBu
 
 const MINI_PROFILE_LIMIT = 3;
 
+// 读数「工具名 已连接」的悬停说明：第一个客户端的 工具 / 项目 / 会话标题；多连接补一行总数。
+// escapeHtml 不动换行，title 属性里的 \n 浏览器会渲染成多行 tooltip。
+function cdpClientTooltip(clients: PublicProfile["cdpClients"]): string {
+  const primary = clients[0];
+  if (!primary) {
+    return "";
+  }
+  const lines = [primary.agent || prettyCdpClientLabel(primary.label)];
+  if (primary.project) {
+    lines.push(`项目：${primary.project}`);
+  }
+  if (primary.title) {
+    lines.push(`标题：${primary.title}`);
+  }
+  if (clients.length > 1) {
+    lines.push(`共 ${clients.length} 个连接`);
+  }
+  // 只有工具名一行时没多少信息，但仍给一个 tooltip 兜底（起码点明是谁）。
+  return lines.join("\n");
+}
+
 // 头部 logo（纸飞机 mark），与 profilepilot-logo.svg 同源
 const MINI_LOGO_MARK = `
   <svg class="mini-mark" viewBox="0 0 36 36" aria-hidden="true">
@@ -227,6 +248,8 @@ function renderMiniProfileCard(profile: PublicProfile): string {
         : port.label;
   // 被连接时在名字右侧跟一段小字：端口 ▸ 正控制哪个页面（域名）。工具名在右侧读数。
   const subLine = !busyHere && driving ? [cdpPort, liveHost].filter(Boolean).join(" ▸ ") : "";
+  // 读数悬停 tooltip：这条连接背后是哪个工具的哪个项目/会话（解析得到才显示）。
+  const readoutTip = !busyHere && driving ? cdpClientTooltip(profile.cdpClients) : "";
 
   return `
     <article class="mini-profile-card ${port.kind} ${driving ? "driving" : ""} ${busyHere ? "busy" : ""}" data-id="${profile.id}" draggable="true">
@@ -236,7 +259,7 @@ function renderMiniProfileCard(profile: PublicProfile): string {
           <span class="mini-profile-name">${escapeHtml(profile.name)}</span>
           ${subLine ? `<span class="mini-profile-sub">${escapeHtml(subLine)}</span>` : ""}
         </span>
-        <span class="mini-readout">${escapeHtml(readout)}</span>
+        <span class="mini-readout"${readoutTip ? ` title="${escapeHtml(readoutTip)}"` : ""}>${escapeHtml(readout)}</span>
       </button>
     </article>
   `;

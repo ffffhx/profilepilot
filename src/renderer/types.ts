@@ -54,6 +54,10 @@ export interface PublicProfile {
 export interface CdpClientInfo {
   pid: number;
   label: string;
+  // 这条连接背后是哪个 AI 工具的哪个会话（能解析出来时才有），用于悬停 tooltip。
+  agent?: string;
+  project?: string;
+  title?: string;
 }
 
 export interface CdpLiveTab {

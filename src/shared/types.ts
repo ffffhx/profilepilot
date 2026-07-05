@@ -53,6 +53,11 @@ export interface Registry {
 export interface CdpClientInfo {
   pid: number;
   label: string;
+  // 能解析出来时，标注这条连接背后是哪个 AI 工具的哪个会话（用于悬停 tooltip）：
+  // agent=工具名（Codex / Claude Code），project=项目目录名，title=会话首句/标题。
+  agent?: string;
+  project?: string;
+  title?: string;
 }
 
 // 实时观测：一个正在以 CDP 运行的 Profile 当前“飞在哪”。

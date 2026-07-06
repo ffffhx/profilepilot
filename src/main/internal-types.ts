@@ -1,6 +1,11 @@
 import { execFile, spawn } from "node:child_process";
 
-export type ProfileRef = { source: "native"; dirName: string } | { source: "isolated"; id: string };
+export type ProfileRef =
+  | { source: "native"; dirName: string }
+  | { source: "isolated"; id: string }
+  // 隔离 user-data-dir 里、非本工具登记的额外子 profile（在 Chrome 里手动新建的）：
+  // parentId=所属隔离 Profile 的 registry id，dirName=子 profile 目录（如 "Profile 2"）。
+  | { source: "isolated-sub"; parentId: string; dirName: string };
 
 export interface RuntimeProfile {
   pids: number[];

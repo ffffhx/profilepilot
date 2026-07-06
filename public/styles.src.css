@@ -2716,9 +2716,10 @@ body:not(.booted) .layout {
 
 /* 状态/连接/操作列用固定宽度：操作列只留两个按钮（主操作 + 更多；关闭、CDP启动都收进“更多”菜单），
    比原来窄约 145px，把空间让给 CDP 地址 / 名称列；名称、CDP 列自适应并省略。 */
+/* 四列：名称吃剩余宽度（不再截断）；状态定宽；连接列合并了原 CDP 地址（端口+驱动+会话）；操作定宽。 */
 .profiles-table th:nth-child(1),
 .profiles-table td:nth-child(1) {
-  width: 30%;
+  width: auto;
 }
 
 .profiles-table th:nth-child(2),
@@ -2726,20 +2727,14 @@ body:not(.booted) .layout {
   width: 92px;
 }
 
-/* CDP 地址列自适应剩余空间并省略；连接、操作列定宽。 */
 .profiles-table th:nth-child(3),
 .profiles-table td:nth-child(3) {
-  width: auto;
+  width: 200px;
 }
 
 .profiles-table th:nth-child(4),
 .profiles-table td:nth-child(4) {
-  width: 88px;
-}
-
-.profiles-table th:nth-child(5),
-.profiles-table td:nth-child(5) {
-  width: 172px;
+  width: 160px;
 }
 
 /* 表头单行并裁切省略：窄列下文字不再溢出盖到相邻列（修复表头“挤在一块”）。 */
@@ -2788,29 +2783,72 @@ body:not(.booted) .layout {
   color: var(--accent-bright);
 }
 
-/* 「驱动中」药丸末尾的结束连接 ✕ */
-.conn-disconnect {
+/* 连接列第一行：端口芯片 + 驱动药丸（或“空闲”）并排 */
+.conn-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-width: 0;
+}
+
+/* 端口芯片固定不缩，让工具名/空闲去吃剩余宽度并按需省略 */
+.conn-line .cdp-tip,
+.conn-line .cdp-cell {
   flex: 0 0 auto;
-  margin-left: 2px;
-  padding: 0 4px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
+}
+
+.conn-line .conn-pill {
+  min-width: 0;
+}
+
+/* CDP 已开但没人驱动 */
+.conn-idle {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
   color: var(--muted);
+  font-family: var(--font-mono);
   font-size: 11px;
-  line-height: 1;
-  cursor: pointer;
-  transition: color 0.12s ease, background 0.12s ease;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.conn-disconnect:hover:not(:disabled) {
-  background: var(--danger-soft);
-  color: var(--danger-bright);
+/* 连接列的会话身份行：⇁ 项目·标题（截断）+ 最近活动（固定不截，判断活/残连接的关键信号） */
+.conn-session {
+  display: flex;
+  align-items: baseline;
+  max-width: 100%;
+  min-width: 0;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
 }
 
-.conn-disconnect:disabled {
-  opacity: 0.4;
-  cursor: default;
+.conn-session::before {
+  content: "⇁";
+  flex: none;
+  margin-right: 4px;
+  color: var(--accent-bright);
+  opacity: 0.7;
+}
+
+.conn-session-main {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conn-session-age {
+  flex: none;
+  margin-left: 5px;
+  color: var(--accent-bright);
+  opacity: 0.85;
+  white-space: nowrap;
 }
 
 .conn-pill.attached .conn-dot {

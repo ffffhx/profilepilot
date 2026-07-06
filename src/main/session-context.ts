@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { access, stat } from "node:fs/promises";
+import { access, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import readline from "node:readline";
@@ -106,13 +106,25 @@ async function resolveOne(pid: number, comm: string): Promise<CdpClientContext> 
     };
   }
 
-  // 认不出具体会话（如独立启动、非某个 Claude 会话派生的 agent-browser）：至少把运行时名
-  // 升级成工具真名，并用它的工作目录名当“项目”，让用户知道是哪个工具、在哪个目录跑。
-  // 没有会话档案可追，故不给 sessionFile/lastActive——不伪造活跃度。
-  return {
-    label: command ? driverLabelFromCommand(command, comm) : comm,
-    project: cwd ? projectFromCwd(cwd) : undefined
-  };
+  // 独立启动的驱动（agent-browser 等）：cwd 是项目目录、不是会话 scratchpad，父子链也断了。
+  // 但如果这个项目目录当前正有会话在跑，仍能按 cwd 反查到它，补上会话标题和最近活动时间：
+  //   · Claude Code：cwd 直接映射成 ~/.claude/projects/<slug>/ 下的会话，取 mtime 最新的那个（=正在用的）。
+  //   · Codex：按 cwd 匹配当前打开着的 rollout。
+  const label = command ? driverLabelFromCommand(command, comm) : comm;
+  if (cwd) {
+    const claudeFile = await latestClaudeSessionForCwd(cwd);
+    if (claudeFile) {
+      const info = await readSessionInfo(claudeFile, "claude");
+      return { label, project: info?.project || projectFromCwd(cwd), title: info?.title, sessionFile: claudeFile };
+    }
+    const codex = await codexSessionInfo(cwd);
+    if (codex) {
+      return { label, project: projectFromCwd(cwd), title: codex.info.title, sessionFile: codex.file };
+    }
+    // 没有会话可追，至少用 cwd 目录名当项目；不给 lastActive——不伪造活跃度。
+    return { label, project: projectFromCwd(cwd) };
+  }
+  return { label };
 }
 
 // 拿工作目录名当“项目”兜底；根目录/家目录太泛，不当项目。
@@ -121,6 +133,33 @@ function projectFromCwd(cwd: string): string | undefined {
     return undefined;
   }
   return path.basename(cwd) || undefined;
+}
+
+// cwd → Claude 项目 slug（Claude 把工作目录里的 / 和 . 都换成 -）→ 该目录下最近改动的会话档案。
+// 用于驱动进程 cwd 就是项目目录（而非 scratchpad）的情况：取 mtime 最新的会话＝当前正在用的那个。
+async function latestClaudeSessionForCwd(cwd: string): Promise<string | null> {
+  const slug = cwd.replace(/[/.]/g, "-");
+  const dir = path.join(homedir(), ".claude", "projects", slug);
+  let entries: string[];
+  try {
+    entries = (await readdir(dir)).filter((name) => name.endsWith(".jsonl"));
+  } catch {
+    return null;
+  }
+  const stamped = await Promise.all(
+    entries.map(async (name) => {
+      const file = path.join(dir, name);
+      const stats = await stat(file).catch(() => null);
+      return stats ? { file, mtimeMs: stats.mtimeMs } : null;
+    })
+  );
+  let best: { file: string; mtimeMs: number } | null = null;
+  for (const item of stamped) {
+    if (item && (!best || item.mtimeMs > best.mtimeMs)) {
+      best = item;
+    }
+  }
+  return best ? best.file : null;
 }
 
 async function psCommand(pid: number): Promise<string | null> {
@@ -310,10 +349,23 @@ function titleFromMessage(raw: string): string | undefined {
   for (const line of raw.split(/\r?\n/)) {
     const text = line.trim();
     if (text) {
-      return text.slice(0, 120);
+      return decodePercentEncoding(text).slice(0, 120);
     }
   }
   return undefined;
+}
+
+// 首句常是用户粘的链接，里头的 %E9%83%A8 之类 percent-encoded 中文在 UI 里是乱码；
+// 尽量解码成可读文字。不是合法编码（如出现裸 % ）就原样返回。
+function decodePercentEncoding(text: string): string {
+  if (!text.includes("%")) {
+    return text;
+  }
+  try {
+    return decodeURIComponent(text);
+  } catch {
+    return text;
+  }
 }
 
 function isInjectedNoise(text: string): boolean {

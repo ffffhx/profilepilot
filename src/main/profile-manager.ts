@@ -44,7 +44,7 @@ import type {
 import { accountSyncCopySpecs, accountSyncDataScore, accountSyncRecordKey, applyAccountSyncRecordBaseline, assertAccountSyncDiskSpace, collectAccountSyncPathStats, copyAccountSyncPath, inspectAccountLocalStateDiff, inspectAccountSyncPathDiff, mergeAccountLocalStateValues, recoverInterruptedAccountSyncArtifactsForProfile, restoreAccountSyncExtensionPreferences, shouldApplyAccountDiffItem, snapshotAccountSyncExtensionPreferences, snapshotAccountSyncSourceFingerprints, summarizeAccountSyncDiff } from "./account-sync";
 import { describePortOwner, findAvailableCdpPort, isPortAvailable, makeCdpUrl, normalizeCdpPortInput, requestCdpTargets, waitForCdp } from "./cdp-client";
 import { appendUniqueExtraUrls, bringCdpPageToFront, closeFreshBlankPagesOverCdp, loadUnpackedExtensionsOverCdp, snapshotPageTargetIds, snapshotRestorableTabUrls } from "./cdp-page";
-import { focusProfileWindow, getDirectChromeCommand, isAnyMacProcessFrontmost, launchChrome, launchDetached, makeIsolatedProfileId, makeNativeProfileId, nativeChromeUserDataDir, openChromeUrl, parseProfileId, readIsolatedProfileUserName, removeNativeProfileFromLocalState, resolveIsolatedProfileDataPath, scanNativeChromeProfiles } from "./chrome-launch";
+import { focusProfileWindow, getDirectChromeCommand, isAnyMacProcessFrontmost, launchChrome, launchDetached, makeIsolatedProfileId, makeIsolatedSubProfileId, makeNativeProfileId, nativeChromeUserDataDir, openChromeUrl, parseProfileId, readIsolatedProfileUserName, removeNativeProfileFromLocalState, resolveIsolatedProfileDataPath, scanChromeProfilesInDir, scanNativeChromeProfiles } from "./chrome-launch";
 import { canAutoLoadUnpackedExtensions, canLoadLocalExtensionViaCdp, canPersistExtensionInstall, copyExtensionDataPath, copyExtensionPackageToProfile, extensionDataDiffers, getMigratedExtensionLaunchPlan, getProtectedDeveloperModeRecord, inspectExtensionMigrationItem, isExtensionMigrationActionItem, isManualLoadSkipReason, isProfileRelativeExtensionSetting, makeStoredMigratedExtensionId, manualLoadExtensionReason, readProtectedExtensionInstallRecord, removeExtensionReferencesFromProfilePreferences, summarizeExtensionMigrationDiff, writeProtectedExtensionInstallRecord } from "./extension-migration";
 import { extensionDeleteRelativePaths, isLikelyExtensionId, scanProfileExtensions } from "./extension-scan";
 import { copyPath, throwIfAborted, waitIfPaused } from "./fs-copy";
@@ -108,7 +108,10 @@ export class ProfileManager {
         const bTime = b.lastLaunchedAt || b.createdAt || "";
         return bTime.localeCompare(aTime);
       });
-    const profiles = [...nativeProfiles, ...isolatedProfiles];
+    // 隔离 user-data-dir 里额外的子 profile（在 Chrome 里手动新建、本工具没登记的）也枚举出来，
+    // 挂到各自所属的隔离目录组下，和系统 Profile 一样成行展示（支持启动/显示）。
+    const isolatedSubProfiles = await this.buildIsolatedSubProfiles(registry, runtime);
+    const profiles = [...nativeProfiles, ...isolatedProfiles, ...isolatedSubProfiles];
 
     // 补算副本组信息：每个副本解析出源名，每个源统计有多少副本指向它。
     const profileNameById = new Map(profiles.map((profile) => [profile.id, profile.name]));
@@ -246,7 +249,7 @@ export class ProfileManager {
       return;
     }
 
-    const profile = this.findIsolatedProfile(registry, ref.id);
+    const profile = this.findIsolatedProfile(registry, this.requireIsolatedId(ref));
     profile.name = name;
     await this.saveRegistry(registry);
   }
@@ -262,10 +265,24 @@ export class ProfileManager {
         return;
       }
 
-      await this.launchIsolatedProfile(ref.id);
+      if (ref.source === "isolated-sub") {
+        await this.launchIsolatedSubProfile(ref.parentId, ref.dirName);
+        return;
+      }
+
+      await this.launchIsolatedProfile(this.requireIsolatedId(ref));
     } finally {
       this.inFlightLaunches.delete(profileId);
     }
+  }
+
+  // 启动隔离目录里的额外子 profile：带上 user-data-dir + profile-directory 单独拉起该子 profile 的窗口。
+  // 实例已在运行时，Chrome 单例握手会在现有实例里打开这个子 profile 的窗口。
+  private async launchIsolatedSubProfile(parentId: string, dirName: string): Promise<void> {
+    const registry = await this.loadRegistry();
+    const parent = this.findIsolatedProfile(registry, parentId);
+    const userDataDir = this.isolatedProfilePath(parent);
+    await launchChrome([`--user-data-dir=${userDataDir}`, `--profile-directory=${dirName}`, "--no-first-run"]);
   }
 
   async launchProfileWithCdp(profileId: string, portInput?: number | null): Promise<void> {
@@ -280,7 +297,7 @@ export class ProfileManager {
     this.acquireLaunchLock(profileId);
     try {
       await this.recoverAccountSyncArtifactsBeforeLaunch(profileId);
-      await this.launchIsolatedProfileWithCdp(ref.id, portInput);
+      await this.launchIsolatedProfileWithCdp(this.requireIsolatedId(ref), portInput);
     } finally {
       this.inFlightLaunches.delete(profileId);
     }
@@ -556,14 +573,14 @@ export class ProfileManager {
       }
 
       if (urls.length) {
-        await this.launchIsolatedProfileWithUrls(ref.id, urls, {
+        await this.launchIsolatedProfileWithUrls(this.requireIsolatedId(ref), urls, {
           cdpPort: plan.cdpPort,
           forceCdp: Boolean(plan.cdpPort)
         });
       } else if (plan.cdpPort) {
-        await this.launchIsolatedProfileWithCdp(ref.id, plan.cdpPort);
+        await this.launchIsolatedProfileWithCdp(this.requireIsolatedId(ref), plan.cdpPort);
       } else {
-        await this.launchIsolatedProfile(ref.id);
+        await this.launchIsolatedProfile(this.requireIsolatedId(ref));
       }
       return plan.urls.length;
     } finally {
@@ -631,7 +648,9 @@ export class ProfileManager {
     const args =
       profile.source === "isolated"
         ? [`--user-data-dir=${profile.path}`, "--no-first-run"]
-        : [`--profile-directory=${profile.dirName}`, "--no-first-run"];
+        : profile.source === "isolated-sub"
+          ? [`--user-data-dir=${profile.userDataDir}`, `--profile-directory=${profile.dirName}`, "--no-first-run"]
+          : [`--profile-directory=${profile.dirName}`, "--no-first-run"];
     launchDetached(command, args);
 
     const deadline = Date.now() + 2500;
@@ -757,7 +776,7 @@ export class ProfileManager {
       if (ref.source === "native") {
         return await this.deleteNativeProfile(ref.dirName, options);
       }
-      return await this.deleteIsolatedProfile(ref.id);
+      return await this.deleteIsolatedProfile(this.requireIsolatedId(ref));
     } finally {
       this.inFlightDeletions.delete(profileId);
     }
@@ -1626,7 +1645,7 @@ export class ProfileManager {
       throw new ProfileManagerError("只有副本（独立 Profile）支持重置。", "ISOLATED_PROFILE_REQUIRED");
     }
     const registry = await this.loadRegistry();
-    const stored = this.findIsolatedProfile(registry, ref.id);
+    const stored = this.findIsolatedProfile(registry, this.requireIsolatedId(ref));
     if (!stored.clonedFromProfileId) {
       throw new ProfileManagerError("这个 Profile 不是副本，没有可重置回去的源。", "NOT_A_CLONE");
     }
@@ -1719,7 +1738,7 @@ export class ProfileManager {
       throw new ProfileManagerError("只有工具独立 Profile 才支持副本元数据。", "ISOLATED_PROFILE_REQUIRED");
     }
     const registry = await this.loadRegistry();
-    const profile = this.findIsolatedProfile(registry, ref.id);
+    const profile = this.findIsolatedProfile(registry, this.requireIsolatedId(ref));
     if (meta.fixedCdpPort !== undefined) {
       profile.fixedCdpPort = meta.fixedCdpPort;
     }
@@ -1790,7 +1809,7 @@ export class ProfileManager {
       return;
     }
 
-    await this.launchIsolatedProfileWithUrls(ref.id, urls);
+    await this.launchIsolatedProfileWithUrls(this.requireIsolatedId(ref), urls);
   }
 
   private async launchNativeProfileWithUrls(dirName: string, urls: string[]): Promise<void> {
@@ -1976,7 +1995,7 @@ export class ProfileManager {
     }
 
     const registry = await this.loadRegistry();
-    return this.isolatedProfilePath(this.findIsolatedProfile(registry, ref.id));
+    return this.isolatedProfilePath(this.findIsolatedProfile(registry, this.requireIsolatedId(ref)));
   }
 
   private async ensureStore(): Promise<void> {
@@ -2212,6 +2231,81 @@ export class ProfileManager {
     };
   }
 
+  // 取登记独立 Profile 的 registry id；对 native / isolated-sub 抛错——这些操作只对登记 Profile 有效。
+  private requireIsolatedId(ref: ReturnType<typeof parseProfileId>): string {
+    if (ref.source !== "isolated") {
+      throw new ProfileManagerError(
+        "这个操作只支持本工具登记的独立 Profile；Chrome 里手动新建的子 Profile 暂不支持。",
+        "UNSUPPORTED_SUB_PROFILE"
+      );
+    }
+    return ref.id;
+  }
+
+  // 枚举各隔离 user-data-dir 里、非本工具登记的额外子 profile（排除登记 Profile 对应的那个子目录）。
+  private async buildIsolatedSubProfiles(
+    registry: Registry,
+    runtime: Map<string, RuntimeProfile>
+  ): Promise<PublicProfile[]> {
+    const rows = await Promise.all(
+      registry.profiles.map(async (parent) => {
+        const userDataDir = this.isolatedProfilePath(parent);
+        // 登记 Profile 代表的是 Default 子目录——排除它，只留 Chrome 里额外新建的子 profile，
+        // 避免和已展示的登记 Profile 重复。（直接排除 Default，省掉每轮的磁盘打分开销。）
+        const extras = (await scanChromeProfilesInDir(userDataDir)).filter((sub) => sub.dirName !== "Default");
+        if (!extras.length) {
+          return [];
+        }
+        // 子 profile 是否运行：按各自的 profile 目录看有没有被 Chrome 进程打开（与父实例共享 CDP 端口）。
+        const openPids = await getOpenProfilePidsByPath(extras.map((sub) => sub.path));
+        const parentCdpPort = (runtime.get(userDataDir) || emptyRuntimeProfile()).cdpPort;
+        return extras.map((sub) =>
+          this.toIsolatedSubPublicProfile(parent, sub, userDataDir, openPids.get(sub.path) || [], parentCdpPort)
+        );
+      })
+    );
+    return rows.flat();
+  }
+
+  private toIsolatedSubPublicProfile(
+    parent: StoredProfile,
+    sub: NativeChromeProfile,
+    userDataDir: string,
+    pids: number[],
+    parentCdpPort: number | null
+  ): PublicProfile {
+    return {
+      id: makeIsolatedSubProfileId(parent.id, sub.dirName),
+      source: "isolated-sub",
+      name: sub.name,
+      dirName: sub.dirName,
+      path: sub.path,
+      userDataDir,
+      profileDataPath: sub.path,
+      createdAt: null,
+      lastLaunchedAt: null,
+      userName: sub.userName,
+      isDefault: false,
+      // 本工具没登记它，不提供删除/同步/克隆——只支持启动/显示。
+      deletable: false,
+      running: pids.length > 0,
+      pids,
+      // 与父隔离实例共享同一个 CDP 端口（CDP 是浏览器实例级）。
+      cdpPort: parentCdpPort,
+      cdpUrl: makeCdpUrl(parentCdpPort),
+      fixedCdpPort: null,
+      listeningPorts: [],
+      pinnedToMini: false,
+      clonedFromProfileId: null,
+      clonedFromName: null,
+      cloneCount: 0,
+      projectTag: null,
+      cdpClients: [],
+      livePrimaryUrl: null,
+      liveTabCount: null
+    };
+  }
+
   private async resolveChromeProfileDataPath(profile: PublicProfile, ensureProfilePath = false): Promise<string> {
     if (profile.source === "native") {
       return profile.path;
@@ -2261,7 +2355,7 @@ export class ProfileManager {
     }
 
     const registry = await this.loadRegistry();
-    const storedProfile = this.findIsolatedProfile(registry, ref.id);
+    const storedProfile = this.findIsolatedProfile(registry, this.requireIsolatedId(ref));
     const existing = storedProfile.migratedExtensions || [];
     const copiedIds = new Set(copiedExtensions.map((extension) => extension.id));
     storedProfile.migratedExtensions = [
@@ -2286,7 +2380,7 @@ export class ProfileManager {
 
     // 先以 registry 为真相源移除条目，成功后再尽力清理磁盘——避免“磁盘已清但 registry 还在”的不一致。
     const registry = await this.loadRegistry();
-    const storedProfile = this.findIsolatedProfile(registry, ref.id);
+    const storedProfile = this.findIsolatedProfile(registry, this.requireIsolatedId(ref));
     const copiedIds = new Set(copiedExtensions.map((extension) => extension.id));
     storedProfile.migratedExtensions = (storedProfile.migratedExtensions || []).filter(
       (extension) => !copiedIds.has(extension.id)
@@ -2323,7 +2417,7 @@ export class ProfileManager {
     }
 
     const registry = await this.loadRegistry();
-    const storedProfile = this.findIsolatedProfile(registry, ref.id);
+    const storedProfile = this.findIsolatedProfile(registry, this.requireIsolatedId(ref));
     const beforeCount = storedProfile.migratedExtensions?.length || 0;
     storedProfile.migratedExtensions = (storedProfile.migratedExtensions || []).filter(
       (extension) => extension.sourceExtensionId !== extensionId && extension.id !== makeStoredMigratedExtensionId(extensionId)
@@ -2377,7 +2471,12 @@ export class ProfileManager {
 
   private async getPublicProfile(profileId: string): Promise<PublicProfile> {
     const ref = parseProfileId(profileId);
-    const expectedId = ref.source === "native" ? makeNativeProfileId(ref.dirName) : makeIsolatedProfileId(ref.id);
+    const expectedId =
+      ref.source === "native"
+        ? makeNativeProfileId(ref.dirName)
+        : ref.source === "isolated-sub"
+          ? makeIsolatedSubProfileId(ref.parentId, ref.dirName)
+          : makeIsolatedProfileId(this.requireIsolatedId(ref));
     const state = await this.getState();
     const profile = state.profiles.find((item) => item.id === expectedId);
 

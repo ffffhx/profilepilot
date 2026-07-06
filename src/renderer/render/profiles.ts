@@ -25,7 +25,6 @@ export function renderProfilesPanel(profiles: PublicProfile[], externalInstances
           <tr>
             <th>名称</th>
             <th>状态</th>
-            <th>CDP 地址</th>
             <th>连接</th>
             <th>操作</th>
           </tr>
@@ -44,7 +43,9 @@ export function groupProfilesByUserDataDir(profiles: PublicProfile[]): ProfileRo
   const indexByKey = new Map<string, number>();
 
   profiles.forEach((profile) => {
-    const key = `${profile.source}:${profile.userDataDir}`;
+    // 隔离目录里的额外子 profile（isolated-sub）与其父隔离 Profile 归到同一组（同一 user-data-dir）。
+    const groupSource = profile.source === "isolated-sub" ? "isolated" : profile.source;
+    const key = `${groupSource}:${profile.userDataDir}`;
     const existingIndex = indexByKey.get(key);
     if (existingIndex !== undefined) {
       groups[existingIndex].profiles.push(profile);
@@ -77,7 +78,7 @@ export function renderProfileRootRow(userDataDir: string, commonPrefix: string, 
   const tail = rootDisplayPath(userDataDir, commonPrefix);
   return `
     <tr class="table-group-row profile-root-row">
-      <td colspan="5">
+      <td colspan="4">
         <div class="profile-root-content">
           <span class="profile-root-head">
             <span class="profile-root-node" aria-hidden="true"></span>
@@ -149,9 +150,6 @@ export function renderProfileRow(profile: PublicProfile, lastInGroup = false): s
         </span>
       </td>
       <td>
-        ${renderProfileCdpCell(profile)}
-      </td>
-      <td>
         ${renderProfileConnectionCell(profile)}
       </td>
       <td>
@@ -199,42 +197,85 @@ export function cdpChip(
   return `<span class="action-tooltip cdp-tip max-w-full min-w-0" data-tooltip="${escapeHtml(fullTitle)}">${chip}</span>`;
 }
 
-// 「连接」列：显示该 Profile 的 CDP 是否正被外部工具（agent-browser 等）持久连接驱动。
-// 驱动中=有工具长连接；空闲=CDP 已开但无人连；—=未开 CDP。
+// 「连接」列（合并原 CDP 地址列）：一列讲清该 Profile 的 CDP 端点 —— 端口是否可用 + 谁在驱动。
+// 驱动中=端口 chip + ◉ 工具名 + 会话行；空闲=端口 chip + 空闲 + 当前页域名；
+// 待启动/不支持/未开启=对应 CDP 芯片。✕ 结束连接在行 hover 时右上角浮现，不占列宽。
 export function renderProfileConnectionCell(profile: PublicProfile): string {
-  const pill = renderConnPill(profile);
-  // 运行中且 CDP 可读时，在连接状态下方挂一行“当前停在哪个域名/IP”的航点摘要（可点击切换）。
-  if (!profile.running || !profile.livePrimaryUrl) {
-    return pill;
+  // CDP 未就绪（绑定待启动 / 系统不支持 / 未开启）：只显示 CDP 可用性芯片，无驱动信息。
+  if (!profile.cdpUrl) {
+    return renderProfileCdpCell(profile);
   }
-  const label = liveAddrLabel(profile);
-  const tabs = profile.liveTabCount && profile.liveTabCount > 1 ? ` · ${profile.liveTabCount} 标签` : "";
-  // 只显示当前页域名；hover 给完整 URL（含路径）。tooltip 挂在外层 .conn-live-tip 上，
-  // 否则会被 conn-live 自身的 overflow:hidden（用于截断长地址）连同 ::after 气泡一起裁掉。
-  const tip = profile.livePrimaryUrl || label;
-  return `<span class="conn-cell-stack">${pill}<span class="conn-live-tip action-tooltip" data-tooltip="${escapeHtml(tip)}"><span class="conn-live" title="${escapeHtml(tip)}">▸ ${escapeHtml(`${label}${tabs}`)}</span></span></span>`;
+
+  const portChip = cdpChip("live", cdpPortLabel(profile.cdpUrl), profile.cdpUrl, null);
+
+  // CDP 已开但无人驱动：端口 + 空闲；运行中再挂一行当前页域名。
+  if (!profile.cdpClients.length) {
+    const live = profile.running && profile.livePrimaryUrl ? renderConnLiveLine(profile) : "";
+    return `<span class="conn-cell-stack"><span class="conn-line">${portChip}<span class="conn-idle">空闲</span></span>${live}</span>`;
+  }
+
+  // 驱动中：端口 + ◉ 工具名药丸 + 会话身份行「项目 · 最近活动」（解析不到则退回当前页域名）。
+  const primary = profile.cdpClients[0];
+  const sessionText = cdpSessionText(primary);
+  const age = formatRelativeTime(primary.lastActive);
+  let subLine = "";
+  if (sessionText || age) {
+    subLine = `<span class="conn-session"><span class="conn-session-main">${escapeHtml(sessionText)}</span>${
+      age ? `<span class="conn-session-age">${escapeHtml(age)}</span>` : ""
+    }</span>`;
+  } else if (profile.running && profile.livePrimaryUrl) {
+    subLine = renderConnLiveLine(profile);
+  }
+  // 结束连接只放右侧详情栏（renderCdpClientsDetail），列表行里不再挂 ✕，避免遮挡药丸/操作。
+  return `<span class="conn-cell-stack"><span class="conn-line">${portChip}${renderConnPill(profile)}</span>${subLine}</span>`;
 }
 
-// 当前页的完整地址提示：优先“域名（IP）”，否则完整 IP/域名，再不行退回完整 URL。
+// 「当前停在哪个域名/IP」的航点行（可 hover 看完整 URL）。tooltip 挂在外层 .conn-live-tip，
+// 否则会被 conn-live 自身的 overflow:hidden（截断长地址用）连同 ::after 气泡一起裁掉。
+function renderConnLiveLine(profile: PublicProfile): string {
+  const label = liveAddrLabel(profile);
+  const tabs = profile.liveTabCount && profile.liveTabCount > 1 ? ` · ${profile.liveTabCount} 标签` : "";
+  const tip = profile.livePrimaryUrl || label;
+  return `<span class="conn-live-tip action-tooltip" data-tooltip="${escapeHtml(tip)}"><span class="conn-live" title="${escapeHtml(tip)}">▸ ${escapeHtml(`${label}${tabs}`)}</span></span>`;
+}
+
+// ◉ 工具名药丸（脉冲绿点=正在驱动）。只在有驱动连接时调用。
+// 脉冲点已表达“正在驱动”，文字直接给更有信息量的工具名（Codex / agent-browser）；
+// tooltip 给全量：工具(pid) · 项目·标题 · 最近活动 · 当前页域名。
 function renderConnPill(profile: PublicProfile): string {
-  if (profile.cdpClients.length) {
-    const clientText = profile.cdpClients.map((client) => `${client.label}(${client.pid})`).join("、");
-    const extra = profile.cdpClients.length > 1 ? ` ×${profile.cdpClients.length}` : "";
-    // tooltip 补上首个连接的会话身份与最近活动，一眼看出是哪个 session、是否还活着。
-    const primary = profile.cdpClients[0];
-    const sessionDesc = [cdpSessionText(primary), formatRelativeTime(primary.lastActive)].filter(Boolean).join(" · ");
-    const tip = sessionDesc ? `驱动中：${clientText} · ${sessionDesc}` : `驱动中：${clientText}`;
-    // 药丸末尾挂个 ✕：结束首个驱动连接（多条连接时其余去详情页逐条断）。
-    const disconnect = `<button type="button" class="conn-disconnect" data-action="disconnect-client" data-id="${escapeHtml(profile.id)}" data-pid="${primary.pid}" ${store.busy ? "disabled" : ""} title="结束这条驱动连接，不影响 Chrome" aria-label="结束驱动连接">✕</button>`;
-    return `<span class="conn-pill attached action-tooltip" data-tooltip="${escapeHtml(tip)}"><span class="conn-dot" aria-hidden="true"></span><span class="conn-label">驱动中${extra}</span>${disconnect}</span>`;
-  }
-  if (profile.cdpUrl) {
-    return `<span class="conn-pill idle action-tooltip" data-tooltip="CDP 已开启，当前没有工具连接"><span class="conn-dot" aria-hidden="true"></span><span class="conn-label">空闲</span></span>`;
-  }
-  return `<span class="conn-pill none">—</span>`;
+  const primary = profile.cdpClients[0];
+  const tool = primary.agent || prettyCdpClientLabel(primary.label);
+  const extra = profile.cdpClients.length > 1 ? ` ×${profile.cdpClients.length}` : "";
+  const clientText = profile.cdpClients.map((client) => `${client.label}(${client.pid})`).join("、");
+  const liveHost = profile.running && profile.livePrimaryUrl ? liveAddrLabel(profile) : "";
+  const tip = [
+    `驱动中：${clientText}`,
+    [cdpSessionText(primary), formatRelativeTime(primary.lastActive)].filter(Boolean).join(" · "),
+    liveHost ? `页面 ${liveHost}` : ""
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return `<span class="conn-pill attached action-tooltip" data-tooltip="${escapeHtml(tip)}"><span class="conn-dot" aria-hidden="true"></span><span class="conn-label">${escapeHtml(`${tool}${extra}`)}</span></span>`;
 }
 
 export function renderProfileActions(profile: PublicProfile): string {
+  // 隔离目录里的额外子 profile：本工具没登记它，只给「显示/启动」这一个主操作，不挂「更多」菜单
+  //（删除/同步/克隆/CDP/重命名都不适用）。
+  if (profile.source === "isolated-sub") {
+    const busyAction = profile.running ? "focus-profile" : "launch";
+    const loading = isBusyAction(profile.running ? "focus-profile" : "launch-profile", { profileId: profile.id });
+    const tip = profile.running ? focusButtonTitle(profile) : launchButtonTitle(profile);
+    return `
+      <div class="profile-actions" data-profile-actions>
+        <span class="action-tooltip" data-tooltip="${escapeHtml(tip)}">
+          <button type="button" class="action-button accent ${loading ? "loading" : ""}" data-action="${busyAction}" data-id="${profile.id}" ${store.busy ? "disabled" : ""}>
+            ${renderButtonLabel(loading, profile.running ? "显示" : "启动", profile.running ? "显示中…" : "启动中…")}
+          </button>
+        </span>
+      </div>
+    `;
+  }
+
   const menuOpen = store.openProfileMenuId === profile.id;
   const cdpLaunchDisabled = store.busy || profile.running || profile.source !== "isolated";
   const deleteDisabled = store.busy || !profile.deletable;
@@ -314,7 +355,7 @@ export function renderEmpty(): string {
 export function renderExternalRows(instances: ExternalChromeInstance[]): string {
   return `
     <tr class="table-group-row">
-      <td colspan="5">
+      <td colspan="4">
         <span>外部实例 · 其他工具（agent-browser 等）自管，仅支持显示 / 关闭</span>
         <span class="count">${instances.length}</span>
       </td>

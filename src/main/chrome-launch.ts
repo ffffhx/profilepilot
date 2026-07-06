@@ -472,9 +472,13 @@ export async function readCommandVersion(command: string, args: string[]): Promi
 }
 
 export async function scanNativeChromeProfiles(): Promise<NativeChromeProfile[]> {
-  const userDataDir = nativeChromeUserDataDir();
-  const localState = await readChromeLocalState();
-  const infoCache = localState.profile?.info_cache || {};
+  return scanChromeProfilesInDir(nativeChromeUserDataDir());
+}
+
+// 枚举任意 user-data-dir 里的所有 profile 子目录（读它的 Local State → info_cache）。
+// 原生系统目录和隔离目录复用同一套逻辑；隔离目录里的额外子 profile 由此发现。
+export async function scanChromeProfilesInDir(userDataDir: string): Promise<NativeChromeProfile[]> {
+  const infoCache = (await readChromeLocalStateFrom(userDataDir)).profile?.info_cache || {};
 
   return Object.entries(infoCache)
     // dirName 来自 Chrome 的 Local State，过滤掉含 ../ 或路径分隔符的恶意目录名。
@@ -496,8 +500,12 @@ export async function scanNativeChromeProfiles(): Promise<NativeChromeProfile[]>
 }
 
 export async function readChromeLocalState(): Promise<ChromeLocalState> {
+  return readChromeLocalStateFrom(nativeChromeUserDataDir());
+}
+
+async function readChromeLocalStateFrom(userDataDir: string): Promise<ChromeLocalState> {
   try {
-    const raw = await fs.readFile(nativeChromeLocalStatePath(), "utf8");
+    const raw = await fs.readFile(path.join(userDataDir, "Local State"), "utf8");
     return JSON.parse(raw) as ChromeLocalState;
   } catch {
     return {};
@@ -551,6 +559,13 @@ export function parseProfileId(profileId: string): ProfileRef {
     return { source: "native", dirName: profileId.slice("native:".length) };
   }
 
+  if (profileId.startsWith("isolated-sub:")) {
+    const rest = profileId.slice("isolated-sub:".length);
+    const sep = rest.indexOf(":");
+    // parentId 是 registry uuid（无冒号），冒号后整段是子 profile 目录名（可含空格，如 "Profile 2"）。
+    return { source: "isolated-sub", parentId: rest.slice(0, sep), dirName: rest.slice(sep + 1) };
+  }
+
   if (profileId.startsWith("isolated:")) {
     return { source: "isolated", id: profileId.slice("isolated:".length) };
   }
@@ -564,4 +579,8 @@ export function makeNativeProfileId(dirName: string): string {
 
 export function makeIsolatedProfileId(id: string): string {
   return `isolated:${id}`;
+}
+
+export function makeIsolatedSubProfileId(parentId: string, dirName: string): string {
+  return `isolated-sub:${parentId}:${dirName}`;
 }

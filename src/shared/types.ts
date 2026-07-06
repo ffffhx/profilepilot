@@ -91,7 +91,7 @@ export interface CdpLiveViewOptions {
   targetId?: string;
 }
 
-export type ProfileSource = "native" | "isolated";
+export type ProfileSource = "native" | "isolated" | "isolated-sub";
 
 export interface PublicProfile {
   id: string;

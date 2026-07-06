@@ -1409,6 +1409,18 @@ appRoot.addEventListener("submit", (event) => {
   });
 });
 
+// 鼠标停在带 tooltip 的元素上时暂停轮询重渲染：轮询会因实时数据（在线页面 URL / 活动时间等）
+// 变化而重建 DOM，把用户正 hover 的节点换掉，导致 tooltip 一闪。悬停期间先不刷新，移开即恢复。
+let hoveringTooltip = false;
+const TOOLTIP_HOVER_SELECTOR = ".action-tooltip, [data-tooltip], [title]";
+document.addEventListener("mousemove", (event) => {
+  const target = event.target as Element | null;
+  hoveringTooltip = Boolean(target?.closest?.(TOOLTIP_HOVER_SELECTOR));
+});
+document.addEventListener("mouseleave", () => {
+  hoveringTooltip = false;
+});
+
 if (store.viewMode === "mini") {
   render();
 }
@@ -1775,8 +1787,8 @@ if (store.viewMode === "mini") {
   });
 
   window.setInterval(() => {
-    // 拖拽排序过程中暂停轮询重渲染，否则 DOM 被重建会打断 DnD。
-    if (!store.busy && !miniDragState && !draggingProfileId && Date.now() - lastMiniScrollAt > 900) {
+    // 拖拽排序 / hover tooltip 过程中暂停轮询重渲染，否则 DOM 被重建会打断 DnD 或让 tooltip 闪。
+    if (!store.busy && !miniDragState && !draggingProfileId && !hoveringTooltip && Date.now() - lastMiniScrollAt > 900) {
       void loadState().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
     }
   }, 2500);
@@ -1788,7 +1800,8 @@ if (store.viewMode === "main") {
   startLiveViewLoop();
 
   window.setInterval(() => {
-    if (store.busy || document.hidden || store.modal) {
+    // hover 到 tooltip 上时暂停：轮询重渲染会把正 hover 的节点换掉，导致 tooltip 一闪。
+    if (store.busy || document.hidden || store.modal || hoveringTooltip) {
       return;
     }
     if (

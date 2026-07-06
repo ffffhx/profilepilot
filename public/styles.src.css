@@ -1137,6 +1137,9 @@ h3 {
     opacity 0.12s ease,
     transform 0.12s ease;
   white-space: normal;
+  /* 长 URL 等无空格长串在气泡内断行，别撑破圆角框往外溢。 */
+  overflow-wrap: anywhere;
+  word-break: break-word;
   box-shadow: 0 10px 28px rgba(2, 6, 9, 0.7), var(--glow-accent);
 }
 

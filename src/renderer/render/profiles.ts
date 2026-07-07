@@ -2,7 +2,7 @@ import { isBusyAction } from "../busy";
 import { store } from "../state";
 import { ExternalChromeInstance, PublicProfile } from "../types";
 import { renderLiveViewSection } from "./live-view";
-import { NATIVE_CDP_UNSUPPORTED_NOTE, cdpLaunchButtonTitle, cdpPortLabel, cdpSessionText, deleteButtonTitle, escapeHtml, focusButtonTitle, formatDate, formatRelativeTime, launchButtonTitle, listeningPortsNote, liveAddrLabel, prettyCdpClientLabel, profileStatusLabel, renderButtonLabel, sourceDetail } from "../util";
+import { NATIVE_CDP_UNSUPPORTED_NOTE, cdpClientToolSummary, cdpLaunchButtonTitle, cdpPortLabel, cdpSessionText, contentionNotice, contentionNoticeShort, deleteButtonTitle, escapeHtml, focusButtonTitle, formatDate, formatRelativeTime, launchButtonTitle, listeningPortsNote, liveAddrLabel, prettyCdpClientLabel, profileStatusLabel, renderButtonLabel, sourceDetail } from "../util";
 
 interface ProfileRootGroup {
   key: string;
@@ -137,6 +137,7 @@ export function renderProfileRow(profile: PublicProfile, lastInGroup = false): s
             <span class="status-dot w-[9px] h-[9px] flex-[0_0_auto] rounded-full bg-line-strong ${profile.running ? "running" : profile.source === "native" ? "native" : ""}"></span>
             <span class="profile-name block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[15px] font-[650] leading-[1.25]">${escapeHtml(profile.name)}</span>
             ${profile.isDefault ? '<span class="native-badge inline-flex items-center justify-center border-solid border border-warn-line rounded-full px-2 py-[3px] bg-warn-soft text-warn-bright font-mono text-[10px] font-semibold tracking-[0.06em]">Default</span>' : ""}
+            ${profile.quickLaunchSlot ? `<span class="slot-badge" title="全局快捷键 ⌘⌥${profile.quickLaunchSlot} 直启">⌘⌥${profile.quickLaunchSlot}</span>` : ""}
           </span>
           <span class="profile-path-line">
             <span>${pathKind}</span>
@@ -208,10 +209,10 @@ export function renderProfileConnectionCell(profile: PublicProfile): string {
 
   const portChip = cdpChip("live", cdpPortLabel(profile.cdpUrl), profile.cdpUrl, null);
 
-  // CDP 已开但无人驱动：端口 + 空闲；运行中再挂一行当前页域名。
+  // CDP 已开但无人驱动：只显示端口 + 空闲。当前停在哪个页面只在被外部工具驱动时才有意义，
+  // 空闲时没人关注，不展示（避免噪音）。
   if (!profile.cdpClients.length) {
-    const live = profile.running && profile.livePrimaryUrl ? renderConnLiveLine(profile) : "";
-    return `<span class="conn-cell-stack"><span class="conn-line">${portChip}<span class="conn-idle">空闲</span></span>${live}</span>`;
+    return `<span class="conn-cell-stack"><span class="conn-line">${portChip}<span class="conn-idle">空闲</span></span></span>`;
   }
 
   // 驱动中：端口 + ◉ 工具名药丸 + 会话身份行「项目 · 最近活动」（解析不到则退回当前页域名）。
@@ -241,36 +242,63 @@ function renderConnLiveLine(profile: PublicProfile): string {
 
 // ◉ 工具名药丸（脉冲绿点=正在驱动）。只在有驱动连接时调用。
 // 脉冲点已表达“正在驱动”，文字直接给更有信息量的工具名（Codex / agent-browser）；
-// tooltip 给全量：工具(pid) · 项目·标题 · 最近活动 · 当前页域名。
+// tooltip 是结构化卡片：警示（如有）/ 工具 / 会话 / 活动，一类信息一行、各有颜色标注——
+// pid、完整警示、归属说明这些细节都在详情栏，hover 只回答“谁在驱动、干什么、多久前”。
+// 判定有争用（多个会话抢同一 Profile/tab）时药丸转琥珀警示。
 function renderConnPill(profile: PublicProfile): string {
   const primary = profile.cdpClients[0];
   const tool = primary.agent || prettyCdpClientLabel(primary.label);
   const extra = profile.cdpClients.length > 1 ? ` ×${profile.cdpClients.length}` : "";
-  const clientText = profile.cdpClients.map((client) => `${client.label}(${client.pid})`).join("、");
-  const liveHost = profile.running && profile.livePrimaryUrl ? liveAddrLabel(profile) : "";
-  const tip = [
-    `驱动中：${clientText}`,
-    [cdpSessionText(primary), formatRelativeTime(primary.lastActive)].filter(Boolean).join(" · "),
-    liveHost ? `页面 ${liveHost}` : ""
+  const warning = contentionNoticeShort(profile);
+  const age = formatRelativeTime(primary.lastActive);
+  // 项目和会话标题分两行展示：项目是「在哪个仓库/目录」，标题是这次会话的抬头，不是一回事，别挤一行。
+  const rows = [
+    warning ? `<span class="tip-row tip-warn">${escapeHtml(warning)}</span>` : "",
+    `<span class="tip-row"><em class="tip-tag">工具</em><span class="tip-tool">${escapeHtml(cdpClientToolSummary(profile.cdpClients))}</span></span>`,
+    primary.session ? `<span class="tip-row"><em class="tip-tag">会话</em><span class="tip-project">${escapeHtml(primary.session)}</span></span>` : "",
+    primary.project ? `<span class="tip-row"><em class="tip-tag">项目</em><span class="tip-project">${escapeHtml(primary.project)}</span></span>` : "",
+    primary.title ? `<span class="tip-row"><em class="tip-tag">标题</em><span class="tip-session">${escapeHtml(primary.title)}</span></span>` : "",
+    age ? `<span class="tip-row"><em class="tip-tag">活动</em><span class="tip-age">${escapeHtml(age)}</span></span>` : "",
+    primary.note ? `<span class="tip-row"><em class="tip-tag">说明</em><span class="tip-note">${escapeHtml(primary.note)}</span></span>` : ""
   ]
     .filter(Boolean)
-    .join(" · ");
-  return `<span class="conn-pill attached action-tooltip" data-tooltip="${escapeHtml(tip)}"><span class="conn-dot" aria-hidden="true"></span><span class="conn-label">${escapeHtml(`${tool}${extra}`)}</span></span>`;
+    .join("");
+  return `<span class="conn-pill attached ${warning ? "contention" : ""}"><span class="conn-dot" aria-hidden="true"></span><span class="conn-label">${escapeHtml(`${tool}${extra}${warning ? " ⚠" : ""}`)}</span><span class="conn-tip-card" role="tooltip">${rows}</span></span>`;
 }
 
 export function renderProfileActions(profile: PublicProfile): string {
-  // 隔离目录里的额外子 profile：本工具没登记它，只给「显示/启动」这一个主操作，不挂「更多」菜单
-  //（删除/同步/克隆/CDP/重命名都不适用）。
+  // 隔离目录里的额外子 profile：本工具没登记它，同步/克隆/CDP/改名都不适用，
+  // 主操作只给「显示/启动」；「更多」菜单只挂一个「删除」（删目录 + 从父目录 Local State 摘除）。
   if (profile.source === "isolated-sub") {
-    const busyAction = profile.running ? "focus-profile" : "launch";
-    const loading = isBusyAction(profile.running ? "focus-profile" : "launch-profile", { profileId: profile.id });
+    const focusingSub = isBusyAction("focus-profile", { profileId: profile.id });
+    const launchingSub = isBusyAction("launch-profile", { profileId: profile.id });
+    const deletingSub = isBusyAction("delete-profile", { profileId: profile.id });
     const tip = profile.running ? focusButtonTitle(profile) : launchButtonTitle(profile);
+    const subPrimaryLoading = focusingSub || launchingSub || deletingSub;
+    const subPrimaryLabel = deletingSub ? "删除中…" : profile.running ? "显示中…" : "启动中…";
+    const subMenuOpen = store.openProfileMenuId === profile.id;
     return `
       <div class="profile-actions" data-profile-actions>
         <span class="action-tooltip" data-tooltip="${escapeHtml(tip)}">
-          <button type="button" class="action-button accent ${loading ? "loading" : ""}" data-action="${busyAction}" data-id="${profile.id}" ${store.busy ? "disabled" : ""}>
-            ${renderButtonLabel(loading, profile.running ? "显示" : "启动", profile.running ? "显示中…" : "启动中…")}
+          <button type="button" class="action-button accent ${subPrimaryLoading ? "loading" : ""}" data-action="${profile.running ? "focus-profile" : "launch"}" data-id="${profile.id}" ${store.busy ? "disabled" : ""}>
+            ${renderButtonLabel(subPrimaryLoading, profile.running ? "显示" : "启动", subPrimaryLabel)}
           </button>
+        </span>
+        <span class="menu-anchor relative inline-flex">
+          <button type="button" class="action-button menu-button" data-action="toggle-profile-menu" data-id="${profile.id}" aria-expanded="${subMenuOpen ? "true" : "false"}" ${store.busy ? "disabled" : ""}>更多</button>
+          ${
+            subMenuOpen
+              ? `
+                <div class="action-menu absolute top-[calc(100%+6px)] right-0 z-40 grid w-40 overflow-visible border-solid border border-line-strong rounded-lg bg-panel-raise [box-shadow:var(--shadow)] p-[5px]" role="menu">
+                  <span class="action-tooltip" data-tooltip="删除这个子 Profile（会先关闭它所在的整个隔离实例）">
+                    <button type="button" class="danger ${deletingSub ? "loading" : ""}" data-action="delete" data-id="${profile.id}" ${store.busy ? "disabled" : ""}>
+                      ${renderButtonLabel(deletingSub, "删除子 Profile", "删除中…")}
+                    </button>
+                  </span>
+                </div>
+              `
+              : ""
+          }
         </span>
       </div>
     `;
@@ -289,34 +317,57 @@ export function renderProfileActions(profile: PublicProfile): string {
   const miniPinnedBusy = isBusyAction("mini-pin", { profileId: profile.id });
   const miniPinDisabled = store.busy || (!profile.pinnedToMini && (store.state?.miniProfileIds.length || 0) >= 3);
 
+  // 独立 Profile（工具 Profile）未运行时，主按钮默认走 CDP 启动——这才是本工具的核心用途（喂给 agent）；
+  // 普通启动挪到「更多」菜单。系统 Profile 不支持端口式 CDP，保持普通启动。
+  const running = profile.running;
+  const preferCdp = !running && profile.source === "isolated";
+  // 有固定端口的独立 Profile：主按钮一键直启到该端口（不弹框，与悬浮窗一致）；
+  // 没有固定端口的：走端口选择弹窗（launch-cdp）让用户挑一个。
+  const cdpQuick = preferCdp && profile.fixedCdpPort != null;
+  // 关闭 / 删除等从「更多」菜单触发的操作，执行时菜单已收起、只剩全屏 disabled，看起来像卡死。
+  // 这里把进行中的状态显示到行内始终可见的主按钮上（转圈 + 「关闭中…/删除中…」）。
+  const baseTip = running
+    ? focusButtonTitle(profile)
+    : preferCdp
+      ? cdpLaunchButtonTitle(profile)
+      : launchButtonTitle(profile);
+  const baseAction = running ? "focus-profile" : preferCdp ? (cdpQuick ? "launch-cdp-quick" : "launch-cdp") : "launch";
+  const baseIdle = running ? "显示" : preferCdp ? "CDP 启动" : "启动";
+  const baseBusy = running ? focusing : preferCdp ? launchingCdp : launching;
+  const menuOpBusyLabel = deleting
+    ? "删除中…"
+    : closing
+      ? "关闭中…"
+      : renaming
+        ? "保存中…"
+        : openingFolder
+          ? "打开中…"
+          : "";
+  const primaryLoading = baseBusy || Boolean(menuOpBusyLabel);
+  const primaryLoadingLabel = menuOpBusyLabel || (running ? "显示中…" : preferCdp ? "CDP 启动中…" : "启动中…");
+
   return `
     <div class="profile-actions" data-profile-actions>
-      ${
-        profile.running
-          ? `
-            <span class="action-tooltip" data-tooltip="${escapeHtml(focusButtonTitle(profile))}">
-              <button type="button" class="action-button accent ${focusing ? "loading" : ""}" data-action="focus-profile" data-id="${profile.id}" ${store.busy ? "disabled" : ""}>
-                ${renderButtonLabel(focusing, "显示", "显示中…")}
-              </button>
-            </span>
-          `
-          : `
-            <span class="action-tooltip" data-tooltip="${escapeHtml(launchButtonTitle(profile))}">
-              <button type="button" class="action-button accent ${launching ? "loading" : ""}" data-action="launch" data-id="${profile.id}" ${store.busy ? "disabled" : ""}>
-                ${renderButtonLabel(launching, "启动", "启动中…")}
-              </button>
-            </span>
-          `
-      }
+      <span class="action-tooltip" data-tooltip="${escapeHtml(baseTip)}">
+        <button type="button" class="action-button accent ${primaryLoading ? "loading" : ""}" data-action="${baseAction}" data-id="${profile.id}" ${store.busy ? "disabled" : ""}>
+          ${renderButtonLabel(primaryLoading, baseIdle, primaryLoadingLabel)}
+        </button>
+      </span>
       <span class="menu-anchor relative inline-flex">
       <button type="button" class="action-button menu-button" data-action="toggle-profile-menu" data-id="${profile.id}" aria-expanded="${menuOpen ? "true" : "false"}" ${store.busy ? "disabled" : ""}>更多</button>
       ${
         menuOpen
           ? `
             <div class="action-menu absolute top-[calc(100%+6px)] right-0 z-40 grid w-40 overflow-visible border-solid border border-line-strong rounded-lg bg-panel-raise [box-shadow:var(--shadow)] p-[5px]" role="menu">
-              <button type="button" class="menu-accent ${launchingCdp ? "loading" : ""}" data-action="launch-cdp" data-id="${profile.id}" title="${escapeHtml(cdpLaunchButtonTitle(profile))}" ${cdpLaunchDisabled ? "disabled" : ""}>
-                ${renderButtonLabel(launchingCdp, "CDP 启动", "启动中…")}
-              </button>
+              ${
+                preferCdp
+                  ? `<button type="button" class="${launching ? "loading" : ""}" data-action="launch" data-id="${profile.id}" title="${escapeHtml(launchButtonTitle(profile))}" ${store.busy ? "disabled" : ""}>
+                      ${renderButtonLabel(launching, "普通启动（不开 CDP）", "启动中…")}
+                    </button>`
+                  : `<button type="button" class="menu-accent ${launchingCdp ? "loading" : ""}" data-action="launch-cdp" data-id="${profile.id}" title="${escapeHtml(cdpLaunchButtonTitle(profile))}" ${cdpLaunchDisabled ? "disabled" : ""}>
+                      ${renderButtonLabel(launchingCdp, "CDP 启动", "启动中…")}
+                    </button>`
+              }
               <button type="button" class="menu-warn ${closing ? "loading" : ""}" data-action="close-profile" data-id="${profile.id}" ${store.busy || !profile.running ? "disabled" : ""}>
                 ${renderButtonLabel(closing, "关闭", "关闭中…")}
               </button>
@@ -329,6 +380,7 @@ export function renderProfileActions(profile: PublicProfile): string {
               <button type="button" class="${miniPinnedBusy ? "loading" : ""}" data-action="${profile.pinnedToMini ? "unpin-mini-profile" : "pin-mini-profile"}" data-id="${profile.id}" ${miniPinDisabled ? "disabled" : ""}>
                 ${renderButtonLabel(miniPinnedBusy, profile.pinnedToMini ? "取消悬浮窗固定" : "固定到悬浮窗", "保存中…")}
               </button>
+              ${renderQuickLaunchSlotRow(profile)}
               <span class="action-tooltip" data-tooltip="${escapeHtml(deleteButtonTitle(profile))}">
                 <button type="button" class="danger ${deleting ? "loading" : ""}" data-action="delete" data-id="${profile.id}" ${deleteDisabled ? "disabled" : ""}>
                   ${renderButtonLabel(deleting, "删除 Profile", "删除中…")}
@@ -340,6 +392,33 @@ export function renderProfileActions(profile: PublicProfile): string {
       }
       </span>
     </div>
+  `;
+}
+
+// 「更多」菜单里的全局快捷键指派行：下拉选 ⌘⌥1~9 或「无」。
+// 选中已被别的 Profile 占用的槽位会顶掉对方（主进程 setQuickLaunchSlot 处理），下拉里用「· 占用」标注。
+function renderQuickLaunchSlotRow(profile: PublicProfile): string {
+  const current = profile.quickLaunchSlot ?? null;
+  // 各槽位当前绑定的 Profile 名，用于标注「已被谁占用」。
+  const slotOwners = new Map<number, string>();
+  (store.state?.profiles || []).forEach((item) => {
+    if (item.quickLaunchSlot) {
+      slotOwners.set(item.quickLaunchSlot, item.name);
+    }
+  });
+  const options = [`<option value=""${current === null ? " selected" : ""}>无</option>`];
+  for (let slot = 1; slot <= 9; slot += 1) {
+    const owner = slotOwners.get(slot);
+    const takenByOther = owner && current !== slot ? ` · ${owner}` : "";
+    options.push(`<option value="${slot}"${current === slot ? " selected" : ""}>⌘⌥${slot}${escapeHtml(takenByOther)}</option>`);
+  }
+  return `
+    <label class="menu-slot-row">
+      <span class="menu-slot-label">全局快捷键</span>
+      <select class="menu-slot-select" data-quick-launch-slot data-id="${profile.id}" ${store.busy ? "disabled" : ""}>
+        ${options.join("")}
+      </select>
+    </label>
   `;
 }
 
@@ -384,16 +463,16 @@ export function renderExternalRow(instance: ExternalChromeInstance): string {
         <span class="state-pill inline-flex items-center justify-center min-w-[58px] border-solid border border-line-strong rounded-full px-[9px] py-1 bg-transparent text-muted font-mono text-[11px] font-semibold tracking-[0.06em] running">运行中</span>
       </td>
       <td>
-        ${
-          instance.cdpUrl
-            ? cdpChip("live", cdpPortLabel(instance.cdpUrl), instance.cdpUrl, null)
-            : instance.cdpPort
-              ? cdpChip("stale", `:${instance.cdpPort}`, `http://127.0.0.1:${instance.cdpPort}`, "未响应")
-              : cdpChip("off", "未开启", null, null)
-        }
-      </td>
-      <td>
-        <span class="conn-pill none action-tooltip" data-tooltip="外部实例由其他工具自管，不在本工具的连接监测范围内">—</span>
+        <span class="conn-cell-stack"><span class="conn-line">
+          ${
+            instance.cdpUrl
+              ? cdpChip("live", cdpPortLabel(instance.cdpUrl), instance.cdpUrl, null)
+              : instance.cdpPort
+                ? cdpChip("stale", `:${instance.cdpPort}`, `http://127.0.0.1:${instance.cdpPort}`, "未响应")
+                : cdpChip("off", "未开启", null, null)
+          }
+          <span class="conn-pill none action-tooltip" data-tooltip="外部实例由其他工具自管，不在本工具的连接监测范围内">—</span>
+        </span></span>
       </td>
       <td>
         <div class="profile-actions">
@@ -562,28 +641,45 @@ export function renderCdpClientsDetail(profile: PublicProfile): string {
   }
 
   const attached = profile.cdpClients.length > 0;
-  const value = attached
-    ? `驱动中 · ${profile.cdpClients.map((client) => `${client.label}(${client.pid})`).join("、")}`
-    : "当前没有工具连接";
+  // 汇总行不带 pid（进程细节对用户没信息量）；断连按钮在同名多连接时才用 pid 区分。
+  const value = attached ? `驱动中 · ${cdpClientToolSummary(profile.cdpClients)}` : "当前没有工具连接";
 
-  // 首个连接的会话身份行：哪个项目 / 哪个会话在驱动 + 最近活动时间（区分活会话与残留连接）。
-  const primary = attached ? profile.cdpClients[0] : undefined;
-  const sessionText = primary ? cdpSessionText(primary) : "";
-  const sessionAge = primary ? formatRelativeTime(primary.lastActive) : "";
-  const sessionRow =
-    sessionText || sessionAge
-      ? `<small class="detail-session">⇁ ${escapeHtml(sessionText)}${
-          sessionAge ? `<span class="detail-session-age">${escapeHtml(sessionAge)}</span>` : ""
-        }</small>`
-      : "";
+  // 判定有争用时的警示横幅：说明谁在抢 + 建议分流到副本。
+  const warning = contentionNotice(profile);
+  const warningRow = warning ? `<small class="detail-contention">${escapeHtml(warning)}</small>` : "";
+
+  // 每条连接一行会话身份：工具 · 项目·标题 + 最近活动时间（区分活会话与残留连接）。
+  // 多会话共用一个 Profile 正是争用问题的现场，必须每条都平铺出来，不能只显示第一条。
+  const sessionRows = profile.cdpClients
+    .map((client) => {
+      const tool = client.agent || prettyCdpClientLabel(client.label);
+      const sessionText = cdpSessionText(client);
+      const sessionAge = formatRelativeTime(client.lastActive);
+      const main = [tool, sessionText].filter(Boolean).join(" · ");
+      if (!main && !sessionAge && !client.note) {
+        return "";
+      }
+      // 归属说明（共享 daemon 推测/归属未知）hover 可见，正文行保持紧凑。
+      return `<small class="detail-session"${client.note ? ` title="${escapeHtml(client.note)}"` : ""}>⇁ ${escapeHtml(main)}${
+        sessionAge ? `<span class="detail-session-age">${escapeHtml(sessionAge)}</span>` : ""
+      }${client.note && !sessionText ? `<span class="detail-session-note">${escapeHtml(client.note)}</span>` : ""}</small>`;
+    })
+    .join("");
 
   // 每条连接给一个「结束连接」按钮：对该客户端进程发信号断开，不动 Chrome。
+  // 同名工具（如两个 Claude Code 会话）多连接时补 pid 区分，避免不知道结束的是哪一条。
   const disconnecting = isBusyAction("disconnect-client", { profileId: profile.id });
+  const toolCounts = new Map<string, number>();
+  profile.cdpClients.forEach((client) => {
+    const tool = client.agent || prettyCdpClientLabel(client.label);
+    toolCounts.set(tool, (toolCounts.get(tool) || 0) + 1);
+  });
   const disconnectRow = attached
     ? `<div class="detail-session-actions">${profile.cdpClients
         .map((client) => {
           const tool = client.agent || prettyCdpClientLabel(client.label);
-          return `<button type="button" class="action-button warn ${disconnecting ? "loading" : ""}" data-action="disconnect-client" data-id="${escapeHtml(profile.id)}" data-pid="${client.pid}" ${store.busy ? "disabled" : ""} title="结束这条驱动连接，不影响 Chrome">结束 ${escapeHtml(tool)} 连接</button>`;
+          const name = (toolCounts.get(tool) || 0) > 1 ? `${tool}(${client.pid})` : tool;
+          return `<button type="button" class="action-button warn ${disconnecting ? "loading" : ""}" data-action="disconnect-client" data-id="${escapeHtml(profile.id)}" data-pid="${client.pid}" ${store.busy ? "disabled" : ""} title="结束这条驱动连接，不影响 Chrome">结束 ${escapeHtml(name)} 连接</button>`;
         })
         .join("")}</div>`
     : "";
@@ -592,10 +688,41 @@ export function renderCdpClientsDetail(profile: PublicProfile): string {
     <div class="detail-row${attached ? " detail-row-attached" : ""}">
       <span>Agent 连接</span>
       <strong>${escapeHtml(value)}</strong>
-      ${sessionRow}
+      ${warningRow}
+      ${sessionRows}
       ${disconnectRow}
-      <small class="detail-note">检测连到本机 CDP 端口的持久连接；有工具保持长连接（如 agent-browser）时会标为“驱动中”。会话行显示是哪个项目/会话在驱动，以及它最近一次活动时间——很久没动的多半是残留连接，可用「结束连接」断开它（不影响 Chrome）。</small>
+      ${renderShellIntegrationRow(profile)}
+      <small class="detail-note">检测连到本机 CDP 端口的持久连接；有工具保持长连接（如 agent-browser）时会标为“驱动中”。会话行显示是哪个项目/会话在驱动，以及它最近一次活动时间——很久没动的多半是残留连接，可用「结束连接」断开它（不影响 Chrome）。多个活跃会话共用同一 Profile 会互相抢标签页/焦点，建议用「克隆」给第二个会话分一个副本。</small>
     </div>
   `;
+}
+
+// 会话识别 shell 集成的引导/状态行。只在“有 agent-browser 驱动连接”时出现——
+// 这正是归属能力有无差别的现场；没有相关连接时不打扰。
+function renderShellIntegrationRow(profile: PublicProfile): string {
+  const status = store.state?.shellIntegration;
+  if (!status?.supported) {
+    return "";
+  }
+  const hasAgentBrowser = profile.cdpClients.some((client) => client.label.startsWith("agent-browser"));
+  if (!hasAgentBrowser) {
+    return "";
+  }
+
+  const busy = isBusyAction("shell-integration");
+  if (!status.installed) {
+    return `
+      <small class="detail-note">启用「会话识别」后，每个 AI 会话的 agent-browser 自动隔离并携带会话身份——这里就能显示是哪个会话在驱动（往 ${escapeHtml(status.path)} 写一段可移除的配置，对新开会话生效）。</small>
+      <div class="detail-session-actions">
+        <button type="button" class="action-button accent ${busy ? "loading" : ""}" data-action="enable-shell-integration" ${store.busy ? "disabled" : ""}>${renderButtonLabel(busy, "启用会话识别", "写入中…")}</button>
+      </div>
+    `;
+  }
+  if (status.managed) {
+    return `
+      <small class="detail-note">✓ 会话识别已启用（由本工具写入 ${escapeHtml(status.path)}）。<button type="button" class="detail-inline-link" data-action="remove-shell-integration" ${store.busy ? "disabled" : ""}>移除</button></small>
+    `;
+  }
+  return `<small class="detail-note">✓ 会话识别已启用（${escapeHtml(status.path)} 中手动配置）。</small>`;
 }
 

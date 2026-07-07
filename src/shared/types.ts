@@ -47,6 +47,9 @@ export interface Registry {
   miniProfileIds?: string[];
   // 悬浮窗里 Profile 行的自定义排序（拖拽调整）；不在列表里的 Profile 排在末尾，保持自然顺序。
   miniProfileOrder?: string[];
+  // 全局快捷键 ⌘⌥N 直启的槽位映射：键为槽位号 "1"~"9"，值为该槽位绑定的 profile 公开 id。
+  // 一个槽位至多一个 profile，一个 profile 至多占一个槽位（改绑时会顶掉旧的）。
+  quickLaunchSlots?: Record<string, string>;
 }
 
 // 当前持有该 Profile CDP 端口持久连接的客户端（agent-browser / Playwright / DevTools 等）。
@@ -58,8 +61,35 @@ export interface CdpClientInfo {
   agent?: string;
   project?: string;
   title?: string;
+  // 使用方自报的命名 session（agent-browser --session <名>）；tooltip 里单独一行。
+  session?: string;
   // 会话档案最后活动时间（ISO）＝该会话最近一次动静，用来区分活会话与残留连接。
   lastActive?: string;
+  // 归属可信度说明：agent-browser 走共享 daemon 时归属是按其启动目录推测的（或推测不出），
+  // 这里给出人话解释，UI 拼进 tooltip；精确归属时为空。
+  note?: string;
+}
+
+// tab 争用观测里“最抖”的那个标签页：观察窗口内 URL 变化次数与往返翻转（A→B→A）次数。
+export interface CdpContentionChurn {
+  title: string;
+  url: string;
+  changes: number;
+  flipBacks: number;
+}
+
+// 多会话争用判定（主进程算好给 UI 直接用）：
+// level=contention：观察到同一标签页 URL 短时间反复往返改写 + ≥2 条驱动连接 → 疑似正在抢 tab；
+// level=risk：≥2 条连接且其中 ≥2 个会话最近都有活动 → 有争用风险（还没观察到实际抢写）；
+// level=null：单连接 / 一活一残留等正常情况。
+export interface CdpContentionInfo {
+  // 最近活动时间落在活跃窗口内的连接数（解析不出 lastActive 的连接不计入）。
+  activeClientCount: number;
+  // 争用观察者是否已连上该端口（没连上时 churn 恒为 null，判定只能靠活跃连接数）。
+  observing: boolean;
+  // 仅 level=contention 时给出：被抢写的标签页与其抖动读数。
+  churn: CdpContentionChurn | null;
+  level: "contention" | "risk" | null;
 }
 
 // 实时观测：一个正在以 CDP 运行的 Profile 当前“飞在哪”。
@@ -113,6 +143,8 @@ export interface PublicProfile {
   fixedCdpPort: number | null;
   listeningPorts: number[];
   pinnedToMini: boolean;
+  // 全局快捷键 ⌘⌥N 直启的槽位（1~9）；未指派为 null。可在主窗口「更多」菜单里改绑。
+  quickLaunchSlot: number | null;
   // 副本池字段：克隆来源、来源名（已解析）、作为源时有多少副本指向它、项目标签。
   clonedFromProfileId: string | null;
   clonedFromName: string | null;
@@ -123,6 +155,8 @@ export interface PublicProfile {
   // 实时观测摘要：当前主标签页 URL 与打开的标签数（不含截图，随 getState 轮询刷新）；未运行/无 CDP 时为 null。
   livePrimaryUrl: string | null;
   liveTabCount: number | null;
+  // 多会话争用判定：≥2 条驱动连接时才可能非 null 的 level；无 CDP/单连接时为 null 或 level=null。
+  cdpContention: CdpContentionInfo | null;
 }
 
 export interface NativeChromeProfile {
@@ -145,6 +179,16 @@ export interface ExternalChromeInstance {
   headless: boolean;
 }
 
+// 会话识别 shell 集成（~/.zshenv 托管块）的状态。
+// installed=注入已生效（含用户手写版本）；managed=由本工具的标记块提供，可一键移除。
+export interface ShellIntegrationStatus {
+  supported: boolean;
+  installed: boolean;
+  managed: boolean;
+  path: string;
+  error: string | null;
+}
+
 export interface AppState {
   appTitle: string;
   dataDir: string;
@@ -160,6 +204,7 @@ export interface AppState {
   externalInstances: ExternalChromeInstance[];
   miniProfileIds: string[];
   miniProfileOrder: string[];
+  shellIntegration: ShellIntegrationStatus;
 }
 
 export interface DeleteProfileResult {
@@ -490,6 +535,7 @@ export interface ProfileManagerApi {
   suggestCdpPort(preferredPort?: number | null): Promise<CdpPortSuggestion>;
   setMiniProfilePinned(id: string, pinned: boolean): Promise<AppState>;
   setMiniProfileOrder(ids: string[]): Promise<AppState>;
+  setQuickLaunchSlot(id: string, slot: number | null): Promise<AppState>;
   setMiniPanelPinned(pinned: boolean): Promise<void>;
   onMiniPanelPinnedChanged(listener: (pinned: boolean) => void): () => void;
   showMiniWindow(): Promise<void>;
@@ -510,6 +556,8 @@ export interface ProfileManagerApi {
   closeExternalInstance(userDataDir: string): Promise<AppState>;
   // 结束某条 CDP 驱动连接：对该客户端进程发信号使其断开，不动 Chrome。
   disconnectCdpClient(profileId: string, pid: number): Promise<AppState>;
+  // 启用/移除会话识别 shell 集成（~/.zshenv 托管块），返回刷新后的完整状态。
+  setShellIntegrationEnabled(enabled: boolean): Promise<AppState>;
   openProfileFolder(id: string): Promise<AppState>;
   openProfileExtensionsPage(id: string): Promise<AppState>;
   openPath(path: string): Promise<boolean>;

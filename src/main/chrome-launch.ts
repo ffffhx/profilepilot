@@ -513,7 +513,12 @@ async function readChromeLocalStateFrom(userDataDir: string): Promise<ChromeLoca
 }
 
 export async function writeChromeLocalState(localState: ChromeLocalState): Promise<void> {
-  const localStatePath = nativeChromeLocalStatePath();
+  await writeChromeLocalStateAt(nativeChromeUserDataDir(), localState);
+}
+
+// 把 Local State 写回指定 user-data-dir（原生或隔离目录都可）。原子替换 + 落一份备份。
+async function writeChromeLocalStateAt(userDataDir: string, localState: ChromeLocalState): Promise<void> {
+  const localStatePath = path.join(userDataDir, "Local State");
   const raw = await fs.readFile(localStatePath, "utf8");
   const tmpPath = `${localStatePath}.cpm-tmp-${process.pid}`;
   try {
@@ -529,13 +534,47 @@ export async function writeChromeLocalState(localState: ChromeLocalState): Promi
 }
 
 export async function removeNativeProfileFromLocalState(dirName: string): Promise<void> {
-  const localState = await readChromeLocalState();
-  if (!localState.profile?.info_cache?.[dirName]) {
+  await removeProfileFromLocalStateIn(nativeChromeUserDataDir(), dirName);
+}
+
+// 从指定 user-data-dir 的 Local State 里彻底摘掉某个 profile 子目录的记录：
+// info_cache 主记录，外加 profiles_order / last_active_profiles 里的引用、last_used 兜底，
+// 否则 Chrome 下次启动仍会“看见”这个已删目录、重新为它建空目录或报错。
+export async function removeProfileFromLocalStateIn(userDataDir: string, dirName: string): Promise<void> {
+  const localState = await readChromeLocalStateFrom(userDataDir);
+  const profile = localState.profile;
+  if (!profile) {
     return;
   }
 
-  delete localState.profile.info_cache[dirName];
-  await writeChromeLocalState(localState);
+  let changed = false;
+  if (profile.info_cache && profile.info_cache[dirName]) {
+    delete profile.info_cache[dirName];
+    changed = true;
+  }
+  if (Array.isArray(profile.profiles_order)) {
+    const next = profile.profiles_order.filter((item) => item !== dirName);
+    if (next.length !== profile.profiles_order.length) {
+      profile.profiles_order = next;
+      changed = true;
+    }
+  }
+  if (Array.isArray(profile.last_active_profiles)) {
+    const next = profile.last_active_profiles.filter((item) => item !== dirName);
+    if (next.length !== profile.last_active_profiles.length) {
+      profile.last_active_profiles = next;
+      changed = true;
+    }
+  }
+  if (profile.last_used === dirName) {
+    delete profile.last_used;
+    changed = true;
+  }
+
+  if (!changed) {
+    return;
+  }
+  await writeChromeLocalStateAt(userDataDir, localState);
 }
 
 export function nativeChromeLocalStatePath(): string {

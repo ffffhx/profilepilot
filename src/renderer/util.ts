@@ -91,9 +91,13 @@ export function sourceLabel(profile: PublicProfile): string {
 }
 
 export function sourceDetail(profile: PublicProfile): string {
-  return profile.source === "native"
-    ? "系统 Profile（Google Chrome User Data 下的子 Profile）"
-    : "工具独立 Profile（独立 User Data Dir）";
+  if (profile.source === "native") {
+    return "系统 Profile（Google Chrome User Data 下的子 Profile）";
+  }
+  if (profile.source === "isolated-sub") {
+    return "隔离目录内的子 Profile（Chrome 额外账户，与父实例共享目录）";
+  }
+  return "工具独立 Profile（独立 User Data Dir）";
 }
 
 export function extensionInstallTypeLabel(extension: ProfileExtensionInfo): string {
@@ -221,6 +225,16 @@ export function closeConfirmCopy(profile: PublicProfile): { title: string; body:
 }
 
 export function deleteConfirmCopy(profile: PublicProfile): { title: string; body: string; confirmLabel: string } {
+  if (profile.source === "isolated-sub") {
+    return {
+      title: `删除子 Profile ${profile.name}`,
+      body: profile.running
+        ? "这是隔离目录里 Chrome 额外新建的子 Profile。删除会先关闭它所在的整个隔离实例（含同目录下其它 Profile 的窗口），未保存内容可能丢失；随后把该子 Profile 目录移到废纸篓，并从该目录的 Chrome Profile 列表中摘除。"
+        : "这是隔离目录里 Chrome 额外新建的子 Profile。删除会把它的目录移到废纸篓，并从该目录的 Chrome Profile 列表中摘除。",
+      confirmLabel: profile.running ? "关闭实例并删除" : "确认删除"
+    };
+  }
+
   if (profile.running) {
     return {
       title: `删除 ${profile.name}`,
@@ -278,6 +292,46 @@ export function formatRelativeTime(value?: string | null): string {
 // 这里只补项目和会话标题（最近活动时间另外拼，避免被截断吃掉）；都解析不出时返回空串。
 export function cdpSessionText(client: CdpClientInfo): string {
   return [client.project, client.title].filter(Boolean).join(" · ");
+}
+
+// 连接列表 → 人话工具清单：同名去重计数（agent-browser ×2、Claude Code）。
+// pid 是进程细节，面向用户的汇总不带它；需要精确区分时（断连按钮）才单独补。
+export function cdpClientToolSummary(clients: CdpClientInfo[]): string {
+  const counts = new Map<string, number>();
+  for (const client of clients) {
+    const tool = client.agent || prettyCdpClientLabel(client.label);
+    counts.set(tool, (counts.get(tool) || 0) + 1);
+  }
+  return [...counts.entries()].map(([tool, count]) => (count > 1 ? `${tool} ×${count}` : tool)).join("、");
+}
+
+// 争用警示·短版（药丸 tooltip / 悬浮窗用）：一眼看懂发生了什么，细节和建议留给详情栏。
+export function contentionNoticeShort(profile: PublicProfile): string {
+  const info = profile.cdpContention;
+  if (!info?.level) {
+    return "";
+  }
+  if (info.level === "contention") {
+    const churn = info.churn;
+    return `⚠ 疑似多会话在抢同一个标签页${churn ? `（90 秒内被改写 ${churn.changes} 次）` : ""}`;
+  }
+  return `⚠ ${info.activeClientCount} 个活跃会话共用此 Profile，可能互抢标签页`;
+}
+
+// 争用判定 → 完整警示（详情栏横幅用）：带被抢标签页读数和处置建议。
+// contention=观察到实际抢写（带被抢标签页的读数）；risk=两个活跃会话共用、还没抓到抢写现场。
+export function contentionNotice(profile: PublicProfile): string {
+  const info = profile.cdpContention;
+  if (!info?.level) {
+    return "";
+  }
+  if (info.level === "contention") {
+    const churn = info.churn;
+    const tabName = churn ? churn.title || hostOf(churn.url) : "";
+    const detail = churn ? `：「${tabName}」90 秒内 URL 被改写 ${churn.changes} 次、往返翻转 ${churn.flipBacks} 次` : "";
+    return `⚠ 疑似多个会话正在抢同一个标签页${detail}。建议把其中一个会话挪到独立 Profile/副本。`;
+  }
+  return `⚠ ${info.activeClientCount} 个活跃会话共用此 Profile，可能互相抢标签页/焦点。建议给第二个会话克隆一个副本。`;
 }
 
 // 把 URL 收成一个简短的“航点”：优先域名；chrome:// 等特殊协议退回主机名/路径；解析失败截断原串。

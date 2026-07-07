@@ -7,6 +7,10 @@ import { ProfileManagerError } from "./profile-manager-error";
 export class CdpBrowserClient {
   private nextId = 1;
   private readonly pending = new Map<number, CdpPendingRequest>();
+  // CDP 事件订阅（长连接观察者用）：事件是浏览器主动推送的无 id 消息，默认丢弃；
+  // 挂了 onEvent 才分发。onDisconnect 在连接关闭时通知持有方清理状态。
+  onEvent: ((method: string, params: unknown) => void) | null = null;
+  onDisconnect: (() => void) | null = null;
 
   private constructor(private readonly socket: WebSocket) {
     this.socket.addEventListener("message", (event) => {
@@ -14,6 +18,7 @@ export class CdpBrowserClient {
     });
     this.socket.addEventListener("close", () => {
       this.rejectPending(new Error("CDP 连接已关闭"));
+      this.onDisconnect?.();
     });
   }
 
@@ -90,7 +95,13 @@ export class CdpBrowserClient {
 
   private handleMessage(event: MessageEvent): void {
     const message = parseCdpMessage(event.data);
-    if (!message || typeof message.id !== "number") {
+    if (!message) {
+      return;
+    }
+    if (typeof message.id !== "number") {
+      if (message.method && this.onEvent) {
+        this.onEvent(message.method, message.params);
+      }
       return;
     }
 

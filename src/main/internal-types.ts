@@ -54,6 +54,9 @@ export interface CdpResponse<T> {
     message?: string;
     data?: unknown;
   };
+  // CDP 事件推送（无 id 的消息）：method=事件名（如 Target.targetInfoChanged），params=事件负载。
+  method?: string;
+  params?: unknown;
 }
 
 export interface CdpPendingRequest<T = unknown> {

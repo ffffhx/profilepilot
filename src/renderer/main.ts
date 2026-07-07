@@ -50,6 +50,11 @@ profileApi().onOperationProgress((progress) => {
 
 appRoot.addEventListener("click", (event) => {
   const target = event.target instanceof Element ? event.target : null;
+  // 全局快捷键下拉是原生 <select>，点它会冒泡命中所在行的 data-action="select"，触发 render() 把
+  // 正打开的原生下拉重建掉。这里直接放行给 change 处理器，不当作行选择、也不关掉「更多」菜单。
+  if (target?.closest("[data-quick-launch-slot]")) {
+    return;
+  }
   const hadOpenProfileMenu = Boolean(store.openProfileMenuId);
   const hadAccountSyncMenu = Boolean(store.accountSyncMenuOpen);
   if (store.openProfileMenuId && !target?.closest("[data-profile-actions]")) {
@@ -899,6 +904,26 @@ appRoot.addEventListener("click", (event) => {
     return;
   }
 
+  // 主按钮的「CDP 启动」：有固定端口的独立 Profile 一键直启到该端口，不弹框。
+  if (action === "launch-cdp-quick" && id) {
+    const profile = store.state.profiles.find((item) => item.id === id);
+    if (!profile) {
+      return;
+    }
+    if (profile.source !== "isolated" || profile.running || profile.fixedCdpPort == null) {
+      return;
+    }
+    const port = profile.fixedCdpPort;
+    void withBusy(async () => {
+      store.state = await profileApi().launchProfileWithCdp(id, port);
+    }, `已以 CDP 启动 ${emphasizeName(profile.name)}（:${port}）`, {
+      key: "launch-cdp",
+      message: `正在以 CDP 启动 ${profile.name}…`,
+      profileId: id
+    });
+    return;
+  }
+
   if (action === "launch-cdp" && id) {
     const profile = store.state.profiles.find((item) => item.id === id);
     if (!profile) {
@@ -1005,6 +1030,19 @@ appRoot.addEventListener("click", (event) => {
     return;
   }
 
+  // 会话识别 shell 集成：往 ~/.zshenv 写入/移除托管块。可逆低风险，不走确认弹窗。
+  if (action === "enable-shell-integration" || action === "remove-shell-integration") {
+    const enable = action === "enable-shell-integration";
+    void withBusy(
+      async () => {
+        store.state = await profileApi().setShellIntegrationEnabled(enable);
+      },
+      enable ? "会话识别已启用，对之后新开的 agent 会话生效" : "已移除会话识别集成",
+      { key: "shell-integration", message: enable ? "正在写入 shell 集成…" : "正在移除 shell 集成…" }
+    );
+    return;
+  }
+
   if (action === "focus-profile" && id) {
     const profile = store.state.profiles.find((item) => item.id === id);
     if (!profile) {
@@ -1082,6 +1120,27 @@ appRoot.addEventListener("click", (event) => {
 appRoot.addEventListener("change", (event) => {
   const target = event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement ? event.target : null;
   if (!target || !store.state) {
+    return;
+  }
+
+  if (target instanceof HTMLSelectElement && target.matches("[data-quick-launch-slot]")) {
+    const id = target.getAttribute("data-id");
+    if (!id) {
+      return;
+    }
+    const profile = store.state.profiles.find((item) => item.id === id);
+    if (!profile) {
+      return;
+    }
+    const slot = target.value ? Number(target.value) : null;
+    store.openProfileMenuId = null;
+    void withBusy(async () => {
+      store.state = await profileApi().setQuickLaunchSlot(id, slot);
+    }, slot ? `已把 ⌘⌥${slot} 绑定到 ${emphasizeName(profile.name)}` : `已清除 ${emphasizeName(profile.name)} 的全局快捷键`, {
+      key: "quick-launch-slot",
+      message: "正在保存快捷键…",
+      profileId: id
+    });
     return;
   }
 
@@ -1412,7 +1471,7 @@ appRoot.addEventListener("submit", (event) => {
 // 鼠标停在带 tooltip 的元素上时暂停轮询重渲染：轮询会因实时数据（在线页面 URL / 活动时间等）
 // 变化而重建 DOM，把用户正 hover 的节点换掉，导致 tooltip 一闪。悬停期间先不刷新，移开即恢复。
 let hoveringTooltip = false;
-const TOOLTIP_HOVER_SELECTOR = ".action-tooltip, [data-tooltip], [title]";
+const TOOLTIP_HOVER_SELECTOR = ".action-tooltip, [data-tooltip], [title], .conn-pill";
 document.addEventListener("mousemove", (event) => {
   const target = event.target as Element | null;
   hoveringTooltip = Boolean(target?.closest?.(TOOLTIP_HOVER_SELECTOR));

@@ -44,12 +44,14 @@ import type {
 import { accountSyncCopySpecs, accountSyncDataScore, accountSyncRecordKey, applyAccountSyncRecordBaseline, assertAccountSyncDiskSpace, collectAccountSyncPathStats, copyAccountSyncPath, inspectAccountLocalStateDiff, inspectAccountSyncPathDiff, mergeAccountLocalStateValues, recoverInterruptedAccountSyncArtifactsForProfile, restoreAccountSyncExtensionPreferences, shouldApplyAccountDiffItem, snapshotAccountSyncExtensionPreferences, snapshotAccountSyncSourceFingerprints, summarizeAccountSyncDiff } from "./account-sync";
 import { describePortOwner, findAvailableCdpPort, isPortAvailable, makeCdpUrl, normalizeCdpPortInput, requestCdpTargets, waitForCdp } from "./cdp-client";
 import { appendUniqueExtraUrls, bringCdpPageToFront, closeFreshBlankPagesOverCdp, loadUnpackedExtensionsOverCdp, snapshotPageTargetIds, snapshotRestorableTabUrls } from "./cdp-page";
-import { focusProfileWindow, getDirectChromeCommand, isAnyMacProcessFrontmost, launchChrome, launchDetached, makeIsolatedProfileId, makeIsolatedSubProfileId, makeNativeProfileId, nativeChromeUserDataDir, openChromeUrl, parseProfileId, readIsolatedProfileUserName, removeNativeProfileFromLocalState, resolveIsolatedProfileDataPath, scanChromeProfilesInDir, scanNativeChromeProfiles } from "./chrome-launch";
+import { focusProfileWindow, getDirectChromeCommand, isAnyMacProcessFrontmost, launchChrome, launchDetached, makeIsolatedProfileId, makeIsolatedSubProfileId, makeNativeProfileId, nativeChromeUserDataDir, openChromeUrl, parseProfileId, readIsolatedProfileUserName, removeNativeProfileFromLocalState, removeProfileFromLocalStateIn, resolveIsolatedProfileDataPath, scanChromeProfilesInDir, scanNativeChromeProfiles } from "./chrome-launch";
 import { canAutoLoadUnpackedExtensions, canLoadLocalExtensionViaCdp, canPersistExtensionInstall, copyExtensionDataPath, copyExtensionPackageToProfile, extensionDataDiffers, getMigratedExtensionLaunchPlan, getProtectedDeveloperModeRecord, inspectExtensionMigrationItem, isExtensionMigrationActionItem, isManualLoadSkipReason, isProfileRelativeExtensionSetting, makeStoredMigratedExtensionId, manualLoadExtensionReason, readProtectedExtensionInstallRecord, removeExtensionReferencesFromProfilePreferences, summarizeExtensionMigrationDiff, writeProtectedExtensionInstallRecord } from "./extension-migration";
 import { extensionDeleteRelativePaths, isLikelyExtensionId, scanProfileExtensions } from "./extension-scan";
 import { copyPath, throwIfAborted, waitIfPaused } from "./fs-copy";
-import { POSIX_LOCALE_ENV, chromeProfileDirName, defaultDataDir, execFileAsync, exists, isProcessGoneError, isSafePathSegment, isSameFilesystemPath, makePathSegment, makeSlug, normalizeAccountSyncRecords, normalizeNativeProfileMetadata, normalizeProfile, normalizeProfileName, normalizeSafeRelativePath, shouldCopyLocalExtensionPackagePath, sleep, uniqueStrings } from "./fs-util";
+import { POSIX_LOCALE_ENV, chromeProfileDirName, defaultDataDir, execFileAsync, exists, isProcessGoneError, isRecord, isSafePathSegment, isSameFilesystemPath, makePathSegment, makeSlug, normalizeAccountSyncRecords, normalizeNativeProfileMetadata, normalizeProfile, normalizeProfileName, normalizeSafeRelativePath, shouldCopyLocalExtensionPackagePath, sleep, uniqueStrings } from "./fs-util";
 import { AccountSyncCopyPlan, AccountSyncDataLocation, ProfileRef, ProfileRestartPlan, RuntimeProfile } from "./internal-types";
+import { resolveCdpContention, syncContentionObservers } from "./cdp-contention";
+import { getShellIntegrationStatus } from "./shell-integration";
 import { addRuntimeProcess, attachListeningPorts, emptyRuntimeProfile, findExternalChromeInstances, getCdpClientsByPort, getChromeProcessPids, getOpenProfilePidsByPath, isChromeRunning, isImplicitDefaultChromeProcess, makeNativeRuntimeKey, mergeRuntimeProfiles, parseRuntimeProcess } from "./process-scan";
 import { ProfileManagerError } from "./profile-manager-error";
 
@@ -58,6 +60,8 @@ export { ProfileManagerError } from "./profile-manager-error";
 export const APP_TITLE = "ProfilePilot";
 const CHROME_REMOTE_DEBUGGING_URL = "chrome://inspect/#remote-debugging";
 const MINI_PROFILE_LIMIT = 3;
+// 全局快捷键直启的槽位数：⌘⌥1 ~ ⌘⌥9。
+const QUICK_LAUNCH_SLOT_COUNT = 9;
 
 export class ProfileManager {
   private readonly profilesDir: string;
@@ -164,6 +168,17 @@ export class ProfileManager {
       profile.liveTabCount = summary?.tabCount ?? null;
     });
 
+    // tab 争用观测：对每个 live CDP 端口维持一条观察者长连接（Target 事件流），
+    // 结合驱动连接的活跃度给出争用判定；观察连接自身的 pid 已被上面的 selfPids 过滤排除。
+    syncContentionObservers(
+      profiles.filter((profile) => profile.cdpUrl && profile.cdpPort !== null).map((profile) => profile.cdpPort as number)
+    );
+    profiles.forEach((profile) => {
+      if (profile.cdpPort !== null && profile.cdpUrl) {
+        profile.cdpContention = resolveCdpContention(profile.cdpPort, profile.cdpClients);
+      }
+    });
+
     const runningProfiles = profiles.filter((profile) => profile.running);
     const lastLaunchedProfile = profiles.find((profile) => profile.lastLaunchedAt) || null;
     const externalInstances = await findExternalChromeInstances([
@@ -175,8 +190,15 @@ export class ProfileManager {
     const miniProfileIds = normalizeMiniProfileIds(registry.miniProfileIds, validProfileIds);
     const miniProfileOrder = normalizeMiniProfileOrder(registry.miniProfileOrder, validProfileIds);
     const miniProfileIdSet = new Set(miniProfileIds);
+    const quickLaunchSlots = normalizeQuickLaunchSlots(registry.quickLaunchSlots, validProfileIds);
+    // 反向索引 profileId → 槽位号，填到每个 PublicProfile 上供 UI 展示。
+    const slotByProfileId = new Map<string, number>();
+    for (const [slotKey, boundId] of Object.entries(quickLaunchSlots)) {
+      slotByProfileId.set(boundId, Number(slotKey));
+    }
     profiles.forEach((profile) => {
       profile.pinnedToMini = miniProfileIdSet.has(profile.id);
+      profile.quickLaunchSlot = slotByProfileId.get(profile.id) ?? null;
     });
 
     return {
@@ -193,7 +215,8 @@ export class ProfileManager {
       accountSyncRecords: Object.values(registry.accountSyncRecords || {}).sort((a, b) => b.syncedAt.localeCompare(a.syncedAt)),
       externalInstances,
       miniProfileIds,
-      miniProfileOrder
+      miniProfileOrder,
+      shellIntegration: await getShellIntegrationStatus()
     };
   }
 
@@ -377,6 +400,38 @@ export class ProfileManager {
     await this.saveRegistry({
       ...registry,
       miniProfileOrder: order
+    });
+  }
+
+  // 指派 / 改绑 / 清除某 Profile 的全局快捷键槽位（⌘⌥N）。slot 传 null 清除。
+  // 语义：一个 Profile 至多占一个槽位，一个槽位至多绑一个 Profile——
+  // 把某槽位绑给新 Profile 时，会顶掉该槽位原来的 Profile，也会清掉本 Profile 之前占的槽位。
+  async setQuickLaunchSlot(profileId: string, slot: number | null): Promise<void> {
+    const state = await this.getState();
+    const validProfileIds = new Set(state.profiles.map((profile) => profile.id));
+    if (!validProfileIds.has(profileId)) {
+      throw new ProfileManagerError("没有找到这个 Profile。", "PROFILE_NOT_FOUND");
+    }
+    if (slot !== null && (!Number.isInteger(slot) || slot < 1 || slot > QUICK_LAUNCH_SLOT_COUNT)) {
+      throw new ProfileManagerError(`快捷键槽位只支持 1~${QUICK_LAUNCH_SLOT_COUNT}。`, "QUICK_LAUNCH_SLOT_RANGE");
+    }
+
+    const registry = await this.loadRegistry();
+    const slots = normalizeQuickLaunchSlots(registry.quickLaunchSlots, validProfileIds);
+    // 先清掉本 Profile 之前占的槽位（一个 Profile 至多一个槽位）。
+    for (const key of Object.keys(slots)) {
+      if (slots[key] === profileId) {
+        delete slots[key];
+      }
+    }
+    if (slot !== null) {
+      // 顶掉该槽位原来的 Profile（一个槽位至多一个 Profile），再绑给本 Profile。
+      slots[String(slot)] = profileId;
+    }
+
+    await this.saveRegistry({
+      ...registry,
+      quickLaunchSlots: slots
     });
   }
 
@@ -775,6 +830,9 @@ export class ProfileManager {
       const ref = parseProfileId(profileId);
       if (ref.source === "native") {
         return await this.deleteNativeProfile(ref.dirName, options);
+      }
+      if (ref.source === "isolated-sub") {
+        return await this.deleteIsolatedSubProfile(ref.parentId, ref.dirName);
       }
       return await this.deleteIsolatedProfile(this.requireIsolatedId(ref));
     } finally {
@@ -1930,6 +1988,11 @@ export class ProfileManager {
       registry.miniProfileOrder = nextMiniProfileOrder;
       registryChanged = true;
     }
+    const prunedQuickLaunchSlots = pruneQuickLaunchSlots(registry.quickLaunchSlots, profile.id);
+    if (prunedQuickLaunchSlots) {
+      registry.quickLaunchSlots = prunedQuickLaunchSlots;
+      registryChanged = true;
+    }
     if (registryChanged) {
       await this.saveRegistry(registry);
     }
@@ -1966,7 +2029,8 @@ export class ProfileManager {
       profiles: nextProfiles,
       accountSyncRecords,
       miniProfileIds: (registry.miniProfileIds || []).filter((profileId) => profileId !== deletedProfileId),
-      miniProfileOrder: (registry.miniProfileOrder || []).filter((profileId) => profileId !== deletedProfileId)
+      miniProfileOrder: (registry.miniProfileOrder || []).filter((profileId) => profileId !== deletedProfileId),
+      quickLaunchSlots: pruneQuickLaunchSlots(registry.quickLaunchSlots, deletedProfileId) ?? registry.quickLaunchSlots
     });
     let trashPath: string | null;
     try {
@@ -1975,6 +2039,47 @@ export class ProfileManager {
       // 移废纸篓失败：把刚移除的条目回滚回去，保持 registry 与磁盘一致。
       await this.saveRegistry(registry).catch(() => undefined);
       throw error;
+    }
+
+    return {
+      deletedProfile: publicProfile,
+      trashPath,
+      state: await this.getState()
+    };
+  }
+
+  // 删除隔离目录里的额外子 profile（Chrome 自己在父 user-data-dir 里新建的 Profile N）。
+  // 与父实例共享同一个 Chrome 进程，删目录前必须关掉整个父实例释放目录锁；
+  // 目录移废纸篓后，再从父目录的 Local State 里摘除记录（否则 Chrome 仍会显示它）。
+  private async deleteIsolatedSubProfile(parentId: string, dirName: string): Promise<DeleteProfileResult> {
+    // Default 是登记 Profile 本体，不从这里删；非法路径段直接拒绝。
+    if (!isSafePathSegment(dirName) || dirName === "Default") {
+      throw new ProfileManagerError("这个子 Profile 不能删除。", "SUB_PROFILE_NOT_DELETABLE");
+    }
+
+    const registry = await this.loadRegistry();
+    const parent = this.findIsolatedProfile(registry, parentId);
+    const userDataDir = this.isolatedProfilePath(parent);
+
+    const subId = makeIsolatedSubProfileId(parentId, dirName);
+    const state = await this.getState();
+    const publicProfile = state.profiles.find((item) => item.id === subId);
+    if (!publicProfile) {
+      throw new ProfileManagerError("没有找到这个子 Profile。", "SUB_PROFILE_NOT_FOUND");
+    }
+
+    // 子 profile 与父实例共享进程；删目录前必须关掉整个父实例（会一并关掉父 Default 及其它子 profile 窗口）。
+    await this.closeProfileIfRunning(makeIsolatedProfileId(parentId));
+
+    const subPath = path.join(userDataDir, dirName);
+    // 先移目录到废纸篓，再改 Local State（与 native 删同序）：即便中途崩溃，剩下的也只是无害孤儿。
+    const trashPath = await this.moveToTrash(subPath, dirName);
+    await removeProfileFromLocalStateIn(userDataDir, dirName);
+
+    // 子 profile 若被指派过快捷键槽位，顺手清掉。
+    const prunedQuickLaunchSlots = pruneQuickLaunchSlots(registry.quickLaunchSlots, subId);
+    if (prunedQuickLaunchSlots) {
+      await this.saveRegistry({ ...registry, quickLaunchSlots: prunedQuickLaunchSlots });
     }
 
     return {
@@ -2030,7 +2135,8 @@ export class ProfileManager {
         nativeProfiles,
         accountSyncRecords,
         miniProfileIds: normalizeMiniProfileIds(parsed.miniProfileIds),
-        miniProfileOrder: normalizeMiniProfileOrder(parsed.miniProfileOrder)
+        miniProfileOrder: normalizeMiniProfileOrder(parsed.miniProfileOrder),
+        quickLaunchSlots: normalizeQuickLaunchSlots(parsed.quickLaunchSlots)
       };
     } catch (error) {
       const backup = `${this.registryPath}.broken-${Date.now()}`;
@@ -2185,13 +2291,15 @@ export class ProfileManager {
       fixedCdpPort: null,
       listeningPorts: runtimeProfile.listeningPorts,
       pinnedToMini: false,
+      quickLaunchSlot: null,
       clonedFromProfileId: null,
       clonedFromName: null,
       cloneCount: 0,
       projectTag: null,
       cdpClients: [],
       livePrimaryUrl: null,
-      liveTabCount: null
+      liveTabCount: null,
+      cdpContention: null
     };
   }
 
@@ -2221,13 +2329,15 @@ export class ProfileManager {
       fixedCdpPort: profile.fixedCdpPort ?? null,
       listeningPorts: runtimeProfile.listeningPorts,
       pinnedToMini: false,
+      quickLaunchSlot: null,
       clonedFromProfileId: profile.clonedFromProfileId ?? null,
       clonedFromName: null,
       cloneCount: 0,
       projectTag: profile.projectTag ?? null,
       cdpClients: [],
       livePrimaryUrl: null,
-      liveTabCount: null
+      liveTabCount: null,
+      cdpContention: null
     };
   }
 
@@ -2286,8 +2396,8 @@ export class ProfileManager {
       lastLaunchedAt: null,
       userName: sub.userName,
       isDefault: false,
-      // 本工具没登记它，不提供删除/同步/克隆——只支持启动/显示。
-      deletable: false,
+      // 本工具没登记它，不提供同步/克隆/改名——但支持删除（删目录 + 从父目录 Local State 摘除记录）。
+      deletable: true,
       running: pids.length > 0,
       pids,
       // 与父隔离实例共享同一个 CDP 端口（CDP 是浏览器实例级）。
@@ -2296,13 +2406,15 @@ export class ProfileManager {
       fixedCdpPort: null,
       listeningPorts: [],
       pinnedToMini: false,
+      quickLaunchSlot: null,
       clonedFromProfileId: null,
       clonedFromName: null,
       cloneCount: 0,
       projectTag: null,
       cdpClients: [],
       livePrimaryUrl: null,
-      liveTabCount: null
+      liveTabCount: null,
+      cdpContention: null
     };
   }
 
@@ -2565,4 +2677,42 @@ function normalizeMiniProfileIds(input: unknown, validProfileIds?: Set<string>):
 function normalizeMiniProfileOrder(input: unknown, validProfileIds?: Set<string>): string[] {
   const ids = Array.isArray(input) ? uniqueStrings(input.filter((id): id is string => typeof id === "string")) : [];
   return validProfileIds ? ids.filter((id) => validProfileIds.has(id)) : ids;
+}
+
+// 归一化全局快捷键槽位映射：只保留槽位号 1~9、profileId 合法（提供 validProfileIds 时）的项；
+// 同一个 Profile 若在多个槽位里出现，只保留槽位号最小的那个（一个 Profile 至多一个槽位）。
+function normalizeQuickLaunchSlots(input: unknown, validProfileIds?: Set<string>): Record<string, string> {
+  const result: Record<string, string> = {};
+  if (!isRecord(input)) {
+    return result;
+  }
+  const seenProfiles = new Set<string>();
+  for (let slot = 1; slot <= QUICK_LAUNCH_SLOT_COUNT; slot += 1) {
+    const value = input[String(slot)];
+    if (typeof value !== "string" || !value) {
+      continue;
+    }
+    if (validProfileIds && !validProfileIds.has(value)) {
+      continue;
+    }
+    if (seenProfiles.has(value)) {
+      continue;
+    }
+    seenProfiles.add(value);
+    result[String(slot)] = value;
+  }
+  return result;
+}
+
+// 删除某 Profile 时清掉它占用的槽位。没有变化时返回 null（调用方据此决定是否需要落盘）。
+function pruneQuickLaunchSlots(input: unknown, removedProfileId: string): Record<string, string> | null {
+  const slots = normalizeQuickLaunchSlots(input);
+  let changed = false;
+  for (const key of Object.keys(slots)) {
+    if (slots[key] === removedProfileId) {
+      delete slots[key];
+      changed = true;
+    }
+  }
+  return changed ? slots : null;
 }

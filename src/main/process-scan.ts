@@ -222,6 +222,10 @@ export async function getCdpClientsByPort(ports: number[]): Promise<Map<number, 
       continue;
     }
     if (line.startsWith("n") && pid !== null) {
+      // 排除当前进程自己（快路径；所有 ProfilePilot 实例的排除见下面 dropOwnAppClients）。
+      if (pid === process.pid) {
+        continue;
+      }
       const port = parseCdpClientRemotePort(line.slice(1));
       if (port === null || !portSet.has(port)) {
         continue;
@@ -234,8 +238,49 @@ export async function getCdpClientsByPort(ports: number[]): Promise<Map<number, 
     }
   }
 
+  await dropOwnAppClients(result);
   await applyClientContexts(result);
   return result;
+}
+
+// 排除所有 ProfilePilot 进程（按可执行文件路径识别，覆盖其它实例）：
+// 实时画面截图和 tab 争用观测都会对 live 端口保持只读长连接——观察者不该出现在
+// “驱动工具”名单里，也不该被算进多会话争用的活跃连接数。
+// 注意只按“可执行路径 == 本进程 execPath”精确匹配，绝不能按进程名 Electron 过滤——
+// VS Code 等一大票工具都是 Electron 壳，它们连 CDP 时可能是真驱动。
+// ps 查询失败或查不到某 pid 时保守放行（宁可多显示，不可漏掉真驱动方）。
+async function dropOwnAppClients(byPort: Map<number, CdpClientInfo[]>): Promise<void> {
+  const pids = uniqueNumbers([...byPort.values()].flat().map((client) => client.pid));
+  if (!pids.length) {
+    return;
+  }
+
+  const ownPids = new Set<number>();
+  try {
+    const { stdout } = await execFileAsync("ps", ["-o", "pid=,comm=", "-p", pids.join(",")], {
+      maxBuffer: 1024 * 1024
+    });
+    for (const line of stdout.split("\n")) {
+      const match = line.match(/^\s*(\d+)\s+(.+?)\s*$/);
+      if (match && match[2] === process.execPath) {
+        ownPids.add(Number(match[1]));
+      }
+    }
+  } catch {
+    return;
+  }
+
+  if (!ownPids.size) {
+    return;
+  }
+  for (const [port, clients] of byPort) {
+    const kept = clients.filter((client) => !ownPids.has(client.pid));
+    if (kept.length) {
+      byPort.set(port, kept);
+    } else {
+      byPort.delete(port);
+    }
+  }
 }
 
 // lsof 抓到的进程名往往没信息量（node）或只是驱动名（agent-browser）。这里翻命令行/cwd/会话档案，
@@ -258,7 +303,9 @@ async function applyClientContexts(byPort: Map<number, CdpClientInfo[]>): Promis
     client.agent = context.agent;
     client.project = context.project;
     client.title = context.title;
+    client.session = context.session;
     client.lastActive = context.lastActive;
+    client.note = context.note;
   }
 }
 

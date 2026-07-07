@@ -677,6 +677,23 @@ body.mini-collapsing .mini-shell {
   cursor: default;
 }
 
+/* 置顶卡片左侧的全局快捷键角标：⌘⌥N 直启该 profile */
+.mini-profile-slot {
+  flex: none;
+  align-self: center;
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface-2, rgba(255, 255, 255, 0.04));
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.3;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
 .mini-profile-name {
   flex: none;
   max-width: 60%;
@@ -1098,6 +1115,61 @@ h3 {
   background: rgba(56, 225, 160, 0.12);
 }
 
+/* 「更多」菜单里的全局快捷键指派行：标签 + 下拉，风格贴合菜单项 */
+.menu-slot-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 10px;
+  border-radius: 6px;
+}
+
+.menu-slot-label {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.menu-slot-select {
+  flex: none;
+  max-width: 96px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--panel-soft, rgba(255, 255, 255, 0.04));
+  padding: 3px 6px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.menu-slot-select:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* 主表格名字行的全局快捷键角标：⌘⌥N */
+.slot-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  padding: 2px 6px;
+  background: var(--panel-soft, rgba(255, 255, 255, 0.04));
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
 /* ---- tooltips: HUD readout ---- */
 
 .action-tooltip {
@@ -1136,7 +1208,8 @@ h3 {
   transition:
     opacity 0.12s ease,
     transform 0.12s ease;
-  white-space: normal;
+  /* pre-line：data-tooltip 里的 \n 生效，多段信息分行呈现（无换行的旧内容不受影响）。 */
+  white-space: pre-line;
   /* 长 URL 等无空格长串在气泡内断行，别撑破圆角框往外溢。 */
   overflow-wrap: anywhere;
   word-break: break-word;
@@ -2860,6 +2933,102 @@ body:not(.booted) .layout {
   animation: beacon 1.2s ease-in-out infinite;
 }
 
+/* 驱动药丸的结构化 tooltip 卡片：一类信息一行（警示/工具/会话/活动），各有颜色标注。
+   用真实 DOM 而非 data-tooltip 伪元素，才能给不同行上不同颜色。定位/视觉与全局 HUD 气泡一致。 */
+.conn-pill {
+  position: relative;
+}
+
+.conn-tip-card {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: max-content;
+  max-width: 300px;
+  border: 1px solid var(--accent-line);
+  border-radius: 6px;
+  background: #060c0f;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.45;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, 4px);
+  transition:
+    opacity 0.12s ease,
+    transform 0.12s ease;
+  box-shadow: 0 10px 28px rgba(2, 6, 9, 0.7), var(--glow-accent);
+}
+
+.conn-pill:hover .conn-tip-card {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
+.conn-tip-card .tip-row {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+
+/* 行首的类别小标签：统一弱化灰，让右侧的值成为视觉主体 */
+.conn-tip-card .tip-tag {
+  flex: none;
+  color: var(--muted);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+}
+
+.conn-tip-card .tip-warn {
+  color: var(--warn-bright);
+}
+
+.conn-tip-card .tip-tool {
+  color: var(--accent-bright);
+}
+
+.conn-tip-card .tip-project {
+  color: var(--accent-bright);
+  font-weight: 700;
+}
+
+.conn-tip-card .tip-session {
+  color: #d9fff0;
+}
+
+.conn-tip-card .tip-age {
+  color: var(--accent);
+}
+
+/* 归属可信度说明（推测归属/归属未知的原因），弱化展示不抢主体 */
+.conn-tip-card .tip-note {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+/* 疑似争用/争用风险：多个会话抢同一 Profile，驱动药丸整体转琥珀警示 */
+.conn-pill.attached.contention {
+  border-color: var(--warn-line);
+  background: linear-gradient(180deg, rgba(242, 177, 62, 0.18), rgba(242, 177, 62, 0.05));
+  color: var(--warn-bright);
+}
+
+.conn-pill.attached.contention .conn-dot {
+  background: var(--warn-bright);
+  box-shadow: 0 0 9px rgba(242, 177, 62, 0.9);
+}
+
 .conn-pill.idle .conn-dot {
   background: var(--accent);
   opacity: 0.5;
@@ -2955,6 +3124,11 @@ body:not(.booted) .layout {
 
 .detail-row-attached strong {
   color: var(--accent-bright);
+}
+
+/* 悬浮窗卡片：判定争用时读数转琥珀（叠加在 driving 高亮之上）。 */
+.mini-profile-card.driving.contention .mini-readout {
+  color: var(--warn-bright);
 }
 
 /* 悬浮窗卡片：被工具驱动时高亮读数并加快机头脉冲。 */
@@ -3357,6 +3531,21 @@ body:not(.booted) .layout {
   color: var(--accent-dark);
 }
 
+/* Agent 连接的争用警示横幅：多个会话抢同一 Profile/tab 时置于会话行之上 */
+.detail-contention {
+  display: block;
+  margin-top: 6px;
+  padding: 6px 9px;
+  border: 1px solid var(--warn-line);
+  border-radius: 8px;
+  background: var(--warn-soft);
+  overflow-wrap: anywhere;
+  color: var(--warn-bright);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 /* Agent 连接下的会话身份行：项目·标题 + 最近活动，紧跟“驱动中 · 工具”下方 */
 .detail-session {
   display: block;
@@ -3368,10 +3557,43 @@ body:not(.booted) .layout {
   line-height: 1.4;
 }
 
+/* 会话行内的 span（最近活动/归属说明）是正文，不是行标签：
+   把 .detail-row span 的大写标签样式（uppercase/block/宽字距）重置掉。 */
+.detail-session span {
+  display: inline;
+  margin-bottom: 0;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
 .detail-session-age {
   margin-left: 8px;
   color: var(--accent-bright);
   font-weight: 600;
+}
+
+/* 归属未知/推测说明：跟在会话行里的弱化小字（共享 daemon 场景） */
+.detail-session-note {
+  margin-left: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/* 说明行内的轻量操作（如「移除」会话识别集成）：链接形态，不抢主操作的视觉 */
+.detail-inline-link {
+  margin-left: 4px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent-bright);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.detail-inline-link:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 /* Agent 连接下的「结束连接」按钮行（每条驱动连接一个） */

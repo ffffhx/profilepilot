@@ -5,6 +5,7 @@ import { PublicProfile } from "../types";
 import {
   cdpPortLabel,
   cdpSessionText,
+  contentionNoticeShort,
   escapeHtml,
   formatRelativeTime,
   liveAddrLabel,
@@ -14,25 +15,39 @@ import {
 
 const MINI_PROFILE_LIMIT = 3;
 
-// 读数「工具名 已连接」的悬停说明：第一个客户端的 工具 / 项目 / 会话标题；多连接补一行总数。
-// escapeHtml 不动换行，title 属性里的 \n 浏览器会渲染成多行 tooltip。
-function cdpClientTooltip(clients: PublicProfile["cdpClients"]): string {
+// 读数「工具名 已连接」的悬停说明：第一个客户端的 工具 / 项目 / 会话标题；
+// 多连接时每个额外会话补一行（工具 · 项目·标题 · 最近活动）——争用问题的现场就是这些并存的会话。
+// 判定有争用时首行给警示。escapeHtml 不动换行，title 属性里的 \n 浏览器会渲染成多行 tooltip。
+function cdpClientTooltip(profile: PublicProfile): string {
+  const clients = profile.cdpClients;
   const primary = clients[0];
   if (!primary) {
     return "";
   }
-  const lines = [primary.agent || prettyCdpClientLabel(primary.label)];
+  const lines: string[] = [];
+  const warning = contentionNoticeShort(profile);
+  if (warning) {
+    lines.push(warning);
+  }
+  lines.push(primary.agent || prettyCdpClientLabel(primary.label));
+  if (primary.session) {
+    lines.push(`会话：${primary.session}`);
+  }
   if (primary.project) {
     lines.push(`项目：${primary.project}`);
   }
   if (primary.title) {
     lines.push(`标题：${primary.title}`);
   }
-  if (clients.length > 1) {
-    lines.push(`共 ${clients.length} 个连接`);
-  }
   if (primary.lastActive) {
     lines.push(`最近活动：${formatRelativeTime(primary.lastActive)}`);
+  }
+  if (primary.note) {
+    lines.push(primary.note);
+  }
+  for (const client of clients.slice(1)) {
+    const parts = [client.agent || prettyCdpClientLabel(client.label), cdpSessionText(client), formatRelativeTime(client.lastActive)];
+    lines.push(`同时连接：${parts.filter(Boolean).join(" · ")}`);
   }
   // 只有工具名一行时没多少信息，但仍给一个 tooltip 兜底（起码点明是谁）。
   return lines.join("\n");
@@ -238,6 +253,7 @@ export function sortByMiniOrder(profiles: PublicProfile[]): PublicProfile[] {
 }
 
 function renderMiniProfileCard(profile: PublicProfile): string {
+  const slot = profile.quickLaunchSlot ?? undefined;
   const port = miniPortInfo(profile);
   const action = miniPrimaryAction(profile);
   const focusing = isBusyAction("focus-profile", { profileId: profile.id });
@@ -260,8 +276,10 @@ function renderMiniProfileCard(profile: PublicProfile): string {
   // CDP 端口开没开（:端口 / 无 CDP）、有没有工具连着驱动（工具名·已连接/未连接）。
   // 忙碌 > 工具名·已连接 > 端口·未连接 > 已启动·无 CDP > 未启动。
   const cdpPort = profile.cdpUrl ? cdpPortLabel(profile.cdpUrl) : "";
+  // 判定有争用时读数带 ⚠（卡片同时加 contention 类转琥珀），提醒去主窗口看详情/分流。
+  const contention = driving && Boolean(profile.cdpContention?.level);
   const toolLabel = driving
-    ? `${prettyCdpClientLabel(profile.cdpClients[0].label)}${profile.cdpClients.length > 1 ? ` ×${profile.cdpClients.length}` : ""}`
+    ? `${prettyCdpClientLabel(profile.cdpClients[0].label)}${profile.cdpClients.length > 1 ? ` ×${profile.cdpClients.length}` : ""}${contention ? " ⚠" : ""}`
     : "";
   const readout = busyHere
     ? busyLabel
@@ -273,7 +291,7 @@ function renderMiniProfileCard(profile: PublicProfile): string {
   // 被连接时在名字右侧跟一段小字：端口 ▸ 正控制哪个页面（域名）。工具名在右侧读数。
   const subLine = !busyHere && driving ? [cdpPort, liveHost].filter(Boolean).join(" ▸ ") : "";
   // 读数悬停 tooltip：这条连接背后是哪个工具的哪个项目/会话（解析得到才显示）。
-  const readoutTip = !busyHere && driving ? cdpClientTooltip(profile.cdpClients) : "";
+  const readoutTip = !busyHere && driving ? cdpClientTooltip(profile) : "";
   // 卡片正文可见的会话身份行：哪个项目 / 哪个会话在驱动（解析到才显示）。
   // 文案会截断，但“最近活动”固定在右侧不被吃掉——它是判断“活会话 vs 残留连接”的关键信号。
   const primaryClient = driving ? profile.cdpClients[0] : undefined;
@@ -281,11 +299,12 @@ function renderMiniProfileCard(profile: PublicProfile): string {
   const sessionAge = !busyHere && primaryClient ? formatRelativeTime(primaryClient.lastActive) : "";
 
   return `
-    <article class="mini-profile-card ${port.kind} ${driving ? "driving" : ""} ${busyHere ? "busy" : ""}" data-id="${profile.id}" draggable="true">
+    <article class="mini-profile-card ${port.kind} ${driving ? "driving" : ""} ${contention ? "contention" : ""} ${busyHere ? "busy" : ""}" data-id="${profile.id}" draggable="true">
       <button type="button" class="mini-profile-main" data-action="${action}" data-id="${profile.id}" title="${escapeHtml(profile.running ? "显示 Chrome 窗口" : "启动 Profile")}" ${store.busy ? "disabled" : ""}>
         <span class="mini-node ${busyHere ? "loading" : port.kind === "live" ? "plane" : "ring"}" aria-hidden="true">${busyHere ? '<span class="mini-spinner"></span>' : port.kind === "live" ? MINI_NODE_PLANE : ""}</span>
         <span class="mini-profile-text">
           <span class="mini-profile-head">
+            ${slot ? `<span class="mini-profile-slot" title="全局快捷键 ⌘⌥${slot} 直启">⌘⌥${slot}</span>` : ""}
             <span class="mini-profile-name">${escapeHtml(profile.name)}</span>
             ${subLine ? `<span class="mini-profile-sub">${escapeHtml(subLine)}</span>` : ""}
           </span>
@@ -311,7 +330,8 @@ function miniPrimaryAction(profile: PublicProfile): string {
     return "mini-focus-profile";
   }
 
-  if (profile.source === "isolated" && profile.fixedCdpPort) {
+  // 独立 Profile 默认走 CDP 启动（无固定端口时自动挑一个空闲端口）——与主窗口一致。
+  if (profile.source === "isolated") {
     return "mini-launch-cdp";
   }
 

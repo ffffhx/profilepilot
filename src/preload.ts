@@ -43,6 +43,8 @@ const profileManagerApi: ProfileManagerApi = {
     ipcRenderer.invoke(IPC_CHANNELS.setMiniProfilePinned, id, pinned),
   setMiniProfileOrder: (ids: string[]): Promise<AppState> =>
     ipcRenderer.invoke(IPC_CHANNELS.setMiniProfileOrder, ids),
+  setQuickLaunchSlot: (id: string, slot: number | null): Promise<AppState> =>
+    ipcRenderer.invoke(IPC_CHANNELS.setQuickLaunchSlot, id, slot),
   setMiniPanelPinned: (pinned: boolean): Promise<void> =>
     ipcRenderer.invoke(IPC_CHANNELS.setMiniPanelPinned, pinned),
   onMiniPanelPinnedChanged: (listener: (pinned: boolean) => void): (() => void) => {
@@ -85,6 +87,8 @@ const profileManagerApi: ProfileManagerApi = {
     ipcRenderer.invoke(IPC_CHANNELS.closeExternalInstance, userDataDir),
   disconnectCdpClient: (profileId: string, pid: number): Promise<AppState> =>
     ipcRenderer.invoke(IPC_CHANNELS.disconnectCdpClient, profileId, pid),
+  setShellIntegrationEnabled: (enabled: boolean): Promise<AppState> =>
+    ipcRenderer.invoke(IPC_CHANNELS.setShellIntegrationEnabled, enabled),
   openProfileFolder: (id: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.openProfileFolder, id),
   openProfileExtensionsPage: (id: string): Promise<AppState> =>
     ipcRenderer.invoke(IPC_CHANNELS.openProfileExtensionsPage, id),

@@ -2974,6 +2974,53 @@ body:not(.booted) .layout {
   transform: translate(-50%, 0);
 }
 
+/* 多会话时 tooltip 升级为表格（.wide 放宽卡片），一会话一行对齐着比较 */
+.conn-tip-card.wide {
+  max-width: 560px;
+}
+
+.conn-tip-table {
+  border-collapse: collapse;
+  width: max-content;
+  max-width: 100%;
+}
+
+.conn-tip-table th {
+  padding: 1px 12px 4px 0;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.conn-tip-table td {
+  padding: 4px 12px 4px 0;
+  border-top: 1px solid var(--line);
+  vertical-align: top;
+}
+
+.conn-tip-table th:last-child,
+.conn-tip-table td:last-child {
+  padding-right: 0;
+}
+
+.conn-tip-table td.tip-tool,
+.conn-tip-table td.tip-project,
+.conn-tip-table td.tip-age {
+  white-space: nowrap;
+}
+
+/* 标题列可长：给个宽度上限，最多两行截断——完整内容在详情栏，tooltip 只要认得出是谁 */
+.conn-tip-table .tip-clamp {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  max-width: 260px;
+}
+
 .conn-tip-card .tip-row {
   display: flex;
   align-items: baseline;

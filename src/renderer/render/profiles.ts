@@ -246,24 +246,44 @@ function renderConnLiveLine(profile: PublicProfile): string {
 // pid、完整警示、归属说明这些细节都在详情栏，hover 只回答“谁在驱动、干什么、多久前”。
 // 判定有争用（多个会话抢同一 Profile/tab）时药丸转琥珀警示。
 function renderConnPill(profile: PublicProfile): string {
-  const primary = profile.cdpClients[0];
+  const clients = profile.cdpClients;
+  const primary = clients[0];
   const tool = primary.agent || prettyCdpClientLabel(primary.label);
-  const extra = profile.cdpClients.length > 1 ? ` ×${profile.cdpClients.length}` : "";
+  const extra = clients.length > 1 ? ` ×${clients.length}` : "";
   const warning = contentionNoticeShort(profile);
+  const warnRow = warning ? `<span class="tip-row tip-warn">${escapeHtml(warning)}</span>` : "";
   const age = formatRelativeTime(primary.lastActive);
   // 项目和会话标题分两行展示：项目是「在哪个仓库/目录」，标题是这次会话的抬头，不是一回事，别挤一行。
-  const rows = [
-    warning ? `<span class="tip-row tip-warn">${escapeHtml(warning)}</span>` : "",
-    `<span class="tip-row"><em class="tip-tag">工具</em><span class="tip-tool">${escapeHtml(cdpClientToolSummary(profile.cdpClients))}</span></span>`,
-    primary.session ? `<span class="tip-row"><em class="tip-tag">会话</em><span class="tip-project">${escapeHtml(primary.session)}</span></span>` : "",
-    primary.project ? `<span class="tip-row"><em class="tip-tag">项目</em><span class="tip-project">${escapeHtml(primary.project)}</span></span>` : "",
-    primary.title ? `<span class="tip-row"><em class="tip-tag">标题</em><span class="tip-session">${escapeHtml(primary.title)}</span></span>` : "",
-    age ? `<span class="tip-row"><em class="tip-tag">活动</em><span class="tip-age">${escapeHtml(age)}</span></span>` : "",
-    primary.note ? `<span class="tip-row"><em class="tip-tag">说明</em><span class="tip-note">${escapeHtml(primary.note)}</span></span>` : ""
-  ]
-    .filter(Boolean)
+  // 多会话并存时升级为表格：一会话一行（工具/项目/标题/活动），谁在驱动一眼对齐着看，
+  // 而不是只讲第一条、其余折进一句"同时连接"。
+  const body =
+    clients.length > 1
+      ? `${warnRow}${renderConnTipTable(clients)}`
+      : [
+          warnRow,
+          `<span class="tip-row"><em class="tip-tag">工具</em><span class="tip-tool">${escapeHtml(tool)}</span></span>`,
+          primary.session ? `<span class="tip-row"><em class="tip-tag">会话</em><span class="tip-project">${escapeHtml(primary.session)}</span></span>` : "",
+          primary.project ? `<span class="tip-row"><em class="tip-tag">项目</em><span class="tip-project">${escapeHtml(primary.project)}</span></span>` : "",
+          primary.title ? `<span class="tip-row"><em class="tip-tag">标题</em><span class="tip-session">${escapeHtml(primary.title)}</span></span>` : "",
+          age ? `<span class="tip-row"><em class="tip-tag">活动</em><span class="tip-age">${escapeHtml(age)}</span></span>` : "",
+          primary.note ? `<span class="tip-row"><em class="tip-tag">说明</em><span class="tip-note">${escapeHtml(primary.note)}</span></span>` : ""
+        ]
+          .filter(Boolean)
+          .join("");
+  return `<span class="conn-pill attached ${warning ? "contention" : ""}"><span class="conn-dot" aria-hidden="true"></span><span class="conn-label">${escapeHtml(`${tool}${extra}${warning ? " ⚠" : ""}`)}</span><span class="conn-tip-card ${clients.length > 1 ? "wide" : ""}" role="tooltip">${body}</span></span>`;
+}
+
+// 多会话 tooltip 表格：每条驱动连接一行。列宽由内容定，标题列最多两行截断（完整信息在详情栏）。
+function renderConnTipTable(clients: PublicProfile["cdpClients"]): string {
+  const rows = clients
+    .map((client) => {
+      const tool = client.agent || prettyCdpClientLabel(client.label);
+      const age = formatRelativeTime(client.lastActive);
+      const title = client.title || client.session || "—";
+      return `<tr><td class="tip-tool">${escapeHtml(tool)}</td><td class="tip-project">${escapeHtml(client.project || "—")}</td><td class="tip-session"><span class="tip-clamp">${escapeHtml(title)}</span></td><td class="tip-age">${escapeHtml(age || "—")}</td></tr>`;
+    })
     .join("");
-  return `<span class="conn-pill attached ${warning ? "contention" : ""}"><span class="conn-dot" aria-hidden="true"></span><span class="conn-label">${escapeHtml(`${tool}${extra}${warning ? " ⚠" : ""}`)}</span><span class="conn-tip-card" role="tooltip">${rows}</span></span>`;
+  return `<table class="conn-tip-table"><thead><tr><th>工具</th><th>项目</th><th>标题</th><th>活动</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 
 export function renderProfileActions(profile: PublicProfile): string {

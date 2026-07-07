@@ -240,6 +240,16 @@ export async function getCdpClientsByPort(ports: number[]): Promise<Map<number, 
 
   await dropOwnAppClients(result);
   await applyClientContexts(result);
+  // 同端口多条连接按“最近活动”降序：UI 主展示（表格药丸/tooltip 首条/行内时间）取的是
+  // clients[0]，必须让活跃的驱动者排前面——否则先连上的残留连接（会话早已结束）会把
+  // 刚连上的新会话压进“同时连接”，行上时间显示成几小时前。
+  const activeTs = (client: CdpClientInfo): number => {
+    const ts = client.lastActive ? Date.parse(client.lastActive) : Number.NaN;
+    return Number.isFinite(ts) ? ts : 0;
+  };
+  for (const clients of result.values()) {
+    clients.sort((a, b) => activeTs(b) - activeTs(a));
+  }
   return result;
 }
 

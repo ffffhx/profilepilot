@@ -1,4 +1,4 @@
-import { AccountSyncDiffResult, AccountSyncResult, AppState, BusyState, CdpLiveView, ExtensionMigrationDiffResult, ExtensionMigrationResult, ExtensionScanResult, GlobalInstructionFileId, GlobalInstructionsSnapshot, ModalState, ToastKind } from "./types";
+import { AccountSyncDiffResult, AccountSyncResult, AgentTakeoverEvent, AppState, BusyState, CdpLiveView, ExtensionMigrationDiffResult, ExtensionMigrationResult, ExtensionScanResult, GlobalInstructionFileId, GlobalInstructionsSnapshot, ModalState, ToastKind } from "./types";
 
 export const root = document.querySelector<HTMLDivElement>("#app");
 
@@ -31,6 +31,8 @@ export interface RendererState {
   toast: string | null;
   toastKind: ToastKind;
   toastTimer: number | undefined;
+  agentTakeoverHistory: AgentTakeoverEvent[];
+  agentTakeoverNoticeDismissed: boolean;
   migrationSourceId: string | null;
   migrationTargetId: string | null;
   extensionScan: ExtensionScanResult | null;
@@ -92,6 +94,8 @@ export const store: RendererState = {
   toast: null,
   toastKind: "normal",
   toastTimer: undefined,
+  agentTakeoverHistory: [],
+  agentTakeoverNoticeDismissed: false,
   migrationSourceId: null,
   migrationTargetId: null,
   extensionScan: null,

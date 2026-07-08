@@ -53,6 +53,8 @@ export interface PublicProfile {
   liveTabCount: number | null;
   // 多会话争用判定（主进程算好）：contention=观察到抢写同一标签页；risk=两个活跃会话共用。
   cdpContention: CdpContentionInfo | null;
+  // 正在驱动这个 Profile 的 agent 的实时活动（会话 tail 解析结果）；无 agent 驱动时为 null。
+  agentActivity: AgentActivity | null;
 }
 
 export interface AgentActivity {

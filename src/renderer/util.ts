@@ -1,5 +1,5 @@
 import { dateFormatter, store } from "./state";
-import { BusyProgressStep, CdpClientInfo, CdpPortSuggestion, ProfileExtensionInfo, PublicProfile } from "./types";
+import { AgentActivity, BusyProgressStep, CdpClientInfo, CdpPortSuggestion, ProfileExtensionInfo, PublicProfile } from "./types";
 
 export function renderBusyBanner(): string {
   if (!store.busyState) {
@@ -332,6 +332,84 @@ export function contentionNotice(profile: PublicProfile): string {
     return `⚠ 疑似多个会话正在抢同一个标签页${detail}。建议把其中一个会话挪到独立 Profile/副本。`;
   }
   return `⚠ ${info.activeClientCount} 个活跃会话共用此 Profile，可能互相抢标签页/焦点。建议给第二个会话克隆一个副本。`;
+}
+
+function cleanActivityText(value?: string | null): string {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+export function truncateText(value: string, maxLength: number): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+  return `${value.slice(0, Math.max(0, maxLength - 1))}…`;
+}
+
+function activityCount(value?: number): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : null;
+}
+
+export function hasAgentActivity(profile: PublicProfile): boolean {
+  return Boolean(profile.agentActivity) && profile.cdpClients.length > 0;
+}
+
+export function agentActivityLeadText(activity?: AgentActivity | null): string {
+  if (!activity) {
+    return "";
+  }
+  return (
+    cleanActivityText(activity.currentAction) ||
+    cleanActivityText(activity.currentStep) ||
+    cleanActivityText(activity.lastMessage) ||
+    ""
+  );
+}
+
+export function agentActivityProgressText(activity?: AgentActivity | null): string {
+  if (!activity) {
+    return "";
+  }
+  const done = activityCount(activity.todoDone);
+  const total = activityCount(activity.todoTotal);
+  if (done !== null && total !== null && total > 0) {
+    return `${done}/${total}`;
+  }
+  if (done !== null) {
+    return `${done}`;
+  }
+  if (total !== null && total > 0) {
+    return `0/${total}`;
+  }
+  return "";
+}
+
+export function agentActivityTooltipText(activity?: AgentActivity | null, messageMaxLength = 96): string {
+  if (!activity) {
+    return "";
+  }
+  const lines: string[] = [];
+  const currentAction = cleanActivityText(activity.currentAction);
+  const progress = agentActivityProgressText(activity);
+  const currentStep = cleanActivityText(activity.currentStep);
+  const nextStep = cleanActivityText(activity.nextStep);
+  const lastMessage = cleanActivityText(activity.lastMessage);
+
+  if (currentAction) {
+    lines.push(`当前动作：${currentAction}`);
+  }
+  if (progress) {
+    lines.push(`进度：第 ${progress} 步`);
+  }
+  if (currentStep) {
+    lines.push(`当前步骤：${currentStep}`);
+  }
+  if (nextStep) {
+    lines.push(`下一步：${nextStep}`);
+  }
+  if (lastMessage) {
+    lines.push(`AI 最近说：${truncateText(lastMessage, messageMaxLength)}`);
+  }
+  return lines.join("\n");
 }
 
 // 把 URL 收成一个简短的“航点”：优先域名；chrome:// 等特殊协议退回主机名/路径；解析失败截断原串。

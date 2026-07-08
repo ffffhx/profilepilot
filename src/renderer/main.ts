@@ -49,6 +49,8 @@ profileApi().onOperationProgress((progress) => {
 });
 
 profileApi().onAgentTakeover((takeover) => {
+  store.agentTakeoverHistory = [takeover, ...store.agentTakeoverHistory].slice(0, 5);
+  store.agentTakeoverNoticeDismissed = false;
   const agent = takeover.agent || "AI";
   setToast(`已接管 ${emphasizeName(takeover.profileName)}，${agent} 已停止操作`);
   void loadState().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
@@ -95,6 +97,12 @@ appRoot.addEventListener("click", (event) => {
   const id = actionTarget.dataset.id || null;
   if (action !== "toggle-profile-menu" && actionTarget.closest("[data-profile-actions]")) {
     store.openProfileMenuId = null;
+  }
+
+  if (action === "dismiss-agent-takeover-history") {
+    store.agentTakeoverNoticeDismissed = true;
+    render();
+    return;
   }
 
   if (action === "toggle-migration-target-menu") {
@@ -1489,7 +1497,7 @@ appRoot.addEventListener("submit", (event) => {
 // 鼠标停在带 tooltip 的元素上时暂停轮询重渲染：轮询会因实时数据（在线页面 URL / 活动时间等）
 // 变化而重建 DOM，把用户正 hover 的节点换掉，导致 tooltip 一闪。悬停期间先不刷新，移开即恢复。
 let hoveringTooltip = false;
-const TOOLTIP_HOVER_SELECTOR = ".action-tooltip, [data-tooltip], [title], .conn-pill";
+const TOOLTIP_HOVER_SELECTOR = ".action-tooltip, [data-tooltip], [title], .conn-pill, .conn-agent-action";
 document.addEventListener("mousemove", (event) => {
   const target = event.target as Element | null;
   hoveringTooltip = Boolean(target?.closest?.(TOOLTIP_HOVER_SELECTOR));

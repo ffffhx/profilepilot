@@ -9,7 +9,7 @@ export function agentOverlayBootstrapScript(): string {
   const STORAGE_KEY = "__ppAgentOverlayPosition";
   const COLLAPSED_KEY = "__ppAgentOverlayCollapsed";
   const STOP_CONFIRM_MS = 3000;
-  const state = {
+  const STATE_DEFAULTS = {
     state: "active",
     profileName: "",
     agent: "",
@@ -26,6 +26,21 @@ export function agentOverlayBootstrapScript(): string {
     startedAt: "",
     sessions: []
   };
+  const KNOWN_STATE_FIELDS = Object.keys(STATE_DEFAULTS);
+  const STRING_STATE_FIELDS = new Set([
+    "profileName",
+    "agent",
+    "project",
+    "session",
+    "sessionTitle",
+    "currentAction",
+    "currentStep",
+    "nextStep",
+    "lastMessage",
+    "updatedAt",
+    "startedAt"
+  ]);
+  const state = cloneStateDefaults();
   let collapsed = readCollapsed();
   let takenOverTimer = null;
   let elapsedTimer = null;
@@ -438,6 +453,38 @@ export function agentOverlayBootstrapScript(): string {
     return Number.isFinite(number) ? number : null;
   }
 
+  function cloneStateDefaults() {
+    const result = {};
+    for (const key of KNOWN_STATE_FIELDS) {
+      result[key] = defaultStateValue(key);
+    }
+    return result;
+  }
+
+  function defaultStateValue(key) {
+    const value = STATE_DEFAULTS[key];
+    return Array.isArray(value) ? [] : value;
+  }
+
+  function normalizeKnownStateValue(key, value) {
+    if (value === null || value === undefined) {
+      return defaultStateValue(key);
+    }
+    if (key === "state") {
+      return value === "takenOver" ? "takenOver" : "active";
+    }
+    if (key === "sessions") {
+      return Array.isArray(value) ? value : [];
+    }
+    if (key === "todoDone" || key === "todoTotal") {
+      return finiteNumber(value);
+    }
+    if (STRING_STATE_FIELDS.has(key)) {
+      return typeof value === "string" ? value : String(value);
+    }
+    return value;
+  }
+
   function formatDuration(ms) {
     const totalSeconds = Math.max(0, Math.floor(ms / 1000));
     const hours = Math.floor(totalSeconds / 3600);
@@ -479,11 +526,10 @@ export function agentOverlayBootstrapScript(): string {
     if (!payload || typeof payload !== "object") {
       return;
     }
-    Object.assign(state, payload);
-    if (!Array.isArray(state.sessions)) {
-      state.sessions = [];
+    for (const key of KNOWN_STATE_FIELDS) {
+      state[key] = normalizeKnownStateValue(key, payload[key]);
     }
-    if (payload.state === "takenOver") {
+    if (state.state === "takenOver") {
       resetStopConfirm();
       clearTimeout(takenOverTimer);
       takenOverTimer = setTimeout(() => collapse(), 5000);

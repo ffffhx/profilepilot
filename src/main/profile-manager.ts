@@ -42,7 +42,8 @@ import type {
   PublicProfile,
   Registry,
   StoredMigratedExtension,
-  StoredProfile
+  StoredProfile,
+  TakeoverAgentConnectionsResult
 } from "../shared/types";
 import { accountSyncCopySpecs, accountSyncDataScore, accountSyncRecordKey, applyAccountSyncRecordBaseline, assertAccountSyncDiskSpace, collectAccountSyncPathStats, copyAccountSyncPath, inspectAccountLocalStateDiff, inspectAccountSyncPathDiff, mergeAccountLocalStateValues, recoverInterruptedAccountSyncArtifactsForProfile, restoreAccountSyncExtensionPreferences, shouldApplyAccountDiffItem, snapshotAccountSyncExtensionPreferences, snapshotAccountSyncSourceFingerprints, summarizeAccountSyncDiff } from "./account-sync";
 import { describePortOwner, findAvailableCdpPort, isPortAvailable, makeCdpUrl, normalizeCdpPortInput, requestCdpTargets, waitForCdp } from "./cdp-client";
@@ -72,6 +73,12 @@ const QUICK_LAUNCH_SLOT_COUNT = 9;
 interface ProfileManagerEvents {
   onAgentTakeover?: (event: AgentTakeoverEvent) => void;
   onAgentOverlayReveal?: (event: AgentOverlayRevealEvent) => void;
+}
+
+interface TakeoverTarget {
+  profileId: string;
+  profileName: string;
+  clients: CdpClientInfo[];
 }
 
 export class ProfileManager {
@@ -563,6 +570,55 @@ export class ProfileManager {
     await this.terminateCdpClient(pid);
   }
 
+  async takeoverAgentConnections(profileId: string, session?: string): Promise<TakeoverAgentConnectionsResult> {
+    const target = await this.resolveTakeoverTarget(profileId);
+    const requestedSession = normalizeSessionFilter(session);
+    const clients = uniqueCdpClientsByPid(
+      target.clients
+        .filter(isAgentDrivenCdpClient)
+        .filter((client) => !requestedSession || client.session === requestedSession)
+    );
+    const takeovers: AgentTakeoverEvent[] = [];
+    const failures: TakeoverAgentConnectionsResult["failures"] = [];
+
+    for (const client of clients) {
+      try {
+        await this.terminateCdpClient(client.pid);
+        const takeover: AgentTakeoverEvent = {
+          profileId: target.profileId,
+          profileName: target.profileName,
+          session: client.session || requestedSession,
+          sessionTitle: client.title,
+          agent: client.agent || inferAgentNameForTakeover(client),
+          at: new Date().toISOString()
+        };
+        await this.recordTakeoverEvent(takeover);
+        this.events.onAgentTakeover?.(takeover);
+        takeovers.push(takeover);
+      } catch (error) {
+        failures.push({
+          pid: client.pid,
+          label: client.label,
+          session: client.session,
+          agent: client.agent || inferAgentNameForTakeover(client),
+          error: errorMessage(error)
+        });
+      }
+    }
+
+    return {
+      profileId: target.profileId,
+      profileName: target.profileName,
+      session: requestedSession,
+      targetCount: clients.length,
+      successCount: takeovers.length,
+      failureCount: failures.length,
+      allStopped: clients.length > 0 && failures.length === 0,
+      takeovers,
+      failures
+    };
+  }
+
   async setAgentOverlayEnabled(enabled: boolean): Promise<void> {
     const registry = await this.loadRegistry();
     await this.saveRegistry({
@@ -592,70 +648,21 @@ export class ProfileManager {
   }
 
   private async stopAgentOverlaySession(request: AgentOverlayStopRequest): Promise<void> {
-    const externalUserDataDir = externalUserDataDirFromProfileId(request.profileId);
-    if (externalUserDataDir) {
-      await this.stopExternalAgentOverlaySession(externalUserDataDir, request);
+    const result = await this.takeoverAgentConnections(request.profileId, request.session);
+    if (result.successCount > 0 && result.allStopped) {
       return;
     }
-
-    const profile = await this.getPublicProfile(request.profileId);
-    const sessionDriver = request.session
-      ? profile.cdpClients.find((client) => client.label === "agent-browser" && client.session === request.session)
-      : null;
-    const requestedDriver = profile.cdpClients.find((client) => client.pid === request.pid);
-    const driver = sessionDriver || requestedDriver;
-    if (!driver) {
-      throw new ProfileManagerError("这个驱动连接已经不在了。", "CDP_CLIENT_NOT_CONNECTED");
+    if (result.successCount > 0) {
+      throw new ProfileManagerError(
+        takeoverFailureMessage(result),
+        "CDP_CLIENT_DISCONNECT_FAILED"
+      );
     }
-
-    await this.disconnectCdpClient(profile.id, driver.pid);
-    const takeover: AgentTakeoverEvent = {
-      profileId: profile.id,
-      profileName: profile.name,
-      session: driver.session || request.session,
-      sessionTitle: driver.title,
-      agent: driver.agent || request.agent,
-      at: new Date().toISOString()
-    };
-    await this.recordTakeoverEvent(takeover);
-    this.events.onAgentTakeover?.(takeover);
-  }
-
-  private async stopExternalAgentOverlaySession(
-    userDataDir: string,
-    request: AgentOverlayStopRequest
-  ): Promise<void> {
-    const instance = await this.locateExternalInstance(userDataDir);
-    if (!instance || instance.cdpPort === null) {
-      throw new ProfileManagerError("这个外部实例已经不在了。", "EXTERNAL_INSTANCE_NOT_FOUND");
+    const requestedClient = result.failures.find((failure) => failure.pid === request.pid);
+    if (requestedClient) {
+      throw new ProfileManagerError(requestedClient.error, "CDP_CLIENT_DISCONNECT_FAILED");
     }
-
-    const cdpClientsByPort = await getCdpClientsByPort([instance.cdpPort]);
-    const clients = filterCdpDriverClients(
-      cdpClientsByPort.get(instance.cdpPort) || [],
-      [instance.pid],
-      new Set(app.getAppMetrics().map((metric) => metric.pid))
-    );
-    const sessionDriver = request.session
-      ? clients.find((client) => client.label === "agent-browser" && client.session === request.session)
-      : null;
-    const requestedDriver = clients.find((client) => client.pid === request.pid);
-    const driver = sessionDriver || requestedDriver;
-    if (!driver) {
-      throw new ProfileManagerError("这个驱动连接已经不在了。", "CDP_CLIENT_NOT_CONNECTED");
-    }
-
-    await this.terminateCdpClient(driver.pid);
-    const takeover: AgentTakeoverEvent = {
-      profileId: makeExternalProfileId(instance.userDataDir),
-      profileName: instance.label,
-      session: driver.session || request.session,
-      sessionTitle: driver.title,
-      agent: driver.agent || request.agent,
-      at: new Date().toISOString()
-    };
-    await this.recordTakeoverEvent(takeover);
-    this.events.onAgentTakeover?.(takeover);
+    throw new ProfileManagerError("这个驱动连接已经不在了。", "CDP_CLIENT_NOT_CONNECTED");
   }
 
   private async recordTakeoverEvent(event: AgentTakeoverEvent): Promise<void> {
@@ -947,6 +954,33 @@ export class ProfileManager {
     const isolatedPaths = registry.profiles.map((profile) => this.isolatedProfilePath(profile));
     const instances = await findExternalChromeInstances([...isolatedPaths, nativeChromeUserDataDir(), this.dataDir]);
     return instances.find((instance) => instance.userDataDir === userDataDir) || null;
+  }
+
+  private async resolveTakeoverTarget(profileId: string): Promise<TakeoverTarget> {
+    const externalUserDataDir = externalUserDataDirFromProfileId(profileId);
+    if (externalUserDataDir) {
+      const instance = await this.locateExternalInstance(externalUserDataDir);
+      if (!instance || instance.cdpPort === null) {
+        throw new ProfileManagerError("这个外部实例已经不在了。", "EXTERNAL_INSTANCE_NOT_FOUND");
+      }
+      const cdpClientsByPort = await getCdpClientsByPort([instance.cdpPort]);
+      return {
+        profileId: makeExternalProfileId(instance.userDataDir),
+        profileName: instance.label,
+        clients: filterCdpDriverClients(
+          cdpClientsByPort.get(instance.cdpPort) || [],
+          [instance.pid],
+          new Set(app.getAppMetrics().map((metric) => metric.pid))
+        )
+      };
+    }
+
+    const profile = await this.getPublicProfile(profileId);
+    return {
+      profileId: profile.id,
+      profileName: profile.name,
+      clients: profile.cdpClients
+    };
   }
 
   async openProfileFolder(profileId: string): Promise<void> {
@@ -2889,6 +2923,63 @@ function filterCdpDriverClients(
 ): CdpClientInfo[] {
   const owners = new Set(ownerPids);
   return clients.filter((client) => !owners.has(client.pid) && !selfPids.has(client.pid));
+}
+
+function normalizeSessionFilter(session: string | undefined): string | undefined {
+  const value = typeof session === "string" ? session.trim() : "";
+  return value || undefined;
+}
+
+function isAgentDrivenCdpClient(client: CdpClientInfo): boolean {
+  const label = client.label.toLowerCase();
+  return Boolean(
+    client.agent ||
+      client.project ||
+      client.session ||
+      client.title ||
+      label.startsWith("agent-browser") ||
+      label === "codex" ||
+      label === "claude code"
+  );
+}
+
+function inferAgentNameForTakeover(client: CdpClientInfo): string | undefined {
+  if (client.agent) {
+    return client.agent;
+  }
+  if (client.session?.startsWith("cc-")) {
+    return "Claude Code";
+  }
+  if (client.session?.startsWith("cx-")) {
+    return "Codex";
+  }
+  return client.label || undefined;
+}
+
+function uniqueCdpClientsByPid(clients: CdpClientInfo[]): CdpClientInfo[] {
+  const seen = new Set<number>();
+  const result: CdpClientInfo[] = [];
+  for (const client of clients) {
+    if (seen.has(client.pid)) {
+      continue;
+    }
+    seen.add(client.pid);
+    result.push(client);
+  }
+  return result;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error || "未知错误");
+}
+
+function takeoverFailureMessage(result: TakeoverAgentConnectionsResult): string {
+  const firstFailure = result.failures[0];
+  const suffix = firstFailure ? `：${firstFailure.error}` : "";
+  if (result.successCount > 0) {
+    return `只停止了 ${result.successCount}/${result.targetCount} 条 AI 驱动连接${suffix}`;
+  }
+  return `没有停止任何 AI 驱动连接${suffix}`;
 }
 
 function normalizeTakeoverHistory(input: unknown): AgentTakeoverEvent[] {

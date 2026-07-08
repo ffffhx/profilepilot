@@ -96,6 +96,30 @@ export interface AgentTakeoverEvent {
   at: string;
 }
 
+export interface TakeoverAgentConnectionFailure {
+  pid: number;
+  label: string;
+  session?: string;
+  agent?: string;
+  error: string;
+}
+
+export interface TakeoverAgentConnectionsResult {
+  profileId: string;
+  profileName: string;
+  session?: string;
+  targetCount: number;
+  successCount: number;
+  failureCount: number;
+  allStopped: boolean;
+  takeovers: AgentTakeoverEvent[];
+  failures: TakeoverAgentConnectionFailure[];
+}
+
+export interface TakeoverAgentConnectionsResponse extends TakeoverAgentConnectionsResult {
+  state: AppState;
+}
+
 export interface AgentOverlayRevealEvent {
   profileId: string;
   profileName: string;
@@ -594,6 +618,8 @@ export interface ProfileManagerApi {
   closeExternalInstance(userDataDir: string): Promise<AppState>;
   // 结束某条 CDP 驱动连接：对该客户端进程发信号使其断开，不动 Chrome。
   disconnectCdpClient(profileId: string, pid: number): Promise<AppState>;
+  // 停止当前 AI 驱动连接并写入接管历史；session 缺省时停止该 Profile 的全部 AI 连接。
+  takeoverAgentConnections(profileId: string, session?: string): Promise<TakeoverAgentConnectionsResponse>;
   // AI 操作可见化 overlay 总开关。
   setAgentOverlayEnabled(enabled: boolean): Promise<AppState>;
   // 启用/移除会话识别 shell 集成（~/.zshenv 托管块），返回刷新后的完整状态。

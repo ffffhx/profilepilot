@@ -5,3 +5,4 @@ require("./session-parse.test.js");
 require("./profile-manager-takeover.test.js");
 require("./renderer-util.test.js");
 require("./renderer-state-actions.test.js");
+require("./renderer-takeover-confirm.test.js");

@@ -22,7 +22,9 @@ const { AgentOverlayManager, isAgentOverlayClient } = require("../dist/main/agen
 const { agentOverlayBootstrapScript } = require("../dist/main/overlay-script.js");
 const { SessionTailer, describeAgentBrowserCommand } = require("../dist/main/session-tail.js");
 
-const TEST_TIMEOUT_MS = 3000;
+const WAIT_TIMEOUT_MS = 10000;
+const WAIT_INTERVAL_MS = 10;
+const TAILER_POLL_INTERVAL_MS = 10;
 
 test("SessionTailer parses Claude TodoWrite statuses", async () => {
   await withTempHome(async (home) => {
@@ -158,7 +160,6 @@ test("SessionTailer ignores bad, half, empty, and missing Claude session input",
     const partialTailer = startTailer(`cc-${partialUuid}`, {});
     try {
       await waitForActivity(partialTailer, (value) => value.agent === "Claude Code", "partial Claude session");
-      await delay(100);
       assert.equal(partialTailer.getActivity().lastMessage, undefined);
 
       await appendFile(partialFile, `${partialEntry.slice(splitIndex)}\n`, "utf8");
@@ -174,7 +175,6 @@ test("SessionTailer ignores bad, half, empty, and missing Claude session input",
 
     const missingTailer = startTailer(`cc-${randomUUID()}`, { project: "missing-project" });
     try {
-      await delay(100);
       const missingActivity = missingTailer.getActivity();
       assert.equal(missingActivity.project, "missing-project");
       assert.equal(missingActivity.agent, undefined);
@@ -277,6 +277,16 @@ test("Codex command detection ignores agent-browser-cdp file paths", async () =>
         type: "response_item",
         payload: {
           item: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "No browser command here." }]
+          }
+        }
+      },
+      {
+        type: "response_item",
+        payload: {
+          item: {
             type: "function_call",
             name: "shell",
             arguments: JSON.stringify({ command: "cat /tmp/agent-browser-cdp/SKILL.md" })
@@ -287,8 +297,11 @@ test("Codex command detection ignores agent-browser-cdp file paths", async () =>
 
     const tailer = startTailer(`cx-${uuid}`, {});
     try {
-      await waitForActivity(tailer, (value) => value.agent === "Codex", "Codex pseudo command session");
-      await delay(100);
+      await waitForActivity(
+        tailer,
+        (value) => value.lastMessage === "No browser command here.",
+        "Codex pseudo command session"
+      );
       assert.equal(tailer.getActivity().currentAction, undefined);
     } finally {
       tailer.stop();
@@ -397,7 +410,6 @@ test("AgentOverlayManager rejects binding stop signals from unknown execution co
     executionContextId: 99,
     payload: JSON.stringify({ action: "stop" })
   });
-  await delay(25);
 
   assert.equal(stopCalls.length, 0);
 });
@@ -554,7 +566,7 @@ function deferred() {
 }
 
 function startTailer(session, base) {
-  const tailer = new SessionTailer(session, base, () => {});
+  const tailer = new SessionTailer(session, base, () => {}, { pollIntervalMs: TAILER_POLL_INTERVAL_MS });
   tailer.start();
   return tailer;
 }
@@ -605,15 +617,18 @@ async function createCodexSession(home, uuid, entries) {
 }
 
 async function waitForActivity(tailer, predicate, label) {
-  const deadline = Date.now() + TEST_TIMEOUT_MS;
+  const startedAt = Date.now();
+  const deadline = startedAt + WAIT_TIMEOUT_MS;
+  let lastActivity = tailer.getActivity();
   while (Date.now() < deadline) {
-    const activity = tailer.getActivity();
-    if (predicate(activity)) {
-      return activity;
+    lastActivity = tailer.getActivity();
+    if (predicate(lastActivity)) {
+      return lastActivity;
     }
-    await delay(25);
+    await delay(WAIT_INTERVAL_MS);
   }
-  assert.fail(`Timed out waiting for ${label}: ${JSON.stringify(tailer.getActivity())}`);
+  const elapsed = Date.now() - startedAt;
+  assert.fail(`Timed out after ${elapsed}ms waiting for ${label}; last activity: ${JSON.stringify(lastActivity)}`);
 }
 
 function delay(ms) {

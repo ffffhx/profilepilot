@@ -16,6 +16,10 @@ export interface SessionTailerBase {
   sessionTitle?: string;
 }
 
+export interface SessionTailerOptions {
+  pollIntervalMs?: number;
+}
+
 export class SessionTailer {
   private sessionFile: AgentSessionFile | null = null;
   private watcher: FSWatcher | null = null;
@@ -29,7 +33,8 @@ export class SessionTailer {
   constructor(
     private readonly session: string,
     private base: SessionTailerBase,
-    private readonly onUpdate: () => void
+    private readonly onUpdate: () => void,
+    private readonly options: SessionTailerOptions = {}
   ) {}
 
   start(): void {
@@ -39,7 +44,7 @@ export class SessionTailer {
     this.started = true;
     this.pollTimer = setInterval(() => {
       this.scheduleRead();
-    }, 2000);
+    }, this.pollIntervalMs());
     this.scheduleRead();
   }
 
@@ -78,6 +83,10 @@ export class SessionTailer {
       .catch(() => {
         // 会话文件可能正在被写入、轮转或暂时不可读；下一轮继续尝试。
       });
+  }
+
+  private pollIntervalMs(): number {
+    return Math.max(1, this.options.pollIntervalMs ?? 2000);
   }
 
   private async readNewBytes(): Promise<void> {

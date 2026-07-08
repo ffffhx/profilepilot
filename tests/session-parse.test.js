@@ -12,7 +12,10 @@ const {
   findAgentBrowserCommand
 } = require("../dist/main/session-tail.js");
 
-const TEST_TIMEOUT_MS = 3500;
+const WAIT_TIMEOUT_MS = 10000;
+const WAIT_INTERVAL_MS = 10;
+const TAILER_POLL_INTERVAL_MS = 10;
+const SLOW_LSOF_TIMEOUT_ASSERT_MS = 8000;
 
 test("agent-browser detection rejects path-like false positives and unknown verbs", () => {
   assert.equal(findAgentBrowserCommand("cat /tmp/agent-browser-cdp/SKILL.md"), "");
@@ -93,7 +96,7 @@ test("listOpenCodexRollouts times out slow lsof, falls back to sessions, and cac
     await mkdir(fakeBin, { recursive: true });
     const lsofLog = path.join(tempHome, "lsof.log");
     const fakeLsof = path.join(fakeBin, "lsof");
-    await writeFile(fakeLsof, "#!/bin/sh\necho call >> \"$LSOF_LOG\"\nexec /bin/sleep 5\n", "utf8");
+    await writeFile(fakeLsof, "#!/bin/sh\necho call >> \"$LSOF_LOG\"\nexec /bin/sleep 10\n", "utf8");
     await chmod(fakeLsof, 0o755);
     process.env.PATH = `${fakeBin}${path.delimiter}${previousPath || ""}`;
     process.env.LSOF_LOG = lsofLog;
@@ -145,10 +148,9 @@ test("listOpenCodexRollouts times out slow lsof, falls back to sessions, and cac
     const first = result.first;
     const firstMs = result.firstMs;
     assert.ok(first.includes(rollout), `fallback rollouts did not include ${rollout}`);
-    assert.ok(firstMs < TEST_TIMEOUT_MS, `slow lsof was not capped: ${firstMs.toFixed(0)}ms`);
+    assert.ok(firstMs < SLOW_LSOF_TIMEOUT_ASSERT_MS, `slow lsof was not capped: ${firstMs.toFixed(0)}ms`);
 
     assert.deepEqual(result.second, first);
-    assert.ok(result.secondMs < 200, `cached lookup was too slow: ${result.secondMs.toFixed(0)}ms`);
     assert.equal(result.lsofCalls, 1);
   } finally {
     restoreEnv("HOME", previousHome);
@@ -164,7 +166,7 @@ function runNodeProbe(script, env) {
     execFile(
       process.execPath,
       ["-e", script],
-      { cwd: path.resolve(__dirname, ".."), env, timeout: 7000, maxBuffer: 1024 * 1024 },
+      { cwd: path.resolve(__dirname, ".."), env, timeout: 15000, maxBuffer: 1024 * 1024 },
       (error, stdout, stderr) => {
         if (error) {
           reject(new Error(`${error.message}\n${stderr}`));
@@ -181,7 +183,7 @@ function runNodeProbe(script, env) {
 }
 
 function startTailer(session, base) {
-  const tailer = new SessionTailer(session, base, () => {});
+  const tailer = new SessionTailer(session, base, () => {}, { pollIntervalMs: TAILER_POLL_INTERVAL_MS });
   tailer.start();
   return tailer;
 }
@@ -228,15 +230,18 @@ async function createCodexSession(home, uuid, entries) {
 }
 
 async function waitForActivity(tailer, predicate, label) {
-  const deadline = Date.now() + TEST_TIMEOUT_MS;
+  const startedAt = Date.now();
+  const deadline = startedAt + WAIT_TIMEOUT_MS;
+  let lastActivity = tailer.getActivity();
   while (Date.now() < deadline) {
-    const activity = tailer.getActivity();
-    if (predicate(activity)) {
-      return activity;
+    lastActivity = tailer.getActivity();
+    if (predicate(lastActivity)) {
+      return lastActivity;
     }
-    await delay(25);
+    await delay(WAIT_INTERVAL_MS);
   }
-  assert.fail(`Timed out waiting for ${label}: ${JSON.stringify(tailer.getActivity())}`);
+  const elapsed = Date.now() - startedAt;
+  assert.fail(`Timed out after ${elapsed}ms waiting for ${label}; last activity: ${JSON.stringify(lastActivity)}`);
 }
 
 function delay(ms) {

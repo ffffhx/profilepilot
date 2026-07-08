@@ -208,7 +208,7 @@ export class SessionTailer {
       }
       const partType = stringValue(part.type);
       if (partType === "text") {
-        const text = normalizeText(stringValue(part.text) || "");
+        const text = assistantMessageText(stringValue(part.text) || "");
         if (text) {
           this.parsed.lastMessage = truncate(text, ACTIVITY_MESSAGE_LIMIT);
           this.parsed.updatedAt = new Date().toISOString();
@@ -225,8 +225,8 @@ export class SessionTailer {
         continue;
       }
       if (name === "Bash") {
-        const command = stringValue(input.command) || "";
-        if (command.includes("agent-browser")) {
+        const command = findAgentBrowserCommand(input.command);
+        if (command) {
           this.parsed.currentAction = describeAgentBrowserCommand(command);
           this.parsed.updatedAt = new Date().toISOString();
           continue;
@@ -300,7 +300,7 @@ function codexAssistantText(entry: Record<string, unknown>): string {
   if (!role && type !== "message") {
     return "";
   }
-  return normalizeText(messageContentText(item.content) || messageContentText(payload.content));
+  return assistantMessageText(messageContentText(item.content) || messageContentText(payload.content));
 }
 
 function codexCommandSource(entry: Record<string, unknown>): Record<string, unknown> | null {
@@ -386,12 +386,12 @@ function messageContentText(content: unknown): string {
     .join(" ");
 }
 
-function findAgentBrowserCommand(value: unknown, depth = 0): string {
+export function findAgentBrowserCommand(value: unknown, depth = 0): string {
   if (depth > 6) {
     return "";
   }
   if (typeof value === "string") {
-    return hasAgentBrowserExecutable(value) ? value : "";
+    return parseAgentBrowserActions(value).length > 0 ? value : "";
   }
   if (Array.isArray(value)) {
     for (const item of value) {
@@ -408,7 +408,7 @@ function findAgentBrowserCommand(value: unknown, depth = 0): string {
 
   for (const key of ["command", "cmd", "script"]) {
     const candidate = stringValue(value[key]);
-    if (candidate && hasAgentBrowserExecutable(candidate)) {
+    if (candidate && parseAgentBrowserActions(candidate).length > 0) {
       return candidate;
     }
   }
@@ -435,50 +435,160 @@ function findAgentBrowserCommand(value: unknown, depth = 0): string {
 }
 
 export function describeAgentBrowserCommand(command: string): string {
-  const startIndex = agentBrowserExecutableIndex(command);
-  const raw = command.slice(startIndex >= 0 ? startIndex : 0).trim();
-  const tokens = shellWords(raw);
-  const start = tokens.findIndex((token) => token === "agent-browser" || path.basename(token) === "agent-browser");
-  const args = stripAgentBrowserOptions(start >= 0 ? tokens.slice(start + 1) : tokens.slice(1));
-  const verb = (args[0] || "").toLowerCase();
-  const rest = args.slice(1).filter((arg) => !arg.startsWith("-"));
+  const actions = parseAgentBrowserActions(command);
+  const action = actions[0] || fallbackAgentBrowserAction(command);
+  if (!action) {
+    return "AI 正在操作浏览器";
+  }
+  const { verb, rest } = action;
 
+  let description: string;
   if (verb === "open" || verb === "goto" || verb === "navigate") {
-    return truncate(`打开 ${hostLabel(rest[0] || "")}`, ACTIVITY_ACTION_LIMIT);
-  }
-  if (verb === "click") {
-    return truncate(rest[0] ? `点击「${rest[0]}」` : "点击页面元素", ACTIVITY_ACTION_LIMIT);
-  }
-  if (verb === "fill" || verb === "type" || verb === "input") {
-    return "填写输入框";
-  }
-  if (verb === "screenshot") {
-    return "截图";
-  }
-  if (verb === "snapshot") {
-    return "读取页面结构";
-  }
-  if (verb === "press" || verb === "key") {
-    return truncate(rest[0] ? `按键 ${rest[0]}` : "按键", ACTIVITY_ACTION_LIMIT);
-  }
-  if (verb === "hover") {
-    return truncate(rest[0] ? `移动到「${rest[0]}」` : "移动鼠标", ACTIVITY_ACTION_LIMIT);
-  }
-  if (verb === "wait") {
-    return "等待页面";
+    description = `打开 ${hostLabel(rest[0] || "")}`;
+  } else if (verb === "click") {
+    description = rest[0] ? `点击「${rest[0]}」` : "点击页面元素";
+  } else if (verb === "fill" || verb === "type" || verb === "input") {
+    description = "填写输入框";
+  } else if (verb === "screenshot") {
+    description = "截图";
+  } else if (verb === "snapshot") {
+    description = "读取页面结构";
+  } else if (verb === "press" || verb === "key") {
+    description = rest[0] ? `按键 ${rest[0]}` : "按键";
+  } else if (verb === "hover") {
+    description = rest[0] ? `移动到「${rest[0]}」` : "移动鼠标";
+  } else if (verb === "mouse") {
+    description = "移动/点击鼠标";
+  } else if (verb === "scroll") {
+    description = "滚动页面";
+  } else if (verb === "wait") {
+    description = "等待";
+  } else if (verb === "eval") {
+    description = "执行脚本";
+  } else if (verb === "back") {
+    description = "后退";
+  } else if (verb === "forward") {
+    description = "前进";
+  } else if (verb === "reload") {
+    description = "刷新页面";
+  } else if (verb === "close") {
+    description = "关闭页面";
+  } else {
+    description = [verb || "agent-browser", ...rest].join(" ") || "AI 正在操作浏览器";
   }
 
-  const summary = [verb || "agent-browser", ...rest].join(" ");
-  return truncate(summary || "AI 正在操作浏览器", ACTIVITY_ACTION_LIMIT);
+  return truncate(actions.length > 1 ? `${description}等 ${actions.length} 步操作` : description, ACTIVITY_ACTION_LIMIT);
 }
 
-function hasAgentBrowserExecutable(text: string): boolean {
-  return agentBrowserExecutableIndex(text) >= 0;
+interface AgentBrowserAction {
+  segment: string;
+  verb: string;
+  rest: string[];
 }
 
-function agentBrowserExecutableIndex(text: string): number {
-  const match = /(?:^|[\s;&|()])(?:[^\s;&|()]*\/)?agent-browser(?:\s|$)/.exec(text);
-  return match ? text.indexOf("agent-browser", match.index) : -1;
+const AGENT_BROWSER_ACTION_VERBS = new Set([
+  "open",
+  "goto",
+  "navigate",
+  "click",
+  "fill",
+  "type",
+  "input",
+  "press",
+  "key",
+  "screenshot",
+  "snapshot",
+  "eval",
+  "scroll",
+  "back",
+  "forward",
+  "reload",
+  "close",
+  "mouse",
+  "hover",
+  "wait"
+]);
+
+function parseAgentBrowserActions(command: string): AgentBrowserAction[] {
+  const actions: AgentBrowserAction[] = [];
+  for (const segment of shellCommandSegments(command)) {
+    const action = parseAgentBrowserActionSegment(segment);
+    if (action) {
+      actions.push(action);
+    }
+  }
+  return actions;
+}
+
+function parseAgentBrowserActionSegment(segment: string): AgentBrowserAction | null {
+  const tokens = shellWords(segment.trim());
+  if (!tokens.length || path.basename(tokens[0]) !== "agent-browser") {
+    return null;
+  }
+  const args = stripAgentBrowserOptions(tokens.slice(1));
+  const verb = (args[0] || "").toLowerCase();
+  if (!AGENT_BROWSER_ACTION_VERBS.has(verb)) {
+    return null;
+  }
+  return {
+    segment,
+    verb,
+    rest: args.slice(1).filter((arg) => !arg.startsWith("-"))
+  };
+}
+
+function fallbackAgentBrowserAction(command: string): AgentBrowserAction | null {
+  const tokens = shellWords(command.trim());
+  const start = tokens.findIndex((token) => path.basename(token) === "agent-browser");
+  if (start < 0) {
+    return null;
+  }
+  const args = stripAgentBrowserOptions(tokens.slice(start + 1));
+  return {
+    segment: command,
+    verb: (args[0] || "").toLowerCase(),
+    rest: args.slice(1).filter((arg) => !arg.startsWith("-"))
+  };
+}
+
+function shellCommandSegments(input: string): string[] {
+  const segments: string[] = [];
+  let current = "";
+  let quote: "'" | "\"" | null = null;
+  let escaping = false;
+  for (let index = 0; index < input.length; index += 1) {
+    const char = input[index];
+    if (escaping) {
+      current += char;
+      escaping = false;
+      continue;
+    }
+    if (char === "\\" && quote !== "'") {
+      current += char;
+      escaping = true;
+      continue;
+    }
+    if ((char === "'" || char === "\"") && (!quote || quote === char)) {
+      quote = quote ? null : char;
+      current += char;
+      continue;
+    }
+    if (!quote && (char === ";" || char === "|" || char === "\n" || (char === "&" && input[index + 1] === "&"))) {
+      if (current.trim()) {
+        segments.push(current.trim());
+      }
+      current = "";
+      if (char === "&" || (char === "|" && input[index + 1] === "|")) {
+        index += 1;
+      }
+      continue;
+    }
+    current += char;
+  }
+  if (current.trim()) {
+    segments.push(current.trim());
+  }
+  return segments;
 }
 
 function stripAgentBrowserOptions(args: string[]): string[] {
@@ -542,6 +652,18 @@ function hostLabel(rawUrl: string): string {
   } catch {
     return rawUrl || "页面";
   }
+}
+
+function assistantMessageText(text: string): string {
+  const meaningfulLines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !isToolReceiptLine(line));
+  return normalizeText(meaningfulLines.join(" "));
+}
+
+function isToolReceiptLine(text: string): boolean {
+  return /^[✓✗](?:\s|$)/.test(text);
 }
 
 function normalizeText(text: string): string {

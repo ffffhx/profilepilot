@@ -37,6 +37,14 @@ const contextByPid = new Map<number, CachedContext>();
 // 会话档案的首句/项目也不变：按文件路径缓存，避免反复读文件。
 const sessionInfoByFile = new Map<string, SessionInfo>();
 
+const PROCESS_LOOKUP_TIMEOUT_MS = 2000;
+const CODEX_ROLLOUT_CACHE_TTL_MS = 15_000;
+const CODEX_ROLLOUT_FALLBACK_LIMIT = 40;
+const CODEX_ROLLOUT_FALLBACK_DAY_LIMIT = 62;
+
+let codexRolloutCache: { expiresAt: number; files: string[] } | null = null;
+let codexRolloutLoad: Promise<string[]> | null = null;
+
 interface SessionInfo {
   cwd?: string;
   project?: string;
@@ -313,7 +321,9 @@ async function readdirDesc(dir: string): Promise<string[]> {
 async function agentBrowserSockSession(pid: number): Promise<string | undefined> {
   try {
     const { stdout } = await execFileAsync("lsof", ["-a", "-p", String(pid), "-U", "-Fn"], {
-      maxBuffer: 1024 * 1024
+      maxBuffer: 1024 * 1024,
+      timeout: PROCESS_LOOKUP_TIMEOUT_MS,
+      killSignal: "SIGKILL"
     });
     for (const line of stdout.split("\n")) {
       if (!line.startsWith("n")) {
@@ -440,6 +450,8 @@ async function psCommand(pid: number): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "command="], {
       maxBuffer: 1024 * 1024,
+      timeout: PROCESS_LOOKUP_TIMEOUT_MS,
+      killSignal: "SIGKILL",
       env: POSIX_LOCALE_ENV
     });
     return stdout.trim() || null;
@@ -451,7 +463,9 @@ async function psCommand(pid: number): Promise<string | null> {
 async function lsofCwd(pid: number): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], {
-      maxBuffer: 1024 * 1024
+      maxBuffer: 1024 * 1024,
+      timeout: PROCESS_LOOKUP_TIMEOUT_MS,
+      killSignal: "SIGKILL"
     });
     const line = stdout.split("\n").find((entry) => entry.startsWith("n"));
     return line ? line.slice(1).trim() || null : null;
@@ -479,10 +493,35 @@ function claudeSessionFile(cwd: string): string | null {
 
 // codex app-server 是共享进程，会同时开着多个会话的 rollout；用 lsof 只挑“当前打开着”的。
 // 返回按文件名时间戳降序（最新会话在前）的 rollout 路径列表。
-async function listOpenCodexRollouts(): Promise<string[]> {
+export async function listOpenCodexRollouts(): Promise<string[]> {
+  const now = Date.now();
+  if (codexRolloutCache && codexRolloutCache.expiresAt > now) {
+    return codexRolloutCache.files;
+  }
+  if (!codexRolloutLoad) {
+    codexRolloutLoad = loadCodexRolloutFiles().finally(() => {
+      codexRolloutLoad = null;
+    });
+  }
+  const files = await codexRolloutLoad;
+  codexRolloutCache = {
+    expiresAt: Date.now() + CODEX_ROLLOUT_CACHE_TTL_MS,
+    files
+  };
+  return files;
+}
+
+async function loadCodexRolloutFiles(): Promise<string[]> {
+  const openRollouts = await lsofCodexRollouts();
+  return openRollouts.length ? openRollouts : latestCodexRolloutsFromDefaultHome();
+}
+
+async function lsofCodexRollouts(): Promise<string[]> {
   try {
     const { stdout } = await execFileAsync("lsof", ["-c", "codex", "-Fn"], {
-      maxBuffer: 4 * 1024 * 1024
+      maxBuffer: 4 * 1024 * 1024,
+      timeout: PROCESS_LOOKUP_TIMEOUT_MS,
+      killSignal: "SIGKILL"
     });
     return [
       ...new Set(
@@ -499,6 +538,81 @@ async function listOpenCodexRollouts(): Promise<string[]> {
   } catch {
     return [];
   }
+}
+
+async function latestCodexRolloutsFromDefaultHome(): Promise<string[]> {
+  const root = path.join(homedir(), ".codex", "sessions");
+  const found: { file: string; mtimeMs: number }[] = [];
+  let scannedDays = 0;
+  for (const year of (await readdirByMtimeDesc(root)).filter((entry) => entry.isDirectory)) {
+    for (const month of (await readdirByMtimeDesc(year.file)).filter((entry) => entry.isDirectory)) {
+      for (const day of (await readdirByMtimeDesc(month.file)).filter((entry) => entry.isDirectory)) {
+        scannedDays += 1;
+        if (scannedDays > CODEX_ROLLOUT_FALLBACK_DAY_LIMIT) {
+          return sortCodexRolloutsByMtime(found);
+        }
+        for (const entry of await readdirByMtimeDesc(day.file)) {
+          if (entry.isFile && /^rollout-.*\.jsonl$/.test(entry.name)) {
+            found.push({ file: entry.file, mtimeMs: entry.mtimeMs });
+          }
+        }
+        if (found.length >= CODEX_ROLLOUT_FALLBACK_LIMIT) {
+          return sortCodexRolloutsByMtime(found);
+        }
+      }
+    }
+  }
+  return sortCodexRolloutsByMtime(found);
+}
+
+function sortCodexRolloutsByMtime(files: { file: string; mtimeMs: number }[]): string[] {
+  return files
+    .sort((a, b) => b.mtimeMs - a.mtimeMs || path.basename(b.file).localeCompare(path.basename(a.file)))
+    .slice(0, CODEX_ROLLOUT_FALLBACK_LIMIT)
+    .map((entry) => entry.file);
+}
+
+interface MtimeDirEntry {
+  name: string;
+  file: string;
+  mtimeMs: number;
+  isDirectory: boolean;
+  isFile: boolean;
+}
+
+async function readdirByMtimeDesc(dir: string): Promise<MtimeDirEntry[]> {
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    const stamped = await Promise.all(
+      entries.map(async (entry) => {
+        const file = path.join(dir, entry.name);
+        const stats = await stat(file).catch(() => null);
+        return stats
+          ? {
+              name: entry.name,
+              file,
+              mtimeMs: stats.mtimeMs,
+              isDirectory: stats.isDirectory(),
+              isFile: stats.isFile()
+            }
+          : null;
+      })
+    );
+    return stamped
+      .filter((entry): entry is MtimeDirEntry => Boolean(entry))
+      .sort((a, b) => b.mtimeMs - a.mtimeMs || b.name.localeCompare(a.name));
+  } catch {
+    return [];
+  }
+}
+
+export function __resetSessionContextCachesForTests(): void {
+  contextByPid.clear();
+  sessionInfoByFile.clear();
+  claudeSessionFileByUuid.clear();
+  codexSessionFileByUuid.clear();
+  codexRolloutCache = null;
+  codexRolloutLoad = null;
 }
 
 // 按 session_meta.cwd 精确匹配 working-dir、取最新的打开着的 rollout（=正在用的那个会话）。

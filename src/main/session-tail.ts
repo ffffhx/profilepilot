@@ -7,6 +7,8 @@ import { findAgentSessionFile, type AgentSessionFile } from "./session-context";
 
 const ACTIVITY_ACTION_LIMIT = 60;
 const ACTIVITY_MESSAGE_LIMIT = 120;
+const MAX_FULL_INITIAL_READ_BYTES = 50 * 1024 * 1024;
+const INITIAL_TAIL_READ_BYTES = 2 * 1024 * 1024;
 
 export interface SessionTailerBase {
   agent?: string;
@@ -106,6 +108,11 @@ export class SessionTailer {
       this.offset = 0;
       this.partialLine = "";
       this.parsed = {};
+    }
+    if (this.offset === 0 && stats.size > MAX_FULL_INITIAL_READ_BYTES) {
+      // 超大会话档案首次接入只扫尾部；第一条半截 JSONL 解析失败即可自然跳过。
+      this.offset = Math.max(0, stats.size - INITIAL_TAIL_READ_BYTES);
+      this.partialLine = "";
     }
     if (stats.size === this.offset) {
       return;
@@ -245,6 +252,11 @@ export class SessionTailer {
       this.parsed.currentAction = describeAgentBrowserCommand(command);
       this.parsed.updatedAt = new Date().toISOString();
     }
+
+    const plan = codexPlanSteps(entry);
+    if (plan) {
+      this.consumeTodos(plan);
+    }
   }
 
   private consumeTodos(rawTodos: unknown): void {
@@ -271,7 +283,10 @@ export class SessionTailer {
 }
 
 function todoText(todo: Record<string, unknown>): string | undefined {
-  return truncate(normalizeText(stringValue(todo.activeForm) || stringValue(todo.content) || ""), ACTIVITY_MESSAGE_LIMIT) || undefined;
+  return truncate(
+    normalizeText(stringValue(todo.activeForm) || stringValue(todo.content) || stringValue(todo.step) || ""),
+    ACTIVITY_MESSAGE_LIMIT
+  ) || undefined;
 }
 
 function codexAssistantText(entry: Record<string, unknown>): string {
@@ -292,7 +307,62 @@ function codexCommandSource(entry: Record<string, unknown>): Record<string, unkn
   const payload = isRecord(entry.payload) ? entry.payload : entry;
   const item = isRecord(payload.item) ? payload.item : isRecord(payload.response_item) ? payload.response_item : payload;
   const role = stringValue(item.role) || stringValue(payload.role);
-  return role === "user" ? null : entry;
+  if (role === "user") {
+    return null;
+  }
+
+  const type = stringValue(item.type) || stringValue(payload.type) || stringValue(entry.type);
+  const name = stringValue(item.name) || stringValue(payload.name);
+  if (type === "function_call" || type === "tool_call" || type === "shell") {
+    return {
+      name,
+      arguments: item.arguments ?? payload.arguments,
+      input: item.input ?? payload.input,
+      command: item.command ?? payload.command,
+      cmd: item.cmd ?? payload.cmd,
+      script: item.script ?? payload.script
+    };
+  }
+  return null;
+}
+
+function codexPlanSteps(entry: Record<string, unknown>): Record<string, unknown>[] | null {
+  const payload = isRecord(entry.payload) ? entry.payload : entry;
+  const item = isRecord(payload.item) ? payload.item : isRecord(payload.response_item) ? payload.response_item : payload;
+  const type = stringValue(item.type) || stringValue(payload.type) || stringValue(entry.type);
+  const name = stringValue(item.name) || stringValue(payload.name);
+
+  if (type === "plan" || type === "update_plan") {
+    return planArray(item.plan ?? payload.plan);
+  }
+  if (name !== "update_plan" && name !== "functions.update_plan") {
+    return null;
+  }
+
+  const args = parseJsonRecord(item.arguments ?? payload.arguments) || parseJsonRecord(item.input ?? payload.input);
+  return args ? planArray(args.plan) : null;
+}
+
+function planArray(value: unknown): Record<string, unknown>[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  return value.filter(isRecord);
+}
+
+function parseJsonRecord(value: unknown): Record<string, unknown> | null {
+  if (isRecord(value)) {
+    return value;
+  }
+  if (typeof value !== "string") {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(value);
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
 }
 
 function messageContentText(content: unknown): string {
@@ -321,7 +391,7 @@ function findAgentBrowserCommand(value: unknown, depth = 0): string {
     return "";
   }
   if (typeof value === "string") {
-    return value.includes("agent-browser") ? value : "";
+    return hasAgentBrowserExecutable(value) ? value : "";
   }
   if (Array.isArray(value)) {
     for (const item of value) {
@@ -338,7 +408,7 @@ function findAgentBrowserCommand(value: unknown, depth = 0): string {
 
   for (const key of ["command", "cmd", "script"]) {
     const candidate = stringValue(value[key]);
-    if (candidate?.includes("agent-browser")) {
+    if (candidate && hasAgentBrowserExecutable(candidate)) {
       return candidate;
     }
   }
@@ -365,7 +435,8 @@ function findAgentBrowserCommand(value: unknown, depth = 0): string {
 }
 
 export function describeAgentBrowserCommand(command: string): string {
-  const raw = command.slice(command.indexOf("agent-browser")).trim();
+  const startIndex = agentBrowserExecutableIndex(command);
+  const raw = command.slice(startIndex >= 0 ? startIndex : 0).trim();
   const tokens = shellWords(raw);
   const start = tokens.findIndex((token) => token === "agent-browser" || path.basename(token) === "agent-browser");
   const args = stripAgentBrowserOptions(start >= 0 ? tokens.slice(start + 1) : tokens.slice(1));
@@ -399,6 +470,15 @@ export function describeAgentBrowserCommand(command: string): string {
 
   const summary = [verb || "agent-browser", ...rest].join(" ");
   return truncate(summary || "AI 正在操作浏览器", ACTIVITY_ACTION_LIMIT);
+}
+
+function hasAgentBrowserExecutable(text: string): boolean {
+  return agentBrowserExecutableIndex(text) >= 0;
+}
+
+function agentBrowserExecutableIndex(text: string): number {
+  const match = /(?:^|[\s;&|()])(?:[^\s;&|()]*\/)?agent-browser(?:\s|$)/.exec(text);
+  return match ? text.indexOf("agent-browser", match.index) : -1;
 }
 
 function stripAgentBrowserOptions(args: string[]): string[] {

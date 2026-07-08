@@ -193,17 +193,24 @@ export class ProfileManager {
     });
 
     const agentOverlayEnabled = registry.agentOverlayEnabled !== false;
+    const agentOverlayPorts = profiles
+      .filter((profile) => profile.cdpPort !== null && profile.cdpUrl)
+      .map((profile) => ({
+        port: profile.cdpPort as number,
+        profileId: profile.id,
+        profileName: profile.name,
+        clients: profile.cdpClients.filter(isAgentOverlayClient)
+      }))
+      .filter((input) => input.clients.length > 0);
     this.agentOverlayManager.sync({
       enabled: agentOverlayEnabled,
-      ports: profiles
-        .filter((profile) => profile.cdpPort !== null && profile.cdpUrl)
-        .map((profile) => ({
-          port: profile.cdpPort as number,
-          profileId: profile.id,
-          profileName: profile.name,
-          clients: profile.cdpClients.filter(isAgentOverlayClient)
-        }))
-        .filter((input) => input.clients.length > 0)
+      ports: agentOverlayPorts
+    });
+    const agentClientsByProfileId = new Map(agentOverlayPorts.map((input) => [input.profileId, input.clients]));
+    profiles.forEach((profile) => {
+      profile.agentActivity = agentOverlayEnabled
+        ? this.agentOverlayManager.getActivity(agentClientsByProfileId.get(profile.id) || [])
+        : null;
     });
 
     const runningProfiles = profiles.filter((profile) => profile.running);

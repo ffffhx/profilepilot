@@ -1,5 +1,5 @@
 import type { AgentActivity, CdpClientInfo } from "../shared/types";
-import { CdpBrowserClient, requestCdpTargets } from "./cdp-client";
+import { CdpBrowserClient, requestCdpTargets, requestCdpVersionInfo } from "./cdp-client";
 import type { CdpTargetListEntry } from "./internal-types";
 import { agentOverlayBootstrapScript } from "./overlay-script";
 import { isRecord, stringValue } from "./fs-util";
@@ -57,6 +57,8 @@ interface PortOverlay {
   profileName: string;
   clients: CdpClientInfo[];
   pages: Map<string, PageOverlay>;
+  browserClient: CdpBrowserClient | null;
+  browserConnecting: boolean;
   syncing: boolean;
   takeoverInFlight: boolean;
   takenOverUntil: number;
@@ -88,6 +90,11 @@ export class AgentOverlayManager {
         state.profileId = next.profileId;
         state.profileName = next.profileName;
         state.clients = next.clients;
+        if (state.clients.length && state.takenOverUntil > now) {
+          // 用户接管后 7 秒内保留 takenOver overlay；但 agent-browser 同会话或新会话重连即恢复 active。
+          state.takenOverUntil = 0;
+          state.lastPayload = null;
+        }
         continue;
       }
       if (state.takenOverUntil > now) {
@@ -107,6 +114,8 @@ export class AgentOverlayManager {
           profileName: next.profileName,
           clients: next.clients,
           pages: new Map(),
+          browserClient: null,
+          browserConnecting: false,
           syncing: false,
           takeoverInFlight: false,
           takenOverUntil: 0,
@@ -117,14 +126,27 @@ export class AgentOverlayManager {
         state.profileId = next.profileId;
         state.profileName = next.profileName;
         state.clients = next.clients;
+        if (state.clients.length && state.takenOverUntil > now) {
+          // 7 秒 keepalive 只覆盖无人接手的窗口；重连成功后下一次 push 会回到 active。
+          state.takenOverUntil = 0;
+          state.lastPayload = null;
+        }
       }
     }
 
     this.syncTailers();
     for (const state of this.ports.values()) {
+      void this.ensureTargetObserver(state).catch(() => undefined);
       void this.syncPortTargets(state).catch(() => undefined);
       void this.pushPortUpdate(state).catch(() => undefined);
     }
+  }
+
+  getActivity(clients: CdpClientInfo[]): AgentActivity | null {
+    const primary = clients.find((client) => client.session && this.tailers.has(client.session))
+      || clients.find((client) => client.session)
+      || clients[0];
+    return primary ? this.activityForClient(primary) : null;
   }
 
   private syncTailers(): void {
@@ -213,6 +235,49 @@ export class AgentOverlayManager {
     } finally {
       state.syncing = false;
     }
+  }
+
+  private async ensureTargetObserver(state: PortOverlay): Promise<void> {
+    if (state.browserClient || state.browserConnecting) {
+      return;
+    }
+    state.browserConnecting = true;
+    try {
+      const version = await requestCdpVersionInfo(state.port).catch(() => null);
+      const webSocketDebuggerUrl = version?.webSocketDebuggerUrl;
+      if (!webSocketDebuggerUrl) {
+        return;
+      }
+      const client = await CdpBrowserClient.connect(webSocketDebuggerUrl, PAGE_CONNECT_TIMEOUT);
+      if (this.ports.get(state.port) !== state) {
+        client.close();
+        return;
+      }
+      state.browserClient = client;
+      client.onEvent = (method, params) => {
+        this.handleBrowserEvent(state, method, params);
+      };
+      client.onDisconnect = () => {
+        if (state.browserClient === client) {
+          state.browserClient = null;
+        }
+      };
+      await client.send("Target.setDiscoverTargets", { discover: true }, 5000);
+    } catch {
+      this.teardownTargetObserver(state);
+    } finally {
+      state.browserConnecting = false;
+    }
+  }
+
+  private handleBrowserEvent(state: PortOverlay, method: string, params: unknown): void {
+    if (!method.startsWith("Target.target")) {
+      return;
+    }
+    if (isRecord(params) && isRecord(params.targetInfo) && stringValue(params.targetInfo.type) !== "page") {
+      return;
+    }
+    void this.syncPortTargets(state).catch(() => undefined);
   }
 
   private async connectPage(state: PortOverlay, targetId: string, target: CdpTargetListEntry): Promise<void> {
@@ -418,10 +483,18 @@ export class AgentOverlayManager {
   }
 
   private teardownPort(state: PortOverlay): void {
+    this.teardownTargetObserver(state);
     for (const page of [...state.pages.values()]) {
       void this.teardownPage(state, page).catch(() => undefined);
     }
     state.pages.clear();
+  }
+
+  private teardownTargetObserver(state: PortOverlay): void {
+    const client = state.browserClient;
+    state.browserClient = null;
+    state.browserConnecting = false;
+    client?.close();
   }
 
   private async teardownPage(state: PortOverlay, page: PageOverlay): Promise<void> {

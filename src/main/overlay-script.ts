@@ -1,5 +1,12 @@
 export function agentOverlayBootstrapScript(): string {
   return String.raw`(() => {
+  try {
+    if (window.top !== window.self) {
+      return;
+    }
+  } catch {
+    return;
+  }
   if (window.__ppAgentOverlayInstalled) {
     return;
   }
@@ -9,6 +16,9 @@ export function agentOverlayBootstrapScript(): string {
   const STORAGE_KEY = "__ppAgentOverlayPosition";
   const COLLAPSED_KEY = "__ppAgentOverlayCollapsed";
   const STOP_CONFIRM_MS = 3000;
+  const HOST_REATTACH_LIMIT = 8;
+  const HOST_REATTACH_WINDOW_MS = 10000;
+  const HOST_REATTACH_BACKOFF_MS = 3000;
   const OVERLAY_TEXT = {
     zh: {
       revealTitle: "在 ProfilePilot 中查看",
@@ -131,7 +141,8 @@ export function agentOverlayBootstrapScript(): string {
     lastMessage: "",
     updatedAt: "",
     startedAt: "",
-    sessions: []
+    sessions: [],
+    stopError: ""
   };
   const KNOWN_STATE_FIELDS = Object.keys(STATE_DEFAULTS);
   const STRING_STATE_FIELDS = new Set([
@@ -145,7 +156,8 @@ export function agentOverlayBootstrapScript(): string {
     "nextStep",
     "lastMessage",
     "updatedAt",
-    "startedAt"
+    "startedAt",
+    "stopError"
   ]);
   const state = cloneStateDefaults();
   let collapsed = readCollapsed();
@@ -181,6 +193,11 @@ export function agentOverlayBootstrapScript(): string {
   let themeMediaListener = null;
   let themeObserver = null;
   let themeUpdateTimer = null;
+  let hostObserver = null;
+  let hostReattachTimer = null;
+  let hostReattachAttempts = 0;
+  let hostReattachWindowStartedAt = 0;
+  let hostReattachBlockedUntil = 0;
 
   function mount() {
     if (!document.documentElement) {
@@ -330,9 +347,11 @@ export function agentOverlayBootstrapScript(): string {
     root.querySelector(".head").addEventListener("pointerdown", startDrag);
 
     document.documentElement.appendChild(host);
+    setupHostReconnectTracking();
     setupReducedMotionTracking();
     setupThemeTracking();
     elapsedTimer = setInterval(() => {
+      ensureHostConnected();
       updateElapsed();
       renderSessionList();
     }, 1000);
@@ -437,6 +456,82 @@ export function agentOverlayBootstrapScript(): string {
     }
     window.addEventListener("pageshow", themeMediaListener, true);
     window.addEventListener("resize", themeMediaListener);
+  }
+
+  function setupHostReconnectTracking() {
+    cleanupHostReconnectTracking();
+    if (typeof MutationObserver !== "function" || !document.documentElement) {
+      return;
+    }
+    hostObserver = new MutationObserver((mutations) => {
+      if (!host || host.isConnected) {
+        return;
+      }
+      for (const mutation of mutations) {
+        for (const node of mutation.removedNodes) {
+          if (node === host) {
+            scheduleHostReconnect();
+            return;
+          }
+        }
+      }
+      scheduleHostReconnect();
+    });
+    try {
+      hostObserver.observe(document.documentElement, { childList: true });
+    } catch {
+      hostObserver = null;
+    }
+  }
+
+  function cleanupHostReconnectTracking() {
+    if (hostReattachTimer) {
+      clearTimeout(hostReattachTimer);
+      hostReattachTimer = null;
+    }
+    if (hostObserver) {
+      hostObserver.disconnect();
+      hostObserver = null;
+    }
+  }
+
+  function scheduleHostReconnect() {
+    if (tearingDown || hostReattachTimer) {
+      return;
+    }
+    hostReattachTimer = setTimeout(() => {
+      hostReattachTimer = null;
+      ensureHostConnected();
+    }, 80);
+  }
+
+  function ensureHostConnected() {
+    if (tearingDown || !host || !document.documentElement || host.isConnected) {
+      return Boolean(host && host.isConnected);
+    }
+    const now = Date.now();
+    if (hostReattachBlockedUntil > now) {
+      return false;
+    }
+    if (!hostReattachWindowStartedAt || now - hostReattachWindowStartedAt > HOST_REATTACH_WINDOW_MS) {
+      hostReattachWindowStartedAt = now;
+      hostReattachAttempts = 0;
+    }
+    hostReattachAttempts += 1;
+    if (hostReattachAttempts > HOST_REATTACH_LIMIT) {
+      hostReattachBlockedUntil = now + HOST_REATTACH_BACKOFF_MS;
+      scheduleHostReconnect();
+      return false;
+    }
+    try {
+      document.documentElement.appendChild(host);
+      requestAnimationFrame(clampHostIntoViewport);
+      return true;
+    } catch {
+      hostReattachBlockedUntil = now + HOST_REATTACH_BACKOFF_MS;
+      scheduleHostReconnect();
+      return false;
+    }
   }
 
   function cleanupThemeTracking() {
@@ -557,6 +652,7 @@ export function agentOverlayBootstrapScript(): string {
     if (!host || !panel) {
       return;
     }
+    ensureHostConnected();
     const copy = text();
     const taken = state.state === "takenOver";
     const sessions = normalizedSessions();
@@ -566,7 +662,7 @@ export function agentOverlayBootstrapScript(): string {
     const metaText = [state.project, state.sessionTitle].filter(Boolean).join(" · ");
     meta.textContent = metaText;
     meta.style.display = metaText ? "block" : "none";
-    action.textContent = copy.actionPrefix + (taken ? copy.takenAction : currentActionText(copy));
+    action.textContent = copy.actionPrefix + (taken ? copy.takenAction : state.stopError || currentActionText(copy));
 
     renderProgress();
     next.textContent = state.nextStep ? copy.nextPrefix + state.nextStep : "";
@@ -934,6 +1030,7 @@ export function agentOverlayBootstrapScript(): string {
       clearTimeout(takenOverTimer);
       takenOverTimer = setTimeout(() => collapse(), 5000);
     }
+    ensureHostConnected();
     render();
   };
 
@@ -944,6 +1041,7 @@ export function agentOverlayBootstrapScript(): string {
     tearingDown = true;
     clearTimeout(takenOverTimer);
     clearInterval(elapsedTimer);
+    cleanupHostReconnectTracking();
     cleanupReducedMotionTracking();
     cleanupThemeTracking();
     resetStopConfirm();

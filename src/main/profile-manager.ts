@@ -81,6 +81,11 @@ interface TakeoverTarget {
   clients: CdpClientInfo[];
 }
 
+interface TakeoverAgentConnectionsOptions {
+  session?: string;
+  pids?: number[];
+}
+
 export class ProfileManager {
   private readonly profilesDir: string;
   private readonly registryPath: string;
@@ -570,13 +575,18 @@ export class ProfileManager {
     await this.terminateCdpClient(pid);
   }
 
-  async takeoverAgentConnections(profileId: string, session?: string): Promise<TakeoverAgentConnectionsResult> {
+  async takeoverAgentConnections(
+    profileId: string,
+    filter?: string | TakeoverAgentConnectionsOptions
+  ): Promise<TakeoverAgentConnectionsResult> {
     const target = await this.resolveTakeoverTarget(profileId);
-    const requestedSession = normalizeSessionFilter(session);
+    const requestedSession = normalizeSessionFilter(typeof filter === "string" ? filter : filter?.session);
+    const requestedPids = typeof filter === "string" ? null : normalizePidFilter(filter?.pids);
     const clients = uniqueCdpClientsByPid(
       target.clients
         .filter(isAgentDrivenCdpClient)
         .filter((client) => !requestedSession || client.session === requestedSession)
+        .filter((client) => !requestedPids || requestedPids.has(client.pid))
     );
     const takeovers: AgentTakeoverEvent[] = [];
     const failures: TakeoverAgentConnectionsResult["failures"] = [];
@@ -648,7 +658,11 @@ export class ProfileManager {
   }
 
   private async stopAgentOverlaySession(request: AgentOverlayStopRequest): Promise<void> {
-    const result = await this.takeoverAgentConnections(request.profileId, request.session);
+    const pids = request.stopAll ? undefined : (request.pids?.length ? request.pids : [request.pid]);
+    const result = await this.takeoverAgentConnections(request.profileId, {
+      session: request.session,
+      pids
+    });
     if (result.successCount > 0 && result.allStopped) {
       return;
     }
@@ -2928,6 +2942,14 @@ function filterCdpDriverClients(
 function normalizeSessionFilter(session: string | undefined): string | undefined {
   const value = typeof session === "string" ? session.trim() : "";
   return value || undefined;
+}
+
+function normalizePidFilter(pids: number[] | undefined): Set<number> | null {
+  if (!Array.isArray(pids)) {
+    return null;
+  }
+  const values = pids.filter((pid) => Number.isSafeInteger(pid) && pid > 0);
+  return values.length ? new Set(values) : null;
 }
 
 function isAgentDrivenCdpClient(client: CdpClientInfo): boolean {

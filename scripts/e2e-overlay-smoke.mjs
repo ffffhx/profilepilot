@@ -166,12 +166,11 @@ try {
   step("Main-world forged stop attempt could not see the binding and did not call onStop.");
 
   await clickOverlayStopButton(rootPageClient);
-  await waitFor(() => (stopCalls.length === clients.length ? stopCalls.length : null), 1500, "isolated overlay button stop path");
-  assert.deepEqual(
-    stopCalls.map((call) => call.pid).sort((left, right) => left - right),
-    clients.map((client) => client.pid).sort((left, right) => left - right)
-  );
-  step("Isolated-world overlay button path stopped all active sessions.");
+  await waitFor(() => (stopCalls.length === 1 ? stopCalls.length : null), 1500, "isolated overlay button stop path");
+  assert.equal(stopCalls[0].stopAll, true);
+  assert.equal(stopCalls[0].pids, undefined);
+  assert.ok(clients.some((client) => client.pid === stopCalls[0].pid), "stop-all request should reference an active driver pid.");
+  step("Isolated-world overlay button path requested stop-all for active sessions.");
 
   const callsAfterFirstSignal = stopCalls.length;
   const repeatedForgery = await evaluateValue(

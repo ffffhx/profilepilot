@@ -277,14 +277,17 @@ async function runTakeoverReconnectScenario(page, clients, stopCalls) {
   const beforeFirstStop = stopCalls.length;
   await clickOverlayStopButton(page.client);
   await waitFor(
-    () => (stopCalls.length === beforeFirstStop + clients.length ? stopCalls.length : null),
+    () => (stopCalls.length === beforeFirstStop + 1 ? stopCalls.length : null),
     2000,
     "first takeover onStop calls"
   );
-  pass("isolated-world double-click stop path invoked onStop for all active sessions", {
-    expected: clients.length,
+  assert.equal(stopCalls.at(-1).stopAll, true);
+  assert.equal(stopCalls.at(-1).pids, undefined);
+  assert.ok(clients.some((client) => client.pid === stopCalls.at(-1).pid), "stop-all request should reference an active driver pid.");
+  pass("isolated-world double-click stop path invoked one stop-all request", {
+    expected: 1,
     actual: stopCalls.length - beforeFirstStop,
-    pids: stopCalls.slice(beforeFirstStop).map((call) => call.pid)
+    pid: stopCalls.at(-1).pid
   });
 
   manager.sync({
@@ -306,7 +309,7 @@ async function runTakeoverReconnectScenario(page, clients, stopCalls) {
   await activatePage(page);
   await clickOverlayStopButton(page.client);
   await delay(250);
-  assert.equal(stopCalls.length, beforeFirstStop + clients.length, "taken-over overlay should not emit duplicate stop calls.");
+  assert.equal(stopCalls.length, beforeFirstStop + 1, "taken-over overlay should not emit duplicate stop calls.");
   pass("taken-over state suppressed duplicate stop attempts during keepalive", {
     stopCalls: stopCalls.length
   });
@@ -328,12 +331,15 @@ async function runTakeoverReconnectScenario(page, clients, stopCalls) {
   await activatePage(page);
   await clickOverlayStopButton(page.client);
   await waitFor(
-    () => (stopCalls.length === beforeSecondStop + clients.length ? stopCalls.length : null),
+    () => (stopCalls.length === beforeSecondStop + 1 ? stopCalls.length : null),
     2000,
     "second takeover after reconnect"
   );
+  assert.equal(stopCalls.at(-1).stopAll, true);
+  assert.equal(stopCalls.at(-1).pids, undefined);
+  assert.ok(clients.some((client) => client.pid === stopCalls.at(-1).pid), "stop-all request should reference an active driver pid.");
   pass("same-session reconnect recovered active behavior; stop was accepted again", {
-    expected: clients.length,
+    expected: 1,
     actual: stopCalls.length - beforeSecondStop,
     totalStopCalls: stopCalls.length
   });

@@ -32,8 +32,10 @@ export interface AgentOverlayStopRequest {
   profileId: string;
   profileName: string;
   pid: number;
+  pids?: number[];
   session?: string;
   agent?: string;
+  stopAll?: boolean;
 }
 
 export interface AgentOverlayRevealRequest {
@@ -787,30 +789,29 @@ export class AgentOverlayManager {
     }
 
     state.takeoverInFlight = true;
-    let stoppedCount = 0;
     let firstError: unknown = null;
-    const requireAllStopped = !requestedSession;
+    const stopAll = !requestedSession && drivers.length > 1;
     try {
-      for (const driver of drivers) {
-        try {
-          await this.options.onStop({
-            port: state.port,
-            profileId: state.profileId,
-            profileName: state.profileName,
-            pid: driver.pid,
-            session: driver.session,
-            agent: inferAgentName(driver)
-          });
-          if (!this.isActivePort(state)) {
-            return;
-          }
-          stoppedCount += 1;
-        } catch (error) {
-          firstError = firstError || error;
-        }
+      try {
+        const driver = drivers[0];
+        await this.options.onStop({
+          port: state.port,
+          profileId: state.profileId,
+          profileName: state.profileName,
+          pid: driver.pid,
+          pids: stopAll ? undefined : drivers.map((client) => client.pid),
+          session: stopAll ? undefined : requestedSession || driver.session,
+          agent: stopAll ? undefined : inferAgentName(driver),
+          stopAll
+        });
+      } catch (error) {
+        firstError = error;
       }
-      if (requireAllStopped && stoppedCount !== drivers.length) {
-        state.stopError = this.stopErrorMessage(drivers.length, stoppedCount, firstError);
+      if (firstError) {
+        if (!stopAll) {
+          throw firstError instanceof Error ? firstError : new Error("没有可停止的 AI 驱动连接。");
+        }
+        state.stopError = this.stopErrorMessage(drivers.length, 0, firstError);
         state.takenOverUntil = 0;
         state.lastPayload = {
           ...this.payloadForPort(state),
@@ -822,9 +823,6 @@ export class AgentOverlayManager {
           console.warn("[ProfilePilot] Agent overlay stop-all failed", firstError);
         }
         return;
-      }
-      if (!stoppedCount) {
-        throw firstError instanceof Error ? firstError : new Error("没有可停止的 AI 驱动连接。");
       }
       if (!this.isActivePort(state)) {
         return;

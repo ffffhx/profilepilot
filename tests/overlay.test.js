@@ -414,6 +414,90 @@ test("AgentOverlayManager rejects binding stop signals from unknown execution co
   assert.equal(stopCalls.length, 0);
 });
 
+test("AgentOverlayManager sends a pid-scoped stop request for a sessionless single driver", async () => {
+  const stopCalls = [];
+  const manager = new AgentOverlayManager({
+    onStop: async (request) => {
+      stopCalls.push(request);
+    }
+  });
+  const state = createOverlayState({
+    clients: [
+      {
+        pid: 42,
+        label: "agent-browser",
+        project: "profilepilot",
+        title: "Sessionless Codex"
+      }
+    ]
+  });
+  const page = createOverlayPage({
+    sessionId: "page-session-1",
+    activeContextId: 7,
+    isolatedContextIds: new Set([7])
+  });
+  manager.ports.set(state.port, state);
+
+  manager.handlePageEvent(state, page, "Runtime.bindingCalled", {
+    name: "__ppAgentOverlaySignal",
+    executionContextId: 7,
+    payload: JSON.stringify({ action: "stop" })
+  });
+
+  await waitFor(() => stopCalls.length, "sessionless pid-scoped stop");
+  assert.equal(stopCalls.length, 1);
+  assert.equal(stopCalls[0].pid, 42);
+  assert.deepEqual(stopCalls[0].pids, [42]);
+  assert.equal(stopCalls[0].session, undefined);
+  assert.equal(stopCalls[0].stopAll, false);
+});
+
+test("AgentOverlayManager sends one stop-all request for multi-session takeover", async () => {
+  const stopCalls = [];
+  const manager = new AgentOverlayManager({
+    onStop: async (request) => {
+      stopCalls.push(request);
+    }
+  });
+  const state = createOverlayState({
+    clients: [
+      {
+        pid: 42,
+        label: "agent-browser",
+        project: "profilepilot",
+        title: "Codex one",
+        session: "cx-one"
+      },
+      {
+        pid: 77,
+        label: "agent-browser",
+        project: "profilepilot",
+        title: "Codex two",
+        session: "cx-two"
+      }
+    ]
+  });
+  const page = createOverlayPage({
+    sessionId: "page-session-1",
+    activeContextId: 7,
+    isolatedContextIds: new Set([7])
+  });
+  manager.ports.set(state.port, state);
+
+  manager.handlePageEvent(state, page, "Runtime.bindingCalled", {
+    name: "__ppAgentOverlaySignal",
+    executionContextId: 7,
+    payload: JSON.stringify({ action: "stop" })
+  });
+
+  await waitFor(() => stopCalls.length, "multi-session stop-all");
+  assert.equal(stopCalls.length, 1);
+  assert.equal(stopCalls[0].pid, 42);
+  assert.equal(stopCalls[0].pids, undefined);
+  assert.equal(stopCalls[0].session, undefined);
+  assert.equal(stopCalls[0].stopAll, true);
+});
+
 test("AgentOverlayManager rebuilds an isolated world after all known contexts fail and throttles recovery", async () => {
   let now = Date.parse("2026-07-08T00:00:00.000Z");
   let createWorldCalls = 0;
@@ -563,6 +647,18 @@ function deferred() {
     reject = promiseReject;
   });
   return { promise, resolve, reject };
+}
+
+async function waitFor(predicate, label) {
+  const deadline = Date.now() + WAIT_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const value = predicate();
+    if (value) {
+      return value;
+    }
+    await new Promise((resolve) => setTimeout(resolve, WAIT_INTERVAL_MS));
+  }
+  throw new Error(`Timed out waiting for ${label}`);
 }
 
 function startTailer(session, base) {

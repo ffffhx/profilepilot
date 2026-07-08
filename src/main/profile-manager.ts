@@ -12,6 +12,7 @@ import type {
   AgentTakeoverEvent,
   AccountSyncSkippedItem,
   AppState,
+  CdpClientInfo,
   CdpPortSuggestion,
   ClonedProfileInfo,
   CloneProfilesRequest,
@@ -62,6 +63,8 @@ export { ProfileManagerError } from "./profile-manager-error";
 export const APP_TITLE = "ProfilePilot";
 const CHROME_REMOTE_DEBUGGING_URL = "chrome://inspect/#remote-debugging";
 const MINI_PROFILE_LIMIT = 3;
+const EXTERNAL_PROFILE_ID_PREFIX = "external:";
+const TAKEOVER_HISTORY_LIMIT = 50;
 // 全局快捷键直启的槽位数：⌘⌥1 ~ ⌘⌥9。
 const QUICK_LAUNCH_SLOT_COUNT = 9;
 
@@ -143,10 +146,20 @@ export class ProfileManager {
       profile.cloneCount = cloneCountBySource.get(profile.id) || 0;
     });
 
-    // 标记“谁在持久连接这些 Profile 的 CDP 端口”（agent-browser 等驱动工具）。
-    const cdpPorts = profiles
+    const externalInstances = await findExternalChromeInstances([
+      ...isolatedPaths,
+      nativeChromeUserDataDir(),
+      this.dataDir
+    ]);
+
+    // 标记“谁在持久连接这些 Profile / 外部实例的 CDP 端口”（agent-browser 等驱动工具）。
+    const profileCdpPorts = profiles
       .filter((profile) => profile.cdpPort !== null)
       .map((profile) => profile.cdpPort as number);
+    const externalCdpPorts = externalInstances
+      .filter((instance) => instance.cdpPort !== null)
+      .map((instance) => instance.cdpPort as number);
+    const cdpPorts = profileCdpPorts.concat(externalCdpPorts);
     const cdpClientsByPort = await getCdpClientsByPort(cdpPorts);
     // ProfilePilot 自己也会连这些 CDP 端口去抓实时观测数据（标签页 / 截图），
     // 这些自连接不是“外部驱动工具”，必须排除，否则会把自己显示成“驱动中：Electron”。
@@ -161,12 +174,25 @@ export class ProfileManager {
         (client) => !profilePids.has(client.pid) && !selfPids.has(client.pid)
       );
     });
+    externalInstances.forEach((instance) => {
+      if (instance.cdpPort === null) {
+        instance.cdpClients = [];
+        instance.agentActivity = null;
+        return;
+      }
+      instance.cdpClients = filterCdpDriverClients(
+        cdpClientsByPort.get(instance.cdpPort) || [],
+        [instance.pid],
+        selfPids
+      );
+      instance.agentActivity = null;
+    });
 
     // 实时摘要：每个有 CDP 端口的 Profile 当前停在哪个页面、开了几个标签（轻量，不抓截图）。
     // 给表格行 / 悬浮窗卡片 / 「在飞中」总览统一供数；详情侧栏的画面截图仍走独立的 getCdpLiveView。
     const liveSummaryByPort = new Map<number, { primaryUrl: string | null; tabCount: number }>();
     await Promise.all(
-      [...new Set(cdpPorts)].map(async (port) => {
+      [...new Set(profileCdpPorts)].map(async (port) => {
         const targets = await requestCdpTargets(port).catch(() => []);
         const pages = targets.filter((target) => target.type === "page");
         liveSummaryByPort.set(port, { primaryUrl: pages[0]?.url || null, tabCount: pages.length });
@@ -193,7 +219,7 @@ export class ProfileManager {
     });
 
     const agentOverlayEnabled = registry.agentOverlayEnabled !== false;
-    const agentOverlayPorts = profiles
+    const profileAgentOverlayPorts = profiles
       .filter((profile) => profile.cdpPort !== null && profile.cdpUrl)
       .map((profile) => ({
         port: profile.cdpPort as number,
@@ -202,6 +228,16 @@ export class ProfileManager {
         clients: profile.cdpClients.filter(isAgentOverlayClient)
       }))
       .filter((input) => input.clients.length > 0);
+    const externalAgentOverlayPorts = externalInstances
+      .filter((instance) => instance.cdpPort !== null)
+      .map((instance) => ({
+        port: instance.cdpPort as number,
+        profileId: makeExternalProfileId(instance.userDataDir),
+        profileName: instance.label,
+        clients: (instance.cdpClients || []).filter(isAgentOverlayClient)
+      }))
+      .filter((input) => input.clients.length > 0);
+    const agentOverlayPorts = profileAgentOverlayPorts.concat(externalAgentOverlayPorts);
     this.agentOverlayManager.sync({
       enabled: agentOverlayEnabled,
       ports: agentOverlayPorts
@@ -212,14 +248,14 @@ export class ProfileManager {
         ? this.agentOverlayManager.getActivity(agentClientsByProfileId.get(profile.id) || [])
         : null;
     });
+    externalInstances.forEach((instance) => {
+      instance.agentActivity = agentOverlayEnabled
+        ? this.agentOverlayManager.getActivity(agentClientsByProfileId.get(makeExternalProfileId(instance.userDataDir)) || [])
+        : null;
+    });
 
     const runningProfiles = profiles.filter((profile) => profile.running);
     const lastLaunchedProfile = profiles.find((profile) => profile.lastLaunchedAt) || null;
-    const externalInstances = await findExternalChromeInstances([
-      ...isolatedPaths,
-      nativeChromeUserDataDir(),
-      this.dataDir
-    ]);
     const validProfileIds = new Set(profiles.map((profile) => profile.id));
     const miniProfileIds = normalizeMiniProfileIds(registry.miniProfileIds, validProfileIds);
     const miniProfileOrder = normalizeMiniProfileOrder(registry.miniProfileOrder, validProfileIds);
@@ -519,16 +555,7 @@ export class ProfileManager {
       throw new ProfileManagerError("这个驱动连接已经不在了。", "CDP_CLIENT_NOT_CONNECTED");
     }
 
-    this.signalPids([pid], "SIGTERM");
-    if (await this.waitUntilPidGone(pid, 2500)) {
-      return;
-    }
-
-    // 优雅退出超时，强制结束。
-    this.signalPids([pid], "SIGKILL");
-    if (!(await this.waitUntilPidGone(pid, 1500))) {
-      throw new ProfileManagerError("无法结束这个驱动连接对应的进程，请手动处理。", "CDP_CLIENT_DISCONNECT_FAILED");
-    }
+    await this.terminateCdpClient(pid);
   }
 
   async setAgentOverlayEnabled(enabled: boolean): Promise<void> {
@@ -542,7 +569,18 @@ export class ProfileManager {
     }
   }
 
+  async getTakeoverHistory(): Promise<AgentTakeoverEvent[]> {
+    const registry = await this.loadRegistry();
+    return [...(registry.takeoverHistory || [])].reverse();
+  }
+
   private async stopAgentOverlaySession(request: AgentOverlayStopRequest): Promise<void> {
+    const externalUserDataDir = externalUserDataDirFromProfileId(request.profileId);
+    if (externalUserDataDir) {
+      await this.stopExternalAgentOverlaySession(externalUserDataDir, request);
+      return;
+    }
+
     const profile = await this.getPublicProfile(request.profileId);
     const sessionDriver = request.session
       ? profile.cdpClients.find((client) => client.label === "agent-browser" && client.session === request.session)
@@ -554,13 +592,57 @@ export class ProfileManager {
     }
 
     await this.disconnectCdpClient(profile.id, driver.pid);
-    this.events.onAgentTakeover?.({
+    const takeover: AgentTakeoverEvent = {
       profileId: profile.id,
       profileName: profile.name,
       session: driver.session || request.session,
       agent: driver.agent || request.agent,
       at: new Date().toISOString()
-    });
+    };
+    await this.recordTakeoverEvent(takeover);
+    this.events.onAgentTakeover?.(takeover);
+  }
+
+  private async stopExternalAgentOverlaySession(
+    userDataDir: string,
+    request: AgentOverlayStopRequest
+  ): Promise<void> {
+    const instance = await this.locateExternalInstance(userDataDir);
+    if (!instance || instance.cdpPort === null) {
+      throw new ProfileManagerError("这个外部实例已经不在了。", "EXTERNAL_INSTANCE_NOT_FOUND");
+    }
+
+    const cdpClientsByPort = await getCdpClientsByPort([instance.cdpPort]);
+    const clients = filterCdpDriverClients(
+      cdpClientsByPort.get(instance.cdpPort) || [],
+      [instance.pid],
+      new Set(app.getAppMetrics().map((metric) => metric.pid))
+    );
+    const sessionDriver = request.session
+      ? clients.find((client) => client.label === "agent-browser" && client.session === request.session)
+      : null;
+    const requestedDriver = clients.find((client) => client.pid === request.pid);
+    const driver = sessionDriver || requestedDriver;
+    if (!driver) {
+      throw new ProfileManagerError("这个驱动连接已经不在了。", "CDP_CLIENT_NOT_CONNECTED");
+    }
+
+    await this.terminateCdpClient(driver.pid);
+    const takeover: AgentTakeoverEvent = {
+      profileId: makeExternalProfileId(instance.userDataDir),
+      profileName: instance.label,
+      session: driver.session || request.session,
+      agent: driver.agent || request.agent,
+      at: new Date().toISOString()
+    };
+    await this.recordTakeoverEvent(takeover);
+    this.events.onAgentTakeover?.(takeover);
+  }
+
+  private async recordTakeoverEvent(event: AgentTakeoverEvent): Promise<void> {
+    const registry = await this.loadRegistry();
+    registry.takeoverHistory = normalizeTakeoverHistory([...(registry.takeoverHistory || []), event]);
+    await this.saveRegistry(registry);
   }
 
   private async waitUntilPidGone(pid: number, timeoutMs: number): Promise<boolean> {
@@ -2176,7 +2258,7 @@ export class ProfileManager {
     try {
       await fs.access(this.registryPath);
     } catch {
-      await this.saveRegistry({ profiles: [], nativeProfiles: {}, accountSyncRecords: {} });
+      await this.saveRegistry({ profiles: [], nativeProfiles: {}, accountSyncRecords: {}, takeoverHistory: [] });
     }
   }
 
@@ -2201,6 +2283,7 @@ export class ProfileManager {
           : [],
         nativeProfiles,
         accountSyncRecords,
+        takeoverHistory: normalizeTakeoverHistory(parsed.takeoverHistory),
         agentOverlayEnabled: parsed.agentOverlayEnabled !== false,
         miniProfileIds: normalizeMiniProfileIds(parsed.miniProfileIds),
         miniProfileOrder: normalizeMiniProfileOrder(parsed.miniProfileOrder),
@@ -2215,7 +2298,15 @@ export class ProfileManager {
       } catch {
         // 无法备份损坏文件时也只能干净启动。
       }
-      return { profiles: [], nativeProfiles: {}, accountSyncRecords: {}, agentOverlayEnabled: true, miniProfileIds: [], miniProfileOrder: [] };
+      return {
+        profiles: [],
+        nativeProfiles: {},
+        accountSyncRecords: {},
+        takeoverHistory: [],
+        agentOverlayEnabled: true,
+        miniProfileIds: [],
+        miniProfileOrder: []
+      };
     }
   }
 
@@ -2721,6 +2812,19 @@ export class ProfileManager {
 
     return false;
   }
+
+  private async terminateCdpClient(pid: number): Promise<void> {
+    this.signalPids([pid], "SIGTERM");
+    if (await this.waitUntilPidGone(pid, 2500)) {
+      return;
+    }
+
+    // 优雅退出超时，强制结束。
+    this.signalPids([pid], "SIGKILL");
+    if (!(await this.waitUntilPidGone(pid, 1500))) {
+      throw new ProfileManagerError("无法结束这个驱动连接对应的进程，请手动处理。", "CDP_CLIENT_DISCONNECT_FAILED");
+    }
+  }
 }
 
 export function createProfileManager(onAgentTakeover?: (event: AgentTakeoverEvent) => void): ProfileManager {
@@ -2736,6 +2840,63 @@ function nextUniqueCloneName(prefix: string, used: Set<string>): string {
     candidate = `${prefix}-${n}`;
   }
   return candidate;
+}
+
+function makeExternalProfileId(userDataDir: string): string {
+  return `${EXTERNAL_PROFILE_ID_PREFIX}${userDataDir}`;
+}
+
+function externalUserDataDirFromProfileId(profileId: string): string | null {
+  return profileId.startsWith(EXTERNAL_PROFILE_ID_PREFIX)
+    ? profileId.slice(EXTERNAL_PROFILE_ID_PREFIX.length)
+    : null;
+}
+
+function filterCdpDriverClients(
+  clients: CdpClientInfo[],
+  ownerPids: number[],
+  selfPids: Set<number>
+): CdpClientInfo[] {
+  const owners = new Set(ownerPids);
+  return clients.filter((client) => !owners.has(client.pid) && !selfPids.has(client.pid));
+}
+
+function normalizeTakeoverHistory(input: unknown): AgentTakeoverEvent[] {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+
+  return input
+    .map(normalizeTakeoverEvent)
+    .filter((event): event is AgentTakeoverEvent => Boolean(event))
+    .slice(-TAKEOVER_HISTORY_LIMIT);
+}
+
+function normalizeTakeoverEvent(input: unknown): AgentTakeoverEvent | null {
+  if (!isRecord(input)) {
+    return null;
+  }
+  const profileId = stringField(input.profileId);
+  const profileName = stringField(input.profileName);
+  const at = stringField(input.at);
+  if (!profileId || !profileName || !at) {
+    return null;
+  }
+
+  const event: AgentTakeoverEvent = { profileId, profileName, at };
+  const session = stringField(input.session);
+  const agent = stringField(input.agent);
+  if (session) {
+    event.session = session;
+  }
+  if (agent) {
+    event.agent = agent;
+  }
+  return event;
+}
+
+function stringField(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
 }
 
 function normalizeMiniProfileIds(input: unknown, validProfileIds?: Set<string>): string[] {

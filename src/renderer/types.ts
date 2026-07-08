@@ -163,6 +163,8 @@ export interface ExternalChromeInstance {
   startedAt: string | null;
   cdpPort: number | null;
   cdpUrl: string | null;
+  cdpClients?: CdpClientInfo[];
+  agentActivity?: AgentActivity | null;
   headless: boolean;
 }
 
@@ -508,6 +510,7 @@ export interface OperationProgress {
 
 export interface ProfileManagerApi {
   getState(): Promise<AppState>;
+  getTakeoverHistory(): Promise<AgentTakeoverEvent[]>;
   createProfile(name: string): Promise<AppState>;
   renameProfile(id: string, name: string): Promise<AppState>;
   launchProfile(id: string): Promise<AppState>;

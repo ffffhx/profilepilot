@@ -1166,6 +1166,7 @@ function createMainWindow(): void {
 
 function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.getState, async (): Promise<AppState> => profileManager.getState());
+  ipcMain.handle(IPC_CHANNELS.getTakeoverHistory, async (): Promise<AgentTakeoverEvent[]> => profileManager.getTakeoverHistory());
 
   ipcMain.handle(IPC_CHANNELS.createProfile, async (_event, name: string): Promise<AppState> => {
     await profileManager.createProfile(name);

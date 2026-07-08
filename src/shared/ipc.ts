@@ -35,6 +35,7 @@ export const IPC_CHANNELS = {
   focusExternalInstance: "profiles:external:focus",
   closeExternalInstance: "profiles:external:close",
   disconnectCdpClient: "profiles:cdp:disconnect-client",
+  takeoverAgentConnections: "profiles:agent:takeover-connections",
   setAgentOverlayEnabled: "profiles:agent-overlay:set-enabled",
   setShellIntegrationEnabled: "profiles:shell-integration:set-enabled",
   openProfileFolder: "profiles:open-folder",

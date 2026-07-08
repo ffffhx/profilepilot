@@ -30,7 +30,8 @@ import type {
   OperationPauseSignal,
   OperationProgress,
   OperationProgressUpdate,
-  PublicProfile
+  PublicProfile,
+  TakeoverAgentConnectionsResponse
 } from "../shared/types";
 import { captureCdpLiveView } from "./cdp-live-view";
 import { defaultDataDir } from "./fs-util";
@@ -1350,6 +1351,17 @@ function registerIpcHandlers(): void {
     await profileManager.disconnectCdpClient(profileId, pid);
     return profileManager.getState();
   });
+
+  ipcMain.handle(
+    IPC_CHANNELS.takeoverAgentConnections,
+    async (_event, profileId: string, session?: string): Promise<TakeoverAgentConnectionsResponse> => {
+      const result = await profileManager.takeoverAgentConnections(profileId, session);
+      return {
+        ...result,
+        state: await profileManager.getState()
+      };
+    }
+  );
 
   ipcMain.handle(IPC_CHANNELS.setAgentOverlayEnabled, async (_event, enabled: boolean): Promise<AppState> => {
     await profileManager.setAgentOverlayEnabled(Boolean(enabled));

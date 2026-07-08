@@ -3,7 +3,7 @@ import { accountSyncProgressStepsForTarget, emphasizeName, extensionSyncProgress
 import { render } from "./render/render-root";
 import { invalidateExtensionMigrationDiff, loadState } from "./state-actions";
 import { store } from "./state";
-import { ConfirmBodyLine, ConfirmIntent, ConfirmModalView, ModalState, PublicProfile } from "./types";
+import { ConfirmBodyLine, ConfirmIntent, ConfirmModalView, ModalState, PublicProfile, TakeoverAgentConnectionsResponse } from "./types";
 import { agentDrivenCdpClients, cdpClientToolSummary, cdpSessionText, closeConfirmCopy, deleteConfirmCopy, escapeHtml, formatDate, formatErrorMessage, formatRelativeTime, prettyCdpClientLabel, profileStatusLabel, sourceDetail } from "./util";
 
 export function renderConfirmModal(confirm: Extract<ModalState, { kind: "confirm" }>): string {
@@ -473,13 +473,27 @@ export function executeAgentTakeoverConfirm(intent: Extract<ConfirmIntent, { kin
 
   void withBusy(
     async () => {
-      for (const client of clients) {
-        store.state = await profileApi().disconnectCdpClient(intent.profileId, client.pid);
+      const result = await profileApi().takeoverAgentConnections(intent.profileId);
+      store.state = result.state;
+      if (!result.targetCount) {
+        throw new Error("这个 Profile 现在没有可接管的 AI 连接");
+      }
+      if (!result.allStopped) {
+        throw new Error(takeoverResultError(result));
       }
     },
     `已接管 ${emphasizeName(profile.name)}`,
     { key: "agent-takeover", message: `正在停止 ${profile.name} 的 AI 操作…`, profileId: intent.profileId }
   );
+}
+
+function takeoverResultError(result: TakeoverAgentConnectionsResponse): string {
+  const firstFailure = result.failures[0];
+  const suffix = firstFailure ? `：${firstFailure.error}` : "";
+  if (result.successCount > 0) {
+    return `只停止了 ${result.successCount}/${result.targetCount} 条 AI 连接，${result.failureCount} 条未停止${suffix}`;
+  }
+  return `没有停止任何 AI 连接${suffix}`;
 }
 
 export function executeDisconnectClientConfirm(intent: Extract<ConfirmIntent, { kind: "disconnect-client" }>): void {

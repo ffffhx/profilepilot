@@ -27,7 +27,8 @@ import type {
   GlobalInstructionUpdateRequest,
   GlobalInstructionsSnapshot,
   OperationProgress,
-  ProfileManagerApi
+  ProfileManagerApi,
+  TakeoverAgentConnectionsResponse
 } from "./shared/types";
 
 const profileManagerApi: ProfileManagerApi = {
@@ -90,6 +91,8 @@ const profileManagerApi: ProfileManagerApi = {
     ipcRenderer.invoke(IPC_CHANNELS.closeExternalInstance, userDataDir),
   disconnectCdpClient: (profileId: string, pid: number): Promise<AppState> =>
     ipcRenderer.invoke(IPC_CHANNELS.disconnectCdpClient, profileId, pid),
+  takeoverAgentConnections: (profileId: string, session?: string): Promise<TakeoverAgentConnectionsResponse> =>
+    ipcRenderer.invoke(IPC_CHANNELS.takeoverAgentConnections, profileId, session),
   setAgentOverlayEnabled: (enabled: boolean): Promise<AppState> =>
     ipcRenderer.invoke(IPC_CHANNELS.setAgentOverlayEnabled, enabled),
   setShellIntegrationEnabled: (enabled: boolean): Promise<AppState> =>

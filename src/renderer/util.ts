@@ -306,12 +306,15 @@ export function cdpClientToolSummary(clients: CdpClientInfo[]): string {
 }
 
 export function isAgentDrivenCdpClient(client: CdpClientInfo): boolean {
+  const label = client.label.toLowerCase();
   return Boolean(
     client.agent ||
       client.project ||
       client.session ||
       client.title ||
-      client.label.toLowerCase().startsWith("agent-browser")
+      label.startsWith("agent-browser") ||
+      label === "codex" ||
+      label === "claude code"
   );
 }
 

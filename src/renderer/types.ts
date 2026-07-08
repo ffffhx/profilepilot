@@ -80,6 +80,30 @@ export interface AgentTakeoverEvent {
   at: string;
 }
 
+export interface TakeoverAgentConnectionFailure {
+  pid: number;
+  label: string;
+  session?: string;
+  agent?: string;
+  error: string;
+}
+
+export interface TakeoverAgentConnectionsResult {
+  profileId: string;
+  profileName: string;
+  session?: string;
+  targetCount: number;
+  successCount: number;
+  failureCount: number;
+  allStopped: boolean;
+  takeovers: AgentTakeoverEvent[];
+  failures: TakeoverAgentConnectionFailure[];
+}
+
+export interface TakeoverAgentConnectionsResponse extends TakeoverAgentConnectionsResult {
+  state: AppState;
+}
+
 export interface AgentOverlayRevealEvent {
   profileId: string;
   profileName: string;
@@ -547,6 +571,7 @@ export interface ProfileManagerApi {
   closeExternalInstance(userDataDir: string): Promise<AppState>;
   // 结束某条 CDP 驱动连接：对该客户端进程发信号使其断开，不动 Chrome。
   disconnectCdpClient(profileId: string, pid: number): Promise<AppState>;
+  takeoverAgentConnections(profileId: string, session?: string): Promise<TakeoverAgentConnectionsResponse>;
   setAgentOverlayEnabled(enabled: boolean): Promise<AppState>;
   setShellIntegrationEnabled(enabled: boolean): Promise<AppState>;
   openProfileFolder(id: string): Promise<AppState>;

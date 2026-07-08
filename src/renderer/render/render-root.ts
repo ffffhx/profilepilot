@@ -4,7 +4,7 @@ import { renderSyncPanel } from "./account-sync";
 import { renderClonePoolModal } from "./clone-pool";
 import { renderLiveZoomModal } from "./live-view";
 import { renderMini } from "./mini";
-import { renderCdpModal, renderCloneTagModal, renderExtensionMigrationModal, renderGlobalInstructionsModal, renderNewModal, renderRenameModal } from "./modals";
+import { renderCdpModal, renderCloneTagModal, renderExtensionMigrationModal, renderGlobalInstructionsModal, renderNewModal, renderRenameModal, renderTakeoverHistoryModal } from "./modals";
 import { renderDetails, renderEmpty, renderExternalDetails, renderProfilesPanel } from "./profiles";
 import { appRoot, store } from "../state";
 import { escapeHtml, formatDate, renderBusyBanner, renderButtonLabel } from "../util";
@@ -104,6 +104,7 @@ export function render(): void {
     ${store.modal?.kind === "clone-pool" ? renderClonePoolModal(profiles) : ""}
     ${store.modal?.kind === "clone-tag" ? renderCloneTagModal(store.modal.profileId) : ""}
     ${store.modal?.kind === "global-instructions" ? renderGlobalInstructionsModal() : ""}
+    ${store.modal?.kind === "takeover-history" ? renderTakeoverHistoryModal() : ""}
     ${store.modal?.kind === "live-zoom" ? renderLiveZoomModal(store.modal.profileId) : ""}
     ${store.modal?.kind === "extension-migration" ? renderExtensionMigrationModal(profiles) : ""}
     ${store.modal?.kind === "confirm" ? renderConfirmModal(store.modal) : ""}
@@ -123,13 +124,12 @@ function renderAgentTakeoverNotice(): string {
   if (store.agentTakeoverNoticeDismissed || !store.agentTakeoverHistory.length) {
     return "";
   }
-  const visibleEvents = store.agentTakeoverHistoryExpanded
-    ? store.agentTakeoverHistory
-    : store.agentTakeoverHistory.slice(0, 5);
+  const visibleEvents = store.agentTakeoverHistory.slice(0, 5);
   const rows = visibleEvents
     .map((event) => {
       const agent = event.agent || "AI";
-      const session = event.session ? ` · ${event.session}` : "";
+      const sessionName = event.sessionTitle || event.session || "";
+      const session = sessionName ? ` · ${sessionName}` : "";
       return `
         <li>
           <time>${escapeHtml(formatDate(event.at))}</time>
@@ -139,7 +139,7 @@ function renderAgentTakeoverNotice(): string {
       `;
     })
     .join("");
-  const canExpand = store.agentTakeoverHistory.length > 5;
+  const canExpand = store.agentTakeoverHistory.length > 0;
   return `
     <section class="agent-takeover-notice" aria-label="AI 接管历史">
       <div class="agent-takeover-notice-head">
@@ -147,7 +147,7 @@ function renderAgentTakeoverNotice(): string {
         <span class="agent-takeover-notice-actions">
           ${
             canExpand
-              ? `<button type="button" data-action="toggle-agent-takeover-history" title="${store.agentTakeoverHistoryExpanded ? "收起接管记录" : "展开接管记录"}">${store.agentTakeoverHistoryExpanded ? "收起" : `展开 ${store.agentTakeoverHistory.length}`}</button>`
+              ? `<button type="button" data-action="open-agent-takeover-history" title="展开全部接管记录">展开 ${store.agentTakeoverHistory.length}</button>`
               : ""
           }
           <button type="button" data-action="dismiss-agent-takeover-history" title="关闭接管记录提示">关闭</button>

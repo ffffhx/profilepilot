@@ -2,7 +2,7 @@ import { isBusyAction } from "../busy";
 import { store } from "../state";
 import { AgentActivity, CdpClientInfo, ExternalChromeInstance, PublicProfile } from "../types";
 import { renderLiveViewSection } from "./live-view";
-import { NATIVE_CDP_UNSUPPORTED_NOTE, agentActivityLeadText, agentActivityProgressText, agentActivityTooltipText, cdpClientToolSummary, cdpLaunchButtonTitle, cdpPortLabel, cdpSessionText, contentionNotice, contentionNoticeShort, deleteButtonTitle, escapeHtml, focusButtonTitle, formatDate, formatRelativeTime, launchButtonTitle, listeningPortsNote, liveAddrLabel, prettyCdpClientLabel, profileStatusLabel, renderButtonLabel, sourceDetail, truncateText } from "../util";
+import { NATIVE_CDP_UNSUPPORTED_NOTE, agentActivityLeadText, agentActivityProgressText, agentActivityTooltipText, agentDrivenCdpClients, cdpClientToolSummary, cdpLaunchButtonTitle, cdpPortLabel, cdpSessionText, contentionNotice, contentionNoticeShort, deleteButtonTitle, escapeHtml, focusButtonTitle, formatDate, formatRelativeTime, launchButtonTitle, listeningPortsNote, liveAddrLabel, prettyCdpClientLabel, profileStatusLabel, renderButtonLabel, sourceDetail, truncateText } from "../util";
 
 interface ConnectionActivityModel {
   cdpClients: CdpClientInfo[];
@@ -259,8 +259,10 @@ function renderAgentActivityInline(profile: ConnectionActivityModel): string {
   }
   const activity = profile.agentActivity;
   const lead = agentActivityLeadText(activity) || "正在操作";
+  const progress = agentActivityProgressText(activity);
   const tooltip = agentActivityTooltipText(activity) || lead;
-  return `<span class="conn-agent-action-tip action-tooltip" data-tooltip="${escapeHtml(tooltip)}"><span class="conn-agent-action">▸ ${escapeHtml(lead)}</span></span>`;
+  const activityKey = [lead, progress, activity?.updatedAt || ""].join("|");
+  return `<span class="conn-agent-action-tip action-tooltip" data-tooltip="${escapeHtml(tooltip)}"><span class="conn-agent-action" data-activity-key="${escapeHtml(activityKey)}"><span class="conn-agent-action-text">▸ ${escapeHtml(lead)}</span>${progress ? `<span class="conn-agent-progress">${escapeHtml(progress)}</span>` : ""}</span></span>`;
 }
 
 function renderAgentActivityTipRows(profile: ConnectionActivityModel): string {
@@ -382,6 +384,7 @@ export function renderProfileActions(profile: PublicProfile): string {
   const deleting = isBusyAction("delete-profile", { profileId: profile.id });
   const miniPinnedBusy = isBusyAction("mini-pin", { profileId: profile.id });
   const miniPinDisabled = store.busy || (!profile.pinnedToMini && (store.state?.miniProfileIds.length || 0) >= 3);
+  const takeoverButton = renderAgentTakeoverButton(profile);
 
   // 独立 Profile（工具 Profile）未运行时，主按钮默认走 CDP 启动——这才是本工具的核心用途（喂给 agent）；
   // 普通启动挪到「更多」菜单。系统 Profile 不支持端口式 CDP，保持普通启动。
@@ -414,6 +417,7 @@ export function renderProfileActions(profile: PublicProfile): string {
 
   return `
     <div class="profile-actions" data-profile-actions>
+      ${takeoverButton}
       <span class="action-tooltip" data-tooltip="${escapeHtml(baseTip)}">
         <button type="button" class="action-button accent ${primaryLoading ? "loading" : ""}" data-action="${baseAction}" data-id="${profile.id}" ${store.busy ? "disabled" : ""}>
           ${renderButtonLabel(primaryLoading, baseIdle, primaryLoadingLabel)}
@@ -458,6 +462,20 @@ export function renderProfileActions(profile: PublicProfile): string {
       }
       </span>
     </div>
+  `;
+}
+
+function renderAgentTakeoverButton(profile: PublicProfile): string {
+  if (!agentDrivenCdpClients(profile.cdpClients).length) {
+    return "";
+  }
+  const takingOver = isBusyAction("agent-takeover", { profileId: profile.id });
+  return `
+    <span class="action-tooltip" data-tooltip="停止 AI 操作，接管浏览器">
+      <button type="button" class="action-button warn takeover-action ${takingOver ? "loading" : ""}" data-action="takeover-agent" data-id="${escapeHtml(profile.id)}" ${store.busy ? "disabled" : ""}>
+        ${renderButtonLabel(takingOver, "⏹ 接管", "接管中…")}
+      </button>
+    </span>
   `;
 }
 
@@ -824,13 +842,14 @@ export function renderCdpClientsDetail(profile: PublicProfile): string {
   // 每条连接给一个「结束连接」按钮：对该客户端进程发信号断开，不动 Chrome。
   // 同名工具（如两个 Claude Code 会话）多连接时补 pid 区分，避免不知道结束的是哪一条。
   const disconnecting = isBusyAction("disconnect-client", { profileId: profile.id });
+  const takeoverButton = renderAgentTakeoverButton(profile);
   const toolCounts = new Map<string, number>();
   profile.cdpClients.forEach((client) => {
     const tool = client.agent || prettyCdpClientLabel(client.label);
     toolCounts.set(tool, (toolCounts.get(tool) || 0) + 1);
   });
   const disconnectRow = attached
-    ? `<div class="detail-session-actions">${profile.cdpClients
+    ? `<div class="detail-session-actions">${takeoverButton}${profile.cdpClients
         .map((client) => {
           const tool = client.agent || prettyCdpClientLabel(client.label);
           const name = (toolCounts.get(tool) || 0) > 1 ? `${tool}(${client.pid})` : tool;

@@ -641,7 +641,9 @@ body.mini-collapsing .mini-shell {
 }
 
 .mini-profile-agent {
-  display: block;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
   overflow: hidden;
   color: var(--info-bright);
@@ -651,6 +653,47 @@ body.mini-collapsing .mini-shell {
   line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: pointer;
+  transition:
+    color 0.16s ease,
+    background 0.16s ease,
+    box-shadow 0.16s ease;
+  animation: agent-activity-soft-pulse 0.8s ease both;
+}
+
+.mini-profile-agent:hover {
+  color: #d9fff0;
+}
+
+.mini-profile-agent.confirming {
+  color: var(--warn-bright);
+}
+
+.mini-profile-agent-text {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mini-profile-progress {
+  flex: none;
+  border: 1px solid var(--info-line);
+  border-radius: 999px;
+  background: rgba(95, 182, 255, 0.1);
+  padding: 0 5px;
+  color: var(--info-bright);
+  font-size: 9.5px;
+  font-weight: 750;
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+}
+
+.mini-profile-agent.confirming .mini-profile-progress {
+  border-color: var(--warn-line);
+  background: var(--warn-soft);
+  color: var(--warn-bright);
 }
 
 .mini-profile-takeover {
@@ -2926,7 +2969,7 @@ body:not(.booted) .layout {
 
 .profiles-table th:nth-child(4),
 .profiles-table td:nth-child(4) {
-  width: 160px;
+  width: 224px;
 }
 
 /* 表头单行并裁切省略：窄列下文字不再溢出盖到相邻列（修复表头“挤在一块”）。 */
@@ -3001,8 +3044,11 @@ body:not(.booted) .layout {
 }
 
 .conn-agent-action {
-  display: block;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   color: var(--info-bright);
   font-family: var(--font-mono);
@@ -3011,6 +3057,44 @@ body:not(.booted) .layout {
   line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
+  transition:
+    color 0.18s ease,
+    background 0.18s ease,
+    box-shadow 0.18s ease;
+  animation: agent-activity-soft-pulse 0.8s ease both;
+}
+
+.conn-agent-action-text {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conn-agent-progress {
+  flex: none;
+  border: 1px solid var(--info-line);
+  border-radius: 999px;
+  background: rgba(95, 182, 255, 0.1);
+  padding: 0 5px;
+  color: var(--info-bright);
+  font-size: 9.5px;
+  font-weight: 800;
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes agent-activity-soft-pulse {
+  0% {
+    background: rgba(95, 182, 255, 0.18);
+    box-shadow: 0 0 0 4px rgba(95, 182, 255, 0.06);
+  }
+
+  100% {
+    background: transparent;
+    box-shadow: 0 0 0 0 rgba(95, 182, 255, 0);
+  }
 }
 
 /* CDP 已开但没人驱动 */
@@ -3804,6 +3888,11 @@ body:not(.booted) .layout {
   margin-top: 8px;
 }
 
+.detail-session-actions .takeover-action {
+  border-color: var(--warn-line);
+  color: var(--warn-bright);
+}
+
 .agent-activity-card {
   display: grid;
   gap: 7px;
@@ -3813,6 +3902,7 @@ body:not(.booted) .layout {
   background: linear-gradient(180deg, rgba(95, 182, 255, 0.1), rgba(95, 182, 255, 0.035));
   padding: 9px 10px;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+  animation: agent-activity-soft-pulse 0.8s ease both;
 }
 
 .agent-activity-head,
@@ -4055,6 +4145,77 @@ body:not(.booted) .layout {
 
 .global-instructions-modal {
   width: min(860px, 100%);
+}
+
+.takeover-history-modal {
+  width: min(760px, 100%);
+}
+
+.takeover-history-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.takeover-history-head > span {
+  flex: none;
+  border: 1px solid var(--warn-line);
+  border-radius: 999px;
+  background: var(--warn-soft);
+  padding: 4px 9px;
+  color: var(--warn-bright);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+}
+
+.takeover-history-list {
+  display: grid;
+  gap: 1px;
+  overflow: hidden;
+  margin-bottom: 18px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--line);
+}
+
+.takeover-history-row {
+  display: grid;
+  grid-template-columns: 108px minmax(120px, 0.85fr) minmax(92px, 0.45fr) minmax(0, 1.4fr);
+  gap: 12px;
+  align-items: baseline;
+  min-width: 0;
+  background: var(--panel-soft);
+  padding: 10px 12px;
+  font-size: 12.5px;
+}
+
+.takeover-history-row time,
+.takeover-history-row span {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.takeover-history-row strong,
+.takeover-history-row em {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.takeover-history-row strong {
+  color: var(--warn-bright);
+}
+
+.takeover-history-row em {
+  color: var(--text);
+  font-style: normal;
 }
 
 .global-instructions-head {
@@ -4535,7 +4696,10 @@ body:not(.booted) .layout {
   }
 
   .busy-banner::after,
-  .operation-progress::after {
+  .operation-progress::after,
+  .conn-agent-action,
+  .agent-activity-card,
+  .mini-profile-agent {
     animation: none;
   }
 
@@ -4700,6 +4864,11 @@ body:not(.booted) .layout {
 
   .confirm-summary {
     grid-template-columns: 1fr;
+  }
+
+  .takeover-history-row {
+    grid-template-columns: 1fr;
+    gap: 4px;
   }
 }
 

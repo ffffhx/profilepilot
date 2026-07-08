@@ -4,6 +4,7 @@ import { appRoot, store } from "../state";
 import { PublicProfile } from "../types";
 import {
   agentActivityLeadText,
+  agentActivityProgressText,
   agentActivityTooltipText,
   cdpPortLabel,
   cdpSessionText,
@@ -299,14 +300,23 @@ function renderMiniProfileCard(profile: PublicProfile): string {
   const primaryClient = driving ? profile.cdpClients[0] : undefined;
   const sessionText = !busyHere && primaryClient ? cdpSessionText(primaryClient) : "";
   const sessionAge = !busyHere && primaryClient ? formatRelativeTime(primaryClient.lastActive) : "";
-  const activityText = profile.agentActivity ? agentActivityLeadText(profile.agentActivity) || "正在操作" : "";
-  const activityTip = profile.agentActivity ? agentActivityTooltipText(profile.agentActivity) || activityText : "";
+  const activity = driving ? profile.agentActivity : null;
+  const activityText = activity ? agentActivityLeadText(activity) || "正在操作" : "";
+  const activityProgress = activity ? agentActivityProgressText(activity) : "";
+  const activityTip = activity ? agentActivityTooltipText(activity) || activityText : "";
   const takeover = store.miniTakeoverByProfileId[profile.id];
   const takeoverAgent = takeover?.agent || "AI";
   const takeoverText = takeover ? `已接管 · ${takeoverAgent} 已停止操作` : "";
   const takeoverTip = takeover
     ? `${takeover.profileName}\n${takeoverAgent}${takeover.session ? ` · ${takeover.session}` : ""} 已停止操作`
     : "";
+  const takeoverConfirming = store.miniTakeoverConfirmProfileId === profile.id;
+  const activityTitle = takeoverConfirming
+    ? "再次点击停止 AI 操作，接管浏览器"
+    : activityTip
+      ? `${activityTip}\n\n点击后再次点击可接管浏览器`
+      : "点击后再次点击可接管浏览器";
+  const activityKey = [activityText, activityProgress, activity?.updatedAt || ""].join("|");
 
   return `
     <article class="mini-profile-card ${port.kind} ${driving ? "driving" : ""} ${contention ? "contention" : ""} ${takeover ? "taken-over" : ""} ${busyHere ? "busy" : ""}" data-id="${profile.id}" draggable="true">
@@ -327,11 +337,11 @@ function renderMiniProfileCard(profile: PublicProfile): string {
             takeoverText
               ? `<span class="mini-profile-takeover"${takeoverTip ? ` title="${escapeHtml(takeoverTip)}"` : ""}>${escapeHtml(takeoverText)}</span>`
               : activityText
-                ? `<span class="mini-profile-agent"${activityTip ? ` title="${escapeHtml(activityTip)}"` : ""}>AI：${escapeHtml(activityText)}</span>`
+                ? `<span class="mini-profile-agent ${takeoverConfirming ? "confirming" : ""}" data-action="mini-takeover-agent" data-id="${escapeHtml(profile.id)}" data-activity-key="${escapeHtml(activityKey)}" role="button" title="${escapeHtml(activityTitle)}"><span class="mini-profile-agent-text">${escapeHtml(takeoverConfirming ? `再点接管：${activityText}` : `AI：${activityText}`)}</span>${activityProgress ? `<span class="mini-profile-progress">${escapeHtml(activityProgress)}</span>` : ""}</span>`
                 : ""
           }
         </span>
-        <span class="mini-readout"${takeoverTip ? ` title="${escapeHtml(takeoverTip)}"` : readoutTip ? ` title="${escapeHtml(readoutTip)}"` : ""}>${escapeHtml(takeover ? "已接管" : readout)}</span>
+        <span class="mini-readout"${takeoverTip ? ` title="${escapeHtml(takeoverTip)}"` : readoutTip ? ` title="${escapeHtml(readoutTip)}"` : ""}>${escapeHtml(takeover ? "已接管" : takeoverConfirming ? "再点接管" : readout)}</span>
       </button>
       ${
         !busyHere && primaryClient

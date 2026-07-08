@@ -4,7 +4,7 @@ import { render } from "./render/render-root";
 import { invalidateExtensionMigrationDiff, loadState } from "./state-actions";
 import { store } from "./state";
 import { ConfirmBodyLine, ConfirmIntent, ConfirmModalView, ModalState, PublicProfile } from "./types";
-import { cdpSessionText, closeConfirmCopy, deleteConfirmCopy, escapeHtml, formatDate, formatErrorMessage, formatRelativeTime, prettyCdpClientLabel, profileStatusLabel, sourceDetail } from "./util";
+import { agentDrivenCdpClients, cdpClientToolSummary, cdpSessionText, closeConfirmCopy, deleteConfirmCopy, escapeHtml, formatDate, formatErrorMessage, formatRelativeTime, prettyCdpClientLabel, profileStatusLabel, sourceDetail } from "./util";
 
 export function renderConfirmModal(confirm: Extract<ModalState, { kind: "confirm" }>): string {
   const view = confirmModalView(confirm.intent);
@@ -277,6 +277,30 @@ export function confirmModalView(intent: ConfirmIntent): ConfirmModalView | null
     };
   }
 
+  if (intent.kind === "agent-takeover") {
+    const profile = store.state.profiles.find((item) => item.id === intent.profileId);
+    const clients = profile ? agentDrivenCdpClients(profile.cdpClients) : [];
+    if (!profile || !clients.length) {
+      return null;
+    }
+    return {
+      kicker: "接管浏览器",
+      title: `接管 ${profile.name}`,
+      body: [
+        `会停止 ${clients.length} 条 AI 驱动连接，断开它们对 ${profile.name} 的 CDP 控制。`,
+        "Chrome 窗口会保留在原处，不会关闭；接管后你可以直接手动操作这个浏览器。"
+      ],
+      confirmLabel: "⏹ 接管",
+      tone: "warn",
+      summary: [
+        { label: "Profile", value: profile.name },
+        { label: "AI 连接", value: `${clients.length} 条` },
+        { label: "工具", value: cdpClientToolSummary(clients) || "AI" },
+        { label: "CDP", value: profile.cdpUrl || "未开启" }
+      ]
+    };
+  }
+
   if (intent.kind === "recycle-clones") {
     const candidates = store.state.profiles.filter(
       (profile) => profile.source === "isolated" && profile.clonedFromProfileId && !profile.running
@@ -428,7 +452,34 @@ export function executeConfirmIntent(intent: ConfirmIntent): void {
     return;
   }
 
+  if (intent.kind === "agent-takeover") {
+    executeAgentTakeoverConfirm(intent);
+    return;
+  }
+
   executeExtensionMigrationConfirm(intent);
+}
+
+export function executeAgentTakeoverConfirm(intent: Extract<ConfirmIntent, { kind: "agent-takeover" }>): void {
+  const profile = store.state?.profiles.find((item) => item.id === intent.profileId);
+  const clients = profile ? agentDrivenCdpClients(profile.cdpClients) : [];
+  store.modal = null;
+
+  if (!profile || !clients.length) {
+    render();
+    setToast("这个 Profile 现在没有可接管的 AI 连接", "error");
+    return;
+  }
+
+  void withBusy(
+    async () => {
+      for (const client of clients) {
+        store.state = await profileApi().disconnectCdpClient(intent.profileId, client.pid);
+      }
+    },
+    `已接管 ${emphasizeName(profile.name)}`,
+    { key: "agent-takeover", message: `正在停止 ${profile.name} 的 AI 操作…`, profileId: intent.profileId }
+  );
 }
 
 export function executeDisconnectClientConfirm(intent: Extract<ConfirmIntent, { kind: "disconnect-client" }>): void {

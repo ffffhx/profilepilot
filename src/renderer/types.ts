@@ -75,6 +75,7 @@ export interface AgentTakeoverEvent {
   profileId: string;
   profileName: string;
   session?: string;
+  sessionTitle?: string;
   agent?: string;
   at: string;
 }
@@ -622,6 +623,10 @@ export type ConfirmIntent =
       kind: "disconnect-client";
       profileId: string;
       pid: number;
+    }
+  | {
+      kind: "agent-takeover";
+      profileId: string;
     };
 export type BusyState = {
   key: string;
@@ -646,6 +651,7 @@ export type ModalState =
   | { kind: "clone-pool" }
   | { kind: "clone-tag"; profileId: string }
   | { kind: "global-instructions" }
+  | { kind: "takeover-history" }
   | { kind: "live-zoom"; profileId: string }
   | {
       kind: "confirm";

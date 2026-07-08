@@ -1,7 +1,7 @@
 import { isBusyAction } from "../busy";
 import { plannedExtensionMigrationExtensions, renderExtensionMigrationDiffPreview, renderMigrationTargetPicker } from "./extensions";
 import { store } from "../state";
-import { CdpPortSuggestion, GlobalInstructionFile, PublicProfile } from "../types";
+import { AgentTakeoverEvent, CdpPortSuggestion, GlobalInstructionFile, PublicProfile } from "../types";
 import { escapeHtml, formatCdpPortSuggestionNote, formatDate, renderButtonLabel } from "../util";
 
 export function renderGlobalInstructionsModal(): string {
@@ -393,6 +393,48 @@ export function renderExtensionMigrationModal(profiles: PublicProfile[]): string
           </button>
         </div>
       </form>
+    </div>
+  `;
+}
+
+export function renderTakeoverHistoryModal(): string {
+  const events = store.agentTakeoverHistory.slice(0, 50);
+  return `
+    <div class="modal-backdrop" data-action="close-modal">
+      <section class="modal max-h-[calc(100vh-36px)] overflow-auto overflow-x-hidden border-solid border border-line-strong rounded-xl bg-[linear-gradient(180deg,var(--panel-raise),var(--panel))] p-5 [box-shadow:0_30px_90px_rgba(2,6,9,0.8),0_0_0_1px_rgba(56,225,160,0.06)] takeover-history-modal" role="dialog" aria-modal="true" aria-labelledby="takeover-history-title">
+        <div class="takeover-history-head">
+          <div>
+            <span class="modal-kicker inline-flex mb-2 text-warn font-mono text-[11px] font-semibold tracking-[0.18em] uppercase">AI Takeover</span>
+            <h2 id="takeover-history-title">接管历史</h2>
+          </div>
+          <span>${events.length}/50</span>
+        </div>
+        ${
+          events.length
+            ? `<div class="takeover-history-list" role="table" aria-label="最近 50 条接管历史">
+                ${events.map(renderTakeoverHistoryRow).join("")}
+              </div>`
+            : `<div class="global-instruction-empty">
+                <strong>还没有接管记录</strong>
+              </div>`
+        }
+        <div class="modal-actions">
+          <button type="button" data-action="close-modal">关闭</button>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function renderTakeoverHistoryRow(event: AgentTakeoverEvent): string {
+  const agent = event.agent || "AI";
+  const sessionTitle = event.sessionTitle || event.session || "—";
+  return `
+    <div class="takeover-history-row" role="row">
+      <time>${escapeHtml(formatDate(event.at))}</time>
+      <strong>${escapeHtml(event.profileName)}</strong>
+      <span>${escapeHtml(agent)}</span>
+      <em>${escapeHtml(sessionTitle)}</em>
     </div>
   `;
 }

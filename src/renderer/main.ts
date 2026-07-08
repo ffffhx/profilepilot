@@ -1,6 +1,6 @@
 import { profileApi } from "./api";
 import { activateBusyStep, busyStepsKey, emphasizeName, focusProfileFromUi, setToast, updateBusyProgressDom, updateBusyState, withBusy } from "./busy";
-import { closeModalFromUi, executeConfirmIntent } from "./confirm";
+import { closeModalFromUi, executeAgentTakeoverConfirm, executeConfirmIntent } from "./confirm";
 import { clampCloneCount } from "./render/clone-pool";
 import { isExtensionMigrationActionItem } from "./render/extensions";
 import { focusLiveTab, openLiveZoom, refreshLiveViewNow, requestLiveViewNow, startLiveViewLoop, toggleLiveScreenshot } from "./render/live-view";
@@ -9,10 +9,12 @@ import { render } from "./render/render-root";
 import { invalidateExtensionMigrationDiff, loadState, loadTakeoverHistory, mergeAgentTakeoverHistory, refreshExtensionMigrationDiff, refreshGlobalInstructions, repairClaudeInstructionShell, saveGlobalInstruction, setMigrationSource } from "./state-actions";
 import { appRoot, store } from "./state";
 import type { AgentTakeoverEvent } from "./types";
-import { deleteButtonTitle, escapeHtml, formatErrorMessage } from "./util";
+import { agentDrivenCdpClients, deleteButtonTitle, escapeHtml, formatErrorMessage } from "./util";
 
 const MINI_TAKEOVER_NOTICE_MS = 5000;
+const MINI_TAKEOVER_CONFIRM_MS = 2800;
 const miniTakeoverTimers = new Map<string, number>();
+let miniTakeoverConfirmTimer: number | null = null;
 
 profileApi().onOperationProgress((progress) => {
   if (!store.busyState || store.busyState.key !== progress.key) {
@@ -56,11 +58,34 @@ profileApi().onAgentTakeover((takeover) => {
   mergeAgentTakeoverHistory([takeover]);
   store.agentTakeoverNoticeDismissed = false;
   store.agentTakeoverHistoryExpanded = false;
+  clearMiniTakeoverConfirm();
   markMiniTakeover(takeover);
   const agent = takeover.agent || "AI";
   setToast(`已接管 ${emphasizeName(takeover.profileName)}，${agent} 已停止操作`);
   void loadState().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
 });
+
+function clearMiniTakeoverConfirm(): void {
+  if (miniTakeoverConfirmTimer !== null) {
+    window.clearTimeout(miniTakeoverConfirmTimer);
+    miniTakeoverConfirmTimer = null;
+  }
+  store.miniTakeoverConfirmProfileId = null;
+}
+
+function armMiniTakeoverConfirm(profileId: string): void {
+  if (miniTakeoverConfirmTimer !== null) {
+    window.clearTimeout(miniTakeoverConfirmTimer);
+  }
+  store.miniTakeoverConfirmProfileId = profileId;
+  miniTakeoverConfirmTimer = window.setTimeout(() => {
+    miniTakeoverConfirmTimer = null;
+    if (store.miniTakeoverConfirmProfileId === profileId) {
+      store.miniTakeoverConfirmProfileId = null;
+      render();
+    }
+  }, MINI_TAKEOVER_CONFIRM_MS);
+}
 
 function markMiniTakeover(takeover: AgentTakeoverEvent): void {
   if (store.viewMode !== "mini") {
@@ -133,6 +158,13 @@ appRoot.addEventListener("click", (event) => {
   if (action === "dismiss-agent-takeover-history") {
     store.agentTakeoverNoticeDismissed = true;
     render();
+    return;
+  }
+
+  if (action === "open-agent-takeover-history") {
+    store.modal = { kind: "takeover-history" };
+    render();
+    void loadTakeoverHistory().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
     return;
   }
 
@@ -1078,6 +1110,42 @@ appRoot.addEventListener("click", (event) => {
     }
     store.modal = { kind: "confirm", intent: { kind: "disconnect-client", profileId: id, pid } };
     render();
+    return;
+  }
+
+  if (action === "takeover-agent" && id) {
+    const profile = store.state.profiles.find((item) => item.id === id);
+    if (!profile || !agentDrivenCdpClients(profile.cdpClients).length) {
+      setToast("这个 Profile 现在没有可接管的 AI 连接", "error");
+      return;
+    }
+    store.modal = { kind: "confirm", intent: { kind: "agent-takeover", profileId: id } };
+    render();
+    return;
+  }
+
+  if (action === "mini-takeover-agent" && id) {
+    if (store.busy) {
+      return;
+    }
+    const profile = store.state.profiles.find((item) => item.id === id);
+    if (!profile || !agentDrivenCdpClients(profile.cdpClients).length) {
+      clearMiniTakeoverConfirm();
+      render();
+      setToast("这个 Profile 现在没有可接管的 AI 连接", "error");
+      return;
+    }
+
+    if (store.miniTakeoverConfirmProfileId === id) {
+      clearMiniTakeoverConfirm();
+      render();
+      executeAgentTakeoverConfirm({ kind: "agent-takeover", profileId: id });
+      return;
+    }
+
+    armMiniTakeoverConfirm(id);
+    render();
+    setToast("再次点击活动行接管浏览器");
     return;
   }
 

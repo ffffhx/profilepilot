@@ -305,6 +305,20 @@ export function cdpClientToolSummary(clients: CdpClientInfo[]): string {
   return [...counts.entries()].map(([tool, count]) => (count > 1 ? `${tool} ×${count}` : tool)).join("、");
 }
 
+export function isAgentDrivenCdpClient(client: CdpClientInfo): boolean {
+  return Boolean(
+    client.agent ||
+      client.project ||
+      client.session ||
+      client.title ||
+      client.label.toLowerCase().startsWith("agent-browser")
+  );
+}
+
+export function agentDrivenCdpClients(clients: CdpClientInfo[]): CdpClientInfo[] {
+  return clients.filter(isAgentDrivenCdpClient);
+}
+
 // 争用警示·短版（药丸 tooltip / 悬浮窗用）：一眼看懂发生了什么，细节和建议留给详情栏。
 export function contentionNoticeShort(profile: PublicProfile): string {
   const info = profile.cdpContention;

@@ -35,6 +35,7 @@ export interface RendererState {
   agentTakeoverNoticeDismissed: boolean;
   agentTakeoverHistoryExpanded: boolean;
   miniTakeoverByProfileId: Record<string, AgentTakeoverEvent>;
+  miniTakeoverConfirmProfileId: string | null;
   migrationSourceId: string | null;
   migrationTargetId: string | null;
   extensionScan: ExtensionScanResult | null;
@@ -100,6 +101,7 @@ export const store: RendererState = {
   agentTakeoverNoticeDismissed: false,
   agentTakeoverHistoryExpanded: false,
   miniTakeoverByProfileId: {},
+  miniTakeoverConfirmProfileId: null,
   migrationSourceId: null,
   migrationTargetId: null,
   extensionScan: null,

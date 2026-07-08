@@ -37,7 +37,7 @@ export function mergeAgentTakeoverHistory(events: AgentTakeoverEvent[]): void {
 }
 
 function agentTakeoverKey(event: AgentTakeoverEvent): string {
-  return [event.profileId, event.profileName, event.session || "", event.agent || "", event.at].join("\u0000");
+  return [event.profileId, event.profileName, event.session || "", event.sessionTitle || "", event.agent || "", event.at].join("\u0000");
 }
 
 export async function refreshGlobalInstructions(): Promise<void> {

@@ -54,7 +54,7 @@ import { copyPath, throwIfAborted, waitIfPaused } from "./fs-copy";
 import { POSIX_LOCALE_ENV, chromeProfileDirName, defaultDataDir, execFileAsync, exists, isProcessGoneError, isRecord, isSafePathSegment, isSameFilesystemPath, makePathSegment, makeSlug, normalizeAccountSyncRecords, normalizeNativeProfileMetadata, normalizeProfile, normalizeProfileName, normalizeSafeRelativePath, shouldCopyLocalExtensionPackagePath, sleep, uniqueStrings } from "./fs-util";
 import { AccountSyncCopyPlan, AccountSyncDataLocation, ProfileRef, ProfileRestartPlan, RuntimeProfile } from "./internal-types";
 import { resolveCdpContention, syncContentionObservers } from "./cdp-contention";
-import { AgentOverlayManager, isAgentOverlayClient, type AgentOverlayRevealRequest, type AgentOverlayStopRequest } from "./agent-overlay";
+import { AgentOverlayManager, isAgentOverlayClient, type AgentOverlayRevealRequest, type AgentOverlayStopRequest, type OverlayLocale } from "./agent-overlay";
 import { getShellIntegrationStatus } from "./shell-integration";
 import { addRuntimeProcess, attachListeningPorts, emptyRuntimeProfile, findExternalChromeInstances, getCdpClientsByPort, getChromeProcessPids, getOpenProfilePidsByPath, isChromeRunning, isImplicitDefaultChromeProcess, makeNativeRuntimeKey, mergeRuntimeProfiles, parseRuntimeProcess } from "./process-scan";
 import { ProfileManagerError } from "./profile-manager-error";
@@ -92,6 +92,8 @@ export class ProfileManager {
     this.profilesDir = path.join(dataDir, "profiles");
     this.registryPath = path.join(dataDir, "profiles.json");
     this.agentOverlayManager = new AgentOverlayManager({
+      // Keep Electron locale lookup here so agent-overlay stays free of Electron imports.
+      locale: agentOverlayLocaleFromApp(),
       onStop: (request) => this.stopAgentOverlaySession(request),
       onReveal: (request) => this.revealAgentOverlayProfile(request)
     });
@@ -2849,6 +2851,14 @@ export function createProfileManager(
   onAgentOverlayReveal?: (event: AgentOverlayRevealEvent) => void
 ): ProfileManager {
   return new ProfileManager(process.env.CPM_DATA_DIR || defaultDataDir(), { onAgentTakeover, onAgentOverlayReveal });
+}
+
+function agentOverlayLocaleFromApp(): OverlayLocale {
+  try {
+    return (app.getLocale() || "").toLowerCase().startsWith("zh") ? "zh" : "en";
+  } catch {
+    return "en";
+  }
 }
 
 // 为副本生成不与现有名字冲突的编号名：prefix-1、prefix-2…

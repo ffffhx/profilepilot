@@ -7,6 +7,7 @@ const { agentOverlayBootstrapScript } = require("../dist/main/overlay-script.js"
 
 test("AgentOverlay payload keeps known fields stable and nulls empty values", () => {
   const payload = buildAgentOverlayPayload({
+    locale: "zh",
     state: "active",
     profileName: "Work Profile",
     now: Date.parse("2026-07-08T12:00:00.000Z"),
@@ -18,6 +19,7 @@ test("AgentOverlay payload keeps known fields stable and nulls empty values", ()
     "currentAction",
     "currentStep",
     "lastMessage",
+    "locale",
     "nextStep",
     "profileName",
     "project",
@@ -30,6 +32,7 @@ test("AgentOverlay payload keeps known fields stable and nulls empty values", ()
     "todoTotal",
     "updatedAt"
   ].sort());
+  assert.equal(payload.locale, "zh");
   assert.equal(payload.agent, "Codex");
   assert.equal(payload.project, null);
   assert.equal(payload.session, null);

@@ -11,6 +11,8 @@ const PAGE_CONNECT_TIMEOUT = 3000;
 const PUSH_INTERVAL_MS = 2000;
 const TAKEN_OVER_KEEPALIVE_MS = 7000;
 
+export type OverlayLocale = "zh" | "en";
+
 export interface AgentOverlayPortInput {
   port: number;
   profileId: string;
@@ -39,6 +41,7 @@ export interface AgentOverlayRevealRequest {
 }
 
 interface AgentOverlayManagerOptions {
+  locale?: OverlayLocale;
   onStop: (request: AgentOverlayStopRequest) => Promise<void>;
   onReveal?: (request: AgentOverlayRevealRequest) => void;
 }
@@ -46,6 +49,7 @@ interface AgentOverlayManagerOptions {
 type OverlayState = "active" | "takenOver";
 
 interface OverlayPayload {
+  locale: OverlayLocale;
   state: OverlayState;
   profileName: string;
   agent: string | null;
@@ -64,6 +68,7 @@ interface OverlayPayload {
 }
 
 interface AgentOverlayPayloadInput {
+  locale?: OverlayLocale;
   state: "active" | "takenOver";
   profileName: string;
   clients: CdpClientInfo[];
@@ -794,6 +799,7 @@ export class AgentOverlayManager {
   private payloadForPort(state: PortOverlay): OverlayPayload {
     const takenOver = state.takenOverUntil > Date.now();
     return buildAgentOverlayPayload({
+      locale: this.options.locale ?? "en",
       state: takenOver ? "takenOver" : "active",
       profileName: state.profileName,
       clients: state.clients,
@@ -909,6 +915,7 @@ export function buildAgentOverlayPayload(input: AgentOverlayPayloadInput): Overl
   if (!input.clients.length && input.lastPayload) {
     return normalizeOverlayPayload({
       ...input.lastPayload,
+      locale: input.locale ?? input.lastPayload.locale,
       state: input.state === "takenOver" ? "takenOver" : input.lastPayload.state,
       profileName: input.profileName
     });
@@ -923,6 +930,7 @@ export function buildAgentOverlayPayload(input: AgentOverlayPayloadInput): Overl
   const startedAt = earliestStartedAt(sessionRows.map((row) => row.startedAt)) || (primary ? startedAtForClient(primary) : undefined);
 
   return normalizeOverlayPayload({
+    locale: input.locale,
     state: input.state,
     profileName: input.profileName,
     startedAt,
@@ -1012,6 +1020,7 @@ function baseActivityForClient(client: CdpClientInfo): AgentActivity {
 
 function normalizeOverlayPayload(payload: Partial<OverlayPayload>): OverlayPayload {
   return {
+    locale: normalizeOverlayLocale(payload.locale),
     state: payload.state === "takenOver" ? "takenOver" : "active",
     profileName: nullableString(payload.profileName) || "",
     agent: nullableString(payload.agent),
@@ -1028,6 +1037,10 @@ function normalizeOverlayPayload(payload: Partial<OverlayPayload>): OverlayPaylo
     startedAt: nullableString(payload.startedAt),
     sessions: Array.isArray(payload.sessions) ? payload.sessions.map(normalizeOverlaySessionPayload) : []
   };
+}
+
+function normalizeOverlayLocale(value: string | null | undefined): OverlayLocale {
+  return typeof value === "string" && value.toLowerCase().startsWith("zh") ? "zh" : "en";
 }
 
 function normalizeOverlaySessionPayload(payload: Partial<OverlaySessionPayload>): OverlaySessionPayload {

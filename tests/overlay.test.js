@@ -306,6 +306,25 @@ test("agent overlay bootstrap script has static safety hooks and valid syntax", 
   new vm.Script(script);
 });
 
+test("agent overlay bootstrap script includes zh/en copy and locale selection", () => {
+  const script = agentOverlayBootstrapScript();
+  assert.match(script, /OVERLAY_TEXT/);
+  assert.match(script, /locale/);
+  assert.match(script, /currentLocale/);
+  assert.match(script, /navigator\.language/);
+  assert.match(script, /AI 正在操作 · /);
+  assert.match(script, /AI is operating · /);
+  assert.match(script, /已接管，AI 已停止操作/);
+  assert.match(script, /Taken over — AI stopped/);
+  assert.match(script, /停止并接管/);
+  assert.match(script, /Stop & take over/);
+  assert.match(script, /再点一次确认接管/);
+  assert.match(script, /Click again to confirm/);
+  assert.match(script, /在 ProfilePilot 中查看/);
+  assert.match(script, /Open in ProfilePilot/);
+  assert.match(script, /browser control returned to you/);
+});
+
 test("AgentOverlayManager pure logic handles disabled and empty sync inputs", () => {
   const manager = new AgentOverlayManager({ onStop: async () => {} });
   assert.doesNotThrow(() => manager.sync({ enabled: false, ports: [] }));

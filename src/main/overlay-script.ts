@@ -9,7 +9,114 @@ export function agentOverlayBootstrapScript(): string {
   const STORAGE_KEY = "__ppAgentOverlayPosition";
   const COLLAPSED_KEY = "__ppAgentOverlayCollapsed";
   const STOP_CONFIRM_MS = 3000;
+  const OVERLAY_TEXT = {
+    zh: {
+      revealTitle: "在 ProfilePilot 中查看",
+      hideTitle: "隐藏",
+      expandTitle: "展开 AI 操作状态",
+      sessionHeading: "会话",
+      recentSummary: "AI 最近说",
+      takenTitle: "✋ 已接管，AI 已停止操作",
+      operatingPrefix: "AI 正在操作 · ",
+      sessionsSuffix: " 个会话",
+      actionPrefix: "▸ ",
+      takenAction: "浏览器控制权已交还给你",
+      defaultAction: "AI 正在操作浏览器",
+      nextPrefix: "下一步：",
+      stepLabel: (index) => "第 " + index + " 步：",
+      progressDone: (done, total) => done + "/" + total + " 已完成",
+      unnamedSession: "未命名会话",
+      unknownActivity: "活动未知",
+      elapsedPrefix: "已运行 ",
+      takenStop: "已接管",
+      confirmStop: "再点一次确认接管",
+      stopSingle: "⏹ 停止并接管",
+      stopAll: "⏹ 全部停止并接管",
+      duration: (ms) => {
+        const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+        const hours = Math.floor(totalSeconds / 3600);
+        const minutes = Math.floor((totalSeconds % 3600) / 60);
+        const seconds = totalSeconds % 60;
+        if (hours > 0) {
+          return hours + " 小时 " + minutes + " 分";
+        }
+        if (minutes > 0) {
+          return minutes + " 分 " + seconds + " 秒";
+        }
+        return seconds + " 秒";
+      },
+      relativeTime: (ts) => {
+        const seconds = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+        if (seconds < 15) {
+          return "刚刚";
+        }
+        if (seconds < 60) {
+          return seconds + " 秒前";
+        }
+        const minutes = Math.floor(seconds / 60);
+        if (minutes < 60) {
+          return minutes + " 分钟前";
+        }
+        const hours = Math.floor(minutes / 60);
+        if (hours < 24) {
+          return hours + " 小时前";
+        }
+        return new Date(ts).toLocaleDateString("zh-CN");
+      }
+    },
+    en: {
+      revealTitle: "Open in ProfilePilot",
+      hideTitle: "Hide",
+      expandTitle: "Expand AI status",
+      sessionHeading: "Sessions",
+      recentSummary: "What AI said",
+      takenTitle: "✋ Taken over — AI stopped",
+      operatingPrefix: "AI is operating · ",
+      sessionsSuffix: " sessions",
+      actionPrefix: "▸ ",
+      takenAction: "browser control returned to you",
+      defaultAction: "AI is operating",
+      nextPrefix: "Next: ",
+      stepLabel: (index) => "Step " + index + ": ",
+      progressDone: (done, total) => done + "/" + total + " completed",
+      unnamedSession: "Untitled session",
+      unknownActivity: "Activity unknown",
+      elapsedPrefix: "Running for ",
+      takenStop: "Taken over",
+      confirmStop: "Click again to confirm",
+      stopSingle: "⏹ Stop & take over",
+      stopAll: "⏹ Stop all & take over",
+      duration: (ms) => {
+        const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+        const minutes = Math.floor(totalSeconds / 60);
+        const seconds = totalSeconds % 60;
+        if (minutes > 0) {
+          return minutes + "m " + seconds + "s";
+        }
+        return seconds + "s";
+      },
+      relativeTime: (ts) => {
+        const seconds = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+        if (seconds < 15) {
+          return "just now";
+        }
+        if (seconds < 60) {
+          return seconds + "s ago";
+        }
+        const minutes = Math.floor(seconds / 60);
+        if (minutes < 60) {
+          return minutes + "m ago";
+        }
+        const hours = Math.floor(minutes / 60);
+        if (hours < 24) {
+          return hours + "h ago";
+        }
+        return new Date(ts).toLocaleDateString("en-US");
+      }
+    }
+  };
   const STATE_DEFAULTS = {
+    locale: "",
     state: "active",
     profileName: "",
     agent: "",
@@ -60,11 +167,14 @@ export function agentOverlayBootstrapScript(): string {
   let progressFill = null;
   let next = null;
   let sessionsBlock = null;
+  let sessionHeading = null;
   let sessionList = null;
   let recent = null;
+  let recentSummary = null;
   let recentText = null;
   let stopButton = null;
   let revealButton = null;
+  let hideButton = null;
   let themeMediaQuery = null;
   let themeMediaListener = null;
   let themeObserver = null;
@@ -151,7 +261,7 @@ export function agentOverlayBootstrapScript(): string {
       "</style>",
       "<div class=\"wrap\">",
       "  <section class=\"panel\">",
-      "    <div class=\"head\"><span class=\"pulse\"></span><span class=\"title\"></span><button class=\"icon-btn reveal\" type=\"button\" title=\"在 ProfilePilot 中查看\">⧉</button><button class=\"icon-btn hide\" type=\"button\" title=\"隐藏\">−</button></div>",
+      "    <div class=\"head\"><span class=\"pulse\"></span><span class=\"title\"></span><button class=\"icon-btn reveal\" type=\"button\" title=\"\">⧉</button><button class=\"icon-btn hide\" type=\"button\" title=\"\">−</button></div>",
       "    <div class=\"body\">",
       "      <div class=\"meta\"></div>",
       "      <div class=\"elapsed\"></div>",
@@ -159,12 +269,12 @@ export function agentOverlayBootstrapScript(): string {
       "      <div class=\"progress-text\"></div>",
       "      <div class=\"progress-bar\"><span class=\"progress-fill\"></span></div>",
       "      <div class=\"next\"></div>",
-      "      <div class=\"sessions\"><div class=\"session-heading\">会话</div><div class=\"session-list\"></div></div>",
-      "      <details class=\"recent\"><summary>AI 最近说</summary><span class=\"recent-text\"></span></details>",
-      "      <button class=\"stop\" type=\"button\">⏹ 停止并接管</button>",
+      "      <div class=\"sessions\"><div class=\"session-heading\"></div><div class=\"session-list\"></div></div>",
+      "      <details class=\"recent\"><summary></summary><span class=\"recent-text\"></span></details>",
+      "      <button class=\"stop\" type=\"button\"></button>",
       "    </div>",
       "  </section>",
-      "  <button class=\"dot\" type=\"button\" title=\"展开 AI 操作状态\"><span class=\"pulse\"></span></button>",
+      "  <button class=\"dot\" type=\"button\" title=\"\"><span class=\"pulse\"></span></button>",
       "</div>"
     ].join("");
 
@@ -179,16 +289,19 @@ export function agentOverlayBootstrapScript(): string {
     progressFill = root.querySelector(".progress-fill");
     next = root.querySelector(".next");
     sessionsBlock = root.querySelector(".sessions");
+    sessionHeading = root.querySelector(".session-heading");
     sessionList = root.querySelector(".session-list");
     recent = root.querySelector(".recent");
+    recentSummary = root.querySelector(".recent summary");
     recentText = root.querySelector(".recent-text");
     stopButton = root.querySelector(".stop");
     revealButton = root.querySelector(".reveal");
+    hideButton = root.querySelector(".hide");
 
     root.addEventListener("click", (event) => event.stopPropagation());
     root.addEventListener("dblclick", (event) => event.stopPropagation());
     root.addEventListener("pointerdown", (event) => event.stopPropagation());
-    root.querySelector(".hide").addEventListener("click", () => {
+    hideButton.addEventListener("click", () => {
       collapse();
       signal("hide");
     });
@@ -367,17 +480,19 @@ export function agentOverlayBootstrapScript(): string {
     if (!host || !panel) {
       return;
     }
+    const copy = text();
     const taken = state.state === "takenOver";
     const sessions = normalizedSessions();
+    applyStaticText(copy);
     panel.classList.toggle("taken", taken);
-    title.textContent = taken ? "✋ 已接管，AI 已停止操作" : titleText(sessions);
+    title.textContent = taken ? copy.takenTitle : titleText(sessions, copy);
     const metaText = [state.project, state.sessionTitle].filter(Boolean).join(" · ");
     meta.textContent = metaText;
     meta.style.display = metaText ? "block" : "none";
-    action.textContent = "▸ " + (taken ? "浏览器控制权已交还给你" : state.currentAction || "AI 正在操作浏览器");
+    action.textContent = copy.actionPrefix + (taken ? copy.takenAction : currentActionText(copy));
 
     renderProgress();
-    next.textContent = state.nextStep ? "下一步：" + state.nextStep : "";
+    next.textContent = state.nextStep ? copy.nextPrefix + state.nextStep : "";
     next.style.display = state.nextStep ? "block" : "none";
     renderSessionList();
     recent.style.display = state.lastMessage ? "block" : "none";
@@ -388,23 +503,39 @@ export function agentOverlayBootstrapScript(): string {
     requestAnimationFrame(clampHostIntoViewport);
   }
 
-  function titleText(sessions) {
+  function applyStaticText(copy) {
+    revealButton.title = copy.revealTitle;
+    hideButton.title = copy.hideTitle;
+    dot.title = copy.expandTitle;
+    sessionHeading.textContent = copy.sessionHeading;
+    recentSummary.textContent = copy.recentSummary;
+  }
+
+  function titleText(sessions, copy) {
     if (sessions.length >= 2) {
-      return "AI 正在操作 · " + sessions.length + " 个会话";
+      return copy.operatingPrefix + sessions.length + copy.sessionsSuffix;
     }
-    return "AI 正在操作 · " + (state.agent || sessions[0]?.agent || "Agent");
+    return copy.operatingPrefix + (state.agent || sessions[0]?.agent || "Agent");
+  }
+
+  function currentActionText(copy) {
+    if (!state.currentAction || state.currentAction === OVERLAY_TEXT.zh.defaultAction || state.currentAction === OVERLAY_TEXT.en.defaultAction) {
+      return copy.defaultAction;
+    }
+    return state.currentAction;
   }
 
   function renderProgress() {
+    const copy = text();
     const total = finiteNumber(state.todoTotal);
     const done = finiteNumber(state.todoDone);
     const hasTodo = done !== null && total !== null && total > 0;
     if (state.currentStep) {
       const index = hasTodo ? Math.min(done + 1, total) + "/" + total : "";
-      progressText.textContent = (index ? "第 " + index + " 步：" : "") + state.currentStep;
+      progressText.textContent = (index ? copy.stepLabel(index) : "") + state.currentStep;
       progressText.style.display = "block";
     } else if (hasTodo) {
-      progressText.textContent = Math.max(0, done) + "/" + total + " 已完成";
+      progressText.textContent = copy.progressDone(Math.max(0, done), total);
       progressText.style.display = "block";
     } else {
       progressText.style.display = "none";
@@ -439,10 +570,10 @@ export function agentOverlayBootstrapScript(): string {
       agent.textContent = item.agent || "Agent";
       const name = document.createElement("div");
       name.className = "session-name";
-      name.textContent = item.sessionTitle || item.project || item.session || "未命名会话";
+      name.textContent = item.sessionTitle || item.project || item.session || text().unnamedSession;
       const time = document.createElement("div");
       time.className = "session-time";
-      time.textContent = item.lastActive ? formatRelativeTime(item.lastActive) : "活动未知";
+      time.textContent = item.lastActive ? formatRelativeTime(item.lastActive) : text().unknownActivity;
       row.append(agent, name, time);
       sessionList.appendChild(row);
     }
@@ -459,7 +590,7 @@ export function agentOverlayBootstrapScript(): string {
       elapsed.style.display = "none";
       return;
     }
-    elapsed.textContent = "已运行 " + formatDuration(Date.now() - startedTs);
+    elapsed.textContent = text().elapsedPrefix + formatDuration(Date.now() - startedTs);
     elapsed.style.display = "block";
   }
 
@@ -484,15 +615,15 @@ export function agentOverlayBootstrapScript(): string {
     const hasBinding = typeof window[SIGNAL_NAME] === "function";
     stopButton.disabled = taken || !hasBinding;
     if (taken) {
-      stopButton.textContent = "已接管";
+      stopButton.textContent = text().takenStop;
       resetStopConfirm();
       return;
     }
     if (stopConfirming) {
-      stopButton.textContent = "再点一次确认接管";
+      stopButton.textContent = text().confirmStop;
       return;
     }
-    stopButton.textContent = isMultiSession() ? "⏹ 全部停止并接管" : "⏹ 停止并接管";
+    stopButton.textContent = isMultiSession() ? text().stopAll : text().stopSingle;
   }
 
   function resetStopConfirm() {
@@ -502,7 +633,7 @@ export function agentOverlayBootstrapScript(): string {
     if (stopButton) {
       stopButton.classList.remove("confirm");
       if (state.state !== "takenOver") {
-        stopButton.textContent = isMultiSession() ? "⏹ 全部停止并接管" : "⏹ 停止并接管";
+        stopButton.textContent = isMultiSession() ? text().stopAll : text().stopSingle;
       }
     }
   }
@@ -598,6 +729,27 @@ export function agentOverlayBootstrapScript(): string {
     return normalizedSessions().length >= 2;
   }
 
+  function text() {
+    return OVERLAY_TEXT[currentLocale()];
+  }
+
+  function currentLocale() {
+    return normalizeLocale(state.locale) || browserLocale();
+  }
+
+  function browserLocale() {
+    const languages = Array.isArray(navigator.languages) ? navigator.languages : [];
+    return normalizeLocale(languages[0]) || normalizeLocale(navigator.language) || "en";
+  }
+
+  function normalizeLocale(value) {
+    if (typeof value !== "string") {
+      return "";
+    }
+    const lower = value.toLowerCase();
+    return lower.startsWith("zh") ? "zh" : lower.startsWith("en") ? "en" : "";
+  }
+
   function finiteNumber(value) {
     if (value === null || value === undefined || value === "") {
       return null;
@@ -626,6 +778,9 @@ export function agentOverlayBootstrapScript(): string {
     if (key === "state") {
       return value === "takenOver" ? "takenOver" : "active";
     }
+    if (key === "locale") {
+      return normalizeLocale(value);
+    }
     if (key === "sessions") {
       return Array.isArray(value) ? value : [];
     }
@@ -639,40 +794,15 @@ export function agentOverlayBootstrapScript(): string {
   }
 
   function formatDuration(ms) {
-    const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-    const hours = Math.floor(totalSeconds / 3600);
-    const minutes = Math.floor((totalSeconds % 3600) / 60);
-    const seconds = totalSeconds % 60;
-    if (hours > 0) {
-      return hours + " 小时 " + minutes + " 分";
-    }
-    if (minutes > 0) {
-      return minutes + " 分 " + seconds + " 秒";
-    }
-    return seconds + " 秒";
+    return text().duration(ms);
   }
 
   function formatRelativeTime(iso) {
     const ts = Date.parse(iso);
     if (!Number.isFinite(ts)) {
-      return "活动未知";
+      return text().unknownActivity;
     }
-    const seconds = Math.max(0, Math.floor((Date.now() - ts) / 1000));
-    if (seconds < 15) {
-      return "刚刚";
-    }
-    if (seconds < 60) {
-      return seconds + " 秒前";
-    }
-    const minutes = Math.floor(seconds / 60);
-    if (minutes < 60) {
-      return minutes + " 分钟前";
-    }
-    const hours = Math.floor(minutes / 60);
-    if (hours < 24) {
-      return hours + " 小时前";
-    }
-    return new Date(ts).toLocaleDateString();
+    return text().relativeTime(ts);
   }
 
   window.__ppAgentOverlayUpdate = (payload) => {

@@ -1,6 +1,6 @@
 import type { AgentActivity, CdpClientInfo } from "../shared/types";
 import { CdpBrowserClient, requestCdpTargets, requestCdpVersionInfo } from "./cdp-client";
-import type { CdpTargetListEntry } from "./internal-types";
+import type { CdpTargetListEntry, CdpVersionInfo } from "./internal-types";
 import { agentOverlayBootstrapScript } from "./overlay-script";
 import { isRecord, stringValue } from "./fs-util";
 import { SessionTailer, type SessionTailerBase } from "./session-tail";
@@ -10,6 +10,7 @@ const OVERLAY_WORLD_NAME = "__ppAgentOverlayWorld";
 const PAGE_CONNECT_TIMEOUT = 3000;
 const PUSH_INTERVAL_MS = 2000;
 const TAKEN_OVER_KEEPALIVE_MS = 7000;
+const CONTEXT_RECOVERY_COOLDOWN_MS = 3000;
 
 export type OverlayLocale = "zh" | "en";
 
@@ -44,6 +45,10 @@ interface AgentOverlayManagerOptions {
   locale?: OverlayLocale;
   onStop: (request: AgentOverlayStopRequest) => Promise<void>;
   onReveal?: (request: AgentOverlayRevealRequest) => void;
+  now?: () => number;
+  requestTargets?: (port: number) => Promise<CdpTargetListEntry[]>;
+  requestVersionInfo?: (port: number) => Promise<CdpVersionInfo>;
+  connectBrowser?: (webSocketDebuggerUrl: string, timeoutMs: number) => Promise<OverlayBrowserClient>;
 }
 
 type OverlayState = "active" | "takenOver";
@@ -106,6 +111,15 @@ interface PageOverlay {
   isolatedContextIds: Set<number>;
   lastPayloadText: string;
   lastPushAt: number;
+  lastContextRecoveryAt: number;
+  recoveringContext: boolean;
+}
+
+interface OverlayBrowserClient {
+  onEvent: ((method: string, params: unknown, sessionId?: string) => void) | null;
+  onDisconnect: (() => void) | null;
+  send<T>(method: string, params?: Record<string, unknown>, timeoutMs?: number, sessionId?: string): Promise<T>;
+  close(): void;
 }
 
 interface PortOverlay {
@@ -114,9 +128,10 @@ interface PortOverlay {
   profileName: string;
   clients: CdpClientInfo[];
   pages: Map<string, PageOverlay>;
-  browserClient: CdpBrowserClient | null;
+  browserClient: OverlayBrowserClient | null;
   browserConnecting: boolean;
   syncing: boolean;
+  alive: boolean;
   takeoverInFlight: boolean;
   takenOverUntil: number;
   lastPayload: OverlayPayload | null;
@@ -127,10 +142,14 @@ export class AgentOverlayManager {
   private readonly ports = new Map<number, PortOverlay>();
   private readonly tailers = new Map<string, SessionTailer>();
   private readonly script = agentOverlayBootstrapScript();
+  private disposed = false;
 
   constructor(private readonly options: AgentOverlayManagerOptions) {}
 
   sync(input: AgentOverlaySyncInput): void {
+    if (this.disposed) {
+      return;
+    }
     if (!input.enabled) {
       this.stopAllTailers();
       for (const state of this.ports.values()) {
@@ -140,7 +159,7 @@ export class AgentOverlayManager {
       return;
     }
 
-    const now = Date.now();
+    const now = this.now();
     const wanted = new Map(input.ports.map((port) => [port.port, port]));
     for (const [port, state] of [...this.ports]) {
       const next = wanted.get(port);
@@ -176,6 +195,7 @@ export class AgentOverlayManager {
           browserClient: null,
           browserConnecting: false,
           syncing: false,
+          alive: true,
           takeoverInFlight: false,
           takenOverUntil: 0,
           lastPayload: null,
@@ -210,6 +230,7 @@ export class AgentOverlayManager {
   }
 
   async dispose(): Promise<void> {
+    this.disposed = true;
     this.stopAllTailers();
     const states = [...this.ports.values()];
     this.ports.clear();
@@ -261,12 +282,15 @@ export class AgentOverlayManager {
   }
 
   private async syncPortTargets(state: PortOverlay): Promise<void> {
-    if (state.syncing) {
+    if (!this.isActivePort(state) || state.syncing) {
       return;
     }
     state.syncing = true;
     try {
-      const targets = await requestCdpTargets(state.port).catch(() => null);
+      const targets = await (this.options.requestTargets || requestCdpTargets)(state.port).catch(() => null);
+      if (!this.isActivePort(state)) {
+        return;
+      }
       if (!targets) {
         for (const page of [...state.pages.values()]) {
           void this.teardownPage(state, page).catch(() => undefined);
@@ -292,6 +316,9 @@ export class AgentOverlayManager {
       }
 
       for (const [targetId, target] of wanted) {
+        if (!this.isActivePort(state)) {
+          return;
+        }
         const page = state.pages.get(targetId);
         if (page) {
           page.url = target.url || page.url;
@@ -301,23 +328,28 @@ export class AgentOverlayManager {
         void this.connectPage(state, targetId, target).catch(() => undefined);
       }
     } finally {
-      state.syncing = false;
+      if (this.ports.get(state.port) === state) {
+        state.syncing = false;
+      }
     }
   }
 
   private async ensureTargetObserver(state: PortOverlay): Promise<void> {
-    if (state.browserClient || state.browserConnecting) {
+    if (!this.isActivePort(state) || state.browserClient || state.browserConnecting) {
       return;
     }
     state.browserConnecting = true;
     try {
-      const version = await requestCdpVersionInfo(state.port).catch(() => null);
+      const version = await (this.options.requestVersionInfo || requestCdpVersionInfo)(state.port).catch(() => null);
+      if (!this.isActivePort(state)) {
+        return;
+      }
       const webSocketDebuggerUrl = version?.webSocketDebuggerUrl;
       if (!webSocketDebuggerUrl) {
         return;
       }
-      const client = await CdpBrowserClient.connect(webSocketDebuggerUrl, PAGE_CONNECT_TIMEOUT);
-      if (this.ports.get(state.port) !== state) {
+      const client = await (this.options.connectBrowser || CdpBrowserClient.connect)(webSocketDebuggerUrl, PAGE_CONNECT_TIMEOUT);
+      if (!this.isActivePort(state)) {
         client.close();
         return;
       }
@@ -340,6 +372,9 @@ export class AgentOverlayManager {
         }
       };
       await client.send("Target.setDiscoverTargets", { discover: true }, 5000);
+      if (!this.isActivePort(state) || state.browserClient !== client) {
+        return;
+      }
       await client.send(
         "Target.setAutoAttach",
         { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
@@ -348,11 +383,16 @@ export class AgentOverlayManager {
     } catch {
       this.teardownTargetObserver(state);
     } finally {
-      state.browserConnecting = false;
+      if (this.ports.get(state.port) === state) {
+        state.browserConnecting = false;
+      }
     }
   }
 
   private handleBrowserEvent(state: PortOverlay, method: string, params: unknown, sessionId?: string): void {
+    if (!this.isActivePort(state)) {
+      return;
+    }
     if (
       method === "Runtime.bindingCalled" ||
       method === "Runtime.executionContextCreated" ||
@@ -405,11 +445,17 @@ export class AgentOverlayManager {
   }
 
   private async connectPage(state: PortOverlay, targetId: string, target: CdpTargetListEntry): Promise<void> {
+    if (!this.isActivePort(state)) {
+      return;
+    }
     const page = this.upsertPage(state, targetId, target.url || "");
     await this.attachPage(state, page);
   }
 
   private handleAttachedToTarget(state: PortOverlay, params: unknown): void {
+    if (!this.isActivePort(state)) {
+      return;
+    }
     if (!isRecord(params) || !isRecord(params.targetInfo)) {
       return;
     }
@@ -438,6 +484,9 @@ export class AgentOverlayManager {
   }
 
   private handleDetachedFromTarget(state: PortOverlay, params: unknown): void {
+    if (!this.isActivePort(state)) {
+      return;
+    }
     if (!isRecord(params)) {
       return;
     }
@@ -472,7 +521,9 @@ export class AgentOverlayManager {
       closing: false,
       isolatedContextIds: new Set(),
       lastPayloadText: "",
-      lastPushAt: 0
+      lastPushAt: 0,
+      lastContextRecoveryAt: 0,
+      recoveringContext: false
     };
     state.pages.set(targetId, page);
     return page;
@@ -480,7 +531,7 @@ export class AgentOverlayManager {
 
   private async attachPage(state: PortOverlay, page: PageOverlay): Promise<void> {
     const client = state.browserClient;
-    if (!client || state.browserConnecting || page.sessionId || page.attachPending || page.connecting || page.closing) {
+    if (!this.isActivePage(state, page) || !client || state.browserConnecting || page.sessionId || page.attachPending || page.connecting || page.closing) {
       return;
     }
     page.attachPending = true;
@@ -491,7 +542,11 @@ export class AgentOverlayManager {
         5000
       );
       const sessionId = result.sessionId;
-      if (!sessionId || state.pages.get(page.targetId) !== page || page.closing) {
+      if (!sessionId) {
+        return;
+      }
+      if (!this.isActivePage(state, page)) {
+        await client.send("Target.detachFromTarget", { sessionId }, 2000).catch(() => undefined);
         return;
       }
       page.sessionId = sessionId;
@@ -499,47 +554,67 @@ export class AgentOverlayManager {
     } catch {
       // Auto-attach may have won the race, or the target may have disappeared.
     } finally {
-      page.attachPending = false;
+      if (state.pages.get(page.targetId) === page) {
+        page.attachPending = false;
+      }
     }
   }
 
   private async initializePageSession(state: PortOverlay, page: PageOverlay, sessionId: string): Promise<void> {
     const client = state.browserClient;
-    if (!client || page.connecting || page.closing || page.sessionId !== sessionId) {
+    if (!this.isActivePage(state, page) || !client || page.connecting || page.closing || page.sessionId !== sessionId) {
       return;
     }
     page.connecting = true;
     try {
       await client.send("Runtime.enable", {}, 5000, sessionId);
+      if (!this.isActivePage(state, page) || state.browserClient !== client || page.sessionId !== sessionId) {
+        return;
+      }
       await client.send("Page.enable", {}, 5000, sessionId);
+      if (!this.isActivePage(state, page) || state.browserClient !== client || page.sessionId !== sessionId) {
+        return;
+      }
       await client.send("Runtime.addBinding", { name: BINDING_NAME, executionContextName: OVERLAY_WORLD_NAME }, 5000, sessionId);
+      if (!this.isActivePage(state, page) || state.browserClient !== client || page.sessionId !== sessionId) {
+        return;
+      }
       const addScript = await client.send<{ identifier?: string }>(
         "Page.addScriptToEvaluateOnNewDocument",
         { source: this.script, worldName: OVERLAY_WORLD_NAME },
         5000,
         sessionId
       );
-      if (state.pages.get(page.targetId) !== page || page.sessionId !== sessionId || page.closing) {
+      if (!this.isActivePage(state, page) || state.browserClient !== client || page.sessionId !== sessionId) {
         return;
       }
       page.scriptIdentifier = addScript.identifier;
       page.mainFrameId = await this.mainFrameIdForSession(client, sessionId);
+      if (!this.isActivePage(state, page) || state.browserClient !== client || page.sessionId !== sessionId) {
+        return;
+      }
       const context = await client.send<{ executionContextId?: number }>(
         "Page.createIsolatedWorld",
         { frameId: page.mainFrameId, worldName: OVERLAY_WORLD_NAME },
         5000,
         sessionId
       );
+      if (!this.isActivePage(state, page) || state.browserClient !== client || page.sessionId !== sessionId) {
+        return;
+      }
       const contextId = numberValue(context.executionContextId);
       if (contextId === null) {
         throw new Error("Chrome did not create an overlay isolated world.");
       }
       this.rememberIsolatedContext(page, contextId, page.mainFrameId);
       await client.send("Runtime.evaluate", { expression: this.script, awaitPromise: false, contextId }, 5000, sessionId);
+      if (!this.isActivePage(state, page) || state.browserClient !== client || page.sessionId !== sessionId) {
+        return;
+      }
       page.connecting = false;
       await this.pushPageUpdate(state, page, true);
     } catch {
-      if (page.sessionId === sessionId) {
+      if (this.isActivePage(state, page) && page.sessionId === sessionId) {
         page.sessionId = null;
         page.scriptIdentifier = undefined;
         page.lastPayloadText = "";
@@ -563,7 +638,7 @@ export class AgentOverlayManager {
     return null;
   }
 
-  private async mainFrameIdForSession(client: CdpBrowserClient, sessionId: string): Promise<string> {
+  private async mainFrameIdForSession(client: OverlayBrowserClient, sessionId: string): Promise<string> {
     const result = await client.send<{ frameTree?: unknown }>("Page.getFrameTree", {}, 5000, sessionId);
     const frameTree = isRecord(result.frameTree) ? result.frameTree : null;
     const frame = frameTree && isRecord(frameTree.frame) ? frameTree.frame : null;
@@ -673,7 +748,7 @@ export class AgentOverlayManager {
   }
 
   private async handleStopSignal(state: PortOverlay, requestedSession?: string): Promise<void> {
-    if (state.takeoverInFlight || Date.now() < state.takenOverUntil) {
+    if (!this.isActivePort(state) || state.takeoverInFlight || this.now() < state.takenOverUntil) {
       return;
     }
     const drivers = this.findStopDrivers(state, requestedSession);
@@ -695,6 +770,9 @@ export class AgentOverlayManager {
             session: driver.session,
             agent: inferAgentName(driver)
           });
+          if (!this.isActivePort(state)) {
+            return;
+          }
           stoppedCount += 1;
         } catch (error) {
           firstError = firstError || error;
@@ -703,14 +781,19 @@ export class AgentOverlayManager {
       if (!stoppedCount) {
         throw firstError instanceof Error ? firstError : new Error("没有可停止的 AI 驱动连接。");
       }
-      state.takenOverUntil = Date.now() + TAKEN_OVER_KEEPALIVE_MS;
+      if (!this.isActivePort(state)) {
+        return;
+      }
+      state.takenOverUntil = this.now() + TAKEN_OVER_KEEPALIVE_MS;
       state.lastPayload = {
         ...this.payloadForPort(state),
         state: "takenOver"
       };
       await this.pushPortUpdate(state, true);
     } finally {
-      state.takeoverInFlight = false;
+      if (this.ports.get(state.port) === state) {
+        state.takeoverInFlight = false;
+      }
     }
   }
 
@@ -739,18 +822,21 @@ export class AgentOverlayManager {
   }
 
   private async pushPortUpdate(state: PortOverlay, force = false): Promise<void> {
+    if (!this.isActivePort(state)) {
+      return;
+    }
     await Promise.all([...state.pages.values()].map((page) => this.pushPageUpdate(state, page, force).catch(() => undefined)));
   }
 
   private async pushPageUpdate(state: PortOverlay, page: PageOverlay, force = false): Promise<void> {
     const client = state.browserClient;
     const sessionId = page.sessionId;
-    if (!client || !sessionId || page.connecting || page.closing) {
+    if (!this.isActivePage(state, page) || !client || !sessionId || page.connecting || page.closing) {
       return;
     }
     const payload = this.payloadForPort(state);
     const text = safeJson(payload);
-    const now = Date.now();
+    const now = this.now();
     if (!force && page.lastPayloadText === text && now - page.lastPushAt < PUSH_INTERVAL_MS) {
       return;
     }
@@ -771,6 +857,9 @@ export class AgentOverlayManager {
           3000,
           sessionId
         );
+        if (!this.isActivePage(state, page) || state.browserClient !== client || page.sessionId !== sessionId) {
+          return;
+        }
         pushed = true;
       } catch {
         page.isolatedContextIds.delete(contextId);
@@ -783,8 +872,58 @@ export class AgentOverlayManager {
       page.lastPayloadText = text;
       page.lastPushAt = now;
       state.lastPayload = payload;
-    } else if (page.isolatedContextIds.size > 0) {
-      await this.teardownPage(state, page).catch(() => undefined);
+    } else {
+      await this.recoverPageContext(state, page, sessionId, now).catch(() => undefined);
+    }
+  }
+
+  private async recoverPageContext(state: PortOverlay, page: PageOverlay, sessionId: string, now: number): Promise<void> {
+    const client = state.browserClient;
+    if (
+      !this.isActivePage(state, page) ||
+      !client ||
+      page.sessionId !== sessionId ||
+      page.connecting ||
+      page.closing ||
+      page.recoveringContext ||
+      now - page.lastContextRecoveryAt < CONTEXT_RECOVERY_COOLDOWN_MS
+    ) {
+      return;
+    }
+
+    page.recoveringContext = true;
+    page.lastContextRecoveryAt = now;
+    try {
+      if (!page.mainFrameId) {
+        page.mainFrameId = await this.mainFrameIdForSession(client, sessionId);
+        if (!this.isActivePage(state, page) || state.browserClient !== client || page.sessionId !== sessionId) {
+          return;
+        }
+      }
+      const context = await client.send<{ executionContextId?: number }>(
+        "Page.createIsolatedWorld",
+        { frameId: page.mainFrameId, worldName: OVERLAY_WORLD_NAME },
+        5000,
+        sessionId
+      );
+      if (!this.isActivePage(state, page) || state.browserClient !== client || page.sessionId !== sessionId) {
+        return;
+      }
+      const contextId = numberValue(context.executionContextId);
+      if (contextId === null) {
+        return;
+      }
+      this.rememberIsolatedContext(page, contextId, page.mainFrameId);
+      await client.send("Runtime.evaluate", { expression: this.script, awaitPromise: false, contextId }, 5000, sessionId);
+      if (!this.isActivePage(state, page) || state.browserClient !== client || page.sessionId !== sessionId) {
+        return;
+      }
+      page.lastPayloadText = "";
+      await this.pushPageUpdate(state, page, true);
+    } finally {
+      if (state.pages.get(page.targetId) === page) {
+        page.recoveringContext = false;
+      }
     }
   }
 
@@ -797,7 +936,7 @@ export class AgentOverlayManager {
   }
 
   private payloadForPort(state: PortOverlay): OverlayPayload {
-    const takenOver = state.takenOverUntil > Date.now();
+    const takenOver = state.takenOverUntil > this.now();
     return buildAgentOverlayPayload({
       locale: this.options.locale ?? "en",
       state: takenOver ? "takenOver" : "active",
@@ -805,7 +944,8 @@ export class AgentOverlayManager {
       clients: state.clients,
       lastPayload: state.lastPayload,
       activityForClient: (client) => this.activityForClient(client),
-      startedAtForClient: (client) => this.startedAtForClient(state, client)
+      startedAtForClient: (client) => this.startedAtForClient(state, client),
+      now: this.now()
     });
   }
 
@@ -861,6 +1001,7 @@ export class AgentOverlayManager {
   }
 
   private async teardownPort(state: PortOverlay): Promise<void> {
+    state.alive = false;
     const pages = [...state.pages.values()];
     state.pages.clear();
     await Promise.allSettled(pages.map((page) => this.teardownPage(state, page)));
@@ -908,6 +1049,18 @@ export class AgentOverlayManager {
     page.isolatedContextIds.clear();
     page.activeContextId = undefined;
     await client.send("Target.detachFromTarget", { sessionId }, 2000).catch(() => undefined);
+  }
+
+  private isActivePort(state: PortOverlay): boolean {
+    return !this.disposed && state.alive && this.ports.get(state.port) === state;
+  }
+
+  private isActivePage(state: PortOverlay, page: PageOverlay): boolean {
+    return this.isActivePort(state) && state.pages.get(page.targetId) === page && !page.closing;
+  }
+
+  private now(): number {
+    return this.options.now ? this.options.now() : Date.now();
   }
 }
 

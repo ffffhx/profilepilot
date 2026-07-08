@@ -402,6 +402,157 @@ test("AgentOverlayManager rejects binding stop signals from unknown execution co
   assert.equal(stopCalls.length, 0);
 });
 
+test("AgentOverlayManager rebuilds an isolated world after all known contexts fail and throttles recovery", async () => {
+  let now = Date.parse("2026-07-08T00:00:00.000Z");
+  let createWorldCalls = 0;
+  const updateContexts = [];
+  const failingUpdateContexts = new Set([7, 8]);
+  const fakeClient = {
+    onEvent: null,
+    onDisconnect: null,
+    close() {},
+    async send(method, params) {
+      if (method === "Runtime.evaluate") {
+        if (String(params.expression).startsWith("globalThis.__ppAgentOverlayUpdate")) {
+          updateContexts.push(params.contextId);
+          if (failingUpdateContexts.has(params.contextId)) {
+            throw new Error(`context ${params.contextId} is gone`);
+          }
+        }
+        return {};
+      }
+      if (method === "Page.createIsolatedWorld") {
+        createWorldCalls += 1;
+        assert.equal(params.frameId, "frame-1");
+        assert.equal(params.worldName, "__ppAgentOverlayWorld");
+        return { executionContextId: 42 };
+      }
+      throw new Error(`unexpected CDP method ${method}`);
+    }
+  };
+  const manager = new AgentOverlayManager({ onStop: async () => {}, now: () => now });
+  const state = createOverlayState({ browserClient: fakeClient });
+  const page = createOverlayPage({
+    sessionId: "session-1",
+    mainFrameId: "frame-1",
+    activeContextId: 7,
+    isolatedContextIds: new Set([7, 8])
+  });
+  state.pages.set(page.targetId, page);
+  manager.ports.set(state.port, state);
+
+  await manager.pushPageUpdate(state, page, true);
+
+  assert.deepEqual(updateContexts, [7, 8, 42]);
+  assert.equal(createWorldCalls, 1);
+  assert.equal(page.activeContextId, 42);
+  assert.equal(page.isolatedContextIds.has(42), true);
+
+  failingUpdateContexts.add(42);
+  failingUpdateContexts.add(100);
+  page.isolatedContextIds.add(100);
+  page.activeContextId = 100;
+  now += 1000;
+  await manager.pushPageUpdate(state, page, true);
+
+  assert.equal(createWorldCalls, 1);
+});
+
+test("AgentOverlayManager ignores late attach results after dispose and rolls back the session", async () => {
+  const attachResult = deferred();
+  const methods = [];
+  const fakeClient = {
+    onEvent: null,
+    onDisconnect: null,
+    close() {
+      methods.push("close");
+    },
+    async send(method, params) {
+      methods.push(method);
+      if (method === "Target.attachToTarget") {
+        return attachResult.promise;
+      }
+      if (method === "Target.detachFromTarget") {
+        assert.deepEqual(params, { sessionId: "late-session" });
+        return {};
+      }
+      throw new Error(`unexpected CDP method ${method}`);
+    }
+  };
+  const manager = new AgentOverlayManager({ onStop: async () => {} });
+  const state = createOverlayState({ browserClient: fakeClient });
+  const page = createOverlayPage();
+  state.pages.set(page.targetId, page);
+  manager.ports.set(state.port, state);
+
+  const attach = manager.attachPage(state, page);
+  assert.equal(page.attachPending, true);
+  await manager.dispose();
+  attachResult.resolve({ sessionId: "late-session" });
+  await attach;
+
+  assert.equal(state.pages.size, 0);
+  assert.equal(page.sessionId, null);
+  assert.equal(methods.includes("Runtime.enable"), false);
+  assert.equal(methods.includes("Runtime.addBinding"), false);
+  assert.deepEqual(methods.filter((method) => method === "Target.detachFromTarget"), ["Target.detachFromTarget"]);
+});
+
+function createOverlayState(overrides = {}) {
+  return {
+    port: 9480,
+    profileId: "test-profile",
+    profileName: "Test Profile",
+    clients: [
+      {
+        pid: 42,
+        label: "agent-browser",
+        project: "profilepilot",
+        title: "Overlay tests",
+        session: "cx-context-test",
+        lastActive: "2026-07-08T00:00:00.000Z"
+      }
+    ],
+    pages: new Map(),
+    browserClient: null,
+    browserConnecting: false,
+    syncing: false,
+    alive: true,
+    takeoverInFlight: false,
+    takenOverUntil: 0,
+    lastPayload: null,
+    sessionStartedAt: new Map(),
+    ...overrides
+  };
+}
+
+function createOverlayPage(overrides = {}) {
+  return {
+    targetId: "target-1",
+    url: "https://example.test/",
+    sessionId: null,
+    attachPending: false,
+    connecting: false,
+    closing: false,
+    isolatedContextIds: new Set(),
+    lastPayloadText: "",
+    lastPushAt: 0,
+    lastContextRecoveryAt: 0,
+    recoveringContext: false,
+    ...overrides
+  };
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
+
 function startTailer(session, base) {
   const tailer = new SessionTailer(session, base, () => {});
   tailer.start();

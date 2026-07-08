@@ -24,7 +24,8 @@
     "dist:win": "npm run build && electron-builder --win nsis zip --x64 --publish never",
     "site": "node site/server.mjs",
     "test": "npm run build && node --test tests/",
-    "e2e": "npm run build && node scripts/e2e-overlay-smoke.mjs"
+    "e2e": "npm run build && node scripts/e2e-overlay-smoke.mjs",
+    "e2e:stress": "npm run build && node scripts/e2e-overlay-stress.mjs"
   },
   "engines": {
     "node": ">=20"

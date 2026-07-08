@@ -7,7 +7,7 @@ import { renderMini } from "./mini";
 import { renderCdpModal, renderCloneTagModal, renderExtensionMigrationModal, renderGlobalInstructionsModal, renderNewModal, renderRenameModal } from "./modals";
 import { renderDetails, renderEmpty, renderExternalDetails, renderProfilesPanel } from "./profiles";
 import { appRoot, store } from "../state";
-import { escapeHtml, renderBusyBanner, renderButtonLabel } from "../util";
+import { escapeHtml, formatDate, renderBusyBanner, renderButtonLabel } from "../util";
 
 // 上一次写入的主视图 HTML。定时轮询（3s）本会每次整段 innerHTML 重建，把用户正 hover
 // 的节点换掉，导致 tooltip / :hover 状态一闪一闪。内容没变时据此跳过重建。
@@ -61,6 +61,7 @@ export function render(): void {
       </header>
 
       ${busyHasEmbeddedProgress ? "" : renderBusyBanner()}
+      ${renderAgentTakeoverNotice()}
 
       <section class="status-grid grid grid-cols-[minmax(0,1.6fr)_repeat(2,minmax(130px,0.7fr))] gap-px overflow-hidden border-solid border border-line rounded-xl bg-line mt-[22px] [box-shadow:inset_0_1px_0_rgba(255,255,255,0.04),0_18px_44px_rgba(2,6,9,0.4)]" aria-label="Profile status">
         <div class="status-item current relative min-w-0 pt-4 pr-4 pb-4 pl-5 bg-panel">
@@ -116,4 +117,33 @@ export function render(): void {
   lastMainHtml = html;
   appRoot.className = "";
   appRoot.innerHTML = html;
+}
+
+function renderAgentTakeoverNotice(): string {
+  if (store.agentTakeoverNoticeDismissed || !store.agentTakeoverHistory.length) {
+    return "";
+  }
+  const rows = store.agentTakeoverHistory
+    .slice(0, 5)
+    .map((event) => {
+      const agent = event.agent || "AI";
+      const session = event.session ? ` · ${event.session}` : "";
+      return `
+        <li>
+          <time>${escapeHtml(formatDate(event.at))}</time>
+          <strong>${escapeHtml(event.profileName)}</strong>
+          <span>${escapeHtml(`${agent}${session} 已停止操作`)}</span>
+        </li>
+      `;
+    })
+    .join("");
+  return `
+    <section class="agent-takeover-notice" aria-label="AI 接管历史">
+      <div class="agent-takeover-notice-head">
+        <strong>最近接管</strong>
+        <button type="button" data-action="dismiss-agent-takeover-history" title="关闭接管记录提示">关闭</button>
+      </div>
+      <ul>${rows}</ul>
+    </section>
+  `;
 }

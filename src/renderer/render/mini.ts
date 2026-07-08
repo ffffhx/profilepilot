@@ -3,6 +3,8 @@ import { isBusyAction, renderToastBody } from "../busy";
 import { appRoot, store } from "../state";
 import { PublicProfile } from "../types";
 import {
+  agentActivityLeadText,
+  agentActivityTooltipText,
   cdpPortLabel,
   cdpSessionText,
   contentionNoticeShort,
@@ -297,6 +299,8 @@ function renderMiniProfileCard(profile: PublicProfile): string {
   const primaryClient = driving ? profile.cdpClients[0] : undefined;
   const sessionText = !busyHere && primaryClient ? cdpSessionText(primaryClient) : "";
   const sessionAge = !busyHere && primaryClient ? formatRelativeTime(primaryClient.lastActive) : "";
+  const activityText = profile.agentActivity ? agentActivityLeadText(profile.agentActivity) || "正在操作" : "";
+  const activityTip = profile.agentActivity ? agentActivityTooltipText(profile.agentActivity) || activityText : "";
 
   return `
     <article class="mini-profile-card ${port.kind} ${driving ? "driving" : ""} ${contention ? "contention" : ""} ${busyHere ? "busy" : ""}" data-id="${profile.id}" draggable="true">
@@ -313,6 +317,7 @@ function renderMiniProfileCard(profile: PublicProfile): string {
               ? `<span class="mini-profile-session"${readoutTip ? ` title="${escapeHtml(readoutTip)}"` : ""}>${sessionText ? `<span class="mini-profile-session-main">${escapeHtml(sessionText)}</span>` : ""}${sessionAge ? `<span class="mini-profile-session-age">${escapeHtml(sessionAge)}</span>` : ""}</span>`
               : ""
           }
+          ${activityText ? `<span class="mini-profile-agent"${activityTip ? ` title="${escapeHtml(activityTip)}"` : ""}>AI：${escapeHtml(activityText)}</span>` : ""}
         </span>
         <span class="mini-readout"${readoutTip ? ` title="${escapeHtml(readoutTip)}"` : ""}>${escapeHtml(readout)}</span>
       </button>

@@ -2,7 +2,7 @@ import { isBusyAction } from "../busy";
 import { store } from "../state";
 import { ExternalChromeInstance, PublicProfile } from "../types";
 import { renderLiveViewSection } from "./live-view";
-import { NATIVE_CDP_UNSUPPORTED_NOTE, cdpClientToolSummary, cdpLaunchButtonTitle, cdpPortLabel, cdpSessionText, contentionNotice, contentionNoticeShort, deleteButtonTitle, escapeHtml, focusButtonTitle, formatDate, formatRelativeTime, launchButtonTitle, listeningPortsNote, liveAddrLabel, prettyCdpClientLabel, profileStatusLabel, renderButtonLabel, sourceDetail } from "../util";
+import { NATIVE_CDP_UNSUPPORTED_NOTE, agentActivityLeadText, agentActivityProgressText, agentActivityTooltipText, cdpClientToolSummary, cdpLaunchButtonTitle, cdpPortLabel, cdpSessionText, contentionNotice, contentionNoticeShort, deleteButtonTitle, escapeHtml, focusButtonTitle, formatDate, formatRelativeTime, hasAgentActivity, launchButtonTitle, listeningPortsNote, liveAddrLabel, prettyCdpClientLabel, profileStatusLabel, renderButtonLabel, sourceDetail, truncateText } from "../util";
 
 interface ProfileRootGroup {
   key: string;
@@ -228,7 +228,7 @@ export function renderProfileConnectionCell(profile: PublicProfile): string {
     subLine = renderConnLiveLine(profile);
   }
   // 结束连接只放右侧详情栏（renderCdpClientsDetail），列表行里不再挂 ✕，避免遮挡药丸/操作。
-  return `<span class="conn-cell-stack"><span class="conn-line">${portChip}${renderConnPill(profile)}</span>${subLine}</span>`;
+  return `<span class="conn-cell-stack"><span class="conn-line">${portChip}${renderConnPill(profile)}${renderAgentActivityInline(profile)}</span>${subLine}</span>`;
 }
 
 // 「当前停在哪个域名/IP」的航点行（可 hover 看完整 URL）。tooltip 挂在外层 .conn-live-tip，
@@ -238,6 +238,41 @@ function renderConnLiveLine(profile: PublicProfile): string {
   const tabs = profile.liveTabCount && profile.liveTabCount > 1 ? ` · ${profile.liveTabCount} 标签` : "";
   const tip = profile.livePrimaryUrl || label;
   return `<span class="conn-live-tip action-tooltip" data-tooltip="${escapeHtml(tip)}"><span class="conn-live" title="${escapeHtml(tip)}">▸ ${escapeHtml(`${label}${tabs}`)}</span></span>`;
+}
+
+function activityValue(value?: string): string {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function renderAgentActivityInline(profile: PublicProfile): string {
+  if (!hasAgentActivity(profile)) {
+    return "";
+  }
+  const activity = profile.agentActivity;
+  const lead = agentActivityLeadText(activity) || "正在操作";
+  const tooltip = agentActivityTooltipText(activity) || lead;
+  return `<span class="conn-agent-action-tip action-tooltip" data-tooltip="${escapeHtml(tooltip)}"><span class="conn-agent-action">▸ ${escapeHtml(lead)}</span></span>`;
+}
+
+function renderAgentActivityTipRows(profile: PublicProfile): string {
+  if (!hasAgentActivity(profile) || !profile.agentActivity) {
+    return "";
+  }
+  const activity = profile.agentActivity;
+  const action = activityValue(activity.currentAction);
+  const progress = agentActivityProgressText(activity);
+  const currentStep = activityValue(activity.currentStep);
+  const nextStep = activityValue(activity.nextStep);
+  const lastMessage = activityValue(activity.lastMessage);
+  return [
+    action ? `<span class="tip-row tip-activity"><em class="tip-tag">当前动作</em><span>${escapeHtml(action)}</span></span>` : "",
+    progress ? `<span class="tip-row tip-activity"><em class="tip-tag">进度</em><span>${escapeHtml(`第 ${progress} 步`)}</span></span>` : "",
+    currentStep ? `<span class="tip-row tip-activity"><em class="tip-tag">当前步骤</em><span>${escapeHtml(currentStep)}</span></span>` : "",
+    nextStep ? `<span class="tip-row tip-activity"><em class="tip-tag">下一步</em><span>${escapeHtml(nextStep)}</span></span>` : "",
+    lastMessage ? `<span class="tip-row tip-activity"><em class="tip-tag">AI 最近说</em><span>${escapeHtml(truncateText(lastMessage, 96))}</span></span>` : ""
+  ]
+    .filter(Boolean)
+    .join("");
 }
 
 // ◉ 工具名药丸（脉冲绿点=正在驱动）。只在有驱动连接时调用。
@@ -253,12 +288,13 @@ function renderConnPill(profile: PublicProfile): string {
   const warning = contentionNoticeShort(profile);
   const warnRow = warning ? `<span class="tip-row tip-warn">${escapeHtml(warning)}</span>` : "";
   const age = formatRelativeTime(primary.lastActive);
+  const activityRows = renderAgentActivityTipRows(profile);
   // 项目和会话标题分两行展示：项目是「在哪个仓库/目录」，标题是这次会话的抬头，不是一回事，别挤一行。
   // 多会话并存时升级为表格：一会话一行（工具/项目/标题/活动），谁在驱动一眼对齐着看，
   // 而不是只讲第一条、其余折进一句"同时连接"。
   const body =
     clients.length > 1
-      ? `${warnRow}${renderConnTipTable(clients)}`
+      ? `${warnRow}${renderConnTipTable(clients)}${activityRows}`
       : [
           warnRow,
           `<span class="tip-row"><em class="tip-tag">工具</em><span class="tip-tool">${escapeHtml(tool)}</span></span>`,
@@ -266,7 +302,8 @@ function renderConnPill(profile: PublicProfile): string {
           primary.project ? `<span class="tip-row"><em class="tip-tag">项目</em><span class="tip-project">${escapeHtml(primary.project)}</span></span>` : "",
           primary.title ? `<span class="tip-row"><em class="tip-tag">标题</em><span class="tip-session">${escapeHtml(primary.title)}</span></span>` : "",
           age ? `<span class="tip-row"><em class="tip-tag">活动</em><span class="tip-age">${escapeHtml(age)}</span></span>` : "",
-          primary.note ? `<span class="tip-row"><em class="tip-tag">说明</em><span class="tip-note">${escapeHtml(primary.note)}</span></span>` : ""
+          primary.note ? `<span class="tip-row"><em class="tip-tag">说明</em><span class="tip-note">${escapeHtml(primary.note)}</span></span>` : "",
+          activityRows
         ]
           .filter(Boolean)
           .join("");
@@ -670,19 +707,20 @@ export function renderCdpClientsDetail(profile: PublicProfile): string {
 
   // 每条连接一行会话身份：工具 · 项目·标题 + 最近活动时间（区分活会话与残留连接）。
   // 多会话共用一个 Profile 正是争用问题的现场，必须每条都平铺出来，不能只显示第一条。
+  const activityDetailCard = renderAgentActivityDetailCard(profile);
   const sessionRows = profile.cdpClients
-    .map((client) => {
+    .map((client, index) => {
       const tool = client.agent || prettyCdpClientLabel(client.label);
       const sessionText = cdpSessionText(client);
       const sessionAge = formatRelativeTime(client.lastActive);
       const main = [tool, sessionText].filter(Boolean).join(" · ");
       if (!main && !sessionAge && !client.note) {
-        return "";
+        return index === 0 ? activityDetailCard : "";
       }
       // 归属说明（共享 daemon 推测/归属未知）hover 可见，正文行保持紧凑。
       return `<small class="detail-session"${client.note ? ` title="${escapeHtml(client.note)}"` : ""}>⇁ ${escapeHtml(main)}${
         sessionAge ? `<span class="detail-session-age">${escapeHtml(sessionAge)}</span>` : ""
-      }${client.note && !sessionText ? `<span class="detail-session-note">${escapeHtml(client.note)}</span>` : ""}</small>`;
+      }${client.note && !sessionText ? `<span class="detail-session-note">${escapeHtml(client.note)}</span>` : ""}</small>${index === 0 ? activityDetailCard : ""}`;
     })
     .join("");
 
@@ -718,15 +756,43 @@ export function renderCdpClientsDetail(profile: PublicProfile): string {
   `;
 }
 
+function renderAgentActivityDetailCard(profile: PublicProfile): string {
+  if (!hasAgentActivity(profile) || !profile.agentActivity) {
+    return "";
+  }
+  const activity = profile.agentActivity;
+  const progress = agentActivityProgressText(activity);
+  const stepSummary = activityValue(activity.currentStep) || agentActivityLeadText(activity) || "正在操作";
+  const action = activityValue(activity.currentAction);
+  const nextStep = activityValue(activity.nextStep);
+  const lastMessage = activityValue(activity.lastMessage);
+  const updated = formatRelativeTime(activity.updatedAt);
+  return `
+    <div class="agent-activity-card">
+      <div class="agent-activity-head">
+        <span>AI 活动</span>
+        ${updated ? `<em>${escapeHtml(updated)}</em>` : ""}
+      </div>
+      <div class="agent-activity-progress">
+        ${progress ? `<strong>${escapeHtml(progress)}</strong>` : ""}
+        <span>${escapeHtml(stepSummary)}</span>
+      </div>
+      ${nextStep ? `<small><em>下一步</em><span>${escapeHtml(nextStep)}</span></small>` : ""}
+      ${action ? `<small><em>最近动作</em><span>${escapeHtml(action)}</span></small>` : ""}
+      ${lastMessage ? `<small><em>AI 最近说</em><span>${escapeHtml(truncateText(lastMessage, 120))}</span></small>` : ""}
+    </div>
+  `;
+}
+
 function renderAgentOverlaySettingRow(): string {
   const enabled = store.state?.agentOverlayEnabled !== false;
   const busy = isBusyAction("agent-overlay");
   return `
     <div class="agent-overlay-setting">
-      <small class="detail-note">AI 操作可见化已${enabled ? "开启" : "关闭"}：agent-browser 操作页面时注入状态条，并允许在页面内停止接管。</small>
+      <small class="detail-note">AI 操作可见化：agent-browser 驱动页面时显示操作状态条，并支持在页面内停止 AI 操作。当前已${enabled ? "开启" : "关闭"}。</small>
       <button type="button" class="overlay-switch ${enabled ? "on" : ""} ${busy ? "loading" : ""}" data-action="toggle-agent-overlay" aria-pressed="${enabled ? "true" : "false"}" ${store.busy ? "disabled" : ""}>
         <span class="overlay-switch-track"><span class="overlay-switch-thumb"></span></span>
-        <span>${enabled ? "开启" : "关闭"}</span>
+        <span>${enabled ? "已开启" : "已关闭"}</span>
       </button>
     </div>
   `;

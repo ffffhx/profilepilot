@@ -640,6 +640,19 @@ body.mini-collapsing .mini-shell {
   white-space: nowrap;
 }
 
+.mini-profile-agent {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--info-bright);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 650;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* 悬浮窗卡片上的「结束驱动连接」✕：默认藏起，hover 卡片时右侧浮现 */
 .mini-disconnect {
   position: absolute;
@@ -1453,6 +1466,90 @@ body:not(.booted) .account-sync-panel {
 
 body:not(.booted) .migration-panel {
   animation: rise-in 0.45s 0.18s ease both;
+}
+
+.agent-takeover-notice {
+  margin-top: 14px;
+  border: 1px solid var(--warn-line);
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(242, 177, 62, 0.12), rgba(242, 177, 62, 0.035));
+  padding: 12px 13px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035), 0 14px 34px rgba(2, 6, 9, 0.28);
+}
+
+.agent-takeover-notice-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.agent-takeover-notice-head strong {
+  color: var(--warn-bright);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.agent-takeover-notice-head button {
+  border: 1px solid var(--warn-line);
+  border-radius: 999px;
+  background: rgba(242, 177, 62, 0.08);
+  padding: 4px 9px;
+  color: var(--warn-bright);
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.agent-takeover-notice-head button:hover {
+  background: rgba(242, 177, 62, 0.15);
+}
+
+.agent-takeover-notice ul {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.agent-takeover-notice li {
+  display: grid;
+  grid-template-columns: auto minmax(120px, auto) minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+  min-width: 0;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.agent-takeover-notice time {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.agent-takeover-notice li strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--warn-bright);
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-takeover-notice li span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @keyframes rise-in {
@@ -2878,6 +2975,25 @@ body:not(.booted) .layout {
   min-width: 0;
 }
 
+.conn-agent-action-tip {
+  flex: 1 1 82px;
+  min-width: 44px;
+  max-width: 132px;
+}
+
+.conn-agent-action {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--info-bright);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* CDP 已开但没人驱动 */
 .conn-idle {
   flex: 0 1 auto;
@@ -3062,6 +3178,14 @@ body:not(.booted) .layout {
 .conn-tip-card .tip-note {
   color: var(--muted);
   font-weight: 500;
+}
+
+.conn-tip-card .tip-activity {
+  color: #d9fff0;
+}
+
+.conn-tip-card .tip-activity .tip-tag {
+  color: var(--info-bright);
 }
 
 /* 疑似争用/争用风险：多个会话抢同一 Profile，驱动药丸整体转琥珀警示 */
@@ -3649,6 +3773,87 @@ body:not(.booted) .layout {
   flex-wrap: wrap;
   gap: 8px;
   margin-top: 8px;
+}
+
+.agent-activity-card {
+  display: grid;
+  gap: 7px;
+  margin-top: 8px;
+  border: 1px solid var(--info-line);
+  border-radius: 8px;
+  background: linear-gradient(180deg, rgba(95, 182, 255, 0.1), rgba(95, 182, 255, 0.035));
+  padding: 9px 10px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+
+.agent-activity-head,
+.agent-activity-progress,
+.agent-activity-card small {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.agent-activity-head span,
+.agent-activity-progress span,
+.agent-activity-card small span {
+  display: inline;
+  margin-bottom: 0;
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.agent-activity-head {
+  justify-content: space-between;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+.agent-activity-head em {
+  flex: none;
+  color: var(--info-bright);
+  font-style: normal;
+  opacity: 0.85;
+}
+
+.agent-activity-progress {
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.35;
+}
+
+.agent-activity-progress strong {
+  flex: none;
+  color: var(--info-bright);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-activity-card small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.agent-activity-card small em {
+  flex: none;
+  width: 58px;
+  color: var(--info-bright);
+  font-style: normal;
+  font-weight: 650;
+}
+
+.agent-activity-card small span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #d9fff0;
 }
 
 .agent-overlay-setting {
@@ -4353,6 +4558,15 @@ body:not(.booted) .layout {
   .account-sync-scope,
   .migration-source-bar {
     grid-template-columns: 1fr;
+  }
+
+  .agent-takeover-notice li {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .agent-takeover-notice li span {
+    grid-column: 2;
+    white-space: normal;
   }
 
   .account-sync-controls {

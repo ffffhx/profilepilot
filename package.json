@@ -27,6 +27,7 @@
     "doctor:overlay": "npm run build && node scripts/overlay-doctor.mjs",
     "e2e": "npm run build && node scripts/e2e-overlay-smoke.mjs",
     "e2e:stress": "npm run build && node scripts/e2e-overlay-stress.mjs",
+    "verify:overlay": "node scripts/verify-overlay.mjs",
     "bench": "npm run build && node scripts/bench-overlay.mjs"
   },
   "engines": {

@@ -572,6 +572,10 @@ export class ProfileManager {
     }
   }
 
+  async disposeAgentOverlay(): Promise<void> {
+    await this.agentOverlayManager.dispose();
+  }
+
   async getTakeoverHistory(): Promise<AgentTakeoverEvent[]> {
     const registry = await this.loadRegistry();
     return [...(registry.takeoverHistory || [])].reverse();

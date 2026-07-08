@@ -18,6 +18,7 @@ const START_PORT = Number(process.env.PP_E2E_PORT_START || 9470);
 const CHROME_READY_TIMEOUT_MS = 10000;
 const INJECTION_TIMEOUT_MS = 5000;
 const NEW_TAB_INJECTION_LIMIT_MS = 1000;
+const OVERLAY_WORLD_NAME = "__ppAgentOverlayWorld";
 const ROOT_URL = dataUrl("pp-e2e-root", "ProfilePilot overlay e2e root");
 const SECOND_URL = dataUrl("pp-e2e-second", "ProfilePilot overlay e2e second tab");
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -89,9 +90,18 @@ try {
     "root page overlay injection"
   );
   rootPageClient = rootPage.client;
-  assert.equal(rootPage.state.installed, true, "Root page should expose window.__ppAgentOverlayInstalled.");
+  assert.equal(rootPage.state.signalType, "undefined", "Root page main world must not expose __ppAgentOverlaySignal.");
+  assert.equal(rootPage.state.installedType, "undefined", "Root page main world must not expose __ppAgentOverlayInstalled.");
+  assert.equal(rootPage.state.updateType, "undefined", "Root page main world must not expose __ppAgentOverlayUpdate.");
   assert.equal(rootPage.state.host, true, "Root page should contain the overlay host DOM node.");
-  step("Root page has overlay globals and host DOM.");
+  step("Root page main world has no overlay globals, while the overlay host DOM is visible.");
+
+  const rootOverlayContextId = await waitForOverlayWorldContext(rootPageClient, "root page isolated overlay world");
+  const isolatedGlobals = await overlayState(rootPageClient, rootOverlayContextId);
+  assert.equal(isolatedGlobals.installed, true, "Root isolated world should have the overlay installed flag.");
+  assert.equal(isolatedGlobals.signalType, "function", "Root isolated world should expose the CDP binding.");
+  assert.equal(isolatedGlobals.updateType, "function", "Root isolated world should expose the update function.");
+  step(`Root isolated world context ${rootOverlayContextId} has the overlay binding and controls.`);
 
   const pushed = await evaluateValue(
     rootPageClient,
@@ -109,7 +119,8 @@ try {
         host: Boolean(document.getElementById("__pp-agent-overlay"))
       };
     })()`,
-    1000
+    1000,
+    rootOverlayContextId
   );
   assert.deepEqual(pushed, {
     updated: true,
@@ -118,38 +129,71 @@ try {
     signalType: "function",
     host: true
   });
-  step("Pushed a todo + multi-session payload through window.__ppAgentOverlayUpdate.");
+  step("Pushed a todo + multi-session payload through the isolated world update function.");
 
-  await evaluateValue(
+  const forged = await evaluateValue(
     rootPageClient,
-    `window.__ppAgentOverlaySignal(JSON.stringify({ action: "stop" })); true`,
+    `(() => {
+      const signal = window.__ppAgentOverlaySignal;
+      let invoked = false;
+      try {
+        if (typeof signal === "function") {
+          signal(JSON.stringify({ action: "stop" }));
+          invoked = true;
+        }
+      } catch {
+        invoked = true;
+      }
+      return {
+        invoked,
+        signalType: typeof window.__ppAgentOverlaySignal,
+        installedType: typeof window.__ppAgentOverlayInstalled,
+        updateType: typeof window.__ppAgentOverlayUpdate,
+        teardownType: typeof window.__ppAgentOverlayTeardown
+      };
+    })()`,
     1000
   );
-  await waitFor(
-    () => (stopCalls.length === clients.length ? stopCalls.length : null),
-    1500,
-    "direct stop signal to call onStop for all active sessions"
-  );
+  assert.deepEqual(forged, {
+    invoked: false,
+    signalType: "undefined",
+    installedType: "undefined",
+    updateType: "undefined",
+    teardownType: "undefined"
+  });
+  await delay(250);
+  assert.equal(stopCalls.length, 0, "Main-world forged stop signal must not trigger onStop.");
+  step("Main-world forged stop attempt could not see the binding and did not call onStop.");
+
+  await clickOverlayStopButton(rootPageClient);
+  await waitFor(() => (stopCalls.length === clients.length ? stopCalls.length : null), 1500, "isolated overlay button stop path");
   assert.deepEqual(
     stopCalls.map((call) => call.pid).sort((left, right) => left - right),
     clients.map((client) => client.pid).sort((left, right) => left - right)
   );
+  step("Isolated-world overlay button path stopped all active sessions.");
 
   const callsAfterFirstSignal = stopCalls.length;
-  await evaluateValue(
+  const repeatedForgery = await evaluateValue(
     rootPageClient,
-    `window.__ppAgentOverlaySignal(JSON.stringify({ action: "stop" })); true`,
+    `(() => {
+      const signal = window.__ppAgentOverlaySignal;
+      if (typeof signal === "function") {
+        signal(JSON.stringify({ action: "stop" }));
+        return true;
+      }
+      return false;
+    })()`,
     1000
   );
+  assert.equal(repeatedForgery, false, "Main world should still not have a signal function after takeover.");
   await delay(200);
   assert.equal(
     stopCalls.length,
     callsAfterFirstSignal,
-    "A repeated direct stop signal should be ignored during the taken-over keepalive window."
+    "A repeated main-world forged stop signal should not call onStop."
   );
-  step(
-    "Stop signal checked: direct __ppAgentOverlaySignal bypasses the page double-confirm UI, so the first signal stops the active sessions and the repeated signal is ignored while taken over."
-  );
+  step("Main-world forged stop remained inert after the legitimate isolated-world takeover.");
 
   const secondStart = performance.now();
   const created = await browserClient.send("Target.createTarget", { url: SECOND_URL }, 5000);
@@ -411,7 +455,9 @@ async function waitForInjectedTarget(port, predicate, timeoutMs, label) {
         connectedTargetId = target.id;
       }
       const state = await overlayState(client).catch(() => null);
-      return state?.installed === true && state?.host === true ? { target, client, state } : null;
+      return state?.host === true && state?.signalType === "undefined" && state?.updateType === "undefined"
+        ? { target, client, state }
+        : null;
     }, timeoutMs, label);
   } catch (error) {
     client?.close();
@@ -428,28 +474,84 @@ async function waitForOverlayRemoved(client, label) {
   }, 3000, label);
 }
 
-function overlayState(client) {
+function overlayState(client, contextId = undefined) {
+  return overlayStateInContext(client, contextId);
+}
+
+function overlayStateInContext(client, contextId) {
   return evaluateValue(
     client,
     `(() => ({
       installed: window.__ppAgentOverlayInstalled === true,
+      installedType: typeof window.__ppAgentOverlayInstalled,
       host: Boolean(document.getElementById("__pp-agent-overlay")),
       updateType: typeof window.__ppAgentOverlayUpdate,
       signalType: typeof window.__ppAgentOverlaySignal,
       teardownType: typeof window.__ppAgentOverlayTeardown
     }))()`,
-    500
+    500,
+    contextId
   );
 }
 
-async function evaluateValue(client, expression, timeoutMs = 1000) {
+async function waitForOverlayWorldContext(client, label) {
+  const contexts = new Set();
+  const previousOnEvent = client.onEvent;
+  client.onEvent = (method, params) => {
+    if (method === "Runtime.executionContextCreated") {
+      const context = params?.context;
+      if (context?.name === OVERLAY_WORLD_NAME && typeof context.id === "number") {
+        contexts.add(context.id);
+      }
+    }
+    previousOnEvent?.(method, params);
+  };
+  await client.send("Runtime.enable", {}, 1000);
+  return waitFor(() => {
+    const first = contexts.values().next();
+    return first.done ? null : first.value;
+  }, 3000, label);
+}
+
+async function clickOverlayStopButton(client) {
+  const rect = await evaluateValue(
+    client,
+    `(() => {
+      const host = document.getElementById("__pp-agent-overlay");
+      if (!host) {
+        return null;
+      }
+      const rect = host.getBoundingClientRect();
+      return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+    })()`,
+    1000
+  );
+  assert.ok(rect && rect.width > 0 && rect.height > 0, "Overlay host should have a clickable rect.");
+  const x = Math.round(rect.left + rect.width / 2);
+  const y = Math.round(rect.top + rect.height - 18);
+  await dispatchMouseClick(client, x, y);
+  await delay(80);
+  await dispatchMouseClick(client, x, y);
+}
+
+async function dispatchMouseClick(client, x, y) {
+  await client.send("Input.dispatchMouseEvent", { type: "mouseMoved", x, y, button: "none" }, 1000);
+  await client.send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 }, 1000);
+  await client.send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 }, 1000);
+}
+
+async function evaluateValue(client, expression, timeoutMs = 1000, contextId = undefined) {
+  const params = {
+    expression,
+    awaitPromise: true,
+    returnByValue: true
+  };
+  if (typeof contextId === "number") {
+    params.contextId = contextId;
+  }
   const response = await client.send(
     "Runtime.evaluate",
-    {
-      expression,
-      awaitPromise: true,
-      returnByValue: true
-    },
+    params,
     timeoutMs
   );
   if (response?.exceptionDetails) {

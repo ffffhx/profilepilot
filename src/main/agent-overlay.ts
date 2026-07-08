@@ -6,6 +6,7 @@ import { isRecord, stringValue } from "./fs-util";
 import { SessionTailer, type SessionTailerBase } from "./session-tail";
 
 const BINDING_NAME = "__ppAgentOverlaySignal";
+const OVERLAY_WORLD_NAME = "__ppAgentOverlayWorld";
 const PAGE_CONNECT_TIMEOUT = 3000;
 const PUSH_INTERVAL_MS = 2000;
 const TAKEN_OVER_KEEPALIVE_MS = 7000;
@@ -95,6 +96,9 @@ interface PageOverlay {
   connecting: boolean;
   closing: boolean;
   scriptIdentifier?: string;
+  mainFrameId?: string;
+  activeContextId?: number;
+  isolatedContextIds: Set<number>;
   lastPayloadText: string;
   lastPushAt: number;
 }
@@ -125,7 +129,7 @@ export class AgentOverlayManager {
     if (!input.enabled) {
       this.stopAllTailers();
       for (const state of this.ports.values()) {
-        this.teardownPort(state);
+        void this.teardownPort(state);
       }
       this.ports.clear();
       return;
@@ -198,6 +202,13 @@ export class AgentOverlayManager {
   getActivity(clients: CdpClientInfo[]): AgentActivity | null {
     const primary = orderedClientsByActivity(clients)[0];
     return primary ? this.activityForClient(primary) : null;
+  }
+
+  async dispose(): Promise<void> {
+    this.stopAllTailers();
+    const states = [...this.ports.values()];
+    this.ports.clear();
+    await Promise.allSettled(states.map((state) => this.teardownPort(state)));
   }
 
   private syncTailers(): void {
@@ -317,6 +328,9 @@ export class AgentOverlayManager {
             page.attachPending = false;
             page.connecting = false;
             page.scriptIdentifier = undefined;
+            page.mainFrameId = undefined;
+            page.activeContextId = undefined;
+            page.isolatedContextIds.clear();
           }
         }
       };
@@ -334,7 +348,13 @@ export class AgentOverlayManager {
   }
 
   private handleBrowserEvent(state: PortOverlay, method: string, params: unknown, sessionId?: string): void {
-    if (method === "Runtime.bindingCalled") {
+    if (
+      method === "Runtime.bindingCalled" ||
+      method === "Runtime.executionContextCreated" ||
+      method === "Runtime.executionContextDestroyed" ||
+      method === "Runtime.executionContextsCleared" ||
+      method === "Page.frameNavigated"
+    ) {
       const page = this.pageForSession(state, sessionId);
       if (page) {
         this.handlePageEvent(state, page, method, params);
@@ -403,6 +423,9 @@ export class AgentOverlayManager {
       page.connecting = false;
       page.scriptIdentifier = undefined;
       page.lastPayloadText = "";
+      page.mainFrameId = undefined;
+      page.activeContextId = undefined;
+      page.isolatedContextIds.clear();
     }
     page.sessionId = sessionId;
     page.attachPending = false;
@@ -422,6 +445,9 @@ export class AgentOverlayManager {
     page.attachPending = false;
     page.connecting = false;
     page.scriptIdentifier = undefined;
+    page.mainFrameId = undefined;
+    page.activeContextId = undefined;
+    page.isolatedContextIds.clear();
     page.lastPayloadText = "";
     void this.syncPortTargets(state).catch(() => undefined);
   }
@@ -439,6 +465,7 @@ export class AgentOverlayManager {
       attachPending: false,
       connecting: false,
       closing: false,
+      isolatedContextIds: new Set(),
       lastPayloadText: "",
       lastPushAt: 0
     };
@@ -478,10 +505,12 @@ export class AgentOverlayManager {
     }
     page.connecting = true;
     try {
+      await client.send("Runtime.enable", {}, 5000, sessionId);
       await client.send("Page.enable", {}, 5000, sessionId);
+      await client.send("Runtime.addBinding", { name: BINDING_NAME, executionContextName: OVERLAY_WORLD_NAME }, 5000, sessionId);
       const addScript = await client.send<{ identifier?: string }>(
         "Page.addScriptToEvaluateOnNewDocument",
-        { source: this.script },
+        { source: this.script, worldName: OVERLAY_WORLD_NAME },
         5000,
         sessionId
       );
@@ -489,9 +518,19 @@ export class AgentOverlayManager {
         return;
       }
       page.scriptIdentifier = addScript.identifier;
-      await client.send("Runtime.enable", {}, 5000, sessionId);
-      await client.send("Runtime.addBinding", { name: BINDING_NAME }, 5000, sessionId);
-      await client.send("Runtime.evaluate", { expression: this.script, awaitPromise: false }, 5000, sessionId);
+      page.mainFrameId = await this.mainFrameIdForSession(client, sessionId);
+      const context = await client.send<{ executionContextId?: number }>(
+        "Page.createIsolatedWorld",
+        { frameId: page.mainFrameId, worldName: OVERLAY_WORLD_NAME },
+        5000,
+        sessionId
+      );
+      const contextId = numberValue(context.executionContextId);
+      if (contextId === null) {
+        throw new Error("Chrome did not create an overlay isolated world.");
+      }
+      this.rememberIsolatedContext(page, contextId, page.mainFrameId);
+      await client.send("Runtime.evaluate", { expression: this.script, awaitPromise: false, contextId }, 5000, sessionId);
       page.connecting = false;
       await this.pushPageUpdate(state, page, true);
     } catch {
@@ -519,8 +558,45 @@ export class AgentOverlayManager {
     return null;
   }
 
-  private handlePageEvent(state: PortOverlay, _page: PageOverlay, method: string, params: unknown): void {
+  private async mainFrameIdForSession(client: CdpBrowserClient, sessionId: string): Promise<string> {
+    const result = await client.send<{ frameTree?: unknown }>("Page.getFrameTree", {}, 5000, sessionId);
+    const frameTree = isRecord(result.frameTree) ? result.frameTree : null;
+    const frame = frameTree && isRecord(frameTree.frame) ? frameTree.frame : null;
+    const frameId = frame ? stringValue(frame.id) : "";
+    if (!frameId) {
+      throw new Error("Chrome did not expose the page main frame.");
+    }
+    return frameId;
+  }
+
+  private handlePageEvent(state: PortOverlay, page: PageOverlay, method: string, params: unknown): void {
+    if (method === "Runtime.executionContextCreated") {
+      this.handleExecutionContextCreated(page, params);
+      return;
+    }
+    if (method === "Runtime.executionContextDestroyed") {
+      const contextId = isRecord(params) ? numberValue(params.executionContextId) : null;
+      if (contextId !== null) {
+        page.isolatedContextIds.delete(contextId);
+        if (page.activeContextId === contextId) {
+          page.activeContextId = undefined;
+        }
+      }
+      return;
+    }
+    if (method === "Runtime.executionContextsCleared") {
+      page.isolatedContextIds.clear();
+      page.activeContextId = undefined;
+      return;
+    }
+    if (method === "Page.frameNavigated") {
+      this.handleFrameNavigated(page, params);
+      return;
+    }
     if (method !== "Runtime.bindingCalled" || !isRecord(params) || stringValue(params.name) !== BINDING_NAME) {
+      return;
+    }
+    if (!this.isTrustedBindingCall(page, params)) {
       return;
     }
     let payload: unknown;
@@ -544,6 +620,51 @@ export class AgentOverlayManager {
       const session = stringValue(payload.session) || undefined;
       void this.handleStopSignal(state, session).catch(() => undefined);
     }
+  }
+
+  private handleExecutionContextCreated(page: PageOverlay, params: unknown): void {
+    if (!isRecord(params) || !isRecord(params.context)) {
+      return;
+    }
+    const context = params.context;
+    if (stringValue(context.name) !== OVERLAY_WORLD_NAME) {
+      return;
+    }
+    const contextId = numberValue(context.id);
+    if (contextId === null) {
+      return;
+    }
+    const auxData = isRecord(context.auxData) ? context.auxData : null;
+    const frameId = auxData ? stringValue(auxData.frameId) || undefined : undefined;
+    this.rememberIsolatedContext(page, contextId, frameId);
+  }
+
+  private handleFrameNavigated(page: PageOverlay, params: unknown): void {
+    if (!isRecord(params) || !isRecord(params.frame)) {
+      return;
+    }
+    const frame = params.frame;
+    const parentId = stringValue(frame.parentId);
+    const frameId = stringValue(frame.id);
+    if (!parentId && frameId) {
+      page.mainFrameId = frameId;
+      page.activeContextId = undefined;
+      page.isolatedContextIds.clear();
+      page.lastPayloadText = "";
+      page.lastPushAt = 0;
+    }
+  }
+
+  private rememberIsolatedContext(page: PageOverlay, contextId: number, frameId?: string): void {
+    page.isolatedContextIds.add(contextId);
+    if (!page.activeContextId || (page.mainFrameId && frameId === page.mainFrameId)) {
+      page.activeContextId = contextId;
+    }
+  }
+
+  private isTrustedBindingCall(page: PageOverlay, params: Record<string, unknown>): boolean {
+    const contextId = numberValue(params.executionContextId);
+    return contextId !== null && page.isolatedContextIds.has(contextId);
   }
 
   private async handleStopSignal(state: PortOverlay, requestedSession?: string): Promise<void> {
@@ -628,19 +749,46 @@ export class AgentOverlayManager {
     if (!force && page.lastPayloadText === text && now - page.lastPushAt < PUSH_INTERVAL_MS) {
       return;
     }
-    try {
-      await client.send(
-        "Runtime.evaluate",
-        { expression: `window.__ppAgentOverlayUpdate && window.__ppAgentOverlayUpdate(${text})`, awaitPromise: false },
-        3000,
-        sessionId
-      );
+    const contextIds = this.contextIdsForPage(page);
+    if (!contextIds.length) {
+      return;
+    }
+    let pushed = false;
+    for (const contextId of contextIds) {
+      try {
+        await client.send(
+          "Runtime.evaluate",
+          {
+            expression: `globalThis.__ppAgentOverlayUpdate && globalThis.__ppAgentOverlayUpdate(${text})`,
+            awaitPromise: false,
+            contextId
+          },
+          3000,
+          sessionId
+        );
+        pushed = true;
+      } catch {
+        page.isolatedContextIds.delete(contextId);
+        if (page.activeContextId === contextId) {
+          page.activeContextId = undefined;
+        }
+      }
+    }
+    if (pushed) {
       page.lastPayloadText = text;
       page.lastPushAt = now;
       state.lastPayload = payload;
-    } catch {
+    } else if (page.isolatedContextIds.size > 0) {
       await this.teardownPage(state, page).catch(() => undefined);
     }
+  }
+
+  private contextIdsForPage(page: PageOverlay): number[] {
+    const ids = [...page.isolatedContextIds];
+    if (page.activeContextId && page.isolatedContextIds.has(page.activeContextId)) {
+      return [page.activeContextId, ...ids.filter((id) => id !== page.activeContextId)];
+    }
+    return ids;
   }
 
   private payloadForPort(state: PortOverlay): OverlayPayload {
@@ -706,12 +854,11 @@ export class AgentOverlayManager {
     };
   }
 
-  private teardownPort(state: PortOverlay): void {
+  private async teardownPort(state: PortOverlay): Promise<void> {
     const pages = [...state.pages.values()];
     state.pages.clear();
-    void Promise.all(pages.map((page) => this.teardownPage(state, page).catch(() => undefined))).finally(() => {
-      this.teardownTargetObserver(state);
-    });
+    await Promise.allSettled(pages.map((page) => this.teardownPage(state, page)));
+    this.teardownTargetObserver(state);
   }
 
   private teardownTargetObserver(state: PortOverlay): void {
@@ -737,14 +884,23 @@ export class AgentOverlayManager {
         .send("Page.removeScriptToEvaluateOnNewDocument", { identifier: page.scriptIdentifier }, 2000, sessionId)
         .catch(() => undefined);
     }
-    await client
-      .send(
-        "Runtime.evaluate",
-        { expression: "window.__ppAgentOverlayTeardown && window.__ppAgentOverlayTeardown()", awaitPromise: false },
-        2000,
-        sessionId
+    await Promise.allSettled(
+      this.contextIdsForPage(page).map((contextId) =>
+        client.send(
+          "Runtime.evaluate",
+          {
+            expression: "globalThis.__ppAgentOverlayTeardown && globalThis.__ppAgentOverlayTeardown()",
+            awaitPromise: false,
+            contextId
+          },
+          2000,
+          sessionId
+        )
       )
-      .catch(() => undefined);
+    );
+    await client.send("Runtime.removeBinding", { name: BINDING_NAME }, 2000, sessionId).catch(() => undefined);
+    page.isolatedContextIds.clear();
+    page.activeContextId = undefined;
     await client.send("Target.detachFromTarget", { sessionId }, 2000).catch(() => undefined);
   }
 }
@@ -890,6 +1046,10 @@ function nullableString(value: string | null | undefined): string | null {
 }
 
 function nullableNumber(value: number | null | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function numberValue(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 

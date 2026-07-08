@@ -708,6 +708,7 @@ export function agentOverlayBootstrapScript(): string {
       delete window.__ppAgentOverlayInstalled;
       delete window.__ppAgentOverlayUpdate;
       delete window.__ppAgentOverlayTeardown;
+      delete window[SIGNAL_NAME];
     };
     if (host) {
       host.classList.add("leaving");

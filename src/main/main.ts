@@ -39,6 +39,7 @@ import { setShellIntegrationEnabled } from "./shell-integration";
 import { APP_TITLE, createProfileManager } from "./profile-manager";
 
 const profileManager = createProfileManager(broadcastAgentTakeover, revealAgentOverlayProfile);
+let agentOverlayDisposedForQuit = false;
 let mainWindow: BrowserWindow | null = null;
 let miniWindow: BrowserWindow | null = null;
 let miniOutsideClickWindows: BrowserWindow[] = [];
@@ -1591,6 +1592,17 @@ app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {
     app.quit();
   }
+});
+
+app.on("before-quit", (event) => {
+  if (agentOverlayDisposedForQuit) {
+    return;
+  }
+  agentOverlayDisposedForQuit = true;
+  event.preventDefault();
+  void profileManager.disposeAgentOverlay().finally(() => {
+    app.quit();
+  });
 });
 
 app.on("will-quit", () => {

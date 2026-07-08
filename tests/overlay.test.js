@@ -331,6 +331,58 @@ test("AgentOverlayManager pure logic handles disabled and empty sync inputs", ()
   assert.equal(isAgentOverlayClient({ pid: 43, label: "Chrome" }), false);
 });
 
+test("AgentOverlayManager rejects binding stop signals from unknown execution contexts", async () => {
+  const stopCalls = [];
+  const manager = new AgentOverlayManager({
+    onStop: async (request) => {
+      stopCalls.push(request);
+    }
+  });
+  const client = {
+    pid: 42,
+    label: "agent-browser",
+    project: "profilepilot",
+    title: "Overlay tests",
+    session: "cx-context-test",
+    lastActive: "2026-07-08T00:00:00.000Z"
+  };
+  const state = {
+    port: 9480,
+    profileId: "test-profile",
+    profileName: "Test Profile",
+    clients: [client],
+    pages: new Map(),
+    browserClient: null,
+    browserConnecting: false,
+    syncing: false,
+    takeoverInFlight: false,
+    takenOverUntil: 0,
+    lastPayload: null,
+    sessionStartedAt: new Map()
+  };
+  const page = {
+    targetId: "target-1",
+    url: "https://example.test/",
+    sessionId: "session-1",
+    attachPending: false,
+    connecting: false,
+    closing: false,
+    activeContextId: 7,
+    isolatedContextIds: new Set([7]),
+    lastPayloadText: "",
+    lastPushAt: 0
+  };
+
+  manager.handlePageEvent(state, page, "Runtime.bindingCalled", {
+    name: "__ppAgentOverlaySignal",
+    executionContextId: 99,
+    payload: JSON.stringify({ action: "stop" })
+  });
+  await delay(25);
+
+  assert.equal(stopCalls.length, 0);
+});
+
 function startTailer(session, base) {
   const tailer = new SessionTailer(session, base, () => {});
   tailer.start();

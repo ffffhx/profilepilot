@@ -8,13 +8,16 @@ import { sortByMiniOrder } from "./render/mini";
 import { render } from "./render/render-root";
 import { invalidateExtensionMigrationDiff, loadState, loadTakeoverHistory, mergeAgentTakeoverHistory, refreshExtensionMigrationDiff, refreshGlobalInstructions, repairClaudeInstructionShell, saveGlobalInstruction, setMigrationSource } from "./state-actions";
 import { appRoot, store } from "./state";
-import type { AgentTakeoverEvent } from "./types";
+import type { AgentOverlayRevealEvent, AgentTakeoverEvent } from "./types";
 import { agentDrivenCdpClients, deleteButtonTitle, escapeHtml, formatErrorMessage } from "./util";
 
 const MINI_TAKEOVER_NOTICE_MS = 5000;
 const MINI_TAKEOVER_CONFIRM_MS = 2800;
+const PROFILE_REVEAL_HIGHLIGHT_MS = 2200;
+const EXTERNAL_PROFILE_ID_PREFIX = "external:";
 const miniTakeoverTimers = new Map<string, number>();
 let miniTakeoverConfirmTimer: number | null = null;
+let profileRevealHighlightTimer: number | null = null;
 
 profileApi().onOperationProgress((progress) => {
   if (!store.busyState || store.busyState.key !== progress.key) {
@@ -64,6 +67,78 @@ profileApi().onAgentTakeover((takeover) => {
   setToast(`已接管 ${emphasizeName(takeover.profileName)}，${agent} 已停止操作`);
   void loadState().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
 });
+
+profileApi().onAgentOverlayReveal((reveal) => {
+  if (store.viewMode !== "main") {
+    return;
+  }
+  void revealProfileFromOverlay(reveal);
+});
+
+async function revealProfileFromOverlay(reveal: AgentOverlayRevealEvent): Promise<void> {
+  if (!store.state) {
+    await loadState();
+  }
+  applyRevealSelection(reveal.profileId);
+  render();
+
+  window.requestAnimationFrame(() => {
+    const row = findRevealRow(reveal.profileId);
+    if (!row) {
+      void loadState()
+        .then(() => {
+          applyRevealSelection(reveal.profileId);
+          render();
+          window.requestAnimationFrame(() => highlightRevealRow(reveal.profileId));
+        })
+        .catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+      return;
+    }
+    highlightRevealRow(reveal.profileId);
+  });
+}
+
+function applyRevealSelection(profileId: string): void {
+  const externalDir = externalDirFromProfileId(profileId);
+  if (externalDir) {
+    store.selectedId = null;
+    store.selectedExternalDir = externalDir;
+    return;
+  }
+  store.selectedId = profileId;
+  store.selectedExternalDir = null;
+}
+
+function highlightRevealRow(profileId: string): void {
+  const row = findRevealRow(profileId);
+  if (!row) {
+    return;
+  }
+
+  appRoot.querySelectorAll(".profile-reveal-highlight").forEach((item) => item.classList.remove("profile-reveal-highlight"));
+  row.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+  row.focus({ preventScroll: true });
+  row.classList.add("profile-reveal-highlight");
+  if (profileRevealHighlightTimer !== null) {
+    window.clearTimeout(profileRevealHighlightTimer);
+  }
+  profileRevealHighlightTimer = window.setTimeout(() => {
+    row.classList.remove("profile-reveal-highlight");
+    profileRevealHighlightTimer = null;
+  }, PROFILE_REVEAL_HIGHLIGHT_MS);
+}
+
+function findRevealRow(profileId: string): HTMLElement | null {
+  const externalDir = externalDirFromProfileId(profileId);
+  if (externalDir) {
+    return appRoot.querySelector<HTMLElement>(`.external-row[data-dir="${CSS.escape(externalDir)}"]`);
+  }
+  return appRoot.querySelector<HTMLElement>(`[data-profile-row][data-id="${CSS.escape(profileId)}"]`);
+}
+
+function externalDirFromProfileId(profileId: string): string | null {
+  return profileId.startsWith(EXTERNAL_PROFILE_ID_PREFIX) ? profileId.slice(EXTERNAL_PROFILE_ID_PREFIX.length) : null;
+}
 
 function clearMiniTakeoverConfirm(): void {
   if (miniTakeoverConfirmTimer !== null) {

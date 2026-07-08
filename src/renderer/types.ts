@@ -80,6 +80,12 @@ export interface AgentTakeoverEvent {
   at: string;
 }
 
+export interface AgentOverlayRevealEvent {
+  profileId: string;
+  profileName: string;
+  at: string;
+}
+
 // tab 争用观测里“最抖”的那个标签页：观察窗口内 URL 变化次数与往返翻转（A→B→A）次数。
 export interface CdpContentionChurn {
   title: string;
@@ -564,6 +570,7 @@ export interface ProfileManagerApi {
   getCdpLiveView(port: number, options?: CdpLiveViewOptions): Promise<CdpLiveView>;
   onOperationProgress(listener: (progress: OperationProgress) => void): () => void;
   onAgentTakeover(listener: (event: AgentTakeoverEvent) => void): () => void;
+  onAgentOverlayReveal(listener: (event: AgentOverlayRevealEvent) => void): () => void;
 }
 
 export type ConfirmIntent =

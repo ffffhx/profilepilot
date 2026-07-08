@@ -31,8 +31,15 @@ export interface AgentOverlayStopRequest {
   agent?: string;
 }
 
+export interface AgentOverlayRevealRequest {
+  port: number;
+  profileId: string;
+  profileName: string;
+}
+
 interface AgentOverlayManagerOptions {
   onStop: (request: AgentOverlayStopRequest) => Promise<void>;
+  onReveal?: (request: AgentOverlayRevealRequest) => void;
 }
 
 type OverlayState = "active" | "takenOver";
@@ -391,6 +398,10 @@ export class AgentOverlayManager {
     }
     const action = stringValue(payload.action);
     if (action === "hide") {
+      return;
+    }
+    if (action === "reveal") {
+      this.options.onReveal?.({ port: state.port, profileId: state.profileId, profileName: state.profileName });
       return;
     }
     if (action === "stop") {

@@ -6,6 +6,7 @@ import type {
   AccountSyncDiffResult,
   AccountSyncRequest,
   AccountSyncResult,
+  AgentOverlayRevealEvent,
   AgentTakeoverEvent,
   CloneProfilesRequest,
   CloneProfilesResult,
@@ -37,7 +38,7 @@ import { ensureClaudeInstructionShell, readGlobalInstructions, writeGlobalInstru
 import { setShellIntegrationEnabled } from "./shell-integration";
 import { APP_TITLE, createProfileManager } from "./profile-manager";
 
-const profileManager = createProfileManager(broadcastAgentTakeover);
+const profileManager = createProfileManager(broadcastAgentTakeover, revealAgentOverlayProfile);
 let mainWindow: BrowserWindow | null = null;
 let miniWindow: BrowserWindow | null = null;
 let miniOutsideClickWindows: BrowserWindow[] = [];
@@ -117,6 +118,55 @@ function broadcastAgentTakeover(takeover: AgentTakeoverEvent): void {
       windowRef.webContents.send(IPC_CHANNELS.agentTakeover, takeover);
     }
   }
+  maybeShowAgentTakeoverNotification(takeover);
+}
+
+function maybeShowAgentTakeoverNotification(takeover: AgentTakeoverEvent): void {
+  // Mini 可见时它已经会展示接管状态；这里跳过系统通知，避免同一接管动作双重提醒。
+  if (miniWindow && !miniWindow.isDestroyed() && miniWindow.isVisible()) {
+    return;
+  }
+  if (!Notification.isSupported()) {
+    return;
+  }
+
+  const agent = takeover.agent || "AI";
+  const session = takeover.sessionTitle || takeover.session || "未命名会话";
+  try {
+    const notification = new Notification({
+      title: `已接管 ${takeover.profileName}`,
+      body: `${agent} · ${session}`,
+      icon: APP_ICON_PATH,
+      silent: true
+    });
+    notification.on("click", () => {
+      void showMainWindow();
+    });
+    notification.show();
+  } catch {
+    // 通知权限未授予、系统不支持或当前环境禁用时静默跳过。
+  }
+}
+
+function revealAgentOverlayProfile(reveal: AgentOverlayRevealEvent): void {
+  void showMainWindow().then(() => {
+    const windowRef = mainWindow;
+    if (!windowRef || windowRef.isDestroyed() || windowRef.webContents.isDestroyed()) {
+      return;
+    }
+
+    const send = (): void => {
+      if (!windowRef.isDestroyed() && !windowRef.webContents.isDestroyed()) {
+        windowRef.webContents.send(IPC_CHANNELS.agentOverlayReveal, reveal);
+      }
+    };
+
+    if (windowRef.webContents.isLoading()) {
+      windowRef.webContents.once("did-finish-load", () => setTimeout(send, 0));
+      return;
+    }
+    send();
+  });
 }
 
 function operationId(key: string, profileId?: string): string {

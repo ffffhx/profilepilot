@@ -4,6 +4,7 @@ import type {
   AccountSyncDiffResult,
   AccountSyncRequest,
   AccountSyncResult,
+  AgentOverlayRevealEvent,
   AgentTakeoverEvent,
   CloneProfilesRequest,
   CloneProfilesResult,
@@ -144,6 +145,14 @@ const profileManagerApi: ProfileManagerApi = {
 
     ipcRenderer.on(IPC_CHANNELS.agentTakeover, handler);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.agentTakeover, handler);
+  },
+  onAgentOverlayReveal: (listener: (event: AgentOverlayRevealEvent) => void): (() => void) => {
+    const handler = (_event: IpcRendererEvent, reveal: AgentOverlayRevealEvent): void => {
+      listener(reveal);
+    };
+
+    ipcRenderer.on(IPC_CHANNELS.agentOverlayReveal, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.agentOverlayReveal, handler);
   }
 };
 

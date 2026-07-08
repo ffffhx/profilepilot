@@ -51,5 +51,6 @@ export const IPC_CHANNELS = {
   controlOperation: "profiles:operation:control",
   operationProgress: "profiles:operation-progress",
   getTakeoverHistory: "profiles:takeover-history",
-  agentTakeover: "profiles:agent-takeover"
+  agentTakeover: "profiles:agent-takeover",
+  agentOverlayReveal: "profiles:agent-overlay:reveal"
 } as const;

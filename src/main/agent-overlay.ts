@@ -11,6 +11,7 @@ const PAGE_CONNECT_TIMEOUT = 3000;
 const PUSH_INTERVAL_MS = 2000;
 const TAKEN_OVER_KEEPALIVE_MS = 7000;
 const CONTEXT_RECOVERY_COOLDOWN_MS = 3000;
+const TARGET_CACHE_TTL_MS = 1500;
 
 export type OverlayLocale = "zh" | "en";
 
@@ -70,6 +71,7 @@ interface OverlayPayload {
   updatedAt: string | null;
   startedAt: string | null;
   sessions: OverlaySessionPayload[];
+  stopError?: string | null;
 }
 
 interface AgentOverlayPayloadInput {
@@ -131,11 +133,16 @@ interface PortOverlay {
   browserClient: OverlayBrowserClient | null;
   browserConnecting: boolean;
   syncing: boolean;
+  targetSyncRequested: boolean;
   alive: boolean;
   takeoverInFlight: boolean;
   takenOverUntil: number;
   lastPayload: OverlayPayload | null;
+  stopError: string | null;
   sessionStartedAt: Map<string, string>;
+  targetCache: { targets: CdpTargetListEntry[]; expiresAt: number } | null;
+  targetRequest: Promise<CdpTargetListEntry[] | null> | null;
+  targetCacheGeneration: number;
 }
 
 export class AgentOverlayManager {
@@ -195,10 +202,15 @@ export class AgentOverlayManager {
           browserClient: null,
           browserConnecting: false,
           syncing: false,
+          targetSyncRequested: false,
           alive: true,
           takeoverInFlight: false,
           takenOverUntil: 0,
           lastPayload: null,
+          stopError: null,
+          targetCache: null,
+          targetRequest: null,
+          targetCacheGeneration: 0,
           sessionStartedAt: new Map()
         };
         this.syncSessionStarts(state, now);
@@ -282,16 +294,21 @@ export class AgentOverlayManager {
   }
 
   private async syncPortTargets(state: PortOverlay): Promise<void> {
-    if (!this.isActivePort(state) || state.syncing) {
+    if (!this.isActivePort(state)) {
+      return;
+    }
+    if (state.syncing) {
+      state.targetSyncRequested = true;
       return;
     }
     state.syncing = true;
     try {
-      const targets = await (this.options.requestTargets || requestCdpTargets)(state.port).catch(() => null);
+      const targets = await this.targetsForPort(state);
       if (!this.isActivePort(state)) {
         return;
       }
       if (!targets) {
+        this.invalidateTargetCache(state);
         for (const page of [...state.pages.values()]) {
           void this.teardownPage(state, page).catch(() => undefined);
         }
@@ -330,6 +347,10 @@ export class AgentOverlayManager {
     } finally {
       if (this.ports.get(state.port) === state) {
         state.syncing = false;
+        if (state.targetSyncRequested) {
+          state.targetSyncRequested = false;
+          void this.syncPortTargets(state).catch(() => undefined);
+        }
       }
     }
   }
@@ -354,12 +375,14 @@ export class AgentOverlayManager {
         return;
       }
       state.browserClient = client;
+      this.invalidateTargetCache(state);
       client.onEvent = (method, params, sessionId) => {
         this.handleBrowserEvent(state, method, params, sessionId);
       };
       client.onDisconnect = () => {
         if (state.browserClient === client) {
           state.browserClient = null;
+          this.invalidateTargetCache(state);
           for (const page of state.pages.values()) {
             page.sessionId = null;
             page.attachPending = false;
@@ -420,6 +443,7 @@ export class AgentOverlayManager {
     if (!method.startsWith("Target.target")) {
       return;
     }
+    this.invalidateTargetCache(state);
 
     if (method === "Target.targetDestroyed" && isRecord(params)) {
       const targetId = stringValue(params.targetId);
@@ -716,6 +740,9 @@ export class AgentOverlayManager {
     }
     const auxData = isRecord(context.auxData) ? context.auxData : null;
     const frameId = auxData ? stringValue(auxData.frameId) || undefined : undefined;
+    if (!page.mainFrameId || frameId !== page.mainFrameId) {
+      return;
+    }
     this.rememberIsolatedContext(page, contextId, frameId);
   }
 
@@ -736,8 +763,11 @@ export class AgentOverlayManager {
   }
 
   private rememberIsolatedContext(page: PageOverlay, contextId: number, frameId?: string): void {
+    if (!page.mainFrameId || frameId !== page.mainFrameId) {
+      return;
+    }
     page.isolatedContextIds.add(contextId);
-    if (!page.activeContextId || (page.mainFrameId && frameId === page.mainFrameId)) {
+    if (!page.activeContextId || frameId === page.mainFrameId) {
       page.activeContextId = contextId;
     }
   }
@@ -759,6 +789,7 @@ export class AgentOverlayManager {
     state.takeoverInFlight = true;
     let stoppedCount = 0;
     let firstError: unknown = null;
+    const requireAllStopped = !requestedSession;
     try {
       for (const driver of drivers) {
         try {
@@ -778,12 +809,27 @@ export class AgentOverlayManager {
           firstError = firstError || error;
         }
       }
+      if (requireAllStopped && stoppedCount !== drivers.length) {
+        state.stopError = this.stopErrorMessage(drivers.length, stoppedCount, firstError);
+        state.takenOverUntil = 0;
+        state.lastPayload = {
+          ...this.payloadForPort(state),
+          state: "active",
+          stopError: state.stopError
+        };
+        await this.pushPortUpdate(state, true);
+        if (firstError) {
+          console.warn("[ProfilePilot] Agent overlay stop-all failed", firstError);
+        }
+        return;
+      }
       if (!stoppedCount) {
         throw firstError instanceof Error ? firstError : new Error("没有可停止的 AI 驱动连接。");
       }
       if (!this.isActivePort(state)) {
         return;
       }
+      state.stopError = null;
       state.takenOverUntil = this.now() + TAKEN_OVER_KEEPALIVE_MS;
       state.lastPayload = {
         ...this.payloadForPort(state),
@@ -819,6 +865,55 @@ export class AgentOverlayManager {
 
   private async pushAllUpdates(): Promise<void> {
     await Promise.all([...this.ports.values()].map((state) => this.pushPortUpdate(state).catch(() => undefined)));
+  }
+
+  private async targetsForPort(state: PortOverlay): Promise<CdpTargetListEntry[] | null> {
+    const now = this.now();
+    if (state.targetCache && state.targetCache.expiresAt > now) {
+      return state.targetCache.targets;
+    }
+    if (state.targetRequest) {
+      return state.targetRequest;
+    }
+    const requestTargets = this.options.requestTargets || requestCdpTargets;
+    const generation = state.targetCacheGeneration || 0;
+    const request = requestTargets(state.port)
+      .then((targets) => {
+        if (!this.isActivePort(state)) {
+          return null;
+        }
+        if (state.targetCacheGeneration === generation) {
+          state.targetCache = { targets, expiresAt: this.now() + TARGET_CACHE_TTL_MS };
+        }
+        return targets;
+      })
+      .catch(() => {
+        if (this.isActivePort(state)) {
+          this.invalidateTargetCache(state);
+        }
+        return null;
+      })
+      .finally(() => {
+        if (this.ports.get(state.port) === state && state.targetRequest === request) {
+          state.targetRequest = null;
+        }
+      });
+    state.targetRequest = request;
+    return state.targetRequest;
+  }
+
+  private invalidateTargetCache(state: PortOverlay): void {
+    state.targetCache = null;
+    state.targetRequest = null;
+    state.targetCacheGeneration = (state.targetCacheGeneration || 0) + 1;
+  }
+
+  private stopErrorMessage(total: number, stopped: number, error: unknown): string {
+    const detail = error instanceof Error && error.message ? `：${error.message}` : "";
+    if ((this.options.locale ?? "en") === "zh") {
+      return `部分停止失败，请重试（已停止 ${stopped}/${total}）${detail}`;
+    }
+    return `Some sessions failed to stop. Try again (${stopped}/${total} stopped)${detail}`;
   }
 
   private async pushPortUpdate(state: PortOverlay, force = false): Promise<void> {
@@ -937,7 +1032,7 @@ export class AgentOverlayManager {
 
   private payloadForPort(state: PortOverlay): OverlayPayload {
     const takenOver = state.takenOverUntil > this.now();
-    return buildAgentOverlayPayload({
+    const payload = buildAgentOverlayPayload({
       locale: this.options.locale ?? "en",
       state: takenOver ? "takenOver" : "active",
       profileName: state.profileName,
@@ -947,6 +1042,13 @@ export class AgentOverlayManager {
       startedAtForClient: (client) => this.startedAtForClient(state, client),
       now: this.now()
     });
+    if (!state.stopError) {
+      return payload;
+    }
+    return {
+      ...payload,
+      stopError: state.stopError
+    };
   }
 
   private syncSessionStarts(state: PortOverlay, now: number): void {
@@ -1002,6 +1104,7 @@ export class AgentOverlayManager {
 
   private async teardownPort(state: PortOverlay): Promise<void> {
     state.alive = false;
+    this.invalidateTargetCache(state);
     const pages = [...state.pages.values()];
     state.pages.clear();
     await Promise.allSettled(pages.map((page) => this.teardownPage(state, page)));

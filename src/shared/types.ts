@@ -91,7 +91,14 @@ export interface AgentTakeoverEvent {
   profileId: string;
   profileName: string;
   session?: string;
+  sessionTitle?: string;
   agent?: string;
+  at: string;
+}
+
+export interface AgentOverlayRevealEvent {
+  profileId: string;
+  profileName: string;
   at: string;
 }
 
@@ -612,4 +619,5 @@ export interface ProfileManagerApi {
   getCdpLiveView(port: number, options?: CdpLiveViewOptions): Promise<CdpLiveView>;
   onOperationProgress(listener: (progress: OperationProgress) => void): () => void;
   onAgentTakeover(listener: (event: AgentTakeoverEvent) => void): () => void;
+  onAgentOverlayReveal(listener: (event: AgentOverlayRevealEvent) => void): () => void;
 }

@@ -10,6 +10,7 @@ import type {
   AccountSyncRequest,
   AccountSyncResult,
   AgentTakeoverEvent,
+  AgentOverlayRevealEvent,
   AccountSyncSkippedItem,
   AppState,
   CdpClientInfo,
@@ -53,7 +54,7 @@ import { copyPath, throwIfAborted, waitIfPaused } from "./fs-copy";
 import { POSIX_LOCALE_ENV, chromeProfileDirName, defaultDataDir, execFileAsync, exists, isProcessGoneError, isRecord, isSafePathSegment, isSameFilesystemPath, makePathSegment, makeSlug, normalizeAccountSyncRecords, normalizeNativeProfileMetadata, normalizeProfile, normalizeProfileName, normalizeSafeRelativePath, shouldCopyLocalExtensionPackagePath, sleep, uniqueStrings } from "./fs-util";
 import { AccountSyncCopyPlan, AccountSyncDataLocation, ProfileRef, ProfileRestartPlan, RuntimeProfile } from "./internal-types";
 import { resolveCdpContention, syncContentionObservers } from "./cdp-contention";
-import { AgentOverlayManager, isAgentOverlayClient, type AgentOverlayStopRequest } from "./agent-overlay";
+import { AgentOverlayManager, isAgentOverlayClient, type AgentOverlayRevealRequest, type AgentOverlayStopRequest } from "./agent-overlay";
 import { getShellIntegrationStatus } from "./shell-integration";
 import { addRuntimeProcess, attachListeningPorts, emptyRuntimeProfile, findExternalChromeInstances, getCdpClientsByPort, getChromeProcessPids, getOpenProfilePidsByPath, isChromeRunning, isImplicitDefaultChromeProcess, makeNativeRuntimeKey, mergeRuntimeProfiles, parseRuntimeProcess } from "./process-scan";
 import { ProfileManagerError } from "./profile-manager-error";
@@ -70,6 +71,7 @@ const QUICK_LAUNCH_SLOT_COUNT = 9;
 
 interface ProfileManagerEvents {
   onAgentTakeover?: (event: AgentTakeoverEvent) => void;
+  onAgentOverlayReveal?: (event: AgentOverlayRevealEvent) => void;
 }
 
 export class ProfileManager {
@@ -90,7 +92,8 @@ export class ProfileManager {
     this.profilesDir = path.join(dataDir, "profiles");
     this.registryPath = path.join(dataDir, "profiles.json");
     this.agentOverlayManager = new AgentOverlayManager({
-      onStop: (request) => this.stopAgentOverlaySession(request)
+      onStop: (request) => this.stopAgentOverlaySession(request),
+      onReveal: (request) => this.revealAgentOverlayProfile(request)
     });
   }
 
@@ -574,6 +577,14 @@ export class ProfileManager {
     return [...(registry.takeoverHistory || [])].reverse();
   }
 
+  private revealAgentOverlayProfile(request: AgentOverlayRevealRequest): void {
+    this.events.onAgentOverlayReveal?.({
+      profileId: request.profileId,
+      profileName: request.profileName,
+      at: new Date().toISOString()
+    });
+  }
+
   private async stopAgentOverlaySession(request: AgentOverlayStopRequest): Promise<void> {
     const externalUserDataDir = externalUserDataDirFromProfileId(request.profileId);
     if (externalUserDataDir) {
@@ -596,6 +607,7 @@ export class ProfileManager {
       profileId: profile.id,
       profileName: profile.name,
       session: driver.session || request.session,
+      sessionTitle: driver.title,
       agent: driver.agent || request.agent,
       at: new Date().toISOString()
     };
@@ -632,6 +644,7 @@ export class ProfileManager {
       profileId: makeExternalProfileId(instance.userDataDir),
       profileName: instance.label,
       session: driver.session || request.session,
+      sessionTitle: driver.title,
       agent: driver.agent || request.agent,
       at: new Date().toISOString()
     };
@@ -2827,8 +2840,11 @@ export class ProfileManager {
   }
 }
 
-export function createProfileManager(onAgentTakeover?: (event: AgentTakeoverEvent) => void): ProfileManager {
-  return new ProfileManager(process.env.CPM_DATA_DIR || defaultDataDir(), { onAgentTakeover });
+export function createProfileManager(
+  onAgentTakeover?: (event: AgentTakeoverEvent) => void,
+  onAgentOverlayReveal?: (event: AgentOverlayRevealEvent) => void
+): ProfileManager {
+  return new ProfileManager(process.env.CPM_DATA_DIR || defaultDataDir(), { onAgentTakeover, onAgentOverlayReveal });
 }
 
 // 为副本生成不与现有名字冲突的编号名：prefix-1、prefix-2…
@@ -2885,9 +2901,13 @@ function normalizeTakeoverEvent(input: unknown): AgentTakeoverEvent | null {
 
   const event: AgentTakeoverEvent = { profileId, profileName, at };
   const session = stringField(input.session);
+  const sessionTitle = stringField(input.sessionTitle);
   const agent = stringField(input.agent);
   if (session) {
     event.session = session;
+  }
+  if (sessionTitle) {
+    event.sessionTitle = sessionTitle;
   }
   if (agent) {
     event.agent = agent;

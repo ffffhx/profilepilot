@@ -3458,6 +3458,10 @@ body:not(.booted) .layout {
   position: relative;
 }
 
+.profiles-table tr.profile-reveal-highlight td {
+  animation: profile-reveal-highlight 2.2s ease-out;
+}
+
 .profiles-table tr.selected td {
   background: rgba(56, 225, 160, 0.07);
 }
@@ -3481,6 +3485,23 @@ body:not(.booted) .layout {
 .profiles-table tbody tr:focus-visible {
   outline: 3px solid var(--focus);
   outline-offset: -3px;
+}
+
+@keyframes profile-reveal-highlight {
+  0% {
+    background: rgba(56, 225, 160, 0.24);
+    box-shadow: inset 0 0 0 1px rgba(56, 225, 160, 0.48), 0 0 22px rgba(56, 225, 160, 0.18);
+  }
+
+  55% {
+    background: rgba(56, 225, 160, 0.13);
+    box-shadow: inset 0 0 0 1px rgba(56, 225, 160, 0.28), 0 0 14px rgba(56, 225, 160, 0.1);
+  }
+
+  100% {
+    background: transparent;
+    box-shadow: none;
+  }
 }
 
 /* 基础态保留为 CSS：该 class 仍被 profile-select 下拉等其它视图复用，

@@ -23,7 +23,8 @@
     "dist:mac:x64": "npm run build && electron-builder --mac dmg zip --x64 --publish never",
     "dist:win": "npm run build && electron-builder --win nsis zip --x64 --publish never",
     "site": "node site/server.mjs",
-    "test": "npm run build && node --test tests/"
+    "test": "npm run build && node --test tests/",
+    "e2e": "npm run build && node scripts/e2e-overlay-smoke.mjs"
   },
   "engines": {
     "node": ">=20"

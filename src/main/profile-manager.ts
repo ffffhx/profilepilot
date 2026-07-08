@@ -9,6 +9,7 @@ import type {
   AccountSyncRecord,
   AccountSyncRequest,
   AccountSyncResult,
+  AgentTakeoverEvent,
   AccountSyncSkippedItem,
   AppState,
   CdpPortSuggestion,
@@ -51,6 +52,7 @@ import { copyPath, throwIfAborted, waitIfPaused } from "./fs-copy";
 import { POSIX_LOCALE_ENV, chromeProfileDirName, defaultDataDir, execFileAsync, exists, isProcessGoneError, isRecord, isSafePathSegment, isSameFilesystemPath, makePathSegment, makeSlug, normalizeAccountSyncRecords, normalizeNativeProfileMetadata, normalizeProfile, normalizeProfileName, normalizeSafeRelativePath, shouldCopyLocalExtensionPackagePath, sleep, uniqueStrings } from "./fs-util";
 import { AccountSyncCopyPlan, AccountSyncDataLocation, ProfileRef, ProfileRestartPlan, RuntimeProfile } from "./internal-types";
 import { resolveCdpContention, syncContentionObservers } from "./cdp-contention";
+import { AgentOverlayManager, isAgentOverlayClient, type AgentOverlayStopRequest } from "./agent-overlay";
 import { getShellIntegrationStatus } from "./shell-integration";
 import { addRuntimeProcess, attachListeningPorts, emptyRuntimeProfile, findExternalChromeInstances, getCdpClientsByPort, getChromeProcessPids, getOpenProfilePidsByPath, isChromeRunning, isImplicitDefaultChromeProcess, makeNativeRuntimeKey, mergeRuntimeProfiles, parseRuntimeProcess } from "./process-scan";
 import { ProfileManagerError } from "./profile-manager-error";
@@ -63,9 +65,14 @@ const MINI_PROFILE_LIMIT = 3;
 // 全局快捷键直启的槽位数：⌘⌥1 ~ ⌘⌥9。
 const QUICK_LAUNCH_SLOT_COUNT = 9;
 
+interface ProfileManagerEvents {
+  onAgentTakeover?: (event: AgentTakeoverEvent) => void;
+}
+
 export class ProfileManager {
   private readonly profilesDir: string;
   private readonly registryPath: string;
+  private readonly agentOverlayManager: AgentOverlayManager;
   // 防止同一 Profile 被并发启动（两次快速点击各自通过“未运行”检查后同时拉起 Chrome）。
   private readonly inFlightLaunches = new Set<string>();
   // 防止同一 Profile 被并发删除（并发删除时回滚会把对方已删的条目错误恢复，造成 registry 与磁盘不一致）。
@@ -73,9 +80,15 @@ export class ProfileManager {
   // 串行化 registry 写入，避免并发写交错或临时文件相互覆盖。
   private registryWriteChain: Promise<unknown> = Promise.resolve();
 
-  constructor(private readonly dataDir = defaultDataDir()) {
+  constructor(
+    private readonly dataDir = defaultDataDir(),
+    private readonly events: ProfileManagerEvents = {}
+  ) {
     this.profilesDir = path.join(dataDir, "profiles");
     this.registryPath = path.join(dataDir, "profiles.json");
+    this.agentOverlayManager = new AgentOverlayManager({
+      onStop: (request) => this.stopAgentOverlaySession(request)
+    });
   }
 
   private acquireLaunchLock(profileId: string): void {
@@ -179,6 +192,20 @@ export class ProfileManager {
       }
     });
 
+    const agentOverlayEnabled = registry.agentOverlayEnabled !== false;
+    this.agentOverlayManager.sync({
+      enabled: agentOverlayEnabled,
+      ports: profiles
+        .filter((profile) => profile.cdpPort !== null && profile.cdpUrl)
+        .map((profile) => ({
+          port: profile.cdpPort as number,
+          profileId: profile.id,
+          profileName: profile.name,
+          clients: profile.cdpClients.filter(isAgentOverlayClient)
+        }))
+        .filter((input) => input.clients.length > 0)
+    });
+
     const runningProfiles = profiles.filter((profile) => profile.running);
     const lastLaunchedProfile = profiles.find((profile) => profile.lastLaunchedAt) || null;
     const externalInstances = await findExternalChromeInstances([
@@ -216,6 +243,7 @@ export class ProfileManager {
       externalInstances,
       miniProfileIds,
       miniProfileOrder,
+      agentOverlayEnabled,
       shellIntegration: await getShellIntegrationStatus()
     };
   }
@@ -494,6 +522,38 @@ export class ProfileManager {
     if (!(await this.waitUntilPidGone(pid, 1500))) {
       throw new ProfileManagerError("无法结束这个驱动连接对应的进程，请手动处理。", "CDP_CLIENT_DISCONNECT_FAILED");
     }
+  }
+
+  async setAgentOverlayEnabled(enabled: boolean): Promise<void> {
+    const registry = await this.loadRegistry();
+    await this.saveRegistry({
+      ...registry,
+      agentOverlayEnabled: Boolean(enabled)
+    });
+    if (!enabled) {
+      this.agentOverlayManager.sync({ enabled: false, ports: [] });
+    }
+  }
+
+  private async stopAgentOverlaySession(request: AgentOverlayStopRequest): Promise<void> {
+    const profile = await this.getPublicProfile(request.profileId);
+    const sessionDriver = request.session
+      ? profile.cdpClients.find((client) => client.label === "agent-browser" && client.session === request.session)
+      : null;
+    const requestedDriver = profile.cdpClients.find((client) => client.pid === request.pid);
+    const driver = sessionDriver || requestedDriver;
+    if (!driver) {
+      throw new ProfileManagerError("这个驱动连接已经不在了。", "CDP_CLIENT_NOT_CONNECTED");
+    }
+
+    await this.disconnectCdpClient(profile.id, driver.pid);
+    this.events.onAgentTakeover?.({
+      profileId: profile.id,
+      profileName: profile.name,
+      session: driver.session || request.session,
+      agent: driver.agent || request.agent,
+      at: new Date().toISOString()
+    });
   }
 
   private async waitUntilPidGone(pid: number, timeoutMs: number): Promise<boolean> {
@@ -2134,6 +2194,7 @@ export class ProfileManager {
           : [],
         nativeProfiles,
         accountSyncRecords,
+        agentOverlayEnabled: parsed.agentOverlayEnabled !== false,
         miniProfileIds: normalizeMiniProfileIds(parsed.miniProfileIds),
         miniProfileOrder: normalizeMiniProfileOrder(parsed.miniProfileOrder),
         quickLaunchSlots: normalizeQuickLaunchSlots(parsed.quickLaunchSlots)
@@ -2147,7 +2208,7 @@ export class ProfileManager {
       } catch {
         // 无法备份损坏文件时也只能干净启动。
       }
-      return { profiles: [], nativeProfiles: {}, accountSyncRecords: {}, miniProfileIds: [], miniProfileOrder: [] };
+      return { profiles: [], nativeProfiles: {}, accountSyncRecords: {}, agentOverlayEnabled: true, miniProfileIds: [], miniProfileOrder: [] };
     }
   }
 
@@ -2652,8 +2713,8 @@ export class ProfileManager {
   }
 }
 
-export function createProfileManager(): ProfileManager {
-  return new ProfileManager(process.env.CPM_DATA_DIR || defaultDataDir());
+export function createProfileManager(onAgentTakeover?: (event: AgentTakeoverEvent) => void): ProfileManager {
+  return new ProfileManager(process.env.CPM_DATA_DIR || defaultDataDir(), { onAgentTakeover });
 }
 
 // 为副本生成不与现有名字冲突的编号名：prefix-1、prefix-2…

@@ -4,6 +4,7 @@ import type {
   AccountSyncDiffResult,
   AccountSyncRequest,
   AccountSyncResult,
+  AgentTakeoverEvent,
   CloneProfilesRequest,
   CloneProfilesResult,
   RefreshClonesResult,
@@ -87,6 +88,8 @@ const profileManagerApi: ProfileManagerApi = {
     ipcRenderer.invoke(IPC_CHANNELS.closeExternalInstance, userDataDir),
   disconnectCdpClient: (profileId: string, pid: number): Promise<AppState> =>
     ipcRenderer.invoke(IPC_CHANNELS.disconnectCdpClient, profileId, pid),
+  setAgentOverlayEnabled: (enabled: boolean): Promise<AppState> =>
+    ipcRenderer.invoke(IPC_CHANNELS.setAgentOverlayEnabled, enabled),
   setShellIntegrationEnabled: (enabled: boolean): Promise<AppState> =>
     ipcRenderer.invoke(IPC_CHANNELS.setShellIntegrationEnabled, enabled),
   openProfileFolder: (id: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.openProfileFolder, id),
@@ -132,6 +135,14 @@ const profileManagerApi: ProfileManagerApi = {
 
     ipcRenderer.on(IPC_CHANNELS.operationProgress, handler);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.operationProgress, handler);
+  },
+  onAgentTakeover: (listener: (event: AgentTakeoverEvent) => void): (() => void) => {
+    const handler = (_event: IpcRendererEvent, takeover: AgentTakeoverEvent): void => {
+      listener(takeover);
+    };
+
+    ipcRenderer.on(IPC_CHANNELS.agentTakeover, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.agentTakeover, handler);
   }
 };
 

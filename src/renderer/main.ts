@@ -48,6 +48,12 @@ profileApi().onOperationProgress((progress) => {
   }
 });
 
+profileApi().onAgentTakeover((takeover) => {
+  const agent = takeover.agent || "AI";
+  setToast(`已接管 ${emphasizeName(takeover.profileName)}，${agent} 已停止操作`);
+  void loadState().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+});
+
 appRoot.addEventListener("click", (event) => {
   const target = event.target instanceof Element ? event.target : null;
   // 全局快捷键下拉是原生 <select>，点它会冒泡命中所在行的 data-action="select"，触发 render() 把
@@ -1027,6 +1033,18 @@ appRoot.addEventListener("click", (event) => {
     }
     store.modal = { kind: "confirm", intent: { kind: "disconnect-client", profileId: id, pid } };
     render();
+    return;
+  }
+
+  if (action === "toggle-agent-overlay") {
+    const enable = !store.state.agentOverlayEnabled;
+    void withBusy(
+      async () => {
+        store.state = await profileApi().setAgentOverlayEnabled(enable);
+      },
+      enable ? "AI 操作可见化已开启" : "AI 操作可见化已关闭",
+      { key: "agent-overlay", message: "正在保存可见化设置…" }
+    );
     return;
   }
 

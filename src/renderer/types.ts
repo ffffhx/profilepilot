@@ -55,6 +55,28 @@ export interface PublicProfile {
   cdpContention: CdpContentionInfo | null;
 }
 
+export interface AgentActivity {
+  agent?: string;
+  project?: string;
+  session?: string;
+  sessionTitle?: string;
+  currentAction?: string;
+  currentStep?: string;
+  nextStep?: string;
+  todoDone?: number;
+  todoTotal?: number;
+  lastMessage?: string;
+  updatedAt?: string;
+}
+
+export interface AgentTakeoverEvent {
+  profileId: string;
+  profileName: string;
+  session?: string;
+  agent?: string;
+  at: string;
+}
+
 // tab 争用观测里“最抖”的那个标签页：观察窗口内 URL 变化次数与往返翻转（A→B→A）次数。
 export interface CdpContentionChurn {
   title: string;
@@ -157,6 +179,7 @@ export interface AppState {
   externalInstances: ExternalChromeInstance[];
   miniProfileIds: string[];
   miniProfileOrder: string[];
+  agentOverlayEnabled: boolean;
   shellIntegration: ShellIntegrationStatus;
 }
 
@@ -512,6 +535,7 @@ export interface ProfileManagerApi {
   closeExternalInstance(userDataDir: string): Promise<AppState>;
   // 结束某条 CDP 驱动连接：对该客户端进程发信号使其断开，不动 Chrome。
   disconnectCdpClient(profileId: string, pid: number): Promise<AppState>;
+  setAgentOverlayEnabled(enabled: boolean): Promise<AppState>;
   setShellIntegrationEnabled(enabled: boolean): Promise<AppState>;
   openProfileFolder(id: string): Promise<AppState>;
   openProfileExtensionsPage(id: string): Promise<AppState>;
@@ -533,6 +557,7 @@ export interface ProfileManagerApi {
   controlOperation(request: ControlOperationRequest): Promise<boolean>;
   getCdpLiveView(port: number, options?: CdpLiveViewOptions): Promise<CdpLiveView>;
   onOperationProgress(listener: (progress: OperationProgress) => void): () => void;
+  onAgentTakeover(listener: (event: AgentTakeoverEvent) => void): () => void;
 }
 
 export type ConfirmIntent =

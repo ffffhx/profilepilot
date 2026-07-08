@@ -44,6 +44,8 @@ export interface Registry {
   profiles: StoredProfile[];
   nativeProfiles?: Record<string, NativeProfileMetadata>;
   accountSyncRecords?: Record<string, AccountSyncRecord>;
+  // AI 操作可见化 overlay 总开关。旧配置缺省视为开启。
+  agentOverlayEnabled?: boolean;
   miniProfileIds?: string[];
   // 悬浮窗里 Profile 行的自定义排序（拖拽调整）；不在列表里的 Profile 排在末尾，保持自然顺序。
   miniProfileOrder?: string[];
@@ -68,6 +70,28 @@ export interface CdpClientInfo {
   // 归属可信度说明：agent-browser 走共享 daemon 时归属是按其启动目录推测的（或推测不出），
   // 这里给出人话解释，UI 拼进 tooltip；精确归属时为空。
   note?: string;
+}
+
+export interface AgentActivity {
+  agent?: string;
+  project?: string;
+  session?: string;
+  sessionTitle?: string;
+  currentAction?: string;
+  currentStep?: string;
+  nextStep?: string;
+  todoDone?: number;
+  todoTotal?: number;
+  lastMessage?: string;
+  updatedAt?: string;
+}
+
+export interface AgentTakeoverEvent {
+  profileId: string;
+  profileName: string;
+  session?: string;
+  agent?: string;
+  at: string;
 }
 
 // tab 争用观测里“最抖”的那个标签页：观察窗口内 URL 变化次数与往返翻转（A→B→A）次数。
@@ -204,6 +228,7 @@ export interface AppState {
   externalInstances: ExternalChromeInstance[];
   miniProfileIds: string[];
   miniProfileOrder: string[];
+  agentOverlayEnabled: boolean;
   shellIntegration: ShellIntegrationStatus;
 }
 
@@ -556,6 +581,8 @@ export interface ProfileManagerApi {
   closeExternalInstance(userDataDir: string): Promise<AppState>;
   // 结束某条 CDP 驱动连接：对该客户端进程发信号使其断开，不动 Chrome。
   disconnectCdpClient(profileId: string, pid: number): Promise<AppState>;
+  // AI 操作可见化 overlay 总开关。
+  setAgentOverlayEnabled(enabled: boolean): Promise<AppState>;
   // 启用/移除会话识别 shell 集成（~/.zshenv 托管块），返回刷新后的完整状态。
   setShellIntegrationEnabled(enabled: boolean): Promise<AppState>;
   openProfileFolder(id: string): Promise<AppState>;
@@ -578,4 +605,5 @@ export interface ProfileManagerApi {
   controlOperation(request: ControlOperationRequest): Promise<boolean>;
   getCdpLiveView(port: number, options?: CdpLiveViewOptions): Promise<CdpLiveView>;
   onOperationProgress(listener: (progress: OperationProgress) => void): () => void;
+  onAgentTakeover(listener: (event: AgentTakeoverEvent) => void): () => void;
 }

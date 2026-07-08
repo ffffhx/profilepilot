@@ -43,6 +43,11 @@ interface SessionInfo {
   title?: string;
 }
 
+export interface AgentSessionFile {
+  file: string;
+  kind: "codex" | "claude";
+}
+
 const GENERIC_RUNTIME_COMMS = new Set(["node", "deno", "bun"]);
 
 // 给一批客户端解析上下文（带 pid 级缓存）。返回 pid -> context。
@@ -105,6 +110,7 @@ async function resolveDaemonContext(base: CachedContext): Promise<CdpClientConte
       return {
         label: base.label,
         agent: "Claude Code",
+        session: named,
         project: info?.project,
         title: info?.title,
         lastActive: await fileMtimeIso(file)
@@ -122,6 +128,7 @@ async function resolveDaemonContext(base: CachedContext): Promise<CdpClientConte
       return {
         label: base.label,
         agent: "Codex",
+        session: named,
         project: info?.cwd ? path.basename(info.cwd) : undefined,
         title: info?.title,
         lastActive: await fileMtimeIso(file)
@@ -273,6 +280,22 @@ async function findCodexSessionByUuid(uuid: string): Promise<string | null> {
       }
     }
   }
+  return null;
+}
+
+export async function findAgentSessionFile(session: string): Promise<AgentSessionFile | null> {
+  const claudeUuid = session.match(/^cc-([0-9a-fA-F-]{36})$/)?.[1];
+  if (claudeUuid) {
+    const file = await findClaudeSessionByUuid(claudeUuid);
+    return file ? { file, kind: "claude" } : null;
+  }
+
+  const codexUuid = session.match(/^cx-([0-9a-fA-F-]{36})$/)?.[1];
+  if (codexUuid) {
+    const file = await findCodexSessionByUuid(codexUuid);
+    return file ? { file, kind: "codex" } : null;
+  }
+
   return null;
 }
 

@@ -6,6 +6,7 @@ import type {
   AccountSyncDiffResult,
   AccountSyncRequest,
   AccountSyncResult,
+  AgentTakeoverEvent,
   CloneProfilesRequest,
   CloneProfilesResult,
   RefreshClonesResult,
@@ -36,7 +37,7 @@ import { ensureClaudeInstructionShell, readGlobalInstructions, writeGlobalInstru
 import { setShellIntegrationEnabled } from "./shell-integration";
 import { APP_TITLE, createProfileManager } from "./profile-manager";
 
-const profileManager = createProfileManager();
+const profileManager = createProfileManager(broadcastAgentTakeover);
 let mainWindow: BrowserWindow | null = null;
 let miniWindow: BrowserWindow | null = null;
 let miniOutsideClickWindows: BrowserWindow[] = [];
@@ -107,6 +108,14 @@ class OperationPauseController implements OperationPauseSignal {
     return new Promise((resolve) => {
       this.waiters.push(resolve);
     });
+  }
+}
+
+function broadcastAgentTakeover(takeover: AgentTakeoverEvent): void {
+  for (const windowRef of [mainWindow, miniWindow]) {
+    if (windowRef && !windowRef.isDestroyed()) {
+      windowRef.webContents.send(IPC_CHANNELS.agentTakeover, takeover);
+    }
   }
 }
 
@@ -1287,6 +1296,11 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.disconnectCdpClient, async (_event, profileId: string, pid: number): Promise<AppState> => {
     await profileManager.disconnectCdpClient(profileId, pid);
+    return profileManager.getState();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.setAgentOverlayEnabled, async (_event, enabled: boolean): Promise<AppState> => {
+    await profileManager.setAgentOverlayEnabled(Boolean(enabled));
     return profileManager.getState();
   });
 

@@ -711,8 +711,23 @@ export function renderCdpClientsDetail(profile: PublicProfile): string {
       ${warningRow}
       ${sessionRows}
       ${disconnectRow}
+      ${renderAgentOverlaySettingRow()}
       ${renderShellIntegrationRow(profile)}
       <small class="detail-note">检测连到本机 CDP 端口的持久连接；有工具保持长连接（如 agent-browser）时会标为“驱动中”。会话行显示是哪个项目/会话在驱动，以及它最近一次活动时间——很久没动的多半是残留连接，可用「结束连接」断开它（不影响 Chrome）。多个活跃会话共用同一 Profile 会互相抢标签页/焦点，建议用「克隆」给第二个会话分一个副本。</small>
+    </div>
+  `;
+}
+
+function renderAgentOverlaySettingRow(): string {
+  const enabled = store.state?.agentOverlayEnabled !== false;
+  const busy = isBusyAction("agent-overlay");
+  return `
+    <div class="agent-overlay-setting">
+      <small class="detail-note">AI 操作可见化已${enabled ? "开启" : "关闭"}：agent-browser 操作页面时注入状态条，并允许在页面内停止接管。</small>
+      <button type="button" class="overlay-switch ${enabled ? "on" : ""} ${busy ? "loading" : ""}" data-action="toggle-agent-overlay" aria-pressed="${enabled ? "true" : "false"}" ${store.busy ? "disabled" : ""}>
+        <span class="overlay-switch-track"><span class="overlay-switch-thumb"></span></span>
+        <span>${enabled ? "开启" : "关闭"}</span>
+      </button>
     </div>
   `;
 }
@@ -745,4 +760,3 @@ function renderShellIntegrationRow(profile: PublicProfile): string {
   }
   return `<small class="detail-note">✓ 会话识别已启用（${escapeHtml(status.path)} 中手动配置）。</small>`;
 }
-

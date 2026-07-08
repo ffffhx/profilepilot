@@ -175,6 +175,8 @@ export function agentOverlayBootstrapScript(): string {
   let stopButton = null;
   let revealButton = null;
   let hideButton = null;
+  let reducedMotionMediaQuery = null;
+  let reducedMotionMediaListener = null;
   let themeMediaQuery = null;
   let themeMediaListener = null;
   let themeObserver = null;
@@ -187,13 +189,18 @@ export function agentOverlayBootstrapScript(): string {
     }
     host = document.createElement("div");
     host.id = "__pp-agent-overlay";
+    // Keep the overlay hidden from agent accessibility snapshots. This also hides
+    // it from screen readers, so every critical control still carries title and
+    // aria-label text for the least-bad default if that policy changes later.
     host.setAttribute("aria-hidden", "true");
+    host.setAttribute("role", "presentation");
     host.style.position = "fixed";
     host.style.top = "16px";
     host.style.right = "16px";
     host.style.zIndex = "2147483647";
     host.style.pointerEvents = "auto";
     host.style.colorScheme = "dark";
+    host.classList.toggle("reduced-motion", isReducedMotionPreferred());
 
     try {
       const saved = JSON.parse(sessionStorage.getItem(STORAGE_KEY) || "null");
@@ -211,9 +218,9 @@ export function agentOverlayBootstrapScript(): string {
       "<style>",
       ":host{all:initial}",
       "*{box-sizing:border-box}",
-      ".wrap{--pp-text:#f4fff9;--pp-title:#f1fff8;--pp-muted:#a6c1b8;--pp-muted-soft:#7fa89a;--pp-panel-bg:rgba(8,13,16,.84);--pp-panel-border:rgba(148,255,213,.30);--pp-panel-shadow:0 18px 50px rgba(0,0,0,.42),0 0 0 1px rgba(255,255,255,.04) inset;--pp-panel-hover-shadow:0 20px 56px rgba(0,0,0,.46),0 0 0 1px rgba(255,255,255,.06) inset;--pp-taken-bg:rgba(6,27,19,.88);--pp-taken-border:rgba(86,240,170,.58);--pp-control-bg:rgba(255,255,255,.07);--pp-control-hover-bg:rgba(255,255,255,.14);--pp-control-text:#d7fff1;--pp-control-hover-text:#ffffff;--pp-action-bg:rgba(255,255,255,.06);--pp-action-text:#f7fffb;--pp-progress-text:#effff8;--pp-progress-bg:rgba(148,255,213,.13);--pp-next:#9bb7ad;--pp-sessions-bg:rgba(255,255,255,.045);--pp-sessions-border:rgba(255,255,255,.055);--pp-session-heading:#c8fff0;--pp-session-row:#afcac1;--pp-session-agent:#eafff8;--pp-session-name:#bdd7cf;--pp-session-time:#78a292;--pp-details:#a9c7bd;--pp-summary:#c9fff0;--pp-summary-hover:#ffffff;--pp-dot-bg:rgba(8,13,16,.86);--pp-dot-hover-bg:rgba(12,22,24,.92);--pp-dot-border:rgba(148,255,213,.36);--pp-dot-hover-border:rgba(148,255,213,.55);--pp-dot-shadow:0 12px 34px rgba(0,0,0,.42);--pp-stop-text:#ffe2de;--pp-stop-hover-text:#fff2ef;--pp-stop-confirm-text:#fff1dc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:var(--pp-text);user-select:none;opacity:0;transform:translateY(-4px) scale(.985);animation:ppIn .18s ease-out forwards}",
-      ":host(.theme-light) .wrap{--pp-text:#173128;--pp-title:#0d241c;--pp-muted:#49635a;--pp-muted-soft:#667d74;--pp-panel-bg:rgba(255,255,255,.82);--pp-panel-border:rgba(34,139,101,.30);--pp-panel-shadow:0 18px 50px rgba(20,41,34,.20),0 0 0 1px rgba(255,255,255,.55) inset;--pp-panel-hover-shadow:0 20px 56px rgba(20,41,34,.24),0 0 0 1px rgba(255,255,255,.70) inset;--pp-taken-bg:rgba(235,255,247,.86);--pp-taken-border:rgba(42,176,123,.46);--pp-control-bg:rgba(13,48,36,.08);--pp-control-hover-bg:rgba(13,48,36,.14);--pp-control-text:#14583d;--pp-control-hover-text:#083624;--pp-action-bg:rgba(22,92,67,.08);--pp-action-text:#102f25;--pp-progress-text:#173128;--pp-progress-bg:rgba(33,143,103,.16);--pp-next:#506b61;--pp-sessions-bg:rgba(20,91,66,.06);--pp-sessions-border:rgba(20,91,66,.14);--pp-session-heading:#135a3e;--pp-session-row:#516b62;--pp-session-agent:#123f2d;--pp-session-name:#39594e;--pp-session-time:#61786f;--pp-details:#536d63;--pp-summary:#145a40;--pp-summary-hover:#06351f;--pp-dot-bg:rgba(255,255,255,.82);--pp-dot-hover-bg:rgba(244,255,250,.92);--pp-dot-border:rgba(34,139,101,.32);--pp-dot-hover-border:rgba(34,139,101,.52);--pp-dot-shadow:0 12px 34px rgba(20,41,34,.20);--pp-stop-text:#8f2119;--pp-stop-hover-text:#68140f;--pp-stop-confirm-text:#74420d}",
-      ".panel{width:min(336px,calc(100vw - 24px));border:1px solid var(--pp-panel-border);border-radius:14px;background:var(--pp-panel-bg);backdrop-filter:blur(18px) saturate(1.35);box-shadow:var(--pp-panel-shadow);overflow:hidden;transition:border-color .18s ease,background .18s ease,box-shadow .18s ease,transform .18s ease}",
+      ".wrap{--pp-text:#f4fff9;--pp-title:#f1fff8;--pp-muted:#a6c1b8;--pp-muted-soft:#7fa89a;--pp-panel-bg:rgba(8,13,16,.88);--pp-panel-border:rgba(148,255,213,.30);--pp-panel-shadow:0 18px 50px rgba(0,0,0,.42),0 0 0 1px rgba(255,255,255,.04) inset;--pp-panel-hover-shadow:0 20px 56px rgba(0,0,0,.46),0 0 0 1px rgba(255,255,255,.06) inset;--pp-taken-bg:rgba(6,27,19,.90);--pp-taken-border:rgba(86,240,170,.58);--pp-control-bg:rgba(255,255,255,.07);--pp-control-hover-bg:rgba(255,255,255,.14);--pp-control-text:#d7fff1;--pp-control-hover-text:#ffffff;--pp-action-bg:rgba(255,255,255,.06);--pp-action-text:#f7fffb;--pp-progress-text:#effff8;--pp-progress-bg:rgba(148,255,213,.13);--pp-progress-fill-start:#35d892;--pp-progress-fill-end:#86ffd2;--pp-progress-glow:rgba(56,225,160,.55);--pp-next:#9bb7ad;--pp-sessions-bg:rgba(255,255,255,.045);--pp-sessions-border:rgba(255,255,255,.055);--pp-session-heading:#c8fff0;--pp-session-row:#afcac1;--pp-session-agent:#eafff8;--pp-session-name:#bdd7cf;--pp-session-time:#78a292;--pp-details:#a9c7bd;--pp-summary:#c9fff0;--pp-summary-hover:#ffffff;--pp-dot-bg:rgba(8,13,16,.90);--pp-dot-hover-bg:rgba(12,22,24,.94);--pp-dot-border:rgba(148,255,213,.36);--pp-dot-hover-border:rgba(148,255,213,.55);--pp-dot-shadow:0 12px 34px rgba(0,0,0,.42);--pp-stop-text:#ffe2de;--pp-stop-hover-text:#fff2ef;--pp-stop-confirm-text:#fff1dc;--pp-focus-ring:#ffffff;--pp-motion-duration:.16s;--pp-motion-ease:cubic-bezier(.2,0,0,1);--pp-hover-duration:.14s;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:var(--pp-text);user-select:none;opacity:0;transform:translateY(-4px) scale(.985);animation:ppIn var(--pp-motion-duration) var(--pp-motion-ease) forwards}",
+      ":host(.theme-light) .wrap{--pp-text:#173128;--pp-title:#0d241c;--pp-muted:#49635a;--pp-muted-soft:#5b7369;--pp-panel-bg:rgba(255,255,255,.92);--pp-panel-border:rgba(22,115,80,.34);--pp-panel-shadow:0 18px 50px rgba(20,41,34,.20),0 0 0 1px rgba(255,255,255,.70) inset;--pp-panel-hover-shadow:0 20px 56px rgba(20,41,34,.24),0 0 0 1px rgba(255,255,255,.78) inset;--pp-taken-bg:rgba(240,255,249,.94);--pp-taken-border:rgba(31,139,96,.52);--pp-control-bg:rgba(13,48,36,.08);--pp-control-hover-bg:rgba(13,48,36,.14);--pp-control-text:#14583d;--pp-control-hover-text:#083624;--pp-action-bg:rgba(22,92,67,.08);--pp-action-text:#102f25;--pp-progress-text:#173128;--pp-progress-bg:#d4e3dd;--pp-progress-fill-start:#0d7f54;--pp-progress-fill-end:#145f45;--pp-progress-glow:rgba(17,115,79,.24);--pp-next:#506b61;--pp-sessions-bg:rgba(20,91,66,.06);--pp-sessions-border:rgba(20,91,66,.14);--pp-session-heading:#135a3e;--pp-session-row:#516b62;--pp-session-agent:#123f2d;--pp-session-name:#39594e;--pp-session-time:#586e65;--pp-details:#536d63;--pp-summary:#145a40;--pp-summary-hover:#06351f;--pp-dot-bg:rgba(255,255,255,.92);--pp-dot-hover-bg:rgba(244,255,250,.96);--pp-dot-border:rgba(22,115,80,.36);--pp-dot-hover-border:rgba(22,115,80,.56);--pp-dot-shadow:0 12px 34px rgba(20,41,34,.20);--pp-stop-text:#8f2119;--pp-stop-hover-text:#68140f;--pp-stop-confirm-text:#74420d;--pp-focus-ring:#073f2b}",
+      ".panel{width:min(336px,calc(100vw - 24px));border:1px solid var(--pp-panel-border);border-radius:14px;background:var(--pp-panel-bg);backdrop-filter:blur(18px) saturate(1.35);box-shadow:var(--pp-panel-shadow);overflow:hidden;transition:border-color var(--pp-motion-duration) var(--pp-motion-ease),background var(--pp-motion-duration) var(--pp-motion-ease),box-shadow var(--pp-motion-duration) var(--pp-motion-ease),transform var(--pp-motion-duration) var(--pp-motion-ease)}",
       ".panel:hover{box-shadow:var(--pp-panel-hover-shadow)}",
       ".panel.taken{border-color:var(--pp-taken-border);background:var(--pp-taken-bg);transform:translateY(1px)}",
       ".head{display:flex;align-items:center;gap:9px;min-height:40px;padding:10px 10px 8px 12px;cursor:grab}",
@@ -221,7 +228,7 @@ export function agentOverlayBootstrapScript(): string {
       ".pulse{width:9px;height:9px;border-radius:99px;background:#38e1a0;box-shadow:0 0 0 0 rgba(56,225,160,.55);animation:ppPulse 1.45s ease-out infinite;flex:0 0 auto}",
       ".taken .pulse{background:#66f0b2}",
       ".title{min-width:0;flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;font-weight:760;letter-spacing:0;color:var(--pp-title)}",
-      ".icon-btn{width:26px;height:24px;border:0;border-radius:7px;background:var(--pp-control-bg);color:var(--pp-control-text);font-size:16px;line-height:20px;cursor:pointer;transition:background .14s ease,color .14s ease,transform .14s ease}",
+      ".icon-btn{width:26px;height:24px;border:0;border-radius:7px;background:var(--pp-control-bg);color:var(--pp-control-text);font-size:16px;line-height:20px;cursor:pointer;transition:background var(--pp-hover-duration) var(--pp-motion-ease),color var(--pp-hover-duration) var(--pp-motion-ease),transform var(--pp-hover-duration) var(--pp-motion-ease)}",
       ".icon-btn:hover{background:var(--pp-control-hover-bg);color:var(--pp-control-hover-text)}",
       ".icon-btn:active{transform:translateY(1px)}",
       ".hide{font-size:18px}",
@@ -231,7 +238,7 @@ export function agentOverlayBootstrapScript(): string {
       ".action{margin:0 0 9px;padding:8px 9px;border-radius:8px;background:var(--pp-action-bg);font-size:12.5px;line-height:1.35;overflow-wrap:anywhere;color:var(--pp-action-text)}",
       ".progress-text{margin:0 0 5px;color:var(--pp-progress-text);font-size:12px;font-weight:680;line-height:1.35;overflow-wrap:anywhere}",
       ".progress-bar{height:3px;margin:0 0 8px;border-radius:99px;background:var(--pp-progress-bg);overflow:hidden}",
-      ".progress-fill{display:block;width:0;height:100%;border-radius:99px;background:linear-gradient(90deg,#35d892,#86ffd2);box-shadow:0 0 12px rgba(56,225,160,.55);transition:width .32s ease}",
+      ".progress-fill{display:block;width:0;height:100%;border-radius:99px;background:linear-gradient(90deg,var(--pp-progress-fill-start),var(--pp-progress-fill-end));box-shadow:0 0 12px var(--pp-progress-glow);transition:width .32s var(--pp-motion-ease)}",
       ".next{margin:0 0 9px;color:var(--pp-next);font-size:11.5px;line-height:1.35;overflow-wrap:anywhere}",
       ".sessions{margin:0 0 10px;padding:7px 8px;border-radius:8px;background:var(--pp-sessions-bg);border:1px solid var(--pp-sessions-border)}",
       ".session-heading{margin:0 0 5px;color:var(--pp-session-heading);font-size:11px;font-weight:700}",
@@ -241,40 +248,46 @@ export function agentOverlayBootstrapScript(): string {
       ".session-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--pp-session-name)}",
       ".session-time{white-space:nowrap;color:var(--pp-session-time);font-variant-numeric:tabular-nums}",
       "details{margin:0 0 10px;color:var(--pp-details);font-size:11.5px;line-height:1.4}",
-      "summary{cursor:pointer;color:var(--pp-summary);font-weight:650;outline:none}",
+      "summary{cursor:pointer;color:var(--pp-summary);font-weight:650;outline:none;transition:color var(--pp-hover-duration) var(--pp-motion-ease)}",
       "summary:hover{color:var(--pp-summary-hover)}",
+      ".icon-btn:focus-visible,.stop:focus-visible,.dot:focus-visible,summary:focus-visible{outline:2px solid var(--pp-focus-ring);outline-offset:2px}",
       ".recent-text{display:block;margin-top:4px;overflow-wrap:anywhere}",
-      ".stop{width:100%;min-height:34px;border:1px solid rgba(255,113,100,.58);border-radius:9px;background:linear-gradient(180deg,rgba(255,113,100,.24),rgba(255,113,100,.11));color:var(--pp-stop-text);font-size:12px;font-weight:780;cursor:pointer;transition:background .14s ease,border-color .14s ease,color .14s ease,transform .14s ease}",
+      ".stop{width:100%;min-height:34px;border:1px solid rgba(255,113,100,.58);border-radius:9px;background:linear-gradient(180deg,rgba(255,113,100,.24),rgba(255,113,100,.11));color:var(--pp-stop-text);font-size:12px;font-weight:780;cursor:pointer;transition:background var(--pp-hover-duration) var(--pp-motion-ease),border-color var(--pp-hover-duration) var(--pp-motion-ease),color var(--pp-hover-duration) var(--pp-motion-ease),transform var(--pp-hover-duration) var(--pp-motion-ease)}",
       ".stop:hover:not(:disabled){background:rgba(255,113,100,.28);border-color:rgba(255,135,123,.70);color:var(--pp-stop-hover-text)}",
       ".stop:active:not(:disabled){transform:translateY(1px)}",
       ".stop.confirm{background:linear-gradient(180deg,rgba(255,171,92,.27),rgba(255,171,92,.13));border-color:rgba(255,188,112,.68);color:var(--pp-stop-confirm-text)}",
       ".stop:disabled{opacity:.56;cursor:default;transform:none}",
-      ".dot{display:none;width:36px;height:36px;border:1px solid var(--pp-dot-border);border-radius:99px;background:var(--pp-dot-bg);backdrop-filter:blur(14px);box-shadow:var(--pp-dot-shadow);cursor:pointer;place-items:center;transition:background .14s ease,border-color .14s ease,transform .14s ease}",
+      ".dot{display:none;width:36px;height:36px;border:1px solid var(--pp-dot-border);border-radius:99px;background:var(--pp-dot-bg);backdrop-filter:blur(14px);box-shadow:var(--pp-dot-shadow);cursor:pointer;place-items:center;transition:background var(--pp-hover-duration) var(--pp-motion-ease),border-color var(--pp-hover-duration) var(--pp-motion-ease),transform var(--pp-hover-duration) var(--pp-motion-ease)}",
       ".dot:hover{background:var(--pp-dot-hover-bg);border-color:var(--pp-dot-hover-border);transform:translateY(-1px)}",
       ".dot .pulse{width:11px;height:11px}",
       ":host(.collapsed) .panel{display:none}",
       ":host(.collapsed) .dot{display:grid}",
-      ":host(.leaving) .wrap{animation:ppOut .16s ease-in forwards}",
+      ":host(.leaving) .wrap{animation:ppOut var(--pp-motion-duration) var(--pp-motion-ease) forwards}",
+      ":host(.reduced-motion) .wrap{opacity:1;transform:none;animation:none}",
+      ":host(.leaving.reduced-motion) .wrap{opacity:0;transform:none;animation:none}",
+      ":host(.reduced-motion) .pulse{animation:none;box-shadow:none}",
+      ":host(.reduced-motion) .panel,:host(.reduced-motion) .icon-btn,:host(.reduced-motion) .progress-fill,:host(.reduced-motion) summary,:host(.reduced-motion) .stop,:host(.reduced-motion) .dot{transition:none}",
+      ":host(.reduced-motion) .panel.taken,:host(.reduced-motion) .icon-btn:active,:host(.reduced-motion) .stop:active:not(:disabled),:host(.reduced-motion) .dot:hover{transform:none}",
       "@keyframes ppIn{to{opacity:1;transform:translateY(0) scale(1)}}",
       "@keyframes ppOut{to{opacity:0;transform:translateY(-3px) scale(.985)}}",
       "@keyframes ppPulse{0%{box-shadow:0 0 0 0 rgba(56,225,160,.58)}70%{box-shadow:0 0 0 9px rgba(56,225,160,0)}100%{box-shadow:0 0 0 0 rgba(56,225,160,0)}}",
       "</style>",
       "<div class=\"wrap\">",
-      "  <section class=\"panel\">",
-      "    <div class=\"head\"><span class=\"pulse\"></span><span class=\"title\"></span><button class=\"icon-btn reveal\" type=\"button\" title=\"\">⧉</button><button class=\"icon-btn hide\" type=\"button\" title=\"\">−</button></div>",
+      "  <section id=\"pp-agent-overlay-panel\" class=\"panel\" role=\"group\" aria-labelledby=\"pp-agent-overlay-title\">",
+      "    <div class=\"head\"><span class=\"pulse\" aria-hidden=\"true\"></span><span id=\"pp-agent-overlay-title\" class=\"title\"></span><button class=\"icon-btn reveal\" type=\"button\" title=\"\" aria-label=\"\">⧉</button><button class=\"icon-btn hide\" type=\"button\" title=\"\" aria-label=\"\" aria-controls=\"pp-agent-overlay-panel\">−</button></div>",
       "    <div class=\"body\">",
       "      <div class=\"meta\"></div>",
       "      <div class=\"elapsed\"></div>",
       "      <div class=\"action\"></div>",
-      "      <div class=\"progress-text\"></div>",
-      "      <div class=\"progress-bar\"><span class=\"progress-fill\"></span></div>",
+      "      <div id=\"pp-agent-overlay-progress-text\" class=\"progress-text\"></div>",
+      "      <div class=\"progress-bar\" role=\"progressbar\" aria-valuemin=\"0\" aria-valuemax=\"100\" aria-labelledby=\"pp-agent-overlay-progress-text\"><span class=\"progress-fill\"></span></div>",
       "      <div class=\"next\"></div>",
       "      <div class=\"sessions\"><div class=\"session-heading\"></div><div class=\"session-list\"></div></div>",
-      "      <details class=\"recent\"><summary></summary><span class=\"recent-text\"></span></details>",
+      "      <details class=\"recent\"><summary aria-controls=\"pp-agent-overlay-recent-text\" aria-expanded=\"false\"></summary><span id=\"pp-agent-overlay-recent-text\" class=\"recent-text\"></span></details>",
       "      <button class=\"stop\" type=\"button\"></button>",
       "    </div>",
       "  </section>",
-      "  <button class=\"dot\" type=\"button\" title=\"\"><span class=\"pulse\"></span></button>",
+      "  <button class=\"dot\" type=\"button\" title=\"\" aria-label=\"\" aria-controls=\"pp-agent-overlay-panel\" aria-expanded=\"false\"><span class=\"pulse\" aria-hidden=\"true\"></span></button>",
       "</div>"
     ].join("");
 
@@ -297,6 +310,7 @@ export function agentOverlayBootstrapScript(): string {
     stopButton = root.querySelector(".stop");
     revealButton = root.querySelector(".reveal");
     hideButton = root.querySelector(".hide");
+    recentSummary.tabIndex = 0;
 
     root.addEventListener("click", (event) => event.stopPropagation());
     root.addEventListener("dblclick", (event) => event.stopPropagation());
@@ -308,9 +322,15 @@ export function agentOverlayBootstrapScript(): string {
     revealButton.addEventListener("click", () => signal("reveal"));
     dot.addEventListener("click", () => expand());
     stopButton.addEventListener("click", handleStopClick);
+    for (const control of [hideButton, revealButton, dot, stopButton]) {
+      control.addEventListener("keydown", handleKeyboardClick);
+    }
+    recent.addEventListener("toggle", updateInteractiveAria);
+    recentSummary.addEventListener("keydown", handleRecentSummaryKeydown);
     root.querySelector(".head").addEventListener("pointerdown", startDrag);
 
     document.documentElement.appendChild(host);
+    setupReducedMotionTracking();
     setupThemeTracking();
     elapsedTimer = setInterval(() => {
       updateElapsed();
@@ -334,6 +354,63 @@ export function agentOverlayBootstrapScript(): string {
     } catch {
       // The page or CDP binding may have disconnected.
     }
+  }
+
+  function isActivationKey(event) {
+    return event.key === "Enter" || event.key === " " || event.key === "Spacebar";
+  }
+
+  function handleKeyboardClick(event) {
+    if (!isActivationKey(event) || event.repeat) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.currentTarget.disabled) {
+      return;
+    }
+    event.currentTarget.click();
+  }
+
+  function setupReducedMotionTracking() {
+    updateReducedMotion();
+    reducedMotionMediaListener = () => updateReducedMotion();
+    if (typeof window.matchMedia !== "function") {
+      return;
+    }
+    reducedMotionMediaQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+    if (typeof reducedMotionMediaQuery.addEventListener === "function") {
+      reducedMotionMediaQuery.addEventListener("change", reducedMotionMediaListener);
+    } else if (typeof reducedMotionMediaQuery.addListener === "function") {
+      reducedMotionMediaQuery.addListener(reducedMotionMediaListener);
+    }
+  }
+
+  function cleanupReducedMotionTracking() {
+    if (reducedMotionMediaQuery && reducedMotionMediaListener) {
+      if (typeof reducedMotionMediaQuery.removeEventListener === "function") {
+        reducedMotionMediaQuery.removeEventListener("change", reducedMotionMediaListener);
+      } else if (typeof reducedMotionMediaQuery.removeListener === "function") {
+        reducedMotionMediaQuery.removeListener(reducedMotionMediaListener);
+      }
+    }
+    reducedMotionMediaQuery = null;
+    reducedMotionMediaListener = null;
+  }
+
+  function updateReducedMotion() {
+    if (!host) {
+      return;
+    }
+    host.classList.toggle("reduced-motion", isReducedMotionPreferred());
+  }
+
+  function isReducedMotionPreferred() {
+    return Boolean(
+      reducedMotionMediaQuery
+        ? reducedMotionMediaQuery.matches
+        : typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    );
   }
 
   function setupThemeTracking() {
@@ -500,15 +577,41 @@ export function agentOverlayBootstrapScript(): string {
     updateElapsed();
     updateStopButton();
     host.classList.toggle("collapsed", collapsed);
+    updateInteractiveAria();
     requestAnimationFrame(clampHostIntoViewport);
   }
 
   function applyStaticText(copy) {
     revealButton.title = copy.revealTitle;
+    revealButton.setAttribute("aria-label", copy.revealTitle);
     hideButton.title = copy.hideTitle;
+    hideButton.setAttribute("aria-label", copy.hideTitle);
     dot.title = copy.expandTitle;
+    dot.setAttribute("aria-label", copy.expandTitle);
     sessionHeading.textContent = copy.sessionHeading;
     recentSummary.textContent = copy.recentSummary;
+  }
+
+  function updateInteractiveAria() {
+    if (hideButton) {
+      hideButton.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    }
+    if (dot) {
+      dot.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    }
+    if (recentSummary && recent) {
+      recentSummary.setAttribute("aria-expanded", recent.open ? "true" : "false");
+    }
+  }
+
+  function handleRecentSummaryKeydown(event) {
+    if (!isActivationKey(event) || event.repeat) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    recent.open = !recent.open;
+    updateInteractiveAria();
   }
 
   function titleText(sessions, copy) {
@@ -544,9 +647,13 @@ export function agentOverlayBootstrapScript(): string {
     if (hasTodo) {
       const percent = Math.max(0, Math.min(100, Math.round((Math.max(0, Math.min(done, total)) / total) * 100)));
       progressBar.style.display = "block";
+      progressBar.setAttribute("aria-valuenow", String(percent));
+      progressBar.setAttribute("aria-valuetext", copy.progressDone(Math.max(0, done), total));
       progressFill.style.width = percent + "%";
     } else {
       progressBar.style.display = "none";
+      progressBar.removeAttribute("aria-valuenow");
+      progressBar.removeAttribute("aria-valuetext");
       progressFill.style.width = "0%";
     }
   }
@@ -616,14 +723,21 @@ export function agentOverlayBootstrapScript(): string {
     stopButton.disabled = taken || !hasBinding;
     if (taken) {
       stopButton.textContent = text().takenStop;
+      stopButton.title = text().takenStop;
+      stopButton.setAttribute("aria-label", text().takenStop);
       resetStopConfirm();
       return;
     }
     if (stopConfirming) {
       stopButton.textContent = text().confirmStop;
+      stopButton.title = text().confirmStop;
+      stopButton.setAttribute("aria-label", text().confirmStop);
       return;
     }
-    stopButton.textContent = isMultiSession() ? text().stopAll : text().stopSingle;
+    const label = isMultiSession() ? text().stopAll : text().stopSingle;
+    stopButton.textContent = label;
+    stopButton.title = label;
+    stopButton.setAttribute("aria-label", label);
   }
 
   function resetStopConfirm() {
@@ -633,7 +747,10 @@ export function agentOverlayBootstrapScript(): string {
     if (stopButton) {
       stopButton.classList.remove("confirm");
       if (state.state !== "takenOver") {
-        stopButton.textContent = isMultiSession() ? text().stopAll : text().stopSingle;
+        const label = isMultiSession() ? text().stopAll : text().stopSingle;
+        stopButton.textContent = label;
+        stopButton.title = label;
+        stopButton.setAttribute("aria-label", label);
       }
     }
   }
@@ -827,6 +944,7 @@ export function agentOverlayBootstrapScript(): string {
     tearingDown = true;
     clearTimeout(takenOverTimer);
     clearInterval(elapsedTimer);
+    cleanupReducedMotionTracking();
     cleanupThemeTracking();
     resetStopConfirm();
     const cleanup = () => {
@@ -842,7 +960,7 @@ export function agentOverlayBootstrapScript(): string {
     };
     if (host) {
       host.classList.add("leaving");
-      setTimeout(cleanup, 180);
+      setTimeout(cleanup, isReducedMotionPreferred() ? 0 : 180);
     } else {
       cleanup();
     }

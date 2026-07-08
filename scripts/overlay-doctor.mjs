@@ -178,17 +178,26 @@ async function runSelfStartedDiagnostics() {
   });
 
   await check("6. isolated-world button path triggers onStop", async () => {
+    const before = stopCalls.length;
     await clickOverlayStopButton(pageClient);
     await waitFor(
-      () => (stopCalls.length >= clients.length ? stopCalls.length : null),
-      1500,
+      () => (stopCalls.length === before + 1 ? stopCalls.length : null),
+      2000,
       "isolated overlay stop button path"
     );
+    await delay(250);
     const expectedPids = clients.map((client) => client.pid).sort((left, right) => left - right);
-    const actualPids = stopCalls.map((call) => call.pid).sort((left, right) => left - right);
+    const call = stopCalls.at(-1);
     return {
-      pass: arraysEqual(actualPids, expectedPids),
-      values: { stopCalls: stopCalls.length, actualPids, expectedPids }
+      pass: call?.stopAll === true && call?.pids === undefined && expectedPids.includes(call?.pid),
+      values: {
+        stopCallsBefore: before,
+        stopCallsAfter: stopCalls.length,
+        stopAll: call?.stopAll,
+        pidsType: typeof call?.pids,
+        pid: call?.pid,
+        expectedPids
+      }
     };
   });
 

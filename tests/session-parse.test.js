@@ -9,6 +9,7 @@ const test = require("node:test");
 const {
   SessionTailer,
   describeAgentBrowserCommand,
+  extractAgentBrowserTargetUrl,
   findAgentBrowserCommand
 } = require("../dist/main/session-tail.js");
 
@@ -48,6 +49,31 @@ test("agent-browser descriptions cover chained and newer actions", () => {
   assert.equal(describeAgentBrowserCommand("agent-browser scroll 0 500"), "滚动页面");
   assert.equal(describeAgentBrowserCommand("agent-browser wait 500"), "等待");
   assert.equal(describeAgentBrowserCommand("agent-browser eval \"document.title\""), "执行脚本");
+});
+
+test("agent-browser target URL extraction covers navigation commands", () => {
+  assert.equal(
+    extractAgentBrowserTargetUrl("agent-browser open https://example.com/path/to/page?tab=ai#state"),
+    "example.com/path/to/page?tab=ai#state"
+  );
+  assert.equal(
+    extractAgentBrowserTargetUrl("agent-browser goto 'http://localhost:9510/demo/index.html'"),
+    "localhost:9510/demo/index.html"
+  );
+  assert.equal(
+    extractAgentBrowserTargetUrl("/opt/homebrew/bin/agent-browser --cdp http://127.0.0.1:9510 navigate https://docs.example.test/guide"),
+    "docs.example.test/guide"
+  );
+  assert.equal(extractAgentBrowserTargetUrl("agent-browser click \"https://example.com/not-a-navigation\""), undefined);
+  assert.equal(extractAgentBrowserTargetUrl("agent-browser open"), undefined);
+  assert.equal(extractAgentBrowserTargetUrl("agent-browser goto not-a-url"), undefined);
+
+  const longTarget = extractAgentBrowserTargetUrl(
+    `agent-browser open https://example.com/${"nested/".repeat(20)}final`
+  );
+  assert.equal(longTarget.length, 90);
+  assert.match(longTarget, /…$/);
+  assert.doesNotMatch(longTarget, /^https?:\/\//);
 });
 
 test("SessionTailer filters pure tool receipts from assistant lastMessage", async () => {

@@ -7,8 +7,13 @@ import { findAgentSessionFile, type AgentSessionFile } from "./session-context";
 
 const ACTIVITY_ACTION_LIMIT = 60;
 const ACTIVITY_MESSAGE_LIMIT = 120;
+const ACTIVITY_TARGET_URL_LIMIT = 90;
 const MAX_FULL_INITIAL_READ_BYTES = 50 * 1024 * 1024;
 const INITIAL_TAIL_READ_BYTES = 2 * 1024 * 1024;
+
+type ParsedAgentActivity = AgentActivity & {
+  targetUrl?: string;
+};
 
 export interface SessionTailerBase {
   agent?: string;
@@ -27,7 +32,7 @@ export class SessionTailer {
   private readChain: Promise<void> = Promise.resolve();
   private offset = 0;
   private partialLine = "";
-  private parsed: AgentActivity = {};
+  private parsed: ParsedAgentActivity = {};
   private started = false;
 
   constructor(
@@ -236,8 +241,7 @@ export class SessionTailer {
       if (name === "Bash") {
         const command = findAgentBrowserCommand(input.command);
         if (command) {
-          this.parsed.currentAction = describeAgentBrowserCommand(command);
-          this.parsed.updatedAt = new Date().toISOString();
+          this.consumeAgentBrowserCommand(command);
           continue;
         }
       }
@@ -258,8 +262,7 @@ export class SessionTailer {
     const commandSource = codexCommandSource(entry);
     const command = commandSource ? findAgentBrowserCommand(commandSource) : "";
     if (command) {
-      this.parsed.currentAction = describeAgentBrowserCommand(command);
-      this.parsed.updatedAt = new Date().toISOString();
+      this.consumeAgentBrowserCommand(command);
     }
 
     const plan = codexPlanSteps(entry);
@@ -287,6 +290,15 @@ export class SessionTailer {
     this.parsed.todoTotal = total;
     this.parsed.currentStep = active ? todoText(active) : undefined;
     this.parsed.nextStep = pending ? todoText(pending) : undefined;
+    this.parsed.updatedAt = new Date().toISOString();
+  }
+
+  private consumeAgentBrowserCommand(command: string): void {
+    this.parsed.currentAction = describeAgentBrowserCommand(command);
+    const target = agentBrowserTargetUrl(command);
+    if (target.hasTargetCommand) {
+      this.parsed.targetUrl = target.targetUrl;
+    }
     this.parsed.updatedAt = new Date().toISOString();
   }
 }
@@ -489,6 +501,10 @@ export function describeAgentBrowserCommand(command: string): string {
   return truncate(actions.length > 1 ? `${description}等 ${actions.length} 步操作` : description, ACTIVITY_ACTION_LIMIT);
 }
 
+export function extractAgentBrowserTargetUrl(command: string): string | undefined {
+  return agentBrowserTargetUrl(command).targetUrl;
+}
+
 interface AgentBrowserAction {
   segment: string;
   verb: string;
@@ -517,6 +533,8 @@ const AGENT_BROWSER_ACTION_VERBS = new Set([
   "hover",
   "wait"
 ]);
+
+const AGENT_BROWSER_TARGET_VERBS = new Set(["open", "goto", "navigate"]);
 
 function parseAgentBrowserActions(command: string): AgentBrowserAction[] {
   const actions: AgentBrowserAction[] = [];
@@ -558,6 +576,49 @@ function fallbackAgentBrowserAction(command: string): AgentBrowserAction | null 
     verb: (args[0] || "").toLowerCase(),
     rest: args.slice(1).filter((arg) => !arg.startsWith("-"))
   };
+}
+
+function agentBrowserTargetUrl(command: string): { hasTargetCommand: boolean; targetUrl?: string } {
+  let hasTargetCommand = false;
+  let targetUrl: string | undefined;
+  for (const action of parseAgentBrowserActions(command)) {
+    if (!AGENT_BROWSER_TARGET_VERBS.has(action.verb)) {
+      continue;
+    }
+    hasTargetCommand = true;
+    targetUrl = targetUrlFromArgs(action.rest);
+  }
+  return { hasTargetCommand, targetUrl };
+}
+
+function targetUrlFromArgs(args: string[]): string | undefined {
+  for (const arg of args) {
+    const targetUrl = normalizeTargetUrl(arg);
+    if (targetUrl) {
+      return targetUrl;
+    }
+  }
+  return undefined;
+}
+
+function normalizeTargetUrl(rawUrl: string): string | undefined {
+  const value = rawUrl.trim();
+  if (!value) {
+    return undefined;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return undefined;
+  }
+  if (!parsed.protocol) {
+    return undefined;
+  }
+  const pathLabel = `${parsed.pathname || ""}${parsed.search || ""}${parsed.hash || ""}`;
+  const suffix = pathLabel === "/" ? "" : pathLabel;
+  const label = parsed.host ? `${parsed.host}${suffix}` : parsed.href.replace(/^[a-z][a-z\d+.-]*:(\/\/)?/i, "");
+  return truncate(label, ACTIVITY_TARGET_URL_LIMIT) || undefined;
 }
 
 function shellCommandSegments(input: string): string[] {

@@ -30,6 +30,7 @@ export function agentOverlayBootstrapScript(): string {
       operatingPrefix: "AI 正在操作 · ",
       sessionsSuffix: " 个会话",
       actionPrefix: "▸ ",
+      targetPrefix: "目标：",
       takenAction: "浏览器控制权已交还给你",
       defaultAction: "AI 正在操作浏览器",
       nextPrefix: "下一步：",
@@ -84,6 +85,7 @@ export function agentOverlayBootstrapScript(): string {
       operatingPrefix: "AI is operating · ",
       sessionsSuffix: " sessions",
       actionPrefix: "▸ ",
+      targetPrefix: "Target: ",
       takenAction: "browser control returned to you",
       defaultAction: "AI is operating",
       nextPrefix: "Next: ",
@@ -134,6 +136,7 @@ export function agentOverlayBootstrapScript(): string {
     session: "",
     sessionTitle: "",
     currentAction: "",
+    targetUrl: "",
     currentStep: "",
     nextStep: "",
     todoDone: null,
@@ -152,6 +155,7 @@ export function agentOverlayBootstrapScript(): string {
     "session",
     "sessionTitle",
     "currentAction",
+    "targetUrl",
     "currentStep",
     "nextStep",
     "lastMessage",
@@ -174,6 +178,7 @@ export function agentOverlayBootstrapScript(): string {
   let meta = null;
   let elapsed = null;
   let action = null;
+  let target = null;
   let progressText = null;
   let progressBar = null;
   let progressFill = null;
@@ -253,6 +258,7 @@ export function agentOverlayBootstrapScript(): string {
       ".meta{margin:0 0 4px 18px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--pp-muted);font-size:11px;line-height:1.3}",
       ".elapsed{margin:0 0 8px 18px;color:var(--pp-muted-soft);font-size:10.5px;line-height:1.2;font-variant-numeric:tabular-nums}",
       ".action{margin:0 0 9px;padding:8px 9px;border-radius:8px;background:var(--pp-action-bg);font-size:12.5px;line-height:1.35;overflow-wrap:anywhere;color:var(--pp-action-text)}",
+      ".target{margin:-4px 0 8px;color:var(--pp-next);font-size:11.5px;line-height:1.3;overflow-wrap:anywhere}",
       ".progress-text{margin:0 0 5px;color:var(--pp-progress-text);font-size:12px;font-weight:680;line-height:1.35;overflow-wrap:anywhere}",
       ".progress-bar{height:3px;margin:0 0 8px;border-radius:99px;background:var(--pp-progress-bg);overflow:hidden}",
       ".progress-fill{display:block;width:0;height:100%;border-radius:99px;background:linear-gradient(90deg,var(--pp-progress-fill-start),var(--pp-progress-fill-end));box-shadow:0 0 12px var(--pp-progress-glow);transition:width .32s var(--pp-motion-ease)}",
@@ -296,6 +302,7 @@ export function agentOverlayBootstrapScript(): string {
       "      <div class=\"meta\"></div>",
       "      <div class=\"elapsed\"></div>",
       "      <div class=\"action\"></div>",
+      "      <div class=\"target\"></div>",
       "      <div id=\"pp-agent-overlay-progress-text\" class=\"progress-text\"></div>",
       "      <div class=\"progress-bar\" role=\"progressbar\" aria-valuemin=\"0\" aria-valuemax=\"100\" aria-labelledby=\"pp-agent-overlay-progress-text\"><span class=\"progress-fill\"></span></div>",
       "      <div class=\"next\"></div>",
@@ -314,6 +321,7 @@ export function agentOverlayBootstrapScript(): string {
     meta = root.querySelector(".meta");
     elapsed = root.querySelector(".elapsed");
     action = root.querySelector(".action");
+    target = root.querySelector(".target");
     progressText = root.querySelector(".progress-text");
     progressBar = root.querySelector(".progress-bar");
     progressFill = root.querySelector(".progress-fill");
@@ -663,6 +671,8 @@ export function agentOverlayBootstrapScript(): string {
     meta.textContent = metaText;
     meta.style.display = metaText ? "block" : "none";
     action.textContent = copy.actionPrefix + (taken ? copy.takenAction : state.stopError || currentActionText(copy));
+    target.textContent = state.targetUrl ? copy.targetPrefix + state.targetUrl : "";
+    target.style.display = state.targetUrl ? "block" : "none";
 
     renderProgress();
     next.textContent = state.nextStep ? copy.nextPrefix + state.nextStep : "";

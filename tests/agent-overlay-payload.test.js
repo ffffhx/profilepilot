@@ -28,6 +28,7 @@ test("AgentOverlay payload keeps known fields stable and nulls empty values", ()
     "sessions",
     "startedAt",
     "state",
+    "targetUrl",
     "todoDone",
     "todoTotal",
     "updatedAt"
@@ -38,6 +39,7 @@ test("AgentOverlay payload keeps known fields stable and nulls empty values", ()
   assert.equal(payload.session, null);
   assert.equal(payload.sessionTitle, null);
   assert.equal(payload.currentAction, "AI 正在操作浏览器");
+  assert.equal(payload.targetUrl, null);
   assert.equal(payload.currentStep, null);
   assert.equal(payload.nextStep, null);
   assert.equal(payload.todoDone, null);
@@ -58,7 +60,25 @@ test("AgentOverlay payload keeps known fields stable and nulls empty values", ()
 
   const serialized = JSON.stringify(payload);
   assert.match(serialized, /"currentStep":null/);
+  assert.match(serialized, /"targetUrl":null/);
   assert.match(serialized, /"lastMessage":null/);
+});
+
+test("AgentOverlay payload passes through targetUrl from activity", () => {
+  const payload = buildAgentOverlayPayload({
+    locale: "en",
+    state: "active",
+    profileName: "Work Profile",
+    clients: [{ pid: 3201, label: "Codex", session: "cx-target" }],
+    activityForClient: () => ({
+      agent: "Codex",
+      session: "cx-target",
+      currentAction: "打开 example.com",
+      targetUrl: "example.com/path"
+    })
+  });
+
+  assert.equal(payload.targetUrl, "example.com/path");
 });
 
 test("AgentOverlay payload chooses latest lastActive primary and orders sessions", () => {

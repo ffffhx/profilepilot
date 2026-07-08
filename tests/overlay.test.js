@@ -96,6 +96,7 @@ test("SessionTailer parses Claude Bash agent-browser commands", async () => {
         "Claude Bash command"
       );
       assert.equal(activity.currentAction, "打开 example.com");
+      assert.equal(activity.targetUrl, "example.com/path");
     } finally {
       tailer.stop();
     }
@@ -335,6 +336,9 @@ test("agent overlay bootstrap script includes zh/en copy and locale selection", 
   assert.match(script, /Click again to confirm/);
   assert.match(script, /在 ProfilePilot 中查看/);
   assert.match(script, /Open in ProfilePilot/);
+  assert.match(script, /targetPrefix/);
+  assert.match(script, /目标：/);
+  assert.match(script, /Target: /);
   assert.match(script, /browser control returned to you/);
 });
 

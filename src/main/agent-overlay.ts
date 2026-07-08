@@ -65,6 +65,7 @@ interface OverlayPayload {
   session: string | null;
   sessionTitle: string | null;
   currentAction: string | null;
+  targetUrl: string | null;
   currentStep: string | null;
   nextStep: string | null;
   todoDone: number | null;
@@ -1201,6 +1202,7 @@ export function buildAgentOverlayPayload(input: AgentOverlayPayloadInput): Overl
     session: nullableString(activity.session || primary?.session),
     sessionTitle: nullableString(activity.sessionTitle || primary?.title),
     currentAction: nullableString(activity.currentAction || (primary ? "AI 正在操作浏览器" : undefined)),
+    targetUrl: nullableString(activityTargetUrl(activity)),
     currentStep: nullableString(activity.currentStep),
     nextStep: nullableString(activity.nextStep),
     todoDone: nullableNumber(activity.todoDone),
@@ -1282,6 +1284,7 @@ function normalizeOverlayPayload(payload: Partial<OverlayPayload>): OverlayPaylo
     session: nullableString(payload.session),
     sessionTitle: nullableString(payload.sessionTitle),
     currentAction: nullableString(payload.currentAction),
+    targetUrl: nullableString(payload.targetUrl),
     currentStep: nullableString(payload.currentStep),
     nextStep: nullableString(payload.nextStep),
     todoDone: nullableNumber(payload.todoDone),
@@ -1310,6 +1313,11 @@ function normalizeOverlaySessionPayload(payload: Partial<OverlaySessionPayload>)
 
 function nullableString(value: string | null | undefined): string | null {
   return value ? value : null;
+}
+
+function activityTargetUrl(activity: AgentActivity): string | undefined {
+  const value = (activity as { targetUrl?: unknown }).targetUrl;
+  return typeof value === "string" ? value : undefined;
 }
 
 function nullableNumber(value: number | null | undefined): number | null {

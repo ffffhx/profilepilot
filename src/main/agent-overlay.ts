@@ -35,19 +35,48 @@ interface AgentOverlayManagerOptions {
   onStop: (request: AgentOverlayStopRequest) => Promise<void>;
 }
 
-interface OverlayPayload extends AgentActivity {
+type OverlayState = "active" | "takenOver";
+
+interface OverlayPayload {
+  state: OverlayState;
+  profileName: string;
+  agent: string | null;
+  project: string | null;
+  session: string | null;
+  sessionTitle: string | null;
+  currentAction: string | null;
+  currentStep: string | null;
+  nextStep: string | null;
+  todoDone: number | null;
+  todoTotal: number | null;
+  lastMessage: string | null;
+  updatedAt: string | null;
+  startedAt: string | null;
+  sessions: OverlaySessionPayload[];
+}
+
+interface AgentOverlayPayloadInput {
   state: "active" | "takenOver";
   profileName: string;
-  startedAt?: string;
-  sessions?: OverlaySessionPayload[];
+  clients: CdpClientInfo[];
+  lastPayload?: OverlayPayload | null;
+  activityForClient?: (client: CdpClientInfo) => AgentActivity;
+  startedAtForClient?: (client: CdpClientInfo) => string | undefined;
+  now?: number;
 }
 
 interface OverlaySessionPayload {
-  agent?: string;
-  project?: string;
-  session?: string;
-  sessionTitle?: string;
-  lastActive?: string;
+  agent: string | null;
+  project: string | null;
+  session: string | null;
+  sessionTitle: string | null;
+  lastActive: string | null;
+  startedAt: string | null;
+}
+
+interface OverlaySessionRow {
+  client: CdpClientInfo;
+  activity: AgentActivity;
   startedAt?: string;
 }
 
@@ -159,9 +188,7 @@ export class AgentOverlayManager {
   }
 
   getActivity(clients: CdpClientInfo[]): AgentActivity | null {
-    const primary = clients.find((client) => client.session && this.tailers.has(client.session))
-      || clients.find((client) => client.session)
-      || clients[0];
+    const primary = orderedClientsByActivity(clients)[0];
     return primary ? this.activityForClient(primary) : null;
   }
 
@@ -468,42 +495,14 @@ export class AgentOverlayManager {
 
   private payloadForPort(state: PortOverlay): OverlayPayload {
     const takenOver = state.takenOverUntil > Date.now();
-    if (!state.clients.length && state.lastPayload) {
-      return {
-        ...state.lastPayload,
-        state: takenOver ? "takenOver" : state.lastPayload.state,
-        profileName: state.profileName
-      };
-    }
-
-    const sessionRows = this.sessionRowsForPort(state);
-    const primary = sessionRows[0]?.client || state.clients[0];
-    const activity = primary ? this.activityForClient(primary) : {};
-    const startedAt = earliestStartedAt(sessionRows.map((row) => row.startedAt)) || (primary ? this.startedAtForClient(state, primary) : undefined);
-    return {
+    return buildAgentOverlayPayload({
       state: takenOver ? "takenOver" : "active",
       profileName: state.profileName,
-      startedAt,
-      sessions: sessionRows.map((row) => ({
-        agent: row.activity.agent || inferAgentName(row.client),
-        project: row.activity.project || row.client.project,
-        session: row.activity.session || row.client.session,
-        sessionTitle: row.activity.sessionTitle || row.client.title,
-        lastActive: row.client.lastActive || row.activity.updatedAt,
-        startedAt: row.startedAt
-      })),
-      agent: activity.agent || (primary ? inferAgentName(primary) : undefined),
-      project: activity.project || primary?.project,
-      session: activity.session || primary?.session,
-      sessionTitle: activity.sessionTitle || primary?.title,
-      currentAction: activity.currentAction || "AI 正在操作浏览器",
-      currentStep: activity.currentStep,
-      nextStep: activity.nextStep,
-      todoDone: activity.todoDone,
-      todoTotal: activity.todoTotal,
-      lastMessage: activity.lastMessage,
-      updatedAt: activity.updatedAt || primary?.lastActive || new Date().toISOString()
-    };
+      clients: state.clients,
+      lastPayload: state.lastPayload,
+      activityForClient: (client) => this.activityForClient(client),
+      startedAtForClient: (client) => this.startedAtForClient(state, client)
+    });
   }
 
   private syncSessionStarts(state: PortOverlay, now: number): void {
@@ -523,22 +522,12 @@ export class AgentOverlayManager {
     }
   }
 
-  private sessionRowsForPort(state: PortOverlay): Array<{ client: CdpClientInfo; activity: AgentActivity; startedAt?: string }> {
-    const seen = new Set<string>();
-    const rows: Array<{ client: CdpClientInfo; activity: AgentActivity; startedAt?: string }> = [];
-    for (const client of state.clients) {
-      const key = clientSessionKey(client);
-      if (seen.has(key)) {
-        continue;
-      }
-      seen.add(key);
-      rows.push({
-        client,
-        activity: this.activityForClient(client),
-        startedAt: state.sessionStartedAt.get(key)
-      });
-    }
-    return rows;
+  private sessionRowsForPort(state: PortOverlay): OverlaySessionRow[] {
+    return sessionRowsForClients(
+      state.clients,
+      (client) => this.activityForClient(client),
+      (client) => this.startedAtForClient(state, client)
+    );
   }
 
   private startedAtForClient(state: PortOverlay, client: CdpClientInfo): string | undefined {
@@ -608,8 +597,148 @@ export class AgentOverlayManager {
   }
 }
 
+export function buildAgentOverlayPayload(input: AgentOverlayPayloadInput): OverlayPayload {
+  if (!input.clients.length && input.lastPayload) {
+    return normalizeOverlayPayload({
+      ...input.lastPayload,
+      state: input.state === "takenOver" ? "takenOver" : input.lastPayload.state,
+      profileName: input.profileName
+    });
+  }
+
+  const activityForClient = input.activityForClient || baseActivityForClient;
+  const startedAtForClient = input.startedAtForClient || (() => undefined);
+  const sessionRows = sessionRowsForClients(input.clients, activityForClient, startedAtForClient);
+  const primary = sessionRows[0]?.client || orderedClientsByActivity(input.clients)[0];
+  const activity = primary ? activityForClient(primary) : {};
+  const now = input.now ?? Date.now();
+  const startedAt = earliestStartedAt(sessionRows.map((row) => row.startedAt)) || (primary ? startedAtForClient(primary) : undefined);
+
+  return normalizeOverlayPayload({
+    state: input.state,
+    profileName: input.profileName,
+    startedAt,
+    sessions: sessionRows.map((row) => ({
+      agent: nullableString(row.activity.agent || inferAgentName(row.client)),
+      project: nullableString(row.activity.project || row.client.project),
+      session: nullableString(row.activity.session || row.client.session),
+      sessionTitle: nullableString(row.activity.sessionTitle || row.client.title),
+      lastActive: nullableString(row.client.lastActive || row.activity.updatedAt),
+      startedAt: nullableString(row.startedAt)
+    })),
+    agent: nullableString(activity.agent || (primary ? inferAgentName(primary) : undefined)),
+    project: nullableString(activity.project || primary?.project),
+    session: nullableString(activity.session || primary?.session),
+    sessionTitle: nullableString(activity.sessionTitle || primary?.title),
+    currentAction: nullableString(activity.currentAction || (primary ? "AI 正在操作浏览器" : undefined)),
+    currentStep: nullableString(activity.currentStep),
+    nextStep: nullableString(activity.nextStep),
+    todoDone: nullableNumber(activity.todoDone),
+    todoTotal: nullableNumber(activity.todoTotal),
+    lastMessage: nullableString(activity.lastMessage),
+    updatedAt: nullableString(primary ? activity.updatedAt || primary.lastActive || new Date(now).toISOString() : undefined)
+  });
+}
+
 export function isAgentOverlayClient(client: CdpClientInfo): boolean {
   return Boolean(client.agent) || client.label === "agent-browser" || client.label === "Codex" || client.label === "Claude Code";
+}
+
+function sessionRowsForClients(
+  clients: CdpClientInfo[],
+  activityForClient: (client: CdpClientInfo) => AgentActivity,
+  startedAtForClient: (client: CdpClientInfo) => string | undefined
+): OverlaySessionRow[] {
+  const seen = new Set<string>();
+  const rows: OverlaySessionRow[] = [];
+  for (const client of orderedClientsByActivity(clients)) {
+    const key = clientSessionKey(client);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    rows.push({
+      client,
+      activity: activityForClient(client),
+      startedAt: startedAtForClient(client)
+    });
+  }
+  return rows;
+}
+
+function orderedClientsByActivity(clients: CdpClientInfo[]): CdpClientInfo[] {
+  return [...clients].sort(compareClientsByActivity);
+}
+
+function compareClientsByActivity(left: CdpClientInfo, right: CdpClientInfo): number {
+  const leftLastActive = lastActiveTimestamp(left);
+  const rightLastActive = lastActiveTimestamp(right);
+  const leftHasLastActive = Number.isFinite(leftLastActive);
+  const rightHasLastActive = Number.isFinite(rightLastActive);
+  if (leftHasLastActive && rightHasLastActive && leftLastActive !== rightLastActive) {
+    return rightLastActive - leftLastActive;
+  }
+  if (leftHasLastActive !== rightHasLastActive) {
+    return leftHasLastActive ? -1 : 1;
+  }
+  if (left.pid !== right.pid) {
+    return left.pid - right.pid;
+  }
+  return 0;
+}
+
+function lastActiveTimestamp(client: CdpClientInfo): number {
+  const timestamp = client.lastActive ? Date.parse(client.lastActive) : Number.NaN;
+  return Number.isFinite(timestamp) ? timestamp : Number.NaN;
+}
+
+function baseActivityForClient(client: CdpClientInfo): AgentActivity {
+  return {
+    agent: inferAgentName(client),
+    project: client.project,
+    session: client.session,
+    sessionTitle: client.title,
+    updatedAt: client.lastActive
+  };
+}
+
+function normalizeOverlayPayload(payload: Partial<OverlayPayload>): OverlayPayload {
+  return {
+    state: payload.state === "takenOver" ? "takenOver" : "active",
+    profileName: nullableString(payload.profileName) || "",
+    agent: nullableString(payload.agent),
+    project: nullableString(payload.project),
+    session: nullableString(payload.session),
+    sessionTitle: nullableString(payload.sessionTitle),
+    currentAction: nullableString(payload.currentAction),
+    currentStep: nullableString(payload.currentStep),
+    nextStep: nullableString(payload.nextStep),
+    todoDone: nullableNumber(payload.todoDone),
+    todoTotal: nullableNumber(payload.todoTotal),
+    lastMessage: nullableString(payload.lastMessage),
+    updatedAt: nullableString(payload.updatedAt),
+    startedAt: nullableString(payload.startedAt),
+    sessions: Array.isArray(payload.sessions) ? payload.sessions.map(normalizeOverlaySessionPayload) : []
+  };
+}
+
+function normalizeOverlaySessionPayload(payload: Partial<OverlaySessionPayload>): OverlaySessionPayload {
+  return {
+    agent: nullableString(payload.agent),
+    project: nullableString(payload.project),
+    session: nullableString(payload.session),
+    sessionTitle: nullableString(payload.sessionTitle),
+    lastActive: nullableString(payload.lastActive),
+    startedAt: nullableString(payload.startedAt)
+  };
+}
+
+function nullableString(value: string | null | undefined): string | null {
+  return value ? value : null;
+}
+
+function nullableNumber(value: number | null | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function inferAgentName(client: CdpClientInfo): string | undefined {
@@ -626,7 +755,7 @@ function inferAgentName(client: CdpClientInfo): string | undefined {
 }
 
 function clientSessionKey(client: CdpClientInfo): string {
-  return client.session ? `session:${client.session}` : `pid:${client.pid}`;
+  return client.session ? `session:${client.session}` : `client:${client.label}:${client.pid}`;
 }
 
 function uniqueClientsByPid(clients: CdpClientInfo[]): CdpClientInfo[] {

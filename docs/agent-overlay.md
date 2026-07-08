@@ -1,5 +1,7 @@
 # Agent Overlay 工程设计
 
+面向使用者的说明见：[AI 操作可见化使用说明](./agent-overlay-usage.md)。
+
 本文记录 ProfilePilot 的「AI 操作可见化 + 人工接管」实现，读者是后续维护者。当前实现主要落在：
 
 - `src/main/profile-manager.ts`

@@ -38,6 +38,17 @@ interface AgentOverlayManagerOptions {
 interface OverlayPayload extends AgentActivity {
   state: "active" | "takenOver";
   profileName: string;
+  startedAt?: string;
+  sessions?: OverlaySessionPayload[];
+}
+
+interface OverlaySessionPayload {
+  agent?: string;
+  project?: string;
+  session?: string;
+  sessionTitle?: string;
+  lastActive?: string;
+  startedAt?: string;
 }
 
 interface PageOverlay {
@@ -63,6 +74,7 @@ interface PortOverlay {
   takeoverInFlight: boolean;
   takenOverUntil: number;
   lastPayload: OverlayPayload | null;
+  sessionStartedAt: Map<string, string>;
 }
 
 export class AgentOverlayManager {
@@ -90,6 +102,7 @@ export class AgentOverlayManager {
         state.profileId = next.profileId;
         state.profileName = next.profileName;
         state.clients = next.clients;
+        this.syncSessionStarts(state, now);
         if (state.clients.length && state.takenOverUntil > now) {
           // 用户接管后 7 秒内保留 takenOver overlay；但 agent-browser 同会话或新会话重连即恢复 active。
           state.takenOverUntil = 0;
@@ -119,13 +132,16 @@ export class AgentOverlayManager {
           syncing: false,
           takeoverInFlight: false,
           takenOverUntil: 0,
-          lastPayload: null
+          lastPayload: null,
+          sessionStartedAt: new Map()
         };
+        this.syncSessionStarts(state, now);
         this.ports.set(next.port, state);
       } else {
         state.profileId = next.profileId;
         state.profileName = next.profileName;
         state.clients = next.clients;
+        this.syncSessionStarts(state, now);
         if (state.clients.length && state.takenOverUntil > now) {
           // 7 秒 keepalive 只覆盖无人接手的窗口；重连成功后下一次 push 会回到 active。
           state.takenOverUntil = 0;
@@ -360,21 +376,33 @@ export class AgentOverlayManager {
     if (state.takeoverInFlight || Date.now() < state.takenOverUntil) {
       return;
     }
-    const driver = this.findStopDriver(state, requestedSession);
-    if (!driver) {
+    const drivers = this.findStopDrivers(state, requestedSession);
+    if (!drivers.length) {
       return;
     }
 
     state.takeoverInFlight = true;
+    let stoppedCount = 0;
+    let firstError: unknown = null;
     try {
-      await this.options.onStop({
-        port: state.port,
-        profileId: state.profileId,
-        profileName: state.profileName,
-        pid: driver.pid,
-        session: driver.session,
-        agent: inferAgentName(driver)
-      });
+      for (const driver of drivers) {
+        try {
+          await this.options.onStop({
+            port: state.port,
+            profileId: state.profileId,
+            profileName: state.profileName,
+            pid: driver.pid,
+            session: driver.session,
+            agent: inferAgentName(driver)
+          });
+          stoppedCount += 1;
+        } catch (error) {
+          firstError = firstError || error;
+        }
+      }
+      if (!stoppedCount) {
+        throw firstError instanceof Error ? firstError : new Error("没有可停止的 AI 驱动连接。");
+      }
       state.takenOverUntil = Date.now() + TAKEN_OVER_KEEPALIVE_MS;
       state.lastPayload = {
         ...this.payloadForPort(state),
@@ -386,17 +414,24 @@ export class AgentOverlayManager {
     }
   }
 
-  private findStopDriver(state: PortOverlay, requestedSession?: string): CdpClientInfo | null {
+  private findStopDrivers(state: PortOverlay, requestedSession?: string): CdpClientInfo[] {
     const primary = state.clients[0];
-    const session = requestedSession || primary?.session;
     const agentBrowser = state.clients.filter((client) => client.label === "agent-browser");
-    if (session) {
-      const exact = agentBrowser.find((client) => client.session === session);
-      if (exact) {
+    if (requestedSession) {
+      const exact = uniqueClientsByPid(agentBrowser.filter((client) => client.session === requestedSession));
+      if (exact.length) {
         return exact;
       }
+      const sessionClient = state.clients.find((client) => client.session === requestedSession);
+      return sessionClient ? [sessionClient] : [];
     }
-    return agentBrowser[0] || primary || null;
+
+    if (this.sessionRowsForPort(state).length >= 2) {
+      const drivers = uniqueClientsByPid(agentBrowser);
+      return drivers.length ? drivers : uniqueClientsByPid(state.clients);
+    }
+
+    return uniqueClientsByPid([agentBrowser[0] || primary].filter(Boolean) as CdpClientInfo[]);
   }
 
   private async pushAllUpdates(): Promise<void> {
@@ -441,11 +476,22 @@ export class AgentOverlayManager {
       };
     }
 
-    const primary = state.clients[0];
+    const sessionRows = this.sessionRowsForPort(state);
+    const primary = sessionRows[0]?.client || state.clients[0];
     const activity = primary ? this.activityForClient(primary) : {};
+    const startedAt = earliestStartedAt(sessionRows.map((row) => row.startedAt)) || (primary ? this.startedAtForClient(state, primary) : undefined);
     return {
       state: takenOver ? "takenOver" : "active",
       profileName: state.profileName,
+      startedAt,
+      sessions: sessionRows.map((row) => ({
+        agent: row.activity.agent || inferAgentName(row.client),
+        project: row.activity.project || row.client.project,
+        session: row.activity.session || row.client.session,
+        sessionTitle: row.activity.sessionTitle || row.client.title,
+        lastActive: row.client.lastActive || row.activity.updatedAt,
+        startedAt: row.startedAt
+      })),
       agent: activity.agent || (primary ? inferAgentName(primary) : undefined),
       project: activity.project || primary?.project,
       session: activity.session || primary?.session,
@@ -458,6 +504,45 @@ export class AgentOverlayManager {
       lastMessage: activity.lastMessage,
       updatedAt: activity.updatedAt || primary?.lastActive || new Date().toISOString()
     };
+  }
+
+  private syncSessionStarts(state: PortOverlay, now: number): void {
+    const activeKeys = new Set<string>();
+    const startedAt = new Date(now).toISOString();
+    for (const client of state.clients) {
+      const key = clientSessionKey(client);
+      activeKeys.add(key);
+      if (!state.sessionStartedAt.has(key)) {
+        state.sessionStartedAt.set(key, startedAt);
+      }
+    }
+    for (const key of [...state.sessionStartedAt.keys()]) {
+      if (!activeKeys.has(key)) {
+        state.sessionStartedAt.delete(key);
+      }
+    }
+  }
+
+  private sessionRowsForPort(state: PortOverlay): Array<{ client: CdpClientInfo; activity: AgentActivity; startedAt?: string }> {
+    const seen = new Set<string>();
+    const rows: Array<{ client: CdpClientInfo; activity: AgentActivity; startedAt?: string }> = [];
+    for (const client of state.clients) {
+      const key = clientSessionKey(client);
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      rows.push({
+        client,
+        activity: this.activityForClient(client),
+        startedAt: state.sessionStartedAt.get(key)
+      });
+    }
+    return rows;
+  }
+
+  private startedAtForClient(state: PortOverlay, client: CdpClientInfo): string | undefined {
+    return state.sessionStartedAt.get(clientSessionKey(client));
   }
 
   private activityForClient(client: CdpClientInfo): AgentActivity {
@@ -538,6 +623,36 @@ function inferAgentName(client: CdpClientInfo): string | undefined {
     return "Codex";
   }
   return client.label || undefined;
+}
+
+function clientSessionKey(client: CdpClientInfo): string {
+  return client.session ? `session:${client.session}` : `pid:${client.pid}`;
+}
+
+function uniqueClientsByPid(clients: CdpClientInfo[]): CdpClientInfo[] {
+  const seen = new Set<number>();
+  const result: CdpClientInfo[] = [];
+  for (const client of clients) {
+    if (seen.has(client.pid)) {
+      continue;
+    }
+    seen.add(client.pid);
+    result.push(client);
+  }
+  return result;
+}
+
+function earliestStartedAt(values: Array<string | undefined>): string | undefined {
+  let earliest: string | undefined;
+  let earliestTs = Number.POSITIVE_INFINITY;
+  for (const value of values) {
+    const ts = value ? Date.parse(value) : Number.NaN;
+    if (Number.isFinite(ts) && ts < earliestTs) {
+      earliest = value;
+      earliestTs = ts;
+    }
+  }
+  return earliest;
 }
 
 function isInjectableTarget(target: CdpTargetListEntry): boolean {

@@ -22,7 +22,8 @@
     "dist:mac:arm64": "npm run build && electron-builder --mac dmg zip --arm64 --publish never",
     "dist:mac:x64": "npm run build && electron-builder --mac dmg zip --x64 --publish never",
     "dist:win": "npm run build && electron-builder --win nsis zip --x64 --publish never",
-    "site": "node site/server.mjs"
+    "site": "node site/server.mjs",
+    "test": "npm run build && node --test tests/"
   },
   "engines": {
     "node": ">=20"

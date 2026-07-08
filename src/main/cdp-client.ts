@@ -9,7 +9,7 @@ export class CdpBrowserClient {
   private readonly pending = new Map<number, CdpPendingRequest>();
   // CDP 事件订阅（长连接观察者用）：事件是浏览器主动推送的无 id 消息，默认丢弃；
   // 挂了 onEvent 才分发。onDisconnect 在连接关闭时通知持有方清理状态。
-  onEvent: ((method: string, params: unknown) => void) | null = null;
+  onEvent: ((method: string, params: unknown, sessionId?: string) => void) | null = null;
   onDisconnect: (() => void) | null = null;
 
   private constructor(private readonly socket: WebSocket) {
@@ -54,7 +54,7 @@ export class CdpBrowserClient {
     });
   }
 
-  send<T>(method: string, params?: Record<string, unknown>, timeoutMs = 15000): Promise<T> {
+  send<T>(method: string, params?: Record<string, unknown>, timeoutMs = 15000, sessionId?: string): Promise<T> {
     if (this.socket.readyState !== 1) {
       return Promise.reject(new ProfileManagerError("Chrome CDP 连接未打开。", "CDP_NOT_CONNECTED"));
     }
@@ -75,7 +75,11 @@ export class CdpBrowserClient {
       });
 
       try {
-        this.socket.send(JSON.stringify({ id, method, params: params || {} }));
+        const message: Record<string, unknown> = { id, method, params: params || {} };
+        if (sessionId) {
+          message.sessionId = sessionId;
+        }
+        this.socket.send(JSON.stringify(message));
       } catch (error) {
         clearTimeout(timer);
         this.pending.delete(id);
@@ -100,7 +104,7 @@ export class CdpBrowserClient {
     }
     if (typeof message.id !== "number") {
       if (message.method && this.onEvent) {
-        this.onEvent(message.method, message.params);
+        this.onEvent(message.method, message.params, stringValue((message as CdpResponse<unknown> & { sessionId?: unknown }).sessionId) || undefined);
       }
       return;
     }
@@ -335,7 +339,9 @@ export function requestCdpCloseTarget(port: number, targetId: string): Promise<v
         hostname: "127.0.0.1",
         port,
         path: `/json/close/${targetId}`,
-        timeout: 700
+        timeout: 700,
+        agent: false,
+        headers: { Connection: "close" }
       },
       (response) => {
         response.resume();
@@ -363,7 +369,9 @@ export function requestCdpJson<T>(port: number, requestPath: string): Promise<T>
         hostname: "127.0.0.1",
         port,
         path: requestPath,
-        timeout: 700
+        timeout: 700,
+        agent: false,
+        headers: { Connection: "close" }
       },
       (response) => {
         const chunks: Buffer[] = [];

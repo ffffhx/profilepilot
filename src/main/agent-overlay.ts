@@ -83,7 +83,8 @@ interface OverlaySessionRow {
 interface PageOverlay {
   targetId: string;
   url: string;
-  client: CdpBrowserClient | null;
+  sessionId: string | null;
+  attachPending: boolean;
   connecting: boolean;
   closing: boolean;
   scriptIdentifier?: string;
@@ -271,6 +272,7 @@ export class AgentOverlayManager {
         const page = state.pages.get(targetId);
         if (page) {
           page.url = target.url || page.url;
+          void this.attachPage(state, page).catch(() => undefined);
           continue;
         }
         void this.connectPage(state, targetId, target).catch(() => undefined);
@@ -297,15 +299,26 @@ export class AgentOverlayManager {
         return;
       }
       state.browserClient = client;
-      client.onEvent = (method, params) => {
-        this.handleBrowserEvent(state, method, params);
+      client.onEvent = (method, params, sessionId) => {
+        this.handleBrowserEvent(state, method, params, sessionId);
       };
       client.onDisconnect = () => {
         if (state.browserClient === client) {
           state.browserClient = null;
+          for (const page of state.pages.values()) {
+            page.sessionId = null;
+            page.attachPending = false;
+            page.connecting = false;
+            page.scriptIdentifier = undefined;
+          }
         }
       };
       await client.send("Target.setDiscoverTargets", { discover: true }, 5000);
+      await client.send(
+        "Target.setAutoAttach",
+        { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
+        5000
+      );
     } catch {
       this.teardownTargetObserver(state);
     } finally {
@@ -313,67 +326,190 @@ export class AgentOverlayManager {
     }
   }
 
-  private handleBrowserEvent(state: PortOverlay, method: string, params: unknown): void {
+  private handleBrowserEvent(state: PortOverlay, method: string, params: unknown, sessionId?: string): void {
+    if (method === "Runtime.bindingCalled") {
+      const page = this.pageForSession(state, sessionId);
+      if (page) {
+        this.handlePageEvent(state, page, method, params);
+      }
+      return;
+    }
+
+    if (method === "Target.attachedToTarget") {
+      this.handleAttachedToTarget(state, params);
+      return;
+    }
+
+    if (method === "Target.detachedFromTarget") {
+      this.handleDetachedFromTarget(state, params);
+      return;
+    }
+
     if (!method.startsWith("Target.target")) {
       return;
     }
-    if (isRecord(params) && isRecord(params.targetInfo) && stringValue(params.targetInfo.type) !== "page") {
+
+    if (method === "Target.targetDestroyed" && isRecord(params)) {
+      const targetId = stringValue(params.targetId);
+      const page = targetId ? state.pages.get(targetId) : null;
+      if (page) {
+        void this.teardownPage(state, page).catch(() => undefined);
+      }
       return;
+    }
+
+    if (isRecord(params) && isRecord(params.targetInfo)) {
+      const targetInfo = params.targetInfo;
+      if (stringValue(targetInfo.type) !== "page") {
+        return;
+      }
+      const targetId = stringValue(targetInfo.targetId) || stringValue(targetInfo.id);
+      const page = targetId ? state.pages.get(targetId) : null;
+      if (page) {
+        page.url = stringValue(targetInfo.url) || page.url;
+      }
     }
     void this.syncPortTargets(state).catch(() => undefined);
   }
 
   private async connectPage(state: PortOverlay, targetId: string, target: CdpTargetListEntry): Promise<void> {
-    const webSocketDebuggerUrl = target.webSocketDebuggerUrl;
-    if (!webSocketDebuggerUrl) {
+    const page = this.upsertPage(state, targetId, target.url || "");
+    await this.attachPage(state, page);
+  }
+
+  private handleAttachedToTarget(state: PortOverlay, params: unknown): void {
+    if (!isRecord(params) || !isRecord(params.targetInfo)) {
+      return;
+    }
+    const sessionId = stringValue(params.sessionId);
+    const targetInfo = params.targetInfo;
+    if (!sessionId || stringValue(targetInfo.type) !== "page") {
+      return;
+    }
+    const targetId = stringValue(targetInfo.targetId) || stringValue(targetInfo.id);
+    if (!targetId || !isInjectableTargetInfo(targetInfo)) {
       return;
     }
 
+    const page = this.upsertPage(state, targetId, stringValue(targetInfo.url) || "");
+    if (page.sessionId && page.sessionId !== sessionId) {
+      page.connecting = false;
+      page.scriptIdentifier = undefined;
+      page.lastPayloadText = "";
+    }
+    page.sessionId = sessionId;
+    page.attachPending = false;
+    void this.initializePageSession(state, page, sessionId).catch(() => undefined);
+  }
+
+  private handleDetachedFromTarget(state: PortOverlay, params: unknown): void {
+    if (!isRecord(params)) {
+      return;
+    }
+    const sessionId = stringValue(params.sessionId);
+    const page = this.pageForSession(state, sessionId || undefined);
+    if (!page) {
+      return;
+    }
+    page.sessionId = null;
+    page.attachPending = false;
+    page.connecting = false;
+    page.scriptIdentifier = undefined;
+    page.lastPayloadText = "";
+    void this.syncPortTargets(state).catch(() => undefined);
+  }
+
+  private upsertPage(state: PortOverlay, targetId: string, url: string): PageOverlay {
+    const existing = state.pages.get(targetId);
+    if (existing) {
+      existing.url = url || existing.url;
+      return existing;
+    }
     const page: PageOverlay = {
       targetId,
-      url: target.url || "",
-      client: null,
-      connecting: true,
+      url,
+      sessionId: null,
+      attachPending: false,
+      connecting: false,
       closing: false,
       lastPayloadText: "",
       lastPushAt: 0
     };
     state.pages.set(targetId, page);
+    return page;
+  }
 
+  private async attachPage(state: PortOverlay, page: PageOverlay): Promise<void> {
+    const client = state.browserClient;
+    if (!client || state.browserConnecting || page.sessionId || page.attachPending || page.connecting || page.closing) {
+      return;
+    }
+    page.attachPending = true;
     try {
-      const client = await CdpBrowserClient.connect(webSocketDebuggerUrl, PAGE_CONNECT_TIMEOUT);
-      if (state.pages.get(targetId) !== page) {
-        client.close();
+      const result = await client.send<{ sessionId?: string }>(
+        "Target.attachToTarget",
+        { targetId: page.targetId, flatten: true },
+        5000
+      );
+      const sessionId = result.sessionId;
+      if (!sessionId || state.pages.get(page.targetId) !== page || page.closing) {
         return;
       }
-      page.client = client;
-      client.onEvent = (method, params) => {
-        this.handlePageEvent(state, page, method, params);
-      };
-      client.onDisconnect = () => {
-        if (state.pages.get(targetId) === page) {
-          state.pages.delete(targetId);
-        }
-      };
+      page.sessionId = sessionId;
+      await this.initializePageSession(state, page, sessionId);
+    } catch {
+      // Auto-attach may have won the race, or the target may have disappeared.
+    } finally {
+      page.attachPending = false;
+    }
+  }
 
-      await client.send("Page.enable", {}, 5000);
+  private async initializePageSession(state: PortOverlay, page: PageOverlay, sessionId: string): Promise<void> {
+    const client = state.browserClient;
+    if (!client || page.connecting || page.closing || page.sessionId !== sessionId) {
+      return;
+    }
+    page.connecting = true;
+    try {
+      await client.send("Page.enable", {}, 5000, sessionId);
       const addScript = await client.send<{ identifier?: string }>(
         "Page.addScriptToEvaluateOnNewDocument",
         { source: this.script },
-        5000
+        5000,
+        sessionId
       );
+      if (state.pages.get(page.targetId) !== page || page.sessionId !== sessionId || page.closing) {
+        return;
+      }
       page.scriptIdentifier = addScript.identifier;
-      await client.send("Runtime.enable", {}, 5000);
-      await client.send("Runtime.addBinding", { name: BINDING_NAME }, 5000);
-      await client.send("Runtime.evaluate", { expression: this.script, awaitPromise: false }, 5000);
+      await client.send("Runtime.enable", {}, 5000, sessionId);
+      await client.send("Runtime.addBinding", { name: BINDING_NAME }, 5000, sessionId);
+      await client.send("Runtime.evaluate", { expression: this.script, awaitPromise: false }, 5000, sessionId);
       page.connecting = false;
       await this.pushPageUpdate(state, page, true);
     } catch {
-      state.pages.delete(targetId);
-      page.client?.close();
+      if (page.sessionId === sessionId) {
+        page.sessionId = null;
+        page.scriptIdentifier = undefined;
+        page.lastPayloadText = "";
+      }
     } finally {
-      page.connecting = false;
+      if (state.pages.get(page.targetId) === page) {
+        page.connecting = false;
+      }
     }
+  }
+
+  private pageForSession(state: PortOverlay, sessionId?: string): PageOverlay | null {
+    if (!sessionId) {
+      return null;
+    }
+    for (const page of state.pages.values()) {
+      if (page.sessionId === sessionId) {
+        return page;
+      }
+    }
+    return null;
   }
 
   private handlePageEvent(state: PortOverlay, _page: PageOverlay, method: string, params: unknown): void {
@@ -470,7 +606,9 @@ export class AgentOverlayManager {
   }
 
   private async pushPageUpdate(state: PortOverlay, page: PageOverlay, force = false): Promise<void> {
-    if (!page.client || page.connecting || page.closing) {
+    const client = state.browserClient;
+    const sessionId = page.sessionId;
+    if (!client || !sessionId || page.connecting || page.closing) {
       return;
     }
     const payload = this.payloadForPort(state);
@@ -480,10 +618,11 @@ export class AgentOverlayManager {
       return;
     }
     try {
-      await page.client.send(
+      await client.send(
         "Runtime.evaluate",
         { expression: `window.__ppAgentOverlayUpdate && window.__ppAgentOverlayUpdate(${text})`, awaitPromise: false },
-        3000
+        3000,
+        sessionId
       );
       page.lastPayloadText = text;
       page.lastPushAt = now;
@@ -557,11 +696,11 @@ export class AgentOverlayManager {
   }
 
   private teardownPort(state: PortOverlay): void {
-    this.teardownTargetObserver(state);
-    for (const page of [...state.pages.values()]) {
-      void this.teardownPage(state, page).catch(() => undefined);
-    }
+    const pages = [...state.pages.values()];
     state.pages.clear();
+    void Promise.all(pages.map((page) => this.teardownPage(state, page).catch(() => undefined))).finally(() => {
+      this.teardownTargetObserver(state);
+    });
   }
 
   private teardownTargetObserver(state: PortOverlay): void {
@@ -577,23 +716,25 @@ export class AgentOverlayManager {
     }
     page.closing = true;
     state.pages.delete(page.targetId);
-    const client = page.client;
-    if (!client) {
+    const client = state.browserClient;
+    const sessionId = page.sessionId;
+    if (!client || !sessionId) {
       return;
     }
     if (page.scriptIdentifier) {
       await client
-        .send("Page.removeScriptToEvaluateOnNewDocument", { identifier: page.scriptIdentifier }, 2000)
+        .send("Page.removeScriptToEvaluateOnNewDocument", { identifier: page.scriptIdentifier }, 2000, sessionId)
         .catch(() => undefined);
     }
     await client
       .send(
         "Runtime.evaluate",
         { expression: "window.__ppAgentOverlayTeardown && window.__ppAgentOverlayTeardown()", awaitPromise: false },
-        2000
+        2000,
+        sessionId
       )
       .catch(() => undefined);
-    client.close();
+    await client.send("Target.detachFromTarget", { sessionId }, 2000).catch(() => undefined);
   }
 }
 
@@ -785,15 +926,25 @@ function earliestStartedAt(values: Array<string | undefined>): string | undefine
 }
 
 function isInjectableTarget(target: CdpTargetListEntry): boolean {
-  if (target.type !== "page" || !target.webSocketDebuggerUrl) {
+  if (target.type !== "page" || !target.id) {
     return false;
   }
-  const url = target.url || "";
+  return isInjectableUrl(target.url || "");
+}
+
+function isInjectableTargetInfo(targetInfo: Record<string, unknown>): boolean {
+  if (stringValue(targetInfo.type) !== "page") {
+    return false;
+  }
+  return isInjectableUrl(stringValue(targetInfo.url) || "");
+}
+
+function isInjectableUrl(url: string): boolean {
   return !/^(chrome|devtools|chrome-extension|edge|about:chrome|view-source:chrome):/i.test(url);
 }
 
 function targetKey(target: CdpTargetListEntry): string {
-  return target.id || target.webSocketDebuggerUrl || "";
+  return target.id || "";
 }
 
 function safeJson(value: unknown): string {

@@ -31,6 +31,7 @@ import type {
 
 const profileManagerApi: ProfileManagerApi = {
   getState: (): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.getState),
+  getTakeoverHistory: (): Promise<AgentTakeoverEvent[]> => ipcRenderer.invoke(IPC_CHANNELS.getTakeoverHistory),
   createProfile: (name: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.createProfile, name),
   renameProfile: (id: string, name: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.renameProfile, id, name),
   launchProfile: (id: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.launchProfile, id),

@@ -653,6 +653,19 @@ body.mini-collapsing .mini-shell {
   white-space: nowrap;
 }
 
+.mini-profile-takeover {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--warn-bright);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 750;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* 悬浮窗卡片上的「结束驱动连接」✕：默认藏起，hover 卡片时右侧浮现 */
 .mini-disconnect {
   position: absolute;
@@ -1492,6 +1505,12 @@ body:not(.booted) .migration-panel {
   font-weight: 750;
   letter-spacing: 0.12em;
   text-transform: uppercase;
+}
+
+.agent-takeover-notice-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .agent-takeover-notice-head button {
@@ -3302,10 +3321,20 @@ body:not(.booted) .layout {
   color: var(--warn-bright);
 }
 
+.mini-profile-card.taken-over .mini-readout {
+  color: var(--warn-bright);
+  font-weight: 750;
+}
+
 /* 悬浮窗卡片：被工具驱动时高亮读数并加快机头脉冲。 */
 .mini-profile-card.driving .mini-readout {
   color: var(--accent-bright);
   font-weight: 700;
+}
+
+.mini-profile-card.driving.taken-over .mini-readout {
+  color: var(--warn-bright);
+  font-weight: 750;
 }
 
 .mini-profile-card.driving .mini-node.plane {

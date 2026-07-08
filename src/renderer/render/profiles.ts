@@ -1,8 +1,13 @@
 import { isBusyAction } from "../busy";
 import { store } from "../state";
-import { ExternalChromeInstance, PublicProfile } from "../types";
+import { AgentActivity, CdpClientInfo, ExternalChromeInstance, PublicProfile } from "../types";
 import { renderLiveViewSection } from "./live-view";
-import { NATIVE_CDP_UNSUPPORTED_NOTE, agentActivityLeadText, agentActivityProgressText, agentActivityTooltipText, cdpClientToolSummary, cdpLaunchButtonTitle, cdpPortLabel, cdpSessionText, contentionNotice, contentionNoticeShort, deleteButtonTitle, escapeHtml, focusButtonTitle, formatDate, formatRelativeTime, hasAgentActivity, launchButtonTitle, listeningPortsNote, liveAddrLabel, prettyCdpClientLabel, profileStatusLabel, renderButtonLabel, sourceDetail, truncateText } from "../util";
+import { NATIVE_CDP_UNSUPPORTED_NOTE, agentActivityLeadText, agentActivityProgressText, agentActivityTooltipText, cdpClientToolSummary, cdpLaunchButtonTitle, cdpPortLabel, cdpSessionText, contentionNotice, contentionNoticeShort, deleteButtonTitle, escapeHtml, focusButtonTitle, formatDate, formatRelativeTime, launchButtonTitle, listeningPortsNote, liveAddrLabel, prettyCdpClientLabel, profileStatusLabel, renderButtonLabel, sourceDetail, truncateText } from "../util";
+
+interface ConnectionActivityModel {
+  cdpClients: CdpClientInfo[];
+  agentActivity?: AgentActivity | null;
+}
 
 interface ProfileRootGroup {
   key: string;
@@ -244,8 +249,12 @@ function activityValue(value?: string): string {
   return String(value ?? "").replace(/\s+/g, " ").trim();
 }
 
-function renderAgentActivityInline(profile: PublicProfile): string {
-  if (!hasAgentActivity(profile)) {
+function hasConnectionAgentActivity(model: ConnectionActivityModel): boolean {
+  return Boolean(model.agentActivity) && model.cdpClients.length > 0;
+}
+
+function renderAgentActivityInline(profile: ConnectionActivityModel): string {
+  if (!hasConnectionAgentActivity(profile)) {
     return "";
   }
   const activity = profile.agentActivity;
@@ -254,8 +263,8 @@ function renderAgentActivityInline(profile: PublicProfile): string {
   return `<span class="conn-agent-action-tip action-tooltip" data-tooltip="${escapeHtml(tooltip)}"><span class="conn-agent-action">▸ ${escapeHtml(lead)}</span></span>`;
 }
 
-function renderAgentActivityTipRows(profile: PublicProfile): string {
-  if (!hasAgentActivity(profile) || !profile.agentActivity) {
+function renderAgentActivityTipRows(profile: ConnectionActivityModel): string {
+  if (!hasConnectionAgentActivity(profile) || !profile.agentActivity) {
     return "";
   }
   const activity = profile.agentActivity;
@@ -488,6 +497,67 @@ export function renderEmpty(): string {
   `;
 }
 
+function externalConnectionModel(instance: ExternalChromeInstance): ConnectionActivityModel {
+  return {
+    cdpClients: instance.cdpClients || [],
+    agentActivity: instance.agentActivity ?? null
+  };
+}
+
+function renderExternalConnectionCell(instance: ExternalChromeInstance): string {
+  const model = externalConnectionModel(instance);
+  const portChip = instance.cdpUrl
+    ? cdpChip("live", cdpPortLabel(instance.cdpUrl), instance.cdpUrl, null)
+    : instance.cdpPort
+      ? cdpChip("stale", `:${instance.cdpPort}`, `http://127.0.0.1:${instance.cdpPort}`, "未响应")
+      : cdpChip("off", "未开启", null, null);
+  const connection = model.cdpClients.length
+    ? `${renderExternalConnPill(instance)}${renderAgentActivityInline(model)}`
+    : instance.cdpUrl
+      ? '<span class="conn-idle">空闲</span>'
+      : '<span class="conn-pill none action-tooltip" data-tooltip="外部实例未检测到可用 CDP 驱动连接">—</span>';
+  const primary = model.cdpClients[0];
+  const sessionText = primary ? cdpSessionText(primary) : "";
+  const age = primary ? formatRelativeTime(primary.lastActive) : "";
+  const subLine =
+    sessionText || age
+      ? `<span class="conn-session"><span class="conn-session-main">${escapeHtml(sessionText)}</span>${
+          age ? `<span class="conn-session-age">${escapeHtml(age)}</span>` : ""
+        }</span>`
+      : "";
+
+  return `<span class="conn-cell-stack"><span class="conn-line">${portChip}${connection}</span>${subLine}</span>`;
+}
+
+function renderExternalConnPill(instance: ExternalChromeInstance): string {
+  const model = externalConnectionModel(instance);
+  const clients = model.cdpClients;
+  const primary = clients[0];
+  if (!primary) {
+    return '<span class="conn-pill none action-tooltip" data-tooltip="当前没有工具连接">—</span>';
+  }
+
+  const tool = primary.agent || prettyCdpClientLabel(primary.label);
+  const extra = clients.length > 1 ? ` ×${clients.length}` : "";
+  const age = formatRelativeTime(primary.lastActive);
+  const activityRows = renderAgentActivityTipRows(model);
+  const body =
+    clients.length > 1
+      ? `${renderConnTipTable(clients)}${activityRows}`
+      : [
+          `<span class="tip-row"><em class="tip-tag">工具</em><span class="tip-tool">${escapeHtml(tool)}</span></span>`,
+          primary.session ? `<span class="tip-row"><em class="tip-tag">会话</em><span class="tip-project">${escapeHtml(primary.session)}</span></span>` : "",
+          primary.project ? `<span class="tip-row"><em class="tip-tag">项目</em><span class="tip-project">${escapeHtml(primary.project)}</span></span>` : "",
+          primary.title ? `<span class="tip-row"><em class="tip-tag">标题</em><span class="tip-session">${escapeHtml(primary.title)}</span></span>` : "",
+          age ? `<span class="tip-row"><em class="tip-tag">活动</em><span class="tip-age">${escapeHtml(age)}</span></span>` : "",
+          primary.note ? `<span class="tip-row"><em class="tip-tag">说明</em><span class="tip-note">${escapeHtml(primary.note)}</span></span>` : "",
+          activityRows
+        ]
+          .filter(Boolean)
+          .join("");
+  return `<span class="conn-pill attached"><span class="conn-dot" aria-hidden="true"></span><span class="conn-label">${escapeHtml(`${tool}${extra}`)}</span><span class="conn-tip-card ${clients.length > 1 ? "wide" : ""}" role="tooltip">${body}</span></span>`;
+}
+
 export function renderExternalRows(instances: ExternalChromeInstance[]): string {
   return `
     <tr class="table-group-row">
@@ -520,16 +590,7 @@ export function renderExternalRow(instance: ExternalChromeInstance): string {
         <span class="state-pill inline-flex items-center justify-center min-w-[58px] border-solid border border-line-strong rounded-full px-[9px] py-1 bg-transparent text-muted font-mono text-[11px] font-semibold tracking-[0.06em] running">运行中</span>
       </td>
       <td>
-        <span class="conn-cell-stack"><span class="conn-line">
-          ${
-            instance.cdpUrl
-              ? cdpChip("live", cdpPortLabel(instance.cdpUrl), instance.cdpUrl, null)
-              : instance.cdpPort
-                ? cdpChip("stale", `:${instance.cdpPort}`, `http://127.0.0.1:${instance.cdpPort}`, "未响应")
-                : cdpChip("off", "未开启", null, null)
-          }
-          <span class="conn-pill none action-tooltip" data-tooltip="外部实例由其他工具自管，不在本工具的连接监测范围内">—</span>
-        </span></span>
+        ${renderExternalConnectionCell(instance)}
       </td>
       <td>
         <div class="profile-actions">
@@ -550,6 +611,41 @@ export function renderExternalRow(instance: ExternalChromeInstance): string {
         </div>
       </td>
     </tr>
+  `;
+}
+
+function renderExternalCdpClientsDetail(instance: ExternalChromeInstance): string {
+  if (!instance.cdpUrl) {
+    return "";
+  }
+
+  const model = externalConnectionModel(instance);
+  const clients = model.cdpClients;
+  const attached = clients.length > 0;
+  const value = attached ? `驱动中 · ${cdpClientToolSummary(clients)}` : "当前没有工具连接";
+  const activityDetailCard = renderAgentActivityDetailCard(model);
+  const sessionRows = clients
+    .map((client, index) => {
+      const tool = client.agent || prettyCdpClientLabel(client.label);
+      const sessionText = cdpSessionText(client);
+      const sessionAge = formatRelativeTime(client.lastActive);
+      const main = [tool, sessionText].filter(Boolean).join(" · ");
+      if (!main && !sessionAge && !client.note) {
+        return index === 0 ? activityDetailCard : "";
+      }
+      return `<small class="detail-session"${client.note ? ` title="${escapeHtml(client.note)}"` : ""}>⇁ ${escapeHtml(main)}${
+        sessionAge ? `<span class="detail-session-age">${escapeHtml(sessionAge)}</span>` : ""
+      }${client.note && !sessionText ? `<span class="detail-session-note">${escapeHtml(client.note)}</span>` : ""}</small>${index === 0 ? activityDetailCard : ""}`;
+    })
+    .join("");
+
+  return `
+    <div class="detail-row${attached ? " detail-row-attached" : ""}">
+      <span>Agent 连接</span>
+      <strong>${escapeHtml(value)}</strong>
+      ${sessionRows}
+      <small class="detail-note">检测连到此外部实例 CDP 端口的持久连接；外部实例不由 ProfilePilot 管理，仅展示归属与活动。</small>
+    </div>
   `;
 }
 
@@ -590,6 +686,7 @@ export function renderExternalDetails(instance: ExternalChromeInstance): string 
           <strong>${formatDate(instance.startedAt)}</strong>
         </div>
         ${cdpRow}
+        ${renderExternalCdpClientsDetail(instance)}
         <div class="detail-row">
           <span>数据目录</span>
           <code class="path-box">${escapeHtml(instance.userDataDir)}</code>
@@ -756,8 +853,8 @@ export function renderCdpClientsDetail(profile: PublicProfile): string {
   `;
 }
 
-function renderAgentActivityDetailCard(profile: PublicProfile): string {
-  if (!hasAgentActivity(profile) || !profile.agentActivity) {
+function renderAgentActivityDetailCard(profile: ConnectionActivityModel): string {
+  if (!hasConnectionAgentActivity(profile) || !profile.agentActivity) {
     return "";
   }
   const activity = profile.agentActivity;

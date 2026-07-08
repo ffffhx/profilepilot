@@ -301,9 +301,15 @@ function renderMiniProfileCard(profile: PublicProfile): string {
   const sessionAge = !busyHere && primaryClient ? formatRelativeTime(primaryClient.lastActive) : "";
   const activityText = profile.agentActivity ? agentActivityLeadText(profile.agentActivity) || "正在操作" : "";
   const activityTip = profile.agentActivity ? agentActivityTooltipText(profile.agentActivity) || activityText : "";
+  const takeover = store.miniTakeoverByProfileId[profile.id];
+  const takeoverAgent = takeover?.agent || "AI";
+  const takeoverText = takeover ? `已接管 · ${takeoverAgent} 已停止操作` : "";
+  const takeoverTip = takeover
+    ? `${takeover.profileName}\n${takeoverAgent}${takeover.session ? ` · ${takeover.session}` : ""} 已停止操作`
+    : "";
 
   return `
-    <article class="mini-profile-card ${port.kind} ${driving ? "driving" : ""} ${contention ? "contention" : ""} ${busyHere ? "busy" : ""}" data-id="${profile.id}" draggable="true">
+    <article class="mini-profile-card ${port.kind} ${driving ? "driving" : ""} ${contention ? "contention" : ""} ${takeover ? "taken-over" : ""} ${busyHere ? "busy" : ""}" data-id="${profile.id}" draggable="true">
       <button type="button" class="mini-profile-main" data-action="${action}" data-id="${profile.id}" title="${escapeHtml(profile.running ? "显示 Chrome 窗口" : "启动 Profile")}" ${store.busy ? "disabled" : ""}>
         <span class="mini-node ${busyHere ? "loading" : port.kind === "live" ? "plane" : "ring"}" aria-hidden="true">${busyHere ? '<span class="mini-spinner"></span>' : port.kind === "live" ? MINI_NODE_PLANE : ""}</span>
         <span class="mini-profile-text">
@@ -317,9 +323,15 @@ function renderMiniProfileCard(profile: PublicProfile): string {
               ? `<span class="mini-profile-session"${readoutTip ? ` title="${escapeHtml(readoutTip)}"` : ""}>${sessionText ? `<span class="mini-profile-session-main">${escapeHtml(sessionText)}</span>` : ""}${sessionAge ? `<span class="mini-profile-session-age">${escapeHtml(sessionAge)}</span>` : ""}</span>`
               : ""
           }
-          ${activityText ? `<span class="mini-profile-agent"${activityTip ? ` title="${escapeHtml(activityTip)}"` : ""}>AI：${escapeHtml(activityText)}</span>` : ""}
+          ${
+            takeoverText
+              ? `<span class="mini-profile-takeover"${takeoverTip ? ` title="${escapeHtml(takeoverTip)}"` : ""}>${escapeHtml(takeoverText)}</span>`
+              : activityText
+                ? `<span class="mini-profile-agent"${activityTip ? ` title="${escapeHtml(activityTip)}"` : ""}>AI：${escapeHtml(activityText)}</span>`
+                : ""
+          }
         </span>
-        <span class="mini-readout"${readoutTip ? ` title="${escapeHtml(readoutTip)}"` : ""}>${escapeHtml(readout)}</span>
+        <span class="mini-readout"${takeoverTip ? ` title="${escapeHtml(takeoverTip)}"` : readoutTip ? ` title="${escapeHtml(readoutTip)}"` : ""}>${escapeHtml(takeover ? "已接管" : readout)}</span>
       </button>
       ${
         !busyHere && primaryClient

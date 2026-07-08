@@ -33,6 +33,8 @@ export interface RendererState {
   toastTimer: number | undefined;
   agentTakeoverHistory: AgentTakeoverEvent[];
   agentTakeoverNoticeDismissed: boolean;
+  agentTakeoverHistoryExpanded: boolean;
+  miniTakeoverByProfileId: Record<string, AgentTakeoverEvent>;
   migrationSourceId: string | null;
   migrationTargetId: string | null;
   extensionScan: ExtensionScanResult | null;
@@ -96,6 +98,8 @@ export const store: RendererState = {
   toastTimer: undefined,
   agentTakeoverHistory: [],
   agentTakeoverNoticeDismissed: false,
+  agentTakeoverHistoryExpanded: false,
+  miniTakeoverByProfileId: {},
   migrationSourceId: null,
   migrationTargetId: null,
   extensionScan: null,

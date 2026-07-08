@@ -6,9 +6,13 @@ import { isExtensionMigrationActionItem } from "./render/extensions";
 import { focusLiveTab, openLiveZoom, refreshLiveViewNow, requestLiveViewNow, startLiveViewLoop, toggleLiveScreenshot } from "./render/live-view";
 import { sortByMiniOrder } from "./render/mini";
 import { render } from "./render/render-root";
-import { invalidateExtensionMigrationDiff, loadState, refreshExtensionMigrationDiff, refreshGlobalInstructions, repairClaudeInstructionShell, saveGlobalInstruction, setMigrationSource } from "./state-actions";
+import { invalidateExtensionMigrationDiff, loadState, loadTakeoverHistory, mergeAgentTakeoverHistory, refreshExtensionMigrationDiff, refreshGlobalInstructions, repairClaudeInstructionShell, saveGlobalInstruction, setMigrationSource } from "./state-actions";
 import { appRoot, store } from "./state";
+import type { AgentTakeoverEvent } from "./types";
 import { deleteButtonTitle, escapeHtml, formatErrorMessage } from "./util";
+
+const MINI_TAKEOVER_NOTICE_MS = 5000;
+const miniTakeoverTimers = new Map<string, number>();
 
 profileApi().onOperationProgress((progress) => {
   if (!store.busyState || store.busyState.key !== progress.key) {
@@ -49,12 +53,39 @@ profileApi().onOperationProgress((progress) => {
 });
 
 profileApi().onAgentTakeover((takeover) => {
-  store.agentTakeoverHistory = [takeover, ...store.agentTakeoverHistory].slice(0, 5);
+  mergeAgentTakeoverHistory([takeover]);
   store.agentTakeoverNoticeDismissed = false;
+  store.agentTakeoverHistoryExpanded = false;
+  markMiniTakeover(takeover);
   const agent = takeover.agent || "AI";
   setToast(`已接管 ${emphasizeName(takeover.profileName)}，${agent} 已停止操作`);
   void loadState().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
 });
+
+function markMiniTakeover(takeover: AgentTakeoverEvent): void {
+  if (store.viewMode !== "mini") {
+    return;
+  }
+
+  store.miniTakeoverByProfileId = {
+    ...store.miniTakeoverByProfileId,
+    [takeover.profileId]: takeover
+  };
+
+  const existingTimer = miniTakeoverTimers.get(takeover.profileId);
+  if (existingTimer) {
+    window.clearTimeout(existingTimer);
+  }
+  miniTakeoverTimers.set(
+    takeover.profileId,
+    window.setTimeout(() => {
+      const { [takeover.profileId]: _expired, ...rest } = store.miniTakeoverByProfileId;
+      store.miniTakeoverByProfileId = rest;
+      miniTakeoverTimers.delete(takeover.profileId);
+      render();
+    }, MINI_TAKEOVER_NOTICE_MS)
+  );
+}
 
 appRoot.addEventListener("click", (event) => {
   const target = event.target instanceof Element ? event.target : null;
@@ -101,6 +132,12 @@ appRoot.addEventListener("click", (event) => {
 
   if (action === "dismiss-agent-takeover-history") {
     store.agentTakeoverNoticeDismissed = true;
+    render();
+    return;
+  }
+
+  if (action === "toggle-agent-takeover-history") {
+    store.agentTakeoverHistoryExpanded = !store.agentTakeoverHistoryExpanded;
     render();
     return;
   }
@@ -1510,9 +1547,11 @@ if (store.viewMode === "mini") {
   render();
 }
 
-loadState().catch((error: unknown) => {
-  appRoot.innerHTML = `<div class="app-loading p-8 text-muted font-mono text-[13px] tracking-[0.08em] uppercase">${escapeHtml(formatErrorMessage(error))}</div>`;
-});
+loadState()
+  .then(() => loadTakeoverHistory().catch((error: unknown) => setToast(formatErrorMessage(error), "error")))
+  .catch((error: unknown) => {
+    appRoot.innerHTML = `<div class="app-loading p-8 text-muted font-mono text-[13px] tracking-[0.08em] uppercase">${escapeHtml(formatErrorMessage(error))}</div>`;
+  });
 
 if (store.viewMode === "mini") {
   let lastMiniScrollAt = 0;

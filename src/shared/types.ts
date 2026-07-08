@@ -44,6 +44,7 @@ export interface Registry {
   profiles: StoredProfile[];
   nativeProfiles?: Record<string, NativeProfileMetadata>;
   accountSyncRecords?: Record<string, AccountSyncRecord>;
+  takeoverHistory?: AgentTakeoverEvent[];
   // AI 操作可见化 overlay 总开关。旧配置缺省视为开启。
   agentOverlayEnabled?: boolean;
   miniProfileIds?: string[];
@@ -202,6 +203,8 @@ export interface ExternalChromeInstance {
   startedAt: string | null;
   cdpPort: number | null;
   cdpUrl: string | null;
+  cdpClients?: CdpClientInfo[];
+  agentActivity?: AgentActivity | null;
   headless: boolean;
 }
 
@@ -554,6 +557,7 @@ export interface OperationPauseSignal {
 
 export interface ProfileManagerApi {
   getState(): Promise<AppState>;
+  getTakeoverHistory(): Promise<AgentTakeoverEvent[]>;
   createProfile(name: string): Promise<AppState>;
   renameProfile(id: string, name: string): Promise<AppState>;
   launchProfile(id: string): Promise<AppState>;

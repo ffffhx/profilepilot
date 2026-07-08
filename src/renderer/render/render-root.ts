@@ -123,8 +123,10 @@ function renderAgentTakeoverNotice(): string {
   if (store.agentTakeoverNoticeDismissed || !store.agentTakeoverHistory.length) {
     return "";
   }
-  const rows = store.agentTakeoverHistory
-    .slice(0, 5)
+  const visibleEvents = store.agentTakeoverHistoryExpanded
+    ? store.agentTakeoverHistory
+    : store.agentTakeoverHistory.slice(0, 5);
+  const rows = visibleEvents
     .map((event) => {
       const agent = event.agent || "AI";
       const session = event.session ? ` · ${event.session}` : "";
@@ -137,11 +139,19 @@ function renderAgentTakeoverNotice(): string {
       `;
     })
     .join("");
+  const canExpand = store.agentTakeoverHistory.length > 5;
   return `
     <section class="agent-takeover-notice" aria-label="AI 接管历史">
       <div class="agent-takeover-notice-head">
         <strong>最近接管</strong>
-        <button type="button" data-action="dismiss-agent-takeover-history" title="关闭接管记录提示">关闭</button>
+        <span class="agent-takeover-notice-actions">
+          ${
+            canExpand
+              ? `<button type="button" data-action="toggle-agent-takeover-history" title="${store.agentTakeoverHistoryExpanded ? "收起接管记录" : "展开接管记录"}">${store.agentTakeoverHistoryExpanded ? "收起" : `展开 ${store.agentTakeoverHistory.length}`}</button>`
+              : ""
+          }
+          <button type="button" data-action="dismiss-agent-takeover-history" title="关闭接管记录提示">关闭</button>
+        </span>
       </div>
       <ul>${rows}</ul>
     </section>

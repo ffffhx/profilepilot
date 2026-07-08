@@ -24,6 +24,7 @@
     "dist:win": "npm run build && electron-builder --win nsis zip --x64 --publish never",
     "site": "node site/server.mjs",
     "test": "npm run build && node --test tests/",
+    "doctor:overlay": "npm run build && node scripts/overlay-doctor.mjs",
     "e2e": "npm run build && node scripts/e2e-overlay-smoke.mjs",
     "e2e:stress": "npm run build && node scripts/e2e-overlay-stress.mjs"
   },

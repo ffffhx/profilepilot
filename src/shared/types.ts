@@ -181,6 +181,8 @@ export interface PublicProfile {
   liveTabCount: number | null;
   // 多会话争用判定：≥2 条驱动连接时才可能非 null 的 level；无 CDP/单连接时为 null 或 level=null。
   cdpContention: CdpContentionInfo | null;
+  // 正在驱动这个 Profile 的 agent 的实时活动（会话 tail 解析结果）；无 agent 驱动时为 null。
+  agentActivity: AgentActivity | null;
 }
 
 export interface NativeChromeProfile {

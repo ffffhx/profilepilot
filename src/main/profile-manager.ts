@@ -2360,7 +2360,8 @@ export class ProfileManager {
       cdpClients: [],
       livePrimaryUrl: null,
       liveTabCount: null,
-      cdpContention: null
+      cdpContention: null,
+      agentActivity: null
     };
   }
 
@@ -2398,7 +2399,8 @@ export class ProfileManager {
       cdpClients: [],
       livePrimaryUrl: null,
       liveTabCount: null,
-      cdpContention: null
+      cdpContention: null,
+      agentActivity: null
     };
   }
 
@@ -2475,7 +2477,8 @@ export class ProfileManager {
       cdpClients: [],
       livePrimaryUrl: null,
       liveTabCount: null,
-      cdpContention: null
+      cdpContention: null,
+      agentActivity: null
     };
   }
 

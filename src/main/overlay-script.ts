@@ -19,6 +19,9 @@ export function agentOverlayBootstrapScript(): string {
   const HOST_REATTACH_LIMIT = 8;
   const HOST_REATTACH_WINDOW_MS = 10000;
   const HOST_REATTACH_BACKOFF_MS = 3000;
+  // 合成光标 / 点击高亮层：AI 空闲 900ms 后隐藏合成光标，点击涟漪 620ms 后自动回收。
+  const CURSOR_IDLE_HIDE_MS = 900;
+  const RIPPLE_LIFETIME_MS = 620;
   const OVERLAY_TEXT = {
     zh: {
       revealTitle: "在 ProfilePilot 中查看",
@@ -204,6 +207,11 @@ export function agentOverlayBootstrapScript(): string {
   let hostReattachAttempts = 0;
   let hostReattachWindowStartedAt = 0;
   let hostReattachBlockedUntil = 0;
+  // 合成光标 / 点击高亮层的节点与计时器；agentPointerListener 用于在拆除时摘掉全局监听。
+  let cursorLayer = null;
+  let agentCursor = null;
+  let cursorHideTimer = null;
+  let agentPointerListener = null;
 
   function mount() {
     if (!document.documentElement) {
@@ -295,6 +303,15 @@ export function agentOverlayBootstrapScript(): string {
       "@keyframes ppIn{to{opacity:1;transform:translateY(0) scale(1)}}",
       "@keyframes ppOut{to{opacity:0;transform:translateY(-3px) scale(.985)}}",
       "@keyframes ppPulse{0%{box-shadow:0 0 0 0 rgba(56,225,160,.58)}70%{box-shadow:0 0 0 9px rgba(56,225,160,0)}100%{box-shadow:0 0 0 0 rgba(56,225,160,0)}}",
+      // 合成光标 / 点击高亮层：满屏 fixed 叠加、pointer-events:none，坐标即视口 CSS 像素，不抢真实指针。
+      ".pp-cursor-layer{position:fixed;inset:0;pointer-events:none;z-index:2147483646;overflow:visible}",
+      ".pp-agent-cursor{position:fixed;left:0;top:0;width:22px;height:22px;opacity:0;transform:translate(-120px,-120px);transition:transform .24s cubic-bezier(.2,0,0,1),opacity .18s ease;filter:drop-shadow(0 2px 5px rgba(0,0,0,.45));will-change:transform,opacity}",
+      ".pp-agent-cursor.show{opacity:1}",
+      ".pp-agent-cursor svg{display:block;width:100%;height:100%}",
+      ".pp-click-ripple{position:fixed;left:0;top:0;width:18px;height:18px;margin:-9px 0 0 -9px;border-radius:99px;border:2px solid rgba(56,225,160,.92);background:rgba(56,225,160,.20);box-shadow:0 0 14px rgba(56,225,160,.55);animation:ppRipple .58s cubic-bezier(.2,0,0,1) forwards}",
+      "@keyframes ppRipple{0%{opacity:.9;transform:scale(.32)}70%{opacity:.5}100%{opacity:0;transform:scale(2.7)}}",
+      ":host(.reduced-motion) .pp-agent-cursor{transition:none}",
+      ":host(.reduced-motion) .pp-click-ripple{animation:none;opacity:.5}",
       "</style>",
       "<div class=\"wrap\">",
       "  <section id=\"pp-agent-overlay-panel\" class=\"panel\" role=\"group\" aria-labelledby=\"pp-agent-overlay-title\">",
@@ -313,7 +330,9 @@ export function agentOverlayBootstrapScript(): string {
       "    </div>",
       "  </section>",
       "  <button class=\"dot\" type=\"button\" title=\"\" aria-label=\"\" aria-controls=\"pp-agent-overlay-panel\" aria-expanded=\"false\"><span class=\"pulse\" aria-hidden=\"true\"></span></button>",
-      "</div>"
+      "</div>",
+      // 合成光标层放在 .wrap 之外：.wrap 带 transform 会成为 fixed 定位的包含块，放外面才能用视口坐标。
+      "<div class=\"pp-cursor-layer\" aria-hidden=\"true\"><span class=\"pp-agent-cursor\"><svg viewBox=\"0 0 24 24\" width=\"22\" height=\"22\"><path d=\"M5 3 L10.5 18 L12.7 11.7 L19 9.5 Z\" fill=\"rgba(8,19,15,.92)\" stroke=\"#38e1a0\" stroke-width=\"1.5\" stroke-linejoin=\"round\"></path></svg></span></div>"
     ].join("");
 
     panel = root.querySelector(".panel");
@@ -336,6 +355,8 @@ export function agentOverlayBootstrapScript(): string {
     stopButton = root.querySelector(".stop");
     revealButton = root.querySelector(".reveal");
     hideButton = root.querySelector(".hide");
+    cursorLayer = root.querySelector(".pp-cursor-layer");
+    agentCursor = root.querySelector(".pp-agent-cursor");
     recentSummary.tabIndex = 0;
 
     root.addEventListener("click", (event) => event.stopPropagation());
@@ -354,6 +375,9 @@ export function agentOverlayBootstrapScript(): string {
     recent.addEventListener("toggle", updateInteractiveAria);
     recentSummary.addEventListener("keydown", handleRecentSummaryKeydown);
     root.querySelector(".head").addEventListener("pointerdown", startDrag);
+    // 捕获阶段监听页面上被 AI 派发（isTrusted）的按下事件，作为高亮触发源。
+    agentPointerListener = handleAgentPointer;
+    window.addEventListener("pointerdown", agentPointerListener, { capture: true, passive: true });
 
     document.documentElement.appendChild(host);
     setupHostReconnectTracking();
@@ -942,6 +966,78 @@ export function agentOverlayBootstrapScript(): string {
     host.style.top = top + "px";
   }
 
+  function handleAgentPointer(event) {
+    if (!shouldAutoHighlight(event)) {
+      return;
+    }
+    highlightAt(event.clientX, event.clientY);
+  }
+
+  function shouldAutoHighlight(event) {
+    // 只在 AI 操作态（active）且 overlay 存活时画；接管或拆除后停画。
+    if (tearingDown || !host || state.state === "takenOver") {
+      return false;
+    }
+    // 仅高亮浏览器真实派发的事件（CDP Input.dispatchMouseEvent 也是 isTrusted），过滤脚本合成点击。
+    if (!event || event.isTrusted !== true) {
+      return false;
+    }
+    // 命中 overlay 自身（拖动条 / 停止按钮等）不算 AI 页面点击。
+    if (typeof event.composedPath === "function" && event.composedPath().includes(host)) {
+      return false;
+    }
+    return true;
+  }
+
+  // 在视口坐标 (x, y) 处画一次高亮：合成光标滑过去 + 一圈点击涟漪。
+  function highlightAt(x, y) {
+    const px = Number(x);
+    const py = Number(y);
+    if (tearingDown || !cursorLayer || !Number.isFinite(px) || !Number.isFinite(py)) {
+      return;
+    }
+    ensureHostConnected();
+    moveAgentCursor(px, py);
+    spawnRipple(px, py);
+  }
+
+  function moveAgentCursor(x, y) {
+    if (!agentCursor) {
+      return;
+    }
+    agentCursor.style.transform = "translate(" + x + "px," + y + "px)";
+    agentCursor.classList.add("show");
+    clearTimeout(cursorHideTimer);
+    cursorHideTimer = setTimeout(hideAgentCursor, CURSOR_IDLE_HIDE_MS);
+  }
+
+  function hideAgentCursor() {
+    clearTimeout(cursorHideTimer);
+    cursorHideTimer = null;
+    if (agentCursor) {
+      agentCursor.classList.remove("show");
+    }
+  }
+
+  function spawnRipple(x, y) {
+    const ripple = document.createElement("span");
+    ripple.className = "pp-click-ripple";
+    ripple.style.left = x + "px";
+    ripple.style.top = y + "px";
+    const remove = () => {
+      clearTimeout(fallback);
+      try {
+        ripple.remove();
+      } catch {
+        // 节点可能已被页面移除。
+      }
+    };
+    // 动画正常时靠 animationend 回收；reduced-motion 下无动画则靠兜底定时器移除。
+    const fallback = setTimeout(remove, RIPPLE_LIFETIME_MS);
+    ripple.addEventListener("animationend", remove);
+    cursorLayer.appendChild(ripple);
+  }
+
   function normalizedSessions() {
     if (!Array.isArray(state.sessions)) {
       return [];
@@ -1053,6 +1149,26 @@ export function agentOverlayBootstrapScript(): string {
     render();
   };
 
+  // 供 CDP Runtime.evaluate 直接驱动的接线点：拿到 AI 点击坐标即可触发高亮。
+  // 兼容 highlightAt(x, y)、highlightAt({x, y}) 与 highlightAt('{"x":..,"y":..}') 三种调用形式。
+  window.__ppAgentOverlayHighlightAt = (x, y) => {
+    try {
+      let px = x;
+      let py = y;
+      if (typeof x === "string") {
+        const parsed = JSON.parse(x);
+        px = parsed && parsed.x;
+        py = parsed && parsed.y;
+      } else if (x && typeof x === "object") {
+        px = x.x;
+        py = x.y;
+      }
+      highlightAt(px, py);
+    } catch {
+      // 忽略非法坐标输入。
+    }
+  };
+
   window.__ppAgentOverlayTeardown = () => {
     if (tearingDown) {
       return;
@@ -1060,6 +1176,11 @@ export function agentOverlayBootstrapScript(): string {
     tearingDown = true;
     clearTimeout(takenOverTimer);
     clearInterval(elapsedTimer);
+    clearTimeout(cursorHideTimer);
+    if (agentPointerListener) {
+      window.removeEventListener("pointerdown", agentPointerListener, true);
+      agentPointerListener = null;
+    }
     cleanupHostReconnectTracking();
     cleanupReducedMotionTracking();
     cleanupThemeTracking();
@@ -1072,6 +1193,7 @@ export function agentOverlayBootstrapScript(): string {
       }
       delete window.__ppAgentOverlayInstalled;
       delete window.__ppAgentOverlayUpdate;
+      delete window.__ppAgentOverlayHighlightAt;
       delete window.__ppAgentOverlayTeardown;
       delete window[SIGNAL_NAME];
     };

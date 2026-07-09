@@ -123,11 +123,22 @@ export interface CdpContentionChurn {
   owners: string[];
 }
 
+// 面向 agent 的稳定信号（借鉴 ego-lite 的 EGO_* 契约模型，主进程 agent-signals.ts 产出）：
+// code 稳定，message 给人看，action 是一句机器可照做的指令，hardStop=是否必须停手照 action 处理。
+export interface ProfilePilotSignalInfo {
+  code: string;
+  message: string;
+  action?: string;
+  hardStop: boolean;
+}
+
 export interface CdpContentionInfo {
   activeClientCount: number;
   observing: boolean;
   churn: CdpContentionChurn | null;
   level: "contention" | "risk" | null;
+  // 面向 agent 的稳定信号（由 level 映射）：level=null 时为 null；UI 优先突出 hardStop 的 action。
+  signal: ProfilePilotSignalInfo | null;
 }
 
 export interface CdpClientInfo {
@@ -532,6 +543,8 @@ export interface CdpPortSuggestion {
   port: number;
   preferredAvailable: boolean;
   preferredOwner: string | null;
+  // 端口被占时的稳定信号（CDP_PORT_UNAVAILABLE）：带「改用建议端口重连」的可照做 action；可用时 null。
+  signal: ProfilePilotSignalInfo | null;
 }
 
 export interface OperationProgress {

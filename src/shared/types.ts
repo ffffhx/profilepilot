@@ -142,6 +142,16 @@ export interface CdpContentionChurn {
   owners: string[];
 }
 
+// 面向 agent 的稳定信号（借鉴 ego-lite 的 EGO_* 契约模型，详见 main/agent-signals.ts）：
+// code 是持久契约（跨版本不漂移），message 给人看，action 是一句机器可照做的指令，
+// hardStop=是否属于「必须停手、按 action 处理」的硬停。UI 在 hardStop 时优先突出 action。
+export interface ProfilePilotSignalInfo {
+  code: string;
+  message: string;
+  action?: string;
+  hardStop: boolean;
+}
+
 // 多会话争用判定（主进程算好给 UI 直接用）：
 // level=contention：观察到同一标签页 URL 短时间反复往返改写 + ≥2 条驱动连接 → 疑似正在抢 tab；
 // level=risk：≥2 条连接且其中 ≥2 个会话最近都有活动 → 有争用风险（还没观察到实际抢写）；
@@ -154,6 +164,9 @@ export interface CdpContentionInfo {
   // 仅 level=contention 时给出：被抢写的标签页与其抖动读数。
   churn: CdpContentionChurn | null;
   level: "contention" | "risk" | null;
+  // 面向 agent 的稳定信号（由 level 映射而来）：带 code + 一句可照做的 action + hardStop。
+  // level=null 时为 null；UI 优先展示 hardStop 信号的 action。
+  signal: ProfilePilotSignalInfo | null;
 }
 
 // 实时观测：一个正在以 CDP 运行的 Profile 当前“飞在哪”。
@@ -562,6 +575,9 @@ export interface CdpPortSuggestion {
   port: number;
   preferredAvailable: boolean;
   preferredOwner: string | null;
+  // 端口被占时的稳定信号（CDP_PORT_UNAVAILABLE）：带一句「改用建议端口重连」的可照做 action；
+  // 端口可用时为 null。
+  signal: ProfilePilotSignalInfo | null;
 }
 
 export interface OperationProgress {

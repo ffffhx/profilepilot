@@ -1,4 +1,5 @@
 import { CdpClientInfo, CdpContentionChurn, CdpContentionInfo } from "../shared/types";
+import { resolveSignal } from "./agent-signals";
 import { CdpBrowserClient, requestCdpVersionInfo } from "./cdp-client";
 import { isRecord, stringValue } from "./fs-util";
 
@@ -239,11 +240,22 @@ export function resolveCdpContention(port: number, clients: CdpClientInfo[]): Cd
       level = "risk";
     }
   }
+  // 把争用判定映射成面向 agent 的稳定信号（码 + 一句可照做的 action + hardStop），随判定一起下发。
+  // contention 时把 ① 的 owners 打戳一并喂给信号，让 message 能点名争抢方。
+  const signal = resolveSignal({
+    kind: "cdp-contention",
+    level,
+    activeClientCount,
+    port,
+    churnChanges: churn?.changes,
+    churnOwners: churn?.owners
+  });
   return {
     activeClientCount,
     observing,
     churn: level === "contention" ? churn : null,
-    level
+    level,
+    signal
   };
 }
 

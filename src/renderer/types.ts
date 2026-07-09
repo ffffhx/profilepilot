@@ -110,12 +110,17 @@ export interface AgentOverlayRevealEvent {
   at: string;
 }
 
+// AI 对某个 tab / Profile 的归属（借鉴 ego-lite 的三值枚举，取代散落的布尔+时间窗）。
+export type Ownership = "agent" | "agentDelegatedToUser" | "user";
+
 // tab 争用观测里“最抖”的那个标签页：观察窗口内 URL 变化次数与往返翻转（A→B→A）次数。
 export interface CdpContentionChurn {
   title: string;
   url: string;
   changes: number;
   flipBacks: number;
+  // 观察窗口内驱动过这个 tab 的 owner 会话标识；≥2 个不同 owner＝被多会话争抢。
+  owners: string[];
 }
 
 export interface CdpContentionInfo {

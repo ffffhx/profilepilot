@@ -126,12 +126,20 @@ export interface AgentOverlayRevealEvent {
   at: string;
 }
 
+// AI 对某个 tab / Profile 的归属（借鉴 ego-lite 的三值枚举，取代散落的布尔+时间窗）：
+// agent＝AI 正在驱动；agentDelegatedToUser＝用户刚接管、AI 暂让出控制权但仍持有该 tab
+// （同会话重连即恢复 agent）；user＝已彻底交还 / 无 AI 驱动。
+export type Ownership = "agent" | "agentDelegatedToUser" | "user";
+
 // tab 争用观测里“最抖”的那个标签页：观察窗口内 URL 变化次数与往返翻转（A→B→A）次数。
 export interface CdpContentionChurn {
   title: string;
   url: string;
   changes: number;
   flipBacks: number;
+  // 观察窗口内“驱动过这个 tab”的 owner 会话标识（AGENT_BROWSER_SESSION，如 cc-/cx-<uuid>；
+  // 无命名 session 的连接退化成 pid:<pid>）。≥2 个不同 owner＝这个 tab 被多会话争抢。
+  owners: string[];
 }
 
 // 多会话争用判定（主进程算好给 UI 直接用）：

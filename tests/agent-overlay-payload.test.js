@@ -21,6 +21,7 @@ test("AgentOverlay payload keeps known fields stable and nulls empty values", ()
     "lastMessage",
     "locale",
     "nextStep",
+    "ownership",
     "profileName",
     "project",
     "session",
@@ -34,6 +35,7 @@ test("AgentOverlay payload keeps known fields stable and nulls empty values", ()
     "updatedAt"
   ].sort());
   assert.equal(payload.locale, "zh");
+  assert.equal(payload.ownership, "agent");
   assert.equal(payload.agent, "Codex");
   assert.equal(payload.project, null);
   assert.equal(payload.session, null);

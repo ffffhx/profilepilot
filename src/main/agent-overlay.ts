@@ -1,4 +1,4 @@
-import type { AgentActivity, CdpClientInfo } from "../shared/types";
+import type { AgentActivity, CdpClientInfo, Ownership } from "../shared/types";
 import { CdpBrowserClient, requestCdpTargets, requestCdpVersionInfo } from "./cdp-client";
 import type { CdpTargetListEntry, CdpVersionInfo } from "./internal-types";
 import { agentOverlayBootstrapScript } from "./overlay-script";
@@ -54,11 +54,16 @@ interface AgentOverlayManagerOptions {
   connectBrowser?: (webSocketDebuggerUrl: string, timeoutMs: number) => Promise<OverlayBrowserClient>;
 }
 
+// 底层 overlay 状态（时间窗驱动的实现细节）：active＝AI 在驱动；takenOver＝用户刚接管、
+// 处于 7 秒保留窗口内。对外表达统一收敛到下面 payload 的 ownership 三值枚举，state 只留作内部映射源。
 type OverlayState = "active" | "takenOver";
 
 interface OverlayPayload {
   locale: OverlayLocale;
   state: OverlayState;
+  // 归属三值枚举（借鉴 ego-lite），对外的单一真相：由底层 state + 是否有 agent 驱动映射而来。
+  // active→agent；takenOver（用户接管保留窗口内）→agentDelegatedToUser；无 agent→user。
+  ownership: Ownership;
   profileName: string;
   agent: string | null;
   project: string | null;
@@ -1275,9 +1280,11 @@ function baseActivityForClient(client: CdpClientInfo): AgentActivity {
 }
 
 function normalizeOverlayPayload(payload: Partial<OverlayPayload>): OverlayPayload {
+  const state: OverlayState = payload.state === "takenOver" ? "takenOver" : "active";
   return {
     locale: normalizeOverlayLocale(payload.locale),
-    state: payload.state === "takenOver" ? "takenOver" : "active",
+    state,
+    ownership: ownershipForState(state, payload),
     profileName: nullableString(payload.profileName) || "",
     agent: nullableString(payload.agent),
     project: nullableString(payload.project),
@@ -1298,6 +1305,17 @@ function normalizeOverlayPayload(payload: Partial<OverlayPayload>): OverlayPaylo
 
 function normalizeOverlayLocale(value: string | null | undefined): OverlayLocale {
   return typeof value === "string" && value.toLowerCase().startsWith("zh") ? "zh" : "en";
+}
+
+// 把底层 state（active/takenOver 时间窗）+ 是否有 agent 驱动，映射成对外的三值归属枚举：
+// 无 agent（无会话且无 agent 名）→ user；用户接管保留窗口内（takenOver）→ agentDelegatedToUser；
+// 其余（AI 正在驱动）→ agent。ownership 是对外单一真相，底层时间窗机制保持不变。
+function ownershipForState(state: OverlayState, payload: Partial<OverlayPayload>): Ownership {
+  const hasAgent = Boolean(payload.agent) || (Array.isArray(payload.sessions) && payload.sessions.length > 0);
+  if (!hasAgent) {
+    return "user";
+  }
+  return state === "takenOver" ? "agentDelegatedToUser" : "agent";
 }
 
 function normalizeOverlaySessionPayload(payload: Partial<OverlaySessionPayload>): OverlaySessionPayload {

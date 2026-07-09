@@ -54,6 +54,7 @@ import { extensionDeleteRelativePaths, isLikelyExtensionId, scanProfileExtension
 import { copyPath, throwIfAborted, waitIfPaused } from "./fs-copy";
 import { POSIX_LOCALE_ENV, chromeProfileDirName, defaultDataDir, execFileAsync, exists, isProcessGoneError, isRecord, isSafePathSegment, isSameFilesystemPath, makePathSegment, makeSlug, normalizeAccountSyncRecords, normalizeNativeProfileMetadata, normalizeProfile, normalizeProfileName, normalizeSafeRelativePath, shouldCopyLocalExtensionPackagePath, sleep, uniqueStrings } from "./fs-util";
 import { AccountSyncCopyPlan, AccountSyncDataLocation, ProfileRef, ProfileRestartPlan, RuntimeProfile } from "./internal-types";
+import { resolveSignal } from "./agent-signals";
 import { resolveCdpContention, syncContentionObservers } from "./cdp-contention";
 import { AgentOverlayManager, isAgentOverlayClient, type AgentOverlayRevealRequest, type AgentOverlayStopRequest, type OverlayLocale } from "./agent-overlay";
 import { getShellIntegrationStatus } from "./shell-integration";
@@ -443,11 +444,14 @@ export class ProfileManager {
     const preferredPort = normalizeCdpPortInput(preferredPortInput) ?? 9223;
     const port = await findAvailableCdpPort(preferredPort);
     const preferredAvailable = port === preferredPort;
+    const preferredOwner = preferredAvailable ? null : await describePortOwner(preferredPort);
     return {
       preferredPort,
       port,
       preferredAvailable,
-      preferredOwner: preferredAvailable ? null : await describePortOwner(preferredPort)
+      preferredOwner,
+      // 端口被占时给出 CDP_PORT_UNAVAILABLE 信号：一句「改用建议端口重连」的可照做 action。
+      signal: resolveSignal({ kind: "cdp-port", available: preferredAvailable, preferredPort, suggestedPort: port, owner: preferredOwner })
     };
   }
 

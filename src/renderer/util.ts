@@ -67,7 +67,9 @@ export function formatCdpPortSuggestionNote(suggestion: CdpPortSuggestion): stri
   }
 
   const owner = suggestion.preferredOwner ? `，占用者：${suggestion.preferredOwner}` : "";
-  return `端口 ${suggestion.preferredPort} 已被占用${owner}，已自动改用 ${suggestion.port}。`;
+  // 端口被占＝面向 agent 的硬停信号：把稳定码 + 一句可照做的 action 一并给出。
+  const guidance = suggestion.signal?.action ? ` [${suggestion.signal.code}] ${suggestion.signal.action}` : "";
+  return `端口 ${suggestion.preferredPort} 已被占用${owner}，已自动改用 ${suggestion.port}。${guidance}`;
 }
 
 export function formatErrorMessage(error: unknown): string {
@@ -337,18 +339,35 @@ export function contentionNoticeShort(profile: PublicProfile): string {
 
 // 争用判定 → 完整警示（详情栏横幅用）：带被抢标签页读数和处置建议。
 // contention=观察到实际抢写（带被抢标签页的读数）；risk=两个活跃会话共用、还没抓到抢写现场。
+// 有面向 agent 的稳定信号时，处置建议直接换成「[稳定码] 一句可照做的 action」——对标 ego：
+// 给 agent 的不是现象，而是稳定码 + 一句可照做的指令。
 export function contentionNotice(profile: PublicProfile): string {
   const info = profile.cdpContention;
   if (!info?.level) {
     return "";
   }
+  const signal = info.signal;
   if (info.level === "contention") {
     const churn = info.churn;
     const tabName = churn ? churn.title || hostOf(churn.url) : "";
     const detail = churn ? `：「${tabName}」90 秒内 URL 被改写 ${churn.changes} 次、往返翻转 ${churn.flipBacks} 次` : "";
-    return `⚠ 疑似多个会话正在抢同一个标签页${detail}。建议把其中一个会话挪到独立 Profile/副本。`;
+    // 按 tab 粒度点名归属：这个被抢的标签页在窗口内被哪些 owner 会话驱动过（≥2 个才有意义）。
+    const owners = churn && churn.owners.length >= 2 ? `（争抢方：${churn.owners.join("、")}）` : "";
+    const guidance = signal?.action ? ` [${signal.code}] ${signal.action}` : "建议把其中一个会话挪到独立 Profile/副本。";
+    return `⚠ 疑似多个会话正在抢同一个标签页${detail}${owners}。${guidance}`;
   }
-  return `⚠ ${info.activeClientCount} 个活跃会话共用此 Profile，可能互相抢标签页/焦点。建议给第二个会话克隆一个副本。`;
+  const guidance = signal?.action ? ` [${signal.code}] ${signal.action}` : "建议给第二个会话克隆一个副本。";
+  return `⚠ ${info.activeClientCount} 个活跃会话共用此 Profile，可能互相抢标签页/焦点。${guidance}`;
+}
+
+// 面向 agent 的信号 → 塌缩成一行硬停引导 `[CODE] action`（对标 ego 的 hard-stop collapse：
+// 硬停时丢弃现象、只留一句 owned guidance）。非硬停 / 无信号返回空串。
+export function contentionHardStopGuidance(profile: PublicProfile): string {
+  const signal = profile.cdpContention?.signal;
+  if (!signal || !signal.hardStop || !signal.action) {
+    return "";
+  }
+  return `[${signal.code}] ${signal.action}`;
 }
 
 function cleanActivityText(value?: string | null): string {

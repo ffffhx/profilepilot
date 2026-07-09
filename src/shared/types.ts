@@ -126,12 +126,30 @@ export interface AgentOverlayRevealEvent {
   at: string;
 }
 
+// AI 对某个 tab / Profile 的归属（借鉴 ego-lite 的三值枚举，取代散落的布尔+时间窗）：
+// agent＝AI 正在驱动；agentDelegatedToUser＝用户刚接管、AI 暂让出控制权但仍持有该 tab
+// （同会话重连即恢复 agent）；user＝已彻底交还 / 无 AI 驱动。
+export type Ownership = "agent" | "agentDelegatedToUser" | "user";
+
 // tab 争用观测里“最抖”的那个标签页：观察窗口内 URL 变化次数与往返翻转（A→B→A）次数。
 export interface CdpContentionChurn {
   title: string;
   url: string;
   changes: number;
   flipBacks: number;
+  // 观察窗口内“驱动过这个 tab”的 owner 会话标识（AGENT_BROWSER_SESSION，如 cc-/cx-<uuid>；
+  // 无命名 session 的连接退化成 pid:<pid>）。≥2 个不同 owner＝这个 tab 被多会话争抢。
+  owners: string[];
+}
+
+// 面向 agent 的稳定信号（借鉴 ego-lite 的 EGO_* 契约模型，详见 main/agent-signals.ts）：
+// code 是持久契约（跨版本不漂移），message 给人看，action 是一句机器可照做的指令，
+// hardStop=是否属于「必须停手、按 action 处理」的硬停。UI 在 hardStop 时优先突出 action。
+export interface ProfilePilotSignalInfo {
+  code: string;
+  message: string;
+  action?: string;
+  hardStop: boolean;
 }
 
 // 多会话争用判定（主进程算好给 UI 直接用）：
@@ -146,6 +164,9 @@ export interface CdpContentionInfo {
   // 仅 level=contention 时给出：被抢写的标签页与其抖动读数。
   churn: CdpContentionChurn | null;
   level: "contention" | "risk" | null;
+  // 面向 agent 的稳定信号（由 level 映射而来）：带 code + 一句可照做的 action + hardStop。
+  // level=null 时为 null；UI 优先展示 hardStop 信号的 action。
+  signal: ProfilePilotSignalInfo | null;
 }
 
 // 实时观测：一个正在以 CDP 运行的 Profile 当前“飞在哪”。
@@ -554,6 +575,9 @@ export interface CdpPortSuggestion {
   port: number;
   preferredAvailable: boolean;
   preferredOwner: string | null;
+  // 端口被占时的稳定信号（CDP_PORT_UNAVAILABLE）：带一句「改用建议端口重连」的可照做 action；
+  // 端口可用时为 null。
+  signal: ProfilePilotSignalInfo | null;
 }
 
 export interface OperationProgress {

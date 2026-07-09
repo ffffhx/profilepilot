@@ -709,6 +709,21 @@ body.mini-collapsing .mini-shell {
   white-space: nowrap;
 }
 
+/* 硬停信号引导行：面向 agent 的「稳定码 + 一句可照做的 action」，塌缩成一行突出显示。
+   琥珀警示色 + 等宽，截断但 title 里给全文（对标 ego 的 hard-stop 一行引导）。 */
+.mini-profile-signal {
+  display: block;
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--warn-bright);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* 悬浮窗卡片上的「结束驱动连接」✕：默认藏起，hover 卡片时右侧浮现 */
 .mini-disconnect {
   position: absolute;

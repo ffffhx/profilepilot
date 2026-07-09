@@ -8,6 +8,7 @@ import {
   agentActivityTooltipText,
   cdpPortLabel,
   cdpSessionText,
+  contentionHardStopGuidance,
   contentionNoticeShort,
   escapeHtml,
   formatRelativeTime,
@@ -300,6 +301,8 @@ function renderMiniProfileCard(profile: PublicProfile): string {
   const primaryClient = driving ? profile.cdpClients[0] : undefined;
   const sessionText = !busyHere && primaryClient ? cdpSessionText(primaryClient) : "";
   const sessionAge = !busyHere && primaryClient ? formatRelativeTime(primaryClient.lastActive) : "";
+  // 硬停信号（如 CDP_PORT_CONTENDED）：塌缩成一行「稳定码 + 可照做 action」，优先突出给 agent 照做。
+  const hardStopGuidance = !busyHere && driving ? contentionHardStopGuidance(profile) : "";
   const activity = driving ? profile.agentActivity : null;
   const activityText = activity ? agentActivityLeadText(activity) || "正在操作" : "";
   const activityProgress = activity ? agentActivityProgressText(activity) : "";
@@ -333,6 +336,7 @@ function renderMiniProfileCard(profile: PublicProfile): string {
               ? `<span class="mini-profile-session"${readoutTip ? ` title="${escapeHtml(readoutTip)}"` : ""}>${sessionText ? `<span class="mini-profile-session-main">${escapeHtml(sessionText)}</span>` : ""}${sessionAge ? `<span class="mini-profile-session-age">${escapeHtml(sessionAge)}</span>` : ""}</span>`
               : ""
           }
+          ${hardStopGuidance ? `<span class="mini-profile-signal" title="${escapeHtml(hardStopGuidance)}">${escapeHtml(hardStopGuidance)}</span>` : ""}
           ${
             takeoverText
               ? `<span class="mini-profile-takeover"${takeoverTip ? ` title="${escapeHtml(takeoverTip)}"` : ""}>${escapeHtml(takeoverText)}</span>`

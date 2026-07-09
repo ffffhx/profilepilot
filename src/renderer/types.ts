@@ -110,12 +110,26 @@ export interface AgentOverlayRevealEvent {
   at: string;
 }
 
+// AI 对某个 tab / Profile 的归属（借鉴 ego-lite 的三值枚举，取代散落的布尔+时间窗）。
+export type Ownership = "agent" | "agentDelegatedToUser" | "user";
+
 // tab 争用观测里“最抖”的那个标签页：观察窗口内 URL 变化次数与往返翻转（A→B→A）次数。
 export interface CdpContentionChurn {
   title: string;
   url: string;
   changes: number;
   flipBacks: number;
+  // 观察窗口内驱动过这个 tab 的 owner 会话标识；≥2 个不同 owner＝被多会话争抢。
+  owners: string[];
+}
+
+// 面向 agent 的稳定信号（借鉴 ego-lite 的 EGO_* 契约模型，主进程 agent-signals.ts 产出）：
+// code 稳定，message 给人看，action 是一句机器可照做的指令，hardStop=是否必须停手照 action 处理。
+export interface ProfilePilotSignalInfo {
+  code: string;
+  message: string;
+  action?: string;
+  hardStop: boolean;
 }
 
 export interface CdpContentionInfo {
@@ -123,6 +137,8 @@ export interface CdpContentionInfo {
   observing: boolean;
   churn: CdpContentionChurn | null;
   level: "contention" | "risk" | null;
+  // 面向 agent 的稳定信号（由 level 映射）：level=null 时为 null；UI 优先突出 hardStop 的 action。
+  signal: ProfilePilotSignalInfo | null;
 }
 
 export interface CdpClientInfo {
@@ -527,6 +543,8 @@ export interface CdpPortSuggestion {
   port: number;
   preferredAvailable: boolean;
   preferredOwner: string | null;
+  // 端口被占时的稳定信号（CDP_PORT_UNAVAILABLE）：带「改用建议端口重连」的可照做 action；可用时 null。
+  signal: ProfilePilotSignalInfo | null;
 }
 
 export interface OperationProgress {

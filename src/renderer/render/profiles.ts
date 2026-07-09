@@ -867,7 +867,7 @@ export function renderCdpClientsDetail(profile: PublicProfile): string {
       ${disconnectRow}
       ${renderAgentOverlaySettingRow()}
       ${renderShellIntegrationRow(profile)}
-      <small class="detail-note">检测连到本机 CDP 端口的持久连接；有工具保持长连接（如 agent-browser）时会标为“驱动中”。会话行显示是哪个项目/会话在驱动，以及它最近一次活动时间——很久没动的多半是残留连接，可用「结束连接」断开它（不影响 Chrome）。多个活跃会话共用同一 Profile 会互相抢标签页/焦点，建议用「克隆」给第二个会话分一个副本。</small>
+      <small class="detail-note">列出连到 CDP 端口的工具连接。“驱动中”表示有工具在控制；每行显示驱动方与最近活动，久无动静多为残留，可「结束连接」断开（不影响 Chrome）。多个会话共用同一 Profile 会互抢标签页，建议「克隆」出副本。</small>
     </div>
   `;
 }
@@ -905,7 +905,7 @@ function renderAgentOverlaySettingRow(): string {
   const busy = isBusyAction("agent-overlay");
   return `
     <div class="agent-overlay-setting">
-      <small class="detail-note">AI 操作可见化：agent-browser 驱动页面时显示操作状态条，并支持在页面内停止 AI 操作。当前已${enabled ? "开启" : "关闭"}。</small>
+      <small class="detail-note">AI 驱动页面时显示操作状态条，可在页面内停止 AI。当前已${enabled ? "开启" : "关闭"}。</small>
       <button type="button" class="overlay-switch ${enabled ? "on" : ""} ${busy ? "loading" : ""}" data-action="toggle-agent-overlay" aria-pressed="${enabled ? "true" : "false"}" ${store.busy ? "disabled" : ""}>
         <span class="overlay-switch-track"><span class="overlay-switch-thumb"></span></span>
         <span>${enabled ? "已开启" : "已关闭"}</span>

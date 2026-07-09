@@ -130,6 +130,7 @@ export function agentOverlayBootstrapScript(): string {
   const STATE_DEFAULTS = {
     locale: "",
     state: "active",
+    ownership: "agent",
     profileName: "",
     agent: "",
     project: "",
@@ -662,7 +663,7 @@ export function agentOverlayBootstrapScript(): string {
     }
     ensureHostConnected();
     const copy = text();
-    const taken = state.state === "takenOver";
+    const taken = isDelegatedToUser();
     const sessions = normalizedSessions();
     applyStaticText(copy);
     panel.classList.toggle("taken", taken);
@@ -808,7 +809,7 @@ export function agentOverlayBootstrapScript(): string {
   }
 
   function handleStopClick() {
-    if (stopButton.disabled || state.state === "takenOver") {
+    if (stopButton.disabled || isDelegatedToUser()) {
       return;
     }
     if (!stopConfirming) {
@@ -824,7 +825,7 @@ export function agentOverlayBootstrapScript(): string {
   }
 
   function updateStopButton() {
-    const taken = state.state === "takenOver";
+    const taken = isDelegatedToUser();
     const hasBinding = typeof window[SIGNAL_NAME] === "function";
     stopButton.disabled = taken || !hasBinding;
     if (taken) {
@@ -852,7 +853,7 @@ export function agentOverlayBootstrapScript(): string {
     stopConfirmTimer = null;
     if (stopButton) {
       stopButton.classList.remove("confirm");
-      if (state.state !== "takenOver") {
+      if (!isDelegatedToUser()) {
         const label = isMultiSession() ? text().stopAll : text().stopSingle;
         stopButton.textContent = label;
         stopButton.title = label;
@@ -952,6 +953,11 @@ export function agentOverlayBootstrapScript(): string {
     return normalizedSessions().length >= 2;
   }
 
+  // 归属交给用户（用户接管保留窗口内）：以三值枚举 ownership 为准，兼容仍只发 state 的旧 payload。
+  function isDelegatedToUser() {
+    return state.ownership === "agentDelegatedToUser" || state.state === "takenOver";
+  }
+
   function text() {
     return OVERLAY_TEXT[currentLocale()];
   }
@@ -1001,6 +1007,9 @@ export function agentOverlayBootstrapScript(): string {
     if (key === "state") {
       return value === "takenOver" ? "takenOver" : "active";
     }
+    if (key === "ownership") {
+      return value === "agentDelegatedToUser" || value === "user" ? value : "agent";
+    }
     if (key === "locale") {
       return normalizeLocale(value);
     }
@@ -1035,7 +1044,7 @@ export function agentOverlayBootstrapScript(): string {
     for (const key of KNOWN_STATE_FIELDS) {
       state[key] = normalizeKnownStateValue(key, payload[key]);
     }
-    if (state.state === "takenOver") {
+    if (isDelegatedToUser()) {
       resetStopConfirm();
       clearTimeout(takenOverTimer);
       takenOverTimer = setTimeout(() => collapse(), 5000);

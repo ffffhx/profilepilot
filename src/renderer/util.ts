@@ -346,7 +346,9 @@ export function contentionNotice(profile: PublicProfile): string {
     const churn = info.churn;
     const tabName = churn ? churn.title || hostOf(churn.url) : "";
     const detail = churn ? `：「${tabName}」90 秒内 URL 被改写 ${churn.changes} 次、往返翻转 ${churn.flipBacks} 次` : "";
-    return `⚠ 疑似多个会话正在抢同一个标签页${detail}。建议把其中一个会话挪到独立 Profile/副本。`;
+    // 按 tab 粒度点名归属：这个被抢的标签页在窗口内被哪些 owner 会话驱动过（≥2 个才有意义）。
+    const owners = churn && churn.owners.length >= 2 ? `（争抢方：${churn.owners.join("、")}）` : "";
+    return `⚠ 疑似多个会话正在抢同一个标签页${detail}${owners}。建议把其中一个会话挪到独立 Profile/副本。`;
   }
   return `⚠ ${info.activeClientCount} 个活跃会话共用此 Profile，可能互相抢标签页/焦点。建议给第二个会话克隆一个副本。`;
 }

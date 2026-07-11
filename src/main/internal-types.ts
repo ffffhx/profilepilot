@@ -9,6 +9,9 @@ export type ProfileRef =
 
 export interface RuntimeProfile {
   pids: number[];
+  // 只包含 Chromium 应用主进程；Input Guard 必须挂在接收窗口事件的主进程，
+  // 不能把 renderer / gpu helper 当作独立浏览器去建 event tap。
+  browserPids?: number[];
   startedAt: string | null;
   cdpPort: number | null;
   listeningPorts: number[];

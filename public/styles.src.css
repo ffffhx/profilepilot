@@ -1332,51 +1332,6 @@ h3 {
   transform: translate(-50%, 0) rotate(45deg);
 }
 
-.path-tooltip {
-  display: inline-flex;
-  min-width: 0;
-  max-width: 100%;
-}
-
-.path-tooltip::after {
-  left: 0;
-  max-width: min(680px, calc(100vw - 180px));
-  color: var(--accent-bright);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  letter-spacing: 0;
-  overflow-wrap: anywhere;
-  text-transform: none;
-  transform: translate(0, 4px);
-}
-
-.path-tooltip::before {
-  left: 18px;
-  transform: translate(0, 4px) rotate(45deg);
-}
-
-.path-tooltip:hover::after,
-.path-tooltip:focus-within::after {
-  transform: translate(0, 0);
-}
-
-.path-tooltip:hover::before,
-.path-tooltip:focus-within::before {
-  transform: translate(0, 0) rotate(45deg);
-}
-
-.path-tooltip > code {
-  width: 100%;
-}
-
-.profile-root-path-tip {
-  width: 100%;
-}
-
-.profile-path-tip {
-  flex: 1 1 auto;
-}
-
 /* ---- button variants ---- */
 
 .action-button {
@@ -3545,87 +3500,61 @@ body:not(.booted) .layout {
 }
 
 .profile-child-row .profile-name-cell {
-  padding-left: 40px;
-}
-
-.profile-child-row .profile-pick {
-  position: relative;
-  z-index: 1;
-}
-
-.tree-branch {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 18px;
-  width: 20px;
-  pointer-events: none;
-}
-
-.tree-branch::before,
-.tree-branch::after {
-  position: absolute;
-  content: "";
-}
-
-.tree-branch::before {
-  top: 0;
-  bottom: 0;
-  left: 8px;
-  border-left: 1px solid rgba(143, 161, 173, 0.28);
-}
-
-.profile-child-row.last-in-group .tree-branch::before {
-  bottom: 50%;
-}
-
-.tree-branch::after {
-  top: 50%;
-  left: 8px;
-  width: 14px;
-  border-top: 1px solid rgba(143, 161, 173, 0.34);
-}
-
-.profile-child-row.selected .tree-branch::before,
-.profile-child-row.selected .tree-branch::after {
-  border-color: rgba(56, 225, 160, 0.58);
-}
-
-.profile-path-line {
   display: flex;
   align-items: center;
-  gap: 7px;
-  min-width: 0;
-  margin-top: 5px;
-  padding-left: 17px;
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 10px;
-  font-weight: 600;
-  line-height: 1.2;
+  gap: 4px;
 }
 
-.profile-path-line > span:first-child {
-  flex: 0 0 auto;
-  color: rgba(143, 161, 173, 0.78);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.profile-path-line .path-tooltip {
+.profile-child-row .profile-name-cell .profile-pick {
+  position: relative;
+  z-index: 1;
   flex: 1 1 auto;
   min-width: 0;
-  letter-spacing: 0;
-  text-transform: none;
 }
 
-.profile-path-line code {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--accent-dark);
-  font-family: var(--font-mono);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+/* —— 拖拽排序手柄：默认隐形占位，行 hover / 选中 / 聚焦时浮现，避免平时干扰阅读 —— */
+.drag-handle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: stretch;
+  width: 16px;
+  color: var(--line-strong);
+  font-size: 13px;
+  line-height: 1;
+  letter-spacing: -1px;
+  cursor: grab;
+  opacity: 0;
+  user-select: none;
+  transition: opacity 0.12s ease, color 0.12s ease;
+}
+
+.profile-child-row:hover .drag-handle,
+.profile-child-row.selected .drag-handle,
+.profile-child-row:focus-within .drag-handle {
+  opacity: 1;
+}
+
+.drag-handle:hover {
+  color: var(--accent);
+}
+
+.drag-handle:active {
+  cursor: grabbing;
+}
+
+/* 被拖行半透明；落点行在其上/下缘亮一条落点线（box-shadow 作用在 td 上，tr 上不生效）。 */
+.profile-child-row.dragging {
+  opacity: 0.4;
+}
+
+.profiles-table tbody tr.profile-child-row.drop-above td {
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+
+.profiles-table tbody tr.profile-child-row.drop-below td {
+  box-shadow: inset 0 -2px 0 var(--accent);
 }
 
 .state-pill.running {
@@ -3683,96 +3612,6 @@ body:not(.booted) .layout {
 
 .table-group-row .count {
   margin-left: 10px;
-}
-
-.profile-root-row td {
-  color: var(--muted);
-}
-
-.profile-root-content {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.profile-root-head {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-  flex: 0 1 auto;
-}
-
-/* 路径框按内容宽度（短尾部不拉满），过长才省略；计数靠 margin-left:auto 顶到最右。 */
-.profile-root-head .profile-root-path-tip {
-  width: auto;
-  max-width: 100%;
-  min-width: 0;
-}
-
-.profile-root-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 9px;
-  min-width: 0;
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-}
-
-.profile-root-node {
-  position: relative;
-  width: 16px;
-  height: 16px;
-  flex: 0 0 auto;
-  border: 1px solid var(--line-strong);
-  border-radius: 4px;
-  background: linear-gradient(180deg, rgba(95, 182, 255, 0.14), rgba(95, 182, 255, 0.03));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
-}
-
-.profile-root-node::before {
-  position: absolute;
-  top: 3px;
-  left: 3px;
-  width: 8px;
-  height: 2px;
-  border-radius: 99px;
-  background: var(--accent-dark);
-  content: "";
-}
-
-.profile-root-node::after {
-  position: absolute;
-  top: 6px;
-  left: 3px;
-  width: 10px;
-  height: 2px;
-  border-radius: 99px;
-  background: rgba(157, 239, 201, 0.72);
-  content: "";
-}
-
-.profile-root-content code {
-  min-width: 0;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: rgba(2, 6, 9, 0.35);
-  padding: 5px 8px;
-  color: var(--accent-dark);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.profile-root-content .count {
-  flex: 0 0 auto;
-  margin-left: auto;
 }
 
 /* 基础态保留为 CSS：仍被 extensions/account-sync 复用，profiles 处已叠加等值工具类。 */

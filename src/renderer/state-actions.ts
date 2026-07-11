@@ -1,12 +1,16 @@
 import { profileApi } from "./api";
 import { render } from "./render/render-root";
 import { store } from "./state";
-import { AgentTakeoverEvent, PublicProfile } from "./types";
+import { AgentTakeoverEvent, AppState, PublicProfile } from "./types";
 
 const TAKEOVER_HISTORY_LIMIT = 50;
 
 export async function loadState(): Promise<void> {
-  store.state = await profileApi().getState();
+  applyState(await profileApi().getState());
+}
+
+export function applyState(state: AppState): void {
+  store.state = state;
   const profiles = store.state.profiles || [];
 
   if (!profiles.some((profile) => profile.id === store.selectedId)) {

@@ -1,9 +1,15 @@
 import { existsSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import type {
   CdpClientInfo,
   ExternalChromeInstance
 } from "../shared/types";
+import {
+  readAgentBrowserProfileLeaseSync,
+  type AgentBrowserProfileLease
+} from "./agent-browser-lease";
+import { readActiveAgentBrowserSessionActivityClientsByPort } from "./agent-browser-session";
 import { isValidTcpPort, makeCdpUrl, parseRemoteDebuggingPort, requestCdpVersionInfo } from "./cdp-client";
 import { POSIX_LOCALE_ENV, compareNumbers, earlierIsoDate, execFileAsync, uniqueNumbers } from "./fs-util";
 import { RuntimeProfile } from "./internal-types";
@@ -39,6 +45,7 @@ export function parseRuntimeProcess(line: string): (RuntimeProfile & { pid: numb
   return {
     pid,
     pids: [pid],
+    browserPids: isChromiumBrowserMainProcess(command) ? [pid] : [],
     startedAt,
     cdpPort: parseRemoteDebuggingPort(command),
     listeningPorts: [],
@@ -55,6 +62,24 @@ export function parsePsStartTime(value: string): string | null {
   return date.toISOString();
 }
 
+function laterIsoDate(left: string | undefined, right: string | undefined): string | undefined {
+  if (!left) {
+    return right;
+  }
+  if (!right) {
+    return left;
+  }
+  const leftTime = Date.parse(left);
+  const rightTime = Date.parse(right);
+  if (!Number.isFinite(leftTime)) {
+    return right;
+  }
+  if (!Number.isFinite(rightTime)) {
+    return left;
+  }
+  return rightTime > leftTime ? right : left;
+}
+
 export function addRuntimeProcess(
   runtime: Map<string, RuntimeProfile>,
   key: string,
@@ -64,6 +89,7 @@ export function addRuntimeProcess(
   if (!profile.pids.includes(processInfo.pid)) {
     profile.pids.push(processInfo.pid);
   }
+  profile.browserPids = uniqueNumbers([...(profile.browserPids || []), ...(processInfo.browserPids || [])]);
   profile.startedAt = earlierIsoDate(profile.startedAt, processInfo.startedAt);
   profile.cdpPort = profile.cdpPort || processInfo.cdpPort;
   profile.listeningPorts = uniqueNumbers(profile.listeningPorts.concat(processInfo.listeningPorts)).sort(compareNumbers);
@@ -240,6 +266,9 @@ export async function getCdpClientsByPort(ports: number[]): Promise<Map<number, 
 
   await dropOwnAppClients(result);
   await applyClientContexts(result);
+  await applyAgentBrowserSessionActivities(result, targetPorts);
+  applyDelegatedAgentBrowserProfileLeases(result, targetPorts);
+  collapseDuplicateNamedSessionClients(result);
   // 同端口多条连接按“最近活动”降序：UI 主展示（表格药丸/tooltip 首条/行内时间）取的是
   // clients[0]，必须让活跃的驱动者排前面——否则先连上的残留连接（会话早已结束）会把
   // 刚连上的新会话压进“同时连接”，行上时间显示成几小时前。
@@ -251,6 +280,111 @@ export async function getCdpClientsByPort(ports: number[]): Promise<Map<number, 
     clients.sort((a, b) => activeTs(b) - activeTs(a));
   }
   return result;
+}
+
+// lsof 按进程列连接；同一个命名 Session 在 daemon 异常重启时可能短暂或永久残留多个 PID。
+// 对产品控制权来说 owner 是 Session，而不是 daemon 进程，因此这里按 Session 折叠：
+//   · 争用统计不会把一个 Session 误报成两个会话；
+//   · 仍保留 duplicatePids，让 UI 和回收逻辑能明确诊断/结束残留 daemon。
+export function collapseDuplicateNamedSessionClients(byPort: Map<number, CdpClientInfo[]>): void {
+  for (const [port, clients] of byPort) {
+    const result: CdpClientInfo[] = [];
+    const bySession = new Map<string, CdpClientInfo>();
+    for (const client of clients) {
+      const session = client.session?.trim();
+      if (!session) {
+        result.push(client);
+        continue;
+      }
+      const existing = bySession.get(session);
+      if (!existing) {
+        bySession.set(session, client);
+        result.push(client);
+        continue;
+      }
+      existing.duplicatePids = [...new Set([...(existing.duplicatePids || []), client.pid, ...(client.duplicatePids || [])])]
+        .filter((pid) => pid !== existing.pid)
+        .sort(compareNumbers);
+      existing.agent = existing.agent || client.agent;
+      existing.project = existing.project || client.project;
+      existing.title = existing.title || client.title;
+      existing.lastActive = laterIsoDate(existing.lastActive, client.lastActive);
+      const duplicateNote = `同一 Session 存在 ${1 + existing.duplicatePids.length} 个 agent-browser daemon（PID ${[
+        existing.pid,
+        ...existing.duplicatePids
+      ].join("、")}）`;
+      existing.note = existing.note ? `${existing.note}；${duplicateNote}` : duplicateNote;
+    }
+    byPort.set(port, result);
+  }
+}
+
+function applyDelegatedAgentBrowserProfileLeases(
+  byPort: Map<number, CdpClientInfo[]>,
+  targetPorts: number[],
+  homeDir = os.homedir()
+): void {
+  for (const port of targetPorts) {
+    const lease = readAgentBrowserProfileLeaseSync(port, homeDir);
+    if (!lease?.delegatedToUser) continue;
+    const leaseClient = clientFromDelegatedAgentBrowserProfileLease(lease);
+    const clients = byPort.get(port) || [];
+    const existing = clients.find(
+      (client) => client.session === leaseClient.session || client.pid === leaseClient.pid
+    );
+    if (existing) {
+      existing.agent = existing.agent || leaseClient.agent;
+      existing.project = existing.project || leaseClient.project;
+      existing.title = existing.title || leaseClient.title;
+      existing.session = existing.session || leaseClient.session;
+      existing.note = existing.note || leaseClient.note;
+      existing.lastActive = laterIsoDate(existing.lastActive, leaseClient.lastActive);
+    } else {
+      clients.push(leaseClient);
+    }
+    byPort.set(port, clients);
+  }
+}
+
+export function clientFromDelegatedAgentBrowserProfileLease(lease: AgentBrowserProfileLease): CdpClientInfo {
+  return {
+    pid: lease.daemonPid || lease.holderPid,
+    label: "agent-browser",
+    agent: lease.agent,
+    project: lease.project,
+    title: lease.command ? `agent-browser ${lease.command}` : "agent-browser Session",
+    session: lease.session,
+    lastActive: lease.updatedAt,
+    note: "ProfilePilot 控制权状态：用户正在操作，原 agent-browser Session 与 Profile 排它绑定继续保留"
+  };
+}
+
+async function applyAgentBrowserSessionActivities(
+  byPort: Map<number, CdpClientInfo[]>,
+  targetPorts: number[]
+): Promise<void> {
+  const activityClientsByPort = await readActiveAgentBrowserSessionActivityClientsByPort(targetPorts);
+  for (const [port, activityClients] of activityClientsByPort) {
+    const clients = byPort.get(port) || [];
+    for (const activityClient of activityClients) {
+      const existing = clients.find((client) =>
+        (activityClient.session && client.session === activityClient.session) || client.pid === activityClient.pid
+      );
+      if (existing) {
+        existing.agent = existing.agent || activityClient.agent;
+        existing.project = existing.project || activityClient.project;
+        existing.title = existing.title || activityClient.title;
+        existing.session = existing.session || activityClient.session;
+        existing.note = existing.note || activityClient.note;
+        existing.lastActive = laterIsoDate(existing.lastActive, activityClient.lastActive);
+        continue;
+      }
+      clients.push(activityClient);
+    }
+    if (clients.length) {
+      byPort.set(port, clients);
+    }
+  }
 }
 
 // 排除所有 ProfilePilot 进程（按可执行文件路径识别，覆盖其它实例）：
@@ -339,6 +473,7 @@ export function mergeRuntimeProfiles(...profiles: Array<RuntimeProfile | undefin
 
       return {
         pids: uniqueNumbers(merged.pids.concat(profile.pids)),
+        browserPids: uniqueNumbers([...(merged.browserPids || []), ...(profile.browserPids || [])]),
         startedAt: earlierIsoDate(merged.startedAt, profile.startedAt),
         cdpPort: merged.cdpPort || profile.cdpPort,
         listeningPorts: uniqueNumbers(merged.listeningPorts.concat(profile.listeningPorts)).sort(compareNumbers)
@@ -349,7 +484,7 @@ export function mergeRuntimeProfiles(...profiles: Array<RuntimeProfile | undefin
 }
 
 export function emptyRuntimeProfile(): RuntimeProfile {
-  return { pids: [], startedAt: null, cdpPort: null, listeningPorts: [] };
+  return { pids: [], browserPids: [], startedAt: null, cdpPort: null, listeningPorts: [] };
 }
 
 export function isImplicitDefaultChromeProcess(command: string): boolean {

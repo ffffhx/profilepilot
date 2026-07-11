@@ -9,7 +9,10 @@
   },
   "main": "dist/main/main.js",
   "scripts": {
-    "build": "tsc && npm run bundle:renderer && npm run build:css",
+    "build": "npm run build:input-guard && tsc && npm run bundle:agent-browser-wrapper && npm run bundle:renderer && npm run build:css",
+    "build:input-guard": "node scripts/build-input-guard.mjs",
+    "setup:input-guard-signing": "node scripts/setup-input-guard-signing.mjs",
+    "bundle:agent-browser-wrapper": "esbuild src/main/agent-browser-wrapper.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/main/profilepilot-agent-browser-wrapper.cjs --log-level=warning",
     "bundle:renderer": "esbuild src/renderer/main.ts --bundle --outfile=dist/renderer/app.js --platform=browser --format=iife --target=es2022 --log-level=warning",
     "build:css": "tailwindcss -i ./public/styles.src.css -o ./public/app.css",
     "watch:css": "tailwindcss -i ./public/styles.src.css -o ./public/app.css --watch",
@@ -46,10 +49,17 @@
     },
     "files": [
       "dist/**/*",
+      "!dist/native/**/*",
       "public/**/*",
       "README.md",
       "LICENSE",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "dist/native/ProfilePilot Input Guard.app",
+        "to": "native/ProfilePilot Input Guard.app"
+      }
     ],
     "mac": {
       "category": "public.app-category.developer-tools",

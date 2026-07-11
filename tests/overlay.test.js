@@ -1,6 +1,6 @@
 const assert = require("node:assert/strict");
 const { randomUUID } = require("node:crypto");
-const { mkdir, mkdtemp, rm, writeFile, appendFile } = require("node:fs/promises");
+const { mkdir, mkdtemp, readFile, rm, writeFile, appendFile } = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
@@ -129,6 +129,31 @@ test("SessionTailer parses Claude assistant text", async () => {
   });
 });
 
+test("SessionTailer marks Claude end_turn completed and a later user turn active", async () => {
+  await withTempHome(async (home) => {
+    const uuid = randomUUID();
+    const file = await createClaudeSession(home, uuid, [
+      { type: "user", message: { content: "Open the browser" } },
+      {
+        type: "assistant",
+        message: {
+          content: [{ type: "text", text: "Done." }],
+          stop_reason: "end_turn"
+        }
+      }
+    ]);
+
+    const tailer = startTailer(`cc-${uuid}`, {});
+    try {
+      await waitFor(() => tailer.getControlPhase() === "completed", "Claude completed turn");
+      await appendFile(file, `${JSON.stringify({ type: "user", message: { content: "Continue" } })}\n`, "utf8");
+      await waitFor(() => tailer.getControlPhase() === "active", "Claude next active turn");
+    } finally {
+      tailer.stop();
+    }
+  });
+});
+
 test("SessionTailer ignores bad, half, empty, and missing Claude session input", async () => {
   await withTempHome(async (home) => {
     const emptyUuid = randomUUID();
@@ -192,6 +217,10 @@ test("SessionTailer parses Codex rollout messages, function calls, and update_pl
     const uuid = randomUUID();
     await createCodexSession(home, uuid, [
       {
+        type: "event_msg",
+        payload: { type: "task_started" }
+      },
+      {
         type: "session_meta",
         payload: { cwd: "/tmp/profilepilot" }
       },
@@ -230,6 +259,10 @@ test("SessionTailer parses Codex rollout messages, function calls, and update_pl
             })
           }
         }
+      },
+      {
+        type: "event_msg",
+        payload: { type: "task_complete" }
       }
     ]);
 
@@ -252,6 +285,7 @@ test("SessionTailer parses Codex rollout messages, function calls, and update_pl
       assert.equal(activity.nextStep, "Write summary");
       assert.equal(activity.todoDone, 1);
       assert.equal(activity.todoTotal, 3);
+      assert.equal(tailer.getControlPhase(), "completed");
     } finally {
       tailer.stop();
     }
@@ -317,7 +351,37 @@ test("agent overlay bootstrap script has static safety hooks and valid syntax", 
   assert.match(script, /__ppAgentOverlaySignal/);
   assert.match(script, /window\.__ppAgentOverlayUpdate/);
   assert.match(script, /window\.__ppAgentOverlayTeardown/);
+  assert.match(script, /__ppAgentOverlayTerminalStopUntil/);
+  assert.match(script, /sessionStorage\.setItem\(TERMINAL_STOP_KEY/);
+  assert.match(script, /sessionStorage\.getItem\(TERMINAL_STOP_KEY\)/);
+  assert.ok(
+    script.indexOf('signal("stop", { stopAll: true, reason: "user_stop" });') < script.indexOf("window.__ppAgentOverlayTeardown?.()"),
+    "terminal stop dispatches the binding before fully tearing down its current overlay"
+  );
   new vm.Script(script);
+});
+
+test("agent overlay bootstrap is compatible with strict Trusted Types pages", () => {
+  const script = agentOverlayBootstrapScript();
+  assert.doesNotMatch(script, /\.innerHTML\s*=/);
+  assert.doesNotMatch(script, /insertAdjacentHTML|createContextualFragment|DOMParser/);
+  assert.doesNotMatch(script, /trustedTypes\.createPolicy/);
+  assert.match(script, /const styleNode = overlayNode\("style"\)/);
+  assert.match(script, /document\.createElement\(tagName\)/);
+  assert.match(script, /styleNode\.textContent = styleText/);
+  assert.match(script, /document\.createElementNS\("http:\/\/www\.w3\.org\/2000\/svg", "svg"\)/);
+  assert.match(script, /shadowRoot\.append\(styleNode, wrapNode, cursorLayerNode\)/);
+  new vm.Script(script);
+});
+
+test("agent overlay details toggle also works after user takeover", () => {
+  const script = agentOverlayBootstrapScript();
+  const toggleDetails = script.match(/function toggleDetails\(\) \{([\s\S]*?)\n  \}/)?.[1] || "";
+  assert.match(script, /detailToggleButton\.addEventListener\("click", toggleDetails\)/);
+  assert.match(script, /host\.classList\.toggle\("expanded", expanded\)/);
+  assert.doesNotMatch(script, /host\.classList\.toggle\("expanded", !taken && expanded\)/);
+  assert.match(toggleDetails, /expanded = !expanded/);
+  assert.doesNotMatch(toggleDetails, /isDelegatedToUser/);
 });
 
 test("agent overlay bootstrap script includes zh/en copy and locale selection", () => {
@@ -326,20 +390,234 @@ test("agent overlay bootstrap script includes zh/en copy and locale selection", 
   assert.match(script, /locale/);
   assert.match(script, /currentLocale/);
   assert.match(script, /navigator\.language/);
-  assert.match(script, /AI 正在操作 · /);
-  assert.match(script, /AI is operating · /);
-  assert.match(script, /已接管，AI 已停止操作/);
-  assert.match(script, /Taken over — AI stopped/);
-  assert.match(script, /停止并接管/);
-  assert.match(script, /Stop & take over/);
-  assert.match(script, /再点一次确认接管/);
-  assert.match(script, /Click again to confirm/);
+  assert.match(script, /AI 正在控制 · /);
+  assert.match(script, /AI is controlling · /);
+  assert.match(script, /已接管，AI 已暂停操作/);
+  assert.match(script, /Taken over — AI paused/);
+  assert.match(script, /Agent 调试中/);
+  assert.match(script, /Agent debugging/);
+  assert.match(script, /暂时无法手动点击/);
+  assert.match(script, /正在启用点击保护/);
+  assert.match(script, /需要给“ProfilePilot Input Guard”开启辅助功能权限/);
+  assert.match(script, /Manual clicks are temporarily disabled/);
+  assert.match(script, /Agent 任务/);
+  assert.match(script, /Agent task/);
+  assert.match(script, /查看控制详情/);
+  assert.match(script, /Show control details/);
+  assert.match(script, /任务空间/);
+  assert.match(script, /Task space/);
+  assert.match(script, /projectPrefix: "项目"/);
+  assert.match(script, /sessionPrefix: "Session"/);
+  assert.match(script, /compactSessionId/);
+  assert.match(script, /spaceChip\.title = fullTaskSpaceText/);
+  assert.match(script, /Hard-stop notice sent/);
+  assert.match(script, /接管/);
+  assert.match(script, /returnToAgent: "交还 Agent"/);
+  assert.match(script, /offlineButton: "Agent 已离线"/);
+  assert.match(script, /releaseProfile: "释放 Profile"/);
+  assert.match(script, /confirmRelease: "再点一次释放"/);
+  assert.match(script, /takeover: "接管"/);
+  assert.match(script, /stopSingle: "结束任务"/);
+  assert.doesNotMatch(script, /takeover: "Take over"/);
+  assert.doesNotMatch(script, /stopSingle: "Stop task"/);
+  assert.doesNotMatch(script, /再点一次接管/);
+  assert.doesNotMatch(script, /Click again to take over/);
+  assert.match(script, /再点一次结束/);
+  assert.doesNotMatch(script, /confirmStop: "Click again to stop"/);
   assert.match(script, /在 ProfilePilot 中查看/);
   assert.match(script, /Open in ProfilePilot/);
   assert.match(script, /targetPrefix/);
   assert.match(script, /目标：/);
   assert.match(script, /Target: /);
   assert.match(script, /browser control returned to you/);
+});
+
+test("agent overlay bootstrap script exposes fail-closed native Input Guard hit testing", () => {
+  const script = agentOverlayBootstrapScript();
+  assert.doesNotMatch(script, /class=\\"shield\\"/);
+  assert.match(script, /host\.style\.pointerEvents = "none"/);
+  assert.doesNotMatch(script, /\.shield\{/);
+  assert.doesNotMatch(script, /radial-gradient/);
+  assert.match(script, /overlayNode\("div", "status-line"\)/);
+  assert.match(script, /overlayNode\("span", "state-chip"\)/);
+  assert.match(script, /overlayNode\("span", "space-chip"\)/);
+  assert.match(script, /overlayNode\("button", "icon-btn detail-toggle"/);
+  assert.match(script, /overlayNode\("div", "details"/);
+  assert.doesNotMatch(script, /INPUT_LOCK_EVENTS/);
+  assert.doesNotMatch(script, /beforeinput/);
+  assert.doesNotMatch(script, /shouldBlockPageInput/);
+  assert.match(script, /copy\.lockedTitle/);
+  assert.match(script, /compactTaskSpaceText/);
+  assert.match(script, /EXPANDED_KEY/);
+  assert.match(script, /toggleDetails/);
+  assert.match(script, /:host\(.locked\.expanded\) \.details\{/);
+  assert.match(script, /:host\(.locked\) \.details\{display:none\}/);
+  assert.match(script, /host\.classList\.toggle\("collapsed", taken && collapsed && !offline\)/);
+  assert.match(script, /:host\(.locked\.collapsed\) \.panel\{display:grid\}/);
+  assert.match(script, /host\.classList\.add\("locked"\)/);
+  assert.doesNotMatch(script, /host\.classList\.toggle\("locked", !taken\)/);
+  assert.match(script, /const stopLabel = stopConfirming && stopConfirmKind === "stop" \? text\(\)\.confirmStop : isMultiSession\(\) \? text\(\)\.stopAll : text\(\)\.stopSingle/);
+  assert.doesNotMatch(script, /stopButton\.textContent = text\(\)\.takenStop/);
+  assert.match(script, /signal\("resume", \{ stopAll: false \}\)/);
+  assert.match(script, /takeoverButton\.disabled = !hasBinding/);
+  assert.match(script, /takeoverButton\.disabled = !hasBinding \|\| pending \|\| offline/);
+  assert.match(script, /stopButton\.disabled = !hasBinding/);
+  assert.match(script, /const wasDelegatedToUser = isDelegatedToUser\(\)/);
+  assert.match(script, /if \(!wasDelegatedToUser\) \{\s*resetStopConfirm\(\)/);
+  assert.doesNotMatch(script, /WINDOW_GEOMETRY_SAMPLE_MS/);
+  assert.doesNotMatch(script, /window-geometry/);
+  assert.doesNotMatch(script, /window-focus/);
+  assert.doesNotMatch(script, /window-blur/);
+  assert.match(script, /window\.outerWidth/);
+  assert.match(script, /window\.visualViewport/);
+  assert.match(script, /devicePixelRatio \/ displayScale/);
+  assert.match(script, /__ppAgentOverlayGuardProbe/);
+  assert.match(script, /__ppAgentOverlayGuardActivate/);
+  assert.match(script, /guardActionAtClientPoint/);
+  assert.match(script, /rect\.left \+ inset/);
+});
+
+test("AgentOverlayManager arms Input Guard only for active visible Chrome main pids", async () => {
+  const syncCalls = [];
+  const inputGuard = {
+    sync(pids) {
+      syncCalls.push([...pids]);
+    },
+    dispose() {}
+  };
+  const manager = new AgentOverlayManager({
+    onStop: async () => {},
+    inputGuard,
+    requestVersionInfo: async () => ({})
+  });
+  manager.sync({
+    enabled: true,
+    ports: [
+      {
+        port: 9480,
+        profileId: "test-profile",
+        profileName: "Test Profile",
+        browserPids: [501, 501],
+        headless: false,
+        clients: [{ pid: 42, label: "agent-browser" }]
+      },
+      {
+        port: 9481,
+        profileId: "headless-profile",
+        profileName: "Headless Profile",
+        browserPids: [777],
+        headless: true,
+        clients: [{ pid: 43, label: "agent-browser" }]
+      }
+    ]
+  });
+  assert.deepEqual(syncCalls.at(-1), [501]);
+  manager.sync({ enabled: false, ports: [] });
+  assert.deepEqual(syncCalls.at(-1), []);
+  await manager.dispose();
+});
+
+test("AgentOverlayManager keeps Input Guard off while the same CDP client is paused", async () => {
+  let now = 1_000;
+  const syncCalls = [];
+  const inputGuard = {
+    sync(pids) {
+      syncCalls.push([...pids]);
+    },
+    dispose() {}
+  };
+  const manager = new AgentOverlayManager({
+    now: () => now,
+    onStop: async () => {},
+    inputGuard,
+    requestVersionInfo: async () => ({})
+  });
+  const port = {
+    port: 9480,
+    profileId: "test-profile",
+    profileName: "Test Profile",
+    browserPids: [501],
+    headless: false,
+    clients: [{ pid: 42, label: "agent-browser", session: "cx-one" }]
+  };
+
+  manager.sync({ enabled: true, ports: [port] });
+  assert.deepEqual(syncCalls.at(-1), [501]);
+
+  manager.sync({ enabled: true, ports: [{ ...port, controlPaused: true }] });
+  assert.deepEqual(syncCalls.at(-1), []);
+  assert.equal(manager.ports.get(9480).delegatedToUser, true);
+
+  now += 10_000;
+  manager.sync({ enabled: true, ports: [{ ...port, controlPaused: true }] });
+  assert.deepEqual(syncCalls.at(-1), []);
+
+  manager.sync({ enabled: true, ports: [{ ...port, controlPaused: false }] });
+  assert.deepEqual(syncCalls.at(-1), [501]);
+  assert.equal(manager.ports.get(9480).delegatedToUser, false);
+  await manager.dispose();
+});
+
+test("AgentOverlayManager activates only a live probe in the clicked native window", async () => {
+  const evaluations = [];
+  const fakeClient = {
+    onEvent: null,
+    onDisconnect: null,
+    close() {},
+    async send(method, params) {
+      if (method === "Browser.getWindowForTarget") {
+        return { windowId: 9, bounds: { left: 0, top: 38, width: 1512, height: 867, windowState: "normal" } };
+      }
+      if (method === "Runtime.evaluate") {
+        evaluations.push(params.expression);
+        if (String(params.expression).includes("__ppAgentOverlayGuardProbe")) {
+          return { result: { value: { action: "takeover", signature: "live-layout" } } };
+        }
+        return { result: { value: true } };
+      }
+      throw new Error(`unexpected CDP method ${method}`);
+    }
+  };
+  const manager = new AgentOverlayManager({ onStop: async () => {}, inputGuard: { sync() {}, dispose() {} } });
+  const state = createOverlayState({
+    browserPids: [501],
+    headless: false,
+    browserClient: fakeClient,
+    targetCache: { targets: [{ id: "target-1", type: "page", url: "https://example.test" }], expiresAt: Date.now() + 10_000 },
+    targetRequest: null,
+    targetCacheGeneration: 0
+  });
+  const page = createOverlayPage({
+    sessionId: "session-1",
+    activeContextId: 7,
+    isolatedContextIds: new Set([7])
+  });
+  state.pages.set(page.targetId, page);
+  manager.ports.set(state.port, state);
+
+  await manager.handleInputGuardClick({
+    pid: 501,
+    windowId: 88,
+    displayScale: 2,
+    window: { x: 0, y: 38, width: 1512, height: 867 },
+    down: { x: 700, y: 780 },
+    up: { x: 701, y: 780 },
+    startedAt: 1_000,
+    endedAt: 2_000
+  });
+
+  assert.equal(evaluations.length, 2);
+  assert.match(evaluations[0], /__ppAgentOverlayGuardProbe/);
+  assert.match(evaluations[1], /__ppAgentOverlayGuardActivate/);
+});
+
+test("main process keeps agent control UI inside the web page", async () => {
+  const source = await readFile(path.join(__dirname, "..", "src", "main", "main.ts"), "utf8");
+  assert.match(source, /createProfileManager\(broadcastAgentTakeover, revealAgentOverlayProfile\)/);
+  assert.doesNotMatch(source, /createAgentLockWindow/);
+  assert.doesNotMatch(source, /agentLockWindows/);
+  assert.doesNotMatch(source, /FrontmostAppMonitor/);
+  assert.doesNotMatch(source, /frontmost-app-monitor/);
 });
 
 test("AgentOverlayManager pure logic handles disabled and empty sync inputs", () => {
@@ -453,6 +731,7 @@ test("AgentOverlayManager sends a pid-scoped stop request for a sessionless sing
   assert.equal(stopCalls[0].pid, 42);
   assert.deepEqual(stopCalls[0].pids, [42]);
   assert.equal(stopCalls[0].session, undefined);
+  assert.equal(stopCalls[0].reason, "user_stop");
   assert.equal(stopCalls[0].stopAll, false);
 });
 
@@ -491,7 +770,7 @@ test("AgentOverlayManager sends one stop-all request for multi-session takeover"
   manager.handlePageEvent(state, page, "Runtime.bindingCalled", {
     name: "__ppAgentOverlaySignal",
     executionContextId: 7,
-    payload: JSON.stringify({ action: "stop" })
+    payload: JSON.stringify({ action: "stop", reason: "user_stop" })
   });
 
   await waitFor(() => stopCalls.length, "multi-session stop-all");
@@ -499,7 +778,401 @@ test("AgentOverlayManager sends one stop-all request for multi-session takeover"
   assert.equal(stopCalls[0].pid, 42);
   assert.equal(stopCalls[0].pids, undefined);
   assert.equal(stopCalls[0].session, undefined);
+  assert.equal(stopCalls[0].reason, "user_stop");
   assert.equal(stopCalls[0].stopAll, true);
+});
+
+test("AgentOverlayManager returns delegated control to the original Agent", async () => {
+  const resumeCalls = [];
+  const inputGuardSyncs = [];
+  const manager = new AgentOverlayManager({
+    onStop: async () => {},
+    onResume: async (request) => {
+      resumeCalls.push(request);
+    },
+    inputGuard: {
+      sync(pids) {
+        inputGuardSyncs.push([...pids]);
+      },
+      dispose() {}
+    }
+  });
+  const state = createOverlayState({
+    browserPids: [27371],
+    delegatedToUser: true,
+    takenOverUntil: Date.now() + 60_000
+  });
+  const page = createOverlayPage({
+    sessionId: "page-session-1",
+    activeContextId: 7,
+    isolatedContextIds: new Set([7])
+  });
+  manager.ports.set(state.port, state);
+
+  manager.handlePageEvent(state, page, "Runtime.bindingCalled", {
+    name: "__ppAgentOverlaySignal",
+    executionContextId: 7,
+    payload: JSON.stringify({ action: "resume", session: "cx-context-test" })
+  });
+
+  await waitFor(() => resumeCalls.length, "return control to Agent");
+  assert.equal(resumeCalls.length, 1);
+  assert.equal(resumeCalls[0].pid, 42);
+  assert.deepEqual(resumeCalls[0].pids, [42]);
+  assert.equal(resumeCalls[0].session, "cx-context-test");
+  assert.equal(resumeCalls[0].resumeAll, false);
+  assert.equal(state.delegatedToUser, false);
+  assert.equal(state.takenOverUntil, 0);
+  assert.deepEqual(inputGuardSyncs.at(-1), [27371]);
+});
+
+test("AgentOverlayManager refuses return-to-Agent when its waiter is offline but still releases the Session", async () => {
+  const resumeCalls = [];
+  const stopCalls = [];
+  const manager = new AgentOverlayManager({
+    onStop: async (request) => {
+      stopCalls.push(request);
+    },
+    onResume: async (request) => {
+      resumeCalls.push(request);
+    },
+    inputGuard: { sync() {}, dispose() {} }
+  });
+  const state = createOverlayState({
+    delegatedToUser: true,
+    agentOffline: true,
+    controlSince: "2026-07-10T08:00:00.000Z",
+    takenOverUntil: Date.now() + 60_000
+  });
+  const page = createOverlayPage({
+    sessionId: "page-session-1",
+    activeContextId: 7,
+    isolatedContextIds: new Set([7])
+  });
+  manager.ports.set(state.port, state);
+
+  manager.handlePageEvent(state, page, "Runtime.bindingCalled", {
+    name: "__ppAgentOverlaySignal",
+    executionContextId: 7,
+    payload: JSON.stringify({ action: "resume", session: "cx-context-test" })
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(resumeCalls.length, 0);
+
+  manager.handlePageEvent(state, page, "Runtime.bindingCalled", {
+    name: "__ppAgentOverlaySignal",
+    executionContextId: 7,
+    payload: JSON.stringify({ action: "stop", reason: "user_stop", session: "cx-context-test" })
+  });
+  await waitFor(() => stopCalls.length, "release offline Session");
+  assert.equal(stopCalls[0].reason, "user_stop");
+  assert.equal(manager.ports.has(state.port), false);
+});
+
+test("AgentOverlayManager clears the takeover-pending UI when quiescence fails", async () => {
+  const manager = new AgentOverlayManager({
+    onStop: async () => {
+      throw new Error("当前 agent-browser 命令尚未结束");
+    },
+    inputGuard: { sync() {}, dispose() {} }
+  });
+  const state = createOverlayState();
+  manager.ports.set(state.port, state);
+
+  await manager.handleStopSignal(state, "cx-context-test", "user_takeover");
+
+  assert.equal(state.delegatedToUser, false);
+  assert.equal(state.handoffPending, false);
+  assert.match(state.stopError, /命令尚未结束/);
+  assert.equal(state.lastPayload.handoffPending, false);
+});
+
+test("AgentOverlayManager keeps the completed Session visible in delegated user state", async () => {
+  const completionCalls = [];
+  const inputGuardSyncs = [];
+  const manager = new AgentOverlayManager({
+    onStop: async () => {},
+    onComplete: async (request) => {
+      completionCalls.push(request);
+    },
+    inputGuard: {
+      sync(pids) {
+        inputGuardSyncs.push([...pids]);
+      },
+      dispose() {}
+    }
+  });
+  const state = createOverlayState({ browserPids: [27371] });
+  manager.ports.set(state.port, state);
+  manager.tailers.set("cx-context-test", {
+    getControlPhase: () => "completed",
+    stop() {}
+  });
+
+  await manager.handleSessionTailerUpdate("cx-context-test");
+
+  assert.equal(completionCalls.length, 1);
+  assert.equal(completionCalls[0].profileId, "test-profile");
+  assert.equal(completionCalls[0].session, "cx-context-test");
+  assert.deepEqual(completionCalls[0].pids, [42]);
+  assert.equal(manager.ports.has(state.port), true);
+  assert.equal(manager.tailers.has("cx-context-test"), true);
+  assert.equal(state.clients.length, 1);
+  assert.equal(state.delegatedToUser, true);
+  assert.equal(manager.completedSessions.has("cx-context-test"), true);
+  assert.deepEqual(inputGuardSyncs.at(-1), []);
+
+  await manager.handleSessionTailerUpdate("cx-context-test");
+  assert.equal(completionCalls.length, 1);
+
+  manager.sync({ enabled: true, ports: [] });
+  assert.equal(manager.ports.has(state.port), false);
+  assert.equal(manager.tailers.has("cx-context-test"), false);
+});
+
+test("AgentOverlayManager still allows ending a task after user takeover", async () => {
+  const stopCalls = [];
+  const manager = new AgentOverlayManager({
+    onStop: async (request) => {
+      stopCalls.push(request);
+    },
+    inputGuard: { sync() {}, dispose() {} }
+  });
+  const state = createOverlayState({ delegatedToUser: true, takenOverUntil: Date.now() + 60_000 });
+  const page = createOverlayPage({
+    sessionId: "page-session-1",
+    activeContextId: 7,
+    isolatedContextIds: new Set([7])
+  });
+  manager.ports.set(state.port, state);
+
+  manager.handlePageEvent(state, page, "Runtime.bindingCalled", {
+    name: "__ppAgentOverlaySignal",
+    executionContextId: 7,
+    payload: JSON.stringify({ action: "stop", reason: "user_stop", session: "cx-context-test" })
+  });
+
+  await waitFor(() => stopCalls.length, "end task after takeover");
+  assert.equal(stopCalls[0].reason, "user_stop");
+  assert.equal(stopCalls[0].session, "cx-context-test");
+});
+
+test("AgentOverlayManager removes the control box only when the Session ends", async () => {
+  const manager = new AgentOverlayManager({
+    onStop: async () => {},
+    inputGuard: { sync() {}, dispose() {} }
+  });
+  const state = createOverlayState({ delegatedToUser: true, takenOverUntil: Date.now() + 60_000 });
+  manager.ports.set(state.port, state);
+  manager.completedSessions.add("cx-context-test");
+
+  await manager.handleStopSignal(state, "cx-context-test", "user_stop");
+
+  assert.equal(manager.ports.has(state.port), false);
+  assert.equal(manager.completedSessions.has("cx-context-test"), false);
+  assert.equal(state.alive, false);
+  assert.equal(state.clients.length, 0);
+});
+
+test("AgentOverlayManager revokes page bootstrap before a terminal Session stop settles", async () => {
+  const sequence = [];
+  let finishStop;
+  const stopPending = new Promise((resolve) => {
+    finishStop = resolve;
+  });
+  const fakeClient = {
+    onEvent: null,
+    onDisconnect: null,
+    close() {},
+    async send(method) {
+      sequence.push(method);
+      return {};
+    }
+  };
+  const manager = new AgentOverlayManager({
+    onStop: async () => {
+      sequence.push("onStop");
+      await stopPending;
+    },
+    inputGuard: { sync() {}, dispose() {} }
+  });
+  const state = createOverlayState({ browserClient: fakeClient });
+  const page = createOverlayPage({
+    sessionId: "page-session-1",
+    scriptIdentifier: "future-document-script",
+    activeContextId: 7,
+    isolatedContextIds: new Set([7])
+  });
+  state.pages.set(page.targetId, page);
+  manager.ports.set(state.port, state);
+
+  const stopping = manager.handleStopSignal(state, "cx-context-test", "user_stop");
+  await waitFor(() => sequence.includes("onStop"), "terminal stop started");
+
+  assert.deepEqual(sequence.slice(0, 4), [
+    "Runtime.evaluate",
+    "Page.removeScriptToEvaluateOnNewDocument",
+    "Runtime.evaluate",
+    "onStop"
+  ]);
+  assert.equal(page.scriptIdentifier, undefined);
+  assert.equal(manager.ports.has(state.port), true, "Session remains authoritative until onStop succeeds");
+
+  finishStop();
+  await stopping;
+  assert.equal(manager.ports.has(state.port), false);
+  assert.equal(state.alive, false);
+});
+
+test("AgentOverlayManager uses target discovery without browser-wide auto-attach", async () => {
+  const methods = [];
+  const fakeClient = {
+    onEvent: null,
+    onDisconnect: null,
+    close() {},
+    async send(method) {
+      methods.push(method);
+      return {};
+    }
+  };
+  const manager = new AgentOverlayManager({
+    onStop: async () => {},
+    requestVersionInfo: async () => ({ webSocketDebuggerUrl: "ws://browser" }),
+    requestTargets: async () => [],
+    connectBrowser: async () => fakeClient,
+    inputGuard: { sync() {}, dispose() {} }
+  });
+  const state = createOverlayState();
+  manager.ports.set(state.port, state);
+
+  await manager.ensureTargetObserver(state);
+
+  assert.equal(methods.includes("Target.setDiscoverTargets"), true);
+  assert.equal(methods.includes("Target.setAutoAttach"), false);
+  assert.equal(state.browserClient, fakeClient);
+  await manager.dispose();
+});
+
+test("AgentOverlayManager supports injection, takeover, return, and cleanup on chrome-extension pages", async () => {
+  const calls = [];
+  const pushedPayloads = [];
+  const stopCalls = [];
+  const resumeCalls = [];
+  const fakeClient = {
+    onEvent: null,
+    onDisconnect: null,
+    close() {},
+    async send(method, params = {}, _timeoutMs, sessionId) {
+      calls.push({ method, params, sessionId });
+      if (method === "Target.attachToTarget") {
+        return { sessionId: "extension-page-session" };
+      }
+      if (method === "Page.addScriptToEvaluateOnNewDocument") {
+        return { identifier: "extension-overlay-script" };
+      }
+      if (method === "Page.getFrameTree") {
+        return { frameTree: { frame: { id: "extension-main-frame" } } };
+      }
+      if (method === "Page.createIsolatedWorld") {
+        assert.equal(params.frameId, "extension-main-frame");
+        return { executionContextId: 77 };
+      }
+      if (method === "Runtime.evaluate" && String(params.expression).includes("globalThis.__ppAgentOverlayUpdate(")) {
+        const expression = String(params.expression);
+        const marker = "globalThis.__ppAgentOverlayUpdate(";
+        const start = expression.lastIndexOf(marker) + marker.length;
+        pushedPayloads.push(JSON.parse(expression.slice(start, expression.lastIndexOf(")"))));
+      }
+      return {};
+    }
+  };
+  const manager = new AgentOverlayManager({
+    locale: "zh",
+    requestTargets: async () => [
+      {
+        id: "extension-target",
+        type: "page",
+        title: "扩展页面",
+        url: "chrome-extension://abcdefghijklmnop/popup.html",
+        webSocketDebuggerUrl: "ws://extension-target"
+      },
+      {
+        id: "chrome-internal-target",
+        type: "page",
+        title: "扩展程序",
+        url: "chrome://extensions/",
+        webSocketDebuggerUrl: "ws://chrome-internal-target"
+      }
+    ],
+    onStop: async (request) => {
+      stopCalls.push(request);
+    },
+    onResume: async (request) => {
+      resumeCalls.push(request);
+    },
+    inputGuard: { sync() {}, dispose() {} }
+  });
+  const state = createOverlayState({ browserClient: fakeClient });
+  manager.ports.set(state.port, state);
+
+  await manager.syncPortTargets(state);
+
+  const page = state.pages.get("extension-target");
+  assert.ok(page, "chrome-extension page should be selected for injection");
+  await waitFor(
+    () => page.activeContextId === 77 && !page.connecting && pushedPayloads.length > 0,
+    "extension page overlay initialization"
+  );
+  assert.equal(state.pages.has("chrome-internal-target"), false, "chrome:// pages remain excluded");
+  assert.equal(page.url, "chrome-extension://abcdefghijklmnop/popup.html");
+  assert.equal(page.sessionId, "extension-page-session");
+  assert.equal(page.activeContextId, 77);
+  const terminalMarkerClears = () => calls.filter((call) =>
+    call.method === "Runtime.evaluate" &&
+    String(call.params.expression).includes('sessionStorage.removeItem("__ppAgentOverlayTerminalStopUntil")')
+  ).length;
+  assert.equal(terminalMarkerClears(), 1);
+  await manager.initializePageSession(state, page, "extension-page-session");
+  assert.equal(terminalMarkerClears(), 1, "same Target reinitialization must preserve a terminal stop marker");
+  assert.equal(calls.some((call) => call.method === "Page.addScriptToEvaluateOnNewDocument"), true);
+  assert.equal(pushedPayloads.at(-1).ownership, "agent");
+
+  manager.handlePageEvent(state, page, "Runtime.bindingCalled", {
+    name: "__ppAgentOverlaySignal",
+    executionContextId: 77,
+    payload: JSON.stringify({ action: "stop", reason: "user_takeover", session: "cx-context-test" })
+  });
+  await waitFor(() => stopCalls.length === 1 && state.delegatedToUser, "extension page takeover");
+  assert.equal(stopCalls[0].reason, "user_takeover");
+  assert.equal(pushedPayloads.at(-1).ownership, "agentDelegatedToUser");
+
+  manager.handlePageEvent(state, page, "Runtime.bindingCalled", {
+    name: "__ppAgentOverlaySignal",
+    executionContextId: 77,
+    payload: JSON.stringify({ action: "resume", session: "cx-context-test" })
+  });
+  await waitFor(
+    () => resumeCalls.length === 1 && !state.delegatedToUser && !state.takeoverInFlight,
+    "extension page return to Agent"
+  );
+  assert.equal(resumeCalls[0].session, "cx-context-test");
+  assert.equal(pushedPayloads.at(-1).ownership, "agent");
+
+  manager.handlePageEvent(state, page, "Runtime.bindingCalled", {
+    name: "__ppAgentOverlaySignal",
+    executionContextId: 77,
+    payload: JSON.stringify({ action: "stop", reason: "user_stop", session: "cx-context-test" })
+  });
+  await waitFor(() => !manager.ports.has(state.port), "extension page Session cleanup");
+  assert.equal(stopCalls.length, 2);
+  assert.equal(stopCalls[1].reason, "user_stop");
+  assert.equal(state.alive, false);
+  assert.equal(calls.some((call) => call.method === "Page.removeScriptToEvaluateOnNewDocument"), true);
+  assert.equal(calls.some((call) =>
+    call.method === "Runtime.evaluate" && String(call.params.expression).includes("__ppAgentOverlayTeardown")
+  ), true);
+  assert.equal(calls.some((call) => call.method === "Runtime.removeBinding"), true);
+  assert.equal(calls.some((call) => call.method === "Target.detachFromTarget"), true);
 });
 
 test("AgentOverlayManager rebuilds an isolated world after all known contexts fail and throttles recovery", async () => {
@@ -603,6 +1276,8 @@ function createOverlayState(overrides = {}) {
     port: 9480,
     profileId: "test-profile",
     profileName: "Test Profile",
+    browserPids: [],
+    headless: false,
     clients: [
       {
         pid: 42,
@@ -617,10 +1292,20 @@ function createOverlayState(overrides = {}) {
     browserClient: null,
     browserConnecting: false,
     syncing: false,
+    targetSyncRequested: false,
     alive: true,
     takeoverInFlight: false,
+    handoffPending: false,
+    delegatedToUser: false,
+    agentOffline: false,
+    controlSince: undefined,
+    delegationGraceUntil: 0,
     takenOverUntil: 0,
     lastPayload: null,
+    stopError: null,
+    targetCache: null,
+    targetRequest: null,
+    targetCacheGeneration: 0,
     sessionStartedAt: new Map(),
     ...overrides
   };
@@ -639,6 +1324,7 @@ function createOverlayPage(overrides = {}) {
     lastPushAt: 0,
     lastContextRecoveryAt: 0,
     recoveringContext: false,
+    terminalMarkerCleared: false,
     ...overrides
   };
 }

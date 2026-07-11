@@ -25,6 +25,8 @@ export interface SessionTailerOptions {
   pollIntervalMs?: number;
 }
 
+export type AgentControlPhase = "unknown" | "active" | "completed";
+
 export class SessionTailer {
   private sessionFile: AgentSessionFile | null = null;
   private watcher: FSWatcher | null = null;
@@ -33,6 +35,7 @@ export class SessionTailer {
   private offset = 0;
   private partialLine = "";
   private parsed: ParsedAgentActivity = {};
+  private controlPhase: AgentControlPhase = "unknown";
   private started = false;
 
   constructor(
@@ -82,6 +85,10 @@ export class SessionTailer {
     };
   }
 
+  getControlPhase(): AgentControlPhase {
+    return this.controlPhase;
+  }
+
   private scheduleRead(): void {
     this.readChain = this.readChain
       .then(() => this.readNewBytes())
@@ -122,6 +129,7 @@ export class SessionTailer {
       this.offset = 0;
       this.partialLine = "";
       this.parsed = {};
+      this.controlPhase = "unknown";
     }
     if (this.offset === 0 && stats.size > MAX_FULL_INITIAL_READ_BYTES) {
       // 超大会话档案首次接入只扫尾部；第一条半截 JSONL 解析失败即可自然跳过。
@@ -163,6 +171,7 @@ export class SessionTailer {
     this.offset = 0;
     this.partialLine = "";
     this.parsed = {};
+    this.controlPhase = "unknown";
     try {
       this.watcher = watch(file.file, () => {
         this.scheduleRead();
@@ -199,19 +208,24 @@ export class SessionTailer {
       if (!isRecord(parsed)) {
         continue;
       }
-      const before = JSON.stringify(this.parsed);
+      const before = JSON.stringify({ parsed: this.parsed, controlPhase: this.controlPhase });
       if (this.sessionFile?.kind === "claude") {
         this.consumeClaudeEntry(parsed);
       } else if (this.sessionFile?.kind === "codex") {
         this.consumeCodexEntry(parsed);
       }
-      changed = JSON.stringify(this.parsed) !== before || changed;
+      changed = JSON.stringify({ parsed: this.parsed, controlPhase: this.controlPhase }) !== before || changed;
     }
     return changed;
   }
 
   private consumeClaudeEntry(entry: Record<string, unknown>): void {
-    if (stringValue(entry.type) !== "assistant" || !isRecord(entry.message)) {
+    const entryType = stringValue(entry.type);
+    if (entryType === "user" && isRecord(entry.message) && isClaudeTurnStart(entry.message.content)) {
+      this.controlPhase = "active";
+      return;
+    }
+    if (entryType !== "assistant" || !isRecord(entry.message)) {
       return;
     }
     const content = entry.message.content;
@@ -250,9 +264,20 @@ export class SessionTailer {
         this.parsed.updatedAt = new Date().toISOString();
       }
     }
+    if (stringValue(entry.message.stop_reason) === "end_turn") {
+      this.controlPhase = "completed";
+    }
   }
 
   private consumeCodexEntry(entry: Record<string, unknown>): void {
+    const payload = isRecord(entry.payload) ? entry.payload : entry;
+    const eventType = stringValue(payload.type);
+    if (eventType === "task_started") {
+      this.controlPhase = "active";
+    } else if (eventType === "task_complete") {
+      this.controlPhase = "completed";
+    }
+
     const text = codexAssistantText(entry);
     if (text) {
       this.parsed.lastMessage = truncate(text, ACTIVITY_MESSAGE_LIMIT);
@@ -301,6 +326,11 @@ export class SessionTailer {
     }
     this.parsed.updatedAt = new Date().toISOString();
   }
+}
+
+function isClaudeTurnStart(content: unknown): boolean {
+  const parts = Array.isArray(content) ? content : typeof content === "string" ? [{ type: "text" }] : [];
+  return !parts.some((part) => isRecord(part) && stringValue(part.type) === "tool_result");
 }
 
 function todoText(todo: Record<string, unknown>): string | undefined {

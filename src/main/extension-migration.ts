@@ -10,12 +10,19 @@ import type {
   StoredProfile
 } from "../shared/types";
 import { makeAccountSyncWorkPath, pathMetadataFingerprint, recoverInterruptedAccountSyncPath, replacePathWithStagedCopy } from "./account-sync";
-import { closeTemporaryChromeWithCdp, enableDeveloperModeOverCdp, launchTemporaryChromeWithCdp, readChromeMajorVersion } from "./chrome-launch";
+import { closeTemporaryChromeWithCdp, enableDeveloperModeOverCdp, launchTemporaryChromeWithCdp } from "./chrome-launch";
 import { readChromeSecurePreferences } from "./extension-scan";
 import { copyPath } from "./fs-copy";
 import { cloneJsonValue, exists, getNestedValue, isRecord, isSameFilesystemPath, makePathSegment, normalizeSafeRelativePath, readJsonFile, shouldCopyLocalExtensionPackagePath, stringValue, uniqueStrings, writeJsonFileAtomic } from "./fs-util";
-import { ACCOUNT_SYNC_PARTIAL_SUFFIX, ChromeExtensionSetting, MigratedExtensionLaunchPlan, ProtectedDeveloperModeRecord, ProtectedExtensionInstallRecord, TemporaryChromeCdpLaunch } from "./internal-types";
+import { ACCOUNT_SYNC_PARTIAL_SUFFIX, ChromeExtensionSetting, ProtectedDeveloperModeRecord, ProtectedExtensionInstallRecord, TemporaryChromeCdpLaunch } from "./internal-types";
 import { ProfileManagerError } from "./profile-manager-error";
+
+export {
+  cachedCanAutoLoadUnpackedExtensions,
+  canAutoLoadUnpackedExtensions,
+  detectAutoLoadUnpackedExtensionSupport,
+  getMigratedExtensionLaunchPlan
+} from "./migrated-extension-launch";
 
 export async function readProtectedExtensionInstallRecord(
   profilePath: string,
@@ -439,55 +446,6 @@ export function removeExtensionReferences(value: unknown, extensionId: string): 
   }
 
   return changed;
-}
-
-export let cachedCanAutoLoadUnpackedExtensions: boolean | null = null;
-
-export async function canAutoLoadUnpackedExtensions(): Promise<boolean> {
-  if (cachedCanAutoLoadUnpackedExtensions !== null) {
-    return cachedCanAutoLoadUnpackedExtensions;
-  }
-
-  cachedCanAutoLoadUnpackedExtensions = await detectAutoLoadUnpackedExtensionSupport();
-  return cachedCanAutoLoadUnpackedExtensions;
-}
-
-export async function detectAutoLoadUnpackedExtensionSupport(): Promise<boolean> {
-  const launcherName = (process.env.CHROME_BINARY
-    ? path.basename(process.env.CHROME_BINARY)
-    : process.env.CHROME_APP_NAME || "Google Chrome"
-  ).toLowerCase();
-
-  if (launcherName.includes("chromium") || launcherName.includes("chrome for testing")) {
-    return true;
-  }
-
-  const majorVersion = await readChromeMajorVersion();
-  if (launcherName.includes("google chrome") || majorVersion !== null) {
-    return majorVersion !== null ? majorVersion < 137 : false;
-  }
-
-  return true;
-}
-
-export async function getMigratedExtensionLaunchPlan(profile: StoredProfile): Promise<MigratedExtensionLaunchPlan> {
-  const extensionPaths = uniqueStrings((profile.migratedExtensions || []).map((extension) => extension.path));
-  const existingPaths: string[] = [];
-  for (const extensionPath of extensionPaths) {
-    if (await exists(path.join(extensionPath, "manifest.json"))) {
-      existingPaths.push(extensionPath);
-    }
-  }
-
-  if (!existingPaths.length) {
-    return { launchArgs: [], runtimeLoadPaths: [] };
-  }
-
-  if (await canAutoLoadUnpackedExtensions()) {
-    return { launchArgs: [`--load-extension=${existingPaths.join(",")}`], runtimeLoadPaths: [] };
-  }
-
-  return { launchArgs: [], runtimeLoadPaths: existingPaths };
 }
 
 export function makeStoredMigratedExtensionId(extensionId: string): string {

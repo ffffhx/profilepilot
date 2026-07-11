@@ -28,11 +28,19 @@ import type {
   GlobalInstructionsSnapshot,
   OperationProgress,
   ProfileManagerApi,
+  TakeoverAgentConnectionsRequest,
   TakeoverAgentConnectionsResponse
 } from "./shared/types";
 
 const profileManagerApi: ProfileManagerApi = {
   getState: (): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.getState),
+  onStateChanged: (listener: (state: AppState) => void): (() => void) => {
+    const handler = (_event: IpcRendererEvent, state: AppState): void => {
+      listener(state);
+    };
+    ipcRenderer.on(IPC_CHANNELS.stateChanged, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.stateChanged, handler);
+  },
   getTakeoverHistory: (): Promise<AgentTakeoverEvent[]> => ipcRenderer.invoke(IPC_CHANNELS.getTakeoverHistory),
   createProfile: (name: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.createProfile, name),
   renameProfile: (id: string, name: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.renameProfile, id, name),
@@ -47,6 +55,8 @@ const profileManagerApi: ProfileManagerApi = {
     ipcRenderer.invoke(IPC_CHANNELS.setMiniProfilePinned, id, pinned),
   setMiniProfileOrder: (ids: string[]): Promise<AppState> =>
     ipcRenderer.invoke(IPC_CHANNELS.setMiniProfileOrder, ids),
+  setMainProfileOrder: (ids: string[]): Promise<AppState> =>
+    ipcRenderer.invoke(IPC_CHANNELS.setMainProfileOrder, ids),
   setQuickLaunchSlot: (id: string, slot: number | null): Promise<AppState> =>
     ipcRenderer.invoke(IPC_CHANNELS.setQuickLaunchSlot, id, slot),
   setMiniPanelPinned: (pinned: boolean): Promise<void> =>
@@ -91,8 +101,11 @@ const profileManagerApi: ProfileManagerApi = {
     ipcRenderer.invoke(IPC_CHANNELS.closeExternalInstance, userDataDir),
   disconnectCdpClient: (profileId: string, pid: number): Promise<AppState> =>
     ipcRenderer.invoke(IPC_CHANNELS.disconnectCdpClient, profileId, pid),
-  takeoverAgentConnections: (profileId: string, session?: string): Promise<TakeoverAgentConnectionsResponse> =>
-    ipcRenderer.invoke(IPC_CHANNELS.takeoverAgentConnections, profileId, session),
+  takeoverAgentConnections: (
+    profileId: string,
+    sessionOrOptions?: string | TakeoverAgentConnectionsRequest
+  ): Promise<TakeoverAgentConnectionsResponse> =>
+    ipcRenderer.invoke(IPC_CHANNELS.takeoverAgentConnections, profileId, sessionOrOptions),
   setAgentOverlayEnabled: (enabled: boolean): Promise<AppState> =>
     ipcRenderer.invoke(IPC_CHANNELS.setAgentOverlayEnabled, enabled),
   setShellIntegrationEnabled: (enabled: boolean): Promise<AppState> =>

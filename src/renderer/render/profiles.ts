@@ -2,7 +2,7 @@ import { isBusyAction } from "../busy";
 import { store } from "../state";
 import { AgentActivity, CdpClientInfo, ExternalChromeInstance, PublicProfile } from "../types";
 import { renderLiveViewSection } from "./live-view";
-import { NATIVE_CDP_UNSUPPORTED_NOTE, agentActivityLeadText, agentActivityProgressText, agentActivityTooltipText, agentDrivenCdpClients, cdpClientToolSummary, cdpLaunchButtonTitle, cdpPortLabel, cdpSessionText, contentionNotice, contentionNoticeShort, deleteButtonTitle, escapeHtml, focusButtonTitle, formatDate, formatRelativeTime, launchButtonTitle, listeningPortsNote, liveAddrLabel, prettyCdpClientLabel, profileStatusLabel, renderButtonLabel, sourceDetail, truncateText } from "../util";
+import { NATIVE_CDP_UNSUPPORTED_NOTE, agentActivityLeadText, agentActivityProgressText, agentActivityTooltipText, cdpClientToolSummary, cdpLaunchButtonTitle, cdpPortLabel, cdpSessionText, contentionNotice, contentionNoticeShort, deleteButtonTitle, escapeHtml, focusButtonTitle, formatDate, formatRelativeTime, gatewayControlClient, gatewayUserHasControl, launchButtonTitle, listeningPortsNote, liveAddrLabel, prettyCdpClientLabel, profileAgentControlClients, profileStatusLabel, renderButtonLabel, sourceDetail, truncateText } from "../util";
 
 interface ConnectionActivityModel {
   cdpClients: CdpClientInfo[];
@@ -19,9 +19,7 @@ interface ProfileRootGroup {
 // 受管 Profile 表格与外部实例放进同一个框：它们本质都是 Profile，只是
 // 来源不同；外部实例仍只读（仅显示/关闭），用框内分隔段和类型标签区分。
 export function renderProfilesPanel(profiles: PublicProfile[], externalInstances: ExternalChromeInstance[]): string {
-  const profileGroups = groupProfilesByUserDataDir(profiles);
-  // 各组 user-data-dir 的公共前缀（如 /Users/x/Library/Application Support）相同，根行里省略不显示。
-  const commonPrefix = commonPathPrefix(profileGroups.map((group) => group.userDataDir));
+  const profileGroups = groupProfilesByUserDataDir(sortByMainOrder(profiles));
 
   return `
     <div class="profiles-table-wrap overflow-visible border-solid border border-line rounded-xl bg-panel [box-shadow:inset_0_1px_0_rgba(255,255,255,0.04),0_18px_44px_rgba(2,6,9,0.35)]">
@@ -35,7 +33,7 @@ export function renderProfilesPanel(profiles: PublicProfile[], externalInstances
           </tr>
         </thead>
         <tbody>
-          ${profileGroups.map((group) => renderProfileRootGroup(group, commonPrefix)).join("")}
+          ${profileGroups.map((group) => renderProfileRootGroup(group)).join("")}
           ${externalInstances.length ? renderExternalRows(externalInstances) : ""}
         </tbody>
       </table>
@@ -69,84 +67,106 @@ export function groupProfilesByUserDataDir(profiles: PublicProfile[]): ProfileRo
   return groups;
 }
 
-export function renderProfileRootGroup(group: ProfileRootGroup, commonPrefix = ""): string {
-  const countLabel = group.profiles.length === 1 ? "1 Profile" : `${group.profiles.length} Profiles`;
-  return (
-    renderProfileRootRow(group.userDataDir, commonPrefix, countLabel) +
-    group.profiles.map((profile, index) => renderProfileRow(profile, index === group.profiles.length - 1)).join("")
+// 根行（user-data-dir 尾部 + Profile 计数）已不再展示：受管 Profile 直接以扁平顶层行呈现，
+// 完整 user-data-dir 仍可在每行的数据目录 hover 提示里看到。
+export function renderProfileRootGroup(group: ProfileRootGroup): string {
+  return group.profiles
+    .map((profile, index) => renderProfileRow(profile, index === 0, index === group.profiles.length - 1))
+    .join("");
+}
+
+// 应用主窗口 Profile 表格的自定义拖拽排序：列在 mainProfileOrder 里的靠前，
+// 未列出的排后面、保持自然顺序（sort 稳定）。语义同悬浮窗的 sortByMiniOrder。
+export function sortByMainOrder(profiles: PublicProfile[]): PublicProfile[] {
+  const order = store.state?.mainProfileOrder || [];
+  if (!order.length) {
+    return [...profiles];
+  }
+
+  const orderIndex = new Map(order.map((id, index) => [id, index]));
+  return [...profiles].sort(
+    (a, b) => (orderIndex.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (orderIndex.get(b.id) ?? Number.MAX_SAFE_INTEGER)
   );
 }
 
-// 根行只展示 user-data-dir 去掉组间公共前缀后的尾部 + 右侧 Profile 计数；名称标签不再展示。
-// hover 路径仍提示完整 user-data-dir。
-export function renderProfileRootRow(userDataDir: string, commonPrefix: string, countLabel: string): string {
-  const tail = rootDisplayPath(userDataDir, commonPrefix);
-  return `
-    <tr class="table-group-row profile-root-row">
-      <td colspan="4">
-        <div class="profile-root-content">
-          <span class="profile-root-head">
-            <span class="profile-root-node" aria-hidden="true"></span>
-            ${renderPathTooltip(tail, userDataDir, "profile-root-path-tip")}
-          </span>
-          <span class="count">${escapeHtml(countLabel)}</span>
-        </div>
-      </td>
-    </tr>
-  `;
+export interface MainProfileGroup {
+  key: string;
+  memberIds: string[];
 }
 
-// 计算一组路径的最长公共目录前缀（按 / 分段）。少于两个路径时无公共前缀。
-export function commonPathPrefix(paths: string[]): string {
-  const cleaned = paths.filter(Boolean).map((path) => path.replace(/\/+$/, ""));
-  if (cleaned.length < 2) {
-    return "";
+// 主窗口表格实际渲染出来的「数据目录分组 + 组内成员顺序」，供拖拽排序计算用。
+// 每组首个成员即该数据目录的主 Profile（isolated / native），其后是目录内的子 Profile。
+export function mainProfileGroups(profiles: PublicProfile[]): MainProfileGroup[] {
+  return groupProfilesByUserDataDir(sortByMainOrder(profiles)).map((group) => ({
+    key: group.key,
+    memberIds: group.profiles.map((profile) => profile.id)
+  }));
+}
+
+// 纯函数：给定当前分组、被拖 id、落点 id、是否插到落点之前，算出新的完整 id 顺序。
+// 两级语义：组首（主 Profile）拖动 → 整组在各数据目录间移动；
+// 子 Profile 拖动 → 仅在本目录内移动、且不越过组首（主 Profile 恒为组内首位）。
+// 非法落点（落点即自身 / 子行跨目录 / 组首落回本组）返回 null。
+export function computeMainReorder(
+  groups: MainProfileGroup[],
+  draggedId: string,
+  targetId: string,
+  insertBefore: boolean
+): string[] | null {
+  if (draggedId === targetId) {
+    return null;
   }
-  const split = cleaned.map((path) => path.split("/"));
-  const first = split[0];
-  let i = 0;
-  for (; i < first.length; i += 1) {
-    if (!split.every((segments) => segments[i] === first[i])) {
-      break;
+  const fromIdx = groups.findIndex((group) => group.memberIds.includes(draggedId));
+  const targetGroupIdx = groups.findIndex((group) => group.memberIds.includes(targetId));
+  if (fromIdx < 0 || targetGroupIdx < 0) {
+    return null;
+  }
+  const fromGroup = groups[fromIdx];
+  const isPrimary = fromGroup.memberIds[0] === draggedId;
+
+  if (isPrimary) {
+    if (targetGroupIdx === fromIdx) {
+      return null;
     }
+    const targetKey = groups[targetGroupIdx].key;
+    const remaining = groups.filter((_, idx) => idx !== fromIdx);
+    const insertPos = remaining.findIndex((group) => group.key === targetKey);
+    const insertAt = insertBefore ? insertPos : insertPos + 1;
+    const nextGroups = [...remaining.slice(0, insertAt), fromGroup, ...remaining.slice(insertAt)];
+    return nextGroups.flatMap((group) => group.memberIds);
   }
-  return first.slice(0, i).join("/");
+
+  if (targetGroupIdx !== fromIdx) {
+    return null;
+  }
+  const withoutDragged = fromGroup.memberIds.filter((memberId) => memberId !== draggedId);
+  const targetPos = withoutDragged.indexOf(targetId);
+  if (targetPos < 0) {
+    return null;
+  }
+  const insertAt = Math.max(1, insertBefore ? targetPos : targetPos + 1);
+  const nextMembers = [...withoutDragged.slice(0, insertAt), draggedId, ...withoutDragged.slice(insertAt)];
+  const nextGroups = groups.map((group, idx) => (idx === fromIdx ? { ...group, memberIds: nextMembers } : group));
+  return nextGroups.flatMap((group) => group.memberIds);
 }
 
-function rootDisplayPath(userDataDir: string, commonPrefix: string): string {
-  let tail = userDataDir;
-  if (commonPrefix && userDataDir.startsWith(commonPrefix)) {
-    tail = userDataDir.slice(commonPrefix.length).replace(/^\/+/, "");
-  }
-  if (!tail) {
-    // 兜底（单组等情况）：去掉 Application Support / .config 样板前缀。
-    tail = userDataDir.replace(/^.*\/Application Support\//, "").replace(/^.*\/\.config\//, "");
-  }
-  return tail || userDataDir;
-}
-
-export function renderProfileRow(profile: PublicProfile, lastInGroup = false): string {
+export function renderProfileRow(profile: PublicProfile, isFirstInGroup = false, lastInGroup = false): string {
   const selected = profile.id === store.selectedId;
-  // isolated：显示独立数据目录名（如 test03-00064815，即去掉公共前缀后“不一样”的那段），hover 看完整 user-data-dir；
-  // native：仍显示 Chrome 个人资料子目录名（Default 等）。
-  const isNative = profile.source === "native";
-  const pathKind = isNative ? "Profile Dir" : "数据目录";
-  const pathLabel = profile.dirName;
-  const fullPath = isNative ? profile.profileDataPath : profile.userDataDir;
+  // 数据目录行已隐藏：一个 user-data-dir 对应一个 CDP、其下可有多个 Profile，
+  // 这个映射用户已理清，行内只留名称/徽标；完整路径仍在详情栏可查。
+  // 拖拽角色：组首（主 Profile）拖动=整块数据目录一起挪；组内其它（子 Profile）拖动=仅在目录内排序。
+  const dragRole = isFirstInGroup ? "primary" : "sub";
+  const handleTitle = isFirstInGroup ? "拖拽调整数据目录顺序" : "拖拽在数据目录内排序";
   return `
-    <tr class="profile-child-row ${lastInGroup ? "last-in-group" : ""} ${selected ? "selected" : ""}" data-action="select" data-id="${profile.id}" data-profile-row tabindex="0" aria-selected="${selected ? "true" : "false"}">
+    <tr class="profile-child-row ${lastInGroup ? "last-in-group" : ""} ${selected ? "selected" : ""}" data-action="select" data-id="${profile.id}" data-profile-row data-drag-role="${dragRole}" tabindex="0" aria-selected="${selected ? "true" : "false"}">
       <td class="profile-name-cell">
-        <span class="tree-branch" aria-hidden="true"></span>
+        <span class="drag-handle" data-drag-handle role="button" tabindex="-1" aria-label="${handleTitle}" title="${handleTitle}">⠿</span>
         <div class="profile-pick w-full min-h-[auto] py-1 px-0.5 text-left">
           <span class="profile-name-line flex items-center gap-2 min-w-0">
             <span class="status-dot w-[9px] h-[9px] flex-[0_0_auto] rounded-full bg-line-strong ${profile.running ? "running" : profile.source === "native" ? "native" : ""}"></span>
             <span class="profile-name block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[15px] font-[650] leading-[1.25]">${escapeHtml(profile.name)}</span>
             ${profile.isDefault ? '<span class="native-badge inline-flex items-center justify-center border-solid border border-warn-line rounded-full px-2 py-[3px] bg-warn-soft text-warn-bright font-mono text-[10px] font-semibold tracking-[0.06em]">Default</span>' : ""}
             ${profile.quickLaunchSlot ? `<span class="slot-badge" title="全局快捷键 ⌘⌥${profile.quickLaunchSlot} 直启">⌘⌥${profile.quickLaunchSlot}</span>` : ""}
-          </span>
-          <span class="profile-path-line">
-            <span>${pathKind}</span>
-            ${renderPathTooltip(pathLabel, fullPath, "profile-path-tip")}
           </span>
         </div>
       </td>
@@ -163,11 +183,6 @@ export function renderProfileRow(profile: PublicProfile, lastInGroup = false): s
       </td>
     </tr>
   `;
-}
-
-function renderPathTooltip(label: string, fullPath: string, className: string): string {
-  const escapedFullPath = escapeHtml(fullPath);
-  return `<span class="action-tooltip path-tooltip ${className}" data-tooltip="${escapedFullPath}" title="${escapedFullPath}"><code>${escapeHtml(label)}</code></span>`;
 }
 
 // 表格里直接展示该 Profile 的 CDP 连接地址：正在以 CDP 运行时显示实时地址（live）；
@@ -212,7 +227,18 @@ export function renderProfileConnectionCell(profile: PublicProfile): string {
     return renderProfileCdpCell(profile);
   }
 
-  const portChip = cdpChip("live", cdpPortLabel(profile.cdpUrl), profile.cdpUrl, null);
+  const portChip = cdpChip(
+    "live",
+    cdpPortLabel(profile.cdpUrl),
+    profile.gatewayControl
+      ? `ProfilePilot Gateway 逻辑入口 · ${cdpPortLabel(profile.cdpUrl)}`
+      : profile.cdpUrl,
+    profile.gatewayControl ? "Gateway" : null
+  );
+  const gatewayControlCell = renderGatewayControlCell(profile, portChip);
+  if (gatewayControlCell) {
+    return gatewayControlCell;
+  }
 
   // CDP 已开但无人驱动：只显示端口 + 空闲。当前停在哪个页面只在被外部工具驱动时才有意义，
   // 空闲时没人关注，不展示（避免噪音）。
@@ -234,6 +260,26 @@ export function renderProfileConnectionCell(profile: PublicProfile): string {
   }
   // 结束连接只放右侧详情栏（renderCdpClientsDetail），列表行里不再挂 ✕，避免遮挡药丸/操作。
   return `<span class="conn-cell-stack"><span class="conn-line">${portChip}${renderConnPill(profile)}${renderAgentActivityInline(profile)}</span>${subLine}</span>`;
+}
+
+function renderGatewayControlCell(profile: PublicProfile, portChip: string): string {
+  const control = profile.gatewayControl;
+  if (!control || control.sessionStatus !== "active" || !control.ownerSessionId) return "";
+  // Agent 真正持有长连接时继续走标准“驱动中”样式；这里只覆盖已接管/已绑定但未连接。
+  if (control.ownership === "agent" && control.connectionActive) return "";
+  const client = gatewayControlClient(profile);
+  const sessionText = client ? cdpSessionText(client) : control.ownerSessionId;
+  const age = formatRelativeTime(control.updatedAt);
+  const label = control.ownership === "user" ? "用户已接管" : "Agent 已绑定";
+  const tip = control.ownership === "user"
+    ? "浏览器控制权属于用户；Agent Session 仍保留，等待交还"
+    : "Gateway 已为该 Agent 保留控制权，当前没有活动连接";
+  const subLine = sessionText || age
+    ? `<span class="conn-session"><span class="conn-session-main">${escapeHtml(sessionText)}</span>${
+        age ? `<span class="conn-session-age">${escapeHtml(age)}</span>` : ""
+      }</span>`
+    : "";
+  return `<span class="conn-cell-stack"><span class="conn-line">${portChip}<span class="conn-pill none action-tooltip" data-tooltip="${escapeHtml(tip)}">${escapeHtml(label)}</span></span>${subLine}</span>`;
 }
 
 // 「当前停在哪个域名/IP」的航点行（可 hover 看完整 URL）。tooltip 挂在外层 .conn-live-tip，
@@ -466,12 +512,19 @@ export function renderProfileActions(profile: PublicProfile): string {
 }
 
 function renderAgentTakeoverButton(profile: PublicProfile): string {
-  if (!agentDrivenCdpClients(profile.cdpClients).length) {
+  if (gatewayUserHasControl(profile)) {
+    return `
+      <span class="action-tooltip" data-tooltip="浏览器控制权当前属于你，可在浏览器控制框中交还 Agent">
+        <button type="button" class="action-button warn takeover-action" disabled>✓ 已接管</button>
+      </span>
+    `;
+  }
+  if (!profileAgentControlClients(profile).length) {
     return "";
   }
   const takingOver = isBusyAction("agent-takeover", { profileId: profile.id });
   return `
-    <span class="action-tooltip" data-tooltip="停止 AI 操作，接管浏览器">
+    <span class="action-tooltip" data-tooltip="暂停 AI 操作，接管浏览器">
       <button type="button" class="action-button warn takeover-action ${takingOver ? "loading" : ""}" data-action="takeover-agent" data-id="${escapeHtml(profile.id)}" ${store.busy ? "disabled" : ""}>
         ${renderButtonLabel(takingOver, "⏹ 接管", "接管中…")}
       </button>
@@ -812,9 +865,18 @@ export function renderCdpClientsDetail(profile: PublicProfile): string {
     return "";
   }
 
+  const gatewayClient = gatewayControlClient(profile);
+  const gatewayReserved = Boolean(gatewayClient && profile.gatewayControl?.sessionStatus === "active");
   const attached = profile.cdpClients.length > 0;
+  const displayClients = attached ? profile.cdpClients : gatewayClient ? [gatewayClient] : [];
   // 汇总行不带 pid（进程细节对用户没信息量）；断连按钮在同名多连接时才用 pid 区分。
-  const value = attached ? `驱动中 · ${cdpClientToolSummary(profile.cdpClients)}` : "当前没有工具连接";
+  const value = gatewayUserHasControl(profile)
+    ? "用户已接管 · Agent Session 保留"
+    : gatewayReserved && !attached
+      ? "Agent 已绑定 · 当前没有活动连接"
+      : attached
+        ? `驱动中 · ${cdpClientToolSummary(profile.cdpClients)}`
+        : "当前没有工具连接";
 
   // 判定有争用时的警示横幅：说明谁在抢 + 建议分流到副本。
   const warning = contentionNotice(profile);
@@ -823,7 +885,7 @@ export function renderCdpClientsDetail(profile: PublicProfile): string {
   // 每条连接一行会话身份：工具 · 项目·标题 + 最近活动时间（区分活会话与残留连接）。
   // 多会话共用一个 Profile 正是争用问题的现场，必须每条都平铺出来，不能只显示第一条。
   const activityDetailCard = renderAgentActivityDetailCard(profile);
-  const sessionRows = profile.cdpClients
+  const sessionRows = displayClients
     .map((client, index) => {
       const tool = client.agent || prettyCdpClientLabel(client.label);
       const sessionText = cdpSessionText(client);
@@ -848,7 +910,7 @@ export function renderCdpClientsDetail(profile: PublicProfile): string {
     const tool = client.agent || prettyCdpClientLabel(client.label);
     toolCounts.set(tool, (toolCounts.get(tool) || 0) + 1);
   });
-  const disconnectRow = attached
+  const disconnectRow = attached && !gatewayUserHasControl(profile)
     ? `<div class="detail-session-actions">${takeoverButton}${profile.cdpClients
         .map((client) => {
           const tool = client.agent || prettyCdpClientLabel(client.label);
@@ -859,7 +921,7 @@ export function renderCdpClientsDetail(profile: PublicProfile): string {
     : "";
 
   return `
-    <div class="detail-row${attached ? " detail-row-attached" : ""}">
+    <div class="detail-row${attached || gatewayReserved ? " detail-row-attached" : ""}">
       <span>Agent 连接</span>
       <strong>${escapeHtml(value)}</strong>
       ${warningRow}
@@ -867,7 +929,7 @@ export function renderCdpClientsDetail(profile: PublicProfile): string {
       ${disconnectRow}
       ${renderAgentOverlaySettingRow()}
       ${renderShellIntegrationRow(profile)}
-      <small class="detail-note">列出连到 CDP 端口的工具连接。“驱动中”表示有工具在控制；每行显示驱动方与最近活动，久无动静多为残留，可「结束连接」断开（不影响 Chrome）。多个会话共用同一 Profile 会互抢标签页，建议「克隆」出副本。</small>
+      <small class="detail-note">列出连到 CDP 端口的工具连接。“驱动中”表示有工具在控制；每行显示驱动方与最近活动。ProfilePilot 会自动释放 agent-browser 残留连接，也可手动「结束连接」（不影响 Chrome）。多个会话共用同一 Profile 会互抢标签页，建议「克隆」出副本。</small>
     </div>
   `;
 }

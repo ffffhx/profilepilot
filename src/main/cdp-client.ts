@@ -3,6 +3,7 @@ import net from "node:net";
 import { POSIX_LOCALE_ENV, execFileAsync, isRecord, sleep, stringValue } from "./fs-util";
 import { CdpPendingRequest, CdpResponse, CdpTargetListEntry, CdpVersionInfo } from "./internal-types";
 import { ProfileManagerError } from "./profile-manager-error";
+import { gatewayHttpHeaders } from "./browser-gateway-client";
 
 export class CdpBrowserClient {
   private nextId = 1;
@@ -281,13 +282,13 @@ export async function processLabelForPid(pid: number, fallback: string): Promise
   }
 }
 
-export async function waitForCdp(port: number, timeoutMs: number): Promise<void> {
+export async function waitForCdp(port: number, timeoutMs: number, homeDir?: string): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastError: unknown = null;
 
   while (Date.now() < deadline) {
     try {
-      await requestCdpVersion(port);
+      await requestCdpVersion(port, homeDir);
       return;
     } catch (error) {
       lastError = error;
@@ -304,12 +305,12 @@ export async function waitForCdp(port: number, timeoutMs: number): Promise<void>
   );
 }
 
-export function requestCdpVersion(port: number): Promise<void> {
-  return requestCdpVersionInfo(port).then(() => undefined);
+export function requestCdpVersion(port: number, homeDir?: string): Promise<void> {
+  return requestCdpVersionInfo(port, homeDir).then(() => undefined);
 }
 
-export function requestCdpVersionInfo(port: number): Promise<CdpVersionInfo> {
-  return requestCdpJson<unknown>(port, "/json/version").then((parsed) => ({
+export function requestCdpVersionInfo(port: number, homeDir?: string): Promise<CdpVersionInfo> {
+  return requestCdpJson<unknown>(port, "/json/version", homeDir).then((parsed) => ({
     webSocketDebuggerUrl: isRecord(parsed) ? stringValue(parsed.webSocketDebuggerUrl) || undefined : undefined
   }));
 }
@@ -341,7 +342,7 @@ export function requestCdpCloseTarget(port: number, targetId: string): Promise<v
         path: `/json/close/${targetId}`,
         timeout: 700,
         agent: false,
-        headers: { Connection: "close" }
+        headers: { Connection: "close", ...gatewayHttpHeaders() }
       },
       (response) => {
         response.resume();
@@ -362,7 +363,7 @@ export function requestCdpCloseTarget(port: number, targetId: string): Promise<v
   });
 }
 
-export function requestCdpJson<T>(port: number, requestPath: string): Promise<T> {
+export function requestCdpJson<T>(port: number, requestPath: string, homeDir?: string): Promise<T> {
   return new Promise((resolve, reject) => {
     const request = http.get(
       {
@@ -371,7 +372,7 @@ export function requestCdpJson<T>(port: number, requestPath: string): Promise<T>
         path: requestPath,
         timeout: 700,
         agent: false,
-        headers: { Connection: "close" }
+        headers: { Connection: "close", ...gatewayHttpHeaders(homeDir) }
       },
       (response) => {
         const chunks: Buffer[] = [];

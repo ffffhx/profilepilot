@@ -4,7 +4,7 @@ import { render } from "./render/render-root";
 import { invalidateExtensionMigrationDiff, loadState } from "./state-actions";
 import { store } from "./state";
 import { ConfirmBodyLine, ConfirmIntent, ConfirmModalView, ModalState, PublicProfile, TakeoverAgentConnectionsResponse } from "./types";
-import { agentDrivenCdpClients, cdpClientToolSummary, cdpSessionText, closeConfirmCopy, deleteConfirmCopy, escapeHtml, formatDate, formatErrorMessage, formatRelativeTime, prettyCdpClientLabel, profileStatusLabel, sourceDetail } from "./util";
+import { cdpClientToolSummary, cdpSessionText, closeConfirmCopy, deleteConfirmCopy, escapeHtml, formatDate, formatErrorMessage, formatRelativeTime, prettyCdpClientLabel, profileAgentControlClients, profileStatusLabel, sourceDetail } from "./util";
 
 export function renderConfirmModal(confirm: Extract<ModalState, { kind: "confirm" }>): string {
   const view = confirmModalView(confirm.intent);
@@ -279,7 +279,7 @@ export function confirmModalView(intent: ConfirmIntent): ConfirmModalView | null
 
   if (intent.kind === "agent-takeover") {
     const profile = store.state.profiles.find((item) => item.id === intent.profileId);
-    const clients = profile ? agentDrivenCdpClients(profile.cdpClients) : [];
+    const clients = profile ? profileAgentControlClients(profile) : [];
     if (!profile || !clients.length) {
       return null;
     }
@@ -287,8 +287,8 @@ export function confirmModalView(intent: ConfirmIntent): ConfirmModalView | null
       kicker: "接管浏览器",
       title: `接管 ${profile.name}`,
       body: [
-        `会停止 ${clients.length} 条 AI 驱动连接，断开它们对 ${profile.name} 的 CDP 控制。`,
-        "Chrome 窗口会保留在原处，不会关闭；接管后你可以直接手动操作这个浏览器。"
+        `会暂停 ${clients.length} 条 AI 浏览器会话，让它们收到用户接管的 hard-stop notice。`,
+        "Chrome 窗口和 agent-browser daemon 都会保留；接管后你可以直接手动操作这个浏览器。"
       ],
       confirmLabel: "⏹ 接管",
       tone: "warn",
@@ -462,7 +462,7 @@ export function executeConfirmIntent(intent: ConfirmIntent): void {
 
 export function executeAgentTakeoverConfirm(intent: Extract<ConfirmIntent, { kind: "agent-takeover" }>): void {
   const profile = store.state?.profiles.find((item) => item.id === intent.profileId);
-  const clients = profile ? agentDrivenCdpClients(profile.cdpClients) : [];
+  const clients = profile ? profileAgentControlClients(profile) : [];
   store.modal = null;
 
   if (!profile || !clients.length) {
@@ -482,8 +482,8 @@ export function executeAgentTakeoverConfirm(intent: Extract<ConfirmIntent, { kin
         throw new Error(takeoverResultError(result));
       }
     },
-    `已接管 ${emphasizeName(profile.name)}`,
-    { key: "agent-takeover", message: `正在停止 ${profile.name} 的 AI 操作…`, profileId: intent.profileId }
+    `已接管 ${emphasizeName(profile.name)}，AI 已暂停`,
+    { key: "agent-takeover", message: `正在暂停 ${profile.name} 的 AI 操作…`, profileId: intent.profileId }
   );
 }
 
@@ -491,9 +491,9 @@ function takeoverResultError(result: TakeoverAgentConnectionsResponse): string {
   const firstFailure = result.failures[0];
   const suffix = firstFailure ? `：${firstFailure.error}` : "";
   if (result.successCount > 0) {
-    return `只停止了 ${result.successCount}/${result.targetCount} 条 AI 连接，${result.failureCount} 条未停止${suffix}`;
+    return `只暂停了 ${result.successCount}/${result.targetCount} 条 AI 连接，${result.failureCount} 条未暂停${suffix}`;
   }
-  return `没有停止任何 AI 连接${suffix}`;
+  return `没有暂停任何 AI 连接${suffix}`;
 }
 
 export function executeDisconnectClientConfirm(intent: Extract<ConfirmIntent, { kind: "disconnect-client" }>): void {

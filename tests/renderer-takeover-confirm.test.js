@@ -20,8 +20,8 @@ test("renderer takeover confirm view summarizes only AI-driven clients", () => {
 
   assert.equal(view.title, "接管 Work");
   assert.deepEqual(view.body, [
-    "会停止 2 条 AI 驱动连接，断开它们对 Work 的 CDP 控制。",
-    "Chrome 窗口会保留在原处，不会关闭；接管后你可以直接手动操作这个浏览器。"
+    "会暂停 2 条 AI 浏览器会话，让它们收到用户接管的 hard-stop notice。",
+    "Chrome 窗口和 agent-browser daemon 都会保留；接管后你可以直接手动操作这个浏览器。"
   ]);
   assert.deepEqual(view.summary, [
     { label: "Profile", value: "Work" },
@@ -66,11 +66,11 @@ test("renderer executeAgentTakeoverConfirm stops the whole profile without filte
   assert.deepEqual(calls.busyStates, [
     {
       key: "agent-takeover",
-      message: "正在停止 Work 的 AI 操作…",
+      message: "正在暂停 Work 的 AI 操作…",
       profileId: "p1"
     }
   ]);
-  assert.deepEqual(calls.toasts, [{ message: "已接管 <Work>", kind: "normal" }]);
+  assert.deepEqual(calls.toasts, [{ message: "已接管 <Work>，AI 已暂停", kind: "normal" }]);
 });
 
 test("renderer executeAgentTakeoverConfirm reports partial takeover failures", async () => {
@@ -109,7 +109,7 @@ test("renderer executeAgentTakeoverConfirm reports partial takeover failures", a
   assert.equal(store.state, partialState);
   assert.deepEqual(calls.toasts, [
     {
-      message: "只停止了 1/3 条 AI 连接，2 条未停止：permission denied",
+      message: "只暂停了 1/3 条 AI 连接，2 条未暂停：permission denied",
       kind: "error"
     }
   ]);
@@ -139,7 +139,7 @@ test("renderer executeAgentTakeoverConfirm does not call the API when no AI clie
 });
 
 test("renderer takeover util filters agent-driven CDP clients", () => {
-  const { agentDrivenCdpClients, isAgentDrivenCdpClient } = loadUtilHarness();
+  const { agentDrivenCdpClients, isAgentDrivenCdpClient, profileAgentControlClients } = loadUtilHarness();
   const clients = [
     cdpClient({ pid: 101, label: "agent-browser-linux-x64" }),
     cdpClient({ pid: 202, label: "codex" }),
@@ -154,6 +154,24 @@ test("renderer takeover util filters agent-driven CDP clients", () => {
   );
   assert.equal(isAgentDrivenCdpClient(cdpClient({ label: "Chrome" })), false);
   assert.equal(isAgentDrivenCdpClient(cdpClient({ label: "Claude Code" })), true);
+  assert.deepEqual(
+    profileAgentControlClients(profile({
+      gatewayControl: {
+        publicPort: 9223,
+        ownership: "agent",
+        sessionStatus: "active",
+        agentHealth: "online",
+        connectionActive: false,
+        ownerSessionId: "cx-gateway",
+        daemonInstanceId: "daemon-one",
+        daemonPid: 808,
+        agent: "Codex",
+        project: "profilepilot",
+        updatedAt: "2026-07-11T00:00:00.000Z"
+      }
+    })).map((client) => client.session),
+    ["cx-gateway"]
+  );
 });
 
 test("renderer takeover state action loads API history through merge and render", async () => {
@@ -186,7 +204,7 @@ test("renderer mini takeover requires a second click before executing", async ()
 
     assert.equal(harness.store.miniTakeoverConfirmProfileId, "p1");
     assert.deepEqual(harness.calls.executeTakeoverIntents, []);
-    assert.deepEqual(harness.calls.toasts, [{ message: "再次点击活动行接管浏览器", kind: "normal" }]);
+    assert.deepEqual(harness.calls.toasts, [{ message: "再次点击活动行暂停 AI 并接管浏览器", kind: "normal" }]);
     assert.equal(harness.calls.timers[0].ms, 2800);
 
     harness.click({ action: "mini-takeover-agent", id: "p1" });
@@ -436,6 +454,9 @@ function loadMainHarness({ profile: activeProfile }) {
       "src/renderer/api.ts": {
         profileApi() {
           return {
+            onStateChanged() {
+              return () => {};
+            },
             onAgentOverlayReveal() {
               return () => {};
             },
@@ -522,6 +543,9 @@ function loadMainHarness({ profile: activeProfile }) {
         agentDrivenCdpClients(clients) {
           return clients.filter(isAgentDrivenClient);
         },
+        profileAgentControlClients(activeProfile) {
+          return activeProfile.cdpClients.filter(isAgentDrivenClient);
+        },
         deleteButtonTitle() {
           return "";
         },
@@ -594,13 +618,15 @@ function appState(profiles) {
   return {
     profiles,
     miniProfileIds: [],
-    miniProfileOrder: []
+    miniProfileOrder: [],
+    mainProfileOrder: []
   };
 }
 
 function profile(patch = {}) {
   return {
     cdpClients: [],
+    gatewayControl: null,
     cdpContention: null,
     cdpPort: 9223,
     cdpUrl: "http://127.0.0.1:9223",

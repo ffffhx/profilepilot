@@ -324,8 +324,44 @@ export function agentDrivenCdpClients(clients: CdpClientInfo[]): CdpClientInfo[]
   return clients.filter(isAgentDrivenCdpClient);
 }
 
+export function gatewayControlClient(profile: PublicProfile): CdpClientInfo | null {
+  const control = profile.gatewayControl;
+  if (!control || control.sessionStatus !== "active" || !control.ownerSessionId) return null;
+  return {
+    pid: control.daemonPid || 0,
+    label: "agent-browser",
+    agent: control.agent || undefined,
+    project: control.project || undefined,
+    title: "Gateway Agent Session",
+    session: control.ownerSessionId,
+    lastActive: control.updatedAt,
+    note: control.ownership === "user"
+      ? "Session 仍保留，浏览器控制权当前属于用户"
+      : "当前 Session 由 ProfilePilot Gateway 排它管理"
+  };
+}
+
+export function profileAgentControlClients(profile: PublicProfile): CdpClientInfo[] {
+  const clients = agentDrivenCdpClients(profile.cdpClients);
+  const gatewayClient = gatewayControlClient(profile);
+  if (!gatewayClient || clients.some((client) => client.session === gatewayClient.session)) return clients;
+  return [gatewayClient, ...clients];
+}
+
+export function gatewayUserHasControl(profile: PublicProfile): boolean {
+  return Boolean(
+    profile.gatewayControl?.sessionStatus === "active" &&
+    profile.gatewayControl.ownership === "user" &&
+    profile.gatewayControl.ownerSessionId
+  );
+}
+
 // 争用警示·短版（药丸 tooltip / 悬浮窗用）：一眼看懂发生了什么，细节和建议留给详情栏。
 export function contentionNoticeShort(profile: PublicProfile): string {
+  const duplicate = profile.cdpClients.find((client) => client.duplicatePids?.length);
+  if (duplicate) {
+    return `⚠ 同一 Session 存在 ${1 + (duplicate.duplicatePids?.length || 0)} 个 daemon`;
+  }
   const info = profile.cdpContention;
   if (!info?.level) {
     return "";
@@ -342,6 +378,11 @@ export function contentionNoticeShort(profile: PublicProfile): string {
 // 有面向 agent 的稳定信号时，处置建议直接换成「[稳定码] 一句可照做的 action」——对标 ego：
 // 给 agent 的不是现象，而是稳定码 + 一句可照做的指令。
 export function contentionNotice(profile: PublicProfile): string {
+  const duplicate = profile.cdpClients.find((client) => client.duplicatePids?.length);
+  if (duplicate) {
+    const pids = [duplicate.pid, ...(duplicate.duplicatePids || [])];
+    return `⚠ Session ${duplicate.session || "未命名"} 存在 ${pids.length} 个 agent-browser daemon（PID ${pids.join("、")}）。这是 daemon 重启异常，不是多个 Agent；应结束残留 daemon 后重新连接。`;
+  }
   const info = profile.cdpContention;
   if (!info?.level) {
     return "";

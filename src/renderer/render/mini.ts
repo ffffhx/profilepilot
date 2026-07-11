@@ -12,6 +12,8 @@ import {
   contentionNoticeShort,
   escapeHtml,
   formatRelativeTime,
+  gatewayControlClient,
+  gatewayUserHasControl,
   liveAddrLabel,
   prettyCdpClientLabel,
   renderButtonLabel
@@ -88,8 +90,7 @@ const MINI_LOGO_GLYPH = `
 // 航点节点：运行中朝右的小机头
 const MINI_NODE_PLANE = `<svg viewBox="0 0 13 13" aria-hidden="true"><path d="M1 1 L12 6.5 L1 12 L4 6.5 Z" fill="currentColor" /></svg>`;
 
-// 上一次渲染的展开面板 HTML。定时轮询（2.5s）本会每次整段 innerHTML 重建，把用户正
-// hover 的节点换掉，导致 tooltip / 呼吸灯一闪一闪。内容没变时据此跳过重建。
+// 上一次渲染的展开面板 HTML。事件快照内容没变时跳过整段 DOM 重建，避免 tooltip / 呼吸灯闪烁。
 let lastMiniPanelHtml = "";
 
 export function renderMini(): void {
@@ -99,7 +100,7 @@ export function renderMini(): void {
   const previousScrollTop = store.miniExpanded ? store.miniScrollTop : 0;
 
   if (!store.miniPanelOpen) {
-    // dock 没有动态内容；已经渲染过就不重建，否则每次 render（含 2.5s 轮询）都会
+    // dock 没有动态内容；已经渲染过就不重建，否则每次状态推送都会
     // 重建 .mini-logo-dock 元素，导致呼吸灯 CSS 动画被重置、看起来一卡一顿。
     lastMiniPanelHtml = "";
     if (!appRoot.querySelector(".mini-logo-dock")) {
@@ -171,7 +172,7 @@ export function renderMini(): void {
     </div>
   `;
 
-  // 内容没变就别重刷 DOM（面板已处于展开态时）：避免轮询把正 hover 的节点换掉造成闪烁。
+  // 内容没变就别重刷 DOM（面板已处于展开态时）：避免事件快照把正 hover 的节点换掉造成闪烁。
   if (appRoot.className === "mini-root mini-root-panel" && lastMiniPanelHtml === html) {
     return;
   }
@@ -276,6 +277,7 @@ function renderMiniProfileCard(profile: PublicProfile): string {
           : "";
   const liveHost = profile.running && profile.livePrimaryUrl ? liveAddrLabel(profile) : "";
   const driving = profile.running && profile.cdpClients.length > 0;
+  const gatewayReserved = profile.gatewayControl?.sessionStatus === "active" && Boolean(profile.gatewayControl.ownerSessionId);
   // 右侧读数覆盖三个维度：浏览器开没开（图标颜色 + 未启动/已启动字样）、
   // CDP 端口开没开（:端口 / 无 CDP）、有没有工具连着驱动（工具名·已连接/未连接）。
   // 忙碌 > 工具名·已连接 > 端口·未连接 > 已启动·无 CDP > 未启动。
@@ -289,6 +291,8 @@ function renderMiniProfileCard(profile: PublicProfile): string {
     ? busyLabel
     : driving
       ? `${toolLabel} 已连接`
+      : gatewayReserved
+        ? profile.gatewayControl?.ownership === "user" ? "已接管" : "Agent 已绑定"
       : profile.running && profile.cdpUrl
         ? `${cdpPort} · 未连接`
         : port.label;
@@ -298,7 +302,7 @@ function renderMiniProfileCard(profile: PublicProfile): string {
   const readoutTip = !busyHere && driving ? cdpClientTooltip(profile) : "";
   // 卡片正文可见的会话身份行：哪个项目 / 哪个会话在驱动（解析到才显示）。
   // 文案会截断，但“最近活动”固定在右侧不被吃掉——它是判断“活会话 vs 残留连接”的关键信号。
-  const primaryClient = driving ? profile.cdpClients[0] : undefined;
+  const primaryClient = driving ? profile.cdpClients[0] : gatewayControlClient(profile) || undefined;
   const sessionText = !busyHere && primaryClient ? cdpSessionText(primaryClient) : "";
   const sessionAge = !busyHere && primaryClient ? formatRelativeTime(primaryClient.lastActive) : "";
   // 硬停信号（如 CDP_PORT_CONTENDED）：塌缩成一行「稳定码 + 可照做 action」，优先突出给 agent 照做。
@@ -307,18 +311,26 @@ function renderMiniProfileCard(profile: PublicProfile): string {
   const activityText = activity ? agentActivityLeadText(activity) || "正在操作" : "";
   const activityProgress = activity ? agentActivityProgressText(activity) : "";
   const activityTip = activity ? agentActivityTooltipText(activity) || activityText : "";
-  const takeover = store.miniTakeoverByProfileId[profile.id];
+  const takeover = store.miniTakeoverByProfileId[profile.id] || (gatewayUserHasControl(profile)
+    ? {
+        profileId: profile.id,
+        profileName: profile.name,
+        agent: profile.gatewayControl?.agent || undefined,
+        session: profile.gatewayControl?.ownerSessionId || undefined,
+        at: profile.gatewayControl?.updatedAt || new Date().toISOString()
+      }
+    : undefined);
   const takeoverAgent = takeover?.agent || "AI";
-  const takeoverText = takeover ? `已接管 · ${takeoverAgent} 已停止操作` : "";
+  const takeoverText = takeover ? `已接管 · ${takeoverAgent} 已暂停操作` : "";
   const takeoverTip = takeover
-    ? `${takeover.profileName}\n${takeoverAgent}${takeover.session ? ` · ${takeover.session}` : ""} 已停止操作`
+    ? `${takeover.profileName}\n${takeoverAgent}${takeover.session ? ` · ${takeover.session}` : ""} 已暂停操作`
     : "";
   const takeoverConfirming = store.miniTakeoverConfirmProfileId === profile.id;
   const activityTitle = takeoverConfirming
-    ? "再次点击停止 AI 操作，接管浏览器"
+    ? "再次点击暂停 AI 操作，接管浏览器"
     : activityTip
-      ? `${activityTip}\n\n点击后再次点击可接管浏览器`
-      : "点击后再次点击可接管浏览器";
+      ? `${activityTip}\n\n点击后再次点击可暂停 AI 并接管浏览器`
+      : "点击后再次点击可暂停 AI 并接管浏览器";
   const activityKey = [activityText, activityProgress, activity?.updatedAt || ""].join("|");
 
   return `

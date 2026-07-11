@@ -200,16 +200,16 @@ export async function requestIsolatedProfileWindow(profile: PublicProfile): Prom
   launchDetached(command, [`--user-data-dir=${profile.path}`, "--no-first-run"]);
 }
 
-export function getDirectChromeCommand(): string | null {
-  if (process.env.CHROME_BINARY) {
-    return process.env.CHROME_BINARY;
+export function getDirectChromeCommand(env: NodeJS.ProcessEnv = process.env): string | null {
+  if (env.CHROME_BINARY) {
+    return env.CHROME_BINARY;
   }
 
   if (process.platform !== "darwin") {
     return null;
   }
 
-  const appName = process.env.CHROME_APP_NAME || "Google Chrome";
+  const appName = env.CHROME_APP_NAME || "Google Chrome";
   const command = `/Applications/${appName}.app/Contents/MacOS/${appName}`;
   return existsSync(command) ? command : null;
 }

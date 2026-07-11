@@ -1,8 +1,14 @@
-import type { AgentActivity, CdpClientInfo, Ownership } from "../shared/types";
+import type { AgentActivity, AgentControlNoticeReason, CdpClientInfo, Ownership } from "../shared/types";
 import { CdpBrowserClient, requestCdpTargets, requestCdpVersionInfo } from "./cdp-client";
 import type { CdpTargetListEntry, CdpVersionInfo } from "./internal-types";
 import { agentOverlayBootstrapScript } from "./overlay-script";
 import { isRecord, stringValue } from "./fs-util";
+import {
+  MacInputGuard,
+  type InputGuardClick,
+  type InputGuardController,
+  type InputGuardWindowBounds
+} from "./input-guard";
 import { SessionTailer, type SessionTailerBase } from "./session-tail";
 
 const BINDING_NAME = "__ppAgentOverlaySignal";
@@ -19,6 +25,13 @@ export interface AgentOverlayPortInput {
   port: number;
   profileId: string;
   profileName: string;
+  browserPids?: number[];
+  headless?: boolean;
+  // true 表示当前驱动仍连着 CDP，但已经收到用户接管 notice，不能据此把控制权误判回 Agent。
+  controlPaused?: boolean;
+  // 用户接管已经稳定，但对应 wait-control 进程在宽限期后仍不存在或已经退出。
+  agentOffline?: boolean;
+  controlSince?: string;
   clients: CdpClientInfo[];
 }
 
@@ -35,7 +48,29 @@ export interface AgentOverlayStopRequest {
   pids?: number[];
   session?: string;
   agent?: string;
+  reason?: AgentControlNoticeReason;
   stopAll?: boolean;
+}
+
+export interface AgentOverlayResumeRequest {
+  port: number;
+  profileId: string;
+  profileName: string;
+  pid: number;
+  pids?: number[];
+  session?: string;
+  agent?: string;
+  resumeAll?: boolean;
+}
+
+export interface AgentOverlayCompleteRequest {
+  port: number;
+  profileId: string;
+  profileName: string;
+  pid: number;
+  pids?: number[];
+  session: string;
+  agent?: string;
 }
 
 export interface AgentOverlayRevealRequest {
@@ -47,16 +82,20 @@ export interface AgentOverlayRevealRequest {
 interface AgentOverlayManagerOptions {
   locale?: OverlayLocale;
   onStop: (request: AgentOverlayStopRequest) => Promise<void>;
+  onResume?: (request: AgentOverlayResumeRequest) => Promise<void>;
+  onComplete?: (request: AgentOverlayCompleteRequest) => Promise<void>;
   onReveal?: (request: AgentOverlayRevealRequest) => void;
   now?: () => number;
   requestTargets?: (port: number) => Promise<CdpTargetListEntry[]>;
   requestVersionInfo?: (port: number) => Promise<CdpVersionInfo>;
   connectBrowser?: (webSocketDebuggerUrl: string, timeoutMs: number) => Promise<OverlayBrowserClient>;
+  inputGuard?: InputGuardController;
 }
 
 // 底层 overlay 状态（时间窗驱动的实现细节）：active＝AI 在驱动；takenOver＝用户刚接管、
 // 处于 7 秒保留窗口内。对外表达统一收敛到下面 payload 的 ownership 三值枚举，state 只留作内部映射源。
 type OverlayState = "active" | "takenOver";
+type InputGuardState = "starting" | "active" | "unavailable";
 
 interface OverlayPayload {
   locale: OverlayLocale;
@@ -79,6 +118,10 @@ interface OverlayPayload {
   updatedAt: string | null;
   startedAt: string | null;
   sessions: OverlaySessionPayload[];
+  inputGuardState: InputGuardState;
+  handoffPending: boolean;
+  agentOffline: boolean;
+  controlSince: string | null;
   stopError?: string | null;
 }
 
@@ -91,6 +134,10 @@ interface AgentOverlayPayloadInput {
   activityForClient?: (client: CdpClientInfo) => AgentActivity;
   startedAtForClient?: (client: CdpClientInfo) => string | undefined;
   now?: number;
+  inputGuardState?: InputGuardState;
+  handoffPending?: boolean;
+  agentOffline?: boolean;
+  controlSince?: string;
 }
 
 interface OverlaySessionPayload {
@@ -123,6 +170,7 @@ interface PageOverlay {
   lastPushAt: number;
   lastContextRecoveryAt: number;
   recoveringContext: boolean;
+  terminalMarkerCleared: boolean;
 }
 
 interface OverlayBrowserClient {
@@ -136,6 +184,8 @@ interface PortOverlay {
   port: number;
   profileId: string;
   profileName: string;
+  browserPids: number[];
+  headless: boolean;
   clients: CdpClientInfo[];
   pages: Map<string, PageOverlay>;
   browserClient: OverlayBrowserClient | null;
@@ -144,6 +194,11 @@ interface PortOverlay {
   targetSyncRequested: boolean;
   alive: boolean;
   takeoverInFlight: boolean;
+  handoffPending: boolean;
+  agentOffline: boolean;
+  controlSince?: string;
+  delegatedToUser: boolean;
+  delegationGraceUntil: number;
   takenOverUntil: number;
   lastPayload: OverlayPayload | null;
   stopError: string | null;
@@ -153,19 +208,72 @@ interface PortOverlay {
   targetCacheGeneration: number;
 }
 
+interface GuardProbeResult {
+  action: "takeover" | "stop";
+  signature: string;
+}
+
+interface GuardPageCandidate extends GuardProbeResult {
+  page: PageOverlay;
+  contextId: number;
+  windowId: number;
+}
+
+interface CdpBrowserWindowResult {
+  windowId?: number;
+  bounds?: {
+    left?: number;
+    top?: number;
+    width?: number;
+    height?: number;
+    windowState?: string;
+  };
+}
+
 export class AgentOverlayManager {
   private readonly ports = new Map<number, PortOverlay>();
   private readonly tailers = new Map<string, SessionTailer>();
+  private readonly completionInFlight = new Set<string>();
+  private readonly completedSessions = new Set<string>();
   private readonly script = agentOverlayBootstrapScript();
+  private readonly inputGuard: InputGuardController;
+  private guardClickChain: Promise<void> = Promise.resolve();
+  private inputGuardState: InputGuardState = "starting";
   private disposed = false;
 
-  constructor(private readonly options: AgentOverlayManagerOptions) {}
+  constructor(private readonly options: AgentOverlayManagerOptions) {
+    this.inputGuard = options.inputGuard || new MacInputGuard({
+      onClick: (click) => {
+        this.guardClickChain = this.guardClickChain
+          .then(() => this.handleInputGuardClick(click))
+          .catch((error) => {
+            console.warn("[ProfilePilot] Input Guard 点击命中失败", error);
+          });
+      },
+      onStatus: (message) => {
+        if (message.status === "tap-create-failed" || message.status === "tap-disabled") {
+          console.warn(`[ProfilePilot] Input Guard ${message.status}${message.pid ? ` (pid ${message.pid})` : ""}`);
+        }
+        const nextState =
+          message.status === "guard-active"
+            ? "active"
+            : message.status === "guard-unavailable" || message.status === "accessibility-access-denied"
+              ? "unavailable"
+              : null;
+        if (nextState && this.inputGuardState !== nextState) {
+          this.inputGuardState = nextState;
+          void this.pushAllUpdates();
+        }
+      }
+    });
+  }
 
   sync(input: AgentOverlaySyncInput): void {
     if (this.disposed) {
       return;
     }
     if (!input.enabled) {
+      this.inputGuard.sync([]);
       this.stopAllTailers();
       for (const state of this.ports.values()) {
         void this.teardownPort(state);
@@ -181,16 +289,19 @@ export class AgentOverlayManager {
       if (next) {
         state.profileId = next.profileId;
         state.profileName = next.profileName;
+        state.browserPids = normalizeBrowserPids(next.browserPids);
+        state.headless = Boolean(next.headless);
         state.clients = next.clients;
+        state.agentOffline = Boolean(next.agentOffline);
+        state.controlSince = next.controlSince;
         this.syncSessionStarts(state, now);
-        if (state.clients.length && state.takenOverUntil > now) {
-          // 用户接管后 7 秒内保留 takenOver overlay；但 agent-browser 同会话或新会话重连即恢复 active。
-          state.takenOverUntil = 0;
-          state.lastPayload = null;
-        }
+        this.syncDelegatedControl(state, Boolean(next.controlPaused), now);
         continue;
       }
-      if (state.takenOverUntil > now) {
+      const completedSessionStillShown = state.clients.some(
+        (client) => Boolean(client.session) && this.completedSessions.has(client.session as string)
+      );
+      if (!completedSessionStillShown && state.takenOverUntil > now) {
         state.clients = [];
         continue;
       }
@@ -205,6 +316,8 @@ export class AgentOverlayManager {
           port: next.port,
           profileId: next.profileId,
           profileName: next.profileName,
+          browserPids: normalizeBrowserPids(next.browserPids),
+          headless: Boolean(next.headless),
           clients: next.clients,
           pages: new Map(),
           browserClient: null,
@@ -213,7 +326,12 @@ export class AgentOverlayManager {
           targetSyncRequested: false,
           alive: true,
           takeoverInFlight: false,
-          takenOverUntil: 0,
+          handoffPending: false,
+          agentOffline: Boolean(next.agentOffline),
+          controlSince: next.controlSince,
+          delegatedToUser: Boolean(next.controlPaused),
+          delegationGraceUntil: 0,
+          takenOverUntil: next.controlPaused ? now + TAKEN_OVER_KEEPALIVE_MS : 0,
           lastPayload: null,
           stopError: null,
           targetCache: null,
@@ -226,16 +344,17 @@ export class AgentOverlayManager {
       } else {
         state.profileId = next.profileId;
         state.profileName = next.profileName;
+        state.browserPids = normalizeBrowserPids(next.browserPids);
+        state.headless = Boolean(next.headless);
         state.clients = next.clients;
+        state.agentOffline = Boolean(next.agentOffline);
+        state.controlSince = next.controlSince;
         this.syncSessionStarts(state, now);
-        if (state.clients.length && state.takenOverUntil > now) {
-          // 7 秒 keepalive 只覆盖无人接手的窗口；重连成功后下一次 push 会回到 active。
-          state.takenOverUntil = 0;
-          state.lastPayload = null;
-        }
+        this.syncDelegatedControl(state, Boolean(next.controlPaused), now);
       }
     }
 
+    this.syncInputGuard();
     this.syncTailers();
     for (const state of this.ports.values()) {
       void this.ensureTargetObserver(state).catch(() => undefined);
@@ -251,10 +370,186 @@ export class AgentOverlayManager {
 
   async dispose(): Promise<void> {
     this.disposed = true;
+    this.inputGuard.sync([]);
+    await this.inputGuard.dispose();
     this.stopAllTailers();
     const states = [...this.ports.values()];
     this.ports.clear();
     await Promise.allSettled(states.map((state) => this.teardownPort(state)));
+  }
+
+  private syncInputGuard(): void {
+    if (this.disposed) {
+      this.inputGuard.sync([]);
+      return;
+    }
+    const pids = [...this.ports.values()]
+      .filter((state) => this.isInputGuardPort(state))
+      .flatMap((state) => state.browserPids || []);
+    if (!pids.length) {
+      this.inputGuardState = "starting";
+    }
+    this.inputGuard.sync(pids);
+  }
+
+  private isInputGuardPort(state: PortOverlay): boolean {
+    return (
+      this.isActivePort(state) &&
+      !state.headless &&
+      !state.delegatedToUser &&
+      state.clients.length > 0 &&
+      (state.browserPids || []).length > 0 &&
+      state.takenOverUntil <= this.now()
+    );
+  }
+
+  private syncDelegatedControl(state: PortOverlay, controlPaused: boolean, now: number): void {
+    if (controlPaused) {
+      if (!state.delegatedToUser) {
+        state.delegatedToUser = true;
+        state.takenOverUntil = Math.max(state.takenOverUntil, now + TAKEN_OVER_KEEPALIVE_MS);
+        state.lastPayload = null;
+      }
+      return;
+    }
+    // onStop 完成前可能已有一轮 getState 在途；给它一个很短的陈旧快照保护窗，避免刚接管
+    // 就被旧的 controlPaused=false 结果重新加锁。真正的 resume 会在保护窗后稳定恢复。
+    if (!state.delegatedToUser || now < state.delegationGraceUntil) {
+      return;
+    }
+    state.delegatedToUser = false;
+    state.delegationGraceUntil = 0;
+    state.takenOverUntil = 0;
+    state.lastPayload = null;
+  }
+
+  private async handleInputGuardClick(click: InputGuardClick): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
+    const states = [...this.ports.values()].filter(
+      (state) => this.isInputGuardPort(state) && (state.browserPids || []).includes(click.pid)
+    );
+    for (const state of states) {
+      if (!this.isInputGuardPort(state) || !state.browserClient) {
+        continue;
+      }
+      // Docked DevTools splits the outer window's non-page area between top and bottom.
+      // Without a native content-view frame that mapping is ambiguous, so this click is
+      // deliberately ignored instead of risking a false takeover.
+      const targets = await this.targetsForPort(state);
+      if (!targets || targets.some((target) => (stringValue(target.url) || "").startsWith("devtools://"))) {
+        continue;
+      }
+
+      const candidates = (
+        await Promise.all(
+          [...state.pages.values()].map((page) => this.probeInputGuardPage(state, page, click).catch(() => null))
+        )
+      ).filter((candidate): candidate is GuardPageCandidate => candidate !== null);
+      if (!candidates.length) {
+        continue;
+      }
+
+      // Multiple native windows can share identical bounds when stacked. CDP cannot map
+      // its windowId to CGWindowID directly, so ambiguous stacked windows fail closed.
+      const windowIds = new Set(candidates.map((candidate) => candidate.windowId));
+      const actions = new Set(candidates.map((candidate) => candidate.action));
+      if (windowIds.size !== 1 || actions.size !== 1) {
+        continue;
+      }
+
+      const candidate = candidates[0];
+      if (await this.activateInputGuardCandidate(state, candidate, click)) {
+        return;
+      }
+    }
+  }
+
+  private async probeInputGuardPage(
+    state: PortOverlay,
+    page: PageOverlay,
+    click: InputGuardClick
+  ): Promise<GuardPageCandidate | null> {
+    const client = state.browserClient;
+    if (!client || !this.isInputGuardPort(state) || !this.isActivePage(state, page) || !page.sessionId) {
+      return null;
+    }
+    const browserWindow = await client.send<CdpBrowserWindowResult>(
+      "Browser.getWindowForTarget",
+      { targetId: page.targetId },
+      2500
+    );
+    const windowId = positiveIntegerValue(browserWindow.windowId);
+    if (
+      !windowId ||
+      browserWindow.bounds?.windowState === "minimized" ||
+      !cdpWindowMatchesInputGuardBounds(browserWindow.bounds, click.window)
+    ) {
+      return null;
+    }
+
+    const payload = safeJson(inputGuardClickPayload(click));
+    for (const contextId of this.contextIdsForPage(page)) {
+      let result: { result?: { value?: unknown } };
+      try {
+        result = await client.send(
+          "Runtime.evaluate",
+          {
+            expression: `globalThis.__ppAgentOverlayGuardProbe ? globalThis.__ppAgentOverlayGuardProbe(${payload}) : null`,
+            awaitPromise: false,
+            returnByValue: true,
+            contextId
+          },
+          2500,
+          page.sessionId
+        );
+      } catch {
+        continue;
+      }
+      const value = result.result?.value;
+      if (!isRecord(value)) {
+        continue;
+      }
+      const action = stringValue(value.action);
+      const signature = stringValue(value.signature);
+      if ((action === "takeover" || action === "stop") && signature) {
+        return { page, contextId, windowId, action, signature };
+      }
+    }
+    return null;
+  }
+
+  private async activateInputGuardCandidate(
+    state: PortOverlay,
+    candidate: GuardPageCandidate,
+    click: InputGuardClick
+  ): Promise<boolean> {
+    const client = state.browserClient;
+    const sessionId = candidate.page.sessionId;
+    if (
+      !client ||
+      !sessionId ||
+      !this.isInputGuardPort(state) ||
+      !this.isActivePage(state, candidate.page) ||
+      !candidate.page.isolatedContextIds.has(candidate.contextId)
+    ) {
+      return false;
+    }
+    const payload = safeJson(inputGuardClickPayload(click));
+    const signature = safeJson(candidate.signature);
+    const result = await client.send<{ result?: { value?: unknown } }>(
+      "Runtime.evaluate",
+      {
+        expression: `Boolean(globalThis.__ppAgentOverlayGuardActivate && globalThis.__ppAgentOverlayGuardActivate(${payload}, ${signature}))`,
+        awaitPromise: false,
+        returnByValue: true,
+        contextId: candidate.contextId
+      },
+      2500,
+      sessionId
+    );
+    return result.result?.value === true;
   }
 
   private syncTailers(): void {
@@ -277,6 +572,7 @@ export class AgentOverlayManager {
       if (!base) {
         tailer.stop();
         this.tailers.delete(session);
+        this.completedSessions.delete(session);
         continue;
       }
       tailer.updateBase(base);
@@ -287,10 +583,74 @@ export class AgentOverlayManager {
         continue;
       }
       const tailer = new SessionTailer(session, base, () => {
-        void this.pushAllUpdates().catch(() => undefined);
+        void this.handleSessionTailerUpdate(session).catch((error) => {
+          console.warn(`[ProfilePilot] 自动交还 Session ${session} 失败`, error);
+        });
       });
-      tailer.start();
       this.tailers.set(session, tailer);
+      tailer.start();
+    }
+  }
+
+  private async handleSessionTailerUpdate(session: string): Promise<void> {
+    const tailer = this.tailers.get(session);
+    if (!tailer || tailer.getControlPhase() !== "completed" || !this.options.onComplete) {
+      if (tailer?.getControlPhase() === "active") {
+        this.completedSessions.delete(session);
+      }
+      await this.pushAllUpdates();
+      return;
+    }
+    if (this.completedSessions.has(session) || this.completionInFlight.has(session)) {
+      return;
+    }
+
+    const match = [...this.ports.values()]
+      .map((state) => ({
+        state,
+        drivers: uniqueClientsByPid(
+          state.clients.filter(
+            (client) => client.session === session && client.label.toLowerCase().startsWith("agent-browser")
+          )
+        )
+      }))
+      .find((candidate) => candidate.drivers.length > 0);
+    if (!match) {
+      await this.pushAllUpdates();
+      return;
+    }
+
+    this.completionInFlight.add(session);
+    try {
+      const driver = match.drivers[0];
+      await this.options.onComplete({
+        port: match.state.port,
+        profileId: match.state.profileId,
+        profileName: match.state.profileName,
+        pid: driver.pid,
+        pids: match.drivers.map((client) => client.pid),
+        session,
+        agent: inferAgentName(driver)
+      });
+
+      this.completedSessions.add(session);
+      const delegatedAt = this.now();
+      for (const state of this.ports.values()) {
+        if (!state.clients.some((client) => client.session === session)) {
+          continue;
+        }
+        // “任务完成”只交还操作权，不等于关闭 Session：保留 daemon、租约、tailer 和控制框，
+        // 将状态切到与用户主动接管一致的 delegated 状态，直到用户交还或显式结束 Session。
+        state.delegatedToUser = true;
+        state.delegationGraceUntil = delegatedAt + 1500;
+        state.takenOverUntil = Math.max(state.takenOverUntil, delegatedAt + TAKEN_OVER_KEEPALIVE_MS);
+        state.stopError = null;
+        state.lastPayload = null;
+        await this.pushPortUpdate(state, true);
+      }
+      this.syncInputGuard();
+    } finally {
+      this.completionInFlight.delete(session);
     }
   }
 
@@ -299,6 +659,7 @@ export class AgentOverlayManager {
       tailer.stop();
     }
     this.tailers.clear();
+    this.completedSessions.clear();
   }
 
   private async syncPortTargets(state: PortOverlay): Promise<void> {
@@ -406,11 +767,10 @@ export class AgentOverlayManager {
       if (!this.isActivePort(state) || state.browserClient !== client) {
         return;
       }
-      await client.send(
-        "Target.setAutoAttach",
-        { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
-        5000
-      );
+      // Target discovery plus our explicit attachPage path is deliberately the only attach owner.
+      // Browser-wide auto-attach can race attachPage, register two future-document scripts for one
+      // target, and leave an untracked script that resurrects the overlay after Session stop.
+      void this.syncPortTargets(state).catch(() => undefined);
     } catch {
       this.teardownTargetObserver(state);
     } finally {
@@ -555,7 +915,8 @@ export class AgentOverlayManager {
       lastPayloadText: "",
       lastPushAt: 0,
       lastContextRecoveryAt: 0,
-      recoveringContext: false
+      recoveringContext: false,
+      terminalMarkerCleared: false
     };
     state.pages.set(targetId, page);
     return page;
@@ -606,6 +967,21 @@ export class AgentOverlayManager {
       await client.send("Page.enable", {}, 5000, sessionId);
       if (!this.isActivePage(state, page) || state.browserClient !== client || page.sessionId !== sessionId) {
         return;
+      }
+      if (!page.terminalMarkerCleared) {
+        await client.send(
+          "Runtime.evaluate",
+          {
+            expression: 'try { sessionStorage.removeItem("__ppAgentOverlayTerminalStopUntil"); } catch {}',
+            awaitPromise: false
+          },
+          5000,
+          sessionId
+        );
+        if (!this.isActivePage(state, page) || state.browserClient !== client || page.sessionId !== sessionId) {
+          return;
+        }
+        page.terminalMarkerCleared = true;
       }
       await client.send("Runtime.addBinding", { name: BINDING_NAME, executionContextName: OVERLAY_WORLD_NAME }, 5000, sessionId);
       if (!this.isActivePage(state, page) || state.browserClient !== client || page.sessionId !== sessionId) {
@@ -730,7 +1106,13 @@ export class AgentOverlayManager {
     }
     if (action === "stop") {
       const session = stringValue(payload.session) || undefined;
-      void this.handleStopSignal(state, session).catch(() => undefined);
+      const reason = agentControlReasonValue(payload.reason) || "user_stop";
+      void this.handleStopSignal(state, session, reason).catch(() => undefined);
+      return;
+    }
+    if (action === "resume") {
+      const session = stringValue(payload.session) || undefined;
+      void this.handleResumeSignal(state, session).catch(() => undefined);
     }
   }
 
@@ -785,8 +1167,17 @@ export class AgentOverlayManager {
     return contextId !== null && page.isolatedContextIds.has(contextId);
   }
 
-  private async handleStopSignal(state: PortOverlay, requestedSession?: string): Promise<void> {
-    if (!this.isActivePort(state) || state.takeoverInFlight || this.now() < state.takenOverUntil) {
+  private async handleStopSignal(
+    state: PortOverlay,
+    requestedSession?: string,
+    reason: AgentControlNoticeReason = "user_stop"
+  ): Promise<void> {
+    if (
+      !this.isActivePort(state) ||
+      state.takeoverInFlight ||
+      (state.delegatedToUser && reason !== "user_stop") ||
+      (!state.delegatedToUser && this.now() < state.takenOverUntil)
+    ) {
       return;
     }
     const drivers = this.findStopDrivers(state, requestedSession);
@@ -795,6 +1186,18 @@ export class AgentOverlayManager {
     }
 
     state.takeoverInFlight = true;
+    state.handoffPending = reason === "user_takeover";
+    if (state.handoffPending) {
+      state.lastPayload = null;
+      await this.pushPortUpdate(state, true);
+    }
+    const terminalStop = reason === "user_stop" || reason === "user_disconnect";
+    if (terminalStop) {
+      // Gateway stop / daemon retirement can take long enough for the user to refresh the page.
+      // Revoke the future-document bootstrap first so a refresh cannot resurrect the control box
+      // while the authoritative Session stop is still settling.
+      await this.suspendPageBootstrapScripts(state);
+    }
     let firstError: unknown = null;
     const stopAll = !requestedSession && drivers.length > 1;
     try {
@@ -808,16 +1211,18 @@ export class AgentOverlayManager {
           pids: stopAll ? undefined : drivers.map((client) => client.pid),
           session: stopAll ? undefined : requestedSession || driver.session,
           agent: stopAll ? undefined : inferAgentName(driver),
+          reason,
           stopAll
         });
       } catch (error) {
         firstError = error;
       }
       if (firstError) {
-        if (!stopAll) {
-          throw firstError instanceof Error ? firstError : new Error("没有可停止的 AI 驱动连接。");
+        if (terminalStop && this.isActivePort(state)) {
+          await this.rebuildPortPages(state);
         }
         state.stopError = this.stopErrorMessage(drivers.length, 0, firstError);
+        state.handoffPending = false;
         state.takenOverUntil = 0;
         state.lastPayload = {
           ...this.payloadForPort(state),
@@ -825,21 +1230,116 @@ export class AgentOverlayManager {
           stopError: state.stopError
         };
         await this.pushPortUpdate(state, true);
-        if (firstError) {
-          console.warn("[ProfilePilot] Agent overlay stop-all failed", firstError);
-        }
+        console.warn("[ProfilePilot] Agent overlay control handoff failed", firstError);
         return;
       }
       if (!this.isActivePort(state)) {
         return;
       }
+      if (reason === "user_stop" || reason === "user_disconnect") {
+        const stoppedPids = new Set(drivers.map((client) => client.pid));
+        for (const driver of drivers) {
+          if (driver.session) {
+            this.completedSessions.delete(driver.session);
+            this.completionInFlight.delete(driver.session);
+          }
+        }
+        state.clients = state.clients.filter((client) => !stoppedPids.has(client.pid));
+        state.stopError = null;
+        state.handoffPending = false;
+        state.agentOffline = false;
+        state.controlSince = undefined;
+        state.delegatedToUser = false;
+        state.delegationGraceUntil = 0;
+        state.takenOverUntil = 0;
+        state.lastPayload = null;
+        if (!state.clients.length) {
+          this.ports.delete(state.port);
+          await this.teardownPort(state);
+          this.syncInputGuard();
+          this.syncTailers();
+          return;
+        }
+        this.syncInputGuard();
+        this.syncTailers();
+        await this.pushPortUpdate(state, true);
+        return;
+      }
       state.stopError = null;
-      state.takenOverUntil = this.now() + TAKEN_OVER_KEEPALIVE_MS;
+      state.handoffPending = false;
+      const takenOverAt = this.now();
+      state.agentOffline = false;
+      state.controlSince = new Date(takenOverAt).toISOString();
+      state.delegatedToUser = reason === "user_takeover";
+      state.delegationGraceUntil = state.delegatedToUser ? takenOverAt + 1500 : 0;
+      state.takenOverUntil = takenOverAt + TAKEN_OVER_KEEPALIVE_MS;
+      this.syncInputGuard();
       state.lastPayload = {
         ...this.payloadForPort(state),
         state: "takenOver"
       };
       await this.pushPortUpdate(state, true);
+    } finally {
+      if (this.ports.get(state.port) === state) {
+        state.takeoverInFlight = false;
+        state.handoffPending = false;
+      }
+    }
+  }
+
+  private async handleResumeSignal(state: PortOverlay, requestedSession?: string): Promise<void> {
+    if (
+      !this.isActivePort(state) ||
+      state.takeoverInFlight ||
+      !state.delegatedToUser ||
+      state.agentOffline ||
+      !this.options.onResume
+    ) {
+      return;
+    }
+    const drivers = this.findStopDrivers(state, requestedSession);
+    if (!drivers.length) {
+      return;
+    }
+
+    const controlSince = state.controlSince;
+    state.takeoverInFlight = true;
+    // 先重新启用点击保护，再发 CONTROL_RETURNED；等待中的 Agent 醒来时浏览器已经重新上锁。
+    state.delegatedToUser = false;
+    state.agentOffline = false;
+    state.controlSince = undefined;
+    state.delegationGraceUntil = 0;
+    state.takenOverUntil = 0;
+    state.lastPayload = null;
+    this.syncInputGuard();
+    try {
+      const resumeAll = !requestedSession && drivers.length > 1;
+      const driver = drivers[0];
+      await this.options.onResume({
+        port: state.port,
+        profileId: state.profileId,
+        profileName: state.profileName,
+        pid: driver.pid,
+        pids: resumeAll ? undefined : drivers.map((client) => client.pid),
+        session: resumeAll ? undefined : requestedSession || driver.session,
+        agent: resumeAll ? undefined : inferAgentName(driver),
+        resumeAll
+      });
+      if (!this.isActivePort(state)) {
+        return;
+      }
+      state.stopError = null;
+      await this.pushPortUpdate(state, true);
+    } catch (error) {
+      state.delegatedToUser = true;
+      state.agentOffline = false;
+      state.controlSince = controlSince || new Date(this.now()).toISOString();
+      state.takenOverUntil = this.now() + TAKEN_OVER_KEEPALIVE_MS;
+      this.syncInputGuard();
+      state.stopError = error instanceof Error ? error.message : "交还 Agent 失败。";
+      state.lastPayload = null;
+      await this.pushPortUpdate(state, true);
+      throw error;
     } finally {
       if (this.ports.get(state.port) === state) {
         state.takeoverInFlight = false;
@@ -914,6 +1414,11 @@ export class AgentOverlayManager {
 
   private stopErrorMessage(total: number, stopped: number, error: unknown): string {
     const detail = error instanceof Error && error.message ? `：${error.message}` : "";
+    if (total <= 1) {
+      return (this.options.locale ?? "en") === "zh"
+        ? `操作失败，请重试${detail}`
+        : `Action failed. Try again${detail}`;
+    }
     if ((this.options.locale ?? "en") === "zh") {
       return `部分停止失败，请重试（已停止 ${stopped}/${total}）${detail}`;
     }
@@ -1035,7 +1540,7 @@ export class AgentOverlayManager {
   }
 
   private payloadForPort(state: PortOverlay): OverlayPayload {
-    const takenOver = state.takenOverUntil > this.now();
+    const takenOver = state.delegatedToUser || state.takenOverUntil > this.now();
     const payload = buildAgentOverlayPayload({
       locale: this.options.locale ?? "en",
       state: takenOver ? "takenOver" : "active",
@@ -1044,6 +1549,10 @@ export class AgentOverlayManager {
       lastPayload: state.lastPayload,
       activityForClient: (client) => this.activityForClient(client),
       startedAtForClient: (client) => this.startedAtForClient(state, client),
+      inputGuardState: this.inputGuardState,
+      handoffPending: state.handoffPending,
+      agentOffline: state.agentOffline,
+      controlSince: state.controlSince,
       now: this.now()
     });
     if (!state.stopError) {
@@ -1115,6 +1624,78 @@ export class AgentOverlayManager {
     this.teardownTargetObserver(state);
   }
 
+  private async suspendPageBootstrapScripts(state: PortOverlay): Promise<void> {
+    const client = state.browserClient;
+    if (!client) {
+      return;
+    }
+    const pages = [...state.pages.values()];
+    await Promise.allSettled(
+      pages.map((page) => {
+        const sessionId = page.sessionId;
+        if (!sessionId) {
+          return Promise.resolve();
+        }
+        return client.send(
+          "Runtime.evaluate",
+          {
+            expression: 'try { sessionStorage.setItem("__ppAgentOverlayTerminalStopUntil", String(Date.now() + 120000)); } catch {}',
+            awaitPromise: false
+          },
+          2000,
+          sessionId
+        );
+      })
+    );
+    await Promise.allSettled(
+      pages.map(async (page) => {
+        const sessionId = page.sessionId;
+        const identifier = page.scriptIdentifier;
+        if (!sessionId || !identifier) {
+          return;
+        }
+        await client.send(
+          "Page.removeScriptToEvaluateOnNewDocument",
+          { identifier },
+          2000,
+          sessionId
+        );
+        if (page.scriptIdentifier === identifier) {
+          page.scriptIdentifier = undefined;
+        }
+      })
+    );
+    await Promise.allSettled(
+      pages.flatMap((page) => {
+        const sessionId = page.sessionId;
+        if (!sessionId) {
+          return [];
+        }
+        return this.contextIdsForPage(page).map((contextId) =>
+          client.send(
+            "Runtime.evaluate",
+            {
+              expression: "globalThis.__ppAgentOverlayTeardown && globalThis.__ppAgentOverlayTeardown()",
+              awaitPromise: false,
+              contextId
+            },
+            2000,
+            sessionId
+          )
+        );
+      })
+    );
+  }
+
+  private async rebuildPortPages(state: PortOverlay): Promise<void> {
+    const pages = [...state.pages.values()];
+    await Promise.allSettled(pages.map((page) => this.teardownPage(state, page)));
+    if (this.isActivePort(state)) {
+      this.invalidateTargetCache(state);
+      await this.syncPortTargets(state);
+    }
+  }
+
   private teardownTargetObserver(state: PortOverlay): void {
     const client = state.browserClient;
     state.browserClient = null;
@@ -1177,7 +1758,11 @@ export function buildAgentOverlayPayload(input: AgentOverlayPayloadInput): Overl
       ...input.lastPayload,
       locale: input.locale ?? input.lastPayload.locale,
       state: input.state === "takenOver" ? "takenOver" : input.lastPayload.state,
-      profileName: input.profileName
+      profileName: input.profileName,
+      inputGuardState: input.inputGuardState,
+      handoffPending: input.handoffPending,
+      agentOffline: input.agentOffline,
+      controlSince: input.controlSince
     });
   }
 
@@ -1206,14 +1791,18 @@ export function buildAgentOverlayPayload(input: AgentOverlayPayloadInput): Overl
     project: nullableString(activity.project || primary?.project),
     session: nullableString(activity.session || primary?.session),
     sessionTitle: nullableString(activity.sessionTitle || primary?.title),
-    currentAction: nullableString(activity.currentAction || (primary ? "AI 正在操作浏览器" : undefined)),
+    currentAction: nullableString(activity.currentAction || (primary ? "AI 正在控制浏览器" : undefined)),
     targetUrl: nullableString(activityTargetUrl(activity)),
     currentStep: nullableString(activity.currentStep),
     nextStep: nullableString(activity.nextStep),
     todoDone: nullableNumber(activity.todoDone),
     todoTotal: nullableNumber(activity.todoTotal),
     lastMessage: nullableString(activity.lastMessage),
-    updatedAt: nullableString(primary ? activity.updatedAt || primary.lastActive || new Date(now).toISOString() : undefined)
+    updatedAt: nullableString(primary ? activity.updatedAt || primary.lastActive || new Date(now).toISOString() : undefined),
+    inputGuardState: input.inputGuardState,
+    handoffPending: input.handoffPending,
+    agentOffline: input.agentOffline,
+    controlSince: input.controlSince
   });
 }
 
@@ -1299,7 +1888,12 @@ function normalizeOverlayPayload(payload: Partial<OverlayPayload>): OverlayPaylo
     lastMessage: nullableString(payload.lastMessage),
     updatedAt: nullableString(payload.updatedAt),
     startedAt: nullableString(payload.startedAt),
-    sessions: Array.isArray(payload.sessions) ? payload.sessions.map(normalizeOverlaySessionPayload) : []
+    sessions: Array.isArray(payload.sessions) ? payload.sessions.map(normalizeOverlaySessionPayload) : [],
+    inputGuardState:
+      payload.inputGuardState === "active" || payload.inputGuardState === "unavailable" ? payload.inputGuardState : "starting",
+    handoffPending: payload.handoffPending === true,
+    agentOffline: payload.agentOffline === true,
+    controlSince: nullableString(payload.controlSince)
   };
 }
 
@@ -1344,6 +1938,54 @@ function nullableNumber(value: number | null | undefined): number | null {
 
 function numberValue(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function positiveIntegerValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : null;
+}
+
+function normalizeBrowserPids(value: number[] | undefined): number[] {
+  return [...new Set((value || []).filter((pid) => Number.isInteger(pid) && pid > 0))].sort(
+    (left, right) => left - right
+  );
+}
+
+function inputGuardClickPayload(click: InputGuardClick): {
+  displayScale: number;
+  window: InputGuardWindowBounds;
+  down: { x: number; y: number };
+  up: { x: number; y: number };
+} {
+  return {
+    displayScale: click.displayScale,
+    window: click.window,
+    down: click.down,
+    up: click.up
+  };
+}
+
+function cdpWindowMatchesInputGuardBounds(
+  bounds: CdpBrowserWindowResult["bounds"],
+  nativeBounds: InputGuardWindowBounds
+): boolean {
+  const left = numberValue(bounds?.left);
+  const top = numberValue(bounds?.top);
+  const width = numberValue(bounds?.width);
+  const height = numberValue(bounds?.height);
+  if (left === null || top === null || width === null || height === null || width <= 0 || height <= 0) {
+    return false;
+  }
+  const epsilon = 4;
+  return (
+    Math.abs(left - nativeBounds.x) <= epsilon &&
+    Math.abs(top - nativeBounds.y) <= epsilon &&
+    Math.abs(width - nativeBounds.width) <= epsilon &&
+    Math.abs(height - nativeBounds.height) <= epsilon
+  );
+}
+
+function agentControlReasonValue(value: unknown): AgentControlNoticeReason | null {
+  return value === "user_takeover" || value === "agent_complete" || value === "user_stop" || value === "user_disconnect" || value === "user_return" ? value : null;
 }
 
 function inferAgentName(client: CdpClientInfo): string | undefined {
@@ -1404,7 +2046,9 @@ function isInjectableTargetInfo(targetInfo: Record<string, unknown>): boolean {
 }
 
 function isInjectableUrl(url: string): boolean {
-  return !/^(chrome|devtools|chrome-extension|edge|about:chrome|view-source:chrome):/i.test(url);
+  // Extension-owned pages are regular CDP page targets and support the same isolated-world
+  // bootstrap as web pages. Keep browser-owned WebUI / DevTools surfaces excluded.
+  return !/^(chrome|devtools|edge|about:chrome|view-source:chrome):/i.test(url);
 }
 
 function targetKey(target: CdpTargetListEntry): string {

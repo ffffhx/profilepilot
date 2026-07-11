@@ -1,11 +1,23 @@
 export function agentOverlayBootstrapScript(): string {
   return String.raw`(() => {
+  const TERMINAL_STOP_KEY = "__ppAgentOverlayTerminalStopUntil";
   try {
     if (window.top !== window.self) {
       return;
     }
   } catch {
     return;
+  }
+  try {
+    const terminalStopUntil = Number(window.sessionStorage.getItem(TERMINAL_STOP_KEY));
+    if (Number.isFinite(terminalStopUntil) && terminalStopUntil > Date.now()) {
+      return;
+    }
+    if (terminalStopUntil) {
+      window.sessionStorage.removeItem(TERMINAL_STOP_KEY);
+    }
+  } catch {
+    // Opaque origins may deny sessionStorage; main-process script removal remains authoritative.
   }
   if (window.__ppAgentOverlayInstalled) {
     return;
@@ -15,6 +27,7 @@ export function agentOverlayBootstrapScript(): string {
   const SIGNAL_NAME = "__ppAgentOverlaySignal";
   const STORAGE_KEY = "__ppAgentOverlayPosition";
   const COLLAPSED_KEY = "__ppAgentOverlayCollapsed";
+  const EXPANDED_KEY = "__ppAgentOverlayExpanded";
   const STOP_CONFIRM_MS = 3000;
   const HOST_REATTACH_LIMIT = 8;
   const HOST_REATTACH_WINDOW_MS = 10000;
@@ -29,23 +42,47 @@ export function agentOverlayBootstrapScript(): string {
       expandTitle: "展开 AI 操作状态",
       sessionHeading: "会话",
       recentSummary: "AI 最近说",
-      takenTitle: "✋ 已接管，AI 已停止操作",
-      operatingPrefix: "AI 正在操作 · ",
+      takenTitle: "✋ 已接管，AI 已暂停操作",
+      offlineTitle: "Agent 已离线",
+      handoffTitle: "正在安全交接…",
+      operatingPrefix: "AI 正在控制 · ",
       sessionsSuffix: " 个会话",
       actionPrefix: "▸ ",
       targetPrefix: "目标：",
       takenAction: "浏览器控制权已交还给你",
-      defaultAction: "AI 正在操作浏览器",
+      offlineAction: "原 Agent 已不再等待；请释放 Profile 后再开始新的 Agent 会话",
+      handoffAction: "正在等待当前浏览器操作结束，完成前仍禁止手动点击",
+      defaultAction: "AI 正在控制浏览器",
+      lockedTitle: "Agent 调试中",
+      lockedHint: "暂时无法手动点击",
+      guardStarting: "正在启用点击保护…",
+      guardUnavailable: "需要给“ProfilePilot Input Guard”开启辅助功能权限，当前尚未禁止点击",
+      defaultTask: "Agent 任务",
+      multiTaskTitle: (count) => count + " 个 Agent 任务正在控制",
+      detailsTitle: "查看控制详情",
+      collapseDetailsTitle: "收起控制详情",
+      ownerAgent: "Agent",
+      ownerUser: "User",
+      taskSpacePrefix: "任务空间",
+      projectPrefix: "项目",
+      sessionPrefix: "Session",
+      hardStopSent: "已发送 hard-stop notice",
+      takeoverHint: "你可以随时接管；接管后 Agent 会收到硬停止通知",
       nextPrefix: "下一步：",
       stepLabel: (index) => "第 " + index + " 步：",
       progressDone: (done, total) => done + "/" + total + " 已完成",
       unnamedSession: "未命名会话",
       unknownActivity: "活动未知",
       elapsedPrefix: "已运行 ",
-      takenStop: "已接管",
-      confirmStop: "再点一次确认接管",
-      stopSingle: "⏹ 停止并接管",
-      stopAll: "⏹ 全部停止并接管",
+      takenElapsedPrefix: "已接管 ",
+      returnToAgent: "交还 Agent",
+      offlineButton: "Agent 已离线",
+      releaseProfile: "释放 Profile",
+      confirmRelease: "再点一次释放",
+      takeover: "接管",
+      stopSingle: "结束任务",
+      stopAll: "结束全部",
+      confirmStop: "再点一次结束",
       duration: (ms) => {
         const totalSeconds = Math.max(0, Math.floor(ms / 1000));
         const hours = Math.floor(totalSeconds / 3600);
@@ -84,23 +121,48 @@ export function agentOverlayBootstrapScript(): string {
       expandTitle: "Expand AI status",
       sessionHeading: "Sessions",
       recentSummary: "What AI said",
-      takenTitle: "✋ Taken over — AI stopped",
-      operatingPrefix: "AI is operating · ",
+      takenTitle: "✋ Taken over — AI paused",
+      offlineTitle: "Agent offline",
+      handoffTitle: "Handing over safely…",
+      operatingPrefix: "AI is controlling · ",
       sessionsSuffix: " sessions",
       actionPrefix: "▸ ",
       targetPrefix: "Target: ",
       takenAction: "browser control returned to you",
-      defaultAction: "AI is operating",
+      offlineAction: "The original agent is no longer waiting; release this Profile before starting another agent session",
+      handoffAction: "Waiting for the current browser action to settle; manual clicks remain disabled",
+      defaultAction: "AI is controlling this browser",
+      lockedTitle: "Agent debugging",
+      lockedHint: "Manual clicks are temporarily disabled",
+      guardStarting: "正在启用点击保护…",
+      guardUnavailable: "需要给“ProfilePilot Input Guard”开启辅助功能权限，当前尚未禁止点击",
+      defaultTask: "Agent task",
+      multiTaskTitle: (count) => count + " Agent tasks are controlling",
+      detailsTitle: "Show control details",
+      collapseDetailsTitle: "Hide control details",
+      ownerAgent: "Agent",
+      ownerUser: "User",
+      taskSpacePrefix: "Task space",
+      projectPrefix: "项目",
+      sessionPrefix: "Session",
+      hardStopSent: "Hard-stop notice sent",
+      takeoverHint: "You can take over anytime; the agent receives a hard-stop notice",
       nextPrefix: "Next: ",
       stepLabel: (index) => "Step " + index + ": ",
       progressDone: (done, total) => done + "/" + total + " completed",
       unnamedSession: "Untitled session",
       unknownActivity: "Activity unknown",
       elapsedPrefix: "Running for ",
-      takenStop: "Taken over",
-      confirmStop: "Click again to confirm",
-      stopSingle: "⏹ Stop & take over",
-      stopAll: "⏹ Stop all & take over",
+      takenElapsedPrefix: "Taken over for ",
+      // 控制权按钮是操作协议的一部分，不跟随网页语言，避免中文应用里被页面语言切成英文。
+      returnToAgent: "交还 Agent",
+      offlineButton: "Agent 已离线",
+      releaseProfile: "释放 Profile",
+      confirmRelease: "再点一次释放",
+      takeover: "接管",
+      stopSingle: "结束任务",
+      stopAll: "结束全部",
+      confirmStop: "再点一次结束",
       duration: (ms) => {
         const totalSeconds = Math.max(0, Math.floor(ms / 1000));
         const minutes = Math.floor(totalSeconds / 60);
@@ -134,6 +196,10 @@ export function agentOverlayBootstrapScript(): string {
     locale: "",
     state: "active",
     ownership: "agent",
+    inputGuardState: "starting",
+    handoffPending: false,
+    agentOffline: false,
+    controlSince: "",
     profileName: "",
     agent: "",
     project: "",
@@ -165,10 +231,13 @@ export function agentOverlayBootstrapScript(): string {
     "lastMessage",
     "updatedAt",
     "startedAt",
-    "stopError"
+    "controlSince",
+    "stopError",
+    "inputGuardState"
   ]);
   const state = cloneStateDefaults();
   let collapsed = readCollapsed();
+  let expanded = readExpanded();
   let takenOverTimer = null;
   let elapsedTimer = null;
   let stopConfirmTimer = null;
@@ -193,9 +262,15 @@ export function agentOverlayBootstrapScript(): string {
   let recent = null;
   let recentSummary = null;
   let recentText = null;
+  let lockHint = null;
+  let stateChip = null;
+  let spaceChip = null;
+  let controlNote = null;
+  let takeoverButton = null;
   let stopButton = null;
   let revealButton = null;
   let hideButton = null;
+  let detailToggleButton = null;
   let reducedMotionMediaQuery = null;
   let reducedMotionMediaListener = null;
   let themeMediaQuery = null;
@@ -212,6 +287,7 @@ export function agentOverlayBootstrapScript(): string {
   let agentCursor = null;
   let cursorHideTimer = null;
   let agentPointerListener = null;
+  let stopConfirmKind = "";
 
   function mount() {
     if (!document.documentElement) {
@@ -226,27 +302,16 @@ export function agentOverlayBootstrapScript(): string {
     host.setAttribute("aria-hidden", "true");
     host.setAttribute("role", "presentation");
     host.style.position = "fixed";
-    host.style.top = "16px";
-    host.style.right = "16px";
+    host.style.inset = "0";
+    host.style.width = "100vw";
+    host.style.height = "100vh";
     host.style.zIndex = "2147483647";
-    host.style.pointerEvents = "auto";
+    host.style.pointerEvents = "none";
     host.style.colorScheme = "dark";
     host.classList.toggle("reduced-motion", isReducedMotionPreferred());
 
-    try {
-      const saved = JSON.parse(sessionStorage.getItem(STORAGE_KEY) || "null");
-      if (saved && typeof saved.left === "number" && typeof saved.top === "number") {
-        host.style.left = Math.max(8, Math.min(window.innerWidth - 48, saved.left)) + "px";
-        host.style.top = Math.max(8, Math.min(window.innerHeight - 48, saved.top)) + "px";
-        host.style.right = "auto";
-      }
-    } catch {
-      // sessionStorage may be disabled.
-    }
-
     root = host.attachShadow({ mode: "closed" });
-    root.innerHTML = [
-      "<style>",
+    const styleText = [
       ":host{all:initial}",
       "*{box-sizing:border-box}",
       ".wrap{--pp-text:#f4fff9;--pp-title:#f1fff8;--pp-muted:#a6c1b8;--pp-muted-soft:#7fa89a;--pp-panel-bg:rgba(8,13,16,.88);--pp-panel-border:rgba(148,255,213,.30);--pp-panel-shadow:0 18px 50px rgba(0,0,0,.42),0 0 0 1px rgba(255,255,255,.04) inset;--pp-panel-hover-shadow:0 20px 56px rgba(0,0,0,.46),0 0 0 1px rgba(255,255,255,.06) inset;--pp-taken-bg:rgba(6,27,19,.90);--pp-taken-border:rgba(86,240,170,.58);--pp-control-bg:rgba(255,255,255,.07);--pp-control-hover-bg:rgba(255,255,255,.14);--pp-control-text:#d7fff1;--pp-control-hover-text:#ffffff;--pp-action-bg:rgba(255,255,255,.06);--pp-action-text:#f7fffb;--pp-progress-text:#effff8;--pp-progress-bg:rgba(148,255,213,.13);--pp-progress-fill-start:#35d892;--pp-progress-fill-end:#86ffd2;--pp-progress-glow:rgba(56,225,160,.55);--pp-next:#9bb7ad;--pp-sessions-bg:rgba(255,255,255,.045);--pp-sessions-border:rgba(255,255,255,.055);--pp-session-heading:#c8fff0;--pp-session-row:#afcac1;--pp-session-agent:#eafff8;--pp-session-name:#bdd7cf;--pp-session-time:#78a292;--pp-details:#a9c7bd;--pp-summary:#c9fff0;--pp-summary-hover:#ffffff;--pp-dot-bg:rgba(8,13,16,.90);--pp-dot-hover-bg:rgba(12,22,24,.94);--pp-dot-border:rgba(148,255,213,.36);--pp-dot-hover-border:rgba(148,255,213,.55);--pp-dot-shadow:0 12px 34px rgba(0,0,0,.42);--pp-stop-text:#ffe2de;--pp-stop-hover-text:#fff2ef;--pp-stop-confirm-text:#fff1dc;--pp-focus-ring:#ffffff;--pp-motion-duration:.16s;--pp-motion-ease:cubic-bezier(.2,0,0,1);--pp-hover-duration:.14s;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:var(--pp-text);user-select:none;opacity:0;transform:translateY(-4px) scale(.985);animation:ppIn var(--pp-motion-duration) var(--pp-motion-ease) forwards}",
@@ -303,6 +368,7 @@ export function agentOverlayBootstrapScript(): string {
       "@keyframes ppIn{to{opacity:1;transform:translateY(0) scale(1)}}",
       "@keyframes ppOut{to{opacity:0;transform:translateY(-3px) scale(.985)}}",
       "@keyframes ppPulse{0%{box-shadow:0 0 0 0 rgba(56,225,160,.58)}70%{box-shadow:0 0 0 9px rgba(56,225,160,0)}100%{box-shadow:0 0 0 0 rgba(56,225,160,0)}}",
+      "@keyframes ppSpin{to{transform:rotate(360deg)}}",
       // 合成光标 / 点击高亮层：满屏 fixed 叠加、pointer-events:none，坐标即视口 CSS 像素，不抢真实指针。
       ".pp-cursor-layer{position:fixed;inset:0;pointer-events:none;z-index:2147483646;overflow:visible}",
       ".pp-agent-cursor{position:fixed;left:0;top:0;width:22px;height:22px;opacity:0;transform:translate(-120px,-120px);transition:transform .24s cubic-bezier(.2,0,0,1),opacity .18s ease;filter:drop-shadow(0 2px 5px rgba(0,0,0,.45));will-change:transform,opacity}",
@@ -312,28 +378,94 @@ export function agentOverlayBootstrapScript(): string {
       "@keyframes ppRipple{0%{opacity:.9;transform:scale(.32)}70%{opacity:.5}100%{opacity:0;transform:scale(2.7)}}",
       ":host(.reduced-motion) .pp-agent-cursor{transition:none}",
       ":host(.reduced-motion) .pp-click-ripple{animation:none;opacity:.5}",
-      "</style>",
-      "<div class=\"wrap\">",
-      "  <section id=\"pp-agent-overlay-panel\" class=\"panel\" role=\"group\" aria-labelledby=\"pp-agent-overlay-title\">",
-      "    <div class=\"head\"><span class=\"pulse\" aria-hidden=\"true\"></span><span id=\"pp-agent-overlay-title\" class=\"title\"></span><button class=\"icon-btn reveal\" type=\"button\" title=\"\" aria-label=\"\">⧉</button><button class=\"icon-btn hide\" type=\"button\" title=\"\" aria-label=\"\" aria-controls=\"pp-agent-overlay-panel\">−</button></div>",
-      "    <div class=\"body\">",
-      "      <div class=\"meta\"></div>",
-      "      <div class=\"elapsed\"></div>",
-      "      <div class=\"action\"></div>",
-      "      <div class=\"target\"></div>",
-      "      <div id=\"pp-agent-overlay-progress-text\" class=\"progress-text\"></div>",
-      "      <div class=\"progress-bar\" role=\"progressbar\" aria-valuemin=\"0\" aria-valuemax=\"100\" aria-labelledby=\"pp-agent-overlay-progress-text\"><span class=\"progress-fill\"></span></div>",
-      "      <div class=\"next\"></div>",
-      "      <div class=\"sessions\"><div class=\"session-heading\"></div><div class=\"session-list\"></div></div>",
-      "      <details class=\"recent\"><summary aria-controls=\"pp-agent-overlay-recent-text\" aria-expanded=\"false\"></summary><span id=\"pp-agent-overlay-recent-text\" class=\"recent-text\"></span></details>",
-      "      <button class=\"stop\" type=\"button\"></button>",
-      "    </div>",
-      "  </section>",
-      "  <button class=\"dot\" type=\"button\" title=\"\" aria-label=\"\" aria-controls=\"pp-agent-overlay-panel\" aria-expanded=\"false\"><span class=\"pulse\" aria-hidden=\"true\"></span></button>",
-      "</div>",
-      // 合成光标层放在 .wrap 之外：.wrap 带 transform 会成为 fixed 定位的包含块，放外面才能用视口坐标。
-      "<div class=\"pp-cursor-layer\" aria-hidden=\"true\"><span class=\"pp-agent-cursor\"><svg viewBox=\"0 0 24 24\" width=\"22\" height=\"22\"><path d=\"M5 3 L10.5 18 L12.7 11.7 L19 9.5 Z\" fill=\"rgba(8,19,15,.92)\" stroke=\"#38e1a0\" stroke-width=\"1.5\" stroke-linejoin=\"round\"></path></svg></span></div>"
+      ".wrap{position:fixed;inset:0;z-index:1;pointer-events:none}",
+      ".panel{position:absolute;left:50%;right:auto;top:auto;bottom:28px;width:min(560px,calc(100vw - 32px));border-radius:18px;border-color:rgba(197,214,255,.34);background:rgba(31,38,53,.88);box-shadow:0 24px 70px rgba(28,42,88,.34),0 0 0 1px rgba(255,255,255,.08) inset;pointer-events:auto;transform:translateX(-50%);overflow:hidden}",
+      ".panel:hover{box-shadow:0 26px 76px rgba(28,42,88,.38),0 0 0 1px rgba(255,255,255,.10) inset}",
+      ".panel.taken{border-color:rgba(103,240,177,.55);background:rgba(14,39,32,.90);transform:translateX(-50%)}",
+      ".head{min-height:42px;padding:10px 12px 7px;cursor:default}",
+      ".head:active{cursor:default}",
+      ".title{font-size:15px;font-weight:780;color:#f8fbff}",
+      ".body{display:grid;gap:7px;padding:0 12px 12px}",
+      ".details{display:grid;gap:7px}",
+      ".meta,.elapsed{margin-left:18px}",
+      ".action{margin:0;border:1px solid rgba(255,255,255,.06);background:rgba(12,18,30,.26)}",
+      ".status-line{display:none;align-items:center;gap:7px;min-width:0;color:rgba(234,241,255,.74);font-size:12px;font-weight:720;line-height:1.25}",
+      ".status-dot{width:7px;height:7px;border-radius:99px;background:#7fa2ff;box-shadow:0 0 13px rgba(127,162,255,.92);flex:0 0 auto}",
+      ".lock-hint{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
+      ".status-stack{display:none;min-width:0}",
+      ".state-row{display:flex;align-items:center;gap:6px;min-width:0;margin-top:5px}",
+      ".state-chip,.space-chip{display:inline-flex;align-items:center;min-width:0;max-width:100%;height:20px;border-radius:999px;border:1px solid rgba(218,228,255,.17);background:rgba(244,248,255,.08);padding:0 8px;color:rgba(241,246,255,.82);font-size:10.5px;font-weight:740;line-height:20px;white-space:nowrap}",
+      ".state-chip{color:#dbe8ff;border-color:rgba(127,162,255,.34);background:rgba(127,162,255,.14)}",
+      ".space-chip{overflow:hidden;text-overflow:ellipsis}",
+      ".control-note{display:none;margin-top:5px;color:rgba(224,234,255,.58);font-size:10.5px;font-weight:650;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
+      ".controls{display:grid;grid-template-columns:1fr 1fr;gap:8px}",
+      ".takeover,.stop{width:100%;min-height:36px;border-radius:10px;font-size:12.5px;font-weight:780;cursor:pointer;transition:background var(--pp-hover-duration) var(--pp-motion-ease),border-color var(--pp-hover-duration) var(--pp-motion-ease),color var(--pp-hover-duration) var(--pp-motion-ease),transform var(--pp-hover-duration) var(--pp-motion-ease)}",
+      ".takeover{border:1px solid rgba(202,218,255,.58);background:rgba(244,248,255,.13);color:#f8fbff}",
+      ".takeover:hover:not(:disabled){background:rgba(244,248,255,.22);border-color:rgba(232,238,255,.78)}",
+      ".takeover.confirm{background:linear-gradient(180deg,rgba(255,171,92,.27),rgba(255,171,92,.13));border-color:rgba(255,188,112,.68);color:var(--pp-stop-confirm-text)}",
+      ".stop{border:1px solid rgba(255,93,96,.62);background:linear-gradient(180deg,rgba(255,93,96,.28),rgba(255,93,96,.13));color:#ffe4e2}",
+      ".stop:hover:not(:disabled){background:rgba(255,93,96,.32);border-color:rgba(255,128,130,.82);color:#fff6f5}",
+      ".takeover:active:not(:disabled),.stop:active:not(:disabled){transform:translateY(1px)}",
+      ".takeover:disabled,.stop:disabled{opacity:.58;cursor:default;transform:none}",
+      ".hide{display:none}",
+      ".detail-toggle{display:none}",
+      ":host(.delegated) .hide{display:inline-block}",
+      ":host(.locked) .panel{bottom:24px;width:min(548px,calc(100vw - 32px));min-height:72px;display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:auto auto;align-items:center;column-gap:16px;row-gap:1px;padding:10px 11px 10px 15px;border-radius:16px;border-color:rgba(189,203,236,.27);background:linear-gradient(135deg,rgba(27,34,49,.96),rgba(35,42,57,.93));box-shadow:0 18px 48px rgba(9,17,40,.34),0 1px 0 rgba(255,255,255,.08) inset;backdrop-filter:blur(20px) saturate(1.12)}",
+      ":host(.locked) .panel::before{content:\"\";position:absolute;left:0;top:12px;bottom:12px;width:3px;border-radius:0 4px 4px 0;background:linear-gradient(180deg,#9bb8ff 0%,#6f92ef 55%,rgba(111,146,239,.20) 100%);box-shadow:0 0 16px rgba(111,146,239,.52)}",
+      ":host(.locked) .head{grid-column:1;grid-row:1;min-height:28px;padding:0;display:grid;grid-template-columns:29px minmax(0,1fr) 27px;gap:9px;align-items:center}",
+      ":host(.locked) .pulse{position:relative;width:28px;height:28px;border-radius:99px;background:rgba(10,17,31,.44);box-shadow:0 0 0 1px rgba(255,255,255,.09) inset;animation:none}",
+      ":host(.locked) .pulse::before{content:\"\";position:absolute;inset:6px;border:1.5px solid rgba(236,242,255,.88);border-top-color:#82a6ff;border-radius:99px;animation:ppSpin 1.2s linear infinite}",
+      ":host(.locked) .pulse::after{content:\"\";position:absolute;left:50%;top:50%;width:4px;height:4px;margin:-2px 0 0 -2px;border-radius:99px;background:#f8fbff;box-shadow:0 -9px 0 rgba(151,179,244,.72),0 9px 0 rgba(151,179,244,.72),9px 0 0 rgba(151,179,244,.72),-9px 0 0 rgba(151,179,244,.72)}",
+      ":host(.locked) .title{font-size:14px;font-weight:740;letter-spacing:-.01em;color:#f8fbff}",
+      ":host(.locked) .reveal,:host(.locked) .hide{display:none}",
+      ":host(.locked) .detail-toggle{display:inline-grid;place-items:center;width:27px;height:27px;border-radius:8px;font-size:14px;line-height:1;background:rgba(244,248,255,.065);border:1px solid rgba(218,228,255,.13);color:rgba(226,234,250,.78)}",
+      ":host(.locked) .detail-toggle:hover{background:rgba(244,248,255,.13);border-color:rgba(232,238,255,.26);color:#ffffff}",
+      ":host(.locked.expanded) .detail-toggle{transform:rotate(180deg)}",
+      ":host(.locked) .body{display:contents;padding:0}",
+      ":host(.locked) .details{display:none}",
+      ":host(.locked) .status-stack{grid-column:1;grid-row:2;display:block;min-width:0;margin-left:38px}",
+      ":host(.locked) .status-line{display:flex;gap:6px;color:rgba(226,234,250,.72);font-size:11px;font-weight:650}",
+      ":host(.locked) .status-dot{width:6px;height:6px;background:#82a6ff;box-shadow:0 0 10px rgba(130,166,255,.78)}",
+      ":host(.locked) .state-row{margin-top:2px;min-width:0}",
+      ":host(.locked) .state-chip{display:none}",
+      ":host(.locked) .space-chip{display:block;width:100%;height:auto;padding:0;border:0;border-radius:0;background:transparent;color:rgba(205,215,235,.62);font-size:10.25px;font-weight:590;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
+      ":host(.locked) .controls{grid-column:2;grid-row:1 / span 2;display:grid;grid-template-columns:100px 110px;gap:8px;align-self:center}",
+      ":host(.locked) .takeover,:host(.locked) .stop{min-height:36px;border-radius:10px;font-size:12px;font-weight:730}",
+      ":host(.locked) .takeover{border-color:rgba(157,181,235,.48);background:linear-gradient(180deg,rgba(139,165,225,.18),rgba(118,143,202,.11));color:#f5f8ff}",
+      ":host(.locked) .takeover:hover:not(:disabled){background:rgba(139,165,225,.25);border-color:rgba(188,205,244,.68)}",
+      ":host(.locked) .stop{border-color:rgba(255,106,109,.48);background:rgba(255,92,96,.10);color:#ffd9d8}",
+      ":host(.locked) .stop:hover:not(:disabled){background:rgba(255,92,96,.18);border-color:rgba(255,132,134,.68);color:#fff1f0}",
+      ":host(.offline.locked) .panel{border-color:rgba(255,188,112,.42)}",
+      ":host(.offline.locked) .panel::before{background:linear-gradient(180deg,#ffc36f 0%,#d7953d 55%,rgba(215,149,61,.20) 100%);box-shadow:0 0 16px rgba(255,188,112,.42)}",
+      ":host(.offline.locked) .status-dot{background:#ffc36f;box-shadow:0 0 10px rgba(255,188,112,.70)}",
+      ":host(.locked) .takeover:focus-visible,:host(.locked) .stop:focus-visible,:host(.locked) .detail-toggle:focus-visible{outline:2px solid rgba(167,190,246,.92);outline-offset:2px}",
+      ":host(.locked.expanded) .panel{min-height:0;grid-template-rows:auto auto auto;border-color:rgba(166,188,239,.34);background:linear-gradient(135deg,#192131 0%,#222c3e 100%);box-shadow:0 24px 64px rgba(6,12,28,.52),0 1px 0 rgba(255,255,255,.08) inset;backdrop-filter:none}",
+      ":host(.locked.expanded) .control-note{display:block;margin-top:4px;color:#aebbd2;font-size:10.5px;font-weight:620}",
+      ":host(.locked.expanded) .details{grid-column:1 / -1;grid-row:3;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px 16px;margin-top:11px;padding:13px 14px 14px;border:1px solid rgba(157,183,239,.20);border-radius:12px;background:linear-gradient(145deg,#171e2b 0%,#1c2637 100%);box-shadow:inset 3px 0 0 rgba(126,158,239,.72),0 10px 24px rgba(5,10,24,.22);color:#f7faff}",
+      ":host(.locked.expanded) .details::before{content:\"控制详情\";grid-column:1 / -1;color:#9db7ff;font-size:10px;font-weight:780;line-height:1;letter-spacing:.12em}",
+      ":host(.locked.expanded) .meta{grid-column:1;min-width:0;margin:0;color:#e9effc;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:11.5px;font-weight:650;line-height:1.45}",
+      ":host(.locked.expanded) .elapsed{grid-column:2;justify-self:end;margin:0;color:#c2cee5;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:11px;font-weight:620;line-height:1.45;white-space:nowrap}",
+      ":host(.locked.expanded) .action,:host(.locked.expanded) .target,:host(.locked.expanded) .progress-text,:host(.locked.expanded) .progress-bar,:host(.locked.expanded) .next,:host(.locked.expanded) .sessions,:host(.locked.expanded) .recent{grid-column:1 / -1}",
+      ":host(.locked.expanded) .action{margin:0;padding:10px 11px;border:1px solid rgba(157,183,239,.16);border-radius:9px;background:#202a3d;color:#f7faff;font-size:12.5px;font-weight:650;line-height:1.45;box-shadow:0 1px 0 rgba(255,255,255,.04) inset}",
+      ":host(.locked.expanded) .target,:host(.locked.expanded) .next{margin:0;color:#c2cee5;font-size:11.5px;line-height:1.45}",
+      ":host(.locked.expanded) .progress-text{margin:0;color:#e8eefb;font-size:11.5px;font-weight:680}",
+      ":host(.locked.expanded) .progress-bar{margin:-4px 0 0;background:#303c52}",
+      ":host(.locked.expanded) .sessions{margin:0;padding:9px 10px;border:1px solid rgba(157,183,239,.14);border-radius:9px;background:#1d2638}",
+      ":host(.locked.expanded) .session-heading{color:#dbe6fb;font-size:11px;font-weight:720}",
+      ":host(.locked.expanded) .session-row{color:#c2cee5}",
+      ":host(.locked.expanded) .session-agent{color:#f3f7ff}",
+      ":host(.locked.expanded) .session-name{color:#d6e0f2}",
+      ":host(.locked.expanded) .session-time{color:#aebbd2}",
+      ":host(.locked.expanded) .recent{margin:0;color:#c2cee5}",
+      ":host(.locked.expanded) summary{color:#eaf1ff;font-size:11.5px;font-weight:720}",
+      ":host(.locked.expanded) summary:hover{color:#ffffff}",
+      ":host(.locked.expanded) .recent-text{color:#c2cee5;line-height:1.5}",
+      "@media (max-width:640px){:host(.locked) .panel{grid-template-columns:minmax(0,1fr);grid-template-rows:auto auto auto;gap:6px;padding:11px 11px 11px 15px;width:min(420px,calc(100vw - 24px));bottom:14px}:host(.locked) .controls{grid-column:1;grid-row:3;width:100%;grid-template-columns:1fr 1fr;margin-top:2px}:host(.locked) .status-stack{grid-column:1;grid-row:2;margin-left:38px}:host(.locked) .takeover,:host(.locked) .stop{min-height:38px}:host(.locked.expanded) .details{grid-column:1;grid-row:4;grid-template-columns:1fr}:host(.locked.expanded) .elapsed{grid-column:1;justify-self:start}}",
+      ":host(.collapsed) .panel{display:none}",
+      ":host(.locked.collapsed) .panel{display:grid}",
+      ":host(.reduced-motion.locked) .pulse::before{animation:none}"
     ].join("");
+    buildOverlayDom(root, styleText);
 
     panel = root.querySelector(".panel");
     dot = root.querySelector(".dot");
@@ -352,9 +484,15 @@ export function agentOverlayBootstrapScript(): string {
     recent = root.querySelector(".recent");
     recentSummary = root.querySelector(".recent summary");
     recentText = root.querySelector(".recent-text");
+    lockHint = root.querySelector(".lock-hint");
+    stateChip = root.querySelector(".state-chip");
+    spaceChip = root.querySelector(".space-chip");
+    controlNote = root.querySelector(".control-note");
+    takeoverButton = root.querySelector(".takeover");
     stopButton = root.querySelector(".stop");
     revealButton = root.querySelector(".reveal");
     hideButton = root.querySelector(".hide");
+    detailToggleButton = root.querySelector(".detail-toggle");
     cursorLayer = root.querySelector(".pp-cursor-layer");
     agentCursor = root.querySelector(".pp-agent-cursor");
     recentSummary.tabIndex = 0;
@@ -368,13 +506,14 @@ export function agentOverlayBootstrapScript(): string {
     });
     revealButton.addEventListener("click", () => signal("reveal"));
     dot.addEventListener("click", () => expand());
-    stopButton.addEventListener("click", handleStopClick);
-    for (const control of [hideButton, revealButton, dot, stopButton]) {
+    detailToggleButton.addEventListener("click", toggleDetails);
+    takeoverButton.addEventListener("click", () => handleStopClick("takeover"));
+    stopButton.addEventListener("click", () => handleStopClick("stop"));
+    for (const control of [hideButton, revealButton, dot, detailToggleButton, takeoverButton, stopButton]) {
       control.addEventListener("keydown", handleKeyboardClick);
     }
     recent.addEventListener("toggle", updateInteractiveAria);
     recentSummary.addEventListener("keydown", handleRecentSummaryKeydown);
-    root.querySelector(".head").addEventListener("pointerdown", startDrag);
     // 捕获阶段监听页面上被 AI 派发（isTrusted）的按下事件，作为高亮触发源。
     agentPointerListener = handleAgentPointer;
     window.addEventListener("pointerdown", agentPointerListener, { capture: true, passive: true });
@@ -392,13 +531,147 @@ export function agentOverlayBootstrapScript(): string {
     requestAnimationFrame(clampHostIntoViewport);
   }
 
-  function signal(actionName) {
+  // Gmail 等站点通过 CSP 强制 Trusted Types，任何 innerHTML 字符串赋值都会被浏览器拒绝。
+  // 这里仅使用结构化 DOM API；样式写入 textContent，不申请站点的 Trusted Types policy。
+  function buildOverlayDom(shadowRoot, styleText) {
+    const styleNode = overlayNode("style");
+    styleNode.textContent = styleText;
+
+    const wrapNode = overlayNode("div", "wrap");
+    const panelNode = overlayNode("section", "panel", {
+      id: "pp-agent-overlay-panel",
+      role: "group",
+      "aria-labelledby": "pp-agent-overlay-title"
+    });
+    const headNode = overlayNode("div", "head");
+    headNode.append(
+      overlayNode("span", "pulse", { "aria-hidden": "true" }),
+      overlayNode("span", "title", { id: "pp-agent-overlay-title" }),
+      overlayNode("button", "icon-btn reveal", { type: "button", title: "", "aria-label": "" }, "⧉"),
+      overlayNode("button", "icon-btn hide", {
+        type: "button",
+        title: "",
+        "aria-label": "",
+        "aria-controls": "pp-agent-overlay-panel"
+      }, "−"),
+      overlayNode("button", "icon-btn detail-toggle", {
+        type: "button",
+        title: "",
+        "aria-label": "",
+        "aria-controls": "pp-agent-overlay-details",
+        "aria-expanded": "false"
+      }, "⌄")
+    );
+
+    const bodyNode = overlayNode("div", "body");
+    const statusStackNode = overlayNode("div", "status-stack");
+    const statusLineNode = overlayNode("div", "status-line");
+    statusLineNode.append(
+      overlayNode("span", "status-dot", { "aria-hidden": "true" }),
+      overlayNode("span", "lock-hint")
+    );
+    const stateRowNode = overlayNode("div", "state-row");
+    stateRowNode.append(
+      overlayNode("span", "state-chip"),
+      overlayNode("span", "space-chip")
+    );
+    statusStackNode.append(statusLineNode, stateRowNode, overlayNode("div", "control-note"));
+
+    const detailsNode = overlayNode("div", "details", { id: "pp-agent-overlay-details" });
+    const progressBarNode = overlayNode("div", "progress-bar", {
+      role: "progressbar",
+      "aria-valuemin": "0",
+      "aria-valuemax": "100",
+      "aria-labelledby": "pp-agent-overlay-progress-text"
+    });
+    progressBarNode.append(overlayNode("span", "progress-fill"));
+    const sessionsNode = overlayNode("div", "sessions");
+    sessionsNode.append(
+      overlayNode("div", "session-heading"),
+      overlayNode("div", "session-list")
+    );
+    const recentNode = overlayNode("details", "recent");
+    recentNode.append(
+      overlayNode("summary", "", {
+        "aria-controls": "pp-agent-overlay-recent-text",
+        "aria-expanded": "false"
+      }),
+      overlayNode("span", "recent-text", { id: "pp-agent-overlay-recent-text" })
+    );
+    detailsNode.append(
+      overlayNode("div", "meta"),
+      overlayNode("div", "elapsed"),
+      overlayNode("div", "action"),
+      overlayNode("div", "target"),
+      overlayNode("div", "progress-text", { id: "pp-agent-overlay-progress-text" }),
+      progressBarNode,
+      overlayNode("div", "next"),
+      sessionsNode,
+      recentNode
+    );
+
+    const controlsNode = overlayNode("div", "controls");
+    controlsNode.append(
+      overlayNode("button", "takeover", { type: "button" }),
+      overlayNode("button", "stop", { type: "button" })
+    );
+    bodyNode.append(statusStackNode, detailsNode, controlsNode);
+    panelNode.append(headNode, bodyNode);
+
+    const dotNode = overlayNode("button", "dot", {
+      type: "button",
+      title: "",
+      "aria-label": "",
+      "aria-controls": "pp-agent-overlay-panel",
+      "aria-expanded": "false"
+    });
+    dotNode.append(overlayNode("span", "pulse", { "aria-hidden": "true" }));
+    wrapNode.append(panelNode, dotNode);
+
+    // 合成光标层放在 .wrap 之外：.wrap 带 transform，会成为 fixed 定位的包含块。
+    const cursorLayerNode = overlayNode("div", "pp-cursor-layer", { "aria-hidden": "true" });
+    const cursorNode = overlayNode("span", "pp-agent-cursor");
+    const svgNode = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svgNode.setAttribute("viewBox", "0 0 24 24");
+    svgNode.setAttribute("width", "22");
+    svgNode.setAttribute("height", "22");
+    const pathNode = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    pathNode.setAttribute("d", "M5 3 L10.5 18 L12.7 11.7 L19 9.5 Z");
+    pathNode.setAttribute("fill", "rgba(8,19,15,.92)");
+    pathNode.setAttribute("stroke", "#38e1a0");
+    pathNode.setAttribute("stroke-width", "1.5");
+    pathNode.setAttribute("stroke-linejoin", "round");
+    svgNode.append(pathNode);
+    cursorNode.append(svgNode);
+    cursorLayerNode.append(cursorNode);
+
+    shadowRoot.append(styleNode, wrapNode, cursorLayerNode);
+  }
+
+  function overlayNode(tagName, className = "", attributes = {}, textValue) {
+    const node = document.createElement(tagName);
+    if (className) {
+      node.className = className;
+    }
+    for (const [name, value] of Object.entries(attributes)) {
+      node.setAttribute(name, String(value));
+    }
+    if (textValue !== undefined) {
+      node.textContent = textValue;
+    }
+    return node;
+  }
+
+  function signal(actionName, options) {
     const binding = window[SIGNAL_NAME];
     if (typeof binding !== "function") {
       return;
     }
     const payload = { action: actionName };
-    if (actionName === "stop" && !isMultiSession() && state.session) {
+    if (actionName === "stop" && options?.reason) {
+      payload.reason = options.reason;
+    }
+    if ((actionName === "stop" || actionName === "resume") && !options?.stopAll && !isMultiSession() && state.session) {
       payload.session = state.session;
     }
     try {
@@ -688,14 +961,22 @@ export function agentOverlayBootstrapScript(): string {
     ensureHostConnected();
     const copy = text();
     const taken = isDelegatedToUser();
+    const offline = taken && state.agentOffline === true;
+    const pending = state.handoffPending === true && !taken;
     const sessions = normalizedSessions();
     applyStaticText(copy);
+    // 接管前后共用同一套紧凑状态条；delegated 只改变内容和控制权，不切回旧的大卡片。
+    host.classList.add("locked");
+    host.classList.toggle("delegated", taken);
+    host.classList.toggle("offline", offline);
+    host.classList.toggle("expanded", expanded);
     panel.classList.toggle("taken", taken);
-    title.textContent = taken ? copy.takenTitle : titleText(sessions, copy);
-    const metaText = [state.project, state.sessionTitle].filter(Boolean).join(" · ");
+    title.textContent = offline ? copy.offlineTitle : taken ? copy.takenTitle : pending ? copy.handoffTitle : copy.lockedTitle;
+    const metaText = primarySessionIdentity(sessions, copy, false);
     meta.textContent = metaText;
+    meta.title = metaText;
     meta.style.display = metaText ? "block" : "none";
-    action.textContent = copy.actionPrefix + (taken ? copy.takenAction : state.stopError || currentActionText(copy));
+    action.textContent = copy.actionPrefix + (offline ? copy.offlineAction : taken ? copy.takenAction : pending ? copy.handoffAction : state.stopError || currentActionText(copy));
     target.textContent = state.targetUrl ? copy.targetPrefix + state.targetUrl : "";
     target.style.display = state.targetUrl ? "block" : "none";
 
@@ -705,9 +986,14 @@ export function agentOverlayBootstrapScript(): string {
     renderSessionList();
     recent.style.display = state.lastMessage ? "block" : "none";
     recentText.textContent = state.lastMessage || "";
+    lockHint.textContent = offline ? copy.offlineAction : taken ? copy.takenAction : pending ? copy.handoffAction : compactStatusText(sessions, copy);
+    stateChip.textContent = taken ? copy.ownerUser : copy.ownerAgent;
+    spaceChip.textContent = compactTaskSpaceText(sessions, copy);
+    spaceChip.title = fullTaskSpaceText(sessions, copy);
+    controlNote.textContent = offline ? copy.offlineAction : taken ? copy.hardStopSent : pending ? copy.handoffAction : copy.takeoverHint;
     updateElapsed();
     updateStopButton();
-    host.classList.toggle("collapsed", collapsed);
+    host.classList.toggle("collapsed", taken && collapsed && !offline);
     updateInteractiveAria();
     requestAnimationFrame(clampHostIntoViewport);
   }
@@ -719,6 +1005,9 @@ export function agentOverlayBootstrapScript(): string {
     hideButton.setAttribute("aria-label", copy.hideTitle);
     dot.title = copy.expandTitle;
     dot.setAttribute("aria-label", copy.expandTitle);
+    const detailsTitle = expanded ? copy.collapseDetailsTitle : copy.detailsTitle;
+    detailToggleButton.title = detailsTitle;
+    detailToggleButton.setAttribute("aria-label", detailsTitle);
     sessionHeading.textContent = copy.sessionHeading;
     recentSummary.textContent = copy.recentSummary;
   }
@@ -732,6 +1021,9 @@ export function agentOverlayBootstrapScript(): string {
     }
     if (recentSummary && recent) {
       recentSummary.setAttribute("aria-expanded", recent.open ? "true" : "false");
+    }
+    if (detailToggleButton) {
+      detailToggleButton.setAttribute("aria-expanded", expanded ? "true" : "false");
     }
   }
 
@@ -752,9 +1044,90 @@ export function agentOverlayBootstrapScript(): string {
     return copy.operatingPrefix + (state.agent || sessions[0]?.agent || "Agent");
   }
 
+  function compactTitleText(sessions, copy) {
+    if (sessions.length >= 2) {
+      return copy.multiTaskTitle(sessions.length);
+    }
+    const session = sessions[0] || {};
+    return (
+      state.sessionTitle ||
+      session.sessionTitle ||
+      meaningfulActionText() ||
+      state.project ||
+      session.project ||
+      state.agent ||
+      session.agent ||
+      copy.defaultTask
+    );
+  }
+
+  function compactStatusText(sessions, copy) {
+    if (state.inputGuardState === "unavailable") {
+      return copy.guardUnavailable;
+    }
+    if (state.inputGuardState !== "active") {
+      return copy.guardStarting;
+    }
+    return copy.lockedHint;
+  }
+
+  function compactTaskSpaceText(sessions, copy) {
+    const label = primarySessionIdentity(sessions, copy, true);
+    const remaining = Math.max(0, sessions.length - 1);
+    return label + (remaining ? " · +" + remaining : "");
+  }
+
+  function fullTaskSpaceText(sessions, copy) {
+    if (!sessions.length) {
+      return primarySessionIdentity(sessions, copy, false);
+    }
+    return sessions.map((session, index) => {
+      const identity = index === 0 ? primarySessionIdentity(sessions, copy, false) : sessionIdentity(session, copy, false);
+      return (session.agent || "Agent") + " · " + identity;
+    }).join("\n");
+  }
+
+  function primarySessionIdentity(sessions, copy, compact) {
+    const session = sessions[0] || {};
+    return sessionIdentity({
+      project: state.project || session.project,
+      session: state.session || session.session,
+      sessionTitle: state.sessionTitle || session.sessionTitle
+    }, copy, compact);
+  }
+
+  function sessionIdentity(session, copy, compact) {
+    const parts = [];
+    if (session.project) {
+      parts.push(copy.projectPrefix + " " + session.project);
+    }
+    if (session.session) {
+      parts.push(copy.sessionPrefix + " " + (compact ? compactSessionId(session.session) : session.session));
+    }
+    if (parts.length) {
+      return parts.join(" · ");
+    }
+    return session.sessionTitle || copy.taskSpacePrefix + " · " + copy.defaultTask;
+  }
+
+  function compactSessionId(value) {
+    const session = String(value || "");
+    if (session.length <= 22) {
+      return session;
+    }
+    return session.slice(0, 13) + "…" + session.slice(-4);
+  }
+
   function currentActionText(copy) {
     if (!state.currentAction || state.currentAction === OVERLAY_TEXT.zh.defaultAction || state.currentAction === OVERLAY_TEXT.en.defaultAction) {
       return copy.defaultAction;
+    }
+    return state.currentAction;
+  }
+
+  function meaningfulActionText() {
+    if (!state.currentAction || state.currentAction === OVERLAY_TEXT.zh.defaultAction || state.currentAction === OVERLAY_TEXT.en.defaultAction) {
+      return "";
     }
     return state.currentAction;
   }
@@ -800,6 +1173,7 @@ export function agentOverlayBootstrapScript(): string {
       return;
     }
     sessionList.textContent = "";
+    const copy = text();
     for (const item of sessions) {
       const row = document.createElement("div");
       row.className = "session-row";
@@ -808,10 +1182,11 @@ export function agentOverlayBootstrapScript(): string {
       agent.textContent = item.agent || "Agent";
       const name = document.createElement("div");
       name.className = "session-name";
-      name.textContent = item.sessionTitle || item.project || item.session || text().unnamedSession;
+      name.textContent = sessionIdentity(item, copy, true) || copy.unnamedSession;
+      name.title = sessionIdentity(item, copy, false);
       const time = document.createElement("div");
       time.className = "session-time";
-      time.textContent = item.lastActive ? formatRelativeTime(item.lastActive) : text().unknownActivity;
+      time.textContent = item.lastActive ? formatRelativeTime(item.lastActive) : copy.unknownActivity;
       row.append(agent, name, time);
       sessionList.appendChild(row);
     }
@@ -821,23 +1196,39 @@ export function agentOverlayBootstrapScript(): string {
     if (!elapsed) {
       return;
     }
-    const startedAt = state.startedAt || normalizedSessions()[0]?.startedAt || "";
+    const taken = isDelegatedToUser();
+    const startedAt = taken && state.controlSince
+      ? state.controlSince
+      : state.startedAt || normalizedSessions()[0]?.startedAt || "";
     const startedTs = Date.parse(startedAt);
     if (!Number.isFinite(startedTs)) {
       elapsed.textContent = "";
       elapsed.style.display = "none";
       return;
     }
-    elapsed.textContent = text().elapsedPrefix + formatDuration(Date.now() - startedTs);
+    elapsed.textContent = (taken ? text().takenElapsedPrefix : text().elapsedPrefix) + formatDuration(Date.now() - startedTs);
     elapsed.style.display = "block";
   }
 
-  function handleStopClick() {
-    if (stopButton.disabled || isDelegatedToUser()) {
+  function handleStopClick(kind) {
+    const button = kind === "takeover" ? takeoverButton : stopButton;
+    if (!button || button.disabled) {
       return;
     }
-    if (!stopConfirming) {
+    if (kind === "takeover" && isDelegatedToUser()) {
+      resetStopConfirm();
+      signal("resume", { stopAll: false });
+      return;
+    }
+    // “接管”只改变控制权，不关闭浏览器或任务，因此单击立即生效；“结束任务”仍保留二次确认。
+    if (kind === "takeover") {
+      resetStopConfirm();
+      signal("stop", { stopAll: false, reason: "user_takeover" });
+      return;
+    }
+    if (!stopConfirming || stopConfirmKind !== "stop") {
       stopConfirming = true;
+      stopConfirmKind = "stop";
       stopButton.classList.add("confirm");
       updateStopButton();
       clearTimeout(stopConfirmTimer);
@@ -845,48 +1236,276 @@ export function agentOverlayBootstrapScript(): string {
       return;
     }
     resetStopConfirm();
-    signal("stop");
+    try {
+      // Suppress leaked/late future-document bootstraps during the terminal stop window.
+      // A later Agent Session clears this tab-scoped marker before installing its own bootstrap.
+      window.sessionStorage.setItem(TERMINAL_STOP_KEY, String(Date.now() + 120000));
+    } catch {
+      // Main-process script removal still handles pages without sessionStorage.
+    }
+    signal("stop", { stopAll: true, reason: "user_stop" });
+    // The binding call has been dispatched; run the full teardown so the host observer cannot
+    // reattach the box while Gateway/daemon teardown settles.
+    window.__ppAgentOverlayTeardown?.();
   }
 
   function updateStopButton() {
     const taken = isDelegatedToUser();
+    const offline = taken && state.agentOffline === true;
     const hasBinding = typeof window[SIGNAL_NAME] === "function";
-    stopButton.disabled = taken || !hasBinding;
+    const pending = state.handoffPending === true;
+    takeoverButton.disabled = !hasBinding || pending || offline;
+    stopButton.disabled = !hasBinding || pending;
+    if (offline) {
+      takeoverButton.textContent = text().offlineButton;
+      takeoverButton.title = text().offlineButton;
+      takeoverButton.setAttribute("aria-label", text().offlineButton);
+      const stopLabel = stopConfirming && stopConfirmKind === "stop" ? text().confirmRelease : text().releaseProfile;
+      stopButton.textContent = stopLabel;
+      stopButton.title = stopLabel;
+      stopButton.setAttribute("aria-label", stopLabel);
+      return;
+    }
     if (taken) {
-      stopButton.textContent = text().takenStop;
-      stopButton.title = text().takenStop;
-      stopButton.setAttribute("aria-label", text().takenStop);
-      resetStopConfirm();
+      takeoverButton.textContent = text().returnToAgent;
+      takeoverButton.title = text().returnToAgent;
+      takeoverButton.setAttribute("aria-label", text().returnToAgent);
+      const stopLabel = stopConfirming && stopConfirmKind === "stop" ? text().confirmStop : isMultiSession() ? text().stopAll : text().stopSingle;
+      stopButton.textContent = stopLabel;
+      stopButton.title = stopLabel;
+      stopButton.setAttribute("aria-label", stopLabel);
       return;
     }
-    if (stopConfirming) {
-      stopButton.textContent = text().confirmStop;
-      stopButton.title = text().confirmStop;
-      stopButton.setAttribute("aria-label", text().confirmStop);
-      return;
-    }
-    const label = isMultiSession() ? text().stopAll : text().stopSingle;
-    stopButton.textContent = label;
-    stopButton.title = label;
-    stopButton.setAttribute("aria-label", label);
+    const takeoverLabel = text().takeover;
+    const stopLabel = stopConfirming && stopConfirmKind === "stop" ? text().confirmStop : isMultiSession() ? text().stopAll : text().stopSingle;
+    takeoverButton.textContent = takeoverLabel;
+    takeoverButton.title = takeoverLabel;
+    takeoverButton.setAttribute("aria-label", takeoverLabel);
+    stopButton.textContent = stopLabel;
+    stopButton.title = stopLabel;
+    stopButton.setAttribute("aria-label", stopLabel);
   }
 
   function resetStopConfirm() {
     stopConfirming = false;
+    stopConfirmKind = "";
     clearTimeout(stopConfirmTimer);
     stopConfirmTimer = null;
+    if (takeoverButton) {
+      takeoverButton.classList.remove("confirm");
+      if (isDelegatedToUser()) {
+        const takeoverLabel = state.agentOffline === true ? text().offlineButton : text().returnToAgent;
+        takeoverButton.textContent = takeoverLabel;
+        takeoverButton.title = takeoverLabel;
+        takeoverButton.setAttribute("aria-label", takeoverLabel);
+      } else {
+        takeoverButton.textContent = text().takeover;
+        takeoverButton.title = text().takeover;
+        takeoverButton.setAttribute("aria-label", text().takeover);
+      }
+    }
     if (stopButton) {
       stopButton.classList.remove("confirm");
-      if (!isDelegatedToUser()) {
-        const label = isMultiSession() ? text().stopAll : text().stopSingle;
-        stopButton.textContent = label;
-        stopButton.title = label;
-        stopButton.setAttribute("aria-label", label);
-      }
+      const label = isDelegatedToUser() && state.agentOffline === true
+        ? text().releaseProfile
+        : isMultiSession() ? text().stopAll : text().stopSingle;
+      stopButton.textContent = label;
+      stopButton.title = label;
+      stopButton.setAttribute("aria-label", label);
     }
   }
 
+  // Input Guard 在 macOS 原生层先吞掉真实点击，再把同一次按下/抬起的全局坐标和
+  // 事件发生时的原生窗口边界交回来。这里不缓存按钮屏幕坐标：每次都用当前页面
+  // viewport、页面缩放和按钮 rect 即时换算；任何字段不完整或布局变化都返回 null。
+  function guardProbe(payload) {
+    if (
+      tearingDown ||
+      isDelegatedToUser() ||
+      !payload ||
+      typeof payload !== "object" ||
+      document.visibilityState === "hidden"
+    ) {
+      return null;
+    }
+    const nativeWindow = normalizeGuardWindow(payload.window);
+    const down = normalizeGuardPoint(payload.down);
+    const up = normalizeGuardPoint(payload.up);
+    const displayScale = positiveFiniteNumber(payload.displayScale);
+    const innerWidth = positiveFiniteNumber(window.innerWidth);
+    const innerHeight = positiveFiniteNumber(window.innerHeight);
+    const outerWidth = positiveFiniteNumber(window.outerWidth);
+    const outerHeight = positiveFiniteNumber(window.outerHeight);
+    const devicePixelRatio = positiveFiniteNumber(window.devicePixelRatio || 1);
+    if (
+      !nativeWindow ||
+      !down ||
+      !up ||
+      !displayScale ||
+      !innerWidth ||
+      !innerHeight ||
+      !outerWidth ||
+      !outerHeight ||
+      !devicePixelRatio
+    ) {
+      return null;
+    }
+
+    const downClient = guardClientPoint(
+      down,
+      nativeWindow,
+      displayScale,
+      devicePixelRatio,
+      innerWidth,
+      innerHeight
+    );
+    const upClient = guardClientPoint(
+      up,
+      nativeWindow,
+      displayScale,
+      devicePixelRatio,
+      innerWidth,
+      innerHeight
+    );
+    if (!downClient || !upClient) {
+      return null;
+    }
+    const downAction = guardActionAtClientPoint(downClient);
+    const upAction = guardActionAtClientPoint(upClient);
+    if (!downAction || downAction !== upAction) {
+      return null;
+    }
+
+    const button = downAction === "takeover" ? takeoverButton : stopButton;
+    if (!button || button.disabled) {
+      return null;
+    }
+    const rect = button.getBoundingClientRect();
+    const viewport = window.visualViewport;
+    const signature = JSON.stringify([
+      downAction,
+      stopConfirming,
+      stopConfirmKind,
+      roundGuardMetric(innerWidth),
+      roundGuardMetric(innerHeight),
+      roundGuardMetric(outerWidth),
+      roundGuardMetric(outerHeight),
+      roundGuardMetric(devicePixelRatio),
+      roundGuardMetric(displayScale),
+      roundGuardMetric(viewport ? viewport.scale : 1),
+      roundGuardMetric(viewport ? viewport.offsetLeft : 0),
+      roundGuardMetric(viewport ? viewport.offsetTop : 0),
+      roundGuardMetric(rect.left),
+      roundGuardMetric(rect.top),
+      roundGuardMetric(rect.right),
+      roundGuardMetric(rect.bottom)
+    ]);
+    return { action: downAction, signature };
+  }
+
+  function guardActivate(payload, expectedSignature) {
+    const probe = guardProbe(payload);
+    if (!probe || probe.signature !== expectedSignature) {
+      return false;
+    }
+    handleStopClick(probe.action);
+    return true;
+  }
+
+  function guardClientPoint(point, nativeWindow, displayScale, devicePixelRatio, innerWidth, innerHeight) {
+    const localOuterX = point.x - nativeWindow.x;
+    const localOuterY = point.y - nativeWindow.y;
+    const viewport = window.visualViewport;
+    const viewportScale = viewport && positiveFiniteNumber(viewport.scale) ? viewport.scale : 1;
+    const offsetLeft = viewport && Number.isFinite(viewport.offsetLeft) ? viewport.offsetLeft : 0;
+    const offsetTop = viewport && Number.isFinite(viewport.offsetTop) ? viewport.offsetTop : 0;
+    const browserZoom = devicePixelRatio / displayScale;
+    if (!Number.isFinite(browserZoom) || browserZoom < 0.25 || browserZoom > 5) {
+      return null;
+    }
+    const contentWidth = innerWidth * browserZoom;
+    const topChrome = nativeWindow.height - innerHeight * browserZoom;
+    const geometryTolerance = Math.max(4, browserZoom * 2);
+    if (
+      Math.abs(contentWidth - nativeWindow.width) > geometryTolerance ||
+      topChrome < -geometryTolerance ||
+      topChrome > nativeWindow.height
+    ) {
+      return null;
+    }
+    const pointScale = browserZoom * viewportScale;
+    const clientX = offsetLeft + localOuterX / pointScale;
+    const clientY = offsetTop + (localOuterY - Math.max(0, topChrome)) / pointScale;
+    if (
+      !Number.isFinite(clientX) ||
+      !Number.isFinite(clientY) ||
+      clientX < 0 ||
+      clientY < 0 ||
+      clientX > innerWidth ||
+      clientY > innerHeight
+    ) {
+      return null;
+    }
+    return { x: clientX, y: clientY };
+  }
+
+  function guardActionAtClientPoint(point) {
+    const entries = [
+      ["takeover", takeoverButton],
+      ["stop", stopButton]
+    ];
+    for (const [kind, button] of entries) {
+      if (!button || button.disabled) {
+        continue;
+      }
+      const rect = button.getBoundingClientRect();
+      // 边缘留 4px 安全区，避免混合缩放或小数舍入把边界点击误判成控制按钮。
+      const inset = Math.min(4, rect.width / 4, rect.height / 4);
+      if (
+        point.x >= rect.left + inset &&
+        point.x <= rect.right - inset &&
+        point.y >= rect.top + inset &&
+        point.y <= rect.bottom - inset
+      ) {
+        return kind;
+      }
+    }
+    return null;
+  }
+
+  function normalizeGuardWindow(value) {
+    if (!value || typeof value !== "object") {
+      return null;
+    }
+    const x = finiteNumber(value.x);
+    const y = finiteNumber(value.y);
+    const width = positiveFiniteNumber(value.width);
+    const height = positiveFiniteNumber(value.height);
+    return x === null || y === null || !width || !height ? null : { x, y, width, height };
+  }
+
+  function normalizeGuardPoint(value) {
+    if (!value || typeof value !== "object") {
+      return null;
+    }
+    const x = finiteNumber(value.x);
+    const y = finiteNumber(value.y);
+    return x === null || y === null ? null : { x, y };
+  }
+
+  function positiveFiniteNumber(value) {
+    const number = finiteNumber(value);
+    return number !== null && number > 0 ? number : null;
+  }
+
+  function roundGuardMetric(value) {
+    return Number.isFinite(value) ? Math.round(value * 1000) / 1000 : null;
+  }
+
   function collapse() {
+    if (!isDelegatedToUser()) {
+      return;
+    }
     collapsed = true;
     persistCollapsed();
     render();
@@ -895,6 +1514,12 @@ export function agentOverlayBootstrapScript(): string {
   function expand() {
     collapsed = false;
     persistCollapsed();
+    render();
+  }
+
+  function toggleDetails() {
+    expanded = !expanded;
+    persistExpanded();
     render();
   }
 
@@ -947,6 +1572,22 @@ export function agentOverlayBootstrapScript(): string {
   function readCollapsed() {
     try {
       return sessionStorage.getItem(COLLAPSED_KEY) === "1";
+    } catch {
+      return false;
+    }
+  }
+
+  function persistExpanded() {
+    try {
+      sessionStorage.setItem(EXPANDED_KEY, expanded ? "1" : "0");
+    } catch {
+      // sessionStorage may be disabled.
+    }
+  }
+
+  function readExpanded() {
+    try {
+      return sessionStorage.getItem(EXPANDED_KEY) === "1";
     } catch {
       return false;
     }
@@ -1115,6 +1756,9 @@ export function agentOverlayBootstrapScript(): string {
     if (key === "todoDone" || key === "todoTotal") {
       return finiteNumber(value);
     }
+    if (key === "handoffPending" || key === "agentOffline") {
+      return value === true;
+    }
     if (STRING_STATE_FIELDS.has(key)) {
       return typeof value === "string" ? value : String(value);
     }
@@ -1137,13 +1781,20 @@ export function agentOverlayBootstrapScript(): string {
     if (!payload || typeof payload !== "object") {
       return;
     }
+    const wasDelegatedToUser = isDelegatedToUser();
     for (const key of KNOWN_STATE_FIELDS) {
       state[key] = normalizeKnownStateValue(key, payload[key]);
     }
     if (isDelegatedToUser()) {
-      resetStopConfirm();
+      if (!wasDelegatedToUser) {
+        resetStopConfirm();
+      }
       clearTimeout(takenOverTimer);
-      takenOverTimer = setTimeout(() => collapse(), 5000);
+      if (state.agentOffline === true) {
+        collapsed = false;
+      } else {
+        takenOverTimer = setTimeout(() => collapse(), 5000);
+      }
     }
     ensureHostConnected();
     render();
@@ -1166,6 +1817,22 @@ export function agentOverlayBootstrapScript(): string {
       highlightAt(px, py);
     } catch {
       // 忽略非法坐标输入。
+    }
+  };
+
+  window.__ppAgentOverlayGuardProbe = (payload) => {
+    try {
+      return guardProbe(payload);
+    } catch {
+      return null;
+    }
+  };
+
+  window.__ppAgentOverlayGuardActivate = (payload, expectedSignature) => {
+    try {
+      return guardActivate(payload, expectedSignature);
+    } catch {
+      return false;
     }
   };
 
@@ -1194,6 +1861,8 @@ export function agentOverlayBootstrapScript(): string {
       delete window.__ppAgentOverlayInstalled;
       delete window.__ppAgentOverlayUpdate;
       delete window.__ppAgentOverlayHighlightAt;
+      delete window.__ppAgentOverlayGuardProbe;
+      delete window.__ppAgentOverlayGuardActivate;
       delete window.__ppAgentOverlayTeardown;
       delete window[SIGNAL_NAME];
     };

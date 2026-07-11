@@ -50,6 +50,9 @@ export interface Registry {
   miniProfileIds?: string[];
   // 悬浮窗里 Profile 行的自定义排序（拖拽调整）；不在列表里的 Profile 排在末尾，保持自然顺序。
   miniProfileOrder?: string[];
+  // 主窗口 Profile 表格的自定义排序（拖拽调整，含数据目录级与目录内两级）；
+  // 语义同 miniProfileOrder：存完整显示顺序的 profile 公开 id，未列出的排末尾、保持自然顺序。
+  mainProfileOrder?: string[];
   // 全局快捷键 ⌘⌥N 直启的槽位映射：键为槽位号 "1"~"9"，值为该槽位绑定的 profile 公开 id。
   // 一个槽位至多一个 profile，一个 profile 至多占一个槽位（改绑时会顶掉旧的）。
   quickLaunchSlots?: Record<string, string>;
@@ -59,6 +62,9 @@ export interface Registry {
 export interface CdpClientInfo {
   pid: number;
   label: string;
+  // 同一个命名 Session 异常残留多个 daemon 时，把其它 PID 折叠到主连接上。
+  // UI 不再误报成多个 Agent/会话，但会明确展示 daemon 重复故障。
+  duplicatePids?: number[];
   // 能解析出来时，标注这条连接背后是哪个 AI 工具的哪个会话（用于悬停 tooltip）：
   // agent=工具名（Codex / Claude Code），project=项目目录名，title=会话首句/标题。
   agent?: string;
@@ -71,6 +77,20 @@ export interface CdpClientInfo {
   // 归属可信度说明：agent-browser 走共享 daemon 时归属是按其启动目录推测的（或推测不出），
   // 这里给出人话解释，UI 拼进 tooltip；精确归属时为空。
   note?: string;
+}
+
+export interface AgentBrowserSessionActivity {
+  version: 1;
+  session: string;
+  command: string;
+  cdpPort: number;
+  pid: number;
+  daemonPid?: number;
+  agent?: string;
+  cwd?: string;
+  project?: string;
+  updatedAt: string;
+  expiresAt: string;
 }
 
 export interface AgentActivity {
@@ -96,6 +116,8 @@ export interface AgentTakeoverEvent {
   at: string;
 }
 
+export type AgentControlNoticeReason = "user_takeover" | "agent_complete" | "user_stop" | "user_disconnect" | "user_return";
+
 export interface TakeoverAgentConnectionFailure {
   pid: number;
   label: string;
@@ -120,6 +142,12 @@ export interface TakeoverAgentConnectionsResponse extends TakeoverAgentConnectio
   state: AppState;
 }
 
+export interface TakeoverAgentConnectionsRequest {
+  session?: string;
+  pids?: number[];
+  reason?: AgentControlNoticeReason;
+}
+
 export interface AgentOverlayRevealEvent {
   profileId: string;
   profileName: string;
@@ -127,9 +155,32 @@ export interface AgentOverlayRevealEvent {
 }
 
 // AI 对某个 tab / Profile 的归属（借鉴 ego-lite 的三值枚举，取代散落的布尔+时间窗）：
-// agent＝AI 正在驱动；agentDelegatedToUser＝用户刚接管、AI 暂让出控制权但仍持有该 tab
-// （同会话重连即恢复 agent）；user＝已彻底交还 / 无 AI 驱动。
+// agent＝AI 正在驱动；agentDelegatedToUser＝用户主动接管，或 AI 完成本轮后把控制权交还用户，
+// 但 Session 仍保持；user＝Session 已结束 / 无 AI 驱动。
 export type Ownership = "agent" | "agentDelegatedToUser" | "user";
+
+export interface AgentControlNotice {
+  version: 1;
+  // 单调递增的控制权版本。等待方先读当前版本再订阅文件事件，避免快速“接管→交还”丢事件。
+  controlVersion: number;
+  code: string;
+  reason: AgentControlNoticeReason;
+  ownership: Ownership;
+  // requested＝已禁止新命令、仍在等待当前命令收敛；quiesced＝执行面已安静，可开放用户输入。
+  handoffState?: "requested" | "quiesced";
+  message: string;
+  action?: string;
+  hardStop: boolean;
+  profileId: string;
+  profileName: string;
+  pid: number;
+  label: string;
+  session?: string;
+  sessionTitle?: string;
+  agent?: string;
+  at: string;
+  expiresAt: string;
+}
 
 // tab 争用观测里“最抖”的那个标签页：观察窗口内 URL 变化次数与往返翻转（A→B→A）次数。
 export interface CdpContentionChurn {
@@ -200,6 +251,22 @@ export interface CdpLiveViewOptions {
 
 export type ProfileSource = "native" | "isolated" | "isolated-sub";
 
+// Gateway 管理端口的权威控制状态。连接/接管 UI 必须优先使用它；本地 lease、activity
+// 和 lsof 仅用于非 Gateway 端口的兼容展示，不能覆盖这里的状态。
+export interface GatewayProfileControlState {
+  publicPort: number;
+  ownership: "agent" | "user";
+  sessionStatus: "active" | "stopped";
+  agentHealth: "online" | "waiting" | "offline";
+  connectionActive: boolean;
+  ownerSessionId: string | null;
+  daemonInstanceId: string | null;
+  daemonPid: number | null;
+  agent: string | null;
+  project: string | null;
+  updatedAt: string;
+}
+
 export interface PublicProfile {
   id: string;
   source: ProfileSource;
@@ -215,6 +282,8 @@ export interface PublicProfile {
   deletable: boolean;
   running: boolean;
   pids: number[];
+  // Chromium 应用主进程 PID。macOS Input Guard 只挂这些 PID，避免误挂 renderer/helper。
+  browserPids?: number[];
   cdpPort: number | null;
   cdpUrl: string | null;
   fixedCdpPort: number | null;
@@ -229,6 +298,8 @@ export interface PublicProfile {
   projectTag: string | null;
   // 正驱动这个 Profile 的 CDP 客户端（持久连接到其调试端口的外部工具）；空数组=没有工具连接。
   cdpClients: CdpClientInfo[];
+  // 由 ProfilePilot Gateway 管理时的权威控制状态；普通/旧式 CDP 端口为 null。
+  gatewayControl: GatewayProfileControlState | null;
   // 实时观测摘要：当前主标签页 URL 与打开的标签数（不含截图，随 getState 轮询刷新）；未运行/无 CDP 时为 null。
   livePrimaryUrl: string | null;
   liveTabCount: number | null;
@@ -285,6 +356,7 @@ export interface AppState {
   externalInstances: ExternalChromeInstance[];
   miniProfileIds: string[];
   miniProfileOrder: string[];
+  mainProfileOrder: string[];
   agentOverlayEnabled: boolean;
   shellIntegration: ShellIntegrationStatus;
 }
@@ -612,6 +684,7 @@ export interface OperationPauseSignal {
 
 export interface ProfileManagerApi {
   getState(): Promise<AppState>;
+  onStateChanged(listener: (state: AppState) => void): () => void;
   getTakeoverHistory(): Promise<AgentTakeoverEvent[]>;
   createProfile(name: string): Promise<AppState>;
   renameProfile(id: string, name: string): Promise<AppState>;
@@ -621,6 +694,7 @@ export interface ProfileManagerApi {
   suggestCdpPort(preferredPort?: number | null): Promise<CdpPortSuggestion>;
   setMiniProfilePinned(id: string, pinned: boolean): Promise<AppState>;
   setMiniProfileOrder(ids: string[]): Promise<AppState>;
+  setMainProfileOrder(ids: string[]): Promise<AppState>;
   setQuickLaunchSlot(id: string, slot: number | null): Promise<AppState>;
   setMiniPanelPinned(pinned: boolean): Promise<void>;
   onMiniPanelPinnedChanged(listener: (pinned: boolean) => void): () => void;
@@ -642,8 +716,11 @@ export interface ProfileManagerApi {
   closeExternalInstance(userDataDir: string): Promise<AppState>;
   // 结束某条 CDP 驱动连接：对该客户端进程发信号使其断开，不动 Chrome。
   disconnectCdpClient(profileId: string, pid: number): Promise<AppState>;
-  // 停止当前 AI 驱动连接并写入接管历史；session 缺省时停止该 Profile 的全部 AI 连接。
-  takeoverAgentConnections(profileId: string, session?: string): Promise<TakeoverAgentConnectionsResponse>;
+  // 暂停当前 AI 浏览器会话并写入接管历史；session 缺省时接管该 Profile 的全部 AI 会话。
+  takeoverAgentConnections(
+    profileId: string,
+    sessionOrOptions?: string | TakeoverAgentConnectionsRequest
+  ): Promise<TakeoverAgentConnectionsResponse>;
   // AI 操作可见化 overlay 总开关。
   setAgentOverlayEnabled(enabled: boolean): Promise<AppState>;
   // 启用/移除会话识别 shell 集成（~/.zshenv 托管块），返回刷新后的完整状态。

@@ -16,8 +16,12 @@ test("AgentOverlay payload keeps known fields stable and nulls empty values", ()
 
   assert.deepEqual(Object.keys(payload).sort(), [
     "agent",
+    "agentOffline",
+    "controlSince",
     "currentAction",
     "currentStep",
+    "handoffPending",
+    "inputGuardState",
     "lastMessage",
     "locale",
     "nextStep",
@@ -40,7 +44,11 @@ test("AgentOverlay payload keeps known fields stable and nulls empty values", ()
   assert.equal(payload.project, null);
   assert.equal(payload.session, null);
   assert.equal(payload.sessionTitle, null);
-  assert.equal(payload.currentAction, "AI 正在操作浏览器");
+  assert.equal(payload.currentAction, "AI 正在控制浏览器");
+  assert.equal(payload.inputGuardState, "starting");
+  assert.equal(payload.handoffPending, false);
+  assert.equal(payload.agentOffline, false);
+  assert.equal(payload.controlSince, null);
   assert.equal(payload.targetUrl, null);
   assert.equal(payload.currentStep, null);
   assert.equal(payload.nextStep, null);
@@ -64,6 +72,23 @@ test("AgentOverlay payload keeps known fields stable and nulls empty values", ()
   assert.match(serialized, /"currentStep":null/);
   assert.match(serialized, /"targetUrl":null/);
   assert.match(serialized, /"lastMessage":null/);
+});
+
+test("AgentOverlay payload exposes an offline delegated Session without losing its control timestamp", () => {
+  const payload = buildAgentOverlayPayload({
+    locale: "zh",
+    state: "takenOver",
+    ownership: "agentDelegatedToUser",
+    profileName: "Work Profile",
+    agentOffline: true,
+    controlSince: "2026-07-10T08:00:00.000Z",
+    clients: [{ pid: 3201, label: "Codex", session: "cx-offline" }]
+  });
+
+  assert.equal(payload.state, "takenOver");
+  assert.equal(payload.ownership, "agentDelegatedToUser");
+  assert.equal(payload.agentOffline, true);
+  assert.equal(payload.controlSince, "2026-07-10T08:00:00.000Z");
 });
 
 test("AgentOverlay payload passes through targetUrl from activity", () => {

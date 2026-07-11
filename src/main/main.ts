@@ -1,4 +1,4 @@
-import { promises as fs } from "node:fs";
+import { promises as fs, watch, type FSWatcher } from "node:fs";
 import { app, BrowserWindow, globalShortcut, ipcMain, nativeTheme, Notification, screen, type IpcMainInvokeEvent, type Rectangle } from "electron";
 import path from "node:path";
 import { IPC_CHANNELS } from "../shared/ipc";
@@ -31,13 +31,20 @@ import type {
   OperationProgress,
   OperationProgressUpdate,
   PublicProfile,
+  TakeoverAgentConnectionsRequest,
   TakeoverAgentConnectionsResponse
 } from "../shared/types";
 import { captureCdpLiveView } from "./cdp-live-view";
 import { defaultDataDir } from "./fs-util";
 import { ensureClaudeInstructionShell, readGlobalInstructions, writeGlobalInstruction } from "./global-instructions";
-import { setShellIntegrationEnabled } from "./shell-integration";
+import { refreshAgentBrowserWrapperIfInstalled, setShellIntegrationEnabled } from "./shell-integration";
 import { APP_TITLE, createProfileManager } from "./profile-manager";
+import {
+  ensureBrowserGatewayDaemon,
+  browserGatewayRoot,
+  subscribeBrowserGatewayEvents,
+  type GatewayEventSubscription
+} from "./browser-gateway-client";
 
 const profileManager = createProfileManager(broadcastAgentTakeover, revealAgentOverlayProfile);
 let agentOverlayDisposedForQuit = false;
@@ -58,6 +65,8 @@ const MINI_SUMMON_SHORTCUT = "CommandOrControl+Shift+P";
 // 用 Cmd+Alt+数字 而非裸 Cmd+数字，避免抢占浏览器/编辑器里「切到第 N 个标签页」，
 // 也避开 ⌘⇧3/4/5 的 macOS 截图快捷键。
 const QUICK_LAUNCH_SLOT_COUNT = 9;
+// Gateway 事件负责实时更新；低频全量扫描只校准用户手动关闭浏览器、非 Gateway CDP 等外部变化。
+const STATE_CALIBRATION_INTERVAL_MS = 30_000;
 const QUICK_LAUNCH_ACCELERATOR = (slot: number): string => `CommandOrControl+Alt+${slot}`;
 // 正在处理中的槽位启动，防同一 profile 被连按重复拉起。
 const inFlightQuickLaunch = new Set<string>();
@@ -75,6 +84,14 @@ let miniPanelPinned = false;
 // 当前面板高度（自适应）；resizeMiniPanel 会更新它，并被 miniPanelBoundsFromDockBounds 使用。
 let miniPanelHeight = MINI_PANEL_HEIGHT;
 let miniWindowDragState: { offsetX: number; offsetY: number } | null = null;
+let gatewayEventSubscription: GatewayEventSubscription | null = null;
+let gatewayStateWatcher: FSWatcher | null = null;
+let gatewayEventReconnectTimer: NodeJS.Timeout | null = null;
+let stateCalibrationTimer: NodeJS.Timeout | null = null;
+let stateBroadcastTimer: NodeJS.Timeout | null = null;
+let stateBroadcastInFlight = false;
+let stateBroadcastPending = false;
+let stateCoordinatorStopping = false;
 
 interface ActiveOperation {
   controller: AbortController;
@@ -121,6 +138,117 @@ function broadcastAgentTakeover(takeover: AgentTakeoverEvent): void {
     }
   }
   maybeShowAgentTakeoverNotification(takeover);
+}
+
+function broadcastAppState(state: AppState): void {
+  for (const windowRef of [mainWindow, miniWindow]) {
+    if (windowRef && !windowRef.isDestroyed() && !windowRef.webContents.isDestroyed()) {
+      windowRef.webContents.send(IPC_CHANNELS.stateChanged, state);
+    }
+  }
+}
+
+function scheduleAppStateBroadcast(delayMs = 60): void {
+  if (stateCoordinatorStopping) return;
+  stateBroadcastPending = true;
+  if (stateBroadcastTimer) return;
+  stateBroadcastTimer = setTimeout(() => {
+    stateBroadcastTimer = null;
+    void refreshAndBroadcastAppState();
+  }, delayMs);
+}
+
+async function refreshAndBroadcastAppState(): Promise<void> {
+  if (stateCoordinatorStopping) return;
+  if (stateBroadcastInFlight) {
+    stateBroadcastPending = true;
+    return;
+  }
+  stateBroadcastInFlight = true;
+  stateBroadcastPending = false;
+  try {
+    broadcastAppState(await profileManager.getState());
+  } catch (error) {
+    console.warn(`[state-coordinator] 状态校准失败：${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    stateBroadcastInFlight = false;
+    if (stateBroadcastPending) scheduleAppStateBroadcast(40);
+  }
+}
+
+function connectGatewayEventStream(): void {
+  if (stateCoordinatorStopping || gatewayEventSubscription) return;
+  const subscription = subscribeBrowserGatewayEvents({
+    onEvent: () => scheduleAppStateBroadcast(40),
+    onDisconnect: () => {
+      if (gatewayEventSubscription === subscription) gatewayEventSubscription = null;
+      scheduleGatewayEventReconnect();
+    }
+  });
+  gatewayEventSubscription = subscription;
+  void subscription.ready.catch((error) => {
+    console.warn(`[state-coordinator] Gateway 事件订阅失败：${error instanceof Error ? error.message : String(error)}`);
+  });
+}
+
+function scheduleGatewayEventReconnect(delayMs = 1_000): void {
+  if (stateCoordinatorStopping || gatewayEventReconnectTimer) return;
+  gatewayEventReconnectTimer = setTimeout(() => {
+    gatewayEventReconnectTimer = null;
+    void ensureBrowserGatewayDaemon()
+      .then((status) => {
+        if (status.protocolUpgradeDeferred === true) {
+          scheduleGatewayEventReconnect(STATE_CALIBRATION_INTERVAL_MS);
+          return;
+        }
+        connectGatewayEventStream();
+      })
+      .catch(() => scheduleGatewayEventReconnect());
+  }, delayMs);
+}
+
+function startStateCoordinator(): void {
+  stateCoordinatorStopping = false;
+  startGatewayStateWatcher();
+  scheduleGatewayEventReconnect(0);
+  if (!stateCalibrationTimer) {
+    stateCalibrationTimer = setInterval(
+      () => scheduleAppStateBroadcast(0),
+      STATE_CALIBRATION_INTERVAL_MS
+    );
+  }
+}
+
+function startGatewayStateWatcher(): void {
+  if (stateCoordinatorStopping || gatewayStateWatcher) return;
+  try {
+    gatewayStateWatcher = watch(browserGatewayRoot(), { persistent: false }, (_eventType, filename) => {
+      if (!filename || String(filename).includes("state.json")) {
+        scheduleAppStateBroadcast(40);
+      }
+    });
+    gatewayStateWatcher.once("error", () => {
+      gatewayStateWatcher?.close();
+      gatewayStateWatcher = null;
+    });
+  } catch {
+    // Gateway 目录尚未创建时由控制流订阅/30 秒校准兜底。
+  }
+}
+
+function stopStateCoordinator(): void {
+  stateCoordinatorStopping = true;
+  gatewayEventSubscription?.close();
+  gatewayEventSubscription = null;
+  gatewayStateWatcher?.close();
+  gatewayStateWatcher = null;
+  if (gatewayEventReconnectTimer) clearTimeout(gatewayEventReconnectTimer);
+  if (stateCalibrationTimer) clearInterval(stateCalibrationTimer);
+  if (stateBroadcastTimer) clearTimeout(stateBroadcastTimer);
+  gatewayEventReconnectTimer = null;
+  stateCalibrationTimer = null;
+  stateBroadcastTimer = null;
+  stateBroadcastPending = false;
 }
 
 function maybeShowAgentTakeoverNotification(takeover: AgentTakeoverEvent): void {
@@ -869,7 +997,17 @@ async function showMainWindow(): Promise<void> {
   if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isMinimized()) {
     mainWindow.restore();
   }
+
+  // “展开”、Dock 激活和 second-instance 都是用户明确要求打开主控制台。
+  // BrowserWindow.show/focus 只能处理窗口自身；若 App 曾通过 `open -j` 隐藏启动，
+  // macOS 的应用级 hidden/activation 状态仍会把窗口压在后台。因此先解除隐藏并激活 App，
+  // 再把窗口抬到当前桌面的最前面。被动失焦收成悬浮窗不会走这里，仍不会抢用户焦点。
+  if (process.platform === "darwin") {
+    app.show();
+    app.focus({ steal: true });
+  }
   mainWindow?.show();
+  mainWindow?.moveTop();
   mainWindow?.focus();
   closeMiniOutsideClickWindows();
   miniWindow?.hide();
@@ -1259,6 +1397,11 @@ function registerIpcHandlers(): void {
     return profileManager.getState();
   });
 
+  ipcMain.handle(IPC_CHANNELS.setMainProfileOrder, async (_event, ids: string[]): Promise<AppState> => {
+    await profileManager.setMainProfileOrder(Array.isArray(ids) ? ids : []);
+    return profileManager.getState();
+  });
+
   ipcMain.handle(IPC_CHANNELS.setQuickLaunchSlot, async (_event, id: string, slot: number | null): Promise<AppState> => {
     await profileManager.setQuickLaunchSlot(id, slot ?? null);
     return profileManager.getState();
@@ -1354,8 +1497,12 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(
     IPC_CHANNELS.takeoverAgentConnections,
-    async (_event, profileId: string, session?: string): Promise<TakeoverAgentConnectionsResponse> => {
-      const result = await profileManager.takeoverAgentConnections(profileId, session);
+    async (
+      _event,
+      profileId: string,
+      sessionOrOptions?: string | TakeoverAgentConnectionsRequest
+    ): Promise<TakeoverAgentConnectionsResponse> => {
+      const result = await profileManager.takeoverAgentConnections(profileId, sessionOrOptions);
       return {
         ...result,
         state: await profileManager.getState()
@@ -1578,7 +1725,14 @@ if (!app.requestSingleInstanceLock()) {
   });
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  await ensureBrowserGatewayDaemon().catch((error) => {
+    console.error(`[browser-gateway] 启动失败：${error instanceof Error ? error.message : String(error)}`);
+  });
+  await refreshAgentBrowserWrapperIfInstalled().catch((error) => {
+    console.warn(`[shell-integration] 刷新 agent-browser wrapper 失败：${error instanceof Error ? error.message : String(error)}`);
+  });
+
   if (process.platform === "darwin") {
     app.dock?.setIcon(APP_ICON_PATH);
   }
@@ -1586,6 +1740,7 @@ app.whenReady().then(() => {
   registerIpcHandlers();
   registerGlobalShortcuts();
   createMainWindow();
+  startStateCoordinator();
 
   // 点击 Dock 图标：始终把主控制台拉回来（必要时重建），并收起悬浮窗。
   // 覆盖“主窗口已关闭、只剩悬浮窗”的情况——此时旧逻辑会因为还有窗口而什么都不做。
@@ -1607,6 +1762,7 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", (event) => {
+  stopStateCoordinator();
   if (agentOverlayDisposedForQuit) {
     return;
   }

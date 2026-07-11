@@ -49,12 +49,27 @@ export interface PublicProfile {
   cloneCount: number;
   projectTag: string | null;
   cdpClients: CdpClientInfo[];
+  gatewayControl: GatewayProfileControlState | null;
   livePrimaryUrl: string | null;
   liveTabCount: number | null;
   // 多会话争用判定（主进程算好）：contention=观察到抢写同一标签页；risk=两个活跃会话共用。
   cdpContention: CdpContentionInfo | null;
   // 正在驱动这个 Profile 的 agent 的实时活动（会话 tail 解析结果）；无 agent 驱动时为 null。
   agentActivity: AgentActivity | null;
+}
+
+export interface GatewayProfileControlState {
+  publicPort: number;
+  ownership: "agent" | "user";
+  sessionStatus: "active" | "stopped";
+  agentHealth: "online" | "waiting" | "offline";
+  connectionActive: boolean;
+  ownerSessionId: string | null;
+  daemonInstanceId: string | null;
+  daemonPid: number | null;
+  agent: string | null;
+  project: string | null;
+  updatedAt: string;
 }
 
 export interface AgentActivity {
@@ -104,6 +119,14 @@ export interface TakeoverAgentConnectionsResponse extends TakeoverAgentConnectio
   state: AppState;
 }
 
+export type AgentControlNoticeReason = "user_takeover" | "agent_complete" | "user_stop" | "user_disconnect" | "user_return";
+
+export interface TakeoverAgentConnectionsRequest {
+  session?: string;
+  pids?: number[];
+  reason?: AgentControlNoticeReason;
+}
+
 export interface AgentOverlayRevealEvent {
   profileId: string;
   profileName: string;
@@ -144,6 +167,7 @@ export interface CdpContentionInfo {
 export interface CdpClientInfo {
   pid: number;
   label: string;
+  duplicatePids?: number[];
   // 这条连接背后是哪个 AI 工具的哪个会话（能解析出来时才有），用于悬停 tooltip。
   agent?: string;
   project?: string;
@@ -230,6 +254,7 @@ export interface AppState {
   externalInstances: ExternalChromeInstance[];
   miniProfileIds: string[];
   miniProfileOrder: string[];
+  mainProfileOrder: string[];
   agentOverlayEnabled: boolean;
   shellIntegration: ShellIntegrationStatus;
 }
@@ -559,6 +584,7 @@ export interface OperationProgress {
 
 export interface ProfileManagerApi {
   getState(): Promise<AppState>;
+  onStateChanged(listener: (state: AppState) => void): () => void;
   getTakeoverHistory(): Promise<AgentTakeoverEvent[]>;
   createProfile(name: string): Promise<AppState>;
   renameProfile(id: string, name: string): Promise<AppState>;
@@ -568,6 +594,7 @@ export interface ProfileManagerApi {
   suggestCdpPort(preferredPort?: number | null): Promise<CdpPortSuggestion>;
   setMiniProfilePinned(id: string, pinned: boolean): Promise<AppState>;
   setMiniProfileOrder(ids: string[]): Promise<AppState>;
+  setMainProfileOrder(ids: string[]): Promise<AppState>;
   setQuickLaunchSlot(id: string, slot: number | null): Promise<AppState>;
   setMiniPanelPinned(pinned: boolean): Promise<void>;
   onMiniPanelPinnedChanged(listener: (pinned: boolean) => void): () => void;
@@ -589,7 +616,10 @@ export interface ProfileManagerApi {
   closeExternalInstance(userDataDir: string): Promise<AppState>;
   // 结束某条 CDP 驱动连接：对该客户端进程发信号使其断开，不动 Chrome。
   disconnectCdpClient(profileId: string, pid: number): Promise<AppState>;
-  takeoverAgentConnections(profileId: string, session?: string): Promise<TakeoverAgentConnectionsResponse>;
+  takeoverAgentConnections(
+    profileId: string,
+    sessionOrOptions?: string | TakeoverAgentConnectionsRequest
+  ): Promise<TakeoverAgentConnectionsResponse>;
   setAgentOverlayEnabled(enabled: boolean): Promise<AppState>;
   setShellIntegrationEnabled(enabled: boolean): Promise<AppState>;
   openProfileFolder(id: string): Promise<AppState>;

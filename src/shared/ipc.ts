@@ -1,5 +1,6 @@
 export const IPC_CHANNELS = {
   getState: "profiles:get-state",
+  stateChanged: "profiles:state-changed",
   createProfile: "profiles:create",
   renameProfile: "profiles:rename",
   launchProfile: "profiles:launch",
@@ -15,6 +16,7 @@ export const IPC_CHANNELS = {
   launchClones: "profiles:clone:launch",
   setMiniProfilePinned: "profiles:mini:set-pinned",
   setMiniProfileOrder: "profiles:mini:set-order",
+  setMainProfileOrder: "profiles:main:set-order",
   setQuickLaunchSlot: "profiles:quick-launch:set-slot",
   setMiniPanelPinned: "profiles:window:set-mini-panel-pinned",
   miniPanelPinnedChanged: "profiles:window:mini-panel-pinned-changed",

@@ -175,12 +175,16 @@ export async function bringCdpPageToFront(port: number): Promise<boolean> {
   }
 }
 
-export async function loadUnpackedExtensionsOverCdp(port: number, extensionPaths: string[]): Promise<void> {
+export async function loadUnpackedExtensionsOverCdp(
+  port: number,
+  extensionPaths: string[],
+  homeDir?: string
+): Promise<void> {
   if (!extensionPaths.length) {
     return;
   }
 
-  const version = await requestCdpVersionInfo(port);
+  const version = await requestCdpVersionInfo(port, homeDir);
   if (!version.webSocketDebuggerUrl) {
     throw new ProfileManagerError("目标 Profile 的 CDP 没有返回 browser WebSocket 地址。", "CDP_NOT_READY");
   }

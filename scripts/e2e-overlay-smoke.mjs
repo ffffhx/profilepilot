@@ -513,21 +513,24 @@ async function waitForOverlayWorldContext(client, label) {
 }
 
 async function clickOverlayStopButton(client) {
-  const rect = await evaluateValue(
+  const viewport = await evaluateValue(
     client,
     `(() => {
       const host = document.getElementById("__pp-agent-overlay");
       if (!host) {
         return null;
       }
-      const rect = host.getBoundingClientRect();
-      return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+      return { width: window.innerWidth, height: window.innerHeight };
     })()`,
     1000
   );
-  assert.ok(rect && rect.width > 0 && rect.height > 0, "Overlay host should have a clickable rect.");
-  const x = Math.round(rect.left + rect.width / 2);
-  const y = Math.round(rect.top + rect.height - 18);
+  assert.ok(viewport && viewport.width > 0 && viewport.height > 0, "Overlay host should expose a viewport for clicks.");
+  const panelWidth = Math.min(574, viewport.width - 42);
+  const panelHeight = 84;
+  const panelLeft = (viewport.width - panelWidth) / 2;
+  const panelTop = viewport.height - 32 - panelHeight;
+  const x = Math.round(panelLeft + panelWidth - 68);
+  const y = Math.round(panelTop + panelHeight / 2);
   await dispatchMouseClick(client, x, y);
   await delay(80);
   await dispatchMouseClick(client, x, y);

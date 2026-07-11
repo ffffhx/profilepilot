@@ -5,11 +5,12 @@ import { clampCloneCount } from "./render/clone-pool";
 import { isExtensionMigrationActionItem } from "./render/extensions";
 import { focusLiveTab, openLiveZoom, refreshLiveViewNow, requestLiveViewNow, startLiveViewLoop, toggleLiveScreenshot } from "./render/live-view";
 import { sortByMiniOrder } from "./render/mini";
+import { computeMainReorder, mainProfileGroups, type MainProfileGroup } from "./render/profiles";
 import { render } from "./render/render-root";
-import { invalidateExtensionMigrationDiff, loadState, loadTakeoverHistory, mergeAgentTakeoverHistory, refreshExtensionMigrationDiff, refreshGlobalInstructions, repairClaudeInstructionShell, saveGlobalInstruction, setMigrationSource } from "./state-actions";
+import { applyState, invalidateExtensionMigrationDiff, loadState, loadTakeoverHistory, mergeAgentTakeoverHistory, refreshExtensionMigrationDiff, refreshGlobalInstructions, repairClaudeInstructionShell, saveGlobalInstruction, setMigrationSource } from "./state-actions";
 import { appRoot, store } from "./state";
-import type { AgentOverlayRevealEvent, AgentTakeoverEvent } from "./types";
-import { agentDrivenCdpClients, deleteButtonTitle, escapeHtml, formatErrorMessage } from "./util";
+import type { AgentOverlayRevealEvent, AgentTakeoverEvent, AppState } from "./types";
+import { deleteButtonTitle, escapeHtml, formatErrorMessage, profileAgentControlClients } from "./util";
 
 const MINI_TAKEOVER_NOTICE_MS = 5000;
 const MINI_TAKEOVER_CONFIRM_MS = 2800;
@@ -18,6 +19,45 @@ const EXTERNAL_PROFILE_ID_PREFIX = "external:";
 const miniTakeoverTimers = new Map<string, number>();
 let miniTakeoverConfirmTimer: number | null = null;
 let profileRevealHighlightTimer: number | null = null;
+let hoveringTooltip = false;
+let stateInteractionDragging = false;
+let pendingPushedState: AppState | null = null;
+let pushedStateTimer: number | null = null;
+
+function pushedStateApplyBlocked(): boolean {
+  return Boolean(
+    store.busy ||
+    store.modal ||
+    hoveringTooltip ||
+    stateInteractionDragging ||
+    store.openProfileMenuId ||
+    store.migrationTargetMenuOpen ||
+    store.accountSyncMenuOpen ||
+    store.clonePoolMenuOpen
+  );
+}
+
+function flushPushedState(): void {
+  pushedStateTimer = null;
+  if (!pendingPushedState) return;
+  if (pushedStateApplyBlocked()) {
+    pushedStateTimer = window.setTimeout(flushPushedState, 250);
+    return;
+  }
+  const state = pendingPushedState;
+  pendingPushedState = null;
+  applyState(state);
+}
+
+function queuePushedState(state: AppState): void {
+  // 只保留最新快照；Gateway 连续 acquire/connect 会合并成一次 DOM 更新。
+  pendingPushedState = state;
+  if (pushedStateTimer === null) {
+    pushedStateTimer = window.setTimeout(flushPushedState, 60);
+  }
+}
+
+profileApi().onStateChanged(queuePushedState);
 
 profileApi().onOperationProgress((progress) => {
   if (!store.busyState || store.busyState.key !== progress.key) {
@@ -64,7 +104,7 @@ profileApi().onAgentTakeover((takeover) => {
   clearMiniTakeoverConfirm();
   markMiniTakeover(takeover);
   const agent = takeover.agent || "AI";
-  setToast(`已接管 ${emphasizeName(takeover.profileName)}，${agent} 已停止操作`);
+  setToast(`已接管 ${emphasizeName(takeover.profileName)}，${agent} 已暂停操作`);
   void loadState().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
 });
 
@@ -975,6 +1015,10 @@ appRoot.addEventListener("click", (event) => {
   }
 
   if (action === "select" && id) {
+    // 点在拖拽手柄上只用于拖拽排序，不触发选中。
+    if (event.target instanceof Element && event.target.closest("[data-drag-handle]")) {
+      return;
+    }
     store.selectedId = id;
     store.selectedExternalDir = null;
     render();
@@ -1190,7 +1234,7 @@ appRoot.addEventListener("click", (event) => {
 
   if (action === "takeover-agent" && id) {
     const profile = store.state.profiles.find((item) => item.id === id);
-    if (!profile || !agentDrivenCdpClients(profile.cdpClients).length) {
+    if (!profile || !profileAgentControlClients(profile).length || profile.gatewayControl?.ownership === "user") {
       setToast("这个 Profile 现在没有可接管的 AI 连接", "error");
       return;
     }
@@ -1204,7 +1248,7 @@ appRoot.addEventListener("click", (event) => {
       return;
     }
     const profile = store.state.profiles.find((item) => item.id === id);
-    if (!profile || !agentDrivenCdpClients(profile.cdpClients).length) {
+    if (!profile || !profileAgentControlClients(profile).length || profile.gatewayControl?.ownership === "user") {
       clearMiniTakeoverConfirm();
       render();
       setToast("这个 Profile 现在没有可接管的 AI 连接", "error");
@@ -1220,7 +1264,7 @@ appRoot.addEventListener("click", (event) => {
 
     armMiniTakeoverConfirm(id);
     render();
-    setToast("再次点击活动行接管浏览器");
+    setToast("再次点击活动行暂停 AI 并接管浏览器");
     return;
   }
 
@@ -1674,9 +1718,7 @@ appRoot.addEventListener("submit", (event) => {
   });
 });
 
-// 鼠标停在带 tooltip 的元素上时暂停轮询重渲染：轮询会因实时数据（在线页面 URL / 活动时间等）
-// 变化而重建 DOM，把用户正 hover 的节点换掉，导致 tooltip 一闪。悬停期间先不刷新，移开即恢复。
-let hoveringTooltip = false;
+// 鼠标停在带 tooltip 的元素上时延后应用事件快照，避免实时状态变化重建正 hover 的节点。
 const TOOLTIP_HOVER_SELECTOR = ".action-tooltip, [data-tooltip], [title], .conn-pill, .conn-agent-action";
 document.addEventListener("mousemove", (event) => {
   const target = event.target as Element | null;
@@ -1684,6 +1726,7 @@ document.addEventListener("mousemove", (event) => {
 });
 document.addEventListener("mouseleave", () => {
   hoveringTooltip = false;
+  flushPushedState();
 });
 
 if (store.viewMode === "mini") {
@@ -1697,7 +1740,6 @@ loadState()
   });
 
 if (store.viewMode === "mini") {
-  let lastMiniScrollAt = 0;
   let miniPanelTransitionId = 0;
   let miniPanelClosing = false;
   let suppressMiniClick = false;
@@ -1805,7 +1847,6 @@ if (store.viewMode === "mini") {
     const target = event.target instanceof Element ? event.target : null;
     const list = target?.closest<HTMLElement>(".mini-profile-list");
     if (list) {
-      lastMiniScrollAt = Date.now();
       store.miniScrollTop = list.scrollTop;
     }
   };
@@ -1853,7 +1894,9 @@ if (store.viewMode === "mini") {
     }
     sendMiniDrag(event.screenX, event.screenY, "end");
     miniDragState = null;
+    stateInteractionDragging = false;
     document.body.classList.remove("mini-dragging");
+    flushPushedState();
   };
 
   appRoot.addEventListener(
@@ -1887,6 +1930,7 @@ if (store.viewMode === "mini") {
         startScreenY: event.screenY,
         dragging: false
       };
+      stateInteractionDragging = true;
       try {
         target?.setPointerCapture(event.pointerId);
       } catch {
@@ -2003,6 +2047,7 @@ if (store.viewMode === "mini") {
     }
 
     draggingProfileId = card.dataset.id;
+    stateInteractionDragging = true;
     card.classList.add("dragging");
     if (event.dataTransfer) {
       event.dataTransfer.effectAllowed = "move";
@@ -2049,37 +2094,142 @@ if (store.viewMode === "mini") {
   });
   appRoot.addEventListener("dragend", () => {
     draggingProfileId = null;
+    stateInteractionDragging = false;
     clearDropMarkers();
     appRoot.querySelectorAll(".mini-profile-card.dragging").forEach((card) => card.classList.remove("dragging"));
+    flushPushedState();
   });
 
-  window.setInterval(() => {
-    // 拖拽排序 / hover tooltip 过程中暂停轮询重渲染，否则 DOM 被重建会打断 DnD 或让 tooltip 闪。
-    if (!store.busy && !miniDragState && !draggingProfileId && !hoveringTooltip && Date.now() - lastMiniScrollAt > 900) {
-      void loadState().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
-    }
-  }, 2500);
 }
 
-// 主窗口轻量轮询：让“驱动中 / 运行状态 / CDP 地址”等实时刷新。
-// 跳过条件：正忙、窗口隐藏（切到悬浮窗）、有弹窗、或页面上有下拉菜单展开——避免打断正在进行的操作或输入。
+// 主窗口状态由主进程的 Gateway 事件流实时推送；30 秒全量校准也由主进程统一执行，
+// 两个窗口不再各自轮询，避免重复 lsof/CDP 扫描和 DOM 抖动。
 if (store.viewMode === "main") {
   startLiveViewLoop();
 
-  window.setInterval(() => {
-    // hover 到 tooltip 上时暂停：轮询重渲染会把正 hover 的节点换掉，导致 tooltip 一闪。
-    if (store.busy || document.hidden || store.modal || hoveringTooltip) {
-      return;
-    }
-    if (
-      store.openProfileMenuId ||
-      store.migrationTargetMenuOpen ||
-      store.accountSyncMenuOpen ||
-      store.clonePoolMenuOpen
-    ) {
-      return;
-    }
+  // —— 主窗口 Profile 行拖拽排序（HTML5 DnD，仅从行首拖拽手柄发起） ——
+  // 两级语义：拖「数据目录主行」（组首）= 整块目录随之移动、在各目录间重排；
+  // 拖目录内的子 Profile 行 = 仅在本目录内排序，不跨目录、也不越过主行。
+  let draggingMainId: string | null = null;
+  let draggingMainRole: "primary" | "sub" = "primary";
 
-    void loadState().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
-  }, 3000);
+  const clearMainDropMarkers = (): void => {
+    appRoot.querySelectorAll("[data-profile-row].drop-above, [data-profile-row].drop-below").forEach((row) => {
+      row.classList.remove("drop-above", "drop-below");
+    });
+  };
+  const clearMainDraggable = (): void => {
+    appRoot.querySelectorAll("[data-profile-row][draggable='true']").forEach((row) => row.removeAttribute("draggable"));
+  };
+  const groupKeyOfRow = (id: string, groups: MainProfileGroup[]): string | null =>
+    groups.find((group) => group.memberIds.includes(id))?.key ?? null;
+  // 组首（主行）有效落点 = 其它数据目录的任意行；子行有效落点 = 同目录内的其它行。
+  const isValidMainDropTarget = (targetId: string): boolean => {
+    if (!store.state || !draggingMainId || targetId === draggingMainId) {
+      return false;
+    }
+    const groups = mainProfileGroups(store.state.profiles);
+    const fromKey = groupKeyOfRow(draggingMainId, groups);
+    const toKey = groupKeyOfRow(targetId, groups);
+    if (!fromKey || !toKey) {
+      return false;
+    }
+    return draggingMainRole === "primary" ? toKey !== fromKey : toKey === fromKey;
+  };
+
+  const applyMainProfileReorder = (draggedId: string, targetId: string, insertBefore: boolean): void => {
+    if (!store.state) {
+      return;
+    }
+    const groups = mainProfileGroups(store.state.profiles);
+    const nextOrder = computeMainReorder(groups, draggedId, targetId, insertBefore);
+    if (!nextOrder) {
+      return;
+    }
+    store.state.mainProfileOrder = nextOrder;
+    render();
+    void profileApi()
+      .setMainProfileOrder(nextOrder)
+      .then((state) => {
+        store.state = state;
+        render();
+      })
+      .catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+  };
+
+  // 仅当从拖拽手柄按下时才把该行标为可拖拽，避免与整行点击/选中、按钮点击冲突。
+  appRoot.addEventListener("mousedown", (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const row = target?.closest<HTMLElement>("[data-profile-row]");
+    if (!row) {
+      return;
+    }
+    if (target?.closest("[data-drag-handle]")) {
+      row.setAttribute("draggable", "true");
+    } else {
+      row.removeAttribute("draggable");
+    }
+  });
+  appRoot.addEventListener("mouseup", () => {
+    if (!draggingMainId) {
+      clearMainDraggable();
+    }
+  });
+  appRoot.addEventListener("dragstart", (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const row = target?.closest<HTMLElement>("[data-profile-row]");
+    if (!row?.dataset.id || row.getAttribute("draggable") !== "true") {
+      return;
+    }
+    draggingMainId = row.dataset.id;
+    stateInteractionDragging = true;
+    draggingMainRole = row.dataset.dragRole === "sub" ? "sub" : "primary";
+    row.classList.add("dragging");
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", draggingMainId);
+    }
+  });
+  appRoot.addEventListener("dragover", (event) => {
+    if (!draggingMainId) {
+      return;
+    }
+    const target = event.target instanceof Element ? event.target : null;
+    const row = target?.closest<HTMLElement>("[data-profile-row]");
+    if (!row?.dataset.id || !isValidMainDropTarget(row.dataset.id)) {
+      clearMainDropMarkers();
+      return;
+    }
+    event.preventDefault();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = "move";
+    }
+    const rect = row.getBoundingClientRect();
+    const insertBefore = event.clientY < rect.top + rect.height / 2;
+    clearMainDropMarkers();
+    row.classList.add(insertBefore ? "drop-above" : "drop-below");
+  });
+  appRoot.addEventListener("drop", (event) => {
+    if (!draggingMainId) {
+      return;
+    }
+    const target = event.target instanceof Element ? event.target : null;
+    const row = target?.closest<HTMLElement>("[data-profile-row]");
+    if (!row?.dataset.id || !isValidMainDropTarget(row.dataset.id)) {
+      return;
+    }
+    event.preventDefault();
+    const rect = row.getBoundingClientRect();
+    const insertBefore = event.clientY < rect.top + rect.height / 2;
+    applyMainProfileReorder(draggingMainId, row.dataset.id, insertBefore);
+  });
+  appRoot.addEventListener("dragend", () => {
+    draggingMainId = null;
+    stateInteractionDragging = false;
+    clearMainDropMarkers();
+    clearMainDraggable();
+    appRoot.querySelectorAll("[data-profile-row].dragging").forEach((row) => row.classList.remove("dragging"));
+    flushPushedState();
+  });
+
 }

@@ -25,14 +25,25 @@ export enum ProfilePilotSignal {
   // 本会话对 agent-browser 共享 daemon（未命名 default）的控制被后来的会话顶替。
   // 保留契约：当前由归属推测（session-context）在人话说明里表达，尚未从此纯函数产出，
   // 但码是稳定的，日后接线时直接复用，不新造码。
-  AGENT_SESSION_DISPLACED = "AGENT_SESSION_DISPLACED"
+  AGENT_SESSION_DISPLACED = "AGENT_SESSION_DISPLACED",
+  // 用户通过 ProfilePilot/overlay 主动接管，或 Agent 完成当前任务后把控制权交还用户。
+  // 对 Agent 来说这是语义硬停，不是网络断开或可重试错误；必须等用户明确要求继续。
+  AGENT_USER_IN_CONTROL = "AGENT_USER_IN_CONTROL",
+  // 用户完成手动操作后显式把同一 Profile 交还给原 Agent。不是 hard-stop：Agent 下一条
+  // 浏览器命令可以继续，同时收到这条恢复通知。
+  AGENT_CONTROL_RETURNED = "AGENT_CONTROL_RETURNED",
+  // 用户主动终止了 AI 浏览器控制任务。语义上接近 ego 的 INACTIVE：不是让 Agent 等待自动恢复，
+  // 而是这轮浏览器操作已结束，除非用户重新发起。
+  AGENT_TASK_STOPPED = "AGENT_TASK_STOPPED"
 }
 
 // 硬停码集合（对标 ego 的 isEgoHardStopCode）：这些码代表「必须停手、按 action 处理」。
 const HARD_STOP_CODES = new Set<string>([
   ProfilePilotSignal.CDP_PORT_CONTENDED,
   ProfilePilotSignal.CDP_PORT_UNAVAILABLE,
-  ProfilePilotSignal.AGENT_SESSION_DISPLACED
+  ProfilePilotSignal.AGENT_SESSION_DISPLACED,
+  ProfilePilotSignal.AGENT_USER_IN_CONTROL,
+  ProfilePilotSignal.AGENT_TASK_STOPPED
 ]);
 
 export function isHardStopSignal(code: string): boolean {
@@ -61,6 +72,21 @@ export const SIGNAL_CATALOG: Record<ProfilePilotSignal, Omit<ProfilePilotSignalI
   [ProfilePilotSignal.AGENT_SESSION_DISPLACED]: {
     message: "本会话对共享 daemon 的控制已被后来的会话顶替",
     action: "停手：改用 --session <你的会话名> 独占一个 daemon 再重跑，别继续用共享 default daemon",
+    hardStop: true
+  },
+  [ProfilePilotSignal.AGENT_USER_IN_CONTROL]: {
+    message: "用户已接管这个 Profile，AI 浏览器命令已暂停",
+    action: "停手：这是用户主动接管，不要重试或自动重连；运行 agent-browser profilepilot wait-control 等待用户交还，返回后先重新读取页面状态再继续",
+    hardStop: true
+  },
+  [ProfilePilotSignal.AGENT_CONTROL_RETURNED]: {
+    message: "用户已将这个 Profile 的浏览器控制权交还 Agent",
+    action: "控制权已恢复：可以继续之前的浏览器任务；先重新读取页面状态，再从用户接管后的页面继续",
+    hardStop: false
+  },
+  [ProfilePilotSignal.AGENT_TASK_STOPPED]: {
+    message: "用户已终止这个 Profile 的 AI 浏览器任务",
+    action: "停手：这是用户主动终止任务，不要重试或自动重连；只有在用户重新发起浏览器操作时才继续",
     hardStop: true
   }
 };

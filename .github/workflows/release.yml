@@ -50,20 +50,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.20.0
+          run_install: false
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
+          cache: pnpm
 
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: Type check
-        run: npm run check
+        run: pnpm run check
 
       - name: Build packages
-        run: node scripts/retry-command.mjs npm run ${{ matrix.npm_script }}
+        run: node scripts/retry-command.mjs pnpm run ${{ matrix.npm_script }}
 
       - name: Upload package artifacts
         uses: actions/upload-artifact@v4

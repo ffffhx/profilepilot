@@ -35,6 +35,7 @@ import type {
   TakeoverAgentConnectionsResponse
 } from "../shared/types";
 import { captureCdpLiveView } from "./cdp-live-view";
+import { startE2eDriver } from "./e2e-driver";
 import { defaultDataDir } from "./fs-util";
 import { ensureClaudeInstructionShell, readGlobalInstructions, writeGlobalInstruction } from "./global-instructions";
 import { refreshAgentBrowserWrapperIfInstalled, setShellIntegrationEnabled } from "./shell-integration";
@@ -46,6 +47,9 @@ import {
   type GatewayEventSubscription
 } from "./browser-gateway-client";
 
+const E2E_DRIVER_SOCKET = process.env.CPM_E2E_DRIVER_SOCKET || "";
+const IS_E2E_DRIVER_TEST = Boolean(E2E_DRIVER_SOCKET);
+const IS_ELECTRON_SMOKE_TEST = process.env.CPM_ELECTRON_SMOKE_TEST === "1";
 const profileManager = createProfileManager(broadcastAgentTakeover, revealAgentOverlayProfile);
 let agentOverlayDisposedForQuit = false;
 let mainWindow: BrowserWindow | null = null;
@@ -60,7 +64,7 @@ const APP_ICON_PATH = path.join(__dirname, "../../public/assets/profilepilot-ico
 const UI_ZOOM_FACTOR = 1.0;
 const MINI_DOCK_SIZE = 80;
 // 一键唤起 / 聚焦 Mini 面板的全局快捷键（macOS = Cmd+Shift+P）
-const MINI_SUMMON_SHORTCUT = "CommandOrControl+Shift+P";
+const MINI_SUMMON_SHORTCUT = process.env.CPM_E2E_MINI_SHORTCUT || "CommandOrControl+Shift+P";
 // 直启置顶 profile 的全局快捷键：⌘⌥1~9 对应悬浮窗置顶列表的第 1~9 个。
 // 用 Cmd+Alt+数字 而非裸 Cmd+数字，避免抢占浏览器/编辑器里「切到第 N 个标签页」，
 // 也避开 ⌘⇧3/4/5 的 macOS 截图快捷键。
@@ -970,7 +974,7 @@ function registerGlobalShortcuts(): void {
     console.warn(`[mini] 全局快捷键注册失败（可能被占用）：${MINI_SUMMON_SHORTCUT}`);
   }
 
-  for (let slot = 1; slot <= QUICK_LAUNCH_SLOT_COUNT; slot += 1) {
+  for (let slot = 1; slot <= (IS_E2E_DRIVER_TEST ? 0 : QUICK_LAUNCH_SLOT_COUNT); slot += 1) {
     const accelerator = QUICK_LAUNCH_ACCELERATOR(slot);
     globalShortcut.unregister(accelerator);
     const ok = globalShortcut.register(accelerator, () => {
@@ -1026,7 +1030,7 @@ function createProgressReporter(
 }
 
 function createMainWindow(): void {
-  const smokeTest = process.env.CPM_ELECTRON_SMOKE_TEST === "1";
+  const smokeTest = IS_ELECTRON_SMOKE_TEST;
 
   // UI 是深色仪表台主题，原生控件（select 弹出菜单、滚动条等）必须跟随深色
   nativeTheme.themeSource = "dark";
@@ -1037,7 +1041,7 @@ function createMainWindow(): void {
     height: Math.round(760 * UI_ZOOM_FACTOR),
     minWidth: 860,
     minHeight: 620,
-    show: !smokeTest,
+    show: !smokeTest || IS_E2E_DRIVER_TEST,
     title: APP_TITLE,
     icon: APP_ICON_PATH,
     backgroundColor: "#0a1014",
@@ -1049,7 +1053,7 @@ function createMainWindow(): void {
     }
   });
 
-  if (smokeTest) {
+  if (smokeTest && !IS_E2E_DRIVER_TEST) {
     mainWindow.webContents.once("did-finish-load", async () => {
       try {
         const runCrud = process.env.CPM_ELECTRON_SMOKE_CRUD === "1";
@@ -1726,21 +1730,41 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 app.whenReady().then(async () => {
-  await ensureBrowserGatewayDaemon().catch((error) => {
-    console.error(`[browser-gateway] 启动失败：${error instanceof Error ? error.message : String(error)}`);
-  });
-  await refreshAgentBrowserWrapperIfInstalled().catch((error) => {
-    console.warn(`[shell-integration] 刷新 agent-browser wrapper 失败：${error instanceof Error ? error.message : String(error)}`);
-  });
+  // Smoke E2E 只验证当前 Electron 实例的 main/preload/renderer/IPC 链路；
+  // 跳过机器级 Gateway、wrapper 和快捷键，保证临时 HOME 测试不会留下后台进程或抢占全局状态。
+  if (!IS_ELECTRON_SMOKE_TEST) {
+    await ensureBrowserGatewayDaemon().catch((error) => {
+      console.error(`[browser-gateway] 启动失败：${error instanceof Error ? error.message : String(error)}`);
+    });
+    await refreshAgentBrowserWrapperIfInstalled().catch((error) => {
+      console.warn(`[shell-integration] 刷新 agent-browser wrapper 失败：${error instanceof Error ? error.message : String(error)}`);
+    });
+  }
 
   if (process.platform === "darwin") {
     app.dock?.setIcon(APP_ICON_PATH);
   }
 
   registerIpcHandlers();
-  registerGlobalShortcuts();
+  if (!IS_ELECTRON_SMOKE_TEST || process.env.CPM_E2E_ENABLE_GLOBAL_SHORTCUTS === "1") {
+    registerGlobalShortcuts();
+  }
   createMainWindow();
-  startStateCoordinator();
+  if (IS_E2E_DRIVER_TEST) {
+    startE2eDriver({
+      socketPath: E2E_DRIVER_SOCKET,
+      getWindow: (target) => (target === "mini" ? miniWindow : mainWindow),
+      getWindowSnapshot: () => ({
+        main: windowSnapshot(mainWindow),
+        mini: windowSnapshot(miniWindow),
+        miniPanelOpen: miniWindowPanelOpen,
+        miniPanelPinned
+      })
+    });
+  }
+  if (!IS_ELECTRON_SMOKE_TEST) {
+    startStateCoordinator();
+  }
 
   // 点击 Dock 图标：始终把主控制台拉回来（必要时重建），并收起悬浮窗。
   // 覆盖“主窗口已关闭、只剩悬浮窗”的情况——此时旧逻辑会因为还有窗口而什么都不做。
@@ -1776,3 +1800,16 @@ app.on("before-quit", (event) => {
 app.on("will-quit", () => {
   globalShortcut.unregisterAll();
 });
+
+function windowSnapshot(windowRef: BrowserWindow | null): Record<string, unknown> | null {
+  if (!windowRef || windowRef.isDestroyed()) return null;
+  return {
+    bounds: windowRef.getBounds(),
+    contentBounds: windowRef.getContentBounds(),
+    visible: windowRef.isVisible(),
+    focused: windowRef.isFocused(),
+    minimized: windowRef.isMinimized(),
+    alwaysOnTop: windowRef.isAlwaysOnTop(),
+    title: windowRef.getTitle()
+  };
+}

@@ -20,14 +20,15 @@ export enum ProfilePilotSignal {
   // 可以继续，但建议尽早用 --session 隔离或克隆副本，免得升级成真正的争用。
   CDP_SESSION_SHARED = "CDP_SESSION_SHARED",
   // 想要的 CDP 端口已被别的 Chrome 实例/会话占用，连上去会连到别人的浏览器。
-  // 硬停：改用系统建议的空闲端口重连。
+  // 硬停：先让用户确认是否切换登录态/Profile，再改用系统建议的空闲端口。
   CDP_PORT_UNAVAILABLE = "CDP_PORT_UNAVAILABLE",
   // 本会话对 agent-browser 共享 daemon（未命名 default）的控制被后来的会话顶替。
   // 保留契约：当前由归属推测（session-context）在人话说明里表达，尚未从此纯函数产出，
   // 但码是稳定的，日后接线时直接复用，不新造码。
   AGENT_SESSION_DISPLACED = "AGENT_SESSION_DISPLACED",
-  // 用户通过 ProfilePilot/overlay 主动接管，或 Agent 完成当前任务后把控制权交还用户。
-  // 对 Agent 来说这是语义硬停，不是网络断开或可重试错误；必须等用户明确要求继续。
+  // 用户通过 ProfilePilot/overlay 主动接管，或 Agent 完成后正在收敛释放 Session。
+  // 对 Agent 来说这是语义硬停，不是网络断开或可重试错误；接管时必须等用户明确交还，
+  // 完成时则等待释放结束，不得重新连接旧 Session。
   AGENT_USER_IN_CONTROL = "AGENT_USER_IN_CONTROL",
   // 用户完成手动操作后显式把同一 Profile 交还给原 Agent。不是 hard-stop：Agent 下一条
   // 浏览器命令可以继续，同时收到这条恢复通知。
@@ -56,7 +57,7 @@ export function isHardStopSignal(code: string): boolean {
 export const SIGNAL_CATALOG: Record<ProfilePilotSignal, Omit<ProfilePilotSignalInfo, "code">> = {
   [ProfilePilotSignal.CDP_PORT_CONTENDED]: {
     message: "多个会话正在抢同一个标签页",
-    action: "停手：该端口正被多会话争用，改到独立端口或加 --session 隔离后重跑，例如 agent-browser --session <你的会话名> <cmd>",
+    action: "停手：该端口正被多会话争用，不要继续重试或自动切换 Profile；先告知用户，并征得同意后改用独立 Profile 的逻辑端口",
     hardStop: true
   },
   [ProfilePilotSignal.CDP_SESSION_SHARED]: {
@@ -66,7 +67,7 @@ export const SIGNAL_CATALOG: Record<ProfilePilotSignal, Omit<ProfilePilotSignalI
   },
   [ProfilePilotSignal.CDP_PORT_UNAVAILABLE]: {
     message: "想要的 CDP 端口已被别的实例占用",
-    action: "改用系统建议的空闲端口重连，例如 agent-browser --cdp <建议端口> <cmd>",
+    action: "停手：不要自动切换 Profile；先告知用户端口已被占用，并征得同意后再运行 agent-browser --cdp <建议端口> <cmd>",
     hardStop: true
   },
   [ProfilePilotSignal.AGENT_SESSION_DISPLACED]: {
@@ -131,7 +132,7 @@ export function resolveSignal(input: SignalInput): ProfilePilotSignalInfo | null
       return {
         code: ProfilePilotSignal.CDP_PORT_CONTENDED,
         message: `多个会话正在抢同一个标签页${changes}${owners}`,
-        action: `停手：端口${portTag} 正被多会话争用，改到独立端口或加 --session 隔离后重跑，例如 agent-browser --session <你的会话名> <cmd>`,
+        action: `停手：端口${portTag} 正被多会话争用，不要继续重试或自动切换 Profile；先告知用户，并征得同意后改用独立 Profile 的逻辑端口`,
         hardStop: true
       };
     }
@@ -154,7 +155,7 @@ export function resolveSignal(input: SignalInput): ProfilePilotSignalInfo | null
   return {
     code: ProfilePilotSignal.CDP_PORT_UNAVAILABLE,
     message: `端口 ${input.preferredPort} 已被占用${owner}`,
-    action: `改用空闲端口 ${input.suggestedPort} 重连：agent-browser --cdp ${input.suggestedPort} <cmd>`,
+    action: `停手：不要自动切换 Profile；先告知用户端口 ${input.preferredPort} 已被占用，并征得同意后再运行 agent-browser --cdp ${input.suggestedPort} <cmd>`,
     hardStop: true
   };
 }

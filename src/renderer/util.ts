@@ -356,6 +356,36 @@ export function gatewayUserHasControl(profile: PublicProfile): boolean {
   );
 }
 
+export function agentBrowserOccupancyClient(profile: PublicProfile): CdpClientInfo | null {
+  const gatewayClient = gatewayControlClient(profile);
+  if (gatewayClient) return gatewayClient;
+  const occupancy = profile.agentBrowserOccupancy;
+  if (!occupancy) return null;
+  return {
+    pid: occupancy.daemonPid || occupancy.holderPid,
+    label: "agent-browser",
+    agent: occupancy.agent || undefined,
+    project: occupancy.project || undefined,
+    title: occupancy.command ? `agent-browser ${occupancy.command}` : "agent-browser Session",
+    session: occupancy.session,
+    lastActive: occupancy.updatedAt,
+    note: occupancy.ownership === "user"
+      ? "Session 仍保留，浏览器控制权当前属于用户；自动候选不会使用此 Profile"
+      : "当前 Profile 已由 agent-browser Session 排他预留"
+  };
+}
+
+export function profileAgentBrowserReserved(profile: PublicProfile): boolean {
+  return Boolean(
+    (profile.gatewayControl?.sessionStatus === "active" && profile.gatewayControl.ownerSessionId) ||
+    profile.agentBrowserOccupancy
+  );
+}
+
+export function profileUserHasControl(profile: PublicProfile): boolean {
+  return gatewayUserHasControl(profile) || profile.agentBrowserOccupancy?.ownership === "user";
+}
+
 // 争用警示·短版（药丸 tooltip / 悬浮窗用）：一眼看懂发生了什么，细节和建议留给详情栏。
 export function contentionNoticeShort(profile: PublicProfile): string {
   const duplicate = profile.cdpClients.find((client) => client.duplicatePids?.length);

@@ -751,7 +751,7 @@ export function executeProfileSyncConfirm(intent: Extract<ConfirmIntent, { kind:
           sourceProfileId: intent.sourceProfileId,
           targetProfileId: intent.targetProfileId,
           extensionIds,
-          includeData: false,
+          includeData: store.includeExtensionData,
           openInstallPages: false,
           onlyChanged: false
         });

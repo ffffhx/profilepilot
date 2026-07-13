@@ -48,13 +48,13 @@
   color-scheme: dark;
   --bg: #0a1014;
   --bg-deep: #070b0e;
-  --panel: #101920;
-  --panel-raise: #15202a;
+  --panel: #111a20;
+  --panel-raise: #18232b;
   --panel-soft: #0d141a;
   --text: #e6eef2;
-  --muted: #8fa1ad;
-  --line: #1f2d37;
-  --line-strong: #31454f;
+  --muted: #9cafba;
+  --line: #25343d;
+  --line-strong: #3a4e59;
   --accent: #38e1a0;
   --accent-bright: #6ff2c0;
   --accent-dark: #9defc9;
@@ -74,9 +74,9 @@
   --info-soft: rgba(95, 182, 255, 0.11);
   --info-line: rgba(95, 182, 255, 0.36);
   --focus: rgba(56, 225, 160, 0.28);
-  --glow-accent: 0 0 18px rgba(56, 225, 160, 0.22);
-  --shadow: 0 24px 60px rgba(2, 6, 9, 0.6);
-  --font-display: "Chakra Petch", "PingFang SC", -apple-system, "Segoe UI", sans-serif;
+  --glow-accent: none;
+  --shadow: 0 6px 8px rgba(2, 6, 9, 0.34);
+  --font-display: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
     "Liberation Mono", monospace;
   font-family:
@@ -109,13 +109,8 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
-  background:
-    radial-gradient(1100px 460px at 18% -8%, rgba(56, 225, 160, 0.07), transparent 62%),
-    radial-gradient(900px 420px at 92% 0%, rgba(95, 182, 255, 0.05), transparent 60%),
-    repeating-linear-gradient(0deg, rgba(143, 161, 173, 0.035) 0 1px, transparent 1px 44px),
-    repeating-linear-gradient(90deg, rgba(143, 161, 173, 0.035) 0 1px, transparent 1px 44px),
-    linear-gradient(180deg, #0c1318 0%, var(--bg) 38%, var(--bg-deep) 100%);
-  background-attachment: fixed;
+  overflow-x: hidden;
+  background: linear-gradient(180deg, #0c1318 0%, var(--bg) 42%, var(--bg-deep) 100%);
   color: var(--text);
 }
 
@@ -1709,9 +1704,9 @@ body:not(.booted) .migration-panel {
 }
 
 .clone-pool-input:focus-visible {
-  outline: none;
   border-color: var(--accent-line);
-  box-shadow: var(--glow-accent);
+  outline: 3px solid var(--focus);
+  outline-offset: 1px;
 }
 
 .clone-pool-days {
@@ -5183,3 +5178,194 @@ body:not(.booted) .layout {
 }
 
 /* (域名/IP 切换已移除：当前页摘要只显示域名) */
+
+/* ---- 2026 product polish: quieter chrome, clearer state hierarchy ---- */
+
+html {
+  color-scheme: dark;
+}
+
+.skip-link {
+  position: fixed;
+  top: 10px;
+  left: 12px;
+  z-index: 50;
+  border-radius: 7px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  padding: 9px 12px;
+  font-size: 13px;
+  font-weight: 750;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-8px);
+  transition: opacity 0.16s ease-out, transform 0.16s ease-out;
+}
+
+.skip-link:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.app-header,
+.status-grid,
+.account-sync-panel,
+.migration-panel,
+.layout {
+  animation: none !important;
+}
+
+.app-header {
+  align-items: center;
+}
+
+.brand-mark {
+  border: 1px solid var(--accent-line);
+  background: var(--panel);
+  box-shadow: 0 4px 8px rgba(2, 6, 9, 0.34);
+}
+
+.brand-copy h1 {
+  font-family: "Chakra Petch", "PingFang SC", -apple-system, "Segoe UI", sans-serif;
+  font-size: 34px;
+  letter-spacing: -0.02em;
+  line-height: 1;
+  text-wrap: balance;
+}
+
+.brand-subtitle {
+  max-width: 58ch;
+  margin: 7px 0 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.4;
+  text-wrap: pretty;
+}
+
+h2,
+h3 {
+  font-family: inherit;
+  letter-spacing: 0;
+  text-wrap: balance;
+}
+
+button {
+  touch-action: manipulation;
+  background: var(--panel-raise);
+  box-shadow: none;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  background: #1d2a33;
+  box-shadow: none;
+}
+
+.primary,
+.solid {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+  text-shadow: none;
+  box-shadow: none;
+}
+
+.primary:hover:not(:disabled),
+.solid:hover:not(:disabled) {
+  border-color: var(--accent-bright);
+  background: var(--accent-bright);
+  box-shadow: none;
+}
+
+.action-button,
+.action-button.accent,
+.action-button.cdp,
+.action-button.warn {
+  background-image: none;
+  box-shadow: none;
+}
+
+.action-button:hover:not(:disabled),
+.action-button.accent:hover:not(:disabled),
+.action-button.cdp:hover:not(:disabled),
+.action-button.warn:hover:not(:disabled),
+.danger:hover:not(:disabled) {
+  box-shadow: none;
+}
+
+.status-grid,
+.profiles-table-wrap,
+.details,
+.account-sync-panel,
+.migration-panel,
+.agent-takeover-notice {
+  box-shadow: 0 5px 8px rgba(2, 6, 9, 0.26) !important;
+}
+
+.account-sync-panel,
+.migration-panel,
+.details {
+  background: var(--panel) !important;
+}
+
+.status-item::before {
+  top: 20px;
+  bottom: auto;
+  left: 10px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--line-strong);
+}
+
+.status-item.current {
+  background: var(--panel);
+}
+
+.status-item.current::before {
+  background: var(--accent);
+  box-shadow: none;
+}
+
+.profiles-table tr.selected td:first-child,
+.profiles-table tbody tr:hover:not(.selected) td:first-child {
+  box-shadow: none;
+}
+
+.profiles-table tr.selected td {
+  background: rgba(56, 225, 160, 0.09);
+  box-shadow: inset 0 1px 0 var(--accent-line), inset 0 -1px 0 var(--accent-line);
+}
+
+.profiles-table tbody tr:hover td {
+  background: rgba(230, 238, 242, 0.055);
+}
+
+.action-tooltip::after {
+  border-color: var(--line-strong);
+  background: #0b1216;
+  color: var(--text);
+  box-shadow: 0 5px 8px rgba(2, 6, 9, 0.42);
+}
+
+.action-tooltip::before {
+  border-color: var(--line-strong);
+  background: #0b1216;
+}
+
+.toast {
+  box-shadow: 0 6px 8px rgba(2, 6, 9, 0.48) !important;
+}
+
+@media (max-width: 720px) {
+  .app-header {
+    align-items: flex-start;
+  }
+
+  .brand-copy h1 {
+    font-size: 30px;
+  }
+}

@@ -17,6 +17,7 @@ const {
   formatHardStopNotice,
   formatProfileLeaseConflict,
   replaceCdpPortInAgentBrowserArgs,
+  resolveRealAgentBrowser,
   runAgentBrowserWrapper,
   sessionFromAgentBrowserArgs,
   shouldCheckProfilePilotNotice
@@ -57,7 +58,7 @@ test("agent-browser wrapper checks notices only for browser operations", () => {
   assert.equal(shouldCheckProfilePilotNotice(["--version"]), false);
 });
 
-test("agent-browser wrapper rewrites CDP arguments for automatic Profile switching", () => {
+test("agent-browser wrapper rewrites CDP arguments for a user-approved Profile switch", () => {
   assert.deepEqual(
     replaceCdpPortInAgentBrowserArgs(["--cdp", "9223", "snapshot"], 9224),
     ["--cdp", "9224", "snapshot"]
@@ -68,6 +69,32 @@ test("agent-browser wrapper rewrites CDP arguments for automatic Profile switchi
   );
   assert.deepEqual(replaceCdpPortInAgentBrowserArgs(["connect", "9223"], 9224), ["connect", "9224"]);
   assert.deepEqual(replaceCdpPortInAgentBrowserArgs(["snapshot"], 9224), ["--cdp", "9224", "snapshot"]);
+});
+
+test("agent-browser wrapper skips the managed child-shell launcher when resolving the real CLI", () => {
+  const home = makeTempHome();
+  const managedLauncher = path.join(home, ".profilepilot", "bin", "agent-browser");
+  const realAgentBrowser = path.join(home, "real", "agent-browser");
+  mkdirSync(path.dirname(managedLauncher), { recursive: true });
+  mkdirSync(path.dirname(realAgentBrowser), { recursive: true });
+  writeFileSync(managedLauncher, "#!/bin/sh\nexit 99\n", "utf8");
+  writeFileSync(realAgentBrowser, "#!/bin/sh\nexit 0\n", "utf8");
+  chmodSync(managedLauncher, 0o755);
+  chmodSync(realAgentBrowser, 0o755);
+
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${path.dirname(managedLauncher)}:${path.dirname(realAgentBrowser)}:/usr/bin:/bin`;
+  try {
+    assert.equal(resolveRealAgentBrowser({
+      HOME: home,
+      PATH: process.env.PATH,
+      PROFILEPILOT_AGENT_BROWSER_LAUNCHER: managedLauncher
+    }, path.join(home, "profilepilot-agent-browser-wrapper.cjs")), realAgentBrowser);
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("agent-browser session activity files become synthetic ProfilePilot clients", async () => {
@@ -180,7 +207,7 @@ test("agent-browser wrapper finds active ProfilePilot hard-stop notices", () => 
   rmSync(home, { recursive: true, force: true });
 });
 
-test("agent-browser wrapper hard-stops after Agent completion while Session remains open", () => {
+test("agent-browser wrapper hard-stops while Agent completion is still draining", () => {
   const home = makeTempHome();
   const noticePath = path.join(home, ".agent-browser", "cx-one.profilepilot-control.json");
   mkdirSync(path.dirname(noticePath), { recursive: true });
@@ -191,6 +218,7 @@ test("agent-browser wrapper hard-stops after Agent completion while Session rema
       code: "AGENT_USER_IN_CONTROL",
       reason: "agent_complete",
       ownership: "agentDelegatedToUser",
+      handoffState: "requested",
       message: "Agent 已完成当前任务，浏览器控制权已交还用户",
       action: "等待用户交还",
       hardStop: true,
@@ -270,7 +298,7 @@ fs.writeFileSync(noticePath, JSON.stringify({
   rmSync(home, { recursive: true, force: true });
 });
 
-test("agent-browser wrapper explicitly completes without ending the Session", async () => {
+test("agent-browser wrapper completion releases the Session and Profile lease", async () => {
   const home = makeTempHome();
   acquireAgentBrowserProfileLeaseSync({
     cdpPort: 9223,
@@ -301,15 +329,13 @@ test("agent-browser wrapper explicitly completes without ending the Session", as
   }
 
   assert.equal(exitCode, 0);
-  const notice = JSON.parse(readFileSync(
-    path.join(home, ".profilepilot", "agent-control", "cx-complete.json"),
-    "utf8"
-  ));
-  assert.equal(notice.reason, "agent_complete");
-  assert.equal(notice.ownership, "agentDelegatedToUser");
-  assert.equal(notice.handoffState, "quiesced");
-  assert.equal(readAgentBrowserProfileLeaseSync(9223, home).delegatedToUser, true);
-  assert.ok(agentBrowserSessionActivityPaths(home, "cx-complete").some((file) => existsSync(file)));
+  assert.match(writes.stdout.join(""), /"ownership": "user"/);
+  assert.match(writes.stdout.join(""), /"released_ports": \[/);
+  assert.match(writes.stdout.join(""), /Session 和 Profile 租约已释放/);
+  assert.equal(readAgentBrowserProfileLeaseSync(9223, home), null);
+  assert.equal(agentBrowserSessionActivityPaths(home, "cx-complete").some((file) => existsSync(file)), false);
+  assert.equal(existsSync(path.join(home, ".profilepilot", "agent-control", "cx-complete.json")), false);
+  assert.equal(existsSync(path.join(home, ".agent-browser", "cx-complete.profilepilot-control.json")), false);
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -560,7 +586,8 @@ test("agent-browser wrapper blocks a second Session even when the command omits 
       profileId: "isolated:alternative",
       profileName: "备用 Profile",
       cdpPort: 9224,
-      projectTag: "second-project"
+      projectTag: "second-project",
+      running: false
     }
   ], home);
   acquireAgentBrowserProfileLeaseSync({
@@ -595,21 +622,25 @@ test("agent-browser wrapper blocks a second Session even when the command omits 
   assert.equal(exitCode, PROFILEPILOT_AGENT_BROWSER_LEASE_CONFLICT_EXIT_CODE);
   assert.equal(exitCode, 75);
   assert.match(writes.stderr.join(""), /"error_code": "PROFILE_ALREADY_IN_USE"/);
-  assert.match(writes.stderr.join(""), /"hard_stop": false/);
+  assert.match(writes.stderr.join(""), /"hard_stop": true/);
   assert.match(writes.stderr.join(""), /"blocked_profile_hard_stop": true/);
   assert.match(writes.stderr.join(""), /"retryable_with_alternative_profile": true/);
+  assert.match(writes.stderr.join(""), /"requires_user_confirmation": true/);
   assert.match(writes.stderr.join(""), /"owner_session": "cx-owner"/);
   assert.match(writes.stderr.join(""), /工作 Profile/);
-  assert.match(writes.stderr.join(""), /"auto_switch_allowed": true/);
+  assert.match(writes.stderr.join(""), /"auto_switch_allowed": false/);
   assert.match(writes.stderr.join(""), /"recommended_profile_name": "备用 Profile"/);
   assert.match(writes.stderr.join(""), /"recommended_cdp_port": 9224/);
   assert.match(writes.stderr.join(""), /"recommended_command": "agent-browser --cdp 9224 snapshot"/);
+  assert.match(writes.stderr.join(""), /"requires_start": true/);
+  assert.match(writes.stderr.join(""), /先告知用户当前占用情况，并征得同意/);
+  assert.match(writes.stderr.join(""), /Gateway 启动并连接/);
   assert.match(writes.stderr.join(""), /"available_candidate_count": 1/);
 
   rmSync(home, { recursive: true, force: true });
 });
 
-test("agent-browser wrapper hard-stops when no live alternative Profile exists", () => {
+test("agent-browser wrapper hard-stops when no available alternative Profile exists", () => {
   const home = makeTempHome();
   const output = formatProfileLeaseConflict({
     version: 1,
@@ -625,6 +656,7 @@ test("agent-browser wrapper hard-stops when no live alternative Profile exists",
 
   assert.match(output, /"hard_stop": true/);
   assert.match(output, /"retryable_with_alternative_profile": false/);
+  assert.match(output, /"requires_user_confirmation": false/);
   assert.match(output, /"auto_switch_allowed": false/);
   assert.match(output, /"recommended_command": null/);
 

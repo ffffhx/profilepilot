@@ -6,14 +6,15 @@ import {
   agentActivityLeadText,
   agentActivityProgressText,
   agentActivityTooltipText,
+  agentBrowserOccupancyClient,
   cdpPortLabel,
   cdpSessionText,
   contentionHardStopGuidance,
   contentionNoticeShort,
   escapeHtml,
   formatRelativeTime,
-  gatewayControlClient,
-  gatewayUserHasControl,
+  profileAgentBrowserReserved,
+  profileUserHasControl,
   liveAddrLabel,
   prettyCdpClientLabel,
   renderButtonLabel
@@ -277,7 +278,7 @@ function renderMiniProfileCard(profile: PublicProfile): string {
           : "";
   const liveHost = profile.running && profile.livePrimaryUrl ? liveAddrLabel(profile) : "";
   const driving = profile.running && profile.cdpClients.length > 0;
-  const gatewayReserved = profile.gatewayControl?.sessionStatus === "active" && Boolean(profile.gatewayControl.ownerSessionId);
+  const reserved = profileAgentBrowserReserved(profile);
   // 右侧读数覆盖三个维度：浏览器开没开（图标颜色 + 未启动/已启动字样）、
   // CDP 端口开没开（:端口 / 无 CDP）、有没有工具连着驱动（工具名·已连接/未连接）。
   // 忙碌 > 工具名·已连接 > 端口·未连接 > 已启动·无 CDP > 未启动。
@@ -291,8 +292,8 @@ function renderMiniProfileCard(profile: PublicProfile): string {
     ? busyLabel
     : driving
       ? `${toolLabel} 已连接`
-      : gatewayReserved
-        ? profile.gatewayControl?.ownership === "user" ? "已接管" : "Agent 已绑定"
+      : reserved
+        ? profileUserHasControl(profile) ? "已接管" : "Agent 已绑定"
       : profile.running && profile.cdpUrl
         ? `${cdpPort} · 未连接`
         : port.label;
@@ -302,7 +303,7 @@ function renderMiniProfileCard(profile: PublicProfile): string {
   const readoutTip = !busyHere && driving ? cdpClientTooltip(profile) : "";
   // 卡片正文可见的会话身份行：哪个项目 / 哪个会话在驱动（解析到才显示）。
   // 文案会截断，但“最近活动”固定在右侧不被吃掉——它是判断“活会话 vs 残留连接”的关键信号。
-  const primaryClient = driving ? profile.cdpClients[0] : gatewayControlClient(profile) || undefined;
+  const primaryClient = driving ? profile.cdpClients[0] : agentBrowserOccupancyClient(profile) || undefined;
   const sessionText = !busyHere && primaryClient ? cdpSessionText(primaryClient) : "";
   const sessionAge = !busyHere && primaryClient ? formatRelativeTime(primaryClient.lastActive) : "";
   // 硬停信号（如 CDP_PORT_CONTENDED）：塌缩成一行「稳定码 + 可照做 action」，优先突出给 agent 照做。
@@ -311,13 +312,13 @@ function renderMiniProfileCard(profile: PublicProfile): string {
   const activityText = activity ? agentActivityLeadText(activity) || "正在操作" : "";
   const activityProgress = activity ? agentActivityProgressText(activity) : "";
   const activityTip = activity ? agentActivityTooltipText(activity) || activityText : "";
-  const takeover = store.miniTakeoverByProfileId[profile.id] || (gatewayUserHasControl(profile)
+  const takeover = store.miniTakeoverByProfileId[profile.id] || (profileUserHasControl(profile)
     ? {
         profileId: profile.id,
         profileName: profile.name,
-        agent: profile.gatewayControl?.agent || undefined,
-        session: profile.gatewayControl?.ownerSessionId || undefined,
-        at: profile.gatewayControl?.updatedAt || new Date().toISOString()
+        agent: profile.gatewayControl?.agent || profile.agentBrowserOccupancy?.agent || undefined,
+        session: profile.gatewayControl?.ownerSessionId || profile.agentBrowserOccupancy?.session || undefined,
+        at: profile.gatewayControl?.updatedAt || profile.agentBrowserOccupancy?.updatedAt || new Date().toISOString()
       }
     : undefined);
   const takeoverAgent = takeover?.agent || "AI";

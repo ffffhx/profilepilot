@@ -165,7 +165,24 @@ try {
   assert.equal(stopCalls.length, 0, "Main-world forged stop signal must not trigger onStop.");
   step("Main-world forged stop attempt could not see the binding and did not call onStop.");
 
-  await clickOverlayStopButton(rootPageClient);
+  const secondStart = performance.now();
+  const created = await browserClient.send("Target.createTarget", { url: SECOND_URL }, 5000);
+  assert.equal(typeof created?.targetId, "string", "Target.createTarget should return a targetId.");
+  const secondPage = await waitForInjectedTarget(
+    chrome.port,
+    (target) => target.id === created.targetId,
+    NEW_TAB_INJECTION_LIMIT_MS,
+    "new tab overlay injection"
+  );
+  secondPageClient = secondPage.client;
+  const secondElapsedMs = Math.round(performance.now() - secondStart);
+  assert.ok(
+    secondElapsedMs < NEW_TAB_INJECTION_LIMIT_MS,
+    `New tab overlay injection should complete under ${NEW_TAB_INJECTION_LIMIT_MS}ms; got ${secondElapsedMs}ms.`
+  );
+  step(`New tab overlay injection completed in ${secondElapsedMs}ms.`);
+
+  await clickOverlayStopButton(secondPageClient);
   await waitFor(() => (stopCalls.length === 1 ? stopCalls.length : null), 1500, "isolated overlay button stop path");
   assert.equal(stopCalls[0].stopAll, true);
   assert.equal(stopCalls[0].pids, undefined);
@@ -185,31 +202,14 @@ try {
     })()`,
     1000
   );
-  assert.equal(repeatedForgery, false, "Main world should still not have a signal function after takeover.");
+  assert.equal(repeatedForgery, false, "Main world should still not have a signal function after terminal stop.");
   await delay(200);
   assert.equal(
     stopCalls.length,
     callsAfterFirstSignal,
     "A repeated main-world forged stop signal should not call onStop."
   );
-  step("Main-world forged stop remained inert after the legitimate isolated-world takeover.");
-
-  const secondStart = performance.now();
-  const created = await browserClient.send("Target.createTarget", { url: SECOND_URL }, 5000);
-  assert.equal(typeof created?.targetId, "string", "Target.createTarget should return a targetId.");
-  const secondPage = await waitForInjectedTarget(
-    chrome.port,
-    (target) => target.id === created.targetId,
-    NEW_TAB_INJECTION_LIMIT_MS,
-    "new tab overlay injection"
-  );
-  secondPageClient = secondPage.client;
-  const secondElapsedMs = Math.round(performance.now() - secondStart);
-  assert.ok(
-    secondElapsedMs < NEW_TAB_INJECTION_LIMIT_MS,
-    `New tab overlay injection should complete under ${NEW_TAB_INJECTION_LIMIT_MS}ms; got ${secondElapsedMs}ms.`
-  );
-  step(`New tab overlay injection completed in ${secondElapsedMs}ms.`);
+  step("Main-world forged stop remained inert after the legitimate isolated-world terminal stop.");
 
   manager.sync({ enabled: false, ports: [] });
   teardownRequested = true;

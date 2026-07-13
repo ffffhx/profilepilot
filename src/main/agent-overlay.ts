@@ -38,6 +38,8 @@ export interface AgentOverlayPortInput {
 export interface AgentOverlaySyncInput {
   enabled: boolean;
   ports: AgentOverlayPortInput[];
+  // 仍在运行但没有 Agent owner 的端口。用于 App 重启后清掉上次异常中断遗留的页面浮层。
+  inactivePorts?: number[];
 }
 
 export interface AgentOverlayStopRequest {
@@ -235,6 +237,7 @@ export class AgentOverlayManager {
   private readonly tailers = new Map<string, SessionTailer>();
   private readonly completionInFlight = new Set<string>();
   private readonly completedSessions = new Set<string>();
+  private readonly cleanedInactivePorts = new Set<number>();
   private readonly script = agentOverlayBootstrapScript();
   private readonly inputGuard: InputGuardController;
   private guardClickChain: Promise<void> = Promise.resolve();
@@ -273,6 +276,7 @@ export class AgentOverlayManager {
       return;
     }
     if (!input.enabled) {
+      this.cleanedInactivePorts.clear();
       this.inputGuard.sync([]);
       this.stopAllTailers();
       for (const state of this.ports.values()) {
@@ -356,6 +360,7 @@ export class AgentOverlayManager {
 
     this.syncInputGuard();
     this.syncTailers();
+    this.syncInactivePortCleanup(input.inactivePorts || []);
     for (const state of this.ports.values()) {
       void this.ensureTargetObserver(state).catch(() => undefined);
       void this.syncPortTargets(state).catch(() => undefined);
@@ -370,6 +375,7 @@ export class AgentOverlayManager {
 
   async dispose(): Promise<void> {
     this.disposed = true;
+    this.cleanedInactivePorts.clear();
     this.inputGuard.sync([]);
     await this.inputGuard.dispose();
     this.stopAllTailers();
@@ -390,6 +396,86 @@ export class AgentOverlayManager {
       this.inputGuardState = "starting";
     }
     this.inputGuard.sync(pids);
+  }
+
+  private syncInactivePortCleanup(ports: number[]): void {
+    if (this.disposed) {
+      this.cleanedInactivePorts.clear();
+      return;
+    }
+    const inactive = new Set(
+      ports.filter((port) => Number.isSafeInteger(port) && port > 0 && !this.ports.has(port))
+    );
+    for (const port of [...this.cleanedInactivePorts]) {
+      if (!inactive.has(port)) {
+        this.cleanedInactivePorts.delete(port);
+      }
+    }
+    for (const port of inactive) {
+      if (this.cleanedInactivePorts.has(port)) {
+        continue;
+      }
+      this.cleanedInactivePorts.add(port);
+      void this.cleanupInactivePortOverlays(port).then((cleaned) => {
+        if (!cleaned) {
+          this.cleanedInactivePorts.delete(port);
+        }
+      }).catch(() => {
+        this.cleanedInactivePorts.delete(port);
+      });
+    }
+  }
+
+  private async cleanupInactivePortOverlays(port: number): Promise<boolean> {
+    const requestTargets = this.options.requestTargets || requestCdpTargets;
+    const connect = this.options.connectBrowser || CdpBrowserClient.connect;
+    let targets: CdpTargetListEntry[];
+    try {
+      targets = await requestTargets(port);
+    } catch {
+      return false;
+    }
+
+    await Promise.allSettled(
+      targets.filter(isInjectableTarget).map(async (target) => {
+        if (!target.webSocketDebuggerUrl) {
+          return;
+        }
+        const client = await connect(target.webSocketDebuggerUrl, PAGE_CONNECT_TIMEOUT);
+        try {
+          await client.send("Runtime.enable", {}, 2500);
+          await client.send("Page.enable", {}, 2500);
+          const frameTree = await client.send<{ frameTree?: unknown }>("Page.getFrameTree", {}, 2500);
+          const tree = isRecord(frameTree.frameTree) ? frameTree.frameTree : null;
+          const frame = tree && isRecord(tree.frame) ? tree.frame : null;
+          const frameId = frame ? stringValue(frame.id) : "";
+          if (!frameId) {
+            return;
+          }
+          const context = await client.send<{ executionContextId?: number }>(
+            "Page.createIsolatedWorld",
+            { frameId, worldName: OVERLAY_WORLD_NAME },
+            2500
+          );
+          const contextId = numberValue(context.executionContextId);
+          if (contextId === null) {
+            return;
+          }
+          await client.send(
+            "Runtime.evaluate",
+            {
+              expression: 'try { sessionStorage.setItem("__ppAgentOverlayTerminalStopUntil", String(Number.MAX_SAFE_INTEGER)); } catch {} globalThis.__ppAgentOverlayTeardown && globalThis.__ppAgentOverlayTeardown()',
+              awaitPromise: false,
+              contextId
+            },
+            2500
+          );
+        } finally {
+          client.close();
+        }
+      })
+    );
+    return true;
   }
 
   private isInputGuardPort(state: PortOverlay): boolean {
@@ -623,32 +709,52 @@ export class AgentOverlayManager {
     this.completionInFlight.add(session);
     try {
       const driver = match.drivers[0];
-      await this.options.onComplete({
-        port: match.state.port,
-        profileId: match.state.profileId,
-        profileName: match.state.profileName,
-        pid: driver.pid,
-        pids: match.drivers.map((client) => client.pid),
-        session,
-        agent: inferAgentName(driver)
-      });
+      // 先在仍然可用的 internal CDP observer 上同步拆掉当前页和未来页面的浮层，
+      // 再让 onComplete 关闭 Gateway Session。否则 Session 先断开后只剩无法清理的旧 DOM。
+      await this.suspendPageBootstrapScripts(match.state);
+      try {
+        await this.options.onComplete({
+          port: match.state.port,
+          profileId: match.state.profileId,
+          profileName: match.state.profileName,
+          pid: driver.pid,
+          pids: match.drivers.map((client) => client.pid),
+          session,
+          agent: inferAgentName(driver)
+        });
+      } catch (error) {
+        if (this.isActivePort(match.state)) {
+          await this.rebuildPortPages(match.state);
+        }
+        throw error;
+      }
 
-      this.completedSessions.add(session);
-      const delegatedAt = this.now();
+      // 完成是终态：onComplete 已关闭 Gateway Session、daemon 和 Profile 租约。
+      // 立即移除对应客户端与控制框，不再进入 delegated/user takeover 状态。
+      tailer.stop();
+      this.tailers.delete(session);
+      this.completedSessions.delete(session);
       for (const state of this.ports.values()) {
         if (!state.clients.some((client) => client.session === session)) {
           continue;
         }
-        // “任务完成”只交还操作权，不等于关闭 Session：保留 daemon、租约、tailer 和控制框，
-        // 将状态切到与用户主动接管一致的 delegated 状态，直到用户交还或显式结束 Session。
-        state.delegatedToUser = true;
-        state.delegationGraceUntil = delegatedAt + 1500;
-        state.takenOverUntil = Math.max(state.takenOverUntil, delegatedAt + TAKEN_OVER_KEEPALIVE_MS);
+        state.clients = state.clients.filter((client) => client.session !== session);
+        state.delegatedToUser = false;
+        state.agentOffline = false;
+        state.controlSince = undefined;
+        state.delegationGraceUntil = 0;
+        state.takenOverUntil = 0;
         state.stopError = null;
         state.lastPayload = null;
+        if (!state.clients.length) {
+          this.ports.delete(state.port);
+          await this.teardownPort(state);
+          continue;
+        }
         await this.pushPortUpdate(state, true);
       }
       this.syncInputGuard();
+      this.syncTailers();
     } finally {
       this.completionInFlight.delete(session);
     }
@@ -1451,11 +1557,12 @@ export class AgentOverlayManager {
     let pushed = false;
     for (const contextId of contextIds) {
       try {
-        await client.send(
+        const result = await client.send<{ result?: { type?: string } }>(
           "Runtime.evaluate",
           {
             expression: `globalThis.__ppAgentOverlayUpdate && globalThis.__ppAgentOverlayUpdate(${text})`,
             awaitPromise: false,
+            returnByValue: true,
             contextId
           },
           3000,
@@ -1463,6 +1570,11 @@ export class AgentOverlayManager {
         );
         if (!this.isActivePage(state, page) || state.browserClient !== client || page.sessionId !== sessionId) {
           return;
+        }
+        // 心跳过期会主动 teardown 并删除更新函数。Chrome 对缺失函数返回 undefined，
+        // 这不是传输错误；把它当成需要重建 isolated world，下一次更新即可恢复真实状态。
+        if (result.result?.type === "undefined") {
+          continue;
         }
         pushed = true;
       } catch {
@@ -1639,7 +1751,7 @@ export class AgentOverlayManager {
         return client.send(
           "Runtime.evaluate",
           {
-            expression: 'try { sessionStorage.setItem("__ppAgentOverlayTerminalStopUntil", String(Date.now() + 120000)); } catch {}',
+            expression: 'try { sessionStorage.setItem("__ppAgentOverlayTerminalStopUntil", String(Number.MAX_SAFE_INTEGER)); } catch {}',
             awaitPromise: false
           },
           2000,

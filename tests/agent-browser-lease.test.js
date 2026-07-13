@@ -12,6 +12,7 @@ const {
   findAgentBrowserProfileLeaseForSessionSync,
   readAgentBrowserRuntimeProfilesSync,
   readAgentBrowserProfileLeaseSync,
+  readActiveAgentBrowserProfileOccupancySync,
   releaseAgentBrowserProfileLeaseSync,
   releaseAgentBrowserProfileLeasesForSessionSync,
   resolveAgentBrowserProfileTargetSync,
@@ -117,6 +118,19 @@ test("agent-browser Profile lease remains exclusive while delegated to the user"
   const delegated = readAgentBrowserProfileLeaseSync(9223, home);
   assert.equal(delegated.delegatedToUser, true);
   assert.equal(delegated.expiresAt, "9999-12-31T23:59:59.999Z");
+  assert.deepEqual(readActiveAgentBrowserProfileOccupancySync(9223, home, now + 1_000), {
+    cdpPort: 9223,
+    profileId: "isolated:one",
+    profileName: "工作 Profile",
+    session: "cx-owner",
+    ownership: "user",
+    agent: "Codex",
+    project: null,
+    command: null,
+    holderPid: 99_999_991,
+    daemonPid: null,
+    updatedAt: "2026-07-10T00:00:01.000Z"
+  });
 
   const blocked = acquireAgentBrowserProfileLeaseSync({
     cdpPort: 9223,
@@ -130,6 +144,63 @@ test("agent-browser Profile lease remains exclusive while delegated to the user"
   const resumed = readAgentBrowserProfileLeaseSync(9223, home);
   assert.equal(resumed.delegatedToUser, undefined);
   assert.notEqual(resumed.expiresAt, "9999-12-31T23:59:59.999Z");
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("delegated lease is reclaimable when the live Gateway no longer owns that Profile", () => {
+  const home = makeTempHome();
+  const now = Date.parse("2026-07-10T00:00:00.000Z");
+  acquireAgentBrowserProfileLeaseSync({
+    cdpPort: 9224,
+    session: "cx-stale",
+    holderPid: 99_999_991,
+    profileId: "isolated:stale",
+    profileName: "旧备用 Profile"
+  }, home, now);
+  setAgentBrowserProfileLeasesDelegatedSync("cx-stale", true, home, now + 1_000);
+  writeGatewayAuthority(home, []);
+
+  assert.equal(readActiveAgentBrowserProfileOccupancySync(9224, home, now + 2_000), null);
+  const reclaimed = acquireAgentBrowserProfileLeaseSync({
+    cdpPort: 9224,
+    session: "cx-current",
+    holderPid: process.pid,
+    profileId: "isolated:stale",
+    profileName: "旧备用 Profile"
+  }, home, now + 2_000);
+  assert.equal(reclaimed.ok, true);
+  assert.equal(reclaimed.status, "reclaimed");
+  assert.equal(reclaimed.replacedLease.session, "cx-stale");
+
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("delegated lease stays exclusive while the live Gateway still owns that Profile", () => {
+  const home = makeTempHome();
+  const now = Date.parse("2026-07-10T00:00:00.000Z");
+  acquireAgentBrowserProfileLeaseSync({
+    cdpPort: 9224,
+    session: "cx-owner",
+    holderPid: 99_999_991,
+    profileId: "isolated:one",
+    profileName: "工作 Profile"
+  }, home, now);
+  setAgentBrowserProfileLeasesDelegatedSync("cx-owner", true, home, now + 1_000);
+  writeGatewayAuthority(home, [{
+    publicPort: 9224,
+    ownerSessionId: "cx-owner",
+    sessionStatus: "active"
+  }]);
+
+  assert.equal(readActiveAgentBrowserProfileOccupancySync(9224, home, now + 2_000).session, "cx-owner");
+  const blocked = acquireAgentBrowserProfileLeaseSync({
+    cdpPort: 9224,
+    session: "cx-other",
+    holderPid: process.pid
+  }, home, now + 2_000);
+  assert.equal(blocked.ok, false);
+  assert.equal(blocked.lease.session, "cx-owner");
+
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -262,7 +333,7 @@ test("agent-browser Profile lease resolves and refreshes Profile identity", () =
   rmSync(home, { recursive: true, force: true });
 });
 
-test("agent-browser Profile candidates include only live, unoccupied Profiles and sort by CDP port", () => {
+test("agent-browser Profile candidates include registered unoccupied Profiles and sort by CDP port", () => {
   const home = makeTempHome();
   const now = Date.parse("2026-07-10T00:00:00.000Z");
   writeAgentBrowserRuntimeProfilesSync([
@@ -296,6 +367,7 @@ test("agent-browser Profile candidates include only live, unoccupied Profiles an
       profileName: "下一个 Profile",
       cdpPort: 9225,
       source: "isolated",
+      running: false,
       lastLaunchedAt: "2026-07-09T05:00:00.000Z"
     },
     {
@@ -323,6 +395,7 @@ test("agent-browser Profile candidates include only live, unoccupied Profiles an
   assert.deepEqual(candidates.map((candidate) => candidate.cdpPort), [9224, 9225, 9226]);
   assert.equal(candidates[0].profileName, "项目 Profile");
   assert.equal(candidates[0].alreadyOwnedBySession, false);
+  assert.equal(candidates.find((candidate) => candidate.cdpPort === 9225).running, false);
   assert.equal(readAgentBrowserRuntimeProfilesSync(home).profiles.length, 5);
 
   rmSync(home, { recursive: true, force: true });
@@ -345,4 +418,15 @@ test("agent-browser Profile candidates reject stale runtime snapshots", () => {
 
 function makeTempHome() {
   return path.join(os.tmpdir(), `profilepilot-agent-browser-lease-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+}
+
+function writeGatewayAuthority(home, profiles) {
+  const gatewayDir = path.join(home, ".profilepilot", "gateway");
+  mkdirSync(gatewayDir, { recursive: true });
+  writeFileSync(path.join(gatewayDir, "daemon.pid"), `${process.pid}\n`, "utf8");
+  writeFileSync(path.join(gatewayDir, "state.json"), JSON.stringify({
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    profiles
+  }), "utf8");
 }

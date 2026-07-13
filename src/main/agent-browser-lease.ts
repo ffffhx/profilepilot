@@ -10,7 +10,7 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { StoredProfile } from "../shared/types";
+import type { AgentBrowserProfileOccupancy, StoredProfile } from "../shared/types";
 
 const SAFE_SESSION_RE = /^[A-Za-z0-9._-]+$/;
 const LEASE_VERSION = 1;
@@ -21,6 +21,7 @@ const MUTEX_POLL_MS = 10;
 const RUNTIME_SNAPSHOT_VERSION = 1;
 const RUNTIME_SNAPSHOT_MAX_AGE_MS = 30_000;
 const RUNTIME_SNAPSHOT_HEARTBEAT_MS = 10_000;
+const GATEWAY_STATE_VERSION = 1;
 
 // 首条 connect 命令执行期间还不一定已经生成 daemon pid，只给一个短暂的 pending 窗口；
 // 命令成功后会带 daemon pid 续成常规租约。常规租约每条浏览器命令都会续期。
@@ -65,6 +66,8 @@ export interface AgentBrowserRuntimeProfile {
   clonedFromProfileId?: string;
   projectTag?: string;
   lastLaunchedAt?: string;
+  // false 表示已登记但尚未启动；推荐命令会交给 Gateway 自动启动。
+  running: boolean;
 }
 
 export interface AgentBrowserProfileCandidate extends AgentBrowserRuntimeProfile {
@@ -170,9 +173,9 @@ export function findAvailableAgentBrowserProfileCandidatesSync(
   return snapshot.profiles
     .filter((profile) => profile.cdpPort !== input.excludedPort)
     .map((profile): AgentBrowserProfileCandidate | null => {
-      const lease = readAgentBrowserProfileLeaseSync(profile.cdpPort, homeDir);
-      const alreadyOwnedBySession = Boolean(lease && requestedSession && lease.session === requestedSession);
-      if (lease && !alreadyOwnedBySession && isAgentBrowserProfileLeaseActive(lease, now)) {
+      const occupancy = readActiveAgentBrowserProfileOccupancySync(profile.cdpPort, homeDir, now);
+      const alreadyOwnedBySession = Boolean(occupancy && requestedSession && occupancy.session === requestedSession);
+      if (occupancy && !alreadyOwnedBySession) {
         return null;
       }
       return { ...profile, alreadyOwnedBySession };
@@ -181,6 +184,28 @@ export function findAvailableAgentBrowserProfileCandidatesSync(
     // CDP 端口就是用户定义的 Profile 槽位顺序。冲突后严格从小到大推荐，
     // 例如 9223 被占用时依次尝试 9224、9225，而不让副本组/项目标签打乱顺序。
     .sort((a, b) => a.cdpPort - b.cdpPort);
+}
+
+export function readActiveAgentBrowserProfileOccupancySync(
+  cdpPort: number,
+  homeDir = os.homedir(),
+  now = Date.now()
+): AgentBrowserProfileOccupancy | null {
+  const lease = readAgentBrowserProfileLeaseSync(cdpPort, homeDir);
+  if (!lease || !isAgentBrowserProfileLeaseActive(lease, now, homeDir)) return null;
+  return {
+    cdpPort: lease.cdpPort,
+    profileId: lease.profileId,
+    profileName: lease.profileName,
+    session: lease.session,
+    ownership: lease.delegatedToUser ? "user" : "agent",
+    agent: lease.agent || null,
+    project: lease.project || null,
+    command: lease.command || null,
+    holderPid: lease.holderPid,
+    daemonPid: lease.daemonPid || null,
+    updatedAt: lease.updatedAt
+  };
 }
 
 export function acquireAgentBrowserProfileLeaseSync(
@@ -198,7 +223,7 @@ export function acquireAgentBrowserProfileLeaseSync(
   return withLeaseMutexSync(homeDir, cdpPort, () => {
     const leasePath = agentBrowserProfileLeasePath(homeDir, cdpPort);
     const existing = readAgentBrowserProfileLeaseFileSync(leasePath);
-    if (existing && existing.session !== session && isAgentBrowserProfileLeaseActive(existing, now)) {
+    if (existing && existing.session !== session && isAgentBrowserProfileLeaseActive(existing, now, homeDir)) {
       return { ok: false, status: "conflict", lease: existing };
     }
 
@@ -445,8 +470,20 @@ export function retireAgentBrowserSessionSync(
   return true;
 }
 
-export function isAgentBrowserProfileLeaseActive(lease: AgentBrowserProfileLease, now = Date.now()): boolean {
+export function isAgentBrowserProfileLeaseActive(
+  lease: AgentBrowserProfileLease,
+  now = Date.now(),
+  homeDir = os.homedir()
+): boolean {
   if (lease.delegatedToUser) {
+    // 委托给用户的租约没有时间过期，但 Gateway 才是当前 Profile↔Session 所有权的权威。
+    // Gateway 进程活着且状态文件有效时，如果该端口已没有 active owner，说明这是上一次
+    // Gateway 生命周期遗留的 lease；继续永久保留会把所有备用 Profile 逐渐耗尽。
+    // Gateway 不可用时保持保守：仍视为 active，避免仅凭缺文件抢走用户正在操作的 Profile。
+    const gatewayOwnership = readGatewayActiveOwnershipSync(lease.cdpPort, homeDir);
+    if (gatewayOwnership !== undefined) {
+      return gatewayOwnership !== null;
+    }
     return true;
   }
   if (isProcessAlive(lease.holderPid)) {
@@ -457,6 +494,48 @@ export function isAgentBrowserProfileLeaseActive(lease: AgentBrowserProfileLease
     return false;
   }
   return lease.daemonPid ? isProcessAlive(lease.daemonPid) : true;
+}
+
+interface GatewayActiveOwnership {
+  ownerSessionId: string;
+  publicPort: number;
+}
+
+// undefined = Gateway 权威不可用，null = Gateway 明确表示此端口没有 active owner。
+function readGatewayActiveOwnershipSync(
+  cdpPort: number,
+  homeDir: string
+): GatewayActiveOwnership | null | undefined {
+  const gatewayDir = path.join(homeDir, ".profilepilot", "gateway");
+  const daemonPid = readPidFileSync(path.join(gatewayDir, "daemon.pid"));
+  if (!daemonPid || !isProcessAlive(daemonPid)) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(gatewayDir, "state.json"), "utf8")) as {
+      version?: unknown;
+      profiles?: Array<{
+        publicPort?: unknown;
+        ownerSessionId?: unknown;
+        sessionStatus?: unknown;
+      }>;
+    };
+    if (parsed.version !== GATEWAY_STATE_VERSION || !Array.isArray(parsed.profiles)) {
+      return undefined;
+    }
+    const active = parsed.profiles.find(
+      (profile) =>
+        Number(profile.publicPort) === cdpPort &&
+        profile.sessionStatus === "active" &&
+        safeSessionName(typeof profile.ownerSessionId === "string" ? profile.ownerSessionId : undefined) !== undefined
+    );
+    const ownerSessionId = active
+      ? safeSessionName(typeof active.ownerSessionId === "string" ? active.ownerSessionId : undefined)
+      : undefined;
+    return active && ownerSessionId ? { ownerSessionId, publicPort: cdpPort } : null;
+  } catch {
+    return undefined;
+  }
 }
 
 export function resolveAgentBrowserProfileTargetSync(
@@ -632,7 +711,13 @@ function normalizeRuntimeProfiles(input: unknown[]): AgentBrowserRuntimeProfile[
       continue;
     }
     seenPorts.add(cdpPort);
-    const profile: AgentBrowserRuntimeProfile = { profileId, profileName, cdpPort };
+    const profile: AgentBrowserRuntimeProfile = {
+      profileId,
+      profileName,
+      cdpPort,
+      // 兼容升级前没有 running 字段的短时快照：旧快照只包含运行中 Profile。
+      running: candidate.running !== false
+    };
     const source = nonEmptyString(candidate.source);
     if (source) profile.source = source;
     const clonedFromProfileId = nonEmptyString(candidate.clonedFromProfileId);

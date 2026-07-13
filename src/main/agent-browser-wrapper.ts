@@ -311,10 +311,13 @@ export function resolveRealAgentBrowser(env: NodeJS.ProcessEnv = process.env, se
   }
 
   const self = realpathOrInput(selfPath);
+  const managedLauncher = realpathOrInput(
+    env.PROFILEPILOT_AGENT_BROWSER_LAUNCHER || path.join(env.HOME || os.homedir(), ".profilepilot", "bin", "agent-browser")
+  );
   const seen = new Set<string>();
   for (const candidate of output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)) {
     const real = realpathOrInput(candidate);
-    if (seen.has(real) || real === self) {
+    if (seen.has(real) || real === self || real === managedLauncher) {
       continue;
     }
     seen.add(real);
@@ -564,27 +567,28 @@ export function formatProfileLeaseConflict(
       cdp_port: candidate.cdpPort,
       project_tag: candidate.projectTag || null,
       already_owned_by_session: candidate.alreadyOwnedBySession,
+      requires_start: !candidate.running,
       retry_args: retryArgs,
       command: formatAgentBrowserCommand(retryArgs)
     };
   });
   const recommended = alternatives[0] || null;
   const action = recommended
-    ? `自动切换：不要重试端口 ${lease.cdpPort}；立即执行 recommended_command，把原操作切到「${recommended.profile_name}」的 CDP ${recommended.cdp_port}。若失败，按 alternatives 顺序尝试下一个。`
-    : `停手：不要重试端口 ${lease.cdpPort}；当前没有可自动切换的空闲 Profile，请让用户启动或释放另一个 Profile。`;
+    ? `停手：不要重试端口 ${lease.cdpPort}，也不要自动切换 Profile。先告知用户当前占用情况，并征得同意后再执行 recommended_command；该命令会${recommended.requires_start ? "让 Gateway 启动并连接" : "把原操作切到"}「${recommended.profile_name}」的 CDP ${recommended.cdp_port}。`
+    : `停手：不要重试端口 ${lease.cdpPort}；当前没有空闲 Profile，请让用户启动或释放另一个 Profile。`;
   return `${JSON.stringify(
     {
       source: "ProfilePilot",
       error_code: "PROFILE_ALREADY_IN_USE",
-      // 有候选时只硬停当前 Profile，Agent 应按 recommended_command 继续原任务；
-      // 没有候选时才是整个浏览器动作的 hard stop。
-      hard_stop: !recommended,
+      // 切换 Profile 会改变登录态和窗口，因此即使存在候选，也必须先停手征得用户同意。
+      hard_stop: true,
       blocked_profile_hard_stop: true,
       retryable_with_alternative_profile: Boolean(recommended),
+      requires_user_confirmation: Boolean(recommended),
       message: `${lease.profileName} 已被另一个 agent-browser Session 占用`,
       action,
-      auto_switch_allowed: Boolean(recommended),
-      auto_switch_strategy: recommended ? "first_available_then_next" : null,
+      auto_switch_allowed: false,
+      auto_switch_strategy: null,
       recommended_profile_id: recommended?.profile_id || null,
       recommended_profile_name: recommended?.profile_name || null,
       recommended_cdp_port: recommended?.cdp_port || null,
@@ -814,19 +818,32 @@ async function runProfilePilotInternalCommand(
       writeProfilePilotControlNoticeSync(session, requested, homeDir);
     }
     await controlGatewaySessionIfManaged(session, "complete", homeDir);
-    setAgentBrowserProfileLeasesDelegatedSync(session, true, homeDir);
-    const notice = makeWrapperControlNotice(context, "agent_complete", nextControlVersion(session, homeDir));
-    writeProfilePilotControlNoticeSync(session, notice, homeDir);
+    // 兼容仍在持有 Chrome pipe 的旧 Gateway：旧版本把 complete 当成临时接管，
+    // 再发 stop 才能真正清掉 owner。新 Gateway 已在 complete 时停止，此调用会安全跳过。
+    await controlGatewaySessionIfManaged(session, "stop", homeDir);
+    const daemonPid = readAgentBrowserDaemonPidSync(homeDir, session);
+    const retired = retireAgentBrowserSessionSync(session, daemonPid, homeDir);
+    const releasedPorts = releaseAgentBrowserProfileLeasesForSessionSync(session, homeDir);
+    const clearedNotices = clearProfilePilotNoticesForSession(session, homeDir);
+    clearAgentBrowserControlWaitStateSync(session, undefined, homeDir);
+    clearAgentBrowserCommandStateSync(session, undefined, homeDir);
+    clearBrowserGatewayDaemonIdentity(session, homeDir);
+    if (!retired) {
+      process.stderr.write(`[ProfilePilot] Session ${session} 已从 Gateway 和 Profile 租约释放，但残留 agent-browser daemon 无法安全结束。\n`);
+      return PROFILEPILOT_AGENT_BROWSER_HARD_STOP_EXIT_CODE;
+    }
     process.stdout.write(`${JSON.stringify({
       source: "ProfilePilot",
       ok: true,
       action: "complete",
-      ownership: notice.ownership,
+      ownership: "user",
       session,
-      profile_id: notice.profileId,
-      profile_name: notice.profileName,
-      control_version: notice.controlVersion,
-      message: notice.message
+      profile_id: context.profileId,
+      profile_name: context.profileName,
+      daemon_pid: daemonPid || null,
+      released_ports: releasedPorts,
+      cleared_notices: clearedNotices,
+      message: "Agent 已完成当前任务，Session 和 Profile 租约已释放"
     }, null, 2)}\n`);
     return 0;
   }
@@ -1259,10 +1276,10 @@ function makeWrapperControlNotice(
     reason,
     ownership: agentComplete ? "agentDelegatedToUser" : "agent",
     message: agentComplete
-      ? "Agent 已完成当前任务，浏览器控制权已交还用户"
+      ? "Agent 已完成当前任务，正在释放 Session 和 Profile"
       : "用户已将浏览器控制权交还 Agent",
     action: agentComplete
-      ? "停手：当前任务已完成且 Session 仍由用户接管；只有用户点击“交还 Agent”或明确要求继续时，才能恢复浏览器操作"
+      ? "停手：当前任务已完成，ProfilePilot 正在关闭 Agent Session 并释放 Profile；不要重试或重新连接"
       : "控制权已恢复：重新 snapshot 后再继续，不要复用接管前的元素引用",
     hardStop: agentComplete,
     profileId: context.profileId,
@@ -1524,6 +1541,11 @@ function readActiveNotice(filePath: string, now: number): AgentControlNotice | n
   try {
     const parsed = JSON.parse(readFileSync(filePath, "utf8")) as Partial<AgentControlNotice>;
     if (!parsed || parsed.hardStop !== true || typeof parsed.code !== "string" || !HARD_STOP_CODES.has(parsed.code)) {
+      return null;
+    }
+    // agent_complete 只在正在收敛/释放的短窗口内阻止并发命令；旧版本遗留的
+    // quiesced 完成 notice 不能继续把已经释放的 Session 永久锁住。
+    if (parsed.reason === "agent_complete" && parsed.handoffState !== "requested") {
       return null;
     }
     const expiresAt = typeof parsed.expiresAt === "string" ? Date.parse(parsed.expiresAt) : Number.NaN;

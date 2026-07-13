@@ -3,6 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0a1014" />
     <title>ProfilePilot</title>
     <link rel="icon" href="./assets/profilepilot-mark.svg" type="image/svg+xml" />
     <script>
@@ -13,13 +14,7 @@
     <link rel="stylesheet" href="./app.css" />
   </head>
   <body>
-    <div id="app" class="app-loading p-8 text-muted font-mono text-[13px] tracking-[0.08em] uppercase">Loading...</div>
-    <script>
-      // 入场动画只在启动时播放一次；之后 UI 重渲染不再触发（见 styles.css 的 body:not(.booted)）
-      window.addEventListener("load", () => {
-        setTimeout(() => document.body.classList.add("booted"), 800);
-      });
-    </script>
+    <div id="app" class="app-loading p-8 text-muted font-mono text-[13px] tracking-[0.04em]">正在载入…</div>
     <script src="../dist/renderer/app.js"></script>
   </body>
 </html>

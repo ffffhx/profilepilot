@@ -32,6 +32,10 @@ export function agentOverlayBootstrapScript(): string {
   const HOST_REATTACH_LIMIT = 8;
   const HOST_REATTACH_WINDOW_MS = 10000;
   const HOST_REATTACH_BACKOFF_MS = 3000;
+  // ProfilePilot 正常运行时至少每 30 秒校准一次状态。连续错过两轮以上更新，说明
+  // CDP / App 已断开；此时必须自行撤掉旧浮层，不能继续伪装成“Agent 调试中”。
+  const OVERLAY_HEARTBEAT_TIMEOUT_MS = 75000;
+  const OVERLAY_HEARTBEAT_CHECK_MS = 5000;
   // 合成光标 / 点击高亮层：AI 空闲 900ms 后隐藏合成光标，点击涟漪 620ms 后自动回收。
   const CURSOR_IDLE_HIDE_MS = 900;
   const RIPPLE_LIFETIME_MS = 620;
@@ -240,6 +244,8 @@ export function agentOverlayBootstrapScript(): string {
   let expanded = readExpanded();
   let takenOverTimer = null;
   let elapsedTimer = null;
+  let heartbeatTimer = null;
+  let lastUpdateReceivedAt = Date.now();
   let stopConfirmTimer = null;
   let stopConfirming = false;
   let tearingDown = false;
@@ -290,6 +296,9 @@ export function agentOverlayBootstrapScript(): string {
   let stopConfirmKind = "";
 
   function mount() {
+    if (tearingDown || host) {
+      return;
+    }
     if (!document.documentElement) {
       setTimeout(mount, 50);
       return;
@@ -335,7 +344,7 @@ export function agentOverlayBootstrapScript(): string {
       ".target{margin:-4px 0 8px;color:var(--pp-next);font-size:11.5px;line-height:1.3;overflow-wrap:anywhere}",
       ".progress-text{margin:0 0 5px;color:var(--pp-progress-text);font-size:12px;font-weight:680;line-height:1.35;overflow-wrap:anywhere}",
       ".progress-bar{height:3px;margin:0 0 8px;border-radius:99px;background:var(--pp-progress-bg);overflow:hidden}",
-      ".progress-fill{display:block;width:0;height:100%;border-radius:99px;background:linear-gradient(90deg,var(--pp-progress-fill-start),var(--pp-progress-fill-end));box-shadow:0 0 12px var(--pp-progress-glow);transition:width .32s var(--pp-motion-ease)}",
+      ".progress-fill{display:block;width:100%;height:100%;border-radius:99px;background:var(--pp-progress-fill-start);transform:scaleX(0);transform-origin:left center;transition:transform .24s var(--pp-motion-ease)}",
       ".next{margin:0 0 9px;color:var(--pp-next);font-size:11.5px;line-height:1.35;overflow-wrap:anywhere}",
       ".sessions{margin:0 0 10px;padding:7px 8px;border-radius:8px;background:var(--pp-sessions-bg);border:1px solid var(--pp-sessions-border)}",
       ".session-heading{margin:0 0 5px;color:var(--pp-session-heading);font-size:11px;font-weight:700}",
@@ -345,7 +354,7 @@ export function agentOverlayBootstrapScript(): string {
       ".session-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--pp-session-name)}",
       ".session-time{white-space:nowrap;color:var(--pp-session-time);font-variant-numeric:tabular-nums}",
       "details{margin:0 0 10px;color:var(--pp-details);font-size:11.5px;line-height:1.4}",
-      "summary{cursor:pointer;color:var(--pp-summary);font-weight:650;outline:none;transition:color var(--pp-hover-duration) var(--pp-motion-ease)}",
+      "summary{cursor:pointer;color:var(--pp-summary);font-weight:650;transition:color var(--pp-hover-duration) var(--pp-motion-ease)}",
       "summary:hover{color:var(--pp-summary-hover)}",
       ".icon-btn:focus-visible,.stop:focus-visible,.dot:focus-visible,summary:focus-visible{outline:2px solid var(--pp-focus-ring);outline-offset:2px}",
       ".recent-text{display:block;margin-top:4px;overflow-wrap:anywhere}",
@@ -379,87 +388,86 @@ export function agentOverlayBootstrapScript(): string {
       ":host(.reduced-motion) .pp-agent-cursor{transition:none}",
       ":host(.reduced-motion) .pp-click-ripple{animation:none;opacity:.5}",
       ".wrap{position:fixed;inset:0;z-index:1;pointer-events:none}",
-      ".panel{position:absolute;left:50%;right:auto;top:auto;bottom:28px;width:min(560px,calc(100vw - 32px));border-radius:18px;border-color:rgba(197,214,255,.34);background:rgba(31,38,53,.88);box-shadow:0 24px 70px rgba(28,42,88,.34),0 0 0 1px rgba(255,255,255,.08) inset;pointer-events:auto;transform:translateX(-50%);overflow:hidden}",
-      ".panel:hover{box-shadow:0 26px 76px rgba(28,42,88,.38),0 0 0 1px rgba(255,255,255,.10) inset}",
-      ".panel.taken{border-color:rgba(103,240,177,.55);background:rgba(14,39,32,.90);transform:translateX(-50%)}",
+      ".panel{position:absolute;left:50%;right:auto;top:auto;bottom:24px;width:min(560px,calc(100vw - 32px));border:1px solid #31454f;border-radius:14px;background:#101920;box-shadow:0 6px 8px rgba(2,6,9,.34);pointer-events:auto;transform:translateX(-50%);overflow:hidden}",
+      ".panel:hover{border-color:#3a4e59}",
+      ".panel.taken{border-color:rgba(56,225,160,.52);background:#0d1b17;transform:translateX(-50%)}",
       ".head{min-height:42px;padding:10px 12px 7px;cursor:default}",
       ".head:active{cursor:default}",
-      ".title{font-size:15px;font-weight:780;color:#f8fbff}",
+      ".title{font-size:14px;font-weight:740;color:#eef5f7}",
       ".body{display:grid;gap:7px;padding:0 12px 12px}",
       ".details{display:grid;gap:7px}",
       ".meta,.elapsed{margin-left:18px}",
-      ".action{margin:0;border:1px solid rgba(255,255,255,.06);background:rgba(12,18,30,.26)}",
-      ".status-line{display:none;align-items:center;gap:7px;min-width:0;color:rgba(234,241,255,.74);font-size:12px;font-weight:720;line-height:1.25}",
-      ".status-dot{width:7px;height:7px;border-radius:99px;background:#7fa2ff;box-shadow:0 0 13px rgba(127,162,255,.92);flex:0 0 auto}",
+      ".action{margin:0;border:1px solid #25343d;background:#0d151a}",
+      ".status-line{display:none;align-items:center;gap:7px;min-width:0;color:#b9c8d0;font-size:11.5px;font-weight:650;line-height:1.3}",
+      ".status-dot{width:7px;height:7px;border-radius:99px;background:#5fb6ff;flex:0 0 auto}",
       ".lock-hint{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
       ".status-stack{display:none;min-width:0}",
       ".state-row{display:flex;align-items:center;gap:6px;min-width:0;margin-top:5px}",
-      ".state-chip,.space-chip{display:inline-flex;align-items:center;min-width:0;max-width:100%;height:20px;border-radius:999px;border:1px solid rgba(218,228,255,.17);background:rgba(244,248,255,.08);padding:0 8px;color:rgba(241,246,255,.82);font-size:10.5px;font-weight:740;line-height:20px;white-space:nowrap}",
-      ".state-chip{color:#dbe8ff;border-color:rgba(127,162,255,.34);background:rgba(127,162,255,.14)}",
+      ".state-chip,.space-chip{display:inline-flex;align-items:center;min-width:0;max-width:100%;height:20px;border-radius:999px;border:1px solid #31454f;background:#15202a;padding:0 8px;color:#cbd7dc;font-size:10.5px;font-weight:680;line-height:20px;white-space:nowrap}",
+      ".state-chip{color:#92cdff;border-color:rgba(95,182,255,.38);background:rgba(95,182,255,.10)}",
       ".space-chip{overflow:hidden;text-overflow:ellipsis}",
       ".control-note{display:none;margin-top:5px;color:rgba(224,234,255,.58);font-size:10.5px;font-weight:650;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
       ".controls{display:grid;grid-template-columns:1fr 1fr;gap:8px}",
       ".takeover,.stop{width:100%;min-height:36px;border-radius:10px;font-size:12.5px;font-weight:780;cursor:pointer;transition:background var(--pp-hover-duration) var(--pp-motion-ease),border-color var(--pp-hover-duration) var(--pp-motion-ease),color var(--pp-hover-duration) var(--pp-motion-ease),transform var(--pp-hover-duration) var(--pp-motion-ease)}",
-      ".takeover{border:1px solid rgba(202,218,255,.58);background:rgba(244,248,255,.13);color:#f8fbff}",
-      ".takeover:hover:not(:disabled){background:rgba(244,248,255,.22);border-color:rgba(232,238,255,.78)}",
-      ".takeover.confirm{background:linear-gradient(180deg,rgba(255,171,92,.27),rgba(255,171,92,.13));border-color:rgba(255,188,112,.68);color:var(--pp-stop-confirm-text)}",
-      ".stop{border:1px solid rgba(255,93,96,.62);background:linear-gradient(180deg,rgba(255,93,96,.28),rgba(255,93,96,.13));color:#ffe4e2}",
-      ".stop:hover:not(:disabled){background:rgba(255,93,96,.32);border-color:rgba(255,128,130,.82);color:#fff6f5}",
+      ".takeover{border:1px solid #38e1a0;background:#38e1a0;color:#052016}",
+      ".takeover:hover:not(:disabled){background:#6ff2c0;border-color:#6ff2c0}",
+      ".takeover.confirm{background:rgba(242,177,62,.14);border-color:rgba(242,177,62,.62);color:#ffd27a}",
+      ".stop{border:1px solid rgba(255,113,100,.46);background:rgba(255,113,100,.08);color:#ffaaa1}",
+      ".stop:hover:not(:disabled){background:rgba(255,113,100,.15);border-color:rgba(255,113,100,.68);color:#ffd8d3}",
       ".takeover:active:not(:disabled),.stop:active:not(:disabled){transform:translateY(1px)}",
       ".takeover:disabled,.stop:disabled{opacity:.58;cursor:default;transform:none}",
       ".hide{display:none}",
       ".detail-toggle{display:none}",
       ":host(.delegated) .hide{display:inline-block}",
-      ":host(.locked) .panel{bottom:24px;width:min(548px,calc(100vw - 32px));min-height:72px;display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:auto auto;align-items:center;column-gap:16px;row-gap:1px;padding:10px 11px 10px 15px;border-radius:16px;border-color:rgba(189,203,236,.27);background:linear-gradient(135deg,rgba(27,34,49,.96),rgba(35,42,57,.93));box-shadow:0 18px 48px rgba(9,17,40,.34),0 1px 0 rgba(255,255,255,.08) inset;backdrop-filter:blur(20px) saturate(1.12)}",
-      ":host(.locked) .panel::before{content:\"\";position:absolute;left:0;top:12px;bottom:12px;width:3px;border-radius:0 4px 4px 0;background:linear-gradient(180deg,#9bb8ff 0%,#6f92ef 55%,rgba(111,146,239,.20) 100%);box-shadow:0 0 16px rgba(111,146,239,.52)}",
+      ":host(.locked) .panel{bottom:24px;width:min(548px,calc(100vw - 32px));min-height:72px;display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:auto auto;align-items:center;column-gap:16px;row-gap:1px;padding:11px 12px 11px 14px;border-radius:14px;border-color:#31454f;background:#101920;box-shadow:0 6px 8px rgba(2,6,9,.34)}",
+      ":host(.locked) .panel::before{display:none}",
       ":host(.locked) .head{grid-column:1;grid-row:1;min-height:28px;padding:0;display:grid;grid-template-columns:29px minmax(0,1fr) 27px;gap:9px;align-items:center}",
-      ":host(.locked) .pulse{position:relative;width:28px;height:28px;border-radius:99px;background:rgba(10,17,31,.44);box-shadow:0 0 0 1px rgba(255,255,255,.09) inset;animation:none}",
-      ":host(.locked) .pulse::before{content:\"\";position:absolute;inset:6px;border:1.5px solid rgba(236,242,255,.88);border-top-color:#82a6ff;border-radius:99px;animation:ppSpin 1.2s linear infinite}",
-      ":host(.locked) .pulse::after{content:\"\";position:absolute;left:50%;top:50%;width:4px;height:4px;margin:-2px 0 0 -2px;border-radius:99px;background:#f8fbff;box-shadow:0 -9px 0 rgba(151,179,244,.72),0 9px 0 rgba(151,179,244,.72),9px 0 0 rgba(151,179,244,.72),-9px 0 0 rgba(151,179,244,.72)}",
-      ":host(.locked) .title{font-size:14px;font-weight:740;letter-spacing:-.01em;color:#f8fbff}",
+      ":host(.locked) .pulse{position:relative;width:28px;height:28px;border-radius:99px;background:#0d151a;border:1px solid #31454f;animation:none}",
+      ":host(.locked) .pulse::before{content:\"\";position:absolute;inset:6px;border:1.5px solid rgba(95,182,255,.30);border-top-color:#5fb6ff;border-radius:99px;animation:ppSpin 1.2s linear infinite}",
+      ":host(.locked) .pulse::after{content:\"\";position:absolute;left:50%;top:50%;width:4px;height:4px;margin:-2px 0 0 -2px;border-radius:99px;background:#92cdff}",
+      ":host(.locked) .title{font-size:14px;font-weight:720;letter-spacing:0;color:#eef5f7}",
       ":host(.locked) .reveal,:host(.locked) .hide{display:none}",
-      ":host(.locked) .detail-toggle{display:inline-grid;place-items:center;width:27px;height:27px;border-radius:8px;font-size:14px;line-height:1;background:rgba(244,248,255,.065);border:1px solid rgba(218,228,255,.13);color:rgba(226,234,250,.78)}",
-      ":host(.locked) .detail-toggle:hover{background:rgba(244,248,255,.13);border-color:rgba(232,238,255,.26);color:#ffffff}",
+      ":host(.locked) .detail-toggle{display:inline-grid;place-items:center;width:28px;height:28px;border-radius:7px;font-size:14px;line-height:1;background:#15202a;border:1px solid #31454f;color:#aebfc8}",
+      ":host(.locked) .detail-toggle:hover{background:#1d2a33;border-color:#3a4e59;color:#eef5f7}",
       ":host(.locked.expanded) .detail-toggle{transform:rotate(180deg)}",
       ":host(.locked) .body{display:contents;padding:0}",
       ":host(.locked) .details{display:none}",
       ":host(.locked) .status-stack{grid-column:1;grid-row:2;display:block;min-width:0;margin-left:38px}",
-      ":host(.locked) .status-line{display:flex;gap:6px;color:rgba(226,234,250,.72);font-size:11px;font-weight:650}",
-      ":host(.locked) .status-dot{width:6px;height:6px;background:#82a6ff;box-shadow:0 0 10px rgba(130,166,255,.78)}",
+      ":host(.locked) .status-line{display:flex;gap:6px;color:#aebfc8;font-size:11px;font-weight:620}",
+      ":host(.locked) .status-dot{width:6px;height:6px;background:#5fb6ff;box-shadow:none}",
       ":host(.locked) .state-row{margin-top:2px;min-width:0}",
       ":host(.locked) .state-chip{display:none}",
-      ":host(.locked) .space-chip{display:block;width:100%;height:auto;padding:0;border:0;border-radius:0;background:transparent;color:rgba(205,215,235,.62);font-size:10.25px;font-weight:590;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
+      ":host(.locked) .space-chip{display:block;width:100%;height:auto;padding:0;border:0;border-radius:0;background:transparent;color:#879aa5;font-size:10.25px;font-weight:580;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
       ":host(.locked) .controls{grid-column:2;grid-row:1 / span 2;display:grid;grid-template-columns:100px 110px;gap:8px;align-self:center}",
       ":host(.locked) .takeover,:host(.locked) .stop{min-height:36px;border-radius:10px;font-size:12px;font-weight:730}",
-      ":host(.locked) .takeover{border-color:rgba(157,181,235,.48);background:linear-gradient(180deg,rgba(139,165,225,.18),rgba(118,143,202,.11));color:#f5f8ff}",
-      ":host(.locked) .takeover:hover:not(:disabled){background:rgba(139,165,225,.25);border-color:rgba(188,205,244,.68)}",
-      ":host(.locked) .stop{border-color:rgba(255,106,109,.48);background:rgba(255,92,96,.10);color:#ffd9d8}",
-      ":host(.locked) .stop:hover:not(:disabled){background:rgba(255,92,96,.18);border-color:rgba(255,132,134,.68);color:#fff1f0}",
-      ":host(.offline.locked) .panel{border-color:rgba(255,188,112,.42)}",
-      ":host(.offline.locked) .panel::before{background:linear-gradient(180deg,#ffc36f 0%,#d7953d 55%,rgba(215,149,61,.20) 100%);box-shadow:0 0 16px rgba(255,188,112,.42)}",
-      ":host(.offline.locked) .status-dot{background:#ffc36f;box-shadow:0 0 10px rgba(255,188,112,.70)}",
-      ":host(.locked) .takeover:focus-visible,:host(.locked) .stop:focus-visible,:host(.locked) .detail-toggle:focus-visible{outline:2px solid rgba(167,190,246,.92);outline-offset:2px}",
-      ":host(.locked.expanded) .panel{min-height:0;grid-template-rows:auto auto auto;border-color:rgba(166,188,239,.34);background:linear-gradient(135deg,#192131 0%,#222c3e 100%);box-shadow:0 24px 64px rgba(6,12,28,.52),0 1px 0 rgba(255,255,255,.08) inset;backdrop-filter:none}",
-      ":host(.locked.expanded) .control-note{display:block;margin-top:4px;color:#aebbd2;font-size:10.5px;font-weight:620}",
-      ":host(.locked.expanded) .details{grid-column:1 / -1;grid-row:3;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px 16px;margin-top:11px;padding:13px 14px 14px;border:1px solid rgba(157,183,239,.20);border-radius:12px;background:linear-gradient(145deg,#171e2b 0%,#1c2637 100%);box-shadow:inset 3px 0 0 rgba(126,158,239,.72),0 10px 24px rgba(5,10,24,.22);color:#f7faff}",
-      ":host(.locked.expanded) .details::before{content:\"控制详情\";grid-column:1 / -1;color:#9db7ff;font-size:10px;font-weight:780;line-height:1;letter-spacing:.12em}",
-      ":host(.locked.expanded) .meta{grid-column:1;min-width:0;margin:0;color:#e9effc;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:11.5px;font-weight:650;line-height:1.45}",
-      ":host(.locked.expanded) .elapsed{grid-column:2;justify-self:end;margin:0;color:#c2cee5;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:11px;font-weight:620;line-height:1.45;white-space:nowrap}",
+      ":host(.locked) .takeover{border-color:#38e1a0;background:#38e1a0;color:#052016}",
+      ":host(.locked) .takeover:hover:not(:disabled){background:#6ff2c0;border-color:#6ff2c0}",
+      ":host(.locked) .stop{border-color:rgba(255,113,100,.46);background:rgba(255,113,100,.08);color:#ffaaa1}",
+      ":host(.locked) .stop:hover:not(:disabled){background:rgba(255,113,100,.15);border-color:rgba(255,113,100,.68);color:#ffd8d3}",
+      ":host(.offline.locked) .panel{border-color:rgba(242,177,62,.48)}",
+      ":host(.offline.locked) .status-dot{background:#f2b13e;box-shadow:none}",
+      ":host(.locked) .takeover:focus-visible,:host(.locked) .stop:focus-visible,:host(.locked) .detail-toggle:focus-visible{outline:2px solid #38e1a0;outline-offset:2px}",
+      ":host(.locked.expanded) .panel{min-height:0;grid-template-rows:auto auto auto;border-color:#3a4e59;background:#101920;box-shadow:0 6px 8px rgba(2,6,9,.38);backdrop-filter:none}",
+      ":host(.locked.expanded) .control-note{display:block;margin-top:4px;color:#9cafba;font-size:10.5px;font-weight:600}",
+      ":host(.locked.expanded) .details{grid-column:1 / -1;grid-row:3;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px 16px;margin-top:11px;padding:13px 14px 14px;border:1px solid #25343d;border-radius:10px;background:#0d151a;box-shadow:none;color:#eef5f7}",
+      ":host(.locked.expanded) .details::before{content:\"运行详情\";grid-column:1 / -1;color:#92cdff;font-size:10.5px;font-weight:720;line-height:1;letter-spacing:0}",
+      ":host(.locked.expanded) .meta{grid-column:1;min-width:0;margin:0;color:#dbe5e9;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:11.5px;font-weight:620;line-height:1.45}",
+      ":host(.locked.expanded) .elapsed{grid-column:2;justify-self:end;margin:0;color:#9cafba;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:11px;font-weight:600;line-height:1.45;white-space:nowrap}",
       ":host(.locked.expanded) .action,:host(.locked.expanded) .target,:host(.locked.expanded) .progress-text,:host(.locked.expanded) .progress-bar,:host(.locked.expanded) .next,:host(.locked.expanded) .sessions,:host(.locked.expanded) .recent{grid-column:1 / -1}",
-      ":host(.locked.expanded) .action{margin:0;padding:10px 11px;border:1px solid rgba(157,183,239,.16);border-radius:9px;background:#202a3d;color:#f7faff;font-size:12.5px;font-weight:650;line-height:1.45;box-shadow:0 1px 0 rgba(255,255,255,.04) inset}",
-      ":host(.locked.expanded) .target,:host(.locked.expanded) .next{margin:0;color:#c2cee5;font-size:11.5px;line-height:1.45}",
-      ":host(.locked.expanded) .progress-text{margin:0;color:#e8eefb;font-size:11.5px;font-weight:680}",
-      ":host(.locked.expanded) .progress-bar{margin:-4px 0 0;background:#303c52}",
-      ":host(.locked.expanded) .sessions{margin:0;padding:9px 10px;border:1px solid rgba(157,183,239,.14);border-radius:9px;background:#1d2638}",
-      ":host(.locked.expanded) .session-heading{color:#dbe6fb;font-size:11px;font-weight:720}",
-      ":host(.locked.expanded) .session-row{color:#c2cee5}",
-      ":host(.locked.expanded) .session-agent{color:#f3f7ff}",
-      ":host(.locked.expanded) .session-name{color:#d6e0f2}",
-      ":host(.locked.expanded) .session-time{color:#aebbd2}",
-      ":host(.locked.expanded) .recent{margin:0;color:#c2cee5}",
-      ":host(.locked.expanded) summary{color:#eaf1ff;font-size:11.5px;font-weight:720}",
+      ":host(.locked.expanded) .action{margin:0;padding:10px 11px;border:1px solid #25343d;border-radius:8px;background:#111a20;color:#eef5f7;font-size:12.5px;font-weight:620;line-height:1.45;box-shadow:none}",
+      ":host(.locked.expanded) .target,:host(.locked.expanded) .next{margin:0;color:#9cafba;font-size:11.5px;line-height:1.45}",
+      ":host(.locked.expanded) .progress-text{margin:0;color:#dbe5e9;font-size:11.5px;font-weight:650}",
+      ":host(.locked.expanded) .progress-bar{margin:-4px 0 0;background:#25343d}",
+      ":host(.locked.expanded) .sessions{margin:0;padding:9px 10px;border:1px solid #25343d;border-radius:8px;background:#111a20}",
+      ":host(.locked.expanded) .session-heading{color:#c7d5db;font-size:11px;font-weight:700}",
+      ":host(.locked.expanded) .session-row{color:#9cafba}",
+      ":host(.locked.expanded) .session-agent{color:#eef5f7}",
+      ":host(.locked.expanded) .session-name{color:#c7d5db}",
+      ":host(.locked.expanded) .session-time{color:#879aa5}",
+      ":host(.locked.expanded) .recent{margin:0;color:#9cafba}",
+      ":host(.locked.expanded) summary{color:#dbe5e9;font-size:11.5px;font-weight:680}",
       ":host(.locked.expanded) summary:hover{color:#ffffff}",
-      ":host(.locked.expanded) .recent-text{color:#c2cee5;line-height:1.5}",
+      ":host(.locked.expanded) .recent-text{color:#9cafba;line-height:1.5}",
       "@media (max-width:640px){:host(.locked) .panel{grid-template-columns:minmax(0,1fr);grid-template-rows:auto auto auto;gap:6px;padding:11px 11px 11px 15px;width:min(420px,calc(100vw - 24px));bottom:14px}:host(.locked) .controls{grid-column:1;grid-row:3;width:100%;grid-template-columns:1fr 1fr;margin-top:2px}:host(.locked) .status-stack{grid-column:1;grid-row:2;margin-left:38px}:host(.locked) .takeover,:host(.locked) .stop{min-height:38px}:host(.locked.expanded) .details{grid-column:1;grid-row:4;grid-template-columns:1fr}:host(.locked.expanded) .elapsed{grid-column:1;justify-self:start}}",
       ":host(.collapsed) .panel{display:none}",
       ":host(.locked.collapsed) .panel{display:grid}",
@@ -529,6 +537,19 @@ export function agentOverlayBootstrapScript(): string {
     }, 1000);
     render();
     requestAnimationFrame(clampHostIntoViewport);
+  }
+
+  function startHeartbeat() {
+    if (heartbeatTimer || tearingDown) {
+      return;
+    }
+    heartbeatTimer = setInterval(() => {
+      if (Date.now() - lastUpdateReceivedAt > OVERLAY_HEARTBEAT_TIMEOUT_MS) {
+        // 只清理过期 UI，保留 CDP binding；若只是系统休眠或短暂卡顿，下一次
+        // ProfilePilot 更新可重新注入浮层并继续使用原控制通道。
+        window.__ppAgentOverlayTeardown?.(true);
+      }
+    }, OVERLAY_HEARTBEAT_CHECK_MS);
   }
 
   // Gmail 等站点通过 CSP 强制 Trusted Types，任何 innerHTML 字符串赋值都会被浏览器拒绝。
@@ -1153,12 +1174,12 @@ export function agentOverlayBootstrapScript(): string {
       progressBar.style.display = "block";
       progressBar.setAttribute("aria-valuenow", String(percent));
       progressBar.setAttribute("aria-valuetext", copy.progressDone(Math.max(0, done), total));
-      progressFill.style.width = percent + "%";
+      progressFill.style.transform = "scaleX(" + percent / 100 + ")";
     } else {
       progressBar.style.display = "none";
       progressBar.removeAttribute("aria-valuenow");
       progressBar.removeAttribute("aria-valuetext");
-      progressFill.style.width = "0%";
+      progressFill.style.transform = "scaleX(0)";
     }
   }
 
@@ -1237,9 +1258,9 @@ export function agentOverlayBootstrapScript(): string {
     }
     resetStopConfirm();
     try {
-      // Suppress leaked/late future-document bootstraps during the terminal stop window.
-      // A later Agent Session clears this tab-scoped marker before installing its own bootstrap.
-      window.sessionStorage.setItem(TERMINAL_STOP_KEY, String(Date.now() + 120000));
+      // Suppress leaked/late future-document bootstraps until a later real Agent Session
+      // explicitly clears this tab-scoped marker before installing its own bootstrap.
+      window.sessionStorage.setItem(TERMINAL_STOP_KEY, String(Number.MAX_SAFE_INTEGER));
     } catch {
       // Main-process script removal still handles pages without sessionStorage.
     }
@@ -1779,8 +1800,9 @@ export function agentOverlayBootstrapScript(): string {
 
   window.__ppAgentOverlayUpdate = (payload) => {
     if (!payload || typeof payload !== "object") {
-      return;
+      return false;
     }
+    lastUpdateReceivedAt = Date.now();
     const wasDelegatedToUser = isDelegatedToUser();
     for (const key of KNOWN_STATE_FIELDS) {
       state[key] = normalizeKnownStateValue(key, payload[key]);
@@ -1796,8 +1818,15 @@ export function agentOverlayBootstrapScript(): string {
         takenOverTimer = setTimeout(() => collapse(), 5000);
       }
     }
-    ensureHostConnected();
-    render();
+    if (!host) {
+      // bootstrap 可能是旧 CDP Session 遗留的 future-document script。只有收到
+      // ProfilePilot 当前实例发来的有效 payload 后才挂载，不能用默认值伪造 Agent 状态。
+      mount();
+    } else {
+      ensureHostConnected();
+      render();
+    }
+    return true;
   };
 
   // 供 CDP Runtime.evaluate 直接驱动的接线点：拿到 AI 点击坐标即可触发高亮。
@@ -1836,13 +1865,14 @@ export function agentOverlayBootstrapScript(): string {
     }
   };
 
-  window.__ppAgentOverlayTeardown = () => {
+  window.__ppAgentOverlayTeardown = (preserveSignalBinding = false) => {
     if (tearingDown) {
       return;
     }
     tearingDown = true;
     clearTimeout(takenOverTimer);
     clearInterval(elapsedTimer);
+    clearInterval(heartbeatTimer);
     clearTimeout(cursorHideTimer);
     if (agentPointerListener) {
       window.removeEventListener("pointerdown", agentPointerListener, true);
@@ -1852,28 +1882,26 @@ export function agentOverlayBootstrapScript(): string {
     cleanupReducedMotionTracking();
     cleanupThemeTracking();
     resetStopConfirm();
-    const cleanup = () => {
-      try {
-        host && host.remove();
-      } catch {
-        // The node may have already been removed by the page.
-      }
-      delete window.__ppAgentOverlayInstalled;
-      delete window.__ppAgentOverlayUpdate;
-      delete window.__ppAgentOverlayHighlightAt;
-      delete window.__ppAgentOverlayGuardProbe;
-      delete window.__ppAgentOverlayGuardActivate;
-      delete window.__ppAgentOverlayTeardown;
+    // 必须在 Runtime.evaluate 返回前同步移除节点。若等待离场动画，紧接着发生的
+    // Target.detachFromTarget 会销毁 isolated world，180ms cleanup 将永远没有机会执行。
+    try {
+      host && host.remove();
+    } catch {
+      // The node may have already been removed by the page.
+    }
+    delete window.__ppAgentOverlayInstalled;
+    delete window.__ppAgentOverlayUpdate;
+    delete window.__ppAgentOverlayHighlightAt;
+    delete window.__ppAgentOverlayGuardProbe;
+    delete window.__ppAgentOverlayGuardActivate;
+    delete window.__ppAgentOverlayTeardown;
+    if (!preserveSignalBinding) {
       delete window[SIGNAL_NAME];
-    };
-    if (host) {
-      host.classList.add("leaving");
-      setTimeout(cleanup, isReducedMotionPreferred() ? 0 : 180);
-    } else {
-      cleanup();
     }
   };
 
-  mount();
+  // 不在 bootstrap 阶段直接 mount。孤立的 future-document script 只暴露更新入口，
+  // 超时后自行清理；真实 Agent 状态会通过 __ppAgentOverlayUpdate 触发首次挂载。
+  startHeartbeat();
 })();`;
 }

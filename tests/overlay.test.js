@@ -351,14 +351,59 @@ test("agent overlay bootstrap script has static safety hooks and valid syntax", 
   assert.match(script, /__ppAgentOverlaySignal/);
   assert.match(script, /window\.__ppAgentOverlayUpdate/);
   assert.match(script, /window\.__ppAgentOverlayTeardown/);
+  assert.match(script, /OVERLAY_HEARTBEAT_TIMEOUT_MS = 75000/);
+  assert.match(script, /Date\.now\(\) - lastUpdateReceivedAt > OVERLAY_HEARTBEAT_TIMEOUT_MS/);
+  assert.match(script, /window\.__ppAgentOverlayTeardown\?\.\(true\)/);
+  assert.match(script, /lastUpdateReceivedAt = Date\.now\(\)/);
+  assert.match(script, /clearInterval\(heartbeatTimer\)/);
+  assert.doesNotMatch(script, /setTimeout\(cleanup, isReducedMotionPreferred\(\) \? 0 : 180\)/);
+  assert.match(script, /if \(!host\) \{[\s\S]*?mount\(\)/);
+  assert.match(script, /startHeartbeat\(\);\s*\}\)\(\);$/);
+  assert.doesNotMatch(script, /\n  mount\(\);\s*\}\)\(\);$/);
   assert.match(script, /__ppAgentOverlayTerminalStopUntil/);
   assert.match(script, /sessionStorage\.setItem\(TERMINAL_STOP_KEY/);
   assert.match(script, /sessionStorage\.getItem\(TERMINAL_STOP_KEY\)/);
   assert.ok(
-    script.indexOf('signal("stop", { stopAll: true, reason: "user_stop" });') < script.indexOf("window.__ppAgentOverlayTeardown?.()"),
+    script.indexOf('signal("stop", { stopAll: true, reason: "user_stop" });') < script.indexOf("window.__ppAgentOverlayTeardown ="),
     "terminal stop dispatches the binding before fully tearing down its current overlay"
   );
   new vm.Script(script);
+});
+
+test("orphan agent overlay bootstrap stays invisible until a valid payload arrives", () => {
+  const script = agentOverlayBootstrapScript();
+  let createdElements = 0;
+  const pageWindow = {
+    sessionStorage: {
+      getItem() { return null; },
+      removeItem() {}
+    }
+  };
+  pageWindow.top = pageWindow;
+  pageWindow.self = pageWindow;
+  vm.runInNewContext(script, {
+    window: pageWindow,
+    sessionStorage: pageWindow.sessionStorage,
+    document: {
+      documentElement: {},
+      createElement() {
+        createdElements += 1;
+        return {};
+      }
+    },
+    setInterval() { return 1; },
+    clearInterval() {},
+    setTimeout() { return 1; },
+    clearTimeout() {},
+    Date,
+    Number,
+    JSON,
+    Math
+  });
+
+  assert.equal(createdElements, 0);
+  assert.equal(pageWindow.__ppAgentOverlayInstalled, true);
+  assert.equal(typeof pageWindow.__ppAgentOverlayUpdate, "function");
 });
 
 test("agent overlay bootstrap is compatible with strict Trusted Types pages", () => {
@@ -382,6 +427,14 @@ test("agent overlay details toggle also works after user takeover", () => {
   assert.doesNotMatch(script, /host\.classList\.toggle\("expanded", !taken && expanded\)/);
   assert.match(toggleDetails, /expanded = !expanded/);
   assert.doesNotMatch(toggleDetails, /isDelegatedToUser/);
+});
+
+test("agent overlay progress animation stays compositor-friendly", () => {
+  const script = agentOverlayBootstrapScript();
+  assert.doesNotMatch(script, /transition:width/);
+  assert.doesNotMatch(script, /progressFill\.style\.width/);
+  assert.match(script, /progressFill\.style\.transform = "scaleX\(" \+ percent \/ 100 \+ "\)"/);
+  assert.match(script, /transform-origin:left center/);
 });
 
 test("agent overlay bootstrap script includes zh/en copy and locale selection", () => {
@@ -887,7 +940,7 @@ test("AgentOverlayManager clears the takeover-pending UI when quiescence fails",
   assert.equal(state.lastPayload.handoffPending, false);
 });
 
-test("AgentOverlayManager keeps the completed Session visible in delegated user state", async () => {
+test("AgentOverlayManager removes a completed Session after releasing its Profile", async () => {
   const completionCalls = [];
   const inputGuardSyncs = [];
   const manager = new AgentOverlayManager({
@@ -915,19 +968,155 @@ test("AgentOverlayManager keeps the completed Session visible in delegated user 
   assert.equal(completionCalls[0].profileId, "test-profile");
   assert.equal(completionCalls[0].session, "cx-context-test");
   assert.deepEqual(completionCalls[0].pids, [42]);
-  assert.equal(manager.ports.has(state.port), true);
-  assert.equal(manager.tailers.has("cx-context-test"), true);
-  assert.equal(state.clients.length, 1);
-  assert.equal(state.delegatedToUser, true);
-  assert.equal(manager.completedSessions.has("cx-context-test"), true);
+  assert.equal(manager.ports.has(state.port), false);
+  assert.equal(manager.tailers.has("cx-context-test"), false);
+  assert.equal(state.clients.length, 0);
+  assert.equal(state.delegatedToUser, false);
+  assert.equal(state.alive, false);
+  assert.equal(manager.completedSessions.has("cx-context-test"), false);
   assert.deepEqual(inputGuardSyncs.at(-1), []);
 
   await manager.handleSessionTailerUpdate("cx-context-test");
   assert.equal(completionCalls.length, 1);
 
-  manager.sync({ enabled: true, ports: [] });
+});
+
+test("AgentOverlayManager removes page overlays before completing the Gateway Session", async () => {
+  const sequence = [];
+  const fakeClient = {
+    onEvent: null,
+    onDisconnect: null,
+    close() {},
+    async send(method, params) {
+      if (method === "Runtime.evaluate" && String(params.expression).includes("__ppAgentOverlayTeardown")) {
+        sequence.push("overlay-teardown");
+      } else {
+        sequence.push(method);
+      }
+      return {};
+    }
+  };
+  const manager = new AgentOverlayManager({
+    onStop: async () => {},
+    onComplete: async () => {
+      sequence.push("onComplete");
+    },
+    inputGuard: { sync() {}, dispose() {} }
+  });
+  const state = createOverlayState({ browserClient: fakeClient });
+  const page = createOverlayPage({
+    sessionId: "page-session-1",
+    scriptIdentifier: "future-document-script",
+    activeContextId: 7,
+    isolatedContextIds: new Set([7])
+  });
+  state.pages.set(page.targetId, page);
+  manager.ports.set(state.port, state);
+  manager.tailers.set("cx-context-test", {
+    getControlPhase: () => "completed",
+    stop() {}
+  });
+
+  await manager.handleSessionTailerUpdate("cx-context-test");
+
+  assert.deepEqual(sequence.slice(0, 4), [
+    "Runtime.evaluate",
+    "Page.removeScriptToEvaluateOnNewDocument",
+    "overlay-teardown",
+    "onComplete"
+  ]);
   assert.equal(manager.ports.has(state.port), false);
-  assert.equal(manager.tailers.has("cx-context-test"), false);
+});
+
+test("AgentOverlayManager tears down stale page UI before closing its internal observer", async () => {
+  const sequence = [];
+  const fakeClient = {
+    onEvent: null,
+    onDisconnect: null,
+    close() {
+      sequence.push("observer-close");
+    },
+    async send(method, params) {
+      if (method === "Runtime.evaluate" && String(params.expression).includes("__ppAgentOverlayTeardown")) {
+        sequence.push("overlay-teardown");
+      }
+      return {};
+    }
+  };
+  const manager = new AgentOverlayManager({
+    onStop: async () => {},
+    inputGuard: { sync() {}, dispose() {} }
+  });
+  const state = createOverlayState({ browserClient: fakeClient });
+  const page = createOverlayPage({
+    sessionId: "page-session-1",
+    activeContextId: 7,
+    isolatedContextIds: new Set([7])
+  });
+  state.pages.set(page.targetId, page);
+  manager.ports.set(state.port, state);
+
+  manager.sync({ enabled: true, ports: [] });
+  await waitFor(() => sequence.includes("observer-close"), "stale overlay observer close");
+
+  assert.equal(manager.ports.has(state.port), false);
+  assert.ok(sequence.indexOf("overlay-teardown") < sequence.indexOf("observer-close"));
+});
+
+test("AgentOverlayManager cleans stale overlays on an inactive running port once", async () => {
+  const methods = [];
+  let targetRequests = 0;
+  const pageClient = {
+    onEvent: null,
+    onDisconnect: null,
+    close() {
+      methods.push("close");
+    },
+    async send(method, params) {
+      methods.push(method);
+      if (method === "Page.getFrameTree") {
+        return { frameTree: { frame: { id: "frame-1" } } };
+      }
+      if (method === "Page.createIsolatedWorld") {
+        assert.equal(params.worldName, "__ppAgentOverlayWorld");
+        return { executionContextId: 7 };
+      }
+      if (method === "Runtime.evaluate") {
+        assert.match(String(params.expression), /__ppAgentOverlayTeardown/);
+        assert.equal(params.contextId, 7);
+      }
+      return {};
+    }
+  };
+  const manager = new AgentOverlayManager({
+    onStop: async () => {},
+    requestTargets: async () => {
+      targetRequests += 1;
+      return [{
+        id: "target-1",
+        type: "page",
+        url: "https://example.test",
+        webSocketDebuggerUrl: "ws://inactive-page"
+      }];
+    },
+    connectBrowser: async () => pageClient,
+    inputGuard: { sync() {}, dispose() {} }
+  });
+
+  manager.sync({ enabled: true, ports: [], inactivePorts: [9480] });
+  await waitFor(() => methods.includes("close"), "inactive port overlay cleanup");
+  assert.deepEqual(methods, [
+    "Runtime.enable",
+    "Page.enable",
+    "Page.getFrameTree",
+    "Page.createIsolatedWorld",
+    "Runtime.evaluate",
+    "close"
+  ]);
+
+  manager.sync({ enabled: true, ports: [], inactivePorts: [9480] });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(targetRequests, 1);
 });
 
 test("AgentOverlayManager still allows ending a task after user takeover", async () => {

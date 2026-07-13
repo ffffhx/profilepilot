@@ -109,6 +109,43 @@ test("renderer CDP client text summarizes sessions and tools", () => {
   );
 });
 
+test("renderer exposes lease occupancy when Gateway has no active owner", () => {
+  const {
+    agentBrowserOccupancyClient,
+    profileAgentBrowserReserved,
+    profileUserHasControl
+  } = loadUtil();
+  const profile = {
+    gatewayControl: null,
+    agentBrowserOccupancy: {
+      cdpPort: 9224,
+      profileId: "isolated:work",
+      profileName: "工作 Profile",
+      session: "cx-owner",
+      ownership: "user",
+      agent: "Codex",
+      project: "buy-together",
+      command: "snapshot",
+      holderPid: 100,
+      daemonPid: 200,
+      updatedAt: "2026-07-11T05:25:39.358Z"
+    }
+  };
+
+  assert.equal(profileAgentBrowserReserved(profile), true);
+  assert.equal(profileUserHasControl(profile), true);
+  assert.deepEqual(agentBrowserOccupancyClient(profile), {
+    pid: 200,
+    label: "agent-browser",
+    agent: "Codex",
+    project: "buy-together",
+    title: "agent-browser snapshot",
+    session: "cx-owner",
+    lastActive: "2026-07-11T05:25:39.358Z",
+    note: "Session 仍保留，浏览器控制权当前属于用户；自动候选不会使用此 Profile"
+  });
+});
+
 test("renderer formatErrorMessage removes transport noise and preserves recovery copy", () => {
   const { formatErrorMessage } = loadUtil();
 

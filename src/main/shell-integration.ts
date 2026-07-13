@@ -18,14 +18,19 @@ import { ProfileManagerError } from "./profile-manager-error";
 const BEGIN_MARK = "# >>> ProfilePilot session integration >>>";
 const END_MARK = "# <<< ProfilePilot session integration <<<";
 const WRAPPER_FILE_NAME = "profilepilot-agent-browser-wrapper.cjs";
+const LAUNCHER_FILE_NAME = "agent-browser";
 const WRAPPER_SIGNATURE = "PROFILEPILOT_AGENT_BROWSER_WRAPPER";
 const NODE_RUNTIME_SIGNATURE = "PROFILEPILOT_NODE_RUNTIME";
+const LAUNCHER_SIGNATURE = "PROFILEPILOT_AGENT_BROWSER_LAUNCHER";
+const BIN_DIR_SIGNATURE = "PROFILEPILOT_AGENT_BROWSER_BIN_DIR";
 // 生效特征：只要这行 export 在（无论是托管块还是用户手写的），注入就是开着的。
 const EFFECTIVE_SIGNATURE = 'AGENT_BROWSER_SESSION="cc-$CLAUDE_CODE_SESSION_ID"';
 // Codex 分支的特征行：托管块缺它说明是旧版模板（CODEX_CLI_PATH 检测或目录名身份），
 // 重新启用时原位升级。
 const CODEX_SIGNATURE = 'AGENT_BROWSER_SESSION="cx-$CODEX_THREAD_ID"';
 const WRAPPER_PATH = agentBrowserWrapperPath();
+const LAUNCHER_PATH = agentBrowserLauncherPath();
+const BIN_DIR_PATH = path.dirname(LAUNCHER_PATH);
 const NODE_RUNTIME_PATH = process.execPath;
 
 const INTEGRATION_BLOCK = [
@@ -43,23 +48,23 @@ const INTEGRATION_BLOCK = [
   "fi",
   `export ${WRAPPER_SIGNATURE}=${shellQuote(WRAPPER_PATH)}`,
   `export ${NODE_RUNTIME_SIGNATURE}=${shellQuote(NODE_RUNTIME_PATH)}`,
-  `if [[ -n "$AGENT_BROWSER_SESSION" && -r "$${WRAPPER_SIGNATURE}" ]]; then`,
-  "  agent-browser() {",
-  "    if command -v node >/dev/null 2>&1; then",
-  `      command node "$${WRAPPER_SIGNATURE}" "$@"`,
-  `    elif [[ -x "$${NODE_RUNTIME_SIGNATURE}" ]]; then`,
-  `      ELECTRON_RUN_AS_NODE=1 command "$${NODE_RUNTIME_SIGNATURE}" "$${WRAPPER_SIGNATURE}" "$@"`,
-  "    else",
-  "      print -u2 '[ProfilePilot] 缺少可用的 Node/Electron runtime，已拒绝绕过浏览器控制保护。'",
-  "      return 127",
-  "    fi",
-  "  }",
+  `export ${LAUNCHER_SIGNATURE}=${shellQuote(LAUNCHER_PATH)}`,
+  `export ${BIN_DIR_SIGNATURE}=${shellQuote(BIN_DIR_PATH)}`,
+  `if [[ -n "$AGENT_BROWSER_SESSION" && -x "$${LAUNCHER_SIGNATURE}" ]]; then`,
+  '  case ":$PATH:" in',
+  `    *":$${BIN_DIR_SIGNATURE}:"*) ;;`,
+  `    *) export PATH="$${BIN_DIR_SIGNATURE}:$PATH" ;;`,
+  "  esac",
   "fi",
   END_MARK
 ].join("\n");
 
 export function agentBrowserWrapperPath(): string {
   return path.join(os.homedir(), ".profilepilot", "bin", WRAPPER_FILE_NAME);
+}
+
+export function agentBrowserLauncherPath(): string {
+  return path.join(os.homedir(), ".profilepilot", "bin", LAUNCHER_FILE_NAME);
 }
 
 export function shellIntegrationFilePath(): string {
@@ -118,6 +123,8 @@ export async function setShellIntegrationEnabled(enabled: boolean): Promise<Shel
       (!content.includes(CODEX_SIGNATURE) ||
         !content.includes(WRAPPER_SIGNATURE) ||
         !content.includes(NODE_RUNTIME_SIGNATURE) ||
+        !content.includes(LAUNCHER_SIGNATURE) ||
+        !content.includes(BIN_DIR_SIGNATURE) ||
         !content.includes(`export ${NODE_RUNTIME_SIGNATURE}=${shellQuote(NODE_RUNTIME_PATH)}`))
     ) {
       const begin = content.indexOf(BEGIN_MARK);
@@ -203,6 +210,24 @@ async function installAgentBrowserWrapper(): Promise<void> {
   const targetPath = agentBrowserWrapperPath();
   await writeTextFileAtomic(targetPath, source);
   await fs.chmod(targetPath, 0o755).catch(() => undefined);
+
+  const launcherPath = agentBrowserLauncherPath();
+  const launcher = [
+    "#!/bin/sh",
+    `wrapper=\${${WRAPPER_SIGNATURE}:-${shellQuote(targetPath)}}`,
+    `runtime=\${${NODE_RUNTIME_SIGNATURE}:-${shellQuote(NODE_RUNTIME_PATH)}}`,
+    'if command -v node >/dev/null 2>&1; then',
+    '  exec node "$wrapper" "$@"',
+    "fi",
+    'if [ -x "$runtime" ]; then',
+    '  ELECTRON_RUN_AS_NODE=1 exec "$runtime" "$wrapper" "$@"',
+    "fi",
+    "printf '%s\\n' '[ProfilePilot] 缺少可用的 Node/Electron runtime，已拒绝绕过浏览器控制保护。' >&2",
+    "exit 127",
+    ""
+  ].join("\n");
+  await writeTextFileAtomic(launcherPath, launcher);
+  await fs.chmod(launcherPath, 0o755).catch(() => undefined);
 }
 
 async function writeTextFileAtomic(filePath: string, content: string): Promise<void> {

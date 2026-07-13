@@ -126,11 +126,10 @@ test("Gateway takeover, completion, return and stop are durable explicit transit
 
     const complete = h.control.delegateToUser("cx-one", "agent_complete");
     assert.equal(complete.ownership, "user");
-    assert.equal(complete.sessionStatus, "active");
-    h.control.returnToAgent("cx-one");
-    const stopped = h.control.stopSession("cx-one");
-    assert.equal(stopped.sessionStatus, "stopped");
-    assert.equal(stopped.ownerSessionId, undefined);
+    assert.equal(complete.sessionStatus, "stopped");
+    assert.equal(complete.agentHealth, "offline");
+    assert.equal(complete.ownerSessionId, undefined);
+    assertCode(() => h.control.returnToAgent("cx-one"), "GATEWAY_PROFILE_NOT_FOUND");
     assert.equal(h.control.getProfileForSession("cx-one"), null);
   } finally {
     h.cleanup();

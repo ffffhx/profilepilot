@@ -5,7 +5,8 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
-const { ensureConfiguredGatewayProfileRunning, prepareGatewayTransport } = require("../dist/main/agent-browser-wrapper.js");
+const { ensureConfiguredGatewayProfileRunning, prepareGatewayTransport, runAgentBrowserWrapper } = require("../dist/main/agent-browser-wrapper.js");
+const { acquireAgentBrowserProfileLeaseSync, readAgentBrowserProfileLeaseSync } = require("../dist/main/agent-browser-lease.js");
 const { ensureBrowserGatewayDaemon, requestBrowserGateway, subscribeBrowserGatewayEvents } = require("../dist/main/browser-gateway-client.js");
 const { BrowserGatewayDaemon } = require("../dist/main/browser-gateway-daemon.js");
 
@@ -186,8 +187,22 @@ if (connectIndex >= 0) {
     assert.equal(profile.ownerSessionId, "cx-wrapper");
     assert.equal(profile.ownership, "agent");
     assert.equal(profile.daemonPid, Number(readFileSync(holderPidPath, "utf8")));
-    await requestBrowserGateway({ action: "control", sessionId: "cx-wrapper", command: "takeover" }, { homeDir: home });
-    await waitFor(() => !isPidAlive(Number(readFileSync(holderPidPath, "utf8"))), "holder exits after takeover");
+    assert.equal(acquireAgentBrowserProfileLeaseSync({
+      cdpPort: port,
+      session: "cx-wrapper",
+      holderPid: process.pid,
+      daemonPid: profile.daemonPid,
+      profileId: "profile-a",
+      profileName: "Profile A",
+      command: "snapshot"
+    }, home).ok, true);
+    assert.equal(await runAgentBrowserWrapper(["profilepilot", "complete"], env), 0);
+    await waitFor(() => !isPidAlive(Number(readFileSync(holderPidPath, "utf8"))), "holder exits after completion");
+    const completedStatus = await requestBrowserGateway({ action: "status" }, { homeDir: home });
+    const completedProfile = completedStatus.state.profiles.find((item) => item.publicPort === port);
+    assert.equal(completedProfile.sessionStatus, "stopped");
+    assert.equal(completedProfile.ownerSessionId, undefined);
+    assert.equal(readAgentBrowserProfileLeaseSync(port, home), null);
   } finally {
     if (existsSync(holderPidPath)) {
       try { process.kill(Number(readFileSync(holderPidPath, "utf8")), "SIGKILL"); } catch {}

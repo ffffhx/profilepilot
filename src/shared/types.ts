@@ -155,8 +155,8 @@ export interface AgentOverlayRevealEvent {
 }
 
 // AI 对某个 tab / Profile 的归属（借鉴 ego-lite 的三值枚举，取代散落的布尔+时间窗）：
-// agent＝AI 正在驱动；agentDelegatedToUser＝用户主动接管，或 AI 完成本轮后把控制权交还用户，
-// 但 Session 仍保持；user＝Session 已结束 / 无 AI 驱动。
+// agent＝AI 正在驱动；agentDelegatedToUser＝用户主动接管但 Session 仍保持；
+// user＝Session 已结束 / 无 AI 驱动。任务完成后直接进入 user 并释放 Session。
 export type Ownership = "agent" | "agentDelegatedToUser" | "user";
 
 export interface AgentControlNotice {
@@ -267,6 +267,22 @@ export interface GatewayProfileControlState {
   updatedAt: string;
 }
 
+// agent-browser wrapper 用来做候选排他的同一份租约占用状态。Gateway 当前没有
+// 活动连接时，UI 仍必须展示这份预留，不能把 Profile 误标为“空闲”。
+export interface AgentBrowserProfileOccupancy {
+  cdpPort: number;
+  profileId: string;
+  profileName: string;
+  session: string;
+  ownership: "agent" | "user";
+  agent: string | null;
+  project: string | null;
+  command: string | null;
+  holderPid: number;
+  daemonPid: number | null;
+  updatedAt: string;
+}
+
 export interface PublicProfile {
   id: string;
   source: ProfileSource;
@@ -300,6 +316,8 @@ export interface PublicProfile {
   cdpClients: CdpClientInfo[];
   // 由 ProfilePilot Gateway 管理时的权威控制状态；普通/旧式 CDP 端口为 null。
   gatewayControl: GatewayProfileControlState | null;
+  // 与 agent-browser 自动候选筛选共用的排他占用状态；null 才表示未被租约预留。
+  agentBrowserOccupancy: AgentBrowserProfileOccupancy | null;
   // 实时观测摘要：当前主标签页 URL 与打开的标签数（不含截图，随 getState 轮询刷新）；未运行/无 CDP 时为 null。
   livePrimaryUrl: string | null;
   liveTabCount: number | null;

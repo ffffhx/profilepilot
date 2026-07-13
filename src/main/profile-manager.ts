@@ -61,13 +61,16 @@ import { ProfilePilotSignal, SIGNAL_CATALOG, resolveSignal } from "./agent-signa
 import {
   releaseAgentBrowserProfileLeaseSync,
   releaseAgentBrowserProfileLeasesForSessionSync,
+  readActiveAgentBrowserProfileOccupancySync,
   setAgentBrowserProfileLeasesDelegatedSync,
   updateAgentBrowserProfileLeaseTargetSync,
-  writeAgentBrowserRuntimeProfilesSync
+  writeAgentBrowserRuntimeProfilesSync,
+  type AgentBrowserRuntimeProfile
 } from "./agent-browser-lease";
 import {
   agentBrowserSessionActivityPaths,
   clearAgentBrowserControlWaitStateSync,
+  clearAgentBrowserCommandStateSync,
   readActiveAgentBrowserControlWaitStateSync,
   waitForAgentBrowserCommandSettled
 } from "./agent-browser-session";
@@ -77,6 +80,7 @@ import { getShellIntegrationStatus } from "./shell-integration";
 import { addRuntimeProcess, attachListeningPorts, emptyRuntimeProfile, findExternalChromeInstances, getCdpClientsByPort, getChromeProcessPids, getOpenProfilePidsByPath, isChromeRunning, isImplicitDefaultChromeProcess, makeNativeRuntimeKey, mergeRuntimeProfiles, parseRuntimeProcess } from "./process-scan";
 import { ProfileManagerError } from "./profile-manager-error";
 import {
+  clearBrowserGatewayDaemonIdentity,
   ensureBrowserGatewayDaemon,
   requestBrowserGateway,
   type GatewayControlResponse
@@ -193,13 +197,23 @@ export class ProfileManager {
     profiles.forEach((profile) => {
       profile.clonedFromName = profile.clonedFromProfileId ? profileNameById.get(profile.clonedFromProfileId) || null : null;
       profile.cloneCount = cloneCountBySource.get(profile.id) || 0;
+      const candidatePort = profile.cdpPort ?? (profile.source === "isolated" ? profile.fixedCdpPort : null);
+      if (candidatePort !== null) {
+        updateAgentBrowserProfileLeaseTargetSync(candidatePort, {
+          profileId: profile.id,
+          profileName: profile.name
+        });
+        profile.agentBrowserOccupancy = readActiveAgentBrowserProfileOccupancySync(candidatePort);
+      }
     });
 
-    const externalInstances = await findExternalChromeInstances([
-      ...isolatedPaths,
-      nativeChromeUserDataDir(),
-      this.dataDir
-    ]);
+    const externalInstances = process.env.CPM_E2E_DETERMINISTIC === "1"
+      ? []
+      : await findExternalChromeInstances([
+          ...isolatedPaths,
+          nativeChromeUserDataDir(),
+          this.dataDir
+        ]);
 
     // 标记“谁在持久连接这些 Profile / 外部实例的 CDP 端口”（agent-browser 等驱动工具）。
     const profileCdpPorts = profiles
@@ -233,10 +247,6 @@ export class ProfileManager {
         : (cdpClientsByPort.get(profile.cdpPort) || []).filter(
             (client) => !profilePids.has(client.pid) && !selfPids.has(client.pid)
           );
-      updateAgentBrowserProfileLeaseTargetSync(profile.cdpPort, {
-        profileId: profile.id,
-        profileName: profile.name
-      });
     });
     externalInstances.forEach((instance) => {
       if (instance.cdpPort === null) {
@@ -261,20 +271,18 @@ export class ProfileManager {
       instance.agentActivity = null;
     });
     await this.autoDisconnectStaleAgentBrowserClients(profiles, externalInstances);
-    // 给 shell wrapper 一份轻量、短时有效的运行中 Profile 快照。租约冲突时 wrapper 据此
-    // 推荐确实在线且有 CDP 端口的候选，而不是拿 registry 里的历史端口盲猜。
+    // 自动回收可能刚释放了旧租约；写快照和返回 UI 前再读一次，保证“空闲/已占用”
+    // 与 wrapper 下一步的候选筛选看到的是同一时刻状态。
+    profiles.forEach((profile) => {
+      const candidatePort = profile.cdpPort ?? (profile.source === "isolated" ? profile.fixedCdpPort : null);
+      profile.agentBrowserOccupancy = candidatePort === null
+        ? null
+        : readActiveAgentBrowserProfileOccupancySync(candidatePort);
+    });
+    // 给 shell wrapper 一份轻量、短时有效的 Profile 快照。除了已运行的 CDP Profile，
+    // 也包含绑定固定端口且尚未启动的独立 Profile；推荐命令会让 Gateway 自动启动后接管。
     writeAgentBrowserRuntimeProfilesSync(
-      profiles
-        .filter((profile) => profile.running && profile.cdpPort !== null)
-        .map((profile) => ({
-          profileId: profile.id,
-          profileName: profile.name,
-          cdpPort: profile.cdpPort as number,
-          source: profile.source,
-          clonedFromProfileId: profile.clonedFromProfileId || undefined,
-          projectTag: profile.projectTag || undefined,
-          lastLaunchedAt: profile.lastLaunchedAt || undefined
-        })),
+      agentBrowserRuntimeProfilesFromPublicProfiles(profiles),
       os.homedir()
     );
 
@@ -309,7 +317,7 @@ export class ProfileManager {
     });
 
     const agentOverlayEnabled = registry.agentOverlayEnabled !== false;
-    const profileAgentOverlayPorts = await Promise.all(
+    const profileAgentOverlayCandidates = await Promise.all(
       profiles
         .filter((profile) => profile.cdpPort !== null && profile.cdpUrl)
         .map(async (profile) => {
@@ -329,8 +337,8 @@ export class ProfileManager {
             clients
           };
         })
-    ).then((inputs) => inputs.filter((input) => input.clients.length > 0));
-    const externalAgentOverlayPorts = await Promise.all(
+    );
+    const externalAgentOverlayCandidates = await Promise.all(
       externalInstances
         .filter((instance) => instance.cdpPort !== null)
         .map(async (instance) => {
@@ -348,11 +356,21 @@ export class ProfileManager {
             clients
           };
         })
-    ).then((inputs) => inputs.filter((input) => input.clients.length > 0));
+    );
+    const profileAgentOverlayPorts = profileAgentOverlayCandidates.filter((input) => input.clients.length > 0);
+    const externalAgentOverlayPorts = externalAgentOverlayCandidates.filter((input) => input.clients.length > 0);
     const agentOverlayPorts = profileAgentOverlayPorts.concat(externalAgentOverlayPorts);
+    const activeOverlayPorts = new Set(agentOverlayPorts.map((input) => input.port));
+    const inactiveOverlayPorts = [...new Set(
+      profileAgentOverlayCandidates
+        .concat(externalAgentOverlayCandidates)
+        .filter((input) => !input.headless && !activeOverlayPorts.has(input.port))
+        .map((input) => input.port)
+    )];
     this.agentOverlayManager.sync({
       enabled: agentOverlayEnabled,
-      ports: agentOverlayPorts
+      ports: agentOverlayPorts,
+      inactivePorts: inactiveOverlayPorts
     });
     const agentClientsByProfileId = new Map(agentOverlayPorts.map((input) => [input.profileId, input.clients]));
     profiles.forEach((profile) => {
@@ -546,7 +564,7 @@ export class ProfileManager {
       port,
       preferredAvailable,
       preferredOwner,
-      // 端口被占时给出 CDP_PORT_UNAVAILABLE 信号：一句「改用建议端口重连」的可照做 action。
+      // 端口被占时给出 CDP_PORT_UNAVAILABLE 硬停信号：保留建议命令，但要求先征得用户同意。
       signal: resolveSignal({ kind: "cdp-port", available: preferredAvailable, preferredPort, suggestedPort: port, owner: preferredOwner })
     };
   }
@@ -866,14 +884,15 @@ export class ProfileManager {
         if (client.session && gatewayManaged) {
           await this.writeAgentControlNotice(target, client, "agent_complete", new Date().toISOString(), "requested");
           await this.controlGatewaySession(client.session, "complete");
+          if (await this.isGatewaySessionManaged(client.session)) {
+            // 兼容仍持有 Chrome pipe、暂时不能热升级的旧 Gateway。
+            await this.controlGatewaySession(client.session, "stop");
+          }
           gatewaySessions.add(client.session);
         }
-        // 本轮任务完成不等于 Session 关闭：先把原 Session 的排它绑定切成 delegated，
-        // 再发布完成 notice，保证 UI 开放用户输入前锁已经稳定；daemon 和活动文件继续保留。
-        if (client.session) {
-          this.setAgentBrowserProfileLeasesDelegated(client.session, true);
-        }
-        await this.writeAgentControlNotice(target, client, "agent_complete", new Date().toISOString(), "quiesced");
+        // 任务完成是终态。Gateway 已先撤销连接；随后结束 daemon、释放租约并清除
+        // 活动/等待/控制文件，避免“CDP 已关闭但 Profile 仍被旧 Session 占用”。
+        await this.retireCompletedAgentBrowserClient(client);
         successCount += 1;
       } catch (error) {
         failures.push({
@@ -887,6 +906,35 @@ export class ProfileManager {
     }
 
     return { targetCount: clients.length, successCount, failures };
+  }
+
+  private async retireCompletedAgentBrowserClient(client: CdpClientInfo): Promise<void> {
+    let terminationError: unknown;
+    try {
+      await this.terminateCdpClient(client.pid);
+    } catch (error) {
+      terminationError = error;
+    }
+
+    const session = safeAgentBrowserSessionName(client.session);
+    if (session) {
+      // Gateway 已停止该 Session，因此即使 daemon 退出异常，也必须先释放 Profile，
+      // 不能让不可恢复的进程残留继续占满候选池。
+      this.releaseAgentBrowserProfileLeases(session);
+      clearAgentBrowserControlWaitStateSync(session, undefined, os.homedir());
+      clearAgentBrowserCommandStateSync(session, undefined, os.homedir());
+      clearBrowserGatewayDaemonIdentity(session, os.homedir());
+      await this.removeAgentBrowserSessionFiles(client).catch(() => undefined);
+    }
+    await Promise.all(
+      agentControlNoticePaths(os.homedir(), client.session, client.pid).map((filePath) =>
+        fs.rm(filePath, { force: true }).catch(() => undefined)
+      )
+    );
+
+    if (terminationError) {
+      throw terminationError;
+    }
   }
 
   async takeoverAgentConnections(
@@ -3050,6 +3098,7 @@ export class ProfileManager {
       projectTag: null,
       cdpClients: [],
       gatewayControl: null,
+      agentBrowserOccupancy: null,
       livePrimaryUrl: null,
       liveTabCount: null,
       cdpContention: null,
@@ -3091,6 +3140,7 @@ export class ProfileManager {
       projectTag: profile.projectTag ?? null,
       cdpClients: [],
       gatewayControl: null,
+      agentBrowserOccupancy: null,
       livePrimaryUrl: null,
       liveTabCount: null,
       cdpContention: null,
@@ -3180,6 +3230,7 @@ export class ProfileManager {
       projectTag: null,
       cdpClients: [],
       gatewayControl: null,
+      agentBrowserOccupancy: null,
       livePrimaryUrl: null,
       liveTabCount: null,
       cdpContention: null,
@@ -3540,8 +3591,8 @@ export function makeAgentControlNotice(
       : ProfilePilotSignal.AGENT_TASK_STOPPED;
   const signal = normalizedReason === "agent_complete"
     ? {
-        message: "Agent 已完成当前任务，浏览器控制权已交还用户",
-        action: "停手：当前任务已完成且 Session 仍由用户接管；只有用户点击“交还 Agent”或明确要求继续时，才能恢复浏览器操作",
+        message: "Agent 已完成当前任务，正在释放 Session 和 Profile",
+        action: "停手：当前任务已完成，ProfilePilot 正在关闭 Agent Session 并释放 Profile；不要重试或重新连接",
         hardStop: true
       }
     : SIGNAL_CATALOG[code];
@@ -3682,7 +3733,7 @@ async function readActiveAgentControlNotice(
     const expiresAt = typeof value.expiresAt === "string" ? Date.parse(value.expiresAt) : Number.NaN;
     if (
       value.hardStop !== true ||
-      (value.reason !== "user_takeover" && value.reason !== "agent_complete") ||
+      value.reason !== "user_takeover" ||
       value.ownership !== "agentDelegatedToUser" ||
       value.handoffState === "requested" ||
       (expectedOwner.session
@@ -3812,6 +3863,29 @@ export function compatibilityCdpPorts(
   return [...new Set(ports)]
     .filter((port) => Number.isSafeInteger(port) && port > 0 && port <= 65535 && !managed.has(port))
     .sort((a, b) => a - b);
+}
+
+export function agentBrowserRuntimeProfilesFromPublicProfiles(
+  profiles: Array<Pick<PublicProfile,
+    "id" | "name" | "source" | "running" | "cdpPort" | "fixedCdpPort" |
+    "clonedFromProfileId" | "projectTag" | "lastLaunchedAt"
+  >>
+): AgentBrowserRuntimeProfile[] {
+  return profiles
+    .filter((profile) =>
+      profile.cdpPort !== null ||
+      (profile.source === "isolated" && !profile.running && profile.fixedCdpPort !== null)
+    )
+    .map((profile) => ({
+      profileId: profile.id,
+      profileName: profile.name,
+      cdpPort: (profile.cdpPort ?? profile.fixedCdpPort) as number,
+      source: profile.source,
+      clonedFromProfileId: profile.clonedFromProfileId || undefined,
+      projectTag: profile.projectTag || undefined,
+      lastLaunchedAt: profile.lastLaunchedAt || undefined,
+      running: profile.running && profile.cdpPort !== null
+    }));
 }
 
 export function stripManagedCdpRuntimeMetadata(

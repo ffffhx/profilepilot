@@ -50,6 +50,7 @@ export interface PublicProfile {
   projectTag: string | null;
   cdpClients: CdpClientInfo[];
   gatewayControl: GatewayProfileControlState | null;
+  agentBrowserOccupancy: AgentBrowserProfileOccupancy | null;
   livePrimaryUrl: string | null;
   liveTabCount: number | null;
   // 多会话争用判定（主进程算好）：contention=观察到抢写同一标签页；risk=两个活跃会话共用。
@@ -69,6 +70,20 @@ export interface GatewayProfileControlState {
   daemonPid: number | null;
   agent: string | null;
   project: string | null;
+  updatedAt: string;
+}
+
+export interface AgentBrowserProfileOccupancy {
+  cdpPort: number;
+  profileId: string;
+  profileName: string;
+  session: string;
+  ownership: "agent" | "user";
+  agent: string | null;
+  project: string | null;
+  command: string | null;
+  holderPid: number;
+  daemonPid: number | null;
   updatedAt: string;
 }
 
@@ -568,7 +583,7 @@ export interface CdpPortSuggestion {
   port: number;
   preferredAvailable: boolean;
   preferredOwner: string | null;
-  // 端口被占时的稳定信号（CDP_PORT_UNAVAILABLE）：带「改用建议端口重连」的可照做 action；可用时 null。
+  // 端口被占时的稳定信号（CDP_PORT_UNAVAILABLE）：带建议命令，但要求先征得用户同意；可用时 null。
   signal: ProfilePilotSignalInfo | null;
 }
 

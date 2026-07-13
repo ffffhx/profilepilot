@@ -298,9 +298,14 @@ export class BrowserGatewayControlPlane {
   }
 
   delegateToUser(sessionIdInput: string, reason: "user_takeover" | "agent_complete"): GatewayProfileBinding {
+    if (reason === "agent_complete") {
+      // 任务完成是终态：不能像用户临时接管那样继续保留 active owner。
+      // 关闭 Gateway Session 后，Profile 才能立即被其它任务重新选择。
+      return this.stopSession(sessionIdInput);
+    }
     const profile = this.requireSessionProfile(sessionIdInput);
     profile.ownership = "user";
-    profile.agentHealth = reason === "user_takeover" ? "waiting" : "online";
+    profile.agentHealth = "waiting";
     profile.controlGeneration += 1;
     profile.updatedAt = iso(this.now());
     this.persist(reason, profile, true);

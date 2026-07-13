@@ -6,6 +6,7 @@ const test = require("node:test");
 
 const {
   ProfileManager,
+  agentBrowserRuntimeProfilesFromPublicProfiles,
   agentControlStatusForClients,
   agentControlNoticePaths,
   areAllAgentControlClientsPaused,
@@ -16,6 +17,21 @@ const {
   shouldAutoDisconnectStaleAgentBrowserClient
 } = require("../dist/main/profile-manager.js");
 const { writeAgentBrowserControlWaitStateSync } = require("../dist/main/agent-browser-session.js");
+
+function runtimeProfile(overrides) {
+  return {
+    id: "isolated:profile",
+    name: "Profile",
+    source: "isolated",
+    running: false,
+    cdpPort: null,
+    fixedCdpPort: null,
+    clonedFromProfileId: null,
+    projectTag: null,
+    lastLaunchedAt: null,
+    ...overrides
+  };
+}
 
 test("ProfileManager uses Chinese for the browser control protocol", async () => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "profilepilot-overlay-locale-"));
@@ -51,6 +67,20 @@ test("Gateway authority excludes every managed port from legacy scans while OS r
   assert.deepEqual(runtime.get("managed-9226").pids, [106], "OS process still proves Chrome is running");
   assert.equal(runtime.get("managed-9226").cdpPort, null);
   assert.equal(runtime.get("legacy-9333").cdpPort, 9333, "unmanaged legacy port keeps the old fallback");
+});
+
+test("ProfileManager publishes stopped fixed-port Profiles for agent-browser auto-start", () => {
+  const profiles = agentBrowserRuntimeProfilesFromPublicProfiles([
+    runtimeProfile({ id: "isolated:live", name: "Live", running: true, cdpPort: 9224, fixedCdpPort: 9224 }),
+    runtimeProfile({ id: "isolated:stopped", name: "Stopped", running: false, cdpPort: null, fixedCdpPort: 9225 }),
+    runtimeProfile({ id: "isolated:plain-running", name: "Plain", running: true, cdpPort: null, fixedCdpPort: 9226 }),
+    runtimeProfile({ id: "native:Default", name: "System", source: "native", running: false, cdpPort: null, fixedCdpPort: null })
+  ]);
+
+  assert.deepEqual(
+    profiles.map((profile) => ({ port: profile.cdpPort, running: profile.running })),
+    [{ port: 9224, running: true }, { port: 9225, running: false }]
+  );
 });
 
 test("ProfileManager takeoverAgentConnections with pids only pauses requested agent drivers", async () => {
@@ -186,7 +216,7 @@ test("ProfileManager resumeAgentConnections writes a user-return notice without 
   assert.deepEqual(result.failures, []);
 });
 
-test("ProfileManager hands a completed agent-browser Session to the user without closing it", async () => {
+test("ProfileManager releases a completed agent-browser Session and Profile lease", async () => {
   const manager = createTakeoverHarness([
     {
       pid: 101,
@@ -207,9 +237,9 @@ test("ProfileManager hands a completed agent-browser Session to the user without
   ]);
   const result = await manager.completeAgentConnections("profile-1", { session: "cx-one" });
 
-  assert.deepEqual(manager.operations, ["lease-delegated:cx-one:true", "notice:101:agent_complete"]);
-  assert.deepEqual(manager.terminatedPids, []);
-  assert.equal(manager.controlNotices[0].reason, "agent_complete");
+  assert.deepEqual(manager.operations, ["retire-completed:101"]);
+  assert.deepEqual(manager.terminatedPids, [101]);
+  assert.equal(manager.controlNotices.length, 0);
   assert.equal(result.targetCount, 1);
   assert.equal(result.successCount, 1);
   assert.deepEqual(result.failures, []);
@@ -246,8 +276,8 @@ test("ProfileManager orders Gateway revocation between durable notice and user u
   assert.deepEqual(manager.operations, [
     "notice:101:agent_complete",
     "gateway:complete",
-    "lease-delegated:cx-gateway:true",
-    "notice:101:agent_complete"
+    "gateway:stop",
+    "retire-completed:101"
   ]);
 });
 
@@ -374,7 +404,7 @@ test("ProfileManager does not unlock user input for a requested but unquiesced t
   await rm(home, { recursive: true, force: true });
 });
 
-test("ProfileManager keeps a completed Session paused without a time expiry", async () => {
+test("ProfileManager does not keep a completed Session paused after release", async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), "profilepilot-completed-"));
   const client = { pid: 101, label: "agent-browser", session: "cx-one" };
   const notice = makeAgentControlNotice(
@@ -389,11 +419,11 @@ test("ProfileManager keeps a completed Session paused without a time expiry", as
 
   assert.equal(
     await areAllAgentControlClientsPaused([client], home, Date.parse("2099-07-10T08:00:00.000Z")),
-    true
+    false
   );
   assert.deepEqual(
     await agentControlStatusForClients([client], home, Date.parse("2099-07-10T08:00:00.000Z")),
-    { paused: true, agentOffline: false, controlSince: "2026-07-10T08:00:00.000Z" }
+    { paused: false, agentOffline: false }
   );
   await rm(home, { recursive: true, force: true });
 });
@@ -522,6 +552,10 @@ function createTakeoverHarness(clients) {
   };
   manager.recordTakeoverEvent = async () => {};
   manager.removeAgentBrowserSessionFiles = async () => {};
+  manager.retireCompletedAgentBrowserClient = async (client) => {
+    manager.operations.push(`retire-completed:${client.pid}`);
+    manager.terminatedPids.push(client.pid);
+  };
   manager.releaseAgentBrowserProfileLeases = (session) => {
     manager.operations.push(`lease-release:${session}`);
     return [];

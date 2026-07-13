@@ -2,7 +2,7 @@ import { isBusyAction } from "../busy";
 import { store } from "../state";
 import { AgentActivity, CdpClientInfo, ExternalChromeInstance, PublicProfile } from "../types";
 import { renderLiveViewSection } from "./live-view";
-import { NATIVE_CDP_UNSUPPORTED_NOTE, agentActivityLeadText, agentActivityProgressText, agentActivityTooltipText, cdpClientToolSummary, cdpLaunchButtonTitle, cdpPortLabel, cdpSessionText, contentionNotice, contentionNoticeShort, deleteButtonTitle, escapeHtml, focusButtonTitle, formatDate, formatRelativeTime, gatewayControlClient, gatewayUserHasControl, launchButtonTitle, listeningPortsNote, liveAddrLabel, prettyCdpClientLabel, profileAgentControlClients, profileStatusLabel, renderButtonLabel, sourceDetail, truncateText } from "../util";
+import { NATIVE_CDP_UNSUPPORTED_NOTE, agentActivityLeadText, agentActivityProgressText, agentActivityTooltipText, agentBrowserOccupancyClient, cdpClientToolSummary, cdpLaunchButtonTitle, cdpPortLabel, cdpSessionText, contentionNotice, contentionNoticeShort, deleteButtonTitle, escapeHtml, focusButtonTitle, formatDate, formatRelativeTime, gatewayControlClient, gatewayUserHasControl, launchButtonTitle, listeningPortsNote, liveAddrLabel, prettyCdpClientLabel, profileAgentBrowserReserved, profileAgentControlClients, profileStatusLabel, profileUserHasControl, renderButtonLabel, sourceDetail, truncateText } from "../util";
 
 interface ConnectionActivityModel {
   cdpClients: CdpClientInfo[];
@@ -224,7 +224,8 @@ export function cdpChip(
 export function renderProfileConnectionCell(profile: PublicProfile): string {
   // CDP 未就绪（绑定待启动 / 系统不支持 / 未开启）：只显示 CDP 可用性芯片，无驱动信息。
   if (!profile.cdpUrl) {
-    return renderProfileCdpCell(profile);
+    const cdpCell = renderProfileCdpCell(profile);
+    return renderAgentBrowserOccupancyCell(profile, cdpCell) || cdpCell;
   }
 
   const portChip = cdpChip(
@@ -238,6 +239,10 @@ export function renderProfileConnectionCell(profile: PublicProfile): string {
   const gatewayControlCell = renderGatewayControlCell(profile, portChip);
   if (gatewayControlCell) {
     return gatewayControlCell;
+  }
+  const occupancyCell = renderAgentBrowserOccupancyCell(profile, portChip);
+  if (occupancyCell) {
+    return occupancyCell;
   }
 
   // CDP 已开但无人驱动：只显示端口 + 空闲。当前停在哪个页面只在被外部工具驱动时才有意义，
@@ -260,6 +265,26 @@ export function renderProfileConnectionCell(profile: PublicProfile): string {
   }
   // 结束连接只放右侧详情栏（renderCdpClientsDetail），列表行里不再挂 ✕，避免遮挡药丸/操作。
   return `<span class="conn-cell-stack"><span class="conn-line">${portChip}${renderConnPill(profile)}${renderAgentActivityInline(profile)}</span>${subLine}</span>`;
+}
+
+function renderAgentBrowserOccupancyCell(profile: PublicProfile, portChip: string): string {
+  // 有活动 Gateway 归属时由 renderGatewayControlCell 展示；这里专门补足旧租约/断连租约，
+  // 与自动候选筛选使用同一份 agentBrowserOccupancy，避免误显示“空闲”。
+  if (!profile.agentBrowserOccupancy || profile.gatewayControl?.ownerSessionId) return "";
+  const occupancy = profile.agentBrowserOccupancy;
+  const client = agentBrowserOccupancyClient(profile);
+  const label = occupancy.ownership === "user" ? "用户已接管" : "Agent 已绑定";
+  const tip = occupancy.ownership === "user"
+    ? "Session 仍保留，自动切换不会使用此 Profile；请交还或释放后再复用"
+    : "agent-browser Session 仍排他预留此 Profile，自动切换不会使用";
+  const sessionText = client ? cdpSessionText(client) : occupancy.session;
+  const age = formatRelativeTime(occupancy.updatedAt);
+  const subLine = sessionText || age
+    ? `<span class="conn-session"><span class="conn-session-main">${escapeHtml(sessionText)}</span>${
+        age ? `<span class="conn-session-age">${escapeHtml(age)}</span>` : ""
+      }</span>`
+    : "";
+  return `<span class="conn-cell-stack"><span class="conn-line">${portChip}<span class="conn-pill none action-tooltip" data-tooltip="${escapeHtml(tip)}">${escapeHtml(label)}</span></span>${subLine}</span>`;
 }
 
 function renderGatewayControlCell(profile: PublicProfile, portChip: string): string {
@@ -865,14 +890,14 @@ export function renderCdpClientsDetail(profile: PublicProfile): string {
     return "";
   }
 
-  const gatewayClient = gatewayControlClient(profile);
-  const gatewayReserved = Boolean(gatewayClient && profile.gatewayControl?.sessionStatus === "active");
+  const occupancyClient = agentBrowserOccupancyClient(profile);
+  const reserved = profileAgentBrowserReserved(profile);
   const attached = profile.cdpClients.length > 0;
-  const displayClients = attached ? profile.cdpClients : gatewayClient ? [gatewayClient] : [];
+  const displayClients = attached ? profile.cdpClients : occupancyClient ? [occupancyClient] : [];
   // 汇总行不带 pid（进程细节对用户没信息量）；断连按钮在同名多连接时才用 pid 区分。
-  const value = gatewayUserHasControl(profile)
+  const value = profileUserHasControl(profile)
     ? "用户已接管 · Agent Session 保留"
-    : gatewayReserved && !attached
+    : reserved && !attached
       ? "Agent 已绑定 · 当前没有活动连接"
       : attached
         ? `驱动中 · ${cdpClientToolSummary(profile.cdpClients)}`
@@ -921,7 +946,7 @@ export function renderCdpClientsDetail(profile: PublicProfile): string {
     : "";
 
   return `
-    <div class="detail-row${attached || gatewayReserved ? " detail-row-attached" : ""}">
+    <div class="detail-row${attached || reserved ? " detail-row-attached" : ""}">
       <span>Agent 连接</span>
       <strong>${escapeHtml(value)}</strong>
       ${warningRow}

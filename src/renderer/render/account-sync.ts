@@ -33,10 +33,10 @@ export function renderSyncPanel(profiles: PublicProfile[]): string {
       <div class="section-head">
         <div>
           <h2>同步</h2>
-          <span class="section-subtitle block mt-1 text-muted font-mono text-[11px] font-semibold tracking-[0.18em] uppercase">Account + Extensions</span>
+          <span class="section-subtitle block mt-1 text-muted text-[12px] leading-[1.45]">同步登录态与插件，并按需启动目标 Profile</span>
         </div>
         <button type="button" class="primary agent-browser-cta" data-action="open-agent-browser-setup" ${store.busy ? "disabled" : ""}>
-          ⚡ 一键造 Agent 浏览器
+          创建 Agent 浏览器
         </button>
       </div>
 

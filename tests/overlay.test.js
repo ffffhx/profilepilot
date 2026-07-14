@@ -1070,6 +1070,7 @@ test("AgentOverlayManager tears down stale page UI before closing its internal o
 test("AgentOverlayManager cleans stale overlays on an inactive running port once", async () => {
   const methods = [];
   let targetRequests = 0;
+  let overlayHostPresent = true;
   const pageClient = {
     onEvent: null,
     onDisconnect: null,
@@ -1078,6 +1079,11 @@ test("AgentOverlayManager cleans stale overlays on an inactive running port once
     },
     async send(method, params) {
       methods.push(method);
+      if (method === "Runtime.enable") {
+        this.onEvent?.("Runtime.executionContextCreated", {
+          context: { id: 5, name: "__ppAgentOverlayWorld" }
+        });
+      }
       if (method === "Page.getFrameTree") {
         return { frameTree: { frame: { id: "frame-1" } } };
       }
@@ -1086,8 +1092,19 @@ test("AgentOverlayManager cleans stale overlays on an inactive running port once
         return { executionContextId: 7 };
       }
       if (method === "Runtime.evaluate") {
-        assert.match(String(params.expression), /__ppAgentOverlayTeardown/);
-        assert.equal(params.contextId, 7);
+        const expression = String(params.expression);
+        if (expression.includes('Boolean(document.getElementById')) {
+          return { result: { value: overlayHostPresent } };
+        }
+        if (expression.includes("const teardown")) {
+          assert.ok(params.contextId === 5 || params.contextId === 7);
+          overlayHostPresent = false;
+          return { result: { value: params.contextId === 5 } };
+        }
+        if (expression.includes('document.getElementById("__pp-agent-overlay")?.remove()')) {
+          overlayHostPresent = false;
+          return { result: { value: true } };
+        }
       }
       return {};
     }
@@ -1109,18 +1126,64 @@ test("AgentOverlayManager cleans stale overlays on an inactive running port once
 
   manager.sync({ enabled: true, ports: [], inactivePorts: [9480] });
   await waitFor(() => methods.includes("close"), "inactive port overlay cleanup");
-  assert.deepEqual(methods, [
-    "Runtime.enable",
-    "Page.enable",
-    "Page.getFrameTree",
-    "Page.createIsolatedWorld",
-    "Runtime.evaluate",
-    "close"
-  ]);
+  assert.equal(methods[0], "Runtime.enable");
+  assert.equal(methods[1], "Page.enable");
+  assert.equal(methods.includes("Page.getFrameTree"), true);
+  assert.equal(methods.includes("Page.createIsolatedWorld"), true);
+  assert.equal(methods.at(-1), "close");
+  assert.equal(overlayHostPresent, false);
 
   manager.sync({ enabled: true, ports: [], inactivePorts: [9480] });
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(targetRequests, 1);
+});
+
+test("AgentOverlayManager retries inactive overlay cleanup when any target fails", async () => {
+  let targetRequests = 0;
+  let connectAttempts = 0;
+  const pageClient = {
+    onEvent: null,
+    onDisconnect: null,
+    close() {},
+    async send(method) {
+      if (method === "Runtime.enable") {
+        this.onEvent?.("Runtime.executionContextCreated", {
+          context: { id: 5, name: "__ppAgentOverlayWorld" }
+        });
+      }
+      if (method === "Runtime.evaluate") {
+        return { result: { value: false } };
+      }
+      return {};
+    }
+  };
+  const manager = new AgentOverlayManager({
+    onStop: async () => {},
+    requestTargets: async () => {
+      targetRequests += 1;
+      return [{
+        id: "target-1",
+        type: "page",
+        url: "https://example.test",
+        webSocketDebuggerUrl: "ws://inactive-page"
+      }];
+    },
+    connectBrowser: async () => {
+      connectAttempts += 1;
+      if (connectAttempts === 1) {
+        throw new Error("target disappeared during cleanup");
+      }
+      return pageClient;
+    },
+    inputGuard: { sync() {}, dispose() {} }
+  });
+
+  manager.sync({ enabled: true, ports: [], inactivePorts: [9480] });
+  await waitFor(() => connectAttempts === 1 && !manager.cleanedInactivePorts.has(9480), "failed cleanup retry eligibility");
+
+  manager.sync({ enabled: true, ports: [], inactivePorts: [9480] });
+  await waitFor(() => connectAttempts === 2, "inactive overlay cleanup retry");
+  assert.equal(targetRequests, 2);
 });
 
 test("AgentOverlayManager still allows ending a task after user takeover", async () => {

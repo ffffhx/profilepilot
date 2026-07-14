@@ -436,21 +436,58 @@ export class AgentOverlayManager {
       return false;
     }
 
-    await Promise.allSettled(
+    const results = await Promise.allSettled(
       targets.filter(isInjectableTarget).map(async (target) => {
         if (!target.webSocketDebuggerUrl) {
-          return;
+          return false;
         }
         const client = await connect(target.webSocketDebuggerUrl, PAGE_CONNECT_TIMEOUT);
         try {
+          const overlayContextIds = new Set<number>();
+          client.onEvent = (method, params) => {
+            if (method !== "Runtime.executionContextCreated" || !isRecord(params) || !isRecord(params.context)) {
+              return;
+            }
+            const context = params.context;
+            if (stringValue(context.name) !== OVERLAY_WORLD_NAME) {
+              return;
+            }
+            const contextId = numberValue(context.id);
+            if (contextId !== null) {
+              overlayContextIds.add(contextId);
+            }
+          };
           await client.send("Runtime.enable", {}, 2500);
           await client.send("Page.enable", {}, 2500);
+          const hostBefore = await client.send<{ result?: { value?: unknown } }>(
+            "Runtime.evaluate",
+            {
+              expression: 'Boolean(document.getElementById("__pp-agent-overlay"))',
+              awaitPromise: false,
+              returnByValue: true
+            },
+            2500
+          );
+          const hadOverlayHost = hostBefore.result?.value === true;
+          if (!hadOverlayHost) {
+            await client.send(
+              "Runtime.evaluate",
+              {
+                expression: 'try { sessionStorage.setItem("__ppAgentOverlayTerminalStopUntil", String(Number.MAX_SAFE_INTEGER)); } catch {} true',
+                awaitPromise: false,
+                returnByValue: true
+              },
+              2500
+            );
+            return true;
+          }
+
           const frameTree = await client.send<{ frameTree?: unknown }>("Page.getFrameTree", {}, 2500);
           const tree = isRecord(frameTree.frameTree) ? frameTree.frameTree : null;
           const frame = tree && isRecord(tree.frame) ? tree.frame : null;
           const frameId = frame ? stringValue(frame.id) : "";
           if (!frameId) {
-            return;
+            return false;
           }
           const context = await client.send<{ executionContextId?: number }>(
             "Page.createIsolatedWorld",
@@ -458,24 +495,44 @@ export class AgentOverlayManager {
             2500
           );
           const contextId = numberValue(context.executionContextId);
-          if (contextId === null) {
-            return;
+          if (contextId !== null) {
+            overlayContextIds.add(contextId);
           }
-          await client.send(
+
+          let controllerStopped = false;
+          for (const overlayContextId of overlayContextIds) {
+            const cleanup = await client.send<{ result?: { value?: unknown } }>(
+              "Runtime.evaluate",
+              {
+                expression: '(() => { try { sessionStorage.setItem("__ppAgentOverlayTerminalStopUntil", String(Number.MAX_SAFE_INTEGER)); } catch {} const teardown = globalThis.__ppAgentOverlayTeardown; if (typeof teardown !== "function") return false; teardown(); return true; })()',
+                awaitPromise: false,
+                returnByValue: true,
+                contextId: overlayContextId
+              },
+              2500
+            );
+            controllerStopped = cleanup.result?.value === true || controllerStopped;
+          }
+
+          const hostAfter = await client.send<{ result?: { value?: unknown } }>(
             "Runtime.evaluate",
             {
-              expression: 'try { sessionStorage.setItem("__ppAgentOverlayTerminalStopUntil", String(Number.MAX_SAFE_INTEGER)); } catch {} globalThis.__ppAgentOverlayTeardown && globalThis.__ppAgentOverlayTeardown()',
+              expression: '(() => { try { sessionStorage.setItem("__ppAgentOverlayTerminalStopUntil", String(Number.MAX_SAFE_INTEGER)); } catch {} document.getElementById("__pp-agent-overlay")?.remove(); return !document.getElementById("__pp-agent-overlay"); })()',
               awaitPromise: false,
-              contextId
+              returnByValue: true
             },
             2500
           );
+          // 只移除 DOM 不足以证明成功：旧 isolated world 的 MutationObserver 仍可能把
+          // 控制框重新挂回来。必须同时确认旧控制器 teardown 已执行，否则下一轮继续重试。
+          return controllerStopped && hostAfter.result?.value === true;
         } finally {
+          client.onEvent = null;
           client.close();
         }
       })
     );
-    return true;
+    return results.every((result) => result.status === "fulfilled" && result.value === true);
   }
 
   private isInputGuardPort(state: PortOverlay): boolean {

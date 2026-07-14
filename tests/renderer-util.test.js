@@ -146,6 +146,30 @@ test("renderer exposes lease occupancy when Gateway has no active owner", () => 
   });
 });
 
+test("renderer explains a Gateway handoff as pending user action", () => {
+  const { gatewayControlClient } = loadUtil();
+  const client = gatewayControlClient({
+    gatewayControl: {
+      publicPort: 9224,
+      ownership: "user",
+      sessionStatus: "active",
+      agentHealth: "waiting",
+      connectionActive: false,
+      ownerSessionId: "cx-owner",
+      daemonInstanceId: "daemon-owner",
+      daemonPid: 200,
+      agent: "Codex",
+      project: "coze-test-account-cli",
+      pendingUserAction: "手动加载未打包扩展",
+      updatedAt: "2026-07-14T13:24:00.000Z"
+    }
+  });
+
+  assert.equal(client.session, "cx-owner");
+  assert.match(client.note, /等待用户操作“手动加载未打包扩展”/);
+  assert.match(client.note, /Session 仍保留/);
+});
+
 test("renderer formatErrorMessage removes transport noise and preserves recovery copy", () => {
   const { formatErrorMessage } = loadUtil();
 

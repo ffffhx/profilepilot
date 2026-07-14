@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, promises as fs } from "node:fs";
+import { existsSync, readFileSync, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { app, shell } from "electron";
@@ -3916,21 +3916,55 @@ function gatewayControlsByPort(response: GatewayControlResponse | null): Map<num
       ? profile.agentHealth
       : null;
     if (!ownership || !sessionStatus || !agentHealth) continue;
+    const ownerSessionId = stringField(profile.ownerSessionId) || null;
+    const pendingUserAction = stringField(profile.pendingUserAction) || (
+      ownership === "user" && sessionStatus === "active" && ownerSessionId
+        ? pendingUserActionFromControlNoticeSync(ownerSessionId)
+        : null
+    );
     result.set(publicPort, {
       publicPort,
       ownership,
       sessionStatus,
       agentHealth,
       connectionActive: profile.connectionActive === true,
-      ownerSessionId: stringField(profile.ownerSessionId) || null,
+      ownerSessionId,
       daemonInstanceId: stringField(profile.daemonInstanceId) || null,
       daemonPid: positiveInteger(profile.daemonPid),
       agent: stringField(profile.agent) || null,
       project: stringField(profile.project) || null,
+      pendingUserAction,
       updatedAt: stringField(profile.updatedAt) || new Date().toISOString()
     });
   }
   return result;
+}
+
+export function pendingUserActionFromControlNoticeSync(
+  sessionId: string,
+  homeDir = os.homedir()
+): string | null {
+  if (!/^[A-Za-z0-9._-]+$/.test(sessionId)) return null;
+  const paths = [
+    path.join(homeDir, ".profilepilot", "agent-control", `${sessionId}.json`),
+    path.join(homeDir, ".agent-browser", `${sessionId}.profilepilot-control.json`)
+  ];
+  for (const filePath of paths) {
+    try {
+      const notice = JSON.parse(readFileSync(filePath, "utf8")) as Partial<AgentControlNotice>;
+      if (
+        notice.reason === "user_takeover" &&
+        notice.ownership === "agentDelegatedToUser" &&
+        typeof notice.pendingUserAction === "string" &&
+        notice.pendingUserAction.trim()
+      ) {
+        return notice.pendingUserAction.replace(/\s+/g, " ").trim().slice(0, 240);
+      }
+    } catch {
+      // Try the mirrored notice path.
+    }
+  }
+  return null;
 }
 
 function positiveInteger(value: unknown): number | null {
@@ -3949,7 +3983,9 @@ function gatewayControlClient(control: GatewayProfileControlState): CdpClientInf
     session: control.ownerSessionId,
     lastActive: control.updatedAt,
     note: control.ownership === "user"
-      ? "ProfilePilot Gateway：Session 仍保留，但浏览器控制权当前属于用户"
+      ? control.pendingUserAction
+        ? `ProfilePilot Gateway：等待用户操作“${control.pendingUserAction}”，Session 仍保留`
+        : "ProfilePilot Gateway：Session 仍保留，但浏览器控制权当前属于用户"
       : "ProfilePilot Gateway：当前 Session 是此 Profile 的唯一 Agent 控制者"
   };
 }

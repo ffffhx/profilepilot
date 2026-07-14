@@ -336,7 +336,9 @@ export function gatewayControlClient(profile: PublicProfile): CdpClientInfo | nu
     session: control.ownerSessionId,
     lastActive: control.updatedAt,
     note: control.ownership === "user"
-      ? "Session 仍保留，浏览器控制权当前属于用户"
+      ? control.pendingUserAction
+        ? `等待用户操作“${control.pendingUserAction}”，Session 仍保留`
+        : "Session 仍保留，浏览器控制权当前属于用户"
       : "当前 Session 由 ProfilePilot Gateway 排它管理"
   };
 }

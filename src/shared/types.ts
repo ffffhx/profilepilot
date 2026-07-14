@@ -168,6 +168,8 @@ export interface AgentControlNotice {
   ownership: Ownership;
   // requested＝已禁止新命令、仍在等待当前命令收敛；quiesced＝执行面已安静，可开放用户输入。
   handoffState?: "requested" | "quiesced";
+  // Agent 主动交给用户处理的未完成事项；存在时 complete 必须拒绝释放 Session。
+  pendingUserAction?: string;
   message: string;
   action?: string;
   hardStop: boolean;
@@ -264,6 +266,7 @@ export interface GatewayProfileControlState {
   daemonPid: number | null;
   agent: string | null;
   project: string | null;
+  pendingUserAction: string | null;
   updatedAt: string;
 }
 

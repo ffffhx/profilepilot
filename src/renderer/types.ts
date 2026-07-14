@@ -70,6 +70,7 @@ export interface GatewayProfileControlState {
   daemonPid: number | null;
   agent: string | null;
   project: string | null;
+  pendingUserAction: string | null;
   updatedAt: string;
 }
 

@@ -196,6 +196,31 @@ if (connectIndex >= 0) {
       profileName: "Profile A",
       command: "snapshot"
     }, home).ok, true);
+    assert.equal(await runAgentBrowserWrapper([
+      "profilepilot",
+      "handoff",
+      "--reason",
+      "手动加载未打包扩展"
+    ], env), 0);
+    const handedOffStatus = await requestBrowserGateway({ action: "status" }, { homeDir: home });
+    const handedOffProfile = handedOffStatus.state.profiles.find((item) => item.publicPort === port);
+    assert.equal(handedOffProfile.ownerSessionId, "cx-wrapper");
+    assert.equal(handedOffProfile.ownership, "user");
+    assert.equal(handedOffProfile.sessionStatus, "active");
+    assert.equal(handedOffProfile.pendingUserAction, "手动加载未打包扩展");
+    assert.equal(readAgentBrowserProfileLeaseSync(port, home).delegatedToUser, true);
+
+    assert.equal(
+      await runAgentBrowserWrapper(["profilepilot", "complete"], env),
+      75,
+      "complete must not release a Session that is waiting for user action"
+    );
+    assert.equal(readAgentBrowserProfileLeaseSync(port, home).session, "cx-wrapper");
+    assert.equal(await runAgentBrowserWrapper(["profilepilot", "resume"], env), 0);
+    const resumedStatus = await requestBrowserGateway({ action: "status" }, { homeDir: home });
+    const resumedProfile = resumedStatus.state.profiles.find((item) => item.publicPort === port);
+    assert.equal(resumedProfile.ownership, "agent");
+    assert.equal(resumedProfile.pendingUserAction, undefined);
     assert.equal(await runAgentBrowserWrapper(["profilepilot", "complete"], env), 0);
     await waitFor(() => !isPidAlive(Number(readFileSync(holderPidPath, "utf8"))), "holder exits after completion");
     const completedStatus = await requestBrowserGateway({ action: "status" }, { homeDir: home });

@@ -106,9 +106,11 @@ test("Gateway takeover, completion, return and stop are durable explicit transit
   const h = harness();
   try {
     h.control.acquire({ publicPort: 9223, sessionId: "cx-one", daemonInstanceId: "daemon-one" });
-    const takeover = h.control.delegateToUser("cx-one", "user_takeover");
+    const takeover = h.control.delegateToUser("cx-one", "user_takeover", "手动加载未打包扩展");
     assert.equal(takeover.ownership, "user");
     assert.equal(takeover.agentHealth, "waiting");
+    assert.equal(takeover.pendingUserAction, "手动加载未打包扩展");
+    assertCode(() => h.control.delegateToUser("cx-one", "agent_complete"), "PENDING_USER_ACTION");
     assertCode(() => h.control.acquire({
       publicPort: 9223,
       sessionId: "cx-one",
@@ -117,6 +119,7 @@ test("Gateway takeover, completion, return and stop are durable explicit transit
 
     const returned = h.control.returnToAgent("cx-one");
     assert.equal(returned.ownership, "agent");
+    assert.equal(returned.pendingUserAction, undefined);
     const reacquired = h.control.acquire({
       publicPort: 9223,
       sessionId: "cx-one",

@@ -282,7 +282,7 @@ export class BrowserGatewayDaemon {
     }
     if (request.action === "control") {
       const profile = request.command === "takeover"
-        ? this.control.delegateToUser(request.sessionId, "user_takeover")
+        ? this.control.delegateToUser(request.sessionId, "user_takeover", request.pendingUserAction)
         : request.command === "complete"
           ? this.control.delegateToUser(request.sessionId, "agent_complete")
           : request.command === "return"

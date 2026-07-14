@@ -295,9 +295,13 @@ function renderGatewayControlCell(profile: PublicProfile, portChip: string): str
   const client = gatewayControlClient(profile);
   const sessionText = client ? cdpSessionText(client) : control.ownerSessionId;
   const age = formatRelativeTime(control.updatedAt);
-  const label = control.ownership === "user" ? "用户已接管" : "Agent 已绑定";
+  const label = control.ownership === "user"
+    ? control.pendingUserAction ? "等待用户操作" : "用户已接管"
+    : "Agent 已绑定";
   const tip = control.ownership === "user"
-    ? "浏览器控制权属于用户；Agent Session 仍保留，等待交还"
+    ? control.pendingUserAction
+      ? `等待用户完成：${control.pendingUserAction}；Agent Session 仍保留`
+      : "浏览器控制权属于用户；Agent Session 仍保留，等待交还"
     : "Gateway 已为该 Agent 保留控制权，当前没有活动连接";
   const subLine = sessionText || age
     ? `<span class="conn-session"><span class="conn-session-main">${escapeHtml(sessionText)}</span>${
@@ -896,7 +900,9 @@ export function renderCdpClientsDetail(profile: PublicProfile): string {
   const displayClients = attached ? profile.cdpClients : occupancyClient ? [occupancyClient] : [];
   // 汇总行不带 pid（进程细节对用户没信息量）；断连按钮在同名多连接时才用 pid 区分。
   const value = profileUserHasControl(profile)
-    ? "用户已接管 · Agent Session 保留"
+    ? profile.gatewayControl?.pendingUserAction
+      ? `等待用户操作：${profile.gatewayControl.pendingUserAction} · Agent Session 保留`
+      : "用户已接管 · Agent Session 保留"
     : reserved && !attached
       ? "Agent 已绑定 · 当前没有活动连接"
       : attached

@@ -7,7 +7,7 @@ import path from "node:path";
 import type { GatewayControlEvent } from "./browser-gateway-control";
 
 const DEFAULT_TIMEOUT_MS = 3_000;
-export const BROWSER_GATEWAY_PROTOCOL_VERSION = 2;
+export const BROWSER_GATEWAY_PROTOCOL_VERSION = 3;
 
 export type GatewayControlRequest =
   | { action: "ping" }
@@ -32,7 +32,12 @@ export type GatewayControlRequest =
       agent?: string;
       project?: string;
     }
-  | { action: "control"; sessionId: string; command: "takeover" | "complete" | "return" | "stop" }
+  | {
+      action: "control";
+      sessionId: string;
+      command: "takeover" | "complete" | "return" | "stop";
+      pendingUserAction?: string;
+    }
   | { action: "prepare-daemon-restart"; sessionId: string; daemonInstanceId: string }
   | {
       action: "raw-cdp";

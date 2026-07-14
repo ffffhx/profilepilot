@@ -339,6 +339,24 @@ test("agent-browser wrapper completion releases the Session and Profile lease", 
   rmSync(home, { recursive: true, force: true });
 });
 
+test("agent-browser wrapper requires an explicit reason for handoff", async () => {
+  const home = makeTempHome();
+  const writes = captureProcessWrites();
+  let exitCode;
+  try {
+    exitCode = await runAgentBrowserWrapper(["profilepilot", "handoff"], {
+      HOME: home,
+      AGENT_BROWSER_SESSION: "cx-handoff"
+    });
+  } finally {
+    writes.restore();
+  }
+
+  assert.equal(exitCode, PROFILEPILOT_AGENT_BROWSER_USAGE_EXIT_CODE);
+  assert.match(writes.stderr.join(""), /handoff 必须通过 --reason/);
+  rmSync(home, { recursive: true, force: true });
+});
+
 test("agent-browser wrapper waits for the durable user-return event", async () => {
   const home = makeTempHome();
   acquireAgentBrowserProfileLeaseSync({

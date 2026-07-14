@@ -22,6 +22,7 @@ export interface GatewayProfileBinding {
   daemonPid?: number;
   agent?: string;
   project?: string;
+  pendingUserAction?: string;
   ownership: GatewayOwnership;
   sessionStatus: GatewaySessionStatus;
   agentHealth: GatewayAgentHealth;
@@ -89,6 +90,7 @@ export class BrowserGatewayControlError extends Error {
       | "SESSION_ALREADY_BOUND"
       | "SESSION_DAEMON_DUPLICATE"
       | "AGENT_USER_IN_CONTROL"
+      | "PENDING_USER_ACTION"
       | "AGENT_TASK_STOPPED"
       | "GATEWAY_TICKET_INVALID"
       | "GATEWAY_TICKET_EXPIRED"
@@ -236,6 +238,7 @@ export class BrowserGatewayControlPlane {
     profile.daemonPid = normalizePid(request.daemonPid);
     profile.agent = optionalString(request.agent);
     profile.project = optionalString(request.project);
+    profile.pendingUserAction = undefined;
     profile.ownership = "agent";
     profile.sessionStatus = "active";
     profile.agentHealth = "online";
@@ -297,8 +300,24 @@ export class BrowserGatewayControlPlane {
     return cloneProfile(profile);
   }
 
-  delegateToUser(sessionIdInput: string, reason: "user_takeover" | "agent_complete"): GatewayProfileBinding {
+  delegateToUser(
+    sessionIdInput: string,
+    reason: "user_takeover" | "agent_complete",
+    pendingUserAction?: string
+  ): GatewayProfileBinding {
     if (reason === "agent_complete") {
+      const profile = this.requireSessionProfile(sessionIdInput);
+      if (
+        profile.sessionStatus === "active" &&
+        (profile.ownership === "user" || Boolean(profile.pendingUserAction))
+      ) {
+        throw new BrowserGatewayControlError(
+          "PENDING_USER_ACTION",
+          profile.pendingUserAction
+            ? `仍在等待用户完成：${profile.pendingUserAction}`
+            : "用户仍持有浏览器控制权"
+        );
+      }
       // 任务完成是终态：不能像用户临时接管那样继续保留 active owner。
       // 关闭 Gateway Session 后，Profile 才能立即被其它任务重新选择。
       return this.stopSession(sessionIdInput);
@@ -306,6 +325,7 @@ export class BrowserGatewayControlPlane {
     const profile = this.requireSessionProfile(sessionIdInput);
     profile.ownership = "user";
     profile.agentHealth = "waiting";
+    profile.pendingUserAction = optionalString(pendingUserAction);
     profile.controlGeneration += 1;
     profile.updatedAt = iso(this.now());
     this.persist(reason, profile, true);
@@ -319,6 +339,7 @@ export class BrowserGatewayControlPlane {
     }
     profile.ownership = "agent";
     profile.agentHealth = "online";
+    profile.pendingUserAction = undefined;
     profile.controlGeneration += 1;
     // 交还后旧 daemon 连接已经被接管动作吊销，允许同一个 daemon 重新申请 Ticket。
     profile.updatedAt = iso(this.now());
@@ -338,6 +359,7 @@ export class BrowserGatewayControlPlane {
     profile.daemonPid = undefined;
     profile.agent = undefined;
     profile.project = undefined;
+    profile.pendingUserAction = undefined;
     profile.updatedAt = iso(this.now());
     this.profilePortBySession.delete(sessionId);
     this.persist("session-stopped", profile, true);

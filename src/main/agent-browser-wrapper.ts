@@ -78,6 +78,7 @@ const OPTIONS_WITH_VALUES = new Set([
   "--params",
   "--profile",
   "--profile-dir",
+  "--reason",
   "--session",
   "--timeout",
   "--target",
@@ -739,8 +740,8 @@ async function runProfilePilotInternalCommand(
     return null;
   }
   const action = positionals[1];
-  if (action !== "wait-control" && action !== "complete" && action !== "resume" && action !== "release" && action !== "status" && action !== "cdp") {
-    process.stderr.write("[ProfilePilot] 用法：agent-browser profilepilot <status|wait-control|complete|resume|release|cdp>\n");
+  if (action !== "handoff" && action !== "wait-control" && action !== "complete" && action !== "resume" && action !== "release" && action !== "status" && action !== "cdp") {
+    process.stderr.write("[ProfilePilot] 用法：agent-browser profilepilot <status|handoff|wait-control|complete|resume|release|cdp>\n");
     return PROFILEPILOT_AGENT_BROWSER_USAGE_EXIT_CODE;
   }
 
@@ -800,14 +801,94 @@ async function runProfilePilotInternalCommand(
     return 0;
   }
 
+  const handoffReason = action === "handoff"
+    ? normalizedHandoffReason(optionValue(args, "--reason"))
+    : undefined;
+  if (action === "handoff" && !handoffReason) {
+    process.stderr.write("[ProfilePilot] handoff 必须通过 --reason 说明等待用户完成的操作。\n");
+    return PROFILEPILOT_AGENT_BROWSER_USAGE_EXIT_CODE;
+  }
+
   const context = resolveProfilePilotControlContext(session, env, homeDir);
   if (!context) {
     process.stderr.write(`[ProfilePilot] 找不到 Session ${session} 对应的 Profile，无法执行 ${action}。\n`);
     return PROFILEPILOT_AGENT_BROWSER_USAGE_EXIT_CODE;
   }
 
+  if (action === "handoff") {
+    const pendingUserAction = handoffReason as string;
+    if (!await isGatewaySessionManaged(session, homeDir)) {
+      process.stderr.write(`${JSON.stringify({
+        source: "ProfilePilot",
+        error_code: "GATEWAY_PROFILE_NOT_FOUND",
+        hard_stop: true,
+        session,
+        message: "当前 Session 没有受 ProfilePilot Gateway 管理的 Profile，无法安全交给用户",
+        action: "停止浏览器操作并检查 agent-browser profilepilot status；不要用 complete 代替 handoff"
+      }, null, 2)}\n`);
+      return PROFILEPILOT_AGENT_BROWSER_HARD_STOP_EXIT_CODE;
+    }
+    const requested = makeWrapperHandoffNotice(
+      context,
+      pendingUserAction,
+      nextControlVersion(session, homeDir),
+      "requested"
+    );
+    writeProfilePilotControlNoticeSync(session, requested, homeDir);
+    try {
+      await controlGatewaySessionIfManaged(session, "takeover", homeDir, pendingUserAction);
+      setAgentBrowserProfileLeasesDelegatedSync(session, true, homeDir);
+      const quiesced = makeWrapperHandoffNotice(
+        context,
+        pendingUserAction,
+        requested.controlVersion + 1,
+        "quiesced"
+      );
+      writeProfilePilotControlNoticeSync(session, quiesced, homeDir);
+      process.stdout.write(`${JSON.stringify({
+        source: "ProfilePilot",
+        ok: true,
+        action: "handoff",
+        ownership: "user",
+        session,
+        profile_id: context.profileId,
+        profile_name: context.profileName,
+        pending_user_action: pendingUserAction,
+        control_version: quiesced.controlVersion,
+        message: "浏览器控制权已交给用户；Agent Session 和 Profile 租约继续保留"
+      }, null, 2)}\n`);
+      return 0;
+    } catch (error) {
+      setAgentBrowserProfileLeasesDelegatedSync(session, false, homeDir);
+      clearProfilePilotNoticesForSession(session, homeDir);
+      throw error;
+    }
+  }
+
   if (action === "complete") {
-    const gatewayManaged = await isGatewaySessionManaged(session, homeDir);
+    const gatewayProfile = await gatewaySessionProfile(session, homeDir);
+    const pendingNotice = readAnyProfilePilotControlNotice(session, homeDir);
+    const pendingUserAction = normalizedHandoffReason(
+      pendingNotice?.reason === "user_takeover" ? pendingNotice.pendingUserAction : undefined
+    ) || normalizedHandoffReason(
+      typeof gatewayProfile?.pendingUserAction === "string" ? gatewayProfile.pendingUserAction : undefined
+    );
+    const userStillHasControl = gatewayProfile?.sessionStatus === "active" && gatewayProfile.ownership === "user";
+    if (pendingNotice?.reason === "user_takeover" || pendingUserAction || userStillHasControl) {
+      process.stderr.write(`${JSON.stringify({
+        source: "ProfilePilot",
+        error_code: "PROFILEPILOT_PENDING_USER_ACTION",
+        hard_stop: true,
+        session,
+        profile_id: context.profileId,
+        profile_name: context.profileName,
+        pending_user_action: pendingUserAction || "用户正在操作浏览器",
+        message: "任务仍在等待用户操作，不能 complete 并释放 Session",
+        action: "保留当前 Session；用户完成后执行 resume 并重新 snapshot。只有用户明确放弃任务时才执行 release"
+      }, null, 2)}\n`);
+      return PROFILEPILOT_AGENT_BROWSER_HARD_STOP_EXIT_CODE;
+    }
+    const gatewayManaged = Boolean(gatewayProfile);
     if (gatewayManaged) {
       const requested = makeWrapperControlNotice(
         context,
@@ -1075,22 +1156,35 @@ function replaceConnectTarget(args: string[], webSocketUrl: string): string[] {
 async function controlGatewaySessionIfManaged(
   sessionId: string,
   command: "takeover" | "complete" | "return" | "stop",
-  homeDir: string
+  homeDir: string,
+  pendingUserAction?: string
 ): Promise<boolean> {
   if (!await isGatewaySessionManaged(sessionId, homeDir)) return false;
-  await requestBrowserGateway({ action: "control", sessionId, command }, { homeDir, timeoutMs: 3_000 });
+  await requestBrowserGateway({
+    action: "control",
+    sessionId,
+    command,
+    ...(pendingUserAction ? { pendingUserAction } : {})
+  }, { homeDir, timeoutMs: 3_000 });
   return true;
 }
 
 async function isGatewaySessionManaged(sessionId: string, homeDir: string): Promise<boolean> {
+  return Boolean(await gatewaySessionProfile(sessionId, homeDir));
+}
+
+async function gatewaySessionProfile(
+  sessionId: string,
+  homeDir: string
+): Promise<Record<string, unknown> | null> {
   let status: GatewayControlResponse;
   try {
     status = await requestBrowserGateway({ action: "status" }, { homeDir, timeoutMs: 800 });
   } catch (error) {
     if (persistedGatewayOwnsSession(homeDir, sessionId)) throw error;
-    return false;
+    return null;
   }
-  return gatewayProfiles(status).some((profile) => profile.ownerSessionId === sessionId);
+  return gatewayProfiles(status).find((profile) => profile.ownerSessionId === sessionId) || null;
 }
 
 async function runGatewayRawCdp(
@@ -1299,6 +1393,36 @@ function makeWrapperControlNotice(
   if (context.agent) {
     notice.agent = context.agent;
   }
+  return notice;
+}
+
+function makeWrapperHandoffNotice(
+  context: ProfilePilotControlContext,
+  pendingUserAction: string,
+  controlVersion: number,
+  handoffState: NonNullable<AgentControlNotice["handoffState"]>
+): AgentControlNotice {
+  const notice: AgentControlNotice = {
+    version: 1,
+    controlVersion,
+    code: "AGENT_USER_IN_CONTROL",
+    reason: "user_takeover",
+    ownership: "agentDelegatedToUser",
+    handoffState,
+    pendingUserAction,
+    message: `等待用户完成：${pendingUserAction}`,
+    action: "停手：Session 和 Profile 仍保留；等待用户明确完成后再 resume，重新 snapshot 后继续",
+    hardStop: true,
+    profileId: context.profileId,
+    profileName: context.profileName,
+    pid: context.pid,
+    label: context.label,
+    session: context.session,
+    at: new Date().toISOString(),
+    expiresAt: "9999-12-31T23:59:59.999Z"
+  };
+  if (context.sessionTitle) notice.sessionTitle = context.sessionTitle;
+  if (context.agent) notice.agent = context.agent;
   return notice;
 }
 
@@ -1586,6 +1710,11 @@ function readActiveReturnNotice(filePath: string, now: number): AgentControlNoti
 function safeSessionName(value: string | undefined): string | undefined {
   const trimmed = typeof value === "string" ? value.trim() : "";
   return SAFE_SESSION_RE.test(trimmed) ? trimmed : undefined;
+}
+
+function normalizedHandoffReason(value: string | undefined): string | undefined {
+  const normalized = typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+  return normalized ? normalized.slice(0, 240) : undefined;
 }
 
 function positionalArgs(args: string[]): string[] {

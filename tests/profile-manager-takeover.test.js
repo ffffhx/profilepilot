@@ -13,6 +13,7 @@ const {
   compatibilityCdpPorts,
   gatewayManagedPortSet,
   makeAgentControlNotice,
+  pendingUserActionFromControlNoticeSync,
   stripManagedCdpRuntimeMetadata,
   shouldAutoDisconnectStaleAgentBrowserClient
 } = require("../dist/main/profile-manager.js");
@@ -39,6 +40,36 @@ test("ProfileManager uses Chinese for the browser control protocol", async () =>
   assert.equal(manager.agentOverlayManager.options.locale, "zh");
   await manager.disposeAgentOverlay();
   await rm(dataDir, { recursive: true, force: true });
+});
+
+test("ProfileManager recovers pending user action metadata from a wrapper notice", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "profilepilot-pending-user-action-"));
+  const directory = path.join(home, ".profilepilot", "agent-control");
+  await mkdir(directory, { recursive: true });
+  await writeFile(path.join(directory, "cx-handoff.json"), `${JSON.stringify({
+    version: 1,
+    controlVersion: 1,
+    code: "AGENT_USER_IN_CONTROL",
+    reason: "user_takeover",
+    ownership: "agentDelegatedToUser",
+    handoffState: "quiesced",
+    pendingUserAction: "  手动加载   未打包扩展  ",
+    message: "等待用户完成",
+    hardStop: true,
+    profileId: "profile-1",
+    profileName: "Profile One",
+    pid: process.pid,
+    label: "agent-browser",
+    session: "cx-handoff",
+    at: new Date().toISOString(),
+    expiresAt: "9999-12-31T23:59:59.999Z"
+  })}\n`);
+
+  assert.equal(
+    pendingUserActionFromControlNoticeSync("cx-handoff", home),
+    "手动加载 未打包扩展"
+  );
+  await rm(home, { recursive: true, force: true });
 });
 
 test("Gateway authority excludes every managed port from legacy scans while OS runtime only keeps Chrome liveness", () => {

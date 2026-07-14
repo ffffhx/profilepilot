@@ -18,7 +18,11 @@ childProcess.execFile = function patchedExecFile(file, args, options, callback) 
   return realExecFile.apply(this, arguments);
 };
 
-const { AgentOverlayManager, isAgentOverlayClient } = require("../dist/main/agent-overlay.js");
+const {
+  AgentOverlayManager,
+  isAgentOverlayClient,
+  isAgentOverlayInjectableUrl
+} = require("../dist/main/agent-overlay.js");
 const { agentOverlayBootstrapScript } = require("../dist/main/overlay-script.js");
 const { SessionTailer, describeAgentBrowserCommand } = require("../dist/main/session-tail.js");
 
@@ -1242,7 +1246,33 @@ test("AgentOverlayManager uses target discovery without browser-wide auto-attach
   await manager.dispose();
 });
 
-test("AgentOverlayManager supports injection, takeover, return, and cleanup on chrome-extension pages", async () => {
+test("agent overlay includes every Chrome WebUI page while keeping DevTools separate", () => {
+  for (const url of [
+    "chrome://newtab/",
+    "chrome://new-tab-page/",
+    "chrome://settings/",
+    "chrome://extensions/",
+    "chrome://history/",
+    "chrome://downloads/",
+    "chrome://flags/",
+    "chrome://version/",
+    "chrome-untrusted://new-tab-page/",
+    "chrome-error://chromewebdata/",
+    "view-source:chrome://version/",
+    "about:chrome",
+    "chrome-extension://abcdefghijklmnop/popup.html",
+    "https://example.com/"
+  ]) {
+    assert.equal(isAgentOverlayInjectableUrl(url), true, `${url} should receive the agent control overlay`);
+  }
+  assert.equal(
+    isAgentOverlayInjectableUrl("devtools://devtools/bundled/devtools_app.html"),
+    false,
+    "docked DevTools keeps its separate native-window geometry boundary"
+  );
+});
+
+test("AgentOverlayManager supports injection, takeover, return, and cleanup on Chrome-owned pages", async () => {
   const calls = [];
   const pushedPayloads = [];
   const stopCalls = [];
@@ -1254,23 +1284,26 @@ test("AgentOverlayManager supports injection, takeover, return, and cleanup on c
     async send(method, params = {}, _timeoutMs, sessionId) {
       calls.push({ method, params, sessionId });
       if (method === "Target.attachToTarget") {
-        return { sessionId: "extension-page-session" };
+        return { sessionId: `${params.targetId}-session` };
       }
       if (method === "Page.addScriptToEvaluateOnNewDocument") {
-        return { identifier: "extension-overlay-script" };
+        return { identifier: `${sessionId}-overlay-script` };
       }
       if (method === "Page.getFrameTree") {
-        return { frameTree: { frame: { id: "extension-main-frame" } } };
+        return { frameTree: { frame: { id: `${sessionId}-main-frame` } } };
       }
       if (method === "Page.createIsolatedWorld") {
-        assert.equal(params.frameId, "extension-main-frame");
-        return { executionContextId: 77 };
+        assert.equal(params.frameId, `${sessionId}-main-frame`);
+        return { executionContextId: sessionId === "chrome-internal-target-session" ? 88 : 77 };
       }
       if (method === "Runtime.evaluate" && String(params.expression).includes("globalThis.__ppAgentOverlayUpdate(")) {
         const expression = String(params.expression);
         const marker = "globalThis.__ppAgentOverlayUpdate(";
         const start = expression.lastIndexOf(marker) + marker.length;
-        pushedPayloads.push(JSON.parse(expression.slice(start, expression.lastIndexOf(")"))));
+        pushedPayloads.push({
+          sessionId,
+          payload: JSON.parse(expression.slice(start, expression.lastIndexOf(")")))
+        });
       }
       return {};
     }
@@ -1307,24 +1340,34 @@ test("AgentOverlayManager supports injection, takeover, return, and cleanup on c
   await manager.syncPortTargets(state);
 
   const page = state.pages.get("extension-target");
+  const chromePage = state.pages.get("chrome-internal-target");
   assert.ok(page, "chrome-extension page should be selected for injection");
+  assert.ok(chromePage, "chrome:// page should be selected for injection");
   await waitFor(
-    () => page.activeContextId === 77 && !page.connecting && pushedPayloads.length > 0,
-    "extension page overlay initialization"
+    () =>
+      page.activeContextId === 77 &&
+      chromePage.activeContextId === 88 &&
+      !page.connecting &&
+      !chromePage.connecting &&
+      pushedPayloads.length >= 2,
+    "Chrome-owned page overlay initialization"
   );
-  assert.equal(state.pages.has("chrome-internal-target"), false, "chrome:// pages remain excluded");
   assert.equal(page.url, "chrome-extension://abcdefghijklmnop/popup.html");
-  assert.equal(page.sessionId, "extension-page-session");
+  assert.equal(page.sessionId, "extension-target-session");
   assert.equal(page.activeContextId, 77);
+  assert.equal(chromePage.url, "chrome://extensions/");
+  assert.equal(chromePage.sessionId, "chrome-internal-target-session");
+  assert.equal(chromePage.activeContextId, 88);
   const terminalMarkerClears = () => calls.filter((call) =>
+    call.sessionId === "extension-target-session" &&
     call.method === "Runtime.evaluate" &&
     String(call.params.expression).includes('sessionStorage.removeItem("__ppAgentOverlayTerminalStopUntil")')
   ).length;
   assert.equal(terminalMarkerClears(), 1);
-  await manager.initializePageSession(state, page, "extension-page-session");
+  await manager.initializePageSession(state, page, "extension-target-session");
   assert.equal(terminalMarkerClears(), 1, "same Target reinitialization must preserve a terminal stop marker");
   assert.equal(calls.some((call) => call.method === "Page.addScriptToEvaluateOnNewDocument"), true);
-  assert.equal(pushedPayloads.at(-1).ownership, "agent");
+  assert.equal(pushedPayloads.at(-1).payload.ownership, "agent");
 
   manager.handlePageEvent(state, page, "Runtime.bindingCalled", {
     name: "__ppAgentOverlaySignal",
@@ -1333,7 +1376,7 @@ test("AgentOverlayManager supports injection, takeover, return, and cleanup on c
   });
   await waitFor(() => stopCalls.length === 1 && state.delegatedToUser, "extension page takeover");
   assert.equal(stopCalls[0].reason, "user_takeover");
-  assert.equal(pushedPayloads.at(-1).ownership, "agentDelegatedToUser");
+  assert.equal(pushedPayloads.at(-1).payload.ownership, "agentDelegatedToUser");
 
   manager.handlePageEvent(state, page, "Runtime.bindingCalled", {
     name: "__ppAgentOverlaySignal",
@@ -1345,7 +1388,7 @@ test("AgentOverlayManager supports injection, takeover, return, and cleanup on c
     "extension page return to Agent"
   );
   assert.equal(resumeCalls[0].session, "cx-context-test");
-  assert.equal(pushedPayloads.at(-1).ownership, "agent");
+  assert.equal(pushedPayloads.at(-1).payload.ownership, "agent");
 
   manager.handlePageEvent(state, page, "Runtime.bindingCalled", {
     name: "__ppAgentOverlaySignal",

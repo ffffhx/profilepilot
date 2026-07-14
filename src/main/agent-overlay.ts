@@ -2147,20 +2147,21 @@ function isInjectableTarget(target: CdpTargetListEntry): boolean {
   if (target.type !== "page" || !target.id) {
     return false;
   }
-  return isInjectableUrl(target.url || "");
+  return isAgentOverlayInjectableUrl(target.url || "");
 }
 
 function isInjectableTargetInfo(targetInfo: Record<string, unknown>): boolean {
   if (stringValue(targetInfo.type) !== "page") {
     return false;
   }
-  return isInjectableUrl(stringValue(targetInfo.url) || "");
+  return isAgentOverlayInjectableUrl(stringValue(targetInfo.url) || "");
 }
 
-function isInjectableUrl(url: string): boolean {
-  // Extension-owned pages are regular CDP page targets and support the same isolated-world
-  // bootstrap as web pages. Keep browser-owned WebUI / DevTools surfaces excluded.
-  return !/^(chrome|devtools|edge|about:chrome|view-source:chrome):/i.test(url);
+export function isAgentOverlayInjectableUrl(url: string): boolean {
+  // Chrome WebUI（chrome://、chrome-untrusted://、chrome-error://）和扩展页都是
+  // 可 attach 的 page target，统一走 isolated-world 控制框。DevTools 前端单独排除：
+  // 停靠模式会把同一个原生窗口拆成多个内容区域，当前 Input Guard 无法可靠映射按钮坐标。
+  return !/^devtools:/i.test(url);
 }
 
 function targetKey(target: CdpTargetListEntry): string {

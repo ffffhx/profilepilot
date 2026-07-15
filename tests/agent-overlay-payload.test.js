@@ -17,6 +17,12 @@ test("AgentOverlay payload keeps known fields stable and nulls empty values", ()
   assert.deepEqual(Object.keys(payload).sort(), [
     "agent",
     "agentOffline",
+    "agentTargetDomain",
+    "agentTargetId",
+    "agentTargetIsCurrentPage",
+    "agentTargetTitle",
+    "agentTargetUrl",
+    "autoFollowAgent",
     "controlSince",
     "currentAction",
     "currentStep",
@@ -33,6 +39,7 @@ test("AgentOverlay payload keeps known fields stable and nulls empty values", ()
     "sessions",
     "startedAt",
     "state",
+    "targetActivationPending",
     "targetUrl",
     "todoDone",
     "todoTotal",
@@ -48,6 +55,13 @@ test("AgentOverlay payload keeps known fields stable and nulls empty values", ()
   assert.equal(payload.inputGuardState, "starting");
   assert.equal(payload.handoffPending, false);
   assert.equal(payload.agentOffline, false);
+  assert.equal(payload.agentTargetId, null);
+  assert.equal(payload.agentTargetTitle, null);
+  assert.equal(payload.agentTargetUrl, null);
+  assert.equal(payload.agentTargetDomain, null);
+  assert.equal(payload.agentTargetIsCurrentPage, false);
+  assert.equal(payload.autoFollowAgent, false);
+  assert.equal(payload.targetActivationPending, false);
   assert.equal(payload.controlSince, null);
   assert.equal(payload.targetUrl, null);
   assert.equal(payload.currentStep, null);

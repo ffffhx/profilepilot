@@ -61,6 +61,13 @@ export interface BrowserGatewayServerOptions {
   host?: string;
   onBackendClose?: (publicPort: number, error?: Error) => void;
   onAgentConnectionChange?: (publicPort: number, active: boolean) => void;
+  onAgentTargetChange?: (publicPort: number) => void;
+}
+
+export interface GatewayAgentTarget {
+  targetId: string;
+  title: string;
+  url: string;
 }
 
 export class BrowserGatewayServer {
@@ -146,6 +153,36 @@ export class BrowserGatewayServer {
     return [...this.routes.keys()].sort((a, b) => a - b);
   }
 
+  async getAgentTarget(publicPort: number, sessionId: string): Promise<GatewayAgentTarget | null> {
+    const route = this.routes.get(publicPort);
+    const targetId = route?.targetBySession.get(sessionId);
+    if (!route || !targetId) return null;
+    const result = await this.sendRaw(route, "Target.getTargets", {}, 5_000) as {
+      targetInfos?: Array<Record<string, unknown>>;
+    };
+    const target = (result.targetInfos || []).find((candidate) => candidate.targetId === targetId);
+    if (!target || target.type !== "page") {
+      this.clearSessionTarget(route, sessionId);
+      return null;
+    }
+    return {
+      targetId,
+      title: typeof target.title === "string" ? target.title : "",
+      url: typeof target.url === "string" ? target.url : ""
+    };
+  }
+
+  async activateAgentTarget(publicPort: number, sessionId: string): Promise<GatewayAgentTarget> {
+    const target = await this.getAgentTarget(publicPort, sessionId);
+    if (!target) {
+      const error = new Error("当前 Agent 还没有可显示的目标标签页") as Error & { code?: string };
+      error.code = "AGENT_TARGET_NOT_FOUND";
+      throw error;
+    }
+    await this.sendRaw(this.requireRoute(publicPort), "Target.activateTarget", { targetId: target.targetId }, 5_000);
+    return target;
+  }
+
   handleControlEvent(event: GatewayControlEvent): void {
     if (event.type !== "connections-revoked") return;
     const route = this.routes.get(event.profile.publicPort);
@@ -191,6 +228,7 @@ export class BrowserGatewayServer {
       return this.sendRaw(route, input.method, input.params || {}, timeoutMs);
     }
     const targetId = input.targetId || await this.resolveDefaultPageTarget(route, timeoutMs, input.sessionId);
+    this.setSessionTarget(route, input.sessionId, targetId);
     const attached = await this.sendRaw(route, "Target.attachToTarget", { targetId, flatten: true }, timeoutMs) as {
       sessionId?: unknown;
     };
@@ -440,6 +478,7 @@ export class BrowserGatewayServer {
     }
     const backendId = typeof message.id === "number" ? message.id : undefined;
     if (backendId === undefined) {
+      this.handleTargetEvent(route, message);
       for (const connection of route.connections) {
         const eventSessionId = typeof message.sessionId === "string" ? message.sessionId : undefined;
         if (connection.targetSessionId && eventSessionId !== connection.targetSessionId) continue;
@@ -469,12 +508,17 @@ export class BrowserGatewayServer {
           : null;
         const createdTargetId = typeof result?.targetId === "string" ? result.targetId : "";
         if (
+          pending.connection.identity.kind === "agent" &&
           (pending.method === "Target.attachToTarget" || pending.method === "Target.activateTarget") &&
           requestedTargetId
         ) {
-          route.targetBySession.set(pending.connection.identity.sessionId, requestedTargetId);
-        } else if (pending.method === "Target.createTarget" && createdTargetId) {
-          route.targetBySession.set(pending.connection.identity.sessionId, createdTargetId);
+          this.setSessionTarget(route, pending.connection.identity.sessionId, requestedTargetId);
+        } else if (
+          pending.connection.identity.kind === "agent" &&
+          pending.method === "Target.createTarget" &&
+          createdTargetId
+        ) {
+          this.setSessionTarget(route, pending.connection.identity.sessionId, createdTargetId);
         }
       }
       const { sessionId: _sessionId, ...downstream } = message;
@@ -497,6 +541,39 @@ export class BrowserGatewayServer {
     this.rejectPending(route, error || new Error("Chrome backend disconnected"));
     if (this.routes.get(route.publicPort) === route) {
       this.options.onBackendClose?.(route.publicPort, error);
+    }
+  }
+
+  private setSessionTarget(route: GatewayRoute, sessionId: string, targetId: string): void {
+    if (route.targetBySession.get(sessionId) === targetId) return;
+    route.targetBySession.set(sessionId, targetId);
+    this.options.onAgentTargetChange?.(route.publicPort);
+  }
+
+  private clearSessionTarget(route: GatewayRoute, sessionId: string): void {
+    if (!route.targetBySession.delete(sessionId)) return;
+    this.options.onAgentTargetChange?.(route.publicPort);
+  }
+
+  private handleTargetEvent(route: GatewayRoute, message: Record<string, unknown>): void {
+    const method = typeof message.method === "string" ? message.method : "";
+    const params = message.params && typeof message.params === "object" && !Array.isArray(message.params)
+      ? message.params as Record<string, unknown>
+      : null;
+    if (!params) return;
+    if (method === "Target.targetDestroyed" && typeof params.targetId === "string") {
+      for (const [sessionId, targetId] of route.targetBySession) {
+        if (targetId === params.targetId) this.clearSessionTarget(route, sessionId);
+      }
+      return;
+    }
+    if (method !== "Target.targetInfoChanged") return;
+    const info = params.targetInfo && typeof params.targetInfo === "object" && !Array.isArray(params.targetInfo)
+      ? params.targetInfo as Record<string, unknown>
+      : null;
+    if (!info || typeof info.targetId !== "string") return;
+    if ([...route.targetBySession.values()].includes(info.targetId)) {
+      this.options.onAgentTargetChange?.(route.publicPort);
     }
   }
 

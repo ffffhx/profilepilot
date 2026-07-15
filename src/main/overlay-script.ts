@@ -59,6 +59,11 @@ export function agentOverlayBootstrapScript(): string {
       defaultAction: "AI 正在控制浏览器",
       lockedTitle: "Agent 调试中",
       lockedHint: "暂时无法手动点击",
+      backgroundTarget: (name) => "Agent 正在后台操作 " + name,
+      currentTarget: (name) => "Agent 正在操作 " + name,
+      showAgentTarget: "显示 Agent 标签页",
+      showingAgentTarget: "正在显示…",
+      autoFollow: "自动切换标签页",
       guardStarting: "正在启用点击保护…",
       guardUnavailable: "需要给“ProfilePilot Input Guard”开启辅助功能权限，当前尚未禁止点击",
       defaultTask: "Agent 任务",
@@ -138,6 +143,11 @@ export function agentOverlayBootstrapScript(): string {
       defaultAction: "AI is controlling this browser",
       lockedTitle: "Agent debugging",
       lockedHint: "Manual clicks are temporarily disabled",
+      backgroundTarget: (name) => "Agent is working in the background on " + name,
+      currentTarget: (name) => "Agent is working on " + name,
+      showAgentTarget: "Show Agent tab",
+      showingAgentTarget: "Showing…",
+      autoFollow: "Auto-switch tabs",
       guardStarting: "正在启用点击保护…",
       guardUnavailable: "需要给“ProfilePilot Input Guard”开启辅助功能权限，当前尚未禁止点击",
       defaultTask: "Agent task",
@@ -204,6 +214,13 @@ export function agentOverlayBootstrapScript(): string {
     handoffPending: false,
     agentOffline: false,
     controlSince: "",
+    agentTargetId: "",
+    agentTargetTitle: "",
+    agentTargetUrl: "",
+    agentTargetDomain: "",
+    agentTargetIsCurrentPage: false,
+    autoFollowAgent: false,
+    targetActivationPending: false,
     profileName: "",
     agent: "",
     project: "",
@@ -236,6 +253,10 @@ export function agentOverlayBootstrapScript(): string {
     "updatedAt",
     "startedAt",
     "controlSince",
+    "agentTargetId",
+    "agentTargetTitle",
+    "agentTargetUrl",
+    "agentTargetDomain",
     "stopError",
     "inputGuardState"
   ]);
@@ -272,6 +293,10 @@ export function agentOverlayBootstrapScript(): string {
   let stateChip = null;
   let spaceChip = null;
   let controlNote = null;
+  let targetFollow = null;
+  let targetStatus = null;
+  let showAgentTargetButton = null;
+  let autoFollowButton = null;
   let takeoverButton = null;
   let stopButton = null;
   let revealButton = null;
@@ -407,6 +432,17 @@ export function agentOverlayBootstrapScript(): string {
       ".state-chip{color:#92cdff;border-color:rgba(95,182,255,.38);background:rgba(95,182,255,.10)}",
       ".space-chip{overflow:hidden;text-overflow:ellipsis}",
       ".control-note{display:none;margin-top:5px;color:rgba(224,234,255,.58);font-size:10.5px;font-weight:650;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
+      ".target-follow{display:none;align-items:center;gap:10px;min-width:0;padding:8px 9px;border:1px solid #25343d;border-radius:10px;background:#0d151a}",
+      ".target-status{min-width:0;flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#c7d5db;font-size:11px;font-weight:640}",
+      ".target-actions{display:flex;align-items:center;gap:7px;flex:0 0 auto}",
+      ".show-agent-target,.auto-follow{min-height:30px;border:1px solid #31454f;border-radius:8px;background:#15202a;color:#dbe5e9;font-size:10.5px;font-weight:700;cursor:pointer;transition:background var(--pp-hover-duration) var(--pp-motion-ease),border-color var(--pp-hover-duration) var(--pp-motion-ease),color var(--pp-hover-duration) var(--pp-motion-ease),transform var(--pp-hover-duration) var(--pp-motion-ease)}",
+      ".show-agent-target{padding:0 10px}",
+      ".auto-follow{display:inline-flex;align-items:center;gap:6px;padding:0 9px}",
+      ".auto-follow::before{content:\"\";width:18px;height:10px;border-radius:99px;background:#40515a;box-shadow:inset 0 0 0 1px rgba(255,255,255,.08);transition:background var(--pp-motion-duration) var(--pp-motion-ease),box-shadow var(--pp-motion-duration) var(--pp-motion-ease)}",
+      ".auto-follow[aria-checked=\"true\"]::before{background:#38e1a0;box-shadow:inset 8px 0 0 1px rgba(5,32,22,.62)}",
+      ".show-agent-target:hover:not(:disabled),.auto-follow:hover:not(:disabled){background:#1d2a33;border-color:#4b6572;color:#ffffff}",
+      ".show-agent-target:active:not(:disabled),.auto-follow:active:not(:disabled){transform:translateY(1px)}",
+      ".show-agent-target:disabled,.auto-follow:disabled{opacity:.55;cursor:default;transform:none}",
       ".controls{display:grid;grid-template-columns:1fr 1fr;gap:8px}",
       ".takeover,.stop{width:100%;min-height:36px;border-radius:10px;font-size:12.5px;font-weight:780;cursor:pointer;transition:background var(--pp-hover-duration) var(--pp-motion-ease),border-color var(--pp-hover-duration) var(--pp-motion-ease),color var(--pp-hover-duration) var(--pp-motion-ease),transform var(--pp-hover-duration) var(--pp-motion-ease)}",
       ".takeover{border:1px solid #38e1a0;background:#38e1a0;color:#052016}",
@@ -419,7 +455,7 @@ export function agentOverlayBootstrapScript(): string {
       ".hide{display:none}",
       ".detail-toggle{display:none}",
       ":host(.delegated) .hide{display:inline-block}",
-      ":host(.locked) .panel{bottom:24px;width:min(548px,calc(100vw - 32px));min-height:72px;display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:auto auto;align-items:center;column-gap:16px;row-gap:1px;padding:11px 12px 11px 14px;border-radius:14px;border-color:#31454f;background:#101920;box-shadow:0 6px 8px rgba(2,6,9,.34)}",
+      ":host(.locked) .panel{bottom:24px;width:min(720px,calc(100vw - 32px));min-height:72px;display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:auto auto auto;align-items:center;column-gap:16px;row-gap:1px;padding:11px 12px 11px 14px;border-radius:14px;border-color:#31454f;background:#101920;box-shadow:0 6px 8px rgba(2,6,9,.34)}",
       ":host(.locked) .panel::before{display:none}",
       ":host(.locked) .head{grid-column:1;grid-row:1;min-height:28px;padding:0;display:grid;grid-template-columns:29px minmax(0,1fr) 27px;gap:9px;align-items:center}",
       ":host(.locked) .pulse{position:relative;width:28px;height:28px;border-radius:99px;background:#0d151a;border:1px solid #31454f;animation:none}",
@@ -439,6 +475,7 @@ export function agentOverlayBootstrapScript(): string {
       ":host(.locked) .state-chip{display:none}",
       ":host(.locked) .space-chip{display:block;width:100%;height:auto;padding:0;border:0;border-radius:0;background:transparent;color:#879aa5;font-size:10.25px;font-weight:580;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
       ":host(.locked) .controls{grid-column:2;grid-row:1 / span 2;display:grid;grid-template-columns:100px 110px;gap:8px;align-self:center}",
+      ":host(.locked) .target-follow{grid-column:1 / -1;grid-row:3;margin-top:9px}",
       ":host(.locked) .takeover,:host(.locked) .stop{min-height:36px;border-radius:10px;font-size:12px;font-weight:730}",
       ":host(.locked) .takeover{border-color:#38e1a0;background:#38e1a0;color:#052016}",
       ":host(.locked) .takeover:hover:not(:disabled){background:#6ff2c0;border-color:#6ff2c0}",
@@ -446,10 +483,10 @@ export function agentOverlayBootstrapScript(): string {
       ":host(.locked) .stop:hover:not(:disabled){background:rgba(255,113,100,.15);border-color:rgba(255,113,100,.68);color:#ffd8d3}",
       ":host(.offline.locked) .panel{border-color:rgba(242,177,62,.48)}",
       ":host(.offline.locked) .status-dot{background:#f2b13e;box-shadow:none}",
-      ":host(.locked) .takeover:focus-visible,:host(.locked) .stop:focus-visible,:host(.locked) .detail-toggle:focus-visible{outline:2px solid #38e1a0;outline-offset:2px}",
+      ":host(.locked) .takeover:focus-visible,:host(.locked) .stop:focus-visible,:host(.locked) .detail-toggle:focus-visible,:host(.locked) .show-agent-target:focus-visible,:host(.locked) .auto-follow:focus-visible{outline:2px solid #38e1a0;outline-offset:2px}",
       ":host(.locked.expanded) .panel{min-height:0;grid-template-rows:auto auto auto;border-color:#3a4e59;background:#101920;box-shadow:0 6px 8px rgba(2,6,9,.38);backdrop-filter:none}",
       ":host(.locked.expanded) .control-note{display:block;margin-top:4px;color:#9cafba;font-size:10.5px;font-weight:600}",
-      ":host(.locked.expanded) .details{grid-column:1 / -1;grid-row:3;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px 16px;margin-top:11px;padding:13px 14px 14px;border:1px solid #25343d;border-radius:10px;background:#0d151a;box-shadow:none;color:#eef5f7}",
+      ":host(.locked.expanded) .details{grid-column:1 / -1;grid-row:4;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px 16px;margin-top:11px;padding:13px 14px 14px;border:1px solid #25343d;border-radius:10px;background:#0d151a;box-shadow:none;color:#eef5f7}",
       ":host(.locked.expanded) .details::before{content:\"运行详情\";grid-column:1 / -1;color:#92cdff;font-size:10.5px;font-weight:720;line-height:1;letter-spacing:0}",
       ":host(.locked.expanded) .meta{grid-column:1;min-width:0;margin:0;color:#dbe5e9;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:11.5px;font-weight:620;line-height:1.45}",
       ":host(.locked.expanded) .elapsed{grid-column:2;justify-self:end;margin:0;color:#9cafba;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:11px;font-weight:600;line-height:1.45;white-space:nowrap}",
@@ -468,7 +505,7 @@ export function agentOverlayBootstrapScript(): string {
       ":host(.locked.expanded) summary{color:#dbe5e9;font-size:11.5px;font-weight:680}",
       ":host(.locked.expanded) summary:hover{color:#ffffff}",
       ":host(.locked.expanded) .recent-text{color:#9cafba;line-height:1.5}",
-      "@media (max-width:640px){:host(.locked) .panel{grid-template-columns:minmax(0,1fr);grid-template-rows:auto auto auto;gap:6px;padding:11px 11px 11px 15px;width:min(420px,calc(100vw - 24px));bottom:14px}:host(.locked) .controls{grid-column:1;grid-row:3;width:100%;grid-template-columns:1fr 1fr;margin-top:2px}:host(.locked) .status-stack{grid-column:1;grid-row:2;margin-left:38px}:host(.locked) .takeover,:host(.locked) .stop{min-height:38px}:host(.locked.expanded) .details{grid-column:1;grid-row:4;grid-template-columns:1fr}:host(.locked.expanded) .elapsed{grid-column:1;justify-self:start}}",
+      "@media (max-width:640px){:host(.locked) .panel{grid-template-columns:minmax(0,1fr);grid-template-rows:auto auto auto auto;gap:6px;padding:11px 11px 11px 15px;width:min(420px,calc(100vw - 24px));bottom:14px}:host(.locked) .controls{grid-column:1;grid-row:3;width:100%;grid-template-columns:1fr 1fr;margin-top:2px}:host(.locked) .status-stack{grid-column:1;grid-row:2;margin-left:38px}:host(.locked) .target-follow{grid-column:1;grid-row:4;align-items:flex-start;flex-wrap:wrap}:host(.locked) .target-status{flex-basis:100%}:host(.locked) .target-actions{width:100%}:host(.locked) .show-agent-target,:host(.locked) .auto-follow{flex:1 1 auto}:host(.locked) .takeover,:host(.locked) .stop{min-height:38px}:host(.locked.expanded) .details{grid-column:1;grid-row:5;grid-template-columns:1fr}:host(.locked.expanded) .elapsed{grid-column:1;justify-self:start}}",
       ":host(.collapsed) .panel{display:none}",
       ":host(.locked.collapsed) .panel{display:grid}",
       ":host(.reduced-motion.locked) .pulse::before{animation:none}"
@@ -496,6 +533,10 @@ export function agentOverlayBootstrapScript(): string {
     stateChip = root.querySelector(".state-chip");
     spaceChip = root.querySelector(".space-chip");
     controlNote = root.querySelector(".control-note");
+    targetFollow = root.querySelector(".target-follow");
+    targetStatus = root.querySelector(".target-status");
+    showAgentTargetButton = root.querySelector(".show-agent-target");
+    autoFollowButton = root.querySelector(".auto-follow");
     takeoverButton = root.querySelector(".takeover");
     stopButton = root.querySelector(".stop");
     revealButton = root.querySelector(".reveal");
@@ -517,7 +558,9 @@ export function agentOverlayBootstrapScript(): string {
     detailToggleButton.addEventListener("click", toggleDetails);
     takeoverButton.addEventListener("click", () => handleStopClick("takeover"));
     stopButton.addEventListener("click", () => handleStopClick("stop"));
-    for (const control of [hideButton, revealButton, dot, detailToggleButton, takeoverButton, stopButton]) {
+    showAgentTargetButton.addEventListener("click", () => signal("show-agent-target"));
+    autoFollowButton.addEventListener("click", () => signal("set-auto-follow", { enabled: !state.autoFollowAgent }));
+    for (const control of [hideButton, revealButton, dot, detailToggleButton, takeoverButton, stopButton, showAgentTargetButton, autoFollowButton]) {
       control.addEventListener("keydown", handleKeyboardClick);
     }
     recent.addEventListener("toggle", updateInteractiveAria);
@@ -597,6 +640,13 @@ export function agentOverlayBootstrapScript(): string {
       overlayNode("span", "space-chip")
     );
     statusStackNode.append(statusLineNode, stateRowNode, overlayNode("div", "control-note"));
+    const targetFollowNode = overlayNode("div", "target-follow");
+    const targetActionsNode = overlayNode("div", "target-actions");
+    targetActionsNode.append(
+      overlayNode("button", "show-agent-target", { type: "button" }),
+      overlayNode("button", "auto-follow", { type: "button", role: "switch", "aria-checked": "false" })
+    );
+    targetFollowNode.append(overlayNode("span", "target-status"), targetActionsNode);
 
     const detailsNode = overlayNode("div", "details", { id: "pp-agent-overlay-details" });
     const progressBarNode = overlayNode("div", "progress-bar", {
@@ -636,7 +686,7 @@ export function agentOverlayBootstrapScript(): string {
       overlayNode("button", "takeover", { type: "button" }),
       overlayNode("button", "stop", { type: "button" })
     );
-    bodyNode.append(statusStackNode, detailsNode, controlsNode);
+    bodyNode.append(statusStackNode, targetFollowNode, detailsNode, controlsNode);
     panelNode.append(headNode, bodyNode);
 
     const dotNode = overlayNode("button", "dot", {
@@ -694,6 +744,9 @@ export function agentOverlayBootstrapScript(): string {
     }
     if ((actionName === "stop" || actionName === "resume") && !options?.stopAll && !isMultiSession() && state.session) {
       payload.session = state.session;
+    }
+    if (actionName === "set-auto-follow") {
+      payload.enabled = options?.enabled === true;
     }
     try {
       binding(JSON.stringify(payload));
@@ -1008,6 +1061,7 @@ export function agentOverlayBootstrapScript(): string {
     recent.style.display = state.lastMessage ? "block" : "none";
     recentText.textContent = state.lastMessage || "";
     lockHint.textContent = offline ? copy.offlineAction : taken ? copy.takenAction : pending ? copy.handoffAction : compactStatusText(sessions, copy);
+    renderTargetFollow(copy, taken, pending);
     stateChip.textContent = taken ? copy.ownerUser : copy.ownerAgent;
     spaceChip.textContent = compactTaskSpaceText(sessions, copy);
     spaceChip.title = fullTaskSpaceText(sessions, copy);
@@ -1017,6 +1071,41 @@ export function agentOverlayBootstrapScript(): string {
     host.classList.toggle("collapsed", taken && collapsed && !offline);
     updateInteractiveAria();
     requestAnimationFrame(clampHostIntoViewport);
+  }
+
+  function renderTargetFollow(copy, taken, pending) {
+    const hasTarget = Boolean(state.agentTargetId);
+    const background = hasTarget && !state.agentTargetIsCurrentPage;
+    const label = friendlyAgentTargetName() || state.agentTargetDomain || state.agentTargetUrl || copy.defaultTask;
+    targetFollow.style.display = hasTarget && !taken ? "flex" : "none";
+    if (!hasTarget || taken) {
+      return;
+    }
+    targetStatus.textContent = background ? copy.backgroundTarget(label) : copy.currentTarget(label);
+    targetStatus.title = [state.agentTargetTitle, state.agentTargetDomain, state.agentTargetUrl].filter(Boolean).join(" · ");
+    if (background && !pending) {
+      lockHint.textContent = copy.backgroundTarget(label);
+    }
+    const hasBinding = typeof window[SIGNAL_NAME] === "function";
+    showAgentTargetButton.style.display = background ? "inline-block" : "none";
+    showAgentTargetButton.disabled = !hasBinding || state.targetActivationPending === true || pending;
+    showAgentTargetButton.textContent = state.targetActivationPending ? copy.showingAgentTarget : copy.showAgentTarget;
+    showAgentTargetButton.title = copy.showAgentTarget;
+    showAgentTargetButton.setAttribute("aria-label", copy.showAgentTarget);
+    autoFollowButton.disabled = !hasBinding || pending;
+    autoFollowButton.textContent = copy.autoFollow;
+    autoFollowButton.title = copy.autoFollow;
+    autoFollowButton.setAttribute("aria-label", copy.autoFollow);
+    autoFollowButton.setAttribute("aria-checked", state.autoFollowAgent ? "true" : "false");
+  }
+
+  function friendlyAgentTargetName() {
+    const title = String(state.agentTargetTitle || "").trim();
+    if (!title) {
+      return "";
+    }
+    const parts = title.split(/\s*[-–—|]\s*/).filter(Boolean);
+    return parts[parts.length - 1] || title;
   }
 
   function applyStaticText(copy) {
@@ -1397,7 +1486,7 @@ export function agentOverlayBootstrapScript(): string {
       return null;
     }
 
-    const button = downAction === "takeover" ? takeoverButton : stopButton;
+    const button = guardButtonForAction(downAction);
     if (!button || button.disabled) {
       return null;
     }
@@ -1429,7 +1518,13 @@ export function agentOverlayBootstrapScript(): string {
     if (!probe || probe.signature !== expectedSignature) {
       return false;
     }
-    handleStopClick(probe.action);
+    if (probe.action === "showAgentTarget") {
+      signal("show-agent-target");
+    } else if (probe.action === "toggleAutoFollow") {
+      signal("set-auto-follow", { enabled: !state.autoFollowAgent });
+    } else {
+      handleStopClick(probe.action);
+    }
     return true;
   }
 
@@ -1473,7 +1568,9 @@ export function agentOverlayBootstrapScript(): string {
   function guardActionAtClientPoint(point) {
     const entries = [
       ["takeover", takeoverButton],
-      ["stop", stopButton]
+      ["stop", stopButton],
+      ["showAgentTarget", showAgentTargetButton],
+      ["toggleAutoFollow", autoFollowButton]
     ];
     for (const [kind, button] of entries) {
       if (!button || button.disabled) {
@@ -1491,6 +1588,14 @@ export function agentOverlayBootstrapScript(): string {
         return kind;
       }
     }
+    return null;
+  }
+
+  function guardButtonForAction(actionName) {
+    if (actionName === "takeover") return takeoverButton;
+    if (actionName === "stop") return stopButton;
+    if (actionName === "showAgentTarget") return showAgentTargetButton;
+    if (actionName === "toggleAutoFollow") return autoFollowButton;
     return null;
   }
 
@@ -1777,7 +1882,13 @@ export function agentOverlayBootstrapScript(): string {
     if (key === "todoDone" || key === "todoTotal") {
       return finiteNumber(value);
     }
-    if (key === "handoffPending" || key === "agentOffline") {
+    if (
+      key === "handoffPending" ||
+      key === "agentOffline" ||
+      key === "agentTargetIsCurrentPage" ||
+      key === "autoFollowAgent" ||
+      key === "targetActivationPending"
+    ) {
       return value === true;
     }
     if (STRING_STATE_FIELDS.has(key)) {

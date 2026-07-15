@@ -1,4 +1,4 @@
-import type { AgentActivity, AgentControlNoticeReason, CdpClientInfo, Ownership } from "../shared/types";
+import type { AgentActivity, AgentControlNoticeReason, CdpClientInfo, GatewayAgentTarget, Ownership } from "../shared/types";
 import { CdpBrowserClient, requestCdpTargets, requestCdpVersionInfo } from "./cdp-client";
 import type { CdpTargetListEntry, CdpVersionInfo } from "./internal-types";
 import { agentOverlayBootstrapScript } from "./overlay-script";
@@ -32,6 +32,7 @@ export interface AgentOverlayPortInput {
   // 用户接管已经稳定，但对应 wait-control 进程在宽限期后仍不存在或已经退出。
   agentOffline?: boolean;
   controlSince?: string;
+  agentTarget?: GatewayAgentTarget | null;
   clients: CdpClientInfo[];
 }
 
@@ -81,12 +82,19 @@ export interface AgentOverlayRevealRequest {
   profileName: string;
 }
 
+export interface AgentOverlayActivateTargetRequest {
+  port: number;
+  profileId: string;
+  profileName: string;
+}
+
 interface AgentOverlayManagerOptions {
   locale?: OverlayLocale;
   onStop: (request: AgentOverlayStopRequest) => Promise<void>;
   onResume?: (request: AgentOverlayResumeRequest) => Promise<void>;
   onComplete?: (request: AgentOverlayCompleteRequest) => Promise<void>;
   onReveal?: (request: AgentOverlayRevealRequest) => void;
+  onActivateTarget?: (request: AgentOverlayActivateTargetRequest) => Promise<void>;
   now?: () => number;
   requestTargets?: (port: number) => Promise<CdpTargetListEntry[]>;
   requestVersionInfo?: (port: number) => Promise<CdpVersionInfo>;
@@ -124,6 +132,13 @@ interface OverlayPayload {
   handoffPending: boolean;
   agentOffline: boolean;
   controlSince: string | null;
+  agentTargetId: string | null;
+  agentTargetTitle: string | null;
+  agentTargetUrl: string | null;
+  agentTargetDomain: string | null;
+  agentTargetIsCurrentPage: boolean;
+  autoFollowAgent: boolean;
+  targetActivationPending: boolean;
   stopError?: string | null;
 }
 
@@ -208,10 +223,13 @@ interface PortOverlay {
   targetCache: { targets: CdpTargetListEntry[]; expiresAt: number } | null;
   targetRequest: Promise<CdpTargetListEntry[] | null> | null;
   targetCacheGeneration: number;
+  agentTarget: GatewayAgentTarget | null;
+  autoFollowAgent: boolean;
+  targetActivationInFlight: boolean;
 }
 
 interface GuardProbeResult {
-  action: "takeover" | "stop";
+  action: "takeover" | "stop" | "showAgentTarget" | "toggleAutoFollow";
   signature: string;
 }
 
@@ -291,6 +309,8 @@ export class AgentOverlayManager {
     for (const [port, state] of [...this.ports]) {
       const next = wanted.get(port);
       if (next) {
+        const previousSession = primaryAgentSession(state.clients);
+        const previousTargetId = state.agentTarget?.targetId || null;
         state.profileId = next.profileId;
         state.profileName = next.profileName;
         state.browserPids = normalizeBrowserPids(next.browserPids);
@@ -298,8 +318,18 @@ export class AgentOverlayManager {
         state.clients = next.clients;
         state.agentOffline = Boolean(next.agentOffline);
         state.controlSince = next.controlSince;
+        state.agentTarget = next.agentTarget || null;
         this.syncSessionStarts(state, now);
         this.syncDelegatedControl(state, Boolean(next.controlPaused), now);
+        if (previousSession !== primaryAgentSession(next.clients) || next.controlPaused) {
+          state.autoFollowAgent = false;
+        } else if (
+          state.autoFollowAgent &&
+          state.agentTarget &&
+          state.agentTarget.targetId !== previousTargetId
+        ) {
+          void this.activateAgentTarget(state).catch(() => undefined);
+        }
         continue;
       }
       const completedSessionStillShown = state.clients.some(
@@ -341,7 +371,10 @@ export class AgentOverlayManager {
           targetCache: null,
           targetRequest: null,
           targetCacheGeneration: 0,
-          sessionStartedAt: new Map()
+          sessionStartedAt: new Map(),
+          agentTarget: next.agentTarget || null,
+          autoFollowAgent: false,
+          targetActivationInFlight: false
         };
         this.syncSessionStarts(state, now);
         this.ports.set(next.port, state);
@@ -353,6 +386,7 @@ export class AgentOverlayManager {
         state.clients = next.clients;
         state.agentOffline = Boolean(next.agentOffline);
         state.controlSince = next.controlSince;
+        state.agentTarget = next.agentTarget || null;
         this.syncSessionStarts(state, now);
         this.syncDelegatedControl(state, Boolean(next.controlPaused), now);
       }
@@ -548,6 +582,7 @@ export class AgentOverlayManager {
 
   private syncDelegatedControl(state: PortOverlay, controlPaused: boolean, now: number): void {
     if (controlPaused) {
+      state.autoFollowAgent = false;
       if (!state.delegatedToUser) {
         state.delegatedToUser = true;
         state.takenOverUntil = Math.max(state.takenOverUntil, now + TAKEN_OVER_KEEPALIVE_MS);
@@ -656,7 +691,10 @@ export class AgentOverlayManager {
       }
       const action = stringValue(value.action);
       const signature = stringValue(value.signature);
-      if ((action === "takeover" || action === "stop") && signature) {
+      if (
+        (action === "takeover" || action === "stop" || action === "showAgentTarget" || action === "toggleAutoFollow") &&
+        signature
+      ) {
         return { page, contextId, windowId, action, signature };
       }
     }
@@ -1276,6 +1314,45 @@ export class AgentOverlayManager {
     if (action === "resume") {
       const session = stringValue(payload.session) || undefined;
       void this.handleResumeSignal(state, session).catch(() => undefined);
+      return;
+    }
+    if (action === "show-agent-target") {
+      void this.activateAgentTarget(state).catch(() => undefined);
+      return;
+    }
+    if (action === "set-auto-follow") {
+      const enabled = payload.enabled === true;
+      state.autoFollowAgent = enabled && !state.delegatedToUser;
+      void this.pushPortUpdate(state, true);
+      if (state.autoFollowAgent) {
+        void this.activateAgentTarget(state).catch(() => undefined);
+      }
+    }
+  }
+
+  private async activateAgentTarget(state: PortOverlay): Promise<void> {
+    if (
+      !this.isActivePort(state) ||
+      state.delegatedToUser ||
+      !state.agentTarget ||
+      state.targetActivationInFlight ||
+      !this.options.onActivateTarget
+    ) {
+      return;
+    }
+    state.targetActivationInFlight = true;
+    await this.pushPortUpdate(state, true);
+    try {
+      await this.options.onActivateTarget({
+        port: state.port,
+        profileId: state.profileId,
+        profileName: state.profileName
+      });
+    } finally {
+      if (this.ports.get(state.port) === state) {
+        state.targetActivationInFlight = false;
+        await this.pushPortUpdate(state, true);
+      }
     }
   }
 
@@ -1434,6 +1511,7 @@ export class AgentOverlayManager {
       state.agentOffline = false;
       state.controlSince = new Date(takenOverAt).toISOString();
       state.delegatedToUser = reason === "user_takeover";
+      if (state.delegatedToUser) state.autoFollowAgent = false;
       state.delegationGraceUntil = state.delegatedToUser ? takenOverAt + 1500 : 0;
       state.takenOverUntil = takenOverAt + TAKEN_OVER_KEEPALIVE_MS;
       this.syncInputGuard();
@@ -1601,7 +1679,7 @@ export class AgentOverlayManager {
     if (!this.isActivePage(state, page) || !client || !sessionId || page.connecting || page.closing) {
       return;
     }
-    const payload = this.payloadForPort(state);
+    const payload = this.payloadForPort(state, page);
     const text = safeJson(payload);
     const now = this.now();
     if (!force && page.lastPayloadText === text && now - page.lastPushAt < PUSH_INTERVAL_MS) {
@@ -1708,7 +1786,7 @@ export class AgentOverlayManager {
     return ids;
   }
 
-  private payloadForPort(state: PortOverlay): OverlayPayload {
+  private payloadForPort(state: PortOverlay, page?: PageOverlay): OverlayPayload {
     const takenOver = state.delegatedToUser || state.takenOverUntil > this.now();
     const payload = buildAgentOverlayPayload({
       locale: this.options.locale ?? "en",
@@ -1724,11 +1802,23 @@ export class AgentOverlayManager {
       controlSince: state.controlSince,
       now: this.now()
     });
+    const agentTarget = state.agentTarget;
+    const pageTarget = agentTarget && page?.targetId === agentTarget.targetId;
+    const targetPayload = {
+      ...payload,
+      agentTargetId: agentTarget?.targetId || null,
+      agentTargetTitle: agentTarget?.title || null,
+      agentTargetUrl: agentTarget?.url || null,
+      agentTargetDomain: agentTargetDomain(agentTarget?.url),
+      agentTargetIsCurrentPage: Boolean(pageTarget),
+      autoFollowAgent: state.autoFollowAgent,
+      targetActivationPending: state.targetActivationInFlight
+    };
     if (!state.stopError) {
-      return payload;
+      return targetPayload;
     }
     return {
-      ...payload,
+      ...targetPayload,
       stopError: state.stopError
     };
   }
@@ -2062,8 +2152,28 @@ function normalizeOverlayPayload(payload: Partial<OverlayPayload>): OverlayPaylo
       payload.inputGuardState === "active" || payload.inputGuardState === "unavailable" ? payload.inputGuardState : "starting",
     handoffPending: payload.handoffPending === true,
     agentOffline: payload.agentOffline === true,
-    controlSince: nullableString(payload.controlSince)
+    controlSince: nullableString(payload.controlSince),
+    agentTargetId: nullableString(payload.agentTargetId),
+    agentTargetTitle: nullableString(payload.agentTargetTitle),
+    agentTargetUrl: nullableString(payload.agentTargetUrl),
+    agentTargetDomain: nullableString(payload.agentTargetDomain),
+    agentTargetIsCurrentPage: payload.agentTargetIsCurrentPage === true,
+    autoFollowAgent: payload.autoFollowAgent === true,
+    targetActivationPending: payload.targetActivationPending === true
   };
+}
+
+function agentTargetDomain(value: string | null | undefined): string | null {
+  if (!value) return null;
+  try {
+    return new URL(value).hostname || null;
+  } catch {
+    return null;
+  }
+}
+
+function primaryAgentSession(clients: CdpClientInfo[]): string | null {
+  return orderedClientsByActivity(clients)[0]?.session || null;
 }
 
 function normalizeOverlayLocale(value: string | null | undefined): OverlayLocale {

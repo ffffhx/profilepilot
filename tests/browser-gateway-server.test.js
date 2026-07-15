@@ -36,7 +36,7 @@ class FakeBackend {
   }
 }
 
-async function makeHarness() {
+async function makeHarness(serverOptions = {}) {
   const port = await freePort();
   const home = mkdtempSync(path.join(os.tmpdir(), "profilepilot-gateway-server-"));
   let gateway;
@@ -46,7 +46,7 @@ async function makeHarness() {
     onEvent: (event) => gateway?.handleControlEvent(event)
   });
   control.registerProfile({ profileId: "profile-a", profileName: "Profile A", publicPort: port });
-  gateway = new BrowserGatewayServer(control, { internalSecret: "internal-secret" });
+  gateway = new BrowserGatewayServer(control, { internalSecret: "internal-secret", ...serverOptions });
   const backend = new FakeBackend();
   await gateway.registerBackend({ publicPort: port, backend });
   return {
@@ -240,6 +240,52 @@ test("Gateway Raw CDP prefers the Agent Session's last attached target", async (
       "Target.detachFromTarget"
     ]);
     assert.equal(sent[0].params.targetId, "page-affinity");
+    ws.close();
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("Gateway exposes and explicitly activates the Agent Session target", async () => {
+  const targetChanges = [];
+  const h = await makeHarness({ onAgentTargetChange: (port) => targetChanges.push(port) });
+  try {
+    h.backend.onSend = (text) => {
+      const message = JSON.parse(text);
+      const result = message.method === "Target.attachToTarget"
+        ? { sessionId: "agent-flat" }
+        : message.method === "Target.getTargets"
+          ? {
+              targetInfos: [
+                { targetId: "byte-cloud", type: "page", title: "云引擎 - 字节云", url: "https://cloud.bytedance.net/engine" },
+                { targetId: "bots", type: "page", title: "Bot 管理后台", url: "https://op-bots-boe.bytedance.net/" }
+              ]
+            }
+          : { ok: true };
+      queueMicrotask(() => h.backend.emit(JSON.stringify({ id: message.id, sessionId: message.sessionId, result })));
+    };
+    const acquired = h.control.acquire({
+      publicPort: h.port,
+      sessionId: "cx-target",
+      daemonInstanceId: "daemon-target"
+    });
+    const ws = await openWebSocket(`ws://127.0.0.1:${h.port}/devtools/browser/gateway?ticket=${encodeURIComponent(acquired.ticket)}`);
+    const attached = nextMessage(ws);
+    ws.send(JSON.stringify({ id: 1, method: "Target.attachToTarget", params: { targetId: "byte-cloud", flatten: true } }));
+    await attached;
+
+    assert.deepEqual(await h.gateway.getAgentTarget(h.port, "cx-target"), {
+      targetId: "byte-cloud",
+      title: "云引擎 - 字节云",
+      url: "https://cloud.bytedance.net/engine"
+    });
+    assert.deepEqual(await h.gateway.activateAgentTarget(h.port, "cx-target"), {
+      targetId: "byte-cloud",
+      title: "云引擎 - 字节云",
+      url: "https://cloud.bytedance.net/engine"
+    });
+    assert.deepEqual(targetChanges, [h.port]);
+    assert.equal(h.backend.sent.map(JSON.parse).at(-1).method, "Target.activateTarget");
     ws.close();
   } finally {
     await h.cleanup();

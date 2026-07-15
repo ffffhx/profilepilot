@@ -141,7 +141,8 @@ export class ProfileManager {
       onStop: (request) => this.stopAgentOverlaySession(request),
       onResume: (request) => this.resumeAgentOverlaySession(request),
       onComplete: (request) => this.completeAgentOverlaySession(request),
-      onReveal: (request) => this.revealAgentOverlayProfile(request)
+      onReveal: (request) => this.revealAgentOverlayProfile(request),
+      onActivateTarget: (request) => this.activateAgentOverlayTarget(request.port)
     });
   }
 
@@ -334,6 +335,7 @@ export class ProfileManager {
             controlPaused: control.paused,
             agentOffline: control.agentOffline,
             controlSince: control.controlSince,
+            agentTarget: profile.gatewayControl?.agentTarget || null,
             clients
           };
         })
@@ -353,6 +355,7 @@ export class ProfileManager {
             controlPaused: control.paused,
             agentOffline: control.agentOffline,
             controlSince: control.controlSince,
+            agentTarget: null,
             clients
           };
         })
@@ -1076,6 +1079,10 @@ export class ProfileManager {
       profileName: request.profileName,
       at: new Date().toISOString()
     });
+  }
+
+  private async activateAgentOverlayTarget(publicPort: number): Promise<void> {
+    await requestBrowserGateway({ action: "activate-agent-target", publicPort }, { timeoutMs: 3_000 });
   }
 
   private async stopAgentOverlaySession(request: AgentOverlayStopRequest): Promise<void> {
@@ -3933,11 +3940,24 @@ function gatewayControlsByPort(response: GatewayControlResponse | null): Map<num
       daemonPid: positiveInteger(profile.daemonPid),
       agent: stringField(profile.agent) || null,
       project: stringField(profile.project) || null,
+      agentTarget: gatewayAgentTarget(profile.agentTarget),
       pendingUserAction,
       updatedAt: stringField(profile.updatedAt) || new Date().toISOString()
     });
   }
   return result;
+}
+
+function gatewayAgentTarget(value: unknown): GatewayProfileControlState["agentTarget"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const target = value as Record<string, unknown>;
+  const targetId = stringField(target.targetId);
+  if (!targetId) return null;
+  return {
+    targetId,
+    title: stringField(target.title) || "",
+    url: stringField(target.url) || ""
+  };
 }
 
 export function pendingUserActionFromControlNoticeSync(

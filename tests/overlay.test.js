@@ -531,6 +531,14 @@ test("agent overlay bootstrap script exposes fail-closed native Input Guard hit 
   assert.match(script, /__ppAgentOverlayGuardProbe/);
   assert.match(script, /__ppAgentOverlayGuardActivate/);
   assert.match(script, /guardActionAtClientPoint/);
+  assert.match(script, /Agent 正在后台操作/);
+  assert.match(script, /显示 Agent 标签页/);
+  assert.match(script, /自动切换标签页/);
+  assert.match(script, /role: "switch", "aria-checked": "false"/);
+  assert.match(script, /signal\("show-agent-target"\)/);
+  assert.match(script, /signal\("set-auto-follow", \{ enabled: !state\.autoFollowAgent \}\)/);
+  assert.match(script, /\["showAgentTarget", showAgentTargetButton\]/);
+  assert.match(script, /\["toggleAutoFollow", autoFollowButton\]/);
   assert.match(script, /rect\.left \+ inset/);
 });
 
@@ -1526,6 +1534,59 @@ test("AgentOverlayManager rebuilds an isolated world after all known contexts fa
   assert.equal(createWorldCalls, 1);
 });
 
+test("AgentOverlayManager builds page-specific no-focus target payloads", () => {
+  const manager = new AgentOverlayManager({ onStop: async () => {} });
+  const state = createOverlayState({
+    agentTarget: {
+      targetId: "target-byte-cloud",
+      title: "云引擎 - 字节云",
+      url: "https://cloud.bytedance.net/engine"
+    }
+  });
+  const byteCloud = createOverlayPage({ targetId: "target-byte-cloud" });
+  const bots = createOverlayPage({ targetId: "target-bots" });
+
+  const currentPayload = manager.payloadForPort(state, byteCloud);
+  const backgroundPayload = manager.payloadForPort(state, bots);
+  assert.equal(currentPayload.agentTargetIsCurrentPage, true);
+  assert.equal(backgroundPayload.agentTargetIsCurrentPage, false);
+  assert.equal(backgroundPayload.agentTargetTitle, "云引擎 - 字节云");
+  assert.equal(backgroundPayload.agentTargetDomain, "cloud.bytedance.net");
+  assert.equal(backgroundPayload.autoFollowAgent, false);
+});
+
+test("AgentOverlayManager activates only after an explicit target signal and keeps auto-follow off by default", async () => {
+  const activations = [];
+  const manager = new AgentOverlayManager({
+    onStop: async () => {},
+    onActivateTarget: async (request) => activations.push(request.port)
+  });
+  const state = createOverlayState({
+    agentTarget: { targetId: "target-byte-cloud", title: "字节云", url: "https://cloud.bytedance.net/" }
+  });
+  const page = createOverlayPage({ isolatedContextIds: new Set([17]) });
+  manager.ports.set(state.port, state);
+
+  assert.equal(state.autoFollowAgent, false);
+  manager.handlePageEvent(state, page, "Runtime.bindingCalled", {
+    name: "__ppAgentOverlaySignal",
+    executionContextId: 17,
+    payload: JSON.stringify({ action: "show-agent-target" })
+  });
+  await waitFor(() => activations.length === 1, "explicit Agent target activation");
+
+  manager.handlePageEvent(state, page, "Runtime.bindingCalled", {
+    name: "__ppAgentOverlaySignal",
+    executionContextId: 17,
+    payload: JSON.stringify({ action: "set-auto-follow", enabled: true })
+  });
+  await waitFor(() => activations.length === 2, "auto-follow activation");
+  assert.equal(state.autoFollowAgent, true);
+
+  manager.syncDelegatedControl(state, true, Date.now());
+  assert.equal(state.autoFollowAgent, false);
+});
+
 test("AgentOverlayManager ignores late attach results after dispose and rolls back the session", async () => {
   const attachResult = deferred();
   const methods = [];
@@ -1602,6 +1663,9 @@ function createOverlayState(overrides = {}) {
     targetRequest: null,
     targetCacheGeneration: 0,
     sessionStartedAt: new Map(),
+    agentTarget: null,
+    autoFollowAgent: false,
+    targetActivationInFlight: false,
     ...overrides
   };
 }

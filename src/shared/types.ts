@@ -253,6 +253,12 @@ export interface CdpLiveViewOptions {
 
 export type ProfileSource = "native" | "isolated" | "isolated-sub";
 
+export interface GatewayAgentTarget {
+  targetId: string;
+  title: string;
+  url: string;
+}
+
 // Gateway 管理端口的权威控制状态。连接/接管 UI 必须优先使用它；本地 lease、activity
 // 和 lsof 仅用于非 Gateway 端口的兼容展示，不能覆盖这里的状态。
 export interface GatewayProfileControlState {
@@ -266,6 +272,7 @@ export interface GatewayProfileControlState {
   daemonPid: number | null;
   agent: string | null;
   project: string | null;
+  agentTarget: GatewayAgentTarget | null;
   pendingUserAction: string | null;
   updatedAt: string;
 }

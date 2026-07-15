@@ -85,6 +85,16 @@ export class BrowserGatewayDaemon {
             reason: active ? "agent-connected" : "agent-disconnected"
           });
         }
+      },
+      onAgentTargetChange: (publicPort) => {
+        const profile = this.control.getProfile(publicPort);
+        if (profile) {
+          this.publishControlEvent({
+            type: "connection-updated",
+            profile,
+            reason: "agent-target-changed"
+          });
+        }
       }
     });
     gatewayRef = this.gateway;
@@ -192,6 +202,21 @@ export class BrowserGatewayDaemon {
     }
     if (request.action === "status") {
       const snapshot = this.control.snapshot();
+      const profiles = await Promise.all(snapshot.profiles.map(async (profile) => ({
+        ...profile,
+        connectionActive: Boolean(
+          profile.ownerSessionId &&
+          profile.daemonInstanceId &&
+          this.gateway.hasActiveAgentConnection(
+            profile.publicPort,
+            profile.ownerSessionId,
+            profile.daemonInstanceId
+          )
+        ),
+        agentTarget: profile.ownerSessionId
+          ? await this.gateway.getAgentTarget(profile.publicPort, profile.ownerSessionId).catch(() => null)
+          : null
+      })));
       return {
         ok: true,
         protocolVersion: BROWSER_GATEWAY_PROTOCOL_VERSION,
@@ -202,20 +227,21 @@ export class BrowserGatewayDaemon {
         managedProfiles: [...this.managedProfiles.entries()].map(([publicPort, profile]) => ({ publicPort, ...profile })),
         state: {
           ...snapshot,
-          profiles: snapshot.profiles.map((profile) => ({
-            ...profile,
-            connectionActive: Boolean(
-              profile.ownerSessionId &&
-              profile.daemonInstanceId &&
-              this.gateway.hasActiveAgentConnection(
-                profile.publicPort,
-                profile.ownerSessionId,
-                profile.daemonInstanceId
-              )
-            )
-          }))
+          profiles
         }
       };
+    }
+    if (request.action === "activate-agent-target") {
+      const profile = this.control.getProfile(request.publicPort);
+      if (!profile?.ownerSessionId || profile.sessionStatus !== "active") {
+        return {
+          ok: false,
+          error_code: "AGENT_TARGET_NOT_FOUND",
+          message: "当前 Profile 没有活跃的 Agent Session"
+        };
+      }
+      const target = await this.gateway.activateAgentTarget(request.publicPort, profile.ownerSessionId);
+      return { ok: true, target };
     }
     if (request.action === "launch-profile") {
       if (this.gateway.registeredPorts().includes(request.publicPort)) {

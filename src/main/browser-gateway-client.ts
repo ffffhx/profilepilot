@@ -7,7 +7,7 @@ import path from "node:path";
 import type { GatewayControlEvent } from "./browser-gateway-control";
 
 const DEFAULT_TIMEOUT_MS = 3_000;
-export const BROWSER_GATEWAY_PROTOCOL_VERSION = 3;
+export const BROWSER_GATEWAY_PROTOCOL_VERSION = 4;
 
 export type GatewayControlRequest =
   | { action: "ping" }
@@ -48,6 +48,13 @@ export type GatewayControlRequest =
       params?: Record<string, unknown>;
       targetId?: string;
       timeoutMs?: number;
+    }
+  | {
+      action: "load-unpacked-extension";
+      publicPort: number;
+      sessionId: string;
+      daemonInstanceId: string;
+      extensionPath: string;
     }
   | { action: "status" }
   | { action: "unregister-profile"; publicPort: number; closeChrome?: boolean }

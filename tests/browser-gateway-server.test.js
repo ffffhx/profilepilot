@@ -143,6 +143,36 @@ test("Gateway Raw CDP uses the same ownership boundary and method policy", async
   }
 });
 
+test("Gateway loads an unpacked extension only for the active owning Agent", async () => {
+  const h = await makeHarness();
+  try {
+    h.control.acquire({ publicPort: h.port, sessionId: "cx-one", daemonInstanceId: "daemon-one" });
+    h.backend.onSend = (text) => {
+      const message = JSON.parse(text);
+      queueMicrotask(() => h.backend.emit(JSON.stringify({ id: message.id, result: { id: "extension-one" } })));
+    };
+    assert.deepEqual(await h.gateway.loadUnpackedExtension({
+      publicPort: h.port,
+      sessionId: "cx-one",
+      daemonInstanceId: "daemon-one",
+      extensionPath: "/tmp/fixture-extension"
+    }), { id: "extension-one" });
+    const sent = h.backend.sent.map(JSON.parse);
+    assert.equal(sent.at(-1).method, "Extensions.loadUnpacked");
+    assert.deepEqual(sent.at(-1).params, { path: "/tmp/fixture-extension" });
+
+    h.control.delegateToUser("cx-one", "user_takeover");
+    await assert.rejects(() => h.gateway.loadUnpackedExtension({
+      publicPort: h.port,
+      sessionId: "cx-one",
+      daemonInstanceId: "daemon-one",
+      extensionPath: "/tmp/fixture-extension"
+    }), (error) => error.code === "AGENT_USER_IN_CONTROL");
+  } finally {
+    await h.cleanup();
+  }
+});
+
 test("Gateway Raw CDP automatically attaches target-scoped methods to a page", async () => {
   const h = await makeHarness();
   try {

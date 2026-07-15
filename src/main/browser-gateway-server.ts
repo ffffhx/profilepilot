@@ -203,6 +203,32 @@ export class BrowserGatewayServer {
     }
   }
 
+  async loadUnpackedExtension(input: {
+    publicPort: number;
+    sessionId: string;
+    daemonInstanceId: string;
+    extensionPath: string;
+    timeoutMs?: number;
+  }): Promise<unknown> {
+    const profile = this.control.getProfile(input.publicPort);
+    if (!profile) throw new Error(`Gateway port ${input.publicPort} is not registered`);
+    const identity: GatewayConnectionIdentity = {
+      sessionId: input.sessionId,
+      profileId: profile.profileId,
+      publicPort: input.publicPort,
+      daemonInstanceId: input.daemonInstanceId,
+      controlGeneration: profile.controlGeneration,
+      kind: "agent"
+    };
+    this.control.assertConnectionCanSend(identity);
+    return this.sendRaw(
+      this.requireRoute(input.publicPort),
+      "Extensions.loadUnpacked",
+      { path: input.extensionPath },
+      input.timeoutMs || 15_000
+    );
+  }
+
   private async resolveDefaultPageTarget(route: GatewayRoute, timeoutMs: number, sessionId: string): Promise<string> {
     const affinity = route.targetBySession.get(sessionId);
     if (affinity) return affinity;

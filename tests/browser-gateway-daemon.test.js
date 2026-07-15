@@ -1,5 +1,5 @@
 const assert = require("node:assert/strict");
-const { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
+const { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } = require("node:fs");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
@@ -13,6 +13,7 @@ const { BrowserGatewayDaemon } = require("../dist/main/browser-gateway-daemon.js
 test("gatewayd owns the Chrome pipe, control socket and public ticketed WebSocket end to end", async () => {
   const home = mkdtempSync(path.join(os.tmpdir(), "profilepilot-gateway-daemon-"));
   const fakeChrome = writeFakeChrome(home);
+  const unpackedExtension = writeUnpackedExtension(home);
   const port = await freePort();
   const daemon = new BrowserGatewayDaemon(home);
   await daemon.start();
@@ -72,6 +73,17 @@ test("gatewayd owns the Chrome pipe, control socket and public ticketed WebSocke
     }, { homeDir: home });
     assert.deepEqual(raw.result, { echoed: "Target.activateTarget" });
 
+    const loaded = await requestBrowserGateway({
+      action: "load-unpacked-extension",
+      publicPort: port,
+      sessionId: "cx-one",
+      daemonInstanceId: "daemon-one",
+      extensionPath: unpackedExtension
+    }, { homeDir: home });
+    assert.deepEqual(loaded.result, { echoed: "Extensions.loadUnpacked" });
+    assert.equal(loaded.extension.path, realpathSync(unpackedExtension));
+    assert.equal(loaded.extension.name, "Fixture Extension");
+
     const closed = new Promise((resolve) => ws.addEventListener("close", resolve, { once: true }));
     await requestBrowserGateway({ action: "control", sessionId: "cx-one", command: "takeover" }, { homeDir: home });
     await closed;
@@ -126,6 +138,7 @@ test("gatewayd owns the Chrome pipe, control socket and public ticketed WebSocke
 test("agent-browser wrapper transparently connects through a Gateway ticket and strips direct CDP", async () => {
   const home = mkdtempSync(path.join(os.tmpdir(), "profilepilot-gateway-wrapper-"));
   const fakeChrome = writeFakeChrome(home);
+  const unpackedExtension = writeUnpackedExtension(home);
   const fakeAgentBrowser = path.join(home, "fake-agent-browser.js");
   const callsPath = path.join(home, "agent-browser-calls.ndjson");
   const holderPidPath = path.join(home, "holder.pid");
@@ -169,7 +182,8 @@ if (connectIndex >= 0) {
       AGENT_BROWSER_SESSION: "cx-wrapper",
       CALLS_PATH: callsPath,
       HOLDER_PID_PATH: holderPidPath,
-      READY_PATH: readyPath
+      READY_PATH: readyPath,
+      PROFILEPILOT_AGENT_BROWSER_REAL: fakeAgentBrowser
     };
     const prepared = await prepareGatewayTransport(
       fakeAgentBrowser,
@@ -196,6 +210,15 @@ if (connectIndex >= 0) {
       profileName: "Profile A",
       command: "snapshot"
     }, home).ok, true);
+    assert.equal(await runAgentBrowserWrapper([
+      "--cdp",
+      String(port),
+      "profilepilot",
+      "extension",
+      "load-unpacked",
+      unpackedExtension
+    ], env), 0);
+    assert.equal(readAgentBrowserProfileLeaseSync(port, home).session, "cx-wrapper");
     assert.equal(await runAgentBrowserWrapper([
       "profilepilot",
       "handoff",
@@ -528,6 +551,17 @@ input.on("data", (chunk) => {
 `);
   chmodSync(fakeChrome, 0o755);
   return fakeChrome;
+}
+
+function writeUnpackedExtension(home) {
+  const extensionPath = path.join(home, "fixture-extension");
+  mkdirSync(extensionPath, { recursive: true });
+  writeFileSync(path.join(extensionPath, "manifest.json"), `${JSON.stringify({
+    manifest_version: 3,
+    name: "Fixture Extension",
+    version: "1.0.0"
+  })}\n`);
+  return extensionPath;
 }
 
 async function freePort() {

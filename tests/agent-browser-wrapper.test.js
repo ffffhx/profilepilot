@@ -357,6 +357,32 @@ test("agent-browser wrapper requires an explicit reason for handoff", async () =
   rmSync(home, { recursive: true, force: true });
 });
 
+test("agent-browser wrapper requires an absolute validated unpacked extension path", async () => {
+  const home = makeTempHome();
+  const writes = captureProcessWrites();
+  let exitCode;
+  try {
+    exitCode = await runAgentBrowserWrapper([
+      "--cdp",
+      "9223",
+      "profilepilot",
+      "extension",
+      "load-unpacked",
+      "relative/extension"
+    ], {
+      HOME: home,
+      AGENT_BROWSER_SESSION: "cx-extension"
+    });
+  } finally {
+    writes.restore();
+  }
+
+  assert.equal(exitCode, PROFILEPILOT_AGENT_BROWSER_USAGE_EXIT_CODE);
+  assert.match(writes.stderr.join(""), /"error_code": "EXTENSION_PATH_MUST_BE_ABSOLUTE"/);
+  assert.equal(readAgentBrowserProfileLeaseSync(9223, home), null);
+  rmSync(home, { recursive: true, force: true });
+});
+
 test("agent-browser wrapper waits for the durable user-return event", async () => {
   const home = makeTempHome();
   acquireAgentBrowserProfileLeaseSync({

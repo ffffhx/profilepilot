@@ -19,6 +19,7 @@ import {
 } from "./browser-gateway-client";
 import { BrowserGatewayServer } from "./browser-gateway-server";
 import { ChromePipeTransport } from "./browser-gateway-transport";
+import { validateUnpackedExtensionPath } from "./unpacked-extension";
 
 const MAX_CONTROL_REQUEST_BYTES = 4 * 1024 * 1024;
 
@@ -293,6 +294,25 @@ export class BrowserGatewayDaemon {
     if (request.action === "raw-cdp") {
       const result = await this.gateway.callRaw(request);
       return { ok: true, result };
+    }
+    if (request.action === "load-unpacked-extension") {
+      const extension = validateUnpackedExtensionPath(request.extensionPath);
+      const result = await this.gateway.loadUnpackedExtension({
+        publicPort: request.publicPort,
+        sessionId: request.sessionId,
+        daemonInstanceId: request.daemonInstanceId,
+        extensionPath: extension.path
+      });
+      return {
+        ok: true,
+        result,
+        extension: {
+          path: extension.path,
+          name: extension.name,
+          version: extension.version,
+          manifestVersion: extension.manifestVersion
+        }
+      };
     }
     if (request.action === "shutdown") {
       this.shutdownRequested = true;

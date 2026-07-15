@@ -52,6 +52,7 @@ import { waitForCdp, requestCdpVersionInfo } from "./cdp-client";
 import { loadUnpackedExtensionsOverCdp } from "./cdp-page";
 import { getDirectChromeCommand } from "./chrome-launch";
 import { getMigratedExtensionLaunchPlan } from "./migrated-extension-launch";
+import { validateUnpackedExtensionPath } from "./unpacked-extension";
 
 const HARD_STOP_CODES = new Set(["AGENT_USER_IN_CONTROL", "AGENT_TASK_STOPPED"]);
 const NOTICE_BYPASS_COMMANDS = new Set([
@@ -505,7 +506,8 @@ function spawnRealAgentBrowser(
   executable: string,
   args: string[],
   env: NodeJS.ProcessEnv,
-  commandState: BrowserCommandStateContext | null
+  commandState: BrowserCommandStateContext | null,
+  stdio: "inherit" | "ignore" = "inherit"
 ): Promise<SpawnedAgentBrowserResult> {
   return new Promise((resolve) => {
     let settled = false;
@@ -516,7 +518,7 @@ function spawnRealAgentBrowser(
     };
     let child;
     try {
-      child = spawn(executable, args, { env, stdio: "inherit" });
+      child = spawn(executable, args, { env, stdio });
     } catch (error) {
       finish({ status: null, signal: null, error: error as Error & { code?: string } });
       return;
@@ -740,8 +742,8 @@ async function runProfilePilotInternalCommand(
     return null;
   }
   const action = positionals[1];
-  if (action !== "handoff" && action !== "wait-control" && action !== "complete" && action !== "resume" && action !== "release" && action !== "status" && action !== "cdp") {
-    process.stderr.write("[ProfilePilot] 用法：agent-browser profilepilot <status|handoff|wait-control|complete|resume|release|cdp>\n");
+  if (action !== "handoff" && action !== "wait-control" && action !== "complete" && action !== "resume" && action !== "release" && action !== "status" && action !== "cdp" && action !== "extension") {
+    process.stderr.write("[ProfilePilot] 用法：agent-browser profilepilot <status|handoff|wait-control|complete|resume|release|cdp|extension>\n");
     return PROFILEPILOT_AGENT_BROWSER_USAGE_EXIT_CODE;
   }
 
@@ -753,6 +755,9 @@ async function runProfilePilotInternalCommand(
   const homeDir = env.HOME || os.homedir();
   if (action === "cdp") {
     return runGatewayRawCdp(args, session, env, homeDir);
+  }
+  if (action === "extension") {
+    return runGatewayExtensionCommand(args, session, env, homeDir);
   }
   if (action === "status") {
     try {
@@ -955,11 +960,126 @@ async function runProfilePilotInternalCommand(
   return 0;
 }
 
+async function runGatewayExtensionCommand(
+  args: string[],
+  session: string,
+  env: NodeJS.ProcessEnv,
+  homeDir: string
+): Promise<number> {
+  const positionals = positionalArgs(args);
+  if (positionals[2] !== "load-unpacked" || !positionals[3] || positionals.length !== 4) {
+    process.stderr.write(
+      "[ProfilePilot] 用法：agent-browser --cdp <逻辑端口> profilepilot extension load-unpacked <扩展绝对路径>\n"
+    );
+    return PROFILEPILOT_AGENT_BROWSER_USAGE_EXIT_CODE;
+  }
+  const publicPort = cdpPortFromAgentBrowserArgs(args);
+  if (!publicPort) {
+    process.stderr.write("[ProfilePilot] load-unpacked 必须通过 --cdp 指定 ProfilePilot 逻辑端口。\n");
+    return PROFILEPILOT_AGENT_BROWSER_USAGE_EXIT_CODE;
+  }
+
+  let extension: ReturnType<typeof validateUnpackedExtensionPath>;
+  try {
+    extension = validateUnpackedExtensionPath(positionals[3]);
+  } catch (error) {
+    process.stderr.write(formatExtensionLoadFailure(error, args, env));
+    return PROFILEPILOT_AGENT_BROWSER_USAGE_EXIT_CODE;
+  }
+
+  const activeNotice = findActiveProfilePilotNotice(args, env);
+  if (activeNotice) {
+    process.stderr.write(formatHardStopNotice(activeNotice));
+    return PROFILEPILOT_AGENT_BROWSER_HARD_STOP_EXIT_CODE;
+  }
+
+  const lease = acquireProfileLeaseForCommand(args, env);
+  if (lease && !lease.ok) {
+    process.stderr.write(formatProfileLeaseConflict(lease.lease, session, args, env));
+    return PROFILEPILOT_AGENT_BROWSER_LEASE_CONFLICT_EXIT_CODE;
+  }
+  const leaseContext = lease?.ok ? lease.context : null;
+  if (!leaseContext) {
+    process.stderr.write("[ProfilePilot] 无法为 load-unpacked 建立 Profile 租约。\n");
+    return PROFILEPILOT_AGENT_BROWSER_USAGE_EXIT_CODE;
+  }
+  if (leaseContext.acquisition.replacedLease) {
+    const retired = retireReplacedAgentBrowserLeaseOwnerSync(
+      leaseContext.acquisition.replacedLease,
+      homeDir
+    );
+    if (!retired) {
+      releaseAgentBrowserProfileLeaseSync(publicPort, session, homeDir);
+      process.stderr.write(formatProfileLeaseReclaimFailure(leaseContext.acquisition.replacedLease, session));
+      return PROFILEPILOT_AGENT_BROWSER_LEASE_CONFLICT_EXIT_CODE;
+    }
+  }
+
+  const realAgentBrowser = resolveRealAgentBrowser(env);
+  if (!realAgentBrowser) {
+    releaseNewProfileLeaseAfterFailure(leaseContext, env);
+    process.stderr.write("[ProfilePilot] 未找到真实 agent-browser 可执行文件。\n");
+    return 127;
+  }
+
+  let transportReady = false;
+  const commandState = beginBrowserCommandState(args, env, publicPort);
+  writeSessionActivityIfBrowserOperation(args, env, publicPort);
+  try {
+    await prepareGatewayTransport(realAgentBrowser, args, env, publicPort, { quietConnect: true });
+    transportReady = true;
+    const response = await requestBrowserGateway({
+      action: "load-unpacked-extension",
+      publicPort,
+      sessionId: session,
+      daemonInstanceId: readOrCreateBrowserGatewayDaemonIdentity(session, homeDir),
+      extensionPath: extension.path
+    }, { homeDir, timeoutMs: 20_000 });
+
+    acknowledgeRequestedTakeover(args, env);
+    const after = findActiveProfilePilotNotice(args, env);
+    if (after) {
+      process.stderr.write(formatHardStopNotice(after));
+      return PROFILEPILOT_AGENT_BROWSER_HARD_STOP_EXIT_CODE;
+    }
+
+    renewProfileLeaseAfterSuccess(leaseContext, args, env);
+    writeSessionActivityIfBrowserOperation(args, env, publicPort);
+    const result = response.result && typeof response.result === "object"
+      ? response.result as Record<string, unknown>
+      : null;
+    process.stdout.write(`${JSON.stringify({
+      source: "ProfilePilot Gateway",
+      ok: true,
+      action: "load-unpacked",
+      session,
+      cdp_port: publicPort,
+      extension_id: typeof result?.id === "string" ? result.id : null,
+      extension: response.extension,
+      message: `已通过 Gateway 加载未打包扩展：${extension.name}`
+    }, null, 2)}\n`);
+    return 0;
+  } catch (error) {
+    if (transportReady) {
+      renewProfileLeaseAfterSuccess(leaseContext, args, env);
+    } else {
+      releaseNewProfileLeaseAfterFailure(leaseContext, env);
+    }
+    process.stderr.write(formatExtensionLoadFailure(error, args, env));
+    return PROFILEPILOT_AGENT_BROWSER_HARD_STOP_EXIT_CODE;
+  } finally {
+    if (commandState) {
+      clearAgentBrowserCommandStateSync(commandState.session, commandState.commandId, commandState.homeDir);
+    }
+  }
+}
+
 export async function prepareGatewayTransport(
   executable: string,
   args: string[],
   env: NodeJS.ProcessEnv,
-  resolvedCdpPort?: number
+  resolvedCdpPort?: number,
+  options: { quietConnect?: boolean } = {}
 ): Promise<string[]> {
   if (!shouldCheckProfilePilotNotice(args)) return args;
   const sessionId = sessionFromAgentBrowserArgs(args, env);
@@ -1018,7 +1138,13 @@ export async function prepareGatewayTransport(
     return replaceConnectTarget(stripCdpOption(args), webSocketUrl);
   }
   if (acquire.connectionActive !== true) {
-    const connected = await spawnRealAgentBrowser(executable, ["--session", sessionId, "connect", webSocketUrl], env, null);
+    const connected = await spawnRealAgentBrowser(
+      executable,
+      ["--session", sessionId, "connect", webSocketUrl],
+      env,
+      null,
+      options.quietConnect ? "ignore" : "inherit"
+    );
     if (connected.error || connected.signal || connected.status !== 0) {
       // Parallel commands may both observe an initially disconnected daemon. If the other
       // command won the connect race, the failed duplicate connect is harmless.
@@ -1315,6 +1441,19 @@ function formatGatewayFailure(error: unknown, args: string[], env: NodeJS.Proces
     session: sessionFromAgentBrowserArgs(args, env) || null,
     cdp_port: cdpPortFromAgentBrowserArgs(args) || null,
     action: "停手：不要绕过 Gateway 直连 Chrome CDP；先恢复 ProfilePilot Gateway 或交还控制权。"
+  }, null, 2)}\n`;
+}
+
+function formatExtensionLoadFailure(error: unknown, args: string[], env: NodeJS.ProcessEnv): string {
+  const candidate = error as { code?: unknown; message?: unknown } | null;
+  return `${JSON.stringify({
+    source: "ProfilePilot Gateway",
+    error_code: typeof candidate?.code === "string" ? candidate.code : "EXTENSION_LOAD_FAILED",
+    hard_stop: true,
+    message: typeof candidate?.message === "string" ? candidate.message : String(error || "扩展加载失败"),
+    session: sessionFromAgentBrowserArgs(args, env) || null,
+    cdp_port: cdpPortFromAgentBrowserArgs(args) || null,
+    action: "检查扩展绝对路径和 manifest.json；不要改用原生文件选择器或绕过 Gateway。"
   }, null, 2)}\n`;
 }
 

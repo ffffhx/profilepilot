@@ -68,6 +68,32 @@ test("Gateway enforces Profile↔Session and Session↔daemon one-to-one binding
   }
 });
 
+test("Gateway keeps the browser driver identity immutable for an active Session", () => {
+  const h = harness();
+  try {
+    const first = h.control.acquire({
+      publicPort: 9223,
+      sessionId: "cx-driver",
+      daemonInstanceId: "daemon-driver",
+      daemonPid: 101,
+      driverKind: "playwright-cli",
+      driverLabel: "Playwright CLI"
+    });
+    assert.equal(first.profile.driverKind, "playwright-cli");
+    assert.equal(first.profile.driverLabel, "Playwright CLI");
+
+    assertCode(() => h.control.acquire({
+      publicPort: 9223,
+      sessionId: "cx-driver",
+      daemonInstanceId: "daemon-driver",
+      driverKind: "chrome-devtools-mcp"
+    }), "SESSION_DAEMON_DUPLICATE");
+    assert.equal(h.control.getProfile(9223).driverKind, "playwright-cli");
+  } finally {
+    h.cleanup();
+  }
+});
+
 test("Gateway tickets are signed, one-shot, expiring and generation-bound", () => {
   const h = harness();
   try {

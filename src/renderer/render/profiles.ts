@@ -24,12 +24,20 @@ export function renderProfilesPanel(profiles: PublicProfile[], externalInstances
   return `
     <div class="profiles-table-wrap overflow-visible border-solid border border-line rounded-xl bg-panel [box-shadow:inset_0_1px_0_rgba(255,255,255,0.04),0_18px_44px_rgba(2,6,9,0.35)]">
       <table class="profiles-table w-full border-collapse table-fixed">
+        <colgroup>
+          <col class="profile-col-name" />
+          <col class="profile-col-status" />
+          <col class="profile-col-connection" />
+          <col class="profile-col-activity" />
+          <col class="profile-col-actions" />
+        </colgroup>
         <thead>
           <tr>
-            <th>名称</th>
-            <th>状态</th>
-            <th>连接</th>
-            <th>操作</th>
+            <th>Profile</th>
+            <th>Status</th>
+            <th>Connection</th>
+            <th>Agent Activity</th>
+            <th>Actions</th>
           </tr>
         </thead>
         <tbody>
@@ -165,7 +173,7 @@ export function renderProfileRow(profile: PublicProfile, isFirstInGroup = false,
           <span class="profile-name-line flex items-center gap-2 min-w-0">
             <span class="status-dot w-[9px] h-[9px] flex-[0_0_auto] rounded-full bg-line-strong ${profile.running ? "running" : profile.source === "native" ? "native" : ""}"></span>
             <span class="profile-name block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[15px] font-[650] leading-[1.25]">${escapeHtml(profile.name)}</span>
-            ${profile.isDefault ? '<span class="native-badge inline-flex items-center justify-center border-solid border border-warn-line rounded-full px-2 py-[3px] bg-warn-soft text-warn-bright font-mono text-[10px] font-semibold tracking-[0.06em]">Default</span>' : ""}
+            ${profile.isDefault ? '<span class="native-badge inline-flex items-center justify-center border-solid border border-warn-line rounded-full px-2 py-[3px] bg-warn-soft text-warn-bright font-mono text-[10px] font-semibold tracking-[0.06em]">DEFAULT</span>' : ""}
             ${profile.quickLaunchSlot ? `<span class="slot-badge" title="全局快捷键 ⌘⌥${profile.quickLaunchSlot} 直启">⌘⌥${profile.quickLaunchSlot}</span>` : ""}
           </span>
         </div>
@@ -176,7 +184,10 @@ export function renderProfileRow(profile: PublicProfile, isFirstInGroup = false,
         </span>
       </td>
       <td>
-        ${renderProfileConnectionCell(profile)}
+        ${renderProfilePortCell(profile)}
+      </td>
+      <td>
+        ${renderProfileActivityCell(profile)}
       </td>
       <td>
         ${renderProfileActions(profile)}
@@ -192,13 +203,113 @@ export function renderProfileCdpCell(profile: PublicProfile): string {
     return cdpChip("live", cdpPortLabel(profile.cdpUrl), profile.cdpUrl, null);
   }
   if (profile.source === "native") {
-    return cdpChip("off", "不支持", null, null);
+    return cdpChip("off", "不支持 Gateway", null, null);
   }
   if (profile.fixedCdpPort) {
     const url = `http://127.0.0.1:${profile.fixedCdpPort}`;
     return cdpChip("bound", `:${profile.fixedCdpPort}`, url, "待启动");
   }
   return cdpChip("off", "未开启", null, null);
+}
+
+// Profile Registry 的 CONNECTION 列只表达端口/Gateway 可用性，驱动者和会话活动
+// 单独进入 AGENT ACTIVITY 列。两类信息拆开后，每一行都能共享同一组固定列起点。
+export function renderProfilePortCell(profile: PublicProfile): string {
+  if (!profile.cdpUrl) {
+    return renderProfileCdpCell(profile);
+  }
+  return cdpChip(
+    "live",
+    cdpPortLabel(profile.cdpUrl),
+    profile.gatewayControl
+      ? `ProfilePilot Gateway 逻辑入口 · ${cdpPortLabel(profile.cdpUrl)}`
+      : profile.cdpUrl,
+    profile.gatewayControl ? "Gateway" : null
+  );
+}
+
+// Profile Registry 的 AGENT ACTIVITY 列：第一行回答“谁在驱动/谁占有控制权”，
+// 第二行只保留项目（或会话身份）与最近活动。空态也占据同一列，保证轨道严格对齐。
+export function renderProfileActivityCell(profile: PublicProfile): string {
+  const control = profile.gatewayControl;
+  if (control?.sessionStatus === "active" && control.ownerSessionId) {
+    const activelyDriven = control.ownership === "agent" && control.connectionActive && profile.cdpClients.length > 0;
+    if (!activelyDriven) {
+      const client = gatewayControlClient(profile);
+      const label = control.ownership === "user"
+        ? control.pendingUserAction ? "等待用户操作" : "用户已接管"
+        : "Agent 已绑定";
+      const tooltip = control.ownership === "user"
+        ? control.pendingUserAction
+          ? `等待用户完成：${control.pendingUserAction}；Agent Session 仍保留`
+          : "浏览器控制权属于用户；Agent Session 仍保留，等待交还"
+        : "Gateway 已为该 Agent 保留控制权，当前没有活动连接";
+      return renderProfileActivityTrack(
+        label,
+        client ? cdpSessionText(client) : control.ownerSessionId,
+        formatRelativeTime(control.updatedAt),
+        tooltip,
+        control.ownership === "user" ? "user" : "reserved"
+      );
+    }
+  }
+
+  if (profile.agentBrowserOccupancy && !control?.ownerSessionId) {
+    const occupancy = profile.agentBrowserOccupancy;
+    const client = agentBrowserOccupancyClient(profile);
+    const label = occupancy.ownership === "user" ? "用户已接管" : "Agent 已绑定";
+    const tooltip = occupancy.ownership === "user"
+      ? "Session 仍保留，自动切换不会使用此 Profile；请交还或释放后再复用"
+      : "agent-browser Session 仍排他预留此 Profile，自动切换不会使用";
+    return renderProfileActivityTrack(
+      label,
+      client ? cdpSessionText(client) : occupancy.session,
+      formatRelativeTime(occupancy.updatedAt),
+      tooltip,
+      occupancy.ownership === "user" ? "user" : "reserved"
+    );
+  }
+
+  if (!profile.cdpUrl) {
+    return '<span class="profile-activity-empty">—</span>';
+  }
+  if (!profile.cdpClients.length) {
+    return '<span class="profile-activity-empty">空闲</span>';
+  }
+
+  const primary = profile.cdpClients[0];
+  const tool = primary.agent || prettyCdpClientLabel(primary.label);
+  const extra = profile.cdpClients.length > 1 ? ` ×${profile.cdpClients.length}` : "";
+  const warning = contentionNoticeShort(profile);
+  const activityTooltip = agentActivityTooltipText(profile.agentActivity);
+  const tooltip = [warning, activityTooltip, primary.note].filter(Boolean).join(" · ") || `${tool} 正在驱动`;
+  const sessionText = primary.project || primary.title || primary.session || "";
+  return renderProfileActivityTrack(
+    `${tool}${extra} 正在驱动${warning ? " ⚠" : ""}`,
+    sessionText,
+    formatRelativeTime(primary.lastActive),
+    tooltip,
+    warning ? "contention" : "driving"
+  );
+}
+
+function renderProfileActivityTrack(
+  label: string,
+  sessionText: string,
+  age: string,
+  tooltip: string,
+  tone: "driving" | "contention" | "reserved" | "user"
+): string {
+  const meta = [sessionText, age].filter(Boolean);
+  return `
+    <span class="profile-activity-track ${tone}">
+      <span class="profile-activity-signal" aria-hidden="true"></span>
+      <span class="profile-activity-main action-tooltip" data-tooltip="${escapeHtml(tooltip)}">
+        <span class="profile-activity-label">${escapeHtml(label)}</span>
+      </span>
+      ${meta.length ? `<span class="profile-activity-meta"><span>${escapeHtml(meta[0] || "")}</span>${meta[1] ? `<em>· ${escapeHtml(meta[1])}</em>` : ""}</span>` : ""}
+    </span>
+  `;
 }
 
 // CDP 状态芯片：前导指示灯 + 地址 + 可选状态标签，沿用全局信号灯语言。
@@ -422,13 +533,14 @@ export function renderProfileActions(profile: PublicProfile): string {
     const subMenuOpen = store.openProfileMenuId === profile.id;
     return `
       <div class="profile-actions" data-profile-actions>
-        <span class="action-tooltip" data-tooltip="${escapeHtml(tip)}">
+        <span class="action-tooltip profile-primary-action" data-tooltip="${escapeHtml(tip)}">
           <button type="button" class="action-button accent ${subPrimaryLoading ? "loading" : ""}" data-action="${profile.running ? "focus-profile" : "launch"}" data-id="${profile.id}" ${store.busy ? "disabled" : ""}>
             ${renderButtonLabel(subPrimaryLoading, profile.running ? "显示" : "启动", subPrimaryLabel)}
           </button>
         </span>
-        <span class="menu-anchor relative inline-flex">
-          <button type="button" class="action-button menu-button" data-action="toggle-profile-menu" data-id="${profile.id}" aria-expanded="${subMenuOpen ? "true" : "false"}" ${store.busy ? "disabled" : ""}>更多</button>
+        ${renderProfileDetailsButton(profile.id)}
+        <span class="menu-anchor profile-menu-action relative inline-flex">
+          <button type="button" class="action-button menu-button" data-action="toggle-profile-menu" data-id="${profile.id}" aria-label="更多" title="更多" aria-expanded="${subMenuOpen ? "true" : "false"}" ${store.busy ? "disabled" : ""}>⋮</button>
           ${
             subMenuOpen
               ? `
@@ -476,7 +588,7 @@ export function renderProfileActions(profile: PublicProfile): string {
       ? cdpLaunchButtonTitle(profile)
       : launchButtonTitle(profile);
   const baseAction = running ? "focus-profile" : preferCdp ? (cdpQuick ? "launch-cdp-quick" : "launch-cdp") : "launch";
-  const baseIdle = running ? "显示" : preferCdp ? "CDP 启动" : "启动";
+  const baseIdle = running ? "显示" : "启动";
   const baseBusy = running ? focusing : preferCdp ? launchingCdp : launching;
   const menuOpBusyLabel = deleting
     ? "删除中…"
@@ -490,16 +602,22 @@ export function renderProfileActions(profile: PublicProfile): string {
   const primaryLoading = baseBusy || Boolean(menuOpBusyLabel);
   const primaryLoadingLabel = menuOpBusyLabel || (running ? "显示中…" : preferCdp ? "CDP 启动中…" : "启动中…");
 
+  const hasTakeoverAction = Boolean(takeoverButton);
+  const baseActionClass = hasTakeoverAction ? "profile-window-action" : "profile-primary-action";
+  const baseVisualLabel = hasTakeoverAction ? "↗" : baseIdle;
+  const baseLoadingLabel = hasTakeoverAction ? "" : primaryLoadingLabel;
+
   return `
     <div class="profile-actions" data-profile-actions>
       ${takeoverButton}
-      <span class="action-tooltip" data-tooltip="${escapeHtml(baseTip)}">
-        <button type="button" class="action-button accent ${primaryLoading ? "loading" : ""}" data-action="${baseAction}" data-id="${profile.id}" ${store.busy ? "disabled" : ""}>
-          ${renderButtonLabel(primaryLoading, baseIdle, primaryLoadingLabel)}
+      ${renderProfileDetailsButton(profile.id)}
+      <span class="action-tooltip ${baseActionClass}" data-tooltip="${escapeHtml(baseTip)}">
+        <button type="button" class="action-button accent ${hasTakeoverAction ? "icon-action" : ""} ${primaryLoading ? "loading" : ""}" data-action="${baseAction}" data-id="${profile.id}" aria-label="${escapeHtml(baseIdle)}" ${store.busy ? "disabled" : ""}>
+          ${renderButtonLabel(primaryLoading, baseVisualLabel, baseLoadingLabel)}
         </button>
       </span>
-      <span class="menu-anchor relative inline-flex">
-      <button type="button" class="action-button menu-button" data-action="toggle-profile-menu" data-id="${profile.id}" aria-expanded="${menuOpen ? "true" : "false"}" ${store.busy ? "disabled" : ""}>更多</button>
+      <span class="menu-anchor profile-menu-action relative inline-flex">
+      <button type="button" class="action-button menu-button" data-action="toggle-profile-menu" data-id="${profile.id}" aria-label="更多" title="更多" aria-expanded="${menuOpen ? "true" : "false"}" ${store.busy ? "disabled" : ""}>⋮</button>
       ${
         menuOpen
           ? `
@@ -540,10 +658,18 @@ export function renderProfileActions(profile: PublicProfile): string {
   `;
 }
 
+function renderProfileDetailsButton(profileId: string): string {
+  return `
+    <span class="action-tooltip profile-details-action" data-tooltip="查看连接信息、标签页与实时画面">
+      <button type="button" class="action-button details-action" data-action="open-profile-details" data-id="${escapeHtml(profileId)}" aria-label="查看详情" ${store.busy ? "disabled" : ""}>详情</button>
+    </span>
+  `;
+}
+
 function renderAgentTakeoverButton(profile: PublicProfile): string {
   if (gatewayUserHasControl(profile)) {
     return `
-      <span class="action-tooltip" data-tooltip="浏览器控制权当前属于你，可在浏览器控制框中交还 Agent">
+      <span class="action-tooltip profile-primary-action" data-tooltip="浏览器控制权当前属于你，可在浏览器控制框中交还 Agent">
         <button type="button" class="action-button warn takeover-action" disabled>✓ 已接管</button>
       </span>
     `;
@@ -553,9 +679,9 @@ function renderAgentTakeoverButton(profile: PublicProfile): string {
   }
   const takingOver = isBusyAction("agent-takeover", { profileId: profile.id });
   return `
-    <span class="action-tooltip" data-tooltip="暂停 AI 操作，接管浏览器">
+    <span class="action-tooltip profile-primary-action" data-tooltip="暂停 AI 操作，接管浏览器">
       <button type="button" class="action-button warn takeover-action ${takingOver ? "loading" : ""}" data-action="takeover-agent" data-id="${escapeHtml(profile.id)}" ${store.busy ? "disabled" : ""}>
-        ${renderButtonLabel(takingOver, "⏹ 接管", "接管中…")}
+        ${renderButtonLabel(takingOver, "接管", "接管中…")}
       </button>
     </span>
   `;
@@ -629,6 +755,34 @@ function renderExternalConnectionCell(instance: ExternalChromeInstance): string 
   return `<span class="conn-cell-stack"><span class="conn-line">${portChip}${connection}</span>${subLine}</span>`;
 }
 
+function renderExternalPortCell(instance: ExternalChromeInstance): string {
+  if (instance.cdpUrl) {
+    return cdpChip("live", cdpPortLabel(instance.cdpUrl), instance.cdpUrl, null);
+  }
+  if (instance.cdpPort) {
+    return cdpChip("stale", `:${instance.cdpPort}`, `http://127.0.0.1:${instance.cdpPort}`, "未响应");
+  }
+  return cdpChip("off", "未开启", null, null);
+}
+
+function renderExternalActivityCell(instance: ExternalChromeInstance): string {
+  const model = externalConnectionModel(instance);
+  const primary = model.cdpClients[0];
+  if (!primary) {
+    return `<span class="profile-activity-empty">${instance.cdpUrl ? "空闲" : "—"}</span>`;
+  }
+  const tool = primary.agent || prettyCdpClientLabel(primary.label);
+  const extra = model.cdpClients.length > 1 ? ` ×${model.cdpClients.length}` : "";
+  const tooltip = agentActivityTooltipText(model.agentActivity) || primary.note || `${tool} 正在驱动`;
+  return renderProfileActivityTrack(
+    `${tool}${extra} 正在驱动`,
+    primary.project || primary.title || primary.session || "",
+    formatRelativeTime(primary.lastActive),
+    tooltip,
+    "driving"
+  );
+}
+
 function renderExternalConnPill(instance: ExternalChromeInstance): string {
   const model = externalConnectionModel(instance);
   const clients = model.cdpClients;
@@ -661,7 +815,7 @@ function renderExternalConnPill(instance: ExternalChromeInstance): string {
 export function renderExternalRows(instances: ExternalChromeInstance[]): string {
   return `
     <tr class="table-group-row">
-      <td colspan="4">
+      <td colspan="5">
         <span>外部实例 · 其他工具（agent-browser 等）自管，仅支持显示 / 关闭</span>
         <span class="count">${instances.length}</span>
       </td>
@@ -690,20 +844,26 @@ export function renderExternalRow(instance: ExternalChromeInstance): string {
         <span class="state-pill inline-flex items-center justify-center min-w-[58px] border-solid border border-line-strong rounded-full px-[9px] py-1 bg-transparent text-muted font-mono text-[11px] font-semibold tracking-[0.06em] running">运行中</span>
       </td>
       <td>
-        ${renderExternalConnectionCell(instance)}
+        ${renderExternalPortCell(instance)}
       </td>
       <td>
-        <div class="profile-actions">
+        ${renderExternalActivityCell(instance)}
+      </td>
+      <td>
+        <div class="profile-actions external-profile-actions">
           ${
             instance.headless
               ? ""
-              : `<span class="action-tooltip" data-tooltip="把这个窗口显示到最前面">
+              : `<span class="action-tooltip profile-primary-action" data-tooltip="把这个窗口显示到最前面">
             <button type="button" class="action-button accent ${focusing ? "loading" : ""}" data-action="focus-external" data-dir="${escapeHtml(instance.userDataDir)}" ${store.busy ? "disabled" : ""}>
               ${renderButtonLabel(focusing, "显示", "显示中…")}
             </button>
           </span>`
           }
-          <span class="action-tooltip" data-tooltip="结束这个外部实例进程">
+          <span class="action-tooltip profile-details-action" data-tooltip="查看外部实例连接信息">
+            <button type="button" class="action-button details-action" data-action="open-external-details" data-dir="${escapeHtml(instance.userDataDir)}" aria-label="查看详情" ${store.busy ? "disabled" : ""}>详情</button>
+          </span>
+          <span class="action-tooltip profile-window-action" data-tooltip="结束这个外部实例进程">
             <button type="button" class="action-button warn ${closing ? "loading" : ""}" data-action="close-external" data-dir="${escapeHtml(instance.userDataDir)}" ${store.busy ? "disabled" : ""}>
               ${renderButtonLabel(closing, "关闭", "关闭中…")}
             </button>
@@ -796,7 +956,7 @@ export function renderExternalDetails(instance: ExternalChromeInstance): string 
   `;
 }
 
-export function renderDetails(profile: PublicProfile | null): string {
+export function renderDetails(profile: PublicProfile | null, includeLiveView = true): string {
   if (!profile) {
     return `
       <aside class="details border-solid border border-line rounded-xl bg-[linear-gradient(180deg,var(--panel),var(--panel-soft))] p-[18px] [box-shadow:inset_0_1px_0_rgba(255,255,255,0.04),0_18px_44px_rgba(2,6,9,0.35)]">
@@ -833,8 +993,61 @@ export function renderDetails(profile: PublicProfile | null): string {
         ${renderListeningPortsDetail(profile)}
         ${renderConnectionDetail(profile)}
       </div>
-      ${renderLiveViewSection(profile)}
+      ${includeLiveView ? renderLiveViewSection(profile) : ""}
     </aside>
+  `;
+}
+
+export function renderProfileDetailsModal(profile: PublicProfile | null): string {
+  if (!profile) {
+    return "";
+  }
+  const liveView = renderLiveViewSection(profile);
+  const liveEmpty = profile.source === "native"
+    ? "系统 Profile 不支持端口式实时画面。"
+    : !profile.running
+      ? "启动这个 Profile 后，可在这里查看标签页与实时画面。"
+      : "通过 CDP 启动后，可在这里查看标签页与实时画面。";
+  return `
+    <div class="modal-backdrop profile-details-backdrop" data-action="close-modal">
+      <section class="profile-details-modal" role="dialog" aria-modal="true" aria-labelledby="profile-details-title">
+        <header class="profile-details-modal-head">
+          <div>
+            <span>Profile Inspector</span>
+            <h2 id="profile-details-title">${escapeHtml(profile.name)}</h2>
+          </div>
+          <button type="button" data-action="close-modal" data-profile-details-close>关闭</button>
+        </header>
+        <div class="profile-details-modal-body">
+          <div class="profile-details-summary">${renderDetails(profile, false)}</div>
+          <section class="profile-details-cockpit" aria-label="实时画面">
+            ${liveView || `<div class="profile-details-live-empty"><span>Cockpit</span><strong>暂不可观测</strong><p>${escapeHtml(liveEmpty)}</p></div>`}
+          </section>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+export function renderExternalDetailsModal(instance: ExternalChromeInstance | null): string {
+  if (!instance) {
+    return "";
+  }
+  return `
+    <div class="modal-backdrop profile-details-backdrop" data-action="close-modal">
+      <section class="profile-details-modal external-details-modal" role="dialog" aria-modal="true" aria-labelledby="external-details-title">
+        <header class="profile-details-modal-head">
+          <div>
+            <span>External Inspector</span>
+            <h2 id="external-details-title">${escapeHtml(instance.label)}</h2>
+          </div>
+          <button type="button" data-action="close-modal" data-profile-details-close>关闭</button>
+        </header>
+        <div class="profile-details-modal-body single">
+          <div class="profile-details-summary">${renderExternalDetails(instance)}</div>
+        </div>
+      </section>
+    </div>
   `;
 }
 
@@ -960,7 +1173,7 @@ export function renderCdpClientsDetail(profile: PublicProfile): string {
       ${disconnectRow}
       ${renderAgentOverlaySettingRow()}
       ${renderShellIntegrationRow(profile)}
-      <small class="detail-note">列出连到 CDP 端口的工具连接。“驱动中”表示有工具在控制；每行显示驱动方与最近活动。ProfilePilot 会自动释放 agent-browser 残留连接，也可手动「结束连接」（不影响 Chrome）。多个会话共用同一 Profile 会互抢标签页，建议「克隆」出副本。</small>
+      <small class="detail-note">列出连到 CDP 端口的工具连接。“驱动中”表示有工具在控制；每行显示驱动方与最近活动。ProfilePilot 会统一管理 agent-browser、Playwright CLI 和 Chrome DevTools MCP 的接管、交还与结束（不影响 Chrome）。</small>
     </div>
   `;
 }
@@ -1007,22 +1220,30 @@ function renderAgentOverlaySettingRow(): string {
   `;
 }
 
-// 会话识别 shell 集成的引导/状态行。只在“有 agent-browser 驱动连接”时出现——
+// 会话识别 shell 集成的引导/状态行。只在“有受管浏览器驱动”时出现——
 // 这正是归属能力有无差别的现场；没有相关连接时不打扰。
 function renderShellIntegrationRow(profile: PublicProfile): string {
   const status = store.state?.shellIntegration;
   if (!status?.supported) {
     return "";
   }
-  const hasAgentBrowser = profile.cdpClients.some((client) => client.label.startsWith("agent-browser"));
-  if (!hasAgentBrowser) {
+  const hasManagedDriver = profile.cdpClients.some((client) => {
+    const label = client.label.toLowerCase();
+    return Boolean(
+      client.driverKind ||
+        label.startsWith("agent-browser") ||
+        label.startsWith("playwright") ||
+        label.includes("chrome devtools mcp")
+    );
+  });
+  if (!hasManagedDriver) {
     return "";
   }
 
   const busy = isBusyAction("shell-integration");
   if (!status.installed) {
     return `
-      <small class="detail-note">启用「会话识别」后，每个 AI 会话的 agent-browser 自动隔离并携带会话身份——这里就能显示是哪个会话在驱动（往 ${escapeHtml(status.path)} 写一段可移除的配置，对新开会话生效）。</small>
+      <small class="detail-note">启用「会话识别」后，agent-browser、Playwright CLI 和 Chrome DevTools MCP 都会携带统一的 AI 会话身份（往 ${escapeHtml(status.path)} 写一段可移除的配置，对新开会话生效）。</small>
       <div class="detail-session-actions">
         <button type="button" class="action-button accent ${busy ? "loading" : ""}" data-action="enable-shell-integration" ${store.busy ? "disabled" : ""}>${renderButtonLabel(busy, "启用会话识别", "写入中…")}</button>
       </div>

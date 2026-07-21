@@ -253,11 +253,16 @@ export class SessionTailer {
         continue;
       }
       if (name === "Bash") {
-        const command = findAgentBrowserCommand(input.command);
+        const command = findBrowserDriverCommand(input.command);
         if (command) {
-          this.consumeAgentBrowserCommand(command);
+          this.consumeBrowserDriverCommand(command);
           continue;
         }
+      }
+      const browserCommand = findBrowserDriverCommand({ name, input });
+      if (browserCommand) {
+        this.consumeBrowserDriverCommand(browserCommand);
+        continue;
       }
       if (!this.parsed.currentAction && name) {
         this.parsed.currentAction = truncate(`使用 ${name}`, ACTIVITY_ACTION_LIMIT);
@@ -285,9 +290,9 @@ export class SessionTailer {
     }
 
     const commandSource = codexCommandSource(entry);
-    const command = commandSource ? findAgentBrowserCommand(commandSource) : "";
+    const command = commandSource ? findBrowserDriverCommand(commandSource) : "";
     if (command) {
-      this.consumeAgentBrowserCommand(command);
+      this.consumeBrowserDriverCommand(command);
     }
 
     const plan = codexPlanSteps(entry);
@@ -318,9 +323,9 @@ export class SessionTailer {
     this.parsed.updatedAt = new Date().toISOString();
   }
 
-  private consumeAgentBrowserCommand(command: string): void {
-    this.parsed.currentAction = describeAgentBrowserCommand(command);
-    const target = agentBrowserTargetUrl(command);
+  private consumeBrowserDriverCommand(command: string): void {
+    this.parsed.currentAction = describeBrowserDriverCommand(command);
+    const target = browserDriverTargetUrl(command);
     if (target.hasTargetCommand) {
       this.parsed.targetUrl = target.targetUrl;
     }
@@ -485,6 +490,54 @@ export function findAgentBrowserCommand(value: unknown, depth = 0): string {
   return "";
 }
 
+export function findBrowserDriverCommand(value: unknown, depth = 0): string {
+  if (depth > 6) return "";
+  if (typeof value === "string") {
+    return parseBrowserDriverActions(value).length > 0 ? value : "";
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findBrowserDriverCommand(item, depth + 1);
+      if (found) return found;
+    }
+    return "";
+  }
+  if (!isRecord(value)) return "";
+
+  const mcpCommand = chromeDevtoolsMcpToolCommand(value);
+  if (mcpCommand) return mcpCommand;
+  for (const key of ["command", "cmd", "script"]) {
+    const candidate = stringValue(value[key]);
+    if (candidate && parseBrowserDriverActions(candidate).length > 0) return candidate;
+  }
+  for (const key of ["arguments", "args", "input", "payload", "item", "response_item", "content", "call"]) {
+    const nested = value[key];
+    if (typeof nested === "string" && (nested.startsWith("{") || nested.startsWith("["))) {
+      try {
+        const found = findBrowserDriverCommand(JSON.parse(nested), depth + 1);
+        if (found) return found;
+      } catch {
+        // Continue with the ordinary string/object traversal.
+      }
+    }
+    const found = findBrowserDriverCommand(nested, depth + 1);
+    if (found) return found;
+  }
+  return "";
+}
+
+export function describeBrowserDriverCommand(command: string): string {
+  const agentActions = parseAgentBrowserActions(command);
+  if (agentActions.length) return describeAgentBrowserCommand(command);
+  const actions = parseBrowserDriverActions(command);
+  const action = actions[0];
+  if (!action) return "AI 正在操作浏览器";
+  const pseudo = ["agent-browser", action.verb, ...action.rest]
+    .map((token) => JSON.stringify(token))
+    .join(" ");
+  return describeAgentBrowserCommand(pseudo).replace(/^agent-browser\s+/, "");
+}
+
 export function describeAgentBrowserCommand(command: string): string {
   const actions = parseAgentBrowserActions(command);
   const action = actions[0] || fallbackAgentBrowserAction(command);
@@ -566,6 +619,37 @@ const AGENT_BROWSER_ACTION_VERBS = new Set([
 
 const AGENT_BROWSER_TARGET_VERBS = new Set(["open", "goto", "navigate"]);
 
+function chromeDevtoolsMcpToolCommand(value: Record<string, unknown>): string {
+  const name = stringValue(value.name) || "";
+  if (!/(?:chrome[-_ ]?devtools|devtools[-_ ]?chrome)/i.test(name)) return "";
+  const rawTool = name.split("__").filter(Boolean).at(-1) || name.split(/[.:/]/).filter(Boolean).at(-1) || "";
+  const verb = normalizeBrowserDriverVerb(rawTool.toLowerCase());
+  if (!AGENT_BROWSER_ACTION_VERBS.has(verb)) return "";
+  const input = parseJsonRecord(value.input) || parseJsonRecord(value.arguments) || {};
+  const argument = firstBrowserToolArgument(input, verb);
+  return ["chrome-devtools-mcp", rawTool, ...(argument ? [JSON.stringify(argument)] : [])].join(" ");
+}
+
+function firstBrowserToolArgument(value: unknown, verb: string, depth = 0): string {
+  if (depth > 4 || !isRecord(value)) return "";
+  const preferred = AGENT_BROWSER_TARGET_VERBS.has(verb)
+    ? ["url"]
+    : verb === "press"
+      ? ["key"]
+      : ["uid", "ref", "selector", "text", "url"];
+  for (const key of preferred) {
+    const candidate = stringValue(value[key]);
+    if (candidate) return candidate;
+  }
+  for (const nested of Object.values(value)) {
+    if (isRecord(nested)) {
+      const candidate = firstBrowserToolArgument(nested, verb, depth + 1);
+      if (candidate) return candidate;
+    }
+  }
+  return "";
+}
+
 function parseAgentBrowserActions(command: string): AgentBrowserAction[] {
   const actions: AgentBrowserAction[] = [];
   for (const segment of shellCommandSegments(command)) {
@@ -575,6 +659,65 @@ function parseAgentBrowserActions(command: string): AgentBrowserAction[] {
     }
   }
   return actions;
+}
+
+function parseBrowserDriverActions(command: string): AgentBrowserAction[] {
+  const actions: AgentBrowserAction[] = [];
+  for (const segment of shellCommandSegments(command)) {
+    const action = parseAgentBrowserActionSegment(segment) ||
+      parsePlaywrightCliActionSegment(segment) ||
+      parseChromeDevtoolsMcpActionSegment(segment);
+    if (action) actions.push(action);
+  }
+  return actions;
+}
+
+function parsePlaywrightCliActionSegment(segment: string): AgentBrowserAction | null {
+  const tokens = shellWords(segment.trim());
+  if (!tokens.length || path.basename(tokens[0]) !== "playwright-cli") return null;
+  const args = stripPlaywrightCliOptions(tokens.slice(1));
+  const rawVerb = (args[0] || "").toLowerCase();
+  const verb = normalizeBrowserDriverVerb(rawVerb);
+  if (!AGENT_BROWSER_ACTION_VERBS.has(verb)) return null;
+  return { segment, verb, rest: args.slice(1).filter((arg) => !arg.startsWith("-")) };
+}
+
+function parseChromeDevtoolsMcpActionSegment(segment: string): AgentBrowserAction | null {
+  const tokens = shellWords(segment.trim());
+  if (!tokens.length || path.basename(tokens[0]) !== "chrome-devtools-mcp") return null;
+  const rawVerb = (tokens[1] || "").toLowerCase();
+  const verb = normalizeBrowserDriverVerb(rawVerb);
+  if (!AGENT_BROWSER_ACTION_VERBS.has(verb)) return null;
+  return { segment, verb, rest: tokens.slice(2).filter((arg) => !arg.startsWith("-")) };
+}
+
+function normalizeBrowserDriverVerb(verb: string): string {
+  const aliases: Record<string, string> = {
+    "go-back": "back",
+    "go-forward": "forward",
+    "tab-new": "open",
+    "new-page": "open",
+    "new_page": "open",
+    "navigate-page": "goto",
+    "navigate_page": "goto",
+    "take-screenshot": "screenshot",
+    "take_screenshot": "screenshot",
+    "take-snapshot": "snapshot",
+    "take_snapshot": "snapshot",
+    "evaluate-script": "eval",
+    "evaluate_script": "eval",
+    "press-key": "press",
+    "press_key": "press",
+    "fill-form": "fill",
+    "fill_form": "fill",
+    "type-text": "type",
+    "type_text": "type",
+    "wait-for": "wait",
+    "wait_for": "wait",
+    "close-page": "close",
+    "close_page": "close"
+  };
+  return aliases[verb] || verb;
 }
 
 function parseAgentBrowserActionSegment(segment: string): AgentBrowserAction | null {
@@ -615,6 +758,17 @@ function agentBrowserTargetUrl(command: string): { hasTargetCommand: boolean; ta
     if (!AGENT_BROWSER_TARGET_VERBS.has(action.verb)) {
       continue;
     }
+    hasTargetCommand = true;
+    targetUrl = targetUrlFromArgs(action.rest);
+  }
+  return { hasTargetCommand, targetUrl };
+}
+
+function browserDriverTargetUrl(command: string): { hasTargetCommand: boolean; targetUrl?: string } {
+  let hasTargetCommand = false;
+  let targetUrl: string | undefined;
+  for (const action of parseBrowserDriverActions(command)) {
+    if (!AGENT_BROWSER_TARGET_VERBS.has(action.verb)) continue;
     hasTargetCommand = true;
     targetUrl = targetUrlFromArgs(action.rest);
   }
@@ -706,6 +860,31 @@ function stripAgentBrowserOptions(args: string[]): string[] {
     if (arg.startsWith("-")) {
       continue;
     }
+    result.push(arg);
+  }
+  return result;
+}
+
+function stripPlaywrightCliOptions(args: string[]): string[] {
+  const valueOptions = new Set([
+    "-s",
+    "--s",
+    "--session",
+    "--cdp",
+    "--endpoint",
+    "--browser",
+    "--profile",
+    "--config"
+  ]);
+  const result: string[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg.startsWith("-") && arg.includes("=")) continue;
+    if (valueOptions.has(arg)) {
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith("-")) continue;
     result.push(arg);
   }
   return result;

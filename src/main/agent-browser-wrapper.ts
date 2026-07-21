@@ -87,6 +87,8 @@ const OPTIONS_WITH_VALUES = new Set([
   "--viewport"
 ]);
 const SAFE_SESSION_RE = /^[A-Za-z0-9._-]+$/;
+const HANDOFF_GATEWAY_TIMEOUT_MS = 10_000;
+const HANDOFF_RECONCILE_TIMEOUT_MS = 3_000;
 
 export const PROFILEPILOT_AGENT_BROWSER_HARD_STOP_EXIT_CODE = 75;
 export const PROFILEPILOT_AGENT_BROWSER_USAGE_EXIT_CODE = 64;
@@ -840,34 +842,104 @@ async function runProfilePilotInternalCommand(
       "requested"
     );
     writeProfilePilotControlNoticeSync(session, requested, homeDir);
+    let controlResponse: GatewayControlResponse | null = null;
+    let controlError: unknown = null;
     try {
-      await controlGatewaySessionIfManaged(session, "takeover", homeDir, pendingUserAction);
-      setAgentBrowserProfileLeasesDelegatedSync(session, true, homeDir);
-      const quiesced = makeWrapperHandoffNotice(
-        context,
-        pendingUserAction,
-        requested.controlVersion + 1,
-        "quiesced"
-      );
-      writeProfilePilotControlNoticeSync(session, quiesced, homeDir);
-      process.stdout.write(`${JSON.stringify({
-        source: "ProfilePilot",
-        ok: true,
-        action: "handoff",
-        ownership: "user",
+      controlResponse = await controlGatewaySessionIfManaged(
         session,
-        profile_id: context.profileId,
-        profile_name: context.profileName,
-        pending_user_action: pendingUserAction,
-        control_version: quiesced.controlVersion,
-        message: "浏览器控制权已交给用户；Agent Session 和 Profile 租约继续保留"
-      }, null, 2)}\n`);
-      return 0;
+        "takeover",
+        homeDir,
+        pendingUserAction,
+        true
+      );
     } catch (error) {
+      controlError = error;
+    }
+
+    let gatewayProfile = gatewayResponseProfile(controlResponse);
+    if (!gatewayProfile || controlError) {
+      try {
+        gatewayProfile = await gatewaySessionProfile(session, homeDir, HANDOFF_RECONCILE_TIMEOUT_MS);
+      } catch {
+        // Ownership is unknown. Keep the requested hard-stop notice and the existing
+        // lease untouched instead of reviving Agent control after a request that may
+        // already have committed the takeover in Gateway.
+        throw controlError || gatewayWrapperError(
+          "GATEWAY_HANDOFF_STATE_UNKNOWN",
+          "无法确认 Gateway 当前控制权，已保留 handoff 停手状态"
+        );
+      }
+    }
+
+    const userOwnsGatewaySession = gatewayProfile?.sessionStatus === "active" && gatewayProfile.ownership === "user";
+    if (!userOwnsGatewaySession) {
       setAgentBrowserProfileLeasesDelegatedSync(session, false, homeDir);
       clearProfilePilotNoticesForSession(session, homeDir);
-      throw error;
+      throw controlError || gatewayWrapperError(
+        "GATEWAY_HANDOFF_NOT_COMMITTED",
+        "Gateway 未将当前 Session 的浏览器控制权交给用户"
+      );
     }
+
+    setAgentBrowserProfileLeasesDelegatedSync(session, true, homeDir);
+    const effectivePendingUserAction = normalizedHandoffReason(
+      typeof gatewayProfile?.pendingUserAction === "string" ? gatewayProfile.pendingUserAction : undefined
+    ) || pendingUserAction;
+    const quiesced = makeWrapperHandoffNotice(
+      context,
+      effectivePendingUserAction,
+      requested.controlVersion + 1,
+      "quiesced"
+    );
+    writeProfilePilotControlNoticeSync(session, quiesced, homeDir);
+
+    const handoffTransitioned = typeof controlResponse?.handoffTransitioned === "boolean"
+      ? controlResponse.handoffTransitioned
+      : null;
+    const revealedTarget = controlResponse?.revealedTarget || null;
+    const profileFocused = controlResponse?.profileFocused === true;
+    const revealAttempted = typeof controlResponse?.revealAttempted === "boolean"
+      ? controlResponse.revealAttempted
+      : Boolean(revealedTarget || profileFocused || typeof controlResponse?.revealError === "string");
+    const revealConfirmed = revealAttempted && Boolean(revealedTarget) && profileFocused;
+    const repeatedHandoff = handoffTransitioned === false;
+    const controlFailureMessage = controlError instanceof Error
+      ? controlError.message
+      : controlError
+        ? String(controlError)
+        : null;
+    const revealError = controlFailureMessage
+      ? `Gateway 接管响应失败（${controlFailureMessage}），但已重新查询并确认控制权在用户侧；无法确认标签页显示结果`
+      : typeof controlResponse?.revealError === "string"
+        ? controlResponse.revealError
+        : !repeatedHandoff && !revealConfirmed
+          ? "Gateway 未确认 Agent 标签页和目标 Profile 窗口均已显示"
+          : null;
+    const message = repeatedHandoff
+      ? "浏览器控制权此前已交给用户；本次未重复切换标签页或聚焦 Profile 窗口"
+      : revealConfirmed
+        ? "浏览器控制权已交给用户，Agent 标签页已带到台前；Agent Session 和 Profile 租约继续保留"
+        : `浏览器控制权已交给用户，但自动显示 Agent 标签页未获确认：${revealError}。请提示用户点击“显示 Agent 标签页”`;
+    process.stdout.write(`${JSON.stringify({
+      source: "ProfilePilot",
+      ok: true,
+      action: "handoff",
+      ownership: "user",
+      session,
+      profile_id: context.profileId,
+      profile_name: context.profileName,
+      pending_user_action: effectivePendingUserAction,
+      control_version: quiesced.controlVersion,
+      handoff_transitioned: handoffTransitioned,
+      reveal_attempted: revealAttempted,
+      reveal_confirmed: revealConfirmed,
+      reveal_skipped: repeatedHandoff ? "already_user_owned" : null,
+      revealed_target: revealedTarget,
+      profile_focused: profileFocused,
+      reveal_error: revealError,
+      message
+    }, null, 2)}\n`);
+    return 0;
   }
 
   if (action === "complete") {
@@ -1128,6 +1200,8 @@ export async function prepareGatewayTransport(
     sessionId,
     daemonInstanceId,
     daemonPid: readAgentBrowserDaemonPidSync(homeDir, sessionId),
+    driverKind: "agent-browser",
+    driverLabel: "agent-browser",
     agent: inferAgentFromSession(sessionId),
     project: projectFromEnv(env)
   }, { homeDir, timeoutMs: 3_000 });
@@ -1154,6 +1228,8 @@ export async function prepareGatewayTransport(
         sessionId,
         daemonInstanceId,
         daemonPid: readAgentBrowserDaemonPidSync(homeDir, sessionId),
+        driverKind: "agent-browser",
+        driverLabel: "agent-browser",
         agent: inferAgentFromSession(sessionId),
         project: projectFromEnv(env)
       }, { homeDir, timeoutMs: 3_000 });
@@ -1174,6 +1250,8 @@ export async function prepareGatewayTransport(
       sessionId,
       daemonInstanceId,
       daemonPid: readAgentBrowserDaemonPidSync(homeDir, sessionId),
+      driverKind: "agent-browser",
+      driverLabel: "agent-browser",
       agent: inferAgentFromSession(sessionId),
       project: projectFromEnv(env)
     }, { homeDir, timeoutMs: 3_000 });
@@ -1283,16 +1361,31 @@ async function controlGatewaySessionIfManaged(
   sessionId: string,
   command: "takeover" | "complete" | "return" | "stop",
   homeDir: string,
-  pendingUserAction?: string
-): Promise<boolean> {
-  if (!await isGatewaySessionManaged(sessionId, homeDir)) return false;
-  await requestBrowserGateway({
+  pendingUserAction?: string,
+  revealAgentTarget = false
+): Promise<GatewayControlResponse | null> {
+  if (!await isGatewaySessionManaged(sessionId, homeDir)) return null;
+  const response = await requestBrowserGateway({
     action: "control",
     sessionId,
     command,
-    ...(pendingUserAction ? { pendingUserAction } : {})
-  }, { homeDir, timeoutMs: 3_000 });
-  return true;
+    ...(pendingUserAction ? { pendingUserAction } : {}),
+    ...(revealAgentTarget ? { revealAgentTarget: true } : {})
+  }, { homeDir, timeoutMs: revealAgentTarget ? HANDOFF_GATEWAY_TIMEOUT_MS : 3_000 });
+  if (
+    revealAgentTarget &&
+    !("revealedTarget" in response) &&
+    !("profileFocused" in response) &&
+    !("revealError" in response)
+  ) {
+    return {
+      ...response,
+      revealedTarget: null,
+      profileFocused: false,
+      revealError: "当前 Gateway 尚未升级到支持自动显示 Agent 标签页的版本"
+    };
+  }
+  return response;
 }
 
 async function isGatewaySessionManaged(sessionId: string, homeDir: string): Promise<boolean> {
@@ -1301,11 +1394,12 @@ async function isGatewaySessionManaged(sessionId: string, homeDir: string): Prom
 
 async function gatewaySessionProfile(
   sessionId: string,
-  homeDir: string
+  homeDir: string,
+  timeoutMs = 800
 ): Promise<Record<string, unknown> | null> {
   let status: GatewayControlResponse;
   try {
-    status = await requestBrowserGateway({ action: "status" }, { homeDir, timeoutMs: 800 });
+    status = await requestBrowserGateway({ action: "status" }, { homeDir, timeoutMs });
   } catch (error) {
     if (persistedGatewayOwnsSession(homeDir, sessionId)) throw error;
     return null;
@@ -1406,6 +1500,11 @@ function gatewayProfiles(response: GatewayControlResponse): Array<Record<string,
   if (!state || typeof state !== "object") return [];
   const profiles = (state as { profiles?: unknown }).profiles;
   return Array.isArray(profiles) ? profiles.filter((profile): profile is Record<string, unknown> => Boolean(profile && typeof profile === "object")) : [];
+}
+
+function gatewayResponseProfile(response: GatewayControlResponse | null): Record<string, unknown> | null {
+  const profile = response?.profile;
+  return profile && typeof profile === "object" ? profile as Record<string, unknown> : null;
 }
 
 function persistedGatewayOwnsPort(homeDir: string, publicPort: number): boolean {
@@ -1952,7 +2051,19 @@ function errorExitCode(error: Error & { code?: string }): number {
   return error.code === "ENOENT" ? 127 : 1;
 }
 
-if (require.main === module) {
+function isAgentBrowserWrapperEntrypoint(entryPath = process.argv[1] || ""): boolean {
+  const name = path.basename(entryPath).toLowerCase();
+  return name === "agent-browser-wrapper.js" ||
+    name === "agent-browser-wrapper.cjs" ||
+    name === "profilepilot-agent-browser-wrapper.js" ||
+    name === "profilepilot-agent-browser-wrapper.cjs";
+}
+
+// This module also exposes shared Profile auto-start helpers. esbuild folds it
+// into the Playwright/MCP wrapper bundles, where `require.main === module` is
+// still true for the final bundle. Check the actual entry filename as well so
+// importing those helpers can never launch an accidental second driver.
+if (require.main === module && isAgentBrowserWrapperEntrypoint()) {
   void runAgentBrowserWrapper().then(
     (exitCode) => {
       process.exitCode = exitCode;

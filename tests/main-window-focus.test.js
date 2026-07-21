@@ -14,3 +14,14 @@ test("showMainWindow explicitly unhides and activates the macOS app", () => {
   assert.match(body, /mainWindow\?\.focus\(\)/);
   assert.ok(body.indexOf("app.show()") < body.indexOf("mainWindow?.show()"));
 });
+
+test("main window enters Mini only through explicit user actions", () => {
+  const source = readFileSync(path.join(__dirname, "../src/main/main.ts"), "utf8");
+  const rendererSource = readFileSync(path.join(__dirname, "../src/renderer/main.ts"), "utf8");
+
+  assert.doesNotMatch(source, /mainWindow\.on\("blur"/);
+  assert.doesNotMatch(source, /mainWindowBlurTimer/);
+  assert.match(source, /mainWindow\.on\("minimize"/);
+  assert.match(source, /IPC_CHANNELS\.showMiniWindow/);
+  assert.match(rendererSource, /action === "open-mini-window"/);
+});

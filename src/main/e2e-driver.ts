@@ -6,8 +6,10 @@ type E2eWindowTarget = "main" | "mini";
 
 interface E2eDriverOptions {
   socketPath: string;
+  mode: "background" | "desktop";
   getWindow: (target: E2eWindowTarget) => BrowserWindow | null;
   getWindowSnapshot: () => unknown;
+  triggerMiniHotkeyHandler: () => Promise<void>;
 }
 
 interface E2eDriverRequest {
@@ -21,10 +23,28 @@ interface E2eDriverRequest {
   modifiers?: string[];
   toX?: number;
   toY?: number;
+  expression?: string;
+  eventType?: string;
+  eventInit?: Record<string, unknown>;
+  value?: string;
+  checked?: boolean;
   baselinePngBase64?: string;
   channelTolerance?: number;
   maxDifferentPixelRatio?: number;
 }
+
+const BACKGROUND_COMMANDS = new Set([
+  "ping",
+  "windows",
+  "query",
+  "evaluate",
+  "domClick",
+  "domInput",
+  "dispatch",
+  "screenshot",
+  "compareScreenshot",
+  "quit"
+]);
 
 interface ElementSnapshot {
   count: number;
@@ -95,10 +115,19 @@ async function handleLine(socket: net.Socket, line: string, options: E2eDriverOp
 }
 
 async function executeRequest(request: E2eDriverRequest, options: E2eDriverOptions): Promise<unknown> {
+  if (options.mode === "background" && !BACKGROUND_COMMANDS.has(request.command || "")) {
+    throw new Error(
+      `Background E2E only supports DOM/read commands; ${String(request.command)} is a real desktop input command.`
+    );
+  }
+
   switch (request.command) {
     case "ping":
       return { pid: process.pid };
     case "windows":
+      return options.getWindowSnapshot();
+    case "triggerMiniHotkeyHandler":
+      await options.triggerMiniHotkeyHandler();
       return options.getWindowSnapshot();
     case "activate": {
       const windowRef = requireWindow(options, request.target);
@@ -111,6 +140,26 @@ async function executeRequest(request: E2eDriverRequest, options: E2eDriverOptio
     }
     case "query":
       return queryElement(requireWindow(options, request.target), requireSelector(request), request.index ?? 0);
+    case "evaluate":
+      return evaluateExpression(requireWindow(options, request.target), request.expression);
+    case "domClick":
+      return domClickElement(requireWindow(options, request.target), requireSelector(request), request.index ?? 0);
+    case "domInput":
+      return domInputElement(
+        requireWindow(options, request.target),
+        requireSelector(request),
+        request.index ?? 0,
+        request.value,
+        request.checked
+      );
+    case "dispatch":
+      return dispatchElementEvent(
+        requireWindow(options, request.target),
+        requireSelector(request),
+        request.index ?? 0,
+        request.eventType,
+        request.eventInit
+      );
     case "click":
       return clickElement(requireWindow(options, request.target), requireSelector(request), request.index ?? 0);
     case "fill":
@@ -162,6 +211,96 @@ function requireWindow(options: E2eDriverOptions, target: E2eWindowTarget | unde
 function requireSelector(request: E2eDriverRequest): string {
   if (!request.selector) throw new Error("selector is required");
   return request.selector;
+}
+
+function requireExpression(request: E2eDriverRequest): string {
+  if (!request.expression) throw new Error("expression is required");
+  return request.expression;
+}
+
+function requireEventType(request: E2eDriverRequest): string {
+  if (!request.eventType) throw new Error("eventType is required");
+  return request.eventType;
+}
+
+async function evaluateExpression(windowRef: BrowserWindow, expression: string | undefined): Promise<unknown> {
+  return windowRef.webContents.executeJavaScript(requireExpression({ expression }), true);
+}
+
+async function domClickElement(windowRef: BrowserWindow, selector: string, index: number): Promise<ElementSnapshot> {
+  await windowRef.webContents.executeJavaScript(
+    `(() => {
+      const element = Array.from(document.querySelectorAll(${JSON.stringify(selector)}))[${JSON.stringify(index)}];
+      if (!(element instanceof HTMLElement)) throw new Error("Element is not clickable: " + ${JSON.stringify(selector)});
+      if (element instanceof HTMLButtonElement && element.disabled) throw new Error("Element is disabled: " + ${JSON.stringify(selector)});
+      element.click();
+      return true;
+    })()`,
+    true
+  );
+  await shortDelay();
+  return queryElement(windowRef, selector, index);
+}
+
+async function domInputElement(
+  windowRef: BrowserWindow,
+  selector: string,
+  index: number,
+  value: string | undefined,
+  checked: boolean | undefined
+): Promise<ElementSnapshot> {
+  await windowRef.webContents.executeJavaScript(
+    `(() => {
+      const element = Array.from(document.querySelectorAll(${JSON.stringify(selector)}))[${JSON.stringify(index)}];
+      if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement)) {
+        throw new Error("Element is not a form control: " + ${JSON.stringify(selector)});
+      }
+      if (${JSON.stringify(value)} !== undefined && "value" in element) {
+        const prototype = element instanceof HTMLInputElement
+          ? HTMLInputElement.prototype
+          : element instanceof HTMLTextAreaElement
+            ? HTMLTextAreaElement.prototype
+            : HTMLSelectElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+        if (setter) setter.call(element, ${JSON.stringify(value)});
+        else element.value = ${JSON.stringify(value)};
+      }
+      if (${JSON.stringify(checked)} !== undefined && element instanceof HTMLInputElement) {
+        element.checked = Boolean(${JSON.stringify(checked)});
+      }
+      element.dispatchEvent(new Event("input", { bubbles: true }));
+      element.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    })()`,
+    true
+  );
+  await shortDelay();
+  return queryElement(windowRef, selector, index);
+}
+
+async function dispatchElementEvent(
+  windowRef: BrowserWindow,
+  selector: string,
+  index: number,
+  eventType: string | undefined,
+  eventInit: Record<string, unknown> | undefined
+): Promise<ElementSnapshot> {
+  const type = requireEventType({ eventType });
+  await windowRef.webContents.executeJavaScript(
+    `(() => {
+      const element = Array.from(document.querySelectorAll(${JSON.stringify(selector)}))[${JSON.stringify(index)}];
+      if (!(element instanceof Element)) throw new Error("Element is not available: " + ${JSON.stringify(selector)});
+      const init = ${JSON.stringify(eventInit || {})};
+      const event = ${JSON.stringify(type)}.startsWith("key")
+        ? new KeyboardEvent(${JSON.stringify(type)}, { bubbles: true, cancelable: true, ...init })
+        : new Event(${JSON.stringify(type)}, { bubbles: true, cancelable: true, ...init });
+      element.dispatchEvent(event);
+      return true;
+    })()`,
+    true
+  );
+  await shortDelay();
+  return queryElement(windowRef, selector, index);
 }
 
 async function queryElement(windowRef: BrowserWindow, selector: string, index: number): Promise<ElementSnapshot> {

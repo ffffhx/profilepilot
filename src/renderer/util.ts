@@ -310,11 +310,14 @@ export function cdpClientToolSummary(clients: CdpClientInfo[]): string {
 export function isAgentDrivenCdpClient(client: CdpClientInfo): boolean {
   const label = client.label.toLowerCase();
   return Boolean(
-    client.agent ||
+    client.driverKind ||
+      client.agent ||
       client.project ||
       client.session ||
       client.title ||
       label.startsWith("agent-browser") ||
+      label.startsWith("playwright") ||
+      label.includes("chrome devtools mcp") ||
       label === "codex" ||
       label === "claude code"
   );
@@ -327,12 +330,14 @@ export function agentDrivenCdpClients(clients: CdpClientInfo[]): CdpClientInfo[]
 export function gatewayControlClient(profile: PublicProfile): CdpClientInfo | null {
   const control = profile.gatewayControl;
   if (!control || control.sessionStatus !== "active" || !control.ownerSessionId) return null;
+  const label = control.driverLabel || browserDriverLabel(control.driverKind);
   return {
     pid: control.daemonPid || 0,
-    label: "agent-browser",
+    label,
+    driverKind: control.driverKind || undefined,
     agent: control.agent || undefined,
     project: control.project || undefined,
-    title: "Gateway Agent Session",
+    title: `${label} Gateway Session`,
     session: control.ownerSessionId,
     lastActive: control.updatedAt,
     note: control.ownership === "user"
@@ -341,6 +346,12 @@ export function gatewayControlClient(profile: PublicProfile): CdpClientInfo | nu
         : "Session 仍保留，浏览器控制权当前属于用户"
       : "当前 Session 由 ProfilePilot Gateway 排它管理"
   };
+}
+
+function browserDriverLabel(kind: CdpClientInfo["driverKind"] | null | undefined): string {
+  if (kind === "playwright-cli") return "Playwright CLI";
+  if (kind === "chrome-devtools-mcp") return "Chrome DevTools MCP";
+  return "agent-browser";
 }
 
 export function profileAgentControlClients(profile: PublicProfile): CdpClientInfo[] {

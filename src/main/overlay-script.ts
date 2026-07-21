@@ -27,7 +27,6 @@ export function agentOverlayBootstrapScript(): string {
   const SIGNAL_NAME = "__ppAgentOverlaySignal";
   const STORAGE_KEY = "__ppAgentOverlayPosition";
   const COLLAPSED_KEY = "__ppAgentOverlayCollapsed";
-  const EXPANDED_KEY = "__ppAgentOverlayExpanded";
   const STOP_CONFIRM_MS = 3000;
   const HOST_REATTACH_LIMIT = 8;
   const HOST_REATTACH_WINDOW_MS = 10000;
@@ -68,8 +67,13 @@ export function agentOverlayBootstrapScript(): string {
       guardUnavailable: "需要给“ProfilePilot Input Guard”开启辅助功能权限，当前尚未禁止点击",
       defaultTask: "Agent 任务",
       multiTaskTitle: (count) => count + " 个 Agent 任务正在控制",
-      detailsTitle: "查看控制详情",
-      collapseDetailsTitle: "收起控制详情",
+      detailsHeading: "运行详情",
+      currentActionLabel: "当前动作",
+      taskProgressLabel: "任务进度",
+      nextStepLabel: "下一步",
+      recentActivityLabel: "最近活动",
+      backgroundOperation: "后台操作",
+      currentOperation: "当前标签页",
       ownerAgent: "Agent",
       ownerUser: "User",
       taskSpacePrefix: "任务空间",
@@ -152,8 +156,13 @@ export function agentOverlayBootstrapScript(): string {
       guardUnavailable: "需要给“ProfilePilot Input Guard”开启辅助功能权限，当前尚未禁止点击",
       defaultTask: "Agent task",
       multiTaskTitle: (count) => count + " Agent tasks are controlling",
-      detailsTitle: "Show control details",
-      collapseDetailsTitle: "Hide control details",
+      detailsHeading: "Run details",
+      currentActionLabel: "Current action",
+      taskProgressLabel: "Task progress",
+      nextStepLabel: "Next step",
+      recentActivityLabel: "Recent activity",
+      backgroundOperation: "Background operation",
+      currentOperation: "Current tab",
       ownerAgent: "Agent",
       ownerUser: "User",
       taskSpacePrefix: "Task space",
@@ -262,7 +271,6 @@ export function agentOverlayBootstrapScript(): string {
   ]);
   const state = cloneStateDefaults();
   let collapsed = readCollapsed();
-  let expanded = readExpanded();
   let takenOverTimer = null;
   let elapsedTimer = null;
   let heartbeatTimer = null;
@@ -294,14 +302,21 @@ export function agentOverlayBootstrapScript(): string {
   let spaceChip = null;
   let controlNote = null;
   let targetFollow = null;
+  let targetEyebrow = null;
   let targetStatus = null;
+  let targetDomain = null;
   let showAgentTargetButton = null;
   let autoFollowButton = null;
+  let detailsHeading = null;
+  let currentActionLabel = null;
+  let taskProgressLabel = null;
+  let nextStepLabel = null;
+  let recentActivityLabel = null;
+  let recentActivity = null;
   let takeoverButton = null;
   let stopButton = null;
   let revealButton = null;
   let hideButton = null;
-  let detailToggleButton = null;
   let reducedMotionMediaQuery = null;
   let reducedMotionMediaListener = null;
   let themeMediaQuery = null;
@@ -453,19 +468,15 @@ export function agentOverlayBootstrapScript(): string {
       ".takeover:active:not(:disabled),.stop:active:not(:disabled){transform:translateY(1px)}",
       ".takeover:disabled,.stop:disabled{opacity:.58;cursor:default;transform:none}",
       ".hide{display:none}",
-      ".detail-toggle{display:none}",
       ":host(.delegated) .hide{display:inline-block}",
       ":host(.locked) .panel{bottom:24px;width:min(720px,calc(100vw - 32px));min-height:72px;display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:auto auto auto;align-items:center;column-gap:16px;row-gap:1px;padding:11px 12px 11px 14px;border-radius:14px;border-color:#31454f;background:#101920;box-shadow:0 6px 8px rgba(2,6,9,.34)}",
       ":host(.locked) .panel::before{display:none}",
-      ":host(.locked) .head{grid-column:1;grid-row:1;min-height:28px;padding:0;display:grid;grid-template-columns:29px minmax(0,1fr) 27px;gap:9px;align-items:center}",
+      ":host(.locked) .head{grid-column:1;grid-row:1;min-height:28px;padding:0;display:grid;grid-template-columns:29px minmax(0,1fr);gap:9px;align-items:center}",
       ":host(.locked) .pulse{position:relative;width:28px;height:28px;border-radius:99px;background:#0d151a;border:1px solid #31454f;animation:none}",
       ":host(.locked) .pulse::before{content:\"\";position:absolute;inset:6px;border:1.5px solid rgba(95,182,255,.30);border-top-color:#5fb6ff;border-radius:99px;animation:ppSpin 1.2s linear infinite}",
       ":host(.locked) .pulse::after{content:\"\";position:absolute;left:50%;top:50%;width:4px;height:4px;margin:-2px 0 0 -2px;border-radius:99px;background:#92cdff}",
       ":host(.locked) .title{font-size:14px;font-weight:720;letter-spacing:0;color:#eef5f7}",
       ":host(.locked) .reveal,:host(.locked) .hide{display:none}",
-      ":host(.locked) .detail-toggle{display:inline-grid;place-items:center;width:28px;height:28px;border-radius:7px;font-size:14px;line-height:1;background:#15202a;border:1px solid #31454f;color:#aebfc8}",
-      ":host(.locked) .detail-toggle:hover{background:#1d2a33;border-color:#3a4e59;color:#eef5f7}",
-      ":host(.locked.expanded) .detail-toggle{transform:rotate(180deg)}",
       ":host(.locked) .body{display:contents;padding:0}",
       ":host(.locked) .details{display:none}",
       ":host(.locked) .status-stack{grid-column:1;grid-row:2;display:block;min-width:0;margin-left:38px}",
@@ -483,29 +494,47 @@ export function agentOverlayBootstrapScript(): string {
       ":host(.locked) .stop:hover:not(:disabled){background:rgba(255,113,100,.15);border-color:rgba(255,113,100,.68);color:#ffd8d3}",
       ":host(.offline.locked) .panel{border-color:rgba(242,177,62,.48)}",
       ":host(.offline.locked) .status-dot{background:#f2b13e;box-shadow:none}",
-      ":host(.locked) .takeover:focus-visible,:host(.locked) .stop:focus-visible,:host(.locked) .detail-toggle:focus-visible,:host(.locked) .show-agent-target:focus-visible,:host(.locked) .auto-follow:focus-visible{outline:2px solid #38e1a0;outline-offset:2px}",
-      ":host(.locked.expanded) .panel{min-height:0;grid-template-rows:auto auto auto;border-color:#3a4e59;background:#101920;box-shadow:0 6px 8px rgba(2,6,9,.38);backdrop-filter:none}",
-      ":host(.locked.expanded) .control-note{display:block;margin-top:4px;color:#9cafba;font-size:10.5px;font-weight:600}",
-      ":host(.locked.expanded) .details{grid-column:1 / -1;grid-row:4;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px 16px;margin-top:11px;padding:13px 14px 14px;border:1px solid #25343d;border-radius:10px;background:#0d151a;box-shadow:none;color:#eef5f7}",
-      ":host(.locked.expanded) .details::before{content:\"运行详情\";grid-column:1 / -1;color:#92cdff;font-size:10.5px;font-weight:720;line-height:1;letter-spacing:0}",
-      ":host(.locked.expanded) .meta{grid-column:1;min-width:0;margin:0;color:#dbe5e9;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:11.5px;font-weight:620;line-height:1.45}",
-      ":host(.locked.expanded) .elapsed{grid-column:2;justify-self:end;margin:0;color:#9cafba;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:11px;font-weight:600;line-height:1.45;white-space:nowrap}",
-      ":host(.locked.expanded) .action,:host(.locked.expanded) .target,:host(.locked.expanded) .progress-text,:host(.locked.expanded) .progress-bar,:host(.locked.expanded) .next,:host(.locked.expanded) .sessions,:host(.locked.expanded) .recent{grid-column:1 / -1}",
-      ":host(.locked.expanded) .action{margin:0;padding:10px 11px;border:1px solid #25343d;border-radius:8px;background:#111a20;color:#eef5f7;font-size:12.5px;font-weight:620;line-height:1.45;box-shadow:none}",
-      ":host(.locked.expanded) .target,:host(.locked.expanded) .next{margin:0;color:#9cafba;font-size:11.5px;line-height:1.45}",
-      ":host(.locked.expanded) .progress-text{margin:0;color:#dbe5e9;font-size:11.5px;font-weight:650}",
-      ":host(.locked.expanded) .progress-bar{margin:-4px 0 0;background:#25343d}",
-      ":host(.locked.expanded) .sessions{margin:0;padding:9px 10px;border:1px solid #25343d;border-radius:8px;background:#111a20}",
-      ":host(.locked.expanded) .session-heading{color:#c7d5db;font-size:11px;font-weight:700}",
-      ":host(.locked.expanded) .session-row{color:#9cafba}",
-      ":host(.locked.expanded) .session-agent{color:#eef5f7}",
-      ":host(.locked.expanded) .session-name{color:#c7d5db}",
-      ":host(.locked.expanded) .session-time{color:#879aa5}",
-      ":host(.locked.expanded) .recent{margin:0;color:#9cafba}",
-      ":host(.locked.expanded) summary{color:#dbe5e9;font-size:11.5px;font-weight:680}",
-      ":host(.locked.expanded) summary:hover{color:#ffffff}",
-      ":host(.locked.expanded) .recent-text{color:#9cafba;line-height:1.5}",
-      "@media (max-width:640px){:host(.locked) .panel{grid-template-columns:minmax(0,1fr);grid-template-rows:auto auto auto auto;gap:6px;padding:11px 11px 11px 15px;width:min(420px,calc(100vw - 24px));bottom:14px}:host(.locked) .controls{grid-column:1;grid-row:3;width:100%;grid-template-columns:1fr 1fr;margin-top:2px}:host(.locked) .status-stack{grid-column:1;grid-row:2;margin-left:38px}:host(.locked) .target-follow{grid-column:1;grid-row:4;align-items:flex-start;flex-wrap:wrap}:host(.locked) .target-status{flex-basis:100%}:host(.locked) .target-actions{width:100%}:host(.locked) .show-agent-target,:host(.locked) .auto-follow{flex:1 1 auto}:host(.locked) .takeover,:host(.locked) .stop{min-height:38px}:host(.locked.expanded) .details{grid-column:1;grid-row:5;grid-template-columns:1fr}:host(.locked.expanded) .elapsed{grid-column:1;justify-self:start}}",
+      ":host(.locked) .takeover:focus-visible,:host(.locked) .stop:focus-visible,:host(.locked) .show-agent-target:focus-visible,:host(.locked) .auto-follow:focus-visible{outline:2px solid #38e1a0;outline-offset:2px}",
+      // 已确认的“任务舱”视觉：只覆盖 locked 状态，delegated / native Input Guard 协议保持不变。
+      ":host(.locked) .panel{isolation:isolate;min-height:0;grid-template-rows:auto auto auto;column-gap:16px;row-gap:0;padding:10px 14px 11px 15px;border-color:#2b4350;border-radius:15px;background:#0b151c;box-shadow:0 12px 30px rgba(1,7,11,.32),inset 0 1px 0 rgba(255,255,255,.025)}",
+      ":host(.locked) .panel:hover{border-color:#365462;box-shadow:0 14px 34px rgba(1,7,11,.38),inset 0 1px 0 rgba(255,255,255,.035)}",
+      ":host(.locked) .panel::before{content:\"\";display:block;position:absolute;z-index:0;left:28px;top:33px;bottom:18px;width:1px;background:rgba(89,177,230,.46)}",
+      ":host(.locked) .panel::after{content:\"\";position:absolute;z-index:2;left:25px;bottom:16px;width:7px;height:7px;border-radius:50%;background:#64bfff;box-shadow:0 0 0 4px rgba(100,191,255,.08),0 0 13px rgba(100,191,255,.52)}",
+      ":host(.locked) .head{grid-template-columns:28px minmax(0,1fr);gap:9px;min-height:28px}",
+      ":host(.locked) .pulse{width:28px;height:28px;border-color:#36505f;background:#0d1a22;box-shadow:inset 0 0 0 4px rgba(89,177,230,.035)}",
+      ":host(.locked) .pulse::before{inset:6px;border:1px solid rgba(100,191,255,.42);animation:none}",
+      ":host(.locked) .pulse::after{width:7px;height:7px;margin:-3.5px 0 0 -3.5px;background:#64bfff;box-shadow:0 0 0 4px rgba(100,191,255,.12),0 0 12px rgba(100,191,255,.58)}",
+      ":host(.locked) .title{font-size:14px;font-weight:760;letter-spacing:.01em;color:#f0f6f8}",
+      ":host(.locked) .status-stack{display:flex;align-items:center;gap:8px;margin:2px 0 0 37px}",
+      ":host(.locked) .status-line{flex:0 1 auto;gap:6px;color:#a7b8c1;font-size:11px;line-height:1.3}",
+      ":host(.locked) .status-dot{width:7px;height:7px;background:#5ebaff;box-shadow:0 0 9px rgba(94,186,255,.35)}",
+      ":host(.locked) .state-row{flex:1 1 auto;margin-top:0;overflow:hidden}",
+      ":host(.locked) .space-chip{display:inline-flex;width:auto;max-width:100%;height:20px;padding:0 8px;border:1px solid #2a404c;border-radius:6px;background:#0e1a22;color:#8fa5b0;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:9.5px;font-weight:620;line-height:18px;letter-spacing:.025em}",
+      ":host(.locked) .controls{grid-template-columns:96px 106px;gap:8px}",
+      ":host(.locked) .takeover,:host(.locked) .stop{position:relative;min-height:38px;border-radius:9px;font-size:12px}",
+      ":host(.locked) .takeover::after,:host(.locked) .stop::after{content:\"\";position:absolute;inset:-3px 0}",
+      ":host(.locked) .takeover{background:#35dca0;border-color:#35dca0;color:#052119;box-shadow:0 5px 14px rgba(53,220,160,.10)}",
+      ":host(.locked) .takeover:hover:not(:disabled){background:#62e8b7;border-color:#62e8b7}",
+      ":host(.locked) .stop{background:rgba(255,116,105,.045);border-color:rgba(255,116,105,.54);color:#ff9d94}",
+      ":host(.locked) .stop:hover:not(:disabled){background:rgba(255,116,105,.11);border-color:rgba(255,130,119,.76);color:#ffc2bc}",
+      ":host(.locked) .control-note{margin-top:4px;color:#8296a1}",
+      ":host(.locked) .target-follow{position:relative;display:none;grid-template-columns:36px minmax(0,1fr) auto;align-items:center;gap:10px;min-height:56px;margin:8px 0 0 37px;padding:9px 10px;border-color:#263d48;border-radius:10px;background:#0a141a}",
+      ":host(.locked) .target-follow::before{content:\"\";display:block;width:32px;height:26px;border:1.5px solid #8ca0aa;border-radius:6px;background:#0c171d;box-shadow:inset 0 7px 0 #13222b}",
+      ":host(.locked) .target-follow::after{content:\"•••\";position:absolute;left:18px;top:14px;color:#8ca0aa;font-size:8px;line-height:1;letter-spacing:1px}",
+      ":host(.locked) .target-copy{min-width:0;display:grid;gap:3px}",
+      ":host(.locked) .target-eyebrow{color:#788d98;font-size:10px;font-weight:720;line-height:1.2;letter-spacing:.08em}",
+      ":host(.locked) .target-status{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e4edf1;font-size:12.5px;font-weight:700;line-height:1.35}",
+      ":host(.locked) .target-domain{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#61b9ef;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:10.5px;font-weight:620;line-height:1.3;letter-spacing:.04em}",
+      ":host(.locked) .target-actions{gap:8px;padding-left:10px;border-left:1px solid #263c47}",
+      ":host(.locked) .show-agent-target,:host(.locked) .auto-follow{position:relative;min-height:34px;border-color:#36505e;background:#101d25;color:#d9e4e9;font-size:10.5px}",
+      ":host(.locked) .show-agent-target::after,:host(.locked) .auto-follow::after{content:\"\";position:absolute;inset:-5px 0}",
+      ":host(.locked) .show-agent-target{padding:0 10px}",
+      ":host(.locked) .show-agent-target::before{content:\"↗\";margin-right:6px;color:#9ec7dc;font-size:14px}",
+      ":host(.locked) .auto-follow{padding:0 10px 0 9px;color:#9cafb8}",
+      ":host(.locked) .auto-follow::before{width:25px;height:14px;background:#3a4a53;box-shadow:inset -11px 0 0 #aab8bf}",
+      ":host(.locked) .auto-follow[aria-checked=\"true\"]::before{background:#35dca0;box-shadow:inset 11px 0 0 #e8fff7}",
+      "@media (max-width:640px){:host(.locked) .panel{grid-template-columns:minmax(0,1fr);grid-template-rows:auto auto auto auto;gap:6px;padding:10px 11px 11px 14px;width:min(430px,calc(100vw - 24px));bottom:14px}:host(.locked) .panel::before,:host(.locked) .panel::after{display:none}:host(.locked) .controls{grid-column:1;grid-row:3;width:100%;grid-template-columns:1fr 1fr;margin-top:5px}:host(.locked) .status-stack{grid-column:1;grid-row:2;margin-left:37px}:host(.locked) .target-follow{display:none;grid-column:1;grid-row:4;grid-template-columns:36px minmax(0,1fr);margin:8px 0 0;padding:9px 10px}:host(.locked) .target-follow[style*=\"grid\"]{display:grid!important}:host(.locked) .target-actions{grid-column:1 / -1;width:100%;padding:8px 0 0;border-left:0;border-top:1px solid #263c47}:host(.locked) .show-agent-target,:host(.locked) .auto-follow{flex:1 1 auto}}",
+      "@media (max-width:420px){:host(.locked) .status-stack{align-items:flex-start;flex-direction:column;gap:4px}:host(.locked) .target-actions{flex-wrap:wrap}:host(.locked) .show-agent-target,:host(.locked) .auto-follow{flex:1 1 100%}}",
       ":host(.collapsed) .panel{display:none}",
       ":host(.locked.collapsed) .panel{display:grid}",
       ":host(.reduced-motion.locked) .pulse::before{animation:none}"
@@ -534,14 +563,21 @@ export function agentOverlayBootstrapScript(): string {
     spaceChip = root.querySelector(".space-chip");
     controlNote = root.querySelector(".control-note");
     targetFollow = root.querySelector(".target-follow");
+    targetEyebrow = root.querySelector(".target-eyebrow");
     targetStatus = root.querySelector(".target-status");
+    targetDomain = root.querySelector(".target-domain");
     showAgentTargetButton = root.querySelector(".show-agent-target");
     autoFollowButton = root.querySelector(".auto-follow");
+    detailsHeading = root.querySelector(".details-heading");
+    currentActionLabel = root.querySelector(".current-action-label");
+    taskProgressLabel = root.querySelector(".task-progress-label");
+    nextStepLabel = root.querySelector(".next-step-label");
+    recentActivityLabel = root.querySelector(".recent-activity-label");
+    recentActivity = root.querySelector(".recent-activity");
     takeoverButton = root.querySelector(".takeover");
     stopButton = root.querySelector(".stop");
     revealButton = root.querySelector(".reveal");
     hideButton = root.querySelector(".hide");
-    detailToggleButton = root.querySelector(".detail-toggle");
     cursorLayer = root.querySelector(".pp-cursor-layer");
     agentCursor = root.querySelector(".pp-agent-cursor");
     recentSummary.tabIndex = 0;
@@ -555,12 +591,11 @@ export function agentOverlayBootstrapScript(): string {
     });
     revealButton.addEventListener("click", () => signal("reveal"));
     dot.addEventListener("click", () => expand());
-    detailToggleButton.addEventListener("click", toggleDetails);
     takeoverButton.addEventListener("click", () => handleStopClick("takeover"));
     stopButton.addEventListener("click", () => handleStopClick("stop"));
     showAgentTargetButton.addEventListener("click", () => signal("show-agent-target"));
     autoFollowButton.addEventListener("click", () => signal("set-auto-follow", { enabled: !state.autoFollowAgent }));
-    for (const control of [hideButton, revealButton, dot, detailToggleButton, takeoverButton, stopButton, showAgentTargetButton, autoFollowButton]) {
+    for (const control of [hideButton, revealButton, dot, takeoverButton, stopButton, showAgentTargetButton, autoFollowButton]) {
       control.addEventListener("keydown", handleKeyboardClick);
     }
     recent.addEventListener("toggle", updateInteractiveAria);
@@ -617,14 +652,7 @@ export function agentOverlayBootstrapScript(): string {
         title: "",
         "aria-label": "",
         "aria-controls": "pp-agent-overlay-panel"
-      }, "−"),
-      overlayNode("button", "icon-btn detail-toggle", {
-        type: "button",
-        title: "",
-        "aria-label": "",
-        "aria-controls": "pp-agent-overlay-details",
-        "aria-expanded": "false"
-      }, "⌄")
+      }, "−")
     );
 
     const bodyNode = overlayNode("div", "body");
@@ -646,7 +674,13 @@ export function agentOverlayBootstrapScript(): string {
       overlayNode("button", "show-agent-target", { type: "button" }),
       overlayNode("button", "auto-follow", { type: "button", role: "switch", "aria-checked": "false" })
     );
-    targetFollowNode.append(overlayNode("span", "target-status"), targetActionsNode);
+    const targetCopyNode = overlayNode("div", "target-copy");
+    targetCopyNode.append(
+      overlayNode("div", "target-eyebrow"),
+      overlayNode("div", "target-status"),
+      overlayNode("div", "target-domain")
+    );
+    targetFollowNode.append(targetCopyNode, targetActionsNode);
 
     const detailsNode = overlayNode("div", "details", { id: "pp-agent-overlay-details" });
     const progressBarNode = overlayNode("div", "progress-bar", {
@@ -669,16 +703,37 @@ export function agentOverlayBootstrapScript(): string {
       }),
       overlayNode("span", "recent-text", { id: "pp-agent-overlay-recent-text" })
     );
+    const actionCellNode = overlayNode("div", "detail-cell detail-action");
+    actionCellNode.append(
+      overlayNode("div", "detail-label current-action-label"),
+      overlayNode("div", "action"),
+      overlayNode("div", "target")
+    );
+    const progressCellNode = overlayNode("div", "detail-cell detail-progress");
+    progressCellNode.append(
+      overlayNode("div", "detail-label task-progress-label"),
+      overlayNode("div", "progress-text", { id: "pp-agent-overlay-progress-text" }),
+      progressBarNode
+    );
+    const nextCellNode = overlayNode("div", "detail-cell detail-next");
+    nextCellNode.append(
+      overlayNode("div", "detail-label next-step-label"),
+      overlayNode("div", "next")
+    );
+    const recentCellNode = overlayNode("div", "detail-cell detail-recent");
+    recentCellNode.append(
+      overlayNode("div", "detail-label recent-activity-label"),
+      overlayNode("div", "recent-activity"),
+      recentNode
+    );
+    const detailGridNode = overlayNode("div", "detail-grid");
+    detailGridNode.append(actionCellNode, progressCellNode, nextCellNode, recentCellNode);
     detailsNode.append(
+      overlayNode("div", "details-heading"),
+      detailGridNode,
       overlayNode("div", "meta"),
       overlayNode("div", "elapsed"),
-      overlayNode("div", "action"),
-      overlayNode("div", "target"),
-      overlayNode("div", "progress-text", { id: "pp-agent-overlay-progress-text" }),
-      progressBarNode,
-      overlayNode("div", "next"),
-      sessionsNode,
-      recentNode
+      sessionsNode
     );
 
     const controlsNode = overlayNode("div", "controls");
@@ -1043,20 +1098,19 @@ export function agentOverlayBootstrapScript(): string {
     host.classList.add("locked");
     host.classList.toggle("delegated", taken);
     host.classList.toggle("offline", offline);
-    host.classList.toggle("expanded", expanded);
     panel.classList.toggle("taken", taken);
     title.textContent = offline ? copy.offlineTitle : taken ? copy.takenTitle : pending ? copy.handoffTitle : copy.lockedTitle;
     const metaText = primarySessionIdentity(sessions, copy, false);
     meta.textContent = metaText;
     meta.title = metaText;
     meta.style.display = metaText ? "block" : "none";
-    action.textContent = copy.actionPrefix + (offline ? copy.offlineAction : taken ? copy.takenAction : pending ? copy.handoffAction : state.stopError || currentActionText(copy));
+    action.textContent = offline ? copy.offlineAction : taken ? copy.takenAction : pending ? copy.handoffAction : state.stopError || currentActionText(copy);
     target.textContent = state.targetUrl ? copy.targetPrefix + state.targetUrl : "";
     target.style.display = state.targetUrl ? "block" : "none";
 
     renderProgress();
-    next.textContent = state.nextStep ? copy.nextPrefix + state.nextStep : "";
-    next.style.display = state.nextStep ? "block" : "none";
+    next.textContent = state.nextStep || "—";
+    next.style.display = "block";
     renderSessionList();
     recent.style.display = state.lastMessage ? "block" : "none";
     recentText.textContent = state.lastMessage || "";
@@ -1077,12 +1131,15 @@ export function agentOverlayBootstrapScript(): string {
     const hasTarget = Boolean(state.agentTargetId);
     const background = hasTarget && !state.agentTargetIsCurrentPage;
     const label = friendlyAgentTargetName() || state.agentTargetDomain || state.agentTargetUrl || copy.defaultTask;
-    targetFollow.style.display = hasTarget && !taken ? "flex" : "none";
+    targetFollow.style.display = hasTarget && !taken ? "grid" : "none";
     if (!hasTarget || taken) {
       return;
     }
-    targetStatus.textContent = background ? copy.backgroundTarget(label) : copy.currentTarget(label);
+    targetEyebrow.textContent = background ? copy.backgroundOperation : copy.currentOperation;
+    targetStatus.textContent = String(state.agentTargetTitle || "").trim() || label;
     targetStatus.title = [state.agentTargetTitle, state.agentTargetDomain, state.agentTargetUrl].filter(Boolean).join(" · ");
+    targetDomain.textContent = state.agentTargetDomain || domainFromUrl(state.agentTargetUrl);
+    targetDomain.title = state.agentTargetUrl || targetDomain.textContent;
     if (background && !pending) {
       lockHint.textContent = copy.backgroundTarget(label);
     }
@@ -1108,6 +1165,14 @@ export function agentOverlayBootstrapScript(): string {
     return parts[parts.length - 1] || title;
   }
 
+  function domainFromUrl(value) {
+    try {
+      return new URL(String(value || "")).hostname;
+    } catch {
+      return "";
+    }
+  }
+
   function applyStaticText(copy) {
     revealButton.title = copy.revealTitle;
     revealButton.setAttribute("aria-label", copy.revealTitle);
@@ -1115,9 +1180,11 @@ export function agentOverlayBootstrapScript(): string {
     hideButton.setAttribute("aria-label", copy.hideTitle);
     dot.title = copy.expandTitle;
     dot.setAttribute("aria-label", copy.expandTitle);
-    const detailsTitle = expanded ? copy.collapseDetailsTitle : copy.detailsTitle;
-    detailToggleButton.title = detailsTitle;
-    detailToggleButton.setAttribute("aria-label", detailsTitle);
+    detailsHeading.textContent = copy.detailsHeading;
+    currentActionLabel.textContent = copy.currentActionLabel;
+    taskProgressLabel.textContent = copy.taskProgressLabel;
+    nextStepLabel.textContent = copy.nextStepLabel;
+    recentActivityLabel.textContent = copy.recentActivityLabel;
     sessionHeading.textContent = copy.sessionHeading;
     recentSummary.textContent = copy.recentSummary;
   }
@@ -1131,9 +1198,6 @@ export function agentOverlayBootstrapScript(): string {
     }
     if (recentSummary && recent) {
       recentSummary.setAttribute("aria-expanded", recent.open ? "true" : "false");
-    }
-    if (detailToggleButton) {
-      detailToggleButton.setAttribute("aria-expanded", expanded ? "true" : "false");
     }
   }
 
@@ -1182,7 +1246,10 @@ export function agentOverlayBootstrapScript(): string {
   }
 
   function compactTaskSpaceText(sessions, copy) {
-    const label = primarySessionIdentity(sessions, copy, true);
+    const session = sessions[0] || {};
+    const project = state.project || session.project || state.sessionTitle || session.sessionTitle || state.agent || session.agent || copy.defaultTask;
+    const sessionId = state.session || session.session;
+    const label = sessionId ? project + " · " + copy.sessionPrefix + " " + compactSessionId(sessionId) : project;
     const remaining = Math.max(0, sessions.length - 1);
     return label + (remaining ? " · +" + remaining : "");
   }
@@ -1247,12 +1314,11 @@ export function agentOverlayBootstrapScript(): string {
     const total = finiteNumber(state.todoTotal);
     const done = finiteNumber(state.todoDone);
     const hasTodo = done !== null && total !== null && total > 0;
-    if (state.currentStep) {
-      const index = hasTodo ? Math.min(done + 1, total) + "/" + total : "";
-      progressText.textContent = (index ? copy.stepLabel(index) : "") + state.currentStep;
-      progressText.style.display = "block";
-    } else if (hasTodo) {
+    if (hasTodo) {
       progressText.textContent = copy.progressDone(Math.max(0, done), total);
+      progressText.style.display = "block";
+    } else if (state.currentStep) {
+      progressText.textContent = state.currentStep;
       progressText.style.display = "block";
     } else {
       progressText.style.display = "none";
@@ -1277,8 +1343,8 @@ export function agentOverlayBootstrapScript(): string {
       return;
     }
     const sessions = normalizedSessions();
-    sessionsBlock.style.display = sessions.length >= 2 ? "block" : "none";
-    if (sessions.length < 2) {
+    sessionsBlock.style.display = sessions.length >= 1 ? "block" : "none";
+    if (sessions.length < 1) {
       sessionList.textContent = "";
       return;
     }
@@ -1314,10 +1380,14 @@ export function agentOverlayBootstrapScript(): string {
     if (!Number.isFinite(startedTs)) {
       elapsed.textContent = "";
       elapsed.style.display = "none";
-      return;
+    } else {
+      elapsed.textContent = (taken ? text().takenElapsedPrefix : text().elapsedPrefix) + formatDuration(Date.now() - startedTs);
+      elapsed.style.display = "block";
     }
-    elapsed.textContent = (taken ? text().takenElapsedPrefix : text().elapsedPrefix) + formatDuration(Date.now() - startedTs);
-    elapsed.style.display = "block";
+    if (recentActivity) {
+      const updatedTs = Date.parse(state.updatedAt || normalizedSessions()[0]?.lastActive || "");
+      recentActivity.textContent = Number.isFinite(updatedTs) ? text().relativeTime(updatedTs) : text().unknownActivity;
+    }
   }
 
   function handleStopClick(kind) {
@@ -1345,7 +1415,6 @@ export function agentOverlayBootstrapScript(): string {
       stopConfirmTimer = setTimeout(resetStopConfirm, STOP_CONFIRM_MS);
       return;
     }
-    resetStopConfirm();
     try {
       // Suppress leaked/late future-document bootstraps until a later real Agent Session
       // explicitly clears this tab-scoped marker before installing its own bootstrap.
@@ -1643,12 +1712,6 @@ export function agentOverlayBootstrapScript(): string {
     render();
   }
 
-  function toggleDetails() {
-    expanded = !expanded;
-    persistExpanded();
-    render();
-  }
-
   function startDrag(event) {
     if (event.button !== 0) {
       return;
@@ -1698,22 +1761,6 @@ export function agentOverlayBootstrapScript(): string {
   function readCollapsed() {
     try {
       return sessionStorage.getItem(COLLAPSED_KEY) === "1";
-    } catch {
-      return false;
-    }
-  }
-
-  function persistExpanded() {
-    try {
-      sessionStorage.setItem(EXPANDED_KEY, expanded ? "1" : "0");
-    } catch {
-      // sessionStorage may be disabled.
-    }
-  }
-
-  function readExpanded() {
-    try {
-      return sessionStorage.getItem(EXPANDED_KEY) === "1";
     } catch {
       return false;
     }
@@ -1985,6 +2032,8 @@ export function agentOverlayBootstrapScript(): string {
     clearInterval(elapsedTimer);
     clearInterval(heartbeatTimer);
     clearTimeout(cursorHideTimer);
+    clearTimeout(stopConfirmTimer);
+    stopConfirmTimer = null;
     if (agentPointerListener) {
       window.removeEventListener("pointerdown", agentPointerListener, true);
       agentPointerListener = null;
@@ -1992,7 +2041,6 @@ export function agentOverlayBootstrapScript(): string {
     cleanupHostReconnectTracking();
     cleanupReducedMotionTracking();
     cleanupThemeTracking();
-    resetStopConfirm();
     // 必须在 Runtime.evaluate 返回前同步移除节点。若等待离场动画，紧接着发生的
     // Target.detachFromTarget 会销毁 isolated world，180ms cleanup 将永远没有机会执行。
     try {

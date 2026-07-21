@@ -10,7 +10,7 @@ const baselinePath = path.join(baselineDir, `main-empty-${process.platform}.png`
 const update = process.env.UPDATE_VISUAL_BASELINES === "1";
 
 async function main() {
-  const app = await launchProfilePilotE2e();
+  const app = await launchProfilePilotE2e({ mode: "background", name: "e2e-visual-regression" });
   try {
     await delay(1_000);
     const current = await app.driver.screenshot("main");

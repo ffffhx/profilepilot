@@ -1,9 +1,7 @@
 import { profileApi } from "./api";
 import { render } from "./render/render-root";
 import { store } from "./state";
-import { AgentTakeoverEvent, AppState, PublicProfile } from "./types";
-
-const TAKEOVER_HISTORY_LIMIT = 50;
+import { AppState, PublicProfile } from "./types";
 
 export async function loadState(): Promise<void> {
   applyState(await profileApi().getState());
@@ -23,25 +21,6 @@ export function applyState(state: AppState): void {
   normalizeMigrationProfileSelection(profiles);
   normalizeAccountSyncProfileSelection(profiles);
   render();
-}
-
-export async function loadTakeoverHistory(): Promise<void> {
-  mergeAgentTakeoverHistory(await profileApi().getTakeoverHistory());
-  render();
-}
-
-export function mergeAgentTakeoverHistory(events: AgentTakeoverEvent[]): void {
-  const byKey = new Map<string, AgentTakeoverEvent>();
-  for (const event of [...events, ...store.agentTakeoverHistory]) {
-    byKey.set(agentTakeoverKey(event), event);
-  }
-  store.agentTakeoverHistory = [...byKey.values()]
-    .sort((a, b) => b.at.localeCompare(a.at))
-    .slice(0, TAKEOVER_HISTORY_LIMIT);
-}
-
-function agentTakeoverKey(event: AgentTakeoverEvent): string {
-  return [event.profileId, event.profileName, event.session || "", event.sessionTitle || "", event.agent || "", event.at].join("\u0000");
 }
 
 export async function refreshGlobalInstructions(): Promise<void> {

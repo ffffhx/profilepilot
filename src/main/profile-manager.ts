@@ -15,6 +15,7 @@ import type {
   AgentOverlayRevealEvent,
   AccountSyncSkippedItem,
   AppState,
+  BrowserDriverKind,
   CdpClientInfo,
   CdpPortSuggestion,
   ClonedProfileInfo,
@@ -97,6 +98,20 @@ const AGENT_BROWSER_STALE_DISCONNECT_MS = 2 * 60_000;
 const AGENT_CONTROL_WAITER_OFFLINE_GRACE_MS = 30_000;
 // 全局快捷键直启的槽位数：⌘⌥1 ~ ⌘⌥9。
 const QUICK_LAUNCH_SLOT_COUNT = 9;
+
+function assertDisposableE2eProfile(profileId: string): void {
+  if (process.env.CPM_E2E_DISPOSABLE_PROFILES !== "1") {
+    return;
+  }
+
+  const ref = parseProfileId(profileId);
+  if (ref.source === "native") {
+    throw new ProfileManagerError(
+      "E2E 已启用临时 Profile 保护，禁止启动、聚焦、关闭或删除系统 Chrome Profile。",
+      "E2E_NATIVE_PROFILE_BLOCKED"
+    );
+  }
+}
 
 interface ProfileManagerEvents {
   onAgentTakeover?: (event: AgentTakeoverEvent) => void;
@@ -484,6 +499,7 @@ export class ProfileManager {
   }
 
   async launchProfile(profileId: string): Promise<void> {
+    assertDisposableE2eProfile(profileId);
     this.acquireLaunchLock(profileId);
     try {
       await this.recoverAccountSyncArtifactsBeforeLaunch(profileId);
@@ -533,6 +549,7 @@ export class ProfileManager {
   }
 
   async connectRunningSystemChrome(profileId: string): Promise<void> {
+    assertDisposableE2eProfile(profileId);
     const ref = parseProfileId(profileId);
     if (ref.source !== "native") {
       throw new ProfileManagerError("连接已运行系统 Chrome 只支持系统 Profile。", "NATIVE_PROFILE_REQUIRED");
@@ -659,6 +676,7 @@ export class ProfileManager {
   }
 
   async closeProfile(profileId: string): Promise<void> {
+    assertDisposableE2eProfile(profileId);
     const profile = await this.getPublicProfile(profileId);
     if (!profile.running || !profile.pids.length) {
       throw new ProfileManagerError("这个 Profile 当前未运行。", "PROFILE_NOT_RUNNING");
@@ -871,7 +889,7 @@ export class ProfileManager {
     const requestedPids = normalizePidFilter(filter.pids);
     const clients = uniqueCdpClientsByPid(
       target.clients
-        .filter((client) => client.label.toLowerCase().startsWith("agent-browser"))
+        .filter(isManagedBrowserDriverClient)
         .filter((client) => Boolean(requestedSession) && client.session === requestedSession)
         .filter((client) => !requestedPids || requestedPids.has(client.pid))
     );
@@ -895,7 +913,11 @@ export class ProfileManager {
         }
         // 任务完成是终态。Gateway 已先撤销连接；随后结束 daemon、释放租约并清除
         // 活动/等待/控制文件，避免“CDP 已关闭但 Profile 仍被旧 Session 占用”。
-        await this.retireCompletedAgentBrowserClient(client);
+        if (!client.driverKind || client.driverKind === "agent-browser") {
+          await this.retireCompletedAgentBrowserClient(client);
+        } else {
+          await this.retireCompletedGatewayDriverClient(client);
+        }
         successCount += 1;
       } catch (error) {
         failures.push({
@@ -940,6 +962,50 @@ export class ProfileManager {
     }
   }
 
+  private async retireCompletedGatewayDriverClient(client: CdpClientInfo): Promise<void> {
+    let terminationError: unknown;
+    try {
+      await this.terminateCdpClient(client.pid);
+    } catch (error) {
+      terminationError = error;
+    }
+    const session = safeAgentBrowserSessionName(client.session);
+    if (session) {
+      clearBrowserGatewayDaemonIdentity(session, os.homedir());
+      clearAgentBrowserControlWaitStateSync(session, undefined, os.homedir());
+      clearAgentBrowserCommandStateSync(session, undefined, os.homedir());
+      if (client.driverKind === "playwright-cli") {
+        await this.removePlaywrightCliStatesForGatewaySession(session).catch(() => undefined);
+      }
+    }
+    await Promise.all(
+      agentControlNoticePaths(os.homedir(), client.session, client.pid).map((filePath) =>
+        fs.rm(filePath, { force: true }).catch(() => undefined)
+      )
+    );
+    if (terminationError) throw terminationError;
+  }
+
+  private async removePlaywrightCliStatesForGatewaySession(session: string): Promise<void> {
+    const root = path.join(os.homedir(), ".profilepilot", "playwright-cli");
+    const workspaces = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
+    await Promise.all(workspaces.filter((entry) => entry.isDirectory()).map(async (workspace) => {
+      const workspacePath = path.join(root, workspace.name);
+      const entries = await fs.readdir(workspacePath, { withFileTypes: true }).catch(() => []);
+      await Promise.all(entries.filter((entry) => entry.isFile() && entry.name.endsWith(".json")).map(async (entry) => {
+        const statePath = path.join(workspacePath, entry.name);
+        try {
+          const state = JSON.parse(await fs.readFile(statePath, "utf8")) as { gatewaySessionId?: unknown };
+          if (state.gatewaySessionId !== session) return;
+          await fs.rm(statePath, { force: true });
+          await fs.rm(`${statePath}.reconnect.lock`, { recursive: true, force: true }).catch(() => undefined);
+        } catch {
+          // Ignore unrelated/corrupt state files; only a verified Session match is removed.
+        }
+      }));
+    }));
+  }
+
   async takeoverAgentConnections(
     profileId: string,
     filter?: string | TakeoverAgentConnectionsOptions
@@ -979,7 +1045,17 @@ export class ProfileManager {
         }
         if (shouldTerminateAgentControlReason(reason)) {
           await this.terminateCdpClient(client.pid);
-          await this.removeAgentBrowserSessionFiles(client).catch(() => undefined);
+          if (client.driverKind && client.driverKind !== "agent-browser") {
+            const session = safeAgentBrowserSessionName(client.session);
+            if (session) {
+              clearBrowserGatewayDaemonIdentity(session, os.homedir());
+              if (client.driverKind === "playwright-cli") {
+                await this.removePlaywrightCliStatesForGatewaySession(session).catch(() => undefined);
+              }
+            }
+          } else {
+            await this.removeAgentBrowserSessionFiles(client).catch(() => undefined);
+          }
         } else if (cooperativeTakeover) {
           const settled = client.session
             ? await this.waitForAgentBrowserCommandSettled(client.session)
@@ -1326,6 +1402,7 @@ export class ProfileManager {
   }
 
   async focusProfile(profileId: string): Promise<void> {
+    assertDisposableE2eProfile(profileId);
     const profile = await this.getPublicProfile(profileId);
     if (!profile.running || !profile.pids.length) {
       throw new ProfileManagerError("这个 Profile 当前未运行。", "PROFILE_NOT_RUNNING");
@@ -1533,6 +1610,7 @@ export class ProfileManager {
   }
 
   async deleteProfile(profileId: string, options: DeleteProfileOptions = {}): Promise<DeleteProfileResult> {
+    assertDisposableE2eProfile(profileId);
     if (this.inFlightDeletions.has(profileId)) {
       throw new ProfileManagerError("这个 Profile 正在删除中，请稍候。", "PROFILE_DELETE_IN_FLIGHT");
     }
@@ -3552,13 +3630,26 @@ function normalizeAgentControlNoticeReason(reason: AgentControlNoticeReason | un
 function isAgentDrivenCdpClient(client: CdpClientInfo): boolean {
   const label = client.label.toLowerCase();
   return Boolean(
-    client.agent ||
+    client.driverKind ||
+      client.agent ||
       client.project ||
       client.session ||
       client.title ||
       label.startsWith("agent-browser") ||
+      label.startsWith("playwright") ||
+      label.includes("chrome devtools mcp") ||
       label === "codex" ||
       label === "claude code"
+  );
+}
+
+function isManagedBrowserDriverClient(client: CdpClientInfo): boolean {
+  const label = client.label.toLowerCase();
+  return Boolean(
+    client.driverKind ||
+      label.startsWith("agent-browser") ||
+      label.startsWith("playwright") ||
+      label.includes("chrome devtools mcp")
   );
 }
 
@@ -3938,6 +4029,8 @@ function gatewayControlsByPort(response: GatewayControlResponse | null): Map<num
       ownerSessionId,
       daemonInstanceId: stringField(profile.daemonInstanceId) || null,
       daemonPid: positiveInteger(profile.daemonPid),
+      driverKind: gatewayDriverKind(profile.driverKind),
+      driverLabel: stringField(profile.driverLabel) || null,
       agent: stringField(profile.agent) || null,
       project: stringField(profile.project) || null,
       agentTarget: gatewayAgentTarget(profile.agentTarget),
@@ -3958,6 +4051,12 @@ function gatewayAgentTarget(value: unknown): GatewayProfileControlState["agentTa
     title: stringField(target.title) || "",
     url: stringField(target.url) || ""
   };
+}
+
+function gatewayDriverKind(value: unknown): BrowserDriverKind | null {
+  return value === "agent-browser" || value === "playwright-cli" || value === "chrome-devtools-mcp"
+    ? value
+    : null;
 }
 
 export function pendingUserActionFromControlNoticeSync(
@@ -3994,12 +4093,14 @@ function positiveInteger(value: unknown): number | null {
 
 function gatewayControlClient(control: GatewayProfileControlState): CdpClientInfo | null {
   if (control.sessionStatus !== "active" || !control.ownerSessionId || !control.daemonPid) return null;
+  const label = control.driverLabel || browserDriverLabel(control.driverKind);
   return {
     pid: control.daemonPid,
-    label: "agent-browser",
+    label,
+    driverKind: control.driverKind || undefined,
     agent: control.agent || undefined,
     project: control.project || undefined,
-    title: "Gateway Agent Session",
+    title: `${label} Gateway Session`,
     session: control.ownerSessionId,
     lastActive: control.updatedAt,
     note: control.ownership === "user"
@@ -4008,6 +4109,12 @@ function gatewayControlClient(control: GatewayProfileControlState): CdpClientInf
         : "ProfilePilot Gateway：Session 仍保留，但浏览器控制权当前属于用户"
       : "ProfilePilot Gateway：当前 Session 是此 Profile 的唯一 Agent 控制者"
   };
+}
+
+function browserDriverLabel(kind: BrowserDriverKind | null | undefined): string {
+  if (kind === "playwright-cli") return "Playwright CLI";
+  if (kind === "chrome-devtools-mcp") return "Chrome DevTools MCP";
+  return "agent-browser";
 }
 
 function gatewayConnectedClients(control: GatewayProfileControlState): CdpClientInfo[] {

@@ -66,21 +66,25 @@ export function launchDetached(command: string, args: string[]): void {
   child.unref();
 }
 
-export async function focusProfileWindow(pids: number[]): Promise<boolean> {
+export async function focusProfileWindow(pids: number[], signal?: AbortSignal): Promise<boolean> {
   if (process.platform !== "darwin") {
     throw new ProfileManagerError("当前只支持在 macOS 上把 Profile 窗口显示到最前面。", "FOCUS_UNSUPPORTED");
   }
 
+  signal?.throwIfAborted();
   let lastError: unknown = null;
   let activatedAnyProcess = false;
   for (const pid of pids) {
     try {
-      const raisedWindow = await focusMacProcess(pid);
+      const raisedWindow = await focusMacProcess(pid, signal);
       activatedAnyProcess = true;
       if (raisedWindow) {
         return true;
       }
     } catch (error) {
+      if (signal?.aborted) {
+        throw signal.reason || error;
+      }
       lastError = error;
     }
   }
@@ -96,9 +100,10 @@ export async function focusProfileWindow(pids: number[]): Promise<boolean> {
   );
 }
 
-export async function focusMacProcess(pid: number): Promise<boolean> {
-  await activateMacProcess(pid);
-  if (await isFrontmostMacProcess(pid)) {
+export async function focusMacProcess(pid: number, signal?: AbortSignal): Promise<boolean> {
+  signal?.throwIfAborted();
+  await activateMacProcess(pid, signal);
+  if (await isFrontmostMacProcess(pid, signal)) {
     return true;
   }
 
@@ -127,24 +132,28 @@ tell application "System Events"
 `;
 
   try {
-    const { stdout } = await execFileAsync("osascript", ["-e", script]);
+    const { stdout } = await execFileAsync("osascript", ["-e", script], { signal });
     const raisedWindow = stdout.trim().toLowerCase() === "true";
-    return raisedWindow || (await isFrontmostMacProcess(pid));
-  } catch {
+    return raisedWindow || (await isFrontmostMacProcess(pid, signal));
+  } catch (error) {
+    if (signal?.aborted) {
+      throw signal.reason || error;
+    }
     // 窗口级 AXRaise 可能因多 profile 实例或缺少辅助功能权限失败。
     // 只有能确认目标 PID 已成为前台进程时才算成功，避免把其它 Profile 当成已显示。
-    return isFrontmostMacProcess(pid);
+    return isFrontmostMacProcess(pid, signal);
   }
 }
 
-export async function isFrontmostMacProcess(pid: number): Promise<boolean> {
-  return isAnyMacProcessFrontmost([pid]);
+export async function isFrontmostMacProcess(pid: number, signal?: AbortSignal): Promise<boolean> {
+  return isAnyMacProcessFrontmost([pid], signal);
 }
 
-export async function isAnyMacProcessFrontmost(pids: number[]): Promise<boolean> {
+export async function isAnyMacProcessFrontmost(pids: number[], signal?: AbortSignal): Promise<boolean> {
   if (process.platform !== "darwin") {
     return false;
   }
+  signal?.throwIfAborted();
   const normalizedPids = uniqueNumbers(pids.filter((pid) => Number.isInteger(pid) && pid > 0));
   if (!normalizedPids.length) {
     return false;
@@ -161,9 +170,12 @@ if (!front) {
 `;
 
   try {
-    const { stdout } = await execFileAsync("osascript", ["-l", "JavaScript", "-e", script]);
+    const { stdout } = await execFileAsync("osascript", ["-l", "JavaScript", "-e", script], { signal });
     return stdout.trim().toLowerCase() === "true";
-  } catch {
+  } catch (error) {
+    if (signal?.aborted) {
+      throw signal.reason || error;
+    }
     return false;
   }
 }
@@ -214,7 +226,8 @@ export function getDirectChromeCommand(env: NodeJS.ProcessEnv = process.env): st
   return existsSync(command) ? command : null;
 }
 
-export async function activateMacProcess(pid: number): Promise<void> {
+export async function activateMacProcess(pid: number, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted();
   const script = `
 ObjC.import("AppKit");
 const app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(${pid});
@@ -229,7 +242,7 @@ if (!activated) {
 }
 `;
 
-  await execFileAsync("osascript", ["-l", "JavaScript", "-e", script]);
+  await execFileAsync("osascript", ["-l", "JavaScript", "-e", script], { signal });
 }
 
 export async function readIsolatedProfileUserName(profileRootPath: string): Promise<string | null> {

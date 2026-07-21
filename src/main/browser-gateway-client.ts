@@ -5,9 +5,10 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import type { GatewayControlEvent } from "./browser-gateway-control";
+import type { GatewayDriverKind } from "./browser-gateway-control";
 
 const DEFAULT_TIMEOUT_MS = 3_000;
-export const BROWSER_GATEWAY_PROTOCOL_VERSION = 5;
+export const BROWSER_GATEWAY_PROTOCOL_VERSION = 8;
 
 export type GatewayControlRequest =
   | { action: "ping" }
@@ -28,6 +29,8 @@ export type GatewayControlRequest =
       sessionId: string;
       daemonInstanceId: string;
       daemonPid?: number;
+      driverKind?: GatewayDriverKind;
+      driverLabel?: string;
       restartNonce?: string;
       agent?: string;
       project?: string;
@@ -37,6 +40,7 @@ export type GatewayControlRequest =
       sessionId: string;
       command: "takeover" | "complete" | "return" | "stop";
       pendingUserAction?: string;
+      revealAgentTarget?: boolean;
     }
   | { action: "prepare-daemon-restart"; sessionId: string; daemonInstanceId: string }
   | {

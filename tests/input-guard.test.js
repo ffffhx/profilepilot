@@ -241,7 +241,16 @@ test("Input Guard companion launches independently through LaunchServices and a 
     });
     child.once("exit", (code) => {
       clearTimeout(timer);
-      code === 0 ? resolve() : reject(new Error(`Input Guard companion exited ${code}`));
+      const protocolCompleted =
+        output.includes('"status":"ready"') &&
+        output.includes('"status":"tap-create-failed"') &&
+        output.includes('"status":"sync-complete"');
+      // /usr/bin/open -W can return 1 when the helper processes QUIT and exits
+      // before LaunchServices finishes installing its process waiter. The private
+      // socket protocol is the authoritative helper result in that race.
+      code === 0 || protocolCompleted
+        ? resolve()
+        : reject(new Error(`Input Guard companion exited ${code}`));
     });
   });
   assert.match(output, /"status":"ready"/);

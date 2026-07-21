@@ -170,6 +170,37 @@ test("renderer explains a Gateway handoff as pending user action", () => {
   assert.match(client.note, /Session 仍保留/);
 });
 
+test("renderer presents Gateway browser drivers by their verified tool identity", () => {
+  const { gatewayControlClient, isAgentDrivenCdpClient } = loadUtil();
+  for (const [driverKind, driverLabel] of [
+    ["playwright-cli", "Playwright CLI"],
+    ["chrome-devtools-mcp", "Chrome DevTools MCP"]
+  ]) {
+    const client = gatewayControlClient({
+      gatewayControl: {
+        publicPort: 9224,
+        ownership: "agent",
+        sessionStatus: "active",
+        agentHealth: "online",
+        connectionActive: true,
+        ownerSessionId: `cx-${driverKind}`,
+        daemonInstanceId: `daemon-${driverKind}`,
+        daemonPid: 300,
+        driverKind,
+        driverLabel,
+        agent: "Codex",
+        project: "profilepilot",
+        pendingUserAction: null,
+        updatedAt: "2026-07-18T00:00:00.000Z"
+      }
+    });
+    assert.equal(client.label, driverLabel);
+    assert.equal(client.driverKind, driverKind);
+    assert.match(client.title, new RegExp(driverLabel));
+    assert.equal(isAgentDrivenCdpClient(client), true);
+  }
+});
+
 test("renderer formatErrorMessage removes transport noise and preserves recovery copy", () => {
   const { formatErrorMessage } = loadUtil();
 

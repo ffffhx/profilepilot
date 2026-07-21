@@ -397,7 +397,9 @@ export function extensionMigrationConfirmDataLine(
 }
 
 export function closeModalFromUi(): void {
-  if (store.modal?.kind === "confirm" && store.modal.returnTo === "extension-migration") {
+  if (store.modal?.kind === "live-zoom" && store.modal.returnTo === "profile-details") {
+    store.modal = { kind: "profile-details", profileId: store.modal.profileId };
+  } else if (store.modal?.kind === "confirm" && store.modal.returnTo === "extension-migration") {
     store.modal = { kind: "extension-migration" };
   } else if (store.modal?.kind === "confirm" && store.modal.returnTo === "clone-pool") {
     store.modal = { kind: "clone-pool" };

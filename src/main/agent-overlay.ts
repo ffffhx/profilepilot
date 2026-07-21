@@ -16,6 +16,7 @@ const OVERLAY_WORLD_NAME = "__ppAgentOverlayWorld";
 const PAGE_CONNECT_TIMEOUT = 3000;
 const PUSH_INTERVAL_MS = 2000;
 const TAKEN_OVER_KEEPALIVE_MS = 7000;
+const CONTROL_RECONCILE_GRACE_MS = 1500;
 const CONTEXT_RECOVERY_COOLDOWN_MS = 3000;
 const TARGET_CACHE_TTL_MS = 1500;
 
@@ -216,6 +217,7 @@ interface PortOverlay {
   controlSince?: string;
   delegatedToUser: boolean;
   delegationGraceUntil: number;
+  returnGraceUntil: number;
   takenOverUntil: number;
   lastPayload: OverlayPayload | null;
   stopError: string | null;
@@ -256,6 +258,8 @@ export class AgentOverlayManager {
   private readonly completionInFlight = new Set<string>();
   private readonly completedSessions = new Set<string>();
   private readonly cleanedInactivePorts = new Set<number>();
+  private readonly inactiveCleanupTokens = new Map<number, symbol>();
+  private readonly inactiveCleanupTasks = new Map<number, Promise<void>>();
   private readonly script = agentOverlayBootstrapScript();
   private readonly inputGuard: InputGuardController;
   private guardClickChain: Promise<void> = Promise.resolve();
@@ -295,6 +299,7 @@ export class AgentOverlayManager {
     }
     if (!input.enabled) {
       this.cleanedInactivePorts.clear();
+      this.inactiveCleanupTokens.clear();
       this.inputGuard.sync([]);
       this.stopAllTailers();
       for (const state of this.ports.values()) {
@@ -365,6 +370,7 @@ export class AgentOverlayManager {
           controlSince: next.controlSince,
           delegatedToUser: Boolean(next.controlPaused),
           delegationGraceUntil: 0,
+          returnGraceUntil: 0,
           takenOverUntil: next.controlPaused ? now + TAKEN_OVER_KEEPALIVE_MS : 0,
           lastPayload: null,
           stopError: null,
@@ -396,9 +402,7 @@ export class AgentOverlayManager {
     this.syncTailers();
     this.syncInactivePortCleanup(input.inactivePorts || []);
     for (const state of this.ports.values()) {
-      void this.ensureTargetObserver(state).catch(() => undefined);
-      void this.syncPortTargets(state).catch(() => undefined);
-      void this.pushPortUpdate(state).catch(() => undefined);
+      void this.syncActivePort(state).catch(() => undefined);
     }
   }
 
@@ -410,6 +414,8 @@ export class AgentOverlayManager {
   async dispose(): Promise<void> {
     this.disposed = true;
     this.cleanedInactivePorts.clear();
+    this.inactiveCleanupTokens.clear();
+    this.inactiveCleanupTasks.clear();
     this.inputGuard.sync([]);
     await this.inputGuard.dispose();
     this.stopAllTailers();
@@ -435,6 +441,7 @@ export class AgentOverlayManager {
   private syncInactivePortCleanup(ports: number[]): void {
     if (this.disposed) {
       this.cleanedInactivePorts.clear();
+      this.inactiveCleanupTokens.clear();
       return;
     }
     const inactive = new Set(
@@ -443,6 +450,7 @@ export class AgentOverlayManager {
     for (const port of [...this.cleanedInactivePorts]) {
       if (!inactive.has(port)) {
         this.cleanedInactivePorts.delete(port);
+        this.inactiveCleanupTokens.delete(port);
       }
     }
     for (const port of inactive) {
@@ -450,17 +458,68 @@ export class AgentOverlayManager {
         continue;
       }
       this.cleanedInactivePorts.add(port);
-      void this.cleanupInactivePortOverlays(port).then((cleaned) => {
-        if (!cleaned) {
+      const token = Symbol(`inactive-overlay-cleanup-${port}`);
+      this.inactiveCleanupTokens.set(port, token);
+      let task: Promise<void>;
+      task = this.cleanupInactivePortOverlays(
+        port,
+        () => this.isInactiveCleanupCurrent(port, token)
+      ).then((cleaned) => {
+        if (this.isInactiveCleanupCurrent(port, token) && !cleaned) {
           this.cleanedInactivePorts.delete(port);
+          this.inactiveCleanupTokens.delete(port);
         }
       }).catch(() => {
-        this.cleanedInactivePorts.delete(port);
+        if (this.isInactiveCleanupCurrent(port, token)) {
+          this.cleanedInactivePorts.delete(port);
+          this.inactiveCleanupTokens.delete(port);
+        }
+      }).finally(() => {
+        if (this.inactiveCleanupTasks.get(port) === task) {
+          this.inactiveCleanupTasks.delete(port);
+        }
       });
+      this.inactiveCleanupTasks.set(port, task);
     }
   }
 
-  private async cleanupInactivePortOverlays(port: number): Promise<boolean> {
+  private isInactiveCleanupCurrent(port: number, token: symbol): boolean {
+    return (
+      !this.disposed &&
+      !this.ports.has(port) &&
+      this.cleanedInactivePorts.has(port) &&
+      this.inactiveCleanupTokens.get(port) === token
+    );
+  }
+
+  private async syncActivePort(state: PortOverlay): Promise<void> {
+    // 空闲清理通过独立 CDP 连接执行。端口重新 active 时先让旧任务彻底退出，
+    // 再创建 Overlay observer，避免跨连接乱序把刚清掉的终止标记重新写回。
+    const inactiveCleanup = this.inactiveCleanupTasks.get(state.port);
+    if (inactiveCleanup) {
+      await inactiveCleanup;
+    }
+    if (!this.isActivePort(state)) {
+      return;
+    }
+    await this.ensureTargetObserver(state);
+    if (!this.isActivePort(state)) {
+      return;
+    }
+    await this.syncPortTargets(state);
+    if (!this.isActivePort(state)) {
+      return;
+    }
+    await this.pushPortUpdate(state);
+  }
+
+  private async cleanupInactivePortOverlays(
+    port: number,
+    shouldContinue: () => boolean
+  ): Promise<boolean> {
+    if (!shouldContinue()) {
+      return false;
+    }
     const requestTargets = this.options.requestTargets || requestCdpTargets;
     const connect = this.options.connectBrowser || CdpBrowserClient.connect;
     let targets: CdpTargetListEntry[];
@@ -469,14 +528,20 @@ export class AgentOverlayManager {
     } catch {
       return false;
     }
+    if (!shouldContinue()) {
+      return false;
+    }
 
     const results = await Promise.allSettled(
       targets.filter(isInjectableTarget).map(async (target) => {
-        if (!target.webSocketDebuggerUrl) {
+        if (!target.webSocketDebuggerUrl || !shouldContinue()) {
           return false;
         }
         const client = await connect(target.webSocketDebuggerUrl, PAGE_CONNECT_TIMEOUT);
         try {
+          if (!shouldContinue()) {
+            return false;
+          }
           const overlayContextIds = new Set<number>();
           client.onEvent = (method, params) => {
             if (method !== "Runtime.executionContextCreated" || !isRecord(params) || !isRecord(params.context)) {
@@ -504,6 +569,9 @@ export class AgentOverlayManager {
           );
           const hadOverlayHost = hostBefore.result?.value === true;
           if (!hadOverlayHost) {
+            if (!shouldContinue()) {
+              return false;
+            }
             await client.send(
               "Runtime.evaluate",
               {
@@ -520,7 +588,7 @@ export class AgentOverlayManager {
           const tree = isRecord(frameTree.frameTree) ? frameTree.frameTree : null;
           const frame = tree && isRecord(tree.frame) ? tree.frame : null;
           const frameId = frame ? stringValue(frame.id) : "";
-          if (!frameId) {
+          if (!frameId || !shouldContinue()) {
             return false;
           }
           const context = await client.send<{ executionContextId?: number }>(
@@ -535,6 +603,9 @@ export class AgentOverlayManager {
 
           let controllerStopped = false;
           for (const overlayContextId of overlayContextIds) {
+            if (!shouldContinue()) {
+              return false;
+            }
             const cleanup = await client.send<{ result?: { value?: unknown } }>(
               "Runtime.evaluate",
               {
@@ -548,6 +619,9 @@ export class AgentOverlayManager {
             controllerStopped = cleanup.result?.value === true || controllerStopped;
           }
 
+          if (!shouldContinue()) {
+            return false;
+          }
           const hostAfter = await client.send<{ result?: { value?: unknown } }>(
             "Runtime.evaluate",
             {
@@ -582,6 +656,12 @@ export class AgentOverlayManager {
 
   private syncDelegatedControl(state: PortOverlay, controlPaused: boolean, now: number): void {
     if (controlPaused) {
+      // 交还过程中或刚交还成功后，getState 可能仍带回操作前的 ownership=user 快照。
+      // 本地交还结果已经由 onResume/Gateway 确认，在保护窗内不能让旧快照把按钮改回“交还 Agent”。
+      if (!state.delegatedToUser && (state.takeoverInFlight || now < state.returnGraceUntil)) {
+        return;
+      }
+      state.returnGraceUntil = 0;
       state.autoFollowAgent = false;
       if (!state.delegatedToUser) {
         state.delegatedToUser = true;
@@ -597,6 +677,7 @@ export class AgentOverlayManager {
     }
     state.delegatedToUser = false;
     state.delegationGraceUntil = 0;
+    state.returnGraceUntil = 0;
     state.takenOverUntil = 0;
     state.lastPayload = null;
   }
@@ -791,7 +872,7 @@ export class AgentOverlayManager {
         state,
         drivers: uniqueClientsByPid(
           state.clients.filter(
-            (client) => client.session === session && client.label.toLowerCase().startsWith("agent-browser")
+            (client) => client.session === session && isAgentOverlayClient(client)
           )
         )
       }))
@@ -838,6 +919,7 @@ export class AgentOverlayManager {
         state.agentOffline = false;
         state.controlSince = undefined;
         state.delegationGraceUntil = 0;
+        state.returnGraceUntil = 0;
         state.takenOverUntil = 0;
         state.stopError = null;
         state.lastPayload = null;
@@ -1426,6 +1508,7 @@ export class AgentOverlayManager {
     }
 
     state.takeoverInFlight = true;
+    state.returnGraceUntil = 0;
     state.handoffPending = reason === "user_takeover";
     if (state.handoffPending) {
       state.lastPayload = null;
@@ -1491,6 +1574,7 @@ export class AgentOverlayManager {
         state.controlSince = undefined;
         state.delegatedToUser = false;
         state.delegationGraceUntil = 0;
+        state.returnGraceUntil = 0;
         state.takenOverUntil = 0;
         state.lastPayload = null;
         if (!state.clients.length) {
@@ -1512,7 +1596,8 @@ export class AgentOverlayManager {
       state.controlSince = new Date(takenOverAt).toISOString();
       state.delegatedToUser = reason === "user_takeover";
       if (state.delegatedToUser) state.autoFollowAgent = false;
-      state.delegationGraceUntil = state.delegatedToUser ? takenOverAt + 1500 : 0;
+      state.delegationGraceUntil = state.delegatedToUser ? takenOverAt + CONTROL_RECONCILE_GRACE_MS : 0;
+      state.returnGraceUntil = 0;
       state.takenOverUntil = takenOverAt + TAKEN_OVER_KEEPALIVE_MS;
       this.syncInputGuard();
       state.lastPayload = {
@@ -1550,6 +1635,7 @@ export class AgentOverlayManager {
     state.agentOffline = false;
     state.controlSince = undefined;
     state.delegationGraceUntil = 0;
+    state.returnGraceUntil = this.now() + CONTROL_RECONCILE_GRACE_MS;
     state.takenOverUntil = 0;
     state.lastPayload = null;
     this.syncInputGuard();
@@ -1570,11 +1656,13 @@ export class AgentOverlayManager {
         return;
       }
       state.stopError = null;
+      state.returnGraceUntil = this.now() + CONTROL_RECONCILE_GRACE_MS;
       await this.pushPortUpdate(state, true);
     } catch (error) {
       state.delegatedToUser = true;
       state.agentOffline = false;
       state.controlSince = controlSince || new Date(this.now()).toISOString();
+      state.returnGraceUntil = 0;
       state.takenOverUntil = this.now() + TAKEN_OVER_KEEPALIVE_MS;
       this.syncInputGuard();
       state.stopError = error instanceof Error ? error.message : "交还 Agent 失败。";
@@ -1590,9 +1678,9 @@ export class AgentOverlayManager {
 
   private findStopDrivers(state: PortOverlay, requestedSession?: string): CdpClientInfo[] {
     const primary = state.clients[0];
-    const agentBrowser = state.clients.filter((client) => client.label === "agent-browser");
+    const browserDrivers = state.clients.filter(isAgentOverlayClient);
     if (requestedSession) {
-      const exact = uniqueClientsByPid(agentBrowser.filter((client) => client.session === requestedSession));
+      const exact = uniqueClientsByPid(browserDrivers.filter((client) => client.session === requestedSession));
       if (exact.length) {
         return exact;
       }
@@ -1601,11 +1689,11 @@ export class AgentOverlayManager {
     }
 
     if (this.sessionRowsForPort(state).length >= 2) {
-      const drivers = uniqueClientsByPid(agentBrowser);
+      const drivers = uniqueClientsByPid(browserDrivers);
       return drivers.length ? drivers : uniqueClientsByPid(state.clients);
     }
 
-    return uniqueClientsByPid([agentBrowser[0] || primary].filter(Boolean) as CdpClientInfo[]);
+    return uniqueClientsByPid([browserDrivers[0] || primary].filter(Boolean) as CdpClientInfo[]);
   }
 
   private async pushAllUpdates(): Promise<void> {
@@ -2066,7 +2154,16 @@ export function buildAgentOverlayPayload(input: AgentOverlayPayloadInput): Overl
 }
 
 export function isAgentOverlayClient(client: CdpClientInfo): boolean {
-  return Boolean(client.agent) || client.label === "agent-browser" || client.label === "Codex" || client.label === "Claude Code";
+  const label = client.label.toLowerCase();
+  return Boolean(
+    client.driverKind ||
+      client.agent ||
+      label.startsWith("agent-browser") ||
+      label.startsWith("playwright") ||
+      label.includes("chrome devtools mcp") ||
+      label === "codex" ||
+      label === "claude code"
+  );
 }
 
 function sessionRowsForClients(

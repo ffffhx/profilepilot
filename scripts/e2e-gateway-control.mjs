@@ -15,22 +15,32 @@ const { requestBrowserGateway } = require("../dist/main/browser-gateway-client.j
 
 async function main() {
   const app = await launchProfilePilotE2e({
+    mode: "desktop",
+    name: "e2e-gateway-control",
     realGateway: true,
     env: { CPM_E2E_MINI_SHORTCUT: "CommandOrControl+Shift+U" },
     timeoutMs: 20_000
   });
   const { driver, homeDir } = app;
   const port = await findAvailablePort(9530);
+  const windowTitleProbe = path.join(app.fixtureRoot, "native-window-titles");
   let agentSocket = null;
   let profileId = null;
   try {
+    await execFileAsync("/usr/bin/xcrun", [
+      "clang", "-fobjc-arc", "-O2", "-framework", "Foundation", "-framework", "ApplicationServices",
+      path.join(process.cwd(), "scripts", "e2e", "native-window-titles.m"), "-o", windowTitleProbe
+    ]);
     profileId = await createProfile(driver, "E2E Gateway Profile");
     await driver.click(`[data-action="launch-cdp"][data-id="${profileId}"]`);
     await driver.waitFor("#cdp-port");
     await driver.fill("#cdp-port", String(port));
-    await submitWithSystemEvents(driver, "#cdp-port");
+    // Submit through the renderer driver so the E2E does not need to activate
+    // the Electron app merely to synthesize an Enter key with System Events.
+    await driver.click('[data-cdp-form] button[type="submit"]');
     await driver.waitFor("[data-cdp-form]", (snapshot) => !snapshot.exists);
-    await waitForGatewayProfile(homeDir, port, (profile) => profile.profileId === profileId);
+    const launchedProfile = await waitForGatewayProfile(homeDir, port, (profile) => profile.profileId === profileId);
+    assert.equal(Number.isInteger(launchedProfile.chromePid), true, "Gateway status must expose the exact Chrome PID");
     step(`Gateway launched Chrome through remote-debugging-pipe on logical port ${port}`);
 
     const sessionId = "cx-e2e-gateway-primary";
@@ -48,6 +58,100 @@ async function main() {
     const targets = await agentSocket.send("Target.getTargets", {});
     assert.ok(Array.isArray(targets.targetInfos), "Gateway WebSocket should proxy real CDP traffic");
     step("agent WebSocket connected and completed Target.getTargets through Gateway");
+
+    const created = await agentSocket.send("Target.createTarget", {
+      url: "data:text/html,<title>ProfilePilot%20No%20Focus</title><h1>No%20Focus</h1>",
+      background: false,
+      focus: true
+    });
+    assert.equal(typeof created.targetId, "string", "background target should return a targetId");
+    const attached = await agentSocket.send("Target.attachToTarget", {
+      targetId: created.targetId,
+      flatten: true
+    });
+    assert.equal(typeof attached.sessionId, "string", "created target should be attachable");
+    const nativeViewport = await evaluateInSession(
+      agentSocket,
+      attached.sessionId,
+      "({innerWidth,innerHeight,outerWidth,outerHeight})"
+    );
+    assert.ok(nativeViewport.outerWidth > 0 && nativeViewport.outerHeight > 0, "real Chrome should expose native outer bounds");
+    await agentSocket.send("Emulation.setDeviceMetricsOverride", {
+      width: 777,
+      height: 666,
+      deviceScaleFactor: 1,
+      mobile: false
+    }, attached.sessionId);
+    assert.deepEqual(
+      await evaluateInSession(agentSocket, attached.sessionId, "({innerWidth,innerHeight,outerWidth,outerHeight})"),
+      nativeViewport,
+      "Agent viewport emulation must not replace the real Chrome Profile viewport"
+    );
+    const nativeWindow = await agentSocket.send("Browser.getWindowForTarget", { targetId: created.targetId });
+    const nativeBounds = await agentSocket.send("Browser.getWindowBounds", { windowId: nativeWindow.windowId });
+    await agentSocket.send("Browser.setContentsSize", {
+      windowId: nativeWindow.windowId,
+      width: 777,
+      height: 666
+    });
+    assert.deepEqual(
+      await agentSocket.send("Browser.getWindowBounds", { windowId: nativeWindow.windowId }),
+      nativeBounds,
+      "Agent content sizing must not resize the user's real Chrome window"
+    );
+    step("Agent viewport and content-size overrides were virtualized on the real Chrome Profile");
+    await waitFor(async () => (
+      await evaluateInSession(agentSocket, attached.sessionId, "document.visibilityState")
+    ) === "hidden", "Agent-created target stays in the background");
+
+    await agentSocket.send("Page.bringToFront", {}, attached.sessionId);
+    assert.equal(
+      await evaluateInSession(agentSocket, attached.sessionId, "document.visibilityState"),
+      "hidden",
+      "Agent Page.bringToFront must be logical-only"
+    );
+    await agentSocket.send("Target.activateTarget", { targetId: created.targetId });
+    assert.equal(
+      await evaluateInSession(agentSocket, attached.sessionId, "document.visibilityState"),
+      "hidden",
+      "Agent Target.activateTarget must be logical-only"
+    );
+    assert.equal(
+      (await chromeWindowTitles(windowTitleProbe, launchedProfile.chromePid)).some((title) => title.includes("ProfilePilot No Focus")),
+      false,
+      "Agent logical activation must not change the real Chrome window's active tab title"
+    );
+    step("Agent create/bringToFront/activateTarget all preserved the user's visible tab");
+
+    const revealed = await gateway(homeDir, { action: "activate-agent-target", publicPort: port });
+    assert.equal(revealed.target.targetId, created.targetId);
+    assert.equal(
+      await evaluateInSession(agentSocket, attached.sessionId, "document.title"),
+      "ProfilePilot No Focus",
+      "trusted reveal must keep the selected Agent page alive"
+    );
+    const revealedWindow = await agentSocket.send("Browser.getWindowForTarget", { targetId: created.targetId });
+    const revealedBounds = await agentSocket.send("Browser.getWindowBounds", { windowId: revealedWindow.windowId });
+    const revealedVisibility = await evaluateInSession(agentSocket, attached.sessionId, "document.visibilityState");
+    step(`trusted reveal state: visibility=${revealedVisibility}, window=${JSON.stringify(revealedBounds.bounds)}`);
+    await waitFor(async () => (
+      await chromeWindowTitles(windowTitleProbe, launchedProfile.chromePid)
+    ).some((title) => title.includes("ProfilePilot No Focus")), "trusted reveal changes the real Chrome window's active tab title");
+    if (revealed.profileFocused === true) {
+      await waitFor(async () => (
+        await evaluateInSession(agentSocket, attached.sessionId, "document.visibilityState")
+      ) === "visible", "trusted reveal activates the Agent target");
+    }
+    assert.equal(
+      revealed.profileFocused === true || typeof revealed.focusError === "string",
+      true,
+      "trusted reveal must either confirm exact macOS focus or report why it could not"
+    );
+    step(
+      revealed.profileFocused
+        ? "trusted ProfilePilot reveal activated the Agent target and focused its Chrome Profile"
+        : `trusted ProfilePilot reveal activated the Agent target; macOS focus was explicitly unconfirmed (${revealed.focusError})`
+    );
 
     await assert.rejects(
       gateway(homeDir, {
@@ -119,15 +223,6 @@ async function main() {
   step("PASS");
 }
 
-async function submitWithSystemEvents(driver, selector) {
-  const appProcess = await driver.request("ping");
-  await driver.focus(selector);
-  await execFileAsync("/usr/bin/osascript", [
-    "-e",
-    `tell application \"System Events\" to tell first process whose unix id is ${appProcess.pid} to key code 36`
-  ]);
-}
-
 async function createProfile(driver, name) {
   await driver.click('[data-action="new-profile"]');
   await driver.waitFor("#profile-name");
@@ -186,11 +281,11 @@ class CdpSocket {
     });
   }
 
-  send(method, params) {
+  send(method, params, sessionId) {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
-      this.socket.send(JSON.stringify({ id, method, params }));
+      this.socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
     });
   }
 
@@ -202,6 +297,33 @@ class CdpSocket {
   close() {
     this.socket.close();
   }
+}
+
+async function evaluateInSession(socket, sessionId, expression) {
+  const response = await socket.send("Runtime.evaluate", { expression, returnByValue: true }, sessionId);
+  return response.result?.value;
+}
+
+async function chromeWindowTitles(probe, pid) {
+  const { stdout } = await execFileAsync(probe, [String(pid)]);
+  const titles = JSON.parse(stdout);
+  return Array.isArray(titles) ? titles.map(String) : [];
+}
+
+async function waitFor(predicate, description, timeoutMs = 10_000) {
+  const startedAt = Date.now();
+  let latestError = null;
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      if (await predicate()) return;
+      latestError = null;
+    } catch (error) {
+      latestError = error;
+    }
+    await delay(80);
+  }
+  const detail = latestError instanceof Error ? `: ${latestError.message}` : "";
+  throw new Error(`Timed out waiting for ${description}${detail}`);
 }
 
 async function findAvailablePort(start) {

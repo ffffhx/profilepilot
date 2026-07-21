@@ -3,7 +3,7 @@ import { LiveViewEntry, store } from "../state";
 import { CdpLiveTab, CdpLiveView, PublicProfile } from "../types";
 import { escapeHtml, formatErrorMessage, hostOf } from "../util";
 
-// 实时观测刷新节奏：和主轮询(3s)错开一点，专门盯当前选中的那一个在飞的 Profile。
+// 实时观测刷新节奏：和主轮询(3s)错开一点，只在用户主动打开观测弹窗后运行。
 const LIVE_VIEW_INTERVAL_MS = 2500;
 
 let liveViewTimer: number | null = null;
@@ -13,7 +13,7 @@ export function liveViewEligible(profile: PublicProfile): boolean {
   return profile.source === "isolated" && profile.running && profile.cdpPort != null;
 }
 
-// 详情侧栏里的实时观测区块。外层带 data-live-view=profileId，轮询时只换内部 body，
+// 详情弹窗里的实时观测区块。外层带 data-live-view=profileId，轮询时只换内部 body，
 // 不触发全量 render，避免截图和滚动跳动。不满足条件返回空串（系统 / 未运行 / 无 CDP）。
 export function renderLiveViewSection(profile: PublicProfile): string {
   if (!liveViewEligible(profile)) {
@@ -22,13 +22,18 @@ export function renderLiveViewSection(profile: PublicProfile): string {
   return `<section class="live-view" data-live-view="${escapeHtml(profile.id)}">${renderLiveViewBody(profile)}</section>`;
 }
 
-// 启动独立的观测循环（仅主窗口）。跳过条件与主轮询一致：忙 / 隐藏 / 有弹窗。
+// 启动独立的观测循环（仅主窗口）。只有 Profile 详情弹窗或其画面放大层打开时才抓帧。
 export function startLiveViewLoop(): void {
   if (liveViewTimer !== null) {
     return;
   }
   liveViewTimer = window.setInterval(() => {
-    if (store.viewMode !== "main" || store.busy || document.hidden || (store.modal && store.modal.kind !== "live-zoom")) {
+    if (
+      store.viewMode !== "main" ||
+      store.busy ||
+      document.hidden ||
+      (store.modal?.kind !== "profile-details" && store.modal?.kind !== "live-zoom")
+    ) {
       return;
     }
     const profile = currentLiveProfile();
@@ -50,19 +55,20 @@ export function requestLiveViewNow(profileId: string | null): void {
 }
 
 export function refreshLiveViewNow(): void {
-  requestLiveViewNow(store.selectedId);
+  requestLiveViewNow(activeLiveProfileId());
 }
 
 export function toggleLiveScreenshot(): void {
   store.liveViewShowScreenshot = !store.liveViewShowScreenshot;
-  if (store.selectedId) {
+  const profileId = activeLiveProfileId();
+  if (profileId) {
     // 先反映按钮态（截图开/关），再按新设置重新拉一帧。
-    updateLiveViewDom(store.selectedId);
-    requestLiveViewNow(store.selectedId);
+    updateLiveViewDom(profileId);
+    requestLiveViewNow(profileId);
   }
 }
 
-// 点 Cockpit 标签列表里的某一项：把浏览器真正切到那个标签，并让实时画面切到它。
+// 点 Cockpit 标签列表里的某一项：只切换弹窗正在观测的标签和实时画面。
 export function focusLiveTab(profileId: string, targetId: string): void {
   if (!store.state || !targetId) {
     return;
@@ -78,11 +84,19 @@ export function focusLiveTab(profileId: string, targetId: string): void {
 }
 
 function currentLiveProfile(): PublicProfile | null {
-  if (!store.state || !store.selectedId) {
+  const profileId = activeLiveProfileId();
+  if (!store.state || !profileId) {
     return null;
   }
-  const profile = store.state.profiles.find((item) => item.id === store.selectedId);
+  const profile = store.state.profiles.find((item) => item.id === profileId);
   return profile && liveViewEligible(profile) ? profile : null;
+}
+
+function activeLiveProfileId(): string | null {
+  if (store.modal?.kind === "profile-details" || store.modal?.kind === "live-zoom") {
+    return store.modal.profileId;
+  }
+  return null;
 }
 
 function ensureEntry(profileId: string): LiveViewEntry {
@@ -109,9 +123,10 @@ async function fetchLiveView(profile: PublicProfile): Promise<void> {
   updateLiveViewDom(profile.id);
 
   try {
+    const targetId = store.liveActiveTab[profile.id] || profile.gatewayControl?.agentTarget?.targetId;
     const data = await profileApi().getCdpLiveView(port, {
       screenshot: store.liveViewShowScreenshot,
-      targetId: store.liveActiveTab[profile.id]
+      targetId
     });
     store.liveView[profile.id] = { data, loading: false, error: data.error, fetchedAt: Date.now() };
   } catch (error) {
@@ -166,7 +181,7 @@ function renderLiveViewBody(profile: PublicProfile): string {
     );
   }
 
-  return head + renderLiveScreen(profile.id, data, showShot) + renderLiveTabs(data) + renderLiveMeta(data, entry);
+  return head + renderLiveScreen(profile.id, data, showShot) + renderLiveTabs(profile.id, data) + renderLiveMeta(data, entry);
 }
 
 function renderLiveHead(loading: boolean, showShot: boolean): string {
@@ -208,7 +223,11 @@ export function openLiveZoom(profileId: string | null): void {
   if (!profileId || !store.liveView[profileId]?.data?.screenshot) {
     return;
   }
-  store.modal = { kind: "live-zoom", profileId };
+  store.modal = {
+    kind: "live-zoom",
+    profileId,
+    returnTo: store.modal?.kind === "profile-details" ? "profile-details" : undefined
+  };
 }
 
 export function renderLiveZoomModal(profileId: string): string {
@@ -272,14 +291,14 @@ function renderLiveZoomContent(profileId: string): string {
   `;
 }
 
-function renderLiveTabs(data: CdpLiveView): string {
+function renderLiveTabs(profileId: string, data: CdpLiveView): string {
   if (!data.tabCount) {
     return `<div class="live-tabs-empty">浏览器在运行，但当前没有打开的标签页。</div>`;
   }
-  return `<ul class="live-tabs">${data.tabs.map(renderLiveTab).join("")}</ul>`;
+  return `<ul class="live-tabs">${data.tabs.map((tab) => renderLiveTab(profileId, tab)).join("")}</ul>`;
 }
 
-function renderLiveTab(tab: CdpLiveTab): string {
+function renderLiveTab(profileId: string, tab: CdpLiveTab): string {
   const host = tab.url ? hostOf(tab.url) : "";
   const favicon = tab.faviconUrl
     ? `<img class="live-tab-favicon" src="${escapeHtml(tab.faviconUrl)}" alt="" onerror="this.remove()" />`
@@ -287,9 +306,9 @@ function renderLiveTab(tab: CdpLiveTab): string {
   const copyButton = tab.url
     ? `<button type="button" class="live-tab-action" data-action="copy-live-url" data-url="${escapeHtml(tab.url)}" title="复制链接">复制</button>`
     : "";
-  // 整行可点：切到这个标签（激活浏览器里的它 + 画面切过去）；复制按钮单独处理，不触发切换。
+  // 整行可点：只切换弹窗正在观测的标签与画面，不把 Chrome 抢到前台；复制按钮单独处理。
   const focusAttrs = tab.targetId
-    ? ` data-action="focus-live-tab" data-target-id="${escapeHtml(tab.targetId)}" role="button" title="切到这个标签页（激活并查看画面）"`
+    ? ` data-action="focus-live-tab" data-profile-id="${escapeHtml(profileId)}" data-target-id="${escapeHtml(tab.targetId)}" role="button" tabindex="0" title="在弹窗中查看这个标签页"`
     : "";
   return `
     <li class="live-tab ${tab.primary ? "primary" : ""}"${focusAttrs}>

@@ -31,9 +31,6 @@ export interface RendererState {
   toast: string | null;
   toastKind: ToastKind;
   toastTimer: number | undefined;
-  agentTakeoverHistory: AgentTakeoverEvent[];
-  agentTakeoverNoticeDismissed: boolean;
-  agentTakeoverHistoryExpanded: boolean;
   miniTakeoverByProfileId: Record<string, AgentTakeoverEvent>;
   miniTakeoverConfirmProfileId: string | null;
   migrationSourceId: string | null;
@@ -97,9 +94,6 @@ export const store: RendererState = {
   toast: null,
   toastKind: "normal",
   toastTimer: undefined,
-  agentTakeoverHistory: [],
-  agentTakeoverNoticeDismissed: false,
-  agentTakeoverHistoryExpanded: false,
   miniTakeoverByProfileId: {},
   miniTakeoverConfirmProfileId: null,
   migrationSourceId: null,

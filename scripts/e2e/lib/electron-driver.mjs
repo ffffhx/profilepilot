@@ -38,6 +38,34 @@ export class ElectronDriver {
     return this.request("query", { target: options.target || "main", selector, index: options.index || 0 });
   }
 
+  evaluate(expression, options = {}) {
+    return this.request("evaluate", { target: options.target || "main", expression });
+  }
+
+  domClick(selector, options = {}) {
+    return this.request("domClick", { target: options.target || "main", selector, index: options.index || 0 });
+  }
+
+  domInput(selector, value, options = {}) {
+    return this.request("domInput", {
+      target: options.target || "main",
+      selector,
+      index: options.index || 0,
+      value,
+      checked: options.checked
+    });
+  }
+
+  dispatch(selector, eventType, eventInit = {}, options = {}) {
+    return this.request("dispatch", {
+      target: options.target || "main",
+      selector,
+      index: options.index || 0,
+      eventType,
+      eventInit
+    });
+  }
+
   click(selector, options = {}) {
     return this.request("click", { target: options.target || "main", selector, index: options.index || 0 });
   }
@@ -70,6 +98,10 @@ export class ElectronDriver {
 
   windows() {
     return this.request("windows");
+  }
+
+  triggerMiniHotkeyHandler() {
+    return this.request("triggerMiniHotkeyHandler");
   }
 
   activate(target = "main") {
@@ -141,6 +173,11 @@ export class ElectronDriver {
 }
 
 export async function launchProfilePilotE2e(options = {}) {
+  const mode = options.mode || "background";
+  if (mode === "desktop") {
+    assertDesktopE2eAllowed(options.name || "desktop E2E");
+  }
+
   // Browser Gateway adds `~/.profilepilot/gateway/control.sock` below HOME.
   // Keep the fixture prefix short enough for macOS' Unix socket path limit.
   const fixtureRoot = await mkdtemp(path.join(options.realGateway ? "/tmp" : os.tmpdir(), "pp-e2e-"));
@@ -167,6 +204,8 @@ export async function launchProfilePilotE2e(options = {}) {
       USERPROFILE: homeDir,
       CPM_DATA_DIR: dataDir,
       CPM_ELECTRON_SMOKE_TEST: options.realGateway ? "0" : "1",
+      CPM_E2E_MODE: mode,
+      CPM_E2E_DISPOSABLE_PROFILES: "1",
       CPM_E2E_DRIVER_SOCKET: socketPath,
       CPM_E2E_ENABLE_GLOBAL_SHORTCUTS: options.enableGlobalShortcuts ? "1" : "0",
       CPM_E2E_DETERMINISTIC: "1",
@@ -213,6 +252,14 @@ export async function launchProfilePilotE2e(options = {}) {
       }
     }
   };
+}
+
+export function assertDesktopE2eAllowed(name = "desktop E2E") {
+  if (process.env.CPM_DESKTOP_E2E !== "1" || process.env.CPM_DESKTOP_E2E_ISOLATED !== "1") {
+    throw new Error(
+      `${name} is blocked on the normal desktop. Run it only in an isolated macOS user, VM, or CI desktop with CPM_DESKTOP_E2E=1 CPM_DESKTOP_E2E_ISOLATED=1.`
+    );
+  }
 }
 
 async function connectSocket(socketPath, child, output, timeoutMs) {

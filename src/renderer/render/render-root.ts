@@ -4,10 +4,10 @@ import { renderSyncPanel } from "./account-sync";
 import { renderClonePoolModal } from "./clone-pool";
 import { renderLiveZoomModal } from "./live-view";
 import { renderMini } from "./mini";
-import { renderCdpModal, renderCloneTagModal, renderExtensionMigrationModal, renderGlobalInstructionsModal, renderNewModal, renderRenameModal, renderTakeoverHistoryModal } from "./modals";
-import { renderDetails, renderEmpty, renderExternalDetails, renderProfilesPanel } from "./profiles";
+import { renderCdpModal, renderCloneTagModal, renderExtensionMigrationModal, renderGlobalInstructionsModal, renderNewModal, renderRenameModal } from "./modals";
+import { renderEmpty, renderExternalDetailsModal, renderProfileDetailsModal, renderProfilesPanel } from "./profiles";
 import { appRoot, store } from "../state";
-import { escapeHtml, formatDate, renderBusyBanner, renderButtonLabel } from "../util";
+import { escapeHtml, renderBusyBanner, renderButtonLabel } from "../util";
 
 // 上一次写入的主视图 HTML。事件快照或低频校准若内容没变就跳过整段 DOM 重建，
 // 避免把用户正 hover 的节点换掉，导致 tooltip / :hover 状态闪烁。
@@ -29,9 +29,14 @@ export function render(): void {
   }
 
   const profiles = store.state.profiles || [];
-  const selected = profiles.find((profile) => profile.id === store.selectedId) || null;
-  const selectedExternal =
-    (store.state.externalInstances || []).find((instance) => instance.userDataDir === store.selectedExternalDir) || null;
+  const profileDetailsId = store.modal?.kind === "profile-details" ? store.modal.profileId : null;
+  const externalDetailsDir = store.modal?.kind === "external-details" ? store.modal.userDataDir : null;
+  const profileDetailsProfile = profileDetailsId
+    ? profiles.find((profile) => profile.id === profileDetailsId) || null
+    : null;
+  const externalDetailsInstance = externalDetailsDir
+    ? (store.state.externalInstances || []).find((instance) => instance.userDataDir === externalDetailsDir) || null
+    : null;
   const runningNames = store.state.runningProfiles.map((profile) => profile.name).join("、");
   const currentLabel = store.state.runningProfiles.length ? runningNames : "无";
   const currentNote = store.state.runningProfiles.length
@@ -62,7 +67,6 @@ export function render(): void {
       </header>
 
       ${busyHasEmbeddedProgress ? "" : renderBusyBanner()}
-      ${renderAgentTakeoverNotice()}
 
       <section class="status-grid grid grid-cols-[minmax(0,1.6fr)_repeat(2,minmax(130px,0.7fr))] gap-px overflow-hidden border-solid border border-line rounded-xl bg-line mt-[22px]" aria-label="Profile 状态概览">
         <div class="status-item current relative min-w-0 pt-4 pr-4 pb-4 pl-5 bg-panel">
@@ -84,11 +88,14 @@ export function render(): void {
 
       ${renderSyncPanel(profiles)}
 
-      <main id="main-content" class="layout grid grid-cols-[minmax(0,1fr)_minmax(320px,360px)] gap-6 mt-6 items-start">
-        <section>
-          <div class="section-head flex items-center justify-between gap-[14px] mb-3">
-            <h2>Profiles</h2>
-            <span class="count border-solid border border-line-strong rounded-full px-2.5 py-1 text-muted font-mono text-[11px] font-semibold tabular-nums">${profiles.length}</span>
+      <main id="main-content" class="layout grid grid-cols-1 gap-6 mt-6 items-start">
+        <section class="profiles-section">
+          <div class="profiles-section-head">
+            <div class="profiles-section-title">
+              <span>Profile Registry</span>
+              <h2>Profiles</h2>
+            </div>
+            <span class="profiles-count"><strong>${profiles.length}</strong> Registered</span>
           </div>
           ${
             profiles.length || (store.state.externalInstances?.length ?? 0)
@@ -96,7 +103,6 @@ export function render(): void {
               : renderEmpty()
           }
         </section>
-        ${selectedExternal ? renderExternalDetails(selectedExternal) : renderDetails(selected)}
       </main>
     </div>
     ${store.modal?.kind === "new" ? renderNewModal() : ""}
@@ -105,7 +111,16 @@ export function render(): void {
     ${store.modal?.kind === "clone-pool" ? renderClonePoolModal(profiles) : ""}
     ${store.modal?.kind === "clone-tag" ? renderCloneTagModal(store.modal.profileId) : ""}
     ${store.modal?.kind === "global-instructions" ? renderGlobalInstructionsModal() : ""}
-    ${store.modal?.kind === "takeover-history" ? renderTakeoverHistoryModal() : ""}
+    ${
+      store.modal?.kind === "profile-details"
+        ? renderProfileDetailsModal(profileDetailsProfile)
+        : ""
+    }
+    ${
+      store.modal?.kind === "external-details"
+        ? renderExternalDetailsModal(externalDetailsInstance)
+        : ""
+    }
     ${store.modal?.kind === "live-zoom" ? renderLiveZoomModal(store.modal.profileId) : ""}
     ${store.modal?.kind === "extension-migration" ? renderExtensionMigrationModal(profiles) : ""}
     ${store.modal?.kind === "confirm" ? renderConfirmModal(store.modal) : ""}
@@ -119,42 +134,4 @@ export function render(): void {
   lastMainHtml = html;
   appRoot.className = "";
   appRoot.innerHTML = html;
-}
-
-function renderAgentTakeoverNotice(): string {
-  if (store.agentTakeoverNoticeDismissed || !store.agentTakeoverHistory.length) {
-    return "";
-  }
-  const visibleEvents = store.agentTakeoverHistory.slice(0, 5);
-  const rows = visibleEvents
-    .map((event) => {
-      const agent = event.agent || "AI";
-      const sessionName = event.sessionTitle || event.session || "";
-      const session = sessionName ? ` · ${sessionName}` : "";
-      return `
-        <li>
-          <time>${escapeHtml(formatDate(event.at))}</time>
-          <strong>${escapeHtml(event.profileName)}</strong>
-          <span>${escapeHtml(`${agent}${session} 已暂停操作`)}</span>
-        </li>
-      `;
-    })
-    .join("");
-  const canExpand = store.agentTakeoverHistory.length > 0;
-  return `
-    <section class="agent-takeover-notice" aria-label="AI 接管历史">
-      <div class="agent-takeover-notice-head">
-        <strong>最近接管</strong>
-        <span class="agent-takeover-notice-actions">
-          ${
-            canExpand
-              ? `<button type="button" data-action="open-agent-takeover-history" title="展开全部接管记录">展开 ${store.agentTakeoverHistory.length}</button>`
-              : ""
-          }
-          <button type="button" data-action="dismiss-agent-takeover-history" title="关闭接管记录提示">关闭</button>
-        </span>
-      </div>
-      <ul>${rows}</ul>
-    </section>
-  `;
 }

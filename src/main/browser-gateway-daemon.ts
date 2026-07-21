@@ -7,7 +7,8 @@ import path from "node:path";
 import {
   BrowserGatewayControlError,
   BrowserGatewayControlPlane,
-  type GatewayControlEvent
+  type GatewayControlEvent,
+  type GatewayProfileBinding
 } from "./browser-gateway-control";
 import {
   browserGatewayRoot,
@@ -19,9 +20,16 @@ import {
 } from "./browser-gateway-client";
 import { BrowserGatewayServer } from "./browser-gateway-server";
 import { ChromePipeTransport } from "./browser-gateway-transport";
+import { focusProfileWindow } from "./chrome-launch";
 import { validateUnpackedExtensionPath } from "./unpacked-extension";
 
 const MAX_CONTROL_REQUEST_BYTES = 4 * 1024 * 1024;
+const DEFAULT_HANDOFF_REVEAL_DEADLINE_MS = 5_000;
+
+export interface BrowserGatewayDaemonOptions {
+  focusProfileWindow?: (pids: number[], signal?: AbortSignal) => Promise<boolean>;
+  handoffRevealDeadlineMs?: number;
+}
 
 export class BrowserGatewayDaemon {
   private readonly homeDir: string;
@@ -36,17 +44,27 @@ export class BrowserGatewayDaemon {
   private readonly gateway: BrowserGatewayServer;
   private readonly controlServer: net.Server;
   private readonly subscribers = new Set<Socket>();
+  private readonly sessionControlQueues = new Map<string, Promise<void>>();
+  private readonly focusProfileWindow: (pids: number[], signal?: AbortSignal) => Promise<boolean>;
+  private readonly handoffRevealDeadlineMs: number;
   private eventSequence = 0;
   private shuttingDown = false;
   private shutdownRequested = false;
 
-  constructor(homeDir = process.env.PROFILEPILOT_GATEWAY_HOME || os.homedir()) {
+  constructor(
+    homeDir = process.env.PROFILEPILOT_GATEWAY_HOME || os.homedir(),
+    options: BrowserGatewayDaemonOptions = {}
+  ) {
     this.homeDir = homeDir;
     this.root = browserGatewayRoot(homeDir);
     this.socketPath = browserGatewaySocketPath(homeDir);
     this.pidPath = path.join(this.root, "daemon.pid");
     this.lockPath = path.join(this.root, "daemon.lock");
     this.managedProfilesPath = path.join(this.root, "managed-profiles.json");
+    this.focusProfileWindow = options.focusProfileWindow || focusProfileWindow;
+    this.handoffRevealDeadlineMs = Number.isFinite(options.handoffRevealDeadlineMs) && Number(options.handoffRevealDeadlineMs) > 0
+      ? Math.floor(Number(options.handoffRevealDeadlineMs))
+      : DEFAULT_HANDOFF_REVEAL_DEADLINE_MS;
     mkdirSync(this.root, { recursive: true });
     this.loadManagedProfiles();
     this.internalSecret = loadOrCreateSecret(browserGatewaySecretPath(homeDir));
@@ -240,8 +258,38 @@ export class BrowserGatewayDaemon {
           message: "当前 Profile 没有活跃的 Agent Session"
         };
       }
-      const target = await this.gateway.activateAgentTarget(request.publicPort, profile.ownerSessionId);
-      return { ok: true, target };
+      const expectedSessionId = profile.ownerSessionId;
+      const expectedGeneration = profile.controlGeneration;
+      return this.withSessionControlLock(expectedSessionId, async () => {
+        const current = this.control.getProfile(request.publicPort);
+        if (
+          !current ||
+          current.ownerSessionId !== expectedSessionId ||
+          current.sessionStatus !== "active" ||
+          current.controlGeneration !== expectedGeneration
+        ) {
+          throw new BrowserGatewayControlError(
+            "CONTROL_GENERATION_STALE",
+            "Agent Session 已经变化，请重新点击显示最新标签页"
+          );
+        }
+        const target = await this.gateway.activateAgentTarget(
+          request.publicPort,
+          expectedSessionId,
+          expectedGeneration
+        );
+        let profileFocused = false;
+        let focusError = null;
+        try {
+          profileFocused = await this.focusGatewayProfile(current);
+        } catch (error) {
+          // The trusted CDP path has already activated and brought the tab forward.
+          // Keep that success visible while reporting that macOS could not confirm
+          // the exact Profile window as the frontmost application.
+          focusError = error instanceof Error ? error.message : String(error || "显示 Chrome Profile 失败");
+        }
+        return { ok: true, target, profileFocused, focusError };
+      });
     }
     if (request.action === "launch-profile") {
       if (this.gateway.registeredPorts().includes(request.publicPort)) {
@@ -308,14 +356,7 @@ export class BrowserGatewayDaemon {
       return { ok: true, restartNonce: this.control.prepareDaemonRestart(request.sessionId, request.daemonInstanceId) };
     }
     if (request.action === "control") {
-      const profile = request.command === "takeover"
-        ? this.control.delegateToUser(request.sessionId, "user_takeover", request.pendingUserAction)
-        : request.command === "complete"
-          ? this.control.delegateToUser(request.sessionId, "agent_complete")
-          : request.command === "return"
-            ? this.control.returnToAgent(request.sessionId)
-            : this.control.stopSession(request.sessionId);
-      return { ok: true, profile };
+      return this.withSessionControlLock(request.sessionId, () => this.handleSessionControl(request));
     }
     if (request.action === "raw-cdp") {
       const result = await this.gateway.callRaw(request);
@@ -346,6 +387,145 @@ export class BrowserGatewayDaemon {
       return { ok: true };
     }
     return { ok: false, error_code: "GATEWAY_UNKNOWN_ACTION", message: "未知 Gateway 操作" };
+  }
+
+  private async handleSessionControl(
+    request: Extract<GatewayControlRequest, { action: "control" }>
+  ): Promise<GatewayControlResponse> {
+    const sessionProfile = this.control.snapshot().profiles.find(
+      (profile) => profile.ownerSessionId === request.sessionId
+    );
+    const wasAgentControlled = Boolean(
+      sessionProfile?.sessionStatus === "active" && sessionProfile.ownership === "agent"
+    );
+    let executionQuiesced = false;
+    if (request.command === "takeover" && wasAgentControlled && sessionProfile) {
+      // 先在 Gateway 执行面封锁新命令，再等已发往 Chrome 的命令收敛。
+      // 这样 Playwright/MCP 即使没有 agent-browser 的本地 notice，也不会和用户并发操作。
+      const quiesced = await this.gateway.quiesceAgentSession(
+        sessionProfile.publicPort,
+        request.sessionId,
+        5_000
+      );
+      if (!quiesced) {
+        const error = new Error("当前浏览器命令在 5 秒内未结束，已取消接管") as Error & { code?: string };
+        error.code = "AGENT_COMMAND_BUSY";
+        throw error;
+      }
+      executionQuiesced = true;
+    }
+    let profile: GatewayProfileBinding;
+    try {
+      profile = request.command === "takeover"
+        ? this.control.delegateToUser(request.sessionId, "user_takeover", request.pendingUserAction)
+        : request.command === "complete"
+          ? this.control.delegateToUser(request.sessionId, "agent_complete")
+          : request.command === "return"
+            ? this.control.returnToAgent(request.sessionId)
+            : this.control.stopSession(request.sessionId);
+    } catch (error) {
+      if (executionQuiesced && sessionProfile) {
+        this.gateway.cancelAgentQuiesce(sessionProfile.publicPort, request.sessionId);
+      }
+      throw error;
+    }
+    if (profile.sessionStatus === "stopped" && sessionProfile) {
+      this.gateway.clearAgentTarget(sessionProfile.publicPort, request.sessionId);
+    }
+
+    let revealedTarget = null;
+    let revealError = null;
+    let profileFocused = false;
+    let revealAttempted = false;
+    if (
+      request.command === "takeover" &&
+      request.revealAgentTarget === true &&
+      wasAgentControlled &&
+      sessionProfile
+    ) {
+      revealAttempted = true;
+      try {
+        // delegateToUser has already revoked the Agent connection. The trusted
+        // activation is pinned to that exact user-owned control generation, and
+        // this whole transition is serialized against resume/stop for the Session.
+        await this.withHandoffRevealDeadline(async (signal, deadlineAt) => {
+          const activationTimeoutMs = Math.max(1, Math.min(1_500, deadlineAt - Date.now()));
+          revealedTarget = await this.gateway.activateDelegatedAgentTarget(
+            sessionProfile.publicPort,
+            request.sessionId,
+            profile.controlGeneration,
+            activationTimeoutMs
+          );
+          signal.throwIfAborted();
+          profileFocused = await this.focusGatewayProfile(profile, signal);
+        });
+      } catch (error) {
+        // The takeover is already effective and must never be rolled back merely
+        // because the target disappeared or macOS could not raise the exact window.
+        revealError = error instanceof Error ? error.message : String(error || "显示 Agent 标签页失败");
+      }
+    }
+    return {
+      ok: true,
+      profile,
+      ...(request.revealAgentTarget === true ? {
+        handoffTransitioned: wasAgentControlled,
+        revealAttempted,
+        revealedTarget,
+        profileFocused,
+        revealError
+      } : {})
+    };
+  }
+
+  private async focusGatewayProfile(profile: GatewayProfileBinding, signal?: AbortSignal): Promise<boolean> {
+    if (!profile.chromePid) {
+      throw new Error("Gateway 没有记录这个 Chrome Profile 的进程，无法精确带到台前");
+    }
+    const focused = await this.focusProfileWindow([profile.chromePid], signal);
+    if (!focused) {
+      throw new Error("macOS 没有确认目标 Chrome Profile 已到台前");
+    }
+    return true;
+  }
+
+  private async withHandoffRevealDeadline<T>(
+    operation: (signal: AbortSignal, deadlineAt: number) => Promise<T>
+  ): Promise<T> {
+    const controller = new AbortController();
+    const deadlineAt = Date.now() + this.handoffRevealDeadlineMs;
+    const timeoutError = new Error(
+      `自动显示 Agent 标签页超过 ${this.handoffRevealDeadlineMs}ms 截止时间`
+    );
+    const aborted = new Promise<never>((_resolve, reject) => {
+      controller.signal.addEventListener("abort", () => reject(controller.signal.reason || timeoutError), { once: true });
+    });
+    const timer = setTimeout(() => controller.abort(timeoutError), this.handoffRevealDeadlineMs);
+    timer.unref?.();
+    try {
+      return await Promise.race([operation(controller.signal, deadlineAt), aborted]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async withSessionControlLock<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.sessionControlQueues.get(sessionId) || Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.catch(() => undefined).then(() => gate);
+    this.sessionControlQueues.set(sessionId, tail);
+    await previous.catch(() => undefined);
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.sessionControlQueues.get(sessionId) === tail) {
+        this.sessionControlQueues.delete(sessionId);
+      }
+    }
   }
 
   private acquireDaemonLock(): void {

@@ -174,24 +174,6 @@ test("renderer takeover util filters agent-driven CDP clients", () => {
   );
 });
 
-test("renderer takeover state action loads API history through merge and render", async () => {
-  const { actions, calls, store } = loadStateActionsHarness({
-    apiHistory: [
-      takeoverEvent(3),
-      takeoverEvent(1, { profileId: "api-old" })
-    ],
-    storeHistory: [takeoverEvent(2)]
-  });
-
-  await actions.loadTakeoverHistory();
-
-  assert.deepEqual(
-    store.agentTakeoverHistory.map((event) => event.profileId),
-    ["profile-3", "profile-2", "api-old"]
-  );
-  assert.equal(calls.renderCount, 1);
-});
-
 test("renderer mini takeover requires a second click before executing", async () => {
   const harness = loadMainHarness({
     profile: profile({
@@ -314,38 +296,6 @@ function loadUtilHarness() {
       }
     }
   });
-}
-
-function loadStateActionsHarness({ apiHistory, storeHistory }) {
-  const calls = { renderCount: 0 };
-  const store = {
-    agentTakeoverHistory: storeHistory || [],
-    extensionScan: null,
-    selectedExtensionIds: new Set()
-  };
-  const actions = loadTsModule("src/renderer/state-actions.ts", {
-    stubs: {
-      "src/renderer/api.ts": {
-        profileApi() {
-          return {
-            async getTakeoverHistory() {
-              return apiHistory || [];
-            }
-          };
-        }
-      },
-      "src/renderer/render/render-root.ts": {
-        render() {
-          calls.renderCount += 1;
-        }
-      },
-      "src/renderer/state.ts": {
-        store
-      }
-    }
-  });
-
-  return { actions, calls, store };
 }
 
 function loadMainHarness({ profile: activeProfile }) {
@@ -527,8 +477,6 @@ function loadMainHarness({ profile: activeProfile }) {
       "src/renderer/state-actions.ts": {
         invalidateExtensionMigrationDiff() {},
         loadState: async () => {},
-        loadTakeoverHistory: async () => {},
-        mergeAgentTakeoverHistory() {},
         refreshExtensionMigrationDiff() {},
         refreshGlobalInstructions() {},
         repairClaudeInstructionShell() {},
@@ -598,18 +546,6 @@ function takeoverResponse(patch = {}) {
     successCount: 1,
     takeovers: [],
     targetCount: 1,
-    ...patch
-  };
-}
-
-function takeoverEvent(index, patch = {}) {
-  return {
-    agent: "Codex",
-    at: `2026-07-08T12:${String(index).padStart(2, "0")}:00.000Z`,
-    profileId: `profile-${index}`,
-    profileName: `Profile ${index}`,
-    session: `session-${index}`,
-    sessionTitle: `Session ${index}`,
     ...patch
   };
 }

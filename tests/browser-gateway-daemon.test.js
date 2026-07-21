@@ -14,8 +14,9 @@ test("gatewayd owns the Chrome pipe, control socket and public ticketed WebSocke
   const home = mkdtempSync(path.join(os.tmpdir(), "profilepilot-gateway-daemon-"));
   const fakeChrome = writeFakeChrome(home);
   const unpackedExtension = writeUnpackedExtension(home);
+  const chromeCallsPath = path.join(home, "fake-chrome-calls.ndjson");
   const port = await freePort();
-  const daemon = new BrowserGatewayDaemon(home);
+  const daemon = testGatewayDaemon(home);
   await daemon.start();
   const controlEvents = [];
   const subscription = subscribeBrowserGatewayEvents({
@@ -31,7 +32,8 @@ test("gatewayd owns the Chrome pipe, control socket and public ticketed WebSocke
       profileName: "Profile A",
       publicPort: port,
       executable: process.execPath,
-      args: [fakeChrome]
+      args: [fakeChrome],
+      env: { FAKE_CHROME_CALLS_PATH: chromeCallsPath }
     }, { homeDir: home });
     assert.equal(launched.ok, true);
     await waitFor(() => controlEvents.some((event) => event.reason === "register-profile"), "launch event delivered");
@@ -71,7 +73,23 @@ test("gatewayd owns the Chrome pipe, control socket and public ticketed WebSocke
       method: "Target.activateTarget",
       params: { targetId: "page-1" }
     }, { homeDir: home });
-    assert.deepEqual(raw.result, { echoed: "Target.activateTarget" });
+    assert.deepEqual(raw.result, {});
+    assert.equal(
+      readJsonLines(chromeCallsPath).some((message) => message.method === "Target.activateTarget"),
+      false,
+      "Agent Raw CDP activation must stay logical"
+    );
+
+    const revealed = await requestBrowserGateway({
+      action: "activate-agent-target",
+      publicPort: port
+    }, { homeDir: home });
+    assert.equal(revealed.target.targetId, "page-1");
+    assert.equal(
+      readJsonLines(chromeCallsPath).filter((message) => message.method === "Target.activateTarget").length,
+      1,
+      "ProfilePilot's trusted reveal path must still activate Chrome"
+    );
 
     const loaded = await requestBrowserGateway({
       action: "load-unpacked-extension",
@@ -139,6 +157,7 @@ test("agent-browser wrapper transparently connects through a Gateway ticket and 
   const home = mkdtempSync(path.join(os.tmpdir(), "profilepilot-gateway-wrapper-"));
   const fakeChrome = writeFakeChrome(home);
   const unpackedExtension = writeUnpackedExtension(home);
+  const chromeCallsPath = path.join(home, "fake-chrome-calls.ndjson");
   const fakeAgentBrowser = path.join(home, "fake-agent-browser.js");
   const callsPath = path.join(home, "agent-browser-calls.ndjson");
   const holderPidPath = path.join(home, "holder.pid");
@@ -165,7 +184,7 @@ if (connectIndex >= 0) {
 `);
   chmodSync(fakeAgentBrowser, 0o755);
   const port = await freePort();
-  const daemon = new BrowserGatewayDaemon(home);
+  const daemon = testGatewayDaemon(home);
   await daemon.start();
   try {
     await requestBrowserGateway({
@@ -174,7 +193,8 @@ if (connectIndex >= 0) {
       profileName: "Profile A",
       publicPort: port,
       executable: process.execPath,
-      args: [fakeChrome]
+      args: [fakeChrome],
+      env: { FAKE_CHROME_CALLS_PATH: chromeCallsPath }
     }, { homeDir: home });
     const env = {
       ...process.env,
@@ -219,6 +239,16 @@ if (connectIndex >= 0) {
       unpackedExtension
     ], env), 0);
     assert.equal(readAgentBrowserProfileLeaseSync(port, home).session, "cx-wrapper");
+    await requestBrowserGateway({
+      action: "raw-cdp",
+      publicPort: port,
+      sessionId: "cx-wrapper",
+      daemonInstanceId: profile.daemonInstanceId,
+      method: "Target.attachToTarget",
+      params: { targetId: "page-1", flatten: true }
+    }, { homeDir: home });
+    const activationCountBeforeHandoff = readJsonLines(chromeCallsPath)
+      .filter((message) => message.method === "Target.activateTarget").length;
     assert.equal(await runAgentBrowserWrapper([
       "profilepilot",
       "handoff",
@@ -232,6 +262,48 @@ if (connectIndex >= 0) {
     assert.equal(handedOffProfile.sessionStatus, "active");
     assert.equal(handedOffProfile.pendingUserAction, "手动加载未打包扩展");
     assert.equal(readAgentBrowserProfileLeaseSync(port, home).delegatedToUser, true);
+    assert.equal(
+      readJsonLines(chromeCallsPath).filter((message) => message.method === "Target.activateTarget").length,
+      activationCountBeforeHandoff + 1,
+      "Agent-initiated handoff must reveal the logical target through the trusted path"
+    );
+    const repeatedHandoff = await requestBrowserGateway({
+      action: "control",
+      sessionId: "cx-wrapper",
+      command: "takeover",
+      pendingUserAction: "手动加载未打包扩展",
+      revealAgentTarget: true
+    }, { homeDir: home });
+    assert.equal(repeatedHandoff.handoffTransitioned, false);
+    assert.equal(repeatedHandoff.revealAttempted, false);
+    assert.equal(repeatedHandoff.revealedTarget, null);
+    assert.equal(repeatedHandoff.profileFocused, false);
+    assert.equal(
+      readJsonLines(chromeCallsPath).filter((message) => message.method === "Target.activateTarget").length,
+      activationCountBeforeHandoff + 1,
+      "repeating an already-user-owned handoff must not focus Chrome again"
+    );
+    const repeatedWrites = captureProcessWrites();
+    try {
+      assert.equal(await runAgentBrowserWrapper([
+        "profilepilot",
+        "handoff",
+        "--reason",
+        "手动加载未打包扩展"
+      ], env), 0);
+    } finally {
+      repeatedWrites.restore();
+    }
+    const repeatedChunk = repeatedWrites.stdout.find((chunk) => (
+      chunk.includes('"session": "cx-wrapper"') && chunk.includes('"action": "handoff"')
+    ));
+    assert.ok(repeatedChunk, "wrapper must emit the repeated handoff result");
+    const repeatedOutput = JSON.parse(repeatedChunk);
+    assert.equal(repeatedOutput.handoff_transitioned, false);
+    assert.equal(repeatedOutput.reveal_attempted, false);
+    assert.equal(repeatedOutput.reveal_confirmed, false);
+    assert.equal(repeatedOutput.reveal_skipped, "already_user_owned");
+    assert.doesNotMatch(repeatedOutput.message, /已带到台前/);
 
     assert.equal(
       await runAgentBrowserWrapper(["profilepilot", "complete"], env),
@@ -260,6 +332,235 @@ if (connectIndex >= 0) {
   }
 });
 
+test("handoff reveal has one abortable deadline while takeover ownership remains committed", async () => {
+  const home = mkdtempSync("/tmp/pp-gw-deadline-");
+  const fakeChrome = writeFakeChrome(home);
+  const chromeCallsPath = path.join(home, "fake-chrome-calls.ndjson");
+  const port = await freePort();
+  let focusAborted = false;
+  let focusStartedResolve;
+  const focusStarted = new Promise((resolve) => { focusStartedResolve = resolve; });
+  const daemon = new BrowserGatewayDaemon(home, {
+    handoffRevealDeadlineMs: 80,
+    focusProfileWindow: async (_pids, signal) => {
+      focusStartedResolve();
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => {
+          focusAborted = true;
+          reject(signal.reason);
+        }, { once: true });
+      });
+    }
+  });
+  await daemon.start();
+  try {
+    await requestBrowserGateway({
+      action: "launch-profile",
+      profileId: "profile-deadline",
+      profileName: "Profile Deadline",
+      publicPort: port,
+      executable: process.execPath,
+      args: [fakeChrome],
+      env: { FAKE_CHROME_CALLS_PATH: chromeCallsPath }
+    }, { homeDir: home });
+    await requestBrowserGateway({
+      action: "acquire",
+      publicPort: port,
+      sessionId: "cx-handoff-deadline",
+      daemonInstanceId: "daemon-handoff-deadline"
+    }, { homeDir: home });
+    await requestBrowserGateway({
+      action: "raw-cdp",
+      publicPort: port,
+      sessionId: "cx-handoff-deadline",
+      daemonInstanceId: "daemon-handoff-deadline",
+      method: "Target.activateTarget",
+      params: { targetId: "page-1" }
+    }, { homeDir: home });
+
+    const startedAt = Date.now();
+    const handoff = requestBrowserGateway({
+      action: "control",
+      sessionId: "cx-handoff-deadline",
+      command: "takeover",
+      pendingUserAction: "完成登录",
+      revealAgentTarget: true
+    }, { homeDir: home, timeoutMs: 1_000 });
+    await focusStarted;
+    const result = await handoff;
+
+    assert.equal(result.handoffTransitioned, true);
+    assert.equal(result.revealAttempted, true);
+    assert.ok(result.revealedTarget);
+    assert.equal(result.profileFocused, false);
+    assert.match(result.revealError, /超过 80ms 截止时间/);
+    assert.equal(focusAborted, true, "deadline must abort the in-flight Profile focus operation");
+    assert.ok(Date.now() - startedAt < 800, "daemon must answer before the wrapper-side timeout");
+    const status = await requestBrowserGateway({ action: "status" }, { homeDir: home });
+    const profile = status.state.profiles.find((item) => item.publicPort === port);
+    assert.equal(profile.ownership, "user", "focus timeout must not roll back a committed takeover");
+  } finally {
+    await daemon.stop();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("handoff reveal is serialized before the same Session can return to Agent control", async () => {
+  // Keep the Unix control socket below macOS' sockaddr_un path limit.
+  const home = mkdtempSync("/tmp/pp-gw-race-");
+  const fakeChrome = writeFakeChrome(home);
+  const chromeCallsPath = path.join(home, "fake-chrome-calls.ndjson");
+  const port = await freePort();
+  let announceFocusStarted;
+  const focusStarted = new Promise((resolve) => {
+    announceFocusStarted = resolve;
+  });
+  let releaseFocus;
+  const focusGate = new Promise((resolve) => {
+    releaseFocus = resolve;
+  });
+  const daemon = new BrowserGatewayDaemon(home, {
+    focusProfileWindow: async () => {
+      announceFocusStarted();
+      await focusGate;
+      return true;
+    }
+  });
+  await daemon.start();
+  try {
+    await requestBrowserGateway({
+      action: "launch-profile",
+      profileId: "profile-race",
+      profileName: "Profile Race",
+      publicPort: port,
+      executable: process.execPath,
+      args: [fakeChrome],
+      env: { FAKE_CHROME_CALLS_PATH: chromeCallsPath }
+    }, { homeDir: home });
+    await requestBrowserGateway({
+      action: "acquire",
+      publicPort: port,
+      sessionId: "cx-handoff-race",
+      daemonInstanceId: "daemon-handoff-race"
+    }, { homeDir: home });
+    await requestBrowserGateway({
+      action: "raw-cdp",
+      publicPort: port,
+      sessionId: "cx-handoff-race",
+      daemonInstanceId: "daemon-handoff-race",
+      method: "Target.activateTarget",
+      params: { targetId: "page-1" }
+    }, { homeDir: home });
+
+    const handoff = requestBrowserGateway({
+      action: "control",
+      sessionId: "cx-handoff-race",
+      command: "takeover",
+      pendingUserAction: "完成登录",
+      revealAgentTarget: true
+    }, { homeDir: home, timeoutMs: 8_000 });
+    await focusStarted;
+    let returnFinished = false;
+    const returned = requestBrowserGateway({
+      action: "control",
+      sessionId: "cx-handoff-race",
+      command: "return"
+    }, { homeDir: home, timeoutMs: 8_000 }).then((value) => {
+      returnFinished = true;
+      return value;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(returnFinished, false, "return must wait until the trusted handoff reveal finishes");
+    releaseFocus();
+    const [handoffResult, returnResult] = await Promise.all([handoff, returned]);
+    assert.equal(handoffResult.profileFocused, true);
+    assert.equal(returnResult.profile.ownership, "agent");
+    assert.equal(
+      readJsonLines(chromeCallsPath).filter((message) => message.method === "Target.activateTarget").length,
+      1,
+      "only the trusted handoff transition may activate the tab"
+    );
+  } finally {
+    releaseFocus?.();
+    await daemon.stop();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("explicit Agent target reveal is serialized before the same Session can stop", async () => {
+  const home = mkdtempSync("/tmp/pp-gw-show-race-");
+  const fakeChrome = writeFakeChrome(home);
+  const chromeCallsPath = path.join(home, "fake-chrome-calls.ndjson");
+  const port = await freePort();
+  let announceFocusStarted;
+  const focusStarted = new Promise((resolve) => { announceFocusStarted = resolve; });
+  let releaseFocus;
+  const focusGate = new Promise((resolve) => { releaseFocus = resolve; });
+  const daemon = new BrowserGatewayDaemon(home, {
+    focusProfileWindow: async () => {
+      announceFocusStarted();
+      await focusGate;
+      return true;
+    }
+  });
+  await daemon.start();
+  try {
+    await requestBrowserGateway({
+      action: "launch-profile",
+      profileId: "profile-show-race",
+      profileName: "Profile Show Race",
+      publicPort: port,
+      executable: process.execPath,
+      args: [fakeChrome],
+      env: { FAKE_CHROME_CALLS_PATH: chromeCallsPath }
+    }, { homeDir: home });
+    await requestBrowserGateway({
+      action: "acquire",
+      publicPort: port,
+      sessionId: "cx-show-race",
+      daemonInstanceId: "daemon-show-race"
+    }, { homeDir: home });
+    await requestBrowserGateway({
+      action: "raw-cdp",
+      publicPort: port,
+      sessionId: "cx-show-race",
+      daemonInstanceId: "daemon-show-race",
+      method: "Target.activateTarget",
+      params: { targetId: "page-1" }
+    }, { homeDir: home });
+
+    const reveal = requestBrowserGateway({
+      action: "activate-agent-target",
+      publicPort: port
+    }, { homeDir: home, timeoutMs: 8_000 });
+    await focusStarted;
+    let stopFinished = false;
+    const stopped = requestBrowserGateway({
+      action: "control",
+      sessionId: "cx-show-race",
+      command: "stop"
+    }, { homeDir: home, timeoutMs: 8_000 }).then((value) => {
+      stopFinished = true;
+      return value;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(stopFinished, false, "stop must wait until explicit Agent target reveal finishes");
+    releaseFocus();
+    const [revealResult, stopResult] = await Promise.all([reveal, stopped]);
+    assert.equal(revealResult.profileFocused, true);
+    assert.equal(stopResult.profile.sessionStatus, "stopped");
+    assert.equal(
+      readJsonLines(chromeCallsPath).filter((message) => message.method === "Target.activateTarget").length,
+      1,
+      "only the generation-bound trusted reveal may activate the tab"
+    );
+  } finally {
+    releaseFocus?.();
+    await daemon.stop();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("agent-browser request auto-starts a configured Profile whose Gateway port is idle", async () => {
   const home = mkdtempSync(path.join(os.tmpdir(), "profilepilot-gateway-auto-launch-"));
   const dataDir = path.join(home, "profilepilot-data");
@@ -277,7 +578,7 @@ test("agent-browser request auto-starts a configured Profile whose Gateway port 
       lastCdpPort: port
     }]
   })}\n`);
-  const daemon = new BrowserGatewayDaemon(home);
+  const daemon = testGatewayDaemon(home);
   await daemon.start();
   try {
     const initial = await requestBrowserGateway({ action: "status" }, { homeDir: home });
@@ -328,7 +629,7 @@ test("a Session bound to one Profile cannot auto-start a second configured Profi
       }
     ]
   })}\n`);
-  const daemon = new BrowserGatewayDaemon(home);
+  const daemon = testGatewayDaemon(home);
   await daemon.start();
   try {
     const initial = await requestBrowserGateway({ action: "status" }, { homeDir: home });
@@ -374,7 +675,7 @@ test("agent-browser request reports a clear error when an idle port has no confi
   const port = await freePort();
   mkdirSync(dataDir, { recursive: true });
   writeFileSync(path.join(dataDir, "profiles.json"), `${JSON.stringify({ profiles: [] })}\n`);
-  const daemon = new BrowserGatewayDaemon(home);
+  const daemon = testGatewayDaemon(home);
   await daemon.start();
   try {
     const initial = await requestBrowserGateway({ action: "status" }, { homeDir: home });
@@ -396,7 +697,7 @@ test("Gateway protects every registered port instead of special-casing 9223", as
   const home = mkdtempSync(path.join(os.tmpdir(), "profilepilot-gateway-multi-port-"));
   const fakeChrome = writeFakeChrome(home);
   const ports = await Promise.all([freePort(), freePort(), freePort()]);
-  const daemon = new BrowserGatewayDaemon(home);
+  const daemon = testGatewayDaemon(home);
   await daemon.start();
   try {
     let firstWebSocketUrl = "";
@@ -526,6 +827,12 @@ test("ensure defers a protocol upgrade while the old Gateway still owns live Chr
   }
 });
 
+function testGatewayDaemon(home) {
+  return new BrowserGatewayDaemon(home, {
+    focusProfileWindow: async () => true
+  });
+}
+
 function writeFakeChrome(home) {
   const fakeChrome = path.join(home, "fake-pipe-chrome.js");
   writeFileSync(fakeChrome, `#!${process.execPath}
@@ -542,8 +849,13 @@ input.on("data", (chunk) => {
     pending = pending.subarray(boundary + 1);
     if (!frame.length) continue;
     const message = JSON.parse(frame.toString("utf8"));
+    if (process.env.FAKE_CHROME_CALLS_PATH) {
+      fs.appendFileSync(process.env.FAKE_CHROME_CALLS_PATH, JSON.stringify(message) + "\\n");
+    }
     const result = message.method === "Target.getTargets"
       ? { targetInfos: [{ targetId: "page-1", type: "page", title: "Fixture", url: "https://example.test/" }] }
+      : message.method === "Target.attachToTarget"
+        ? { sessionId: "fake-flat-page-1" }
       : { echoed: message.method };
     output.write(JSON.stringify({ id: message.id, result }) + "\\0");
   }
@@ -551,6 +863,11 @@ input.on("data", (chunk) => {
 `);
   chmodSync(fakeChrome, 0o755);
   return fakeChrome;
+}
+
+function readJsonLines(filePath) {
+  if (!existsSync(filePath)) return [];
+  return readFileSync(filePath, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
 }
 
 function writeUnpackedExtension(home) {
@@ -614,4 +931,27 @@ function isPidAlive(pid) {
   } catch {
     return false;
   }
+}
+
+function captureProcessWrites() {
+  const stdout = [];
+  const stderr = [];
+  const originalStdoutWrite = process.stdout.write;
+  const originalStderrWrite = process.stderr.write;
+  process.stdout.write = (chunk) => {
+    stdout.push(String(chunk));
+    return true;
+  };
+  process.stderr.write = (chunk) => {
+    stderr.push(String(chunk));
+    return true;
+  };
+  return {
+    stdout,
+    stderr,
+    restore() {
+      process.stdout.write = originalStdoutWrite;
+      process.stderr.write = originalStderrWrite;
+    }
+  };
 }

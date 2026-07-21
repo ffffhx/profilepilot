@@ -8,7 +8,7 @@ import { delay, launchProfilePilotE2e } from "./e2e/lib/electron-driver.mjs";
 const EXTENSION_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 async function main() {
-  const app = await launchProfilePilotE2e();
+  const app = await launchProfilePilotE2e({ mode: "background", name: "e2e-sync-copy" });
   const { driver, dataDir } = app;
   try {
     await createProfile(driver, "E2E Sync Target");
@@ -28,10 +28,10 @@ async function main() {
     const targetId = `isolated:${targetStored.id}`;
     await openPicker(driver, "source");
     await driver.waitFor(`[data-action="select-account-sync-profile"][data-kind="source"][data-id="${sourceId}"]`);
-    await driver.click(`[data-action="select-account-sync-profile"][data-kind="source"][data-id="${sourceId}"]`);
+    await driver.domClick(`[data-action="select-account-sync-profile"][data-kind="source"][data-id="${sourceId}"]`);
     await openPicker(driver, "target");
     await driver.waitFor(`[data-action="select-account-sync-profile"][data-kind="target"][data-id="${targetId}"]`);
-    await driver.click(`[data-action="select-account-sync-profile"][data-kind="target"][data-id="${targetId}"]`);
+    await driver.domClick(`[data-action="select-account-sync-profile"][data-kind="target"][data-id="${targetId}"]`);
 
     const sourcePicker = await driver.query('[data-account-sync-select="source"] .profile-select-trigger');
     const targetPicker = await driver.query('[data-account-sync-select="target"] .profile-select-trigger');
@@ -39,13 +39,13 @@ async function main() {
     assert.match(targetPicker.text, /E2E Sync Target/);
 
     const includeData = await driver.query("[data-include-extension-data]");
-    if (!includeData.checked) await driver.click("[data-include-extension-data]");
+    if (!includeData.checked) await driver.domInput("[data-include-extension-data]", "", { checked: true });
     const launchTarget = await driver.query("[data-launch-synced-profile]");
-    if (launchTarget.checked) await driver.click("[data-launch-synced-profile]");
+    if (launchTarget.checked) await driver.domInput("[data-launch-synced-profile]", "", { checked: false });
 
-    await driver.click('[data-action="run-sync"]');
+    await driver.domClick('[data-action="run-sync"]');
     await driver.waitFor('[data-action="confirm-modal-action"]');
-    await driver.click('[data-action="confirm-modal-action"]');
+    await driver.domClick('[data-action="confirm-modal-action"]');
 
     await waitForFileContent(path.join(targetProfile, "Bookmarks"), "SOURCE_BOOKMARKS");
     await waitForFileContent(path.join(targetProfile, "Network", "Cookies"), "SOURCE_COOKIE_BYTES");
@@ -67,21 +67,18 @@ async function main() {
 }
 
 async function createProfile(driver, name) {
-  await driver.click('[data-action="new-profile"]');
+  await driver.domClick('[data-action="new-profile"]');
   await driver.waitFor("#profile-name");
-  await driver.fill("#profile-name", name);
-  await driver.click('[data-create-form] button[type="submit"]');
+  await driver.domInput("#profile-name", name);
+  await driver.domClick('[data-create-form] button[type="submit"]');
   await driver.waitFor("[data-profile-row]", (snapshot) => snapshot.text?.includes(name));
+  await driver.waitFor('[data-action="new-profile"]', (snapshot) => snapshot.exists && !snapshot.disabled);
 }
 
 async function openPicker(driver, kind) {
   const selector = `[data-account-sync-select="${kind}"] .profile-select-trigger`;
-  await driver.click(selector);
+  await driver.domClick(selector);
   await delay(80);
-  if ((await driver.query(selector)).attributes["aria-expanded"] !== "true") {
-    await driver.focus(selector);
-    await driver.press("Enter");
-  }
   await driver.waitFor(selector, (snapshot) => snapshot.attributes["aria-expanded"] === "true");
 }
 

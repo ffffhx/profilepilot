@@ -6,7 +6,6 @@ const { loadTsModule } = require("./helpers/load-ts-module.js");
 function loadStateActions(initialStore = {}) {
   const stateStub = {
     store: {
-      agentTakeoverHistory: [],
       extensionScan: { profileId: "source", extensions: [] },
       selectedExtensionIds: new Set(["a", "b"]),
       extensionScanPreviewCollapsed: true,
@@ -37,40 +36,6 @@ function loadStateActions(initialStore = {}) {
 
   return { actions, store: stateStub.store };
 }
-
-test("renderer mergeAgentTakeoverHistory merges, deduplicates, and sorts newest first", () => {
-  const duplicate = takeoverEvent(2, { session: "same-session", sessionTitle: "Same title" });
-  const { actions, store } = loadStateActions({
-    agentTakeoverHistory: [
-      takeoverEvent(1),
-      duplicate,
-      takeoverEvent(0, { profileId: "persisted-old" })
-    ]
-  });
-
-  actions.mergeAgentTakeoverHistory([
-    takeoverEvent(3),
-    duplicate,
-    takeoverEvent(4, { agent: "Claude Code" })
-  ]);
-
-  assert.deepEqual(
-    store.agentTakeoverHistory.map((event) => event.profileId),
-    ["profile-4", "profile-3", "profile-2", "profile-1", "persisted-old"]
-  );
-  assert.equal(store.agentTakeoverHistory.filter((event) => event.session === "same-session").length, 1);
-});
-
-test("renderer mergeAgentTakeoverHistory caps merged history at fifty newest events", () => {
-  const { actions, store } = loadStateActions();
-  const events = Array.from({ length: 55 }, (_, index) => takeoverEvent(index));
-
-  actions.mergeAgentTakeoverHistory(events);
-
-  assert.equal(store.agentTakeoverHistory.length, 50);
-  assert.equal(store.agentTakeoverHistory[0].profileId, "profile-54");
-  assert.equal(store.agentTakeoverHistory.at(-1).profileId, "profile-5");
-});
 
 test("renderer normalizeMigrationProfileSelection clears invalid scan state and keeps source distinct from target", () => {
   const { actions, store } = loadStateActions({
@@ -125,17 +90,3 @@ test("renderer normalizeAccountSyncProfileSelection prefers a signed-in source a
   assert.equal(store.accountSyncResult, null);
   assert.equal(store.accountSyncMenuOpen, null);
 });
-
-test.skip("renderer takeover notice preview limit is skipped because renderAgentTakeoverNotice is a private DOM renderer");
-
-function takeoverEvent(index, patch = {}) {
-  return {
-    profileId: `profile-${index}`,
-    profileName: `Profile ${index}`,
-    session: `session-${index}`,
-    sessionTitle: `Session ${index}`,
-    agent: "Codex",
-    at: `2026-07-08T12:${String(index).padStart(2, "0")}:00.000Z`,
-    ...patch
-  };
-}

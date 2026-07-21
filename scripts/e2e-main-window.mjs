@@ -163,9 +163,6 @@ function verifyMainWindowSmoke(smoke, homeDir) {
 
   assert.deepEqual(smoke.statusLabels, ["当前运行", "已管理", "运行中"]);
   assert.equal(smoke.accountSyncTitle, "同步");
-  assert.equal(smoke.accountSyncDiffButton, "扫描账号差异");
-  assert.equal(smoke.extensionScanButton, "扫描插件差异");
-  assert.equal(smoke.migrationTitle, "插件明细");
   assert.ok(smoke.buttonCount >= 10, "main window should render its primary controls");
   assert.ok(smoke.shellWidthRatio >= 0.9 && smoke.shellWidthRatio <= 1, "main shell should fill the window");
   assert.equal(smoke.profileTableHasHorizontalOverflow, false);

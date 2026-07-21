@@ -7,7 +7,7 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { delay, repoRoot } from "./e2e/lib/electron-driver.mjs";
+import { assertDesktopE2eAllowed, delay, repoRoot } from "./e2e/lib/electron-driver.mjs";
 
 const require = createRequire(import.meta.url);
 const { launchInputGuardCompanion } = require("../dist/main/input-guard-companion.js");
@@ -18,6 +18,7 @@ async function main() {
     console.log("[e2e:input-guard] SKIP: system Input Guard is macOS-only");
     return;
   }
+  assertDesktopE2eAllowed("e2e-input-guard");
 
   const compileDir = await mkdtemp(path.join(os.tmpdir(), "pp-input-guard-e2e-"));
   const pointer = path.join(compileDir, "native-pointer");
@@ -68,19 +69,19 @@ async function main() {
     await guard.waitFor((message) => message.status === "sync-complete" && message.activeCount === 1, 8_000);
     step(`active CGEventTap attached to native GUI PID ${target.pid}`);
 
-    await postClick(pointer, point);
+    await postClick(pointer, point, target.pid);
     await guard.waitFor((message) => message.type === "mouse" && message.pid === target.pid, 5_000);
     await delay(300);
     await assert.rejects(readFile(marker, "utf8"), (error) => error?.code === "ENOENT");
-    step("real system mouse event reached Input Guard and was suppressed before the target window");
+    step("real system mouse event reached Input Guard and was suppressed before the target process event stream");
 
     guard.write("SET\n");
     await guard.waitFor((message) => message.status === "tap-removed" && message.pid === target.pid, 8_000);
     await guard.waitFor((message) => message.status === "sync-complete" && message.activeCount === 0, 8_000);
-    await postClick(pointer, point);
+    await postClick(pointer, point, target.pid);
     await waitForFile(marker, 5_000);
     assert.equal(await readFile(marker, "utf8"), "clicked\n");
-    step("the same system mouse event reached the target window after Input Guard release");
+    step("the same system mouse event reached the target process after Input Guard release");
     step("PASS");
   } catch (error) {
     if (guard) console.error(`[e2e:input-guard] guard output:\n${guard.output}`);
@@ -180,8 +181,8 @@ function waitForJsonLine(child, predicate, timeoutMs) {
   });
 }
 
-async function postClick(pointer, point) {
-  const { stderr } = await execFileAsync(pointer, ["0", String(point.x), String(point.y)]);
+async function postClick(pointer, point, targetPid) {
+  const { stderr } = await execFileAsync(pointer, [String(targetPid), String(point.x), String(point.y)]);
   if (stderr.trim()) step(`native pointer: ${stderr.trim().split("\n").slice(0, 2).join("; ")}`);
 }
 

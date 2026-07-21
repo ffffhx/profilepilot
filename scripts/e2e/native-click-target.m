@@ -2,6 +2,23 @@
 #import <Cocoa/Cocoa.h>
 
 static NSString *markerPath = nil;
+static CFMachPortRef processEventTap = NULL;
+static CFRunLoopSourceRef processEventTapSource = NULL;
+
+static CGEventRef observeProcessMouse(
+    CGEventTapProxy proxy,
+    CGEventType type,
+    CGEventRef event,
+    void *userInfo) {
+  (void)proxy;
+  (void)userInfo;
+  if (type == kCGEventLeftMouseDown) {
+    [@"clicked\n" writeToFile:markerPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    printf("{\"type\":\"clicked\",\"source\":\"process-event-tap\"}\n");
+    fflush(stdout);
+  }
+  return event;
+}
 
 @interface ClickTargetView : NSView
 @end
@@ -33,6 +50,25 @@ int main(int argc, const char *argv[]) {
     [window setContentView:[[ClickTargetView alloc] initWithFrame:NSMakeRect(0, 0, 320, 200)]];
     [window makeKeyAndOrderFront:nil];
     [application activateIgnoringOtherApps:YES];
+
+    processEventTap = CGEventTapCreateForPid(
+        getpid(),
+        kCGTailAppendEventTap,
+        kCGEventTapOptionListenOnly,
+        CGEventMaskBit(kCGEventLeftMouseDown),
+        observeProcessMouse,
+        NULL);
+    if (processEventTap == NULL) {
+      fprintf(stderr, "Unable to create target process event tap\n");
+      return 3;
+    }
+    processEventTapSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, processEventTap, 0);
+    if (processEventTapSource == NULL) {
+      fprintf(stderr, "Unable to create target process event tap source\n");
+      return 3;
+    }
+    CFRunLoopAddSource(CFRunLoopGetCurrent(), processEventTapSource, kCFRunLoopCommonModes);
+    CGEventTapEnable(processEventTap, true);
 
     const CGWindowID windowId = (CGWindowID)[window windowNumber];
     CFArrayRef infoArray = CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow, windowId);

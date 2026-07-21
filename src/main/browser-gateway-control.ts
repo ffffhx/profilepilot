@@ -11,6 +11,7 @@ const RESTART_NONCE_TTL_MS = 15_000;
 export type GatewayOwnership = "agent" | "user";
 export type GatewaySessionStatus = "active" | "stopped";
 export type GatewayAgentHealth = "online" | "waiting" | "offline";
+export type GatewayDriverKind = "agent-browser" | "playwright-cli" | "chrome-devtools-mcp";
 
 export interface GatewayProfileBinding {
   profileId: string;
@@ -20,6 +21,8 @@ export interface GatewayProfileBinding {
   ownerSessionId?: string;
   daemonInstanceId?: string;
   daemonPid?: number;
+  driverKind?: GatewayDriverKind;
+  driverLabel?: string;
   agent?: string;
   project?: string;
   pendingUserAction?: string;
@@ -35,6 +38,8 @@ export interface GatewayAcquireRequest {
   sessionId: string;
   daemonInstanceId: string;
   daemonPid?: number;
+  driverKind?: GatewayDriverKind;
+  driverLabel?: string;
   agent?: string;
   project?: string;
   restartNonce?: string;
@@ -220,6 +225,19 @@ export class BrowserGatewayControlPlane {
       );
     }
 
+    const requestedDriverKind = normalizeDriverKind(request.driverKind);
+    if (
+      profile.ownerSessionId === sessionId &&
+      profile.sessionStatus === "active" &&
+      profile.driverKind &&
+      profile.driverKind !== requestedDriverKind
+    ) {
+      throw new BrowserGatewayControlError(
+        "SESSION_DAEMON_DUPLICATE",
+        `Session ${sessionId} 已由 ${driverLabel(profile.driverKind)} 驱动，请先结束原驱动会话`
+      );
+    }
+
     if (
       profile.ownerSessionId === sessionId &&
       profile.daemonInstanceId &&
@@ -236,6 +254,8 @@ export class BrowserGatewayControlPlane {
     profile.ownerSessionId = sessionId;
     profile.daemonInstanceId = daemonInstanceId;
     profile.daemonPid = normalizePid(request.daemonPid);
+    profile.driverKind = requestedDriverKind;
+    profile.driverLabel = optionalString(request.driverLabel) || driverLabel(profile.driverKind);
     profile.agent = optionalString(request.agent);
     profile.project = optionalString(request.project);
     profile.pendingUserAction = undefined;
@@ -357,6 +377,8 @@ export class BrowserGatewayControlPlane {
     profile.ownerSessionId = undefined;
     profile.daemonInstanceId = undefined;
     profile.daemonPid = undefined;
+    profile.driverKind = undefined;
+    profile.driverLabel = undefined;
     profile.agent = undefined;
     profile.project = undefined;
     profile.pendingUserAction = undefined;
@@ -627,6 +649,17 @@ function requiredString(value: string, name: string): string {
 function optionalString(value: string | undefined): string | undefined {
   const normalized = String(value || "").trim();
   return normalized ? normalized.slice(0, 500) : undefined;
+}
+
+function normalizeDriverKind(value: GatewayDriverKind | undefined): GatewayDriverKind {
+  if (value === "playwright-cli" || value === "chrome-devtools-mcp") return value;
+  return "agent-browser";
+}
+
+function driverLabel(kind: GatewayDriverKind): string {
+  if (kind === "playwright-cli") return "Playwright CLI";
+  if (kind === "chrome-devtools-mcp") return "Chrome DevTools MCP";
+  return "agent-browser";
 }
 
 function safeId(value: string, name: string): string {

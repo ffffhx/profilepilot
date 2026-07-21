@@ -1,5 +1,6 @@
 const assert = require("node:assert/strict");
 const { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
+const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
@@ -38,6 +39,7 @@ const {
   writeAgentBrowserCommandStateSync,
   writeAgentBrowserSessionActivitySync
 } = require("../dist/main/agent-browser-session.js");
+const { browserGatewaySocketPath } = require("../dist/main/browser-gateway-client.js");
 
 test("agent-browser wrapper resolves session from args before env", () => {
   assert.equal(sessionFromAgentBrowserArgs(["--session", "cx-arg", "open"], { AGENT_BROWSER_SESSION: "cx-env" }), "cx-arg");
@@ -354,6 +356,108 @@ test("agent-browser wrapper requires an explicit reason for handoff", async () =
 
   assert.equal(exitCode, PROFILEPILOT_AGENT_BROWSER_USAGE_EXIT_CODE);
   assert.match(writes.stderr.join(""), /handoff 必须通过 --reason/);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("agent-browser wrapper reconciles its lease from Gateway ownership after a failed handoff response", async () => {
+  const home = makeTempHome();
+  const session = "cx-handoff-reconcile";
+  const port = 9223;
+  acquireAgentBrowserProfileLeaseSync({
+    cdpPort: port,
+    session,
+    holderPid: process.pid,
+    profileId: "profile-reconcile",
+    profileName: "Profile Reconcile",
+    project: "profilepilot",
+    command: "snapshot"
+  }, home);
+  writeAgentBrowserSessionActivitySync({
+    session,
+    command: "snapshot",
+    cdpPort: port,
+    pid: process.pid,
+    cwd: "/tmp/profilepilot"
+  }, home);
+
+  let ownership = "agent";
+  const socketPath = browserGatewaySocketPath(home);
+  mkdirSync(path.dirname(socketPath), { recursive: true });
+  const server = net.createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      const boundary = buffer.indexOf("\n");
+      if (boundary < 0) return;
+      const request = JSON.parse(buffer.slice(0, boundary));
+      const profile = {
+        profileId: "profile-reconcile",
+        profileName: "Profile Reconcile",
+        publicPort: port,
+        ownerSessionId: session,
+        sessionStatus: "active",
+        ownership,
+        agentHealth: ownership === "user" ? "waiting" : "online",
+        pendingUserAction: ownership === "user" ? "完成登录" : undefined,
+        controlGeneration: ownership === "user" ? 2 : 1
+      };
+      if (request.action === "status") {
+        socket.end(`${JSON.stringify({ ok: true, state: { profiles: [profile] } })}\n`);
+        return;
+      }
+      if (request.action === "control" && request.command === "takeover") {
+        ownership = "user";
+        // Simulate an RPC failure after Gateway has durably committed ownership.
+        socket.end(`${JSON.stringify({
+          ok: false,
+          error_code: "TEST_RESPONSE_LOST_AFTER_COMMIT",
+          message: "response lost after takeover commit"
+        })}\n`);
+        return;
+      }
+      socket.end(`${JSON.stringify({ ok: false, error_code: "TEST_UNKNOWN", message: "unexpected request" })}\n`);
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, resolve);
+  });
+
+  const writes = captureProcessWrites();
+  let exitCode;
+  try {
+    exitCode = await runAgentBrowserWrapper([
+      "profilepilot",
+      "handoff",
+      "--reason",
+      "完成登录"
+    ], {
+      HOME: home,
+      AGENT_BROWSER_SESSION: session
+    });
+  } finally {
+    writes.restore();
+    await new Promise((resolve) => server.close(resolve));
+  }
+
+  assert.equal(exitCode, 0, "authoritative user ownership means the handoff itself succeeded");
+  assert.equal(readAgentBrowserProfileLeaseSync(port, home).delegatedToUser, true);
+  const notice = JSON.parse(readFileSync(
+    path.join(home, ".profilepilot", "agent-control", `${session}.json`),
+    "utf8"
+  ));
+  assert.equal(notice.handoffState, "quiesced");
+  assert.equal(notice.ownership, "agentDelegatedToUser");
+  const outputChunk = writes.stdout.find((chunk) => (
+    chunk.includes(`"session": "${session}"`) && chunk.includes('"action": "handoff"')
+  ));
+  assert.ok(outputChunk, "wrapper must emit the reconciled handoff result");
+  const output = JSON.parse(outputChunk);
+  assert.equal(output.ownership, "user");
+  assert.equal(output.reveal_confirmed, false);
+  assert.match(output.reveal_error, /重新查询并确认控制权在用户侧/);
+  assert.doesNotMatch(output.message, /已带到台前/);
   rmSync(home, { recursive: true, force: true });
 });
 

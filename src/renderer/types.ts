@@ -68,6 +68,8 @@ export interface GatewayProfileControlState {
   ownerSessionId: string | null;
   daemonInstanceId: string | null;
   daemonPid: number | null;
+  driverKind: BrowserDriverKind | null;
+  driverLabel: string | null;
   agent: string | null;
   project: string | null;
   agentTarget: {
@@ -185,9 +187,12 @@ export interface CdpContentionInfo {
   signal: ProfilePilotSignalInfo | null;
 }
 
+export type BrowserDriverKind = "agent-browser" | "playwright-cli" | "chrome-devtools-mcp";
+
 export interface CdpClientInfo {
   pid: number;
   label: string;
+  driverKind?: BrowserDriverKind;
   duplicatePids?: number[];
   // 这条连接背后是哪个 AI 工具的哪个会话（能解析出来时才有），用于悬停 tooltip。
   agent?: string;
@@ -752,8 +757,9 @@ export type ModalState =
   | { kind: "clone-pool" }
   | { kind: "clone-tag"; profileId: string }
   | { kind: "global-instructions" }
-  | { kind: "takeover-history" }
-  | { kind: "live-zoom"; profileId: string }
+  | { kind: "profile-details"; profileId: string }
+  | { kind: "external-details"; userDataDir: string }
+  | { kind: "live-zoom"; profileId: string; returnTo?: "profile-details" }
   | {
       kind: "confirm";
       intent: ConfirmIntent;

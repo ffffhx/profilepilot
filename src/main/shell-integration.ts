@@ -20,6 +20,14 @@ const END_MARK = "# <<< ProfilePilot session integration <<<";
 const WRAPPER_FILE_NAME = "profilepilot-agent-browser-wrapper.cjs";
 const LAUNCHER_FILE_NAME = "agent-browser";
 const WRAPPER_SIGNATURE = "PROFILEPILOT_AGENT_BROWSER_WRAPPER";
+const PLAYWRIGHT_WRAPPER_FILE_NAME = "profilepilot-playwright-cli-wrapper.cjs";
+const PLAYWRIGHT_LAUNCHER_FILE_NAME = "playwright-cli";
+const PLAYWRIGHT_WRAPPER_SIGNATURE = "PROFILEPILOT_PLAYWRIGHT_CLI_WRAPPER";
+const PLAYWRIGHT_LAUNCHER_SIGNATURE = "PROFILEPILOT_PLAYWRIGHT_CLI_LAUNCHER";
+const MCP_WRAPPER_FILE_NAME = "profilepilot-chrome-devtools-mcp-wrapper.cjs";
+const MCP_LAUNCHER_FILE_NAME = "chrome-devtools-mcp";
+const MCP_WRAPPER_SIGNATURE = "PROFILEPILOT_CHROME_DEVTOOLS_MCP_WRAPPER";
+const MCP_LAUNCHER_SIGNATURE = "PROFILEPILOT_CHROME_DEVTOOLS_MCP_LAUNCHER";
 const NODE_RUNTIME_SIGNATURE = "PROFILEPILOT_NODE_RUNTIME";
 const LAUNCHER_SIGNATURE = "PROFILEPILOT_AGENT_BROWSER_LAUNCHER";
 const BIN_DIR_SIGNATURE = "PROFILEPILOT_AGENT_BROWSER_BIN_DIR";
@@ -30,15 +38,18 @@ const EFFECTIVE_SIGNATURE = 'AGENT_BROWSER_SESSION="cc-$CLAUDE_CODE_SESSION_ID"'
 const CODEX_SIGNATURE = 'AGENT_BROWSER_SESSION="cx-$CODEX_THREAD_ID"';
 const WRAPPER_PATH = agentBrowserWrapperPath();
 const LAUNCHER_PATH = agentBrowserLauncherPath();
+const PLAYWRIGHT_WRAPPER_PATH = playwrightCliWrapperPath();
+const PLAYWRIGHT_LAUNCHER_PATH = playwrightCliLauncherPath();
+const MCP_WRAPPER_PATH = chromeDevtoolsMcpWrapperPath();
+const MCP_LAUNCHER_PATH = chromeDevtoolsMcpLauncherPath();
 const BIN_DIR_PATH = path.dirname(LAUNCHER_PATH);
 const NODE_RUNTIME_PATH = process.execPath;
 
 const INTEGRATION_BLOCK = [
   BEGIN_MARK,
-  "# 由 ProfilePilot 管理（可在 App 里一键移除）：AI agent 会话里自动为 agent-browser",
-  "# 注入独立 session——防多会话互抢标签页，并让驱动连接可归属到会话。",
-  "# 同时为 agent-browser 加一层薄 wrapper：用户接管/终止时，把 ProfilePilot notice",
-  "# 转成稳定 hard-stop code；同时按 Profile/CDP 端口加 Session 排他租约。",
+  "# 由 ProfilePilot 管理（可在 App 里一键移除）：为 agent-browser、Playwright CLI",
+  "# 和 Chrome DevTools MCP 注入统一 Session，并安装 Gateway 控制 wrapper。",
+  "# 用户接管/终止时 wrapper 输出稳定 hard-stop code，Profile/CDP 端口保持排他。",
   "# Claude Code 用会话 UUID（cc-）；Codex 用 thread UUID（cx-），都精确归属到会话。",
   'if [[ -n "$CLAUDE_CODE_SESSION_ID" && -z "$AGENT_BROWSER_SESSION" ]]; then',
   `  export ${EFFECTIVE_SIGNATURE}`,
@@ -46,7 +57,14 @@ const INTEGRATION_BLOCK = [
   'if [[ -n "$CODEX_THREAD_ID" && -z "$AGENT_BROWSER_SESSION" ]]; then',
   `  export ${CODEX_SIGNATURE}`,
   "fi",
+  'if [[ -n "$AGENT_BROWSER_SESSION" && -z "$PROFILEPILOT_SESSION" ]]; then',
+  '  export PROFILEPILOT_SESSION="$AGENT_BROWSER_SESSION"',
+  "fi",
   `export ${WRAPPER_SIGNATURE}=${shellQuote(WRAPPER_PATH)}`,
+  `export ${PLAYWRIGHT_WRAPPER_SIGNATURE}=${shellQuote(PLAYWRIGHT_WRAPPER_PATH)}`,
+  `export ${PLAYWRIGHT_LAUNCHER_SIGNATURE}=${shellQuote(PLAYWRIGHT_LAUNCHER_PATH)}`,
+  `export ${MCP_WRAPPER_SIGNATURE}=${shellQuote(MCP_WRAPPER_PATH)}`,
+  `export ${MCP_LAUNCHER_SIGNATURE}=${shellQuote(MCP_LAUNCHER_PATH)}`,
   `export ${NODE_RUNTIME_SIGNATURE}=${shellQuote(NODE_RUNTIME_PATH)}`,
   `export ${LAUNCHER_SIGNATURE}=${shellQuote(LAUNCHER_PATH)}`,
   `export ${BIN_DIR_SIGNATURE}=${shellQuote(BIN_DIR_PATH)}`,
@@ -65,6 +83,22 @@ export function agentBrowserWrapperPath(): string {
 
 export function agentBrowserLauncherPath(): string {
   return path.join(os.homedir(), ".profilepilot", "bin", LAUNCHER_FILE_NAME);
+}
+
+export function playwrightCliWrapperPath(): string {
+  return path.join(os.homedir(), ".profilepilot", "bin", PLAYWRIGHT_WRAPPER_FILE_NAME);
+}
+
+export function playwrightCliLauncherPath(): string {
+  return path.join(os.homedir(), ".profilepilot", "bin", PLAYWRIGHT_LAUNCHER_FILE_NAME);
+}
+
+export function chromeDevtoolsMcpWrapperPath(): string {
+  return path.join(os.homedir(), ".profilepilot", "bin", MCP_WRAPPER_FILE_NAME);
+}
+
+export function chromeDevtoolsMcpLauncherPath(): string {
+  return path.join(os.homedir(), ".profilepilot", "bin", MCP_LAUNCHER_FILE_NAME);
 }
 
 export function shellIntegrationFilePath(): string {
@@ -122,6 +156,11 @@ export async function setShellIntegrationEnabled(enabled: boolean): Promise<Shel
       status.managed &&
       (!content.includes(CODEX_SIGNATURE) ||
         !content.includes(WRAPPER_SIGNATURE) ||
+        !content.includes(PLAYWRIGHT_WRAPPER_SIGNATURE) ||
+        !content.includes(PLAYWRIGHT_LAUNCHER_SIGNATURE) ||
+        !content.includes(MCP_WRAPPER_SIGNATURE) ||
+        !content.includes(MCP_LAUNCHER_SIGNATURE) ||
+        !content.includes("PROFILEPILOT_SESSION") ||
         !content.includes(NODE_RUNTIME_SIGNATURE) ||
         !content.includes(LAUNCHER_SIGNATURE) ||
         !content.includes(BIN_DIR_SIGNATURE) ||
@@ -197,24 +236,52 @@ async function refreshManagedIntegrationBlock(filePath: string): Promise<void> {
 }
 
 async function installAgentBrowserWrapper(): Promise<void> {
-  const sourcePath = path.join(__dirname, WRAPPER_FILE_NAME);
+  await installBrowserDriverWrapper({
+    toolLabel: "agent-browser",
+    wrapperFileName: WRAPPER_FILE_NAME,
+    wrapperPath: agentBrowserWrapperPath(),
+    launcherPath: agentBrowserLauncherPath(),
+    wrapperSignature: WRAPPER_SIGNATURE
+  });
+  await installBrowserDriverWrapper({
+    toolLabel: "Playwright CLI",
+    wrapperFileName: PLAYWRIGHT_WRAPPER_FILE_NAME,
+    wrapperPath: playwrightCliWrapperPath(),
+    launcherPath: playwrightCliLauncherPath(),
+    wrapperSignature: PLAYWRIGHT_WRAPPER_SIGNATURE
+  });
+  await installBrowserDriverWrapper({
+    toolLabel: "Chrome DevTools MCP",
+    wrapperFileName: MCP_WRAPPER_FILE_NAME,
+    wrapperPath: chromeDevtoolsMcpWrapperPath(),
+    launcherPath: chromeDevtoolsMcpLauncherPath(),
+    wrapperSignature: MCP_WRAPPER_SIGNATURE
+  });
+}
+
+async function installBrowserDriverWrapper(input: {
+  toolLabel: string;
+  wrapperFileName: string;
+  wrapperPath: string;
+  launcherPath: string;
+  wrapperSignature: string;
+}): Promise<void> {
+  const sourcePath = path.join(__dirname, input.wrapperFileName);
   let source = "";
   try {
     source = await fs.readFile(sourcePath, "utf8");
   } catch (error) {
     throw new ProfileManagerError(
-      `找不到 agent-browser wrapper 编译产物：${sourcePath}（${error instanceof Error ? error.message : String(error)}）`,
-      "AGENT_BROWSER_WRAPPER_MISSING"
+      `找不到 ${input.toolLabel} wrapper 编译产物：${sourcePath}（${error instanceof Error ? error.message : String(error)}）`,
+      "BROWSER_DRIVER_WRAPPER_MISSING"
     );
   }
-  const targetPath = agentBrowserWrapperPath();
-  await writeTextFileAtomic(targetPath, source);
-  await fs.chmod(targetPath, 0o755).catch(() => undefined);
+  await writeTextFileAtomic(input.wrapperPath, source);
+  await fs.chmod(input.wrapperPath, 0o755).catch(() => undefined);
 
-  const launcherPath = agentBrowserLauncherPath();
   const launcher = [
     "#!/bin/sh",
-    `wrapper=\${${WRAPPER_SIGNATURE}:-${shellQuote(targetPath)}}`,
+    `wrapper=\${${input.wrapperSignature}:-${shellQuote(input.wrapperPath)}}`,
     `runtime=\${${NODE_RUNTIME_SIGNATURE}:-${shellQuote(NODE_RUNTIME_PATH)}}`,
     'if command -v node >/dev/null 2>&1; then',
     '  exec node "$wrapper" "$@"',
@@ -226,8 +293,8 @@ async function installAgentBrowserWrapper(): Promise<void> {
     "exit 127",
     ""
   ].join("\n");
-  await writeTextFileAtomic(launcherPath, launcher);
-  await fs.chmod(launcherPath, 0o755).catch(() => undefined);
+  await writeTextFileAtomic(input.launcherPath, launcher);
+  await fs.chmod(input.launcherPath, 0o755).catch(() => undefined);
 }
 
 async function writeTextFileAtomic(filePath: string, content: string): Promise<void> {

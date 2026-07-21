@@ -276,6 +276,24 @@ test("ProfileManager releases a completed agent-browser Session and Profile leas
   assert.deepEqual(result.failures, []);
 });
 
+test("ProfileManager completes Playwright and MCP drivers without treating ordinary Chrome as a driver", async () => {
+  for (const driverKind of ["playwright-cli", "chrome-devtools-mcp"]) {
+    const manager = createTakeoverHarness([
+      {
+        pid: 401,
+        label: driverKind === "playwright-cli" ? "Playwright CLI" : "Chrome DevTools MCP",
+        driverKind,
+        session: `cx-${driverKind}`
+      },
+      { pid: 402, label: "Chrome", session: `cx-${driverKind}` }
+    ]);
+    const result = await manager.completeAgentConnections("profile-1", { session: `cx-${driverKind}` });
+    assert.deepEqual(manager.operations, ["retire-gateway:401"]);
+    assert.equal(result.targetCount, 1);
+    assert.equal(result.successCount, 1);
+  }
+});
+
 test("ProfileManager orders Gateway revocation between durable notice and user unlock", async () => {
   const manager = createTakeoverHarness([
     { pid: 101, label: "agent-browser", session: "cx-gateway" }
@@ -585,6 +603,10 @@ function createTakeoverHarness(clients) {
   manager.removeAgentBrowserSessionFiles = async () => {};
   manager.retireCompletedAgentBrowserClient = async (client) => {
     manager.operations.push(`retire-completed:${client.pid}`);
+    manager.terminatedPids.push(client.pid);
+  };
+  manager.retireCompletedGatewayDriverClient = async (client) => {
+    manager.operations.push(`retire-gateway:${client.pid}`);
     manager.terminatedPids.push(client.pid);
   };
   manager.releaseAgentBrowserProfileLeases = (session) => {

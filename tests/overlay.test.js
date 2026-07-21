@@ -107,6 +107,62 @@ test("SessionTailer parses Claude Bash agent-browser commands", async () => {
   });
 });
 
+test("SessionTailer gives Playwright CLI browser commands first-class activity text", async () => {
+  await withTempHome(async (home) => {
+    const uuid = randomUUID();
+    await createClaudeSession(home, uuid, [{
+      type: "assistant",
+      message: {
+        content: [{
+          type: "tool_use",
+          name: "Bash",
+          input: {
+            command: "playwright-cli -s=checkout goto https://shop.example.test/cart"
+          }
+        }]
+      }
+    }]);
+    const tailer = startTailer(`cc-${uuid}`, {});
+    try {
+      const activity = await waitForActivity(
+        tailer,
+        (value) => value.currentAction === "打开 shop.example.test",
+        "Playwright CLI activity"
+      );
+      assert.equal(activity.targetUrl, "shop.example.test/cart");
+    } finally {
+      tailer.stop();
+    }
+  });
+});
+
+test("SessionTailer gives Chrome DevTools MCP calls first-class activity text", async () => {
+  await withTempHome(async (home) => {
+    const uuid = randomUUID();
+    await createCodexSession(home, uuid, [{
+      type: "response_item",
+      payload: {
+        item: {
+          type: "function_call",
+          name: "mcp__chrome-devtools__navigate_page",
+          arguments: JSON.stringify({ url: "https://docs.example.test/guide" })
+        }
+      }
+    }]);
+    const tailer = startTailer(`cx-${uuid}`, {});
+    try {
+      const activity = await waitForActivity(
+        tailer,
+        (value) => value.currentAction === "打开 docs.example.test",
+        "Chrome DevTools MCP activity"
+      );
+      assert.equal(activity.targetUrl, "docs.example.test/guide");
+    } finally {
+      tailer.stop();
+    }
+  });
+});
+
 test("SessionTailer parses Claude assistant text", async () => {
   await withTempHome(async (home) => {
     const uuid = randomUUID();
@@ -371,6 +427,25 @@ test("agent overlay bootstrap script has static safety hooks and valid syntax", 
     script.indexOf('signal("stop", { stopAll: true, reason: "user_stop" });') < script.indexOf("window.__ppAgentOverlayTeardown ="),
     "terminal stop dispatches the binding before fully tearing down its current overlay"
   );
+  const terminalStopBranch = script.slice(
+    script.indexOf("// Suppress leaked/late future-document bootstraps"),
+    script.indexOf("\n  function updateStopButton()")
+  );
+  assert.doesNotMatch(
+    terminalStopBranch,
+    /resetStopConfirm\(\)/,
+    "confirmed stop keeps its visual state until the overlay is removed"
+  );
+  const teardownBranch = script.slice(
+    script.indexOf("window.__ppAgentOverlayTeardown ="),
+    script.indexOf("\n\n  // 不在 bootstrap 阶段直接 mount")
+  );
+  assert.match(teardownBranch, /clearTimeout\(stopConfirmTimer\)/);
+  assert.doesNotMatch(
+    teardownBranch,
+    /resetStopConfirm\(\)/,
+    "teardown must not repaint the confirmation button before removing its host"
+  );
   new vm.Script(script);
 });
 
@@ -423,14 +498,15 @@ test("agent overlay bootstrap is compatible with strict Trusted Types pages", ()
   new vm.Script(script);
 });
 
-test("agent overlay details toggle also works after user takeover", () => {
+test("agent overlay omits the control-details affordance and persisted expansion state", () => {
   const script = agentOverlayBootstrapScript();
-  const toggleDetails = script.match(/function toggleDetails\(\) \{([\s\S]*?)\n  \}/)?.[1] || "";
-  assert.match(script, /detailToggleButton\.addEventListener\("click", toggleDetails\)/);
-  assert.match(script, /host\.classList\.toggle\("expanded", expanded\)/);
-  assert.doesNotMatch(script, /host\.classList\.toggle\("expanded", !taken && expanded\)/);
-  assert.match(toggleDetails, /expanded = !expanded/);
-  assert.doesNotMatch(toggleDetails, /isDelegatedToUser/);
+  assert.doesNotMatch(script, /detail-toggle|detailToggleButton/);
+  assert.doesNotMatch(script, /EXPANDED_KEY|toggleDetails|persistExpanded|readExpanded/);
+  assert.doesNotMatch(script, /classList\.toggle\("expanded"/);
+  assert.doesNotMatch(script, /:host\(\.locked\.expanded\)/);
+  assert.doesNotMatch(script, /⌄/);
+  assert.match(script, /:host\(\.locked\) \.head\{grid-template-columns:28px minmax\(0,1fr\)/);
+  assert.match(script, /:host\(\.locked\) \.status-stack\{display:flex;align-items:center/);
 });
 
 test("agent overlay progress animation stays compositor-friendly", () => {
@@ -459,8 +535,13 @@ test("agent overlay bootstrap script includes zh/en copy and locale selection", 
   assert.match(script, /Manual clicks are temporarily disabled/);
   assert.match(script, /Agent 任务/);
   assert.match(script, /Agent task/);
-  assert.match(script, /查看控制详情/);
-  assert.match(script, /Show control details/);
+  assert.doesNotMatch(script, /查看控制详情|Show control details/);
+  assert.match(script, /detailsHeading: "运行详情"/);
+  assert.match(script, /currentActionLabel: "当前动作"/);
+  assert.match(script, /taskProgressLabel: "任务进度"/);
+  assert.match(script, /nextStepLabel: "下一步"/);
+  assert.match(script, /recentActivityLabel: "最近活动"/);
+  assert.match(script, /backgroundOperation: "后台操作"/);
   assert.match(script, /任务空间/);
   assert.match(script, /Task space/);
   assert.match(script, /projectPrefix: "项目"/);
@@ -498,16 +579,20 @@ test("agent overlay bootstrap script exposes fail-closed native Input Guard hit 
   assert.match(script, /overlayNode\("div", "status-line"\)/);
   assert.match(script, /overlayNode\("span", "state-chip"\)/);
   assert.match(script, /overlayNode\("span", "space-chip"\)/);
-  assert.match(script, /overlayNode\("button", "icon-btn detail-toggle"/);
+  assert.doesNotMatch(script, /overlayNode\("button", "icon-btn detail-toggle"/);
   assert.match(script, /overlayNode\("div", "details"/);
+  assert.match(script, /overlayNode\("div", "detail-grid"\)/);
+  assert.match(script, /overlayNode\("div", "target-copy"\)/);
+  assert.match(script, /overlayNode\("div", "target-domain"\)/);
   assert.doesNotMatch(script, /INPUT_LOCK_EVENTS/);
   assert.doesNotMatch(script, /beforeinput/);
   assert.doesNotMatch(script, /shouldBlockPageInput/);
+  assert.doesNotMatch(script, /grid-template-columns:1.25fr 1fr 1.1fr .72fr/);
+  assert.match(script, /target-follow.*grid-row:4/);
   assert.match(script, /copy\.lockedTitle/);
   assert.match(script, /compactTaskSpaceText/);
-  assert.match(script, /EXPANDED_KEY/);
-  assert.match(script, /toggleDetails/);
-  assert.match(script, /:host\(.locked\.expanded\) \.details\{/);
+  assert.doesNotMatch(script, /EXPANDED_KEY|toggleDetails/);
+  assert.doesNotMatch(script, /:host\(.locked\.expanded\)/);
   assert.match(script, /:host\(.locked\) \.details\{display:none\}/);
   assert.match(script, /host\.classList\.toggle\("collapsed", taken && collapsed && !offline\)/);
   assert.match(script, /:host\(.locked\.collapsed\) \.panel\{display:grid\}/);
@@ -537,6 +622,8 @@ test("agent overlay bootstrap script exposes fail-closed native Input Guard hit 
   assert.match(script, /role: "switch", "aria-checked": "false"/);
   assert.match(script, /signal\("show-agent-target"\)/);
   assert.match(script, /signal\("set-auto-follow", \{ enabled: !state\.autoFollowAgent \}\)/);
+  assert.match(script, /targetFollow\.style\.display = hasTarget && !taken \? "grid" : "none"/);
+  assert.match(script, /sessionsBlock\.style\.display = sessions\.length >= 1 \? "block" : "none"/);
   assert.match(script, /\["showAgentTarget", showAgentTargetButton\]/);
   assert.match(script, /\["toggleAutoFollow", autoFollowButton\]/);
   assert.match(script, /rect\.left \+ inset/);
@@ -891,6 +978,46 @@ test("AgentOverlayManager returns delegated control to the original Agent", asyn
   assert.deepEqual(inputGuardSyncs.at(-1), [27371]);
 });
 
+test("AgentOverlayManager ignores stale delegated snapshots while returning control to Agent", async () => {
+  let now = 1_000;
+  const resume = deferred();
+  const manager = new AgentOverlayManager({
+    now: () => now,
+    onStop: async () => {},
+    onResume: async () => resume.promise,
+    inputGuard: { sync() {}, dispose() {} },
+    requestVersionInfo: async () => ({})
+  });
+  const port = {
+    port: 9480,
+    profileId: "test-profile",
+    profileName: "Test Profile",
+    browserPids: [501],
+    headless: false,
+    clients: [{ pid: 42, label: "agent-browser", session: "cx-context-test" }]
+  };
+  manager.sync({ enabled: true, ports: [{ ...port, controlPaused: true }] });
+  const state = manager.ports.get(9480);
+
+  const returning = manager.handleResumeSignal(state, "cx-context-test");
+  assert.equal(state.delegatedToUser, false);
+  assert.equal(state.takeoverInFlight, true);
+
+  manager.sync({ enabled: true, ports: [{ ...port, controlPaused: true }] });
+  assert.equal(state.delegatedToUser, false, "in-flight stale ownership must not restore user control");
+
+  resume.resolve();
+  await returning;
+  now += 100;
+  manager.sync({ enabled: true, ports: [{ ...port, controlPaused: true }] });
+  assert.equal(state.delegatedToUser, false, "just-completed stale ownership must not make the button bounce");
+
+  now += 2_000;
+  manager.sync({ enabled: true, ports: [{ ...port, controlPaused: true }] });
+  assert.equal(state.delegatedToUser, true, "persistent authoritative user control is accepted after the grace window");
+  await manager.dispose();
+});
+
 test("AgentOverlayManager refuses return-to-Agent when its waiter is offline but still releases the Session", async () => {
   const resumeCalls = [];
   const stopCalls = [];
@@ -1192,6 +1319,89 @@ test("AgentOverlayManager retries inactive overlay cleanup when any target fails
   manager.sync({ enabled: true, ports: [], inactivePorts: [9480] });
   await waitFor(() => connectAttempts === 2, "inactive overlay cleanup retry");
   assert.equal(targetRequests, 2);
+});
+
+test("AgentOverlayManager cancels an in-flight inactive cleanup before activating the port", async () => {
+  let hostProbeStarted = false;
+  let releaseHostProbe;
+  const hostProbeGate = new Promise((resolve) => {
+    releaseHostProbe = resolve;
+  });
+  let terminalMarkerWrites = 0;
+  let cleanupClientClosed = false;
+  let versionRequests = 0;
+  const pageClient = {
+    onEvent: null,
+    onDisconnect: null,
+    close() {
+      cleanupClientClosed = true;
+    },
+    async send(method, params) {
+      if (method !== "Runtime.evaluate") {
+        return {};
+      }
+      const expression = String(params.expression);
+      if (expression.includes('Boolean(document.getElementById')) {
+        hostProbeStarted = true;
+        await hostProbeGate;
+        return { result: { value: false } };
+      }
+      if (expression.includes("sessionStorage.setItem")) {
+        terminalMarkerWrites += 1;
+        return { result: { value: true } };
+      }
+      return {};
+    }
+  };
+  const manager = new AgentOverlayManager({
+    onStop: async () => {},
+    requestVersionInfo: async () => {
+      versionRequests += 1;
+      return {};
+    },
+    requestTargets: async () => [{
+      id: "target-1",
+      type: "page",
+      url: "https://example.test",
+      webSocketDebuggerUrl: "ws://inactive-page"
+    }],
+    connectBrowser: async () => pageClient,
+    inputGuard: { sync() {}, dispose() {} }
+  });
+
+  manager.sync({ enabled: true, ports: [], inactivePorts: [9480] });
+  await waitFor(() => hostProbeStarted, "inactive cleanup host probe");
+
+  manager.sync({
+    enabled: true,
+    ports: [{
+      port: 9480,
+      profileId: "active-profile",
+      profileName: "Active Profile",
+      clients: [{
+        pid: 42,
+        label: "agent-browser",
+        agent: "Codex",
+        project: "profilepilot",
+        title: "Active session",
+        session: "cx-active-session",
+        lastActive: new Date().toISOString()
+      }]
+    }],
+    inactivePorts: []
+  });
+  assert.equal(manager.ports.has(9480), true);
+  assert.equal(versionRequests, 0, "active injection must wait for the stale cleanup connection to close");
+
+  releaseHostProbe();
+  await waitFor(
+    () => cleanupClientClosed && versionRequests === 1,
+    "active overlay sync after inactive cleanup cancellation"
+  );
+
+  assert.equal(terminalMarkerWrites, 0, "stale cleanup must not write a terminal marker after activation");
+  assert.equal(manager.inactiveCleanupTasks.has(9480), false);
+  await manager.dispose();
 });
 
 test("AgentOverlayManager still allows ending a task after user takeover", async () => {
@@ -1656,6 +1866,7 @@ function createOverlayState(overrides = {}) {
     agentOffline: false,
     controlSince: undefined,
     delegationGraceUntil: 0,
+    returnGraceUntil: 0,
     takenOverUntil: 0,
     lastPayload: null,
     stopError: null,

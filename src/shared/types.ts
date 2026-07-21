@@ -58,10 +58,14 @@ export interface Registry {
   quickLaunchSlots?: Record<string, string>;
 }
 
+export type BrowserDriverKind = "agent-browser" | "playwright-cli" | "chrome-devtools-mcp";
+
 // 当前持有该 Profile CDP 端口持久连接的客户端（agent-browser / Playwright / DevTools 等）。
 export interface CdpClientInfo {
   pid: number;
   label: string;
+  // Gateway 验证过的驱动器身份；不再需要从进程名猜工具。
+  driverKind?: BrowserDriverKind;
   // 同一个命名 Session 异常残留多个 daemon 时，把其它 PID 折叠到主连接上。
   // UI 不再误报成多个 Agent/会话，但会明确展示 daemon 重复故障。
   duplicatePids?: number[];
@@ -270,6 +274,8 @@ export interface GatewayProfileControlState {
   ownerSessionId: string | null;
   daemonInstanceId: string | null;
   daemonPid: number | null;
+  driverKind: BrowserDriverKind | null;
+  driverLabel: string | null;
   agent: string | null;
   project: string | null;
   agentTarget: GatewayAgentTarget | null;

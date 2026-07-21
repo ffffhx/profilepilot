@@ -10,19 +10,13 @@ import { delay, launchProfilePilotE2e } from "./e2e/lib/electron-driver.mjs";
 const execFileAsync = promisify(execFile);
 const CREATED_NAME = "E2E Lifecycle Profile";
 const RENAMED_NAME = "E2E Renamed Profile";
+const IDLE_NAME = "E2E Idle Profile";
 
 async function main() {
-  const app = await launchProfilePilotE2e();
+  const app = await launchProfilePilotE2e({ mode: "desktop", name: "e2e-desktop-ui" });
   const { driver, dataDir, homeDir } = app;
   try {
-    await driver.click('[data-action="new-profile"]');
-    await driver.waitFor("#profile-name");
-    await driver.fill("#profile-name", CREATED_NAME);
-    await driver.waitFor("#profile-name", (snapshot) => snapshot.value === CREATED_NAME);
-    await driver.click('[data-create-form] button[type="submit"]');
-
-    const row = await driver.waitFor("[data-profile-row]", (snapshot) => snapshot.text?.includes(CREATED_NAME));
-    const profileId = row.attributes["data-id"];
+    const profileId = await createProfile(driver, CREATED_NAME);
     assert.match(profileId, /^isolated:/, "the UI should create a real isolated Profile");
 
     const registry = JSON.parse(await readFile(path.join(dataDir, "profiles.json"), "utf8"));
@@ -31,6 +25,9 @@ async function main() {
     const profilePath = path.join(dataDir, "profiles", stored.dirName);
     await access(profilePath);
     step(`created ${profileId} at ${profilePath}`);
+
+    const idleProfileId = await createProfile(driver, IDLE_NAME);
+    assert.match(idleProfileId, /^isolated:/);
 
     await openProfileMenu(driver, profileId);
     await driver.click(`[data-action="rename-profile"][data-id="${profileId}"]`);
@@ -49,6 +46,17 @@ async function main() {
     const launchedCommands = await processCommandsContaining(profilePath);
     assert.ok(launchedCommands.some((command) => command.includes(`--user-data-dir=${profilePath}`)));
     step("launched a real Chrome process with the isolated user-data-dir");
+
+    await assertRegistryColumnAlignment(driver, [profileId, idleProfileId]);
+    step("verified Profile Registry column and action tracks align across running and idle rows");
+
+    await ensureMainVisible(driver);
+    await driver.click(`[data-action="open-profile-details"][data-id="${profileId}"]`);
+    await driver.waitFor(".profile-details-modal", (snapshot) => snapshot.text?.includes(RENAMED_NAME));
+    await driver.waitFor(".profile-details-cockpit", (snapshot) => snapshot.text?.includes("Cockpit"));
+    await driver.click("[data-profile-details-close]");
+    await driver.waitFor(".profile-details-modal", (snapshot) => !snapshot.exists);
+    step("opened the on-demand details modal and rendered the cockpit state");
 
     await ensureMainVisible(driver);
     await openProfileMenu(driver, profileId);
@@ -74,9 +82,47 @@ async function main() {
     assert.ok(trashEntries.some((entry) => entry.startsWith(`${stored.dirName}-`)), "deleted Profile should move to trash");
     step("deleted the Profile and verified registry + trash state");
 
+    await openProfileMenu(driver, idleProfileId);
+    await driver.click(`[data-action="delete"][data-id="${idleProfileId}"]`);
+    await driver.waitFor('[data-action="confirm-modal-action"]');
+    await driver.click('[data-action="confirm-modal-action"]');
+    await driver.waitFor(`[data-profile-row][data-id="${idleProfileId}"]`, (snapshot) => !snapshot.exists);
+
     step("PASS");
   } finally {
     await app.stop();
+  }
+}
+
+async function createProfile(driver, name) {
+  await driver.click('[data-action="new-profile"]');
+  await driver.waitFor("#profile-name");
+  await driver.fill("#profile-name", name);
+  await driver.waitFor("#profile-name", (snapshot) => snapshot.value === name);
+  await driver.click('[data-create-form] button[type="submit"]');
+  const row = await driver.waitFor("[data-profile-row]", (snapshot) => snapshot.text?.includes(name));
+  return row.attributes["data-id"];
+}
+
+async function assertRegistryColumnAlignment(driver, profileIds) {
+  const tracks = [
+    "td:nth-child(1)",
+    "td:nth-child(2)",
+    "td:nth-child(3)",
+    "td:nth-child(4)",
+    "td:nth-child(5)",
+    "[data-profile-actions]"
+  ];
+  for (const track of tracks) {
+    const positions = await Promise.all(profileIds.map(async (profileId) => {
+      const snapshot = await driver.query(`[data-profile-row][data-id="${profileId}"] ${track}`);
+      assert.ok(snapshot.rect, `missing geometry for ${profileId} ${track}`);
+      return snapshot.rect.x;
+    }));
+    assert.ok(
+      Math.max(...positions) - Math.min(...positions) <= 1,
+      `${track} is not aligned across rows: ${positions.join(", ")}`
+    );
   }
 }
 

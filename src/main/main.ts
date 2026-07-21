@@ -50,6 +50,7 @@ import {
 const E2E_DRIVER_SOCKET = process.env.CPM_E2E_DRIVER_SOCKET || "";
 const IS_E2E_DRIVER_TEST = Boolean(E2E_DRIVER_SOCKET);
 const IS_ELECTRON_SMOKE_TEST = process.env.CPM_ELECTRON_SMOKE_TEST === "1";
+const IS_BACKGROUND_E2E = process.env.CPM_E2E_MODE === "background";
 const profileManager = createProfileManager(broadcastAgentTakeover, revealAgentOverlayProfile);
 let agentOverlayDisposedForQuit = false;
 let mainWindow: BrowserWindow | null = null;
@@ -57,8 +58,6 @@ let miniWindow: BrowserWindow | null = null;
 let miniOutsideClickWindows: BrowserWindow[] = [];
 let miniOutsideClickUpdateTimer: NodeJS.Timeout | null = null;
 let miniWindowSaveTimer: NodeJS.Timeout | null = null;
-// 主窗口失焦后延后判定“是否整个 App 退到后台”的定时器（防止内部换焦误触发）。
-let mainWindowBlurTimer: NodeJS.Timeout | null = null;
 const APP_ICON_PATH = path.join(__dirname, "../../public/assets/profilepilot-icon-512.png");
 // 整个界面的统一缩放系数（等比例放大字号/间距/控件）。想再大/再小只改这一个数。
 const UI_ZOOM_FACTOR = 1.0;
@@ -873,21 +872,14 @@ function dragMiniWindow(event: IpcMainInvokeEvent, screenX: number, screenY: num
   windowRef.setBounds(nextBounds, false);
 }
 
-// focus=false：收成悬浮窗但不抢焦点（用于“切到别的 App / 切 Space”这类被动退后台场景，
-// 否则会把焦点从用户刚切过去的窗口（如 Chrome 副本）夺回来）。
-async function showMiniWindow(options?: { focus?: boolean }): Promise<void> {
-  const focusMini = options?.focus !== false;
+// 只由用户的显式操作进入悬浮窗：主窗口最小化、页面“悬浮窗”按钮或全局快捷键。
+async function showMiniWindow(): Promise<void> {
   const windowRef = await createMiniWindow();
   setMiniWindowPanelOpen(false);
   await waitForMiniWindowFirstPaint(windowRef, ".mini-logo-glyph");
-  if (focusMini) {
-    windowRef.show();
-    raiseMiniWindow(windowRef);
-    windowRef.focus();
-  } else {
-    windowRef.showInactive();
-    raiseMiniWindow(windowRef);
-  }
+  windowRef.show();
+  raiseMiniWindow(windowRef);
+  windowRef.focus();
   mainWindow?.hide();
 }
 
@@ -987,11 +979,6 @@ function registerGlobalShortcuts(): void {
 }
 
 async function showMainWindow(): Promise<void> {
-  if (mainWindowBlurTimer) {
-    clearTimeout(mainWindowBlurTimer);
-    mainWindowBlurTimer = null;
-  }
-
   if (!mainWindow || mainWindow.isDestroyed()) {
     createMainWindow();
   }
@@ -1005,7 +992,7 @@ async function showMainWindow(): Promise<void> {
   // “展开”、Dock 激活和 second-instance 都是用户明确要求打开主控制台。
   // BrowserWindow.show/focus 只能处理窗口自身；若 App 曾通过 `open -j` 隐藏启动，
   // macOS 的应用级 hidden/activation 状态仍会把窗口压在后台。因此先解除隐藏并激活 App，
-  // 再把窗口抬到当前桌面的最前面。被动失焦收成悬浮窗不会走这里，仍不会抢用户焦点。
+  // 再把窗口抬到当前桌面的最前面。
   if (process.platform === "darwin") {
     app.show();
     app.focus({ steal: true });
@@ -1041,7 +1028,7 @@ function createMainWindow(): void {
     height: Math.round(760 * UI_ZOOM_FACTOR),
     minWidth: 860,
     minHeight: 620,
-    show: !smokeTest || IS_E2E_DRIVER_TEST,
+    show: !smokeTest || (IS_E2E_DRIVER_TEST && !IS_BACKGROUND_E2E),
     title: APP_TITLE,
     icon: APP_ICON_PATH,
     backgroundColor: "#0a1014",
@@ -1101,12 +1088,9 @@ function createMainWindow(): void {
                   statusValues: Array.from(document.querySelectorAll(".status-value")).map((item) => item.textContent),
                   accountSyncTitle: document.querySelector("[data-account-sync] h2")?.textContent || null,
                   accountSyncSelectCount: document.querySelectorAll("[data-account-sync] select").length,
-                  accountSyncDiffButton: document.querySelector('[data-action="scan-account-diff"]')?.textContent?.trim() || null,
-                  extensionScanButton: document.querySelector('[data-action="scan-extensions"]')?.textContent?.trim() || null,
                   accountConfirmTitle: null,
                   accountConfirmButton: null,
                   accountConfirmSummary: [],
-                  migrationTitle: document.querySelector("[data-extension-migration] strong")?.textContent || null,
                   migrationSelectCount: document.querySelectorAll("[data-extension-migration] select").length,
                   shellWidthRatio: (() => {
                     const shell = document.querySelector(".shell");
@@ -1114,7 +1098,7 @@ function createMainWindow(): void {
                   })(),
                   profileTableHasHorizontalOverflow: (() => {
                     const tableWrap = document.querySelector(".profiles-table-wrap");
-                    return tableWrap ? tableWrap.scrollWidth > tableWrap.clientWidth + 1 : null;
+                    return tableWrap ? tableWrap.scrollWidth > tableWrap.clientWidth + 1 : false;
                   })(),
                   sourcePills: Array.from(document.querySelectorAll(".source-pill")).map((item) => item.textContent),
                   cdpTooltips: Array.from(document.querySelectorAll(".action-tooltip")).map((item) => item.getAttribute("data-tooltip")),
@@ -1324,32 +1308,6 @@ function createMainWindow(): void {
 
     windowRef.hide();
     void showMiniWindow();
-  });
-
-  // 很多人不点最小化，而是「点屏幕别处 / 四本指切 Space」把窗口放到后台——这不会触发 minimize，
-  // 悬浮窗就出不来。这里补上：主窗口在前台可见时失焦，稍等片刻若整个 App 都没有窗口在聚焦
-  // （= 切到别的 App 或切了 Space，而不是内部换焦），就同样收成悬浮窗（不抢焦点）。
-  mainWindow.on("blur", () => {
-    const windowRef = mainWindow;
-    if (!windowRef || windowRef.isDestroyed() || !windowRef.isVisible() || windowRef.isMinimized()) {
-      return;
-    }
-
-    if (mainWindowBlurTimer) {
-      clearTimeout(mainWindowBlurTimer);
-    }
-    mainWindowBlurTimer = setTimeout(() => {
-      mainWindowBlurTimer = null;
-      const ref = mainWindow;
-      if (!ref || ref.isDestroyed() || !ref.isVisible() || ref.isMinimized()) {
-        return;
-      }
-      // 本 App 仍有任意窗口聚焦 → 只是内部换焦（开 DevTools、悬浮窗展开重排等），不处理。
-      if (BrowserWindow.getFocusedWindow()) {
-        return;
-      }
-      void showMiniWindow({ focus: false });
-    }, 150);
   });
 
   mainWindow.loadFile(path.join(__dirname, "../../public/index.html"));
@@ -1746,19 +1704,25 @@ app.whenReady().then(async () => {
   }
 
   registerIpcHandlers();
-  if (!IS_ELECTRON_SMOKE_TEST || process.env.CPM_E2E_ENABLE_GLOBAL_SHORTCUTS === "1") {
+  if (!IS_BACKGROUND_E2E && (!IS_ELECTRON_SMOKE_TEST || process.env.CPM_E2E_ENABLE_GLOBAL_SHORTCUTS === "1")) {
     registerGlobalShortcuts();
   }
   createMainWindow();
   if (IS_E2E_DRIVER_TEST) {
     startE2eDriver({
       socketPath: E2E_DRIVER_SOCKET,
+      mode: IS_BACKGROUND_E2E ? "background" : "desktop",
       getWindow: (target) => (target === "mini" ? miniWindow : mainWindow),
+      triggerMiniHotkeyHandler: summonMiniWindowViaHotkey,
       getWindowSnapshot: () => ({
         main: windowSnapshot(mainWindow),
         mini: windowSnapshot(miniWindow),
         miniPanelOpen: miniWindowPanelOpen,
-        miniPanelPinned
+        miniPanelPinned,
+        miniShortcut: {
+          accelerator: MINI_SUMMON_SHORTCUT,
+          isRegistered: globalShortcut.isRegistered(MINI_SUMMON_SHORTCUT)
+        }
       })
     });
   }

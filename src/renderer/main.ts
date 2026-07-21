@@ -7,7 +7,7 @@ import { focusLiveTab, openLiveZoom, refreshLiveViewNow, requestLiveViewNow, sta
 import { sortByMiniOrder } from "./render/mini";
 import { computeMainReorder, mainProfileGroups, type MainProfileGroup } from "./render/profiles";
 import { render } from "./render/render-root";
-import { applyState, invalidateExtensionMigrationDiff, loadState, loadTakeoverHistory, mergeAgentTakeoverHistory, refreshExtensionMigrationDiff, refreshGlobalInstructions, repairClaudeInstructionShell, saveGlobalInstruction, setMigrationSource } from "./state-actions";
+import { applyState, invalidateExtensionMigrationDiff, loadState, refreshExtensionMigrationDiff, refreshGlobalInstructions, repairClaudeInstructionShell, saveGlobalInstruction, setMigrationSource } from "./state-actions";
 import { appRoot, store } from "./state";
 import type { AgentOverlayRevealEvent, AgentTakeoverEvent, AppState } from "./types";
 import { deleteButtonTitle, escapeHtml, formatErrorMessage, profileAgentControlClients } from "./util";
@@ -98,9 +98,6 @@ profileApi().onOperationProgress((progress) => {
 });
 
 profileApi().onAgentTakeover((takeover) => {
-  mergeAgentTakeoverHistory([takeover]);
-  store.agentTakeoverNoticeDismissed = false;
-  store.agentTakeoverHistoryExpanded = false;
   clearMiniTakeoverConfirm();
   markMiniTakeover(takeover);
   const agent = takeover.agent || "AI";
@@ -268,25 +265,6 @@ appRoot.addEventListener("click", (event) => {
   const id = actionTarget.dataset.id || null;
   if (action !== "toggle-profile-menu" && actionTarget.closest("[data-profile-actions]")) {
     store.openProfileMenuId = null;
-  }
-
-  if (action === "dismiss-agent-takeover-history") {
-    store.agentTakeoverNoticeDismissed = true;
-    render();
-    return;
-  }
-
-  if (action === "open-agent-takeover-history") {
-    store.modal = { kind: "takeover-history" };
-    render();
-    void loadTakeoverHistory().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
-    return;
-  }
-
-  if (action === "toggle-agent-takeover-history") {
-    store.agentTakeoverHistoryExpanded = !store.agentTakeoverHistoryExpanded;
-    render();
-    return;
   }
 
   if (action === "toggle-migration-target-menu") {
@@ -952,9 +930,40 @@ appRoot.addEventListener("click", (event) => {
 
   if (action === "focus-live-tab") {
     const targetId = actionTarget.dataset.targetId;
-    if (targetId && store.selectedId) {
-      focusLiveTab(store.selectedId, targetId);
+    const profileId = actionTarget.dataset.profileId;
+    if (targetId && profileId) {
+      focusLiveTab(profileId, targetId);
     }
+    return;
+  }
+
+  if (action === "open-profile-details" && id) {
+    const profile = store.state.profiles.find((item) => item.id === id);
+    if (!profile) {
+      setToast("没有找到目标 Profile", "error");
+      return;
+    }
+    store.selectedId = id;
+    store.selectedExternalDir = null;
+    store.openProfileMenuId = null;
+    store.modal = { kind: "profile-details", profileId: id };
+    render();
+    requestLiveViewNow(id);
+    window.setTimeout(() => document.querySelector<HTMLButtonElement>("[data-profile-details-close]")?.focus(), 0);
+    return;
+  }
+
+  if (action === "open-external-details") {
+    const userDataDir = actionTarget.dataset.dir;
+    if (!userDataDir || !store.state.externalInstances.some((instance) => instance.userDataDir === userDataDir)) {
+      setToast("没有找到目标外部实例", "error");
+      return;
+    }
+    store.selectedExternalDir = userDataDir;
+    store.selectedId = null;
+    store.modal = { kind: "external-details", userDataDir };
+    render();
+    window.setTimeout(() => document.querySelector<HTMLButtonElement>("[data-profile-details-close]")?.focus(), 0);
     return;
   }
 
@@ -1022,7 +1031,6 @@ appRoot.addEventListener("click", (event) => {
     store.selectedId = id;
     store.selectedExternalDir = null;
     render();
-    requestLiveViewNow(id);
     return;
   }
 
@@ -1304,7 +1312,6 @@ appRoot.addEventListener("click", (event) => {
     }
 
     store.selectedId = id;
-    requestLiveViewNow(id);
     void focusProfileFromUi(profile);
     return;
   }
@@ -1510,12 +1517,27 @@ appRoot.addEventListener("dblclick", (event) => {
 });
 
 appRoot.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && store.modal?.kind === "live-zoom") {
+  if (
+    event.key === "Escape" &&
+    (store.modal?.kind === "live-zoom" || store.modal?.kind === "profile-details" || store.modal?.kind === "external-details")
+  ) {
     closeModalFromUi();
     return;
   }
 
   const target = event.target instanceof Element ? event.target : null;
+  const liveTab = target?.closest<HTMLElement>('[data-action="focus-live-tab"]');
+  const liveTabChildAction = target?.closest('[data-action="copy-live-url"]');
+  if (liveTab && !liveTabChildAction && (event.key === "Enter" || event.key === " ")) {
+    const profileId = liveTab.dataset.profileId;
+    const targetId = liveTab.dataset.targetId;
+    if (profileId && targetId) {
+      event.preventDefault();
+      focusLiveTab(profileId, targetId);
+    }
+    return;
+  }
+
   const liveScreen = target?.closest<HTMLElement>("[data-live-zoom-profile-id]");
   if (liveScreen && (event.key === "Enter" || event.key === " ")) {
     event.preventDefault();
@@ -1543,7 +1565,6 @@ appRoot.addEventListener("keydown", (event) => {
   if (id) {
     store.selectedId = id;
     render();
-    requestLiveViewNow(id);
   }
 });
 
@@ -1733,11 +1754,9 @@ if (store.viewMode === "mini") {
   render();
 }
 
-loadState()
-  .then(() => loadTakeoverHistory().catch((error: unknown) => setToast(formatErrorMessage(error), "error")))
-  .catch((error: unknown) => {
-    appRoot.innerHTML = `<div class="app-loading p-8 text-muted font-mono text-[13px] tracking-[0.08em] uppercase">${escapeHtml(formatErrorMessage(error))}</div>`;
-  });
+loadState().catch((error: unknown) => {
+  appRoot.innerHTML = `<div class="app-loading p-8 text-muted font-mono text-[13px] tracking-[0.08em] uppercase">${escapeHtml(formatErrorMessage(error))}</div>`;
+});
 
 if (store.viewMode === "mini") {
   let miniPanelTransitionId = 0;

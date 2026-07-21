@@ -7,6 +7,8 @@ require("./browser-gateway-control.test.js");
 require("./browser-gateway-server.test.js");
 require("./browser-gateway-daemon.test.js");
 require("./agent-browser-wrapper.test.js");
+require("./playwright-cli-wrapper.test.js");
+require("./chrome-devtools-mcp-wrapper.test.js");
 require("./agent-browser-lease.test.js");
 require("./shell-integration.test.js");
 require("./renderer-util.test.js");

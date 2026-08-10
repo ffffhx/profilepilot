@@ -307,6 +307,7 @@ export function collapseDuplicateNamedSessionClients(byPort: Map<number, CdpClie
         .sort(compareNumbers);
       existing.agent = existing.agent || client.agent;
       existing.project = existing.project || client.project;
+      existing.branch = existing.branch || client.branch;
       existing.title = existing.title || client.title;
       existing.lastActive = laterIsoDate(existing.lastActive, client.lastActive);
       const duplicateNote = `同一 Session 存在 ${1 + existing.duplicatePids.length} 个 agent-browser daemon（PID ${[
@@ -335,6 +336,7 @@ function applyDelegatedAgentBrowserProfileLeases(
     if (existing) {
       existing.agent = existing.agent || leaseClient.agent;
       existing.project = existing.project || leaseClient.project;
+      existing.branch = existing.branch || leaseClient.branch;
       existing.title = existing.title || leaseClient.title;
       existing.session = existing.session || leaseClient.session;
       existing.note = existing.note || leaseClient.note;
@@ -352,6 +354,7 @@ export function clientFromDelegatedAgentBrowserProfileLease(lease: AgentBrowserP
     label: "agent-browser",
     agent: lease.agent,
     project: lease.project,
+    branch: lease.branch,
     title: lease.command ? `agent-browser ${lease.command}` : "agent-browser Session",
     session: lease.session,
     lastActive: lease.updatedAt,
@@ -372,7 +375,8 @@ async function applyAgentBrowserSessionActivities(
       );
       if (existing) {
         existing.agent = existing.agent || activityClient.agent;
-        existing.project = existing.project || activityClient.project;
+        existing.project = activityClient.project || existing.project;
+        existing.branch = activityClient.branch || existing.branch;
         existing.title = existing.title || activityClient.title;
         existing.session = existing.session || activityClient.session;
         existing.note = existing.note || activityClient.note;

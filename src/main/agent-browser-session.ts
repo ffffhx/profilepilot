@@ -3,6 +3,15 @@ import { readdir, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { AgentBrowserSessionActivity, CdpClientInfo } from "../shared/types";
+import {
+  repositoryIdentityFromCwd,
+  type BrowserDriverRepositoryIdentity
+} from "./browser-driver-context";
+
+export {
+  repositoryIdentityFromCwd,
+  type BrowserDriverRepositoryIdentity as RepositoryIdentity
+} from "./browser-driver-context";
 
 const SAFE_SESSION_RE = /^[A-Za-z0-9._-]+$/;
 const SAFE_COMMAND_ID_RE = /^[A-Za-z0-9._-]+$/;
@@ -65,7 +74,9 @@ export function makeAgentBrowserSessionActivity(
   const cwd = typeof input.cwd === "string" && input.cwd.trim() ? input.cwd : undefined;
   if (cwd) {
     activity.cwd = cwd;
-    activity.project = path.basename(cwd) || cwd;
+    const repository = repositoryIdentityFromCwd(cwd);
+    activity.project = repository.project;
+    activity.branch = repository.branch;
   }
   const daemonPid = input.daemonPid;
   if (typeof daemonPid === "number" && Number.isSafeInteger(daemonPid) && daemonPid > 0) {
@@ -364,7 +375,7 @@ export function readAgentBrowserSessionActivitySync(
         JSON.parse(readFileSync(filePath, "utf8")) as Partial<AgentBrowserSessionActivity>
       );
       if (activity) {
-        return activity;
+        return enrichAgentBrowserSessionActivityRepository(activity);
       }
     } catch {
       // 尝试镜像路径。
@@ -428,7 +439,9 @@ async function readActiveAgentBrowserSessionActivity(
       return null;
     }
     const expiresAt = Date.parse(activity.expiresAt);
-    return Number.isFinite(expiresAt) && expiresAt > now ? activity : null;
+    return Number.isFinite(expiresAt) && expiresAt > now
+      ? enrichAgentBrowserSessionActivityRepository(activity)
+      : null;
   } catch {
     return undefined;
   }
@@ -462,6 +475,9 @@ function normalizeAgentBrowserSessionActivity(input: Partial<AgentBrowserSession
   if (typeof input.project === "string" && input.project.trim()) {
     activity.project = input.project;
   }
+  if (typeof input.branch === "string" && input.branch.trim()) {
+    activity.branch = input.branch;
+  }
   if (typeof input.agent === "string" && input.agent.trim()) {
     activity.agent = input.agent;
   }
@@ -470,6 +486,16 @@ function normalizeAgentBrowserSessionActivity(input: Partial<AgentBrowserSession
     activity.daemonPid = daemonPid;
   }
   return activity;
+}
+
+function enrichAgentBrowserSessionActivityRepository(activity: AgentBrowserSessionActivity): AgentBrowserSessionActivity {
+  if (!activity.cwd || (activity.project && activity.branch)) return activity;
+  const repository = repositoryIdentityFromCwd(activity.cwd);
+  return {
+    ...activity,
+    project: repository.project || activity.project,
+    branch: repository.branch || activity.branch
+  };
 }
 
 function normalizeAgentBrowserCommandState(input: Partial<AgentBrowserCommandState>): AgentBrowserCommandState | null {
@@ -509,6 +535,7 @@ function clientFromAgentBrowserSessionActivity(activity: AgentBrowserSessionActi
     label: "agent-browser",
     agent,
     project,
+    branch: activity.branch,
     title: `agent-browser ${activity.command}`,
     session: activity.session,
     lastActive: activity.updatedAt,

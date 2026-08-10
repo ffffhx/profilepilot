@@ -1,5 +1,5 @@
 import { promises as fs, watch, type FSWatcher } from "node:fs";
-import { app, BrowserWindow, globalShortcut, ipcMain, nativeTheme, Notification, screen, type IpcMainInvokeEvent, type Rectangle } from "electron";
+import { app, BrowserWindow, globalShortcut, ipcMain, nativeTheme, Notification, screen, session, type IpcMainInvokeEvent, type Rectangle } from "electron";
 import path from "node:path";
 import { IPC_CHANNELS } from "../shared/ipc";
 import type {
@@ -14,6 +14,7 @@ import type {
   RecycleIdleClonesResult,
   LaunchClonesResult,
   AppState,
+  BifrostSnapshot,
   CancelOperationRequest,
   CdpLiveView,
   CdpLiveViewOptions,
@@ -26,10 +27,16 @@ import type {
   ExtensionMigrationResult,
   ExtensionScanResult,
   GlobalInstructionUpdateRequest,
+  GlobalInstructionUndoRequest,
   GlobalInstructionsSnapshot,
+  LaunchProfileOptions,
   OperationPauseSignal,
   OperationProgress,
   OperationProgressUpdate,
+  ProfileAgentSettings,
+  ProfileReadinessReceipt,
+  ProfileReadinessRequest,
+  ProfileProxyConfig,
   PublicProfile,
   TakeoverAgentConnectionsRequest,
   TakeoverAgentConnectionsResponse
@@ -37,15 +44,18 @@ import type {
 import { captureCdpLiveView } from "./cdp-live-view";
 import { startE2eDriver } from "./e2e-driver";
 import { defaultDataDir } from "./fs-util";
-import { ensureClaudeInstructionShell, readGlobalInstructions, writeGlobalInstruction } from "./global-instructions";
+import { ensureClaudeInstructionShell, readGlobalInstructions, undoGlobalInstruction, writeGlobalInstruction } from "./global-instructions";
 import { refreshAgentBrowserWrapperIfInstalled, setShellIntegrationEnabled } from "./shell-integration";
 import { APP_TITLE, createProfileManager } from "./profile-manager";
+import { resolveSystemProxySnapshot } from "./system-proxy";
 import {
   ensureBrowserGatewayDaemon,
   browserGatewayRoot,
   subscribeBrowserGatewayEvents,
   type GatewayEventSubscription
 } from "./browser-gateway-client";
+import { buildProfileReadinessReceipt } from "./profile-readiness";
+import { resolveCanonicalSessionIdentity } from "./session-identity";
 
 const E2E_DRIVER_SOCKET = process.env.CPM_E2E_DRIVER_SOCKET || "";
 const IS_E2E_DRIVER_TEST = Boolean(E2E_DRIVER_SOCKET);
@@ -1071,6 +1081,8 @@ function createMainWindow(): void {
                   hasLaunchProfileWithCdp: typeof window.profileManager?.launchProfileWithCdp === "function",
                   hasConnectRunningSystemChrome:
                     typeof window.profileManager?.connectRunningSystemChrome === "function",
+                  hasGetBifrostSnapshot: typeof window.profileManager?.getBifrostSnapshot === "function",
+                  hasSetProfileProxy: typeof window.profileManager?.setProfileProxy === "function",
                   hasScanProfileExtensions: typeof window.profileManager?.scanProfileExtensions === "function",
                   hasMigrateExtensions: typeof window.profileManager?.migrateExtensions === "function",
                   hasDeleteProfileExtension: typeof window.profileManager?.deleteProfileExtension === "function",
@@ -1081,7 +1093,10 @@ function createMainWindow(): void {
                   hasControlOperation: typeof window.profileManager?.controlOperation === "function",
                   hasReadGlobalInstructions: typeof window.profileManager?.readGlobalInstructions === "function",
                   hasWriteGlobalInstruction: typeof window.profileManager?.writeGlobalInstruction === "function",
+                  hasUndoGlobalInstruction: typeof window.profileManager?.undoGlobalInstruction === "function",
                   hasEnsureClaudeInstructionShell: typeof window.profileManager?.ensureClaudeInstructionShell === "function",
+                  hasInspectProfileReadiness: typeof window.profileManager?.inspectProfileReadiness === "function",
+                  hasResumeAgentConnections: typeof window.profileManager?.resumeAgentConnections === "function",
                   hasOperationProgress: typeof window.profileManager?.onOperationProgress === "function",
                   buttonCount: document.querySelectorAll("button").length,
                   statusLabels: Array.from(document.querySelectorAll(".status-label")).map((item) => item.textContent),
@@ -1099,6 +1114,17 @@ function createMainWindow(): void {
                   profileTableHasHorizontalOverflow: (() => {
                     const tableWrap = document.querySelector(".profiles-table-wrap");
                     return tableWrap ? tableWrap.scrollWidth > tableWrap.clientWidth + 1 : false;
+                  })(),
+                  profileTableWidths: (() => {
+                    const tableWrap = document.querySelector(".profiles-table-wrap");
+                    const table = document.querySelector(".profiles-table");
+                    return tableWrap
+                      ? {
+                          client: tableWrap.clientWidth,
+                          scroll: tableWrap.scrollWidth,
+                          table: table?.getBoundingClientRect().width || null
+                        }
+                      : null;
                   })(),
                   sourcePills: Array.from(document.querySelectorAll(".source-pill")).map((item) => item.textContent),
                   cdpTooltips: Array.from(document.querySelectorAll(".action-tooltip")).map((item) => item.getAttribute("data-tooltip")),
@@ -1288,6 +1314,8 @@ function createMainWindow(): void {
         `);
         console.log(JSON.stringify({ smokeTest: result }, null, 2));
       } finally {
+        // Smoke 进程没有启动机器级 Gateway/overlay；直接退出可避免正常退出钩子
+        // 为一个未初始化的 overlay 等待清理，从而让 E2E 生命周期保持确定。
         app.quit();
       }
     });
@@ -1316,6 +1344,14 @@ function createMainWindow(): void {
   });
 }
 
+async function bifrostSnapshotForRenderer(): Promise<BifrostSnapshot> {
+  const [snapshot, systemProxy] = await Promise.all([
+    profileManager.getBifrostSnapshot(),
+    resolveSystemProxySnapshot((url) => session.defaultSession.resolveProxy(url))
+  ]);
+  return { ...snapshot, systemProxy };
+}
+
 function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.getState, async (): Promise<AppState> => profileManager.getState());
   ipcMain.handle(IPC_CHANNELS.getTakeoverHistory, async (): Promise<AgentTakeoverEvent[]> => profileManager.getTakeoverHistory());
@@ -1330,13 +1366,13 @@ function registerIpcHandlers(): void {
     return profileManager.getState();
   });
 
-  ipcMain.handle(IPC_CHANNELS.launchProfile, async (_event, id: string): Promise<AppState> => {
-    await profileManager.launchProfile(id);
+  ipcMain.handle(IPC_CHANNELS.launchProfile, async (_event, id: string, options?: LaunchProfileOptions | null): Promise<AppState> => {
+    await profileManager.launchProfile(id, options ?? {});
     return profileManager.getState();
   });
 
-  ipcMain.handle(IPC_CHANNELS.launchProfileWithCdp, async (_event, id: string, port?: number | null): Promise<AppState> => {
-    await profileManager.launchProfileWithCdp(id, port);
+  ipcMain.handle(IPC_CHANNELS.launchProfileWithCdp, async (_event, id: string, port?: number | null, options?: LaunchProfileOptions | null): Promise<AppState> => {
+    await profileManager.launchProfileWithCdp(id, port, options ?? {});
     return profileManager.getState();
   });
 
@@ -1347,6 +1383,33 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.suggestCdpPort, async (_event, preferredPort?: number | null) => {
     return profileManager.suggestCdpPort(preferredPort);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.getBifrostSnapshot, async () => {
+    return bifrostSnapshotForRenderer();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.disableBifrostRule, async (_event, ruleName: string) => {
+    await profileManager.disableBifrostRule(ruleName);
+    return bifrostSnapshotForRenderer();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.setProfileProxy, async (
+    _event,
+    id: string,
+    config: ProfileProxyConfig | null
+  ): Promise<AppState> => {
+    await profileManager.setProfileProxy(id, config ?? null);
+    return profileManager.getState();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.setProfileAgentSettings, async (
+    _event,
+    id: string,
+    settings: ProfileAgentSettings
+  ): Promise<AppState> => {
+    await profileManager.setProfileAgentSettings(id, settings);
+    return profileManager.getState();
   });
 
   ipcMain.handle(IPC_CHANNELS.setMiniProfilePinned, async (_event, id: string, pinned: boolean): Promise<AppState> => {
@@ -1404,6 +1467,13 @@ function registerIpcHandlers(): void {
     }
   );
 
+  ipcMain.handle(
+    IPC_CHANNELS.undoGlobalInstruction,
+    async (_event, request: GlobalInstructionUndoRequest): Promise<GlobalInstructionsSnapshot> => {
+      return undoGlobalInstruction(request);
+    }
+  );
+
   ipcMain.handle(IPC_CHANNELS.isMiniWindowPointerInside, async (): Promise<boolean> => {
     return isMiniWindowPointerInside();
   });
@@ -1422,6 +1492,34 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.ensureClaudeInstructionShell, async (): Promise<GlobalInstructionsSnapshot> => {
     return ensureClaudeInstructionShell();
   });
+
+  ipcMain.handle(
+    IPC_CHANNELS.inspectProfileReadiness,
+    async (_event, request: ProfileReadinessRequest): Promise<ProfileReadinessReceipt> => {
+      const state = await profileManager.getState();
+      const profile = state.profiles.find((candidate) => candidate.id === request?.profileId);
+      if (!profile) {
+        throw new Error("没有找到目标 Profile。");
+      }
+      const needsExtensionScan = Boolean(request.expectation?.requiredExtensions?.length);
+      const [proxySnapshot, extensions, sessionIdentity] = await Promise.all([
+        bifrostSnapshotForRenderer(),
+        needsExtensionScan
+          ? profileManager.scanProfileExtensions(profile.id).then((result) => result.extensions)
+          : Promise.resolve(undefined),
+        resolveCanonicalSessionIdentity(
+          profile.gatewayControl?.ownerSessionId || profile.agentBrowserOccupancy?.session
+        )
+      ]);
+      return buildProfileReadinessReceipt({
+        profile,
+        expectation: request.expectation,
+        proxySnapshot,
+        extensions,
+        sessionIdentity
+      });
+    }
+  );
 
   ipcMain.handle(IPC_CHANNELS.setShellIntegrationEnabled, async (_event, enabled: boolean): Promise<AppState> => {
     await setShellIntegrationEnabled(Boolean(enabled));
@@ -1468,6 +1566,33 @@ function registerIpcHandlers(): void {
       return {
         ...result,
         state: await profileManager.getState()
+      };
+    }
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.resumeAgentConnections,
+    async (
+      _event,
+      profileId: string,
+      sessionOrOptions?: string | TakeoverAgentConnectionsRequest
+    ): Promise<TakeoverAgentConnectionsResponse> => {
+      const options = typeof sessionOrOptions === "string"
+        ? { session: sessionOrOptions }
+        : sessionOrOptions;
+      const result = await profileManager.resumeAgentConnections(profileId, options);
+      const state = await profileManager.getState();
+      return {
+        profileId,
+        profileName: state.profiles.find((profile) => profile.id === profileId)?.name || profileId,
+        session: options?.session,
+        targetCount: result.targetCount,
+        successCount: result.successCount,
+        failureCount: result.failures.length,
+        allStopped: result.targetCount > 0 && result.successCount === result.targetCount,
+        takeovers: [],
+        failures: result.failures,
+        state
       };
     }
   );
@@ -1751,6 +1876,9 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", (event) => {
   stopStateCoordinator();
+  if (IS_ELECTRON_SMOKE_TEST) {
+    return;
+  }
   if (agentOverlayDisposedForQuit) {
     return;
   }

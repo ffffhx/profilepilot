@@ -31,6 +31,218 @@ test("renderer takeover confirm view summarizes only AI-driven clients", () => {
   ]);
 });
 
+test("renderer Bifrost rule confirm explains the global impact without deleting the rule", () => {
+  const { confirm } = loadConfirmHarness();
+  const view = confirm.confirmModalView({
+    kind: "disable-bifrost-rule",
+    ruleName: "FlowPD-FE-BotStudio",
+    ruleCount: 24
+  });
+
+  assert.equal(view.title, "停用 FlowPD-FE-BotStudio");
+  assert.equal(view.confirmLabel, "停用规则");
+  assert.equal(view.tone, "warn");
+  assert.deepEqual(view.body, [
+    "会从 Bifrost 主代理（系统代理入口）停用这份规则，所有跟随系统代理的 Chrome Profile 会立即受影响。",
+    "规则不会被删除；Profile 专属临时端口使用显式规则绑定，不受主代理启用状态影响。"
+  ]);
+  assert.deepEqual(view.summary, [
+    { label: "规则", value: "FlowPD-FE-BotStudio" },
+    { label: "包含", value: "24 条匹配" },
+    { label: "影响", value: "系统代理 · Bifrost 主端口" }
+  ]);
+});
+
+test("renderer Bifrost launch recovery offers one-click daemon start before direct fallback", () => {
+  const configured = profile({
+    name: "套餐升降配本地",
+    bifrostProxy: {
+      listenerPort: 18892,
+      rules: ["codex-plan-change"],
+      groupRules: []
+    }
+  });
+  const { confirm } = loadConfirmHarness({ profiles: [configured] });
+  const intent = {
+    kind: "bifrost-bypass-launch",
+    profileId: "p1",
+    cdpPort: 9224,
+    errorMessage: "[BIFROST_NOT_RUNNING] Bifrost 当前未运行。"
+  };
+  const view = confirm.confirmModalView(intent);
+  const html = confirm.renderConfirmModal({ kind: "confirm", intent });
+
+  assert.equal(view.title, "恢复分流并启动 套餐升降配本地");
+  assert.equal(view.confirmLabel, "本次直连启动");
+  assert.deepEqual(view.summary, [
+    { label: "Profile", value: "套餐升降配本地" },
+    { label: "分流入口", value: "127.0.0.1:18892" },
+    { label: "继续方式", value: "代理注入 · CDP :9224" }
+  ]);
+  assert.match(html, /data-action="confirm-modal-action"[^>]*>[\s\S]*本次直连启动/);
+  assert.match(html, /data-action="start-bifrost-and-launch"[^>]*>启动 Bifrost 并继续<\/button>/);
+});
+
+test("renderer one-click Bifrost recovery preserves CDP mode and requests proxy startup", async () => {
+  const configured = profile({
+    name: "套餐升降配本地",
+    bifrostProxy: {
+      listenerPort: 18892,
+      rules: ["codex-plan-change"],
+      groupRules: []
+    }
+  });
+  const nextState = appState([{ ...configured, running: true, cdpPort: 9224 }]);
+  const nextSnapshot = { running: true, ports: [{ port: 18892 }] };
+  const { confirm, store, calls, waitForBusy } = loadConfirmHarness({
+    profiles: [configured],
+    launchState: nextState,
+    launchSnapshot: nextSnapshot
+  });
+
+  confirm.executeBifrostStartAndLaunch({
+    kind: "bifrost-bypass-launch",
+    profileId: "p1",
+    cdpPort: 9224,
+    errorMessage: "[BIFROST_NOT_RUNNING] Bifrost 当前未运行。"
+  });
+  await waitForBusy();
+
+  assert.deepEqual(calls.launchProfileWithCdpArgs, [["p1", 9224, { startBifrost: true }]]);
+  assert.equal(store.state, nextState);
+  assert.equal(store.bifrostSnapshot, nextSnapshot);
+  assert.deepEqual(calls.busyStates, [{
+    key: "launch-cdp",
+    message: "正在启动 Bifrost、恢复分流并启动 套餐升降配本地…",
+    profileId: "p1"
+  }]);
+  assert.deepEqual(calls.toasts, [{
+    message: "已启动 Bifrost，并通过专属分流启动 <套餐升降配本地>",
+    kind: "normal"
+  }]);
+});
+
+test("renderer disable Bifrost rule confirm refreshes the proxy snapshot", async () => {
+  const nextSnapshot = { running: true, mainRules: [] };
+  const { confirm, store, calls, waitForBusy } = loadConfirmHarness({
+    disableSnapshot: nextSnapshot
+  });
+
+  confirm.executeDisableBifrostRuleConfirm({
+    kind: "disable-bifrost-rule",
+    ruleName: "FlowPD-FE-BotStudio",
+    ruleCount: 24
+  });
+  await waitForBusy();
+
+  assert.deepEqual(calls.disableRuleArgs, ["FlowPD-FE-BotStudio"]);
+  assert.equal(store.bifrostSnapshot, nextSnapshot);
+  assert.equal(store.modal, null);
+  assert.deepEqual(calls.busyStates, [
+    {
+      key: "disable-bifrost-rule",
+      message: "正在停用规则 FlowPD-FE-BotStudio…"
+    }
+  ]);
+  assert.deepEqual(calls.toasts, [
+    { message: "已停用规则 <FlowPD-FE-BotStudio>", kind: "normal" }
+  ]);
+});
+
+test("renderer dedicated Bifrost rule confirm explains its Profile-only scope", () => {
+  const configured = profile({
+    name: "9223端口profile",
+    bifrostProxy: {
+      listenerPort: 18888,
+      rules: ["FlowPD-FE-BotStudio-BOE", "codex-coze-optimize-subs-backend-boe"],
+      groupRules: []
+    }
+  });
+  const { confirm } = loadConfirmHarness({ profiles: [configured] });
+  const view = confirm.confirmModalView({
+    kind: "remove-profile-bifrost-rule",
+    profileId: "p1",
+    ruleKind: "local",
+    ruleRef: "FlowPD-FE-BotStudio-BOE"
+  });
+
+  assert.equal(view.title, "在 9223端口profile 中停用 FlowPD-FE-BotStudio-BOE");
+  assert.equal(view.confirmLabel, "仅在此 Profile 停用");
+  assert.deepEqual(view.body, [
+    "会将这条规则标记为已停用，并从 9223端口profile 的 Bifrost 专属入口 :18888 生效集合中移除；它仍保留在列表中，可随时重新启用。",
+    "入口端口保持不变，确认后立即热更新，无需重启 Chrome。",
+    "这不会停用或删除 Bifrost 中的规则，也不会影响主代理或其他 Profile。"
+  ]);
+  assert.deepEqual(view.summary, [
+    { label: "Profile", value: "9223端口profile" },
+    { label: "专属入口", value: "127.0.0.1:18888" },
+    { label: "规则", value: "FlowPD-FE-BotStudio-BOE" },
+    { label: "范围", value: "仅此 Profile" }
+  ]);
+});
+
+test("renderer pauses one dedicated Bifrost rule while retaining it for re-enable", async () => {
+  const configured = profile({
+    name: "9223端口profile",
+    bifrostProxy: {
+      listenerPort: 18888,
+      rules: ["FlowPD-FE-BotStudio-BOE", "codex-coze-optimize-subs-backend-boe"],
+      groupRules: []
+    }
+  });
+  const nextState = appState([
+    profile({
+      ...configured,
+      bifrostProxy: {
+        listenerPort: 18888,
+        rules: ["FlowPD-FE-BotStudio-BOE", "codex-coze-optimize-subs-backend-boe"],
+        groupRules: [],
+        disabledRules: ["FlowPD-FE-BotStudio-BOE"]
+      }
+    })
+  ]);
+  const { confirm, store, calls, waitForBusy } = loadConfirmHarness({
+    profiles: [configured],
+    profileProxyState: nextState
+  });
+
+  confirm.executeRemoveProfileBifrostRuleConfirm({
+    kind: "remove-profile-bifrost-rule",
+    profileId: "p1",
+    ruleKind: "local",
+    ruleRef: "FlowPD-FE-BotStudio-BOE"
+  });
+  await waitForBusy();
+
+  assert.deepEqual(calls.setProfileProxyArgs, [
+    [
+      "p1",
+      {
+        kind: "bifrost",
+        listenerPort: 18888,
+        rules: ["FlowPD-FE-BotStudio-BOE", "codex-coze-optimize-subs-backend-boe"],
+        groupRules: [],
+        disabledRules: ["FlowPD-FE-BotStudio-BOE"],
+        disabledGroupRules: []
+      }
+    ]
+  ]);
+  assert.equal(store.state, nextState);
+  assert.deepEqual(calls.busyStates, [
+    {
+      key: "remove-profile-bifrost-rule",
+      message: "正在更新 9223端口profile 的专属分流…",
+      profileId: "p1"
+    }
+  ]);
+  assert.deepEqual(calls.toasts, [
+    {
+      message: "已在 <9223端口profile> 中停用规则 <FlowPD-FE-BotStudio-BOE>",
+      kind: "normal"
+    }
+  ]);
+});
+
 test("renderer executeAgentTakeoverConfirm stops the whole profile without filters", async () => {
   const nextState = appState([
     profile({
@@ -66,11 +278,14 @@ test("renderer executeAgentTakeoverConfirm stops the whole profile without filte
   assert.deepEqual(calls.busyStates, [
     {
       key: "agent-takeover",
-      message: "正在暂停 Work 的 AI 操作…",
+      message: "正在封锁 Work 的新命令，并等待当前命令收敛…",
       profileId: "p1"
     }
   ]);
-  assert.deepEqual(calls.toasts, [{ message: "已接管 <Work>，AI 已暂停", kind: "normal" }]);
+  assert.deepEqual(calls.toasts, [{
+    message: "已接管 <Work>；执行面已静默，可以安全操作",
+    kind: "normal"
+  }]);
 });
 
 test("renderer executeAgentTakeoverConfirm reports partial takeover failures", async () => {
@@ -199,15 +414,107 @@ test("renderer mini takeover requires a second click before executing", async ()
   }
 });
 
+test("renderer dedicated Bifrost rule action opens a Profile-scoped confirm", async () => {
+  const harness = loadMainHarness({
+    profile: profile({
+      bifrostProxy: {
+        listenerPort: 18888,
+        rules: ["FlowPD-FE-BotStudio-BOE", "codex-coze-optimize-subs-backend-boe"],
+        groupRules: []
+      }
+    })
+  });
+
+  try {
+    harness.click({
+      action: "remove-profile-bifrost-rule",
+      id: "p1",
+      ruleKind: "local",
+      ruleRef: "FlowPD-FE-BotStudio-BOE"
+    });
+
+    assert.deepEqual(harness.store.modal, {
+      kind: "confirm",
+      intent: {
+        kind: "remove-profile-bifrost-rule",
+        profileId: "p1",
+        ruleKind: "local",
+        ruleRef: "FlowPD-FE-BotStudio-BOE"
+      }
+    });
+    assert.equal(harness.calls.renders, 1);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("renderer enables a paused dedicated Bifrost rule without a confirm dialog", async () => {
+  const harness = loadMainHarness({
+    profile: profile({
+      bifrostProxy: {
+        listenerPort: 18888,
+        rules: ["FlowPD-FE-BotStudio-BOE", "codex-coze-optimize-subs-backend-boe"],
+        groupRules: [],
+        disabledRules: ["FlowPD-FE-BotStudio-BOE"]
+      }
+    })
+  });
+
+  try {
+    harness.click({
+      action: "enable-profile-bifrost-rule",
+      id: "p1",
+      ruleKind: "local",
+      ruleRef: "FlowPD-FE-BotStudio-BOE"
+    });
+    await harness.waitForBusy();
+
+    assert.deepEqual(harness.calls.setProfileProxyArgs, [
+      [
+        "p1",
+        {
+          kind: "bifrost",
+          listenerPort: 18888,
+          rules: ["FlowPD-FE-BotStudio-BOE", "codex-coze-optimize-subs-backend-boe"],
+          groupRules: [],
+          disabledRules: [],
+          disabledGroupRules: []
+        }
+      ]
+    ]);
+    assert.equal(harness.store.modal, null);
+    assert.deepEqual(harness.calls.busyStates, [
+      {
+        key: "enable-profile-bifrost-rule",
+        message: "正在更新 Work 的专属分流…",
+        profileId: "p1"
+      }
+    ]);
+    assert.deepEqual(harness.calls.toasts, [
+      {
+        message: "已在 <Work> 中启用规则 <FlowPD-FE-BotStudio-BOE>",
+        kind: "normal"
+      }
+    ]);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
 function loadConfirmHarness(options = {}) {
   const calls = {
     busyStates: [],
+    disableRuleArgs: [],
+    launchProfileArgs: [],
+    launchProfileWithCdpArgs: [],
     renderCount: 0,
+    setProfileProxyArgs: [],
     takeoverArgs: [],
     toasts: []
   };
   const initialProfiles = options.profiles || [profile({ cdpClients: [cdpClient({ label: "agent-browser" })] })];
   const store = {
+    bifrostSnapshot: null,
     state: appState(initialProfiles),
     modal: { kind: "confirm", intent: { kind: "agent-takeover", profileId: "p1" } },
     extensionScan: null,
@@ -219,6 +526,25 @@ function loadConfirmHarness(options = {}) {
   const apiStub = {
     profileApi() {
       return {
+        async disableBifrostRule(ruleName) {
+          calls.disableRuleArgs.push(ruleName);
+          return options.disableSnapshot || { running: true, mainRules: [] };
+        },
+        async setProfileProxy(...args) {
+          calls.setProfileProxyArgs.push(args);
+          return options.profileProxyState || store.state;
+        },
+        async launchProfile(...args) {
+          calls.launchProfileArgs.push(args);
+          return options.launchState || store.state;
+        },
+        async launchProfileWithCdp(...args) {
+          calls.launchProfileWithCdpArgs.push(args);
+          return options.launchState || store.state;
+        },
+        async getBifrostSnapshot() {
+          return options.launchSnapshot || { running: true, ports: [] };
+        },
         async takeoverAgentConnections(...args) {
           calls.takeoverArgs.push(args);
           return options.takeoverResponse || takeoverResponse();
@@ -309,13 +635,16 @@ function loadMainHarness({ profile: activeProfile }) {
     window: global.window
   };
   const calls = {
+    busyStates: [],
     clearedTimers: [],
     executeTakeoverIntents: [],
     renders: 0,
+    setProfileProxyArgs: [],
     timers: [],
     toasts: []
   };
   let timerId = 0;
+  let busyPromise = Promise.resolve();
   const listeners = new Map();
   const appRoot = {
     addEventListener(type, handler) {
@@ -415,6 +744,10 @@ function loadMainHarness({ profile: activeProfile }) {
             },
             onOperationProgress() {
               return () => {};
+            },
+            async setProfileProxy(...args) {
+              calls.setProfileProxyArgs.push(args);
+              return store.state;
             }
           };
         }
@@ -437,7 +770,16 @@ function loadMainHarness({ profile: activeProfile }) {
           return false;
         },
         updateBusyState() {},
-        withBusy: async () => {}
+        withBusy(work, successMessage, busyState) {
+          calls.busyStates.push(busyState);
+          busyPromise = (async () => {
+            await work();
+            if (successMessage) {
+              calls.toasts.push({ message: successMessage, kind: "normal" });
+            }
+          })();
+          return busyPromise;
+        }
       },
       "src/renderer/confirm.ts": {
         closeModalFromUi() {},
@@ -515,10 +857,11 @@ function loadMainHarness({ profile: activeProfile }) {
       clickHandlers[0]({ target: new FakeElement(dataset) });
     },
     async cleanup() {
-      await Promise.resolve();
+      await busyPromise;
       Object.assign(global, previousGlobals);
     },
-    store
+    store,
+    waitForBusy: () => busyPromise
   };
 }
 

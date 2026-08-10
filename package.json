@@ -34,7 +34,7 @@
     "e2e": "npm run e2e:background",
     "e2e:background": "npm run build && node scripts/e2e-main-window.mjs && node scripts/e2e-background-ui.mjs && node scripts/e2e-sync-copy.mjs && node scripts/e2e-visual-regression.mjs && node scripts/e2e-overlay-smoke.mjs",
     "e2e:desktop": "npm run build && node scripts/e2e-desktop-ui.mjs && node scripts/e2e-gateway-control.mjs && node scripts/e2e-mini-window.mjs && node scripts/e2e-input-guard.mjs",
-    "e2e:full": "npm run e2e:background && npm run e2e:desktop",
+    "e2e:full": "npm run e2e:background && npm run e2e:desktop && npm run e2e:bifrost",
     "e2e:main-window": "npm run build && node scripts/e2e-main-window.mjs",
     "e2e:desktop-ui": "npm run build && node scripts/e2e-desktop-ui.mjs",
     "e2e:mini": "npm run build && node scripts/e2e-mini-window.mjs",
@@ -42,6 +42,7 @@
     "e2e:visual:update": "npm run build && UPDATE_VISUAL_BASELINES=1 node scripts/e2e-visual-regression.mjs",
     "e2e:sync-copy": "npm run build && node scripts/e2e-sync-copy.mjs",
     "e2e:gateway": "npm run build && node scripts/e2e-gateway-control.mjs",
+    "e2e:bifrost": "npm run build && node scripts/e2e-bifrost-proxy.mjs",
     "e2e:browser-drivers": "npm run build && node scripts/e2e-browser-drivers.mjs",
     "e2e:input-guard": "npm run build && node scripts/e2e-input-guard.mjs",
     "e2e:overlay": "npm run build && node scripts/e2e-overlay-smoke.mjs",
@@ -143,5 +144,8 @@
     "esbuild": "^0.28.1",
     "tailwindcss": "^3.4.17",
     "typescript": "^6.0.3"
+  },
+  "dependencies": {
+    "agent-session-core": "^0.1.1"
   }
 }

@@ -7,6 +7,10 @@ settings:
 importers:
 
   .:
+    dependencies:
+      agent-session-core:
+        specifier: ^0.1.1
+        version: 0.1.1
     devDependencies:
       '@types/node':
         specifier: ^25.9.1
@@ -338,6 +342,11 @@ packages:
   agent-base@7.1.4:
     resolution: {integrity: sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ==}
     engines: {node: '>= 14'}
+
+  agent-session-core@0.1.1:
+    resolution: {integrity: sha512-JTjbzWsbrINb1qcKHoqT54iRiF/bla/njeGhHtyjFalEBCM0UvuUimvum9P98HagC0SVREWDnipxVPoTh8i94Q==}
+    engines: {node: '>=18'}
+    hasBin: true
 
   ajv@8.20.0:
     resolution: {integrity: sha512-Thbli+OlOj+iMPYFBVBfJ3OmCAnaSyNn4M1vz9T6Gka5Jt9ba/HIR56joy65tY6kx/FCF5VXNB819Y7/GUrBGA==}
@@ -1779,6 +1788,8 @@ snapshots:
   abbrev@4.0.0: {}
 
   agent-base@7.1.4: {}
+
+  agent-session-core@0.1.1: {}
 
   ajv@8.20.0:
     dependencies:

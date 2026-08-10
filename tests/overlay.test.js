@@ -485,16 +485,22 @@ test("orphan agent overlay bootstrap stays invisible until a valid payload arriv
   assert.equal(typeof pageWindow.__ppAgentOverlayUpdate, "function");
 });
 
-test("agent overlay bootstrap is compatible with strict Trusted Types pages", () => {
+test("agent overlay bootstrap is compatible with strict Trusted Types and CSP pages", () => {
   const script = agentOverlayBootstrapScript();
   assert.doesNotMatch(script, /\.innerHTML\s*=/);
   assert.doesNotMatch(script, /insertAdjacentHTML|createContextualFragment|DOMParser/);
   assert.doesNotMatch(script, /trustedTypes\.createPolicy/);
+  assert.match(script, /typeof CSSStyleSheet === "function"/);
+  assert.match(script, /const styleSheet = new CSSStyleSheet\(\)/);
+  assert.match(script, /styleSheet\.replaceSync\(styleText\)/);
+  assert.match(script, /shadowRoot\.adoptedStyleSheets = \[styleSheet\]/);
   assert.match(script, /const styleNode = overlayNode\("style"\)/);
   assert.match(script, /document\.createElement\(tagName\)/);
   assert.match(script, /styleNode\.textContent = styleText/);
   assert.match(script, /document\.createElementNS\("http:\/\/www\.w3\.org\/2000\/svg", "svg"\)/);
-  assert.match(script, /shadowRoot\.append\(styleNode, wrapNode, cursorLayerNode\)/);
+  assert.match(script, /shadowRoot\.append\(styleNode\)/);
+  assert.match(script, /shadowRoot\.append\(wrapNode, cursorLayerNode\)/);
+  assert.match(script, /:host\{all:initial;position:fixed;inset:0;width:100vw;height:100vh;z-index:2147483647;pointer-events:none;color-scheme:dark\}/);
   new vm.Script(script);
 });
 
@@ -507,6 +513,31 @@ test("agent overlay omits the control-details affordance and persisted expansion
   assert.doesNotMatch(script, /⌄/);
   assert.match(script, /:host\(\.locked\) \.head\{grid-template-columns:28px minmax\(0,1fr\)/);
   assert.match(script, /:host\(\.locked\) \.status-stack\{display:flex;align-items:center/);
+});
+
+test("agent overlay uses a click-expanded 32px HUD with timed collapse and four-corner avoidance", () => {
+  const script = agentOverlayBootstrapScript();
+  assert.match(script, /HUD_AUTO_COLLAPSE_MS = 5000/);
+  assert.match(script, /HUD_OUTSIDE_COLLAPSE_MS = 1000/);
+  assert.match(script, /HUD_HANDOFF_PROMPT_MS = 6000/);
+  assert.match(script, /HUD_COLLISION_MARGIN_PX = 12/);
+  assert.match(script, /HUD_CORNERS = \["top-left", "top-right", "bottom-left", "bottom-right"\]/);
+  assert.match(script, /\.dot\{position:fixed;[^}]*width:32px;height:32px;pointer-events:auto/);
+  assert.match(script, /dot\.addEventListener\("click", \(\) => expand\(\)\)/);
+  assert.match(script, /event\.key === "Escape" && !collapsed/);
+  assert.match(script, /scheduleAutoCollapse\(inside \? HUD_AUTO_COLLAPSE_MS : HUD_OUTSIDE_COLLAPSE_MS\)/);
+  assert.match(script, /window\.__ppAgentOverlayAvoidRect/);
+  assert.match(script, /function avoidHudForRect/);
+  assert.match(script, /document\.elementFromPoint\(x, y\)/);
+  assert.match(script, /\["expand", collapsed \? dot : null\]/);
+  assert.match(script, /\["collapse", collapsed \? null : hideButton\]/);
+  assert.match(script, /if \(probe\.action === "expand"\) \{\s*expand\(\)/);
+  assert.match(script, /else if \(probe\.action === "collapse"\) \{\s*collapse\(\)/);
+  assert.match(script, /const returnError = taken \? String\(state\.stopError \|\| ""\)\.trim\(\) : ""/);
+  assert.match(script, /: returnError\s*\?\s*returnError\s*:\s*requiresUserAction/);
+  assert.match(script, /stopError && stopError !== previousStopError && isDelegatedToUser\(\)/);
+  assert.match(script, /stopConfirming \|\| state\.stopError \|\| !host/);
+  assert.doesNotMatch(script, /querySelectorAll\([^)]*\).*avoidHudForRect/);
 });
 
 test("agent overlay progress animation stays compositor-friendly", () => {
@@ -545,9 +576,12 @@ test("agent overlay bootstrap script includes zh/en copy and locale selection", 
   assert.match(script, /任务空间/);
   assert.match(script, /Task space/);
   assert.match(script, /projectPrefix: "项目"/);
+  assert.match(script, /branchPrefix: "分支"/);
   assert.match(script, /sessionPrefix: "Session"/);
   assert.match(script, /compactSessionId/);
   assert.match(script, /spaceChip\.title = fullTaskSpaceText/);
+  assert.match(script, /const identity = \[project, branch && branch !== project/);
+  assert.doesNotMatch(script, /const label = sessionId \? project \+ " · " \+ copy\.sessionPrefix/);
   assert.match(script, /Hard-stop notice sent/);
   assert.match(script, /接管/);
   assert.match(script, /returnToAgent: "交还 Agent"/);
@@ -568,12 +602,15 @@ test("agent overlay bootstrap script includes zh/en copy and locale selection", 
   assert.match(script, /目标：/);
   assert.match(script, /Target: /);
   assert.match(script, /browser control returned to you/);
+  assert.match(script, /需要你完成一步/);
+  assert.match(script, /Your action is needed/);
 });
 
 test("agent overlay bootstrap script exposes fail-closed native Input Guard hit testing", () => {
   const script = agentOverlayBootstrapScript();
   assert.doesNotMatch(script, /class=\\"shield\\"/);
-  assert.match(script, /host\.style\.pointerEvents = "none"/);
+  assert.match(script, /:host\{[^}]*pointer-events:none/);
+  assert.doesNotMatch(script, /host\.style\.pointerEvents/);
   assert.doesNotMatch(script, /\.shield\{/);
   assert.doesNotMatch(script, /radial-gradient/);
   assert.match(script, /overlayNode\("div", "status-line"\)/);
@@ -594,15 +631,16 @@ test("agent overlay bootstrap script exposes fail-closed native Input Guard hit 
   assert.doesNotMatch(script, /EXPANDED_KEY|toggleDetails/);
   assert.doesNotMatch(script, /:host\(.locked\.expanded\)/);
   assert.match(script, /:host\(.locked\) \.details\{display:none\}/);
-  assert.match(script, /host\.classList\.toggle\("collapsed", taken && collapsed && !offline\)/);
-  assert.match(script, /:host\(.locked\.collapsed\) \.panel\{display:grid\}/);
+  assert.match(script, /host\.classList\.toggle\("collapsed", collapsed\)/);
+  assert.match(script, /:host\(.locked\.collapsed\) \.panel\{display:none\}/);
+  assert.match(script, /:host\(.locked\.collapsed\) \.dot\{display:grid\}/);
   assert.match(script, /host\.classList\.add\("locked"\)/);
   assert.doesNotMatch(script, /host\.classList\.toggle\("locked", !taken\)/);
   assert.match(script, /const stopLabel = stopConfirming && stopConfirmKind === "stop" \? text\(\)\.confirmStop : isMultiSession\(\) \? text\(\)\.stopAll : text\(\)\.stopSingle/);
   assert.doesNotMatch(script, /stopButton\.textContent = text\(\)\.takenStop/);
   assert.match(script, /signal\("resume", \{ stopAll: false \}\)/);
   assert.match(script, /takeoverButton\.disabled = !hasBinding/);
-  assert.match(script, /takeoverButton\.disabled = !hasBinding \|\| pending \|\| offline/);
+  assert.match(script, /takeoverButton\.disabled = !hasBinding \|\| pending \|\| driverUnavailable/);
   assert.match(script, /stopButton\.disabled = !hasBinding/);
   assert.match(script, /const wasDelegatedToUser = isDelegatedToUser\(\)/);
   assert.match(script, /if \(!wasDelegatedToUser\) \{\s*resetStopConfirm\(\)/);
@@ -624,6 +662,8 @@ test("agent overlay bootstrap script exposes fail-closed native Input Guard hit 
   assert.match(script, /signal\("set-auto-follow", \{ enabled: !state\.autoFollowAgent \}\)/);
   assert.match(script, /targetFollow\.style\.display = hasTarget && !taken \? "grid" : "none"/);
   assert.match(script, /sessionsBlock\.style\.display = sessions\.length >= 1 \? "block" : "none"/);
+  assert.match(script, /\["expand", collapsed \? dot : null\]/);
+  assert.match(script, /\["collapse", collapsed \? null : hideButton\]/);
   assert.match(script, /\["showAgentTarget", showAgentTargetButton\]/);
   assert.match(script, /\["toggleAutoFollow", autoFollowButton\]/);
   assert.match(script, /rect\.left \+ inset/);
@@ -710,7 +750,7 @@ test("AgentOverlayManager keeps Input Guard off while the same CDP client is pau
   await manager.dispose();
 });
 
-test("AgentOverlayManager activates only a live probe in the clicked native window", async () => {
+test("AgentOverlayManager activates a collapsed HUD probe in the clicked native window", async () => {
   const evaluations = [];
   const fakeClient = {
     onEvent: null,
@@ -723,7 +763,7 @@ test("AgentOverlayManager activates only a live probe in the clicked native wind
       if (method === "Runtime.evaluate") {
         evaluations.push(params.expression);
         if (String(params.expression).includes("__ppAgentOverlayGuardProbe")) {
-          return { result: { value: { action: "takeover", signature: "live-layout" } } };
+          return { result: { value: { action: "expand", signature: "live-layout" } } };
         }
         return { result: { value: true } };
       }
@@ -976,6 +1016,33 @@ test("AgentOverlayManager returns delegated control to the original Agent", asyn
   assert.equal(state.delegatedToUser, false);
   assert.equal(state.takenOverUntil, 0);
   assert.deepEqual(inputGuardSyncs.at(-1), [27371]);
+});
+
+test("AgentOverlayManager keeps a failed return-to-Agent error in the delegated overlay payload", async () => {
+  const manager = new AgentOverlayManager({
+    onStop: async () => {},
+    onResume: async () => {
+      throw new Error(
+        "原 Agent 当前没有等待接收控制权，无法安全交还。请让 Agent 先进入 wait-control，或结束任务后重新连接。"
+      );
+    },
+    inputGuard: { sync() {}, dispose() {} }
+  });
+  const state = createOverlayState({
+    delegatedToUser: true,
+    controlSince: "2026-07-28T01:00:00.000Z",
+    takenOverUntil: Date.now() + 60_000
+  });
+  manager.ports.set(state.port, state);
+
+  await assert.rejects(
+    manager.handleResumeSignal(state, "cx-context-test"),
+    /没有等待接收控制权/
+  );
+
+  assert.equal(state.delegatedToUser, true);
+  assert.match(state.stopError, /没有等待接收控制权/);
+  assert.match(manager.payloadForPort(state).stopError, /没有等待接收控制权/);
 });
 
 test("AgentOverlayManager ignores stale delegated snapshots while returning control to Agent", async () => {
@@ -1692,6 +1759,7 @@ test("AgentOverlayManager rebuilds an isolated world after all known contexts fa
   let now = Date.parse("2026-07-08T00:00:00.000Z");
   let createWorldCalls = 0;
   const updateContexts = [];
+  const evaluationExpressions = [];
   const failingUpdateContexts = new Set([7, 8]);
   const fakeClient = {
     onEvent: null,
@@ -1699,6 +1767,7 @@ test("AgentOverlayManager rebuilds an isolated world after all known contexts fa
     close() {},
     async send(method, params) {
       if (method === "Runtime.evaluate") {
+        evaluationExpressions.push(String(params.expression));
         if (String(params.expression).startsWith("globalThis.__ppAgentOverlayUpdate")) {
           updateContexts.push(params.contextId);
           if (failingUpdateContexts.has(params.contextId)) {
@@ -1733,6 +1802,11 @@ test("AgentOverlayManager rebuilds an isolated world after all known contexts fa
   assert.equal(createWorldCalls, 1);
   assert.equal(page.activeContextId, 42);
   assert.equal(page.isolatedContextIds.has(42), true);
+  assert.equal(
+    evaluationExpressions.some((expression) => expression.includes('sessionStorage.removeItem("__ppAgentOverlayTerminalStopUntil")')),
+    true,
+    "active Session recovery must clear a late terminal marker before rebuilding the control box"
+  );
 
   failingUpdateContexts.add(42);
   failingUpdateContexts.add(100);
@@ -1864,6 +1938,7 @@ function createOverlayState(overrides = {}) {
     handoffPending: false,
     delegatedToUser: false,
     agentOffline: false,
+    driverReconnecting: false,
     controlSince: undefined,
     delegationGraceUntil: 0,
     returnGraceUntil: 0,

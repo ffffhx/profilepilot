@@ -216,7 +216,8 @@ test("Gateway endpoint provider sends Chrome DevTools MCP driver identity", asyn
     daemonInstanceId: "daemon-one",
     daemonPid: 123,
     agent: "Codex",
-    project: "profilepilot"
+    project: "profilepilot",
+    branch: "feat/overlay-identity"
   });
 
   assert.equal(endpoint, "ws://127.0.0.1:9223/devtools/browser/gateway?ticket=one");
@@ -228,6 +229,7 @@ test("Gateway endpoint provider sends Chrome DevTools MCP driver identity", asyn
     daemonPid: 123,
     agent: "Codex",
     project: "profilepilot",
+    branch: "feat/overlay-identity",
     driverKind: "chrome-devtools-mcp",
     driverLabel: "Chrome DevTools MCP"
   });

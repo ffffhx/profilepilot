@@ -15,16 +15,22 @@ import {
 import os from "node:os";
 import path from "node:path";
 import {
-  BROWSER_GATEWAY_PROTOCOL_VERSION,
   clearBrowserGatewayDaemonIdentity,
   ensureBrowserGatewayDaemon,
   readOrCreateBrowserGatewayDaemonIdentity,
   requestBrowserGateway,
-  type GatewayControlRequest,
   type GatewayControlResponse
 } from "./browser-gateway-client";
-import { findConfiguredAgentBrowserProfileByPortSync } from "./agent-browser-lease";
-import { ensureConfiguredGatewayProfileRunning } from "./agent-browser-wrapper";
+import { repositoryIdentityFromCwd } from "./browser-driver-context";
+import {
+  acquireGatewayDriverEndpoint,
+  ensureConfiguredGatewayProfileRunning,
+  ensurePersistentDriverGatewayProtocol,
+  findConfiguredGatewayProfileByPortSync,
+  gatewayDriverProfiles,
+  type GatewayDriverProfileView,
+  type GatewayDriverRequester
+} from "./browser-gateway-driver-runtime";
 
 const SAFE_SESSION_RE = /^[A-Za-z0-9._:-]{1,240}$/;
 const TERMINAL_COMMANDS = new Set(["close", "detach", "delete-data"]);
@@ -65,31 +71,14 @@ export interface PlaywrightCliSessionState {
   updatedAt: string;
 }
 
-interface GatewayProfileView {
-  publicPort: number;
-  ownerSessionId?: string;
-  daemonInstanceId?: string;
-  ownership?: "agent" | "user";
-  sessionStatus?: "active" | "stopped";
-  connectionActive?: boolean;
-  profileId?: string;
-  profileName?: string;
-  pendingUserAction?: string;
-}
-
 interface PlaywrightCliRunOptions {
   cwd?: string;
   forwardOutput?: boolean;
 }
 
-type GatewayRequester = (
-  request: GatewayControlRequest,
-  options?: { homeDir?: string; timeoutMs?: number }
-) => Promise<GatewayControlResponse>;
-
 export interface PlaywrightCliWrapperDependencies {
   command?: PlaywrightCliCommand;
-  request?: GatewayRequester;
+  request?: GatewayDriverRequester;
   run?: (
     command: PlaywrightCliCommand,
     args: string[],
@@ -394,7 +383,7 @@ export async function runPlaywrightCliWrapper(
   }
 
   if (command === "attach" && invocation.cdpPort) {
-    const configured = findConfiguredAgentBrowserProfileByPortSync(invocation.cdpPort, env, homeDir);
+    const configured = findConfiguredGatewayProfileByPortSync(invocation.cdpPort, env, homeDir);
     let status: GatewayControlResponse;
     try {
       status = await request({ action: "status" }, { homeDir, timeoutMs: 800 });
@@ -415,17 +404,17 @@ export async function runPlaywrightCliWrapper(
       }
     }
     try {
-      status = await requirePersistentDriverGatewayProtocol(
-        status,
+      status = await ensurePersistentDriverGatewayProtocol(status, {
         homeDir,
+        driverLabel: "Playwright CLI",
         request,
         ensureGatewayDaemon
-      );
+      });
     } catch (error) {
       process.stderr.write(formatPlaywrightCliWrapperError(error));
       return PROFILEPILOT_PLAYWRIGHT_CLI_HARD_STOP_EXIT_CODE;
     }
-    if (!gatewayProfiles(status).some((item) => item.publicPort === invocation.cdpPort) && configured) {
+    if (!gatewayDriverProfiles(status).some((item) => item.publicPort === invocation.cdpPort) && configured) {
       try {
         status = await ensureProfileRunning(invocation.cdpPort, status, env, homeDir);
       } catch (error) {
@@ -433,7 +422,7 @@ export async function runPlaywrightCliWrapper(
         return PROFILEPILOT_PLAYWRIGHT_CLI_HARD_STOP_EXIT_CODE;
       }
     }
-    const profile = gatewayProfiles(status).find((item) => item.publicPort === invocation.cdpPort);
+    const profile = gatewayDriverProfiles(status).find((item) => item.publicPort === invocation.cdpPort);
     if (profile) {
       if (invalidExplicitSession) {
         process.stderr.write(formatPlaywrightCliWrapperError(
@@ -531,25 +520,6 @@ export async function runPlaywrightCliWrapper(
   return resultExitCode(result);
 }
 
-async function requirePersistentDriverGatewayProtocol(
-  status: GatewayControlResponse,
-  homeDir: string,
-  request: GatewayRequester,
-  ensureGatewayDaemon: NonNullable<PlaywrightCliWrapperDependencies["ensureGatewayDaemon"]>
-): Promise<GatewayControlResponse> {
-  const current = Number(status.protocolVersion);
-  if (!Number.isFinite(current) || current === BROWSER_GATEWAY_PROTOCOL_VERSION) return status;
-  const upgraded = await ensureGatewayDaemon({ homeDir });
-  const actual = Number(upgraded.protocolVersion);
-  if (actual !== BROWSER_GATEWAY_PROTOCOL_VERSION) {
-    throw wrapperError(
-      "GATEWAY_PROTOCOL_INCOMPATIBLE",
-      `当前 Gateway 协议为 v${current}，Playwright CLI 持久交接需要 v${BROWSER_GATEWAY_PROTOCOL_VERSION}；请先结束旧 Gateway 中仍在运行的 Profile，再重试`
-    );
-  }
-  return request({ action: "status" }, { homeDir, timeoutMs: 800 });
-}
-
 export function formatPlaywrightCliWrapperError(error: unknown): string {
   const candidate = error as { code?: string; message?: string; detail?: unknown } | null;
   const code = candidate?.code || "GATEWAY_ERROR";
@@ -575,7 +545,7 @@ async function runManagedAttach(options: {
   playwrightSession: string;
   gatewaySessionId: string;
   realCommand: PlaywrightCliCommand;
-  request: GatewayRequester;
+  request: GatewayDriverRequester;
   runner: NonNullable<PlaywrightCliWrapperDependencies["run"]>;
   discoverDaemonPid: NonNullable<PlaywrightCliWrapperDependencies["discoverDaemonPid"]>;
 }): Promise<number> {
@@ -635,7 +605,7 @@ async function ensureManagedPlaywrightConnection(options: {
   state: PlaywrightCliSessionState;
   env: NodeJS.ProcessEnv;
   homeDir: string;
-  request: GatewayRequester;
+  request: GatewayDriverRequester;
   runner: NonNullable<PlaywrightCliWrapperDependencies["run"]>;
   realCommand: PlaywrightCliCommand;
   discoverDaemonPid: NonNullable<PlaywrightCliWrapperDependencies["discoverDaemonPid"]>;
@@ -703,32 +673,36 @@ async function acquirePlaywrightGatewayEndpoint(
   state: PlaywrightCliSessionState,
   daemonPid: number | undefined,
   homeDir: string,
-  request: GatewayRequester
+  request: GatewayDriverRequester
 ): Promise<{ webSocketUrl: string; connectionActive: boolean }> {
-  const acquireRequest = {
-    action: "acquire" as const,
+  const repository = repositoryIdentityFromCwd(state.cwd);
+  const acquired = await acquireGatewayDriverEndpoint({
     publicPort: state.publicPort,
     sessionId: state.gatewaySessionId,
     daemonInstanceId: state.daemonInstanceId,
     daemonPid,
-    agent: inferAgentFromSession(state.gatewaySessionId),
-    project: path.basename(state.cwd) || state.cwd,
     driverKind: "playwright-cli",
-    driverLabel: "Playwright CLI"
-  } as GatewayControlRequest & { driverKind: "playwright-cli"; driverLabel: "Playwright CLI" };
-  const response = await request(acquireRequest, { homeDir, timeoutMs: GATEWAY_TIMEOUT_MS });
-  const webSocketUrl = typeof response.webSocketUrl === "string" ? response.webSocketUrl.trim() : "";
-  if (!isWebSocketUrl(webSocketUrl)) {
-    throw wrapperError("GATEWAY_INVALID_RESPONSE", "Gateway 没有返回有效的 WebSocket Ticket");
-  }
-  return { webSocketUrl, connectionActive: response.connectionActive === true };
+    driverLabel: "Playwright CLI",
+    agent: inferAgentFromSession(state.gatewaySessionId),
+    project: repository.project,
+    branch: repository.branch
+  }, {
+    homeDir,
+    timeoutMs: GATEWAY_TIMEOUT_MS,
+    ensureReady: false,
+    request
+  });
+  return {
+    webSocketUrl: acquired.webSocketUrl,
+    connectionActive: acquired.connectionActive
+  };
 }
 
 async function confirmPlaywrightGatewayConnection(
   state: PlaywrightCliSessionState,
   daemonPid: number | undefined,
   homeDir: string,
-  request: GatewayRequester
+  request: GatewayDriverRequester
 ): Promise<boolean> {
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const acquired = await acquirePlaywrightGatewayEndpoint(state, daemonPid, homeDir, request);
@@ -743,7 +717,7 @@ async function handleProfilePilotCommand(
   invocation: PlaywrightCliInvocation,
   state: PlaywrightCliSessionState | null,
   homeDir: string,
-  request: GatewayRequester
+  request: GatewayDriverRequester
 ): Promise<number> {
   const action = invocation.commandIndex === undefined ? undefined : args[invocation.commandIndex + 1];
   if (!state) {
@@ -815,7 +789,7 @@ async function handleProfilePilotCommand(
 async function releaseManagedPlaywrightSession(
   state: PlaywrightCliSessionState,
   homeDir: string,
-  request: GatewayRequester
+  request: GatewayDriverRequester
 ): Promise<void> {
   const status = await request({ action: "status" }, { homeDir, timeoutMs: 800 });
   const profile = profileForState(status, state);
@@ -833,7 +807,7 @@ async function releaseManagedPlaywrightSession(
 async function stopGatewaySessionIfOwned(
   state: PlaywrightCliSessionState,
   homeDir: string,
-  request: GatewayRequester
+  request: GatewayDriverRequester
 ): Promise<void> {
   const status = await request({ action: "status" }, { homeDir, timeoutMs: 800 });
   const profile = profileForState(status, state);
@@ -845,7 +819,7 @@ async function stopGatewaySessionIfOwned(
 }
 
 function assertManagedProfileCanRun(
-  profile: GatewayProfileView | undefined,
+  profile: GatewayDriverProfileView | undefined,
   state: PlaywrightCliSessionState
 ): void {
   if (!profile) {
@@ -897,25 +871,11 @@ async function withSessionReconnectLock<T>(
   }
 }
 
-function gatewayProfiles(status: GatewayControlResponse): GatewayProfileView[] {
-  const state = status.state && typeof status.state === "object"
-    ? status.state as { profiles?: unknown }
-    : null;
-  if (!Array.isArray(state?.profiles)) return [];
-  return state.profiles.flatMap((value) => {
-    if (!value || typeof value !== "object") return [];
-    const profile = value as Record<string, unknown>;
-    const publicPort = validPort(profile.publicPort);
-    if (!publicPort) return [];
-    return [{ ...profile, publicPort } as GatewayProfileView];
-  });
-}
-
 function profileForState(
   status: GatewayControlResponse,
   state: PlaywrightCliSessionState
-): GatewayProfileView | undefined {
-  return gatewayProfiles(status).find((profile) =>
+): GatewayDriverProfileView | undefined {
+  return gatewayDriverProfiles(status).find((profile) =>
     profile.publicPort === state.publicPort &&
     (profile.ownerSessionId === state.gatewaySessionId || profile.sessionStatus === "stopped")
   );

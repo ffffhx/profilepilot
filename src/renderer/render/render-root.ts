@@ -4,7 +4,7 @@ import { renderSyncPanel } from "./account-sync";
 import { renderClonePoolModal } from "./clone-pool";
 import { renderLiveZoomModal } from "./live-view";
 import { renderMini } from "./mini";
-import { renderCdpModal, renderCloneTagModal, renderExtensionMigrationModal, renderGlobalInstructionsModal, renderNewModal, renderRenameModal } from "./modals";
+import { renderBifrostProxyModal, renderCdpModal, renderCloneTagModal, renderExtensionMigrationModal, renderGlobalInstructionsModal, renderNewModal, renderRenameModal } from "./modals";
 import { renderEmpty, renderExternalDetailsModal, renderProfileDetailsModal, renderProfilesPanel } from "./profiles";
 import { appRoot, store } from "../state";
 import { escapeHtml, renderBusyBanner, renderButtonLabel } from "../util";
@@ -108,6 +108,7 @@ export function render(): void {
     ${store.modal?.kind === "new" ? renderNewModal() : ""}
     ${store.modal?.kind === "rename" ? renderRenameModal(store.modal.profileId) : ""}
     ${store.modal?.kind === "cdp" ? renderCdpModal(store.modal.profileId, store.modal.portSuggestion) : ""}
+    ${store.modal?.kind === "bifrost-proxy" ? renderBifrostProxyModal(store.modal.profileId, store.modal.snapshot) : ""}
     ${store.modal?.kind === "clone-pool" ? renderClonePoolModal(profiles) : ""}
     ${store.modal?.kind === "clone-tag" ? renderCloneTagModal(store.modal.profileId) : ""}
     ${store.modal?.kind === "global-instructions" ? renderGlobalInstructionsModal() : ""}

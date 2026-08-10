@@ -51,12 +51,35 @@ export async function saveGlobalInstruction(): Promise<void> {
   try {
     const snapshot = await profileApi().writeGlobalInstruction({
       id: editingId,
-      content: store.globalInstructionDraft
+      content: store.globalInstructionDraft,
+      expectedRevision: store.globalInstructionBaseRevision || undefined
     });
     store.globalInstructions = snapshot;
     store.activeGlobalInstructionId = editingId;
     store.editingGlobalInstructionId = null;
     store.globalInstructionDraft = "";
+    store.globalInstructionBaseRevision = "";
+    store.globalInstructionOriginal = "";
+  } finally {
+    store.globalInstructionsSaving = false;
+    render();
+  }
+}
+
+export async function undoGlobalInstruction(): Promise<void> {
+  const file = store.globalInstructions?.files.find((item) => item.id === store.activeGlobalInstructionId);
+  if (!file) return;
+  store.globalInstructionsSaving = true;
+  render();
+  try {
+    store.globalInstructions = await profileApi().undoGlobalInstruction({
+      id: file.id,
+      expectedRevision: file.revision
+    });
+    store.editingGlobalInstructionId = null;
+    store.globalInstructionDraft = "";
+    store.globalInstructionBaseRevision = "";
+    store.globalInstructionOriginal = "";
   } finally {
     store.globalInstructionsSaving = false;
     render();
@@ -75,6 +98,27 @@ export async function repairClaudeInstructionShell(): Promise<void> {
     store.globalInstructionDraft = "";
   } finally {
     store.globalInstructionsSaving = false;
+    render();
+  }
+}
+
+export async function refreshProfileReadiness(profileId: string): Promise<void> {
+  store.profileReadinessLoading = {
+    ...store.profileReadinessLoading,
+    [profileId]: true
+  };
+  render();
+  try {
+    const receipt = await profileApi().inspectProfileReadiness({ profileId });
+    store.profileReadiness = {
+      ...store.profileReadiness,
+      [profileId]: receipt
+    };
+  } finally {
+    store.profileReadinessLoading = {
+      ...store.profileReadinessLoading,
+      [profileId]: false
+    };
     render();
   }
 }

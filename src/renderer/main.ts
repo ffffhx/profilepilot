@@ -1,15 +1,16 @@
 import { profileApi } from "./api";
 import { activateBusyStep, busyStepsKey, emphasizeName, focusProfileFromUi, setToast, updateBusyProgressDom, updateBusyState, withBusy } from "./busy";
-import { closeModalFromUi, executeAgentTakeoverConfirm, executeConfirmIntent } from "./confirm";
+import { closeModalFromUi, executeAgentTakeoverConfirm, executeBifrostStartAndLaunch, executeConfirmIntent } from "./confirm";
 import { clampCloneCount } from "./render/clone-pool";
 import { isExtensionMigrationActionItem } from "./render/extensions";
 import { focusLiveTab, openLiveZoom, refreshLiveViewNow, requestLiveViewNow, startLiveViewLoop, toggleLiveScreenshot } from "./render/live-view";
 import { sortByMiniOrder } from "./render/mini";
 import { computeMainReorder, mainProfileGroups, type MainProfileGroup } from "./render/profiles";
+import { buildClashMergeTemplate, renderGlobalInstructionDiff } from "./render/modals";
 import { render } from "./render/render-root";
-import { applyState, invalidateExtensionMigrationDiff, loadState, refreshExtensionMigrationDiff, refreshGlobalInstructions, repairClaudeInstructionShell, saveGlobalInstruction, setMigrationSource } from "./state-actions";
+import { applyState, invalidateExtensionMigrationDiff, loadState, refreshExtensionMigrationDiff, refreshGlobalInstructions, refreshProfileReadiness, repairClaudeInstructionShell, saveGlobalInstruction, setMigrationSource, undoGlobalInstruction } from "./state-actions";
 import { appRoot, store } from "./state";
-import type { AgentOverlayRevealEvent, AgentTakeoverEvent, AppState } from "./types";
+import type { AgentOverlayRevealEvent, AgentTakeoverEvent, AppState, ProfileProxyConfig } from "./types";
 import { deleteButtonTitle, escapeHtml, formatErrorMessage, profileAgentControlClients } from "./util";
 
 const MINI_TAKEOVER_NOTICE_MS = 5000;
@@ -224,6 +225,190 @@ function markMiniTakeover(takeover: AgentTakeoverEvent): void {
   );
 }
 
+async function refreshBifrostProxyModal(profileId: string): Promise<void> {
+  if (store.modal?.kind !== "bifrost-proxy" || store.modal.profileId !== profileId) return;
+  store.modal = { kind: "bifrost-proxy", profileId, snapshot: null };
+  render();
+  try {
+    const snapshot = await profileApi().getBifrostSnapshot();
+    // 弹窗里刚拉到的快照顺手同步给全局徽标，省一次轮询。
+    store.bifrostSnapshot = snapshot;
+    if (store.modal?.kind === "bifrost-proxy" && store.modal.profileId === profileId) {
+      store.modal = { kind: "bifrost-proxy", profileId, snapshot };
+      render();
+    }
+  } catch (error) {
+    if (store.modal?.kind === "bifrost-proxy" && store.modal.profileId === profileId) {
+      store.modal = {
+        kind: "bifrost-proxy",
+        profileId,
+        snapshot: {
+          installed: false,
+          running: false,
+          version: null,
+          binaryPath: null,
+          mainPort: null,
+          ports: [],
+          localRules: [],
+          error: formatErrorMessage(error)
+        }
+      };
+      render();
+    }
+  }
+}
+
+// —— Bifrost 分流三态徽标的后台轮询：主窗口可见时每 12s 拉一次快照，hidden 时停表不打扰 CLI ——
+const BIFROST_SNAPSHOT_INTERVAL_MS = 12_000;
+let bifrostSnapshotTimer: number | null = null;
+let bifrostSnapshotInFlight = false;
+
+async function refreshBifrostSnapshotForBadges(): Promise<void> {
+  if (bifrostSnapshotInFlight) {
+    return;
+  }
+  // 独立 Profile 即使没配专属分流，也需要刷新它实际跟随的系统代理。
+  if (!store.state?.profiles.some((profile) => profile.source === "isolated")) {
+    return;
+  }
+  bifrostSnapshotInFlight = true;
+  try {
+    const snapshot = await profileApi().getBifrostSnapshot();
+    const changed = JSON.stringify(snapshot) !== JSON.stringify(store.bifrostSnapshot);
+    store.bifrostSnapshot = snapshot;
+    // 忙碌/弹窗/hover 时只更新缓存不重绘，下一次 render 自然带出新徽标。
+    if (changed && !pushedStateApplyBlocked()) {
+      render();
+    }
+  } catch {
+    // 快照读取失败不打断界面，等下个周期重试。
+  } finally {
+    bifrostSnapshotInFlight = false;
+  }
+}
+
+function startBifrostSnapshotLoop(): void {
+  if (bifrostSnapshotTimer !== null) {
+    return;
+  }
+  void refreshBifrostSnapshotForBadges();
+  bifrostSnapshotTimer = window.setInterval(() => {
+    void refreshBifrostSnapshotForBadges();
+  }, BIFROST_SNAPSHOT_INTERVAL_MS);
+}
+
+function stopBifrostSnapshotLoop(): void {
+  if (bifrostSnapshotTimer !== null) {
+    window.clearInterval(bifrostSnapshotTimer);
+    bifrostSnapshotTimer = null;
+  }
+}
+
+// 代理恢复失败（错误消息带 [BIFROST_*] 或 [UPSTREAM_*] 码）时，把默认错误 toast 换成
+// 「本次直连启动（不走代理）」的确认框；cdpPort 记录重试时要沿用的启动方式。
+function bifrostBypassLaunchHandler(profileId: string, cdpPort: number | null): (message: string) => boolean {
+  return (message) => {
+    if (!/\[(?:BIFROST|UPSTREAM)_[A-Z_]+\]/.test(message)) {
+      return false;
+    }
+    store.modal = {
+      kind: "confirm",
+      intent: { kind: "bifrost-bypass-launch", profileId, cdpPort, errorMessage: message }
+    };
+    render();
+    return true;
+  };
+}
+
+function syncBifrostFormControls(form: HTMLFormElement): void {
+  const enabledInput = form.querySelector<HTMLInputElement>("[data-bifrost-proxy-enabled]");
+  const fields = form.querySelector<HTMLFieldSetElement>("[data-bifrost-config-fields]");
+  const enabled = Boolean(enabledInput?.checked);
+  if (fields && !enabledInput?.disabled) fields.disabled = !enabled;
+  fields?.classList.toggle("enabled", enabled);
+  enabledInput?.closest(".bifrost-enable-row")?.classList.toggle("enabled", enabled);
+
+  // 模式切换：显示对应面板、切换单选高亮，并把当前模式记到 form 上供提交与模板读取。
+  const mode = form.querySelector<HTMLInputElement>('[data-bifrost-mode]:checked')?.value === "upstream" ? "upstream" : "bifrost";
+  form.dataset.proxyMode = mode;
+  form.querySelectorAll<HTMLElement>("[data-bifrost-mode-panel]").forEach((panel) => {
+    panel.hidden = panel.dataset.bifrostModePanel !== mode;
+  });
+  form.querySelectorAll<HTMLElement>(".bifrost-mode-option").forEach((option) => {
+    option.classList.toggle("selected", Boolean(option.querySelector<HTMLInputElement>("input[type=radio]")?.checked));
+  });
+
+  form.querySelectorAll<HTMLElement>(".bifrost-rule-option").forEach((option) => {
+    option.classList.toggle("selected", Boolean(option.querySelector<HTMLInputElement>('input[type="checkbox"]')?.checked));
+  });
+
+  const port = form.querySelector<HTMLInputElement>("[data-bifrost-listener-port]")?.value.trim() || "—";
+  const localCount = form.querySelectorAll<HTMLInputElement>("[data-bifrost-rule-option]:checked").length;
+  const groupCount = (form.querySelector<HTMLTextAreaElement>("[data-bifrost-group-rules]")?.value || "")
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .filter(Boolean).length;
+  const portLabel = form.querySelector<HTMLElement>("[data-bifrost-route-port]");
+  const countLabel = form.querySelector<HTMLElement>("[data-bifrost-route-count]");
+  const upstreamServer = form.querySelector<HTMLInputElement>("[data-bifrost-upstream-server]")?.value.trim() || "";
+  if (portLabel) {
+    portLabel.textContent = !enabled
+      ? "系统代理"
+      : mode === "upstream"
+        ? upstreamServer || "上游代理"
+        : `127.0.0.1:${port}`;
+  }
+  if (countLabel) {
+    countLabel.textContent = !enabled
+      ? "Default view"
+      : mode === "upstream"
+        ? "直连上游"
+        : localCount + groupCount > 0
+          ? `${localCount + groupCount} 条显式规则`
+          : "选择规则";
+  }
+
+  // Clash 模板只在直连 Clash 模式下出现，端口随 server 输入实时更新。
+  const templateCode = form.querySelector<HTMLElement>("[data-clash-template-code]");
+  if (templateCode && mode === "upstream") {
+    templateCode.textContent = buildClashMergeTemplate(extractPortFromEndpointClient(upstreamServer));
+  }
+
+  const submit = form.querySelector<HTMLButtonElement>("[data-bifrost-submit-label]");
+  if (submit && !submit.classList.contains("loading")) {
+    submit.textContent = enabled
+      ? "保存分流"
+      : form.dataset.bifrostConfigured === "true"
+        ? "停用分流"
+        : "保持系统代理";
+  }
+}
+
+// 客户端侧的端口解析（与 modals.ts 的同名逻辑对齐，供实时模板更新用）。
+function extractPortFromEndpointClient(input: string): number | null {
+  const match = String(input || "").trim().match(/:(\d{2,5})(?:\D|$)/);
+  const port = match ? Number(match[1]) : NaN;
+  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null;
+}
+
+// 上游代理地址归一化（渲染层输入校验）：与主进程 proxy-health 规则一致，返回 scheme://host:port 或 null。
+function normalizeProxyServerInput(input: string): string | null {
+  const raw = String(input || "").trim();
+  if (!raw || raw.length > 200 || /[\s\0]/.test(raw)) return null;
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `http://${raw}`;
+  let url: URL;
+  try {
+    url = new URL(withScheme);
+  } catch {
+    return null;
+  }
+  const scheme = url.protocol.replace(/:$/, "").toLowerCase();
+  if (scheme !== "http" && scheme !== "https" && scheme !== "socks5") return null;
+  const port = Number(url.port);
+  if (!url.hostname || !Number.isInteger(port) || port < 1 || port > 65535) return null;
+  return `${scheme}://${url.hostname}:${port}`;
+}
+
 appRoot.addEventListener("click", (event) => {
   const target = event.target instanceof Element ? event.target : null;
   // 全局快捷键下拉是原生 <select>，点它会冒泡命中所在行的 data-action="select"，触发 render() 把
@@ -265,6 +450,95 @@ appRoot.addEventListener("click", (event) => {
   const id = actionTarget.dataset.id || null;
   if (action !== "toggle-profile-menu" && actionTarget.closest("[data-profile-actions]")) {
     store.openProfileMenuId = null;
+  }
+
+  if (action === "disable-bifrost-rule") {
+    const ruleName = String(actionTarget.dataset.ruleName || "").trim();
+    const ruleCount = Math.max(0, Number.parseInt(actionTarget.dataset.ruleCount || "0", 10) || 0);
+    if (!ruleName) {
+      setToast("没有读取到要停用的 Bifrost 规则", "error");
+      return;
+    }
+    store.modal = {
+      kind: "confirm",
+      intent: {
+        kind: "disable-bifrost-rule",
+        ruleName,
+        ruleCount
+      }
+    };
+    render();
+    return;
+  }
+
+  if (action === "remove-profile-bifrost-rule" && id) {
+    const profile = store.state.profiles.find((item) => item.id === id);
+    const ruleKind = actionTarget.dataset.ruleKind === "group" ? "group" : "local";
+    const ruleRef = String(actionTarget.dataset.ruleRef || "").trim();
+    const config = profile?.bifrostProxy;
+    const rules = ruleKind === "group" ? config?.groupRules : config?.rules;
+    const disabledRules = new Set(config?.disabledRules || []);
+    const disabledGroupRules = new Set(config?.disabledGroupRules || []);
+    const selectedDisabledRules = ruleKind === "group" ? disabledGroupRules : disabledRules;
+    if (!profile || !config || !ruleRef || !rules?.includes(ruleRef) || selectedDisabledRules.has(ruleRef)) {
+      setToast("这条专属分流规则已停用或不存在", "error");
+      return;
+    }
+    const activeRuleCount = config.rules.length + config.groupRules.length - disabledRules.size - disabledGroupRules.size;
+    if (activeRuleCount <= 1) {
+      setToast("专属分流至少需要保留一条启用规则", "error");
+      return;
+    }
+    store.modal = {
+      kind: "confirm",
+      intent: {
+        kind: "remove-profile-bifrost-rule",
+        profileId: profile.id,
+        ruleKind,
+        ruleRef
+      }
+    };
+    render();
+    return;
+  }
+
+  if (action === "enable-profile-bifrost-rule" && id) {
+    const profile = store.state.profiles.find((item) => item.id === id);
+    const ruleKind = actionTarget.dataset.ruleKind === "group" ? "group" : "local";
+    const ruleRef = String(actionTarget.dataset.ruleRef || "").trim();
+    const config = profile?.bifrostProxy;
+    const rules = ruleKind === "group" ? config?.groupRules : config?.rules;
+    const disabledRules = new Set(config?.disabledRules || []);
+    const disabledGroupRules = new Set(config?.disabledGroupRules || []);
+    const selectedDisabledRules = ruleKind === "group" ? disabledGroupRules : disabledRules;
+    if (!profile || !config || !ruleRef || !rules?.includes(ruleRef) || !selectedDisabledRules.has(ruleRef)) {
+      setToast("这条专属分流规则未停用或已不存在", "error");
+      return;
+    }
+    const nextConfig = {
+      kind: "bifrost" as const,
+      listenerPort: config.listenerPort,
+      rules: [...config.rules],
+      groupRules: [...config.groupRules],
+      disabledRules: ruleKind === "local"
+        ? [...disabledRules].filter((rule) => rule !== ruleRef)
+        : [...disabledRules],
+      disabledGroupRules: ruleKind === "group"
+        ? [...disabledGroupRules].filter((rule) => rule !== ruleRef)
+        : [...disabledGroupRules]
+    };
+    void withBusy(
+      async () => {
+        store.state = await profileApi().setProfileProxy(profile.id, nextConfig);
+      },
+      `已在 ${emphasizeName(profile.name)} 中启用规则 ${emphasizeName(ruleRef)}`,
+      {
+        key: "enable-profile-bifrost-rule",
+        message: `正在更新 ${profile.name} 的专属分流…`,
+        profileId: profile.id
+      }
+    );
+    return;
   }
 
   if (action === "toggle-migration-target-menu") {
@@ -482,6 +756,8 @@ appRoot.addEventListener("click", (event) => {
     store.modal = { kind: "global-instructions" };
     store.editingGlobalInstructionId = null;
     store.globalInstructionDraft = "";
+    store.globalInstructionBaseRevision = "";
+    store.globalInstructionOriginal = "";
     store.openProfileMenuId = null;
     store.migrationTargetMenuOpen = false;
     store.accountSyncMenuOpen = null;
@@ -525,6 +801,8 @@ appRoot.addEventListener("click", (event) => {
 
     store.editingGlobalInstructionId = file.id;
     store.globalInstructionDraft = file.content;
+    store.globalInstructionOriginal = file.content;
+    store.globalInstructionBaseRevision = file.revision;
     render();
     window.setTimeout(() => document.querySelector<HTMLTextAreaElement>("[data-global-instruction-editor]")?.focus(), 0);
     return;
@@ -533,6 +811,8 @@ appRoot.addEventListener("click", (event) => {
   if (action === "cancel-global-instruction-edit") {
     store.editingGlobalInstructionId = null;
     store.globalInstructionDraft = "";
+    store.globalInstructionBaseRevision = "";
+    store.globalInstructionOriginal = "";
     render();
     return;
   }
@@ -549,6 +829,18 @@ appRoot.addEventListener("click", (event) => {
   if (action === "repair-global-instruction-shell") {
     void repairClaudeInstructionShell()
       .then(() => setToast("已恢复 CLAUDE.md 引用壳"))
+      .catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+    return;
+  }
+
+  if (action === "undo-global-instruction") {
+    const file = store.globalInstructions?.files.find((item) => item.id === store.activeGlobalInstructionId);
+    if (!file || !store.globalInstructions?.undoAvailableIds.includes(file.id)) {
+      setToast("没有可撤销的规则版本", "error");
+      return;
+    }
+    void undoGlobalInstruction()
+      .then(() => setToast(`已撤销 ${file.fileName} 的上一次改动`))
       .catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
     return;
   }
@@ -588,6 +880,15 @@ appRoot.addEventListener("click", (event) => {
 
   if (action === "confirm-modal-action" && store.modal?.kind === "confirm") {
     executeConfirmIntent(store.modal.intent);
+    return;
+  }
+
+  if (
+    action === "start-bifrost-and-launch" &&
+    store.modal?.kind === "confirm" &&
+    store.modal.intent.kind === "bifrost-bypass-launch"
+  ) {
+    executeBifrostStartAndLaunch(store.modal.intent);
     return;
   }
 
@@ -949,7 +1250,25 @@ appRoot.addEventListener("click", (event) => {
     store.modal = { kind: "profile-details", profileId: id };
     render();
     requestLiveViewNow(id);
+    void refreshProfileReadiness(id).catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
     window.setTimeout(() => document.querySelector<HTMLButtonElement>("[data-profile-details-close]")?.focus(), 0);
+    return;
+  }
+
+  if (action === "refresh-profile-readiness" && id) {
+    void refreshProfileReadiness(id).catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+    return;
+  }
+
+  if (action === "copy-profile-readiness" && id) {
+    const receipt = store.profileReadiness[id];
+    if (!receipt || !navigator.clipboard?.writeText) {
+      setToast("当前没有可复制的 readiness receipt", "error");
+      return;
+    }
+    void navigator.clipboard.writeText(JSON.stringify(receipt, null, 2))
+      .then(() => setToast("已复制结构化 readiness receipt"))
+      .catch(() => setToast("复制失败，请重试", "error"));
     return;
   }
 
@@ -1023,6 +1342,54 @@ appRoot.addEventListener("click", (event) => {
     return;
   }
 
+  if (action === "toggle-agent-access" && id) {
+    const profile = store.state.profiles.find((item) => item.id === id);
+    if (!profile || profile.source !== "isolated") {
+      setToast("Agent 连接开关只支持独立 Profile", "error");
+      return;
+    }
+    const agentAccessDisabled = !profile.agentAccessDisabled;
+    void withBusy(async () => {
+      store.state = await profileApi().setProfileAgentSettings(id, { agentAccessDisabled });
+      store.selectedId = id;
+    }, agentAccessDisabled
+      ? `已禁止 Agent 连接 ${emphasizeName(profile.name)}`
+      : `已允许 Agent 连接 ${emphasizeName(profile.name)}`, {
+      key: "save-agent-settings",
+      message: agentAccessDisabled ? "正在禁止 Agent 连接…" : "正在允许 Agent 连接…",
+      profileId: id
+    });
+    return;
+  }
+
+  if (action === "configure-bifrost-proxy" && id) {
+    const profile = store.state.profiles.find((item) => item.id === id);
+    if (!profile || profile.source !== "isolated") {
+      setToast("Bifrost 分流只支持独立 Profile", "error");
+      return;
+    }
+    store.modal = { kind: "bifrost-proxy", profileId: id, snapshot: null };
+    render();
+    void refreshBifrostProxyModal(id);
+    return;
+  }
+
+  if (action === "refresh-bifrost-snapshot" && id) {
+    void refreshBifrostProxyModal(id);
+    return;
+  }
+
+  if (action === "copy-clash-template") {
+    const code = target?.closest("[data-clash-template]")?.querySelector<HTMLElement>("[data-clash-template-code]")?.textContent || "";
+    if (code) {
+      void navigator.clipboard?.writeText(code).then(
+        () => setToast("已复制 Clash Merge 模板", "normal"),
+        () => setToast("复制失败，请手动选择文本复制", "error")
+      );
+    }
+    return;
+  }
+
   if (action === "select" && id) {
     // 点在拖拽手柄上只用于拖拽排序，不触发选中。
     if (event.target instanceof Element && event.target.closest("[data-drag-handle]")) {
@@ -1054,7 +1421,7 @@ appRoot.addEventListener("click", (event) => {
       key: "launch-profile",
       message: `正在启动 ${profile?.name || "Profile"}…`,
       profileId: id
-    });
+    }, bifrostBypassLaunchHandler(id, null));
     return;
   }
 
@@ -1130,7 +1497,7 @@ appRoot.addEventListener("click", (event) => {
       key: "launch-cdp",
       message: `正在以 CDP 启动 ${profile.name}…`,
       profileId: id
-    });
+    }, bifrostBypassLaunchHandler(id, port));
     return;
   }
 
@@ -1248,6 +1615,32 @@ appRoot.addEventListener("click", (event) => {
     }
     store.modal = { kind: "confirm", intent: { kind: "agent-takeover", profileId: id } };
     render();
+    return;
+  }
+
+  if (action === "return-agent-control" && id) {
+    const profile = store.state.profiles.find((item) => item.id === id);
+    const session = profile?.gatewayControl?.ownerSessionId;
+    if (!profile || profile.gatewayControl?.ownership !== "user" || !session) {
+      setToast("这个 Profile 当前没有等待交还的 Agent Session", "error");
+      return;
+    }
+    void withBusy(
+      async () => {
+        const result = await profileApi().resumeAgentConnections(id, { session });
+        store.state = result.state;
+        if (!result.targetCount || result.successCount !== result.targetCount) {
+          throw new Error(result.failures[0]?.error || "没有成功交还 Agent");
+        }
+        await refreshProfileReadiness(id);
+      },
+      `已把 ${emphasizeName(profile.name)} 交还 Agent；Agent 将重新读取页面状态`,
+      {
+        key: "agent-return",
+        message: `正在恢复 ${profile.name} 的租约与 Agent 控制权…`,
+        profileId: id
+      }
+    );
     return;
   }
 
@@ -1401,6 +1794,17 @@ appRoot.addEventListener("change", (event) => {
     return;
   }
 
+  if (target instanceof HTMLInputElement && target.matches("[data-bifrost-proxy-enabled], [data-bifrost-rule-option], [data-bifrost-mode]")) {
+    const form = target.closest<HTMLFormElement>("[data-bifrost-proxy-form]");
+    if (form) {
+      syncBifrostFormControls(form);
+      if (target.matches("[data-bifrost-proxy-enabled]") && target.checked) {
+        form.querySelector<HTMLInputElement>("[data-bifrost-listener-port]")?.focus();
+      }
+    }
+    return;
+  }
+
   if (target instanceof HTMLInputElement && target.matches("[data-launch-synced-profile]")) {
     store.launchSyncedProfile = target.checked;
     render();
@@ -1481,6 +1885,15 @@ appRoot.addEventListener("change", (event) => {
 });
 
 appRoot.addEventListener("input", (event) => {
+  const bifrostTarget = event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement
+    ? event.target
+    : null;
+  if (bifrostTarget?.matches("[data-bifrost-listener-port], [data-bifrost-group-rules], [data-bifrost-upstream-server], [data-bifrost-upstream-bypass]")) {
+    const form = bifrostTarget.closest<HTMLFormElement>("[data-bifrost-proxy-form]");
+    if (form) syncBifrostFormControls(form);
+    return;
+  }
+
   const target = event.target instanceof HTMLTextAreaElement ? event.target : null;
   if (!target?.matches("[data-global-instruction-editor]")) {
     return;
@@ -1490,6 +1903,10 @@ appRoot.addEventListener("input", (event) => {
   const count = document.querySelector("[data-global-instruction-draft-count]");
   if (count) {
     count.textContent = `${target.value.length} 字符`;
+  }
+  const diff = document.querySelector<HTMLElement>("[data-global-instruction-diff]");
+  if (diff) {
+    diff.innerHTML = renderGlobalInstructionDiff(store.globalInstructionOriginal, target.value);
   }
 });
 
@@ -1519,7 +1936,10 @@ appRoot.addEventListener("dblclick", (event) => {
 appRoot.addEventListener("keydown", (event) => {
   if (
     event.key === "Escape" &&
-    (store.modal?.kind === "live-zoom" || store.modal?.kind === "profile-details" || store.modal?.kind === "external-details")
+    (store.modal?.kind === "live-zoom" ||
+      store.modal?.kind === "profile-details" ||
+      store.modal?.kind === "external-details" ||
+      store.modal?.kind === "bifrost-proxy")
   ) {
     closeModalFromUi();
     return;
@@ -1573,13 +1993,96 @@ appRoot.addEventListener("submit", (event) => {
   const createForm = target?.closest<HTMLFormElement>("[data-create-form]");
   const renameForm = target?.closest<HTMLFormElement>("[data-rename-form]");
   const cdpForm = target?.closest<HTMLFormElement>("[data-cdp-form]");
+  const bifrostProxyForm = target?.closest<HTMLFormElement>("[data-bifrost-proxy-form]");
   const extensionMigrationForm = target?.closest<HTMLFormElement>("[data-extension-migration-form]");
   const cloneTagForm = target?.closest<HTMLFormElement>("[data-clone-tag-form]");
-  if (!createForm && !renameForm && !cdpForm && !extensionMigrationForm && !cloneTagForm) {
+  if (!createForm && !renameForm && !cdpForm && !bifrostProxyForm && !extensionMigrationForm && !cloneTagForm) {
     return;
   }
 
   event.preventDefault();
+
+  if (bifrostProxyForm) {
+    const profileId = bifrostProxyForm.dataset.profileId;
+    const profile = store.state?.profiles.find((item) => item.id === profileId);
+    if (!profileId || !profile) return;
+    const data = new FormData(bifrostProxyForm);
+    const hotEditingBifrost = Boolean(profile.running && profile.bifrostProxy);
+    const enabled = hotEditingBifrost || data.has("enabled");
+    const mode = hotEditingBifrost
+      ? "bifrost"
+      : String(data.get("mode") || "bifrost") === "upstream"
+        ? "upstream"
+        : "bifrost";
+    let config: ProfileProxyConfig | null = null;
+    if (enabled && mode === "upstream") {
+      const server = normalizeProxyServerInput(String(data.get("upstreamServer") || ""));
+      if (!server) {
+        setToast("上游代理地址无法解析，请填写形如 http://127.0.0.1:7897 的地址", "error");
+        return;
+      }
+      const bypassList = String(data.get("bypassList") || "").trim() || null;
+      config = { kind: "upstream", server, ...(bypassList ? { bypassList } : {}) };
+    } else if (enabled) {
+      const listenerPort = hotEditingBifrost
+        ? profile.bifrostProxy!.listenerPort
+        : Number(String(data.get("listenerPort") || ""));
+      if (!Number.isInteger(listenerPort) || listenerPort < 1024 || listenerPort > 65535) {
+        setToast("Bifrost 入口端口必须是 1024-65535 之间的整数", "error");
+        return;
+      }
+      const snapshot = store.modal?.kind === "bifrost-proxy" ? store.modal.snapshot : null;
+      if (snapshot?.mainPort === listenerPort) {
+        setToast(`端口 ${listenerPort} 是 Bifrost 主代理端口，请换一个专属入口`, "error");
+        return;
+      }
+      const rules = data.getAll("rule").map(String).map((item) => item.trim()).filter(Boolean);
+      const groupRules = String(data.get("groupRules") || "")
+        .split(/\r?\n/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+      const invalidGroupRule = groupRules.find((item) => !/^\d+\/.+/.test(item));
+      if (invalidGroupRule) {
+        setToast(`Group 规则格式不正确：${invalidGroupRule}`, "error");
+        return;
+      }
+      if (!rules.length && !groupRules.length) {
+        setToast("至少选择一条本地规则或填写一条 Group 规则", "error");
+        return;
+      }
+      const disabledRules = (profile.bifrostProxy?.disabledRules || [])
+        .filter((rule) => rules.includes(rule));
+      const disabledGroupRules = (profile.bifrostProxy?.disabledGroupRules || [])
+        .filter((rule) => groupRules.includes(rule));
+      if (disabledRules.length + disabledGroupRules.length >= rules.length + groupRules.length) {
+        setToast("专属分流至少需要保留一条启用规则", "error");
+        return;
+      }
+      config = {
+        kind: "bifrost",
+        listenerPort,
+        rules,
+        groupRules,
+        ...(disabledRules.length ? { disabledRules } : {}),
+        ...(disabledGroupRules.length ? { disabledGroupRules } : {})
+      };
+    }
+
+    const successMessage = !enabled
+      ? `已让 ${emphasizeName(profile.name)} 恢复跟随系统代理`
+      : mode === "upstream"
+        ? `已给 ${emphasizeName(profile.name)} 配置直连 Clash 代理`
+        : `已给 ${emphasizeName(profile.name)} 配置独立 Bifrost 分流`;
+    void withBusy(
+      async () => {
+        store.state = await profileApi().setProfileProxy(profileId, config);
+        store.modal = null;
+      },
+      successMessage,
+      { key: "save-bifrost-proxy", message: "正在保存代理分流…", profileId }
+    );
+    return;
+  }
 
   if (cloneTagForm) {
     const profileId = cloneTagForm.dataset.profileId;
@@ -1698,7 +2201,7 @@ appRoot.addEventListener("submit", (event) => {
       key: "launch-cdp",
       message: `正在以 CDP 启动 ${profile?.name || "Profile"}…`,
       profileId
-    });
+    }, bifrostBypassLaunchHandler(profileId, port));
     return;
   }
 
@@ -1754,9 +2257,16 @@ if (store.viewMode === "mini") {
   render();
 }
 
-loadState().catch((error: unknown) => {
-  appRoot.innerHTML = `<div class="app-loading p-8 text-muted font-mono text-[13px] tracking-[0.08em] uppercase">${escapeHtml(formatErrorMessage(error))}</div>`;
-});
+loadState()
+  .then(() => {
+    // 首次状态就绪后立刻补一拍 Bifrost 快照，徽标不用等下一个轮询周期。
+    if (store.viewMode === "main") {
+      void refreshBifrostSnapshotForBadges();
+    }
+  })
+  .catch((error: unknown) => {
+    appRoot.innerHTML = `<div class="app-loading p-8 text-muted font-mono text-[13px] tracking-[0.08em] uppercase">${escapeHtml(formatErrorMessage(error))}</div>`;
+  });
 
 if (store.viewMode === "mini") {
   let miniPanelTransitionId = 0;
@@ -2125,6 +2635,15 @@ if (store.viewMode === "mini") {
 // 两个窗口不再各自轮询，避免重复 lsof/CDP 扫描和 DOM 抖动。
 if (store.viewMode === "main") {
   startLiveViewLoop();
+  startBifrostSnapshotLoop();
+  // 面板不可见时停掉 Bifrost 快照轮询（清 timer 防泄漏），回到前台立即补一拍。
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      stopBifrostSnapshotLoop();
+    } else {
+      startBifrostSnapshotLoop();
+    }
+  });
 
   // —— 主窗口 Profile 行拖拽排序（HTML5 DnD，仅从行首拖拽手柄发起） ——
   // 两级语义：拖「数据目录主行」（组首）= 整块目录随之移动、在各目录间重排；

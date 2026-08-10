@@ -18,6 +18,10 @@ import {
   type GatewayControlRequest,
   type GatewayControlResponse
 } from "./browser-gateway-client";
+import {
+  createBrowserGatewayDriverLifecycle,
+  type BrowserGatewayDriverLifecycle
+} from "./browser-gateway-driver-lifecycle";
 import { BrowserGatewayServer } from "./browser-gateway-server";
 import { ChromePipeTransport } from "./browser-gateway-transport";
 import { focusProfileWindow } from "./chrome-launch";
@@ -25,10 +29,29 @@ import { validateUnpackedExtensionPath } from "./unpacked-extension";
 
 const MAX_CONTROL_REQUEST_BYTES = 4 * 1024 * 1024;
 const DEFAULT_HANDOFF_REVEAL_DEADLINE_MS = 5_000;
+// wait-control 醒来后，Agent 还需要完成一次模型调度并重新 snapshot。10 秒在真实工具
+// 往返中会把正在恢复的 Session 误判为失联；无 waiter 的 UI 交还已由 ProfileManager
+// 拒绝，因此这里可以给有效接收方完整的恢复窗口。
+export const DEFAULT_DRIVER_RECONNECT_GRACE_MS = 30_000;
 
 export interface BrowserGatewayDaemonOptions {
   focusProfileWindow?: (pids: number[], signal?: AbortSignal) => Promise<boolean>;
   handoffRevealDeadlineMs?: number;
+  driverReconnectGraceMs?: number;
+  driverLifecycle?: BrowserGatewayDriverLifecycle;
+}
+
+interface ManagedGatewayProfile {
+  profileId: string;
+  profileName: string;
+  agentAccessDisabled: boolean;
+}
+
+interface DriverReconnectTimer {
+  publicPort: number;
+  sessionId: string;
+  daemonInstanceId: string;
+  timer: NodeJS.Timeout;
 }
 
 export class BrowserGatewayDaemon {
@@ -39,7 +62,7 @@ export class BrowserGatewayDaemon {
   private readonly lockPath: string;
   private readonly internalSecret: string;
   private readonly managedProfilesPath: string;
-  private readonly managedProfiles = new Map<number, { profileId: string; profileName: string }>();
+  private readonly managedProfiles = new Map<number, ManagedGatewayProfile>();
   private readonly control: BrowserGatewayControlPlane;
   private readonly gateway: BrowserGatewayServer;
   private readonly controlServer: net.Server;
@@ -47,6 +70,9 @@ export class BrowserGatewayDaemon {
   private readonly sessionControlQueues = new Map<string, Promise<void>>();
   private readonly focusProfileWindow: (pids: number[], signal?: AbortSignal) => Promise<boolean>;
   private readonly handoffRevealDeadlineMs: number;
+  private readonly driverReconnectGraceMs: number;
+  private readonly driverLifecycle: BrowserGatewayDriverLifecycle;
+  private readonly driverReconnectTimers = new Map<string, DriverReconnectTimer>();
   private eventSequence = 0;
   private shuttingDown = false;
   private shutdownRequested = false;
@@ -65,6 +91,10 @@ export class BrowserGatewayDaemon {
     this.handoffRevealDeadlineMs = Number.isFinite(options.handoffRevealDeadlineMs) && Number(options.handoffRevealDeadlineMs) > 0
       ? Math.floor(Number(options.handoffRevealDeadlineMs))
       : DEFAULT_HANDOFF_REVEAL_DEADLINE_MS;
+    this.driverReconnectGraceMs = Number.isFinite(options.driverReconnectGraceMs) && Number(options.driverReconnectGraceMs) > 0
+      ? Math.floor(Number(options.driverReconnectGraceMs))
+      : DEFAULT_DRIVER_RECONNECT_GRACE_MS;
+    this.driverLifecycle = options.driverLifecycle || createBrowserGatewayDriverLifecycle(homeDir);
     mkdirSync(this.root, { recursive: true });
     this.loadManagedProfiles();
     this.internalSecret = loadOrCreateSecret(browserGatewaySecretPath(homeDir));
@@ -79,30 +109,13 @@ export class BrowserGatewayDaemon {
     this.gateway = new BrowserGatewayServer(this.control, {
       internalSecret: this.internalSecret,
       onBackendClose: (publicPort) => {
+        this.cancelDriverReconnectForPort(publicPort);
         void this.gateway.unregisterBackend(publicPort, false).finally(() => {
           this.control.unregisterProfile(publicPort);
         });
       },
-      onAgentConnectionChange: (publicPort, active) => {
-        const profile = this.control.getProfile(publicPort);
-        if (profile) {
-          if (
-            !active &&
-            profile.ownership === "agent" &&
-            profile.sessionStatus === "active" &&
-            profile.ownerSessionId
-          ) {
-            // Gateway 自己观察连接生命周期并维护 Agent 在线状态；UI 不得再靠
-            // daemon pid、waiter 文件或 lease 猜测“在线”。
-            this.control.markAgentOffline(profile.ownerSessionId);
-            return;
-          }
-          this.publishControlEvent({
-            type: "connection-updated",
-            profile,
-            reason: active ? "agent-connected" : "agent-disconnected"
-          });
-        }
+      onAgentConnectionChange: (publicPort, active, identity) => {
+        this.handleAgentConnectionChange(publicPort, active, identity.sessionId, identity.daemonInstanceId);
       },
       onAgentTargetChange: (publicPort) => {
         const profile = this.control.getProfile(publicPort);
@@ -143,6 +156,8 @@ export class BrowserGatewayDaemon {
   async stop(): Promise<void> {
     if (this.shuttingDown) return;
     this.shuttingDown = true;
+    for (const reconnect of this.driverReconnectTimers.values()) clearTimeout(reconnect.timer);
+    this.driverReconnectTimers.clear();
     for (const subscriber of this.subscribers) subscriber.destroy();
     this.subscribers.clear();
     await this.gateway.close().catch(() => undefined);
@@ -292,6 +307,11 @@ export class BrowserGatewayDaemon {
       });
     }
     if (request.action === "launch-profile") {
+      const managedProfile = {
+        profileId: request.profileId,
+        profileName: request.profileName,
+        agentAccessDisabled: request.agentAccessDisabled === true
+      };
       if (this.gateway.registeredPorts().includes(request.publicPort)) {
         const current = this.control.getProfile(request.publicPort);
         if (current?.profileId !== request.profileId) {
@@ -300,9 +320,15 @@ export class BrowserGatewayDaemon {
             `端口 ${request.publicPort} 已由 ${current?.profileName || "另一个 Profile"} 使用`
           );
         }
-        this.managedProfiles.set(request.publicPort, { profileId: request.profileId, profileName: request.profileName });
+        this.managedProfiles.set(request.publicPort, managedProfile);
         this.persistManagedProfiles();
-        return { ok: true, alreadyRunning: true, profile: current };
+        const stoppedSessionId = await this.stopAgentSessionIfAccessDisabled(request.publicPort);
+        return {
+          ok: true,
+          alreadyRunning: true,
+          profile: this.control.getProfile(request.publicPort),
+          stoppedSessionId
+        };
       }
       // A persisted control record without a live route is from a previous Gateway/Chrome
       // lifetime. Never revive its old Agent ownership against a newly launched browser.
@@ -323,7 +349,7 @@ export class BrowserGatewayDaemon {
           chromePid: transport.child.pid
         });
         await this.gateway.registerBackend({ publicPort: request.publicPort, backend: transport });
-        this.managedProfiles.set(request.publicPort, { profileId: request.profileId, profileName: request.profileName });
+        this.managedProfiles.set(request.publicPort, managedProfile);
         this.persistManagedProfiles();
       } catch (error) {
         transport.close();
@@ -332,28 +358,77 @@ export class BrowserGatewayDaemon {
       }
       return { ok: true, chromePid: transport.child.pid, profile: this.control.getProfile(request.publicPort) };
     }
+    if (request.action === "update-profile-agent-settings") {
+      const managed = this.managedProfiles.get(request.publicPort);
+      const current = this.control.getProfile(request.publicPort);
+      if (
+        (managed && managed.profileId !== request.profileId) ||
+        (current && current.profileId !== request.profileId)
+      ) {
+        throw new BrowserGatewayControlError(
+          "PROFILE_LEASE_CONFLICT",
+          `端口 ${request.publicPort} 已由 ${current?.profileName || managed?.profileName || "另一个 Profile"} 使用`
+        );
+      }
+      if (!managed && !current) {
+        throw new BrowserGatewayControlError(
+          "GATEWAY_PROFILE_NOT_RUNNING",
+          `Gateway 没有找到端口 ${request.publicPort} 的 Profile`
+        );
+      }
+      this.managedProfiles.set(request.publicPort, {
+        profileId: request.profileId,
+        profileName: request.profileName,
+        agentAccessDisabled: request.agentAccessDisabled === true
+      });
+      this.persistManagedProfiles();
+      const stoppedSessionId = await this.stopAgentSessionIfAccessDisabled(request.publicPort);
+      return {
+        ok: true,
+        profile: this.control.getProfile(request.publicPort),
+        stoppedSessionId
+      };
+    }
     if (request.action === "unregister-profile") {
+      this.cancelDriverReconnectForPort(request.publicPort);
       await this.gateway.unregisterBackend(request.publicPort, request.closeChrome !== false);
       this.control.unregisterProfile(request.publicPort);
+      this.managedProfiles.delete(request.publicPort);
+      this.persistManagedProfiles();
       return { ok: true };
     }
     if (request.action === "acquire") {
+      const managed = this.managedProfiles.get(request.publicPort);
+      if (managed?.agentAccessDisabled) {
+        throw new BrowserGatewayControlError(
+          "PROFILE_AGENT_ACCESS_DISABLED",
+          `Profile“${managed.profileName}”已禁止 Agent 连接`
+        );
+      }
       const acquired = this.control.acquire(request);
+      const connectionActive = this.gateway.hasActiveAgentConnection(
+        request.publicPort,
+        request.sessionId,
+        request.daemonInstanceId
+      );
+      if (!connectionActive) {
+        this.beginDriverReconnect(acquired.profile, "driver-connect-pending");
+      }
       return {
         ok: true,
         ticket: acquired.ticket,
         claims: acquired.claims,
         profile: acquired.profile,
-        connectionActive: this.gateway.hasActiveAgentConnection(
-          request.publicPort,
-          request.sessionId,
-          request.daemonInstanceId
-        ),
+        connectionActive,
         webSocketUrl: `ws://127.0.0.1:${request.publicPort}/devtools/browser/gateway?ticket=${encodeURIComponent(acquired.ticket)}`
       };
     }
     if (request.action === "prepare-daemon-restart") {
       return { ok: true, restartNonce: this.control.prepareDaemonRestart(request.sessionId, request.daemonInstanceId) };
+    }
+    if (request.action === "reconnect-failed") {
+      await this.expireDriverReconnect(request.sessionId, request.daemonInstanceId, "driver-retry-exhausted");
+      return { ok: true };
     }
     if (request.action === "control") {
       return this.withSessionControlLock(request.sessionId, () => this.handleSessionControl(request));
@@ -362,13 +437,31 @@ export class BrowserGatewayDaemon {
       const result = await this.gateway.callRaw(request);
       return { ok: true, result };
     }
+    if (request.action === "device-emulation") {
+      return this.withSessionControlLock(request.sessionId, async () => {
+        const result = await this.gateway.controlDeviceEmulation(request);
+        return {
+          ok: true,
+          command: request.command,
+          active: Boolean(
+            request.command === "emulate"
+              ? result
+              : request.command === "status"
+                ? result
+                : false
+          ),
+          deviceEmulation: result
+        };
+      });
+    }
     if (request.action === "load-unpacked-extension") {
       const extension = validateUnpackedExtensionPath(request.extensionPath);
       const result = await this.gateway.loadUnpackedExtension({
         publicPort: request.publicPort,
         sessionId: request.sessionId,
         daemonInstanceId: request.daemonInstanceId,
-        extensionPath: extension.path
+        extensionPath: extension.path,
+        extensionVersion: extension.version
       });
       return {
         ok: true,
@@ -379,6 +472,13 @@ export class BrowserGatewayDaemon {
           version: extension.version,
           manifestVersion: extension.manifestVersion
         }
+      };
+    }
+    if (request.action === "trigger-extension-action") {
+      const result = await this.gateway.triggerExtensionAction(request);
+      return {
+        ok: true,
+        result
       };
     }
     if (request.action === "shutdown") {
@@ -398,10 +498,20 @@ export class BrowserGatewayDaemon {
     const wasAgentControlled = Boolean(
       sessionProfile?.sessionStatus === "active" && sessionProfile.ownership === "agent"
     );
+    const preserveDeviceEmulation = Boolean(
+      request.command === "takeover" &&
+      request.preserveDeviceEmulation === true &&
+      wasAgentControlled &&
+      sessionProfile &&
+      this.gateway.prepareDeviceEmulationUserHandoff(
+        sessionProfile.publicPort,
+        request.sessionId
+      )
+    );
     let executionQuiesced = false;
     if (request.command === "takeover" && wasAgentControlled && sessionProfile) {
       // 先在 Gateway 执行面封锁新命令，再等已发往 Chrome 的命令收敛。
-      // 这样 Playwright/MCP 即使没有 agent-browser 的本地 notice，也不会和用户并发操作。
+      // 这样任何驱动即使没有本地通知机制，也不会和用户并发操作。
       const quiesced = await this.gateway.quiesceAgentSession(
         sessionProfile.publicPort,
         request.sessionId,
@@ -414,6 +524,17 @@ export class BrowserGatewayDaemon {
       }
       executionQuiesced = true;
     }
+    if (
+      request.command !== "return" &&
+      !preserveDeviceEmulation &&
+      sessionProfile?.sessionStatus === "active" &&
+      sessionProfile.ownership === "agent"
+    ) {
+      await this.gateway.clearDeviceEmulationForSession(
+        sessionProfile.publicPort,
+        request.sessionId
+      );
+    }
     let profile: GatewayProfileBinding;
     try {
       profile = request.command === "takeover"
@@ -424,13 +545,30 @@ export class BrowserGatewayDaemon {
             ? this.control.returnToAgent(request.sessionId)
             : this.control.stopSession(request.sessionId);
     } catch (error) {
+      if (preserveDeviceEmulation && sessionProfile) {
+        this.gateway.cancelDeviceEmulationUserHandoff(
+          sessionProfile.publicPort,
+          request.sessionId
+        );
+      }
       if (executionQuiesced && sessionProfile) {
         this.gateway.cancelAgentQuiesce(sessionProfile.publicPort, request.sessionId);
       }
       throw error;
     }
+    this.cancelDriverReconnect(request.sessionId);
     if (profile.sessionStatus === "stopped" && sessionProfile) {
       this.gateway.clearAgentTarget(sessionProfile.publicPort, request.sessionId);
+    } else if (request.command === "return" && profile.ownerSessionId && profile.daemonInstanceId) {
+      if (this.gateway.hasActiveAgentConnection(
+        profile.publicPort,
+        profile.ownerSessionId,
+        profile.daemonInstanceId
+      )) {
+        profile = this.control.markAgentConnected(profile.ownerSessionId, profile.daemonInstanceId);
+      } else {
+        this.beginDriverReconnect(profile, "control-return");
+      }
     }
 
     let revealedTarget = null;
@@ -454,7 +592,8 @@ export class BrowserGatewayDaemon {
             sessionProfile.publicPort,
             request.sessionId,
             profile.controlGeneration,
-            activationTimeoutMs
+            activationTimeoutMs,
+            preserveDeviceEmulation
           );
           signal.throwIfAborted();
           profileFocused = await this.focusGatewayProfile(profile, signal);
@@ -470,12 +609,184 @@ export class BrowserGatewayDaemon {
       profile,
       ...(request.revealAgentTarget === true ? {
         handoffTransitioned: wasAgentControlled,
+        deviceEmulationPreserved: preserveDeviceEmulation,
         revealAttempted,
         revealedTarget,
         profileFocused,
         revealError
       } : {})
     };
+  }
+
+  private handleAgentConnectionChange(
+    publicPort: number,
+    active: boolean,
+    sessionId: string,
+    daemonInstanceId: string
+  ): void {
+    const profile = this.control.getProfile(publicPort);
+    if (
+      !profile ||
+      profile.ownerSessionId !== sessionId ||
+      profile.daemonInstanceId !== daemonInstanceId
+    ) {
+      return;
+    }
+    if (profile.sessionStatus !== "active" || profile.ownership !== "agent") {
+      this.publishControlEvent({
+        type: "connection-updated",
+        profile,
+        reason: active ? "agent-connected" : "agent-disconnected"
+      });
+      return;
+    }
+    if (active) {
+      const recoveredFromDisconnect = profile.driverState === "reconnecting";
+      this.cancelDriverReconnect(sessionId);
+      try {
+        const connected = this.control.markAgentConnected(sessionId, daemonInstanceId);
+        if (recoveredFromDisconnect) {
+          this.driverLifecycle.connected(connected);
+        }
+        this.publishControlEvent({
+          type: "connection-updated",
+          profile: connected,
+          reason: "agent-connected"
+        });
+      } catch {
+        // The connection lost the ownership race; its next command will be rejected.
+      }
+      return;
+    }
+    if (this.gateway.hasActiveAgentConnection(publicPort, sessionId, daemonInstanceId)) {
+      return;
+    }
+    this.beginDriverReconnect(profile, "agent-disconnected");
+    const reconnecting = this.control.getProfile(publicPort);
+    if (reconnecting) {
+      this.publishControlEvent({
+        type: "connection-updated",
+        profile: reconnecting,
+        reason: "agent-disconnected"
+      });
+    }
+  }
+
+  private beginDriverReconnect(profile: GatewayProfileBinding, reason: string): void {
+    const sessionId = profile.ownerSessionId;
+    const daemonInstanceId = profile.daemonInstanceId;
+    if (
+      !sessionId ||
+      !daemonInstanceId ||
+      profile.sessionStatus !== "active" ||
+      profile.ownership !== "agent"
+    ) {
+      return;
+    }
+    const existing = this.driverReconnectTimers.get(sessionId);
+    if (existing?.daemonInstanceId === daemonInstanceId && existing.publicPort === profile.publicPort) {
+      return;
+    }
+    if (existing) {
+      clearTimeout(existing.timer);
+      this.driverReconnectTimers.delete(sessionId);
+    }
+    const reconnectDeadlineAt = new Date(Date.now() + this.driverReconnectGraceMs).toISOString();
+    let reconnecting: GatewayProfileBinding;
+    try {
+      reconnecting = this.control.markAgentReconnecting(
+        sessionId,
+        reconnectDeadlineAt,
+        reason,
+        reason === "driver-connect-pending" ? "connecting" : "reconnecting"
+      );
+    } catch {
+      return;
+    }
+    if (reconnecting.driverState === "reconnecting") {
+      this.driverLifecycle.reconnecting(reconnecting, reconnectDeadlineAt);
+    }
+    const timer = setTimeout(() => {
+      void this.expireDriverReconnect(sessionId, daemonInstanceId, "driver-reconnect-timeout");
+    }, this.driverReconnectGraceMs);
+    timer.unref?.();
+    this.driverReconnectTimers.set(sessionId, {
+      publicPort: profile.publicPort,
+      sessionId,
+      daemonInstanceId,
+      timer
+    });
+  }
+
+  private cancelDriverReconnect(sessionId: string): void {
+    const reconnect = this.driverReconnectTimers.get(sessionId);
+    if (!reconnect) return;
+    clearTimeout(reconnect.timer);
+    this.driverReconnectTimers.delete(sessionId);
+  }
+
+  private cancelDriverReconnectForPort(publicPort: number): void {
+    for (const reconnect of [...this.driverReconnectTimers.values()]) {
+      if (reconnect.publicPort === publicPort) this.cancelDriverReconnect(reconnect.sessionId);
+    }
+  }
+
+  private async expireDriverReconnect(
+    sessionId: string,
+    daemonInstanceId: string,
+    reason: string
+  ): Promise<void> {
+    await this.withSessionControlLock(sessionId, async () => {
+      const profile = this.control.getProfileForSession(sessionId);
+      if (
+        !profile ||
+        profile.daemonInstanceId !== daemonInstanceId ||
+        profile.sessionStatus !== "active" ||
+        profile.ownership !== "agent"
+      ) {
+        this.cancelDriverReconnect(sessionId);
+        return;
+      }
+      if (this.gateway.hasActiveAgentConnection(profile.publicPort, sessionId, daemonInstanceId)) {
+        this.cancelDriverReconnect(sessionId);
+        this.control.markAgentConnected(sessionId, daemonInstanceId);
+        return;
+      }
+
+      this.cancelDriverReconnect(sessionId);
+      const stopped = this.control.stopSession(sessionId);
+      this.gateway.clearAgentTarget(profile.publicPort, sessionId);
+      this.driverLifecycle.sessionStopped(profile, "reconnect-exhausted");
+      this.publishControlEvent({
+        type: "connection-updated",
+        profile: stopped,
+        reason
+      });
+    });
+  }
+
+  private async stopAgentSessionIfAccessDisabled(publicPort: number): Promise<string | null> {
+    if (!this.managedProfiles.get(publicPort)?.agentAccessDisabled) return null;
+    const profile = this.control.getProfile(publicPort);
+    const sessionId = profile?.ownerSessionId;
+    if (!profile || !sessionId || profile.sessionStatus !== "active") return null;
+    await this.withSessionControlLock(sessionId, async () => {
+      const current = this.control.getProfile(publicPort);
+      if (
+        !current ||
+        current.ownerSessionId !== sessionId ||
+        current.sessionStatus !== "active"
+      ) {
+        return;
+      }
+      await this.handleSessionControl({
+        action: "control",
+        sessionId,
+        command: "stop"
+      });
+      this.driverLifecycle.sessionStopped(current, "agent-access-disabled");
+    });
+    return sessionId;
   }
 
   private async focusGatewayProfile(profile: GatewayProfileBinding, signal?: AbortSignal): Promise<boolean> {
@@ -557,7 +868,11 @@ export class BrowserGatewayDaemon {
         const profileId = typeof candidate?.profileId === "string" ? candidate.profileId.trim() : "";
         const profileName = typeof candidate?.profileName === "string" ? candidate.profileName.trim() : "";
         if (Number.isInteger(publicPort) && publicPort >= 1024 && publicPort <= 65535 && profileId && profileName) {
-          this.managedProfiles.set(publicPort, { profileId, profileName });
+          this.managedProfiles.set(publicPort, {
+            profileId,
+            profileName,
+            agentAccessDisabled: candidate?.agentAccessDisabled === true
+          });
         }
       }
     } catch {

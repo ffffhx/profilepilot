@@ -1,6 +1,8 @@
 import http, { type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
 import { randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
+import path from "node:path";
 import {
   BrowserGatewayControlError,
   BrowserGatewayControlPlane,
@@ -9,49 +11,42 @@ import {
 } from "./browser-gateway-control";
 import type { GatewayCdpBackend } from "./browser-gateway-transport";
 import { GatewayWebSocketPeer } from "./browser-gateway-websocket";
+import {
+  AGENT_DENIED_TARGET_METHODS,
+  AGENT_VIRTUALIZED_VIEWPORT_METHODS,
+  GATEWAY_DEVICE_PRESETS,
+  isAgentTargetActivityMethod,
+  isRawCdpMethodAllowed
+} from "./browser-gateway-policy";
 
-const RAW_ALLOWED_PREFIXES = ["DOM.", "Emulation.", "Input.", "Page.", "Runtime.", "Target.", "Network."];
-// These Target methods either create a CDP channel whose nested commands are
-// invisible to the Gateway, open a privileged browser-level CDP session, or
-// escape the managed Profile's target set. Keep this policy shared by the
-// Agent WebSocket and raw-cdp entry points so neither path can bypass it.
-const AGENT_DENIED_TARGET_METHODS = new Set([
-  "Target.attachToBrowserTarget",
-  "Target.exposeDevToolsProtocol",
-  "Target.openDevTools",
-  "Target.sendMessageToTarget",
-  "Target.setRemoteLocations"
-]);
-// agent-browser applies a synthetic viewport to every connected page. That is
-// useful in a managed/headless browser, but a real Chrome Profile has a native
-// window that the user can reveal at any time. Forwarding these commands leaves
-// the page rendered into an emulated rectangle (with outerWidth/outerHeight=0),
-// so the rest of the native Chrome content area becomes blank and fixed overlays
-// can be positioned outside the visible window. Keep the real Profile's viewport
-// authoritative while returning a compatible empty success response to the Agent.
-const AGENT_VIRTUALIZED_VIEWPORT_METHODS = new Set([
-  "Browser.setContentsSize",
-  "Browser.setWindowBounds",
-  "Emulation.setDeviceMetricsOverride",
-  "Emulation.setVisibleSize"
-]);
-const RAW_DENIED_METHODS = new Set([
-  "Browser.close",
-  "Browser.setDownloadBehavior",
-  "Network.clearBrowserCache",
-  "Network.clearBrowserCookies",
-  "Network.getAllCookies",
-  "Network.getCookies",
-  "Network.setCookie",
-  "Network.setCookies",
-  "Storage.clearDataForOrigin",
-  "Storage.getCookies",
-  "Target.closeTarget",
-  ...AGENT_DENIED_TARGET_METHODS
-]);
+export {
+  GATEWAY_DEVICE_PRESETS,
+  isRawCdpMethodAllowed
+} from "./browser-gateway-policy";
 const MAX_PENDING_REQUESTS = 10_000;
 const MAX_PARKED_EVENTS = 20_000;
 const MAX_PARKED_EVENT_BYTES = 16 * 1024 * 1024;
+const DEFAULT_EXTENSION_LOAD_TIMEOUT_MS = 30_000;
+const DEFAULT_EXTENSION_VERIFY_TIMEOUT_MS = 10_000;
+const DEFAULT_EXTENSION_VERIFY_INTERVAL_MS = 250;
+
+export interface GatewayDeviceEmulation {
+  preset: string;
+  targetId: string;
+  width: number;
+  height: number;
+  deviceScaleFactor: number;
+  mobile: boolean;
+  maxTouchPoints: number;
+  userAgent: string;
+  platform: string;
+}
+
+interface GatewayDeviceEmulationState extends GatewayDeviceEmulation {
+  sessionId: string;
+  daemonInstanceId: string;
+  cdpSessionId: string;
+}
 
 interface GatewayRoute {
   publicPort: number;
@@ -65,6 +60,11 @@ interface GatewayRoute {
   trustedAttachTargets: Map<string, number>;
   targetIntentBySession: Map<string, number>;
   targetCommitIntentBySession: Map<string, number>;
+  agentCleanupBySession: Map<string, Promise<void>>;
+  deviceEmulationBySession: Map<string, GatewayDeviceEmulationState>;
+  internalCleanupPromises: Set<Promise<void>>;
+  previouslyConnectedAgentSessions: Set<string>;
+  targetLifecycleVersion: number;
   nextBackendId: number;
   nextTargetIntent: number;
   removeBackendMessage: () => void;
@@ -79,7 +79,9 @@ interface GatewayConnection {
   childSessionIds: Set<string>;
   pendingAttachTargets: Map<string, number>;
   autoAttachEnabled: boolean;
+  autoAttachSessionId?: string;
   autoAttachIntent: number;
+  reconnecting: boolean;
   // Playwright CLI / Chrome DevTools MCP 都是长驻驱动。用户接管时保留
   // WebSocket 和 CDP session，但封锁新命令与事件流；交还后原地恢复。
   quiescing: boolean;
@@ -107,6 +109,7 @@ interface PendingRequest {
   targetIntent?: number;
   autoAttachIntent?: number;
   previousAutoAttachEnabled?: boolean;
+  previousAutoAttachSessionId?: string;
   internalAttachTargetId?: string;
   connectionClosed?: boolean;
 }
@@ -115,7 +118,11 @@ export interface BrowserGatewayServerOptions {
   internalSecret: string;
   host?: string;
   onBackendClose?: (publicPort: number, error?: Error) => void;
-  onAgentConnectionChange?: (publicPort: number, active: boolean) => void;
+  onAgentConnectionChange?: (
+    publicPort: number,
+    active: boolean,
+    identity: GatewayConnectionIdentity
+  ) => void;
   onAgentTargetChange?: (publicPort: number) => void;
 }
 
@@ -127,6 +134,7 @@ export interface GatewayAgentTarget {
 
 export class BrowserGatewayServer {
   private readonly routes = new Map<number, GatewayRoute>();
+  private readonly preservedDeviceHandoffs = new Set<string>();
   private readonly host: string;
 
   constructor(
@@ -155,6 +163,11 @@ export class BrowserGatewayServer {
       trustedAttachTargets: new Map(),
       targetIntentBySession: new Map(),
       targetCommitIntentBySession: new Map(),
+      agentCleanupBySession: new Map(),
+      deviceEmulationBySession: new Map(),
+      internalCleanupPromises: new Set(),
+      previouslyConnectedAgentSessions: new Set(),
+      targetLifecycleVersion: 0,
       nextBackendId: 1,
       nextTargetIntent: 1,
       removeBackendMessage: () => undefined,
@@ -184,6 +197,7 @@ export class BrowserGatewayServer {
   async unregisterBackend(publicPort: number, closeBackend = true): Promise<void> {
     const route = this.routes.get(publicPort);
     if (!route) return;
+    await this.clearAllDeviceEmulations(route);
     this.routes.delete(publicPort);
     for (const connection of route.connections) connection.peer.close(1012, "gateway route closed");
     route.connections.clear();
@@ -302,7 +316,8 @@ export class BrowserGatewayServer {
     publicPort: number,
     sessionId: string,
     controlGeneration: number,
-    timeoutMs = 5_000
+    timeoutMs = 5_000,
+    preserveDeviceEmulation = false
   ): Promise<GatewayAgentTarget> {
     const route = this.requireRoute(publicPort);
     const targetId = route.targetBySession.get(sessionId);
@@ -326,7 +341,7 @@ export class BrowserGatewayServer {
     // serializes control transitions for a Session, and sendRaw synchronously
     // writes the trusted activation before yielding back to the event loop.
     this.assertDelegatedSession(publicPort, sessionId, controlGeneration);
-    await this.activateTargetTrusted(route, targetId, timeoutMs);
+    await this.activateTargetTrusted(route, targetId, timeoutMs, preserveDeviceEmulation);
     return {
       targetId,
       title: typeof target.title === "string" ? target.title : "",
@@ -339,16 +354,51 @@ export class BrowserGatewayServer {
     if (route) this.clearSessionTarget(route, sessionId);
   }
 
+  prepareDeviceEmulationUserHandoff(publicPort: number, sessionId: string): boolean {
+    const route = this.routes.get(publicPort);
+    if (!route?.deviceEmulationBySession.has(sessionId)) return false;
+    this.preservedDeviceHandoffs.add(deviceHandoffKey(publicPort, sessionId));
+    return true;
+  }
+
+  cancelDeviceEmulationUserHandoff(publicPort: number, sessionId: string): void {
+    this.preservedDeviceHandoffs.delete(deviceHandoffKey(publicPort, sessionId));
+  }
+
   handleControlEvent(event: GatewayControlEvent): void {
     if (event.type !== "connections-revoked") return;
     const route = this.routes.get(event.profile.publicPort);
     if (!route) return;
+    const preserveDeviceEmulation =
+      event.reason === "user_takeover" &&
+      Boolean(event.profile.ownerSessionId) &&
+      this.preservedDeviceHandoffs.delete(
+        deviceHandoffKey(event.profile.publicPort, event.profile.ownerSessionId as string)
+      );
+    if (event.reason !== "user-return" && !preserveDeviceEmulation) {
+      void this.clearAllDeviceEmulations(route);
+    }
+    if (event.reason === "user-return") {
+      // Takeover rendering and overlay work use short-lived trusted page
+      // attachments. Finish those before a replacement agent-browser daemon
+      // creates its own page session; otherwise their delayed detach events can
+      // invalidate the new daemon's primary session.
+      for (const connection of [...route.connections]) {
+        if (connection.identity.kind === "internal") {
+          connection.peer.close(4003, "user-return");
+        }
+      }
+    }
     for (const connection of [...route.connections]) {
       if (
         connection.identity.kind === "agent" &&
         connection.identity.profileId === event.profile.profileId
       ) {
-        const resumable = event.profile.driverKind === "playwright-cli" ||
+        // All supported Gateway drivers are safe to keep physically connected
+        // while parked: commands are rejected before reaching Chrome and browser
+        // events are buffered until control returns.
+        const resumable = event.profile.driverKind === "agent-browser" ||
+          event.profile.driverKind === "playwright-cli" ||
           event.profile.driverKind === "chrome-devtools-mcp";
         if (resumable && event.reason === "user_takeover") {
           connection.quiescing = false;
@@ -488,7 +538,14 @@ export class BrowserGatewayServer {
       }
       return result;
     }
-    const targetId = input.targetId || await this.resolveDefaultPageTarget(route, timeoutMs, input.sessionId);
+    const configuredTargetId =
+      input.targetId || route.targetBySession.get(input.sessionId);
+    const targetId =
+      configuredTargetId ||
+      (await this.resolveDefaultPageTarget(route, timeoutMs, input.sessionId));
+    if (configuredTargetId && input.method !== "Page.bringToFront") {
+      await this.assertPageTarget(route, targetId, timeoutMs);
+    }
     assertCurrent();
     const intent = this.beginSessionTargetIntent(route, input.sessionId);
     if (input.method === "Page.bringToFront") {
@@ -535,7 +592,10 @@ export class BrowserGatewayServer {
     sessionId: string;
     daemonInstanceId: string;
     extensionPath: string;
+    extensionVersion?: string;
     timeoutMs?: number;
+    verificationTimeoutMs?: number;
+    verificationIntervalMs?: number;
   }): Promise<unknown> {
     const profile = this.control.getProfile(input.publicPort);
     if (!profile) throw new Error(`Gateway port ${input.publicPort} is not registered`);
@@ -548,12 +608,209 @@ export class BrowserGatewayServer {
       kind: "agent"
     };
     this.control.assertConnectionCanSend(identity);
-    return this.sendRaw(
-      this.requireRoute(input.publicPort),
-      "Extensions.loadUnpacked",
-      { path: input.extensionPath },
-      input.timeoutMs || 15_000
+    const route = this.requireRoute(input.publicPort);
+    try {
+      return await this.sendRaw(
+        route,
+        "Extensions.loadUnpacked",
+        { path: input.extensionPath },
+        input.timeoutMs || DEFAULT_EXTENSION_LOAD_TIMEOUT_MS
+      );
+    } catch (error) {
+      const candidate = error as Error & { code?: unknown; method?: unknown };
+      if (candidate.code !== "CDP_CALL_TIMEOUT" || candidate.method !== "Extensions.loadUnpacked") {
+        throw error;
+      }
+      const verified = await this.waitForLoadedUnpackedExtension(
+        route,
+        identity,
+        input.extensionPath,
+        input.extensionVersion,
+        input.verificationTimeoutMs || DEFAULT_EXTENSION_VERIFY_TIMEOUT_MS,
+        input.verificationIntervalMs || DEFAULT_EXTENSION_VERIFY_INTERVAL_MS
+      );
+      if (!verified) throw error;
+      return {
+        id: verified.id,
+        recoveredFromTimeout: true
+      };
+    }
+  }
+
+  async triggerExtensionAction(input: {
+    publicPort: number;
+    sessionId: string;
+    daemonInstanceId: string;
+    extensionId: string;
+    targetId?: string;
+    timeoutMs?: number;
+  }): Promise<{
+    extensionId: string;
+    targetId: string;
+    actionTargetId: string;
+  }> {
+    const profile = this.control.getProfile(input.publicPort);
+    if (!profile) throw new Error(`Gateway port ${input.publicPort} is not registered`);
+    const identity: GatewayConnectionIdentity = {
+      sessionId: input.sessionId,
+      profileId: profile.profileId,
+      publicPort: input.publicPort,
+      daemonInstanceId: input.daemonInstanceId,
+      controlGeneration: profile.controlGeneration,
+      kind: "agent"
+    };
+    this.control.assertConnectionCanSend(identity);
+    const route = this.requireRoute(input.publicPort);
+    const timeoutMs = input.timeoutMs || 15_000;
+    const extensionId = String(input.extensionId || "").trim();
+    if (!/^[a-p]{32}$/.test(extensionId)) {
+      const error = new Error("扩展 ID 格式无效") as Error & { code?: string };
+      error.code = "EXTENSION_ID_INVALID";
+      throw error;
+    }
+    const extensions = await this.sendRaw(route, "Extensions.getExtensions", {}, timeoutMs) as {
+      extensions?: Array<Record<string, unknown>>;
+    };
+    const extension = (extensions.extensions || []).find(
+      (candidate) => candidate.id === extensionId && candidate.enabled !== false
     );
+    if (!extension) {
+      const error = new Error(`扩展 ${extensionId} 未加载或未启用`) as Error & { code?: string };
+      error.code = "EXTENSION_NOT_AVAILABLE";
+      throw error;
+    }
+    const pageTargetId = input.targetId || await this.resolveDefaultPageTarget(
+      route,
+      timeoutMs,
+      input.sessionId
+    );
+    const targetId = await this.resolveExtensionTabTarget(route, pageTargetId, timeoutMs);
+    this.control.assertConnectionCanSend(identity);
+    await this.sendRaw(route, "Target.activateTarget", { targetId }, timeoutMs);
+    this.control.assertConnectionCanSend(identity);
+    await this.sendRaw(route, "Extensions.triggerAction", {
+      id: extensionId,
+      targetId
+    }, timeoutMs);
+    this.control.assertConnectionCanSend(identity);
+    this.setSessionTarget(route, input.sessionId, pageTargetId);
+    return {
+      extensionId,
+      targetId: pageTargetId,
+      actionTargetId: targetId
+    };
+  }
+
+  async controlDeviceEmulation(input: {
+    publicPort: number;
+    sessionId: string;
+    daemonInstanceId: string;
+    command: "emulate" | "clear" | "status";
+    preset?: string;
+    targetId?: string;
+    timeoutMs?: number;
+  }): Promise<GatewayDeviceEmulation | null> {
+    const profile = this.control.getProfile(input.publicPort);
+    if (!profile) throw new Error(`Gateway port ${input.publicPort} is not registered`);
+    const identity: GatewayConnectionIdentity = {
+      sessionId: input.sessionId,
+      profileId: profile.profileId,
+      publicPort: input.publicPort,
+      daemonInstanceId: input.daemonInstanceId,
+      controlGeneration: profile.controlGeneration,
+      kind: "agent"
+    };
+    this.control.assertConnectionCanSend(identity);
+    const route = this.requireRoute(input.publicPort);
+    if (input.command === "status") {
+      return publicDeviceEmulation(route.deviceEmulationBySession.get(input.sessionId));
+    }
+    if (input.command === "clear") {
+      return this.clearDeviceEmulationState(route, input.sessionId, input.timeoutMs);
+    }
+
+    const presetName = String(input.preset || "").trim().toLowerCase();
+    const preset = GATEWAY_DEVICE_PRESETS[presetName];
+    if (!preset) {
+      const error = new Error(
+        `Unsupported device preset: ${input.preset || "(empty)"}; supported: ${Object.keys(GATEWAY_DEVICE_PRESETS).join(", ")}`
+      ) as Error & { code?: string };
+      error.code = "DEVICE_PRESET_NOT_SUPPORTED";
+      throw error;
+    }
+    const timeoutMs = input.timeoutMs || 15_000;
+    const targetId = input.targetId || await this.resolveDefaultPageTarget(
+      route,
+      timeoutMs,
+      input.sessionId
+    );
+    await this.assertPageTarget(route, targetId, timeoutMs);
+    this.control.assertConnectionCanSend(identity);
+    await this.clearDeviceEmulationState(route, input.sessionId, timeoutMs);
+
+    const attached = await this.attachInternalTarget(route, targetId, timeoutMs) as {
+      sessionId?: unknown;
+    };
+    const cdpSessionId = typeof attached.sessionId === "string" ? attached.sessionId : "";
+    if (!cdpSessionId) {
+      throw new Error("Target.attachToTarget did not return sessionId");
+    }
+    try {
+      this.control.assertConnectionCanSend(identity);
+      await this.sendRaw(route, "Emulation.setDeviceMetricsOverride", {
+        width: preset.width,
+        height: preset.height,
+        deviceScaleFactor: preset.deviceScaleFactor,
+        mobile: preset.mobile,
+        screenWidth: preset.width,
+        screenHeight: preset.height,
+        positionX: 0,
+        positionY: 0,
+        screenOrientation: {
+          type: "portraitPrimary",
+          angle: 0
+        }
+      }, timeoutMs, cdpSessionId);
+      await this.sendRaw(route, "Emulation.setUserAgentOverride", {
+        userAgent: preset.userAgent,
+        platform: preset.platform
+      }, timeoutMs, cdpSessionId);
+      await this.sendRaw(route, "Emulation.setTouchEmulationEnabled", {
+        enabled: preset.maxTouchPoints > 0,
+        maxTouchPoints: preset.maxTouchPoints
+      }, timeoutMs, cdpSessionId);
+      this.control.assertConnectionCanSend(identity);
+      const state: GatewayDeviceEmulationState = {
+        preset: presetName,
+        targetId,
+        width: preset.width,
+        height: preset.height,
+        deviceScaleFactor: preset.deviceScaleFactor,
+        mobile: preset.mobile,
+        maxTouchPoints: preset.maxTouchPoints,
+        userAgent: preset.userAgent,
+        platform: preset.platform,
+        sessionId: input.sessionId,
+        daemonInstanceId: input.daemonInstanceId,
+        cdpSessionId
+      };
+      route.deviceEmulationBySession.set(input.sessionId, state);
+      this.setSessionTarget(route, input.sessionId, targetId);
+      return publicDeviceEmulation(state);
+    } catch (error) {
+      await this.resetAndDetachDeviceSession(route, cdpSessionId, timeoutMs);
+      throw error;
+    }
+  }
+
+  async clearDeviceEmulationForSession(
+    publicPort: number,
+    sessionId: string,
+    timeoutMs = 5_000
+  ): Promise<GatewayDeviceEmulation | null> {
+    const route = this.routes.get(publicPort);
+    if (!route) return null;
+    return this.clearDeviceEmulationState(route, sessionId, timeoutMs);
   }
 
   private async resolveDefaultPageTarget(route: GatewayRoute, timeoutMs: number, sessionId: string): Promise<string> {
@@ -569,6 +826,47 @@ export class BrowserGatewayServer {
       throw error;
     }
     return String(target.targetId);
+  }
+
+  private async resolveExtensionTabTarget(
+    route: GatewayRoute,
+    requestedTargetId: string,
+    timeoutMs: number
+  ): Promise<string> {
+    const pagesResult = await this.sendRaw(route, "Target.getTargets", {}, timeoutMs) as {
+      targetInfos?: Array<Record<string, unknown>>;
+    };
+    const page = (pagesResult.targetInfos || []).find(
+      (candidate) => candidate.targetId === requestedTargetId && candidate.type === "page"
+    );
+    const tabsResult = await this.sendRaw(route, "Target.getTargets", {
+      filter: [{ type: "tab" }]
+    }, timeoutMs) as {
+      targetInfos?: Array<Record<string, unknown>>;
+    };
+    const tabs = (tabsResult.targetInfos || []).filter(
+      (candidate) => candidate.type === "tab" && typeof candidate.targetId === "string"
+    );
+    const requestedTab = tabs.find((candidate) => candidate.targetId === requestedTargetId);
+    if (requestedTab?.targetId) return String(requestedTab.targetId);
+    if (!page) {
+      const error = new Error(`页面或标签页 Target ${requestedTargetId} 不存在`) as Error & { code?: string };
+      error.code = "AGENT_TARGET_NOT_FOUND";
+      throw error;
+    }
+    const matchingTabs = tabs.filter((candidate) =>
+      candidate.browserContextId === page.browserContextId &&
+      candidate.url === page.url
+    );
+    const tab = matchingTabs.find(
+      (candidate) => (candidate.embedderData as Record<string, unknown> | undefined)?.tabActive === true
+    ) || matchingTabs[0];
+    if (!tab?.targetId) {
+      const error = new Error(`无法把页面 Target ${requestedTargetId} 映射到所属标签页`) as Error & { code?: string };
+      error.code = "EXTENSION_TAB_TARGET_NOT_FOUND";
+      throw error;
+    }
+    return String(tab.targetId);
   }
 
   private async handleHttp(publicPort: number, request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -677,6 +975,23 @@ export class BrowserGatewayServer {
       }));
       return;
     }
+    const reconnecting = identity.kind === "agent" &&
+      route.previouslyConnectedAgentSessions.has(identity.sessionId);
+    if (identity.kind === "agent") {
+      const cleanup = route.agentCleanupBySession.get(identity.sessionId);
+      if (cleanup) {
+        await cleanup;
+        try {
+          this.control.assertConnectionCanSend(identity);
+        } catch (error) {
+          rejectUpgrade(socket, controlErrorStatus(error), JSON.stringify(gatewayErrorPayload(error)));
+          return;
+        }
+      }
+      if (reconnecting) {
+        await this.waitForInternalConnectionsToSettle(route, 5_000);
+      }
+    }
     let targetSessionId: string | undefined;
     if (pageMatch) {
       try {
@@ -708,6 +1023,7 @@ export class BrowserGatewayServer {
       pendingAttachTargets: new Map(),
       autoAttachEnabled: false,
       autoAttachIntent: 0,
+      reconnecting,
       quiescing: false,
       parked: false,
       parkedEvents: [],
@@ -715,7 +1031,7 @@ export class BrowserGatewayServer {
     };
     route.connections.add(connection);
     if (identity.kind === "agent") {
-      this.options.onAgentConnectionChange?.(route.publicPort, true);
+      this.options.onAgentConnectionChange?.(route.publicPort, true, identity);
     }
     peer.onText = (message) => {
       void this.handleClientMessage(route, connection, message).catch(() => {
@@ -725,8 +1041,10 @@ export class BrowserGatewayServer {
     peer.onClose = () => {
       route.connections.delete(connection);
       if (connection.identity.kind === "agent") {
-        this.options.onAgentConnectionChange?.(route.publicPort, false);
+        route.previouslyConnectedAgentSessions.add(connection.identity.sessionId);
+        this.options.onAgentConnectionChange?.(route.publicPort, false, connection.identity);
       }
+      const cleanupActions: Array<() => Promise<unknown>> = [];
       for (const [id, pending] of route.pending) {
         if (pending.connection !== connection) continue;
         if (pending.internalAttachTargetId) {
@@ -751,20 +1069,39 @@ export class BrowserGatewayServer {
       for (const sessionId of childSessionIds) this.unbindCdpSession(route, sessionId);
       for (const sessionId of childSessionIds) {
         if (route.internalCdpSessionIds.has(sessionId)) {
-          void this.detachInternalTarget(route, sessionId, 2_000).catch(() => undefined);
+          cleanupActions.push(() => this.detachInternalTarget(route, sessionId, 2_000));
         } else {
-          void this.sendRaw(route, "Target.detachFromTarget", { sessionId }, 2_000).catch(() => undefined);
+          cleanupActions.push(() => this.sendRaw(route, "Target.detachFromTarget", { sessionId }, 2_000));
         }
       }
       if (connection.targetSessionId) {
-        void this.detachInternalTarget(route, connection.targetSessionId, 2_000).catch(() => undefined);
+        cleanupActions.push(() => this.detachInternalTarget(route, connection.targetSessionId as string, 2_000));
       }
-      if (connection.autoAttachEnabled) {
-        void this.sendRaw(route, "Target.setAutoAttach", {
-          autoAttach: false,
-          waitForDebuggerOnStart: false,
-          flatten: true
-        }, 2_000).catch(() => undefined);
+      const resetsAutoAttach = connection.autoAttachEnabled;
+      if (cleanupActions.length > 0 || resetsAutoAttach) {
+        const cleanup = (async () => {
+          if (resetsAutoAttach) {
+            await this.sendRaw(route, "Target.setAutoAttach", {
+              autoAttach: false,
+              waitForDebuggerOnStart: false,
+              flatten: true
+            }, 2_000, connection.autoAttachSessionId).catch(() => undefined);
+            await this.waitForTargetLifecycleQuiet(route, 50, 500);
+          }
+          await Promise.allSettled(cleanupActions.map((cleanupAction) => cleanupAction()));
+        })();
+        if (connection.identity.kind === "agent") {
+          const sessionId = connection.identity.sessionId;
+          route.agentCleanupBySession.set(sessionId, cleanup);
+          void cleanup.finally(() => {
+            if (route.agentCleanupBySession.get(sessionId) === cleanup) {
+              route.agentCleanupBySession.delete(sessionId);
+            }
+          });
+        } else {
+          route.internalCleanupPromises.add(cleanup);
+          void cleanup.finally(() => route.internalCleanupPromises.delete(cleanup));
+        }
       }
     };
   }
@@ -782,6 +1119,7 @@ export class BrowserGatewayServer {
       ? message.params as Record<string, unknown>
       : {};
     const downstreamId = typeof message.id === "number" ? message.id : undefined;
+    const clientSessionId = typeof message.sessionId === "string" ? message.sessionId : undefined;
     if (downstreamId === undefined) {
       // CDP commands require an id. Forwarding id-less Agent messages would let
       // activation commands bypass the virtual response path below.
@@ -792,7 +1130,6 @@ export class BrowserGatewayServer {
       }
       return;
     }
-    const clientSessionId = typeof message.sessionId === "string" ? message.sessionId : undefined;
     if (connection.quiescing || connection.parked) {
       this.sendClientResponse(connection, downstreamId, {
         error: {
@@ -844,6 +1181,16 @@ export class BrowserGatewayServer {
         this.sendClientResponse(connection, downstreamId, { result: {} }, clientSessionId);
         return;
       }
+      if (clientSessionId && method !== "Page.bringToFront" && isAgentTargetActivityMethod(method)) {
+        const targetId = this.targetForCdpSession(route, connection, message);
+        const activityIntent = this.beginSessionTargetIntent(route, connection.identity.sessionId);
+        this.setSessionTargetIfCurrentIntent(
+          route,
+          connection.identity.sessionId,
+          targetId,
+          activityIntent
+        );
+      }
       if (method === "Page.bringToFront" || method === "Target.activateTarget") {
         targetIntent = this.beginSessionTargetIntent(route, connection.identity.sessionId);
         try {
@@ -879,6 +1226,16 @@ export class BrowserGatewayServer {
         message = { ...message, params: { ...params, flatten: true } };
         targetIntent = this.beginSessionTargetIntent(route, connection.identity.sessionId);
       } else if (method === "Target.setAutoAttach") {
+        if (connection.reconnecting) {
+          // The old daemon's scoped Auto-Attach controller has already been
+          // disabled during the reconnect barrier. Reinstalling it immediately
+          // makes Chromium replace the freshly attached primary session, while
+          // agent-browser keeps using the pre-replacement id. The replacement
+          // daemon already attached its working page explicitly, so this setup
+          // call is redundant and can be acknowledged without touching Chrome.
+          this.sendClientResponse(connection, downstreamId, { result: {} }, clientSessionId);
+          return;
+        }
         message = { ...message, params: { ...params, flatten: true } };
       }
     }
@@ -892,14 +1249,28 @@ export class BrowserGatewayServer {
     if (internalAttachTargetId) this.incrementCount(route.trustedAttachTargets, internalAttachTargetId);
     let autoAttachIntent: number | undefined;
     let previousAutoAttachEnabled: boolean | undefined;
+    let previousAutoAttachSessionId: string | undefined;
     if (
       connection.identity.kind === "agent" &&
       method === "Target.setAutoAttach" &&
       typeof params.autoAttach === "boolean"
     ) {
       previousAutoAttachEnabled = connection.autoAttachEnabled;
+      previousAutoAttachSessionId = connection.autoAttachSessionId;
       autoAttachIntent = ++connection.autoAttachIntent;
       connection.autoAttachEnabled = params.autoAttach;
+      connection.autoAttachSessionId = params.autoAttach ? clientSessionId : undefined;
+    }
+    if (
+      connection.identity.kind === "agent" &&
+      method === "Input.dispatchMouseEvent" &&
+      params.type === "mousePressed"
+    ) {
+      this.queueOverlayAvoidance(
+        route,
+        connection.targetSessionId || clientSessionId,
+        params
+      );
     }
     const backendId = route.nextBackendId++;
     route.pending.set(backendId, {
@@ -914,6 +1285,7 @@ export class BrowserGatewayServer {
       targetIntent,
       autoAttachIntent,
       previousAutoAttachEnabled,
+      previousAutoAttachSessionId,
       internalAttachTargetId: internalAttachTargetId || undefined
     });
     try {
@@ -931,6 +1303,7 @@ export class BrowserGatewayServer {
       }
       if (autoAttachIntent !== undefined && connection.autoAttachIntent === autoAttachIntent) {
         connection.autoAttachEnabled = previousAutoAttachEnabled === true;
+        connection.autoAttachSessionId = previousAutoAttachSessionId;
       }
       throw error;
     }
@@ -999,6 +1372,7 @@ export class BrowserGatewayServer {
         pending.connection.autoAttachIntent === pending.autoAttachIntent
       ) {
         pending.connection.autoAttachEnabled = pending.previousAutoAttachEnabled === true;
+        pending.connection.autoAttachSessionId = pending.previousAutoAttachSessionId;
       }
       if (message.error && pending.targetIntent !== undefined) {
         this.retireSessionTargetIntent(
@@ -1128,6 +1502,7 @@ export class BrowserGatewayServer {
   }
 
   private handleBackendClose(route: GatewayRoute, error?: Error): void {
+    route.deviceEmulationBySession.clear();
     for (const connection of route.connections) connection.peer.close(1011, "Chrome backend disconnected");
     route.connections.clear();
     this.rejectPending(route, error || new Error("Chrome backend disconnected"));
@@ -1218,12 +1593,16 @@ export class BrowserGatewayServer {
 
   private handleTargetEvent(route: GatewayRoute, message: Record<string, unknown>): void {
     const method = typeof message.method === "string" ? message.method : "";
+    if (method === "Target.attachedToTarget" || method === "Target.detachedFromTarget") {
+      route.targetLifecycleVersion += 1;
+    }
     const params = message.params && typeof message.params === "object" && !Array.isArray(message.params)
       ? message.params as Record<string, unknown>
       : null;
     if (!params) return;
     if (method === "Target.detachedFromTarget") {
       if (typeof params.sessionId === "string") {
+        this.handleDeviceEmulationSessionDetached(route, params.sessionId);
         route.internalCdpSessionIds.delete(params.sessionId);
         for (const connection of route.connections) connection.childSessionIds.delete(params.sessionId);
         this.unbindCdpSession(route, params.sessionId);
@@ -1231,6 +1610,9 @@ export class BrowserGatewayServer {
       return;
     }
     if (method === "Target.targetDestroyed" && typeof params.targetId === "string") {
+      for (const [sessionId, state] of route.deviceEmulationBySession) {
+        if (state.targetId === params.targetId) route.deviceEmulationBySession.delete(sessionId);
+      }
       for (const [sessionId, binding] of route.targetByCdpSession) {
         if (binding.targetId === params.targetId) this.unbindCdpSession(route, sessionId);
       }
@@ -1288,6 +1670,42 @@ export class BrowserGatewayServer {
       binding.connectionId === connection.id &&
       binding.agentSessionId === connection.identity.sessionId
     );
+  }
+
+  private async waitForTargetLifecycleQuiet(
+    route: GatewayRoute,
+    quietMs: number,
+    timeoutMs: number
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    let observedVersion = route.targetLifecycleVersion;
+    while (Date.now() < deadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, quietMs));
+      if (route.targetLifecycleVersion === observedVersion) return;
+      observedVersion = route.targetLifecycleVersion;
+    }
+  }
+
+  private async waitForInternalConnectionsToSettle(
+    route: GatewayRoute,
+    timeoutMs: number
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const hasInternalConnection = [...route.connections].some(
+        (connection) => connection.identity.kind === "internal"
+      );
+      if (!hasInternalConnection && route.internalCleanupPromises.size === 0) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 50));
+        if (
+          ![...route.connections].some((connection) => connection.identity.kind === "internal") &&
+          route.internalCleanupPromises.size === 0
+        ) {
+          return;
+        }
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    }
   }
 
   private connectionOwnsTargetSessionEvent(
@@ -1372,7 +1790,12 @@ export class BrowserGatewayServer {
     }
   }
 
-  private async activateTargetTrusted(route: GatewayRoute, targetId: string, timeoutMs: number): Promise<void> {
+  private async activateTargetTrusted(
+    route: GatewayRoute,
+    targetId: string,
+    timeoutMs: number,
+    preserveDeviceEmulation = false
+  ): Promise<void> {
     await this.sendRaw(route, "Target.activateTarget", { targetId }, timeoutMs);
     const attached = await this.attachInternalTarget(route, targetId, timeoutMs) as { sessionId?: unknown };
     const cdpSessionId = typeof attached.sessionId === "string" ? attached.sessionId : "";
@@ -1382,7 +1805,9 @@ export class BrowserGatewayServer {
       // override before this Gateway version started virtualizing viewport
       // setters. Clear it at the trusted reveal boundary so the tab immediately
       // fills its real Chrome window again.
-      await this.sendRaw(route, "Emulation.clearDeviceMetricsOverride", {}, timeoutMs, cdpSessionId);
+      if (!preserveDeviceEmulation) {
+        await this.sendRaw(route, "Emulation.clearDeviceMetricsOverride", {}, timeoutMs, cdpSessionId);
+      }
       // This is intentionally a real Page.bringToFront. Only ProfilePilot's
       // trusted user reveal/handoff path reaches this helper; Agent paths are
       // virtualized before they can call Chrome.
@@ -1390,6 +1815,115 @@ export class BrowserGatewayServer {
     } finally {
       await this.detachInternalTarget(route, cdpSessionId, Math.min(timeoutMs, 2_000)).catch(() => undefined);
     }
+  }
+
+  private async clearAllDeviceEmulations(route: GatewayRoute): Promise<void> {
+    await Promise.allSettled(
+      [...route.deviceEmulationBySession.keys()].map((sessionId) =>
+        this.clearDeviceEmulationState(route, sessionId, 2_000)
+      )
+    );
+  }
+
+  private async clearDeviceEmulationState(
+    route: GatewayRoute,
+    sessionId: string,
+    timeoutMs = 5_000
+  ): Promise<GatewayDeviceEmulation | null> {
+    const state = route.deviceEmulationBySession.get(sessionId);
+    if (!state) return null;
+    route.deviceEmulationBySession.delete(sessionId);
+    await this.resetAndDetachDeviceState(route, state, timeoutMs);
+    return publicDeviceEmulation(state);
+  }
+
+  private async resetAndDetachDeviceState(
+    route: GatewayRoute,
+    state: GatewayDeviceEmulationState,
+    timeoutMs: number
+  ): Promise<void> {
+    let cdpSessionId = state.cdpSessionId;
+    if (!cdpSessionId || !route.internalCdpSessionIds.has(cdpSessionId)) {
+      const attached = await this.attachInternalTarget(
+        route,
+        state.targetId,
+        timeoutMs
+      ).catch(() => null) as { sessionId?: unknown } | null;
+      cdpSessionId = typeof attached?.sessionId === "string" ? attached.sessionId : "";
+    }
+    if (!cdpSessionId) return;
+    await this.resetAndDetachDeviceSession(route, cdpSessionId, timeoutMs);
+  }
+
+  private async resetAndDetachDeviceSession(
+    route: GatewayRoute,
+    cdpSessionId: string,
+    timeoutMs: number
+  ): Promise<void> {
+    await this.sendRaw(
+      route,
+      "Emulation.clearDeviceMetricsOverride",
+      {},
+      timeoutMs,
+      cdpSessionId
+    ).catch(() => undefined);
+    await this.sendRaw(
+      route,
+      "Emulation.setUserAgentOverride",
+      { userAgent: "" },
+      timeoutMs,
+      cdpSessionId
+    ).catch(() => undefined);
+    await this.sendRaw(
+      route,
+      "Emulation.setTouchEmulationEnabled",
+      { enabled: false },
+      timeoutMs,
+      cdpSessionId
+    ).catch(() => undefined);
+    await this.detachInternalTarget(
+      route,
+      cdpSessionId,
+      Math.min(timeoutMs, 2_000)
+    ).catch(() => undefined);
+  }
+
+  private handleDeviceEmulationSessionDetached(route: GatewayRoute, cdpSessionId: string): void {
+    for (const state of route.deviceEmulationBySession.values()) {
+      if (state.cdpSessionId === cdpSessionId) {
+        state.cdpSessionId = "";
+        queueMicrotask(() => {
+          void this.reapplyDetachedDeviceEmulation(route, state);
+        });
+      }
+    }
+  }
+
+  private async reapplyDetachedDeviceEmulation(
+    route: GatewayRoute,
+    state: GatewayDeviceEmulationState
+  ): Promise<void> {
+    const current = route.deviceEmulationBySession.get(state.sessionId);
+    if (current !== state || current.cdpSessionId) return;
+    const profile = this.control.getProfile(route.publicPort);
+    if (
+      !profile ||
+      profile.ownerSessionId !== state.sessionId ||
+      profile.daemonInstanceId !== state.daemonInstanceId ||
+      profile.sessionStatus !== "active" ||
+      profile.ownership !== "agent"
+    ) {
+      return;
+    }
+    await this.controlDeviceEmulation({
+      publicPort: route.publicPort,
+      sessionId: state.sessionId,
+      daemonInstanceId: state.daemonInstanceId,
+      command: "emulate",
+      preset: state.preset,
+      targetId: state.targetId,
+      timeoutMs: 5_000
+    }).catch(() => undefined);
   }
 
   private async attachInternalTarget(
@@ -1445,6 +1979,54 @@ export class BrowserGatewayServer {
     else map.delete(key);
   }
 
+  private async waitForLoadedUnpackedExtension(
+    route: GatewayRoute,
+    identity: GatewayConnectionIdentity,
+    extensionPath: string,
+    extensionVersion: string | undefined,
+    timeoutMs: number,
+    intervalMs: number
+  ): Promise<{ id: string } | null> {
+    const deadline = Date.now() + Math.max(1, timeoutMs);
+    while (Date.now() < deadline) {
+      this.control.assertConnectionCanSend(identity);
+      const remaining = Math.max(1, deadline - Date.now());
+      try {
+        const result = await this.sendRaw(
+          route,
+          "Extensions.getExtensions",
+          {},
+          Math.min(5_000, remaining)
+        ) as {
+          extensions?: Array<{
+            id?: unknown;
+            path?: unknown;
+            version?: unknown;
+            enabled?: unknown;
+          }>;
+        };
+        const match = (result.extensions || []).find((extension) =>
+          typeof extension.id === "string" &&
+          typeof extension.path === "string" &&
+          sameFilesystemPath(extension.path, extensionPath) &&
+          extension.enabled !== false &&
+          (!extensionVersion || extension.version === extensionVersion)
+        );
+        if (match && typeof match.id === "string") {
+          return { id: match.id };
+        }
+      } catch (error) {
+        const candidate = error as Error & { code?: unknown };
+        if (candidate.code !== "CDP_CALL_TIMEOUT") throw error;
+      }
+      const delayMs = Math.min(Math.max(1, intervalMs), Math.max(0, deadline - Date.now()));
+      if (delayMs > 0) {
+        await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+    return null;
+  }
+
   private sendRaw(
     route: GatewayRoute,
     method: string,
@@ -1456,7 +2038,13 @@ export class BrowserGatewayServer {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         route.pending.delete(id);
-        reject(new Error(`CDP call ${method} timed out`));
+        const error = new Error(`CDP call ${method} timed out`) as Error & {
+          code?: string;
+          method?: string;
+        };
+        error.code = "CDP_CALL_TIMEOUT";
+        error.method = method;
+        reject(error);
       }, timeoutMs);
       route.pending.set(id, { kind: "raw", resolve, reject, timer });
       try {
@@ -1467,6 +2055,51 @@ export class BrowserGatewayServer {
         reject(error);
       }
     });
+  }
+
+  private queueOverlayAvoidance(
+    route: GatewayRoute,
+    sessionId: string | undefined,
+    params: Record<string, unknown>
+  ): void {
+    const x = Number(params.x);
+    const y = Number(params.y);
+    if (!sessionId || !Number.isFinite(x) || !Number.isFinite(y) || route.pending.size >= MAX_PENDING_REQUESTS - 1) {
+      return;
+    }
+    // Keep this in the same backend command queue as the click, but do not await
+    // its response. Chrome receives the tiny hit-test/evasion script first, so
+    // the click itself incurs no extra network round trip.
+    const expression = `(() => {
+      const host = document.getElementById("__pp-agent-overlay");
+      if (!host) return false;
+      const target = (document.elementsFromPoint(${JSON.stringify(x)}, ${JSON.stringify(y)}) || []).find((element) =>
+        element !== host &&
+        element.id !== "__pp-agent-overlay" &&
+        !(typeof element.closest === "function" && element.closest("#__pp-agent-overlay,[data-pp-ui]"))
+      );
+      const rect = target && typeof target.getBoundingClientRect === "function"
+        ? target.getBoundingClientRect()
+        : { left: ${JSON.stringify(x)}, top: ${JSON.stringify(y)}, right: ${JSON.stringify(x + 1)}, bottom: ${JSON.stringify(y + 1)}, width: 1, height: 1 };
+      host.dispatchEvent(new CustomEvent("__pp-agent-overlay-avoid", {
+        detail: {
+          left: rect.left,
+          top: rect.top,
+          right: rect.right,
+          bottom: rect.bottom,
+          width: rect.width,
+          height: rect.height
+        }
+      }));
+      return true;
+    })()`;
+    void this.sendRaw(
+      route,
+      "Runtime.evaluate",
+      { expression, awaitPromise: false, returnByValue: false },
+      750,
+      sessionId
+    ).catch(() => undefined);
   }
 
   private rejectPending(route: GatewayRoute, error: Error): void {
@@ -1501,13 +2134,38 @@ export class BrowserGatewayServer {
   }
 }
 
-export function isRawCdpMethodAllowed(method: string): boolean {
-  const normalized = String(method || "").trim();
-  return Boolean(
-    normalized &&
-      !RAW_DENIED_METHODS.has(normalized) &&
-      RAW_ALLOWED_PREFIXES.some((prefix) => normalized.startsWith(prefix))
-  );
+function publicDeviceEmulation(
+  state: GatewayDeviceEmulationState | undefined
+): GatewayDeviceEmulation | null {
+  if (!state) return null;
+  return {
+    preset: state.preset,
+    targetId: state.targetId,
+    width: state.width,
+    height: state.height,
+    deviceScaleFactor: state.deviceScaleFactor,
+    mobile: state.mobile,
+    maxTouchPoints: state.maxTouchPoints,
+    userAgent: state.userAgent,
+    platform: state.platform
+  };
+}
+
+function sameFilesystemPath(left: string, right: string): boolean {
+  const normalize = (value: string): string => {
+    let resolved: string;
+    try {
+      resolved = realpathSync(value);
+    } catch {
+      resolved = path.resolve(value);
+    }
+    return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+  };
+  return normalize(left) === normalize(right);
+}
+
+function deviceHandoffKey(publicPort: number, sessionId: string): string {
+  return `${publicPort}:${sessionId}`;
 }
 
 function rawMethodNeedsTarget(method: string): boolean {

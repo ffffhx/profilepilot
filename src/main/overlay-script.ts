@@ -26,7 +26,14 @@ export function agentOverlayBootstrapScript(): string {
 
   const SIGNAL_NAME = "__ppAgentOverlaySignal";
   const STORAGE_KEY = "__ppAgentOverlayPosition";
-  const COLLAPSED_KEY = "__ppAgentOverlayCollapsed";
+  const COLLAPSED_KEY = "__ppAgentOverlayCollapsedV2";
+  const HUD_INSET_PX = 16;
+  const HUD_COLLISION_MARGIN_PX = 12;
+  const HUD_AUTO_COLLAPSE_MS = 5000;
+  const HUD_OUTSIDE_COLLAPSE_MS = 1000;
+  const HUD_HANDOFF_PROMPT_MS = 6000;
+  const HUD_CORNERS = ["top-left", "top-right", "bottom-left", "bottom-right"];
+  const HUD_AVOID_EVENT = "__pp-agent-overlay-avoid";
   const STOP_CONFIRM_MS = 3000;
   const HOST_REATTACH_LIMIT = 8;
   const HOST_REATTACH_WINDOW_MS = 10000;
@@ -46,14 +53,18 @@ export function agentOverlayBootstrapScript(): string {
       sessionHeading: "会话",
       recentSummary: "AI 最近说",
       takenTitle: "✋ 已接管，AI 已暂停操作",
+      userActionTitle: "需要你完成一步",
       offlineTitle: "Agent 已离线",
+      reconnectingTitle: "浏览器驱动重连中",
       handoffTitle: "正在安全交接…",
       operatingPrefix: "AI 正在控制 · ",
       sessionsSuffix: " 个会话",
       actionPrefix: "▸ ",
       targetPrefix: "目标：",
       takenAction: "浏览器控制权已交还给你",
+      userActionPrefix: "请在网页中完成：",
       offlineAction: "原 Agent 已不再等待；请释放 Profile 后再开始新的 Agent 会话",
+      reconnectingAction: "Session 仍由 Agent 持有；Gateway 将在 10 秒内等待最多 3 次重连",
       handoffAction: "正在等待当前浏览器操作结束，完成前仍禁止手动点击",
       defaultAction: "AI 正在控制浏览器",
       lockedTitle: "Agent 调试中",
@@ -78,6 +89,7 @@ export function agentOverlayBootstrapScript(): string {
       ownerUser: "User",
       taskSpacePrefix: "任务空间",
       projectPrefix: "项目",
+      branchPrefix: "分支",
       sessionPrefix: "Session",
       hardStopSent: "已发送 hard-stop notice",
       takeoverHint: "你可以随时接管；接管后 Agent 会收到硬停止通知",
@@ -90,6 +102,7 @@ export function agentOverlayBootstrapScript(): string {
       takenElapsedPrefix: "已接管 ",
       returnToAgent: "交还 Agent",
       offlineButton: "Agent 已离线",
+      reconnectingButton: "驱动重连中",
       releaseProfile: "释放 Profile",
       confirmRelease: "再点一次释放",
       takeover: "接管",
@@ -135,14 +148,18 @@ export function agentOverlayBootstrapScript(): string {
       sessionHeading: "Sessions",
       recentSummary: "What AI said",
       takenTitle: "✋ Taken over — AI paused",
+      userActionTitle: "Your action is needed",
       offlineTitle: "Agent offline",
+      reconnectingTitle: "Browser driver reconnecting",
       handoffTitle: "Handing over safely…",
       operatingPrefix: "AI is controlling · ",
       sessionsSuffix: " sessions",
       actionPrefix: "▸ ",
       targetPrefix: "Target: ",
       takenAction: "browser control returned to you",
+      userActionPrefix: "Complete this in the page: ",
       offlineAction: "The original agent is no longer waiting; release this Profile before starting another agent session",
+      reconnectingAction: "The Agent still owns this Session; Gateway allows up to 3 reconnect attempts within 10 seconds",
       handoffAction: "Waiting for the current browser action to settle; manual clicks remain disabled",
       defaultAction: "AI is controlling this browser",
       lockedTitle: "Agent debugging",
@@ -166,7 +183,8 @@ export function agentOverlayBootstrapScript(): string {
       ownerAgent: "Agent",
       ownerUser: "User",
       taskSpacePrefix: "Task space",
-      projectPrefix: "项目",
+      projectPrefix: "Project",
+      branchPrefix: "Branch",
       sessionPrefix: "Session",
       hardStopSent: "Hard-stop notice sent",
       takeoverHint: "You can take over anytime; the agent receives a hard-stop notice",
@@ -180,6 +198,7 @@ export function agentOverlayBootstrapScript(): string {
       // 控制权按钮是操作协议的一部分，不跟随网页语言，避免中文应用里被页面语言切成英文。
       returnToAgent: "交还 Agent",
       offlineButton: "Agent 已离线",
+      reconnectingButton: "驱动重连中",
       releaseProfile: "释放 Profile",
       confirmRelease: "再点一次释放",
       takeover: "接管",
@@ -221,7 +240,9 @@ export function agentOverlayBootstrapScript(): string {
     ownership: "agent",
     inputGuardState: "starting",
     handoffPending: false,
+    pendingUserAction: "",
     agentOffline: false,
+    driverReconnecting: false,
     controlSince: "",
     agentTargetId: "",
     agentTargetTitle: "",
@@ -233,6 +254,7 @@ export function agentOverlayBootstrapScript(): string {
     profileName: "",
     agent: "",
     project: "",
+    branch: "",
     session: "",
     sessionTitle: "",
     currentAction: "",
@@ -252,9 +274,11 @@ export function agentOverlayBootstrapScript(): string {
     "profileName",
     "agent",
     "project",
+    "branch",
     "session",
     "sessionTitle",
     "currentAction",
+    "pendingUserAction",
     "targetUrl",
     "currentStep",
     "nextStep",
@@ -271,7 +295,10 @@ export function agentOverlayBootstrapScript(): string {
   ]);
   const state = cloneStateDefaults();
   let collapsed = readCollapsed();
+  let hudCorner = readHudCorner();
   let takenOverTimer = null;
+  let autoCollapseTimer = null;
+  let handoffPromptTimer = null;
   let elapsedTimer = null;
   let heartbeatTimer = null;
   let lastUpdateReceivedAt = Date.now();
@@ -333,6 +360,9 @@ export function agentOverlayBootstrapScript(): string {
   let agentCursor = null;
   let cursorHideTimer = null;
   let agentPointerListener = null;
+  let outsidePointerListener = null;
+  let escapeKeyListener = null;
+  let hudAvoidListener = null;
   let stopConfirmKind = "";
 
   function mount() {
@@ -345,23 +375,18 @@ export function agentOverlayBootstrapScript(): string {
     }
     host = document.createElement("div");
     host.id = "__pp-agent-overlay";
+    host.setAttribute("data-pp-ui", "hud");
     // Keep the overlay hidden from agent accessibility snapshots. This also hides
     // it from screen readers, so every critical control still carries title and
     // aria-label text for the least-bad default if that policy changes later.
     host.setAttribute("aria-hidden", "true");
     host.setAttribute("role", "presentation");
-    host.style.position = "fixed";
-    host.style.inset = "0";
-    host.style.width = "100vw";
-    host.style.height = "100vh";
-    host.style.zIndex = "2147483647";
-    host.style.pointerEvents = "none";
-    host.style.colorScheme = "dark";
     host.classList.toggle("reduced-motion", isReducedMotionPreferred());
 
     root = host.attachShadow({ mode: "closed" });
     const styleText = [
-      ":host{all:initial}",
+      ":host{all:initial;position:fixed;inset:0;width:100vw;height:100vh;z-index:2147483647;pointer-events:none;color-scheme:dark}",
+      ":host(.theme-light){color-scheme:light}",
       "*{box-sizing:border-box}",
       ".wrap{--pp-text:#f4fff9;--pp-title:#f1fff8;--pp-muted:#a6c1b8;--pp-muted-soft:#7fa89a;--pp-panel-bg:rgba(8,13,16,.88);--pp-panel-border:rgba(148,255,213,.30);--pp-panel-shadow:0 18px 50px rgba(0,0,0,.42),0 0 0 1px rgba(255,255,255,.04) inset;--pp-panel-hover-shadow:0 20px 56px rgba(0,0,0,.46),0 0 0 1px rgba(255,255,255,.06) inset;--pp-taken-bg:rgba(6,27,19,.90);--pp-taken-border:rgba(86,240,170,.58);--pp-control-bg:rgba(255,255,255,.07);--pp-control-hover-bg:rgba(255,255,255,.14);--pp-control-text:#d7fff1;--pp-control-hover-text:#ffffff;--pp-action-bg:rgba(255,255,255,.06);--pp-action-text:#f7fffb;--pp-progress-text:#effff8;--pp-progress-bg:rgba(148,255,213,.13);--pp-progress-fill-start:#35d892;--pp-progress-fill-end:#86ffd2;--pp-progress-glow:rgba(56,225,160,.55);--pp-next:#9bb7ad;--pp-sessions-bg:rgba(255,255,255,.045);--pp-sessions-border:rgba(255,255,255,.055);--pp-session-heading:#c8fff0;--pp-session-row:#afcac1;--pp-session-agent:#eafff8;--pp-session-name:#bdd7cf;--pp-session-time:#78a292;--pp-details:#a9c7bd;--pp-summary:#c9fff0;--pp-summary-hover:#ffffff;--pp-dot-bg:rgba(8,13,16,.90);--pp-dot-hover-bg:rgba(12,22,24,.94);--pp-dot-border:rgba(148,255,213,.36);--pp-dot-hover-border:rgba(148,255,213,.55);--pp-dot-shadow:0 12px 34px rgba(0,0,0,.42);--pp-stop-text:#ffe2de;--pp-stop-hover-text:#fff2ef;--pp-stop-confirm-text:#fff1dc;--pp-focus-ring:#ffffff;--pp-motion-duration:.16s;--pp-motion-ease:cubic-bezier(.2,0,0,1);--pp-hover-duration:.14s;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:var(--pp-text);user-select:none;opacity:0;transform:translateY(-4px) scale(.985);animation:ppIn var(--pp-motion-duration) var(--pp-motion-ease) forwards}",
       ":host(.theme-light) .wrap{--pp-text:#173128;--pp-title:#0d241c;--pp-muted:#49635a;--pp-muted-soft:#5b7369;--pp-panel-bg:rgba(255,255,255,.92);--pp-panel-border:rgba(22,115,80,.34);--pp-panel-shadow:0 18px 50px rgba(20,41,34,.20),0 0 0 1px rgba(255,255,255,.70) inset;--pp-panel-hover-shadow:0 20px 56px rgba(20,41,34,.24),0 0 0 1px rgba(255,255,255,.78) inset;--pp-taken-bg:rgba(240,255,249,.94);--pp-taken-border:rgba(31,139,96,.52);--pp-control-bg:rgba(13,48,36,.08);--pp-control-hover-bg:rgba(13,48,36,.14);--pp-control-text:#14583d;--pp-control-hover-text:#083624;--pp-action-bg:rgba(22,92,67,.08);--pp-action-text:#102f25;--pp-progress-text:#173128;--pp-progress-bg:#d4e3dd;--pp-progress-fill-start:#0d7f54;--pp-progress-fill-end:#145f45;--pp-progress-glow:rgba(17,115,79,.24);--pp-next:#506b61;--pp-sessions-bg:rgba(20,91,66,.06);--pp-sessions-border:rgba(20,91,66,.14);--pp-session-heading:#135a3e;--pp-session-row:#516b62;--pp-session-agent:#123f2d;--pp-session-name:#39594e;--pp-session-time:#586e65;--pp-details:#536d63;--pp-summary:#145a40;--pp-summary-hover:#06351f;--pp-dot-bg:rgba(255,255,255,.92);--pp-dot-hover-bg:rgba(244,255,250,.96);--pp-dot-border:rgba(22,115,80,.36);--pp-dot-hover-border:rgba(22,115,80,.56);--pp-dot-shadow:0 12px 34px rgba(20,41,34,.20);--pp-stop-text:#8f2119;--pp-stop-hover-text:#68140f;--pp-stop-confirm-text:#74420d;--pp-focus-ring:#073f2b}",
@@ -535,8 +560,43 @@ export function agentOverlayBootstrapScript(): string {
       ":host(.locked) .auto-follow[aria-checked=\"true\"]::before{background:#35dca0;box-shadow:inset 11px 0 0 #e8fff7}",
       "@media (max-width:640px){:host(.locked) .panel{grid-template-columns:minmax(0,1fr);grid-template-rows:auto auto auto auto;gap:6px;padding:10px 11px 11px 14px;width:min(430px,calc(100vw - 24px));bottom:14px}:host(.locked) .panel::before,:host(.locked) .panel::after{display:none}:host(.locked) .controls{grid-column:1;grid-row:3;width:100%;grid-template-columns:1fr 1fr;margin-top:5px}:host(.locked) .status-stack{grid-column:1;grid-row:2;margin-left:37px}:host(.locked) .target-follow{display:none;grid-column:1;grid-row:4;grid-template-columns:36px minmax(0,1fr);margin:8px 0 0;padding:9px 10px}:host(.locked) .target-follow[style*=\"grid\"]{display:grid!important}:host(.locked) .target-actions{grid-column:1 / -1;width:100%;padding:8px 0 0;border-left:0;border-top:1px solid #263c47}:host(.locked) .show-agent-target,:host(.locked) .auto-follow{flex:1 1 auto}}",
       "@media (max-width:420px){:host(.locked) .status-stack{align-items:flex-start;flex-direction:column;gap:4px}:host(.locked) .target-actions{flex-wrap:wrap}:host(.locked) .show-agent-target,:host(.locked) .auto-follow{flex:1 1 100%}}",
+      // Minimal HUD: the full-viewport host remains input-transparent; only the
+      // 32px dock or compact panel accepts pointer events.
+      ":host(.locked) .panel,:host(.locked) .panel.taken{position:fixed;left:auto;right:16px;top:auto;bottom:16px;width:min(304px,calc(100vw - 32px));min-height:0;display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:auto auto;align-items:stretch;gap:8px;padding:12px;border:1px solid #2b4350;border-radius:14px;background:#0a1014;box-shadow:0 4px 8px rgba(0,0,0,.30);pointer-events:auto;transform:none;overflow:hidden}",
+      ":host(.locked) .panel::before,:host(.locked) .panel::after{display:none}",
+      ":host(.locked) .head{grid-column:1;grid-row:1;display:grid;grid-template-columns:22px minmax(0,1fr) 28px;gap:8px;min-height:28px;padding:0;align-items:center}",
+      ":host(.locked) .head>.pulse{width:18px;height:18px;border:1px solid #36505f;background:#0d1a22}",
+      ":host(.locked) .head>.pulse::before{inset:4px;border-color:rgba(95,182,255,.42);border-top-color:#5fb6ff;animation:ppSpin 1.2s linear infinite}",
+      ":host(.locked) .head>.pulse::after{width:5px;height:5px;margin:-2.5px 0 0 -2.5px;background:#5fb6ff;box-shadow:0 0 8px rgba(95,182,255,.48)}",
+      ":host(.locked) .title{font-size:13px;font-weight:740}",
+      ":host(.locked) .reveal{display:none}",
+      ":host(.locked) .hide{display:inline-grid;width:28px;height:28px;place-items:center;padding:0;font-size:17px}",
+      ":host(.locked) .body{display:grid;grid-template-columns:minmax(0,1fr);gap:9px;padding:0}",
+      ":host(.locked) .status-stack{grid-column:1;grid-row:auto;display:grid;gap:5px;margin:0}",
+      ":host(.locked) .status-line{display:flex;min-height:18px}",
+      ":host(.locked) .state-row{margin:0}",
+      ":host(.locked) .space-chip{display:block;width:100%;height:auto;padding:0;border:0;background:transparent;color:#879aa5;font-size:10.5px;line-height:1.35}",
+      ":host(.locked) .controls{grid-column:1;grid-row:auto;display:grid;grid-template-columns:1fr 1fr;gap:8px;width:100%}",
+      ":host(.locked) .takeover,:host(.locked) .stop{min-height:34px}",
+      ":host(.locked) .target-follow{grid-column:1;grid-row:auto;margin:0;min-height:52px}",
+      ":host(.locked) .target-follow[style*=\"grid\"]{display:grid!important}",
+      ".dot{position:fixed;left:auto;right:16px;top:auto;bottom:16px;width:32px;height:32px;pointer-events:auto;will-change:transform}",
+      ".dot .pulse,:host(.locked) .dot .pulse{width:10px;height:10px;border:0;background:#38e1a0;box-shadow:0 0 0 0 rgba(56,225,160,.50);animation:ppPulse 1.45s ease-out infinite}",
+      ".dot .pulse::before,.dot .pulse::after,:host(.locked) .dot .pulse::before,:host(.locked) .dot .pulse::after{display:none}",
+      ":host(.corner-top-left) .panel,:host(.corner-top-left) .dot{left:16px;right:auto;top:16px;bottom:auto}",
+      ":host(.corner-top-right) .panel,:host(.corner-top-right) .dot{left:auto;right:16px;top:16px;bottom:auto}",
+      ":host(.corner-bottom-left) .panel,:host(.corner-bottom-left) .dot{left:16px;right:auto;top:auto;bottom:16px}",
+      ":host(.corner-bottom-right) .panel,:host(.corner-bottom-right) .dot{left:auto;right:16px;top:auto;bottom:16px}",
+      ":host(.handoff-prompt) .panel{width:min(320px,calc(100vw - 32px));border-color:rgba(242,176,61,.58);background:#0e1012}",
+      ":host(.handoff-prompt) .head>.pulse,:host(.handoff-prompt) .status-dot{background:#f2b03d;border-color:rgba(242,176,61,.55);box-shadow:0 0 9px rgba(242,176,61,.30)}",
+      ":host(.handoff-prompt) .head>.pulse::before,:host(.handoff-prompt) .head>.pulse::after{display:none}",
+      ":host(.handoff-prompt) .takeover{border-color:#f2b03d;background:#f2b03d;color:#211707}",
+      ":host(.handoff-prompt.collapsed) .dot,:host(.offline.collapsed) .dot{border-color:rgba(242,176,61,.58)}",
+      ":host(.handoff-prompt.collapsed) .dot .pulse,:host(.offline.collapsed) .dot .pulse{background:#f2b03d;box-shadow:0 0 0 0 rgba(242,176,61,.48)}",
       ":host(.collapsed) .panel{display:none}",
-      ":host(.locked.collapsed) .panel{display:grid}",
+      ":host(.locked.collapsed) .panel{display:none}",
+      ":host(.locked.collapsed) .dot{display:grid}",
+      "@media (max-width:360px){:host(.locked) .panel,:host(.handoff-prompt) .panel{width:calc(100vw - 24px)}:host(.corner-top-left) .panel,:host(.corner-bottom-left) .panel{left:12px}:host(.corner-top-right) .panel,:host(.corner-bottom-right) .panel{right:12px}}",
       ":host(.reduced-motion.locked) .pulse::before{animation:none}"
     ].join("");
     buildOverlayDom(root, styleText);
@@ -585,6 +645,8 @@ export function agentOverlayBootstrapScript(): string {
     root.addEventListener("click", (event) => event.stopPropagation());
     root.addEventListener("dblclick", (event) => event.stopPropagation());
     root.addEventListener("pointerdown", (event) => event.stopPropagation());
+    root.addEventListener("pointerenter", () => scheduleAutoCollapse(HUD_AUTO_COLLAPSE_MS), true);
+    root.addEventListener("focusin", () => scheduleAutoCollapse(HUD_AUTO_COLLAPSE_MS));
     hideButton.addEventListener("click", () => {
       collapse();
       signal("hide");
@@ -603,8 +665,15 @@ export function agentOverlayBootstrapScript(): string {
     // 捕获阶段监听页面上被 AI 派发（isTrusted）的按下事件，作为高亮触发源。
     agentPointerListener = handleAgentPointer;
     window.addEventListener("pointerdown", agentPointerListener, { capture: true, passive: true });
+    outsidePointerListener = handleOutsidePointer;
+    escapeKeyListener = handleEscapeKey;
+    hudAvoidListener = handleHudAvoidEvent;
+    window.addEventListener("pointerdown", outsidePointerListener, { capture: true, passive: true });
+    window.addEventListener("keydown", escapeKeyListener, true);
+    host.addEventListener(HUD_AVOID_EVENT, hudAvoidListener);
 
     document.documentElement.appendChild(host);
+    applyHudCorner(hudCorner);
     setupHostReconnectTracking();
     setupReducedMotionTracking();
     setupThemeTracking();
@@ -614,7 +683,6 @@ export function agentOverlayBootstrapScript(): string {
       renderSessionList();
     }, 1000);
     render();
-    requestAnimationFrame(clampHostIntoViewport);
   }
 
   function startHeartbeat() {
@@ -631,10 +699,25 @@ export function agentOverlayBootstrapScript(): string {
   }
 
   // Gmail 等站点通过 CSP 强制 Trusted Types，任何 innerHTML 字符串赋值都会被浏览器拒绝。
-  // 这里仅使用结构化 DOM API；样式写入 textContent，不申请站点的 Trusted Types policy。
+  // 1Password 等站点还会通过 style-src 禁止内联 <style>。优先采用不受该限制的
+  // Constructable Stylesheet，并为不支持该能力的旧浏览器保留 <style> 回退。
   function buildOverlayDom(shadowRoot, styleText) {
-    const styleNode = overlayNode("style");
-    styleNode.textContent = styleText;
+    let styleInstalled = false;
+    if (typeof CSSStyleSheet === "function" && "adoptedStyleSheets" in shadowRoot) {
+      try {
+        const styleSheet = new CSSStyleSheet();
+        styleSheet.replaceSync(styleText);
+        shadowRoot.adoptedStyleSheets = [styleSheet];
+        styleInstalled = true;
+      } catch {
+        // Fall through to the <style> path for older or partially compatible engines.
+      }
+    }
+    if (!styleInstalled) {
+      const styleNode = overlayNode("style");
+      styleNode.textContent = styleText;
+      shadowRoot.append(styleNode);
+    }
 
     const wrapNode = overlayNode("div", "wrap");
     const panelNode = overlayNode("section", "panel", {
@@ -652,7 +735,7 @@ export function agentOverlayBootstrapScript(): string {
         title: "",
         "aria-label": "",
         "aria-controls": "pp-agent-overlay-panel"
-      }, "−")
+      }, "×")
     );
 
     const bodyNode = overlayNode("div", "body");
@@ -771,7 +854,7 @@ export function agentOverlayBootstrapScript(): string {
     cursorNode.append(svgNode);
     cursorLayerNode.append(cursorNode);
 
-    shadowRoot.append(styleNode, wrapNode, cursorLayerNode);
+    shadowRoot.append(wrapNode, cursorLayerNode);
   }
 
   function overlayNode(tagName, className = "", attributes = {}, textValue) {
@@ -960,7 +1043,7 @@ export function agentOverlayBootstrapScript(): string {
     }
     try {
       document.documentElement.appendChild(host);
-      requestAnimationFrame(clampHostIntoViewport);
+      applyHudCorner(hudCorner);
       return true;
     } catch {
       hostReattachBlockedUntil = now + HOST_REATTACH_BACKOFF_MS;
@@ -1009,7 +1092,6 @@ export function agentOverlayBootstrapScript(): string {
     }
     const light = isLightEnvironment();
     host.classList.toggle("theme-light", light);
-    host.style.colorScheme = light ? "light" : "dark";
   }
 
   function isLightEnvironment() {
@@ -1090,21 +1172,50 @@ export function agentOverlayBootstrapScript(): string {
     ensureHostConnected();
     const copy = text();
     const taken = isDelegatedToUser();
-    const offline = taken && state.agentOffline === true;
+    const offline = state.agentOffline === true;
+    const reconnecting = state.driverReconnecting === true;
+    const driverUnavailable = offline || reconnecting;
     const pending = state.handoffPending === true && !taken;
+    const pendingUserAction = String(state.pendingUserAction || "").trim();
+    const requiresUserAction = Boolean(taken && pendingUserAction);
+    const returnError = taken ? String(state.stopError || "").trim() : "";
     const sessions = normalizedSessions();
     applyStaticText(copy);
     // 接管前后共用同一套紧凑状态条；delegated 只改变内容和控制权，不切回旧的大卡片。
     host.classList.add("locked");
     host.classList.toggle("delegated", taken);
-    host.classList.toggle("offline", offline);
+    host.classList.toggle("offline", driverUnavailable);
+    host.classList.toggle("handoff-prompt", requiresUserAction);
+    applyHudCorner(hudCorner);
     panel.classList.toggle("taken", taken);
-    title.textContent = offline ? copy.offlineTitle : taken ? copy.takenTitle : pending ? copy.handoffTitle : copy.lockedTitle;
+    title.textContent = reconnecting
+      ? copy.reconnectingTitle
+      : offline
+        ? copy.offlineTitle
+        : requiresUserAction
+          ? copy.userActionTitle
+          : taken
+            ? copy.takenTitle
+            : pending
+              ? copy.handoffTitle
+              : copy.lockedTitle;
     const metaText = primarySessionIdentity(sessions, copy, false);
     meta.textContent = metaText;
     meta.title = metaText;
     meta.style.display = metaText ? "block" : "none";
-    action.textContent = offline ? copy.offlineAction : taken ? copy.takenAction : pending ? copy.handoffAction : state.stopError || currentActionText(copy);
+    action.textContent = reconnecting
+      ? copy.reconnectingAction
+      : offline
+        ? copy.offlineAction
+        : returnError
+          ? returnError
+          : requiresUserAction
+          ? copy.userActionPrefix + pendingUserAction
+          : taken
+            ? copy.takenAction
+            : pending
+              ? copy.handoffAction
+              : state.stopError || currentActionText(copy);
     target.textContent = state.targetUrl ? copy.targetPrefix + state.targetUrl : "";
     target.style.display = state.targetUrl ? "block" : "none";
 
@@ -1114,17 +1225,40 @@ export function agentOverlayBootstrapScript(): string {
     renderSessionList();
     recent.style.display = state.lastMessage ? "block" : "none";
     recentText.textContent = state.lastMessage || "";
-    lockHint.textContent = offline ? copy.offlineAction : taken ? copy.takenAction : pending ? copy.handoffAction : compactStatusText(sessions, copy);
+    lockHint.textContent = reconnecting
+      ? copy.reconnectingAction
+      : offline
+        ? copy.offlineAction
+        : returnError
+          ? returnError
+          : requiresUserAction
+          ? pendingUserAction
+          : taken
+            ? copy.takenAction
+            : pending
+              ? copy.handoffAction
+              : compactStatusText(sessions, copy);
     renderTargetFollow(copy, taken, pending);
     stateChip.textContent = taken ? copy.ownerUser : copy.ownerAgent;
     spaceChip.textContent = compactTaskSpaceText(sessions, copy);
     spaceChip.title = fullTaskSpaceText(sessions, copy);
-    controlNote.textContent = offline ? copy.offlineAction : taken ? copy.hardStopSent : pending ? copy.handoffAction : copy.takeoverHint;
+    controlNote.textContent = reconnecting
+      ? copy.reconnectingAction
+      : offline
+        ? copy.offlineAction
+        : returnError
+          ? returnError
+          : requiresUserAction
+          ? copy.userActionPrefix + pendingUserAction
+          : taken
+            ? copy.hardStopSent
+            : pending
+              ? copy.handoffAction
+              : copy.takeoverHint;
     updateElapsed();
     updateStopButton();
-    host.classList.toggle("collapsed", taken && collapsed && !offline);
+    host.classList.toggle("collapsed", collapsed);
     updateInteractiveAria();
-    requestAnimationFrame(clampHostIntoViewport);
   }
 
   function renderTargetFollow(copy, taken, pending) {
@@ -1247,21 +1381,42 @@ export function agentOverlayBootstrapScript(): string {
 
   function compactTaskSpaceText(sessions, copy) {
     const session = sessions[0] || {};
-    const project = state.project || session.project || state.sessionTitle || session.sessionTitle || state.agent || session.agent || copy.defaultTask;
-    const sessionId = state.session || session.session;
-    const label = sessionId ? project + " · " + copy.sessionPrefix + " " + compactSessionId(sessionId) : project;
+    const project = state.project || session.project;
+    const branch = state.branch || session.branch;
+    const identity = [project, branch && branch !== project ? branch : ""].filter(Boolean);
+    const label = identity.join(" · ") || state.sessionTitle || session.sessionTitle || state.agent || session.agent || copy.defaultTask;
     const remaining = Math.max(0, sessions.length - 1);
     return label + (remaining ? " · +" + remaining : "");
   }
 
   function fullTaskSpaceText(sessions, copy) {
     if (!sessions.length) {
-      return primarySessionIdentity(sessions, copy, false);
+      return primaryTaskSpaceIdentity(sessions, copy);
     }
     return sessions.map((session, index) => {
-      const identity = index === 0 ? primarySessionIdentity(sessions, copy, false) : sessionIdentity(session, copy, false);
+      const identity = index === 0 ? primaryTaskSpaceIdentity(sessions, copy) : taskSpaceIdentity(session, copy);
       return (session.agent || "Agent") + " · " + identity;
     }).join("\n");
+  }
+
+  function primaryTaskSpaceIdentity(sessions, copy) {
+    const session = sessions[0] || {};
+    return taskSpaceIdentity({
+      project: state.project || session.project,
+      branch: state.branch || session.branch,
+      sessionTitle: state.sessionTitle || session.sessionTitle
+    }, copy);
+  }
+
+  function taskSpaceIdentity(session, copy) {
+    const parts = [];
+    if (session.project) {
+      parts.push(copy.projectPrefix + " " + session.project);
+    }
+    if (session.branch && session.branch !== session.project) {
+      parts.push(copy.branchPrefix + " " + session.branch);
+    }
+    return parts.join(" · ") || session.sessionTitle || copy.taskSpacePrefix + " · " + copy.defaultTask;
   }
 
   function primarySessionIdentity(sessions, copy, compact) {
@@ -1430,15 +1585,18 @@ export function agentOverlayBootstrapScript(): string {
 
   function updateStopButton() {
     const taken = isDelegatedToUser();
-    const offline = taken && state.agentOffline === true;
+    const offline = state.agentOffline === true;
+    const reconnecting = state.driverReconnecting === true;
+    const driverUnavailable = offline || reconnecting;
     const hasBinding = typeof window[SIGNAL_NAME] === "function";
     const pending = state.handoffPending === true;
-    takeoverButton.disabled = !hasBinding || pending || offline;
+    takeoverButton.disabled = !hasBinding || pending || driverUnavailable;
     stopButton.disabled = !hasBinding || pending;
-    if (offline) {
-      takeoverButton.textContent = text().offlineButton;
-      takeoverButton.title = text().offlineButton;
-      takeoverButton.setAttribute("aria-label", text().offlineButton);
+    if (driverUnavailable) {
+      const driverLabel = reconnecting ? text().reconnectingButton : text().offlineButton;
+      takeoverButton.textContent = driverLabel;
+      takeoverButton.title = driverLabel;
+      takeoverButton.setAttribute("aria-label", driverLabel);
       const stopLabel = stopConfirming && stopConfirmKind === "stop" ? text().confirmRelease : text().releaseProfile;
       stopButton.textContent = stopLabel;
       stopButton.title = stopLabel;
@@ -1472,11 +1630,15 @@ export function agentOverlayBootstrapScript(): string {
     stopConfirmTimer = null;
     if (takeoverButton) {
       takeoverButton.classList.remove("confirm");
-      if (isDelegatedToUser()) {
-        const takeoverLabel = state.agentOffline === true ? text().offlineButton : text().returnToAgent;
+      if (state.agentOffline === true || state.driverReconnecting === true) {
+        const takeoverLabel = state.driverReconnecting === true ? text().reconnectingButton : text().offlineButton;
         takeoverButton.textContent = takeoverLabel;
         takeoverButton.title = takeoverLabel;
         takeoverButton.setAttribute("aria-label", takeoverLabel);
+      } else if (isDelegatedToUser()) {
+        takeoverButton.textContent = text().returnToAgent;
+        takeoverButton.title = text().returnToAgent;
+        takeoverButton.setAttribute("aria-label", text().returnToAgent);
       } else {
         takeoverButton.textContent = text().takeover;
         takeoverButton.title = text().takeover;
@@ -1485,7 +1647,7 @@ export function agentOverlayBootstrapScript(): string {
     }
     if (stopButton) {
       stopButton.classList.remove("confirm");
-      const label = isDelegatedToUser() && state.agentOffline === true
+      const label = (state.agentOffline === true || state.driverReconnecting === true)
         ? text().releaseProfile
         : isMultiSession() ? text().stopAll : text().stopSingle;
       stopButton.textContent = label;
@@ -1587,7 +1749,11 @@ export function agentOverlayBootstrapScript(): string {
     if (!probe || probe.signature !== expectedSignature) {
       return false;
     }
-    if (probe.action === "showAgentTarget") {
+    if (probe.action === "expand") {
+      expand();
+    } else if (probe.action === "collapse") {
+      collapse();
+    } else if (probe.action === "showAgentTarget") {
       signal("show-agent-target");
     } else if (probe.action === "toggleAutoFollow") {
       signal("set-auto-follow", { enabled: !state.autoFollowAgent });
@@ -1636,6 +1802,8 @@ export function agentOverlayBootstrapScript(): string {
 
   function guardActionAtClientPoint(point) {
     const entries = [
+      ["expand", collapsed ? dot : null],
+      ["collapse", collapsed ? null : hideButton],
       ["takeover", takeoverButton],
       ["stop", stopButton],
       ["showAgentTarget", showAgentTargetButton],
@@ -1661,6 +1829,8 @@ export function agentOverlayBootstrapScript(): string {
   }
 
   function guardButtonForAction(actionName) {
+    if (actionName === "expand") return dot;
+    if (actionName === "collapse") return hideButton;
     if (actionName === "takeover") return takeoverButton;
     if (actionName === "stop") return stopButton;
     if (actionName === "showAgentTarget") return showAgentTargetButton;
@@ -1698,55 +1868,66 @@ export function agentOverlayBootstrapScript(): string {
   }
 
   function collapse() {
-    if (!isDelegatedToUser()) {
-      return;
-    }
+    clearTimeout(autoCollapseTimer);
+    autoCollapseTimer = null;
     collapsed = true;
     persistCollapsed();
     render();
   }
 
   function expand() {
+    clearTimeout(handoffPromptTimer);
+    handoffPromptTimer = null;
     collapsed = false;
     persistCollapsed();
     render();
+    scheduleAutoCollapse(HUD_AUTO_COLLAPSE_MS);
   }
 
-  function startDrag(event) {
-    if (event.button !== 0) {
+  function scheduleAutoCollapse(delayMs) {
+    clearTimeout(autoCollapseTimer);
+    autoCollapseTimer = null;
+    if (collapsed || tearingDown || stopConfirming || state.stopError || !host) {
       return;
     }
-    if (event.target && event.target.closest && event.target.closest("button")) {
-      return;
-    }
-    event.preventDefault();
-    const rect = host.getBoundingClientRect();
-    const offsetX = event.clientX - rect.left;
-    const offsetY = event.clientY - rect.top;
-    const move = (moveEvent) => {
-      const nextLeft = moveEvent.clientX - offsetX;
-      const nextTop = moveEvent.clientY - offsetY;
-      const left = Math.max(8, Math.min(window.innerWidth - rect.width - 8, nextLeft));
-      const top = Math.max(8, Math.min(window.innerHeight - rect.height - 8, nextTop));
-      host.style.left = left + "px";
-      host.style.top = top + "px";
-      host.style.right = "auto";
-    };
-    const up = () => {
-      window.removeEventListener("pointermove", move, true);
-      window.removeEventListener("pointerup", up, true);
-      persistPosition();
-    };
-    window.addEventListener("pointermove", move, true);
-    window.addEventListener("pointerup", up, true);
+    autoCollapseTimer = setTimeout(() => {
+      autoCollapseTimer = null;
+      if (!stopConfirming) {
+        collapse();
+      }
+    }, delayMs);
   }
 
-  function persistPosition() {
+  function showHandoffPrompt() {
+    clearTimeout(handoffPromptTimer);
+    clearTimeout(autoCollapseTimer);
+    collapsed = false;
+    persistCollapsed();
+    handoffPromptTimer = setTimeout(() => {
+      handoffPromptTimer = null;
+      collapse();
+    }, HUD_HANDOFF_PROMPT_MS);
+  }
+
+  function handleOutsidePointer(event) {
+    if (collapsed || tearingDown || !host) {
+      return;
+    }
+    const inside = typeof event.composedPath === "function" && event.composedPath().includes(host);
+    scheduleAutoCollapse(inside ? HUD_AUTO_COLLAPSE_MS : HUD_OUTSIDE_COLLAPSE_MS);
+  }
+
+  function handleEscapeKey(event) {
+    if (event.key === "Escape" && !collapsed) {
+      collapse();
+    }
+  }
+
+  function handleHudAvoidEvent(event) {
     try {
-      const current = host.getBoundingClientRect();
-      sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ left: current.left, top: current.top }));
+      avoidHudForRect(event && event.detail);
     } catch {
-      // sessionStorage may be disabled.
+      // The click must proceed even if a page supplies malformed event detail.
     }
   }
 
@@ -1760,24 +1941,141 @@ export function agentOverlayBootstrapScript(): string {
 
   function readCollapsed() {
     try {
-      return sessionStorage.getItem(COLLAPSED_KEY) === "1";
+      return sessionStorage.getItem(COLLAPSED_KEY) !== "0";
     } catch {
-      return false;
+      return true;
     }
   }
 
-  function clampHostIntoViewport() {
-    if (!host || host.style.right !== "auto") {
-      return;
+  function readHudCorner() {
+    try {
+      const parsed = JSON.parse(sessionStorage.getItem(STORAGE_KEY) || "null");
+      return parsed && HUD_CORNERS.includes(parsed.corner) ? parsed.corner : "bottom-right";
+    } catch {
+      return "bottom-right";
     }
-    const rect = host.getBoundingClientRect();
-    if (!rect.width || !rect.height) {
-      return;
+  }
+
+  function applyHudCorner(corner) {
+    if (!host) {
+      return false;
     }
-    const left = Math.max(8, Math.min(window.innerWidth - rect.width - 8, rect.left));
-    const top = Math.max(8, Math.min(window.innerHeight - rect.height - 8, rect.top));
-    host.style.left = left + "px";
-    host.style.top = top + "px";
+    const next = HUD_CORNERS.includes(corner) ? corner : "bottom-right";
+    for (const candidate of HUD_CORNERS) {
+      host.classList.toggle("corner-" + candidate, candidate === next);
+    }
+    hudCorner = next;
+    return true;
+  }
+
+  function persistHudCorner() {
+    try {
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ corner: hudCorner }));
+    } catch {
+      // sessionStorage may be disabled.
+    }
+  }
+
+  function avoidHudForRect(input) {
+    if (!host || !panel || !dot || tearingDown) {
+      return false;
+    }
+    const targetRect = normalizeAvoidRect(input);
+    if (!targetRect) {
+      return false;
+    }
+    const control = collapsed ? dot : panel;
+    const controlRect = control.getBoundingClientRect();
+    if (!rectsIntersect(expandRect(targetRect, HUD_COLLISION_MARGIN_PX), controlRect)) {
+      return false;
+    }
+    const candidates = HUD_CORNERS.map((corner) => hudCornerCandidate(corner, controlRect.width, controlRect.height));
+    const targetCenterX = (targetRect.left + targetRect.right) / 2;
+    const targetCenterY = (targetRect.top + targetRect.bottom) / 2;
+    let best = null;
+    for (const candidate of candidates) {
+      const overlap = intersectionArea(expandRect(targetRect, HUD_COLLISION_MARGIN_PX), candidate.rect);
+      const density = interactionDensityAt(candidate.rect);
+      const centerX = (candidate.rect.left + candidate.rect.right) / 2;
+      const centerY = (candidate.rect.top + candidate.rect.bottom) / 2;
+      const distance = Math.hypot(centerX - targetCenterX, centerY - targetCenterY);
+      const score = overlap * 100000 + density * 1000 - distance;
+      if (!best || score < best.score) {
+        best = { corner: candidate.corner, score };
+      }
+    }
+    if (!best || best.corner === hudCorner) {
+      return false;
+    }
+    applyHudCorner(best.corner);
+    persistHudCorner();
+    return true;
+  }
+
+  function normalizeAvoidRect(value) {
+    if (!value || typeof value !== "object") {
+      return null;
+    }
+    const left = finiteNumber(value.left ?? value.x);
+    const top = finiteNumber(value.top ?? value.y);
+    const width = positiveFiniteNumber(value.width) || 1;
+    const height = positiveFiniteNumber(value.height) || 1;
+    const right = finiteNumber(value.right);
+    const bottom = finiteNumber(value.bottom);
+    if (left === null || top === null) {
+      return null;
+    }
+    return {
+      left,
+      top,
+      right: right === null ? left + width : right,
+      bottom: bottom === null ? top + height : bottom
+    };
+  }
+
+  function expandRect(rect, margin) {
+    return {
+      left: rect.left - margin,
+      top: rect.top - margin,
+      right: rect.right + margin,
+      bottom: rect.bottom + margin
+    };
+  }
+
+  function hudCornerCandidate(corner, width, height) {
+    const safeWidth = Math.max(32, width || 32);
+    const safeHeight = Math.max(32, height || 32);
+    const left = corner.endsWith("left") ? HUD_INSET_PX : Math.max(HUD_INSET_PX, window.innerWidth - HUD_INSET_PX - safeWidth);
+    const top = corner.startsWith("top") ? HUD_INSET_PX : Math.max(HUD_INSET_PX, window.innerHeight - HUD_INSET_PX - safeHeight);
+    return {
+      corner,
+      rect: { left, top, right: left + safeWidth, bottom: top + safeHeight }
+    };
+  }
+
+  function rectsIntersect(a, b) {
+    return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+  }
+
+  function intersectionArea(a, b) {
+    const width = Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left));
+    const height = Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
+    return width * height;
+  }
+
+  function interactionDensityAt(rect) {
+    if (typeof document.elementFromPoint !== "function") {
+      return 0;
+    }
+    const x = Math.max(0, Math.min(window.innerWidth - 1, (rect.left + rect.right) / 2));
+    const y = Math.max(0, Math.min(window.innerHeight - 1, (rect.top + rect.bottom) / 2));
+    const element = document.elementFromPoint(x, y);
+    if (!element || element === host || (typeof element.closest === "function" && element.closest("#__pp-agent-overlay,[data-pp-ui]"))) {
+      return 0;
+    }
+    return typeof element.closest === "function" && element.closest("a,button,input,select,textarea,[role='button'],[tabindex]")
+      ? 1
+      : 0;
   }
 
   function handleAgentPointer(event) {
@@ -1932,6 +2230,7 @@ export function agentOverlayBootstrapScript(): string {
     if (
       key === "handoffPending" ||
       key === "agentOffline" ||
+      key === "driverReconnecting" ||
       key === "agentTargetIsCurrentPage" ||
       key === "autoFollowAgent" ||
       key === "targetActivationPending"
@@ -1962,17 +2261,27 @@ export function agentOverlayBootstrapScript(): string {
     }
     lastUpdateReceivedAt = Date.now();
     const wasDelegatedToUser = isDelegatedToUser();
+    const previousPendingUserAction = String(state.pendingUserAction || "").trim();
+    const previousStopError = String(state.stopError || "").trim();
     for (const key of KNOWN_STATE_FIELDS) {
       state[key] = normalizeKnownStateValue(key, payload[key]);
+    }
+    const pendingUserAction = String(state.pendingUserAction || "").trim();
+    const stopError = String(state.stopError || "").trim();
+    if (stopError && stopError !== previousStopError && isDelegatedToUser()) {
+      expand();
+    } else if (pendingUserAction && pendingUserAction !== previousPendingUserAction && isDelegatedToUser()) {
+      showHandoffPrompt();
+    } else if (!pendingUserAction) {
+      clearTimeout(handoffPromptTimer);
+      handoffPromptTimer = null;
     }
     if (isDelegatedToUser()) {
       if (!wasDelegatedToUser) {
         resetStopConfirm();
       }
       clearTimeout(takenOverTimer);
-      if (state.agentOffline === true) {
-        collapsed = false;
-      } else {
+      if (!pendingUserAction && !collapsed) {
         takenOverTimer = setTimeout(() => collapse(), 5000);
       }
     }
@@ -2007,6 +2316,14 @@ export function agentOverlayBootstrapScript(): string {
     }
   };
 
+  window.__ppAgentOverlayAvoidRect = (rect) => {
+    try {
+      return avoidHudForRect(rect);
+    } catch {
+      return false;
+    }
+  };
+
   window.__ppAgentOverlayGuardProbe = (payload) => {
     try {
       return guardProbe(payload);
@@ -2029,6 +2346,8 @@ export function agentOverlayBootstrapScript(): string {
     }
     tearingDown = true;
     clearTimeout(takenOverTimer);
+    clearTimeout(autoCollapseTimer);
+    clearTimeout(handoffPromptTimer);
     clearInterval(elapsedTimer);
     clearInterval(heartbeatTimer);
     clearTimeout(cursorHideTimer);
@@ -2037,6 +2356,18 @@ export function agentOverlayBootstrapScript(): string {
     if (agentPointerListener) {
       window.removeEventListener("pointerdown", agentPointerListener, true);
       agentPointerListener = null;
+    }
+    if (outsidePointerListener) {
+      window.removeEventListener("pointerdown", outsidePointerListener, true);
+      outsidePointerListener = null;
+    }
+    if (escapeKeyListener) {
+      window.removeEventListener("keydown", escapeKeyListener, true);
+      escapeKeyListener = null;
+    }
+    if (host && hudAvoidListener) {
+      host.removeEventListener(HUD_AVOID_EVENT, hudAvoidListener);
+      hudAvoidListener = null;
     }
     cleanupHostReconnectTracking();
     cleanupReducedMotionTracking();
@@ -2051,6 +2382,7 @@ export function agentOverlayBootstrapScript(): string {
     delete window.__ppAgentOverlayInstalled;
     delete window.__ppAgentOverlayUpdate;
     delete window.__ppAgentOverlayHighlightAt;
+    delete window.__ppAgentOverlayAvoidRect;
     delete window.__ppAgentOverlayGuardProbe;
     delete window.__ppAgentOverlayGuardActivate;
     delete window.__ppAgentOverlayTeardown;

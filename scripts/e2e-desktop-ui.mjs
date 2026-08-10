@@ -51,6 +51,7 @@ async function main() {
     step("verified Profile Registry column and action tracks align across running and idle rows");
 
     await ensureMainVisible(driver);
+    await openProfileMenu(driver, profileId);
     await driver.click(`[data-action="open-profile-details"][data-id="${profileId}"]`);
     await driver.waitFor(".profile-details-modal", (snapshot) => snapshot.text?.includes(RENAMED_NAME));
     await driver.waitFor(".profile-details-cockpit", (snapshot) => snapshot.text?.includes("Cockpit"));
@@ -111,6 +112,7 @@ async function assertRegistryColumnAlignment(driver, profileIds) {
     "td:nth-child(3)",
     "td:nth-child(4)",
     "td:nth-child(5)",
+    "td:nth-child(6)",
     "[data-profile-actions]"
   ];
   for (const track of tracks) {

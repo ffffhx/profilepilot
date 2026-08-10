@@ -5,6 +5,7 @@ import path from "node:path";
 import readline from "node:readline";
 import { driverLabelFromCommand } from "./cdp-client";
 import { POSIX_LOCALE_ENV, execFileAsync, isRecord, stringValue } from "./fs-util";
+import { resolveCanonicalSessionIdentity } from "./session-identity";
 
 // 一个 CDP 客户端背后的“谁在用”：工具名（Codex / Claude Code / agent-browser…）、项目、会话标题。
 // 只有能从进程/会话档案里解析出来时才带 agent/project/title；否则退化成纯 label。
@@ -268,8 +269,19 @@ async function findCodexSessionByUuid(uuid: string): Promise<string | null> {
       return file;
     }
   }
-  // 会话已结束的残留连接：到默认 CODEX_HOME 的日期分片目录（sessions/YYYY/MM/DD/）反查。
-  // 新日期优先，并给扫描量封顶——残留连接对应的会话就在近期，扫太远只会拖慢轮询。
+  // 会话已结束的残留连接：交给共享 Session Core 同时查默认 CODEX_HOME、
+  // 自定义 CODEX_HOME 和 Orca 镜像。canonical ID 只认原生 thread UUID，
+  // 多份档案只是同一 Session 的 representations，不会被误判成多个使用方。
+  const identity = await resolveCanonicalSessionIdentity(`cx-${uuid}`);
+  const discovered = identity?.representations
+    .filter((representation) => representation.filePath.endsWith(suffix))
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)[0]?.filePath;
+  if (discovered) {
+    codexSessionFileByUuid.set(uuid, discovered);
+    return discovered;
+  }
+
+  // agent-session-core 不可用时保留原有的默认目录有界降级路径。
   const root = path.join(homedir(), ".codex", "sessions");
   let scannedDays = 0;
   for (const year of await readdirDesc(root)) {

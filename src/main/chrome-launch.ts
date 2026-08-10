@@ -180,6 +180,34 @@ if (!front) {
   }
 }
 
+// 一次读取当前前台进程 PID，供 getState 给所有 Profile 派生 windowActivation。
+// 与逐 Profile 调 isAnyMacProcessFrontmost 相比只启动一次 osascript，也不会激活任何窗口。
+export async function frontmostMacProcessId(signal?: AbortSignal): Promise<number | null> {
+  if (process.platform !== "darwin") {
+    return null;
+  }
+  signal?.throwIfAborted();
+  const script = `
+ObjC.import("AppKit");
+const front = $.NSWorkspace.sharedWorkspace.frontmostApplication;
+front ? Number(front.processIdentifier) : 0;
+`;
+  try {
+    const { stdout } = await execFileAsync("osascript", ["-l", "JavaScript", "-e", script], {
+      signal,
+      timeout: 2_000,
+      killSignal: "SIGKILL"
+    });
+    const pid = Number(stdout.trim());
+    return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+  } catch (error) {
+    if (signal?.aborted) {
+      throw signal.reason || error;
+    }
+    return null;
+  }
+}
+
 export async function hasRendererProcessForProfile(profilePath: string): Promise<boolean> {
   try {
     const { stdout } = await execFileAsync("ps", ["-axo", "command="], {
@@ -595,6 +623,10 @@ export function nativeChromeLocalStatePath(): string {
 }
 
 export function nativeChromeUserDataDir(): string {
+  const override = process.env.CPM_NATIVE_CHROME_USER_DATA_DIR?.trim();
+  if (override) {
+    return path.resolve(override);
+  }
   if (process.platform === "darwin") {
     return path.join(os.homedir(), "Library", "Application Support", "Google", "Chrome");
   }

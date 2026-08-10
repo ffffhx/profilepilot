@@ -89,20 +89,36 @@ test("Gateway transparently remaps CDP request ids and broadcasts events", async
   }
 });
 
-test("Gateway closes existing Agent sockets as soon as the user takes over", async () => {
+test("Gateway parks agent-browser across takeover and resumes the same socket on return", async () => {
   const h = await makeHarness();
   try {
     const acquired = h.control.acquire({
       publicPort: h.port,
       sessionId: "cx-one",
-      daemonInstanceId: "daemon-one"
+      daemonInstanceId: "daemon-one",
+      driverKind: "agent-browser"
     });
     const ws = await openWebSocket(`ws://127.0.0.1:${h.port}/devtools/browser/gateway?ticket=${encodeURIComponent(acquired.ticket)}`);
-    const closed = new Promise((resolve) => ws.addEventListener("close", (event) => resolve(event), { once: true }));
+    let closed = false;
+    ws.addEventListener("close", () => { closed = true; }, { once: true });
     h.control.delegateToUser("cx-one", "user_takeover");
-    const event = await closed;
-    assert.equal(event.code, 4003);
-    assert.match(event.reason, /user_takeover/);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(closed, false);
+    assert.equal(h.gateway.hasActiveAgentConnection(h.port, "cx-one", "daemon-one"), true);
+
+    h.control.returnToAgent("cx-one");
+    const identity = {
+      sessionId: "cx-one",
+      profileId: acquired.profile.profileId,
+      publicPort: h.port,
+      daemonInstanceId: "daemon-one",
+      controlGeneration: h.control.getProfile(h.port).controlGeneration,
+      kind: "agent"
+    };
+    assert.doesNotThrow(() => h.control.assertConnectionCanSend(identity));
+    assert.equal(h.gateway.hasActiveAgentConnection(h.port, "cx-one", "daemon-one"), true);
+    assert.equal(closed, false);
+    ws.close();
   } finally {
     await h.cleanup();
   }
@@ -273,6 +289,207 @@ test("Gateway Raw CDP uses the same ownership boundary and method policy", async
       method: "Runtime.evaluate",
       params: { expression: "1+1" }
     }), (error) => error.code === "AGENT_USER_IN_CONTROL");
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("Gateway applies a bounded device preset and clears it before user takeover", async () => {
+  const h = await makeHarness();
+  try {
+    h.control.acquire({
+      publicPort: h.port,
+      sessionId: "cx-device",
+      daemonInstanceId: "daemon-device",
+      driverKind: "agent-browser"
+    });
+    h.backend.onSend = (text) => {
+      const message = JSON.parse(text);
+      const result = message.method === "Target.getTargets"
+        ? {
+            targetInfos: [
+              { targetId: "mobile-page", type: "page", title: "Mobile", url: "https://example.test/" }
+            ]
+          }
+        : message.method === "Target.attachToTarget"
+          ? { sessionId: "device-flat-session" }
+          : {};
+      queueMicrotask(() => h.backend.emit(JSON.stringify({
+        id: message.id,
+        ...(message.sessionId ? { sessionId: message.sessionId } : {}),
+        result
+      })));
+    };
+
+    const emulation = await h.gateway.controlDeviceEmulation({
+      publicPort: h.port,
+      sessionId: "cx-device",
+      daemonInstanceId: "daemon-device",
+      command: "emulate",
+      preset: "iphone-16-pro"
+    });
+    assert.deepEqual(emulation, {
+      preset: "iphone-16-pro",
+      targetId: "mobile-page",
+      width: 402,
+      height: 874,
+      deviceScaleFactor: 3,
+      mobile: true,
+      maxTouchPoints: 5,
+      userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+      platform: "iPhone"
+    });
+    const applied = h.backend.sent.map(JSON.parse);
+    const metrics = applied.find((message) => message.method === "Emulation.setDeviceMetricsOverride");
+    assert.equal(metrics.sessionId, "device-flat-session");
+    assert.deepEqual(
+      {
+        width: metrics.params.width,
+        height: metrics.params.height,
+        deviceScaleFactor: metrics.params.deviceScaleFactor,
+        mobile: metrics.params.mobile
+      },
+      { width: 402, height: 874, deviceScaleFactor: 3, mobile: true }
+    );
+    assert.equal(
+      applied.find((message) => message.method === "Emulation.setTouchEmulationEnabled").params.maxTouchPoints,
+      5
+    );
+    assert.match(
+      applied.find((message) => message.method === "Emulation.setUserAgentOverride").params.userAgent,
+      /iPhone/
+    );
+    assert.equal(
+      applied.find((message) => message.method === "Emulation.setUserAgentOverride").params.platform,
+      "iPhone"
+    );
+    assert.deepEqual(await h.gateway.controlDeviceEmulation({
+      publicPort: h.port,
+      sessionId: "cx-device",
+      daemonInstanceId: "daemon-device",
+      command: "status"
+    }), emulation);
+    h.backend.emit(JSON.stringify({
+      method: "Target.detachedFromTarget",
+      params: { sessionId: "device-flat-session" }
+    }));
+    await waitFor(
+      () => h.backend.sent.map(JSON.parse).filter(
+        (message) => message.method === "Emulation.setDeviceMetricsOverride"
+      ).length >= 2,
+      "device emulation reapplied after an unexpected target-session detach"
+    );
+    assert.deepEqual(await h.gateway.controlDeviceEmulation({
+      publicPort: h.port,
+      sessionId: "cx-device",
+      daemonInstanceId: "daemon-device",
+      command: "status"
+    }), emulation);
+    await assert.rejects(() => h.gateway.controlDeviceEmulation({
+      publicPort: h.port,
+      sessionId: "cx-device",
+      daemonInstanceId: "daemon-device",
+      command: "emulate",
+      preset: "arbitrary-device"
+    }), (error) => error.code === "DEVICE_PRESET_NOT_SUPPORTED");
+
+    h.control.delegateToUser("cx-device", "user_takeover");
+    await waitFor(
+      () => h.backend.sent.map(JSON.parse).some(
+        (message) => message.method === "Emulation.clearDeviceMetricsOverride"
+      ),
+      "device metrics cleared before user control"
+    );
+    await waitFor(
+      () => h.backend.sent.map(JSON.parse).some(
+        (message) =>
+          message.method === "Emulation.setUserAgentOverride" &&
+          message.params.userAgent === ""
+      ),
+      "mobile UA cleared before user control"
+    );
+    await waitFor(
+      () => h.backend.sent.map(JSON.parse).some(
+        (message) =>
+          message.method === "Target.detachFromTarget" &&
+          message.params.sessionId === "device-flat-session"
+      ),
+      "device session detached before user control"
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("Gateway preserves a device preset only for an explicit user verification handoff", async () => {
+  const h = await makeHarness();
+  try {
+    h.control.acquire({
+      publicPort: h.port,
+      sessionId: "cx-device-preview",
+      daemonInstanceId: "daemon-device-preview",
+      driverKind: "agent-browser"
+    });
+    h.backend.onSend = (text) => {
+      const message = JSON.parse(text);
+      const result = message.method === "Target.getTargets"
+        ? {
+            targetInfos: [
+              { targetId: "preview-page", type: "page", title: "Preview", url: "https://example.test/" }
+            ]
+          }
+        : message.method === "Target.attachToTarget"
+          ? { sessionId: "preview-device-session" }
+          : {};
+      queueMicrotask(() => h.backend.emit(JSON.stringify({
+        id: message.id,
+        ...(message.sessionId ? { sessionId: message.sessionId } : {}),
+        result
+      })));
+    };
+
+    await h.gateway.controlDeviceEmulation({
+      publicPort: h.port,
+      sessionId: "cx-device-preview",
+      daemonInstanceId: "daemon-device-preview",
+      command: "emulate",
+      preset: "iphone-16-pro"
+    });
+    assert.equal(
+      h.gateway.prepareDeviceEmulationUserHandoff(h.port, "cx-device-preview"),
+      true
+    );
+    const delegated = h.control.delegateToUser(
+      "cx-device-preview",
+      "user_takeover",
+      "人工验证手机页面"
+    );
+    await h.gateway.activateDelegatedAgentTarget(
+      h.port,
+      "cx-device-preview",
+      delegated.controlGeneration,
+      500,
+      true
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(
+      h.backend.sent.map(JSON.parse).some(
+        (message) => message.method === "Emulation.clearDeviceMetricsOverride"
+      ),
+      false,
+      "the explicit preview handoff keeps the mobile viewport while Agent commands are revoked"
+    );
+    assert.equal(h.control.getProfile(h.port)?.ownership, "user");
+
+    h.control.returnToAgent("cx-device-preview");
+    await h.gateway.clearDeviceEmulationForSession(h.port, "cx-device-preview");
+    assert.equal(
+      h.backend.sent.map(JSON.parse).some(
+        (message) => message.method === "Emulation.clearDeviceMetricsOverride"
+      ),
+      true,
+      "returning control lets the Agent explicitly restore the desktop viewport"
+    );
   } finally {
     await h.cleanup();
   }
@@ -608,6 +825,159 @@ test("Gateway loads an unpacked extension only for the active owning Agent", asy
   }
 });
 
+test("Gateway recovers when Chrome loads an unpacked extension but its success response misses the deadline", async () => {
+  const h = await makeHarness();
+  try {
+    h.control.acquire({ publicPort: h.port, sessionId: "cx-one", daemonInstanceId: "daemon-one" });
+    h.backend.onSend = (text) => {
+      const message = JSON.parse(text);
+      if (message.method === "Extensions.loadUnpacked") {
+        return;
+      }
+      if (message.method === "Extensions.getExtensions") {
+        queueMicrotask(() => h.backend.emit(JSON.stringify({
+          id: message.id,
+          result: {
+            extensions: [{
+              id: "extension-one",
+              name: "Fixture Extension",
+              version: "0.2.5",
+              path: "/tmp/fixture-extension",
+              enabled: true
+            }]
+          }
+        })));
+      }
+    };
+
+    assert.deepEqual(await h.gateway.loadUnpackedExtension({
+      publicPort: h.port,
+      sessionId: "cx-one",
+      daemonInstanceId: "daemon-one",
+      extensionPath: "/tmp/fixture-extension",
+      extensionVersion: "0.2.5",
+      timeoutMs: 5,
+      verificationTimeoutMs: 50,
+      verificationIntervalMs: 1
+    }), {
+      id: "extension-one",
+      recoveredFromTimeout: true
+    });
+    assert.deepEqual(
+      h.backend.sent.map(JSON.parse).map((message) => message.method),
+      ["Extensions.loadUnpacked", "Extensions.getExtensions"]
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("Gateway keeps the original timeout when post-timeout verification finds a different extension version", async () => {
+  const h = await makeHarness();
+  try {
+    h.control.acquire({ publicPort: h.port, sessionId: "cx-one", daemonInstanceId: "daemon-one" });
+    h.backend.onSend = (text) => {
+      const message = JSON.parse(text);
+      if (message.method === "Extensions.getExtensions") {
+        queueMicrotask(() => h.backend.emit(JSON.stringify({
+          id: message.id,
+          result: {
+            extensions: [{
+              id: "extension-one",
+              version: "0.2.4",
+              path: "/tmp/fixture-extension",
+              enabled: true
+            }]
+          }
+        })));
+      }
+    };
+
+    await assert.rejects(() => h.gateway.loadUnpackedExtension({
+      publicPort: h.port,
+      sessionId: "cx-one",
+      daemonInstanceId: "daemon-one",
+      extensionPath: "/tmp/fixture-extension",
+      extensionVersion: "0.2.5",
+      timeoutMs: 5,
+      verificationTimeoutMs: 15,
+      verificationIntervalMs: 1
+    }), (error) =>
+      error.code === "CDP_CALL_TIMEOUT" &&
+      error.method === "Extensions.loadUnpacked"
+    );
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("Gateway triggers an enabled extension action only on an owned page target", async () => {
+  const h = await makeHarness();
+  const extensionId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  try {
+    h.control.acquire({ publicPort: h.port, sessionId: "cx-one", daemonInstanceId: "daemon-one" });
+    h.backend.onSend = (text) => {
+      const message = JSON.parse(text);
+      const result = message.method === "Extensions.getExtensions"
+        ? { extensions: [{ id: extensionId, enabled: true }] }
+        : message.method === "Target.getTargets"
+          ? message.params?.filter
+            ? {
+                targetInfos: [{
+                  targetId: "tab-1",
+                  type: "tab",
+                  url: "https://example.test/",
+                  browserContextId: "context-1",
+                  embedderData: { tabActive: true }
+                }]
+              }
+            : {
+                targetInfos: [{
+                  targetId: "page-1",
+                  type: "page",
+                  url: "https://example.test/",
+                  browserContextId: "context-1"
+                }]
+              }
+          : {};
+      queueMicrotask(() => h.backend.emit(JSON.stringify({ id: message.id, result })));
+    };
+
+    assert.deepEqual(await h.gateway.triggerExtensionAction({
+      publicPort: h.port,
+      sessionId: "cx-one",
+      daemonInstanceId: "daemon-one",
+      extensionId,
+      targetId: "page-1"
+    }), {
+      extensionId,
+      targetId: "page-1",
+      actionTargetId: "tab-1"
+    });
+    assert.deepEqual(
+      h.backend.sent.map(JSON.parse).map((message) => [message.method, message.params]),
+      [
+        ["Extensions.getExtensions", {}],
+        ["Target.getTargets", {}],
+        ["Target.getTargets", { filter: [{ type: "tab" }] }],
+        ["Target.activateTarget", { targetId: "tab-1" }],
+        ["Extensions.triggerAction", { id: extensionId, targetId: "tab-1" }]
+      ]
+    );
+
+    h.control.delegateToUser("cx-one", "user_takeover");
+    await assert.rejects(() => h.gateway.triggerExtensionAction({
+      publicPort: h.port,
+      sessionId: "cx-one",
+      daemonInstanceId: "daemon-one",
+      extensionId,
+      targetId: "page-1"
+    }), (error) => error.code === "AGENT_USER_IN_CONTROL");
+  } finally {
+    await h.cleanup();
+  }
+});
+
 test("Gateway Raw CDP automatically attaches target-scoped methods to a page", async () => {
   const h = await makeHarness();
   try {
@@ -648,7 +1018,9 @@ test("Gateway Raw CDP prefers the Agent Session's last attached target", async (
       const message = JSON.parse(text);
       const result = message.method === "Target.attachToTarget"
         ? { sessionId: message.params.targetId === "page-affinity" ? "agent-flat" : "raw-flat" }
-        : { ok: true };
+        : message.method === "Target.getTargets"
+          ? { targetInfos: [{ targetId: "page-affinity", type: "page" }] }
+          : { ok: true };
       queueMicrotask(() => h.backend.emit(JSON.stringify({ id: message.id, sessionId: message.sessionId, result })));
     };
     const acquired = h.control.acquire({
@@ -670,11 +1042,12 @@ test("Gateway Raw CDP prefers the Agent Session's last attached target", async (
     });
     const sent = h.backend.sent.map(JSON.parse);
     assert.deepEqual(sent.map((message) => message.method), [
+      "Target.getTargets",
       "Target.attachToTarget",
       "Runtime.evaluate",
       "Target.detachFromTarget"
     ]);
-    assert.equal(sent[0].params.targetId, "page-affinity");
+    assert.equal(sent[1].params.targetId, "page-affinity");
     ws.close();
   } finally {
     await h.cleanup();
@@ -973,9 +1346,250 @@ test("Gateway preserves flattened Agent auto-attach ownership without leaking ot
     await waitFor(() => h.backend.sent.map(JSON.parse).some(
       (message) => message.method === "Target.setAutoAttach" && message.params.autoAttach === false
     ), "Agent auto-attach reset on disconnect");
-    assert.equal(h.backend.sent.map(JSON.parse).some(
+    await waitFor(() => h.backend.sent.map(JSON.parse).some(
       (message) => message.method === "Target.detachFromTarget" && message.params.sessionId === "auto-flat"
-    ), true);
+    ), "Agent child session cleanup after Auto-Attach reset");
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("Gateway finishes old Agent CDP cleanup before accepting a reconnect for the same Session", async () => {
+  const h = await makeHarness();
+  try {
+    let attachCount = 0;
+    let heldAutoAttachReset = null;
+    let announceAutoAttachReset;
+    const autoAttachResetReady = new Promise((resolve) => {
+      announceAutoAttachReset = resolve;
+    });
+    h.backend.onSend = (text) => {
+      const message = JSON.parse(text);
+      if (message.method === "Target.attachToTarget") {
+        attachCount += 1;
+        const sessionId = attachCount === 1 ? "old-flat" : "new-flat";
+        queueMicrotask(() => h.backend.emit(JSON.stringify({ id: message.id, result: { sessionId } })));
+        return;
+      }
+      if (message.method === "Target.setAutoAttach" && message.params.autoAttach === false) {
+        heldAutoAttachReset = message;
+        announceAutoAttachReset();
+        return;
+      }
+      queueMicrotask(() => h.backend.emit(JSON.stringify({ id: message.id, result: {} })));
+    };
+    const acquired = h.control.acquire({
+      publicPort: h.port,
+      sessionId: "cx-clean-reconnect",
+      daemonInstanceId: "daemon-clean-reconnect"
+    });
+    const oldWs = await openWebSocket(
+      `ws://127.0.0.1:${h.port}/devtools/browser/gateway?ticket=${encodeURIComponent(acquired.ticket)}`
+    );
+
+    let response = nextMessage(oldWs);
+    oldWs.send(JSON.stringify({
+      id: 1,
+      method: "Target.attachToTarget",
+      params: { targetId: "page-one", flatten: true }
+    }));
+    assert.equal((await response).result.sessionId, "old-flat");
+    response = nextMessage(oldWs);
+    oldWs.send(JSON.stringify({
+      id: 2,
+      method: "Target.setAutoAttach",
+      params: { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
+      sessionId: "old-flat"
+    }));
+    await response;
+
+    const oldClosed = new Promise((resolve) => oldWs.addEventListener("close", resolve, { once: true }));
+    oldWs.close();
+    await oldClosed;
+    await autoAttachResetReady;
+    assert.equal(heldAutoAttachReset.sessionId, "old-flat");
+    assert.equal(
+      h.backend.sent.map(JSON.parse).some(
+        (message) => message.method === "Target.detachFromTarget" && message.params.sessionId === "old-flat"
+      ),
+      false,
+      "the old page session must stay alive until its scoped Auto-Attach controller is disabled"
+    );
+
+    const reacquired = h.control.acquire({
+      publicPort: h.port,
+      sessionId: "cx-clean-reconnect",
+      daemonInstanceId: "daemon-clean-reconnect"
+    });
+    let reconnectAccepted = false;
+    const reconnect = openWebSocket(
+      `ws://127.0.0.1:${h.port}/devtools/browser/gateway?ticket=${encodeURIComponent(reacquired.ticket)}`
+    ).then((ws) => {
+      reconnectAccepted = true;
+      return ws;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(reconnectAccepted, false, "the replacement socket must wait for old CDP cleanup");
+    assert.equal(attachCount, 1, "the replacement driver must not attach while old cleanup is pending");
+
+    const resetReleasedAt = Date.now();
+    h.backend.emit(JSON.stringify({ id: heldAutoAttachReset.id, result: {} }));
+    setTimeout(() => {
+      h.backend.emit(JSON.stringify({
+        method: "Target.detachedFromTarget",
+        params: { sessionId: "late-auto-flat", targetId: "page-one" }
+      }));
+    }, 20);
+    const newWs = await reconnect;
+    assert.equal(
+      Date.now() - resetReleasedAt >= 55,
+      true,
+      "the replacement socket must wait for late Auto-Attach lifecycle events to become quiet"
+    );
+    response = nextMessage(newWs);
+    newWs.send(JSON.stringify({
+      id: 3,
+      method: "Target.attachToTarget",
+      params: { targetId: "page-one", flatten: true }
+    }));
+    assert.equal((await response).result.sessionId, "new-flat");
+    response = nextMessage(newWs);
+    newWs.send(JSON.stringify({
+      id: 4,
+      method: "Target.setAutoAttach",
+      params: { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
+      sessionId: "new-flat"
+    }));
+    assert.deepEqual(await response, { id: 4, result: {}, sessionId: "new-flat" });
+    assert.equal(
+      h.backend.sent.map(JSON.parse).filter(
+        (message) => message.method === "Target.setAutoAttach" && message.params.autoAttach === true
+      ).length,
+      1,
+      "the replacement driver must not reinstall Auto-Attach and replace its freshly attached primary session"
+    );
+    response = nextMessage(newWs);
+    newWs.send(JSON.stringify({
+      id: 5,
+      method: "DOM.enable",
+      params: {},
+      sessionId: "new-flat"
+    }));
+    assert.deepEqual(await response, { id: 5, result: {}, sessionId: "new-flat" });
+    newWs.close();
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("Gateway follows the tab an Agent actually operates after auto-attach", async () => {
+  const h = await makeHarness();
+  try {
+    h.backend.onSend = (text) => {
+      const message = JSON.parse(text);
+      if (message.method === "Target.attachToTarget") {
+        const sessionId = message.params.targetId === "page-figma" ? "figma-flat" : "trusted-iproyal";
+        queueMicrotask(() => h.backend.emit(JSON.stringify({ id: message.id, result: { sessionId } })));
+        return;
+      }
+      if (message.method === "Target.setAutoAttach" && message.params.autoAttach === true) {
+        queueMicrotask(() => {
+          h.backend.emit(JSON.stringify({
+            method: "Target.attachedToTarget",
+            params: {
+              sessionId: "iproyal-flat",
+              targetInfo: { targetId: "page-iproyal", type: "page" },
+              waitingForDebugger: false
+            }
+          }));
+          h.backend.emit(JSON.stringify({ id: message.id, result: {} }));
+        });
+        return;
+      }
+      if (message.method === "Target.getTargets") {
+        queueMicrotask(() => h.backend.emit(JSON.stringify({
+          id: message.id,
+          result: {
+            targetInfos: [
+              { targetId: "page-figma", type: "page", title: "Figma", url: "https://figma.com/design/one" },
+              { targetId: "page-iproyal", type: "page", title: "完成订单 - IPRoyal", url: "https://iproyal.com/order" }
+            ]
+          }
+        })));
+        return;
+      }
+      queueMicrotask(() => h.backend.emit(JSON.stringify({ id: message.id, result: {} })));
+    };
+    const acquired = h.control.acquire({
+      publicPort: h.port,
+      sessionId: "cx-real-target",
+      daemonInstanceId: "daemon-real-target"
+    });
+    const ws = await openWebSocket(
+      `ws://127.0.0.1:${h.port}/devtools/browser/gateway?ticket=${encodeURIComponent(acquired.ticket)}`
+    );
+
+    const figmaAttached = nextMessage(ws);
+    ws.send(JSON.stringify({
+      id: 1,
+      method: "Target.attachToTarget",
+      params: { targetId: "page-figma", flatten: true }
+    }));
+    await figmaAttached;
+
+    const autoAttachMessages = collectMessages(ws, 2);
+    ws.send(JSON.stringify({
+      id: 2,
+      method: "Target.setAutoAttach",
+      params: { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }
+    }));
+    await autoAttachMessages;
+
+    const passiveSetup = nextMessage(ws);
+    ws.send(JSON.stringify({
+      id: 3,
+      method: "Runtime.enable",
+      params: {},
+      sessionId: "iproyal-flat"
+    }));
+    await passiveSetup;
+    assert.equal((await h.gateway.getAgentTarget(h.port, "cx-real-target")).targetId, "page-figma");
+
+    const inputCommand = nextMessage(ws);
+    ws.send(JSON.stringify({
+      id: 4,
+      method: "Input.dispatchMouseEvent",
+      params: { type: "mousePressed", x: 10, y: 20, button: "left", clickCount: 1 },
+      sessionId: "iproyal-flat"
+    }));
+    await inputCommand;
+    const inputMessages = h.backend.sent.map(JSON.parse);
+    const mousePressedIndex = inputMessages.findIndex(
+      (message) => message.method === "Input.dispatchMouseEvent" && message.params?.type === "mousePressed"
+    );
+    const avoidance = inputMessages[mousePressedIndex - 1];
+    assert.equal(avoidance.method, "Runtime.evaluate", "HUD avoidance must be queued immediately before the click");
+    assert.equal(avoidance.sessionId, "iproyal-flat");
+    assert.match(avoidance.params.expression, /document\.elementsFromPoint/);
+    assert.match(avoidance.params.expression, /__pp-agent-overlay-avoid/);
+    assert.deepEqual(await h.gateway.getAgentTarget(h.port, "cx-real-target"), {
+      targetId: "page-iproyal",
+      title: "完成订单 - IPRoyal",
+      url: "https://iproyal.com/order"
+    });
+
+    assert.equal((await h.gateway.activateAgentTarget(
+      h.port,
+      "cx-real-target",
+      h.control.getProfile(h.port).controlGeneration
+    )).targetId, "page-iproyal");
+    const activation = h.backend.sent
+      .map(JSON.parse)
+      .filter((message) => message.method === "Target.activateTarget")
+      .at(-1);
+    assert.equal(activation.params.targetId, "page-iproyal");
+
+    ws.close();
   } finally {
     await h.cleanup();
   }

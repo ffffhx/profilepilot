@@ -11,6 +11,7 @@ const {
   agentControlNoticePaths,
   areAllAgentControlClientsPaused,
   compatibilityCdpPorts,
+  gatewayOverlayControl,
   gatewayManagedPortSet,
   makeAgentControlNotice,
   pendingUserActionFromControlNoticeSync,
@@ -29,6 +30,7 @@ function runtimeProfile(overrides) {
     fixedCdpPort: null,
     clonedFromProfileId: null,
     projectTag: null,
+    agentAccessDisabled: false,
     lastLaunchedAt: null,
     ...overrides
   };
@@ -103,14 +105,32 @@ test("Gateway authority excludes every managed port from legacy scans while OS r
 test("ProfileManager publishes stopped fixed-port Profiles for agent-browser auto-start", () => {
   const profiles = agentBrowserRuntimeProfilesFromPublicProfiles([
     runtimeProfile({ id: "isolated:live", name: "Live", running: true, cdpPort: 9224, fixedCdpPort: 9224 }),
-    runtimeProfile({ id: "isolated:stopped", name: "Stopped", running: false, cdpPort: null, fixedCdpPort: 9225 }),
+    runtimeProfile({
+      id: "isolated:stopped",
+      name: "Stopped",
+      running: false,
+      cdpPort: null,
+      fixedCdpPort: 9225,
+      agentAccessDisabled: true
+    }),
     runtimeProfile({ id: "isolated:plain-running", name: "Plain", running: true, cdpPort: null, fixedCdpPort: 9226 }),
     runtimeProfile({ id: "native:Default", name: "System", source: "native", running: false, cdpPort: null, fixedCdpPort: null })
   ]);
 
   assert.deepEqual(
-    profiles.map((profile) => ({ port: profile.cdpPort, running: profile.running })),
-    [{ port: 9224, running: true }, { port: 9225, running: false }]
+    profiles.map((profile) => ({
+      port: profile.cdpPort,
+      running: profile.running,
+      agentAccessDisabled: profile.agentAccessDisabled
+    })),
+    [
+      { port: 9224, running: true, agentAccessDisabled: false },
+      {
+        port: 9225,
+        running: false,
+        agentAccessDisabled: true
+      }
+    ]
   );
 });
 
@@ -330,6 +350,27 @@ test("ProfileManager orders Gateway revocation between durable notice and user u
   ]);
 });
 
+test("ProfileManager returns Gateway control even when agent-browser has no active waiter", async () => {
+  const manager = createTakeoverHarness([
+    { pid: 101, label: "agent-browser", driverKind: "agent-browser", session: "cx-gateway" }
+  ]);
+  manager.controlGatewaySession = async (_session, command) => {
+    manager.operations.push(`gateway:${command}`);
+    return true;
+  };
+
+  const result = await manager.resumeAgentConnections("profile-1", { session: "cx-gateway" });
+
+  assert.equal(result.targetCount, 1);
+  assert.equal(result.successCount, 1);
+  assert.deepEqual(result.failures, []);
+  assert.deepEqual(manager.operations, [
+    "gateway:return",
+    "lease-delegated:cx-gateway:false",
+    "notice:101:user_return"
+  ]);
+});
+
 test("ProfileManager builds ego-style agent control notices with stable codes", () => {
   const target = { profileId: "profile-1", profileName: "Profile One" };
   const client = {
@@ -429,6 +470,48 @@ test("ProfileManager distinguishes a live waiting Agent from an offline takeover
     Date.parse("2026-07-10T08:01:00.000Z")
   );
   assert.deepEqual(waiting, { paused: true, agentOffline: false, controlSince });
+  await rm(home, { recursive: true, force: true });
+});
+
+test("ProfileManager marks a parked Gateway Agent offline only after waiter grace expires", async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), "profilepilot-gateway-waiter-"));
+  const controlSince = "2026-07-10T08:00:00.000Z";
+  const control = {
+    publicPort: 9224,
+    ownership: "user",
+    sessionStatus: "active",
+    agentHealth: "waiting",
+    driverState: "parked",
+    reconnectAttempt: null,
+    reconnectDeadlineAt: null,
+    connectionActive: false,
+    ownerSessionId: "cx-gateway-waiter",
+    daemonInstanceId: "gateway-1",
+    daemonPid: process.pid,
+    driverKind: "agent-browser",
+    driverLabel: "agent-browser",
+    agent: "Codex",
+    project: "profilepilot",
+    branch: "main",
+    agentTarget: null,
+    pendingUserAction: null,
+    updatedAt: controlSince
+  };
+
+  assert.deepEqual(
+    gatewayOverlayControl(control, home, Date.parse("2026-07-10T08:00:20.000Z")),
+    { paused: true, agentOffline: false, controlSince, pendingUserAction: undefined }
+  );
+  assert.deepEqual(
+    gatewayOverlayControl(control, home, Date.parse("2026-07-10T08:01:00.000Z")),
+    { paused: true, agentOffline: true, controlSince, pendingUserAction: undefined }
+  );
+
+  writeAgentBrowserControlWaitStateSync(control.ownerSessionId, process.pid, home);
+  assert.deepEqual(
+    gatewayOverlayControl(control, home, Date.parse("2026-07-10T08:01:00.000Z")),
+    { paused: true, agentOffline: false, controlSince, pendingUserAction: undefined }
+  );
   await rm(home, { recursive: true, force: true });
 });
 
@@ -621,6 +704,7 @@ function createTakeoverHarness(clients) {
     manager.operations.push(`wait-settled:${session}`);
     return true;
   };
+  manager.hasActiveAgentBrowserControlWaiter = () => true;
   manager.isGatewaySessionManaged = async () => false;
   manager.controlGatewaySession = async () => false;
   return manager;

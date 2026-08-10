@@ -1,4 +1,4 @@
-import { AccountSyncDiffResult, AccountSyncResult, AgentTakeoverEvent, AppState, BusyState, CdpLiveView, ExtensionMigrationDiffResult, ExtensionMigrationResult, ExtensionScanResult, GlobalInstructionFileId, GlobalInstructionsSnapshot, ModalState, ToastKind } from "./types";
+import { AccountSyncDiffResult, AccountSyncResult, AgentTakeoverEvent, AppState, BifrostSnapshot, BusyState, CdpLiveView, ExtensionMigrationDiffResult, ExtensionMigrationResult, ExtensionScanResult, GlobalInstructionFileId, GlobalInstructionsSnapshot, ModalState, ProfileReadinessReceipt, ToastKind } from "./types";
 
 export const root = document.querySelector<HTMLDivElement>("#app");
 
@@ -72,6 +72,12 @@ export interface RendererState {
   activeGlobalInstructionId: GlobalInstructionFileId;
   editingGlobalInstructionId: GlobalInstructionFileId | null;
   globalInstructionDraft: string;
+  globalInstructionBaseRevision: string;
+  globalInstructionOriginal: string;
+  profileReadiness: Record<string, ProfileReadinessReceipt>;
+  profileReadinessLoading: Record<string, boolean>;
+  // 最近一次 Bifrost 快照（面板可见时后台轮询刷新），供分流徽标/详情算三态健康度。
+  bifrostSnapshot: BifrostSnapshot | null;
   // profileId -> 实时观测缓存；按需拉取，主轮询全量重渲染时从这里恢复，避免截图闪烁。
   liveView: Record<string, LiveViewEntry>;
   liveViewShowScreenshot: boolean;
@@ -133,6 +139,11 @@ export const store: RendererState = {
   activeGlobalInstructionId: "codex-agents",
   editingGlobalInstructionId: null,
   globalInstructionDraft: "",
+  globalInstructionBaseRevision: "",
+  globalInstructionOriginal: "",
+  profileReadiness: {},
+  profileReadinessLoading: {},
+  bifrostSnapshot: null,
   liveView: {},
   liveViewShowScreenshot: true,
   liveActiveTab: {}

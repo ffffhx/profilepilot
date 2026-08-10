@@ -10,7 +10,12 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { AgentBrowserProfileOccupancy, StoredProfile } from "../shared/types";
+import type {
+  AgentBrowserProfileOccupancy,
+  ProfileBifrostProxyConfig,
+  Registry,
+  StoredProfile
+} from "../shared/types";
 
 const SAFE_SESSION_RE = /^[A-Za-z0-9._-]+$/;
 const LEASE_VERSION = 1;
@@ -36,6 +41,7 @@ export interface AgentBrowserProfileLease {
   session: string;
   agent?: string;
   project?: string;
+  branch?: string;
   command?: string;
   holderPid: number;
   daemonPid?: number;
@@ -55,6 +61,7 @@ export interface AcquireAgentBrowserProfileLeaseInput {
   profileName?: string;
   agent?: string;
   project?: string;
+  branch?: string;
   command?: string;
 }
 
@@ -65,6 +72,7 @@ export interface AgentBrowserRuntimeProfile {
   source?: string;
   clonedFromProfileId?: string;
   projectTag?: string;
+  agentAccessDisabled?: boolean;
   lastLaunchedAt?: string;
   // false 表示已登记但尚未启动；推荐命令会交给 Gateway 自动启动。
   running: boolean;
@@ -74,6 +82,13 @@ export interface AgentBrowserProfileCandidate extends AgentBrowserRuntimeProfile
   alreadyOwnedBySession: boolean;
 }
 
+export interface AgentBrowserProfileCatalogEntry extends AgentBrowserRuntimeProfile {
+  available: boolean;
+  alreadyOwnedBySession: boolean;
+  unavailableReason: "agent_access_disabled" | "occupied" | null;
+  occupancy: AgentBrowserProfileOccupancy | null;
+}
+
 export interface ConfiguredAgentBrowserProfile {
   profileId: string;
   profileName: string;
@@ -81,6 +96,15 @@ export interface ConfiguredAgentBrowserProfile {
   profile: StoredProfile;
   registryPath: string;
   userDataDir: string;
+}
+
+export interface ConfiguredAgentBrowserBifrostUpdate {
+  profileId: string;
+  profileName: string;
+  cdpPort: number;
+  registryPath: string;
+  previous: ProfileBifrostProxyConfig | null;
+  current: ProfileBifrostProxyConfig | null;
 }
 
 interface AgentBrowserRuntimeProfileSnapshot {
@@ -164,6 +188,22 @@ export function findAvailableAgentBrowserProfileCandidatesSync(
   homeDir = os.homedir(),
   now = Date.now()
 ): AgentBrowserProfileCandidate[] {
+  return listAgentBrowserProfileCatalogSync(input, homeDir, now)
+    .filter((profile) => profile.available)
+    .map(({ available: _available, unavailableReason: _reason, occupancy: _occupancy, ...profile }) => profile)
+    // CDP 端口就是用户定义的 Profile 槽位顺序。冲突后严格从小到大推荐，
+    // 例如 9223 被占用时依次尝试 9224、9225，而不让副本组/项目标签打乱顺序。
+    .sort((a, b) => a.cdpPort - b.cdpPort);
+}
+
+export function listAgentBrowserProfileCatalogSync(
+  input: {
+    excludedPort?: number;
+    requestedSession?: string;
+  } = {},
+  homeDir = os.homedir(),
+  now = Date.now()
+): AgentBrowserProfileCatalogEntry[] {
   const snapshot = readAgentBrowserRuntimeProfilesSync(homeDir);
   const updatedAt = snapshot ? Date.parse(snapshot.updatedAt) : Number.NaN;
   if (!snapshot || !Number.isFinite(updatedAt) || now - updatedAt > RUNTIME_SNAPSHOT_MAX_AGE_MS) {
@@ -172,17 +212,22 @@ export function findAvailableAgentBrowserProfileCandidatesSync(
   const requestedSession = safeSessionName(input.requestedSession);
   return snapshot.profiles
     .filter((profile) => profile.cdpPort !== input.excludedPort)
-    .map((profile): AgentBrowserProfileCandidate | null => {
+    .map((profile): AgentBrowserProfileCatalogEntry => {
       const occupancy = readActiveAgentBrowserProfileOccupancySync(profile.cdpPort, homeDir, now);
       const alreadyOwnedBySession = Boolean(occupancy && requestedSession && occupancy.session === requestedSession);
-      if (occupancy && !alreadyOwnedBySession) {
-        return null;
-      }
-      return { ...profile, alreadyOwnedBySession };
+      const unavailableReason = profile.agentAccessDisabled
+        ? "agent_access_disabled" as const
+        : occupancy && !alreadyOwnedBySession
+          ? "occupied" as const
+          : null;
+      return {
+        ...profile,
+        available: unavailableReason === null,
+        alreadyOwnedBySession,
+        unavailableReason,
+        occupancy
+      };
     })
-    .filter((profile): profile is AgentBrowserProfileCandidate => Boolean(profile))
-    // CDP 端口就是用户定义的 Profile 槽位顺序。冲突后严格从小到大推荐，
-    // 例如 9223 被占用时依次尝试 9224、9225，而不让副本组/项目标签打乱顺序。
     .sort((a, b) => a.cdpPort - b.cdpPort);
 }
 
@@ -252,6 +297,10 @@ export function acquireAgentBrowserProfileLeaseSync(
     const project = nonEmptyString(input.project) || (sameOwner ? existing?.project : undefined);
     if (project) {
       lease.project = project;
+    }
+    const branch = nonEmptyString(input.branch) || (sameOwner ? existing?.branch : undefined);
+    if (branch) {
+      lease.branch = branch;
     }
     const command = nonEmptyString(input.command) || (sameOwner ? existing?.command : undefined);
     if (command) {
@@ -482,7 +531,7 @@ export function isAgentBrowserProfileLeaseActive(
     // Gateway 不可用时保持保守：仍视为 active，避免仅凭缺文件抢走用户正在操作的 Profile。
     const gatewayOwnership = readGatewayActiveOwnershipSync(lease.cdpPort, homeDir);
     if (gatewayOwnership !== undefined) {
-      return gatewayOwnership !== null;
+      return gatewayOwnership?.ownerSessionId === lease.session;
     }
     return true;
   }
@@ -518,6 +567,7 @@ function readGatewayActiveOwnershipSync(
         publicPort?: unknown;
         ownerSessionId?: unknown;
         sessionStatus?: unknown;
+        chromePid?: unknown;
       }>;
     };
     if (parsed.version !== GATEWAY_STATE_VERSION || !Array.isArray(parsed.profiles)) {
@@ -527,7 +577,8 @@ function readGatewayActiveOwnershipSync(
       (profile) =>
         Number(profile.publicPort) === cdpPort &&
         profile.sessionStatus === "active" &&
-        safeSessionName(typeof profile.ownerSessionId === "string" ? profile.ownerSessionId : undefined) !== undefined
+        safeSessionName(typeof profile.ownerSessionId === "string" ? profile.ownerSessionId : undefined) !== undefined &&
+        gatewayChromeRouteMayStillBeLive(profile.chromePid)
     );
     const ownerSessionId = active
       ? safeSessionName(typeof active.ownerSessionId === "string" ? active.ownerSessionId : undefined)
@@ -536,6 +587,13 @@ function readGatewayActiveOwnershipSync(
   } catch {
     return undefined;
   }
+}
+
+function gatewayChromeRouteMayStillBeLive(chromePidInput: unknown): boolean {
+  const chromePid = normalizePid(Number(chromePidInput));
+  // 兼容尚未写入 chromePid 的旧状态：缺字段时保持保守，不凭空抢占用户控制权。
+  // 一旦 Gateway 明确记录过 Chrome PID，该进程已经退出就说明实时 pipe 路由不可能仍存在。
+  return chromePid ? isProcessAlive(chromePid) : true;
 }
 
 export function resolveAgentBrowserProfileTargetSync(
@@ -586,6 +644,99 @@ export function findConfiguredAgentBrowserProfileByPortSync(
   return null;
 }
 
+export function assertConfiguredAgentAccessAllowedSync(
+  cdpPortInput: number,
+  env: NodeJS.ProcessEnv = process.env,
+  homeDir = os.homedir()
+): ConfiguredAgentBrowserProfile | null {
+  const configured = findConfiguredAgentBrowserProfileByPortSync(cdpPortInput, env, homeDir);
+  if (configured?.profile.agentAccessDisabled === true) {
+    throw codedError(
+      "PROFILE_AGENT_ACCESS_DISABLED",
+      `Profile“${configured.profileName}”已禁止 Agent 连接`
+    );
+  }
+  return configured;
+}
+
+export function setConfiguredAgentBrowserProfileBifrostProxySync(
+  cdpPortInput: number,
+  configInput: ProfileBifrostProxyConfig | null,
+  env: NodeJS.ProcessEnv = process.env,
+  homeDir = os.homedir()
+): ConfiguredAgentBrowserBifrostUpdate {
+  const configured = findConfiguredAgentBrowserProfileByPortSync(cdpPortInput, env, homeDir);
+  if (!configured) {
+    throw codedError(
+      "GATEWAY_PROFILE_NOT_CONFIGURED",
+      `ProfilePilot 没有找到绑定到端口 ${cdpPortInput} 的 Profile`
+    );
+  }
+
+  const parsed = JSON.parse(readFileSync(configured.registryPath, "utf8")) as Registry;
+  const profile = parsed.profiles?.find((candidate) => candidate.id === configured.profile.id);
+  if (!profile) {
+    throw codedError("GATEWAY_PROFILE_NOT_CONFIGURED", `Profile ${configured.profileName} 已不在注册表中`);
+  }
+  const config: ProfileBifrostProxyConfig | null = configInput
+    ? {
+        listenerPort: configInput.listenerPort,
+        rules: [...configInput.rules],
+        groupRules: [...configInput.groupRules],
+        ...(configInput.disabledRules?.length ? { disabledRules: [...configInput.disabledRules] } : {}),
+        ...(configInput.disabledGroupRules?.length
+          ? { disabledGroupRules: [...configInput.disabledGroupRules] }
+          : {})
+      }
+    : null;
+  if (config) {
+    const listenerOwner = parsed.profiles.find(
+      (candidate) => candidate.id !== profile.id && candidate.bifrostProxy?.listenerPort === config.listenerPort
+    );
+    if (listenerOwner) {
+      throw codedError(
+        "BIFROST_PORT_IN_USE",
+        `Bifrost 入口端口 ${config.listenerPort} 已绑定给 Profile“${listenerOwner.name}”`
+      );
+    }
+    const cdpOwner = parsed.profiles.find((candidate) => candidate.fixedCdpPort === config.listenerPort);
+    if (cdpOwner) {
+      throw codedError(
+        "BIFROST_PORT_IN_USE",
+        `端口 ${config.listenerPort} 已作为 Profile“${cdpOwner.name}”的固定 CDP 端口`
+      );
+    }
+  }
+
+  const previous = profile.bifrostProxy
+    ? {
+        listenerPort: profile.bifrostProxy.listenerPort,
+        rules: [...profile.bifrostProxy.rules],
+        groupRules: [...profile.bifrostProxy.groupRules],
+        ...(profile.bifrostProxy.disabledRules?.length
+          ? { disabledRules: [...profile.bifrostProxy.disabledRules] }
+          : {}),
+        ...(profile.bifrostProxy.disabledGroupRules?.length
+          ? { disabledGroupRules: [...profile.bifrostProxy.disabledGroupRules] }
+          : {})
+      }
+    : null;
+  profile.bifrostProxy = config;
+  // 维持 bifrostProxy / upstreamProxy 互斥：CLI 配置 Bifrost 分流时清掉可能存在的直连上游。
+  if (config) {
+    profile.upstreamProxy = null;
+  }
+  writeJsonFileAtomicSync(configured.registryPath, parsed);
+  return {
+    profileId: configured.profile.id,
+    profileName: configured.profileName,
+    cdpPort: configured.cdpPort,
+    registryPath: configured.registryPath,
+    previous,
+    current: config
+  };
+}
+
 function readAgentBrowserProfileLeaseFileSync(filePath: string): AgentBrowserProfileLease | null {
   try {
     return normalizeLease(JSON.parse(readFileSync(filePath, "utf8")) as Partial<AgentBrowserProfileLease>);
@@ -624,6 +775,8 @@ function normalizeLease(input: Partial<AgentBrowserProfileLease>): AgentBrowserP
   if (agent) lease.agent = agent;
   const project = nonEmptyString(input.project);
   if (project) lease.project = project;
+  const branch = nonEmptyString(input.branch);
+  if (branch) lease.branch = branch;
   const command = nonEmptyString(input.command);
   if (command) lease.command = command;
   return lease;
@@ -676,6 +829,12 @@ function writeJsonFileAtomicSync(filePath: string, value: unknown): void {
   }
 }
 
+function codedError(code: string, message: string): Error & { code: string } {
+  const error = new Error(message) as Error & { code: string };
+  error.code = code;
+  return error;
+}
+
 function profileRegistryCandidates(env: NodeJS.ProcessEnv, homeDir: string): string[] {
   const roots: string[] = [];
   if (nonEmptyString(env.CPM_DATA_DIR)) {
@@ -724,6 +883,7 @@ function normalizeRuntimeProfiles(input: unknown[]): AgentBrowserRuntimeProfile[
     if (clonedFromProfileId) profile.clonedFromProfileId = clonedFromProfileId;
     const projectTag = nonEmptyString(candidate.projectTag);
     if (projectTag) profile.projectTag = projectTag;
+    if (candidate.agentAccessDisabled === true) profile.agentAccessDisabled = true;
     const lastLaunchedAt = nonEmptyString(candidate.lastLaunchedAt);
     if (lastLaunchedAt) profile.lastLaunchedAt = lastLaunchedAt;
     profiles.push(profile);

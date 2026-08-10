@@ -9,15 +9,17 @@ import {
 import os from "node:os";
 import path from "node:path";
 import {
-  BROWSER_GATEWAY_PROTOCOL_VERSION,
   clearBrowserGatewayDaemonIdentity,
-  ensureBrowserGatewayDaemon,
   readOrCreateBrowserGatewayDaemonIdentity,
   requestBrowserGateway,
-  type GatewayControlRequest,
-  type GatewayControlResponse
 } from "./browser-gateway-client";
-import { ensureConfiguredGatewayProfileRunning } from "./agent-browser-wrapper";
+import { repositoryIdentityFromCwd } from "./browser-driver-context";
+import {
+  acquireGatewayDriverEndpoint,
+  type GatewayDriverDaemonEnsurer,
+  type GatewayDriverProfileEnsurer,
+  type GatewayDriverRequester
+} from "./browser-gateway-driver-runtime";
 
 const SAFE_SESSION_RE = /^[A-Za-z0-9._:-]{1,240}$/;
 const DEFAULT_NPX_PACKAGE = "chrome-devtools-mcp@latest";
@@ -45,6 +47,7 @@ export interface ChromeDevtoolsMcpEndpointContext {
   daemonPid: number;
   agent?: string;
   project?: string;
+  branch?: string;
 }
 
 /**
@@ -60,19 +63,6 @@ export interface ChromeDevtoolsMcpSpawnResult {
   signal: NodeJS.Signals | null;
   error?: Error & { code?: string };
 }
-
-type GatewayRequester = (
-  request: GatewayControlRequest,
-  options?: { homeDir?: string; timeoutMs?: number }
-) => Promise<GatewayControlResponse>;
-
-type GatewayDaemonEnsurer = (options: { homeDir: string }) => Promise<GatewayControlResponse>;
-type GatewayProfileEnsurer = (
-  publicPort: number,
-  status: GatewayControlResponse,
-  env: NodeJS.ProcessEnv,
-  homeDir: string
-) => Promise<GatewayControlResponse>;
 
 export function parseChromeDevtoolsMcpProfilePilotConfig(
   args: string[],
@@ -221,76 +211,36 @@ export function createGatewayChromeDevtoolsMcpEndpointProvider(
     homeDir?: string;
     timeoutMs?: number;
     env?: NodeJS.ProcessEnv;
-    request?: GatewayRequester;
-    ensureGatewayDaemon?: GatewayDaemonEnsurer;
-    ensureProfileRunning?: GatewayProfileEnsurer;
+    request?: GatewayDriverRequester;
+    ensureGatewayDaemon?: GatewayDriverDaemonEnsurer;
+    ensureProfileRunning?: GatewayDriverProfileEnsurer;
   } = {}
 ): ChromeDevtoolsMcpEndpointProvider {
   const homeDir = options.homeDir || os.homedir();
   const env = options.env || process.env;
-  const request = options.request || requestBrowserGateway;
-  const ensureGatewayDaemon = options.ensureGatewayDaemon || ensureBrowserGatewayDaemon;
-  const ensureProfileRunning = options.ensureProfileRunning || ensureConfiguredGatewayProfileRunning;
   return {
     async getWebSocketUrl(context): Promise<string> {
-      let status: GatewayControlResponse;
-      try {
-        status = await request({ action: "status" }, { homeDir, timeoutMs: 800 });
-      } catch {
-        await ensureGatewayDaemon({ homeDir });
-        status = await request({ action: "status" }, { homeDir, timeoutMs: 800 });
-      }
-      status = await requirePersistentDriverGatewayProtocol(
-        status,
-        homeDir,
-        request,
-        ensureGatewayDaemon
-      );
-      await ensureProfileRunning(context.publicPort, status, env, homeDir);
-
-      // The current Gateway protocol persists this identity so UI, takeover,
-      // completion, and cleanup all operate on the verified driver type.
-      const acquireRequest = {
-        action: "acquire" as const,
+      const acquired = await acquireGatewayDriverEndpoint({
         publicPort: context.publicPort,
         sessionId: context.sessionId,
         daemonInstanceId: context.daemonInstanceId,
         daemonPid: context.daemonPid,
         agent: context.agent,
         project: context.project,
+        branch: context.branch,
         driverKind: "chrome-devtools-mcp",
         driverLabel: "Chrome DevTools MCP"
-      } as GatewayControlRequest & { driverKind: "chrome-devtools-mcp"; driverLabel: "Chrome DevTools MCP" };
-      const response = await request(acquireRequest, {
+      }, {
         homeDir,
-        timeoutMs: options.timeoutMs || 3_000
+        env,
+        timeoutMs: options.timeoutMs,
+        request: options.request,
+        ensureGatewayDaemon: options.ensureGatewayDaemon,
+        ensureProfileRunning: options.ensureProfileRunning
       });
-      const webSocketUrl = typeof response.webSocketUrl === "string" ? response.webSocketUrl.trim() : "";
-      if (!webSocketUrl) {
-        throw wrapperError("GATEWAY_INVALID_RESPONSE", "Gateway 没有返回 WebSocket Ticket");
-      }
-      return webSocketUrl;
+      return acquired.webSocketUrl;
     }
   };
-}
-
-async function requirePersistentDriverGatewayProtocol(
-  status: GatewayControlResponse,
-  homeDir: string,
-  request: GatewayRequester,
-  ensureGatewayDaemon: GatewayDaemonEnsurer
-): Promise<GatewayControlResponse> {
-  const current = Number(status.protocolVersion);
-  if (!Number.isFinite(current) || current === BROWSER_GATEWAY_PROTOCOL_VERSION) return status;
-  const upgraded = await ensureGatewayDaemon({ homeDir });
-  const actual = Number(upgraded.protocolVersion);
-  if (actual !== BROWSER_GATEWAY_PROTOCOL_VERSION) {
-    throw wrapperError(
-      "GATEWAY_PROTOCOL_INCOMPATIBLE",
-      `当前 Gateway 协议为 v${current}，Chrome DevTools MCP 持久交接需要 v${BROWSER_GATEWAY_PROTOCOL_VERSION}；请先结束旧 Gateway 中仍在运行的 Profile，再重试`
-    );
-  }
-  return request({ action: "status" }, { homeDir, timeoutMs: 800 });
 }
 
 export async function prepareChromeDevtoolsMcpLaunchArgs(
@@ -303,13 +253,15 @@ export async function prepareChromeDevtoolsMcpLaunchArgs(
   const sessionId = config.sessionId as string;
   const homeDir = env.HOME || os.homedir();
   const provider = endpointProvider || createGatewayChromeDevtoolsMcpEndpointProvider({ homeDir, env });
+  const repository = repositoryIdentityFromCwd(nonEmpty(env.PWD));
   const webSocketUrl = await provider.getWebSocketUrl({
     publicPort,
     sessionId,
     daemonInstanceId: readOrCreateBrowserGatewayDaemonIdentity(sessionId, homeDir),
     daemonPid: process.pid,
     agent: inferAgentFromSession(sessionId),
-    project: projectFromEnv(env)
+    project: repository.project,
+    ...(repository.branch ? { branch: repository.branch } : {})
   });
   return rewriteChromeDevtoolsMcpWebSocketArgs(config.passthroughArgs, webSocketUrl);
 }
@@ -351,9 +303,9 @@ export async function runChromeDevtoolsMcpWrapper(
   dependencies: {
     endpointProvider?: ChromeDevtoolsMcpEndpointProvider;
     command?: ChromeDevtoolsMcpCommand;
-    request?: GatewayRequester;
-    ensureGatewayDaemon?: GatewayDaemonEnsurer;
-    ensureProfileRunning?: GatewayProfileEnsurer;
+    request?: GatewayDriverRequester;
+    ensureGatewayDaemon?: GatewayDriverDaemonEnsurer;
+    ensureProfileRunning?: GatewayDriverProfileEnsurer;
   } = {}
 ): Promise<number> {
   let config: ChromeDevtoolsMcpProfilePilotConfig;
@@ -536,7 +488,7 @@ function normalizeAgentSession(value: string, prefix: "cx" | "cc"): string {
 async function releaseChromeDevtoolsMcpGatewaySession(
   sessionId: string,
   homeDir: string,
-  request: GatewayRequester
+  request: GatewayDriverRequester
 ): Promise<void> {
   try {
     await request({
@@ -547,11 +499,6 @@ async function releaseChromeDevtoolsMcpGatewaySession(
   } finally {
     clearBrowserGatewayDaemonIdentity(sessionId, homeDir);
   }
-}
-
-function projectFromEnv(env: NodeJS.ProcessEnv): string | undefined {
-  const cwd = nonEmpty(env.PWD);
-  return cwd ? path.basename(cwd) || cwd : undefined;
 }
 
 function signalExitCode(signal: NodeJS.Signals | null): number {

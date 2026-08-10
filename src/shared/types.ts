@@ -6,12 +6,112 @@ export interface StoredProfile {
   lastLaunchedAt: string | null;
   lastCdpPort?: number | null;
   fixedCdpPort?: number | null;
+  // 独立 Profile 的 Bifrost 专属入口。启动时自动恢复临时端口绑定，
+  // 再通过 Chrome --proxy-server 把该 Profile 的流量送入这套规则视图。
+  bifrostProxy?: ProfileBifrostProxyConfig | null;
+  // 独立 Profile 的“直连上游代理”入口（如 Clash Verge 的某个 mixed listener）。
+  // 与 bifrostProxy 互斥：一个 Profile 要么走 Bifrost 规则视图，要么直连某个上游代理。
+  upstreamProxy?: ProfileUpstreamProxyConfig | null;
   // 该独立 Profile 是从哪个源 Profile 克隆出来的（存源的 public id，可为 native:/isolated:）。
   // 用来定义“副本组”：批量刷新登录态、重置、回收都按这个字段聚合。
   clonedFromProfileId?: string | null;
   // 纯展示用的项目标签，标记这个副本当前在干哪个项目的活。
   projectTag?: string | null;
+  // Profile 级 Agent 策略：禁用后 Gateway 拒绝任何新 Agent Session，
+  // 运行时候选清单仍保留该 Profile，但标记为不可选。
+  agentAccessDisabled?: boolean;
   migratedExtensions?: StoredMigratedExtension[];
+}
+
+export interface ProfileBifrostProxyConfig {
+  listenerPort: number;
+  // rules / groupRules 是这个 Profile 管理的完整规则集合；停用项继续保留，
+  // 这样可以在专属入口 Tooltip 中原地重新启用。
+  rules: string[];
+  groupRules: string[];
+  disabledRules?: string[];
+  disabledGroupRules?: string[];
+}
+
+// 直连上游代理配置：把该 Profile 的流量整体交给一个已有代理入口，不经过 Bifrost 规则视图。
+export interface ProfileUpstreamProxyConfig {
+  // 规范化后的上游地址，形如 "http://127.0.0.1:7897" / "socks5://127.0.0.1:7891"。
+  server: string;
+  // 可选的 Chrome --proxy-bypass-list，逗号分隔（如 "localhost,127.0.0.1,*.local"）。
+  bypassList?: string | null;
+}
+
+// 面向渲染层的统一代理配置视图（union）。底层持久化仍是 bifrostProxy / upstreamProxy 两个互斥字段，
+// 但 UI、IPC 用这个判别式联合来表达“这个 Profile 当前是哪种分流模式”。
+export type ProfileProxyConfig =
+  | ({ kind: "bifrost" } & ProfileBifrostProxyConfig)
+  | ({ kind: "upstream" } & ProfileUpstreamProxyConfig);
+
+// Bifrost `status --format json` 里单个临时入口端口的绑定信息；
+// name 归属（profilepilot:<id>）用于渲染层判定该 Profile 分流入口的三态健康度。
+export interface BifrostPortBindingInfo {
+  port: number;
+  host: string | null;
+  name: string | null;
+  status: string | null;
+}
+
+export type BifrostRuleDestinationKind = "local" | "ppe" | "boe" | "mixed" | "other";
+
+export interface BifrostRuleDestination {
+  kind: BifrostRuleDestinationKind;
+  label: string;
+  details: string[];
+}
+
+export interface BifrostActiveRuleInfo {
+  name: string;
+  ruleCount: number;
+}
+
+export interface SystemProxyRoute {
+  protocol: "http" | "https";
+  kind: "direct" | "http" | "https" | "socks4" | "socks5" | "quic" | "unknown";
+  endpoint: string | null;
+}
+
+export interface SystemProxySnapshot {
+  mode: "direct" | "proxy" | "mixed" | "unknown";
+  routes: SystemProxyRoute[];
+}
+
+export interface BifrostSnapshot {
+  installed: boolean;
+  running: boolean;
+  version: string | null;
+  binaryPath: string | null;
+  mainPort: number | null;
+  ports: BifrostPortBindingInfo[];
+  localRules: string[];
+  error: string | null;
+  // 上游代理入口探活结果：key 是规范化后的上游地址（scheme://host:port），value 是 TCP 可达性。
+  // 直连上游代理入口（upstream 模式）的 TCP 可达性：key 是规范化后的地址（scheme://host:port）。
+  // 渲染层据此给 Clash 直连徽标着色。
+  upstreamHealth?: Record<string, boolean>;
+  // Profile 引用规则的语义化去向。key 使用 local:<name> / group:<group-id>/<name>，
+  // UI 据此直接展示“本地 :3001 / PPE / BOE”，而不是让用户从规则名猜。
+  ruleDestinations?: Record<string, BifrostRuleDestination>;
+  // Bifrost 主入口当前启用的规则视图及其聚合去向；系统代理指向 mainPort 时直接展示。
+  mainRules?: BifrostActiveRuleInfo[];
+  mainRuleDestination?: BifrostRuleDestination | null;
+  // Chromium 按系统设置解析出的实际 HTTP / HTTPS 代理路由。
+  systemProxy?: SystemProxySnapshot;
+}
+
+export interface LaunchProfileOptions {
+  // Bifrost 不可用时的直连逃生口：本次启动跳过代理注入，不修改已保存的分流配置。
+  bypassProxy?: boolean;
+  // Bifrost 未运行时由 ProfilePilot 启动 daemon，再恢复专属入口并继续启动。
+  startBifrost?: boolean;
+}
+
+export interface ProfileAgentSettings {
+  agentAccessDisabled: boolean;
 }
 
 export interface StoredMigratedExtension {
@@ -73,9 +173,14 @@ export interface CdpClientInfo {
   // agent=工具名（Codex / Claude Code），project=项目目录名，title=会话首句/标题。
   agent?: string;
   project?: string;
+  branch?: string;
   title?: string;
   // 使用方自报的命名 session（agent-browser --session <名>）；tooltip 里单独一行。
   session?: string;
+  // 跨默认 Codex home / CODEX_HOME / Orca home 归一后的稳定身份。
+  canonicalSessionId?: string;
+  sessionRepresentations?: SessionRepresentation[];
+  sessionDiagnostics?: SessionIdentityDiagnostic[];
   // 会话档案最后活动时间（ISO）＝该会话最近一次动静，用来区分活会话与残留连接。
   lastActive?: string;
   // 归属可信度说明：agent-browser 走共享 daemon 时归属是按其启动目录推测的（或推测不出），
@@ -93,6 +198,7 @@ export interface AgentBrowserSessionActivity {
   agent?: string;
   cwd?: string;
   project?: string;
+  branch?: string;
   updatedAt: string;
   expiresAt: string;
 }
@@ -100,6 +206,7 @@ export interface AgentBrowserSessionActivity {
 export interface AgentActivity {
   agent?: string;
   project?: string;
+  branch?: string;
   session?: string;
   sessionTitle?: string;
   currentAction?: string;
@@ -120,7 +227,15 @@ export interface AgentTakeoverEvent {
   at: string;
 }
 
-export type AgentControlNoticeReason = "user_takeover" | "agent_complete" | "user_stop" | "user_disconnect" | "user_return";
+export type AgentControlNoticeReason =
+  | "user_takeover"
+  | "agent_complete"
+  | "user_stop"
+  | "user_disconnect"
+  | "user_return"
+  | "driver_disconnected"
+  | "driver_reconnected"
+  | "driver_reconnect_exhausted";
 
 export interface TakeoverAgentConnectionFailure {
   pid: number;
@@ -270,6 +385,9 @@ export interface GatewayProfileControlState {
   ownership: "agent" | "user";
   sessionStatus: "active" | "stopped";
   agentHealth: "online" | "waiting" | "offline";
+  driverState: "disconnected" | "connecting" | "connected" | "reconnecting" | "parked";
+  reconnectAttempt: number | null;
+  reconnectDeadlineAt: string | null;
   connectionActive: boolean;
   ownerSessionId: string | null;
   daemonInstanceId: string | null;
@@ -278,9 +396,37 @@ export interface GatewayProfileControlState {
   driverLabel: string | null;
   agent: string | null;
   project: string | null;
+  branch: string | null;
   agentTarget: GatewayAgentTarget | null;
   pendingUserAction: string | null;
   updatedAt: string;
+}
+
+export type SessionRepresentationSource =
+  | "default-codex-home"
+  | "configured-codex-home"
+  | "orca-codex-home"
+  | "claude-home";
+
+export interface SessionRepresentation {
+  source: SessionRepresentationSource;
+  filePath: string;
+  mtimeMs: number;
+  sizeBytes: number;
+}
+
+export interface SessionIdentityDiagnostic {
+  code: "SESSION_CORE_UNAVAILABLE" | "SESSION_REPRESENTATION_NOT_FOUND";
+  severity: "warning" | "error";
+  message: string;
+}
+
+export interface CanonicalSessionIdentity {
+  canonicalSessionId: string;
+  engine: "codex" | "claude";
+  nativeSessionId: string;
+  representations: SessionRepresentation[];
+  diagnostics: SessionIdentityDiagnostic[];
 }
 
 // agent-browser wrapper 用来做候选排他的同一份租约占用状态。Gateway 当前没有
@@ -313,12 +459,16 @@ export interface PublicProfile {
   isDefault: boolean;
   deletable: boolean;
   running: boolean;
+  // 只描述目标 Chrome 进程是否是系统前台应用，不改变逻辑控制权，也不主动抢焦点。
+  windowActivation: "foreground" | "background" | "not_running" | "unknown";
   pids: number[];
   // Chromium 应用主进程 PID。macOS Input Guard 只挂这些 PID，避免误挂 renderer/helper。
   browserPids?: number[];
   cdpPort: number | null;
   cdpUrl: string | null;
   fixedCdpPort: number | null;
+  bifrostProxy: ProfileBifrostProxyConfig | null;
+  upstreamProxy: ProfileUpstreamProxyConfig | null;
   listeningPorts: number[];
   pinnedToMini: boolean;
   // 全局快捷键 ⌘⌥N 直启的槽位（1~9）；未指派为 null。可在主窗口「更多」菜单里改绑。
@@ -328,6 +478,7 @@ export interface PublicProfile {
   clonedFromName: string | null;
   cloneCount: number;
   projectTag: string | null;
+  agentAccessDisabled: boolean;
   // 正驱动这个 Profile 的 CDP 客户端（持久连接到其调试端口的外部工具）；空数组=没有工具连接。
   cdpClients: CdpClientInfo[];
   // 由 ProfilePilot Gateway 管理时的权威控制状态；普通/旧式 CDP 端口为 null。
@@ -393,6 +544,65 @@ export interface AppState {
   mainProfileOrder: string[];
   agentOverlayEnabled: boolean;
   shellIntegration: ShellIntegrationStatus;
+}
+
+export type ProfileReadinessStatus = "pass" | "fail" | "unknown" | "not_applicable";
+export type ProfileReadinessOverall = "ready" | "degraded" | "blocked";
+
+export interface ProfileReadinessExtensionRequirement {
+  id: string;
+  name?: string;
+  minVersion?: string;
+}
+
+export interface ProfileReadinessExpectation {
+  requireRunning?: boolean;
+  requireCdp?: boolean;
+  requireAgentControl?: boolean;
+  requireForeground?: boolean;
+  requireBrowserAccount?: boolean;
+  expectedLogicalPort?: number | null;
+  expectedProxyKind?: "system" | "bifrost" | "upstream";
+  requiredBifrostRules?: string[];
+  expectedTargetUrlIncludes?: string;
+  expectedLoginLabel?: string;
+  requiredExtensions?: ProfileReadinessExtensionRequirement[];
+}
+
+export interface ProfileReadinessRequest {
+  profileId: string;
+  expectation?: ProfileReadinessExpectation;
+}
+
+export interface ProfileReadinessCheck {
+  id: string;
+  code: string;
+  label: string;
+  status: ProfileReadinessStatus;
+  required: boolean;
+  expected: string | null;
+  actual: string;
+  evidence?: string | null;
+  action: string | null;
+}
+
+export interface ProfileReadinessReceipt {
+  version: 1;
+  receiptId: string;
+  generatedAt: string;
+  overall: ProfileReadinessOverall;
+  target: {
+    profileId: string;
+    profileName: string;
+    expectedLogicalPort: number | null;
+    expectedProxyKind: ProfileReadinessExpectation["expectedProxyKind"] | null;
+    expectedTargetUrl: string | null;
+    expectedLogin: string | null;
+  };
+  checks: ProfileReadinessCheck[];
+  blockerCodes: string[];
+  unknownCodes: string[];
+  sessionIdentity: CanonicalSessionIdentity | null;
 }
 
 export interface DeleteProfileResult {
@@ -664,16 +874,34 @@ export interface GlobalInstructionFile {
   sizeBytes: number;
   updatedAt: string | null;
   error: string | null;
+  revision: string;
+  sourceLabel: string;
+  diagnostics: GlobalInstructionDiagnostic[];
 }
 
 export interface GlobalInstructionsSnapshot {
   readAt: string;
   files: GlobalInstructionFile[];
+  canUndo: boolean;
+  undoAvailableIds: GlobalInstructionFileId[];
+  lastBackupAt: string | null;
 }
 
 export interface GlobalInstructionUpdateRequest {
   id: GlobalInstructionFileId;
   content: string;
+  expectedRevision?: string;
+}
+
+export interface GlobalInstructionUndoRequest {
+  id: GlobalInstructionFileId;
+  expectedRevision?: string;
+}
+
+export interface GlobalInstructionDiagnostic {
+  code: "REFERENCE_SHELL_DIVERGED" | "REFERENCE_SHELL_MISSING" | "PRIMARY_SOURCE_MISSING";
+  severity: "info" | "warning";
+  message: string;
 }
 
 export interface CdpPortSuggestion {
@@ -722,10 +950,14 @@ export interface ProfileManagerApi {
   getTakeoverHistory(): Promise<AgentTakeoverEvent[]>;
   createProfile(name: string): Promise<AppState>;
   renameProfile(id: string, name: string): Promise<AppState>;
-  launchProfile(id: string): Promise<AppState>;
-  launchProfileWithCdp(id: string, port?: number | null): Promise<AppState>;
+  launchProfile(id: string, options?: LaunchProfileOptions): Promise<AppState>;
+  launchProfileWithCdp(id: string, port?: number | null, options?: LaunchProfileOptions): Promise<AppState>;
   connectRunningSystemChrome(id: string): Promise<AppState>;
   suggestCdpPort(preferredPort?: number | null): Promise<CdpPortSuggestion>;
+  getBifrostSnapshot(): Promise<BifrostSnapshot>;
+  disableBifrostRule(ruleName: string): Promise<BifrostSnapshot>;
+  setProfileProxy(id: string, config: ProfileProxyConfig | null): Promise<AppState>;
+  setProfileAgentSettings(id: string, settings: ProfileAgentSettings): Promise<AppState>;
   setMiniProfilePinned(id: string, pinned: boolean): Promise<AppState>;
   setMiniProfileOrder(ids: string[]): Promise<AppState>;
   setMainProfileOrder(ids: string[]): Promise<AppState>;
@@ -742,7 +974,9 @@ export interface ProfileManagerApi {
   onMiniWindowPanelOpenChanged(listener: (open: boolean) => void): () => void;
   readGlobalInstructions(): Promise<GlobalInstructionsSnapshot>;
   writeGlobalInstruction(request: GlobalInstructionUpdateRequest): Promise<GlobalInstructionsSnapshot>;
+  undoGlobalInstruction(request: GlobalInstructionUndoRequest): Promise<GlobalInstructionsSnapshot>;
   ensureClaudeInstructionShell(): Promise<GlobalInstructionsSnapshot>;
+  inspectProfileReadiness(request: ProfileReadinessRequest): Promise<ProfileReadinessReceipt>;
   focusProfile(id: string): Promise<AppState>;
   isProfileFrontmost(id: string): Promise<boolean>;
   closeProfile(id: string): Promise<AppState>;
@@ -752,6 +986,10 @@ export interface ProfileManagerApi {
   disconnectCdpClient(profileId: string, pid: number): Promise<AppState>;
   // 暂停当前 AI 浏览器会话并写入接管历史；session 缺省时接管该 Profile 的全部 AI 会话。
   takeoverAgentConnections(
+    profileId: string,
+    sessionOrOptions?: string | TakeoverAgentConnectionsRequest
+  ): Promise<TakeoverAgentConnectionsResponse>;
+  resumeAgentConnections(
     profileId: string,
     sessionOrOptions?: string | TakeoverAgentConnectionsRequest
   ): Promise<TakeoverAgentConnectionsResponse>;

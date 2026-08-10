@@ -10,6 +10,7 @@ import type {
   StoredProfile
 } from "../shared/types";
 import { ProfileManagerError } from "./profile-manager-error";
+import { normalizeStoredBifrostProxy, normalizeStoredUpstreamProxy } from "./bifrost-proxy";
 
 export const execFileAsync = promisify(execFile);
 
@@ -109,12 +110,15 @@ export function normalizeProfile(profile: unknown): StoredProfile | null {
       typeof candidate.fixedCdpPort === "number" && Number.isInteger(candidate.fixedCdpPort)
         ? candidate.fixedCdpPort
         : null,
+    bifrostProxy: normalizeStoredBifrostProxy(candidate.bifrostProxy),
+    upstreamProxy: normalizeStoredUpstreamProxy(candidate.upstreamProxy),
     clonedFromProfileId:
       typeof candidate.clonedFromProfileId === "string" && candidate.clonedFromProfileId
         ? candidate.clonedFromProfileId
         : null,
     projectTag:
       typeof candidate.projectTag === "string" && candidate.projectTag.trim() ? candidate.projectTag.trim() : null,
+    agentAccessDisabled: candidate.agentAccessDisabled === true,
     migratedExtensions: Array.isArray(candidate.migratedExtensions)
       ? candidate.migratedExtensions
           .map(normalizeStoredMigratedExtension)

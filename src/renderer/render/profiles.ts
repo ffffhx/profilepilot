@@ -1,6 +1,6 @@
 import { isBusyAction } from "../busy";
 import { store } from "../state";
-import { AgentActivity, CdpClientInfo, ExternalChromeInstance, PublicProfile } from "../types";
+import { AgentActivity, BifrostRuleDestination, BifrostSnapshot, CdpClientInfo, ExternalChromeInstance, ProfileReadinessReceipt, PublicProfile, SystemProxyRoute } from "../types";
 import { renderLiveViewSection } from "./live-view";
 import { NATIVE_CDP_UNSUPPORTED_NOTE, agentActivityLeadText, agentActivityProgressText, agentActivityTooltipText, agentBrowserOccupancyClient, cdpClientToolSummary, cdpLaunchButtonTitle, cdpPortLabel, cdpSessionText, contentionNotice, contentionNoticeShort, deleteButtonTitle, escapeHtml, focusButtonTitle, formatDate, formatRelativeTime, gatewayControlClient, gatewayUserHasControl, launchButtonTitle, listeningPortsNote, liveAddrLabel, prettyCdpClientLabel, profileAgentBrowserReserved, profileAgentControlClients, profileStatusLabel, profileUserHasControl, renderButtonLabel, sourceDetail, truncateText } from "../util";
 
@@ -27,6 +27,7 @@ export function renderProfilesPanel(profiles: PublicProfile[], externalInstances
         <colgroup>
           <col class="profile-col-name" />
           <col class="profile-col-status" />
+          <col class="profile-col-route" />
           <col class="profile-col-connection" />
           <col class="profile-col-activity" />
           <col class="profile-col-actions" />
@@ -35,6 +36,7 @@ export function renderProfilesPanel(profiles: PublicProfile[], externalInstances
           <tr>
             <th>Profile</th>
             <th>Status</th>
+            <th>Proxy Route</th>
             <th>Connection</th>
             <th>Agent Activity</th>
             <th>Actions</th>
@@ -160,6 +162,7 @@ export function computeMainReorder(
 
 export function renderProfileRow(profile: PublicProfile, isFirstInGroup = false, lastInGroup = false): string {
   const selected = profile.id === store.selectedId;
+  const agentSettingsSaving = isBusyAction("save-agent-settings", { profileId: profile.id });
   // 数据目录行已隐藏：一个 user-data-dir 对应一个 CDP、其下可有多个 Profile，
   // 这个映射用户已理清，行内只留名称/徽标；完整路径仍在详情栏可查。
   // 拖拽角色：组首（主 Profile）拖动=整块数据目录一起挪；组内其它（子 Profile）拖动=仅在目录内排序。
@@ -173,8 +176,17 @@ export function renderProfileRow(profile: PublicProfile, isFirstInGroup = false,
           <span class="profile-name-line flex items-center gap-2 min-w-0">
             <span class="status-dot w-[9px] h-[9px] flex-[0_0_auto] rounded-full bg-line-strong ${profile.running ? "running" : profile.source === "native" ? "native" : ""}"></span>
             <span class="profile-name block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[15px] font-[650] leading-[1.25]">${escapeHtml(profile.name)}</span>
-            ${profile.isDefault ? '<span class="native-badge inline-flex items-center justify-center border-solid border border-warn-line rounded-full px-2 py-[3px] bg-warn-soft text-warn-bright font-mono text-[10px] font-semibold tracking-[0.06em]">DEFAULT</span>' : ""}
-            ${profile.quickLaunchSlot ? `<span class="slot-badge" title="全局快捷键 ⌘⌥${profile.quickLaunchSlot} 直启">⌘⌥${profile.quickLaunchSlot}</span>` : ""}
+            <span class="profile-name-badges">
+              ${
+                profile.source === "isolated"
+                  ? `<button type="button" class="agent-access-toggle ${profile.agentAccessDisabled ? "blocked" : "allowed"} ${agentSettingsSaving ? "loading" : ""}" data-action="toggle-agent-access" data-id="${profile.id}" aria-pressed="${profile.agentAccessDisabled ? "true" : "false"}" aria-label="${profile.agentAccessDisabled ? `允许 Agent 连接 ${escapeHtml(profile.name)}` : `禁止 Agent 连接 ${escapeHtml(profile.name)}`}" title="${profile.agentAccessDisabled ? "当前禁止 Agent 连接；点击允许" : "当前允许 Agent 连接；点击禁止"}" ${store.busy ? "disabled" : ""}>
+                      ${renderButtonLabel(agentSettingsSaving, profile.agentAccessDisabled ? "NO AGENT" : "AGENT ON", "…")}
+                    </button>`
+                  : ""
+              }
+              ${profile.isDefault ? '<span class="native-badge inline-flex items-center justify-center border-solid border border-warn-line rounded-full px-2 py-[3px] bg-warn-soft text-warn-bright font-mono text-[10px] font-semibold tracking-[0.06em]">DEFAULT</span>' : ""}
+              ${profile.quickLaunchSlot ? `<span class="slot-badge" title="全局快捷键 ⌘⌥${profile.quickLaunchSlot} 直启">⌘⌥${profile.quickLaunchSlot}</span>` : ""}
+            </span>
           </span>
         </div>
       </td>
@@ -182,6 +194,9 @@ export function renderProfileRow(profile: PublicProfile, isFirstInGroup = false,
         <span class="state-pill inline-flex items-center justify-center min-w-[58px] border-solid border border-line-strong rounded-full px-[9px] py-1 bg-transparent text-muted font-mono text-[11px] font-semibold tracking-[0.06em] ${profile.running ? "running" : ""}">
           ${profileStatusLabel(profile)}
         </span>
+      </td>
+      <td>
+        ${renderProfileProxyRoute(profile)}
       </td>
       <td>
         ${renderProfilePortCell(profile)}
@@ -238,12 +253,22 @@ export function renderProfileActivityCell(profile: PublicProfile): string {
       const client = gatewayControlClient(profile);
       const label = control.ownership === "user"
         ? control.pendingUserAction ? "等待用户操作" : "用户已接管"
-        : "Agent 已绑定";
+        : control.driverState === "reconnecting"
+          ? "浏览器驱动重连中"
+          : control.driverState === "connecting"
+            ? "浏览器驱动连接中"
+            : control.driverState === "disconnected" ? "Agent 已离线" : "Agent 已绑定";
       const tooltip = control.ownership === "user"
         ? control.pendingUserAction
           ? `等待用户完成：${control.pendingUserAction}；Agent Session 仍保留`
           : "浏览器控制权属于用户；Agent Session 仍保留，等待交还"
-        : "Gateway 已为该 Agent 保留控制权，当前没有活动连接";
+        : control.driverState === "reconnecting"
+          ? `Gateway 仍保留 Agent Session，正在等待驱动重连${Number.isInteger(control.reconnectAttempt) ? `（${control.reconnectAttempt}/3）` : ""}`
+          : control.driverState === "connecting"
+            ? "Gateway 已保留 Agent Session，正在建立驱动连接"
+            : control.driverState === "disconnected"
+              ? "驱动连接已断开；可释放 Profile 后启动新 Session"
+              : "Gateway 已为该 Agent 保留控制权，当前没有活动连接";
       return renderProfileActivityTrack(
         label,
         client ? cdpSessionText(client) : control.ownerSessionId,
@@ -257,9 +282,12 @@ export function renderProfileActivityCell(profile: PublicProfile): string {
   if (profile.agentBrowserOccupancy && !control?.ownerSessionId) {
     const occupancy = profile.agentBrowserOccupancy;
     const client = agentBrowserOccupancyClient(profile);
-    const label = occupancy.ownership === "user" ? "用户已接管" : "Agent 已绑定";
-    const tooltip = occupancy.ownership === "user"
-      ? "Session 仍保留，自动切换不会使用此 Profile；请交还或释放后再复用"
+    const stoppedUserSession = !profile.running && occupancy.ownership === "user";
+    const label = stoppedUserSession ? "Session 残留" : occupancy.ownership === "user" ? "用户已接管" : "Agent 已绑定";
+    const tooltip = stoppedUserSession
+      ? "Profile 未运行，当前不存在可由用户接管的浏览器；这是待回收的残留 Session"
+      : occupancy.ownership === "user"
+        ? "Session 仍保留，自动切换不会使用此 Profile；请交还或释放后再复用"
       : "agent-browser Session 仍排他预留此 Profile，自动切换不会使用";
     return renderProfileActivityTrack(
       label,
@@ -268,6 +296,10 @@ export function renderProfileActivityCell(profile: PublicProfile): string {
       tooltip,
       occupancy.ownership === "user" ? "user" : "reserved"
     );
+  }
+
+  if (profile.agentAccessDisabled) {
+    return '<span class="profile-activity-empty agent-disabled">Agent 已禁用</span>';
   }
 
   if (!profile.cdpUrl) {
@@ -384,9 +416,12 @@ function renderAgentBrowserOccupancyCell(profile: PublicProfile, portChip: strin
   if (!profile.agentBrowserOccupancy || profile.gatewayControl?.ownerSessionId) return "";
   const occupancy = profile.agentBrowserOccupancy;
   const client = agentBrowserOccupancyClient(profile);
-  const label = occupancy.ownership === "user" ? "用户已接管" : "Agent 已绑定";
-  const tip = occupancy.ownership === "user"
-    ? "Session 仍保留，自动切换不会使用此 Profile；请交还或释放后再复用"
+  const stoppedUserSession = !profile.running && occupancy.ownership === "user";
+  const label = stoppedUserSession ? "Session 残留" : occupancy.ownership === "user" ? "用户已接管" : "Agent 已绑定";
+  const tip = stoppedUserSession
+    ? "Profile 未运行，当前不存在可由用户接管的浏览器；这是待回收的残留 Session"
+    : occupancy.ownership === "user"
+      ? "Session 仍保留，自动切换不会使用此 Profile；请交还或释放后再复用"
     : "agent-browser Session 仍排他预留此 Profile，自动切换不会使用";
   const sessionText = client ? cdpSessionText(client) : occupancy.session;
   const age = formatRelativeTime(occupancy.updatedAt);
@@ -408,12 +443,22 @@ function renderGatewayControlCell(profile: PublicProfile, portChip: string): str
   const age = formatRelativeTime(control.updatedAt);
   const label = control.ownership === "user"
     ? control.pendingUserAction ? "等待用户操作" : "用户已接管"
-    : "Agent 已绑定";
+    : control.driverState === "reconnecting"
+      ? "浏览器驱动重连中"
+      : control.driverState === "connecting"
+        ? "浏览器驱动连接中"
+        : control.driverState === "disconnected" ? "Agent 已离线" : "Agent 已绑定";
   const tip = control.ownership === "user"
     ? control.pendingUserAction
       ? `等待用户完成：${control.pendingUserAction}；Agent Session 仍保留`
       : "浏览器控制权属于用户；Agent Session 仍保留，等待交还"
-    : "Gateway 已为该 Agent 保留控制权，当前没有活动连接";
+    : control.driverState === "reconnecting"
+      ? `Gateway 仍保留 Agent Session，正在等待驱动重连${Number.isInteger(control.reconnectAttempt) ? `（${control.reconnectAttempt}/3）` : ""}`
+      : control.driverState === "connecting"
+        ? "Gateway 已保留 Agent Session，正在建立驱动连接"
+        : control.driverState === "disconnected"
+          ? "驱动连接已断开；可释放 Profile 后启动新 Session"
+          : "Gateway 已为该 Agent 保留控制权，当前没有活动连接";
   const subLine = sessionText || age
     ? `<span class="conn-session"><span class="conn-session-main">${escapeHtml(sessionText)}</span>${
         age ? `<span class="conn-session-age">${escapeHtml(age)}</span>` : ""
@@ -522,7 +567,7 @@ function renderConnTipTable(clients: PublicProfile["cdpClients"]): string {
 
 export function renderProfileActions(profile: PublicProfile): string {
   // 隔离目录里的额外子 profile：本工具没登记它，同步/克隆/CDP/改名都不适用，
-  // 主操作只给「显示/启动」；「更多」菜单只挂一个「删除」（删目录 + 从父目录 Local State 摘除）。
+  // 主操作只给「显示/启动」；详情与删除收进「更多」菜单。
   if (profile.source === "isolated-sub") {
     const focusingSub = isBusyAction("focus-profile", { profileId: profile.id });
     const launchingSub = isBusyAction("launch-profile", { profileId: profile.id });
@@ -538,13 +583,13 @@ export function renderProfileActions(profile: PublicProfile): string {
             ${renderButtonLabel(subPrimaryLoading, profile.running ? "显示" : "启动", subPrimaryLabel)}
           </button>
         </span>
-        ${renderProfileDetailsButton(profile.id)}
         <span class="menu-anchor profile-menu-action relative inline-flex">
           <button type="button" class="action-button menu-button" data-action="toggle-profile-menu" data-id="${profile.id}" aria-label="更多" title="更多" aria-expanded="${subMenuOpen ? "true" : "false"}" ${store.busy ? "disabled" : ""}>⋮</button>
           ${
             subMenuOpen
               ? `
                 <div class="action-menu absolute top-[calc(100%+6px)] right-0 z-40 grid w-40 overflow-visible border-solid border border-line-strong rounded-lg bg-panel-raise [box-shadow:var(--shadow)] p-[5px]" role="menu">
+                  ${renderProfileDetailsMenuItem(profile.id)}
                   <span class="action-tooltip" data-tooltip="删除这个子 Profile（会先关闭它所在的整个隔离实例）">
                     <button type="button" class="danger ${deletingSub ? "loading" : ""}" data-action="delete" data-id="${profile.id}" ${store.busy ? "disabled" : ""}>
                       ${renderButtonLabel(deletingSub, "删除子 Profile", "删除中…")}
@@ -570,6 +615,7 @@ export function renderProfileActions(profile: PublicProfile): string {
   const renaming = isBusyAction("rename-profile", { profileId: profile.id });
   const deleting = isBusyAction("delete-profile", { profileId: profile.id });
   const miniPinnedBusy = isBusyAction("mini-pin", { profileId: profile.id });
+  const bifrostSaving = isBusyAction("save-bifrost-proxy", { profileId: profile.id });
   const miniPinDisabled = store.busy || (!profile.pinnedToMini && (store.state?.miniProfileIds.length || 0) >= 3);
   const takeoverButton = renderAgentTakeoverButton(profile);
 
@@ -610,7 +656,6 @@ export function renderProfileActions(profile: PublicProfile): string {
   return `
     <div class="profile-actions" data-profile-actions>
       ${takeoverButton}
-      ${renderProfileDetailsButton(profile.id)}
       <span class="action-tooltip ${baseActionClass}" data-tooltip="${escapeHtml(baseTip)}">
         <button type="button" class="action-button accent ${hasTakeoverAction ? "icon-action" : ""} ${primaryLoading ? "loading" : ""}" data-action="${baseAction}" data-id="${profile.id}" aria-label="${escapeHtml(baseIdle)}" ${store.busy ? "disabled" : ""}>
           ${renderButtonLabel(primaryLoading, baseVisualLabel, baseLoadingLabel)}
@@ -622,6 +667,7 @@ export function renderProfileActions(profile: PublicProfile): string {
         menuOpen
           ? `
             <div class="action-menu absolute top-[calc(100%+6px)] right-0 z-40 grid w-40 overflow-visible border-solid border border-line-strong rounded-lg bg-panel-raise [box-shadow:var(--shadow)] p-[5px]" role="menu">
+              ${renderProfileDetailsMenuItem(profile.id)}
               ${
                 preferCdp
                   ? `<button type="button" class="${launching ? "loading" : ""}" data-action="launch" data-id="${profile.id}" title="${escapeHtml(launchButtonTitle(profile))}" ${store.busy ? "disabled" : ""}>
@@ -640,6 +686,13 @@ export function renderProfileActions(profile: PublicProfile): string {
               <button type="button" class="${renaming ? "loading" : ""}" data-action="rename-profile" data-id="${profile.id}" ${store.busy ? "disabled" : ""}>
                 ${renderButtonLabel(renaming, "修改名称", "保存中…")}
               </button>
+              ${
+                profile.source === "isolated"
+                  ? `<button type="button" class="${profile.bifrostProxy || profile.upstreamProxy ? "menu-info" : ""} ${bifrostSaving ? "loading" : ""}" data-action="configure-bifrost-proxy" data-id="${profile.id}" ${store.busy ? "disabled" : ""}>
+                      ${renderButtonLabel(bifrostSaving, proxyMenuLabel(profile), "保存中…")}
+                    </button>`
+                  : ""
+              }
               <button type="button" class="${miniPinnedBusy ? "loading" : ""}" data-action="${profile.pinnedToMini ? "unpin-mini-profile" : "pin-mini-profile"}" data-id="${profile.id}" ${miniPinDisabled ? "disabled" : ""}>
                 ${renderButtonLabel(miniPinnedBusy, profile.pinnedToMini ? "取消悬浮窗固定" : "固定到悬浮窗", "保存中…")}
               </button>
@@ -658,12 +711,8 @@ export function renderProfileActions(profile: PublicProfile): string {
   `;
 }
 
-function renderProfileDetailsButton(profileId: string): string {
-  return `
-    <span class="action-tooltip profile-details-action" data-tooltip="查看连接信息、标签页与实时画面">
-      <button type="button" class="action-button details-action" data-action="open-profile-details" data-id="${escapeHtml(profileId)}" aria-label="查看详情" ${store.busy ? "disabled" : ""}>详情</button>
-    </span>
-  `;
+function renderProfileDetailsMenuItem(profileId: string): string {
+  return `<button type="button" data-action="open-profile-details" data-id="${escapeHtml(profileId)}" title="查看连接信息、标签页与实时画面" ${store.busy ? "disabled" : ""}>查看详情</button>`;
 }
 
 function renderAgentTakeoverButton(profile: PublicProfile): string {
@@ -815,7 +864,7 @@ function renderExternalConnPill(instance: ExternalChromeInstance): string {
 export function renderExternalRows(instances: ExternalChromeInstance[]): string {
   return `
     <tr class="table-group-row">
-      <td colspan="5">
+      <td colspan="6">
         <span>外部实例 · 其他工具（agent-browser 等）自管，仅支持显示 / 关闭</span>
         <span class="count">${instances.length}</span>
       </td>
@@ -842,6 +891,15 @@ export function renderExternalRow(instance: ExternalChromeInstance): string {
       </td>
       <td>
         <span class="state-pill inline-flex items-center justify-center min-w-[58px] border-solid border border-line-strong rounded-full px-[9px] py-1 bg-transparent text-muted font-mono text-[11px] font-semibold tracking-[0.06em] running">运行中</span>
+      </td>
+      <td>
+        <span class="profile-route-track external action-tooltip" data-tooltip="外部实例不由 ProfilePilot 管理，无法判断它使用的代理规则" aria-label="外部实例不由 ProfilePilot 管理，无法判断它使用的代理规则" tabindex="0">
+          <span class="profile-route-signal" aria-hidden="true"></span>
+          <span class="profile-route-copy">
+            <strong>外部管理</strong>
+            <small>代理规则未知</small>
+          </span>
+        </span>
       </td>
       <td>
         ${renderExternalPortCell(instance)}
@@ -990,11 +1048,582 @@ export function renderDetails(profile: PublicProfile | null, includeLiveView = t
           <span>账号</span>
           <strong>${escapeHtml(profile.userName || "未登录")}</strong>
         </div>
+        <div class="detail-row">
+          <span>窗口前台</span>
+          <strong>${escapeHtml(windowActivationLabel(profile.windowActivation))}</strong>
+          <small class="detail-note">窗口前台状态与 Agent/User 逻辑控制权分开计算；后台自动化不会因此抢焦点。</small>
+        </div>
+        ${
+          profile.source === "isolated"
+            ? `<div class="detail-row ${profile.agentAccessDisabled ? "detail-row-agent-blocked" : ""}">
+                <span>Agent 访问</span>
+                <strong>${profile.agentAccessDisabled ? "禁止连接" : "允许连接"}</strong>
+                <small class="detail-note">${profile.agentAccessDisabled ? "Gateway 会拒绝所有 Agent 连接；手动使用不受影响。" : "Agent 可通过 ProfilePilot Gateway 连接。"}</small>
+              </div>
+              <div class="detail-row">
+                <span>AI 选择提示</span>
+                <strong>${escapeHtml(profile.name)}</strong>
+                <small class="detail-note">Profile 名称会直接提供给 AI，用来匹配当前任务。</small>
+              </div>`
+            : ""
+        }
         ${renderListeningPortsDetail(profile)}
         ${renderConnectionDetail(profile)}
+        ${renderBifrostProxyDetail(profile)}
       </div>
       ${includeLiveView ? renderLiveViewSection(profile) : ""}
     </aside>
+  `;
+}
+
+export type BifrostRouteState = "ok" | "stale" | "down" | "unknown";
+
+// 分流入口三态：ok=Bifrost 在跑且端口绑定归属本 Profile；stale=在跑但端口未绑或归属不符
+// （启动 Profile 时会自动重绑）；down=Bifrost 未运行/未安装；unknown=还没拿到快照。
+export function bifrostRouteState(profile: PublicProfile, snapshot: BifrostSnapshot | null | undefined): BifrostRouteState {
+  const config = profile.bifrostProxy;
+  if (!config || !snapshot) {
+    return "unknown";
+  }
+  if (!snapshot.installed || !snapshot.running) {
+    return "down";
+  }
+  const binding = snapshot.ports.find((entry) => entry.port === config.listenerPort);
+  if (!binding) {
+    return "stale";
+  }
+  // 绑定名用的是注册表里的原始 id；PublicProfile.id 带 isolated: 前缀，需要剥掉再比对。
+  const rawId = profile.id.startsWith("isolated:") ? profile.id.slice("isolated:".length) : profile.id;
+  return binding.name === `profilepilot:${rawId}` ? "ok" : "stale";
+}
+
+export function bifrostRouteStateTitle(profile: PublicProfile, state: BifrostRouteState): string {
+  const addr = `127.0.0.1:${profile.bifrostProxy?.listenerPort}`;
+  if (state === "ok") {
+    return `Bifrost 独立分流生效中 · ${addr}`;
+  }
+  if (state === "stale") {
+    return `Bifrost 在运行，但 ${addr} 未绑定到此 Profile；启动时会自动重绑`;
+  }
+  if (state === "down") {
+    return "Bifrost 未运行或未安装；带分流启动会失败，可在提示里选择本次直连启动";
+  }
+  return `Bifrost 独立分流 · ${addr}`;
+}
+
+function bifrostRouteStateLabel(state: BifrostRouteState): string {
+  if (state === "ok") return "独立分流生效中";
+  if (state === "stale") return "等待端口重绑";
+  if (state === "down") return "服务不可用";
+  return "正在读取状态";
+}
+
+function renderBifrostRouteMapping(detail: string): string {
+  const [source, ...targetParts] = detail.split(" → ");
+  if (!targetParts.length) {
+    return `<span class="route-tip-mapping-text">${escapeHtml(detail)}</span>`;
+  }
+  const roleMatch = source.match(/^(前端|后端)(?:（(.+)）)? · (.+)$/);
+  const scope = roleMatch?.[2] || "";
+  const sourceLabel = roleMatch?.[3] || source;
+  const target = targetParts.join(" → ");
+  const headerMatch = target.match(/^(x-tt-env(?:-fe)?) · (.+)$/i);
+  const headerKey = headerMatch?.[1] || "";
+  // 旧规则的映射描述没有显式角色，但 x-tt-env-fe 已经明确代表前端泳道。
+  // 在展示层补齐“前端”，避免要求用户重建已有 Bifrost 规则。
+  const role = roleMatch?.[1] || (headerKey.toLowerCase() === "x-tt-env-fe" ? "前端" : "");
+  const targetLabel = headerMatch?.[2] || target;
+  const targetKind = targetLabel.startsWith("localhost")
+    ? "local"
+    : targetLabel.startsWith("PPE")
+      ? "ppe"
+      : targetLabel.startsWith("BOE")
+        ? "boe"
+        : "other";
+  return `
+    ${role ? `<span class="route-tip-role ${role === "前端" ? "frontend" : "backend"}">${role}</span>` : ""}
+    ${scope ? `<span class="route-tip-scope">${escapeHtml(scope)}</span>` : ""}
+    <span class="route-tip-mapping-text route-tip-mapping-source">${escapeHtml(sourceLabel)}</span>
+    <span class="route-tip-mapping-arrow" aria-hidden="true">→</span>
+    ${headerKey ? `<code class="route-tip-header-key">${escapeHtml(headerKey)}</code>` : ""}
+    <span class="route-tip-mapping-text route-tip-mapping-target target-${targetKind}">${escapeHtml(targetLabel)}</span>
+  `;
+}
+
+// 三选一代理分流的「更多」菜单文案：未配=代理分流；Bifrost=带专属端口；直连 Clash=带端口。
+export function proxyMenuLabel(profile: PublicProfile): string {
+  if (profile.bifrostProxy) {
+    return `代理分流 · Bifrost :${profile.bifrostProxy.listenerPort}`;
+  }
+  if (profile.upstreamProxy) {
+    const port = profile.upstreamProxy.server.match(/:(\d{2,5})(?:\D|$)/)?.[1];
+    return `代理分流 · Clash${port ? ` :${port}` : ""}`;
+  }
+  return "代理分流";
+}
+
+interface SystemProxyDisplay {
+  label: string;
+  tone: "system-proxy-active" | "system-proxy-direct" | "system-proxy-unknown";
+  routes: SystemProxyRoute[];
+  providerLabel: string | null;
+  mainRules: NonNullable<BifrostSnapshot["mainRules"]>;
+  mainDestination: BifrostRuleDestination | null;
+}
+
+function systemProxyPrimaryRoutes(snapshot: BifrostSnapshot | null | undefined): SystemProxyRoute[] {
+  const routes = snapshot?.systemProxy?.routes || [];
+  return (["https", "http"] as const)
+    .map((protocol) => routes.find((route) => route.protocol === protocol))
+    .filter((route): route is SystemProxyRoute => Boolean(route));
+}
+
+function systemProxyKindLabel(kind: SystemProxyRoute["kind"]): string {
+  if (kind === "direct") return "DIRECT";
+  if (kind === "http") return "HTTP";
+  if (kind === "https") return "HTTPS";
+  if (kind === "socks4") return "SOCKS4";
+  if (kind === "socks5") return "SOCKS5";
+  if (kind === "quic") return "QUIC";
+  return "代理";
+}
+
+function renderSystemRuleDestination(label: string): string {
+  return label.split(" + ").map((part) => {
+    const kind = part.startsWith("本地")
+      ? "local"
+      : part.startsWith("PPE")
+        ? "ppe"
+        : part.startsWith("BOE")
+          ? "boe"
+          : "other";
+    return `<span class="system-rule-destination ${kind}">${escapeHtml(part)}</span>`;
+  }).join('<span class="system-rule-separator">+</span>');
+}
+
+function systemProxyDisplay(snapshot: BifrostSnapshot | null | undefined): SystemProxyDisplay {
+  const systemProxy = snapshot?.systemProxy;
+  const routes = systemProxyPrimaryRoutes(snapshot);
+  const mainRules = snapshot?.mainRules || [];
+  const mainDestination = snapshot?.mainRuleDestination || null;
+  if (!systemProxy) {
+    return {
+      label: "正在读取系统代理…",
+      tone: "system-proxy-unknown",
+      routes,
+      providerLabel: null,
+      mainRules,
+      mainDestination
+    };
+  }
+  if (systemProxy.mode === "direct") {
+    return {
+      label: "未启用 · DIRECT",
+      tone: "system-proxy-direct",
+      routes,
+      providerLabel: null,
+      mainRules,
+      mainDestination
+    };
+  }
+  const primary = routes.find((route) => route.kind !== "direct" && route.endpoint);
+  if (!primary?.endpoint) {
+    return {
+      label: "状态未知",
+      tone: "system-proxy-unknown",
+      routes,
+      providerLabel: null,
+      mainRules,
+      mainDestination
+    };
+  }
+  const port = Number(primary.endpoint.match(/:(\d{1,5})$/)?.[1]);
+  const loopback = /^(?:127\.0\.0\.1|localhost|\[?::1\]?):/i.test(primary.endpoint);
+  const isBifrost = Boolean(snapshot?.running && snapshot.mainPort === port && loopback);
+  const endpoint = loopback && port ? `:${port}` : primary.endpoint;
+  return {
+    label: isBifrost
+      ? mainDestination
+        ? `启用规则 · ${mainDestination.label}`
+        : mainRules.length
+          ? "启用规则 · 按域名与路径匹配"
+          : "无启用规则 · 未命中直连"
+      : `${systemProxyKindLabel(primary.kind)} · ${endpoint}`,
+    tone: "system-proxy-active",
+    routes,
+    providerLabel: isBifrost ? `Bifrost ${endpoint}` : null,
+    mainRules,
+    mainDestination
+  };
+}
+
+function renderSystemProxyTooltip(
+  display: SystemProxyDisplay,
+  modeNote = "此 Profile 未配置独立分流"
+): string {
+  const rows = display.routes.map((route) => `
+    <span class="route-tip-row system-proxy-tip-route">
+      <span class="route-tip-tag">${route.protocol.toUpperCase()}</span>
+      <span class="route-tip-value">
+        <span class="system-proxy-tip-kind">${systemProxyKindLabel(route.kind)}</span>
+        ${route.endpoint ? `
+          <span class="route-tip-mapping-arrow" aria-hidden="true">→</span>
+          <span class="route-tip-mapping-target">${escapeHtml(route.endpoint)}</span>
+        ` : ""}
+      </span>
+    </span>
+  `).join("");
+  const mappingRows = (display.mainDestination?.details || []).slice(0, 6).map((detail) => `
+    <span class="route-tip-row route-tip-mapping">
+      <span class="route-tip-tag">映射</span>
+      <span class="route-tip-value">${renderBifrostRouteMapping(detail)}</span>
+    </span>
+  `).join("");
+  const hiddenMappingCount = Math.max(0, (display.mainDestination?.details.length || 0) - 6);
+  const ruleItems = display.mainRules.map((rule) => `
+    <span class="system-proxy-rule-item">
+      <span class="system-proxy-rule-name">${escapeHtml(rule.name)}</span>
+      <button
+        type="button"
+        class="system-proxy-rule-disable"
+        data-action="disable-bifrost-rule"
+        data-rule-name="${escapeHtml(rule.name)}"
+        data-rule-count="${rule.ruleCount}"
+        aria-label="停用 Bifrost 规则 ${escapeHtml(rule.name)}"
+        title="停用这条 Bifrost 主代理规则"
+      >停用</button>
+    </span>
+  `).join("");
+  return `
+    <span class="route-tip-card system-proxy-tip-card" role="tooltip">
+      <span class="route-tip-scroll" role="region" aria-label="代理路由详情">
+        <span class="route-tip-scroll-content">
+          <span class="route-tip-head">
+            <span class="route-tip-status system"><i aria-hidden="true"></i>系统代理 · ${escapeHtml(display.providerLabel || "Chrome 正在跟随")}</span>
+            <code>${display.routes.find((route) => route.endpoint)?.endpoint ? escapeHtml(display.routes.find((route) => route.endpoint)?.endpoint || "") : "系统设置"}</code>
+          </span>
+          ${rows || `
+            <span class="route-tip-row">
+              <span class="route-tip-tag">状态</span>
+              <span class="route-tip-value">正在读取实际代理路由…</span>
+            </span>
+          `}
+          ${display.mainDestination ? `
+            <span class="route-tip-row system-proxy-main-destination">
+              <span class="route-tip-tag">生效</span>
+              <span class="route-tip-value destination-${display.mainDestination.kind}">${renderSystemRuleDestination(display.mainDestination.label)}</span>
+            </span>
+          ` : ""}
+          ${mappingRows}
+          ${hiddenMappingCount ? `
+            <span class="route-tip-row system-proxy-more-mappings">
+              <span class="route-tip-tag">更多</span>
+              <span class="route-tip-value">还有 ${hiddenMappingCount} 条按域名或路径匹配</span>
+            </span>
+          ` : ""}
+          ${display.providerLabel ? `
+            <span class="route-tip-row system-proxy-rule-list">
+              <span class="route-tip-tag">规则</span>
+              <span class="route-tip-value route-tip-horizontal-scroll" tabindex="0" aria-label="已启用规则，可左右滚动查看完整内容">
+                <span class="route-tip-horizontal-scroll-content">
+                  <span class="system-proxy-rule-count">${display.mainRules.length} 份启用</span>
+                  ${ruleItems}
+                </span>
+              </span>
+            </span>
+            <span class="route-tip-row system-proxy-direct-fallback">
+              <span class="route-tip-tag">兜底</span>
+              <span class="route-tip-value">未命中规则 → 直连原目标</span>
+            </span>
+          ` : ""}
+          <span class="route-tip-row system-proxy-tip-note">
+            <span class="route-tip-tag">方式</span>
+            <span class="route-tip-value">${escapeHtml(modeNote)}</span>
+          </span>
+        </span>
+      </span>
+    </span>
+  `;
+}
+
+export function renderProfileProxyRoute(profile: PublicProfile): string {
+  if (profile.source === "native") {
+    const display = systemProxyDisplay(store.bifrostSnapshot);
+    const tooltip = [
+      "系统 Chrome Profile 跟随系统代理设置，不支持单独配置",
+      ...display.routes.map((route) =>
+        `${route.protocol.toUpperCase()}：${systemProxyKindLabel(route.kind)}${route.endpoint ? ` ${route.endpoint}` : ""}`
+      ),
+      display.mainDestination ? `启用规则去向：${display.mainDestination.label}` : "",
+      display.mainRules.length ? `启用规则：${display.mainRules.map((rule) => rule.name).join(" · ")}` : "",
+      display.providerLabel ? "未命中规则：直连原目标" : ""
+    ].filter(Boolean).join("\n");
+    return `
+      <span class="profile-route-track system ${display.tone} action-tooltip structured-tooltip" aria-label="${escapeHtml(tooltip)}" tabindex="0">
+        <span class="profile-route-signal" aria-hidden="true"></span>
+        <span class="profile-route-copy">
+          <strong>系统代理${display.providerLabel ? ` <em>${escapeHtml(display.providerLabel)}</em>` : ""}</strong>
+          <small${display.mainDestination ? ' class="system-rule-summary"' : ""}>${display.mainDestination ? `启用规则 · ${renderSystemRuleDestination(display.mainDestination.label)}` : escapeHtml(display.label)}</small>
+        </span>
+        ${renderSystemProxyTooltip(display, "系统 Chrome Profile 跟随系统代理，不支持单独配置")}
+      </span>
+    `;
+  }
+  if (profile.source !== "isolated") {
+    return `
+      <span class="profile-route-track native action-tooltip" data-tooltip="系统 Chrome Profile 不支持单独配置代理分流" aria-label="系统 Chrome Profile 不支持单独配置代理分流" tabindex="0">
+        <span class="profile-route-signal" aria-hidden="true"></span>
+        <span class="profile-route-copy">
+          <strong>Chrome 设置</strong>
+          <small>不可单独配置</small>
+        </span>
+      </span>
+    `;
+  }
+  if (profile.upstreamProxy) {
+    return renderUpstreamProxyRoute(profile);
+  }
+  if (!profile.bifrostProxy) {
+    const display = systemProxyDisplay(store.bifrostSnapshot);
+    const tooltip = [
+      "未配置 Profile 专属分流，Chrome 跟随系统代理设置",
+      ...display.routes.map((route) =>
+        `${route.protocol.toUpperCase()}：${systemProxyKindLabel(route.kind)}${route.endpoint ? ` ${route.endpoint}` : ""}`
+      ),
+      display.mainDestination ? `启用规则去向：${display.mainDestination.label}` : "",
+      display.mainRules.length ? `启用规则：${display.mainRules.map((rule) => rule.name).join(" · ")}` : "",
+      display.providerLabel ? "未命中规则：直连原目标" : ""
+    ].filter(Boolean).join("\n");
+    return `
+      <span class="profile-route-track system ${display.tone} action-tooltip structured-tooltip" aria-label="${escapeHtml(tooltip)}" tabindex="0">
+        <span class="profile-route-signal" aria-hidden="true"></span>
+        <span class="profile-route-copy">
+          <strong>系统代理${display.providerLabel ? ` <em>${escapeHtml(display.providerLabel)}</em>` : ""}</strong>
+          <small${display.mainDestination ? ' class="system-rule-summary"' : ""}>${display.mainDestination ? `启用规则 · ${renderSystemRuleDestination(display.mainDestination.label)}` : escapeHtml(display.label)}</small>
+        </span>
+        ${renderSystemProxyTooltip(display)}
+      </span>
+    `;
+  }
+
+  const config = profile.bifrostProxy;
+  const state = bifrostRouteState(profile, store.bifrostSnapshot);
+  const disabledRules = new Set(config.disabledRules || []);
+  const disabledGroupRules = new Set(config.disabledGroupRules || []);
+  const ruleReferences = [
+    ...config.rules.map((ref) => ({ kind: "local" as const, ref, disabled: disabledRules.has(ref) })),
+    ...config.groupRules.map((ref) => ({ kind: "group" as const, ref, disabled: disabledGroupRules.has(ref) }))
+  ];
+  const activeRuleReferences = ruleReferences.filter((rule) => !rule.disabled);
+  const pausedRuleReferences = ruleReferences.filter((rule) => rule.disabled);
+  const ruleNames = activeRuleReferences.map((rule) => rule.ref);
+  const displayRules = activeRuleReferences.length
+    ? activeRuleReferences.map((rule) => rule.ref.split("/").filter(Boolean).at(-1) || rule.ref).join(" · ")
+    : "Default 规则";
+  const fullRules = activeRuleReferences.length ? ruleNames.join(" · ") : "Default 规则";
+  const pausedRules = pausedRuleReferences.map((rule) => rule.ref).join(" · ");
+  const canRemoveRule = activeRuleReferences.length > 1;
+  const ruleItems = ruleReferences.map((rule) => `
+    <span class="profile-bifrost-rule-item ${rule.disabled ? "disabled" : "enabled"}">
+      <span class="profile-bifrost-rule-name">${escapeHtml(rule.ref)}</span>
+      <button
+        type="button"
+        class="${rule.disabled ? "profile-bifrost-rule-enable" : "profile-bifrost-rule-remove"}"
+        data-action="${rule.disabled ? "enable-profile-bifrost-rule" : "remove-profile-bifrost-rule"}"
+        data-id="${escapeHtml(profile.id)}"
+        data-rule-kind="${rule.kind}"
+        data-rule-ref="${escapeHtml(rule.ref)}"
+        aria-label="在 ${escapeHtml(profile.name)} 中${rule.disabled ? "启用" : "停用"} Bifrost 规则 ${escapeHtml(rule.ref)}"
+        title="${rule.disabled ? "仅在此 Profile 中重新启用" : canRemoveRule ? "仅在此 Profile 中停用" : "专属分流至少需要保留一条启用规则"}"
+        ${!rule.disabled && !canRemoveRule ? "disabled" : ""}
+      >${rule.disabled ? "启用" : "停用"}</button>
+    </span>
+  `).join("");
+  const destination = bifrostProfileDestination(profile, store.bifrostSnapshot);
+  const displayDestination = destination?.label || displayRules;
+  const destinationClass = destination ? ` destination-${destination.kind}` : "";
+  const tooltip = [
+    bifrostRouteStateTitle(profile, state),
+    destination ? `去向：${destination.label}` : "",
+    ...(destination?.details || []),
+    `启用规则：${fullRules}`,
+    pausedRules ? `已停用：${pausedRules}` : ""
+  ].filter(Boolean).join("\n");
+  const statusLabel = bifrostRouteStateLabel(state);
+  const endpoint = `127.0.0.1:${config.listenerPort}`;
+  const mappingRows = (destination?.details || []).map((detail) => `
+    <span class="route-tip-row route-tip-mapping">
+      <span class="route-tip-tag">映射</span>
+      <span class="route-tip-value">${renderBifrostRouteMapping(detail)}</span>
+    </span>
+  `).join("");
+  return `
+    <span class="profile-route-track bifrost ${state}${destinationClass} action-tooltip structured-tooltip" aria-label="${escapeHtml(tooltip)}" tabindex="0">
+      <span class="profile-route-signal" aria-hidden="true"></span>
+      <span class="profile-route-copy">
+        <strong>Bifrost <em>:${config.listenerPort}</em></strong>
+        <small>${escapeHtml(displayDestination)}</small>
+      </span>
+      <span class="route-tip-card" role="tooltip">
+        <span class="route-tip-scroll" role="region" aria-label="Bifrost 路由详情">
+          <span class="route-tip-scroll-content">
+            <span class="route-tip-head">
+              <span class="route-tip-status ${state}"><i aria-hidden="true"></i>Bifrost · ${escapeHtml(statusLabel)}</span>
+              <code>${escapeHtml(endpoint)}</code>
+            </span>
+            ${destination ? `
+              <span class="route-tip-row route-tip-destination">
+                <span class="route-tip-tag">去向</span>
+                <span class="route-tip-value destination-${destination.kind}">${escapeHtml(destination.label)}</span>
+              </span>
+            ` : ""}
+            ${mappingRows}
+            <span class="route-tip-row route-tip-rules">
+              <span class="route-tip-tag">规则</span>
+              <span class="route-tip-value route-tip-horizontal-scroll" tabindex="0" aria-label="Bifrost 规则，可左右滚动查看完整内容">
+                <span class="route-tip-horizontal-scroll-content">
+                  ${ruleItems || `<span class="profile-bifrost-rule-name">${escapeHtml(fullRules)}</span>`}
+                </span>
+              </span>
+            </span>
+          </span>
+        </span>
+      </span>
+    </span>
+  `;
+}
+
+export interface BifrostProfileDestination {
+  kind: "local" | "ppe" | "boe" | "mixed" | "other";
+  label: string;
+  details: string[];
+}
+
+export function bifrostProfileDestination(
+  profile: PublicProfile,
+  snapshot: BifrostSnapshot | null | undefined
+): BifrostProfileDestination | null {
+  if (!profile.bifrostProxy || !snapshot?.ruleDestinations) return null;
+  const disabledRules = new Set(profile.bifrostProxy.disabledRules || []);
+  const disabledGroupRules = new Set(profile.bifrostProxy.disabledGroupRules || []);
+  const keys = [
+    ...profile.bifrostProxy.rules
+      .filter((rule) => !disabledRules.has(rule))
+      .map((rule) => `local:${rule}`),
+    ...profile.bifrostProxy.groupRules
+      .filter((rule) => !disabledGroupRules.has(rule))
+      .map((rule) => `group:${rule}`)
+  ];
+  const destinations = keys
+    .map((key) => snapshot.ruleDestinations?.[key])
+    .filter((destination): destination is BifrostRuleDestination => Boolean(destination));
+  if (!destinations.length) return null;
+  const kinds = [...new Set(destinations.map((destination) => destination.kind))];
+  return {
+    kind: kinds.length === 1 ? kinds[0] : "mixed",
+    label: [...new Set(destinations.map((destination) => destination.label))].join(" + "),
+    details: [...new Set(destinations.flatMap((destination) => destination.details))].slice(0, 16)
+  };
+}
+
+// 直连上游代理的可达性两态：绿=TCP 可达；红=不可达/未探到；unknown=还没拿到快照。
+export type UpstreamRouteState = "ok" | "down" | "unknown";
+
+export function upstreamRouteState(profile: PublicProfile, snapshot: BifrostSnapshot | null | undefined): UpstreamRouteState {
+  const config = profile.upstreamProxy;
+  if (!config || !snapshot) {
+    return "unknown";
+  }
+  const reachable = snapshot.upstreamHealth?.[config.server];
+  if (reachable === undefined) {
+    return "unknown";
+  }
+  return reachable ? "ok" : "down";
+}
+
+export function renderUpstreamProxyRoute(profile: PublicProfile): string {
+  const config = profile.upstreamProxy;
+  if (!config) {
+    return "";
+  }
+  const state = upstreamRouteState(profile, store.bifrostSnapshot);
+  const stateClass = state === "unknown" ? "" : ` ${state}`;
+  const port = config.server.match(/:(\d{2,5})(?:\D|$)/)?.[1] || "up";
+  const title = state === "ok"
+    ? `直连 Clash 可达 · ${config.server}`
+    : state === "down"
+      ? `直连 Clash 不可达 · ${config.server}（确认 Clash 已开启并在该端口监听）`
+      : `直连 Clash · ${config.server}`;
+  const tooltip = `${title}\n具体规则由 Clash Verge 决定`;
+  return `
+    <span class="profile-route-track upstream${stateClass} action-tooltip" data-tooltip="${escapeHtml(tooltip)}" aria-label="${escapeHtml(tooltip)}" tabindex="0">
+      <span class="profile-route-signal" aria-hidden="true"></span>
+      <span class="profile-route-copy">
+        <strong>Clash Verge <em>:${escapeHtml(port)}</em></strong>
+        <small>规则由 Clash 决定</small>
+      </span>
+    </span>
+  `;
+}
+
+export function renderBifrostProxyDetail(profile: PublicProfile): string {
+  if (profile.source !== "isolated") {
+    return "";
+  }
+  if (profile.upstreamProxy) {
+    const state = upstreamRouteState(profile, store.bifrostSnapshot);
+    const stateLabel = state === "ok" ? "Clash 可达" : state === "down" ? "Clash 不可达" : "状态未知";
+    const bypass = profile.upstreamProxy.bypassList;
+    return `
+      <div class="detail-row bifrost-detail-row">
+        <span>代理分流</span>
+        <strong>直连 Clash <em class="bifrost-route-state ${state}">${stateLabel}</em></strong>
+        <code class="path-box compact">${escapeHtml(profile.upstreamProxy.server)}</code>
+        <small class="detail-note">${bypass ? `Bypass：${escapeHtml(bypass)}` : "整体流量交给该上游代理（如 Clash 入站）。"}</small>
+      </div>
+    `;
+  }
+  const config = profile.bifrostProxy;
+  if (!config) {
+    const display = systemProxyDisplay(store.bifrostSnapshot);
+    return `
+      <div class="detail-row detail-row-disabled">
+        <span>代理分流</span>
+        <strong>跟随系统代理</strong>
+        <code class="path-box compact">${escapeHtml(display.label)}</code>
+        <small class="detail-note">可在“更多 → 代理分流”中为此 Profile 绑定 Bifrost 规则或直连 Clash。</small>
+      </div>
+    `;
+  }
+  const disabledRules = new Set(config.disabledRules || []);
+  const disabledGroupRules = new Set(config.disabledGroupRules || []);
+  const activeRuleNames = [
+    ...config.rules.filter((rule) => !disabledRules.has(rule)),
+    ...config.groupRules.filter((rule) => !disabledGroupRules.has(rule))
+  ];
+  const pausedRuleNames = [
+    ...config.rules.filter((rule) => disabledRules.has(rule)),
+    ...config.groupRules.filter((rule) => disabledGroupRules.has(rule))
+  ];
+  const state = bifrostRouteState(profile, store.bifrostSnapshot);
+  const stateLabel = state === "ok"
+    ? "分流生效中"
+    : state === "stale"
+      ? "待重绑 · 启动时自动恢复"
+      : state === "down"
+        ? "Bifrost 未运行"
+        : "状态未知";
+  return `
+    <div class="detail-row bifrost-detail-row">
+      <span>Bifrost 分流</span>
+      <strong>127.0.0.1:${config.listenerPort} <em class="bifrost-route-state ${state}" title="${escapeHtml(bifrostRouteStateTitle(profile, state))}">${stateLabel}</em></strong>
+      <code class="path-box compact">${escapeHtml(activeRuleNames.join(" · "))}</code>
+      <small class="detail-note">${
+        pausedRuleNames.length
+          ? `已停用：${escapeHtml(pausedRuleNames.join(" · "))}。`
+          : ""
+      }启动前自动恢复专属入口；Default 规则始终一并生效。</small>
+    </div>
   `;
 }
 
@@ -1018,6 +1647,7 @@ export function renderProfileDetailsModal(profile: PublicProfile | null): string
           </div>
           <button type="button" data-action="close-modal" data-profile-details-close>关闭</button>
         </header>
+        ${renderReadinessPanel(profile)}
         <div class="profile-details-modal-body">
           <div class="profile-details-summary">${renderDetails(profile, false)}</div>
           <section class="profile-details-cockpit" aria-label="实时画面">
@@ -1027,6 +1657,82 @@ export function renderProfileDetailsModal(profile: PublicProfile | null): string
       </section>
     </div>
   `;
+}
+
+function renderReadinessPanel(profile: PublicProfile): string {
+  const receipt = store.profileReadiness[profile.id] || null;
+  const loading = store.profileReadinessLoading[profile.id] === true;
+  if (!receipt) {
+    return `
+      <section class="readiness-panel loading" aria-label="Readiness receipt">
+        <div class="readiness-panel-head">
+          <div>
+            <span>Readiness receipt</span>
+            <strong>${loading ? "正在逐层核验…" : "尚未生成"}</strong>
+          </div>
+          <button type="button" data-action="refresh-profile-readiness" data-id="${escapeHtml(profile.id)}" ${loading ? "disabled" : ""}>
+            ${renderButtonLabel(loading, "开始检查", "检查中…")}
+          </button>
+        </div>
+      </section>
+    `;
+  }
+  const statusLabel = receipt.overall === "ready"
+    ? "可以开工"
+    : receipt.overall === "blocked"
+      ? "存在阻塞"
+      : "需要补证据";
+  const ownership = receipt.checks.find((check) => check.id === "ownership");
+  const foreground = receipt.checks.find((check) => check.id === "foreground");
+  const userOwns = profile.gatewayControl?.ownership === "user" && profile.gatewayControl.sessionStatus === "active";
+  return `
+    <section class="readiness-panel ${receipt.overall}" aria-label="Readiness receipt">
+      <div class="readiness-panel-head">
+        <div class="readiness-verdict">
+          <span>Readiness receipt · ${escapeHtml(formatDate(receipt.generatedAt))}</span>
+          <strong><i aria-hidden="true"></i>${escapeHtml(statusLabel)}</strong>
+          <small>${receipt.blockerCodes.length
+            ? `${receipt.blockerCodes.length} 个阻塞 · ${receipt.blockerCodes.join(" · ")}`
+            : receipt.unknownCodes.length
+              ? `${receipt.unknownCodes.length} 项尚待验证`
+              : "所有必需检查均有可复核证据"}</small>
+        </div>
+        <div class="readiness-actions">
+          ${userOwns ? `<button type="button" class="solid" data-action="return-agent-control" data-id="${escapeHtml(profile.id)}" ${store.busy ? "disabled" : ""}>交还 Agent</button>` : ""}
+          <button type="button" data-action="copy-profile-readiness" data-id="${escapeHtml(profile.id)}">复制 JSON</button>
+          <button type="button" class="${loading ? "loading" : ""}" data-action="refresh-profile-readiness" data-id="${escapeHtml(profile.id)}" ${loading ? "disabled" : ""}>
+            ${renderButtonLabel(loading, "重新检查", "检查中…")}
+          </button>
+        </div>
+      </div>
+      <div class="readiness-control-axis" aria-label="控制权与前台状态">
+        <span><em>逻辑控制权</em><strong>${escapeHtml(ownership?.actual || "未知")}</strong></span>
+        <span><em>窗口前台</em><strong>${escapeHtml(foreground?.actual || windowActivationLabel(profile.windowActivation))}</strong></span>
+      </div>
+      <div class="readiness-checks">
+        ${receipt.checks.map((check) => `
+          <article class="readiness-check ${check.status}">
+            <span class="readiness-check-state" aria-hidden="true"></span>
+            <div>
+              <small>${escapeHtml(check.code)}</small>
+              <strong>${escapeHtml(check.label)}</strong>
+              <p>${escapeHtml(check.actual)}</p>
+              ${check.expected ? `<dl><dt>期望</dt><dd>${escapeHtml(check.expected)}</dd></dl>` : ""}
+              ${check.evidence ? `<dl><dt>证据</dt><dd>${escapeHtml(check.evidence)}</dd></dl>` : ""}
+              ${check.action ? `<aside>${escapeHtml(check.action)}</aside>` : ""}
+            </div>
+          </article>
+        `).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function windowActivationLabel(value: PublicProfile["windowActivation"]): string {
+  if (value === "foreground") return "前台";
+  if (value === "background") return "后台";
+  if (value === "not_running") return "未运行";
+  return "无法确认";
 }
 
 export function renderExternalDetailsModal(instance: ExternalChromeInstance | null): string {

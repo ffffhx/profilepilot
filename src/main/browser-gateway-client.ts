@@ -8,7 +8,7 @@ import type { GatewayControlEvent } from "./browser-gateway-control";
 import type { GatewayDriverKind } from "./browser-gateway-control";
 
 const DEFAULT_TIMEOUT_MS = 3_000;
-export const BROWSER_GATEWAY_PROTOCOL_VERSION = 8;
+export const BROWSER_GATEWAY_PROTOCOL_VERSION = 12;
 
 export type GatewayControlRequest =
   | { action: "ping" }
@@ -22,6 +22,14 @@ export type GatewayControlRequest =
       args: string[];
       env?: Record<string, string>;
       cwd?: string;
+      agentAccessDisabled?: boolean;
+    }
+  | {
+      action: "update-profile-agent-settings";
+      publicPort: number;
+      profileId: string;
+      profileName: string;
+      agentAccessDisabled: boolean;
     }
   | {
       action: "acquire";
@@ -34,6 +42,7 @@ export type GatewayControlRequest =
       restartNonce?: string;
       agent?: string;
       project?: string;
+      branch?: string;
     }
   | {
       action: "control";
@@ -41,8 +50,10 @@ export type GatewayControlRequest =
       command: "takeover" | "complete" | "return" | "stop";
       pendingUserAction?: string;
       revealAgentTarget?: boolean;
+      preserveDeviceEmulation?: boolean;
     }
   | { action: "prepare-daemon-restart"; sessionId: string; daemonInstanceId: string }
+  | { action: "reconnect-failed"; sessionId: string; daemonInstanceId: string }
   | {
       action: "raw-cdp";
       publicPort: number;
@@ -59,6 +70,23 @@ export type GatewayControlRequest =
       sessionId: string;
       daemonInstanceId: string;
       extensionPath: string;
+    }
+  | {
+      action: "trigger-extension-action";
+      publicPort: number;
+      sessionId: string;
+      daemonInstanceId: string;
+      extensionId: string;
+      targetId?: string;
+    }
+  | {
+      action: "device-emulation";
+      publicPort: number;
+      sessionId: string;
+      daemonInstanceId: string;
+      command: "emulate" | "clear" | "status";
+      preset?: string;
+      targetId?: string;
     }
   | { action: "status" }
   | { action: "activate-agent-target"; publicPort: number }

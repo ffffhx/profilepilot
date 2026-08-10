@@ -15,6 +15,7 @@ import type {
   AgentOverlayRevealEvent,
   AccountSyncSkippedItem,
   AppState,
+  BifrostSnapshot,
   BrowserDriverKind,
   CdpClientInfo,
   CdpPortSuggestion,
@@ -24,6 +25,7 @@ import type {
   DeleteProfileOptions,
   DeleteProfileResult,
   LaunchClonesResult,
+  LaunchProfileOptions,
   RecycleIdleClonesResult,
   RefreshClonesResult,
   ExtensionDeleteResult,
@@ -43,6 +45,10 @@ import type {
   OperationPauseSignal,
   OperationProgressUpdate,
   ProfileExtensionInfo,
+  ProfileAgentSettings,
+  ProfileBifrostProxyConfig,
+  ProfileProxyConfig,
+  ProfileUpstreamProxyConfig,
   PublicProfile,
   Registry,
   StoredMigratedExtension,
@@ -52,7 +58,7 @@ import type {
 import { accountSyncCopySpecs, accountSyncDataScore, accountSyncRecordKey, applyAccountSyncRecordBaseline, assertAccountSyncDiskSpace, collectAccountSyncPathStats, copyAccountSyncPath, inspectAccountLocalStateDiff, inspectAccountSyncPathDiff, mergeAccountLocalStateValues, recoverInterruptedAccountSyncArtifactsForProfile, restoreAccountSyncExtensionPreferences, shouldApplyAccountDiffItem, snapshotAccountSyncExtensionPreferences, snapshotAccountSyncSourceFingerprints, summarizeAccountSyncDiff } from "./account-sync";
 import { describePortOwner, findAvailableCdpPort, isPortAvailable, makeCdpUrl, normalizeCdpPortInput, requestCdpTargets, waitForCdp } from "./cdp-client";
 import { appendUniqueExtraUrls, bringCdpPageToFront, closeFreshBlankPagesOverCdp, loadUnpackedExtensionsOverCdp, snapshotPageTargetIds, snapshotRestorableTabUrls } from "./cdp-page";
-import { focusProfileWindow, getDirectChromeCommand, isAnyMacProcessFrontmost, launchChrome, launchDetached, makeIsolatedProfileId, makeIsolatedSubProfileId, makeNativeProfileId, nativeChromeUserDataDir, openChromeUrl, parseProfileId, readIsolatedProfileUserName, removeNativeProfileFromLocalState, removeProfileFromLocalStateIn, resolveIsolatedProfileDataPath, scanChromeProfilesInDir, scanNativeChromeProfiles } from "./chrome-launch";
+import { focusProfileWindow, frontmostMacProcessId, getDirectChromeCommand, isAnyMacProcessFrontmost, launchChrome, launchDetached, makeIsolatedProfileId, makeIsolatedSubProfileId, makeNativeProfileId, nativeChromeUserDataDir, openChromeUrl, parseProfileId, readIsolatedProfileUserName, removeNativeProfileFromLocalState, removeProfileFromLocalStateIn, resolveIsolatedProfileDataPath, scanChromeProfilesInDir, scanNativeChromeProfiles } from "./chrome-launch";
 import { canAutoLoadUnpackedExtensions, canLoadLocalExtensionViaCdp, canPersistExtensionInstall, copyExtensionDataPath, copyExtensionPackageToProfile, extensionDataDiffers, getMigratedExtensionLaunchPlan, getProtectedDeveloperModeRecord, inspectExtensionMigrationItem, isExtensionMigrationActionItem, isManualLoadSkipReason, isProfileRelativeExtensionSetting, makeStoredMigratedExtensionId, manualLoadExtensionReason, readProtectedExtensionInstallRecord, removeExtensionReferencesFromProfilePreferences, summarizeExtensionMigrationDiff, writeProtectedExtensionInstallRecord } from "./extension-migration";
 import { extensionDeleteRelativePaths, isLikelyExtensionId, scanProfileExtensions } from "./extension-scan";
 import { copyPath, throwIfAborted, waitIfPaused } from "./fs-copy";
@@ -81,11 +87,24 @@ import { getShellIntegrationStatus } from "./shell-integration";
 import { addRuntimeProcess, attachListeningPorts, emptyRuntimeProfile, findExternalChromeInstances, getCdpClientsByPort, getChromeProcessPids, getOpenProfilePidsByPath, isChromeRunning, isImplicitDefaultChromeProcess, makeNativeRuntimeKey, mergeRuntimeProfiles, parseRuntimeProcess } from "./process-scan";
 import { ProfileManagerError } from "./profile-manager-error";
 import {
+  canHotUpdateProfileBifrostProxy,
+  disableBifrostRule as disableMainBifrostRule,
+  destroyProfileBifrostProxy,
+  ensureProfileBifrostProxy,
+  ensureUpstreamProxy,
+  getBifrostSnapshot as readBifrostSnapshot,
+  startBifrostIfNeeded,
+  type BifrostRuleReference,
+  validateBifrostProxyConfig,
+  validateUpstreamProxyConfig
+} from "./bifrost-proxy";
+import {
   clearBrowserGatewayDaemonIdentity,
   ensureBrowserGatewayDaemon,
   requestBrowserGateway,
   type GatewayControlResponse
 } from "./browser-gateway-client";
+import { resolveCanonicalSessionIdentity } from "./session-identity";
 
 export { ProfileManagerError } from "./profile-manager-error";
 
@@ -201,6 +220,18 @@ export class ProfileManager {
     // 挂到各自所属的隔离目录组下，和系统 Profile 一样成行展示（支持启动/显示）。
     const isolatedSubProfiles = await this.buildIsolatedSubProfiles(registry, runtime);
     const profiles = [...nativeProfiles, ...isolatedProfiles, ...isolatedSubProfiles];
+    const frontmostPid = process.env.CPM_E2E_DETERMINISTIC === "1"
+      ? null
+      : await frontmostMacProcessId();
+    profiles.forEach((profile) => {
+      profile.windowActivation = !profile.running
+        ? "not_running"
+        : process.platform !== "darwin" || frontmostPid === null
+          ? "unknown"
+          : profile.pids.includes(frontmostPid)
+            ? "foreground"
+            : "background";
+    });
 
     // 补算副本组信息：每个副本解析出源名，每个源统计有多少副本指向它。
     const profileNameById = new Map(profiles.map((profile) => [profile.id, profile.name]));
@@ -286,6 +317,10 @@ export class ProfileManager {
       });
       instance.agentActivity = null;
     });
+    await enrichCdpClientSessionIdentities([
+      ...profiles.flatMap((profile) => profile.cdpClients),
+      ...externalInstances.flatMap((instance) => instance.cdpClients || [])
+    ]);
     await this.autoDisconnectStaleAgentBrowserClients(profiles, externalInstances);
     // 自动回收可能刚释放了旧租约；写快照和返回 UI 前再读一次，保证“空闲/已占用”
     // 与 wrapper 下一步的候选筛选看到的是同一时刻状态。
@@ -348,7 +383,12 @@ export class ProfileManager {
             headless: false,
             browserPids: profile.browserPids || [],
             controlPaused: control.paused,
+            pendingUserAction: profile.gatewayControl?.pendingUserAction || control.pendingUserAction,
             agentOffline: control.agentOffline,
+            driverReconnecting: Boolean(
+              profile.gatewayControl &&
+              (profile.gatewayControl.driverState === "connecting" || profile.gatewayControl.driverState === "reconnecting")
+            ),
             controlSince: control.controlSince,
             agentTarget: profile.gatewayControl?.agentTarget || null,
             clients
@@ -368,7 +408,9 @@ export class ProfileManager {
             headless: instance.headless,
             browserPids: [instance.pid],
             controlPaused: control.paused,
+            pendingUserAction: control.pendingUserAction,
             agentOffline: control.agentOffline,
+            driverReconnecting: false,
             controlSince: control.controlSince,
             agentTarget: null,
             clients
@@ -498,7 +540,7 @@ export class ProfileManager {
     await this.saveRegistry(registry);
   }
 
-  async launchProfile(profileId: string): Promise<void> {
+  async launchProfile(profileId: string, options: LaunchProfileOptions = {}): Promise<void> {
     assertDisposableE2eProfile(profileId);
     this.acquireLaunchLock(profileId);
     try {
@@ -515,7 +557,7 @@ export class ProfileManager {
         return;
       }
 
-      await this.launchIsolatedProfile(this.requireIsolatedId(ref));
+      await this.launchIsolatedProfile(this.requireIsolatedId(ref), options);
     } finally {
       this.inFlightLaunches.delete(profileId);
     }
@@ -530,7 +572,7 @@ export class ProfileManager {
     await launchChrome([`--user-data-dir=${userDataDir}`, `--profile-directory=${dirName}`, "--no-first-run"]);
   }
 
-  async launchProfileWithCdp(profileId: string, portInput?: number | null): Promise<void> {
+  async launchProfileWithCdp(profileId: string, portInput?: number | null, options: LaunchProfileOptions = {}): Promise<void> {
     const ref = parseProfileId(profileId);
     if (ref.source === "native") {
       throw new ProfileManagerError(
@@ -542,7 +584,7 @@ export class ProfileManager {
     this.acquireLaunchLock(profileId);
     try {
       await this.recoverAccountSyncArtifactsBeforeLaunch(profileId);
-      await this.launchIsolatedProfileWithCdp(this.requireIsolatedId(ref), portInput);
+      await this.launchIsolatedProfileWithCdp(this.requireIsolatedId(ref), portInput, options);
     } finally {
       this.inFlightLaunches.delete(profileId);
     }
@@ -587,6 +629,175 @@ export class ProfileManager {
       // 端口被占时给出 CDP_PORT_UNAVAILABLE 硬停信号：保留建议命令，但要求先征得用户同意。
       signal: resolveSignal({ kind: "cdp-port", available: preferredAvailable, preferredPort, suggestedPort: port, owner: preferredOwner })
     };
+  }
+
+  async getBifrostSnapshot(): Promise<BifrostSnapshot> {
+    // 收集直连上游做探活，同时只读取 Profile 实际引用的 Bifrost 规则，
+    // 把 localhost / PPE / BOE 语义化去向带回列表。
+    const endpoints = new Set<string>();
+    const ruleReferences: BifrostRuleReference[] = [];
+    for (const profile of (await this.loadRegistry()).profiles) {
+      if (profile.upstreamProxy?.server) endpoints.add(profile.upstreamProxy.server);
+      profile.bifrostProxy?.rules.forEach((ref) => ruleReferences.push({ kind: "local", ref }));
+      profile.bifrostProxy?.groupRules.forEach((ref) => ruleReferences.push({ kind: "group", ref }));
+    }
+    return readBifrostSnapshot(process.env, [...endpoints], ruleReferences);
+  }
+
+  async disableBifrostRule(ruleName: string): Promise<void> {
+    await disableMainBifrostRule(ruleName, process.env);
+  }
+
+  // 统一的 Profile 代理配置入口：union 判别式决定写入 bifrostProxy 还是 upstreamProxy，两者互斥。
+  async setProfileProxy(profileId: string, configInput: ProfileProxyConfig | null): Promise<void> {
+    const ref = parseProfileId(profileId);
+    if (ref.source !== "isolated") {
+      throw new ProfileManagerError(
+        "代理分流只支持 ProfilePilot 创建的独立 Profile。",
+        "BIFROST_PROXY_ISOLATED_REQUIRED"
+      );
+    }
+
+    const currentProfile = (await this.getState()).profiles.find((profile) => profile.id === profileId);
+    const registry = await this.loadRegistry();
+    const profile = this.findIsolatedProfile(registry, this.requireIsolatedId(ref));
+
+    const bifrostConfig = configInput?.kind === "bifrost" ? validateBifrostProxyConfig(configInput) : null;
+    const upstreamConfig = configInput?.kind === "upstream" ? validateUpstreamProxyConfig(configInput) : null;
+    const hotUpdate = Boolean(
+      currentProfile?.running &&
+      canHotUpdateProfileBifrostProxy(profile.bifrostProxy, bifrostConfig)
+    );
+
+    if (currentProfile?.running && !hotUpdate) {
+      throw new ProfileManagerError(
+        "运行中只支持在入口端口不变时热更新 Bifrost 规则。停用分流、切换代理模式或修改入口端口前，请先关闭这个 Profile。",
+        "PROFILE_RUNNING"
+      );
+    }
+
+    if (bifrostConfig) {
+      this.assertProxyListenerPortFree(registry, profile.id, bifrostConfig.listenerPort);
+    }
+
+    if (hotUpdate && bifrostConfig && profile.bifrostProxy) {
+      const previousConfig = profile.bifrostProxy;
+      await ensureProfileBifrostProxy(profile.id, bifrostConfig, process.env);
+      profile.bifrostProxy = bifrostConfig;
+      profile.upstreamProxy = null;
+      try {
+        await this.saveRegistry(registry);
+      } catch (error) {
+        await ensureProfileBifrostProxy(profile.id, previousConfig, process.env).catch(() => undefined);
+        throw error;
+      }
+      return;
+    }
+
+    // 切换模式或换端口时，回收旧的 Bifrost 端口绑定。
+    const previousPort = profile.bifrostProxy?.listenerPort ?? null;
+    if (previousPort !== null && previousPort !== bifrostConfig?.listenerPort) {
+      await destroyProfileBifrostProxy(profile.id, previousPort);
+    }
+    profile.bifrostProxy = bifrostConfig;
+    profile.upstreamProxy = upstreamConfig;
+    await this.saveRegistry(registry);
+  }
+
+  async setProfileAgentSettings(profileId: string, settingsInput: ProfileAgentSettings): Promise<void> {
+    const ref = parseProfileId(profileId);
+    if (ref.source !== "isolated") {
+      throw new ProfileManagerError(
+        "Agent 使用设置只支持 ProfilePilot 创建的独立 Profile。",
+        "AGENT_SETTINGS_ISOLATED_REQUIRED"
+      );
+    }
+    const agentAccessDisabled = settingsInput?.agentAccessDisabled === true;
+    const current = (await this.getState()).profiles.find((profile) => profile.id === profileId) || null;
+    const registry = await this.loadRegistry();
+    const profile = this.findIsolatedProfile(registry, this.requireIsolatedId(ref));
+    const previousAgentAccessDisabled = profile.agentAccessDisabled === true;
+    profile.agentAccessDisabled = agentAccessDisabled;
+    await this.saveRegistry(registry);
+
+    const publicPort = current?.cdpPort ?? profile.fixedCdpPort ?? null;
+    const gatewayManaged = Boolean(publicPort && current?.gatewayControl);
+    let gatewayPolicyRpcApplied = false;
+    try {
+      if (publicPort && gatewayManaged) {
+        const gatewayStatus = await requestBrowserGateway(
+          { action: "status" },
+          { timeoutMs: 3_000 }
+        );
+        if (Number(gatewayStatus.protocolVersion) >= 12) {
+          gatewayPolicyRpcApplied = true;
+          await requestBrowserGateway({
+            action: "update-profile-agent-settings",
+            publicPort,
+            profileId,
+            profileName: profile.name,
+            agentAccessDisabled
+          }, { timeoutMs: 5_000 });
+        } else if (agentAccessDisabled) {
+          // 活跃 Chrome pipe 会让旧 Gateway 延迟协议升级。先用旧协议已有的 stop
+          // 权威撤销执行权，再结束驱动进程；新 wrapper 会从注册表持续拒绝后续连接。
+          const sessionId = current?.gatewayControl?.ownerSessionId;
+          if (sessionId) {
+            await requestBrowserGateway({
+              action: "control",
+              sessionId,
+              command: "stop"
+            }, { timeoutMs: 5_000 }).catch((error) => {
+              const code = (error as { code?: unknown } | null)?.code;
+              if (code !== "AGENT_TASK_STOPPED") throw error;
+            });
+          }
+          for (const client of current?.cdpClients.filter(isManagedBrowserDriverClient) || []) {
+            await this.terminateCdpClient(client.pid);
+            await this.removeAgentBrowserSessionFiles(client).catch(() => undefined);
+          }
+        }
+      } else if (agentAccessDisabled && current?.cdpClients.length) {
+        for (const client of current.cdpClients.filter(isManagedBrowserDriverClient)) {
+          await this.disconnectCdpClient(profileId, client.pid);
+        }
+      }
+    } catch (error) {
+      profile.agentAccessDisabled = previousAgentAccessDisabled;
+      await this.saveRegistry(registry).catch(() => undefined);
+      if (publicPort && gatewayPolicyRpcApplied) {
+        await requestBrowserGateway({
+          action: "update-profile-agent-settings",
+          publicPort,
+          profileId,
+          profileName: profile.name,
+          agentAccessDisabled: previousAgentAccessDisabled
+        }, { timeoutMs: 3_000 }).catch(() => undefined);
+      }
+      throw new ProfileManagerError(
+        `无法应用 Agent 连接策略：${errorMessage(error)}`,
+        "AGENT_SETTINGS_APPLY_FAILED"
+      );
+    }
+  }
+
+  private assertProxyListenerPortFree(registry: Registry, profileId: string, listenerPort: number): void {
+    const portOwner = registry.profiles.find(
+      (candidate) => candidate.id !== profileId && candidate.bifrostProxy?.listenerPort === listenerPort
+    );
+    if (portOwner) {
+      throw new ProfileManagerError(
+        `Bifrost 入口端口 ${listenerPort} 已绑定给 Profile“${portOwner.name}”。`,
+        "BIFROST_PORT_IN_USE"
+      );
+    }
+    const cdpOwner = registry.profiles.find((candidate) => candidate.fixedCdpPort === listenerPort);
+    if (cdpOwner) {
+      throw new ProfileManagerError(
+        `端口 ${listenerPort} 已作为 Profile“${cdpOwner.name}”的固定 CDP 端口。`,
+        "BIFROST_PORT_IN_USE"
+      );
+    }
   }
 
   async setMiniProfilePinned(profileId: string, pinned: boolean): Promise<void> {
@@ -2617,10 +2828,13 @@ export class ProfileManager {
     await this.saveRegistry(registry);
   }
 
-  private async launchIsolatedProfile(id: string): Promise<void> {
+  private async launchIsolatedProfile(id: string, options: LaunchProfileOptions = {}): Promise<void> {
     const registry = await this.loadRegistry();
     const profile = this.findIsolatedProfile(registry, id);
-    const cdpPort = await this.launchStoredIsolatedProfile(profile);
+    const cdpPort = await this.launchStoredIsolatedProfile(profile, {
+      bypassProxy: options.bypassProxy,
+      startBifrost: options.startBifrost
+    });
     profile.lastLaunchedAt = new Date().toISOString();
     if (cdpPort !== null) {
       profile.lastCdpPort = cdpPort;
@@ -2628,7 +2842,7 @@ export class ProfileManager {
     await this.saveRegistry(registry);
   }
 
-  private async launchIsolatedProfileWithCdp(id: string, portInput?: number | null): Promise<void> {
+  private async launchIsolatedProfileWithCdp(id: string, portInput?: number | null, options: LaunchProfileOptions = {}): Promise<void> {
     const registry = await this.loadRegistry();
     const profile = this.findIsolatedProfile(registry, id);
     const currentState = await this.getState();
@@ -2639,7 +2853,12 @@ export class ProfileManager {
 
     // 用户没显式填端口时，回落到该 Profile 绑定的固定端口（用于 Agent 调试的恒定端点）。
     const requestedPort = normalizeCdpPortInput(portInput) ?? profile.fixedCdpPort ?? null;
-    const cdpPort = await this.launchStoredIsolatedProfile(profile, { cdpPort: requestedPort, forceCdp: true });
+    const cdpPort = await this.launchStoredIsolatedProfile(profile, {
+      cdpPort: requestedPort,
+      forceCdp: true,
+      bypassProxy: options.bypassProxy,
+      startBifrost: options.startBifrost
+    });
     profile.lastLaunchedAt = new Date().toISOString();
     profile.lastCdpPort = cdpPort;
     await this.saveRegistry(registry);
@@ -2699,11 +2918,21 @@ export class ProfileManager {
 
   private async launchStoredIsolatedProfile(
     profile: StoredProfile,
-    options: { urls?: string[]; cdpPort?: number | null; forceCdp?: boolean } = {}
+    options: {
+      urls?: string[];
+      cdpPort?: number | null;
+      forceCdp?: boolean;
+      bypassProxy?: boolean;
+      startBifrost?: boolean;
+    } = {}
   ): Promise<number | null> {
     const profilePath = this.isolatedProfilePath(profile);
     await fs.mkdir(profilePath, { recursive: true });
     const launchPlan = await getMigratedExtensionLaunchPlan(profile);
+    // bypassProxy 是代理不可用时的一次性直连逃生口：跳过代理注入，不改已保存配置。
+    const proxyArgs = options.bypassProxy
+      ? []
+      : await this.ensureProxyForLaunch(profile, { startBifrost: options.startBifrost });
     const needsRuntimeCdp = launchPlan.runtimeLoadPaths.length > 0;
     const shouldStartCdp = Boolean(options.forceCdp || needsRuntimeCdp);
     let cdpPort: number | null = null;
@@ -2730,6 +2959,7 @@ export class ProfileManager {
     const chromeArgs = [
       `--user-data-dir=${profilePath}`,
       "--no-first-run",
+      ...proxyArgs,
       ...launchPlan.launchArgs,
       ...cdpArgs,
       ...(options.urls || [])
@@ -2745,6 +2975,7 @@ export class ProfileManager {
         profileId: makeIsolatedProfileId(profile.id),
         profileName: profile.name,
         publicPort: cdpPort,
+        agentAccessDisabled: profile.agentAccessDisabled === true,
         executable,
         args: chromeArgs
       }, { timeoutMs: 8_000 });
@@ -2760,6 +2991,31 @@ export class ProfileManager {
     }
 
     return cdpPort;
+  }
+
+  // 启动前恢复该 Profile 的代理入口。IPC 序列化会丢掉 ProfileManagerError.code，
+  // 这里把错误码内嵌进 message（[CODE] 前缀），渲染层据此提供“本次直连启动”的逃生口。
+  private async ensureProxyForLaunch(
+    profile: StoredProfile,
+    options: { startBifrost?: boolean } = {}
+  ): Promise<string[]> {
+    try {
+      if (profile.bifrostProxy) {
+        if (options.startBifrost) {
+          await startBifrostIfNeeded(process.env);
+        }
+        return await ensureProfileBifrostProxy(profile.id, profile.bifrostProxy, process.env);
+      }
+      if (profile.upstreamProxy) {
+        return await ensureUpstreamProxy(profile.upstreamProxy);
+      }
+      return [];
+    } catch (error) {
+      if (error instanceof ProfileManagerError && (error.code.startsWith("BIFROST_") || error.code.startsWith("UPSTREAM_"))) {
+        throw new ProfileManagerError(`[${error.code}] ${error.message}`, error.code);
+      }
+      throw error;
+    }
   }
 
   private async gatewayProfileForPort(publicPort: number): Promise<Record<string, unknown> | null> {
@@ -2911,6 +3167,9 @@ export class ProfileManager {
       // 移废纸篓失败：把刚移除的条目回滚回去，保持 registry 与磁盘一致。
       await this.saveRegistry(registry).catch(() => undefined);
       throw error;
+    }
+    if (storedProfile.bifrostProxy) {
+      await destroyProfileBifrostProxy(storedProfile.id, storedProfile.bifrostProxy.listenerPort);
     }
 
     return {
@@ -3169,11 +3428,14 @@ export class ProfileManager {
       isDefault: profile.isDefault,
       deletable: !profile.isDefault,
       running: runtimeProfile.pids.length > 0,
+      windowActivation: runtimeProfile.pids.length ? "unknown" : "not_running",
       pids: runtimeProfile.pids,
       browserPids: runtimeProfile.browserPids || [],
       cdpPort: runtimeProfile.cdpPort,
       cdpUrl: makeCdpUrl(runtimeProfile.cdpPort),
       fixedCdpPort: null,
+      bifrostProxy: null,
+      upstreamProxy: null,
       listeningPorts: runtimeProfile.listeningPorts,
       pinnedToMini: false,
       quickLaunchSlot: null,
@@ -3181,6 +3443,7 @@ export class ProfileManager {
       clonedFromName: null,
       cloneCount: 0,
       projectTag: null,
+      agentAccessDisabled: false,
       cdpClients: [],
       gatewayControl: null,
       agentBrowserOccupancy: null,
@@ -3211,11 +3474,14 @@ export class ProfileManager {
       isDefault: false,
       deletable: true,
       running: runtimeProfile.pids.length > 0,
+      windowActivation: runtimeProfile.pids.length ? "unknown" : "not_running",
       pids: runtimeProfile.pids,
       browserPids: runtimeProfile.browserPids || [],
       cdpPort: runtimeProfile.cdpPort,
       cdpUrl: makeCdpUrl(runtimeProfile.cdpPort),
       fixedCdpPort: profile.fixedCdpPort ?? null,
+      bifrostProxy: profile.bifrostProxy ?? null,
+      upstreamProxy: profile.upstreamProxy ?? null,
       listeningPorts: runtimeProfile.listeningPorts,
       pinnedToMini: false,
       quickLaunchSlot: null,
@@ -3223,6 +3489,7 @@ export class ProfileManager {
       clonedFromName: null,
       cloneCount: 0,
       projectTag: profile.projectTag ?? null,
+      agentAccessDisabled: profile.agentAccessDisabled === true,
       cdpClients: [],
       gatewayControl: null,
       agentBrowserOccupancy: null,
@@ -3300,12 +3567,15 @@ export class ProfileManager {
       // 本工具没登记它，不提供同步/克隆/改名——但支持删除（删目录 + 从父目录 Local State 摘除记录）。
       deletable: true,
       running: pids.length > 0,
+      windowActivation: pids.length ? "unknown" : "not_running",
       pids,
       browserPids,
       // 与父隔离实例共享同一个 CDP 端口（CDP 是浏览器实例级）。
       cdpPort: parentCdpPort,
       cdpUrl: makeCdpUrl(parentCdpPort),
       fixedCdpPort: null,
+      bifrostProxy: null,
+      upstreamProxy: null,
       listeningPorts: [],
       pinnedToMini: false,
       quickLaunchSlot: null,
@@ -3313,6 +3583,7 @@ export class ProfileManager {
       clonedFromName: null,
       cloneCount: 0,
       projectTag: null,
+      agentAccessDisabled: false,
       cdpClients: [],
       gatewayControl: null,
       agentBrowserOccupancy: null,
@@ -3752,6 +4023,7 @@ export interface AgentControlClientsStatus {
   paused: boolean;
   agentOffline: boolean;
   controlSince?: string;
+  pendingUserAction?: string;
 }
 
 export async function agentControlStatusForClients(
@@ -3815,7 +4087,15 @@ export async function agentControlStatusForClients(
     const session = safeAgentBrowserSessionName(notice.session || group.find((client) => client.session)?.session);
     return Boolean(session) && !readActiveAgentBrowserControlWaitStateSync(session, homeDir);
   });
-  return { paused: true, agentOffline, controlSince };
+  const pendingUserAction = notices
+    .map((notice) => typeof notice.pendingUserAction === "string" ? notice.pendingUserAction.replace(/\s+/g, " ").trim() : "")
+    .find(Boolean);
+  return {
+    paused: true,
+    agentOffline,
+    controlSince,
+    ...(pendingUserAction ? { pendingUserAction } : {})
+  };
 }
 
 async function readActiveAgentControlNotice(
@@ -3966,7 +4246,7 @@ export function compatibilityCdpPorts(
 export function agentBrowserRuntimeProfilesFromPublicProfiles(
   profiles: Array<Pick<PublicProfile,
     "id" | "name" | "source" | "running" | "cdpPort" | "fixedCdpPort" |
-    "clonedFromProfileId" | "projectTag" | "lastLaunchedAt"
+    "clonedFromProfileId" | "projectTag" | "agentAccessDisabled" | "lastLaunchedAt"
   >>
 ): AgentBrowserRuntimeProfile[] {
   return profiles
@@ -3981,6 +4261,7 @@ export function agentBrowserRuntimeProfilesFromPublicProfiles(
       source: profile.source,
       clonedFromProfileId: profile.clonedFromProfileId || undefined,
       projectTag: profile.projectTag || undefined,
+      agentAccessDisabled: profile.agentAccessDisabled,
       lastLaunchedAt: profile.lastLaunchedAt || undefined,
       running: profile.running && profile.cdpPort !== null
     }));
@@ -4014,6 +4295,19 @@ function gatewayControlsByPort(response: GatewayControlResponse | null): Map<num
       ? profile.agentHealth
       : null;
     if (!ownership || !sessionStatus || !agentHealth) continue;
+    const driverState = profile.driverState === "disconnected" ||
+      profile.driverState === "connecting" ||
+      profile.driverState === "connected" ||
+      profile.driverState === "reconnecting" ||
+      profile.driverState === "parked"
+      ? profile.driverState
+      : sessionStatus === "stopped"
+        ? "disconnected"
+        : ownership === "user"
+          ? "parked"
+          : profile.connectionActive === true
+            ? "connected"
+            : "reconnecting";
     const ownerSessionId = stringField(profile.ownerSessionId) || null;
     const pendingUserAction = stringField(profile.pendingUserAction) || (
       ownership === "user" && sessionStatus === "active" && ownerSessionId
@@ -4025,6 +4319,9 @@ function gatewayControlsByPort(response: GatewayControlResponse | null): Map<num
       ownership,
       sessionStatus,
       agentHealth,
+      driverState,
+      reconnectAttempt: nonNegativeInteger(profile.reconnectAttempt),
+      reconnectDeadlineAt: stringField(profile.reconnectDeadlineAt) || null,
       connectionActive: profile.connectionActive === true,
       ownerSessionId,
       daemonInstanceId: stringField(profile.daemonInstanceId) || null,
@@ -4033,6 +4330,7 @@ function gatewayControlsByPort(response: GatewayControlResponse | null): Map<num
       driverLabel: stringField(profile.driverLabel) || null,
       agent: stringField(profile.agent) || null,
       project: stringField(profile.project) || null,
+      branch: stringField(profile.branch) || null,
       agentTarget: gatewayAgentTarget(profile.agentTarget),
       pendingUserAction,
       updatedAt: stringField(profile.updatedAt) || new Date().toISOString()
@@ -4057,6 +4355,27 @@ function gatewayDriverKind(value: unknown): BrowserDriverKind | null {
   return value === "agent-browser" || value === "playwright-cli" || value === "chrome-devtools-mcp"
     ? value
     : null;
+}
+
+async function enrichCdpClientSessionIdentities(clients: CdpClientInfo[]): Promise<void> {
+  const bySession = new Map<string, CdpClientInfo[]>();
+  for (const client of clients) {
+    if (!client.session) continue;
+    const group = bySession.get(client.session) || [];
+    group.push(client);
+    bySession.set(client.session, group);
+  }
+  await Promise.all(
+    [...bySession.entries()].map(async ([session, sessionClients]) => {
+      const identity = await resolveCanonicalSessionIdentity(session);
+      if (!identity) return;
+      for (const client of sessionClients) {
+        client.canonicalSessionId = identity.canonicalSessionId;
+        client.sessionRepresentations = identity.representations;
+        client.sessionDiagnostics = identity.diagnostics;
+      }
+    })
+  );
 }
 
 export function pendingUserActionFromControlNoticeSync(
@@ -4091,6 +4410,11 @@ function positiveInteger(value: unknown): number | null {
   return Number.isSafeInteger(number) && number > 0 ? number : null;
 }
 
+function nonNegativeInteger(value: unknown): number | null {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 0 ? number : null;
+}
+
 function gatewayControlClient(control: GatewayProfileControlState): CdpClientInfo | null {
   if (control.sessionStatus !== "active" || !control.ownerSessionId || !control.daemonPid) return null;
   const label = control.driverLabel || browserDriverLabel(control.driverKind);
@@ -4100,6 +4424,7 @@ function gatewayControlClient(control: GatewayProfileControlState): CdpClientInf
     driverKind: control.driverKind || undefined,
     agent: control.agent || undefined,
     project: control.project || undefined,
+    branch: control.branch || undefined,
     title: `${label} Gateway Session`,
     session: control.ownerSessionId,
     lastActive: control.updatedAt,
@@ -4140,15 +4465,35 @@ function gatewayOverlayClients(profile: PublicProfile): CdpClientInfo[] {
   return mergeGatewayControlClient(profile.cdpClients, profile.gatewayControl).filter(isAgentOverlayClient);
 }
 
-function gatewayOverlayControl(control: GatewayProfileControlState): {
+export function gatewayOverlayControl(
+  control: GatewayProfileControlState,
+  homeDir = os.homedir(),
+  now = Date.now()
+): {
   paused: boolean;
   agentOffline: boolean;
   controlSince: string | undefined;
+  pendingUserAction: string | undefined;
 } {
+  const paused = control.ownership === "user";
+  const session = safeAgentBrowserSessionName(control.ownerSessionId || undefined);
+  const delegatedAt = Date.parse(control.updatedAt || "");
+  const waiterOffline = Boolean(
+    paused &&
+    control.sessionStatus === "active" &&
+    control.driverKind === "agent-browser" &&
+    session &&
+    Number.isFinite(delegatedAt) &&
+    now - delegatedAt >= AGENT_CONTROL_WAITER_OFFLINE_GRACE_MS &&
+    !readActiveAgentBrowserControlWaitStateSync(session, homeDir)
+  );
   return {
-    paused: control.ownership === "user",
-    agentOffline: control.agentHealth === "offline",
-    controlSince: control.updatedAt || undefined
+    paused,
+    agentOffline: waiterOffline || (control.driverState
+      ? control.driverState === "disconnected"
+      : control.agentHealth === "offline"),
+    controlSince: control.updatedAt || undefined,
+    pendingUserAction: control.pendingUserAction || undefined
   };
 }
 

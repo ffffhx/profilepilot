@@ -1,5 +1,7 @@
 const assert = require("node:assert/strict");
+const { execFileSync } = require("node:child_process");
 const { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
+const http = require("node:http");
 const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
@@ -9,14 +11,17 @@ const {
   PROFILEPILOT_AGENT_BROWSER_HARD_STOP_EXIT_CODE,
   PROFILEPILOT_AGENT_BROWSER_LEASE_CONFLICT_EXIT_CODE,
   PROFILEPILOT_AGENT_BROWSER_USAGE_EXIT_CODE,
+  acquireProfileLeaseForCommandWithAutomaticSwitch,
   agentBrowserCommandName,
   cdpPortFromAgentBrowserArgs,
   clearProfilePilotNoticesForSession,
   consumeProfilePilotReturnNotice,
   findActiveProfilePilotNotice,
+  formatAutomaticProfileSwitch,
   formatControlReturnedNotice,
   formatHardStopNotice,
   formatProfileLeaseConflict,
+  formatControlledRawCdpFailure,
   replaceCdpPortInAgentBrowserArgs,
   resolveRealAgentBrowser,
   runAgentBrowserWrapper,
@@ -27,6 +32,7 @@ const {
   acquireAgentBrowserProfileLeaseSync,
   findAgentBrowserProfileLeaseForSessionSync,
   readAgentBrowserProfileLeaseSync,
+  setConfiguredAgentBrowserProfileBifrostProxySync,
   setAgentBrowserProfileLeasesDelegatedSync,
   writeAgentBrowserRuntimeProfilesSync
 } = require("../dist/main/agent-browser-lease.js");
@@ -36,6 +42,7 @@ const {
   readActiveAgentBrowserCommandStateSync,
   readActiveAgentBrowserControlWaitStateSync,
   readActiveAgentBrowserSessionActivityClientsByPort,
+  repositoryIdentityFromCwd,
   writeAgentBrowserCommandStateSync,
   writeAgentBrowserSessionActivitySync
 } = require("../dist/main/agent-browser-session.js");
@@ -60,7 +67,154 @@ test("agent-browser wrapper checks notices only for browser operations", () => {
   assert.equal(shouldCheckProfilePilotNotice(["--version"]), false);
 });
 
-test("agent-browser wrapper rewrites CDP arguments for a user-approved Profile switch", () => {
+test("profilepilot profiles uses Profile names as selection hints and publishes blocked access", async () => {
+  const home = path.join(os.tmpdir(), `profilepilot-agent-catalog-${process.pid}-${Date.now()}`);
+  writeAgentBrowserRuntimeProfilesSync([
+    {
+      profileId: "isolated:ppe",
+      profileName: "PPE 验证",
+      cdpPort: 9223,
+      running: false
+    },
+    {
+      profileId: "isolated:private",
+      profileName: "生产账号",
+      cdpPort: 9224,
+      running: true,
+      agentAccessDisabled: true
+    }
+  ], home);
+  const writes = captureProcessWrites();
+  try {
+    assert.equal(await runAgentBrowserWrapper(["profilepilot", "profiles"], { HOME: home }), 0);
+    const output = JSON.parse(writes.stdout.join(""));
+    assert.match(output.selection_guidance, /Profile 名称就是选择提示/);
+    assert.deepEqual(output.profiles.map((profile) => ({
+      cdpPort: profile.cdp_port,
+      available: profile.available,
+      access: profile.agent_access,
+      selectionHint: profile.selection_hint
+    })), [
+      { cdpPort: 9223, available: true, access: "allowed", selectionHint: "PPE 验证" },
+      { cdpPort: 9224, available: false, access: "blocked", selectionHint: "生产账号" }
+    ]);
+  } finally {
+    writes.restore();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("profilepilot readiness returns a structured hard stop when the target Profile is unresolved", async () => {
+  const home = makeTempHome();
+  const writes = captureProcessWrites();
+  try {
+    const exitCode = await runAgentBrowserWrapper([
+      "--session",
+      "cx-12345678-1234-1234-1234-123456789abc",
+      "profilepilot",
+      "readiness",
+      "--expect-profile",
+      "PPE 验证"
+    ], { HOME: home });
+    assert.equal(exitCode, PROFILEPILOT_AGENT_BROWSER_HARD_STOP_EXIT_CODE);
+    const receipt = JSON.parse(writes.stderr.join(""));
+    assert.equal(receipt.version, 1);
+    assert.equal(receipt.overall, "blocked");
+    assert.deepEqual(receipt.blocker_codes, ["TARGET_PROFILE_UNRESOLVED"]);
+  } finally {
+    writes.restore();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("raw CDP policy rejection is a controlled error rather than a hard stop", () => {
+  const error = Object.assign(
+    new Error("Raw CDP method denied: Target.closeTarget"),
+    { code: "RAW_CDP_METHOD_DENIED" }
+  );
+  const output = formatControlledRawCdpFailure(
+    error,
+    ["--cdp", "9224", "profilepilot", "cdp", "call", "Target.closeTarget"],
+    { AGENT_BROWSER_SESSION: "cx-one" }
+  );
+
+  assert.match(output, /"error_code": "RAW_CDP_METHOD_DENIED"/);
+  assert.match(output, /"hard_stop": false/);
+  assert.match(output, /"session": "cx-one"/);
+  assert.match(output, /"cdp_port": 9224/);
+});
+
+test("a bounded raw CDP call timeout does not incorrectly hard-stop a healthy Gateway", () => {
+  const error = Object.assign(
+    new Error("CDP call Runtime.evaluate timed out"),
+    { code: "CDP_CALL_TIMEOUT" }
+  );
+  const output = formatControlledRawCdpFailure(
+    error,
+    ["--cdp", "9224", "profilepilot", "cdp", "call", "Runtime.evaluate"],
+    { AGENT_BROWSER_SESSION: "cx-one" }
+  );
+
+  assert.match(output, /"error_code": "CDP_CALL_TIMEOUT"/);
+  assert.match(output, /"hard_stop": false/);
+  assert.match(output, /调用已超时并被终止/);
+});
+
+test("a missing raw CDP page target is recoverable and does not hard-stop the Gateway", () => {
+  const error = Object.assign(
+    new Error("页面 Target stale-target 不存在"),
+    { code: "AGENT_TARGET_NOT_FOUND" }
+  );
+  const output = formatControlledRawCdpFailure(
+    error,
+    [
+      "--cdp",
+      "9224",
+      "profilepilot",
+      "cdp",
+      "call",
+      "Runtime.evaluate",
+      "--target",
+      "stale-target"
+    ],
+    { AGENT_BROWSER_SESSION: "cx-one" }
+  );
+
+  assert.match(output, /"error_code": "AGENT_TARGET_NOT_FOUND"/);
+  assert.match(output, /"hard_stop": false/);
+  assert.match(output, /Target\.getTargets/);
+});
+
+test("a page-level raw CDP protocol error does not masquerade as a Gateway hard stop", () => {
+  const error = Object.assign(
+    new Error("Script not found"),
+    {
+      code: "GATEWAY_ERROR",
+      detail: {
+        error_code: "GATEWAY_ERROR",
+        message: "Script not found"
+      }
+    }
+  );
+  const output = formatControlledRawCdpFailure(
+    error,
+    [
+      "--cdp",
+      "9224",
+      "profilepilot",
+      "cdp",
+      "call",
+      "Page.removeScriptToEvaluateOnNewDocument"
+    ],
+    { AGENT_BROWSER_SESSION: "cx-one" }
+  );
+
+  assert.match(output, /"error_code": "GATEWAY_ERROR"/);
+  assert.match(output, /"hard_stop": false/);
+  assert.match(output, /Gateway 连接仍可继续使用/);
+});
+
+test("agent-browser wrapper rewrites CDP arguments for an automatic Profile switch", () => {
   assert.deepEqual(
     replaceCdpPortInAgentBrowserArgs(["--cdp", "9223", "snapshot"], 9224),
     ["--cdp", "9224", "snapshot"]
@@ -71,6 +225,275 @@ test("agent-browser wrapper rewrites CDP arguments for a user-approved Profile s
   );
   assert.deepEqual(replaceCdpPortInAgentBrowserArgs(["connect", "9223"], 9224), ["connect", "9224"]);
   assert.deepEqual(replaceCdpPortInAgentBrowserArgs(["snapshot"], 9224), ["--cdp", "9224", "snapshot"]);
+});
+
+test("ProfilePilot configures a stopped logical Profile with an isolated Bifrost listener", () => {
+  const home = makeTempHome();
+  const dataDir = path.join(home, "profilepilot-data");
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(path.join(dataDir, "profiles.json"), `${JSON.stringify({
+    profiles: [
+      { id: "profile-a", name: "A", dirName: "a", createdAt: "", lastLaunchedAt: null, fixedCdpPort: 9223 },
+      { id: "profile-b", name: "B", dirName: "b", createdAt: "", lastLaunchedAt: null, fixedCdpPort: 9226 }
+    ]
+  }, null, 2)}\n`);
+  const env = { HOME: home, CPM_DATA_DIR: dataDir };
+
+  const updated = setConfiguredAgentBrowserProfileBifrostProxySync(9226, {
+    listenerPort: 18889,
+    rules: ["FlowPD-FE-BotStudio-3001-8081"],
+    groupRules: []
+  }, env, home);
+  assert.equal(updated.profileName, "B");
+  assert.equal(updated.previous, null);
+  assert.deepEqual(updated.current, {
+    listenerPort: 18889,
+    rules: ["FlowPD-FE-BotStudio-3001-8081"],
+    groupRules: []
+  });
+  const registry = JSON.parse(readFileSync(path.join(dataDir, "profiles.json"), "utf8"));
+  assert.deepEqual(registry.profiles[1].bifrostProxy, updated.current);
+
+  const cleared = setConfiguredAgentBrowserProfileBifrostProxySync(9226, null, env, home);
+  assert.deepEqual(cleared.previous, updated.current);
+  assert.equal(cleared.current, null);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("ProfilePilot rejects Bifrost listener collisions with another Profile", () => {
+  const home = makeTempHome();
+  const dataDir = path.join(home, "profilepilot-data");
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(path.join(dataDir, "profiles.json"), `${JSON.stringify({
+    profiles: [
+      {
+        id: "profile-a",
+        name: "A",
+        dirName: "a",
+        createdAt: "",
+        lastLaunchedAt: null,
+        fixedCdpPort: 9223,
+        bifrostProxy: { listenerPort: 18889, rules: ["worktree-a"], groupRules: [] }
+      },
+      { id: "profile-b", name: "B", dirName: "b", createdAt: "", lastLaunchedAt: null, fixedCdpPort: 9226 }
+    ]
+  }, null, 2)}\n`);
+  const env = { HOME: home, CPM_DATA_DIR: dataDir };
+  assert.throws(
+    () => setConfiguredAgentBrowserProfileBifrostProxySync(9226, {
+      listenerPort: 18889,
+      rules: ["worktree-b"],
+      groupRules: []
+    }, env, home),
+    (error) => error.code === "BIFROST_PORT_IN_USE"
+  );
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("profilepilot bifrost command persists the rule without requiring an Agent session", async () => {
+  const home = makeTempHome();
+  const dataDir = path.join(home, "profilepilot-data");
+  const fakeBifrost = path.join(home, "bin", "bifrost");
+  const callsPath = path.join(home, "bifrost-calls.log");
+  const cdpPort = await freeTcpPort();
+  mkdirSync(path.dirname(fakeBifrost), { recursive: true });
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(fakeBifrost, `#!/bin/sh
+printf '%s\n' "$*" >> ${JSON.stringify(callsPath)}
+if [ "$1" = status ]; then
+  printf '%s\n' '{"running":true,"version":"test","listener":{"port":9900},"ports":[]}'
+  exit 0
+fi
+if [ "$1" = port ] && [ "$2" = show ]; then exit 1; fi
+exit 0
+`);
+  chmodSync(fakeBifrost, 0o755);
+  writeFileSync(path.join(dataDir, "profiles.json"), `${JSON.stringify({
+    profiles: [{
+      id: "profile-b",
+      name: "B",
+      dirName: "b",
+      createdAt: "",
+      lastLaunchedAt: null,
+      fixedCdpPort: cdpPort
+    }]
+  }, null, 2)}\n`);
+  const capture = captureProcessWrites();
+  try {
+    const exitCode = await runAgentBrowserWrapper([
+      "--cdp",
+      String(cdpPort),
+      "profilepilot",
+      "bifrost",
+      "--listener-port",
+      "18889",
+      "--rule",
+      "FlowPD-FE-BotStudio-3001-8081"
+    ], {
+      HOME: home,
+      CPM_DATA_DIR: dataDir,
+      BIFROST_BINARY: fakeBifrost,
+      PATH: process.env.PATH
+    });
+    assert.equal(exitCode, 0);
+    assert.match(capture.stdout.join(""), /"listener_port": 18889/);
+  } finally {
+    capture.restore();
+  }
+  const registry = JSON.parse(readFileSync(path.join(dataDir, "profiles.json"), "utf8"));
+  assert.deepEqual(registry.profiles[0].bifrostProxy, {
+    listenerPort: 18889,
+    rules: ["FlowPD-FE-BotStudio-3001-8081"],
+    groupRules: []
+  });
+  assert.match(readFileSync(callsPath, "utf8"), /port bind --port 18889 -H 127\.0\.0\.1/);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("profilepilot bifrost --clear removes a stopped Profile rule and destroys its listener", async () => {
+  const home = makeTempHome();
+  const dataDir = path.join(home, "profilepilot-data");
+  const fakeBifrost = path.join(home, "bin", "bifrost");
+  const callsPath = path.join(home, "bifrost-calls.log");
+  const cdpPort = await freeTcpPort();
+  mkdirSync(path.dirname(fakeBifrost), { recursive: true });
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(fakeBifrost, `#!/bin/sh
+printf '%s\n' "$*" >> ${JSON.stringify(callsPath)}
+if [ "$1" = port ] && [ "$2" = show ]; then
+  printf '%s\n' 'Temporary port: 127.0.0.1:18889'
+  printf '%s\n' 'Name: profilepilot:profile-b'
+  exit 0
+fi
+exit 0
+`);
+  chmodSync(fakeBifrost, 0o755);
+  writeFileSync(path.join(dataDir, "profiles.json"), `${JSON.stringify({
+    profiles: [{
+      id: "profile-b",
+      name: "B",
+      dirName: "b",
+      createdAt: "",
+      lastLaunchedAt: null,
+      fixedCdpPort: cdpPort,
+      bifrostProxy: {
+        listenerPort: 18889,
+        rules: ["worktree-old"],
+        groupRules: []
+      }
+    }]
+  }, null, 2)}\n`);
+
+  const capture = captureProcessWrites();
+  try {
+    const exitCode = await runAgentBrowserWrapper([
+      "--cdp",
+      String(cdpPort),
+      "profilepilot",
+      "bifrost",
+      "--clear"
+    ], {
+      HOME: home,
+      CPM_DATA_DIR: dataDir,
+      BIFROST_BINARY: fakeBifrost,
+      PATH: process.env.PATH
+    });
+    assert.equal(exitCode, 0);
+    assert.match(capture.stdout.join(""), /"action": "bifrost-clear"/);
+  } finally {
+    capture.restore();
+  }
+
+  const registry = JSON.parse(readFileSync(path.join(dataDir, "profiles.json"), "utf8"));
+  assert.equal(registry.profiles[0].bifrostProxy, null);
+  assert.match(
+    readFileSync(callsPath, "utf8"),
+    /port destroy 18889/
+  );
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("profilepilot bifrost command hot-updates rules for a running Profile on the same listener", async () => {
+  const home = makeTempHome();
+  const dataDir = path.join(home, "profilepilot-data");
+  const fakeBifrost = path.join(home, "bin", "bifrost");
+  const callsPath = path.join(home, "bifrost-calls.log");
+  const cdpServer = http.createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end('{"webSocketDebuggerUrl":"ws://127.0.0.1/devtools/browser/test"}');
+  });
+  await new Promise((resolve, reject) => {
+    cdpServer.once("error", reject);
+    cdpServer.listen(0, "127.0.0.1", resolve);
+  });
+  const cdpAddress = cdpServer.address();
+  const cdpPort = typeof cdpAddress === "object" && cdpAddress ? cdpAddress.port : 0;
+  mkdirSync(path.dirname(fakeBifrost), { recursive: true });
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(fakeBifrost, `#!/bin/sh
+printf '%s\n' "$*" >> ${JSON.stringify(callsPath)}
+if [ "$1" = status ]; then
+  printf '%s\n' '{"running":true,"version":"test","listener":{"port":9900},"ports":[]}'
+  exit 0
+fi
+if [ "$1" = port ] && [ "$2" = show ]; then
+  printf '%s\n' 'Temporary port: 127.0.0.1:18889'
+  printf '%s\n' 'Name: profilepilot:profile-b'
+  exit 0
+fi
+exit 0
+`);
+  chmodSync(fakeBifrost, 0o755);
+  writeFileSync(path.join(dataDir, "profiles.json"), `${JSON.stringify({
+    profiles: [{
+      id: "profile-b",
+      name: "B",
+      dirName: "b",
+      createdAt: "",
+      lastLaunchedAt: null,
+      fixedCdpPort: cdpPort,
+      bifrostProxy: {
+        listenerPort: 18889,
+        rules: ["worktree-old"],
+        groupRules: []
+      }
+    }]
+  }, null, 2)}\n`);
+
+  const capture = captureProcessWrites();
+  try {
+    const exitCode = await runAgentBrowserWrapper([
+      "--cdp",
+      String(cdpPort),
+      "profilepilot",
+      "bifrost",
+      "--listener-port",
+      "18889",
+      "--rule",
+      "worktree-new"
+    ], {
+      HOME: home,
+      CPM_DATA_DIR: dataDir,
+      BIFROST_BINARY: fakeBifrost,
+      PATH: process.env.PATH
+    });
+    assert.equal(exitCode, 0);
+  } finally {
+    capture.restore();
+    await new Promise((resolve) => cdpServer.close(resolve));
+  }
+
+  const registry = JSON.parse(readFileSync(path.join(dataDir, "profiles.json"), "utf8"));
+  assert.deepEqual(registry.profiles[0].bifrostProxy, {
+    listenerPort: 18889,
+    rules: ["worktree-new"],
+    groupRules: []
+  });
+  assert.match(
+    readFileSync(callsPath, "utf8"),
+    /port update 18889 --name profilepilot:profile-b --rule worktree-new/
+  );
+  rmSync(home, { recursive: true, force: true });
 });
 
 test("agent-browser wrapper skips the managed child-shell launcher when resolving the real CLI", () => {
@@ -121,6 +544,37 @@ test("agent-browser session activity files become synthetic ProfilePilot clients
   assert.equal(clients[0].session, "cx-one");
   assert.equal(clients[0].agent, "Codex");
   assert.equal(clients[0].project, "profilepilot");
+
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("agent-browser resolves the repository project and branch instead of the workspace folder name", async () => {
+  const home = makeTempHome();
+  const cwd = path.join(home, "workspaces", "coze-monorepo", "master");
+  mkdirSync(cwd, { recursive: true });
+  execFileSync("git", ["init", "-q", cwd]);
+  execFileSync("git", ["-C", cwd, "checkout", "-q", "-b", "feat/agent-overlay"]);
+  execFileSync("git", ["-C", cwd, "remote", "add", "origin", "git@code.example:team/coze-monorepo.git"]);
+
+  assert.deepEqual(repositoryIdentityFromCwd(cwd), {
+    project: "coze-monorepo",
+    branch: "feat/agent-overlay"
+  });
+
+  writeAgentBrowserSessionActivitySync({
+    session: "cx-repository",
+    command: "snapshot",
+    cdpPort: 9223,
+    pid: process.pid,
+    cwd
+  }, home, Date.parse("2026-07-09T00:00:00.000Z"));
+  const clients = (await readActiveAgentBrowserSessionActivityClientsByPort(
+    [9223],
+    home,
+    Date.parse("2026-07-09T00:05:00.000Z")
+  )).get(9223);
+  assert.equal(clients[0].project, "coze-monorepo");
+  assert.equal(clients[0].branch, "feat/agent-overlay");
 
   rmSync(home, { recursive: true, force: true });
 });
@@ -245,6 +699,38 @@ test("agent-browser wrapper hard-stops while Agent completion is still draining"
   rmSync(home, { recursive: true, force: true });
 });
 
+test("agent-browser wrapper permanently rejects a Session released after reconnect exhaustion", () => {
+  const home = makeTempHome();
+  const noticePath = path.join(home, ".profilepilot", "agent-control", "cx-expired.json");
+  mkdirSync(path.dirname(noticePath), { recursive: true });
+  writeFileSync(noticePath, `${JSON.stringify({
+    version: 1,
+    controlVersion: 4,
+    code: "AGENT_DRIVER_RECONNECT_FAILED",
+    reason: "driver_reconnect_exhausted",
+    ownership: "user",
+    message: "浏览器驱动重连失败，旧 Session 已释放",
+    action: "创建新的 Agent Session",
+    hardStop: true,
+    profileId: "profile-expired",
+    profileName: "Profile Expired",
+    pid: 101,
+    label: "agent-browser",
+    session: "cx-expired",
+    at: "2026-07-09T00:00:00.000Z",
+    expiresAt: "9999-12-31T23:59:59.999Z"
+  })}\n`);
+
+  const match = findActiveProfilePilotNotice(["snapshot"], {
+    HOME: home,
+    AGENT_BROWSER_SESSION: "cx-expired"
+  }, Date.parse("2099-07-10T08:00:00.000Z"));
+  assert.equal(match.notice.code, "AGENT_DRIVER_RECONNECT_FAILED");
+  assert.equal(match.notice.ownership, "user");
+  assert.match(formatHardStopNotice(match), /"reason": "driver_reconnect_exhausted"/);
+  rmSync(home, { recursive: true, force: true });
+});
+
 test("agent-browser wrapper surfaces a takeover created while the real command is running", async () => {
   const home = makeTempHome();
   mkdirSync(home, { recursive: true });
@@ -338,6 +824,101 @@ test("agent-browser wrapper completion releases the Session and Profile lease", 
   assert.equal(agentBrowserSessionActivityPaths(home, "cx-complete").some((file) => existsSync(file)), false);
   assert.equal(existsSync(path.join(home, ".profilepilot", "agent-control", "cx-complete.json")), false);
   assert.equal(existsSync(path.join(home, ".agent-browser", "cx-complete.profilepilot-control.json")), false);
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("profilepilot close shuts down its own Gateway Profile and releases the Session", async () => {
+  const home = makeTempHome();
+  const session = "cx-close";
+  const port = 9224;
+  acquireAgentBrowserProfileLeaseSync({
+    cdpPort: port,
+    session,
+    holderPid: process.pid,
+    profileId: "profile-close",
+    profileName: "Profile Close",
+    project: "profilepilot",
+    command: "snapshot"
+  }, home);
+  writeAgentBrowserSessionActivitySync({
+    session,
+    command: "snapshot",
+    cdpPort: port,
+    pid: process.pid,
+    cwd: "/tmp/profilepilot"
+  }, home);
+
+  const requests = [];
+  const socketPath = browserGatewaySocketPath(home);
+  mkdirSync(path.dirname(socketPath), { recursive: true });
+  const server = net.createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      const boundary = buffer.indexOf("\n");
+      if (boundary < 0) return;
+      const request = JSON.parse(buffer.slice(0, boundary));
+      requests.push(request);
+      if (request.action === "status") {
+        socket.end(`${JSON.stringify({
+          ok: true,
+          state: {
+            profiles: [{
+              profileId: "profile-close",
+              profileName: "Profile Close",
+              publicPort: port,
+              ownership: "agent",
+              ownerSessionId: session,
+              sessionStatus: "active"
+            }]
+          }
+        })}\n`);
+        return;
+      }
+      socket.end(`${JSON.stringify({ ok: true })}\n`);
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, resolve);
+  });
+
+  const writes = captureProcessWrites();
+  try {
+    const exitCode = await runAgentBrowserWrapper([
+      "--cdp",
+      String(port),
+      "profilepilot",
+      "close"
+    ], {
+      HOME: home,
+      AGENT_BROWSER_SESSION: session
+    });
+    assert.equal(exitCode, 0);
+  } finally {
+    writes.restore();
+    await new Promise((resolve) => server.close(resolve));
+  }
+
+  assert.deepEqual(
+    requests.map((request) => request.action),
+    ["status", "unregister-profile"]
+  );
+  assert.deepEqual(requests[1], {
+    action: "unregister-profile",
+    publicPort: port,
+    closeChrome: true
+  });
+  assert.match(writes.stdout.join(""), /"action": "close"/);
+  assert.match(writes.stdout.join(""), /Profile Close/);
+  assert.equal(readAgentBrowserProfileLeaseSync(port, home), null);
+  assert.equal(
+    agentBrowserSessionActivityPaths(home, session).some((file) =>
+      existsSync(file)
+    ),
+    false
+  );
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -487,12 +1068,30 @@ test("agent-browser wrapper requires an absolute validated unpacked extension pa
   rmSync(home, { recursive: true, force: true });
 });
 
-test("agent-browser wrapper waits for the durable user-return event", async () => {
+test("agent-browser wrapper waits for the durable user-return event without retiring the parked daemon", async () => {
   const home = makeTempHome();
+  const fakeDaemonPath = path.join(home, "fixture-agent-browser-daemon.js");
+  mkdirSync(home, { recursive: true });
+  writeFileSync(fakeDaemonPath, "setInterval(() => {}, 1000);\n");
+  const daemonPid = Number(execFileSync("/bin/sh", [
+    "-c",
+    "\"$NODE_BIN\" \"$DAEMON_SCRIPT\" >/dev/null 2>&1 & echo $!"
+  ], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      NODE_BIN: process.execPath,
+      DAEMON_SCRIPT: fakeDaemonPath
+    }
+  }).trim());
+  const daemonPidPath = path.join(home, ".agent-browser", "cx-wait.pid");
+  mkdirSync(path.dirname(daemonPidPath), { recursive: true });
+  writeFileSync(daemonPidPath, `${daemonPid}\n`);
   acquireAgentBrowserProfileLeaseSync({
     cdpPort: 9223,
     session: "cx-wait",
     holderPid: process.pid,
+    daemonPid,
     profileId: "profile-1",
     profileName: "Profile One",
     command: "snapshot"
@@ -562,8 +1161,11 @@ test("agent-browser wrapper waits for the durable user-return event", async () =
   assert.match(writes.stdout.join(""), /"event_code": "AGENT_CONTROL_RETURNED"/);
   assert.equal(existsSync(noticePath), false);
   assert.equal(existsSync(mirrorPath), false);
+  assert.equal(existsSync(daemonPidPath), true);
+  assert.equal(isProcessAlive(daemonPid), true);
   assert.equal(readActiveAgentBrowserControlWaitStateSync("cx-wait", home), null);
   assert.equal(readAgentBrowserProfileLeaseSync(9223, home).delegatedToUser, undefined);
+  try { process.kill(daemonPid, "SIGKILL"); } catch {}
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -721,7 +1323,7 @@ test("agent-browser wrapper ignores expired notices", () => {
   rmSync(home, { recursive: true, force: true });
 });
 
-test("agent-browser wrapper blocks a second Session even when the command omits --cdp", async () => {
+test("agent-browser wrapper automatically switches a second Session to the next available Profile", () => {
   const home = makeTempHome();
   writeAgentBrowserRuntimeProfilesSync([
     {
@@ -755,35 +1357,76 @@ test("agent-browser wrapper blocks a second Session even when the command omits 
     cwd: "/tmp/second-project"
   }, home);
 
-  const writes = captureProcessWrites();
-  let exitCode;
-  try {
-    exitCode = await runAgentBrowserWrapper(["snapshot"], {
-      HOME: home,
-      PWD: "/tmp/second-project",
-      AGENT_BROWSER_SESSION: "cc-second"
-    });
-  } finally {
-    writes.restore();
-  }
+  const resolution = acquireProfileLeaseForCommandWithAutomaticSwitch(["snapshot"], {
+    HOME: home,
+    PWD: "/tmp/second-project",
+    AGENT_BROWSER_SESSION: "cc-second"
+  });
 
-  assert.equal(exitCode, PROFILEPILOT_AGENT_BROWSER_LEASE_CONFLICT_EXIT_CODE);
-  assert.equal(exitCode, 75);
-  assert.match(writes.stderr.join(""), /"error_code": "PROFILE_ALREADY_IN_USE"/);
-  assert.match(writes.stderr.join(""), /"hard_stop": true/);
-  assert.match(writes.stderr.join(""), /"blocked_profile_hard_stop": true/);
-  assert.match(writes.stderr.join(""), /"retryable_with_alternative_profile": true/);
-  assert.match(writes.stderr.join(""), /"requires_user_confirmation": true/);
-  assert.match(writes.stderr.join(""), /"owner_session": "cx-owner"/);
-  assert.match(writes.stderr.join(""), /工作 Profile/);
-  assert.match(writes.stderr.join(""), /"auto_switch_allowed": false/);
-  assert.match(writes.stderr.join(""), /"recommended_profile_name": "备用 Profile"/);
-  assert.match(writes.stderr.join(""), /"recommended_cdp_port": 9224/);
-  assert.match(writes.stderr.join(""), /"recommended_command": "agent-browser --cdp 9224 snapshot"/);
-  assert.match(writes.stderr.join(""), /"requires_start": true/);
-  assert.match(writes.stderr.join(""), /先告知用户当前占用情况，并征得同意/);
-  assert.match(writes.stderr.join(""), /Gateway 启动并连接/);
-  assert.match(writes.stderr.join(""), /"available_candidate_count": 1/);
+  assert.equal(resolution.lease.ok, true);
+  assert.equal(resolution.lease.context.cdpPort, 9224);
+  assert.deepEqual(resolution.args, ["--cdp", "9224", "snapshot"]);
+  assert.equal(resolution.automaticSwitch.from.cdpPort, 9223);
+  assert.equal(resolution.automaticSwitch.to.cdpPort, 9224);
+  assert.equal(resolution.automaticSwitch.to.running, false);
+  assert.equal(readAgentBrowserProfileLeaseSync(9224, home).session, "cc-second");
+
+  const output = formatAutomaticProfileSwitch(resolution.automaticSwitch, resolution.args);
+  assert.match(output, /"event_code": "PROFILE_AUTO_SWITCHED"/);
+  assert.match(output, /"hard_stop": false/);
+  assert.match(output, /"requires_user_confirmation": false/);
+  assert.match(output, /"from_cdp_port": 9223/);
+  assert.match(output, /"cdp_port": 9224/);
+  assert.match(output, /"profile_started_on_demand": true/);
+  assert.match(output, /"command": "agent-browser --cdp 9224 snapshot"/);
+
+  rmSync(home, { recursive: true, force: true });
+});
+
+test("automatic Profile switch reuses the Profile already owned by the current Session", () => {
+  const home = makeTempHome();
+  writeAgentBrowserRuntimeProfilesSync([
+    {
+      profileId: "isolated:blocked",
+      profileName: "被占用 Profile",
+      cdpPort: 9223
+    },
+    {
+      profileId: "isolated:free",
+      profileName: "空闲 Profile",
+      cdpPort: 9224
+    },
+    {
+      profileId: "isolated:current",
+      profileName: "当前 Session Profile",
+      cdpPort: 9225
+    }
+  ], home);
+  acquireAgentBrowserProfileLeaseSync({
+    cdpPort: 9223,
+    session: "cx-owner",
+    holderPid: process.pid,
+    profileId: "isolated:blocked",
+    profileName: "被占用 Profile"
+  }, home);
+  acquireAgentBrowserProfileLeaseSync({
+    cdpPort: 9225,
+    session: "cx-requester",
+    holderPid: process.pid,
+    profileId: "isolated:current",
+    profileName: "当前 Session Profile"
+  }, home);
+
+  const resolution = acquireProfileLeaseForCommandWithAutomaticSwitch(
+    ["--cdp", "9223", "snapshot"],
+    { HOME: home, AGENT_BROWSER_SESSION: "cx-requester" }
+  );
+
+  assert.equal(resolution.lease.ok, true);
+  assert.equal(resolution.lease.context.cdpPort, 9225);
+  assert.deepEqual(resolution.args, ["--cdp", "9225", "snapshot"]);
+  assert.equal(resolution.automaticSwitch.to.alreadyOwnedBySession, true);
+  assert.equal(readAgentBrowserProfileLeaseSync(9224, home), null);
 
   rmSync(home, { recursive: true, force: true });
 });
@@ -812,7 +1455,33 @@ test("agent-browser wrapper hard-stops when no available alternative Profile exi
 });
 
 function makeTempHome() {
-  return path.join(os.tmpdir(), `profilepilot-agent-browser-wrapper-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  return path.join(
+    process.platform === "win32" ? os.tmpdir() : "/tmp",
+    `pp-abw-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`
+  );
+}
+
+function freeTcpPort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      server.close((error) => {
+        if (error) reject(error);
+        else resolve(address.port);
+      });
+    });
+  });
+}
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function captureProcessWrites() {

@@ -13,6 +13,9 @@ export function renderConfirmModal(confirm: Extract<ModalState, { kind: "confirm
   }
 
   const confirmClass = `${view.tone === "primary" ? "solid" : `${view.tone} solid`}`;
+  const canStartBifrost =
+    confirm.intent.kind === "bifrost-bypass-launch" &&
+    /\[BIFROST_NOT_RUNNING\]/.test(confirm.intent.errorMessage);
 
   return `
     <div class="modal-backdrop app-modal-backdrop" data-action="close-modal">
@@ -50,6 +53,11 @@ export function renderConfirmModal(confirm: Extract<ModalState, { kind: "confirm
           <button type="button" class="${confirmClass}" data-action="confirm-modal-action">
             ${escapeHtml(view.confirmLabel)}
           </button>
+          ${
+            canStartBifrost
+              ? '<button type="button" class="solid" data-action="start-bifrost-and-launch">启动 Bifrost 并继续</button>'
+              : ""
+          }
         </div>
       </section>
     </div>
@@ -59,6 +67,50 @@ export function renderConfirmModal(confirm: Extract<ModalState, { kind: "confirm
 export function confirmModalView(intent: ConfirmIntent): ConfirmModalView | null {
   if (!store.state) {
     return null;
+  }
+
+  if (intent.kind === "disable-bifrost-rule") {
+    return {
+      kicker: "停用 Bifrost 规则",
+      title: `停用 ${intent.ruleName}`,
+      body: [
+        "会从 Bifrost 主代理（系统代理入口）停用这份规则，所有跟随系统代理的 Chrome Profile 会立即受影响。",
+        "规则不会被删除；Profile 专属临时端口使用显式规则绑定，不受主代理启用状态影响。"
+      ],
+      confirmLabel: "停用规则",
+      tone: "warn",
+      summary: [
+        { label: "规则", value: intent.ruleName },
+        { label: "包含", value: `${intent.ruleCount} 条匹配` },
+        { label: "影响", value: "系统代理 · Bifrost 主端口" }
+      ]
+    };
+  }
+
+  if (intent.kind === "remove-profile-bifrost-rule") {
+    const profile = store.state.profiles.find((item) => item.id === intent.profileId);
+    if (!profile?.bifrostProxy) {
+      return null;
+    }
+    return {
+      kicker: "停用专属分流规则",
+      title: `在 ${profile.name} 中停用 ${intent.ruleRef}`,
+      body: [
+        `会将这条规则标记为已停用，并从 ${profile.name} 的 Bifrost 专属入口 :${profile.bifrostProxy.listenerPort} 生效集合中移除；它仍保留在列表中，可随时重新启用。`,
+        profile.running
+          ? "入口端口保持不变，确认后立即热更新，无需重启 Chrome。"
+          : "配置会立即保存，并在下次启动这个 Profile 时按剩余规则恢复绑定。",
+        "这不会停用或删除 Bifrost 中的规则，也不会影响主代理或其他 Profile。"
+      ],
+      confirmLabel: "仅在此 Profile 停用",
+      tone: "warn",
+      summary: [
+        { label: "Profile", value: profile.name },
+        { label: "专属入口", value: `127.0.0.1:${profile.bifrostProxy.listenerPort}` },
+        { label: "规则", value: intent.ruleRef },
+        { label: "范围", value: "仅此 Profile" }
+      ]
+    };
   }
 
   if (intent.kind === "profile") {
@@ -277,6 +329,31 @@ export function confirmModalView(intent: ConfirmIntent): ConfirmModalView | null
     };
   }
 
+  if (intent.kind === "bifrost-bypass-launch") {
+    const profile = store.state.profiles.find((item) => item.id === intent.profileId);
+    if (!profile) {
+      return null;
+    }
+    return {
+      kicker: "Bifrost 分流不可用",
+      title: `恢复分流并启动 ${profile.name}`,
+      body: [
+        { text: intent.errorMessage, tone: "danger" },
+        /\[BIFROST_NOT_RUNNING\]/.test(intent.errorMessage)
+          ? "可以让 ProfilePilot 立即启动 Bifrost、恢复这个 Profile 的专属分流入口，然后继续启动 Chrome。"
+          : "请先修复 Bifrost（安装 CLI / 释放端口）再正常启动。",
+        "如果暂时不需要分流，也可以本次直连启动；已保存的代理配置不会改变。"
+      ],
+      confirmLabel: "本次直连启动",
+      tone: "warn",
+      summary: [
+        { label: "Profile", value: profile.name },
+        { label: "分流入口", value: profile.bifrostProxy ? `127.0.0.1:${profile.bifrostProxy.listenerPort}` : "—" },
+        { label: "继续方式", value: intent.cdpPort !== null ? `代理注入 · CDP :${intent.cdpPort}` : "代理注入启动" }
+      ]
+    };
+  }
+
   if (intent.kind === "agent-takeover") {
     const profile = store.state.profiles.find((item) => item.id === intent.profileId);
     const clients = profile ? profileAgentControlClients(profile) : [];
@@ -414,6 +491,16 @@ export function closeModalFromUi(): void {
 }
 
 export function executeConfirmIntent(intent: ConfirmIntent): void {
+  if (intent.kind === "disable-bifrost-rule") {
+    executeDisableBifrostRuleConfirm(intent);
+    return;
+  }
+
+  if (intent.kind === "remove-profile-bifrost-rule") {
+    executeRemoveProfileBifrostRuleConfirm(intent);
+    return;
+  }
+
   if (intent.kind === "profile") {
     executeProfileConfirm(intent);
     return;
@@ -459,7 +546,137 @@ export function executeConfirmIntent(intent: ConfirmIntent): void {
     return;
   }
 
+  if (intent.kind === "bifrost-bypass-launch") {
+    executeBifrostBypassLaunchConfirm(intent);
+    return;
+  }
+
   executeExtensionMigrationConfirm(intent);
+}
+
+export function executeDisableBifrostRuleConfirm(
+  intent: Extract<ConfirmIntent, { kind: "disable-bifrost-rule" }>
+): void {
+  store.modal = null;
+  render();
+
+  void withBusy(
+    async () => {
+      store.bifrostSnapshot = await profileApi().disableBifrostRule(intent.ruleName);
+    },
+    `已停用规则 ${emphasizeName(intent.ruleName)}`,
+    {
+      key: "disable-bifrost-rule",
+      message: `正在停用规则 ${intent.ruleName}…`
+    }
+  );
+}
+
+export function executeRemoveProfileBifrostRuleConfirm(
+  intent: Extract<ConfirmIntent, { kind: "remove-profile-bifrost-rule" }>
+): void {
+  const profile = store.state?.profiles.find((item) => item.id === intent.profileId);
+  const config = profile?.bifrostProxy;
+  const references = config ? [...config.rules, ...config.groupRules] : [];
+  const selectedRules = intent.ruleKind === "local" ? config?.rules : config?.groupRules;
+  const disabledRules = new Set(config?.disabledRules || []);
+  const disabledGroupRules = new Set(config?.disabledGroupRules || []);
+  const selectedDisabledRules = intent.ruleKind === "local" ? disabledRules : disabledGroupRules;
+  const activeRuleCount = references.length - disabledRules.size - disabledGroupRules.size;
+  store.modal = null;
+
+  if (!profile || !config || !selectedRules?.includes(intent.ruleRef) || selectedDisabledRules.has(intent.ruleRef)) {
+    render();
+    setToast("这条专属分流规则已停用或不存在", "error");
+    return;
+  }
+  if (activeRuleCount <= 1) {
+    render();
+    setToast("专属分流至少需要保留一条启用规则", "error");
+    return;
+  }
+
+  render();
+  const nextConfig = {
+    kind: "bifrost" as const,
+    listenerPort: config.listenerPort,
+    rules: [...config.rules],
+    groupRules: [...config.groupRules],
+    disabledRules: intent.ruleKind === "local"
+      ? [...disabledRules, intent.ruleRef]
+      : [...disabledRules],
+    disabledGroupRules: intent.ruleKind === "group"
+      ? [...disabledGroupRules, intent.ruleRef]
+      : [...disabledGroupRules]
+  };
+  void withBusy(
+    async () => {
+      store.state = await profileApi().setProfileProxy(profile.id, nextConfig);
+    },
+    `已在 ${emphasizeName(profile.name)} 中停用规则 ${emphasizeName(intent.ruleRef)}`,
+    {
+      key: "remove-profile-bifrost-rule",
+      message: `正在更新 ${profile.name} 的专属分流…`,
+      profileId: profile.id
+    }
+  );
+}
+
+// Bifrost 分流恢复失败后的直连逃生口：带 bypassProxy 重新调启动 IPC，跳过代理注入。
+export function executeBifrostBypassLaunchConfirm(intent: Extract<ConfirmIntent, { kind: "bifrost-bypass-launch" }>): void {
+  const profile = store.state?.profiles.find((item) => item.id === intent.profileId);
+  store.modal = null;
+
+  if (!profile) {
+    render();
+    setToast("这个 Profile 已不存在", "error");
+    return;
+  }
+
+  void withBusy(
+    async () => {
+      store.state = intent.cdpPort !== null
+        ? await profileApi().launchProfileWithCdp(intent.profileId, intent.cdpPort, { bypassProxy: true })
+        : await profileApi().launchProfile(intent.profileId, { bypassProxy: true });
+    },
+    `已直连启动 ${emphasizeName(profile.name)}（本次不走 Bifrost 分流）`,
+    {
+      key: intent.cdpPort !== null ? "launch-cdp" : "launch-profile",
+      message: `正在直连启动 ${profile.name}…`,
+      profileId: intent.profileId
+    }
+  );
+}
+
+// Bifrost 未运行时的一键正常启动：主进程负责启动 daemon、恢复专属入口，
+// 确认代理可用后才继续启动 Chrome；与直连逃生口并列，且不修改系统代理设置。
+export function executeBifrostStartAndLaunch(
+  intent: Extract<ConfirmIntent, { kind: "bifrost-bypass-launch" }>
+): void {
+  const profile = store.state?.profiles.find((item) => item.id === intent.profileId);
+  store.modal = null;
+
+  if (!profile) {
+    render();
+    setToast("这个 Profile 已不存在", "error");
+    return;
+  }
+
+  void withBusy(
+    async () => {
+      const api = profileApi();
+      store.state = intent.cdpPort !== null
+        ? await api.launchProfileWithCdp(intent.profileId, intent.cdpPort, { startBifrost: true })
+        : await api.launchProfile(intent.profileId, { startBifrost: true });
+      store.bifrostSnapshot = await api.getBifrostSnapshot().catch(() => store.bifrostSnapshot);
+    },
+    `已启动 Bifrost，并通过专属分流启动 ${emphasizeName(profile.name)}`,
+    {
+      key: intent.cdpPort !== null ? "launch-cdp" : "launch-profile",
+      message: `正在启动 Bifrost、恢复分流并启动 ${profile.name}…`,
+      profileId: intent.profileId
+    }
+  );
 }
 
 export function executeAgentTakeoverConfirm(intent: Extract<ConfirmIntent, { kind: "agent-takeover" }>): void {
@@ -484,8 +701,12 @@ export function executeAgentTakeoverConfirm(intent: Extract<ConfirmIntent, { kin
         throw new Error(takeoverResultError(result));
       }
     },
-    `已接管 ${emphasizeName(profile.name)}，AI 已暂停`,
-    { key: "agent-takeover", message: `正在暂停 ${profile.name} 的 AI 操作…`, profileId: intent.profileId }
+    `已接管 ${emphasizeName(profile.name)}；执行面已静默，可以安全操作`,
+    {
+      key: "agent-takeover",
+      message: `正在封锁 ${profile.name} 的新命令，并等待当前命令收敛…`,
+      profileId: intent.profileId
+    }
   );
 }
 

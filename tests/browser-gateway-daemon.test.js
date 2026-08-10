@@ -8,7 +8,68 @@ const test = require("node:test");
 const { ensureConfiguredGatewayProfileRunning, prepareGatewayTransport, runAgentBrowserWrapper } = require("../dist/main/agent-browser-wrapper.js");
 const { acquireAgentBrowserProfileLeaseSync, readAgentBrowserProfileLeaseSync } = require("../dist/main/agent-browser-lease.js");
 const { ensureBrowserGatewayDaemon, requestBrowserGateway, subscribeBrowserGatewayEvents } = require("../dist/main/browser-gateway-client.js");
-const { BrowserGatewayDaemon } = require("../dist/main/browser-gateway-daemon.js");
+const {
+  BrowserGatewayDaemon,
+  DEFAULT_DRIVER_RECONNECT_GRACE_MS
+} = require("../dist/main/browser-gateway-daemon.js");
+
+test("Gateway gives a waiting Agent enough time to reconnect after user return", () => {
+  assert.equal(DEFAULT_DRIVER_RECONNECT_GRACE_MS, 30_000);
+});
+
+test("Gateway stops an active Session and rejects future acquire when Agent access is disabled", async () => {
+  // Keep the Unix socket path below macOS's sockaddr_un limit.
+  const home = mkdtempSync("/tmp/pp-gap-");
+  const fakeChrome = writeFakeChrome(home);
+  const port = await freePort();
+  const daemon = testGatewayDaemon(home);
+  await daemon.start();
+  try {
+    await requestBrowserGateway({
+      action: "launch-profile",
+      profileId: "profile-private",
+      profileName: "Private Profile",
+      publicPort: port,
+      executable: process.execPath,
+      args: [fakeChrome],
+      agentAccessDisabled: false
+    }, { homeDir: home });
+    await requestBrowserGateway({
+      action: "acquire",
+      publicPort: port,
+      sessionId: "cx-policy",
+      daemonInstanceId: "daemon-policy",
+      driverKind: "chrome-devtools-mcp"
+    }, { homeDir: home });
+
+    const updated = await requestBrowserGateway({
+      action: "update-profile-agent-settings",
+      publicPort: port,
+      profileId: "profile-private",
+      profileName: "Private Profile",
+      agentAccessDisabled: true
+    }, { homeDir: home });
+    assert.equal(updated.stoppedSessionId, "cx-policy");
+
+    const status = await requestBrowserGateway({ action: "status" }, { homeDir: home });
+    const managed = status.managedProfiles.find((profile) => profile.publicPort === port);
+    const profile = status.state.profiles.find((candidate) => candidate.publicPort === port);
+    assert.equal(managed.agentAccessDisabled, true);
+    assert.equal(profile.sessionStatus, "stopped");
+    await assert.rejects(() => requestBrowserGateway({
+      action: "acquire",
+      publicPort: port,
+      sessionId: "cx-policy-next",
+      daemonInstanceId: "daemon-policy-next"
+    }, { homeDir: home }), (error) =>
+      error.code === "PROFILE_AGENT_ACCESS_DISABLED" &&
+      String(error.message).includes("Private Profile")
+    );
+  } finally {
+    await daemon.stop();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
 
 test("gatewayd owns the Chrome pipe, control socket and public ticketed WebSocket end to end", async () => {
   const home = mkdtempSync(path.join(os.tmpdir(), "profilepilot-gateway-daemon-"));
@@ -102,10 +163,77 @@ test("gatewayd owns the Chrome pipe, control socket and public ticketed WebSocke
     assert.equal(loaded.extension.path, realpathSync(unpackedExtension));
     assert.equal(loaded.extension.name, "Fixture Extension");
 
-    const closed = new Promise((resolve) => ws.addEventListener("close", resolve, { once: true }));
+    const triggered = await requestBrowserGateway({
+      action: "trigger-extension-action",
+      publicPort: port,
+      sessionId: "cx-one",
+      daemonInstanceId: "daemon-one",
+      extensionId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      targetId: "page-1"
+    }, { homeDir: home });
+    assert.deepEqual(triggered.result, {
+      extensionId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      targetId: "page-1",
+      actionTargetId: "tab-1"
+    });
+    assert.equal(
+      readJsonLines(chromeCallsPath).some((message) => message.method === "Extensions.triggerAction"),
+      true
+    );
+
+    const emulated = await requestBrowserGateway({
+      action: "device-emulation",
+      publicPort: port,
+      sessionId: "cx-one",
+      daemonInstanceId: "daemon-one",
+      command: "emulate",
+      preset: "iphone-16-pro"
+    }, { homeDir: home });
+    assert.equal(emulated.active, true);
+    assert.deepEqual(
+      {
+        preset: emulated.deviceEmulation.preset,
+        width: emulated.deviceEmulation.width,
+        height: emulated.deviceEmulation.height,
+        mobile: emulated.deviceEmulation.mobile,
+        platform: emulated.deviceEmulation.platform
+      },
+      { preset: "iphone-16-pro", width: 402, height: 874, mobile: true, platform: "iPhone" }
+    );
+    assert.match(emulated.deviceEmulation.userAgent, /iPhone/);
+    assert.equal(
+      readJsonLines(chromeCallsPath).some(
+        (message) => message.method === "Emulation.setDeviceMetricsOverride"
+      ),
+      true
+    );
+
+    let agentSocketClosed = false;
+    ws.addEventListener("close", () => { agentSocketClosed = true; }, { once: true });
     await requestBrowserGateway({ action: "control", sessionId: "cx-one", command: "takeover" }, { homeDir: home });
-    await closed;
-    await waitFor(() => controlEvents.some((event) => event.reason === "agent-disconnected"), "disconnect event delivered");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(agentSocketClosed, false, "takeover must park the agent-browser socket in place");
+    assert.equal(
+      controlEvents.some((event) => event.reason === "agent-disconnected"),
+      false,
+      "parking must not start a reconnect cycle"
+    );
+    assert.equal(
+      readJsonLines(chromeCallsPath).some(
+        (message) => message.method === "Emulation.clearDeviceMetricsOverride"
+      ),
+      true,
+      "takeover must clear the Agent-owned device viewport before user control"
+    );
+    assert.equal(
+      readJsonLines(chromeCallsPath).some(
+        (message) =>
+          message.method === "Emulation.setUserAgentOverride" &&
+          message.params?.userAgent === ""
+      ),
+      true,
+      "takeover must clear the Agent-owned mobile UA before user control"
+    );
     const internalResponse = nextMessage(internalWs);
     internalWs.send(JSON.stringify({ id: 10, method: "Browser.getVersion", params: {} }));
     assert.deepEqual(await internalResponse, { id: 10, result: { echoed: "Browser.getVersion" } });
@@ -323,6 +451,214 @@ if (connectIndex >= 0) {
     assert.equal(completedProfile.sessionStatus, "stopped");
     assert.equal(completedProfile.ownerSessionId, undefined);
     assert.equal(readAgentBrowserProfileLeaseSync(port, home), null);
+  } finally {
+    if (existsSync(holderPidPath)) {
+      try { process.kill(Number(readFileSync(holderPidPath, "utf8")), "SIGKILL"); } catch {}
+    }
+    await daemon.stop();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("unexpected driver disconnect reconnects within the grace window without releasing ownership", async () => {
+  const home = mkdtempSync(path.join(os.tmpdir(), "profilepilot-gateway-reconnect-success-"));
+  const fakeChrome = writeFakeChrome(home);
+  const port = await freePort();
+  const daemon = testGatewayDaemon(home, { driverReconnectGraceMs: 250 });
+  let firstWs;
+  let secondWs;
+  await daemon.start();
+  try {
+    await requestBrowserGateway({
+      action: "launch-profile",
+      profileId: "profile-reconnect",
+      profileName: "Profile Reconnect",
+      publicPort: port,
+      executable: process.execPath,
+      args: [fakeChrome]
+    }, { homeDir: home });
+    const acquired = await requestBrowserGateway({
+      action: "acquire",
+      publicPort: port,
+      sessionId: "cx-reconnect-success",
+      daemonInstanceId: "daemon-reconnect-success"
+    }, { homeDir: home });
+    firstWs = await openWebSocket(acquired.webSocketUrl);
+    await waitFor(async () => {
+      const current = await requestBrowserGateway({ action: "status" }, { homeDir: home });
+      return current.state.profiles.find((profile) => profile.publicPort === port)?.driverState === "connected";
+    }, "initial Gateway driver connection");
+
+    firstWs.close();
+    await waitFor(async () => {
+      const current = await requestBrowserGateway({ action: "status" }, { homeDir: home });
+      const profile = current.state.profiles.find((item) => item.publicPort === port);
+      return profile?.ownership === "agent" && profile?.driverState === "reconnecting";
+    }, "Gateway reconnecting state");
+
+    const retry = await requestBrowserGateway({
+      action: "acquire",
+      publicPort: port,
+      sessionId: "cx-reconnect-success",
+      daemonInstanceId: "daemon-reconnect-success"
+    }, { homeDir: home });
+    secondWs = await openWebSocket(retry.webSocketUrl);
+    await waitFor(async () => {
+      const current = await requestBrowserGateway({ action: "status" }, { homeDir: home });
+      const profile = current.state.profiles.find((item) => item.publicPort === port);
+      return profile?.connectionActive === true && profile?.driverState === "connected";
+    }, "Gateway driver reconnection");
+    await new Promise((resolve) => setTimeout(resolve, 320));
+    const finalStatus = await requestBrowserGateway({ action: "status" }, { homeDir: home });
+    const profile = finalStatus.state.profiles.find((item) => item.publicPort === port);
+    assert.equal(profile.ownerSessionId, "cx-reconnect-success");
+    assert.equal(profile.sessionStatus, "active");
+    assert.equal(profile.driverState, "connected");
+
+    await requestBrowserGateway({
+      action: "control",
+      sessionId: "cx-reconnect-success",
+      command: "takeover"
+    }, { homeDir: home });
+    await new Promise((resolve) => setTimeout(resolve, 320));
+    const takenOverStatus = await requestBrowserGateway({ action: "status" }, { homeDir: home });
+    const takenOver = takenOverStatus.state.profiles.find((item) => item.publicPort === port);
+    assert.equal(takenOver.ownerSessionId, "cx-reconnect-success");
+    assert.equal(takenOver.ownership, "user");
+    assert.equal(takenOver.sessionStatus, "active");
+    assert.equal(takenOver.driverState, "parked", "intentional takeover must not trigger reconnect release");
+  } finally {
+    firstWs?.close();
+    secondWs?.close();
+    await daemon.stop();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("reconnect timeout releases the old Session and leaves a terminal Agent notice", async () => {
+  const home = mkdtempSync(path.join(os.tmpdir(), "profilepilot-gateway-reconnect-timeout-"));
+  const fakeChrome = writeFakeChrome(home);
+  const port = await freePort();
+  const daemon = testGatewayDaemon(home, { driverReconnectGraceMs: 120 });
+  let ws;
+  await daemon.start();
+  try {
+    await requestBrowserGateway({
+      action: "launch-profile",
+      profileId: "profile-timeout",
+      profileName: "Profile Timeout",
+      publicPort: port,
+      executable: process.execPath,
+      args: [fakeChrome]
+    }, { homeDir: home });
+    const acquired = await requestBrowserGateway({
+      action: "acquire",
+      publicPort: port,
+      sessionId: "cx-reconnect-timeout",
+      daemonInstanceId: "daemon-reconnect-timeout",
+      driverKind: "agent-browser"
+    }, { homeDir: home });
+    assert.equal(acquireAgentBrowserProfileLeaseSync({
+      cdpPort: port,
+      session: "cx-reconnect-timeout",
+      holderPid: process.pid,
+      profileId: "profile-timeout",
+      profileName: "Profile Timeout",
+      command: "snapshot"
+    }, home).ok, true);
+    ws = await openWebSocket(acquired.webSocketUrl);
+    ws.close();
+
+    await waitFor(async () => {
+      const current = await requestBrowserGateway({ action: "status" }, { homeDir: home });
+      const profile = current.state.profiles.find((item) => item.publicPort === port);
+      return profile?.sessionStatus === "stopped" && !profile?.ownerSessionId;
+    }, "Gateway releases reconnect timeout", 3_000);
+    assert.equal(readAgentBrowserProfileLeaseSync(port, home), null);
+    const notice = JSON.parse(readFileSync(
+      path.join(home, ".profilepilot", "agent-control", "cx-reconnect-timeout.json"),
+      "utf8"
+    ));
+    assert.equal(notice.code, "AGENT_DRIVER_RECONNECT_FAILED");
+    assert.equal(notice.reason, "driver_reconnect_exhausted");
+    assert.equal(notice.hardStop, true);
+    assert.equal(notice.ownership, "user");
+
+    const replacement = await requestBrowserGateway({
+      action: "acquire",
+      publicPort: port,
+      sessionId: "cx-replacement",
+      daemonInstanceId: "daemon-replacement"
+    }, { homeDir: home });
+    assert.equal(replacement.profile.ownerSessionId, "cx-replacement");
+  } finally {
+    ws?.close();
+    await daemon.stop();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("agent-browser wrapper retries Gateway transport at most three times and recovers", async () => {
+  // Keep the Unix control socket below macOS' sockaddr_un path limit.
+  const home = mkdtempSync("/tmp/pp-gw-retry-");
+  const fakeChrome = writeFakeChrome(home);
+  const fakeAgentBrowser = path.join(home, "retry-agent-browser.js");
+  const callsPath = path.join(home, "retry-calls.ndjson");
+  const holderPidPath = path.join(home, "retry-holder.pid");
+  const readyPath = path.join(home, "retry-holder.ready");
+  writeFileSync(fakeAgentBrowser, `#!${process.execPath}
+const fs = require("node:fs");
+const { spawn } = require("node:child_process");
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.CALLS_PATH, JSON.stringify(args) + "\\n");
+const attempts = fs.readFileSync(process.env.CALLS_PATH, "utf8").trim().split("\\n").length;
+if (attempts < 3) process.exit(7);
+const connectIndex = args.indexOf("connect");
+const url = args[connectIndex + 1];
+const code = \`const fs=require("node:fs");const ws=new WebSocket(\${JSON.stringify(url)});ws.addEventListener("open",()=>fs.writeFileSync(\${JSON.stringify(process.env.READY_PATH)},"ready"));ws.addEventListener("close",()=>process.exit(0));setInterval(()=>{},1000);\`;
+const child = spawn(process.execPath, ["-e", code], { detached: true, stdio: "ignore" });
+child.unref();
+fs.writeFileSync(process.env.HOLDER_PID_PATH, String(child.pid));
+fs.mkdirSync(require("node:path").join(process.env.HOME, ".agent-browser"), { recursive: true });
+fs.writeFileSync(require("node:path").join(process.env.HOME, ".agent-browser", process.env.AGENT_BROWSER_SESSION + ".pid"), String(child.pid));
+const wait = new Int32Array(new SharedArrayBuffer(4));
+const deadline = Date.now() + 2000;
+while (!fs.existsSync(process.env.READY_PATH) && Date.now() < deadline) Atomics.wait(wait, 0, 0, 20);
+process.exit(fs.existsSync(process.env.READY_PATH) ? 0 : 8);
+`);
+  chmodSync(fakeAgentBrowser, 0o755);
+  const port = await freePort();
+  const daemon = testGatewayDaemon(home, { driverReconnectGraceMs: 3_000 });
+  await daemon.start();
+  try {
+    await requestBrowserGateway({
+      action: "launch-profile",
+      profileId: "profile-wrapper-retry",
+      profileName: "Profile Wrapper Retry",
+      publicPort: port,
+      executable: process.execPath,
+      args: [fakeChrome]
+    }, { homeDir: home });
+    const prepared = await prepareGatewayTransport(
+      fakeAgentBrowser,
+      ["--cdp", String(port), "snapshot"],
+      {
+        ...process.env,
+        HOME: home,
+        AGENT_BROWSER_SESSION: "cx-wrapper-retry",
+        CALLS_PATH: callsPath,
+        HOLDER_PID_PATH: holderPidPath,
+        READY_PATH: readyPath
+      },
+      port,
+      { quietConnect: true }
+    );
+    assert.deepEqual(prepared, ["snapshot"]);
+    assert.equal(readFileSync(callsPath, "utf8").trim().split("\n").length, 3);
+    const status = await requestBrowserGateway({ action: "status" }, { homeDir: home });
+    const profile = status.state.profiles.find((item) => item.publicPort === port);
+    assert.equal(profile.driverState, "connected");
+    assert.equal(profile.ownerSessionId, "cx-wrapper-retry");
   } finally {
     if (existsSync(holderPidPath)) {
       try { process.kill(Number(readFileSync(holderPidPath, "utf8")), "SIGKILL"); } catch {}
@@ -827,9 +1163,10 @@ test("ensure defers a protocol upgrade while the old Gateway still owns live Chr
   }
 });
 
-function testGatewayDaemon(home) {
+function testGatewayDaemon(home, options = {}) {
   return new BrowserGatewayDaemon(home, {
-    focusProfileWindow: async () => true
+    focusProfileWindow: async () => true,
+    ...options
   });
 }
 
@@ -853,7 +1190,28 @@ input.on("data", (chunk) => {
       fs.appendFileSync(process.env.FAKE_CHROME_CALLS_PATH, JSON.stringify(message) + "\\n");
     }
     const result = message.method === "Target.getTargets"
-      ? { targetInfos: [{ targetId: "page-1", type: "page", title: "Fixture", url: "https://example.test/" }] }
+      ? message.params?.filter
+        ? {
+            targetInfos: [{
+              targetId: "tab-1",
+              type: "tab",
+              title: "Fixture",
+              url: "https://example.test/",
+              browserContextId: "context-1",
+              embedderData: { tabActive: true }
+            }]
+          }
+        : {
+            targetInfos: [{
+              targetId: "page-1",
+              type: "page",
+              title: "Fixture",
+              url: "https://example.test/",
+              browserContextId: "context-1"
+            }]
+          }
+      : message.method === "Extensions.getExtensions"
+        ? { extensions: [{ id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", enabled: true }] }
       : message.method === "Target.attachToTarget"
         ? { sessionId: "fake-flat-page-1" }
       : { echoed: message.method };

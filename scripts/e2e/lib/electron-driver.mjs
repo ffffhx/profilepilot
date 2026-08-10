@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import net from "node:net";
 import os from "node:os";
@@ -188,15 +188,36 @@ export async function launchProfilePilotE2e(options = {}) {
   await Promise.all([
     mkdir(path.join(homeDir, ".codex"), { recursive: true }),
     mkdir(path.join(homeDir, ".claude"), { recursive: true }),
+    process.platform === "darwin" ? mkdir(path.join(homeDir, "Library"), { recursive: true }) : Promise.resolve(),
     mkdir(dataDir, { recursive: true }),
     mkdir(electronDataDir, { recursive: true })
   ]);
+  if (process.platform === "darwin") {
+    // Security.framework resolves the default login keychain relative to HOME.
+    // Expose the real user's Keychains directory inside the disposable fixture
+    // so macOS does not show its "Restore Defaults" dialog. Chromium still gets
+    // --use-mock-keychain below, so E2E safe-storage data remains disposable.
+    await symlink(
+      path.join(os.homedir(), "Library", "Keychains"),
+      path.join(homeDir, "Library", "Keychains"),
+      "dir"
+    );
+  }
   await Promise.all([
     writeFile(path.join(homeDir, ".codex", "AGENTS.md"), "# ProfilePilot E2E fixture\n", "utf8"),
     writeFile(path.join(homeDir, ".claude", "CLAUDE.md"), "# ProfilePilot E2E reference\n", "utf8")
   ]);
 
-  const child = spawn(electronPath, [repoRoot, `--user-data-dir=${electronDataDir}`], {
+  const electronArgs = [];
+  if (process.platform === "darwin") {
+    // Keep safe-storage contents isolated from the real login keychain.
+    // Keep the Chromium switch before the app path so Electron parses it as a
+    // runtime switch instead of exposing it only as an application argument.
+    electronArgs.push("--use-mock-keychain");
+  }
+  electronArgs.push(repoRoot, `--user-data-dir=${electronDataDir}`);
+
+  const child = spawn(electronPath, electronArgs, {
     cwd: repoRoot,
     env: {
       ...process.env,

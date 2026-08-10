@@ -11,6 +11,7 @@ const RESTART_NONCE_TTL_MS = 15_000;
 export type GatewayOwnership = "agent" | "user";
 export type GatewaySessionStatus = "active" | "stopped";
 export type GatewayAgentHealth = "online" | "waiting" | "offline";
+export type GatewayDriverState = "disconnected" | "connecting" | "connected" | "reconnecting" | "parked";
 export type GatewayDriverKind = "agent-browser" | "playwright-cli" | "chrome-devtools-mcp";
 
 export interface GatewayProfileBinding {
@@ -25,10 +26,17 @@ export interface GatewayProfileBinding {
   driverLabel?: string;
   agent?: string;
   project?: string;
+  branch?: string;
   pendingUserAction?: string;
   ownership: GatewayOwnership;
   sessionStatus: GatewaySessionStatus;
   agentHealth: GatewayAgentHealth;
+  // Session ownership and the actual driver transport are separate. An Agent-owned
+  // Session may remain active while its WebSocket is inside a bounded reconnect window.
+  driverState: GatewayDriverState;
+  reconnectAttempt?: number;
+  reconnectDeadlineAt?: string;
+  lastDisconnectReason?: string;
   controlGeneration: number;
   updatedAt: string;
 }
@@ -42,6 +50,7 @@ export interface GatewayAcquireRequest {
   driverLabel?: string;
   agent?: string;
   project?: string;
+  branch?: string;
   restartNonce?: string;
 }
 
@@ -91,7 +100,9 @@ export class BrowserGatewayControlError extends Error {
   constructor(
     readonly code:
       | "GATEWAY_PROFILE_NOT_FOUND"
+      | "GATEWAY_PROFILE_NOT_RUNNING"
       | "PROFILE_LEASE_CONFLICT"
+      | "PROFILE_AGENT_ACCESS_DISABLED"
       | "SESSION_ALREADY_BOUND"
       | "SESSION_DAEMON_DUPLICATE"
       | "AGENT_USER_IN_CONTROL"
@@ -172,6 +183,7 @@ export class BrowserGatewayControlPlane {
           ownership: "user",
           sessionStatus: "stopped",
           agentHealth: "offline",
+          driverState: "disconnected",
           controlGeneration: 1,
           updatedAt: now
         };
@@ -251,6 +263,9 @@ export class BrowserGatewayControlPlane {
       }
     }
 
+    const continuingAgentSession = profile.ownerSessionId === sessionId &&
+      profile.sessionStatus === "active" &&
+      profile.ownership === "agent";
     profile.ownerSessionId = sessionId;
     profile.daemonInstanceId = daemonInstanceId;
     profile.daemonPid = normalizePid(request.daemonPid);
@@ -258,10 +273,17 @@ export class BrowserGatewayControlPlane {
     profile.driverLabel = optionalString(request.driverLabel) || driverLabel(profile.driverKind);
     profile.agent = optionalString(request.agent);
     profile.project = optionalString(request.project);
+    profile.branch = optionalString(request.branch);
     profile.pendingUserAction = undefined;
     profile.ownership = "agent";
     profile.sessionStatus = "active";
-    profile.agentHealth = "online";
+    if (!continuingAgentSession || profile.driverState === "parked" || profile.driverState === "disconnected") {
+      profile.driverState = "connecting";
+      profile.reconnectAttempt = 1;
+    } else if (profile.driverState === "reconnecting" || profile.driverState === "connecting") {
+      profile.reconnectAttempt = Math.min(3, Math.max(0, profile.reconnectAttempt || 0) + 1);
+    }
+    profile.agentHealth = profile.driverState === "connected" ? "online" : "offline";
     profile.updatedAt = iso(this.now());
     this.profilePortBySession.set(sessionId, publicPort);
     this.persist("acquire", profile);
@@ -345,6 +367,10 @@ export class BrowserGatewayControlPlane {
     const profile = this.requireSessionProfile(sessionIdInput);
     profile.ownership = "user";
     profile.agentHealth = "waiting";
+    profile.driverState = "parked";
+    profile.reconnectAttempt = undefined;
+    profile.reconnectDeadlineAt = undefined;
+    profile.lastDisconnectReason = undefined;
     profile.pendingUserAction = optionalString(pendingUserAction);
     profile.controlGeneration += 1;
     profile.updatedAt = iso(this.now());
@@ -358,7 +384,14 @@ export class BrowserGatewayControlPlane {
       throw new BrowserGatewayControlError("AGENT_TASK_STOPPED", "Agent Session 已结束");
     }
     profile.ownership = "agent";
+    // Gateway takeover parks every supported driver transport in place. Returning
+    // control therefore resumes the existing socket instead of forcing a daemon
+    // that is otherwise idle to discover that it must reconnect.
+    profile.driverState = "connected";
     profile.agentHealth = "online";
+    profile.reconnectAttempt = undefined;
+    profile.reconnectDeadlineAt = undefined;
+    profile.lastDisconnectReason = undefined;
     profile.pendingUserAction = undefined;
     profile.controlGeneration += 1;
     // 交还后旧 daemon 连接已经被接管动作吊销，允许同一个 daemon 重新申请 Ticket。
@@ -373,6 +406,10 @@ export class BrowserGatewayControlPlane {
     profile.ownership = "user";
     profile.sessionStatus = "stopped";
     profile.agentHealth = "offline";
+    profile.driverState = "disconnected";
+    profile.reconnectAttempt = undefined;
+    profile.reconnectDeadlineAt = undefined;
+    profile.lastDisconnectReason = undefined;
     profile.controlGeneration += 1;
     profile.ownerSessionId = undefined;
     profile.daemonInstanceId = undefined;
@@ -381,6 +418,7 @@ export class BrowserGatewayControlPlane {
     profile.driverLabel = undefined;
     profile.agent = undefined;
     profile.project = undefined;
+    profile.branch = undefined;
     profile.pendingUserAction = undefined;
     profile.updatedAt = iso(this.now());
     this.profilePortBySession.delete(sessionId);
@@ -388,11 +426,45 @@ export class BrowserGatewayControlPlane {
     return cloneProfile(profile);
   }
 
-  markAgentOffline(sessionIdInput: string): GatewayProfileBinding {
+  markAgentReconnecting(
+    sessionIdInput: string,
+    reconnectDeadlineAt: string,
+    reason = "driver-disconnected",
+    driverState: "connecting" | "reconnecting" = "reconnecting"
+  ): GatewayProfileBinding {
     const profile = this.requireSessionProfile(sessionIdInput);
+    if (profile.sessionStatus !== "active" || profile.ownership !== "agent") {
+      return cloneProfile(profile);
+    }
+    const reconnectAttempt = profile.driverState === "connecting"
+      ? Math.max(1, profile.reconnectAttempt || 0)
+      : 0;
     profile.agentHealth = "offline";
+    profile.driverState = driverState;
+    profile.reconnectAttempt = reconnectAttempt;
+    profile.reconnectDeadlineAt = reconnectDeadlineAt;
+    profile.lastDisconnectReason = optionalString(reason);
     profile.updatedAt = iso(this.now());
-    this.persist("agent-offline", profile);
+    this.persist(driverState === "connecting" ? "driver-connecting" : "driver-reconnecting", profile);
+    return cloneProfile(profile);
+  }
+
+  markAgentConnected(sessionIdInput: string, daemonInstanceIdInput?: string): GatewayProfileBinding {
+    const profile = this.requireSessionProfile(sessionIdInput);
+    const daemonInstanceId = daemonInstanceIdInput ? safeId(daemonInstanceIdInput, "daemonInstanceId") : undefined;
+    if (daemonInstanceId && profile.daemonInstanceId !== daemonInstanceId) {
+      throw new BrowserGatewayControlError("CONTROL_GENERATION_STALE", "Gateway 连接所有者已变化");
+    }
+    if (profile.sessionStatus !== "active" || profile.ownership !== "agent") {
+      return cloneProfile(profile);
+    }
+    profile.agentHealth = "online";
+    profile.driverState = "connected";
+    profile.reconnectAttempt = undefined;
+    profile.reconnectDeadlineAt = undefined;
+    profile.lastDisconnectReason = undefined;
+    profile.updatedAt = iso(this.now());
+    this.persist("driver-connected", profile);
     return cloneProfile(profile);
   }
 
@@ -593,7 +665,7 @@ export class BrowserGatewayControlPlane {
     if (parsed.version !== STATE_VERSION || !Array.isArray(parsed.profiles)) return;
     for (const candidate of parsed.profiles) {
       if (!isValidProfile(candidate)) continue;
-      const profile = cloneProfile(candidate);
+      const profile = normalizeLoadedProfile(candidate);
       this.profilesByPort.set(profile.publicPort, profile);
       if (profile.ownerSessionId && profile.sessionStatus === "active") {
         this.profilePortBySession.set(profile.ownerSessionId, profile.publicPort);
@@ -613,9 +685,29 @@ function isValidProfile(value: unknown): value is GatewayProfileBinding {
       (input.ownership === "agent" || input.ownership === "user") &&
       (input.sessionStatus === "active" || input.sessionStatus === "stopped") &&
       (input.agentHealth === "online" || input.agentHealth === "waiting" || input.agentHealth === "offline") &&
+      (input.driverState === undefined ||
+        input.driverState === "disconnected" ||
+        input.driverState === "connecting" ||
+        input.driverState === "connected" ||
+        input.driverState === "reconnecting" ||
+        input.driverState === "parked") &&
       Number.isSafeInteger(input.controlGeneration) &&
       input.updatedAt
   );
+}
+
+function normalizeLoadedProfile(profile: GatewayProfileBinding): GatewayProfileBinding {
+  const normalized = cloneProfile(profile);
+  if (!normalized.driverState) {
+    normalized.driverState = normalized.sessionStatus === "stopped"
+      ? "disconnected"
+      : normalized.ownership === "user"
+        ? "parked"
+        : normalized.agentHealth === "online"
+          ? "connecting"
+          : "reconnecting";
+  }
+  return normalized;
 }
 
 function cloneProfile(profile: GatewayProfileBinding): GatewayProfileBinding {

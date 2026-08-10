@@ -95,7 +95,13 @@ export function wait(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
-export async function withBusy(work: () => Promise<unknown>, successMessage?: string, nextBusyState?: BusyState): Promise<void> {
+export async function withBusy(
+  work: () => Promise<unknown>,
+  successMessage?: string,
+  nextBusyState?: BusyState,
+  // 可选的失败拦截：返回 true 表示调用方已自行处理（比如弹出后续确认框），不再走默认的错误 toast。
+  handleError?: (message: string, error: unknown) => boolean
+): Promise<void> {
   if (store.busy) {
     return;
   }
@@ -123,6 +129,9 @@ export async function withBusy(work: () => Promise<unknown>, successMessage?: st
   } catch (error) {
     // 用户主动终止（OPERATION_CANCELLED）不是错误，用中性提示而非红色报错。
     const message = formatErrorMessage(error);
+    if (handleError?.(message, error)) {
+      return;
+    }
     const cancelled = message.startsWith("已终止同步") || message.startsWith("已取消");
     setToast(message, cancelled ? "normal" : "error");
   } finally {

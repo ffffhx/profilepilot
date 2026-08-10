@@ -30,8 +30,11 @@ export interface AgentOverlayPortInput {
   headless?: boolean;
   // true 表示当前驱动仍连着 CDP，但已经收到用户接管 notice，不能据此把控制权误判回 Agent。
   controlPaused?: boolean;
+  pendingUserAction?: string;
   // 用户接管已经稳定，但对应 wait-control 进程在宽限期后仍不存在或已经退出。
   agentOffline?: boolean;
+  // Gateway 仍保留 Agent Session，但实际驱动连接正在有限次数/有限时间内恢复。
+  driverReconnecting?: boolean;
   controlSince?: string;
   agentTarget?: GatewayAgentTarget | null;
   clients: CdpClientInfo[];
@@ -117,6 +120,7 @@ interface OverlayPayload {
   profileName: string;
   agent: string | null;
   project: string | null;
+  branch: string | null;
   session: string | null;
   sessionTitle: string | null;
   currentAction: string | null;
@@ -131,7 +135,9 @@ interface OverlayPayload {
   sessions: OverlaySessionPayload[];
   inputGuardState: InputGuardState;
   handoffPending: boolean;
+  pendingUserAction: string | null;
   agentOffline: boolean;
+  driverReconnecting: boolean;
   controlSince: string | null;
   agentTargetId: string | null;
   agentTargetTitle: string | null;
@@ -154,13 +160,16 @@ interface AgentOverlayPayloadInput {
   now?: number;
   inputGuardState?: InputGuardState;
   handoffPending?: boolean;
+  pendingUserAction?: string;
   agentOffline?: boolean;
+  driverReconnecting?: boolean;
   controlSince?: string;
 }
 
 interface OverlaySessionPayload {
   agent: string | null;
   project: string | null;
+  branch: string | null;
   session: string | null;
   sessionTitle: string | null;
   lastActive: string | null;
@@ -213,7 +222,9 @@ interface PortOverlay {
   alive: boolean;
   takeoverInFlight: boolean;
   handoffPending: boolean;
+  pendingUserAction?: string;
   agentOffline: boolean;
+  driverReconnecting: boolean;
   controlSince?: string;
   delegatedToUser: boolean;
   delegationGraceUntil: number;
@@ -231,7 +242,7 @@ interface PortOverlay {
 }
 
 interface GuardProbeResult {
-  action: "takeover" | "stop" | "showAgentTarget" | "toggleAutoFollow";
+  action: "expand" | "collapse" | "takeover" | "stop" | "showAgentTarget" | "toggleAutoFollow";
   signature: string;
 }
 
@@ -321,7 +332,9 @@ export class AgentOverlayManager {
         state.browserPids = normalizeBrowserPids(next.browserPids);
         state.headless = Boolean(next.headless);
         state.clients = next.clients;
+        state.pendingUserAction = next.pendingUserAction;
         state.agentOffline = Boolean(next.agentOffline);
+        state.driverReconnecting = Boolean(next.driverReconnecting);
         state.controlSince = next.controlSince;
         state.agentTarget = next.agentTarget || null;
         this.syncSessionStarts(state, now);
@@ -366,7 +379,9 @@ export class AgentOverlayManager {
           alive: true,
           takeoverInFlight: false,
           handoffPending: false,
+          pendingUserAction: next.pendingUserAction,
           agentOffline: Boolean(next.agentOffline),
+          driverReconnecting: Boolean(next.driverReconnecting),
           controlSince: next.controlSince,
           delegatedToUser: Boolean(next.controlPaused),
           delegationGraceUntil: 0,
@@ -390,7 +405,9 @@ export class AgentOverlayManager {
         state.browserPids = normalizeBrowserPids(next.browserPids);
         state.headless = Boolean(next.headless);
         state.clients = next.clients;
+        state.pendingUserAction = next.pendingUserAction;
         state.agentOffline = Boolean(next.agentOffline);
+        state.driverReconnecting = Boolean(next.driverReconnecting);
         state.controlSince = next.controlSince;
         state.agentTarget = next.agentTarget || null;
         this.syncSessionStarts(state, now);
@@ -773,7 +790,12 @@ export class AgentOverlayManager {
       const action = stringValue(value.action);
       const signature = stringValue(value.signature);
       if (
-        (action === "takeover" || action === "stop" || action === "showAgentTarget" || action === "toggleAutoFollow") &&
+        (action === "expand" ||
+          action === "collapse" ||
+          action === "takeover" ||
+          action === "stop" ||
+          action === "showAgentTarget" ||
+          action === "toggleAutoFollow") &&
         signature
       ) {
         return { page, contextId, windowId, action, signature };
@@ -917,6 +939,7 @@ export class AgentOverlayManager {
         state.clients = state.clients.filter((client) => client.session !== session);
         state.delegatedToUser = false;
         state.agentOffline = false;
+        state.driverReconnecting = false;
         state.controlSince = undefined;
         state.delegationGraceUntil = 0;
         state.returnGraceUntil = 0;
@@ -1571,6 +1594,7 @@ export class AgentOverlayManager {
         state.stopError = null;
         state.handoffPending = false;
         state.agentOffline = false;
+        state.driverReconnecting = false;
         state.controlSince = undefined;
         state.delegatedToUser = false;
         state.delegationGraceUntil = 0;
@@ -1593,6 +1617,7 @@ export class AgentOverlayManager {
       state.handoffPending = false;
       const takenOverAt = this.now();
       state.agentOffline = false;
+      state.driverReconnecting = false;
       state.controlSince = new Date(takenOverAt).toISOString();
       state.delegatedToUser = reason === "user_takeover";
       if (state.delegatedToUser) state.autoFollowAgent = false;
@@ -1633,6 +1658,7 @@ export class AgentOverlayManager {
     // 先重新启用点击保护，再发 CONTROL_RETURNED；等待中的 Agent 醒来时浏览器已经重新上锁。
     state.delegatedToUser = false;
     state.agentOffline = false;
+    state.driverReconnecting = false;
     state.controlSince = undefined;
     state.delegationGraceUntil = 0;
     state.returnGraceUntil = this.now() + CONTROL_RECONCILE_GRACE_MS;
@@ -1661,6 +1687,7 @@ export class AgentOverlayManager {
     } catch (error) {
       state.delegatedToUser = true;
       state.agentOffline = false;
+      state.driverReconnecting = false;
       state.controlSince = controlSince || new Date(this.now()).toISOString();
       state.returnGraceUntil = 0;
       state.takenOverUntil = this.now() + TAKEN_OVER_KEEPALIVE_MS;
@@ -1797,6 +1824,7 @@ export class AgentOverlayManager {
         // 心跳过期会主动 teardown 并删除更新函数。Chrome 对缺失函数返回 undefined，
         // 这不是传输错误；把它当成需要重建 isolated world，下一次更新即可恢复真实状态。
         if (result.result?.type === "undefined") {
+          page.terminalMarkerCleared = false;
           continue;
         }
         pushed = true;
@@ -1833,6 +1861,22 @@ export class AgentOverlayManager {
     page.recoveringContext = true;
     page.lastContextRecoveryAt = now;
     try {
+      // A terminal stop marker can win a race after the first initialization. If the
+      // Gateway still has an active Session (including reconnecting), clear it again
+      // before rebuilding; otherwise the bootstrap exits early forever and no box appears.
+      await client.send(
+        "Runtime.evaluate",
+        {
+          expression: 'try { sessionStorage.removeItem("__ppAgentOverlayTerminalStopUntil"); } catch {}',
+          awaitPromise: false
+        },
+        3000,
+        sessionId
+      );
+      if (!this.isActivePage(state, page) || state.browserClient !== client || page.sessionId !== sessionId) {
+        return;
+      }
+      page.terminalMarkerCleared = true;
       if (!page.mainFrameId) {
         page.mainFrameId = await this.mainFrameIdForSession(client, sessionId);
         if (!this.isActivePage(state, page) || state.browserClient !== client || page.sessionId !== sessionId) {
@@ -1886,7 +1930,9 @@ export class AgentOverlayManager {
       startedAtForClient: (client) => this.startedAtForClient(state, client),
       inputGuardState: this.inputGuardState,
       handoffPending: state.handoffPending,
+      pendingUserAction: state.pendingUserAction,
       agentOffline: state.agentOffline,
+      driverReconnecting: state.driverReconnecting,
       controlSince: state.controlSince,
       now: this.now()
     });
@@ -1947,6 +1993,7 @@ export class AgentOverlayManager {
         return {
           agent: inferAgentName(client),
           project: client.project,
+          ...(client.branch ? { branch: client.branch } : {}),
           session: client.session,
           sessionTitle: client.title,
           ...tailed
@@ -1956,6 +2003,7 @@ export class AgentOverlayManager {
     return {
       agent: inferAgentName(client),
       project: client.project,
+      ...(client.branch ? { branch: client.branch } : {}),
       session: client.session,
       sessionTitle: client.title,
       updatedAt: client.lastActive
@@ -2108,7 +2156,9 @@ export function buildAgentOverlayPayload(input: AgentOverlayPayloadInput): Overl
       profileName: input.profileName,
       inputGuardState: input.inputGuardState,
       handoffPending: input.handoffPending,
+      pendingUserAction: input.pendingUserAction,
       agentOffline: input.agentOffline,
+      driverReconnecting: input.driverReconnecting,
       controlSince: input.controlSince
     });
   }
@@ -2129,6 +2179,7 @@ export function buildAgentOverlayPayload(input: AgentOverlayPayloadInput): Overl
     sessions: sessionRows.map((row) => ({
       agent: nullableString(row.activity.agent || inferAgentName(row.client)),
       project: nullableString(row.activity.project || row.client.project),
+      branch: nullableString(row.activity.branch || row.client.branch),
       session: nullableString(row.activity.session || row.client.session),
       sessionTitle: nullableString(row.activity.sessionTitle || row.client.title),
       lastActive: nullableString(row.client.lastActive || row.activity.updatedAt),
@@ -2136,6 +2187,7 @@ export function buildAgentOverlayPayload(input: AgentOverlayPayloadInput): Overl
     })),
     agent: nullableString(activity.agent || (primary ? inferAgentName(primary) : undefined)),
     project: nullableString(activity.project || primary?.project),
+    branch: nullableString(activity.branch || primary?.branch),
     session: nullableString(activity.session || primary?.session),
     sessionTitle: nullableString(activity.sessionTitle || primary?.title),
     currentAction: nullableString(activity.currentAction || (primary ? "AI 正在控制浏览器" : undefined)),
@@ -2148,7 +2200,9 @@ export function buildAgentOverlayPayload(input: AgentOverlayPayloadInput): Overl
     updatedAt: nullableString(primary ? activity.updatedAt || primary.lastActive || new Date(now).toISOString() : undefined),
     inputGuardState: input.inputGuardState,
     handoffPending: input.handoffPending,
+    pendingUserAction: input.pendingUserAction,
     agentOffline: input.agentOffline,
+    driverReconnecting: input.driverReconnecting,
     controlSince: input.controlSince
   });
 }
@@ -2218,6 +2272,7 @@ function baseActivityForClient(client: CdpClientInfo): AgentActivity {
   return {
     agent: inferAgentName(client),
     project: client.project,
+    ...(client.branch ? { branch: client.branch } : {}),
     session: client.session,
     sessionTitle: client.title,
     updatedAt: client.lastActive
@@ -2233,6 +2288,7 @@ function normalizeOverlayPayload(payload: Partial<OverlayPayload>): OverlayPaylo
     profileName: nullableString(payload.profileName) || "",
     agent: nullableString(payload.agent),
     project: nullableString(payload.project),
+    branch: nullableString(payload.branch),
     session: nullableString(payload.session),
     sessionTitle: nullableString(payload.sessionTitle),
     currentAction: nullableString(payload.currentAction),
@@ -2248,7 +2304,9 @@ function normalizeOverlayPayload(payload: Partial<OverlayPayload>): OverlayPaylo
     inputGuardState:
       payload.inputGuardState === "active" || payload.inputGuardState === "unavailable" ? payload.inputGuardState : "starting",
     handoffPending: payload.handoffPending === true,
+    pendingUserAction: nullableString(payload.pendingUserAction),
     agentOffline: payload.agentOffline === true,
+    driverReconnecting: payload.driverReconnecting === true,
     controlSince: nullableString(payload.controlSince),
     agentTargetId: nullableString(payload.agentTargetId),
     agentTargetTitle: nullableString(payload.agentTargetTitle),
@@ -2292,6 +2350,7 @@ function normalizeOverlaySessionPayload(payload: Partial<OverlaySessionPayload>)
   return {
     agent: nullableString(payload.agent),
     project: nullableString(payload.project),
+    branch: nullableString(payload.branch),
     session: nullableString(payload.session),
     sessionTitle: nullableString(payload.sessionTitle),
     lastActive: nullableString(payload.lastActive),

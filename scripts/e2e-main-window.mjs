@@ -43,7 +43,17 @@ async function prepareFixture(homeDir, dataDir, electronDataDir) {
 
   await Promise.all([
     writeFile(path.join(homeDir, ".codex", "AGENTS.md"), "# ProfilePilot E2E fixture\n\nReply in Chinese.\n", "utf8"),
-    writeFile(path.join(homeDir, ".claude", "CLAUDE.md"), "# ProfilePilot E2E reference fixture\n", "utf8")
+    writeFile(path.join(homeDir, ".claude", "CLAUDE.md"), "# ProfilePilot E2E reference fixture\n", "utf8"),
+    writeFile(path.join(dataDir, "profiles.json"), `${JSON.stringify({
+      profiles: [{
+        id: "smoke-profile",
+        name: "Smoke Profile",
+        dirName: "smoke-profile",
+        createdAt: "2026-08-01T00:00:00.000Z",
+        lastLaunchedAt: null,
+        fixedCdpPort: 9223
+      }]
+    }, null, 2)}\n`, "utf8")
   ]);
 }
 
@@ -56,6 +66,8 @@ async function runElectron({ homeDir, dataDir, electronDataDir }) {
         HOME: homeDir,
         USERPROFILE: homeDir,
         CPM_DATA_DIR: dataDir,
+        CPM_NATIVE_CHROME_USER_DATA_DIR: path.join(dataDir, "native-chrome"),
+        CPM_E2E_DETERMINISTIC: "1",
         CPM_ELECTRON_SMOKE_TEST: "1"
       },
       stdio: ["ignore", "pipe", "pipe"]
@@ -67,19 +79,35 @@ async function runElectron({ homeDir, dataDir, electronDataDir }) {
     let timeoutError = null;
     let forceKillTimer = null;
     const timeout = setTimeout(() => {
-      timeoutError = new Error(`Electron smoke test timed out after ${TEST_TIMEOUT_MS}ms.`);
+      timeoutError = new Error([
+        `Electron smoke test timed out after ${TEST_TIMEOUT_MS}ms.`,
+        stdout ? `stdout:\n${stdout}` : "",
+        stderr ? `stderr:\n${stderr}` : ""
+      ].filter(Boolean).join("\n"));
       child.kill("SIGTERM");
       forceKillTimer = setTimeout(() => child.kill("SIGKILL"), 2_000);
     }, TEST_TIMEOUT_MS);
 
     child.stdout.on("data", (chunk) => {
       stdout += String(chunk);
+      try {
+        extractSmokePayload(stdout);
+        // The smoke contract is the complete structured payload. Electron helpers
+        // may retain inherited pipes, so terminate this disposable instance once
+        // that payload is complete instead of coupling success to helper teardown.
+        child.kill("SIGKILL");
+        finish(resolve, { exitCode: 0, signal: null, stdout, stderr });
+      } catch {
+        // Payload is still streaming.
+      }
     });
     child.stderr.on("data", (chunk) => {
       stderr += String(chunk);
     });
     child.once("error", (error) => finish(reject, error));
-    child.once("close", (exitCode, signal) => {
+    // Electron helper processes can keep inherited stdout/stderr pipes open after the
+    // main process exits, so wait for the main child lifecycle rather than pipe close.
+    child.once("exit", (exitCode, signal) => {
       if (timeoutError) {
         finish(reject, timeoutError);
         return;
@@ -145,6 +173,8 @@ function verifyMainWindowSmoke(smoke, homeDir) {
     "hasCloseProfile",
     "hasLaunchProfileWithCdp",
     "hasConnectRunningSystemChrome",
+    "hasGetBifrostSnapshot",
+    "hasSetProfileProxy",
     "hasScanProfileExtensions",
     "hasMigrateExtensions",
     "hasDeleteProfileExtension",
@@ -155,7 +185,10 @@ function verifyMainWindowSmoke(smoke, homeDir) {
     "hasControlOperation",
     "hasReadGlobalInstructions",
     "hasWriteGlobalInstruction",
+    "hasUndoGlobalInstruction",
     "hasEnsureClaudeInstructionShell",
+    "hasInspectProfileReadiness",
+    "hasResumeAgentConnections",
     "hasOperationProgress"
   ]) {
     assert.equal(smoke[capability], true, `${capability} should be available through the preload bridge`);
@@ -165,7 +198,11 @@ function verifyMainWindowSmoke(smoke, homeDir) {
   assert.equal(smoke.accountSyncTitle, "同步");
   assert.ok(smoke.buttonCount >= 10, "main window should render its primary controls");
   assert.ok(smoke.shellWidthRatio >= 0.9 && smoke.shellWidthRatio <= 1, "main shell should fill the window");
-  assert.equal(smoke.profileTableHasHorizontalOverflow, false);
+  assert.equal(
+    smoke.profileTableHasHorizontalOverflow,
+    false,
+    `Profile Registry overflow metrics: ${JSON.stringify(smoke.profileTableWidths)}`
+  );
 
   assert.deepEqual(smoke.globalInstructionFiles, ["AGENTS.md", "CLAUDE.md"]);
   assert.equal(smoke.globalInstructionHasContent, true);

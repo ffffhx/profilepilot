@@ -12,6 +12,7 @@ import type {
   RecycleIdleClonesResult,
   LaunchClonesResult,
   AppState,
+  BifrostSnapshot,
   CancelOperationRequest,
   CdpLiveView,
   CdpLiveViewOptions,
@@ -25,9 +26,15 @@ import type {
   ExtensionMigrationResult,
   ExtensionScanResult,
   GlobalInstructionUpdateRequest,
+  GlobalInstructionUndoRequest,
   GlobalInstructionsSnapshot,
+  LaunchProfileOptions,
   OperationProgress,
+  ProfileAgentSettings,
+  ProfileProxyConfig,
   ProfileManagerApi,
+  ProfileReadinessReceipt,
+  ProfileReadinessRequest,
   TakeoverAgentConnectionsRequest,
   TakeoverAgentConnectionsResponse
 } from "./shared/types";
@@ -44,13 +51,22 @@ const profileManagerApi: ProfileManagerApi = {
   getTakeoverHistory: (): Promise<AgentTakeoverEvent[]> => ipcRenderer.invoke(IPC_CHANNELS.getTakeoverHistory),
   createProfile: (name: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.createProfile, name),
   renameProfile: (id: string, name: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.renameProfile, id, name),
-  launchProfile: (id: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.launchProfile, id),
-  launchProfileWithCdp: (id: string, port?: number | null): Promise<AppState> =>
-    ipcRenderer.invoke(IPC_CHANNELS.launchProfileWithCdp, id, port),
+  launchProfile: (id: string, options?: LaunchProfileOptions): Promise<AppState> =>
+    ipcRenderer.invoke(IPC_CHANNELS.launchProfile, id, options ?? null),
+  launchProfileWithCdp: (id: string, port?: number | null, options?: LaunchProfileOptions): Promise<AppState> =>
+    ipcRenderer.invoke(IPC_CHANNELS.launchProfileWithCdp, id, port, options ?? null),
   connectRunningSystemChrome: (id: string): Promise<AppState> =>
     ipcRenderer.invoke(IPC_CHANNELS.connectRunningSystemChrome, id),
   suggestCdpPort: (preferredPort?: number | null): Promise<CdpPortSuggestion> =>
     ipcRenderer.invoke(IPC_CHANNELS.suggestCdpPort, preferredPort),
+  getBifrostSnapshot: (): Promise<BifrostSnapshot> =>
+    ipcRenderer.invoke(IPC_CHANNELS.getBifrostSnapshot),
+  disableBifrostRule: (ruleName: string): Promise<BifrostSnapshot> =>
+    ipcRenderer.invoke(IPC_CHANNELS.disableBifrostRule, ruleName),
+  setProfileProxy: (id: string, config: ProfileProxyConfig | null): Promise<AppState> =>
+    ipcRenderer.invoke(IPC_CHANNELS.setProfileProxy, id, config),
+  setProfileAgentSettings: (id: string, settings: ProfileAgentSettings): Promise<AppState> =>
+    ipcRenderer.invoke(IPC_CHANNELS.setProfileAgentSettings, id, settings),
   setMiniProfilePinned: (id: string, pinned: boolean): Promise<AppState> =>
     ipcRenderer.invoke(IPC_CHANNELS.setMiniProfilePinned, id, pinned),
   setMiniProfileOrder: (ids: string[]): Promise<AppState> =>
@@ -90,8 +106,12 @@ const profileManagerApi: ProfileManagerApi = {
     ipcRenderer.invoke(IPC_CHANNELS.readGlobalInstructions),
   writeGlobalInstruction: (request: GlobalInstructionUpdateRequest): Promise<GlobalInstructionsSnapshot> =>
     ipcRenderer.invoke(IPC_CHANNELS.writeGlobalInstruction, request),
+  undoGlobalInstruction: (request: GlobalInstructionUndoRequest): Promise<GlobalInstructionsSnapshot> =>
+    ipcRenderer.invoke(IPC_CHANNELS.undoGlobalInstruction, request),
   ensureClaudeInstructionShell: (): Promise<GlobalInstructionsSnapshot> =>
     ipcRenderer.invoke(IPC_CHANNELS.ensureClaudeInstructionShell),
+  inspectProfileReadiness: (request: ProfileReadinessRequest): Promise<ProfileReadinessReceipt> =>
+    ipcRenderer.invoke(IPC_CHANNELS.inspectProfileReadiness, request),
   focusProfile: (id: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.focusProfile, id),
   isProfileFrontmost: (id: string): Promise<boolean> => ipcRenderer.invoke(IPC_CHANNELS.isProfileFrontmost, id),
   closeProfile: (id: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.closeProfile, id),
@@ -106,6 +126,11 @@ const profileManagerApi: ProfileManagerApi = {
     sessionOrOptions?: string | TakeoverAgentConnectionsRequest
   ): Promise<TakeoverAgentConnectionsResponse> =>
     ipcRenderer.invoke(IPC_CHANNELS.takeoverAgentConnections, profileId, sessionOrOptions),
+  resumeAgentConnections: (
+    profileId: string,
+    sessionOrOptions?: string | TakeoverAgentConnectionsRequest
+  ): Promise<TakeoverAgentConnectionsResponse> =>
+    ipcRenderer.invoke(IPC_CHANNELS.resumeAgentConnections, profileId, sessionOrOptions),
   setAgentOverlayEnabled: (enabled: boolean): Promise<AppState> =>
     ipcRenderer.invoke(IPC_CHANNELS.setAgentOverlayEnabled, enabled),
   setShellIntegrationEnabled: (enabled: boolean): Promise<AppState> =>

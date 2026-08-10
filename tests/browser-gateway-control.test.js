@@ -40,10 +40,15 @@ test("Gateway enforces Profile↔Session and Session↔daemon one-to-one binding
       publicPort: 9223,
       sessionId: "cx-one",
       daemonInstanceId: "daemon-one",
-      daemonPid: 101
+      daemonPid: 101,
+      project: "coze-monorepo",
+      branch: "feat/overlay-identity"
     });
     assert.equal(first.profile.ownerSessionId, "cx-one");
     assert.equal(first.profile.daemonInstanceId, "daemon-one");
+    assert.equal(first.profile.project, "coze-monorepo");
+    assert.equal(first.profile.branch, "feat/overlay-identity");
+    assert.equal(first.profile.driverState, "connecting");
 
     assertCode(() => h.control.acquire({
       publicPort: 9223,
@@ -135,6 +140,7 @@ test("Gateway takeover, completion, return and stop are durable explicit transit
     const takeover = h.control.delegateToUser("cx-one", "user_takeover", "手动加载未打包扩展");
     assert.equal(takeover.ownership, "user");
     assert.equal(takeover.agentHealth, "waiting");
+    assert.equal(takeover.driverState, "parked");
     assert.equal(takeover.pendingUserAction, "手动加载未打包扩展");
     assertCode(() => h.control.delegateToUser("cx-one", "agent_complete"), "PENDING_USER_ACTION");
     assertCode(() => h.control.acquire({
@@ -145,6 +151,8 @@ test("Gateway takeover, completion, return and stop are durable explicit transit
 
     const returned = h.control.returnToAgent("cx-one");
     assert.equal(returned.ownership, "agent");
+    assert.equal(returned.driverState, "connected");
+    assert.equal(returned.agentHealth, "online");
     assert.equal(returned.pendingUserAction, undefined);
     const reacquired = h.control.acquire({
       publicPort: 9223,
@@ -157,9 +165,49 @@ test("Gateway takeover, completion, return and stop are durable explicit transit
     assert.equal(complete.ownership, "user");
     assert.equal(complete.sessionStatus, "stopped");
     assert.equal(complete.agentHealth, "offline");
+    assert.equal(complete.driverState, "disconnected");
     assert.equal(complete.ownerSessionId, undefined);
     assertCode(() => h.control.returnToAgent("cx-one"), "GATEWAY_PROFILE_NOT_FOUND");
     assert.equal(h.control.getProfileForSession("cx-one"), null);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("Gateway tracks driver reconnect separately from Session ownership", () => {
+  const h = harness();
+  try {
+    h.control.acquire({ publicPort: 9223, sessionId: "cx-reconnect", daemonInstanceId: "daemon-reconnect" });
+    const connected = h.control.markAgentConnected("cx-reconnect", "daemon-reconnect");
+    assert.equal(connected.ownership, "agent");
+    assert.equal(connected.sessionStatus, "active");
+    assert.equal(connected.agentHealth, "online");
+    assert.equal(connected.driverState, "connected");
+
+    const reconnecting = h.control.markAgentReconnecting(
+      "cx-reconnect",
+      "2026-07-11T00:00:10.000Z",
+      "websocket-closed"
+    );
+    assert.equal(reconnecting.ownership, "agent");
+    assert.equal(reconnecting.sessionStatus, "active");
+    assert.equal(reconnecting.agentHealth, "offline");
+    assert.equal(reconnecting.driverState, "reconnecting");
+    assert.equal(reconnecting.reconnectAttempt, 0);
+    assert.equal(reconnecting.reconnectDeadlineAt, "2026-07-11T00:00:10.000Z");
+
+    const retry = h.control.acquire({
+      publicPort: 9223,
+      sessionId: "cx-reconnect",
+      daemonInstanceId: "daemon-reconnect"
+    });
+    assert.equal(retry.profile.driverState, "reconnecting");
+    assert.equal(retry.profile.reconnectAttempt, 1);
+
+    const restored = h.control.markAgentConnected("cx-reconnect", "daemon-reconnect");
+    assert.equal(restored.driverState, "connected");
+    assert.equal(restored.reconnectAttempt, undefined);
+    assert.equal(restored.reconnectDeadlineAt, undefined);
   } finally {
     h.cleanup();
   }

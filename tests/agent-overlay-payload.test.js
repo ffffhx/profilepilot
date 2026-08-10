@@ -26,14 +26,17 @@ test("AgentOverlay payload keeps known fields stable and nulls empty values", ()
     "controlSince",
     "currentAction",
     "currentStep",
+    "driverReconnecting",
     "handoffPending",
     "inputGuardState",
     "lastMessage",
     "locale",
     "nextStep",
     "ownership",
+    "pendingUserAction",
     "profileName",
     "project",
+    "branch",
     "session",
     "sessionTitle",
     "sessions",
@@ -49,12 +52,15 @@ test("AgentOverlay payload keeps known fields stable and nulls empty values", ()
   assert.equal(payload.ownership, "agent");
   assert.equal(payload.agent, "Codex");
   assert.equal(payload.project, null);
+  assert.equal(payload.branch, null);
   assert.equal(payload.session, null);
   assert.equal(payload.sessionTitle, null);
   assert.equal(payload.currentAction, "AI 正在控制浏览器");
   assert.equal(payload.inputGuardState, "starting");
   assert.equal(payload.handoffPending, false);
+  assert.equal(payload.pendingUserAction, null);
   assert.equal(payload.agentOffline, false);
+  assert.equal(payload.driverReconnecting, false);
   assert.equal(payload.agentTargetId, null);
   assert.equal(payload.agentTargetTitle, null);
   assert.equal(payload.agentTargetUrl, null);
@@ -76,6 +82,7 @@ test("AgentOverlay payload keeps known fields stable and nulls empty values", ()
   assert.deepEqual(payload.sessions[0], {
     agent: "Codex",
     project: null,
+    branch: null,
     session: null,
     sessionTitle: null,
     lastActive: null,
@@ -103,6 +110,19 @@ test("AgentOverlay payload exposes an offline delegated Session without losing i
   assert.equal(payload.ownership, "agentDelegatedToUser");
   assert.equal(payload.agentOffline, true);
   assert.equal(payload.controlSince, "2026-07-10T08:00:00.000Z");
+});
+
+test("AgentOverlay payload carries the delegated user action into the HUD", () => {
+  const payload = buildAgentOverlayPayload({
+    locale: "zh",
+    state: "takenOver",
+    ownership: "agentDelegatedToUser",
+    profileName: "Work Profile",
+    pendingUserAction: "完成验证码",
+    clients: [{ pid: 3201, label: "Claude Code", session: "cc-handoff" }]
+  });
+
+  assert.equal(payload.pendingUserAction, "完成验证码");
 });
 
 test("AgentOverlay payload passes through targetUrl from activity", () => {
@@ -145,6 +165,7 @@ test("AgentOverlay payload chooses latest lastActive primary and orders sessions
         pid: 100,
         label: "agent-browser",
         project: "new-project",
+        branch: "feat/new-overlay",
         title: "Newer Codex",
         session: "cx-new",
         lastActive: "2026-07-08T12:00:00.000Z"
@@ -163,6 +184,7 @@ test("AgentOverlay payload chooses latest lastActive primary and orders sessions
   assert.equal(payload.agent, "Codex");
   assert.equal(payload.project, "tie-project");
   assert.equal(payload.session, "cx-tie");
+  assert.equal(payload.sessions[1].branch, "feat/new-overlay");
   assert.deepEqual(payload.sessions.map((session) => session.project), [
     "tie-project",
     "new-project",

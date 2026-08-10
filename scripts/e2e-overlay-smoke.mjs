@@ -19,7 +19,7 @@ const CHROME_READY_TIMEOUT_MS = 10000;
 const INJECTION_TIMEOUT_MS = 5000;
 const NEW_TAB_INJECTION_LIMIT_MS = 1000;
 const OVERLAY_WORLD_NAME = "__ppAgentOverlayWorld";
-const ROOT_URL = dataUrl("pp-e2e-root", "ProfilePilot overlay e2e root");
+const ROOT_URL = dataUrl("pp-e2e-root", "ProfilePilot overlay e2e root", { strictStyleCsp: true });
 const SECOND_URL = dataUrl("pp-e2e-second", "ProfilePilot overlay e2e second tab");
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
@@ -94,7 +94,10 @@ try {
   assert.equal(rootPage.state.installedType, "undefined", "Root page main world must not expose __ppAgentOverlayInstalled.");
   assert.equal(rootPage.state.updateType, "undefined", "Root page main world must not expose __ppAgentOverlayUpdate.");
   assert.equal(rootPage.state.host, true, "Root page should contain the overlay host DOM node.");
-  step("Root page main world has no overlay globals, while the overlay host DOM is visible.");
+  assert.equal(rootPage.state.hostPosition, "fixed", "Strict-CSP root page should keep the overlay host fixed.");
+  assert.equal(rootPage.state.hostPointerEvents, "none", "Strict-CSP root page overlay host must not intercept page input.");
+  assert.equal(rootPage.state.hostInset, "0px", "Strict-CSP root page overlay host should cover the viewport.");
+  step("Root page main world has no overlay globals, while strict-CSP computed overlay styles remain active.");
 
   const rootOverlayContextId = await waitForOverlayWorldContext(rootPageClient, "root page isolated overlay world");
   const isolatedGlobals = await overlayState(rootPageClient, rootOverlayContextId);
@@ -130,6 +133,43 @@ try {
     host: true
   });
   step("Pushed a todo + multi-session payload through the isolated world update function.");
+
+  const avoided = await evaluateValue(
+    rootPageClient,
+    `(() => {
+      const host = document.getElementById("__pp-agent-overlay");
+      const before = host?.className || "";
+      const rect = {
+        left: innerWidth - 48,
+        top: innerHeight - 48,
+        right: innerWidth - 16,
+        bottom: innerHeight - 16,
+        width: 32,
+        height: 32
+      };
+      const moved = typeof window.__ppAgentOverlayAvoidRect === "function"
+        ? window.__ppAgentOverlayAvoidRect({
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+            width: rect.width,
+            height: rect.height
+          })
+        : false;
+      return {
+        moved,
+        before,
+        after: host?.className || ""
+      };
+    })()`,
+    1000,
+    rootOverlayContextId
+  );
+  assert.equal(avoided.moved, true, "HUD should move when the intended click target intersects its current corner.");
+  assert.match(avoided.before, /corner-bottom-right/, "HUD should initially use the bottom-right corner.");
+  assert.doesNotMatch(avoided.after, /corner-bottom-right/, "HUD avoidance should select a different corner.");
+  step("Collapsed HUD moved away from an intersecting click target inside the real isolated overlay world.");
 
   const forged = await evaluateValue(
     rootPageClient,
@@ -480,14 +520,21 @@ function overlayState(client, contextId = undefined) {
 function overlayStateInContext(client, contextId) {
   return evaluateValue(
     client,
-    `(() => ({
-      installed: window.__ppAgentOverlayInstalled === true,
-      installedType: typeof window.__ppAgentOverlayInstalled,
-      host: Boolean(document.getElementById("__pp-agent-overlay")),
-      updateType: typeof window.__ppAgentOverlayUpdate,
-      signalType: typeof window.__ppAgentOverlaySignal,
-      teardownType: typeof window.__ppAgentOverlayTeardown
-    }))()`,
+    `(() => {
+      const host = document.getElementById("__pp-agent-overlay");
+      const style = host ? getComputedStyle(host) : null;
+      return {
+        installed: window.__ppAgentOverlayInstalled === true,
+        installedType: typeof window.__ppAgentOverlayInstalled,
+        host: Boolean(host),
+        hostPosition: style?.position || "",
+        hostPointerEvents: style?.pointerEvents || "",
+        hostInset: style?.inset || "",
+        updateType: typeof window.__ppAgentOverlayUpdate,
+        signalType: typeof window.__ppAgentOverlaySignal,
+        teardownType: typeof window.__ppAgentOverlayTeardown
+      };
+    })()`,
     500,
     contextId
   );
@@ -525,12 +572,12 @@ async function clickOverlayStopButton(client) {
     1000
   );
   assert.ok(viewport && viewport.width > 0 && viewport.height > 0, "Overlay host should expose a viewport for clicks.");
-  const panelWidth = Math.min(574, viewport.width - 42);
-  const panelHeight = 84;
-  const panelLeft = (viewport.width - panelWidth) / 2;
-  const panelTop = viewport.height - 32 - panelHeight;
-  const x = Math.round(panelLeft + panelWidth - 68);
-  const y = Math.round(panelTop + panelHeight / 2);
+  // The active overlay now starts as a 32px bottom-right dock. Expand it first,
+  // then click the right-hand terminal action twice to confirm.
+  await dispatchMouseClick(client, Math.round(viewport.width - 32), Math.round(viewport.height - 32));
+  await delay(80);
+  const x = Math.round(viewport.width - 96);
+  const y = Math.round(viewport.height - 45);
   await dispatchMouseClick(client, x, y);
   await delay(80);
   await dispatchMouseClick(client, x, y);
@@ -664,8 +711,11 @@ async function terminateProcess(child) {
   }
 }
 
-function dataUrl(id, text) {
-  const html = `<!doctype html><meta charset="utf-8"><title>${id}</title><main id="${id}">${text}</main>`;
+function dataUrl(id, text, options = {}) {
+  const csp = options.strictStyleCsp
+    ? `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'none'; style-src-elem 'none'; style-src-attr 'none'">`
+    : "";
+  const html = `<!doctype html><meta charset="utf-8">${csp}<title>${id}</title><main id="${id}">${text}</main>`;
   return `data:text/html,${encodeURIComponent(html)}`;
 }
 

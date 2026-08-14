@@ -1521,7 +1521,7 @@ async function runProfileReadinessCommand(
       expectedRules.length ? expectedRules.join(" · ") : bifrost ? "Bifrost 专属入口" : "Profile 已保存的代理配置",
       bifrost
         ? `${proxySnapshot?.running ? "Bifrost 运行中" : "Bifrost 不可用"} · ${activeRules.join(" · ") || "无启用规则"}`
-        : configured?.profile.upstreamProxy?.server || "跟随系统代理",
+        : configured?.profile.upstreamProxy?.server || (configured?.profile.directConnection ? "直接联网（绕过系统代理）" : "跟随系统代理"),
       proxyReady ? null : missingRules.length ? `缺少规则：${missingRules.join(" · ")}` : "恢复代理入口后重新检查。"
     ),
     readinessCliCheck(

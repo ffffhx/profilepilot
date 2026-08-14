@@ -12,7 +12,7 @@ import {
   type GatewayControlResponse
 } from "./browser-gateway-client";
 import type { GatewayDriverKind } from "./browser-gateway-control";
-import { ensureProfileBifrostProxy } from "./bifrost-proxy";
+import { directConnectionChromeArgs, ensureProfileBifrostProxy, ensureUpstreamProxy } from "./bifrost-proxy";
 import { waitForCdp } from "./cdp-client";
 import { loadUnpackedExtensionsOverCdp } from "./cdp-page";
 import { getDirectChromeCommand } from "./chrome-launch";
@@ -141,9 +141,11 @@ export async function ensureConfiguredGatewayProfileRunning(
   }
   mkdirSync(configured.userDataDir, { recursive: true });
   const launchPlan = await getMigratedExtensionLaunchPlan(configured.profile);
-  const bifrostArgs = configured.profile.bifrostProxy
+  const proxyArgs = configured.profile.bifrostProxy
     ? await ensureProfileBifrostProxy(configured.profile.id, configured.profile.bifrostProxy, env)
-    : [];
+    : configured.profile.upstreamProxy
+      ? await ensureUpstreamProxy(configured.profile.upstreamProxy)
+      : directConnectionChromeArgs(configured.profile.directConnection);
   await requestBrowserGateway({
     action: "launch-profile",
     profileId: configured.profileId,
@@ -154,7 +156,7 @@ export async function ensureConfiguredGatewayProfileRunning(
     args: [
       `--user-data-dir=${configured.userDataDir}`,
       "--no-first-run",
-      ...bifrostArgs,
+      ...proxyArgs,
       ...launchPlan.launchArgs
     ]
   }, { homeDir, timeoutMs: 8_000 });

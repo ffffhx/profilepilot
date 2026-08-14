@@ -1,4 +1,5 @@
 import { isBusyAction } from "../busy";
+import { proxyServerUsesPort } from "../proxy";
 import { store } from "../state";
 import { AgentActivity, BifrostRuleDestination, BifrostSnapshot, CdpClientInfo, ExternalChromeInstance, ProfileReadinessReceipt, PublicProfile, SystemProxyRoute } from "../types";
 import { renderLiveViewSection } from "./live-view";
@@ -688,7 +689,7 @@ export function renderProfileActions(profile: PublicProfile): string {
               </button>
               ${
                 profile.source === "isolated"
-                  ? `<button type="button" class="${profile.bifrostProxy || profile.upstreamProxy ? "menu-info" : ""} ${bifrostSaving ? "loading" : ""}" data-action="configure-bifrost-proxy" data-id="${profile.id}" ${store.busy ? "disabled" : ""}>
+                  ? `<button type="button" class="${profile.bifrostProxy || profile.upstreamProxy || profile.directConnection ? "menu-info" : ""} ${bifrostSaving ? "loading" : ""}" data-action="configure-bifrost-proxy" data-id="${profile.id}" ${store.busy ? "disabled" : ""}>
                       ${renderButtonLabel(bifrostSaving, proxyMenuLabel(profile), "保存中…")}
                     </button>`
                   : ""
@@ -1150,14 +1151,19 @@ function renderBifrostRouteMapping(detail: string): string {
   `;
 }
 
-// 三选一代理分流的「更多」菜单文案：未配=代理分流；Bifrost=带专属端口；直连 Clash=带端口。
+// Profile 专属网络路径的「更多」菜单文案。
 export function proxyMenuLabel(profile: PublicProfile): string {
   if (profile.bifrostProxy) {
     return `代理分流 · Bifrost :${profile.bifrostProxy.listenerPort}`;
   }
   if (profile.upstreamProxy) {
     const port = profile.upstreamProxy.server.match(/:(\d{2,5})(?:\D|$)/)?.[1];
-    return `代理分流 · Clash${port ? ` :${port}` : ""}`;
+    const kind = upstreamProxyKind(profile.upstreamProxy.server, store.bifrostSnapshot);
+    const provider = kind === "bifrost" ? "Bifrost" : kind === "clash" ? "Clash" : "指定代理";
+    return `代理分流 · ${provider}${port ? ` :${port}` : ""}`;
+  }
+  if (profile.directConnection) {
+    return "代理分流 · 直接联网";
   }
   return "代理分流";
 }
@@ -1204,16 +1210,14 @@ function renderSystemRuleDestination(label: string): string {
 function systemProxyDisplay(snapshot: BifrostSnapshot | null | undefined): SystemProxyDisplay {
   const systemProxy = snapshot?.systemProxy;
   const routes = systemProxyPrimaryRoutes(snapshot);
-  const mainRules = snapshot?.mainRules || [];
-  const mainDestination = snapshot?.mainRuleDestination || null;
   if (!systemProxy) {
     return {
       label: "正在读取系统代理…",
       tone: "system-proxy-unknown",
       routes,
       providerLabel: null,
-      mainRules,
-      mainDestination
+      mainRules: [],
+      mainDestination: null
     };
   }
   if (systemProxy.mode === "direct") {
@@ -1222,8 +1226,8 @@ function systemProxyDisplay(snapshot: BifrostSnapshot | null | undefined): Syste
       tone: "system-proxy-direct",
       routes,
       providerLabel: null,
-      mainRules,
-      mainDestination
+      mainRules: [],
+      mainDestination: null
     };
   }
   const primary = routes.find((route) => route.kind !== "direct" && route.endpoint);
@@ -1233,13 +1237,17 @@ function systemProxyDisplay(snapshot: BifrostSnapshot | null | undefined): Syste
       tone: "system-proxy-unknown",
       routes,
       providerLabel: null,
-      mainRules,
-      mainDestination
+      mainRules: [],
+      mainDestination: null
     };
   }
   const port = Number(primary.endpoint.match(/:(\d{1,5})$/)?.[1]);
   const loopback = /^(?:127\.0\.0\.1|localhost|\[?::1\]?):/i.test(primary.endpoint);
   const isBifrost = Boolean(snapshot?.running && snapshot.mainPort === port && loopback);
+  // Bifrost 的主规则只描述它自己的主监听端口。系统代理指向 Clash 等其他
+  // 入口时，展示这些规则会把两条互不相干的链路错误拼接在一起。
+  const mainRules = isBifrost ? snapshot?.mainRules || [] : [];
+  const mainDestination = isBifrost ? snapshot?.mainRuleDestination || null : null;
   const endpoint = loopback && port ? `:${port}` : primary.endpoint;
   return {
     label: isBifrost
@@ -1379,6 +1387,9 @@ export function renderProfileProxyRoute(profile: PublicProfile): string {
         </span>
       </span>
     `;
+  }
+  if (profile.directConnection) {
+    return renderDirectConnectionRoute();
   }
   if (profile.upstreamProxy) {
     return renderUpstreamProxyRoute(profile);
@@ -1529,6 +1540,14 @@ export function bifrostProfileDestination(
 // 直连上游代理的可达性两态：绿=TCP 可达；红=不可达/未探到；unknown=还没拿到快照。
 export type UpstreamRouteState = "ok" | "down" | "unknown";
 
+type UpstreamProxyKind = "bifrost" | "clash" | "custom";
+
+function upstreamProxyKind(server: string, snapshot: BifrostSnapshot | null | undefined): UpstreamProxyKind {
+  if (proxyServerUsesPort(server, snapshot?.mainPort || 9900)) return "bifrost";
+  if (proxyServerUsesPort(server, 7897)) return "clash";
+  return "custom";
+}
+
 export function upstreamRouteState(profile: PublicProfile, snapshot: BifrostSnapshot | null | undefined): UpstreamRouteState {
   const config = profile.upstreamProxy;
   if (!config || !snapshot) {
@@ -1549,18 +1568,54 @@ export function renderUpstreamProxyRoute(profile: PublicProfile): string {
   const state = upstreamRouteState(profile, store.bifrostSnapshot);
   const stateClass = state === "unknown" ? "" : ` ${state}`;
   const port = config.server.match(/:(\d{2,5})(?:\D|$)/)?.[1] || "up";
+  const kind = upstreamProxyKind(config.server, store.bifrostSnapshot);
+  const provider = kind === "bifrost" ? "Bifrost" : kind === "clash" ? "Clash Verge" : "指定代理";
+  const routeNote = kind === "bifrost"
+    ? "使用主入口规则"
+    : kind === "clash"
+      ? "规则由 Clash 决定"
+      : "规则由目标代理决定";
+  const tooltipNote = kind === "clash" ? "具体规则由 Clash Verge 决定" : routeNote;
+  const reachableTitle = kind === "bifrost"
+    ? "Bifrost 主入口可达"
+    : kind === "clash"
+      ? "直连 Clash 可达"
+      : "指定代理可达";
+  const unreachableTitle = kind === "bifrost"
+    ? "Bifrost 主入口不可达"
+    : kind === "clash"
+      ? "直连 Clash 不可达"
+      : "指定代理不可达";
+  const recovery = kind === "bifrost"
+    ? "确认 Bifrost 已开启并监听该端口"
+    : kind === "clash"
+      ? "确认 Clash 已开启并监听该端口"
+      : "确认代理服务已开启并监听该端口";
   const title = state === "ok"
-    ? `直连 Clash 可达 · ${config.server}`
+    ? `${reachableTitle} · ${config.server}`
     : state === "down"
-      ? `直连 Clash 不可达 · ${config.server}（确认 Clash 已开启并在该端口监听）`
-      : `直连 Clash · ${config.server}`;
-  const tooltip = `${title}\n具体规则由 Clash Verge 决定`;
+      ? `${unreachableTitle} · ${config.server}（${recovery}）`
+      : `${provider} · ${config.server}`;
+  const tooltip = `${title}\n${tooltipNote}`;
   return `
     <span class="profile-route-track upstream${stateClass} action-tooltip" data-tooltip="${escapeHtml(tooltip)}" aria-label="${escapeHtml(tooltip)}" tabindex="0">
       <span class="profile-route-signal" aria-hidden="true"></span>
       <span class="profile-route-copy">
-        <strong>Clash Verge <em>:${escapeHtml(port)}</em></strong>
-        <small>规则由 Clash 决定</small>
+        <strong>${provider} <em>:${escapeHtml(port)}</em></strong>
+        <small>${routeNote}</small>
+      </span>
+    </span>
+  `;
+}
+
+export function renderDirectConnectionRoute(): string {
+  const tooltip = "直接联网\nChrome 已显式绕过系统代理，不连接 Bifrost 或 Clash";
+  return `
+    <span class="profile-route-track direct action-tooltip" data-tooltip="${escapeHtml(tooltip)}" aria-label="${escapeHtml(tooltip)}" tabindex="0">
+      <span class="profile-route-signal" aria-hidden="true"></span>
+      <span class="profile-route-copy">
+        <strong>直接联网</strong>
+        <small>已绕过所有代理</small>
       </span>
     </span>
   `;
@@ -1570,16 +1625,38 @@ export function renderBifrostProxyDetail(profile: PublicProfile): string {
   if (profile.source !== "isolated") {
     return "";
   }
-  if (profile.upstreamProxy) {
-    const state = upstreamRouteState(profile, store.bifrostSnapshot);
-    const stateLabel = state === "ok" ? "Clash 可达" : state === "down" ? "Clash 不可达" : "状态未知";
-    const bypass = profile.upstreamProxy.bypassList;
+  if (profile.directConnection) {
     return `
       <div class="detail-row bifrost-detail-row">
         <span>代理分流</span>
-        <strong>直连 Clash <em class="bifrost-route-state ${state}">${stateLabel}</em></strong>
+        <strong>直接联网 <em class="bifrost-route-state ok">已配置</em></strong>
+        <code class="path-box compact">--no-proxy-server</code>
+        <small class="detail-note">启动 Chrome 时显式绕过系统代理，不连接 Bifrost 或 Clash。</small>
+      </div>
+    `;
+  }
+  if (profile.upstreamProxy) {
+    const state = upstreamRouteState(profile, store.bifrostSnapshot);
+    const kind = upstreamProxyKind(profile.upstreamProxy.server, store.bifrostSnapshot);
+    const provider = kind === "bifrost" ? "Bifrost 主入口" : kind === "clash" ? "直连 Clash" : "指定代理";
+    const stateOwner = kind === "bifrost" ? "Bifrost" : kind === "clash" ? "Clash" : "代理";
+    const stateLabel = state === "ok"
+      ? kind === "custom" ? "代理可达" : `${stateOwner} 可达`
+      : state === "down"
+        ? kind === "custom" ? "代理不可达" : `${stateOwner} 不可达`
+        : "状态未知";
+    const bypass = profile.upstreamProxy.bypassList;
+    const routeNote = kind === "bifrost"
+      ? "整体流量交给 Bifrost 主入口，使用当前启用规则。"
+      : kind === "clash"
+        ? "整体流量交给 Clash mixed 入口。"
+        : "整体流量交给这个代理，具体规则由目标服务决定。";
+    return `
+      <div class="detail-row bifrost-detail-row">
+        <span>代理分流</span>
+        <strong>${provider} <em class="bifrost-route-state ${state}">${stateLabel}</em></strong>
         <code class="path-box compact">${escapeHtml(profile.upstreamProxy.server)}</code>
-        <small class="detail-note">${bypass ? `Bypass：${escapeHtml(bypass)}` : "整体流量交给该上游代理（如 Clash 入站）。"}</small>
+        <small class="detail-note">${bypass ? `Bypass：${escapeHtml(bypass)}` : routeNote}</small>
       </div>
     `;
   }
@@ -1591,7 +1668,7 @@ export function renderBifrostProxyDetail(profile: PublicProfile): string {
         <span>代理分流</span>
         <strong>跟随系统代理</strong>
         <code class="path-box compact">${escapeHtml(display.label)}</code>
-        <small class="detail-note">可在“更多 → 代理分流”中为此 Profile 绑定 Bifrost 规则或直连 Clash。</small>
+        <small class="detail-note">可在“更多 → 代理分流”中选择 Bifrost、Clash 或直接联网。</small>
       </div>
     `;
   }

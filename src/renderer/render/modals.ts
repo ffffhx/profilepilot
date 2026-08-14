@@ -1,8 +1,24 @@
 import { isBusyAction } from "../busy";
 import { plannedExtensionMigrationExtensions, renderExtensionMigrationDiffPreview, renderMigrationTargetPicker } from "./extensions";
+import { bifrostMainProxyServer, DEFAULT_CLASH_PROXY_SERVER, proxyServerUsesPort } from "../proxy";
 import { store } from "../state";
 import { BifrostSnapshot, CdpPortSuggestion, GlobalInstructionFile, PublicProfile } from "../types";
 import { escapeHtml, formatCdpPortSuggestionNote, formatDate, renderButtonLabel } from "../util";
+
+type ProxyRouteMapTone = "current" | "saved" | "preview" | "warning" | "unknown";
+type ProxyMode = "custom" | "bifrost-main" | "clash" | "direct";
+
+interface ProxyRouteMapView {
+  badge: string;
+  note: string;
+  tone: ProxyRouteMapTone;
+  middleLabel: string;
+  middleValue: string;
+  middleNote: string;
+  targetLabel: string;
+  targetValue: string;
+  targetNote: string;
+}
 
 export function renderGlobalInstructionsModal(): string {
   const files = store.globalInstructions?.files || [];
@@ -392,29 +408,68 @@ export function renderBifrostProxyModal(profileId: string, snapshot: BifrostSnap
 
   const config = profile.bifrostProxy;
   const upstreamConfig = profile.upstreamProxy;
-  const enabled = Boolean(config || upstreamConfig);
-  const mode: "bifrost" | "upstream" = upstreamConfig ? "upstream" : "bifrost";
-  const listenerPort = config?.listenerPort ?? suggestBifrostListenerPort(profileId, snapshot);
-  const selectedRules = new Set(config?.rules || []);
-  const availableRules = [...new Set([...(snapshot?.localRules || []), ...selectedRules])];
-  const groupRuleText = (config?.groupRules || []).join("\n");
-  const ruleCount = selectedRules.size + (config?.groupRules.length || 0);
-  const disabledRuleCount = (config?.disabledRules?.length || 0) + (config?.disabledGroupRules?.length || 0);
-  const activeRuleCount = Math.max(0, ruleCount - disabledRuleCount);
-  const upstreamServer = upstreamConfig?.server || "";
+  const directConnection = profile.directConnection === true;
+  const enabled = Boolean(config || upstreamConfig || directConnection);
+  const bifrostMainServer = bifrostMainProxyServer(snapshot);
+  const clashServer = DEFAULT_CLASH_PROXY_SERVER;
+  const mode: ProxyMode = directConnection
+    ? "direct"
+    : upstreamConfig
+      ? proxyServerUsesPort(upstreamConfig.server, snapshot?.mainPort || 9900)
+        ? "bifrost-main"
+        : proxyServerUsesPort(upstreamConfig.server, 7897)
+          ? "clash"
+          : "custom"
+      : "bifrost-main";
+  const customProxyServer = mode === "custom" ? upstreamConfig?.server || "" : "";
   const upstreamBypass = upstreamConfig?.bypassList || "";
-  const hotEditable = Boolean(profile.running && config);
-  const locked = Boolean(profile.running && !hotEditable);
+  const locked = Boolean(profile.running);
   const saving = isBusyAction("save-bifrost-proxy", { profileId });
+  const systemRouteView = systemProxyRouteMapView(profile, snapshot);
+  const routeView = config
+    ? bifrostRouteMapView(
+        profile,
+        snapshot,
+        config.listenerPort,
+        config.rules.length + config.groupRules.length,
+        (config.disabledRules?.length || 0) + (config.disabledGroupRules?.length || 0)
+      )
+    : upstreamConfig
+      ? upstreamRouteMapView(profile, snapshot, upstreamConfig.server)
+      : directConnection
+        ? directRouteMapView(profile)
+        : systemRouteView;
 
   return `
     <div class="modal-backdrop app-modal-backdrop" data-action="close-modal">
-      <form class="modal bifrost-proxy-modal" data-bifrost-proxy-form data-profile-id="${escapeHtml(profile.id)}" data-bifrost-configured="${enabled ? "true" : "false"}" data-bifrost-hot-edit="${hotEditable ? "true" : "false"}" data-proxy-mode="${mode}" role="dialog" aria-modal="true" aria-labelledby="bifrost-proxy-title">
+      <form
+        class="modal bifrost-proxy-modal"
+        data-bifrost-proxy-form
+        data-profile-id="${escapeHtml(profile.id)}"
+        data-bifrost-configured="${enabled ? "true" : "false"}"
+        data-bifrost-running="${profile.running ? "true" : "false"}"
+        data-bifrost-hot-edit="false"
+        data-proxy-mode="${mode}"
+        data-bifrost-main-server="${escapeHtml(bifrostMainServer)}"
+        data-clash-server="${escapeHtml(clashServer)}"
+        data-current-route-badge="${escapeHtml(systemRouteView.badge)}"
+        data-current-route-note="${escapeHtml(systemRouteView.note)}"
+        data-current-route-tone="${systemRouteView.tone}"
+        data-current-route-middle-label="${escapeHtml(systemRouteView.middleLabel)}"
+        data-current-route-middle-value="${escapeHtml(systemRouteView.middleValue)}"
+        data-current-route-middle-note="${escapeHtml(systemRouteView.middleNote)}"
+        data-current-route-target-label="${escapeHtml(systemRouteView.targetLabel)}"
+        data-current-route-target-value="${escapeHtml(systemRouteView.targetValue)}"
+        data-current-route-target-note="${escapeHtml(systemRouteView.targetNote)}"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="bifrost-proxy-title"
+      >
         <div class="bifrost-proxy-head">
           <div>
             <span class="modal-kicker inline-flex mb-2 text-accent font-mono text-[11px] font-semibold tracking-[0.18em] uppercase">Proxy route</span>
             <h2 id="bifrost-proxy-title">${escapeHtml(profile.name)} 的请求分流</h2>
-            <p>为这个独立 Profile 建立专属代理入口：走 Bifrost 规则视图，或直连某个上游代理（如 Clash Verge 入站）。</p>
+            <p>为这个独立 Profile 固定一条网络路径，不再跟随系统代理。</p>
           </div>
           <button type="button" class="${snapshot === null ? "loading" : ""}" data-action="refresh-bifrost-snapshot" data-id="${escapeHtml(profile.id)}" ${snapshot === null ? "disabled" : ""}>
             ${renderButtonLabel(snapshot === null, "刷新 Bifrost", "读取中…")}
@@ -423,106 +478,63 @@ export function renderBifrostProxyModal(profileId: string, snapshot: BifrostSnap
 
         ${renderBifrostStatus(snapshot)}
 
-        <div class="bifrost-route-map" aria-label="Profile 代理路径">
-          <div class="bifrost-route-node profile-node">
-            <span>Profile</span>
-            <strong>${escapeHtml(profile.name)}</strong>
-            <small>${profile.fixedCdpPort ? `CDP :${profile.fixedCdpPort}` : "Chrome process"}</small>
-          </div>
-          <span class="bifrost-route-arrow" aria-hidden="true">→</span>
-          <div class="bifrost-route-node port-node">
-            <span>Local listener</span>
-            <strong data-bifrost-route-port>127.0.0.1:${listenerPort}</strong>
-            <small>仅本机</small>
-          </div>
-          <span class="bifrost-route-arrow" aria-hidden="true">→</span>
-          <div class="bifrost-route-node rules-node">
-            <span>Rule view</span>
-            <strong data-bifrost-route-count>${
-              ruleCount
-                ? disabledRuleCount
-                  ? `${activeRuleCount} 条启用 · ${disabledRuleCount} 条停用`
-                  : `${ruleCount} 条显式规则`
-                : "选择规则"
-            }</strong>
-            <small>自动包含 Default</small>
-          </div>
-        </div>
-
-        <label class="bifrost-enable-row ${enabled ? "enabled" : ""}">
-          <span>
-            <strong>启用独立代理分流</strong>
-            <small>启动 Profile 时自动恢复端口绑定 / 探活上游，并注入 Chrome 代理参数</small>
-          </span>
-          <input type="checkbox" name="enabled" data-bifrost-proxy-enabled ${enabled ? "checked" : ""} ${profile.running || saving ? "disabled" : ""} />
-        </label>
+        ${renderProxyRouteMap(routeView, profile)}
 
         ${
           profile.running
-            ? hotEditable
-              ? `<div class="bifrost-lock-notice"><strong>正在运行，可热更新规则</strong><span>入口端口、分流开关和代理模式保持锁定；本地规则与 Group 规则保存后立即生效。</span></div>`
-              : `<div class="bifrost-lock-notice"><strong>正在运行，配置已锁定</strong><span>先关闭 ${escapeHtml(profile.name)}，再启用或切换代理分流。</span></div>`
+            ? `<button
+                type="button"
+                class="bifrost-enable-row bifrost-enable-row-button locked ${enabled ? "enabled" : ""}"
+                data-action="prepare-bifrost-proxy"
+                data-id="${escapeHtml(profile.id)}"
+                aria-describedby="bifrost-proxy-lock-note"
+              >
+                <span>
+                  <strong>启用独立网络路径</strong>
+                  <small>启动 Profile 时按所选模式注入 Chrome 网络参数，不再跟随系统代理</small>
+                </span>
+                <span class="bifrost-toggle-control ${enabled ? "checked" : ""}" aria-hidden="true"></span>
+              </button>`
+            : `<label class="bifrost-enable-row ${enabled ? "enabled" : ""}">
+                <span>
+                  <strong>启用独立网络路径</strong>
+                  <small>启动 Profile 时按所选模式注入 Chrome 网络参数，不再跟随系统代理</small>
+                </span>
+                <input type="checkbox" name="enabled" data-bifrost-proxy-enabled ${enabled ? "checked" : ""} ${saving ? "disabled" : ""} />
+              </label>`
+        }
+
+        ${
+          profile.running
+            ? `<div class="bifrost-lock-notice" id="bifrost-proxy-lock-note"><strong>正在运行，配置已锁定</strong><span>网络路径需要在启动 Chrome 时注入；刷新网页不会改变启动参数。</span><button type="button" data-action="prepare-bifrost-proxy" data-id="${escapeHtml(profile.id)}">关闭后配置</button></div>`
             : ""
         }
 
         <fieldset class="bifrost-config-fields ${enabled ? "enabled" : ""}" data-bifrost-config-fields ${!enabled || locked ? "disabled" : ""}>
           <div class="bifrost-mode-switch" role="radiogroup" aria-label="分流模式">
-            <label class="bifrost-mode-option ${mode === "bifrost" ? "selected" : ""}">
-              <input type="radio" name="mode" value="bifrost" data-bifrost-mode ${mode === "bifrost" ? "checked" : ""} ${profile.running ? "disabled" : ""} />
-              <span><strong>Bifrost 规则</strong><small>命中规则改写/抓包，走规则视图</small></span>
+            <label class="bifrost-mode-option ${enabled && mode === "custom" ? "selected" : ""}">
+              <input type="radio" name="mode" value="custom" data-bifrost-mode ${mode === "custom" ? "checked" : ""} ${profile.running ? "disabled" : ""} />
+              <span><strong>指定代理</strong><small>手动填写 HTTP / SOCKS5 地址</small></span>
             </label>
-            <label class="bifrost-mode-option ${mode === "upstream" ? "selected" : ""}">
-              <input type="radio" name="mode" value="upstream" data-bifrost-mode ${mode === "upstream" ? "checked" : ""} ${profile.running ? "disabled" : ""} />
-              <span><strong>直连 Clash</strong><small>整体交给某个已有代理入口，如 Clash mixed 端口</small></span>
+            <label class="bifrost-mode-option ${enabled && mode === "bifrost-main" ? "selected" : ""}">
+              <input type="radio" name="mode" value="bifrost-main" data-bifrost-mode ${mode === "bifrost-main" ? "checked" : ""} ${profile.running ? "disabled" : ""} />
+              <span><strong>Bifrost</strong><small>主入口 · ${escapeHtml(bifrostMainServer.replace(/^https?:\/\//, ""))}</small></span>
+            </label>
+            <label class="bifrost-mode-option ${enabled && mode === "clash" ? "selected" : ""}">
+              <input type="radio" name="mode" value="clash" data-bifrost-mode ${mode === "clash" ? "checked" : ""} ${profile.running ? "disabled" : ""} />
+              <span><strong>Clash</strong><small>默认 mixed · ${escapeHtml(clashServer.replace(/^https?:\/\//, ""))}</small></span>
+            </label>
+            <label class="bifrost-mode-option ${enabled && mode === "direct" ? "selected" : ""}">
+              <input type="radio" name="mode" value="direct" data-bifrost-mode ${mode === "direct" ? "checked" : ""} ${profile.running ? "disabled" : ""} />
+              <span><strong>直接联网</strong><small>绕过系统代理，不连接 Bifrost 或 Clash</small></span>
             </label>
           </div>
 
-          <div class="bifrost-mode-panel" data-bifrost-mode-panel="bifrost" ${mode === "bifrost" ? "" : "hidden"}>
-            <div class="bifrost-port-field field">
-              <label for="bifrost-listener-port">专属入口端口</label>
-              <input id="bifrost-listener-port" name="listenerPort" type="number" min="1024" max="65535" inputmode="numeric" value="${listenerPort}" data-bifrost-listener-port ${profile.running ? "readonly" : ""} />
-              <span class="field-note">Bifrost 主端口 ${snapshot?.mainPort ? `:${snapshot.mainPort}` : "通常为 :9900"} 保持不动；此端口固定监听在 127.0.0.1。</span>
-            </div>
-
-            <section class="bifrost-rule-section" aria-labelledby="bifrost-local-rules-title">
-              <div class="bifrost-rule-section-head">
-                <div>
-                  <span>Local rules</span>
-                  <h3 id="bifrost-local-rules-title">本地规则</h3>
-                </div>
-                <small>${availableRules.length ? `${availableRules.length} 条可选` : "等待 Bifrost 返回规则"}</small>
-              </div>
-              <div class="bifrost-rule-grid">
-                ${
-                  availableRules.length
-                    ? availableRules
-                        .map(
-                          (rule) => `
-                            <label class="bifrost-rule-option ${selectedRules.has(rule) ? "selected" : ""} ${config?.disabledRules?.includes(rule) ? "rule-paused" : ""}">
-                              <input type="checkbox" name="rule" value="${escapeHtml(rule)}" data-bifrost-rule-option ${selectedRules.has(rule) ? "checked" : ""} />
-                              <span>${escapeHtml(rule)}</span>
-                              ${config?.disabledRules?.includes(rule) ? "<em>已停用</em>" : ""}
-                            </label>
-                          `
-                        )
-                        .join("")
-                    : `<div class="bifrost-rule-empty"><strong>还没有可选规则</strong><span>${escapeHtml(snapshot?.error || "正在读取 Bifrost 规则列表…")}</span></div>`
-                }
-              </div>
-            </section>
-
-            <div class="field bifrost-group-field">
-              <label for="bifrost-group-rules">Group 规则引用 <span>可选</span></label>
-              <textarea id="bifrost-group-rules" name="groupRules" rows="3" spellcheck="false" placeholder="7152084678483132446/worktree-a&#10;7152084678483132446/shared-auth" data-bifrost-group-rules>${escapeHtml(groupRuleText)}</textarea>
-              <span class="field-note">每行一条，格式为 <code>group_id/rule_name</code>。本地规则和 Group 规则可以组合。</span>
-            </div>
-          </div>
-
-          <div class="bifrost-mode-panel" data-bifrost-mode-panel="upstream" ${mode === "upstream" ? "" : "hidden"}>
+          <div class="bifrost-mode-panel" data-bifrost-mode-panel="custom" ${mode === "custom" ? "" : "hidden"}>
             <div class="field bifrost-upstream-field">
-              <label for="bifrost-upstream-server">Clash 代理地址</label>
-              <input id="bifrost-upstream-server" name="upstreamServer" type="text" spellcheck="false" placeholder="http://127.0.0.1:7897" value="${escapeHtml(upstreamServer)}" data-bifrost-upstream-server />
-              <span class="field-note">支持 <code>http://</code>、<code>socks5://</code>，或裸 <code>host:port</code>（默认按 http）。启动前会做 TCP 探活。</span>
+              <label for="bifrost-upstream-server">代理地址</label>
+              <input id="bifrost-upstream-server" name="upstreamServer" type="text" spellcheck="false" placeholder="http://127.0.0.1:8080" value="${escapeHtml(customProxyServer)}" data-bifrost-upstream-server />
+              <span class="field-note">支持 <code>http://</code>、<code>https://</code>、<code>socks5://</code> 或裸 <code>host:port</code>；启动 Profile 前会进行 TCP 探活。</span>
             </div>
             <div class="field bifrost-bypass-field">
               <label for="bifrost-upstream-bypass">Bypass 列表 <span>可选</span></label>
@@ -531,7 +543,6 @@ export function renderBifrostProxyModal(profileId: string, snapshot: BifrostSnap
             </div>
           </div>
 
-          ${renderClashTemplateBlock(mode, upstreamServer)}
         </fieldset>
 
         <div class="modal-actions bifrost-modal-actions">
@@ -545,56 +556,208 @@ export function renderBifrostProxyModal(profileId: string, snapshot: BifrostSnap
   `;
 }
 
-// Clash Verge Merge 配置模板：把 Clash 入口端口翻译成一段可直接粘贴的 listeners + rules 片段。
-// 纯文案，不写任何代码去改 Verge；只在直连 Clash 模式下展示，端口留空时给占位提示。
-export function renderClashTemplateBlock(mode: "bifrost" | "upstream", upstream: string): string {
-  if (mode !== "upstream") {
-    return "";
-  }
-  const port = extractPortFromEndpoint(upstream);
-  const yaml = buildClashMergeTemplate(port);
-  const hint =
-    "如果直连的就是 Clash 主 mixed 端口（如 7897），无需 listeners 段，直接在 Clash 里选节点即可。要为这个 Profile 单开一个入站再按 IN-NAME 分流时，把下面这段粘进 Clash Verge Rev 的 Merge 配置，并把 IN-NAME 第三段替换为实际代理组名。";
+function renderProxyRouteMap(view: ProxyRouteMapView, profile: PublicProfile): string {
   return `
-    <details class="bifrost-clash-template" data-clash-template>
-      <summary>Clash Verge Merge 模板 <span>（可选，手动粘贴）</span></summary>
-      <p class="field-note">${escapeHtml(hint)}</p>
-      <pre class="clash-template-code" data-clash-template-code>${escapeHtml(yaml)}</pre>
-      <button type="button" class="ghost" data-action="copy-clash-template">复制模板</button>
-    </details>
+    <div class="bifrost-route-context ${view.tone}" data-bifrost-route-context aria-live="polite">
+      <span data-bifrost-route-badge>${escapeHtml(view.badge)}</span>
+      <small data-bifrost-route-note>${escapeHtml(view.note)}</small>
+    </div>
+    <div class="bifrost-route-map" data-bifrost-route-map aria-label="Profile 代理路径">
+          <div class="bifrost-route-node profile-node">
+            <span>Profile</span>
+            <strong>${escapeHtml(profile.name)}</strong>
+            <small>${profile.fixedCdpPort ? `CDP :${profile.fixedCdpPort}` : "Chrome process"}</small>
+          </div>
+          <span class="bifrost-route-arrow" aria-hidden="true">→</span>
+          <div class="bifrost-route-node port-node">
+            <span data-bifrost-route-middle-label>${escapeHtml(view.middleLabel)}</span>
+            <strong data-bifrost-route-port>${escapeHtml(view.middleValue)}</strong>
+            <small data-bifrost-route-middle-note>${escapeHtml(view.middleNote)}</small>
+          </div>
+          <span class="bifrost-route-arrow" aria-hidden="true">→</span>
+          <div class="bifrost-route-node rules-node">
+            <span data-bifrost-route-target-label>${escapeHtml(view.targetLabel)}</span>
+            <strong data-bifrost-route-count>${escapeHtml(view.targetValue)}</strong>
+            <small data-bifrost-route-target-note>${escapeHtml(view.targetNote)}</small>
+          </div>
+    </div>
   `;
 }
 
-export function buildClashMergeTemplate(port: number | null): string {
-  const p = port ?? 7811;
-  return [
-    "listeners:",
-    `  - { name: pp-${p}, type: mixed, port: ${p} }`,
-    "rules:",
-    `  - IN-NAME,pp-${p},PROXY-GROUP-NAME`
-  ].join("\n");
+function systemProxyRouteMapView(profile: PublicProfile, snapshot: BifrostSnapshot | null): ProxyRouteMapView {
+  const badge = profile.running ? "当前生效" : "当前设置";
+  const note = profile.running
+    ? "未启用独立分流，Chrome 正在跟随系统代理"
+    : "未启用独立分流，启动后将跟随系统代理";
+  if (!snapshot?.systemProxy) {
+    return {
+      badge,
+      note,
+      tone: "unknown",
+      middleLabel: "System proxy",
+      middleValue: "正在读取…",
+      middleNote: "等待 Chrome 系统代理快照",
+      targetLabel: "Current route",
+      targetValue: "状态未知",
+      targetNote: "刷新 Bifrost 后重试"
+    };
+  }
+
+  const routes = snapshot.systemProxy.routes;
+  const allDirect = snapshot.systemProxy.mode === "direct" || (routes.length > 0 && routes.every((route) => route.kind === "direct"));
+  if (allDirect) {
+    return {
+      badge,
+      note,
+      tone: "current",
+      middleLabel: "System proxy",
+      middleValue: "DIRECT",
+      middleNote: "HTTP / HTTPS 未设置代理",
+      targetLabel: "Current route",
+      targetValue: "直接访问目标",
+      targetNote: "未启用独立代理分流"
+    };
+  }
+
+  const routeCopies = routes.map((route) => `${route.protocol.toUpperCase()} ${route.kind === "direct" ? "DIRECT" : route.endpoint || "未知"}`);
+  const proxiedRoutes = routes.filter((route) => route.kind !== "direct" && route.endpoint);
+  const endpoints = [...new Set(proxiedRoutes.map((route) => route.endpoint as string))];
+  const sameProxyForEveryProtocol = routes.length > 0 && routes.every((route) => route.kind !== "direct") && endpoints.length === 1;
+  const mainPort = snapshot.mainPort;
+  const allThroughBifrostMain = Boolean(
+    snapshot.running &&
+      mainPort &&
+      routes.length > 0 &&
+      proxiedRoutes.length === routes.length &&
+      proxiedRoutes.every((route) => isLoopbackPort(route.endpoint, mainPort))
+  );
+  const middleValue = sameProxyForEveryProtocol ? endpoints[0] : routeCopies.join(" · ") || "状态未知";
+
+  if (allThroughBifrostMain) {
+    return {
+      badge,
+      note,
+      tone: "current",
+      middleLabel: "System proxy",
+      middleValue,
+      middleNote: "HTTP / HTTPS · 系统当前设置",
+      targetLabel: "Current route",
+      targetValue: `Bifrost 主入口 :${mainPort}`,
+      targetNote: "使用主代理当前规则视图"
+    };
+  }
+  if (sameProxyForEveryProtocol) {
+    return {
+      badge,
+      note,
+      tone: "current",
+      middleLabel: "System proxy",
+      middleValue,
+      middleNote: "HTTP / HTTPS · 系统当前设置",
+      targetLabel: "Current route",
+      targetValue: "外部代理入口",
+      targetNote: "具体规则由该代理决定"
+    };
+  }
+  return {
+    badge,
+    note,
+    tone: "current",
+    middleLabel: "System proxy",
+    middleValue,
+    middleNote: "系统按协议使用不同路径",
+    targetLabel: "Current route",
+    targetValue: "按协议分流",
+    targetNote: "以上为 Chrome 实际解析结果"
+  };
 }
 
-function extractPortFromEndpoint(input: string): number | null {
-  const raw = String(input || "").trim();
-  if (!raw) return null;
-  const match = raw.match(/:(\d{2,5})(?:\D|$)/);
-  const port = match ? Number(match[1]) : NaN;
-  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null;
+function bifrostRouteMapView(
+  profile: PublicProfile,
+  snapshot: BifrostSnapshot | null,
+  listenerPort: number,
+  ruleCount: number,
+  disabledRuleCount: number
+): ProxyRouteMapView {
+  const binding = snapshot?.ports.find((entry) => entry.port === listenerPort);
+  const rawProfileId = profile.id.startsWith("isolated:") ? profile.id.slice("isolated:".length) : profile.id;
+  const owned = Boolean(snapshot?.running && binding?.name === `profilepilot:${rawProfileId}`);
+  const activeRuleCount = Math.max(0, ruleCount - disabledRuleCount);
+  const ruleLabel = ruleCount
+    ? disabledRuleCount
+      ? `${activeRuleCount} 条启用 · ${disabledRuleCount} 条停用`
+      : `${ruleCount} 条显式规则`
+    : "尚未选择规则";
+
+  if (owned) {
+    return {
+      badge: profile.running ? "当前生效" : "入口已就绪",
+      note: profile.running ? "Chrome 正在使用这个 Bifrost 专属入口" : "专属入口当前存在，启动 Profile 后使用",
+      tone: "current",
+      middleLabel: "Local listener",
+      middleValue: `127.0.0.1:${listenerPort}`,
+      middleNote: "Bifrost 正在监听 · 仅本机",
+      targetLabel: "Rule view",
+      targetValue: ruleLabel,
+      targetNote: "自动包含 Default"
+    };
+  }
+
+  const bifrostAvailable = Boolean(snapshot?.installed && snapshot.running);
+  const occupied = Boolean(binding && binding.name !== `profilepilot:${rawProfileId}`);
+  return {
+    badge: profile.running ? "入口未监听" : bifrostAvailable ? "待启动恢复" : "Bifrost 不可用",
+    note: profile.running
+      ? occupied
+        ? `端口 ${listenerPort} 当前属于其他 Bifrost 入口`
+        : `Bifrost 中不存在这个 Profile 的 ${listenerPort} 入口`
+      : bifrostAvailable
+        ? "配置已保存，启动 Profile 时自动恢复专属入口"
+        : "配置已保存，Bifrost 启动后才能恢复入口",
+    tone: profile.running || occupied || !bifrostAvailable ? "warning" : "saved",
+    middleLabel: "Saved listener",
+    middleValue: `127.0.0.1:${listenerPort}`,
+    middleNote: occupied ? "端口已被其他入口占用" : "当前没有对应监听",
+    targetLabel: "Saved rules",
+    targetValue: ruleLabel,
+    targetNote: "入口恢复后才会生效"
+  };
 }
 
-export function suggestBifrostListenerPort(profileId: string, snapshot: BifrostSnapshot | null): number {
-  const used = new Set<number>();
-  if (snapshot?.mainPort) used.add(snapshot.mainPort);
-  snapshot?.ports.forEach((entry) => used.add(entry.port));
-  (store.state?.profiles || []).forEach((profile) => {
-    if (profile.id !== profileId && profile.bifrostProxy?.listenerPort) used.add(profile.bifrostProxy.listenerPort);
-    if (profile.fixedCdpPort) used.add(profile.fixedCdpPort);
-    if (profile.cdpPort) used.add(profile.cdpPort);
-  });
-  let candidate = 18888;
-  while (used.has(candidate) && candidate < 65535) candidate += 1;
-  return candidate;
+function upstreamRouteMapView(profile: PublicProfile, snapshot: BifrostSnapshot | null, server: string): ProxyRouteMapView {
+  const reachable = snapshot?.upstreamHealth?.[server];
+  const usesBifrostMain = proxyServerUsesPort(server, snapshot?.mainPort || 9900);
+  return {
+    badge: profile.running ? (reachable === false ? "上游不可达" : "当前生效") : "已保存配置",
+    note: profile.running ? "Chrome 正在直连这个上游代理" : "启动 Profile 后将直连这个上游代理",
+    tone: reachable === false ? "warning" : profile.running ? "current" : "saved",
+    middleLabel: "指定代理",
+    middleValue: server || "地址未填写",
+    middleNote: reachable === true ? "TCP 探活成功" : reachable === false ? "TCP 探活失败" : "等待探活结果",
+    targetLabel: "Route owner",
+    targetValue: usesBifrostMain ? "Bifrost 主入口" : "Clash / 自定义代理",
+    targetNote: usesBifrostMain ? "使用主入口当前启用规则" : "具体规则由目标入口决定"
+  };
+}
+
+function directRouteMapView(profile: PublicProfile): ProxyRouteMapView {
+  return {
+    badge: profile.running ? "当前生效" : "已保存配置",
+    note: profile.running ? "Chrome 正在直接访问网络" : "启动 Profile 后将绕过所有系统代理",
+    tone: profile.running ? "current" : "saved",
+    middleLabel: "Chrome network",
+    middleValue: "DIRECT",
+    middleNote: "--no-proxy-server",
+    targetLabel: "Current route",
+    targetValue: "直接访问目标",
+    targetNote: "不连接 Bifrost 或 Clash"
+  };
+}
+
+function isLoopbackPort(endpoint: string | null, port: number): boolean {
+  if (!endpoint) return false;
+  const match = endpoint.match(/^(?:127\.0\.0\.1|localhost|\[?::1\]?):(\d{1,5})$/i);
+  return Number(match?.[1]) === port;
 }
 
 function renderBifrostStatus(snapshot: BifrostSnapshot | null): string {

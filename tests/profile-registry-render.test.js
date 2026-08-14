@@ -47,6 +47,7 @@ function profile(overrides = {}) {
     fixedCdpPort: 9223,
     bifrostProxy: null,
     upstreamProxy: null,
+    directConnection: false,
     listeningPorts: [9223],
     pinnedToMini: false,
     quickLaunchSlot: null,
@@ -340,6 +341,70 @@ test("configured upstream Profile names Clash Verge and explains where its rules
   assert.match(details, /直连 Clash[\s\S]*127\.0\.0\.1:7897/);
 });
 
+test("configured Bifrost main entry is not mislabeled as Clash", () => {
+  const server = "http://127.0.0.1:9900";
+  const { renderer } = loadProfilesRenderer({
+    openProfileMenuId: "p1",
+    bifrostSnapshot: bifrostSnapshot({ upstreamHealth: { [server]: true } })
+  });
+  const configured = profile({
+    running: false,
+    pids: [],
+    cdpPort: null,
+    cdpUrl: null,
+    upstreamProxy: { server, bypassList: null }
+  });
+  const row = renderer.renderProfileRow(configured);
+  const details = renderer.renderDetails(configured, false);
+
+  assert.match(row, /data-tooltip="Bifrost 主入口可达 · http:\/\/127\.0\.0\.1:9900\s+使用主入口规则"/);
+  assert.match(row, /<strong>Bifrost <em>:9900<\/em><\/strong>[\s\S]*<small>使用主入口规则<\/small>/);
+  assert.match(row, /data-action="configure-bifrost-proxy"[^>]*>[\s\S]*代理分流 · Bifrost :9900/);
+  assert.doesNotMatch(row, /Clash Verge|规则由 Clash 决定/);
+  assert.match(details, /Bifrost 主入口[\s\S]*Bifrost 可达[\s\S]*127\.0\.0\.1:9900[\s\S]*使用当前启用规则/);
+  assert.doesNotMatch(details, /直连 Clash|Clash 可达/);
+});
+
+test("configured custom upstream stays labeled as a custom proxy", () => {
+  const server = "socks5://127.0.0.1:18080";
+  const { renderer } = loadProfilesRenderer({
+    openProfileMenuId: "p1",
+    bifrostSnapshot: bifrostSnapshot({ upstreamHealth: { [server]: true } })
+  });
+  const configured = profile({
+    running: false,
+    pids: [],
+    cdpPort: null,
+    cdpUrl: null,
+    upstreamProxy: { server, bypassList: null }
+  });
+  const row = renderer.renderProfileRow(configured);
+  const details = renderer.renderDetails(configured, false);
+
+  assert.match(row, /<strong>指定代理 <em>:18080<\/em><\/strong>[\s\S]*<small>规则由目标代理决定<\/small>/);
+  assert.match(row, /代理分流 · 指定代理 :18080/);
+  assert.doesNotMatch(row, /Clash Verge|Bifrost <em>/);
+  assert.match(details, /指定代理[\s\S]*代理可达[\s\S]*127\.0\.0\.1:18080/);
+});
+
+test("configured direct Profile clearly shows that every proxy is bypassed", () => {
+  const { renderer } = loadProfilesRenderer({ openProfileMenuId: "p1" });
+  const configured = profile({
+    running: false,
+    pids: [],
+    cdpPort: null,
+    cdpUrl: null,
+    directConnection: true
+  });
+  const row = renderer.renderProfileRow(configured);
+  const details = renderer.renderDetails(configured, false);
+
+  assert.match(row, /profile-route-track direct action-tooltip/);
+  assert.match(row, /<strong>直接联网<\/strong>[\s\S]*<small>已绕过所有代理<\/small>/);
+  assert.match(row, /代理分流 · 直接联网/);
+  assert.match(details, /直接联网[\s\S]*--no-proxy-server[\s\S]*不连接 Bifrost 或 Clash/);
+});
+
 function bifrostSnapshot(overrides = {}) {
   return {
     installed: true,
@@ -433,6 +498,36 @@ test("native Chrome Profile shows its actual system proxy while explaining it ca
   assert.match(row, /系统 Chrome Profile 跟随系统代理，不支持单独配置/);
   assert.match(row, /route-tip-tag">HTTPS<\/span>[\s\S]*127\.0\.0\.1:9900/);
   assert.doesNotMatch(row, /<strong>Chrome 设置<\/strong>|<small>不可单独配置<\/small>/);
+});
+
+test("system proxy routed through Clash does not inherit unrelated Bifrost rules", () => {
+  const { renderer, store } = loadProfilesRenderer();
+  store.bifrostSnapshot = bifrostSnapshot({
+    mainPort: 9900,
+    systemProxy: {
+      mode: "proxy",
+      routes: [
+        { protocol: "http", kind: "http", endpoint: "127.0.0.1:7897" },
+        { protocol: "https", kind: "http", endpoint: "127.0.0.1:7897" }
+      ]
+    },
+    mainRules: [{ name: "FlowPD-FE-BotStudio", ruleCount: 24 }],
+    mainRuleDestination: {
+      kind: "local",
+      label: "本地 · :3000 / :8080",
+      details: ["code.coze.cn → localhost:8080"]
+    }
+  });
+
+  const configured = profile({ bifrostProxy: null, upstreamProxy: null });
+  const row = renderer.renderProfileRow(configured);
+  const details = renderer.renderDetails(configured, false);
+
+  assert.match(row, /<strong>系统代理<\/strong>[\s\S]*<small>HTTP · :7897<\/small>/);
+  assert.match(row, /系统代理 · Chrome 正在跟随[\s\S]*127\.0\.0\.1:7897/);
+  assert.doesNotMatch(row, /Bifrost :9900|FlowPD-FE-BotStudio|本地 · :3000 \/ :8080|localhost:8080|未命中规则 → 直连原目标/);
+  assert.match(details, /跟随系统代理[\s\S]*HTTP · :7897/);
+  assert.doesNotMatch(details, /Bifrost :9900|FlowPD-FE-BotStudio|本地 · :3000 \/ :8080|localhost:8080/);
 });
 
 test("unconfigured isolated Profile identifies system DIRECT mode", () => {

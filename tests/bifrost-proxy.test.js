@@ -10,6 +10,7 @@ const {
   bifrostRuleArgs,
   canHotUpdateProfileBifrostProxy,
   combineBifrostRuleDestinations,
+  directConnectionChromeArgs,
   disableBifrostRule,
   ensureProfileBifrostProxy,
   normalizeStoredBifrostProxy,
@@ -18,11 +19,24 @@ const {
   parseBifrostRuleDestination,
   parseBifrostRuleList,
   parseBifrostStatus,
+  resolveBifrostBinary,
   startBifrostIfNeeded,
   upstreamProxyChromeArgs,
   validateBifrostProxyConfig,
   validateUpstreamProxyConfig
 } = loadTsModule("src/main/bifrost-proxy.ts");
+
+test("Bifrost binary resolution prefers the caller PATH over stale fallback installs", () => {
+  const home = mkdtempSync(path.join(os.tmpdir(), "pp-bifrost-path-"));
+  const binary = path.join(home, process.platform === "win32" ? "bifrost.exe" : "bifrost");
+  try {
+    writeFileSync(binary, "#!/bin/sh\nexit 0\n");
+    chmodSync(binary, 0o755);
+    assert.equal(resolveBifrostBinary({ PATH: home }), binary);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
 
 test("Bifrost rule list parser keeps local rules and excludes global Default", () => {
   const rules = parseBifrostRuleList(`Rules (4):
@@ -482,4 +496,10 @@ test("upstreamProxyChromeArgs emits proxy-server (scheme-stripped for http) and 
     "--proxy-bypass-list=localhost,*.local"
   ]);
   assert.deepEqual(upstreamProxyChromeArgs(null), []);
+});
+
+test("directConnectionChromeArgs explicitly bypasses the system proxy", () => {
+  assert.deepEqual(directConnectionChromeArgs(true), ["--no-proxy-server"]);
+  assert.deepEqual(directConnectionChromeArgs(false), []);
+  assert.deepEqual(directConnectionChromeArgs(undefined), []);
 });

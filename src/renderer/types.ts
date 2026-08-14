@@ -8,6 +8,7 @@ export interface StoredProfile {
   fixedCdpPort?: number | null;
   bifrostProxy?: ProfileBifrostProxyConfig | null;
   upstreamProxy?: ProfileUpstreamProxyConfig | null;
+  directConnection?: boolean;
   clonedFromProfileId?: string | null;
   projectTag?: string | null;
   agentAccessDisabled?: boolean;
@@ -29,7 +30,8 @@ export interface ProfileUpstreamProxyConfig {
 
 export type ProfileProxyConfig =
   | ({ kind: "bifrost" } & ProfileBifrostProxyConfig)
-  | ({ kind: "upstream" } & ProfileUpstreamProxyConfig);
+  | ({ kind: "upstream" } & ProfileUpstreamProxyConfig)
+  | { kind: "direct" };
 
 export interface BifrostPortBindingInfo {
   port: number;
@@ -121,6 +123,7 @@ export interface PublicProfile {
   fixedCdpPort: number | null;
   bifrostProxy: ProfileBifrostProxyConfig | null;
   upstreamProxy: ProfileUpstreamProxyConfig | null;
+  directConnection: boolean;
   listeningPorts: number[];
   pinnedToMini: boolean;
   // 全局快捷键 ⌘⌥N 直启的槽位（1~9）；未指派为 null。
@@ -746,7 +749,7 @@ export interface ProfileReadinessExpectation {
   requireForeground?: boolean;
   requireBrowserAccount?: boolean;
   expectedLogicalPort?: number | null;
-  expectedProxyKind?: "system" | "bifrost" | "upstream";
+  expectedProxyKind?: "system" | "bifrost" | "upstream" | "direct";
   requiredBifrostRules?: string[];
   expectedTargetUrlIncludes?: string;
   expectedLoginLabel?: string;
@@ -897,6 +900,10 @@ export type ConfirmIntent =
   | {
       kind: "profile";
       action: "close" | "delete" | "delete-after-chrome-exit";
+      profileId: string;
+    }
+  | {
+      kind: "close-profile-for-bifrost";
       profileId: string;
     }
   | {

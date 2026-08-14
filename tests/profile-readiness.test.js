@@ -26,6 +26,7 @@ function profile(overrides = {}) {
       disabledGroupRules: []
     },
     upstreamProxy: null,
+    directConnection: false,
     livePrimaryUrl: "https://ppe.example.test/editor",
     windowActivation: "background",
     gatewayControl: {
@@ -148,6 +149,20 @@ test("site login remains unknown until a site-specific verifier supplies evidenc
   assert.equal(login.code, "SITE_LOGIN_REQUIRES_VERIFICATION");
   assert.equal(login.status, "unknown");
   assert.match(login.action, /Cookies 或 Chrome 账号不能替代站点级验证/);
+});
+
+test("readiness recognizes an explicit direct connection as distinct from system proxy", () => {
+  const receipt = buildProfileReadinessReceipt({
+    profile: profile({ bifrostProxy: null, upstreamProxy: null, directConnection: true }),
+    expectation: { expectedProxyKind: "direct" },
+    proxySnapshot: bifrostSnapshot(),
+    sessionIdentity: null
+  });
+
+  const proxy = receipt.checks.find((check) => check.id === "proxy");
+  assert.equal(proxy.code, "DIRECT_CONNECTION_ENABLED");
+  assert.equal(proxy.status, "pass");
+  assert.match(proxy.actual, /绕过系统代理/);
 });
 
 test("readiness version comparison handles dotted extension versions", () => {

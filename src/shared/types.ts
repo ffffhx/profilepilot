@@ -12,6 +12,9 @@ export interface StoredProfile {
   // 独立 Profile 的“直连上游代理”入口（如 Clash Verge 的某个 mixed listener）。
   // 与 bifrostProxy 互斥：一个 Profile 要么走 Bifrost 规则视图，要么直连某个上游代理。
   upstreamProxy?: ProfileUpstreamProxyConfig | null;
+  // 显式直接联网：启动 Chrome 时注入 --no-proxy-server，不跟随系统代理。
+  // 与 bifrostProxy / upstreamProxy 互斥。
+  directConnection?: boolean;
   // 该独立 Profile 是从哪个源 Profile 克隆出来的（存源的 public id，可为 native:/isolated:）。
   // 用来定义“副本组”：批量刷新登录态、重置、回收都按这个字段聚合。
   clonedFromProfileId?: string | null;
@@ -45,7 +48,8 @@ export interface ProfileUpstreamProxyConfig {
 // 但 UI、IPC 用这个判别式联合来表达“这个 Profile 当前是哪种分流模式”。
 export type ProfileProxyConfig =
   | ({ kind: "bifrost" } & ProfileBifrostProxyConfig)
-  | ({ kind: "upstream" } & ProfileUpstreamProxyConfig);
+  | ({ kind: "upstream" } & ProfileUpstreamProxyConfig)
+  | { kind: "direct" };
 
 // Bifrost `status --format json` 里单个临时入口端口的绑定信息；
 // name 归属（profilepilot:<id>）用于渲染层判定该 Profile 分流入口的三态健康度。
@@ -469,6 +473,7 @@ export interface PublicProfile {
   fixedCdpPort: number | null;
   bifrostProxy: ProfileBifrostProxyConfig | null;
   upstreamProxy: ProfileUpstreamProxyConfig | null;
+  directConnection: boolean;
   listeningPorts: number[];
   pinnedToMini: boolean;
   // 全局快捷键 ⌘⌥N 直启的槽位（1~9）；未指派为 null。可在主窗口「更多」菜单里改绑。
@@ -562,7 +567,7 @@ export interface ProfileReadinessExpectation {
   requireForeground?: boolean;
   requireBrowserAccount?: boolean;
   expectedLogicalPort?: number | null;
-  expectedProxyKind?: "system" | "bifrost" | "upstream";
+  expectedProxyKind?: "system" | "bifrost" | "upstream" | "direct";
   requiredBifrostRules?: string[];
   expectedTargetUrlIncludes?: string;
   expectedLoginLabel?: string;

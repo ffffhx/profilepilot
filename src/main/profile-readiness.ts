@@ -139,7 +139,13 @@ function proxyCheck(
   snapshot: BifrostSnapshot | null,
   expectation: ProfileReadinessExpectation
 ): ProfileReadinessCheck {
-  const actualKind = profile.bifrostProxy ? "bifrost" : profile.upstreamProxy ? "upstream" : "system";
+  const actualKind = profile.bifrostProxy
+    ? "bifrost"
+    : profile.upstreamProxy
+      ? "upstream"
+      : profile.directConnection
+        ? "direct"
+        : "system";
   if (expectation.expectedProxyKind && expectation.expectedProxyKind !== actualKind) {
     return check({
       id: "proxy",
@@ -198,6 +204,18 @@ function proxyCheck(
       expected: profile.upstreamProxy.server,
       actual: reachable === true ? "TCP 可达" : reachable === false ? "不可达" : "尚未探测",
       action: reachable === false ? "确认上游代理正在监听该端口。" : reachable === undefined ? "刷新代理状态后重新检查。" : null
+    });
+  }
+  if (profile.directConnection) {
+    return check({
+      id: "proxy",
+      code: "DIRECT_CONNECTION_ENABLED",
+      label: "代理分流",
+      status: "pass",
+      required: Boolean(expectation.expectedProxyKind),
+      expected: expectation.expectedProxyKind ? proxyKindLabel(expectation.expectedProxyKind) : null,
+      actual: "直接联网（已绕过系统代理）",
+      action: null
     });
   }
   return check({
@@ -438,9 +456,10 @@ function check(input: ProfileReadinessCheck): ProfileReadinessCheck {
   return input;
 }
 
-function proxyKindLabel(kind: "system" | "bifrost" | "upstream"): string {
+function proxyKindLabel(kind: "system" | "bifrost" | "upstream" | "direct"): string {
   if (kind === "bifrost") return "Bifrost";
   if (kind === "upstream") return "上游代理";
+  if (kind === "direct") return "直接联网";
   return "系统代理";
 }
 

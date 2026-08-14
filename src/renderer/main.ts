@@ -1,12 +1,13 @@
 import { profileApi } from "./api";
 import { activateBusyStep, busyStepsKey, emphasizeName, focusProfileFromUi, setToast, updateBusyProgressDom, updateBusyState, withBusy } from "./busy";
 import { closeModalFromUi, executeAgentTakeoverConfirm, executeBifrostStartAndLaunch, executeConfirmIntent } from "./confirm";
+import { normalizeProxyServerInput } from "./proxy";
 import { clampCloneCount } from "./render/clone-pool";
 import { isExtensionMigrationActionItem } from "./render/extensions";
 import { focusLiveTab, openLiveZoom, refreshLiveViewNow, requestLiveViewNow, startLiveViewLoop, toggleLiveScreenshot } from "./render/live-view";
 import { sortByMiniOrder } from "./render/mini";
 import { computeMainReorder, mainProfileGroups, type MainProfileGroup } from "./render/profiles";
-import { buildClashMergeTemplate, renderGlobalInstructionDiff } from "./render/modals";
+import { renderGlobalInstructionDiff } from "./render/modals";
 import { render } from "./render/render-root";
 import { applyState, invalidateExtensionMigrationDiff, loadState, refreshExtensionMigrationDiff, refreshGlobalInstructions, refreshProfileReadiness, repairClaudeInstructionShell, saveGlobalInstruction, setMigrationSource, undoGlobalInstruction } from "./state-actions";
 import { appRoot, store } from "./state";
@@ -323,55 +324,80 @@ function bifrostBypassLaunchHandler(profileId: string, cdpPort: number | null): 
 function syncBifrostFormControls(form: HTMLFormElement): void {
   const enabledInput = form.querySelector<HTMLInputElement>("[data-bifrost-proxy-enabled]");
   const fields = form.querySelector<HTMLFieldSetElement>("[data-bifrost-config-fields]");
-  const enabled = Boolean(enabledInput?.checked);
-  if (fields && !enabledInput?.disabled) fields.disabled = !enabled;
+  const enabled = enabledInput ? enabledInput.checked : form.dataset.bifrostConfigured === "true";
+  if (fields && enabledInput && !enabledInput.disabled) fields.disabled = !enabled;
   fields?.classList.toggle("enabled", enabled);
   enabledInput?.closest(".bifrost-enable-row")?.classList.toggle("enabled", enabled);
 
-  // 模式切换：显示对应面板、切换单选高亮，并把当前模式记到 form 上供提交与模板读取。
-  const mode = form.querySelector<HTMLInputElement>('[data-bifrost-mode]:checked')?.value === "upstream" ? "upstream" : "bifrost";
+  // 四种路径直接互斥；只有“指定代理”需要展开手动输入。
+  const selectedMode = form.querySelector<HTMLInputElement>('[data-bifrost-mode]:checked')?.value;
+  const mode = selectedMode === "custom" || selectedMode === "clash" || selectedMode === "direct"
+    ? selectedMode
+    : "bifrost-main";
   form.dataset.proxyMode = mode;
   form.querySelectorAll<HTMLElement>("[data-bifrost-mode-panel]").forEach((panel) => {
     panel.hidden = panel.dataset.bifrostModePanel !== mode;
   });
   form.querySelectorAll<HTMLElement>(".bifrost-mode-option").forEach((option) => {
-    option.classList.toggle("selected", Boolean(option.querySelector<HTMLInputElement>("input[type=radio]")?.checked));
+    option.classList.toggle("selected", enabled && Boolean(option.querySelector<HTMLInputElement>("input[type=radio]")?.checked));
   });
 
-  form.querySelectorAll<HTMLElement>(".bifrost-rule-option").forEach((option) => {
-    option.classList.toggle("selected", Boolean(option.querySelector<HTMLInputElement>('input[type="checkbox"]')?.checked));
-  });
-
-  const port = form.querySelector<HTMLInputElement>("[data-bifrost-listener-port]")?.value.trim() || "—";
-  const localCount = form.querySelectorAll<HTMLInputElement>("[data-bifrost-rule-option]:checked").length;
-  const groupCount = (form.querySelector<HTMLTextAreaElement>("[data-bifrost-group-rules]")?.value || "")
-    .split(/\r?\n/)
-    .map((item) => item.trim())
-    .filter(Boolean).length;
   const portLabel = form.querySelector<HTMLElement>("[data-bifrost-route-port]");
   const countLabel = form.querySelector<HTMLElement>("[data-bifrost-route-count]");
-  const upstreamServer = form.querySelector<HTMLInputElement>("[data-bifrost-upstream-server]")?.value.trim() || "";
-  if (portLabel) {
-    portLabel.textContent = !enabled
-      ? "系统代理"
-      : mode === "upstream"
-        ? upstreamServer || "上游代理"
-        : `127.0.0.1:${port}`;
-  }
-  if (countLabel) {
-    countLabel.textContent = !enabled
-      ? "Default view"
-      : mode === "upstream"
-        ? "直连上游"
-        : localCount + groupCount > 0
-          ? `${localCount + groupCount} 条显式规则`
-          : "选择规则";
-  }
+  const customServer = form.querySelector<HTMLInputElement>("[data-bifrost-upstream-server]")?.value.trim() || "";
+  const bifrostMainServer = form.dataset.bifrostMainServer || "http://127.0.0.1:9900";
+  const clashServer = form.dataset.clashServer || "http://127.0.0.1:7897";
+  const routeContext = form.querySelector<HTMLElement>("[data-bifrost-route-context]");
+  const setRouteText = (selector: string, value: string | undefined): void => {
+    const element = form.querySelector<HTMLElement>(selector);
+    if (element) element.textContent = value || "—";
+  };
+  const setRouteTone = (tone: string): void => {
+    routeContext?.classList.remove("current", "saved", "preview", "warning", "unknown");
+    routeContext?.classList.add(tone);
+  };
 
-  // Clash 模板只在直连 Clash 模式下出现，端口随 server 输入实时更新。
-  const templateCode = form.querySelector<HTMLElement>("[data-clash-template-code]");
-  if (templateCode && mode === "upstream") {
-    templateCode.textContent = buildClashMergeTemplate(extractPortFromEndpointClient(upstreamServer));
+  if (!enabled) {
+    const removingSavedConfig = form.dataset.bifrostConfigured === "true";
+    setRouteTone(removingSavedConfig ? "preview" : form.dataset.currentRouteTone || "unknown");
+    setRouteText("[data-bifrost-route-badge]", removingSavedConfig ? "配置预览" : form.dataset.currentRouteBadge);
+    setRouteText(
+      "[data-bifrost-route-note]",
+      removingSavedConfig ? "保存后将恢复这条系统代理路径" : form.dataset.currentRouteNote
+    );
+    setRouteText("[data-bifrost-route-middle-label]", form.dataset.currentRouteMiddleLabel);
+    setRouteText("[data-bifrost-route-port]", form.dataset.currentRouteMiddleValue);
+    setRouteText("[data-bifrost-route-middle-note]", form.dataset.currentRouteMiddleNote);
+    setRouteText("[data-bifrost-route-target-label]", form.dataset.currentRouteTargetLabel);
+    setRouteText("[data-bifrost-route-count]", form.dataset.currentRouteTargetValue);
+    setRouteText("[data-bifrost-route-target-note]", form.dataset.currentRouteTargetNote);
+  } else if (mode === "direct") {
+    setRouteTone("preview");
+    setRouteText("[data-bifrost-route-badge]", "配置预览");
+    setRouteText("[data-bifrost-route-note]", "保存后，启动 Profile 时将显式绕过系统代理");
+    setRouteText("[data-bifrost-route-middle-label]", "Chrome network");
+    if (portLabel) portLabel.textContent = "DIRECT";
+    setRouteText("[data-bifrost-route-middle-note]", "--no-proxy-server");
+    setRouteText("[data-bifrost-route-target-label]", "Current route");
+    if (countLabel) countLabel.textContent = "直接访问目标";
+    setRouteText("[data-bifrost-route-target-note]", "不连接 Bifrost 或 Clash");
+  } else {
+    const effectiveServer = mode === "bifrost-main" ? bifrostMainServer : mode === "clash" ? clashServer : customServer;
+    const routeOwner = mode === "bifrost-main" ? "Bifrost 主入口" : mode === "clash" ? "Clash" : "自定义代理";
+    const ownerNote = mode === "bifrost-main"
+      ? "使用主入口当前启用规则"
+      : mode === "clash"
+        ? "使用 Clash 当前节点和规则"
+        : "具体行为由目标代理决定";
+    setRouteTone("preview");
+    setRouteText("[data-bifrost-route-badge]", "配置预览");
+    setRouteText("[data-bifrost-route-note]", "保存后，启动 Profile 时将注入这条代理路径");
+    setRouteText("[data-bifrost-route-middle-label]", mode === "custom" ? "指定代理" : routeOwner);
+    if (portLabel) portLabel.textContent = effectiveServer || "请填写代理地址";
+    setRouteText("[data-bifrost-route-middle-note]", "启动前进行 TCP 探活");
+    setRouteText("[data-bifrost-route-target-label]", "Route owner");
+    if (countLabel) countLabel.textContent = routeOwner;
+    setRouteText("[data-bifrost-route-target-note]", ownerNote);
   }
 
   const submit = form.querySelector<HTMLButtonElement>("[data-bifrost-submit-label]");
@@ -384,31 +410,7 @@ function syncBifrostFormControls(form: HTMLFormElement): void {
   }
 }
 
-// 客户端侧的端口解析（与 modals.ts 的同名逻辑对齐，供实时模板更新用）。
-function extractPortFromEndpointClient(input: string): number | null {
-  const match = String(input || "").trim().match(/:(\d{2,5})(?:\D|$)/);
-  const port = match ? Number(match[1]) : NaN;
-  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null;
-}
-
 // 上游代理地址归一化（渲染层输入校验）：与主进程 proxy-health 规则一致，返回 scheme://host:port 或 null。
-function normalizeProxyServerInput(input: string): string | null {
-  const raw = String(input || "").trim();
-  if (!raw || raw.length > 200 || /[\s\0]/.test(raw)) return null;
-  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `http://${raw}`;
-  let url: URL;
-  try {
-    url = new URL(withScheme);
-  } catch {
-    return null;
-  }
-  const scheme = url.protocol.replace(/:$/, "").toLowerCase();
-  if (scheme !== "http" && scheme !== "https" && scheme !== "socks5") return null;
-  const port = Number(url.port);
-  if (!url.hostname || !Number.isInteger(port) || port < 1 || port > 65535) return null;
-  return `${scheme}://${url.hostname}:${port}`;
-}
-
 appRoot.addEventListener("click", (event) => {
   const target = event.target instanceof Element ? event.target : null;
   // 全局快捷键下拉是原生 <select>，点它会冒泡命中所在行的 data-action="select"，触发 render() 把
@@ -1379,14 +1381,26 @@ appRoot.addEventListener("click", (event) => {
     return;
   }
 
-  if (action === "copy-clash-template") {
-    const code = target?.closest("[data-clash-template]")?.querySelector<HTMLElement>("[data-clash-template-code]")?.textContent || "";
-    if (code) {
-      void navigator.clipboard?.writeText(code).then(
-        () => setToast("已复制 Clash Merge 模板", "normal"),
-        () => setToast("复制失败，请手动选择文本复制", "error")
-      );
+  if (action === "prepare-bifrost-proxy" && id) {
+    const profile = store.state.profiles.find((item) => item.id === id);
+    if (!profile || profile.source !== "isolated") {
+      setToast("独立代理分流只支持独立 Profile", "error");
+      return;
     }
+    if (!profile.running) {
+      store.modal = { kind: "bifrost-proxy", profileId: id, snapshot: null };
+      render();
+      void refreshBifrostProxyModal(id);
+      return;
+    }
+    store.modal = {
+      kind: "confirm",
+      intent: {
+        kind: "close-profile-for-bifrost",
+        profileId: id
+      }
+    };
+    render();
     return;
   }
 
@@ -1794,13 +1808,10 @@ appRoot.addEventListener("change", (event) => {
     return;
   }
 
-  if (target instanceof HTMLInputElement && target.matches("[data-bifrost-proxy-enabled], [data-bifrost-rule-option], [data-bifrost-mode]")) {
+  if (target instanceof HTMLInputElement && target.matches("[data-bifrost-proxy-enabled], [data-bifrost-mode]")) {
     const form = target.closest<HTMLFormElement>("[data-bifrost-proxy-form]");
     if (form) {
       syncBifrostFormControls(form);
-      if (target.matches("[data-bifrost-proxy-enabled]") && target.checked) {
-        form.querySelector<HTMLInputElement>("[data-bifrost-listener-port]")?.focus();
-      }
     }
     return;
   }
@@ -1888,7 +1899,7 @@ appRoot.addEventListener("input", (event) => {
   const bifrostTarget = event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement
     ? event.target
     : null;
-  if (bifrostTarget?.matches("[data-bifrost-listener-port], [data-bifrost-group-rules], [data-bifrost-upstream-server], [data-bifrost-upstream-bypass]")) {
+  if (bifrostTarget?.matches("[data-bifrost-upstream-server], [data-bifrost-upstream-bypass]")) {
     const form = bifrostTarget.closest<HTMLFormElement>("[data-bifrost-proxy-form]");
     if (form) syncBifrostFormControls(form);
     return;
@@ -2007,72 +2018,37 @@ appRoot.addEventListener("submit", (event) => {
     const profile = store.state?.profiles.find((item) => item.id === profileId);
     if (!profileId || !profile) return;
     const data = new FormData(bifrostProxyForm);
-    const hotEditingBifrost = Boolean(profile.running && profile.bifrostProxy);
-    const enabled = hotEditingBifrost || data.has("enabled");
-    const mode = hotEditingBifrost
-      ? "bifrost"
-      : String(data.get("mode") || "bifrost") === "upstream"
-        ? "upstream"
-        : "bifrost";
+    const enabled = data.has("enabled");
+    const submittedMode = String(data.get("mode") || "bifrost-main");
+    const mode = submittedMode === "custom" || submittedMode === "clash" || submittedMode === "direct"
+      ? submittedMode
+      : "bifrost-main";
     let config: ProfileProxyConfig | null = null;
-    if (enabled && mode === "upstream") {
-      const server = normalizeProxyServerInput(String(data.get("upstreamServer") || ""));
-      if (!server) {
-        setToast("上游代理地址无法解析，请填写形如 http://127.0.0.1:7897 的地址", "error");
-        return;
-      }
-      const bypassList = String(data.get("bypassList") || "").trim() || null;
-      config = { kind: "upstream", server, ...(bypassList ? { bypassList } : {}) };
+    if (enabled && mode === "direct") {
+      config = { kind: "direct" };
     } else if (enabled) {
-      const listenerPort = hotEditingBifrost
-        ? profile.bifrostProxy!.listenerPort
-        : Number(String(data.get("listenerPort") || ""));
-      if (!Number.isInteger(listenerPort) || listenerPort < 1024 || listenerPort > 65535) {
-        setToast("Bifrost 入口端口必须是 1024-65535 之间的整数", "error");
+      const server = mode === "bifrost-main"
+        ? normalizeProxyServerInput(bifrostProxyForm.dataset.bifrostMainServer || "")
+        : mode === "clash"
+          ? normalizeProxyServerInput(bifrostProxyForm.dataset.clashServer || "")
+          : normalizeProxyServerInput(String(data.get("upstreamServer") || ""));
+      if (!server) {
+        setToast("代理地址无法解析，请填写形如 http://127.0.0.1:8080 的地址", "error");
         return;
       }
-      const snapshot = store.modal?.kind === "bifrost-proxy" ? store.modal.snapshot : null;
-      if (snapshot?.mainPort === listenerPort) {
-        setToast(`端口 ${listenerPort} 是 Bifrost 主代理端口，请换一个专属入口`, "error");
-        return;
-      }
-      const rules = data.getAll("rule").map(String).map((item) => item.trim()).filter(Boolean);
-      const groupRules = String(data.get("groupRules") || "")
-        .split(/\r?\n/)
-        .map((item) => item.trim())
-        .filter(Boolean);
-      const invalidGroupRule = groupRules.find((item) => !/^\d+\/.+/.test(item));
-      if (invalidGroupRule) {
-        setToast(`Group 规则格式不正确：${invalidGroupRule}`, "error");
-        return;
-      }
-      if (!rules.length && !groupRules.length) {
-        setToast("至少选择一条本地规则或填写一条 Group 规则", "error");
-        return;
-      }
-      const disabledRules = (profile.bifrostProxy?.disabledRules || [])
-        .filter((rule) => rules.includes(rule));
-      const disabledGroupRules = (profile.bifrostProxy?.disabledGroupRules || [])
-        .filter((rule) => groupRules.includes(rule));
-      if (disabledRules.length + disabledGroupRules.length >= rules.length + groupRules.length) {
-        setToast("专属分流至少需要保留一条启用规则", "error");
-        return;
-      }
-      config = {
-        kind: "bifrost",
-        listenerPort,
-        rules,
-        groupRules,
-        ...(disabledRules.length ? { disabledRules } : {}),
-        ...(disabledGroupRules.length ? { disabledGroupRules } : {})
-      };
+      const bypassList = mode === "custom" ? String(data.get("bypassList") || "").trim() || null : null;
+      config = { kind: "upstream", server, ...(bypassList ? { bypassList } : {}) };
     }
 
     const successMessage = !enabled
       ? `已让 ${emphasizeName(profile.name)} 恢复跟随系统代理`
-      : mode === "upstream"
-        ? `已给 ${emphasizeName(profile.name)} 配置直连 Clash 代理`
-        : `已给 ${emphasizeName(profile.name)} 配置独立 Bifrost 分流`;
+      : mode === "direct"
+        ? `已让 ${emphasizeName(profile.name)} 直接联网`
+        : mode === "bifrost-main"
+          ? `已让 ${emphasizeName(profile.name)} 使用 Bifrost`
+          : mode === "clash"
+            ? `已让 ${emphasizeName(profile.name)} 使用 Clash`
+            : `已给 ${emphasizeName(profile.name)} 配置指定代理`;
     void withBusy(
       async () => {
         store.state = await profileApi().setProfileProxy(profileId, config);

@@ -112,6 +112,7 @@ export function normalizeProfile(profile: unknown): StoredProfile | null {
         : null,
     bifrostProxy: normalizeStoredBifrostProxy(candidate.bifrostProxy),
     upstreamProxy: normalizeStoredUpstreamProxy(candidate.upstreamProxy),
+    directConnection: candidate.directConnection === true,
     clonedFromProfileId:
       typeof candidate.clonedFromProfileId === "string" && candidate.clonedFromProfileId
         ? candidate.clonedFromProfileId

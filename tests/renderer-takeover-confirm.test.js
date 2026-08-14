@@ -149,6 +149,41 @@ test("renderer disable Bifrost rule confirm refreshes the proxy snapshot", async
   ]);
 });
 
+test("renderer explains why a running Profile must close before proxy injection", () => {
+  const { confirm } = loadConfirmHarness();
+  const view = confirm.confirmModalView({ kind: "close-profile-for-bifrost", profileId: "p1" });
+
+  assert.equal(view.title, "关闭 Work 并继续配置");
+  assert.equal(view.confirmLabel, "关闭后继续配置");
+  assert.match(view.body[0], /刷新网页可以重发请求/);
+  assert.match(view.body[0], /不能改变已经启动的 Chrome 进程/);
+  assert.match(view.body[1], /不会修改 Bifrost、Clash 或系统代理/);
+});
+
+test("renderer closes a running Profile and returns to its Bifrost settings", async () => {
+  const stoppedState = appState([profile({ running: false, pids: [] })]);
+  const nextSnapshot = { running: true, ports: [] };
+  const { confirm, store, calls, waitForBusy } = loadConfirmHarness({
+    closeState: stoppedState,
+    launchSnapshot: nextSnapshot
+  });
+
+  confirm.executeCloseProfileForBifrostConfirm({ kind: "close-profile-for-bifrost", profileId: "p1" });
+  await waitForBusy();
+
+  assert.deepEqual(calls.closeProfileArgs, ["p1"]);
+  assert.equal(store.state, stoppedState);
+  assert.deepEqual(store.modal, {
+    kind: "bifrost-proxy",
+    profileId: "p1",
+    snapshot: nextSnapshot
+  });
+  assert.deepEqual(calls.toasts, [{
+    message: "已关闭 <Work>，现在可以配置独立分流",
+    kind: "normal"
+  }]);
+});
+
 test("renderer dedicated Bifrost rule confirm explains its Profile-only scope", () => {
   const configured = profile({
     name: "9223端口profile",
@@ -448,6 +483,25 @@ test("renderer dedicated Bifrost rule action opens a Profile-scoped confirm", as
   }
 });
 
+test("renderer locked proxy toggle opens the close-and-configure confirmation", async () => {
+  const harness = loadMainHarness({ profile: profile({ running: true }) });
+
+  try {
+    harness.click({ action: "prepare-bifrost-proxy", id: "p1" });
+
+    assert.deepEqual(harness.store.modal, {
+      kind: "confirm",
+      intent: {
+        kind: "close-profile-for-bifrost",
+        profileId: "p1"
+      }
+    });
+    assert.equal(harness.calls.renders, 1);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
 test("renderer enables a paused dedicated Bifrost rule without a confirm dialog", async () => {
   const harness = loadMainHarness({
     profile: profile({
@@ -504,6 +558,7 @@ test("renderer enables a paused dedicated Bifrost rule without a confirm dialog"
 function loadConfirmHarness(options = {}) {
   const calls = {
     busyStates: [],
+    closeProfileArgs: [],
     disableRuleArgs: [],
     launchProfileArgs: [],
     launchProfileWithCdpArgs: [],
@@ -526,6 +581,10 @@ function loadConfirmHarness(options = {}) {
   const apiStub = {
     profileApi() {
       return {
+        async closeProfile(profileId) {
+          calls.closeProfileArgs.push(profileId);
+          return options.closeState || store.state;
+        },
         async disableBifrostRule(ruleName) {
           calls.disableRuleArgs.push(ruleName);
           return options.disableSnapshot || { running: true, mainRules: [] };

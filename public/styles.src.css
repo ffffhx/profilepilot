@@ -4681,6 +4681,21 @@ body:not(.booted) .layout {
   background: #9c86ee;
 }
 
+.profile-route-track.direct {
+  border-color: rgba(56, 225, 160, 0.34);
+  background: rgba(56, 225, 160, 0.07);
+}
+
+.profile-route-track.direct .profile-route-copy strong,
+.profile-route-track.direct .profile-route-copy small {
+  color: var(--accent-bright);
+}
+
+.profile-route-track.direct .profile-route-signal::before,
+.profile-route-track.direct .profile-route-signal::after {
+  background: var(--accent);
+}
+
 .profile-route-track.system.system-proxy-active {
   border-color: var(--info-line);
   background: var(--info-soft);
@@ -5263,10 +5278,10 @@ body:not(.booted) .layout {
   color: var(--danger-bright);
 }
 
-/* 分流模式切换（Bifrost 规则 / 直连上游） */
+/* 分流模式切换（指定代理 / Bifrost / Clash / 直接联网） */
 .bifrost-mode-switch {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
   margin-bottom: 14px;
 }
@@ -5299,35 +5314,6 @@ body:not(.booted) .layout {
 
 .bifrost-mode-panel[hidden] {
   display: none;
-}
-
-/* Clash Verge Merge 模板区块 */
-.bifrost-clash-template {
-  margin-top: 12px;
-  border: 1px solid var(--line-strong);
-  border-radius: 10px;
-  padding: 10px 12px;
-}
-
-.bifrost-clash-template > summary {
-  cursor: pointer;
-  font-weight: 600;
-}
-
-.bifrost-clash-template > summary span {
-  color: var(--muted);
-  font-weight: 400;
-}
-
-.clash-template-code {
-  margin: 8px 0;
-  padding: 10px;
-  border-radius: 8px;
-  background: var(--info-soft);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  white-space: pre;
-  overflow-x: auto;
 }
 
 .bifrost-proxy-modal {
@@ -5406,6 +5392,55 @@ body:not(.booted) .layout {
 .bifrost-status small {
   color: var(--muted);
   font-size: 11px;
+}
+
+.bifrost-route-context {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 0 8px;
+  min-width: 0;
+}
+
+.bifrost-route-context > span {
+  flex: 0 0 auto;
+  border: 1px solid var(--accent-line);
+  border-radius: 999px;
+  background: var(--accent-soft);
+  padding: 3px 8px;
+  color: var(--accent-bright);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+
+.bifrost-route-context > small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bifrost-route-context.preview > span,
+.bifrost-route-context.saved > span {
+  border-color: var(--info-line);
+  background: var(--info-soft);
+  color: var(--info-bright);
+}
+
+.bifrost-route-context.warning > span {
+  border-color: var(--warn-line);
+  background: var(--warn-soft);
+  color: var(--warn-bright);
+}
+
+.bifrost-route-context.unknown > span {
+  border-color: var(--line-strong);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--muted);
 }
 
 .bifrost-route-map {
@@ -5499,6 +5534,18 @@ body:not(.booted) .layout {
   cursor: pointer;
 }
 
+.bifrost-enable-row-button {
+  width: 100%;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+}
+
+.bifrost-enable-row-button.locked:hover {
+  border-color: var(--warn-line);
+  background: color-mix(in srgb, var(--warn-soft) 64%, var(--panel-soft));
+}
+
 .bifrost-enable-row.enabled {
   border-color: var(--info-line);
   background: var(--info-soft);
@@ -5519,8 +5566,10 @@ body:not(.booted) .layout {
   line-height: 1.45;
 }
 
-.bifrost-enable-row input {
+.bifrost-enable-row input,
+.bifrost-toggle-control {
   position: relative;
+  display: inline-block;
   width: 38px;
   height: 22px;
   flex: 0 0 auto;
@@ -5532,7 +5581,8 @@ body:not(.booted) .layout {
   transition: border-color 140ms ease, background 140ms ease;
 }
 
-.bifrost-enable-row input::after {
+.bifrost-enable-row input::after,
+.bifrost-toggle-control::after {
   position: absolute;
   top: 3px;
   left: 3px;
@@ -5544,12 +5594,14 @@ body:not(.booted) .layout {
   transition: transform 140ms ease, background 140ms ease;
 }
 
-.bifrost-enable-row input:checked {
+.bifrost-enable-row input:checked,
+.bifrost-toggle-control.checked {
   border-color: var(--info);
   background: rgba(95, 182, 255, 0.24);
 }
 
-.bifrost-enable-row input:checked::after {
+.bifrost-enable-row input:checked::after,
+.bifrost-toggle-control.checked::after {
   background: var(--info-bright);
   transform: translateX(16px);
 }
@@ -5575,6 +5627,13 @@ body:not(.booted) .layout {
 .bifrost-lock-notice span {
   color: var(--muted);
   text-align: right;
+}
+
+.bifrost-lock-notice button {
+  flex: 0 0 auto;
+  border-color: var(--warn-line);
+  color: var(--warn-bright);
+  white-space: nowrap;
 }
 
 .bifrost-config-fields {
@@ -5849,6 +5908,10 @@ body:not(.booted) .layout {
   }
 
   .bifrost-rule-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .bifrost-mode-switch {
     grid-template-columns: 1fr;
   }
 

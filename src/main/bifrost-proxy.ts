@@ -163,6 +163,11 @@ export function upstreamProxyChromeArgs(config: ProfileUpstreamProxyConfig | nul
   return args;
 }
 
+// 显式直连模式不能只是“不注入 --proxy-server”，否则 Chrome 仍会跟随系统代理。
+export function directConnectionChromeArgs(enabled: boolean | null | undefined): string[] {
+  return enabled ? ["--no-proxy-server"] : [];
+}
+
 // 启动前对直连上游做 TCP 探活；不可达抛 UPSTREAM_PROXY_UNREACHABLE，与 Bifrost 逃生口共享错误处理。
 export async function ensureUpstreamProxy(config: ProfileUpstreamProxyConfig): Promise<string[]> {
   const validated = validateUpstreamProxyConfig(config);
@@ -814,19 +819,36 @@ function bindingName(profileId: string): string {
   return `${PROFILEPILOT_BINDING_PREFIX}${profileId}`;
 }
 
-function resolveBifrostBinary(env: NodeJS.ProcessEnv): string {
+export function resolveBifrostBinary(env: NodeJS.ProcessEnv): string {
   if (env.BIFROST_BINARY?.trim()) {
     return env.BIFROST_BINARY.trim();
   }
 
   const executable = process.platform === "win32" ? "bifrost.exe" : "bifrost";
+  const pathBinary = executableFromPath(executable, env.PATH);
+  if (pathBinary) {
+    return pathBinary;
+  }
   const candidates = [
+    ...(process.platform === "darwin"
+      ? ["/Applications/Bifrost.app/Contents/Resources/resources/bin/bifrost"]
+      : []),
     path.join(os.homedir(), ".local", "bin", executable),
     path.join(os.homedir(), "bin", executable),
     "/opt/homebrew/bin/bifrost",
     "/usr/local/bin/bifrost"
   ];
   return candidates.find((candidate) => existsSync(candidate)) || executable;
+}
+
+function executableFromPath(executable: string, pathValue: string | undefined): string | null {
+  for (const entry of String(pathValue || "").split(path.delimiter)) {
+    const directory = entry.trim().replace(/^"|"$/g, "");
+    if (!directory) continue;
+    const candidate = path.join(directory, executable);
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
 }
 
 function runBifrost(binary: string, args: string[], env: NodeJS.ProcessEnv): Promise<CommandResult> {
@@ -862,10 +884,11 @@ async function tryRunBifrost(binary: string, args: string[], env: NodeJS.Process
 
 function withBifrostPath(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const pathEntries = [
+    env.PATH || "",
     path.join(os.homedir(), ".local", "bin"),
+    path.join(os.homedir(), "bin"),
     "/opt/homebrew/bin",
-    "/usr/local/bin",
-    env.PATH || ""
+    "/usr/local/bin"
   ];
   return { ...env, PATH: pathEntries.filter(Boolean).join(path.delimiter) };
 }

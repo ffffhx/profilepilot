@@ -88,6 +88,7 @@ import { addRuntimeProcess, attachListeningPorts, emptyRuntimeProfile, findExter
 import { ProfileManagerError } from "./profile-manager-error";
 import {
   canHotUpdateProfileBifrostProxy,
+  directConnectionChromeArgs,
   disableBifrostRule as disableMainBifrostRule,
   destroyProfileBifrostProxy,
   ensureProfileBifrostProxy,
@@ -664,6 +665,7 @@ export class ProfileManager {
 
     const bifrostConfig = configInput?.kind === "bifrost" ? validateBifrostProxyConfig(configInput) : null;
     const upstreamConfig = configInput?.kind === "upstream" ? validateUpstreamProxyConfig(configInput) : null;
+    const directConnection = configInput?.kind === "direct";
     const hotUpdate = Boolean(
       currentProfile?.running &&
       canHotUpdateProfileBifrostProxy(profile.bifrostProxy, bifrostConfig)
@@ -685,6 +687,7 @@ export class ProfileManager {
       await ensureProfileBifrostProxy(profile.id, bifrostConfig, process.env);
       profile.bifrostProxy = bifrostConfig;
       profile.upstreamProxy = null;
+      profile.directConnection = false;
       try {
         await this.saveRegistry(registry);
       } catch (error) {
@@ -701,6 +704,7 @@ export class ProfileManager {
     }
     profile.bifrostProxy = bifrostConfig;
     profile.upstreamProxy = upstreamConfig;
+    profile.directConnection = directConnection;
     await this.saveRegistry(registry);
   }
 
@@ -2929,9 +2933,9 @@ export class ProfileManager {
     const profilePath = this.isolatedProfilePath(profile);
     await fs.mkdir(profilePath, { recursive: true });
     const launchPlan = await getMigratedExtensionLaunchPlan(profile);
-    // bypassProxy 是代理不可用时的一次性直连逃生口：跳过代理注入，不改已保存配置。
+    // bypassProxy 是代理不可用时的一次性直连逃生口：显式绕过系统代理，不改已保存配置。
     const proxyArgs = options.bypassProxy
-      ? []
+      ? directConnectionChromeArgs(true)
       : await this.ensureProxyForLaunch(profile, { startBifrost: options.startBifrost });
     const needsRuntimeCdp = launchPlan.runtimeLoadPaths.length > 0;
     const shouldStartCdp = Boolean(options.forceCdp || needsRuntimeCdp);
@@ -3008,6 +3012,9 @@ export class ProfileManager {
       }
       if (profile.upstreamProxy) {
         return await ensureUpstreamProxy(profile.upstreamProxy);
+      }
+      if (profile.directConnection) {
+        return directConnectionChromeArgs(true);
       }
       return [];
     } catch (error) {
@@ -3436,6 +3443,7 @@ export class ProfileManager {
       fixedCdpPort: null,
       bifrostProxy: null,
       upstreamProxy: null,
+      directConnection: false,
       listeningPorts: runtimeProfile.listeningPorts,
       pinnedToMini: false,
       quickLaunchSlot: null,
@@ -3482,6 +3490,7 @@ export class ProfileManager {
       fixedCdpPort: profile.fixedCdpPort ?? null,
       bifrostProxy: profile.bifrostProxy ?? null,
       upstreamProxy: profile.upstreamProxy ?? null,
+      directConnection: profile.directConnection === true,
       listeningPorts: runtimeProfile.listeningPorts,
       pinnedToMini: false,
       quickLaunchSlot: null,
@@ -3576,6 +3585,7 @@ export class ProfileManager {
       fixedCdpPort: null,
       bifrostProxy: null,
       upstreamProxy: null,
+      directConnection: false,
       listeningPorts: [],
       pinnedToMini: false,
       quickLaunchSlot: null,

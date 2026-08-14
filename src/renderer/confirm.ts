@@ -153,6 +153,28 @@ export function confirmModalView(intent: ConfirmIntent): ConfirmModalView | null
     };
   }
 
+  if (intent.kind === "close-profile-for-bifrost") {
+    const profile = store.state.profiles.find((item) => item.id === intent.profileId);
+    if (!profile) {
+      return null;
+    }
+    return {
+      kicker: "关闭后配置分流",
+      title: `关闭 ${profile.name} 并继续配置`,
+      body: [
+        "独立代理分流依赖 Chrome 启动参数。刷新网页可以重发请求，但不能改变已经启动的 Chrome 进程所使用的代理入口。",
+        "确认后只会关闭这个 Profile，并自动返回分流设置；不会修改 Bifrost、Clash 或系统代理。未保存的网页内容可能会丢失。"
+      ],
+      confirmLabel: "关闭后继续配置",
+      tone: "warn",
+      summary: [
+        { label: "Profile", value: profile.name },
+        { label: "当前状态", value: "运行中" },
+        { label: "下一步", value: "返回分流配置" }
+      ]
+    };
+  }
+
   if (intent.kind === "profile-sync") {
     const sourceProfile = store.state.profiles.find((profile) => profile.id === intent.sourceProfileId);
     const targetProfile = store.state.profiles.find((profile) => profile.id === intent.targetProfileId);
@@ -506,6 +528,11 @@ export function executeConfirmIntent(intent: ConfirmIntent): void {
     return;
   }
 
+  if (intent.kind === "close-profile-for-bifrost") {
+    executeCloseProfileForBifrostConfirm(intent);
+    return;
+  }
+
   if (intent.kind === "profile-sync") {
     executeProfileSyncConfirm(intent);
     return;
@@ -843,6 +870,52 @@ export function executeProfileConfirm(intent: Extract<ConfirmIntent, { kind: "pr
   }
 
   void executeProfileDeleteConfirm(profile, intent.action === "delete-after-chrome-exit");
+}
+
+export function executeCloseProfileForBifrostConfirm(
+  intent: Extract<ConfirmIntent, { kind: "close-profile-for-bifrost" }>
+): void {
+  const profile = store.state?.profiles.find((item) => item.id === intent.profileId);
+  store.modal = null;
+
+  if (!profile) {
+    render();
+    return;
+  }
+
+  if (!profile.running) {
+    store.modal = {
+      kind: "bifrost-proxy",
+      profileId: profile.id,
+      snapshot: store.bifrostSnapshot
+    };
+    render();
+    return;
+  }
+
+  void withBusy(
+    async () => {
+      store.state = await profileApi().closeProfile(profile.id);
+      let snapshot = store.bifrostSnapshot;
+      try {
+        snapshot = await profileApi().getBifrostSnapshot();
+        store.bifrostSnapshot = snapshot;
+      } catch {
+        // 关闭 Profile 已成功时，读取 Bifrost 快照失败不应阻断用户继续编辑已保存的分流配置。
+      }
+      store.modal = {
+        kind: "bifrost-proxy",
+        profileId: profile.id,
+        snapshot
+      };
+    },
+    `已关闭 ${emphasizeName(profile.name)}，现在可以配置独立分流`,
+    {
+      key: "close-profile",
+      message: `正在关闭 ${profile.name} 并准备分流设置…`,
+      profileId: profile.id
+    }
+  );
 }
 
 export async function executeProfileDeleteConfirm(profile: PublicProfile, quitChromeBeforeDelete: boolean): Promise<void> {

@@ -421,6 +421,75 @@ export interface ShellIntegrationStatus {
   error: string | null;
 }
 
+export type AgentToolAvailability = "installed" | "missing" | "error";
+
+export interface AgentToolDiagnostic {
+  key: BrowserDriverKind;
+  label: string;
+  availability: AgentToolAvailability;
+  executablePath: string | null;
+  version: string | null;
+  source: "binary" | null;
+  installCommand: string;
+  verifyCommand: string;
+  error: string | null;
+}
+
+export interface AgentWrapperDiagnostic {
+  key: BrowserDriverKind;
+  label: string;
+  wrapperPath: string;
+  launcherPath: string;
+  wrapperInstalled: boolean;
+  launcherInstalled: boolean;
+}
+
+export type AgentSkillHost = "shared" | "codex" | "claude";
+
+export interface AgentSkillTargetDiagnostic {
+  host: AgentSkillHost;
+  label: string;
+  path: string;
+  installed: boolean;
+  managed: boolean;
+  upToDate: boolean;
+}
+
+export interface AgentSkillDiagnostic {
+  key: BrowserDriverKind;
+  label: string;
+  skillId: string;
+  installed: boolean;
+  managed: boolean;
+  upToDate: boolean;
+  installedTargetCount: number;
+  managedTargetCount: number;
+  targetCount: number;
+  installPath: string;
+  targets: AgentSkillTargetDiagnostic[];
+  error: string | null;
+}
+
+export interface InputGuardPermissionDiagnostic {
+  supported: boolean;
+  granted: boolean;
+  appName: string;
+  appPath: string | null;
+  inspectedAt: string;
+  error: string | null;
+}
+
+export interface AgentIntegrationDiagnostic {
+  inspectedAt: string;
+  ready: boolean;
+  shellIntegration: ShellIntegrationStatus;
+  wrapperDirectory: string;
+  tools: AgentToolDiagnostic[];
+  wrappers: AgentWrapperDiagnostic[];
+  skills: AgentSkillDiagnostic[];
+  inputGuard: InputGuardPermissionDiagnostic;
+}
+
 export interface DeleteProfileResult {
   deletedProfile: PublicProfile;
   trashPath: string | null;
@@ -861,6 +930,12 @@ export interface ProfileManagerApi {
   ): Promise<TakeoverAgentConnectionsResponse>;
   setAgentOverlayEnabled(enabled: boolean): Promise<AppState>;
   setShellIntegrationEnabled(enabled: boolean): Promise<AppState>;
+  inspectAgentIntegration(): Promise<AgentIntegrationDiagnostic>;
+  setAgentWrapperEnabled(tool: BrowserDriverKind, enabled: boolean): Promise<AgentIntegrationDiagnostic>;
+  setAgentSkillEnabled(tool: BrowserDriverKind, enabled: boolean): Promise<AgentIntegrationDiagnostic>;
+  requestInputGuardPermission(): Promise<AgentIntegrationDiagnostic>;
+  openInputGuardSettings(): Promise<boolean>;
+  prepareProfileForAgent(profileId: string): Promise<AppState>;
   openProfileFolder(id: string): Promise<AppState>;
   openProfileExtensionsPage(id: string): Promise<AppState>;
   openPath(path: string): Promise<boolean>;
@@ -993,6 +1068,8 @@ export type ModalState =
   | { kind: "clone-pool" }
   | { kind: "clone-tag"; profileId: string }
   | { kind: "global-instructions" }
+  | { kind: "onboarding" }
+  | { kind: "agent-integration" }
   | { kind: "profile-details"; profileId: string }
   | { kind: "external-details"; userDataDir: string }
   | { kind: "live-zoom"; profileId: string; returnTo?: "profile-details" }

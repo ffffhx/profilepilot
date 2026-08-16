@@ -23,6 +23,7 @@ const {
   formatProfileLeaseConflict,
   formatControlledRawCdpFailure,
   replaceCdpPortInAgentBrowserArgs,
+  resolveProfilePilotUseArgs,
   resolveRealAgentBrowser,
   runAgentBrowserWrapper,
   sessionFromAgentBrowserArgs,
@@ -100,6 +101,33 @@ test("profilepilot profiles uses Profile names as selection hints and publishes 
     ]);
   } finally {
     writes.restore();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("profilepilot use resolves an exact Profile name into the protected Gateway connection", () => {
+  const home = path.join(os.tmpdir(), `profilepilot-agent-use-${process.pid}-${Date.now()}`);
+  writeAgentBrowserRuntimeProfilesSync([
+    {
+      profileId: "isolated:ppe",
+      profileName: "PPE 验证",
+      cdpPort: 9323,
+      running: false
+    }
+  ], home);
+  try {
+    assert.deepEqual(
+      resolveProfilePilotUseArgs(
+        ["profilepilot", "use", "PPE 验证"],
+        { HOME: home, AGENT_BROWSER_SESSION: "cx-use-profile" }
+      ),
+      ["--session", "cx-use-profile", "--cdp", "9323", "connect", "9323"]
+    );
+    assert.throws(
+      () => resolveProfilePilotUseArgs(["profilepilot", "use", "PPE 验证"], { HOME: home }),
+      /当前终端没有 Agent Session/
+    );
+  } finally {
     rmSync(home, { recursive: true, force: true });
   }
 });

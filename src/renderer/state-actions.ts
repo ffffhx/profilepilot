@@ -3,8 +3,14 @@ import { render } from "./render/render-root";
 import { store } from "./state";
 import { AppState, PublicProfile } from "./types";
 
+const ONBOARDING_STORAGE_KEY = "profilepilot:onboarding:v1:seen";
+let onboardingEvaluated = false;
+
 export async function loadState(): Promise<void> {
   applyState(await profileApi().getState());
+  if (store.modal?.kind === "onboarding") {
+    void refreshAgentIntegrationDiagnostic().catch(() => undefined);
+  }
 }
 
 export function applyState(state: AppState): void {
@@ -20,7 +26,51 @@ export function applyState(state: AppState): void {
 
   normalizeMigrationProfileSelection(profiles);
   normalizeAccountSyncProfileSelection(profiles);
+  if (!onboardingEvaluated) {
+    onboardingEvaluated = true;
+    if (store.viewMode === "main" && !onboardingWasSeen() && !store.modal) {
+      store.modal = { kind: "onboarding" };
+    }
+  }
   render();
+}
+
+export function markOnboardingSeen(): void {
+  try {
+    window.localStorage.setItem(ONBOARDING_STORAGE_KEY, "1");
+  } catch {
+    // localStorage 不可用时只在当前进程展示一次，避免阻断主流程。
+  }
+}
+
+function onboardingWasSeen(): boolean {
+  try {
+    return window.localStorage.getItem(ONBOARDING_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export async function refreshAgentIntegrationDiagnostic(): Promise<void> {
+  store.agentIntegrationLoading = true;
+  render();
+  try {
+    store.agentIntegrationDiagnostic = await profileApi().inspectAgentIntegration();
+  } finally {
+    store.agentIntegrationLoading = false;
+    render();
+  }
+}
+
+export async function requestInputGuardPermission(): Promise<void> {
+  store.inputGuardPermissionLoading = true;
+  render();
+  try {
+    store.agentIntegrationDiagnostic = await profileApi().requestInputGuardPermission();
+  } finally {
+    store.inputGuardPermissionLoading = false;
+    render();
+  }
 }
 
 export async function refreshGlobalInstructions(): Promise<void> {

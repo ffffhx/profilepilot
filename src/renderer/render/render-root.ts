@@ -1,6 +1,7 @@
 import { isBusyAction, renderToastBody } from "../busy";
 import { renderConfirmModal } from "../confirm";
 import { renderSyncPanel } from "./account-sync";
+import { renderAgentAccessDock, renderAgentIntegrationModal, renderOnboardingModal } from "./agent-integration";
 import { renderClonePoolModal } from "./clone-pool";
 import { renderLiveZoomModal } from "./live-view";
 import { renderMini } from "./mini";
@@ -86,6 +87,8 @@ export function render(): void {
         </div>
       </section>
 
+      ${renderAgentAccessDock(profiles)}
+
       ${renderSyncPanel(profiles)}
 
       <main id="main-content" class="layout grid grid-cols-1 gap-6 mt-6 items-start">
@@ -112,6 +115,8 @@ export function render(): void {
     ${store.modal?.kind === "clone-pool" ? renderClonePoolModal(profiles) : ""}
     ${store.modal?.kind === "clone-tag" ? renderCloneTagModal(store.modal.profileId) : ""}
     ${store.modal?.kind === "global-instructions" ? renderGlobalInstructionsModal() : ""}
+    ${store.modal?.kind === "onboarding" ? renderOnboardingModal() : ""}
+    ${store.modal?.kind === "agent-integration" ? renderAgentIntegrationModal(profiles) : ""}
     ${
       store.modal?.kind === "profile-details"
         ? renderProfileDetailsModal(profileDetailsProfile)

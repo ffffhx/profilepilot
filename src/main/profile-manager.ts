@@ -632,6 +632,57 @@ export class ProfileManager {
     };
   }
 
+  async prepareProfileForAgent(profileId: string): Promise<number> {
+    const ref = parseProfileId(profileId);
+    if (ref.source !== "isolated") {
+      throw new ProfileManagerError(
+        "只有 ProfilePilot 创建的独立 Profile 可以绑定 Agent 端口。",
+        "AGENT_PROFILE_ISOLATED_REQUIRED"
+      );
+    }
+    const registry = await this.loadRegistry();
+    const profile = this.findIsolatedProfile(registry, this.requireIsolatedId(ref));
+    if (profile.agentAccessDisabled === true) {
+      throw new ProfileManagerError("这个 Profile 已禁止 Agent 连接。", "PROFILE_AGENT_ACCESS_DISABLED");
+    }
+    if (profile.fixedCdpPort) {
+      return profile.fixedCdpPort;
+    }
+
+    const profilePath = this.isolatedProfilePath(profile);
+    const runtime = (await this.getRuntime([profilePath], [])).get(profilePath) || emptyRuntimeProfile();
+    if (runtime.pids.length) {
+      if (!runtime.cdpPort) {
+        throw new ProfileManagerError(
+          "这个 Profile 正在以普通模式运行。请先关闭，再回到 Agent 工具接入中准备。",
+          "AGENT_PROFILE_RESTART_REQUIRED"
+        );
+      }
+      profile.fixedCdpPort = runtime.cdpPort;
+      await this.saveRegistry(registry);
+      return runtime.cdpPort;
+    }
+
+    const reserved = new Set<number>();
+    for (const candidate of registry.profiles) {
+      if (candidate.fixedCdpPort) reserved.add(candidate.fixedCdpPort);
+      if (candidate.bifrostProxy?.listenerPort) reserved.add(candidate.bifrostProxy.listenerPort);
+    }
+    let preferred = 9223;
+    while (preferred <= 65535) {
+      while (reserved.has(preferred) && preferred <= 65535) preferred += 1;
+      if (preferred > 65535) break;
+      const port = await findAvailableCdpPort(preferred);
+      if (!reserved.has(port)) {
+        profile.fixedCdpPort = port;
+        await this.saveRegistry(registry);
+        return port;
+      }
+      preferred = port + 1;
+    }
+    throw new ProfileManagerError("没有找到可绑定的本机端口。", "CDP_PORT_UNAVAILABLE");
+  }
+
   async getBifrostSnapshot(): Promise<BifrostSnapshot> {
     // 收集直连上游做探活，同时只读取 Profile 实际引用的 Bifrost 规则，
     // 把 localhost / PPE / BOE 语义化去向带回列表。

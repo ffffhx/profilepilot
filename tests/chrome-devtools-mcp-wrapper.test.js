@@ -173,20 +173,16 @@ test("bundled MCP wrapper does not execute the embedded agent-browser entrypoint
   }
 });
 
-test("Chrome DevTools MCP wrapper falls back to npx with an overridable package spec", () => {
+test("Chrome DevTools MCP wrapper requires a real installed binary and ignores npx", () => {
   const home = makeTempDir();
   try {
     const bin = path.join(home, "bin");
     const npx = executable(path.join(bin, "npx"), "#!/bin/sh\nexit 0\n");
-    assert.deepEqual(resolveRealChromeDevtoolsMcp({
+    assert.equal(resolveRealChromeDevtoolsMcp({
       HOME: home,
       PATH: bin,
       PROFILEPILOT_CHROME_DEVTOOLS_MCP_PACKAGE: "chrome-devtools-mcp@1.2.3"
-    }, path.join(home, "wrapper.cjs")), {
-      executable: npx,
-      prefixArgs: ["--yes", "chrome-devtools-mcp@1.2.3"],
-      source: "npx"
-    });
+    }, path.join(home, "wrapper.cjs")), null);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

@@ -411,11 +411,25 @@ export async function runAgentBrowserWrapper(
   args = process.argv.slice(2),
   env: NodeJS.ProcessEnv = process.env
 ): Promise<number> {
-  const internalExitCode = await runProfilePilotInternalCommand(args, env);
+  let effectiveArgs = args;
+  try {
+    effectiveArgs = resolveProfilePilotUseArgs(args, env) || args;
+  } catch (error) {
+    process.stderr.write(formatGatewayFailure(error, args, env));
+    const errorCode = typeof error === "object" && error !== null && "code" in error
+      ? String(error.code)
+      : "";
+    return errorCode === "PROFILEPILOT_SESSION_REQUIRED" || errorCode === "PROFILEPILOT_PROFILE_NAME_REQUIRED"
+      ? PROFILEPILOT_AGENT_BROWSER_USAGE_EXIT_CODE
+      : PROFILEPILOT_AGENT_BROWSER_HARD_STOP_EXIT_CODE;
+  }
+
+  const internalExitCode = await runProfilePilotInternalCommand(effectiveArgs, env);
   if (internalExitCode !== null) {
     return internalExitCode;
   }
 
+  args = effectiveArgs;
   emitControlReturnedNotice(args, env);
   const before = findActiveProfilePilotNotice(args, env);
   if (before) {
@@ -500,6 +514,66 @@ export async function runAgentBrowserWrapper(
   }
 
   return exitCode;
+}
+
+// 给用户一个稳定、可读的 Profile 名称入口：
+//   agent-browser profilepilot use "PPE 验证"
+// wrapper 在本地把名称解析成固定逻辑端口，再复用既有 Gateway acquire/connect 流程。
+export function resolveProfilePilotUseArgs(
+  args: string[],
+  env: NodeJS.ProcessEnv = process.env
+): string[] | null {
+  const positionals = positionalArgs(args);
+  if (positionals[0] !== "profilepilot" || positionals[1] !== "use") {
+    return null;
+  }
+  const profileName = positionals[2]?.trim();
+  if (!profileName || positionals.length !== 3) {
+    throw gatewayWrapperError(
+      "PROFILEPILOT_PROFILE_NAME_REQUIRED",
+      "用法：agent-browser profilepilot use <Profile 名称>"
+    );
+  }
+  const session = sessionFromAgentBrowserArgs(args, env);
+  if (!session) {
+    throw gatewayWrapperError(
+      "PROFILEPILOT_SESSION_REQUIRED",
+      "当前终端没有 Agent Session；请在新开的 Codex/Claude 会话中执行，或显式传入 --session <名称>"
+    );
+  }
+
+  const homeDir = env.HOME || os.homedir();
+  const profiles = listAgentBrowserProfileCatalogSync({ requestedSession: session }, homeDir);
+  const exact = profiles.filter((profile) => profile.profileName === profileName);
+  const matches = exact.length
+    ? exact
+    : profiles.filter((profile) => profile.profileName.toLocaleLowerCase() === profileName.toLocaleLowerCase());
+  if (!matches.length) {
+    throw gatewayWrapperError(
+      "PROFILEPILOT_PROFILE_NOT_FOUND",
+      `没有找到名为“${profileName}”的 Profile；先执行 agent-browser profilepilot profiles 查看可选名称`
+    );
+  }
+  if (matches.length > 1) {
+    throw gatewayWrapperError(
+      "PROFILEPILOT_PROFILE_NAME_AMBIGUOUS",
+      `有多个 Profile 都叫“${profileName}”，请先在 ProfilePilot 中重命名后再连接`
+    );
+  }
+  const profile = matches[0];
+  if (profile.agentAccessDisabled) {
+    throw gatewayWrapperError(
+      "PROFILE_AGENT_ACCESS_DISABLED",
+      `Profile“${profile.profileName}”已禁止 Agent 连接`
+    );
+  }
+  if (!profile.available && !profile.alreadyOwnedBySession) {
+    throw gatewayWrapperError(
+      "PROFILEPILOT_PROFILE_OCCUPIED",
+      `Profile“${profile.profileName}”正被其他 Agent Session 使用`
+    );
+  }
+  return ["--session", session, "--cdp", String(profile.cdpPort), "connect", String(profile.cdpPort)];
 }
 
 interface BrowserCommandStateContext {
@@ -858,7 +932,7 @@ async function runProfilePilotInternalCommand(
   }
   const action = positionals[1];
   if (action !== "profiles" && action !== "readiness" && action !== "handoff" && action !== "wait-control" && action !== "complete" && action !== "resume" && action !== "release" && action !== "close" && action !== "status" && action !== "cdp" && action !== "extension" && action !== "device" && action !== "bifrost") {
-    process.stderr.write("[ProfilePilot] 用法：agent-browser profilepilot <profiles|readiness|status|handoff|wait-control|complete|resume|release|close|cdp|extension|device|bifrost>\n");
+    process.stderr.write("[ProfilePilot] 用法：agent-browser profilepilot <use|profiles|readiness|status|handoff|wait-control|complete|resume|release|close|cdp|extension|device|bifrost>\n");
     return PROFILEPILOT_AGENT_BROWSER_USAGE_EXIT_CODE;
   }
 

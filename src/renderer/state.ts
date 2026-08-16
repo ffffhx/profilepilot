@@ -1,4 +1,4 @@
-import { AccountSyncDiffResult, AccountSyncResult, AgentTakeoverEvent, AppState, BifrostSnapshot, BusyState, CdpLiveView, ExtensionMigrationDiffResult, ExtensionMigrationResult, ExtensionScanResult, GlobalInstructionFileId, GlobalInstructionsSnapshot, ModalState, ProfileReadinessReceipt, ToastKind } from "./types";
+import { AccountSyncDiffResult, AccountSyncResult, AgentIntegrationDiagnostic, AgentTakeoverEvent, AppState, BifrostSnapshot, BusyState, CdpLiveView, ExtensionMigrationDiffResult, ExtensionMigrationResult, ExtensionScanResult, GlobalInstructionFileId, GlobalInstructionsSnapshot, ModalState, ProfileReadinessReceipt, ToastKind } from "./types";
 
 export const root = document.querySelector<HTMLDivElement>("#app");
 
@@ -76,6 +76,9 @@ export interface RendererState {
   globalInstructionOriginal: string;
   profileReadiness: Record<string, ProfileReadinessReceipt>;
   profileReadinessLoading: Record<string, boolean>;
+  agentIntegrationDiagnostic: AgentIntegrationDiagnostic | null;
+  agentIntegrationLoading: boolean;
+  inputGuardPermissionLoading: boolean;
   // 最近一次 Bifrost 快照（面板可见时后台轮询刷新），供分流徽标/详情算三态健康度。
   bifrostSnapshot: BifrostSnapshot | null;
   // profileId -> 实时观测缓存；按需拉取，主轮询全量重渲染时从这里恢复，避免截图闪烁。
@@ -143,6 +146,9 @@ export const store: RendererState = {
   globalInstructionOriginal: "",
   profileReadiness: {},
   profileReadinessLoading: {},
+  agentIntegrationDiagnostic: null,
+  agentIntegrationLoading: false,
+  inputGuardPermissionLoading: false,
   bifrostSnapshot: null,
   liveView: {},
   liveViewShowScreenshot: true,

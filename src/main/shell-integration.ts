@@ -1,7 +1,21 @@
-import { promises as fs } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { constants as fsConstants, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { ShellIntegrationStatus } from "../shared/types";
+import {
+  AgentIntegrationDiagnostic,
+  AgentToolDiagnostic,
+  AgentWrapperDiagnostic,
+  ShellIntegrationStatus
+} from "../shared/types";
+import { resolveRealAgentBrowser } from "./agent-browser-wrapper";
+import {
+  inspectAgentSkills,
+  setAgentSkillEnabled as setInstalledAgentSkillEnabled
+} from "./agent-skill-integration";
+import { resolveRealChromeDevtoolsMcp } from "./chrome-devtools-mcp-wrapper";
+import { inspectInputGuardPermission } from "./input-guard-companion";
+import { resolveRealPlaywrightCli } from "./playwright-cli-wrapper";
 import { ProfileManagerError } from "./profile-manager-error";
 
 // 会话识别 shell 集成：往 ~/.zshenv 写一个托管块，在 AI agent 会话的 shell 里
@@ -47,8 +61,8 @@ const NODE_RUNTIME_PATH = process.execPath;
 
 const INTEGRATION_BLOCK = [
   BEGIN_MARK,
-  "# 由 ProfilePilot 管理（可在 App 里一键移除）：为 agent-browser、Playwright CLI",
-  "# 和 Chrome DevTools MCP 注入统一 Session，并安装 Gateway 控制 wrapper。",
+  "# 由 ProfilePilot 管理（可在 App 里一键移除）：为已选择的浏览器工具",
+  "# 注入统一 Session，并让对应 Gateway Wrapper 在新 Agent 会话中生效。",
   "# 用户接管/终止时 wrapper 输出稳定 hard-stop code，Profile/CDP 端口保持排他。",
   "# Claude Code 用会话 UUID（cc-）；Codex 用 thread UUID（cx-），都精确归属到会话。",
   'if [[ -n "$CLAUDE_CODE_SESSION_ID" && -z "$AGENT_BROWSER_SESSION" ]]; then',
@@ -68,7 +82,7 @@ const INTEGRATION_BLOCK = [
   `export ${NODE_RUNTIME_SIGNATURE}=${shellQuote(NODE_RUNTIME_PATH)}`,
   `export ${LAUNCHER_SIGNATURE}=${shellQuote(LAUNCHER_PATH)}`,
   `export ${BIN_DIR_SIGNATURE}=${shellQuote(BIN_DIR_PATH)}`,
-  `if [[ -n "$AGENT_BROWSER_SESSION" && -x "$${LAUNCHER_SIGNATURE}" ]]; then`,
+  `if [[ -n "$AGENT_BROWSER_SESSION" && -d "$${BIN_DIR_SIGNATURE}" ]]; then`,
   '  case ":$PATH:" in',
   `    *":$${BIN_DIR_SIGNATURE}:"*) ;;`,
   `    *) export PATH="$${BIN_DIR_SIGNATURE}:$PATH" ;;`,
@@ -136,6 +150,141 @@ export async function getShellIntegrationStatus(): Promise<ShellIntegrationStatu
   };
 }
 
+export async function inspectAgentIntegration(): Promise<AgentIntegrationDiagnostic> {
+  const [shellIntegration, wrappers, skills, inputGuard] = await Promise.all([
+    getShellIntegrationStatus(),
+    inspectInstalledWrappers(),
+    inspectAgentSkills(),
+    inspectInputGuardPermission()
+  ]);
+  const agentBrowserPath = resolveRealAgentBrowser(process.env, agentBrowserWrapperPath());
+  const playwrightCommand = resolveRealPlaywrightCli(process.env, playwrightCliWrapperPath());
+  const mcpCommand = resolveRealChromeDevtoolsMcp(process.env, chromeDevtoolsMcpWrapperPath());
+  const tools: AgentToolDiagnostic[] = [
+    inspectBinaryTool({
+      key: "agent-browser",
+      label: "agent-browser",
+      executablePath: agentBrowserPath,
+      installCommand: "npm install -g agent-browser && agent-browser install",
+      verifyCommand: "agent-browser --version"
+    }),
+    inspectBinaryTool({
+      key: "playwright-cli",
+      label: "Playwright CLI",
+      executablePath: playwrightCommand?.executable || null,
+      installCommand: "npm install -g @playwright/cli@latest",
+      verifyCommand: "playwright-cli --version"
+    }),
+    inspectBinaryTool({
+      key: "chrome-devtools-mcp",
+      label: "Chrome DevTools MCP",
+      executablePath: mcpCommand?.executable || null,
+      installCommand: "npm install -g chrome-devtools-mcp@latest",
+      verifyCommand: "chrome-devtools-mcp --version"
+    })
+  ];
+
+  const ready = tools.some((tool) => {
+    const wrapper = wrappers.find((item) => item.key === tool.key);
+    const skill = skills.find((item) => item.key === tool.key);
+    return tool.availability === "installed" &&
+      Boolean(wrapper?.wrapperInstalled && wrapper.launcherInstalled) &&
+      Boolean(skill?.installed) &&
+      shellIntegration.installed;
+  });
+
+  return {
+    inspectedAt: new Date().toISOString(),
+    ready,
+    shellIntegration,
+    wrapperDirectory: BIN_DIR_PATH,
+    tools,
+    wrappers,
+    skills,
+    inputGuard
+  };
+}
+
+function inspectBinaryTool(input: {
+  key: AgentToolDiagnostic["key"];
+  label: string;
+  executablePath: string | null;
+  installCommand: string;
+  verifyCommand: string;
+}): AgentToolDiagnostic {
+  if (!input.executablePath) {
+    return {
+      ...input,
+      availability: "missing",
+      version: null,
+      source: null,
+      error: null
+    };
+  }
+  try {
+    const version = execFileSync(input.executablePath, ["--version"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 3_500,
+      env: process.env
+    }).trim().split(/\r?\n/, 1)[0] || null;
+    return {
+      ...input,
+      availability: "installed",
+      version,
+      source: "binary",
+      error: null
+    };
+  } catch (probeError) {
+    return {
+      ...input,
+      availability: "error",
+      version: null,
+      source: "binary",
+      error: probeError instanceof Error ? probeError.message : String(probeError)
+    };
+  }
+}
+
+export async function inspectInstalledWrappers(): Promise<AgentWrapperDiagnostic[]> {
+  const definitions: Array<Omit<AgentWrapperDiagnostic, "wrapperInstalled" | "launcherInstalled">> = [
+    {
+      key: "agent-browser",
+      label: "agent-browser",
+      wrapperPath: agentBrowserWrapperPath(),
+      launcherPath: agentBrowserLauncherPath()
+    },
+    {
+      key: "playwright-cli",
+      label: "Playwright CLI",
+      wrapperPath: playwrightCliWrapperPath(),
+      launcherPath: playwrightCliLauncherPath()
+    },
+    {
+      key: "chrome-devtools-mcp",
+      label: "Chrome DevTools MCP",
+      wrapperPath: chromeDevtoolsMcpWrapperPath(),
+      launcherPath: chromeDevtoolsMcpLauncherPath()
+    }
+  ];
+  return Promise.all(definitions.map(async (definition) => {
+    const [wrapperInstalled, launcherInstalled] = await Promise.all([
+      isExecutable(definition.wrapperPath),
+      isExecutable(definition.launcherPath)
+    ]);
+    return { ...definition, wrapperInstalled, launcherInstalled };
+  }));
+}
+
+async function isExecutable(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function setShellIntegrationEnabled(enabled: boolean): Promise<ShellIntegrationStatus> {
   const status = await getShellIntegrationStatus();
   if (!status.supported) {
@@ -143,7 +292,6 @@ export async function setShellIntegrationEnabled(enabled: boolean): Promise<Shel
   }
 
   if (enabled) {
-    await installAgentBrowserWrapper();
     let content = "";
     try {
       content = await fs.readFile(status.path, "utf8");
@@ -209,11 +357,17 @@ export async function setShellIntegrationEnabled(enabled: boolean): Promise<Shel
 // App 升级后，已启用的 shell 集成仍会引用同一个固定路径。启动时刷新该路径，
 // 避免新版本的通知协议已经生效，而当前终端继续执行旧 wrapper。
 export async function refreshAgentBrowserWrapperIfInstalled(): Promise<boolean> {
-  const status = await getShellIntegrationStatus();
-  if (!status.supported || !status.installed) {
+  const [status, wrappers] = await Promise.all([
+    getShellIntegrationStatus(),
+    inspectInstalledWrappers()
+  ]);
+  const selected = wrappers.filter((wrapper) => wrapper.wrapperInstalled || wrapper.launcherInstalled);
+  if (!status.supported || !status.installed || !selected.length) {
     return false;
   }
-  await installAgentBrowserWrapper();
+  for (const wrapper of selected) {
+    await installBrowserDriverWrapper(wrapperDefinition(wrapper.key));
+  }
   if (status.managed) {
     await refreshManagedIntegrationBlock(status.path);
   }
@@ -235,28 +389,92 @@ async function refreshManagedIntegrationBlock(filePath: string): Promise<void> {
   await writeTextFileAtomic(filePath, next);
 }
 
-async function installAgentBrowserWrapper(): Promise<void> {
-  await installBrowserDriverWrapper({
-    toolLabel: "agent-browser",
-    wrapperFileName: WRAPPER_FILE_NAME,
-    wrapperPath: agentBrowserWrapperPath(),
-    launcherPath: agentBrowserLauncherPath(),
-    wrapperSignature: WRAPPER_SIGNATURE
-  });
-  await installBrowserDriverWrapper({
-    toolLabel: "Playwright CLI",
-    wrapperFileName: PLAYWRIGHT_WRAPPER_FILE_NAME,
-    wrapperPath: playwrightCliWrapperPath(),
-    launcherPath: playwrightCliLauncherPath(),
-    wrapperSignature: PLAYWRIGHT_WRAPPER_SIGNATURE
-  });
-  await installBrowserDriverWrapper({
-    toolLabel: "Chrome DevTools MCP",
-    wrapperFileName: MCP_WRAPPER_FILE_NAME,
-    wrapperPath: chromeDevtoolsMcpWrapperPath(),
-    launcherPath: chromeDevtoolsMcpLauncherPath(),
-    wrapperSignature: MCP_WRAPPER_SIGNATURE
-  });
+export async function setAgentWrapperEnabled(
+  key: AgentToolDiagnostic["key"],
+  enabled: boolean
+): Promise<AgentIntegrationDiagnostic> {
+  const definition = wrapperDefinition(key);
+  if (enabled) {
+    const diagnostic = await inspectAgentIntegration();
+    const tool = diagnostic.tools.find((item) => item.key === key);
+    if (tool?.availability !== "installed") {
+      throw new ProfileManagerError(
+        `请先安装并重新检测 ${definition.toolLabel}，再安装 Wrapper。`,
+        "AGENT_TOOL_REQUIRED"
+      );
+    }
+    await installBrowserDriverWrapper(definition);
+    await setShellIntegrationEnabled(true);
+  } else {
+    await Promise.all([
+      fs.rm(definition.wrapperPath, { force: true }),
+      fs.rm(definition.launcherPath, { force: true })
+    ]);
+    const remaining = await inspectInstalledWrappers();
+    if (!remaining.some((wrapper) => wrapper.wrapperInstalled || wrapper.launcherInstalled)) {
+      const status = await getShellIntegrationStatus();
+      if (status.installed && status.managed) {
+        await setShellIntegrationEnabled(false);
+      }
+    }
+  }
+  return inspectAgentIntegration();
+}
+
+export async function setAgentSkillEnabled(
+  key: AgentToolDiagnostic["key"],
+  enabled: boolean
+): Promise<AgentIntegrationDiagnostic> {
+  if (enabled) {
+    const diagnostic = await inspectAgentIntegration();
+    const tool = diagnostic.tools.find((item) => item.key === key);
+    const wrapper = diagnostic.wrappers.find((item) => item.key === key);
+    if (tool?.availability !== "installed") {
+      throw new ProfileManagerError("请先安装真实工具，再安装配套 Skill。", "AGENT_TOOL_REQUIRED");
+    }
+    if (!wrapper?.wrapperInstalled || !wrapper.launcherInstalled) {
+      throw new ProfileManagerError("请先安装这个工具的 Wrapper，再安装配套 Skill。", "AGENT_WRAPPER_REQUIRED");
+    }
+  }
+  await setInstalledAgentSkillEnabled(key, enabled);
+  return inspectAgentIntegration();
+}
+
+function wrapperDefinition(key: AgentToolDiagnostic["key"]): {
+  toolLabel: string;
+  wrapperFileName: string;
+  wrapperPath: string;
+  launcherPath: string;
+  wrapperSignature: string;
+} {
+  if (key === "agent-browser") {
+    return {
+      toolLabel: "agent-browser",
+      wrapperFileName: WRAPPER_FILE_NAME,
+      wrapperPath: agentBrowserWrapperPath(),
+      launcherPath: agentBrowserLauncherPath(),
+      wrapperSignature: WRAPPER_SIGNATURE
+    };
+  }
+  if (key === "playwright-cli") {
+    return {
+      toolLabel: "Playwright CLI",
+      wrapperFileName: PLAYWRIGHT_WRAPPER_FILE_NAME,
+      wrapperPath: playwrightCliWrapperPath(),
+      launcherPath: playwrightCliLauncherPath(),
+      wrapperSignature: PLAYWRIGHT_WRAPPER_SIGNATURE
+    };
+  }
+  if (key === "chrome-devtools-mcp") {
+    return {
+      toolLabel: "Chrome DevTools MCP",
+      wrapperFileName: MCP_WRAPPER_FILE_NAME,
+      wrapperPath: chromeDevtoolsMcpWrapperPath(),
+      launcherPath: chromeDevtoolsMcpLauncherPath(),
+      wrapperSignature: MCP_WRAPPER_SIGNATURE
+    };
+  }
+  throw new ProfileManagerError(`不支持的 Agent 工具：${key}`, "AGENT_TOOL_UNSUPPORTED");
 }
 
 async function installBrowserDriverWrapper(input: {

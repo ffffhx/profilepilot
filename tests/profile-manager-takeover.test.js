@@ -1,5 +1,5 @@
 const assert = require("node:assert/strict");
-const { mkdir, mkdtemp, rm, writeFile } = require("node:fs/promises");
+const { mkdir, mkdtemp, readFile, rm, writeFile } = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
@@ -42,6 +42,23 @@ test("ProfileManager uses Chinese for the browser control protocol", async () =>
   assert.equal(manager.agentOverlayManager.options.locale, "zh");
   await manager.disposeAgentOverlay();
   await rm(dataDir, { recursive: true, force: true });
+});
+
+test("ProfileManager prepares a new independent Profile with a stable Agent port without launching Chrome", async () => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "profilepilot-agent-prepare-"));
+  const manager = new ProfileManager(dataDir);
+  try {
+    const created = await manager.createProfile("朋友试用");
+    const port = await manager.prepareProfileForAgent(`isolated:${created.id}`);
+    assert.equal(Number.isSafeInteger(port), true);
+    assert.equal(port >= 9223 && port <= 65535, true);
+    const registry = JSON.parse(await readFile(path.join(dataDir, "profiles.json"), "utf8"));
+    assert.equal(registry.profiles[0].fixedCdpPort, port);
+    assert.equal(registry.profiles[0].lastLaunchedAt, null);
+  } finally {
+    await manager.disposeAgentOverlay();
+    await rm(dataDir, { recursive: true, force: true });
+  }
 });
 
 test("ProfileManager recovers pending user action metadata from a wrapper notice", async () => {

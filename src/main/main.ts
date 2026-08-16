@@ -1,5 +1,5 @@
 import { promises as fs, watch, type FSWatcher } from "node:fs";
-import { app, BrowserWindow, globalShortcut, ipcMain, nativeTheme, Notification, screen, session, type IpcMainInvokeEvent, type Rectangle } from "electron";
+import { app, BrowserWindow, globalShortcut, ipcMain, nativeTheme, Notification, screen, session, shell, type IpcMainInvokeEvent, type Rectangle } from "electron";
 import path from "node:path";
 import { IPC_CHANNELS } from "../shared/ipc";
 import type {
@@ -15,6 +15,7 @@ import type {
   LaunchClonesResult,
   AppState,
   BifrostSnapshot,
+  BrowserDriverKind,
   CancelOperationRequest,
   CdpLiveView,
   CdpLiveViewOptions,
@@ -45,7 +46,13 @@ import { captureCdpLiveView } from "./cdp-live-view";
 import { startE2eDriver } from "./e2e-driver";
 import { defaultDataDir } from "./fs-util";
 import { ensureClaudeInstructionShell, readGlobalInstructions, undoGlobalInstruction, writeGlobalInstruction } from "./global-instructions";
-import { refreshAgentBrowserWrapperIfInstalled, setShellIntegrationEnabled } from "./shell-integration";
+import {
+  inspectAgentIntegration,
+  refreshAgentBrowserWrapperIfInstalled,
+  setAgentSkillEnabled,
+  setAgentWrapperEnabled,
+  setShellIntegrationEnabled
+} from "./shell-integration";
 import { APP_TITLE, createProfileManager } from "./profile-manager";
 import { resolveSystemProxySnapshot } from "./system-proxy";
 import {
@@ -56,6 +63,10 @@ import {
 } from "./browser-gateway-client";
 import { buildProfileReadinessReceipt } from "./profile-readiness";
 import { resolveCanonicalSessionIdentity } from "./session-identity";
+import {
+  INPUT_GUARD_ACCESSIBILITY_SETTINGS_URL,
+  requestInputGuardPermission
+} from "./input-guard-companion";
 
 const E2E_DRIVER_SOCKET = process.env.CPM_E2E_DRIVER_SOCKET || "";
 const IS_E2E_DRIVER_TEST = Boolean(E2E_DRIVER_SOCKET);
@@ -1523,6 +1534,33 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.setShellIntegrationEnabled, async (_event, enabled: boolean): Promise<AppState> => {
     await setShellIntegrationEnabled(Boolean(enabled));
+    return profileManager.getState();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.inspectAgentIntegration, async () => inspectAgentIntegration());
+
+  ipcMain.handle(
+    IPC_CHANNELS.setAgentWrapperEnabled,
+    async (_event, tool: BrowserDriverKind, enabled: boolean) => setAgentWrapperEnabled(tool, Boolean(enabled))
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.setAgentSkillEnabled,
+    async (_event, tool: BrowserDriverKind, enabled: boolean) => setAgentSkillEnabled(tool, Boolean(enabled))
+  );
+
+  ipcMain.handle(IPC_CHANNELS.requestInputGuardPermission, async () => {
+    await requestInputGuardPermission();
+    return inspectAgentIntegration();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.openInputGuardSettings, async (): Promise<boolean> => {
+    await shell.openExternal(INPUT_GUARD_ACCESSIBILITY_SETTINGS_URL);
+    return true;
+  });
+
+  ipcMain.handle(IPC_CHANNELS.prepareProfileForAgent, async (_event, profileId: string): Promise<AppState> => {
+    await profileManager.prepareProfileForAgent(profileId);
     return profileManager.getState();
   });
 

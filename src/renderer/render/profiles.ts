@@ -1159,7 +1159,7 @@ export function proxyMenuLabel(profile: PublicProfile): string {
   if (profile.upstreamProxy) {
     const port = profile.upstreamProxy.server.match(/:(\d{2,5})(?:\D|$)/)?.[1];
     const kind = upstreamProxyKind(profile.upstreamProxy.server, store.bifrostSnapshot);
-    const provider = kind === "bifrost" ? "Bifrost" : kind === "clash" ? "Clash" : "指定代理";
+    const provider = kind === "bifrost" ? "Bifrost" : kind === "clash" ? "Clash Verge" : "指定代理";
     return `代理分流 · ${provider}${port ? ` :${port}` : ""}`;
   }
   if (profile.directConnection) {
@@ -1168,10 +1168,19 @@ export function proxyMenuLabel(profile: PublicProfile): string {
   return "代理分流";
 }
 
+type ProxyProviderKind = "bifrost" | "clash" | "custom";
+
+interface BifrostMainRuleDisplay {
+  label: string;
+  mainRules: NonNullable<BifrostSnapshot["mainRules"]>;
+  mainDestination: BifrostRuleDestination | null;
+}
+
 interface SystemProxyDisplay {
   label: string;
   tone: "system-proxy-active" | "system-proxy-direct" | "system-proxy-unknown";
   routes: SystemProxyRoute[];
+  providerKind: Exclude<ProxyProviderKind, "custom"> | null;
   providerLabel: string | null;
   mainRules: NonNullable<BifrostSnapshot["mainRules"]>;
   mainDestination: BifrostRuleDestination | null;
@@ -1207,6 +1216,22 @@ function renderSystemRuleDestination(label: string): string {
   }).join('<span class="system-rule-separator">+</span>');
 }
 
+function bifrostMainRuleDisplay(snapshot: BifrostSnapshot | null | undefined): BifrostMainRuleDisplay {
+  const mainRules = snapshot?.mainRules || [];
+  const mainDestination = snapshot?.mainRuleDestination || null;
+  return {
+    label: mainDestination
+      ? `启用规则 · ${mainDestination.label}`
+      : mainRules.length
+        ? `${mainRules.length} 份规则启用 · 按域名与路径匹配`
+        : snapshot?.running
+          ? "无启用规则 · 未命中直连"
+          : "规则状态不可用",
+    mainRules,
+    mainDestination
+  };
+}
+
 function systemProxyDisplay(snapshot: BifrostSnapshot | null | undefined): SystemProxyDisplay {
   const systemProxy = snapshot?.systemProxy;
   const routes = systemProxyPrimaryRoutes(snapshot);
@@ -1215,6 +1240,7 @@ function systemProxyDisplay(snapshot: BifrostSnapshot | null | undefined): Syste
       label: "正在读取系统代理…",
       tone: "system-proxy-unknown",
       routes,
+      providerKind: null,
       providerLabel: null,
       mainRules: [],
       mainDestination: null
@@ -1225,6 +1251,7 @@ function systemProxyDisplay(snapshot: BifrostSnapshot | null | undefined): Syste
       label: "未启用 · DIRECT",
       tone: "system-proxy-direct",
       routes,
+      providerKind: null,
       providerLabel: null,
       mainRules: [],
       mainDestination: null
@@ -1236,6 +1263,7 @@ function systemProxyDisplay(snapshot: BifrostSnapshot | null | undefined): Syste
       label: "状态未知",
       tone: "system-proxy-unknown",
       routes,
+      providerKind: null,
       providerLabel: null,
       mainRules: [],
       mainDestination: null
@@ -1243,23 +1271,24 @@ function systemProxyDisplay(snapshot: BifrostSnapshot | null | undefined): Syste
   }
   const port = Number(primary.endpoint.match(/:(\d{1,5})$/)?.[1]);
   const loopback = /^(?:127\.0\.0\.1|localhost|\[?::1\]?):/i.test(primary.endpoint);
-  const isBifrost = Boolean(snapshot?.running && snapshot.mainPort === port && loopback);
+  const isBifrost = Boolean(loopback && port === (snapshot?.mainPort || 9900));
+  const isClash = Boolean(loopback && port === 7897);
   // Bifrost 的主规则只描述它自己的主监听端口。系统代理指向 Clash 等其他
   // 入口时，展示这些规则会把两条互不相干的链路错误拼接在一起。
-  const mainRules = isBifrost ? snapshot?.mainRules || [] : [];
-  const mainDestination = isBifrost ? snapshot?.mainRuleDestination || null : null;
+  const mainRuleDisplay = isBifrost ? bifrostMainRuleDisplay(snapshot) : null;
+  const mainRules = mainRuleDisplay?.mainRules || [];
+  const mainDestination = mainRuleDisplay?.mainDestination || null;
   const endpoint = loopback && port ? `:${port}` : primary.endpoint;
   return {
     label: isBifrost
-      ? mainDestination
-        ? `启用规则 · ${mainDestination.label}`
-        : mainRules.length
-          ? "启用规则 · 按域名与路径匹配"
-          : "无启用规则 · 未命中直连"
-      : `${systemProxyKindLabel(primary.kind)} · ${endpoint}`,
+      ? mainRuleDisplay?.label || "规则状态不可用"
+      : isClash
+        ? "规则由 Clash 决定"
+        : `${systemProxyKindLabel(primary.kind)} · ${endpoint}`,
     tone: "system-proxy-active",
     routes,
-    providerLabel: isBifrost ? `Bifrost ${endpoint}` : null,
+    providerKind: isBifrost ? "bifrost" : isClash ? "clash" : null,
+    providerLabel: isBifrost ? `Bifrost ${endpoint}` : isClash ? `Clash Verge ${endpoint}` : null,
     mainRules,
     mainDestination
   };
@@ -1307,7 +1336,7 @@ function renderSystemProxyTooltip(
       <span class="route-tip-scroll" role="region" aria-label="代理路由详情">
         <span class="route-tip-scroll-content">
           <span class="route-tip-head">
-            <span class="route-tip-status system"><i aria-hidden="true"></i>系统代理 · ${escapeHtml(display.providerLabel || "Chrome 正在跟随")}</span>
+            <span class="route-tip-status system"><i aria-hidden="true"></i>${escapeHtml(display.providerLabel || "系统代理 · Chrome 正在跟随")}</span>
             <code>${display.routes.find((route) => route.endpoint)?.endpoint ? escapeHtml(display.routes.find((route) => route.endpoint)?.endpoint || "") : "系统设置"}</code>
           </span>
           ${rows || `
@@ -1329,7 +1358,7 @@ function renderSystemProxyTooltip(
               <span class="route-tip-value">还有 ${hiddenMappingCount} 条按域名或路径匹配</span>
             </span>
           ` : ""}
-          ${display.providerLabel ? `
+          ${display.providerKind === "bifrost" ? `
             <span class="route-tip-row system-proxy-rule-list">
               <span class="route-tip-tag">规则</span>
               <span class="route-tip-value route-tip-horizontal-scroll" tabindex="0" aria-label="已启用规则，可左右滚动查看完整内容">
@@ -1364,13 +1393,13 @@ export function renderProfileProxyRoute(profile: PublicProfile): string {
       ),
       display.mainDestination ? `启用规则去向：${display.mainDestination.label}` : "",
       display.mainRules.length ? `启用规则：${display.mainRules.map((rule) => rule.name).join(" · ")}` : "",
-      display.providerLabel ? "未命中规则：直连原目标" : ""
+      display.providerKind === "bifrost" ? "未命中规则：直连原目标" : ""
     ].filter(Boolean).join("\n");
     return `
-      <span class="profile-route-track system ${display.tone} action-tooltip structured-tooltip" aria-label="${escapeHtml(tooltip)}" tabindex="0">
+      <span class="profile-route-track system ${display.tone}${display.providerKind ? ` provider-${display.providerKind}` : ""} action-tooltip structured-tooltip" aria-label="${escapeHtml(tooltip)}" tabindex="0">
         <span class="profile-route-signal" aria-hidden="true"></span>
         <span class="profile-route-copy">
-          <strong>系统代理${display.providerLabel ? ` <em>${escapeHtml(display.providerLabel)}</em>` : ""}</strong>
+          <strong>${escapeHtml(display.providerLabel || "系统代理")}</strong>
           <small${display.mainDestination ? ' class="system-rule-summary"' : ""}>${display.mainDestination ? `启用规则 · ${renderSystemRuleDestination(display.mainDestination.label)}` : escapeHtml(display.label)}</small>
         </span>
         ${renderSystemProxyTooltip(display, "系统 Chrome Profile 跟随系统代理，不支持单独配置")}
@@ -1403,13 +1432,13 @@ export function renderProfileProxyRoute(profile: PublicProfile): string {
       ),
       display.mainDestination ? `启用规则去向：${display.mainDestination.label}` : "",
       display.mainRules.length ? `启用规则：${display.mainRules.map((rule) => rule.name).join(" · ")}` : "",
-      display.providerLabel ? "未命中规则：直连原目标" : ""
+      display.providerKind === "bifrost" ? "未命中规则：直连原目标" : ""
     ].filter(Boolean).join("\n");
     return `
-      <span class="profile-route-track system ${display.tone} action-tooltip structured-tooltip" aria-label="${escapeHtml(tooltip)}" tabindex="0">
+      <span class="profile-route-track system ${display.tone}${display.providerKind ? ` provider-${display.providerKind}` : ""} action-tooltip structured-tooltip" aria-label="${escapeHtml(tooltip)}" tabindex="0">
         <span class="profile-route-signal" aria-hidden="true"></span>
         <span class="profile-route-copy">
-          <strong>系统代理${display.providerLabel ? ` <em>${escapeHtml(display.providerLabel)}</em>` : ""}</strong>
+          <strong>${escapeHtml(display.providerLabel || "系统代理")}</strong>
           <small${display.mainDestination ? ' class="system-rule-summary"' : ""}>${display.mainDestination ? `启用规则 · ${renderSystemRuleDestination(display.mainDestination.label)}` : escapeHtml(display.label)}</small>
         </span>
         ${renderSystemProxyTooltip(display)}
@@ -1540,9 +1569,7 @@ export function bifrostProfileDestination(
 // 直连上游代理的可达性两态：绿=TCP 可达；红=不可达/未探到；unknown=还没拿到快照。
 export type UpstreamRouteState = "ok" | "down" | "unknown";
 
-type UpstreamProxyKind = "bifrost" | "clash" | "custom";
-
-function upstreamProxyKind(server: string, snapshot: BifrostSnapshot | null | undefined): UpstreamProxyKind {
+function upstreamProxyKind(server: string, snapshot: BifrostSnapshot | null | undefined): ProxyProviderKind {
   if (proxyServerUsesPort(server, snapshot?.mainPort || 9900)) return "bifrost";
   if (proxyServerUsesPort(server, 7897)) return "clash";
   return "custom";
@@ -1570,8 +1597,9 @@ export function renderUpstreamProxyRoute(profile: PublicProfile): string {
   const port = config.server.match(/:(\d{2,5})(?:\D|$)/)?.[1] || "up";
   const kind = upstreamProxyKind(config.server, store.bifrostSnapshot);
   const provider = kind === "bifrost" ? "Bifrost" : kind === "clash" ? "Clash Verge" : "指定代理";
-  const routeNote = kind === "bifrost"
-    ? "使用主入口规则"
+  const mainRuleDisplay = kind === "bifrost" ? bifrostMainRuleDisplay(store.bifrostSnapshot) : null;
+  const routeNote = mainRuleDisplay
+    ? mainRuleDisplay.label
     : kind === "clash"
       ? "规则由 Clash 决定"
       : "规则由目标代理决定";
@@ -1596,14 +1624,41 @@ export function renderUpstreamProxyRoute(profile: PublicProfile): string {
     : state === "down"
       ? `${unreachableTitle} · ${config.server}（${recovery}）`
       : `${provider} · ${config.server}`;
-  const tooltip = `${title}\n${tooltipNote}`;
+  const tooltip = kind === "bifrost"
+    ? [
+        title,
+        mainRuleDisplay?.mainDestination ? `启用规则去向：${mainRuleDisplay.mainDestination.label}` : "",
+        mainRuleDisplay?.mainRules.length ? `启用规则：${mainRuleDisplay.mainRules.map((rule) => rule.name).join(" · ")}` : "没有启用规则",
+        "未命中规则：直连原目标",
+        `所有使用 :${port} 的 Profile 共享这些规则`
+      ].filter(Boolean).join("\n")
+    : `${title}\n${tooltipNote}`;
+  const endpoint = config.server.replace(/^[a-z][a-z\d+.-]*:\/\//i, "");
+  const bifrostTooltip = kind === "bifrost" && mainRuleDisplay
+    ? renderSystemProxyTooltip({
+        label: mainRuleDisplay.label,
+        tone: state === "down" ? "system-proxy-unknown" : "system-proxy-active",
+        routes: [
+          { protocol: "https", kind: "http", endpoint },
+          { protocol: "http", kind: "http", endpoint }
+        ],
+        providerKind: "bifrost",
+        providerLabel: `Bifrost :${port}`,
+        mainRules: mainRuleDisplay.mainRules,
+        mainDestination: mainRuleDisplay.mainDestination
+      }, `此 Profile 显式连接主入口；所有使用 :${port} 的 Profile 共享这些规则`)
+    : "";
+  const routeNoteHtml = mainRuleDisplay?.mainDestination
+    ? `启用规则 · ${renderSystemRuleDestination(mainRuleDisplay.mainDestination.label)}`
+    : escapeHtml(routeNote);
   return `
-    <span class="profile-route-track upstream${stateClass} action-tooltip" data-tooltip="${escapeHtml(tooltip)}" aria-label="${escapeHtml(tooltip)}" tabindex="0">
+    <span class="profile-route-track upstream provider-${kind}${stateClass} action-tooltip${kind === "bifrost" ? " structured-tooltip" : ""}"${kind === "bifrost" ? "" : ` data-tooltip="${escapeHtml(tooltip)}"`} aria-label="${escapeHtml(tooltip)}" tabindex="0">
       <span class="profile-route-signal" aria-hidden="true"></span>
       <span class="profile-route-copy">
         <strong>${provider} <em>:${escapeHtml(port)}</em></strong>
-        <small>${routeNote}</small>
+        <small${mainRuleDisplay?.mainDestination ? ' class="system-rule-summary"' : ""}>${routeNoteHtml}</small>
       </span>
+      ${bifrostTooltip}
     </span>
   `;
 }
@@ -1638,7 +1693,7 @@ export function renderBifrostProxyDetail(profile: PublicProfile): string {
   if (profile.upstreamProxy) {
     const state = upstreamRouteState(profile, store.bifrostSnapshot);
     const kind = upstreamProxyKind(profile.upstreamProxy.server, store.bifrostSnapshot);
-    const provider = kind === "bifrost" ? "Bifrost 主入口" : kind === "clash" ? "直连 Clash" : "指定代理";
+    const provider = kind === "bifrost" ? "Bifrost 主入口" : kind === "clash" ? "Clash Verge" : "指定代理";
     const stateOwner = kind === "bifrost" ? "Bifrost" : kind === "clash" ? "Clash" : "代理";
     const stateLabel = state === "ok"
       ? kind === "custom" ? "代理可达" : `${stateOwner} 可达`
@@ -1646,8 +1701,9 @@ export function renderBifrostProxyDetail(profile: PublicProfile): string {
         ? kind === "custom" ? "代理不可达" : `${stateOwner} 不可达`
         : "状态未知";
     const bypass = profile.upstreamProxy.bypassList;
+    const mainRuleDisplay = kind === "bifrost" ? bifrostMainRuleDisplay(store.bifrostSnapshot) : null;
     const routeNote = kind === "bifrost"
-      ? "整体流量交给 Bifrost 主入口，使用当前启用规则。"
+      ? `${mainRuleDisplay?.label || "规则状态不可用"}${mainRuleDisplay?.mainRules.length ? `；规则：${mainRuleDisplay.mainRules.map((rule) => rule.name).join(" · ")}` : ""}。所有使用该主入口的 Profile 共享这些规则。`
       : kind === "clash"
         ? "整体流量交给 Clash mixed 入口。"
         : "整体流量交给这个代理，具体规则由目标服务决定。";
@@ -1666,7 +1722,7 @@ export function renderBifrostProxyDetail(profile: PublicProfile): string {
     return `
       <div class="detail-row detail-row-disabled">
         <span>代理分流</span>
-        <strong>跟随系统代理</strong>
+        <strong>${escapeHtml(display.providerLabel || "跟随系统代理")}</strong>
         <code class="path-box compact">${escapeHtml(display.label)}</code>
         <small class="detail-note">可在“更多 → 代理分流”中选择 Bifrost、Clash 或直接联网。</small>
       </div>

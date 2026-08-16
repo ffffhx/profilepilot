@@ -14,9 +14,11 @@ const test = require("node:test");
 const { MacInputGuard, parseInputGuardOutputLine } = require("../dist/main/input-guard.js");
 const {
   ensureInputGuardCompanion,
+  inspectInputGuardPermission,
   inputGuardBuildInfoPath,
   inputGuardExecutablePath,
-  launchInputGuardCompanion
+  launchInputGuardCompanion,
+  requestInputGuardPermission
 } = require("../dist/main/input-guard-companion.js");
 
 test("Input Guard re-enables taps disabled by either macOS condition", () => {
@@ -31,12 +33,62 @@ test("Input Guard checks Accessibility without prompting unless explicitly reque
   const source = readFileSync(path.join(__dirname, "..", "native", "input-guard.c"), "utf8");
   assert.match(source, /AXIsProcessTrusted\(\)/);
   assert.match(source, /--request-accessibility/);
+  assert.match(source, /--check-accessibility/);
   assert.match(source, /check_accessibility_access\(true\)/);
   assert.match(source, /check_accessibility_access\(false\)/);
   assert.match(source, /AXIsProcessTrustedWithOptions/);
   assert.match(source, /kAXTrustedCheckOptionPrompt/);
   assert.match(source, /accessibility-access-denied/);
   assert.match(source, /check_accessibility_access\(false\);[\s\S]*emit_status\("ready"/);
+});
+
+test("Input Guard permission diagnostics stay non-interactive until the user requests access", async () => {
+  const helper = path.join(
+    "/tmp",
+    "ProfilePilot Input Guard.app",
+    "Contents",
+    "MacOS",
+    "ProfilePilot Input Guard"
+  );
+  let requestCount = 0;
+  const denied = await inspectInputGuardPermission({
+    platform: "darwin",
+    overridePath: helper,
+    runProbe: async () => ({
+      code: 3,
+      stdout: '{"type":"status","status":"accessibility-access-denied","pid":0}\n',
+      stderr: ""
+    }),
+    runRequest: async () => {
+      requestCount += 1;
+    }
+  });
+  assert.equal(denied.supported, true);
+  assert.equal(denied.granted, false);
+  assert.equal(requestCount, 0, "ordinary inspection must not prompt");
+
+  const granted = await requestInputGuardPermission({
+    platform: "darwin",
+    overridePath: helper,
+    runRequest: async () => {
+      requestCount += 1;
+    },
+    runProbe: async () => ({
+      code: 0,
+      stdout: '{"type":"status","status":"accessibility-access-granted","pid":0}\n',
+      stderr: ""
+    })
+  });
+  assert.equal(requestCount, 1);
+  assert.equal(granted.granted, true);
+  assert.equal(granted.appName, "ProfilePilot Input Guard");
+});
+
+test("Input Guard permission is marked not required outside macOS", async () => {
+  const diagnostic = await inspectInputGuardPermission({ platform: "linux" });
+  assert.equal(diagnostic.supported, false);
+  assert.equal(diagnostic.granted, true);
+  assert.equal(diagnostic.appPath, null);
 });
 
 test("Input Guard build prefers its stable local signing identity", () => {

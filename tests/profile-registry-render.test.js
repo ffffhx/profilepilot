@@ -335,17 +335,31 @@ test("configured upstream Profile names Clash Verge and explains where its rules
   const row = renderer.renderProfileRow(configured);
   const details = renderer.renderDetails(configured, false);
 
-  assert.match(row, /profile-route-track upstream action-tooltip[^>]*data-tooltip="[^"]*具体规则由 Clash Verge 决定"/);
+  assert.match(row, /profile-route-track upstream provider-clash action-tooltip[^>]*data-tooltip="[^"]*具体规则由 Clash Verge 决定"/);
   assert.match(row, /<strong>Clash Verge <em>:7897<\/em><\/strong>[\s\S]*<small>规则由 Clash 决定<\/small>/);
-  assert.match(row, /data-action="configure-bifrost-proxy"[^>]*>[\s\S]*代理分流 · Clash :7897/);
-  assert.match(details, /直连 Clash[\s\S]*127\.0\.0\.1:7897/);
+  assert.match(row, /data-action="configure-bifrost-proxy"[^>]*>[\s\S]*代理分流 · Clash Verge :7897/);
+  assert.match(details, /Clash Verge[\s\S]*127\.0\.0\.1:7897/);
 });
 
 test("configured Bifrost main entry is not mislabeled as Clash", () => {
   const server = "http://127.0.0.1:9900";
   const { renderer } = loadProfilesRenderer({
     openProfileMenuId: "p1",
-    bifrostSnapshot: bifrostSnapshot({ upstreamHealth: { [server]: true } })
+    bifrostSnapshot: bifrostSnapshot({
+      upstreamHealth: { [server]: true },
+      mainRules: [
+        { name: "FlowPD-FE-BotStudio", ruleCount: 24 },
+        { name: "FlowPD-FE-BotStudio-BOE", ruleCount: 27 }
+      ],
+      mainRuleDestination: {
+        kind: "mixed",
+        label: "本地 · :3000 / :8080 + PPE + BOE",
+        details: [
+          "bots-boe.bytedance.net → localhost:3000",
+          "code.coze.cn → x-tt-env-fe · PPE ppe_optimize_subs"
+        ]
+      }
+    })
   });
   const configured = profile({
     running: false,
@@ -357,11 +371,19 @@ test("configured Bifrost main entry is not mislabeled as Clash", () => {
   const row = renderer.renderProfileRow(configured);
   const details = renderer.renderDetails(configured, false);
 
-  assert.match(row, /data-tooltip="Bifrost 主入口可达 · http:\/\/127\.0\.0\.1:9900\s+使用主入口规则"/);
-  assert.match(row, /<strong>Bifrost <em>:9900<\/em><\/strong>[\s\S]*<small>使用主入口规则<\/small>/);
+  assert.match(row, /profile-route-track upstream provider-bifrost ok action-tooltip structured-tooltip/);
+  assert.match(row, /aria-label="Bifrost 主入口可达 · http:\/\/127\.0\.0\.1:9900[\s\S]*启用规则去向：本地 · :3000 \/ :8080 \+ PPE \+ BOE[\s\S]*启用规则：FlowPD-FE-BotStudio · FlowPD-FE-BotStudio-BOE[\s\S]*所有使用 :9900 的 Profile 共享这些规则"/);
+  assert.match(row, /<strong>Bifrost <em>:9900<\/em><\/strong>[\s\S]*system-rule-summary">启用规则 · [\s\S]*本地 · :3000 \/ :8080[\s\S]*PPE[\s\S]*BOE/);
+  assert.match(row, /route-tip-status system[\s\S]*Bifrost :9900/);
+  assert.match(row, /route-tip-tag">映射<\/span>[\s\S]*bots-boe.bytedance.net[\s\S]*localhost:3000/);
+  assert.match(row, /route-tip-tag">规则<\/span>[\s\S]*system-proxy-rule-count">2 份启用/);
+  assert.match(row, /system-proxy-rule-name">FlowPD-FE-BotStudio<\/span>[\s\S]*system-proxy-rule-name">FlowPD-FE-BotStudio-BOE<\/span>/);
+  assert.match(row, /route-tip-tag">兜底<\/span>[\s\S]*未命中规则 → 直连原目标/);
+  assert.match(row, /此 Profile 显式连接主入口；所有使用 :9900 的 Profile 共享这些规则/);
+  assert.doesNotMatch(row, /使用主入口规则/);
   assert.match(row, /data-action="configure-bifrost-proxy"[^>]*>[\s\S]*代理分流 · Bifrost :9900/);
   assert.doesNotMatch(row, /Clash Verge|规则由 Clash 决定/);
-  assert.match(details, /Bifrost 主入口[\s\S]*Bifrost 可达[\s\S]*127\.0\.0\.1:9900[\s\S]*使用当前启用规则/);
+  assert.match(details, /Bifrost 主入口[\s\S]*Bifrost 可达[\s\S]*127\.0\.0\.1:9900[\s\S]*启用规则 · 本地 · :3000 \/ :8080 \+ PPE \+ BOE[\s\S]*规则：FlowPD-FE-BotStudio · FlowPD-FE-BotStudio-BOE[\s\S]*共享这些规则/);
   assert.doesNotMatch(details, /直连 Clash|Clash 可达/);
 });
 
@@ -450,10 +472,10 @@ test("unconfigured isolated Profile shows the actual system proxy route", () => 
   const row = renderer.renderProfileRow(configured);
   const details = renderer.renderDetails(configured, false);
 
-  assert.match(row, /profile-route-track system system-proxy-active action-tooltip structured-tooltip/);
-  assert.match(row, /<strong>系统代理 <em>Bifrost :9900<\/em><\/strong>/);
+  assert.match(row, /profile-route-track system system-proxy-active provider-bifrost action-tooltip structured-tooltip/);
+  assert.match(row, /<strong>Bifrost :9900<\/strong>/);
   assert.match(row, /system-rule-summary">启用规则 · [\s\S]*本地 · :3000 \/ :8080[\s\S]*PPE[\s\S]*BOE/);
-  assert.match(row, /route-tip-status system[\s\S]*系统代理 · Bifrost :9900/);
+  assert.match(row, /route-tip-status system[\s\S]*Bifrost :9900/);
   assert.match(row, /route-tip-scroll" role="region" aria-label="代理路由详情"/);
   assert.match(row, /route-tip-horizontal-scroll" tabindex="0" aria-label="已启用规则，可左右滚动查看完整内容"[\s\S]*route-tip-horizontal-scroll-content/);
   assert.match(row, /route-tip-tag">HTTPS<\/span>[\s\S]*system-proxy-tip-kind">HTTP<\/span>[\s\S]*127\.0\.0\.1:9900/);
@@ -468,7 +490,7 @@ test("unconfigured isolated Profile shows the actual system proxy route", () => 
   assert.match(row, /system-proxy-rule-name">FlowPD-FE-BotStudio-BOE<\/span>[\s\S]*data-action="disable-bifrost-rule"[\s\S]*data-rule-name="FlowPD-FE-BotStudio-BOE"[\s\S]*data-rule-count="27"/);
   assert.equal((row.match(/data-action="disable-bifrost-rule"/g) || []).length, 2);
   assert.match(row, /route-tip-tag">兜底<\/span>[\s\S]*未命中规则 → 直连原目标/);
-  assert.match(details, /跟随系统代理[\s\S]*启用规则 · 本地 · :3000 \/ :8080 \+ PPE \+ BOE/);
+  assert.match(details, /Bifrost :9900[\s\S]*启用规则 · 本地 · :3000 \/ :8080 \+ PPE \+ BOE/);
 });
 
 test("native Chrome Profile shows its actual system proxy while explaining it cannot be configured independently", () => {
@@ -492,8 +514,8 @@ test("native Chrome Profile shows its actual system proxy while explaining it ca
 
   const row = renderer.renderProfileRow(profile({ source: "native", isDefault: true }));
 
-  assert.match(row, /profile-route-track system system-proxy-active action-tooltip structured-tooltip/);
-  assert.match(row, /<strong>系统代理 <em>Bifrost :9900<\/em><\/strong>/);
+  assert.match(row, /profile-route-track system system-proxy-active provider-bifrost action-tooltip structured-tooltip/);
+  assert.match(row, /<strong>Bifrost :9900<\/strong>/);
   assert.match(row, /system-rule-summary">启用规则 · [\s\S]*本地 · :3000 \/ :8080/);
   assert.match(row, /系统 Chrome Profile 跟随系统代理，不支持单独配置/);
   assert.match(row, /route-tip-tag">HTTPS<\/span>[\s\S]*127\.0\.0\.1:9900/);
@@ -523,10 +545,12 @@ test("system proxy routed through Clash does not inherit unrelated Bifrost rules
   const row = renderer.renderProfileRow(configured);
   const details = renderer.renderDetails(configured, false);
 
-  assert.match(row, /<strong>系统代理<\/strong>[\s\S]*<small>HTTP · :7897<\/small>/);
-  assert.match(row, /系统代理 · Chrome 正在跟随[\s\S]*127\.0\.0\.1:7897/);
+  assert.match(row, /profile-route-track system system-proxy-active provider-clash action-tooltip structured-tooltip/);
+  assert.match(row, /<strong>Clash Verge :7897<\/strong>[\s\S]*<small>规则由 Clash 决定<\/small>/);
+  assert.match(row, /route-tip-status system[\s\S]*Clash Verge :7897[\s\S]*127\.0\.0\.1:7897/);
+  assert.doesNotMatch(row, /system-proxy-rule-list|system-proxy-direct-fallback/);
   assert.doesNotMatch(row, /Bifrost :9900|FlowPD-FE-BotStudio|本地 · :3000 \/ :8080|localhost:8080|未命中规则 → 直连原目标/);
-  assert.match(details, /跟随系统代理[\s\S]*HTTP · :7897/);
+  assert.match(details, /Clash Verge :7897[\s\S]*规则由 Clash 决定/);
   assert.doesNotMatch(details, /Bifrost :9900|FlowPD-FE-BotStudio|本地 · :3000 \/ :8080|localhost:8080/);
 });
 
@@ -719,6 +743,8 @@ test("Profile Registry CSS locks column and action alignment", () => {
   assert.doesNotMatch(css, /\.profile-activity-signal\s*\{[^}]*border-left:/);
   assert.doesNotMatch(css, /\.profiles-table \.cdp-cell\.off\s*\{[^}]*padding-left:\s*0;/);
   assert.match(css, /\.profile-details-modal-body\s*\{[\s\S]*?grid-template-columns:\s*minmax\(270px, 0\.7fr\) minmax\(460px, 1\.65fr\);/);
+  assert.match(css, /\.profile-route-track\.provider-bifrost \.profile-route-copy strong,[\s\S]*?color:\s*#86d2ff;/);
+  assert.match(css, /\.profile-route-track\.provider-clash \.profile-route-copy strong,[\s\S]*?color:\s*#b9a8ff;/);
 });
 
 test("proxy route tooltip stays interactive and exposes its full horizontal content", () => {

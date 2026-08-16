@@ -4,6 +4,7 @@ import type {
   AccountSyncDiffResult,
   AccountSyncRequest,
   AccountSyncResult,
+  AgentIntegrationDiagnostic,
   AgentOverlayRevealEvent,
   AgentTakeoverEvent,
   CloneProfilesRequest,
@@ -135,6 +136,18 @@ const profileManagerApi: ProfileManagerApi = {
     ipcRenderer.invoke(IPC_CHANNELS.setAgentOverlayEnabled, enabled),
   setShellIntegrationEnabled: (enabled: boolean): Promise<AppState> =>
     ipcRenderer.invoke(IPC_CHANNELS.setShellIntegrationEnabled, enabled),
+  inspectAgentIntegration: (): Promise<AgentIntegrationDiagnostic> =>
+    ipcRenderer.invoke(IPC_CHANNELS.inspectAgentIntegration),
+  setAgentWrapperEnabled: (tool, enabled): Promise<AgentIntegrationDiagnostic> =>
+    ipcRenderer.invoke(IPC_CHANNELS.setAgentWrapperEnabled, tool, enabled),
+  setAgentSkillEnabled: (tool, enabled): Promise<AgentIntegrationDiagnostic> =>
+    ipcRenderer.invoke(IPC_CHANNELS.setAgentSkillEnabled, tool, enabled),
+  requestInputGuardPermission: (): Promise<AgentIntegrationDiagnostic> =>
+    ipcRenderer.invoke(IPC_CHANNELS.requestInputGuardPermission),
+  openInputGuardSettings: (): Promise<boolean> =>
+    ipcRenderer.invoke(IPC_CHANNELS.openInputGuardSettings),
+  prepareProfileForAgent: (profileId: string): Promise<AppState> =>
+    ipcRenderer.invoke(IPC_CHANNELS.prepareProfileForAgent, profileId),
   openProfileFolder: (id: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.openProfileFolder, id),
   openProfileExtensionsPage: (id: string): Promise<AppState> =>
     ipcRenderer.invoke(IPC_CHANNELS.openProfileExtensionsPage, id),

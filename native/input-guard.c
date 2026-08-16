@@ -445,9 +445,12 @@ static bool connect_socket_stdio(const char *socket_path) {
 
 int main(int argc, char **argv) {
   bool prompt_for_accessibility = false;
+  bool check_accessibility_only = false;
   for (int index = 1; index < argc; index += 1) {
     if (strcmp(argv[index], "--request-accessibility") == 0) {
       prompt_for_accessibility = true;
+    } else if (strcmp(argv[index], "--check-accessibility") == 0) {
+      check_accessibility_only = true;
     } else if (strcmp(argv[index], "--socket") == 0 && index + 1 < argc) {
       server_socket_path = argv[index + 1];
       index += 1;
@@ -465,6 +468,9 @@ int main(int argc, char **argv) {
       CFRunLoopRunInMode(kCFRunLoopDefaultMode, 1.5, false);
     }
     return trusted ? 0 : 3;
+  }
+  if (check_accessibility_only) {
+    return check_accessibility_access(false) ? 0 : 3;
   }
   // 启动时只检查 macOS“辅助功能”权限。没有权限时 active event tap 会直接创建失败；
   // 不能让 helper 继续存活却让上层误以为 Chrome 已经被锁定，也不能自动打断用户请求授权。

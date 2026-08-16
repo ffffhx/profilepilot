@@ -9,9 +9,9 @@ import { sortByMiniOrder } from "./render/mini";
 import { computeMainReorder, mainProfileGroups, type MainProfileGroup } from "./render/profiles";
 import { renderGlobalInstructionDiff } from "./render/modals";
 import { render } from "./render/render-root";
-import { applyState, invalidateExtensionMigrationDiff, loadState, refreshExtensionMigrationDiff, refreshGlobalInstructions, refreshProfileReadiness, repairClaudeInstructionShell, saveGlobalInstruction, setMigrationSource, undoGlobalInstruction } from "./state-actions";
+import { applyState, invalidateExtensionMigrationDiff, loadState, markOnboardingSeen, refreshAgentIntegrationDiagnostic, refreshExtensionMigrationDiff, refreshGlobalInstructions, refreshProfileReadiness, repairClaudeInstructionShell, requestInputGuardPermission, saveGlobalInstruction, setMigrationSource, undoGlobalInstruction } from "./state-actions";
 import { appRoot, store } from "./state";
-import type { AgentOverlayRevealEvent, AgentTakeoverEvent, AppState, ProfileProxyConfig } from "./types";
+import type { AgentOverlayRevealEvent, AgentTakeoverEvent, AppState, BrowserDriverKind, ProfileProxyConfig } from "./types";
 import { deleteButtonTitle, escapeHtml, formatErrorMessage, profileAgentControlClients } from "./util";
 
 const MINI_TAKEOVER_NOTICE_MS = 5000;
@@ -23,6 +23,12 @@ let miniTakeoverConfirmTimer: number | null = null;
 let profileRevealHighlightTimer: number | null = null;
 let hoveringTooltip = false;
 let stateInteractionDragging = false;
+
+function browserDriverKind(value: string | undefined): BrowserDriverKind | null {
+  return value === "agent-browser" || value === "playwright-cli" || value === "chrome-devtools-mcp"
+    ? value
+    : null;
+}
 let pendingPushedState: AppState | null = null;
 let pushedStateTimer: number | null = null;
 
@@ -722,6 +728,102 @@ appRoot.addEventListener("click", (event) => {
     store.modal = { kind: "new" };
     render();
     window.setTimeout(() => document.querySelector<HTMLInputElement>("#profile-name")?.focus(), 0);
+    return;
+  }
+
+  if (action === "open-onboarding") {
+    store.modal = { kind: "onboarding" };
+    render();
+    void refreshAgentIntegrationDiagnostic().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+    return;
+  }
+
+  if (action === "dismiss-onboarding") {
+    if (event.target === actionTarget || actionTarget.tagName === "BUTTON") {
+      markOnboardingSeen();
+      store.modal = null;
+      render();
+    }
+    return;
+  }
+
+  if (action === "open-agent-integration" || action === "start-agent-integration") {
+    if (action === "start-agent-integration") {
+      markOnboardingSeen();
+    }
+    store.modal = { kind: "agent-integration" };
+    render();
+    void refreshAgentIntegrationDiagnostic().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+    return;
+  }
+
+  if (action === "refresh-agent-integration") {
+    void refreshAgentIntegrationDiagnostic().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+    return;
+  }
+
+  if (
+    action === "install-agent-wrapper" ||
+    action === "remove-agent-wrapper" ||
+    action === "install-agent-skill" ||
+    action === "remove-agent-skill"
+  ) {
+    const tool = browserDriverKind(actionTarget.dataset.tool);
+    if (!tool) {
+      setToast("没有找到要配置的 Agent 工具", "error");
+      return;
+    }
+    const install = action === "install-agent-wrapper" || action === "install-agent-skill";
+    const skill = action === "install-agent-skill" || action === "remove-agent-skill";
+    const label = tool === "agent-browser" ? "agent-browser" : tool === "playwright-cli" ? "Playwright CLI" : "Chrome DevTools MCP";
+    void withBusy(
+      async () => {
+        store.agentIntegrationDiagnostic = skill
+          ? await profileApi().setAgentSkillEnabled(tool, install)
+          : await profileApi().setAgentWrapperEnabled(tool, install);
+        if (store.state && store.agentIntegrationDiagnostic) {
+          store.state.shellIntegration = store.agentIntegrationDiagnostic.shellIntegration;
+        }
+      },
+      install
+        ? `${label} ${skill ? "Skill" : "Wrapper"} 已安装`
+        : `${label} ${skill ? "由 ProfilePilot 安装的 Skill" : "Wrapper"} 已移除`,
+      {
+        key: `agent-${skill ? "skill" : "wrapper"}-${tool}`,
+        message: `${install ? "正在安装" : "正在移除"} ${label} ${skill ? "Skill" : "Wrapper"}…`
+      }
+    );
+    return;
+  }
+
+  if (action === "request-input-guard-permission") {
+    void requestInputGuardPermission()
+      .then(() => {
+        const permission = store.agentIntegrationDiagnostic?.inputGuard;
+        setToast(permission?.granted
+          ? "Input Guard 点击保护已授权"
+          : "授权请求已发出；请在系统设置中允许 ProfilePilot Input Guard 后重新检测");
+      })
+      .catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+    return;
+  }
+
+  if (action === "open-input-guard-settings") {
+    void profileApi().openInputGuardSettings()
+      .then(() => setToast("已打开“隐私与安全性 → 辅助功能”"))
+      .catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+    return;
+  }
+
+  if (action === "copy-agent-command") {
+    const command = actionTarget.dataset.command || "";
+    if (!command || !navigator.clipboard?.writeText) {
+      setToast("当前环境不能直接复制，请手动选中命令", "error");
+      return;
+    }
+    void navigator.clipboard.writeText(command)
+      .then(() => setToast("命令已复制"))
+      .catch(() => setToast("复制失败，请手动选中命令", "error"));
     return;
   }
 
@@ -1701,8 +1803,11 @@ appRoot.addEventListener("click", (event) => {
     void withBusy(
       async () => {
         store.state = await profileApi().setShellIntegrationEnabled(enable);
+        if (store.modal?.kind === "agent-integration") {
+          store.agentIntegrationDiagnostic = await profileApi().inspectAgentIntegration();
+        }
       },
-      enable ? "会话识别已启用，对之后新开的 agent 会话生效" : "已移除会话识别集成",
+      enable ? "会话识别已启用，对之后新开的 Agent 会话生效" : "已移除会话识别集成",
       { key: "shell-integration", message: enable ? "正在写入 shell 集成…" : "正在移除 shell 集成…" }
     );
     return;

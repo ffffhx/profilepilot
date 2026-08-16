@@ -12,10 +12,24 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { PassThrough, type Readable, type Writable } from "node:stream";
+import type { InputGuardPermissionDiagnostic } from "../shared/types";
 
 export const INPUT_GUARD_APP_NAME = "ProfilePilot Input Guard.app";
 export const INPUT_GUARD_EXECUTABLE_NAME = "ProfilePilot Input Guard";
 export const INPUT_GUARD_BUILD_INFO_NAME = "input-guard-build.json";
+export const INPUT_GUARD_ACCESSIBILITY_SETTINGS_URL =
+  "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
+
+interface InputGuardPermissionCommandResult {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+interface InputGuardPermissionOptions extends InputGuardCompanionOptions {
+  runProbe?: (helperPath: string) => Promise<InputGuardPermissionCommandResult>;
+  runRequest?: (helperPath: string) => Promise<void>;
+}
 
 export interface InputGuardCompanionOptions {
   platform?: NodeJS.Platform;
@@ -38,6 +52,71 @@ export interface InputGuardProcess {
   on(event: "error", listener: (error: Error) => void): this;
   on(event: "exit", listener: (code: number | null, signal: NodeJS.Signals | null) => void): this;
   kill(signal?: NodeJS.Signals): boolean;
+}
+
+export async function inspectInputGuardPermission(
+  options: InputGuardPermissionOptions = {}
+): Promise<InputGuardPermissionDiagnostic> {
+  const platform = options.platform || process.platform;
+  const base = {
+    supported: platform === "darwin",
+    granted: platform !== "darwin",
+    appName: "ProfilePilot Input Guard",
+    appPath: null as string | null,
+    inspectedAt: new Date().toISOString(),
+    error: null as string | null
+  };
+  if (!base.supported) {
+    return base;
+  }
+
+  let helperPath = "";
+  try {
+    helperPath = resolveInputGuardHelperPath(options);
+    const result = await (options.runProbe || runInputGuardPermissionProbe)(helperPath);
+    if (result.stdout.includes('"status":"accessibility-access-granted"')) {
+      return { ...base, granted: true, appPath: companionAppPathFromExecutable(helperPath) };
+    }
+    if (result.stdout.includes('"status":"accessibility-access-denied"')) {
+      return { ...base, granted: false, appPath: companionAppPathFromExecutable(helperPath) };
+    }
+    const detail = result.stderr.trim() || result.stdout.trim() || `退出码 ${result.code ?? "未知"}`;
+    return {
+      ...base,
+      appPath: companionAppPathFromExecutable(helperPath),
+      error: `无法确认 Input Guard 辅助功能权限：${detail}`
+    };
+  } catch (error) {
+    return {
+      ...base,
+      appPath: helperPath ? safeCompanionAppPath(helperPath) : null,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+export async function requestInputGuardPermission(
+  options: InputGuardPermissionOptions = {}
+): Promise<InputGuardPermissionDiagnostic> {
+  const platform = options.platform || process.platform;
+  if (platform !== "darwin") {
+    return inspectInputGuardPermission(options);
+  }
+  let helperPath = "";
+  let requestError: string | null = null;
+  try {
+    helperPath = resolveInputGuardHelperPath(options);
+    await (options.runRequest || runInputGuardPermissionRequest)(helperPath);
+  } catch (error) {
+    requestError = error instanceof Error ? error.message : String(error);
+  }
+  const diagnostic = await inspectInputGuardPermission({
+    ...options,
+    ...(helperPath ? { overridePath: helperPath } : {})
+  });
+  return requestError && !diagnostic.granted
+    ? { ...diagnostic, error: requestError }
+    : diagnostic;
 }
 
 /**
@@ -258,6 +337,65 @@ class InputGuardCompanionProcess extends EventEmitter implements InputGuardProce
     this.stdout.end();
     this.stderr.end();
     this.emit("exit", code, signal);
+  }
+}
+
+function runInputGuardPermissionProbe(helperPath: string): Promise<InputGuardPermissionCommandResult> {
+  return collectInputGuardCommand(helperPath, ["--check-accessibility"], 4_000);
+}
+
+async function runInputGuardPermissionRequest(helperPath: string): Promise<void> {
+  const appPath = companionAppPathFromExecutable(helperPath);
+  const result = await collectInputGuardCommand(
+    "/usr/bin/open",
+    ["-W", "-g", "-j", "-n", appPath, "--args", "--request-accessibility"],
+    8_000
+  );
+  // LaunchServices 偶尔在短命伴随进程先退出时返回 1；权限结果以随后的无打扰探测为准。
+  if (result.code !== 0 && result.code !== 1) {
+    throw new Error(result.stderr.trim() || `无法启动 Input Guard 授权请求（退出码 ${result.code ?? "未知"}）`);
+  }
+}
+
+function collectInputGuardCommand(
+  executable: string,
+  args: string[],
+  timeoutMs: number
+): Promise<InputGuardPermissionCommandResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(executable, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr?.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback();
+    };
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish(() => reject(new Error(`Input Guard 权限检查超时（${timeoutMs}ms）`)));
+    }, timeoutMs);
+    timer.unref?.();
+    child.once("error", (error) => finish(() => reject(error)));
+    child.once("close", (code) => finish(() => resolve({ code, stdout, stderr })));
+  });
+}
+
+function safeCompanionAppPath(helperPath: string): string | null {
+  try {
+    return companionAppPathFromExecutable(helperPath);
+  } catch {
+    return null;
   }
 }
 

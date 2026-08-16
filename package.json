@@ -67,6 +67,7 @@
     "files": [
       "dist/**/*",
       "!dist/native/**/*",
+      "skills/**/*",
       "public/**/*",
       "README.md",
       "LICENSE",

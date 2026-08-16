@@ -22,8 +22,6 @@ import {
 } from "./browser-gateway-driver-runtime";
 
 const SAFE_SESSION_RE = /^[A-Za-z0-9._:-]{1,240}$/;
-const DEFAULT_NPX_PACKAGE = "chrome-devtools-mcp@latest";
-
 export const PROFILEPILOT_CHROME_DEVTOOLS_MCP_HARD_STOP_EXIT_CODE = 75;
 export const PROFILEPILOT_CHROME_DEVTOOLS_MCP_USAGE_EXIT_CODE = 64;
 
@@ -37,7 +35,7 @@ export interface ChromeDevtoolsMcpProfilePilotConfig {
 export interface ChromeDevtoolsMcpCommand {
   executable: string;
   prefixArgs: string[];
-  source: "binary" | "npx";
+  source: "binary";
 }
 
 export interface ChromeDevtoolsMcpEndpointContext {
@@ -196,14 +194,7 @@ export function resolveRealChromeDevtoolsMcp(
     return { executable: candidate, prefixArgs: [], source: "binary" };
   }
 
-  const explicitNpx = nonEmpty(env.PROFILEPILOT_CHROME_DEVTOOLS_MCP_NPX);
-  const npxCandidates = explicitNpx && isExecutableFile(explicitNpx)
-    ? [explicitNpx]
-    : executableCandidatesOnPath(process.platform === "win32" ? "npx.cmd" : "npx", env);
-  const npx = npxCandidates.find((candidate) => realpathOrInput(candidate) !== self);
-  if (!npx) return null;
-  const packageSpec = nonEmpty(env.PROFILEPILOT_CHROME_DEVTOOLS_MCP_PACKAGE) || DEFAULT_NPX_PACKAGE;
-  return { executable: npx, prefixArgs: ["--yes", packageSpec], source: "npx" };
+  return null;
 }
 
 export function createGatewayChromeDevtoolsMcpEndpointProvider(
@@ -318,7 +309,7 @@ export async function runChromeDevtoolsMcpWrapper(
 
   const command = dependencies.command || resolveRealChromeDevtoolsMcp(env);
   if (!command) {
-    process.stderr.write("[ProfilePilot] 未找到真实 chrome-devtools-mcp 或 npx 可执行文件。\n");
+    process.stderr.write("[ProfilePilot] 未找到真实 chrome-devtools-mcp 可执行文件；请先全局安装后重试。\n");
     return 127;
   }
 

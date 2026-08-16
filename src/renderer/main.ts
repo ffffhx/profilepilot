@@ -763,6 +763,34 @@ appRoot.addEventListener("click", (event) => {
   }
 
   if (
+    action === "install-profilepilot-cli" ||
+    action === "remove-profilepilot-cli" ||
+    action === "install-profilepilot-cli-skill" ||
+    action === "remove-profilepilot-cli-skill"
+  ) {
+    const install = action.startsWith("install-");
+    const skill = action.endsWith("-skill");
+    void withBusy(
+      async () => {
+        store.agentIntegrationDiagnostic = skill
+          ? await profileApi().setProfilePilotCliSkillEnabled(install)
+          : await profileApi().setProfilePilotCliEnabled(install);
+        if (store.state && store.agentIntegrationDiagnostic) {
+          store.state.shellIntegration = store.agentIntegrationDiagnostic.shellIntegration;
+        }
+      },
+      install
+        ? `ProfilePilot 管理 ${skill ? "Skill" : "CLI"} 已安装`
+        : `ProfilePilot 管理 ${skill ? "Skill" : "CLI"} 已移除`,
+      {
+        key: `profilepilot-management-${skill ? "skill" : "cli"}`,
+        message: `${install ? "正在安装" : "正在移除"} ProfilePilot 管理 ${skill ? "Skill" : "CLI"}…`
+      }
+    );
+    return;
+  }
+
+  if (
     action === "install-agent-wrapper" ||
     action === "remove-agent-wrapper" ||
     action === "install-agent-skill" ||

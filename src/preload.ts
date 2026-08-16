@@ -142,6 +142,10 @@ const profileManagerApi: ProfileManagerApi = {
     ipcRenderer.invoke(IPC_CHANNELS.setAgentWrapperEnabled, tool, enabled),
   setAgentSkillEnabled: (tool, enabled): Promise<AgentIntegrationDiagnostic> =>
     ipcRenderer.invoke(IPC_CHANNELS.setAgentSkillEnabled, tool, enabled),
+  setProfilePilotCliEnabled: (enabled): Promise<AgentIntegrationDiagnostic> =>
+    ipcRenderer.invoke(IPC_CHANNELS.setProfilePilotCliEnabled, enabled),
+  setProfilePilotCliSkillEnabled: (enabled): Promise<AgentIntegrationDiagnostic> =>
+    ipcRenderer.invoke(IPC_CHANNELS.setProfilePilotCliSkillEnabled, enabled),
   requestInputGuardPermission: (): Promise<AgentIntegrationDiagnostic> =>
     ipcRenderer.invoke(IPC_CHANNELS.requestInputGuardPermission),
   openInputGuardSettings: (): Promise<boolean> =>

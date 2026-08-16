@@ -4,6 +4,7 @@ import path from "node:path";
 import type {
   AgentSkillDiagnostic,
   AgentSkillHost,
+  AgentSkillKey,
   AgentSkillTargetDiagnostic,
   BrowserDriverKind
 } from "../shared/types";
@@ -12,7 +13,7 @@ import { ProfileManagerError } from "./profile-manager-error";
 const MANAGED_MARKER_FILE = ".profilepilot-managed.json";
 
 interface AgentSkillDefinition {
-  key: BrowserDriverKind;
+  key: AgentSkillKey;
   label: string;
   skillId: string;
 }
@@ -20,8 +21,11 @@ interface AgentSkillDefinition {
 const SKILL_DEFINITIONS: AgentSkillDefinition[] = [
   { key: "agent-browser", label: "Agent Browser Gateway", skillId: "agent-browser-cdp" },
   { key: "playwright-cli", label: "Playwright CLI Gateway", skillId: "playwright-cli-profilepilot" },
-  { key: "chrome-devtools-mcp", label: "DevTools MCP Gateway", skillId: "chrome-devtools-mcp-profilepilot" }
+  { key: "chrome-devtools-mcp", label: "DevTools MCP Gateway", skillId: "chrome-devtools-mcp-profilepilot" },
+  { key: "profilepilot-cli", label: "ProfilePilot Profile Management", skillId: "profilepilot-cli" }
 ];
+
+const BROWSER_SKILL_KEYS: BrowserDriverKind[] = ["agent-browser", "playwright-cli", "chrome-devtools-mcp"];
 
 const SKILL_HOSTS: Array<{ host: AgentSkillHost; label: string; root: (homeDir: string) => string }> = [
   { host: "shared", label: "共享 Agent", root: (homeDir) => path.join(homeDir, ".agents", "skills") },
@@ -29,7 +33,7 @@ const SKILL_HOSTS: Array<{ host: AgentSkillHost; label: string; root: (homeDir: 
   { host: "claude", label: "Claude", root: (homeDir) => path.join(homeDir, ".claude", "skills") }
 ];
 
-export function agentSkillDefinition(key: BrowserDriverKind): AgentSkillDefinition {
+export function agentSkillDefinition(key: AgentSkillKey): AgentSkillDefinition {
   const definition = SKILL_DEFINITIONS.find((item) => item.key === key);
   if (!definition) {
     throw new ProfileManagerError(`不支持的 Agent 工具：${key}`, "AGENT_TOOL_UNSUPPORTED");
@@ -37,13 +41,13 @@ export function agentSkillDefinition(key: BrowserDriverKind): AgentSkillDefiniti
   return definition;
 }
 
-export function bundledAgentSkillPath(key: BrowserDriverKind): string {
+export function bundledAgentSkillPath(key: AgentSkillKey): string {
   const definition = agentSkillDefinition(key);
   return path.join(__dirname, "..", "..", "skills", definition.skillId);
 }
 
 export function agentSkillTargetPaths(
-  key: BrowserDriverKind,
+  key: AgentSkillKey,
   homeDir = os.homedir()
 ): Array<{ host: AgentSkillHost; label: string; path: string }> {
   const definition = agentSkillDefinition(key);
@@ -55,11 +59,15 @@ export function agentSkillTargetPaths(
 }
 
 export async function inspectAgentSkills(homeDir = os.homedir()): Promise<AgentSkillDiagnostic[]> {
-  return Promise.all(SKILL_DEFINITIONS.map((definition) => inspectAgentSkill(definition.key, homeDir)));
+  return Promise.all(BROWSER_SKILL_KEYS.map((key) => inspectAgentSkill(key, homeDir)));
+}
+
+export function inspectProfilePilotCliSkill(homeDir = os.homedir()): Promise<AgentSkillDiagnostic> {
+  return inspectAgentSkill("profilepilot-cli", homeDir);
 }
 
 export async function inspectAgentSkill(
-  key: BrowserDriverKind,
+  key: AgentSkillKey,
   homeDir = os.homedir()
 ): Promise<AgentSkillDiagnostic> {
   const definition = agentSkillDefinition(key);
@@ -108,7 +116,7 @@ export async function inspectAgentSkill(
 }
 
 export async function setAgentSkillEnabled(
-  key: BrowserDriverKind,
+  key: AgentSkillKey,
   enabled: boolean,
   homeDir = os.homedir()
 ): Promise<AgentSkillDiagnostic> {

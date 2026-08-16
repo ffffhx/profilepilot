@@ -50,6 +50,8 @@ export const IPC_CHANNELS = {
   inspectAgentIntegration: "profiles:shell-integration:inspect",
   setAgentWrapperEnabled: "profiles:agent-wrapper:set-enabled",
   setAgentSkillEnabled: "profiles:agent-skill:set-enabled",
+  setProfilePilotCliEnabled: "profiles:management-cli:set-enabled",
+  setProfilePilotCliSkillEnabled: "profiles:management-cli-skill:set-enabled",
   requestInputGuardPermission: "profiles:input-guard:request-permission",
   openInputGuardSettings: "profiles:input-guard:open-settings",
   prepareProfileForAgent: "profiles:agent:prepare-profile",

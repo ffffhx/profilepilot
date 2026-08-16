@@ -164,6 +164,8 @@ export function renderAgentIntegrationModal(_profiles: PublicProfile[]): string 
           <button type="button" class="modal-icon-close" data-action="close-modal" aria-label="关闭 Agent 工具接入">×</button>
         </div>
 
+        ${renderManagementCliPanel(diagnostic, loading || !diagnostic)}
+
         <section class="agent-tools-panel agent-setup-panel" aria-labelledby="agent-tools-title">
           <div class="agent-section-heading">
             <div><span>TOOL CHAINS</span><strong id="agent-tools-title">逐工具配置</strong></div>
@@ -183,6 +185,93 @@ export function renderAgentIntegrationModal(_profiles: PublicProfile[]): string 
         ${renderInputGuardPermissionCard("integration")}
       </section>
     </div>
+  `;
+}
+
+function renderManagementCliPanel(
+  diagnostic: AgentIntegrationDiagnostic | null,
+  pending: boolean
+): string {
+  const cli = diagnostic?.managementCli || null;
+  const skill = cli?.skill || null;
+  const cliPartial = Boolean(cli?.bundleInstalled || cli?.launcherInstalled) && !cli?.installed;
+  const cliStale = Boolean(cli?.installed && !cli.upToDate);
+  const skillInstalled = Boolean(skill?.installed);
+  const externalSkill = skillInstalled && !skill?.managed;
+  const skillStale = skillInstalled && Boolean(skill?.managed) && !skill?.upToDate;
+  const ready = Boolean(cli?.installed && skillInstalled && diagnostic?.shellIntegration.installed);
+  const cliStatus = pending
+    ? "检测中"
+    : cliStale
+      ? "需要更新"
+      : cli?.installed
+        ? "已安装"
+        : cliPartial
+          ? "安装不完整"
+          : "未安装";
+  const skillStatus = pending
+    ? "检测中"
+    : externalSkill
+      ? "已安装 · 外部管理"
+      : skillStale
+        ? "需要更新"
+        : skillInstalled
+          ? "已安装"
+          : "未安装";
+
+  return `
+    <section class="agent-management-cli ${ready ? "ready" : "pending"}" aria-labelledby="management-cli-title">
+      <div class="agent-management-cli-head">
+        <div>
+          <span>PROFILE MANAGEMENT CLI</span>
+          <strong id="management-cli-title">让 Agent 管理 Profile</strong>
+          <p>独立的 <code>profilepilot</code> 命令通过本机受保护 Socket 执行查询、创建、重命名、启动、停止和删除。</p>
+        </div>
+        <em>${ready ? "READY" : "SETUP"}</em>
+      </div>
+      <div class="agent-management-cli-stages">
+        ${renderSetupStage({
+          index: "01",
+          label: "管理 CLI",
+          status: cliStatus,
+          tone: pending ? "pending" : cli?.installed ? "ready" : "blocked",
+          detail: cli?.installed
+            ? cli.launcherPath
+            : cliPartial
+              ? "CLI 文件不完整，可一键修复"
+              : "ProfilePilot 内置，可独立安装",
+          actions: pending
+            ? ""
+            : `
+              <button type="button" data-action="install-profilepilot-cli">${cliStale ? "更新 CLI" : cliPartial ? "修复 CLI" : cli?.installed ? "验证 / 重装" : "安装管理 CLI"}</button>
+              ${cli?.installed || cliPartial ? `<button type="button" class="danger-ghost" data-action="remove-profilepilot-cli">移除</button>` : ""}
+            `
+        })}
+        ${renderSetupStage({
+          index: "02",
+          label: "管理 Skill",
+          status: skillStatus,
+          tone: pending ? "pending" : skillInstalled ? "ready" : "blocked",
+          detail: skillInstalled
+            ? `${skill?.skillId || "profilepilot-cli"} · ${skill?.installedTargetCount || 0}/${skill?.targetCount || 3} 个 Agent 目录`
+            : cli?.installed
+              ? "让 Codex / Claude 安全执行 Profile 增删改查"
+              : "安装管理 CLI 后开放",
+          actions: pending
+            ? ""
+            : `
+              ${externalSkill
+                ? `<span class="agent-external-note">由现有 Skill 管理器提供</span>`
+                : `<button type="button" data-action="install-profilepilot-cli-skill" ${cli?.installed ? "" : "disabled"}>${skillStale ? "更新 Skill" : skillInstalled ? "重新安装" : "安装管理 Skill"}</button>`}
+              ${skill?.managedTargetCount ? `<button type="button" class="danger-ghost" data-action="remove-profilepilot-cli-skill">移除本工具安装</button>` : ""}
+            `
+        })}
+      </div>
+      <div class="agent-management-cli-example">
+        <code>profilepilot profile list --json</code>
+        <span>删除必须显式添加 <code>--yes</code>；系统 Profile 只读。</span>
+      </div>
+    </section>
   `;
 }
 

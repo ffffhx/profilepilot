@@ -12,6 +12,7 @@ require("./chrome-devtools-mcp-wrapper.test.js");
 require("./agent-browser-lease.test.js");
 require("./shell-integration.test.js");
 require("./agent-skill-integration.test.js");
+require("./profilepilot-management-cli.test.js");
 require("./renderer-util.test.js");
 require("./renderer-state-actions.test.js");
 require("./renderer-takeover-confirm.test.js");

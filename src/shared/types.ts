@@ -163,6 +163,7 @@ export interface Registry {
 }
 
 export type BrowserDriverKind = "agent-browser" | "playwright-cli" | "chrome-devtools-mcp";
+export type AgentSkillKey = BrowserDriverKind | "profilepilot-cli";
 
 // 当前持有该 Profile CDP 端口持久连接的客户端（agent-browser / Playwright / DevTools 等）。
 export interface CdpClientInfo {
@@ -566,7 +567,7 @@ export interface AgentSkillTargetDiagnostic {
 }
 
 export interface AgentSkillDiagnostic {
-  key: BrowserDriverKind;
+  key: AgentSkillKey;
   label: string;
   skillId: string;
   installed: boolean;
@@ -577,6 +578,17 @@ export interface AgentSkillDiagnostic {
   targetCount: number;
   installPath: string;
   targets: AgentSkillTargetDiagnostic[];
+  error: string | null;
+}
+
+export interface ProfilePilotCliDiagnostic {
+  installed: boolean;
+  bundleInstalled: boolean;
+  launcherInstalled: boolean;
+  upToDate: boolean;
+  bundlePath: string;
+  launcherPath: string;
+  skill: AgentSkillDiagnostic;
   error: string | null;
 }
 
@@ -597,6 +609,7 @@ export interface AgentIntegrationDiagnostic {
   tools: AgentToolDiagnostic[];
   wrappers: AgentWrapperDiagnostic[];
   skills: AgentSkillDiagnostic[];
+  managementCli: ProfilePilotCliDiagnostic;
   inputGuard: InputGuardPermissionDiagnostic;
 }
 
@@ -1074,6 +1087,8 @@ export interface ProfileManagerApi {
   inspectAgentIntegration(): Promise<AgentIntegrationDiagnostic>;
   setAgentWrapperEnabled(tool: BrowserDriverKind, enabled: boolean): Promise<AgentIntegrationDiagnostic>;
   setAgentSkillEnabled(tool: BrowserDriverKind, enabled: boolean): Promise<AgentIntegrationDiagnostic>;
+  setProfilePilotCliEnabled(enabled: boolean): Promise<AgentIntegrationDiagnostic>;
+  setProfilePilotCliSkillEnabled(enabled: boolean): Promise<AgentIntegrationDiagnostic>;
   requestInputGuardPermission(): Promise<AgentIntegrationDiagnostic>;
   openInputGuardSettings(): Promise<boolean>;
   prepareProfileForAgent(profileId: string): Promise<AppState>;

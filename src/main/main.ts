@@ -51,6 +51,8 @@ import {
   refreshAgentBrowserWrapperIfInstalled,
   setAgentSkillEnabled,
   setAgentWrapperEnabled,
+  setProfilePilotCliEnabled,
+  setProfilePilotCliSkillEnabled,
   setShellIntegrationEnabled
 } from "./shell-integration";
 import { APP_TITLE, createProfileManager } from "./profile-manager";
@@ -67,6 +69,10 @@ import {
   INPUT_GUARD_ACCESSIBILITY_SETTINGS_URL,
   requestInputGuardPermission
 } from "./input-guard-companion";
+import {
+  startProfilePilotManagementServer,
+  type ProfilePilotManagementServerHandle
+} from "./profilepilot-management-server";
 
 const E2E_DRIVER_SOCKET = process.env.CPM_E2E_DRIVER_SOCKET || "";
 const IS_E2E_DRIVER_TEST = Boolean(E2E_DRIVER_SOCKET);
@@ -116,6 +122,7 @@ let stateBroadcastTimer: NodeJS.Timeout | null = null;
 let stateBroadcastInFlight = false;
 let stateBroadcastPending = false;
 let stateCoordinatorStopping = false;
+let managementServer: ProfilePilotManagementServerHandle | null = null;
 
 interface ActiveOperation {
   controller: AbortController;
@@ -1549,6 +1556,16 @@ function registerIpcHandlers(): void {
     async (_event, tool: BrowserDriverKind, enabled: boolean) => setAgentSkillEnabled(tool, Boolean(enabled))
   );
 
+  ipcMain.handle(
+    IPC_CHANNELS.setProfilePilotCliEnabled,
+    async (_event, enabled: boolean) => setProfilePilotCliEnabled(Boolean(enabled))
+  );
+
+  ipcMain.handle(
+    IPC_CHANNELS.setProfilePilotCliSkillEnabled,
+    async (_event, enabled: boolean) => setProfilePilotCliSkillEnabled(Boolean(enabled))
+  );
+
   ipcMain.handle(IPC_CHANNELS.requestInputGuardPermission, async () => {
     await requestInputGuardPermission();
     return inspectAgentIntegration();
@@ -1860,6 +1877,14 @@ app.whenReady().then(async () => {
     await refreshAgentBrowserWrapperIfInstalled().catch((error) => {
       console.warn(`[shell-integration] 刷新 agent-browser wrapper 失败：${error instanceof Error ? error.message : String(error)}`);
     });
+    managementServer = await startProfilePilotManagementServer({
+      profileManager,
+      appVersion: app.getVersion(),
+      onMutation: () => scheduleAppStateBroadcast(0)
+    }).catch((error) => {
+      console.error(`[management-cli] 启动失败：${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    });
   }
 
   if (process.platform === "darwin") {
@@ -1922,7 +1947,13 @@ app.on("before-quit", (event) => {
   }
   agentOverlayDisposedForQuit = true;
   event.preventDefault();
-  void profileManager.disposeAgentOverlay().finally(() => {
+  void Promise.all([
+    profileManager.disposeAgentOverlay(),
+    managementServer?.close().catch((error) => {
+      console.warn(`[management-cli] 关闭失败：${error instanceof Error ? error.message : String(error)}`);
+    })
+  ]).finally(() => {
+    managementServer = null;
     app.quit();
   });
 });

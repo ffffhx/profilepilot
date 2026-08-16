@@ -147,6 +147,24 @@ test("an installed CLI exposes only its own Wrapper action and does not enable a
   assert.doesNotMatch(html, /启用三套|三套 Wrapper|共享接入层/);
 });
 
+test("ProfilePilot management CLI and management Skill have their own independent setup card", () => {
+  const inputGuard = permission(false, true);
+  const diagnostic = diagnosticWith({
+    managementCli: managementCli(true, false),
+    inputGuard
+  });
+  const { renderer } = loadRenderer(inputGuard, { agentIntegrationDiagnostic: diagnostic });
+  const html = renderer.renderAgentIntegrationModal([]);
+
+  assert.match(html, /PROFILE MANAGEMENT CLI/);
+  assert.match(html, /让 Agent 管理 Profile/);
+  assert.match(html, /profilepilot profile list --json/);
+  assert.match(html, /data-action="install-profilepilot-cli"/);
+  assert.match(html, /data-action="remove-profilepilot-cli"/);
+  assert.match(html, /data-action="install-profilepilot-cli-skill" >/);
+  assert.match(html, /删除必须显式添加 <code>--yes<\/code>/);
+});
+
 function permission(supported, granted) {
   return {
     supported,
@@ -220,6 +238,32 @@ function skill(key, installed, managed = true) {
     targetCount: 3,
     installPath: `~/.agents/skills/${skillId}`,
     targets: [],
+    error: null
+  };
+}
+
+function managementCli(installed, skillInstalled) {
+  return {
+    installed,
+    bundleInstalled: installed,
+    launcherInstalled: installed,
+    upToDate: installed,
+    bundlePath: "~/.profilepilot/cli/profilepilot-cli.cjs",
+    launcherPath: "~/.profilepilot/cli-bin/profilepilot",
+    skill: {
+      key: "profilepilot-cli",
+      label: "ProfilePilot Profile Management",
+      skillId: "profilepilot-cli",
+      installed: skillInstalled,
+      managed: skillInstalled,
+      upToDate: skillInstalled,
+      installedTargetCount: skillInstalled ? 3 : 0,
+      managedTargetCount: skillInstalled ? 3 : 0,
+      targetCount: 3,
+      installPath: "~/.agents/skills/profilepilot-cli",
+      targets: [],
+      error: null
+    },
     error: null
   };
 }

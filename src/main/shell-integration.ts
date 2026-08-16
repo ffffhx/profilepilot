@@ -6,11 +6,13 @@ import {
   AgentIntegrationDiagnostic,
   AgentToolDiagnostic,
   AgentWrapperDiagnostic,
+  ProfilePilotCliDiagnostic,
   ShellIntegrationStatus
 } from "../shared/types";
 import { resolveRealAgentBrowser } from "./agent-browser-wrapper";
 import {
   inspectAgentSkills,
+  inspectProfilePilotCliSkill,
   setAgentSkillEnabled as setInstalledAgentSkillEnabled
 } from "./agent-skill-integration";
 import { resolveRealChromeDevtoolsMcp } from "./chrome-devtools-mcp-wrapper";
@@ -45,6 +47,10 @@ const MCP_LAUNCHER_SIGNATURE = "PROFILEPILOT_CHROME_DEVTOOLS_MCP_LAUNCHER";
 const NODE_RUNTIME_SIGNATURE = "PROFILEPILOT_NODE_RUNTIME";
 const LAUNCHER_SIGNATURE = "PROFILEPILOT_AGENT_BROWSER_LAUNCHER";
 const BIN_DIR_SIGNATURE = "PROFILEPILOT_AGENT_BROWSER_BIN_DIR";
+const MANAGEMENT_CLI_BUNDLE_FILE_NAME = "profilepilot-cli.cjs";
+const MANAGEMENT_CLI_LAUNCHER_FILE_NAME = "profilepilot";
+const MANAGEMENT_CLI_SIGNATURE = "PROFILEPILOT_MANAGEMENT_CLI";
+const MANAGEMENT_CLI_BIN_DIR_SIGNATURE = "PROFILEPILOT_MANAGEMENT_CLI_BIN_DIR";
 // 生效特征：只要这行 export 在（无论是托管块还是用户手写的），注入就是开着的。
 const EFFECTIVE_SIGNATURE = 'AGENT_BROWSER_SESSION="cc-$CLAUDE_CODE_SESSION_ID"';
 // Codex 分支的特征行：托管块缺它说明是旧版模板（CODEX_CLI_PATH 检测或目录名身份），
@@ -57,6 +63,8 @@ const PLAYWRIGHT_LAUNCHER_PATH = playwrightCliLauncherPath();
 const MCP_WRAPPER_PATH = chromeDevtoolsMcpWrapperPath();
 const MCP_LAUNCHER_PATH = chromeDevtoolsMcpLauncherPath();
 const BIN_DIR_PATH = path.dirname(LAUNCHER_PATH);
+const MANAGEMENT_CLI_LAUNCHER_PATH = profilePilotCliLauncherPath();
+const MANAGEMENT_CLI_BIN_DIR_PATH = path.dirname(MANAGEMENT_CLI_LAUNCHER_PATH);
 const NODE_RUNTIME_PATH = process.execPath;
 
 const INTEGRATION_BLOCK = [
@@ -82,6 +90,14 @@ const INTEGRATION_BLOCK = [
   `export ${NODE_RUNTIME_SIGNATURE}=${shellQuote(NODE_RUNTIME_PATH)}`,
   `export ${LAUNCHER_SIGNATURE}=${shellQuote(LAUNCHER_PATH)}`,
   `export ${BIN_DIR_SIGNATURE}=${shellQuote(BIN_DIR_PATH)}`,
+  `export ${MANAGEMENT_CLI_SIGNATURE}=${shellQuote(MANAGEMENT_CLI_LAUNCHER_PATH)}`,
+  `export ${MANAGEMENT_CLI_BIN_DIR_SIGNATURE}=${shellQuote(MANAGEMENT_CLI_BIN_DIR_PATH)}`,
+  `if [[ -x "$${MANAGEMENT_CLI_SIGNATURE}" && -d "$${MANAGEMENT_CLI_BIN_DIR_SIGNATURE}" ]]; then`,
+  '  case ":$PATH:" in',
+  `    *":$${MANAGEMENT_CLI_BIN_DIR_SIGNATURE}:"*) ;;`,
+  `    *) export PATH="$${MANAGEMENT_CLI_BIN_DIR_SIGNATURE}:$PATH" ;;`,
+  "  esac",
+  "fi",
   `if [[ -n "$AGENT_BROWSER_SESSION" && -d "$${BIN_DIR_SIGNATURE}" ]]; then`,
   '  case ":$PATH:" in',
   `    *":$${BIN_DIR_SIGNATURE}:"*) ;;`,
@@ -113,6 +129,14 @@ export function chromeDevtoolsMcpWrapperPath(): string {
 
 export function chromeDevtoolsMcpLauncherPath(): string {
   return path.join(os.homedir(), ".profilepilot", "bin", MCP_LAUNCHER_FILE_NAME);
+}
+
+export function profilePilotCliBundlePath(): string {
+  return path.join(os.homedir(), ".profilepilot", "cli", MANAGEMENT_CLI_BUNDLE_FILE_NAME);
+}
+
+export function profilePilotCliLauncherPath(): string {
+  return path.join(os.homedir(), ".profilepilot", "cli-bin", MANAGEMENT_CLI_LAUNCHER_FILE_NAME);
 }
 
 export function shellIntegrationFilePath(): string {
@@ -151,10 +175,11 @@ export async function getShellIntegrationStatus(): Promise<ShellIntegrationStatu
 }
 
 export async function inspectAgentIntegration(): Promise<AgentIntegrationDiagnostic> {
-  const [shellIntegration, wrappers, skills, inputGuard] = await Promise.all([
+  const [shellIntegration, wrappers, skills, managementCli, inputGuard] = await Promise.all([
     getShellIntegrationStatus(),
     inspectInstalledWrappers(),
     inspectAgentSkills(),
+    inspectProfilePilotCli(),
     inspectInputGuardPermission()
   ]);
   const agentBrowserPath = resolveRealAgentBrowser(process.env, agentBrowserWrapperPath());
@@ -201,6 +226,7 @@ export async function inspectAgentIntegration(): Promise<AgentIntegrationDiagnos
     tools,
     wrappers,
     skills,
+    managementCli,
     inputGuard
   };
 }
@@ -312,6 +338,8 @@ export async function setShellIntegrationEnabled(enabled: boolean): Promise<Shel
         !content.includes(NODE_RUNTIME_SIGNATURE) ||
         !content.includes(LAUNCHER_SIGNATURE) ||
         !content.includes(BIN_DIR_SIGNATURE) ||
+        !content.includes(MANAGEMENT_CLI_SIGNATURE) ||
+        !content.includes(MANAGEMENT_CLI_BIN_DIR_SIGNATURE) ||
         !content.includes(`export ${NODE_RUNTIME_SIGNATURE}=${shellQuote(NODE_RUNTIME_PATH)}`))
     ) {
       const begin = content.indexOf(BEGIN_MARK);
@@ -357,16 +385,20 @@ export async function setShellIntegrationEnabled(enabled: boolean): Promise<Shel
 // App 升级后，已启用的 shell 集成仍会引用同一个固定路径。启动时刷新该路径，
 // 避免新版本的通知协议已经生效，而当前终端继续执行旧 wrapper。
 export async function refreshAgentBrowserWrapperIfInstalled(): Promise<boolean> {
-  const [status, wrappers] = await Promise.all([
+  const [status, wrappers, managementCli] = await Promise.all([
     getShellIntegrationStatus(),
-    inspectInstalledWrappers()
+    inspectInstalledWrappers(),
+    inspectProfilePilotCli()
   ]);
   const selected = wrappers.filter((wrapper) => wrapper.wrapperInstalled || wrapper.launcherInstalled);
-  if (!status.supported || !status.installed || !selected.length) {
+  if (!status.supported || !status.installed || (!selected.length && !managementCli.installed)) {
     return false;
   }
   for (const wrapper of selected) {
     await installBrowserDriverWrapper(wrapperDefinition(wrapper.key));
+  }
+  if (managementCli.installed) {
+    await installProfilePilotCliFiles();
   }
   if (status.managed) {
     await refreshManagedIntegrationBlock(status.path);
@@ -410,14 +442,84 @@ export async function setAgentWrapperEnabled(
       fs.rm(definition.wrapperPath, { force: true }),
       fs.rm(definition.launcherPath, { force: true })
     ]);
-    const remaining = await inspectInstalledWrappers();
-    if (!remaining.some((wrapper) => wrapper.wrapperInstalled || wrapper.launcherInstalled)) {
+    const [remaining, managementCli] = await Promise.all([
+      inspectInstalledWrappers(),
+      inspectProfilePilotCli()
+    ]);
+    if (!remaining.some((wrapper) => wrapper.wrapperInstalled || wrapper.launcherInstalled) && !managementCli.installed) {
       const status = await getShellIntegrationStatus();
       if (status.installed && status.managed) {
         await setShellIntegrationEnabled(false);
       }
     }
   }
+  return inspectAgentIntegration();
+}
+
+export async function inspectProfilePilotCli(): Promise<ProfilePilotCliDiagnostic> {
+  const [bundleInstalled, launcherInstalled, skill] = await Promise.all([
+    isExecutable(profilePilotCliBundlePath()),
+    isExecutable(profilePilotCliLauncherPath()),
+    inspectProfilePilotCliSkill()
+  ]);
+  let upToDate = false;
+  let error: string | null = null;
+  if (bundleInstalled && launcherInstalled) {
+    try {
+      const [source, installed, launcher] = await Promise.all([
+        fs.readFile(path.join(__dirname, MANAGEMENT_CLI_BUNDLE_FILE_NAME), "utf8"),
+        fs.readFile(profilePilotCliBundlePath(), "utf8"),
+        fs.readFile(profilePilotCliLauncherPath(), "utf8")
+      ]);
+      upToDate = source === installed && launcher === profilePilotCliLauncherContent();
+    } catch (readError) {
+      error = readError instanceof Error ? readError.message : String(readError);
+    }
+  }
+  return {
+    installed: bundleInstalled && launcherInstalled,
+    bundleInstalled,
+    launcherInstalled,
+    upToDate,
+    bundlePath: profilePilotCliBundlePath(),
+    launcherPath: profilePilotCliLauncherPath(),
+    skill,
+    error
+  };
+}
+
+export async function setProfilePilotCliEnabled(enabled: boolean): Promise<AgentIntegrationDiagnostic> {
+  if (enabled) {
+    await installProfilePilotCliFiles();
+    await setShellIntegrationEnabled(true);
+  } else {
+    await Promise.all([
+      fs.rm(profilePilotCliBundlePath(), { force: true }),
+      fs.rm(profilePilotCliLauncherPath(), { force: true })
+    ]);
+    await Promise.all([
+      fs.rmdir(path.dirname(profilePilotCliBundlePath())).catch(() => undefined),
+      fs.rmdir(path.dirname(profilePilotCliLauncherPath())).catch(() => undefined)
+    ]);
+    const wrappers = await inspectInstalledWrappers();
+    if (!wrappers.some((wrapper) => wrapper.wrapperInstalled || wrapper.launcherInstalled)) {
+      const status = await getShellIntegrationStatus();
+      if (status.installed && status.managed) {
+        await setShellIntegrationEnabled(false);
+      }
+    }
+  }
+  return inspectAgentIntegration();
+}
+
+export async function setProfilePilotCliSkillEnabled(enabled: boolean): Promise<AgentIntegrationDiagnostic> {
+  if (enabled) {
+    const cli = await inspectProfilePilotCli();
+    if (!cli.installed) {
+      throw new ProfileManagerError("请先安装 ProfilePilot 管理 CLI，再安装配套 Skill。", "PROFILEPILOT_CLI_REQUIRED");
+    }
+  }
+  await setInstalledAgentSkillEnabled("profilepilot-cli", enabled);
   return inspectAgentIntegration();
 }
 
@@ -513,6 +615,41 @@ async function installBrowserDriverWrapper(input: {
   ].join("\n");
   await writeTextFileAtomic(input.launcherPath, launcher);
   await fs.chmod(input.launcherPath, 0o755).catch(() => undefined);
+}
+
+async function installProfilePilotCliFiles(): Promise<void> {
+  const sourcePath = path.join(__dirname, MANAGEMENT_CLI_BUNDLE_FILE_NAME);
+  let source = "";
+  try {
+    source = await fs.readFile(sourcePath, "utf8");
+  } catch (error) {
+    throw new ProfileManagerError(
+      `找不到 ProfilePilot 管理 CLI 编译产物：${sourcePath}（${error instanceof Error ? error.message : String(error)}）`,
+      "PROFILEPILOT_CLI_BUNDLE_MISSING"
+    );
+  }
+  await writeTextFileAtomic(profilePilotCliBundlePath(), source);
+  await fs.chmod(profilePilotCliBundlePath(), 0o755).catch(() => undefined);
+  const launcher = profilePilotCliLauncherContent();
+  await writeTextFileAtomic(profilePilotCliLauncherPath(), launcher);
+  await fs.chmod(profilePilotCliLauncherPath(), 0o755).catch(() => undefined);
+}
+
+function profilePilotCliLauncherContent(): string {
+  return [
+    "#!/bin/sh",
+    `cli=${shellQuote(profilePilotCliBundlePath())}`,
+    `runtime=\${${NODE_RUNTIME_SIGNATURE}:-${shellQuote(NODE_RUNTIME_PATH)}}`,
+    'if command -v node >/dev/null 2>&1; then',
+    '  exec node "$cli" "$@"',
+    "fi",
+    'if [ -x "$runtime" ]; then',
+    '  ELECTRON_RUN_AS_NODE=1 exec "$runtime" "$cli" "$@"',
+    "fi",
+    "printf '%s\\n' '[ProfilePilot] 缺少可用的 Node/Electron runtime，无法启动管理 CLI。' >&2",
+    "exit 127",
+    ""
+  ].join("\n");
 }
 
 async function writeTextFileAtomic(filePath: string, content: string): Promise<void> {

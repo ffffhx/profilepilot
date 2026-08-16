@@ -9,6 +9,7 @@ const {
   bundledAgentSkillPath,
   inspectAgentSkill,
   inspectAgentSkills,
+  inspectProfilePilotCliSkill,
   setAgentSkillEnabled
 } = require("../dist/main/agent-skill-integration.js");
 
@@ -25,6 +26,18 @@ test("ProfilePilot bundles one installable Skill for every supported browser too
     assert.match(source, /ProfilePilot/);
     assert.equal(skill.error, null);
   }
+});
+
+test("ProfilePilot management CLI has an independent installable Skill", async () => {
+  const home = path.join(os.tmpdir(), `profilepilot-cli-skill-home-${process.pid}-${Date.now()}`);
+  const skill = await inspectProfilePilotCliSkill(home);
+  assert.equal(skill.key, "profilepilot-cli");
+  assert.equal(skill.skillId, "profilepilot-cli");
+  assert.equal(skill.installed, false);
+  const source = fs.readFileSync(path.join(bundledAgentSkillPath("profilepilot-cli"), "SKILL.md"), "utf8");
+  assert.match(source, /name: profilepilot-cli/);
+  assert.match(source, /profilepilot profile delete/);
+  assert.match(source, /explicit user approval/);
 });
 test("Skill installation writes independent shared, Codex, and Claude copies and removes only managed copies", async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "profilepilot-agent-skill-"));

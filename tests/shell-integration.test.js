@@ -112,6 +112,64 @@ test("Wrapper installation is blocked until the corresponding real CLI is instal
   }
 });
 
+test("ProfilePilot management CLI and its Skill install independently from browser Wrappers", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "profilepilot-management-cli-install-"));
+  const originalHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const modulePath = require.resolve("../dist/main/shell-integration.js");
+    delete require.cache[modulePath];
+    const shell = require(modulePath);
+
+    let diagnostic = await shell.inspectAgentIntegration();
+    assert.equal(diagnostic.managementCli.installed, false);
+    assert.equal(diagnostic.managementCli.skill.installed, false);
+
+    await assert.rejects(
+      () => shell.setProfilePilotCliSkillEnabled(true),
+      (error) => error.code === "PROFILEPILOT_CLI_REQUIRED"
+    );
+
+    diagnostic = await shell.setProfilePilotCliEnabled(true);
+    assert.equal(diagnostic.managementCli.installed, true);
+    assert.equal(diagnostic.managementCli.upToDate, true);
+    assert.ok(diagnostic.wrappers.every((wrapper) => !wrapper.wrapperInstalled && !wrapper.launcherInstalled));
+    assert.equal(diagnostic.shellIntegration.installed, true);
+    assert.equal(
+      execFileSync(diagnostic.managementCli.launcherPath, ["--version"], {
+        encoding: "utf8",
+        env: { HOME: home, PATH: "/usr/bin:/bin", PROFILEPILOT_NODE_RUNTIME: process.execPath }
+      }).trim(),
+      "0.1.0"
+    );
+
+    const zshenv = fs.readFileSync(path.join(home, ".zshenv"), "utf8");
+    assert.match(zshenv, /PROFILEPILOT_MANAGEMENT_CLI_BIN_DIR/);
+    assert.match(zshenv, /-x "\$PROFILEPILOT_MANAGEMENT_CLI"/);
+    assert.match(zshenv, /export PATH="\$PROFILEPILOT_MANAGEMENT_CLI_BIN_DIR:\$PATH"/);
+
+    diagnostic = await shell.setProfilePilotCliSkillEnabled(true);
+    assert.equal(diagnostic.managementCli.skill.installed, true);
+    assert.equal(diagnostic.managementCli.skill.managedTargetCount, 3);
+
+    fs.writeFileSync(diagnostic.managementCli.bundlePath, "stale cli", "utf8");
+    assert.equal(await shell.refreshAgentBrowserWrapperIfInstalled(), true);
+    assert.match(fs.readFileSync(diagnostic.managementCli.bundlePath, "utf8"), /PROFILEPILOT_CLI_VERSION/);
+
+    diagnostic = await shell.setProfilePilotCliEnabled(false);
+    assert.equal(diagnostic.managementCli.installed, false);
+    assert.equal(diagnostic.managementCli.skill.installed, true, "Skill is a separate installation dimension");
+    assert.equal(diagnostic.shellIntegration.installed, false);
+
+    diagnostic = await shell.setProfilePilotCliSkillEnabled(false);
+    assert.equal(diagnostic.managementCli.skill.installedTargetCount, 0);
+  } finally {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("agent integration diagnostics do not treat npx as an installed MCP tool", async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "profilepilot-tool-diagnostic-"));
   const bin = path.join(home, "bin");

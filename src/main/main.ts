@@ -73,11 +73,13 @@ import {
   startProfilePilotManagementServer,
   type ProfilePilotManagementServerHandle
 } from "./profilepilot-management-server";
+import { initializeDiagnosticLogging, writeDiagnosticLog } from "./diagnostic-log";
 
 const E2E_DRIVER_SOCKET = process.env.CPM_E2E_DRIVER_SOCKET || "";
 const IS_E2E_DRIVER_TEST = Boolean(E2E_DRIVER_SOCKET);
 const IS_ELECTRON_SMOKE_TEST = process.env.CPM_ELECTRON_SMOKE_TEST === "1";
 const IS_BACKGROUND_E2E = process.env.CPM_E2E_MODE === "background";
+initializeDiagnosticLogging({ appVersion: app.getVersion() });
 const profileManager = createProfileManager(broadcastAgentTakeover, revealAgentOverlayProfile);
 let agentOverlayDisposedForQuit = false;
 let mainWindow: BrowserWindow | null = null;
@@ -210,7 +212,11 @@ async function refreshAndBroadcastAppState(): Promise<void> {
 function connectGatewayEventStream(): void {
   if (stateCoordinatorStopping || gatewayEventSubscription) return;
   const subscription = subscribeBrowserGatewayEvents({
-    onEvent: () => scheduleAppStateBroadcast(40),
+    onEvent: (message) => {
+      const eventType = typeof message.controlEvent?.type === "string" ? message.controlEvent.type : "unknown";
+      writeDiagnosticLog("info", "gateway", "control.event", `Gateway 状态事件：${eventType}`, message.controlEvent);
+      scheduleAppStateBroadcast(40);
+    },
     onDisconnect: () => {
       if (gatewayEventSubscription === subscription) gatewayEventSubscription = null;
       scheduleGatewayEventReconnect();
@@ -1860,14 +1866,22 @@ app.setName(APP_TITLE);
 // 单实例锁：双实例会各自对 live CDP 端口挂观察连接、互相把对方当成“驱动工具”，
 // 还会同时写 registry。第二个实例直接退出，把已有实例的主窗口拉到前台。
 if (!app.requestSingleInstanceLock()) {
+  writeDiagnosticLog("info", "app", "app.secondary_instance", "检测到正在运行的 ProfilePilot，当前进程退出");
   app.quit();
 } else {
+  writeDiagnosticLog("info", "app", "app.started", "ProfilePilot 主进程已启动", {
+    electron: process.versions.electron,
+    chrome: process.versions.chrome,
+    node: process.versions.node,
+    e2e: IS_E2E_DRIVER_TEST || IS_ELECTRON_SMOKE_TEST
+  });
   app.on("second-instance", () => {
     void showMainWindow();
   });
 }
 
 app.whenReady().then(async () => {
+  writeDiagnosticLog("info", "app", "app.ready", "Electron 已就绪");
   // Smoke E2E 只验证当前 Electron 实例的 main/preload/renderer/IPC 链路；
   // 跳过机器级 Gateway、wrapper 和快捷键，保证临时 HOME 测试不会留下后台进程或抢占全局状态。
   if (!IS_ELECTRON_SMOKE_TEST) {
@@ -1946,6 +1960,7 @@ app.on("before-quit", (event) => {
     return;
   }
   agentOverlayDisposedForQuit = true;
+  writeDiagnosticLog("info", "app", "app.quit_requested", "ProfilePilot 正在退出");
   event.preventDefault();
   void Promise.all([
     profileManager.disposeAgentOverlay(),
@@ -1959,6 +1974,7 @@ app.on("before-quit", (event) => {
 });
 
 app.on("will-quit", () => {
+  writeDiagnosticLog("info", "app", "app.stopped", "ProfilePilot 主进程已停止");
   globalShortcut.unregisterAll();
 });
 

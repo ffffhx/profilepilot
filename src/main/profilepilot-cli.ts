@@ -3,6 +3,13 @@ import { promises as fs } from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
+import packageMetadata from "../../package.json";
+import {
+  getDiagnosticLogStats,
+  readDiagnosticLogs,
+  type DiagnosticLogEntry,
+  type DiagnosticLogLevel
+} from "./diagnostic-log";
 import {
   PROFILEPILOT_MANAGEMENT_MAX_MESSAGE_BYTES,
   PROFILEPILOT_MANAGEMENT_PROTOCOL_VERSION,
@@ -13,20 +20,37 @@ import {
   type ProfilePilotManagementResponse
 } from "./profilepilot-management-protocol";
 
-export const PROFILEPILOT_CLI_VERSION = "0.1.0";
+export const PROFILEPILOT_CLI_VERSION = packageMetadata.version;
 const REQUEST_TIMEOUT_MS = 35_000;
 const USAGE_EXIT_CODE = 2;
 const SERVER_UNAVAILABLE_EXIT_CODE = 69;
 const COMMAND_FAILED_EXIT_CODE = 1;
 
-interface ParsedCliCommand {
+interface ParsedManagementCliCommand {
   command: ProfilePilotManagementCommand;
   json: boolean;
 }
 
+interface ParsedLogsCliCommand {
+  local: "logs";
+  json: boolean;
+  levels: DiagnosticLogLevel[];
+  since: number | null;
+  limit: number;
+  follow: boolean;
+}
+
+interface ParsedDoctorCliCommand {
+  local: "doctor";
+  json: boolean;
+}
+
+export type ParsedCliCommand = ParsedManagementCliCommand | ParsedLogsCliCommand | ParsedDoctorCliCommand;
+
 export async function runProfilePilotCli(
   args = process.argv.slice(2),
-  io: Pick<NodeJS.Process, "stdout" | "stderr"> = process
+  io: Pick<NodeJS.Process, "stdout" | "stderr"> = process,
+  runtime: { homeDir?: string; env?: NodeJS.ProcessEnv } = {}
 ): Promise<number> {
   if (args.includes("--help") || args.includes("-h") || args.length === 0) {
     io.stdout.write(helpText());
@@ -46,9 +70,22 @@ export async function runProfilePilotCli(
     return USAGE_EXIT_CODE;
   }
 
+  const homeDir = runtime.homeDir || os.homedir();
+  const env = runtime.env || process.env;
+  if ("local" in parsed && parsed.local === "logs") {
+    await runLogsCommand(parsed, io, homeDir, env);
+    return 0;
+  }
+  if ("local" in parsed && parsed.local === "doctor") {
+    const report = await createDoctorReport(homeDir, env);
+    if (parsed.json) io.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    else io.stdout.write(formatDoctorReport(report));
+    return report.status === "error" ? COMMAND_FAILED_EXIT_CODE : 0;
+  }
+
   let response: ProfilePilotManagementResponse;
   try {
-    response = await requestProfilePilotManagement(parsed.command);
+    response = await requestProfilePilotManagement(parsed.command, homeDir, env);
   } catch (error) {
     const candidate = error as NodeJS.ErrnoException;
     const unavailable = candidate?.code === "ENOENT" || candidate?.code === "ECONNREFUSED" || candidate?.code === "EPIPE";
@@ -76,6 +113,12 @@ export async function runProfilePilotCli(
 export function parseProfilePilotCliArgs(args: string[]): ParsedCliCommand {
   const json = args.includes("--json");
   const yes = args.includes("--yes");
+  if (args[0] === "logs") return parseLogsArgs(args.slice(1), json);
+  if (args[0] === "doctor") {
+    const extra = args.slice(1).filter((arg) => arg !== "--json");
+    if (extra.length) throw new Error(`doctor 不支持参数：${extra.join(" ")}`);
+    return { local: "doctor", json };
+  }
   const positionals = args.filter((arg) => arg !== "--json" && arg !== "--yes");
   if (positionals[0] === "status" && positionals.length === 1) {
     return { json, command: { action: "ping" } };
@@ -121,10 +164,228 @@ export function parseProfilePilotCliArgs(args: string[]): ParsedCliCommand {
   throw new Error(`不支持的 profile 命令：${verb}`);
 }
 
+function parseLogsArgs(args: string[], json: boolean): ParsedLogsCliCommand {
+  const levels: DiagnosticLogLevel[] = [];
+  let since: number | null = null;
+  let limit = 200;
+  let follow = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--json") continue;
+    if (arg === "--follow" || arg === "-f") {
+      follow = true;
+      continue;
+    }
+    if (arg === "--level") {
+      const value = args[index + 1];
+      if (!isDiagnosticLogLevel(value)) throw new Error("--level 只支持 debug、info、warn 或 error。");
+      levels.push(value);
+      index += 1;
+      continue;
+    }
+    if (arg === "--since") {
+      since = parseSince(args[index + 1]);
+      index += 1;
+      continue;
+    }
+    if (arg === "--limit") {
+      const value = Number(args[index + 1]);
+      if (!Number.isSafeInteger(value) || value <= 0 || value > 5_000) {
+        throw new Error("--limit 必须是 1 到 5000 之间的整数。");
+      }
+      limit = value;
+      index += 1;
+      continue;
+    }
+    throw new Error(`logs 不支持参数：${arg}`);
+  }
+  return { local: "logs", json, levels, since, limit, follow };
+}
+
+function parseSince(value: string | undefined, now = Date.now()): number {
+  const normalized = String(value || "").trim();
+  const relative = /^(\d+)(s|m|h|d)$/i.exec(normalized);
+  if (relative) {
+    const units: Record<string, number> = { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 };
+    return now - Number(relative[1]) * units[relative[2].toLowerCase()];
+  }
+  const absolute = Date.parse(normalized);
+  if (Number.isFinite(absolute)) return absolute;
+  throw new Error("--since 需要相对时间（如 30m、2h、7d）或 ISO 时间。");
+}
+
+function isDiagnosticLogLevel(value: string | undefined): value is DiagnosticLogLevel {
+  return value === "debug" || value === "info" || value === "warn" || value === "error";
+}
+
+async function runLogsCommand(
+  parsed: ParsedLogsCliCommand,
+  io: Pick<NodeJS.Process, "stdout" | "stderr">,
+  homeDir: string,
+  env: NodeJS.ProcessEnv
+): Promise<void> {
+  const read = (): DiagnosticLogEntry[] => readDiagnosticLogs({
+    homeDir,
+    env,
+    since: parsed.since,
+    levels: parsed.levels,
+    limit: parsed.limit
+  });
+  let entries = read();
+  writeLogEntries(io.stdout, entries, parsed.json);
+  if (!parsed.follow) {
+    if (!parsed.json && !entries.length) io.stdout.write("没有匹配的诊断日志。\n");
+    return;
+  }
+
+  const seen = new Set(entries.map(logEntryIdentity));
+  await new Promise<void>((resolve) => {
+    const timer = setInterval(() => {
+      entries = read();
+      const fresh = entries.filter((entry) => !seen.has(logEntryIdentity(entry)));
+      for (const entry of fresh) seen.add(logEntryIdentity(entry));
+      while (seen.size > 10_000) seen.delete(seen.values().next().value as string);
+      writeLogEntries(io.stdout, fresh, parsed.json);
+    }, 500);
+    const finish = (): void => {
+      clearInterval(timer);
+      process.off("SIGTERM", finish);
+      resolve();
+    };
+    process.once("SIGINT", finish);
+    process.once("SIGTERM", finish);
+  });
+}
+
+function writeLogEntries(
+  stream: Pick<NodeJS.WriteStream, "write">,
+  entries: DiagnosticLogEntry[],
+  json: boolean
+): void {
+  for (const entry of entries) {
+    if (json) {
+      stream.write(`${JSON.stringify(entry)}\n`);
+      continue;
+    }
+    const details = entry.details === undefined ? "" : `\n  ${JSON.stringify(entry.details)}`;
+    stream.write(`${entry.timestamp} ${entry.level.toUpperCase().padEnd(5)} ${entry.component}/${entry.event} ${entry.message}${details}\n`);
+  }
+}
+
+function logEntryIdentity(entry: DiagnosticLogEntry): string {
+  return `${entry.timestamp}\0${entry.pid}\0${entry.level}\0${entry.component}\0${entry.event}\0${entry.message}`;
+}
+
+export interface ProfilePilotDoctorReport {
+  status: "ok" | "warning" | "error";
+  checked_at: string;
+  cli_version: string;
+  runtime: {
+    node: string;
+    platform: string;
+    arch: string;
+  };
+  app: {
+    running: boolean;
+    version: string | null;
+    protocol_version: number | null;
+    pid: number | null;
+    error: string | null;
+  };
+  logs: ReturnType<typeof getDiagnosticLogStats> & {
+    recent_errors: number;
+    latest_error: Pick<DiagnosticLogEntry, "timestamp" | "component" | "event" | "message"> | null;
+  };
+}
+
+export async function createDoctorReport(
+  homeDir = os.homedir(),
+  env: NodeJS.ProcessEnv = process.env
+): Promise<ProfilePilotDoctorReport> {
+  let appStatus: ProfilePilotDoctorReport["app"];
+  try {
+    const response = await requestProfilePilotManagement({ action: "ping" }, homeDir, env, 3_000);
+    if (!response.ok) throw new Error(`${response.error.message} (${response.error.code})`);
+    const data = response.data as Record<string, unknown>;
+    appStatus = {
+      running: true,
+      version: typeof data.app_version === "string" ? data.app_version : null,
+      protocol_version: typeof data.protocol_version === "number" ? data.protocol_version : null,
+      pid: typeof data.pid === "number" ? data.pid : null,
+      error: null
+    };
+  } catch (error) {
+    const candidate = error as NodeJS.ErrnoException;
+    appStatus = {
+      running: false,
+      version: null,
+      protocol_version: null,
+      pid: null,
+      error: candidate.code === "ENOENT" || candidate.code === "ECONNREFUSED" || candidate.code === "EPIPE"
+        ? "ProfilePilot 桌面应用未运行"
+        : candidate.message || String(error)
+    };
+  }
+  const recentErrors = readDiagnosticLogs({
+    homeDir,
+    env,
+    since: Date.now() - 24 * 60 * 60 * 1_000,
+    levels: ["error"],
+    limit: 5_000
+  });
+  const latestError = recentErrors.at(-1);
+  return {
+    status: appStatus.running ? (recentErrors.length ? "warning" : "ok") : "warning",
+    checked_at: new Date().toISOString(),
+    cli_version: PROFILEPILOT_CLI_VERSION,
+    runtime: {
+      node: process.version,
+      platform: process.platform,
+      arch: process.arch
+    },
+    app: appStatus,
+    logs: {
+      ...getDiagnosticLogStats(homeDir, env),
+      recent_errors: recentErrors.length,
+      latest_error: latestError ? {
+        timestamp: latestError.timestamp,
+        component: latestError.component,
+        event: latestError.event,
+        message: latestError.message
+      } : null
+    }
+  };
+}
+
+function formatDoctorReport(report: ProfilePilotDoctorReport): string {
+  const state = report.status === "ok" ? "正常" : report.status === "warning" ? "需要注意" : "异常";
+  const app = report.app.running
+    ? `运行中 · v${report.app.version || "unknown"} · PID ${report.app.pid || "?"}`
+    : `未连接 · ${report.app.error || "原因未知"}`;
+  const latest = report.logs.latest_error
+    ? `\n最近错误：${report.logs.latest_error.timestamp} ${report.logs.latest_error.component}/${report.logs.latest_error.event} ${report.logs.latest_error.message}`
+    : "";
+  return [
+    `ProfilePilot Doctor：${state}`,
+    `桌面应用：${app}`,
+    `CLI：v${report.cli_version} · Node ${report.runtime.node} · ${report.runtime.platform}/${report.runtime.arch}`,
+    `诊断日志：${report.logs.files} 个文件 · ${formatBytes(report.logs.bytes)} · 最近 24 小时 ${report.logs.recent_errors} 个错误`,
+    `日志路径：${report.logs.active_file}${latest}`,
+    ""
+  ].join("\n");
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1_024) return `${bytes} B`;
+  if (bytes < 1_024 * 1_024) return `${(bytes / 1_024).toFixed(1)} KiB`;
+  return `${(bytes / (1_024 * 1_024)).toFixed(1)} MiB`;
+}
+
 export async function requestProfilePilotManagement(
   command: ProfilePilotManagementCommand,
   homeDir = os.homedir(),
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
+  timeoutMs = REQUEST_TIMEOUT_MS
 ): Promise<ProfilePilotManagementResponse> {
   const [token, socketPath] = await Promise.all([
     fs.readFile(profilePilotManagementSecretPath(homeDir, env), "utf8").then((value) => value.trim()),
@@ -148,7 +409,7 @@ export async function requestProfilePilotManagement(
       else if (response) resolve(response);
     };
     socket.setEncoding("utf8");
-    socket.setTimeout(REQUEST_TIMEOUT_MS, () => finish(Object.assign(new Error("连接 ProfilePilot 管理服务超时。"), { code: "ETIMEDOUT" })));
+    socket.setTimeout(timeoutMs, () => finish(Object.assign(new Error("连接 ProfilePilot 管理服务超时。"), { code: "ETIMEDOUT" })));
     socket.once("error", (error) => finish(error));
     socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
     socket.on("data", (chunk: string) => {
@@ -232,6 +493,8 @@ function helpText(): string {
 
 用法：
   profilepilot status [--json]
+  profilepilot doctor [--json]
+  profilepilot logs [--level <级别>] [--since <时间>] [--limit <数量>] [--follow] [--json]
   profilepilot profile list [--json]
   profilepilot profile get <名称|ID> [--json]
   profilepilot profile create --name <名称> [--json]
@@ -241,6 +504,8 @@ function helpText(): string {
   profilepilot profile delete <名称|ID> --yes [--json]
 
 说明：
+  logs 可在桌面应用未运行时读取本地脱敏诊断日志；--since 支持 30m、2h、7d 或 ISO 时间。
+  doctor 检查桌面应用连接、版本、运行环境和最近 24 小时错误。
   修改操作仅支持 ProfilePilot 创建的独立 Profile。
   系统 Profile 和子 Profile 可以查询，但不能通过管理 CLI 修改。
   CLI 通过本机受保护 Socket 调用正在运行的 ProfilePilot，不会直接修改 profiles.json。

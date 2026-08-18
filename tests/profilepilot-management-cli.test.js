@@ -10,6 +10,7 @@ const {
   startProfilePilotManagementServer
 } = require("../dist/main/profilepilot-management-server.js");
 const {
+  createDoctorReport,
   parseProfilePilotCliArgs,
   requestProfilePilotManagement
 } = require("../dist/main/profilepilot-cli.js");
@@ -133,6 +134,37 @@ test("CLI parser exposes stable profile management commands and explicit delete 
     true
   );
   assert.throws(() => parseProfilePilotCliArgs(["profile", "rename", "only-one-value"]), /rename 需要/);
+  const before = Date.now() - 2 * 60 * 60 * 1000;
+  const logs = parseProfilePilotCliArgs(["logs", "--level", "error", "--since", "2h", "--limit", "50", "--json"]);
+  const after = Date.now() - 2 * 60 * 60 * 1000;
+  assert.equal(logs.local, "logs");
+  assert.equal(logs.json, true);
+  assert.deepEqual(logs.levels, ["error"]);
+  assert.ok(logs.since >= before && logs.since <= after);
+  assert.equal(logs.limit, 50);
+  assert.equal(logs.follow, false);
+  assert.deepEqual(parseProfilePilotCliArgs(["doctor", "--json"]), { local: "doctor", json: true });
+  assert.throws(() => parseProfilePilotCliArgs(["logs", "--level", "fatal"]), /--level/);
+});
+
+test("doctor reports an offline app together with local diagnostic state", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "profilepilot-doctor-"));
+  const home = path.join(root, "home");
+  const env = {
+    ...process.env,
+    PROFILEPILOT_MANAGEMENT_ROOT: path.join(root, "missing-management"),
+    PROFILEPILOT_LOG_ROOT: path.join(root, "logs")
+  };
+  fs.mkdirSync(home, { recursive: true });
+  try {
+    const report = await createDoctorReport(home, env);
+    assert.equal(report.status, "warning");
+    assert.equal(report.app.running, false);
+    assert.match(report.app.error, /未运行/);
+    assert.equal(report.logs.recent_errors, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 function fakeProfileManager() {

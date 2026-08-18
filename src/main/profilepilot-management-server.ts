@@ -5,6 +5,7 @@ import os from "node:os";
 import type { AppState, PublicProfile, StoredProfile } from "../shared/types";
 import type { ProfileManager } from "./profile-manager";
 import { ProfileManagerError } from "./profile-manager-error";
+import { writeDiagnosticLog } from "./diagnostic-log";
 import {
   PROFILEPILOT_MANAGEMENT_MAX_MESSAGE_BYTES,
   PROFILEPILOT_MANAGEMENT_PROTOCOL_VERSION,
@@ -195,12 +196,35 @@ async function handleRequestLine(
   if (!request.command || typeof request.command.action !== "string") {
     return errorResponse(id, "MANAGEMENT_COMMAND_REQUIRED", "管理请求缺少 command。" );
   }
+  const startedAt = Date.now();
+  const metadata = managementCommandMetadata(request.command);
+  writeDiagnosticLog("info", "management-cli", "command.started", `开始执行 ${request.command.action}`, metadata);
   try {
     const data = await executeProfilePilotManagementCommand(request.command, options);
+    writeDiagnosticLog("info", "management-cli", "command.completed", `${request.command.action} 执行完成`, {
+      ...metadata,
+      duration_ms: Date.now() - startedAt
+    });
     return { version: 1, id, ok: true, data };
   } catch (error) {
+    const candidate = error as { code?: unknown; message?: unknown };
+    writeDiagnosticLog("error", "management-cli", "command.failed", `${request.command.action} 执行失败`, {
+      ...metadata,
+      duration_ms: Date.now() - startedAt,
+      error_code: typeof candidate?.code === "string" ? candidate.code : null,
+      error: typeof candidate?.message === "string" ? candidate.message : String(error)
+    });
     return responseFromError(id, error);
   }
+}
+
+function managementCommandMetadata(command: ProfilePilotManagementCommand): Record<string, unknown> {
+  if (command.action === "ping" || command.action === "profile.list") return { action: command.action };
+  if (command.action === "profile.create") return { action: command.action, profile_name: command.name };
+  if (command.action === "profile.rename") {
+    return { action: command.action, profile_selector: command.selector, profile_name: command.name };
+  }
+  return { action: command.action, profile_selector: command.selector };
 }
 
 function resolveProfile(state: AppState, selectorInput: string): PublicProfile {

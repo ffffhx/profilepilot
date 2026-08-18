@@ -111,6 +111,9 @@ jobs:
             echo "name=$name"
           } >> "$GITHUB_OUTPUT"
 
+      - name: Prepare release notes from changelog
+        run: node scripts/extract-release-notes.mjs "${{ steps.release_meta.outputs.tag }}" release-notes.md
+
       - name: Move rolling latest tag
         if: steps.release_meta.outputs.tag == 'latest'
         run: |
@@ -129,7 +132,8 @@ jobs:
           tag_name: ${{ steps.release_meta.outputs.tag }}
           name: ${{ steps.release_meta.outputs.name }}
           target_commitish: ${{ github.sha }}
-          generate_release_notes: true
+          body_path: release-notes.md
+          generate_release_notes: false
           make_latest: true
           overwrite_files: true
           fail_on_unmatched_files: true

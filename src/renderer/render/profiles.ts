@@ -1,4 +1,4 @@
-import { isBusyAction } from "../busy";
+import { isBusyAction, profileBusyKind, profileBusyStatusLabel } from "../busy";
 import { proxyServerUsesPort } from "../proxy";
 import { store } from "../state";
 import { AgentActivity, BifrostRuleDestination, BifrostSnapshot, CdpClientInfo, ExternalChromeInstance, ProfileReadinessReceipt, PublicProfile, SystemProxyRoute } from "../types";
@@ -164,18 +164,20 @@ export function computeMainReorder(
 export function renderProfileRow(profile: PublicProfile, isFirstInGroup = false, lastInGroup = false): string {
   const selected = profile.id === store.selectedId;
   const agentSettingsSaving = isBusyAction("save-agent-settings", { profileId: profile.id });
+  const busyKind = profileBusyKind(profile.id);
+  const statusLabel = busyKind ? profileBusyStatusLabel(busyKind) : profileStatusLabel(profile);
   // 数据目录行已隐藏：一个 user-data-dir 对应一个 CDP、其下可有多个 Profile，
   // 这个映射用户已理清，行内只留名称/徽标；完整路径仍在详情栏可查。
   // 拖拽角色：组首（主 Profile）拖动=整块数据目录一起挪；组内其它（子 Profile）拖动=仅在目录内排序。
   const dragRole = isFirstInGroup ? "primary" : "sub";
   const handleTitle = isFirstInGroup ? "拖拽调整数据目录顺序" : "拖拽在数据目录内排序";
   return `
-    <tr class="profile-child-row ${lastInGroup ? "last-in-group" : ""} ${selected ? "selected" : ""}" data-action="select" data-id="${profile.id}" data-profile-row data-drag-role="${dragRole}" tabindex="0" aria-selected="${selected ? "true" : "false"}">
+    <tr class="profile-child-row ${lastInGroup ? "last-in-group" : ""} ${selected ? "selected" : ""} ${busyKind ? "busy" : ""}" data-action="select" data-id="${profile.id}" data-profile-row data-drag-role="${dragRole}" tabindex="0" aria-selected="${selected ? "true" : "false"}" aria-busy="${busyKind ? "true" : "false"}">
       <td class="profile-name-cell">
         <span class="drag-handle" data-drag-handle role="button" tabindex="-1" aria-label="${handleTitle}" title="${handleTitle}">⠿</span>
         <div class="profile-pick w-full min-h-[auto] py-1 px-0.5 text-left">
           <span class="profile-name-line flex items-center gap-2 min-w-0">
-            <span class="status-dot w-[9px] h-[9px] flex-[0_0_auto] rounded-full bg-line-strong ${profile.running ? "running" : profile.source === "native" ? "native" : ""}"></span>
+            <span class="status-dot w-[9px] h-[9px] flex-[0_0_auto] rounded-full bg-line-strong ${busyKind ? "loading" : profile.running ? "running" : profile.source === "native" ? "native" : ""}"></span>
             <span class="profile-name block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[15px] font-[650] leading-[1.25]">${escapeHtml(profile.name)}</span>
             <span class="profile-name-badges">
               ${
@@ -192,8 +194,8 @@ export function renderProfileRow(profile: PublicProfile, isFirstInGroup = false,
         </div>
       </td>
       <td>
-        <span class="state-pill inline-flex items-center justify-center min-w-[58px] border-solid border border-line-strong rounded-full px-[9px] py-1 bg-transparent text-muted font-mono text-[11px] font-semibold tracking-[0.06em] ${profile.running ? "running" : ""}">
-          ${profileStatusLabel(profile)}
+        <span class="state-pill inline-flex items-center justify-center min-w-[58px] border-solid border border-line-strong rounded-full px-[9px] py-1 bg-transparent text-muted font-mono text-[11px] font-semibold tracking-[0.06em] ${busyKind ? "loading" : profile.running ? "running" : ""}">
+          ${busyKind ? '<span class="inline-spinner" aria-hidden="true"></span>' : ""}${escapeHtml(statusLabel)}
         </span>
       </td>
       <td>
@@ -1032,12 +1034,15 @@ export function renderDetails(profile: PublicProfile | null, includeLiveView = t
     `;
   }
 
+  const busyKind = profileBusyKind(profile.id);
+  const statusLabel = busyKind ? profileBusyStatusLabel(busyKind) : profileStatusLabel(profile);
+
   return `
     <aside class="details border-solid border border-line rounded-xl bg-[linear-gradient(180deg,var(--panel),var(--panel-soft))] p-[18px] [box-shadow:inset_0_1px_0_rgba(255,255,255,0.04),0_18px_44px_rgba(2,6,9,0.35)]">
       <div class="detail-title flex items-center justify-between gap-3 mb-[18px] pb-3 border-solid border-b border-line">
         <h2>${escapeHtml(profile.name)}</h2>
-        <span class="detail-status text-muted font-mono text-[11px] tracking-[0.08em] ${profile.running ? "running" : ""}">
-          ${profileStatusLabel(profile)}
+        <span class="detail-status text-muted font-mono text-[11px] tracking-[0.08em] ${busyKind ? "loading" : profile.running ? "running" : ""}">
+          ${busyKind ? '<span class="inline-spinner" aria-hidden="true"></span>' : ""}${escapeHtml(statusLabel)}
         </span>
       </div>
       <div class="detail-list grid gap-[14px]">

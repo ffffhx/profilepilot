@@ -6,6 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import { delay, launchProfilePilotE2e } from "./e2e/lib/electron-driver.mjs";
 
+const OPERATION_TIMEOUT_MS = process.platform === "win32" ? 45_000 : 10_000;
+
 async function createBifrostLaunchFixture() {
   const root = await mkdtemp(path.join(os.tmpdir(), "pp-bifrost-launch-"));
   const binaryPath = path.join(root, "bifrost-fixture.mjs");
@@ -91,11 +93,15 @@ async function main() {
     await driver.domClick('[data-action="new-profile"]');
     await driver.domInput("#profile-name", "Worktree A");
     await driver.domClick('[data-create-form] button[type="submit"]');
-    await driver.waitFor('[data-profile-row][data-id^="isolated:"]');
-    await driver.waitFor('[data-action="toggle-profile-menu"]', (snapshot) => snapshot.exists && snapshot.disabled === false);
+    const profileRow = await driver.waitFor('[data-profile-row][data-id^="isolated:"]');
+    const profileId = profileRow.attributes["data-id"];
+    assert.ok(profileId);
+    const menuSelector = `[data-action="toggle-profile-menu"][data-id="${profileId}"]`;
+    const launchSelector = `[data-action="launch"][data-id="${profileId}"]`;
+    await driver.waitFor(menuSelector, (snapshot) => snapshot.exists && snapshot.disabled === false);
 
     phase = "open Bifrost configuration";
-    await driver.domClick('[data-action="toggle-profile-menu"]');
+    await driver.domClick(menuSelector);
     const bifrostAction = await driver.query('[data-action="configure-bifrost-proxy"]');
     assert.equal(bifrostAction.exists, true, `Bifrost action missing; menu=${JSON.stringify(await driver.query(".action-menu"))}`);
     await driver.domClick('[data-action="configure-bifrost-proxy"]');
@@ -104,18 +110,13 @@ async function main() {
 
     phase = "configure Bifrost route";
     await driver.domInput("[data-bifrost-proxy-enabled]", undefined, { checked: true });
-    if (/\bready\b/.test(bifrostStatus.attributes.class || "")) {
-      const rule = await driver.waitFor("[data-bifrost-rule-option]");
-      assert.equal(rule.disabled, false);
-      await driver.domInput("[data-bifrost-rule-option]", undefined, { checked: true });
-    } else {
-      await driver.domInput("[data-bifrost-group-rules]", "7152084678483132446/worktree-a");
-    }
+    assert.match(bifrostStatus.text || "", /Bifrost/);
+    assert.equal((await driver.query('[data-bifrost-mode][value="bifrost-main"]')).checked, true);
 
     const route = await driver.query(".bifrost-route-map");
     assert.match(route.text || "", /Worktree A/);
-    assert.match(route.text || "", /127\.0\.0\.1:18888/);
-    assert.match(route.text || "", /1 条显式规则/);
+    assert.match(route.text || "", /127\.0\.0\.1:9900/);
+    assert.match(route.text || "", /Bifrost 主入口/);
 
     if (process.env.CPM_E2E_SCREENSHOT_PATH) {
       await delay(180);
@@ -125,23 +126,28 @@ async function main() {
 
     phase = "save Bifrost route";
     await driver.domClick('[data-bifrost-proxy-form] button[type="submit"]');
-    await driver.waitFor(".bifrost-proxy-modal", (snapshot) => !snapshot.exists);
-    const routeReadout = await driver.waitFor(".profile-route-track.bifrost");
-    assert.match(routeReadout.text || "", /Bifrost\s*:18888/);
-    assert.match(routeReadout.text || "", /worktree-a/);
+    await driver.waitFor(".bifrost-proxy-modal", (snapshot) => !snapshot.exists, { timeoutMs: OPERATION_TIMEOUT_MS });
+    const routeReadout = await driver.waitFor(".profile-route-track.upstream.provider-bifrost");
+    assert.match(routeReadout.text || "", /Bifrost\s*:9900/);
+    await driver.waitFor(menuSelector, (snapshot) => snapshot.exists && !snapshot.disabled, {
+      timeoutMs: OPERATION_TIMEOUT_MS
+    });
 
-    phase = "open recovery modal";
     try {
-      await driver.waitFor('[data-action="launch"]', undefined, { timeoutMs: 500 });
+      await driver.waitFor(launchSelector, undefined, { timeoutMs: 500 });
     } catch {
-      await driver.domClick('[data-action="toggle-profile-menu"]');
+      phase = "open profile menu for launch";
+      await driver.domClick(menuSelector);
     }
-    await driver.waitFor('[data-action="launch"]');
+    phase = "wait for launch action";
+    await driver.waitFor(launchSelector);
     phase = "request launch while Bifrost is stopped";
-    await driver.domClick('[data-action="launch"]');
+    await driver.domClick(launchSelector);
     phase = "wait for recovery modal";
-    const recoveryModal = await driver.waitFor(".confirm-dialog", (snapshot) =>
-      snapshot.exists && snapshot.text?.includes("启动 Bifrost 并继续")
+    const recoveryModal = await driver.waitFor(
+      ".confirm-dialog",
+      (snapshot) => snapshot.exists && snapshot.text?.includes("启动 Bifrost 并继续"),
+      { timeoutMs: OPERATION_TIMEOUT_MS }
     );
     assert.match(recoveryModal.text || "", /恢复分流并启动 Worktree A/);
     assert.match(recoveryModal.text || "", /本次直连启动/);
@@ -154,24 +160,26 @@ async function main() {
 
     phase = "one-click recover and launch";
     await driver.domClick('[data-action="start-bifrost-and-launch"]');
-    await driver.waitFor(".toast", (snapshot) =>
-      snapshot.exists && snapshot.text?.includes("已启动 Bifrost，并通过专属分流启动 Worktree A")
+    await driver.waitFor(
+      ".toast",
+      (snapshot) => snapshot.exists && snapshot.text?.includes("已启动 Bifrost，并通过专属分流启动 Worktree A"),
+      { timeoutMs: OPERATION_TIMEOUT_MS }
     );
 
     const bifrostCommands = await readFile(fixture.bifrostLogPath, "utf8");
     assert.match(bifrostCommands, /^start --daemon$/m);
-    assert.match(bifrostCommands, /^port bind --port 18888 -H 127\.0\.0\.1 --name profilepilot:/m);
     const chromeArgs = (await readFile(fixture.chromeLogPath, "utf8"))
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line))
       .flat();
-    assert.ok(chromeArgs.includes("--proxy-server=http://127.0.0.1:18888"), `args=${JSON.stringify(chromeArgs)}`);
+    assert.ok(chromeArgs.includes("--proxy-server=127.0.0.1:9900"), `args=${JSON.stringify(chromeArgs)}`);
 
-    console.log("[e2e:bifrost] PASS route configuration and one-click Bifrost recovery launch");
+    console.log("[e2e:bifrost] PASS main-route configuration and one-click Bifrost recovery launch");
   } catch (error) {
     const output = app.output();
     console.error(`[e2e:bifrost] failed during: ${phase}`);
+    console.error("[e2e:bifrost] UI toast:", await driver.query(".toast").catch(() => null));
     console.error(`[e2e:bifrost] renderer output\nstdout:\n${output.stdout}\nstderr:\n${output.stderr}`);
     throw error;
   } finally {

@@ -60,6 +60,16 @@ const AGENT_PASSIVE_TARGET_METHODS = new Set([
   "Security.enable"
 ]);
 
+const AGENT_TARGET_INTERACTION_METHODS = new Set([
+  "DOM.focus",
+  "DOM.setAttributeValue",
+  "DOM.setAttributesAsText",
+  "DOM.setFileInputFiles",
+  "Page.navigate",
+  "Page.navigateToHistoryEntry",
+  "Page.reload"
+]);
+
 const RAW_DENIED_METHODS = new Set([
   "Browser.close",
   "Browser.setDownloadBehavior",
@@ -111,4 +121,13 @@ export function isAgentTargetActivityMethod(method: string): boolean {
     return false;
   }
   return !AGENT_PASSIVE_TARGET_METHODS.has(method);
+}
+
+export function isAgentTargetInteractionMethod(method: string): boolean {
+  return Boolean(
+    method && (
+      method.startsWith("Input.") ||
+      AGENT_TARGET_INTERACTION_METHODS.has(method)
+    )
+  );
 }

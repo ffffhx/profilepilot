@@ -52,7 +52,7 @@ export interface RendererState {
   accountSyncSourceId: string | null;
   accountSyncTargetId: string | null;
   launchSyncedProfile: boolean;
-  // 合并同步面板的内容开关：默认账号登录态和插件都同步，允许只勾其一。
+  // 合并同步面板的内容开关：默认 Profile 数据和插件都同步，允许只勾其一。
   syncAccountPart: boolean;
   syncExtensionsPart: boolean;
   // 账号同步差异扫描（源 vs 目标）：手动触发，换源/换目标/同步完成后清空。

@@ -6,6 +6,7 @@ import readline from "node:readline";
 import { driverLabelFromCommand } from "./cdp-client";
 import { POSIX_LOCALE_ENV, execFileAsync, isRecord, stringValue } from "./fs-util";
 import { resolveCanonicalSessionIdentity } from "./session-identity";
+import { getWindowsSystemSnapshot } from "./windows-platform";
 
 // 一个 CDP 客户端背后的“谁在用”：工具名（Codex / Claude Code / agent-browser…）、项目、会话标题。
 // 只有能从进程/会话档案里解析出来时才带 agent/project/title；否则退化成纯 label。
@@ -331,6 +332,10 @@ async function readdirDesc(dir: string): Promise<string[]> {
 // agent-browser daemon 打开的 unix socket（~/.agent-browser/<session>.sock）→ session 名。
 // 配合“每个并发会话各用 --session <名>”的使用纪律，session 名就是可靠的归属标识。
 async function agentBrowserSockSession(pid: number): Promise<string | undefined> {
+  if (process.platform === "win32") {
+    const command = await psCommand(pid);
+    return command ? commandOption(command, "--session") : undefined;
+  }
   try {
     const { stdout } = await execFileAsync("lsof", ["-a", "-p", String(pid), "-U", "-Fn"], {
       maxBuffer: 1024 * 1024,
@@ -425,7 +430,7 @@ async function resolveOne(pid: number, comm: string): Promise<CachedContext> {
 
 // 拿工作目录名当“项目”兜底；根目录/家目录太泛，不当项目。
 function projectFromCwd(cwd: string): string | undefined {
-  if (cwd === "/" || cwd === homedir()) {
+  if (path.resolve(cwd) === path.parse(path.resolve(cwd)).root || path.resolve(cwd) === path.resolve(homedir())) {
     return undefined;
   }
   return path.basename(cwd) || undefined;
@@ -434,7 +439,7 @@ function projectFromCwd(cwd: string): string | undefined {
 // cwd → Claude 项目 slug（Claude 把工作目录里的 / 和 . 都换成 -）→ 该目录下最近改动的会话档案。
 // 用于驱动进程 cwd 就是项目目录（而非 scratchpad）的情况：取 mtime 最新的会话＝当前正在用的那个。
 async function latestClaudeSessionForCwd(cwd: string): Promise<string | null> {
-  const slug = cwd.replace(/[/.]/g, "-");
+  const slug = cwd.replace(/[\\/:.]/g, "-");
   const dir = path.join(homedir(), ".claude", "projects", slug);
   let entries: string[];
   try {
@@ -459,6 +464,10 @@ async function latestClaudeSessionForCwd(cwd: string): Promise<string | null> {
 }
 
 async function psCommand(pid: number): Promise<string | null> {
+  if (process.platform === "win32") {
+    const snapshot = await getWindowsSystemSnapshot().catch(() => null);
+    return snapshot?.processes.find((processInfo) => processInfo.pid === pid)?.commandLine || null;
+  }
   try {
     const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "command="], {
       maxBuffer: 1024 * 1024,
@@ -473,6 +482,10 @@ async function psCommand(pid: number): Promise<string | null> {
 }
 
 async function lsofCwd(pid: number): Promise<string | null> {
+  if (process.platform === "win32") {
+    const command = await psCommand(pid);
+    return command ? commandOption(command, "--working-dir") || commandOption(command, "--cwd") || null : null;
+  }
   try {
     const { stdout } = await execFileAsync("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], {
       maxBuffer: 1024 * 1024,
@@ -487,16 +500,21 @@ async function lsofCwd(pid: number): Promise<string | null> {
 }
 
 function codexWorkingDir(command: string): string | null {
-  if (!command.includes("Codex.app") && !command.includes("cua_node")) {
+  if (!/Codex\.app|cua_node|(?:^|[\\/\s])codex(?:\.exe)?(?:\s|$)/i.test(command)) {
     return null;
   }
-  const match = command.match(/--working-dir[= ]+(\S+)/);
-  return match ? match[1] : null;
+  return commandOption(command, "--working-dir") || null;
+}
+
+function commandOption(command: string, option: string): string | undefined {
+  const escaped = option.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = command.match(new RegExp(`${escaped}(?:=|\\s+)(?:"([^"]+)"|'([^']+)'|(\\S+))`, "i"));
+  return match?.[1] || match?.[2] || match?.[3] || undefined;
 }
 
 // …/claude-<uid>/<slug>/<sessionUuid>/… → ~/.claude/projects/<slug>/<sessionUuid>.jsonl
 function claudeSessionFile(cwd: string): string | null {
-  const match = cwd.match(/\/claude-\d+\/([^/]+)\/([0-9a-fA-F-]{36})(?:\/|$)/);
+  const match = cwd.match(/[\\/]claude-\d+[\\/]([^\\/]+)[\\/]([0-9a-fA-F-]{36})(?:[\\/]|$)/);
   if (!match) {
     return null;
   }
@@ -529,6 +547,9 @@ async function loadCodexRolloutFiles(): Promise<string[]> {
 }
 
 async function lsofCodexRollouts(): Promise<string[]> {
+  if (process.platform === "win32") {
+    return [];
+  }
   try {
     const { stdout } = await execFileAsync("lsof", ["-c", "codex", "-Fn"], {
       maxBuffer: 4 * 1024 * 1024,

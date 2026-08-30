@@ -94,6 +94,14 @@ export interface GatewayControlEvent {
   type: "profile-updated" | "connections-revoked" | "connection-updated";
   profile: GatewayProfileBinding;
   reason: string;
+  targetChange?: GatewayAgentTargetChange;
+}
+
+export interface GatewayAgentTargetChange {
+  sessionId: string;
+  previousTargetId: string | null;
+  targetId: string | null;
+  source: string;
 }
 
 export class BrowserGatewayControlError extends Error {

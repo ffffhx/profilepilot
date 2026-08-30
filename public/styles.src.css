@@ -181,6 +181,12 @@ body.mini-mode #app,
   cursor: grabbing !important;
 }
 
+.mini-logo-dock-wrap {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
 .mini-logo-dock {
   position: relative;
   display: grid;
@@ -240,6 +246,49 @@ body.mini-mode #app,
     animation: none;
     border-color: rgba(56, 225, 160, 0.85);
   }
+}
+
+.mini-dock-close {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  z-index: 2;
+  display: grid;
+  width: 22px;
+  height: 22px;
+  min-height: 22px;
+  place-items: center;
+  border: 1px solid rgba(130, 153, 168, 0.44);
+  border-radius: 50%;
+  background: rgba(9, 17, 22, 0.94);
+  padding: 0 0 2px;
+  color: rgba(210, 222, 229, 0.8);
+  font-family: var(--font-ui);
+  font-size: 16px;
+  line-height: 1;
+  opacity: 0.78;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+  transition:
+    opacity 120ms ease,
+    border-color 120ms ease,
+    background-color 120ms ease,
+    color 120ms ease,
+    transform 120ms ease;
+}
+
+.mini-dock-close:hover,
+.mini-dock-close:focus-visible {
+  border-color: rgba(255, 112, 101, 0.82);
+  background: rgba(73, 25, 25, 0.96);
+  color: #ffb2aa;
+  opacity: 1;
+  transform: scale(1.06);
+}
+
+.mini-dock-close:focus-visible {
+  outline: 2px solid rgba(255, 149, 139, 0.72);
+  outline-offset: 1px;
 }
 
 .mini-mark-button {
@@ -402,6 +451,13 @@ body.mini-collapsing .mini-shell {
   border-color: var(--accent-line);
   background: rgba(56, 225, 160, 0.1);
   color: var(--accent-bright);
+}
+
+.mini-window-actions .mini-panel-close:hover,
+.mini-window-actions .mini-panel-close:focus-visible {
+  border-color: rgba(255, 112, 101, 0.72);
+  background: rgba(255, 83, 70, 0.1);
+  color: #ffb2aa;
 }
 
 .mini-profile-list {
@@ -1756,6 +1812,20 @@ body:not(.booted) .migration-panel {
   font-size: 11px;
   min-width: 48px;
   text-align: right;
+}
+
+.clone-row-state.loading {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  color: var(--accent-bright);
+}
+
+.clone-row-state.loading .inline-spinner {
+  width: 10px;
+  height: 10px;
+  border-width: 1.5px;
 }
 
 .clone-row-actions {
@@ -3403,6 +3473,14 @@ body:not(.booted) .layout {
   animation: beacon 2.2s ease-in-out infinite;
 }
 
+.status-dot.loading {
+  background: transparent;
+  border: 1.5px solid var(--accent);
+  border-right-color: transparent;
+  box-shadow: none;
+  animation: spinner-rotate 0.8s linear infinite;
+}
+
 .status-dot.native {
   background: var(--warn);
   box-shadow: 0 0 7px rgba(242, 177, 62, 0.6);
@@ -3475,6 +3553,20 @@ body:not(.booted) .layout {
   background: var(--accent-soft);
   color: var(--accent-bright);
   box-shadow: 0 0 12px rgba(56, 225, 160, 0.15);
+}
+
+.state-pill.loading {
+  gap: 6px;
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+  color: var(--accent-bright);
+  box-shadow: 0 0 12px rgba(56, 225, 160, 0.15);
+}
+
+.state-pill.loading .inline-spinner {
+  width: 10px;
+  height: 10px;
+  border-width: 1.5px;
 }
 
 /* 基础态保留为 CSS：仍被 extensions 面板复用，profiles 处已叠加等值工具类。 */
@@ -3602,6 +3694,21 @@ body:not(.booted) .layout {
   color: var(--accent-bright);
   font-weight: 600;
   text-shadow: 0 0 12px rgba(56, 225, 160, 0.5);
+}
+
+.detail-status.loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--accent-bright);
+  font-weight: 600;
+  text-shadow: 0 0 12px rgba(56, 225, 160, 0.5);
+}
+
+.detail-status.loading .inline-spinner {
+  width: 10px;
+  height: 10px;
+  border-width: 1.5px;
 }
 
 .detail-row {
@@ -4344,7 +4451,14 @@ body:not(.booted) .layout {
 
 .confirm-dialog {
   padding: 0;
-  overflow: hidden;
+  max-height: calc(100vh - 36px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: linear-gradient(180deg, var(--panel-raise), var(--panel));
+  color: var(--text);
+  box-shadow: 0 30px 90px rgba(2, 6, 9, 0.8), 0 0 0 1px rgba(56, 225, 160, 0.06);
 }
 
 .confirm-dialog-head {
@@ -4389,23 +4503,23 @@ body:not(.booted) .layout {
   transform: translateX(-50%);
 }
 
-.confirm-dialog.warn .confirm-dialog-icon {
+.confirm-dialog.tone-warn .confirm-dialog-icon {
   background: var(--warn-soft);
   color: var(--warn-bright);
   box-shadow: inset 0 0 0 1px var(--warn-line);
 }
 
-.confirm-dialog.danger .confirm-dialog-icon {
+.confirm-dialog.tone-danger .confirm-dialog-icon {
   background: var(--danger-soft);
   color: var(--danger-bright);
   box-shadow: inset 0 0 0 1px var(--danger-line);
 }
 
-.confirm-dialog.warn .modal-kicker {
+.confirm-dialog.tone-warn .modal-kicker {
   color: var(--warn);
 }
 
-.confirm-dialog.danger .modal-kicker {
+.confirm-dialog.tone-danger .modal-kicker {
   color: var(--danger);
 }
 
@@ -4423,8 +4537,13 @@ body:not(.booted) .layout {
 }
 
 .confirm-copy p.danger-line {
-  color: var(--danger-bright);
-  font-weight: 700;
+  margin: 12px 0;
+  border-left: 3px solid var(--danger);
+  border-radius: 0 7px 7px 0;
+  background: var(--danger-soft);
+  padding: 10px 12px;
+  color: #ffc0ba;
+  font-weight: 650;
 }
 
 .modal-note.warn {
@@ -5861,6 +5980,7 @@ body:not(.booted) .layout {
 
   .eyebrow::before,
   .status-dot.running,
+  .status-dot.loading,
   .operation-progress-steps li.active span {
     animation: none;
   }
@@ -6838,6 +6958,10 @@ button:hover:not(:disabled) {
   padding: 5px 8px;
   font-size: 10px;
   letter-spacing: 0;
+}
+
+.profiles-table .state-pill.loading {
+  min-width: 72px;
 }
 
 .profiles-table .cdp-tip {

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawn, type SpawnOptions } from "node:child_process";
+import type { SpawnOptions } from "node:child_process";
 import {
   accessSync,
   constants as fsConstants,
@@ -20,6 +20,7 @@ import {
   type GatewayDriverProfileEnsurer,
   type GatewayDriverRequester
 } from "./browser-gateway-driver-runtime";
+import { spawnPortableCommand } from "./portable-command";
 
 const SAFE_SESSION_RE = /^[A-Za-z0-9._:-]{1,240}$/;
 export const PROFILEPILOT_CHROME_DEVTOOLS_MCP_HARD_STOP_EXIT_CODE = 75;
@@ -186,7 +187,12 @@ export function resolveRealChromeDevtoolsMcp(
   const self = realpathOrInput(selfPath);
   const managedLauncher = realpathOrInput(
     env.PROFILEPILOT_CHROME_DEVTOOLS_MCP_LAUNCHER ||
-      path.join(env.HOME || os.homedir(), ".profilepilot", "bin", "chrome-devtools-mcp")
+      path.join(
+        env.HOME || os.homedir(),
+        ".profilepilot",
+        "bin",
+        process.platform === "win32" ? "chrome-devtools-mcp.cmd" : "chrome-devtools-mcp"
+      )
   );
   for (const candidate of executableCandidatesOnPath("chrome-devtools-mcp", env)) {
     const real = realpathOrInput(candidate);
@@ -264,7 +270,7 @@ export function spawnChromeDevtoolsMcp(
   options: Pick<SpawnOptions, "cwd"> = {}
 ): Promise<ChromeDevtoolsMcpSpawnResult> {
   return new Promise((resolve) => {
-    const child = spawn(command.executable, [...command.prefixArgs, ...args], {
+    const child = spawnPortableCommand(command.executable, [...command.prefixArgs, ...args], {
       cwd: options.cwd,
       env,
       stdio: "inherit"
@@ -380,7 +386,7 @@ function executableCandidatesOnPath(command: string, env: NodeJS.ProcessEnv): st
   const pathValue = env.PATH || env.Path || env.path || "";
   const pathEntries = pathValue.split(path.delimiter).filter(Boolean);
   const extensions = process.platform === "win32"
-    ? executableExtensions(command, env.PATHEXT)
+    ? [".exe", ".ps1", ".cmd", ".bat", ".com"]
     : [""];
   const seen = new Set<string>();
   const candidates: string[] = [];

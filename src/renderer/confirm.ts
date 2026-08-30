@@ -4,7 +4,7 @@ import { render } from "./render/render-root";
 import { invalidateExtensionMigrationDiff, loadState } from "./state-actions";
 import { store } from "./state";
 import { ConfirmBodyLine, ConfirmIntent, ConfirmModalView, ModalState, PublicProfile, TakeoverAgentConnectionsResponse } from "./types";
-import { cdpClientToolSummary, cdpSessionText, closeConfirmCopy, deleteConfirmCopy, escapeHtml, formatDate, formatErrorMessage, formatRelativeTime, prettyCdpClientLabel, profileAgentControlClients, profileStatusLabel, sourceDetail } from "./util";
+import { cdpClientToolSummary, cdpSessionText, closeConfirmCopy, deleteConfirmCopy, escapeHtml, formatDate, formatErrorMessage, formatRelativeTime, isWindowsNativeAgentTemplate, prettyCdpClientLabel, profileAgentControlClients, profileStatusLabel, sourceDetail } from "./util";
 
 export function renderConfirmModal(confirm: Extract<ModalState, { kind: "confirm" }>): string {
   const view = confirmModalView(confirm.intent);
@@ -19,7 +19,7 @@ export function renderConfirmModal(confirm: Extract<ModalState, { kind: "confirm
 
   return `
     <div class="modal-backdrop app-modal-backdrop" data-action="close-modal">
-      <section class="modal confirm-modal confirm-dialog ${view.tone}" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+      <section class="modal confirm-modal confirm-dialog tone-${view.tone}" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
         <div class="confirm-dialog-head">
           <span class="confirm-dialog-icon" aria-hidden="true"></span>
           <div>
@@ -182,7 +182,7 @@ export function confirmModalView(intent: ConfirmIntent): ConfirmModalView | null
       return null;
     }
 
-    const parts = [intent.syncAccount ? "账号登录态" : null, intent.syncExtensions ? "插件" : null]
+    const parts = [intent.syncAccount ? "Profile 数据" : null, intent.syncExtensions ? "插件" : null]
       .filter(Boolean)
       .join(" + ");
     const body: string[] = [];
@@ -192,8 +192,8 @@ export function confirmModalView(intent: ConfirmIntent): ConfirmModalView | null
     if (intent.syncAccount) {
       body.push(
         intent.existingRecordSyncedAt
-          ? `上次已在 ${formatDate(intent.existingRecordSyncedAt)} 从 ${sourceProfile.name} 同步到 ${targetProfile.name}。继续会覆盖刷新目标登录态，不会重复叠加。`
-          : `${targetProfile.name} 当前登录态会被 ${sourceProfile.name} 的登录态覆盖。`
+          ? `上次已在 ${formatDate(intent.existingRecordSyncedAt)} 从 ${sourceProfile.name} 同步到 ${targetProfile.name}。继续会覆盖刷新可迁移数据，不会重复叠加；登录状态仍需在目标网站验证。`
+          : `${targetProfile.name} 的可迁移 Profile 数据会被 ${sourceProfile.name} 覆盖；登录状态仍需在目标网站验证。`
       );
     }
     if (intent.syncExtensions) {
@@ -249,18 +249,40 @@ export function confirmModalView(intent: ConfirmIntent): ConfirmModalView | null
     if (!source) {
       return null;
     }
+    const windowsNativeTemplate = isWindowsNativeAgentTemplate(store.state.platform, source);
+    const willRestartSource = store.state.platform === "win32" && source.running && !windowsNativeTemplate;
     return {
-      kicker: "批量克隆确认",
-      title: `克隆 ${source.name} 为 ${intent.count} 份`,
+      kicker: windowsNativeTemplate ? "创建 Agent 浏览器" : "批量克隆确认",
+      title: windowsNativeTemplate
+        ? `从 ${source.name} 创建 ${intent.count} 个 Agent 浏览器`
+        : `克隆 ${source.name} 为 ${intent.count} 份`,
       body: [
-        `会新建 ${intent.count} 个隔离副本，逐个从 ${source.name} 复制登录态${intent.includeExtensions ? "并同步插件" : ""}，各分配一个独立的固定 CDP 端口。`,
-        intent.launchAfter ? "克隆完成后会逐个以 CDP 模式启动。" : "克隆完成后不会自动启动，可稍后在副本池里批量启动。",
-        "克隆较耗时（每份都要复制账号数据），请耐心等待。"
-      ],
-      confirmLabel: `克隆 ${intent.count} 份`,
+        windowsNativeTemplate
+          ? `会新建 ${intent.count} 个独立 Profile，只从「${source.name}」复制书签${intent.includeExtensions ? "与插件" : ""}，不会复制 Cookie、站点数据或缓存；各分配一个固定 CDP 端口。`
+          : `会新建 ${intent.count} 个隔离副本，逐个从 ${source.name} 复制可迁移的 Profile 数据${intent.includeExtensions ? "并同步插件" : ""}，各分配一个独立的固定 CDP 端口。登录状态仍需在目标网站验证。`,
+        windowsNativeTemplate
+          ? "Windows 原生 Chrome 使用 App-Bound Encryption，登录 Cookie 不能在独立目录中复用。请在每个 Agent 浏览器首次启动后登录一次，之后持续复用它。"
+          : null,
+        willRestartSource
+          ? {
+              text: `Windows 正在使用源 ${source.name}。开始克隆前会先关闭它以释放 Cookie 等数据文件，结束后会自动重新打开。`,
+              tone: "danger"
+            }
+          : null,
+        intent.launchAfter ? "创建完成后会逐个以 CDP 模式启动。" : "创建完成后不会自动启动，可稍后在副本池里批量启动。",
+        windowsNativeTemplate ? "轻量模板不会扫描或复制浏览器缓存。" : "复制时间取决于 Profile 数据量；缓存目录不会复制。"
+      ].filter((line): line is ConfirmBodyLine => Boolean(line)),
+      confirmLabel: `${windowsNativeTemplate ? "创建" : "克隆"} ${intent.count} 份`,
       tone: "primary",
       summary: [
         { label: "源 Profile", value: source.name },
+        ...(willRestartSource ? [{ label: "源运行状态", value: "先关闭，完成后恢复" }] : []),
+        ...(windowsNativeTemplate
+          ? [
+              { label: "模式", value: "Windows 轻量模板" },
+              { label: "登录", value: "创建后手动登录" }
+            ]
+          : []),
         { label: "份数", value: String(intent.count) },
         { label: "含插件", value: intent.includeExtensions ? "是" : "否" },
         { label: "克隆后启动", value: intent.launchAfter ? "是" : "否" }
@@ -275,16 +297,19 @@ export function confirmModalView(intent: ConfirmIntent): ConfirmModalView | null
     }
     const clones = store.state.profiles.filter((profile) => profile.clonedFromProfileId === intent.sourceProfileId);
     const runningCount = clones.filter((clone) => clone.running).length;
+    const windowsNativeTemplate = isWindowsNativeAgentTemplate(store.state.platform, source);
     return {
-      kicker: "刷新副本登录态",
-      title: `刷新 ${source.name} 的 ${clones.length} 个副本`,
+      kicker: windowsNativeTemplate ? "更新轻量模板" : "刷新副本数据",
+      title: `${windowsNativeTemplate ? "更新" : "刷新"} ${source.name} 的 ${clones.length} 个副本`,
       body: [
-        `会以 ${source.name} 为准，把它的全部副本登录态增量刷新一遍。`,
+        windowsNativeTemplate
+          ? `会以 ${source.name} 为准，只更新全部副本的书签；不会覆盖各副本自己的 Cookie、站点数据或登录状态。`
+          : `会以 ${source.name} 为准，把全部副本的可迁移 Profile 数据增量刷新一遍；登录状态仍需在目标网站验证。`,
         runningCount
           ? `其中 ${runningCount} 个副本正在运行，刷新前会先关闭它们（不会自动重开）。`
-          : "副本会逐个写入最新登录态。"
+          : windowsNativeTemplate ? "副本会逐个写入最新书签模板。" : "副本会逐个写入最新 Profile 数据。"
       ],
-      confirmLabel: "刷新登录态",
+      confirmLabel: windowsNativeTemplate ? "更新模板" : "刷新数据",
       tone: "warn",
       summary: [
         { label: "源 Profile", value: source.name },
@@ -302,16 +327,21 @@ export function confirmModalView(intent: ConfirmIntent): ConfirmModalView | null
     const source = clone.clonedFromProfileId
       ? store.state.profiles.find((profile) => profile.id === clone.clonedFromProfileId)
       : null;
+    const windowsNativeTemplate = isWindowsNativeAgentTemplate(store.state.platform, source || null);
     return {
-      kicker: "重置副本",
-      title: `重置 ${clone.name}`,
+      kicker: windowsNativeTemplate ? "更新轻量模板" : "重置副本",
+      title: `${windowsNativeTemplate ? "更新" : "重置"} ${clone.name}`,
       body: [
-        source
-          ? `会以源 ${source.name} 为准，重新覆盖 ${clone.name} 的登录态（全量）。`
-          : "会以记录的源为准，重新覆盖这个副本的登录态。",
-        clone.running ? "副本正在运行，重置前会先关闭它。" : "重置只覆盖登录态，不会清空本地浏览数据。"
+        windowsNativeTemplate
+          ? `会以源 ${source?.name || "Profile"} 为准更新书签，不会覆盖 ${clone.name} 自己的登录状态或站点数据。`
+          : source
+            ? `会以源 ${source.name} 为准，重新覆盖 ${clone.name} 的可迁移 Profile 数据；登录状态仍需在目标网站验证。`
+            : "会以记录的源为准，重新覆盖这个副本的可迁移 Profile 数据。",
+        clone.running
+          ? `副本正在运行，${windowsNativeTemplate ? "更新" : "重置"}前会先关闭它。`
+          : windowsNativeTemplate ? "只更新书签模板，不会清空本地浏览数据。" : "不会清空目标中未包含在同步范围内的数据。"
       ],
-      confirmLabel: "重置登录态",
+      confirmLabel: windowsNativeTemplate ? "更新模板" : "重置数据",
       tone: "warn",
       summary: [
         { label: "副本", value: clone.name },
@@ -769,6 +799,7 @@ export function executeDisconnectClientConfirm(intent: Extract<ConfirmIntent, { 
 
 export function executeCloneProfilesConfirm(intent: Extract<ConfirmIntent, { kind: "clone-profiles" }>): void {
   const source = store.state?.profiles.find((profile) => profile.id === intent.sourceProfileId);
+  const windowsNativeTemplate = isWindowsNativeAgentTemplate(store.state?.platform, source || null);
   // 保持副本池弹窗开着，过程中显示进度，完成后直接看到新副本列表。
   store.modal = { kind: "clone-pool" };
   if (!source) {
@@ -788,7 +819,11 @@ export function executeCloneProfilesConfirm(intent: Extract<ConfirmIntent, { kin
       });
       store.state = result.state;
       store.clonePoolSourceId = intent.sourceProfileId;
-      setToast(`已克隆 ${result.created.length} 个副本`);
+      setToast(
+        windowsNativeTemplate
+          ? `已创建 ${result.created.length} 个 Agent 浏览器，请首次启动后分别登录`
+          : `已克隆 ${result.created.length} 个副本，登录状态请在目标网站验证`
+      );
     },
     undefined,
     { key: "clone-profiles", message: `正在克隆 ${intent.count} 份…` }
@@ -797,6 +832,7 @@ export function executeCloneProfilesConfirm(intent: Extract<ConfirmIntent, { kin
 
 export function executeRefreshClonesConfirm(intent: Extract<ConfirmIntent, { kind: "refresh-clones" }>): void {
   const source = store.state?.profiles.find((profile) => profile.id === intent.sourceProfileId);
+  const windowsNativeTemplate = isWindowsNativeAgentTemplate(store.state?.platform, source || null);
   store.modal = { kind: "clone-pool" };
   if (!source) {
     render();
@@ -810,16 +846,20 @@ export function executeRefreshClonesConfirm(intent: Extract<ConfirmIntent, { kin
       store.state = result.state;
       store.clonePoolSourceId = intent.sourceProfileId;
       setToast(
-        `已刷新 ${result.refreshedCount} 个副本登录态${result.skippedCount ? `，跳过 ${result.skippedCount} 个` : ""}`
+        `已${windowsNativeTemplate ? "更新" : "刷新"} ${result.refreshedCount} 个副本${windowsNativeTemplate ? "的书签模板" : "数据"}${result.skippedCount ? `，跳过 ${result.skippedCount} 个` : ""}`
       );
     },
     undefined,
-    { key: "refresh-clones", message: "正在刷新副本登录态…" }
+    { key: "refresh-clones", message: windowsNativeTemplate ? "正在更新副本书签模板…" : "正在刷新副本数据…" }
   );
 }
 
 export function executeResetCloneConfirm(intent: Extract<ConfirmIntent, { kind: "reset-clone" }>): void {
   const clone = store.state?.profiles.find((profile) => profile.id === intent.profileId);
+  const source = clone?.clonedFromProfileId
+    ? store.state?.profiles.find((profile) => profile.id === clone.clonedFromProfileId) || null
+    : null;
+  const windowsNativeTemplate = isWindowsNativeAgentTemplate(store.state?.platform, source);
   store.modal = { kind: "clone-pool" };
   if (!clone) {
     render();
@@ -833,8 +873,10 @@ export function executeResetCloneConfirm(intent: Extract<ConfirmIntent, { kind: 
       store.state = result.state;
       store.selectedId = intent.profileId;
     },
-    `已重置 ${emphasizeName(clone.name)} 的登录态`,
-    { key: "reset-clone", message: `正在重置 ${clone.name}…`, profileId: intent.profileId }
+    windowsNativeTemplate
+      ? `已更新 ${emphasizeName(clone.name)} 的书签模板`
+      : `已重置 ${emphasizeName(clone.name)} 的 Profile 数据`,
+    { key: "reset-clone", message: `正在${windowsNativeTemplate ? "更新" : "重置"} ${clone.name}…`, profileId: intent.profileId }
   );
 }
 
@@ -969,7 +1011,7 @@ function isChromeRunningDeleteError(message: string): boolean {
   return message.includes("删除 Chrome Profile 前请先退出 Chrome");
 }
 
-// 合并同步：按勾选串行执行「账号登录态 → 插件 → 启动目标」。
+// 合并同步：按勾选串行执行「Profile 数据 → 插件 → 启动目标」。
 // 每个阶段沿用各自的 busy key（account-sync / migrate-extensions），
 // 这样主进程按 key 上报的进度、暂停/终止按钮都能照常工作。
 export function executeProfileSyncConfirm(intent: Extract<ConfirmIntent, { kind: "profile-sync" }>): void {

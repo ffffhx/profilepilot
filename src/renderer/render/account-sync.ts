@@ -1,9 +1,9 @@
 import { isBusyAction } from "../busy";
 import { store } from "../state";
 import { PublicProfile } from "../types";
-import { escapeHtml, formatDate, profileStatusLabel, renderButtonLabel, renderOperationProgress, sourceLabel } from "../util";
+import { escapeHtml, formatDate, isWindowsCrossDataDirAccountSyncUnsupported, profileStatusLabel, renderButtonLabel, renderOperationProgress, sourceLabel } from "../util";
 
-// 合并同步面板：账号登录态 + 插件共用一对源/目标 Profile，
+// 合并同步面板：可迁移的 Profile 数据 + 插件共用一对源/目标 Profile，
 // 默认两项都同步，也可以只勾其中一项。
 export function renderSyncPanel(profiles: PublicProfile[]): string {
   const sourceId = store.accountSyncSourceId || profiles[0]?.id || "";
@@ -16,7 +16,9 @@ export function renderSyncPanel(profiles: PublicProfile[]): string {
   const runningBlocker = targetProfile?.running ? targetProfile : null;
   const partAccount = store.syncAccountPart;
   const partExtensions = store.syncExtensionsPart;
-  const canSync = Boolean(sourceProfile && targetProfile && sourceProfile.id !== targetProfile.id) && (partAccount || partExtensions);
+  const accountSyncUnsupported = isWindowsCrossDataDirAccountSyncUnsupported(store.state?.platform, sourceProfile, targetProfile);
+  const effectiveAccountPart = partAccount && !accountSyncUnsupported;
+  const canSync = Boolean(sourceProfile && targetProfile && sourceProfile.id !== targetProfile.id) && (effectiveAccountPart || partExtensions);
   const syncingAccount = isBusyAction("account-sync");
   const syncButtonLabel = "同步";
   const syncingLabel = runningBlocker ? "关闭并同步中…" : "同步中…";
@@ -29,7 +31,7 @@ export function renderSyncPanel(profiles: PublicProfile[]): string {
       <div class="section-head">
         <div>
           <h2>同步</h2>
-          <span class="section-subtitle block mt-1 text-muted text-[12px] leading-[1.45]">同步登录态与插件，并按需启动目标 Profile</span>
+          <span class="section-subtitle block mt-1 text-muted text-[12px] leading-[1.45]">同步可迁移的 Profile 数据与插件，并按需启动目标 Profile</span>
         </div>
         <button type="button" class="primary agent-browser-cta" data-action="open-agent-browser-setup" ${store.busy ? "disabled" : ""}>
           创建 Agent 浏览器
@@ -51,8 +53,8 @@ export function renderSyncPanel(profiles: PublicProfile[]): string {
         <div class="account-sync-controls grid gap-2.5 justify-items-end min-w-0">
           <div class="account-sync-options flex items-center justify-end gap-2.5 min-w-0 flex-wrap [row-gap:6px]">
             <label class="check-control self-end">
-              <input type="checkbox" data-sync-part-account ${partAccount ? "checked" : ""} ${store.busy ? "disabled" : ""} />
-              <span>账号登录态</span>
+              <input type="checkbox" data-sync-part-account ${effectiveAccountPart ? "checked" : ""} ${store.busy || accountSyncUnsupported ? "disabled" : ""} />
+              <span>Profile 数据</span>
             </label>
             <label class="check-control self-end">
               <input type="checkbox" data-sync-part-extensions ${partExtensions ? "checked" : ""} ${store.busy ? "disabled" : ""} />
@@ -81,6 +83,12 @@ export function renderSyncPanel(profiles: PublicProfile[]): string {
           </div>
         </div>
       </div>
+
+      ${
+        accountSyncUnsupported
+          ? '<p class="field-note warning">Windows 无法在不同 user-data-dir 之间可靠复制登录态。这里可只同步插件；独立 Agent 浏览器请首次启动后手动登录，并持续复用同一个 Profile。</p>'
+          : ""
+      }
 
       ${syncingAccount ? renderAccountSyncLoading(sourceProfile, targetProfile) : ""}
     </section>

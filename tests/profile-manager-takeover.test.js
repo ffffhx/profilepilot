@@ -426,11 +426,14 @@ test("ProfileManager builds ego-style agent control notices with stable codes", 
   assert.equal(completed.expiresAt, "9999-12-31T23:59:59.999Z");
   assert.match(completed.message, /已完成当前任务/);
 
-  assert.deepEqual(agentControlNoticePaths("/tmp/home", "cx-one", 101), [
-    "/tmp/home/.profilepilot/agent-control/cx-one.json",
-    "/tmp/home/.agent-browser/cx-one.profilepilot-control.json"
+  const fixtureHome = path.join(os.tmpdir(), "home");
+  assert.deepEqual(agentControlNoticePaths(fixtureHome, "cx-one", 101), [
+    path.join(fixtureHome, ".profilepilot", "agent-control", "cx-one.json"),
+    path.join(fixtureHome, ".agent-browser", "cx-one.profilepilot-control.json")
   ]);
-  assert.deepEqual(agentControlNoticePaths("/tmp/home", "../bad", 101), ["/tmp/home/.profilepilot/agent-control/pid-101.json"]);
+  assert.deepEqual(agentControlNoticePaths(fixtureHome, "../bad", 101), [
+    path.join(fixtureHome, ".profilepilot", "agent-control", "pid-101.json")
+  ]);
 });
 
 test("ProfileManager treats a connected daemon with a takeover notice as paused until resume", async () => {

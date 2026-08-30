@@ -37,7 +37,10 @@ async function main() {
     assert.equal((await driver.query("#profile-name")).value, PROFILE_NAME);
     await driver.domClick('[data-create-form] button[type="submit"]');
 
-    const row = await driver.waitFor("[data-profile-row]", (snapshot) => snapshot.text?.includes(PROFILE_NAME));
+    const row = await driver.waitFor(
+      '[data-profile-row][data-id^="isolated:"]',
+      (snapshot) => snapshot.text?.includes(PROFILE_NAME)
+    );
     assert.match(row.attributes["data-id"], /^isolated:/);
     await driver.waitFor('[data-action="new-profile"]', (snapshot) => snapshot.exists && !snapshot.disabled);
     const registry = JSON.parse(await readFile(path.join(dataDir, "profiles.json"), "utf8"));

@@ -20,8 +20,8 @@ export async function inspectAccountSyncPathDiff(
   const sourcePath = path.join(sourceLocation.profilePath, spec.relativePath);
   const targetPath = path.join(targetLocation.profilePath, normalizeSafeRelativePath(spec.relativePath));
   const [sourceFingerprint, targetFingerprint] = await Promise.all([
-    pathMetadataFingerprint(sourcePath, isAccountSyncComparablePath),
-    pathMetadataFingerprint(targetPath, isAccountSyncComparablePath)
+    pathMetadataFingerprint(sourcePath, (candidatePath) => shouldCopyAccountSyncPathEntry(sourcePath, candidatePath)),
+    pathMetadataFingerprint(targetPath, (candidatePath) => shouldCopyAccountSyncPathEntry(targetPath, candidatePath))
   ]);
 
   if (!sourceFingerprint) {
@@ -231,7 +231,8 @@ export async function accountSyncSourceFingerprint(
   sourceLocation: AccountSyncDataLocation,
   relativePath: string
 ): Promise<string | null> {
-  return pathMetadataFingerprint(accountSyncSourcePath(sourceLocation, relativePath), isAccountSyncComparablePath);
+  const sourcePath = accountSyncSourcePath(sourceLocation, relativePath);
+  return pathMetadataFingerprint(sourcePath, (candidatePath) => shouldCopyAccountSyncPathEntry(sourcePath, candidatePath));
 }
 
 export async function accountSyncSourcePathChangedAfterRecord(
@@ -244,7 +245,11 @@ export async function accountSyncSourcePathChangedAfterRecord(
     return true;
   }
 
-  const latestMtime = await latestPathMtimeMs(accountSyncSourcePath(sourceLocation, relativePath), isAccountSyncComparablePath);
+  const sourcePath = accountSyncSourcePath(sourceLocation, relativePath);
+  const latestMtime = await latestPathMtimeMs(
+    sourcePath,
+    (candidatePath) => shouldCopyAccountSyncPathEntry(sourcePath, candidatePath)
+  );
   return latestMtime === null || latestMtime > recordTime + 1000;
 }
 
@@ -406,6 +411,32 @@ export async function mergeAccountLocalStateValues(
     return false;
   }
 
+  await writeJsonFileAtomic(targetLocalStatePath, targetLocalState);
+  return true;
+}
+
+// Windows 下只有 ProfilePilot 隔离 Profile 之间才复用这个旧版 DPAPI 密钥。
+// 原生 Chrome 的 app_bound_encrypted_key 与默认 user-data-dir 绑定，不能复制到自定义目录。
+export async function copyWindowsLegacyOsCryptKey(
+  sourceLocation: AccountSyncDataLocation,
+  targetLocation: AccountSyncDataLocation
+): Promise<boolean> {
+  const sourceLocalStatePath = path.join(sourceLocation.userDataPath, "Local State");
+  const targetLocalStatePath = path.join(targetLocation.userDataPath, "Local State");
+  const sourceLocalState = await readJsonFile<ChromeLocalState>(sourceLocalStatePath);
+  const encryptedKey = sourceLocalState?.os_crypt?.encrypted_key;
+  if (typeof encryptedKey !== "string" || !encryptedKey) {
+    return false;
+  }
+
+  const targetLocalState = (await readJsonFile<ChromeLocalState>(targetLocalStatePath)) || {};
+  const targetOsCrypt = isRecord(targetLocalState.os_crypt) ? targetLocalState.os_crypt : {};
+  if (targetOsCrypt.encrypted_key === encryptedKey) {
+    return false;
+  }
+
+  targetOsCrypt.encrypted_key = encryptedKey;
+  targetLocalState.os_crypt = targetOsCrypt;
   await writeJsonFileAtomic(targetLocalStatePath, targetLocalState);
   return true;
 }
@@ -594,11 +625,45 @@ export function shouldCopyAccountSyncPathEntry(sourceRootPath: string, candidate
   if (name === "LOCK" || isAccountSyncWorkArtifactName(name)) {
     return false;
   }
+  if (isAccountSyncServiceWorkerCachePath(sourceRootPath, candidatePath)) {
+    return false;
+  }
 
   const rootName = path.basename(sourceRootPath);
   const relativePath = path.relative(sourceRootPath, candidatePath);
   const firstPart = relativePath.split(path.sep).find(Boolean) || "";
   return !isAccountSyncExtensionStoreEntry(rootName, firstPart);
+}
+
+// CacheStorage 是站点静态资源缓存，不是登录态。源 Profile 里经常有数 GB / 上万文件，
+// 复制进去会让 Windows 上每次启动 Chrome 都卡在扫盘。保留 Database / ScriptCache 即可。
+export function isAccountSyncServiceWorkerCachePath(sourceRootPath: string, candidatePath: string): boolean {
+  const relativePath = path.relative(sourceRootPath, candidatePath);
+  if (!relativePath || relativePath.startsWith("..") || path.isAbsolute(relativePath)) {
+    return false;
+  }
+  const parts = relativePath.split(path.sep).filter(Boolean);
+  if (path.basename(sourceRootPath) === "Service Worker") {
+    return parts[0] === "CacheStorage";
+  }
+  if (path.basename(sourceRootPath) === "WebStorage") {
+    return parts.length >= 2 && parts[1] === "CacheStorage";
+  }
+  const workerIndex = parts.indexOf("Service Worker");
+  if (workerIndex >= 0 && parts[workerIndex + 1] === "CacheStorage") {
+    return true;
+  }
+  const webStorageIndex = parts.indexOf("WebStorage");
+  return webStorageIndex >= 0 && parts.length > webStorageIndex + 2 && parts[webStorageIndex + 2] === "CacheStorage";
+}
+
+export async function pruneServiceWorkerCacheStorage(profileDataPath: string): Promise<boolean> {
+  const cacheStoragePath = path.join(profileDataPath, "Service Worker", "CacheStorage");
+  if (!(await exists(cacheStoragePath))) {
+    return false;
+  }
+  await fs.rm(cacheStoragePath, { recursive: true, force: true });
+  return true;
 }
 
 export function isAccountSyncExtensionStoreEntry(rootName: string, firstPart: string): boolean {

@@ -12,7 +12,7 @@ import { render } from "./render/render-root";
 import { applyState, invalidateExtensionMigrationDiff, loadState, markOnboardingSeen, refreshAgentIntegrationDiagnostic, refreshExtensionMigrationDiff, refreshGlobalInstructions, refreshProfileReadiness, repairClaudeInstructionShell, requestInputGuardPermission, saveGlobalInstruction, setMigrationSource, undoGlobalInstruction } from "./state-actions";
 import { appRoot, store } from "./state";
 import type { AgentOverlayRevealEvent, AgentTakeoverEvent, AppState, BrowserDriverKind, ProfileProxyConfig } from "./types";
-import { deleteButtonTitle, escapeHtml, formatErrorMessage, profileAgentControlClients } from "./util";
+import { deleteButtonTitle, escapeHtml, formatErrorMessage, isWindowsCrossDataDirAccountSyncUnsupported, profileAgentControlClients } from "./util";
 
 const MINI_TAKEOVER_NOTICE_MS = 5000;
 const MINI_TAKEOVER_CONFIRM_MS = 2800;
@@ -1038,6 +1038,12 @@ appRoot.addEventListener("click", (event) => {
       setToast("请选择两个不同的 Profile", "error");
       return;
     }
+    const sourceProfile = profiles.find((profile) => profile.id === sourceId) || null;
+    const targetProfile = profiles.find((profile) => profile.id === targetId) || null;
+    if (isWindowsCrossDataDirAccountSyncUnsupported(store.state.platform, sourceProfile, targetProfile)) {
+      setToast("Windows 无法在不同 user-data-dir 之间可靠复制登录态；请只同步插件，或在独立 Agent 浏览器中登录一次。", "error");
+      return;
+    }
     store.accountSyncDiff = null;
     store.accountSyncDiffCollapsed = false;
     store.accountSyncDiffLoading = true;
@@ -1084,8 +1090,19 @@ appRoot.addEventListener("click", (event) => {
       setToast("请选择两个不同的 Profile", "error");
       return;
     }
-    if (!store.syncAccountPart && !store.syncExtensionsPart) {
-      setToast("至少勾选一项同步内容（账号登录态或插件）", "error");
+    const accountSyncUnsupported = isWindowsCrossDataDirAccountSyncUnsupported(
+      store.state.platform,
+      sourceProfile,
+      targetProfile
+    );
+    const syncAccount = store.syncAccountPart && !accountSyncUnsupported;
+    if (!syncAccount && !store.syncExtensionsPart) {
+      setToast(
+        accountSyncUnsupported
+          ? "Windows 无法在不同 user-data-dir 之间可靠复制登录态；可勾选插件同步，或在独立 Agent 浏览器中登录一次。"
+          : "至少勾选一项同步内容（Profile 数据或插件）",
+        "error"
+      );
       return;
     }
     const shouldCloseTarget = targetProfile.running;
@@ -1098,7 +1115,7 @@ appRoot.addEventListener("click", (event) => {
         kind: "profile-sync",
         sourceProfileId: sourceId,
         targetProfileId: targetId,
-        syncAccount: store.syncAccountPart,
+        syncAccount,
         syncExtensions: store.syncExtensionsPart,
         shouldCloseTarget,
         existingRecordSyncedAt: existingRecord?.syncedAt || null,
@@ -1692,15 +1709,19 @@ appRoot.addEventListener("click", (event) => {
 
   if (action === "open-agent-browser-setup") {
     if (!store.state.profiles.length) {
-      setToast("还没有可用的 Profile 作为登录态来源", "error");
+      setToast("还没有可用的 Profile 作为模板或副本来源", "error");
       return;
     }
-    // 默认源：系统默认 Profile → 第一个已登录 Profile → 第一个。
+    // Windows 优先复用已经可用的独立 Profile；原生 Profile 只作为轻量模板来源。
     if (!store.clonePoolSourceId || !store.state.profiles.some((profile) => profile.id === store.clonePoolSourceId)) {
-      const defaultSource =
-        store.state.profiles.find((profile) => profile.source === "native" && profile.isDefault) ||
-        store.state.profiles.find((profile) => profile.userName) ||
-        store.state.profiles[0];
+      const defaultSource = store.state.platform === "win32"
+        ? store.state.profiles.find((profile) => profile.source === "isolated" && profile.userName) ||
+          store.state.profiles.find((profile) => profile.source === "isolated") ||
+          store.state.profiles.find((profile) => profile.source === "native" && profile.isDefault) ||
+          store.state.profiles[0]
+        : store.state.profiles.find((profile) => profile.source === "native" && profile.isDefault) ||
+          store.state.profiles.find((profile) => profile.userName) ||
+          store.state.profiles[0];
       store.clonePoolSourceId = defaultSource?.id || null;
     }
     store.clonePoolMenuOpen = false;

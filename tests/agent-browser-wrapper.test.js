@@ -1,5 +1,5 @@
 const assert = require("node:assert/strict");
-const { execFileSync } = require("node:child_process");
+const { execFileSync, spawn } = require("node:child_process");
 const { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
 const http = require("node:http");
 const net = require("node:net");
@@ -13,6 +13,7 @@ const {
   PROFILEPILOT_AGENT_BROWSER_USAGE_EXIT_CODE,
   acquireProfileLeaseForCommandWithAutomaticSwitch,
   agentBrowserCommandName,
+  assertManagedGatewayLaunchOptions,
   cdpPortFromAgentBrowserArgs,
   clearProfilePilotNoticesForSession,
   consumeProfilePilotReturnNotice,
@@ -22,6 +23,8 @@ const {
   formatHardStopNotice,
   formatProfileLeaseConflict,
   formatControlledRawCdpFailure,
+  gatewaySupportsAgentActivity,
+  managedGatewayAgentBrowserEnv,
   replaceCdpPortInAgentBrowserArgs,
   resolveProfilePilotUseArgs,
   resolveRealAgentBrowser,
@@ -66,6 +69,44 @@ test("agent-browser wrapper checks notices only for browser operations", () => {
   assert.equal(shouldCheckProfilePilotNotice(["skills", "get", "core"]), false);
   assert.equal(shouldCheckProfilePilotNotice(["session", "list"]), false);
   assert.equal(shouldCheckProfilePilotNotice(["--version"]), false);
+  assert.equal(agentBrowserCommandName(["--proxy", "http://127.0.0.1:7897", "open"]), "open");
+});
+
+test("managed Gateway child env isolates controller proxies case-insensitively without changing Profile routing", () => {
+  const original = {
+    HTTP_PROXY: "http://127.0.0.1:7897",
+    https_proxy: "http://127.0.0.1:7897",
+    All_Proxy: "socks5://127.0.0.1:7897",
+    AGENT_BROWSER_PROXY: "http://controller.test:8080",
+    agent_browser_proxy_bypass: "localhost",
+    NO_PROXY: "127.0.0.1,localhost",
+    PATH: "test-path"
+  };
+  const isolated = managedGatewayAgentBrowserEnv(original);
+
+  assert.deepEqual(isolated, {
+    NO_PROXY: "127.0.0.1,localhost",
+    PATH: "test-path"
+  });
+  assert.equal(original.HTTP_PROXY, "http://127.0.0.1:7897", "the parent environment must remain unchanged");
+});
+
+test("managed Gateway rejects agent-browser launch proxy options and points to Profile proxy settings", () => {
+  assert.throws(
+    () => assertManagedGatewayLaunchOptions(["--proxy", "http://127.0.0.1:7897", "open"]),
+    (error) => error.code === "GATEWAY_LAUNCH_OPTION_CONFLICT" && /目标 Profile/.test(error.message)
+  );
+  assert.throws(
+    () => assertManagedGatewayLaunchOptions(["--proxy-bypass=localhost", "snapshot"]),
+    (error) => error.code === "GATEWAY_LAUNCH_OPTION_CONFLICT"
+  );
+  assert.doesNotThrow(() => assertManagedGatewayLaunchOptions(["open", "https://example.test"]));
+});
+
+test("activity verification waits for a running old Gateway route to upgrade safely", () => {
+  assert.equal(gatewaySupportsAgentActivity({ ok: true, protocolVersion: 13 }), true);
+  assert.equal(gatewaySupportsAgentActivity({ ok: true, protocolVersion: 12 }), false);
+  assert.equal(gatewaySupportsAgentActivity({ ok: true }), false);
 });
 
 test("profilepilot profiles uses Profile names as selection hints and publishes blocked access", async () => {
@@ -321,20 +362,12 @@ test("ProfilePilot rejects Bifrost listener collisions with another Profile", ()
 test("profilepilot bifrost command persists the rule without requiring an Agent session", async () => {
   const home = makeTempHome();
   const dataDir = path.join(home, "profilepilot-data");
-  const fakeBifrost = path.join(home, "bin", "bifrost");
+  const fakeBifrost = path.join(home, "bin", "bifrost.js");
   const callsPath = path.join(home, "bifrost-calls.log");
   const cdpPort = await freeTcpPort();
   mkdirSync(path.dirname(fakeBifrost), { recursive: true });
   mkdirSync(dataDir, { recursive: true });
-  writeFileSync(fakeBifrost, `#!/bin/sh
-printf '%s\n' "$*" >> ${JSON.stringify(callsPath)}
-if [ "$1" = status ]; then
-  printf '%s\n' '{"running":true,"version":"test","listener":{"port":9900},"ports":[]}'
-  exit 0
-fi
-if [ "$1" = port ] && [ "$2" = show ]; then exit 1; fi
-exit 0
-`);
+  writeFileSync(fakeBifrost, fakeBifrostSource(callsPath, { portShowExit: 1 }));
   chmodSync(fakeBifrost, 0o755);
   writeFileSync(path.join(dataDir, "profiles.json"), `${JSON.stringify({
     profiles: [{
@@ -381,20 +414,12 @@ exit 0
 test("profilepilot bifrost --clear removes a stopped Profile rule and destroys its listener", async () => {
   const home = makeTempHome();
   const dataDir = path.join(home, "profilepilot-data");
-  const fakeBifrost = path.join(home, "bin", "bifrost");
+  const fakeBifrost = path.join(home, "bin", "bifrost.js");
   const callsPath = path.join(home, "bifrost-calls.log");
   const cdpPort = await freeTcpPort();
   mkdirSync(path.dirname(fakeBifrost), { recursive: true });
   mkdirSync(dataDir, { recursive: true });
-  writeFileSync(fakeBifrost, `#!/bin/sh
-printf '%s\n' "$*" >> ${JSON.stringify(callsPath)}
-if [ "$1" = port ] && [ "$2" = show ]; then
-  printf '%s\n' 'Temporary port: 127.0.0.1:18889'
-  printf '%s\n' 'Name: profilepilot:profile-b'
-  exit 0
-fi
-exit 0
-`);
+  writeFileSync(fakeBifrost, fakeBifrostSource(callsPath, { portShowExit: 0 }));
   chmodSync(fakeBifrost, 0o755);
   writeFileSync(path.join(dataDir, "profiles.json"), `${JSON.stringify({
     profiles: [{
@@ -444,7 +469,7 @@ exit 0
 test("profilepilot bifrost command hot-updates rules for a running Profile on the same listener", async () => {
   const home = makeTempHome();
   const dataDir = path.join(home, "profilepilot-data");
-  const fakeBifrost = path.join(home, "bin", "bifrost");
+  const fakeBifrost = path.join(home, "bin", "bifrost.js");
   const callsPath = path.join(home, "bifrost-calls.log");
   const cdpServer = http.createServer((_request, response) => {
     response.writeHead(200, { "content-type": "application/json" });
@@ -458,19 +483,7 @@ test("profilepilot bifrost command hot-updates rules for a running Profile on th
   const cdpPort = typeof cdpAddress === "object" && cdpAddress ? cdpAddress.port : 0;
   mkdirSync(path.dirname(fakeBifrost), { recursive: true });
   mkdirSync(dataDir, { recursive: true });
-  writeFileSync(fakeBifrost, `#!/bin/sh
-printf '%s\n' "$*" >> ${JSON.stringify(callsPath)}
-if [ "$1" = status ]; then
-  printf '%s\n' '{"running":true,"version":"test","listener":{"port":9900},"ports":[]}'
-  exit 0
-fi
-if [ "$1" = port ] && [ "$2" = show ]; then
-  printf '%s\n' 'Temporary port: 127.0.0.1:18889'
-  printf '%s\n' 'Name: profilepilot:profile-b'
-  exit 0
-fi
-exit 0
-`);
+  writeFileSync(fakeBifrost, fakeBifrostSource(callsPath, { portShowExit: 0 }));
   chmodSync(fakeBifrost, 0o755);
   writeFileSync(path.join(dataDir, "profiles.json"), `${JSON.stringify({
     profiles: [{
@@ -526,17 +539,18 @@ exit 0
 
 test("agent-browser wrapper skips the managed child-shell launcher when resolving the real CLI", () => {
   const home = makeTempHome();
-  const managedLauncher = path.join(home, ".profilepilot", "bin", "agent-browser");
-  const realAgentBrowser = path.join(home, "real", "agent-browser");
+  const commandName = process.platform === "win32" ? "agent-browser.cmd" : "agent-browser";
+  const managedLauncher = path.join(home, ".profilepilot", "bin", commandName);
+  const realAgentBrowser = path.join(home, "real", commandName);
   mkdirSync(path.dirname(managedLauncher), { recursive: true });
   mkdirSync(path.dirname(realAgentBrowser), { recursive: true });
-  writeFileSync(managedLauncher, "#!/bin/sh\nexit 99\n", "utf8");
-  writeFileSync(realAgentBrowser, "#!/bin/sh\nexit 0\n", "utf8");
+  writeFileSync(managedLauncher, process.platform === "win32" ? "@exit /b 99\r\n" : "#!/bin/sh\nexit 99\n", "utf8");
+  writeFileSync(realAgentBrowser, process.platform === "win32" ? "@exit /b 0\r\n" : "#!/bin/sh\nexit 0\n", "utf8");
   chmodSync(managedLauncher, 0o755);
   chmodSync(realAgentBrowser, 0o755);
 
   const originalPath = process.env.PATH;
-  process.env.PATH = `${path.dirname(managedLauncher)}:${path.dirname(realAgentBrowser)}:/usr/bin:/bin`;
+  process.env.PATH = [path.dirname(managedLauncher), path.dirname(realAgentBrowser), process.env.PATH || ""].join(path.delimiter);
   try {
     assert.equal(resolveRealAgentBrowser({
       HOME: home,
@@ -1101,17 +1115,9 @@ test("agent-browser wrapper waits for the durable user-return event without reti
   const fakeDaemonPath = path.join(home, "fixture-agent-browser-daemon.js");
   mkdirSync(home, { recursive: true });
   writeFileSync(fakeDaemonPath, "setInterval(() => {}, 1000);\n");
-  const daemonPid = Number(execFileSync("/bin/sh", [
-    "-c",
-    "\"$NODE_BIN\" \"$DAEMON_SCRIPT\" >/dev/null 2>&1 & echo $!"
-  ], {
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      NODE_BIN: process.execPath,
-      DAEMON_SCRIPT: fakeDaemonPath
-    }
-  }).trim());
+  const daemon = spawn(process.execPath, [fakeDaemonPath], { detached: true, stdio: "ignore" });
+  daemon.unref();
+  const daemonPid = daemon.pid;
   const daemonPidPath = path.join(home, ".agent-browser", "cx-wait.pid");
   mkdirSync(path.dirname(daemonPidPath), { recursive: true });
   writeFileSync(daemonPidPath, `${daemonPid}\n`);
@@ -1481,6 +1487,25 @@ test("agent-browser wrapper hard-stops when no available alternative Profile exi
 
   rmSync(home, { recursive: true, force: true });
 });
+
+function fakeBifrostSource(callsPath, { portShowExit }) {
+  return `
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(callsPath)}, args.join(" ") + "\\n");
+if (args[0] === "status") {
+  process.stdout.write('{"running":true,"version":"test","listener":{"port":9900},"ports":[]}\\n');
+  process.exit(0);
+}
+if (args[0] === "port" && args[1] === "show") {
+  if (${portShowExit} === 0) {
+    process.stdout.write("Temporary port: 127.0.0.1:18889\\nName: profilepilot:profile-b\\n");
+  }
+  process.exit(${portShowExit});
+}
+process.exit(0);
+`;
+}
 
 function makeTempHome() {
   return path.join(

@@ -55,14 +55,14 @@ import type {
   StoredProfile,
   TakeoverAgentConnectionsResult
 } from "../shared/types";
-import { accountSyncCopySpecs, accountSyncDataScore, accountSyncRecordKey, applyAccountSyncRecordBaseline, assertAccountSyncDiskSpace, collectAccountSyncPathStats, copyAccountSyncPath, inspectAccountLocalStateDiff, inspectAccountSyncPathDiff, mergeAccountLocalStateValues, recoverInterruptedAccountSyncArtifactsForProfile, restoreAccountSyncExtensionPreferences, shouldApplyAccountDiffItem, snapshotAccountSyncExtensionPreferences, snapshotAccountSyncSourceFingerprints, summarizeAccountSyncDiff } from "./account-sync";
+import { accountSyncCopySpecs, accountSyncDataScore, accountSyncRecordKey, applyAccountSyncRecordBaseline, assertAccountSyncDiskSpace, collectAccountSyncPathStats, copyAccountSyncPath, copyWindowsLegacyOsCryptKey, inspectAccountLocalStateDiff, inspectAccountSyncPathDiff, mergeAccountLocalStateValues, pruneServiceWorkerCacheStorage, recoverInterruptedAccountSyncArtifactsForProfile, restoreAccountSyncExtensionPreferences, shouldApplyAccountDiffItem, snapshotAccountSyncExtensionPreferences, snapshotAccountSyncSourceFingerprints, summarizeAccountSyncDiff } from "./account-sync";
 import { describePortOwner, findAvailableCdpPort, isPortAvailable, makeCdpUrl, normalizeCdpPortInput, requestCdpTargets, waitForCdp } from "./cdp-client";
 import { appendUniqueExtraUrls, bringCdpPageToFront, closeFreshBlankPagesOverCdp, loadUnpackedExtensionsOverCdp, snapshotPageTargetIds, snapshotRestorableTabUrls } from "./cdp-page";
 import { focusProfileWindow, frontmostMacProcessId, getDirectChromeCommand, isAnyMacProcessFrontmost, launchChrome, launchDetached, makeIsolatedProfileId, makeIsolatedSubProfileId, makeNativeProfileId, nativeChromeUserDataDir, openChromeUrl, parseProfileId, readIsolatedProfileUserName, removeNativeProfileFromLocalState, removeProfileFromLocalStateIn, resolveIsolatedProfileDataPath, scanChromeProfilesInDir, scanNativeChromeProfiles } from "./chrome-launch";
 import { canAutoLoadUnpackedExtensions, canLoadLocalExtensionViaCdp, canPersistExtensionInstall, copyExtensionDataPath, copyExtensionPackageToProfile, extensionDataDiffers, getMigratedExtensionLaunchPlan, getProtectedDeveloperModeRecord, inspectExtensionMigrationItem, isExtensionMigrationActionItem, isManualLoadSkipReason, isProfileRelativeExtensionSetting, makeStoredMigratedExtensionId, manualLoadExtensionReason, readProtectedExtensionInstallRecord, removeExtensionReferencesFromProfilePreferences, summarizeExtensionMigrationDiff, writeProtectedExtensionInstallRecord } from "./extension-migration";
 import { extensionDeleteRelativePaths, isLikelyExtensionId, scanProfileExtensions } from "./extension-scan";
 import { copyPath, throwIfAborted, waitIfPaused } from "./fs-copy";
-import { POSIX_LOCALE_ENV, chromeProfileDirName, defaultDataDir, execFileAsync, exists, isProcessGoneError, isRecord, isSafePathSegment, isSameFilesystemPath, makePathSegment, makeSlug, normalizeAccountSyncRecords, normalizeNativeProfileMetadata, normalizeProfile, normalizeProfileName, normalizeSafeRelativePath, shouldCopyLocalExtensionPackagePath, sleep, uniqueStrings, writeJsonFileAtomic } from "./fs-util";
+import { chromeProfileDirName, defaultDataDir, execFileAsync, exists, isProcessGoneError, isRecord, isSafePathSegment, isSameFilesystemPath, makePathSegment, makeSlug, normalizeAccountSyncRecords, normalizeNativeProfileMetadata, normalizeProfile, normalizeProfileName, normalizeSafeRelativePath, shouldCopyLocalExtensionPackagePath, sleep, uniqueStrings, writeJsonFileAtomic } from "./fs-util";
 import { AccountSyncCopyPlan, AccountSyncDataLocation, ProfileRef, ProfileRestartPlan, RuntimeProfile } from "./internal-types";
 import { ProfilePilotSignal, SIGNAL_CATALOG, resolveSignal } from "./agent-signals";
 import {
@@ -84,15 +84,15 @@ import {
 import { resolveCdpContention, syncContentionObservers } from "./cdp-contention";
 import { AgentOverlayManager, isAgentOverlayClient, type AgentOverlayCompleteRequest, type AgentOverlayResumeRequest, type AgentOverlayRevealRequest, type AgentOverlayStopRequest } from "./agent-overlay";
 import { getShellIntegrationStatus } from "./shell-integration";
-import { addRuntimeProcess, attachListeningPorts, emptyRuntimeProfile, findExternalChromeInstances, getCdpClientsByPort, getChromeProcessPids, getOpenProfilePidsByPath, isChromeRunning, isImplicitDefaultChromeProcess, makeNativeRuntimeKey, mergeRuntimeProfiles, parseRuntimeProcess } from "./process-scan";
+import { addRuntimeProcess, attachListeningPorts, emptyRuntimeProfile, findExternalChromeInstances, getCdpClientsByPort, getChromeProcessPids, getOpenProfilePidsByPath, isChromeRunning, isImplicitDefaultChromeProcess, listRuntimeProcesses, makeNativeRuntimeKey, mergeRuntimeProfiles, parseProfileDirectoryFlag, parseUserDataDirFlag } from "./process-scan";
 import { ProfileManagerError } from "./profile-manager-error";
 import {
   canHotUpdateProfileBifrostProxy,
   directConnectionChromeArgs,
   disableBifrostRule as disableMainBifrostRule,
   destroyProfileBifrostProxy,
+  ensureBifrostMainProxy,
   ensureProfileBifrostProxy,
-  ensureUpstreamProxy,
   getBifrostSnapshot as readBifrostSnapshot,
   startBifrostIfNeeded,
   type BifrostRuleReference,
@@ -106,6 +106,7 @@ import {
   type GatewayControlResponse
 } from "./browser-gateway-client";
 import { resolveCanonicalSessionIdentity } from "./session-identity";
+import { requestWindowsProcessClose } from "./windows-platform";
 
 export { ProfileManagerError } from "./profile-manager-error";
 
@@ -149,6 +150,16 @@ interface TakeoverAgentConnectionsOptions {
   pids?: number[];
   reason?: AgentControlNoticeReason;
 }
+
+interface AccountSyncExecutionOptions {
+  allowWindowsCrossDataDir?: boolean;
+  copyWindowsLegacyEncryptionKey?: boolean;
+}
+
+const WINDOWS_NATIVE_AGENT_TEMPLATE_SPECS = [
+  { label: "书签", relativePath: "Bookmarks" },
+  { label: "书签备份", relativePath: "Bookmarks.bak" }
+] as const;
 
 export class ProfileManager {
   private readonly profilesDir: string;
@@ -227,7 +238,7 @@ export class ProfileManager {
     profiles.forEach((profile) => {
       profile.windowActivation = !profile.running
         ? "not_running"
-        : process.platform !== "darwin" || frontmostPid === null
+        : (process.platform !== "darwin" && process.platform !== "win32") || frontmostPid === null
           ? "unknown"
           : profile.pids.includes(frontmostPid)
             ? "foreground"
@@ -464,6 +475,7 @@ export class ProfileManager {
     });
 
     return {
+      platform: process.platform,
       appTitle: APP_TITLE,
       dataDir: this.dataDir,
       profilesDir: this.profilesDir,
@@ -1520,6 +1532,12 @@ export class ProfileManager {
         // AppleScript 退出失败或超时，退回信号方式。
       }
     }
+    if (process.platform === "win32") {
+      const requested = await requestWindowsProcessClose(profile.pids);
+      if (requested) {
+        return;
+      }
+    }
     this.signalPids(profile.pids, "SIGTERM");
   }
 
@@ -1578,6 +1596,9 @@ export class ProfileManager {
       } catch {
         // 若 AppleScript 没有权限或超时，继续用进程信号兜底。
       }
+    }
+    if (process.platform === "win32") {
+      await requestWindowsProcessClose(await getChromeProcessPids()).catch(() => false);
     }
 
     if (await this.waitUntilChromeStops(7000)) {
@@ -1685,7 +1706,7 @@ export class ProfileManager {
       return;
     }
 
-    // macOS 对同一个 Google Chrome.app 的多实例做应用级激活不可靠：请求激活实例 B 时，
+    // macOS/Windows 对同一个 Chrome 可执行文件的多实例做应用级激活不总是可靠：请求激活实例 B 时，
     // 系统可能把前台给同一 bundle 的实例 A（连 Chrome 自己 Page.bringToFront 的自激活也会被路由错）。
     // 此时走 Chrome 自己的单例握手通道：对同一 user-data-dir / profile-directory 再拉一次
     // 启动命令，运行中的实例收到握手后会自己把窗口带到最前。
@@ -1696,13 +1717,17 @@ export class ProfileManager {
     // 静默激活和单例握手都试过了，走到这里说明确认不了前台，直接报错给出指引。
     if (profile.source === "native") {
       throw new ProfileManagerError(
-        "macOS 没有把这个系统 Chrome Profile 精确显示到最前面。多个 Google Chrome.app 实例同时运行时，系统的应用级激活可能会落到其它 Profile；请给 ProfilePilot 授予“辅助功能”权限，或先关闭其它 Chrome 实例后重试。",
+        process.platform === "win32"
+          ? "Windows 没有把这个系统 Chrome Profile 精确显示到最前面。请先点击一次目标 Chrome 窗口，或关闭其它 Chrome 实例后重试。"
+          : "macOS 没有把这个系统 Chrome Profile 精确显示到最前面。多个 Google Chrome.app 实例同时运行时，系统的应用级激活可能会落到其它 Profile；请给 ProfilePilot 授予“辅助功能”权限，或先关闭其它 Chrome 实例后重试。",
         "FOCUS_PROFILE_UNCONFIRMED"
       );
     }
 
     throw new ProfileManagerError(
-      "macOS 没有把这个独立 Profile 精确显示到最前面。若同一个 Google Chrome.app 同时开了多个实例，请先用 CDP 启动这个 Profile，或给 ProfilePilot 授予“辅助功能”权限后重试。",
+      process.platform === "win32"
+        ? "Windows 没有把这个独立 Profile 精确显示到最前面。若同时开了多个 Chrome 实例，请先用 CDP 启动这个 Profile 后重试。"
+        : "macOS 没有把这个独立 Profile 精确显示到最前面。若同一个 Google Chrome.app 同时开了多个实例，请先用 CDP 启动这个 Profile，或给 ProfilePilot 授予“辅助功能”权限后重试。",
       "FOCUS_PROFILE_UNCONFIRMED"
     );
   }
@@ -1715,7 +1740,7 @@ export class ProfileManager {
   // 好在上层已先试过无副作用的系统级激活，只有多实例互切失败时才落到这里。
   // 返回是否确认目标实例已到前台。
   private async focusViaChromeSingleton(profile: PublicProfile): Promise<boolean> {
-    if (process.platform !== "darwin") {
+    if (process.platform !== "darwin" && process.platform !== "win32") {
       return false;
     }
     const command = getDirectChromeCommand();
@@ -1774,7 +1799,11 @@ export class ProfileManager {
       throw new ProfileManagerError("这个外部实例已不在运行。", "EXTERNAL_INSTANCE_NOT_RUNNING");
     }
 
-    this.signalPids([instance.pid], "SIGTERM");
+    if (process.platform === "win32") {
+      await requestWindowsProcessClose([instance.pid]);
+    } else {
+      this.signalPids([instance.pid], "SIGTERM");
+    }
     if (await this.waitUntilExternalStops(userDataDir, 1800)) {
       return;
     }
@@ -1908,7 +1937,10 @@ export class ProfileManager {
     };
   }
 
-  async inspectAccountSyncDiff(request: AccountSyncRequest): Promise<AccountSyncDiffResult> {
+  async inspectAccountSyncDiff(
+    request: AccountSyncRequest,
+    executionOptions: AccountSyncExecutionOptions = {}
+  ): Promise<AccountSyncDiffResult> {
     const sourceProfileId = String(request.sourceProfileId || "");
     const targetProfileId = String(request.targetProfileId || "");
     if (!sourceProfileId || !targetProfileId || sourceProfileId === targetProfileId) {
@@ -1921,6 +1953,12 @@ export class ProfileManager {
     if (!sourceProfile || !targetProfile) {
       throw new ProfileManagerError("没有找到源 Profile 或目标 Profile。", "PROFILE_NOT_FOUND");
     }
+    assertWindowsAccountSyncSupported(
+      process.platform,
+      sourceProfile,
+      targetProfile,
+      Boolean(executionOptions.allowWindowsCrossDataDir)
+    );
 
     const sourceLocation = await this.resolveAccountSyncLocation(sourceProfile, false);
     const targetLocation = await this.resolveAccountSyncLocation(targetProfile, false);
@@ -2439,7 +2477,8 @@ export class ProfileManager {
     request: AccountSyncRequest,
     onProgress?: (progress: OperationProgressUpdate) => void,
     abortSignal?: AbortSignal,
-    pauseSignal?: OperationPauseSignal
+    pauseSignal?: OperationPauseSignal,
+    executionOptions: AccountSyncExecutionOptions = {}
   ): Promise<AccountSyncResult> {
     const sourceProfileId = String(request.sourceProfileId || "");
     const targetProfileId = String(request.targetProfileId || "");
@@ -2463,6 +2502,12 @@ export class ProfileManager {
     if (!sourceProfile || !targetProfile) {
       throw new ProfileManagerError("没有找到源 Profile 或目标 Profile。", "PROFILE_NOT_FOUND");
     }
+    assertWindowsAccountSyncSupported(
+      process.platform,
+      sourceProfile,
+      targetProfile,
+      Boolean(executionOptions.allowWindowsCrossDataDir)
+    );
 
     const targetRestartPlan =
       targetProfile.running && launchTarget ? await this.captureProfileRestartPlan(targetProfile) : null;
@@ -2474,7 +2519,7 @@ export class ProfileManager {
     const sourceLocation = await this.resolveAccountSyncLocation(sourceProfile, false);
     const targetLocation = await this.resolveAccountSyncLocation(targetProfile, true);
     await recoverInterruptedAccountSyncArtifactsForProfile(targetLocation.profilePath);
-    const accountDiff = await this.inspectAccountSyncDiff(request);
+    const accountDiff = await this.inspectAccountSyncDiff(request, executionOptions);
     const accountDiffByPath = new Map(accountDiff.items.map((item) => [item.relativePath, item]));
     if (!accountDiff.items.some((item) => item.status !== "source_missing")) {
       throw new ProfileManagerError("源 Profile 里没有找到可同步的账号数据。", "ACCOUNT_SYNC_SOURCE_EMPTY");
@@ -2557,6 +2602,20 @@ export class ProfileManager {
       });
     }
 
+    const legacyEncryptionKeyCopied =
+      process.platform === "win32" &&
+      executionOptions.copyWindowsLegacyEncryptionKey &&
+      sourceProfile.source === "isolated" &&
+      targetProfile.source === "isolated"
+        ? await copyWindowsLegacyOsCryptKey(sourceLocation, targetLocation)
+        : false;
+    if (legacyEncryptionKeyCopied) {
+      copiedItems.push({
+        label: "Windows DPAPI 加密密钥",
+        relativePath: "Local State / os_crypt.encrypted_key"
+      });
+    }
+
     report("正在保留目标插件状态…", "写入浏览器状态", 5);
     const restoredExtensionPreferences = await restoreAccountSyncExtensionPreferences(
       targetLocation.profilePath,
@@ -2613,8 +2672,74 @@ export class ProfileManager {
     };
   }
 
-  // 副本池：把一个登录态 Profile 批量克隆成 N 份隔离副本，每份独立 CDP 端口、登录态一致。
-  // 复用单份链路 createProfile → syncAccount →（可选）migrateExtensions，再绑定固定端口与副本来源。
+  private async syncWindowsNativeAgentTemplate(
+    sourceProfileId: string,
+    targetProfileId: string,
+    onProgress?: (progress: OperationProgressUpdate) => void,
+    abortSignal?: AbortSignal,
+    pauseSignal?: OperationPauseSignal
+  ): Promise<AccountSyncResult> {
+    const state = await this.getState();
+    const sourceProfile = state.profiles.find((profile) => profile.id === sourceProfileId);
+    const targetProfile = state.profiles.find((profile) => profile.id === targetProfileId);
+    if (!sourceProfile || !targetProfile) {
+      throw new ProfileManagerError("没有找到源 Profile 或目标 Profile。", "PROFILE_NOT_FOUND");
+    }
+    if (process.platform !== "win32" || sourceProfile.source !== "native" || targetProfile.source !== "isolated") {
+      throw new ProfileManagerError("轻量 Agent 模板只适用于 Windows 原生 Chrome 到独立 Profile。", "INVALID_AGENT_TEMPLATE_PROFILES");
+    }
+
+    const report = (message: string, step: string, stepIndex: number): void => {
+      onProgress?.({ message, step, stepIndex, stepCount: 3 });
+    };
+    report("正在检查书签模板…", "检查模板", 1);
+    throwIfAborted(abortSignal);
+    await waitIfPaused(pauseSignal, abortSignal);
+    if (targetProfile.running) {
+      report(`正在关闭 ${targetProfile.name} 以更新模板…`, "关闭目标", 1);
+      await this.closeProfileIfRunning(targetProfileId);
+    }
+
+    const sourceLocation = await this.resolveAccountSyncLocation(sourceProfile, false);
+    const targetLocation = await this.resolveAccountSyncLocation(targetProfile, true);
+    await recoverInterruptedAccountSyncArtifactsForProfile(targetLocation.profilePath);
+    const copiedItems: AccountSyncCopiedItem[] = [];
+    const skippedItems: AccountSyncSkippedItem[] = [];
+
+    for (const [index, spec] of WINDOWS_NATIVE_AGENT_TEMPLATE_SPECS.entries()) {
+      throwIfAborted(abortSignal);
+      await waitIfPaused(pauseSignal, abortSignal);
+      const sourcePath = path.join(sourceLocation.profilePath, spec.relativePath);
+      if (!(await exists(sourcePath))) {
+        skippedItems.push({
+          label: spec.label,
+          relativePath: spec.relativePath,
+          reason: "源 Profile 中没有这个文件，本次无需复制"
+        });
+        continue;
+      }
+
+      const targetPath = path.join(targetLocation.profilePath, spec.relativePath);
+      report(`正在复制${spec.label}（${index + 1}/${WINDOWS_NATIVE_AGENT_TEMPLATE_SPECS.length}）…`, "复制模板", 2);
+      const stats = await collectAccountSyncPathStats(sourcePath, abortSignal, pauseSignal);
+      await copyAccountSyncPath(sourcePath, targetPath, undefined, abortSignal, pauseSignal, stats);
+      copiedItems.push({ label: spec.label, relativePath: spec.relativePath });
+    }
+
+    report("模板已更新；登录状态由这个 Agent 浏览器独立保存。", "完成", 3);
+    return {
+      sourceProfileId,
+      targetProfileId,
+      copiedItems,
+      skippedItems,
+      launchedTarget: false,
+      restoredTargetTabs: 0,
+      state: await this.getState()
+    };
+  }
+
+  // Windows 原生 Chrome 使用轻量模板（书签 + 可选插件），避免复制无法解密的 Cookie 和大体积站点数据。
+  // 其他平台及 ProfilePilot 隔离 Profile 继续复制可迁移数据；Windows 隔离 Profile 同时复用旧版 DPAPI 密钥。
   async cloneProfiles(
     request: CloneProfilesRequest,
     onProgress?: (progress: OperationProgressUpdate) => void,
@@ -2632,8 +2757,9 @@ export class ProfileManager {
     const state = await this.getState();
     const source = state.profiles.find((profile) => profile.id === sourceProfileId);
     if (!source) {
-      throw new ProfileManagerError("没有找到作为登录态来源的 Profile。", "PROFILE_NOT_FOUND");
+      throw new ProfileManagerError("没有找到作为模板或副本来源的 Profile。", "PROFILE_NOT_FOUND");
     }
+    const mode = cloneProfileMode(process.platform, source);
 
     const prefix = normalizeProfileName(request.namePrefix || source.name).slice(0, 70);
     let nextPortSeed = normalizeCdpPortInput(request.basePort) ?? (await findAvailableCdpPort(9223));
@@ -2644,65 +2770,112 @@ export class ProfileManager {
     const created: ClonedProfileInfo[] = [];
     const usedNames = new Set(state.profiles.map((profile) => profile.name));
 
-    for (let i = 0; i < count; i += 1) {
-      throwIfAborted(abortSignal);
-      await waitIfPaused(pauseSignal, abortSignal);
-      const name = nextUniqueCloneName(prefix, usedNames);
-      usedNames.add(name);
-      report(`正在创建副本 ${i + 1}/${count}：${name}…`, i + 1);
-      const createdProfile = await this.createProfile(name);
-      const targetId = makeIsolatedProfileId(createdProfile.id);
-      try {
-        report(`正在为 ${name} 同步登录态（${i + 1}/${count}）…`, i + 1);
-        await this.syncAccount(
-          { sourceProfileId, targetProfileId: targetId, launchTarget: false, onlyChanged: false },
-          (update) => report(update.message, i + 1),
-          abortSignal,
-          pauseSignal
-        );
+    // Windows 会对运行中的 Chrome SQLite 文件（尤其 Network/Cookies）持独占锁。
+    // 克隆前先优雅关闭源 Profile，整个批次结束后再恢复；macOS 保持原有的在线复制行为。
+    const sourceRestartPlan = shouldRestartCloneSource(process.platform, source.running, source.source)
+      ? await this.captureProfileRestartPlan(source)
+      : null;
+    let sourceClosedForClone = false;
+    let cloneFailure: unknown = null;
 
-        if (includeExtensions) {
-          report(`正在为 ${name} 同步插件（${i + 1}/${count}）…`, i + 1);
-          const scan = await this.scanProfileExtensions(sourceProfileId);
-          const extensionIds = scan.extensions.map((extension) => extension.id);
-          if (extensionIds.length) {
-            await this.migrateExtensions(
+    try {
+      if (sourceRestartPlan) {
+        report(`Windows 正在关闭源 ${source.name}，以释放浏览器数据文件…`, 1);
+        await this.closeProfileIfRunning(sourceProfileId);
+        sourceClosedForClone = true;
+      }
+
+      for (let i = 0; i < count; i += 1) {
+        throwIfAborted(abortSignal);
+        await waitIfPaused(pauseSignal, abortSignal);
+        const name = nextUniqueCloneName(prefix, usedNames);
+        usedNames.add(name);
+        report(`正在创建副本 ${i + 1}/${count}：${name}…`, i + 1);
+        const createdProfile = await this.createProfile(name);
+        const targetId = makeIsolatedProfileId(createdProfile.id);
+        try {
+          if (mode === "windows-native-template") {
+            report(`正在为 ${name} 复制轻量模板（${i + 1}/${count}）…`, i + 1);
+            await this.syncWindowsNativeAgentTemplate(
+              sourceProfileId,
+              targetId,
+              (update) => report(update.message, i + 1),
+              abortSignal,
+              pauseSignal
+            );
+          } else {
+            report(`正在为 ${name} 复制 Profile 数据（${i + 1}/${count}）…`, i + 1);
+            await this.syncAccount(
+              { sourceProfileId, targetProfileId: targetId, launchTarget: false, onlyChanged: false },
+              (update) => report(update.message, i + 1),
+              abortSignal,
+              pauseSignal,
               {
-                sourceProfileId,
-                targetProfileId: targetId,
-                extensionIds,
-                includeData: false,
-                openInstallPages: false,
-                onlyChanged: false
-              },
-              (update) => report(update.message, i + 1)
+                allowWindowsCrossDataDir: process.platform === "win32" && source.source === "isolated",
+                copyWindowsLegacyEncryptionKey: process.platform === "win32" && source.source === "isolated"
+              }
             );
           }
-        }
 
-        const port = await findAvailableCdpPort(nextPortSeed);
-        nextPortSeed = port + 1;
-        await this.setStoredCloneMeta(targetId, { fixedCdpPort: port, clonedFromProfileId: sourceProfileId });
+          if (includeExtensions) {
+            report(`正在为 ${name} 同步插件（${i + 1}/${count}）…`, i + 1);
+            const scan = await this.scanProfileExtensions(sourceProfileId);
+            const extensionIds = scan.extensions.map((extension) => extension.id);
+            if (extensionIds.length) {
+              await this.migrateExtensions(
+                {
+                  sourceProfileId,
+                  targetProfileId: targetId,
+                  extensionIds,
+                  includeData: false,
+                  openInstallPages: false,
+                  onlyChanged: false
+                },
+                (update) => report(update.message, i + 1)
+              );
+            }
+          }
 
-        let launched = false;
-        if (launchAfter) {
-          report(`正在以 CDP 启动 ${name}（${i + 1}/${count}）…`, i + 1);
-          await this.launchProfileWithCdp(targetId, port);
-          launched = true;
+          const port = await findAvailableCdpPort(nextPortSeed);
           nextPortSeed = port + 1;
+          await this.setStoredCloneMeta(targetId, { fixedCdpPort: port, clonedFromProfileId: sourceProfileId });
+
+          let launched = false;
+          if (launchAfter) {
+            report(`正在以 CDP 启动 ${name}（${i + 1}/${count}）…`, i + 1);
+            await this.launchProfileWithCdp(targetId, port);
+            launched = true;
+            nextPortSeed = port + 1;
+          }
+          created.push({ profileId: targetId, name, port, launched });
+        } catch (error) {
+          // 当前这份失败（含用户中止）：清理半成品；前面已成功的副本保留。
+          await this.deleteProfile(targetId).catch(() => undefined);
+          throw error;
         }
-        created.push({ profileId: targetId, name, port, launched });
-      } catch (error) {
-        // 当前这份失败（含用户中止）：清理半成品；前面已成功的副本保留。
-        await this.deleteProfile(targetId).catch(() => undefined);
-        throw error;
+      }
+    } catch (error) {
+      cloneFailure = error;
+      throw friendlyCloneError(error, source.name, process.platform);
+    } finally {
+      if (sourceRestartPlan && sourceClosedForClone) {
+        try {
+          report(`正在重新打开源 ${source.name}…`, Math.max(created.length, 1));
+          await this.restoreProfileFromRestartPlan(sourceRestartPlan);
+        } catch (restoreError) {
+          if (!cloneFailure) {
+            throw restoreError;
+          }
+          // 恢复失败不能覆盖真正的克隆错误，但需要留在诊断日志里。
+          console.error(`[profilepilot] 克隆失败后未能重新打开源 Profile：${source.name}`, restoreError);
+        }
       }
     }
 
     return { sourceProfileId, created, state: await this.getState() };
   }
 
-  // 副本池：以源为准，把该源的全部副本登录态刷新一遍（onlyChanged 走增量，快）。
+  // 副本池：Windows 原生源只更新书签模板；其余来源增量刷新可迁移的 Profile 数据。
   async refreshClones(
     sourceProfileId: string,
     onProgress?: (progress: OperationProgressUpdate) => void,
@@ -2710,6 +2883,12 @@ export class ProfileManager {
     pauseSignal?: OperationPauseSignal
   ): Promise<RefreshClonesResult> {
     const sourceId = String(sourceProfileId || "");
+    const state = await this.getState();
+    const source = state.profiles.find((profile) => profile.id === sourceId);
+    if (!source) {
+      throw new ProfileManagerError("没有找到副本的源 Profile。", "PROFILE_NOT_FOUND");
+    }
+    const mode = cloneProfileMode(process.platform, source);
     const registry = await this.loadRegistry();
     const clones = registry.profiles.filter((profile) => profile.clonedFromProfileId === sourceId);
     if (!clones.length) {
@@ -2727,12 +2906,24 @@ export class ProfileManager {
       };
       report(`正在刷新副本 ${index + 1}/${clones.length}：${clone.name}…`);
       try {
-        const result = await this.syncAccount(
-          { sourceProfileId: sourceId, targetProfileId: targetId, launchTarget: false, onlyChanged: true },
-          (update) => report(update.message),
-          abortSignal,
-          pauseSignal
-        );
+        const result = mode === "windows-native-template"
+          ? await this.syncWindowsNativeAgentTemplate(
+              sourceId,
+              targetId,
+              (update) => report(update.message),
+              abortSignal,
+              pauseSignal
+            )
+          : await this.syncAccount(
+              { sourceProfileId: sourceId, targetProfileId: targetId, launchTarget: false, onlyChanged: true },
+              (update) => report(update.message),
+              abortSignal,
+              pauseSignal,
+              {
+                allowWindowsCrossDataDir: process.platform === "win32" && source.source === "isolated",
+                copyWindowsLegacyEncryptionKey: process.platform === "win32" && source.source === "isolated"
+              }
+            );
         refreshed.push({ profileId: targetId, name: clone.name, copiedCount: result.copiedItems.length });
       } catch (error) {
         if (error instanceof ProfileManagerError && error.code === "ACCOUNT_SYNC_SOURCE_EMPTY") {
@@ -2763,11 +2954,30 @@ export class ProfileManager {
       throw new ProfileManagerError("这个 Profile 不是副本，没有可重置回去的源。", "NOT_A_CLONE");
     }
 
+    const state = await this.getState();
+    const source = state.profiles.find((profile) => profile.id === stored.clonedFromProfileId);
+    if (!source) {
+      throw new ProfileManagerError("没有找到副本的源 Profile。", "PROFILE_NOT_FOUND");
+    }
+    if (cloneProfileMode(process.platform, source) === "windows-native-template") {
+      return this.syncWindowsNativeAgentTemplate(
+        stored.clonedFromProfileId,
+        profileId,
+        onProgress,
+        abortSignal,
+        pauseSignal
+      );
+    }
+
     return this.syncAccount(
       { sourceProfileId: stored.clonedFromProfileId, targetProfileId: profileId, launchTarget: false, onlyChanged: false },
       onProgress,
       abortSignal,
-      pauseSignal
+      pauseSignal,
+      {
+        allowWindowsCrossDataDir: process.platform === "win32" && source.source === "isolated",
+        copyWindowsLegacyEncryptionKey: process.platform === "win32" && source.source === "isolated"
+      }
     );
   }
 
@@ -2900,11 +3110,6 @@ export class ProfileManager {
   private async launchIsolatedProfileWithCdp(id: string, portInput?: number | null, options: LaunchProfileOptions = {}): Promise<void> {
     const registry = await this.loadRegistry();
     const profile = this.findIsolatedProfile(registry, id);
-    const currentState = await this.getState();
-    const currentProfile = currentState.profiles.find((item) => item.id === makeIsolatedProfileId(id));
-    if (currentProfile?.running) {
-      throw new ProfileManagerError("请先关闭这个 Profile，再用 CDP 模式启动。", "PROFILE_RUNNING");
-    }
 
     // 用户没显式填端口时，回落到该 Profile 绑定的固定端口（用于 Agent 调试的恒定端点）。
     const requestedPort = normalizeCdpPortInput(portInput) ?? profile.fixedCdpPort ?? null;
@@ -3011,6 +3216,9 @@ export class ProfileManager {
       }
     }
 
+    const profileDataPath = await resolveIsolatedProfileDataPath(profilePath);
+    await pruneServiceWorkerCacheStorage(profileDataPath).catch(() => false);
+
     const chromeArgs = [
       `--user-data-dir=${profilePath}`,
       "--no-first-run",
@@ -3062,7 +3270,10 @@ export class ProfileManager {
         return await ensureProfileBifrostProxy(profile.id, profile.bifrostProxy, process.env);
       }
       if (profile.upstreamProxy) {
-        return await ensureUpstreamProxy(profile.upstreamProxy);
+        return await ensureBifrostMainProxy(profile.upstreamProxy, {
+          start: options.startBifrost,
+          env: process.env
+        });
       }
       if (profile.directConnection) {
         return directConnectionChromeArgs(true);
@@ -3383,13 +3594,29 @@ export class ProfileManager {
   }
 
   private async recoverAccountSyncArtifactsBeforeLaunch(profileId: string): Promise<void> {
-    const profile = await this.getPublicProfile(profileId);
-    if (profile.running) {
+    const profilePath = await this.accountSyncProfilePathForLaunch(profileId);
+    if (!profilePath) {
       return;
     }
+    await recoverInterruptedAccountSyncArtifactsForProfile(profilePath);
+  }
 
-    const location = await this.resolveAccountSyncLocation(profile, false);
-    await recoverInterruptedAccountSyncArtifactsForProfile(location.profilePath);
+  private async accountSyncProfilePathForLaunch(profileId: string): Promise<string | null> {
+    const ref = parseProfileId(profileId);
+    if (ref.source === "native") {
+      return path.join(nativeChromeUserDataDir(), ref.dirName);
+    }
+    if (ref.source === "isolated-sub") {
+      const registry = await this.loadRegistry();
+      const parent = this.findIsolatedProfile(registry, ref.parentId);
+      return path.join(this.isolatedProfilePath(parent), ref.dirName);
+    }
+    if (ref.source !== "isolated") {
+      return null;
+    }
+    const registry = await this.loadRegistry();
+    const profile = this.findIsolatedProfile(registry, this.requireIsolatedId(ref));
+    return resolveIsolatedProfileDataPath(this.isolatedProfilePath(profile));
   }
 
   private async getRuntime(profilePaths: string[], nativeProfiles: NativeChromeProfile[]): Promise<Map<string, RuntimeProfile>> {
@@ -3402,20 +3629,14 @@ export class ProfileManager {
     }
 
     try {
-      const { stdout } = await execFileAsync("ps", ["-axo", "pid=,lstart=,command="], {
-        maxBuffer: 1024 * 1024 * 8,
-        env: POSIX_LOCALE_ENV
-      });
-
       const processesByPid = new Map<number, RuntimeProfile & { pid: number; command: string }>();
-      for (const line of stdout.split("\n")) {
-        const processInfo = parseRuntimeProcess(line);
-        if (!processInfo) {
-          continue;
-        }
+      const processes = await listRuntimeProcesses();
+      for (const processInfo of processes) {
         processesByPid.set(processInfo.pid, processInfo);
 
         const { command } = processInfo;
+        const userDataDir = parseUserDataDirFlag(command);
+        const profileDirectory = parseProfileDirectoryFlag(command);
 
         // A normally opened Chrome often does not include --profile-directory.
         // Treat that main browser process as the Default profile.
@@ -3424,14 +3645,14 @@ export class ProfileManager {
         }
 
         for (const profilePath of profilePaths) {
-          if (!command.includes("--user-data-dir=") || !command.includes(profilePath)) {
+          if (!userDataDir || !(await isSameFilesystemPath(userDataDir, profilePath))) {
             continue;
           }
           addRuntimeProcess(runtime, profilePath, processInfo);
         }
 
         for (const dirName of nativeDirNames) {
-          if (!command.includes("--profile-directory=") || !command.includes(`--profile-directory=${dirName}`)) {
+          if (profileDirectory !== dirName) {
             continue;
           }
           addRuntimeProcess(runtime, makeNativeRuntimeKey(dirName), processInfo);
@@ -3846,7 +4067,7 @@ export class ProfileManager {
     }
 
     if (process.platform === "win32") {
-      return "chrome";
+      return getDirectChromeCommand() || "Google Chrome";
     }
 
     return "google-chrome";
@@ -3910,6 +4131,59 @@ export function createProfileManager(
     onAgentTakeover,
     onAgentOverlayReveal
   });
+}
+
+export function cloneProfileMode(
+  platform: NodeJS.Platform,
+  source: Pick<PublicProfile, "source">
+): "windows-native-template" | "account-copy" {
+  return platform === "win32" && source.source === "native" ? "windows-native-template" : "account-copy";
+}
+
+export function isWindowsCrossDataDirAccountSyncUnsupported(
+  platform: NodeJS.Platform,
+  source: Pick<PublicProfile, "userDataDir">,
+  target: Pick<PublicProfile, "userDataDir">
+): boolean {
+  if (platform !== "win32") {
+    return false;
+  }
+  const sourceDir = path.win32.resolve(source.userDataDir).toLowerCase();
+  const targetDir = path.win32.resolve(target.userDataDir).toLowerCase();
+  return sourceDir !== targetDir;
+}
+
+function assertWindowsAccountSyncSupported(
+  platform: NodeJS.Platform,
+  source: Pick<PublicProfile, "userDataDir">,
+  target: Pick<PublicProfile, "userDataDir">,
+  allowCrossDataDir: boolean
+): void {
+  if (!allowCrossDataDir && isWindowsCrossDataDirAccountSyncUnsupported(platform, source, target)) {
+    throw new ProfileManagerError(
+      "Windows 无法把 Chrome 登录态可靠地复制到另一个 user-data-dir。请在独立 Agent 浏览器中登录一次；之后继续复用这个 Profile。",
+      "WINDOWS_LOGIN_STATE_COPY_UNSUPPORTED"
+    );
+  }
+}
+
+export function shouldRestartCloneSource(
+  platform: NodeJS.Platform,
+  sourceRunning: boolean,
+  source: PublicProfile["source"] = "isolated"
+): boolean {
+  return platform === "win32" && sourceRunning && source !== "native";
+}
+
+export function friendlyCloneError(error: unknown, sourceName: string, platform: NodeJS.Platform): unknown {
+  const code = error && typeof error === "object" && "code" in error ? String(error.code || "") : "";
+  if (platform !== "win32" || code !== "EBUSY") {
+    return error;
+  }
+  return new ProfileManagerError(
+    `Windows 仍在占用源 ${sourceName} 的浏览器数据。请完全退出这个 Chrome（包括后台进程）后重试。`,
+    "CLONE_SOURCE_BUSY"
+  );
 }
 
 // 为副本生成不与现有名字冲突的编号名：prefix-1、prefix-2…

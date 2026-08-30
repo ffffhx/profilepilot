@@ -29,7 +29,8 @@ export class ElectronDriver {
         this.pending.delete(id);
         reject(new Error(`Electron E2E driver command timed out: ${command}`));
       }, timeoutMs);
-      this.pending.set(id, { resolve, reject, timeout });
+      const label = payload.selector ? `${command}(${payload.selector})` : command;
+      this.pending.set(id, { resolve, reject, timeout, command: label });
       this.socket.write(`${JSON.stringify({ id, command, ...payload })}\n`);
     });
   }
@@ -133,6 +134,12 @@ export class ElectronDriver {
       try {
         latest = await this.query(selector, options);
         if (predicate(latest)) return latest;
+        if (!Object.prototype.hasOwnProperty.call(options, "index")) {
+          for (let index = 1; index < latest.count; index += 1) {
+            const candidate = await this.query(selector, { ...options, index });
+            if (predicate(candidate)) return candidate;
+          }
+        }
       } catch {
         // The target window may be transitioning; keep waiting until the deadline.
       }
@@ -142,7 +149,7 @@ export class ElectronDriver {
   }
 
   close() {
-    this.socket.end();
+    this.socket.destroy();
   }
 
   #consume(chunk) {
@@ -159,7 +166,7 @@ export class ElectronDriver {
       this.pending.delete(response.id);
       clearTimeout(waiter.timeout);
       if (response.ok) waiter.resolve(response.result);
-      else waiter.reject(new Error(response.error || "Electron E2E driver command failed."));
+      else waiter.reject(new Error(`${waiter.command} failed: ${response.error || "Electron E2E driver command failed."}`));
     }
   }
 
@@ -180,11 +187,13 @@ export async function launchProfilePilotE2e(options = {}) {
 
   // Browser Gateway adds `~/.profilepilot/gateway/control.sock` below HOME.
   // Keep the fixture prefix short enough for macOS' Unix socket path limit.
-  const fixtureRoot = await mkdtemp(path.join(options.realGateway ? "/tmp" : os.tmpdir(), "pp-e2e-"));
+  const fixtureRoot = await mkdtemp(path.join(options.realGateway && process.platform !== "win32" ? "/tmp" : os.tmpdir(), "pp-e2e-"));
   const homeDir = path.join(fixtureRoot, "home");
   const dataDir = path.join(fixtureRoot, "profilepilot-data");
   const electronDataDir = path.join(fixtureRoot, "electron-data");
-  const socketPath = path.join(fixtureRoot, "driver.sock");
+  const socketPath = process.platform === "win32"
+    ? `\\\\.\\pipe\\profilepilot-e2e-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`
+    : path.join(fixtureRoot, "driver.sock");
   await Promise.all([
     mkdir(path.join(homeDir, ".codex"), { recursive: true }),
     mkdir(path.join(homeDir, ".claude"), { recursive: true }),
@@ -244,10 +253,32 @@ export async function launchProfilePilotE2e(options = {}) {
     stderr += String(chunk);
   });
 
-  const socket = await connectSocket(socketPath, child, () => ({ stdout, stderr }), options.timeoutMs || 15_000);
-  const driver = new ElectronDriver(socket);
-  await driver.request("ping");
-  await driver.waitFor("h1", (snapshot) => snapshot.text === "ProfilePilot", { timeoutMs: 10_000 });
+  let socket = null;
+  let driver = null;
+  try {
+    socket = await connectSocket(socketPath, child, () => ({ stdout, stderr }), options.timeoutMs || 15_000);
+    driver = new ElectronDriver(socket);
+    await driver.request("ping");
+    await driver.waitFor("h1", (snapshot) => snapshot.text === "ProfilePilot", {
+      timeoutMs: process.platform === "win32" ? 30_000 : 10_000
+    });
+  } catch (error) {
+    driver?.close();
+    socket?.destroy();
+    child.kill("SIGKILL");
+    await waitForExit(child, 5_000).catch(() => undefined);
+    await rm(fixtureRoot, {
+      recursive: true,
+      force: true,
+      maxRetries: process.platform === "win32" ? 10 : 0,
+      retryDelay: 100
+    });
+    throw new Error([
+      error instanceof Error ? error.message : String(error),
+      stdout ? `stdout:\n${stdout}` : "",
+      stderr ? `stderr:\n${stderr}` : ""
+    ].filter(Boolean).join("\n"));
+  }
 
   let stopped = false;
   return {
@@ -261,16 +292,38 @@ export async function launchProfilePilotE2e(options = {}) {
     async stop(stopOptions = {}) {
       if (stopped) return;
       stopped = true;
-      try {
-        await driver.request("quit", {}, 3_000);
-      } catch {
+      const debugCleanup = (message) => {
+        if (process.env.CPM_E2E_DEBUG_CLEANUP === "1") console.error(`[e2e:cleanup] ${message}`);
+      };
+      debugCleanup("start");
+      if (process.platform === "win32") {
+        // A detached Gateway helper can retain Electron's inherited pipes on
+        // Windows. Tear down the disposable named-pipe client first and wait on
+        // the main process lifecycle instead of a graceful IPC round trip.
+        driver.close();
         child.kill("SIGTERM");
+      } else {
+        try {
+          await driver.request("quit", {}, 3_000);
+        } catch {
+          child.kill("SIGTERM");
+        }
       }
       await waitForExit(child, 5_000).catch(() => child.kill("SIGKILL"));
+      debugCleanup("main process exited");
+      child.stdout.destroy();
+      child.stderr.destroy();
       driver.close();
+      debugCleanup("pipes closed");
       if (stopOptions.removeFixture !== false) {
-        await rm(fixtureRoot, { recursive: true, force: true });
+        await rm(fixtureRoot, {
+          recursive: true,
+          force: true,
+          maxRetries: process.platform === "win32" ? 10 : 0,
+          retryDelay: 100
+        });
       }
+      debugCleanup("fixture removed");
     }
   };
 }
@@ -306,13 +359,17 @@ async function connectSocket(socketPath, child, output, timeoutMs) {
 }
 
 function waitForExit(child, timeoutMs) {
-  if (child.exitCode !== null) return Promise.resolve();
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error("Electron E2E app did not exit.")), timeoutMs);
-    child.once("close", () => {
+    child.once("exit", () => {
       clearTimeout(timeout);
       resolve();
     });
+    if (child.exitCode !== null || child.signalCode !== null) {
+      clearTimeout(timeout);
+      resolve();
+    }
   });
 }
 

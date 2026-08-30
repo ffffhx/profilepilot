@@ -6,6 +6,7 @@ import path from "node:path";
 import { delay, launchProfilePilotE2e } from "./e2e/lib/electron-driver.mjs";
 
 const EXTENSION_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const OPERATION_TIMEOUT_MS = process.platform === "win32" ? 45_000 : 15_000;
 
 async function main() {
   const app = await launchProfilePilotE2e({ mode: "background", name: "e2e-sync-copy" });
@@ -38,10 +39,10 @@ async function main() {
     assert.match(sourcePicker.text, /E2E Sync Source/);
     assert.match(targetPicker.text, /E2E Sync Target/);
 
-    const includeData = await driver.query("[data-include-extension-data]");
-    if (!includeData.checked) await driver.domInput("[data-include-extension-data]", "", { checked: true });
+    assert.equal((await driver.query("[data-sync-part-account]")).checked, true);
+    assert.equal((await driver.query("[data-sync-part-extensions]")).checked, true);
     const launchTarget = await driver.query("[data-launch-synced-profile]");
-    if (launchTarget.checked) await driver.domInput("[data-launch-synced-profile]", "", { checked: false });
+    if (launchTarget.checked) await driver.domClick("[data-launch-synced-profile]");
 
     await driver.domClick('[data-action="run-sync"]');
     await driver.waitFor('[data-action="confirm-modal-action"]');
@@ -50,17 +51,26 @@ async function main() {
     await waitForFileContent(path.join(targetProfile, "Bookmarks"), "SOURCE_BOOKMARKS");
     await waitForFileContent(path.join(targetProfile, "Network", "Cookies"), "SOURCE_COOKIE_BYTES");
     await waitForFileContent(path.join(targetProfile, "Local Storage", "leveldb", "fixture.log"), "SOURCE_LOCAL_STORAGE");
-    await waitForFileContent(
-      path.join(targetProfile, "Local Extension Settings", EXTENSION_ID, "fixture.log"),
-      "SOURCE_EXTENSION_DATA"
-    );
-
     await driver.waitFor('[data-action="run-sync"]', (snapshot) => snapshot.exists && !snapshot.disabled, {
-      timeoutMs: 15_000
+      timeoutMs: OPERATION_TIMEOUT_MS
     });
-    await waitForMigratedExtension(path.join(dataDir, "profiles.json"), targetStored.id);
-    step("account files and extension data were copied through the combined UI sync flow");
+    await waitForFileContent(
+      path.join(targetProfile, "Extensions", EXTENSION_ID, "1.0.0", "manifest.json"),
+      JSON.stringify({ manifest_version: 3, name: "ProfilePilot E2E Extension", version: "1.0.0" })
+    );
+    assert.equal(
+      await readFile(path.join(targetProfile, "Local Extension Settings", EXTENSION_ID, "fixture.log"), "utf8"),
+      "TARGET_OLD_EXTENSION_DATA",
+      "combined sync must preserve extension data unless the user opted into copying it"
+    );
+    step("account files and extensions were copied through the combined UI sync flow");
     step("PASS");
+  } catch (error) {
+    const output = app.output();
+    console.error("[e2e:sync-copy] UI toast:", await driver.query(".toast").catch(() => null));
+    if (output.stdout) console.error(`[e2e:sync-copy] Electron stdout:\n${output.stdout}`);
+    if (output.stderr) console.error(`[e2e:sync-copy] Electron stderr:\n${output.stderr}`);
+    throw error;
   } finally {
     await app.stop();
   }
@@ -94,14 +104,32 @@ async function seedSyncFixtures(sourceRoot, sourceProfile, targetRoot, targetPro
     mkdir(path.join(targetProfile, "Local Extension Settings", EXTENSION_ID), { recursive: true })
   ]);
 
+  const extensionSetting = {
+    state: 1,
+    location: 4,
+    from_webstore: true,
+    path: path.relative(sourceProfile, extensionDir),
+    manifest: {
+      manifest_version: 3,
+      name: "ProfilePilot E2E Extension",
+      version: "1.0.0",
+      update_url: "https://clients2.google.com/service/update2/crx"
+    }
+  };
   const preferences = {
     extensions: {
       settings: {
-        [EXTENSION_ID]: {
-          state: 1,
-          location: 4,
-          path: path.relative(sourceProfile, extensionDir),
-          manifest: { manifest_version: 3, name: "ProfilePilot E2E Extension", version: "1.0.0" }
+        [EXTENSION_ID]: extensionSetting
+      }
+    }
+  };
+  const securePreferences = {
+    extensions: { settings: { [EXTENSION_ID]: extensionSetting } },
+    protection: {
+      macs: {
+        extensions: {
+          settings: { [EXTENSION_ID]: "fixture-settings-mac" },
+          settings_encrypted_hash: { [EXTENSION_ID]: "fixture-settings-hash" }
         }
       }
     }
@@ -130,7 +158,7 @@ async function seedSyncFixtures(sourceRoot, sourceProfile, targetRoot, targetPro
     writeFile(path.join(sourceProfile, "Local Extension Settings", EXTENSION_ID, "fixture.log"), "SOURCE_EXTENSION_DATA", "utf8"),
     writeFile(path.join(extensionDir, "manifest.json"), JSON.stringify({ manifest_version: 3, name: "ProfilePilot E2E Extension", version: "1.0.0" }), "utf8"),
     writeFile(path.join(sourceProfile, "Preferences"), JSON.stringify(preferences), "utf8"),
-    writeFile(path.join(sourceProfile, "Secure Preferences"), "{}", "utf8"),
+    writeFile(path.join(sourceProfile, "Secure Preferences"), JSON.stringify(securePreferences), "utf8"),
     writeFile(path.join(sourceRoot, "Local State"), JSON.stringify(sourceLocalState), "utf8"),
     writeFile(path.join(targetProfile, "Bookmarks"), "TARGET_OLD_BOOKMARKS", "utf8"),
     writeFile(path.join(targetProfile, "Network", "Cookies"), "TARGET_OLD_COOKIES", "utf8"),
@@ -142,7 +170,7 @@ async function seedSyncFixtures(sourceRoot, sourceProfile, targetRoot, targetPro
   ]);
 }
 
-async function waitForFileContent(filePath, expected, timeoutMs = 15_000) {
+async function waitForFileContent(filePath, expected, timeoutMs = OPERATION_TIMEOUT_MS) {
   const startedAt = Date.now();
   let latest = null;
   while (Date.now() - startedAt < timeoutMs) {
@@ -151,17 +179,6 @@ async function waitForFileContent(filePath, expected, timeoutMs = 15_000) {
     await delay(80);
   }
   throw new Error(`Timed out waiting for copied file ${filePath}; latest=${String(latest)}`);
-}
-
-async function waitForMigratedExtension(registryPath, targetId, timeoutMs = 15_000) {
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < timeoutMs) {
-    const registry = JSON.parse(await readFile(registryPath, "utf8"));
-    const target = registry.profiles.find((profile) => profile.id === targetId);
-    if (target?.migratedExtensions?.some((extension) => extension.sourceExtensionId === EXTENSION_ID)) return;
-    await delay(80);
-  }
-  assert.fail("extension migration should persist a runtime-load record on the target");
 }
 
 function step(message) {

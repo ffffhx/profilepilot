@@ -117,13 +117,14 @@ export class BrowserGatewayDaemon {
       onAgentConnectionChange: (publicPort, active, identity) => {
         this.handleAgentConnectionChange(publicPort, active, identity.sessionId, identity.daemonInstanceId);
       },
-      onAgentTargetChange: (publicPort) => {
+      onAgentTargetChange: (publicPort, targetChange) => {
         const profile = this.control.getProfile(publicPort);
         if (profile) {
           this.publishControlEvent({
             type: "connection-updated",
             profile,
-            reason: "agent-target-changed"
+            reason: "agent-target-changed",
+            ...(targetChange ? { targetChange } : {})
           });
         }
       }
@@ -246,6 +247,13 @@ export class BrowserGatewayDaemon {
             profile.daemonInstanceId
           )
         ),
+        agentActivity: profile.ownerSessionId && profile.daemonInstanceId
+          ? this.gateway.getAgentActivity(
+              profile.publicPort,
+              profile.ownerSessionId,
+              profile.daemonInstanceId
+            )
+          : null,
         agentTarget: profile.ownerSessionId
           ? await this.gateway.getAgentTarget(profile.publicPort, profile.ownerSessionId).catch(() => null)
           : null
@@ -420,6 +428,11 @@ export class BrowserGatewayDaemon {
         claims: acquired.claims,
         profile: acquired.profile,
         connectionActive,
+        agentActivity: this.gateway.getAgentActivity(
+          request.publicPort,
+          request.sessionId,
+          request.daemonInstanceId
+        ),
         webSocketUrl: `ws://127.0.0.1:${request.publicPort}/devtools/browser/gateway?ticket=${encodeURIComponent(acquired.ticket)}`
       };
     }
@@ -795,7 +808,7 @@ export class BrowserGatewayDaemon {
     }
     const focused = await this.focusProfileWindow([profile.chromePid], signal);
     if (!focused) {
-      throw new Error("macOS 没有确认目标 Chrome Profile 已到台前");
+      throw new Error(`${process.platform === "win32" ? "Windows" : "macOS"} 没有确认目标 Chrome Profile 已到台前`);
     }
     return true;
   }

@@ -7,7 +7,7 @@ import { delay, launchProfilePilotE2e, repoRoot } from "./e2e/lib/electron-drive
 
 const baselineDir = path.join(repoRoot, "tests", "visual-baselines");
 const baselinePath = path.join(baselineDir, `main-empty-${process.platform}.png`);
-const update = process.env.UPDATE_VISUAL_BASELINES === "1";
+const update = process.env.UPDATE_VISUAL_BASELINES === "1" || process.argv.includes("--update");
 
 async function main() {
   const app = await launchProfilePilotE2e({ mode: "background", name: "e2e-visual-regression" });

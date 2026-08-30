@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -8,7 +8,7 @@ import type { GatewayControlEvent } from "./browser-gateway-control";
 import type { GatewayDriverKind } from "./browser-gateway-control";
 
 const DEFAULT_TIMEOUT_MS = 3_000;
-export const BROWSER_GATEWAY_PROTOCOL_VERSION = 12;
+export const BROWSER_GATEWAY_PROTOCOL_VERSION = 13;
 
 export type GatewayControlRequest =
   | { action: "ping" }
@@ -118,9 +118,11 @@ export function browserGatewayRoot(homeDir = os.homedir()): string {
 }
 
 export function browserGatewaySocketPath(homeDir = os.homedir()): string {
-  return process.platform === "win32"
-    ? "\\\\.\\pipe\\profilepilot-browser-gateway"
-    : path.join(browserGatewayRoot(homeDir), "control.sock");
+  if (process.platform === "win32") {
+    const suffix = createHash("sha256").update(path.resolve(browserGatewayRoot(homeDir))).digest("hex").slice(0, 16);
+    return `\\\\.\\pipe\\profilepilot-browser-gateway-${suffix}`;
+  }
+  return path.join(browserGatewayRoot(homeDir), "control.sock");
 }
 
 export function browserGatewaySecretPath(homeDir = os.homedir()): string {

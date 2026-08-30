@@ -5,9 +5,14 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
-const { ensureConfiguredGatewayProfileRunning, prepareGatewayTransport, runAgentBrowserWrapper } = require("../dist/main/agent-browser-wrapper.js");
+const {
+  PROFILEPILOT_AGENT_BROWSER_HARD_STOP_EXIT_CODE,
+  ensureConfiguredGatewayProfileRunning,
+  prepareGatewayTransport,
+  runAgentBrowserWrapper
+} = require("../dist/main/agent-browser-wrapper.js");
 const { acquireAgentBrowserProfileLeaseSync, readAgentBrowserProfileLeaseSync } = require("../dist/main/agent-browser-lease.js");
-const { ensureBrowserGatewayDaemon, requestBrowserGateway, subscribeBrowserGatewayEvents } = require("../dist/main/browser-gateway-client.js");
+const { browserGatewaySocketPath, ensureBrowserGatewayDaemon, requestBrowserGateway, subscribeBrowserGatewayEvents } = require("../dist/main/browser-gateway-client.js");
 const {
   BrowserGatewayDaemon,
   DEFAULT_DRIVER_RECONNECT_GRACE_MS
@@ -19,7 +24,7 @@ test("Gateway gives a waiting Agent enough time to reconnect after user return",
 
 test("Gateway stops an active Session and rejects future acquire when Agent access is disabled", async () => {
   // Keep the Unix socket path below macOS's sockaddr_un limit.
-  const home = mkdtempSync("/tmp/pp-gap-");
+  const home = mkdtempSync(path.join(os.tmpdir(), "pp-gap-"));
   const fakeChrome = writeFakeChrome(home);
   const port = await freePort();
   const daemon = testGatewayDaemon(home);
@@ -288,6 +293,7 @@ test("agent-browser wrapper transparently connects through a Gateway ticket and 
   const chromeCallsPath = path.join(home, "fake-chrome-calls.ndjson");
   const fakeAgentBrowser = path.join(home, "fake-agent-browser.js");
   const callsPath = path.join(home, "agent-browser-calls.ndjson");
+  const envCallsPath = path.join(home, "agent-browser-env.ndjson");
   const holderPidPath = path.join(home, "holder.pid");
   const readyPath = path.join(home, "holder.ready");
   writeFileSync(fakeAgentBrowser, `#!${process.execPath}
@@ -295,6 +301,13 @@ const fs = require("node:fs");
 const { spawn } = require("node:child_process");
 const args = process.argv.slice(2);
 fs.appendFileSync(process.env.CALLS_PATH, JSON.stringify(args) + "\\n");
+fs.appendFileSync(process.env.ENV_CALLS_PATH, JSON.stringify({
+  HTTP_PROXY: process.env.HTTP_PROXY || null,
+  HTTPS_PROXY: process.env.HTTPS_PROXY || null,
+  ALL_PROXY: process.env.ALL_PROXY || null,
+  AGENT_BROWSER_PROXY: process.env.AGENT_BROWSER_PROXY || null,
+  NO_PROXY: process.env.NO_PROXY || null
+}) + "\\n");
 const connectIndex = args.indexOf("connect");
 if (connectIndex >= 0) {
   const url = args[connectIndex + 1];
@@ -329,8 +342,14 @@ if (connectIndex >= 0) {
       HOME: home,
       AGENT_BROWSER_SESSION: "cx-wrapper",
       CALLS_PATH: callsPath,
+      ENV_CALLS_PATH: envCallsPath,
       HOLDER_PID_PATH: holderPidPath,
       READY_PATH: readyPath,
+      HTTP_PROXY: "http://127.0.0.1:7897",
+      HTTPS_PROXY: "http://127.0.0.1:7897",
+      ALL_PROXY: "socks5://127.0.0.1:7897",
+      AGENT_BROWSER_PROXY: "http://controller.test:8080",
+      NO_PROXY: "127.0.0.1,localhost",
       PROFILEPILOT_AGENT_BROWSER_REAL: fakeAgentBrowser
     };
     const prepared = await prepareGatewayTransport(
@@ -342,6 +361,13 @@ if (connectIndex >= 0) {
     assert.deepEqual(prepared, ["snapshot", "--json"]);
     const calls = readFileSync(callsPath, "utf8").trim().split("\n").map(JSON.parse);
     assert.equal(calls.length, 1);
+    assert.deepEqual(readJsonLines(envCallsPath), [{
+      HTTP_PROXY: null,
+      HTTPS_PROXY: null,
+      ALL_PROXY: null,
+      AGENT_BROWSER_PROXY: null,
+      NO_PROXY: "127.0.0.1,localhost"
+    }]);
     assert.deepEqual(calls[0].slice(0, 3), ["--session", "cx-wrapper", "connect"]);
     assert.match(calls[0][3], new RegExp(`^ws://127\\.0\\.0\\.1:${port}/devtools/browser/gateway\\?ticket=`));
     const status = await requestBrowserGateway({ action: "status" }, { homeDir: home });
@@ -349,6 +375,11 @@ if (connectIndex >= 0) {
     assert.equal(profile.ownerSessionId, "cx-wrapper");
     assert.equal(profile.ownership, "agent");
     assert.equal(profile.daemonPid, Number(readFileSync(holderPidPath, "utf8")));
+    assert.deepEqual(profile.agentActivity, {
+      generation: 0,
+      lastCdpAt: null,
+      lastCdpMethod: null
+    });
     assert.equal(acquireAgentBrowserProfileLeaseSync({
       cdpPort: port,
       session: "cx-wrapper",
@@ -457,6 +488,88 @@ if (connectIndex >= 0) {
     }
     await daemon.stop();
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("managed wrapper uses the same isolated proxy env and fails closed when a command bypasses Gateway", async () => {
+  for (const detached of [false, true]) {
+    const home = mkdtempSync(path.join(os.tmpdir(), `profilepilot-gateway-activity-${detached ? "detached" : "connected"}-`));
+    const fakeChrome = writeFakeChrome(home);
+    const fakeAgentBrowser = writeGatewayAwareFakeAgentBrowser(home);
+    const callsPath = path.join(home, "calls.ndjson");
+    const envCallsPath = path.join(home, "env.ndjson");
+    const holderPidPath = path.join(home, "holder.pid");
+    const daemon = testGatewayDaemon(home);
+    await daemon.start();
+    const port = await freePort();
+    const env = {
+      ...process.env,
+      HOME: home,
+      AGENT_BROWSER_SESSION: `cx-activity-${detached ? "detached" : "connected"}`,
+      PROFILEPILOT_AGENT_BROWSER_REAL: fakeAgentBrowser,
+      CALLS_PATH: callsPath,
+      ENV_CALLS_PATH: envCallsPath,
+      HOLDER_PID_PATH: holderPidPath,
+      READY_PATH: path.join(home, "ready"),
+      TRIGGER_PATH: path.join(home, "trigger"),
+      ACK_PATH: path.join(home, "ack"),
+      HTTP_PROXY: "http://127.0.0.1:7897",
+      HTTPS_PROXY: "http://127.0.0.1:7897",
+      ALL_PROXY: "socks5://127.0.0.1:7897",
+      AGENT_BROWSER_PROXY: "http://controller.test:8080",
+      NO_PROXY: "127.0.0.1,localhost",
+      ...(detached ? { FAKE_DETACHED: "1" } : {})
+    };
+    const writes = captureProcessWrites();
+    try {
+      await requestBrowserGateway({
+        action: "launch-profile",
+        profileId: `profile-activity-${detached}`,
+        profileName: `Profile Activity ${detached}`,
+        publicPort: port,
+        executable: process.execPath,
+        args: [fakeChrome]
+      }, { homeDir: home });
+
+      const exitCode = await runAgentBrowserWrapper([
+        "--cdp",
+        String(port),
+        "snapshot"
+      ], env);
+      const childEnvs = readJsonLines(envCallsPath);
+      assert.equal(childEnvs.length, 2, "connect and command must both use the wrapper environment");
+      for (const childEnv of childEnvs) {
+        assert.deepEqual(childEnv, {
+          HTTP_PROXY: null,
+          HTTPS_PROXY: null,
+          ALL_PROXY: null,
+          AGENT_BROWSER_PROXY: null,
+          NO_PROXY: "127.0.0.1,localhost"
+        });
+      }
+
+      const status = await requestBrowserGateway({ action: "status" }, { homeDir: home });
+      const profile = status.state.profiles.find((item) => item.publicPort === port);
+      if (detached) {
+        assert.equal(exitCode, PROFILEPILOT_AGENT_BROWSER_HARD_STOP_EXIT_CODE);
+        assert.match(writes.stderr.join(""), /AGENT_BROWSER_DETACHED_FROM_GATEWAY/);
+        assert.equal(profile.sessionStatus, "stopped");
+        assert.equal(profile.ownerSessionId, undefined);
+      } else {
+        assert.equal(exitCode, 0);
+        assert.equal(profile.connectionActive, true);
+        assert.ok(profile.agentActivity.generation > 0);
+        assert.equal(profile.agentActivity.lastCdpMethod, "Browser.getVersion");
+        assert.equal(await runAgentBrowserWrapper(["profilepilot", "complete"], env), 0);
+      }
+    } finally {
+      writes.restore();
+      if (existsSync(holderPidPath)) {
+        try { process.kill(Number(readFileSync(holderPidPath, "utf8")), "SIGKILL"); } catch {}
+      }
+      await daemon.stop();
+      rmSync(home, { recursive: true, force: true });
+    }
   }
 });
 
@@ -600,7 +713,7 @@ test("reconnect timeout releases the old Session and leaves a terminal Agent not
 
 test("agent-browser wrapper retries Gateway transport at most three times and recovers", async () => {
   // Keep the Unix control socket below macOS' sockaddr_un path limit.
-  const home = mkdtempSync("/tmp/pp-gw-retry-");
+  const home = mkdtempSync(path.join(os.tmpdir(), "pp-gw-retry-"));
   const fakeChrome = writeFakeChrome(home);
   const fakeAgentBrowser = path.join(home, "retry-agent-browser.js");
   const callsPath = path.join(home, "retry-calls.ndjson");
@@ -669,7 +782,7 @@ process.exit(fs.existsSync(process.env.READY_PATH) ? 0 : 8);
 });
 
 test("handoff reveal has one abortable deadline while takeover ownership remains committed", async () => {
-  const home = mkdtempSync("/tmp/pp-gw-deadline-");
+  const home = mkdtempSync(path.join(os.tmpdir(), "pp-gw-deadline-"));
   const fakeChrome = writeFakeChrome(home);
   const chromeCallsPath = path.join(home, "fake-chrome-calls.ndjson");
   const port = await freePort();
@@ -743,7 +856,7 @@ test("handoff reveal has one abortable deadline while takeover ownership remains
 
 test("handoff reveal is serialized before the same Session can return to Agent control", async () => {
   // Keep the Unix control socket below macOS' sockaddr_un path limit.
-  const home = mkdtempSync("/tmp/pp-gw-race-");
+  const home = mkdtempSync(path.join(os.tmpdir(), "pp-gw-race-"));
   const fakeChrome = writeFakeChrome(home);
   const chromeCallsPath = path.join(home, "fake-chrome-calls.ndjson");
   const port = await freePort();
@@ -824,7 +937,7 @@ test("handoff reveal is serialized before the same Session can return to Agent c
 });
 
 test("explicit Agent target reveal is serialized before the same Session can stop", async () => {
-  const home = mkdtempSync("/tmp/pp-gw-show-race-");
+  const home = mkdtempSync(path.join(os.tmpdir(), "pp-gw-show-race-"));
   const fakeChrome = writeFakeChrome(home);
   const chromeCallsPath = path.join(home, "fake-chrome-calls.ndjson");
   const port = await freePort();
@@ -1128,7 +1241,7 @@ test("ensure waits out a shutting-down daemon and returns a fresh process", asyn
 test("ensure defers a protocol upgrade while the old Gateway still owns live Chrome pipes", async () => {
   const home = mkdtempSync(path.join(os.tmpdir(), "profilepilot-gateway-deferred-upgrade-"));
   const gatewayRoot = path.join(home, ".profilepilot", "gateway");
-  const socketPath = path.join(gatewayRoot, "control.sock");
+  const socketPath = browserGatewaySocketPath(home);
   mkdirSync(gatewayRoot, { recursive: true });
   let shutdownRequested = false;
   const server = net.createServer((socket) => {
@@ -1168,6 +1281,61 @@ function testGatewayDaemon(home, options = {}) {
     focusProfileWindow: async () => true,
     ...options
   });
+}
+
+function writeGatewayAwareFakeAgentBrowser(home) {
+  const fakeAgentBrowser = path.join(home, "gateway-aware-agent-browser.js");
+  writeFileSync(fakeAgentBrowser, `#!${process.execPath}
+const fs = require("node:fs");
+const { spawn } = require("node:child_process");
+const args = process.argv.slice(2);
+if (args[0] === "--gateway-holder") {
+  const ws = new WebSocket(args[1]);
+  let sent = false;
+  ws.addEventListener("open", () => fs.writeFileSync(process.env.READY_PATH, "ready"));
+  ws.addEventListener("message", () => fs.writeFileSync(process.env.ACK_PATH, "ack"));
+  ws.addEventListener("close", () => process.exit(0));
+  setInterval(() => {
+    if (!sent && fs.existsSync(process.env.TRIGGER_PATH)) {
+      sent = true;
+      ws.send(JSON.stringify({ id: 1, method: "Browser.getVersion", params: {} }));
+    }
+  }, 10);
+} else {
+  fs.appendFileSync(process.env.CALLS_PATH, JSON.stringify(args) + "\\n");
+  fs.appendFileSync(process.env.ENV_CALLS_PATH, JSON.stringify({
+    HTTP_PROXY: process.env.HTTP_PROXY || null,
+    HTTPS_PROXY: process.env.HTTPS_PROXY || null,
+    ALL_PROXY: process.env.ALL_PROXY || null,
+    AGENT_BROWSER_PROXY: process.env.AGENT_BROWSER_PROXY || null,
+    NO_PROXY: process.env.NO_PROXY || null
+  }) + "\\n");
+  const connectIndex = args.indexOf("connect");
+  if (connectIndex >= 0) {
+    const child = spawn(process.execPath, [process.argv[1], "--gateway-holder", args[connectIndex + 1]], {
+      detached: true,
+      stdio: "ignore",
+      env: process.env
+    });
+    child.unref();
+    fs.writeFileSync(process.env.HOLDER_PID_PATH, String(child.pid));
+    fs.mkdirSync(require("node:path").join(process.env.HOME, ".agent-browser"), { recursive: true });
+    fs.writeFileSync(require("node:path").join(process.env.HOME, ".agent-browser", process.env.AGENT_BROWSER_SESSION + ".pid"), String(child.pid));
+    const wait = new Int32Array(new SharedArrayBuffer(4));
+    const deadline = Date.now() + 3000;
+    while (!fs.existsSync(process.env.READY_PATH) && Date.now() < deadline) Atomics.wait(wait, 0, 0, 20);
+    if (!fs.existsSync(process.env.READY_PATH)) process.exit(2);
+  } else if (process.env.FAKE_DETACHED !== "1") {
+    fs.writeFileSync(process.env.TRIGGER_PATH, "send");
+    const wait = new Int32Array(new SharedArrayBuffer(4));
+    const deadline = Date.now() + 3000;
+    while (!fs.existsSync(process.env.ACK_PATH) && Date.now() < deadline) Atomics.wait(wait, 0, 0, 20);
+    if (!fs.existsSync(process.env.ACK_PATH)) process.exit(3);
+  }
+}
+`);
+  chmodSync(fakeAgentBrowser, 0o755);
+  return fakeAgentBrowser;
 }
 
 function writeFakeChrome(home) {

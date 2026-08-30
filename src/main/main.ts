@@ -1,5 +1,5 @@
 import { promises as fs, watch, type FSWatcher } from "node:fs";
-import { app, BrowserWindow, globalShortcut, ipcMain, nativeTheme, Notification, screen, session, shell, type IpcMainInvokeEvent, type Rectangle } from "electron";
+import { app, BrowserWindow, globalShortcut, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, session, shell, Tray, type IpcMainInvokeEvent, type Rectangle } from "electron";
 import path from "node:path";
 import { IPC_CHANNELS } from "../shared/ipc";
 import type {
@@ -82,8 +82,10 @@ const IS_BACKGROUND_E2E = process.env.CPM_E2E_MODE === "background";
 initializeDiagnosticLogging({ appVersion: app.getVersion() });
 const profileManager = createProfileManager(broadcastAgentTakeover, revealAgentOverlayProfile);
 let agentOverlayDisposedForQuit = false;
+let appQuitting = false;
 let mainWindow: BrowserWindow | null = null;
 let miniWindow: BrowserWindow | null = null;
+let appTray: Tray | null = null;
 let miniOutsideClickWindows: BrowserWindow[] = [];
 let miniOutsideClickUpdateTimer: NodeJS.Timeout | null = null;
 let miniWindowSaveTimer: NodeJS.Timeout | null = null;
@@ -215,6 +217,20 @@ function connectGatewayEventStream(): void {
     onEvent: (message) => {
       const eventType = typeof message.controlEvent?.type === "string" ? message.controlEvent.type : "unknown";
       writeDiagnosticLog("info", "gateway", "control.event", `Gateway 状态事件：${eventType}`, message.controlEvent);
+      const targetChange = message.controlEvent?.targetChange;
+      if (targetChange) {
+        writeDiagnosticLog(
+          "info",
+          "gateway",
+          "agent.target-mapped",
+          "Gateway Agent 目标映射变更",
+          {
+            publicPort: message.controlEvent.profile.publicPort,
+            profileId: message.controlEvent.profile.profileId,
+            ...targetChange
+          }
+        );
+      }
       scheduleAppStateBroadcast(40);
     },
     onDisconnect: () => {
@@ -1038,6 +1054,45 @@ async function showMainWindow(): Promise<void> {
   miniWindow?.hide();
 }
 
+function createAppTray(): void {
+  if (appTray || IS_ELECTRON_SMOKE_TEST || IS_E2E_DRIVER_TEST) {
+    return;
+  }
+
+  const sourceImage = nativeImage.createFromPath(APP_ICON_PATH);
+  const trayImage = sourceImage.isEmpty()
+    ? APP_ICON_PATH
+    : sourceImage.resize({
+        width: process.platform === "darwin" ? 18 : 20,
+        height: process.platform === "darwin" ? 18 : 20,
+        quality: "best"
+      });
+
+  appTray = new Tray(trayImage);
+  appTray.setToolTip(APP_TITLE);
+  appTray.setContextMenu(
+    Menu.buildFromTemplate([
+      {
+        label: "显示 ProfilePilot",
+        click: () => {
+          void showMainWindow();
+        }
+      },
+      { type: "separator" },
+      {
+        label: "退出 ProfilePilot",
+        click: () => {
+          appQuitting = true;
+          app.quit();
+        }
+      }
+    ])
+  );
+  appTray.on("click", () => {
+    void showMainWindow();
+  });
+}
+
 function createProgressReporter(
   event: IpcMainInvokeEvent,
   baseProgress: Pick<OperationProgress, "key" | "profileId">
@@ -1360,6 +1415,18 @@ function createMainWindow(): void {
 
     windowRef.hide();
     void showMiniWindow();
+  });
+
+  // 托盘存在时，关闭主窗口只隐藏到后台；从托盘“退出”或系统退出时才真正销毁窗口。
+  mainWindow.on("close", (event) => {
+    if (appQuitting || !appTray) {
+      return;
+    }
+
+    event.preventDefault();
+    closeMiniOutsideClickWindows();
+    miniWindow?.hide();
+    mainWindow?.hide();
   });
 
   mainWindow.loadFile(path.join(__dirname, "../../public/index.html"));
@@ -1910,6 +1977,7 @@ app.whenReady().then(async () => {
     registerGlobalShortcuts();
   }
   createMainWindow();
+  createAppTray();
   if (IS_E2E_DRIVER_TEST) {
     startE2eDriver({
       socketPath: E2E_DRIVER_SOCKET,
@@ -1946,12 +2014,13 @@ app.whenReady().then(async () => {
 });
 
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") {
+  if (process.platform !== "darwin" && !appTray) {
     app.quit();
   }
 });
 
 app.on("before-quit", (event) => {
+  appQuitting = true;
   stopStateCoordinator();
   if (IS_ELECTRON_SMOKE_TEST) {
     return;
@@ -1975,6 +2044,8 @@ app.on("before-quit", (event) => {
 
 app.on("will-quit", () => {
   writeDiagnosticLog("info", "app", "app.stopped", "ProfilePilot 主进程已停止");
+  appTray?.destroy();
+  appTray = null;
   globalShortcut.unregisterAll();
 });
 

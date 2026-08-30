@@ -63,7 +63,7 @@ interface ElementSnapshot {
 }
 
 export function startE2eDriver(options: E2eDriverOptions): () => void {
-  rmSync(options.socketPath, { force: true });
+  if (process.platform !== "win32") rmSync(options.socketPath, { force: true });
   const sockets = new Set<net.Socket>();
   const server = net.createServer((socket) => {
     sockets.add(socket);
@@ -90,7 +90,7 @@ export function startE2eDriver(options: E2eDriverOptions): () => void {
     for (const socket of sockets) socket.destroy();
     sockets.clear();
     server.close();
-    rmSync(options.socketPath, { force: true });
+    if (process.platform !== "win32") rmSync(options.socketPath, { force: true });
   };
   app.once("will-quit", stop);
   return stop;
@@ -254,6 +254,14 @@ async function domInputElement(
       const element = Array.from(document.querySelectorAll(${JSON.stringify(selector)}))[${JSON.stringify(index)}];
       if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement)) {
         throw new Error("Element is not a form control: " + ${JSON.stringify(selector)});
+      }
+      if (
+        ${JSON.stringify(checked)} !== undefined &&
+        element instanceof HTMLInputElement &&
+        (element.type === "checkbox" || element.type === "radio")
+      ) {
+        if (element.checked !== Boolean(${JSON.stringify(checked)})) element.click();
+        return true;
       }
       if (${JSON.stringify(value)} !== undefined && "value" in element) {
         const prototype = element instanceof HTMLInputElement

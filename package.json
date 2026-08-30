@@ -40,7 +40,7 @@
     "e2e:desktop-ui": "npm run build && node scripts/e2e-desktop-ui.mjs",
     "e2e:mini": "npm run build && node scripts/e2e-mini-window.mjs",
     "e2e:visual": "npm run build && node scripts/e2e-visual-regression.mjs",
-    "e2e:visual:update": "npm run build && UPDATE_VISUAL_BASELINES=1 node scripts/e2e-visual-regression.mjs",
+    "e2e:visual:update": "npm run build && node scripts/e2e-visual-regression.mjs --update",
     "e2e:sync-copy": "npm run build && node scripts/e2e-sync-copy.mjs",
     "e2e:gateway": "npm run build && node scripts/e2e-gateway-control.mjs",
     "e2e:bifrost": "npm run build && node scripts/e2e-bifrost-proxy.mjs",
@@ -61,6 +61,7 @@
     "productName": "ProfilePilot",
     "copyright": "Copyright 2026 ffffhx",
     "asar": true,
+    "electronDist": "node_modules/electron/dist",
     "directories": {
       "buildResources": "build",
       "output": "release"
@@ -74,12 +75,6 @@
       "CHANGELOG.md",
       "LICENSE",
       "package.json"
-    ],
-    "extraResources": [
-      {
-        "from": "dist/native/ProfilePilot Input Guard.app",
-        "to": "native/ProfilePilot Input Guard.app"
-      }
     ],
     "mac": {
       "category": "public.app-category.developer-tools",
@@ -100,7 +95,13 @@
           ]
         }
       ],
-      "artifactName": "ProfilePilot-mac-${arch}.${ext}"
+      "artifactName": "ProfilePilot-mac-${arch}.${ext}",
+      "extraResources": [
+        {
+          "from": "dist/native/ProfilePilot Input Guard.app",
+          "to": "native/ProfilePilot Input Guard.app"
+        }
+      ]
     },
     "dmg": {
       "artifactName": "ProfilePilot-mac-${arch}.${ext}"
@@ -121,7 +122,13 @@
           ]
         }
       ],
-      "artifactName": "ProfilePilot-win-${arch}.${ext}"
+      "artifactName": "ProfilePilot-win-${arch}.${ext}",
+      "extraResources": [
+        {
+          "from": "native/input-guard-win.ps1",
+          "to": "native/input-guard-win.ps1"
+        }
+      ]
     },
     "nsis": {
       "oneClick": false,

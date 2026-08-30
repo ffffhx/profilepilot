@@ -11,7 +11,8 @@ test("each real tool installs and refreshes only its own Wrapper", async () => {
     "HOME",
     "PROFILEPILOT_AGENT_BROWSER_REAL",
     "PROFILEPILOT_PLAYWRIGHT_CLI_REAL",
-    "PROFILEPILOT_CHROME_DEVTOOLS_MCP_REAL"
+    "PROFILEPILOT_CHROME_DEVTOOLS_MCP_REAL",
+    "PROFILEPILOT_TEST_WINDOWS_USER_PATH"
   ];
   const original = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
   const fakeAgentBrowser = executable(path.join(home, "fake-agent-browser"), "child-shell-ok");
@@ -21,6 +22,7 @@ test("each real tool installs and refreshes only its own Wrapper", async () => {
   process.env.PROFILEPILOT_AGENT_BROWSER_REAL = fakeAgentBrowser;
   process.env.PROFILEPILOT_PLAYWRIGHT_CLI_REAL = fakePlaywrightCli;
   process.env.PROFILEPILOT_CHROME_DEVTOOLS_MCP_REAL = fakeChromeDevtoolsMcp;
+  if (process.platform === "win32") process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH = "";
 
   try {
     const modulePath = require.resolve("../dist/main/shell-integration.js");
@@ -53,15 +55,20 @@ test("each real tool installs and refreshes only its own Wrapper", async () => {
     assert.ok(otherWrappers.every((item) => !fs.existsSync(item.wrapperPath) && !fs.existsSync(item.launcherPath)));
 
     const launcher = fs.readFileSync(agentWrapper.launcherPath, "utf8");
-    assert.match(launcher, /^#!\/bin\/sh/);
-    assert.match(launcher, /ELECTRON_RUN_AS_NODE=1 exec/);
-    assert.equal(fs.statSync(agentWrapper.launcherPath).mode & 0o111, 0o111);
-    const zshenv = fs.readFileSync(path.join(home, ".zshenv"), "utf8");
-    assert.match(zshenv, /PROFILEPILOT_SESSION="\$AGENT_BROWSER_SESSION"/);
-    assert.match(zshenv, /-d "\$PROFILEPILOT_AGENT_BROWSER_BIN_DIR"/);
-    assert.match(zshenv, /export PATH="\$PROFILEPILOT_AGENT_BROWSER_BIN_DIR:\$PATH"/);
+    assert.match(launcher, process.platform === "win32" ? /^@echo off/ : /^#!\/bin\/sh/);
+    assert.match(launcher, process.platform === "win32" ? /set ELECTRON_RUN_AS_NODE=1/ : /ELECTRON_RUN_AS_NODE=1 exec/);
+    if (process.platform !== "win32") {
+      assert.equal(fs.statSync(agentWrapper.launcherPath).mode & 0o111, 0o111);
+      const zshenv = fs.readFileSync(path.join(home, ".zshenv"), "utf8");
+      assert.match(zshenv, /PROFILEPILOT_SESSION="\$AGENT_BROWSER_SESSION"/);
+      assert.match(zshenv, /-d "\$PROFILEPILOT_AGENT_BROWSER_BIN_DIR"/);
+      assert.match(zshenv, /export PATH="\$PROFILEPILOT_AGENT_BROWSER_BIN_DIR:\$PATH"/);
+    } else {
+      assert.match(process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH, /\.profilepilot\\bin/i);
+    }
 
-    const childOutput = execFileSync("/bin/sh", ["-c", "agent-browser version"], {
+    const { execPortableCommandSync } = require("../dist/main/portable-command.js");
+    const childOutput = execPortableCommandSync(agentWrapper.launcherPath, ["version"], {
       encoding: "utf8",
       env: {
         HOME: home,
@@ -115,7 +122,9 @@ test("Wrapper installation is blocked until the corresponding real CLI is instal
 test("ProfilePilot management CLI and its Skill install independently from browser Wrappers", async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "profilepilot-management-cli-install-"));
   const originalHome = process.env.HOME;
+  const originalWindowsUserPath = process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH;
   process.env.HOME = home;
+  if (process.platform === "win32") process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH = "";
   try {
     const modulePath = require.resolve("../dist/main/shell-integration.js");
     delete require.cache[modulePath];
@@ -136,17 +145,21 @@ test("ProfilePilot management CLI and its Skill install independently from brows
     assert.ok(diagnostic.wrappers.every((wrapper) => !wrapper.wrapperInstalled && !wrapper.launcherInstalled));
     assert.equal(diagnostic.shellIntegration.installed, true);
     assert.equal(
-      execFileSync(diagnostic.managementCli.launcherPath, ["--version"], {
+      require("../dist/main/portable-command.js").execPortableCommandSync(diagnostic.managementCli.launcherPath, ["--version"], {
         encoding: "utf8",
         env: { HOME: home, PATH: "/usr/bin:/bin", PROFILEPILOT_NODE_RUNTIME: process.execPath }
       }).trim(),
       "0.1.0"
     );
 
-    const zshenv = fs.readFileSync(path.join(home, ".zshenv"), "utf8");
-    assert.match(zshenv, /PROFILEPILOT_MANAGEMENT_CLI_BIN_DIR/);
-    assert.match(zshenv, /-x "\$PROFILEPILOT_MANAGEMENT_CLI"/);
-    assert.match(zshenv, /export PATH="\$PROFILEPILOT_MANAGEMENT_CLI_BIN_DIR:\$PATH"/);
+    if (process.platform !== "win32") {
+      const zshenv = fs.readFileSync(path.join(home, ".zshenv"), "utf8");
+      assert.match(zshenv, /PROFILEPILOT_MANAGEMENT_CLI_BIN_DIR/);
+      assert.match(zshenv, /-x "\$PROFILEPILOT_MANAGEMENT_CLI"/);
+      assert.match(zshenv, /export PATH="\$PROFILEPILOT_MANAGEMENT_CLI_BIN_DIR:\$PATH"/);
+    } else {
+      assert.match(process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH, /\.profilepilot\\cli-bin/i);
+    }
 
     diagnostic = await shell.setProfilePilotCliSkillEnabled(true);
     assert.equal(diagnostic.managementCli.skill.installed, true);
@@ -166,6 +179,8 @@ test("ProfilePilot management CLI and its Skill install independently from brows
   } finally {
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
+    if (originalWindowsUserPath === undefined) delete process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH;
+    else process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH = originalWindowsUserPath;
     fs.rmSync(home, { recursive: true, force: true });
   }
 });
@@ -221,8 +236,15 @@ test("agent integration diagnostics do not treat npx as an installed MCP tool", 
 });
 
 function executable(filePath, output) {
+  if (process.platform === "win32") {
+    filePath += ".cmd";
+  }
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, `#!/bin/sh\nprintf '%s\\n' '${output}'\n`, "utf8");
+  fs.writeFileSync(
+    filePath,
+    process.platform === "win32" ? `@echo off\r\necho ${output}\r\n` : `#!/bin/sh\nprintf '%s\\n' '${output}'\n`,
+    "utf8"
+  );
   fs.chmodSync(filePath, 0o755);
   return filePath;
 }

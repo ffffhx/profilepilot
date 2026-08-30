@@ -79,11 +79,124 @@ test("Gateway transparently remaps CDP request ids and broadcasts events", async
     ws.send(JSON.stringify({ id: 77, method: "Browser.getVersion", params: {} }));
     assert.deepEqual(await response, { id: 77, result: { echoed: "Browser.getVersion" } });
     assert.notEqual(JSON.parse(h.backend.sent[0]).id, 77, "upstream id must be gateway-owned");
+    const activity = h.gateway.getAgentActivity(h.port, "cx-one", "daemon-one");
+    assert.equal(activity.generation, 1);
+    assert.equal(activity.lastCdpMethod, "Browser.getVersion");
+    assert.ok(Date.parse(activity.lastCdpAt));
 
     const event = nextMessage(ws);
     h.backend.emit(JSON.stringify({ method: "Target.targetCreated", params: { targetInfo: { targetId: "t1" } } }));
     assert.equal((await event).method, "Target.targetCreated");
     ws.close();
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("Gateway does not let background target activity overwrite the Agent tab affinity", async () => {
+  const targetChanges = [];
+  const h = await makeHarness({
+    onAgentTargetChange: (publicPort, change) => targetChanges.push({ publicPort, ...change })
+  });
+  try {
+    h.backend.onSend = (text) => {
+      const message = JSON.parse(text);
+      const result = message.method === "Target.attachToTarget"
+        ? { sessionId: message.params.targetId === "page-deepseek" ? "flat-deepseek" : "flat-tencent" }
+        : { echoed: message.method };
+      queueMicrotask(() => h.backend.emit(JSON.stringify({
+        id: message.id,
+        ...(message.sessionId ? { sessionId: message.sessionId } : {}),
+        result
+      })));
+    };
+    const acquired = h.control.acquire({
+      publicPort: h.port,
+      sessionId: "cx-target-trace",
+      daemonInstanceId: "daemon-target-trace"
+    });
+    const ws = await openWebSocket(`ws://127.0.0.1:${h.port}/devtools/browser/gateway?ticket=${encodeURIComponent(acquired.ticket)}`);
+
+    let response = nextMessage(ws);
+    ws.send(JSON.stringify({
+      id: 1,
+      method: "Target.attachToTarget",
+      params: { targetId: "page-deepseek", flatten: true }
+    }));
+    await response;
+
+    response = nextMessage(ws);
+    ws.send(JSON.stringify({
+      id: 2,
+      method: "Target.attachToTarget",
+      params: { targetId: "page-tencent", flatten: true }
+    }));
+    await response;
+
+    response = nextMessage(ws);
+    ws.send(JSON.stringify({
+      id: 3,
+      method: "Runtime.evaluate",
+      params: { expression: "document.title" },
+      sessionId: "flat-deepseek"
+    }));
+    await response;
+
+    response = nextMessage(ws);
+    ws.send(JSON.stringify({
+      id: 4,
+      method: "Runtime.callFunctionOn",
+      params: { objectId: "background-object", functionDeclaration: "function () { return this.title; }" },
+      sessionId: "flat-deepseek"
+    }));
+    await response;
+
+    assert.deepEqual(targetChanges.map(({ sessionId, previousTargetId, targetId, source }) => ({
+      sessionId,
+      previousTargetId,
+      targetId,
+      source
+    })), [
+      {
+        sessionId: "cx-target-trace",
+        previousTargetId: null,
+        targetId: "page-deepseek",
+        source: "agent-cdp-response:Target.attachToTarget"
+      },
+      {
+        sessionId: "cx-target-trace",
+        previousTargetId: "page-deepseek",
+        targetId: "page-tencent",
+        source: "agent-cdp-response:Target.attachToTarget"
+      }
+    ]);
+    ws.close();
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("Gateway handoff refuses to activate an unrelated tab when the exact Agent target is missing", async () => {
+  const h = await makeHarness();
+  try {
+    h.control.acquire({
+      publicPort: h.port,
+      sessionId: "cx-no-target",
+      daemonInstanceId: "daemon-no-target"
+    });
+    const delegated = h.control.delegateToUser("cx-no-target", "user_takeover", "人工登录");
+    await assert.rejects(
+      () => h.gateway.activateDelegatedAgentTarget(
+        h.port,
+        "cx-no-target",
+        delegated.controlGeneration
+      ),
+      (error) => error.code === "GATEWAY_AGENT_TARGET_MISMATCH"
+    );
+    assert.equal(
+      h.backend.sent.map(JSON.parse).some((message) => message.method === "Target.activateTarget"),
+      false
+    );
   } finally {
     await h.cleanup();
   }

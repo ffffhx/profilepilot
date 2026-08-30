@@ -159,8 +159,11 @@ export async function focusProfileFromUi(profile: PublicProfile): Promise<void> 
     await wait(700);
     const isFrontmost = await profileApi().isProfileFrontmost(profile.id);
     if (!isFrontmost) {
+      const platformHint = store.state?.platform === "win32"
+        ? "Windows 未确认它已到最前面。请点击一次目标 Chrome 窗口，或先关闭其它 Chrome 实例后重试。"
+        : "macOS 没有把它放到最前面。请检查辅助功能权限，或先关闭其它 Chrome 实例后重试。";
       setToast(
-        `${emphasizeName(profile.name)} 已请求显示，但 macOS 没有把它放到最前面。请检查辅助功能权限，或先关闭其它 Chrome 实例后重试。`,
+        `${emphasizeName(profile.name)} 已请求显示，但${platformHint}`,
         "error"
       );
     } else {
@@ -182,6 +185,22 @@ export function isBusyAction(key: string, match: Partial<Omit<BusyState, "key" |
   }
 
   return Object.entries(match).every(([field, value]) => activeBusyState[field as keyof BusyState] === value);
+}
+
+export type ProfileBusyKind = "launch" | "close";
+
+export function profileBusyKind(profileId: string): ProfileBusyKind | null {
+  if (isBusyAction("launch-profile", { profileId }) || isBusyAction("launch-cdp", { profileId })) {
+    return "launch";
+  }
+  if (isBusyAction("close-profile", { profileId })) {
+    return "close";
+  }
+  return null;
+}
+
+export function profileBusyStatusLabel(kind: ProfileBusyKind): string {
+  return kind === "launch" ? "启动中" : "关闭中";
 }
 
 export function busyStepsKey(steps: BusyProgressStep[] | undefined): string {

@@ -107,9 +107,12 @@ export function renderMini(): void {
     if (!appRoot.querySelector(".mini-logo-dock")) {
       appRoot.className = "mini-root mini-root-collapsed";
       appRoot.innerHTML = `
-        <button type="button" class="mini-logo-dock" data-action="toggle-mini-panel" title="展开悬浮窗" aria-label="展开悬浮窗">
-          ${MINI_LOGO_GLYPH}
-        </button>
+        <div class="mini-logo-dock-wrap">
+          <button type="button" class="mini-logo-dock" data-action="toggle-mini-panel" title="展开悬浮窗" aria-label="展开悬浮窗">
+            ${MINI_LOGO_GLYPH}
+          </button>
+          <button type="button" class="mini-dock-close" data-action="show-main-window" title="关闭悬浮窗并返回主窗口" aria-label="关闭悬浮窗">×</button>
+        </div>
       `;
     } else if (appRoot.className !== "mini-root mini-root-collapsed") {
       appRoot.className = "mini-root mini-root-collapsed";
@@ -150,7 +153,7 @@ export function renderMini(): void {
             ${renderButtonLabel(refreshing, "刷新", "刷新")}
           </button>
           <button type="button" data-action="toggle-mini-panel" title="收起为悬浮图标">收起</button>
-          <button type="button" data-action="show-main-window" title="展开完整控制台">展开</button>
+          <button type="button" class="mini-panel-close" data-action="show-main-window" title="关闭悬浮窗并返回完整控制台">关闭</button>
         </div>
       </header>
       <main class="mini-profile-list ${store.miniExpanded ? "expanded" : ""}" aria-label="Mini Profiles">

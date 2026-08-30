@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import {
   accessSync,
   constants as fsConstants,
@@ -47,6 +47,7 @@ import {
   type AgentBrowserProfileLease
 } from "./agent-browser-lease";
 import {
+  BROWSER_GATEWAY_PROTOCOL_VERSION,
   clearBrowserGatewayDaemonIdentity,
   ensureBrowserGatewayDaemon,
   readOrCreateBrowserGatewayDaemonIdentity,
@@ -63,6 +64,7 @@ import {
   validateBifrostProxyConfig
 } from "./bifrost-proxy";
 import { validateUnpackedExtensionPath } from "./unpacked-extension";
+import { spawnPortableCommand } from "./portable-command";
 
 export { ensureConfiguredGatewayProfileRunning } from "./browser-gateway-driver-runtime";
 
@@ -85,6 +87,14 @@ const NOTICE_BYPASS_COMMANDS = new Set([
   "upgrade",
   "version"
 ]);
+const GATEWAY_ACTIVITY_EXEMPT_COMMANDS = new Set(["close", "connect", "read"]);
+const GATEWAY_CONTROLLER_PROXY_ENV_KEYS = new Set([
+  "http_proxy",
+  "https_proxy",
+  "all_proxy",
+  "agent_browser_proxy",
+  "agent_browser_proxy_bypass"
+]);
 const OPTIONS_WITH_VALUES = new Set([
   "--browser",
   "--browser-path",
@@ -96,6 +106,8 @@ const OPTIONS_WITH_VALUES = new Set([
   "--params",
   "--profile",
   "--profile-dir",
+  "--proxy",
+  "--proxy-bypass",
   "--listener-port",
   "--rule",
   "--group-rule",
@@ -140,6 +152,17 @@ export interface ProfilePilotNoticeMatch {
   notice: AgentControlNotice;
 }
 
+interface GatewayAgentActivitySnapshot {
+  generation: number;
+  lastCdpAt: string | null;
+  lastCdpMethod: string | null;
+}
+
+interface GatewayAgentActivityRead {
+  supported: boolean;
+  activity: GatewayAgentActivitySnapshot | null;
+}
+
 export function sessionFromAgentBrowserArgs(args: string[], env: NodeJS.ProcessEnv = process.env): string | undefined {
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -181,6 +204,31 @@ export function agentBrowserCommandName(args: string[]): string | undefined {
 export function shouldCheckProfilePilotNotice(args: string[]): boolean {
   const command = agentBrowserCommandName(args);
   return Boolean(command && !NOTICE_BYPASS_COMMANDS.has(command));
+}
+
+export function managedGatewayAgentBrowserEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const isolated = { ...env };
+  for (const key of Object.keys(isolated)) {
+    if (GATEWAY_CONTROLLER_PROXY_ENV_KEYS.has(key.toLowerCase())) {
+      delete isolated[key];
+    }
+  }
+  return isolated;
+}
+
+export function assertManagedGatewayLaunchOptions(args: string[]): void {
+  if (optionValue(args, "--proxy") === undefined && optionValue(args, "--proxy-bypass") === undefined) {
+    return;
+  }
+  throw gatewayWrapperError(
+    "GATEWAY_LAUNCH_OPTION_CONFLICT",
+    "ProfilePilot Gateway 模式不能把 --proxy/--proxy-bypass 交给 agent-browser 控制器；请在目标 Profile 中配置代理并重启该 Profile"
+  );
+}
+
+export function gatewaySupportsAgentActivity(response: GatewayControlResponse): boolean {
+  const protocolVersion = Number(response.protocolVersion);
+  return Number.isSafeInteger(protocolVersion) && protocolVersion >= BROWSER_GATEWAY_PROTOCOL_VERSION;
 }
 
 export function cdpPortFromAgentBrowserArgs(args: string[]): number | undefined {
@@ -340,27 +388,42 @@ export function resolveRealAgentBrowser(env: NodeJS.ProcessEnv = process.env, se
   }
 
   let output = "";
-  try {
-    output = execFileSync("which", ["-a", "agent-browser"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"]
-    });
-  } catch {
-    output = "";
+  if (process.platform !== "win32") {
+    try {
+      output = execFileSync("which", ["-a", "agent-browser"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"]
+      });
+    } catch {
+      output = "";
+    }
   }
 
   const self = realpathOrInput(selfPath);
   const managedLauncher = realpathOrInput(
-    env.PROFILEPILOT_AGENT_BROWSER_LAUNCHER || path.join(env.HOME || os.homedir(), ".profilepilot", "bin", "agent-browser")
+    env.PROFILEPILOT_AGENT_BROWSER_LAUNCHER || path.join(
+      env.HOME || os.homedir(),
+      ".profilepilot",
+      "bin",
+      process.platform === "win32" ? "agent-browser.cmd" : "agent-browser"
+    )
   );
   const seen = new Set<string>();
-  for (const candidate of output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)) {
+  const pathCandidates = process.platform === "win32"
+    ? executableCandidatesOnPath("agent-browser", env)
+    : output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  for (const candidate of pathCandidates) {
     const real = realpathOrInput(candidate);
-    if (seen.has(real) || real === self || real === managedLauncher) {
+    const comparable = comparableExecutablePath(real);
+    if (
+      seen.has(comparable) ||
+      comparable === comparableExecutablePath(self) ||
+      comparable === comparableExecutablePath(managedLauncher)
+    ) {
       continue;
     }
-    seen.add(real);
-    if (path.basename(candidate) === "agent-browser" && isExecutableFile(candidate)) {
+    seen.add(comparable);
+    if ((process.platform === "win32" || path.basename(candidate) === "agent-browser") && isExecutableFile(candidate)) {
       return candidate;
     }
   }
@@ -405,6 +468,29 @@ function cachedNativeAgentBrowserCandidates(homeDir: string): string[] {
     }
   }
   return candidates.sort((a, b) => b.mtimeMs - a.mtimeMs).map((candidate) => candidate.path);
+}
+
+function executableCandidatesOnPath(command: string, env: NodeJS.ProcessEnv): string[] {
+  const pathValue = env.PATH || env.Path || env.path || "";
+  const extensions = process.platform === "win32"
+    ? [".exe", ".ps1", ".cmd", ".bat", ".com"]
+    : [""];
+  const seen = new Set<string>();
+  const candidates: string[] = [];
+  for (const directory of pathValue.split(path.delimiter).filter(Boolean)) {
+    for (const extension of extensions) {
+      const candidate = path.join(directory, `${command}${extension}`);
+      const comparable = comparableExecutablePath(realpathOrInput(candidate));
+      if (seen.has(comparable) || !isExecutableFile(candidate)) continue;
+      seen.add(comparable);
+      candidates.push(candidate);
+    }
+  }
+  return candidates;
+}
+
+function comparableExecutablePath(filePath: string): string {
+  return process.platform === "win32" ? path.win32.normalize(filePath).toLowerCase() : filePath;
 }
 
 export async function runAgentBrowserWrapper(
@@ -467,6 +553,15 @@ export async function runAgentBrowserWrapper(
     }
   }
 
+  const homeDir = env.HOME || os.homedir();
+  const managedGatewayRoute = Boolean(
+    leaseContext && (
+      findConfiguredAgentBrowserProfileByPortSync(leaseContext.cdpPort, env, homeDir) ||
+      persistedGatewayOwnsPort(homeDir, leaseContext.cdpPort)
+    )
+  );
+  const childEnv = managedGatewayRoute ? managedGatewayAgentBrowserEnv(env) : env;
+
   const realAgentBrowser = resolveRealAgentBrowser(env);
   if (!realAgentBrowser) {
     releaseNewProfileLeaseAfterFailure(leaseContext, env);
@@ -475,10 +570,35 @@ export async function runAgentBrowserWrapper(
   }
 
   let realArgs = commandArgs;
+  let gatewayActivityBefore: GatewayAgentActivitySnapshot | null = null;
   try {
+    // Keep the caller environment available to Profile auto-start so its own proxy
+    // policy is unchanged. prepareGatewayTransport isolates only the agent-browser
+    // connect child; the final controller command uses childEnv below.
     realArgs = await prepareGatewayTransport(realAgentBrowser, commandArgs, env, leaseContext?.cdpPort);
+    if (managedGatewayRoute && leaseContext && shouldVerifyGatewayActivity(commandArgs)) {
+      const activityRead = await readGatewayAgentActivity(leaseContext, env);
+      gatewayActivityBefore = activityRead.activity;
+      if (activityRead.supported && !gatewayActivityBefore) {
+        throw gatewayWrapperError(
+          "GATEWAY_ACTIVITY_UNAVAILABLE",
+          "Gateway 已建立连接，但没有返回当前 agent-browser Session 的活动基线"
+        );
+      }
+    }
   } catch (error) {
-    releaseNewProfileLeaseAfterFailure(leaseContext, env);
+    if (
+      managedGatewayRoute &&
+      leaseContext &&
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "GATEWAY_ACTIVITY_UNAVAILABLE"
+    ) {
+      await retireDetachedGatewaySession(leaseContext, env);
+    } else {
+      releaseNewProfileLeaseAfterFailure(leaseContext, env);
+    }
     process.stderr.write(formatGatewayFailure(error, commandArgs, env));
     return PROFILEPILOT_AGENT_BROWSER_HARD_STOP_EXIT_CODE;
   }
@@ -488,7 +608,7 @@ export async function runAgentBrowserWrapper(
 
   writeSessionActivityIfBrowserOperation(commandArgs, env, leaseContext?.cdpPort);
   const commandState = beginBrowserCommandState(commandArgs, env, leaseContext?.cdpPort);
-  const result = await spawnRealAgentBrowser(realAgentBrowser, realArgs, env, commandState);
+  const result = await spawnRealAgentBrowser(realAgentBrowser, realArgs, childEnv, commandState);
   if (commandState) {
     clearAgentBrowserCommandStateSync(commandState.session, commandState.commandId, commandState.homeDir);
   }
@@ -501,6 +621,19 @@ export async function runAgentBrowserWrapper(
   if (after) {
     process.stderr.write(formatHardStopNotice(after));
     return PROFILEPILOT_AGENT_BROWSER_HARD_STOP_EXIT_CODE;
+  }
+  if (leaseContext && gatewayActivityBefore && !result.error && exitCode === 0 && !result.signal) {
+    const gatewayActivityAfter = await readGatewayAgentActivity(leaseContext, env)
+      .then((read) => read.activity)
+      .catch(() => null);
+    if (!gatewayActivityAfter || gatewayActivityAfter.generation <= gatewayActivityBefore.generation) {
+      await retireDetachedGatewaySession(leaseContext, env);
+      process.stderr.write(formatGatewayFailure(gatewayWrapperError(
+        "AGENT_BROWSER_DETACHED_FROM_GATEWAY",
+        "agent-browser 命令成功退出，但没有任何 CDP 请求经过 ProfilePilot Gateway；已停止该 Session，防止它悄悄改用临时浏览器"
+      ), commandArgs, env));
+      return PROFILEPILOT_AGENT_BROWSER_HARD_STOP_EXIT_CODE;
+    }
   }
   if (leaseContext && !result.error && exitCode === 0 && !result.signal) {
     renewProfileLeaseAfterSuccess(leaseContext, commandArgs, env);
@@ -640,7 +773,7 @@ function spawnRealAgentBrowser(
     };
     let child;
     try {
-      child = spawn(executable, args, { env, stdio });
+      child = spawnPortableCommand(executable, args, { env, stdio });
     } catch (error) {
       finish({ status: null, signal: null, error: error as Error & { code?: string } });
       return;
@@ -920,6 +1053,69 @@ function releaseNewProfileLeaseAfterFailure(context: AgentBrowserLeaseContext | 
     return;
   }
   releaseAgentBrowserProfileLeaseSync(context.cdpPort, context.session, env.HOME || os.homedir());
+}
+
+function shouldVerifyGatewayActivity(args: string[]): boolean {
+  const command = agentBrowserCommandName(args);
+  return Boolean(
+    command &&
+    shouldCheckProfilePilotNotice(args) &&
+    !GATEWAY_ACTIVITY_EXEMPT_COMMANDS.has(command)
+  );
+}
+
+async function readGatewayAgentActivity(
+  context: AgentBrowserLeaseContext,
+  env: NodeJS.ProcessEnv
+): Promise<GatewayAgentActivityRead> {
+  const homeDir = env.HOME || os.homedir();
+  const daemonInstanceId = readOrCreateBrowserGatewayDaemonIdentity(context.session, homeDir);
+  const status = await requestBrowserGateway({ action: "status" }, { homeDir, timeoutMs: 3_000 });
+  if (!gatewaySupportsAgentActivity(status)) {
+    // A running Profile keeps its Chrome pipe inside the old daemon, so ProfilePilot
+    // deliberately defers that daemon's protocol upgrade until the Profile restarts.
+    // Proxy isolation is wrapper-local and is still effective immediately; strict CDP
+    // activity verification starts as soon as the route moves to the current daemon.
+    return { supported: false, activity: null };
+  }
+  const profile = gatewayProfiles(status).find((candidate) => (
+    Number(candidate.publicPort) === context.cdpPort &&
+    candidate.ownerSessionId === context.session &&
+    candidate.daemonInstanceId === daemonInstanceId &&
+    candidate.connectionActive === true
+  ));
+  const activity = profile?.agentActivity;
+  if (!activity || typeof activity !== "object" || Array.isArray(activity)) {
+    return { supported: true, activity: null };
+  }
+  const record = activity as Record<string, unknown>;
+  const generation = Number(record.generation);
+  if (!Number.isSafeInteger(generation) || generation < 0) {
+    return { supported: true, activity: null };
+  }
+  return {
+    supported: true,
+    activity: {
+      generation,
+      lastCdpAt: typeof record.lastCdpAt === "string" ? record.lastCdpAt : null,
+      lastCdpMethod: typeof record.lastCdpMethod === "string" ? record.lastCdpMethod : null
+    }
+  };
+}
+
+async function retireDetachedGatewaySession(
+  context: AgentBrowserLeaseContext,
+  env: NodeJS.ProcessEnv
+): Promise<void> {
+  const homeDir = env.HOME || os.homedir();
+  const daemonPid = readAgentBrowserDaemonPidSync(homeDir, context.session);
+  retireAgentBrowserSessionSync(context.session, daemonPid, homeDir);
+  await controlGatewaySessionIfManaged(context.session, "stop", homeDir).catch(() => undefined);
+  releaseAgentBrowserProfileLeasesForSessionSync(context.session, homeDir);
+  clearProfilePilotNoticesForSession(context.session, homeDir);
+  clearAgentBrowserControlWaitStateSync(context.session, undefined, homeDir);
+  clearAgentBrowserCommandStateSync(context.session, undefined, homeDir);
+  clearBrowserGatewayDaemonIdentity(context.session, homeDir);
 }
 
 async function runProfilePilotInternalCommand(
@@ -2020,6 +2216,8 @@ export async function prepareGatewayTransport(
     throw gatewayWrapperError("GATEWAY_PROFILE_NOT_RUNNING", `Gateway 端口 ${publicPort} 缺少有效 Profile 绑定`);
   }
 
+  assertManagedGatewayLaunchOptions(args);
+  const gatewayChildEnv = managedGatewayAgentBrowserEnv(env);
   const daemonInstanceId = readOrCreateBrowserGatewayDaemonIdentity(sessionId, homeDir);
   let acquire = await requestBrowserGateway({
     action: "acquire",
@@ -2050,7 +2248,7 @@ export async function prepareGatewayTransport(
       const connected = await spawnRealAgentBrowser(
         executable,
         ["--session", sessionId, "connect", attemptWebSocketUrl],
-        env,
+        gatewayChildEnv,
         null,
         options.quietConnect ? "ignore" : "inherit"
       );

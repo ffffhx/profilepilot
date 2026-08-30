@@ -102,6 +102,22 @@ export function sourceDetail(profile: PublicProfile): string {
   return "工具独立 Profile（独立 User Data Dir）";
 }
 
+export function isWindowsNativeAgentTemplate(platform: string | undefined, profile: PublicProfile | null): boolean {
+  return platform === "win32" && profile?.source === "native";
+}
+
+export function isWindowsCrossDataDirAccountSyncUnsupported(
+  platform: string | undefined,
+  source: PublicProfile | null,
+  target: PublicProfile | null
+): boolean {
+  if (platform !== "win32" || !source || !target) {
+    return false;
+  }
+  const normalize = (value: string): string => value.replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
+  return normalize(source.userDataDir) !== normalize(target.userDataDir);
+}
+
 export function extensionInstallTypeLabel(extension: ProfileExtensionInfo): string {
   if (extension.fromWebStore) {
     return "商店";

@@ -29,7 +29,12 @@ async function main() {
 
     console.log("[e2e:main-window] PASS main -> preload -> renderer -> IPC smoke flow");
   } finally {
-    await rm(fixtureRoot, { recursive: true, force: true });
+    await rm(fixtureRoot, {
+      recursive: true,
+      force: true,
+      maxRetries: process.platform === "win32" ? 10 : 0,
+      retryDelay: 100
+    });
   }
 }
 

@@ -453,7 +453,7 @@ function renderSessionBridge(diagnostic: AgentIntegrationDiagnostic | null): str
     <div class="agent-session-bridge ${ready ? "ready" : wrappers > 0 ? "blocked" : "idle"}">
       <span>SESSION BRIDGE</span>
       <strong>${escapeHtml(status)}</strong>
-      <small>${escapeHtml(shell?.path || "~/.zshenv")} · 只对之后新开的 Codex / Claude 会话生效</small>
+      <small>${escapeHtml(shell?.path || (store.state?.platform === "win32" ? "Windows 用户 PATH" : "~/.zshenv"))} · 只对之后新开的 Codex / Claude 会话生效</small>
       ${wrappers > 0 && !shell?.installed ? `<button type="button" data-action="enable-shell-integration">修复会话识别</button>` : ""}
     </div>
   `;
@@ -461,6 +461,7 @@ function renderSessionBridge(diagnostic: AgentIntegrationDiagnostic | null): str
 
 function renderInputGuardPermissionCard(context: "onboarding" | "integration"): string {
   const permission = store.agentIntegrationDiagnostic?.inputGuard || null;
+  const windows = permission?.platform === "win32";
   const inspecting = store.agentIntegrationLoading && !permission;
   const requesting = store.inputGuardPermissionLoading;
   const state = inspecting || !permission
@@ -487,7 +488,9 @@ function renderInputGuardPermissionCard(context: "onboarding" | "integration"): 
   const detail = state === "ready"
     ? "Agent 控制浏览器时，可以拦截受管 Chrome 窗口的鼠标点击、拖动与滚动。"
     : state === "skipped"
-      ? "Input Guard 的辅助功能权限只在 macOS 上需要。"
+      ? windows
+        ? "Windows Input Guard 使用系统鼠标钩子，无需额外的辅助功能授权。"
+        : "Input Guard 的辅助功能权限只在 macOS 上需要。"
       : state === "pending"
         ? "正在确认 ProfilePilot Input Guard 的 macOS 辅助功能权限。"
         : "不授权不影响 Profile 管理和 Agent 连接，但无法阻止 Agent 操作期间的手动点击。";
@@ -497,7 +500,7 @@ function renderInputGuardPermissionCard(context: "onboarding" | "integration"): 
     <section class="input-guard-permission ${context} ${state}" aria-labelledby="${labelId}">
       <div class="input-guard-mark" aria-hidden="true"><span>IG</span></div>
       <div class="input-guard-copy">
-        <span>MACOS SAFETY CHECKPOINT</span>
+        <span>${windows ? "WINDOWS INPUT GUARD" : "MACOS SAFETY CHECKPOINT"}</span>
         <strong id="${labelId}">${title}</strong>
         <p>${detail}</p>
         ${permission?.error ? `<small class="input-guard-error">${escapeHtml(permission.error)}</small>` : ""}

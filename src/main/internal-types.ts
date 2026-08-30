@@ -69,6 +69,11 @@ export interface CdpPendingRequest<T = unknown> {
 }
 
 export interface ChromeLocalState {
+  os_crypt?: {
+    encrypted_key?: unknown;
+    app_bound_encrypted_key?: unknown;
+    [key: string]: unknown;
+  };
   profile?: {
     info_cache?: Record<
       string,

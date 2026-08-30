@@ -63,6 +63,14 @@ async function main() {
 
     await driver.click('[data-action="open-mini-window"]');
     await waitForWindow(driver, (state) => state.mini?.visible && !state.main?.visible && !state.miniPanelOpen);
+    const collapsedClose = await driver.query(".mini-dock-close", { target: "mini" });
+    assert.equal(collapsedClose.count, 1, "Collapsed Mini should expose a close button");
+    await driver.click(".mini-dock-close", { target: "mini" });
+    await waitForWindow(driver, (state) => state.main?.visible && state.main.focused && !state.mini?.visible);
+    step("Collapsed Mini close button hid the floating window and restored the main window");
+
+    await driver.click('[data-action="open-mini-window"]');
+    await waitForWindow(driver, (state) => state.mini?.visible && !state.main?.visible && !state.miniPanelOpen);
     const beforeDrag = await driver.windows();
     await driver.drag(".mini-logo-dock", 5, 75, { target: "mini" });
     await delay(350);
@@ -77,11 +85,14 @@ async function main() {
     await waitForWindow(driver, (state) => state.miniPanelOpen && state.mini.bounds.width > 80);
     const profileCards = await driver.query(".mini-profile-card", { target: "mini" });
     assert.equal(profileCards.count, 3, "Mini should render the three deterministic fixture Profiles");
+    const panelClose = await driver.query(".mini-panel-close", { target: "mini" });
+    assert.equal(panelClose.count, 1, "Expanded Mini should expose a close button");
     assert.ok((await driver.screenshot("mini")).pngBase64.length > 1_000, "Mini screenshot should contain PNG data");
     step("Mini panel expanded, rendered three Profiles, and produced a screenshot");
 
-    await driver.click('[data-action="show-main-window"]', { target: "mini" });
-    await waitForWindow(driver, (state) => state.main?.visible && state.main.focused);
+    await driver.click(".mini-panel-close", { target: "mini" });
+    await waitForWindow(driver, (state) => state.main?.visible && state.main.focused && !state.mini?.visible);
+    step("Expanded Mini close button hid the floating window and restored the main window");
     step("PASS");
   } catch (error) {
     const output = app.output();

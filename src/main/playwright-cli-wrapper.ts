@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   accessSync,
@@ -31,6 +31,8 @@ import {
   type GatewayDriverProfileView,
   type GatewayDriverRequester
 } from "./browser-gateway-driver-runtime";
+import { spawnPortableCommand } from "./portable-command";
+import { windowsPowerShellExecutable } from "./windows-platform";
 
 const SAFE_SESSION_RE = /^[A-Za-z0-9._:-]{1,240}$/;
 const TERMINAL_COMMANDS = new Set(["close", "detach", "delete-data"]);
@@ -267,7 +269,12 @@ export function resolveRealPlaywrightCli(
   const self = realpathOrInput(selfPath);
   const managedLauncher = realpathOrInput(
     env.PROFILEPILOT_PLAYWRIGHT_CLI_LAUNCHER ||
-      path.join(env.HOME || os.homedir(), ".profilepilot", "bin", "playwright-cli")
+      path.join(
+        env.HOME || os.homedir(),
+        ".profilepilot",
+        "bin",
+        process.platform === "win32" ? "playwright-cli.cmd" : "playwright-cli"
+      )
   );
   for (const candidate of executableCandidatesOnPath("playwright-cli", env)) {
     const real = realpathOrInput(candidate);
@@ -284,7 +291,7 @@ export function spawnRealPlaywrightCli(
   options: PlaywrightCliRunOptions = {}
 ): Promise<PlaywrightCliSpawnResult> {
   return new Promise((resolve) => {
-    const child = spawn(command.executable, args, {
+    const child = spawnPortableCommand(command.executable, args, {
       cwd: options.cwd,
       env,
       stdio: ["inherit", "pipe", "pipe"]
@@ -321,27 +328,50 @@ export function spawnRealPlaywrightCli(
 }
 
 export function discoverPlaywrightCliDaemonPid(session: string, endpoint?: string): number | undefined {
-  if (process.platform === "win32") return undefined;
   const safe = safeSession(session);
   if (!safe) return undefined;
   try {
-    const output = execFileSync("ps", ["-axww", "-o", "pid=,command="], {
-      encoding: "utf8",
-      timeout: 1_000
-    });
-    const matches = output.split("\n").flatMap((line) => {
-      const match = line.match(/^\s*(\d+)\s+(.+)$/);
-      if (!match || !match[2].includes("cliDaemon.js")) return [];
-      if (endpoint && !match[2].includes(endpoint)) return [];
-      const tokens = match[2].split(/\s+/);
+    const processRows = process.platform === "win32"
+      ? windowsPlaywrightDaemonProcesses()
+      : execFileSync("ps", ["-axww", "-o", "pid=,command="], {
+          encoding: "utf8",
+          timeout: 1_000
+        }).split("\n").flatMap((line) => {
+          const match = line.match(/^\s*(\d+)\s+(.+)$/);
+          return match ? [{ pid: Number(match[1]), commandLine: match[2] }] : [];
+        });
+    const matches = processRows.flatMap(({ pid, commandLine }) => {
+      if (!commandLine.includes("cliDaemon.js")) return [];
+      if (endpoint && !commandLine.includes(endpoint)) return [];
+      const tokens = commandLine.split(/\s+/);
       if (!tokens.includes(safe)) return [];
-      const pid = positivePid(match[1]);
-      return pid ? [pid] : [];
+      const validPid = positivePid(pid);
+      return validPid ? [validPid] : [];
     });
     return matches.sort((left, right) => right - left)[0];
   } catch {
     return undefined;
   }
+}
+
+function windowsPlaywrightDaemonProcesses(): Array<{ pid: number; commandLine: string }> {
+  const output = execFileSync(windowsPowerShellExecutable(), [
+    "-NoLogo",
+    "-NoProfile",
+    "-NonInteractive",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-Command",
+    "[Console]::OutputEncoding=[Text.Encoding]::UTF8; @(Get-CimInstance Win32_Process | Where-Object CommandLine -Like '*cliDaemon.js*' | ForEach-Object { [pscustomobject]@{ pid=[int]$_.ProcessId; commandLine=[string]$_.CommandLine } }) | ConvertTo-Json -Compress"
+  ], { encoding: "utf8", timeout: 2_000, windowsHide: true });
+  const parsed = JSON.parse(output || "[]") as unknown;
+  const rows = Array.isArray(parsed) ? parsed : parsed ? [parsed] : [];
+  return rows.flatMap((row) => {
+    if (!row || typeof row !== "object") return [];
+    const value = row as { pid?: unknown; commandLine?: unknown };
+    const pid = positivePid(value.pid);
+    return pid && typeof value.commandLine === "string" ? [{ pid, commandLine: value.commandLine }] : [];
+  });
 }
 
 export async function runPlaywrightCliWrapper(
@@ -959,7 +989,7 @@ function executableCandidatesOnPath(command: string, env: NodeJS.ProcessEnv): st
   const pathValue = env.PATH || env.Path || env.path || "";
   const directories = pathValue.split(path.delimiter).filter(Boolean);
   const extensions = process.platform === "win32"
-    ? (env.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean)
+    ? [".exe", ".ps1", ".cmd", ".bat", ".com"]
     : [""];
   const seen = new Set<string>();
   return directories.flatMap((directory) => extensions.flatMap((extension) => {

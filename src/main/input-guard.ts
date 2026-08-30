@@ -4,6 +4,7 @@ import {
   resolveInputGuardHelperPath,
   type InputGuardProcess
 } from "./input-guard-companion";
+import { windowsPowerShellExecutable } from "./windows-platform";
 
 const CLICK_MAX_DURATION_NS = 2_000_000_000;
 const WINDOW_GEOMETRY_EPSILON = 0.75;
@@ -84,10 +85,17 @@ export class MacInputGuard implements InputGuardController {
 
   constructor(private readonly options: MacInputGuardOptions) {
     this.platform = options.platform || process.platform;
-    this.helperPath = options.helperPath || (this.platform === "darwin" ? defaultInputGuardHelperPath() : "");
+    this.helperPath = options.helperPath || (supportsInputGuardPlatform(this.platform) ? defaultInputGuardHelperPath() : "");
     this.spawnHelper = options.spawnHelper || ((helperPath) => {
       if (this.platform === "darwin" && helperPath.includes(".app/Contents/MacOS/")) {
         return launchInputGuardCompanion(helperPath);
+      }
+      if (this.platform === "win32") {
+        return spawn(
+          windowsPowerShellExecutable(),
+          ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", helperPath],
+          { stdio: ["pipe", "pipe", "pipe"], windowsHide: true }
+        );
       }
       return spawn(helperPath, [], { stdio: ["pipe", "pipe", "pipe"] });
     });
@@ -101,7 +109,7 @@ export class MacInputGuard implements InputGuardController {
       }
     }
     this.mouseDown.clear();
-    if (this.platform !== "darwin" || !this.wantedPids.length) {
+    if (!supportsInputGuardPlatform(this.platform) || !this.wantedPids.length) {
       this.clearHealthRetryTimer();
       this.stopHelper();
       return;
@@ -118,7 +126,7 @@ export class MacInputGuard implements InputGuardController {
   }
 
   private ensureHelper(): void {
-    if (this.child || this.stopping || this.platform !== "darwin" || !this.wantedPids.length) {
+    if (this.child || this.stopping || !supportsInputGuardPlatform(this.platform) || !this.wantedPids.length) {
       return;
     }
     this.clearRestartTimer();
@@ -283,7 +291,7 @@ export class MacInputGuard implements InputGuardController {
   }
 
   private scheduleRestart(): void {
-    if (this.restartTimer || this.stopping || !this.wantedPids.length || this.platform !== "darwin") {
+    if (this.restartTimer || this.stopping || !this.wantedPids.length || !supportsInputGuardPlatform(this.platform)) {
       return;
     }
     this.restartTimer = setTimeout(() => {
@@ -301,7 +309,7 @@ export class MacInputGuard implements InputGuardController {
   }
 
   private scheduleHealthRetry(): void {
-    if (this.healthRetryTimer || !this.ready || !this.wantedPids.length || this.platform !== "darwin") {
+    if (this.healthRetryTimer || !this.ready || !this.wantedPids.length || !supportsInputGuardPlatform(this.platform)) {
       return;
     }
     this.healthRetryTimer = setTimeout(() => {
@@ -321,6 +329,10 @@ export class MacInputGuard implements InputGuardController {
   private reportStatus(message: InputGuardStatusMessage): void {
     this.options.onStatus?.(message);
   }
+}
+
+function supportsInputGuardPlatform(platform: NodeJS.Platform): boolean {
+  return platform === "darwin" || platform === "win32";
 }
 
 export function parseInputGuardOutputLine(line: string): InputGuardMessage | null {

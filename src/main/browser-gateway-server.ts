@@ -6,6 +6,7 @@ import path from "node:path";
 import {
   BrowserGatewayControlError,
   BrowserGatewayControlPlane,
+  type GatewayAgentTargetChange,
   type GatewayConnectionIdentity,
   type GatewayControlEvent
 } from "./browser-gateway-control";
@@ -16,6 +17,7 @@ import {
   AGENT_VIRTUALIZED_VIEWPORT_METHODS,
   GATEWAY_DEVICE_PRESETS,
   isAgentTargetActivityMethod,
+  isAgentTargetInteractionMethod,
   isRawCdpMethodAllowed
 } from "./browser-gateway-policy";
 
@@ -88,6 +90,9 @@ interface GatewayConnection {
   parked: boolean;
   parkedEvents: string[];
   parkedEventBytes: number;
+  agentCdpGeneration: number;
+  lastAgentCdpAt?: string;
+  lastAgentCdpMethod?: string;
 }
 
 interface GatewayCdpSessionBinding {
@@ -123,13 +128,19 @@ export interface BrowserGatewayServerOptions {
     active: boolean,
     identity: GatewayConnectionIdentity
   ) => void;
-  onAgentTargetChange?: (publicPort: number) => void;
+  onAgentTargetChange?: (publicPort: number, change?: GatewayAgentTargetChange) => void;
 }
 
 export interface GatewayAgentTarget {
   targetId: string;
   title: string;
   url: string;
+}
+
+export interface GatewayAgentActivity {
+  generation: number;
+  lastCdpAt: string | null;
+  lastCdpMethod: string | null;
 }
 
 export class BrowserGatewayServer {
@@ -222,6 +233,25 @@ export class BrowserGatewayServer {
       connection.identity.sessionId === sessionId &&
       connection.identity.daemonInstanceId === daemonInstanceId
     ));
+  }
+
+  getAgentActivity(
+    publicPort: number,
+    sessionId: string,
+    daemonInstanceId: string
+  ): GatewayAgentActivity | null {
+    const route = this.routes.get(publicPort);
+    const connection = route && [...route.connections].find((candidate) => (
+      candidate.identity.kind === "agent" &&
+      candidate.identity.sessionId === sessionId &&
+      candidate.identity.daemonInstanceId === daemonInstanceId
+    ));
+    if (!connection) return null;
+    return {
+      generation: connection.agentCdpGeneration,
+      lastCdpAt: connection.lastAgentCdpAt || null,
+      lastCdpMethod: connection.lastAgentCdpMethod || null
+    };
   }
 
   async quiesceAgentSession(publicPort: number, sessionId: string, timeoutMs = 5_000): Promise<boolean> {
@@ -322,8 +352,8 @@ export class BrowserGatewayServer {
     const route = this.requireRoute(publicPort);
     const targetId = route.targetBySession.get(sessionId);
     if (!targetId) {
-      const error = new Error("当前 Agent 还没有可显示的目标标签页") as Error & { code?: string };
-      error.code = "AGENT_TARGET_NOT_FOUND";
+      const error = new Error("当前 Agent 没有可精确确认的目标标签页；为避免显示无关页面，ProfilePilot 已拒绝自动切页") as Error & { code?: string };
+      error.code = "GATEWAY_AGENT_TARGET_MISMATCH";
       throw error;
     }
     const result = await this.sendRaw(route, "Target.getTargets", {}, timeoutMs) as {
@@ -332,8 +362,8 @@ export class BrowserGatewayServer {
     const target = (result.targetInfos || []).find((candidate) => candidate.targetId === targetId);
     if (!target || target.type !== "page") {
       this.clearSessionTarget(route, sessionId);
-      const error = new Error(`页面 Target ${targetId} 不存在`) as Error & { code?: string };
-      error.code = "AGENT_TARGET_NOT_FOUND";
+      const error = new Error(`目标页面 ${targetId} 已不存在；为避免显示无关页面，ProfilePilot 已拒绝自动切页`) as Error & { code?: string };
+      error.code = "GATEWAY_AGENT_TARGET_MISMATCH";
       throw error;
     }
 
@@ -473,7 +503,13 @@ export class BrowserGatewayServer {
         ) as Record<string, unknown> | null;
         assertCurrent();
         const targetId = typeof result?.targetId === "string" ? result.targetId : "";
-        if (targetId) this.setSessionTargetIfCurrentIntent(route, input.sessionId, targetId, intent);
+        if (targetId) this.setSessionTargetIfCurrentIntent(
+          route,
+          input.sessionId,
+          targetId,
+          intent,
+          "raw-cdp:Target.createTarget"
+        );
         else this.retireSessionTargetIntent(route, input.sessionId, intent);
         return result;
       } catch (error) {
@@ -489,7 +525,13 @@ export class BrowserGatewayServer {
       try {
         await this.assertPageTarget(route, targetId, timeoutMs);
         assertCurrent();
-        this.setSessionTargetIfCurrentIntent(route, input.sessionId, targetId, intent);
+        this.setSessionTargetIfCurrentIntent(
+          route,
+          input.sessionId,
+          targetId,
+          intent,
+          "raw-cdp:Target.activateTarget"
+        );
         return {};
       } catch (error) {
         this.retireSessionTargetIntent(route, input.sessionId, intent);
@@ -531,7 +573,13 @@ export class BrowserGatewayServer {
       if (input.method === "Target.attachToTarget") {
         const targetId = typeof input.params?.targetId === "string" ? input.params.targetId : "";
         if (targetId && intent !== undefined) {
-          this.setSessionTargetIfCurrentIntent(route, input.sessionId, targetId, intent);
+          this.setSessionTargetIfCurrentIntent(
+            route,
+            input.sessionId,
+            targetId,
+            intent,
+            "raw-cdp:Target.attachToTarget"
+          );
         } else if (intent !== undefined) {
           this.retireSessionTargetIntent(route, input.sessionId, intent);
         }
@@ -552,7 +600,13 @@ export class BrowserGatewayServer {
       try {
         await this.assertPageTarget(route, targetId, timeoutMs);
         assertCurrent();
-        this.setSessionTargetIfCurrentIntent(route, input.sessionId, targetId, intent);
+        this.setSessionTargetIfCurrentIntent(
+          route,
+          input.sessionId,
+          targetId,
+          intent,
+          "raw-cdp:Page.bringToFront"
+        );
         return {};
       } catch (error) {
         this.retireSessionTargetIntent(route, input.sessionId, intent);
@@ -574,7 +628,13 @@ export class BrowserGatewayServer {
     let targetCommitted = false;
     try {
       assertCurrent();
-      this.setSessionTargetIfCurrentIntent(route, input.sessionId, targetId, intent);
+      this.setSessionTargetIfCurrentIntent(
+        route,
+        input.sessionId,
+        targetId,
+        intent,
+        `raw-cdp:${input.method}`
+      );
       targetCommitted = route.targetCommitIntentBySession.get(input.sessionId) === intent;
       const result = await this.sendRaw(route, input.method, input.params || {}, timeoutMs, targetSessionId);
       assertCurrent();
@@ -693,7 +753,7 @@ export class BrowserGatewayServer {
       targetId
     }, timeoutMs);
     this.control.assertConnectionCanSend(identity);
-    this.setSessionTarget(route, input.sessionId, pageTargetId);
+    this.setSessionTarget(route, input.sessionId, pageTargetId, "extension:trigger-action");
     return {
       extensionId,
       targetId: pageTargetId,
@@ -795,7 +855,7 @@ export class BrowserGatewayServer {
         cdpSessionId
       };
       route.deviceEmulationBySession.set(input.sessionId, state);
-      this.setSessionTarget(route, input.sessionId, targetId);
+      this.setSessionTarget(route, input.sessionId, targetId, "device-emulation:emulate");
       return publicDeviceEmulation(state);
     } catch (error) {
       await this.resetAndDetachDeviceSession(route, cdpSessionId, timeoutMs);
@@ -1027,7 +1087,8 @@ export class BrowserGatewayServer {
       quiescing: false,
       parked: false,
       parkedEvents: [],
-      parkedEventBytes: 0
+      parkedEventBytes: 0,
+      agentCdpGeneration: 0
     };
     route.connections.add(connection);
     if (identity.kind === "agent") {
@@ -1161,6 +1222,9 @@ export class BrowserGatewayServer {
         }, clientSessionId);
         return;
       }
+      connection.agentCdpGeneration += 1;
+      connection.lastAgentCdpAt = new Date().toISOString();
+      connection.lastAgentCdpMethod = method || "<missing-method>";
     }
     if (route.pending.size >= MAX_PENDING_REQUESTS) {
       connection.peer.close(1013, "too many pending CDP requests");
@@ -1181,14 +1245,23 @@ export class BrowserGatewayServer {
         this.sendClientResponse(connection, downstreamId, { result: {} }, clientSessionId);
         return;
       }
-      if (clientSessionId && method !== "Page.bringToFront" && isAgentTargetActivityMethod(method)) {
+      if (
+        clientSessionId &&
+        method !== "Page.bringToFront" &&
+        isAgentTargetActivityMethod(method) &&
+        (
+          !route.targetBySession.has(connection.identity.sessionId) ||
+          isAgentTargetInteractionMethod(method)
+        )
+      ) {
         const targetId = this.targetForCdpSession(route, connection, message);
         const activityIntent = this.beginSessionTargetIntent(route, connection.identity.sessionId);
         this.setSessionTargetIfCurrentIntent(
           route,
           connection.identity.sessionId,
           targetId,
-          activityIntent
+          activityIntent,
+          `agent-cdp:${method}`
         );
       }
       if (method === "Page.bringToFront" || method === "Target.activateTarget") {
@@ -1203,7 +1276,8 @@ export class BrowserGatewayServer {
             route,
             connection.identity.sessionId,
             targetId,
-            targetIntent
+            targetIntent,
+            `agent-cdp:${method}`
           );
           this.sendClientResponse(connection, downstreamId, { result: {} }, clientSessionId);
         } catch (error) {
@@ -1440,7 +1514,8 @@ export class BrowserGatewayServer {
               route,
               pending.connection.identity.sessionId,
               requestedTargetId,
-              pending.targetIntent
+              pending.targetIntent,
+              "agent-cdp-response:Target.attachToTarget"
             );
           }
         } else if (
@@ -1453,7 +1528,8 @@ export class BrowserGatewayServer {
               route,
               pending.connection.identity.sessionId,
               createdTargetId,
-              pending.targetIntent
+              pending.targetIntent,
+              "agent-cdp-response:Target.createTarget"
             );
           }
         } else if (
@@ -1511,10 +1587,21 @@ export class BrowserGatewayServer {
     }
   }
 
-  private setSessionTarget(route: GatewayRoute, sessionId: string, targetId: string): void {
-    if (route.targetBySession.get(sessionId) === targetId) return;
+  private setSessionTarget(
+    route: GatewayRoute,
+    sessionId: string,
+    targetId: string,
+    source = "gateway:unspecified"
+  ): void {
+    const previousTargetId = route.targetBySession.get(sessionId);
+    if (previousTargetId === targetId) return;
     route.targetBySession.set(sessionId, targetId);
-    this.options.onAgentTargetChange?.(route.publicPort);
+    this.options.onAgentTargetChange?.(route.publicPort, {
+      sessionId,
+      previousTargetId: previousTargetId || null,
+      targetId,
+      source
+    });
   }
 
   private beginSessionTargetIntent(route: GatewayRoute, sessionId: string): number {
@@ -1527,11 +1614,12 @@ export class BrowserGatewayServer {
     route: GatewayRoute,
     sessionId: string,
     targetId: string,
-    intent: number
+    intent: number,
+    source = "gateway:intent-commit"
   ): void {
     if (route.targetIntentBySession.get(sessionId) !== intent) return;
     route.targetCommitIntentBySession.set(sessionId, intent);
-    this.setSessionTarget(route, sessionId, targetId);
+    this.setSessionTarget(route, sessionId, targetId, source);
   }
 
   private retireSessionTargetIntent(route: GatewayRoute, sessionId: string, intent: number): void {
@@ -1545,7 +1633,8 @@ export class BrowserGatewayServer {
     route: GatewayRoute,
     sessionId: string,
     expectedTargetId: string,
-    expectedCommitIntent?: number
+    expectedCommitIntent?: number,
+    source = "gateway:committed-target-cleared"
   ): void {
     if (route.targetBySession.get(sessionId) !== expectedTargetId) return;
     if (route.targetCommitIntentBySession.get(sessionId) !== expectedCommitIntent) return;
@@ -1554,14 +1643,25 @@ export class BrowserGatewayServer {
     if (route.targetIntentBySession.get(sessionId) === expectedCommitIntent) {
       route.targetIntentBySession.delete(sessionId);
     }
-    this.options.onAgentTargetChange?.(route.publicPort);
+    this.options.onAgentTargetChange?.(route.publicPort, {
+      sessionId,
+      previousTargetId: expectedTargetId,
+      targetId: null,
+      source
+    });
   }
 
-  private clearSessionTarget(route: GatewayRoute, sessionId: string): void {
+  private clearSessionTarget(route: GatewayRoute, sessionId: string, source = "gateway:session-target-cleared"): void {
     route.targetIntentBySession.delete(sessionId);
     route.targetCommitIntentBySession.delete(sessionId);
+    const previousTargetId = route.targetBySession.get(sessionId);
     if (!route.targetBySession.delete(sessionId)) return;
-    this.options.onAgentTargetChange?.(route.publicPort);
+    this.options.onAgentTargetChange?.(route.publicPort, {
+      sessionId,
+      previousTargetId: previousTargetId || null,
+      targetId: null,
+      source
+    });
   }
 
   private bindCdpSession(
@@ -1622,7 +1722,8 @@ export class BrowserGatewayServer {
             route,
             sessionId,
             targetId,
-            route.targetCommitIntentBySession.get(sessionId)
+            route.targetCommitIntentBySession.get(sessionId),
+            "chrome-event:Target.targetDestroyed"
           );
         }
       }

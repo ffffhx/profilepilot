@@ -4,6 +4,7 @@ import { POSIX_LOCALE_ENV, execFileAsync, isRecord, sleep, stringValue } from ".
 import { CdpPendingRequest, CdpResponse, CdpTargetListEntry, CdpVersionInfo } from "./internal-types";
 import { ProfileManagerError } from "./profile-manager-error";
 import { gatewayHttpHeaders } from "./browser-gateway-client";
+import { getWindowsSystemSnapshot } from "./windows-platform";
 
 export class CdpBrowserClient {
   private nextId = 1;
@@ -217,6 +218,14 @@ export function isPortAvailable(port: number): Promise<boolean> {
 }
 
 export async function describePortOwner(port: number): Promise<string | null> {
+  if (process.platform === "win32") {
+    const snapshot = await getWindowsSystemSnapshot().catch(() => null);
+    const connection = snapshot?.tcp.find((entry) => entry.localPort === port && entry.state.toLowerCase() === "listen");
+    if (!connection) return null;
+    const owner = snapshot?.processes.find((entry) => entry.pid === connection.pid);
+    const label = driverLabelFromCommand(owner?.commandLine || "", owner?.name || "未知进程");
+    return `${label} (PID ${connection.pid})`;
+  }
   try {
     const { stdout } = await execFileAsync("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN"], {
       maxBuffer: 1024 * 1024
@@ -273,6 +282,11 @@ export function driverLabelFromCommand(command: string, fallback: string): strin
 }
 
 export async function processLabelForPid(pid: number, fallback: string): Promise<string> {
+  if (process.platform === "win32") {
+    const snapshot = await getWindowsSystemSnapshot().catch(() => null);
+    const processInfo = snapshot?.processes.find((entry) => entry.pid === pid);
+    return processInfo ? driverLabelFromCommand(processInfo.commandLine, processInfo.name || fallback) : fallback;
+  }
   try {
     const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "command="], {
       maxBuffer: 1024 * 1024,

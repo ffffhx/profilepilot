@@ -22,6 +22,14 @@ const MCP_WRAPPER = path.join(repoRoot, "dist", "main", "profilepilot-chrome-dev
 async function main() {
   const playwrightExecutable = findRealExecutable("playwright-cli");
   const mcpExecutable = findRealExecutable("chrome-devtools-mcp");
+  if (!playwrightExecutable || !mcpExecutable) {
+    const missing = [
+      !playwrightExecutable ? "playwright-cli" : null,
+      !mcpExecutable ? "chrome-devtools-mcp" : null
+    ].filter(Boolean);
+    console.log(`[e2e:browser-drivers] SKIP missing optional real CLI: ${missing.join(", ")}`);
+    return;
+  }
   const fixtureRoot = await mkdtemp(path.join(os.tmpdir(), "pp-drivers-e2e-"));
   const homeDir = path.join(fixtureRoot, "home");
   const dataDir = path.join(fixtureRoot, "profilepilot-data");
@@ -424,13 +432,21 @@ async function ensureProcessExit(pid, timeoutMs = 5_000) {
 }
 
 function findRealExecutable(name) {
-  const output = execFileSync("/usr/bin/which", ["-a", name], { encoding: "utf8" });
+  const locator = process.platform === "win32"
+    ? path.join(process.env.SystemRoot || process.env.SYSTEMROOT || "C:\\Windows", "System32", "where.exe")
+    : "/usr/bin/which";
+  const locatorArgs = process.platform === "win32" ? [name] : ["-a", name];
+  let output = "";
+  try {
+    output = execFileSync(locator, locatorArgs, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  } catch {
+    return null;
+  }
   const executable = output
-    .split("\n")
+    .split(/\r?\n/)
     .map((value) => value.trim())
-    .find((value) => value && !value.includes(`${path.sep}.profilepilot${path.sep}bin${path.sep}`));
-  if (!executable) throw new Error(`Cannot find real ${name} executable`);
-  return executable;
+    .find((value) => value && !value.toLowerCase().includes(`${path.sep}.profilepilot${path.sep}bin${path.sep}`.toLowerCase()));
+  return executable || null;
 }
 
 async function gateway(homeDir, request) {

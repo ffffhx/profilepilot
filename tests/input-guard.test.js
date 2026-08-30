@@ -14,12 +14,21 @@ const test = require("node:test");
 const { MacInputGuard, parseInputGuardOutputLine } = require("../dist/main/input-guard.js");
 const {
   ensureInputGuardCompanion,
+  defaultInputGuardWindowsHelperPath,
   inspectInputGuardPermission,
   inputGuardBuildInfoPath,
   inputGuardExecutablePath,
   launchInputGuardCompanion,
   requestInputGuardPermission
 } = require("../dist/main/input-guard-companion.js");
+
+test("Windows Input Guard resolves the packaged and development helper paths", () => {
+  assert.equal(
+    defaultInputGuardWindowsHelperPath({ resourcesPath: "C:\\ProfilePilot\\resources", defaultApp: false }),
+    path.join("C:\\ProfilePilot\\resources", "native", "input-guard-win.ps1")
+  );
+  assert.equal(path.basename(defaultInputGuardWindowsHelperPath({ defaultApp: true })), "input-guard-win.ps1");
+});
 
 test("Input Guard re-enables taps disabled by either macOS condition", () => {
   const source = readFileSync(path.join(__dirname, "..", "native", "input-guard.c"), "utf8");
@@ -255,6 +264,39 @@ test("Input Guard native helper accepts SET commands and reports failed unknown 
     child.once("exit", (code) => {
       clearTimeout(timer);
       code === 0 ? resolve() : reject(new Error(`Input Guard helper exited ${code}`));
+    });
+  });
+  assert.match(output, /"status":"ready"/);
+  assert.match(output, /"status":"tap-create-failed"/);
+  assert.match(output, /"status":"sync-complete"/);
+});
+
+test("Windows Input Guard helper accepts SET commands and reports failed unknown pids", { skip: process.platform !== "win32" }, async () => {
+  const helper = path.join(__dirname, "..", "native", "input-guard-win.ps1");
+  const powershell = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  const child = spawn(powershell, [
+    "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", helper
+  ], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+  child.stdout.setEncoding("utf8");
+  let output = "";
+  child.stdout.on("data", (chunk) => {
+    output += chunk;
+    if (output.includes('"status":"ready"') && !output.includes('"status":"sync-complete"')) {
+      child.stdin.write("SET 2147480000\nQUIT\n");
+    }
+  });
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`Windows Input Guard helper timed out: ${output}`));
+    }, 8_000);
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once("exit", (code) => {
+      clearTimeout(timer);
+      code === 0 ? resolve() : reject(new Error(`Windows Input Guard helper exited ${code}`));
     });
   });
   assert.match(output, /"status":"ready"/);

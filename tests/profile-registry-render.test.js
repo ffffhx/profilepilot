@@ -221,6 +221,57 @@ test("Profile Registry preserves empty activity and fixed action slots", () => {
   assert.doesNotMatch(html, /data-action="open-profile-details"/);
 });
 
+test("Profile Registry shows a launching status while Chrome is starting", () => {
+  const idle = profile({
+    running: false,
+    pids: [],
+    cdpPort: null,
+    cdpUrl: null,
+    cdpClients: [],
+    fixedCdpPort: 9223
+  });
+  const { renderer } = loadProfilesRenderer({
+    busy: true,
+    busyState: {
+      key: "launch-cdp",
+      message: "正在以 CDP 启动 9223端口profile…",
+      profileId: "p1"
+    }
+  });
+  const row = renderer.renderProfileRow(idle);
+  const details = renderer.renderDetails(idle, false);
+
+  assert.match(row, /class="profile-child-row[^"]*\bbusy\b/);
+  assert.match(row, /aria-busy="true"/);
+  assert.match(row, /status-dot[\s\S]*\bloading\b/);
+  assert.match(row, /state-pill[\s\S]*\bloading\b[\s\S]*inline-spinner[\s\S]*启动中/);
+  assert.match(row, /action-button accent[\s\S]*\bloading\b[\s\S]*启动中/);
+  assert.doesNotMatch(row, />未运行</);
+  assert.match(details, /detail-status[\s\S]*\bloading\b[\s\S]*inline-spinner[\s\S]*启动中/);
+});
+
+test("Profile Registry launching status is scoped to the target Profile", () => {
+  const { renderer } = loadProfilesRenderer({
+    busy: true,
+    busyState: {
+      key: "launch-profile",
+      message: "正在启动 other…",
+      profileId: "other"
+    }
+  });
+  const html = renderer.renderProfileRow(profile({
+    running: false,
+    pids: [],
+    cdpPort: null,
+    cdpUrl: null,
+    cdpClients: []
+  }));
+
+  assert.doesNotMatch(html, /aria-busy="true"/);
+  assert.doesNotMatch(html, /启动中/);
+  assert.match(html, /state-pill[\s\S]*未运行/);
+});
+
 test("Profile Registry exposes the Agent access switch inline and uses the name as AI selection hint", () => {
   const { renderer } = loadProfilesRenderer({ openProfileMenuId: "p1" });
   const configured = profile({

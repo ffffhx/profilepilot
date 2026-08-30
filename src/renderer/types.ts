@@ -393,6 +393,7 @@ export interface ExternalChromeInstance {
 }
 
 export interface AppState {
+  platform?: string;
   appTitle: string;
   dataDir: string;
   profilesDir: string;
@@ -483,6 +484,7 @@ export interface ProfilePilotCliDiagnostic {
 }
 
 export interface InputGuardPermissionDiagnostic {
+  platform?: string;
   supported: boolean;
   granted: boolean;
   appName: string;

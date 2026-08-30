@@ -25,3 +25,16 @@ test("main window enters Mini only through explicit user actions", () => {
   assert.match(source, /IPC_CHANNELS\.showMiniWindow/);
   assert.match(rendererSource, /action === "open-mini-window"/);
 });
+
+test("Mini close controls restore the main window and hide Mini", () => {
+  const miniSource = readFileSync(path.join(__dirname, "../src/renderer/render/mini.ts"), "utf8");
+  const rendererSource = readFileSync(path.join(__dirname, "../src/renderer/main.ts"), "utf8");
+  const mainSource = readFileSync(path.join(__dirname, "../src/main/main.ts"), "utf8");
+  const showMainBody = mainSource.match(/async function showMainWindow\(\)[\s\S]*?function createAppTray/)?.[0] || "";
+
+  assert.match(miniSource, /class="mini-dock-close" data-action="show-main-window"/);
+  assert.match(miniSource, /class="mini-panel-close" data-action="show-main-window"/);
+  assert.match(rendererSource, /action === "show-main-window"[\s\S]*?profileApi\(\)\.showMainWindow\(\)/);
+  assert.match(showMainBody, /mainWindow\?\.show\(\)/);
+  assert.match(showMainBody, /miniWindow\?\.hide\(\)/);
+});

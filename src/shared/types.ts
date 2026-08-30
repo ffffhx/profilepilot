@@ -593,6 +593,7 @@ export interface ProfilePilotCliDiagnostic {
 }
 
 export interface InputGuardPermissionDiagnostic {
+  platform?: NodeJS.Platform;
   supported: boolean;
   granted: boolean;
   appName: string;
@@ -614,6 +615,7 @@ export interface AgentIntegrationDiagnostic {
 }
 
 export interface AppState {
+  platform?: NodeJS.Platform;
   appTitle: string;
   dataDir: string;
   profilesDir: string;

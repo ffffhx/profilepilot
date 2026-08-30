@@ -1,5 +1,6 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import type { Readable, Writable } from "node:stream";
+import { spawnPortableCommand } from "./portable-command";
 
 export interface GatewayCdpBackend {
   send(message: string): void;
@@ -43,7 +44,7 @@ export class ChromePipeTransport implements GatewayCdpBackend {
     if (!args.includes("--remote-debugging-pipe")) {
       args.push("--remote-debugging-pipe");
     }
-    const child = spawn(options.executable, args, {
+    const child = spawnPortableCommand(options.executable, args, {
       cwd: options.cwd,
       env: options.env,
       detached: false,

@@ -1,4 +1,3 @@
-import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -12,6 +11,7 @@ import type {
 } from "../shared/types";
 import { ProfileManagerError } from "./profile-manager-error";
 import { normalizeProxyEndpoint, parseProxyEndpoint, probeTcp } from "./proxy-health";
+import { spawnPortableCommand } from "./portable-command";
 
 const BIFROST_COMMAND_TIMEOUT_MS = 6_000;
 const BIFROST_START_READY_TIMEOUT_MS = 10_000;
@@ -172,6 +172,36 @@ export function directConnectionChromeArgs(enabled: boolean | null | undefined):
 export async function ensureUpstreamProxy(config: ProfileUpstreamProxyConfig): Promise<string[]> {
   const validated = validateUpstreamProxyConfig(config);
   await assertUpstreamReachable(validated.server);
+  return upstreamProxyChromeArgs(validated);
+}
+
+export async function ensureBifrostMainProxy(
+  config: ProfileUpstreamProxyConfig,
+  options: { start?: boolean; env?: NodeJS.ProcessEnv } = {}
+): Promise<string[]> {
+  const validated = validateUpstreamProxyConfig(config);
+  const parsed = parseProxyEndpoint(validated.server);
+  const env = options.env || process.env;
+  const snapshot = await getBifrostSnapshot(env);
+  const isLoopbackMain = Boolean(
+    parsed &&
+      isLoopbackHost(parsed.host) &&
+      (parsed.port === snapshot.mainPort || parsed.port === 9900)
+  );
+  if (!isLoopbackMain) {
+    return ensureUpstreamProxy(validated);
+  }
+  if (!snapshot.installed) {
+    throw new ProfileManagerError(
+      "没有找到 bifrost CLI。请先安装 Bifrost，或通过 BIFROST_BINARY 指定可执行文件。",
+      "BIFROST_NOT_INSTALLED"
+    );
+  }
+  if (options.start) {
+    await startBifrostIfNeeded(env);
+  } else if (!snapshot.running) {
+    throw new ProfileManagerError("Bifrost 当前未运行。请先启动 Bifrost，再启动这个 Profile。", "BIFROST_NOT_RUNNING");
+  }
   return upstreamProxyChromeArgs(validated);
 }
 
@@ -853,24 +883,52 @@ function executableFromPath(executable: string, pathValue: string | undefined): 
 
 function runBifrost(binary: string, args: string[], env: NodeJS.ProcessEnv): Promise<CommandResult> {
   return new Promise((resolve, reject) => {
-    execFile(
-      binary,
-      args,
-      {
-        timeout: BIFROST_COMMAND_TIMEOUT_MS,
-        maxBuffer: 1024 * 1024 * 4,
-        env: withBifrostPath(env),
-        windowsHide: true
-      },
-      (error, stdout, stderr) => {
-        if (error) {
-          Object.assign(error, { stdout: String(stdout || ""), stderr: String(stderr || "") });
-          reject(error);
-          return;
-        }
-        resolve({ stdout: String(stdout || ""), stderr: String(stderr || "") });
+    const child = spawnPortableCommand(binary, args, {
+      env: withBifrostPath(env),
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      stdout += chunk;
+      if (stdout.length > 4 * 1024 * 1024) child.kill();
+    });
+    child.stderr?.on("data", (chunk: string) => {
+      stderr += chunk;
+      if (stderr.length > 4 * 1024 * 1024) child.kill();
+    });
+    const finish = (error?: Error & { code?: unknown }): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) {
+        Object.assign(error, { stdout, stderr });
+        reject(error);
+      } else {
+        resolve({ stdout, stderr });
       }
-    );
+    };
+    const timer = setTimeout(() => {
+      child.kill();
+      const error = new Error(`Bifrost 命令超时（${BIFROST_COMMAND_TIMEOUT_MS}ms）`) as Error & { code?: string };
+      error.code = "ETIMEDOUT";
+      finish(error);
+    }, BIFROST_COMMAND_TIMEOUT_MS);
+    timer.unref?.();
+    child.once("error", (error) => finish(error));
+    child.once("close", (code, signal) => {
+      if (code === 0) {
+        finish();
+        return;
+      }
+      const error = new Error(stderr.trim() || `Bifrost 退出码 ${code ?? signal ?? "未知"}`) as Error & { code?: string | number };
+      error.code = code ?? signal ?? "BIFROST_EXIT";
+      finish(error as Error & { code?: unknown });
+    });
   });
 }
 

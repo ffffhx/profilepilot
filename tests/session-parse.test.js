@@ -177,7 +177,7 @@ test("listOpenCodexRollouts times out slow lsof, falls back to sessions, and cac
     assert.ok(firstMs < SLOW_LSOF_TIMEOUT_ASSERT_MS, `slow lsof was not capped: ${firstMs.toFixed(0)}ms`);
 
     assert.deepEqual(result.second, first);
-    assert.equal(result.lsofCalls, 1);
+    assert.equal(result.lsofCalls, process.platform === "win32" ? 0 : 1);
   } finally {
     restoreEnv("HOME", previousHome);
     restoreEnv("USERPROFILE", previousUserProfile);

@@ -53,6 +53,82 @@ test("renderer Bifrost rule confirm explains the global impact without deleting 
   ]);
 });
 
+test("renderer clone confirm explains the Windows native lightweight template", () => {
+  const source = profile({ id: "native:Default", name: "系统默认 Profile", source: "native", running: true });
+  const { confirm, store } = loadConfirmHarness({ profiles: [source] });
+  store.state.platform = "win32";
+
+  const view = confirm.confirmModalView({
+    kind: "clone-profiles",
+    sourceProfileId: source.id,
+    count: 2,
+    namePrefix: source.name,
+    includeExtensions: true,
+    launchAfter: false
+  });
+
+  assert.equal(view.kicker, "创建 Agent 浏览器");
+  assert.match(view.body[0], /只从「系统默认 Profile」复制书签与插件/);
+  assert.match(view.body[1], /App-Bound Encryption/);
+  assert.match(view.body[1], /首次启动后登录一次/);
+  assert.equal(view.body.some((line) => typeof line === "object" && line.tone === "danger"), false);
+  assert.deepEqual(view.summary[1], { label: "模式", value: "Windows 轻量模板" });
+  assert.deepEqual(view.summary[2], { label: "登录", value: "创建后手动登录" });
+
+  const html = confirm.renderConfirmModal({
+    kind: "confirm",
+    intent: {
+      kind: "clone-profiles",
+      sourceProfileId: source.id,
+      count: 2,
+      namePrefix: source.name,
+      includeExtensions: true,
+      launchAfter: false
+    }
+  });
+  assert.match(html, /class="modal confirm-modal confirm-dialog tone-primary"/);
+  assert.doesNotMatch(html, /class="modal confirm-modal confirm-dialog primary"/);
+});
+
+test("renderer clone confirm still restarts a running Windows isolated source", () => {
+  const source = profile({ id: "isolated:work", name: "Agent Work", source: "isolated", running: true });
+  const { confirm, store } = loadConfirmHarness({ profiles: [source] });
+  store.state.platform = "win32";
+
+  const view = confirm.confirmModalView({
+    kind: "clone-profiles",
+    sourceProfileId: source.id,
+    count: 1,
+    namePrefix: source.name,
+    includeExtensions: false,
+    launchAfter: false
+  });
+
+  assert.deepEqual(view.body[1], {
+    text: "Windows 正在使用源 Agent Work。开始克隆前会先关闭它以释放 Cookie 等数据文件，结束后会自动重新打开。",
+    tone: "danger"
+  });
+  assert.deepEqual(view.summary[1], { label: "源运行状态", value: "先关闭，完成后恢复" });
+});
+
+test("renderer clone confirm keeps macOS online-copy behavior unchanged", () => {
+  const source = profile({ id: "native:Default", name: "系统默认 Profile", source: "native", running: true });
+  const { confirm, store } = loadConfirmHarness({ profiles: [source] });
+  store.state.platform = "darwin";
+
+  const view = confirm.confirmModalView({
+    kind: "clone-profiles",
+    sourceProfileId: source.id,
+    count: 2,
+    namePrefix: source.name,
+    includeExtensions: false,
+    launchAfter: false
+  });
+
+  assert.equal(view.body.some((line) => typeof line === "object" && line.tone === "danger"), false);
+  assert.equal(view.summary.some((item) => item.label === "源运行状态"), false);
+});
+
 test("renderer Bifrost launch recovery offers one-click daemon start before direct fallback", () => {
   const configured = profile({
     name: "套餐升降配本地",

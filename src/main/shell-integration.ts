@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { constants as fsConstants, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -19,6 +18,8 @@ import { resolveRealChromeDevtoolsMcp } from "./chrome-devtools-mcp-wrapper";
 import { inspectInputGuardPermission } from "./input-guard-companion";
 import { resolveRealPlaywrightCli } from "./playwright-cli-wrapper";
 import { ProfileManagerError } from "./profile-manager-error";
+import { execPortableCommandSync } from "./portable-command";
+import { runWindowsPowerShell } from "./windows-platform";
 
 // 会话识别 shell 集成：往 ~/.zshenv 写一个托管块，在 AI agent 会话的 shell 里
 // 自动注入 AGENT_BROWSER_SESSION。效果：
@@ -34,21 +35,21 @@ import { ProfileManagerError } from "./profile-manager-error";
 const BEGIN_MARK = "# >>> ProfilePilot session integration >>>";
 const END_MARK = "# <<< ProfilePilot session integration <<<";
 const WRAPPER_FILE_NAME = "profilepilot-agent-browser-wrapper.cjs";
-const LAUNCHER_FILE_NAME = "agent-browser";
+const LAUNCHER_FILE_NAME = launcherFileName("agent-browser");
 const WRAPPER_SIGNATURE = "PROFILEPILOT_AGENT_BROWSER_WRAPPER";
 const PLAYWRIGHT_WRAPPER_FILE_NAME = "profilepilot-playwright-cli-wrapper.cjs";
-const PLAYWRIGHT_LAUNCHER_FILE_NAME = "playwright-cli";
+const PLAYWRIGHT_LAUNCHER_FILE_NAME = launcherFileName("playwright-cli");
 const PLAYWRIGHT_WRAPPER_SIGNATURE = "PROFILEPILOT_PLAYWRIGHT_CLI_WRAPPER";
 const PLAYWRIGHT_LAUNCHER_SIGNATURE = "PROFILEPILOT_PLAYWRIGHT_CLI_LAUNCHER";
 const MCP_WRAPPER_FILE_NAME = "profilepilot-chrome-devtools-mcp-wrapper.cjs";
-const MCP_LAUNCHER_FILE_NAME = "chrome-devtools-mcp";
+const MCP_LAUNCHER_FILE_NAME = launcherFileName("chrome-devtools-mcp");
 const MCP_WRAPPER_SIGNATURE = "PROFILEPILOT_CHROME_DEVTOOLS_MCP_WRAPPER";
 const MCP_LAUNCHER_SIGNATURE = "PROFILEPILOT_CHROME_DEVTOOLS_MCP_LAUNCHER";
 const NODE_RUNTIME_SIGNATURE = "PROFILEPILOT_NODE_RUNTIME";
 const LAUNCHER_SIGNATURE = "PROFILEPILOT_AGENT_BROWSER_LAUNCHER";
 const BIN_DIR_SIGNATURE = "PROFILEPILOT_AGENT_BROWSER_BIN_DIR";
 const MANAGEMENT_CLI_BUNDLE_FILE_NAME = "profilepilot-cli.cjs";
-const MANAGEMENT_CLI_LAUNCHER_FILE_NAME = "profilepilot";
+const MANAGEMENT_CLI_LAUNCHER_FILE_NAME = launcherFileName("profilepilot");
 const MANAGEMENT_CLI_SIGNATURE = "PROFILEPILOT_MANAGEMENT_CLI";
 const MANAGEMENT_CLI_BIN_DIR_SIGNATURE = "PROFILEPILOT_MANAGEMENT_CLI_BIN_DIR";
 // 生效特征：只要这行 export 在（无论是托管块还是用户手写的），注入就是开着的。
@@ -108,52 +109,60 @@ const INTEGRATION_BLOCK = [
 ].join("\n");
 
 export function agentBrowserWrapperPath(): string {
-  return path.join(os.homedir(), ".profilepilot", "bin", WRAPPER_FILE_NAME);
+  return path.join(integrationHomeDir(), ".profilepilot", "bin", WRAPPER_FILE_NAME);
 }
 
 export function agentBrowserLauncherPath(): string {
-  return path.join(os.homedir(), ".profilepilot", "bin", LAUNCHER_FILE_NAME);
+  return path.join(integrationHomeDir(), ".profilepilot", "bin", LAUNCHER_FILE_NAME);
 }
 
 export function playwrightCliWrapperPath(): string {
-  return path.join(os.homedir(), ".profilepilot", "bin", PLAYWRIGHT_WRAPPER_FILE_NAME);
+  return path.join(integrationHomeDir(), ".profilepilot", "bin", PLAYWRIGHT_WRAPPER_FILE_NAME);
 }
 
 export function playwrightCliLauncherPath(): string {
-  return path.join(os.homedir(), ".profilepilot", "bin", PLAYWRIGHT_LAUNCHER_FILE_NAME);
+  return path.join(integrationHomeDir(), ".profilepilot", "bin", PLAYWRIGHT_LAUNCHER_FILE_NAME);
 }
 
 export function chromeDevtoolsMcpWrapperPath(): string {
-  return path.join(os.homedir(), ".profilepilot", "bin", MCP_WRAPPER_FILE_NAME);
+  return path.join(integrationHomeDir(), ".profilepilot", "bin", MCP_WRAPPER_FILE_NAME);
 }
 
 export function chromeDevtoolsMcpLauncherPath(): string {
-  return path.join(os.homedir(), ".profilepilot", "bin", MCP_LAUNCHER_FILE_NAME);
+  return path.join(integrationHomeDir(), ".profilepilot", "bin", MCP_LAUNCHER_FILE_NAME);
 }
 
 export function profilePilotCliBundlePath(): string {
-  return path.join(os.homedir(), ".profilepilot", "cli", MANAGEMENT_CLI_BUNDLE_FILE_NAME);
+  return path.join(integrationHomeDir(), ".profilepilot", "cli", MANAGEMENT_CLI_BUNDLE_FILE_NAME);
 }
 
 export function profilePilotCliLauncherPath(): string {
-  return path.join(os.homedir(), ".profilepilot", "cli-bin", MANAGEMENT_CLI_LAUNCHER_FILE_NAME);
+  return path.join(integrationHomeDir(), ".profilepilot", "cli-bin", MANAGEMENT_CLI_LAUNCHER_FILE_NAME);
 }
 
 export function shellIntegrationFilePath(): string {
-  return path.join(os.homedir(), ".zshenv");
+  return process.platform === "win32"
+    ? "HKCU\\Environment\\Path"
+    : path.join(integrationHomeDir(), ".zshenv");
 }
 
 export async function getShellIntegrationStatus(): Promise<ShellIntegrationStatus> {
   const filePath = shellIntegrationFilePath();
   const base: ShellIntegrationStatus = {
-    supported: process.platform !== "win32",
+    supported: true,
     installed: false,
     managed: false,
     path: filePath,
     error: null
   };
-  if (!base.supported) {
-    return base;
+  if (process.platform === "win32") {
+    try {
+      const userPath = await readWindowsUserPath();
+      const installed = windowsIntegrationPathEntries().every((entry) => windowsPathIncludes(userPath, entry));
+      return { ...base, installed, managed: installed };
+    } catch (error) {
+      return { ...base, error: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   let content = "";
@@ -178,7 +187,7 @@ export async function inspectAgentIntegration(): Promise<AgentIntegrationDiagnos
   const [shellIntegration, wrappers, skills, managementCli, inputGuard] = await Promise.all([
     getShellIntegrationStatus(),
     inspectInstalledWrappers(),
-    inspectAgentSkills(),
+    inspectAgentSkills(integrationHomeDir()),
     inspectProfilePilotCli(),
     inspectInputGuardPermission()
   ]);
@@ -248,7 +257,7 @@ function inspectBinaryTool(input: {
     };
   }
   try {
-    const version = execFileSync(input.executablePath, ["--version"], {
+    const version = execPortableCommandSync(input.executablePath, ["--version"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: 3_500,
@@ -304,7 +313,7 @@ export async function inspectInstalledWrappers(): Promise<AgentWrapperDiagnostic
 
 async function isExecutable(filePath: string): Promise<boolean> {
   try {
-    await fs.access(filePath, fsConstants.X_OK);
+    await fs.access(filePath, process.platform === "win32" ? fsConstants.F_OK : fsConstants.X_OK);
     return true;
   } catch {
     return false;
@@ -315,6 +324,11 @@ export async function setShellIntegrationEnabled(enabled: boolean): Promise<Shel
   const status = await getShellIntegrationStatus();
   if (!status.supported) {
     throw new ProfileManagerError("当前系统不支持这个 shell 集成（仅 macOS/Linux 的 zsh）。", "SHELL_INTEGRATION_UNSUPPORTED");
+  }
+
+  if (process.platform === "win32") {
+    await setWindowsIntegrationPathEnabled(enabled);
+    return getShellIntegrationStatus();
   }
 
   if (enabled) {
@@ -400,7 +414,7 @@ export async function refreshAgentBrowserWrapperIfInstalled(): Promise<boolean> 
   if (managementCli.installed) {
     await installProfilePilotCliFiles();
   }
-  if (status.managed) {
+  if (status.managed && process.platform !== "win32") {
     await refreshManagedIntegrationBlock(status.path);
   }
   return true;
@@ -460,7 +474,7 @@ export async function inspectProfilePilotCli(): Promise<ProfilePilotCliDiagnosti
   const [bundleInstalled, launcherInstalled, skill] = await Promise.all([
     isExecutable(profilePilotCliBundlePath()),
     isExecutable(profilePilotCliLauncherPath()),
-    inspectProfilePilotCliSkill()
+    inspectProfilePilotCliSkill(integrationHomeDir())
   ]);
   let upToDate = false;
   let error: string | null = null;
@@ -519,7 +533,7 @@ export async function setProfilePilotCliSkillEnabled(enabled: boolean): Promise<
       throw new ProfileManagerError("请先安装 ProfilePilot 管理 CLI，再安装配套 Skill。", "PROFILEPILOT_CLI_REQUIRED");
     }
   }
-  await setInstalledAgentSkillEnabled("profilepilot-cli", enabled);
+  await setInstalledAgentSkillEnabled("profilepilot-cli", enabled, integrationHomeDir());
   return inspectAgentIntegration();
 }
 
@@ -538,7 +552,7 @@ export async function setAgentSkillEnabled(
       throw new ProfileManagerError("请先安装这个工具的 Wrapper，再安装配套 Skill。", "AGENT_WRAPPER_REQUIRED");
     }
   }
-  await setInstalledAgentSkillEnabled(key, enabled);
+  await setInstalledAgentSkillEnabled(key, enabled, integrationHomeDir());
   return inspectAgentIntegration();
 }
 
@@ -599,7 +613,7 @@ async function installBrowserDriverWrapper(input: {
   await writeTextFileAtomic(input.wrapperPath, source);
   await fs.chmod(input.wrapperPath, 0o755).catch(() => undefined);
 
-  const launcher = [
+  const launcher = process.platform === "win32" ? windowsBrowserLauncherContent(input) : [
     "#!/bin/sh",
     `wrapper=\${${input.wrapperSignature}:-${shellQuote(input.wrapperPath)}}`,
     `runtime=\${${NODE_RUNTIME_SIGNATURE}:-${shellQuote(NODE_RUNTIME_PATH)}}`,
@@ -636,6 +650,9 @@ async function installProfilePilotCliFiles(): Promise<void> {
 }
 
 function profilePilotCliLauncherContent(): string {
+  if (process.platform === "win32") {
+    return windowsCliLauncherContent();
+  }
   return [
     "#!/bin/sh",
     `cli=${shellQuote(profilePilotCliBundlePath())}`,
@@ -650,6 +667,131 @@ function profilePilotCliLauncherContent(): string {
     "exit 127",
     ""
   ].join("\n");
+}
+
+function windowsBrowserLauncherContent(input: {
+  wrapperPath: string;
+  wrapperSignature: string;
+}): string {
+  return [
+    "@echo off",
+    "setlocal",
+    ...windowsSessionEnvironmentLines(),
+    `set "wrapper=${batchValue(input.wrapperPath)}"`,
+    `if defined ${input.wrapperSignature} set "wrapper=%${input.wrapperSignature}%"`,
+    `set "runtime=${batchValue(NODE_RUNTIME_PATH)}"`,
+    `if defined ${NODE_RUNTIME_SIGNATURE} set "runtime=%${NODE_RUNTIME_SIGNATURE}%"`,
+    "where node >nul 2>nul",
+    "if errorlevel 1 goto profilepilot_electron_runtime",
+    "node \"%wrapper%\" %*",
+    "exit /b %errorlevel%",
+    ":profilepilot_electron_runtime",
+    "if not exist \"%runtime%\" goto profilepilot_missing_runtime",
+    "set ELECTRON_RUN_AS_NODE=1",
+    "\"%runtime%\" \"%wrapper%\" %*",
+    "exit /b %errorlevel%",
+    ":profilepilot_missing_runtime",
+    ">&2 echo [ProfilePilot] 缺少可用的 Node/Electron runtime，已拒绝绕过浏览器控制保护。",
+    "exit /b 127",
+    ""
+  ].join("\r\n");
+}
+
+function windowsCliLauncherContent(): string {
+  return [
+    "@echo off",
+    "setlocal",
+    ...windowsSessionEnvironmentLines(),
+    `set "cli=${batchValue(profilePilotCliBundlePath())}"`,
+    `set "runtime=${batchValue(NODE_RUNTIME_PATH)}"`,
+    `if defined ${NODE_RUNTIME_SIGNATURE} set "runtime=%${NODE_RUNTIME_SIGNATURE}%"`,
+    "where node >nul 2>nul",
+    "if errorlevel 1 goto profilepilot_electron_runtime",
+    "node \"%cli%\" %*",
+    "exit /b %errorlevel%",
+    ":profilepilot_electron_runtime",
+    "if not exist \"%runtime%\" goto profilepilot_missing_runtime",
+    "set ELECTRON_RUN_AS_NODE=1",
+    "\"%runtime%\" \"%cli%\" %*",
+    "exit /b %errorlevel%",
+    ":profilepilot_missing_runtime",
+    ">&2 echo [ProfilePilot] 缺少可用的 Node/Electron runtime，无法启动管理 CLI。",
+    "exit /b 127",
+    ""
+  ].join("\r\n");
+}
+
+function windowsSessionEnvironmentLines(): string[] {
+  return [
+    "if not defined AGENT_BROWSER_SESSION if defined CLAUDE_CODE_SESSION_ID set \"AGENT_BROWSER_SESSION=cc-%CLAUDE_CODE_SESSION_ID%\"",
+    "if not defined AGENT_BROWSER_SESSION if defined CODEX_THREAD_ID set \"AGENT_BROWSER_SESSION=cx-%CODEX_THREAD_ID%\"",
+    "if not defined PROFILEPILOT_SESSION if defined AGENT_BROWSER_SESSION set \"PROFILEPILOT_SESSION=%AGENT_BROWSER_SESSION%\""
+  ];
+}
+
+async function readWindowsUserPath(): Promise<string> {
+  if (Object.prototype.hasOwnProperty.call(process.env, "PROFILEPILOT_TEST_WINDOWS_USER_PATH")) {
+    return process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH || "";
+  }
+  return (await runWindowsPowerShell(
+    "[Console]::OutputEncoding=[Text.Encoding]::UTF8; [Environment]::GetEnvironmentVariable('Path','User')",
+    { timeout: 5_000 }
+  )).trim();
+}
+
+async function setWindowsIntegrationPathEnabled(enabled: boolean): Promise<void> {
+  const current = await readWindowsUserPath();
+  const managedEntries = windowsIntegrationPathEntries();
+  const remaining = current
+    .split(";")
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .filter((entry) => !managedEntries.some((managed) => sameWindowsPath(entry, managed)));
+  const nextEntries = enabled ? [...managedEntries, ...remaining] : remaining;
+  const next = nextEntries.join(";");
+  if (Object.prototype.hasOwnProperty.call(process.env, "PROFILEPILOT_TEST_WINDOWS_USER_PATH")) {
+    process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH = next;
+  } else {
+    const encoded = Buffer.from(next, "utf8").toString("base64");
+    await runWindowsPowerShell([
+      `$value=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}'))`,
+      "[Environment]::SetEnvironmentVariable('Path',$value,'User')",
+      "Add-Type -Namespace ProfilePilot -Name EnvironmentBroadcast -MemberDefinition '[DllImport(\"user32.dll\", CharSet=CharSet.Unicode, SetLastError=true)] public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint Msg, System.UIntPtr wParam, string lParam, uint flags, uint timeout, out System.UIntPtr result);'",
+      "$result=[UIntPtr]::Zero",
+      "[void][ProfilePilot.EnvironmentBroadcast]::SendMessageTimeout([IntPtr]0xffff,0x001A,[UIntPtr]::Zero,'Environment',2,2000,[ref]$result)"
+    ].join("; "), { timeout: 8_000 });
+  }
+  const processPath = process.env.PATH || "";
+  const processRemaining = processPath
+    .split(path.delimiter)
+    .filter(Boolean)
+    .filter((entry) => !managedEntries.some((managed) => sameWindowsPath(entry, managed)));
+  process.env.PATH = (enabled ? [...managedEntries, ...processRemaining] : processRemaining).join(path.delimiter);
+}
+
+function windowsIntegrationPathEntries(): string[] {
+  return [BIN_DIR_PATH, MANAGEMENT_CLI_BIN_DIR_PATH];
+}
+
+function windowsPathIncludes(pathValue: string, candidate: string): boolean {
+  return pathValue.split(";").some((entry) => sameWindowsPath(entry, candidate));
+}
+
+function sameWindowsPath(left: string, right: string): boolean {
+  const normalize = (value: string) => path.win32.normalize(value.trim().replace(/^"|"$/g, "")).replace(/[\\/]+$/, "").toLowerCase();
+  return normalize(left) === normalize(right);
+}
+
+function batchValue(value: string): string {
+  return value.replace(/%/g, "%%").replace(/"/g, '""');
+}
+
+function launcherFileName(name: string): string {
+  return process.platform === "win32" ? `${name}.cmd` : name;
+}
+
+function integrationHomeDir(): string {
+  return process.env.HOME || os.homedir();
 }
 
 async function writeTextFileAtomic(filePath: string, content: string): Promise<void> {

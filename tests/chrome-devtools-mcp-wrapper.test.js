@@ -166,7 +166,7 @@ test("bundled MCP wrapper does not execute the embedded agent-browser entrypoint
     });
 
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout, "MCP_ONLY\n");
+    assert.equal(result.stdout.trim(), "MCP_ONLY");
     assert.doesNotMatch(result.stdout + result.stderr, /UNEXPECTED_AGENT_BROWSER/);
   } finally {
     rmSync(home, { recursive: true, force: true });
@@ -409,6 +409,12 @@ function makeTempDir() {
 }
 
 function executable(filePath, content) {
+  if (process.platform === "win32") {
+    filePath += ".cmd";
+    const output = content.match(/printf\s+['"]([^'"]*)/)?.[1]?.replace(/\\n/g, "") || "";
+    const exitCode = content.match(/exit\s+(\d+)/)?.[1] || "0";
+    content = `@echo off\r\n${output ? `echo ${output}\r\n` : ""}exit /b ${exitCode}\r\n`;
+  }
   mkdirSync(path.dirname(filePath), { recursive: true });
   writeFileSync(filePath, content);
   chmodSync(filePath, 0o755);

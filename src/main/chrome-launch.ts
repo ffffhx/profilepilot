@@ -1,4 +1,4 @@
-import { execFile, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { existsSync, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -12,6 +12,13 @@ import { openInspectablePageOverCdp } from "./cdp-page";
 import { POSIX_LOCALE_ENV, execFileAsync, exists, getNestedValue, isRecord, isSafePathSegment, readJsonFile, sleep, stringValue, uniqueNumbers } from "./fs-util";
 import { CdpRuntimeEvaluateResult, ChromeLocalState, ProfileRef, TemporaryChromeCdpLaunch } from "./internal-types";
 import { ProfileManagerError } from "./profile-manager-error";
+import {
+  focusWindowsProcess,
+  getWindowsSystemSnapshot,
+  invalidateWindowsSystemSnapshot,
+  windowsForegroundProcessId
+} from "./windows-platform";
+import { spawnPortableCommand } from "./portable-command";
 
 export async function launchChrome(args: string[]): Promise<void> {
   if (process.env.CHROME_BINARY) {
@@ -19,7 +26,14 @@ export async function launchChrome(args: string[]): Promise<void> {
   } else if (process.platform === "darwin") {
     await execFileAsync("open", ["-na", process.env.CHROME_APP_NAME || "Google Chrome", "--args", ...args]);
   } else if (process.platform === "win32") {
-    await execFileAsync("cmd", ["/c", "start", "", "chrome", ...args]);
+    const executable = getDirectChromeCommand();
+    if (!executable) {
+      throw new ProfileManagerError(
+        "找不到 Google Chrome。请安装 Chrome，或通过 CHROME_BINARY 指定 chrome.exe。",
+        "CHROME_NOT_FOUND"
+      );
+    }
+    launchDetached(executable, args);
   } else {
     launchDetached("google-chrome", args);
   }
@@ -31,7 +45,14 @@ export async function openChromeUrl(url: string): Promise<void> {
   } else if (process.platform === "darwin") {
     await setFrontMacChromeTabUrl(url);
   } else if (process.platform === "win32") {
-    await execFileAsync("cmd", ["/c", "start", "", "chrome", url]);
+    const executable = getDirectChromeCommand();
+    if (!executable) {
+      throw new ProfileManagerError(
+        "找不到 Google Chrome。请安装 Chrome，或通过 CHROME_BINARY 指定 chrome.exe。",
+        "CHROME_NOT_FOUND"
+      );
+    }
+    launchDetached(executable, [url]);
   } else {
     launchDetached("google-chrome", [url]);
   }
@@ -54,7 +75,8 @@ export function toAppleScriptString(value: string): string {
 }
 
 export function launchDetached(command: string, args: string[]): void {
-  const child = spawn(command, args, {
+  if (process.platform === "win32") invalidateWindowsSystemSnapshot();
+  const child = spawnPortableCommand(command, args, {
     detached: true,
     stdio: "ignore"
   });
@@ -67,8 +89,12 @@ export function launchDetached(command: string, args: string[]): void {
 }
 
 export async function focusProfileWindow(pids: number[], signal?: AbortSignal): Promise<boolean> {
+  if (process.platform === "win32") {
+    signal?.throwIfAborted();
+    return focusWindowsProcess(pids);
+  }
   if (process.platform !== "darwin") {
-    throw new ProfileManagerError("当前只支持在 macOS 上把 Profile 窗口显示到最前面。", "FOCUS_UNSUPPORTED");
+    throw new ProfileManagerError("当前系统不支持把 Profile 窗口显示到最前面。", "FOCUS_UNSUPPORTED");
   }
 
   signal?.throwIfAborted();
@@ -150,6 +176,11 @@ export async function isFrontmostMacProcess(pid: number, signal?: AbortSignal): 
 }
 
 export async function isAnyMacProcessFrontmost(pids: number[], signal?: AbortSignal): Promise<boolean> {
+  if (process.platform === "win32") {
+    signal?.throwIfAborted();
+    const frontmostPid = await windowsForegroundProcessId();
+    return frontmostPid !== null && pids.includes(frontmostPid);
+  }
   if (process.platform !== "darwin") {
     return false;
   }
@@ -183,6 +214,10 @@ if (!front) {
 // 一次读取当前前台进程 PID，供 getState 给所有 Profile 派生 windowActivation。
 // 与逐 Profile 调 isAnyMacProcessFrontmost 相比只启动一次 osascript，也不会激活任何窗口。
 export async function frontmostMacProcessId(signal?: AbortSignal): Promise<number | null> {
+  if (process.platform === "win32") {
+    signal?.throwIfAborted();
+    return windowsForegroundProcessId();
+  }
   if (process.platform !== "darwin") {
     return null;
   }
@@ -209,6 +244,18 @@ front ? Number(front.processIdentifier) : 0;
 }
 
 export async function hasRendererProcessForProfile(profilePath: string): Promise<boolean> {
+  if (process.platform === "win32") {
+    try {
+      const normalized = normalizeWindowsPath(profilePath);
+      const snapshot = await getWindowsSystemSnapshot();
+      return snapshot.processes.some((processInfo) => {
+        const command = processInfo.commandLine;
+        return /--type=renderer(?:\s|$)/i.test(command) && normalizeWindowsPath(command).includes(normalized);
+      });
+    } catch {
+      return true;
+    }
+  }
   try {
     const { stdout } = await execFileAsync("ps", ["-axo", "command="], {
       maxBuffer: 1024 * 1024 * 8,
@@ -228,7 +275,7 @@ export async function hasRendererProcessForProfile(profilePath: string): Promise
 }
 
 export async function requestIsolatedProfileWindow(profile: PublicProfile): Promise<void> {
-  if (process.platform !== "darwin") {
+  if (process.platform !== "darwin" && process.platform !== "win32") {
     return;
   }
 
@@ -245,13 +292,63 @@ export function getDirectChromeCommand(env: NodeJS.ProcessEnv = process.env): st
     return env.CHROME_BINARY;
   }
 
-  if (process.platform !== "darwin") {
-    return null;
+  if (process.platform === "win32") {
+    return resolveWindowsChromeExecutable(env);
   }
+  if (process.platform === "darwin") {
+    const appName = env.CHROME_APP_NAME || "Google Chrome";
+    const command = `/Applications/${appName}.app/Contents/MacOS/${appName}`;
+    return existsSync(command) ? command : null;
+  }
+  return executableFromPath("google-chrome", env) || executableFromPath("chromium", env);
+}
 
-  const appName = env.CHROME_APP_NAME || "Google Chrome";
-  const command = `/Applications/${appName}.app/Contents/MacOS/${appName}`;
-  return existsSync(command) ? command : null;
+export function resolveWindowsChromeExecutable(env: NodeJS.ProcessEnv = process.env): string | null {
+  if (env.CHROME_BINARY?.trim()) return env.CHROME_BINARY.trim();
+  const candidates = [
+    env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, "Google", "Chrome", "Application", "chrome.exe"),
+    env.ProgramFiles && path.join(env.ProgramFiles, "Google", "Chrome", "Application", "chrome.exe"),
+    env["ProgramFiles(x86)"] && path.join(env["ProgramFiles(x86)"] as string, "Google", "Chrome", "Application", "chrome.exe"),
+    env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, "Google", "Chrome Beta", "Application", "chrome.exe")
+  ].filter((candidate): candidate is string => Boolean(candidate));
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  for (const registryPath of [
+    "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\chrome.exe",
+    "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\chrome.exe",
+    "HKLM\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\App Paths\\chrome.exe"
+  ]) {
+    try {
+      const output = execFileSync("reg.exe", ["query", registryPath, "/ve"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        windowsHide: true,
+        timeout: 1_500
+      });
+      const match = output.match(/REG_(?:EXPAND_)?SZ\s+(.+?)\s*$/im);
+      const value = match?.[1]?.trim().replace(/^"|"$/g, "");
+      if (value && existsSync(value)) return value;
+    } catch {
+      // Try the next registry hive or PATH.
+    }
+  }
+  return executableFromPath("chrome.exe", env);
+}
+
+function executableFromPath(executable: string, env: NodeJS.ProcessEnv): string | null {
+  const value = env.PATH || env.Path || env.path || "";
+  for (const entry of value.split(path.delimiter)) {
+    const directory = entry.trim().replace(/^"|"$/g, "");
+    if (!directory) continue;
+    const candidate = path.join(directory, executable);
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+function normalizeWindowsPath(value: string): string {
+  return value.replace(/\//g, "\\").toLowerCase();
 }
 
 export async function activateMacProcess(pid: number, signal?: AbortSignal): Promise<void> {
@@ -352,7 +449,7 @@ export async function launchTemporaryChromeWithCdp(userDataDir: string): Promise
     "--remote-debugging-address=127.0.0.1",
     "--remote-debugging-port=0"
   ];
-  const child = spawn(command, args, { stdio: ["ignore", "ignore", "pipe"] });
+  const child = spawnPortableCommand(command, args, { stdio: ["ignore", "ignore", "pipe"] });
   let stderr = "";
   let spawnError: Error | null = null;
   child.stderr?.on("data", (chunk: Buffer | string) => {
@@ -391,9 +488,6 @@ export function directChromeCommandForMaintenance(): string {
   if (direct) {
     return direct;
   }
-  if (process.platform === "win32") {
-    return "chrome";
-  }
   return "google-chrome";
 }
 
@@ -421,7 +515,7 @@ export async function closeTemporaryChromeWithCdp(launch: TemporaryChromeCdpLaun
   }
 }
 
-export function waitForChildExit(child: ReturnType<typeof spawn>, timeoutMs: number): Promise<boolean> {
+export function waitForChildExit(child: ReturnType<typeof spawnPortableCommand>, timeoutMs: number): Promise<boolean> {
   if (child.exitCode !== null || child.signalCode !== null) {
     return Promise.resolve(true);
   }

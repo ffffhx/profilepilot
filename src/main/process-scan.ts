@@ -14,6 +14,14 @@ import { isValidTcpPort, makeCdpUrl, parseRemoteDebuggingPort, requestCdpVersion
 import { POSIX_LOCALE_ENV, compareNumbers, earlierIsoDate, execFileAsync, uniqueNumbers } from "./fs-util";
 import { RuntimeProfile } from "./internal-types";
 import { resolveClientContexts } from "./session-context";
+import { findWindowsProcessesLockingPaths, getWindowsSystemSnapshot, type WindowsProcessInfo } from "./windows-platform";
+
+export type RuntimeProcessInfo = RuntimeProfile & {
+  pid: number;
+  command: string;
+  parentPid?: number;
+  executablePath?: string | null;
+};
 
 export function makeNativeRuntimeKey(dirName: string): string {
   return `native:${dirName}`;
@@ -51,6 +59,31 @@ export function parseRuntimeProcess(line: string): (RuntimeProfile & { pid: numb
     listeningPorts: [],
     command
   };
+}
+
+export async function listRuntimeProcesses(): Promise<RuntimeProcessInfo[]> {
+  if (process.platform === "win32") {
+    const snapshot = await getWindowsSystemSnapshot();
+    return snapshot.processes.map((processInfo) => ({
+      pid: processInfo.pid,
+      parentPid: processInfo.parentPid,
+      executablePath: processInfo.executablePath,
+      pids: [processInfo.pid],
+      browserPids: isChromiumBrowserMainProcess(processInfo.commandLine) ? [processInfo.pid] : [],
+      startedAt: processInfo.startedAt,
+      cdpPort: parseRemoteDebuggingPort(processInfo.commandLine),
+      listeningPorts: [],
+      command: processInfo.commandLine
+    }));
+  }
+  const { stdout } = await execFileAsync("ps", ["-axo", "pid=,lstart=,command="], {
+    maxBuffer: 1024 * 1024 * 8,
+    env: POSIX_LOCALE_ENV
+  });
+  return stdout.split("\n").flatMap((line) => {
+    const processInfo = parseRuntimeProcess(line);
+    return processInfo ? [processInfo] : [];
+  });
 }
 
 export function parsePsStartTime(value: string): string | null {
@@ -118,6 +151,23 @@ export async function attachListeningPorts(runtime: Map<string, RuntimeProfile>)
 export async function getListeningPortsByPid(targetPids: Set<number>): Promise<Map<number, number[]>> {
   const portsByPid = new Map<number, number[]>();
 
+  if (process.platform === "win32") {
+    try {
+      const snapshot = await getWindowsSystemSnapshot();
+      for (const connection of snapshot.tcp) {
+        if (connection.state.toLowerCase() !== "listen" || !targetPids.has(connection.pid)) continue;
+        if (!isValidTcpPort(connection.localPort)) continue;
+        portsByPid.set(
+          connection.pid,
+          uniqueNumbers([...(portsByPid.get(connection.pid) || []), connection.localPort]).sort(compareNumbers)
+        );
+      }
+    } catch {
+      // Return the empty, conservative snapshot below.
+    }
+    return portsByPid;
+  }
+
   try {
     const { stdout } = await execFileAsync("lsof", ["-nP", "-iTCP", "-sTCP:LISTEN"], {
       maxBuffer: 1024 * 1024 * 8
@@ -156,6 +206,37 @@ export async function getOpenProfilePidsByPath(profilePaths: string[]): Promise<
 
   if (!profileByCandidatePath.size) {
     return new Map();
+  }
+
+  if (process.platform === "win32") {
+    try {
+      const snapshot = await getWindowsSystemSnapshot();
+      const result = windowsOpenProfilePids(profilePaths, snapshot.processes);
+      const lockers = await findWindowsProcessesLockingPaths([...profileByCandidatePath.keys()]);
+      const processByPid = new Map(snapshot.processes.map((processInfo) => [processInfo.pid, processInfo]));
+      for (const [candidatePath, pids] of lockers) {
+        const profilePath = profileByCandidatePath.get(candidatePath);
+        if (!profilePath) continue;
+        const resolved = new Set(result.get(profilePath) || []);
+        for (const pid of pids) {
+          resolved.add(pid);
+          let current = processByPid.get(pid);
+          const seen = new Set<number>();
+          while (current && !seen.has(current.pid)) {
+            seen.add(current.pid);
+            if (isGoogleChromeMainProcess(current.commandLine)) {
+              resolved.add(current.pid);
+              break;
+            }
+            current = processByPid.get(current.parentPid);
+          }
+        }
+        if (resolved.size) result.set(profilePath, [...resolved]);
+      }
+      return result;
+    } catch {
+      return new Map();
+    }
   }
 
   let stdout = "";
@@ -223,44 +304,57 @@ export async function getCdpClientsByPort(ports: number[]): Promise<Map<number, 
   }
   const portSet = new Set(targetPorts);
 
-  // 注意：不要按 `-iTCP:<port>` 逐端口过滤——只要其中某个端口当前没有连接，
-  // lsof 就会以非零码退出（即便其它端口有有效输出），execFileAsync 会因此 reject 把有效结果一起丢掉。
-  // 这里列出全部 ESTABLISHED TCP，再用下面的 portSet 在代码里过滤，稳。
-  let stdout = "";
-  try {
-    ({ stdout } = await execFileAsync("lsof", ["-nP", "-iTCP", "-sTCP:ESTABLISHED", "-Fpcn"], {
-      maxBuffer: 1024 * 1024 * 8
-    }));
-  } catch {
-    return result;
-  }
+  if (process.platform === "win32") {
+    try {
+      const snapshot = await getWindowsSystemSnapshot();
+      const processByPid = new Map(snapshot.processes.map((item) => [item.pid, item]));
+      for (const connection of snapshot.tcp) {
+        if (connection.state.toLowerCase() !== "established" || !portSet.has(connection.remotePort)) continue;
+        if (connection.pid <= 0 || connection.pid === process.pid) continue;
+        const clients = result.get(connection.remotePort) || [];
+        if (!clients.some((client) => client.pid === connection.pid)) {
+          const processInfo = processByPid.get(connection.pid);
+          clients.push({ pid: connection.pid, label: processInfo?.name.replace(/\.exe$/i, "") || "unknown" });
+        }
+        result.set(connection.remotePort, clients);
+      }
+    } catch {
+      // Continue with activity/lease metadata even when the OS snapshot fails.
+    }
+  } else {
 
-  let pid: number | null = null;
-  let label = "";
-  for (const line of stdout.split("\n")) {
-    if (line.startsWith("p")) {
-      pid = Number(line.slice(1)) || null;
-      label = "";
-      continue;
+    // 注意：不要按 `-iTCP:<port>` 逐端口过滤——只要其中某个端口当前没有连接，
+    // lsof 就会以非零码退出（即便其它端口有有效输出），execFileAsync 会因此 reject 把有效结果一起丢掉。
+    // 这里列出全部 ESTABLISHED TCP，再用下面的 portSet 在代码里过滤，稳。
+    let stdout = "";
+    try {
+      ({ stdout } = await execFileAsync("lsof", ["-nP", "-iTCP", "-sTCP:ESTABLISHED", "-Fpcn"], {
+        maxBuffer: 1024 * 1024 * 8
+      }));
+    } catch {
+      stdout = "";
     }
-    if (line.startsWith("c")) {
-      label = line.slice(1).trim();
-      continue;
-    }
-    if (line.startsWith("n") && pid !== null) {
-      // 排除当前进程自己（快路径；所有 ProfilePilot 实例的排除见下面 dropOwnAppClients）。
-      if (pid === process.pid) {
+
+    let pid: number | null = null;
+    let label = "";
+    for (const line of stdout.split("\n")) {
+      if (line.startsWith("p")) {
+        pid = Number(line.slice(1)) || null;
+        label = "";
         continue;
       }
-      const port = parseCdpClientRemotePort(line.slice(1));
-      if (port === null || !portSet.has(port)) {
+      if (line.startsWith("c")) {
+        label = line.slice(1).trim();
         continue;
       }
-      const clients = result.get(port) || [];
-      if (!clients.some((client) => client.pid === pid)) {
-        clients.push({ pid, label: label || "unknown" });
+      if (line.startsWith("n") && pid !== null) {
+        if (pid === process.pid) continue;
+        const port = parseCdpClientRemotePort(line.slice(1));
+        if (port === null || !portSet.has(port)) continue;
+        const clients = result.get(port) || [];
+        if (!clients.some((client) => client.pid === pid)) clients.push({ pid, label: label || "unknown" });
+        result.set(port, clients);
       }
-      result.set(port, clients);
     }
   }
 
@@ -404,6 +498,19 @@ async function dropOwnAppClients(byPort: Map<number, CdpClientInfo[]>): Promise<
   }
 
   const ownPids = new Set<number>();
+  if (process.platform === "win32") {
+    try {
+      const snapshot = await getWindowsSystemSnapshot();
+      const ownExecutable = normalizeFilesystemPath(process.execPath);
+      for (const processInfo of snapshot.processes) {
+        if (pids.includes(processInfo.pid) && processInfo.executablePath && normalizeFilesystemPath(processInfo.executablePath) === ownExecutable) {
+          ownPids.add(processInfo.pid);
+        }
+      }
+    } catch {
+      return;
+    }
+  } else {
   try {
     const { stdout } = await execFileAsync("ps", ["-o", "pid=,comm=", "-p", pids.join(",")], {
       maxBuffer: 1024 * 1024
@@ -416,6 +523,7 @@ async function dropOwnAppClients(byPort: Map<number, CdpClientInfo[]>): Promise<
     }
   } catch {
     return;
+  }
   }
 
   if (!ownPids.size) {
@@ -509,7 +617,7 @@ export function isGoogleChromeMainProcess(command: string): boolean {
   }
 
   if (process.platform === "win32") {
-    return /(^|[\\\s])chrome\.exe(\s|$)/i.test(command);
+    return /(^|[\\/\s"])(chrome)\.exe(?:"|\s|$)/i.test(command);
   }
 
   return /(^|\s)(\/\S+\/)?(google-chrome|google-chrome-stable|chromium|chromium-browser|chrome)(\s|$)/.test(
@@ -546,10 +654,24 @@ export function isChromiumBrowserMainProcess(command: string): boolean {
     );
   }
 
+  if (process.platform === "win32") {
+    return /(^|[\\/\s"])(chrome|msedge|brave|chromium)\.exe(?:"|\s|$)/i.test(command);
+  }
+
   return isGoogleChromeMainProcess(command);
 }
 
 export function parseExternalBrowserName(command: string): string {
+  if (process.platform === "win32") {
+    const match = command.match(/(?:^|[\\/\s"])(chrome|msedge|brave|chromium)\.exe(?:"|\s|$)/i);
+    const names: Record<string, string> = {
+      chrome: /Chrome for Testing/i.test(command) ? "Google Chrome for Testing" : "Google Chrome",
+      msedge: "Microsoft Edge",
+      brave: "Brave Browser",
+      chromium: "Chromium"
+    };
+    return match ? names[match[1].toLowerCase()] : "Chromium";
+  }
   const match = command.match(
     /\/Contents\/MacOS\/(Google Chrome( for Testing| Beta| Dev| Canary)?|Chromium|Microsoft Edge|Brave Browser)(\s|$)/
   );
@@ -558,9 +680,18 @@ export function parseExternalBrowserName(command: string): string {
 
 // ps 输出不带引号，路径里可能有空格；取到下一个“ --flag”或行尾为止。
 export function parseUserDataDirFlag(command: string): string | null {
+  const wholeQuoted = command.match(/(?:^|\s)"--user-data-dir=([^"]+)"/i);
+  if (wholeQuoted?.[1]) return wholeQuoted[1].trim();
+  const valueQuoted = command.match(/(?:^|\s)--user-data-dir="([^"]+)"/i);
+  if (valueQuoted?.[1]) return valueQuoted[1].trim();
   const match = command.match(/--user-data-dir=(.*?)(?=\s+--|$)/);
-  const value = match?.[1]?.trim();
+  const value = match?.[1]?.trim().replace(/^"|"$/g, "");
   return value || null;
+}
+
+export function parseProfileDirectoryFlag(command: string): string | null {
+  const match = command.match(/(?:^|\s)"?--profile-directory=(?:"([^"]+)"|([^"\s]+))"?/i);
+  return match?.[1]?.trim() || match?.[2]?.trim() || null;
 }
 
 export function externalInstanceLabel(userDataDir: string): string {
@@ -577,27 +708,23 @@ export function externalInstanceLabel(userDataDir: string): string {
 }
 
 export async function findExternalChromeInstances(knownUserDataDirs: string[]): Promise<ExternalChromeInstance[]> {
-  const known = new Set(knownUserDataDirs.map((dir) => dir.replace(/\/+$/, "")));
+  const known = new Set(knownUserDataDirs.map(normalizeFilesystemPath));
 
-  let stdout = "";
+  let processes: RuntimeProcessInfo[] = [];
   try {
-    ({ stdout } = await execFileAsync("ps", ["-axo", "pid=,lstart=,command="], {
-      maxBuffer: 1024 * 1024 * 8,
-      env: POSIX_LOCALE_ENV
-    }));
+    processes = await listRuntimeProcesses();
   } catch {
     return [];
   }
 
   const byDir = new Map<string, ExternalChromeInstance>();
-  for (const line of stdout.split("\n")) {
-    const processInfo = parseRuntimeProcess(line);
-    if (!processInfo || !isChromiumBrowserMainProcess(processInfo.command)) {
+  for (const processInfo of processes) {
+    if (!isChromiumBrowserMainProcess(processInfo.command)) {
       continue;
     }
 
     const userDataDir = parseUserDataDirFlag(processInfo.command);
-    if (!userDataDir || known.has(userDataDir.replace(/\/+$/, ""))) {
+    if (!userDataDir || known.has(normalizeFilesystemPath(userDataDir))) {
       continue;
     }
 
@@ -638,6 +765,14 @@ export async function findExternalChromeInstances(knownUserDataDirs: string[]): 
 }
 
 export async function isChromeRunning(): Promise<boolean> {
+  if (process.platform === "win32") {
+    try {
+      const snapshot = await getWindowsSystemSnapshot();
+      return snapshot.processes.some((processInfo) => isGoogleChromeProcess(processInfo));
+    } catch {
+      return true;
+    }
+  }
   try {
     const { stdout } = await execFileAsync("ps", ["-axo", "command="], {
       maxBuffer: 1024 * 1024 * 8,
@@ -652,6 +787,14 @@ export async function isChromeRunning(): Promise<boolean> {
 }
 
 export async function getChromeProcessPids(): Promise<number[]> {
+  if (process.platform === "win32") {
+    try {
+      const snapshot = await getWindowsSystemSnapshot(true);
+      return uniqueNumbers(snapshot.processes.filter(isGoogleChromeProcess).map((processInfo) => processInfo.pid));
+    } catch {
+      return [];
+    }
+  }
   try {
     const { stdout } = await execFileAsync("ps", ["-axo", "pid=,command="], {
       maxBuffer: 1024 * 1024 * 8,
@@ -680,4 +823,49 @@ export async function getChromeProcessPids(): Promise<number[]> {
   } catch {
     return [];
   }
+}
+
+function windowsOpenProfilePids(profilePaths: string[], processes: WindowsProcessInfo[]): Map<string, number[]> {
+  const result = new Map<string, number[]>();
+  const mainProcesses = processes.filter((processInfo) => isGoogleChromeMainProcess(processInfo.commandLine));
+  const byPid = new Map(processes.map((processInfo) => [processInfo.pid, processInfo]));
+  const mainPidFor = (processInfo: WindowsProcessInfo): number | null => {
+    let current: WindowsProcessInfo | undefined = processInfo;
+    const seen = new Set<number>();
+    while (current && !seen.has(current.pid)) {
+      seen.add(current.pid);
+      if (isGoogleChromeMainProcess(current.commandLine)) return current.pid;
+      current = byPid.get(current.parentPid);
+    }
+    return null;
+  };
+  for (const profilePath of profilePaths) {
+    const dirName = path.basename(profilePath);
+    const matched = new Set<number>();
+    for (const processInfo of processes) {
+      const command = processInfo.commandLine;
+      const profileDirectory = parseProfileDirectoryFlag(command);
+      if (profileDirectory === dirName || normalizeFilesystemPath(command).includes(normalizeFilesystemPath(profilePath))) {
+        matched.add(processInfo.pid);
+        const mainPid = mainPidFor(processInfo);
+        if (mainPid) matched.add(mainPid);
+      }
+    }
+    if (dirName === "Default") {
+      for (const processInfo of mainProcesses.filter((item) => isImplicitDefaultChromeProcess(item.commandLine))) matched.add(processInfo.pid);
+    }
+    if (matched.size) result.set(profilePath, [...matched]);
+  }
+  return result;
+}
+
+function isGoogleChromeProcess(processInfo: WindowsProcessInfo): boolean {
+  const executable = `${processInfo.executablePath || ""} ${processInfo.commandLine}`;
+  return /(?:^|[\\/\s"])(chrome)\.exe(?:"|\s|$)/i.test(executable) &&
+    (/Google[\\/]Chrome/i.test(executable) || /chrome\.exe/i.test(processInfo.name));
+}
+
+function normalizeFilesystemPath(value: string): string {
+  const resolved = value.replace(/[\\/]+$/, "");
+  return process.platform === "win32" ? resolved.replace(/\//g, "\\").toLowerCase() : resolved;
 }

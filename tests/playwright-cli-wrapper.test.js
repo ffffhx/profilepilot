@@ -69,7 +69,7 @@ test("Playwright CLI state is stable per workspace and persisted atomically", ()
     writePlaywrightCliSessionState(state, home);
     assert.deepEqual(readPlaywrightCliSessionState(session, "/work/one", home), state);
     assert.equal(readPlaywrightCliSessionState(session, "/work/two", home), null);
-    assert.match(playwrightCliSessionStatePath(session, "/work/one", home), /\.profilepilot\/playwright-cli\//);
+    assert.ok(playwrightCliSessionStatePath(session, "/work/one", home).includes(path.join(".profilepilot", "playwright-cli")));
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
@@ -117,7 +117,7 @@ test("bundled Playwright wrapper does not execute the embedded agent-browser ent
     });
 
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout, "PLAYWRIGHT_ONLY\n");
+    assert.equal(result.stdout.trim(), "PLAYWRIGHT_ONLY");
     assert.doesNotMatch(result.stdout + result.stderr, /UNEXPECTED_AGENT_BROWSER/);
   } finally {
     rmSync(home, { recursive: true, force: true });
@@ -509,6 +509,12 @@ function makeTempDir() {
 }
 
 function executable(filePath, content = "#!/bin/sh\nexit 0\n") {
+  if (process.platform === "win32") {
+    filePath += ".cmd";
+    const output = content.match(/printf\s+['"]([^'"]*)/)?.[1]?.replace(/\\n/g, "") || "";
+    const exitCode = content.match(/exit\s+(\d+)/)?.[1] || "0";
+    content = `@echo off\r\n${output ? `echo ${output}\r\n` : ""}exit /b ${exitCode}\r\n`;
+  }
   mkdirSync(path.dirname(filePath), { recursive: true });
   writeFileSync(filePath, content);
   chmodSync(filePath, 0o755);

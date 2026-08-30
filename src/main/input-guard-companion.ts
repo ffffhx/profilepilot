@@ -17,6 +17,7 @@ import type { InputGuardPermissionDiagnostic } from "../shared/types";
 export const INPUT_GUARD_APP_NAME = "ProfilePilot Input Guard.app";
 export const INPUT_GUARD_EXECUTABLE_NAME = "ProfilePilot Input Guard";
 export const INPUT_GUARD_BUILD_INFO_NAME = "input-guard-build.json";
+export const INPUT_GUARD_WINDOWS_HELPER_NAME = "input-guard-win.ps1";
 export const INPUT_GUARD_ACCESSIBILITY_SETTINGS_URL =
   "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
 
@@ -59,6 +60,7 @@ export async function inspectInputGuardPermission(
 ): Promise<InputGuardPermissionDiagnostic> {
   const platform = options.platform || process.platform;
   const base = {
+    platform,
     supported: platform === "darwin",
     granted: platform !== "darwin",
     appName: "ProfilePilot Input Guard",
@@ -134,6 +136,9 @@ export function resolveInputGuardHelperPath(options: InputGuardCompanionOptions 
   }
 
   const platform = options.platform || process.platform;
+  if (platform === "win32") {
+    return defaultInputGuardWindowsHelperPath(options);
+  }
   const sourceAppPath = options.sourceAppPath || defaultInputGuardSourceAppPath(options);
   const sourceExecutablePath = inputGuardExecutablePath(sourceAppPath);
   if (platform !== "darwin") {
@@ -223,6 +228,17 @@ export function defaultInputGuardSourceAppPath(options: Pick<InputGuardCompanion
     return path.join(resourcesPath, "native", INPUT_GUARD_APP_NAME);
   }
   return path.resolve(__dirname, "..", "native", INPUT_GUARD_APP_NAME);
+}
+
+export function defaultInputGuardWindowsHelperPath(
+  options: Pick<InputGuardCompanionOptions, "resourcesPath" | "defaultApp"> = {}
+): string {
+  const resourcesPath = options.resourcesPath ?? (typeof process.resourcesPath === "string" ? process.resourcesPath : "");
+  const defaultApp = options.defaultApp ?? Boolean(process.defaultApp);
+  if (resourcesPath && !defaultApp) {
+    return path.join(resourcesPath, "native", INPUT_GUARD_WINDOWS_HELPER_NAME);
+  }
+  return path.resolve(__dirname, "..", "..", "native", INPUT_GUARD_WINDOWS_HELPER_NAME);
 }
 
 export function inputGuardExecutablePath(appPath: string): string {

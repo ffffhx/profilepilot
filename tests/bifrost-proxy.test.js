@@ -264,30 +264,31 @@ function makeFakeBifrost({
   startTransitionsToRunning = false
 }) {
   const home = mkdtempSync(path.join(os.tmpdir(), "pp-bifrost-fake-"));
-  const binary = path.join(home, "bin", "bifrost");
+  const binary = path.join(home, "bin", "bifrost.js");
   const callsPath = path.join(home, "bifrost-calls.log");
   const startedPath = path.join(home, "bifrost-started");
   const runningStatusJson = { ...statusJson, running: true };
   mkdirSync(path.dirname(binary), { recursive: true });
-  writeFileSync(binary, `#!/bin/sh
-printf '%s\n' "$*" >> ${JSON.stringify(callsPath)}
-if [ "$1" = status ]; then
-  if [ -f ${JSON.stringify(startedPath)} ]; then
-    printf '%s\n' '${JSON.stringify(runningStatusJson)}'
-    exit 0
-  fi
-  printf '%s\n' '${JSON.stringify(statusJson)}'
-  exit 0
-fi
-if [ "$1" = start ]; then
-${startTransitionsToRunning ? `  touch ${JSON.stringify(startedPath)}` : "  :"}
-  exit 0
-fi
-if [ "$1" = port ] && [ "$2" = show ]; then
-${portShowStdout ? `  printf '%s\n' '${portShowStdout}'` : "  :"}
-  exit ${portShowExit}
-fi
-exit 0
+  writeFileSync(binary, `
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(callsPath)}, args.join(" ") + "\\n");
+if (args[0] === "status") {
+  const status = fs.existsSync(${JSON.stringify(startedPath)})
+    ? ${JSON.stringify(runningStatusJson)}
+    : ${JSON.stringify(statusJson)};
+  process.stdout.write(JSON.stringify(status) + "\\n");
+  process.exit(0);
+}
+if (args[0] === "start") {
+  ${startTransitionsToRunning ? `fs.writeFileSync(${JSON.stringify(startedPath)}, "started");` : ""}
+  process.exit(0);
+}
+if (args[0] === "port" && args[1] === "show") {
+  ${portShowStdout ? `process.stdout.write(${JSON.stringify(`${portShowStdout}\n`)});` : ""}
+  process.exit(${portShowExit});
+}
+process.exit(0);
 `);
   chmodSync(binary, 0o755);
   return {

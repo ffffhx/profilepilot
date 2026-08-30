@@ -71,6 +71,9 @@ jobs:
       - name: Build packages
         run: node scripts/retry-command.mjs pnpm run ${{ matrix.npm_script }}
 
+      - name: Run test suite
+        run: node --test tests/
+
       - name: Upload package artifacts
         uses: actions/upload-artifact@v4
         with:

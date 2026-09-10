@@ -91,10 +91,6 @@ export function updateBusyState(patch: Partial<BusyState>): void {
   render();
 }
 
-export function wait(ms: number): Promise<void> {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
-
 export async function withBusy(
   work: () => Promise<unknown>,
   successMessage?: string,
@@ -156,25 +152,14 @@ export async function focusProfileFromUi(profile: PublicProfile): Promise<void> 
 
   try {
     await profileApi().focusProfile(profile.id);
-    await wait(700);
-    const isFrontmost = await profileApi().isProfileFrontmost(profile.id);
-    if (!isFrontmost) {
-      const platformHint = store.state?.platform === "win32"
-        ? "Windows 未确认它已到最前面。请点击一次目标 Chrome 窗口，或先关闭其它 Chrome 实例后重试。"
-        : "macOS 没有把它放到最前面。请检查辅助功能权限，或先关闭其它 Chrome 实例后重试。";
-      setToast(
-        `${emphasizeName(profile.name)} 已请求显示，但${platformHint}`,
-        "error"
-      );
-    } else {
-      setToast(`已将 ${emphasizeName(profile.name)} 显示到当前屏幕`);
-    }
+    setToast(`已将 ${emphasizeName(profile.name)} 显示到当前屏幕`);
   } catch (error) {
     setToast(formatErrorMessage(error), "error");
   } finally {
     store.busy = false;
     store.busyState = null;
-    await loadState().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+    render();
+    void loadState().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
   }
 }
 

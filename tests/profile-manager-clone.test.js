@@ -3,7 +3,9 @@ const test = require("node:test");
 
 const {
   cloneProfileMode,
+  findAvailableUnreservedCdpPort,
   ProfileManager,
+  repairDuplicateFixedCdpPorts,
   friendlyCloneError,
   isWindowsCrossDataDirAccountSyncUnsupported,
   shouldRestartCloneSource
@@ -45,6 +47,51 @@ test("Windows clone errors explain a lingering Chrome file lock", () => {
   assert.equal(friendlyCloneError(busy, "系统默认 Profile", "darwin"), busy);
 });
 
+test("CDP port allocation skips ports reserved by stopped Profiles", async () => {
+  const checked = [];
+  const port = await findAvailableUnreservedCdpPort(9223, new Set([9223, 9224]), async (candidate) => {
+    checked.push(candidate);
+    return candidate;
+  });
+
+  assert.equal(port, 9225);
+  assert.deepEqual(checked, [9225]);
+});
+
+test("duplicate fixed CDP ports keep the established owner and repair later Profiles", async () => {
+  const registry = {
+    profiles: [
+      { id: "old", name: "9223Profile", fixedCdpPort: 9223 },
+      { id: "new", name: "系统默认 Profile-1", fixedCdpPort: 9223 },
+      { id: "other", name: "9224", fixedCdpPort: 9224 }
+    ]
+  };
+
+  const repairs = await repairDuplicateFixedCdpPorts(registry, new Map(), async (candidate) => candidate);
+
+  assert.deepEqual(repairs, [{
+    profileId: "new",
+    profileName: "系统默认 Profile-1",
+    previousPort: 9223,
+    port: 9225
+  }]);
+  assert.deepEqual(registry.profiles.map((profile) => profile.fixedCdpPort), [9223, 9225, 9224]);
+});
+
+test("duplicate fixed CDP repair preserves the Profile actively bound by Gateway", async () => {
+  const registry = {
+    profiles: [
+      { id: "old", name: "Old", fixedCdpPort: 9223 },
+      { id: "active", name: "Active", fixedCdpPort: 9223 },
+      { id: "other", name: "Other", fixedCdpPort: 9224 }
+    ]
+  };
+
+  await repairDuplicateFixedCdpPorts(registry, new Map([[9223, "active"]]), async (candidate) => candidate);
+
+  assert.deepEqual(registry.profiles.map((profile) => profile.fixedCdpPort), [9225, 9223, 9224]);
+});
+
 test("cloneProfiles keeps a Windows native source open and uses the lightweight template", async () => {
   const manager = Object.create(ProfileManager.prototype);
   const events = [];
@@ -74,8 +121,9 @@ test("cloneProfiles keeps a Windows native source open and uses the lightweight 
   manager.syncWindowsNativeAgentTemplate = async (sourceProfileId, targetProfileId) => {
     events.push(`template:${sourceProfileId}:${targetProfileId}`);
   };
-  manager.setStoredCloneMeta = async (profileId, meta) => {
-    events.push(`meta:${profileId}:${meta.clonedFromProfileId}`);
+  manager.reserveAvailableFixedCdpPort = async (profileId, preferredPort, clonedFromProfileId) => {
+    events.push(`reserve:${profileId}:${clonedFromProfileId}`);
+    return preferredPort;
   };
 
   const result = await manager.cloneProfiles({

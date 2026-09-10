@@ -50,7 +50,7 @@ const {
   writeAgentBrowserCommandStateSync,
   writeAgentBrowserSessionActivitySync
 } = require("../dist/main/agent-browser-session.js");
-const { browserGatewaySocketPath } = require("../dist/main/browser-gateway-client.js");
+const { BROWSER_GATEWAY_PROTOCOL_VERSION, browserGatewaySocketPath } = require("../dist/main/browser-gateway-client.js");
 
 test("agent-browser wrapper resolves session from args before env", () => {
   assert.equal(sessionFromAgentBrowserArgs(["--session", "cx-arg", "open"], { AGENT_BROWSER_SESSION: "cx-env" }), "cx-arg");
@@ -104,7 +104,8 @@ test("managed Gateway rejects agent-browser launch proxy options and points to P
 });
 
 test("activity verification waits for a running old Gateway route to upgrade safely", () => {
-  assert.equal(gatewaySupportsAgentActivity({ ok: true, protocolVersion: 13 }), true);
+  assert.equal(gatewaySupportsAgentActivity({ ok: true, protocolVersion: BROWSER_GATEWAY_PROTOCOL_VERSION }), true);
+  assert.equal(gatewaySupportsAgentActivity({ ok: true, protocolVersion: 13 }), true, "active v13 routes remain compatible during the policy upgrade");
   assert.equal(gatewaySupportsAgentActivity({ ok: true, protocolVersion: 12 }), false);
   assert.equal(gatewaySupportsAgentActivity({ ok: true }), false);
 });

@@ -871,6 +871,11 @@ appRoot.addEventListener("click", (event) => {
     return;
   }
 
+  if (action === "hide-mini-window") {
+    void profileApi().hideMiniWindow().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+    return;
+  }
+
   if (action === "show-main-window") {
     void profileApi().showMainWindow().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
     return;
@@ -2141,7 +2146,7 @@ appRoot.addEventListener("keydown", (event) => {
   }
 
   const row = target?.closest<HTMLElement>("[data-profile-row]");
-  if (!row || !store.state || (event.key !== "Enter" && event.key !== " ")) {
+  if (!row || target !== row || !store.state || (event.key !== "Enter" && event.key !== " ")) {
     return;
   }
 

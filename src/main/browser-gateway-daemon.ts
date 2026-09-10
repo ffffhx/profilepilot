@@ -29,6 +29,7 @@ import { validateUnpackedExtensionPath } from "./unpacked-extension";
 
 const MAX_CONTROL_REQUEST_BYTES = 4 * 1024 * 1024;
 const DEFAULT_HANDOFF_REVEAL_DEADLINE_MS = 5_000;
+const DEFAULT_AGENT_COMMAND_QUIESCE_TIMEOUT_MS = 5_000;
 // wait-control 醒来后，Agent 还需要完成一次模型调度并重新 snapshot。10 秒在真实工具
 // 往返中会把正在恢复的 Session 误判为失联；无 waiter 的 UI 交还已由 ProfileManager
 // 拒绝，因此这里可以给有效接收方完整的恢复窗口。
@@ -37,6 +38,7 @@ export const DEFAULT_DRIVER_RECONNECT_GRACE_MS = 30_000;
 export interface BrowserGatewayDaemonOptions {
   focusProfileWindow?: (pids: number[], signal?: AbortSignal) => Promise<boolean>;
   handoffRevealDeadlineMs?: number;
+  agentCommandQuiesceTimeoutMs?: number;
   driverReconnectGraceMs?: number;
   driverLifecycle?: BrowserGatewayDriverLifecycle;
 }
@@ -70,6 +72,7 @@ export class BrowserGatewayDaemon {
   private readonly sessionControlQueues = new Map<string, Promise<void>>();
   private readonly focusProfileWindow: (pids: number[], signal?: AbortSignal) => Promise<boolean>;
   private readonly handoffRevealDeadlineMs: number;
+  private readonly agentCommandQuiesceTimeoutMs: number;
   private readonly driverReconnectGraceMs: number;
   private readonly driverLifecycle: BrowserGatewayDriverLifecycle;
   private readonly driverReconnectTimers = new Map<string, DriverReconnectTimer>();
@@ -91,6 +94,9 @@ export class BrowserGatewayDaemon {
     this.handoffRevealDeadlineMs = Number.isFinite(options.handoffRevealDeadlineMs) && Number(options.handoffRevealDeadlineMs) > 0
       ? Math.floor(Number(options.handoffRevealDeadlineMs))
       : DEFAULT_HANDOFF_REVEAL_DEADLINE_MS;
+    this.agentCommandQuiesceTimeoutMs = Number.isFinite(options.agentCommandQuiesceTimeoutMs) && Number(options.agentCommandQuiesceTimeoutMs) > 0
+      ? Math.floor(Number(options.agentCommandQuiesceTimeoutMs))
+      : DEFAULT_AGENT_COMMAND_QUIESCE_TIMEOUT_MS;
     this.driverReconnectGraceMs = Number.isFinite(options.driverReconnectGraceMs) && Number(options.driverReconnectGraceMs) > 0
       ? Math.floor(Number(options.driverReconnectGraceMs))
       : DEFAULT_DRIVER_RECONNECT_GRACE_MS;
@@ -522,18 +528,24 @@ export class BrowserGatewayDaemon {
       )
     );
     let executionQuiesced = false;
+    let forcedAgentDisconnects = 0;
     if (request.command === "takeover" && wasAgentControlled && sessionProfile) {
       // 先在 Gateway 执行面封锁新命令，再等已发往 Chrome 的命令收敛。
       // 这样任何驱动即使没有本地通知机制，也不会和用户并发操作。
       const quiesced = await this.gateway.quiesceAgentSession(
         sessionProfile.publicPort,
         request.sessionId,
-        5_000
+        this.agentCommandQuiesceTimeoutMs
       );
       if (!quiesced) {
-        const error = new Error("当前浏览器命令在 5 秒内未结束，已取消接管") as Error & { code?: string };
-        error.code = "AGENT_COMMAND_BUSY";
-        throw error;
+        // User takeover has priority after the graceful deadline. A permanently
+        // pending CDP request must not keep Input Guard locked forever; closing
+        // the driver WebSocket detaches its CDP sessions before ownership flips.
+        forcedAgentDisconnects = this.gateway.disconnectAgentSession(
+          sessionProfile.publicPort,
+          request.sessionId,
+          "AGENT_TAKEOVER_QUIESCE_TIMEOUT"
+        );
       }
       executionQuiesced = true;
     }
@@ -620,6 +632,7 @@ export class BrowserGatewayDaemon {
     return {
       ok: true,
       profile,
+      forcedAgentDisconnects,
       ...(request.revealAgentTarget === true ? {
         handoffTransitioned: wasAgentControlled,
         deviceEmulationPreserved: preserveDeviceEmulation,

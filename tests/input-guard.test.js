@@ -30,6 +30,17 @@ test("Windows Input Guard resolves the packaged and development helper paths", (
   assert.equal(path.basename(defaultInputGuardWindowsHelperPath({ defaultApp: true })), "input-guard-win.ps1");
 });
 
+test("Windows Input Guard allows hover movement and only suppresses captured drags", () => {
+  const source = readFileSync(path.join(__dirname, "..", "native", "input-guard-win.ps1"), "utf8");
+  const callback = source.slice(source.indexOf("private static IntPtr HookCallback"), source.indexOf("private static bool IsDown"));
+  assert.match(callback, /var capturedGesture = false;/);
+  assert.match(
+    callback,
+    /if \(\(down && guarded\) \|\|\s*\(\(message == WM_MOUSEMOVE \|\| up\) && capturedGesture\) \|\|\s*\(guarded && \(message == WM_MOUSEWHEEL \|\| message == WM_MOUSEHWHEEL\)\)\)/
+  );
+  assert.doesNotMatch(callback, /guarded && \(down \|\| up \|\| message == WM_MOUSEMOVE/);
+});
+
 test("Input Guard re-enables taps disabled by either macOS condition", () => {
   const source = readFileSync(path.join(__dirname, "..", "native", "input-guard.c"), "utf8");
   const callback = source.slice(source.indexOf("static CGEventRef guard_callback"), source.indexOf("static CGEventMask guarded_event_mask"));

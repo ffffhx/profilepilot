@@ -1,12 +1,34 @@
-const RAW_ALLOWED_PREFIXES = [
-  "DOM.",
-  "Emulation.",
-  "Input.",
-  "Page.",
-  "Runtime.",
-  "Target.",
-  "Network."
-];
+// Raw Bridge is a deliberately bounded API, not a forward-compatible CDP
+// tunnel. New protocol methods require review before they become callable.
+const RAW_ALLOWED_METHODS = new Set([
+  "DOM.enable", "DOM.disable", "DOM.getDocument", "DOM.getFlattenedDocument",
+  "DOM.describeNode", "DOM.querySelector", "DOM.querySelectorAll", "DOM.getAttributes",
+  "DOM.getOuterHTML", "DOM.getBoxModel", "DOM.getContentQuads", "DOM.getNodeForLocation",
+  "DOM.requestNode", "DOM.resolveNode", "DOM.requestChildNodes", "DOM.focus",
+  "DOM.scrollIntoViewIfNeeded", "DOM.setAttributeValue", "DOM.setAttributesAsText",
+  "DOM.removeAttribute", "DOM.setNodeValue", "DOM.setOuterHTML", "DOM.setFileInputFiles",
+  "DOM.performSearch", "DOM.getSearchResults", "DOM.discardSearchResults",
+  "Emulation.canEmulate", "Emulation.setDeviceMetricsOverride", "Emulation.clearDeviceMetricsOverride",
+  "Emulation.setTouchEmulationEnabled", "Emulation.setUserAgentOverride", "Emulation.setVisibleSize",
+  "Input.dispatchKeyEvent", "Input.dispatchMouseEvent", "Input.dispatchTouchEvent",
+  "Input.insertText", "Input.imeSetComposition", "Input.synthesizeTapGesture",
+  "Input.synthesizeScrollGesture", "Input.synthesizePinchGesture",
+  "Page.enable", "Page.disable", "Page.navigate", "Page.navigateToHistoryEntry", "Page.reload",
+  "Page.stopLoading", "Page.getNavigationHistory", "Page.getFrameTree", "Page.getResourceTree",
+  "Page.getResourceContent", "Page.searchInResource", "Page.getLayoutMetrics",
+  "Page.captureScreenshot", "Page.printToPDF", "Page.bringToFront", "Page.handleJavaScriptDialog",
+  "Page.addScriptToEvaluateOnNewDocument", "Page.removeScriptToEvaluateOnNewDocument",
+  "Page.setLifecycleEventsEnabled",
+  "Runtime.enable", "Runtime.disable", "Runtime.evaluate", "Runtime.callFunctionOn",
+  "Runtime.getProperties", "Runtime.releaseObject", "Runtime.releaseObjectGroup",
+  "Runtime.awaitPromise", "Runtime.compileScript", "Runtime.runScript",
+  "Runtime.addBinding", "Runtime.removeBinding", "Runtime.runIfWaitingForDebugger",
+  "Target.getTargets", "Target.getTargetInfo", "Target.createTarget", "Target.activateTarget",
+  "Target.attachToTarget", "Target.detachFromTarget", "Target.setAutoAttach", "Target.setDiscoverTargets",
+  "Network.enable", "Network.disable", "Network.getResponseBody", "Network.getRequestPostData",
+  "Network.searchInResponseBody", "Network.getCertificate", "Network.getSecurityIsolationStatus",
+  "Network.setExtraHTTPHeaders", "Network.setCacheDisabled", "Network.setBypassServiceWorker"
+]);
 
 // These Target methods either create an opaque CDP channel, open a privileged
 // browser session, or escape the managed Profile's target set.
@@ -70,21 +92,6 @@ const AGENT_TARGET_INTERACTION_METHODS = new Set([
   "Page.reload"
 ]);
 
-const RAW_DENIED_METHODS = new Set([
-  "Browser.close",
-  "Browser.setDownloadBehavior",
-  "Network.clearBrowserCache",
-  "Network.clearBrowserCookies",
-  "Network.getAllCookies",
-  "Network.getCookies",
-  "Network.setCookie",
-  "Network.setCookies",
-  "Storage.clearDataForOrigin",
-  "Storage.getCookies",
-  "Target.closeTarget",
-  ...AGENT_DENIED_TARGET_METHODS
-]);
-
 export interface GatewayDevicePreset {
   width: number;
   height: number;
@@ -109,11 +116,7 @@ export const GATEWAY_DEVICE_PRESETS: Readonly<Record<string, GatewayDevicePreset
 
 export function isRawCdpMethodAllowed(method: string): boolean {
   const normalized = String(method || "").trim();
-  return Boolean(
-    normalized &&
-      !RAW_DENIED_METHODS.has(normalized) &&
-      RAW_ALLOWED_PREFIXES.some((prefix) => normalized.startsWith(prefix))
-  );
+  return normalized === method && RAW_ALLOWED_METHODS.has(normalized);
 }
 
 export function isAgentTargetActivityMethod(method: string): boolean {

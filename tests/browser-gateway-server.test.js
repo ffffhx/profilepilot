@@ -376,7 +376,13 @@ test("Gateway Raw CDP uses the same ownership boundary and method policy", async
       "Target.attachToBrowserTarget",
       "Target.exposeDevToolsProtocol",
       "Target.openDevTools",
-      "Target.setRemoteLocations"
+      "Target.setRemoteLocations",
+      "Network.deleteCookies",
+      "Network.deleteDeviceBoundSession",
+      "Page.crash",
+      "Page.setDownloadBehavior",
+      "Network.futureSensitiveMethod",
+      "DOM.futureSensitiveMethod"
     ]) {
       await assert.rejects(() => h.gateway.callRaw({
         publicPort: h.port,

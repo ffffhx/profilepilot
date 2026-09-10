@@ -14,6 +14,23 @@ import { escapeHtml, renderBusyBanner, renderButtonLabel } from "../util";
 // 避免把用户正 hover 的节点换掉，导致 tooltip / :hover 状态闪烁。
 let lastMainHtml = "";
 
+function renderToast(): void {
+  let toast = document.getElementById("app-toast");
+  if (!store.toast) {
+    toast?.remove();
+    return;
+  }
+  if (!toast) {
+    toast = document.createElement("div");
+    toast.id = "app-toast";
+    toast.setAttribute("role", "status");
+    document.body.appendChild(toast);
+  }
+  toast.className = `toast fixed right-[18px] bottom-[18px] z-20 max-w-[min(420px,calc(100vw-36px))] border-solid border border-accent-line rounded-lg bg-[#0a1411] text-[#dcfff1] px-[14px] py-3 [box-shadow:0_18px_50px_rgba(2,6,9,0.7),var(--glow-accent)] ${store.toastKind === "error" ? "error" : ""}`;
+  const body = renderToastBody(store.toast);
+  if (toast.innerHTML !== body) toast.innerHTML = body;
+}
+
 export function render(): void {
   if (store.viewMode === "mini") {
     lastMainHtml = "";
@@ -22,6 +39,9 @@ export function render(): void {
   }
 
   document.body.classList.remove("mini-mode", "mini-panel-open");
+  // Toast has its own DOM lifetime. Showing/dismissing it must not rebuild a
+  // form whose unsubmitted values and focus live in the current document.
+  renderToast();
 
   if (!store.state) {
     lastMainHtml = "";
@@ -130,7 +150,6 @@ export function render(): void {
     ${store.modal?.kind === "live-zoom" ? renderLiveZoomModal(store.modal.profileId) : ""}
     ${store.modal?.kind === "extension-migration" ? renderExtensionMigrationModal(profiles) : ""}
     ${store.modal?.kind === "confirm" ? renderConfirmModal(store.modal) : ""}
-    ${store.toast ? `<div class="toast fixed right-[18px] bottom-[18px] z-20 max-w-[min(420px,calc(100vw-36px))] border-solid border border-accent-line rounded-lg bg-[#0a1411] text-[#dcfff1] px-[14px] py-3 [box-shadow:0_18px_50px_rgba(2,6,9,0.7),var(--glow-accent)] ${store.toastKind === "error" ? "error" : ""}" role="status">${renderToastBody(store.toast)}</div>` : ""}
   `;
 
   // 内容没变就别重刷 DOM：避免状态快照把正 hover 的节点换掉，造成 tooltip / :hover 闪烁。

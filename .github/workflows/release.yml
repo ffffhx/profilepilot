@@ -72,7 +72,7 @@ jobs:
         run: node scripts/retry-command.mjs pnpm run ${{ matrix.npm_script }}
 
       - name: Run test suite
-        run: node --test tests/
+        run: node scripts/run-tests.mjs
 
       - name: Upload package artifacts
         uses: actions/upload-artifact@v4

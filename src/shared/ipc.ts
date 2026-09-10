@@ -25,6 +25,7 @@ export const IPC_CHANNELS = {
   setMiniPanelPinned: "profiles:window:set-mini-panel-pinned",
   miniPanelPinnedChanged: "profiles:window:mini-panel-pinned-changed",
   showMiniWindow: "profiles:window:show-mini",
+  hideMiniWindow: "profiles:window:hide-mini",
   showMainWindow: "profiles:window:show-main",
   setMiniWindowPanelOpen: "profiles:window:set-mini-panel-open",
   resizeMiniPanel: "profiles:window:resize-mini-panel",

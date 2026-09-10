@@ -564,6 +564,25 @@ export async function restoreAccountSyncExtensionPreferences(
   return changedAny;
 }
 
+// Prepare each Preferences file before it can become the live target. A crash
+// or cancellation between files then leaves target extension settings intact;
+// correctness no longer depends on a final in-memory rollback step.
+export async function prepareAccountSyncPreferences(
+  stagingPath: string,
+  relativePath: string,
+  snapshot: AccountSyncExtensionPreferencesSnapshot
+): Promise<void> {
+  if (relativePath !== "Preferences" && relativePath !== "Secure Preferences") return;
+  const preferences: unknown = JSON.parse(await fs.readFile(stagingPath, "utf8"));
+  if (!isRecord(preferences)) {
+    throw new ProfileManagerError(`源 ${relativePath} 不是有效的浏览器设置，目标文件保持不变。`, "INVALID_ACCOUNT_SYNC_PREFERENCES");
+  }
+  const saved = snapshot[relativePath];
+  restoreJsonProperty(preferences, ["extensions"], saved.extensions);
+  restoreJsonProperty(preferences, ["protection", "macs", "extensions"], saved.protectedExtensions);
+  await fs.writeFile(stagingPath, `${JSON.stringify(preferences, null, 2)}\n`, "utf8");
+}
+
 export function snapshotJsonProperty(root: Record<string, unknown>, pathParts: string[]): JsonPropertySnapshot {
   const parent = getJsonPropertyParent(root, pathParts, false);
   const key = pathParts[pathParts.length - 1];
@@ -745,7 +764,8 @@ export async function copyAccountSyncPath(
   onProgress?: (detail: string) => void,
   abortSignal?: AbortSignal,
   pauseSignal?: OperationPauseSignal,
-  precomputedStats?: CopyStats
+  precomputedStats?: CopyStats,
+  prepareStaging?: (stagingPath: string) => Promise<void>
 ): Promise<void> {
   throwIfAborted(abortSignal);
   await waitIfPaused(pauseSignal, abortSignal);
@@ -763,6 +783,8 @@ export async function copyAccountSyncPath(
       await fs.rm(stagingPath, { recursive: true, force: true });
       await fs.mkdir(stagingPath, { recursive: true });
       await preserveTimestamps(stagingPath, sourceStat);
+      await prepareStaging?.(stagingPath);
+      throwIfAborted(abortSignal);
       await replacePathWithStagedCopy(stagingPath, targetPath);
     }
     onProgress?.("没有需要复制的文件");
@@ -805,6 +827,9 @@ export async function copyAccountSyncPath(
       abortSignal,
       pauseSignal
     );
+    throwIfAborted(abortSignal);
+    await waitIfPaused(pauseSignal, abortSignal);
+    await prepareStaging?.(stagingPath);
     throwIfAborted(abortSignal);
     await waitIfPaused(pauseSignal, abortSignal);
     onProgress?.("正在替换目标数据");

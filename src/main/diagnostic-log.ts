@@ -6,7 +6,8 @@ import {
   readFileSync,
   renameSync,
   rmSync,
-  statSync
+  statSync,
+  writeFileSync
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -41,6 +42,24 @@ export interface DiagnosticLogStats {
   bytes: number;
 }
 
+export interface DiagnosticRuntimeState {
+  version: 1;
+  pid: number;
+  started_at: string;
+  heartbeat_at: string;
+  clean_shutdown: boolean;
+  clean_shutdown_at?: string;
+  shutdown_reason?: string;
+  exit_code?: number;
+  last_failure?: {
+    timestamp: string;
+    event: string;
+    message: string;
+  };
+  platform: string;
+  app_version: string | null;
+}
+
 interface DiagnosticLogConfiguration {
   root: string;
   appVersion: string | null;
@@ -49,8 +68,10 @@ interface DiagnosticLogConfiguration {
 }
 
 const LOG_FILE_NAME = "profilepilot.log.jsonl";
+const RUNTIME_STATE_FILE_NAME = "runtime-state.json";
 const DEFAULT_MAX_BYTES = 5 * 1024 * 1024;
 const DEFAULT_RETAINED_FILES = 5;
+const DEFAULT_HEARTBEAT_MS = 15_000;
 const REDACTED = "[REDACTED]";
 const SENSITIVE_KEY = /(authorization|cookie|password|passwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|proxy[_-]?(?:password|username)|credential)/i;
 const URL_CREDENTIALS = /\b(https?|socks5?):\/\/([^\s/@:]+):([^\s/@]+)@/gi;
@@ -59,6 +80,10 @@ const INLINE_SECRET = /\b(token|password|passwd|secret|api[_-]?key|access[_-]?ke
 
 let configuration: DiagnosticLogConfiguration | null = null;
 let consoleCaptureInstalled = false;
+let processCrashCaptureInstalled = false;
+let runtimeState: DiagnosticRuntimeState | null = null;
+let runtimeStatePath: string | null = null;
+let runtimeHeartbeatTimer: NodeJS.Timeout | null = null;
 
 export function diagnosticLogRoot(
   homeDir = os.homedir(),
@@ -73,6 +98,13 @@ export function diagnosticLogPath(
   env: NodeJS.ProcessEnv = process.env
 ): string {
   return path.join(diagnosticLogRoot(homeDir, env), LOG_FILE_NAME);
+}
+
+export function diagnosticRuntimeStatePath(
+  homeDir = os.homedir(),
+  env: NodeJS.ProcessEnv = process.env
+): string {
+  return path.join(diagnosticLogRoot(homeDir, env), RUNTIME_STATE_FILE_NAME);
 }
 
 export function initializeDiagnosticLogging(options: {
@@ -97,6 +129,75 @@ export function initializeDiagnosticLogging(options: {
     // Logging must never keep ProfilePilot from starting.
   }
   if (options.captureConsole !== false) installDiagnosticConsoleCapture();
+}
+
+export function installProcessCrashLogging(): void {
+  if (processCrashCaptureInstalled) return;
+  processCrashCaptureInstalled = true;
+  process.prependListener("uncaughtExceptionMonitor", (error, origin) => {
+    const message = error instanceof Error ? error.message : String(error);
+    writeDiagnosticLog("error", "process", "process.uncaught_exception", `主进程出现未捕获异常：${message}`, {
+      origin,
+      error
+    });
+    recordRuntimeFailure("process.uncaught_exception", message);
+  });
+  process.on("warning", (warning) => {
+    writeDiagnosticLog("warn", "process", "process.warning", warning.message, { warning });
+  });
+  process.on("exit", (code) => {
+    writeDiagnosticLog(code === 0 ? "info" : "error", "process", "process.exit", `主进程退出，退出码 ${code}`, { exitCode: code });
+    if (runtimeState && !runtimeState.clean_shutdown) {
+      runtimeState.exit_code = code;
+      runtimeState.heartbeat_at = new Date().toISOString();
+      writeRuntimeStateSnapshot();
+    }
+  });
+}
+
+export function startRuntimeStateTracking(options: { heartbeatMs?: number } = {}): void {
+  if (!configuration) return;
+  stopRuntimeHeartbeat();
+  runtimeStatePath = path.join(configuration.root, RUNTIME_STATE_FILE_NAME);
+  const previous = readRuntimeState(runtimeStatePath);
+  if (previous && !previous.clean_shutdown && previous.pid !== process.pid) {
+    writeDiagnosticLog(
+      "error",
+      "app",
+      "app.previous_unclean_exit",
+      `检测到上一次主进程 ${previous.pid} 未完成正常退出`,
+      { previous }
+    );
+  }
+  const now = new Date().toISOString();
+  runtimeState = {
+    version: 1,
+    pid: process.pid,
+    started_at: now,
+    heartbeat_at: now,
+    clean_shutdown: false,
+    platform: `${process.platform}/${process.arch}`,
+    app_version: configuration.appVersion
+  };
+  writeRuntimeStateSnapshot();
+  const heartbeatMs = Math.max(positiveInteger(options.heartbeatMs, DEFAULT_HEARTBEAT_MS), 1_000);
+  runtimeHeartbeatTimer = setInterval(() => {
+    if (!runtimeState || runtimeState.clean_shutdown) return;
+    runtimeState.heartbeat_at = new Date().toISOString();
+    writeRuntimeStateSnapshot();
+  }, heartbeatMs);
+  runtimeHeartbeatTimer.unref();
+}
+
+export function stopRuntimeStateTracking(reason = "normal-shutdown"): void {
+  stopRuntimeHeartbeat();
+  if (!runtimeState) return;
+  const now = new Date().toISOString();
+  runtimeState.heartbeat_at = now;
+  runtimeState.clean_shutdown = true;
+  runtimeState.clean_shutdown_at = now;
+  runtimeState.shutdown_reason = reason;
+  writeRuntimeStateSnapshot();
 }
 
 export function writeDiagnosticLog(
@@ -196,6 +297,57 @@ function installDiagnosticConsoleCapture(): void {
     writeDiagnosticLog("error", "console", "console.error", formatConsoleArgs(args), { arguments: args });
     originalError(...args);
   };
+}
+
+function recordRuntimeFailure(event: string, message: string): void {
+  if (!runtimeState || runtimeState.clean_shutdown) return;
+  const now = new Date().toISOString();
+  runtimeState.heartbeat_at = now;
+  runtimeState.last_failure = {
+    timestamp: now,
+    event: sanitizeText(event).slice(0, 160),
+    message: sanitizeText(message).slice(0, 8_000)
+  };
+  writeRuntimeStateSnapshot();
+}
+
+function stopRuntimeHeartbeat(): void {
+  if (runtimeHeartbeatTimer) clearInterval(runtimeHeartbeatTimer);
+  runtimeHeartbeatTimer = null;
+}
+
+function writeRuntimeStateSnapshot(): void {
+  if (!runtimeState || !runtimeStatePath) return;
+  const temporaryPath = `${runtimeStatePath}.${process.pid}.tmp`;
+  try {
+    mkdirSync(path.dirname(runtimeStatePath), { recursive: true, mode: 0o700 });
+    writeFileSync(temporaryPath, `${JSON.stringify(runtimeState, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    chmodSync(temporaryPath, 0o600);
+    try {
+      renameSync(temporaryPath, runtimeStatePath);
+    } catch {
+      rmSync(runtimeStatePath, { force: true });
+      renameSync(temporaryPath, runtimeStatePath);
+    }
+    chmodSync(runtimeStatePath, 0o600);
+  } catch {
+    try {
+      rmSync(temporaryPath, { force: true });
+    } catch {
+      // Runtime diagnostics must never break the application.
+    }
+  }
+}
+
+function readRuntimeState(filePath: string): DiagnosticRuntimeState | null {
+  try {
+    const value = JSON.parse(readFileSync(filePath, "utf8")) as Partial<DiagnosticRuntimeState>;
+    if (value.version !== 1 || !Number.isSafeInteger(value.pid) || typeof value.started_at !== "string" ||
+      typeof value.heartbeat_at !== "string" || typeof value.clean_shutdown !== "boolean") return null;
+    return value as DiagnosticRuntimeState;
+  } catch {
+    return null;
+  }
 }
 
 function diagnosticLogFiles(root: string): string[] {

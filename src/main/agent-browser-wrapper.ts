@@ -47,7 +47,6 @@ import {
   type AgentBrowserProfileLease
 } from "./agent-browser-lease";
 import {
-  BROWSER_GATEWAY_PROTOCOL_VERSION,
   clearBrowserGatewayDaemonIdentity,
   ensureBrowserGatewayDaemon,
   readOrCreateBrowserGatewayDaemonIdentity,
@@ -123,7 +122,9 @@ const OPTIONS_WITH_VALUES = new Set([
   "--viewport"
 ]);
 const SAFE_SESSION_RE = /^[A-Za-z0-9._-]+$/;
-const HANDOFF_GATEWAY_TIMEOUT_MS = 10_000;
+// Handoff can drain a command, clear emulation, and reveal/focus the target in
+// three separately bounded phases. Do not abandon the control RPC mid-transition.
+const HANDOFF_GATEWAY_TIMEOUT_MS = 18_000;
 const HANDOFF_RECONCILE_TIMEOUT_MS = 3_000;
 
 export const PROFILEPILOT_AGENT_BROWSER_HARD_STOP_EXIT_CODE = 75;
@@ -228,7 +229,9 @@ export function assertManagedGatewayLaunchOptions(args: string[]): void {
 
 export function gatewaySupportsAgentActivity(response: GatewayControlResponse): boolean {
   const protocolVersion = Number(response.protocolVersion);
-  return Number.isSafeInteger(protocolVersion) && protocolVersion >= BROWSER_GATEWAY_PROTOCOL_VERSION;
+  // Activity reporting was introduced in v13. A later policy-only daemon
+  // upgrade can be deferred while Chrome is running without blocking drivers.
+  return Number.isSafeInteger(protocolVersion) && protocolVersion >= 13;
 }
 
 export function cdpPortFromAgentBrowserArgs(args: string[]): number | undefined {

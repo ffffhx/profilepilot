@@ -34,7 +34,7 @@ async function main() {
     assert.equal(windows.mini.focused, true, "direct hotkey handler should focus Mini");
     step("the desktop-only driver invoked the registered hotkey handler and opened Mini");
 
-    await driver.click('[data-action="show-main-window"]', { target: "mini" });
+    await driver.evaluate("window.profileManager.showMainWindow()", { target: "mini" });
     await waitForWindow(driver, (state) => state.main?.visible && state.main.focused);
     step("Mini -> main restored and focused the main window");
 
@@ -56,7 +56,7 @@ async function main() {
       assert.equal(windows.mini.focused, true, "global shortcut should focus Mini");
       step("macOS delivered the global shortcut and focused Mini");
 
-      await driver.click('[data-action="show-main-window"]', { target: "mini" });
+      await driver.evaluate("window.profileManager.showMainWindow()", { target: "mini" });
       await waitForWindow(driver, (state) => state.main?.visible && state.main.focused);
       step("Mini -> main restored after the macOS delivery check");
     }
@@ -66,8 +66,11 @@ async function main() {
     const collapsedClose = await driver.query(".mini-dock-close", { target: "mini" });
     assert.equal(collapsedClose.count, 1, "Collapsed Mini should expose a close button");
     await driver.click(".mini-dock-close", { target: "mini" });
-    await waitForWindow(driver, (state) => state.main?.visible && state.main.focused && !state.mini?.visible);
-    step("Collapsed Mini close button hid the floating window and restored the main window");
+    await waitForWindow(driver, (state) => !state.main?.visible && !state.mini?.visible);
+    step("Collapsed Mini close button hid only the floating window");
+
+    await driver.evaluate("window.profileManager.showMainWindow()", { target: "mini" });
+    await waitForWindow(driver, (state) => state.main?.visible && state.main.focused);
 
     await driver.click('[data-action="open-mini-window"]');
     await waitForWindow(driver, (state) => state.mini?.visible && !state.main?.visible && !state.miniPanelOpen);
@@ -91,8 +94,8 @@ async function main() {
     step("Mini panel expanded, rendered three Profiles, and produced a screenshot");
 
     await driver.click(".mini-panel-close", { target: "mini" });
-    await waitForWindow(driver, (state) => state.main?.visible && state.main.focused && !state.mini?.visible);
-    step("Expanded Mini close button hid the floating window and restored the main window");
+    await waitForWindow(driver, (state) => !state.main?.visible && !state.mini?.visible);
+    step("Expanded Mini close button hid only the floating window");
     step("PASS");
   } catch (error) {
     const output = app.output();

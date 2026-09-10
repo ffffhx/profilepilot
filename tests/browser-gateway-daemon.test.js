@@ -22,6 +22,19 @@ test("Gateway gives a waiting Agent enough time to reconnect after user return",
   assert.equal(DEFAULT_DRIVER_RECONNECT_GRACE_MS, 30_000);
 });
 
+test("Gateway client rejects unsafe Raw CDP before contacting a daemon during upgrade", async () => {
+  const home = mkdtempSync(path.join(os.tmpdir(), "pp-raw-policy-"));
+  try {
+    for (const method of ["Network.deleteCookies", "Network.deleteDeviceBoundSessions", "Page.crash", "Target.closeTarget", "DOM.unknownFutureMethod"]) {
+      await assert.rejects(requestBrowserGateway({
+        action: "raw-cdp", publicPort: 9223, sessionId: "test", daemonInstanceId: "test", method
+      }, { homeDir: home }), (error) => error.code === "RAW_CDP_METHOD_DENIED");
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("Gateway stops an active Session and rejects future acquire when Agent access is disabled", async () => {
   // Keep the Unix socket path below macOS's sockaddr_un limit.
   const home = mkdtempSync(path.join(os.tmpdir(), "pp-gap-"));
@@ -281,6 +294,65 @@ test("gatewayd owns the Chrome pipe, control socket and public ticketed WebSocke
     assert.equal(reacquired.profile.ownerSessionId, "cx-two");
   } finally {
     subscription.close();
+    await daemon.stop();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("Gateway takeover disconnects a driver whose CDP request never settles", async () => {
+  const home = mkdtempSync(path.join(os.tmpdir(), "profilepilot-gateway-stuck-takeover-"));
+  const fakeChrome = writeFakeChrome(home);
+  const chromeCallsPath = path.join(home, "fake-chrome-calls.ndjson");
+  const port = await freePort();
+  const daemon = testGatewayDaemon(home, { agentCommandQuiesceTimeoutMs: 60 });
+  let ws;
+  await daemon.start();
+  try {
+    await requestBrowserGateway({
+      action: "launch-profile",
+      profileId: "profile-stuck",
+      profileName: "Profile Stuck",
+      publicPort: port,
+      executable: process.execPath,
+      args: [fakeChrome],
+      env: {
+        FAKE_CHROME_CALLS_PATH: chromeCallsPath,
+        FAKE_CHROME_HANG_METHOD: "Browser.getVersion"
+      }
+    }, { homeDir: home });
+    const acquired = await requestBrowserGateway({
+      action: "acquire",
+      publicPort: port,
+      sessionId: "cx-stuck",
+      daemonInstanceId: "daemon-stuck",
+      driverKind: "agent-browser"
+    }, { homeDir: home });
+    ws = await openWebSocket(acquired.webSocketUrl);
+    const closed = new Promise((resolve) => ws.addEventListener("close", resolve, { once: true }));
+    ws.send(JSON.stringify({ id: 1, method: "Browser.getVersion", params: {} }));
+    await waitFor(
+      () => readJsonLines(chromeCallsPath).some((message) => message.method === "Browser.getVersion"),
+      "stuck CDP request reaches Chrome"
+    );
+
+    const startedAt = Date.now();
+    const takeover = await requestBrowserGateway({
+      action: "control",
+      sessionId: "cx-stuck",
+      command: "takeover"
+    }, { homeDir: home, timeoutMs: 1_000 });
+    await closed;
+
+    assert.equal(takeover.forcedAgentDisconnects, 1);
+    assert.ok(Date.now() - startedAt >= 50, "takeover must first allow a graceful drain window");
+    const status = await requestBrowserGateway({ action: "status" }, { homeDir: home });
+    const profile = status.state.profiles.find((candidate) => candidate.publicPort === port);
+    assert.equal(profile.ownership, "user");
+    assert.equal(profile.sessionStatus, "active");
+    assert.equal(profile.driverState, "parked");
+    assert.equal(profile.connectionActive, false);
+  } finally {
+    ws?.close();
     await daemon.stop();
     rmSync(home, { recursive: true, force: true });
   }
@@ -1357,6 +1429,7 @@ input.on("data", (chunk) => {
     if (process.env.FAKE_CHROME_CALLS_PATH) {
       fs.appendFileSync(process.env.FAKE_CHROME_CALLS_PATH, JSON.stringify(message) + "\\n");
     }
+    if (message.method === process.env.FAKE_CHROME_HANG_METHOD) continue;
     const result = message.method === "Target.getTargets"
       ? message.params?.filter
         ? {

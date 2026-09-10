@@ -1,5 +1,6 @@
 const assert = require("node:assert/strict");
 const net = require("node:net");
+const { EventEmitter } = require("node:events");
 const test = require("node:test");
 
 const { loadTsModule } = require("./helpers/load-ts-module.js");
@@ -31,6 +32,25 @@ test("normalizeProxyEndpoint canonicalizes to scheme://host:port", () => {
   assert.equal(normalizeProxyEndpoint("garbage"), null);
 });
 
+test("main and renderer accept explicit default ports without losing the port", () => {
+  const { normalizeProxyServerInput, proxyServerUsesPort } = loadTsModule("src/renderer/proxy.ts");
+  for (const [input, expected] of [
+    ["http://127.0.0.1:80", "http://127.0.0.1:80"],
+    ["https://localhost:443", "https://localhost:443"],
+    ["127.0.0.1:80", "http://127.0.0.1:80"],
+    ["http://[::1]:80/", "http://[::1]:80"],
+    ["socks5://[::1]:1080", "socks5://[::1]:1080"]
+  ]) {
+    assert.equal(normalizeProxyEndpoint(input), expected);
+    assert.equal(normalizeProxyServerInput(input), expected);
+  }
+  assert.equal(proxyServerUsesPort("https://localhost:443", 443), true);
+  for (const input of ["http://user:pass@host:8080", "http://host:8080/path", "http://host:8080?x=1"]) {
+    assert.equal(normalizeProxyEndpoint(input), null);
+    assert.equal(normalizeProxyServerInput(input), null);
+  }
+});
+
 test("probeTcp resolves true for a live listener and false for a closed port", async () => {
   const server = net.createServer();
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -39,10 +59,10 @@ test("probeTcp resolves true for a live listener and false for a closed port", a
     assert.equal(await probeTcp("127.0.0.1", port), true);
     assert.equal(await probeProxyEndpoint(`127.0.0.1:${port}`), true);
   } finally {
-    server.close();
+    await new Promise((resolve) => server.close(resolve));
   }
   // 关掉后同一端口应不可达（给系统一点时间释放）。
-  assert.equal(await probeTcp("127.0.0.1", 1), false);
+  assert.equal(await probeTcp("127.0.0.1", port), false);
 });
 
 test("probeTcp returns false on invalid input without throwing", async () => {
@@ -51,7 +71,18 @@ test("probeTcp returns false on invalid input without throwing", async () => {
   assert.equal(await probeProxyEndpoint("not-a-url"), false);
 });
 
-test("probeTcp times out to false against an unroutable address", async () => {
-  // 192.0.2.0/24 是 TEST-NET-1，保证不可路由；用短超时确保测试快返回。
-  assert.equal(await probeTcp("192.0.2.1", 9, 300), false);
+test("probeTcp destroys a timed-out socket and ignores a late connection", async () => {
+  let timeout;
+  let destroyed = 0;
+  class TimeoutSocket extends EventEmitter {
+    setTimeout(value) { timeout = value; }
+    destroy() { destroyed += 1; }
+    connect() {
+      queueMicrotask(() => { this.emit("timeout"); this.emit("connect"); });
+    }
+  }
+  const probe = loadTsModule("src/main/proxy-health.ts", { stubs: { "node:net": { Socket: TimeoutSocket } } });
+  assert.equal(await probe.probeTcp("test.invalid", 9, 300), false);
+  assert.equal(timeout, 300);
+  assert.equal(destroyed, 1);
 });

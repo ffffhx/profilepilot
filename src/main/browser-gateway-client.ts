@@ -6,9 +6,12 @@ import os from "node:os";
 import path from "node:path";
 import type { GatewayControlEvent } from "./browser-gateway-control";
 import type { GatewayDriverKind } from "./browser-gateway-control";
+import { isRawCdpMethodAllowed } from "./browser-gateway-policy";
 
 const DEFAULT_TIMEOUT_MS = 3_000;
-export const BROWSER_GATEWAY_PROTOCOL_VERSION = 13;
+// Version 14 requires the reviewed Raw CDP method allowlist. An older idle
+// daemon must be replaced instead of silently retaining the previous policy.
+export const BROWSER_GATEWAY_PROTOCOL_VERSION = 14;
 
 export type GatewayControlRequest =
   | { action: "ping" }
@@ -178,6 +181,11 @@ export function requestBrowserGateway(
   request: GatewayControlRequest,
   options: { homeDir?: string; timeoutMs?: number } = {}
 ): Promise<GatewayControlResponse> {
+  // Enforce the current policy even while an older daemon must keep owning
+  // live Chrome pipes. The server repeats this check for every caller.
+  if (request.action === "raw-cdp" && !isRawCdpMethodAllowed(request.method)) {
+    return Promise.reject(gatewayClientError("RAW_CDP_METHOD_DENIED", `Raw CDP method denied: ${request.method}`));
+  }
   const homeDir = options.homeDir || os.homedir();
   const socketPath = browserGatewaySocketPath(homeDir);
   const timeoutMs = options.timeoutMs || DEFAULT_TIMEOUT_MS;

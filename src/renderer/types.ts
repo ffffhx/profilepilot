@@ -916,6 +916,7 @@ export interface ProfileManagerApi {
   setMiniPanelPinned(pinned: boolean): Promise<void>;
   onMiniPanelPinnedChanged(listener: (pinned: boolean) => void): () => void;
   showMiniWindow(): Promise<void>;
+  hideMiniWindow(): Promise<void>;
   showMainWindow(): Promise<void>;
   setMiniWindowPanelOpen(open: boolean): Promise<void>;
   resizeMiniPanel(height: number): Promise<void>;
@@ -928,7 +929,7 @@ export interface ProfileManagerApi {
   undoGlobalInstruction(request: GlobalInstructionUndoRequest): Promise<GlobalInstructionsSnapshot>;
   ensureClaudeInstructionShell(): Promise<GlobalInstructionsSnapshot>;
   inspectProfileReadiness(request: ProfileReadinessRequest): Promise<ProfileReadinessReceipt>;
-  focusProfile(id: string): Promise<AppState>;
+  focusProfile(id: string): Promise<void>;
   isProfileFrontmost(id: string): Promise<boolean>;
   closeProfile(id: string): Promise<AppState>;
   focusExternalInstance(userDataDir: string): Promise<AppState>;

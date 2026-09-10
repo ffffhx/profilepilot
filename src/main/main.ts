@@ -1,5 +1,5 @@
 import { promises as fs, watch, type FSWatcher } from "node:fs";
-import { app, BrowserWindow, globalShortcut, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, session, shell, Tray, type IpcMainInvokeEvent, type Rectangle } from "electron";
+import { app, BrowserWindow, crashReporter, globalShortcut, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, session, shell, Tray, type IpcMainInvokeEvent, type Rectangle } from "electron";
 import path from "node:path";
 import { IPC_CHANNELS } from "../shared/ipc";
 import type {
@@ -73,19 +73,29 @@ import {
   startProfilePilotManagementServer,
   type ProfilePilotManagementServerHandle
 } from "./profilepilot-management-server";
-import { initializeDiagnosticLogging, writeDiagnosticLog } from "./diagnostic-log";
+import {
+  initializeDiagnosticLogging,
+  installProcessCrashLogging,
+  startRuntimeStateTracking,
+  stopRuntimeStateTracking,
+  writeDiagnosticLog
+} from "./diagnostic-log";
 
 const E2E_DRIVER_SOCKET = process.env.CPM_E2E_DRIVER_SOCKET || "";
 const IS_E2E_DRIVER_TEST = Boolean(E2E_DRIVER_SOCKET);
 const IS_ELECTRON_SMOKE_TEST = process.env.CPM_ELECTRON_SMOKE_TEST === "1";
 const IS_BACKGROUND_E2E = process.env.CPM_E2E_MODE === "background";
 initializeDiagnosticLogging({ appVersion: app.getVersion() });
+installProcessCrashLogging();
+installElectronCrashLogging();
 const profileManager = createProfileManager(broadcastAgentTakeover, revealAgentOverlayProfile);
 let agentOverlayDisposedForQuit = false;
 let appQuitting = false;
 let mainWindow: BrowserWindow | null = null;
 let miniWindow: BrowserWindow | null = null;
 let appTray: Tray | null = null;
+let appWindowRequestsReady = false;
+let pendingShowMainWindow = false;
 let miniOutsideClickWindows: BrowserWindow[] = [];
 let miniOutsideClickUpdateTimer: NodeJS.Timeout | null = null;
 let miniWindowSaveTimer: NodeJS.Timeout | null = null;
@@ -124,6 +134,66 @@ let gatewayEventReconnectTimer: NodeJS.Timeout | null = null;
 let stateCalibrationTimer: NodeJS.Timeout | null = null;
 let stateBroadcastTimer: NodeJS.Timeout | null = null;
 let stateBroadcastInFlight = false;
+
+function installElectronCrashLogging(): void {
+  try {
+    crashReporter.start({
+      productName: APP_TITLE,
+      uploadToServer: false,
+      compress: false,
+      globalExtra: {
+        platform: process.platform,
+        architecture: process.arch,
+        packaged: String(app.isPackaged)
+      }
+    });
+    writeDiagnosticLog("info", "electron", "crash_reporter.started", "Electron Crashpad 已启用（仅保存在本机，不上传）", {
+      crashDumpsPath: app.getPath("crashDumps")
+    });
+  } catch (error) {
+    writeDiagnosticLog("error", "electron", "crash_reporter.start_failed", "Electron Crashpad 启动失败", { error });
+  }
+
+  app.on("render-process-gone", (_event, webContents, details) => {
+    writeDiagnosticLog(
+      details.reason === "clean-exit" ? "info" : "error",
+      "electron",
+      "electron.renderer_gone",
+      `渲染进程已退出：${details.reason}（退出码 ${details.exitCode}）`,
+      { webContentsId: webContents.id, type: webContents.getType(), ...details }
+    );
+  });
+  app.on("child-process-gone", (_event, details) => {
+    writeDiagnosticLog(
+      details.reason === "clean-exit" ? "info" : "error",
+      "electron",
+      "electron.child_process_gone",
+      `${details.type} 子进程已退出：${details.reason}（退出码 ${details.exitCode}）`,
+      details
+    );
+  });
+  app.on("web-contents-created", (_event, webContents) => {
+    webContents.on("preload-error", (_preloadEvent, preloadPath, error) => {
+      writeDiagnosticLog("error", "electron", "electron.preload_error", "Preload 脚本出现未捕获异常", {
+        webContentsId: webContents.id,
+        preloadFile: path.basename(preloadPath),
+        error
+      });
+    });
+    webContents.on("unresponsive", () => {
+      writeDiagnosticLog("warn", "electron", "electron.web_contents_unresponsive", "渲染界面失去响应", {
+        webContentsId: webContents.id,
+        type: webContents.getType()
+      });
+    });
+    webContents.on("responsive", () => {
+      writeDiagnosticLog("info", "electron", "electron.web_contents_responsive", "渲染界面已恢复响应", {
+        webContentsId: webContents.id,
+        type: webContents.getType()
+      });
+    });
+  });
+}
 let stateBroadcastPending = false;
 let stateCoordinatorStopping = false;
 let managementServer: ProfilePilotManagementServerHandle | null = null;
@@ -922,6 +992,14 @@ function dragMiniWindow(event: IpcMainInvokeEvent, screenX: number, screenY: num
   windowRef.setBounds(nextBounds, false);
 }
 
+function hideMiniWindow(): void {
+  closeMiniOutsideClickWindows();
+  miniWindowDragState = null;
+  if (miniWindow && !miniWindow.isDestroyed()) {
+    miniWindow.hide();
+  }
+}
+
 // 只由用户的显式操作进入悬浮窗：主窗口最小化、页面“悬浮窗”按钮或全局快捷键。
 async function showMiniWindow(): Promise<void> {
   const windowRef = await createMiniWindow();
@@ -1029,6 +1107,14 @@ function registerGlobalShortcuts(): void {
 }
 
 async function showMainWindow(): Promise<void> {
+  // second-instance can arrive while the primary process is still awaiting Gateway/CLI startup.
+  // Do not create a renderer until IPC handlers are registered, otherwise its first getState call
+  // permanently leaves the window on the "No handler registered" error screen.
+  if (!appWindowRequestsReady) {
+    pendingShowMainWindow = true;
+    return;
+  }
+
   if (!mainWindow || mainWindow.isDestroyed()) {
     createMainWindow();
   }
@@ -1417,16 +1503,16 @@ function createMainWindow(): void {
     void showMiniWindow();
   });
 
-  // 托盘存在时，关闭主窗口只隐藏到后台；从托盘“退出”或系统退出时才真正销毁窗口。
+  // Windows/Linux 用户点击标题栏关闭就是退出；macOS 保留“关窗口但不退出 App”的平台惯例，
+  // 后续仍可通过 Dock 的 activate 事件重建主窗口。
   mainWindow.on("close", (event) => {
-    if (appQuitting || !appTray) {
+    if (appQuitting || process.platform === "darwin") {
       return;
     }
 
     event.preventDefault();
-    closeMiniOutsideClickWindows();
-    miniWindow?.hide();
-    mainWindow?.hide();
+    appQuitting = true;
+    app.quit();
   });
 
   mainWindow.loadFile(path.join(__dirname, "../../public/index.html"));
@@ -1529,6 +1615,10 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.showMiniWindow, async (): Promise<void> => {
     await showMiniWindow();
+  });
+
+  ipcMain.handle(IPC_CHANNELS.hideMiniWindow, async (): Promise<void> => {
+    hideMiniWindow();
   });
 
   ipcMain.handle(IPC_CHANNELS.showMainWindow, async (): Promise<void> => {
@@ -1654,9 +1744,8 @@ function registerIpcHandlers(): void {
     return profileManager.getState();
   });
 
-  ipcMain.handle(IPC_CHANNELS.focusProfile, async (_event, id: string): Promise<AppState> => {
+  ipcMain.handle(IPC_CHANNELS.focusProfile, async (_event, id: string): Promise<void> => {
     await profileManager.focusProfile(id);
-    return profileManager.getState();
   });
 
   ipcMain.handle(IPC_CHANNELS.isProfileFrontmost, async (_event, id: string): Promise<boolean> => {
@@ -1936,6 +2025,7 @@ if (!app.requestSingleInstanceLock()) {
   writeDiagnosticLog("info", "app", "app.secondary_instance", "检测到正在运行的 ProfilePilot，当前进程退出");
   app.quit();
 } else {
+  startRuntimeStateTracking();
   writeDiagnosticLog("info", "app", "app.started", "ProfilePilot 主进程已启动", {
     electron: process.versions.electron,
     chrome: process.versions.chrome,
@@ -1945,73 +2035,78 @@ if (!app.requestSingleInstanceLock()) {
   app.on("second-instance", () => {
     void showMainWindow();
   });
-}
-
-app.whenReady().then(async () => {
-  writeDiagnosticLog("info", "app", "app.ready", "Electron 已就绪");
-  // Smoke E2E 只验证当前 Electron 实例的 main/preload/renderer/IPC 链路；
-  // 跳过机器级 Gateway、wrapper 和快捷键，保证临时 HOME 测试不会留下后台进程或抢占全局状态。
-  if (!IS_ELECTRON_SMOKE_TEST) {
-    await ensureBrowserGatewayDaemon().catch((error) => {
-      console.error(`[browser-gateway] 启动失败：${error instanceof Error ? error.message : String(error)}`);
-    });
-    await refreshAgentBrowserWrapperIfInstalled().catch((error) => {
-      console.warn(`[shell-integration] 刷新 agent-browser wrapper 失败：${error instanceof Error ? error.message : String(error)}`);
-    });
-    managementServer = await startProfilePilotManagementServer({
-      profileManager,
-      appVersion: app.getVersion(),
-      onMutation: () => scheduleAppStateBroadcast(0)
-    }).catch((error) => {
-      console.error(`[management-cli] 启动失败：${error instanceof Error ? error.message : String(error)}`);
-      return null;
-    });
-  }
-
-  if (process.platform === "darwin") {
-    app.dock?.setIcon(APP_ICON_PATH);
-  }
-
-  registerIpcHandlers();
-  if (!IS_BACKGROUND_E2E && (!IS_ELECTRON_SMOKE_TEST || process.env.CPM_E2E_ENABLE_GLOBAL_SHORTCUTS === "1")) {
-    registerGlobalShortcuts();
-  }
-  createMainWindow();
-  createAppTray();
-  if (IS_E2E_DRIVER_TEST) {
-    startE2eDriver({
-      socketPath: E2E_DRIVER_SOCKET,
-      mode: IS_BACKGROUND_E2E ? "background" : "desktop",
-      getWindow: (target) => (target === "mini" ? miniWindow : mainWindow),
-      triggerMiniHotkeyHandler: summonMiniWindowViaHotkey,
-      getWindowSnapshot: () => ({
-        main: windowSnapshot(mainWindow),
-        mini: windowSnapshot(miniWindow),
-        miniPanelOpen: miniWindowPanelOpen,
-        miniPanelPinned,
-        miniShortcut: {
-          accelerator: MINI_SUMMON_SHORTCUT,
-          isRegistered: globalShortcut.isRegistered(MINI_SUMMON_SHORTCUT)
-        }
-      })
-    });
-  }
-  if (!IS_ELECTRON_SMOKE_TEST) {
-    startStateCoordinator();
-  }
-
-  // 点击 Dock 图标：始终把主控制台拉回来（必要时重建），并收起悬浮窗。
-  // 覆盖“主窗口已关闭、只剩悬浮窗”的情况——此时旧逻辑会因为还有窗口而什么都不做。
-  app.on("activate", () => {
-    // 若这次激活来自点击悬浮窗本身（App 在后台时点小球 → 光标落在悬浮窗内），
-    // 交给悬浮窗自己展开面板，不要抢回主窗口，否则一点小球就变回大窗口。
-    if (miniWindow && !miniWindow.isDestroyed() && miniWindow.isVisible() && isMiniWindowPointerInside()) {
-      raiseMiniWindow(miniWindow);
-      return;
+  app.whenReady().then(async () => {
+    writeDiagnosticLog("info", "app", "app.ready", "Electron 已就绪");
+    // Smoke E2E 只验证当前 Electron 实例的 main/preload/renderer/IPC 链路；
+    // 跳过机器级 Gateway、wrapper 和快捷键，保证临时 HOME 测试不会留下后台进程或抢占全局状态。
+    if (!IS_ELECTRON_SMOKE_TEST) {
+      await ensureBrowserGatewayDaemon().catch((error) => {
+        console.error(`[browser-gateway] 启动失败：${error instanceof Error ? error.message : String(error)}`);
+      });
+      await refreshAgentBrowserWrapperIfInstalled().catch((error) => {
+        console.warn(`[shell-integration] 刷新 agent-browser wrapper 失败：${error instanceof Error ? error.message : String(error)}`);
+      });
+      managementServer = await startProfilePilotManagementServer({
+        profileManager,
+        appVersion: app.getVersion(),
+        onMutation: () => scheduleAppStateBroadcast(0)
+      }).catch((error) => {
+        console.error(`[management-cli] 启动失败：${error instanceof Error ? error.message : String(error)}`);
+        return null;
+      });
     }
-    void showMainWindow();
+
+    if (process.platform === "darwin") {
+      app.dock?.setIcon(APP_ICON_PATH);
+    }
+
+    registerIpcHandlers();
+    if (!IS_BACKGROUND_E2E && (!IS_ELECTRON_SMOKE_TEST || process.env.CPM_E2E_ENABLE_GLOBAL_SHORTCUTS === "1")) {
+      registerGlobalShortcuts();
+    }
+    createMainWindow();
+    createAppTray();
+    if (IS_E2E_DRIVER_TEST) {
+      startE2eDriver({
+        socketPath: E2E_DRIVER_SOCKET,
+        mode: IS_BACKGROUND_E2E ? "background" : "desktop",
+        getWindow: (target) => (target === "mini" ? miniWindow : mainWindow),
+        triggerMiniHotkeyHandler: summonMiniWindowViaHotkey,
+        getWindowSnapshot: () => ({
+          main: windowSnapshot(mainWindow),
+          mini: windowSnapshot(miniWindow),
+          miniPanelOpen: miniWindowPanelOpen,
+          miniPanelPinned,
+          miniShortcut: {
+            accelerator: MINI_SUMMON_SHORTCUT,
+            isRegistered: globalShortcut.isRegistered(MINI_SUMMON_SHORTCUT)
+          }
+        })
+      });
+    }
+    if (!IS_ELECTRON_SMOKE_TEST) {
+      startStateCoordinator();
+    }
+
+    appWindowRequestsReady = true;
+    if (pendingShowMainWindow) {
+      pendingShowMainWindow = false;
+      await showMainWindow();
+    }
+
+    // 点击 Dock 图标：始终把主控制台拉回来（必要时重建），并收起悬浮窗。
+    // 覆盖“主窗口已关闭、只剩悬浮窗”的情况——此时旧逻辑会因为还有窗口而什么都不做。
+    app.on("activate", () => {
+      // 若这次激活来自点击悬浮窗本身（App 在后台时点小球 → 光标落在悬浮窗内），
+      // 交给悬浮窗自己展开面板，不要抢回主窗口，否则一点小球就变回大窗口。
+      if (miniWindow && !miniWindow.isDestroyed() && miniWindow.isVisible() && isMiniWindowPointerInside()) {
+        raiseMiniWindow(miniWindow);
+        return;
+      }
+      void showMainWindow();
+    });
   });
-});
+}
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin" && !appTray) {
@@ -2043,6 +2138,7 @@ app.on("before-quit", (event) => {
 });
 
 app.on("will-quit", () => {
+  stopRuntimeStateTracking("electron.will-quit");
   writeDiagnosticLog("info", "app", "app.stopped", "ProfilePilot 主进程已停止");
   appTray?.destroy();
   appTray = null;

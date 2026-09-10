@@ -47,7 +47,8 @@ export async function runWindowsPowerShell(
 ): Promise<string> {
   const { stdout } = await execFileAsync(
     windowsPowerShellExecutable(options.env),
-    ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+    ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
+      `[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n${script}`],
     {
       windowsHide: true,
       encoding: "utf8",
@@ -235,7 +236,9 @@ Add-Type -AssemblyName Microsoft.VisualBasic
 Add-Type @'
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Threading;
 public static class ProfilePilotWindowFocus {
   private const int SW_RESTORE = 9;
   private delegate bool EnumWindowsProc(IntPtr window, IntPtr parameter);
@@ -245,7 +248,22 @@ public static class ProfilePilotWindowFocus {
   [DllImport("user32.dll")] private static extern bool ShowWindowAsync(IntPtr window, int command);
   [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr window);
   [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+  public static bool WaitForForeground(int[] processIds, int timeoutMs) {
+    var targets = new HashSet<int>(processIds);
+    var elapsed = Stopwatch.StartNew();
+    while (true) {
+      var foreground = GetForegroundWindow();
+      uint foregroundPid;
+      if (foreground != IntPtr.Zero &&
+          GetWindowThreadProcessId(foreground, out foregroundPid) != 0 &&
+          targets.Contains((int)foregroundPid)) return true;
+      if (elapsed.ElapsedMilliseconds >= timeoutMs) return false;
+      Thread.Sleep(25);
+    }
+  }
   public static bool Focus(int[] processIds) {
+    // CDP 的异步激活可在启动 helper 期间完成，此时无需再激活一次。
+    if (WaitForForeground(processIds, 0)) return true;
     var targets = new HashSet<int>(processIds);
     IntPtr candidate = IntPtr.Zero;
     EnumWindows(delegate(IntPtr window, IntPtr parameter) {
@@ -257,23 +275,23 @@ public static class ProfilePilotWindowFocus {
     if (candidate == IntPtr.Zero) return false;
     ShowWindowAsync(candidate, SW_RESTORE);
     SetForegroundWindow(candidate);
-    var foreground = GetForegroundWindow();
-    uint foregroundPid;
-    GetWindowThreadProcessId(foreground, out foregroundPid);
-    return targets.Contains((int)foregroundPid);
+    // 跨线程输入队列的激活通知是异步处理的，等待前台 PID 再判定结果。
+    return WaitForForeground(processIds, 750);
   }
 }
 '@
 $targets = @(${targets.join(",")})
+$focusElapsed = [Diagnostics.Stopwatch]::StartNew()
 if ([ProfilePilotWindowFocus]::Focus([int[]]$targets)) {
   [Console]::Out.WriteLine('true')
   exit 0
 }
 foreach ($targetPid in $targets) {
+  if ($focusElapsed.ElapsedMilliseconds -ge 2000) { break }
   try {
     [Microsoft.VisualBasic.Interaction]::AppActivate([int]$targetPid)
-    Start-Sleep -Milliseconds 60
-    if ([ProfilePilotWindowFocus]::Focus([int[]]$targets)) { [Console]::Out.WriteLine('true'); exit 0 }
+    $waitMs = [int][Math]::Max(0, [Math]::Min(500, 2000 - $focusElapsed.ElapsedMilliseconds))
+    if ([ProfilePilotWindowFocus]::WaitForForeground([int[]]$targets, $waitMs)) { [Console]::Out.WriteLine('true'); exit 0 }
   } catch {}
 }
 [Console]::Out.WriteLine('false')

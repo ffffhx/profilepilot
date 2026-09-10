@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { launchProfilePilotE2e } from "./e2e/lib/electron-driver.mjs";
+import { delay, launchProfilePilotE2e } from "./e2e/lib/electron-driver.mjs";
 
 const PROFILE_NAME = "Background DOM Profile";
 
@@ -43,6 +43,38 @@ async function main() {
     );
     assert.match(row.attributes["data-id"], /^isolated:/);
     await driver.waitFor('[data-action="new-profile"]', (snapshot) => snapshot.exists && !snapshot.disabled);
+
+    await driver.domClick('[data-action="new-profile"]');
+    await driver.domInput("#profile-name", "未提交的第二个名称");
+    await driver.evaluate(`(() => {
+      const input = document.querySelector('#profile-name');
+      input.focus(); input.setSelectionRange(2, 5);
+      window.__draftInput = input;
+    })()`);
+    await delay(3_500);
+    assert.equal((await driver.query(".toast")).exists, false);
+    assert.deepEqual(await driver.evaluate(`(() => {
+      const input = document.querySelector('#profile-name');
+      return { value: input.value, sameNode: input === window.__draftInput,
+        focused: document.activeElement === input, start: input.selectionStart, end: input.selectionEnd };
+    })()`), { value: "未提交的第二个名称", sameNode: true, focused: true, start: 2, end: 5 });
+    await driver.domClick('.modal-actions [data-action="close-modal"]');
+
+    assert.deepEqual(await driver.evaluate(`(() => {
+      const row = document.querySelector('[data-profile-row]');
+      return ['Enter', ' '].map(key => {
+        const button = row.querySelector('button[data-action="toggle-profile-menu"]');
+        const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+        button.dispatchEvent(event);
+        return event.defaultPrevented;
+      });
+    })()`), [false, false], "row delegation must preserve native button activation");
+    assert.equal(await driver.evaluate(`(() => {
+      const row = document.querySelector('[data-profile-row]');
+      const event = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true });
+      row.dispatchEvent(event);
+      return event.defaultPrevented;
+    })()`), true, "a focused row must still support keyboard selection");
     const registry = JSON.parse(await readFile(path.join(dataDir, "profiles.json"), "utf8"));
     assert.ok(registry.profiles.some((profile) => profile.name === PROFILE_NAME));
 

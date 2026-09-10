@@ -26,15 +26,50 @@ test("main window enters Mini only through explicit user actions", () => {
   assert.match(rendererSource, /action === "open-mini-window"/);
 });
 
-test("Mini close controls restore the main window and hide Mini", () => {
+test("main window close exits on Windows and Linux while preserving macOS window semantics", () => {
+  const source = readFileSync(path.join(__dirname, "../src/main/main.ts"), "utf8");
+  const closeBody = source.match(/mainWindow\.on\("close"[\s\S]*?mainWindow\.loadFile/)?.[0] || "";
+
+  assert.match(closeBody, /appQuitting \|\| process\.platform === "darwin"/);
+  assert.match(closeBody, /event\.preventDefault\(\)/);
+  assert.match(closeBody, /appQuitting = true;[\s\S]*?app\.quit\(\)/);
+  assert.doesNotMatch(closeBody, /mainWindow\?\.hide\(\)/);
+});
+
+test("Mini close controls hide only Mini and leave the main window hidden", () => {
   const miniSource = readFileSync(path.join(__dirname, "../src/renderer/render/mini.ts"), "utf8");
   const rendererSource = readFileSync(path.join(__dirname, "../src/renderer/main.ts"), "utf8");
   const mainSource = readFileSync(path.join(__dirname, "../src/main/main.ts"), "utf8");
-  const showMainBody = mainSource.match(/async function showMainWindow\(\)[\s\S]*?function createAppTray/)?.[0] || "";
+  const hideMiniBody = mainSource.match(/function hideMiniWindow\(\)[\s\S]*?async function showMiniWindow/)?.[0] || "";
 
-  assert.match(miniSource, /class="mini-dock-close" data-action="show-main-window"/);
-  assert.match(miniSource, /class="mini-panel-close" data-action="show-main-window"/);
-  assert.match(rendererSource, /action === "show-main-window"[\s\S]*?profileApi\(\)\.showMainWindow\(\)/);
-  assert.match(showMainBody, /mainWindow\?\.show\(\)/);
-  assert.match(showMainBody, /miniWindow\?\.hide\(\)/);
+  assert.match(miniSource, /class="mini-dock-close" data-action="hide-mini-window"/);
+  assert.match(miniSource, /class="mini-panel-close" data-action="hide-mini-window"/);
+  assert.match(rendererSource, /action === "hide-mini-window"[\s\S]*?profileApi\(\)\.hideMiniWindow\(\)/);
+  assert.match(mainSource, /IPC_CHANNELS\.hideMiniWindow/);
+  assert.match(hideMiniBody, /miniWindow\.hide\(\)/);
+  assert.doesNotMatch(hideMiniBody, /mainWindow/);
+});
+
+test("single-instance startup cannot create the main window before IPC is ready", () => {
+  const source = readFileSync(path.join(__dirname, "../src/main/main.ts"), "utf8");
+  const showMainBody = source.match(/async function showMainWindow\(\)[\s\S]*?function createAppTray/)?.[0] || "";
+  const startup = source.slice(source.indexOf("app.name = APP_TITLE;"), source.indexOf('app.on("window-all-closed"'));
+
+  assert.match(
+    startup,
+    /if \(!app\.requestSingleInstanceLock\(\)\) \{[\s\S]*?app\.quit\(\);[\s\S]*?\} else \{[\s\S]*?app\.whenReady\(\)\.then/
+  );
+  assert.match(
+    showMainBody,
+    /if \(!appWindowRequestsReady\) \{[\s\S]*?pendingShowMainWindow = true;[\s\S]*?return;/
+  );
+  assert.match(startup, /app\.on\("second-instance"[\s\S]*?showMainWindow\(\)/);
+
+  const ipcReadyIndex = startup.lastIndexOf("registerIpcHandlers();");
+  const windowCreateIndex = startup.lastIndexOf("createMainWindow();");
+  const requestsReadyIndex = startup.lastIndexOf("appWindowRequestsReady = true;");
+  const pendingRequestIndex = startup.lastIndexOf("if (pendingShowMainWindow)");
+  assert.ok(ipcReadyIndex >= 0 && ipcReadyIndex < windowCreateIndex);
+  assert.ok(windowCreateIndex < requestsReadyIndex);
+  assert.ok(requestsReadyIndex < pendingRequestIndex);
 });

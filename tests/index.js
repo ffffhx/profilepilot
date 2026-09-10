@@ -1,33 +1,4 @@
-require("./overlay.test.js");
-require("./agent-overlay-payload.test.js");
-require("./cdp-client-flatten.test.js");
-require("./session-parse.test.js");
-require("./profile-manager-takeover.test.js");
-require("./browser-gateway-control.test.js");
-require("./browser-gateway-server.test.js");
-require("./browser-gateway-daemon.test.js");
-require("./agent-browser-wrapper.test.js");
-require("./playwright-cli-wrapper.test.js");
-require("./chrome-devtools-mcp-wrapper.test.js");
-require("./agent-browser-lease.test.js");
-require("./shell-integration.test.js");
-require("./agent-skill-integration.test.js");
-require("./profilepilot-management-cli.test.js");
-require("./diagnostic-log.test.js");
-require("./changelog.test.js");
-require("./renderer-util.test.js");
-require("./renderer-state-actions.test.js");
-require("./renderer-takeover-confirm.test.js");
-require("./main-profile-reorder.test.js");
-require("./state-coordinator.test.js");
-require("./input-guard.test.js");
-require("./agent-integration-render.test.js");
-require("./bifrost-proxy.test.js");
-require("./proxy-health.test.js");
-require("./system-proxy.test.js");
-require("./proxy-modal-render.test.js");
-require("./profile-readiness.test.js");
-require("./session-identity.test.js");
-require("./global-instruction-diff.test.js");
-require("./global-instructions.test.js");
-require("./electron-driver.test.js");
+// Compatibility for direct `node --test tests/` callers. npm and CI use the
+// same discovery with separate test processes through scripts/run-tests.mjs.
+const { discoverTestFiles } = require("../scripts/test-files.cjs");
+for (const file of discoverTestFiles(__dirname)) require(file);

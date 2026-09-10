@@ -55,7 +55,7 @@ import type {
   StoredProfile,
   TakeoverAgentConnectionsResult
 } from "../shared/types";
-import { accountSyncCopySpecs, accountSyncDataScore, accountSyncRecordKey, applyAccountSyncRecordBaseline, assertAccountSyncDiskSpace, collectAccountSyncPathStats, copyAccountSyncPath, copyWindowsLegacyOsCryptKey, inspectAccountLocalStateDiff, inspectAccountSyncPathDiff, mergeAccountLocalStateValues, pruneServiceWorkerCacheStorage, recoverInterruptedAccountSyncArtifactsForProfile, restoreAccountSyncExtensionPreferences, shouldApplyAccountDiffItem, snapshotAccountSyncExtensionPreferences, snapshotAccountSyncSourceFingerprints, summarizeAccountSyncDiff } from "./account-sync";
+import { accountSyncCopySpecs, accountSyncDataScore, accountSyncRecordKey, applyAccountSyncRecordBaseline, assertAccountSyncDiskSpace, collectAccountSyncPathStats, copyAccountSyncPath, copyWindowsLegacyOsCryptKey, inspectAccountLocalStateDiff, inspectAccountSyncPathDiff, mergeAccountLocalStateValues, prepareAccountSyncPreferences, pruneServiceWorkerCacheStorage, recoverInterruptedAccountSyncArtifactsForProfile, shouldApplyAccountDiffItem, snapshotAccountSyncExtensionPreferences, snapshotAccountSyncSourceFingerprints, summarizeAccountSyncDiff } from "./account-sync";
 import { describePortOwner, findAvailableCdpPort, isPortAvailable, makeCdpUrl, normalizeCdpPortInput, requestCdpTargets, waitForCdp } from "./cdp-client";
 import { appendUniqueExtraUrls, bringCdpPageToFront, closeFreshBlankPagesOverCdp, loadUnpackedExtensionsOverCdp, snapshotPageTargetIds, snapshotRestorableTabUrls } from "./cdp-page";
 import { focusProfileWindow, frontmostMacProcessId, getDirectChromeCommand, isAnyMacProcessFrontmost, launchChrome, launchDetached, makeIsolatedProfileId, makeIsolatedSubProfileId, makeNativeProfileId, nativeChromeUserDataDir, openChromeUrl, parseProfileId, readIsolatedProfileUserName, removeNativeProfileFromLocalState, removeProfileFromLocalStateIn, resolveIsolatedProfileDataPath, scanChromeProfilesInDir, scanNativeChromeProfiles } from "./chrome-launch";
@@ -106,7 +106,7 @@ import {
   type GatewayControlResponse
 } from "./browser-gateway-client";
 import { resolveCanonicalSessionIdentity } from "./session-identity";
-import { requestWindowsProcessClose } from "./windows-platform";
+import { requestWindowsProcessClose, windowsForegroundProcessId } from "./windows-platform";
 
 export { ProfileManagerError } from "./profile-manager-error";
 
@@ -117,6 +117,14 @@ const EXTERNAL_PROFILE_ID_PREFIX = "external:";
 const TAKEOVER_HISTORY_LIMIT = 50;
 const AGENT_BROWSER_STALE_DISCONNECT_MS = 2 * 60_000;
 const AGENT_CONTROL_WAITER_OFFLINE_GRACE_MS = 30_000;
+// 前台操作发生在 UI 已经拿到一次完整状态之后。短时复用这份运行时信息，
+// 避免用户点击“显示”时为了找同一个 Profile 再扫描整机进程、端口和文件锁。
+const FOCUS_PROFILE_CACHE_TTL_MS = 60_000;
+// Gateway takeover may spend up to five seconds draining a CDP command and a
+// further five seconds clearing device emulation. Keep the caller alive long
+// enough to receive the authoritative ownership result instead of reporting a
+// misleading three-second connection timeout.
+const GATEWAY_SESSION_CONTROL_TIMEOUT_MS = 12_000;
 // 全局快捷键直启的槽位数：⌘⌥1 ~ ⌘⌥9。
 const QUICK_LAUNCH_SLOT_COUNT = 9;
 
@@ -156,6 +164,99 @@ interface AccountSyncExecutionOptions {
   copyWindowsLegacyEncryptionKey?: boolean;
 }
 
+type AvailableCdpPortFinder = (startPort: number) => Promise<number>;
+
+export interface FixedCdpPortRepair {
+  profileId: string;
+  profileName: string;
+  previousPort: number;
+  port: number;
+}
+
+export function registeredCdpPortReservations(
+  registry: Registry,
+  excludedProfileId?: string
+): Set<number> {
+  const reserved = new Set<number>();
+  for (const profile of registry.profiles) {
+    if (profile.id !== excludedProfileId && profile.fixedCdpPort) {
+      reserved.add(profile.fixedCdpPort);
+    }
+    if (profile.bifrostProxy?.listenerPort) {
+      reserved.add(profile.bifrostProxy.listenerPort);
+    }
+  }
+  return reserved;
+}
+
+export async function findAvailableUnreservedCdpPort(
+  startPort: number,
+  reservedPorts: ReadonlySet<number>,
+  findAvailable: AvailableCdpPortFinder = findAvailableCdpPort
+): Promise<number> {
+  let candidate = normalizeCdpPortInput(startPort) ?? 9223;
+  while (candidate <= 65535) {
+    while (reservedPorts.has(candidate) && candidate <= 65535) {
+      candidate += 1;
+    }
+    if (candidate > 65535) break;
+
+    const port = await findAvailable(candidate);
+    if (!reservedPorts.has(port)) {
+      return port;
+    }
+    candidate = port + 1;
+  }
+  throw new ProfileManagerError("没有找到未被其他 Profile 预留的 CDP 端口。", "NO_CDP_PORT_AVAILABLE");
+}
+
+export async function repairDuplicateFixedCdpPorts(
+  registry: Registry,
+  activeProfileByPort: ReadonlyMap<number, string> = new Map(),
+  findAvailable: AvailableCdpPortFinder = findAvailableCdpPort
+): Promise<FixedCdpPortRepair[]> {
+  const profilesByPort = new Map<number, StoredProfile[]>();
+  for (const profile of registry.profiles) {
+    if (!profile.fixedCdpPort) continue;
+    const profiles = profilesByPort.get(profile.fixedCdpPort) || [];
+    profiles.push(profile);
+    profilesByPort.set(profile.fixedCdpPort, profiles);
+  }
+
+  const reserved = registeredCdpPortReservations(registry);
+  const repairs: FixedCdpPortRepair[] = [];
+  for (const [previousPort, profiles] of profilesByPort) {
+    if (profiles.length < 2) continue;
+    const activeProfileId = activeProfileByPort.get(previousPort);
+    const winner = profiles.find((profile) => profile.id === activeProfileId) || profiles[0];
+    for (const profile of profiles) {
+      if (profile === winner) continue;
+      const startPort = previousPort < 65535 ? previousPort + 1 : 9223;
+      const port = await findAvailableUnreservedCdpPort(startPort, reserved, findAvailable);
+      profile.fixedCdpPort = port;
+      reserved.add(port);
+      repairs.push({
+        profileId: profile.id,
+        profileName: profile.name,
+        previousPort,
+        port
+      });
+    }
+  }
+  return repairs;
+}
+
+function describeRegisteredCdpPortOwner(registry: Registry, port: number, excludedProfileId?: string): string | null {
+  const fixedOwner = registry.profiles.find(
+    (profile) => profile.id !== excludedProfileId && profile.fixedCdpPort === port
+  );
+  if (fixedOwner) {
+    return `${fixedOwner.name} 的固定 CDP 端口`;
+  }
+  const bifrostOwner = registry.profiles.find((profile) => profile.bifrostProxy?.listenerPort === port);
+  return bifrostOwner ? `${bifrostOwner.name} 的 Bifrost 入口` : null;
+}
+
 const WINDOWS_NATIVE_AGENT_TEMPLATE_SPECS = [
   { label: "书签", relativePath: "Bookmarks" },
   { label: "书签备份", relativePath: "Bookmarks.bak" }
@@ -171,8 +272,10 @@ export class ProfileManager {
   private readonly inFlightDeletions = new Set<string>();
   // 防止状态轮询并发时对同一个残留 agent-browser daemon 重复发信号。
   private readonly autoDisconnectingCdpPids = new Set<number>();
-  // 串行化 registry 写入，避免并发写交错或临时文件相互覆盖。
-  private registryWriteChain: Promise<unknown> = Promise.resolve();
+  // 所有登记操作共用读取—修改—写入队列，包括固定端口预留和回滚。
+  private registryUpdateChain: Promise<unknown> = Promise.resolve();
+  private focusProfileCache = new Map<string, PublicProfile>();
+  private focusProfileCacheUpdatedAt = 0;
 
   constructor(
     private readonly dataDir = defaultDataDir(),
@@ -212,8 +315,8 @@ export class ProfileManager {
   }
 
   async getState(): Promise<AppState> {
-    const registry = await this.loadRegistry();
     const gatewayStatus = await this.readGatewayStatus();
+    const registry = await this.loadRegistryWithUniqueFixedCdpPorts(gatewayStatus);
     const nativeChromeProfiles = await scanNativeChromeProfiles();
     const nativePaths = nativeChromeProfiles.map((profile) => profile.path);
     const isolatedPaths = registry.profiles.map((profile) => this.isolatedProfilePath(profile));
@@ -474,7 +577,7 @@ export class ProfileManager {
       profile.quickLaunchSlot = slotByProfileId.get(profile.id) ?? null;
     });
 
-    return {
+    const state: AppState = {
       platform: process.platform,
       appTitle: APP_TITLE,
       dataDir: this.dataDir,
@@ -494,12 +597,14 @@ export class ProfileManager {
       agentOverlayEnabled,
       shellIntegration: await getShellIntegrationStatus()
     };
+    this.rememberProfilesForFocus(profiles);
+    return state;
   }
 
   async createProfile(nameInput: string): Promise<StoredProfile> {
     const name = normalizeProfileName(nameInput);
 
-    const registry = await this.loadRegistry();
+    await this.ensureStore();
     const id = randomUUID();
     const dirName = `${makeSlug(name)}-${id.slice(0, 8)}`;
     const now = new Date().toISOString();
@@ -514,8 +619,7 @@ export class ProfileManager {
     const profilePath = this.isolatedProfilePath(profile);
     await fs.mkdir(profilePath, { recursive: false });
     try {
-      registry.profiles.push(profile);
-      await this.saveRegistry(registry);
+      await this.updateRegistry((registry) => { registry.profiles.push(profile); });
     } catch (error) {
       // 登记失败时清理刚建好的目录，避免留下未登记的孤儿 Profile 目录。
       await fs.rm(profilePath, { recursive: true, force: true }).catch(() => undefined);
@@ -528,29 +632,28 @@ export class ProfileManager {
   async renameProfile(profileId: string, nameInput: string): Promise<void> {
     const ref = parseProfileId(profileId);
     const name = normalizeProfileName(nameInput);
-    const registry = await this.loadRegistry();
-
     if (ref.source === "native") {
       const profile = (await scanNativeChromeProfiles()).find((item) => item.dirName === ref.dirName);
       if (!profile) {
         throw new ProfileManagerError("没有找到这个 Chrome Profile。", "PROFILE_NOT_FOUND");
       }
 
-      registry.nativeProfiles = {
-        ...(registry.nativeProfiles || {}),
-        [profile.dirName]: {
-          ...(registry.nativeProfiles?.[profile.dirName] || {}),
-          lastLaunchedAt: registry.nativeProfiles?.[profile.dirName]?.lastLaunchedAt || null,
-          name
-        }
-      };
-      await this.saveRegistry(registry);
+      await this.updateRegistry((registry) => {
+        registry.nativeProfiles = {
+          ...(registry.nativeProfiles || {}),
+          [profile.dirName]: {
+            ...(registry.nativeProfiles?.[profile.dirName] || {}),
+            lastLaunchedAt: registry.nativeProfiles?.[profile.dirName]?.lastLaunchedAt || null,
+            name
+          }
+        };
+      });
       return;
     }
 
-    const profile = this.findIsolatedProfile(registry, this.requireIsolatedId(ref));
-    profile.name = name;
-    await this.saveRegistry(registry);
+    await this.updateRegistry((registry) => {
+      this.findIsolatedProfile(registry, this.requireIsolatedId(ref)).name = name;
+    });
   }
 
   async launchProfile(profileId: string, options: LaunchProfileOptions = {}): Promise<void> {
@@ -631,9 +734,12 @@ export class ProfileManager {
 
   async suggestCdpPort(preferredPortInput?: number | null): Promise<CdpPortSuggestion> {
     const preferredPort = normalizeCdpPortInput(preferredPortInput) ?? 9223;
-    const port = await findAvailableCdpPort(preferredPort);
+    const registry = await this.loadRegistry();
+    const reserved = registeredCdpPortReservations(registry);
+    const port = await findAvailableUnreservedCdpPort(preferredPort, reserved);
     const preferredAvailable = port === preferredPort;
-    const preferredOwner = preferredAvailable ? null : await describePortOwner(preferredPort);
+    const registeredOwner = preferredAvailable ? null : describeRegisteredCdpPortOwner(registry, preferredPort);
+    const preferredOwner = preferredAvailable ? null : registeredOwner || await describePortOwner(preferredPort);
     return {
       preferredPort,
       port,
@@ -657,7 +763,10 @@ export class ProfileManager {
     if (profile.agentAccessDisabled === true) {
       throw new ProfileManagerError("这个 Profile 已禁止 Agent 连接。", "PROFILE_AGENT_ACCESS_DISABLED");
     }
-    if (profile.fixedCdpPort) {
+    if (
+      profile.fixedCdpPort &&
+      registry.profiles.find((candidate) => candidate.fixedCdpPort === profile.fixedCdpPort)?.id === profile.id
+    ) {
       return profile.fixedCdpPort;
     }
 
@@ -670,29 +779,17 @@ export class ProfileManager {
           "AGENT_PROFILE_RESTART_REQUIRED"
         );
       }
-      profile.fixedCdpPort = runtime.cdpPort;
-      await this.saveRegistry(registry);
+      await this.updateRegistry((latest) => {
+        const reserved = registeredCdpPortReservations(latest, profile.id);
+        if (reserved.has(runtime.cdpPort!)) {
+          throw new ProfileManagerError("运行端口已由另一个 Profile 预留。", "CDP_PORT_RESERVED");
+        }
+        this.findIsolatedProfile(latest, profile.id).fixedCdpPort = runtime.cdpPort;
+      });
       return runtime.cdpPort;
     }
 
-    const reserved = new Set<number>();
-    for (const candidate of registry.profiles) {
-      if (candidate.fixedCdpPort) reserved.add(candidate.fixedCdpPort);
-      if (candidate.bifrostProxy?.listenerPort) reserved.add(candidate.bifrostProxy.listenerPort);
-    }
-    let preferred = 9223;
-    while (preferred <= 65535) {
-      while (reserved.has(preferred) && preferred <= 65535) preferred += 1;
-      if (preferred > 65535) break;
-      const port = await findAvailableCdpPort(preferred);
-      if (!reserved.has(port)) {
-        profile.fixedCdpPort = port;
-        await this.saveRegistry(registry);
-        return port;
-      }
-      preferred = port + 1;
-    }
-    throw new ProfileManagerError("没有找到可绑定的本机端口。", "CDP_PORT_UNAVAILABLE");
+    return this.reserveAvailableFixedCdpPort(profile.id, profile.fixedCdpPort ?? 9223);
   }
 
   async getBifrostSnapshot(): Promise<BifrostSnapshot> {
@@ -723,52 +820,54 @@ export class ProfileManager {
     }
 
     const currentProfile = (await this.getState()).profiles.find((profile) => profile.id === profileId);
-    const registry = await this.loadRegistry();
-    const profile = this.findIsolatedProfile(registry, this.requireIsolatedId(ref));
-
     const bifrostConfig = configInput?.kind === "bifrost" ? validateBifrostProxyConfig(configInput) : null;
     const upstreamConfig = configInput?.kind === "upstream" ? validateUpstreamProxyConfig(configInput) : null;
     const directConnection = configInput?.kind === "direct";
-    const hotUpdate = Boolean(
-      currentProfile?.running &&
-      canHotUpdateProfileBifrostProxy(profile.bifrostProxy, bifrostConfig)
-    );
+    const rollback: { profileId?: string; config?: ProfileBifrostProxyConfig } = {};
+    try {
+      await this.updateRegistry(async (registry) => {
+        const profile = this.findIsolatedProfile(registry, this.requireIsolatedId(ref));
+        const hotUpdate = Boolean(
+          currentProfile?.running &&
+          canHotUpdateProfileBifrostProxy(profile.bifrostProxy, bifrostConfig)
+        );
 
-    if (currentProfile?.running && !hotUpdate) {
-      throw new ProfileManagerError(
-        "运行中只支持在入口端口不变时热更新 Bifrost 规则。停用分流、切换代理模式或修改入口端口前，请先关闭这个 Profile。",
-        "PROFILE_RUNNING"
-      );
-    }
+        if (currentProfile?.running && !hotUpdate) {
+          throw new ProfileManagerError(
+            "运行中只支持在入口端口不变时热更新 Bifrost 规则。停用分流、切换代理模式或修改入口端口前，请先关闭这个 Profile。",
+            "PROFILE_RUNNING"
+          );
+        }
 
-    if (bifrostConfig) {
-      this.assertProxyListenerPortFree(registry, profile.id, bifrostConfig.listenerPort);
-    }
+        if (bifrostConfig) {
+          this.assertProxyListenerPortFree(registry, profile.id, bifrostConfig.listenerPort);
+        }
 
-    if (hotUpdate && bifrostConfig && profile.bifrostProxy) {
-      const previousConfig = profile.bifrostProxy;
-      await ensureProfileBifrostProxy(profile.id, bifrostConfig, process.env);
-      profile.bifrostProxy = bifrostConfig;
-      profile.upstreamProxy = null;
-      profile.directConnection = false;
-      try {
-        await this.saveRegistry(registry);
-      } catch (error) {
-        await ensureProfileBifrostProxy(profile.id, previousConfig, process.env).catch(() => undefined);
-        throw error;
+        if (hotUpdate && bifrostConfig && profile.bifrostProxy) {
+          rollback.profileId = profile.id;
+          rollback.config = profile.bifrostProxy;
+          await ensureProfileBifrostProxy(profile.id, bifrostConfig, process.env);
+          profile.bifrostProxy = bifrostConfig;
+          profile.upstreamProxy = null;
+          profile.directConnection = false;
+          return;
+        }
+
+        // 切换模式或换端口时，回收旧的 Bifrost 端口绑定。
+        const previousPort = profile.bifrostProxy?.listenerPort ?? null;
+        if (previousPort !== null && previousPort !== bifrostConfig?.listenerPort) {
+          await destroyProfileBifrostProxy(profile.id, previousPort);
+        }
+        profile.bifrostProxy = bifrostConfig;
+        profile.upstreamProxy = upstreamConfig;
+        profile.directConnection = directConnection;
+      });
+    } catch (error) {
+      if (rollback.profileId && rollback.config) {
+        await ensureProfileBifrostProxy(rollback.profileId, rollback.config, process.env).catch(() => undefined);
       }
-      return;
+      throw error;
     }
-
-    // 切换模式或换端口时，回收旧的 Bifrost 端口绑定。
-    const previousPort = profile.bifrostProxy?.listenerPort ?? null;
-    if (previousPort !== null && previousPort !== bifrostConfig?.listenerPort) {
-      await destroyProfileBifrostProxy(profile.id, previousPort);
-    }
-    profile.bifrostProxy = bifrostConfig;
-    profile.upstreamProxy = upstreamConfig;
-    profile.directConnection = directConnection;
-    await this.saveRegistry(registry);
   }
 
   async setProfileAgentSettings(profileId: string, settingsInput: ProfileAgentSettings): Promise<void> {
@@ -781,11 +880,12 @@ export class ProfileManager {
     }
     const agentAccessDisabled = settingsInput?.agentAccessDisabled === true;
     const current = (await this.getState()).profiles.find((profile) => profile.id === profileId) || null;
-    const registry = await this.loadRegistry();
-    const profile = this.findIsolatedProfile(registry, this.requireIsolatedId(ref));
-    const previousAgentAccessDisabled = profile.agentAccessDisabled === true;
-    profile.agentAccessDisabled = agentAccessDisabled;
-    await this.saveRegistry(registry);
+    const { profile, previousAgentAccessDisabled } = await this.updateRegistry((registry) => {
+      const profile = this.findIsolatedProfile(registry, this.requireIsolatedId(ref));
+      const previousAgentAccessDisabled = profile.agentAccessDisabled === true;
+      profile.agentAccessDisabled = agentAccessDisabled;
+      return { profile, previousAgentAccessDisabled };
+    });
 
     const publicPort = current?.cdpPort ?? profile.fixedCdpPort ?? null;
     const gatewayManaged = Boolean(publicPort && current?.gatewayControl);
@@ -830,8 +930,12 @@ export class ProfileManager {
         }
       }
     } catch (error) {
-      profile.agentAccessDisabled = previousAgentAccessDisabled;
-      await this.saveRegistry(registry).catch(() => undefined);
+      await this.updateRegistry((registry) => {
+        const latest = this.findIsolatedProfile(registry, profile.id);
+        if (latest.agentAccessDisabled === agentAccessDisabled) {
+          latest.agentAccessDisabled = previousAgentAccessDisabled;
+        }
+      }).catch(() => undefined);
       if (publicPort && gatewayPolicyRpcApplied) {
         await requestBrowserGateway({
           action: "update-profile-agent-settings",
@@ -874,22 +978,20 @@ export class ProfileManager {
       throw new ProfileManagerError("没有找到这个 Profile。", "PROFILE_NOT_FOUND");
     }
 
-    const registry = await this.loadRegistry();
-    const current = normalizeMiniProfileIds(registry.miniProfileIds, validProfileIds);
-    const hasProfile = current.includes(profileId);
-    const next = pinned
-      ? hasProfile
-        ? current
-        : [...current, profileId]
-      : current.filter((id) => id !== profileId);
+    await this.updateRegistry((registry) => {
+      const current = normalizeMiniProfileIds(registry.miniProfileIds, validProfileIds);
+      const hasProfile = current.includes(profileId);
+      const next = pinned
+        ? hasProfile
+          ? current
+          : [...current, profileId]
+        : current.filter((id) => id !== profileId);
 
-    if (next.length > MINI_PROFILE_LIMIT) {
-      throw new ProfileManagerError(`Mini 最多只能固定 ${MINI_PROFILE_LIMIT} 个 Profile。`, "MINI_PROFILE_LIMIT");
-    }
+      if (next.length > MINI_PROFILE_LIMIT) {
+        throw new ProfileManagerError(`Mini 最多只能固定 ${MINI_PROFILE_LIMIT} 个 Profile。`, "MINI_PROFILE_LIMIT");
+      }
 
-    await this.saveRegistry({
-      ...registry,
-      miniProfileIds: next
+      registry.miniProfileIds = next;
     });
   }
 
@@ -900,10 +1002,8 @@ export class ProfileManager {
     const validProfileIds = new Set(state.profiles.map((profile) => profile.id));
     const order = normalizeProfileOrder(ids, validProfileIds);
 
-    const registry = await this.loadRegistry();
-    await this.saveRegistry({
-      ...registry,
-      miniProfileOrder: order
+    await this.updateRegistry((registry) => {
+      registry.miniProfileOrder = order;
     });
   }
 
@@ -914,10 +1014,8 @@ export class ProfileManager {
     const validProfileIds = new Set(state.profiles.map((profile) => profile.id));
     const order = normalizeProfileOrder(ids, validProfileIds);
 
-    const registry = await this.loadRegistry();
-    await this.saveRegistry({
-      ...registry,
-      mainProfileOrder: order
+    await this.updateRegistry((registry) => {
+      registry.mainProfileOrder = order;
     });
   }
 
@@ -934,22 +1032,20 @@ export class ProfileManager {
       throw new ProfileManagerError(`快捷键槽位只支持 1~${QUICK_LAUNCH_SLOT_COUNT}。`, "QUICK_LAUNCH_SLOT_RANGE");
     }
 
-    const registry = await this.loadRegistry();
-    const slots = normalizeQuickLaunchSlots(registry.quickLaunchSlots, validProfileIds);
-    // 先清掉本 Profile 之前占的槽位（一个 Profile 至多一个槽位）。
-    for (const key of Object.keys(slots)) {
-      if (slots[key] === profileId) {
-        delete slots[key];
+    await this.updateRegistry((registry) => {
+      const slots = normalizeQuickLaunchSlots(registry.quickLaunchSlots, validProfileIds);
+      // 先清掉本 Profile 之前占的槽位（一个 Profile 至多一个槽位）。
+      for (const key of Object.keys(slots)) {
+        if (slots[key] === profileId) {
+          delete slots[key];
+        }
       }
-    }
-    if (slot !== null) {
-      // 顶掉该槽位原来的 Profile（一个槽位至多一个 Profile），再绑给本 Profile。
-      slots[String(slot)] = profileId;
-    }
+      if (slot !== null) {
+        // 顶掉该槽位原来的 Profile（一个槽位至多一个 Profile），再绑给本 Profile。
+        slots[String(slot)] = profileId;
+      }
 
-    await this.saveRegistry({
-      ...registry,
-      quickLaunchSlots: slots
+      registry.quickLaunchSlots = slots;
     });
   }
 
@@ -1387,11 +1483,26 @@ export class ProfileManager {
     command: "takeover" | "complete" | "return" | "stop"
   ): Promise<boolean> {
     try {
-      await requestBrowserGateway({ action: "control", sessionId, command }, { timeoutMs: 3_000 });
+      await requestBrowserGateway(
+        { action: "control", sessionId, command },
+        { timeoutMs: GATEWAY_SESSION_CONTROL_TIMEOUT_MS }
+      );
       return true;
     } catch (error) {
       const code = (error as { code?: unknown } | null)?.code;
       if (code === "GATEWAY_PROFILE_NOT_FOUND") return false;
+      if (command === "takeover" && code === "AGENT_COMMAND_BUSY") {
+        // Older Gateway daemons wait for a busy CDP command, then reject the
+        // takeover. They cannot be hot-restarted while they still own Chrome's
+        // debugging pipe, so end that Gateway Session as a compatibility
+        // fallback. The browser stays open and a later Agent command can
+        // acquire a fresh session through the same logical port.
+        await requestBrowserGateway(
+          { action: "control", sessionId, command: "stop" },
+          { timeoutMs: GATEWAY_SESSION_CONTROL_TIMEOUT_MS }
+        );
+        return true;
+      }
       if (!persistedGatewayOwnsSession(sessionId)) return false;
       throw error;
     }
@@ -1408,10 +1519,8 @@ export class ProfileManager {
   }
 
   async setAgentOverlayEnabled(enabled: boolean): Promise<void> {
-    const registry = await this.loadRegistry();
-    await this.saveRegistry({
-      ...registry,
-      agentOverlayEnabled: Boolean(enabled)
+    await this.updateRegistry((registry) => {
+      registry.agentOverlayEnabled = Boolean(enabled);
     });
     if (!enabled) {
       this.agentOverlayManager.sync({ enabled: false, ports: [] });
@@ -1500,9 +1609,9 @@ export class ProfileManager {
   }
 
   private async recordTakeoverEvent(event: AgentTakeoverEvent): Promise<void> {
-    const registry = await this.loadRegistry();
-    registry.takeoverHistory = normalizeTakeoverHistory([...(registry.takeoverHistory || []), event]);
-    await this.saveRegistry(registry);
+    await this.updateRegistry((registry) => {
+      registry.takeoverHistory = normalizeTakeoverHistory([...(registry.takeoverHistory || []), event]);
+    });
   }
 
   private async waitUntilPidGone(pid: number, timeoutMs: number): Promise<boolean> {
@@ -1690,26 +1799,30 @@ export class ProfileManager {
 
   async focusProfile(profileId: string): Promise<void> {
     assertDisposableE2eProfile(profileId);
-    const profile = await this.getPublicProfile(profileId);
+    const cachedProfile = this.getCachedProfileForFocus(profileId);
+    let profile = cachedProfile || await this.getPublicProfile(profileId);
     if (!profile.running || !profile.pids.length) {
       throw new ProfileManagerError("这个 Profile 当前未运行。", "PROFILE_NOT_RUNNING");
     }
 
-    if (profile.cdpPort) {
-      await bringCdpPageToFront(profile.cdpPort).catch(() => false);
-    }
-
-    // 先试无副作用的系统级激活，并确认真的到了前台才算成功。
-    // 只开一个 Chrome 实例时这条路通常就够了，不产生任何副作用。
-    const raisedQuietly = await focusProfileWindow(profile.pids).catch(() => false);
-    if (raisedQuietly && (await isAnyMacProcessFrontmost(profile.pids))) {
+    if (await this.tryFocusPublicProfile(profile)) {
       return;
     }
 
-    // macOS/Windows 对同一个 Chrome 可执行文件的多实例做应用级激活不总是可靠：请求激活实例 B 时，
-    // 系统可能把前台给同一 bundle 的实例 A（连 Chrome 自己 Page.bringToFront 的自激活也会被路由错）。
-    // 此时走 Chrome 自己的单例握手通道：对同一 user-data-dir / profile-directory 再拉一次
-    // 启动命令，运行中的实例收到握手后会自己把窗口带到最前。
+    // 缓存里的 PID 可能刚好在点击前失效。快速激活失败时重新扫描一次，
+    // 保留原有的进程校验和异常恢复能力，再用最新信息重试。
+    if (cachedProfile) {
+      profile = await this.getPublicProfile(profileId);
+      if (!profile.running || !profile.pids.length) {
+        throw new ProfileManagerError("这个 Profile 当前未运行。", "PROFILE_NOT_RUNNING");
+      }
+      if (await this.tryFocusPublicProfile(profile)) {
+        return;
+      }
+    }
+
+    // CDP 和原生激活仍未确认目标进程在前台时，向同一 user-data-dir / profile-directory
+    // 再发一次启动命令，由 Chrome 单例通道转交给现有实例处理，并继续验证前台进程。
     if (await this.focusViaChromeSingleton(profile)) {
       return;
     }
@@ -1729,6 +1842,27 @@ export class ProfileManager {
         ? "Windows 没有把这个独立 Profile 精确显示到最前面。若同时开了多个 Chrome 实例，请先用 CDP 启动这个 Profile 后重试。"
         : "macOS 没有把这个独立 Profile 精确显示到最前面。若同一个 Google Chrome.app 同时开了多个实例，请先用 CDP 启动这个 Profile，或给 ProfilePilot 授予“辅助功能”权限后重试。",
       "FOCUS_PROFILE_UNCONFIRMED"
+    );
+  }
+
+  private async tryFocusPublicProfile(profile: PublicProfile): Promise<boolean> {
+    if (profile.cdpPort) {
+      await bringCdpPageToFront(profile.cdpPort).catch(() => false);
+    }
+
+    // CDP 返回成功不代表 Windows 已切到目标进程；先只读前台 PID，已到前台就结束，
+    // 无需再次激活窗口。没有 CDP 时也能跳过已在前台的实例。
+    if (process.platform === "win32") {
+      const foregroundPid = await windowsForegroundProcessId();
+      if (foregroundPid !== null && profile.pids.includes(foregroundPid)) {
+        return true;
+      }
+    }
+
+    // Windows helper 激活后会等待并验证前台 PID。macOS 保留原有的独立确认。
+    const raisedQuietly = await focusProfileWindow(profile.pids).catch(() => false);
+    return raisedQuietly && (
+      process.platform === "win32" || await isAnyMacProcessFrontmost(profile.pids)
     );
   }
 
@@ -1776,7 +1910,7 @@ export class ProfileManager {
   }
 
   async isProfileFrontmost(profileId: string): Promise<boolean> {
-    const profile = await this.getPublicProfile(profileId);
+    const profile = this.getCachedProfileForFocus(profileId) || await this.getPublicProfile(profileId);
     if (!profile.running || !profile.pids.length) {
       return false;
     }
@@ -2574,7 +2708,10 @@ export class ProfileManager {
         report(`正在复制账号数据 ${itemPosition}：${plan.spec.label}${detail ? ` · ${detail}` : ""}`, "复制账号数据", 3);
       };
       reportCopyProgress("准备中");
-      await copyAccountSyncPath(plan.sourcePath, plan.targetPath, reportCopyProgress, abortSignal, pauseSignal, plan.stats);
+      await copyAccountSyncPath(
+        plan.sourcePath, plan.targetPath, reportCopyProgress, abortSignal, pauseSignal, plan.stats,
+        (stagingPath) => prepareAccountSyncPreferences(stagingPath, plan.spec.relativePath, targetExtensionPreferences)
+      );
       copiedItems.push({
         label: plan.spec.label,
         relativePath: plan.spec.relativePath
@@ -2616,17 +2753,10 @@ export class ProfileManager {
       });
     }
 
-    report("正在保留目标插件状态…", "写入浏览器状态", 5);
-    const restoredExtensionPreferences = await restoreAccountSyncExtensionPreferences(
-      targetLocation.profilePath,
-      targetExtensionPreferences
-    );
     skippedItems.push({
       label: "插件安装状态",
       relativePath: "Preferences / Secure Preferences",
-      reason: restoredExtensionPreferences
-        ? "账号同步已保留目标 Profile 原有插件状态，未复制源 Profile 的插件安装记录"
-        : "账号同步不会复制源 Profile 的插件安装记录"
+      reason: "账号同步已保留目标 Profile 原有插件状态，未复制源 Profile 的插件安装记录"
     });
 
     let launchedTarget = false;
@@ -2762,7 +2892,7 @@ export class ProfileManager {
     const mode = cloneProfileMode(process.platform, source);
 
     const prefix = normalizeProfileName(request.namePrefix || source.name).slice(0, 70);
-    let nextPortSeed = normalizeCdpPortInput(request.basePort) ?? (await findAvailableCdpPort(9223));
+    let nextPortSeed = normalizeCdpPortInput(request.basePort) ?? 9223;
     const report = (message: string, stepIndex: number): void => {
       onProgress?.({ message, step: `克隆 ${stepIndex}/${count}`, stepIndex, stepCount: count });
     };
@@ -2836,9 +2966,8 @@ export class ProfileManager {
             }
           }
 
-          const port = await findAvailableCdpPort(nextPortSeed);
+          const port = await this.reserveAvailableFixedCdpPort(createdProfile.id, nextPortSeed, sourceProfileId);
           nextPortSeed = port + 1;
-          await this.setStoredCloneMeta(targetId, { fixedCdpPort: port, clonedFromProfileId: sourceProfileId });
 
           let launched = false;
           if (launchAfter) {
@@ -3051,27 +3180,24 @@ export class ProfileManager {
     return { sourceProfileId: sourceId, launched, failed, state: await this.getState() };
   }
 
-  // 改写独立 Profile 的副本元数据（固定端口 / 克隆来源 / 项目标签），只动 registry。
+  // 改写独立 Profile 的副本元数据（克隆来源 / 项目标签），只动 registry。
   private async setStoredCloneMeta(
     profileId: string,
-    meta: { fixedCdpPort?: number | null; clonedFromProfileId?: string | null; projectTag?: string | null }
+    meta: { clonedFromProfileId?: string | null; projectTag?: string | null }
   ): Promise<void> {
     const ref = parseProfileId(profileId);
     if (ref.source !== "isolated") {
       throw new ProfileManagerError("只有工具独立 Profile 才支持副本元数据。", "ISOLATED_PROFILE_REQUIRED");
     }
-    const registry = await this.loadRegistry();
-    const profile = this.findIsolatedProfile(registry, this.requireIsolatedId(ref));
-    if (meta.fixedCdpPort !== undefined) {
-      profile.fixedCdpPort = meta.fixedCdpPort;
-    }
-    if (meta.clonedFromProfileId !== undefined) {
-      profile.clonedFromProfileId = meta.clonedFromProfileId;
-    }
-    if (meta.projectTag !== undefined) {
-      profile.projectTag = meta.projectTag;
-    }
-    await this.saveRegistry(registry);
+    await this.updateRegistry((registry) => {
+      const profile = this.findIsolatedProfile(registry, this.requireIsolatedId(ref));
+      if (meta.clonedFromProfileId !== undefined) {
+        profile.clonedFromProfileId = meta.clonedFromProfileId;
+      }
+      if (meta.projectTag !== undefined) {
+        profile.projectTag = meta.projectTag;
+      }
+    });
   }
 
   private async launchNativeProfile(dirName: string): Promise<void> {
@@ -3082,15 +3208,15 @@ export class ProfileManager {
     }
 
     await launchChrome([`--profile-directory=${profile.dirName}`, "--no-first-run"]);
-    const registry = await this.loadRegistry();
-    registry.nativeProfiles = {
-      ...(registry.nativeProfiles || {}),
-      [profile.dirName]: {
-        ...(registry.nativeProfiles?.[profile.dirName] || {}),
-        lastLaunchedAt: new Date().toISOString()
-      }
-    };
-    await this.saveRegistry(registry);
+    await this.updateRegistry((registry) => {
+      registry.nativeProfiles = {
+        ...(registry.nativeProfiles || {}),
+        [profile.dirName]: {
+          ...(registry.nativeProfiles?.[profile.dirName] || {}),
+          lastLaunchedAt: new Date().toISOString()
+        }
+      };
+    });
   }
 
   private async launchIsolatedProfile(id: string, options: LaunchProfileOptions = {}): Promise<void> {
@@ -3100,11 +3226,7 @@ export class ProfileManager {
       bypassProxy: options.bypassProxy,
       startBifrost: options.startBifrost
     });
-    profile.lastLaunchedAt = new Date().toISOString();
-    if (cdpPort !== null) {
-      profile.lastCdpPort = cdpPort;
-    }
-    await this.saveRegistry(registry);
+    await this.recordIsolatedLaunch(id, cdpPort);
   }
 
   private async launchIsolatedProfileWithCdp(id: string, portInput?: number | null, options: LaunchProfileOptions = {}): Promise<void> {
@@ -3119,9 +3241,7 @@ export class ProfileManager {
       bypassProxy: options.bypassProxy,
       startBifrost: options.startBifrost
     });
-    profile.lastLaunchedAt = new Date().toISOString();
-    profile.lastCdpPort = cdpPort;
-    await this.saveRegistry(registry);
+    await this.recordIsolatedLaunch(id, cdpPort);
   }
 
   private async launchProfileWithUrls(profileId: string, urls: string[]): Promise<void> {
@@ -3146,15 +3266,15 @@ export class ProfileManager {
     }
 
     await launchChrome([`--profile-directory=${profile.dirName}`, "--no-first-run", ...urls]);
-    const registry = await this.loadRegistry();
-    registry.nativeProfiles = {
-      ...(registry.nativeProfiles || {}),
-      [profile.dirName]: {
-        ...(registry.nativeProfiles?.[profile.dirName] || {}),
-        lastLaunchedAt: new Date().toISOString()
-      }
-    };
-    await this.saveRegistry(registry);
+    await this.updateRegistry((registry) => {
+      registry.nativeProfiles = {
+        ...(registry.nativeProfiles || {}),
+        [profile.dirName]: {
+          ...(registry.nativeProfiles?.[profile.dirName] || {}),
+          lastLaunchedAt: new Date().toISOString()
+        }
+      };
+    });
   }
 
   private async launchIsolatedProfileWithUrls(
@@ -3169,11 +3289,15 @@ export class ProfileManager {
       cdpPort: options.cdpPort,
       forceCdp: options.forceCdp
     });
-    profile.lastLaunchedAt = new Date().toISOString();
-    if (cdpPort !== null) {
-      profile.lastCdpPort = cdpPort;
-    }
-    await this.saveRegistry(registry);
+    await this.recordIsolatedLaunch(id, cdpPort);
+  }
+
+  private async recordIsolatedLaunch(id: string, cdpPort: number | null): Promise<void> {
+    await this.updateRegistry((registry) => {
+      const profile = this.findIsolatedProfile(registry, id);
+      profile.lastLaunchedAt = new Date().toISOString();
+      if (cdpPort !== null) profile.lastCdpPort = cdpPort;
+    });
   }
 
   private async launchStoredIsolatedProfile(
@@ -3200,11 +3324,18 @@ export class ProfileManager {
 
     if (shouldStartCdp) {
       const preferredPort = options.cdpPort ?? profile.lastCdpPort ?? 9222;
+      const registry = await this.loadRegistry();
+      const reserved = registeredCdpPortReservations(registry, profile.id);
+      if (options.cdpPort !== undefined && options.cdpPort !== null && reserved.has(options.cdpPort)) {
+        const owner = describeRegisteredCdpPortOwner(registry, options.cdpPort, profile.id);
+        const detail = owner ? `，已由${owner}预留` : "";
+        throw new ProfileManagerError(`CDP 端口 ${options.cdpPort} 已被其他配置占用${detail}。`, "CDP_PORT_RESERVED");
+      }
       const preferredGatewayProfile = await this.gatewayProfileForPort(preferredPort);
       if (preferredGatewayProfile?.profileId === makeIsolatedProfileId(profile.id)) {
         return preferredPort;
       }
-      cdpPort = options.cdpPort ?? (await findAvailableCdpPort(preferredPort));
+      cdpPort = options.cdpPort ?? (await findAvailableUnreservedCdpPort(preferredPort, reserved));
       const existingGatewayProfile = await this.gatewayProfileForPort(cdpPort);
       if (existingGatewayProfile?.profileId === makeIsolatedProfileId(profile.id)) {
         return cdpPort;
@@ -3363,35 +3494,27 @@ export class ProfileManager {
 
     const trashPath = await this.moveToTrash(profile.path, profile.dirName);
     await removeNativeProfileFromLocalState(profile.dirName);
-    const registry = await this.loadRegistry();
-    let registryChanged = false;
-    if (registry.nativeProfiles) {
-      delete registry.nativeProfiles[profile.dirName];
-      registryChanged = true;
-    }
-    const nextMiniProfileIds = (registry.miniProfileIds || []).filter((id) => id !== profile.id);
-    if (nextMiniProfileIds.length !== (registry.miniProfileIds || []).length) {
-      registry.miniProfileIds = nextMiniProfileIds;
-      registryChanged = true;
-    }
-    const nextMiniProfileOrder = (registry.miniProfileOrder || []).filter((id) => id !== profile.id);
-    if (nextMiniProfileOrder.length !== (registry.miniProfileOrder || []).length) {
-      registry.miniProfileOrder = nextMiniProfileOrder;
-      registryChanged = true;
-    }
-    const nextMainProfileOrder = (registry.mainProfileOrder || []).filter((id) => id !== profile.id);
-    if (nextMainProfileOrder.length !== (registry.mainProfileOrder || []).length) {
-      registry.mainProfileOrder = nextMainProfileOrder;
-      registryChanged = true;
-    }
-    const prunedQuickLaunchSlots = pruneQuickLaunchSlots(registry.quickLaunchSlots, profile.id);
-    if (prunedQuickLaunchSlots) {
-      registry.quickLaunchSlots = prunedQuickLaunchSlots;
-      registryChanged = true;
-    }
-    if (registryChanged) {
-      await this.saveRegistry(registry);
-    }
+    await this.updateRegistry((registry) => {
+      if (registry.nativeProfiles) {
+        delete registry.nativeProfiles[profile.dirName];
+      }
+      const nextMiniProfileIds = (registry.miniProfileIds || []).filter((id) => id !== profile.id);
+      if (nextMiniProfileIds.length !== (registry.miniProfileIds || []).length) {
+        registry.miniProfileIds = nextMiniProfileIds;
+      }
+      const nextMiniProfileOrder = (registry.miniProfileOrder || []).filter((id) => id !== profile.id);
+      if (nextMiniProfileOrder.length !== (registry.miniProfileOrder || []).length) {
+        registry.miniProfileOrder = nextMiniProfileOrder;
+      }
+      const nextMainProfileOrder = (registry.mainProfileOrder || []).filter((id) => id !== profile.id);
+      if (nextMainProfileOrder.length !== (registry.mainProfileOrder || []).length) {
+        registry.mainProfileOrder = nextMainProfileOrder;
+      }
+      const prunedQuickLaunchSlots = pruneQuickLaunchSlots(registry.quickLaunchSlots, profile.id);
+      if (prunedQuickLaunchSlots) {
+        registry.quickLaunchSlots = prunedQuickLaunchSlots;
+      }
+    });
 
     return {
       deletedProfile: profile,
@@ -3410,33 +3533,37 @@ export class ProfileManager {
     }
 
     const publicProfile = profile || (await this.toIsolatedPublicProfile(storedProfile, new Map()));
-    const nextProfiles = registry.profiles.filter((item) => item.id !== id);
-    const deletedProfileId = makeIsolatedProfileId(id);
-    const accountSyncRecords = Object.fromEntries(
-      Object.entries(registry.accountSyncRecords || {}).filter(
-        ([, record]) => record.sourceProfileId !== deletedProfileId && record.targetProfileId !== deletedProfileId
-      )
-    );
+    let trashPath: string | null = null;
+    await this.updateRegistry(async (registry) => {
+      this.findIsolatedProfile(registry, id);
+      const beforeDelete = structuredClone(registry);
+      const nextProfiles = registry.profiles.filter((item) => item.id !== id);
+      const deletedProfileId = makeIsolatedProfileId(id);
+      const accountSyncRecords = Object.fromEntries(
+        Object.entries(registry.accountSyncRecords || {}).filter(
+          ([, record]) => record.sourceProfileId !== deletedProfileId && record.targetProfileId !== deletedProfileId
+        )
+      );
 
-    // 先从 registry 移除条目（含同步记录），再移到废纸篓：
-    // 这样即便移废纸篓后崩溃，剩下的也只是无害的孤儿目录，而不是“界面里有但目录已没”的孤儿条目。
-    await this.saveRegistry({
-      ...registry,
-      profiles: nextProfiles,
-      accountSyncRecords,
-      miniProfileIds: (registry.miniProfileIds || []).filter((profileId) => profileId !== deletedProfileId),
-      miniProfileOrder: (registry.miniProfileOrder || []).filter((profileId) => profileId !== deletedProfileId),
-      mainProfileOrder: (registry.mainProfileOrder || []).filter((profileId) => profileId !== deletedProfileId),
-      quickLaunchSlots: pruneQuickLaunchSlots(registry.quickLaunchSlots, deletedProfileId) ?? registry.quickLaunchSlots
+      // 先从 registry 移除条目（含同步记录），再移到废纸篓：
+      // 这样即便移废纸篓后崩溃，剩下的也只是无害的孤儿目录，而不是“界面里有但目录已没”的孤儿条目。
+      Object.assign(registry, {
+        profiles: nextProfiles,
+        accountSyncRecords,
+        miniProfileIds: (registry.miniProfileIds || []).filter((profileId) => profileId !== deletedProfileId),
+        miniProfileOrder: (registry.miniProfileOrder || []).filter((profileId) => profileId !== deletedProfileId),
+        mainProfileOrder: (registry.mainProfileOrder || []).filter((profileId) => profileId !== deletedProfileId),
+        quickLaunchSlots: pruneQuickLaunchSlots(registry.quickLaunchSlots, deletedProfileId) ?? registry.quickLaunchSlots
+      });
+      await this.saveRegistry(registry);
+      try {
+        trashPath = await this.moveToTrash(this.isolatedProfilePath(storedProfile), storedProfile.dirName);
+      } catch (error) {
+        // 移废纸篓失败：把刚移除的条目回滚回去，保持 registry 与磁盘一致。
+        await this.saveRegistry(beforeDelete);
+        throw error;
+      }
     });
-    let trashPath: string | null;
-    try {
-      trashPath = await this.moveToTrash(this.isolatedProfilePath(storedProfile), storedProfile.dirName);
-    } catch (error) {
-      // 移废纸篓失败：把刚移除的条目回滚回去，保持 registry 与磁盘一致。
-      await this.saveRegistry(registry).catch(() => undefined);
-      throw error;
-    }
     if (storedProfile.bifrostProxy) {
       await destroyProfileBifrostProxy(storedProfile.id, storedProfile.bifrostProxy.listenerPort);
     }
@@ -3477,10 +3604,12 @@ export class ProfileManager {
     await removeProfileFromLocalStateIn(userDataDir, dirName);
 
     // 子 profile 若被指派过快捷键槽位，顺手清掉。
-    const prunedQuickLaunchSlots = pruneQuickLaunchSlots(registry.quickLaunchSlots, subId);
-    if (prunedQuickLaunchSlots) {
-      await this.saveRegistry({ ...registry, quickLaunchSlots: prunedQuickLaunchSlots });
-    }
+    await this.updateRegistry((registry) => {
+      const prunedQuickLaunchSlots = pruneQuickLaunchSlots(registry.quickLaunchSlots, subId);
+      if (prunedQuickLaunchSlots) {
+        registry.quickLaunchSlots = prunedQuickLaunchSlots;
+      }
+    });
 
     return {
       deletedProfile: publicProfile,
@@ -3505,12 +3634,75 @@ export class ProfileManager {
 
   private async ensureStore(): Promise<void> {
     await fs.mkdir(this.profilesDir, { recursive: true });
+  }
 
-    try {
-      await fs.access(this.registryPath);
-    } catch {
-      await this.saveRegistry({ profiles: [], nativeProfiles: {}, accountSyncRecords: {}, takeoverHistory: [] });
-    }
+  private updateRegistry<T>(mutate: (registry: Registry) => T | Promise<T>): Promise<T> {
+    const run = async (): Promise<T> => {
+      const registry = await this.loadRegistry();
+      const before = JSON.stringify(registry);
+      const result = await mutate(registry);
+      if (JSON.stringify(registry) !== before || !(await exists(this.registryPath))) {
+        await this.saveRegistry(registry);
+      }
+      return result;
+    };
+    const previous = this.registryUpdateChain || Promise.resolve();
+    const next = previous.then(run, run);
+    this.registryUpdateChain = next.catch(() => undefined);
+    return next;
+  }
+
+  private reserveAvailableFixedCdpPort(
+    storedProfileId: string,
+    preferredPort: number,
+    clonedFromProfileId?: string
+  ): Promise<number> {
+    return this.updateRegistry(async (registry) => {
+      const profile = this.findIsolatedProfile(registry, storedProfileId);
+      const currentPortOwner = profile.fixedCdpPort
+        ? registry.profiles.find((candidate) => candidate.fixedCdpPort === profile.fixedCdpPort)
+        : null;
+      if (profile.fixedCdpPort && currentPortOwner?.id === profile.id) {
+        if (clonedFromProfileId !== undefined && profile.clonedFromProfileId !== clonedFromProfileId) {
+          profile.clonedFromProfileId = clonedFromProfileId;
+        }
+        return profile.fixedCdpPort;
+      }
+
+      const reserved = registeredCdpPortReservations(registry, profile.id);
+      const port = await findAvailableUnreservedCdpPort(preferredPort, reserved);
+      profile.fixedCdpPort = port;
+      if (clonedFromProfileId !== undefined) {
+        profile.clonedFromProfileId = clonedFromProfileId;
+      }
+      return port;
+    });
+  }
+
+  private loadRegistryWithUniqueFixedCdpPorts(
+    gatewayStatus: GatewayControlResponse | null
+  ): Promise<Registry> {
+    return this.updateRegistry(async (registry) => {
+      const activePorts = new Set(Array.isArray(gatewayStatus?.ports) ? gatewayStatus.ports.map(Number) : []);
+      const activeProfileByPort = new Map<number, string>();
+      for (const binding of gatewayStatus ? gatewayProfilesFromResponse(gatewayStatus) : []) {
+        const port = Number(binding.publicPort);
+        if (!activePorts.has(port)) continue;
+        const publicProfileId = String(binding.profileId || "");
+        const stored = registry.profiles.find((profile) => makeIsolatedProfileId(profile.id) === publicProfileId);
+        if (stored) activeProfileByPort.set(port, stored.id);
+      }
+
+      const repairs = await repairDuplicateFixedCdpPorts(registry, activeProfileByPort);
+      if (repairs.length) {
+        for (const repair of repairs) {
+          console.warn(
+            `[profilepilot] 修复重复 CDP 固定端口：${repair.profileName} ${repair.previousPort} -> ${repair.port}`
+          );
+        }
+      }
+      return registry;
+    });
   }
 
   private async loadRegistry(): Promise<Registry> {
@@ -3542,13 +3734,11 @@ export class ProfileManager {
         quickLaunchSlots: normalizeQuickLaunchSlots(parsed.quickLaunchSlots)
       };
     } catch (error) {
-      const backup = `${this.registryPath}.broken-${Date.now()}`;
-      // 注册表损坏不静默吞掉：记录并把损坏文件备份到 .broken-<ts>，数据仍可人工恢复。
-      console.error(`[profilepilot] profiles.json 解析失败，已备份到 ${backup} 并以空注册表启动：`, error);
-      try {
-        await fs.rename(this.registryPath, backup);
-      } catch {
-        // 无法备份损坏文件时也只能干净启动。
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw new ProfileManagerError(
+          `无法读取 Profile 注册表，已停止更新并保留原文件：${errorMessage(error)}`,
+          "REGISTRY_READ_FAILED"
+        );
       }
       return {
         profiles: [],
@@ -3565,31 +3755,22 @@ export class ProfileManager {
 
   private async saveRegistry(registry: Registry): Promise<void> {
     const snapshot = `${JSON.stringify(registry, null, 2)}\n`;
-    const run = async (): Promise<void> => {
-      await fs.mkdir(this.dataDir, { recursive: true });
-      const tmpPath = `${this.registryPath}.tmp-${process.pid}`;
-      try {
-        await fs.writeFile(tmpPath, snapshot, "utf8");
-        await fs.rename(tmpPath, this.registryPath);
-      } finally {
-        // rename 成功后 tmp 已不存在；失败时清理残留临时文件。
-        await fs.rm(tmpPath, { force: true }).catch(() => undefined);
-      }
-    };
-    // 串行接到写入链上：并发的 saveRegistry 排队执行，不交错、不抢同名临时文件。
-    const next = this.registryWriteChain.then(run, run);
-    this.registryWriteChain = next.catch(() => undefined);
-    return next;
+    await fs.mkdir(this.dataDir, { recursive: true });
+    const tmpPath = `${this.registryPath}.tmp-${process.pid}`;
+    try {
+      await fs.writeFile(tmpPath, snapshot, "utf8");
+      await fs.rename(tmpPath, this.registryPath);
+    } finally {
+      await fs.rm(tmpPath, { force: true }).catch(() => undefined);
+    }
   }
 
   private async recordAccountSync(record: AccountSyncRecord): Promise<void> {
-    const registry = await this.loadRegistry();
-    await this.saveRegistry({
-      ...registry,
-      accountSyncRecords: {
+    await this.updateRegistry((registry) => {
+      registry.accountSyncRecords = {
         ...(registry.accountSyncRecords || {}),
         [accountSyncRecordKey(record.sourceProfileId, record.targetProfileId)]: record
-      }
+      };
     });
   }
 
@@ -3924,15 +4105,15 @@ export class ProfileManager {
       return;
     }
 
-    const registry = await this.loadRegistry();
-    const storedProfile = this.findIsolatedProfile(registry, this.requireIsolatedId(ref));
-    const existing = storedProfile.migratedExtensions || [];
-    const copiedIds = new Set(copiedExtensions.map((extension) => extension.id));
-    storedProfile.migratedExtensions = [
-      ...existing.filter((extension) => !copiedIds.has(extension.id)),
-      ...copiedExtensions
-    ].sort((a, b) => a.name.localeCompare(b.name));
-    await this.saveRegistry(registry);
+    await this.updateRegistry((registry) => {
+      const storedProfile = this.findIsolatedProfile(registry, this.requireIsolatedId(ref));
+      const existing = storedProfile.migratedExtensions || [];
+      const copiedIds = new Set(copiedExtensions.map((extension) => extension.id));
+      storedProfile.migratedExtensions = [
+        ...existing.filter((extension) => !copiedIds.has(extension.id)),
+        ...copiedExtensions
+      ].sort((a, b) => a.name.localeCompare(b.name));
+    });
   }
 
   private async discardMigratedExtensions(
@@ -3949,13 +4130,13 @@ export class ProfileManager {
     }
 
     // 先以 registry 为真相源移除条目，成功后再尽力清理磁盘——避免“磁盘已清但 registry 还在”的不一致。
-    const registry = await this.loadRegistry();
-    const storedProfile = this.findIsolatedProfile(registry, this.requireIsolatedId(ref));
-    const copiedIds = new Set(copiedExtensions.map((extension) => extension.id));
-    storedProfile.migratedExtensions = (storedProfile.migratedExtensions || []).filter(
-      (extension) => !copiedIds.has(extension.id)
-    );
-    await this.saveRegistry(registry);
+    await this.updateRegistry((registry) => {
+      const storedProfile = this.findIsolatedProfile(registry, this.requireIsolatedId(ref));
+      const copiedIds = new Set(copiedExtensions.map((extension) => extension.id));
+      storedProfile.migratedExtensions = (storedProfile.migratedExtensions || []).filter(
+        (extension) => !copiedIds.has(extension.id)
+      );
+    });
 
     // registry 已更新，再清理磁盘上已复制的扩展目录（失败仅告警，不影响已完成的回滚）。
     const migratedExtensionsDir = path.join(targetProfile.path, "Migrated Extensions");
@@ -3986,15 +4167,12 @@ export class ProfileManager {
       return;
     }
 
-    const registry = await this.loadRegistry();
-    const storedProfile = this.findIsolatedProfile(registry, this.requireIsolatedId(ref));
-    const beforeCount = storedProfile.migratedExtensions?.length || 0;
-    storedProfile.migratedExtensions = (storedProfile.migratedExtensions || []).filter(
-      (extension) => extension.sourceExtensionId !== extensionId && extension.id !== makeStoredMigratedExtensionId(extensionId)
-    );
-    if ((storedProfile.migratedExtensions || []).length !== beforeCount) {
-      await this.saveRegistry(registry);
-    }
+    await this.updateRegistry((registry) => {
+      const storedProfile = this.findIsolatedProfile(registry, this.requireIsolatedId(ref));
+      storedProfile.migratedExtensions = (storedProfile.migratedExtensions || []).filter(
+        (extension) => extension.sourceExtensionId !== extensionId && extension.id !== makeStoredMigratedExtensionId(extensionId)
+      );
+    });
   }
 
   private async resolveAccountSyncLocation(
@@ -4040,13 +4218,7 @@ export class ProfileManager {
   }
 
   private async getPublicProfile(profileId: string): Promise<PublicProfile> {
-    const ref = parseProfileId(profileId);
-    const expectedId =
-      ref.source === "native"
-        ? makeNativeProfileId(ref.dirName)
-        : ref.source === "isolated-sub"
-          ? makeIsolatedSubProfileId(ref.parentId, ref.dirName)
-          : makeIsolatedProfileId(this.requireIsolatedId(ref));
+    const expectedId = this.expectedPublicProfileId(profileId);
     const state = await this.getState();
     const profile = state.profiles.find((item) => item.id === expectedId);
 
@@ -4055,6 +4227,31 @@ export class ProfileManager {
     }
 
     return profile;
+  }
+
+  private expectedPublicProfileId(profileId: string): string {
+    const ref = parseProfileId(profileId);
+    return (
+      ref.source === "native"
+        ? makeNativeProfileId(ref.dirName)
+        : ref.source === "isolated-sub"
+          ? makeIsolatedSubProfileId(ref.parentId, ref.dirName)
+          : makeIsolatedProfileId(this.requireIsolatedId(ref))
+    );
+  }
+
+  private rememberProfilesForFocus(profiles: PublicProfile[]): void {
+    this.focusProfileCache = new Map(profiles.map((profile) => [profile.id, profile]));
+    this.focusProfileCacheUpdatedAt = Date.now();
+  }
+
+  private getCachedProfileForFocus(profileId: string): PublicProfile | null {
+    if (Date.now() - this.focusProfileCacheUpdatedAt > FOCUS_PROFILE_CACHE_TTL_MS) {
+      return null;
+    }
+
+    const profile = this.focusProfileCache.get(this.expectedPublicProfileId(profileId));
+    return profile?.running && profile.pids.length ? profile : null;
   }
 
   private getLauncherLabel(): string {

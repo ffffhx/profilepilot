@@ -2,12 +2,16 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { spawnSync } = require("node:child_process");
 const test = require("node:test");
 
 const {
   diagnosticLogPath,
+  diagnosticRuntimeStatePath,
   getDiagnosticLogStats,
   initializeDiagnosticLogging,
+  startRuntimeStateTracking,
+  stopRuntimeStateTracking,
   readDiagnosticLogs,
   writeDiagnosticLog
 } = require("../dist/main/diagnostic-log.js");
@@ -44,6 +48,47 @@ test("diagnostic log redacts secrets, rotates files, and reads newest structured
     const stats = getDiagnosticLogStats(root, env);
     assert.equal(stats.files, 3);
     assert.ok(stats.bytes > 0);
+
+    startRuntimeStateTracking({ heartbeatMs: 1_000 });
+    const runtimePath = diagnosticRuntimeStatePath(root, env);
+    let runtime = JSON.parse(fs.readFileSync(runtimePath, "utf8"));
+    assert.equal(runtime.pid, process.pid);
+    assert.equal(runtime.clean_shutdown, false);
+    stopRuntimeStateTracking("test-complete");
+    runtime = JSON.parse(fs.readFileSync(runtimePath, "utf8"));
+    assert.equal(runtime.clean_shutdown, true);
+    assert.equal(runtime.shutdown_reason, "test-complete");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("process crash logging records an uncaught main-process exception before Node exits", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "profilepilot-crash-log-"));
+  const logRoot = path.join(root, "logs");
+  const modulePath = path.resolve(__dirname, "../dist/main/diagnostic-log.js");
+  try {
+    const child = spawnSync(process.execPath, ["-e", `
+      const diagnostics = require(${JSON.stringify(modulePath)});
+      diagnostics.initializeDiagnosticLogging({ appVersion: "crash-test", captureConsole: false });
+      diagnostics.installProcessCrashLogging();
+      diagnostics.startRuntimeStateTracking({ heartbeatMs: 1000 });
+      throw new Error("diagnostic-crash-marker");
+    `], {
+      encoding: "utf8",
+      env: { ...process.env, PROFILEPILOT_LOG_ROOT: logRoot }
+    });
+    assert.notEqual(child.status, 0);
+    const entries = fs.readFileSync(path.join(logRoot, "profilepilot.log.jsonl"), "utf8")
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => JSON.parse(line));
+    const crash = entries.find((entry) => entry.event === "process.uncaught_exception");
+    assert.ok(crash);
+    assert.match(crash.message, /diagnostic-crash-marker/);
+    const runtime = JSON.parse(fs.readFileSync(path.join(logRoot, "runtime-state.json"), "utf8"));
+    assert.equal(runtime.clean_shutdown, false);
+    assert.equal(runtime.last_failure.event, "process.uncaught_exception");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

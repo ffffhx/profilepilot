@@ -178,20 +178,27 @@ public static class ProfilePilotWindowsInputGuard
         var down = IsDown(message);
         var up = IsUp(message);
         var guarded = false;
+        var capturedGesture = false;
         lock (Sync)
         {
             guarded = GuardedPids.Contains(pid);
             if (down && guarded) { capturedPid = pid; capturedWindow = window; }
             if ((message == WM_MOUSEMOVE || up) && capturedPid != 0)
             {
+                capturedGesture = true;
                 pid = capturedPid;
                 window = capturedWindow;
                 guarded = GuardedPids.Contains(pid);
             }
-            if (guarded && (down || up)) EmitMouse(pid, window, mouse, down ? "down" : "up", ButtonFor(message));
+            if (guarded && (down || (up && capturedGesture))) EmitMouse(pid, window, mouse, down ? "down" : "up", ButtonFor(message));
             if (up) { capturedPid = 0; capturedWindow = IntPtr.Zero; }
         }
-        if (guarded && (down || up || message == WM_MOUSEMOVE || message == WM_MOUSEWHEEL || message == WM_MOUSEHWHEEL))
+        // Hover movement must remain usable while the Agent owns the browser. Only
+        // suppress movement/up when that physical gesture began inside a guarded
+        // window, matching the macOS guard's click/drag protection.
+        if ((down && guarded) ||
+            ((message == WM_MOUSEMOVE || up) && capturedGesture) ||
+            (guarded && (message == WM_MOUSEWHEEL || message == WM_MOUSEHWHEEL)))
             return new IntPtr(1);
         return CallNextHookEx(hook, code, messageValue, data);
     }

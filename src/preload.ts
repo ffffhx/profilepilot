@@ -87,6 +87,7 @@ const profileManagerApi: ProfileManagerApi = {
     return () => ipcRenderer.removeListener(IPC_CHANNELS.miniPanelPinnedChanged, handler);
   },
   showMiniWindow: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.showMiniWindow),
+  hideMiniWindow: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.hideMiniWindow),
   showMainWindow: (): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.showMainWindow),
   setMiniWindowPanelOpen: (open: boolean): Promise<void> =>
     ipcRenderer.invoke(IPC_CHANNELS.setMiniWindowPanelOpen, open),
@@ -113,7 +114,7 @@ const profileManagerApi: ProfileManagerApi = {
     ipcRenderer.invoke(IPC_CHANNELS.ensureClaudeInstructionShell),
   inspectProfileReadiness: (request: ProfileReadinessRequest): Promise<ProfileReadinessReceipt> =>
     ipcRenderer.invoke(IPC_CHANNELS.inspectProfileReadiness, request),
-  focusProfile: (id: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.focusProfile, id),
+  focusProfile: (id: string): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.focusProfile, id),
   isProfileFrontmost: (id: string): Promise<boolean> => ipcRenderer.invoke(IPC_CHANNELS.isProfileFrontmost, id),
   closeProfile: (id: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.closeProfile, id),
   focusExternalInstance: (userDataDir: string): Promise<AppState> =>

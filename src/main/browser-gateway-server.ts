@@ -274,6 +274,21 @@ export class BrowserGatewayServer {
     return false;
   }
 
+  disconnectAgentSession(publicPort: number, sessionId: string, reason = "agent command did not quiesce"): number {
+    const route = this.routes.get(publicPort);
+    if (!route) return 0;
+    const connections = [...route.connections].filter((connection) =>
+      connection.identity.kind === "agent" && connection.identity.sessionId === sessionId
+    );
+    // A Chrome request can occasionally remain pending forever even though the
+    // driver is otherwise idle. Once the graceful deadline expires, closing the
+    // driver transport is the only safe way to detach its CDP sessions before
+    // allowing physical user input. The Gateway Session itself remains active,
+    // so returning control can reconnect the driver normally.
+    for (const connection of connections) connection.peer.close(4003, reason);
+    return connections.length;
+  }
+
   cancelAgentQuiesce(publicPort: number, sessionId: string): void {
     const route = this.routes.get(publicPort);
     if (!route) return;

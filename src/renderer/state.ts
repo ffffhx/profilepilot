@@ -1,4 +1,5 @@
 import { AccountSyncDiffResult, AccountSyncResult, AgentIntegrationDiagnostic, AgentTakeoverEvent, AppState, BifrostSnapshot, BusyState, CdpLiveView, ExtensionMigrationDiffResult, ExtensionMigrationResult, ExtensionScanResult, GlobalInstructionFileId, GlobalInstructionsSnapshot, ModalState, ProfileReadinessReceipt, ToastKind } from "./types";
+import type { StartupSettings } from "../shared/startup-settings";
 
 export const root = document.querySelector<HTMLDivElement>("#app");
 
@@ -23,6 +24,7 @@ export interface RendererState {
   miniPanelPinned: boolean;
   miniScrollTop: number;
   state: AppState | null;
+  startupSettings: StartupSettings | null;
   selectedId: string | null;
   selectedExternalDir: string | null;
   modal: ModalState;
@@ -95,6 +97,7 @@ export const store: RendererState = {
   miniPanelPinned: false,
   miniScrollTop: 0,
   state: null,
+  startupSettings: null,
   selectedId: null,
   selectedExternalDir: null,
   modal: null,

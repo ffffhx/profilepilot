@@ -7,7 +7,11 @@ const ONBOARDING_STORAGE_KEY = "profilepilot:onboarding:v1:seen";
 let onboardingEvaluated = false;
 
 export async function loadState(): Promise<void> {
-  applyState(await profileApi().getState());
+  const [state, startupSettings] = await Promise.all([
+    profileApi().getState(), profileApi().getStartupSettings()
+  ]);
+  store.startupSettings = startupSettings;
+  applyState(state);
   if (store.modal?.kind === "onboarding") {
     void refreshAgentIntegrationDiagnostic().catch(() => undefined);
   }

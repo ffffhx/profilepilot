@@ -45,6 +45,7 @@ import type {
 import { captureCdpLiveView } from "./cdp-live-view";
 import { startE2eDriver } from "./e2e-driver";
 import { defaultDataDir } from "./fs-util";
+import { StartupSettingsManager, createTestLoginItemApi } from "./startup-settings";
 import { ensureClaudeInstructionShell, readGlobalInstructions, undoGlobalInstruction, writeGlobalInstruction } from "./global-instructions";
 import {
   inspectAgentIntegration,
@@ -89,6 +90,7 @@ initializeDiagnosticLogging({ appVersion: app.getVersion() });
 installProcessCrashLogging();
 installElectronCrashLogging();
 const profileManager = createProfileManager(broadcastAgentTakeover, revealAgentOverlayProfile);
+let startupSettingsManager: StartupSettingsManager;
 let agentOverlayDisposedForQuit = false;
 let appQuitting = false;
 let mainWindow: BrowserWindow | null = null;
@@ -1530,6 +1532,11 @@ async function bifrostSnapshotForRenderer(): Promise<BifrostSnapshot> {
 }
 
 function registerIpcHandlers(): void {
+  ipcMain.handle(IPC_CHANNELS.getStartupSettings, () => startupSettingsManager.get());
+  ipcMain.handle(IPC_CHANNELS.setStartupEnabled, (_event, enabled: unknown) => {
+    if (typeof enabled !== "boolean") throw new TypeError("开机自启动开关必须是布尔值。");
+    return startupSettingsManager.setEnabled(enabled);
+  });
   ipcMain.handle(IPC_CHANNELS.getState, async (): Promise<AppState> => profileManager.getState());
   ipcMain.handle(IPC_CHANNELS.getTakeoverHistory, async (): Promise<AgentTakeoverEvent[]> => profileManager.getTakeoverHistory());
 
@@ -2037,6 +2044,17 @@ if (!app.requestSingleInstanceLock()) {
   });
   app.whenReady().then(async () => {
     writeDiagnosticLog("info", "app", "app.ready", "Electron 已就绪");
+    const isolatedStartupTest = IS_ELECTRON_SMOKE_TEST || IS_E2E_DRIVER_TEST || IS_BACKGROUND_E2E;
+    startupSettingsManager = new StartupSettingsManager(
+      path.join(process.env.CPM_DATA_DIR || defaultDataDir(), "startup-settings.json"),
+      isolatedStartupTest ? createTestLoginItemApi() : app,
+      { platform: process.platform, isPackaged: app.isPackaged || isolatedStartupTest,
+        executablePath: process.execPath, appPath: app.getAppPath() }
+    );
+    const startupSettings = startupSettingsManager.initialize();
+    if (startupSettings.supported && startupSettings.error) {
+      console.warn(`[startup] ${startupSettings.error}`);
+    }
     // Smoke E2E 只验证当前 Electron 实例的 main/preload/renderer/IPC 链路；
     // 跳过机器级 Gateway、wrapper 和快捷键，保证临时 HOME 测试不会留下后台进程或抢占全局状态。
     if (!IS_ELECTRON_SMOKE_TEST) {

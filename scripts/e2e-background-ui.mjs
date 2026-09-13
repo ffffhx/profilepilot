@@ -20,6 +20,19 @@ async function main() {
     assert.equal(await driver.evaluate("document.visibilityState"), "visible");
     assert.ok((await driver.screenshot("main")).pngBase64.length > 1_000, "hidden window should still be capturable");
 
+    const startupSwitch = '[data-action="toggle-startup"]';
+    if (process.platform === "win32" || process.platform === "darwin") {
+      await driver.waitFor(startupSwitch, snapshot => snapshot.attributes["aria-checked"] === "true");
+      await driver.domClick(startupSwitch);
+      await driver.waitFor(startupSwitch, snapshot => snapshot.attributes["aria-checked"] === "false" && !snapshot.disabled);
+      assert.equal(JSON.parse(await readFile(path.join(dataDir, "startup-settings.json"), "utf8")).enabled, false);
+      await driver.domClick(startupSwitch);
+      await driver.waitFor(startupSwitch, snapshot => snapshot.attributes["aria-checked"] === "true" && !snapshot.disabled);
+      assert.equal(JSON.parse(await readFile(path.join(dataDir, "startup-settings.json"), "utf8")).enabled, true);
+    } else {
+      assert.equal((await driver.query(startupSwitch)).disabled, true);
+    }
+
     await assert.rejects(
       driver.click('[data-action="new-profile"]'),
       /Background E2E only supports DOM\/read commands/,

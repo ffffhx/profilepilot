@@ -1,5 +1,7 @@
 export const IPC_CHANNELS = {
   getState: "profiles:get-state",
+  getStartupSettings: "app:startup:get-settings",
+  setStartupEnabled: "app:startup:set-enabled",
   stateChanged: "profiles:state-changed",
   createProfile: "profiles:create",
   renameProfile: "profiles:rename",

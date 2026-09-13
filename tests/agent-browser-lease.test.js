@@ -1,11 +1,12 @@
 const assert = require("node:assert/strict");
-const { mkdirSync, rmSync, writeFileSync } = require("node:fs");
+const { mkdirSync, rmSync, writeFileSync, existsSync } = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
 const {
   AGENT_BROWSER_PROFILE_LEASE_PENDING_TTL_MS,
+  retireAgentBrowserSessionSync,
   acquireAgentBrowserProfileLeaseSync,
   assertConfiguredAgentAccessAllowedSync,
   findConfiguredAgentBrowserProfileByPortSync,
@@ -26,6 +27,36 @@ const {
   clientFromDelegatedAgentBrowserProfileLease,
   collapseDuplicateNamedSessionClients
 } = require("../dist/main/process-scan.js");
+
+test("retiring a session removes Windows transport sidecars without touching another session or preferences", () => {
+  const home = makeTempHome();
+  const dir = path.join(home, ".agent-browser");
+  mkdirSync(dir, { recursive: true });
+  const removed = ["cx-retired.sock", "cx-retired.port", "cx-retired.stream"];
+  const retained = ["cx-other.port", "cx-retired.config", "cx-retired.target"];
+  try {
+    for (const name of [...removed, ...retained]) writeFileSync(path.join(dir, name), "64348");
+    assert.equal(retireAgentBrowserSessionSync("cx-retired", undefined, home), true);
+    for (const name of removed) assert.equal(existsSync(path.join(dir, name)), false, name);
+    for (const name of retained) assert.equal(existsSync(path.join(dir, name)), true, name);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("retiring refuses to remove transport files belonging to a live unrelated process", () => {
+  const home = makeTempHome();
+  const dir = path.join(home, ".agent-browser");
+  mkdirSync(dir, { recursive: true });
+  try {
+    writeFileSync(path.join(dir, "cx-live.pid"), String(process.pid));
+    writeFileSync(path.join(dir, "cx-live.port"), "64348");
+    retireAgentBrowserSessionSync("cx-live", process.pid, home);
+    assert.equal(existsSync(path.join(dir, "cx-live.port")), true);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
 
 test("agent-browser Profile lease allows one Session and rejects another", () => {
   const home = makeTempHome();

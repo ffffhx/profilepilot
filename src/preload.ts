@@ -41,6 +41,8 @@ import type {
 } from "./shared/types";
 
 const profileManagerApi: ProfileManagerApi = {
+  getStartupSettings: () => ipcRenderer.invoke(IPC_CHANNELS.getStartupSettings),
+  setStartupEnabled: (enabled: boolean) => ipcRenderer.invoke(IPC_CHANNELS.setStartupEnabled, enabled),
   getState: (): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.getState),
   onStateChanged: (listener: (state: AppState) => void): (() => void) => {
     const handler = (_event: IpcRendererEvent, state: AppState): void => {

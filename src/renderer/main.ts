@@ -1839,6 +1839,20 @@ appRoot.addEventListener("click", (event) => {
     return;
   }
 
+  if (action === "toggle-startup") {
+    if (!store.startupSettings?.supported) return;
+    const enable = !store.startupSettings.enabled;
+    void withBusy(async () => {
+      const settings = await profileApi().setStartupEnabled(enable);
+      store.startupSettings = settings;
+      if (settings.error) throw new Error(settings.error);
+      setToast(settings.requiresApproval
+        ? "请在系统设置的登录项中允许 ProfilePilot 自启动"
+        : enable ? "开机自启动已开启" : "开机自启动已关闭");
+    }, undefined, { key: "startup", message: "正在保存启动设置…" });
+    return;
+  }
+
   if (action === "toggle-agent-overlay") {
     const enable = !store.state.agentOverlayEnabled;
     void withBusy(

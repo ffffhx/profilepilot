@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { driverProcessSnapshot, isDriverProcess, temporaryBrowserChildren, retiredPortOwner } from "./agent-browser-process-cleanup";
 import type {
   AgentBrowserProfileOccupancy,
   ProfileBifrostProxyConfig,
@@ -485,12 +486,34 @@ export function retireAgentBrowserSessionSync(
   const agentBrowserDir = path.join(homeDir, ".agent-browser");
   const pidPath = path.join(agentBrowserDir, `${session}.pid`);
   const pidFromFile = readPidFileSync(pidPath);
-  const daemonPid = normalizePid(knownDaemonPid) || pidFromFile;
+  let daemonPid = normalizePid(knownDaemonPid) || pidFromFile;
+  try {
+    // A dead Windows driver may leave an inherited listener without a PID file.
+    // Use its port only when the owning PID is already dead, never adopt a live PID.
+    if (!daemonPid) {
+      const owner = retiredPortOwner(Number(readFileSync(path.join(agentBrowserDir, `${session}.port`), "utf8")));
+      if (owner && !isProcessAlive(owner)) daemonPid = owner;
+    }
+  } catch { /* Missing sidecar or unavailable inspection: do not guess ownership. */ }
+
+  if (daemonPid) {
+    try {
+      const rows = driverProcessSnapshot();
+      const parent = rows.find(p => p.pid === daemonPid);
+      if ((pidFromFile && pidFromFile !== daemonPid) || (parent && !isDriverProcess(parent))) return false;
+      for (const candidate of temporaryBrowserChildren(rows, daemonPid)) {
+        const current = driverProcessSnapshot();
+        if (!temporaryBrowserChildren(current, daemonPid).some(p => p.pid === candidate.pid && p.command === candidate.command)) continue;
+        process.kill(candidate.pid, "SIGTERM");
+        if (!waitUntilProcessGoneSync(candidate.pid, 1500)) return false;
+      }
+    } catch { return false; }
+  }
 
   if (daemonPid && isProcessAlive(daemonPid)) {
     // pid 文件指向了别的 daemon，或 PID 已被非 agent-browser 进程复用时绝不误杀。
     if ((pidFromFile && pidFromFile !== daemonPid) || !isAgentBrowserProcess(daemonPid)) {
-      return true;
+      return false;
     }
     try {
       process.kill(daemonPid, "SIGTERM");
@@ -512,6 +535,11 @@ export function retireAgentBrowserSessionSync(
   if (!pidFromFile || !daemonPid || pidFromFile === daemonPid) {
     rmSync(pidPath, { force: true });
     rmSync(path.join(agentBrowserDir, `${session}.sock`), { force: true });
+    // Windows uses TCP sidecars instead of the Unix socket. Leaving these behind
+    // can route the next CLI invocation to a retired daemon's port.
+    for (const extension of ["port", "stream"]) {
+      rmSync(path.join(agentBrowserDir, `${session}.${extension}`), { force: true });
+    }
   }
   for (const activityPath of agentBrowserSessionActivityPaths(homeDir, session)) {
     rmSync(activityPath, { force: true });
@@ -908,8 +936,8 @@ function readPidFileSync(filePath: string): number | undefined {
 
 function isAgentBrowserProcess(pid: number): boolean {
   try {
-    const command = execFileSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" });
-    return /agent-browser/i.test(command);
+    const entry = driverProcessSnapshot().find(p => p.pid === pid);
+    return !!entry && isDriverProcess(entry);
   } catch {
     return false;
   }

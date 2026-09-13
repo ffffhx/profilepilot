@@ -78,6 +78,13 @@ export function render(): void {
           </div>
         </div>
         <div class="header-actions">
+          <button type="button" role="switch" data-action="toggle-startup"
+            aria-checked="${store.startupSettings?.enabled === true}" aria-label="开机自启动"
+            aria-describedby="startup-note"
+            title="登录系统后自动启动 ProfilePilot"
+            ${store.busy || !store.startupSettings?.supported ? "disabled" : ""}>
+            开机自启动 <span class="${store.startupSettings?.enabled ? "text-accent-bright" : "text-muted"}">${!store.startupSettings ? "读取中…" : store.startupSettings.requiresApproval ? "待允许" : store.startupSettings.enabled ? "开启" : "关闭"}</span>
+          </button>
           <button type="button" data-action="open-mini-window" title="切换到悬浮窗">悬浮窗</button>
           <button type="button" data-action="open-global-instructions">全局指令</button>
           <button type="button" class="${refreshing ? "loading" : ""}" data-action="refresh" ${store.busy ? "disabled" : ""}>
@@ -86,6 +93,8 @@ export function render(): void {
           <button type="button" class="primary" data-action="new-profile" ${store.busy ? "disabled" : ""}>新建独立 Profile</button>
         </div>
       </header>
+
+      <p id="startup-note" class="${store.startupSettings?.error || store.startupSettings?.requiresApproval ? "mt-3 text-[12px] text-muted" : "sr-only"}" role="status">${escapeHtml(store.startupSettings?.error || (store.startupSettings?.requiresApproval ? "请在系统设置 → 通用 → 登录项中允许 ProfilePilot 自启动。" : "登录系统后自动启动 ProfilePilot；关闭后会保留你的选择。"))}</p>
 
       ${busyHasEmbeddedProgress ? "" : renderBusyBanner()}
 

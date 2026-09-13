@@ -1,3 +1,5 @@
+import type { StartupSettings } from "./startup-settings";
+
 export interface StoredProfile {
   id: string;
   name: string;
@@ -1034,6 +1036,8 @@ export interface OperationPauseSignal {
 }
 
 export interface ProfileManagerApi {
+  getStartupSettings(): Promise<StartupSettings>;
+  setStartupEnabled(enabled: boolean): Promise<StartupSettings>;
   getState(): Promise<AppState>;
   onStateChanged(listener: (state: AppState) => void): () => void;
   getTakeoverHistory(): Promise<AgentTakeoverEvent[]>;

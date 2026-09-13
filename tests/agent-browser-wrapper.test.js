@@ -14,6 +14,7 @@ const {
   acquireProfileLeaseForCommandWithAutomaticSwitch,
   agentBrowserCommandName,
   assertManagedGatewayLaunchOptions,
+  assertGatewayConnectStillCurrent,
   cdpPortFromAgentBrowserArgs,
   clearProfilePilotNoticesForSession,
   consumeProfilePilotReturnNotice,
@@ -29,6 +30,7 @@ const {
   resolveProfilePilotUseArgs,
   resolveRealAgentBrowser,
   runAgentBrowserWrapper,
+  spawnRealAgentBrowser,
   sessionFromAgentBrowserArgs,
   shouldCheckProfilePilotNotice
 } = require("../dist/main/agent-browser-wrapper.js");
@@ -51,6 +53,50 @@ const {
   writeAgentBrowserSessionActivitySync
 } = require("../dist/main/agent-browser-session.js");
 const { BROWSER_GATEWAY_PROTOCOL_VERSION, browserGatewaySocketPath } = require("../dist/main/browser-gateway-client.js");
+
+test("captured connect output does not wait for a descendant holding its pipes", {timeout:10000}, async () => {
+  const home = makeTempHome();
+  mkdirSync(home, {recursive:true});
+  const childFile = path.join(home, "descendant.pid");
+  const launcher = path.join(home, "launcher.cjs");
+  writeFileSync(launcher, `
+    const {spawn}=require('node:child_process');
+    const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:['ignore',1,2],detached:true,windowsHide:true});
+    require('node:fs').writeFileSync(process.argv[2],String(child.pid));
+    child.unref();
+    process.stderr.write('connect diagnostic\\n');
+    process.exitCode=7;
+  `);
+  try {
+    const start=Date.now();
+    const result=await spawnRealAgentBrowser(process.execPath,[launcher,childFile],process.env,null,'ignore',true);
+    assert.equal(result.status,7);
+    assert.match(result.diagnostic,/connect diagnostic/);
+    assert.ok(Date.now()-start<5000,'must finish while the descendant is still alive');
+    process.kill(Number(readFileSync(childFile,'utf8')),0);
+  } finally {
+    if(existsSync(childFile)) { try {process.kill(Number(readFileSync(childFile,'utf8')));} catch {} }
+    rmSync(home,{recursive:true,force:true});
+  }
+});
+
+test("late connect results cannot revive a completed or replaced driver", () => {
+  const {readOrCreateBrowserGatewayDaemonIdentity, clearBrowserGatewayDaemonIdentity} = require("../dist/main/browser-gateway-client.js");
+  const home = makeTempHome();
+  const session = "cx-connect-lifecycle";
+  const args = ["--session", session, "--cdp", "9223", "snapshot"];
+  try {
+    const original = readOrCreateBrowserGatewayDaemonIdentity(session, home);
+    assert.doesNotThrow(() => assertGatewayConnectStillCurrent(args, {HOME:home}, session, original, home));
+    clearBrowserGatewayDaemonIdentity(session, home);
+    assert.throws(() => assertGatewayConnectStillCurrent(args, {HOME:home}, session, original, home), {code:"AGENT_TASK_STOPPED"});
+    const replacement = readOrCreateBrowserGatewayDaemonIdentity(session, home);
+    assert.throws(() => assertGatewayConnectStillCurrent(args, {HOME:home}, session, original, home), {code:"AGENT_TASK_STOPPED"});
+    assert.doesNotThrow(() => assertGatewayConnectStillCurrent(args, {HOME:home}, session, replacement, home));
+  } finally {
+    rmSync(home, {recursive:true, force:true});
+  }
+});
 
 test("agent-browser wrapper resolves session from args before env", () => {
   assert.equal(sessionFromAgentBrowserArgs(["--session", "cx-arg", "open"], { AGENT_BROWSER_SESSION: "cx-env" }), "cx-arg");

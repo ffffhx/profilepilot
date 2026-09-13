@@ -47,6 +47,7 @@ import {
   type AgentBrowserProfileLease
 } from "./agent-browser-lease";
 import {
+  browserGatewayDaemonIdentityPath,
   clearBrowserGatewayDaemonIdentity,
   ensureBrowserGatewayDaemon,
   readOrCreateBrowserGatewayDaemonIdentity,
@@ -725,6 +726,16 @@ interface SpawnedAgentBrowserResult {
   status: number | null;
   signal: NodeJS.Signals | null;
   error?: Error & { code?: string };
+  diagnostic?: string;
+}
+
+export function classifyGatewayConnectFailure(output: string, spawnCode?: string): { code: string; message: string } {
+  if (/0x800705AF|paging file|页面文件太小|Thread failed to start|out of memory/i.test(output) || spawnCode === "ENOMEM") return { code: "AGENT_DRIVER_RESOURCE_EXHAUSTED", message: "系统内存或页面文件不足，驱动/辅助进程无法启动；需先释放系统资源" };
+  if (spawnCode) return { code: "AGENT_DRIVER_START_FAILED", message: `浏览器驱动无法启动（${spawnCode}）` };
+  if (/401|Unauthorized|GATEWAY_TICKET/.test(output)) return { code: "GATEWAY_AUTH_REJECTED", message: "Gateway 拒绝连接凭证；票据可能过期、已使用或失效，不能仅凭 401 判定具体原因" };
+  if (/Failed to read.*(?:10060|timed out)|os error 10060/is.test(output)) return { code: "AGENT_DRIVER_IPC_TIMEOUT", message: "CLI 等待本机驱动响应超时；请检查驱动进程和遗留通信端口" };
+  if (/ECONNREFUSED|Connection refused|10061/i.test(output)) return { code: "GATEWAY_CONNECTION_REFUSED", message: "连接被拒绝；请检查 Gateway 监听及本机驱动端口" };
+  return { code: "GATEWAY_CONNECT_FAILED", message: "驱动未建立有效 Gateway 连接，现有信息不足以确定原因" };
 }
 
 function beginBrowserCommandState(
@@ -760,23 +771,38 @@ function beginBrowserCommandState(
   return context;
 }
 
-function spawnRealAgentBrowser(
+export function assertGatewayConnectStillCurrent(
+  args: string[], env: NodeJS.ProcessEnv, sessionId: string, daemonInstanceId: string, homeDir: string
+): void {
+  const notice = findActiveProfilePilotNotice(args, env);
+  if (notice) throw gatewayWrapperError("AGENT_TASK_STOPPED", "连接期间控制权已变更，旧命令不能重新申请连接");
+  let current = "";
+  try { current = readFileSync(browserGatewayDaemonIdentityPath(sessionId, homeDir), "utf8").trim(); } catch { /* Retired identity. */ }
+  if (current !== daemonInstanceId) {
+    throw gatewayWrapperError("AGENT_TASK_STOPPED", "连接所属驱动已结束或更换，旧命令不能重新申请连接");
+  }
+}
+
+export function spawnRealAgentBrowser(
   executable: string,
   args: string[],
   env: NodeJS.ProcessEnv,
   commandState: BrowserCommandStateContext | null,
-  stdio: "inherit" | "ignore" = "inherit"
+  stdio: "inherit" | "ignore" = "inherit",
+  captureDiagnostic = false
 ): Promise<SpawnedAgentBrowserResult> {
   return new Promise((resolve) => {
     let settled = false;
+    let drainTimer: ReturnType<typeof setTimeout> | undefined;
     const finish = (result: SpawnedAgentBrowserResult): void => {
       if (settled) return;
       settled = true;
+      if (drainTimer) clearTimeout(drainTimer);
       resolve(result);
     };
     let child;
     try {
-      child = spawnPortableCommand(executable, args, { env, stdio });
+      child = spawnPortableCommand(executable, args, { env, stdio: captureDiagnostic ? ["ignore", "pipe", "pipe"] : stdio, windowsHide: true });
     } catch (error) {
       finish({ status: null, signal: null, error: error as Error & { code?: string } });
       return;
@@ -793,11 +819,28 @@ function spawnRealAgentBrowser(
         startedAt: commandState.startedAt
       }, commandState.homeDir);
     }
+    let diagnostic = "";
+    if (captureDiagnostic) {
+      const collect = (chunk: Buffer): void => { diagnostic = (diagnostic + chunk.toString()).slice(-8192); };
+      child.stdout?.on("data", collect);
+      child.stderr?.on("data", collect);
+      // A detached daemon can inherit pipe handles on Windows. Its parent CLI
+      // has exited, but Node's `close` waits for those handles indefinitely.
+      // Drain buffered diagnostics briefly, then stop waiting for descendants.
+      child.once("exit", (status, signal) => {
+        if (settled) return;
+        drainTimer = setTimeout(() => {
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+          finish({ status, signal, diagnostic });
+        }, 200);
+      });
+    }
     child.once("error", (error) => {
       finish({ status: null, signal: null, error: error as Error & { code?: string } });
     });
     child.once("close", (status, signal) => {
-      finish({ status, signal });
+      finish({ status, signal, diagnostic });
     });
   });
 }
@@ -2242,8 +2285,10 @@ export async function prepareGatewayTransport(
   }
   if (acquire.connectionActive !== true) {
     let lastConnectError: Error | undefined;
+    let lastDiagnostic = "";
     let lastConnectStatus: number | null = null;
     for (let attempt = 1; attempt <= 3 && acquire.connectionActive !== true; attempt += 1) {
+      assertGatewayConnectStillCurrent(args, env, sessionId, daemonInstanceId, homeDir);
       const attemptWebSocketUrl = typeof acquire.webSocketUrl === "string" ? acquire.webSocketUrl : "";
       if (!attemptWebSocketUrl) {
         throw gatewayWrapperError("GATEWAY_INVALID_RESPONSE", "Gateway 没有返回 WebSocket Ticket");
@@ -2253,10 +2298,15 @@ export async function prepareGatewayTransport(
         ["--session", sessionId, "connect", attemptWebSocketUrl],
         gatewayChildEnv,
         null,
-        options.quietConnect ? "ignore" : "inherit"
+        options.quietConnect ? "ignore" : "inherit",
+        true
       );
       lastConnectError = connected.error;
+      lastDiagnostic = connected.diagnostic || "";
       lastConnectStatus = connected.status;
+      // complete/takeover may have run while the native connect command was pending.
+      // Never let its late result reacquire a released session with the old identity.
+      assertGatewayConnectStillCurrent(args, env, sessionId, daemonInstanceId, homeDir);
       // Parallel commands may both observe an initially disconnected daemon. Re-acquire
       // after every attempt: it both observes the winner and issues a fresh one-shot Ticket.
       acquire = await requestBrowserGateway({
@@ -2282,15 +2332,14 @@ export async function prepareGatewayTransport(
         sessionId,
         daemonInstanceId
       }, { homeDir, timeoutMs: 3_000 }).catch(() => undefined);
-      throw lastConnectError || gatewayWrapperError(
-        "GATEWAY_CONNECT_FAILED",
-        `agent-browser 连续 3 次无法连接 Gateway（最后退出码 ${lastConnectStatus ?? "unknown"}），旧 Session 已释放`
-      );
+      const failure = classifyGatewayConnectFailure(lastDiagnostic, (lastConnectError as NodeJS.ErrnoException | undefined)?.code);
+      throw gatewayWrapperError(failure.code, `${failure.message}（最后退出码 ${lastConnectStatus ?? "unknown"}）。旧 Session 已释放；停止重试，先恢复驱动/Gateway。`);
     }
     // The first acquire happens before agent-browser has created its daemon PID file.
     // Confirm the live connection once more so Gateway becomes the complete source of
     // truth for both connectionActive and daemonPid; otherwise the UI must (correctly)
     // refuse to infer a real Agent from a lease alone.
+    assertGatewayConnectStillCurrent(args, env, sessionId, daemonInstanceId, homeDir);
     const confirmed = await requestBrowserGateway({
       action: "acquire",
       publicPort,

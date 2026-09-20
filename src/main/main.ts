@@ -2,6 +2,8 @@ import { promises as fs, watch, type FSWatcher } from "node:fs";
 import { app, BrowserWindow, crashReporter, globalShortcut, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, session, shell, Tray, type IpcMainInvokeEvent, type Rectangle } from "electron";
 import path from "node:path";
 import { IPC_CHANNELS } from "../shared/ipc";
+import { registerTaskService } from "./tasks/ipc";
+import type { TaskService } from "./tasks/service";
 import type {
   AccountSyncDiffResult,
   AccountSyncRequest,
@@ -90,6 +92,7 @@ initializeDiagnosticLogging({ appVersion: app.getVersion() });
 installProcessCrashLogging();
 installElectronCrashLogging();
 const profileManager = createProfileManager(broadcastAgentTakeover, revealAgentOverlayProfile);
+let taskService: TaskService | undefined;
 let startupSettingsManager: StartupSettingsManager;
 let agentOverlayDisposedForQuit = false;
 let appQuitting = false;
@@ -289,6 +292,12 @@ function connectGatewayEventStream(): void {
     onEvent: (message) => {
       const eventType = typeof message.controlEvent?.type === "string" ? message.controlEvent.type : "unknown";
       writeDiagnosticLog("info", "gateway", "control.event", `Gateway 状态事件：${eventType}`, message.controlEvent);
+      const taskBinding = message.controlEvent?.profile;
+      if (taskBinding?.ownerSessionId) taskService?.externalControl(taskBinding.ownerSessionId, taskBinding.ownership, taskBinding.sessionStatus, message.controlEvent?.reason);
+      else if (taskBinding?.sessionStatus === "stopped" && message.controlEvent?.reason === "session-stopped") {
+        const task = taskService?.store.data.tasks.find(task => task.port === taskBinding.publicPort && !["completed", "partial", "failed", "cancelled"].includes(task.status));
+        if (task) taskService?.externalControl(task.sessionId, "user", "stopped", "session-stopped");
+      }
       const targetChange = message.controlEvent?.targetChange;
       if (targetChange) {
         writeDiagnosticLog(
@@ -1002,7 +1011,7 @@ function hideMiniWindow(): void {
   }
 }
 
-// 只由用户的显式操作进入悬浮窗：主窗口最小化、页面“悬浮窗”按钮或全局快捷键。
+// 悬浮窗默认关闭，只由页面“悬浮窗”按钮或专用全局快捷键主动打开。
 async function showMiniWindow(): Promise<void> {
   const windowRef = await createMiniWindow();
   setMiniWindowPanelOpen(false);
@@ -1121,8 +1130,7 @@ async function showMainWindow(): Promise<void> {
     createMainWindow();
   }
 
-  // 收成悬浮窗时主窗口可能仍带着最小化标记（minimize 事件里只 hide 没 restore），
-  // 恢复前先 restore 清掉，避免 show() 后窗口仍处于最小化态。
+  // 从系统任务栏、Dock 或托盘重新打开时，先恢复已最小化的主窗口。
   if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isMinimized()) {
     mainWindow.restore();
   }
@@ -1494,16 +1502,7 @@ function createMainWindow(): void {
     mainWindow?.webContents.setZoomFactor(UI_ZOOM_FACTOR);
   });
 
-  // 点最小化（黄色按钮）不缩进 Dock，而是收成悬浮窗：只 hide()，绝不 restore()。
-  mainWindow.on("minimize", () => {
-    const windowRef = mainWindow;
-    if (!windowRef || windowRef.isDestroyed()) {
-      return;
-    }
-
-    windowRef.hide();
-    void showMiniWindow();
-  });
+  // 最小化沿用系统行为（Windows/Linux 任务栏、macOS Dock），不自动开启悬浮窗。
 
   // Windows/Linux 用户点击标题栏关闭就是退出；macOS 保留“关窗口但不退出 App”的平台惯例，
   // 后续仍可通过 Dock 的 activate 事件重建主窗口。
@@ -1517,7 +1516,7 @@ function createMainWindow(): void {
     app.quit();
   });
 
-  mainWindow.loadFile(path.join(__dirname, "../../public/index.html"));
+  mainWindow.loadFile(path.join(__dirname, "../../public", process.env.CPM_START_VIEW === "browser" ? "index.html" : "tasks.html"));
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
@@ -1538,6 +1537,12 @@ function registerIpcHandlers(): void {
     return startupSettingsManager.setEnabled(enabled);
   });
   ipcMain.handle(IPC_CHANNELS.getState, async (): Promise<AppState> => profileManager.getState());
+  ipcMain.handle(IPC_CHANNELS.getInitialState, (): Promise<AppState> => {
+    // The coordinator already coalesces refreshes across both windows. Never
+    // make page navigation wait for process, port and browser target probes.
+    if (profileManager.getCachedState() && !stateBroadcastInFlight) scheduleAppStateBroadcast();
+    return profileManager.getInitialState();
+  });
   ipcMain.handle(IPC_CHANNELS.getTakeoverHistory, async (): Promise<AgentTakeoverEvent[]> => profileManager.getTakeoverHistory());
 
   ipcMain.handle(IPC_CHANNELS.createProfile, async (_event, name: string): Promise<AppState> => {
@@ -2079,6 +2084,7 @@ if (!app.requestSingleInstanceLock()) {
     }
 
     registerIpcHandlers();
+    taskService = registerTaskService(profileManager);
     if (!IS_BACKGROUND_E2E && (!IS_ELECTRON_SMOKE_TEST || process.env.CPM_E2E_ENABLE_GLOBAL_SHORTCUTS === "1")) {
       registerGlobalShortcuts();
     }
@@ -2135,9 +2141,6 @@ app.on("window-all-closed", () => {
 app.on("before-quit", (event) => {
   appQuitting = true;
   stopStateCoordinator();
-  if (IS_ELECTRON_SMOKE_TEST) {
-    return;
-  }
   if (agentOverlayDisposedForQuit) {
     return;
   }
@@ -2145,6 +2148,7 @@ app.on("before-quit", (event) => {
   writeDiagnosticLog("info", "app", "app.quit_requested", "ProfilePilot 正在退出");
   event.preventDefault();
   void Promise.all([
+    taskService?.close(),
     profileManager.disposeAgentOverlay(),
     managementServer?.close().catch((error) => {
       console.warn(`[management-cli] 关闭失败：${error instanceof Error ? error.message : String(error)}`);

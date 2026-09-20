@@ -1105,7 +1105,11 @@ export class AgentOverlayManager {
     }
 
     if (method === "Target.attachedToTarget") {
-      this.handleAttachedToTarget(state, params);
+      // Gateway multiplexes Chrome's target events across internal observers.
+      // An attach event can belong to agent-browser or another internal client;
+      // adopting it lets overlay cleanup detach that client's working session.
+      // This manager does not enable Auto-Attach. Only attachPage's own command
+      // response grants ownership, including when an event arrives before it.
       return;
     }
 
@@ -1148,37 +1152,6 @@ export class AgentOverlayManager {
     }
     const page = this.upsertPage(state, targetId, target.url || "");
     await this.attachPage(state, page);
-  }
-
-  private handleAttachedToTarget(state: PortOverlay, params: unknown): void {
-    if (!this.isActivePort(state)) {
-      return;
-    }
-    if (!isRecord(params) || !isRecord(params.targetInfo)) {
-      return;
-    }
-    const sessionId = stringValue(params.sessionId);
-    const targetInfo = params.targetInfo;
-    if (!sessionId || stringValue(targetInfo.type) !== "page") {
-      return;
-    }
-    const targetId = stringValue(targetInfo.targetId) || stringValue(targetInfo.id);
-    if (!targetId || !isInjectableTargetInfo(targetInfo)) {
-      return;
-    }
-
-    const page = this.upsertPage(state, targetId, stringValue(targetInfo.url) || "");
-    if (page.sessionId && page.sessionId !== sessionId) {
-      page.connecting = false;
-      page.scriptIdentifier = undefined;
-      page.lastPayloadText = "";
-      page.mainFrameId = undefined;
-      page.activeContextId = undefined;
-      page.isolatedContextIds.clear();
-    }
-    page.sessionId = sessionId;
-    page.attachPending = false;
-    void this.initializePageSession(state, page, sessionId).catch(() => undefined);
   }
 
   private handleDetachedFromTarget(state: PortOverlay, params: unknown): void {
@@ -2471,13 +2444,6 @@ function isInjectableTarget(target: CdpTargetListEntry): boolean {
     return false;
   }
   return isAgentOverlayInjectableUrl(target.url || "");
-}
-
-function isInjectableTargetInfo(targetInfo: Record<string, unknown>): boolean {
-  if (stringValue(targetInfo.type) !== "page") {
-    return false;
-  }
-  return isAgentOverlayInjectableUrl(stringValue(targetInfo.url) || "");
 }
 
 export function isAgentOverlayInjectableUrl(url: string): boolean {

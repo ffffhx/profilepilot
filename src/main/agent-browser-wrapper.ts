@@ -387,7 +387,7 @@ export function formatControlReturnedNotice(match: ProfilePilotNoticeMatch): str
 
 export function resolveRealAgentBrowser(env: NodeJS.ProcessEnv = process.env, selfPath = process.argv[1] || ""): string | null {
   const explicit = env.PROFILEPILOT_AGENT_BROWSER_REAL;
-  if (explicit && isExecutableFile(explicit)) {
+  if (explicit && isExecutableFile(explicit) && !isProfilePilotLauncher(explicit)) {
     return explicit;
   }
 
@@ -422,7 +422,8 @@ export function resolveRealAgentBrowser(env: NodeJS.ProcessEnv = process.env, se
     if (
       seen.has(comparable) ||
       comparable === comparableExecutablePath(self) ||
-      comparable === comparableExecutablePath(managedLauncher)
+      comparable === comparableExecutablePath(managedLauncher) ||
+      isProfilePilotLauncher(candidate)
     ) {
       continue;
     }
@@ -441,6 +442,16 @@ export function resolveRealAgentBrowser(env: NodeJS.ProcessEnv = process.env, se
     }
   }
   return null;
+}
+
+// A disposable HOME or a second installation can put a different managed shim
+// on PATH. Comparing only the current HOME's launcher recurses into that shim.
+function isProfilePilotLauncher(candidate: string): boolean {
+  if (/\.(exe|com)$/i.test(candidate)) return false;
+  try {
+    const source = readFileSync(candidate, "utf8");
+    return source.includes("profilepilot-agent-browser-wrapper") || source.includes("PROFILEPILOT_AGENT_BROWSER_WRAPPER");
+  } catch { return false; }
 }
 
 function cachedNativeAgentBrowserCandidates(homeDir: string): string[] {
@@ -597,7 +608,7 @@ export async function runAgentBrowserWrapper(
       typeof error === "object" &&
       error !== null &&
       "code" in error &&
-      error.code === "GATEWAY_ACTIVITY_UNAVAILABLE"
+      ["GATEWAY_ACTIVITY_UNAVAILABLE", "AGENT_TARGET_UNRESPONSIVE", "GATEWAY_CONNECT_FAILED"].includes(String(error.code))
     ) {
       await retireDetachedGatewaySession(leaseContext, env);
     } else {
@@ -730,6 +741,7 @@ interface SpawnedAgentBrowserResult {
 }
 
 export function classifyGatewayConnectFailure(output: string, spawnCode?: string): { code: string; message: string } {
+  if (/tab is not responding|did not recover after activation/i.test(output)) return { code: "AGENT_TARGET_UNRESPONSIVE", message: "Gateway 已连通，但选中的页面无响应；驱动未完成初始化，请先恢复该页面" };
   if (/0x800705AF|paging file|页面文件太小|Thread failed to start|out of memory/i.test(output) || spawnCode === "ENOMEM") return { code: "AGENT_DRIVER_RESOURCE_EXHAUSTED", message: "系统内存或页面文件不足，驱动/辅助进程无法启动；需先释放系统资源" };
   if (spawnCode) return { code: "AGENT_DRIVER_START_FAILED", message: `浏览器驱动无法启动（${spawnCode}）` };
   if (/401|Unauthorized|GATEWAY_TICKET/.test(output)) return { code: "GATEWAY_AUTH_REJECTED", message: "Gateway 拒绝连接凭证；票据可能过期、已使用或失效，不能仅凭 401 判定具体原因" };
@@ -2321,7 +2333,17 @@ export async function prepareGatewayTransport(
         project: projectFromEnv(env),
         branch: branchFromEnv(env)
       }, { homeDir, timeoutMs: 3_000 });
-      if (acquire.connectionActive === true) break;
+      if (acquire.connectionActive === true) {
+        // A live socket does not mean the CLI initialized its browser. In
+        // particular, connect can leave a socket open after a tab liveness
+        // failure; executing the next command would auto-launch a local browser.
+        if (connected.error || connected.signal || connected.status !== 0) {
+          await requestBrowserGateway({ action: "control", sessionId, command: "stop" }, { homeDir, timeoutMs: 3_000 }).catch(() => undefined);
+          const failure = classifyGatewayConnectFailure(lastDiagnostic, connected.error?.code);
+          throw gatewayWrapperError(failure.code, `${failure.message}（连接命令退出码 ${connected.status ?? "unknown"}）；已拒绝执行后续浏览器命令。`);
+        }
+        break;
+      }
       if (attempt < 3) {
         await new Promise<void>((resolve) => setTimeout(resolve, attempt === 1 ? 250 : 750));
       }
@@ -2356,7 +2378,12 @@ export async function prepareGatewayTransport(
       throw gatewayWrapperError("GATEWAY_CONNECT_FAILED", "agent-browser daemon 已启动，但 Gateway 未观察到有效连接");
     }
   }
-  return stripCdpOption(args);
+  // Bind the real CLI explicitly as well as the Gateway. Shell shims and
+  // environment defaults must not redirect the operation to another daemon.
+  const stripped = stripCdpOption(args);
+  return optionValue(stripped, "--session") === undefined
+    ? ["--session", sessionId, ...stripped]
+    : stripped;
 }
 
 function assertSessionIsNotBoundToAnotherGatewayProfile(

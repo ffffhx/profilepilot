@@ -430,7 +430,7 @@ if (connectIndex >= 0) {
       env,
       port
     );
-    assert.deepEqual(prepared, ["snapshot", "--json"]);
+    assert.deepEqual(prepared, ["--session", "cx-wrapper", "snapshot", "--json"]);
     const calls = readFileSync(callsPath, "utf8").trim().split("\n").map(JSON.parse);
     assert.equal(calls.length, 1);
     assert.deepEqual(readJsonLines(envCallsPath), [{
@@ -838,7 +838,7 @@ process.exit(fs.existsSync(process.env.READY_PATH) ? 0 : 8);
       port,
       { quietConnect: true }
     );
-    assert.deepEqual(prepared, ["snapshot"]);
+    assert.deepEqual(prepared, ["--session", "cx-wrapper-retry", "snapshot"]);
     assert.equal(readFileSync(callsPath, "utf8").trim().split("\n").length, 3);
     const status = await requestBrowserGateway({ action: "status" }, { homeDir: home });
     const profile = status.state.profiles.find((item) => item.publicPort === port);
@@ -1554,3 +1554,73 @@ function captureProcessWrites() {
     }
   };
 }
+
+test("agent-browser wrapper rejects a failed connect even when the Gateway socket is live", async () => {
+  // Keep the Unix control socket below macOS' sockaddr_un path limit.
+  const home = mkdtempSync(path.join(os.tmpdir(), "pp-gw-retry-"));
+  const fakeChrome = writeFakeChrome(home);
+  const fakeAgentBrowser = path.join(home, "retry-agent-browser.js");
+  const callsPath = path.join(home, "retry-calls.ndjson");
+  const holderPidPath = path.join(home, "retry-holder.pid");
+  const readyPath = path.join(home, "retry-holder.ready");
+  writeFileSync(fakeAgentBrowser, `#!${process.execPath}
+const fs = require("node:fs");
+const { spawn } = require("node:child_process");
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.CALLS_PATH, JSON.stringify(args) + "\\n");
+const attempts = fs.readFileSync(process.env.CALLS_PATH, "utf8").trim().split("\\n").length;
+
+const connectIndex = args.indexOf("connect");
+const url = args[connectIndex + 1];
+const code = \`const fs=require("node:fs");const ws=new WebSocket(\${JSON.stringify(url)});ws.addEventListener("open",()=>fs.writeFileSync(\${JSON.stringify(process.env.READY_PATH)},"ready"));ws.addEventListener("close",()=>process.exit(0));setInterval(()=>{},1000);\`;
+const child = spawn(process.execPath, ["-e", code], { detached: true, stdio: "ignore" });
+child.unref();
+fs.writeFileSync(process.env.HOLDER_PID_PATH, String(child.pid));
+fs.mkdirSync(require("node:path").join(process.env.HOME, ".agent-browser"), { recursive: true });
+fs.writeFileSync(require("node:path").join(process.env.HOME, ".agent-browser", process.env.AGENT_BROWSER_SESSION + ".pid"), String(child.pid));
+const wait = new Int32Array(new SharedArrayBuffer(4));
+const deadline = Date.now() + 2000;
+while (!fs.existsSync(process.env.READY_PATH) && Date.now() < deadline) Atomics.wait(wait, 0, 0, 20);
+console.error("tab is not responding and did not recover after activation");
+process.exit(1);
+`);
+  chmodSync(fakeAgentBrowser, 0o755);
+  const port = await freePort();
+  const daemon = testGatewayDaemon(home, { driverReconnectGraceMs: 3_000 });
+  await daemon.start();
+  try {
+    await requestBrowserGateway({
+      action: "launch-profile",
+      profileId: "profile-wrapper-retry",
+      profileName: "Profile Wrapper Retry",
+      publicPort: port,
+      executable: process.execPath,
+      args: [fakeChrome]
+    }, { homeDir: home });
+    await assert.rejects(() => prepareGatewayTransport(
+      fakeAgentBrowser,
+      ["--cdp", String(port), "snapshot"],
+      {
+        ...process.env,
+        HOME: home,
+        AGENT_BROWSER_SESSION: "cx-wrapper-retry",
+        CALLS_PATH: callsPath,
+        HOLDER_PID_PATH: holderPidPath,
+        READY_PATH: readyPath
+      },
+      port,
+      { quietConnect: true }
+    ), (error) => error.code === "AGENT_TARGET_UNRESPONSIVE");
+    assert.equal(readFileSync(callsPath, "utf8").trim().split("\n").length, 1);
+    const status = await requestBrowserGateway({ action: "status" }, { homeDir: home });
+    const profile = status.state.profiles.find((item) => item.publicPort === port);
+    assert.equal(profile.connectionActive, false);
+    assert.notEqual(profile.ownership, "agent");
+  } finally {
+    if (existsSync(holderPidPath)) {
+      try { process.kill(Number(readFileSync(holderPidPath, "utf8")), "SIGKILL"); } catch {}
+    }
+    await daemon.stop();
+    rmSync(home, { recursive: true, force: true });
+  }
+});

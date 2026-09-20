@@ -899,6 +899,7 @@ export interface ProfileManagerApi {
   getStartupSettings(): Promise<import("../shared/startup-settings").StartupSettings>;
   setStartupEnabled(enabled: boolean): Promise<import("../shared/startup-settings").StartupSettings>;
   getState(): Promise<AppState>;
+  getInitialState(): Promise<AppState>;
   onStateChanged(listener: (state: AppState) => void): () => void;
   getTakeoverHistory(): Promise<AgentTakeoverEvent[]>;
   createProfile(name: string): Promise<AppState>;

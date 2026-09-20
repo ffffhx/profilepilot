@@ -5,6 +5,10 @@ release/
 .DS_Store
 .env
 .cpm-data/
+release-win-debug/
+test-results/
+tmp/
+Microsoft/
 npm-debug.log*
 
 # Tailwind CSS build output

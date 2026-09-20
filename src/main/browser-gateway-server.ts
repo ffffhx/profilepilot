@@ -15,6 +15,7 @@ import { GatewayWebSocketPeer } from "./browser-gateway-websocket";
 import {
   AGENT_DENIED_TARGET_METHODS,
   AGENT_VIRTUALIZED_VIEWPORT_METHODS,
+  chromiumDownloadParams,
   GATEWAY_DEVICE_PRESETS,
   isAgentTargetActivityMethod,
   isAgentTargetInteractionMethod,
@@ -1328,6 +1329,7 @@ export class BrowserGatewayServer {
         message = { ...message, params: { ...params, flatten: true } };
       }
     }
+    if (method === "Browser.setDownloadBehavior") message = { ...message, params: chromiumDownloadParams(params) };
     const attachTargetId = connection.identity.kind === "agent" && method === "Target.attachToTarget" && typeof params.targetId === "string"
       ? params.targetId
       : "";

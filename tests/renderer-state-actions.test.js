@@ -3,7 +3,7 @@ const test = require("node:test");
 
 const { loadTsModule } = require("./helpers/load-ts-module.js");
 
-function loadStateActions(initialStore = {}) {
+function loadStateActions(initialStore = {}, api) {
   const stateStub = {
     store: {
       extensionScan: { profileId: "source", extensions: [] },
@@ -22,6 +22,7 @@ function loadStateActions(initialStore = {}) {
   const renderStub = { render() {} };
   const apiStub = {
     profileApi() {
+      if (api) return api;
       throw new Error("profileApi should be stubbed by tests that call async actions");
     }
   };
@@ -36,6 +37,30 @@ function loadStateActions(initialStore = {}) {
 
   return { actions, store: stateStub.store };
 }
+
+test("initial state renders while startup preferences are still loading; refresh still reads fresh state", async () => {
+  let finishStartup;
+  let scans = 0;
+  let initialReads = 0;
+  const cached = { profiles: [{ id: "cached" }], currentProfile: null };
+  const fresh = { profiles: [{ id: "fresh" }], currentProfile: null };
+  const startup = new Promise(resolve => { finishStartup = resolve; });
+  const { actions, store } = loadStateActions({}, {
+    getInitialState: async () => { initialReads++; return cached; },
+    getState: async () => { scans++; return fresh; },
+    getStartupSettings: () => startup
+  });
+  const loading = actions.loadState(true);
+  await Promise.resolve();
+  assert.equal(store.state, cached);
+  assert.equal(store.startupSettings, undefined);
+  finishStartup({ enabled: false });
+  await loading;
+  await actions.loadState();
+  assert.equal(store.state, fresh);
+  assert.equal(initialReads, 1);
+  assert.equal(scans, 1);
+});
 
 test("renderer normalizeMigrationProfileSelection clears invalid scan state and keeps source distinct from target", () => {
   const { actions, store } = loadStateActions({

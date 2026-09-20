@@ -21,7 +21,7 @@ test("main window enters Mini only through explicit user actions", () => {
 
   assert.doesNotMatch(source, /mainWindow\.on\("blur"/);
   assert.doesNotMatch(source, /mainWindowBlurTimer/);
-  assert.match(source, /mainWindow\.on\("minimize"/);
+  assert.doesNotMatch(source, /mainWindow\.on\("minimize"/);
   assert.match(source, /IPC_CHANNELS\.showMiniWindow/);
   assert.match(rendererSource, /action === "open-mini-window"/);
 });

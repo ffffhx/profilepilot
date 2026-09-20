@@ -73,7 +73,8 @@ async function runElectron({ homeDir, dataDir, electronDataDir }) {
         CPM_DATA_DIR: dataDir,
         CPM_NATIVE_CHROME_USER_DATA_DIR: path.join(dataDir, "native-chrome"),
         CPM_E2E_DETERMINISTIC: "1",
-        CPM_ELECTRON_SMOKE_TEST: "1"
+        CPM_ELECTRON_SMOKE_TEST: "1",
+        CPM_START_VIEW: "browser"
       },
       stdio: ["ignore", "pipe", "pipe"]
     });

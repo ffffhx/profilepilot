@@ -2406,7 +2406,7 @@ if (store.viewMode === "mini") {
   render();
 }
 
-loadState()
+loadState(true)
   .then(() => {
     // 首次状态就绪后立刻补一拍 Bifrost 快照，徽标不用等下一个轮询周期。
     if (store.viewMode === "main") {
@@ -2414,6 +2414,10 @@ loadState()
     }
   })
   .catch((error: unknown) => {
+    if (store.state) {
+      setToast(formatErrorMessage(error), "error");
+      return;
+    }
     appRoot.innerHTML = `<div class="app-loading p-8 text-muted font-mono text-[13px] tracking-[0.08em] uppercase">${escapeHtml(formatErrorMessage(error))}</div>`;
   });
 

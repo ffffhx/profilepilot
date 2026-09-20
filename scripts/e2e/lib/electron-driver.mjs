@@ -239,6 +239,7 @@ export async function launchProfilePilotE2e(options = {}) {
       CPM_E2E_DRIVER_SOCKET: socketPath,
       CPM_E2E_ENABLE_GLOBAL_SHORTCUTS: options.enableGlobalShortcuts ? "1" : "0",
       CPM_E2E_DETERMINISTIC: "1",
+      CPM_START_VIEW: "browser",
       ...options.env
     },
     stdio: ["ignore", "pipe", "pipe"]
@@ -259,7 +260,7 @@ export async function launchProfilePilotE2e(options = {}) {
     socket = await connectSocket(socketPath, child, () => ({ stdout, stderr }), options.timeoutMs || 15_000);
     driver = new ElectronDriver(socket);
     await driver.request("ping");
-    await driver.waitFor("h1", (snapshot) => snapshot.text === "ProfilePilot", {
+    await driver.waitFor("h1", (snapshot) => snapshot.text === (options.env?.CPM_START_VIEW === "tasks" ? "任务工作台" : "ProfilePilot"), {
       timeoutMs: process.platform === "win32" ? 30_000 : 10_000
     });
   } catch (error) {

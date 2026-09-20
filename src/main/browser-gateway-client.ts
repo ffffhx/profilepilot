@@ -9,9 +9,9 @@ import type { GatewayDriverKind } from "./browser-gateway-control";
 import { isRawCdpMethodAllowed } from "./browser-gateway-policy";
 
 const DEFAULT_TIMEOUT_MS = 3_000;
-// Version 14 requires the reviewed Raw CDP method allowlist. An older idle
-// daemon must be replaced instead of silently retaining the previous policy.
-export const BROWSER_GATEWAY_PROTOCOL_VERSION = 14;
+// Version 15 also normalizes Windows download directories for Chromium.
+// Replace an older idle daemon, while preserving pipes for open user browsers.
+export const BROWSER_GATEWAY_PROTOCOL_VERSION = 15;
 
 export type GatewayControlRequest =
   | { action: "ping" }

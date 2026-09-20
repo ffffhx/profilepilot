@@ -78,6 +78,7 @@ export function render(): void {
           </div>
         </div>
         <div class="header-actions">
+          <a class="primary" href="./tasks.html" style="padding: 9px 14px; border-radius: 8px; text-decoration: none;">浏览器任务 ↗</a>
           <button type="button" role="switch" data-action="toggle-startup"
             aria-checked="${store.startupSettings?.enabled === true}" aria-label="开机自启动"
             aria-describedby="startup-note"

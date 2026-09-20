@@ -6,12 +6,14 @@ import { AppState, PublicProfile } from "./types";
 const ONBOARDING_STORAGE_KEY = "profilepilot:onboarding:v1:seen";
 let onboardingEvaluated = false;
 
-export async function loadState(): Promise<void> {
-  const [state, startupSettings] = await Promise.all([
-    profileApi().getState(), profileApi().getStartupSettings()
+export async function loadState(initial = false): Promise<void> {
+  await Promise.all([
+    (initial ? profileApi().getInitialState() : profileApi().getState()).then(applyState),
+    profileApi().getStartupSettings().then((settings) => {
+      store.startupSettings = settings;
+      render();
+    })
   ]);
-  store.startupSettings = startupSettings;
-  applyState(state);
   if (store.modal?.kind === "onboarding") {
     void refreshAgentIntegrationDiagnostic().catch(() => undefined);
   }

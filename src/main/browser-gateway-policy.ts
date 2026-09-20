@@ -51,6 +51,17 @@ export const AGENT_VIRTUALIZED_VIEWPORT_METHODS = new Set([
   "Emulation.setVisibleSize"
 ]);
 
+// Rust's canonicalize() produces extended Windows paths. Chromium's download
+// manager expects a regular drive/UNC path and otherwise cancels the download.
+// Preserve the destination; this does not grant additional CDP permissions.
+export function chromiumDownloadParams(params: Record<string, unknown>, platform: NodeJS.Platform = process.platform): Record<string, unknown> {
+  if (platform !== "win32" || typeof params.downloadPath !== "string") return params;
+  const value = params.downloadPath;
+  if (value.startsWith("\\\\?\\UNC\\")) return { ...params, downloadPath: "\\\\" + value.slice(8) };
+  if (/^\\\\\?\\[A-Za-z]:\\/.test(value)) return { ...params, downloadPath: value.slice(4) };
+  return params;
+}
+
 // Auto-attach initializes every tab. These methods do not prove that the Agent
 // intentionally selected a page and therefore do not update the logical target.
 const AGENT_PASSIVE_TARGET_METHODS = new Set([

@@ -276,6 +276,12 @@ export class ProfileManager {
   private registryUpdateChain: Promise<unknown> = Promise.resolve();
   private focusProfileCache = new Map<string, PublicProfile>();
   private focusProfileCacheUpdatedAt = 0;
+  // Presentation only: navigation can reuse the last complete scan. Commands
+  // and explicit refreshes still call getState() and validate current state.
+  private displayState: AppState | null = null;
+  private initialStateInFlight: Promise<AppState> | null = null;
+  private stateScanSequence = 0;
+  private displayStateSequence = 0;
 
   constructor(
     private readonly dataDir = defaultDataDir(),
@@ -314,7 +320,22 @@ export class ProfileManager {
     }
   }
 
+  getCachedState(): AppState | null {
+    return this.displayState;
+  }
+
+  getInitialState(): Promise<AppState> {
+    if (this.displayState) return Promise.resolve(this.displayState);
+    if (!this.initialStateInFlight) {
+      this.initialStateInFlight = this.getState().finally(() => {
+        this.initialStateInFlight = null;
+      });
+    }
+    return this.initialStateInFlight;
+  }
+
   async getState(): Promise<AppState> {
+    const scanSequence = ++this.stateScanSequence;
     const gatewayStatus = await this.readGatewayStatus();
     const registry = await this.loadRegistryWithUniqueFixedCdpPorts(gatewayStatus);
     const nativeChromeProfiles = await scanNativeChromeProfiles();
@@ -598,6 +619,10 @@ export class ProfileManager {
       shellIntegration: await getShellIntegrationStatus()
     };
     this.rememberProfilesForFocus(profiles);
+    if (scanSequence >= this.displayStateSequence) {
+      this.displayState = state;
+      this.displayStateSequence = scanSequence;
+    }
     return state;
   }
 

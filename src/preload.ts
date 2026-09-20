@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
 import { IPC_CHANNELS } from "./shared/ipc";
+import { TASK_CHANNEL, TASK_CHANGED, type TaskApi, type TaskSnapshot } from "./shared/tasks";
 import type {
   AccountSyncDiffResult,
   AccountSyncRequest,
@@ -44,6 +45,7 @@ const profileManagerApi: ProfileManagerApi = {
   getStartupSettings: () => ipcRenderer.invoke(IPC_CHANNELS.getStartupSettings),
   setStartupEnabled: (enabled: boolean) => ipcRenderer.invoke(IPC_CHANNELS.setStartupEnabled, enabled),
   getState: (): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.getState),
+  getInitialState: (): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.getInitialState),
   onStateChanged: (listener: (state: AppState) => void): (() => void) => {
     const handler = (_event: IpcRendererEvent, state: AppState): void => {
       listener(state);
@@ -218,3 +220,31 @@ const profileManagerApi: ProfileManagerApi = {
 };
 
 contextBridge.exposeInMainWorld("profileManager", profileManagerApi);
+const taskApi: TaskApi = {
+  snapshot: () => ipcRenderer.invoke(TASK_CHANNEL, "snapshot"),
+  create: (input) => ipcRenderer.invoke(TASK_CHANNEL, "create", input),
+  retryItems: (id, items) => ipcRenderer.invoke(TASK_CHANNEL, "retryItems", id, items),
+  control: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "control", ...args),
+  reply: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "reply", ...args),
+  saveMaterial: (input) => ipcRenderer.invoke(TASK_CHANNEL, "saveMaterial", input),
+  deleteMaterial: (id) => ipcRenderer.invoke(TASK_CHANNEL, "deleteMaterial", id),
+  importAttachments: () => ipcRenderer.invoke(TASK_CHANNEL, "importAttachments"),
+  deleteAttachment: (id) => ipcRenderer.invoke(TASK_CHANNEL, "deleteAttachment", id),
+  saveSettings: (input) => ipcRenderer.invoke(TASK_CHANNEL, "saveSettings", input),
+  testConnection: () => ipcRenderer.invoke(TASK_CHANNEL, "testConnection"),
+  saveJevSettings: (input) => ipcRenderer.invoke(TASK_CHANNEL, "saveJevSettings", input),
+  testJevConnection: () => ipcRenderer.invoke(TASK_CHANNEL, "testJevConnection"),
+  openJevConsole: (page) => ipcRenderer.invoke(TASK_CHANNEL, "openJevConsole", page),
+  saveSchedule: (input) => ipcRenderer.invoke(TASK_CHANNEL, "saveSchedule", input),
+  deleteSchedule: (id) => ipcRenderer.invoke(TASK_CHANNEL, "deleteSchedule", id),
+  saveTemplate: (input) => ipcRenderer.invoke(TASK_CHANNEL, "saveTemplate", input),
+  deleteTemplate: (id) => ipcRenderer.invoke(TASK_CHANNEL, "deleteTemplate", id),
+  deleteTask: (id) => ipcRenderer.invoke(TASK_CHANNEL, "deleteTask", id),
+  exportData: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "exportData", ...args),
+  openArtifact: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "openArtifact", ...args),
+  onChanged: (listener) => {
+    const handler = (_event: IpcRendererEvent, snapshot: TaskSnapshot): void => listener(snapshot);
+    ipcRenderer.on(TASK_CHANGED, handler); return () => ipcRenderer.removeListener(TASK_CHANGED, handler);
+  }
+};
+contextBridge.exposeInMainWorld("tasks", taskApi);

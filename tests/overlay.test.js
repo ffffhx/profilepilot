@@ -1911,6 +1911,27 @@ test("AgentOverlayManager ignores late attach results after dispose and rolls ba
   assert.deepEqual(methods.filter((method) => method === "Target.detachFromTarget"), ["Target.detachFromTarget"]);
 });
 
+test("AgentOverlayManager never adopts or detaches another client's attached session", async () => {
+  const calls = [];
+  const client = { close() {}, async send(method, params, timeout, sessionId) { calls.push({ method, params, sessionId }); return {}; } };
+  const manager = new AgentOverlayManager({ onStop: async () => {}, inputGuard: { sync() {}, dispose() {} } });
+  const state = createOverlayState({ browserClient: client });
+  const page = createOverlayPage({ sessionId: "overlay-owned", activeContextId: 17 });
+  state.pages.set(page.targetId, page);
+  manager.ports.set(state.port, state);
+  try {
+    manager.handleBrowserEvent(state, "Target.attachedToTarget", {
+      sessionId: "agent-owned",
+      targetInfo: { targetId: page.targetId, type: "page", url: "https://fixture.test/" }
+    });
+    const recordedSession = page.sessionId;
+    await manager.teardownPage(state, page);
+    assert.equal(recordedSession, "overlay-owned", "broadcast attach events are not ownership grants");
+    assert.equal(calls.some(c => c.sessionId === "agent-owned" || c.params?.sessionId === "agent-owned"), false,
+      "overlay initialization and cleanup must never use the Agent's CDP session");
+  } finally { await manager.dispose(); }
+});
+
 function createOverlayState(overrides = {}) {
   return {
     port: 9480,

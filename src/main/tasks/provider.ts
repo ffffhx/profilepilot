@@ -4,7 +4,7 @@ export function providerEnvironment(settings: TaskSettings, key: string, cwd: st
   const hostname = new URL(settings.baseUrl).hostname;
   const compatible = hostname !== "api.anthropic.com";
   const moonshot = ["api.moonshot.cn", "api.moonshot.ai", "api.kimi.com"].includes(hostname);
-  const bearer = (settings.authMode || (moonshot ? "bearer" : "apiKey")) === "bearer";
+  const bearer = (settings.authMode || (moonshot || hostname === "api.deepseek.com" ? "bearer" : "apiKey")) === "bearer";
   return {
     ANTHROPIC_API_KEY: bearer ? undefined : key, ANTHROPIC_AUTH_TOKEN: bearer ? key : undefined,
     ANTHROPIC_BASE_URL: settings.baseUrl, ANTHROPIC_MODEL: settings.model,

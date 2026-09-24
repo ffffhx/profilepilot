@@ -9,13 +9,16 @@ import type { GatewayDriverKind } from "./browser-gateway-control";
 import { isRawCdpMethodAllowed } from "./browser-gateway-policy";
 
 const DEFAULT_TIMEOUT_MS = 3_000;
-// Version 15 also normalizes Windows download directories for Chromium.
+// Version 16 adds protected Electron renderer connections.
 // Replace an older idle daemon, while preserving pipes for open user browsers.
-export const BROWSER_GATEWAY_PROTOCOL_VERSION = 15;
+export const BROWSER_GATEWAY_PROTOCOL_VERSION = 16;
 
 export type GatewayControlRequest =
   | { action: "ping" }
   | { action: "subscribe" }
+  | { action: "attach-electron"; profileId: string; profileName: string; publicPort: number; backendPort: number }
+  | { action: "reconnect-electron"; publicPort: number }
+  | { action: "detach-electron"; profileId: string; publicPort: number }
   | {
       action: "launch-profile";
       profileId: string;
@@ -358,6 +361,7 @@ export async function ensureBrowserGatewayDaemon(options: {
   const daemonScriptPath = options.daemonScriptPath || path.join(__dirname, "browser-gateway-daemon.js");
   const child = spawn(runtimePath, [daemonScriptPath], {
     detached: true,
+    windowsHide: true,
     stdio: "ignore",
     env: {
       ...process.env,

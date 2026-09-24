@@ -14,6 +14,13 @@ const task = { id: randomUUID(), sessionId: `pp-verify-${randomUUID()}`, port: g
 const upload = path.join(root, "test-resume.txt"); await writeFile(upload, "Test applicant, example.test only");
 task.attachments.push({ id: "fixture-resume", name: "test-resume.txt", path: upload, size: 33 });
 const browser = new WrapperBrowser(root);
+if (process.env.PP_VERIFY_TRACE === "1") {
+  const command = browser.command;
+  browser.command = async (task, args) => {
+    console.log(`Browser command: ${args[0]}`);
+    return command(task, args);
+  };
+}
 const action = async (kind, value, ref) => browser.execute(task, { kind, value, ref, effect: "read", summary: "本地验收" });
 function refFor(snapshot, label) {
   const line = snapshot.split("\n").find(line => line.includes(label) && /@e\d+|ref=e\d+/.test(line));

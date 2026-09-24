@@ -53,6 +53,7 @@ interface GatewayDeviceEmulationState extends GatewayDeviceEmulation {
 
 interface GatewayRoute {
   publicPort: number;
+  kind: "browser" | "electron";
   backend: GatewayCdpBackend;
   server: Server;
   connections: Set<GatewayConnection>;
@@ -156,7 +157,7 @@ export class BrowserGatewayServer {
     this.host = options.host || "127.0.0.1";
   }
 
-  async registerBackend(input: { publicPort: number; backend: GatewayCdpBackend }): Promise<void> {
+  async registerBackend(input: { publicPort: number; backend: GatewayCdpBackend; kind?: "browser" | "electron" }): Promise<void> {
     if (this.routes.has(input.publicPort)) {
       throw new Error(`Gateway port ${input.publicPort} is already registered`);
     }
@@ -165,6 +166,7 @@ export class BrowserGatewayServer {
     });
     const route: GatewayRoute = {
       publicPort: input.publicPort,
+      kind: input.kind || "browser",
       backend: input.backend,
       server,
       connections: new Set(),
@@ -317,7 +319,7 @@ export class BrowserGatewayServer {
         targetInfos?: Array<Record<string, unknown>>;
       };
       const target = (result.targetInfos || []).find((candidate) => candidate.targetId === targetId);
-      if (target?.type === "page") {
+      if (target && (target.type === "page" || route.kind === "electron" && target.type === "webview")) {
         return {
           targetId,
           title: typeof target.title === "string" ? target.title : "",
@@ -376,7 +378,7 @@ export class BrowserGatewayServer {
       targetInfos?: Array<Record<string, unknown>>;
     };
     const target = (result.targetInfos || []).find((candidate) => candidate.targetId === targetId);
-    if (!target || target.type !== "page") {
+    if (!target || !(target.type === "page" || route.kind === "electron" && target.type === "webview")) {
       this.clearSessionTarget(route, sessionId);
       const error = new Error(`目标页面 ${targetId} 已不存在；为避免显示无关页面，ProfilePilot 已拒绝自动切页`) as Error & { code?: string };
       error.code = "GATEWAY_AGENT_TARGET_MISMATCH";
@@ -505,6 +507,9 @@ export class BrowserGatewayServer {
     assertCurrent();
     const route = this.requireRoute(input.publicPort);
     const timeoutMs = input.timeoutMs || 15_000;
+    if (route.kind === "electron" && input.method === "Target.createTarget") {
+      throw new Error("Electron 自动化仅操作已有窗口；请从应用中打开新窗口。");
+    }
     if (AGENT_VIRTUALIZED_VIEWPORT_METHODS.has(input.method)) {
       return {};
     }
@@ -895,7 +900,7 @@ export class BrowserGatewayServer {
     const result = await this.sendRaw(route, "Target.getTargets", {}, timeoutMs) as {
       targetInfos?: Array<Record<string, unknown>>;
     };
-    const target = (result.targetInfos || []).find((candidate) => candidate.type === "page" && typeof candidate.targetId === "string");
+    const target = (result.targetInfos || []).find((candidate) => (candidate.type === "page" || route.kind === "electron" && candidate.type === "webview") && typeof candidate.targetId === "string");
     if (!target?.targetId) {
       const error = new Error("当前没有可供 Raw CDP 操作的页面") as Error & { code?: string };
       error.code = "RAW_CDP_TARGET_NOT_FOUND";
@@ -1248,7 +1253,7 @@ export class BrowserGatewayServer {
     }
     let targetIntent: number | undefined;
     if (connection.identity.kind === "agent") {
-      if (AGENT_DENIED_TARGET_METHODS.has(method)) {
+      if (AGENT_DENIED_TARGET_METHODS.has(method) || route.kind === "electron" && ["Target.createTarget", "Browser.close"].includes(method)) {
         const message = method === "Target.sendMessageToTarget"
           ? "Target.sendMessageToTarget is disabled; use flattened CDP sessions"
           : `${method} is disabled by ProfilePilot Gateway`;
@@ -1870,7 +1875,7 @@ export class BrowserGatewayServer {
       targetInfos?: Array<Record<string, unknown>>;
     };
     const target = (result.targetInfos || []).find((candidate) => candidate.targetId === targetId);
-    if (!target || target.type !== "page") {
+    if (!target || !(target.type === "page" || route.kind === "electron" && target.type === "webview")) {
       const error = new Error(`页面 Target ${targetId} 不存在`) as Error & { code?: string };
       error.code = "AGENT_TARGET_NOT_FOUND";
       throw error;

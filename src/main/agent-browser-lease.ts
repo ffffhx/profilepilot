@@ -185,6 +185,7 @@ export function findAvailableAgentBrowserProfileCandidatesSync(
   input: {
     excludedPort: number;
     requestedSession?: string;
+    env?: NodeJS.ProcessEnv;
   },
   homeDir = os.homedir(),
   now = Date.now()
@@ -201,17 +202,43 @@ export function listAgentBrowserProfileCatalogSync(
   input: {
     excludedPort?: number;
     requestedSession?: string;
+    env?: NodeJS.ProcessEnv;
   } = {},
   homeDir = os.homedir(),
   now = Date.now()
 ): AgentBrowserProfileCatalogEntry[] {
   const snapshot = readAgentBrowserRuntimeProfilesSync(homeDir);
   const updatedAt = snapshot ? Date.parse(snapshot.updatedAt) : Number.NaN;
-  if (!snapshot || !Number.isFinite(updatedAt) || now - updatedAt > RUNTIME_SNAPSHOT_MAX_AGE_MS) {
-    return [];
+  const fresh = snapshot && Number.isFinite(updatedAt) && now - updatedAt <= RUNTIME_SNAPSHOT_MAX_AGE_MS;
+  const profiles = new Map((fresh ? snapshot.profiles : []).map((profile) => [profile.cdpPort, profile]));
+  // Registry entries remain launchable when the UI is closed or its snapshot expires.
+  // Always check live leases below; an expired snapshot does not imply a free lease.
+  const registryEnv = input.env ?? (homeDir === os.homedir() ? process.env : {});
+  for (const registryPath of profileRegistryCandidates(registryEnv, homeDir)) {
+    try {
+      const registry = JSON.parse(readFileSync(registryPath, "utf8")) as { profiles?: StoredProfile[] };
+      if (!Array.isArray(registry.profiles)) continue;
+      for (const stored of registry.profiles) {
+        const port = normalizePort(Number(stored.fixedCdpPort)) || normalizePort(Number(stored.lastCdpPort));
+        if (!port || !stored.id || !stored.name || !stored.dirName) continue;
+        const profilesRoot = path.resolve(path.dirname(registryPath), "profiles");
+        const profilePath = path.resolve(profilesRoot, stored.dirName);
+        if (profilePath !== profilesRoot && !profilePath.startsWith(`${profilesRoot}${path.sep}`)) continue;
+        const runtime = profiles.get(port);
+        profiles.set(port, {
+          profileId: `isolated:${stored.id}`, profileName: stored.name, cdpPort: port,
+          source: "isolated", running: Boolean(runtime?.profileId === `isolated:${stored.id}` && runtime.running),
+          agentAccessDisabled: stored.agentAccessDisabled,
+          clonedFromProfileId: stored.clonedFromProfileId || undefined,
+          projectTag: stored.projectTag || undefined,
+          lastLaunchedAt: stored.lastLaunchedAt || undefined
+        });
+      }
+      break;
+    } catch { /* Try the next supported platform data directory. */ }
   }
   const requestedSession = safeSessionName(input.requestedSession);
-  return snapshot.profiles
+  return [...profiles.values()]
     .filter((profile) => profile.cdpPort !== input.excludedPort)
     .map((profile): AgentBrowserProfileCatalogEntry => {
       const occupancy = readActiveAgentBrowserProfileOccupancySync(profile.cdpPort, homeDir, now);

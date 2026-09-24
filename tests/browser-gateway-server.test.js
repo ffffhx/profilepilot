@@ -36,7 +36,7 @@ class FakeBackend {
   }
 }
 
-async function makeHarness(serverOptions = {}) {
+async function makeHarness(serverOptions = {}, kind = "browser") {
   const port = await freePort();
   const home = mkdtempSync(path.join(os.tmpdir(), "profilepilot-gateway-server-"));
   let gateway;
@@ -48,7 +48,7 @@ async function makeHarness(serverOptions = {}) {
   control.registerProfile({ profileId: "profile-a", profileName: "Profile A", publicPort: port });
   gateway = new BrowserGatewayServer(control, { internalSecret: "internal-secret", ...serverOptions });
   const backend = new FakeBackend();
-  await gateway.registerBackend({ publicPort: port, backend });
+  await gateway.registerBackend({ publicPort: port, backend, kind });
   return {
     port,
     home,
@@ -61,6 +61,38 @@ async function makeHarness(serverOptions = {}) {
     }
   };
 }
+
+test("Electron routes virtualize focus and webview activation and cannot create or close the application", async () => {
+  const h = await makeHarness({}, "electron");
+  try {
+    h.backend.onSend = text => {
+      const message = JSON.parse(text);
+      const result = message.method === "Target.getTargets"
+        ? { targetInfos: [{ targetId: "webview", type: "webview", title: "App", url: "file:///app.html" }] }
+        : message.method === "Target.attachToTarget" ? { sessionId: "flat-app" } : {};
+      queueMicrotask(() => h.backend.emit(JSON.stringify({ id: message.id, sessionId: message.sessionId, result })));
+    };
+    const acquired = h.control.acquire({ publicPort: h.port, sessionId: "cx-electron", daemonInstanceId: "daemon-electron" });
+    const ws = await openWebSocket(`ws://127.0.0.1:${h.port}/devtools/browser/gateway?ticket=${encodeURIComponent(acquired.ticket)}`);
+    let id = 0;
+    const send = async (method, params = {}, sessionId) => {
+      const response = nextMessage(ws);
+      ws.send(JSON.stringify({ id: ++id, method, params, sessionId }));
+      return response;
+    };
+    assert.ok((await send("Target.attachToTarget", { targetId: "webview", flatten: true })).result);
+    assert.ok((await send("Target.activateTarget", { targetId: "webview" })).result);
+    assert.ok((await send("Page.bringToFront", {}, "flat-app")).result);
+    assert.ok((await send("Browser.setWindowBounds", { windowId: 1, bounds: { windowState: "maximized" } })).result);
+    assert.equal((await h.gateway.getAgentTarget(h.port, "cx-electron")).targetId, "webview");
+    for (const method of ["Target.createTarget", "Browser.close"]) {
+      assert.equal((await send(method, { url: "about:blank" })).error.code, -32601);
+    }
+    const forbidden = new Set(["Target.activateTarget", "Page.bringToFront", "Browser.setWindowBounds", "Target.createTarget", "Browser.close"]);
+    assert.ok(!h.backend.sent.map(JSON.parse).some(message => forbidden.has(message.method)));
+    ws.close();
+  } finally { await h.cleanup(); }
+});
 
 test("Gateway transparently remaps CDP request ids and broadcasts events", async () => {
   const h = await makeHarness();

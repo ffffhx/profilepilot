@@ -48,6 +48,9 @@ test("compatible provider maps auxiliary models and selects exactly one auth mec
   assert.equal(env.ANTHROPIC_DEFAULT_HAIKU_MODEL, "kimi-k3"); assert.equal(env.CLAUDE_CONFIG_DIR, "test-cwd");
   const standard = providerEnvironment({ baseUrl: "https://example.test/anthropic", model: "custom", authMode: "apiKey" }, "test-key", "cwd");
   assert.equal(standard.ANTHROPIC_API_KEY, "test-key"); assert.equal(standard.ANTHROPIC_AUTH_TOKEN, undefined);
+  const deepseek = providerEnvironment({ baseUrl: "https://api.deepseek.com/anthropic", model: "deepseek-flash" }, "test-key", "cwd");
+  assert.equal(deepseek.ANTHROPIC_AUTH_TOKEN, "test-key"); assert.equal(deepseek.ANTHROPIC_API_KEY, undefined);
+  for (const tier of ["OPUS", "SONNET", "HAIKU", "FABLE"]) assert.equal(deepseek[`ANTHROPIC_DEFAULT_${tier}_MODEL`], "deepseek-flash");
 });
 
 test("record-page navigation does not consume submission authorization", () => {
@@ -69,6 +72,40 @@ test("Windows pointer preparation paints the frame and sends a submission click 
   assert.equal(require("node:fs").existsSync(commands[1][1]), false);
 });
 
+for (const status of ["cancelled", "failed", "partial", "completed"]) {
+  test(`continue ${status} task preserves its conversation and spent authorization`, async t => {
+    const f = fixture(t); f.service.runs.delete(f.task.id);
+    f.task.status = status; f.task.port = 9223; f.task.sdkSessionId = "original-sdk-session";
+    f.task.result = { summary: "Earlier result", evidence: ["receipt"], remaining: ["verify"] };
+    f.task.items = [{ id: "done", label: "Done", status: "completed" }];
+    f.task.grant = { origin: "https://example.test", effects: ["submit"], maxActions: 3, used: 2 };
+    const originalId = f.task.id, sessionId = f.task.sessionId;
+    const message = "只补充今天的内容，保留上次结果。\n不要重复提交。";
+    await f.service.control(originalId, status === "cancelled" ? "rerun" : "resume", message);
+    assert.equal(f.store.data.tasks.length, 1);
+    assert.equal(f.task.id, originalId); assert.equal(f.task.sessionId, sessionId);
+    assert.equal(f.task.sdkSessionId, "original-sdk-session");
+    assert.equal(f.task.status, "queued"); assert.equal(f.task.result, undefined);
+    assert.equal(f.task.items[0].status, "completed"); assert.equal(f.task.grant.used, 2);
+    assert.equal(f.task.resumeContext.observed, false);
+    assert.ok(f.task.events.some(event => event.text.includes("Earlier result")));
+    assert.equal(f.task.events.filter(event => event.kind === "user" && event.text === message).length, 1);
+    assert.equal(f.task.events.filter(event => event.kind === "user").at(-1).text, message);
+    assert.equal(f.task.events.filter(event => event.kind === "user").length, 2, "only the original request and the actual follow-up belong to the user");
+    assert.deepEqual(f.calls, [], "released browser must be reacquired through the normal ownership checks");
+    await assert.rejects(f.service.control(originalId, "resume"), /正在执行或排队/);
+  });
+}
+
+test("continuation refuses an exhausted budget without altering history", async t => {
+  const f = fixture(t); f.service.runs.delete(f.task.id); f.task.status = "cancelled";
+  f.task.usage.actions = f.task.limits.actions;
+  f.task.result = { summary: "Previous result", evidence: [], remaining: [] };
+  await assert.rejects(f.service.control(f.task.id, "resume"), /运行限制/);
+  assert.equal(f.task.status, "cancelled"); assert.equal(f.task.result.summary, "Previous result");
+  assert.equal(f.store.data.tasks.length, 1);
+});
+
 function fixture(t) {
   const root = mkdtempSync(path.join(os.tmpdir(), "pp-tasks-"));
   const store = new TaskStore(root);
@@ -87,6 +124,57 @@ function fixture(t) {
   t.after(async () => { await service.close(); rmSync(root, { recursive: true, force: true }); });
   return { store, task, service, run, browser, calls, setSnapshot: (value) => snapshot = value };
 }
+
+test('changing action summaries cannot bypass repeated no-progress handoff', async t => {
+  const f = fixture(t); f.task.port = 9223;
+  for (let i = 0; i < 3; i++) {
+    await f.service.handleTool(f.task, f.run, 'observe', {});
+    await f.service.handleTool(f.task, f.run, 'browser_action', { kind: 'press', value: 'Tab', effect: 'read', version: f.task.observation.version, summary: `Try ${i}` });
+  }
+  await f.service.handleTool(f.task, f.run, 'observe', {});
+  await assert.rejects(f.service.handleTool(f.task, f.run, 'browser_action', { kind: 'press', value: 'Tab', effect: 'read', version: f.task.observation.version, summary: 'Another description' }), /停止重复尝试/);
+  assert.equal(f.task.status, 'waiting_user'); assert.equal(f.task.pending.kind, 'handoff');
+  assert.equal(f.task.receipts.length, 3); assert.ok(f.calls.includes('handoff'));
+});
+
+test('repeating an action on pages that actually change remains allowed', async t => {
+  const f = fixture(t);
+  for (let i = 0; i < 5; i++) {
+    f.setSnapshot(`Page ${i}`);
+    await f.service.handleTool(f.task, f.run, 'observe', {});
+    await f.service.handleTool(f.task, f.run, 'browser_action', { kind: 'press', value: 'ArrowDown', effect: 'read', version: f.task.observation.version, summary: 'Next' });
+  }
+  assert.equal(f.task.status, 'running'); assert.equal(f.task.receipts.length, 5);
+});
+
+test('human return retains context and requires observation before new navigation', async t => {
+  const f = fixture(t);
+  f.task.resumeContext = { reason: '登录', url: 'https://example.test/', returnedAt: new Date().toISOString(), observed: false };
+  const action = { kind: 'open', value: 'https://example.test/login', effect: 'read', summary: 'Check login' };
+  const blocked = await f.service.handleTool(f.task, f.run, 'browser_action', action);
+  assert.equal(blocked.isError, true); assert.equal(f.calls.length, 0);
+  const observation = await f.service.handleTool(f.task, f.run, 'observe', {});
+  assert.equal(f.task.resumeContext.observed, true);
+  assert.equal(JSON.parse(observation.content[0].text).resumeContext.reason, '登录');
+});
+
+test('main model can request DOM layout when regular page refs omit an icon', async t => {
+  const f = fixture(t);
+  f.browser.observeFast = async () => ({ ...(await f.browser.observe()), fast: { document: 'd', guard: 'g', candidates: [{ ref: 'e1', role: 'button', label: '个人中心', kind: 'click', offscreen: true }] } });
+  const result = await f.service.handleTool(f.task, f.run, 'observe', { layout: true });
+  assert.equal(JSON.parse(result.content[0].text).fast.candidates[0].label, '个人中心');
+  assert.ok(f.task.observation.fast);
+});
+
+test('cancellation records an honest partial summary without claiming clicks completed the goal', async t => {
+  const f = fixture(t);
+  await f.service.handleTool(f.task, f.run, 'observe', {});
+  await f.service.handleTool(f.task, f.run, 'browser_action', { kind: 'press', value: 'Tab', effect: 'read', version: f.task.observation.version, summary: '查找账号入口' });
+  await f.service.control(f.task.id, 'cancel');
+  assert.equal(f.task.status, 'cancelled'); assert.match(f.task.result.summary, /查找账号入口/);
+  assert.match(f.task.result.summary, /尚未确认全部完成/);
+  assert.equal(f.task.result.evidence.length, 0); assert.ok(f.task.result.remaining.length);
+});
 
 for (const status of ["completed", "partial", "failed"]) {
   test(`deadline drains a ${status} task while the SDK final response is pending`, async t => {

@@ -217,6 +217,7 @@ export async function launchProfilePilotE2e(options = {}) {
     writeFile(path.join(homeDir, ".claude", "CLAUDE.md"), "# ProfilePilot E2E reference\n", "utf8")
   ]);
 
+  await options.prepareFixture?.({ fixtureRoot, homeDir, dataDir, electronDataDir });
   const electronArgs = [];
   if (process.platform === "darwin") {
     // Keep safe-storage contents isolated from the real login keychain.

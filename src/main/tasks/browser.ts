@@ -5,13 +5,18 @@ import path from "node:path";
 import { z } from "zod";
 import type { BrowserAction, BrowserObservation, BrowserTask, Effect } from "../../shared/tasks";
 import { requestBrowserGateway } from "../browser-gateway-client";
-import { FastBrowser } from "./fast-browser";
+import { FastBrowser, pageViewport } from "./fast-browser";
+import { bundledBrowserExecutable } from "./browser-runtime";
 
 export const browserActionSchema = z.object({
-  kind: z.enum(["open", "click", "fill", "select", "check", "uncheck", "press", "scroll", "upload", "download", "back", "switch_tab", "close_tab"]),
+  kind: z.enum(["open", "click", "hover", "fill", "select", "check", "uncheck", "press", "scroll", "upload", "download", "back", "switch_tab", "close_tab"]),
   version: z.string().max(100).optional(), ref: z.string().regex(/^@?e\d+$/).optional(),
-  value: z.string().max(20000).optional(), attachmentId: z.string().max(100).optional(),
+  value: z.string().max(20000).describe("动作参数；scroll 只接受 up、down、left、right，每次滚动 600 像素。不要传 top 或 bottom。").optional(), attachmentId: z.string().max(100).optional(),
   effect: z.enum(["read", "edit", "submit", "send", "purchase", "delete"]), summary: z.string().min(1).max(2000)
+}).superRefine((action, context) => {
+  if (action.kind === "scroll" && action.value !== undefined && !["up", "down", "left", "right"].includes(action.value)) {
+    context.addIssue({ code: "custom", path: ["value"], message: "scroll 方向只支持 up、down、left、right；到页底请逐次 down 并观察。" });
+  }
 });
 export type BrowserCommand = (task: BrowserTask, args: string[]) => Promise<unknown>;
 export interface BrowserAdapter {
@@ -46,7 +51,7 @@ export function effectiveEffect(action: BrowserAction, observation?: BrowserObse
   if (action.kind === "click") {
     const ref = action.ref?.replace(/^@/, "");
     const line = observation?.snapshot.split("\n").find((line) => line.includes(`ref=${ref}]`) || new RegExp(`^\\s*@${ref}\\s`).test(line)) || "";
-    const label = line.match(/(?:button|link)\s+"([^"]+)"/)?.[1]?.trim() || "";
+    const label = line.match(/(?:button|link|menuitem)\s+"([^"]+)"/)?.[1]?.trim() || "";
     // A history navigation item is not another submission. Preserve an explicit
     // model-declared side effect (handled above), but don't infer one from the
     // noun in “提交记录”, “订单详情”, or “View submission history”.
@@ -68,26 +73,48 @@ export class WrapperBrowser implements BrowserAdapter {
     this.command = command || ((task, args) => new Promise((resolve, reject) => {
       if (!task.port) return reject(new Error("任务没有绑定浏览器端口。"));
       // The app owns a separate task identity. Never inherit the developing agent's session.
-      const env: NodeJS.ProcessEnv = { ...process.env, ELECTRON_RUN_AS_NODE: "1" };
+      const env: NodeJS.ProcessEnv = { ...process.env, ELECTRON_RUN_AS_NODE: "1", PROFILEPILOT_AGENT_BROWSER_REAL: bundledBrowserExecutable() };
       delete env.CLAUDECODE;
       execFile(process.execPath, [path.join(__dirname, "../profilepilot-agent-browser-wrapper.cjs"),
         "--session", task.sessionId, "--cdp", String(task.port), "--json", ...args],
       { env, windowsHide: true, timeout: 45000, maxBuffer: 6 * 1024 * 1024, encoding: "utf8" },
       (error, stdout, stderr) => {
-        if (error) reject(new Error((stderr || stdout || error.message).slice(0, 5000)));
+        if (error) {
+          // A benign control-return notice is written to stderr. It must not
+          // hide the controller's actual JSON error on stdout.
+          let commandError = "";
+          try { parseCliResult(stdout); } catch (failure) { commandError = failure instanceof Error ? failure.message : String(failure); }
+          reject(new Error([commandError, stderr || (!commandError ? stdout || error.message : "")].filter(Boolean).join("\n").slice(0, 5000)));
+        }
         else { try { resolve(parseCliResult(stdout)); } catch (error) { reject(error); } }
       });
     }));
-    this.fast = new FastBrowser(task => this.command(task, ["get", "url"]));
+    // URL/title getters may return the driver's cached target metadata without
+    // touching CDP. Acquisition must prove this session still reaches Gateway,
+    // especially after pause interrupted its initial navigation.
+    this.fast = new FastBrowser(task => this.command(task, ["eval", "document.title"]));
   }
   observeFast(task: BrowserTask): Promise<BrowserObservation> { return this.fast.observe(task); }
   async observe(task: BrowserTask, screenshot = false, retainScreenshot = true): Promise<BrowserObservation> {
-    const url = field(await this.command(task, ["get", "url"]), "url");
+    let url: string, title: string;
+    if (this.usesGateway) {
+      const page = await this.fast.raw(task, "Runtime.evaluate", {
+        expression: "({url:location.href,title:document.title})", returnByValue: true
+      });
+      if (page.exceptionDetails || typeof page.result?.value?.url !== "string") throw new Error("无法读取当前浏览器页面，请重新观察。");
+      ({ url, title } = page.result.value);
+    } else {
+      url = field(await this.command(task, ["get", "url"]), "url");
+      title = field(await this.command(task, ["get", "title"]), "title");
+    }
     const data = await this.command(task, ["snapshot"]);
     const snapshot = field(data, "snapshot").slice(0, 60000);
-    const title = field(await this.command(task, ["get", "title"]), "title");
     const observation: BrowserObservation = { version: randomUUID(), at: new Date().toISOString(),
       fingerprint: observationFingerprint(url, snapshot), url, title, snapshot, account: "账号未确认" };
+    if (this.usesGateway) {
+      const layout = await this.fast.raw(task, "Runtime.evaluate", { expression: `(${pageViewport.toString()})()`, returnByValue: true });
+      if (layout.result?.value) observation.viewport = layout.result.value;
+    }
     if (screenshot) {
       const dir = path.join(this.artifactRoot, task.id);
       mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -116,17 +143,17 @@ export class WrapperBrowser implements BrowserAdapter {
   }
   async execute(task: BrowserTask, input: BrowserAction): Promise<string> {
     const action = browserActionSchema.parse(input);
-    if (task.observation?.fast && ["click", "fill", "select", "scroll"].includes(action.kind)) return this.fast.execute(task, action);
+    if (task.observation?.fast && ["click", "hover", "fill", "select", "scroll"].includes(action.kind)) return this.fast.execute(task, action);
     let args: string[];
     const ref = action.ref ? `@${action.ref.replace(/^@/, "")}` : "";
-    if (["click", "fill", "select", "check", "uncheck", "upload", "download"].includes(action.kind) && !ref) throw new Error("缺少页面元素引用，请重新观察页面。");
+    if (["click", "hover", "fill", "select", "check", "uncheck", "upload", "download"].includes(action.kind) && !ref) throw new Error("缺少页面元素引用，请重新观察页面。");
     switch (action.kind) {
       case "open": {
         const url = new URL(action.value || "");
         if (!["https:", "http:"].includes(url.protocol) || url.username || url.password) throw new Error("只支持不包含凭据的 HTTP/HTTPS 页面。");
         args = ["open", url.href]; break;
       }
-      case "click": case "check": case "uncheck": args = [action.kind, ref]; break;
+      case "click": case "hover": case "check": case "uncheck": args = [action.kind, ref]; break;
       case "fill": case "select": args = [action.kind, ref, action.value ?? ""]; break;
       case "upload": {
         const file = [...task.attachments, ...(task.outputs || [])].find((entry) => entry.id === action.attachmentId);
@@ -161,7 +188,7 @@ export class WrapperBrowser implements BrowserAdapter {
         args = action.kind === "switch_tab" ? ["tab", action.value!] : ["tab", "close", action.value!]; break;
       }
     }
-    if (["click", "check", "uncheck"].includes(action.kind)) await this.preparePointer(task, ref);
+    if (["click", "hover", "check", "uncheck"].includes(action.kind)) await this.preparePointer(task, ref);
     const result = await this.command(task, args);
     return typeof result === "string" ? result : JSON.stringify(result);
   }

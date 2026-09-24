@@ -54,7 +54,7 @@ import {
   requestBrowserGateway,
   type GatewayControlResponse
 } from "./browser-gateway-client";
-import { ensureConfiguredGatewayProfileRunning } from "./browser-gateway-driver-runtime";
+import { ensureConfiguredGatewayProfileRunning, assertProtectedElectronPort, managedElectronPorts } from "./browser-gateway-driver-runtime";
 import { requestCdpVersionInfo } from "./cdp-client";
 import {
   canHotUpdateProfileBifrostProxy,
@@ -873,9 +873,10 @@ export function formatProfileLeaseConflict(
   const homeDir = env.HOME || os.homedir();
   const candidates = findAvailableAgentBrowserProfileCandidatesSync({
     excludedPort: lease.cdpPort,
-    requestedSession
+    requestedSession,
+    env
   }, homeDir);
-  const alternatives = candidates.slice(0, 5).map((candidate) => {
+  const alternatives = candidates.map((candidate) => {
     const retryArgs = replaceCdpPortInAgentBrowserArgs(originalArgs, candidate.cdpPort);
     return {
       profile_id: candidate.profileId,
@@ -885,6 +886,7 @@ export function formatProfileLeaseConflict(
       project_tag: candidate.projectTag || null,
       already_owned_by_session: candidate.alreadyOwnedBySession,
       requires_start: !candidate.running,
+      status: candidate.running ? "空闲 · 已启动" : "空闲 · 未启动",
       retry_args: retryArgs,
       command: formatAgentBrowserCommand(retryArgs)
     };
@@ -1020,7 +1022,8 @@ export function acquireProfileLeaseForCommandWithAutomaticSwitch(
   const homeDir = env.HOME || os.homedir();
   const candidates = findAvailableAgentBrowserProfileCandidatesSync({
     excludedPort: lease.lease.cdpPort,
-    requestedSession
+    requestedSession,
+    env
   }, homeDir).sort(
     (left, right) =>
       Number(right.alreadyOwnedBySession) - Number(left.alreadyOwnedBySession) ||
@@ -1194,7 +1197,8 @@ async function runProfilePilotInternalCommand(
   if (action === "profiles") {
     const session = sessionFromAgentBrowserArgs(args, env);
     const profiles = listAgentBrowserProfileCatalogSync({
-      requestedSession: session
+      requestedSession: session,
+      env
     }, homeDir);
     process.stdout.write(`${JSON.stringify({
       source: "ProfilePilot",
@@ -1209,6 +1213,7 @@ async function runProfilePilotInternalCommand(
         cdp_port: profile.cdpPort,
         running: profile.running,
         available: profile.available,
+        status: profile.available ? (profile.running ? "空闲 · 已启动" : "空闲 · 未启动") : profile.unavailableReason === "occupied" ? "占用中" : "禁止 Agent 连接",
         unavailable_reason: profile.unavailableReason,
         agent_access: profile.agentAccessDisabled ? "blocked" : "allowed",
         project_tag: profile.projectTag || null,
@@ -2239,13 +2244,14 @@ export async function prepareGatewayTransport(
   const publicPort = resolvedCdpPort || cdpPortFromAgentBrowserArgs(args);
   if (!sessionId || !publicPort) return args;
   const homeDir = env.HOME || os.homedir();
+  assertProtectedElectronPort(publicPort, homeDir);
   let status: GatewayControlResponse | null = null;
   try {
     status = await requestBrowserGateway({ action: "status" }, { homeDir, timeoutMs: 800 });
   } catch (error) {
     if (persistedGatewayOwnsPort(homeDir, publicPort)) throw error;
     const configured = findConfiguredAgentBrowserProfileByPortSync(publicPort, env, homeDir);
-    if (!configured) {
+    if (!configured && !managedElectronPorts(homeDir).some(profile => profile.publicPort === publicPort)) {
       if (await isReachableLegacyCdp(publicPort, homeDir)) return args;
       throw gatewayWrapperError(
         "GATEWAY_PROFILE_NOT_CONFIGURED",

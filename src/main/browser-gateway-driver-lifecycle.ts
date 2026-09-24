@@ -17,6 +17,7 @@ import { writeGatewayDriverNoticeSync } from "./agent-control-notice";
 
 export type GatewayDriverSessionStopReason =
   | "reconnect-exhausted"
+  | "electron-detached"
   | "agent-access-disabled";
 
 export interface BrowserGatewayDriverLifecycle {

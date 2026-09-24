@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "ProfilePilot 浏览器连接",
+  "version": "0.1.0",
+  "description": "连接当前 Chrome Profile，在专用新标签页中执行任务，保留已有页面和登录状态。",
+  "minimum_chrome_version": "125",
+  "host_permissions": ["http://127.0.0.1/*"],
+  "content_scripts": [{ "matches": ["http://127.0.0.1/profilepilot-connect/*"], "js": ["onboarding.js"], "run_at": "document_idle" }],
+  "permissions": [
+    "debugger",
+    "tabs",
+    "storage",
+    "alarms"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "ProfilePilot 浏览器连接"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src ws://127.0.0.1:* http://127.0.0.1:*"
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxbdr6AhwlcHpNgKk1z/hjZfflOli/wTbQbM37JZlj6HRa6W2oHX4I6flMMMbzdv8pD1CI6jsNRGvzE+FMg5w4dLLNBPa+f4IhCOYirceN9rTvSnEflQaOoacHX6dGBLozk7ptHGwjf9c5C/8FC4pX/ZwN0Ba8T9eSrWhKM9zhfRm8dEMTcaz63RX/oePr5aByRyCjSTd77rZ2WNdMvX43x9Ovxpta6NF9+9KXZRrz2gw0h3Ybw2rBC0JXFEPFLmPmWIN7psvWNztptVgIoDWc5DqpBUzhI409ckQ9DlhaJ0s+HwMBX4y+3u/4xU7aKZuR1akofahF7jdRo6Kn4Ua8wIDAQAB"
+}

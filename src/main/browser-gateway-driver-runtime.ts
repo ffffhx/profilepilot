@@ -1,4 +1,5 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
+import path from "node:path";
 import os from "node:os";
 import {
   assertConfiguredAgentAccessAllowedSync,
@@ -6,6 +7,7 @@ import {
 } from "./agent-browser-lease";
 import {
   BROWSER_GATEWAY_PROTOCOL_VERSION,
+  browserGatewayRoot,
   ensureBrowserGatewayDaemon,
   requestBrowserGateway,
   type GatewayControlRequest,
@@ -97,7 +99,9 @@ export async function ensurePersistentDriverGatewayProtocol(
   }
 ): Promise<GatewayControlResponse> {
   const current = Number(status.protocolVersion);
-  if (!Number.isFinite(current) || current === BROWSER_GATEWAY_PROTOCOL_VERSION) return status;
+  // v16 adds Electron attachment; the existing browser driver protocol is
+  // unchanged from v15. Do not interrupt live Chrome sessions during upgrade.
+  if (!Number.isFinite(current) || current === 15 || current === BROWSER_GATEWAY_PROTOCOL_VERSION) return status;
   const request = input.request || requestBrowserGateway;
   const ensureGatewayDaemon = input.ensureGatewayDaemon || ensureBrowserGatewayDaemon;
   const upgraded = await ensureGatewayDaemon({ homeDir: input.homeDir });
@@ -118,8 +122,14 @@ export async function ensureConfiguredGatewayProfileRunning(
   homeDir = env.HOME || os.homedir()
 ): Promise<GatewayControlResponse> {
   const configured = assertConfiguredAgentAccessAllowedSync(publicPort, env, homeDir);
+  assertProtectedElectronPort(publicPort, homeDir);
   const activePorts = Array.isArray(status.ports) ? status.ports.map(Number) : [];
   if (activePorts.includes(publicPort)) return status;
+  const electron = managedElectronPorts(homeDir).find(profile => profile.publicPort === publicPort);
+  if (electron) {
+    await requestBrowserGateway({ action: "reconnect-electron", publicPort }, { homeDir, timeoutMs: 5000 });
+    return requestBrowserGateway({ action: "status" }, { homeDir, timeoutMs: 1500 });
+  }
 
   if (!configured) {
     const managedPorts = Array.isArray(status.managedPorts) ? status.managedPorts.map(Number) : [];
@@ -231,6 +241,18 @@ export function gatewayDriverError(
   const error = new Error(message) as Error & { code: string };
   error.code = code;
   return error;
+}
+
+export function managedElectronPorts(homeDir = os.homedir()): Array<{ publicPort: number; electronCdpPort: number }> {
+  try {
+    const catalog = JSON.parse(readFileSync(path.join(browserGatewayRoot(homeDir), "managed-profiles.json"), "utf8"));
+    return (Array.isArray(catalog.profiles) ? catalog.profiles : []).filter((item: { publicPort: number; electronCdpPort: number }) =>
+      validPort(item.publicPort) && validPort(item.electronCdpPort));
+  } catch { return []; }
+}
+export function assertProtectedElectronPort(publicPort: number, homeDir = os.homedir()): void {
+  const electron = managedElectronPorts(homeDir).find(profile => profile.electronCdpPort === publicPort);
+  if (electron) throw gatewayDriverError("ELECTRON_USE_GATEWAY_PORT", `这是 Electron 原始调试端口；请使用受保护的 Agent 端口：--cdp ${electron.publicPort}`);
 }
 
 function validPort(value: unknown): number | undefined {

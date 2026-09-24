@@ -26,10 +26,14 @@ const server = http.createServer(async (req, res) => {
   if (req.url?.includes("count_tokens")) { res.setHeader("content-type", "application/json"); res.end('{"input_tokens":100}'); return; }
   if (!req.url?.includes("messages")) { res.setHeader("content-type", "application/json"); res.end('{}'); return; }
   const body = JSON.parse(text); requests.push(body);
-  const turn = requests.length;
-  const block = turn <= 2 ? { type: "tool_use", id: `tool_read_${turn}`, name: "Read", input: { file_path: turn === 1 ? unselectedFile : selectedFile } }
+  // SDK auxiliary requests can interleave with the main tool loop. They must
+  // not consume fixture steps or receive tools absent from their own schema.
+  const main = request => request.tools?.some(t => t.name === "mcp__profilepilot__observe");
+  const turn = main(body) ? requests.filter(main).length : 0;
+  const block = turn === 0 ? { type: "text", text: "Auxiliary fixture response" }
+    : turn <= 2 ? { type: "tool_use", id: `tool_read_${turn}`, name: "Read", input: { file_path: turn === 1 ? unselectedFile : selectedFile } }
     : turn === 3 ? { type: "tool_use", id: "tool_pdf", name: "Read", input: { file_path: pdfFile } }
-    : turn === 4 ? { type: "tool_use", id: "tool_observe", name: "mcp__profilepilot__observe", input: { screenshot: false } } : { type: "text", text: "SDK transport verified" };
+    : turn === 4 ? { type: "tool_use", id: "tool_observe", name: "mcp__profilepilot__observe", input: { screenshot: false, layout: false } } : { type: "text", text: "SDK transport verified" };
   const stop = block.type === "tool_use" ? "tool_use" : "end_turn";
   const message = { id: `msg_${turn}`, type: "message", role: "assistant", model: body.model, content: [block], stop_reason: stop, stop_sequence: null, usage: { input_tokens: 100, output_tokens: 20 } };
   if (!body.stream) { res.setHeader("content-type", "application/json"); res.end(JSON.stringify(message)); return; }
@@ -61,7 +65,7 @@ try {
     task: { prompt: "观察测试页面", profileName: "测试", authorization: "", materials: [], attachments, items: [], plan: [], events: [], receipts: [], needsReconciliation: false, limits: { actions: 5, budgetUsd: 1 }, usage: { actions: 0, costUsd: 0 } } });
   const outcome = await result;
   assert.equal(outcome.success, true, JSON.stringify(outcome));
-  assert.ok(messages.some(m => m.kind === "tool" && m.name === "observe"));
+  assert.ok(messages.some(m => m.kind === "tool" && m.name === "observe"), JSON.stringify({ requests: requests.map(r => ({ model: r.model, tools: (r.tools || []).map(t => t.name) })), messages: messages.map(m => ({ kind: m.kind, name: m.name })) }));
   assert.ok(requests.length >= 2);
   assert.ok(JSON.stringify(requests).includes("APPROVED-TASK-FILE-CONTENT"));
   assert.equal(JSON.stringify(requests).includes("UNSELECTED-SECRET-MUST-NOT-APPEAR"), false);

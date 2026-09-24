@@ -1,3 +1,4 @@
+import { workspaceSwitcher, refreshWorkspaceSwitcher } from "../workspace-switcher";
 import { isBusyAction, renderToastBody } from "../busy";
 import { renderConfirmModal } from "../confirm";
 import { renderSyncPanel } from "./account-sync";
@@ -70,15 +71,8 @@ export function render(): void {
     <div class="shell w-[min(1760px,calc(100vw-clamp(24px,3vw,56px)))] mx-auto my-0 pt-[28px] px-0 pb-[40px]">
       <a class="skip-link" href="#main-content">跳到 Profile 列表</a>
       <header class="app-header flex items-start justify-between gap-5 pt-2 px-0 pb-[22px] border-solid border-b border-line">
-        <div class="brand-lockup flex items-center gap-4 min-w-0">
-          <img class="brand-mark w-[52px] h-[52px] flex-[0_0_auto] rounded-xl" src="./assets/profilepilot-mark.svg" width="52" height="52" alt="" />
-          <div class="brand-copy min-w-0">
-            <h1>ProfilePilot</h1>
-            <p class="brand-subtitle">管理 Chrome Profile、连接与 Agent 控制权</p>
-          </div>
-        </div>
+        <div class="browser-workspace-brand"><h1 class="sr-only">ProfilePilot</h1>${workspaceSwitcher("browser")}<p>管理账号、Profile 与浏览器连接</p></div>
         <div class="header-actions">
-          <a class="primary" href="./tasks.html" style="padding: 9px 14px; border-radius: 8px; text-decoration: none;">浏览器任务 ↗</a>
           <button type="button" role="switch" data-action="toggle-startup"
             aria-checked="${store.startupSettings?.enabled === true}" aria-label="开机自启动"
             aria-describedby="startup-note"
@@ -167,6 +161,16 @@ export function render(): void {
     return;
   }
   lastMainHtml = html;
+  // Preserve an unsaved rename across busy/status/toast renders of the same form.
+  const renameForm = appRoot.querySelector<HTMLFormElement>("[data-rename-form]");
+  const renameInput = renameForm?.querySelector<HTMLInputElement>("#profile-rename");
+  const renameDraft = store.modal?.kind === "rename" && renameForm?.dataset.profileId === store.modal.profileId
+    ? renameInput?.value : undefined;
   appRoot.className = "";
   appRoot.innerHTML = html;
+  refreshWorkspaceSwitcher();
+  if (renameDraft !== undefined) {
+    const input = appRoot.querySelector<HTMLInputElement>("#profile-rename");
+    if (input) input.value = renameDraft;
+  }
 }

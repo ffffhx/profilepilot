@@ -47,6 +47,8 @@ test("Jev credentials are isolated, omitted from snapshots, preserved by main se
     await handler(event, "saveJevSettings", { enabled: false, apiKey: "" });
     assert.equal(service.dependencies.jevApiKey(), ""); assert.equal(service.dependencies.apiKey(), "main-fixture-secret");
     assert.equal(service.store.data.settings.hasJevApiKey, false);
+    await assert.rejects(handler(event, "saveSettings", { ...service.store.data.settings, baseUrl: "https://api.deepseek.com/anthropic" }), /请输入新服务/);
+    assert.equal(service.dependencies.apiKey(), "main-fixture-secret");
     await assert.rejects(handler(event, "testJevConnection"), /请先/);
     await handler(event, "openJevConsole", "keys"); await handler(event, "openJevConsole", "billing");
     assert.equal(opened.length, 2); assert.ok(opened.every(url => new URL(url).hostname === "console.typesafe.ai"));
@@ -60,6 +62,12 @@ test("Jev credentials are isolated, omitted from snapshots, preserved by main se
     assert.equal(service.store.data.settings.jevEnabled, true);
     assert.equal(service.dependencies.jevApiKey(), "gateway-fixture-secret");
     await assert.rejects(handler(event, "openJevConsole", "https://example.test"));
+    opened.length = 0;
+    await handler(event, "openLink", "http://localhost:8080/");
+    await handler(event, "openLink", "https://example.test/?a=1&b=2");
+    for (const url of ["javascript:alert(1)", "file:///tmp/test.html", "https://user:secret@example.test", "https://example.test\n"]) await assert.rejects(handler(event, "openLink", url), /HTTP/);
+    await assert.rejects(handler({ senderFrame: { url: "https://example.test" } }, "openLink", "http://localhost:8080/"), /本地桌面/);
+    assert.deepEqual(opened, ["http://localhost:8080/", "https://example.test/?a=1&b=2"]);
     await assert.rejects(handler({ senderFrame: { url: "https://example.test" } }, "saveJevSettings", { enabled: true, apiKey: "wrong" }), /本地桌面/);
   } finally { await service?.close(); assert.ok(path.resolve(root).startsWith(path.resolve(os.tmpdir()) + path.sep)); rmSync(root, { recursive: true, force: true }); }
 });

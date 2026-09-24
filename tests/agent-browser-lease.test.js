@@ -549,6 +549,30 @@ function makeTempHome() {
   return path.join(os.tmpdir(), `profilepilot-agent-browser-lease-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
 }
 
+test("expired or missing snapshots still list registered idle profiles and honor live occupancy", () => {
+  const home = makeTempHome();
+  const root = process.platform === "win32" ? path.join(home, "ProfilePilot")
+    : process.platform === "darwin" ? path.join(home, "Library", "Application Support", "ProfilePilot")
+      : path.join(home, ".config", "profilepilot");
+  mkdirSync(root, { recursive: true });
+  const now = Date.now();
+  try {
+    writeFileSync(path.join(root, "profiles.json"), JSON.stringify({ profiles: [
+      { id: "idle", name: "未启动", dirName: "idle", fixedCdpPort: 9230 },
+      { id: "busy", name: "占用", dirName: "busy", fixedCdpPort: 9231 },
+      { id: "blocked", name: "禁止连接", dirName: "blocked", fixedCdpPort: 9232, agentAccessDisabled: true }
+    ] }));
+    acquireAgentBrowserProfileLeaseSync({ cdpPort: 9231, session: "other", holderPid: process.pid }, home, now);
+    for (const stale of [false, true]) {
+      if (stale) writeAgentBrowserRuntimeProfilesSync([], home, now - 31_000);
+      const candidates = findAvailableAgentBrowserProfileCandidatesSync({ excludedPort: 9223, requestedSession: "test" }, home, now);
+      assert.deepEqual(candidates.map(p => p.cdpPort), [9230]);
+      assert.equal(candidates[0].running, false);
+      assert.equal(candidates[0].profileName, "未启动");
+    }
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
 function writeGatewayAuthority(home, profiles) {
   const gatewayDir = path.join(home, ".profilepilot", "gateway");
   mkdirSync(gatewayDir, { recursive: true });

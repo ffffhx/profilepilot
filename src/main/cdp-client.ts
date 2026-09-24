@@ -24,15 +24,17 @@ export class CdpBrowserClient {
     });
   }
 
-  static connect(url: string, timeoutMs: number): Promise<CdpBrowserClient> {
+  static connect(url: string, timeoutMs: number, signal?: AbortSignal): Promise<CdpBrowserClient> {
     const WebSocketCtor = globalThis.WebSocket;
     if (typeof WebSocketCtor !== "function") {
       throw new ProfileManagerError("当前运行环境没有 WebSocket，无法连接 Chrome CDP。", "CDP_WEBSOCKET_UNAVAILABLE");
     }
 
     return new Promise((resolve, reject) => {
+      signal?.throwIfAborted();
       const socket = new WebSocketCtor(url);
       const timer = setTimeout(() => {
+        cleanup();
         socket.close();
         reject(new ProfileManagerError("连接 Chrome CDP 超时。", "CDP_CONNECT_TIMEOUT"));
       }, timeoutMs);
@@ -41,6 +43,8 @@ export class CdpBrowserClient {
         clearTimeout(timer);
         socket.removeEventListener("open", handleOpen);
         socket.removeEventListener("error", handleError);
+        socket.removeEventListener("close", handleError);
+        signal?.removeEventListener("abort", handleAbort);
       };
       const handleOpen = (): void => {
         cleanup();
@@ -48,11 +52,15 @@ export class CdpBrowserClient {
       };
       const handleError = (): void => {
         cleanup();
+        socket.close();
         reject(new ProfileManagerError("连接 Chrome CDP 失败。", "CDP_CONNECT_FAILED"));
       };
+      const handleAbort = (): void => { cleanup(); socket.close(); reject(signal?.reason || new Error("连接已取消。")); };
 
       socket.addEventListener("open", handleOpen);
       socket.addEventListener("error", handleError);
+      socket.addEventListener("close", handleError);
+      signal?.addEventListener("abort", handleAbort, { once: true });
     });
   }
 

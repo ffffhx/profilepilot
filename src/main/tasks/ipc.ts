@@ -5,11 +5,20 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, wr
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import { TASK_CHANNEL, TASK_CHANGED, TERMINAL_TASKS, jevProviderFor, type JevProvider, type TaskSchedule } from "../../shared/tasks";
+import { taskLinkUrl } from "../../shared/task-link";
+import { TASK_CHANNEL, TASK_CHANGED, TASK_PREVIEW, TERMINAL_TASKS, jevProviderFor, type JevProvider, type TaskSchedule } from "../../shared/tasks";
+import { TaskPreviewStream } from "./preview";
 import type { ProfileManager } from "../profile-manager";
 import { defaultDataDir } from "../fs-util";
 import { WrapperBrowser } from "./browser";
+import { NativeBrowserBridge } from "./native-bridge";
+import { NATIVE_EXTENSION_ID } from "./native-bridge";
+import { NativeExtensionInstaller } from "./native-installer";
+import { nativeChromeUserDataDir } from "../chrome-launch";
+import { NativeBrowser, RoutedBrowser, isNativeTask } from "./native-browser";
+import { NativePreviewStream } from "./native-preview";
 import { TaskStore, createTaskSchema, scrubDiagnostics, now } from "./store";
+import { listServiceModels } from "./model-catalog";
 import { TaskService, workerEnvironment } from "./service";
 import { JEV_KEYS_URL, JEV_BILLING_URL, JEV_CONSOLE_URL, testJevConnection } from "./jev";
 import { writeAgentBrowserControlWaitStateSync, clearAgentBrowserControlWaitStateSync } from "../agent-browser-session";
@@ -17,6 +26,9 @@ import { writeAgentBrowserControlWaitStateSync, clearAgentBrowserControlWaitStat
 export function registerTaskService(profileManager: ProfileManager): TaskService {
   const root = path.join(process.env.CPM_DATA_DIR || defaultDataDir(), "browser-tasks");
   const store = new TaskStore(root);
+  const previews = new Map<number, { taskId: string; stream: TaskPreviewStream | NativePreviewStream }>();
+  const previewSenders = new WeakSet<Electron.WebContents>();
+  const stopPreview = (id: number): void => { previews.get(id)?.stream.close(); previews.delete(id); };
   const vaultPath = path.join(root, "credentials.bin");
   // The original vault belongs to Vercel. Never send a saved key to a different provider.
   const jevVault = (provider: JevProvider) => path.join(root, provider === "typesafe" ? "jev-typesafe-credentials.bin" : "jev-credentials.bin");
@@ -37,21 +49,51 @@ export function registerTaskService(profileManager: ProfileManager): TaskService
   store.data.settings.hasJevApiKey = existsSync(jevVault(jevProviderFor(store.data.settings)));
   store.data.settings.jevEnabled = store.data.settings.jevEnabled === true && store.data.settings.hasJevApiKey;
   store.save();
+  const extensionVault = path.join(root, "native-browser-credentials.bin");
+  const native = new NativeBrowserBridge(root, {
+    read: () => {
+      if (!existsSync(extensionVault)) return {};
+      if (!safeStorage.isEncryptionAvailable()) throw new Error("系统安全存储不可用，无法读取扩展连接。");
+      return JSON.parse(safeStorage.decryptString(readFileSync(extensionVault)));
+    },
+    write: value => {
+      if (!safeStorage.isEncryptionAvailable() || safeStorage.getSelectedStorageBackend?.() === "basic_text") throw new Error("系统安全存储不可用，未保存扩展连接。");
+      writeFileSync(extensionVault, safeStorage.encryptString(JSON.stringify(value)), { mode: 0o600 });
+    }
+  });
+  const snapshot = () => ({ ...store.snapshot(), nativeBrowsers: native.states(), nativeInstallations: native.installationStates() });
+  const broadcast = () => { for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send(TASK_CHANGED, snapshot()); };
+  const packagedExtension = path.join(process.resourcesPath || "", "profilepilot-extension");
+  const extensionSource = existsSync(path.join(packagedExtension, "manifest.json")) ? packagedExtension : path.resolve(__dirname, "../../../extensions/profilepilot");
+  native.configureInstallation(new NativeExtensionInstaller({
+    source: extensionSource, destination: path.join(root, "native-extension"), userDataDir: nativeChromeUserDataDir(), extensionId: NATIVE_EXTENSION_ID,
+    openSettings: id => profileManager.launchProfileWithUrls(id, ["chrome://inspect/#remote-debugging"])
+  }), broadcast);
   const service = new TaskService(store, {
-    browser: new WrapperBrowser(path.join(root, "artifacts")), apiKey, jevApiKey,
+    closePreview: () => { for (const id of previews.keys()) stopPreview(id); },
+    closeBrowser: () => native.close(),
+    browser: new RoutedBrowser(new WrapperBrowser(path.join(root, "artifacts")), new NativeBrowser(native, path.join(root, "artifacts"))), apiKey, jevApiKey,
     profileName: async (id) => {
       const profile = (await profileManager.getState()).profiles.find((entry) => entry.id === id);
-      if (!profile || profile.source !== "isolated" || profile.agentAccessDisabled) throw new Error("请选择允许 Agent 连接的独立 Profile。");
+      if (!profile) throw new Error("请选择有效的浏览器 Profile。");
+      if (profile.source === "native") {
+        if (!native.states().some(s => s.profileId === id && s.connected && s.taskTabs)) throw new Error("请连接最新的 ProfilePilot 扩展，任务将自动新开标签页。");
+      } else if (profile.source !== "isolated" || profile.agentAccessDisabled) throw new Error("请选择允许 Agent 连接的独立 Profile。");
       return profile.name;
     },
     prepareProfile: async (id) => {
+      const profile = (await profileManager.getState()).profiles.find(p => p.id === id);
+      if (!profile) throw new Error("Profile 不存在。");
+      if (profile.source === "native") {
+        if (!native.states().some(s => s.profileId === id && s.connected && s.taskTabs)) throw new Error("请连接最新的 ProfilePilot 扩展，任务将自动新开标签页。");
+        return { name: profile.name, browserConnection: "extension" };
+      }
+      if (profile.source !== "isolated" || profile.agentAccessDisabled) throw new Error("请选择允许 Agent 连接的独立 Profile。");
       const port = await profileManager.prepareProfileForAgent(id);
       await profileManager.launchProfileWithCdp(id, port);
       return { port, name: (await profileManager.getState()).profiles.find((profile) => profile.id === id)?.name || id };
     },
-    changed: (snapshot) => {
-      for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send(TASK_CHANGED, snapshot);
-    },
+    changed: broadcast,
     notify: (title, body, taskId) => {
       if (!Notification.isSupported()) return;
       const notification = new Notification({ title: `ProfilePilot · ${title}`, body });
@@ -68,6 +110,20 @@ export function registerTaskService(profileManager: ProfileManager): TaskService
       else clearAgentBrowserControlWaitStateSync(sessionId, process.pid);
     }
   });
+  native.onEvent(event => {
+    if (event.type === "cdp") return;
+    if (event.type === "state" && event.state?.connected && event.state.taskTabs && !event.state.ownerSessionId && !event.state.pausedByBrowser) service.reconcileIdleNativeProfile(event.profileId);
+    if (event.sessionId) {
+      const task = store.data.tasks.find(t => t.sessionId === event.sessionId);
+      if ((!task || TERMINAL_TASKS.has(task.status)) && event.state?.ownerSessionId) {
+        void native.request(event.profileId, "control", { action: "release", sessionId: event.sessionId }).catch(() => {});
+      } else service.externalControl(event.sessionId, event.state?.ownership || "user", "active", event.type === "disconnected" ? "extension-disconnected" : event.state?.ownership === "agent" ? "user-return" : event.state?.pausedByBrowser ? "extension-paused" : "extension-takeover");
+    }
+    broadcast();
+  });
+  // Only restore a previously paired listener automatically; new installations
+  // start the listener when the user explicitly generates a pairing code.
+  if (existsSync(extensionVault)) void native.start().catch(() => broadcast());
   const idSchema = z.string().uuid();
   ipcMain.handle(TASK_CHANNEL, async (event, method: string, ...args: any[]) => {
     const url = event.senderFrame?.url || "";
@@ -76,7 +132,66 @@ export function registerTaskService(profileManager: ProfileManager): TaskService
     const publicDir = path.resolve(__dirname, "../../../public");
     if (!["tasks.html", "index.html"].some((name) => path.resolve(source) === path.join(publicDir, name))) throw new Error("不允许此页面调用任务接口。");
     switch (method) {
-      case "snapshot": return store.snapshot();
+      case "watchPreview": {
+        const id = z.string().uuid().nullable().parse(args[0]);
+        const sender = event.sender;
+        if (previews.get(sender.id)?.taskId === id) return;
+        stopPreview(sender.id);
+        if (!id) return;
+        const task = store.get(id);
+        if (isNativeTask(task)) for (const [otherId, item] of previews) {
+          if (otherId !== sender.id && store.data.tasks.find(t => t.id === item.taskId)?.profileId === task.profileId) stopPreview(otherId);
+        }
+        if (!previewSenders.has(sender)) {
+          previewSenders.add(sender);
+          sender.once("destroyed", () => stopPreview(sender.id));
+          sender.on("did-start-navigation", (_event, _url, _inPlace, mainFrame) => { if (mainFrame) stopPreview(sender.id); });
+        }
+        const emit = (update: import("../../shared/tasks").TaskPreviewUpdate) => {
+          if (!sender.isDestroyed()) sender.send(TASK_PREVIEW, update);
+        };
+        const getTask = () => store.data.tasks.find(t => t.id === id);
+        const stream = isNativeTask(task) ? new NativePreviewStream(native, getTask, emit) : new TaskPreviewStream(getTask, emit);
+        previews.set(sender.id, { taskId: id, stream }); stream.start(); return;
+      }
+      case "ackPreview": {
+        const id = idSchema.parse(args[0]); const frameId = z.number().int().positive().parse(args[1]);
+        const preview = previews.get(event.sender.id);
+        if (preview?.taskId === id) preview.stream.ack(frameId);
+        return;
+      }
+      case "snapshot": return snapshot();
+      case "authorizeNativeBrowser":
+      case "pairNativeBrowser": {
+        if (!safeStorage.isEncryptionAvailable() || safeStorage.getSelectedStorageBackend?.() === "basic_text") throw new Error("系统安全存储不可用，无法保存扩展配对。");
+        const id = z.string().max(150).parse(args[0]);
+        const profile = (await profileManager.getState()).profiles.find(p => p.id === id && p.source === "native");
+        if (!profile) throw new Error("请选择本机已发现的系统 Chrome Profile。");
+        if (store.data.tasks.some(t => t.profileId === id && t.status === "running")) throw new Error("请先暂停此 Profile 上的任务，再重新配对。");
+        if (method === "authorizeNativeBrowser") {
+          const request = await native.authorize(id, profile.name);
+          await profileManager.launchProfileWithUrls(id, [request.url]);
+          native.beginInstallation(request.url);
+          return { expiresAt: request.expiresAt };
+        }
+        return native.pair(id);
+      }
+      case "disconnectNativeBrowser": {
+        const id = z.string().max(150).parse(args[0]);
+        if (!(await profileManager.getState()).profiles.some(p => p.id === id && p.source === "native")) throw new Error("Profile 不存在。");
+        await native.disconnect(id); broadcast(); return;
+      }
+      case "openNativeExtensionFolder": {
+        const folder = extensionSource;
+        if (!existsSync(path.join(folder, "manifest.json"))) throw new Error("扩展文件缺失，请重新安装 ProfilePilot。");
+        const error = await shell.openPath(folder); if (error) throw new Error(error); return;
+      }
+      case "focusTaskBrowser": {
+        const task = store.get(idSchema.parse(args[0]));
+        if (isNativeTask(task)) await native.request(task.profileId, "focus", { sessionId: task.sessionId });
+        else await profileManager.focusProfile(task.profileId);
+        return;
+      }
       case "create": return service.create(createTaskSchema.parse(args[0]));
       case "retryItems": return service.retryItems(idSchema.parse(args[0]), z.array(idSchema).min(1).max(500).parse(args[1]));
       case "control": return service.control(idSchema.parse(args[0]), z.enum(["pause", "resume", "takeover", "cancel", "rerun", "steer"]).parse(args[1]), z.string().max(30000).parse(args[2] || ""));
@@ -120,6 +235,7 @@ export function registerTaskService(profileManager: ProfileManager): TaskService
       case "saveSettings": {
         const input = z.object({ model: z.string().trim().min(1).max(200), baseUrl: z.string().url(), authMode: z.enum(["apiKey", "bearer"]).optional(), maxConcurrent: z.number().int().min(1).max(6), retentionDays: z.number().int().min(1).max(3650), saveScreenshots: z.boolean(), notifications: z.boolean(), apiKey: z.string().max(1000).optional() }).parse(args[0]);
         const endpoint = new URL(input.baseUrl);
+        if (endpoint.origin !== new URL(store.data.settings.baseUrl).origin && !input.apiKey?.trim() && existsSync(vaultPath)) throw new Error("切换模型服务时请输入新服务的 API 密钥，避免将原密钥发送给其他服务。");
         if (endpoint.username || endpoint.password || endpoint.search || endpoint.hash || !(endpoint.protocol === "https:" || (endpoint.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(endpoint.hostname)))) throw new Error("模型地址需要 HTTPS，本机服务可使用 HTTP；不能包含凭据或查询参数。");
         if (input.apiKey !== undefined) {
           if (!input.apiKey.trim()) { if (existsSync(vaultPath)) rmSync(vaultPath); }
@@ -133,6 +249,7 @@ export function registerTaskService(profileManager: ProfileManager): TaskService
         service.publish(); void service.tick(); return;
       }
       case "testConnection": return testConnection(store, apiKey());
+      case "listModels": return listServiceModels(store.data.settings, apiKey());
       case "saveJevSettings": {
         const input = z.object({ enabled: z.boolean(), provider: z.enum(["typesafe", "vercel"]).optional(), mode: z.enum(["driver", "advisory"]).optional(), apiKey: z.string().trim().max(1000).optional() }).parse(args[0]);
         const provider = input.provider || jevProviderFor(store.data.settings);
@@ -151,6 +268,11 @@ export function registerTaskService(profileManager: ProfileManager): TaskService
         service.publish(); return;
       }
       case "testJevConnection": return testJevConnection(jevApiKey(), jevProviderFor(store.data.settings));
+      case "openLink": {
+        const url = taskLinkUrl(args[0]);
+        if (!url) throw new Error("只能打开有效的 HTTP 或 HTTPS 网页链接。");
+        return shell.openExternal(url);
+      }
       case "openJevConsole": {
         const page = z.enum(["keys", "billing"]).parse(args[0]);
         return shell.openExternal(jevProviderFor(store.data.settings) === "typesafe" ? JEV_CONSOLE_URL : page === "keys" ? JEV_KEYS_URL : JEV_BILLING_URL);
@@ -173,6 +295,7 @@ export function registerTaskService(profileManager: ProfileManager): TaskService
       }
       case "deleteTemplate": { const id = idSchema.parse(args[0]); store.data.templates = store.data.templates.filter(template => template.id !== id); service.publish(); return; }
       case "deleteTask": return service.deleteTask(idSchema.parse(args[0]));
+      case "updateTaskMetadata": return service.updateTaskMetadata(idSchema.parse(args[0]), args[1]);
       case "exportData": {
         const kind = z.enum(["task", "materials", "diagnostics"]).parse(args[0]);
         const value = kind === "materials" ? store.data.materials : kind === "diagnostics" ? scrubDiagnostics(store.data) : store.get(idSchema.parse(args[1]));

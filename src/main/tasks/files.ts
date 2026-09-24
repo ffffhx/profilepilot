@@ -92,10 +92,12 @@ export async function readTaskTable(task: BrowserTask, value: unknown): Promise<
 }
 
 export function writeTaskResult(task: BrowserTask, artifactRoot: string, value: unknown): TaskAttachment {
-  const input = z.object({ name: z.string().min(1).max(100), format: z.enum(["csv", "json", "markdown"]),
+  const input = z.object({ name: z.string().min(1).max(100), format: z.enum(["csv", "json", "markdown", "html"]),
     columns: z.array(z.string().max(500)).max(100).default([]), rows: z.array(z.array(z.union([z.string().max(10000), z.number().finite(), z.boolean(), z.null()])).max(100)).max(1000).default([]),
     text: z.string().max(1000000).default("") }).parse(value);
-  const name = input.name.replace(/[^\p{L}\p{N} _.-]/gu, "_").replace(/[. ]+$/, "") || "result";
+  const extension = input.format === "markdown" ? "md" : input.format;
+  const sanitized = input.name.replace(/[^\p{L}\p{N} _.-]/gu, "_").replace(/[. ]+$/, "");
+  const name = (sanitized.toLowerCase().endsWith(`.${extension}`) ? sanitized.slice(0, -extension.length - 1) : sanitized) || "result";
   const dir = path.resolve(artifactRoot, task.id);
   if (!dir.startsWith(path.resolve(artifactRoot) + path.sep)) throw new Error("无效的任务目录。");
   let content: string;
@@ -106,7 +108,7 @@ export function writeTaskResult(task: BrowserTask, artifactRoot: string, value: 
     content = "\uFEFF" + [input.columns, ...input.rows].map(row => row.map(cell).join(",")).join("\r\n");
   } else if (input.format === "json") content = JSON.stringify({ columns: input.columns, rows: input.rows, notes: input.text }, null, 2);
   else content = input.text;
-  const id = randomUUID(); const extension = input.format === "markdown" ? "md" : input.format;
+  const id = randomUUID();
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const destination = path.join(dir, `${id}-${name}.${extension}`);
   writeFileSync(destination, content, { encoding: "utf8", mode: 0o600 });

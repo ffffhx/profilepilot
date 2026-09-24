@@ -1,0 +1,36 @@
+import assert from 'node:assert/strict';
+import { launchProfilePilotE2e } from './e2e/lib/electron-driver.mjs';
+const app = await launchProfilePilotE2e({name:'template feedback and Jev entry'});
+try {
+  const d=app.driver;
+  const profile=await d.evaluate(`window.profileManager.createProfile('模板测试').then(s=>s.profiles.find(p=>p.name==='模板测试'))`);
+  await d.domClick('[data-workspace-trigger]');
+  await d.domClick('a[href="./tasks.html"]');
+  await d.waitFor('#create-task');
+  await d.domClick('[data-action=save-template]');
+  await new Promise(resolve=>setTimeout(resolve,600));
+  assert.equal((await d.query('#prompt-error')).exists,true,'Invalid template feedback must not disappear after the click');
+  assert.equal((await d.evaluate('window.tasks.snapshot()')).templates.length,0);
+  await d.evaluate('window.tasks.snapshot().then(({settings})=>window.tasks.saveSettings({...settings,notifications:false}))');
+  assert.equal((await d.query('#prompt-error')).exists,true,'Snapshot updates must retain validation feedback');
+  await d.domInput('#prompt','这是一份模板草稿');
+  await d.domInput('select[name=profileId]',profile.id);
+  await d.domClick('[data-action=save-template]');
+  await d.waitFor('#task-toast',s=>s.text.includes('模板已保存'));
+  await d.waitFor('#task-app',s=>s.attributes['aria-busy']!=='true');
+  assert.equal((await d.evaluate('window.tasks.snapshot()')).templates.length,1);
+  assert.equal(await d.evaluate('document.querySelector("#prompt").value'),'这是一份模板草稿');
+  await d.waitFor('.jev-entry');
+  assert.match((await d.query('.jev-entry')).text,/Jev.*未配置/);
+  await d.domClick('.jev-entry');
+  assert.equal(await d.evaluate('document.activeElement.id'),'jev-provider-trigger');
+  await d.domClick('.return-agent');
+  assert.equal(await d.evaluate('document.querySelector("#prompt").value'),'这是一份模板草稿');
+  await d.evaluate(`window.tasks.saveJevSettings({enabled:true,provider:'typesafe',mode:'driver',apiKey:'fixture-jev-entry-only'})`);
+  await d.waitFor('.jev-entry',s=>s.text.includes('优先执行'));
+  await d.evaluate(`window.tasks.saveJevSettings({enabled:true,mode:'advisory'})`);
+  await d.waitFor('.jev-entry',s=>s.text.includes('辅助判断'));
+  await d.evaluate(`window.tasks.saveJevSettings({enabled:false})`);
+  await d.waitFor('.jev-entry',s=>s.text.includes('未启用'));
+  console.log('PASS template feedback persists, valid save succeeds, Jev states and settings/return preserve draft');
+} finally {await app.stop();}

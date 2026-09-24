@@ -9,7 +9,8 @@ const require = createRequire(import.meta.url);
 const { requestBrowserGateway } = require('../dist/main/browser-gateway-client');
 const { WrapperBrowser } = require('../dist/main/tasks/browser');
 const { TaskStore } = require('../dist/main/tasks/store');
-const state = await requestBrowserGateway({ action: 'status' });
+const gatewayOptions = { homeDir: process.env.PROFILEPILOT_GATEWAY_HOME };
+const state = await requestBrowserGateway({ action: 'status' }, gatewayOptions);
 const profile = state.state.profiles.find(p => p.profileId === profileId && p.publicPort === port);
 assert.ok(profile && (!profile.ownerSessionId || profile.sessionStatus === 'stopped'), 'Do not override an occupied profile.');
 const fixture = await startTaskFixture();
@@ -62,7 +63,7 @@ try {
   await writeFile(output, JSON.stringify({ passed: true, at: new Date().toISOString(), profileId, port, checks }, null, 2));
   console.log('PASS', JSON.stringify({ checks, output }));
 } finally {
-  const latest = await requestBrowserGateway({ action: 'status' });
+  const latest = await requestBrowserGateway({ action: 'status' }, gatewayOptions);
   if (latest.state.profiles.some(p => p.ownerSessionId === task.sessionId)) await browser.control(task, 'complete');
   await fixture.close();
 }

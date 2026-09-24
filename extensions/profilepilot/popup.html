@@ -1,0 +1,5 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>ProfilePilot 浏览器连接</title><link rel="stylesheet" href="popup.css"></head><body>
+<h1>ProfilePilot</h1><p>使用当前 Chrome Profile 的登录状态，自动在新标签页执行任务。</p><div id="status" role="status">正在读取连接状态…</div>
+<form id="connect"><label for="code">在 ProfilePilot 中生成的配对码</label><textarea id="code" required autocomplete="off" placeholder="PP1.…"></textarea><small>请确认当前 Chrome Profile 正是应用中选择的系统 Profile。连接后，新任务会自动新开标签页，保留你已有的页面。</small><button type="submit" class="primary">授权并连接 ProfilePilot</button></form>
+<div id="controls" hidden><p>新任务自动新开标签页；继续同一任务时复用它的页面。</p><button id="reconnect">重新连接</button><button id="takeover">我来操作</button><button id="return">交还 Agent</button><details><summary>将已有页面用于当前任务</summary><small>仅在接管任务后使用。选中后允许当前任务操作此页。</small><label for="next-tab">选择已有标签页</label><select id="next-tab"></select><button id="select-tab">将此页用于当前任务</button></details><button id="disconnect">断开并取消配对</button></div><p class="foot">连接和页面画面仅传到本机应用。任务所需页面内容由应用发送给你配置的模型服务。</p><script type="module" src="popup.js"></script></body></html>
+

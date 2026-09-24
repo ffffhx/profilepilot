@@ -21,6 +21,14 @@ export async function startTaskFixture(port = 0) {
   }
   </script></body></html>`;
   const server = http.createServer(async (req, res) => {
+    if (req.url.startsWith("/live")) {
+      res.setHeader("content-type", "text/html;charset=utf-8");
+      res.end('<!doctype html><html><meta charset="utf-8"><title>Live preview fixture</title><body style="background:#142820;color:white;font:40px sans-serif"><h1>Live browser preview</h1><p id="counter">0</p><a style="color:white" href="/live?second">Switch page</a><script>let n=0;setInterval(()=>{document.getElementById("counter").textContent=++n;document.body.style.background=n%2?"#142820":"#214232"},250)</script></body></html>'); return;
+    }
+    if (req.url === "/wide") {
+      res.setHeader("content-type", "text/html;charset=utf-8");
+      res.end('<!doctype html><html><meta charset="utf-8"><title>Wide account page</title><body><header style="width:2400px;height:120px"><button style="margin-left:2000px;cursor:pointer" onclick="document.getElementById(\'result\').textContent=\'个人中心已打开\'"><img alt="个人中心" width="50" height="50"></button></header><p id="result">请打开右侧头像</p></body></html>'); return;
+    }
     if (req.url === "/api/events") { let text = ""; for await (const chunk of req) text += chunk; try { events.push(JSON.parse(text)); } catch {} res.end("ok"); return; }
     if (req.url === "/report.csv") { res.writeHead(200, { "content-type": "text/csv;charset=utf-8", "content-disposition": "attachment; filename=report.csv" }); res.end("id,name\nPP-1,test\n"); return; }
     if (req.url === "/api/records") { res.setHeader("content-type", "application/json"); res.end(JSON.stringify(records)); return; }

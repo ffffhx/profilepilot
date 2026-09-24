@@ -51,3 +51,17 @@ test("macOS and Linux independent launcher uses a detached session with closed s
   assert.equal(invocation.options.detached, true);
   assert.equal(invocation.options.stdio, "ignore");
 });
+
+test("background launch reaches Electron on Windows and macOS without displaying a launcher window", async () => {
+  const launcher = await import(launcherUrl);
+  const bootstrap = launcher.buildWindowsBootstrap({
+    executable: "C:\\Electron\\electron.exe", repoRoot: "C:\\Code\\Profile Pilot",
+    resultPath: "C:\\Temp\\result.json", environment: {}, background: true
+  });
+  const encodedArguments = bootstrap.match(/\$electronArguments = .*FromBase64String\('([^']+)'\)/)[1];
+  assert.equal(Buffer.from(encodedArguments, "base64").toString("utf8"), '"C:\\Code\\Profile Pilot" --background');
+  assert.match(bootstrap, /Start-Process .* -WindowStyle Hidden -PassThru/);
+  const invocation = launcher.buildPosixInvocation({ executable: "/Electron", repoRoot: "/repo", background: true });
+  assert.deepEqual(invocation.args, ["/repo", "--background"]);
+  assert.equal(invocation.options.detached, true);
+});

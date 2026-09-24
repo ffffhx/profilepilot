@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'">
+  <title>ProfilePilot · 本地应用</title>
+  <link rel="icon" href="./assets/profilepilot-mark.svg">
+  <link rel="stylesheet" href="./local-apps.css"><link rel="stylesheet" href="./workspace-switcher.css">
+</head>
+<body>
+  <div id="local-apps"><p role="status">正在读取本地应用…</p></div>
+  <div id="app-message" role="status" aria-live="polite" hidden></div>
+  <script src="../dist/renderer/local-apps.js"></script>
+</body>
+</html>

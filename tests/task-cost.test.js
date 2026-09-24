@@ -1,0 +1,50 @@
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const { usageCharge, deepseekPeak, mergeCostRecords, costTotals } = require('../dist/shared/task-cost');
+const { updateTokenRecords } = require('../dist/shared/task-token-usage');
+const time = s => Date.parse(s);
+const u = { input_tokens: 1000000, output_tokens: 1000000, cache_read_input_tokens: 1000000 };
+const ds = (start, end = start) => usageCharge('x', 'model', 'deepseek-flash', 'https://api.deepseek.com/anthropic', time(start), time(end), u);
+test('DeepSeek prices UTC boundaries, weekends and Chinese holidays independently of local timezone', () => {
+  assert.equal(deepseekPeak(time('2026-09-24T01:00:00Z')), true);
+  assert.equal(deepseekPeak(time('2026-09-24T04:00:00Z')), false);
+  assert.equal(deepseekPeak(time('2026-09-24T06:00:00Z')), true);
+  assert.equal(deepseekPeak(time('2026-09-24T10:00:00Z')), false);
+  assert.equal(deepseekPeak(time('2026-09-25T02:00:00Z')), false);
+  assert.equal(deepseekPeak(time('2026-09-26T02:00:00Z')), false);
+  assert.equal(deepseekPeak(time('2026-10-01T02:00:00Z')), false);
+  assert.equal(ds('2026-09-24T02:00:00Z').estimate.min, 1.506);
+  assert.equal(ds('2026-09-25T02:00:00Z').estimate.min, 0.753);
+  const q = ds('2026-09-24T03:59:00Z', '2026-09-24T04:01:00Z').estimate;
+  assert.deepEqual([q.min, q.max], [0.753, 1.506]);
+});
+test('Kimi quotes cache creation TTL separately and does not price international or proxy endpoints as domestic', () => {
+  const at = time('2026-09-24T02:00:00Z');
+  const usage = { ...u, cache_creation_input_tokens: 1000000 };
+  const q = usageCharge('k', 'model', 'kimi-k3', 'https://api.moonshot.cn/anthropic', at, at, usage).estimate;
+  assert.deepEqual([q.currency, q.min, q.max], ['CNY', 142, 162]);
+  usage.cache_creation = { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 1000000 };
+  const exact = usageCharge('k', 'model', 'kimi-k3', 'https://api.moonshot.cn/anthropic', at, at, usage).estimate;
+  assert.deepEqual([exact.min, exact.max], [162, 162]);
+  for (const host of ['api.moonshot.ai', 'proxy.example']) assert.equal(usageCharge('k', 'model', 'kimi-k3', `https://${host}`, at, at, usage).estimate, undefined);
+});
+test('historical calls and expired prices stay unpriced; invalid token counters are rejected', () => {
+  assert.equal(ds('2026-09-23T02:00:00Z').estimate, undefined);
+  assert.equal(ds('2026-11-01T02:00:00Z').estimate, undefined);
+  assert.equal(usageCharge('x', 'model', 'deepseek-flash', 'https://api.deepseek.com', 0, 1, { input_tokens: -1, output_tokens: 2 }), undefined);
+});
+test('streamed duplicate responses are replaced, currencies stay separate and saved quotes survive task removal', () => {
+  const at = time('2026-09-24T02:00:00Z');
+  const one = ds('2026-09-24T02:00:00Z');
+  const two = usageCharge('k', 'helper', 'kimi-k3', 'https://api.moonshot.cn', at, at, u);
+  const merged = mergeCostRecords([one], [one, two]);
+  assert.equal(merged.length, 2);
+  assert.deepEqual(mergeCostRecords([one], [{ ...one, estimate: { ...one.estimate, min: 999 } }]), [one]);
+  const record = { taskId: 'task', costRecords: merged };
+  assert.equal(costTotals([record], 'all').amounts.length, 2);
+  assert.equal(costTotals([record], 'model').calls, 1);
+  assert.equal(costTotals([record], 'jev').calls, 0);
+  assert.deepEqual(updateTokenRecords([record], []), [record]);
+  const smaller = { ...one, outputTokens: 1 };
+  assert.deepEqual(mergeCostRecords([one], [smaller]), [one]);
+});

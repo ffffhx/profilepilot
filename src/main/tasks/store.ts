@@ -3,6 +3,9 @@ import { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync } from "
 import path from "node:path";
 import { z } from "zod";
 import type { BrowserTask, CreateTaskInput, TaskSnapshot, TaskEvent } from "../../shared/tasks";
+import { taskModelText } from "../../shared/task-model";
+import { updateTokenRecords } from "../../shared/task-token-usage";
+import { legacyCostCorrection } from "./cost-accounting";
 
 export const now = (): string => new Date().toISOString();
 const text = z.string().trim().min(1).max(30000);
@@ -30,9 +33,25 @@ export class TaskStore {
       if (parsed.version !== 1 || !Array.isArray(parsed.tasks) || !Array.isArray(parsed.materials) || !Array.isArray(parsed.schedules) || !Array.isArray(parsed.attachments)) throw new Error("任务数据格式不正确，已保留原文件，请检查任务存储。");
       this.data = { ...this.data, ...parsed, settings: { ...this.data.settings, ...parsed.settings } };
     }
+    const corrections = this.data.tasks.map(task => ({ task, correction: legacyCostCorrection(root, task) })).filter(entry => entry.correction);
+    if (corrections.length) {
+      // Preserve the exact original store before applying the idempotent repair.
+      writeFileSync(`${this.file}.before-pricing-${Date.now()}.bak`, readFileSync(this.file), { mode: 0o600 });
+      for (const { task, correction } of corrections) {
+        task.costAccounting = correction!.accounting; task.cachedInputTokens = correction!.cacheReadInputTokens;
+        task.usage.costUsd = correction!.costUsd;
+        if (task.status === "paused" && task.result?.summary.startsWith("Reached maximum budget") && task.usage.costUsd < task.limits.budgetUsd) {
+          task.result.summary = "此前费用估算使用了错误单价，现已校正。任务保持暂停，可继续处理原来的要求。";
+        }
+        this.event(task, "system", `已按 DeepSeek 公布单价校正估算费用：$${correction!.accounting.originalUsd!.toFixed(3)} → $${task.usage.costUsd.toFixed(3)}。原预算上限保持不变，实际费用以服务商账单为准。`);
+      }
+    }
     // Never replay an interrupted external operation automatically after a crash.
     for (const task of this.data.tasks) {
       task.runningSince = undefined;
+      for (const decision of task.jevDecisions || []) if (decision.status === "running") {
+        decision.status = "interrupted"; decision.note = "应用中断，未收到完整判断响应；不计入平均响应时间。";
+      }
       const interrupted = task.status === "running";
       for (const receipt of task.receipts) if (receipt.status === "started" || (interrupted && ["submit", "send", "purchase", "delete"].includes(receipt.action.effect) && receipt.status === "executed" && !receipt.reconciliation)) receipt.status = "uncertain";
       if (task.receipts.some(receipt => receipt.status === "uncertain" && ["submit", "send", "purchase", "delete"].includes(receipt.action.effect) && !["completed", "not_completed"].includes(receipt.reconciliation?.outcome || ""))) task.needsReconciliation = true;
@@ -52,6 +71,7 @@ export class TaskStore {
     this.save();
   }
   save(): void {
+    this.data.tokenRecords = updateTokenRecords(this.data.tokenRecords || [], this.data.tasks);
     const temp = `${this.file}.${randomUUID()}.tmp`;
     writeFileSync(temp, JSON.stringify({ ...this.data, version: 1 }, null, 2), { encoding: "utf8", mode: 0o600 });
     renameSync(temp, this.file);
@@ -88,6 +108,7 @@ export class TaskStore {
     return task;
   }
   event(task: BrowserTask, kind: TaskEvent["kind"], value: string): void {
+    if (kind === "system") value = taskModelText(task, value);
     task.events.push({ id: randomUUID(), at: now(), kind, text: value.slice(0, 30000) });
     task.updatedAt = now();
   }

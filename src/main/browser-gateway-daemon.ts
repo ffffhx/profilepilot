@@ -24,6 +24,7 @@ import {
 } from "./browser-gateway-driver-lifecycle";
 import { BrowserGatewayServer } from "./browser-gateway-server";
 import { ChromePipeTransport } from "./browser-gateway-transport";
+import { ElectronCdpTransport } from "./electron-cdp-transport";
 import { focusProfileWindow } from "./chrome-launch";
 import { validateUnpackedExtensionPath } from "./unpacked-extension";
 
@@ -47,6 +48,7 @@ interface ManagedGatewayProfile {
   profileId: string;
   profileName: string;
   agentAccessDisabled: boolean;
+  electronCdpPort?: number;
 }
 
 interface DriverReconnectTimer {
@@ -79,6 +81,7 @@ export class BrowserGatewayDaemon {
   private eventSequence = 0;
   private shuttingDown = false;
   private shutdownRequested = false;
+  private electronRegistration: Promise<unknown> = Promise.resolve();
 
   constructor(
     homeDir = process.env.PROFILEPILOT_GATEWAY_HOME || os.homedir(),
@@ -320,7 +323,37 @@ export class BrowserGatewayDaemon {
         return { ok: true, target, profileFocused, focusError };
       });
     }
+    if (request.action === "attach-electron" || request.action === "reconnect-electron" || request.action === "detach-electron") {
+      const operation = this.electronRegistration.catch(() => undefined).then(async () => {
+        if (request.action === "detach-electron") {
+          const managed = this.managedProfiles.get(request.publicPort);
+          if (!managed) return { ok: true };
+          if (!managed.electronCdpPort || managed.profileId !== request.profileId) throw new Error("此端口不属于该 Electron 应用。");
+          const profile = this.control.getProfile(request.publicPort);
+          if (profile?.ownerSessionId && profile.sessionStatus === "active") {
+            await this.withSessionControlLock(profile.ownerSessionId, () => this.handleSessionControl({ action: "control", sessionId: profile.ownerSessionId!, command: "stop" }));
+            this.driverLifecycle.sessionStopped(profile, "electron-detached");
+          }
+          this.cancelDriverReconnectForPort(request.publicPort);
+          await this.gateway.unregisterBackend(request.publicPort, true);
+          this.control.unregisterProfile(request.publicPort);
+          this.managedProfiles.delete(request.publicPort); this.persistManagedProfiles();
+          return { ok: true };
+        }
+        if (request.action === "reconnect-electron") {
+          const managed = this.managedProfiles.get(request.publicPort);
+          if (!managed?.electronCdpPort) throw new Error("未配置此 Electron Agent 端口。");
+          return this.attachElectron({ ...managed, action: "attach-electron", publicPort: request.publicPort, backendPort: managed.electronCdpPort });
+        }
+        return this.attachElectron(request);
+      });
+      this.electronRegistration = operation;
+      return operation;
+    }
     if (request.action === "launch-profile") {
+      if ([...this.managedProfiles.entries()].some(([port, profile]) => profile.electronCdpPort && (port === request.publicPort || profile.electronCdpPort === request.publicPort))) {
+        throw new BrowserGatewayControlError("PROFILE_LEASE_CONFLICT", "此端口已保留给 Electron 应用，不能用于启动 Chrome。");
+      }
       const managedProfile = {
         profileId: request.profileId,
         profileName: request.profileName,
@@ -897,12 +930,47 @@ export class BrowserGatewayDaemon {
           this.managedProfiles.set(publicPort, {
             profileId,
             profileName,
-            agentAccessDisabled: candidate?.agentAccessDisabled === true
+            agentAccessDisabled: candidate?.agentAccessDisabled === true,
+            ...(Number.isInteger(candidate?.electronCdpPort) && candidate.electronCdpPort >= 1024 && candidate.electronCdpPort <= 65535
+              ? { electronCdpPort: candidate.electronCdpPort } : {})
           });
         }
       }
     } catch {
       // First run or a recoverable catalog corruption.
+    }
+  }
+
+  private async attachElectron(request: Extract<GatewayControlRequest, { action: "attach-electron" }>): Promise<GatewayControlResponse> {
+    const { publicPort, backendPort, profileId, profileName } = request;
+    if (![publicPort, backendPort].every(port => Number.isInteger(port) && port >= 1024 && port <= 65535)
+      || publicPort === backendPort || !/^local-app:[a-f0-9-]{36}$/i.test(profileId) || !profileName?.trim()) {
+      throw new Error("Electron Agent 连接配置无效；Agent 端口必须与应用调试端口不同。");
+    }
+    for (const [port, managed] of this.managedProfiles) {
+      if ((port === publicPort && (managed.profileId !== profileId || managed.electronCdpPort !== backendPort))
+        || (port !== publicPort && (managed.profileId === profileId || managed.electronCdpPort === backendPort))
+        || port === backendPort || managed.electronCdpPort === publicPort) {
+        throw new BrowserGatewayControlError("PROFILE_LEASE_CONFLICT", "应用或端口已有 Gateway 绑定，请先解除原连接。");
+      }
+    }
+    if (this.gateway.registeredPorts().includes(publicPort)) {
+      const current = this.control.getProfile(publicPort);
+      if (current?.profileId !== profileId) throw new BrowserGatewayControlError("PROFILE_LEASE_CONFLICT", "Agent 端口已被其他应用使用。");
+      return { ok: true, alreadyRunning: true, profile: current };
+    }
+    const transport = await ElectronCdpTransport.connect(backendPort);
+    try {
+      const chromePid = await transport.browserPid();
+      // A new application lifetime never revives the previous Agent's ownership.
+      this.control.unregisterProfile(publicPort);
+      this.control.registerProfile({ profileId, profileName, publicPort, chromePid });
+      await this.gateway.registerBackend({ publicPort, backend: transport, kind: "electron" });
+      this.managedProfiles.set(publicPort, { profileId, profileName, agentAccessDisabled: false, electronCdpPort: backendPort });
+      this.persistManagedProfiles();
+      return { ok: true, profile: this.control.getProfile(publicPort) };
+    } catch (error) {
+      transport.close(); this.control.unregisterProfile(publicPort); throw error;
     }
   }
 

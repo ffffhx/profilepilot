@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
 import { IPC_CHANNELS } from "./shared/ipc";
-import { TASK_CHANNEL, TASK_CHANGED, type TaskApi, type TaskSnapshot } from "./shared/tasks";
+import { LOCAL_APPS_CHANNEL, type LocalAppsApi } from "./shared/local-apps";
+import { TASK_CHANNEL, TASK_CHANGED, TASK_PREVIEW, type TaskApi, type TaskSnapshot, type TaskPreviewUpdate } from "./shared/tasks";
 import type {
   AccountSyncDiffResult,
   AccountSyncRequest,
@@ -221,6 +222,18 @@ const profileManagerApi: ProfileManagerApi = {
 
 contextBridge.exposeInMainWorld("profileManager", profileManagerApi);
 const taskApi: TaskApi = {
+  openLink: url => ipcRenderer.invoke(TASK_CHANNEL, "openLink", url),
+  pairNativeBrowser: id => ipcRenderer.invoke(TASK_CHANNEL, "pairNativeBrowser", id),
+  authorizeNativeBrowser: id => ipcRenderer.invoke(TASK_CHANNEL, "authorizeNativeBrowser", id),
+  disconnectNativeBrowser: id => ipcRenderer.invoke(TASK_CHANNEL, "disconnectNativeBrowser", id),
+  openNativeExtensionFolder: () => ipcRenderer.invoke(TASK_CHANNEL, "openNativeExtensionFolder"),
+  focusTaskBrowser: id => ipcRenderer.invoke(TASK_CHANNEL, "focusTaskBrowser", id),
+  watchPreview: id => ipcRenderer.invoke(TASK_CHANNEL, "watchPreview", id),
+  ackPreview: (id, frameId) => ipcRenderer.invoke(TASK_CHANNEL, "ackPreview", id, frameId),
+  onPreview: listener => {
+    const handler = (_event: IpcRendererEvent, update: TaskPreviewUpdate): void => listener(update);
+    ipcRenderer.on(TASK_PREVIEW, handler); return () => ipcRenderer.removeListener(TASK_PREVIEW, handler);
+  },
   snapshot: () => ipcRenderer.invoke(TASK_CHANNEL, "snapshot"),
   create: (input) => ipcRenderer.invoke(TASK_CHANNEL, "create", input),
   retryItems: (id, items) => ipcRenderer.invoke(TASK_CHANNEL, "retryItems", id, items),
@@ -232,6 +245,7 @@ const taskApi: TaskApi = {
   deleteAttachment: (id) => ipcRenderer.invoke(TASK_CHANNEL, "deleteAttachment", id),
   saveSettings: (input) => ipcRenderer.invoke(TASK_CHANNEL, "saveSettings", input),
   testConnection: () => ipcRenderer.invoke(TASK_CHANNEL, "testConnection"),
+  listModels: () => ipcRenderer.invoke(TASK_CHANNEL, "listModels"),
   saveJevSettings: (input) => ipcRenderer.invoke(TASK_CHANNEL, "saveJevSettings", input),
   testJevConnection: () => ipcRenderer.invoke(TASK_CHANNEL, "testJevConnection"),
   openJevConsole: (page) => ipcRenderer.invoke(TASK_CHANNEL, "openJevConsole", page),
@@ -240,6 +254,7 @@ const taskApi: TaskApi = {
   saveTemplate: (input) => ipcRenderer.invoke(TASK_CHANNEL, "saveTemplate", input),
   deleteTemplate: (id) => ipcRenderer.invoke(TASK_CHANNEL, "deleteTemplate", id),
   deleteTask: (id) => ipcRenderer.invoke(TASK_CHANNEL, "deleteTask", id),
+  updateTaskMetadata: (id, input) => ipcRenderer.invoke(TASK_CHANNEL, "updateTaskMetadata", id, input),
   exportData: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "exportData", ...args),
   openArtifact: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "openArtifact", ...args),
   onChanged: (listener) => {
@@ -248,3 +263,17 @@ const taskApi: TaskApi = {
   }
 };
 contextBridge.exposeInMainWorld("tasks", taskApi);
+const localAppsApi: LocalAppsApi = {
+  list: () => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "list"),
+  save: input => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "save", input),
+  remove: id => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "remove", id),
+  start: id => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "start", id),
+  stop: id => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "stop", id),
+  restart: id => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "restart", id),
+  logs: id => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "logs", id),
+  pickDirectory: () => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "pickDirectory"),
+  openDirectory: id => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "openDirectory", id),
+  openDebugger: (id, kind, targetId) => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "openDebugger", id, kind, targetId),
+  agentControl: (id, command) => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "agentControl", id, command)
+};
+contextBridge.exposeInMainWorld("localApps", localAppsApi);

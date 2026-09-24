@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { randomUUID } from "node:crypto";
+import { usageCharge, mergeCostRecords } from "../../shared/task-cost";
 import type { BrowserObservation, BrowserTask, TaskSettings } from "../../shared/tasks";
 import { providerEnvironment } from "./provider";
 
@@ -27,6 +29,8 @@ export async function taskHelper(key: string, settings: TaskSettings, task: Brow
         messages: [{ role: "user", content: JSON.stringify({ user: JSON.parse(userSource(task)), page: { url: observation.url, title: observation.title, snapshot: observation.snapshot.slice(0, 18000), fields: observation.fast?.candidates.filter(c => c.kind !== "click") }, recentActions: task.receipts.slice(-8).map(r => ({ action: r.action, status: r.status, result: r.result })), outputs: task.outputs?.map(f => ({ name: f.name, size: f.size })) }) }] }) });
     if (!response.ok) { await response.body?.cancel(); throw new Error("Provider unavailable"); }
     const body = await response.json() as any;
+    const charge = usageCharge(`helper:${randomUUID()}`, "helper", body.model || settings.model, settings.baseUrl, started, Date.now(), body.usage);
+    if (charge) task.costRecords = mergeCostRecords(task.costRecords || [], [charge]);
     if (body.stop_reason !== "end_turn") throw new Error("Incomplete response");
     const text = body.content?.filter((b: any) => b.type === "text").map((b: any) => b.text).join("")?.trim().replace(/^```(?:json)?\s*|\s*```$/g, "");
     const result = (kind === "fields" ? fieldSchema : completionSchema).parse(JSON.parse(text));

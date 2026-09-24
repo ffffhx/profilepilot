@@ -62,7 +62,7 @@ function decodeExpression(value) {
   return `[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(${powershellString(Buffer.from(String(value), "utf8").toString("base64"))}))`;
 }
 
-export function buildWindowsBootstrap({ executable, repoRoot, resultPath, environment = process.env }) {
+export function buildWindowsBootstrap({ executable, repoRoot, resultPath, environment = process.env, background = false }) {
   const assignments = Object.entries(independentEnvironment(environment))
     .map(([name, value]) => `$env:${name} = ${decodeExpression(value)}`)
     .join("\n");
@@ -70,11 +70,11 @@ export function buildWindowsBootstrap({ executable, repoRoot, resultPath, enviro
     "$ErrorActionPreference = 'Stop'",
     `$executable = ${decodeExpression(executable)}`,
     `$repoRoot = ${decodeExpression(repoRoot)}`,
-    `$electronArguments = ${decodeExpression(quoteWindowsArgument(repoRoot))}`,
+    `$electronArguments = ${decodeExpression([repoRoot, ...(background ? ["--background"] : [])].map(quoteWindowsArgument).join(" "))}`,
     `$resultPath = ${decodeExpression(resultPath)}`,
     "try {",
     assignments ? assignments.split("\n").map((line) => `  ${line}`).join("\n") : "",
-    "  $started = Start-Process -FilePath $executable -ArgumentList $electronArguments -WorkingDirectory $repoRoot -PassThru",
+    `  $started = Start-Process -FilePath $executable -ArgumentList $electronArguments -WorkingDirectory $repoRoot${background ? " -WindowStyle Hidden" : ""} -PassThru`,
     "  $payload = @{ ok = $true; pid = $started.Id } | ConvertTo-Json -Compress",
     "} catch {",
     "  $payload = @{ ok = $false; error = $_.Exception.Message } | ConvertTo-Json -Compress",
@@ -106,10 +106,10 @@ export function buildWindowsCimInvocation({ bootstrapScript, powershellPath }) {
   };
 }
 
-export function buildPosixInvocation({ executable, repoRoot }) {
+export function buildPosixInvocation({ executable, repoRoot, background = false }) {
   return {
     executable,
-    args: [repoRoot],
+    args: [repoRoot, ...(background ? ["--background"] : [])],
     options: {
       cwd: repoRoot,
       detached: true,
@@ -172,11 +172,11 @@ function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function launchOnWindows(executable, repoRoot) {
+async function launchOnWindows(executable, repoRoot, background) {
   const powershellPath = path.join(process.env.SystemRoot || process.env.SYSTEMROOT || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
   const resultPath = path.join(os.tmpdir(), `profilepilot-independent-${process.pid}-${randomUUID()}.json`);
   try {
-    const bootstrapScript = buildWindowsBootstrap({ executable, repoRoot, resultPath });
+    const bootstrapScript = buildWindowsBootstrap({ executable, repoRoot, resultPath, background });
     const invocation = buildWindowsCimInvocation({ bootstrapScript, powershellPath });
     const launched = spawnSync(invocation.executable, invocation.args, {
       cwd: repoRoot,
@@ -204,8 +204,8 @@ async function launchOnWindows(executable, repoRoot) {
   }
 }
 
-async function launchOnPosix(executable, repoRoot) {
-  const invocation = buildPosixInvocation({ executable, repoRoot });
+async function launchOnPosix(executable, repoRoot, background) {
+  const invocation = buildPosixInvocation({ executable, repoRoot, background });
   const child = spawn(invocation.executable, invocation.args, invocation.options);
   child.unref();
   if (!Number.isSafeInteger(child.pid)) throw new Error("独立启动器没有返回 Electron PID。");
@@ -214,6 +214,7 @@ async function launchOnPosix(executable, repoRoot) {
 }
 
 export async function main() {
+  const background = process.argv.includes("--background");
   const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const executable = process.platform === "win32"
     ? path.join(repoRoot, "node_modules", "electron", "dist", "electron.exe")
@@ -233,9 +234,9 @@ export async function main() {
     return;
   }
   const launched = process.platform === "win32"
-    ? await launchOnWindows(executable, repoRoot)
-    : await launchOnPosix(executable, repoRoot);
-  process.stdout.write(`${JSON.stringify({ ok: true, platform: process.platform, executable, ...launched }, null, 2)}\n`);
+    ? await launchOnWindows(executable, repoRoot, background)
+    : await launchOnPosix(executable, repoRoot, background);
+  process.stdout.write(`${JSON.stringify({ ok: true, platform: process.platform, executable, background, ...launched }, null, 2)}\n`);
 }
 
 const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : "";

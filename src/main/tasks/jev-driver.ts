@@ -3,6 +3,7 @@ import type { BrowserAction, BrowserObservation, BrowserTask, TaskSettings } fro
 import { jevProviderFor } from "../../shared/tasks";
 import { chooseJevAction } from "./jev-actions";
 import { taskHelper, type FieldValues, type Completion } from "./task-helper";
+import { beginJevCall, finishJevCall } from "./jev-usage";
 
 export interface DriverContext {
   task: BrowserTask; settings: TaskSettings; apiKey: string; jevKey: string; signal: AbortSignal;
@@ -13,6 +14,15 @@ export interface DriverContext {
   publish(): void;
   choose?: typeof chooseJevAction;
   helper?: typeof taskHelper;
+}
+export function firstTaskUrl(prompt: string): string | undefined {
+  // Chinese prose commonly follows a URL without a separating space.
+  // Keep Unicode paths and encoded query values, but stop at prose delimiters.
+  let value = prompt.match(/https?:\/\/[^\s<>"'`，。；！？、：”“‘’（）【】]+/i)?.[0];
+  if (!value) return;
+  value = value.replace(/[.,;:!?\]}]+$/, "");
+  while (value.endsWith(")") && (value.match(/\)/g)?.length || 0) > (value.match(/\(/g)?.length || 0)) value = value.slice(0, -1);
+  try { return new URL(value).href; } catch { return; }
 }
 export async function runJevDriver(ctx: DriverContext): Promise<string | undefined> {
   const { task, signal } = ctx;
@@ -28,23 +38,33 @@ export async function runJevDriver(ctx: DriverContext): Promise<string | undefin
     return result.result;
   };
   if (task.needsReconciliation || task.items.length || task.attachments.length) return "任务需要核查已有记录、读取附件或管理批量项目，交由完整 Agent 处理。";
+  const latestRequest = task.events.filter(event => event.kind === "user").at(-1)?.text || task.prompt;
+  if (/(?:终端|命令行|运行脚本|本地服务|PowerShell|\bbash\b|\bshell\b|\bnpm\b|\bpython\b)|(?:生成|制作|创建|搭建|启动|运行|跑起来).{0,40}(?:HTML|网页|网站|服务)|(?:HTML|网页|网站|服务).{0,40}(?:生成|启动|运行|跑起来)/i.test(latestRequest)) {
+    return "任务需要生成文件或使用终端，交由具备终端工具的完整 Agent 处理。";
+  }
+  if (task.resumeContext?.returnedAt && !task.resumeContext.observed) return "人工操作已结束，主模型先核对当前页面、账号和已完成步骤，再继续任务。";
   ctx.event("Jev 正在选择页面动作；填写内容和完成核查按需调用主模型。");
   // Only bootstrap a URL explicitly supplied by the user, and only on the first run.
   if (!task.receipts.length) {
-    const url = task.prompt.match(/https?:\/\/[^\s<>"“”]+/)?.[0]?.replace(/[，。；）)]+$/, "");
+    const url = firstTaskUrl(task.prompt);
     if (url) { await ctx.tool("browser_action", { kind: "open", value: url, effect: "read", summary: "打开任务指定页面" }); if (!active()) return; }
   }
   for (let step = 0; step < 100 && active(); step++) {
     if ((task.usage.jev?.calls || 0) >= 100) return "Jev 已达到本任务 100 次判断上限，交由主模型继续。";
     const observation = await ctx.observe();
     if (!active()) return;
+    if (observation.url === "about:blank" || /^(?:chrome|edge):\/\/newtab\/?$/.test(observation.url)) {
+      return "浏览器当前是空白页，尚未打开任务网站。已自动切换到主模型，查找并打开任务所需页面。";
+    }
     if (!observation.fast) return "当前浏览器不支持快速页面观察，交由主模型继续。";
     unchanged = observation.fingerprint === previous ? unchanged + 1 : 0; previous = observation.fingerprint;
     if (unchanged >= 3) return "页面连续多次没有变化，交由主模型检查原因。";
-    const usage = task.usage.jev ||= { calls: 0, inputTokens: 0, elapsedMs: 0 };
-    usage.calls++; ctx.publish();
-    const decision = await (ctx.choose || chooseJevAction)(ctx.jevKey, task, observation, { provider: jevProviderFor(ctx.settings), signal });
-    usage.inputTokens += decision.inputTokens; usage.elapsedMs += decision.elapsedMs; ctx.publish();
+    const record = beginJevCall(task, "driver"); ctx.publish();
+    let decision: Awaited<ReturnType<typeof chooseJevAction>>;
+    try {
+      decision = await (ctx.choose || chooseJevAction)(ctx.jevKey, task, observation, { provider: jevProviderFor(ctx.settings), signal });
+      finishJevCall(task, record, { ...decision, outcome: decision.operation || "转交主模型" });
+    } finally { finishJevCall(task, record); ctx.publish(); }
     if (!active()) return;
     if (decision.operation === "REVIEW" || (!decision.operation && !task.usage.jevActions)) return decision.note || "Jev 将复杂判断交给主模型继续处理。";
     // Uncertainty after making progress gets one bounded completion check first.
@@ -66,7 +86,7 @@ export async function runJevDriver(ctx: DriverContext): Promise<string | undefin
       return finished.isError ? "完成依据未通过检查，交由主模型继续核查。" : undefined;
     }
     const action: BrowserAction = { kind: op === "CLICK" ? "click" : op === "TYPE_TEXT" ? "fill" : op === "SELECT" ? "select" : "scroll", version: observation.version, effect: op === "TYPE_TEXT" || op === "SELECT" ? "edit" : "read", summary: "" };
-    if (action.kind === "scroll") { action.value = op === "SCROLL_UP" ? "up" : "down"; action.summary = op === "SCROLL_UP" ? "向上查看页面" : "向下查看页面"; }
+    if (action.kind === "scroll") { action.value = op.replace("SCROLL_", "").toLowerCase(); action.summary = `向${({ up: "上", down: "下", left: "左", right: "右" } as Record<string, string>)[action.value]}查看页面`; }
     else {
       if (!candidate) return "Jev 选择的元素已失效，交由主模型重新观察。";
       action.ref = candidate.ref;
@@ -86,7 +106,8 @@ export async function runJevDriver(ctx: DriverContext): Promise<string | undefin
     if (!active()) return;
     const result = await ctx.tool("browser_action", action);
     if (!active()) return;
-    if (result.isError) { ctx.event("页面已变化，重新读取后再选择动作。"); continue; }
+    if (result.isError) { record.outcome = "未执行，重新观察"; ctx.event("动作未执行，重新读取后再选择。"); continue; }
+    record.outcome = "已执行";
     task.usage.jevActions = (task.usage.jevActions || 0) + 1; ctx.publish();
     await delay(80, undefined, { signal });
   }

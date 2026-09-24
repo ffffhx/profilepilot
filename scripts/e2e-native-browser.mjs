@@ -1,0 +1,43 @@
+import assert from 'node:assert/strict';
+import path from 'node:path';
+import os from 'node:os';
+import { mkdtemp, mkdir, writeFile, rm, readFile } from 'node:fs/promises';
+import { launchProfilePilotE2e, repoRoot } from './e2e/lib/electron-driver.mjs';
+const root = await mkdtemp(path.join(os.tmpdir(), 'pp-native-ui-'));
+await mkdir(path.join(root, 'Default'), { recursive: true });
+await writeFile(path.join(root, 'Local State'), JSON.stringify({ profile: { info_cache: { Default: { name: '日常 Chrome · 验收' } } } }));
+let app;
+try {
+  app = await launchProfilePilotE2e({ env: { CPM_START_VIEW: 'tasks', CPM_NATIVE_CHROME_USER_DATA_DIR: root } });
+  const d = app.driver;
+  await d.domInput('#prompt', '保留系统浏览器任务草稿');
+  await d.waitFor('.browser-picker .select-trigger', state => !state.disabled);
+  await d.domClick('.browser-picker .select-trigger');
+  assert.match((await d.query('[role=option][data-value="native:Default"]')).text, /尚未配对扩展/);
+  assert.equal(await d.evaluate('document.querySelector("[data-value=\\"native:Default\\"]").getAttribute("aria-disabled")'), 'true');
+  await d.domClick('.select-popover .model-service-link');
+  await d.waitFor('#native-profile');
+  assert.equal(await d.evaluate('document.activeElement.id'), 'native-profile-trigger');
+  await d.domClick('[data-action="return-agent"]');
+  assert.equal(await d.evaluate('document.querySelector("#prompt").value'), '保留系统浏览器任务草稿');
+  await d.domClick('[data-nav="settings"]');
+  await d.waitFor('#native-profile');
+  assert.match((await d.query('.native-browser-settings')).text, /连接系统 Chrome/);
+  assert.equal(await d.evaluate('document.querySelector("#native-profile").value'), 'native:Default');
+  const artifacts = path.join(repoRoot, 'test-results/browser-tasks'); await mkdir(artifacts, { recursive: true });
+  await writeFile(path.join(artifacts, 'native-browser-settings.png'), Buffer.from((await d.screenshot()).pngBase64, 'base64'));
+  await d.domClick('[data-action="pair-native"]');
+  await d.waitFor('#native-pair-code');
+  assert.equal(await d.evaluate('document.querySelector("#native-pair-code").value.startsWith("PP1.")'), true);
+  const saved = await readFile(path.join(app.dataDir, 'browser-tasks/tasks.json'), 'utf8');
+  assert.equal(saved.includes('PP1.'), false);
+  await assert.rejects(d.evaluate('window.tasks.pairNativeBrowser("native:missing")'), /请选择/);
+  await assert.rejects(d.evaluate('window.tasks.create({profileId:"native:Default",prompt:"Read a page"})'), /连接/);
+  await assert.rejects(d.evaluate('window.tasks.pairNativeBrowser("isolated:fake")'), /请选择/);
+  await d.domClick('[data-nav="tasks"]');
+  assert.equal(await d.evaluate('Boolean(document.querySelector("#create-task select[name=profileId] option[value=\\"native:Default\\"]"))'), true);
+  console.log('PASS native connection UI, pairing IPC, unknown Profile rejection, token redaction and disconnected task guard');
+} finally {
+  await app?.stop();
+  if (path.resolve(root).startsWith(path.resolve(os.tmpdir()) + path.sep)) await rm(root, { recursive: true, force: true });
+}

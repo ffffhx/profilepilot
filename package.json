@@ -17,7 +17,7 @@
     "bundle:chrome-devtools-mcp-wrapper": "esbuild src/main/chrome-devtools-mcp-wrapper.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/main/profilepilot-chrome-devtools-mcp-wrapper.cjs --log-level=warning",
     "bundle:browser-wrappers": "npm run bundle:agent-browser-wrapper && npm run bundle:playwright-cli-wrapper && npm run bundle:chrome-devtools-mcp-wrapper",
     "bundle:profilepilot-cli": "esbuild src/main/profilepilot-cli.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/main/profilepilot-cli.cjs --log-level=warning",
-    "bundle:renderer": "esbuild src/renderer/main.ts --bundle --outfile=dist/renderer/app.js --platform=browser --format=iife --target=es2022 --log-level=warning && esbuild src/renderer/tasks.ts --bundle --outfile=dist/renderer/tasks.js --platform=browser --format=iife --target=es2022 --log-level=warning",
+    "bundle:renderer": "esbuild src/renderer/main.ts --bundle --outfile=dist/renderer/app.js --platform=browser --format=iife --target=es2022 --log-level=warning && esbuild src/renderer/tasks.ts --bundle --outfile=dist/renderer/tasks.js --platform=browser --format=iife --target=es2022 --log-level=warning && esbuild src/renderer/local-apps.ts --bundle --outfile=dist/renderer/local-apps.js --platform=browser --format=iife --target=es2022 --log-level=warning",
     "build:css": "tailwindcss -i ./public/styles.src.css -o ./public/app.css",
     "watch:css": "tailwindcss -i ./public/styles.src.css -o ./public/app.css --watch",
     "start": "npm run start:independent",
@@ -54,6 +54,8 @@
     "bench": "npm run build && node scripts/bench-overlay.mjs",
     "test:tasks": "npm run build && node --test tests/browser-tasks.test.js tests/browser-tasks-jev.test.js tests/browser-task-ipc.test.js",
     "e2e:tasks": "npm run build && node scripts/e2e-browser-tasks.mjs",
+    "e2e:local-apps": "npm run build && node scripts/e2e-local-apps.mjs",
+    "e2e:electron-gateway": "npm run build && node scripts/e2e-electron-gateway.mjs",
     "verify:tasks:sdk": "npm run build && node scripts/verify-sdk-runtime.mjs",
     "verify:tasks:integration": "npm run build && node scripts/verify-task-integration.mjs",
     "verify:tasks:recovery": "npm run build && node scripts/verify-task-recovery.mjs",
@@ -85,7 +87,8 @@
       "README.md",
       "CHANGELOG.md",
       "LICENSE",
-      "package.json"
+      "package.json",
+      "!node_modules/agent-browser/bin/agent-browser-*"
     ],
     "mac": {
       "category": "public.app-category.developer-tools",
@@ -111,6 +114,28 @@
         {
           "from": "dist/native/ProfilePilot Input Guard.app",
           "to": "native/ProfilePilot Input Guard.app"
+        },
+        {
+          "from": "extensions/profilepilot",
+          "to": "profilepilot-extension"
+        },
+        {
+          "from": "node_modules/agent-browser/bin",
+          "to": "browser-runtime",
+          "filter": [
+            "agent-browser-darwin-*"
+          ]
+        },
+        {
+          "from": "node_modules/agent-browser/LICENSE",
+          "to": "browser-runtime/LICENSE-agent-browser"
+        },
+        {
+          "from": "node_modules/agent-browser/cli/src/native/a11y",
+          "to": "browser-runtime/licenses",
+          "filter": [
+            "LICENSE*"
+          ]
         }
       ]
     },
@@ -138,6 +163,28 @@
         {
           "from": "native/input-guard-win.ps1",
           "to": "native/input-guard-win.ps1"
+        },
+        {
+          "from": "extensions/profilepilot",
+          "to": "profilepilot-extension"
+        },
+        {
+          "from": "node_modules/agent-browser/bin",
+          "to": "browser-runtime",
+          "filter": [
+            "agent-browser-win32-x64.exe"
+          ]
+        },
+        {
+          "from": "node_modules/agent-browser/LICENSE",
+          "to": "browser-runtime/LICENSE-agent-browser"
+        },
+        {
+          "from": "node_modules/agent-browser/cli/src/native/a11y",
+          "to": "browser-runtime/licenses",
+          "filter": [
+            "LICENSE*"
+          ]
         }
       ]
     },
@@ -156,7 +203,8 @@
         "owner": "ffffhx",
         "repo": "profilepilot"
       }
-    ]
+    ],
+    "beforePack": "scripts/verify-browser-runtime.cjs"
   },
   "devDependencies": {
     "@types/node": "^25.9.1",
@@ -168,6 +216,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.278",
+    "agent-browser": "0.34.0",
     "agent-session-core": "^0.1.1",
     "ai": "7.0.107",
     "exceljs": "^4.4.0",

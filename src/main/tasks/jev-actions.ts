@@ -7,6 +7,7 @@ export const operations = {
   TYPE_TEXT: "Fill a visible text field; a separate model will supply text from the user's information.",
   SELECT: "Choose an option in a native dropdown; a separate model will determine its value.",
   SCROLL_DOWN: "Scroll down to find more relevant content.", SCROLL_UP: "Scroll up to relevant content.",
+  SCROLL_LEFT: "Scroll left to reveal content clipped by the viewport.", SCROLL_RIGHT: "Scroll right to reveal content clipped by the viewport, including account icons.",
   WAIT: "A page is loading or an action is still processing; wait briefly.",
   DONE: "All requested work is visibly complete. A separate verifier must confirm this.",
   BLOCKED: "Login, CAPTCHA, payment, missing personal information, or another human-only step blocks the task.",
@@ -52,7 +53,8 @@ export async function chooseJevAction(key: string, task: BrowserTask, observatio
   const state = {
     goal: task.prompt.slice(0, 6000), authorization: task.authorization.slice(0, 2000),
     userUpdates: task.events.filter(e => e.kind === "user").slice(-4).map(e => e.text.slice(0, 2000)),
-    page: { url: observation.url.split(/[?#]/)[0], title: observation.title, text: observation.snapshot.slice(0, 14000) },
+    page: { url: observation.url.split(/[?#]/)[0], title: observation.title, text: observation.snapshot.slice(0, 14000), viewport: observation.viewport },
+    resumeContext: task.resumeContext,
     recentActions: task.receipts.slice(-8).map(r => ({ action: r.action.summary, status: r.status, result: r.result?.slice(0, 500) }))
   };
   const signal = AbortSignal.any([options.signal, AbortSignal.timeout(options.timeoutMs ?? 6000)]);

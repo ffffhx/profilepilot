@@ -1,0 +1,41 @@
+import assert from 'node:assert/strict';
+import http from 'node:http';
+import path from 'node:path';
+import { createRequire } from 'node:module';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { launchProfilePilotE2e, repoRoot } from './e2e/lib/electron-driver.mjs';
+const require = createRequire(import.meta.url);
+const { NativeOnboarding } = require('../dist/main/tasks/native-onboarding');
+const onboarding = new NativeOnboarding('gmdaabnoocjlpimglalnbegfdaklfnaj');
+let request; let openedSettings = 0;
+onboarding.configure({ install: async r => { request = r; r.report({ stage: 'enable-debugging', message: '扩展文件已准备好。首次连接请打开 Chrome 设置，开启“允许对此浏览器进行远程调试”。' }); }, openSettings: async () => { openedSettings++; } }, () => {});
+let port;
+const server = http.createServer((req, res) => onboarding.handle(req, res, port));
+await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); port = server.address().port;
+let app;
+try {
+  const url = onboarding.create(port, 'PP1.must-not-appear-in-ui', '系统默认 Profile', new Date(Date.now() + 300000).toISOString(), 'native:Default');
+  onboarding.start(url, true);
+  app = await launchProfilePilotE2e({ env: { CPM_START_VIEW: 'tasks' } });
+  const d = app.driver;
+  await d.evaluate(`location.href=${JSON.stringify(url)}`);
+  await d.waitFor('#settings');
+  assert.match((await d.query('#status')).text, /扩展文件已准备好/);
+  assert.equal(await d.evaluate('document.documentElement.outerHTML.includes("PP1.")'), false);
+  await d.domClick('#settings');
+  await new Promise(r => setTimeout(r, 150)); assert.equal(openedSettings, 1);
+  const artifacts = path.join(repoRoot, 'test-results/browser-tasks'); await mkdir(artifacts, { recursive: true });
+  await writeFile(path.join(artifacts, 'native-install-onboarding.png'), Buffer.from((await d.screenshot()).pngBase64, 'base64'));
+  await d.domClick('#cancel'); await d.waitFor('#status', s => /已取消/.test(s.text)); assert.equal(request.signal.aborted, true);
+  await d.domClick('#retry'); await d.waitFor('#status', s => /准备好/.test(s.text));
+  request.report({ stage: 'failed', message: '自动安装需要 Chrome 149 或更新版本。' });
+  await d.waitFor('#status', s => /Chrome 149/.test(s.text)); assert.equal(await d.evaluate('document.querySelector("#retry").hidden'), false);
+  request.report({ stage: 'confirm-tab', message: '扩展已安装，请选择允许操作的标签页。' });
+  await d.waitFor('#status', s => /扩展已安装/.test(s.text));
+  await fetch(url + '/pair', { headers: { Origin: 'chrome-extension://gmdaabnoocjlpimglalnbegfdaklfnaj' } });
+  onboarding.connected('native:Default'); await d.waitFor('#status', s => /连接成功/.test(s.text));
+  console.log('PASS installation UI: progress polling, Chrome settings action, cancellation/retry, failure, pairing and success');
+} finally {
+  onboarding.close(); server.close(); server.closeAllConnections();
+  await app?.stop();
+}

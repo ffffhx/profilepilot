@@ -8,6 +8,8 @@ const { TaskService } = require('../dist/main/tasks/service');
 const { actionQuestions, parseActionDecision, chooseJevAction } = require('../dist/main/tasks/jev-actions');
 const { taskHelper } = require('../dist/main/tasks/task-helper');
 const { effectiveEffect } = require('../dist/main/tasks/browser');
+const { FastBrowserPageError } = require('../dist/main/tasks/fast-browser');
+const { EventEmitter } = require('node:events');
 
 const candidates = [{ ref: 'e1', role: 'textbox', label: '姓名', kind: 'fill', value: '' }, { ref: 'e2', role: 'button', label: '提交', kind: 'click', submit: true }];
 const questions = actionQuestions(candidates);
@@ -44,9 +46,9 @@ async function fixture(t, options = {}) {
   let value = '', executions = 0, helperCalls = 0, workerCalls = 0, decisions = 0;
   const controls = [];
   const observe = async () => ({ version: `v${executions}`, fingerprint: `f${executions}`, url: 'https://example.test/form', at: new Date().toISOString(), title: 'Form', account: 'unknown', snapshot: `姓名 ${value}\n提交成功\n- button "提交" [ref=e2]`, fast: { document: 'd', guard: `g${executions}`, candidates: candidates.map(c => c.ref === 'e1' ? { ...c, value } : c) } });
-  const browser = { observe, observeFast: observe, execute: async (_t, a) => { executions++; if (a.kind === 'fill') value = a.value; return 'executed'; }, control: async (_t, a) => controls.push(a), tabs: async () => [] };
+  const browser = { observe, observeFast: options.observeFast || observe, execute: async (_t, a) => { executions++; if (options.execute) return options.execute(_t, a); if (a.kind === 'fill') value = a.value; return 'executed'; }, control: async (_t, a) => controls.push(a), tabs: async () => [] };
   const service = new TaskService(store, { browser, apiKey: () => 'main', jevApiKey: () => 'jev', profileName: async () => 'Test', prepareProfile: async () => ({ name: 'Test', port: 9227 }), changed: () => {}, notify: () => {},
-    worker: () => { workerCalls++; throw new Error('fallback reached'); },
+    worker: (...args) => { workerCalls++; if (options.worker) return options.worker(...args); throw new Error('fallback reached'); },
     chooseJev: async (...args) => { decisions++; return options.choose ? options.choose(...args) : { operation: executions ? 'DONE' : 'TYPE_TEXT', target: 'e1', inputTokens: 10, elapsedMs: 2 }; },
     taskHelper: async (...args) => { helperCalls++; return { result: options.helper ? await options.helper(...args) : args[4] === 'fields' ? { fields: [{ ref: 'e1', text: '张三', source: '张三' }], question: '' } : { complete: true, summary: '已填写张三', evidence: ['姓名 张三'], remaining: [] }, inputTokens: 20, outputTokens: 10, elapsedMs: 3 }; }
   });
@@ -73,6 +75,74 @@ test('pause aborts an in-flight Jev request and drains the run without fallback 
 test('uncertain Jev delegates once to the existing SDK with no speculative browser action', async t => {
   const f = await fixture(t, { choose: async () => ({ inputTokens: 1, elapsedMs: 1, note: 'uncertain' }) }); await drained(f);
   assert.equal(f.counts().workerCalls, 1); assert.equal(f.counts().executions, 0);
+});
+
+test('page script failure delegates once with its reason and a fresh normal observation', async t => {
+  let startMessage, observationResult;
+  const f = await fixture(t, {
+    observeFast: async () => { throw new FastBrowserPageError('observe', 'TypeError: test page reader failed'); },
+    worker: () => {
+      const worker = new EventEmitter(); worker.connected = true;
+      worker.send = message => {
+        if (message.kind === 'start') {
+          startMessage = message;
+          queueMicrotask(() => worker.emit('message', { kind: 'tool', id: 'fresh', name: 'observe', args: {} }));
+        } else if (message.kind === 'tool_result') {
+          observationResult = message.result;
+          worker.exitCode = 0; worker.connected = false;
+          worker.emit('message', { kind: 'result', result: 'Fresh page read' });
+          worker.emit('exit', 0);
+        }
+      };
+      return worker;
+    }
+  });
+  await drained(f);
+  assert.equal(f.counts().workerCalls, 1); assert.equal(f.counts().executions, 0);
+  assert.equal(startMessage.task.pending, undefined); assert.equal(startMessage.task.observation, undefined);
+  assert.equal(startMessage.task.sessionId, f.task.sessionId);
+  assert.equal(JSON.parse(observationResult.content[0].text).url, 'https://example.test/form');
+  assert.ok(f.task.events.some(e => /TypeError: test page reader failed/.test(e.text) && /已自动切换到Claude · claude-sonnet-4-6/.test(e.text)));
+  assert.notEqual(f.task.status, 'waiting_user');
+});
+
+test('blank page delegates without calling Jev or attempting any page action', async t => {
+  const f = await fixture(t, { observeFast: async () => ({ version: 'blank', fingerprint: 'blank', url: 'about:blank', snapshot: '', fast: { document: 'blank', guard: '', candidates: [] } }) });
+  await drained(f);
+  assert.equal(f.counts().workerCalls, 1); assert.equal(f.counts().decisions, 0); assert.equal(f.counts().executions, 0);
+  assert.ok(f.task.events.some(e => /空白页/.test(e.text) && /已自动切换/.test(e.text)));
+});
+
+test('Gateway stops, ownership conflicts and transport failures never trigger model fallback', async t => {
+  for (const code of ['AGENT_USER_IN_CONTROL', 'AGENT_TASK_STOPPED', 'PROFILE_LEASE_CONFLICT', 'GATEWAY_TIMEOUT']) {
+    const f = await fixture(t, { observeFast: async () => { throw Object.assign(new Error(code), { code }); } });
+    await drained(f);
+    assert.equal(f.counts().workerCalls, 0); assert.equal(f.counts().executions, 0);
+    assert.equal(f.task.status, 'waiting_user'); assert.match(f.task.pending.details, new RegExp(code));
+  }
+});
+
+test('cancelling while a page read fails does not launch a fallback worker', async t => {
+  let entered, failRead;
+  const started = new Promise(resolve => entered = resolve);
+  const f = await fixture(t, { observeFast: () => { entered(); return new Promise((_, reject) => failRead = reject); } });
+  await started;
+  await f.service.control(f.task.id, 'cancel');
+  failRead(new FastBrowserPageError('observe', 'page read interrupted'));
+  await drained(f);
+  assert.equal(f.task.status, 'cancelled'); assert.equal(f.counts().workerCalls, 0);
+});
+
+test('failed authorized submission keeps its uncertain receipt when switching models', async t => {
+  const f = await fixture(t, {
+    choose: async () => ({ operation: 'CLICK', target: 'e2', inputTokens: 1, elapsedMs: 1 }),
+    execute: async () => { throw new FastBrowserPageError('execute', 'Error: submit handler threw'); }
+  });
+  f.task.grant = { origin: 'https://example.test', effects: ['submit'], maxActions: 1, used: 0 };
+  await drained(f);
+  assert.equal(f.counts().workerCalls, 1); assert.equal(f.counts().executions, 1);
+  assert.equal(f.task.needsReconciliation, true); assert.equal(f.task.receipts[0].status, 'uncertain');
+  assert.equal(f.task.grant.used, 1);
 });
 test('uncertainty after progress gets independent verification without another action or SDK startup', async t => {
   let calls = 0;

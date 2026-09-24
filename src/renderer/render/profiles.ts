@@ -371,7 +371,12 @@ export function renderProfileConnectionCell(profile: PublicProfile): string {
   // CDP 未就绪（绑定待启动 / 系统不支持 / 未开启）：只显示 CDP 可用性芯片，无驱动信息。
   if (!profile.cdpUrl) {
     const cdpCell = renderProfileCdpCell(profile);
-    return renderAgentBrowserOccupancyCell(profile, cdpCell) || cdpCell;
+    const occupancy = renderAgentBrowserOccupancyCell(profile, cdpCell);
+    if (occupancy) return occupancy;
+    if (!profile.running && profile.source === "isolated" && profile.fixedCdpPort && !profile.agentAccessDisabled) {
+      return `<span class="conn-cell-stack"><span class="conn-line">${cdpCell}<span class="conn-idle">空闲 · 未启动</span></span></span>`;
+    }
+    return cdpCell;
   }
 
   const portChip = cdpChip(

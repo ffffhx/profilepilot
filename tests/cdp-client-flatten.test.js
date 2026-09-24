@@ -108,3 +108,23 @@ test("CdpBrowserClient routes flatten session commands and events", async () => 
     globalThis.WebSocket = originalWebSocket;
   }
 });
+
+test("CDP authorization can be cancelled before the browser accepts, without leaving a connection", async () => {
+  const original = globalThis.WebSocket;
+  let socket;
+  class PendingSocket extends EventTarget {
+    constructor() { super(); socket = this; this.closed = false; }
+    close() { this.closed = true; this.dispatchEvent(new Event('close')); }
+  }
+  globalThis.WebSocket = PendingSocket;
+  try {
+    const controller = new AbortController();
+    const connection = CdpBrowserClient.connect('ws://127.0.0.1:9222/devtools/browser/test', 5000, controller.signal);
+    controller.abort(new Error('user cancelled'));
+    await assert.rejects(connection, /user cancelled/);
+    assert.equal(socket.closed, true);
+    // A delayed open event must not resurrect the cancelled bootstrap.
+    socket.dispatchEvent(new Event('open'));
+    assert.equal(socket.closed, true);
+  } finally { globalThis.WebSocket = original; }
+});

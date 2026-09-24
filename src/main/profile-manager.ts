@@ -553,13 +553,32 @@ export class ProfileManager {
           };
         })
     );
+    const localAppOverlayCandidates = gatewayProfilesFromResponse(gatewayStatus || { ok: true })
+      .filter(profile => typeof profile.profileId === "string" && profile.profileId.startsWith("local-app:"))
+      .flatMap(profile => {
+        const port = Number(profile.publicPort);
+        const control = gatewayControlByPort.get(port);
+        if (!control) return [];
+        const state = gatewayOverlayControl(control);
+        const client = gatewayControlClient(control);
+        return [{
+          port, profileId: String(profile.profileId), profileName: String(profile.profileName),
+          headless: false, browserPids: positiveInteger(profile.chromePid) ? [Number(profile.chromePid)] : [],
+          controlPaused: state.paused, pendingUserAction: state.pendingUserAction,
+          agentOffline: state.agentOffline,
+          driverReconnecting: control.driverState === "connecting" || control.driverState === "reconnecting",
+          controlSince: state.controlSince, agentTarget: control.agentTarget,
+          clients: client ? [client] : []
+        }];
+      });
     const profileAgentOverlayPorts = profileAgentOverlayCandidates.filter((input) => input.clients.length > 0);
     const externalAgentOverlayPorts = externalAgentOverlayCandidates.filter((input) => input.clients.length > 0);
-    const agentOverlayPorts = profileAgentOverlayPorts.concat(externalAgentOverlayPorts);
+    const agentOverlayPorts = profileAgentOverlayPorts.concat(externalAgentOverlayPorts, localAppOverlayCandidates.filter(input => input.clients.length > 0));
     const activeOverlayPorts = new Set(agentOverlayPorts.map((input) => input.port));
     const inactiveOverlayPorts = [...new Set(
       profileAgentOverlayCandidates
         .concat(externalAgentOverlayCandidates)
+        .concat(localAppOverlayCandidates)
         .filter((input) => !input.headless && !activeOverlayPorts.has(input.port))
         .map((input) => input.port)
     )];
@@ -1995,6 +2014,14 @@ export class ProfileManager {
   }
 
   private async resolveTakeoverTarget(profileId: string): Promise<TakeoverTarget> {
+    if (profileId.startsWith("local-app:")) {
+      const status = await requestBrowserGateway({ action: "status" });
+      const profile = gatewayProfilesFromResponse(status).find(item => item.profileId === profileId);
+      const control = profile && gatewayControlsByPort(status).get(Number(profile.publicPort));
+      if (!profile || !control) throw new ProfileManagerError("Electron Agent 连接已断开。", "CDP_CLIENT_NOT_CONNECTED");
+      const client = gatewayControlClient(control);
+      return { profileId, profileName: String(profile.profileName), clients: client ? [client] : [] };
+    }
     const externalUserDataDir = externalUserDataDirFromProfileId(profileId);
     if (externalUserDataDir) {
       const instance = await this.locateExternalInstance(externalUserDataDir);
@@ -3269,7 +3296,7 @@ export class ProfileManager {
     await this.recordIsolatedLaunch(id, cdpPort);
   }
 
-  private async launchProfileWithUrls(profileId: string, urls: string[]): Promise<void> {
+  async launchProfileWithUrls(profileId: string, urls: string[]): Promise<void> {
     const ref = parseProfileId(profileId);
     if (!urls.length) {
       return;

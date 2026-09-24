@@ -10,9 +10,8 @@ const require = createRequire(import.meta.url);
 
 // Each run owns a disposable registered Profile and Gateway, never a user's port.
 export async function startTaskGatewayFixture() {
-  const { resolveRealAgentBrowser } = require("../dist/main/agent-browser-wrapper");
-  const driver = process.env.PROFILEPILOT_AGENT_BROWSER_REAL || resolveRealAgentBrowser();
-  if (!driver) throw new Error("Install the agent-browser native driver before running browser integration tests.");
+  const { bundledBrowserExecutable } = require("../dist/main/tasks/browser-runtime");
+  const driver = bundledBrowserExecutable();
   const root = await mkdtemp(path.join(os.tmpdir(), "pp-task-gateway-"));
   const home = path.join(root, "home");
   await mkdir(home, { recursive: true });

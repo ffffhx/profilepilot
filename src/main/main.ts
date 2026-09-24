@@ -3,6 +3,7 @@ import { app, BrowserWindow, crashReporter, globalShortcut, ipcMain, Menu, nativ
 import path from "node:path";
 import { IPC_CHANNELS } from "../shared/ipc";
 import { registerTaskService } from "./tasks/ipc";
+import { registerLocalApps } from "./local-apps/ipc";
 import type { TaskService } from "./tasks/service";
 import type {
   AccountSyncDiffResult,
@@ -88,6 +89,10 @@ const E2E_DRIVER_SOCKET = process.env.CPM_E2E_DRIVER_SOCKET || "";
 const IS_E2E_DRIVER_TEST = Boolean(E2E_DRIVER_SOCKET);
 const IS_ELECTRON_SMOKE_TEST = process.env.CPM_ELECTRON_SMOKE_TEST === "1";
 const IS_BACKGROUND_E2E = process.env.CPM_E2E_MODE === "background";
+const START_IN_BACKGROUND = process.argv.includes("--background");
+if (process.platform === "darwin" && (START_IN_BACKGROUND || IS_BACKGROUND_E2E)) {
+  app.setActivationPolicy("accessory");
+}
 initializeDiagnosticLogging({ appVersion: app.getVersion() });
 installProcessCrashLogging();
 installElectronCrashLogging();
@@ -1118,6 +1123,7 @@ function registerGlobalShortcuts(): void {
 }
 
 async function showMainWindow(): Promise<void> {
+  if (IS_BACKGROUND_E2E) return;
   // second-instance can arrive while the primary process is still awaiting Gateway/CLI startup.
   // Do not create a renderer until IPC handlers are registered, otherwise its first getState call
   // permanently leaves the window on the "No handler registered" error screen.
@@ -1140,6 +1146,7 @@ async function showMainWindow(): Promise<void> {
   // macOS 的应用级 hidden/activation 状态仍会把窗口压在后台。因此先解除隐藏并激活 App，
   // 再把窗口抬到当前桌面的最前面。
   if (process.platform === "darwin") {
+    app.setActivationPolicy("regular");
     app.show();
     app.focus({ steal: true });
   }
@@ -1213,7 +1220,8 @@ function createMainWindow(): void {
     height: Math.round(760 * UI_ZOOM_FACTOR),
     minWidth: 860,
     minHeight: 620,
-    show: !smokeTest || (IS_E2E_DRIVER_TEST && !IS_BACKGROUND_E2E),
+    show: !IS_BACKGROUND_E2E && !START_IN_BACKGROUND && (!smokeTest || IS_E2E_DRIVER_TEST),
+    focusable: !IS_BACKGROUND_E2E,
     title: APP_TITLE,
     icon: APP_ICON_PATH,
     backgroundColor: "#0a1014",
@@ -1516,7 +1524,7 @@ function createMainWindow(): void {
     app.quit();
   });
 
-  mainWindow.loadFile(path.join(__dirname, "../../public", process.env.CPM_START_VIEW === "browser" ? "index.html" : "tasks.html"));
+  mainWindow.loadFile(path.join(__dirname, "../../public", process.env.CPM_START_VIEW === "local-apps" ? "local-apps.html" : process.env.CPM_START_VIEW === "browser" ? "index.html" : "tasks.html"));
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
@@ -2044,7 +2052,8 @@ if (!app.requestSingleInstanceLock()) {
     node: process.versions.node,
     e2e: IS_E2E_DRIVER_TEST || IS_ELECTRON_SMOKE_TEST
   });
-  app.on("second-instance", () => {
+  app.on("second-instance", (_event, commandLine) => {
+    if (commandLine.includes("--background")) return;
     void showMainWindow();
   });
   app.whenReady().then(async () => {
@@ -2085,6 +2094,7 @@ if (!app.requestSingleInstanceLock()) {
 
     registerIpcHandlers();
     taskService = registerTaskService(profileManager);
+    registerLocalApps(profileManager);
     if (!IS_BACKGROUND_E2E && (!IS_ELECTRON_SMOKE_TEST || process.env.CPM_E2E_ENABLE_GLOBAL_SHORTCUTS === "1")) {
       registerGlobalShortcuts();
     }
@@ -2097,6 +2107,7 @@ if (!app.requestSingleInstanceLock()) {
         getWindow: (target) => (target === "mini" ? miniWindow : mainWindow),
         triggerMiniHotkeyHandler: summonMiniWindowViaHotkey,
         getWindowSnapshot: () => ({
+          all: BrowserWindow.getAllWindows().map(windowSnapshot),
           main: windowSnapshot(mainWindow),
           mini: windowSnapshot(miniWindow),
           miniPanelOpen: miniWindowPanelOpen,

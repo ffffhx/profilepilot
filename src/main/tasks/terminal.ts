@@ -45,7 +45,9 @@ export function terminalInvocation(platform: NodeJS.Platform, runtime: "shell" |
   if (platform === "win32") return {
     executable: path.win32.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
     args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script],
-    source: '\uFEFF$ErrorActionPreference = "Stop"\n$ProgressPreference = "SilentlyContinue"\n[Console]::InputEncoding = [Console]::OutputEncoding = $OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n' + command + '\nif ($LASTEXITCODE) { exit $LASTEXITCODE }\n'
+    // Explicitly load the built-in cmdlets without scanning every installed
+    // module on machines whose module-analysis cache has not been populated.
+    source: '\uFEFF$ErrorActionPreference = "Stop"\n$ProgressPreference = "SilentlyContinue"\n[Console]::InputEncoding = [Console]::OutputEncoding = $OutputEncoding = [System.Text.UTF8Encoding]::new($false)\nImport-Module "$PSHOME\\Modules\\Microsoft.PowerShell.Management\\Microsoft.PowerShell.Management.psd1"\nImport-Module "$PSHOME\\Modules\\Microsoft.PowerShell.Utility\\Microsoft.PowerShell.Utility.psd1"\n' + command + '\nif ($LASTEXITCODE) { exit $LASTEXITCODE }\n'
   };
   return { executable: "/bin/bash", args: ["--noprofile", "--norc", script], source: "set -eo pipefail\n" + command + "\n" };
 }

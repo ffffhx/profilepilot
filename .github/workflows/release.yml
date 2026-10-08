@@ -123,6 +123,10 @@ jobs:
       - name: Build packages
         run: node scripts/retry-command.mjs npm run ${{ matrix.npm_script }}
 
+      - name: Verify Windows shell startup
+        if: runner.os == 'Windows'
+        run: node scripts/diagnose-windows-terminal.cjs
+
       - name: Run test suite
         run: node scripts/run-tests.mjs --test-concurrency=4
 

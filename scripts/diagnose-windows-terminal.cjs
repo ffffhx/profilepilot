@@ -20,6 +20,7 @@ try {
     const started = Date.now();
     const result = spawnSync(invocation.executable, invocation.args, { env, cwd: root, encoding: 'utf8', timeout: 15000, windowsHide: true });
     console.log(JSON.stringify({ label, elapsedMs: Date.now() - started, status: result.status, stdout: result.stdout, stderr: result.stderr, error: result.error?.message }));
+    if (result.status !== 0) process.exitCode = 1;
   }
 } finally {
   fs.rmSync(root, { recursive: true, force: true });

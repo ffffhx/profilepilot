@@ -19,6 +19,7 @@
 
 - 官网和 README 更新当前工作区、上手步骤、真实截图与 Android 下载入口。
 - 发布流程分别使用 Apple Silicon 与 Intel 构建机，明确安装 Electron 运行时；所有平台测试通过后发布。
+- Windows 终端直接加载基础 PowerShell 模块，避免干净环境中的首次命令执行长时间等待模块扫描。
 - Android 发布版不包含 debug 测试页面。开发版与发布版签名不同，不能直接互相覆盖安装；切换前保存所需资料并准备重新配对。
 - CLI 与桌面应用统一从 `package.json` 获取版本，避免发布时出现版本不一致。
 - GitHub Release 改为直接使用本文件中的对应版本说明。

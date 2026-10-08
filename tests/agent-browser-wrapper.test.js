@@ -1543,7 +1543,7 @@ test("agent-browser wrapper hard-stops when no available alternative Profile exi
 });
 
 function fakeBifrostSource(callsPath, { portShowExit }) {
-  return `
+  return `#!${process.execPath}
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(callsPath)}, args.join(" ") + "\\n");

@@ -5,6 +5,9 @@ const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
 
+// macOS's default temporary directory can exceed the Unix socket path limit.
+const gatewayTempDir = process.platform === "darwin" ? "/tmp" : os.tmpdir();
+
 const {
   PROFILEPILOT_AGENT_BROWSER_HARD_STOP_EXIT_CODE,
   ensureConfiguredGatewayProfileRunning,
@@ -23,7 +26,7 @@ test("Gateway gives a waiting Agent enough time to reconnect after user return",
 });
 
 test("Gateway client rejects unsafe Raw CDP before contacting a daemon during upgrade", async () => {
-  const home = mkdtempSync(path.join(os.tmpdir(), "pp-raw-policy-"));
+  const home = mkdtempSync(path.join(gatewayTempDir, "pp-raw-policy-"));
   try {
     for (const method of ["Network.deleteCookies", "Network.deleteDeviceBoundSessions", "Page.crash", "Target.closeTarget", "DOM.unknownFutureMethod"]) {
       await assert.rejects(requestBrowserGateway({
@@ -37,7 +40,7 @@ test("Gateway client rejects unsafe Raw CDP before contacting a daemon during up
 
 test("Gateway stops an active Session and rejects future acquire when Agent access is disabled", async () => {
   // Keep the Unix socket path below macOS's sockaddr_un limit.
-  const home = mkdtempSync(path.join(os.tmpdir(), "pp-gap-"));
+  const home = mkdtempSync(path.join(gatewayTempDir, "pp-gap-"));
   const fakeChrome = writeFakeChrome(home);
   const port = await freePort();
   const daemon = testGatewayDaemon(home);
@@ -90,7 +93,7 @@ test("Gateway stops an active Session and rejects future acquire when Agent acce
 });
 
 test("gatewayd owns the Chrome pipe, control socket and public ticketed WebSocket end to end", async () => {
-  const home = mkdtempSync(path.join(os.tmpdir(), "profilepilot-gateway-daemon-"));
+  const home = mkdtempSync(path.join(gatewayTempDir, "profilepilot-gateway-daemon-"));
   const fakeChrome = writeFakeChrome(home);
   const unpackedExtension = writeUnpackedExtension(home);
   const chromeCallsPath = path.join(home, "fake-chrome-calls.ndjson");
@@ -300,7 +303,7 @@ test("gatewayd owns the Chrome pipe, control socket and public ticketed WebSocke
 });
 
 test("Gateway takeover disconnects a driver whose CDP request never settles", async () => {
-  const home = mkdtempSync(path.join(os.tmpdir(), "profilepilot-gateway-stuck-takeover-"));
+  const home = mkdtempSync(path.join(gatewayTempDir, "profilepilot-gateway-stuck-takeover-"));
   const fakeChrome = writeFakeChrome(home);
   const chromeCallsPath = path.join(home, "fake-chrome-calls.ndjson");
   const port = await freePort();
@@ -359,7 +362,7 @@ test("Gateway takeover disconnects a driver whose CDP request never settles", as
 });
 
 test("agent-browser wrapper transparently connects through a Gateway ticket and strips direct CDP", async () => {
-  const home = mkdtempSync(path.join(os.tmpdir(), "profilepilot-gateway-wrapper-"));
+  const home = mkdtempSync(path.join(gatewayTempDir, "profilepilot-gateway-wrapper-"));
   const fakeChrome = writeFakeChrome(home);
   const unpackedExtension = writeUnpackedExtension(home);
   const chromeCallsPath = path.join(home, "fake-chrome-calls.ndjson");
@@ -565,7 +568,7 @@ if (connectIndex >= 0) {
 
 test("managed wrapper uses the same isolated proxy env and fails closed when a command bypasses Gateway", async () => {
   for (const detached of [false, true]) {
-    const home = mkdtempSync(path.join(os.tmpdir(), `profilepilot-gateway-activity-${detached ? "detached" : "connected"}-`));
+    const home = mkdtempSync(path.join(gatewayTempDir, `profilepilot-gateway-activity-${detached ? "detached" : "connected"}-`));
     const fakeChrome = writeFakeChrome(home);
     const fakeAgentBrowser = writeGatewayAwareFakeAgentBrowser(home);
     const callsPath = path.join(home, "calls.ndjson");
@@ -646,7 +649,7 @@ test("managed wrapper uses the same isolated proxy env and fails closed when a c
 });
 
 test("unexpected driver disconnect reconnects within the grace window without releasing ownership", async () => {
-  const home = mkdtempSync(path.join(os.tmpdir(), "profilepilot-gateway-reconnect-success-"));
+  const home = mkdtempSync(path.join(gatewayTempDir, "profilepilot-gateway-reconnect-success-"));
   const fakeChrome = writeFakeChrome(home);
   const port = await freePort();
   const daemon = testGatewayDaemon(home, { driverReconnectGraceMs: 250 });
@@ -721,7 +724,7 @@ test("unexpected driver disconnect reconnects within the grace window without re
 });
 
 test("reconnect timeout releases the old Session and leaves a terminal Agent notice", async () => {
-  const home = mkdtempSync(path.join(os.tmpdir(), "profilepilot-gateway-reconnect-timeout-"));
+  const home = mkdtempSync(path.join(gatewayTempDir, "profilepilot-gateway-reconnect-timeout-"));
   const fakeChrome = writeFakeChrome(home);
   const port = await freePort();
   const daemon = testGatewayDaemon(home, { driverReconnectGraceMs: 120 });
@@ -785,7 +788,7 @@ test("reconnect timeout releases the old Session and leaves a terminal Agent not
 
 test("agent-browser wrapper retries Gateway transport at most three times and recovers", async () => {
   // Keep the Unix control socket below macOS' sockaddr_un path limit.
-  const home = mkdtempSync(path.join(os.tmpdir(), "pp-gw-retry-"));
+  const home = mkdtempSync(path.join(gatewayTempDir, "pp-gw-retry-"));
   const fakeChrome = writeFakeChrome(home);
   const fakeAgentBrowser = path.join(home, "retry-agent-browser.js");
   const callsPath = path.join(home, "retry-calls.ndjson");
@@ -854,7 +857,7 @@ process.exit(fs.existsSync(process.env.READY_PATH) ? 0 : 8);
 });
 
 test("handoff reveal has one abortable deadline while takeover ownership remains committed", async () => {
-  const home = mkdtempSync(path.join(os.tmpdir(), "pp-gw-deadline-"));
+  const home = mkdtempSync(path.join(gatewayTempDir, "pp-gw-deadline-"));
   const fakeChrome = writeFakeChrome(home);
   const chromeCallsPath = path.join(home, "fake-chrome-calls.ndjson");
   const port = await freePort();
@@ -928,7 +931,7 @@ test("handoff reveal has one abortable deadline while takeover ownership remains
 
 test("handoff reveal is serialized before the same Session can return to Agent control", async () => {
   // Keep the Unix control socket below macOS' sockaddr_un path limit.
-  const home = mkdtempSync(path.join(os.tmpdir(), "pp-gw-race-"));
+  const home = mkdtempSync(path.join(gatewayTempDir, "pp-gw-race-"));
   const fakeChrome = writeFakeChrome(home);
   const chromeCallsPath = path.join(home, "fake-chrome-calls.ndjson");
   const port = await freePort();
@@ -1009,7 +1012,7 @@ test("handoff reveal is serialized before the same Session can return to Agent c
 });
 
 test("explicit Agent target reveal is serialized before the same Session can stop", async () => {
-  const home = mkdtempSync(path.join(os.tmpdir(), "pp-gw-show-race-"));
+  const home = mkdtempSync(path.join(gatewayTempDir, "pp-gw-show-race-"));
   const fakeChrome = writeFakeChrome(home);
   const chromeCallsPath = path.join(home, "fake-chrome-calls.ndjson");
   const port = await freePort();
@@ -1083,7 +1086,7 @@ test("explicit Agent target reveal is serialized before the same Session can sto
 });
 
 test("agent-browser request auto-starts a configured Profile whose Gateway port is idle", async () => {
-  const home = mkdtempSync(path.join(os.tmpdir(), "profilepilot-gateway-auto-launch-"));
+  const home = mkdtempSync(path.join(gatewayTempDir, "profilepilot-gateway-auto-launch-"));
   const dataDir = path.join(home, "profilepilot-data");
   const fakeChrome = writeFakeChrome(home);
   const port = await freePort();
@@ -1123,7 +1126,7 @@ test("agent-browser request auto-starts a configured Profile whose Gateway port 
 });
 
 test("a Session bound to one Profile cannot auto-start a second configured Profile", async () => {
-  const home = mkdtempSync(path.join(os.tmpdir(), "profilepilot-gateway-single-profile-"));
+  const home = mkdtempSync(path.join(gatewayTempDir, "profilepilot-gateway-single-profile-"));
   const dataDir = path.join(home, "profilepilot-data");
   const fakeChrome = writeFakeChrome(home);
   const [firstPort, secondPort] = await Promise.all([freePort(), freePort()]);
@@ -1191,7 +1194,7 @@ test("a Session bound to one Profile cannot auto-start a second configured Profi
 });
 
 test("agent-browser request reports a clear error when an idle port has no configured Profile", async () => {
-  const home = mkdtempSync(path.join(os.tmpdir(), "profilepilot-gateway-missing-profile-"));
+  const home = mkdtempSync(path.join(gatewayTempDir, "profilepilot-gateway-missing-profile-"));
   const dataDir = path.join(home, "profilepilot-data");
   const port = await freePort();
   mkdirSync(dataDir, { recursive: true });
@@ -1215,7 +1218,7 @@ test("agent-browser request reports a clear error when an idle port has no confi
 });
 
 test("Gateway protects every registered port instead of special-casing 9223", async () => {
-  const home = mkdtempSync(path.join(os.tmpdir(), "profilepilot-gateway-multi-port-"));
+  const home = mkdtempSync(path.join(gatewayTempDir, "profilepilot-gateway-multi-port-"));
   const fakeChrome = writeFakeChrome(home);
   const ports = await Promise.all([freePort(), freePort(), freePort()]);
   const daemon = testGatewayDaemon(home);
@@ -1264,7 +1267,7 @@ test("Gateway protects every registered port instead of special-casing 9223", as
 });
 
 test("parallel Gateway ensure calls converge on exactly one daemon", async () => {
-  const home = mkdtempSync(path.join(os.tmpdir(), "profilepilot-gateway-ensure-"));
+  const home = mkdtempSync(path.join(gatewayTempDir, "profilepilot-gateway-ensure-"));
   const daemonScriptPath = path.join(__dirname, "..", "dist", "main", "browser-gateway-daemon.js");
   try {
     const results = await Promise.all(Array.from({ length: 6 }, () => ensureBrowserGatewayDaemon({
@@ -1285,7 +1288,7 @@ test("parallel Gateway ensure calls converge on exactly one daemon", async () =>
 });
 
 test("ensure waits out a shutting-down daemon and returns a fresh process", async () => {
-  const home = mkdtempSync(path.join(os.tmpdir(), "profilepilot-gateway-restart-"));
+  const home = mkdtempSync(path.join(gatewayTempDir, "profilepilot-gateway-restart-"));
   const daemonScriptPath = path.join(__dirname, "..", "dist", "main", "browser-gateway-daemon.js");
   try {
     const first = await ensureBrowserGatewayDaemon({
@@ -1311,7 +1314,7 @@ test("ensure waits out a shutting-down daemon and returns a fresh process", asyn
 });
 
 test("ensure defers a protocol upgrade while the old Gateway still owns live Chrome pipes", async () => {
-  const home = mkdtempSync(path.join(os.tmpdir(), "profilepilot-gateway-deferred-upgrade-"));
+  const home = mkdtempSync(path.join(gatewayTempDir, "profilepilot-gateway-deferred-upgrade-"));
   const gatewayRoot = path.join(home, ".profilepilot", "gateway");
   const socketPath = browserGatewaySocketPath(home);
   mkdirSync(gatewayRoot, { recursive: true });
@@ -1557,7 +1560,7 @@ function captureProcessWrites() {
 
 test("agent-browser wrapper rejects a failed connect even when the Gateway socket is live", async () => {
   // Keep the Unix control socket below macOS' sockaddr_un path limit.
-  const home = mkdtempSync(path.join(os.tmpdir(), "pp-gw-retry-"));
+  const home = mkdtempSync(path.join(gatewayTempDir, "pp-gw-retry-"));
   const fakeChrome = writeFakeChrome(home);
   const fakeAgentBrowser = path.join(home, "retry-agent-browser.js");
   const callsPath = path.join(home, "retry-calls.ndjson");

@@ -269,7 +269,7 @@ function makeFakeBifrost({
   const startedPath = path.join(home, "bifrost-started");
   const runningStatusJson = { ...statusJson, running: true };
   mkdirSync(path.dirname(binary), { recursive: true });
-  writeFileSync(binary, `
+  writeFileSync(binary, `#!${process.execPath}
 const fs = require("node:fs");
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(callsPath)}, args.join(" ") + "\\n");

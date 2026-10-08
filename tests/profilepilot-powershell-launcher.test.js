@@ -9,7 +9,7 @@ const { windowsPowerShellCliLauncherContent } = loadCli('src/main/shell-integrat
 const quote = value => "'" + value.replace(/'/g, "''") + "'";
 
 test('PowerShell entry preserves arguments, Unicode stdin, exit status and caller environment', { skip: process.platform !== 'win32' }, async t => {
-  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ppilot-powershell-')));
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'ppilot-powershell-')));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const bin = path.join(root, '中文 空格'); fs.mkdirSync(bin);
   const cli = path.join(bin, 'echo-cli.cjs');

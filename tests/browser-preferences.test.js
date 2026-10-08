@@ -7,7 +7,7 @@ const { readBrowserPreferences, writeBrowserPreferences } = require('../dist/mai
 const { agentSkillTargetPaths } = require('../dist/main/agent-skill-integration.js');
 
 function fixture(t, count = 3) {
-  const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'ppilot 偏好 test-')));
+  const home = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'ppilot 偏好 test-')));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const targets = agentSkillTargetPaths('profilepilot', home).slice(0, count);
   for (const target of targets) {

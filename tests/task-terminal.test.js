@@ -31,11 +31,18 @@ test('node command wrappers are rejected before confirmation, disk output, or pr
 
 test('real shell supports Unicode, paths with spaces, and failing exit codes', async t => {
   const { terminal } = fixture(t);
+  const finish = async result => {
+    // Cold PowerShell startup on CI can outlast one terminal_run yield window.
+    for (let waits = 0; result.status === 'running' && waits < 2; waits++) {
+      result = await terminal.read('task-one', { process_id: result.process_id, wait_ms: 10000 });
+    }
+    return result;
+  };
   const command = process.platform === 'win32' ? "[IO.File]::WriteAllText((Join-Path $PWD '中文 文件.txt'), '你好，终端'); Get-Content -Encoding utf8 -LiteralPath '中文 文件.txt'" : "printf '你好，终端' > '中文 文件.txt'; cat '中文 文件.txt'";
-  const result = await run(terminal, command, { runtime: 'shell' });
+  const result = await finish(await run(terminal, command, { runtime: 'shell' }));
   assert.equal(result.status, 'succeeded', result.stderr); assert.match(result.stdout, /你好，终端/);
   assert.equal(readFileSync(path.join(result.cwd, '中文 文件.txt'), 'utf8'), '你好，终端');
-  const failed = await run(terminal, 'exit 7', { runtime: 'shell' });
+  const failed = await finish(await run(terminal, 'exit 7', { runtime: 'shell' }));
   assert.equal(failed.status, 'failed'); assert.equal(failed.exit_code, 7);
 });
 

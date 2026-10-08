@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="ProfilePilot 是一个本机优先的 Chrome Profile 控制台，用于管理原生 Profile、隔离测试环境、插件迁移、账号同步和 CDP 自动化入口。"
+      content="让 AI 使用你已登录的 Chrome，管理本地应用与 Android 手机。在桌面、终端和手机之间发起任务、跟进结果，随时暂停或接管。"
     />
-    <title>ProfilePilot - Chrome Profile Control Desk</title>
+    <title>ProfilePilot - 浏览器、桌面与 Android 的 AI 工作区</title>
     <link rel="icon" href="public/assets/profilepilot-mark.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="site/styles.css" />
   </head>
@@ -20,7 +20,7 @@
       <nav class="nav-links" aria-label="主要导航">
         <a href="#workflows">工作流</a>
         <a href="#features">能力</a>
-        <a href="#compare">对比</a>
+        <a href="#compare">如何开始</a>
         <a href="#download">下载</a>
       </nav>
       <div class="topbar-actions">
@@ -36,73 +36,19 @@
 
     <main id="top">
       <section class="hero" aria-labelledby="hero-title">
-        <div class="hero-scene" aria-hidden="true">
-          <div class="product-shell">
-            <div class="app-window">
-              <div class="window-bar">
-                <span></span>
-                <span></span>
-                <span></span>
-                <strong>ProfilePilot</strong>
-              </div>
-              <div class="window-body">
-                <aside class="profile-rail">
-                  <div class="rail-title">Profiles</div>
-                  <div class="profile-item active">
-                    <b>Work Default</b>
-                    <span>native · running</span>
-                  </div>
-                  <div class="profile-item">
-                    <b>Agent Test</b>
-                    <span>isolated · CDP 9222</span>
-                  </div>
-                  <div class="profile-item">
-                    <b>Client QA</b>
-                    <span>isolated · closed</span>
-                  </div>
-                </aside>
-                <section class="desk-panel">
-                  <div class="desk-head">
-                    <span>Account session</span>
-                    <b>Local backup ready</b>
-                  </div>
-                  <div class="sync-flow">
-                    <div>
-                      <small>source</small>
-                      <strong>Work Default</strong>
-                    </div>
-                    <i></i>
-                    <div>
-                      <small>target</small>
-                      <strong>Agent Test</strong>
-                    </div>
-                  </div>
-                  <div class="metric-grid">
-                    <div><span>Cookies</span><b>34</b></div>
-                    <div><span>Extensions</span><b>12</b></div>
-                    <div><span>Profiles</span><b>7</b></div>
-                  </div>
-                  <div class="extension-list">
-                    <span>Extensions selected</span>
-                    <div class="extension-row"><b>Auth Switcher</b><em>data copied</em></div>
-                    <div class="extension-row"><b>DevTools Helper</b><em>mounted</em></div>
-                    <div class="extension-row"><b>Proxy Toggle</b><em>store opened</em></div>
-                  </div>
-                </section>
-              </div>
-            </div>
-          </div>
+        <div class="hero-scene">
+          <div class="product-shell"><img class="product-screenshot" src="docs/screenshots/workspace-agent.png" alt="ProfilePilot Agent 工作区与五个功能 Tab" width="1400" height="950" /></div>
         </div>
 
         <div class="hero-copy">
-          <p class="eyebrow">Chrome-native · local-first · CDP-ready</p>
+          <p class="eyebrow">Browser · Desktop · Android</p>
           <h1 id="hero-title">ProfilePilot</h1>
           <p class="hero-lede">
-            一个给真实 Chrome Profile 用的本机控制台。管理原生 Profile，创建隔离测试环境，迁移扩展和登录态，再把干净的浏览器交给 Agent 或人工测试。
+            让 AI 沿用你的 Chrome 登录状态，连接本地应用与 Android 手机。在一个工作区里发起任务、查看执行过程和结果，随时暂停或接管。
           </p>
           <div class="hero-actions">
-            <a class="button primary" href="https://github.com/ffffhx/profilepilot/releases/latest/download/ProfilePilot-mac-arm64.dmg">下载 macOS 版</a>
-            <a class="button secondary" href="#download">更多下载</a>
+            <a class="button primary" href="#download">选择你的版本</a>
+            <a class="button secondary" href="https://github.com/ffffhx/profilepilot">GitHub / Star</a>
             <a class="button secondary" href="#workflows">查看工作流</a>
           </div>
           <dl class="proof-strip" aria-label="ProfilePilot 关键承诺">
@@ -125,29 +71,29 @@
       <section class="section workflow-section" id="workflows">
         <div class="section-kicker">Workflows</div>
         <div class="section-head">
-          <h2>把 Profile 工作流从手工搬运变成可恢复操作。</h2>
-          <p>竞品大多只做 profile 启动或云端隔离，ProfilePilot 更关注本机 Chrome 数据的扫描、迁移、同步和回滚。</p>
+          <h2>从连接浏览器，到完成第一个任务。</h2>
+          <p>新手引导会逐步高亮真实的 Tab 和按钮，说明每个入口的作用。先连接浏览器，再配置模型，回到 Agent 描述目标。</p>
         </div>
 
         <div class="workflow-tabs" role="tablist" aria-label="ProfilePilot 工作流">
-          <button class="active" type="button" role="tab" aria-selected="true" data-workflow="native">发现原生 Profile</button>
-          <button type="button" role="tab" aria-selected="false" data-workflow="extensions">迁移扩展</button>
-          <button type="button" role="tab" aria-selected="false" data-workflow="account">同步登录态</button>
-          <button type="button" role="tab" aria-selected="false" data-workflow="cdp">CDP 启动</button>
+          <button class="active" type="button" role="tab" aria-selected="true" data-workflow="native">连接浏览器</button>
+          <button type="button" role="tab" aria-selected="false" data-workflow="extensions">创建任务</button>
+          <button type="button" role="tab" aria-selected="false" data-workflow="account">本地应用</button>
+          <button type="button" role="tab" aria-selected="false" data-workflow="cdp">手机协作</button>
         </div>
 
         <div class="workflow-board">
           <article class="workflow-copy" data-workflow-copy>
             <span>01</span>
-            <h3>发现你已经在用的 Chrome Profile</h3>
-            <p>读取 Chrome Local State，把 Default 和 Profile N 作为一等公民呈现，同时保护默认 Profile 不被误删。</p>
+            <h3>连接你已经登录的 Chrome</h3>
+            <p>在「配套工具」中选择日常 Profile，按引导安装并连接浏览器扩展，沿用已有页面和账号。</p>
           </article>
           <div class="workflow-visual" data-workflow-visual aria-live="polite">
-            <div class="workflow-node on">Local State</div>
+            <div class="workflow-node on">选择 Profile</div>
             <div class="workflow-line"></div>
-            <div class="workflow-node">Default</div>
+            <div class="workflow-node">连接扩展</div>
             <div class="workflow-line"></div>
-            <div class="workflow-node accent">Profile N</div>
+            <div class="workflow-node accent">开始使用</div>
           </div>
         </div>
       </section>
@@ -155,82 +101,27 @@
       <section class="section feature-section" id="features">
         <div class="section-kicker">Control surface</div>
         <div class="section-head compact">
-          <h2>为本机 Chrome 场景补上缺失的控制面。</h2>
-          <p>保留真实浏览器和扩展生态，把重复、危险、容易忘记的操作收进一个桌面工作台。</p>
+          <h2>浏览器、项目与手机，各有清楚的入口。</h2>
+          <p>桌面负责执行与管理；终端和 Android 移动版让你在其他入口继续处理同一份任务。</p>
         </div>
         <div class="feature-grid">
-          <article>
-            <span class="feature-index">A</span>
-            <h3>原生 Profile 管理</h3>
-            <p>发现、重命名、启动、聚焦、关闭和安全删除 Chrome 自带 Profile。</p>
-          </article>
-          <article>
-            <span class="feature-index">B</span>
-            <h3>隔离测试 Profile</h3>
-            <p>用独立 user-data-dir 创建干净环境，适合 QA、Agent、临时账号验证。</p>
-          </article>
-          <article>
-            <span class="feature-index">C</span>
-            <h3>扩展扫描与迁移</h3>
-            <p>识别 Web Store、本地、Profile 内扩展，并在迁移前为目标创建备份。</p>
-          </article>
-          <article>
-            <span class="feature-index">D</span>
-            <h3>账号会话同步</h3>
-            <p>复制 Cookies、Local Storage、IndexedDB、Account Web Data 等已落盘登录数据。</p>
-          </article>
-          <article>
-            <span class="feature-index">E</span>
-            <h3>CDP 自动化入口</h3>
-            <p>隔离 Profile 可带 remote debugging port 启动，给 browser agent 直接接管。</p>
-          </article>
-          <article>
-            <span class="feature-index">F</span>
-            <h3>备份与恢复</h3>
-            <p>迁移扩展或同步账号前自动留存目标快照，失败时尽量回滚到安全状态。</p>
-          </article>
+          <article><span class="feature-index">A</span><h3>Agent 任务</h3><p>描述目标、补充文件，查看执行过程和结果；常用任务可保存为模板或安排定时执行。</p></article>
+          <article><span class="feature-index">B</span><h3>浏览器环境</h3><p>管理日常 Chrome 和独立 Profile，查看连接状态，按需同步账号数据与扩展。</p></article>
+          <article><span class="feature-index">C</span><h3>本地应用</h3><p>登记开发项目和后台服务，集中查看启动状态、端口与日志，连接支持调试的 Electron 应用。</p></article>
+          <article><span class="feature-index">D</span><h3>Android 手机</h3><p>通过 USB 或 Wi-Fi 查看、控制 Android；在手机上向电脑发任务、跟进进度和处理确认。</p></article>
+          <article><span class="feature-index">E</span><h3>CLI 与外部 Agent</h3><p>在配套工具中安装 ppilot 和使用指引，从终端对话或让外部 Agent 操作浏览器与手机。</p></article>
+          <article><span class="feature-index">F</span><h3>逐步高亮引导</h3><p>框住真实 Tab、按钮和内容，在旁边说明用途。支持上一步、下一步、跳过与随时重新打开。</p></article>
         </div>
       </section>
 
       <section class="compare-section" id="compare">
-        <div class="compare-copy">
-          <div class="section-kicker">Market map</div>
-          <h2>和市面类似工具相比，ProfilePilot 的位置更轻，也更贴近真实 Chrome。</h2>
-          <p>
-            LoginLane、SessionBox、Unbundle、Parall 这类产品证明了用户确实需要更好的 profile 工作流。但 ProfilePilot 选择不做云端浏览器和指纹伪装，而是把本机 Chrome 的数据操作做扎实。
-          </p>
-        </div>
-        <div class="compare-table" role="table" aria-label="ProfilePilot 市场对比">
-          <div class="compare-row head" role="row">
-            <span role="columnheader">类型</span>
-            <span role="columnheader">典型代表</span>
-            <span role="columnheader">强项</span>
-            <span role="columnheader">ProfilePilot 差异</span>
-          </div>
-          <div class="compare-row" role="row">
-            <span role="cell">Chrome-native 多账号</span>
-            <span role="cell">LoginLane</span>
-            <span role="cell">真实 Chrome、轻量、账号切换</span>
-            <span role="cell">更偏桌面控制台，内置迁移、备份和 CDP</span>
-          </div>
-          <div class="compare-row" role="row">
-            <span role="cell">会话隔离平台</span>
-            <span role="cell">SessionBox</span>
-            <span role="cell">云同步、团队、代理、API</span>
-            <span role="cell">本机优先，不强制云端和团队体系</span>
-          </div>
-          <div class="compare-row" role="row">
-            <span role="cell">Profile 启动器</span>
-            <span role="cell">Unbundle / Parall</span>
-            <span role="cell">Dock 图标、独立窗口、快捷启动</span>
-            <span role="cell">不只打开窗口，还处理扩展和登录数据</span>
-          </div>
-          <div class="compare-row" role="row">
-            <span role="cell">反检测浏览器</span>
-            <span role="cell">GoLogin / AdsPower / Multilogin</span>
-            <span role="cell">代理、指纹、团队、规模化运营</span>
-            <span role="cell">不伪装指纹，保留真实 Chrome 和本机可解释性</span>
-          </div>
+        <div class="compare-copy"><div class="section-kicker">Get started</div><h2>选好工作环境，再说出你的目标。</h2><p>内置 Agent 的模型在左下角「设置」中配置。只需要直接控制工具时，也可以使用 CLI 和你自己的 Agent。</p></div>
+        <div class="compare-table" role="table" aria-label="使用场景与连接入口">
+          <div class="compare-row head" role="row"><span role="columnheader">你想做什么</span><span role="columnheader">入口</span><span role="columnheader">准备工作</span><span role="columnheader">接下来</span></div>
+          <div class="compare-row" role="row"><span role="cell">使用日常浏览器</span><span role="cell">配套工具</span><span role="cell">选择 Chrome Profile，连接扩展</span><span role="cell">回到 Agent 发起任务</span></div>
+          <div class="compare-row" role="row"><span role="cell">独立环境测试</span><span role="cell">浏览器</span><span role="cell">新建独立 Profile，按需准备账号</span><span role="cell">交给 Agent 或人工测试</span></div>
+          <div class="compare-row" role="row"><span role="cell">管理本地项目</span><span role="cell">本地应用</span><span role="cell">添加项目目录与启动命令</span><span role="cell">启动、查看状态与日志</span></div>
+          <div class="compare-row" role="row"><span role="cell">手机跟进任务</span><span role="cell">手机</span><span role="cell">安装 Android APK，配对电脑</span><span role="cell">发送任务、查看进度与确认</span></div>
         </div>
       </section>
 
@@ -259,7 +150,7 @@
         <div class="install-copy">
           <div class="section-kicker">Download</div>
           <h2>从官网直接下载 ProfilePilot。</h2>
-          <p>安装包发布在 GitHub Release。macOS 提供 Apple Silicon 和 Intel 版本，Windows 提供 x64 安装器。</p>
+          <p>安装包发布在 GitHub Release。支持 macOS、Windows，以及 Android 11 或以上的手机。手机管理电脑任务时，电脑需要保持运行且能从手机访问。</p>
         </div>
         <div class="download-panel" aria-label="ProfilePilot 下载链接">
           <a class="download-card primary" href="https://github.com/ffffhx/profilepilot/releases/latest/download/ProfilePilot-mac-arm64.dmg">
@@ -277,8 +168,9 @@
             <strong>x64</strong>
             <small>下载安装器</small>
           </a>
+          <a class="download-card" href="https://github.com/ffffhx/profilepilot/releases/latest/download/ProfilePilot-android.apk"><span>Android</span><strong>Android 11+</strong><small>下载签名 APK</small></a>
           <a class="download-link" href="https://github.com/ffffhx/profilepilot/releases/latest">查看全部 Release 文件</a>
-          <p class="download-note">当前安装包未做商业代码签名。macOS 首次打开可能需要在系统安全设置中确认。</p>
+          <p class="download-note">桌面安装包尚未完成商业代码签名与公证；Android APK 使用固定发布签名，可从此页面手动下载更新。</p>
           <article class="macos-help" aria-labelledby="macos-help-title">
             <div class="macos-help-copy">
               <span>macOS 安装提示</span>
@@ -314,7 +206,7 @@
     <footer class="site-footer">
       <img src="public/assets/profilepilot-mark.svg" alt="" />
       <strong>ProfilePilot</strong>
-      <p>Browser profile control desk. Built for local Chrome workflows, extension QA, and agent-ready browsing.</p>
+      <p>Your AI workspace for signed-in browsers, local apps, and Android.</p>
       <div class="footer-links">
         <a href="https://github.com/ffffhx/profilepilot" target="_blank" rel="noopener">GitHub 仓库</a>
         <a href="https://github.com/ffffhx/profilepilot/issues" target="_blank" rel="noopener">反馈问题</a>

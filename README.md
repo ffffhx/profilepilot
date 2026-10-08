@@ -92,7 +92,7 @@ Android 配套 App 支持 **Android 11 及以上**，有两条独立的使用路
 - **电脑查看或控制手机**：通过 USB 或 Wi-Fi 连接，按手机系统提示授予所需权限。屏幕画面按需采集，手机端也能暂停或结束会话。
 - **手机管理电脑任务**：配对电脑后发任务、查看进度和结果、回答问题及确认操作。电脑需要保持运行，手机需要能访问电脑；这条路径不要求手机控制用的无障碍权限。
 
-Android 目前提供源码和开发用 debug APK 构建，尚无 iOS 版本或应用商店发行版。构建与配对见 [Android 手机](docs/android-phone.md)和[移动工作区](docs/mobile-workspace.md)。可选的[手机状态同步](docs/phone-status-sync.md)使用 HTTPS 服务传递设备诊断状态，不代替控制连接。
+Android 提供[签名 APK 下载](https://github.com/ffffhx/profilepilot/releases/latest/download/ProfilePilot-android.apk)，尚无 iOS 版本或应用商店发行版。构建与配对见 [Android 手机](docs/android-phone.md)和[移动工作区](docs/mobile-workspace.md)。可选的[手机状态同步](docs/phone-status-sync.md)使用 HTTPS 服务传递设备诊断状态，不代替控制连接。
 
 ## 安装
 
@@ -101,6 +101,7 @@ Android 目前提供源码和开发用 debug APK 构建，尚无 iOS 版本或�
 | macOS | Apple Silicon | [ProfilePilot-mac-arm64.dmg](https://github.com/ffffhx/profilepilot/releases/latest/download/ProfilePilot-mac-arm64.dmg) |
 | macOS | Intel | [ProfilePilot-mac-x64.dmg](https://github.com/ffffhx/profilepilot/releases/latest/download/ProfilePilot-mac-x64.dmg) |
 | Windows | x64 | [ProfilePilot-win-x64.exe](https://github.com/ffffhx/profilepilot/releases/latest/download/ProfilePilot-win-x64.exe) |
+| Android | Android 11+ | [ProfilePilot-android.apk](https://github.com/ffffhx/profilepilot/releases/latest/download/ProfilePilot-android.apk) |
 | 全部文件 | — | [Releases](https://github.com/ffffhx/profilepilot/releases/latest) |
 
 本 README 描述 `main` 分支的功能。安装包由维护者单独构建发布，可能落后于源码；体验最新改动可从源码运行。
@@ -133,7 +134,9 @@ Android 构建还需 JDK 17 或更新版本和 Android SDK，设置方式见 [An
 npm run build:phone
 ```
 
-该命令构建 debug APK，并运行 Android 单元测试和 lint，输出 `dist/android/profilepilot-phone.apk`。普通桌面构建不下载 Android 工具链；需要把 APK 一起打包时，先执行手机构建。
+该命令构建 debug APK，并运行 Android 单元测试和 lint，输出 `dist/android/profilepilot-phone.apk`。发布流程使用 `--release` 和仓库的签名密钥构建正式 APK，并把同一 APK 放入桌面安装包。普通本地桌面构建不下载 Android 工具链；需要把 APK 一起打包时，先执行手机构建。
+
+自行构建的 debug APK 与下载的发布版签名不同，不能直接互相覆盖安装；切换前请先保存需要的本机资料，并准备重新配对电脑。之后的发布版沿用同一签名。
 
 ## 数据与控制
 
@@ -186,7 +189,7 @@ npm run dist:win   # Windows nsis + zip，x64
 
 推送到 `main` **不会自动构建安装包或部署官网**：
 
-- [release.yml](.github/workflows/release.yml)：手动触发发布，或推送 `v*.*.*` 标签触发版本发布。手动构建默认更新滚动的 `latest` Release。
+- [release.yml](.github/workflows/release.yml)：构建签名 Android APK，再构建包含该 APK 的 macOS / Windows 桌面包；全部构建与测试通过后发布。手动触发默认更新滚动的 `latest` Release，也支持 `v*.*.*` 标签触发版本发布。
 - [deploy-pages.yml](.github/workflows/deploy-pages.yml)：手动触发 GitHub Pages 部署。
 
 维护者确认本次需要发布后执行：

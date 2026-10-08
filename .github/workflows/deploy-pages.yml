@@ -25,11 +25,12 @@ jobs:
 
       - name: Prepare static site
         run: |
-          mkdir -p _site/site _site/public
+          mkdir -p _site/site _site/public _site/docs/screenshots
           cp site/index.html _site/index.html
           cp site/styles.css _site/site/styles.css
           cp site/script.js _site/site/script.js
           cp -R public/assets _site/public/assets
+          cp docs/screenshots/workspace-agent.png _site/docs/screenshots/
 
       - name: Configure Pages
         uses: actions/configure-pages@v5

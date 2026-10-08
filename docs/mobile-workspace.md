@@ -4,7 +4,7 @@ PC 版保管浏览器 Profile、模型配置与任务记录，持续执行 Agent
 
 ## 安装与连接
 
-1. `npm run build:phone` 构建 Android 11 及以上的 APK，输出为 `dist/android/profilepilot-phone.apk`。当前开发流程生成 debug 签名安装包，不代表商店发布版本。
+1. 从 [Release](https://github.com/ffffhx/profilepilot/releases/latest/download/ProfilePilot-android.apk) 下载 Android 11 及以上的签名 APK；开发时也可使用 `npm run build:phone` 生成 `dist/android/profilepilot-phone.apk`（debug 签名）。两种签名的安装包不能互相覆盖安装，切换后需重新配对。
 2. PC 的「手机 → 连接移动版」可以打开 APK 所在位置。USB 连接时，原有「安装并连接手机 App」也可安装同一 APK。
 3. 开启「移动版连接」，选择手机可达的电脑地址，生成二维码。
 4. 手机打开「设备 → 扫码连接电脑」，核对电脑名称和地址后确认。也可粘贴配对链接，或从系统打开 `profilepilot://pair` 链接。二维码有效期三分钟，仅能配对一台设备。

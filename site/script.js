@@ -5,29 +5,45 @@ const workflowVisual = document.querySelector("[data-workflow-visual]");
 const copyButtons = document.querySelectorAll("[data-copy-command]");
 
 const workflows = {
-  native: {
-    index: "01",
-    title: "发现你已经在用的 Chrome Profile",
-    copy: "读取 Chrome Local State，把 Default 和 Profile N 作为一等公民呈现，同时保护默认 Profile 不被误删。",
-    nodes: ["Local State", "Default", "Profile N"]
+  "native": {
+    "index": "01",
+    "title": "连接你已经登录的 Chrome",
+    "copy": "在「配套工具」中选择日常 Profile，按引导安装并连接浏览器扩展，沿用已有页面和账号。",
+    "nodes": [
+      "选择 Profile",
+      "连接扩展",
+      "开始使用"
+    ]
   },
-  extensions: {
-    index: "02",
-    title: "从源 Profile 扫描并迁移扩展",
-    copy: "识别扩展来源、版本、数据目录和 Web Store 地址，先备份目标，再复制可本地挂载的扩展和数据。",
-    nodes: ["Scan", "Backup", "Migrate"]
+  "extensions": {
+    "index": "02",
+    "title": "配置模型，描述要完成的目标",
+    "copy": "在设置中配置模型服务，回到 Agent 选择浏览器，描述目标与预期结果，随时查看进度、补充要求或接管。",
+    "nodes": [
+      "配置模型",
+      "描述目标",
+      "跟进结果"
+    ]
   },
-  account: {
-    index: "03",
-    title: "把已落盘登录态同步到目标环境",
-    copy: "复制 Cookies、Local Storage、IndexedDB、Web Data 和账号偏好，让测试 Profile 继承可验证会话。",
-    nodes: ["Session", "Storage", "Restore point"]
+  "account": {
+    "index": "03",
+    "title": "把开发项目和后台服务放在一起",
+    "copy": "添加项目目录和启动命令，集中启动应用、查看端口与日志。支持调试的 Electron 应用可以连接 Agent。",
+    "nodes": [
+      "添加项目",
+      "启动应用",
+      "查看日志"
+    ]
   },
-  cdp: {
-    index: "04",
-    title: "用可控端口启动 Agent 浏览器",
-    copy: "隔离 Profile 可以带 remote debugging port 启动，避开默认浏览器状态，方便自动化工具接管。",
-    nodes: ["Isolated", "Port check", "CDP URL"]
+  "cdp": {
+    "index": "04",
+    "title": "从 Android 手机继续处理任务",
+    "copy": "安装配套 APK 并与电脑配对，在手机上发任务、查看结果和处理确认；电脑需要保持运行并能从手机访问。",
+    "nodes": [
+      "安装 APK",
+      "配对电脑",
+      "移动协作"
+    ]
   }
 };
 

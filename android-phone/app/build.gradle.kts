@@ -12,6 +12,20 @@ android {
     }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     buildFeatures { buildConfig = true }
+    signingConfigs {
+        create("release") {
+            System.getenv("ANDROID_RELEASE_KEYSTORE")?.let { storeFile = file(it) }
+            storePassword = System.getenv("ANDROID_RELEASE_STORE_PASSWORD")
+            keyAlias = System.getenv("ANDROID_RELEASE_KEY_ALIAS")
+            keyPassword = System.getenv("ANDROID_RELEASE_KEY_PASSWORD")
+        }
+    }
+    buildTypes {
+        getByName("release") {
+            isDebuggable = false
+            signingConfig = signingConfigs.getByName("release")
+        }
+    }
     lint { abortOnError = true }
 }
 dependencies {

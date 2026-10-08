@@ -436,6 +436,7 @@ h3 {
   position: relative;
   perspective: 1400px;
 }
+.product-screenshot { display:block; width:100%; height:auto; border:1px solid var(--line-strong); border-radius:12px; box-shadow:var(--shadow); }
 
 .app-window {
   position: relative;
@@ -1086,7 +1087,7 @@ h3 {
 
 .download-panel {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
 }
 

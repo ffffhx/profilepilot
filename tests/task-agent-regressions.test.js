@@ -50,7 +50,7 @@ test('idle extension clears only a stale paused reservation, retaining task hist
   assert.equal(f.task.browserConnection, undefined);
   assert.equal(f.task.status, 'paused'); assert.equal(f.task.sessionId, session);
   assert.equal(f.task.resumeContext.url, 'https://example.test/start');
-  assert.equal(f.task.needsReconciliation, true);
+  assert.equal(f.task.needsReconciliation, false, 'Connection freshness alone does not invent unresolved external work');
 });
 
 test('read-only URL navigation leaves a changing page, while DOM actions still reject stale refs', async t => {
@@ -129,16 +129,18 @@ test('reply connection failure leaves a retryable decision without recording dup
 test('hover ignores unrelated carousel changes but still checks target context, attributes and identity', () => {
   const { readLinkGuard } = require('../dist/main/tasks/fast-browser');
   const action = { kind: 'hover', effect: 'read', ref: 'e1' };
-  const make = (changes = {}) => JSON.stringify(['https://example.test', 'doc',
-    [{ ref: changes.ref || 'e1', role: 'button', label: '头像', kind: 'click' }, { ref: 'e2', label: changes.slide || 'Slide 1' }],
-    [changes.context || '账号区域', 'carousel'], [changes.attributes || '["dropdown-trigger"]', '[]']]);
-  const guard = readLinkGuard(make(), action);
-  assert.ok(guard);
-  assert.equal(readLinkGuard(make({ slide: 'Slide 2' }), action), guard);
-  for (const change of [{ ref: 'e3' }, { context: '另一个账号' }, { attributes: '["changed"]' }]) {
-    assert.notEqual(readLinkGuard(make(change), action), guard);
+  for (const dom of [undefined, { tag: 'DIV', popup: true, effect: 'read' }]) {
+    const make = (changes = {}) => JSON.stringify(['https://example.test', 'doc',
+      [{ ref: changes.ref || 'e1', role: 'button', label: '头像', kind: 'click', dom }, { ref: 'e2', label: changes.slide || 'Slide 1' }],
+      [changes.context || '账号区域', 'carousel'], [changes.attributes || '["dropdown-trigger"]', '[]']]);
+    const guard = readLinkGuard(make(), action);
+    assert.ok(guard);
+    assert.equal(readLinkGuard(make({ slide: 'Slide 2' }), action), guard);
+    for (const change of [{ ref: 'e3' }, { context: '另一个账号' }, { attributes: '["changed"]' }]) {
+      assert.notEqual(readLinkGuard(make(change), action), guard);
+    }
+    if (!dom) assert.equal(readLinkGuard(make(), { ...action, effect: 'submit' }), undefined);
   }
-  assert.equal(readLinkGuard(make(), { ...action, effect: 'submit' }), undefined);
 });
 
 test('invalid scroll directions fail before browser execution or an uncertain receipt is created', async t => {
@@ -155,8 +157,17 @@ test('opening a records menu is read-only while application submission and payme
   const { effectiveEffect } = require('../dist/main/tasks/browser');
   const action = { kind: 'click', ref: 'e1', effect: 'read' };
   assert.equal(effectiveEffect(action, { snapshot: '- menuitem "投递记录" [ref=e1]' }), 'read');
+  assert.equal(effectiveEffect({ ...action, effect: 'submit' }, { snapshot: '- menuitem "投递记录" [ref=e1]' }), 'read');
   assert.equal(effectiveEffect(action, { snapshot: '- menuitem "投递简历" [ref=e1]' }), 'submit');
   assert.equal(effectiveEffect(action, { snapshot: '- menuitem "支付" [ref=e1]' }), 'purchase');
+  const menu = { ref: 'e1', role: 'menuitem', label: '投递记录', kind: 'click' };
+  for (const [candidate, expected] of [
+    [menu, 'read'],
+    [{ ...menu, submit: true }, 'submit'],
+    [{ ...menu, dom: { command: 'post' } }, 'submit'],
+    [{ ...menu, dom: { command: 'checkout' } }, 'purchase'],
+    [{ ...menu, dom: { toggle: true } }, 'submit'],
+  ]) assert.equal(effectiveEffect(action, { fast: { candidates: [candidate] } }), expected);
 });
 
 test('pause drains read-only connection and observation; takeover and write interruption remain immediate', async t => {
@@ -236,5 +247,27 @@ test('read link guards ignore unrelated carousel controls but protect target ide
   for (const change of [{ candidate: { ref: 'e50' } }, { candidate: { label: '退出' } }, { attributes: '["/records?page=2"]' }, { context: '另一账号' }]) assert.notEqual(original, readLinkGuard(make(change), action));
   assert.equal(readLinkGuard(make(), { ...action, effect: 'submit' }), undefined);
   assert.equal(readLinkGuard(make({ candidate: { role: 'button' } }), action), undefined);
+  assert.equal(readLinkGuard(make({ candidate: { submit: true } }), action), undefined);
   assert.equal(readLinkGuard('malformed', action), undefined);
+});
+
+test('modern note guards tolerate metric counts but retain account context, URL, document and frame boundaries', () => {
+  const { readLinkGuard } = require('../dist/main/tasks/fast-browser');
+  const action = { kind: 'click', ref: 'e1', effect: 'submit' };
+  const make = (change = {}) => JSON.stringify([
+    change.url || 'https://example.test/feed', change.document || 'doc1',
+    [{ ref: 'e1', role: 'link', href: 'https://example.test/note/1', label: '发布新闻', dom: { tag: 'A', effect: 'read' } }],
+    [change.context || 'Author 用户29赞 29 likes 1.2万收藏'], ['["/note/1", "context1"]'],
+    { frame: change.frame || { id: 'child', sessionId: 'session', generation: 1, loaderId: 'loader' } },
+  ]);
+  const original = readLinkGuard(make(), action);
+  assert.ok(original);
+  assert.equal(readLinkGuard(make({ context: 'Author 用户29赞 31 likes, 2万收藏, 8 bookmarks' }), action), original);
+  for (const change of [
+    { context: 'Another author 用户29赞 31 likes 2万收藏' },
+    { context: 'Author 用户30赞 31 likes 2万收藏' },
+    { context: 'Author 用户29赞 invoice 30 31 likes 2万收藏' },
+    { url: 'https://example.test/another-feed' }, { document: 'doc2' },
+    { frame: { id: 'child', sessionId: 'session', generation: 1, loaderId: 'new-loader' } },
+  ]) assert.notEqual(readLinkGuard(make(change), action), original);
 });

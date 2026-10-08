@@ -4,6 +4,7 @@ import { jevProviderFor } from "../../shared/tasks";
 import { chooseJevAction } from "./jev-actions";
 import { taskHelper, type FieldValues, type Completion } from "./task-helper";
 import { beginJevCall, finishJevCall } from "./jev-usage";
+import { latestUserRequest, deferBrowserDriver, hasBrowserRequest } from "./turn-request";
 
 export interface DriverContext {
   task: BrowserTask; settings: TaskSettings; apiKey: string; jevKey: string; signal: AbortSignal;
@@ -37,11 +38,13 @@ export async function runJevDriver(ctx: DriverContext): Promise<string | undefin
     if (!active()) throw new Error("任务配置已变化，停止当前判断。");
     return result.result;
   };
+  const latestRequest = latestUserRequest(task);
+  if (deferBrowserDriver(latestRequest)) return "本轮先由主模型回答；不为对话自动观察浏览器，历史待核查事项单独保留。";
   if (task.needsReconciliation || task.items.length || task.attachments.length) return "任务需要核查已有记录、读取附件或管理批量项目，交由完整 Agent 处理。";
-  const latestRequest = task.events.filter(event => event.kind === "user").at(-1)?.text || task.prompt;
   if (/(?:终端|命令行|运行脚本|本地服务|PowerShell|\bbash\b|\bshell\b|\bnpm\b|\bpython\b)|(?:生成|制作|创建|搭建|启动|运行|跑起来).{0,40}(?:HTML|网页|网站|服务)|(?:HTML|网页|网站|服务).{0,40}(?:生成|启动|运行|跑起来)/i.test(latestRequest)) {
-    return "任务需要生成文件或使用终端，交由具备终端工具的完整 Agent 处理。";
+    return "本轮包含终端或文件相关要求，交由主模型处理这些约束。";
   }
+  if (!hasBrowserRequest(latestRequest)) return "本轮没有明确的网页操作要求，先由主模型处理，不自动读取浏览器。";
   if (task.resumeContext?.returnedAt && !task.resumeContext.observed) return "人工操作已结束，主模型先核对当前页面、账号和已完成步骤，再继续任务。";
   ctx.event("Jev 正在选择页面动作；填写内容和完成核查按需调用主模型。");
   // Only bootstrap a URL explicitly supplied by the user, and only on the first run.

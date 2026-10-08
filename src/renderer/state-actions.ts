@@ -2,13 +2,19 @@ import { profileApi } from "./api";
 import { render } from "./render/render-root";
 import { store } from "./state";
 import { AppState, PublicProfile } from "./types";
+import type { TaskSnapshot } from "../shared/tasks";
+import { formatErrorMessage } from "./util";
 
 const ONBOARDING_STORAGE_KEY = "profilepilot:onboarding:v1:seen";
 let onboardingEvaluated = false;
 
 export async function loadState(initial = false): Promise<void> {
   await Promise.all([
-    (initial ? profileApi().getInitialState() : profileApi().getState()).then(applyState),
+    (initial ? profileApi().getInitialState() : profileApi().getState()).then(applyState).catch((error) => {
+      store.profileLoadError = formatErrorMessage(error);
+      render();
+      throw error;
+    }),
     profileApi().getStartupSettings().then((settings) => {
       store.startupSettings = settings;
       render();
@@ -21,7 +27,12 @@ export async function loadState(initial = false): Promise<void> {
 
 export function applyState(state: AppState): void {
   store.state = state;
+  store.profileLoadError = null;
   const profiles = store.state.profiles || [];
+  const nativeProfiles = profiles.filter(profile => profile.source === "native");
+  if (!nativeProfiles.some(profile => profile.id === store.nativeExtensionProfileId)) {
+    store.nativeExtensionProfileId = (nativeProfiles.find(profile => profile.isDefault) || nativeProfiles[0])?.id || null;
+  }
 
   if (!profiles.some((profile) => profile.id === store.selectedId)) {
     store.selectedId = store.state.currentProfile?.id || profiles[0]?.id || null;
@@ -34,7 +45,9 @@ export function applyState(state: AppState): void {
   normalizeAccountSyncProfileSelection(profiles);
   if (!onboardingEvaluated) {
     onboardingEvaluated = true;
-    if (store.viewMode === "main" && !onboardingWasSeen() && !store.modal) {
+    // The desktop shell owns the global tour. Avoid stacking the legacy CLI
+    // setup dialog underneath it when the browser pane is first opened.
+    if (store.viewMode === "main" && store.workspace !== "tools" && !window.workspacePane && !onboardingWasSeen() && !store.modal) {
       store.modal = { kind: "onboarding" };
     }
   }
@@ -57,13 +70,48 @@ function onboardingWasSeen(): boolean {
   }
 }
 
-export async function refreshAgentIntegrationDiagnostic(): Promise<void> {
+let agentIntegrationInFlight: Promise<void> | null = null;
+
+export function refreshAgentIntegrationDiagnostic(): Promise<void> {
+  if (agentIntegrationInFlight) return agentIntegrationInFlight;
+  agentIntegrationInFlight = inspectAgentIntegration().finally(() => { agentIntegrationInFlight = null; });
+  return agentIntegrationInFlight;
+}
+
+async function inspectAgentIntegration(): Promise<void> {
   store.agentIntegrationLoading = true;
   render();
   try {
     store.agentIntegrationDiagnostic = await profileApi().inspectAgentIntegration();
   } finally {
     store.agentIntegrationLoading = false;
+    render();
+  }
+}
+
+let nativeExtensionRevision = 0;
+
+export function applyNativeExtensionSnapshot(snapshot: TaskSnapshot): void {
+  nativeExtensionRevision += 1;
+  store.nativeExtensionBrowsers = snapshot.nativeBrowsers || [];
+  store.nativeExtensionInstallations = snapshot.nativeInstallations || [];
+  store.nativeExtensionError = null;
+  render();
+}
+
+export async function refreshNativeExtensionStatus(): Promise<void> {
+  if (store.nativeExtensionLoading) return;
+  store.nativeExtensionLoading = true;
+  store.nativeExtensionError = null;
+  render();
+  const revision = nativeExtensionRevision;
+  try {
+    const snapshot = await window.tasks.snapshot();
+    if (revision === nativeExtensionRevision) applyNativeExtensionSnapshot(snapshot);
+  } catch (error) {
+    if (revision === nativeExtensionRevision) store.nativeExtensionError = formatErrorMessage(error);
+  } finally {
+    store.nativeExtensionLoading = false;
     render();
   }
 }

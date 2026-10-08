@@ -165,7 +165,7 @@ export interface Registry {
 }
 
 export type BrowserDriverKind = "agent-browser" | "playwright-cli" | "chrome-devtools-mcp";
-export type AgentSkillKey = BrowserDriverKind | "profilepilot-cli";
+export type AgentSkillKey = BrowserDriverKind | "profilepilot-cli" | "profilepilot";
 
 // 当前持有该 Profile CDP 端口持久连接的客户端（agent-browser / Playwright / DevTools 等）。
 export interface CdpClientInfo {
@@ -580,6 +580,7 @@ export interface AgentSkillDiagnostic {
   targetCount: number;
   installPath: string;
   targets: AgentSkillTargetDiagnostic[];
+  legacySkillPaths?: string[];
   error: string | null;
 }
 
@@ -1093,6 +1094,10 @@ export interface ProfileManagerApi {
   // 启用/移除会话识别 shell 集成（~/.zshenv 托管块），返回刷新后的完整状态。
   setShellIntegrationEnabled(enabled: boolean): Promise<AppState>;
   inspectAgentIntegration(): Promise<AgentIntegrationDiagnostic>;
+  readBrowserPreferences(): Promise<import("./browser-preferences").BrowserPreferencesSnapshot>;
+  readControlPreferences(domain: import("./control-preferences").ControlPreferencesDomain): Promise<import("./control-preferences").ControlPreferencesSnapshot>;
+  writeControlPreferences(request: import("./control-preferences").ControlPreferencesUpdate): Promise<import("./control-preferences").ControlPreferencesSnapshot>;
+  writeBrowserPreferences(request: import("./browser-preferences").BrowserPreferencesUpdate): Promise<import("./browser-preferences").BrowserPreferencesSnapshot>;
   setAgentWrapperEnabled(tool: BrowserDriverKind, enabled: boolean): Promise<AgentIntegrationDiagnostic>;
   setAgentSkillEnabled(tool: BrowserDriverKind, enabled: boolean): Promise<AgentIntegrationDiagnostic>;
   setProfilePilotCliEnabled(enabled: boolean): Promise<AgentIntegrationDiagnostic>;

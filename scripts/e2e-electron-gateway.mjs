@@ -12,6 +12,7 @@ const { BrowserGatewayDaemon } = require("../dist/main/browser-gateway-daemon");
 const { requestBrowserGateway } = require("../dist/main/browser-gateway-client");
 const electronPath = require("electron");
 const wrapper = path.join(repoRoot, "dist/main/profilepilot-agent-browser-wrapper.cjs");
+const unifiedCli = process.env.PPILOT_BROWSER_CLI_E2E === "1";
 const real = path.join(repoRoot, "node_modules/agent-browser/bin", process.platform === "win32" ? "agent-browser-win32-x64.exe" : `agent-browser-${process.platform}-${process.arch}`);
 async function freePort() {
   const server = net.createServer();
@@ -33,7 +34,10 @@ async function command(args, sessionId = session, expected = 0) {
     AGENT_BROWSER_SOCKET_DIR: path.join(homeDir, ".agent-browser"),
     AGENT_BROWSER_SESSION: sessionId, PROFILEPILOT_AGENT_BROWSER_REAL: real };
   delete env.ELECTRON_RUN_AS_NODE;
-  const child = spawn(process.execPath, [wrapper, ...args], { cwd: repoRoot, env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+  const commandArgs = unifiedCli
+    ? [path.join(repoRoot, "dist/main/profilepilot-cli.cjs"), "browser", "--connection", "gateway", ...args.filter(arg => arg !== "profilepilot")]
+    : [wrapper, ...args];
+  const child = spawn(process.execPath, commandArgs, { cwd: repoRoot, env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
   let output = "";
   child.stdout.on("data", chunk => { output += chunk; }); child.stderr.on("data", chunk => { output += chunk; });
   const code = await new Promise((resolve, reject) => {

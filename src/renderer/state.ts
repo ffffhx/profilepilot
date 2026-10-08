@@ -1,5 +1,6 @@
 import { AccountSyncDiffResult, AccountSyncResult, AgentIntegrationDiagnostic, AgentTakeoverEvent, AppState, BifrostSnapshot, BusyState, CdpLiveView, ExtensionMigrationDiffResult, ExtensionMigrationResult, ExtensionScanResult, GlobalInstructionFileId, GlobalInstructionsSnapshot, ModalState, ProfileReadinessReceipt, ToastKind } from "./types";
 import type { StartupSettings } from "../shared/startup-settings";
+import type { TaskSnapshot } from "../shared/tasks";
 
 export const root = document.querySelector<HTMLDivElement>("#app");
 
@@ -19,11 +20,13 @@ export interface LiveViewEntry {
 
 export interface RendererState {
   viewMode: "main" | "mini";
+  workspace: "browser" | "tools";
   miniExpanded: boolean;
   miniPanelOpen: boolean;
   miniPanelPinned: boolean;
   miniScrollTop: number;
   state: AppState | null;
+  profileLoadError: string | null;
   startupSettings: StartupSettings | null;
   selectedId: string | null;
   selectedExternalDir: string | null;
@@ -80,6 +83,12 @@ export interface RendererState {
   profileReadinessLoading: Record<string, boolean>;
   agentIntegrationDiagnostic: AgentIntegrationDiagnostic | null;
   agentIntegrationLoading: boolean;
+  nativeExtensionBrowsers: TaskSnapshot["nativeBrowsers"] | null;
+  nativeExtensionInstallations: NonNullable<TaskSnapshot["nativeInstallations"]>;
+  nativeExtensionProfileId: string | null;
+  nativeExtensionLoading: boolean;
+  nativeExtensionError: string | null;
+  nativeExtensionAuthorization: { profileId: string; expiresAt: string } | null;
   inputGuardPermissionLoading: boolean;
   // 最近一次 Bifrost 快照（面板可见时后台轮询刷新），供分流徽标/详情算三态健康度。
   bifrostSnapshot: BifrostSnapshot | null;
@@ -92,11 +101,13 @@ export interface RendererState {
 
 export const store: RendererState = {
   viewMode: new URLSearchParams(window.location.search).get("mode") === "mini" ? "mini" : "main",
+  workspace: document.body.dataset.workspace === "tools" ? "tools" : "browser",
   miniExpanded: false,
   miniPanelOpen: false,
   miniPanelPinned: false,
   miniScrollTop: 0,
   state: null,
+  profileLoadError: null,
   startupSettings: null,
   selectedId: null,
   selectedExternalDir: null,
@@ -151,6 +162,12 @@ export const store: RendererState = {
   profileReadinessLoading: {},
   agentIntegrationDiagnostic: null,
   agentIntegrationLoading: false,
+  nativeExtensionBrowsers: null,
+  nativeExtensionInstallations: [],
+  nativeExtensionProfileId: null,
+  nativeExtensionLoading: false,
+  nativeExtensionError: null,
+  nativeExtensionAuthorization: null,
   inputGuardPermissionLoading: false,
   bifrostSnapshot: null,
   liveView: {},

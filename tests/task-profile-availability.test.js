@@ -17,7 +17,7 @@ test("connected system profiles start without a selected tab and still respect t
   assert.match(taskProfileAvailability(native, [], [state]).label, /更新或重新加载/);
   state.taskTabs = true;
   assert.equal(taskProfileAvailability(native, [], [state]).available, true);
-  assert.match(taskProfileAvailability(native, [], [state]).label, /自动新开标签页/);
+  assert.match(taskProfileAvailability(native, [], [state]).label, /可使用当前页/);
   state.ownerSessionId = "existing-session"; state.ownership = "user";
   assert.match(taskProfileAvailability(native, [], [state]).label, /用户接管/);
   assert.equal(taskProfileAvailability(native, [], [state]).available, false);

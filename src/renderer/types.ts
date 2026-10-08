@@ -311,7 +311,7 @@ export interface CdpContentionInfo {
 }
 
 export type BrowserDriverKind = "agent-browser" | "playwright-cli" | "chrome-devtools-mcp";
-export type AgentSkillKey = BrowserDriverKind | "profilepilot-cli";
+export type AgentSkillKey = BrowserDriverKind | "profilepilot-cli" | "profilepilot";
 
 export interface CdpClientInfo {
   pid: number;
@@ -469,6 +469,7 @@ export interface AgentSkillDiagnostic {
   targetCount: number;
   installPath: string;
   targets: AgentSkillTargetDiagnostic[];
+  legacySkillPaths?: string[];
   error: string | null;
 }
 
@@ -950,6 +951,10 @@ export interface ProfileManagerApi {
   setAgentOverlayEnabled(enabled: boolean): Promise<AppState>;
   setShellIntegrationEnabled(enabled: boolean): Promise<AppState>;
   inspectAgentIntegration(): Promise<AgentIntegrationDiagnostic>;
+  readBrowserPreferences(): Promise<import("../shared/browser-preferences").BrowserPreferencesSnapshot>;
+  readControlPreferences(domain: import("../shared/control-preferences").ControlPreferencesDomain): Promise<import("../shared/control-preferences").ControlPreferencesSnapshot>;
+  writeControlPreferences(request: import("../shared/control-preferences").ControlPreferencesUpdate): Promise<import("../shared/control-preferences").ControlPreferencesSnapshot>;
+  writeBrowserPreferences(request: import("../shared/browser-preferences").BrowserPreferencesUpdate): Promise<import("../shared/browser-preferences").BrowserPreferencesSnapshot>;
   setAgentWrapperEnabled(tool: BrowserDriverKind, enabled: boolean): Promise<AgentIntegrationDiagnostic>;
   setAgentSkillEnabled(tool: BrowserDriverKind, enabled: boolean): Promise<AgentIntegrationDiagnostic>;
   setProfilePilotCliEnabled(enabled: boolean): Promise<AgentIntegrationDiagnostic>;
@@ -1089,8 +1094,8 @@ export type ModalState =
   | { kind: "clone-pool" }
   | { kind: "clone-tag"; profileId: string }
   | { kind: "global-instructions" }
+  | { kind: "control-preferences"; activeTab: import("../shared/control-preferences").ControlPreferencesDomain; editors: Record<import("../shared/control-preferences").ControlPreferencesDomain, import("../shared/control-preferences").ControlPreferencesEditor>; discard: false | "close" | "reload" }
   | { kind: "onboarding" }
-  | { kind: "agent-integration" }
   | { kind: "profile-details"; profileId: string }
   | { kind: "external-details"; userDataDir: string }
   | { kind: "live-zoom"; profileId: string; returnTo?: "profile-details" }

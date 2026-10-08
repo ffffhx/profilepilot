@@ -62,6 +62,28 @@ test("initial state renders while startup preferences are still loading; refresh
   assert.equal(scans, 1);
 });
 
+test("overlapping tool detection requests share one result and allow a later refresh", async () => {
+  let finish;
+  let probes = 0;
+  const { actions, store } = loadStateActions({}, {
+    inspectAgentIntegration: () => { probes++; return new Promise(resolve => { finish = resolve; }); }
+  });
+  const initial = actions.refreshAgentIntegrationDiagnostic();
+  const onboarding = actions.refreshAgentIntegrationDiagnostic();
+  assert.equal(initial, onboarding);
+  assert.equal(probes, 1);
+  assert.equal(store.agentIntegrationLoading, true);
+  const diagnostic = { tools: [] };
+  finish(diagnostic);
+  await initial;
+  assert.equal(store.agentIntegrationLoading, false);
+  assert.equal(store.agentIntegrationDiagnostic, diagnostic);
+  const refresh = actions.refreshAgentIntegrationDiagnostic();
+  assert.equal(probes, 2);
+  finish(diagnostic);
+  await refresh;
+});
+
 test("renderer normalizeMigrationProfileSelection clears invalid scan state and keeps source distinct from target", () => {
   const { actions, store } = loadStateActions({
     selectedId: "p2",

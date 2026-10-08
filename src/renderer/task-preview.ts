@@ -1,7 +1,8 @@
 import type { TaskApi, TaskPreviewUpdate } from "../shared/tasks";
+import { workspaceHidden, onWorkspaceVisibilityChanged } from "./workspace-lifecycle";
 
 export function previewMarkup(): string {
-  return `<section class="panel browser-live"><div class="panel-header"><h2>浏览器现场</h2><button data-action="focus-browser">打开窗口 ↗</button></div>
+  return `<section class="panel browser-live"><div class="panel-header"><h2>当前浏览器</h2><button data-action="focus-browser" aria-label="打开浏览器窗口" title="打开浏览器窗口">↗</button></div>
     <div class="live-heading"><span class="live-indicator" data-preview-state="connecting"></span><span data-preview-status role="status">正在连接实时画面…</span></div>
     <div class="live-stage"><canvas class="live-canvas" hidden aria-label="任务浏览器实时画面"></canvas><div class="preview-placeholder" data-preview-placeholder>正在连接实时画面…</div></div>
     <div class="url" data-preview-url></div><small>画面随页面变化更新 · 操作浏览器请打开窗口</small></section>`;
@@ -20,9 +21,9 @@ export class TaskPreviewView {
     this.canvas.setAttribute("aria-label", "任务浏览器实时画面");
     this.canvas.hidden = true;
     api.onPreview(update => void this.receive(update));
-    document.addEventListener("visibilitychange", () => {
+    onWorkspaceVisibilityChanged(() => {
       this.generation++;
-      void api.watchPreview(document.hidden ? null : this.taskId).catch(() => {});
+      void api.watchPreview(workspaceHidden() ? null : this.taskId).catch(() => {});
     });
     window.addEventListener("beforeunload", () => { void api.watchPreview(null); });
   }
@@ -30,7 +31,7 @@ export class TaskPreviewView {
     if (this.taskId !== taskId) {
       this.generation++; this.taskId = taskId; this.latest = undefined; this.canvas.hidden = true;
       this.canvas.getContext("2d")?.clearRect(0, 0, this.canvas.width, this.canvas.height);
-      void this.api.watchPreview(document.hidden ? null : taskId).catch(() => {
+      void this.api.watchPreview(workspaceHidden() ? null : taskId).catch(() => {
         if (this.taskId === taskId && taskId) { this.latest = { taskId, state: "unavailable", message: "暂时无法连接实时画面" }; this.paintStatus(); }
       });
     }

@@ -233,6 +233,7 @@ export async function launchProfilePilotE2e(options = {}) {
       ...process.env,
       HOME: homeDir,
       USERPROFILE: homeDir,
+      CODEX_HOME: path.join(homeDir, ".codex"),
       CPM_DATA_DIR: dataDir,
       CPM_ELECTRON_SMOKE_TEST: options.realGateway ? "0" : "1",
       CPM_E2E_MODE: mode,
@@ -261,9 +262,17 @@ export async function launchProfilePilotE2e(options = {}) {
     socket = await connectSocket(socketPath, child, () => ({ stdout, stderr }), options.timeoutMs || 15_000);
     driver = new ElectronDriver(socket);
     await driver.request("ping");
-    await driver.waitFor("h1", (snapshot) => snapshot.text === (options.env?.CPM_START_VIEW === "tasks" ? "任务工作台" : "ProfilePilot"), {
+    // Wait for shell activation: a child can render its heading before the
+    // shell is ready to open the first-run tour.
+    await driver.waitFor('#workspace-guide[open], html[data-workspace-loading="false"]', snapshot => snapshot.exists, { target: "shell", timeoutMs: process.platform === "win32" ? 30_000 : 10_000 });
+    if (!options.onboarding) {
+      await driver.evaluate(`document.querySelector('#workspace-guide[open] [data-guide-close]')?.click(); true`, { target: "shell" });
+      await driver.waitFor('#workspace-guide', snapshot => !snapshot.exists, { target: "shell" });
+    }
+    await driver.waitFor("h1", (snapshot) => snapshot.text === (options.env?.CPM_START_VIEW === "phones" ? "手机" : options.env?.CPM_START_VIEW === "tools" ? "配套工具" : options.env?.CPM_START_VIEW === "tasks" ? "Agent" : "浏览器"), {
       timeoutMs: process.platform === "win32" ? 30_000 : 10_000
     });
+    await driver.evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))', { target: "shell" });
   } catch (error) {
     driver?.close();
     socket?.destroy();
@@ -317,6 +326,20 @@ export async function launchProfilePilotE2e(options = {}) {
       child.stderr.destroy();
       driver.close();
       debugCleanup("pipes closed");
+      if (!stopOptions.keepBrowserService) {
+        // The browser service intentionally outlives the App. Only terminate
+        // the authenticated service belonging to this disposable fixture.
+        const { readBrowserServiceConnection, serviceRequest, processAlive } = require('../../../dist/main/browser-service/connection');
+        const serviceRoot = path.join(dataDir, 'browser-tasks');
+        const connection = readBrowserServiceConnection(serviceRoot);
+        if (connection?.service === 'browser' && processAlive(connection.pid)) {
+          const identity = (await serviceRequest(connection, 'ping')).result;
+          if (path.resolve(identity.root) !== path.resolve(serviceRoot) || identity.pid !== connection.pid) throw new Error('Refusing to stop a service outside the E2E fixture.');
+          try { await serviceRequest(connection, 'stop'); } catch { process.kill(connection.pid); }
+          for (let attempt = 0; attempt < 50 && processAlive(connection.pid); attempt++) await new Promise(resolve => setTimeout(resolve, 100));
+          if (processAlive(connection.pid)) throw new Error('Fixture browser service did not exit.');
+        }
+      }
       if (stopOptions.removeFixture !== false) {
         await rm(fixtureRoot, {
           recursive: true,

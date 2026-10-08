@@ -8,6 +8,7 @@ const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const { LocalAppsService, debugTargets } = require('../dist/main/local-apps/service');
 const { parseEnvironment, launchCommand, workerRequest } = require('../dist/main/local-apps/protocol');
+const { driverProcessSnapshot } = require('../dist/main/agent-browser-process-cleanup');
 
 const input = (cwd, changes = {}) => ({ name: '测试项目', mode: 'launch', cwd, command: 'npm run dev', environment: '', cdpPort: null, inspectPort: null, ...changes });
 function temporary() {
@@ -17,6 +18,41 @@ function temporary() {
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(fn) { for (let i = 0; i < 100; i++) { const result = await fn(); if (result) return result; await delay(100); } throw new Error('condition timed out'); }
 function alive(pid) { try { process.kill(pid, 0); return true; } catch { return false; } }
+
+async function cleanProcessFixture(temp, service, id, pids, primaryError) {
+  const errors = primaryError ? [primaryError] : [];
+  if (id) { try { await service.stop(id); } catch (error) { errors.push(error); } }
+  // A stopped runtime can precede the supervisor's delayed pipe shutdown.
+  const deadline = Date.now() + 3000;
+  while ([...pids].some(alive) && Date.now() < deadline) await delay(100);
+  if (errors.length || [...pids].some(alive)) {
+    if ([...pids].some(alive)) errors.push(new Error(`Fixture processes did not exit: ${[...pids].filter(alive).join(', ')} (${temp.root})`));
+    try {
+      // Failure cleanup only: verify the unique fixture path before targeting
+      // any process, then include its descendants across all launch generations.
+      const rows = driverProcessSnapshot();
+      const owned = new Set(rows.filter(row => row.command.includes(temp.root + path.sep)).map(row => row.pid));
+      let added;
+      do { added = false; for (const row of rows) if (owned.has(row.parentPid) && !owned.has(row.pid)) { owned.add(row.pid); added = true; } } while (added);
+      assert.equal(owned.has(process.pid), false);
+      for (const pid of owned) pids.add(pid);
+      if (process.platform === 'win32') {
+        for (const row of rows.filter(row => owned.has(row.pid) && !owned.has(row.parentPid))) {
+          if (!alive(row.pid)) continue;
+          try { await promisify(execFile)('taskkill.exe', ['/PID', String(row.pid), '/T', '/F'], { windowsHide: true, timeout: 8000 }); }
+          catch (error) { if (alive(row.pid)) throw error; }
+        }
+      } else {
+        for (const pid of [...owned].reverse()) { try { process.kill(pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; } }
+      }
+      await until(() => ![...pids].some(alive));
+    } catch (error) { errors.push(error); }
+  }
+  // Keep diagnostics intact if cleanup could not terminate this fixture.
+  if (![...pids].some(alive)) { try { temp.clean(); } catch (error) { errors.push(error); } }
+  if (errors.length === 1) throw errors[0];
+  if (errors.length) throw new AggregateError(errors, errors.map(error => error.stack || String(error)).join('\nCleanup also reported:\n'), { cause: primaryError });
+}
 
 test('environment and shell commands preserve values and handle Windows/macOS invocation', () => {
   assert.deepEqual({ ...parseEnvironment('# comment\nA=中 文\nTOKEN=a=b\nEMPTY=') }, { A: '中 文', TOKEN: 'a=b', EMPTY: '' });
@@ -52,17 +88,26 @@ test('configuration validates ports, paths, identifiers and preserves project fi
   } finally { temp.clean(); }
 });
 
-test('supervisor tracks a real process tree across service recreation, restarts and stops only its tree', { timeout: 35000 }, async () => {
+test('supervisor tracks a real process tree across service recreation, restarts and stops only its tree', { timeout: 60000 }, async () => {
   const temp = temporary(); const store = path.join(temp.root, 'store'); const service = new LocalAppsService(store);
   const project = path.join(temp.root, '中文 project'); fs.mkdirSync(project);
   const fixture = path.join(project, 'run.cjs');
-  fs.writeFileSync(fixture, `const {spawn}=require('node:child_process'); const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'}); console.log('READY '+JSON.stringify({pid:process.pid,child:child.pid,value:process.env.PP_TEST_VALUE,runAsNode:process.env.ELECTRON_RUN_AS_NODE})); console.error('错误日志'); setInterval(()=>{},1000);`);
-  let id;
+  fs.writeFileSync(fixture, `const {spawn}=require('node:child_process'); const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)',__filename],{stdio:'ignore'}); console.log('READY '+JSON.stringify({pid:process.pid,child:child.pid,value:process.env.PP_TEST_VALUE,runAsNode:process.env.ELECTRON_RUN_AS_NODE})); console.error('错误日志'); setInterval(()=>{},1000);`);
+  let id, failure;
+  const processIds = new Set();
+  const remember = (...ids) => { for (const pid of ids) if (Number.isInteger(pid) && pid > 0) processIds.add(pid); };
+  const rememberWorker = () => {
+    if (!id) return;
+    const file = path.join(store, `${id}.runtime.json`);
+    if (fs.existsSync(file)) { const record = JSON.parse(fs.readFileSync(file, 'utf8')); remember(record.workerPid, record.runtime.pid); }
+  };
   try {
     id = await service.save(input(project, { command: `"${process.execPath}" "${fixture}"`, environment: 'PP_TEST_VALUE=中文 value' }));
     await service.start(id);
+    rememberWorker();
     const log = await until(() => { const text = service.logs(id); return text.includes('READY') && text.includes('错误日志') ? text : ''; });
     const pids = JSON.parse(log.match(/READY (.+)/)[1]);
+    remember(pids.pid, pids.child);
     assert.equal(pids.value, '中文 value'); assert.equal(pids.runAsNode, undefined);
     assert.ok(alive(pids.pid)); assert.ok(alive(pids.child));
     const record = JSON.parse(fs.readFileSync(path.join(store, `${id}.runtime.json`), 'utf8'));
@@ -72,15 +117,21 @@ test('supervisor tracks a real process tree across service recreation, restarts 
     await assert.rejects(reopened.start(id), /先停止/);
     await assert.rejects(reopened.remove(id), /先停止/);
     await reopened.restart(id);
+    rememberWorker();
     await until(() => !alive(pids.pid) && !alive(pids.child));
-    const newLog = await until(() => { const text = reopened.logs(id); return text.includes('READY') ? text : ''; });
+    const newLog = await until(() => { const text = reopened.logs(id), ready = text.match(/READY (.+)/); return ready && JSON.parse(ready[1]).pid !== pids.pid ? text : ''; });
     const next = JSON.parse(newLog.match(/READY (.+)/)[1]);
+    remember(next.pid, next.child);
     assert.notEqual(next.pid, pids.pid);
     await reopened.stop(id);
     await until(() => !alive(next.pid) && !alive(next.child));
     assert.equal((await reopened.list())[0].runtime.status, 'stopped');
     await reopened.remove(id); id = undefined;
-  } finally { if (id) await service.stop(id).catch(() => {}); await delay(500); temp.clean(); }
+  } catch (error) { failure = error; }
+  finally {
+    try { rememberWorker(); } catch (error) { failure = failure ? new AggregateError([failure, error], `${failure.stack}\n${error.stack}`) : error; }
+    await cleanProcessFixture(temp, service, id, processIds, failure);
+  }
 });
 
 test('debug discovery supports multiple windows and inspector while rejecting remote endpoints; attach never owns the process', async () => {

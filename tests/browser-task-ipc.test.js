@@ -6,6 +6,12 @@ const vm = require("node:vm");
 const path = require("node:path");
 const os = require("node:os");
 const { pathToFileURL } = require("node:url");
+// These IPC tests exercise credentials/notifications, not process launching.
+// The real remote adapter and independent process have their own tests.
+const browserServiceStub = { BrowserServiceClient: class {
+  states() { return []; } installationStates() { return []; }
+  configureUi() {} onEvent() { return () => {}; } async start() {} close() {}
+} };
 
 test("Jev credentials are isolated, omitted from snapshots, preserved by main settings, and deleted independently", async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "pp-jev-ipc-")); let handler;
@@ -15,7 +21,7 @@ test("Jev credentials are isolated, omitted from snapshots, preserved by main se
     shell: { openExternal: async url => { opened.push(url); } }, dialog: {} };
   const filename = path.resolve("dist/main/tasks/ipc.js"); const localRequire = createRequire(filename); const module = { exports: {} };
   const load = vm.runInThisContext(`(function(require,module,exports,__dirname,process){${readFileSync(filename, "utf8")}\n})`, { filename });
-  load(id => id === "electron" ? electron : localRequire(id), module, module.exports, path.dirname(filename), { env: { ...process.env, CPM_DATA_DIR: root } });
+  load(id => id === "electron" ? electron : id === '../browser-service/client' ? browserServiceStub : localRequire(id), module, module.exports, path.dirname(filename), { env: { ...process.env, CPM_DATA_DIR: root } });
   const event = { senderFrame: { url: pathToFileURL(path.resolve("public/tasks.html")).href } }; let service;
   try {
     service = module.exports.registerTaskService({ getState: async () => ({ profiles: [] }) });
@@ -91,7 +97,7 @@ test("task notification restores the desktop and opens the matching task", async
   const filename = path.resolve("dist/main/tasks/ipc.js"); const localRequire = createRequire(filename);
   const module = { exports: {} };
   const load = vm.runInThisContext(`(function(require,module,exports,__dirname,process){${readFileSync(filename, "utf8")}\n})`, { filename });
-  load(id => id === "electron" ? electron : localRequire(id), module, module.exports, path.dirname(filename), { env: { ...process.env, CPM_DATA_DIR: root } });
+  load(id => id === "electron" ? electron : id === '../browser-service/client' ? browserServiceStub : localRequire(id), module, module.exports, path.dirname(filename), { env: { ...process.env, CPM_DATA_DIR: root } });
   let service;
   try {
     service = module.exports.registerTaskService({ getState: async () => ({ profiles: [] }) });

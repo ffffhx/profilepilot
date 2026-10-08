@@ -4,8 +4,7 @@ const app = await launchProfilePilotE2e({name:'template feedback and Jev entry'}
 try {
   const d=app.driver;
   const profile=await d.evaluate(`window.profileManager.createProfile('模板测试').then(s=>s.profiles.find(p=>p.name==='模板测试'))`);
-  await d.domClick('[data-workspace-trigger]');
-  await d.domClick('a[href="./tasks.html"]');
+  await d.domClick('.workspace-link[data-workspace="agent"]');
   await d.waitFor('#create-task');
   await d.domClick('[data-action=save-template]');
   await new Promise(resolve=>setTimeout(resolve,600));

@@ -34,5 +34,5 @@ export function taskProfileAvailability(profile: PublicProfile, tasks: BrowserTa
     return occupied("占用中 · 任务保留中");
   }
   if (profileTasks.some(task => task.status === "queued")) return occupied("占用中 · 有任务排队");
-  return { available: true, label: profile.source === "native" ? "空闲 · 任务自动新开标签页" : profile.running ? "空闲" : "空闲 · 未启动" };
+  return { available: true, label: profile.source === "native" ? "空闲 · 可使用当前页" : profile.running ? "空闲" : "空闲 · 未启动" };
 }

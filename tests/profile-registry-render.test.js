@@ -20,7 +20,11 @@ function loadProfilesRenderer(overrides = {}) {
   const renderer = loadTsModule("src/renderer/render/profiles.ts", {
     stubs: {
       "../state": { store, dateFormatter: { format: (value) => value.toISOString() } },
-      "src/renderer/state": { store, dateFormatter: { format: (value) => value.toISOString() } }
+      "src/renderer/state": { store, dateFormatter: { format: (value) => value.toISOString() } },
+      // Exercise real row/inspector and busy-state rendering without importing
+      // the desktop bootstrap, which installs document/window event handlers.
+      "src/renderer/render/render-root": { render: () => {} },
+      "src/renderer/state-actions": { loadState: async () => {} }
     }
   });
   return { renderer, store };
@@ -165,9 +169,9 @@ test("Profile Registry renders one shared six-column track", () => {
     })
   ], []);
 
-  assert.match(html, /<col class="profile-col-name" \/>[\s\S]*profile-col-status[\s\S]*profile-col-route[\s\S]*profile-col-connection[\s\S]*profile-col-activity[\s\S]*profile-col-actions/);
-  assert.match(html, /<th>Profile<\/th>[\s\S]*<th>Status<\/th>[\s\S]*<th>Proxy Route<\/th>[\s\S]*<th>Connection<\/th>[\s\S]*<th>Agent Activity<\/th>[\s\S]*<th>Actions<\/th>/);
-  assert.match(html, /系统代理[\s\S]*正在读取系统代理[\s\S]*:9223[\s\S]*Gateway[\s\S]*Codex 正在驱动[\s\S]*coze-test-account-cli/);
+  assert.match(html, /<col class="profile-col-name" \/>[\s\S]*profile-col-status[\s\S]*profile-col-connection[\s\S]*profile-col-route[\s\S]*profile-col-activity[\s\S]*profile-col-actions/);
+  assert.match(html, /<th>Profile<\/th>[\s\S]*<th>状态<\/th>[\s\S]*<th>连接<\/th>[\s\S]*<th>代理<\/th>[\s\S]*<th>当前活动<\/th>[\s\S]*<th>操作<\/th>/);
+  assert.match(html, /Gateway[\s\S]*:9223[\s\S]*系统代理[\s\S]*正在读取系统代理[\s\S]*Codex 正在驱动[\s\S]*coze-test-account-cli/);
   assert.match(html, /profile-activity-track driving">\s*<span class="profile-activity-signal" aria-hidden="true"><\/span>\s*<span class="profile-activity-main action-tooltip"/);
   assert.match(html, /profile-primary-action[\s\S]*>\s*接管\s*<\/button>[\s\S]*profile-window-action[\s\S]*aria-label="显示"[\s\S]*>\s*↗\s*<\/button>[\s\S]*profile-menu-action[\s\S]*data-action="open-profile-details"[\s\S]*>查看详情<\/button>/);
   assert.doesNotMatch(html, /profile-details-action/);

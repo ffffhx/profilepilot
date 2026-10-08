@@ -1,0 +1,24 @@
+[Unit]
+Description=ProfilePilot phone status relay
+After=network.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=profilepilot-phone-status
+WorkingDirectory=/opt/profilepilot-phone-status
+Environment=STATUS_DATA=/var/lib/profilepilot-phone-status
+Environment=STATUS_TRUST_PROXY=1
+Environment=PORT=8798
+ExecStart=/usr/bin/node /opt/profilepilot-phone-status/server.mjs
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+UMask=0077
+MemoryMax=192M
+
+[Install]
+WantedBy=multi-user.target

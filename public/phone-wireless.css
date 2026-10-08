@@ -1,0 +1,33 @@
+.phone-wireless-dialog { width:min(610px,calc(100vw - 40px)); max-height:calc(100vh - 48px); padding:0; border:1px solid var(--line,#d7e3f4); border-radius:18px; color:var(--ink,#233047); background:var(--panel,#fff); box-shadow:0 24px 80px #17366033; }
+.phone-wireless-dialog::backdrop { background:#12244366; }
+.wireless-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; padding:24px 28px 18px; }
+.wireless-heading h2 { font-size:24px; margin-top:5px; }
+.wireless-heading [data-close] { font-size:23px; min-width:34px; padding:0 8px; border-color:transparent; }
+.wireless-eyebrow { color:var(--accent,#2459dd); font-size:12px; font-weight:600; }
+.wireless-progress { display:flex; list-style:none; gap:18px; margin:0; padding:0 28px 20px; border-bottom:1px solid var(--line,#d7e3f4); }
+.wireless-progress li { display:flex; align-items:center; gap:7px; color:var(--muted,#718097); font-size:12px; }
+.wireless-progress li > span { display:grid; place-items:center; width:24px; height:24px; border-radius:50%; background:#edf3fc; }
+.wireless-progress [aria-current] { color:var(--accent,#2459dd); font-weight:600; }
+.wireless-progress [aria-current] > span { color:#fff; background:var(--accent,#2459dd); }
+.wireless-progress [data-done=true] { color:var(--success,#19755e); }
+.wireless-body { display:grid; gap:14px; padding:23px 28px 26px; }
+.wireless-body > p,.wireless-help p { font-size:13px; line-height:1.7; color:var(--muted,#718097); }
+.wireless-instructions { display:grid; gap:15px; margin:0; padding-left:22px; }
+.wireless-instructions li { padding-left:5px; font-size:14px; }
+.wireless-instructions span { display:block; color:var(--muted,#718097); font-size:13px; line-height:1.7; margin-top:4px; }
+.wireless-body .wireless-note { background:#f0f5ff; border-radius:9px; padding:12px 14px; font-size:12px; }
+.wireless-body form { display:grid; gap:16px; }
+.wireless-body input { height:42px; border-radius:8px; }
+.wireless-footer { display:flex; justify-content:flex-end; flex-wrap:wrap; gap:10px; margin-top:6px; }
+.wireless-footer button { min-height:38px; border-radius:8px; }
+.wireless-discovery { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:12px; border:1px solid var(--line,#d7e3f4); border-radius:10px; }
+.wireless-discovery > span { font-size:12px; color:var(--muted,#718097); flex:1; min-width:100px; }
+.wireless-discovery [data-services] { display:flex; gap:8px; flex-wrap:wrap; width:100%; }
+.wireless-discovery [data-services]:empty { display:none; }
+.wireless-result { color:var(--success,#19755e); font-weight:600; font-size:14px; }
+.wireless-body .wireless-port-tip { padding:10px 12px; background:#fff6df; color:#785720; border-radius:8px; }
+.wireless-body .wireless-error { color:var(--danger,#a83248); line-height:1.6; }
+.wireless-help { border-top:1px solid var(--line,#d7e3f4); padding-top:14px; font-size:12px; }
+.wireless-help summary { cursor:pointer; color:var(--muted,#718097); }
+.wireless-help p { margin-top:8px; }
+@media(max-width:620px) { .wireless-heading,.wireless-body { padding:20px; } .wireless-progress { padding:0 20px 16px; gap:8px; } .phone-service-status { display:none; } }

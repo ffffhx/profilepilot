@@ -8,10 +8,13 @@ export class TaskSelects {
   private popup?: HTMLElement;
   private active = "";
   private query = "";
+  private optionSignature = "";
 
   constructor(private root: HTMLElement) {
     window.addEventListener("resize", () => this.position());
-    root.addEventListener("scroll", () => this.position(), true);
+    // The workspace can scroll on every stream snapshot. Keep an open menu at
+    // its original viewport coordinates until dismissal; moving it while a
+    // pointer targets an option can select the row now under that coordinate.
     document.addEventListener("pointerdown", event => {
       const target = event.target as Node;
       if (this.popup && !this.popup.contains(target) && !this.trigger?.contains(target)) this.close(false);
@@ -25,8 +28,12 @@ export class TaskSelects {
   }
 
   mount(state?: ReturnType<TaskSelects["capture"]>): void {
-    this.close(false);
-    this.root.querySelectorAll<HTMLSelectElement>("select").forEach((select, index) => {
+    // TaskDom replaces native selects on a stream snapshot. Keep the popover
+    // and its option nodes alive while rebuilding the source controls: a real
+    // pointer interaction may still be in flight over one of those nodes.
+    const keepPopup = !!state && !!this.popup?.isConnected && this.current?.id === state.id;
+    if (!keepPopup) this.close(false);
+    this.root.querySelectorAll<HTMLSelectElement>("select:not([data-native-select])").forEach((select, index) => {
       if (!select.id) select.id = `select-${select.form?.id || "page"}-${select.name || index}`;
       const wrapper = document.createElement("div");
       wrapper.className = "select-field";
@@ -72,8 +79,27 @@ export class TaskSelects {
       const trigger = document.getElementById(`${state.id}-trigger`) as HTMLButtonElement | null;
       if (select && trigger && !select.disabled) {
         this.query = state.query; this.active = state.active;
-        this.open(select, trigger, true);
-        this.popup!.querySelector(".select-options")!.scrollTop = state.scroll;
+        if (keepPopup && this.popup) {
+          this.current = select; this.trigger = trigger;
+          trigger.setAttribute("aria-expanded", "true");
+          trigger.setAttribute("aria-controls", this.popup.id);
+          const input = this.popup.querySelector<HTMLInputElement>(".select-search");
+          const label = select.getAttribute("aria-label") || trigger.getAttribute("aria-label") || "选择选项";
+          input?.setAttribute("aria-label", label);
+          this.popup.querySelector("[role=listbox]")?.setAttribute("aria-label", label);
+          const status = this.popup.querySelector(".model-menu-status");
+          if (status) status.textContent = select.dataset.status || "选择当前服务的模型，或直接输入模型 ID。";
+          if (this.optionSignature !== this.signature(select)) {
+            this.options();
+            this.popup.querySelector<HTMLElement>(".select-options")!.scrollTop = state.scroll;
+          }
+          if (!this.popup.matches(":popover-open")) this.popup.showPopover();
+        } else {
+          this.open(select, trigger, true);
+          this.popup!.querySelector(".select-options")!.scrollTop = state.scroll;
+        }
+      } else if (keepPopup) {
+        this.close(false);
       }
     }
   }
@@ -82,6 +108,7 @@ export class TaskSelects {
     const trigger = this.trigger;
     this.current = undefined; this.trigger = undefined;
     if (this.popup) { this.popup.remove(); this.popup = undefined; }
+    this.optionSignature = "";
     trigger?.setAttribute("aria-expanded", "false");
     trigger?.removeAttribute("aria-controls");
     if (focus && trigger?.isConnected) trigger.focus({ preventScroll: true });
@@ -106,7 +133,7 @@ export class TaskSelects {
       const footer = document.createElement("div"); footer.className = "model-menu-footer";
       const connect = document.createElement("button"); connect.type = "button"; connect.className = "model-service-link";
       connect.textContent = "连接系统 Chrome →";
-      connect.addEventListener("click", () => { this.close(false); select.dispatchEvent(new CustomEvent("native-browser-settings", { bubbles: true })); });
+      connect.addEventListener("click", () => { const source = this.current; this.close(false); source?.dispatchEvent(new CustomEvent("native-browser-settings", { bubbles: true })); });
       footer.append(connect); popup.append(footer);
     }
     if (select.dataset.modelPicker) {
@@ -117,13 +144,13 @@ export class TaskSelects {
       status.textContent = select.dataset.status || "选择当前服务的模型，或直接输入模型 ID。";
       const settings = document.createElement("button"); settings.type = "button"; settings.className = "model-service-link";
       settings.textContent = "模型服务设置 →";
-      settings.addEventListener("click", () => { this.close(false); select.dispatchEvent(new CustomEvent("model-settings", { bubbles: true })); });
+      settings.addEventListener("click", () => { const source = this.current; this.close(false); source?.dispatchEvent(new CustomEvent("model-settings", { bubbles: true })); });
       footer.append(status, settings); popup.append(footer);
     }
     document.body.append(popup);
     trigger.setAttribute("aria-expanded", "true");
     trigger.setAttribute("aria-controls", popup.id);
-    popup.addEventListener("toggle", event => { if ((event as ToggleEvent).newState === "closed" && this.popup === popup) this.close(false); });
+    popup.addEventListener("toggle", event => { if ((event as ToggleEvent).newState === "closed" && this.popup === popup && !popup.matches(":popover-open")) this.close(false); });
     input.addEventListener("input", () => { this.query = input.value; this.active = ""; this.options(); });
     popup.addEventListener("keydown", event => {
       if (event.isComposing) return;
@@ -133,21 +160,30 @@ export class TaskSelects {
       } else if (event.key === "Enter") { event.preventDefault(); this.choose(this.active); }
       else if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); this.close(); }
       else if (event.key === "Tab") {
-        if ((select.dataset.modelPicker || select.name === "profileId") && ((event.target === input && !event.shiftKey) || (event.target instanceof HTMLButtonElement && event.shiftKey))) return;
+        if ((this.current?.dataset.modelPicker || this.current?.name === "profileId") && ((event.target === input && !event.shiftKey) || (event.target instanceof HTMLButtonElement && event.shiftKey))) return;
         // Restore the tab origin, then let the browser advance naturally.
         this.close();
       }
     });
-    popup.addEventListener("click", event => {
-      const row = (event.target as Element).closest<HTMLElement>("[data-value]");
-      if (row && row.getAttribute("aria-disabled") !== "true") this.choose(row.dataset.value!);
-    });
+    this.bindOptionEvents(popup);
     this.options(); popup.showPopover(); this.position(); this.highlight(); input.focus({ preventScroll: true });
     if (select.dataset.modelPicker) select.dispatchEvent(new CustomEvent("model-menu-open", { bubbles: true }));
   }
 
+  private bindOptionEvents(popup: HTMLElement): void {
+    popup.addEventListener("click", event => {
+      const row = (event.target as Element).closest<HTMLElement>("[data-value]");
+      if (row && row.getAttribute("aria-disabled") !== "true") this.choose(row.dataset.value!);
+    });
+    // A running task can redraw the menu between pointerdown and click. Commit
+    // mouse/pen choices on the first event, while retaining click for touch and
+    // synthesized activation and Enter for keyboard users.
+    popup.addEventListener("pointerdown", event => this.pointerChoose(event));
+  }
+
   private options(): void {
     if (!this.current || !this.popup) return;
+    this.optionSignature = this.signature(this.current);
     const list = this.popup.querySelector<HTMLElement>(".select-options")!;
     list.replaceChildren();
     const options = [...this.current.options].filter(option =>
@@ -186,6 +222,10 @@ export class TaskSelects {
     this.highlight();
   }
 
+  private signature(select: HTMLSelectElement): string {
+    return JSON.stringify([select.required, select.dataset.modelPicker, ...[...select.options].map(option => [option.value, option.textContent, option.disabled, option.selected, option.dataset.label, option.dataset.description])]);
+  }
+
   private move(direction: number, edge = false): void {
     const rows = [...this.popup!.querySelectorAll<HTMLElement>('[role=option]:not([aria-disabled=true])')];
     if (!rows.length) return;
@@ -204,8 +244,19 @@ export class TaskSelects {
     });
   }
 
+  private pointerChoose(event: PointerEvent): void {
+    if (event.button !== 0 || !["mouse", "pen"].includes(event.pointerType)) return;
+    const row = (event.target as Element).closest<HTMLElement>("[role=option][data-value]");
+    if (row && row.getAttribute("aria-disabled") !== "true") this.choose(row.dataset.value!);
+  }
+
   private choose(value: string): void {
-    const select = this.current;
+    // TaskDom may have replaced the native select during a stream snapshot.
+    // Dispatching change on that detached node would never reach the app root.
+    const current = this.current;
+    const replacement = current && document.getElementById(current.id);
+    const select = current && (current.isConnected ? current : replacement instanceof HTMLSelectElement && this.root.contains(replacement) ? replacement : null);
+    if (!select || select.disabled) return;
     let option = select && [...select.options].find(option => option.value === value && !option.disabled);
     if (!option && select?.dataset.modelPicker && value.trim() && value.length <= 200) { option = new Option(value, value); select.add(option); }
     if (!select || !option) return;

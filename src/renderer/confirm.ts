@@ -1,4 +1,5 @@
 import { profileApi } from "./api";
+import { leaveControlPreferences } from "./control-preferences";
 import { accountSyncProgressStepsForTarget, emphasizeName, extensionSyncProgressStepsForProfiles, pendingBusySteps, setToast, withBusy } from "./busy";
 import { render } from "./render/render-root";
 import { invalidateExtensionMigrationDiff, loadState } from "./state-actions";
@@ -526,6 +527,10 @@ export function extensionMigrationConfirmDataLine(
 }
 
 export function closeModalFromUi(): void {
+  if (store.modal?.kind === "control-preferences") {
+    leaveControlPreferences("close");
+    return;
+  }
   if (store.modal?.kind === "live-zoom" && store.modal.returnTo === "profile-details") {
     store.modal = { kind: "profile-details", profileId: store.modal.profileId };
   } else if (store.modal?.kind === "confirm" && store.modal.returnTo === "extension-migration") {

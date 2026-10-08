@@ -1,4 +1,8 @@
 import { profileApi } from "./api";
+import { workspaceHidden, onWorkspaceVisibilityChanged, navigateWorkspace } from "./workspace-lifecycle";
+import { leaveControlPreferences, openControlPreferences, saveControlPreferences, switchControlPreferencesTab, updateControlPreferencesDraft } from "./control-preferences";
+import { profilePilotSetupState } from "../shared/profilepilot-setup";
+import { applyNativeExtensionSnapshot, refreshNativeExtensionStatus } from "./state-actions";
 import { activateBusyStep, busyStepsKey, emphasizeName, focusProfileFromUi, setToast, updateBusyProgressDom, updateBusyState, withBusy } from "./busy";
 import { closeModalFromUi, executeAgentTakeoverConfirm, executeBifrostStartAndLaunch, executeConfirmIntent } from "./confirm";
 import { normalizeProxyServerInput } from "./proxy";
@@ -295,7 +299,7 @@ async function refreshBifrostSnapshotForBadges(): Promise<void> {
 }
 
 function startBifrostSnapshotLoop(): void {
-  if (bifrostSnapshotTimer !== null) {
+  if (bifrostSnapshotTimer !== null || workspaceHidden()) {
     return;
   }
   void refreshBifrostSnapshotForBadges();
@@ -442,7 +446,7 @@ appRoot.addEventListener("click", (event) => {
   }
 
   const actionTarget = target?.closest<HTMLElement>("[data-action]");
-  if (!actionTarget || !store.state) {
+  if (!actionTarget) {
     if (
       (hadOpenProfileMenu && !store.openProfileMenuId) ||
       (hadMigrationTargetMenu && !store.migrationTargetMenuOpen) ||
@@ -455,6 +459,213 @@ appRoot.addEventListener("click", (event) => {
   }
 
   const action = actionTarget.dataset.action;
+  if (action === "open-control-preferences") {
+    void openControlPreferences();
+    return;
+  }
+  if (action === "save-control-preferences") { void saveControlPreferences(); return; }
+  if (action === "switch-control-preferences-tab") {
+    const domain = actionTarget.dataset.preferencesTab;
+    if (domain === "browser" || domain === "phone") switchControlPreferencesTab(domain);
+    return;
+  }
+  if (action === "reload-control-preferences") { leaveControlPreferences("reload"); return; }
+  if (action === "discard-control-preferences" && store.modal?.kind === "control-preferences") {
+    leaveControlPreferences(store.modal.discard || "close", true); return;
+  }
+  if (action === "keep-control-preferences" && store.modal?.kind === "control-preferences") {
+    store.modal.discard = false; render(); document.getElementById("control-preferences-editor")?.focus(); return;
+  }
+  if (action === "connect-browser-extension") {
+    const profileId = store.nativeExtensionProfileId;
+    if (!profileId || !store.state?.profiles.some(profile => profile.id === profileId && profile.source === "native")) {
+      setToast("请先选择系统 Chrome Profile", "error");
+      return;
+    }
+    void withBusy(async () => {
+      store.nativeExtensionAuthorization = { profileId, ...await window.tasks.authorizeNativeBrowser(profileId) };
+      await refreshNativeExtensionStatus();
+    }, "已打开浏览器扩展安装与连接页面", { key: "connect-browser-extension", message: "正在准备扩展安装与连接…" });
+    return;
+  }
+
+  if (action === "open-browser-extension-folder") {
+    void withBusy(() => window.tasks.openNativeExtensionFolder(), undefined, {
+      key: "open-browser-extension-folder", message: "正在打开扩展文件夹…"
+    });
+    return;
+  }
+
+  if (action === "refresh-browser-extension") {
+    void withBusy(async () => {
+      await Promise.all([loadState(), refreshNativeExtensionStatus()]);
+    }, undefined, { key: "refresh-browser-extension", message: "正在检测浏览器扩展连接…" });
+    return;
+  }
+
+  if (action === "open-onboarding") {
+    store.modal = { kind: "onboarding" };
+    render();
+    void refreshAgentIntegrationDiagnostic().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+    return;
+  }
+
+  if (action === "dismiss-onboarding") {
+    if (event.target === actionTarget || actionTarget.tagName === "BUTTON") {
+      markOnboardingSeen();
+      store.modal = null;
+      render();
+    }
+    return;
+  }
+
+  if (action === "open-agent-integration" || action === "start-agent-integration") {
+    if (action === "start-agent-integration") {
+      markOnboardingSeen();
+    }
+    if (store.workspace !== "tools") {
+      if (!navigateWorkspace("./tools.html")) window.location.href = "./tools.html";
+      return;
+    }
+    store.modal = null;
+    render();
+    void refreshAgentIntegrationDiagnostic().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+    return;
+  }
+
+  if (action === "refresh-agent-integration") {
+    void refreshAgentIntegrationDiagnostic().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+    return;
+  }
+
+  if (
+    action === "install-profilepilot-cli" ||
+    action === "remove-profilepilot-cli" ||
+    action === "install-profilepilot-cli-skill" ||
+    action === "remove-profilepilot-cli-skill"
+  ) {
+    const install = action.startsWith("install-");
+    void withBusy(
+      async () => {
+        try {
+          store.agentIntegrationDiagnostic = await profileApi().setProfilePilotCliEnabled(install);
+        } catch (error) {
+          // A component can fail after another has installed. Show its actual
+          // state so the same button can repair the installation on retry.
+          await refreshAgentIntegrationDiagnostic().catch(() => undefined);
+          throw error;
+        }
+        if (store.state && store.agentIntegrationDiagnostic) {
+          store.state.shellIntegration = store.agentIntegrationDiagnostic.shellIntegration;
+        }
+        const setup = profilePilotSetupState(store.agentIntegrationDiagnostic);
+        setToast(install
+          ? setup.ready ? "ProfilePilot CLI 已就绪，命令工具与 Agent 使用指引已同步"
+            : `安装已处理，${setup.status}；展开 ProfilePilot CLI 查看详情`
+          : "ProfilePilot CLI 与随附指引已移除，个人偏好已保留", install && !setup.ready ? "error" : "normal");
+      },
+      undefined,
+      {
+        key: "profilepilot-management-cli",
+        message: `${install ? "正在安装 / 更新" : "正在移除"} ProfilePilot CLI 与 Agent 使用指引…`
+      }
+    );
+    return;
+  }
+
+  if (
+    action === "install-agent-wrapper" ||
+    action === "remove-agent-wrapper" ||
+    action === "install-agent-skill" ||
+    action === "remove-agent-skill"
+  ) {
+    const tool = browserDriverKind(actionTarget.dataset.tool);
+    if (!tool) {
+      setToast("没有找到要配置的 Agent 工具", "error");
+      return;
+    }
+    const install = action === "install-agent-wrapper" || action === "install-agent-skill";
+    const skill = action === "install-agent-skill" || action === "remove-agent-skill";
+    const label = tool === "agent-browser" ? "agent-browser" : tool === "playwright-cli" ? "Playwright CLI" : "Chrome DevTools MCP";
+    void withBusy(
+      async () => {
+        store.agentIntegrationDiagnostic = skill
+          ? await profileApi().setAgentSkillEnabled(tool, install)
+          : await profileApi().setAgentWrapperEnabled(tool, install);
+        if (store.state && store.agentIntegrationDiagnostic) {
+          store.state.shellIntegration = store.agentIntegrationDiagnostic.shellIntegration;
+        }
+      },
+      install
+        ? `${label} ${skill ? "Skill" : "Wrapper"} 已安装`
+        : `${label} ${skill ? "由 ProfilePilot 安装的 Skill" : "Wrapper"} 已移除`,
+      {
+        key: `agent-${skill ? "skill" : "wrapper"}-${tool}`,
+        message: `${install ? "正在安装" : "正在移除"} ${label} ${skill ? "Skill" : "Wrapper"}…`
+      }
+    );
+    return;
+  }
+
+  if (action === "request-input-guard-permission") {
+    void requestInputGuardPermission()
+      .then(() => {
+        const permission = store.agentIntegrationDiagnostic?.inputGuard;
+        setToast(permission?.granted
+          ? "Input Guard 点击保护已授权"
+          : "授权请求已发出；请在系统设置中允许 ProfilePilot Input Guard 后重新检测");
+      })
+      .catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+    return;
+  }
+
+  if (action === "open-input-guard-settings") {
+    void profileApi().openInputGuardSettings()
+      .then(() => setToast("已打开“隐私与安全性 → 辅助功能”"))
+      .catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+    return;
+  }
+
+  if (action === "copy-agent-command") {
+    const command = actionTarget.dataset.command || "";
+    if (!command || !navigator.clipboard?.writeText) {
+      setToast("当前环境不能直接复制，请手动选中命令", "error");
+      return;
+    }
+    void navigator.clipboard.writeText(command)
+      .then(() => setToast("命令已复制"))
+      .catch(() => setToast("复制失败，请手动选中命令", "error"));
+    return;
+  }
+
+  if (action === "close-modal") {
+    if (event.target === actionTarget || actionTarget.tagName === "BUTTON") {
+      if (store.modal?.kind === "global-instructions" && store.editingGlobalInstructionId) {
+        setToast("先保存或取消当前编辑", "error");
+        return;
+      }
+      closeModalFromUi();
+    }
+    return;
+  }
+
+  // 会话识别 shell 集成：往 ~/.zshenv 写入/移除托管块。可逆低风险，不走确认弹窗。
+  if (action === "enable-shell-integration" || action === "remove-shell-integration") {
+    const enable = action === "enable-shell-integration";
+    void withBusy(
+      async () => {
+        store.state = await profileApi().setShellIntegrationEnabled(enable);
+        if (store.workspace === "tools") {
+          store.agentIntegrationDiagnostic = await profileApi().inspectAgentIntegration();
+        }
+      },
+      enable ? "会话识别已启用，对之后新开的 Agent 会话生效" : "已移除会话识别集成",
+      { key: "shell-integration", message: enable ? "正在写入 shell 集成…" : "正在移除 shell 集成…" }
+    );
+    return;
+  }
+
+  if (!store.state) return;
   const id = actionTarget.dataset.id || null;
   if (action !== "toggle-profile-menu" && actionTarget.closest("[data-profile-actions]")) {
     store.openProfileMenuId = null;
@@ -728,141 +939,6 @@ appRoot.addEventListener("click", (event) => {
     store.modal = { kind: "new" };
     render();
     window.setTimeout(() => document.querySelector<HTMLInputElement>("#profile-name")?.focus(), 0);
-    return;
-  }
-
-  if (action === "open-onboarding") {
-    store.modal = { kind: "onboarding" };
-    render();
-    void refreshAgentIntegrationDiagnostic().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
-    return;
-  }
-
-  if (action === "dismiss-onboarding") {
-    if (event.target === actionTarget || actionTarget.tagName === "BUTTON") {
-      markOnboardingSeen();
-      store.modal = null;
-      render();
-    }
-    return;
-  }
-
-  if (action === "open-agent-integration" || action === "start-agent-integration") {
-    if (action === "start-agent-integration") {
-      markOnboardingSeen();
-    }
-    store.modal = { kind: "agent-integration" };
-    render();
-    void refreshAgentIntegrationDiagnostic().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
-    return;
-  }
-
-  if (action === "refresh-agent-integration") {
-    void refreshAgentIntegrationDiagnostic().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
-    return;
-  }
-
-  if (
-    action === "install-profilepilot-cli" ||
-    action === "remove-profilepilot-cli" ||
-    action === "install-profilepilot-cli-skill" ||
-    action === "remove-profilepilot-cli-skill"
-  ) {
-    const install = action.startsWith("install-");
-    const skill = action.endsWith("-skill");
-    void withBusy(
-      async () => {
-        store.agentIntegrationDiagnostic = skill
-          ? await profileApi().setProfilePilotCliSkillEnabled(install)
-          : await profileApi().setProfilePilotCliEnabled(install);
-        if (store.state && store.agentIntegrationDiagnostic) {
-          store.state.shellIntegration = store.agentIntegrationDiagnostic.shellIntegration;
-        }
-      },
-      install
-        ? `ProfilePilot 管理 ${skill ? "Skill" : "CLI"} 已安装`
-        : `ProfilePilot 管理 ${skill ? "Skill" : "CLI"} 已移除`,
-      {
-        key: `profilepilot-management-${skill ? "skill" : "cli"}`,
-        message: `${install ? "正在安装" : "正在移除"} ProfilePilot 管理 ${skill ? "Skill" : "CLI"}…`
-      }
-    );
-    return;
-  }
-
-  if (
-    action === "install-agent-wrapper" ||
-    action === "remove-agent-wrapper" ||
-    action === "install-agent-skill" ||
-    action === "remove-agent-skill"
-  ) {
-    const tool = browserDriverKind(actionTarget.dataset.tool);
-    if (!tool) {
-      setToast("没有找到要配置的 Agent 工具", "error");
-      return;
-    }
-    const install = action === "install-agent-wrapper" || action === "install-agent-skill";
-    const skill = action === "install-agent-skill" || action === "remove-agent-skill";
-    const label = tool === "agent-browser" ? "agent-browser" : tool === "playwright-cli" ? "Playwright CLI" : "Chrome DevTools MCP";
-    void withBusy(
-      async () => {
-        store.agentIntegrationDiagnostic = skill
-          ? await profileApi().setAgentSkillEnabled(tool, install)
-          : await profileApi().setAgentWrapperEnabled(tool, install);
-        if (store.state && store.agentIntegrationDiagnostic) {
-          store.state.shellIntegration = store.agentIntegrationDiagnostic.shellIntegration;
-        }
-      },
-      install
-        ? `${label} ${skill ? "Skill" : "Wrapper"} 已安装`
-        : `${label} ${skill ? "由 ProfilePilot 安装的 Skill" : "Wrapper"} 已移除`,
-      {
-        key: `agent-${skill ? "skill" : "wrapper"}-${tool}`,
-        message: `${install ? "正在安装" : "正在移除"} ${label} ${skill ? "Skill" : "Wrapper"}…`
-      }
-    );
-    return;
-  }
-
-  if (action === "request-input-guard-permission") {
-    void requestInputGuardPermission()
-      .then(() => {
-        const permission = store.agentIntegrationDiagnostic?.inputGuard;
-        setToast(permission?.granted
-          ? "Input Guard 点击保护已授权"
-          : "授权请求已发出；请在系统设置中允许 ProfilePilot Input Guard 后重新检测");
-      })
-      .catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
-    return;
-  }
-
-  if (action === "open-input-guard-settings") {
-    void profileApi().openInputGuardSettings()
-      .then(() => setToast("已打开“隐私与安全性 → 辅助功能”"))
-      .catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
-    return;
-  }
-
-  if (action === "copy-agent-command") {
-    const command = actionTarget.dataset.command || "";
-    if (!command || !navigator.clipboard?.writeText) {
-      setToast("当前环境不能直接复制，请手动选中命令", "error");
-      return;
-    }
-    void navigator.clipboard.writeText(command)
-      .then(() => setToast("命令已复制"))
-      .catch(() => setToast("复制失败，请手动选中命令", "error"));
-    return;
-  }
-
-  if (action === "close-modal") {
-    if (event.target === actionTarget || actionTarget.tagName === "BUTTON") {
-      if (store.modal?.kind === "global-instructions" && store.editingGlobalInstructionId) {
-        setToast("先保存或取消当前编辑", "error");
-        return;
-      }
-      closeModalFromUi();
-    }
     return;
   }
 
@@ -1865,22 +1941,6 @@ appRoot.addEventListener("click", (event) => {
     return;
   }
 
-  // 会话识别 shell 集成：往 ~/.zshenv 写入/移除托管块。可逆低风险，不走确认弹窗。
-  if (action === "enable-shell-integration" || action === "remove-shell-integration") {
-    const enable = action === "enable-shell-integration";
-    void withBusy(
-      async () => {
-        store.state = await profileApi().setShellIntegrationEnabled(enable);
-        if (store.modal?.kind === "agent-integration") {
-          store.agentIntegrationDiagnostic = await profileApi().inspectAgentIntegration();
-        }
-      },
-      enable ? "会话识别已启用，对之后新开的 Agent 会话生效" : "已移除会话识别集成",
-      { key: "shell-integration", message: enable ? "正在写入 shell 集成…" : "正在移除 shell 集成…" }
-    );
-    return;
-  }
-
   if (action === "focus-profile" && id) {
     const profile = store.state.profiles.find((item) => item.id === id);
     if (!profile) {
@@ -1957,6 +2017,12 @@ appRoot.addEventListener("click", (event) => {
 appRoot.addEventListener("change", (event) => {
   const target = event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement ? event.target : null;
   if (!target || !store.state) {
+    return;
+  }
+
+  if (target instanceof HTMLSelectElement && target.id === "tools-native-profile") {
+    store.nativeExtensionProfileId = target.value;
+    render();
     return;
   }
 
@@ -2069,6 +2135,14 @@ appRoot.addEventListener("change", (event) => {
 });
 
 appRoot.addEventListener("input", (event) => {
+  if (event.target instanceof HTMLTextAreaElement && event.target.id === "control-preferences-editor") {
+    updateControlPreferencesDraft(event.target.value); return;
+  }
+  if (event.target instanceof HTMLInputElement && event.target.matches("[data-control-preferences-sync]") && store.modal?.kind === "control-preferences") {
+    const editor = store.modal.editors[store.modal.activeTab];
+    editor.syncAll = event.target.checked;
+    updateControlPreferencesDraft(editor.draft); return;
+  }
   const bifrostTarget = event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement
     ? event.target
     : null;
@@ -2118,6 +2192,21 @@ appRoot.addEventListener("dblclick", (event) => {
 });
 
 appRoot.addEventListener("keydown", (event) => {
+  if (store.modal?.kind === "control-preferences") {
+    if (event.isComposing) return;
+    if (event.target instanceof HTMLElement && event.target.matches('[data-preferences-tab]') && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+      event.preventDefault();
+      switchControlPreferencesTab(event.key === "Home" ? "browser" : event.key === "End" ? "phone" : store.modal.activeTab === "browser" ? "phone" : "browser");
+      return;
+    }
+    if (event.key === "Escape") { event.preventDefault(); leaveControlPreferences("close"); return; }
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") { event.preventDefault(); void saveControlPreferences(); return; }
+    if (event.key === "Tab") {
+      const controls = [...appRoot.querySelectorAll<HTMLElement>('.control-preferences-modal button:not(:disabled):not([tabindex="-1"]), .control-preferences-modal textarea:not(:disabled), .control-preferences-modal input:not(:disabled), .control-preferences-modal summary')];
+      const next = event.shiftKey ? controls.at(-1) : controls[0];
+      if (document.activeElement === (event.shiftKey ? controls[0] : controls.at(-1))) { event.preventDefault(); next?.focus(); }
+    }
+  }
   if (
     event.key === "Escape" &&
     (store.modal?.kind === "live-zoom" ||
@@ -2406,6 +2495,16 @@ if (store.viewMode === "mini") {
   render();
 }
 
+if (store.viewMode === "main") {
+  const unsubscribeNativeExtension = window.tasks.onChanged(applyNativeExtensionSnapshot);
+  window.addEventListener("unload", unsubscribeNativeExtension, { once: true });
+  void refreshNativeExtensionStatus();
+}
+if (store.workspace === "tools") {
+  render();
+  void refreshAgentIntegrationDiagnostic().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+}
+
 loadState(true)
   .then(() => {
     // 首次状态就绪后立刻补一拍 Bifrost 快照，徽标不用等下一个轮询周期。
@@ -2414,7 +2513,7 @@ loadState(true)
     }
   })
   .catch((error: unknown) => {
-    if (store.state) {
+    if (store.state || store.workspace === "tools") {
       setToast(formatErrorMessage(error), "error");
       return;
     }
@@ -2790,8 +2889,8 @@ if (store.viewMode === "main") {
   startLiveViewLoop();
   startBifrostSnapshotLoop();
   // 面板不可见时停掉 Bifrost 快照轮询（清 timer 防泄漏），回到前台立即补一拍。
-  document.addEventListener("visibilitychange", () => {
-    if (document.hidden) {
+  onWorkspaceVisibilityChanged(() => {
+    if (workspaceHidden()) {
       stopBifrostSnapshotLoop();
     } else {
       startBifrostSnapshotLoop();

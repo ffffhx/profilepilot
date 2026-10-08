@@ -6,6 +6,16 @@ export interface TaskAttachment { id: string; name: string; path: string; size: 
 export interface PersonalMaterial { id: string; name: string; scope: string; content: string; version: number; updatedAt: string; }
 export interface TaskItem { id: string; label: string; status: ItemStatus; result?: string; evidence?: string; }
 export interface TaskEvent { id: string; at: string; kind: "user" | "assistant" | "action" | "system" | "error"; text: string; }
+export type TaskPermissionMode = "manual" | "plan" | "acceptEdits";
+export interface NativeAccessPolicy { allowedOrigins?: string[]; blockedOrigins?: string[]; confirmActions?: boolean; }
+export interface NativeTaskTarget { tabId?: number; newTab?: boolean; }
+export interface TaskPermissionRule { id: string; kind: "browser" | "terminal"; scope: string; label: string; createdAt: string; }
+export interface TaskStream { id: string; text: string; updatedAt: string; }
+export interface TaskMessageOptions { requestId?: string; attachmentIds?: string[]; }
+export interface TaskReplyOptions extends TaskMessageOptions { scope?: "once" | "session"; }
+export interface TaskQueuedMessage { id: string; message: string; attachmentIds: string[]; createdAt: string; }
+export interface TaskArtifactPreview { name: string; mime: string; text?: string; dataUrl?: string; truncated?: boolean; }
+export interface TaskContext { summary: string; throughEventId: string; compactedAt: string; }
 export interface JevAssessment {
   status: "ready" | "uncertain" | "unavailable"; model: string; version: string; elapsedMs: number; inputTokens: number; note: string;
   answers?: { page: { type: "choice"; choice: string; probabilities?: Record<string, number> };
@@ -14,6 +24,8 @@ export interface JevAssessment {
   confidence?: Record<string, number>;
 }
 export interface BrowserObservation {
+  page?: { frameId?: string; nextCursor?: string; totalControls: number; totalText: number; offset: number; textOffset: number; query?: string };
+  frames?: Array<{ id: string; parentId?: string; url: string; name?: string; oopif: boolean }>;
   version: string; fingerprint: string; at: string; url: string; title: string;
   snapshot: string; screenshotPath?: string; screenshotDataUrl?: string; account: string;
   jev?: JevAssessment;
@@ -22,7 +34,9 @@ export interface BrowserObservation {
 }
 export interface BrowserCandidate {
   ref: string; role: string; label: string; kind: "click" | "fill" | "select";
-  value?: string; checked?: boolean; options?: Array<{ value: string; label: string }>;
+  value?: string; checked?: boolean; multiple?: boolean; selectedValues?: string[];
+  inputType?: string;
+  options?: Array<{ value: string; label: string; selected?: boolean }>;
   submit?: boolean;
   href?: string;
   offscreen?: boolean;
@@ -35,24 +49,42 @@ export interface BrowserAction {
 export interface TaskDecision {
   id: string; kind: "question" | "confirmation" | "handoff"; title: string;
   details: string; action?: BrowserAction; observationVersion?: string; createdAt: string;
+  terminal?: { command: string; summary: string; runtime: "shell" | "node"; cwd: string; background: boolean; timeout_ms: number; yield_ms: number };
+  exportResult?: { name: string; format: "csv" | "json" | "markdown" | "html"; columns: string[]; rows: Array<Array<string | number | boolean | null>>; text: string };
+  permissionScope?: { kind: "browser" | "terminal"; scope: string; label: string };
 }
 export interface TaskReceipt {
   id: string; at: string; action: BrowserAction; status: "started" | "executed" | "uncertain";
   result?: string; observationVersion?: string;
+  // Covered by a verified completion, so later conversation turns do not
+  // reinterpret a successfully executed historical action as interrupted.
+  verifiedAt?: string;
   reconciliation?: { outcome: "completed" | "not_completed" | "uncertain"; evidence: string; at: string };
 }
-export interface TaskResult { summary: string; evidence: string[]; remaining: string[]; }
+export interface TaskResult { kind?: "answer" | "verified"; summary: string; evidence: string[]; remaining: string[]; }
 export interface JevDecisionRecord {
   at: string; mode: "driver" | "advisory"; status: "running" | "completed" | "interrupted";
   operation?: string; target?: string; probability?: number; confidence?: number;
   elapsedMs: number; inputTokens: number; note?: string; outcome?: string;
 }
 export interface BrowserTask {
+  historyRevision?: number;
+  messageQueue?: TaskQueuedMessage[];
+  messageReceipts?: Array<{ id: string; fingerprint: string; at: string }>;
+  nativeUiRequests?: Array<{ id: string; method: string; fingerprint: string; error?: string }>;
+  nativeTarget?: NativeTaskTarget; nativeAccess?: NativeAccessPolicy;
+  mode?: TaskPermissionMode; model?: string;
+  permissionRules?: TaskPermissionRule[];
+  context?: TaskContext;
+  agentActivities?: Array<{ id: string; description: string; status: string; updatedAt: string }>;
+  sdkTokenBaseline?: { inputTokens: number; outputTokens: number };
   costAccounting?: { version: string; sessionId: string; sdkUsd: number; originalUsd?: number; correctedAt?: string };
   cachedInputTokens?: number;
   costRecords?: TaskCostRecord[];
   modelTokenUsage?: ModelTokenUsage[];
   browserConnection?: "gateway" | "extension";
+  // Set before browser I/O: even a failed request may have acquired a lease.
+  browserLeaseAttempted?: boolean;
   browserReleasePending?: boolean;
   modelRuns?: TaskModelRun[];
   id: string; title: string; prompt: string; profileId: string; profileName: string;
@@ -66,7 +98,7 @@ export interface BrowserTask {
   evidencePages?: Array<Pick<BrowserObservation, "version" | "at" | "url" | "title" | "snapshot">>;
   execution?: { engine: "preparing" | "jev" | "model"; activity: string; at: string; reason?: string };
   jevDecisions?: JevDecisionRecord[];
-  resumeContext?: { reason: string; url?: string; userResponse?: string; returnedAt?: string; observed?: boolean };
+  resumeContext?: { reason: string; url?: string; userResponse?: string; returnedAt?: string; observed?: boolean; remaining?: string[] };
   usage: { inputTokens: number; outputTokens: number; costUsd: number; elapsedMs: number; actions: number; jev?: { calls: number; completedCalls?: number; inputTokens: number; elapsedMs: number }; helper?: { calls: number; inputTokens: number; outputTokens: number; elapsedMs: number }; jevActions?: number };
   limits: { minutes: number; actions: number; budgetUsd: number };
   needsReconciliation: boolean; scheduledBy?: string;
@@ -74,6 +106,8 @@ export interface BrowserTask {
   outputs?: TaskAttachment[];
 }
 export interface CreateTaskInput {
+  nativeTarget?: NativeTaskTarget; nativeAccess?: NativeAccessPolicy;
+  mode?: TaskPermissionMode; model?: string;
   prompt: string; profileId: string; authorization?: string; materialIds?: string[];
   attachmentIds?: string[]; items?: string[]; limits?: Partial<BrowserTask["limits"]>;
   grant?: Omit<ExecutionGrant, "used">;
@@ -96,6 +130,8 @@ export function jevProviderFor(settings: TaskSettings): JevProvider {
   return settings.jevProvider || (settings.hasJevApiKey ? "vercel" : "typesafe");
 }
 export interface TaskSnapshot {
+  streams?: Record<string, TaskStream>;
+  nativeAccessPolicies?: Record<string, NativeAccessPolicy>;
   tokenRecords?: TaskTokenRecord[];
   nativeInstallations?: Array<{ profileId: string; stage: string; message: string }>;
   nativeBrowsers?: NativeBrowserState[];
@@ -132,8 +168,13 @@ export interface TaskApi {
   snapshot(): Promise<TaskSnapshot>;
   create(input: CreateTaskInput): Promise<BrowserTask>;
   retryItems(id: string, itemIds: string[]): Promise<BrowserTask>;
-  control(id: string, action: "pause" | "resume" | "takeover" | "cancel" | "rerun" | "steer", message?: string): Promise<void>;
-  reply(id: string, decisionId: string, answer: string, approved: boolean): Promise<void>;
+  control(id: string, action: "pause" | "resume" | "takeover" | "cancel" | "rerun" | "steer" | "queue", message?: string, options?: TaskMessageOptions): Promise<void>;
+  reply(id: string, decisionId: string, answer: string, approved: boolean, options?: TaskReplyOptions): Promise<void>;
+  queue(id: string, removeId?: string): Promise<TaskQueuedMessage[]>;
+  permissions(id: string, revokeId?: string): Promise<TaskPermissionRule[]>;
+  setLimits(id: string, limits: Partial<BrowserTask["limits"]>): Promise<void>;
+  setModel(id: string, model: string): Promise<void>;
+  previewArtifact(id: string, taskId?: string): Promise<TaskArtifactPreview>;
   saveMaterial(input: Partial<PersonalMaterial>): Promise<PersonalMaterial>;
   deleteMaterial(id: string): Promise<void>;
   importAttachments(): Promise<TaskAttachment[]>;
@@ -149,7 +190,7 @@ export interface TaskApi {
   deleteTemplate(id: string): Promise<void>;
   deleteTask(id: string): Promise<void>;
   updateTaskMetadata(id: string, input: TaskMetadataInput): Promise<void>;
-  exportData(kind: "task" | "materials" | "diagnostics", id?: string): Promise<string | null>;
+  exportData(kind: "task" | "task-markdown" | "materials" | "diagnostics", id?: string): Promise<string | null>;
   openArtifact(id: string, taskId?: string): Promise<void>;
   onChanged(listener: (snapshot: TaskSnapshot) => void): () => void;
 }
@@ -164,6 +205,8 @@ export interface TaskPreviewUpdate {
 export const TERMINAL_TASKS = new Set<TaskStatus>(["completed", "partial", "failed", "cancelled"]);
 export interface NativeBrowserState {
   taskTabs?: boolean;
+  /** Extension worker identity plus its latest stop generation. */
+  controlGeneration?: string;
   tabId?: number;
   pausedByBrowser?: boolean;
   profileId: string; connected: boolean; ownerSessionId?: string; ownership: "agent" | "user";

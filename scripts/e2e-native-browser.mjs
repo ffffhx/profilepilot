@@ -23,9 +23,18 @@ try {
   await d.domClick('[data-nav="settings"]');
   await d.waitFor('#native-profile');
   assert.match((await d.query('.native-browser-settings')).text, /连接系统 Chrome/);
+  const connectionCopy = (await d.query('.native-browser-settings')).text;
+  assert.match(connectionCopy, /当前页和登录态/);
+  assert.match(connectionCopy, /固定安装目录/);
+  assert.match(connectionCopy, /默认允许所有普通网站/);
+  assert.match(connectionCopy, /侧边栏/);
+  assert.match(connectionCopy, /立即停止/);
+  assert.doesNotMatch(connectionCopy, /适用于本次 Chrome 会话|任务会自动新开标签页/);
   assert.equal(await d.evaluate('document.querySelector("#native-profile").value'), 'native:Default');
   const artifacts = path.join(repoRoot, 'test-results/browser-tasks'); await mkdir(artifacts, { recursive: true });
   await writeFile(path.join(artifacts, 'native-browser-settings.png'), Buffer.from((await d.screenshot()).pngBase64, 'base64'));
+  await d.domClick('.native-browser-settings details > summary');
+  assert.match((await d.query('.native-browser-settings details')).text, /安装目录与手动配对/);
   await d.domClick('[data-action="pair-native"]');
   await d.waitFor('#native-pair-code');
   assert.equal(await d.evaluate('document.querySelector("#native-pair-code").value.startsWith("PP1.")'), true);
@@ -36,7 +45,10 @@ try {
   await assert.rejects(d.evaluate('window.tasks.pairNativeBrowser("isolated:fake")'), /请选择/);
   await d.domClick('[data-nav="tasks"]');
   assert.equal(await d.evaluate('Boolean(document.querySelector("#create-task select[name=profileId] option[value=\\"native:Default\\"]"))'), true);
-  console.log('PASS native connection UI, pairing IPC, unknown Profile rejection, token redaction and disconnected task guard');
+  assert.equal(await d.evaluate('document.querySelector("#native-target").value'), 'current');
+  assert.equal(await d.evaluate('Boolean(document.querySelector("#native-target option[value=new]"))'), true);
+  assert.equal(await d.evaluate('document.querySelector("[name=nativeConfirmActions]").checked'), false);
+  console.log('PASS native current-page defaults, persistent installation and side-panel copy, pairing IPC, unknown Profile rejection, token redaction and disconnected task guard');
 } finally {
   await app?.stop();
   if (path.resolve(root).startsWith(path.resolve(os.tmpdir()) + path.sep)) await rm(root, { recursive: true, force: true });

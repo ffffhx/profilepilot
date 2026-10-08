@@ -5,21 +5,25 @@ import path from "node:path";
 import { z } from "zod";
 import type { BrowserAction, BrowserObservation, BrowserTask, Effect } from "../../shared/tasks";
 import { requestBrowserGateway } from "../browser-gateway-client";
-import { FastBrowser, pageViewport } from "./fast-browser";
+import { FastBrowser, domControlEffect, pageViewport, type DomCandidate, type PageReadOptions } from "./fast-browser";
 import { bundledBrowserExecutable } from "./browser-runtime";
 
 export const browserActionSchema = z.object({
   kind: z.enum(["open", "click", "hover", "fill", "select", "check", "uncheck", "press", "scroll", "upload", "download", "back", "switch_tab", "close_tab"]),
   version: z.string().max(100).optional(), ref: z.string().regex(/^@?e\d+$/).optional(),
-  value: z.string().max(20000).describe("动作参数；scroll 只接受 up、down、left、right，每次滚动 600 像素。不要传 top 或 bottom。").optional(), attachmentId: z.string().max(100).optional(),
+  value: z.string().max(20000).describe("动作参数；open 必须在 value 中传完整网址，不能只传 ref；按 ref 打开链接请用 click。scroll 只接受 up、down、left、right，每次滚动 600 像素。不要传 top 或 bottom。").optional(), attachmentId: z.string().max(100).optional(),
   effect: z.enum(["read", "edit", "submit", "send", "purchase", "delete"]), summary: z.string().min(1).max(2000)
 }).superRefine((action, context) => {
+  if (action.kind === "open" && (!action.value?.trim() || !URL.canParse(action.value))) {
+    context.addIssue({ code: "custom", path: ["value"], message: "open 需要在 value 中填写用户提供或已观察到的完整网址；若要点击 ref 对应的链接，请使用 kind=click。未执行浏览器操作。" });
+  }
   if (action.kind === "scroll" && action.value !== undefined && !["up", "down", "left", "right"].includes(action.value)) {
     context.addIssue({ code: "custom", path: ["value"], message: "scroll 方向只支持 up、down、left、right；到页底请逐次 down 并观察。" });
   }
 });
 export type BrowserCommand = (task: BrowserTask, args: string[]) => Promise<unknown>;
 export interface BrowserAdapter {
+  readPage?(task: BrowserTask, options: PageReadOptions): Promise<BrowserObservation>;
   observeFast?(task: BrowserTask): Promise<BrowserObservation>;
   observe(task: BrowserTask, screenshot?: boolean, retainScreenshot?: boolean): Promise<BrowserObservation>;
   execute(task: BrowserTask, action: BrowserAction): Promise<string>;
@@ -46,22 +50,38 @@ export function observationFingerprint(url: string, snapshot: string): string {
   return createHash("sha256").update(url + "\n" + snapshot).digest("hex");
 }
 export function effectiveEffect(action: BrowserAction, observation?: BrowserObservation): Effect {
-  if (["purchase", "delete", "send", "submit"].includes(action.effect)) return action.effect;
-  if (action.kind === "press" && /^(Enter|Return|Control\+Enter|Meta\+Enter)$/i.test(action.value || "")) return "submit";
-  if (action.kind === "click") {
-    const ref = action.ref?.replace(/^@/, "");
-    const line = observation?.snapshot.split("\n").find((line) => line.includes(`ref=${ref}]`) || new RegExp(`^\\s*@${ref}\\s`).test(line)) || "";
-    const label = line.match(/(?:button|link|menuitem)\s+"([^"]+)"/)?.[1]?.trim() || "";
-    // A history navigation item is not another submission. Preserve an explicit
-    // model-declared side effect (handled above), but don't infer one from the
-    // noun in “提交记录”, “订单详情”, or “View submission history”.
-    if (/^(?:查看|浏览|打开|核对)?(?:提交|申请|投递|发送|发布|订单|支付|购买)(?:记录|历史|状态|详情|列表)$/.test(label) || /^(?:(?:view|show|open|check)\s+)?(?:application|submission|order|payment|purchase|sent message)s?\s+(?:history|records|status|details|list)$/i.test(label)) return action.effect;
-    if (/支付|付款|购买|下单|提交订单|确认订单|pay\b|purchase|checkout|place\s+order|confirm\s+order/i.test(line)) return "purchase";
-    if (/删除|移除|delete|remove/i.test(line)) return "delete";
-    if (/发送|send\b/i.test(line)) return "send";
-    if (/提交|发布|投递|保存|submit|publish|apply\s+changes|save\b/i.test(line)) return "submit";
-    if (observation?.fast?.candidates.find(c => c.ref === ref)?.submit) return "submit";
+  const ref = action.ref?.replace(/^@/, "");
+  let candidates: DomCandidate[] = [], focus: { focusedRef?: string } | undefined;
+  try { [, , candidates, , , focus] = JSON.parse(observation?.fast?.guard || ""); } catch { candidates = observation?.fast?.candidates || []; }
+  const candidate = candidates.find(candidate => candidate.ref === ref);
+  if (action.kind === "press") {
+    // Escape dismisses UI; it cannot activate a form or a focused submit button.
+    if (/^Escape$/i.test(action.value || "") && observation) return "read";
+    if (/^(?:(Control|Meta)\+)?(Enter|Return)$/i.test(action.value || "")) {
+      const focused = candidates.find(candidate => candidate.ref === focus?.focusedRef);
+      if (/^(Enter|Return)$/i.test(action.value || "") && focused?.dom?.search && (!ref || ref === focused.ref)) return "read";
+      const effect = focused && (focused.dom?.enterEffect || (focused.kind === "click" ? domControlEffect(focused) : undefined));
+      if (effect && ["purchase", "delete", "send"].includes(effect)) return effect;
+      return "submit";
+    }
   }
+  if (action.kind === "hover" && candidate) return "read";
+  if (["click", "fill", "select"].includes(action.kind) && candidate) {
+    const inferred = domControlEffect(candidate);
+    if (inferred) return inferred;
+  }
+  if (action.kind === "click" && !candidate) {
+    const line = observation?.snapshot.split("\n").find(line => ref && (line.includes(`ref=${ref}]`) || new RegExp(`^\\s*@${ref}\\s`).test(line))) || "";
+    const match = line.match(/\b(button|link|menuitem|checkbox|radio|switch|option)\s+"((?:\\.|[^"\\])*)"/);
+    if (match) {
+      let label = match[2]; try { label = JSON.parse(`"${label}"`); } catch { /* Keep observed text. */ }
+      const inferred = domControlEffect({ ref: ref!, role: match[1], label, kind: "click", submit: /\(submit button\)/.test(line) });
+      if (inferred) return inferred;
+      if (match[1] === "link" && /(?:记录|历史|状态|详情|列表)$|\b(?:history|records|status|details|list)$/i.test(label)) return action.effect;
+    }
+  }
+  if (["purchase", "delete", "send", "submit"].includes(action.effect)) return action.effect;
+  if (["fill", "select", "check", "uncheck", "upload", "press", "download", "close_tab"].includes(action.kind)) return "edit";
   return action.effect;
 }
 export class WrapperBrowser implements BrowserAdapter {
@@ -94,7 +114,8 @@ export class WrapperBrowser implements BrowserAdapter {
     // especially after pause interrupted its initial navigation.
     this.fast = new FastBrowser(task => this.command(task, ["eval", "document.title"]));
   }
-  observeFast(task: BrowserTask): Promise<BrowserObservation> { return this.fast.observe(task); }
+  observeFast(task: BrowserTask): Promise<BrowserObservation> { return this.fast.reobserve(task); }
+  readPage(task: BrowserTask, options: PageReadOptions): Promise<BrowserObservation> { return this.fast.observe(task, options); }
   async observe(task: BrowserTask, screenshot = false, retainScreenshot = true): Promise<BrowserObservation> {
     let url: string, title: string;
     if (this.usesGateway) {

@@ -7,17 +7,18 @@
     "type": "git",
     "url": "https://github.com/ffffhx/profilepilot.git"
   },
-  "main": "dist/main/main.js",
+  "main": "dist/main/entry.js",
   "scripts": {
-    "build": "npm run build:input-guard && tsc && npm run bundle:browser-wrappers && npm run bundle:profilepilot-cli && npm run bundle:renderer && npm run build:css",
+    "build": "npm run build:input-guard && npm run build:phone-wrapper && tsc && npm run bundle:browser-wrappers && npm run bundle:profilepilot-cli && npm run bundle:renderer && npm run build:css",
+    "build:phone-wrapper": "node scripts/build-phone-wrapper.mjs",
     "build:input-guard": "node scripts/build-input-guard.mjs",
     "setup:input-guard-signing": "node scripts/setup-input-guard-signing.mjs",
     "bundle:agent-browser-wrapper": "esbuild src/main/agent-browser-wrapper.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/main/profilepilot-agent-browser-wrapper.cjs --log-level=warning",
     "bundle:playwright-cli-wrapper": "esbuild src/main/playwright-cli-wrapper.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/main/profilepilot-playwright-cli-wrapper.cjs --log-level=warning",
     "bundle:chrome-devtools-mcp-wrapper": "esbuild src/main/chrome-devtools-mcp-wrapper.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/main/profilepilot-chrome-devtools-mcp-wrapper.cjs --log-level=warning",
     "bundle:browser-wrappers": "npm run bundle:agent-browser-wrapper && npm run bundle:playwright-cli-wrapper && npm run bundle:chrome-devtools-mcp-wrapper",
-    "bundle:profilepilot-cli": "esbuild src/main/profilepilot-cli.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/main/profilepilot-cli.cjs --log-level=warning",
-    "bundle:renderer": "esbuild src/renderer/main.ts --bundle --outfile=dist/renderer/app.js --platform=browser --format=iife --target=es2022 --log-level=warning && esbuild src/renderer/tasks.ts --bundle --outfile=dist/renderer/tasks.js --platform=browser --format=iife --target=es2022 --log-level=warning && esbuild src/renderer/local-apps.ts --bundle --outfile=dist/renderer/local-apps.js --platform=browser --format=iife --target=es2022 --log-level=warning",
+    "bundle:profilepilot-cli": "esbuild src/main/profilepilot-cli.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/main/profilepilot-cli.cjs --external:agent-browser/package.json --log-level=warning",
+    "bundle:renderer": "esbuild src/renderer/main.ts --bundle --outfile=dist/renderer/app.js --platform=browser --format=iife --target=es2022 --log-level=warning && esbuild src/renderer/tasks.ts --bundle --outfile=dist/renderer/tasks.js --platform=browser --format=iife --target=es2022 --log-level=warning && esbuild src/renderer/local-apps.ts --bundle --outfile=dist/renderer/local-apps.js --platform=browser --format=iife --target=es2022 --log-level=warning && esbuild src/renderer/phones.ts --bundle --outfile=dist/renderer/phones.js --platform=browser --format=iife --target=es2022 --log-level=warning && esbuild src/renderer/workspace-shell.ts src/renderer/workspace-frame.ts --bundle --outdir=dist/renderer --platform=browser --format=iife --target=es2022 --log-level=warning",
     "build:css": "tailwindcss -i ./public/styles.src.css -o ./public/app.css",
     "watch:css": "tailwindcss -i ./public/styles.src.css -o ./public/app.css --watch",
     "start": "npm run start:independent",
@@ -62,7 +63,8 @@
     "verify:tasks:provider": "npm run build && node scripts/verify-task-provider.mjs",
     "verify:tasks:live": "npm run build && node scripts/verify-task-live.mjs",
     "verify:tasks:browser": "npm run build && node scripts/verify-task-browser.mjs",
-    "verify:tasks:pdf": "npm run build && node scripts/verify-task-pdf.mjs"
+    "verify:tasks:pdf": "npm run build && node scripts/verify-task-pdf.mjs",
+    "build:phone": "node scripts/build-phone.mjs"
   },
   "engines": {
     "node": ">=22.13.0"
@@ -161,6 +163,10 @@
       "artifactName": "ProfilePilot-win-${arch}.${ext}",
       "extraResources": [
         {
+          "from": "build/icon.ico",
+          "to": "icon.ico"
+        },
+        {
           "from": "native/input-guard-win.ps1",
           "to": "native/input-guard-win.ps1"
         },
@@ -208,6 +214,7 @@
   },
   "devDependencies": {
     "@types/node": "^25.9.1",
+    "@types/qrcode": "^1.5.6",
     "electron": "^42.3.3",
     "electron-builder": "^26.15.2",
     "esbuild": "^0.28.1",
@@ -221,6 +228,8 @@
     "ai": "7.0.107",
     "exceljs": "^4.4.0",
     "pdfjs-dist": "^6.3.289",
+    "qrcode": "^1.5.4",
+    "selfsigned": "^5.5.0",
     "zod": "^4.6.5"
   },
   "overrides": {

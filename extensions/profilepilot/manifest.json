@@ -1,16 +1,21 @@
 {
   "manifest_version": 3,
   "name": "ProfilePilot 浏览器连接",
-  "version": "0.1.0",
-  "description": "连接当前 Chrome Profile，在专用新标签页中执行任务，保留已有页面和登录状态。",
+  "version": "0.2.4",
+  "description": "连接当前 Chrome Profile，操作现有或新建页面，提供侧边任务、调试、历史和下载。",
   "minimum_chrome_version": "125",
-  "host_permissions": ["http://127.0.0.1/*"],
+  "host_permissions": ["http://*/*", "https://*/*"],
   "content_scripts": [{ "matches": ["http://127.0.0.1/profilepilot-connect/*"], "js": ["onboarding.js"], "run_at": "document_idle" }],
   "permissions": [
     "debugger",
     "tabs",
     "storage",
-    "alarms"
+    "alarms",
+    "history",
+    "downloads",
+    "sidePanel",
+    "contextMenus",
+    "scripting"
   ],
   "background": {
     "service_worker": "background.js",
@@ -20,6 +25,9 @@
     "default_popup": "popup.html",
     "default_title": "ProfilePilot 浏览器连接"
   },
+  "side_panel": { "default_path": "sidepanel.html" },
+  "icons": { "16": "icons/icon-16.png", "32": "icons/icon-32.png", "48": "icons/icon-48.png", "128": "icons/icon-128.png" },
+  "web_accessible_resources": [{ "resources": ["icons/icon-32.png"], "matches": ["http://*/*", "https://*/*"] }],
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'; connect-src ws://127.0.0.1:* http://127.0.0.1:*"
   },

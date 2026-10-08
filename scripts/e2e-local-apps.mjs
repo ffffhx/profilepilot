@@ -52,9 +52,9 @@ try {
   if ((await d.query('button[data-action="dismiss-onboarding"]')).exists) await d.domClick('button[data-action="dismiss-onboarding"]');
   // The new IPC surface must not be available to another workspace.
   assert.match(await d.evaluate(`window.localApps.list().then(()=>"unexpected",error=>error.message)`), /本地应用工作区/);
-  await d.domClick('[data-workspace-trigger]'); await d.domClick('[data-workspace="local-apps"]');
+  await d.domClick('.workspace-link[data-workspace="local-apps"]');
   await d.waitFor('.empty-state h2');
-  assert.equal((await d.query('[data-workspace-trigger]')).text.trim(), '本地应用');
+  assert.equal((await d.query('.workspace-link[aria-current="page"]')).text.trim(), '本地应用');
   const results = path.join(repoRoot, 'test-results', 'local-apps'); await mkdir(results, { recursive: true });
   const screenshot = async name => { await d.screenshot(); await new Promise(resolve => setTimeout(resolve, 250)); await writeFile(path.join(results, name), Buffer.from((await d.screenshot()).pngBase64, 'base64')); };
   await screenshot('empty.png');
@@ -86,9 +86,9 @@ try {
   await d.domClick('[data-action="debug"][data-kind="renderer"]');
   await assertBackgroundWindows();
   // Reopen the workspace while its app is still running.
-  await d.domClick('[data-workspace-trigger]'); await d.domClick('[data-workspace="agent"]');
+  await d.domClick('.workspace-link[data-workspace="agent"]');
   await d.waitFor('#task-app');
-  await d.domClick('[data-workspace-trigger]'); await d.domClick('[data-workspace="local-apps"]');
+  await d.domClick('.workspace-link[data-workspace="local-apps"]');
   await d.waitFor('.target-row', state => state.count === 3);
   // An open form must survive periodic connection refreshes.
   await d.domClick('.app-topbar [data-action="add"]');

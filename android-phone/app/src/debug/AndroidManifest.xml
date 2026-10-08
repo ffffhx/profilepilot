@@ -1,0 +1,10 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <activity
+            android:name=".ControlBenchmarkActivity"
+            android:exported="true"
+            android:label="ProfilePilot control benchmark"
+            android:launchMode="singleTop"
+            android:windowSoftInputMode="adjustResize" />
+    </application>
+</manifest>

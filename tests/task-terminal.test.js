@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { mkdtempSync, readFileSync, rmSync } = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { TaskTerminal, terminalEnvironment, terminalInvocation } = require('../dist/main/tasks/terminal');
+const { TaskTerminal, terminalEnvironment, terminalInvocation, validateTerminalSource } = require('../dist/main/tasks/terminal');
 const { TaskStore } = require('../dist/main/tasks/store');
 const { TaskService } = require('../dist/main/tasks/service');
 
@@ -14,6 +14,20 @@ function fixture(t) {
   return { root, terminal };
 }
 const run = (terminal, command, options = {}) => terminal.run('task-one', { command, summary: '验收终端', runtime: 'node', yield_ms: 10000, ...options });
+
+test('node command wrappers are rejected before confirmation, disk output, or process launch', async t => {
+  const { root, terminal } = fixture(t);
+  for (const command of ['node -e "console.log(1)"', "node -p '1+1'", 'node.exe --eval "console.log(1)"', 'nodejs --print 1', 'node --no-warnings -e"console.log(1)"', 'node --eval="console.log(1)"']) {
+    await assert.rejects(run(terminal, command), /runtime=node.*JavaScript/);
+  }
+  assert.deepEqual(terminal.list('task-one'), []);
+  assert.equal(require('fs').existsSync(path.join(root, 'terminals')), false);
+  assert.doesNotThrow(() => validateTerminalSource({ runtime: 'node', command: 'const node = 1; console.log(node - 1);' }));
+  assert.doesNotThrow(() => validateTerminalSource({ runtime: 'shell', command: 'node -e "console.log(1)"' }));
+  const fixed = await run(terminal, "console.log('正确的 JavaScript 源码')");
+  assert.equal(fixed.status, 'succeeded');
+  assert.match(fixed.stdout, /正确的 JavaScript 源码/);
+});
 
 test('real shell supports Unicode, paths with spaces, and failing exit codes', async t => {
   const { terminal } = fixture(t);
@@ -80,6 +94,15 @@ function serviceFixture(t) {
   return { root, task, service, active, tool };
 }
 
+test('manual terminal runtime mismatch does not create a pending approval', async t => {
+  const f = serviceFixture(t); f.task.mode = 'manual';
+  await assert.rejects(f.service.handleTool(f.task, f.active, 'terminal_run', {
+    command: 'node -e "console.log(1)"', runtime: 'node', summary: 'calculate',
+  }), /runtime=node/);
+  assert.equal(f.task.pending, undefined);
+  assert.deepEqual(f.service.terminal.list(f.task.id), []);
+});
+
 test('product tools export actual HTML, serve it, verify HTTP, finish and retain server until app close', async t => {
   const f = serviceFixture(t);
   const html = '<!doctype html><html lang="zh"><meta charset="utf-8"><h1>终端验收网页</h1></html>';
@@ -136,5 +159,5 @@ test('Jev delegates terminal requests to the full Agent before browser actions',
   const f = serviceFixture(t);
   const result = await runJevDriver({ task: f.task, signal: new AbortController().signal, current: () => true,
     tool: () => { throw new Error('unexpected browser action'); }, observe: () => { throw new Error('unexpected browser observation'); } });
-  assert.match(result, /终端工具/);
+  assert.match(result, /终端.*主模型/);
 });

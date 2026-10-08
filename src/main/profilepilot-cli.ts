@@ -4,6 +4,11 @@ import net from "node:net";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
 import packageMetadata from "../../package.json";
+import { ensureChatService } from "./cli/service-launcher";
+import { runPhoneCli } from "./phones/cli";
+import { runAdbCli, runPhoneWrap } from "./phones/adb-wrapper";
+import { runBrowserCli } from "./browser-cli";
+import { parseAgentCliArgs, runAgentCli, type AgentCliRuntime, type AgentCliTransport, type ParsedAgentCliCommand } from "./profilepilot-agent-cli";
 import {
   getDiagnosticLogStats,
   readDiagnosticLogs,
@@ -12,6 +17,7 @@ import {
 } from "./diagnostic-log";
 import {
   PROFILEPILOT_MANAGEMENT_MAX_MESSAGE_BYTES,
+  PROFILEPILOT_PHONE_MAX_RESPONSE_BYTES,
   PROFILEPILOT_MANAGEMENT_PROTOCOL_VERSION,
   profilePilotManagementSecretPath,
   profilePilotManagementSocketPath,
@@ -45,18 +51,51 @@ interface ParsedDoctorCliCommand {
   json: boolean;
 }
 
-export type ParsedCliCommand = ParsedManagementCliCommand | ParsedLogsCliCommand | ParsedDoctorCliCommand;
+export type ParsedCliCommand = ParsedManagementCliCommand | ParsedLogsCliCommand | ParsedDoctorCliCommand | ParsedAgentCliCommand;
 
 export async function runProfilePilotCli(
   args = process.argv.slice(2),
   io: Pick<NodeJS.Process, "stdout" | "stderr"> = process,
-  runtime: { homeDir?: string; env?: NodeJS.ProcessEnv } = {}
+  runtime: AgentCliRuntime & { homeDir?: string; env?: NodeJS.ProcessEnv; request?: AgentCliTransport } = {}
 ): Promise<number> {
-  if (args.includes("--help") || args.includes("-h") || args.length === 0) {
+  // The Windows PowerShell entry transports argv without legacy native quoting
+  // or cmd.exe reinterpreting URL/JSON characters. Consume it before any child
+  // process can inherit the user's arguments; ordinary entries are unchanged.
+  if (args.length === 1 && args[0] === "--profilepilot-argv-env") {
+    const env = runtime.env || process.env;
+    const encoded = env.PROFILEPILOT_LAUNCHER_ARGV;
+    delete env.PROFILEPILOT_LAUNCHER_ARGV;
+    try {
+      if (!encoded) throw new Error("missing argv");
+      const decoded: unknown = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
+      if (!Array.isArray(decoded) || decoded.some(value => typeof value !== "string")) throw new Error("invalid argv");
+      args = decoded;
+    } catch {
+      io.stderr.write(`${JSON.stringify({ ok: false, code: "NATIVE_INVALID_REQUEST", error: "PowerShell 启动参数无效，请重新运行 ppilot。" })}\n`);
+      return 64;
+    }
+  }
+  // Keep the former top-level adb spelling as a compatibility alias.
+  const phoneAdb = args[0] === "phone" && args[1] === "adb";
+  if (args[0] === "adb" || phoneAdb || args[0] === "phone" && args[1] === "wrap") {
+    const env = runtime.env || process.env;
+    const request = runtime.request || (command => requestProfilePilotManagement(command, runtime.homeDir || os.homedir(), env, 10_000));
+    return args[0] === "adb" || phoneAdb ? runAdbCli(args.slice(phoneAdb ? 2 : 1), request, io, env) : runPhoneWrap(args.slice(2), request, io, env);
+  }
+  if (args[0] === "phone") {
+    return runPhoneCli(args.slice(1), runtime.request || (command => requestProfilePilotManagement(command, runtime.homeDir || os.homedir(), runtime.env || process.env, 125_000)), io);
+  }
+  if (args[0] === "browser") {
+    return runBrowserCli(args.slice(1), io, runtime.env || process.env);
+  }
+  // The short command opens chat directly. Keep the explicit agent namespace
+  // working for existing scripts alongside ppilot run/list/watch/etc.
+  args = normalizeCliArgs(args);
+  if (args[0] !== "agent" && (args.includes("--help") || args.includes("-h"))) {
     io.stdout.write(helpText());
     return 0;
   }
-  if (args.includes("--version") || args.includes("-V")) {
+  if (args[0] !== "agent" && (args.includes("--version") || args.includes("-V"))) {
     io.stdout.write(`${PROFILEPILOT_CLI_VERSION}\n`);
     return 0;
   }
@@ -66,12 +105,22 @@ export async function runProfilePilotCli(
     parsed = parseProfilePilotCliArgs(args);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    io.stderr.write(`[ProfilePilot] ${message}\n\n${helpText()}`);
+    if (args[0] === "agent" && args.includes("--json")) {
+      io.stdout.write(`${JSON.stringify({ type: "error", ok: false, error: { code: "INVALID_ARGUMENTS", message }, exitCode: USAGE_EXIT_CODE })}\n`);
+    } else io.stderr.write(`[ProfilePilot] ${message}\n\n${args[0] === "agent" ? "运行 ppilot --help 查看用法。\n" : helpText()}`);
     return USAGE_EXIT_CODE;
   }
 
   const homeDir = runtime.homeDir || os.homedir();
   const env = runtime.env || process.env;
+  if ("local" in parsed && parsed.local === "agent") {
+    if (parsed.verb === "chat" && !runtime.request && (runtime.stdin || process.stdin).isTTY) {
+      try { await ensureChatService((command, signal) => requestProfilePilotManagement(command, homeDir, env, 1500, signal), homeDir, message => io.stderr.write(message)); }
+      catch (error) { io.stderr.write(`[ppilot] ${error instanceof Error ? error.message : error}\n`); return SERVER_UNAVAILABLE_EXIT_CODE; }
+    }
+    return runAgentCli(parsed, io, runtime.request || ((command, signal) => requestProfilePilotManagement(command, homeDir, env,
+      ["task.compact", "task.connection.test"].includes(command.action) ? 120_000 : REQUEST_TIMEOUT_MS, signal)), runtime);
+  }
   if ("local" in parsed && parsed.local === "logs") {
     await runLogsCommand(parsed, io, homeDir, env);
     return 0;
@@ -111,6 +160,8 @@ export async function runProfilePilotCli(
 }
 
 export function parseProfilePilotCliArgs(args: string[]): ParsedCliCommand {
+  args = normalizeCliArgs(args);
+  if (args[0] === "agent") return parseAgentCliArgs(args.slice(1));
   const json = args.includes("--json");
   const yes = args.includes("--yes");
   if (args[0] === "logs") return parseLogsArgs(args.slice(1), json);
@@ -162,6 +213,17 @@ export function parseProfilePilotCliArgs(args: string[]): ParsedCliCommand {
     };
   }
   throw new Error(`不支持的 profile 命令：${verb}`);
+}
+
+function normalizeCliArgs(args: string[]): string[] {
+  if (!args.length) return ["agent", "chat"];
+  if (["run", "chat", "list", "show", "watch", "reply", "resume", "pause", "cancel", "takeover", "send"].includes(args[0])) {
+    return ["agent", ...args];
+  }
+  if (["--profile", "--resume", "--prompt-file", "--authorization", "--minutes", "--actions", "--budget", "--screen-reader", "--reduced-motion", "--"].includes(args[0])) {
+    return ["agent", "chat", ...args];
+  }
+  return args;
 }
 
 function parseLogsArgs(args: string[], json: boolean): ParsedLogsCliCommand {
@@ -385,8 +447,10 @@ export async function requestProfilePilotManagement(
   command: ProfilePilotManagementCommand,
   homeDir = os.homedir(),
   env: NodeJS.ProcessEnv = process.env,
-  timeoutMs = REQUEST_TIMEOUT_MS
+  timeoutMs = REQUEST_TIMEOUT_MS,
+  signal?: AbortSignal
 ): Promise<ProfilePilotManagementResponse> {
+  signal?.throwIfAborted();
   const [token, socketPath] = await Promise.all([
     fs.readFile(profilePilotManagementSecretPath(homeDir, env), "utf8").then((value) => value.trim()),
     Promise.resolve(profilePilotManagementSocketPath(homeDir, env))
@@ -397,6 +461,10 @@ export async function requestProfilePilotManagement(
     token,
     command
   };
+  signal?.throwIfAborted();
+  // Phone screenshots are already bounded by the companion transport (8 MiB).
+  // Allow its image plus the management envelope without relaxing request limits.
+  const maxResponseBytes = command.action === "phone" && ["action", "wrapper-action"].includes(command.method) ? PROFILEPILOT_PHONE_MAX_RESPONSE_BYTES : PROFILEPILOT_MANAGEMENT_MAX_MESSAGE_BYTES;
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath);
     let buffer = "";
@@ -404,17 +472,22 @@ export async function requestProfilePilotManagement(
     const finish = (error?: Error, response?: ProfilePilotManagementResponse): void => {
       if (settled) return;
       settled = true;
+      signal?.removeEventListener("abort", abort);
       socket.destroy();
       if (error) reject(error);
       else if (response) resolve(response);
     };
+    const abort = (): void => finish(Object.assign(new Error("终端连接已中断。"), { name: "AbortError" }));
+    signal?.addEventListener("abort", abort, { once: true });
     socket.setEncoding("utf8");
     socket.setTimeout(timeoutMs, () => finish(Object.assign(new Error("连接 ProfilePilot 管理服务超时。"), { code: "ETIMEDOUT" })));
     socket.once("error", (error) => finish(error));
+    socket.once("end", () => finish(Object.assign(new Error("ProfilePilot 管理连接已关闭。"), { code: "ECONNRESET" })));
+    socket.once("close", () => finish(Object.assign(new Error("ProfilePilot 管理连接已关闭。"), { code: "ECONNRESET" })));
     socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
     socket.on("data", (chunk: string) => {
       buffer += chunk;
-      if (Buffer.byteLength(buffer, "utf8") > PROFILEPILOT_MANAGEMENT_MAX_MESSAGE_BYTES) {
+      if (Buffer.byteLength(buffer, "utf8") > maxResponseBytes) {
         finish(new Error("ProfilePilot 管理响应超过大小限制。"));
         return;
       }
@@ -489,25 +562,36 @@ function requiredValue(value: string | undefined, message: string): string {
 }
 
 function helpText(): string {
-  return `ProfilePilot 管理 CLI ${PROFILEPILOT_CLI_VERSION}
+  return `ppilot · ProfilePilot CLI ${PROFILEPILOT_CLI_VERSION}
 
 用法：
-  profilepilot status [--json]
-  profilepilot doctor [--json]
-  profilepilot logs [--level <级别>] [--since <时间>] [--limit <数量>] [--follow] [--json]
-  profilepilot profile list [--json]
-  profilepilot profile get <名称|ID> [--json]
-  profilepilot profile create --name <名称> [--json]
-  profilepilot profile rename <名称|ID> <新名称> [--json]
-  profilepilot profile start <名称|ID> [--json]
-  profilepilot profile stop <名称|ID> [--json]
-  profilepilot profile delete <名称|ID> --yes [--json]
+  ppilot                                      进入对话并选择 Profile
+  ppilot --profile <名称|ID>                   使用指定 Profile 对话
+  ppilot --resume <任务ID>                     继续已有对话
+  ppilot browser <method>                     ppilot browser CLI：扩展 / Gateway 统一浏览器控制
+  ppilot browser --help                       浏览器命令与会话说明
+  ppilot phone --help                         ppilot phone CLI：设备、会话与手机控制
+  ppilot phone wrap --help                    为脚本或工具建立手机控制会话
+  ppilot phone adb --help                     ADB 兼容命令
+  ppilot <run|chat|list|show|watch|reply|resume|pause|cancel|takeover|send> [参数]
+  ppilot chat --help
+  ppilot status [--json]
+  ppilot doctor [--json]
+  ppilot logs [--level <级别>] [--since <时间>] [--limit <数量>] [--follow] [--json]
+  ppilot profile list [--json]
+  ppilot profile get <名称|ID> [--json]
+  ppilot profile create --name <名称> [--json]
+  ppilot profile rename <名称|ID> <新名称> [--json]
+  ppilot profile start <名称|ID> [--json]
+  ppilot profile stop <名称|ID> [--json]
+  ppilot profile delete <名称|ID> --yes [--json]
 
 说明：
+  对话需要交互终端；任务与桌面应用同步，桌面应用需保持运行。
   logs 可在桌面应用未运行时读取本地脱敏诊断日志；--since 支持 30m、2h、7d 或 ISO 时间。
   doctor 检查桌面应用连接、版本、运行环境和最近 24 小时错误。
   修改操作仅支持 ProfilePilot 创建的独立 Profile。
-  系统 Profile 和子 Profile 可以查询，但不能通过管理 CLI 修改。
+  系统 Profile 和子 Profile 可以查询，但不能通过 Profile 管理命令修改。
   CLI 通过本机受保护 Socket 调用正在运行的 ProfilePilot，不会直接修改 profiles.json。
 `;
 }

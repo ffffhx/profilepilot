@@ -39,7 +39,8 @@ test('pin, rename, archive and restore persist without changing execution histor
   await f.service.updateTaskMetadata(task.id, { archived: false });
   assert.equal(new TaskStore(f.root).get(task.id).archivedAt, undefined);
   for (const key of ['updatedAt', 'prompt', 'events', 'receipts', 'result', 'usage', 'sessionId', 'status']) assert.deepEqual(task[key], original[key], key);
-  assert.equal(f.broadcasts(), 3);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.ok(f.broadcasts() >= 1 && f.broadcasts() <= 3, 'metadata updates reach the desktop through coalesced broadcasts');
 });
 
 test('invalid metadata is rejected before stopping or renaming a task', async t => {
@@ -83,10 +84,24 @@ test('archiving drains the live worker and current action, and blocks concurrent
   child.kill = () => { child.exitCode = 0; child.emit('exit', 0); };
   Object.assign(f.service.dependencies, { apiKey: () => 'fixture', prepareProfile: async () => ({ name: 'Fixture', port: 9223 }), worker: () => child });
   const controls = [];
-  f.service.dependencies.browser.control = async (_, action) => controls.push(action);
+  let leasedSession;
+  f.service.dependencies.browser.observe = async observedTask => {
+    leasedSession = observedTask.sessionId;
+    return { version: 'observed-page', fingerprint: 'stable-page', at: new Date().toISOString(),
+      url: 'https://example.test/form', title: 'Form', snapshot: '- textbox "Name" [ref=e1]', account: '' };
+  };
+  f.service.dependencies.browser.control = async (controlledTask, action) => {
+    assert.equal(leasedSession, controlledTask.sessionId, 'Only the observed session owns the browser lease');
+    controls.push(action); leasedSession = undefined;
+  };
   task.status = 'queued';
   await f.service.tick(); await f.service.runs.get(task.id).starting;
   const run = f.service.runs.get(task.id);
+  // Profile preparation only supplies a route. Observe through the service so
+  // this case actually owns a lease before testing archive cleanup.
+  await f.service.handleTool(task, run, 'observe', {});
+  assert.equal(leasedSession, task.sessionId);
+  assert.equal(task.observation.version, 'observed-page');
   run.chain = new Promise(resolve => { finishAction = resolve; });
   try {
     const archive = f.service.updateTaskMetadata(task.id, { archived: true });
@@ -101,12 +116,14 @@ test('archiving drains the live worker and current action, and blocks concurrent
     finishAction(); await archive;
     assert.ok(task.archivedAt); assert.equal(f.service.runs.has(task.id), false);
     assert.deepEqual(controls, ['release']);
+    assert.equal(leasedSession, undefined);
     assert.equal(task.result.summary, 'Preserved result');
   } finally { finishAction(); child.kill(); await f.service.close(); }
 });
 
 test('archiving during browser preparation waits and never starts a worker', async t => {
   const f = fixture(t), task = f.create('Preparing');
+  f.store.event(task, 'user', '打开网页 https://example.test');
   let prepared;
   Object.assign(f.service.dependencies, { apiKey: () => 'fixture', prepareProfile: () => new Promise(resolve => { prepared = resolve; }), worker: () => assert.fail('Must not start a worker') });
   task.status = 'queued';
@@ -149,7 +166,7 @@ test('archiving waits for an in-flight user reply or browser return before chang
   }
 });
 
-test('retention preserves pinned and archived tasks and gives restored tasks a fresh retention period', async t => {
+test('retention preserves conversation history including unpinned completed tasks', async t => {
   const f = fixture(t);
   const pinned = f.create('Pinned'), archived = f.create('Archived'), expired = f.create('Expired');
   const old = '2000-01-01T00:00:00.000Z';
@@ -157,12 +174,12 @@ test('retention preserves pinned and archived tasks and gives restored tasks a f
   await f.service.updateTaskMetadata(pinned.id, { pinned: true });
   await f.service.updateTaskMetadata(archived.id, { archived: true });
   await f.service.tick();
-  assert.deepEqual(f.store.data.tasks.map(task => task.id).sort(), [pinned.id, archived.id].sort());
+  assert.deepEqual(f.store.data.tasks.map(task => task.id).sort(), [pinned.id, archived.id, expired.id].sort());
   await f.service.updateTaskMetadata(pinned.id, { pinned: false });
   await f.service.updateTaskMetadata(archived.id, { archived: false });
   f.service.lastCleanup = 0;
   await f.service.tick();
-  assert.equal(f.store.data.tasks.length, 2);
+  assert.equal(f.store.data.tasks.length, 3);
   assert.equal(archived.updatedAt, old);
 });
 

@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
-const { NativeOnboarding } = require('../dist/main/tasks/native-onboarding');
+const { NativeOnboarding } = require(process.env.PROFILEPILOT_INSTALL_TEST_BUILD ? require('node:path').join(process.env.PROFILEPILOT_INSTALL_TEST_BUILD, 'native-onboarding.js') : '../dist/main/tasks/native-onboarding');
 const id = 'gmdaabnoocjlpimglalnbegfdaklfnaj';
 
 test('onboarding only delivers credentials once to the extension, never to its public page', async t => {
@@ -45,6 +45,7 @@ test('installation actions require same-origin POST, support cancellation and ne
   onboarding.start(url); onboarding.start(url, true); assert.equal(started, 1); assert.equal(signal.aborted, false);
   const status = await (await fetch(url + '/status')).text(); assert.equal(status.includes('PP1.'), false); assert.match(status, /enable-debugging/);
   assert.equal((await fetch(url + '/open-debugging')).status, 403);
+  assert.equal(settings, 0, 'Opening requires an authorized POST; no intermediary page is served');
   assert.equal((await fetch(url + '/open-debugging', { method: 'POST', headers: { Origin: 'https://attacker.test', 'X-ProfilePilot-Onboarding': '1' } })).status, 403);
   const post = action => fetch(url + '/' + action, { method: 'POST', headers: { Origin: `http://127.0.0.1:${port}`, 'X-ProfilePilot-Onboarding': '1' } });
   assert.equal((await post('open-debugging')).status, 200); assert.equal(settings, 1);
@@ -77,4 +78,18 @@ test('slow or returning extensions never cause an automatic debug authorization'
     assert.equal(started, 0);
     assert.equal(onboarding.pending('native:Default'), undefined);
   } finally { onboarding.close(); }
+});
+
+test('reusing an existing installation does not promise persistence or relabel it temporary', t => {
+  const onboarding = new NativeOnboarding(id);
+  t.after(() => onboarding.close());
+  onboarding.configure({ install: async r => r.report({ stage: 'installing', mode: 'existing', message: 'Verifying existing' }), openSettings: async () => {} }, () => {});
+  const url = onboarding.create(19000, 'PP1.fixture', 'Default', new Date(Date.now() + 300000).toISOString(), 'native:Default');
+  onboarding.start(url, true);
+  onboarding.connected('native:Default');
+  const state = onboarding.states()[0];
+  assert.equal(state.stage, 'connected');
+  assert.equal(state.mode, 'existing');
+  assert.match(state.message, /保留原有安装方式/);
+  assert.doesNotMatch(state.message, /本次为临时|Chrome 会自动重连/);
 });

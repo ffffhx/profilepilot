@@ -16,8 +16,7 @@ const baseUrl = `http://127.0.0.1:${server.address().port}/v1`;
 const app = await launchProfilePilotE2e({ name: 'model picker and return navigation' });
 try {
   const d = app.driver;
-  await d.domClick('[data-workspace-trigger]');
-  await d.domClick('a[href="./tasks.html"]');
+  await d.domClick('.workspace-link[data-workspace="agent"]');
   await d.waitFor('#create-task');
   await d.evaluate(`window.tasks.snapshot().then(({settings})=>window.tasks.saveSettings({...settings,model:'fixture-balanced',baseUrl:${JSON.stringify(baseUrl)},apiKey:'fixture-model-key'}))`);
   await d.domInput('#prompt', '保留对话草稿，不要切换页面');

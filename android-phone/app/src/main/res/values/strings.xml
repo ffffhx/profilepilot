@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">ProfilePilot 移动版</string>
+    <string name="accessibility_description">仅在你允许的电脑会话中，读取当前页面、获取画面并执行点击、滑动和文字输入。手机胶囊与通知始终提供暂停和结束入口。暂停、锁屏或连接中断后拒绝后续控制指令；不会自动恢复会话。</string>
+</resources>

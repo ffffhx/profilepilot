@@ -15,7 +15,7 @@ interface E2eDriverOptions {
 interface E2eDriverRequest {
   id?: string | number;
   command?: string;
-  target?: E2eWindowTarget;
+  target?: E2eWindowTarget | "shell";
   selector?: string;
   index?: number;
   text?: string;
@@ -27,6 +27,8 @@ interface E2eDriverRequest {
   eventType?: string;
   eventInit?: Record<string, unknown>;
   value?: string;
+  width?: number;
+  height?: number;
   checked?: boolean;
   baselinePngBase64?: string;
   channelTolerance?: number;
@@ -43,6 +45,8 @@ const BACKGROUND_COMMANDS = new Set([
   "dispatch",
   "screenshot",
   "compareScreenshot",
+  "reload",
+  "resize",
   "quit"
 ]);
 
@@ -126,6 +130,18 @@ async function executeRequest(request: E2eDriverRequest, options: E2eDriverOptio
       return { pid: process.pid };
     case "windows":
       return options.getWindowSnapshot();
+    case "reload":
+      requireWindow(options, request.target).webContents.reload();
+      return true;
+    case "resize": {
+      if (!Number.isInteger(request.width) || !Number.isInteger(request.height) || request.width! < 480 || request.width! > 2560 || request.height! < 360 || request.height! > 1600) {
+        throw new Error("E2E window size is out of range.");
+      }
+      const windowRef = requireWindow(options, request.target);
+      windowRef.setMinimumSize(480, 360);
+      windowRef.setContentSize(request.width!, request.height!);
+      return true;
+    }
     case "triggerMiniHotkeyHandler":
       await options.triggerMiniHotkeyHandler();
       return options.getWindowSnapshot();
@@ -141,7 +157,7 @@ async function executeRequest(request: E2eDriverRequest, options: E2eDriverOptio
     case "query":
       return queryElement(requireWindow(options, request.target), requireSelector(request), request.index ?? 0);
     case "evaluate":
-      return evaluateExpression(requireWindow(options, request.target), request.expression);
+      return evaluateExpression(requireWindow(options, request.target), request.expression, request.target === "shell");
     case "domClick":
       return domClickElement(requireWindow(options, request.target), requireSelector(request), request.index ?? 0);
     case "domInput":
@@ -199,7 +215,7 @@ async function executeRequest(request: E2eDriverRequest, options: E2eDriverOptio
   }
 }
 
-function requireWindow(options: E2eDriverOptions, target: E2eWindowTarget | undefined): BrowserWindow {
+function requireWindow(options: E2eDriverOptions, target: E2eWindowTarget | "shell" | undefined): BrowserWindow {
   const resolvedTarget = target === "mini" ? "mini" : "main";
   const windowRef = options.getWindow(resolvedTarget);
   if (!windowRef || windowRef.isDestroyed()) {
@@ -223,12 +239,22 @@ function requireEventType(request: E2eDriverRequest): string {
   return request.eventType;
 }
 
-async function evaluateExpression(windowRef: BrowserWindow, expression: string | undefined): Promise<unknown> {
-  return windowRef.webContents.executeJavaScript(requireExpression({ expression }), true);
+async function rendererFrame(windowRef: BrowserWindow, selector?: string) {
+  const main = windowRef.webContents.mainFrame;
+  const name = await main.executeJavaScript(`(() => {
+    if (${JSON.stringify(selector || "")} && document.querySelector(${JSON.stringify(selector || "html")})) return null;
+    return document.querySelector('iframe.workspace-page[data-active="true"]')?.name || null;
+  })()`);
+  return main.frames.find(frame => frame.name === name) || main;
+}
+
+async function evaluateExpression(windowRef: BrowserWindow, expression: string | undefined, shell = false): Promise<unknown> {
+  const frame = shell ? windowRef.webContents.mainFrame : await rendererFrame(windowRef);
+  return frame.executeJavaScript(requireExpression({ expression }), true);
 }
 
 async function domClickElement(windowRef: BrowserWindow, selector: string, index: number): Promise<ElementSnapshot> {
-  await windowRef.webContents.executeJavaScript(
+  await (await rendererFrame(windowRef, selector)).executeJavaScript(
     `(() => {
       const element = Array.from(document.querySelectorAll(${JSON.stringify(selector)}))[${JSON.stringify(index)}];
       if (!(element instanceof HTMLElement)) throw new Error("Element is not clickable: " + ${JSON.stringify(selector)});
@@ -249,7 +275,7 @@ async function domInputElement(
   value: string | undefined,
   checked: boolean | undefined
 ): Promise<ElementSnapshot> {
-  await windowRef.webContents.executeJavaScript(
+  await (await rendererFrame(windowRef, selector)).executeJavaScript(
     `(() => {
       const element = Array.from(document.querySelectorAll(${JSON.stringify(selector)}))[${JSON.stringify(index)}];
       if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement)) {
@@ -294,7 +320,7 @@ async function dispatchElementEvent(
   eventInit: Record<string, unknown> | undefined
 ): Promise<ElementSnapshot> {
   const type = requireEventType({ eventType });
-  await windowRef.webContents.executeJavaScript(
+  await (await rendererFrame(windowRef, selector)).executeJavaScript(
     `(() => {
       const element = Array.from(document.querySelectorAll(${JSON.stringify(selector)}))[${JSON.stringify(index)}];
       if (!(element instanceof Element)) throw new Error("Element is not available: " + ${JSON.stringify(selector)});
@@ -312,7 +338,7 @@ async function dispatchElementEvent(
 }
 
 async function queryElement(windowRef: BrowserWindow, selector: string, index: number): Promise<ElementSnapshot> {
-  return windowRef.webContents.executeJavaScript(
+  return (await rendererFrame(windowRef, selector)).executeJavaScript(
     `(() => {
       const items = Array.from(document.querySelectorAll(${JSON.stringify(selector)}));
       const element = items[${JSON.stringify(index)}];
@@ -345,7 +371,7 @@ async function clickElement(windowRef: BrowserWindow, selector: string, index: n
   if (!windowRef.isVisible()) windowRef.show();
   windowRef.focus();
   windowRef.webContents.focus();
-  await windowRef.webContents.executeJavaScript(
+  await (await rendererFrame(windowRef, selector)).executeJavaScript(
     `(() => {
       const element = Array.from(document.querySelectorAll(${JSON.stringify(selector)}))[${JSON.stringify(index)}];
       if (element instanceof Element) element.scrollIntoView({ block: "center", inline: "center" });
@@ -398,7 +424,7 @@ async function focusElement(windowRef: BrowserWindow, selector: string, index: n
   windowRef.webContents.focus();
   const snapshot = await queryElement(windowRef, selector, index);
   if (!snapshot.exists) throw new Error(`Element is not focusable: ${selector}[${index}]`);
-  const focused = await windowRef.webContents.executeJavaScript(
+  const focused = await (await rendererFrame(windowRef, selector)).executeJavaScript(
     `(() => {
       const element = Array.from(document.querySelectorAll(${JSON.stringify(selector)}))[${JSON.stringify(index)}];
       if (!(element instanceof HTMLElement)) return false;
@@ -518,7 +544,7 @@ function formatError(error: unknown): string {
 }
 
 async function assertFocused(windowRef: BrowserWindow, selector: string, index: number, phase: string): Promise<void> {
-  const focused = await windowRef.webContents.executeJavaScript(
+  const focused = await (await rendererFrame(windowRef, selector)).executeJavaScript(
     `document.activeElement === Array.from(document.querySelectorAll(${JSON.stringify(selector)}))[${JSON.stringify(index)}]`,
     true
   );

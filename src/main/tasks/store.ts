@@ -1,15 +1,25 @@
-import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync, openSync, closeSync, fsyncSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import type { BrowserTask, CreateTaskInput, TaskSnapshot, TaskEvent } from "../../shared/tasks";
 import { taskModelText } from "../../shared/task-model";
 import { updateTokenRecords } from "../../shared/task-token-usage";
 import { legacyCostCorrection } from "./cost-accounting";
+import { interruptReceipts, preserveVerifiedReceipts } from "./conversation";
 
 export const now = (): string => new Date().toISOString();
 const text = z.string().trim().min(1).max(30000);
+const nativeOriginSchema = z.string().trim().url().max(2000).transform(value => {
+  const url = new URL(value);
+  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.pathname !== "/" || url.search || url.hash) throw new Error("站点规则必须是无路径、凭据或查询参数的 HTTP/HTTPS 来源。");
+  return url.origin;
+});
+export const nativeAccessSchema = z.object({ allowedOrigins: z.array(nativeOriginSchema).max(200).optional(), blockedOrigins: z.array(nativeOriginSchema).max(200).optional(), confirmActions: z.boolean().optional() }).strict();
 export const createTaskSchema = z.object({
+  nativeTarget: z.object({ tabId: z.number().int().positive().optional(), newTab: z.boolean().optional() }).strict().refine(value => !(value.newTab && value.tabId !== undefined), "新标签页不能同时指定既有标签页编号。").optional(),
+  nativeAccess: nativeAccessSchema.optional(),
+  mode: z.enum(["manual", "plan", "acceptEdits"]).optional(), model: z.string().trim().min(1).max(200).optional(),
   prompt: text, profileId: z.string().min(1).max(200), authorization: z.string().max(5000).default(""),
   materialIds: z.array(z.string()).max(50).default([]), attachmentIds: z.array(z.string()).max(50).default([]),
   items: z.array(z.string().trim().min(1).max(3000)).max(500).default([]),
@@ -24,6 +34,11 @@ export const createTaskSchema = z.object({
 export class TaskStore {
   readonly file: string;
   data: TaskSnapshot;
+  private saveTimer?: ReturnType<typeof setTimeout>;
+  private savedDigest?: string;
+  private saveError?: Error;
+  /** Deferred failures stay visible until a successful save/flush retries them. */
+  get persistenceError(): Error | undefined { return this.saveError; }
   constructor(readonly root: string) {
     mkdirSync(root, { recursive: true, mode: 0o700 });
     this.file = path.join(root, "tasks.json");
@@ -49,40 +64,84 @@ export class TaskStore {
     // Never replay an interrupted external operation automatically after a crash.
     for (const task of this.data.tasks) {
       task.runningSince = undefined;
+      for (const activity of task.agentActivities || []) if (activity.status === "running") { activity.status = "interrupted"; activity.updatedAt = now(); }
       for (const decision of task.jevDecisions || []) if (decision.status === "running") {
         decision.status = "interrupted"; decision.note = "应用中断，未收到完整判断响应；不计入平均响应时间。";
       }
       const interrupted = task.status === "running";
-      for (const receipt of task.receipts) if (receipt.status === "started" || (interrupted && ["submit", "send", "purchase", "delete"].includes(receipt.action.effect) && receipt.status === "executed" && !receipt.reconciliation)) receipt.status = "uncertain";
-      if (task.receipts.some(receipt => receipt.status === "uncertain" && ["submit", "send", "purchase", "delete"].includes(receipt.action.effect) && !["completed", "not_completed"].includes(receipt.reconciliation?.outcome || ""))) task.needsReconciliation = true;
+      preserveVerifiedReceipts(task);
+      interruptReceipts(task, interrupted);
       if (task.status === "running") {
         task.status = "paused";
-        task.needsReconciliation = true;
         task.observation = undefined;
         this.event(task, "system", "应用中断，任务已暂停。继续时将先核查页面及已执行操作。");
       }
       if (task.pending?.kind === "confirmation") {
         task.pending = undefined;
         task.status = "paused";
-        task.needsReconciliation = true;
         task.observation = undefined;
       }
     }
     this.save();
   }
+  /** Synchronous durability boundary: retain this before/after external actions,
+   * user messages, permissions and task-state transitions. Also drains batching. */
   save(): void {
-    this.data.tokenRecords = updateTokenRecords(this.data.tokenRecords || [], this.data.tasks);
-    const temp = `${this.file}.${randomUUID()}.tmp`;
-    writeFileSync(temp, JSON.stringify({ ...this.data, version: 1 }, null, 2), { encoding: "utf8", mode: 0o600 });
-    renameSync(temp, this.file);
+    if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = undefined; }
+    let temp: string | undefined, descriptor: number | undefined, ownsTemp = false;
+    try {
+      this.data.tokenRecords = updateTokenRecords(this.data.tokenRecords || [], this.data.tasks);
+      // Compact JSON keeps the existing version-1 format without whitespace I/O.
+      // Keep only a digest: caching the full history would retain another large string.
+      const serialized = JSON.stringify({ ...this.data, version: 1 });
+      const digest = createHash("sha256").update(serialized).digest("hex");
+      if (digest !== this.savedDigest || !existsSync(this.file)) {
+        temp = `${this.file}.${randomUUID()}.tmp`;
+        descriptor = openSync(temp, "wx", 0o600);
+        ownsTemp = true;
+        writeFileSync(descriptor, serialized, { encoding: "utf8" });
+        fsyncSync(descriptor);
+        closeSync(descriptor); descriptor = undefined;
+        // Same-directory replacement leaves readers with either complete version.
+        // Never delete the old store as a Windows rename-failure fallback.
+        renameSync(temp, this.file);
+        ownsTemp = false;
+        this.savedDigest = digest;
+      }
+      this.saveError = undefined;
+    } catch (error) {
+      this.saveError = error instanceof Error ? error : new Error(String(error));
+      throw error;
+    } finally {
+      if (descriptor !== undefined) try { closeSync(descriptor); } catch { /* preserve original error */ }
+      if (ownsTemp && temp) try { unlinkSync(temp); } catch { /* old store remains intact */ }
+    }
   }
+  /** Only for replaceable progress/activity metadata, never action receipts or
+   * messages. The first request sets the deadline; repeated updates cannot delay
+   * saving forever. Serialization occurs once when the batch is drained. */
+  scheduleSave(delayMs = 80): void {
+    if (!Number.isFinite(delayMs) || delayMs < 0 || delayMs > 1000) throw new RangeError("保存延迟须在 0–1000ms 之间。");
+    if (this.saveTimer) return;
+    // Keep the short timer referenced so ordinary process exit cannot drop a batch.
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = undefined;
+      try { this.save(); }
+      catch (error) { console.error("任务进度保存失败；下次保存或关闭时将重试。", error); }
+    }, delayMs);
+  }
+  /** Also captures direct data mutations by legacy callers, without scheduling. */
+  flush(): void { this.save(); }
+  /** Call after the service's final state changes, before application shutdown. */
+  close(): void { this.flush(); }
   get(id: string): BrowserTask {
     const task = this.data.tasks.find((entry) => entry.id === id);
     if (!task) throw new Error("任务不存在。");
     return task;
   }
-  create(input: CreateTaskInput, profileName: string): BrowserTask {
+  create(input: CreateTaskInput, profileName: string, nativeRequest?: NonNullable<BrowserTask["nativeUiRequests"]>[number]): BrowserTask {
     const parsed = createTaskSchema.parse(input);
+    if (!parsed.profileId.startsWith("native:") && (parsed.nativeTarget || parsed.nativeAccess)) throw new Error("原生浏览器目标与权限仅适用于系统 Chrome Profile。");
     const materials = parsed.materialIds.map((id) => {
       const value = this.data.materials.find((entry) => entry.id === id);
       if (!value) throw new Error("选择的资料已不存在。");
@@ -95,6 +154,9 @@ export class TaskStore {
     });
     const id = randomUUID();
     const task: BrowserTask = {
+      mode: parsed.mode || (parsed.profileId.startsWith("native:") ? "acceptEdits" : undefined), model: parsed.model,
+      nativeTarget: parsed.nativeTarget, nativeAccess: parsed.profileId.startsWith("native:") ? structuredClone({ ...this.data.nativeAccessPolicies?.[parsed.profileId], ...parsed.nativeAccess }) : undefined,
+      nativeUiRequests: nativeRequest ? [structuredClone(nativeRequest)] : undefined,
       id, title: parsed.prompt.slice(0, 48), prompt: parsed.prompt, profileId: parsed.profileId, profileName,
       status: "queued", createdAt: now(), updatedAt: now(), sessionId: `pp-task-${id}`,
       authorization: parsed.authorization, attachments, materials, events: [],

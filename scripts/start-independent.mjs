@@ -73,6 +73,9 @@ export function buildWindowsBootstrap({ executable, repoRoot, resultPath, enviro
     `$electronArguments = ${decodeExpression([repoRoot, ...(background ? ["--background"] : [])].map(quoteWindowsArgument).join(" "))}`,
     `$resultPath = ${decodeExpression(resultPath)}`,
     "try {",
+    "  $launchIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()",
+    "  $launchPrincipal = [Security.Principal.WindowsPrincipal]::new($launchIdentity)",
+    "  if ($launchPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'ProfilePilot must run without administrator privileges so ordinary CLI sessions can connect. Launch it from a normal desktop session.' }",
     assignments ? assignments.split("\n").map((line) => `  ${line}`).join("\n") : "",
     `  $started = Start-Process -FilePath $executable -ArgumentList $electronArguments -WorkingDirectory $repoRoot${background ? " -WindowStyle Hidden" : ""} -PassThru`,
     "  $payload = @{ ok = $true; pid = $started.Id } | ConvertTo-Json -Compress",
@@ -84,11 +87,12 @@ export function buildWindowsBootstrap({ executable, repoRoot, resultPath, enviro
 }
 
 export function buildWindowsCimInvocation({ bootstrapScript, powershellPath }) {
-  const commandLine = [
-    powershellPath,
+  const bootstrapArguments = [
     "-NoLogo",
     "-NoProfile",
     "-NonInteractive",
+    "-WindowStyle",
+    "Hidden",
     "-ExecutionPolicy",
     "Bypass",
     "-EncodedCommand",
@@ -96,8 +100,25 @@ export function buildWindowsCimInvocation({ bootstrapScript, powershellPath }) {
   ].map(quoteWindowsArgument).join(" ");
   const script = [
     "$ErrorActionPreference = 'Stop'",
+    `$launchPowerShell = ${decodeExpression(powershellPath)}`,
+    `$launchArguments = ${decodeExpression(bootstrapArguments)}`,
+    "$launchIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()",
+    "$launchPrincipal = [Security.Principal.WindowsPrincipal]::new($launchIdentity)",
+    "if ($launchPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {",
+    // WMI detaches from the caller's Job, but preserves elevation. Ask the
+    // desktop Explorer to start the bootstrap with the interactive user's token.
+    // A fresh Shell.Application alone can still belong to the elevated caller.
+    "  $desktopShell = New-Object -ComObject Shell.Application",
+    "  $desktopHandle = 0",
+    "  $desktop = $desktopShell.Windows().FindWindowSW(0, 0, 8, [ref]$desktopHandle, 1)",
+    "  if ($null -eq $desktop) { throw 'Cannot find the desktop Explorer. Start ProfilePilot from a non-administrator terminal.' }",
+    "  $desktop.Document.Application.ShellExecute($launchPowerShell, $launchArguments, '', 'open', 0)",
+    "  @{ ReturnValue = 0; Method = 'windows-explorer-bootstrap' } | ConvertTo-Json -Compress",
+    "  exit 0",
+    "}",
     "$startup = New-CimInstance -ClassName Win32_ProcessStartup -Namespace root/cimv2 -ClientOnly -Property @{ ShowWindow = [uint16]0 }",
-    `$result = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = ${decodeExpression(commandLine)}; ProcessStartupInformation = $startup }`,
+    `$commandLine = ${decodeExpression(quoteWindowsArgument(powershellPath))} + ' ' + $launchArguments`,
+    "$result = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $commandLine; ProcessStartupInformation = $startup }",
     "$result | Select-Object ReturnValue, ProcessId | ConvertTo-Json -Compress"
   ].join("\n");
   return {
@@ -189,7 +210,7 @@ async function launchOnWindows(executable, repoRoot, background) {
       throw new Error(`WMI/CIM 启动失败：${String(launched.stderr || launched.stdout || `exit ${launched.status}`).trim()}`);
     }
     const cim = JSON.parse(String(launched.stdout || "{}").trim());
-    if (Number(cim.ReturnValue) !== 0 || !Number.isSafeInteger(Number(cim.ProcessId))) {
+    if (Number(cim.ReturnValue) !== 0 || (cim.Method !== "windows-explorer-bootstrap" && !Number.isSafeInteger(Number(cim.ProcessId)))) {
       throw new Error(`WMI/CIM 未能创建独立启动器：${String(launched.stdout).trim()}`);
     }
     const result = await waitForResult(resultPath);
@@ -198,7 +219,7 @@ async function launchOnWindows(executable, repoRoot, background) {
     }
     const pid = Number(result.pid);
     await confirmProcess(pid);
-    return { pid, method: "windows-wmi-bootstrap" };
+    return { pid, method: cim.Method === "windows-explorer-bootstrap" ? cim.Method : "windows-wmi-bootstrap" };
   } finally {
     rmSync(resultPath, { force: true });
   }

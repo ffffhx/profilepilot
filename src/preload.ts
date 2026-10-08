@@ -1,6 +1,8 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
 import { IPC_CHANNELS } from "./shared/ipc";
 import { LOCAL_APPS_CHANNEL, type LocalAppsApi } from "./shared/local-apps";
+import { PHONE_CHANNEL, PHONE_CHANGED, type PhonesApi, type PhonesSnapshot } from "./shared/phones";
+import { MOBILE_CHANNEL, MOBILE_CHANGED, type MobileApi, type MobileSnapshot } from "./shared/mobile";
 import { TASK_CHANNEL, TASK_CHANGED, TASK_PREVIEW, type TaskApi, type TaskSnapshot, type TaskPreviewUpdate } from "./shared/tasks";
 import type {
   AccountSyncDiffResult,
@@ -41,6 +43,29 @@ import type {
   TakeoverAgentConnectionsRequest,
   TakeoverAgentConnectionsResponse
 } from "./shared/types";
+
+contextBridge.exposeInMainWorld("desktopWindow", {
+  platform: process.platform,
+  onNavigate: (listener: (href: string) => void) => {
+    const handler = (_event: IpcRendererEvent, href: string) => listener(href);
+    ipcRenderer.on(IPC_CHANNELS.navigateWorkspace, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.navigateWorkspace, handler);
+  },
+  setAppearance: (background: string, symbols: string) => {
+    ipcRenderer.send(IPC_CHANNELS.setWindowAppearance, background, symbols);
+  }
+});
+
+const mobileApi: MobileApi = {
+  snapshot: () => ipcRenderer.invoke(MOBILE_CHANNEL, "snapshot"),
+  configure: input => ipcRenderer.invoke(MOBILE_CHANNEL, "configure", input),
+  pair: endpoint => ipcRenderer.invoke(MOBILE_CHANNEL, "pair", endpoint),
+  revoke: id => ipcRenderer.invoke(MOBILE_CHANNEL, "revoke", id),
+  updateDevice: (id, input) => ipcRenderer.invoke(MOBILE_CHANNEL, "updateDevice", id, input),
+  openApkFolder: () => ipcRenderer.invoke(MOBILE_CHANNEL, "openApkFolder"),
+  onChanged: listener => { const handler = (_event: IpcRendererEvent, snapshot: MobileSnapshot) => listener(snapshot); ipcRenderer.on(MOBILE_CHANGED, handler); return () => ipcRenderer.removeListener(MOBILE_CHANGED, handler); }
+};
+contextBridge.exposeInMainWorld("mobile", mobileApi);
 
 const profileManagerApi: ProfileManagerApi = {
   getStartupSettings: () => ipcRenderer.invoke(IPC_CHANNELS.getStartupSettings),
@@ -144,6 +169,10 @@ const profileManagerApi: ProfileManagerApi = {
     ipcRenderer.invoke(IPC_CHANNELS.setShellIntegrationEnabled, enabled),
   inspectAgentIntegration: (): Promise<AgentIntegrationDiagnostic> =>
     ipcRenderer.invoke(IPC_CHANNELS.inspectAgentIntegration),
+  readBrowserPreferences: () => ipcRenderer.invoke(IPC_CHANNELS.readBrowserPreferences),
+  readControlPreferences: domain => ipcRenderer.invoke(IPC_CHANNELS.readControlPreferences, domain),
+  writeControlPreferences: request => ipcRenderer.invoke(IPC_CHANNELS.writeControlPreferences, request),
+  writeBrowserPreferences: request => ipcRenderer.invoke(IPC_CHANNELS.writeBrowserPreferences, request),
   setAgentWrapperEnabled: (tool, enabled): Promise<AgentIntegrationDiagnostic> =>
     ipcRenderer.invoke(IPC_CHANNELS.setAgentWrapperEnabled, tool, enabled),
   setAgentSkillEnabled: (tool, enabled): Promise<AgentIntegrationDiagnostic> =>
@@ -239,6 +268,11 @@ const taskApi: TaskApi = {
   retryItems: (id, items) => ipcRenderer.invoke(TASK_CHANNEL, "retryItems", id, items),
   control: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "control", ...args),
   reply: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "reply", ...args),
+  queue: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "queue", ...args),
+  permissions: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "permissions", ...args),
+  setLimits: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "setLimits", ...args),
+  setModel: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "setModel", ...args),
+  previewArtifact: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "previewArtifact", ...args),
   saveMaterial: (input) => ipcRenderer.invoke(TASK_CHANNEL, "saveMaterial", input),
   deleteMaterial: (id) => ipcRenderer.invoke(TASK_CHANNEL, "deleteMaterial", id),
   importAttachments: () => ipcRenderer.invoke(TASK_CHANNEL, "importAttachments"),
@@ -277,3 +311,26 @@ const localAppsApi: LocalAppsApi = {
   agentControl: (id, command) => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "agentControl", id, command)
 };
 contextBridge.exposeInMainWorld("localApps", localAppsApi);
+const phonesApi: PhonesApi = {
+  snapshot: () => ipcRenderer.invoke(PHONE_CHANNEL, "snapshot"),
+  cloudPair: url => ipcRenderer.invoke(PHONE_CHANNEL, "cloud-pair", { url }),
+  cloudForget: id => ipcRenderer.invoke(PHONE_CHANNEL, "cloud-forget", { id }),
+  listEmulators: () => ipcRenderer.invoke(PHONE_CHANNEL, "emulator-list"),
+  connectEmulator: name => ipcRenderer.invoke(PHONE_CHANNEL, "emulator-connect", { name }),
+  discoverWireless: id => ipcRenderer.invoke(PHONE_CHANNEL, "wireless-discover", id ? { id } : {}),
+  pairWireless: (address, code) => ipcRenderer.invoke(PHONE_CHANNEL, "wireless-pair", { address, code }),
+  connectWireless: address => ipcRenderer.invoke(PHONE_CHANNEL, "wireless-connect", { address }),
+  autoConnectWireless: id => ipcRenderer.invoke(PHONE_CHANNEL, "wireless-connect", { id }),
+  prepare: id => ipcRenderer.invoke(PHONE_CHANNEL, "connect", { id }),
+  preview: id => ipcRenderer.invoke(PHONE_CHANNEL, "preview", { id }),
+  openSettings: (id, setting) => ipcRenderer.invoke(PHONE_CHANNEL, "settings", { id, setting }),
+  rename: (id, name) => ipcRenderer.invoke(PHONE_CHANNEL, "rename", { id, name }),
+  start: (id, mode, controller, task) => ipcRenderer.invoke(PHONE_CHANNEL, "start", { id, mode, controller, task }),
+  control: (id, command) => ipcRenderer.invoke(PHONE_CHANNEL, command, { id }),
+  perform: input => ipcRenderer.invoke(PHONE_CHANNEL, "action", input),
+  onChanged: listener => {
+    const handler = (_event: IpcRendererEvent, snapshot: PhonesSnapshot) => listener(snapshot);
+    ipcRenderer.on(PHONE_CHANGED, handler); return () => ipcRenderer.removeListener(PHONE_CHANGED, handler);
+  }
+};
+contextBridge.exposeInMainWorld("phones", phonesApi);

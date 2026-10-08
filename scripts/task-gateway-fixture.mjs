@@ -9,7 +9,7 @@ import { randomUUID } from "node:crypto";
 const require = createRequire(import.meta.url);
 
 // Each run owns a disposable registered Profile and Gateway, never a user's port.
-export async function startTaskGatewayFixture() {
+export async function startTaskGatewayFixture({ extensionPaths = [] } = {}) {
   const { bundledBrowserExecutable } = require("../dist/main/tasks/browser-runtime");
   const driver = bundledBrowserExecutable();
   const root = await mkdtemp(path.join(os.tmpdir(), "pp-task-gateway-"));
@@ -34,6 +34,12 @@ export async function startTaskGatewayFixture() {
     const { createProfileManager } = require("../dist/main/profile-manager");
     const manager = createProfileManager();
     const profile = await manager.createProfile("Browser task fixture");
+    if (extensionPaths.length) await manager.updateRegistry(registry => {
+      registry.profiles.find(item => item.id === profile.id).migratedExtensions = extensionPaths.map(extensionPath => ({
+        id: randomUUID(), sourceProfileId: 'fixture', sourceExtensionId: 'fixture',
+        name: 'Fixture extension', version: '0.0.1', path: path.resolve(extensionPath), migratedAt: new Date().toISOString(), includeData: false
+      }));
+    });
     const id = `isolated:${profile.id}`;
     port = await manager.prepareProfileForAgent(id);
     const { BrowserGatewayDaemon } = require("../dist/main/browser-gateway-daemon");

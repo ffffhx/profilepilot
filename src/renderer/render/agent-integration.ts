@@ -1,51 +1,31 @@
 import { store } from "../state";
+import { profilePilotSetupState } from "../../shared/profilepilot-setup";
 import type {
   AgentIntegrationDiagnostic,
   AgentSkillDiagnostic,
   AgentToolDiagnostic,
   AgentWrapperDiagnostic,
-  BrowserDriverKind,
-  PublicProfile
+  BrowserDriverKind
 } from "../types";
 import { escapeHtml, renderButtonLabel } from "../util";
+import { renderBrowserExtensionPanel, renderBrowserExtensionSummary } from "./browser-extension";
 
 const TOOL_ORDER: BrowserDriverKind[] = ["agent-browser", "playwright-cli", "chrome-devtools-mcp"];
 
-const TOOL_COPY: Record<BrowserDriverKind, { label: string; description: string; skillLabel: string }> = {
+const TOOL_COPY: Record<BrowserDriverKind, { label: string; description: string }> = {
   "agent-browser": {
     label: "agent-browser",
-    description: "面向 Agent 的浏览器操作 CLI，继续使用 open、snapshot、click 等原生命令。",
-    skillLabel: "agent-browser-cdp"
+    description: "面向 Agent 的浏览器操作 CLI，继续使用 open、snapshot、click 等原生命令。"
   },
   "playwright-cli": {
     label: "Playwright CLI",
-    description: "微软提供的 Playwright 命令行工具，通过受控 attach 接入真实 Chrome。",
-    skillLabel: "playwright-cli-profilepilot"
+    description: "微软提供的 Playwright 命令行工具，通过受控 attach 接入真实 Chrome。"
   },
   "chrome-devtools-mcp": {
     label: "Chrome DevTools MCP",
-    description: "作为 MCP Server 接入真实 Chrome；只检测已经安装的本机 CLI。",
-    skillLabel: "chrome-devtools-mcp-profilepilot"
+    description: "作为 MCP Server 接入真实 Chrome；只检测已经安装的本机 CLI。"
   }
 };
-
-function signalTone(ok: boolean, pending = false): "ready" | "blocked" | "pending" {
-  return pending ? "pending" : ok ? "ready" : "blocked";
-}
-
-function signalNode(label: string, detail: string, tone: "ready" | "blocked" | "pending"): string {
-  const stateLabel = tone === "ready" ? "就绪" : tone === "pending" ? "检测中" : "待配置";
-  return `
-    <div class="agent-signal-node ${tone}">
-      <span class="agent-signal-light" aria-hidden="true"></span>
-      <span class="agent-signal-copy">
-        <strong>${escapeHtml(label)}</strong>
-        <small>${escapeHtml(detail)}</small>
-      </span>
-      <span class="agent-signal-state">${stateLabel}</span>
-    </div>
-  `;
-}
 
 function installedToolCount(diagnostic: AgentIntegrationDiagnostic | null): number {
   return diagnostic?.tools.filter((tool) => tool.availability === "installed").length || 0;
@@ -56,51 +36,24 @@ function installedWrapperCount(diagnostic: AgentIntegrationDiagnostic | null): n
 }
 
 function installedSkillCount(diagnostic: AgentIntegrationDiagnostic | null): number {
-  return diagnostic?.skills.filter((skill) => skill.installed).length || 0;
+  return unifiedSkill(diagnostic)?.installed ? 1 : 0;
 }
 
-function readyToolchainCount(diagnostic: AgentIntegrationDiagnostic | null): number {
-  if (!diagnostic?.shellIntegration.installed) return 0;
-  return TOOL_ORDER.filter((key) => {
-    const tool = diagnostic.tools.find((item) => item.key === key);
-    const wrapper = diagnostic.wrappers.find((item) => item.key === key);
-    const skill = diagnostic.skills.find((item) => item.key === key);
-    return tool?.availability === "installed" && wrapperReady(wrapper) && Boolean(skill?.installed);
-  }).length;
+function unifiedSkill(diagnostic: AgentIntegrationDiagnostic | null): AgentSkillDiagnostic | null {
+  return diagnostic?.skills.find(skill => skill.key === "profilepilot") || diagnostic?.managementCli?.skill || null;
 }
 
-export function renderAgentAccessDock(_profiles: PublicProfile[]): string {
-  const diagnostic = store.agentIntegrationDiagnostic;
-  const tools = installedToolCount(diagnostic);
-  const wrappers = installedWrapperCount(diagnostic);
-  const skills = installedSkillCount(diagnostic);
-  const ready = readyToolchainCount(diagnostic);
-  const pending = store.agentIntegrationLoading;
-
-  return `
-    <section class="agent-access-dock" aria-labelledby="agent-access-title">
-      <div class="agent-access-intro">
-        <span class="agent-access-eyebrow">Agent Access</span>
-        <h2 id="agent-access-title">按工具接入 Agent</h2>
-        <p>真实 CLI、Wrapper 和配套 Skill 分别检测；只安装你实际使用的那一套。</p>
-        <div class="agent-access-actions">
-          <button type="button" class="primary" data-action="open-agent-integration">管理 Agent 工具</button>
-          <button type="button" class="agent-guide-link" data-action="open-onboarding">新手引导</button>
-        </div>
-      </div>
-      <div class="agent-signal-chain" aria-label="Agent 工具接入状态">
-        ${signalNode("真实工具", diagnostic ? `${tools}/3 已安装` : "等待检测", signalTone(tools > 0, pending))}
-        <span class="agent-signal-wire ${tools > 0 ? "active" : ""}" aria-hidden="true"></span>
-        ${signalNode("Wrapper", diagnostic ? `${wrappers} 个已接入` : "按工具独立安装", signalTone(wrappers > 0, pending))}
-        <span class="agent-signal-wire ${wrappers > 0 ? "active" : ""}" aria-hidden="true"></span>
-        ${signalNode("配套 Skill", diagnostic ? `${skills} 个已安装` : "让 Agent 遵守接管协议", signalTone(skills > 0, pending))}
-      </div>
-      <div class="agent-access-meter agent-ready-count" aria-label="完整接入数量">
-        <span>${ready}</span>
-        <small>READY</small>
-      </div>
-    </section>
-  `;
+function renderToolsStatusSummary(diagnostic: AgentIntegrationDiagnostic | null): string {
+  const pending = store.agentIntegrationLoading || !diagnostic;
+  const setup = profilePilotSetupState(diagnostic);
+  const status = pending ? "正在检测安装状态" : setup.status;
+  return `<section class="tools-status-summary" aria-label="配套工具状态概览">
+    ${renderBrowserExtensionSummary()}
+    <div class="tools-status-item ${pending ? "pending" : setup.ready ? "ready" : "blocked"}">
+      <span class="tools-status-mark" aria-hidden="true">${pending ? "…" : setup.ready ? "✓" : "!"}</span>
+      <div><strong>ProfilePilot CLI ${status}</strong><small>命令工具与 Agent 使用指引</small></div>
+    </div>
+  </section>`;
 }
 
 export function renderOnboardingModal(): string {
@@ -110,31 +63,31 @@ export function renderOnboardingModal(): string {
         <div class="onboarding-head">
           <div>
             <span class="modal-kicker">First Flight</span>
-            <h2 id="onboarding-title">选一套工具，完成三层接入</h2>
+            <h2 id="onboarding-title">一次安装，准备好 Agent 工具</h2>
           </div>
           <button type="button" class="modal-icon-close" data-action="dismiss-onboarding" aria-label="关闭新手引导">×</button>
         </div>
-        <p class="onboarding-lead">不要求安装全部工具。每种工具都按相同顺序独立准备，互不影响。</p>
+        <p class="onboarding-lead">安装 ProfilePilot CLI，即可获得命令工具和配套的 Agent 使用指引。</p>
         <div class="onboarding-route" aria-label="接入顺序">
           <article>
             <span>01</span>
-            <div><strong>安装真实工具</strong><p>只认本机已经安装且能够返回版本号的 CLI；缺少时复制安装命令。</p></div>
+            <div><strong>安装 ProfilePilot CLI</strong><p>自动配置命令工具和 Agent 使用指引，一起更新并保留个人控制偏好。</p></div>
           </article>
           <i aria-hidden="true"></i>
           <article>
             <span>02</span>
-            <div><strong>安装对应 Wrapper</strong><p>Wrapper 随 ProfilePilot 提供，一次只启用当前工具的受控启动器。</p></div>
+            <div><strong>选择连接方式</strong><p>ppilot browser 支持扩展和 Gateway 两种连接，浏览器驱动已内置。</p></div>
           </article>
           <i aria-hidden="true"></i>
           <article>
             <span>03</span>
-            <div><strong>安装配套 Skill</strong><p>让 Codex 和 Claude 理解 Gateway、用户接管与任务结束规则。</p></div>
+            <div><strong>确认目标 Profile</strong><p>复用所选浏览器的登录态，并遵守会话独占、用户接管和结束规则。</p></div>
           </article>
         </div>
         ${renderInputGuardPermissionCard("onboarding")}
         <div class="onboarding-safety-note">
           <span>CONTROL RULE</span>
-          <p>用户接管浏览器时，Wrapper 会硬停 Agent；配套 Skill 会要求 Agent 等待，而不是绕过保护。</p>
+          <p>用户接管浏览器时，CLI 会停止 Agent 操作；随附指引会指导 Agent 等待交还控制。</p>
         </div>
         <div class="modal-actions onboarding-actions">
           <button type="button" data-action="dismiss-onboarding">稍后再说</button>
@@ -145,136 +98,137 @@ export function renderOnboardingModal(): string {
   `;
 }
 
-export function renderAgentIntegrationModal(_profiles: PublicProfile[]): string {
+export function renderAgentIntegrationPanel(): string {
   const diagnostic = store.agentIntegrationDiagnostic;
-  const loading = store.agentIntegrationLoading || store.busy;
-  const toolCount = installedToolCount(diagnostic);
-  const wrapperCount = installedWrapperCount(diagnostic);
-  const skillCount = installedSkillCount(diagnostic);
-
+  const pending = store.agentIntegrationLoading || store.busy || !diagnostic;
   return `
-    <div class="modal-backdrop app-modal-backdrop" data-action="close-modal">
-      <section class="modal agent-integration-modal" role="dialog" aria-modal="true" aria-labelledby="agent-integration-title">
-        <div class="agent-integration-head">
-          <div>
-            <span class="modal-kicker">Agent Tooling</span>
-            <h2 id="agent-integration-title">Agent 工具接入</h2>
-            <p>每种工具独立完成“真实 CLI → Wrapper → Skill”。只配置你要使用的工具。</p>
+    <section class="agent-integration-page" aria-labelledby="agent-integration-title">
+      <h2 id="agent-integration-title" class="tools-visually-hidden">Agent 工作环境</h2>
+      ${renderToolsStatusSummary(diagnostic)}
+      ${renderBrowserExtensionPanel()}
+      <div class="tools-overview-grid">
+        ${renderManagementCliPanel(diagnostic, pending)}
+        ${renderGatewayOverview(diagnostic, pending)}
+        ${renderControlPreferences(diagnostic, pending)}
+      </div>
+      <details id="tools-connection-diagnostics" class="tools-diagnostics">
+        <summary><span class="tools-help-icon" aria-hidden="true">?</span><span>需要帮助？查看连接诊断</span><span class="tools-diagnostic-arrow" aria-hidden="true">›</span></summary>
+        <div class="tools-disclosure-body">
+          <div class="agent-section-heading"><div><strong>连接诊断</strong><p>安装统一 CLI，再确认目标 Profile 的扩展或 Gateway 连接。</p></div>
+            <button type="button" data-action="refresh-agent-integration" ${pending ? "disabled" : ""}>${renderButtonLabel(pending, "重新检测", "检测中…")}</button>
           </div>
-          <button type="button" class="modal-icon-close" data-action="close-modal" aria-label="关闭 Agent 工具接入">×</button>
-        </div>
-
-        ${renderManagementCliPanel(diagnostic, loading || !diagnostic)}
-
-        <section class="agent-tools-panel agent-setup-panel" aria-labelledby="agent-tools-title">
-          <div class="agent-section-heading">
-            <div><span>TOOL CHAINS</span><strong id="agent-tools-title">逐工具配置</strong></div>
-            <div class="agent-section-status">
-              ${diagnostic ? `<span>工具 ${toolCount}/3 · Wrapper ${wrapperCount} · Skill ${skillCount}</span>` : ""}
-              <button type="button" class="compact ${loading ? "loading" : ""}" data-action="refresh-agent-integration" ${loading ? "disabled" : ""}>
-                ${renderButtonLabel(loading, "重新检测", "检测中…")}
-              </button>
-            </div>
-          </div>
-          <div class="agent-tool-grid agent-setup-grid">
-            ${TOOL_ORDER.map((key) => renderToolSetupCard(key, diagnostic, loading || !diagnostic)).join("")}
-          </div>
+          ${diagnostic?.inspectedAt ? `<p class="tools-inspected-at">最近检测：${escapeHtml(new Date(diagnostic.inspectedAt).toLocaleString())}</p>` : ""}
           ${renderSessionBridge(diagnostic)}
-        </section>
-
-        ${renderInputGuardPermissionCard("integration")}
-      </section>
-    </div>
-  `;
-}
-
-function renderManagementCliPanel(
-  diagnostic: AgentIntegrationDiagnostic | null,
-  pending: boolean
-): string {
-  const cli = diagnostic?.managementCli || null;
-  const skill = cli?.skill || null;
-  const cliPartial = Boolean(cli?.bundleInstalled || cli?.launcherInstalled) && !cli?.installed;
-  const cliStale = Boolean(cli?.installed && !cli.upToDate);
-  const skillInstalled = Boolean(skill?.installed);
-  const externalSkill = skillInstalled && !skill?.managed;
-  const skillStale = skillInstalled && Boolean(skill?.managed) && !skill?.upToDate;
-  const ready = Boolean(cli?.installed && skillInstalled && diagnostic?.shellIntegration.installed);
-  const cliStatus = pending
-    ? "检测中"
-    : cliStale
-      ? "需要更新"
-      : cli?.installed
-        ? "已安装"
-        : cliPartial
-          ? "安装不完整"
-          : "未安装";
-  const skillStatus = pending
-    ? "检测中"
-    : externalSkill
-      ? "已安装 · 外部管理"
-      : skillStale
-        ? "需要更新"
-        : skillInstalled
-          ? "已安装"
-          : "未安装";
-
-  return `
-    <section class="agent-management-cli ${ready ? "ready" : "pending"}" aria-labelledby="management-cli-title">
-      <div class="agent-management-cli-head">
-        <div>
-          <span>PROFILE MANAGEMENT CLI</span>
-          <strong id="management-cli-title">让 Agent 管理 Profile</strong>
-          <p>独立的 <code>profilepilot</code> 命令通过本机受保护 Socket 执行查询、创建、重命名、启动、停止和删除。</p>
+          ${renderInputGuardPermissionCard("integration")}
         </div>
-        <em>${ready ? "READY" : "SETUP"}</em>
-      </div>
-      <div class="agent-management-cli-stages">
-        ${renderSetupStage({
-          index: "01",
-          label: "管理 CLI",
-          status: cliStatus,
-          tone: pending ? "pending" : cli?.installed ? "ready" : "blocked",
-          detail: cli?.installed
-            ? cli.launcherPath
-            : cliPartial
-              ? "CLI 文件不完整，可一键修复"
-              : "ProfilePilot 内置，可独立安装",
-          actions: pending
-            ? ""
-            : `
-              <button type="button" data-action="install-profilepilot-cli">${cliStale ? "更新 CLI" : cliPartial ? "修复 CLI" : cli?.installed ? "验证 / 重装" : "安装管理 CLI"}</button>
-              ${cli?.installed || cliPartial ? `<button type="button" class="danger-ghost" data-action="remove-profilepilot-cli">移除</button>` : ""}
-            `
-        })}
-        ${renderSetupStage({
-          index: "02",
-          label: "管理 Skill",
-          status: skillStatus,
-          tone: pending ? "pending" : skillInstalled ? "ready" : "blocked",
-          detail: skillInstalled
-            ? `${skill?.skillId || "profilepilot-cli"} · ${skill?.installedTargetCount || 0}/${skill?.targetCount || 3} 个 Agent 目录`
-            : cli?.installed
-              ? "让 Codex / Claude 安全执行 Profile 增删改查"
-              : "安装管理 CLI 后开放",
-          actions: pending
-            ? ""
-            : `
-              ${externalSkill
-                ? `<span class="agent-external-note">由现有 Skill 管理器提供</span>`
-                : `<button type="button" data-action="install-profilepilot-cli-skill" ${cli?.installed ? "" : "disabled"}>${skillStale ? "更新 Skill" : skillInstalled ? "重新安装" : "安装管理 Skill"}</button>`}
-              ${skill?.managedTargetCount ? `<button type="button" class="danger-ghost" data-action="remove-profilepilot-cli-skill">移除本工具安装</button>` : ""}
-            `
-        })}
-      </div>
-      <div class="agent-management-cli-example">
-        <code>profilepilot profile list --json</code>
-        <span>删除必须显式添加 <code>--yes</code>；系统 Profile 只读。</span>
-      </div>
-    </section>
-  `;
+      </details>
+    </section>`;
 }
 
+function overviewIcon(kind: "skill" | "cli" | "gateway" | "preferences"): string {
+  const paths = {
+    skill: '<path d="m12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5"/>',
+    cli: '<path d="m6 7 5 5-5 5m8 0h5"/>',
+    gateway: '<circle cx="12" cy="5" r="3"/><circle cx="5" cy="19" r="3"/><circle cx="19" cy="19" r="3"/><path d="m10.5 7.5-4 9m7-9 4 9M8 19h8"/>',
+    preferences: '<path d="m10 3-.6 2.1-2 .9-2-.5-2 3.5 1.5 1.6v2.3L3.4 15l2 3.5 2-.5 2 .9.6 2.1h4l.6-2.1 2-.9 2 .5 2-3.5-1.5-1.6v-2.3L20.6 9l-2-3.5-2 .5-2-.9L14 3Z"/><circle cx="12" cy="12" r="3"/>'
+  };
+  return `<span class="tools-overview-icon ${kind}" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${paths[kind]}</svg></span>`;
+}
+
+function renderBundledInstructions(diagnostic: AgentIntegrationDiagnostic | null, pending: boolean): string {
+  const skill = unifiedSkill(diagnostic);
+  const installed = Boolean(skill?.installed);
+  const external = installed && !skill?.managed;
+  const stale = installed && skill?.managed && !skill.upToDate;
+  const partial = Boolean(skill?.installedTargetCount) && !installed;
+  const status = pending ? "检测中" : external ? "已安装 · 外部管理" : stale ? "需要更新" : installed ? "已安装" : partial ? "部分安装" : "未安装";
+  const tone = pending ? "pending" : installed && !stale ? "ready" : "blocked";
+  return `
+      <section id="tools-guide-details" aria-label="Agent 使用指引">
+        ${renderSetupStage({
+          index: "02", label: "Agent 使用指引（随 CLI 安装）", status, tone,
+          detail: `共享 Agent / Codex / Claude · ${skill?.installedTargetCount || 0}/${skill?.targetCount || 3} 个目录`,
+          actions: ""
+        })}
+        ${skill?.targets.map(target => `<p class="tools-guide-target"><strong>${escapeHtml(target.label)}</strong> · ${target.installed ? !target.managed ? "外部维护" : target.upToDate ? "已更新" : "待更新" : "待安装"}<code class="tools-path">${escapeHtml(target.path)}</code></p>`).join("") || ""}
+        <p>指引以 <code>SKILL.md</code> 供 Agent 读取，与 CLI 同步更新。个人偏好 <code>local/browser-routing.md</code> 在更新和移除时保留。</p>
+        ${skill?.targets.some(target => target.installed && !target.managed) || external ? '<p>外部维护的指引会保留；如版本不同，请通过原工具更新后重新检测。</p>' : ""}
+        ${skill?.error ? `<p class="tools-diagnostic-error" role="alert">${escapeHtml(skill.error)}</p>` : ""}
+        ${skill?.legacySkillPaths?.length ? `<p>检测到旧版指引；安装时会备份并迁移本工具管理的版本，外部版本保留。</p>` : ""}
+      </section>`;
+}
+
+function renderManagementCliPanel(diagnostic: AgentIntegrationDiagnostic | null, pending: boolean): string {
+  const cli = diagnostic?.managementCli || null;
+  const setup = profilePilotSetupState(diagnostic);
+  const status = pending ? "检测中" : setup.status;
+  const cliReady = Boolean(cli?.installed && cli.upToDate && diagnostic?.shellIntegration.installed);
+  const cliStatus = pending ? "检测中" : cliReady ? "已就绪" : cli?.installed && !cli.upToDate ? "需要更新" : cli?.installed ? "终端连接待修复" : "未安装";
+  const action = setup.ready ? "检查 / 更新" : setup.needsUpdate ? "更新 ProfilePilot CLI" : setup.hasParts ? "修复 ProfilePilot CLI" : "安装 ProfilePilot CLI";
+  return `
+    <details id="tools-cli-details" class="tools-overview-card tools-cli-card ${pending ? "pending" : setup.ready ? "ready" : "blocked"}" data-tools-search="ProfilePilot CLI ppilot browser phone Skill Agent 使用指引 扩展 Gateway 终端 命令 安装">
+      <summary class="tools-overview-summary">
+        ${overviewIcon("cli")}
+        <span class="tools-overview-copy"><span class="tools-overview-title"><strong id="management-cli-title">ProfilePilot CLI</strong><em>${status}</em></span>
+          <span class="tools-overview-line"><small>命令工具与 Agent 使用指引，一次安装，一起更新</small><button type="button" data-action="install-profilepilot-cli" ${pending ? "disabled" : ""}>${pending ? "检测中…" : action}</button></span>
+        </span>
+      </summary>
+      <div class="tools-disclosure-body">
+        <p><code>ppilot</code> 提供浏览器、手机、Profile 管理与 Agent 对话命令。安装时同时配置命令工具和随附指引，无需分别安装 Skill。</p>
+        ${renderSetupStage({
+          index: "01", label: "命令工具（ppilot）", status: cliStatus,
+          tone: pending ? "pending" : cliReady ? "ready" : "blocked",
+          detail: cli?.installed ? cli.launcherPath : "包含浏览器与手机控制入口，以及内置驱动",
+          actions: pending ? "" : '<button type="button" data-action="copy-agent-command" data-command="ppilot --help">复制帮助命令</button>'
+        })}
+        ${renderBundledInstructions(diagnostic, pending)}
+        <div class="agent-management-cli-example"><code>ppilot browser status</code><span>扩展连接：独立浏览器服务自动启动，无需保持桌面应用打开。</span></div>
+        <div class="agent-management-cli-example"><code>ppilot browser --cdp PORT snapshot -i</code><span>Gateway 连接：PORT 为目标的 Agent 逻辑端口。Agent 会话自动识别，手动使用时添加 <code>--session 任务名</code>。</span></div>
+        <div class="agent-management-cli-example"><code>ppilot browser --help</code><span>查看两种连接的命令。旧 agent-browser 命令继续兼容。</span></div>
+        <div class="agent-management-cli-example"><code>ppilot phone --help</code><span>查看手机连接、控制会话与 ADB 接入命令。</span></div>
+        <div class="agent-management-cli-example"><code>ppilot profile list --json</code><span>删除必须显式添加 <code>--yes</code>；系统 Profile 的管理操作只读。</span></div>
+        <div class="agent-management-cli-example"><code>ppilot chat --profile "Profile 名称"</code><span>任务与桌面同步；使用 <code>ppilot --help</code> 查看脚本调用和恢复任务的命令。</span></div>
+        ${cli?.error ? `<p class="tools-diagnostic-error" role="alert">${escapeHtml(cli.error)}</p>` : ""}
+        ${diagnostic?.shellIntegration.error ? `<p class="tools-diagnostic-error" role="alert">${escapeHtml(diagnostic.shellIntegration.error)}</p>` : ""}
+        ${setup.hasParts ? `<div class="agent-stage-actions"><button type="button" class="danger-ghost" data-action="remove-profilepilot-cli" ${pending ? "disabled" : ""}>移除 CLI 与随附指引</button><span class="agent-external-note">个人偏好和外部维护的指引会保留。</span></div>` : ""}
+      </div>
+    </details>`;
+}
+
+function renderGatewayOverview(diagnostic: AgentIntegrationDiagnostic | null, pending: boolean): string {
+  const readyCount = diagnostic && unifiedSkill(diagnostic)?.installed && diagnostic.shellIntegration.installed
+    ? TOOL_ORDER.filter(key => diagnostic.tools.some(tool => tool.key === key && tool.availability === "installed") && wrapperReady(diagnostic.wrappers.find(wrapper => wrapper.key === key))).length : 0;
+  const status = pending ? "检测中" : readyCount ? `${readyCount} 套可用` : "可选";
+  return `<details id="tools-gateway-details" class="tools-overview-card tools-gateway-card ${pending ? "pending" : readyCount ? "ready" : "blocked"}" data-tools-search="Gateway agent-browser Playwright CLI Chrome DevTools MCP Wrapper 会话">
+    <summary class="tools-overview-summary">
+      ${overviewIcon("gateway")}
+      <span class="tools-overview-copy"><span class="tools-overview-title"><strong id="agent-tools-title">其他工具兼容</strong><em>${status}</em></span>
+        <span class="tools-overview-line"><small>已有 agent-browser、Playwright、MCP</small><span class="tools-card-action">查看配置</span></span>
+      </span>
+    </summary>
+    <div class="tools-disclosure-body">
+      <div class="agent-section-heading"><div><strong>已有工具的兼容接入</strong><p>使用 ppilot browser CLI 无需配置此处。仅在保留其他工具的原命令时，安装对应的兼容 Wrapper。</p></div><span>${diagnostic ? `工具 ${installedToolCount(diagnostic)}/3 · Wrapper ${installedWrapperCount(diagnostic)} · Skill ${installedSkillCount(diagnostic)}` : "等待检测"}</span></div>
+      <div class="agent-tool-grid agent-setup-grid">${TOOL_ORDER.map(key => renderToolSetupCard(key, diagnostic, pending)).join("")}</div>
+      ${renderSessionBridge(diagnostic)}
+    </div>
+  </details>`;
+}
+
+function renderControlPreferences(diagnostic: AgentIntegrationDiagnostic | null, pending: boolean): string {
+  const skill = unifiedSkill(diagnostic);
+  const canEdit = !pending && Boolean(skill?.installedTargetCount);
+  return `<details id="tools-control-preferences" class="tools-overview-card tools-preferences-card" data-tools-search="控制偏好 浏览器 手机 安卓 Profile 设备 连接方式 browser phone 编辑">
+    <summary class="tools-overview-summary">
+      ${overviewIcon("preferences")}
+      <span class="tools-overview-copy"><span class="tools-overview-title"><strong>控制偏好</strong></span>
+        <span class="tools-overview-line"><small>浏览器与手机的使用规则</small><button type="button" data-action="open-control-preferences" ${canEdit ? "" : "disabled"}>编辑偏好</button></span>
+      </span>
+    </summary>
+    <div class="tools-disclosure-body"><p>分别设置浏览器的 Profile 与连接方式、手机的设备与控制模式，以及操作前的确认规则。个人偏好会随 Agent 使用指引读取，更新 CLI 时保留。</p>
+      <p>${canEdit ? "点击“编辑偏好”，在浏览器和手机两个 Tab 中查看、编辑并保存。" : "先安装 ProfilePilot CLI，再编辑个人控制偏好。"}</p>
+    </div>
+  </details>`;
+}
 function renderToolSetupCard(
   key: BrowserDriverKind,
   diagnostic: AgentIntegrationDiagnostic | null,
@@ -283,7 +237,7 @@ function renderToolSetupCard(
   const copy = TOOL_COPY[key];
   const tool = diagnostic?.tools.find((item) => item.key === key) || null;
   const wrapper = diagnostic?.wrappers.find((item) => item.key === key) || null;
-  const skill = diagnostic?.skills.find((item) => item.key === key) || null;
+  const skill = unifiedSkill(diagnostic);
   const toolReady = tool?.availability === "installed";
   const wrapperInstalled = wrapperReady(wrapper);
   const skillInstalled = Boolean(skill?.installed);
@@ -297,10 +251,10 @@ function renderToolSetupCard(
         ? "先安装工具"
         : !wrapperInstalled
           ? "待装 Wrapper"
-          : "待装 Skill";
+          : !skillInstalled ? "待配置使用指引" : "待修复会话";
 
   return `
-    <article class="agent-tool-card agent-setup-card ${complete ? "ready" : toolReady ? "installed" : "missing"}">
+    <article class="agent-tool-card agent-setup-card ${pending ? "pending" : complete ? "ready" : toolReady ? "installed" : "missing"}">
       <header>
         <span class="agent-tool-light" aria-hidden="true"></span>
         <strong>${escapeHtml(copy.label)}</strong>
@@ -310,11 +264,10 @@ function renderToolSetupCard(
       <div class="agent-setup-stages">
         ${renderToolStage(key, tool, pending)}
         ${renderWrapperStage(key, wrapper, toolReady, pending)}
-        ${renderSkillStage(key, skill, wrapperInstalled, pending)}
       </div>
-      <div class="agent-toolchain-result ${complete ? "ready" : "blocked"}">
-        <span>${complete ? "READY" : "NEXT"}</span>
-        <strong>${complete ? "这套工具可以使用" : nextActionLabel(toolReady, wrapperInstalled, skillInstalled)}</strong>
+      <div class="agent-toolchain-result ${pending ? "pending" : complete ? "ready" : "blocked"}">
+        <span>${pending ? "检测中" : complete ? "已就绪" : "下一步"}</span>
+        <strong>${pending ? "正在确认本机工具状态" : complete ? "这套工具可以使用" : nextActionLabel(toolReady, wrapperInstalled, skillInstalled, sessionReady)}</strong>
       </div>
     </article>
   `;
@@ -374,52 +327,6 @@ function renderWrapperStage(
   });
 }
 
-function renderSkillStage(
-  key: BrowserDriverKind,
-  skill: AgentSkillDiagnostic | null,
-  wrapperInstalled: boolean,
-  pending: boolean
-): string {
-  const installed = Boolean(skill?.installed);
-  const partial = Boolean(skill?.installedTargetCount) && !installed;
-  const external = installed && !skill?.managed;
-  const stale = installed && skill?.managed && !skill.upToDate;
-  const status = pending
-    ? "检测中"
-    : external
-      ? "已安装 · 外部管理"
-      : stale
-        ? "需要更新"
-        : installed
-          ? "已安装"
-          : partial
-            ? "部分安装"
-            : "未安装";
-  const detail = installed
-    ? `${skill?.skillId || TOOL_COPY[key].skillLabel} · ${skill?.installedTargetCount || 0}/${skill?.targetCount || 3} 个 Agent 目录`
-    : partial
-      ? `${skill?.installedTargetCount || 0}/${skill?.targetCount || 3} 个 Agent 目录可见`
-      : wrapperInstalled
-        ? `安装 ${skill?.skillId || TOOL_COPY[key].skillLabel}`
-        : "安装 Wrapper 后开放";
-  const canInstall = wrapperInstalled && !external;
-  const actionLabel = stale ? "更新 Skill" : partial ? "补齐 Skill" : installed ? "重新安装" : "安装 Skill";
-  const actions = pending
-    ? ""
-    : `
-      ${external ? `<span class="agent-external-note">由现有 Skill 管理器提供</span>` : `<button type="button" data-action="install-agent-skill" data-tool="${key}" ${canInstall ? "" : "disabled"}>${actionLabel}</button>`}
-      ${skill?.managedTargetCount ? `<button type="button" class="danger-ghost" data-action="remove-agent-skill" data-tool="${key}">移除本工具安装</button>` : ""}
-    `;
-  return renderSetupStage({
-    index: "03",
-    label: "配套 Skill",
-    status,
-    tone: pending ? "pending" : installed ? "ready" : "blocked",
-    detail,
-    actions
-  });
-}
-
 function renderSetupStage(input: {
   index: string;
   label: string;
@@ -451,7 +358,7 @@ function renderSessionBridge(diagnostic: AgentIntegrationDiagnostic | null): str
       : "安装第一个 Wrapper 时自动启用会话识别";
   return `
     <div class="agent-session-bridge ${ready ? "ready" : wrappers > 0 ? "blocked" : "idle"}">
-      <span>SESSION BRIDGE</span>
+      <span>Agent 会话识别</span>
       <strong>${escapeHtml(status)}</strong>
       <small>${escapeHtml(shell?.path || (store.state?.platform === "win32" ? "Windows 用户 PATH" : "~/.zshenv"))} · 只对之后新开的 Codex / Claude 会话生效</small>
       ${wrappers > 0 && !shell?.installed ? `<button type="button" data-action="enable-shell-integration">修复会话识别</button>` : ""}
@@ -526,9 +433,10 @@ function wrapperReady(wrapper: AgentWrapperDiagnostic | null | undefined): boole
   return Boolean(wrapper?.wrapperInstalled && wrapper.launcherInstalled);
 }
 
-function nextActionLabel(tool: boolean, wrapper: boolean, skill: boolean): string {
+function nextActionLabel(tool: boolean, wrapper: boolean, skill: boolean, session: boolean): string {
   if (!tool) return "先安装真实工具";
   if (!wrapper) return "下一步：安装 Wrapper";
-  if (!skill) return "下一步：安装配套 Skill";
+  if (!skill) return "下一步：安装 ProfilePilot CLI（含使用指引）";
+  if (!session) return "下一步：修复会话识别";
   return "新开 Agent 会话后生效";
 }

@@ -10,12 +10,23 @@ export function confirmTaskAction(title: string, description: string, confirmLab
     dialog.querySelector("p")!.textContent = description;
     if (title.includes("断开")) dialog.querySelector("[data-confirm-action]")!.textContent = "确认断开";
     if (confirmLabel) dialog.querySelector("[data-confirm-action]")!.textContent = confirmLabel;
-    dialog.addEventListener("close", () => {
-      const confirmed = dialog.returnValue === "confirm";
+    let settled = false;
+    const finish = (confirmed: boolean) => {
+      if (settled) return;
+      settled = true;
+      if (dialog.open) dialog.close(confirmed ? "confirm" : "cancel");
       dialog.remove();
       if (origin?.isConnected) origin.focus({ preventScroll: true });
       resolve(confirmed);
-    }, { once: true });
+    };
+    // Native close events may wait for a frame in a hidden Electron window.
+    // Complete explicit user decisions without waiting for that frame.
+    dialog.querySelector("form")!.addEventListener("submit", event => {
+      event.preventDefault();
+      finish((event.submitter as HTMLButtonElement | null)?.value === "confirm");
+    });
+    dialog.addEventListener("cancel", event => { event.preventDefault(); finish(false); });
+    dialog.addEventListener("close", () => finish(dialog.returnValue === "confirm"), { once: true });
     document.body.append(dialog); dialog.showModal();
   });
 }

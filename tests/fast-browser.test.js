@@ -1,10 +1,11 @@
+require('./helpers/native-dom-source.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
-const { FastBrowser, FastBrowserPageError } = require('../dist/main/tasks/fast-browser');
+const { FastBrowser, FastBrowserPageError } = require('../src/main/tasks/fast-browser.ts');
 
 function fixture() {
-  const context = vm.createContext({ crypto: {}, location: { href: 'about:blank' }, document: { title: '', body: { innerText: '' }, querySelectorAll: () => [] } });
+  const context = vm.createContext({ crypto: {}, location: { href: 'about:blank' }, getComputedStyle: el => el.style || {}, document: { title: '', body: { innerText: '' }, querySelectorAll: () => [] } });
   context.window = context;
   const browser = new FastBrowser(async () => {});
   browser.raw = async (_task, _method, { expression }) => {
@@ -162,4 +163,63 @@ test('a dropdown SVG without pointer cursor, role or tabindex is observable and 
   await f.browser.execute(task, { kind: 'hover', ref: avatar.ref, effect: 'read' });
   assert.deepEqual(f.mouse.map(e => e.type), ['mouseMoved']);
   assert.ok((await f.browser.observe(task)).fast.candidates.some(c => c.label === '投递记录'));
+});
+
+function scrollFixture(horizontal = false, shadow = false) {
+  const f = hoverFixture(), context = f.context;
+  const target = context.document.querySelectorAll('div,span,img,svg,li')[0];
+  context.scrollX = 0; context.scrollY = 0;
+  context.document.documentElement = { scrollHeight: 5000, scrollWidth: 3000, style: { direction: 'ltr' } };
+  let windowScrolls = 0;
+  context.scrollBy = ({ top, left }) => { windowScrolls++; context.scrollY += top; context.scrollX += left; };
+  const panel = { isConnected: true, textContent: 'Panel', style: { cursor: 'auto', overflowX: horizontal ? 'auto' : 'visible', overflowY: horizontal ? 'visible' : 'auto', direction: 'ltr' },
+    scrollTop: 0, scrollLeft: 0, clientWidth: 200, clientHeight: 200, scrollWidth: horizontal ? 1200 : 200, scrollHeight: horizontal ? 200 : 1200,
+    parentElement: context.document.body, closest: () => null,
+    scrollBy({ top, left }) { this.scrollTop = Math.max(0, Math.min(this.scrollHeight - this.clientHeight, this.scrollTop + top)); this.scrollLeft = Math.max(0, Math.min(this.scrollWidth - this.clientWidth, this.scrollLeft + left)); }
+  };
+  if (shadow) { target.parentElement = null; target.getRootNode = () => ({ host: panel }); }
+  else target.parentElement = panel;
+  return { ...f, target, panel, windowScrolls: () => windowScrolls };
+}
+
+const scrollResult = message => JSON.parse(message.match(/^滚动结果：(.*)；需要/)[1]);
+
+test('ref scroll targets the nearest scroll container and reports movement and boundary without bubbling', async () => {
+  const f = scrollFixture(), task = { observation: await f.browser.observe({}) }, ref = task.observation.fast.candidates[0].ref;
+  const first = scrollResult(await f.browser.execute(task, { kind: 'scroll', ref, value: 'down' }));
+  assert.equal(first.target, 'element'); assert.deepEqual(first.moved, { x: 0, y: 600 }); assert.equal(first.atBoundary, false);
+  const second = scrollResult(await f.browser.execute(task, { kind: 'scroll', ref, value: 'down' }));
+  assert.deepEqual(second.moved, { x: 0, y: 400 }); assert.equal(second.atBoundary, true);
+  const third = scrollResult(await f.browser.execute(task, { kind: 'scroll', ref, value: 'down' }));
+  assert.deepEqual(third.moved, { x: 0, y: 0 }); assert.equal(third.atBoundary, true);
+  assert.equal(f.windowScrolls(), 0); assert.equal(f.context.scrollY, 0);
+});
+
+test('horizontal ref scrolling crosses a shadow host and rejects missing refs before moving the window', async () => {
+  const f = scrollFixture(true, true), task = { observation: await f.browser.observe({}) }, ref = task.observation.fast.candidates[0].ref;
+  const result = scrollResult(await f.browser.execute(task, { kind: 'scroll', ref, value: 'right' }));
+  assert.deepEqual(result.moved, { x: 600, y: 0 }); assert.equal(f.panel.scrollLeft, 600);
+  await assert.rejects(f.browser.execute(task, { kind: 'scroll', ref: 'e99999', value: 'down' }), /目标元素已失效/);
+  assert.equal(f.windowScrolls(), 0);
+});
+
+test('an explicitly referenced scrollable control takes precedence over its scrollable parent', async () => {
+  const f = scrollFixture();
+  Object.assign(f.target, { scrollTop: 0, scrollLeft: 0, clientWidth: 100, clientHeight: 100, scrollWidth: 100, scrollHeight: 400, scrollBy: f.panel.scrollBy });
+  f.target.style = { ...f.target.style, overflowY: 'auto', direction: 'ltr' };
+  const task = { observation: await f.browser.observe({}) }, ref = task.observation.fast.candidates[0].ref;
+  const result = scrollResult(await f.browser.execute(task, { kind: 'scroll', ref, value: 'down' }));
+  assert.deepEqual(result.moved, { x: 0, y: 300 }); assert.equal(result.atBoundary, true);
+  assert.equal(f.target.scrollTop, 300); assert.equal(f.panel.scrollTop, 0); assert.equal(f.windowScrolls(), 0);
+});
+
+test('ref without a scrollable target reports failure and unscoped scroll reports actual window displacement', async () => {
+  const f = scrollFixture(), task = { observation: await f.browser.observe({}) }, ref = task.observation.fast.candidates[0].ref;
+  f.panel.style.overflowY = 'visible';
+  f.context.document.documentElement.scrollHeight = 600;
+  await assert.rejects(f.browser.execute(task, { kind: 'scroll', ref, value: 'down' }), /没有可滚动区域/);
+  assert.equal(f.windowScrolls(), 0);
+  f.context.document.documentElement.scrollHeight = 5000;
+  const result = scrollResult(await f.browser.execute(task, { kind: 'scroll', value: 'down' }));
+  assert.equal(result.target, 'window'); assert.deepEqual(result.moved, { x: 0, y: 600 }); assert.equal(result.atBoundary, false);
 });

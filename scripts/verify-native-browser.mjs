@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
@@ -9,10 +9,11 @@ import { promisify } from 'node:util';
 import { startTaskGatewayFixture } from './task-gateway-fixture.mjs';
 import { startTaskFixture } from './browser-task-fixture.mjs';
 const require = createRequire(import.meta.url);
-const { NativeBrowserBridge, NATIVE_EXTENSION_ID } = require('../dist/main/tasks/native-bridge');
-const { NativeBrowser } = require('../dist/main/tasks/native-browser');
-const { NativePreviewStream } = require('../dist/main/tasks/native-preview');
-const { parseCliResult } = require('../dist/main/tasks/browser');
+const build = path.resolve(process.env.PP_CONTROL_BUILD || 'dist');
+const { NativeBrowserBridge, NATIVE_EXTENSION_ID } = require(path.join(build, 'main/tasks/native-bridge'));
+const { NativeBrowser } = require(path.join(build, 'main/tasks/native-browser'));
+const { NativePreviewStream } = require(path.join(build, 'main/tasks/native-preview'));
+const { parseCliResult } = require(path.join(build, 'main/tasks/browser'));
 const root = await mkdtemp(path.join(os.tmpdir(), 'pp-native-test-'));
 const gateway = await startTaskGatewayFixture();
 const fixture = await startTaskFixture();
@@ -39,9 +40,10 @@ try {
   const pair = await bridge.pair(task.profileId);
   // Exercise the same extension popup message as an explicit user pairing. The
   // disposable fixture has no user accounts, history or real-world side effects.
-  const paired = await evaluate(`(async () => { const tabs = await chrome.tabs.query({}); const tab = tabs.find(t => t.url?.startsWith(${JSON.stringify(fixture.url)})); return chrome.runtime.sendMessage({ method: 'connect', code: ${JSON.stringify(pair.code)}, tabId: tab.id }); })()`);
+  const paired = await evaluate(`(async () => { const tabs = await chrome.tabs.query({}); const tab = tabs.find(t => t.url?.startsWith(${JSON.stringify(fixture.url)})); const reply = await chrome.runtime.sendMessage({ method: 'connect', code: ${JSON.stringify(pair.code)} }); await chrome.tabs.update(tab.id, {active:true}); return { ...reply, tabId:tab.id }; })()`);
   if (process.env.PP_NATIVE_TRACE) console.log('Pairing result:', JSON.stringify(paired));
   if (paired?.error) throw new Error(paired.error);
+  task.nativeTarget = { tabId: paired.tabId };
   await until(() => bridge.states().some(s => s.connected), 'Extension did not authenticate');
   // Release the test bootstrap driver before the new extension begins control.
   await cli(['profilepilot', 'complete']); bootstrapDone = true;
@@ -53,7 +55,15 @@ try {
     task.observation = await browser.observe(task);
     const candidate = task.observation.fast.candidates.find(c => c.label.includes(label));
     assert.ok(candidate, `Missing control: ${label}`);
-    return browser.execute(task, { kind, ref: candidate.ref, value, effect: 'edit', summary: 'Local extension fixture', ...extra });
+    try { return await browser.execute(task, { kind, ref: candidate.ref, value, effect: 'edit', summary: 'Local extension fixture', ...extra }); }
+    catch (error) {
+      const before = task.observation;
+      const after = await browser.observeFast(task).catch(() => undefined);
+      const evidence = { kind, label, ref: candidate.ref, phase: error.phase, error: error.message, before: before?.fast, after: after?.fast };
+      const out = path.resolve('artifacts/herdr-native-20260926/control-evidence'); await mkdir(out, { recursive: true });
+      await writeFile(path.join(out, 'native-adapter-failure.json'), JSON.stringify(evidence, null, 2));
+      throw error;
+    }
   };
   await action('fill', '姓名', 'Extension test');
   await action('fill', '邮箱', 'fixture@example.test');

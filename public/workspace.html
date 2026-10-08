@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN" class="workspace-layout">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'">
+  <title>ProfilePilot</title>
+  <link rel="icon" href="./assets/profilepilot-mark.svg">
+  <link rel="stylesheet" href="./workspace-switcher.css">
+  <link rel="stylesheet" href="./window-chrome.css">
+  <link rel="stylesheet" href="./design-system.css">
+  <link rel="stylesheet" href="./workspace-shell.css">
+</head>
+<body>
+  <div id="workspace-chrome"></div>
+  <main id="workspace-pages" aria-label="工作区内容"></main>
+  <div id="workspace-loading" role="status" hidden></div>
+  <script src="../dist/renderer/workspace-shell.js"></script>
+</body>
+</html>

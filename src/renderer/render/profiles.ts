@@ -3,6 +3,7 @@ import { proxyServerUsesPort } from "../proxy";
 import { store } from "../state";
 import { AgentActivity, BifrostRuleDestination, BifrostSnapshot, CdpClientInfo, ExternalChromeInstance, ProfileReadinessReceipt, PublicProfile, SystemProxyRoute } from "../types";
 import { renderLiveViewSection } from "./live-view";
+import { profileAvatar } from "./browser-workspace";
 import { NATIVE_CDP_UNSUPPORTED_NOTE, agentActivityLeadText, agentActivityProgressText, agentActivityTooltipText, agentBrowserOccupancyClient, cdpClientToolSummary, cdpLaunchButtonTitle, cdpPortLabel, cdpSessionText, contentionNotice, contentionNoticeShort, deleteButtonTitle, escapeHtml, focusButtonTitle, formatDate, formatRelativeTime, gatewayControlClient, gatewayUserHasControl, launchButtonTitle, listeningPortsNote, liveAddrLabel, prettyCdpClientLabel, profileAgentBrowserReserved, profileAgentControlClients, profileStatusLabel, profileUserHasControl, renderButtonLabel, sourceDetail, truncateText } from "../util";
 
 interface ConnectionActivityModel {
@@ -28,19 +29,19 @@ export function renderProfilesPanel(profiles: PublicProfile[], externalInstances
         <colgroup>
           <col class="profile-col-name" />
           <col class="profile-col-status" />
-          <col class="profile-col-route" />
           <col class="profile-col-connection" />
+          <col class="profile-col-route" />
           <col class="profile-col-activity" />
           <col class="profile-col-actions" />
         </colgroup>
         <thead>
           <tr>
             <th>Profile</th>
-            <th>Status</th>
-            <th>Proxy Route</th>
-            <th>Connection</th>
-            <th>Agent Activity</th>
-            <th>Actions</th>
+            <th>状态</th>
+            <th>连接</th>
+            <th>代理</th>
+            <th>当前活动</th>
+            <th>操作</th>
           </tr>
         </thead>
         <tbody>
@@ -174,6 +175,7 @@ export function renderProfileRow(profile: PublicProfile, isFirstInGroup = false,
   return `
     <tr class="profile-child-row ${lastInGroup ? "last-in-group" : ""} ${selected ? "selected" : ""} ${busyKind ? "busy" : ""}" data-action="select" data-id="${profile.id}" data-profile-row data-drag-role="${dragRole}" tabindex="0" aria-selected="${selected ? "true" : "false"}" aria-busy="${busyKind ? "true" : "false"}">
       <td class="profile-name-cell">
+        ${profileAvatar(profile)}
         <span class="drag-handle" data-drag-handle role="button" tabindex="-1" aria-label="${handleTitle}" title="${handleTitle}">⠿</span>
         <div class="profile-pick w-full min-h-[auto] py-1 px-0.5 text-left">
           <span class="profile-name-line flex items-center gap-2 min-w-0">
@@ -187,7 +189,7 @@ export function renderProfileRow(profile: PublicProfile, isFirstInGroup = false,
                     </button>`
                   : ""
               }
-              ${profile.isDefault ? '<span class="native-badge inline-flex items-center justify-center border-solid border border-warn-line rounded-full px-2 py-[3px] bg-warn-soft text-warn-bright font-mono text-[10px] font-semibold tracking-[0.06em]">DEFAULT</span>' : ""}
+              ${profile.isDefault ? '<span class="native-badge inline-flex items-center justify-center border-solid border border-warn-line rounded-full px-2 py-[3px] bg-warn-soft text-warn-bright font-mono text-[10px] font-semibold tracking-[0.06em]">系统默认</span>' : ""}
               ${profile.quickLaunchSlot ? `<span class="slot-badge" title="全局快捷键 ⌘⌥${profile.quickLaunchSlot} 直启">⌘⌥${profile.quickLaunchSlot}</span>` : ""}
             </span>
           </span>
@@ -199,10 +201,12 @@ export function renderProfileRow(profile: PublicProfile, isFirstInGroup = false,
         </span>
       </td>
       <td>
-        ${renderProfileProxyRoute(profile)}
+        <span class="registry-connection-summary">${profile.source === "native" ? store.nativeExtensionBrowsers?.find(item => item.profileId === profile.id)?.connected ? "扩展已连接" : store.nativeExtensionBrowsers ? "待连接" : "检测中…" : profile.cdpPort || profile.fixedCdpPort ? "Gateway" : "待连接"}</span>
+        <div class="registry-connection-details">${renderProfilePortCell(profile)}</div>
       </td>
       <td>
-        ${renderProfilePortCell(profile)}
+        <span class="registry-proxy-summary">${profile.directConnection ? "直连" : profile.upstreamProxy ? "指定代理" : profile.bifrostProxy ? "Bifrost" : "系统代理"}</span>
+        <div class="registry-proxy-details">${renderProfileProxyRoute(profile)}</div>
       </td>
       <td>
         ${renderProfileActivityCell(profile)}
@@ -901,6 +905,9 @@ export function renderExternalRow(instance: ExternalChromeInstance): string {
         <span class="state-pill inline-flex items-center justify-center min-w-[58px] border-solid border border-line-strong rounded-full px-[9px] py-1 bg-transparent text-muted font-mono text-[11px] font-semibold tracking-[0.06em] running">运行中</span>
       </td>
       <td>
+        ${renderExternalPortCell(instance)}
+      </td>
+      <td>
         <span class="profile-route-track external action-tooltip" data-tooltip="外部实例不由 ProfilePilot 管理，无法判断它使用的代理规则" aria-label="外部实例不由 ProfilePilot 管理，无法判断它使用的代理规则" tabindex="0">
           <span class="profile-route-signal" aria-hidden="true"></span>
           <span class="profile-route-copy">
@@ -908,9 +915,6 @@ export function renderExternalRow(instance: ExternalChromeInstance): string {
             <small>代理规则未知</small>
           </span>
         </span>
-      </td>
-      <td>
-        ${renderExternalPortCell(instance)}
       </td>
       <td>
         ${renderExternalActivityCell(instance)}

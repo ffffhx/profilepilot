@@ -204,8 +204,21 @@ export function agentBrowserCommandName(args: string[]): string | undefined {
 }
 
 export function shouldCheckProfilePilotNotice(args: string[]): boolean {
+  if (isAgentBrowserHelpInvocation(args)) return false;
   const command = agentBrowserCommandName(args);
   return Boolean(command && !NOTICE_BYPASS_COMMANDS.has(command));
+}
+
+/** Clap exits for these flags before executing a browser command. Only inspect
+ * argument positions, never JS source, option values or arguments after --. */
+export function isAgentBrowserHelpInvocation(args: string[]): boolean {
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index];
+    if (arg === "--") break;
+    if (["--help", "-h", "--version", "-V"].includes(arg)) return true;
+    if (OPTIONS_WITH_VALUES.has(arg)) index++;
+  }
+  return ["help", "version"].includes(agentBrowserCommandName(args) || "");
 }
 
 export function managedGatewayAgentBrowserEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -531,6 +544,14 @@ export async function runAgentBrowserWrapper(
   }
 
   args = effectiveArgs;
+  // Local help must neither acquire a lease nor reconnect/retire an existing
+  // session. It is not evidence of detached browser execution.
+  if (isAgentBrowserHelpInvocation(args)) {
+    const executable = resolveRealAgentBrowser(env);
+    if (!executable) { process.stderr.write("[ProfilePilot] 未找到真实 agent-browser 可执行文件。\n"); return 127; }
+    const result = await spawnRealAgentBrowser(executable, args, env, null);
+    return typeof result.status === "number" ? result.status : result.error || result.signal ? 1 : 0;
+  }
   emitControlReturnedNotice(args, env);
   const before = findActiveProfilePilotNotice(args, env);
   if (before) {
@@ -1015,7 +1036,7 @@ export function acquireProfileLeaseForCommandWithAutomaticSwitch(
   env: NodeJS.ProcessEnv = process.env
 ): AgentBrowserCommandLeaseResolution {
   const lease = acquireProfileLeaseForCommand(args, env);
-  if (!lease || lease.ok) {
+  if (!lease || lease.ok || env.PROFILEPILOT_BROWSER_CLI === "1") {
     return { args, lease, automaticSwitch: null };
   }
   const requestedSession = sessionFromAgentBrowserArgs(args, env);
@@ -2252,7 +2273,7 @@ export async function prepareGatewayTransport(
     if (persistedGatewayOwnsPort(homeDir, publicPort)) throw error;
     const configured = findConfiguredAgentBrowserProfileByPortSync(publicPort, env, homeDir);
     if (!configured && !managedElectronPorts(homeDir).some(profile => profile.publicPort === publicPort)) {
-      if (await isReachableLegacyCdp(publicPort, homeDir)) return args;
+      if (env.PROFILEPILOT_BROWSER_CLI !== "1" && await isReachableLegacyCdp(publicPort, homeDir)) return args;
       throw gatewayWrapperError(
         "GATEWAY_PROFILE_NOT_CONFIGURED",
         `ProfilePilot 没有找到绑定到端口 ${publicPort} 的 Profile`
@@ -2263,6 +2284,7 @@ export async function prepareGatewayTransport(
   }
   const initiallyActivePorts = Array.isArray(status.ports) ? status.ports.map(Number) : [];
   if (
+    env.PROFILEPILOT_BROWSER_CLI !== "1" &&
     !initiallyActivePorts.includes(publicPort) &&
     !findConfiguredAgentBrowserProfileByPortSync(publicPort, env, homeDir) &&
     await isReachableLegacyCdp(publicPort, homeDir)
@@ -2290,7 +2312,7 @@ export async function prepareGatewayTransport(
     daemonInstanceId,
     daemonPid: readAgentBrowserDaemonPidSync(homeDir, sessionId),
     driverKind: "agent-browser",
-    driverLabel: "agent-browser",
+    driverLabel: env.PROFILEPILOT_BROWSER_CLI === "1" ? "ppilot browser CLI" : "agent-browser",
     agent: inferAgentFromSession(sessionId),
     project: projectFromEnv(env),
     branch: branchFromEnv(env)
@@ -2334,7 +2356,7 @@ export async function prepareGatewayTransport(
         daemonInstanceId,
         daemonPid: readAgentBrowserDaemonPidSync(homeDir, sessionId),
         driverKind: "agent-browser",
-        driverLabel: "agent-browser",
+        driverLabel: env.PROFILEPILOT_BROWSER_CLI === "1" ? "ppilot browser CLI" : "agent-browser",
         agent: inferAgentFromSession(sessionId),
         project: projectFromEnv(env),
         branch: branchFromEnv(env)
@@ -2375,7 +2397,7 @@ export async function prepareGatewayTransport(
       daemonInstanceId,
       daemonPid: readAgentBrowserDaemonPidSync(homeDir, sessionId),
       driverKind: "agent-browser",
-      driverLabel: "agent-browser",
+      driverLabel: env.PROFILEPILOT_BROWSER_CLI === "1" ? "ppilot browser CLI" : "agent-browser",
       agent: inferAgentFromSession(sessionId),
       project: projectFromEnv(env),
       branch: branchFromEnv(env)

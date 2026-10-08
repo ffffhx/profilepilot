@@ -6,8 +6,13 @@ import type { AppState, PublicProfile, StoredProfile } from "../shared/types";
 import type { ProfileManager } from "./profile-manager";
 import { ProfileManagerError } from "./profile-manager-error";
 import { writeDiagnosticLog } from "./diagnostic-log";
+import type { TaskService } from "./tasks/service";
+import { executeTaskManagementCommand, parseTaskManagementCommand } from "./tasks/management";
+import { executePhoneCommand } from "./phones/management";
+import type { PhonesService } from "./phones/service";
 import {
   PROFILEPILOT_MANAGEMENT_MAX_MESSAGE_BYTES,
+  PROFILEPILOT_PHONE_MAX_RESPONSE_BYTES,
   PROFILEPILOT_MANAGEMENT_PROTOCOL_VERSION,
   profilePilotManagementRoot,
   profilePilotManagementSecretPath,
@@ -17,7 +22,8 @@ import {
   type ProfilePilotManagementResponse
 } from "./profilepilot-management-protocol";
 
-const REQUEST_TIMEOUT_MS = 35_000;
+const REQUEST_TIMEOUT_MS = 125_000;
+const CLOSE_TIMEOUT_MS = 2_000;
 
 type ManagementProfileManager = Pick<
   ProfileManager,
@@ -26,6 +32,8 @@ type ManagementProfileManager = Pick<
 
 export interface ProfilePilotManagementServerOptions {
   profileManager: ManagementProfileManager;
+  getTaskService?: () => TaskService | undefined;
+  getPhoneService?: () => PhonesService | undefined;
   homeDir?: string;
   env?: NodeJS.ProcessEnv;
   appVersion?: string;
@@ -51,12 +59,22 @@ export async function startProfilePilotManagementServer(
     await fs.rm(socketPath, { force: true });
   }
 
+  const sockets = new Set<net.Socket>();
+  let closing: Promise<void> | undefined;
+  let accepting = true;
   const server = net.createServer((socket) => {
+    if (!accepting) { socket.destroy(); return; }
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+    // CLI callers can detach while an awaited browser operation is finishing.
+    // A reset connection must not turn into an uncaught desktop error.
+    socket.on("error", () => socket.destroy());
     socket.setEncoding("utf8");
     socket.setTimeout(REQUEST_TIMEOUT_MS, () => socket.destroy());
     let buffer = "";
     let handled = false;
     socket.on("data", (chunk: string) => {
+      if (!accepting) { socket.destroy(); return; }
       if (handled) return;
       buffer += chunk;
       if (Buffer.byteLength(buffer, "utf8") > PROFILEPILOT_MANAGEMENT_MAX_MESSAGE_BYTES) {
@@ -68,8 +86,13 @@ export async function startProfilePilotManagementServer(
       if (newline === -1) return;
       handled = true;
       const line = buffer.slice(0, newline).trim();
+      let maxResponseBytes = PROFILEPILOT_MANAGEMENT_MAX_MESSAGE_BYTES;
+      try {
+        const { command } = JSON.parse(line);
+        if (command?.action === "phone" && ["action", "wrapper-action"].includes(command.method)) maxResponseBytes = PROFILEPILOT_PHONE_MAX_RESPONSE_BYTES;
+      } catch { /* handleRequestLine returns the normal invalid-request error */ }
       void handleRequestLine(line, token, options)
-        .then((response) => writeResponse(socket, response))
+        .then((response) => writeResponse(socket, response, maxResponseBytes))
         .catch((error) => writeResponse(socket, responseFromError("unknown", error)));
     });
   });
@@ -88,23 +111,55 @@ export async function startProfilePilotManagementServer(
 
   return {
     socketPath,
-    close: async () => {
-      await new Promise<void>((resolve, reject) => {
-        server.close((error) => error ? reject(error) : resolve());
-      }).catch((error) => {
-        if ((error as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING") throw error;
+    close: () => {
+      if (closing) return closing;
+      accepting = false;
+      closing = new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const finish = (error?: NodeJS.ErrnoException | null): void => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          if (error && error.code !== "ERR_SERVER_NOT_RUNNING") reject(error);
+          else resolve();
+        };
+        const timer = setTimeout(() => finish(Object.assign(
+          new Error("管理服务关闭超时；已断开客户端，未确认监听器完成关闭。"),
+          { code: "MANAGEMENT_CLOSE_TIMEOUT" }
+        )), CLOSE_TIMEOUT_MS);
+        try { server.close(finish); }
+        catch (error) { finish(error as NodeJS.ErrnoException); }
+        // net.Server.close only stops accepting. Existing clients (including
+        // incomplete requests whose traffic resets the idle timeout) otherwise
+        // keep shutdown pending indefinitely on both named pipes and Unix sockets.
+        for (const socket of sockets) socket.destroy();
+      }).then(async () => {
+        if (process.platform !== "win32") await fs.rm(socketPath, { force: true });
       });
-      if (process.platform !== "win32") {
-        await fs.rm(socketPath, { force: true });
-      }
+      return closing;
     }
   };
 }
 
 export async function executeProfilePilotManagementCommand(
   command: ProfilePilotManagementCommand,
-  options: Pick<ProfilePilotManagementServerOptions, "profileManager" | "appVersion" | "onMutation">
+  options: Pick<ProfilePilotManagementServerOptions, "profileManager" | "appVersion" | "onMutation" | "getTaskService" | "getPhoneService">
 ): Promise<unknown> {
+  if (typeof command?.action !== "string") throw new ProfileManagerError("管理请求缺少 command。", "MANAGEMENT_COMMAND_REQUIRED");
+  if (command.action === "phone") {
+    const service = options.getPhoneService?.();
+    if (!service) throw new ProfileManagerError("手机服务尚未就绪。", "PHONE_SERVICE_UNAVAILABLE");
+    return executePhoneCommand(command, service);
+  }
+  if (command.action.startsWith("task.")) {
+    const parsed = parseTaskManagementCommand(command);
+    const service = options.getTaskService?.();
+    if (!service) throw new ProfileManagerError("Agent 服务尚未就绪，请稍后重试。", "TASK_SERVICE_UNAVAILABLE");
+    return executeTaskManagementCommand(parsed, service, async selector => resolveProfile(await options.profileManager.getState(), selector).id);
+  }
+  if (!["ping", "profile.list", "profile.get", "profile.create", "profile.rename", "profile.start", "profile.stop", "profile.delete"].includes(command.action)) {
+    throw new ProfileManagerError("未知的管理命令。", "MANAGEMENT_COMMAND_UNKNOWN");
+  }
   if (command.action === "ping") {
     return {
       service: "ProfilePilot",
@@ -117,11 +172,12 @@ export async function executeProfilePilotManagementCommand(
   const manager = options.profileManager;
   if (command.action === "profile.list") {
     const state = await manager.getState();
-    return { profiles: state.profiles.map(toManagementProfile) };
+    return { profiles: state.profiles.map(profile => toManagementProfile(profile, options.getTaskService?.()?.profileAvailability(profile.id))) };
   }
   if (command.action === "profile.get") {
     const state = await manager.getState();
-    return { profile: toManagementProfile(resolveProfile(state, command.selector)) };
+    const profile = resolveProfile(state, command.selector);
+    return { profile: toManagementProfile(profile, options.getTaskService?.()?.profileAvailability(profile.id)) };
   }
   if (command.action === "profile.create") {
     const created = await manager.createProfile(command.name);
@@ -131,6 +187,11 @@ export async function executeProfilePilotManagementCommand(
     return { changed: true, profile: toManagementProfile(profile) };
   }
 
+  // Explicitly narrow to profile mutations: unknown actions must never fall
+  // through to deleting the selected profile.
+  if (!(command.action === "profile.rename" || command.action === "profile.start" || command.action === "profile.stop" || command.action === "profile.delete")) {
+    throw new ProfileManagerError("未知的管理命令。", "MANAGEMENT_COMMAND_UNKNOWN");
+  }
   const before = await manager.getState();
   const profile = resolveProfile(before, command.selector);
   assertCliManageable(profile);
@@ -159,7 +220,7 @@ export async function executeProfilePilotManagementCommand(
     options.onMutation?.();
     return { changed: true, profile: toManagementProfile(resolveProfile(state, profile.id)) };
   }
-  if (!command.confirmed) {
+  if (command.confirmed !== true) {
     throw new ProfileManagerError(
       `删除 Profile“${profile.name}”需要显式确认。请重新执行并添加 --yes。`,
       "PROFILE_DELETE_CONFIRMATION_REQUIRED"
@@ -212,19 +273,22 @@ async function handleRequestLine(
       ...metadata,
       duration_ms: Date.now() - startedAt,
       error_code: typeof candidate?.code === "string" ? candidate.code : null,
-      error: typeof candidate?.message === "string" ? candidate.message : String(error)
+      // Task errors can contain model text or user answers. Diagnostic logs
+      // only record the error code for these commands.
+      ...(request.command.action.startsWith("task.") ? {} : { error: typeof candidate?.message === "string" ? candidate.message : String(error) })
     });
     return responseFromError(id, error);
   }
 }
 
 function managementCommandMetadata(command: ProfilePilotManagementCommand): Record<string, unknown> {
+  if (command.action.startsWith("task.")) return { action: command.action };
   if (command.action === "ping" || command.action === "profile.list") return { action: command.action };
   if (command.action === "profile.create") return { action: command.action, profile_name: command.name };
   if (command.action === "profile.rename") {
     return { action: command.action, profile_selector: command.selector, profile_name: command.name };
   }
-  return { action: command.action, profile_selector: command.selector };
+  return { action: command.action, ...("selector" in command ? { profile_selector: command.selector } : {}) };
 }
 
 function resolveProfile(state: AppState, selectorInput: string): PublicProfile {
@@ -263,13 +327,13 @@ function resolveCreatedProfile(state: AppState, created: StoredProfile): PublicP
 function assertCliManageable(profile: PublicProfile): void {
   if (profile.source !== "isolated" || !profile.id.startsWith("isolated:")) {
     throw new ProfileManagerError(
-      "管理 CLI 目前只允许修改 ProfilePilot 创建的独立 Profile；系统和子 Profile 只能查询。",
+      "ProfilePilot CLI 的 Profile 管理命令只允许修改本工具创建的独立 Profile；系统和子 Profile 只能查询。",
       "PROFILE_CLI_MANAGED_ONLY"
     );
   }
 }
 
-function toManagementProfile(profile: PublicProfile): Record<string, unknown> {
+function toManagementProfile(profile: PublicProfile, availability?: { ready: boolean; reason?: string; code?: string }): Record<string, unknown> {
   const proxyKind = profile.bifrostProxy
     ? "bifrost"
     : profile.upstreamProxy
@@ -289,6 +353,7 @@ function toManagementProfile(profile: PublicProfile): Record<string, unknown> {
     proxy_kind: proxyKind,
     project_tag: profile.projectTag,
     agent_access: profile.agentAccessDisabled ? "blocked" : "allowed",
+    ...(availability ? { task_ready: availability.ready, task_unavailable_reason: availability.reason, task_unavailable_code: availability.code } : {}),
     occupancy: occupancy ? {
       session: occupancy.session,
       ownership: occupancy.ownership,
@@ -356,6 +421,12 @@ function errorResponse(id: string, code: string, message: string, details?: unkn
   };
 }
 
-function writeResponse(socket: net.Socket, response: ProfilePilotManagementResponse): void {
-  socket.end(`${JSON.stringify(response)}\n`);
+function writeResponse(socket: net.Socket, response: ProfilePilotManagementResponse, maxResponseBytes = PROFILEPILOT_MANAGEMENT_MAX_MESSAGE_BYTES): void {
+  if (socket.destroyed) return;
+  const line = `${JSON.stringify(response)}\n`;
+  if (Buffer.byteLength(line, "utf8") > maxResponseBytes) {
+    socket.end(`${JSON.stringify(errorResponse("unknown", "MANAGEMENT_RESPONSE_TOO_LARGE", "响应超过大小限制，请缩小分页或在桌面应用查看。"))}\n`);
+    return;
+  }
+  socket.end(line);
 }

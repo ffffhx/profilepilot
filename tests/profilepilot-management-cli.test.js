@@ -15,6 +15,25 @@ const {
   requestProfilePilotManagement
 } = require("../dist/main/profilepilot-cli.js");
 
+test("profile readiness distinguishes a legacy extension and refreshes after upgrade", async () => {
+  const { nativeProfileAvailability, NATIVE_REQUIRED_CAPABILITIES } = require('../dist/main/tasks/native-compatibility');
+  const manager = fakeProfileManager();
+  let state = { connected: true, taskTabs: true, extensionVersion: '0.1.0' };
+  const options = { profileManager: manager, getTaskService: () => ({ profileAvailability: id => id === 'native:Default' ? nativeProfileAvailability(state) : undefined }) };
+  const first = await executeProfilePilotManagementCommand({ action: 'profile.list' }, options);
+  assert.equal(first.profiles[0].task_ready, false);
+  assert.equal(first.profiles[0].task_unavailable_code, 'NATIVE_EXTENSION_UPDATE_REQUIRED');
+  assert.match(first.profiles[0].task_unavailable_reason, /0\.2\.0/);
+  assert.equal(first.profiles[1].task_ready, undefined);
+  state = { connected: true, taskTabs: true, extensionVersion: '0.2.0', capabilities: [...NATIVE_REQUIRED_CAPABILITIES] };
+  const upgraded = await executeProfilePilotManagementCommand({ action: 'profile.get', selector: 'native:Default' }, options);
+  assert.equal(upgraded.profile.task_ready, true);
+  assert.equal(upgraded.profile.task_unavailable_reason, undefined);
+  state.connected = false;
+  const disconnected = await executeProfilePilotManagementCommand({ action: 'profile.get', selector: 'native:Default' }, options);
+  assert.equal(disconnected.profile.task_unavailable_code, 'NATIVE_EXTENSION_DISCONNECTED');
+});
+
 test("management commands provide safe CRUD for ProfilePilot-owned Profiles", async () => {
   const manager = fakeProfileManager();
 

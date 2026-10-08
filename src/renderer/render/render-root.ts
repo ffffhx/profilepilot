@@ -1,11 +1,13 @@
-import { workspaceSwitcher, refreshWorkspaceSwitcher } from "../workspace-switcher";
+import { workspaceSwitcher, workspaceIdentityBar, refreshWorkspaceSwitcher } from "../workspace-switcher";
 import { isBusyAction, renderToastBody } from "../busy";
 import { renderConfirmModal } from "../confirm";
+import { renderControlPreferencesModal } from "../control-preferences";
 import { renderSyncPanel } from "./account-sync";
-import { renderAgentAccessDock, renderAgentIntegrationModal, renderOnboardingModal } from "./agent-integration";
+import { renderAgentIntegrationPanel, renderOnboardingModal } from "./agent-integration";
 import { renderClonePoolModal } from "./clone-pool";
 import { renderLiveZoomModal } from "./live-view";
 import { renderMini } from "./mini";
+import { renderBrowserInspector } from "./browser-workspace";
 import { renderBifrostProxyModal, renderCdpModal, renderCloneTagModal, renderExtensionMigrationModal, renderGlobalInstructionsModal, renderNewModal, renderRenameModal } from "./modals";
 import { renderEmpty, renderExternalDetailsModal, renderProfileDetailsModal, renderProfilesPanel } from "./profiles";
 import { appRoot, store } from "../state";
@@ -14,6 +16,26 @@ import { escapeHtml, renderBusyBanner, renderButtonLabel } from "../util";
 // 上一次写入的主视图 HTML。事件快照或低频校准若内容没变就跳过整段 DOM 重建，
 // 避免把用户正 hover 的节点换掉，导致 tooltip / :hover 状态闪烁。
 let lastMainHtml = "";
+let browserQuery = "", toolsQuery = "";
+function applyWorkspaceSearch(): void {
+  const rows = [...appRoot.querySelectorAll<HTMLElement>("[data-profile-row]")];
+  rows.forEach(row => { row.hidden = !(row.querySelector(".profile-name")?.textContent || "").toLocaleLowerCase().includes(browserQuery.toLocaleLowerCase()); });
+  const empty = appRoot.querySelector<HTMLElement>(".profile-search-empty");
+  if (empty) empty.hidden = !rows.length || rows.some(row => !row.hidden);
+  appRoot.querySelectorAll<HTMLElement>("[data-tools-search]").forEach(card => { card.hidden = !(card.dataset.toolsSearch || card.textContent || "").toLocaleLowerCase().includes(toolsQuery.toLocaleLowerCase()); });
+}
+appRoot.addEventListener("input", event => {
+  const input = event.target as HTMLInputElement;
+  if (input.id === "profile-search") browserQuery = input.value;
+  else if (input.id === "tools-search") toolsQuery = input.value;
+  else return;
+  applyWorkspaceSearch();
+});
+document.addEventListener("workspace-profile-selected", event => {
+  if (store.workspace !== "browser") return;
+  const id = (event as CustomEvent<string>).detail;
+  if (store.state?.profiles.some(profile => profile.id === id)) { store.selectedId = id; render(); }
+});
 
 function renderToast(): void {
   let toast = document.getElementById("app-toast");
@@ -44,94 +66,83 @@ export function render(): void {
   // form whose unsubmitted values and focus live in the current document.
   renderToast();
 
-  if (!store.state) {
+  if (!store.state && store.workspace !== "tools") {
     lastMainHtml = "";
     appRoot.innerHTML = '<div class="app-loading p-8 text-muted font-mono text-[13px] tracking-[0.04em]">正在载入…</div>';
     return;
   }
 
-  const profiles = store.state.profiles || [];
+  const profiles = store.state?.profiles || [];
   const profileDetailsId = store.modal?.kind === "profile-details" ? store.modal.profileId : null;
   const externalDetailsDir = store.modal?.kind === "external-details" ? store.modal.userDataDir : null;
   const profileDetailsProfile = profileDetailsId
     ? profiles.find((profile) => profile.id === profileDetailsId) || null
     : null;
   const externalDetailsInstance = externalDetailsDir
-    ? (store.state.externalInstances || []).find((instance) => instance.userDataDir === externalDetailsDir) || null
+    ? (store.state?.externalInstances || []).find((instance) => instance.userDataDir === externalDetailsDir) || null
     : null;
-  const runningNames = store.state.runningProfiles.map((profile) => profile.name).join("、");
-  const currentLabel = store.state.runningProfiles.length ? runningNames : "无";
-  const currentNote = store.state.runningProfiles.length
-    ? `${store.state.runningProfiles.length} 个 Profile 正在运行`
+  const runningProfiles = store.state?.runningProfiles || [];
+  const runningNames = runningProfiles.map((profile) => profile.name).join("、");
+  const currentLabel = runningProfiles.length ? runningNames : "无";
+  const currentNote = runningProfiles.length
+    ? `${runningProfiles.length} 个 Profile 正在运行`
     : "当前没有正在运行的 Profile";
   const refreshing = isBusyAction("refresh");
   const busyHasEmbeddedProgress = store.busyState?.key === "account-sync" || store.busyState?.key === "migrate-extensions";
 
+  if (store.selectedExternalDir && !store.state?.externalInstances.some(instance => instance.userDataDir === store.selectedExternalDir)) store.selectedExternalDir = null;
+  if (!store.selectedExternalDir && profiles.length && !profiles.some(profile => profile.id === store.selectedId)) store.selectedId = profiles[0].id;
   const html = `
-    <div class="shell w-[min(1760px,calc(100vw-clamp(24px,3vw,56px)))] mx-auto my-0 pt-[28px] px-0 pb-[40px]">
-      <a class="skip-link" href="#main-content">跳到 Profile 列表</a>
-      <header class="app-header flex items-start justify-between gap-5 pt-2 px-0 pb-[22px] border-solid border-b border-line">
-        <div class="browser-workspace-brand"><h1 class="sr-only">ProfilePilot</h1>${workspaceSwitcher("browser")}<p>管理账号、Profile 与浏览器连接</p></div>
+    ${workspaceSwitcher(store.workspace === "tools" ? "tools" : "browser")}
+    ${workspaceIdentityBar(store.state || undefined, store.workspace === "browser" ? store.selectedId || "" : "", false, store.nativeExtensionBrowsers || undefined)}
+    ${store.workspace === "tools" ? `
+    <div class="shell tools-workspace">
+      <a class="skip-link" href="#main-content">跳到配套工具</a>
+      <header class="app-header">
+        <div class="browser-workspace-brand"><h1>配套工具</h1><p>连接浏览器，准备 Agent 工作环境</p></div>
         <div class="header-actions">
-          <button type="button" role="switch" data-action="toggle-startup"
-            aria-checked="${store.startupSettings?.enabled === true}" aria-label="开机自启动"
-            aria-describedby="startup-note"
-            title="登录系统后自动启动 ProfilePilot"
-            ${store.busy || !store.startupSettings?.supported ? "disabled" : ""}>
-            开机自启动 <span class="${store.startupSettings?.enabled ? "text-accent-bright" : "text-muted"}">${!store.startupSettings ? "读取中…" : store.startupSettings.requiresApproval ? "待允许" : store.startupSettings.enabled ? "开启" : "关闭"}</span>
-          </button>
-          <button type="button" data-action="open-mini-window" title="切换到悬浮窗">悬浮窗</button>
-          <button type="button" data-action="open-global-instructions">全局指令</button>
-          <button type="button" class="${refreshing ? "loading" : ""}" data-action="refresh" ${store.busy ? "disabled" : ""}>
-            ${renderButtonLabel(refreshing, "刷新", "刷新中…")}
-          </button>
-          <button type="button" class="primary" data-action="new-profile" ${store.busy ? "disabled" : ""}>新建独立 Profile</button>
+          <input id="tools-search" type="search" aria-label="搜索配套工具" placeholder="搜索…" value="${escapeHtml(toolsQuery)}">
+          <button type="button" data-action="open-onboarding">连接指南</button>
+          <button type="button" data-action="open-global-instructions" ${store.busy || !store.state ? "disabled" : ""}>全局指令</button>
+          <button class="primary" type="button" data-action="refresh-agent-integration" ${store.agentIntegrationLoading ? "disabled" : ""}>检查更新</button>
         </div>
       </header>
-
-      <p id="startup-note" class="${store.startupSettings?.error || store.startupSettings?.requiresApproval ? "mt-3 text-[12px] text-muted" : "sr-only"}" role="status">${escapeHtml(store.startupSettings?.error || (store.startupSettings?.requiresApproval ? "请在系统设置 → 通用 → 登录项中允许 ProfilePilot 自启动。" : "登录系统后自动启动 ProfilePilot；关闭后会保留你的选择。"))}</p>
-
+      ${renderBusyBanner()}
+      <main id="main-content">${renderAgentIntegrationPanel()}</main>
+    </div>` : !store.state ? "" : `
+    <div class="shell browser-workspace">
+      <a class="skip-link" href="#main-content">跳到 Profile 列表</a>
+      <header class="app-header">
+        <div class="browser-workspace-brand"><h1>浏览器</h1><p>管理账号与浏览器连接</p></div>
+        <div class="header-actions">
+          <button type="button" class="primary" data-action="new-profile" ${store.busy ? "disabled" : ""}><span aria-hidden="true">＋</span> 新建独立 Profile</button>
+          <button type="button" data-action="refresh" ${store.busy ? "disabled" : ""}>${renderButtonLabel(refreshing, "刷新", "刷新中…")}</button>
+          <button type="button" data-action="open-onboarding" aria-label="浏览器使用指南">···</button>
+        </div>
+      </header>
+      <p id="startup-note" class="sr-only" role="status">${escapeHtml(store.startupSettings?.error || "登录系统后自动启动 ProfilePilot")}</p>
       ${busyHasEmbeddedProgress ? "" : renderBusyBanner()}
-
-      <section class="status-grid grid grid-cols-[minmax(0,1.6fr)_repeat(2,minmax(130px,0.7fr))] gap-px overflow-hidden border-solid border border-line rounded-xl bg-line mt-[22px]" aria-label="Profile 状态概览">
-        <div class="status-item current relative min-w-0 pt-4 pr-4 pb-4 pl-5 bg-panel">
-          <span class="status-label block mb-2 text-muted text-[12px] font-semibold">当前运行</span>
-          <strong class="status-value block [overflow-wrap:anywhere] text-[20px] font-semibold tabular-nums">${escapeHtml(currentLabel)}</strong>
-          <span class="status-note block mt-2 [overflow-wrap:anywhere] text-muted text-[12px]">${escapeHtml(currentNote)}</span>
-        </div>
-        <div class="status-item relative min-w-0 pt-4 pr-4 pb-4 pl-5 bg-panel">
-          <span class="status-label block mb-2 text-muted text-[12px] font-semibold">已管理</span>
-          <strong class="status-value block [overflow-wrap:anywhere] text-[20px] font-semibold tabular-nums">${profiles.length}</strong>
-          <span class="status-note block mt-2 [overflow-wrap:anywhere] text-muted text-[12px]">本机所有可管理的 Chrome Profile</span>
-        </div>
-        <div class="status-item relative min-w-0 pt-4 pr-4 pb-4 pl-5 bg-panel">
-          <span class="status-label block mb-2 text-muted text-[12px] font-semibold">运行中</span>
-          <strong class="status-value block [overflow-wrap:anywhere] text-[20px] font-semibold tabular-nums">${store.state.runningProfiles.length}</strong>
-          <span class="status-note block mt-2 [overflow-wrap:anywhere] text-muted text-[12px]">可以点击“显示”拉到屏幕最前面</span>
-        </div>
+      <section class="browser-status-strip sr-only" aria-label="Profile 状态概览">
+        <span>已管理 <strong>${profiles.length}</strong></span><span>运行中 <strong>${runningProfiles.length}</strong></span>
+        <span class="browser-current">${escapeHtml(currentNote)}</span>
       </section>
-
-      ${renderAgentAccessDock(profiles)}
-
-      ${renderSyncPanel(profiles)}
-
-      <main id="main-content" class="layout grid grid-cols-1 gap-6 mt-6 items-start">
+      <main id="main-content" class="browser-registry-layout">
         <section class="profiles-section">
-          <div class="profiles-section-head">
-            <div class="profiles-section-title">
-              <span>Profile Registry</span>
-              <h2>Profiles</h2>
-            </div>
-            <span class="profiles-count"><strong>${profiles.length}</strong> Registered</span>
-          </div>
-          ${
-            profiles.length || (store.state.externalInstances?.length ?? 0)
-              ? renderProfilesPanel(profiles, store.state.externalInstances || [])
-              : renderEmpty()
-          }
+          <div class="profiles-section-head"><h2>Profiles</h2><input id="profile-search" type="search" aria-label="搜索 Profile" placeholder="搜索 Profile…" value="${escapeHtml(browserQuery)}"></div>
+          ${profiles.length || store.state.externalInstances.length ? renderProfilesPanel(profiles, store.state.externalInstances) : renderEmpty()}
+          <p class="profile-search-empty" hidden>没有匹配的 Profile</p>
         </section>
+        ${renderBrowserInspector(profiles.find(profile=>profile.id === store.selectedId), store.state.externalInstances.find(instance=>instance.userDataDir === store.selectedExternalDir))}
       </main>
-    </div>
+      ${renderSyncPanel(profiles)}
+      <footer class="browser-workspace-footer">
+        <button type="button" data-action="open-agent-browser-setup">创建 Agent 浏览器</button>
+        <span class="footer-spacer"></span>
+        <button type="button" data-action="open-mini-window">悬浮窗</button>
+        <button type="button" data-action="open-global-instructions">全局指令</button>
+        <button type="button" role="switch" data-action="toggle-startup" aria-checked="${store.startupSettings?.enabled === true}" aria-label="开机自启动" aria-describedby="startup-note" ${store.busy || !store.startupSettings?.supported ? "disabled" : ""}>开机自启动</button>
+      </footer>
+    </div>`}
     ${store.modal?.kind === "new" ? renderNewModal() : ""}
     ${store.modal?.kind === "rename" ? renderRenameModal(store.modal.profileId) : ""}
     ${store.modal?.kind === "cdp" ? renderCdpModal(store.modal.profileId, store.modal.portSuggestion) : ""}
@@ -139,8 +150,8 @@ export function render(): void {
     ${store.modal?.kind === "clone-pool" ? renderClonePoolModal(profiles) : ""}
     ${store.modal?.kind === "clone-tag" ? renderCloneTagModal(store.modal.profileId) : ""}
     ${store.modal?.kind === "global-instructions" ? renderGlobalInstructionsModal() : ""}
+    ${store.modal?.kind === "control-preferences" ? renderControlPreferencesModal() : ""}
     ${store.modal?.kind === "onboarding" ? renderOnboardingModal() : ""}
-    ${store.modal?.kind === "agent-integration" ? renderAgentIntegrationModal(profiles) : ""}
     ${
       store.modal?.kind === "profile-details"
         ? renderProfileDetailsModal(profileDetailsProfile)
@@ -166,9 +177,28 @@ export function render(): void {
   const renameInput = renameForm?.querySelector<HTMLInputElement>("#profile-rename");
   const renameDraft = store.modal?.kind === "rename" && renameForm?.dataset.profileId === store.modal.profileId
     ? renameInput?.value : undefined;
+  const expandedTools = [...appRoot.querySelectorAll<HTMLDetailsElement>(".tools-workspace details[id][open]")].map(node => node.id);
+  const preferencesInput = appRoot.querySelector<HTMLTextAreaElement>("#control-preferences-editor");
+  const preferencesFocus = preferencesInput && store.modal?.kind === "control-preferences" && preferencesInput.dataset.domain === store.modal.activeTab && document.activeElement === preferencesInput
+    ? { start: preferencesInput.selectionStart, end: preferencesInput.selectionEnd, direction: preferencesInput.selectionDirection, scroll: preferencesInput.scrollTop } : null;
+  const preferencesLocationOpen = appRoot.querySelector<HTMLDetailsElement>(".control-preferences-location")?.open;
   appRoot.className = "";
   appRoot.innerHTML = html;
   refreshWorkspaceSwitcher();
+  expandedTools.forEach(id => { const node = document.getElementById(id); if (node instanceof HTMLDetailsElement) node.open = true; });
+  applyWorkspaceSearch();
+  if (preferencesLocationOpen) {
+    const location = appRoot.querySelector<HTMLDetailsElement>(".control-preferences-location");
+    if (location) location.open = true;
+  }
+  if (preferencesFocus) {
+    const input = appRoot.querySelector<HTMLTextAreaElement>("#control-preferences-editor");
+    if (input && !input.disabled) {
+      input.focus({ preventScroll: true });
+      input.setSelectionRange(preferencesFocus.start, preferencesFocus.end, preferencesFocus.direction);
+      input.scrollTop = preferencesFocus.scroll;
+    }
+  }
   if (renameDraft !== undefined) {
     const input = appRoot.querySelector<HTMLInputElement>("#profile-rename");
     if (input) input.value = renameDraft;

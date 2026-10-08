@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isWorkspaceShell } from "../workspace-shell";
 import { z } from "zod";
 import { LOCAL_APPS_CHANNEL } from "../../shared/local-apps";
 import { defaultDataDir } from "../fs-util";
@@ -34,7 +35,7 @@ export function registerLocalApps(profileManager: ProfileManager): LocalAppsServ
   ipcMain.handle(LOCAL_APPS_CHANNEL, async (event, method: string, ...args: unknown[]) => {
     let source = "";
     try { source = fileURLToPath(event.senderFrame!.url.split("?")[0]); } catch { /* reject below */ }
-    if (path.resolve(source) !== path.resolve(__dirname, "../../../public/local-apps.html") || event.senderFrame !== event.sender.mainFrame) throw new Error("本地应用接口只能由本地应用工作区调用。");
+    if ((!isWorkspaceShell(event.senderFrame?.url || "", path.resolve(__dirname, "../../../public")) && path.resolve(source) !== path.resolve(__dirname, "../../../public/local-apps.html")) || event.senderFrame !== event.sender.mainFrame) throw new Error("本地应用接口只能由本地应用工作区调用。");
     if (method === "list") return service.list();
     if (method === "save") { const id = await service.save(args[0] as never); sync(); return id; }
     if (method === "pickDirectory") {

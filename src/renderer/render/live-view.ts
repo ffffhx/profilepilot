@@ -1,4 +1,5 @@
 import { profileApi } from "../api";
+import { workspaceHidden } from "../workspace-lifecycle";
 import { LiveViewEntry, store } from "../state";
 import { CdpLiveTab, CdpLiveView, PublicProfile } from "../types";
 import { escapeHtml, formatErrorMessage, hostOf } from "../util";
@@ -31,7 +32,7 @@ export function startLiveViewLoop(): void {
     if (
       store.viewMode !== "main" ||
       store.busy ||
-      document.hidden ||
+      workspaceHidden() ||
       (store.modal?.kind !== "profile-details" && store.modal?.kind !== "live-zoom")
     ) {
       return;

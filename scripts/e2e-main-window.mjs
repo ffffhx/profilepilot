@@ -170,7 +170,7 @@ function extractSmokePayload(stdout) {
 
 function verifyMainWindowSmoke(smoke, homeDir) {
   assert.equal(smoke.title, "ProfilePilot");
-  assert.equal(smoke.h1, "ProfilePilot");
+  assert.equal(smoke.h1, "浏览器");
   assert.equal(smoke.hasBridge, true, "preload should expose window.profileManager");
 
   for (const capability of [
@@ -200,10 +200,11 @@ function verifyMainWindowSmoke(smoke, homeDir) {
     assert.equal(smoke[capability], true, `${capability} should be available through the preload bridge`);
   }
 
-  assert.deepEqual(smoke.statusLabels, ["当前运行", "已管理", "运行中"]);
+  assert.deepEqual(smoke.statusLabels, ["已管理", "运行中"]);
+  assert.equal(smoke.statusValues.length, 2, "status strip should show managed and running counts");
   assert.equal(smoke.accountSyncTitle, "同步");
   assert.ok(smoke.buttonCount >= 10, "main window should render its primary controls");
-  assert.ok(smoke.shellWidthRatio >= 0.9 && smoke.shellWidthRatio <= 1, "main shell should fill the window");
+  assert.ok(smoke.shellWidthRatio >= 0.9 && smoke.shellWidthRatio <= 1, "main shell should fill the space beside the workspace rail");
   assert.equal(
     smoke.profileTableHasHorizontalOverflow,
     false,

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; form-action 'none'">
+<title>Local benchmark form</title>
+<style>
+  :root { color-scheme: light; font-family: sans-serif; color: #182230; background: #fff; }
+  body { margin: 0; padding: 12px 4px 40px; }
+  h1 { font-size: 21px; margin-top: 0; }
+  label { display: block; font-size: 16px; margin: 14px 0 6px; }
+  input, button { box-sizing: border-box; width: 100%; min-height: 46px; font: inherit; }
+  input { padding: 9px; border: 1px solid #667085; border-radius: 4px; }
+  button { margin: 8px 0; color: #182230; background: #eef2f6; border: 1px solid #667085; border-radius: 4px; }
+  p { overflow-wrap: anywhere; line-height: 1.4; }
+  ul { padding-left: 25px; } li { padding: 7px 0; }
+</style>
+<h1>Offline Web form</h1>
+<form id="web-form">
+  <label for="web-input">Web search</label>
+  <input id="web-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false">
+  <button id="web-apply" type="submit">Apply web filter</button>
+</form>
+<p id="web-mirror" aria-live="polite">Web mirror: (empty)</p>
+<p id="web-status" role="status">Web status: ready</p>
+<ul id="web-results" aria-label="Web results"></ul>
+<button id="web-clear" type="button">Clear web filter</button>
+<script>
+  const choices = ['Alpha local item', 'Beta local item', 'Gamma local item', '蓝牙测试 local item'];
+  const input = document.getElementById('web-input');
+  const mirror = document.getElementById('web-mirror');
+  const status = document.getElementById('web-status');
+  const results = document.getElementById('web-results');
+  function render(items) {
+    results.replaceChildren(...items.map(text => {
+      const row = document.createElement('li'); row.textContent = text; return row;
+    }));
+  }
+  input.addEventListener('input', () => {
+    mirror.textContent = 'Web mirror: ' + (input.value || '(empty)');
+    status.textContent = 'Web status: editing';
+  });
+  document.getElementById('web-form').addEventListener('submit', event => {
+    event.preventDefault();
+    const query = input.value.toLocaleLowerCase('en-US');
+    const items = choices.filter(text => text.toLocaleLowerCase('en-US').includes(query));
+    render(items); status.textContent = 'Web results: ' + items.length;
+    input.blur();
+  });
+  document.getElementById('web-clear').addEventListener('click', () => {
+    input.value = ''; mirror.textContent = 'Web mirror: (empty)';
+    status.textContent = 'Web status: ready'; render(choices); input.blur();
+  });
+  render(choices);
+</script>
+</html>

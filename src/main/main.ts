@@ -2,8 +2,13 @@ import { promises as fs, watch, type FSWatcher } from "node:fs";
 import { app, BrowserWindow, crashReporter, globalShortcut, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, session, shell, Tray, type IpcMainInvokeEvent, type Rectangle } from "electron";
 import path from "node:path";
 import { IPC_CHANNELS } from "../shared/ipc";
+import { protectWorkspaceShell } from "./workspace-shell";
 import { registerTaskService } from "./tasks/ipc";
+import { registerMobile } from "./mobile/ipc";
+import type { MobileService } from "./mobile/service";
 import { registerLocalApps } from "./local-apps/ipc";
+import { registerPhones } from "./phones/ipc";
+import type { PhonesService } from "./phones/service";
 import type { TaskService } from "./tasks/service";
 import type {
   AccountSyncDiffResult,
@@ -49,7 +54,10 @@ import { captureCdpLiveView } from "./cdp-live-view";
 import { startE2eDriver } from "./e2e-driver";
 import { defaultDataDir } from "./fs-util";
 import { StartupSettingsManager, createTestLoginItemApi } from "./startup-settings";
+import { ShutdownCoordinator } from "./shutdown-coordinator";
 import { ensureClaudeInstructionShell, readGlobalInstructions, undoGlobalInstruction, writeGlobalInstruction } from "./global-instructions";
+import { readBrowserPreferences, writeBrowserPreferences } from "./browser-preferences";
+import { readControlPreferences, writeControlPreferences } from "./control-preferences";
 import {
   inspectAgentIntegration,
   refreshAgentBrowserWrapperIfInstalled,
@@ -98,10 +106,13 @@ installProcessCrashLogging();
 installElectronCrashLogging();
 const profileManager = createProfileManager(broadcastAgentTakeover, revealAgentOverlayProfile);
 let taskService: TaskService | undefined;
+let phonesService: PhonesService | undefined;
+let mobileService: MobileService | undefined;
 let startupSettingsManager: StartupSettingsManager;
-let agentOverlayDisposedForQuit = false;
+let shutdownReason = "electron";
 let appQuitting = false;
 let mainWindow: BrowserWindow | null = null;
+let mainWindowAppearance = "";
 let miniWindow: BrowserWindow | null = null;
 let appTray: Tray | null = null;
 let appWindowRequestsReady = false;
@@ -110,6 +121,13 @@ let miniOutsideClickWindows: BrowserWindow[] = [];
 let miniOutsideClickUpdateTimer: NodeJS.Timeout | null = null;
 let miniWindowSaveTimer: NodeJS.Timeout | null = null;
 const APP_ICON_PATH = path.join(__dirname, "../../public/assets/profilepilot-icon-512.png");
+const APP_USER_MODEL_ID = "io.github.ffffhx.profilepilot";
+// Windows Explorer needs a real ICO file outside app.asar for the taskbar/relaunch icon.
+const WINDOW_ICON_PATH = process.platform === "win32"
+  ? app.isPackaged
+    ? path.join(process.resourcesPath, "icon.ico")
+    : path.join(__dirname, "../../build/icon.ico")
+  : APP_ICON_PATH;
 // 整个界面的统一缩放系数（等比例放大字号/间距/控件）。想再大/再小只改这一个数。
 const UI_ZOOM_FACTOR = 1.0;
 const MINI_DOCK_SIZE = 80;
@@ -261,6 +279,19 @@ function broadcastAppState(state: AppState): void {
       windowRef.webContents.send(IPC_CHANNELS.stateChanged, state);
     }
   }
+}
+
+async function updatedAppState(): Promise<AppState> {
+  const state = await profileManager.getState();
+  // Cached workspaces need mutation results immediately, without waiting for a
+  // filesystem watch or the periodic reconciliation scan.
+  broadcastAppState(state);
+  return state;
+}
+
+function publishProfileResult<T extends { state: AppState }>(result: T): T {
+  broadcastAppState(result.state);
+  return result;
 }
 
 function scheduleAppStateBroadcast(delayMs = 60): void {
@@ -802,7 +833,7 @@ async function createMiniWindow(): Promise<BrowserWindow> {
     alwaysOnTop: true,
     skipTaskbar: true,
     title: `${APP_TITLE} Mini`,
-    icon: APP_ICON_PATH,
+    icon: WINDOW_ICON_PATH,
     backgroundColor: "#00000000",
     webPreferences: {
       preload: path.join(__dirname, "../preload.js"),
@@ -1186,6 +1217,7 @@ function createAppTray(): void {
         label: "退出 ProfilePilot",
         click: () => {
           appQuitting = true;
+          shutdownReason = "tray";
           app.quit();
         }
       }
@@ -1210,9 +1242,10 @@ function createProgressReporter(
 
 function createMainWindow(): void {
   const smokeTest = IS_ELECTRON_SMOKE_TEST;
+  mainWindowAppearance = "#f6faff/#576a83";
 
-  // UI 是深色仪表台主题，原生控件（select 弹出菜单、滚动条等）必须跟随深色
-  nativeTheme.themeSource = "dark";
+  // Workspace colors also style the native caption buttons; macOS keeps its traffic lights.
+  nativeTheme.themeSource = "system";
 
   // 默认窗口尺寸随 UI_ZOOM_FACTOR 一起放大，保证缩放后二栏布局仍有原来的可用空间。
   mainWindow = new BrowserWindow({
@@ -1220,18 +1253,39 @@ function createMainWindow(): void {
     height: Math.round(760 * UI_ZOOM_FACTOR),
     minWidth: 860,
     minHeight: 620,
+    autoHideMenuBar: process.platform !== "darwin",
     show: !IS_BACKGROUND_E2E && !START_IN_BACKGROUND && (!smokeTest || IS_E2E_DRIVER_TEST),
     focusable: !IS_BACKGROUND_E2E,
     title: APP_TITLE,
-    icon: APP_ICON_PATH,
-    backgroundColor: "#0a1014",
+    icon: WINDOW_ICON_PATH,
+    backgroundColor: "#ffffff",
+    titleBarStyle: process.platform === "darwin" ? "hiddenInset" : "hidden",
+    titleBarOverlay: process.platform === "darwin" ? true : {
+      color: "#f6faff",
+      symbolColor: "#576a83",
+      height: 58
+    },
     webPreferences: {
       preload: path.join(__dirname, "../preload.js"),
+      zoomFactor: UI_ZOOM_FACTOR,
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false
     }
   });
+
+
+  if (process.platform === "win32") {
+    // Development runs use electron.exe; identify its taskbar button as ProfilePilot too.
+    mainWindow.setAppDetails({
+      appId: APP_USER_MODEL_ID,
+      appIconPath: WINDOW_ICON_PATH,
+      relaunchDisplayName: APP_TITLE,
+      relaunchCommand: app.isPackaged
+        ? `"${process.execPath}"`
+        : `"${process.execPath}" "${app.getAppPath()}"`
+    });
+  }
 
   if (smokeTest && !IS_E2E_DRIVER_TEST) {
     mainWindow.webContents.once("did-finish-load", async () => {
@@ -1282,8 +1336,8 @@ function createMainWindow(): void {
                   hasResumeAgentConnections: typeof window.profileManager?.resumeAgentConnections === "function",
                   hasOperationProgress: typeof window.profileManager?.onOperationProgress === "function",
                   buttonCount: document.querySelectorAll("button").length,
-                  statusLabels: Array.from(document.querySelectorAll(".status-label")).map((item) => item.textContent),
-                  statusValues: Array.from(document.querySelectorAll(".status-value")).map((item) => item.textContent),
+                  statusLabels: Array.from(document.querySelectorAll(".browser-status-strip > span:not(.browser-current)")).map((item) => item.firstChild?.textContent?.trim()),
+                  statusValues: Array.from(document.querySelectorAll(".browser-status-strip strong")).map((item) => item.textContent),
                   accountSyncTitle: document.querySelector("[data-account-sync] h2")?.textContent || null,
                   accountSyncSelectCount: document.querySelectorAll("[data-account-sync] select").length,
                   accountConfirmTitle: null,
@@ -1292,7 +1346,8 @@ function createMainWindow(): void {
                   migrationSelectCount: document.querySelectorAll("[data-extension-migration] select").length,
                   shellWidthRatio: (() => {
                     const shell = document.querySelector(".shell");
-                    return shell ? Math.round((shell.clientWidth / window.innerWidth) * 100) / 100 : null;
+                    const railWidth = document.querySelector(".workspace-rail")?.getBoundingClientRect().width || 0;
+                    return shell ? Math.round((shell.clientWidth / (window.innerWidth - railWidth)) * 100) / 100 : null;
                   })(),
                   profileTableHasHorizontalOverflow: (() => {
                     const tableWrap = document.querySelector(".profiles-table-wrap");
@@ -1499,6 +1554,7 @@ function createMainWindow(): void {
       } finally {
         // Smoke 进程没有启动机器级 Gateway/overlay；直接退出可避免正常退出钩子
         // 为一个未初始化的 overlay 等待清理，从而让 E2E 生命周期保持确定。
+        shutdownReason = "smoke-test";
         app.quit();
       }
     });
@@ -1506,9 +1562,7 @@ function createMainWindow(): void {
 
   // 整体 UI 缩放：样式表保持原始的紧凑基准字号/间距，这里用一个统一的缩放系数
   // 等比例放大整个界面（字号、间距、控件一起放大），比逐条加 px 更协调，调一个数即可。
-  mainWindow.webContents.on("did-finish-load", () => {
-    mainWindow?.webContents.setZoomFactor(UI_ZOOM_FACTOR);
-  });
+  // Set in webPreferences before the first paint, rather than resizing after load.
 
   // 最小化沿用系统行为（Windows/Linux 任务栏、macOS Dock），不自动开启悬浮窗。
 
@@ -1521,10 +1575,17 @@ function createMainWindow(): void {
 
     event.preventDefault();
     appQuitting = true;
+    shutdownReason = "main-window-close";
     app.quit();
   });
 
-  mainWindow.loadFile(path.join(__dirname, "../../public", process.env.CPM_START_VIEW === "local-apps" ? "local-apps.html" : process.env.CPM_START_VIEW === "browser" ? "index.html" : "tasks.html"));
+  if (smokeTest && !IS_E2E_DRIVER_TEST) {
+    // The legacy smoke harness directly exercises the standalone browser page.
+    mainWindow.loadFile(path.join(__dirname, "../../public/index.html"));
+  } else {
+    protectWorkspaceShell(mainWindow);
+    mainWindow.loadFile(path.join(__dirname, "../../public/workspace.html"), { query: { workspace: process.env.CPM_START_VIEW || "agent" } });
+  }
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
@@ -1539,12 +1600,25 @@ async function bifrostSnapshotForRenderer(): Promise<BifrostSnapshot> {
 }
 
 function registerIpcHandlers(): void {
+  ipcMain.on(IPC_CHANNELS.setWindowAppearance, (event, background: unknown, symbols: unknown) => {
+    if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents ||
+        event.senderFrame !== mainWindow.webContents.mainFrame) return;
+    const isColor = (value: unknown): value is string => typeof value === "string" && /^#[\da-f]{6}$/i.test(value);
+    if (!isColor(background) || !isColor(symbols)) return;
+    const appearance = `${background}/${symbols}`;
+    if (appearance === mainWindowAppearance) return;
+    mainWindowAppearance = appearance;
+    mainWindow.setBackgroundColor(background);
+    if (process.platform !== "darwin") {
+      mainWindow.setTitleBarOverlay({ color: background, symbolColor: symbols });
+    }
+  });
   ipcMain.handle(IPC_CHANNELS.getStartupSettings, () => startupSettingsManager.get());
   ipcMain.handle(IPC_CHANNELS.setStartupEnabled, (_event, enabled: unknown) => {
     if (typeof enabled !== "boolean") throw new TypeError("开机自启动开关必须是布尔值。");
     return startupSettingsManager.setEnabled(enabled);
   });
-  ipcMain.handle(IPC_CHANNELS.getState, async (): Promise<AppState> => profileManager.getState());
+  ipcMain.handle(IPC_CHANNELS.getState, async (): Promise<AppState> => updatedAppState());
   ipcMain.handle(IPC_CHANNELS.getInitialState, (): Promise<AppState> => {
     // The coordinator already coalesces refreshes across both windows. Never
     // make page navigation wait for process, port and browser target probes.
@@ -1555,27 +1629,27 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.createProfile, async (_event, name: string): Promise<AppState> => {
     await profileManager.createProfile(name);
-    return profileManager.getState();
+    return updatedAppState();
   });
 
   ipcMain.handle(IPC_CHANNELS.renameProfile, async (_event, id: string, name: string): Promise<AppState> => {
     await profileManager.renameProfile(id, name);
-    return profileManager.getState();
+    return updatedAppState();
   });
 
   ipcMain.handle(IPC_CHANNELS.launchProfile, async (_event, id: string, options?: LaunchProfileOptions | null): Promise<AppState> => {
     await profileManager.launchProfile(id, options ?? {});
-    return profileManager.getState();
+    return updatedAppState();
   });
 
   ipcMain.handle(IPC_CHANNELS.launchProfileWithCdp, async (_event, id: string, port?: number | null, options?: LaunchProfileOptions | null): Promise<AppState> => {
     await profileManager.launchProfileWithCdp(id, port, options ?? {});
-    return profileManager.getState();
+    return updatedAppState();
   });
 
   ipcMain.handle(IPC_CHANNELS.connectRunningSystemChrome, async (_event, id: string): Promise<AppState> => {
     await profileManager.connectRunningSystemChrome(id);
-    return profileManager.getState();
+    return updatedAppState();
   });
 
   ipcMain.handle(IPC_CHANNELS.suggestCdpPort, async (_event, preferredPort?: number | null) => {
@@ -1597,7 +1671,7 @@ function registerIpcHandlers(): void {
     config: ProfileProxyConfig | null
   ): Promise<AppState> => {
     await profileManager.setProfileProxy(id, config ?? null);
-    return profileManager.getState();
+    return updatedAppState();
   });
 
   ipcMain.handle(IPC_CHANNELS.setProfileAgentSettings, async (
@@ -1606,27 +1680,27 @@ function registerIpcHandlers(): void {
     settings: ProfileAgentSettings
   ): Promise<AppState> => {
     await profileManager.setProfileAgentSettings(id, settings);
-    return profileManager.getState();
+    return updatedAppState();
   });
 
   ipcMain.handle(IPC_CHANNELS.setMiniProfilePinned, async (_event, id: string, pinned: boolean): Promise<AppState> => {
     await profileManager.setMiniProfilePinned(id, Boolean(pinned));
-    return profileManager.getState();
+    return updatedAppState();
   });
 
   ipcMain.handle(IPC_CHANNELS.setMiniProfileOrder, async (_event, ids: string[]): Promise<AppState> => {
     await profileManager.setMiniProfileOrder(Array.isArray(ids) ? ids : []);
-    return profileManager.getState();
+    return updatedAppState();
   });
 
   ipcMain.handle(IPC_CHANNELS.setMainProfileOrder, async (_event, ids: string[]): Promise<AppState> => {
     await profileManager.setMainProfileOrder(Array.isArray(ids) ? ids : []);
-    return profileManager.getState();
+    return updatedAppState();
   });
 
   ipcMain.handle(IPC_CHANNELS.setQuickLaunchSlot, async (_event, id: string, slot: number | null): Promise<AppState> => {
     await profileManager.setQuickLaunchSlot(id, slot ?? null);
-    return profileManager.getState();
+    return updatedAppState();
   });
 
   ipcMain.handle(IPC_CHANNELS.setMiniPanelPinned, async (_event, pinned: boolean): Promise<void> => {
@@ -1724,10 +1798,14 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.setShellIntegrationEnabled, async (_event, enabled: boolean): Promise<AppState> => {
     await setShellIntegrationEnabled(Boolean(enabled));
-    return profileManager.getState();
+    return updatedAppState();
   });
 
   ipcMain.handle(IPC_CHANNELS.inspectAgentIntegration, async () => inspectAgentIntegration());
+  ipcMain.handle(IPC_CHANNELS.readBrowserPreferences, async () => readBrowserPreferences());
+  ipcMain.handle(IPC_CHANNELS.readControlPreferences, async (_event, domain) => readControlPreferences(domain));
+  ipcMain.handle(IPC_CHANNELS.writeControlPreferences, async (_event, request) => writeControlPreferences(request));
+  ipcMain.handle(IPC_CHANNELS.writeBrowserPreferences, async (_event, request) => writeBrowserPreferences(request));
 
   ipcMain.handle(
     IPC_CHANNELS.setAgentWrapperEnabled,
@@ -1761,7 +1839,7 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.prepareProfileForAgent, async (_event, profileId: string): Promise<AppState> => {
     await profileManager.prepareProfileForAgent(profileId);
-    return profileManager.getState();
+    return updatedAppState();
   });
 
   ipcMain.handle(IPC_CHANNELS.focusProfile, async (_event, id: string): Promise<void> => {
@@ -1774,22 +1852,22 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.closeProfile, async (_event, id: string): Promise<AppState> => {
     await profileManager.closeProfile(id);
-    return profileManager.getState();
+    return updatedAppState();
   });
 
   ipcMain.handle(IPC_CHANNELS.focusExternalInstance, async (_event, userDataDir: string): Promise<AppState> => {
     await profileManager.focusExternalInstance(userDataDir);
-    return profileManager.getState();
+    return updatedAppState();
   });
 
   ipcMain.handle(IPC_CHANNELS.closeExternalInstance, async (_event, userDataDir: string): Promise<AppState> => {
     await profileManager.closeExternalInstance(userDataDir);
-    return profileManager.getState();
+    return updatedAppState();
   });
 
   ipcMain.handle(IPC_CHANNELS.disconnectCdpClient, async (_event, profileId: string, pid: number): Promise<AppState> => {
     await profileManager.disconnectCdpClient(profileId, pid);
-    return profileManager.getState();
+    return updatedAppState();
   });
 
   ipcMain.handle(
@@ -1802,7 +1880,7 @@ function registerIpcHandlers(): void {
       const result = await profileManager.takeoverAgentConnections(profileId, sessionOrOptions);
       return {
         ...result,
-        state: await profileManager.getState()
+        state: await updatedAppState()
       };
     }
   );
@@ -1836,17 +1914,17 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.setAgentOverlayEnabled, async (_event, enabled: boolean): Promise<AppState> => {
     await profileManager.setAgentOverlayEnabled(Boolean(enabled));
-    return profileManager.getState();
+    return updatedAppState();
   });
 
   ipcMain.handle(IPC_CHANNELS.openProfileFolder, async (_event, id: string): Promise<AppState> => {
     await profileManager.openProfileFolder(id);
-    return profileManager.getState();
+    return updatedAppState();
   });
 
   ipcMain.handle(IPC_CHANNELS.openProfileExtensionsPage, async (_event, id: string): Promise<AppState> => {
     await profileManager.openProfileExtensionsPage(id);
-    return profileManager.getState();
+    return updatedAppState();
   });
 
   ipcMain.handle(IPC_CHANNELS.openPath, async (_event, targetPath: string): Promise<boolean> => {
@@ -1855,7 +1933,9 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.handle(IPC_CHANNELS.deleteProfile, async (_event, id: string, options?: DeleteProfileOptions): Promise<DeleteProfileResult> => {
-    return profileManager.deleteProfile(id, options);
+    const result = await profileManager.deleteProfile(id, options);
+    broadcastAppState(result.state);
+    return result;
   });
 
   ipcMain.handle(
@@ -1912,7 +1992,7 @@ function registerIpcHandlers(): void {
         }),
         controller.signal,
         pause
-      );
+      ).then(publishProfileResult);
     } finally {
       activeOperations.delete(id);
     }
@@ -1930,7 +2010,7 @@ function registerIpcHandlers(): void {
         createProgressReporter(event, { key: "clone-profiles" }),
         controller.signal,
         pause
-      );
+      ).then(publishProfileResult);
     } finally {
       activeOperations.delete(id);
     }
@@ -1948,7 +2028,7 @@ function registerIpcHandlers(): void {
         createProgressReporter(event, { key: "refresh-clones" }),
         controller.signal,
         pause
-      );
+      ).then(publishProfileResult);
     } finally {
       activeOperations.delete(id);
     }
@@ -1966,23 +2046,23 @@ function registerIpcHandlers(): void {
         createProgressReporter(event, { key: "reset-clone", profileId }),
         controller.signal,
         pause
-      );
+      ).then(publishProfileResult);
     } finally {
       activeOperations.delete(id);
     }
   });
 
   ipcMain.handle(IPC_CHANNELS.launchClones, async (event, sourceProfileId: string): Promise<LaunchClonesResult> => {
-    return profileManager.launchClones(sourceProfileId, createProgressReporter(event, { key: "launch-clones" }));
+    return profileManager.launchClones(sourceProfileId, createProgressReporter(event, { key: "launch-clones" })).then(publishProfileResult);
   });
 
   ipcMain.handle(IPC_CHANNELS.recycleIdleClones, async (_event, days: number): Promise<RecycleIdleClonesResult> => {
-    return profileManager.recycleIdleClones(days);
+    return profileManager.recycleIdleClones(days).then(publishProfileResult);
   });
 
   ipcMain.handle(IPC_CHANNELS.setProfileTag, async (_event, profileId: string, tag: string): Promise<AppState> => {
     await profileManager.setProfileTag(profileId, tag);
-    return profileManager.getState();
+    return updatedAppState();
   });
 
   ipcMain.handle(IPC_CHANNELS.cancelOperation, async (_event, request: CancelOperationRequest): Promise<boolean> => {
@@ -2038,11 +2118,15 @@ function registerIpcHandlers(): void {
 
 app.name = APP_TITLE;
 app.setName(APP_TITLE);
+if (process.platform === "win32") {
+  app.setAppUserModelId(APP_USER_MODEL_ID);
+}
 
 // 单实例锁：双实例会各自对 live CDP 端口挂观察连接、互相把对方当成“驱动工具”，
 // 还会同时写 registry。第二个实例直接退出，把已有实例的主窗口拉到前台。
 if (!app.requestSingleInstanceLock()) {
   writeDiagnosticLog("info", "app", "app.secondary_instance", "检测到正在运行的 ProfilePilot，当前进程退出");
+  shutdownReason = "secondary-instance";
   app.quit();
 } else {
   startRuntimeStateTracking();
@@ -2080,6 +2164,8 @@ if (!app.requestSingleInstanceLock()) {
       });
       managementServer = await startProfilePilotManagementServer({
         profileManager,
+        getTaskService: () => taskService,
+        getPhoneService: () => phonesService,
         appVersion: app.getVersion(),
         onMutation: () => scheduleAppStateBroadcast(0)
       }).catch((error) => {
@@ -2095,6 +2181,8 @@ if (!app.requestSingleInstanceLock()) {
     registerIpcHandlers();
     taskService = registerTaskService(profileManager);
     registerLocalApps(profileManager);
+    phonesService = registerPhones(path.join(process.env.CPM_DATA_DIR || defaultDataDir(), "phones"), path.join(__dirname, "../android/profilepilot-phone.apk"), !IS_ELECTRON_SMOKE_TEST);
+    mobileService = registerMobile(path.join(process.env.CPM_DATA_DIR || defaultDataDir(), "mobile"), taskService, profileManager, path.join(__dirname, "../android/profilepilot-phone.apk"));
     if (!IS_BACKGROUND_E2E && (!IS_ELECTRON_SMOKE_TEST || process.env.CPM_E2E_ENABLE_GLOBAL_SHORTCUTS === "1")) {
       registerGlobalShortcuts();
     }
@@ -2145,37 +2233,43 @@ if (!app.requestSingleInstanceLock()) {
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin" && !appTray) {
+    shutdownReason = "window-all-closed";
     app.quit();
   }
+});
+
+const shutdown = new ShutdownCoordinator({
+  stages: [
+    { name: "phone-sessions", run: () => phonesService?.close() },
+    { name: "mobile-connections", run: () => mobileService?.close() },
+    { name: "state-coordinator", run: () => stopStateCoordinator() },
+    { name: "tasks-save-and-handoff", run: () => taskService?.close() },
+    { name: "agent-overlay", run: () => profileManager.disposeAgentOverlay() },
+    { name: "management-server", run: async () => { await managementServer?.close(); managementServer = null; } }
+  ],
+  log: (level, event, message, details) => writeDiagnosticLog(level, "app", event, message, details),
+  requestQuit: () => app.quit(),
+  // app.exit bypasses Electron's cancellable quit hooks. Leave runtime-state
+  // unclean on this path so the next start reports unfinished cleanup honestly.
+  forceExit: () => app.exit(1)
 });
 
 app.on("before-quit", (event) => {
   appQuitting = true;
-  stopStateCoordinator();
-  if (agentOverlayDisposedForQuit) {
-    return;
-  }
-  agentOverlayDisposedForQuit = true;
-  writeDiagnosticLog("info", "app", "app.quit_requested", "ProfilePilot 正在退出");
-  event.preventDefault();
-  void Promise.all([
-    taskService?.close(),
-    profileManager.disposeAgentOverlay(),
-    managementServer?.close().catch((error) => {
-      console.warn(`[management-cli] 关闭失败：${error instanceof Error ? error.message : String(error)}`);
-    })
-  ]).finally(() => {
-    managementServer = null;
-    app.quit();
-  });
+  shutdown.beforeQuit(event, shutdownReason);
 });
 
 app.on("will-quit", () => {
-  stopRuntimeStateTracking("electron.will-quit");
-  writeDiagnosticLog("info", "app", "app.stopped", "ProfilePilot 主进程已停止");
+  shutdown.willQuit();
   appTray?.destroy();
   appTray = null;
   globalShortcut.unregisterAll();
+});
+
+app.on("quit", () => {
+  if (shutdown.clean) stopRuntimeStateTracking("electron.quit");
+  writeDiagnosticLog(shutdown.clean ? "info" : "error", "app", "app.stopped", "ProfilePilot 主进程已停止", { clean: shutdown.clean });
+  shutdown.didQuit();
 });
 
 function windowSnapshot(windowRef: BrowserWindow | null): Record<string, unknown> | null {

@@ -1,0 +1,7 @@
+/* Identity and native caption share one row. No extra empty title-bar band. */
+html.desktop-window { --window-titlebar-height:58px; --workspace-topbar-height:58px; --window-sidebar-width:0px; }
+.desktop-window body { padding-top:var(--workspace-topbar-height); }
+.desktop-window body::before { content:"";position:fixed;inset:0 0 auto;height:var(--workspace-topbar-height);z-index:20;background:var(--panel-soft);-webkit-app-region:drag;user-select:none; }
+.desktop-window #task-app,.desktop-window .app-frame { height:calc(100dvh - var(--workspace-topbar-height)); }
+.desktop-window .app-shell,.desktop-window .phone-shell { min-height:calc(100dvh - var(--workspace-topbar-height)); }
+.desktop-window .app-sidebar { top:var(--workspace-topbar-height); }

@@ -195,7 +195,9 @@ for (const status of ["completed", "partial", "failed"]) {
     f.service.dependencies.worker = () => child;
     f.task.limits.minutes = 1;
     await f.service.startRun(f.task, f.run);
-    f.task.observation = await f.browser.observe();
+    // Observe through the service so the fixture owns an actual browser lease
+    // that must be completed after the SDK worker drains.
+    await f.service.handleTool(f.task, f.run, 'observe', {});
     await f.service.handleTool(f.task, f.run, "finish", { status, summary: "结果已保存", evidence: ["提交申请"], remaining: [] });
     assert.equal(f.service.runs.has(f.task.id), true, "SDK has not exited yet");
     t.mock.timers.tick(60000);
@@ -358,7 +360,10 @@ test("cancel during approval page verification prevents the queued click", async
   f.browser.observe = () => new Promise(resolve => finish = resolve);
   const approval = f.service.reply(f.task.id, f.task.pending.id, "确认", true);
   await f.service.control(f.task.id, "cancel"); finish(observed);
-  await assert.rejects(approval, /已取消/); assert.equal(f.calls.length, 0); assert.equal(f.task.status, "cancelled");
+  await assert.rejects(approval, /已取消/);
+  // Lazy preparation now creates the real route, so cancellation releases it.
+  assert.equal(f.calls.filter(call => typeof call === "object").length, 0);
+  assert.deepEqual(f.calls, ["release"]); assert.equal(f.task.status, "cancelled");
 });
 test("explicit per-origin grant avoids repeated confirmation and stops at its quota", async (t) => {
   const f = fixture(t); f.task.grant = { origin: "https://example.test", effects: ["submit"], maxActions: 1, used: 0 };
@@ -483,7 +488,9 @@ test("same-profile tasks queue while another profile can run, including during u
   await service.control(first.id, "takeover"); await new Promise(resolve => setImmediate(resolve)); await service.tick();
   assert.equal(first.status, "waiting_user"); assert.equal(second.status, "queued");
   await service.control(first.id, "cancel"); await service.tick(); await new Promise(resolve => setImmediate(resolve));
-  assert.equal(second.status, "running"); assert.ok(controls.some(([id, action]) => id === first.id && action === "release"));
+  assert.equal(second.status, "running");
+  assert.equal(controls.some(([id, action]) => id === first.id && action === "release"), false,
+    "a queued worker that never used the browser has no lease to release");
 });
 
 test("missed schedules do not backfill external work and due schedules persist their execution", async (t) => {

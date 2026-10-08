@@ -7,10 +7,9 @@ const app = await launchProfilePilotE2e({ name: "browser tasks" });
 try {
   const d = app.driver;
   const profile = await d.evaluate(`window.profileManager.createProfile('任务验收浏览器').then(s => s.profiles.find(p => p.name === '任务验收浏览器'))`);
-  await d.domClick('[data-workspace-trigger]');
-  await d.domClick('a[href="./tasks.html"]');
+  await d.domClick('.workspace-link[data-workspace="agent"]');
   await d.waitFor("#create-task");
-  assert.equal((await d.query("h1")).text, "任务工作台");
+  assert.equal((await d.query("h1")).text, "Agent");
   await d.waitFor("#task-profile-availability", s => s.text.includes("1 个空闲"));
   assert.match(await d.evaluate(`document.querySelector('select[name="profileId"] option[value="${profile.id}"]').textContent`), /空闲 · 未启动/);
   const documentStartedAt = await d.evaluate("performance.timeOrigin");

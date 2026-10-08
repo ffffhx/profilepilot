@@ -1,0 +1,9 @@
+<resources>
+    <string name="bench_heading" translatable="false">Control benchmark</string>
+    <string name="bench_menu_label" translatable="false">Benchmark menu</string>
+    <string name="bench_form_heading" translatable="false">Native form</string>
+    <string name="bench_list_heading" translatable="false">Long list</string>
+    <string name="bench_state_heading" translatable="false">Dynamic state</string>
+    <string name="bench_web_heading" translatable="false">Local WebView</string>
+    <string name="bench_synthetic_password" translatable="false">synthetic-password-42</string>
+</resources>

@@ -16,7 +16,7 @@ async function main() {
     assert.equal(initialWindows.main.focused, false, "background E2E must not focus the main window");
 
     const heading = await driver.query("h1");
-    assert.equal(heading.text, "ProfilePilot");
+    assert.equal(heading.text, "浏览器");
     assert.equal(await driver.evaluate("document.visibilityState"), "visible");
     assert.ok((await driver.screenshot("main")).pngBase64.length > 1_000, "hidden window should still be capturable");
 

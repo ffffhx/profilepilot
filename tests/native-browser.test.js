@@ -6,9 +6,12 @@ const { randomBytes, createHash } = require('node:crypto');
 const { mkdtempSync, readFileSync, rmSync } = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const { NativeBrowserBridge, NATIVE_EXTENSION_ID } = require('../dist/main/tasks/native-bridge');
-const { NativeBrowser, RoutedBrowser } = require('../dist/main/tasks/native-browser');
-const { hasTaskBrowser } = require('../dist/shared/tasks');
+const build = process.env.PP_CONTROL_BUILD || path.resolve('dist');
+const { NativeBrowserBridge, NATIVE_EXTENSION_ID } = require(path.join(build, 'main/tasks/native-bridge'));
+const { NativeBrowser, RoutedBrowser } = require(path.join(build, 'main/tasks/native-browser'));
+const { hasTaskBrowser } = require(path.join(build, 'shared/tasks'));
+const { NATIVE_REQUIRED_CAPABILITIES } = require(path.join(build, 'main/tasks/native-compatibility'));
+const { requestNativeControl } = require(path.join(build, 'main/native-control/cli'));
 
 function open(port, origin = `chrome-extension://${NATIVE_EXTENSION_ID}`) {
   return new Promise((resolve, reject) => {
@@ -31,7 +34,7 @@ function open(port, origin = `chrome-extension://${NATIVE_EXTENSION_ID}`) {
       };
       socket.on('data', chunk => { buffer = Buffer.concat([buffer, chunk]); parse(); });
       socket.on('error', () => {});
-      resolve({ closed, close: () => socket.destroy(), next: () => messages.length ? Promise.resolve(messages.shift()) : new Promise(resolve => readers.push(resolve)), send: value => {
+      resolve({ closed, close: () => socket.destroy(), end: () => socket.end(Buffer.from([0x88, 0x80, 0, 0, 0, 0])), next: () => messages.length ? Promise.resolve(messages.shift()) : new Promise(resolve => readers.push(resolve)), send: value => {
         const data = Buffer.from(JSON.stringify(value)); const mask = randomBytes(4), header = Buffer.alloc(data.length < 126 ? 2 : 4);
         header[0] = 0x81; header[1] = 0x80 | (data.length < 126 ? data.length : 126); if (data.length >= 126) header.writeUInt16BE(data.length, 2);
         for (let i = 0; i < data.length; i++) data[i] ^= mask[i % 4]; socket.write(Buffer.concat([header, mask, data]));
@@ -61,7 +64,7 @@ test('extension origin, short-lived pairing, persistence, duplicate connections 
     assert.equal(JSON.stringify(bridge.states()).includes(config.token), false);
     duplicate = await open(config.port); duplicate.send({ type: 'hello', ...config }); await duplicate.closed;
     assert.equal(bridge.states()[0].connected, true);
-    client.send({ type: 'state', state: { taskTabs: true, ownership: 'agent', sessionId: 'task', tabId: 7 } });
+    client.send({ type: 'state', state: { taskTabs: true, extensionVersion: '0.2.0', capabilities: [...NATIVE_REQUIRED_CAPABILITIES], ownership: 'agent', sessionId: 'task', tabId: 7 } });
     const result = bridge.request('native:Default', 'tabs'); const command = await client.next();
     client.send({ id: command.id, result: [{ id: '7' }] }); assert.deepEqual(await result, [{ id: '7' }]);
     await assert.rejects(bridge.pair('native:Default'), /结束/);
@@ -83,13 +86,77 @@ test('extension origin, short-lived pairing, persistence, duplicate connections 
   } finally { client?.close(); duplicate?.close(); bridge?.close(); assert.ok(root.startsWith(os.tmpdir() + path.sep)); rmSync(root, { recursive: true, force: true }); }
 });
 
+test('legacy and modern handshakes distinguish readiness without losing pairing or ownership', { timeout: 10000 }, async t => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'pp-native-handshake-'));
+  const profileId = 'native:Legacy', token = randomBytes(32).toString('hex');
+  let writes = 0, client;
+  const bridge = new NativeBrowserBridge(root, { read: () => ({ [profileId]: token }), write: () => { writes++; } });
+  t.after(() => { client?.close(); bridge.close(); });
+  const bounded = async (promise, stage) => {
+    let timer;
+    try { return await Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`Handshake fixture timed out: ${stage}`)), 2000); })]); }
+    finally { clearTimeout(timer); }
+  };
+  try {
+    await bridge.start();
+    // A still-pending invitation must not bypass the legacy connection check.
+    await bridge.authorize(profileId, 'Legacy Chrome');
+    const pendingPairing = bridge.pairings.get(profileId);
+    const { port } = JSON.parse(readFileSync(path.join(root, 'extension-listener.json'), 'utf8'));
+    client = await open(port); client.send({ type: 'hello', profileId, token });
+    assert.equal((await bounded(client.next(), 'saved pairing welcome')).type, 'welcome');
+    assert.equal(bridge.states()[0].taskTabs, false, 'authentication alone is not execution readiness');
+    const publish = state => bounded(new Promise(resolve => {
+      const unsubscribe = bridge.onEvent(event => { if (event.type === 'state') { unsubscribe(); resolve(event.state); } });
+      client.send({ type: 'state', state });
+    }), 'state advertisement');
+    const owner = { taskTabs: true, ownership: 'user', sessionId: 'legacy-owner', pausedByBrowser: true, tabId: 7, tabTitle: 'Legacy page' };
+    const legacy = await publish(owner);
+    assert.equal(legacy.connected, true); assert.equal(legacy.taskTabs, false);
+    assert.equal(legacy.ownerSessionId, owner.sessionId); assert.equal(legacy.ownership, 'user');
+    assert.equal(legacy.pausedByBrowser, true); assert.equal(legacy.tabId, 7);
+    assert.equal(legacy.extensionVersion, undefined); assert.equal(legacy.capabilities, undefined);
+    await assert.rejects(bridge.authorize(profileId, 'Legacy Chrome'), error => error.code === 'NATIVE_EXTENSION_UPDATE_REQUIRED');
+    assert.equal(bridge.pairings.get(profileId), pendingPairing, 'no replacement pairing is created');
+    const status = await requestNativeControl({ method: 'status', requestId: 'legacy-status' }, root);
+    assert.deepEqual(status.profiles, JSON.parse(JSON.stringify(bridge.states())));
+    await assert.rejects(requestNativeControl({ method: 'claim', profileId, sessionId: 'direct', requestId: 'legacy-claim' }, root), error => error.code === 'NATIVE_EXTENSION_UPDATE_REQUIRED' && /更新或重新加载/.test(error.message));
+    assert.equal(bridge.isDirectSession(profileId, 'direct'), false);
+    // A heartbeat must be the very next wire message: rejection sent no claim.
+    client.send({ type: 'heartbeat' }); assert.deepEqual(await bounded(client.next(), 'no claim on wire'), { type: 'heartbeat' });
+    assert.equal(writes, 0); assert.equal(bridge.states()[0].ownerSessionId, owner.sessionId);
+
+    const modern = { ...owner, extensionVersion: '0.2.0', capabilities: [...NATIVE_REQUIRED_CAPABILITIES] };
+    for (const capability of NATIVE_REQUIRED_CAPABILITIES) {
+      const state = await publish({ ...modern, capabilities: modern.capabilities.filter(item => item !== capability) });
+      assert.equal(state.taskTabs, false, `missing ${capability}`); assert.equal(state.ownerSessionId, owner.sessionId);
+    }
+    for (const extensionVersion of [undefined, '0.1.99', '0.0.99', 'garbage', '0.2.0-beta', '70000.0']) {
+      assert.equal((await publish({ ...modern, extensionVersion })).taskTabs, false);
+    }
+    assert.equal((await publish({ ...modern, taskTabs: false })).taskTabs, false);
+    for (const extensionVersion of ['0.2.0', '0.2.0.1', '0.10.0', '1.0']) {
+      const ready = await publish({ ...modern, extensionVersion });
+      assert.equal(ready.taskTabs, true); assert.equal(ready.ownerSessionId, owner.sessionId);
+      assert.equal(ready.connected, true); assert.equal(ready.pausedByBrowser, true);
+    }
+    assert.equal((await publish(owner)).taskTabs, false, 'a later legacy advertisement cannot retain stale readiness');
+    assert.equal(writes, 0, 'capability negotiation never rotates the pairing token');
+    const disconnected = new Promise(resolve => { const stop = bridge.onEvent(event => { if (event.type === 'disconnected') { stop(); resolve(); } }); });
+    client.end(); await bounded(disconnected, 'disconnect');
+    client = await open(port); client.send({ type: 'hello', profileId, token });
+    assert.equal((await bounded(client.next(), 'upgrade reconnect')).type, 'welcome'); assert.equal(writes, 0);
+    assert.equal((await publish(modern)).taskTabs, true, 'the same pairing reconnects after upgrade');
+  } finally { client?.close(); bridge.close(); assert.ok(root.startsWith(os.tmpdir() + path.sep)); rmSync(root, { recursive: true, force: true }); }
+});
+
 test('manifest identity matches bridge and cannot be loaded by remote pages', () => {
   const manifest = JSON.parse(readFileSync('extensions/profilepilot/manifest.json', 'utf8'));
   const hash = createHash('sha256').update(Buffer.from(manifest.key, 'base64')).digest('hex').slice(0, 32);
   assert.equal([...hash].map(c => String.fromCharCode(97 + parseInt(c, 16))).join(''), NATIVE_EXTENSION_ID);
   assert.equal(manifest.externally_connectable, undefined);
   assert.deepEqual(manifest.content_scripts[0].matches, ['http://127.0.0.1/profilepilot-connect/*']);
-  assert.deepEqual(manifest.host_permissions, ['http://127.0.0.1/*']);
+  assert.deepEqual(manifest.host_permissions, ['http://*/*', 'https://*/*']);
   assert.equal(manifest.permissions.includes('debugger'), true);
 });
 
@@ -120,7 +187,7 @@ async function extension(fetcher = fetch, timerScale = 1, storage = { local: {},
     tabs: { get: async id => { if (removed.has(id)) throw Error('No tab'); return { id, url: 'https://fixture.test', title: 'fixture' }; }, create: async options => { const tab = { id: nextTabId++, ...options }; created.push(tab); return tab; }, update: async id => ({ id, windowId: 1 }), remove: async id => { removed.add(id); chrome.tabs.onRemoved.listener(id); }, onUpdated: event(), onReplaced: event(), onCreated: event(), onRemoved: event() },
     debugger: { attach: async () => calls.push('attach'), detach: async () => calls.push('detach'), sendCommand: async (_target, method) => { calls.push(method); return {}; }, onEvent: event(), onDetach: { addListener: fn => { detached = fn; } } }
   };
-  const context = vm.createContext({ chrome, URL, setInterval, clearInterval, setTimeout: (callback, ms) => setTimeout(callback, ms * timerScale), clearTimeout, WebSocket: WorkerSocket, atob, fetch: fetcher });
+  const context = vm.createContext({ chrome, crypto: require('node:crypto').webcrypto, URL, setInterval, clearInterval, setTimeout: (callback, ms) => setTimeout(callback, ms * timerScale), clearTimeout, WebSocket: WorkerSocket, atob, fetch: fetcher });
   // Parsing the actual worker as a script also catches unsupported top-level await.
   vm.runInContext(readFileSync('extensions/profilepilot/background.js', 'utf8') + '\nglobalThis.fixture = { handle, select: id => { taskTabs.set("one", {tabId:id,tabs:[id]}); }, state, connect: () => { config = {port: 12345, profileId: "native:Default", token: "fixture"}; return connect(); } };', context);
   await new Promise(resolve => setImmediate(resolve));
@@ -128,15 +195,20 @@ async function extension(fetcher = fetch, timerScale = 1, storage = { local: {},
     close: () => transport?.close(), command: message => new Promise(resolve => { replies.set(message.id, resolve); transport.receive(message); }) };
 }
 
-test('native connection restores only the authorized discarded or frozen tab before attaching', async () => {
+test('native connection never activates a sleeping tab in the background', async () => {
   for (const condition of ['discarded', 'frozen', 'live']) {
     const ext = await extension(); ext.select(7); let sleeping = condition !== 'live';
     ext.chrome.tabs.get = async id => ({ id, url: 'https://fixture.test', discarded: condition === 'discarded' && sleeping, frozen: condition === 'frozen' && sleeping, status: sleeping ? 'unloaded' : 'complete' });
     ext.chrome.tabs.update = async (id, changes) => { assert.equal(id, 7); assert.deepEqual(JSON.parse(JSON.stringify(changes)), { active: true }); ext.calls.push('restore'); sleeping = false; };
-    await ext.handle('claim', { sessionId: 'one' });
-    assert.deepEqual(ext.calls, condition === 'live' ? ['attach'] : ['restore', 'attach']);
+    if (sleeping) {
+      await assert.rejects(ext.handle('claim', { sessionId: 'one' }), /休眠/);
+      assert.deepEqual(ext.calls, []);
+      sleeping = false;
+      await ext.handle('control', { sessionId: 'one', action: 'resume', controlGeneration: (await ext.state()).controlGeneration });
+    } else await ext.handle('claim', { sessionId: 'one' });
+    assert.deepEqual(ext.calls, ['attach']);
     await ext.handle('cdp', { sessionId: 'one', method: 'Runtime.evaluate' });
-    assert.equal(ext.calls.filter(c => c === 'restore').length, condition === 'live' ? 0 : 1);
+    assert.equal(ext.calls.filter(c => c === 'restore').length, 0);
   }
 });
 
@@ -145,8 +217,10 @@ test('a restored renderer can attach while resources still load; no reload or ne
     const ext = await extension(); ext.select(7); let sleeping = true;
     ext.chrome.tabs.get = async id => ({ id, url: 'https://fixture.test', [condition]: sleeping, status: sleeping ? 'unloaded' : 'loading' });
     ext.chrome.tabs.update = async id => { assert.equal(id, 7); sleeping = false; ext.calls.push('wake'); };
-    await ext.handle('claim', { sessionId: 'one' });
-    assert.deepEqual(ext.calls, ['wake', 'attach']);
+    await assert.rejects(ext.handle('claim', { sessionId: 'one' }), /休眠/);
+    sleeping = false;
+    await ext.handle('control', { sessionId: 'one', action: 'resume', controlGeneration: (await ext.state()).controlGeneration });
+    assert.deepEqual(ext.calls, ['attach']);
     assert.equal((await ext.state()).ownership, 'agent'); assert.equal(ext.created.length, 0);
     await ext.handle('cdp', { sessionId: 'one', method: 'Runtime.evaluate' });
     assert.equal(ext.calls.at(-1), 'Runtime.evaluate');
@@ -158,17 +232,17 @@ test('connection failure is reported as a browser pause, not a user takeover', a
   ext.chrome.debugger.attach = async () => { throw new Error('Renderer unavailable'); };
   await assert.rejects(ext.handle('claim', { sessionId: 'one' }), /Renderer unavailable/);
   assert.equal((await ext.state()).ownership, 'user'); assert.equal((await ext.state()).pausedByBrowser, true);
-  await assert.rejects(ext.handle('control', { sessionId: 'one', action: 'resume' }), /Renderer unavailable/);
+  await assert.rejects(ext.handle('control', { sessionId: 'one', action: 'resume', controlGeneration: (await ext.state()).controlGeneration }), /Renderer unavailable/);
   assert.equal((await ext.state()).pausedByBrowser, true);
   ext.chrome.debugger.attach = async () => {};
-  await ext.handle('control', { sessionId: 'one', action: 'resume' });
+  await ext.handle('control', { sessionId: 'one', action: 'resume', controlGeneration: (await ext.state()).controlGeneration });
   assert.equal((await ext.state()).pausedByBrowser, false); assert.equal((await ext.state()).ownership, 'agent');
 });
 
 test('old extension wake timeout retries only the authorized resume once, preserving session', async () => {
   let attempts = 0;
-  const state = { connected: true, taskTabs: true, profileId: 'native:Default', ownerSessionId: 'original' };
-  const bridge = { states: () => [state], request: async (profile, method, params) => {
+  const state = { connected: true, taskTabs: true, controlGeneration: 'fixture:0', profileId: 'native:Default', ownerSessionId: 'original' };
+  const bridge = { onEvent: () => () => {}, states: () => [state], request: async (profile, method, params) => {
     assert.equal(profile, 'native:Default'); assert.equal(method, 'control'); assert.equal(params.action, 'resume'); assert.equal(params.sessionId, 'original');
     if (++attempts === 1) throw new Error('授权标签页正在从休眠恢复，请等待页面加载后继续当前任务。');
   } };
@@ -184,31 +258,32 @@ test('old extension wake timeout retries only the authorized resume once, preser
   await assert.rejects(browser.control({ profileId: 'native:Default', sessionId: 'original' }, 'resume'), /休眠/); assert.equal(attempts, 1);
 });
 
-test('new tasks create their own tab, preserve user pages and resume only their own descendants', async () => {
+test('explicit new-tab tasks preserve pages and can select existing ordinary tabs without takeover', async () => {
   const ext = await extension();
   const targets = [];
   ext.chrome.debugger.sendCommand = async (target, method, params) => { targets.push({ id: target.tabId, method, params }); return {}; };
   assert.equal((await ext.state()).tabId, undefined);
-  await ext.handle('claim', { sessionId: 'news' });
+  await ext.handle('claim', { sessionId: 'news', newTab: true });
   const first = (await ext.state()).tabId;
   assert.deepEqual(ext.created, [{ id: first, url: 'about:blank', active: false }]);
   await ext.handle('open', { sessionId: 'news', url: 'https://x.com/' });
   assert.equal(targets[0].id, first);
-  await assert.rejects(ext.handle('switch', { sessionId: 'news', tabId: 7 }), /未授权/);
   await assert.rejects(ext.handle('closeTab', { sessionId: 'news', tabId: 7 }), /未授权/);
+  await ext.handle('switch', { sessionId: 'news', tabId: 7 });
+  await ext.handle('switch', { sessionId: 'news', tabId: first });
   await ext.handle('claim', { sessionId: 'news' });
   assert.equal(ext.created.length, 1, 'repeated claim cannot create duplicates');
   ext.chrome.tabs.onCreated.listener({ id: 150, openerTabId: first });
   await ext.handle('switch', { sessionId: 'news', tabId: 150 });
   await ext.handle('control', { sessionId: 'news', action: 'complete' });
-  await ext.handle('claim', { sessionId: 'jobs' });
+  await ext.handle('claim', { sessionId: 'jobs', newTab: true });
   assert.notEqual((await ext.state()).tabId, first);
   assert.equal(ext.created.length, 2);
   const ids = (await ext.handle('tabs', { sessionId: 'jobs' })).map(t => t.id);
   assert.deepEqual(Array.from(ids), [String(ext.created[1].id)]);
-  await assert.rejects(ext.handle('switch', { sessionId: 'jobs', tabId: first }), /未授权/);
+  await ext.handle('switch', { sessionId: 'jobs', tabId: first });
   await ext.handle('control', { sessionId: 'jobs', action: 'complete' });
-  await ext.handle('control', { sessionId: 'news', action: 'resume' });
+  await ext.handle('control', { sessionId: 'news', action: 'resume', controlGeneration: (await ext.state()).controlGeneration });
   assert.equal((await ext.state()).tabId, 150);
   assert.equal(ext.created.length, 2, 'continuation restores the saved task tab');
   await ext.handle('switch', { sessionId: 'news', tabId: first });
@@ -221,7 +296,7 @@ test('closing a task page pauses input, explicit resume creates a replacement wi
   await ext.chrome.tabs.remove(first);
   await assert.rejects(ext.handle('cdp', { sessionId: 'news', method: 'Input.insertText' }), /用户正在/);
   await assert.rejects(ext.handle('claim', { sessionId: 'other' }), /另一个任务/);
-  await ext.handle('control', { sessionId: 'news', action: 'resume' });
+  await ext.handle('control', { sessionId: 'news', action: 'resume', controlGeneration: (await ext.state()).controlGeneration });
   assert.notEqual((await ext.state()).tabId, first);
   assert.equal(ext.created.length, 2);
   assert.equal((await ext.state()).ownership, 'agent');
@@ -237,12 +312,16 @@ test('new task waits for pending about:blank to commit before debugger attachmen
   assert.equal((await ext.state()).ownership, 'agent');
 });
 
-test('expired tab preparation removes only its newly created blank tab and never attaches', async () => {
+test('expired tab preparation reports its created tab without closing a potentially user-owned page or attaching', async () => {
   const ext = await extension(); let expired = false, removed;
   ext.chrome.tabs.create = async () => { expired = true; return { id: 200, url: 'about:blank' }; };
   ext.chrome.tabs.remove = async id => { removed = id; };
-  await assert.rejects(ext.handle('claim', { sessionId: 'news' }, () => { if (expired) throw Error('expired'); }), /expired/);
-  assert.equal(removed, 200);
+  await assert.rejects(ext.handle('claim', { sessionId: 'news' }, () => { if (expired) throw Error('expired'); }), error => {
+    assert.match(error.message, /expired.*ID: 200.*勿重复新建/);
+    assert.equal(error.createdTabId, 200);
+    return true;
+  });
+  assert.equal(removed, undefined, 'Cancellation may be a takeover; never close the page the user could now be using');
   assert.equal(ext.calls.includes('attach'), false);
   assert.equal((await ext.state()).sessionId, undefined);
 });
@@ -258,7 +337,7 @@ test('paired extension restores task pages after worker suspension but ignores l
     assert.equal((await ext.state()).sessionId, 'news');
     assert.equal((await ext.state()).ownership, 'user');
     await assert.rejects(ext.handle('claim', { sessionId: 'news' }), /用户正在/);
-    await ext.handle('control', { sessionId: 'news', action: 'resume' });
+    await ext.handle('control', { sessionId: 'news', action: 'resume', controlGeneration: (await ext.state()).controlGeneration });
     assert.equal((await ext.state()).tabId, 71);
     assert.equal(ext.created.length, 0);
   } finally { ext.close(); }
@@ -286,13 +365,14 @@ test('Profile pairing no longer requires selecting an existing tab or attaching 
     assert.deepEqual(ext.calls, []);
     assert.deepEqual(ext.created, []);
     const select = await new Promise(resolve => ext.message({ method: 'selectTab', tabId: 7 }, sender, resolve));
-    assert.match(select.error, /新任务会自动/);
+    assert.equal(select.error, undefined);
+    assert.equal(select.result.tabId, 7);
   } finally { ext.close(); }
 });
 
 test('native adapter can claim without tab selection but rejects old extensions before navigation', async () => {
   const state = { profileId: 'native:Default', connected: true, taskTabs: true, ownership: 'user' }, calls = [];
-  const bridge = { states: () => [state], request: async (_profile, method, params) => { calls.push(method); if (method === 'claim') { state.ownerSessionId = params.sessionId; state.ownership = 'agent'; } return {}; } };
+  const bridge = { onEvent: () => () => {}, states: () => [state], request: async (_profile, method, params) => { calls.push(method); if (method === 'claim') { state.ownerSessionId = params.sessionId; state.ownership = 'agent'; } return {}; } };
   const native = new NativeBrowser(bridge, os.tmpdir());
   const task = { profileId: state.profileId, sessionId: 'news' };
   await native.tabs(task);
@@ -322,7 +402,7 @@ test('Agent close restores an authorized parent, but user close still pauses', a
   await assert.rejects(ext.handle('cdp', { sessionId: 'two', method: 'Input.insertText' }), /用户正在/);
 });
 
-test('native pointer preparation activates only the authorized tab and respects minimized windows and takeover', async () => {
+test('native pointer preparation stays in background, foreground is explicit, and takeover stops input', async () => {
   const ext = await extension(); ext.select(7);
   await ext.handle('claim', { sessionId: 'one' });
   ext.chrome.tabs.get = async id => ({ id, windowId: 42, url: 'https://fixture.test', active: false });
@@ -330,10 +410,12 @@ test('native pointer preparation activates only the authorized tab and respects 
   ext.chrome.windows.get = async id => { assert.equal(id, 42); return { state: minimized ? 'minimized' : 'normal' }; };
   ext.chrome.windows.update = async () => assert.fail('Must not focus or restore a user window');
   ext.chrome.tabs.update = async (id, changes) => { activated.push(id); assert.equal(changes.active, true); };
-  await assert.rejects(ext.handle('preparePointer', { sessionId: 'one' }), /最小化/);
+  await ext.handle('preparePointer', { sessionId: 'one' });
   assert.deepEqual(activated, []);
   minimized = false;
   await ext.handle('preparePointer', { sessionId: 'one' });
+  assert.deepEqual(activated, []);
+  await ext.handle('preparePointer', { sessionId: 'one', foreground: true });
   assert.deepEqual(activated, [7]);
   await ext.handle('control', { sessionId: 'one', action: 'handoff' });
   await assert.rejects(ext.handle('preparePointer', { sessionId: 'one' }), /用户正在/);
@@ -349,12 +431,12 @@ test('hung page reads release the queue, expired input is skipped and the origin
     const reading = ext.command({ id: 2, method: 'cdp', params: { sessionId: 'one', method: 'Runtime.evaluate' } });
     const expired = ext.command({ id: 3, method: 'cdp', params: { sessionId: 'one', method: 'Input.insertText' }, expiresAt: Date.now() - 1 });
     assert.match((await reading).error, /无响应/);
-    assert.match((await expired).error, /请求已超时/);
+    assert.match((await expired).error, /请求已超时|已停止或接管/);
     assert.equal(ext.calls.includes('Input.insertText'), false);
     assert.ok(ext.calls.includes('detach'));
     assert.equal((await ext.state()).ownership, 'user');
     hang = false;
-    assert.equal((await ext.command({ id: 4, method: 'control', params: { sessionId: 'one', action: 'resume' } })).error, undefined);
+    assert.equal((await ext.command({ id: 4, method: 'control', params: { sessionId: 'one', action: 'resume', controlGeneration: (await ext.state()).controlGeneration } })).error, undefined);
     assert.equal((await ext.command({ id: 5, method: 'cdp', params: { sessionId: 'one', method: 'Runtime.evaluate' } })).error, undefined);
     assert.equal((await ext.state()).sessionId, 'one');
   } finally { ext.close(); }
@@ -417,19 +499,21 @@ test('automatic pairing only accepts the top-level loopback invitation and leave
   assert.equal((await ext.state()).connected, false);
   assert.deepEqual(ext.calls, [], 'detection must not attach to a user tab');
 });
-test('extension enforces tab/session scope, handoff, browser stop, method whitelist and explicit resume', async () => {
+test('extension enforces session scope, handoff and browser stop while allowing full Chrome-supported CDP', async () => {
   const ext = await extension(); ext.select(7);
   await ext.handle('claim', { sessionId: 'one' });
   await assert.rejects(ext.handle('claim', { sessionId: 'two' }), /另一个任务/);
-  await assert.rejects(ext.handle('switch', { sessionId: 'one', tabId: 8 }), /未授权/);
-  await assert.rejects(ext.handle('cdp', { sessionId: 'one', method: 'Network.getAllCookies' }), /未开放/);
+  await ext.handle('switch', { sessionId: 'one', tabId: 8 });
+  await ext.handle('switch', { sessionId: 'one', tabId: 7 });
+  await ext.handle('cdp', { sessionId: 'one', method: 'Network.enable' });
+  await assert.rejects(ext.handle('cdp', { sessionId: 'one', method: 'not a method' }), /无效/);
   await ext.handle('control', { sessionId: 'one', action: 'handoff' });
   await assert.rejects(ext.handle('cdp', { sessionId: 'one', method: 'Input.insertText' }), /用户正在/);
   await assert.rejects(ext.handle('claim', { sessionId: 'one' }), /用户正在/);
-  await ext.handle('control', { sessionId: 'one', action: 'resume' }); ext.detach();
+  await ext.handle('control', { sessionId: 'one', action: 'resume', controlGeneration: (await ext.state()).controlGeneration }); ext.detach();
   await assert.rejects(ext.handle('preview', { sessionId: 'one', method: 'Page.startScreencast' }), /已由你停止/);
   await assert.rejects(ext.handle('cdp', { sessionId: 'one', method: 'Input.insertText' }), /用户正在/);
-  await ext.handle('control', { sessionId: 'one', action: 'resume' });
+  await ext.handle('control', { sessionId: 'one', action: 'resume', controlGeneration: (await ext.state()).controlGeneration });
   await ext.handle('cdp', { sessionId: 'one', method: 'Input.insertText' });
   await ext.handle('control', { sessionId: 'one', action: 'complete' });
   assert.equal((await ext.state()).sessionId, undefined); assert.ok(ext.calls.includes('detach'));
@@ -438,7 +522,7 @@ test('extension enforces tab/session scope, handoff, browser stop, method whitel
 });
 test('native tasks route without a logical port and never acquire after user takeover', async () => {
   const calls = [], state = { profileId: 'native:Default', taskTabs: true, tabId: 7, connected: true, ownerSessionId: 'task', ownership: 'user' };
-  const bridge = { states: () => [state], request: async (...args) => { calls.push(args); return {}; } };
+  const bridge = { onEvent: () => () => {}, states: () => [state], request: async (...args) => { calls.push(args); return {}; } };
   const native = new NativeBrowser(bridge, os.tmpdir());
   const task = { profileId: state.profileId, sessionId: 'task', browserConnection: 'extension' };
   assert.equal(hasTaskBrowser(task), true);
@@ -450,8 +534,8 @@ test('native tasks route without a logical port and never acquire after user tak
 
 test('a fresh blank task page is observed without waiting for a missing screenshot frame', async () => {
   const calls = [];
-  const native = new NativeBrowser({ states: () => [], request: async (...args) => { calls.push(args); throw Error('Blank page has no compositor frame'); } }, os.tmpdir());
-  native.fast.observe = async () => ({ url: 'about:blank', snapshot: '', fast: { candidates: [], guard: 'blank' } });
+  const native = new NativeBrowser({ onEvent: () => () => {}, states: () => [], request: async (...args) => { calls.push(args); throw Error('Blank page has no compositor frame'); } }, os.tmpdir());
+  native.fast.reobserve = async () => ({ url: 'about:blank', snapshot: '', fast: { candidates: [], guard: 'blank' } });
   const observation = await native.observe({ sessionId: 'new' }, true, true);
   assert.equal(observation.url, 'about:blank');
   assert.match(observation.snapshot, /空白任务页/);
@@ -463,11 +547,12 @@ test('optional screenshot failure retains DOM, but a concurrent takeover or disc
   const state = { profileId: 'native:Default', taskTabs: true, connected: true, ownership: 'agent', ownerSessionId: 'news' };
   const task = { profileId: state.profileId, sessionId: 'news' };
   let changeState = () => {}, requests = 0;
-  const native = new NativeBrowser({ states: () => [state], request: async (_profile, method, params) => {
+  const native = new NativeBrowser({ onEvent: () => () => {}, states: () => [state], request: async (_profile, method, params) => {
     assert.equal(method, 'cdp'); assert.equal(params.method, 'Page.captureScreenshot');
     requests++; changeState(); throw Error('Screenshot timed out');
   } }, os.tmpdir());
-  native.fast.observe = async () => ({ url: 'https://fixture.test', snapshot: 'Readable page', fast: { candidates: [{ ref: 'e1' }], guard: 'page' } });
+  native.fast.reobserve = async () => ({ url: 'https://fixture.test', snapshot: 'Readable page', fast: { candidates: [{ ref: 'e1' }], guard: 'page' } });
+  native.fast.captureScreenshot = () => native.raw(task, 'Page.captureScreenshot', { format: 'png' });
   const observed = await native.observe(task, true);
   assert.match(observed.snapshot, /Readable page/); assert.match(observed.snapshot, /截图暂不可用/);
   assert.equal(observed.fast.candidates[0].ref, 'e1');

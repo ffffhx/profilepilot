@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "name": "开发回归：表单、状态、对话框与列表",
+  "timeoutMs": 120000,
+  "steps": [
+    { "kind": "wait", "selector": { "resourceId": "io.github.profilepilot.phone:id/bench_open_form" } },
+    { "kind": "click", "selector": { "text": "1. Native form", "clickable": true } },
+    { "kind": "wait", "selector": { "resourceId": "io.github.profilepilot.phone:id/bench_input" } },
+    { "kind": "fill", "selector": { "resourceId": "io.github.profilepilot.phone:id/bench_input" }, "text": "中文测试 & API=1" },
+    { "kind": "assert", "selector": { "resourceId": "io.github.profilepilot.phone:id/bench_mirror", "text": "Mirror: 中文测试 & API=1" } },
+    { "kind": "fill", "selector": { "resourceId": "io.github.profilepilot.phone:id/bench_input" }, "text": "" },
+    { "kind": "assert", "selector": { "resourceId": "io.github.profilepilot.phone:id/bench_input", "text": "" } },
+    { "kind": "fill", "selector": { "resourceId": "io.github.profilepilot.phone:id/bench_input" }, "text": "复用流程" },
+    { "kind": "click", "selector": { "resourceId": "io.github.profilepilot.phone:id/bench_submit" } },
+    { "kind": "wait", "selector": { "text": "Form submitted: 复用流程" } },
+    { "kind": "click", "selector": { "resourceId": "io.github.profilepilot.phone:id/bench_menu" } },
+    { "kind": "click", "selector": { "resourceId": "io.github.profilepilot.phone:id/bench_open_state" } },
+    { "kind": "click", "selector": { "text": "Increment counter", "enabled": true } },
+    { "kind": "assert", "selector": { "text": "Counter: 1" } },
+    { "kind": "click", "selector": { "resourceId": "io.github.profilepilot.phone:id/bench_checkbox", "checked": false } },
+    { "kind": "assert", "selector": { "resourceId": "io.github.profilepilot.phone:id/bench_checkbox", "checked": true } },
+    { "kind": "click", "selector": { "resourceId": "io.github.profilepilot.phone:id/bench_open_dialog" } },
+    { "kind": "wait", "selector": { "text": "Confirm a local benchmark action?" } },
+    { "kind": "click", "selector": { "resourceId": "android:id/button1" } },
+    { "kind": "wait", "selector": { "text": "Confirm a local benchmark action?" }, "condition": "absent" },
+    { "kind": "assert", "selector": { "text": "Dialog result: confirmed" } },
+    { "kind": "click", "selector": { "resourceId": "io.github.profilepilot.phone:id/bench_menu" } },
+    { "kind": "click", "selector": { "resourceId": "io.github.profilepilot.phone:id/bench_open_list" } },
+    { "kind": "scrollUntil", "selector": { "text": "Case 30" }, "container": { "resourceId": "io.github.profilepilot.phone:id/bench_list" } },
+    { "kind": "click", "selector": { "text": "Case 30" } },
+    { "kind": "wait", "selector": { "text": "Detail: Case 30" } }
+  ]
+}

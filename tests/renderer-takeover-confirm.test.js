@@ -821,6 +821,11 @@ function loadMainHarness({ profile: activeProfile }) {
   global.HTMLSelectElement = class {};
   global.HTMLTextAreaElement = class {};
   global.window = {
+    addEventListener() {},
+    tasks: {
+      onChanged() { return () => {}; },
+      async snapshot() { return { nativeBrowsers: [], nativeInstallations: [] }; }
+    },
     clearInterval() {},
     clearTimeout(id) {
       calls.clearedTimers.push(id);
@@ -954,6 +959,8 @@ function loadMainHarness({ profile: activeProfile }) {
       "src/renderer/state-actions.ts": {
         invalidateExtensionMigrationDiff() {},
         loadState: async () => {},
+        applyNativeExtensionSnapshot() {},
+        refreshNativeExtensionStatus: async () => {},
         refreshExtensionMigrationDiff() {},
         refreshGlobalInstructions() {},
         repairClaudeInstructionShell() {},

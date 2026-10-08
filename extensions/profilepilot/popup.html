@@ -1,5 +1,74 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>ProfilePilot 浏览器连接</title><link rel="stylesheet" href="popup.css"></head><body>
-<h1>ProfilePilot</h1><p>使用当前 Chrome Profile 的登录状态，自动在新标签页执行任务。</p><div id="status" role="status">正在读取连接状态…</div>
-<form id="connect"><label for="code">在 ProfilePilot 中生成的配对码</label><textarea id="code" required autocomplete="off" placeholder="PP1.…"></textarea><small>请确认当前 Chrome Profile 正是应用中选择的系统 Profile。连接后，新任务会自动新开标签页，保留你已有的页面。</small><button type="submit" class="primary">授权并连接 ProfilePilot</button></form>
-<div id="controls" hidden><p>新任务自动新开标签页；继续同一任务时复用它的页面。</p><button id="reconnect">重新连接</button><button id="takeover">我来操作</button><button id="return">交还 Agent</button><details><summary>将已有页面用于当前任务</summary><small>仅在接管任务后使用。选中后允许当前任务操作此页。</small><label for="next-tab">选择已有标签页</label><select id="next-tab"></select><button id="select-tab">将此页用于当前任务</button></details><button id="disconnect">断开并取消配对</button></div><p class="foot">连接和页面画面仅传到本机应用。任务所需页面内容由应用发送给你配置的模型服务。</p><script type="module" src="popup.js"></script></body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ProfilePilot</title><link rel="stylesheet" href="popup.css"></head>
+<body>
+  <header class="app-header">
+    <div class="brand"><svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M5 2 29 16 16 18 3 30 9 11Z" fill="currentColor"/></svg><h1>ProfilePilot</h1></div>
+    <div class="header-actions">
+      <button id="open-side-panel" class="quiet" type="button" title="打开侧边栏"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16m3-11v6"/></svg>侧边栏</button>
+      <button id="close-panel" hidden class="icon-button" type="button" aria-label="关闭侧边栏"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+    </div>
+  </header>
+  <section class="identity-strip" aria-label="当前 Profile">
+    <span class="profile-avatar"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4" fill="currentColor"/><path d="M4.5 21v-2a7.5 7.5 0 0 1 15 0v2Z" fill="currentColor"/></svg></span>
+    <strong id="profile-name">当前 Profile</strong>
+    <div class="identity-state"><span id="connection-label" class="connection-label">读取连接中</span><p id="connection-note">正在读取浏览器服务状态…</p></div>
+    <div id="status" class="sr-only" role="status">正在读取连接状态…</div>
+  </section>
+  <p id="error" role="alert" hidden></p>
+  <form id="connect" class="connect-form">
+    <h2>连接当前浏览器</h2>
+    <label for="code">从 ProfilePilot App 或 CLI 获取的配对码</label>
+    <textarea id="code" required autocomplete="off" placeholder="PP1.…" spellcheck="false"></textarea>
+    <small>将当前 Chrome Profile 连接到本机浏览器服务。请确认它与生成配对码时选择的 Profile 一致。</small>
+    <button type="submit" class="primary">连接浏览器服务</button>
+  </form>
+  <section id="temporary-installation" hidden><p>当前扩展带有临时安装标记。请先在目标 Chrome 的 chrome://extensions 选择“加载未打包的扩展程序”，使用固定安装目录；完成后再清除标记。</p><button id="confirm-persistent-installation" type="button">已完成持久安装，清除临时标记</button></section>
+  <main id="controls" hidden>
+    <section class="page-context" aria-label="任务页面">
+      <div class="page-context-heading">
+        <label for="next-tab">任务页面</label>
+        <div class="page-segments" role="group" aria-label="任务页面选择">
+          <button id="page-current" type="button" aria-pressed="true">当前页</button>
+          <button id="page-new" type="button" aria-pressed="false">新建页</button>
+          <label class="tab-menu" title="选择其他标签页"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg><select id="next-tab" aria-label="选择任务页面"><option value="current">当前页</option><option value="new">新建页</option></select></label>
+        </div>
+      </div>
+      <div class="current-page">
+        <span class="page-icon"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9l-6-6Z"/><path d="M14 3v6h6M8 13h8m-8 4h6"/></svg></span>
+        <div class="page-copy"><p id="page-title">当前页</p><p id="page-domain"></p></div>
+        <button id="select-tab" class="quiet" type="button">将此页用于当前任务</button>
+        <button id="refresh-context" class="quiet" type="button"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9l-6-6Z"/><path d="M14 3v6h6M8 13h8m-8 4h6"/></svg>读取选中文字</button>
+      </div>
+      <div class="selection-context">
+        <span class="selection-heading">选中文字</span>
+        <blockquote id="selection" hidden></blockquote>
+        <label id="include-selection-label" class="check" hidden><input id="include-selection" type="checkbox" checked>附上选中文字</label>
+      </div>
+    </section>
+    <section id="conversation" aria-label="任务对话" hidden>
+      <div class="section-heading"><h2>当前任务</h2><button id="new-task" class="quiet new-task" type="button"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>新任务</button></div>
+      <div class="task-card">
+        <div class="task-heading"><h2 id="task-title">当前任务</h2><p id="task-status" role="status"></p></div>
+        <div id="task-progress" class="task-progress" aria-label="任务进度" hidden></div>
+        <p id="task-summary" class="task-summary" hidden></p>
+        <details class="conversation-history"><summary>查看完整对话</summary><div id="messages" role="log" aria-label="对话记录"></div></details>
+      </div>
+      <div class="confirmation-card"><span class="confirmation-icon" aria-hidden="true">!</span><p id="pending" hidden></p><div id="decision-controls" class="task-controls" hidden><button id="deny" type="button">拒绝</button><button id="approve" class="primary" type="button">确认执行</button></div></div>
+    </section>
+    <p id="desktop-required" hidden>浏览器服务已连接，外部 Agent 可通过 CLI 使用。要在这里发起 AI 对话，请打开 ProfilePilot App。</p>
+    <form id="compose">
+      <label id="prompt-label" for="prompt">让浏览器帮你做什么？</label>
+      <div class="composer-box"><textarea id="prompt" required maxlength="20000" placeholder="补充要求，或告诉我下一步…" rows="3"></textarea><div class="compose-footer"><small></small><button id="send" type="submit" class="primary">开始任务</button></div></div>
+    </form>
+    <div class="task-controls ownership-controls" aria-label="浏览器操作权"><button id="takeover" class="danger" type="button"><svg class="icon stop-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>立即停止 · 我来操作</button><button id="return" type="button"><svg class="icon play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7V5Z"/></svg>继续任务</button></div>
+    <div class="settings-group">
+      <details id="access-settings"><summary><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a17 17 0 0 1 0 18 17 17 0 0 1 0-18Z"/></svg>网站与确认设置<span id="access-summary"></span></summary><form id="access-form"><p>默认允许所有网站。这里的限制只影响当前 Profile。</p><label for="allowed-origins">仅允许的网站（留空则不限）</label><textarea id="allowed-origins" placeholder="留空允许所有网站" spellcheck="false"></textarea><label for="blocked-origins">禁止访问的网站（每行一个）</label><textarea id="blocked-origins" placeholder="https://example.com" spellcheck="false"></textarea><label class="check"><input id="confirm-actions" type="checkbox">修改或提交前逐次确认</label><button type="submit">保存设置</button><p id="access-result" role="status"></p></form></details>
+      <details><summary><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 3-1 3-3 1-2 4 2 2v4l4 2 3-1 3 1 4-2v-4l2-2-2-4-3-1-1-3H9Z"/><circle cx="12" cy="12" r="3"/></svg>连接设置</summary><div class="connection-actions"><button id="reconnect" type="button"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 15v5h-5M4.5 14a8 8 0 0 0 13 4M19.5 10a8 8 0 0 0-13-4"/></svg>重新连接</button><button id="disconnect" type="button">断开配对</button></div></details>
+    </div>
 
+  </main>
+  <p class="foot">复用当前 Profile 的登录态<span>任务所需内容会发送给应用中配置的模型服务。</span></p>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

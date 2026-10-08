@@ -19,6 +19,9 @@ export class GatewayWebSocketPeer {
     socket.on("data", (chunk: Buffer) => this.handleData(chunk));
     socket.once("close", () => this.finish());
     socket.once("error", () => this.finish());
+    // Upgraded HTTP sockets can be half-open on Windows. EOF without a close
+    // frame must still revoke the connection immediately, not at heartbeat.
+    socket.once("end", () => { socket.destroy(); this.finish(); });
   }
 
   static accept(request: IncomingMessage, socket: Socket, head?: Buffer): GatewayWebSocketPeer {

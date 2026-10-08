@@ -1,4 +1,5 @@
 const paths = {
+  phone: '<rect x="6" y="2" width="12" height="20" rx="3"/><path d="M10 5h4m-3 14h2"/>',
   usage: '<path d="M4 20V10m8 10V4m8 16v-7"/>',
   desktop: '<rect x="3" y="3" width="18" height="14" rx="2"/><path d="M8 21h8M12 17v4m-5-9 3 3-3 3m6 0h4"/>',
   sidebar: '<rect x="3" y="3" width="18" height="18" rx="3"/><path d="M9 3v18"/>',

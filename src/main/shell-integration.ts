@@ -9,6 +9,8 @@ import {
   ShellIntegrationStatus
 } from "../shared/types";
 import { resolveRealAgentBrowser } from "./agent-browser-wrapper";
+import { bundledBrowserExecutable } from "./tasks/browser-runtime";
+import { profilePilotSetupState } from "../shared/profilepilot-setup";
 import {
   inspectAgentSkills,
   inspectProfilePilotCliSkill,
@@ -18,8 +20,9 @@ import { resolveRealChromeDevtoolsMcp } from "./chrome-devtools-mcp-wrapper";
 import { inspectInputGuardPermission } from "./input-guard-companion";
 import { resolveRealPlaywrightCli } from "./playwright-cli-wrapper";
 import { ProfileManagerError } from "./profile-manager-error";
-import { execPortableCommandSync } from "./portable-command";
+import { execPortableCommand } from "./portable-command";
 import { runWindowsPowerShell } from "./windows-platform";
+import { browserServiceLaunchInfo } from './browser-service/launcher';
 
 // 会话识别 shell 集成：往 ~/.zshenv 写一个托管块，在 AI agent 会话的 shell 里
 // 自动注入 AGENT_BROWSER_SESSION。效果：
@@ -49,7 +52,7 @@ const NODE_RUNTIME_SIGNATURE = "PROFILEPILOT_NODE_RUNTIME";
 const LAUNCHER_SIGNATURE = "PROFILEPILOT_AGENT_BROWSER_LAUNCHER";
 const BIN_DIR_SIGNATURE = "PROFILEPILOT_AGENT_BROWSER_BIN_DIR";
 const MANAGEMENT_CLI_BUNDLE_FILE_NAME = "profilepilot-cli.cjs";
-const MANAGEMENT_CLI_LAUNCHER_FILE_NAME = launcherFileName("profilepilot");
+const MANAGEMENT_CLI_LAUNCHER_FILE_NAME = launcherFileName("ppilot");
 const MANAGEMENT_CLI_SIGNATURE = "PROFILEPILOT_MANAGEMENT_CLI";
 const MANAGEMENT_CLI_BIN_DIR_SIGNATURE = "PROFILEPILOT_MANAGEMENT_CLI_BIN_DIR";
 // 生效特征：只要这行 export 在（无论是托管块还是用户手写的），注入就是开着的。
@@ -140,6 +143,10 @@ export function profilePilotCliLauncherPath(): string {
   return path.join(integrationHomeDir(), ".profilepilot", "cli-bin", MANAGEMENT_CLI_LAUNCHER_FILE_NAME);
 }
 
+function profilePilotPowerShellLauncherPaths(): string[] {
+  return process.platform === "win32" ? ["ppilot.ps1", "profilepilot.ps1"].map(name => path.join(path.dirname(profilePilotCliLauncherPath()), name)) : [];
+}
+
 export function shellIntegrationFilePath(): string {
   return process.platform === "win32"
     ? "HKCU\\Environment\\Path"
@@ -194,7 +201,7 @@ export async function inspectAgentIntegration(): Promise<AgentIntegrationDiagnos
   const agentBrowserPath = resolveRealAgentBrowser(process.env, agentBrowserWrapperPath());
   const playwrightCommand = resolveRealPlaywrightCli(process.env, playwrightCliWrapperPath());
   const mcpCommand = resolveRealChromeDevtoolsMcp(process.env, chromeDevtoolsMcpWrapperPath());
-  const tools: AgentToolDiagnostic[] = [
+  const tools: AgentToolDiagnostic[] = await Promise.all([
     inspectBinaryTool({
       key: "agent-browser",
       label: "agent-browser",
@@ -216,16 +223,9 @@ export async function inspectAgentIntegration(): Promise<AgentIntegrationDiagnos
       installCommand: "npm install -g chrome-devtools-mcp@latest",
       verifyCommand: "chrome-devtools-mcp --version"
     })
-  ];
+  ]);
 
-  const ready = tools.some((tool) => {
-    const wrapper = wrappers.find((item) => item.key === tool.key);
-    const skill = skills.find((item) => item.key === tool.key);
-    return tool.availability === "installed" &&
-      Boolean(wrapper?.wrapperInstalled && wrapper.launcherInstalled) &&
-      Boolean(skill?.installed) &&
-      shellIntegration.installed;
-  });
+  const ready = profilePilotSetupState({ managementCli, shellIntegration, skills }).ready;
 
   return {
     inspectedAt: new Date().toISOString(),
@@ -240,13 +240,13 @@ export async function inspectAgentIntegration(): Promise<AgentIntegrationDiagnos
   };
 }
 
-function inspectBinaryTool(input: {
+async function inspectBinaryTool(input: {
   key: AgentToolDiagnostic["key"];
   label: string;
   executablePath: string | null;
   installCommand: string;
   verifyCommand: string;
-}): AgentToolDiagnostic {
+}): Promise<AgentToolDiagnostic> {
   if (!input.executablePath) {
     return {
       ...input,
@@ -257,12 +257,12 @@ function inspectBinaryTool(input: {
     };
   }
   try {
-    const version = execPortableCommandSync(input.executablePath, ["--version"], {
+    const version = (await execPortableCommand(input.executablePath, ["--version"], {
       encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
       timeout: 3_500,
       env: process.env
-    }).trim().split(/\r?\n/, 1)[0] || null;
+    })).trim().split(/\r?\n/, 1)[0] || null;
     return {
       ...input,
       availability: "installed",
@@ -405,14 +405,14 @@ export async function refreshAgentBrowserWrapperIfInstalled(): Promise<boolean> 
     inspectProfilePilotCli()
   ]);
   const selected = wrappers.filter((wrapper) => wrapper.wrapperInstalled || wrapper.launcherInstalled);
-  if (!status.supported || !status.installed || (!selected.length && !managementCli.installed)) {
+  if (!status.supported || !status.installed || (!selected.length && !managementCli.bundleInstalled)) {
     return false;
   }
   for (const wrapper of selected) {
     await installBrowserDriverWrapper(wrapperDefinition(wrapper.key));
   }
-  if (managementCli.installed) {
-    await installProfilePilotCliFiles();
+  if (managementCli.bundleInstalled) {
+    await setProfilePilotCliEnabled(true);
   }
   if (status.managed && process.platform !== "win32") {
     await refreshManagedIntegrationBlock(status.path);
@@ -486,7 +486,13 @@ export async function inspectProfilePilotCli(): Promise<ProfilePilotCliDiagnosti
         fs.readFile(profilePilotCliLauncherPath(), "utf8")
       ]);
       upToDate = source === installed && launcher === profilePilotCliLauncherContent();
+      const browserRuntime = JSON.parse(await fs.readFile(path.join(path.dirname(profilePilotCliBundlePath()), "browser-runtime.json"), "utf8"));
+      upToDate = browserRuntime.executable === bundledBrowserExecutable() && upToDate;
+      for (const file of profilePilotPowerShellLauncherPaths()) {
+        upToDate = (await fs.readFile(file, "utf8").catch(() => "")) === windowsPowerShellCliLauncherContent() && upToDate;
+      }
     } catch (readError) {
+      upToDate = false;
       error = readError instanceof Error ? readError.message : String(readError);
     }
   }
@@ -502,14 +508,32 @@ export async function inspectProfilePilotCli(): Promise<ProfilePilotCliDiagnosti
   };
 }
 
+const cliSetupMutations = new Map<string, Promise<unknown>>();
+
 export async function setProfilePilotCliEnabled(enabled: boolean): Promise<AgentIntegrationDiagnostic> {
+  const key = path.resolve(integrationHomeDir());
+  const operation = (cliSetupMutations.get(key) || Promise.resolve()).catch(() => {}).then(() => updateProfilePilotCli(enabled));
+  cliSetupMutations.set(key, operation);
+  try { return await operation; }
+  finally { if (cliSetupMutations.get(key) === operation) cliSetupMutations.delete(key); }
+}
+
+async function updateProfilePilotCli(enabled: boolean): Promise<AgentIntegrationDiagnostic> {
   if (enabled) {
     await installProfilePilotCliFiles();
     await setShellIntegrationEnabled(true);
+    await setInstalledAgentSkillEnabled("profilepilot", true, integrationHomeDir());
   } else {
+    // The Skill installer archives only our own files and retains local/.
+    await setInstalledAgentSkillEnabled("profilepilot", false, integrationHomeDir());
     await Promise.all([
       fs.rm(profilePilotCliBundlePath(), { force: true }),
-      fs.rm(profilePilotCliLauncherPath(), { force: true })
+      fs.rm(path.join(path.dirname(profilePilotCliBundlePath()), "app-launch.json"), { force: true }),
+      fs.rm(path.join(path.dirname(profilePilotCliBundlePath()), "browser-service-launch.json"), { force: true }),
+      fs.rm(path.join(path.dirname(profilePilotCliBundlePath()), "browser-runtime.json"), { force: true }),
+      fs.rm(profilePilotCliLauncherPath(), { force: true }),
+      fs.rm(path.join(path.dirname(profilePilotCliLauncherPath()), launcherFileName("profilepilot")), { force: true }),
+      ...profilePilotPowerShellLauncherPaths().map(file => fs.rm(file, { force: true }))
     ]);
     await Promise.all([
       fs.rmdir(path.dirname(profilePilotCliBundlePath())).catch(() => undefined),
@@ -527,31 +551,15 @@ export async function setProfilePilotCliEnabled(enabled: boolean): Promise<Agent
 }
 
 export async function setProfilePilotCliSkillEnabled(enabled: boolean): Promise<AgentIntegrationDiagnostic> {
-  if (enabled) {
-    const cli = await inspectProfilePilotCli();
-    if (!cli.installed) {
-      throw new ProfileManagerError("请先安装 ProfilePilot 管理 CLI，再安装配套 Skill。", "PROFILEPILOT_CLI_REQUIRED");
-    }
-  }
-  await setInstalledAgentSkillEnabled("profilepilot-cli", enabled, integrationHomeDir());
-  return inspectAgentIntegration();
+  // Previous UI versions still use this IPC; migrate them to the same setup.
+  return setProfilePilotCliEnabled(enabled);
 }
 
 export async function setAgentSkillEnabled(
   key: AgentToolDiagnostic["key"],
   enabled: boolean
 ): Promise<AgentIntegrationDiagnostic> {
-  if (enabled) {
-    const diagnostic = await inspectAgentIntegration();
-    const tool = diagnostic.tools.find((item) => item.key === key);
-    const wrapper = diagnostic.wrappers.find((item) => item.key === key);
-    if (tool?.availability !== "installed") {
-      throw new ProfileManagerError("请先安装真实工具，再安装配套 Skill。", "AGENT_TOOL_REQUIRED");
-    }
-    if (!wrapper?.wrapperInstalled || !wrapper.launcherInstalled) {
-      throw new ProfileManagerError("请先安装这个工具的 Wrapper，再安装配套 Skill。", "AGENT_WRAPPER_REQUIRED");
-    }
-  }
+  // Compatibility for old per-tool IPC. Instructions have no CLI prerequisite.
   await setInstalledAgentSkillEnabled(key, enabled, integrationHomeDir());
   return inspectAgentIntegration();
 }
@@ -632,21 +640,57 @@ async function installBrowserDriverWrapper(input: {
 }
 
 async function installProfilePilotCliFiles(): Promise<void> {
+  // Resolve before writing any CLI files. The application ships the native
+  // browser driver on Windows and macOS; no global npm install is required.
+  const browserExecutable = bundledBrowserExecutable();
   const sourcePath = path.join(__dirname, MANAGEMENT_CLI_BUNDLE_FILE_NAME);
   let source = "";
   try {
     source = await fs.readFile(sourcePath, "utf8");
   } catch (error) {
     throw new ProfileManagerError(
-      `找不到 ProfilePilot 管理 CLI 编译产物：${sourcePath}（${error instanceof Error ? error.message : String(error)}）`,
+      `找不到 ProfilePilot CLI 编译产物：${sourcePath}（${error instanceof Error ? error.message : String(error)}）`,
       "PROFILEPILOT_CLI_BUNDLE_MISSING"
     );
   }
   await writeTextFileAtomic(profilePilotCliBundlePath(), source);
   await fs.chmod(profilePilotCliBundlePath(), 0o755).catch(() => undefined);
+  await writeTextFileAtomic(path.join(path.dirname(profilePilotCliBundlePath()), "browser-runtime.json"), JSON.stringify({ executable: browserExecutable }));
+  // The ADB wrapper is opt-in per phone task. Keep it out of global PATH;
+  // phone wrap prepends this directory only for the launched process tree.
+  const phoneBin = path.join(path.dirname(profilePilotCliBundlePath()), "phone-bin");
+  const phoneLauncherName = process.platform === "win32" ? "adb.exe" : "adb";
+  const phoneLauncher = path.join(phoneBin, phoneLauncherName);
+  const phoneLauncherBytes = await fs.readFile(path.join(__dirname, "phone-bin", phoneLauncherName));
+  await fs.mkdir(phoneBin, { recursive: true });
+  const previousPhoneLauncher = await fs.readFile(phoneLauncher).catch(() => null);
+  if (!previousPhoneLauncher?.equals(phoneLauncherBytes)) {
+    const temporaryPhoneLauncher = `${phoneLauncher}.${process.pid}.tmp`;
+    await fs.writeFile(temporaryPhoneLauncher, phoneLauncherBytes, { mode: 0o755 });
+    await fs.rename(temporaryPhoneLauncher, phoneLauncher);
+  }
+  if (process.platform !== "win32") await fs.chmod(phoneLauncher, 0o755);
   const launcher = profilePilotCliLauncherContent();
   await writeTextFileAtomic(profilePilotCliLauncherPath(), launcher);
   await fs.chmod(profilePilotCliLauncherPath(), 0o755).catch(() => undefined);
+  // Existing scripts can keep using the previous name during the migration.
+  const legacyLauncher = path.join(path.dirname(profilePilotCliLauncherPath()), launcherFileName("profilepilot"));
+  await writeTextFileAtomic(legacyLauncher, launcher);
+  await fs.chmod(legacyLauncher, 0o755).catch(() => undefined);
+  for (const file of profilePilotPowerShellLauncherPaths()) {
+    await writeTextFileAtomic(file, windowsPowerShellCliLauncherContent());
+  }
+  // The terminal can start its shared service without asking the user to open
+  // the desktop first. Store paths, never credentials, beside the CLI bundle.
+  const projectRoot = path.resolve(__dirname, "../..");
+  const packaged = projectRoot.includes(".asar");
+  const executable = packaged ? process.execPath : path.join(projectRoot, "node_modules", "electron", "dist",
+    process.platform === "darwin" ? "Electron.app/Contents/MacOS/Electron" : process.platform === "win32" ? "electron.exe" : "electron");
+  await writeTextFileAtomic(path.join(path.dirname(profilePilotCliBundlePath()), "app-launch.json"), JSON.stringify({
+    executable, args: packaged ? ["--background"] : [projectRoot, "--background"],
+    cwd: packaged ? path.dirname(process.execPath) : projectRoot
+  }));
+  await writeTextFileAtomic(path.join(path.dirname(profilePilotCliBundlePath()), 'browser-service-launch.json'), JSON.stringify(browserServiceLaunchInfo(projectRoot)));
 }
 
 function profilePilotCliLauncherContent(): string {
@@ -663,7 +707,7 @@ function profilePilotCliLauncherContent(): string {
     'if [ -x "$runtime" ]; then',
     '  ELECTRON_RUN_AS_NODE=1 exec "$runtime" "$cli" "$@"',
     "fi",
-    "printf '%s\\n' '[ProfilePilot] 缺少可用的 Node/Electron runtime，无法启动管理 CLI。' >&2",
+    "printf '%s\\n' '[ProfilePilot] 缺少可用的 Node/Electron runtime，无法启动 ProfilePilot CLI。' >&2",
     "exit 127",
     ""
   ].join("\n");
@@ -715,8 +759,46 @@ function windowsCliLauncherContent(): string {
     "\"%runtime%\" \"%cli%\" %*",
     "exit /b %errorlevel%",
     ":profilepilot_missing_runtime",
-    ">&2 echo [ProfilePilot] 缺少可用的 Node/Electron runtime，无法启动管理 CLI。",
+    ">&2 echo [ProfilePilot] 缺少可用的 Node/Electron runtime，无法启动 ProfilePilot CLI。",
     "exit /b 127",
+    ""
+  ].join("\r\n");
+}
+
+/** PowerShell discovers .ps1 before .cmd. Keep its arguments out of cmd.exe. */
+export function windowsPowerShellCliLauncherContent(cliPath = profilePilotCliBundlePath(), runtimePath = NODE_RUNTIME_PATH): string {
+  const quote = (value: string) => `'${value.replace(/'/g, "''")}'`;
+  return [
+    // Windows PowerShell 5.1 otherwise reads non-ASCII installation paths as ANSI.
+    "\uFEFF# ProfilePilot PowerShell entry; environment changes stay within this invocation.",
+    "$ProgressPreference = 'SilentlyContinue'",
+    `$ppilotCli = ${quote(cliPath)}`,
+    `$ppilotRuntime = ${quote(runtimePath)}`,
+    "$ppilotEnvironment = @{}",
+    "foreach ($name in @('AGENT_BROWSER_SESSION', 'PROFILEPILOT_SESSION', 'ELECTRON_RUN_AS_NODE', 'PROFILEPILOT_LAUNCHER_ARGV')) { $ppilotEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process') }",
+    "$ppilotExit = 1",
+    "try {",
+    "  if (-not $env:AGENT_BROWSER_SESSION -and $env:CLAUDE_CODE_SESSION_ID) { $env:AGENT_BROWSER_SESSION = 'cc-' + $env:CLAUDE_CODE_SESSION_ID }",
+    "  if (-not $env:AGENT_BROWSER_SESSION -and $env:CODEX_THREAD_ID) { $env:AGENT_BROWSER_SESSION = 'cx-' + $env:CODEX_THREAD_ID }",
+    "  if (-not $env:PROFILEPILOT_SESSION -and $env:AGENT_BROWSER_SESSION) { $env:PROFILEPILOT_SESSION = $env:AGENT_BROWSER_SESSION }",
+    "  if ($env:PROFILEPILOT_NODE_RUNTIME) { $ppilotRuntime = $env:PROFILEPILOT_NODE_RUNTIME }",
+    "  $ppilotNode = Get-Command node -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1",
+    "  if ($ppilotNode) { $ppilotRuntime = $ppilotNode.Source }",
+    "  elseif (Test-Path -LiteralPath $ppilotRuntime -PathType Leaf) { $env:ELECTRON_RUN_AS_NODE = '1' }",
+    "  else { [Console]::Error.WriteLine('[ProfilePilot] Node/Electron runtime unavailable.'); exit 127 }",
+    // Legacy PowerShell cannot reliably encode arbitrary native argv. Base64
+    // carries the string array without a shell parser or a temporary secrets file.
+    "  $ppilotJson = ConvertTo-Json -InputObject ([string[]]$args) -Compress",
+    "  $env:PROFILEPILOT_LAUNCHER_ARGV = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($ppilotJson))",
+    "  if ($MyInvocation.ExpectingInput) {",
+    "    $OutputEncoding = [Text.UTF8Encoding]::new($false)",
+    "    $input | & $ppilotRuntime $ppilotCli --profilepilot-argv-env",
+    "  } else { & $ppilotRuntime $ppilotCli --profilepilot-argv-env }",
+    "  $ppilotExit = $LASTEXITCODE",
+    "} finally {",
+    "  foreach ($name in $ppilotEnvironment.Keys) { [Environment]::SetEnvironmentVariable($name, $ppilotEnvironment[$name], 'Process') }",
+    "}",
+    "exit $ppilotExit",
     ""
   ].join("\r\n");
 }

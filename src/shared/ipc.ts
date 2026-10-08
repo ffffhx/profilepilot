@@ -1,4 +1,6 @@
 export const IPC_CHANNELS = {
+  setWindowAppearance: "app:window:set-appearance",
+  navigateWorkspace: "app:workspace:navigate",
   getState: "profiles:get-state",
   getInitialState: "profiles:get-initial-state",
   getStartupSettings: "app:startup:get-settings",
@@ -52,6 +54,10 @@ export const IPC_CHANNELS = {
   setAgentOverlayEnabled: "profiles:agent-overlay:set-enabled",
   setShellIntegrationEnabled: "profiles:shell-integration:set-enabled",
   inspectAgentIntegration: "profiles:shell-integration:inspect",
+  readBrowserPreferences: "profiles:browser-preferences:read",
+  writeBrowserPreferences: "profiles:browser-preferences:write",
+  readControlPreferences: "profiles:control-preferences:read",
+  writeControlPreferences: "profiles:control-preferences:write",
   setAgentWrapperEnabled: "profiles:agent-wrapper:set-enabled",
   setAgentSkillEnabled: "profiles:agent-skill:set-enabled",
   setProfilePilotCliEnabled: "profiles:management-cli:set-enabled",

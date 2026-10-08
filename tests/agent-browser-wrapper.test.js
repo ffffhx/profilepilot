@@ -1404,7 +1404,7 @@ test("agent-browser wrapper ignores expired notices", () => {
   rmSync(home, { recursive: true, force: true });
 });
 
-test("agent-browser wrapper automatically switches a second Session to the next available Profile", () => {
+test("ppilot browser keeps the requested target while legacy commands retain automatic switching", () => {
   const home = makeTempHome();
   writeAgentBrowserRuntimeProfilesSync([
     {
@@ -1437,6 +1437,13 @@ test("agent-browser wrapper automatically switches a second Session to the next 
     pid: process.pid,
     cwd: "/tmp/second-project"
   }, home);
+
+  const unified = acquireProfileLeaseForCommandWithAutomaticSwitch(["--cdp", "9223", "snapshot"], {
+    HOME: home, AGENT_BROWSER_SESSION: "cc-unified", PROFILEPILOT_BROWSER_CLI: "1"
+  });
+  assert.equal(unified.lease.ok, false);
+  assert.equal(unified.automaticSwitch, null);
+  assert.equal(readAgentBrowserProfileLeaseSync(9224, home), null);
 
   const resolution = acquireProfileLeaseForCommandWithAutomaticSwitch(["snapshot"], {
     HOME: home,

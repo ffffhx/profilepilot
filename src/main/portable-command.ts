@@ -1,6 +1,9 @@
-import { spawn, spawnSync, type ExecFileSyncOptionsWithStringEncoding, type SpawnOptions } from "node:child_process";
+import { execFile, spawn, spawnSync, type ExecFileOptionsWithStringEncoding, type ExecFileSyncOptionsWithStringEncoding, type SpawnOptions } from "node:child_process";
 import path from "node:path";
+import { promisify } from "node:util";
 import { windowsPowerShellExecutable } from "./windows-platform";
+
+const execFileAsync = promisify(execFile);
 
 export interface PortableCommandInvocation {
   executable: string;
@@ -49,6 +52,21 @@ export function spawnPortableCommand(
     env: portableCommandEnvironment(executable, sourceEnv),
     windowsVerbatimArguments: invocation.windowsVerbatimArguments
   });
+}
+
+export async function execPortableCommand(
+  executable: string,
+  args: string[],
+  options: ExecFileOptionsWithStringEncoding
+): Promise<string> {
+  const sourceEnv = options.env || process.env;
+  const invocation = portableCommandInvocation(executable, args, sourceEnv);
+  const result = await execFileAsync(invocation.executable, invocation.args, {
+    ...options,
+    env: portableCommandEnvironment(executable, sourceEnv),
+    windowsVerbatimArguments: invocation.windowsVerbatimArguments
+  });
+  return result.stdout;
 }
 
 export function execPortableCommandSync(

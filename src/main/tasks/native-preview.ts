@@ -1,5 +1,5 @@
 import { TERMINAL_TASKS, type BrowserTask, type TaskPreviewUpdate } from "../../shared/tasks";
-import { NativeBrowserBridge } from "./native-bridge";
+import type { NativeBrowserTransport } from "./native-bridge";
 
 // Negative IDs are avoided because the renderer IPC accepts positive IDs only.
 let nextFrameId = 1_000_000_000;
@@ -13,7 +13,7 @@ export class NativePreviewStream {
   private lastAt = 0;
   private streaming?: number;
   private statusKey = "";
-  constructor(private readonly bridge: NativeBrowserBridge, private readonly getTask: () => BrowserTask | undefined, private readonly emit: (value: TaskPreviewUpdate) => void) {}
+  constructor(private readonly bridge: NativeBrowserTransport, private readonly getTask: () => BrowserTask | undefined, private readonly emit: (value: TaskPreviewUpdate) => void) {}
   start(): void {
     this.unsubscribe = this.bridge.onEvent(event => {
       const task = this.getTask();

@@ -1,0 +1,11 @@
+<resources>
+    <style name="Theme.ProfilePilot" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:colorAccent">#3976ED</item>
+        <item name="android:statusBarColor">#F6F8FC</item>
+        <item name="android:navigationBarColor">#FFFFFF</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowActionModeOverlay">true</item>
+    </style>
+</resources>

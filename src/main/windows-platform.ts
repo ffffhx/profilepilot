@@ -72,11 +72,16 @@ export async function getWindowsSystemSnapshot(force = false): Promise<WindowsSy
   if (!force && snapshotCache && snapshotCache.expiresAt > now) {
     return snapshotCache.promise;
   }
-  const promise = loadWindowsSystemSnapshot().catch((error) => {
+  const promise = loadWindowsSystemSnapshot().then((snapshot) => {
+    // A CIM scan can take longer than the TTL. Reuse its in-flight request and
+    // start the freshness window only once the result is available.
+    if (snapshotCache?.promise === promise) snapshotCache.expiresAt = Date.now() + SNAPSHOT_TTL_MS;
+    return snapshot;
+  }).catch((error) => {
     if (snapshotCache?.promise === promise) snapshotCache = null;
     throw error;
   });
-  snapshotCache = { expiresAt: now + SNAPSHOT_TTL_MS, promise };
+  snapshotCache = { expiresAt: Infinity, promise };
   return promise;
 }
 

@@ -23,8 +23,7 @@ try {
   for (const name of ["工作账号", "招聘专用", "团队资料 — 一个很长的浏览器名称用于检查换行和菜单边界", "客户后台", "资料整理", "临时测试"]) {
     await d.evaluate(`window.profileManager.createProfile(${JSON.stringify(name)})`);
   }
-  await d.domClick('[data-workspace-trigger]');
-  await d.domClick('a[href="./tasks.html"]');
+  await d.domClick('.workspace-link[data-workspace="agent"]');
   await d.waitFor('#create-task .select-trigger');
   await d.domClick('#create-task .send-task');
   assert.match((await d.query('#prompt-error')).text, /填写/);

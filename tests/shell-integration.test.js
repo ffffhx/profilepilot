@@ -40,11 +40,11 @@ test("each real tool installs and refreshes only its own Wrapper", async () => {
     assert.equal(agentWrapper.launcherInstalled, true);
     assert.ok(otherWrappers.every((item) => !item.wrapperInstalled && !item.launcherInstalled));
     assert.equal(diagnostic.shellIntegration.installed, true);
-    assert.equal(diagnostic.ready, false, "Skill is an independent readiness requirement");
+    assert.equal(diagnostic.ready, false, "a legacy Wrapper does not install the unified CLI");
 
     diagnostic = await shell.setAgentSkillEnabled("agent-browser", true);
-    assert.equal(diagnostic.skills.find((item) => item.key === "agent-browser").installed, true);
-    assert.equal(diagnostic.ready, true);
+    assert.equal(diagnostic.skills.find((item) => item.key === "profilepilot").installed, true);
+    assert.equal(diagnostic.ready, false, "legacy tool compatibility must not mask an incomplete unified setup");
 
     fs.writeFileSync(agentWrapper.wrapperPath, "stale wrapper", "utf8");
     assert.equal(await shell.refreshAgentBrowserWrapperIfInstalled(), true);
@@ -119,7 +119,7 @@ test("Wrapper installation is blocked until the corresponding real CLI is instal
   }
 });
 
-test("ProfilePilot management CLI and its Skill install independently from browser Wrappers", async () => {
+test("ProfilePilot CLI installs, updates and removes its bundled instructions together", async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "profilepilot-management-cli-install-"));
   const originalHome = process.env.HOME;
   const originalWindowsUserPath = process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH;
@@ -134,14 +134,42 @@ test("ProfilePilot management CLI and its Skill install independently from brows
     assert.equal(diagnostic.managementCli.installed, false);
     assert.equal(diagnostic.managementCli.skill.installed, false);
 
-    await assert.rejects(
-      () => shell.setProfilePilotCliSkillEnabled(true),
-      (error) => error.code === "PROFILEPILOT_CLI_REQUIRED"
-    );
-
     diagnostic = await shell.setProfilePilotCliEnabled(true);
+    assert.equal(diagnostic.skills.length, 1);
+    assert.equal(diagnostic.managementCli.skill.installed, true, "one setup installs the Agent instructions too");
     assert.equal(diagnostic.managementCli.installed, true);
     assert.equal(diagnostic.managementCli.upToDate, true);
+    assert.equal(diagnostic.ready, true, "the unified CLI is ready without external browser Wrappers");
+    const targets = diagnostic.managementCli.skill.targets;
+    for (const target of targets) {
+      fs.mkdirSync(path.join(target.path, "local"), { recursive: true });
+      fs.writeFileSync(path.join(target.path, "local/browser-routing.md"), "keep my chosen Profile", "utf8");
+    }
+    // An old CLI-only installation and a stale guide are repaired by the same
+    // startup refresh, without changing the user's local routing.
+    fs.unlinkSync(path.join(targets[0].path, "SKILL.md"));
+    fs.writeFileSync(path.join(targets[1].path, "references/agent-browser.md"), "old commands", "utf8");
+    assert.equal((await shell.inspectAgentIntegration()).ready, false);
+    await shell.refreshAgentBrowserWrapperIfInstalled();
+    assert.equal((await shell.inspectAgentIntegration()).managementCli.skill.upToDate, true);
+    for (const target of targets) assert.equal(fs.readFileSync(path.join(target.path, "local/browser-routing.md"), "utf8"), "keep my chosen Profile");
+    const backups = path.join(home, ".profilepilot/skill-backups");
+    const backupCount = fs.readdirSync(backups).length;
+    await shell.refreshAgentBrowserWrapperIfInstalled();
+    assert.equal(fs.readdirSync(backups).length, backupCount, "identical guides are not archived on every app launch");
+    const browserManifest = path.join(path.dirname(diagnostic.managementCli.bundlePath), "browser-runtime.json");
+    assert.ok(fs.existsSync(JSON.parse(fs.readFileSync(browserManifest, "utf8")).executable));
+    const browserVersion = execFileSync(process.execPath, [diagnostic.managementCli.bundlePath, "browser", "--connection", "gateway", "--version"], {
+      encoding: "utf8", env: { ...process.env, HOME: home, PATH: path.join(home, "empty-bin"), PROFILEPILOT_AGENT_BROWSER_REAL: "missing-global-driver" }
+    });
+    assert.match(browserVersion, /agent-browser/);
+    fs.unlinkSync(browserManifest);
+    assert.equal((await shell.inspectProfilePilotCli()).upToDate, false);
+    await shell.refreshAgentBrowserWrapperIfInstalled();
+    assert.equal((await shell.inspectProfilePilotCli()).upToDate, true);
+    assert.equal(path.basename(diagnostic.managementCli.launcherPath), process.platform === "win32" ? "ppilot.cmd" : "ppilot");
+    const legacyLauncher = path.join(path.dirname(diagnostic.managementCli.launcherPath), process.platform === "win32" ? "profilepilot.cmd" : "profilepilot");
+    assert.equal(fs.existsSync(legacyLauncher), true);
     assert.ok(diagnostic.wrappers.every((wrapper) => !wrapper.wrapperInstalled && !wrapper.launcherInstalled));
     assert.equal(diagnostic.shellIntegration.installed, true);
     assert.equal(
@@ -159,6 +187,13 @@ test("ProfilePilot management CLI and its Skill install independently from brows
       assert.match(zshenv, /export PATH="\$PROFILEPILOT_MANAGEMENT_CLI_BIN_DIR:\$PATH"/);
     } else {
       assert.match(process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH, /\.profilepilot\\cli-bin/i);
+      const powershellLauncher = path.join(path.dirname(diagnostic.managementCli.launcherPath), "ppilot.ps1");
+      assert.equal(fs.existsSync(powershellLauncher), true);
+      assert.equal(fs.existsSync(path.join(path.dirname(powershellLauncher), "profilepilot.ps1")), true);
+      fs.unlinkSync(powershellLauncher);
+      assert.equal((await shell.inspectProfilePilotCli()).upToDate, false, "older Windows installations need the PowerShell entry");
+      await shell.refreshAgentBrowserWrapperIfInstalled();
+      assert.equal((await shell.inspectProfilePilotCli()).upToDate, true);
     }
 
     diagnostic = await shell.setProfilePilotCliSkillEnabled(true);
@@ -166,19 +201,75 @@ test("ProfilePilot management CLI and its Skill install independently from brows
     assert.equal(diagnostic.managementCli.skill.managedTargetCount, 3);
 
     fs.writeFileSync(diagnostic.managementCli.bundlePath, "stale cli", "utf8");
+    fs.unlinkSync(diagnostic.managementCli.launcherPath);
+    assert.equal((await shell.inspectProfilePilotCli()).installed, false);
     assert.equal(await shell.refreshAgentBrowserWrapperIfInstalled(), true);
+    assert.equal((await shell.inspectProfilePilotCli()).installed, true, "an existing installation gains ppilot during automatic refresh");
     assert.match(fs.readFileSync(diagnostic.managementCli.bundlePath, "utf8"), /PROFILEPILOT_CLI_VERSION/);
 
     diagnostic = await shell.setProfilePilotCliEnabled(false);
     assert.equal(diagnostic.managementCli.installed, false);
-    assert.equal(diagnostic.managementCli.skill.installed, true, "Skill is a separate installation dimension");
+    assert.equal(fs.existsSync(legacyLauncher), false);
+    if (process.platform === "win32") {
+      assert.equal(fs.existsSync(path.join(path.dirname(legacyLauncher), "ppilot.ps1")), false);
+      assert.equal(fs.existsSync(path.join(path.dirname(legacyLauncher), "profilepilot.ps1")), false);
+    }
+    assert.equal(diagnostic.managementCli.skill.installed, false, "removal includes managed instructions");
+    for (const target of targets) assert.equal(fs.readFileSync(path.join(target.path, "local/browser-routing.md"), "utf8"), "keep my chosen Profile");
     assert.equal(diagnostic.shellIntegration.installed, false);
 
+    diagnostic = await shell.setProfilePilotCliSkillEnabled(true);
+    assert.equal(diagnostic.managementCli.installed, true, "legacy Skill setup redirects to the unified installer");
+    assert.equal(diagnostic.managementCli.skill.upToDate, true);
     diagnostic = await shell.setProfilePilotCliSkillEnabled(false);
     assert.equal(diagnostic.managementCli.skill.installedTargetCount, 0);
+    assert.equal(diagnostic.managementCli.installed, false);
   } finally {
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
+    if (originalWindowsUserPath === undefined) delete process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH;
+    else process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH = originalWindowsUserPath;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("unified setup recovers a failed guide update and preserves external guides on removal", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "profilepilot-cli-repair-"));
+  const originalHome = process.env.HOME;
+  const originalWindowsUserPath = process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH;
+  process.env.HOME = home;
+  if (process.platform === "win32") process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH = "";
+  try {
+    delete require.cache[require.resolve("../dist/main/shell-integration.js")];
+    const shell = require("../dist/main/shell-integration.js");
+    let diagnostic = await shell.setProfilePilotCliEnabled(true);
+    const target = diagnostic.managementCli.skill.targets[0].path;
+    const guide = path.join(target, "references/agent-browser.md");
+    fs.writeFileSync(guide, "previous release");
+    const rename = fs.promises.rename;
+    fs.promises.rename = async (from, to) => {
+      if (String(from).includes(".profilepilot-tmp-") && to === target) throw new Error("guide update failed");
+      return rename(from, to);
+    };
+    try { await assert.rejects(shell.setProfilePilotCliEnabled(true), /guide update failed/); }
+    finally { fs.promises.rename = rename; }
+    diagnostic = await shell.inspectAgentIntegration();
+    assert.equal(diagnostic.managementCli.installed, true);
+    assert.equal(diagnostic.ready, false);
+    assert.equal(fs.readFileSync(guide, "utf8"), "previous release");
+    diagnostic = await shell.setProfilePilotCliEnabled(true);
+    assert.equal(diagnostic.ready, true);
+
+    fs.unlinkSync(path.join(target, ".profilepilot-managed.json"));
+    fs.writeFileSync(path.join(target, "SKILL.md"), "external owner instructions");
+    diagnostic = await shell.setProfilePilotCliEnabled(true);
+    assert.equal(diagnostic.managementCli.installed, true);
+    assert.equal(diagnostic.ready, false, "different external instructions cannot count as synchronized");
+    assert.equal(diagnostic.managementCli.skill.targets[0].managed, false);
+    await shell.setProfilePilotCliEnabled(false);
+    assert.equal(fs.readFileSync(path.join(target, "SKILL.md"), "utf8"), "external owner instructions");
+  } finally {
+    if (originalHome === undefined) delete process.env.HOME; else process.env.HOME = originalHome;
     if (originalWindowsUserPath === undefined) delete process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH;
     else process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH = originalWindowsUserPath;
     fs.rmSync(home, { recursive: true, force: true });
@@ -222,7 +313,7 @@ test("agent integration diagnostics do not treat npx as an installed MCP tool", 
       ]
     );
     assert.equal(diagnostic.tools[2].executablePath, null);
-    assert.equal(diagnostic.skills.length, 3);
+    assert.equal(diagnostic.skills.length, 1);
     assert.match(diagnostic.tools[0].installCommand, /npm install -g agent-browser/);
     assert.match(diagnostic.tools[1].installCommand, /@playwright\/cli/);
     assert.match(diagnostic.tools[2].installCommand, /chrome-devtools-mcp/);

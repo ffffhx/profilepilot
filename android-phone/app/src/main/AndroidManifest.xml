@@ -1,0 +1,28 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <queries>
+        <intent><action android:name="android.settings.APPLICATION_DEVELOPMENT_SETTINGS" /></intent>
+        <intent><action android:name="android.settings.ACCESSIBILITY_DETAILS_SETTINGS" /></intent>
+    </queries>
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <application android:label="@string/app_name" android:icon="@drawable/ic_phone" android:theme="@style/Theme.ProfilePilot" android:allowBackup="false" android:fullBackupContent="false" android:dataExtractionRules="@xml/data_extraction_rules" android:supportsRtl="true" android:usesCleartextTraffic="false">
+        <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTop" android:windowSoftInputMode="adjustResize">
+            <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
+            <intent-filter><action android:name="android.intent.action.VIEW" /><category android:name="android.intent.category.DEFAULT" /><category android:name="android.intent.category.BROWSABLE" /><data android:scheme="profilepilot" android:host="pair" /><data android:scheme="profilepilot" android:host="status" /></intent-filter>
+            <intent-filter><action android:name="android.intent.action.SEND" /><category android:name="android.intent.category.DEFAULT" /><data android:mimeType="text/plain" /></intent-filter>
+        </activity>
+        <activity android:name=".PermissionsActivity" android:exported="false" />
+        <service android:name=".RemoteSyncService" android:exported="false" android:foregroundServiceType="connectedDevice" />
+        <service android:name=".StatusSyncService" android:exported="false" android:foregroundServiceType="connectedDevice" />
+        <service android:name=".ControlService" android:exported="false" android:foregroundServiceType="connectedDevice" />
+        <service android:name=".PhoneAccessibility" android:label="ProfilePilot 手机控制" android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE" android:exported="true">
+            <intent-filter><action android:name="android.accessibilityservice.AccessibilityService" /></intent-filter>
+            <meta-data android:name="android.accessibilityservice" android:resource="@xml/accessibility" />
+        </service>
+    </application>
+</manifest>

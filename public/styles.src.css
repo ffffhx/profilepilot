@@ -7954,6 +7954,66 @@ button:hover:not(:disabled) {
   width: min(900px, 100%);
 }
 
+.agent-integration-page {
+  margin-top: 24px;
+}
+
+.agent-integration-page h1 {
+  margin: 6px 0 0;
+  font-size: 25px;
+}
+
+.agent-integration-page .agent-management-cli,
+.agent-integration-page .agent-tools-panel {
+  border-radius: 12px;
+  padding: 20px;
+}
+
+.browser-extension-controls {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.browser-extension-controls .field {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.browser-extension-controls select {
+  display: block;
+  width: 100%;
+  min-height: 36px;
+}
+
+.browser-extension-controls button {
+  min-height: 36px;
+  font-size: 12px;
+}
+
+.browser-extension-status {
+  margin: 16px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.browser-extension-panel.ready .browser-extension-status {
+  color: var(--accent-bright);
+}
+
+.browser-extension-note,
+.browser-extension-error {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+.browser-extension-note { color: var(--muted); }
+.browser-extension-error { color: var(--warn-bright); }
+
 .onboarding-head,
 .agent-integration-head,
 .agent-command-heading,

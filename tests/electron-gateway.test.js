@@ -31,24 +31,35 @@ test("Electron upgrade preserves existing v15 Chrome driver sessions", async () 
 
 test("Electron Agent port persists while upgrade is deferred and cannot collide with other apps", async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "pp-electron-ports-"));
+  let ready = false;
+  const server = http.createServer((_req, res) => res.end(JSON.stringify(ready ? [{
+    id: "window", type: "page", webSocketDebuggerUrl: `ws://127.0.0.1:${server.address().port}/devtools/page/window`
+  }] : [])));
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const debugPort = server.address().port;
   const gateway = { status:async () => { throw new Error("Gateway 需升级"); }, detach:async () => {} };
   try {
     const service = new LocalAppsService(root, async () => new Set([9223]), gateway);
-    const input = { name:"App", mode:"attach", cwd:"", command:"", environment:"", cdpPort:9333, inspectPort:null };
+    const input = { name:"App", mode:"attach", cwd:"", command:"", environment:"", cdpPort:debugPort, inspectPort:null };
     const id = await service.save(input);
     await service.syncAgents();
     const config = service.get(id);
-    assert.ok(config.agentPort >= 1024 && config.agentPort !== 9333 && config.agentPort !== 9223);
+    assert.ok(config.agentPort >= 1024 && config.agentPort !== debugPort && config.agentPort !== 9223);
     assert.equal(new LocalAppsService(root).get(id).agentPort, config.agentPort);
-    assert.match((await service.list())[0].agent.error, /需升级/);
+    assert.deepEqual(service.snapshot()[0].agent, { connected: false }, 'an app without a renderer is disconnected, not an attachment failure');
+    ready = true;
+    await service.syncAgents();
+    assert.equal(service.get(id).agentPort, config.agentPort, 'readiness must not reallocate the saved Agent port');
+    assert.match(service.snapshot()[0].agent.error, /需升级/);
     await assert.rejects(service.save({ ...input, cdpPort:config.agentPort }), /已分配/);
     await assert.rejects(service.save({ ...input, cdpPort:9334, agentPort:9334 }), /不能与其他/);
     await assert.rejects(service.save({ ...input, cdpPort:null, inspectPort:9230, agentPort:9444 }), /需要界面/);
     const catalog = path.join(root, ".profilepilot/gateway"); fs.mkdirSync(catalog, {recursive:true});
-    fs.writeFileSync(path.join(catalog, "managed-profiles.json"), JSON.stringify({ profiles:[{ publicPort:config.agentPort, electronCdpPort:9333 }] }));
-    assert.throws(() => assertProtectedElectronPort(9333, root), error => error.code === "ELECTRON_USE_GATEWAY_PORT");
+    fs.writeFileSync(path.join(catalog, "managed-profiles.json"), JSON.stringify({ profiles:[{ publicPort:config.agentPort, electronCdpPort:debugPort }] }));
+    assert.throws(() => assertProtectedElectronPort(debugPort, root), error => error.code === "ELECTRON_USE_GATEWAY_PORT");
     assert.doesNotThrow(() => assertProtectedElectronPort(config.agentPort, root));
   } finally {
+    await new Promise(resolve => server.close(resolve));
     assert.ok(path.resolve(root).startsWith(path.resolve(os.tmpdir()) + path.sep));
     fs.rmSync(root, {recursive:true,force:true});
   }

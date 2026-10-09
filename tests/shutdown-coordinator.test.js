@@ -3,7 +3,6 @@ const assert = require('node:assert/strict');
 const { loadTsModule } = require('./helpers/load-ts-module');
 const { ShutdownCoordinator } = loadTsModule('src/main/shutdown-coordinator.ts');
 const flush = () => new Promise(resolve => setImmediate(resolve));
-const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 
 function fixture(stages, options = {}) {
@@ -54,10 +53,14 @@ test('synchronous and asynchronous cleanup errors are recorded without skipping 
   assert.equal(f.coordinator.clean, false, 'errors must not mark runtime-state clean');
 });
 
-test('a stuck cleanup logs its exact pending stage and forces exit; late rejection is consumed', async () => {
+test('a stuck cleanup logs its exact pending stage and forces exit; late rejection is consumed', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const tasks = deferred();
   const f = fixture([{ name: 'tasks-save-and-handoff', run: () => tasks.promise }, { name: 'management-server', run: () => {} }], { cleanupTimeoutMs: 20 });
-  f.request(); await delay(50);
+  f.request(); await flush();
+  t.mock.timers.tick(19);
+  assert.deepEqual(f.calls, []);
+  t.mock.timers.tick(1);
   assert.deepEqual(f.calls, ['forced']);
   assert.equal(f.coordinator.clean, false);
   assert.deepEqual(f.logs.filter(log => log.event === 'app.shutdown.stage.timeout').map(log => log.details.stage), ['tasks-save-and-handoff']);
@@ -68,21 +71,25 @@ test('a stuck cleanup logs its exact pending stage and forces exit; late rejecti
   assert.deepEqual(f.calls, ['forced']);
 });
 
-test('finished cleanup cannot leave a headless process indefinitely if Electron quit is prevented', async () => {
+test('finished cleanup cannot leave a headless process indefinitely if Electron quit is prevented', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const f = fixture([{ name: 'tasks', run: () => {} }], { quitTimeoutMs: 20 });
   f.request(); await flush(); await flush();
   f.coordinator.willQuit();
-  await delay(50);
+  t.mock.timers.tick(19);
+  assert.deepEqual(f.calls, ['quit']);
+  t.mock.timers.tick(1);
   assert.deepEqual(f.calls, ['quit', 'forced']);
   assert.equal(f.logs.find(log => log.event === 'app.shutdown.forced_exit').details.reason, 'electron-quit');
   assert.equal(f.coordinator.clean, false);
 });
 
-test('only actual quit cancels the final watchdog', async () => {
+test('only actual quit cancels the final watchdog', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   const f = fixture([{ name: 'tasks', run: () => {} }], { quitTimeoutMs: 20 });
   f.request(); await flush(); await flush();
   f.coordinator.willQuit(); f.coordinator.didQuit();
-  await delay(50);
+  t.mock.timers.tick(50);
   assert.deepEqual(f.calls, ['quit']);
   assert.equal(f.coordinator.clean, true);
 });

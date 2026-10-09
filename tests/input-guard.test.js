@@ -257,9 +257,13 @@ test("Input Guard native helper accepts SET commands and reports failed unknown 
   const child = spawn(helper, [], { stdio: ["pipe", "pipe", "pipe"] });
   child.stdout.setEncoding("utf8");
   let output = "";
+  // stdout can split the replies into several chunks. The accumulated ready
+  // message must not cause another write after QUIT has closed the helper.
+  let commandsSent = false;
   child.stdout.on("data", (chunk) => {
     output += chunk;
-    if (output.includes('"status":"ready"')) {
+    if (!commandsSent && output.includes('"status":"ready"')) {
+      commandsSent = true;
       child.stdin.write("SET 2147480000\nQUIT\n");
     }
   });
@@ -290,9 +294,11 @@ test("Windows Input Guard helper accepts SET commands and reports failed unknown
   ], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
   child.stdout.setEncoding("utf8");
   let output = "";
+  let commandsSent = false;
   child.stdout.on("data", (chunk) => {
     output += chunk;
-    if (output.includes('"status":"ready"') && !output.includes('"status":"sync-complete"')) {
+    if (!commandsSent && output.includes('"status":"ready"')) {
+      commandsSent = true;
       child.stdin.write("SET 2147480000\nQUIT\n");
     }
   });
@@ -329,9 +335,11 @@ test("Input Guard companion launches independently through LaunchServices and a 
   const child = launchInputGuardCompanion(helper);
   child.stdout.setEncoding("utf8");
   let output = "";
+  let commandsSent = false;
   child.stdout.on("data", (chunk) => {
     output += chunk;
-    if (output.includes('"status":"ready"') && !output.includes('"status":"sync-complete"')) {
+    if (!commandsSent && output.includes('"status":"ready"')) {
+      commandsSent = true;
       child.stdin.write("SET 2147480000\nQUIT\n");
     }
   });

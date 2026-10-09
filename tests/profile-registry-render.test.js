@@ -17,7 +17,9 @@ function loadProfilesRenderer(overrides = {}) {
     profileReadinessLoading: {},
     ...overrides
   };
+  const cache = new Map();
   const renderer = loadTsModule("src/renderer/render/profiles.ts", {
+    cache,
     stubs: {
       "../state": { store, dateFormatter: { format: (value) => value.toISOString() } },
       "src/renderer/state": { store, dateFormatter: { format: (value) => value.toISOString() } },
@@ -27,7 +29,8 @@ function loadProfilesRenderer(overrides = {}) {
       "src/renderer/state-actions": { loadState: async () => {} }
     }
   });
-  return { renderer, store };
+  const inspector = loadTsModule("src/renderer/render/browser-workspace.ts", { cache });
+  return { renderer, inspector, store };
 }
 
 function profile(overrides = {}) {
@@ -136,10 +139,9 @@ test("Profile Inspector separates logical ownership from frontmost window state"
   assert.match(html, /data-action="return-agent-control"[\s\S]*>交还 Agent<\/button>/);
 });
 
-test("Profile Registry renders one shared six-column track", () => {
-  const { renderer } = loadProfilesRenderer({ openProfileMenuId: "p1" });
-  const html = renderer.renderProfilesPanel([
-    profile({
+test("Profile Registry keeps six columns and shows current Agent activity in the inspector", () => {
+  const { renderer, inspector } = loadProfilesRenderer({ openProfileMenuId: "p1" });
+  const configured = profile({
       gatewayControl: {
         publicPort: 9223,
         ownership: "agent",
@@ -166,20 +168,22 @@ test("Profile Registry renders one shared six-column track", () => {
         session: "cx-019f",
         lastActive: "2026-07-15T00:00:00.000Z"
       }]
-    })
-  ], []);
+    });
+  const html = renderer.renderProfilesPanel([configured], []);
+  const details = inspector.renderBrowserInspector(configured);
 
-  assert.match(html, /<col class="profile-col-name" \/>[\s\S]*profile-col-status[\s\S]*profile-col-connection[\s\S]*profile-col-route[\s\S]*profile-col-activity[\s\S]*profile-col-actions/);
-  assert.match(html, /<th>Profile<\/th>[\s\S]*<th>状态<\/th>[\s\S]*<th>连接<\/th>[\s\S]*<th>代理<\/th>[\s\S]*<th>当前活动<\/th>[\s\S]*<th>操作<\/th>/);
-  assert.match(html, /Gateway[\s\S]*:9223[\s\S]*系统代理[\s\S]*正在读取系统代理[\s\S]*Codex 正在驱动[\s\S]*coze-test-account-cli/);
-  assert.match(html, /profile-activity-track driving">\s*<span class="profile-activity-signal" aria-hidden="true"><\/span>\s*<span class="profile-activity-main action-tooltip"/);
-  assert.match(html, /profile-primary-action[\s\S]*>\s*接管\s*<\/button>[\s\S]*profile-window-action[\s\S]*aria-label="显示"[\s\S]*>\s*↗\s*<\/button>[\s\S]*profile-menu-action[\s\S]*data-action="open-profile-details"[\s\S]*>查看详情<\/button>/);
+  assert.match(html, /<col class="profile-col-name" \/>[\s\S]*profile-col-status[\s\S]*profile-col-connection[\s\S]*profile-col-route[\s\S]*profile-col-port[\s\S]*profile-col-actions/);
+  assert.match(html, /<th>Profile<\/th>[\s\S]*<th>状态<\/th>[\s\S]*<th>连接<\/th>[\s\S]*<th>代理<\/th>[\s\S]*<th>端口<\/th>[\s\S]*<th[^>]*><span>操作<\/span><\/th>/);
+  assert.match(html, /Gateway[\s\S]*系统代理[\s\S]*正在读取系统代理[\s\S]*class="profile-port"[^>]*>9223<\/span>/);
+  assert.match(details, /当前 Agent[\s\S]*Codex 正在驱动[\s\S]*coze-test-account-cli/);
+  assert.match(details, /profile-activity-track driving">\s*<span class="profile-activity-signal" aria-hidden="true"><\/span>\s*<span class="profile-activity-main action-tooltip"/);
+  assert.match(html, /profile-primary-action[\s\S]*>\s*接管\s*<\/button>[\s\S]*profile-window-action[\s\S]*aria-label="显示"[\s\S]*>\s*↗\s*<\/button>[\s\S]*profile-menu-action[\s\S]*role="menu"/);
   assert.doesNotMatch(html, /profile-details-action/);
 });
 
 test("Profile Registry distinguishes a reconnecting driver from an Agent ownership lock", () => {
-  const { renderer } = loadProfilesRenderer();
-  const html = renderer.renderProfileRow(profile({
+  const { inspector } = loadProfilesRenderer();
+  const html = inspector.renderBrowserInspector(profile({
     gatewayControl: {
       publicPort: 9223,
       ownership: "agent",
@@ -207,19 +211,20 @@ test("Profile Registry distinguishes a reconnecting driver from an Agent ownersh
   assert.doesNotMatch(html, /conn-idle">空闲/);
 });
 
-test("Profile Registry preserves empty activity and fixed action slots", () => {
-  const { renderer } = loadProfilesRenderer();
-  const html = renderer.renderProfileRow(profile({
+test("Profile Registry preserves the configured port, empty inspector activity and fixed action slots", () => {
+  const { renderer, inspector } = loadProfilesRenderer();
+  const configured = profile({
     running: false,
     pids: [],
     cdpPort: null,
     cdpUrl: null,
     cdpClients: [],
     fixedCdpPort: 9226
-  }));
+  });
+  const html = renderer.renderProfileRow(configured);
 
-  assert.match(html, /:9226[\s\S]*待启动/);
-  assert.match(html, /profile-activity-empty">—<\/span>/);
+  assert.match(html, /class="profile-port pending"[^>]*>9226<small>待启动<\/small><\/span>/);
+  assert.match(inspector.renderBrowserInspector(configured), /profile-activity-empty">—<\/span>/);
   assert.match(html, /profile-primary-action[\s\S]*aria-label="启动"[\s\S]*>\s*启动\s*<\/button>/);
   assert.match(html, /aria-label="更多"[\s\S]*>⋮<\/button>/);
   assert.doesNotMatch(html, /data-action="open-profile-details"/);
@@ -249,7 +254,7 @@ test("Profile Registry shows a launching status while Chrome is starting", () =>
   assert.match(row, /aria-busy="true"/);
   assert.match(row, /status-dot[\s\S]*\bloading\b/);
   assert.match(row, /state-pill[\s\S]*\bloading\b[\s\S]*inline-spinner[\s\S]*启动中/);
-  assert.match(row, /action-button accent[\s\S]*\bloading\b[\s\S]*启动中/);
+  assert.match(row, /action-button profile-action-start[^>]*\bloading\b[^>]*data-action="launch-cdp-quick"[^>]*disabled[\s\S]*启动中/);
   assert.doesNotMatch(row, />未运行</);
   assert.match(details, /detail-status[\s\S]*\bloading\b[\s\S]*inline-spinner[\s\S]*启动中/);
 });
@@ -277,7 +282,7 @@ test("Profile Registry launching status is scoped to the target Profile", () => 
 });
 
 test("Profile Registry exposes the Agent access switch inline and uses the name as AI selection hint", () => {
-  const { renderer } = loadProfilesRenderer({ openProfileMenuId: "p1" });
+  const { renderer, inspector } = loadProfilesRenderer({ openProfileMenuId: "p1" });
   const configured = profile({
     running: false,
     pids: [],
@@ -289,14 +294,14 @@ test("Profile Registry exposes the Agent access switch inline and uses the name 
   const details = renderer.renderDetails(configured, false);
 
   assert.match(row, /data-action="toggle-agent-access"[^>]*aria-pressed="true"[^>]*>[\s\S]*NO AGENT[\s\S]*<\/button>/);
-  assert.match(row, /profile-activity-empty agent-disabled">Agent 已禁用<\/span>/);
+  assert.match(inspector.renderBrowserInspector(configured), /profile-activity-empty agent-disabled">Agent 已禁用<\/span>/);
   assert.doesNotMatch(row, /configure-agent-settings|Agent 使用设置|>TIP</);
   assert.match(details, /Agent 访问[\s\S]*禁止连接[\s\S]*AI 选择提示[\s\S]*9223端口profile/);
 });
 
 test("Profile Registry never describes a stopped Profile as user-controlled", () => {
-  const { renderer } = loadProfilesRenderer();
-  const html = renderer.renderProfileRow(profile({
+  const { renderer, inspector } = loadProfilesRenderer();
+  const configured = profile({
     running: false,
     pids: [],
     cdpPort: null,
@@ -315,10 +320,13 @@ test("Profile Registry never describes a stopped Profile as user-controlled", ()
       daemonPid: 201,
       updatedAt: "2026-07-15T00:00:00.000Z"
     }
-  }));
+  });
+  const html = renderer.renderProfileRow(configured);
+  const details = inspector.renderBrowserInspector(configured);
 
-  assert.match(html, /:9223[\s\S]*待启动[\s\S]*Session 残留/);
-  assert.doesNotMatch(html, /用户已接管/);
+  assert.match(html, /class="profile-port pending"[^>]*>9223<small>待启动<\/small><\/span>/);
+  assert.match(details, /Session 残留/);
+  assert.doesNotMatch(html + details, /用户已接管/);
 });
 
 test("configured Profile exposes its Bifrost rules and listener in the row, menu and details", () => {
@@ -812,14 +820,51 @@ test("proxy route tooltip stays interactive and exposes its full horizontal cont
   assert.match(css, /\.route-tip-horizontal-scroll-content\s*\{[\s\S]*?padding-bottom:\s*12px;/);
 });
 
-test("live observation starts from the details modal, not row selection", () => {
-  const main = readFileSync(path.join(__dirname, "..", "src", "renderer", "main.ts"), "utf8");
-  const liveView = readFileSync(path.join(__dirname, "..", "src", "renderer", "render", "live-view.ts"), "utf8");
-  const selectBlock = main.slice(main.indexOf('if (action === "select"'), main.indexOf('if (action === "select-external"'));
-
-  assert.match(main, /action === "open-profile-details"[\s\S]*store\.modal = \{ kind: "profile-details", profileId: id \}[\s\S]*requestLiveViewNow\(id\)/);
-  assert.doesNotMatch(selectBlock, /requestLiveViewNow/);
-  assert.match(liveView, /store\.modal\?\.kind !== "profile-details" && store\.modal\?\.kind !== "live-zoom"/);
-  assert.match(liveView, /function activeLiveProfileId\(\)[\s\S]*store\.modal\?\.kind === "profile-details"/);
-  assert.match(liveView, /store\.liveActiveTab\[profile\.id\] \|\| profile\.gatewayControl\?\.agentTarget\?\.targetId/);
+test("live observation follows selection and detail modals, and pauses outside the visible browser workspace", async t => {
+  const originals = { document: global.document, CSS: global.CSS };
+  global.document = { querySelector: () => null };
+  global.CSS = { escape: value => value };
+  t.after(() => { global.document = originals.document; global.CSS = originals.CSS; });
+  const calls = [];
+  let hidden = false;
+  const first = profile({ gatewayControl: { agentTarget: { targetId: 'agent-tab' } } });
+  const second = profile({ id: 'p2', cdpPort: 9224 });
+  const store = { viewMode: 'main', workspace: 'browser', busy: false, modal: null,
+    state: { profiles: [first, second] }, selectedId: 'p1', selectedExternalDir: null,
+    liveView: {}, liveActiveTab: {}, liveViewShowScreenshot: false };
+  const liveView = loadTsModule('src/renderer/render/live-view.ts', { stubs: {
+    '../state': { store }, '../workspace-lifecycle': { workspaceHidden: () => hidden },
+    '../api': { profileApi: () => ({ getCdpLiveView: async (port, options) => {
+      calls.push({ port, ...options }); return { port, error: null };
+    } }) },
+    '../util': { escapeHtml: String, formatErrorMessage: error => error.message }
+  } });
+  const refresh = async () => { liveView.refreshSelectedBrowserPreview(); await new Promise(resolve => setImmediate(resolve)); };
+  await refresh();
+  assert.deepEqual(calls, [{ port: 9223, screenshot: true, targetId: 'agent-tab' }]);
+  await refresh();
+  assert.equal(calls.length, 1, 'fresh frames are reused');
+  store.selectedId = 'p2';
+  await refresh();
+  assert.equal(calls.at(-1).port, 9224, 'selection updates the preview');
+  for (const kind of ['profile-details', 'live-zoom']) {
+    store.modal = { kind, profileId: 'p1' };
+    store.liveActiveTab.p1 = 'chosen-tab';
+    store.liveView = {};
+    await refresh();
+    assert.deepEqual(calls.at(-1), { port: 9223, screenshot: kind === 'live-zoom', targetId: 'chosen-tab' });
+  }
+  store.modal = null;
+  const count = calls.length;
+  for (const overrides of [{ workspace: 'tools' }, { viewMode: 'mini' }, { busy: true },
+    { selectedExternalDir: '/external' }, { modal: { kind: 'rename' } }]) {
+    Object.assign(store, { workspace: 'browser', viewMode: 'main', busy: false, selectedExternalDir: null, modal: null }, overrides);
+    store.liveView = {};
+    await refresh();
+    assert.equal(calls.length, count, JSON.stringify(overrides));
+  }
+  store.modal = null;
+  hidden = true;
+  await refresh();
+  assert.equal(calls.length, count, 'hidden workspaces do not capture');
 });

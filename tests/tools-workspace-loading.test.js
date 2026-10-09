@@ -15,6 +15,7 @@ function fixture(t) {
   const emptyRenderers = new Proxy({}, { get: () => () => "" });
   const renderer = loadTsModule("src/renderer/render/render-root.ts", { stubs: {
     "../state": { store, appRoot },
+    "../profile-menu-layout": { positionProfileMenu() {} },
     "../workspace-switcher": { workspaceSwitcher: () => '<button data-workspace-trigger>配套工具</button>', workspaceIdentityBar: () => '<div class="workspace-identity"></div>', refreshWorkspaceSwitcher() {} },
     "../busy": { isBusyAction: () => false, renderToastBody: value => value },
     "../confirm": emptyRenderers,

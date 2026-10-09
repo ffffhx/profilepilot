@@ -11,9 +11,12 @@ const publicDir = path.resolve(__dirname, '../public');
 const html = fs.readFileSync(path.join(publicDir, 'tasks.html'), 'utf8');
 const links = [...html.matchAll(/<link\b[^>]*rel=["']stylesheet["'][^>]*href=["']([^"']+)["'][^>]*>/g)].map(match => match[1]);
 const styles = links.map(href => {
-  assert.ok(href.startsWith('./'), 'expected local shipped stylesheet: ' + href);
-  const file = href.slice(2);
-  const css = fs.readFileSync(path.join(publicDir, file), 'utf8');
+  assert.match(href, /^\.\.?\//, 'expected local shipped stylesheet: ' + href);
+  const absolute = path.resolve(publicDir, href);
+  const relative = path.relative(path.resolve(publicDir, '..'), absolute);
+  assert.ok(!relative.startsWith('..') && !path.isAbsolute(relative), 'stylesheet must stay in the shipped app: ' + href);
+  const file = path.relative(publicDir, absolute).split(path.sep).join('/');
+  const css = fs.readFileSync(absolute, 'utf8');
   return { file, css, root: postcss.parse(css, { from: file }) };
 });
 

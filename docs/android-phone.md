@@ -2,6 +2,25 @@
 
 手机工作区管理通过 ProfilePilot 发起的查看和控制会话。电脑显示设备、控制者、任务、持续时间与最近动作；安卓配套 App 在会话期间显示可拖动的顶部胶囊和状态通知，均可暂停或结束控制。
 
+## 免安装基础控制
+
+手机连接 USB 或 Wi-Fi 调试并授权电脑后，可选择「仅查看」或「免安装控制」，无需安装 APK 或开启无障碍服务。桌面控制窗口支持截图、坐标点击、拖动、返回/主页/最近应用和基础英文、数字输入。画面每 2 秒按需刷新，也可关闭自动刷新；这是截图预览，不是视频投屏。首次开启调试与授权电脑仍由用户在手机上完成。
+
+免安装会话的暂停与结束位于电脑端；断线后停止接受指令，不自动恢复。它不提供手机端控制胶囊、控件识别、中文精确填写或手机状态上报。需要这些功能时，点击「结束控制并安装 App」，桌面端使用随包附带的 APK 安装并打开手机 App，之后由用户确认配对与权限。配套工具页提供「ProfilePilot 安卓 App」入口，标记为可选安装。
+
+CLI 使用显式模式，不会在 App 连接失败后自动切换：
+
+```sh
+ppilot phone start --device DEVICE_ID --backend basic --mode control --controller Codex --task "查看应用"
+ppilot phone action --backend basic --params-file action.json --output screen.png
+ppilot phone pause --device DEVICE_ID --backend basic
+ppilot phone stop --device DEVICE_ID --backend basic
+```
+
+`action.json` 的格式与 App 模式相同，但 `sessionId`、`generation` 来自设备的 `basic` 字段。坐标操作需要最近 30 秒内的截图，输入后需重新截图；重复请求 ID、过期会话版本和暂停期间的输入都会被拒绝。当前仅允许一个免安装会话，并与 App 会话互斥；`run`、`wrap` 和通用 APK 安装仍使用 App 模式。
+
+截图使用 ADB 二进制输出直接传输，Windows 不经过 PowerShell 文本重定向；Windows/macOS 共用控制实现及参数转义。
+
 ## 开发与连接
 
 需要 Node.js、JDK 17 或更新版本、Android SDK（platform 37、Platform Tools）。设置 `JAVA_HOME` 和 `ANDROID_HOME`，运行：

@@ -2,6 +2,16 @@ import { z } from "zod";
 import { PhonesService, phoneActionSchema } from "./service";
 export type PhoneManagementCommand = { action: "phone"; method: string; params?: unknown };
 export async function executePhoneCommand(command: PhoneManagementCommand, service: PhonesService): Promise<unknown> {
+  if (command.method === "inspect") return service.inspect(z.object({ id: z.string() }).strict().parse(command.params).id);
+  if (command.method === "basic-start") {
+    const p = z.object({ id: z.string(), mode: z.enum(["view", "control"]).default("control"), controller: z.string().default("本机用户"), task: z.string().default("") }).strict().parse(command.params);
+    return service.basicStart(p.id, p.mode, p.controller, p.task);
+  }
+  if (command.method === "basic-action") return service.basicPerform(z.object({ id: z.string(), sessionId: z.string(), generation: z.number(), requestId: z.string(), action: phoneActionSchema }).strict().parse(command.params));
+  if (["basic-pause", "basic-resume", "basic-stop"].includes(command.method)) {
+    const { id } = z.object({ id: z.string() }).strict().parse(command.params);
+    return service.basicControl(id, command.method.slice(6) as "pause" | "resume" | "stop");
+  }
   if (command.method === "wrapper-install") {
     const p = z.object({ lease: z.string().uuid(), generation: z.number().int().nonnegative(), apk: z.string().min(1).max(32768), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict().parse(command.params);
     return service.installWrapper(p.lease, p.generation, p.apk, p.sha256);

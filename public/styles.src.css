@@ -1316,6 +1316,34 @@ h3 {
 
 /* ---- tooltips: HUD readout ---- */
 
+/* Dark tooltip surfaces need their own palette, including nested status text. */
+.action-tooltip::before,
+.action-tooltip::after,
+.conn-tip-card,
+.route-tip-card {
+  color-scheme: dark;
+  --text: #f8fafc;
+  --ink: #f8fafc;
+  --muted: #b8c8d4;
+  --panel: #111a20;
+  --panel-soft: #0d141a;
+  --line: #354857;
+  --line-strong: #526879;
+  --accent: #93c5fd;
+  --accent-bright: #bfdbfe;
+  --accent-soft: #1b3048;
+  --accent-line: #42658d;
+  --warn: #fbbf24;
+  --warn-bright: #fde68a;
+  --danger: #fb7185;
+  --danger-bright: #fca5a5;
+  --info: #60a5fa;
+  --info-bright: #93c5fd;
+  --info-soft: #172b40;
+  --info-line: #42658d;
+  color: var(--text);
+}
+
 .action-tooltip {
   position: relative;
   display: inline-flex;
@@ -1340,7 +1368,7 @@ h3 {
   border: 1px solid var(--accent-line);
   border-radius: 6px;
   background: #060c0f;
-  color: #d9fff0;
+  color: var(--text);
   content: attr(data-tooltip);
   font-size: 12px;
   font-weight: 600;

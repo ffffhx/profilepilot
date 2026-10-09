@@ -3,6 +3,8 @@ import type { LocalAppAgentState, LocalAppConfig } from "../../shared/local-apps
 import { BROWSER_GATEWAY_PROTOCOL_VERSION, ensureBrowserGatewayDaemon, requestBrowserGateway, type GatewayControlResponse } from "../browser-gateway-client";
 import type { GatewayProfileBinding } from "../browser-gateway-control";
 
+type AppBinding = GatewayProfileBinding & { connectionActive?: boolean; agentTarget?: { targetId: string; title: string } | null };
+
 export const localAppProfileId = (id: string): string => `local-app:${id}`;
 
 export class LocalAppGateway {
@@ -38,15 +40,20 @@ export class LocalAppGateway {
     try { return this.profile(config, await requestBrowserGateway({ action: "status" }, { homeDir: this.homeDir })); }
     catch (error) { if ((error as { code?: string }).code !== "GATEWAY_UNAVAILABLE") throw error; }
   }
-  profile(config: LocalAppConfig, status: GatewayControlResponse): GatewayProfileBinding | undefined {
-    const profiles = (status.state as { profiles?: GatewayProfileBinding[] } | undefined)?.profiles || [];
+  profile(config: LocalAppConfig, status: GatewayControlResponse): AppBinding | undefined {
+    const profiles = (status.state as { profiles?: AppBinding[] } | undefined)?.profiles || [];
     return profiles.find(profile => profile.profileId === localAppProfileId(config.id) && profile.publicPort === config.agentPort);
   }
   state(config: LocalAppConfig, status: GatewayControlResponse): LocalAppAgentState {
     const profile = this.profile(config, status);
     return {
       connected: Boolean(profile && (status.ports as number[] | undefined)?.includes(config.agentPort!)),
-      ...(profile?.sessionStatus === "active" && profile.ownerSessionId ? { sessionId: profile.ownerSessionId, ownership: profile.ownership } : {})
+      ...(profile?.sessionStatus === "active" && profile.ownerSessionId ? {
+        sessionId: profile.ownerSessionId, ownership: profile.ownership,
+        name: profile.agent || "Agent", project: profile.project,
+        connectionActive: profile.connectionActive,
+        targetTitle: profile.agentTarget?.title, targetId: profile.agentTarget?.targetId
+      } : {})
     };
   }
 }

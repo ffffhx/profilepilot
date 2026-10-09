@@ -1,0 +1,85 @@
+import assert from 'node:assert/strict';
+import { mkdir, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { launchProfilePilotE2e, repoRoot } from './e2e/lib/electron-driver.mjs';
+
+const skillRoot = path.resolve(repoRoot, '../my-agent-skills/skills');
+const app = await launchProfilePilotE2e({ name: 'shared task skills', env: { PROFILEPILOT_SKILL_ROOTS: skillRoot } });
+try {
+  const d = app.driver;
+  const waitTemplates = async predicate => {
+    for (let i = 0; i < 50; i++) {
+      const snapshot = await d.evaluate('window.tasks.snapshot()');
+      if (predicate(snapshot.templates)) return snapshot;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    throw new Error('Template save did not finish: ' + JSON.stringify(await d.evaluate('({form: Object.fromEntries(new FormData(document.querySelector("#create-task"))), errors: [...document.querySelectorAll(".field-error,.operation-error")].map(n=>n.textContent)})')));
+  };
+  const profile = await d.evaluate(`window.profileManager.createProfile('工作流验收').then(s => s.profiles.find(p => p.name === '工作流验收'))`);
+  await d.domClick('.workspace-link[data-workspace="agent"]');
+  await d.waitFor('#create-task');
+  await d.domClick('[data-nav="templates"]');
+  await d.waitFor('[data-use-skill="price-trend"]');
+  assert.equal(await d.evaluate('document.querySelectorAll(".skill-card").length'), 4);
+  await d.request('resize', { width: 1280, height: 960 });
+  await new Promise(resolve => setTimeout(resolve, 500));
+  assert.equal(await d.evaluate('document.documentElement.scrollWidth <= innerWidth'), true, 'workflow library fits the window');
+  const screenshot = await d.screenshot();
+  const dir = path.join(repoRoot, 'artifacts/shared-skills');
+  await mkdir(dir, { recursive: true });
+  if (screenshot.pngBase64) await writeFile(path.join(dir, 'workflows.png'), Buffer.from(screenshot.pngBase64, 'base64'));
+  await d.domClick('[data-use-skill="job-search"]');
+  await d.waitFor('#skill-param-role');
+  await d.domInput('select[name="profileId"]', profile.id);
+  await d.domClick('[data-action="save-template"]');
+  assert.equal((await d.evaluate('window.tasks.snapshot()')).templates.length, 0, 'required workflow parameters block invalid saves');
+  await d.domInput('#skill-param-role', '前端工程师');
+  await d.domInput('#skill-param-location', '上海，接受远程');
+  await d.domInput('[name="templateName"]', '上海前端岗位');
+  await d.domClick('[data-action="save-template"]');
+  await d.waitFor('#task-toast', state => state.text.includes('模板已保存'));
+  let state = await waitTemplates(templates => templates.some(t => t.task.skill?.id === 'job-search'));
+  assert.equal(state.templates[0].task.skill.parameters.role, '前端工程师');
+  await d.domClick('[data-nav="templates"]');
+  await d.domClick(`[data-use-template="${state.templates[0].id}"]`);
+  assert.equal(await d.evaluate('document.querySelector("#skill-param-location").value'), '上海，接受远程');
+  await d.domClick('[data-nav="templates"]');
+  await d.domClick('[data-nav="tasks"]');
+  assert.equal(await d.evaluate('document.querySelector("#skill-param-role").value'), '前端工程师', 'navigation retains parameter draft');
+  await d.domClick('[data-nav="templates"]');
+  await d.domClick('[data-use-skill="price-trend"]');
+  assert.equal(await d.evaluate('document.querySelector("[name=skillId]").value'), 'price-trend', 'switching workflows clears the previous hidden skill ID');
+  await d.domInput('#skill-param-product', 'DDR5 6000 CL36 32GB (2x16GB)');
+  await d.domInput('select[name="profileId"]', profile.id);
+  await d.domInput('#skill-param-period', '最近两年');
+  await d.domInput('#skill-param-market', '美国 / USD');
+  await d.domClick('[data-action="save-template"]');
+  await d.waitFor('#task-toast', state => state.text.includes('模板已保存'));
+  state = await waitTemplates(templates => templates.some(t => t.task.skill?.id === 'price-trend'));
+  const price = state.templates.find(t => t.task.skill?.id === 'price-trend');
+  assert.equal(price.task.skill.parameters.period, '最近两年');
+  const task = await d.evaluate(`window.tasks.create(${JSON.stringify(price.task)})`);
+  assert.equal(task.skill.id, 'price-trend');
+  assert.equal(task.skill.parameters.market, '美国 / USD');
+  assert.match(task.skill.instructions, /价格趋势分析/);
+  await d.domClick('[data-action="remove-skill"]');
+  assert.equal(await d.evaluate('document.querySelector("[name=skillId]") === null'), true);
+  await d.domClick('[data-nav="templates"]');
+  await d.domClick('[data-use-skill="new-product-shopping"]');
+  await d.waitFor('#skill-param-product');
+  assert.equal(await d.evaluate('document.querySelector("#skill-param-platforms").value'), '淘宝 / 天猫、京东');
+  await d.domInput('#skill-param-product', '全新单条 16GB DDR4 3200 台式机内存');
+  await d.domInput('#skill-param-budget', '300 元以内，1 条');
+  await d.domInput('select[name="profileId"]', profile.id);
+  await d.domInput('[name="templateName"]', '买全新 16GB 内存');
+  await d.domClick('[data-action="save-template"]');
+  state = await waitTemplates(templates => templates.some(t => t.task.skill?.id === 'new-product-shopping'));
+  const shopping = state.templates.find(t => t.task.skill?.id === 'new-product-shopping');
+  await d.domClick('[data-nav="templates"]');
+  await d.domClick(`[data-use-template="${shopping.id}"]`);
+  assert.equal(await d.evaluate('document.querySelector("#skill-param-budget").value'), '300 元以内，1 条');
+  assert.equal(await d.evaluate('document.querySelector("#skill-param-product").value'), '全新单条 16GB DDR4 3200 台式机内存');
+  console.log('PASS workflow discovery, required parameters, save/reopen, draft retention and captured task instructions');
+} finally {
+  await app.stop();
+}

@@ -18,6 +18,7 @@ function fixture(t, running = false) {
       calls.push(args);
       if (args[0] === 'devices') return 'REAL-PHONE device model:Real_Phone\nemulator-5556 device model:Other_Emulator' + (running ? '\nemulator-5554 device model:Test_Emulator' : '');
       if (args[2] === 'emu') return args[1] === 'emulator-5554' ? 'Test_AVD\nOK' : 'Other_AVD\nOK';
+      if (args[3] === "'getprop' 'ro.serialno'" && args[1] === 'REAL-PHONE') return 'REAL-PHONE';
       throw Error('Unexpected device operation: ' + args.join(' '));
     } }
   });
@@ -31,7 +32,7 @@ test('emulator connection starts the selected AVD and never prepares or controls
   assert.equal(connected.id, 'emulator-5554');
   assert.equal(connected.state, null);
   assert.equal(h.launched(), 1);
-  assert.ok(h.calls.every(args => args[0] === 'devices' || args[2] === 'emu'));
+  assert.ok(h.calls.every(args => args[0] === 'devices' || args[2] === 'emu' || args[3] === "'pm' 'path' 'io.github.profilepilot.phone'" || args[1] === 'REAL-PHONE' && args[3] === "'getprop' 'ro.serialno'"));
 });
 
 test('an already running matching AVD is reused and different running devices are ignored', async t => {

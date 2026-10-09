@@ -1,0 +1,34 @@
+* { box-sizing:border-box; }
+body { margin:0; font:14px/1.5 "Microsoft YaHei UI","PingFang SC",sans-serif; }
+button { font:inherit; cursor:pointer; }
+.settings-header { padding:20px 24px; border-bottom:1px solid var(--line); }
+.settings-header h1 { margin:0; font-size:30px; line-height:1.4; }
+.settings-header p { margin:5px 0 0; color:var(--muted); }
+.global-settings { max-width:960px; padding:28px 24px; }
+.global-settings h2 { margin:0 0 14px; font-size:18px; }
+.global-settings section + section { margin-top:32px; }
+.setting-card { padding:22px; border:1px solid var(--line); border-radius:8px; background:var(--panel); }
+.setting-row { display:flex; align-items:center; justify-content:space-between; gap:24px; }
+.setting-copy h3 { margin:0 0 6px; font-size:16px; }
+.setting-copy p { margin:0; color:var(--muted); }
+.setting-control { display:flex; align-items:center; gap:12px; flex-shrink:0; }
+#startup-status { color:var(--muted); min-width:4em; text-align:right; }
+#startup-status[data-state="enabled"] { color:var(--success); }
+#experimental-agent-status { color:var(--muted); min-width:4em; text-align:right; }
+#experimental-agent-status[data-state="enabled"] { color:var(--success); }
+#startup-status[data-state="approval"],#startup-status[data-state="error"] { color:var(--warn); }
+.setting-switch { position:relative; width:46px; height:26px; padding:0; border:1px solid var(--line-strong); border-radius:20px; background:var(--muted); }
+.setting-switch::after { content:""; position:absolute; width:18px; height:18px; left:3px; top:3px; border-radius:50%; background:#fff; transition:transform .15s; }
+.setting-switch[aria-checked="true"] { background:var(--accent); border-color:var(--accent); }
+.setting-switch[aria-checked="true"]::after { transform:translateX(20px); }
+.setting-switch:disabled { opacity:.5; }
+.setting-note { margin:16px 0 0; color:var(--warn); }
+.settings-refresh { margin-top:18px; padding:0; border:0; background:transparent; color:var(--accent); }
+.settings-refresh:disabled { color:var(--muted); }
+@media(max-width:560px) {
+  .settings-header { padding:18px; }
+  .global-settings { padding:22px 18px; }
+  .setting-card { padding:18px; }
+  .setting-row { align-items:flex-start; flex-direction:column; gap:18px; }
+}
+@media(prefers-reduced-motion:reduce) { .setting-switch::after { transition:none; } }

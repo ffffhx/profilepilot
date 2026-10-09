@@ -151,15 +151,15 @@
 .workspace-layout .sidebar .recent-task-row.active .recent-task { color:var(--ink); }
 .workspace-layout .recent-document { display:inline-flex; color:var(--ink); }
 .workspace-layout .recent-document .icon { width:15px; height:15px; }
-.workspace-layout .recent-title { font-size:13px; font-weight:500; }
-.workspace-layout .sidebar .recent-meta { display:none; }
+.workspace-layout #task-app .sidebar .recent-title { display:block; min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; font-size:13px; font-weight:500; }
+.workspace-layout #task-app .sidebar .recent-meta { display:none; }
 .workspace-layout .sidebar-task-group+.sidebar-task-group { border-top:1px solid var(--line); padding-top:18px; margin-top:20px; }
 .workspace-layout .sidebar .sidebar-tools { display:flex; flex-direction:column; border:0; padding-top:10px; gap:0; margin-top:auto; }
 .workspace-layout .sidebar .sidebar-tools .nav-item { display:flex; min-height:39px; padding:8px; font-size:13px; color:var(--ink); }
 .workspace-layout .sidebar-tools .nav-item .icon { width:17px;height:17px; }
 .workspace-layout .sidebar-more { color:var(--muted); padding:7px 8px; font-size:11px; }
 .workspace-layout .sidebar-more summary { cursor:pointer; }
-.workspace-layout .sidebar-footer { display:none; }
+.workspace-layout .sidebar-footer { display:flex; border-color:var(--line); }
 .workspace-layout .workspace { --task-gutter:16px; --task-reader-width:100%; --task-inspector-width:210px; --task-header-height:56px; --task-column-gap:0px; background:var(--panel); }
 .workspace-layout .workspace.is-home>.page-header { display:none; }
 .workspace-layout .workspace .page-header { min-height:60px; height:60px; padding:12px 20px; }
@@ -240,7 +240,10 @@
 @media(max-width:1150px) { .workspace-layout #task-app .app-frame{grid-template-columns:190px minmax(0,1fr)}.workspace-layout .workspace{--task-inspector-width:195px}.workspace-layout .thread-heading h2{font-size:18px}.workspace-layout .thread-heading>.pill{font-size:9px;padding:2px 5px}.agent-workspace-heading h1{font-size:30px} }
 @media(max-width:950px) { .workspace-layout #task-app .app-frame{grid-template-columns:160px minmax(0,1fr)}.workspace-layout .workspace{--task-inspector-width:175px}.workspace-layout .thread-heading{padding-right:10px}.workspace-layout .thread-inspector{margin-top:0}.workspace-layout .thread-main{padding-inline:10px}.workspace-layout .thread-inspector{padding-inline:8px}.workspace-layout .history-request,.workspace-layout .history-answer{padding-left:34px}.workspace-layout .history-request::before,.workspace-layout .history-answer::before{width:26px;height:26px}.workspace-layout .thread-heading h2{font-size:17px} }
 @media(max-width:760px) { .workspace-layout #task-app .app-frame{grid-template-columns:140px minmax(0,1fr)}.workspace-layout .task-detail{grid-template-columns:minmax(0,1fr)}.workspace-layout .thread-inspector{margin:0;position:static;border-top:1px solid var(--line);border-left:0}.workspace-layout .sidebar .recent-title,.workspace-layout .sidebar .nav-section-label,.workspace-layout .sidebar .nav-item>span{display:initial}.workspace-layout .sidebar .recent-task,.workspace-layout .sidebar .nav-item{justify-content:flex-start}.agent-workspace-heading{padding-inline:15px}.agent-workspace-heading>div>span{display:none} }
-.workspace-layout #task-app.sidebar-collapsed .app-frame { grid-template-columns:60px minmax(0,1fr); }
+.workspace-layout #task-app.sidebar-collapsed .app-frame { grid-template-columns:minmax(0,1fr); }
+.workspace-layout #task-app.sidebar-collapsed .app-frame>.sidebar { display:none; }
+.workspace-layout .agent-workspace-heading .sidebar-toggle { display:inline-flex; align-self:center; flex:none; }
+.workspace-layout .agent-workspace-heading .new-task>.icon { display:inline-block; }
 .workspace-layout .thread-heading { position:sticky; top:0; z-index:4; }
 .workspace-layout .sidebar .sidebar-tools { max-height:none; overflow:visible; flex:0 0 auto; }
 .workspace-layout .thread-inspector :is(.task-retention-note,.task-lifecycle-note) { display:none; }

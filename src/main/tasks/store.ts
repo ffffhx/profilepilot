@@ -7,6 +7,7 @@ import { taskModelText } from "../../shared/task-model";
 import { updateTokenRecords } from "../../shared/task-token-usage";
 import { legacyCostCorrection } from "./cost-accounting";
 import { interruptReceipts, preserveVerifiedReceipts } from "./conversation";
+import { captureTaskSkill, taskSkillCatalog, taskSkillSelectionSchema } from "./skills";
 
 export const now = (): string => new Date().toISOString();
 const text = z.string().trim().min(1).max(30000);
@@ -17,6 +18,7 @@ const nativeOriginSchema = z.string().trim().url().max(2000).transform(value => 
 });
 export const nativeAccessSchema = z.object({ allowedOrigins: z.array(nativeOriginSchema).max(200).optional(), blockedOrigins: z.array(nativeOriginSchema).max(200).optional(), confirmActions: z.boolean().optional() }).strict();
 export const createTaskSchema = z.object({
+  skill: taskSkillSelectionSchema.optional(),
   nativeTarget: z.object({ tabId: z.number().int().positive().optional(), newTab: z.boolean().optional() }).strict().refine(value => !(value.newTab && value.tabId !== undefined), "新标签页不能同时指定既有标签页编号。").optional(),
   nativeAccess: nativeAccessSchema.optional(),
   mode: z.enum(["manual", "plan", "acceptEdits"]).optional(), model: z.string().trim().min(1).max(200).optional(),
@@ -154,6 +156,7 @@ export class TaskStore {
     });
     const id = randomUUID();
     const task: BrowserTask = {
+      skill: parsed.skill ? captureTaskSkill(parsed.skill, this.root) : undefined,
       mode: parsed.mode || (parsed.profileId.startsWith("native:") ? "acceptEdits" : undefined), model: parsed.model,
       nativeTarget: parsed.nativeTarget, nativeAccess: parsed.profileId.startsWith("native:") ? structuredClone({ ...this.data.nativeAccessPolicies?.[parsed.profileId], ...parsed.nativeAccess }) : undefined,
       nativeUiRequests: nativeRequest ? [structuredClone(nativeRequest)] : undefined,
@@ -169,12 +172,12 @@ export class TaskStore {
     this.save();
     return task;
   }
-  event(task: BrowserTask, kind: TaskEvent["kind"], value: string): void {
+  event(task: BrowserTask, kind: TaskEvent["kind"], value: string, streamId?: string): void {
     if (kind === "system") value = taskModelText(task, value);
-    task.events.push({ id: randomUUID(), at: now(), kind, text: value.slice(0, 30000) });
+    task.events.push({ id: randomUUID(), at: now(), kind, text: value.slice(0, 30000), ...(streamId ? { streamId } : {}) });
     task.updatedAt = now();
   }
-  snapshot(): TaskSnapshot { return structuredClone(this.data); }
+  snapshot(): TaskSnapshot { const catalog = taskSkillCatalog(); return { ...structuredClone(this.data), skills: catalog.skills, skillIssues: catalog.issues }; }
 }
 
 export function scrubDiagnostics(data: TaskSnapshot): unknown {

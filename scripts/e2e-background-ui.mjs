@@ -21,6 +21,10 @@ async function main() {
     assert.ok((await driver.screenshot("main")).pngBase64.length > 1_000, "hidden window should still be capturable");
 
     const startupSwitch = '[data-action="toggle-startup"]';
+    assert.equal((await driver.query(startupSwitch)).exists, false);
+    assert.equal((await driver.query('[data-action="open-mini-window"]')).exists, false);
+    await driver.domClick('.workspace-settings');
+    await driver.waitFor('.global-settings');
     if (process.platform === "win32" || process.platform === "darwin") {
       await driver.waitFor(startupSwitch, snapshot => snapshot.attributes["aria-checked"] === "true");
       await driver.domClick(startupSwitch);
@@ -32,6 +36,8 @@ async function main() {
     } else {
       assert.equal((await driver.query(startupSwitch)).disabled, true);
     }
+    await driver.domClick('.workspace-link[data-workspace="browser"]');
+  await driver.waitFor('h1', snapshot => snapshot.text === 'PC 控制');
 
     await assert.rejects(
       driver.click('[data-action="new-profile"]'),

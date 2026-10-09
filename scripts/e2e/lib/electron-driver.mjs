@@ -266,10 +266,17 @@ export async function launchProfilePilotE2e(options = {}) {
     // shell is ready to open the first-run tour.
     await driver.waitFor('#workspace-guide[open], html[data-workspace-loading="false"]', snapshot => snapshot.exists, { target: "shell", timeoutMs: process.platform === "win32" ? 30_000 : 10_000 });
     if (!options.onboarding) {
+      await driver.evaluate(`for (const workspace of ['browser','phones','tools','agent','local-apps','settings']) localStorage.setItem('profilepilot:workspace-guide:v3:' + workspace, 'dismissed'); true`, { target: "shell" });
       await driver.evaluate(`document.querySelector('#workspace-guide[open] [data-guide-close]')?.click(); true`, { target: "shell" });
       await driver.waitFor('#workspace-guide', snapshot => !snapshot.exists, { target: "shell" });
     }
-    await driver.waitFor("h1", (snapshot) => snapshot.text === (options.env?.CPM_START_VIEW === "phones" ? "手机" : options.env?.CPM_START_VIEW === "tools" ? "配套工具" : options.env?.CPM_START_VIEW === "tasks" ? "Agent" : "浏览器"), {
+    // Existing workspace tests exercise all features. The default-off settings
+    // test opts out explicitly; production has no test flag or preference override.
+    if (options.experimentalAgent !== false) {
+      await driver.evaluate(`localStorage.setItem('profilepilot-experimental-agent', 'true'); window.dispatchEvent(new Event('profilepilot-experimental-features-changed')); true`, { target: "shell" });
+      if (["tasks", "agent"].includes(options.env?.CPM_START_VIEW)) await driver.evaluate(`window.workspaceHost.navigate('./tasks.html'); true`, { target: "shell" });
+    }
+    await driver.waitFor("h1", (snapshot) => snapshot.text === (options.env?.CPM_START_VIEW === "phones" ? "手机控制" : options.env?.CPM_START_VIEW === "tools" ? "配套工具" : options.env?.CPM_START_VIEW === "settings" ? "设置" : options.experimentalAgent !== false && ["tasks", "agent"].includes(options.env?.CPM_START_VIEW) ? "Agent" : "PC 控制"), {
       timeoutMs: process.platform === "win32" ? 30_000 : 10_000
     });
     await driver.evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))', { target: "shell" });

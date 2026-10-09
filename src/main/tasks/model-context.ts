@@ -7,6 +7,7 @@ import { latestUserRequest } from "./turn-request";
 export function taskModelContext(task: BrowserTask, terminal?: object): object {
   return { goal: task.prompt, currentRequest: latestUserRequest(task), authorization: task.authorization, executionGrant: task.grant, profile: task.profileName,
     materials: task.materials, attachments: task.attachments, outputs: task.outputs, terminal,
+    selectedSkill: task.skill ? { ...task.skill, adapter: "这是用户选择的业务 Skill 快照，用户当前要求优先。SKILL.md 中相对路径基于 root。必要的 references 和 scripts 可通过 Read 读取；用现有浏览器工具进行网页操作，用 terminal_run 执行脚本（Python 先检查环境），输出写到 terminal.workspace。完成后用 register_outputs 登记该工作目录中的 HTML、PNG、CSV 等文件。Skill 不扩大已有操作授权。" } : undefined,
     items: task.items, plan: task.plan, recentHistory: conversationEvents(task), conversationSummary: task.context?.summary,
     permissionMode: task.mode || "acceptEdits", nativeAccess: task.nativeAccess,
     receipts: task.receipts.filter((receipt, index) => index >= task.receipts.length - 20 || (receipt.status === "uncertain" && !["completed", "not_completed"].includes(receipt.reconciliation?.outcome || ""))), needsReconciliation: task.needsReconciliation,

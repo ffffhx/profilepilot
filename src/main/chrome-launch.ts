@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { readProfileAvatar } from "./profile-avatar";
 import { existsSync, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -615,18 +616,19 @@ export async function scanNativeChromeProfiles(): Promise<NativeChromeProfile[]>
 export async function scanChromeProfilesInDir(userDataDir: string): Promise<NativeChromeProfile[]> {
   const infoCache = (await readChromeLocalStateFrom(userDataDir)).profile?.info_cache || {};
 
-  return Object.entries(infoCache)
+  const profiles = await Promise.all(Object.entries(infoCache)
     // dirName 来自 Chrome 的 Local State，过滤掉含 ../ 或路径分隔符的恶意目录名。
     .filter(([dirName]) => isSafePathSegment(dirName))
-    .map(([dirName, profile]) => ({
+    .map(async ([dirName, profile]) => ({
+      avatarDataUrl: await readProfileAvatar(path.join(userDataDir, dirName), profile.gaia_picture_file_name || undefined),
       dirName,
       name: typeof profile.name === "string" && profile.name.trim() ? profile.name : dirName,
       userName: typeof profile.user_name === "string" && profile.user_name.trim() ? profile.user_name : null,
       path: path.join(userDataDir, dirName),
       userDataDir,
       isDefault: dirName === "Default"
-    }))
-    .sort((a, b) => {
+    })));
+  return profiles.sort((a, b) => {
       if (a.isDefault !== b.isDefault) {
         return a.isDefault ? -1 : 1;
       }

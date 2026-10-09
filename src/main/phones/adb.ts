@@ -4,10 +4,14 @@ import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import type { PhoneDevice } from "../../shared/phones";
+import { isPhoneRead } from "./actions";
 
 export const COMPANION_PACKAGE = "io.github.profilepilot.phone";
 export const COMPANION_PORT = 18761;
-export interface AdbRunner { run(args: string[], timeout?: number, input?: string, signal?: AbortSignal): Promise<string>; }
+export interface AdbRunner {
+  run(args: string[], timeout?: number, input?: string, signal?: AbortSignal): Promise<string>;
+  runBinary?(args: string[], timeout?: number, signal?: AbortSignal): Promise<Buffer>;
+}
 export function findAdb(env = process.env, platform = process.platform): string {
   if (env.PROFILEPILOT_ADB_PATH) return env.PROFILEPILOT_ADB_PATH;
   const executable = platform === "win32" ? "adb.exe" : "adb";
@@ -17,6 +21,14 @@ export function findAdb(env = process.env, platform = process.platform): string 
 }
 export class Adb implements AdbRunner {
   constructor(readonly executable = findAdb()) {}
+  runBinary(args: string[], timeout = 12000, signal?: AbortSignal): Promise<Buffer> {
+    return new Promise((resolve, reject) => {
+      execFile(this.executable, args, { windowsHide: true, timeout, signal, encoding: "buffer", maxBuffer: 24 * 1024 * 1024 }, (error, stdout, stderr) => {
+        if (error) reject(new Error(`手机画面获取失败：${error.code === "ENOENT" ? "未找到 Android Platform Tools" : stderr.toString("utf8").trim().slice(0, 300) || "连接中断或超时"}`));
+        else resolve(stdout);
+      });
+    });
+  }
   run(args: string[], timeout = 8000, input?: string, signal?: AbortSignal): Promise<string> {
     return new Promise((resolve, reject) => {
       const child = execFile(this.executable, args, { windowsHide: true, timeout, signal, encoding: "utf8", maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
@@ -54,7 +66,11 @@ export function phoneRequest(port: number, token: string, method: string, body: 
       response.on("error", reject);
       response.on("end", () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf8"))); } catch { reject(new Error("手机返回了无效响应。")); } });
     });
-    request.setTimeout(7000, () => request.destroy(new Error("手机未及时确认操作；请检查状态，不要直接重试输入。")));
+    const action = (body as { action?: { kind?: string } } | null)?.action;
+    const timeoutMessage = method === "action" && !isPhoneRead(action?.kind || "")
+      ? "手机没有返回这次操作的结果。请先查看手机，确认点击或输入是否已生效，再决定是否重试。"
+      : "手机 App 超过 7 秒没有回复。请解锁手机并打开 ProfilePilot，再检查连接是否恢复。";
+    request.setTimeout(7000, () => request.destroy(new Error(timeoutMessage)));
     request.on("error", reject); request.end(payload);
   });
 }

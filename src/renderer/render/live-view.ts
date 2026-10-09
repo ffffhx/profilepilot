@@ -4,14 +4,47 @@ import { LiveViewEntry, store } from "../state";
 import { CdpLiveTab, CdpLiveView, PublicProfile } from "../types";
 import { escapeHtml, formatErrorMessage, hostOf } from "../util";
 
-// 实时观测刷新节奏：和主轮询(3s)错开一点，只在用户主动打开观测弹窗后运行。
+// 只刷新可见工作区选中的 Profile，不抢浏览器焦点。
 const LIVE_VIEW_INTERVAL_MS = 2500;
 
 let liveViewTimer: number | null = null;
 
-// 只有“工具独立 + 正在运行 + 有 CDP 端口”的 Profile 才能被观测（系统 Profile 没有端口式 CDP）。
+// 系统 Profile 走已配对扩展，独立 Profile 走自身 CDP。
 export function liveViewEligible(profile: PublicProfile): boolean {
-  return profile.source === "isolated" && profile.running && profile.cdpPort != null;
+  return profile.source === "native"
+    ? Boolean(store.nativeExtensionBrowsers?.some(item => item.profileId === profile.id && item.connected))
+    : profile.running && profile.cdpPort != null;
+}
+
+export function renderBrowserPreview(profile: PublicProfile): string {
+  const entry = store.liveView[profile.id];
+  const data = entry?.data;
+  const eligible = liveViewEligible(profile);
+  const error = entry?.error || data?.error || data?.screenshotError;
+  const shot = eligible && !error ? data?.screenshot : null;
+  const hint = !eligible
+    ? profile.source === "native" ? "到配套工具连接扩展后查看画面" : !profile.running ? "启动浏览器后显示实时画面" : "以 CDP 启动后查看画面"
+    : error || (data && !data.tabCount ? "没有打开的标签页" : "正在获取画面…");
+  const updated = entry?.fetchedAt ? new Date(entry.fetchedAt).toLocaleTimeString("zh-CN", { hour12: false }) : "";
+  return `<div class="browser-preview-heading"><h3>实时画面</h3>${shot ? '<span>单击放大</span>' : ""}</div>
+    ${shot ? `<button type="button" class="browser-preview-screen" data-action="open-live-zoom" data-id="${escapeHtml(profile.id)}" aria-label="放大实时画面"><img src="${escapeHtml(shot)}" alt="${escapeHtml(data?.primaryTitle || "浏览器当前页面")}" /></button>` : `<div class="browser-preview-empty" role="status">${escapeHtml(hint)}</div>`}
+    <p class="browser-preview-caption">${shot ? `${escapeHtml(data?.primaryTitle || "当前页面")}<small>更新于 ${escapeHtml(updated)} · 每 2.5 秒刷新</small>` : ""}</p>`;
+}
+
+export function refreshSelectedBrowserPreview(): void {
+  // Keep image frames out of render-root's HTML comparison. Incoming frames
+  // should update this section without rebuilding the Profile list or menus.
+  const selected = store.state?.profiles.find(profile => profile.id === store.selectedId);
+  if (selected && store.workspace === "browser" && !store.selectedExternalDir) updateLiveViewDom(selected.id);
+  const profile = currentLiveProfile();
+  if (!profile || !canRefreshLiveView()) return;
+  const entry = store.liveView[profile.id];
+  if (!entry?.loading && (!entry || Date.now() - entry.fetchedAt >= LIVE_VIEW_INTERVAL_MS)) void fetchLiveView(profile);
+}
+
+function canRefreshLiveView(): boolean {
+  return store.viewMode === "main" && !store.busy && !workspaceHidden() &&
+    (!store.modal || store.modal.kind === "profile-details" || store.modal.kind === "live-zoom");
 }
 
 // 详情弹窗里的实时观测区块。外层带 data-live-view=profileId，轮询时只换内部 body，
@@ -23,24 +56,13 @@ export function renderLiveViewSection(profile: PublicProfile): string {
   return `<section class="live-view" data-live-view="${escapeHtml(profile.id)}">${renderLiveViewBody(profile)}</section>`;
 }
 
-// 启动独立的观测循环（仅主窗口）。只有 Profile 详情弹窗或其画面放大层打开时才抓帧。
+// 右侧预览和放大层共用一个循环，仅可见时抓帧。
 export function startLiveViewLoop(): void {
   if (liveViewTimer !== null) {
     return;
   }
   liveViewTimer = window.setInterval(() => {
-    if (
-      store.viewMode !== "main" ||
-      store.busy ||
-      workspaceHidden() ||
-      (store.modal?.kind !== "profile-details" && store.modal?.kind !== "live-zoom")
-    ) {
-      return;
-    }
-    const profile = currentLiveProfile();
-    if (profile) {
-      void fetchLiveView(profile);
-    }
+    refreshSelectedBrowserPreview();
   }, LIVE_VIEW_INTERVAL_MS);
 }
 
@@ -97,7 +119,7 @@ function activeLiveProfileId(): string | null {
   if (store.modal?.kind === "profile-details" || store.modal?.kind === "live-zoom") {
     return store.modal.profileId;
   }
-  return null;
+  return store.workspace === "browser" && !store.selectedExternalDir ? store.selectedId : null;
 }
 
 function ensureEntry(profileId: string): LiveViewEntry {
@@ -112,7 +134,7 @@ function ensureEntry(profileId: string): LiveViewEntry {
 
 async function fetchLiveView(profile: PublicProfile): Promise<void> {
   const port = profile.cdpPort;
-  if (port == null) {
+  if (profile.source !== "native" && port == null) {
     return;
   }
 
@@ -125,8 +147,8 @@ async function fetchLiveView(profile: PublicProfile): Promise<void> {
 
   try {
     const targetId = store.liveActiveTab[profile.id] || profile.gatewayControl?.agentTarget?.targetId;
-    const data = await profileApi().getCdpLiveView(port, {
-      screenshot: store.liveViewShowScreenshot,
+    const data = profile.source === "native" ? await window.tasks.getNativeLiveView(profile.id) : await profileApi().getCdpLiveView(port!, {
+      screenshot: store.modal?.kind === "profile-details" ? store.liveViewShowScreenshot : true,
       targetId
     });
     store.liveView[profile.id] = { data, loading: false, error: data.error, fetchedAt: Date.now() };
@@ -150,6 +172,12 @@ function updateLiveViewDom(profileId: string): void {
   }
   if (container) {
     container.innerHTML = renderLiveViewBody(profile);
+  }
+  const preview = document.querySelector<HTMLElement>(`[data-browser-preview="${CSS.escape(profileId)}"]`);
+  if (preview) {
+    const focused = document.activeElement === preview.querySelector('.browser-preview-screen');
+    preview.innerHTML = renderBrowserPreview(profile);
+    if (focused) preview.querySelector<HTMLButtonElement>('.browser-preview-screen')?.focus({ preventScroll: true });
   }
   updateLiveZoomDom(profileId);
 }
@@ -188,7 +216,7 @@ function renderLiveViewBody(profile: PublicProfile): string {
 function renderLiveHead(loading: boolean, showShot: boolean): string {
   return `
     <div class="live-view-head">
-      <span class="live-view-kicker"><span class="live-pulse ${loading ? "loading" : ""}" aria-hidden="true"></span>Cockpit · 实时画面</span>
+      <span class="live-view-kicker"><span class="live-pulse ${loading ? "loading" : ""}" aria-hidden="true"></span>浏览器预览</span>
       <div class="live-view-actions">
         <button type="button" class="live-view-toggle ${showShot ? "on" : ""}" data-action="toggle-live-screenshot" title="${showShot ? "关闭画面截图（更省资源）" : "开启画面截图"}">画面</button>
         <button type="button" class="live-view-refresh ${loading ? "loading" : ""}" data-action="refresh-live-view" title="立即刷新这一帧">刷新</button>
@@ -208,7 +236,7 @@ function renderLiveScreen(profileId: string, data: CdpLiveView, showShot: boolea
   if (data.screenshot) {
     return `
       <div class="live-view-stage">
-        <div class="live-screen zoomable" data-live-zoom-profile-id="${escapeHtml(profileId)}" role="button" tabindex="0" aria-label="放大实时画面" title="双击放大实时画面">
+        <div class="live-screen zoomable" data-action="open-live-zoom" data-id="${escapeHtml(profileId)}" data-live-zoom-profile-id="${escapeHtml(profileId)}" role="button" tabindex="0" aria-label="放大实时画面" title="单击放大实时画面">
           <img class="live-screen-img" src="${escapeHtml(data.screenshot)}" alt="当前页面画面" />
           ${flag}
         </div>
@@ -247,12 +275,15 @@ function updateLiveZoomDom(profileId: string): void {
   }
   const container = document.querySelector<HTMLElement>(`[data-live-zoom-modal="${CSS.escape(profileId)}"]`);
   if (container) {
+    const closeFocused = document.activeElement === container.querySelector('[data-action="close-modal"]');
     container.innerHTML = renderLiveZoomContent(profileId);
+    if (closeFocused) container.querySelector<HTMLButtonElement>('[data-action="close-modal"]')?.focus({ preventScroll: true });
   }
 }
 
 function renderLiveZoomContent(profileId: string): string {
-  const data = store.liveView[profileId]?.data || null;
+  const entry = store.liveView[profileId];
+  const data = entry?.data || null;
   const profile = store.state?.profiles.find((item) => item.id === profileId);
   const title = data?.primaryTitle || profile?.name || "实时画面";
   const host = data?.primaryUrl ? hostOf(data.primaryUrl) : "";
@@ -260,24 +291,24 @@ function renderLiveZoomContent(profileId: string): string {
   const port = data?.port ? `<span>127.0.0.1:${escapeHtml(String(data.port))}</span>` : "";
   const tabCount = data?.tabCount !== undefined ? `<span>${escapeHtml(String(data.tabCount))} 标签</span>` : "";
 
-  if (!data?.screenshot) {
+  if (!data?.screenshot || entry?.error || data.error || data.screenshotError || !profile || !liveViewEligible(profile)) {
     return `
       <div class="live-zoom-head">
         <div class="live-zoom-title">
-          <span>COCKPIT</span>
-          <h2 id="live-zoom-title">${escapeHtml(title)}</h2>
+          <span>浏览器预览</span>
+          <h2 id="live-zoom-title" title="${escapeHtml(title)}">${escapeHtml(title)}</h2>
         </div>
         <button type="button" data-action="close-modal">关闭</button>
       </div>
-      <div class="live-zoom-empty">当前没有可放大的画面</div>
+      <div class="live-zoom-empty">${escapeHtml(entry?.error || data?.error || data?.screenshotError || "当前没有可放大的画面")}</div>
     `;
   }
 
   return `
     <div class="live-zoom-head">
       <div class="live-zoom-title">
-        <span>COCKPIT</span>
-        <h2 id="live-zoom-title">${escapeHtml(title)}</h2>
+        <span>浏览器预览</span>
+        <h2 id="live-zoom-title" title="${escapeHtml(title)}">${escapeHtml(title)}</h2>
       </div>
       <button type="button" data-action="close-modal">关闭</button>
     </div>

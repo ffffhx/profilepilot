@@ -21,7 +21,9 @@ export interface LocalAppConfig extends LocalAppInput {
 }
 
 export interface LocalAppRuntime {
-  status: "starting" | "running" | "stopping" | "stopped" | "failed";
+  status: "starting" | "running" | "stopping" | "stopped" | "failed" | "unknown";
+  statusDetail?: string;
+  serviceReady?: boolean;
   pid: number | null;
   startedAt: string | null;
   exitCode: number | null;
@@ -36,6 +38,9 @@ export interface LocalDebugTarget {
 }
 
 export interface LocalAppView extends LocalAppConfig {
+  iconUrl?: string;
+  managed: boolean;
+  controls: { start: boolean; stop: boolean; restart: boolean };
   runtime: LocalAppRuntime;
   debug: { renderer: boolean; main: boolean; targets: LocalDebugTarget[] };
   agent?: LocalAppAgentState;
@@ -45,16 +50,31 @@ export interface LocalAppAgentState {
   connected: boolean;
   sessionId?: string;
   ownership?: "agent" | "user";
+  name?: string;
+  project?: string;
+  connectionActive?: boolean;
+  targetTitle?: string;
+  targetId?: string;
+  error?: string;
+}
+
+export interface LocalAppPreview {
+  screenshot: string | null;
+  title: string;
+  capturedAt: string;
   error?: string;
 }
 
 export interface LocalAppsApi {
-  list(): Promise<LocalAppView[]>;
+  list(options?: { cached?: boolean }): Promise<LocalAppView[]>;
   save(input: LocalAppInput): Promise<string>;
   remove(id: string): Promise<void>;
   start(id: string): Promise<void>;
   stop(id: string): Promise<void>;
   restart(id: string): Promise<void>;
+  connect(id: string): Promise<void>;
+  preview(id: string): Promise<LocalAppPreview>;
+  showWindow(id: string): Promise<void>;
   logs(id: string): Promise<string>;
   pickDirectory(): Promise<string | null>;
   openDirectory(id: string): Promise<void>;

@@ -3,7 +3,7 @@ import { IPC_CHANNELS } from "./shared/ipc";
 import { LOCAL_APPS_CHANNEL, type LocalAppsApi } from "./shared/local-apps";
 import { PHONE_CHANNEL, PHONE_CHANGED, type PhonesApi, type PhonesSnapshot } from "./shared/phones";
 import { MOBILE_CHANNEL, MOBILE_CHANGED, type MobileApi, type MobileSnapshot } from "./shared/mobile";
-import { TASK_CHANNEL, TASK_CHANGED, TASK_PREVIEW, type TaskApi, type TaskSnapshot, type TaskPreviewUpdate } from "./shared/tasks";
+import { TASK_CHANNEL, TASK_CHANGED, TASK_STREAM, TASK_PREVIEW, type TaskApi, type TaskSnapshot, type TaskPreviewUpdate, type TaskStreamUpdate } from "./shared/tasks";
 import type {
   AccountSyncDiffResult,
   AccountSyncRequest,
@@ -51,8 +51,8 @@ contextBridge.exposeInMainWorld("desktopWindow", {
     ipcRenderer.on(IPC_CHANNELS.navigateWorkspace, handler);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.navigateWorkspace, handler);
   },
-  setAppearance: (background: string, symbols: string) => {
-    ipcRenderer.send(IPC_CHANNELS.setWindowAppearance, background, symbols);
+  setAppearance: (background: string, symbols: string, guideActive = false) => {
+    ipcRenderer.send(IPC_CHANNELS.setWindowAppearance, background, symbols, guideActive);
   }
 });
 
@@ -253,6 +253,7 @@ contextBridge.exposeInMainWorld("profileManager", profileManagerApi);
 const taskApi: TaskApi = {
   openLink: url => ipcRenderer.invoke(TASK_CHANNEL, "openLink", url),
   pairNativeBrowser: id => ipcRenderer.invoke(TASK_CHANNEL, "pairNativeBrowser", id),
+  getNativeLiveView: id => ipcRenderer.invoke(TASK_CHANNEL, "getNativeLiveView", id),
   authorizeNativeBrowser: id => ipcRenderer.invoke(TASK_CHANNEL, "authorizeNativeBrowser", id),
   disconnectNativeBrowser: id => ipcRenderer.invoke(TASK_CHANNEL, "disconnectNativeBrowser", id),
   openNativeExtensionFolder: () => ipcRenderer.invoke(TASK_CHANNEL, "openNativeExtensionFolder"),
@@ -294,16 +295,23 @@ const taskApi: TaskApi = {
   onChanged: (listener) => {
     const handler = (_event: IpcRendererEvent, snapshot: TaskSnapshot): void => listener(snapshot);
     ipcRenderer.on(TASK_CHANGED, handler); return () => ipcRenderer.removeListener(TASK_CHANGED, handler);
+  },
+  onStream: listener => {
+    const handler = (_event: IpcRendererEvent, update: TaskStreamUpdate) => listener(update);
+    ipcRenderer.on(TASK_STREAM, handler); return () => ipcRenderer.removeListener(TASK_STREAM, handler);
   }
 };
 contextBridge.exposeInMainWorld("tasks", taskApi);
 const localAppsApi: LocalAppsApi = {
-  list: () => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "list"),
+  list: options => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "list", options),
   save: input => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "save", input),
   remove: id => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "remove", id),
   start: id => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "start", id),
   stop: id => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "stop", id),
   restart: id => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "restart", id),
+  connect: id => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "connect", id),
+  preview: id => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "preview", id),
+  showWindow: id => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "showWindow", id),
   logs: id => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "logs", id),
   pickDirectory: () => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "pickDirectory"),
   openDirectory: id => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "openDirectory", id),
@@ -312,6 +320,9 @@ const localAppsApi: LocalAppsApi = {
 };
 contextBridge.exposeInMainWorld("localApps", localAppsApi);
 const phonesApi: PhonesApi = {
+  basicStart: (id, mode, controller, task) => ipcRenderer.invoke(PHONE_CHANNEL, "basic-start", { id, mode, controller, task }),
+  basicControl: (id, command) => ipcRenderer.invoke(PHONE_CHANNEL, `basic-${command}`, { id }),
+  basicPerform: input => ipcRenderer.invoke(PHONE_CHANNEL, "basic-action", input),
   snapshot: () => ipcRenderer.invoke(PHONE_CHANNEL, "snapshot"),
   cloudPair: url => ipcRenderer.invoke(PHONE_CHANNEL, "cloud-pair", { url }),
   cloudForget: id => ipcRenderer.invoke(PHONE_CHANNEL, "cloud-forget", { id }),
@@ -322,6 +333,7 @@ const phonesApi: PhonesApi = {
   connectWireless: address => ipcRenderer.invoke(PHONE_CHANNEL, "wireless-connect", { address }),
   autoConnectWireless: id => ipcRenderer.invoke(PHONE_CHANNEL, "wireless-connect", { id }),
   prepare: id => ipcRenderer.invoke(PHONE_CHANNEL, "connect", { id }),
+  inspect: id => ipcRenderer.invoke(PHONE_CHANNEL, "inspect", { id }),
   preview: id => ipcRenderer.invoke(PHONE_CHANNEL, "preview", { id }),
   openSettings: (id, setting) => ipcRenderer.invoke(PHONE_CHANNEL, "settings", { id, setting }),
   rename: (id, name) => ipcRenderer.invoke(PHONE_CHANNEL, "rename", { id, name }),

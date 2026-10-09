@@ -253,6 +253,16 @@ async function evaluateExpression(windowRef: BrowserWindow, expression: string |
   return frame.executeJavaScript(requireExpression({ expression }), true);
 }
 
+async function rendererOffset(windowRef: BrowserWindow, selector: string): Promise<{ x: number; y: number }> {
+  const frame = await rendererFrame(windowRef, selector);
+  if (frame === windowRef.webContents.mainFrame) return { x: 0, y: 0 };
+  return await windowRef.webContents.mainFrame.executeJavaScript(`(() => {
+    const frame = [...document.querySelectorAll('iframe')].find(node => node.name === ${JSON.stringify(frame.name)});
+    const rect = frame?.getBoundingClientRect();
+    return { x: rect?.left || 0, y: rect?.top || 0 };
+  })()`) as { x: number; y: number };
+}
+
 async function domClickElement(windowRef: BrowserWindow, selector: string, index: number): Promise<ElementSnapshot> {
   await (await rendererFrame(windowRef, selector)).executeJavaScript(
     `(() => {
@@ -386,8 +396,9 @@ async function clickElement(windowRef: BrowserWindow, selector: string, index: n
   if (!snapshot.exists || !snapshot.rect || snapshot.rect.width <= 0 || snapshot.rect.height <= 0) {
     throw new Error(`Element is not clickable: ${selector}[${index}]`);
   }
-  const x = Math.round(snapshot.rect.x + snapshot.rect.width / 2);
-  const y = Math.round(snapshot.rect.y + snapshot.rect.height / 2);
+  const offset = await rendererOffset(windowRef, selector);
+  const x = Math.round(offset.x + snapshot.rect.x + snapshot.rect.width / 2);
+  const y = Math.round(offset.y + snapshot.rect.y + snapshot.rect.height / 2);
   await sendMouse(windowRef, "mouseMove", x, y);
   await shortDelay();
   await sendMouse(windowRef, "mouseDown", x, y);
@@ -459,8 +470,11 @@ async function dragElement(
   windowRef.webContents.focus();
   const snapshot = await queryElement(windowRef, selector, index);
   if (!snapshot.exists || !snapshot.rect) throw new Error(`Element is not draggable: ${selector}[${index}]`);
-  const fromX = Math.round(snapshot.rect.x + snapshot.rect.width / 2);
-  const fromY = Math.round(snapshot.rect.y + snapshot.rect.height / 2);
+  const offset = await rendererOffset(windowRef, selector);
+  const fromX = Math.round(offset.x + snapshot.rect.x + snapshot.rect.width / 2);
+  const fromY = Math.round(offset.y + snapshot.rect.y + snapshot.rect.height / 2);
+  toX += offset.x;
+  toY += offset.y;
   await sendMouse(windowRef, "mouseMove", fromX, fromY);
   await sendMouse(windowRef, "mouseDown", fromX, fromY);
   for (let step = 1; step <= 6; step += 1) {

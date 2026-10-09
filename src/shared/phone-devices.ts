@@ -3,6 +3,7 @@ import { phoneActive, type PhoneDevice } from "./phones";
 export interface PhoneDeviceGroup { device: PhoneDevice; routes: PhoneDevice[]; }
 
 function priority(device: PhoneDevice): number {
+  if (device.basic && device.basic.phase !== "stopped") return 4;
   if (device.connection !== "device") return device.connection === "unauthorized" ? 1 : 0;
   if (device.companion !== "ready") return 2;
   return 3;

@@ -1,0 +1,94 @@
+import assert from 'node:assert/strict';
+import {spawn} from 'node:child_process';
+import {createRequire} from 'node:module';
+import {mkdtemp,mkdir,rm,writeFile} from 'node:fs/promises';
+import net from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
+import {ElectronDriver,delay,repoRoot} from './e2e/lib/electron-driver.mjs';
+const require = createRequire(import.meta.url);
+const fixture = await mkdtemp(path.join(os.tmpdir(),'pp-chat-ui-'));
+const socket = process.platform === 'win32' ? `\\\\.\\pipe\\pp-chat-ui-${process.pid}` : path.join(fixture,'driver.sock');
+const output = path.join(repoRoot,'artifacts/task-chat'); await mkdir(output,{recursive:true});
+const child = spawn(require('electron'),[path.join(repoRoot,'scripts/e2e/fixtures/task-chat-main.cjs')],{cwd:repoRoot,windowsHide:true,env:{...process.env,TASK_CHAT_FIXTURE:fixture,TASK_CHAT_SOCKET:socket},stdio:['ignore','pipe','pipe']});
+let logs='',d;
+child.stdout.on('data',chunk=>logs+=chunk); child.stderr.on('data',chunk=>logs+=chunk);
+try {
+  for (let tries=0; tries<200; tries++) {
+    if (child.exitCode !== null) throw new Error(logs);
+    try { const connection=await new Promise((resolve,reject)=>{const client=net.createConnection(socket);client.once('connect',()=>resolve(client));client.once('error',error=>{client.destroy();reject(error);});});d=new ElectronDriver(connection);break; } catch {await delay(50);}
+  }
+  assert.ok(d,logs);
+  const paint = () => d.evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');
+  const command = (action,value) => d.evaluate(`window.chatFixture(${JSON.stringify(action)},${JSON.stringify(value)})`);
+  const state = () => command('state');
+  const input = async text => {await d.evaluate(`(()=>{const n=document.querySelector('#steering');n.focus({preventScroll:true});Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(n,${JSON.stringify(text)});n.dispatchEvent(new Event('input',{bubbles:true}));})()`);await paint();};
+  await d.waitFor('#steering');
+  assert.equal(await d.evaluate('getComputedStyle(document.querySelector("#steering")).resize'),'none');
+  assert.equal((await d.query('[data-action=attach-message] svg')).exists,true,'attachment control has a visible icon');
+  await d.waitFor('#task-prompt .task-markdown',value=>value.text.includes('保留代码'));
+  const ids = await state();
+  await d.evaluate('window.oldMessage=document.querySelector(".history-answer");window.oldInput=document.querySelector("#steering");document.querySelector(".task-process-group").open=true');
+  const text = '## 分析结果\n\n中文**重点**与 English 混排。\n\n| 项目 | 状态 |\n| --- | --- |\n| 输入 | 正常 |\n\n```javascript\nconst value = "中文";\nconsole.log(value);\n```\n\n[来源](https://example.com/report)';
+  for (const prefix of [text.slice(0,14),text.slice(0,70),text.slice(0,115),text]) {await command('stream',prefix);await paint();}
+  await d.waitFor('#task-stream table'); await d.waitFor('#task-stream pre');
+  await d.waitFor('#task-stream code span[style]');
+  await writeFile(path.join(output,'markdown-streaming.png'),Buffer.from((await d.screenshot()).pngBase64,'base64'));
+  assert.equal(await d.evaluate('oldMessage===document.querySelector(".history-answer") && oldInput===document.querySelector("#steering")'),true,'historical messages and composer keep their nodes');
+  assert.equal(await d.evaluate('document.querySelector(".task-process-group").open'),true);
+  await input('继续补充中文');
+  await d.dispatch('#steering','compositionstart');
+  await command('stream',text+'\n\n输入中文时仍然更新。'); await paint();
+  await d.waitFor('#task-stream',value=>value.text.includes('输入中文时仍然更新'));
+  await d.dispatch('#steering','keydown',{key:'Enter',keyCode:229,isComposing:true});
+  assert.equal((await state()).calls.length,0,'IME confirmation cannot send a message');
+  assert.equal((await d.query('#steering')).value,'继续补充中文');
+  await d.evaluate('window.streamNode=document.querySelector("#task-stream")');
+  await command('finish');await paint();
+  assert.equal(await d.evaluate('streamNode===document.querySelector("[data-chat-message-id=stream-live-response]")'),true,'final message retains the streamed message node, even during IME');
+  assert.equal((await d.query('[data-chat-message-id=stream-live-response]')).count,1);
+  await d.dispatch('#steering','compositionend');await paint();
+  assert.equal((await d.query('#steer-task.task-composer-compact')).exists,true);
+  await d.evaluate('document.querySelector("[data-chat-message-id=stream-live-response] pre").scrollIntoView({block:"center"})');await paint();
+  await writeFile(path.join(output,'code-and-composer.png'),Buffer.from((await d.screenshot()).pngBase64,'base64'));
+  assert.equal((await d.query('#steering')).value,'继续补充中文');
+  await command('fail');await d.dispatch('#steering','keydown',{key:'Enter'});
+  await d.waitFor('.chat-composer [role=alert]',value=>value.text.includes('测试网络中断'));
+  assert.equal((await d.query('#steering')).value,'继续补充中文','failed send retains draft');
+  const request = (await state()).calls.at(-1).args[3].requestId;
+  await command('hold');await d.domClick('.chat-composer [role=alert] button');await paint();
+  await d.dispatch('#steering','keydown',{key:'Enter'});
+  await input('发送期间的新草稿');await command('release');
+  await d.waitFor('.chat-composer .send-task',value=>!value.disabled);
+  let calls = (await state()).calls;
+  assert.equal(calls.length,2,'Enter while pending does not double send');
+  assert.equal(calls[1].args[3].requestId,request,'retry uses same idempotency key');
+  assert.equal(calls[1].args[1],'resume');
+  assert.equal((await d.query('#steering')).value,'发送期间的新草稿','acknowledgement preserves newer text');
+  await d.domClick(`[data-task="${ids.otherId}"]`);await d.waitFor('#steer-task',value=>value.attributes['data-task-id']===ids.otherId);
+  await input('另一任务的独立草稿');
+  await d.domClick(`[data-task="${ids.taskId}"]`);await d.waitFor('#steering',value=>value.value==='发送期间的新草稿');
+  await command('pending');await d.waitFor('#reply-task');
+  await input('等待确认时补充');await d.dispatch('#steering','keydown',{key:'Enter'});
+  await d.waitFor('#steering',value=>value.value==='');
+  calls = (await state()).calls;
+  assert.equal(calls.at(-1).args[1],'queue'); assert.equal(calls.filter(c=>c.method==='reply').length,0,'chat submission never authorizes pending actions');
+  await command('continue');
+  await command('stream','[危险链接](javascript:alert(1))\n\n![远程图片](https://example.com/tracker.png)\n\n<script>window.unsafeChat=true</script>');await paint();
+  assert.equal(await d.evaluate('Boolean(window.unsafeChat)||!!document.querySelector("#task-stream script,#task-stream img,#task-stream a[href^=javascript]")'),false,'model output cannot execute HTML or load tracking images');
+  await command('stream',Array.from({length:80},(_,i)=>`段落 ${i}：用于检查长回复与滚动。`).join('\n\n'));await paint();
+  await d.evaluate('document.querySelector(".workspace").scrollTop=0');await paint();
+  await command('stream',Array.from({length:100},(_,i)=>`段落 ${i}：用于检查长回复与滚动。`).join('\n\n'));await paint();
+  assert.ok(await d.evaluate('document.querySelector(".workspace").scrollTop<5'),'reading older messages does not jump to latest');
+  await d.domClick('.task-jump-latest');await paint();
+  await command('stream',Array.from({length:120},(_,i)=>`段落 ${i}：用于检查长回复与滚动。`).join('\n\n'));await paint();
+  assert.ok(await d.evaluate('(()=>{const w=document.querySelector(".workspace");return w.scrollHeight-w.scrollTop-w.clientHeight<80;})()'),'bottom follows growing output');
+  await d.domClick('[data-chat-message-id=stream-live-response] a[data-task-link]');
+  assert.equal((await state()).calls.at(-1).method,'openLink');
+  for (const [width,height] of [[1440,1000],[1000,720]]) {await d.request('resize',{width,height});await paint();assert.equal(await d.evaluate('document.documentElement.scrollWidth>innerWidth'),false);}
+  await d.request('resize',{width:1440,height:1000});await paint();
+  await writeFile(path.join(output,'streamdown-conversation.png'),Buffer.from((await d.screenshot()).pngBase64,'base64'));
+  assert.deepEqual((await state()).errors,[],'renderer has no runtime errors');
+  console.log('PASS Streamdown Markdown/CJK, stable message DOM, streaming during IME, drafts, retry/double-send, task switching, approvals, scroll and responsive layout');
+} catch(error) { console.error(logs); if(d) console.error(await d.evaluate('window.chatFixture("state").then(fixture=>({text:document.body.innerText.slice(0,2500),fixture}))').catch(()=>null)); throw error; }
+finally {if(d){await d.request('quit').catch(()=>{});d.close();}if(child.exitCode===null)child.kill();await delay(300);await rm(fixture,{recursive:true,force:true,maxRetries:5,retryDelay:100});}

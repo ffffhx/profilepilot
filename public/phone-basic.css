@@ -1,0 +1,86 @@
+.phone-control-section { margin-top:18px; padding:22px; border:1px solid #dce5f1; border-radius:12px; background:#fff; }
+.phone-connection-section { padding:22px; }
+.phone-section-heading { display:flex; justify-content:space-between; align-items:center; gap:16px; margin-bottom:18px; }
+.phone-section-heading h2 { font-size:18px; line-height:1.4; }
+.phone-section-heading p { margin-top:5px; font-size:12px; color:#71829b; }
+.phone-connection-section .phone-route { display:flex; flex-direction:row; align-items:center; gap:14px; padding:16px; background:#fafcff; }
+.phone-route-icon { flex:none; display:grid; place-items:center; width:38px; height:38px; border-radius:10px; background:#edf3fc; color:#3565a4; }
+.phone-route-icon .icon { width:23px; height:23px; }
+.phone-route-copy { flex:1; min-width:0; }
+.phone-route-copy header { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.phone-route-copy h3 { font-size:16px; }
+.phone-route-copy .phone-route-note { margin:7px 0 0; font-size:11px; overflow-wrap:anywhere; }
+.phone-connection-section .phone-route>button { flex:none; }
+.phone-connection-section .phone-empty { margin:12px 0 0; max-width:none; padding:0; text-align:left; }
+.phone-connection-section .phone-emulator-connection { display:flex; align-items:center; gap:18px; margin:0; }
+.phone-connection-section .phone-emulator-connection button { margin:0; }
+.phone-basic-section { display:flex; align-items:center; gap:16px; background:#f7faff; border-color:#d9e5fa; }
+.phone-basic-icon { width:46px; height:50px; flex:none; border-radius:11px; background:#e5eeff; color:#245df2; display:grid; place-items:center; }
+.phone-basic-icon .icon { width:24px; height:28px; }
+.phone-basic-copy { flex:1; min-width:0; }
+.phone-basic-section>.primary { flex:none; min-height:40px; padding-inline:20px; }
+.phone-basic-section .phone-mode-description { margin:8px 0 0; }
+.phone-basic-section .phone-mode-hint { margin-top:5px; }
+.phone-mode-heading { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.phone-mode-heading h3 { margin:0; font-size:18px; line-height:1.4; color:#183156; }
+.phone-mode-heading>span { font-size:11px; line-height:1.5; padding:3px 8px; color:#597294; border:1px solid #dce5f1; background:#fff; border-radius:20px; }
+.phone-mode-description,.phone-basic-session p { font-size:12px; line-height:1.8; color:#64748b; margin:10px 0 16px; }
+.phone-mode-actions { display:flex; gap:8px; flex-wrap:wrap; }
+.phone-mode-hint { font-size:12px; line-height:1.7; color:#64748b; margin:10px 0 0; }
+.phone-basic-connect { margin-top:12px; }
+.phone-enhancement-body { display:grid; grid-template-columns:minmax(0,1fr) 178px; align-items:start; gap:24px; margin-top:18px; }
+.phone-enhancement-info { min-width:0; }
+.phone-enhancement-info>strong { font-size:14px; color:#183156; }
+.phone-enhancement-info .phone-mode-description { margin-top:8px; }
+.phone-app-status-panel { padding:16px; border:1px solid #e3eaf3; border-radius:10px; }
+.phone-app-status-panel>header { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.phone-app-status-panel>header strong { font-size:14px; }
+.phone-app-status-panel>header button { margin-left:auto; }
+.phone-app-status-panel>.phone-mode-hint { margin:6px 0 12px; font-size:11px; }
+.phone-app-status-panel .phone-permissions { border:0; border-top:1px solid #e7ecf3; border-radius:0; padding:0; }
+.phone-app-status-panel .phone-setting { min-height:43px; }
+.phone-app-status-panel .phone-setting-info>div { gap:12px; }
+.phone-app-status-panel .phone-setting-name { min-width:84px; }
+.phone-install-actions { margin-top:16px; }
+.phone-debug-settings { margin-top:16px; }
+.phone-direct-install { display:flex; align-items:center; flex-wrap:wrap; gap:10px 14px; border-top:1px solid #e7ecf3; margin-top:18px; padding-top:16px; }
+.phone-direct-install .phone-mode-hint { flex:1; min-width:170px; margin:0; }
+.phone-download-qr { width:178px; max-width:100%; margin:0; padding:12px; border:1px solid #e7ecf3; border-radius:10px; background:#fff; text-align:center; }
+.phone-download-qr img { display:block; width:144px; height:144px; max-width:100%; margin:auto; }
+.phone-download-qr figcaption { font-size:12px; font-weight:600; line-height:1.6; color:#183156; padding:4px 0; }
+.phone-download-qr small { display:block; font-size:10px; font-weight:400; color:#64748b; margin-top:4px; }
+.phone-download-qr button { margin-top:8px; width:100%; }
+.phone-basic-session h2 { margin-bottom:10px; }
+.phone-enhanced-section .phone-app-setup { margin-top:18px; border-top:1px solid #e7ecf3; }
+.phone-app-setup>summary { cursor:pointer; color:#64748b; font-size:12px; padding:10px 0; }
+dialog.phone-basic-dialog { width:min(1000px,calc(100vw - 40px)); max-width:1000px; max-height:calc(100dvh - 40px); padding:22px; border:1px solid #dce5f1; border-radius:16px; color:#183156; background:white; overflow:auto; }
+.phone-basic-dialog::backdrop { background:rgba(20,35,55,.55); }
+.phone-basic-dialog>header { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-bottom:18px; }
+.phone-basic-dialog h2 { font-size:20px; margin:0; }
+.phone-basic-dialog header p { margin:8px 0 0; font-size:12px; color:#64748b; line-height:1.7; }
+.phone-basic-dialog>header>button { padding:4px 12px; font-size:22px; }
+.phone-basic-body { display:grid; grid-template-columns:minmax(0,1fr) 240px; gap:22px; }
+.phone-basic-screen { min-height:320px; display:flex; align-items:center; justify-content:center; background:#eff3f8; border-radius:12px; overflow:hidden; }
+.phone-basic-screen img { display:block; width:auto; height:auto; max-height:calc(100dvh - 190px); max-width:100%; touch-action:none; user-select:none; }
+.phone-basic-screen img[hidden],.phone-basic-screen [hidden] { display:none; }
+.phone-basic-screen img[data-interactive=true] { cursor:crosshair; }
+.phone-basic-body aside { display:flex; flex-direction:column; gap:10px; }
+.phone-basic-dialog button { min-height:36px; border:1px solid #dce5f1; border-radius:7px; padding:7px 12px; background:white; color:#183156; font-size:12px; }
+.phone-basic-dialog button:hover:not(:disabled) { background:#eef4ff; border-color:#9ab7ec; }
+.phone-basic-dialog button:disabled { opacity:.45; cursor:default; }
+.phone-basic-dialog button.phone-refresh-lock:disabled { opacity:1; cursor:pointer; }
+.phone-basic-dialog button.phone-refresh-lock:disabled:hover { background:#eef4ff; border-color:#9ab7ec; }
+.phone-basic-nav { display:grid; grid-template-columns:repeat(3,1fr); gap:5px; }
+.phone-basic-nav button { padding-inline:4px; }
+.phone-basic-status { font-size:14px; font-weight:600; }
+.phone-basic-dialog label { font-size:12px; display:grid; gap:8px; }
+.phone-basic-dialog small,.phone-basic-upgrade p { font-size:11px; color:#64748b; line-height:1.7; }
+.phone-basic-dialog .phone-basic-auto { display:flex; align-items:center; gap:8px; }
+.phone-basic-auto input { width:15px; height:15px; }
+.phone-basic-upgrade { margin-top:8px; padding-top:14px; border-top:1px solid #e4eaf3; }
+.phone-basic-upgrade strong { font-size:13px; }
+.phone-basic-upgrade button { width:100%; }
+.phone-basic-error { color:#af3044; font-size:12px; line-height:1.7; overflow-wrap:anywhere; margin:0; }
+@media(max-width:1100px) { .phone-connection-section .phone-route { display:grid; grid-template-columns:38px minmax(0,1fr); } .phone-connection-section .phone-route>button { grid-column:2; justify-self:start; } .phone-app-status-panel .phone-setting-info>div { display:block; } .phone-app-status-panel .phone-setting-info p { margin-top:3px; } }
+@media(max-width:800px) { .phone-basic-section { flex-wrap:wrap; } .phone-basic-copy { min-width:180px; } .phone-basic-section>.primary,.phone-basic-section>.phone-mode-actions { margin-left:62px; } .phone-enhancement-body { grid-template-columns:1fr; gap:16px; } .phone-download-qr { justify-self:center; } }
+@media(max-width:680px) { .phone-control-section,.phone-connection-section { padding:16px; } .phone-basic-body { grid-template-columns:1fr; } .phone-basic-screen img { max-height:50dvh; } }

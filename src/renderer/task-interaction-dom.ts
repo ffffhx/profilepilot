@@ -95,7 +95,7 @@ export class TaskDom {
   }
   capture(): void {
     if (!this.page) return;
-    for (const node of this.root.querySelectorAll<HTMLTextAreaElement>("textarea[data-editor-key]")) this.editors.set(node.dataset.editorKey!, node);
+    for (const node of this.root.querySelectorAll<HTMLTextAreaElement>("textarea[data-editor-key]")) if (!node.closest("[data-task-chat-owned]")) this.editors.set(node.dataset.editorKey!, node);
     const workspace = this.root.querySelector<HTMLElement>(".workspace"); if (!workspace) return;
     const rect = workspace.getBoundingClientRect();
     const anchor = [...workspace.querySelectorAll<HTMLElement>("[data-message-id], details[id]")].find(node => node.getBoundingClientRect().bottom > rect.top + 60);
@@ -111,6 +111,8 @@ export class TaskDom {
     const patch = (old: Node, fresh: Node): void => {
       if (old.nodeType === Node.TEXT_NODE) { if (old.nodeValue !== fresh.nodeValue) old.nodeValue = fresh.nodeValue; return; }
       if (!(old instanceof Element) || !(fresh instanceof Element)) return;
+      // React owns this subtree, including textarea composition and undo history.
+      if (old.hasAttribute("data-task-chat-owned") && fresh.hasAttribute("data-task-chat-owned")) return;
       // TaskPreviewView owns the live bitmap, dimensions and hidden state.
       // Resetting canvas attributes during a task snapshot erases its frame.
       if (old.tagName.toLowerCase() === "canvas" && old.getAttribute("class")?.split(/\s+/).includes("live-canvas")) return;
@@ -138,7 +140,7 @@ export class TaskDom {
     };
     children(this.root, template.content);
     this.page = page;
-    for (const node of this.root.querySelectorAll<HTMLTextAreaElement>("textarea[data-editor-key]")) this.editors.set(node.dataset.editorKey!, node);
+    for (const node of this.root.querySelectorAll<HTMLTextAreaElement>("textarea[data-editor-key]")) if (!node.closest("[data-task-chat-owned]")) this.editors.set(node.dataset.editorKey!, node);
   }
   restore(follow = true): void {
     const workspace = this.root.querySelector<HTMLElement>(".workspace"); if (!workspace) return;

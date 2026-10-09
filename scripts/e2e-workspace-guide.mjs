@@ -1,12 +1,12 @@
-﻿import assert from 'node:assert/strict';
+import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { launchProfilePilotE2e, repoRoot } from './e2e/lib/electron-driver.mjs';
 
-const app = await launchProfilePilotE2e({ name: 'workspace spotlight tour', onboarding: true, env: { CPM_START_VIEW: 'tasks' } });
+const app = await launchProfilePilotE2e({ name: 'workspace spotlight tour', onboarding: true });
 const d = app.driver;
 const shell = expression => d.evaluate(expression, { target: 'shell' });
-const key = 'profilepilot:workspace-guide:v2';
+const key = 'profilepilot:workspace-guide:v3:';
 const output = path.join(repoRoot, 'test-results', 'workspace-guide');
 const tick = () => shell('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))');
 const capture = async name => {
@@ -26,7 +26,8 @@ const reload = async () => {
   await shell('document.documentElement.dataset.reloadMarker = "old"; true');
   await d.request('reload');
   await d.waitFor('html', state => state.exists && !state.attributes['data-reload-marker']);
-  await d.waitFor('h1', state => state.text === 'Agent');
+  await d.waitFor('html[data-workspace-loading="false"]', state => state.exists, { target:'shell', timeoutMs:30000 });
+  await d.waitFor('h1', state => state.exists, { timeoutMs:30000 });
   await tick();
 };
 const checkGeometry = async () => {
@@ -42,7 +43,7 @@ const checkGeometry = async () => {
     const x = rect.left + (doc === document ? 0 : outer.left), y = rect.top + (doc === document ? 0 : outer.top);
     const overlap = Math.max(0, Math.min(card.right, ring.right) - Math.max(card.left, ring.left)) * Math.max(0, Math.min(card.bottom, ring.bottom) - Math.max(card.top, ring.top));
     return { id: tour.dataset.stepId, workspace: document.documentElement.dataset.workspace, expected: tour.dataset.targetWorkspace,
-      focused: tour.contains(document.activeElement), cardFits: card.left >= 0 && card.right <= innerWidth + 1 && card.top >= 0 && card.bottom <= innerHeight + 1,
+      focused: tour.contains(document.activeElement) || !!document.activeElement.closest('.workspace-rail'), cardFits: card.left >= 0 && card.right <= innerWidth + 1 && card.top >= 0 && card.bottom <= innerHeight + 1,
       ringFits: ring.left >= -1 && ring.right <= innerWidth + 1 && ring.top >= -1 && ring.bottom <= innerHeight + 1,
       targetMatches: ring.left >= x - 6 && ring.top >= y - 6 && ring.right <= x + rect.width + 6 && ring.bottom <= y + rect.height + 6,
       overlap, ring: { left:ring.left,top:ring.top,width:ring.width,height:ring.height }, card: { left:card.left,top:card.top,width:card.width,height:card.height } };
@@ -55,104 +56,91 @@ const checkGeometry = async () => {
 
 try {
   await mkdir(output, { recursive: true });
+  await ready('browser-tab');
+  await tick();
+  assert.equal((await d.windows()).main.backgroundColor.toLowerCase(), '#5e697b', 'native caption background must match the guide shade');
+  assert.equal((await d.windows()).main.captionAppearance.endsWith('/true'), true);
+  assert.equal(await shell(`document.querySelector('.guide-progress').textContent`), '1 / 3');
+  assert.equal(await shell(`document.querySelector('iframe[data-active="true"]').inert`), true);
+  // The real rail remains clickable while the page underneath is protected.
+  assert.equal(await shell(`(() => { const tab = document.querySelector('.workspace-link[data-workspace="phones"]'); const rect = tab.getBoundingClientRect(); return document.elementFromPoint(rect.left + 15, rect.top + rect.height / 2).closest('a') === tab; })()`), true);
+  await d.domClick('.workspace-link[data-workspace="phones"]', { target: 'shell' });
+  await ready('phones-tab');
+  assert.equal(await shell(`localStorage.getItem('profilepilot:workspace-guide:v3:browser')`), 'dismissed');
+  assert.equal(await shell(`document.querySelectorAll('#workspace-guide').length`), 1);
+  await d.domClick('.guide-skip');
+  await closed();
+  await tick();
+  assert.equal((await d.windows()).main.backgroundColor.toLowerCase(), '#f6faff', 'native caption restores after guide closes');
+  assert.equal((await d.windows()).main.captionAppearance.endsWith('/false'), true);
+  await d.domClick('.workspace-link[data-workspace="browser"]');
+  assert.equal((await d.query('#workspace-guide')).exists, false, 'visiting an already dismissed tab does not repeat its guide');
+  const chapters = [
+    ['browser', ['browser-tab', 'browser-new', 'browser-profiles']],
+    ['phones', ['phones-tab', 'phone-connect', 'phone-mobile']],
+    ['tools', ['tools-tab', 'tools-extension', 'tools-cli']],
+    ['agent', ['agent-tab', 'agent-prompt', 'settings']],
+    ['local-apps', ['local-apps-tab', 'apps-add', 'apps-list']]
+  ];
+  for (const [workspace, ids] of chapters) {
+    if (workspace === 'local-apps') await d.domClick('.workspace-link[data-workspace="browser"]');
+    await d.domClick(workspace === 'local-apps' ? '[data-pc-view="local-apps"]' : `.workspace-link[data-workspace="${workspace}"]`);
+    if (!(await d.query('#workspace-guide')).exists) await d.domClick('[data-workspace-guide]');
+    for (const [index, id] of ids.entries()) {
+      await ready(id);
+      await checkGeometry();
+      assert.equal(await shell(`document.documentElement.dataset.workspace`), workspace);
+      assert.equal(await shell(`document.querySelector('.guide-progress').textContent`), `${index + 1} / 3`);
+      if (index === 1) await capture(`${workspace}-control`);
+      await d.domClick('[data-guide-next]');
+    }
+    await closed();
+    assert.equal(await shell(`localStorage.getItem(${JSON.stringify(key + workspace)})`), 'completed');
+    assert.equal(await shell(`document.querySelector('iframe[data-active="true"]').inert`), false);
+    assert.equal(await shell(`document.documentElement.dataset.workspace`), workspace, 'completion must not navigate to another tab');
+    console.log(`PASS contextual tour ${workspace}: three steps, no cross-tab navigation`);
+  }
+  // Replaying a guide must preserve the page instance and its unsent draft.
+  await d.domClick('.workspace-link[data-workspace="agent"]');
+  assert.equal((await d.query('#workspace-guide')).exists, false);
+  await d.domInput('#prompt', 'Keep this unsent draft');
+  await shell(`window.__initialFrame = document.querySelector('iframe[data-active="true"]'); window.__initialOrigin = __initialFrame.contentWindow.performance.timeOrigin; true`);
+  await d.domClick('[data-workspace-guide]');
   await ready('agent-tab');
-  assert.equal(await shell(`document.querySelector('#workspace-guide').matches(':modal')`), true);
-  assert.equal(await shell(`localStorage.getItem(${JSON.stringify(key)})`), null);
-  await checkGeometry();
-  assert.equal(await shell(`(() => { const target = document.querySelector('.workspace-link[data-workspace="agent"]').getBoundingClientRect(); return document.querySelector('#workspace-guide').contains(document.elementFromPoint(target.left + target.width/2, target.top + target.height/2)); })()`), true, 'native modal blocks clicks through spotlight hole');
-  await capture('spotlight-agent-tab');
-  for (const [width, height] of [[860, 600], [560, 600]]) {
+  await d.domClick('[data-guide-next]');
+  await ready('agent-prompt');
+  for (const [width, height] of [[860,650], [560,600]]) {
     await d.request('resize', { width, height });
     await checkGeometry();
-    await capture(`spotlight-${width}`);
   }
-  await d.request('resize', { width: 1400, height: 950 });
-  await tick();
+  await d.request('resize', { width:1400, height:950 });
   await d.domClick('.guide-skip');
   await closed();
-  await d.domInput('#prompt', '保留这份未发送的任务草稿');
-  await shell(`window.__initialFrame = document.querySelector('iframe[data-active="true"]'); window.__initialOrigin = __initialFrame.contentWindow.performance.timeOrigin; document.querySelector('[data-workspace-guide]').focus(); true`);
-  await d.domClick('[data-workspace-guide]');
-  const ids = ['agent-tab', 'agent-new', 'agent-prompt', 'agent-profile', 'browser-tab', 'browser-new', 'browser-profiles', 'local-apps-tab', 'apps-add', 'apps-list', 'phones-tab', 'phone-connect', 'phone-mobile', 'tools-tab', 'tools-extension', 'tools-cli', 'tools-preferences', 'settings'];
-  for (const id of ids) {
-    await ready(id);
-    await checkGeometry();
-    if (['agent-prompt', 'browser-new', 'phone-connect', 'phone-mobile', 'tools-extension'].includes(id)) await capture(`spotlight-${id}`);
-    assert.equal(await d.evaluate(`!!document.querySelector('dialog[open], .onboarding-backdrop')`), false, 'tour must not trigger product actions or old prompts');
-    console.log(`PASS spotlight ${id}`);
-    await d.domClick('[data-guide-next]');
-  }
-  await closed();
-  assert.equal(await shell(`localStorage.getItem(${JSON.stringify(key)})`), 'completed');
-  assert.equal(await shell(`document.querySelector('iframe[data-active="true"]') === __initialFrame && __initialFrame.contentWindow.performance.timeOrigin === __initialOrigin`), true);
-  assert.equal(await d.evaluate(`document.querySelector('#prompt').value`), '保留这份未发送的任务草稿');
-  assert.equal(await shell(`document.querySelector('iframe[data-workspace="phones"]').contentDocument.querySelector('[data-phone-options]').open`), false, 'disclosure state restored');
-  assert.equal(await shell(`document.activeElement.hasAttribute('data-workspace-guide')`), true);
+  assert.equal(await d.evaluate(`document.querySelector('#prompt').value`), 'Keep this unsent draft');
+  assert.equal(await shell(`__initialFrame.contentWindow.performance.timeOrigin === __initialOrigin`), true);
+  // Persistence is per tab across reload, not one global completion flag.
   await reload();
   assert.equal((await d.query('#workspace-guide')).exists, false);
-  await d.domClick('[data-workspace-guide]');
-  await ready('agent-tab');
-  await shell(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, metaKey: true, bubbles: true })); true`);
-  assert.equal(await d.evaluate(`!!document.querySelector('dialog[open]')`), false);
-  assert.equal(await shell(`document.querySelector('[data-workspace-guide]').focus(); document.querySelector('#workspace-guide').contains(document.activeElement)`), true);
-  await d.domInput('[data-guide-chapter]', 'browser');
-  await ready('browser-tab');
-  await d.domClick('[data-guide-next]');
-  await ready('browser-new');
-  await d.evaluate(`(() => { const button = document.querySelector('[data-action="new-profile"]'); const replacement = button.cloneNode(true); replacement.style.marginTop = '25px'; button.replaceWith(replacement); return true; })()`);
-  await checkGeometry();
-  await d.evaluate(`window.__tourButton = document.querySelector('[data-action="new-profile"]'); __tourButton.style.display = 'none'; true`);
-  await tick();
-  assert.equal(await shell(`document.querySelector('.guide-spotlight').hidden`), true);
-  await d.evaluate(`window.__tourButton.style.display = ''; true`);
-  await ready('browser-new');
-  await checkGeometry();
-  await d.domClick('[data-guide-back]');
-  await ready('browser-tab');
-  await shell(`document.querySelector('#workspace-guide').requestClose(); true`);
-  await closed();
-  assert.equal(await shell(`document.documentElement.dataset.workspace`), 'agent');
-  await shell(`localStorage.removeItem(${JSON.stringify(key)}); localStorage.setItem('profilepilot:workspace-guide:v1', 'completed'); true`);
-  await reload();
-  await ready('agent-tab');
-  await d.domClick('.guide-skip');
-  await closed();
-  assert.equal(await shell(`localStorage.getItem(${JSON.stringify(key)})`), 'dismissed');
-  await reload();
-  assert.equal((await d.query('#workspace-guide')).exists, false);
-  await d.domClick('.workspace-link[data-workspace="tools"]');
-  await d.waitFor('h1', state => state.text === '配套工具');
-  await d.domClick('[data-workspace-guide]');
-  await ready('agent-tab');
-  await d.domClick('.guide-skip');
-  await closed();
-  assert.equal(await shell(`document.documentElement.dataset.workspace`), 'tools');
-  await shell(`window.workspaceHost.ready(document.querySelector('iframe[data-active="true"]').contentWindow); true`);
-  assert.equal((await d.query('#workspace-guide')).exists, false);
-  await d.request('resize', { width: 860, height: 650 });
-  await d.domClick('[data-workspace-guide]');
-  for (const [chapter, target, next] of [['agent', 'agent-prompt', 2], ['local-apps', 'apps-list', 2], ['phones', 'phone-connect', 1], ['tools', 'tools-cli', 2]]) {
-    await d.domInput('[data-guide-chapter]', chapter);
-    await ready(`${chapter}-tab`);
-    for (let step = 0; step < next; step++) await d.domClick('[data-guide-next]');
-    await ready(target);
-    await checkGeometry();
+  for (const [workspace] of chapters) {
+    if (workspace === 'local-apps') await d.domClick('.workspace-link[data-workspace="browser"]');
+    await d.domClick(workspace === 'local-apps' ? '[data-pc-view="local-apps"]' : `.workspace-link[data-workspace="${workspace}"]`);
+    assert.equal((await d.query('#workspace-guide')).exists, false);
   }
-  await capture('spotlight-compact-controls');
-  await d.domClick('.guide-skip');
-  await closed();
-  await d.request('resize', { width: 1400, height: 950 });
   await shell(`localStorage.setItem('profilepilot-workspace-theme', 'dark'); true`);
   await d.domClick('[data-workspace-guide]');
-  await ready('agent-tab');
+  await ready('local-apps-tab');
   assert.equal(await shell(`getComputedStyle(document.querySelector('.guide-card')).backgroundColor`), 'rgb(30, 42, 60)');
-  await capture('spotlight-dark');
+  await capture('dark');
+  await shell(`document.querySelector('#workspace-guide').dispatchEvent(new KeyboardEvent('keydown', { key:'Escape', bubbles:true })); true`);
+  await closed();
   await shell(`window.__originalSetItem = Storage.prototype.setItem; Storage.prototype.setItem = () => { throw new DOMException('Storage unavailable', 'QuotaExceededError'); }; true`);
+  await d.domClick('[data-workspace-guide]');
+  await ready('local-apps-tab');
   await d.domClick('.guide-skip');
   await closed();
-  await shell(`Storage.prototype.setItem = window.__originalSetItem; localStorage.removeItem('profilepilot-workspace-theme'); true`);
+  await shell(`Storage.prototype.setItem = window.__originalSetItem; true`);
   assert.deepEqual(app.output().stderr.match(/Uncaught (?:Exception|Error|TypeError)/g) || [], []);
-  console.log('PASS spotlight tour: 18 real targets, Tab navigation, geometry/resize, input blocking, draft/disclosure restoration, persistence/replay, dynamic targets, chapters/back/Escape, dark theme and storage failure');
+  console.log('PASS per-tab tours: first visit, direct tab switching, completion/dismissal persistence, manual replay, resizing, draft preservation, dark theme and storage failure');
 } catch (error) {
   await capture('failure').catch(() => {});
   throw error;

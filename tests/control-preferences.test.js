@@ -20,6 +20,25 @@ function fixture(t) {
 }
 const save = (home, snapshot, content, syncAll = true) => write({ domain: snapshot.domain, content, expectedRevision: snapshot.revision, syncAll }, home);
 
+test('Electron defaults are read-only until saved, independent of browser and phone, and clearing is preserved', async t => {
+  const { home } = fixture(t);
+  const browser = await read('browser', home), phone = await read('phone', home);
+  const electron = await read('electron', home);
+  assert.equal(electron.exists, false);
+  assert.ok(electron.content.includes('ppilot browser'));
+  for (const location of electron.locations) assert.equal(fs.existsSync(location.path), false);
+  await assert.rejects(write({ domain: 'electron', content: 'Wrong tab', expectedRevision: browser.revision, syncAll: true }, home), /其他会话修改/);
+  const saved = await save(home, electron, electron.content + '\n优先使用指定应用。');
+  for (const location of saved.locations) {
+    assert.equal(path.basename(location.path), 'electron-control.md');
+    assert.equal(fs.readFileSync(location.path, 'utf8'), saved.content);
+  }
+  assert.deepEqual(await read('browser', home), browser);
+  assert.deepEqual(await read('phone', home), phone);
+  await save(home, saved, '');
+  assert.equal((await read('electron', home)).content, '');
+});
+
 test('phone saves create UTF-8 files for clients and never modify the existing browser policy or revision', async t => {
   const { home, files } = fixture(t);
   const browser = await readBrowserPreferences(home);
@@ -60,7 +79,7 @@ test('phone file conflicts preserve existing contents and different client polic
   for (const file of files) assert.equal(fs.readFileSync(file, 'utf8'), 'Synced');
 });
 
-test('only the two named domains can be read or written', async t => {
+test('only supported preference domains can be read or written', async t => {
   const { home } = fixture(t);
   for (const domain of [undefined, null, '', '../browser-routing.md', '__proto__', 'toString']) {
     await assert.rejects(read(domain, home), /不支持的控制偏好类型/);

@@ -21,6 +21,7 @@ async function checkShell(label) {
     sameDocument: window.__shellDocument === document && window.__shellOrigin === performance.timeOrigin,
     sameRail: window.__shellRail === document.querySelector('.workspace-rail'),
     sameHeader: window.__shellHeader === document.querySelector('.workspace-identity'),
+    headerText: document.querySelector('.workspace-identity').textContent.trim(),
     active: [...document.querySelectorAll('iframe[data-active="true"]')].map(f => f.dataset.workspace),
     visible: [...document.querySelectorAll('iframe')].filter(f => getComputedStyle(f).visibility === 'visible').map(f => f.dataset.workspace),
     count: document.querySelectorAll('iframe').length,
@@ -31,9 +32,10 @@ async function checkShell(label) {
   assert.equal(state.sameDocument, true, `${label}: desktop document was replaced`);
   assert.equal(state.sameRail, true, `${label}: rail was replaced`);
   assert.equal(state.sameHeader, true, `${label}: title bar was replaced`);
+  assert.equal(state.headerText, '', `${label}: the title bar must not show connection status`);
   assert.equal(state.active.length, 1, `${label}: no active content`);
   assert.deepEqual(state.visible, state.active);
-  assert.ok(state.count <= 5);
+  assert.ok(state.count <= 6);
   const image = await d.screenshot();
   const png = PNG.sync.read(Buffer.from(image.pngBase64, 'base64'));
   const sx = png.width / state.width, sy = png.height / state.height;
@@ -70,7 +72,8 @@ try {
   for (let round = 0; round < 4; round++) {
     for (const workspace of workspaces) {
       const started = performance.now();
-      await d.domClick(`.workspace-link[data-workspace="${workspace}"]`);
+      await d.domClick(workspace === 'local-apps' ? '[data-pc-view="local-apps"]' : `.workspace-link[data-workspace="${workspace}"]`);
+      await d.waitFor(`html[data-workspace="${workspace}"][data-workspace-loading="false"]`, s => s.exists, { target:'shell' });
       await checkShell(`${round}/${workspace}`);
       assert.equal(await shell(`document.documentElement.dataset.workspace`), workspace);
       const origin = await d.evaluate('performance.timeOrigin');
@@ -81,18 +84,20 @@ try {
         if (round === 0) await d.domInput('#prompt', '切换后保留原页面与草稿');
         else assert.equal(await d.evaluate(`document.querySelector('#prompt').value`), '切换后保留原页面与草稿');
       }
-      if (workspace === 'browser') {
-        if (round === 0) await d.domInput('#profile-search', '系统');
-        else assert.equal(await d.evaluate(`document.querySelector('#profile-search').value`), '系统');
-      }
       if (round === 0) {
         await d.evaluate(`window.__pageMarker = {}; window.__originalMarker = window.__pageMarker; true`);
         await writeFile(path.join(directory, `${workspace}.png`), Buffer.from((await d.screenshot()).pngBase64, 'base64'));
       } else assert.equal(await d.evaluate('window.__pageMarker === window.__originalMarker'), true);
     }
   }
-  // Settings is an in-page Agent route, not another document load.
+  // Global settings is its own workspace; Agent configuration stays in Agent.
   await d.domClick('.workspace-settings');
+  await d.waitFor('.global-settings');
+  assert.equal(await shell(`document.querySelector('.workspace-settings').getAttribute('aria-current')`), 'page');
+  assert.equal((await d.query('#settings-form')).exists, false);
+  await checkShell('global-settings');
+  await d.domClick('.workspace-link[data-workspace="agent"]');
+  await d.domClick('.sidebar-footer [data-nav="settings"]');
   await d.waitFor('[data-nav="settings"].active');
   assert.equal(await d.evaluate('performance.timeOrigin'), origins.get('agent'));
   await checkShell('settings');
@@ -109,13 +114,18 @@ try {
   await d.domClick('[data-action="return-agent"]');
   await d.waitFor('#prompt');
   const profile = await d.evaluate(`window.profileManager.createProfile('固定顶部栏测试').then(s=>s.profiles.find(p=>p.name==='固定顶部栏测试'))`);
-  await d.waitFor('#workspace-profile', s => s.text.includes('固定顶部栏测试'));
-  await d.domInput('#workspace-profile', profile.id);
+  assert.equal(await shell(`!!document.querySelector('#workspace-profile')`), false);
+  await d.waitFor('select[name="profileId"]', s => s.text.includes('固定顶部栏测试'));
+  await d.domInput('select[name="profileId"]', profile.id);
   await d.waitFor('select[name="profileId"]', s => s.value === profile.id);
-  await d.domClick('[data-workspace-search]');
-  assert.equal(await d.evaluate(`!!document.querySelector('dialog[open]')`), true, 'outer search opens the active Agent command menu');
+  await d.evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key:'k', ctrlKey:true, metaKey:true, bubbles:true })); true`);
+  assert.equal(await d.evaluate(`!!document.querySelector('dialog[open]')`), true, 'Agent command shortcut still works without header search');
   await d.evaluate(`document.querySelector('dialog[open]').close(); true`);
   await d.domClick('.workspace-link[data-workspace="browser"]');
+  await d.waitFor(`[data-profile-row][data-id="${profile.id}"]`);
+  await d.domClick(`[data-profile-row][data-id="${profile.id}"]`);
+  await d.waitFor('.browser-profile-inspector h2', s => s.text === '固定顶部栏测试');
+  assert.equal(await shell(`document.querySelector('.workspace-identity').textContent.trim()`), '', 'list selection does not restore the removed header status');
   await assert.rejects(d.evaluate(`window.phones.start('fixture', 'control', 'fixture', 'must reject')`), /手机工作区/);
   await assert.rejects(d.evaluate(`window.localApps.list()`), /本地应用工作区/);
   await d.domClick('.workspace-link[data-workspace="phones"]');
@@ -125,7 +135,65 @@ try {
   for (const href of ['https://example.com/', '../README.md', './index.html?mode=mini', 'data:text/html,test']) {
     assert.equal(await shell(`window.workspaceHost.navigate(${JSON.stringify(href)})`), false);
   }
-  assert.equal(await shell(`document.querySelectorAll('iframe').length`), 5);
+  assert.equal(await shell(`document.querySelectorAll('iframe').length`), 6);
+  // Both sidebars act independently, keep the draft, and leave an expand control visible.
+  await d.domClick('.workspace-link[data-workspace="agent"]');
+  await d.domClick('[data-nav="tasks"]');
+  const draft = (await d.query('#prompt')).value;
+  const paint = () => shell('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+  for (const width of [1400, 800]) {
+    await d.request('resize', { width, height:800 });
+    for (const rail of ['expanded', 'collapsed']) {
+      if (await shell('document.documentElement.dataset.workspaceRail') !== rail) await d.domClick('[data-toggle-workspace-rail]', { target:'shell' });
+      await paint();
+      const railState = await shell(`(() => {
+        const aside=document.querySelector('.workspace-rail'), button=document.querySelector('[data-toggle-workspace-rail]');
+        return { width:aside.getBoundingClientRect().width, contentLeft:document.querySelector('#workspace-pages').getBoundingClientRect().left,
+          labels:[...aside.querySelectorAll('.workspace-link>span')].every(n=>getComputedStyle(n).display!=='none'),
+          expanded:button.getAttribute('aria-expanded'), drag:getComputedStyle(button).getPropertyValue('-webkit-app-region'),
+          buttonWidth:button.getBoundingClientRect().width };
+      })()`);
+      assert.equal(railState.labels, rail==='expanded');
+      assert.equal(railState.expanded, String(rail==='expanded'));
+      assert.equal(railState.drag, 'no-drag');
+      assert.ok(railState.buttonWidth>0);
+      assert.equal(railState.contentLeft, railState.width);
+      assert.ok(rail==='collapsed' ? railState.width===64 : railState.width>150);
+      for (const collapsed of [false, true]) {
+        if (await d.evaluate('document.querySelector("#task-app").classList.contains("sidebar-collapsed")') !== collapsed) await d.domClick('#task-sidebar-toggle');
+        await paint();
+        const state = await d.evaluate(`(() => {
+          const sidebar=document.querySelector('#task-sidebar'), button=document.querySelector('#task-sidebar-toggle'), workspace=document.querySelector('.workspace');
+          return {hidden:getComputedStyle(sidebar).display==='none', expanded:button.getAttribute('aria-expanded'),
+            button:button.getBoundingClientRect().width, left:workspace.getBoundingClientRect().left,
+            overflow:document.documentElement.scrollWidth>innerWidth,
+            dockBottom:document.querySelector('.compose-dock').getBoundingClientRect().bottom, bottom:workspace.getBoundingClientRect().bottom};
+        })()`);
+        assert.equal(state.hidden,collapsed);
+        assert.equal(state.expanded,String(!collapsed));
+        assert.ok(state.button>0);
+        assert.ok(collapsed ? state.left===0 : state.left>100);
+        assert.equal(state.overflow,false);
+        assert.ok(Math.abs(state.dockBottom-state.bottom)<2);
+        assert.equal((await d.query('#prompt')).value,draft);
+        await writeFile(path.join(directory, `sidebars-${width}-${rail}-${collapsed}.png`), Buffer.from((await d.screenshot()).pngBase64,'base64'));
+      }
+    }
+  }
+  await d.domClick('.workspace-link[data-workspace="phones"]');
+  await d.waitFor('h1', s=>s.text==='手机');
+  assert.equal(await shell('document.documentElement.dataset.workspaceRail'),'collapsed');
+  await d.domClick('.workspace-link[data-workspace="agent"]');
+  assert.equal((await d.query('#prompt')).value,draft);
+  await shell('location.reload(); true');
+  await d.waitFor('.workspace-link', s=>s.exists, {target:'shell'});
+  await d.domClick('.workspace-link[data-workspace="agent"]');
+  await d.waitFor('#task-sidebar-toggle', s=>s.attributes['aria-expanded']==='false');
+  assert.equal(await shell('document.documentElement.dataset.workspaceRail'),'collapsed','navigation preference survives reload');
+  await d.domClick('#task-sidebar-toggle');
+  await d.waitFor('#task-sidebar-toggle', s=>s.attributes['aria-expanded']==='true');
+  await d.domClick('[data-toggle-workspace-rail]', {target:'shell'});
+  assert.equal(await shell('document.documentElement.dataset.workspaceRail'),'expanded');
   // Exercise graceful shutdown after all five content frames have subscribed.
   await d.request('quit');
   await new Promise((resolve, reject) => {

@@ -478,7 +478,6 @@ details.task-context-tools p { font-size: var(--task-label-size); overflow-wrap:
 .recent-task-copy { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 1px; }
 .recent-title { min-width: 0; max-width: 100%; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 1; white-space: normal; overflow-wrap: anywhere; }
 .recent-meta { display: block; font-size: var(--task-label-size); line-height: 1.3; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.recent-task-row.active .recent-title, .recent-task-row:focus-within .recent-title { -webkit-line-clamp: unset; }
 .recent-task-row .task-menu-trigger { margin-top: 8px; }
 .recent-task .task-status-dot { margin-top: 6px; }
 .task-status-dot { width: 8px; height: 8px; flex-basis: 8px; background: var(--subtle); }

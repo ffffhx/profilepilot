@@ -31,11 +31,9 @@ export function renderClonePoolModal(profiles: PublicProfile[]): string {
   const cloning = isBusyAction("clone-profiles");
   const refreshing = isBusyAction("refresh-clones");
   const launchingClones = isBusyAction("launch-clones");
-  const recycling = isBusyAction("recycle-clones");
-  const busyHere = cloning || refreshing || launchingClones || recycling;
+  const busyHere = cloning || refreshing || launchingClones;
 
   const count = clampCloneCount(store.clonePoolCount);
-  const days = Number.isFinite(store.clonePoolRecycleDays) ? Math.max(0, Math.round(store.clonePoolRecycleDays)) : 7;
   const canClone = Boolean(sourceProfile) && !store.busy;
 
   return `
@@ -89,13 +87,6 @@ export function renderClonePoolModal(profiles: PublicProfile[]): string {
 
         ${clones.length ? renderCloneGroup(sourceProfile, clones, refreshing, launchingClones, windowsNativeTemplate) : renderCloneEmpty(sourceProfile, windowsNativeTemplate)}
 
-        <div class="clone-pool-recycle">
-          <span class="clone-pool-recycle-copy">回收 <input type="number" min="0" step="1" class="clone-pool-input clone-pool-days" data-clone-pool-recycle-days value="${days}" ${store.busy ? "disabled" : ""} /> 天未使用的空闲副本</span>
-          <button type="button" class="action-button warn ${recycling ? "loading" : ""}" data-action="recycle-clones" ${store.busy || !allClones.length ? "disabled" : ""}>
-            ${renderButtonLabel(recycling, "清理闲置副本", "清理中…")}
-          </button>
-        </div>
-
         <div class="modal-actions">
           <button type="button" data-action="close-modal" ${store.busy ? "disabled" : ""}>关闭</button>
         </div>
@@ -114,7 +105,7 @@ function activeCloneOpKey(): string {
   if (isBusyAction("launch-clones")) {
     return "launch-clones";
   }
-  return "recycle-clones";
+  return "clone-profiles";
 }
 
 function cloneOpTitle(sourceProfile: PublicProfile | null): string {
@@ -129,7 +120,7 @@ function cloneOpTitle(sourceProfile: PublicProfile | null): string {
   if (isBusyAction("launch-clones")) {
     return `正在批量启动 ${name} 的副本`;
   }
-  return "正在清理闲置副本";
+  return "正在创建 Agent 浏览器";
 }
 
 function renderCloneEmpty(sourceProfile: PublicProfile | null, windowsNativeTemplate: boolean): string {

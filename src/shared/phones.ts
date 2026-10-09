@@ -34,6 +34,10 @@ export interface PhoneCloudStatus {
   report: { deviceId: string; name: string; permissions: PhoneSessionState["permissions"]; readiness: NonNullable<PhoneSessionState["readiness"]> } | null;
 }
 export interface PhoneDevice {
+  /** Read-only package detection on an authorized debug transport. */
+  appInstallation?: { status: "installed" | "missing" | "unknown"; checkedAt: number };
+  /** Explicit desktop-owned session; does not imply companion permissions. */
+  basic?: PhoneSessionState;
   id: string;
   /** Verified hardware identity shared by USB and wireless routes. */
   hardwareId?: string;
@@ -69,9 +73,13 @@ export interface PhoneActionInput { id: string; sessionId: string; generation: n
 export interface PhoneActionResult { state: PhoneSessionState; result: unknown; }
 export type PhoneSetting = "accessibility" | "overlay" | "notifications" | "developerOptions" | "usbDebugging" | "wirelessDebugging";
 export interface PhonesApi {
+  basicStart(id: string, mode: "view" | "control", controller: string, task: string): Promise<PhoneDevice>;
+  basicControl(id: string, command: "pause" | "resume" | "stop"): Promise<PhoneDevice>;
+  basicPerform(input: PhoneActionInput): Promise<PhoneActionResult>;
   cloudPair(url?: string): Promise<{ id: string; uri: string; qrCode: string; expiresAt: number }>;
   cloudForget(id: string): Promise<void>;
   snapshot(): Promise<PhonesSnapshot>;
+  inspect(id: string): Promise<PhonesSnapshot>;
   listEmulators(): Promise<string[]>;
   connectEmulator(name: string): Promise<PhoneDevice>;
   discoverWireless(id?: string): Promise<PhoneWirelessDiscovery>;

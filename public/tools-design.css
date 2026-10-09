@@ -42,15 +42,6 @@
 .tools-workspace #main-content { padding: 18px; margin: 0; }
 .tools-workspace .agent-integration-page { display: grid; gap: 12px; min-width: 0; margin: 0; color: var(--tools-ink); container: tools-content / inline-size; }
 .tools-workspace .tools-visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-.tools-workspace .tools-status-summary { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); min-height: 76px; align-items: center; border: 1px solid var(--tools-line); border-radius: 8px; background: #fff; padding: 14px 12px; }
-.tools-workspace .tools-status-item { display: flex; align-items: center; gap: 12px; min-width: 0; padding: 0 20px; }
-.tools-workspace .tools-status-item + .tools-status-item { border-left: 1px solid var(--tools-line); }
-.tools-workspace .tools-status-item > div { min-width: 0; }
-.tools-workspace .tools-status-item strong { display: block; color: var(--tools-ink); font-size: 13px; font-weight: 650; line-height: 1.5; }
-.tools-workspace .tools-status-item small { display: block; margin-top: 4px; color: var(--tools-muted); font-size: 11px; line-height: 1.5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tools-workspace .tools-status-mark { display: grid; place-items: center; width: 32px; height: 32px; flex: 0 0 32px; border-radius: 50%; background: #edf3ff; color: var(--tools-accent); font: 600 17px/1 var(--font,sans-serif); }
-.tools-workspace .tools-status-item.ready .tools-status-mark { background: var(--tools-success); color: #fff; }
-.tools-workspace .tools-status-item.blocked .tools-status-mark { background: #fff5e5; color: var(--tools-attention); }
 .tools-workspace .browser-extension-panel { position: relative; min-width: 0; border: 1px solid var(--tools-line); border-radius: 8px; background: #fff; margin: 0; padding: 20px 22px; box-shadow: none; }
 .tools-workspace .tools-extension-main { display: grid; grid-template-columns: 52px minmax(220px,1fr) auto; align-items: center; gap: 16px; min-height: 86px; }
 .tools-workspace .tools-extension-icon { display: grid; place-items: center; width: 52px; height: 52px; border-radius: 50%; background: #f0f5fc; box-shadow: 0 0 0 8px #f8faff; color: var(--tools-ink); }
@@ -83,11 +74,15 @@
 .tools-workspace .browser-extension-panel.ready .browser-extension-status { color: var(--tools-success); }
 .tools-workspace .browser-extension-error,
 .tools-workspace .tools-diagnostic-error { margin: 12px 0 0; border-radius: 6px; background: #fff1f2; padding: 10px 12px; color: var(--tools-danger); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
-.tools-workspace .tools-overview-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); align-items: start; gap: 12px; }
+.tools-workspace .tools-overview-grid { display: grid; grid-template-columns: minmax(0,1fr); align-items: start; gap: 12px; }
+.tools-workspace .tools-phone-link { display:inline-flex; align-items:center; justify-content:center; flex-shrink:0; min-height:32px; padding:6px 10px; border:1px solid var(--tools-line); border-radius:6px; color:var(--tools-ink); background:white; font:11px/1.5 var(--font,sans-serif); text-decoration:none; }
+.tools-workspace .tools-phone-link:hover { background:#f2f6fd; border-color:#acbfd8; }
 .tools-workspace .tools-overview-card { min-width: 0; border: 1px solid var(--tools-line); border-radius: 8px; background: #fff; }
 .tools-workspace .tools-cli-card { grid-column: 1 / -1; }
 .tools-workspace .tools-guide-target { color: var(--tools-muted); font-size: 12px; line-height: 1.6; }
 .tools-workspace .tools-overview-summary { display: grid; grid-template-columns: 44px minmax(0,1fr); align-items: center; gap: 14px; min-height: 106px; padding: 17px 20px; cursor: pointer; list-style: none; }
+.tools-workspace .tools-cli-card > .tools-overview-summary,
+.tools-workspace .tools-preferences-card > .tools-overview-summary { cursor: default; }
 .tools-workspace .tools-overview-summary::-webkit-details-marker,
 .tools-workspace .tools-diagnostics > summary::-webkit-details-marker,
 .tools-workspace .tools-extension-help > summary::-webkit-details-marker { display: none; }
@@ -198,15 +193,9 @@
   .tools-workspace .tools-overview-title strong { font-size: 14px; }
   .tools-workspace .tools-overview-line { gap: 6px; }
   .tools-workspace .tools-overview-line small { font-size: 11px; }
-  .tools-workspace .tools-status-item { padding: 0 12px; gap: 9px; }
   .tools-workspace .agent-tool-grid { grid-template-columns: minmax(0,1fr); }
 }
 @container tools-content (max-width: 760px) {
-  .tools-workspace .tools-status-summary { padding: 12px 3px; }
-  .tools-workspace .tools-status-item { padding: 0 9px; }
-  .tools-workspace .tools-status-mark { width: 27px; height: 27px; flex-basis: 27px; }
-  .tools-workspace .tools-status-item strong { font-size: 11px; }
-  .tools-workspace .tools-status-item small { font-size: 10px; }
   .tools-workspace .tools-extension-main { grid-template-columns: 44px minmax(0,1fr); }
   .tools-workspace .browser-extension-controls { grid-column: 2; }
   .tools-workspace .tools-overview-grid { grid-template-columns: minmax(0,1fr); }

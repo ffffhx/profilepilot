@@ -68,7 +68,9 @@ try {
         const save = () => fs.writeFileSync(${JSON.stringify(targetStats)}, JSON.stringify({ pid:process.pid, focused, shown, windows:BrowserWindow.getAllWindows().map(w=>({visible:w.isVisible(),focused:w.isFocused()})) }));
         app.whenReady().then(async () => {
           for (let index = 0; index < 2; index++) {
-            const window = new BrowserWindow({ show:false, focusable:false, webPreferences:{contextIsolation:true,nodeIntegration:false} });
+            // Offscreen rendering produces real frames without revealing a
+            // window on the user's desktop during background acceptance.
+            const window = new BrowserWindow({ show:false, focusable:false, webPreferences:{contextIsolation:true,nodeIntegration:false,offscreen:true,backgroundThrottling:false} });
             window.on('focus',()=>{focused++;save()}); window.on('show',()=>{shown++;save()});
             await window.loadURL('data:text/html;charset=utf-8,'+encodeURIComponent('<title>Electron 窗口 '+index+'</title>'+${JSON.stringify(html)}));
           }
@@ -79,15 +81,20 @@ try {
       target = spawn(electronPath, [`--remote-debugging-port=${backendPort}`, source], { env, windowsHide:true, stdio:"ignore" });
       await until(async () => { try { return JSON.parse(await readFile(targetStats, "utf8")).windows.length === 2; } catch { return false; } }, "fixture windows");
       await mkdir(path.join(dataDir, "local-apps"), { recursive: true });
-      await writeFile(path.join(dataDir, "local-apps/apps.json"), JSON.stringify([{ id, name:"受保护 Electron", mode:"attach", cwd:project, command:"", environment:"", cdpPort:backendPort, inspectPort:null, agentPort, createdAt:new Date().toISOString() }]));
+      await writeFile(path.join(dataDir, "local-apps/apps.json"), JSON.stringify([{ id, name:"受保护 Electron", mode:"launch", cwd:project, command:"must-not-start-another-copy", environment:"", cdpPort:backendPort, inspectPort:null, agentPort, createdAt:new Date().toISOString() }]));
     }
   });
   const d = app.driver;
   await d.evaluate("location.href='./local-apps.html'");
   await d.waitFor("[data-agent-status]", state => state.text.includes("可供 Agent"));
-  assert.match((await d.query(".agent-command")).text, new RegExp(`--cdp ${agentPort}`));
+  assert.equal((await d.query('[data-action="start"], [data-action="restart"], [data-action="stop"]')).exists, false);
+  assert.equal((await d.query('.agent-command, [data-action="copy-agent"]')).exists, false);
   assert.equal((await fetch(`http://127.0.0.1:${agentPort}/json/version`)).status, 401);
   console.log("protected Electron route connected");
+  const idlePreview = await d.evaluate(`window.localApps.preview(${JSON.stringify(id)})`);
+  assert.match(idlePreview.screenshot || '', /^data:image\/jpeg;base64,/, JSON.stringify({preview:idlePreview, output:app.output()}));
+  assert.match(idlePreview.title, /Electron 窗口/);
+  assert.equal(await d.evaluate('window.localApps.list().then(apps => !!apps[0].agent.sessionId)'), false, 'preview must not claim an Agent session');
   await assert.rejects(requestBrowserGateway({ action:"attach-electron", profileId:`local-app:${randomUUID()}`, profileName:"Duplicate", publicPort:await freePort(), backendPort }, {homeDir}), error => error.code === "PROFILE_LEASE_CONFLICT");
   for (const port of [agentPort, backendPort]) await assert.rejects(requestBrowserGateway({ action:"launch-profile", profileId:"fixture-browser", profileName:"Conflict", publicPort:port, executable:"must-not-launch", args:[] }, {homeDir}), error => error.code === "PROFILE_LEASE_CONFLICT");
   const snapshot = await command(["--cdp", String(agentPort), "snapshot", "-i"]);
@@ -100,6 +107,11 @@ try {
   assert.ok(tabIds.length >= 2, tabs);
   await command(["--cdp", String(agentPort), "tab", tabIds[1]]);
   assert.match(await command(["--cdp", String(agentPort), "snapshot", "-i"]), /增加计数/);
+  const ownedTarget = (await requestBrowserGateway({action:"status"}, {homeDir})).state.profiles.find(profile => profile.profileId === `local-app:${id}`).agentTarget;
+  const ownedPreview = await d.evaluate(`window.localApps.preview(${JSON.stringify(id)})`);
+  assert.match(ownedPreview.screenshot || '', /^data:image\/jpeg;base64,/);
+  assert.equal(ownedPreview.title, ownedTarget.title, 'preview must follow the Agent window');
+  console.log("idle and Agent-target previews passed without claiming or focusing a window");
   const conflict = await command(["--cdp", String(agentPort), "snapshot", "-i"], `${session}-other`, 75);
   assert.match(conflict, /PROFILE_LEASE_CONFLICT|PROFILE_ALREADY_IN_USE/);
   const raw = await command(["--cdp", String(backendPort), "snapshot", "-i"], `${session}-raw`, 75);
@@ -121,6 +133,14 @@ try {
   await command(["--cdp", String(agentPort), "click", "#increment"]);
   await command(["profilepilot", "complete"]);
   await d.waitFor("[data-agent-status]", state => state.text.includes("可供 Agent"));
+  const stopSession = session + "-stop";
+  await command(["--cdp", String(agentPort), "snapshot", "-i"], stopSession);
+  await d.waitFor("[data-agent-control=stop]", state => state.exists && !state.disabled);
+  await d.domClick("[data-agent-control=stop]");
+  await d.waitFor("[data-agent-status]", state => state.text.includes("可供 Agent"));
+  const stoppedProfile = (await requestBrowserGateway({action:"status"}, {homeDir})).state.profiles.find(profile => profile.profileId === `local-app:${id}`);
+  assert.equal(stoppedProfile.sessionStatus, "stopped");
+  assert.equal(target.exitCode, null, "stopping the Agent task must leave the application running");
   await requestBrowserGateway({ action:"detach-electron", profileId:`local-app:${id}`, publicPort:agentPort }, {homeDir});
   assert.equal(target.exitCode, null);
   const states = JSON.parse(await readFile(targetStats, "utf8"));
@@ -131,7 +151,7 @@ try {
   await d.screenshot(); await new Promise(resolve => setTimeout(resolve, 250));
   await writeFile(path.join(dir, "protected-app.png"), Buffer.from((await d.screenshot()).pngBase64, "base64"));
   await writeFile(path.join(dir, "result.json"), JSON.stringify({ passed:true, agentPort, backendPort, states }, null, 2));
-  console.log("PASS Electron Gateway: real agent-browser, background input and window switching, exclusive session, raw-port rejection, takeover/return/complete, and application survival");
+  console.log("PASS Electron Gateway: real previews, background input and window switching, exclusive session, raw-port rejection, takeover/return/complete/stop, and application survival");
 } finally {
   if (homeDir && daemon) {
     const status = await requestBrowserGateway({ action:"status" }, { homeDir }).catch(() => null);

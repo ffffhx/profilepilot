@@ -41,12 +41,8 @@ try {
   assert.equal(await d.evaluate('document.querySelector("#prompt").value'), "点击标识后保留的任务草稿");
   await d.domClick('[data-action="toggle-sidebar"]');
   assert.equal(await d.evaluate('document.querySelector(".sidebar-toggle").getAttribute("aria-expanded")'), "true");
-  await d.domClick('[data-nav="materials"]');
-  await d.domInput("#material-name", "求职资料");
-  await d.domInput("#material-scope", "招聘申请");
-  await d.domInput("#material-content", "姓名：测试用户\n邮箱：test@example.test");
-  await d.domClick("#material-form button.primary");
-  await d.waitFor(".material-body", s => s.text.includes("test@example.test"));
+  assert.equal((await d.query('[data-nav="materials"]')).exists, false);
+  await d.evaluate(`window.tasks.saveMaterial({name:'求职资料',scope:'招聘申请',content:'姓名：测试用户 邮箱：test@example.test'})`);
   await d.domClick('[data-nav="tasks"]');
   await d.domInput("#prompt", "打开本地测试表单，填写资料，提交前让我检查。");
   await d.domInput('select[name="profileId"]', profile.id);

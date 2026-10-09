@@ -590,6 +590,40 @@ test("provider credentials spanning stream chunks are withheld and redacted befo
   assert.equal(redactProviderSecrets("echo a%2Fb", ["a/b"]), "echo [REDACTED]");
 });
 
+test("stream IPC batches deltas separately from full snapshots and persists the same message identity", async t => {
+  const f = fixture(t), updates = [], snapshots = [];
+  let child;
+  f.service.dependencies.worker = () => fakeWorker(value => { child = value; });
+  f.service.dependencies.streamChanged = update => updates.push(structuredClone(update));
+  f.service.dependencies.changed = snapshot => snapshots.push(snapshot);
+  await f.service.startRun(f.task, f.run());
+  await new Promise(resolve => setTimeout(resolve, 110)); snapshots.length = 0;
+  child.emit("message", {kind:"text_delta",id:"response",text:"中文"});
+  child.emit("message", {kind:"text_delta",id:"response",text:"输出"});
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(updates.length,1); assert.equal(updates[0].stream.text,"中文输出"); assert.equal(snapshots.length,0);
+  assert.equal(f.task.events.some(event=>event.kind==="assistant"),false);
+  child.emit("message", {kind:"text",id:"response",text:"中文输出"});
+  assert.equal(f.task.events.at(-1).streamId,updates[0].stream.id);
+  await new Promise(resolve => setTimeout(resolve, 110));
+  assert.equal(snapshots.length,1); assert.equal(snapshots[0].streams[f.task.id],undefined);
+});
+
+test("reused SDK response ids get separate block identities and id-less completion retains its delta identity", async t => {
+  const f = fixture(t); let child;
+  f.service.dependencies.worker = () => fakeWorker(value => { child = value; });
+  await f.service.startRun(f.task,f.run());
+  child.emit("message", {kind:"text_delta",id:"same",text:"first"});
+  const first = f.service.snapshot().streams[f.task.id].id;
+  child.emit("message", {kind:"text",id:"same",text:"first"});
+  child.emit("message", {kind:"text_delta",id:"same",text:"second"});
+  const second = f.service.snapshot().streams[f.task.id].id;
+  assert.notEqual(first,second);
+  child.emit("message", {kind:"text",text:"second"});
+  assert.deepEqual(f.task.events.filter(event=>event.kind==="assistant").map(event=>event.streamId),[first,second]);
+  assert.equal(f.service.snapshot().streams[f.task.id],undefined);
+});
+
 test("stream text keeps its prefix at the event limit and old final messages do not clear a newer stream", async t => {
   const f = fixture(t);
   let child;

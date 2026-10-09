@@ -132,10 +132,24 @@ try {
   await d.domInput('[data-control-preferences-sync]', '', { checked: true });
   await d.domClick(save);
   await d.waitFor('[data-control-preferences-state]', s => s.text === '已与本地内容同步');
-  // Tab arrow keys move the selected tab without changing either preference.
+  // All three tabs participate in keyboard navigation and preserve independent drafts.
+  const electronTab = '#control-preferences-tab-electron';
   await d.dispatch(phoneTab, 'keydown', { key: 'ArrowLeft', bubbles: true });
+  await d.waitFor(textarea, s => !s.disabled && s.value.includes('# Electron 控制偏好'));
+  const electronContent = (await d.query(textarea)).value + '\n优先使用已登记的编辑器。';
+  await d.domInput(textarea, electronContent);
+  await d.dispatch(electronTab, 'keydown', { key: 'ArrowLeft', bubbles: true });
   assert.equal((await d.query(textarea)).value, browserDraft);
   await d.dispatch(browserTab, 'keydown', { key: 'ArrowRight', bubbles: true });
+  assert.equal((await d.query(textarea)).value, electronContent);
+  await d.domClick(save);
+  await d.waitFor('[data-control-preferences-state]', s => s.text === '已与本地内容同步');
+  const electronFiles = files.map(file => file.replace('browser-routing.md', 'electron-control.md'));
+  for (const file of electronFiles) assert.equal(await readFile(file, 'utf8'), electronContent);
+  await d.screenshot();
+  await new Promise(resolve => setTimeout(resolve, 1200));
+  await writeFile(path.join(artifacts, 'electron-editor.png'), Buffer.from((await d.screenshot()).pngBase64, 'base64'));
+  await d.dispatch(electronTab, 'keydown', { key: 'End', bubbles: true });
   assert.equal((await d.query(textarea)).value, phoneContent);
   await d.screenshot();
   await new Promise(resolve => setTimeout(resolve, 1200));
@@ -146,5 +160,6 @@ try {
   await d.waitFor(edit, s => s.exists && !s.disabled, { timeoutMs: 20000 });
   for (const file of files) assert.equal(await readFile(file, 'utf8'), browserDraft);
   for (const file of phoneFiles) assert.equal(await readFile(file, 'utf8'), phoneContent);
-  console.log('PASS browser + phone tabs, independent drafts/saves, conflict recovery, keyboard navigation, client sync and CLI update preservation');
+  for (const file of electronFiles) assert.equal(await readFile(file, 'utf8'), electronContent);
+  console.log('PASS browser + Electron + phone tabs, independent drafts/saves, conflict recovery, keyboard navigation, client sync and CLI update preservation');
 } finally { await app.stop(); }

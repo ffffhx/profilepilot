@@ -103,6 +103,7 @@ export interface StoredMigratedExtension {
 }
 
 export interface PublicProfile {
+  avatarDataUrl?: string | null;
   id: string;
   source: ProfileSource;
   name: string;
@@ -1049,10 +1050,6 @@ export type ConfirmIntent =
   | {
       kind: "reset-clone";
       profileId: string;
-    }
-  | {
-      kind: "recycle-clones";
-      days: number;
     }
   | {
       kind: "disconnect-client";

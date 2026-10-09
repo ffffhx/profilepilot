@@ -1,6 +1,6 @@
 import { profileApi } from "./api";
 import { workspaceHidden, onWorkspaceVisibilityChanged, navigateWorkspace } from "./workspace-lifecycle";
-import { leaveControlPreferences, openControlPreferences, saveControlPreferences, switchControlPreferencesTab, updateControlPreferencesDraft } from "./control-preferences";
+import { controlPreferencesDomains, leaveControlPreferences, openControlPreferences, saveControlPreferences, switchControlPreferencesTab, updateControlPreferencesDraft } from "./control-preferences";
 import { profilePilotSetupState } from "../shared/profilepilot-setup";
 import { applyNativeExtensionSnapshot, refreshNativeExtensionStatus } from "./state-actions";
 import { activateBusyStep, busyStepsKey, emphasizeName, focusProfileFromUi, setToast, updateBusyProgressDom, updateBusyState, withBusy } from "./busy";
@@ -459,6 +459,13 @@ appRoot.addEventListener("click", (event) => {
   }
 
   const action = actionTarget.dataset.action;
+  if (action === "open-live-zoom") {
+    const profileId = actionTarget.dataset.id || null;
+    openLiveZoom(profileId);
+    render();
+    requestLiveViewNow(profileId);
+    return;
+  }
   if (action === "open-control-preferences") {
     void openControlPreferences();
     return;
@@ -466,7 +473,7 @@ appRoot.addEventListener("click", (event) => {
   if (action === "save-control-preferences") { void saveControlPreferences(); return; }
   if (action === "switch-control-preferences-tab") {
     const domain = actionTarget.dataset.preferencesTab;
-    if (domain === "browser" || domain === "phone") switchControlPreferencesTab(domain);
+    if (domain === "browser" || domain === "electron" || domain === "phone") switchControlPreferencesTab(domain);
     return;
   }
   if (action === "reload-control-preferences") { leaveControlPreferences("reload"); return; }
@@ -561,7 +568,7 @@ appRoot.addEventListener("click", (event) => {
         const setup = profilePilotSetupState(store.agentIntegrationDiagnostic);
         setToast(install
           ? setup.ready ? "ProfilePilot CLI 已就绪，命令工具与 Agent 使用指引已同步"
-            : `安装已处理，${setup.status}；展开 ProfilePilot CLI 查看详情`
+            : `安装已处理，${setup.status}；请查看连接诊断`
           : "ProfilePilot CLI 与随附指引已移除，个人偏好已保留", install && !setup.ready ? "error" : "normal");
       },
       undefined,
@@ -921,29 +928,11 @@ appRoot.addEventListener("click", (event) => {
     return;
   }
 
-  if (action === "recycle-clones") {
-    const days = Number.isFinite(store.clonePoolRecycleDays) ? Math.max(0, Math.round(store.clonePoolRecycleDays)) : 7;
-    const candidates = store.state.profiles.filter(
-      (profile) => profile.source === "isolated" && profile.clonedFromProfileId && !profile.running
-    );
-    if (!candidates.length) {
-      setToast("当前没有空闲副本可清理", "error");
-      return;
-    }
-    store.modal = { kind: "confirm", returnTo: "clone-pool", intent: { kind: "recycle-clones", days } };
-    render();
-    return;
-  }
 
   if (action === "new-profile") {
     store.modal = { kind: "new" };
     render();
     window.setTimeout(() => document.querySelector<HTMLInputElement>("#profile-name")?.focus(), 0);
-    return;
-  }
-
-  if (action === "open-mini-window") {
-    void profileApi().showMiniWindow().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
     return;
   }
 
@@ -1915,20 +1904,6 @@ appRoot.addEventListener("click", (event) => {
     return;
   }
 
-  if (action === "toggle-startup") {
-    if (!store.startupSettings?.supported) return;
-    const enable = !store.startupSettings.enabled;
-    void withBusy(async () => {
-      const settings = await profileApi().setStartupEnabled(enable);
-      store.startupSettings = settings;
-      if (settings.error) throw new Error(settings.error);
-      setToast(settings.requiresApproval
-        ? "请在系统设置的登录项中允许 ProfilePilot 自启动"
-        : enable ? "开机自启动已开启" : "开机自启动已关闭");
-    }, undefined, { key: "startup", message: "正在保存启动设置…" });
-    return;
-  }
-
   if (action === "toggle-agent-overlay") {
     const enable = !store.state.agentOverlayEnabled;
     void withBusy(
@@ -2089,11 +2064,6 @@ appRoot.addEventListener("change", (event) => {
     return;
   }
 
-  if (target instanceof HTMLInputElement && target.matches("[data-clone-pool-recycle-days]")) {
-    const parsed = Math.round(Number(target.value));
-    store.clonePoolRecycleDays = Number.isFinite(parsed) && parsed >= 0 ? parsed : 7;
-    return;
-  }
 
   if (target instanceof HTMLInputElement && target.matches("[data-extension-select]")) {
     const extensionId = target.dataset.extensionId;
@@ -2196,7 +2166,10 @@ appRoot.addEventListener("keydown", (event) => {
     if (event.isComposing) return;
     if (event.target instanceof HTMLElement && event.target.matches('[data-preferences-tab]') && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
       event.preventDefault();
-      switchControlPreferencesTab(event.key === "Home" ? "browser" : event.key === "End" ? "phone" : store.modal.activeTab === "browser" ? "phone" : "browser");
+      const tabs = controlPreferencesDomains;
+      const index = tabs.indexOf(store.modal.activeTab);
+      const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+      switchControlPreferencesTab(tabs[next]);
       return;
     }
     if (event.key === "Escape") { event.preventDefault(); leaveControlPreferences("close"); return; }

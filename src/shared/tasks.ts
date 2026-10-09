@@ -1,3 +1,4 @@
+import type { TaskSkillDefinition, TaskSkillRun, TaskSkillSelection } from "./task-skills";
 export type TaskStatus = "queued" | "running" | "waiting_user" | "paused" | "completed" | "partial" | "failed" | "cancelled";
 export type ItemStatus = "pending" | "running" | "waiting_user" | "completed" | "skipped" | "failed" | "uncertain";
 export type Effect = "read" | "edit" | "submit" | "send" | "purchase" | "delete";
@@ -5,12 +6,13 @@ export interface ExecutionGrant { origin: string; effects: Array<"submit" | "sen
 export interface TaskAttachment { id: string; name: string; path: string; size: number; }
 export interface PersonalMaterial { id: string; name: string; scope: string; content: string; version: number; updatedAt: string; }
 export interface TaskItem { id: string; label: string; status: ItemStatus; result?: string; evidence?: string; }
-export interface TaskEvent { id: string; at: string; kind: "user" | "assistant" | "action" | "system" | "error"; text: string; }
+export interface TaskEvent { id: string; at: string; kind: "user" | "assistant" | "action" | "system" | "error"; text: string; streamId?: string; }
 export type TaskPermissionMode = "manual" | "plan" | "acceptEdits";
 export interface NativeAccessPolicy { allowedOrigins?: string[]; blockedOrigins?: string[]; confirmActions?: boolean; }
 export interface NativeTaskTarget { tabId?: number; newTab?: boolean; }
 export interface TaskPermissionRule { id: string; kind: "browser" | "terminal"; scope: string; label: string; createdAt: string; }
 export interface TaskStream { id: string; text: string; updatedAt: string; }
+export interface TaskStreamUpdate { taskId: string; stream: TaskStream; }
 export interface TaskMessageOptions { requestId?: string; attachmentIds?: string[]; }
 export interface TaskReplyOptions extends TaskMessageOptions { scope?: "once" | "session"; }
 export interface TaskQueuedMessage { id: string; message: string; attachmentIds: string[]; createdAt: string; }
@@ -68,6 +70,7 @@ export interface JevDecisionRecord {
   elapsedMs: number; inputTokens: number; note?: string; outcome?: string;
 }
 export interface BrowserTask {
+  skill?: TaskSkillRun;
   historyRevision?: number;
   messageQueue?: TaskQueuedMessage[];
   messageReceipts?: Array<{ id: string; fingerprint: string; at: string }>;
@@ -106,6 +109,7 @@ export interface BrowserTask {
   outputs?: TaskAttachment[];
 }
 export interface CreateTaskInput {
+  skill?: TaskSkillSelection;
   nativeTarget?: NativeTaskTarget; nativeAccess?: NativeAccessPolicy;
   mode?: TaskPermissionMode; model?: string;
   prompt: string; profileId: string; authorization?: string; materialIds?: string[];
@@ -130,6 +134,8 @@ export function jevProviderFor(settings: TaskSettings): JevProvider {
   return settings.jevProvider || (settings.hasJevApiKey ? "vercel" : "typesafe");
 }
 export interface TaskSnapshot {
+  skills?: TaskSkillDefinition[];
+  skillIssues?: string[];
   streams?: Record<string, TaskStream>;
   nativeAccessPolicies?: Record<string, NativeAccessPolicy>;
   tokenRecords?: TaskTokenRecord[];
@@ -158,6 +164,7 @@ export interface TaskApi {
   openLink(url: string): Promise<void>;
   listModels(): Promise<string[]>;
   pairNativeBrowser(profileId: string): Promise<{ code: string; expiresAt: string }>;
+  getNativeLiveView(profileId: string): Promise<import("./types").CdpLiveView>;
   authorizeNativeBrowser(profileId: string): Promise<{ expiresAt: string }>;
   disconnectNativeBrowser(profileId: string): Promise<void>;
   openNativeExtensionFolder(): Promise<void>;
@@ -193,9 +200,11 @@ export interface TaskApi {
   exportData(kind: "task" | "task-markdown" | "materials" | "diagnostics", id?: string): Promise<string | null>;
   openArtifact(id: string, taskId?: string): Promise<void>;
   onChanged(listener: (snapshot: TaskSnapshot) => void): () => void;
+  onStream?(listener: (update: TaskStreamUpdate) => void): () => void;
 }
 export const TASK_CHANNEL = "tasks:request";
 export const TASK_CHANGED = "tasks:changed";
+export const TASK_STREAM = "tasks:stream";
 export const TASK_PREVIEW = "tasks:preview";
 export interface TaskModelRun { id: string; endpoint: string; at: string; }
 export interface TaskPreviewUpdate {

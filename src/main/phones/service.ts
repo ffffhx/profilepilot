@@ -14,6 +14,7 @@ import { AndroidEmulators, type EmulatorRuntime } from "./emulators";
 import { PhoneCloud } from "./cloud";
 import { readinessSchema } from "./readiness-schema";
 import { inspectApk } from "./apk";
+import { BasicPhoneControl } from "./basic";
 export { phoneActionSchema } from "./actions";
 
 const sessionSchema = z.object({
@@ -43,6 +44,7 @@ export class PhonesService {
   private routes = new Map<string, Route>();
   private debugReadings = new Map<string, { route: Route; at: number; value: DebugSettings }>();
   private debugPending = new Map<string, Route>();
+  private hardwareReadings = new Map<string, { at: number; id?: string }>();
   private saved: Record<string, SavedPhone>;
   private adb: AdbRunner;
   private request: typeof phoneRequest;
@@ -63,9 +65,12 @@ export class PhonesService {
   private adbAvailable = false;
   private error = "";
   private cloud: PhoneCloud;
+  private basic: BasicPhoneControl;
+  private basicStarting = false;
   readonly computer: string;
   constructor(private options: PhonesOptions) {
     this.adb = options.adb || new Adb(); this.request = options.request || phoneRequest; this.computer = (options.computer || os.hostname()).slice(0, 120);
+    this.basic = new BasicPhoneControl(this.adb, this.computer, () => this.changed(), () => this.now());
     this.emulators = options.emulators || new AndroidEmulators();
     fs.mkdirSync(options.root, { recursive: true });
     this.cloud = new PhoneCloud(options.root, () => this.changed());
@@ -86,9 +91,10 @@ export class PhonesService {
     const matched = new Set<string>();
     const devices: PhoneDevice[] = [...this.devices.values()].map(device => {
       const saved = this.saved[device.id];
-      const identity = device.state?.statusDeviceId || saved?.statusDeviceId || identityByHardware.get(saved?.hardwareId);
+      const hardwareId = device.hardwareId || saved?.hardwareId;
+      const identity = device.state?.statusDeviceId || saved?.statusDeviceId || identityByHardware.get(hardwareId);
       if (identity) matched.add(identity);
-      return structuredClone({ ...device, hardwareId: saved?.hardwareId, cloud: identity ? cloud.find(c => c.cloud?.report?.deviceId === identity)?.cloud : undefined });
+      return structuredClone({ ...device, basic: this.basic.state(device.id), hardwareId, cloud: identity ? cloud.find(c => c.cloud?.report?.deviceId === identity)?.cloud : undefined });
     });
     devices.push(...cloud.filter(c => !c.cloud?.report || !matched.has(c.cloud.report.deviceId)));
     return { devices, adbAvailable: this.adbAvailable, error: this.error, computer: this.computer };
@@ -96,6 +102,34 @@ export class PhonesService {
   cloudPair(url?: string) { return this.cloud.pair(url); }
   cloudForget(id: string) { return this.cloud.forget(id); }
   private changed(): void { this.options.onChanged?.(this.snapshot()); }
+  private assertNoBasic(): void {
+    if (this.basicStarting || this.basic.active) throw new Error("请先结束免安装控制，再连接 App 或开始 App 会话。");
+  }
+  async basicStart(id: string, mode: "view" | "control", controller: string, task: string): Promise<PhoneDevice> {
+    const input = z.object({ mode: z.enum(["view", "control"]), controller: z.string().trim().min(1).max(120), task: z.string().max(500) }).parse({ mode, controller, task });
+    if (this.closed || this.basicStarting || this.operations.size || this.actions.size) throw new Error("手机正在处理操作，请稍后再开始免安装会话。");
+    this.basicStarting = true;
+    try {
+      await this.refresh(); this.connected(id);
+      // Treat an unresolved/paused App session as occupied, including aliases.
+      if ([...this.devices.values()].some(d => d.state?.sessionId && !["idle", "stopped"].includes(d.state.phase))) throw new Error("请先结束已有的手机 App 会话，再开始免安装控制。");
+      if (this.closed) throw new Error("手机服务正在退出。");
+      this.basic.start(id, input.mode, input.controller, input.task);
+      return this.snapshot().devices.find(device => device.id === id)!;
+    } finally { this.basicStarting = false; }
+  }
+  basicControl(id: string, command: "pause" | "resume" | "stop"): PhoneDevice {
+    z.enum(["pause", "resume", "stop"]).parse(command);
+    if (command !== "stop") this.connected(id); else this.device(id);
+    this.basic.control(id, command);
+    return this.snapshot().devices.find(device => device.id === id)!;
+  }
+  async basicPerform(input: PhoneActionInput): Promise<PhoneActionResult> {
+    const parsed = z.object({ id: z.string(), sessionId: z.string().min(1), generation: z.number().int().nonnegative(), requestId: z.string().uuid(), action: phoneActionSchema }).strict().parse(input);
+    if (this.closed) throw new Error("手机服务正在退出。");
+    this.connected(parsed.id);
+    return this.basic.perform(parsed);
+  }
   listEmulators(): Promise<string[]> { return this.emulators.list(); }
   async connectEmulator(name: string): Promise<PhoneDevice> {
     if (this.emulatorBusy) throw new Error("正在启动模拟器，请稍候。");
@@ -155,10 +189,13 @@ export class PhonesService {
         if (saved && (saved.model !== next.model || saved.transport !== next.transport)) { saved.model = next.model.slice(0, 200); saved.transport = next.transport; metadataChanged = true; }
         if (device.connection !== "device") { await this.disconnected(device, device.connection === "unauthorized" ? device.transport === "emulator" ? "请在模拟器窗口中确认此电脑的调试连接。" : "请在手机上允许此电脑进行 USB 调试。" : "ADB 连接离线。", device.connection); continue; }
         if (this.operations.has(device.id)) continue;
+        await this.identifyHardware(device);
+        await this.inspectInstallation(device);
         try {
           if (!this.routes.has(device.id) && this.saved[device.id]) await this.forward(device.id);
           if (this.routes.has(device.id)) {
             const { state } = await this.rpc(device.id, "sync");
+            if (!["idle", "stopped"].includes(state.phase)) this.basic.close();
             // A new desktop process or a recovered link must not silently
             // inherit an old controller's authority, even within the phone TTL.
             if ((!previous || this.reconcile.has(device.id)) && ["viewing", "controlling", "executing"].includes(state.phase)) {
@@ -178,7 +215,34 @@ export class PhonesService {
     }
     this.changed(); return this.snapshot();
   }
+  async inspect(id: string): Promise<PhonesSnapshot> {
+    if (this.refreshing) await this.refreshing;
+    this.device(id).appInstallation = undefined;
+    return this.refresh();
+  }
+  private async inspectInstallation(device: PhoneDevice): Promise<void> {
+    if (device.appInstallation && this.now() - device.appInstallation.checkedAt < 30000) return;
+    let status: "installed" | "missing" | "unknown" = "unknown";
+    try {
+      const output = (await this.adb.run(["-s", device.id, "shell", deviceShell(["pm", "path", COMPANION_PACKAGE])], 3000)).trim();
+      if (/^package:\S+/m.test(output)) status = "installed";
+      else if (!output) status = "missing";
+    } catch { /* A failed query does not mean the App is missing. */ }
+    device.appInstallation = { status, checkedAt: this.now() };
+  }
+  private async identifyHardware(device: PhoneDevice): Promise<void> {
+    // An authorized debugging connection has an identity even without an App
+    // pairing. Do not install the App or copy its credentials just to group routes.
+    if (device.transport === "emulator") return;
+    const cached = this.hardwareReadings.get(device.id);
+    if (cached?.id || cached && this.now() - cached.at < 30000) return;
+    const serial = (await this.adb.run(["-s", device.id, "shell", deviceShell(["getprop", "ro.serialno"])], 3000).catch(() => "")).trim();
+    const id = /^[a-zA-Z0-9_-]{1,200}$/.test(serial) && !["unknown", "null"].includes(serial) ? serial : undefined;
+    this.hardwareReadings.set(device.id, { at: this.now(), id });
+    device.hardwareId = id;
+  }
   private async disconnected(device: PhoneDevice, error: string, connection = device.connection): Promise<void> {
+    if (connection !== "device") { this.basic.disconnect(device.id); this.hardwareReadings.delete(device.id); device.appInstallation = undefined; }
     this.debugReadings.delete(device.id); this.debugPending.delete(device.id);
     if (device.state && ["viewing", "controlling", "executing"].includes(device.state.phase)) this.reconcile.add(device.id);
     device.connection = connection; device.companion = "unavailable"; device.error = error;
@@ -328,6 +392,7 @@ export class PhonesService {
       throw new Error("无线连接已提交，但设备尚未就绪。请保持手机解锁，核对无线调试主页面的地址后重新连接。");
   }
   async prepare(id: string): Promise<PhoneDevice> {
+    this.assertNoBasic();
     await this.exclusive(id, "正在连接手机…", async () => {
       // USB and wireless transports can identify the same physical phone with
       // different ADB IDs. Reuse its existing app pairing without rotating its
@@ -358,6 +423,7 @@ export class PhonesService {
       }
       this.saved[id] = { ...this.saved[id], token: this.saved[id]?.token || randomBytes(32).toString("hex"), installedHash, model: this.device(id).model.slice(0, 200), transport: this.device(id).transport,
         ...(/^[a-zA-Z0-9_-]{1,200}$/.test(hardwareId) && !["unknown", "null"].includes(hardwareId) ? { hardwareId } : {}) }; this.persist();
+      this.device(id).appInstallation = { status: "installed", checkedAt: this.now() };
       this.pairing.add(id);
       await this.adb.run(["-s", id, "shell", deviceShell(["am", "start", "-f", "0x24000000", "-n", `${COMPANION_PACKAGE}/.MainActivity`, "--es", "token", this.saved[id].token, "--es", "computer", this.computer])]);
       if (!this.routes.has(id)) await this.forward(id);
@@ -380,6 +446,7 @@ export class PhonesService {
     this.persist(); this.changed();
   }
   async start(id: string, mode: "view" | "control", controller: string, task: string): Promise<PhoneDevice> {
+    this.assertNoBasic();
     const input = z.object({ mode: z.enum(["view", "control"]), controller: z.string().trim().min(1).max(120), task: z.string().trim().max(500) }).parse({ mode, controller, task });
     await this.exclusive(id, "等待手机确认会话…", async () => {
       const { state } = await this.rpc(id, "sync");
@@ -388,6 +455,7 @@ export class PhonesService {
     }); return structuredClone(this.device(id));
   }
   async control(id: string, command: "pause" | "resume" | "stop"): Promise<PhoneDevice> {
+    if (command === "resume") this.assertNoBasic();
     z.enum(["pause", "resume", "stop"]).parse(command);
     await this.exclusive(id, command === "stop" ? "正在结束控制…" : command === "pause" ? "正在暂停…" : "正在恢复…", async () => {
       const { state } = await this.rpc(id, "sync");
@@ -395,6 +463,7 @@ export class PhonesService {
     }); return structuredClone(this.device(id));
   }
   async perform(input: PhoneActionInput): Promise<PhoneActionResult> {
+    this.assertNoBasic();
     const { id, sessionId, generation, requestId, action } = z.object({ id: z.string(), sessionId: z.string().min(1).max(100), generation: z.number().int().nonnegative(), requestId: z.string().uuid(), action: phoneActionSchema }).strict().parse(input);
     const device = this.connected(id);
     if (device.companion !== "ready" || this.reconcile.has(id)) throw new Error("手机连接需要重新确认，请等待状态同步后由用户恢复会话。");
@@ -411,6 +480,7 @@ export class PhonesService {
     finally { this.actions.delete(id); this.changed(); }
   }
   async preview(id: string): Promise<PhoneActionResult> {
+    this.assertNoBasic();
     const device = this.connected(id);
     if (device.companion !== "ready" || this.reconcile.has(id)) throw new Error("请先连接手机 App，并确认会话状态。");
     if (this.actions.has(id)) throw new Error("手机正在执行操作，请稍后刷新画面。");
@@ -438,6 +508,7 @@ export class PhonesService {
     });
   }
   async openSettings(id: string, setting: PhoneSetting): Promise<void> {
+    this.assertNoBasic();
     const target = z.enum(["accessibility", "overlay", "notifications", "developerOptions", "usbDebugging", "wirelessDebugging"]).parse(setting);
     if (this.actions.has(id)) throw new Error("手机正在执行操作，请稍后打开设置。");
     await this.exclusive(id, "正在打开手机设置…", async () => {
@@ -569,6 +640,7 @@ export class PhonesService {
     });
   }
   async close(): Promise<void> {
+    this.basic.close();
     this.cloud.close();
     for (const job of this.installs.values()) job.abort.abort(new Error("ProfilePilot 正在退出，安装已停止。"));
     this.closed = true; this.wrappers.clear(); clearInterval(this.timer);

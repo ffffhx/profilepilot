@@ -156,7 +156,9 @@ test('manifest identity matches bridge and cannot be loaded by remote pages', ()
   assert.equal([...hash].map(c => String.fromCharCode(97 + parseInt(c, 16))).join(''), NATIVE_EXTENSION_ID);
   assert.equal(manifest.externally_connectable, undefined);
   assert.deepEqual(manifest.content_scripts[0].matches, ['http://127.0.0.1/profilepilot-connect/*']);
-  assert.deepEqual(manifest.host_permissions, ['http://*/*', 'https://*/*']);
+  // captureVisibleTab requires this exact permission for desktop background
+  // previews; http/https wildcard permissions alone do not authorize capture.
+  assert.deepEqual(manifest.host_permissions, ['<all_urls>']);
   assert.equal(manifest.permissions.includes('debugger'), true);
 });
 

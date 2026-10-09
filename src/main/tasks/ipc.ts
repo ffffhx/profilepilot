@@ -8,7 +8,7 @@ import { isWorkspaceShell } from "../workspace-shell";
 import { IPC_CHANNELS } from "../../shared/ipc";
 import { z } from "zod";
 import { taskLinkUrl } from "../../shared/task-link";
-import { TASK_CHANNEL, TASK_CHANGED, TASK_PREVIEW, TERMINAL_TASKS, jevProviderFor, type JevProvider, type TaskSchedule } from "../../shared/tasks";
+import { TASK_CHANNEL, TASK_CHANGED, TASK_STREAM, TASK_PREVIEW, TERMINAL_TASKS, jevProviderFor, type JevProvider, type TaskSchedule } from "../../shared/tasks";
 import { TaskPreviewStream } from "./preview";
 import type { ProfileManager } from "../profile-manager";
 import { defaultDataDir } from "../fs-util";
@@ -101,6 +101,7 @@ export function registerTaskService(profileManager: ProfileManager): TaskService
       return { port, name: (await profileManager.getState()).profiles.find((profile) => profile.id === id)?.name || id };
     },
     changed: broadcast,
+    streamChanged: update => { for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send(TASK_STREAM, update); },
     notify: (title, body, taskId) => {
       if (!Notification.isSupported()) return;
       const notification = new Notification({ title: `ProfilePilot · ${title}`, body });
@@ -179,6 +180,13 @@ export function registerTaskService(profileManager: ProfileManager): TaskService
         return;
       }
       case "snapshot": return snapshot();
+      case "getNativeLiveView": {
+        const id = z.string().regex(/^native:[^/\\]{1,100}$/).parse(args[0]);
+        const state = native.states().find(item => item.profileId === id);
+        if (!state?.connected) throw new Error("请先到配套工具连接浏览器扩展。");
+        if (!state.capabilities?.includes("liveView")) throw new Error("请在配套工具中更新浏览器扩展后查看实时画面。");
+        return native.request(id, "liveView", {}, 5000);
+      }
       case "authorizeNativeBrowser":
       case "pairNativeBrowser": {
         const id = z.string().max(150).parse(args[0]);

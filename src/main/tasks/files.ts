@@ -1,9 +1,10 @@
-import { realpathSync, mkdirSync, writeFileSync, statSync } from "node:fs";
+import { realpathSync, mkdirSync, writeFileSync, statSync, copyFileSync } from "node:fs";
 import path from "node:path";
 import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type { BrowserTask, TaskAttachment } from "../../shared/tasks";
+import { canReadTaskSkill } from "./skills";
 
 export function canReadTaskFile(task: BrowserTask, file: string): boolean {
   const canonical = (value: string): string => {
@@ -19,10 +20,32 @@ export function taskFile(task: BrowserTask, id: string): TaskAttachment {
   return file;
 }
 export function authorizeTaskRead(task: BrowserTask, file: string): { allowed: boolean } {
+  if (canReadTaskSkill(task.skill, file)) return { allowed: !/\.pdf$/i.test(file) };
   if (!canReadTaskFile(task, file)) return { allowed: false };
   // The SDK sends PDFs as Anthropic document blocks, unsupported by some
   // compatible providers. Route every PDF through our paginated local reader.
   return { allowed: !/\.pdf$/i.test(file) && !/\.pdf$/i.test(realpathSync(file)) };
+}
+
+/** Register only files produced inside this task's terminal workspace. */
+export function registerTaskOutputs(task: BrowserTask, workspace: string, root: string, value: unknown): TaskAttachment[] {
+  const input = z.object({ paths: z.array(z.string().min(1).max(4000)).min(1).max(20) }).strict().parse(value);
+  const base = realpathSync(workspace), names = new Set<string>();
+  const sources = input.paths.map(file => {
+    const source = realpathSync(path.resolve(base, file));
+    const relative = path.relative(base, source), name = path.basename(source);
+    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error("只能登记当前任务工作目录中的产物。");
+    const info = statSync(source);
+    if (!info.isFile() || info.size > 50 * 1024 * 1024 || !/\.(html|png|svg|csv|json|md|txt|pdf)$/i.test(name)) throw new Error("产物类型不支持或超过 50 MB。");
+    const key = process.platform === "win32" ? name.toLowerCase() : name;
+    if (names.has(key)) throw new Error("本次登记包含重名文件，请分批登记。");
+    names.add(key); return { source, name, size: info.size };
+  });
+  const destination = path.join(root, "outputs", task.id, randomUUID());
+  mkdirSync(destination, { recursive: true, mode: 0o700 });
+  const files = sources.map(file => { const target = path.join(destination, file.name); copyFileSync(file.source, target); return { id: randomUUID(), name: file.name, path: target, size: file.size }; });
+  (task.outputs ||= []).push(...files);
+  return files;
 }
 
 export async function readTaskDocument(task: BrowserTask, value: unknown): Promise<{ content: any[] }> {

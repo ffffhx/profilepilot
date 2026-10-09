@@ -13,7 +13,7 @@ test('offline, stale or unavailable companion data never remains green', () => {
   for (const change of [{ connection: 'missing' }, { confirmedAt: null }, { confirmedAt: 0 }, { companion: 'unavailable' }]) {
     const view = phonePresentation({ ...device(), ...change }, 10000);
     assert.equal(view.known, false); assert.equal(view.canPreview, false); assert.equal(view.canSetup, false);
-    assert.ok([...view.permissions, ...view.settings].every(row => row.value === '未检测'));
+    assert.ok([...view.permissions, ...view.settings].every(row => row.value === (change.companion === 'unavailable' ? '暂时无法读取' : '未检测')));
   }
 });
 test('unknown debugging state is neither enabled nor disabled', () => {
@@ -132,4 +132,53 @@ test('a companion explicitly reporting disconnection is not shown as connected',
   assert.equal(overview(phone).view.canSetup, false);
   phone.state.readiness.computerConnected = true; phone.state.phase = 'disconnected';
   assert.equal(overview(phone).connected, false);
+});
+
+test('an unresponsive companion distinguishes recognized transport from unreadable permissions', () => {
+  for (const transport of ['usb', 'wifi', 'emulator']) {
+    const phone = { ...device(), transport, companion: 'unavailable', error: 'read ECONNRESET' };
+    phone.state.readiness.unlocked = false;
+    const status = overview(phone, 10000);
+    assert.equal(status.connected, false);
+    assert.equal(status.connectionLabel, 'App 未响应');
+    assert.equal(status.label, '暂时无法读取');
+    assert.equal(status.view.locked, false, 'historical lock state does not establish the current state');
+    assert.ok([...status.view.permissions, ...status.view.settings].every(row => row.status === 'unknown' && row.value === '暂时无法读取'));
+    assert.match(status.issue.description, /仍能识别.*权限和画面都无法更新/);
+    assert.match(status.issue.lastState, /上次.*尚未确认/);
+    assert.match(status.issue.steps.join(' '), /解锁.*ProfilePilot/);
+    assert.equal(status.issue.detail, 'read ECONNRESET');
+    if (transport !== 'emulator') assert.equal(status.routes.find(route => route.transport === transport).label, 'App 未响应');
+    assert.match(status.issue.steps[1], transport === 'wifi' ? /同一网络/ : transport === 'usb' ? /USB/ : /模拟器/);
+  }
+});
+
+test('screen lock with a responding app retains permissions and is not diagnosed as a timeout', () => {
+  const phone = device(); phone.state.readiness.unlocked = false;
+  const status = overview(phone);
+  assert.equal(status.connected, true); assert.equal(status.issue, null);
+  assert.equal(status.view.permissionsReady, true);
+  assert.equal(status.view.canPreview, false);
+  assert.match(status.connectionNote, /已锁屏/);
+});
+
+test('first setup and a lost physical connection do not claim the companion is unresponsive', () => {
+  for (const change of [{ companion: 'unknown', state: null, confirmedAt: null }, { companion: 'pairing' }, { connection: 'missing', companion: 'unavailable', error: '手机连接已断开。' }]) {
+    assert.equal(overview({ ...device(), ...change }).issue, null);
+  }
+});
+
+test('fresh cloud evidence is retained and newer unlocked evidence suppresses the old lock hint', () => {
+  const phone = { ...device(), companion: 'unavailable', error: 'socket hang up' };
+  phone.state.readiness.unlocked = false;
+  phone.cloud = { reportedAt: 2000, report: { permissions: phone.state.permissions, readiness: { ...phone.state.readiness, unlocked: true } } };
+  assert.equal(overview(phone, 3000).view.permissionsReady, true);
+  assert.equal(overview(phone, 3000).issue.lastState, '');
+  assert.equal(overview(phone, 50000).view.permissionsReady, false);
+  assert.equal(overview(phone, 50000).issue.lastState, '');
+});
+
+test('an uncertain input result remains visible in the recovery explanation', () => {
+  const phone = { ...device(), companion: 'unavailable', error: '手机没有返回这次操作的结果。请先查看手机，确认点击或输入是否已生效，再决定是否重试。' };
+  assert.match(overview(phone).issue.description, /确认点击或输入是否已生效/);
 });

@@ -29,6 +29,8 @@ On success use the same prefix with `complete` before the final response. On can
 
 ## Registered Electron apps
 
+Read `local/electron-control.md` beside the skill entrypoint if present. If absent, use any Electron-specific preferences in the older `local/browser-routing.md`. The dedicated file governs Electron preferences when both exist; browser-only routing does not apply to Electron.
+
 Verify the app is registered in ProfilePilot Local Apps with its own Agent logical port and renderer debugging ready. Use that logical port, not its native debug port or a Chrome Profile's port. Normal snapshots/reads/clicks/screenshots can stay in the background: Gateway suppresses Agent activation calls. Do not relaunch, show, focus or open DevTools just to inspect the app. Windows `windowsHide` only hides a console; macOS and Windows applications may still focus themselves on startup. Without the required debugging connection, report the limitation rather than claiming Gateway verification.
 
 ## Additional managed operations

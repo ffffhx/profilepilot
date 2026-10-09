@@ -98,6 +98,7 @@ async function run(input: WorkerStart): Promise<void> {
       sdk.tool("terminal_run", "在当前任务目录执行终端命令或 Node.js 代码。返回退出码和输出；running 时使用 terminal_read 继续查看。后台服务设置 background=true，由应用管理生命周期。", terminalRunSchema.shape, args => rpc("terminal_run", args)),
       sdk.tool("terminal_read", "查看当前任务终端进程状态、退出码和最新输出（超过上限时保留尾部）。", terminalReadSchema.shape, args => rpc("terminal_read", args)),
       sdk.tool("terminal_stop", "停止当前任务的终端进程及其子进程，例如不再需要的本地网页服务。", terminalStopSchema.shape, args => rpc("terminal_stop", args)),
+      sdk.tool("register_outputs", "登记当前任务终端工作目录内已生成的 HTML、PNG、SVG、CSV、JSON 等产物，供界面预览和下载。paths 是工作目录中的相对路径；需要互相引用的文件应一并登记。", { paths: z.array(z.string()).min(1).max(20) }, args => rpc("register_outputs", args)),
       sdk.tool("tabs", "列出浏览器标签页。", {}, (args) => rpc("tabs", args)),
       sdk.tool("verify_account", "记录页面中可见的当前登录账号。", { account: z.string(), evidence: z.string() }, (args) => rpc("verify_account", args)),
       sdk.tool("reconcile", "中断恢复后，用已观察的记录页或回执核查此前操作。", { receiptId: z.string(), outcome: z.enum(["completed", "not_completed", "uncertain"]), evidence: z.string() }, (args) => rpc("reconcile", args)),

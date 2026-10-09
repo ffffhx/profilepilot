@@ -11,14 +11,14 @@ export function richResult(result: TaskResult): string {
   return `<div class="task-markdown">${taskMarkdown(result.summary)}${resultDetails(result)}</div>`;
 }
 function comparableAnswer(text: string): string { return text.replace(/\r\n?/g, "\n").replace(/[ \t]+$/gm, "").trim(); }
-function matchingAnswer(task: BrowserTask): string {
+export function matchingAnswer(task: BrowserTask): string {
   if (task.result?.kind !== "answer") return "";
   const latest = [...task.events].reverse().find(event => event.kind === "user" || event.kind === "assistant");
   if (latest?.kind !== "assistant") return "";
   const summary = task.result.summary.replace(/^已回答[:：]\s*/, "");
   return comparableAnswer(summary) === comparableAnswer(latest.text) ? latest.id : "";
 }
-function resumedAnswerAliases(task: BrowserTask): { bySource: Map<string, { event: TaskEvent; extra: string }>; skipped: Set<string> } {
+export function resumedAnswerAliases(task: BrowserTask): { bySource: Map<string, { event: TaskEvent; extra: string }>; skipped: Set<string> } {
   const bySource = new Map<string, { event: TaskEvent; extra: string }>(), skipped = new Set<string>();
   const events = task.events;
   for (let index = 0; index < events.length - 3; index++) {

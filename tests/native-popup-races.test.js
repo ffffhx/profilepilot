@@ -1,97 +1,59 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { popupFixture } = require('./helpers/native-popup-fixture.cjs');
-const tabs = [{ id: 7, url: 'https://fixture.test/a', title: 'A', windowId: 2, active: true },
-  { id: 8, url: 'https://fixture.test/b', title: 'B', windowId: 2, active: false }];
-const currentTask = { id: 'existing', status: 'running', title: 'Existing conversation' };
-const edit = (f, value) => { f.element('#prompt').value = value; f.element('#prompt').listeners.input(); };
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 
-test('a late send preserves a newer draft, including text edited back to the original', async () => {
-  for (const newer of ['new unsent text', 'first']) {
-    const f = await popupFixture(tabs, { state: { task: currentTask } });
-    const reply = deferred(); f.handlers.taskMessage = () => reply.promise;
-    edit(f, 'first'); const pending = f.submit('#compose'); await f.flush();
-    edit(f, 'intermediate edit'); edit(f, newer);
-    reply.resolve({ result: currentTask }); await pending;
-    assert.equal(f.element('#prompt').value, newer);
-    assert.equal(f.calls.filter(c => c.method === 'taskMessage').length, 1);
-  }
+test('slow polling is single flight and leaves the last known connection visible', async () => {
+  const f = await popupFixture([]), reply = deferred();
+  f.handlers.state = () => reply.promise;
+  await f.poll(); await f.poll(); await f.poll();
+  assert.equal(f.calls.filter(c => c.method === 'state').length, 2);
+  assert.equal(f.element('#connection-label').textContent, '已连接');
+  reply.resolve({ result: { ...f.state, connected: false } }); await f.flush();
+  assert.equal(f.element('#connection-label').textContent, '未连接');
 });
 
-test('a late send cannot leave the new conversation or discard its draft', async () => {
-  const f = await popupFixture(tabs, { state: { task: currentTask } });
-  const reply = deferred(); f.handlers.taskMessage = () => reply.promise;
-  edit(f, 'old conversation message'); const pending = f.submit('#compose'); await f.flush();
-  f.element('#new-task').onclick(); edit(f, 'new task draft');
-  reply.resolve({ result: currentTask }); await pending; await f.poll();
-  assert.equal(f.element('#prompt').value, 'new task draft');
-  assert.equal(f.element('#conversation').hidden, true);
-  assert.equal(f.element('#send').textContent, '开始任务');
-  f.handlers.startTask = () => ({ result: { id: 'new-task', status: 'queued' } });
-  await f.submit('#compose');
-  assert.equal(f.calls.find(c => c.method === 'startTask').prompt, 'new task draft');
-  assert.equal(f.calls.filter(c => c.method === 'taskMessage').length, 1);
+test('an old status reply cannot overwrite a newly paired Profile', async () => {
+  const f = await popupFixture([], { state: { profileId: undefined, connected: false } }), old = deferred();
+  f.handlers.state = () => old.promise;
+  await f.poll();
+  f.handlers.connect = () => ({ result: { profileId: 'native:Profile 2', connected: true } });
+  f.element('#code').value = 'PP1.fixture'; await f.submit('#connect');
+  old.resolve({ result: f.state }); await f.flush();
+  assert.equal(f.element('#profile-name').textContent, 'Profile 2');
+  assert.equal(f.element('#connection-label').textContent, '已连接');
+  assert.equal(f.element('#connect').hidden, true);
 });
 
-test('choosing a new conversation while target lookup waits cancels the unsent request', async () => {
-  const f = await popupFixture(tabs);
-  const context = deferred(); f.handlers.getPageContext = () => context.promise;
-  edit(f, 'old draft'); const pending = f.submit('#compose'); await f.flush();
-  f.element('#new-task').onclick(); edit(f, 'new draft');
-  context.resolve({ result: tabs[0] }); await pending;
-  assert.equal(f.calls.some(c => c.method === 'startTask'), false);
-  assert.equal(f.element('#prompt').value, 'new draft');
-  assert.equal(f.element('#send').disabled, false);
+test('an old status reply cannot overwrite an explicit reconnect', async () => {
+  const f = await popupFixture([], { state: { connected: false } }), old = deferred();
+  f.handlers.state = () => old.promise; await f.poll();
+  f.handlers.reconnect = () => ({ result: { ...f.state, connected: true } });
+  await f.element('#reconnect').onclick();
+  old.resolve({ result: f.state }); await f.flush();
+  assert.equal(f.element('#connection-label').textContent, '已连接');
+  assert.equal(f.element('#reconnect').hidden, true);
 });
 
-test('selection from another tab or a navigated document is omitted before starting a task', async () => {
-  for (const actual of [tabs[1], { ...tabs[0], url: 'https://fixture.test/changed' }]) {
-    const f = await popupFixture(tabs);
-    f.handlers.getPageContext = () => ({ result: { ...tabs[0], selection: 'Only from document A' } });
-    f.element('#refresh-context').onclick(); await f.flush();
-    assert.equal(f.element('#selection').hidden, false);
-    f.handlers.getPageContext = () => ({ result: actual });
-    edit(f, 'explain current document'); await f.submit('#compose');
-    const sent = f.calls.find(c => c.method === 'startTask');
-    assert.equal(sent.tabId, actual.id);
-    assert.equal(sent.selection, undefined);
-  }
+test('duplicate pairing submits and polls cannot run during pairing', async () => {
+  const f = await popupFixture([], { state: { connected: false, profileId: undefined } }), reply = deferred();
+  f.handlers.connect = () => reply.promise;
+  f.element('#code').value = 'PP1.fixture';
+  const sending = f.submit('#connect');
+  await f.submit('#connect'); await f.poll();
+  assert.equal(f.element('#connect-submit').disabled, true);
+  assert.deepEqual(f.calls.map(c => c.method), ['state', 'connect']);
+  reply.resolve({ result: { profileId: 'native:Default', connected: true } }); await sending;
+  assert.equal(f.element('#connect-submit').disabled, false);
+  assert.equal(f.element('#code').value, '');
 });
 
-test('a retained explicit selection must still match that tab current document', async () => {
-  const f = await popupFixture(tabs, { storage: { nativeTaskContext: { ...tabs[0], selection: 'Saved selection A' } } });
-  f.handlers.getPageContext = () => ({ result: { ...tabs[0], url: 'https://fixture.test/new-document' } });
-  edit(f, 'summarize selected page'); await f.submit('#compose');
-  const sent = f.calls.find(c => c.method === 'startTask');
-  assert.equal(sent.tabId, 7); assert.equal(sent.selection, undefined);
-});
-
-test('lost-response retry keeps the validated original selection and request despite polling', async () => {
-  const f = await popupFixture(tabs);
-  f.handlers.getPageContext = () => ({ result: { ...tabs[0], selection: 'Saved selection A' } });
-  f.element('#refresh-context').onclick(); await f.flush();
-  f.handlers.startTask = () => ({ error: 'Connection lost before receipt' });
-  edit(f, 'explain selection'); await f.submit('#compose');
-  const first = f.calls.find(c => c.method === 'startTask');
-  assert.equal(first.tabId, 7); assert.equal(first.selection, 'Saved selection A');
-  f.setState({ currentTab: tabs[1], task: { id: 'created', status: 'running' } }); await f.poll();
-  assert.equal(f.element('#selection').hidden, true);
-  f.handlers.getPageContext = () => ({ result: tabs[1] });
-  f.handlers.startTask = () => ({ result: { id: 'created', status: 'running' } });
-  await f.submit('#compose');
-  const second = f.calls.filter(c => c.method === 'startTask')[1];
-  assert.deepEqual(second, first);
-  assert.equal(f.calls.some(c => c.method === 'taskMessage'), false);
-});
-
-test('changing the page selector during current-page lookup prevents an ambiguous send', async () => {
-  const f = await popupFixture(tabs);
-  const context = deferred(); f.handlers.getPageContext = () => context.promise;
-  edit(f, 'read current page'); const pending = f.submit('#compose'); await f.flush();
-  f.element('#next-tab').value = '8'; f.element('#next-tab').listeners.change();
-  context.resolve({ result: tabs[0] }); await pending;
-  assert.equal(f.calls.some(c => c.method === 'startTask'), false);
-  assert.match(f.element('#error').textContent, /页面已改变/);
-  assert.equal(f.element('#prompt').value, 'read current page');
+test('a worker error removes a stale connected indicator and recovers on the next poll', async () => {
+  const f = await popupFixture([]);
+  f.handlers.state = () => ({ error: 'Worker unavailable' }); await f.poll();
+  assert.equal(f.element('#connection-label').textContent, '状态暂不可用');
+  assert.equal(f.element('#controlled-tab').hidden, true);
+  delete f.handlers.state; await f.poll();
+  assert.equal(f.element('#connection-label').textContent, '已连接');
+  assert.equal(f.element('#controlled-tab').hidden, false);
 });

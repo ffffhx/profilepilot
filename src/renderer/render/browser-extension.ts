@@ -27,14 +27,6 @@ function extensionPresentation() {
   return { profiles, profilesPending, profilePlaceholder, selected, browser, ready, loading, status, message, tone };
 }
 
-export function renderBrowserExtensionSummary(): string {
-  const { selected, status, tone } = extensionPresentation();
-  return `<div class="tools-status-item ${tone}">
-    <span class="tools-status-mark" aria-hidden="true">${tone === "ready" ? "✓" : tone === "pending" ? "…" : "!"}</span>
-    <div><strong>浏览器扩展${tone === "ready" ? "已连接" : tone === "pending" ? "检测中" : "待连接"}</strong><small title="${escapeHtml(selected?.name || "选择系统 Chrome Profile")}">${escapeHtml(status)}</small></div>
-  </div>`;
-}
-
 export function renderBrowserExtensionPanel(): string {
   const { profiles, profilesPending, profilePlaceholder, selected, browser, ready, loading, status, message, tone } = extensionPresentation();
 

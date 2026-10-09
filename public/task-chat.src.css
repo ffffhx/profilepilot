@@ -1,0 +1,40 @@
+@tailwind utilities;
+
+.task-chat-surface { min-width: 0; --background: var(--panel); --foreground: var(--ink); --muted-foreground: var(--muted); --border: var(--line); }
+.task-chat-thread { min-width: 0; }
+.task-chat-surface .history-answer { margin: 24px 0 30px; }
+.task-chat-surface .history-request { max-width: min(88%, 760px); }
+.task-chat-surface .history-agent { margin-bottom: 10px; color: var(--muted); font-size: 12px; font-weight: 600; }
+.task-chat-surface .task-markdown { font-size: 15px; line-height: 1.8; overflow-wrap: anywhere; min-width: 0; }
+.task-chat-surface .task-markdown p { white-space: normal; margin: 0 0 12px; }
+.task-chat-surface .task-markdown :where(h1,h2,h3,h4) { line-height: 1.45; margin: 22px 0 12px; }
+.task-chat-surface .task-markdown :where(ul,ol) { padding-left: 1.6em; margin: 10px 0 16px; }
+.task-chat-surface .task-markdown li { margin: 4px 0; }
+.task-chat-surface .task-markdown blockquote { border-left: 3px solid var(--line); margin: 14px 0; padding: 4px 16px; color: var(--muted); }
+.task-chat-surface :where(pre,code) { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .9em; }
+.task-chat-surface pre { overflow-x: auto; max-width: 100%; margin: 0; padding: 16px; line-height: 1.65; white-space: pre; }
+.task-chat-surface [data-streamdown="code-block"] { border: 1px solid var(--line); border-radius: 10px; margin: 16px 0; overflow: hidden; background: var(--panel); }
+.task-chat-surface [data-streamdown="code-block-header"] { min-height: 38px; padding: 6px 12px; border-bottom: 1px solid var(--line); background: var(--raised); }
+.task-chat-surface [data-streamdown="code-block-actions"] button { min-width: 30px; min-height: 30px; padding: 5px; display: inline-flex; align-items: center; justify-content: center; }
+.task-chat-surface .task-markdown table { width: 100%; border-collapse: collapse; margin: 10px 0; }
+.task-chat-surface .task-markdown :where(th,td) { padding: 9px 12px; border: 1px solid var(--line); text-align: left; }
+.task-chat-surface .task-markdown th { background: var(--raised); font-weight: 600; }
+.task-chat-surface .chat-message-actions { display: flex; gap: 8px; margin-top: 12px; }
+.task-chat-surface .chat-message-actions button { min-height: 30px; font-size: 12px; color: var(--muted); padding: 4px 9px; }
+.task-chat-surface .chat-composer { border: 1px solid var(--line); padding: 14px 16px 10px; border-radius: 14px; background: var(--panel); }
+.task-chat-surface .chat-composer:focus-within { border-color: var(--task-focus, #4f7cff); box-shadow: 0 0 0 2px color-mix(in srgb, var(--task-focus, #4f7cff) 14%, transparent); }
+.task-chat-surface .chat-composer textarea { display: block; resize: none; width: 100%; box-sizing: border-box; min-height: 44px; border: 0; background: transparent; color: var(--ink); font: inherit; line-height: 1.7; padding: 6px 0; outline: none; box-shadow: none; }
+.task-chat-surface .chat-composer .compose-toolbar { align-items: center; gap: 10px; flex-wrap: wrap; padding-top: 10px; }
+.task-chat-surface .chat-composer .send-task { min-width: 76px; min-height: 38px; margin-left: auto; padding: 8px 15px; }
+.task-chat-surface .chat-composer select { max-width: 115px; min-height: 34px; padding: 5px 8px; }
+.task-chat-surface .task-context-line { display: flex; align-items: center; gap: 12px; margin-top: 8px; color: var(--muted); font-size: 12px; }
+.task-chat-surface .task-context-line span { max-width: 38%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.task-chat-surface .chat-input-hint { display: block; margin-top: 6px; font-size: 11px; color: var(--muted); }
+.task-chat-surface .chat-image-label { color: var(--muted); }
+.workspace-layout .history-footer .task-chat-surface #steer-task { display:flex; flex-direction:column; gap:0; padding:14px 16px 10px; border-radius:14px; }
+.workspace-layout .task-chat-surface #steer-task textarea { resize:none; min-height:44px; padding:6px 0; border:0; outline:none; box-shadow:none; }
+.workspace-layout .task-chat-surface #steer-task .task-followup-actions { width:100%; align-self:stretch; order:0; margin:0; padding-top:8px; }
+.workspace-layout .task-chat-surface #steer-task .composer-meta { align-self:stretch; flex-wrap:wrap; margin-top:8px; }
+.workspace-layout .task-chat-surface #steer-task .send-task { width:auto; min-width:76px; }
+.workspace-layout .task-chat-surface #steer-task .chat-input-hint { margin-top:6px; }
+@media (prefers-reduced-motion: reduce) { .task-chat-surface * { animation: none !important; scroll-behavior: auto !important; } }

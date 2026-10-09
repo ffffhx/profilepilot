@@ -1,24 +1,25 @@
 ﻿.workspace-guide {
   position:fixed; inset:0; width:100vw; height:100dvh; max-width:none; max-height:none;
   margin:0; padding:0; border:0; background:transparent; color:var(--ink); overflow:hidden;
-  font:14px/1.65 var(--font); -webkit-app-region:no-drag;
+  font:14px/1.65 var(--font); -webkit-app-region:no-drag; z-index:1000; pointer-events:none;
 }
 .workspace-guide::backdrop { background:transparent; }
 .workspace-guide[data-theme="dark"] {
   color-scheme:dark; --panel:#1e2a3c; --hover:#304159; --ink:#e5edf9; --muted:#afbdd2;
   --line:#34465f; --line-strong:#7085a3; --accent:#a2c2ff; --accent-ink:#152846; --focus:#a2c2ff;
 }
-.guide-veil { position:absolute; inset:0; background:#101e36a8; }
+.guide-veil { position:absolute; inset:0; background:var(--workspace-guide-shade); }
+.guide-shield { position:absolute; inset:0 0 0 var(--workspace-rail-width); pointer-events:auto; }
 .workspace-guide[data-target-ready="true"] .guide-veil { visibility:hidden; }
 .guide-spotlight {
   position:absolute; box-sizing:border-box; border:2px solid #8eb6ff; border-radius:9px;
-  background:transparent; box-shadow:0 0 0 9999px #101e36a8,0 0 0 4px #6d9cff38;
+  background:transparent; box-shadow:0 0 0 9999px var(--workspace-guide-shade),0 0 0 4px #6d9cff38;
   pointer-events:none;
 }
 .guide-card {
   position:absolute; box-sizing:border-box; width:336px; max-width:calc(100vw - 24px); max-height:calc(100dvh - 24px);
   padding:16px 18px; background:var(--panel); border:1px solid var(--line); border-radius:12px;
-  box-shadow:0 12px 48px #07132c50; overflow:auto; overscroll-behavior:contain;
+  box-shadow:0 12px 48px #07132c50; overflow:auto; overscroll-behavior:contain; pointer-events:auto;
 }
 /* A short accent on the side facing the highlighted control keeps the card's direction clear. */
 .guide-card[data-side="right"] { border-left:3px solid #8eb6ff; }
@@ -29,7 +30,6 @@
 .workspace-guide button { cursor:pointer; }
 .guide-header { display:flex; align-items:center; justify-content:space-between; gap:10px; }
 .guide-chapter-label { display:flex; align-items:center; gap:8px; color:var(--muted); font-size:11px; }
-.guide-chapter-label select { max-width:145px; padding:3px 7px; border:1px solid var(--line); border-radius:5px; background:var(--panel); color:var(--ink); font-size:12px; cursor:pointer; }
 .workspace-guide .guide-close { width:26px; height:26px; padding:0; border:0; background:transparent; border-radius:5px; font-size:23px; line-height:1; color:var(--muted); }
 .workspace-guide .guide-close:hover { background:var(--hover); }
 .guide-card h2 { margin:13px 0 8px; font-size:17px; font-weight:650; line-height:1.5; outline:none; }
@@ -52,3 +52,4 @@
   .guide-card h2 { font-size:15px; margin:9px 0 6px; }
   .guide-footer { margin-top:12px; padding-top:9px; }
 }
+:root { --workspace-guide-shade:#101e36a8; }

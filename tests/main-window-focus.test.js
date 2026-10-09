@@ -17,13 +17,13 @@ test("showMainWindow explicitly unhides and activates the macOS app", () => {
 
 test("main window enters Mini only through explicit user actions", () => {
   const source = readFileSync(path.join(__dirname, "../src/main/main.ts"), "utf8");
-  const rendererSource = readFileSync(path.join(__dirname, "../src/renderer/main.ts"), "utf8");
+  const rendererSource = readFileSync(path.join(__dirname, "../src/renderer/render/render-root.ts"), "utf8");
 
   assert.doesNotMatch(source, /mainWindow\.on\("blur"/);
   assert.doesNotMatch(source, /mainWindowBlurTimer/);
   assert.doesNotMatch(source, /mainWindow\.on\("minimize"/);
   assert.match(source, /IPC_CHANNELS\.showMiniWindow/);
-  assert.match(rendererSource, /action === "open-mini-window"/);
+  assert.doesNotMatch(rendererSource, /data-action="open-mini-window"/);
 });
 
 test("main window close exits on Windows and Linux while preserving macOS window semantics", () => {

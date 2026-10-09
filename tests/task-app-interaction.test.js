@@ -127,15 +127,15 @@ test('#1/#4/#28 controls stay outside inspector, summary and separate reply + or
   const html = workbenchThread(task({ pending: { id: 'q1', kind: 'confirmation', title: 'Approve?', details: 'details' } }), options());
   assert.ok(html.indexOf('data-control="cancel"') < html.indexOf('id="task-inspector"'));
   assert.match(html, /class="task-thread-status"/); assert.match(html, /class="task-decision-card"/);
-  assert.match(html, /id="reply-task"/); assert.match(html, /id="steer-task"/); assert.match(html, /data-decision-id="q1"/);
+  assert.match(html, /id="reply-task"/); assert.match(html, /id="task-chat-composer"/); assert.match(html, /data-decision-id="q1"/);
   assert.doesNotMatch(html, /id="task-evidence"/);
   const withEvidence = workbenchThread(task({ evidencePages: [{ title: 'Source', url: 'https://example.com', snapshot: 'Observed text' }] }), options());
   assert.match(withEvidence, /id="task-evidence"/); assert.match(withEvidence, /Observed text/);
 });
 test('#2/#24/#56/#57 followup has files/context/queue and scoped approval/revoke entry', () => {
   const html = workbenchThread(task({ pending: { id: 'q1', kind: 'confirmation', title: 'scope', details: '', permissionScope: { kind: 'browser', label: 'write', scope: 'https://example.com' } }, permissionRules: [{ id: 'rule1', label: 'site writes', scope: 'example.com' }], messageQueue: [{ id: 'm1', message: 'queued', attachmentIds: ['a'], createdAt: '' }] }), options());
-  assert.equal((html.match(/data-action="attach-message"/g) || []).length, 2);
-  for (const pattern of [/Profile：工作账户/, /模型：model-local/, /data-edit-queued="m1"/, /data-remove-queued="m1"/, /value="session"/, /data-revoke-permission="rule1"/, /class="compose-toolbar task-followup-actions"/, /aria-label="发送时机"/, /value="steer"[^>]*disabled/, /id="steering-help" class="sr-only"/]) assert.match(html, pattern);
+  assert.equal((html.match(/data-action="attach-message"/g) || []).length, 1, 'decision attachments remain outside the React composer');
+  for (const pattern of [/id="task-chat-composer"/, /data-edit-queued="m1"/, /data-remove-queued="m1"/, /value="session"/, /data-revoke-permission="rule1"/]) assert.match(html, pattern);
 });
 test('#19 keyboard users can read disabled takeover reason in ordinary text', () => {
   const html = workbenchThread(task(), options()); assert.match(html, /disabled aria-describedby="task-takeover-reason"/); assert.match(html, /id="task-takeover-reason">任务连接浏览器后可接管/);
@@ -146,7 +146,7 @@ test('#26 pin and status coexist with Profile/time/status metadata', () => {
 });
 test('#61/#64/#65 stream has visible pending reply; history retention and lifecycle are accurate', () => {
   const html = workbenchThread(task(), { ...options(), stream: { id: 's', text: '**streaming**', updatedAt: '' } });
-  assert.match(html, /id="task-stream"/); assert.match(html, /<strong>streaming<\/strong>/); assert.match(html, /直到你显式删除任务/); assert.match(html, /关闭窗口后任务继续在后台运行/); assert.match(html, /退出 ProfilePilot 应用会停止任务服务/); assert.doesNotMatch(html, /默认保留 30 天/);
+  assert.match(html, /id="task-chat"[^>]*data-task-chat-owned/); assert.match(html, /直到你显式删除任务/); assert.match(html, /关闭窗口后任务继续在后台运行/); assert.match(html, /退出 ProfilePilot 应用会停止任务服务/); assert.doesNotMatch(html, /默认保留 30 天/);
 });
 test('#13/#17 terminal tasks without a saved result still explain completion state', () => {
   assert.match(richTranscript(task({ status: 'failed' })), /尚无完整核实结果/);
@@ -186,10 +186,10 @@ test('resume folds only an adjacent saved pure answer, retaining its event ancho
   assert.equal((repeatedUser.match(/继续处理/g) || []).length, 2);
 });
 test('compact followup is only offered for terminal tasks without a pending decision or queue', () => {
-  assert.match(workbenchThread(task({ status: 'completed' }), options()), /class="task-composer task-composer-compact"/);
+  assert.match(workbenchThread(task({ status: 'completed' }), options()), /class="task-detail[^"]*is-terminal/);
   assert.match(workbenchThread(task({ status: 'completed' }), options()), /id="task-thread-end"/);
-  assert.doesNotMatch(workbenchThread(task({ status: 'completed', messageQueue: [{ id: 'q', message: 'later', attachmentIds: [], createdAt: '' }] }), options()), /task-composer-compact/);
-  assert.doesNotMatch(workbenchThread(task({ status: 'waiting_user', pending: { id: 'p', kind: 'question', title: 'Question', details: '' } }), options()), /task-composer-compact/);
+  assert.doesNotMatch(workbenchThread(task({ status: 'completed', messageQueue: [{ id: 'q', message: 'later', attachmentIds: [], createdAt: '' }] }), options()), /is-terminal/);
+  assert.doesNotMatch(workbenchThread(task({ status: 'waiting_user', pending: { id: 'p', kind: 'question', title: 'Question', details: '' } }), options()), /is-terminal/);
 });
 test('#2 questions require a written answer; attachments never approve an unanswered question', () => {
   const html = workbenchThread(task({ pending: { id: 'q', kind: 'question', title: 'Need a choice', details: '' } }), options());

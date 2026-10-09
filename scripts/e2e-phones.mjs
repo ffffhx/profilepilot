@@ -23,22 +23,29 @@ try {
     } catch { await delay(50); }
   }
   assert.ok(driver, `Fixture driver did not start: ${logs}`);
-  await driver.waitFor('h1', item => item.text === '手机');
+  await driver.waitFor('h1', item => item.text === '手机控制');
   assert.equal((await driver.windows()).main.visible, false);
   assert.equal((await driver.query('[name="phoneDevice"] option')).count, 3);
   assert.equal((await driver.query('[data-action="connect"]')).count, 0, 'no separate connect button beside the device selector');
   assert.equal((await driver.query('[name="phoneDevice"] option[value^="connect:"]')).count, 0, 'selector contains physical devices only');
   assert.equal((await driver.query('.phone-route')).count, 2);
   assert.equal((await driver.query('.phone-readiness')).text, '连接条件已就绪');
-  assert.equal((await driver.query('.phone-preview')).exists, false, 'no blank phone screenshot panel');
+  await driver.evaluate('document.querySelector("[data-phone-app-setup]").open=true');
+  await driver.waitFor('.phone-preview img');
+  const previewCalls = () => driver.evaluate('window.phoneFixture.previewCalls()');
+  assert.equal(await previewCalls(), 1, 'connected USB phone automatically captures once');
   assert.equal((await driver.query('.phone-cli, #phone-start-form, [name="allowInput"], #phone-text-form')).count, 0);
   const state = () => driver.evaluate('window.phones.snapshot()');
   const phase = expected => driver.waitFor('.phone-task-heading', item => expected.test(item.text));
   const paint = () => driver.evaluate('document.querySelector(".phone-shell").scrollTo(0, 0); new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
-  const idle = await state(); assert.equal(idle.devices[0].state.phase, 'idle');
+  const idle = await state(); assert.equal(idle.devices[0].state.phase, 'stopped');
   assert.equal((await driver.query('.phone-setting-status[data-status="enabled"]')).count, 6);
+  await delay(1200);
+  await driver.evaluate('window.phoneFixture.setState("UI-TEST-1", { lastAction: "状态更新" })');
+  assert.equal(await previewCalls(), 1, 'timer ticks and status updates retain the image without capturing again');
   await driver.domClick('[data-action="screenshot"]');
-  await driver.waitFor('.phone-preview img');
+  await driver.waitFor('[data-action="screenshot"]', item => !item.disabled);
+  assert.equal(await previewCalls(), 2, 'manual refresh remains available');
   assert.equal((await state()).devices[0].state.phase, 'stopped', 'one-off preview must release its view session');
   assert.equal((await driver.query('.phone-task-strip')).count, 0);
   await driver.domClick('[data-action="enlarge"]');
@@ -73,7 +80,7 @@ try {
   await driver.domClick('[data-action="rename"]');
   await driver.domInput('.phone-name-dialog input', '<手机 & 名称>');
   await driver.domClick('.phone-name-dialog button[type="submit"]');
-  await driver.waitFor('.phone-heading h2', item => item.text === '<手机 & 名称>');
+  await driver.waitFor('[name="phoneDevice"] option:checked', item => item.text === '<手机 & 名称>');
   assert.equal(await driver.evaluate('document.documentElement.scrollWidth > innerWidth'), false);
   await driver.domClick('[data-phone-options] [data-action="emulator"]');
   await driver.waitFor('.phone-emulator-dialog[open]');
@@ -113,7 +120,7 @@ try {
   const wireless = (await state()).devices.find(d => d.id === '192.168.1.8:40235');
   assert.equal(wireless.state, null, 'pairing/connecting must not start control or install the app');
   await driver.domClick('[data-finish]');
-  await driver.waitFor('.phone-heading h2', item => item.text === 'Wireless Test Phone');
+  await driver.waitFor('[name="phoneDevice"] option:checked', item => item.text === 'Wireless Test Phone');
   await driver.domClick('[data-phone-options] [data-action="wifi"]');
   await driver.waitFor('.wireless-error', item => /尚未发现|确认设备身份/.test(item.text));
   await driver.domClick('[data-manual]');
@@ -125,7 +132,7 @@ try {
   await driver.evaluate('window.phoneFixture.setConnection(true)');
   assert.equal((await state()).devices.length, 5);
   assert.equal((await driver.query('[name="phoneDevice"] option')).count, 4);
-  assert.equal((await driver.query('.phone-heading h2')).text, '<手机 & 名称>');
+  assert.equal((await driver.query('[name="phoneDevice"] option:checked')).text, '<手机 & 名称>');
   await driver.evaluate('window.phones.start("UI-TEST-1", "control", "Codex", "检查应用设置")');
   await phase(/正在操作/);
   await driver.evaluate('window.phoneFixture.setConnection(true)');
@@ -136,8 +143,9 @@ try {
   assert.equal((await driver.query('[data-route="wifi"] .phone-route-badge')).text, '已连接');
   assert.match((await driver.query('.phone-connection-note')).text, /Wi-Fi/);
   assert.equal((await driver.query('.phone-error')).exists, false);
-  await driver.domClick('[data-action="screenshot"]');
   await driver.waitFor('.phone-preview img');
+  await driver.waitFor('[data-action="screenshot"]', item => !item.disabled);
+  assert.equal((await state()).devices.find(device => device.id === '192.168.1.9:40236').state.phase, 'controlling', 'automatic Wi-Fi preview preserves the active task');
   await paint();
   await writeFile(path.join(output, 'same-phone-wifi.png'), Buffer.from((await driver.screenshot()).pngBase64, 'base64'));
   await driver.domClick('[data-action="pause"]'); await phase(/暂停/);
@@ -160,8 +168,8 @@ try {
   await writeFile(path.join(output, 'offline.png'), Buffer.from((await driver.screenshot()).pngBase64, 'base64'));
   await driver.domInput('[name="phoneDevice"]', 'emulator-5554');
   await driver.waitFor('.phone-connection', item => /未连接/.test(item.text));
-  assert.equal((await driver.query('.phone-heading h2')).text, 'Android 模拟器');
-  assert.equal((await driver.query('.phone-setting')).count, 0, 'do not show undetected phone switches for an emulator');
+  assert.equal((await driver.query('[name="phoneDevice"] option:checked')).text, 'Android 模拟器');
+  assert.equal((await driver.query('.phone-setting')).count, 3, 'App permissions stay visible for an emulator');
   assert.match((await driver.query('.phone-emulator-connection [data-action="emulator"]')).text, /启动.*模拟器/);
   assert.doesNotMatch((await driver.query('.phone-connection-note')).text, /请用 USB|手机上允许/);
   await paint();
@@ -193,15 +201,15 @@ try {
   await writeFile(path.join(output, 'cloud-online.png'), Buffer.from((await driver.screenshot()).pngBase64, 'base64'));
   await driver.evaluate('window.phoneFixture.setCloud(0, { debugReasons: { wirelessDebugging: "denied" }, appVersion: "0.2.1" })');
   await driver.waitFor('[data-setting="wirelessDebugging"]', item => /系统拒绝读取/.test(item.text));
-  assert.match((await driver.query('[data-route="wifi"] .phone-route-note')).text, /没有读取此开关的权限/);
+  assert.match((await driver.query('[data-setting="wirelessDebugging"]')).text, /没有读取此开关的权限/);
   await driver.evaluate('window.phoneFixture.setCloud(0, { developerOptions: "enabled", usbDebugging: "enabled", wirelessDebugging: "disabled", debugReasons: { wirelessDebugging: "system-value" } })');
-  await driver.waitFor('[data-route="wifi"] .phone-route-badge', item => item.text === '未就绪');
+  await driver.waitFor('[data-route="wifi"] .phone-route-badge', item => item.text === '未连接');
   assert.match((await driver.query('[data-setting="wirelessDebugging"]')).text, /未开启/);
   assert.equal((await driver.query('.phone-readiness')).text, '连接条件已就绪');
   await driver.evaluate('window.phoneFixture.setCloud(0, { developerOptions: "enabled", usbDebugging: "disabled", wirelessDebugging: "enabled" })');
   await driver.waitFor('.phone-readiness', item => item.text === '连接条件已就绪');
   assert.equal((await driver.query('.phone-connection')).text, '未连接');
-  assert.equal((await driver.query('[data-route="usb"] .phone-route-badge')).text, '未就绪');
+  assert.equal((await driver.query('[data-route="usb"] .phone-route-badge')).text, '未连接');
   assert.equal((await driver.query('[data-action="screenshot"]')).disabled, true);
   await driver.domClick('[data-phone-options] summary');
   await paint();
@@ -218,9 +226,79 @@ try {
   assert.match((await driver.query('[data-result] textarea')).value, /^profilepilot:\/\/status/);
   assert.equal(await driver.evaluate('document.querySelector("[data-result] textarea").readOnly'), true);
   await driver.domClick('.phone-connect-dialog[open] [data-close]');
+  // Reconnection in an inactive workspace waits until it is shown. A failed
+  // capture does not repeatedly create sessions or spam the phone with retries.
+  await driver.evaluate('window.workspacePane = { active: false }; document.dispatchEvent(new Event("workspace-visibilitychange"))');
+  const beforeReconnect = await previewCalls();
+  await driver.evaluate('window.phoneFixture.setConnection(true)');
+  await driver.domInput('[name="phoneDevice"]', 'UI-TEST-1');
+  await delay(1200);
+  assert.equal(await previewCalls(), beforeReconnect, 'inactive workspace does not capture');
+  await driver.evaluate('window.phoneFixture.previewBehavior({ fail: true })');
+  await driver.evaluate('window.workspacePane.active = true; document.dispatchEvent(new Event("workspace-visibilitychange"))');
+  await driver.waitFor('[data-action="screenshot"]', item => item.text === '重试');
+  await delay(1200);
+  await driver.evaluate('window.phoneFixture.setState("UI-TEST-1", { lastAction: "截图失败后更新状态" })');
+  assert.equal(await previewCalls(), beforeReconnect + 1, 'failed automatic preview is not retried by polling');
+  await driver.domClick('[data-action="screenshot"]');
+  await driver.waitFor('.phone-preview img');
+  assert.equal(await previewCalls(), beforeReconnect + 2, 'manual retry recovers the preview');
+  await driver.evaluate('window.workspacePane.active = false; document.dispatchEvent(new Event("workspace-visibilitychange")); window.workspacePane.active = true; document.dispatchEvent(new Event("workspace-visibilitychange"))');
+  assert.equal(await previewCalls(), beforeReconnect + 2, 'returning to a pane keeps the cached image');
+  // Delay an old phone response until after selection changes; it must never
+  // populate the newly selected phone's preview, even if its capture fails.
+  await driver.evaluate('window.phoneFixture.previewBehavior({ delay: 1200 })');
+  await driver.domClick('[data-action="screenshot"]');
+  await driver.waitFor('[data-action="screenshot"]', item => item.text === '获取中…');
+  await driver.evaluate('window.phoneFixture.previewBehavior({ fail: true })');
+  await driver.domInput('[name="phoneDevice"]', 'UI-TEST-2');
+  await driver.waitFor('[data-action="screenshot"]', item => item.text === '重试');
+  assert.equal((await driver.query('.phone-preview img')).exists, false, 'late screenshot from the previous device is discarded');
+  await driver.domClick('[data-action="screenshot"]');
+  await driver.waitFor('.phone-preview img');
+  // A phone waiting for user readiness gets its first image only after unlock.
+  await driver.evaluate('window.phoneFixture.setOffline()');
+  await driver.domInput('[name="phoneDevice"]', 'UI-TEST-1');
+  const readiness = (await state()).devices.find(device => device.id === 'UI-TEST-1').state.readiness;
+  await driver.evaluate(`window.phoneFixture.setState("UI-TEST-1", { readiness: ${JSON.stringify({ ...readiness, unlocked: false })} })`);
+  const beforeUnlock = await previewCalls();
+  await driver.evaluate('window.phoneFixture.setConnection(true)');
+  await driver.waitFor('.phone-screen-bar', item => /请先解锁/.test(item.text));
+  assert.equal(await previewCalls(), beforeUnlock);
+  await driver.evaluate(`window.phoneFixture.setState("UI-TEST-1", { readiness: ${JSON.stringify({ ...readiness, unlocked: true })} })`);
+  await driver.waitFor('.phone-preview img');
+  assert.equal(await previewCalls(), beforeUnlock + 1, 'unlock after reconnection automatically displays the phone');
+  await driver.evaluate(`window.phoneFixture.setState("UI-TEST-1", { readiness: ${JSON.stringify({ ...readiness, unlocked: false })} })`);
+  assert.equal((await driver.query('.phone-connection-help')).exists, false, 'screen lock alone does not mean connection failure');
+  await driver.evaluate('window.phoneFixture.setConnection(false)');
+  await driver.evaluate('window.phoneFixture.setUnresponsive("UI-TEST-1", true)');
+  await driver.waitFor('.phone-connection-help');
+  assert.equal((await driver.query('.phone-connection')).text, 'App 未响应');
+  assert.equal((await driver.query('.phone-readiness')).text, '暂时无法读取');
+  assert.equal((await driver.query('[data-route="wifi"] .phone-route-badge')).attributes['data-tone'], 'ready', 'App failure does not hide a working debug connection');
+  assert.match((await driver.query('.phone-updated')).text, /最后上报/);
+  assert.equal((await driver.query('.phone-setting-status[data-status="unknown"]')).count, 6);
+  assert.equal((await driver.query('.phone-error')).exists, false, 'raw transport failure is replaced by recovery guidance');
+  assert.match((await driver.query('.phone-connection-help')).text, /仍能识别.*权限和画面都无法更新.*上次.*尚未确认.*解锁.*ProfilePilot.*同一网络/s);
+  assert.equal((await driver.query('[data-action="install-phone-app"]')).text, '重新连接手机 App');
+  assert.equal((await driver.query('[data-action="basic-control"]')).disabled, false, 'basic control stays available without a responsive App');
+  assert.equal((await driver.query('.phone-error-details')).attributes.open, undefined);
+  assert.match((await driver.query('.phone-status-note')).text, /不代表权限已关闭/);
+  await paint();
+  await writeFile(path.join(output, 'companion-unresponsive.png'), Buffer.from((await driver.screenshot()).pngBase64, 'base64'));
+  await driver.domClick('.phone-error-details summary');
+  await driver.evaluate('window.phoneFixture.setUnresponsive("UI-TEST-1", true)');
+  assert.equal(await driver.evaluate('document.querySelector(".phone-error-details").open'), true, 'status updates retain expanded diagnostics');
+  await driver.evaluate('window.phoneFixture.setUnresponsive("UI-TEST-1", false)');
+  await driver.waitFor('.phone-connection-help', item => !item.exists);
+  assert.equal((await driver.query('.phone-connection')).text, '已连接');
+  assert.equal((await driver.query('.phone-setting-status[data-status="enabled"]')).count, 6);
+  assert.equal((await driver.query('[data-action="screenshot"]')).disabled, true, 'recovered connection does not bypass the lock');
+  console.log('Connection recovery guidance: screen lock versus timeout, unknown permissions, reconnect instructions and automatic recovery passed.');
+  console.log('Automatic preview: USB/Wi-Fi, cached image, background deferral, manual retry, stale response and unlock passed.');
   console.log('Cloud UI: live diagnostics without a control connection, unavailable debugging switches and stale status passed.');
   console.log('Emulator UI: startup/connection, no USB wizard, post-connection permissions and emulator-specific guidance passed.');
-  console.log(JSON.stringify({ ok: true, fixture: 'isolated mock devices; no ADB', checks: ['device-only selector', 'one route sufficient', 'no blank preview panel', 'six live settings', 'one-click read-only preview', 'existing task preserved', 'pause and resume', 'permission setup entry', 'escaped rename', 'no CLI or session form', 'wireless pairing', 'USB/Wi-Fi deduplication', 'offline clears stale permissions and screen'], screenshots: output }, null, 2));
+  console.log(JSON.stringify({ ok: true, fixture: 'isolated mock devices; no ADB', checks: ['device-only selector', 'one route sufficient', 'automatic preview without polling', 'six live settings', 'manual refresh and retry', 'existing task preserved', 'pause and resume', 'permission setup entry', 'escaped rename', 'no CLI or session form', 'wireless pairing', 'USB/Wi-Fi deduplication', 'offline clears stale permissions and screen', 'hidden workspace deferral', 'late response discarded', 'unlock enables automatic preview'], screenshots: output }, null, 2));
 
 } finally {
   if (driver) { await driver.request('quit', {}, 1000).catch(() => {}); driver.close(); }
@@ -238,7 +316,7 @@ try {
   await realApp.driver.waitFor('.phone-empty');
   assert.equal((await realApp.driver.query('[data-action="connect"]')).count, 0);
   assert.equal((await realApp.driver.query('[name="phoneDevice"]')).value, '');
-  await realApp.driver.domClick('.phone-empty [data-action="usb"]');
+  await realApp.driver.domClick('.phone-connection-section [data-action="usb"]');
   await realApp.driver.waitFor('.phone-usb-dialog[open]');
   await realApp.driver.domClick('.phone-usb-dialog footer [data-close]');
   assert.equal((await realApp.driver.query('[name="phoneDevice"]')).value, '', 'no phantom device after cancelling the first connection');

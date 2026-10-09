@@ -31,7 +31,7 @@ export function renderProfilesPanel(profiles: PublicProfile[], externalInstances
           <col class="profile-col-status" />
           <col class="profile-col-connection" />
           <col class="profile-col-route" />
-          <col class="profile-col-activity" />
+          <col class="profile-col-port" />
           <col class="profile-col-actions" />
         </colgroup>
         <thead>
@@ -40,8 +40,8 @@ export function renderProfilesPanel(profiles: PublicProfile[], externalInstances
             <th>状态</th>
             <th>连接</th>
             <th>代理</th>
-            <th>当前活动</th>
-            <th>操作</th>
+            <th>端口</th>
+            <th class="profile-actions-heading"><span>操作</span></th>
           </tr>
         </thead>
         <tbody>
@@ -202,14 +202,13 @@ export function renderProfileRow(profile: PublicProfile, isFirstInGroup = false,
       </td>
       <td>
         <span class="registry-connection-summary">${profile.source === "native" ? store.nativeExtensionBrowsers?.find(item => item.profileId === profile.id)?.connected ? "扩展已连接" : store.nativeExtensionBrowsers ? "待连接" : "检测中…" : profile.cdpPort || profile.fixedCdpPort ? "Gateway" : "待连接"}</span>
-        <div class="registry-connection-details">${renderProfilePortCell(profile)}</div>
       </td>
       <td>
         <span class="registry-proxy-summary">${profile.directConnection ? "直连" : profile.upstreamProxy ? "指定代理" : profile.bifrostProxy ? "Bifrost" : "系统代理"}</span>
         <div class="registry-proxy-details">${renderProfileProxyRoute(profile)}</div>
       </td>
       <td>
-        ${renderProfileActivityCell(profile)}
+        ${renderCurrentPort(profile)}
       </td>
       <td>
         ${renderProfileActions(profile)}
@@ -248,6 +247,13 @@ export function renderProfilePortCell(profile: PublicProfile): string {
       : profile.cdpUrl,
     profile.gatewayControl ? "Gateway" : null
   );
+}
+
+function renderCurrentPort(profile: PublicProfile): string {
+  if (profile.source === "native") return '<span class="profile-port-empty" title="系统 Profile 通过扩展连接，无需 CDP 端口">—</span>';
+  if (profile.running && profile.cdpPort) return `<span class="profile-port" title="当前 CDP 端口">${profile.cdpPort}</span>`;
+  if (profile.fixedCdpPort) return `<span class="profile-port pending" title="配置的端口，启动后使用">${profile.fixedCdpPort}<small>待启动</small></span>`;
+  return '<span class="profile-port-empty">—</span>';
 }
 
 // Profile Registry 的 AGENT ACTIVITY 列：第一行回答“谁在驱动/谁占有控制权”，
@@ -591,7 +597,7 @@ export function renderProfileActions(profile: PublicProfile): string {
     return `
       <div class="profile-actions" data-profile-actions>
         <span class="action-tooltip profile-primary-action" data-tooltip="${escapeHtml(tip)}">
-          <button type="button" class="action-button accent ${subPrimaryLoading ? "loading" : ""}" data-action="${profile.running ? "focus-profile" : "launch"}" data-id="${profile.id}" ${store.busy ? "disabled" : ""}>
+          <button type="button" class="action-button ${profile.running ? "profile-action-show" : "profile-action-start"} ${subPrimaryLoading ? "loading" : ""}" data-action="${profile.running ? "focus-profile" : "launch"}" data-id="${profile.id}" ${store.busy ? "disabled" : ""}>
             ${renderButtonLabel(subPrimaryLoading, profile.running ? "显示" : "启动", subPrimaryLabel)}
           </button>
         </span>
@@ -601,7 +607,6 @@ export function renderProfileActions(profile: PublicProfile): string {
             subMenuOpen
               ? `
                 <div class="action-menu absolute top-[calc(100%+6px)] right-0 z-40 grid w-40 overflow-visible border-solid border border-line-strong rounded-lg bg-panel-raise [box-shadow:var(--shadow)] p-[5px]" role="menu">
-                  ${renderProfileDetailsMenuItem(profile.id)}
                   <span class="action-tooltip" data-tooltip="删除这个子 Profile（会先关闭它所在的整个隔离实例）">
                     <button type="button" class="danger ${deletingSub ? "loading" : ""}" data-action="delete" data-id="${profile.id}" ${store.busy ? "disabled" : ""}>
                       ${renderButtonLabel(deletingSub, "删除子 Profile", "删除中…")}
@@ -623,12 +628,9 @@ export function renderProfileActions(profile: PublicProfile): string {
   const closing = isBusyAction("close-profile", { profileId: profile.id });
   const launching = isBusyAction("launch-profile", { profileId: profile.id });
   const launchingCdp = isBusyAction("launch-cdp", { profileId: profile.id });
-  const openingFolder = isBusyAction("open-folder", { profileId: profile.id });
   const renaming = isBusyAction("rename-profile", { profileId: profile.id });
   const deleting = isBusyAction("delete-profile", { profileId: profile.id });
-  const miniPinnedBusy = isBusyAction("mini-pin", { profileId: profile.id });
   const bifrostSaving = isBusyAction("save-bifrost-proxy", { profileId: profile.id });
-  const miniPinDisabled = store.busy || (!profile.pinnedToMini && (store.state?.miniProfileIds.length || 0) >= 3);
   const takeoverButton = renderAgentTakeoverButton(profile);
 
   // 独立 Profile（工具 Profile）未运行时，主按钮默认走 CDP 启动——这才是本工具的核心用途（喂给 agent）；
@@ -654,9 +656,7 @@ export function renderProfileActions(profile: PublicProfile): string {
       ? "关闭中…"
       : renaming
         ? "保存中…"
-        : openingFolder
-          ? "打开中…"
-          : "";
+        : "";
   const primaryLoading = baseBusy || Boolean(menuOpBusyLabel);
   const primaryLoadingLabel = menuOpBusyLabel || (running ? "显示中…" : preferCdp ? "CDP 启动中…" : "启动中…");
 
@@ -669,7 +669,7 @@ export function renderProfileActions(profile: PublicProfile): string {
     <div class="profile-actions" data-profile-actions>
       ${takeoverButton}
       <span class="action-tooltip ${baseActionClass}" data-tooltip="${escapeHtml(baseTip)}">
-        <button type="button" class="action-button accent ${hasTakeoverAction ? "icon-action" : ""} ${primaryLoading ? "loading" : ""}" data-action="${baseAction}" data-id="${profile.id}" aria-label="${escapeHtml(baseIdle)}" ${store.busy ? "disabled" : ""}>
+        <button type="button" class="action-button ${running ? "profile-action-show" : "profile-action-start"} ${hasTakeoverAction ? "icon-action" : ""} ${primaryLoading ? "loading" : ""}" data-action="${baseAction}" data-id="${profile.id}" aria-label="${escapeHtml(baseIdle)}" ${store.busy ? "disabled" : ""}>
           ${renderButtonLabel(primaryLoading, baseVisualLabel, baseLoadingLabel)}
         </button>
       </span>
@@ -679,7 +679,6 @@ export function renderProfileActions(profile: PublicProfile): string {
         menuOpen
           ? `
             <div class="action-menu absolute top-[calc(100%+6px)] right-0 z-40 grid w-40 overflow-visible border-solid border border-line-strong rounded-lg bg-panel-raise [box-shadow:var(--shadow)] p-[5px]" role="menu">
-              ${renderProfileDetailsMenuItem(profile.id)}
               ${
                 preferCdp
                   ? `<button type="button" class="${launching ? "loading" : ""}" data-action="launch" data-id="${profile.id}" title="${escapeHtml(launchButtonTitle(profile))}" ${store.busy ? "disabled" : ""}>
@@ -692,9 +691,6 @@ export function renderProfileActions(profile: PublicProfile): string {
               <button type="button" class="menu-warn ${closing ? "loading" : ""}" data-action="close-profile" data-id="${profile.id}" ${store.busy || !profile.running ? "disabled" : ""}>
                 ${renderButtonLabel(closing, "关闭", "关闭中…")}
               </button>
-              <button type="button" class="${openingFolder ? "loading" : ""}" data-action="open-folder" data-id="${profile.id}" ${store.busy ? "disabled" : ""}>
-                ${renderButtonLabel(openingFolder, "打开目录", "打开中…")}
-              </button>
               <button type="button" class="${renaming ? "loading" : ""}" data-action="rename-profile" data-id="${profile.id}" ${store.busy ? "disabled" : ""}>
                 ${renderButtonLabel(renaming, "修改名称", "保存中…")}
               </button>
@@ -705,9 +701,6 @@ export function renderProfileActions(profile: PublicProfile): string {
                     </button>`
                   : ""
               }
-              <button type="button" class="${miniPinnedBusy ? "loading" : ""}" data-action="${profile.pinnedToMini ? "unpin-mini-profile" : "pin-mini-profile"}" data-id="${profile.id}" ${miniPinDisabled ? "disabled" : ""}>
-                ${renderButtonLabel(miniPinnedBusy, profile.pinnedToMini ? "取消悬浮窗固定" : "固定到悬浮窗", "保存中…")}
-              </button>
               ${renderQuickLaunchSlotRow(profile)}
               <span class="action-tooltip" data-tooltip="${escapeHtml(deleteButtonTitle(profile))}">
                 <button type="button" class="danger ${deleting ? "loading" : ""}" data-action="delete" data-id="${profile.id}" ${deleteDisabled ? "disabled" : ""}>
@@ -721,10 +714,6 @@ export function renderProfileActions(profile: PublicProfile): string {
       </span>
     </div>
   `;
-}
-
-function renderProfileDetailsMenuItem(profileId: string): string {
-  return `<button type="button" data-action="open-profile-details" data-id="${escapeHtml(profileId)}" title="查看连接信息、标签页与实时画面" ${store.busy ? "disabled" : ""}>查看详情</button>`;
 }
 
 function renderAgentTakeoverButton(profile: PublicProfile): string {
@@ -917,7 +906,7 @@ export function renderExternalRow(instance: ExternalChromeInstance): string {
         </span>
       </td>
       <td>
-        ${renderExternalActivityCell(instance)}
+        ${renderExternalPortCell(instance)}
       </td>
       <td>
         <div class="profile-actions external-profile-actions">
@@ -1794,12 +1783,14 @@ export function renderProfileDetailsModal(profile: PublicProfile | null): string
           </div>
           <button type="button" data-action="close-modal" data-profile-details-close>关闭</button>
         </header>
+        <div class="profile-details-scroll">
         ${renderReadinessPanel(profile)}
         <div class="profile-details-modal-body">
           <div class="profile-details-summary">${renderDetails(profile, false)}</div>
           <section class="profile-details-cockpit" aria-label="实时画面">
-            ${liveView || `<div class="profile-details-live-empty"><span>Cockpit</span><strong>暂不可观测</strong><p>${escapeHtml(liveEmpty)}</p></div>`}
+            ${liveView || `<div class="profile-details-live-empty"><span>浏览器预览</span><strong>暂不可观测</strong><p>${escapeHtml(liveEmpty)}</p></div>`}
           </section>
+        </div>
         </div>
       </section>
     </div>
@@ -1896,8 +1887,9 @@ export function renderExternalDetailsModal(instance: ExternalChromeInstance | nu
           </div>
           <button type="button" data-action="close-modal" data-profile-details-close>关闭</button>
         </header>
-        <div class="profile-details-modal-body single">
+        <div class="profile-details-scroll"><div class="profile-details-modal-body single">
           <div class="profile-details-summary">${renderExternalDetails(instance)}</div>
+        </div>
         </div>
       </section>
     </div>

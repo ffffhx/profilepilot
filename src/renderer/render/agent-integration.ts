@@ -3,57 +3,17 @@ import { profilePilotSetupState } from "../../shared/profilepilot-setup";
 import type {
   AgentIntegrationDiagnostic,
   AgentSkillDiagnostic,
-  AgentToolDiagnostic,
-  AgentWrapperDiagnostic,
-  BrowserDriverKind
+  AgentWrapperDiagnostic
 } from "../types";
 import { escapeHtml, renderButtonLabel } from "../util";
-import { renderBrowserExtensionPanel, renderBrowserExtensionSummary } from "./browser-extension";
-
-const TOOL_ORDER: BrowserDriverKind[] = ["agent-browser", "playwright-cli", "chrome-devtools-mcp"];
-
-const TOOL_COPY: Record<BrowserDriverKind, { label: string; description: string }> = {
-  "agent-browser": {
-    label: "agent-browser",
-    description: "面向 Agent 的浏览器操作 CLI，继续使用 open、snapshot、click 等原生命令。"
-  },
-  "playwright-cli": {
-    label: "Playwright CLI",
-    description: "微软提供的 Playwright 命令行工具，通过受控 attach 接入真实 Chrome。"
-  },
-  "chrome-devtools-mcp": {
-    label: "Chrome DevTools MCP",
-    description: "作为 MCP Server 接入真实 Chrome；只检测已经安装的本机 CLI。"
-  }
-};
-
-function installedToolCount(diagnostic: AgentIntegrationDiagnostic | null): number {
-  return diagnostic?.tools.filter((tool) => tool.availability === "installed").length || 0;
-}
+import { renderBrowserExtensionPanel } from "./browser-extension";
 
 function installedWrapperCount(diagnostic: AgentIntegrationDiagnostic | null): number {
   return diagnostic?.wrappers.filter(wrapperReady).length || 0;
 }
 
-function installedSkillCount(diagnostic: AgentIntegrationDiagnostic | null): number {
-  return unifiedSkill(diagnostic)?.installed ? 1 : 0;
-}
-
 function unifiedSkill(diagnostic: AgentIntegrationDiagnostic | null): AgentSkillDiagnostic | null {
   return diagnostic?.skills.find(skill => skill.key === "profilepilot") || diagnostic?.managementCli?.skill || null;
-}
-
-function renderToolsStatusSummary(diagnostic: AgentIntegrationDiagnostic | null): string {
-  const pending = store.agentIntegrationLoading || !diagnostic;
-  const setup = profilePilotSetupState(diagnostic);
-  const status = pending ? "正在检测安装状态" : setup.status;
-  return `<section class="tools-status-summary" aria-label="配套工具状态概览">
-    ${renderBrowserExtensionSummary()}
-    <div class="tools-status-item ${pending ? "pending" : setup.ready ? "ready" : "blocked"}">
-      <span class="tools-status-mark" aria-hidden="true">${pending ? "…" : setup.ready ? "✓" : "!"}</span>
-      <div><strong>ProfilePilot CLI ${status}</strong><small>命令工具与 Agent 使用指引</small></div>
-    </div>
-  </section>`;
 }
 
 export function renderOnboardingModal(): string {
@@ -104,11 +64,17 @@ export function renderAgentIntegrationPanel(): string {
   return `
     <section class="agent-integration-page" aria-labelledby="agent-integration-title">
       <h2 id="agent-integration-title" class="tools-visually-hidden">Agent 工作环境</h2>
-      ${renderToolsStatusSummary(diagnostic)}
       ${renderBrowserExtensionPanel()}
       <div class="tools-overview-grid">
         ${renderManagementCliPanel(diagnostic, pending)}
-        ${renderGatewayOverview(diagnostic, pending)}
+        <section id="tools-phone-app" class="tools-overview-card" aria-labelledby="tools-phone-app-title">
+          <div class="tools-overview-summary">
+            <span class="tools-overview-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="6" y="2" width="12" height="20" rx="3"/><path d="M10 5h4m-3 14h2"/></svg></span>
+            <span class="tools-overview-copy"><span class="tools-overview-title"><strong id="tools-phone-app-title">ProfilePilot 安卓 App</strong><em>可选安装</em></span>
+              <span class="tools-overview-line"><small>基础控制免安装；App 增加控件识别、中文填写、手机端暂停与状态同步</small><a class="tools-phone-link" href="./phones.html">安装与连接</a></span>
+            </span>
+          </div>
+        </section>
         ${renderControlPreferences(diagnostic, pending)}
       </div>
       <details id="tools-connection-diagnostics" class="tools-diagnostics">
@@ -118,6 +84,7 @@ export function renderAgentIntegrationPanel(): string {
             <button type="button" data-action="refresh-agent-integration" ${pending ? "disabled" : ""}>${renderButtonLabel(pending, "重新检测", "检测中…")}</button>
           </div>
           ${diagnostic?.inspectedAt ? `<p class="tools-inspected-at">最近检测：${escapeHtml(new Date(diagnostic.inspectedAt).toLocaleString())}</p>` : ""}
+          ${[diagnostic?.managementCli?.error, unifiedSkill(diagnostic)?.error, diagnostic?.shellIntegration.error].filter(Boolean).map(error => `<p class="tools-diagnostic-error" role="alert">${escapeHtml(error!)}</p>`).join("")}
           ${renderSessionBridge(diagnostic)}
           ${renderInputGuardPermissionCard("integration")}
         </div>
@@ -125,228 +92,41 @@ export function renderAgentIntegrationPanel(): string {
     </section>`;
 }
 
-function overviewIcon(kind: "skill" | "cli" | "gateway" | "preferences"): string {
+function overviewIcon(kind: "cli" | "preferences"): string {
   const paths = {
-    skill: '<path d="m12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5"/>',
     cli: '<path d="m6 7 5 5-5 5m8 0h5"/>',
-    gateway: '<circle cx="12" cy="5" r="3"/><circle cx="5" cy="19" r="3"/><circle cx="19" cy="19" r="3"/><path d="m10.5 7.5-4 9m7-9 4 9M8 19h8"/>',
     preferences: '<path d="m10 3-.6 2.1-2 .9-2-.5-2 3.5 1.5 1.6v2.3L3.4 15l2 3.5 2-.5 2 .9.6 2.1h4l.6-2.1 2-.9 2 .5 2-3.5-1.5-1.6v-2.3L20.6 9l-2-3.5-2 .5-2-.9L14 3Z"/><circle cx="12" cy="12" r="3"/>'
   };
   return `<span class="tools-overview-icon ${kind}" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${paths[kind]}</svg></span>`;
 }
 
-function renderBundledInstructions(diagnostic: AgentIntegrationDiagnostic | null, pending: boolean): string {
-  const skill = unifiedSkill(diagnostic);
-  const installed = Boolean(skill?.installed);
-  const external = installed && !skill?.managed;
-  const stale = installed && skill?.managed && !skill.upToDate;
-  const partial = Boolean(skill?.installedTargetCount) && !installed;
-  const status = pending ? "检测中" : external ? "已安装 · 外部管理" : stale ? "需要更新" : installed ? "已安装" : partial ? "部分安装" : "未安装";
-  const tone = pending ? "pending" : installed && !stale ? "ready" : "blocked";
-  return `
-      <section id="tools-guide-details" aria-label="Agent 使用指引">
-        ${renderSetupStage({
-          index: "02", label: "Agent 使用指引（随 CLI 安装）", status, tone,
-          detail: `共享 Agent / Codex / Claude · ${skill?.installedTargetCount || 0}/${skill?.targetCount || 3} 个目录`,
-          actions: ""
-        })}
-        ${skill?.targets.map(target => `<p class="tools-guide-target"><strong>${escapeHtml(target.label)}</strong> · ${target.installed ? !target.managed ? "外部维护" : target.upToDate ? "已更新" : "待更新" : "待安装"}<code class="tools-path">${escapeHtml(target.path)}</code></p>`).join("") || ""}
-        <p>指引以 <code>SKILL.md</code> 供 Agent 读取，与 CLI 同步更新。个人偏好 <code>local/browser-routing.md</code> 在更新和移除时保留。</p>
-        ${skill?.targets.some(target => target.installed && !target.managed) || external ? '<p>外部维护的指引会保留；如版本不同，请通过原工具更新后重新检测。</p>' : ""}
-        ${skill?.error ? `<p class="tools-diagnostic-error" role="alert">${escapeHtml(skill.error)}</p>` : ""}
-        ${skill?.legacySkillPaths?.length ? `<p>检测到旧版指引；安装时会备份并迁移本工具管理的版本，外部版本保留。</p>` : ""}
-      </section>`;
-}
-
 function renderManagementCliPanel(diagnostic: AgentIntegrationDiagnostic | null, pending: boolean): string {
-  const cli = diagnostic?.managementCli || null;
   const setup = profilePilotSetupState(diagnostic);
   const status = pending ? "检测中" : setup.status;
-  const cliReady = Boolean(cli?.installed && cli.upToDate && diagnostic?.shellIntegration.installed);
-  const cliStatus = pending ? "检测中" : cliReady ? "已就绪" : cli?.installed && !cli.upToDate ? "需要更新" : cli?.installed ? "终端连接待修复" : "未安装";
   const action = setup.ready ? "检查 / 更新" : setup.needsUpdate ? "更新 ProfilePilot CLI" : setup.hasParts ? "修复 ProfilePilot CLI" : "安装 ProfilePilot CLI";
   return `
-    <details id="tools-cli-details" class="tools-overview-card tools-cli-card ${pending ? "pending" : setup.ready ? "ready" : "blocked"}" data-tools-search="ProfilePilot CLI ppilot browser phone Skill Agent 使用指引 扩展 Gateway 终端 命令 安装">
-      <summary class="tools-overview-summary">
+    <section id="tools-cli-card" aria-labelledby="management-cli-title" class="tools-overview-card tools-cli-card ${pending ? "pending" : setup.ready ? "ready" : "blocked"}" data-tools-search="ProfilePilot CLI ppilot browser electron phone Skill Agent 使用指引 扩展 Gateway 终端 命令 安装">
+      <div class="tools-overview-summary">
         ${overviewIcon("cli")}
         <span class="tools-overview-copy"><span class="tools-overview-title"><strong id="management-cli-title">ProfilePilot CLI</strong><em>${status}</em></span>
           <span class="tools-overview-line"><small>命令工具与 Agent 使用指引，一次安装，一起更新</small><button type="button" data-action="install-profilepilot-cli" ${pending ? "disabled" : ""}>${pending ? "检测中…" : action}</button></span>
         </span>
-      </summary>
-      <div class="tools-disclosure-body">
-        <p><code>ppilot</code> 提供浏览器、手机、Profile 管理与 Agent 对话命令。安装时同时配置命令工具和随附指引，无需分别安装 Skill。</p>
-        ${renderSetupStage({
-          index: "01", label: "命令工具（ppilot）", status: cliStatus,
-          tone: pending ? "pending" : cliReady ? "ready" : "blocked",
-          detail: cli?.installed ? cli.launcherPath : "包含浏览器与手机控制入口，以及内置驱动",
-          actions: pending ? "" : '<button type="button" data-action="copy-agent-command" data-command="ppilot --help">复制帮助命令</button>'
-        })}
-        ${renderBundledInstructions(diagnostic, pending)}
-        <div class="agent-management-cli-example"><code>ppilot browser status</code><span>扩展连接：独立浏览器服务自动启动，无需保持桌面应用打开。</span></div>
-        <div class="agent-management-cli-example"><code>ppilot browser --cdp PORT snapshot -i</code><span>Gateway 连接：PORT 为目标的 Agent 逻辑端口。Agent 会话自动识别，手动使用时添加 <code>--session 任务名</code>。</span></div>
-        <div class="agent-management-cli-example"><code>ppilot browser --help</code><span>查看两种连接的命令。旧 agent-browser 命令继续兼容。</span></div>
-        <div class="agent-management-cli-example"><code>ppilot phone --help</code><span>查看手机连接、控制会话与 ADB 接入命令。</span></div>
-        <div class="agent-management-cli-example"><code>ppilot profile list --json</code><span>删除必须显式添加 <code>--yes</code>；系统 Profile 的管理操作只读。</span></div>
-        <div class="agent-management-cli-example"><code>ppilot chat --profile "Profile 名称"</code><span>任务与桌面同步；使用 <code>ppilot --help</code> 查看脚本调用和恢复任务的命令。</span></div>
-        ${cli?.error ? `<p class="tools-diagnostic-error" role="alert">${escapeHtml(cli.error)}</p>` : ""}
-        ${diagnostic?.shellIntegration.error ? `<p class="tools-diagnostic-error" role="alert">${escapeHtml(diagnostic.shellIntegration.error)}</p>` : ""}
-        ${setup.hasParts ? `<div class="agent-stage-actions"><button type="button" class="danger-ghost" data-action="remove-profilepilot-cli" ${pending ? "disabled" : ""}>移除 CLI 与随附指引</button><span class="agent-external-note">个人偏好和外部维护的指引会保留。</span></div>` : ""}
       </div>
-    </details>`;
-}
-
-function renderGatewayOverview(diagnostic: AgentIntegrationDiagnostic | null, pending: boolean): string {
-  const readyCount = diagnostic && unifiedSkill(diagnostic)?.installed && diagnostic.shellIntegration.installed
-    ? TOOL_ORDER.filter(key => diagnostic.tools.some(tool => tool.key === key && tool.availability === "installed") && wrapperReady(diagnostic.wrappers.find(wrapper => wrapper.key === key))).length : 0;
-  const status = pending ? "检测中" : readyCount ? `${readyCount} 套可用` : "可选";
-  return `<details id="tools-gateway-details" class="tools-overview-card tools-gateway-card ${pending ? "pending" : readyCount ? "ready" : "blocked"}" data-tools-search="Gateway agent-browser Playwright CLI Chrome DevTools MCP Wrapper 会话">
-    <summary class="tools-overview-summary">
-      ${overviewIcon("gateway")}
-      <span class="tools-overview-copy"><span class="tools-overview-title"><strong id="agent-tools-title">其他工具兼容</strong><em>${status}</em></span>
-        <span class="tools-overview-line"><small>已有 agent-browser、Playwright、MCP</small><span class="tools-card-action">查看配置</span></span>
-      </span>
-    </summary>
-    <div class="tools-disclosure-body">
-      <div class="agent-section-heading"><div><strong>已有工具的兼容接入</strong><p>使用 ppilot browser CLI 无需配置此处。仅在保留其他工具的原命令时，安装对应的兼容 Wrapper。</p></div><span>${diagnostic ? `工具 ${installedToolCount(diagnostic)}/3 · Wrapper ${installedWrapperCount(diagnostic)} · Skill ${installedSkillCount(diagnostic)}` : "等待检测"}</span></div>
-      <div class="agent-tool-grid agent-setup-grid">${TOOL_ORDER.map(key => renderToolSetupCard(key, diagnostic, pending)).join("")}</div>
-      ${renderSessionBridge(diagnostic)}
-    </div>
-  </details>`;
+    </section>`;
 }
 
 function renderControlPreferences(diagnostic: AgentIntegrationDiagnostic | null, pending: boolean): string {
   const skill = unifiedSkill(diagnostic);
   const canEdit = !pending && Boolean(skill?.installedTargetCount);
-  return `<details id="tools-control-preferences" class="tools-overview-card tools-preferences-card" data-tools-search="控制偏好 浏览器 手机 安卓 Profile 设备 连接方式 browser phone 编辑">
-    <summary class="tools-overview-summary">
+  return `<section id="tools-control-preferences" aria-labelledby="control-preferences-card-title" class="tools-overview-card tools-preferences-card" data-tools-search="控制偏好 浏览器 Electron 手机 安卓 Profile 设备 连接方式 browser electron phone 编辑">
+    <div class="tools-overview-summary">
       ${overviewIcon("preferences")}
-      <span class="tools-overview-copy"><span class="tools-overview-title"><strong>控制偏好</strong></span>
-        <span class="tools-overview-line"><small>浏览器与手机的使用规则</small><button type="button" data-action="open-control-preferences" ${canEdit ? "" : "disabled"}>编辑偏好</button></span>
+      <span class="tools-overview-copy"><span class="tools-overview-title"><strong id="control-preferences-card-title">控制偏好</strong></span>
+        <span class="tools-overview-line"><small>浏览器、Electron 应用与手机的使用规则</small><button type="button" data-action="open-control-preferences" ${canEdit ? "" : "disabled"}>编辑偏好</button></span>
       </span>
-    </summary>
-    <div class="tools-disclosure-body"><p>分别设置浏览器的 Profile 与连接方式、手机的设备与控制模式，以及操作前的确认规则。个人偏好会随 Agent 使用指引读取，更新 CLI 时保留。</p>
-      <p>${canEdit ? "点击“编辑偏好”，在浏览器和手机两个 Tab 中查看、编辑并保存。" : "先安装 ProfilePilot CLI，再编辑个人控制偏好。"}</p>
     </div>
-  </details>`;
+  </section>`;
 }
-function renderToolSetupCard(
-  key: BrowserDriverKind,
-  diagnostic: AgentIntegrationDiagnostic | null,
-  pending: boolean
-): string {
-  const copy = TOOL_COPY[key];
-  const tool = diagnostic?.tools.find((item) => item.key === key) || null;
-  const wrapper = diagnostic?.wrappers.find((item) => item.key === key) || null;
-  const skill = unifiedSkill(diagnostic);
-  const toolReady = tool?.availability === "installed";
-  const wrapperInstalled = wrapperReady(wrapper);
-  const skillInstalled = Boolean(skill?.installed);
-  const sessionReady = Boolean(diagnostic?.shellIntegration.installed);
-  const complete = toolReady && wrapperInstalled && skillInstalled && sessionReady;
-  const overall = pending
-    ? "检测中"
-    : complete
-      ? "接入就绪"
-      : !toolReady
-        ? "先安装工具"
-        : !wrapperInstalled
-          ? "待装 Wrapper"
-          : !skillInstalled ? "待配置使用指引" : "待修复会话";
-
-  return `
-    <article class="agent-tool-card agent-setup-card ${pending ? "pending" : complete ? "ready" : toolReady ? "installed" : "missing"}">
-      <header>
-        <span class="agent-tool-light" aria-hidden="true"></span>
-        <strong>${escapeHtml(copy.label)}</strong>
-        <em>${overall}</em>
-      </header>
-      <p>${escapeHtml(copy.description)}</p>
-      <div class="agent-setup-stages">
-        ${renderToolStage(key, tool, pending)}
-        ${renderWrapperStage(key, wrapper, toolReady, pending)}
-      </div>
-      <div class="agent-toolchain-result ${pending ? "pending" : complete ? "ready" : "blocked"}">
-        <span>${pending ? "检测中" : complete ? "已就绪" : "下一步"}</span>
-        <strong>${pending ? "正在确认本机工具状态" : complete ? "这套工具可以使用" : nextActionLabel(toolReady, wrapperInstalled, skillInstalled, sessionReady)}</strong>
-      </div>
-    </article>
-  `;
-}
-
-function renderToolStage(key: BrowserDriverKind, tool: AgentToolDiagnostic | null, pending: boolean): string {
-  const installed = tool?.availability === "installed";
-  const failed = tool?.availability === "error";
-  const status = pending ? "检测中" : installed ? "已安装" : failed ? "检测失败" : "未安装";
-  const detail = installed
-    ? tool?.version || tool?.executablePath || "版本已确认"
-    : failed
-      ? tool?.error || "无法执行版本检测"
-      : "需要先安装真实 CLI";
-  return renderSetupStage({
-    index: "01",
-    label: "真实工具",
-    status,
-    tone: pending ? "pending" : installed ? "ready" : "blocked",
-    detail,
-    actions: !pending && tool && !installed
-      ? `<button type="button" data-action="copy-agent-command" data-command="${escapeHtml(tool.installCommand)}">复制安装命令</button>`
-      : ""
-  });
-}
-
-function renderWrapperStage(
-  key: BrowserDriverKind,
-  wrapper: AgentWrapperDiagnostic | null,
-  toolReady: boolean,
-  pending: boolean
-): string {
-  const installed = wrapperReady(wrapper);
-  const partial = Boolean(wrapper?.wrapperInstalled || wrapper?.launcherInstalled) && !installed;
-  const status = pending ? "检测中" : installed ? "已安装" : partial ? "安装不完整" : "未安装";
-  const detail = installed
-    ? `已写入 ${wrapper?.launcherPath || "~/.profilepilot/bin"}`
-    : partial
-      ? "启动器或 Wrapper 文件缺失"
-      : toolReady
-        ? "内置于 ProfilePilot，可一键安装"
-        : "安装真实工具后开放";
-  const primaryLabel = installed ? "验证 / 重装" : partial ? "修复 Wrapper" : "安装 Wrapper";
-  const actions = pending
-    ? ""
-    : `
-      <button type="button" data-action="install-agent-wrapper" data-tool="${key}" ${toolReady ? "" : "disabled"}>${primaryLabel}</button>
-      ${installed || partial ? `<button type="button" class="danger-ghost" data-action="remove-agent-wrapper" data-tool="${key}">移除</button>` : ""}
-    `;
-  return renderSetupStage({
-    index: "02",
-    label: "Wrapper",
-    status,
-    tone: pending ? "pending" : installed ? "ready" : "blocked",
-    detail,
-    actions
-  });
-}
-
-function renderSetupStage(input: {
-  index: string;
-  label: string;
-  status: string;
-  tone: "ready" | "blocked" | "pending";
-  detail: string;
-  actions: string;
-}): string {
-  return `
-    <section class="agent-setup-stage ${input.tone}">
-      <div class="agent-stage-index">${input.index}</div>
-      <div class="agent-stage-copy">
-        <div><strong>${escapeHtml(input.label)}</strong><em>${escapeHtml(input.status)}</em></div>
-        <small title="${escapeHtml(input.detail)}">${escapeHtml(input.detail)}</small>
-        ${input.actions ? `<div class="agent-stage-actions">${input.actions}</div>` : ""}
-      </div>
-    </section>
-  `;
-}
-
 function renderSessionBridge(diagnostic: AgentIntegrationDiagnostic | null): string {
   const wrappers = installedWrapperCount(diagnostic);
   const shell = diagnostic?.shellIntegration;
@@ -431,12 +211,4 @@ function renderInputGuardPermissionCard(context: "onboarding" | "integration"): 
 
 function wrapperReady(wrapper: AgentWrapperDiagnostic | null | undefined): boolean {
   return Boolean(wrapper?.wrapperInstalled && wrapper.launcherInstalled);
-}
-
-function nextActionLabel(tool: boolean, wrapper: boolean, skill: boolean, session: boolean): string {
-  if (!tool) return "先安装真实工具";
-  if (!wrapper) return "下一步：安装 Wrapper";
-  if (!skill) return "下一步：安装 ProfilePilot CLI（含使用指引）";
-  if (!session) return "下一步：修复会话识别";
-  return "新开 Agent 会话后生效";
 }

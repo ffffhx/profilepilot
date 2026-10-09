@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { readProfileAvatar } from "./profile-avatar";
 import { existsSync, readFileSync, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -3924,6 +3925,7 @@ export class ProfileManager {
 
     return {
       id: makeNativeProfileId(profile.dirName),
+      avatarDataUrl: profile.avatarDataUrl,
       source: "native",
       // 默认 Profile 统一显示为“系统默认 Profile”（除非用户在本工具里手动重命名过）；
       // 其它系统 Profile 仍沿用 Chrome 自己的名字。
@@ -3975,6 +3977,7 @@ export class ProfileManager {
 
     return {
       id: makeIsolatedProfileId(profile.id),
+      avatarDataUrl: await readProfileAvatar(profileDataPath),
       source: "isolated",
       name: profile.name,
       dirName: profile.dirName,
@@ -4068,6 +4071,7 @@ export class ProfileManager {
   ): PublicProfile {
     return {
       id: makeIsolatedSubProfileId(parent.id, sub.dirName),
+      avatarDataUrl: sub.avatarDataUrl,
       source: "isolated-sub",
       name: sub.name,
       dirName: sub.dirName,

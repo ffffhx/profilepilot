@@ -1,40 +1,61 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { readFileSync } = require('node:fs');
 const { popupFixture } = require('./helpers/native-popup-fixture.cjs');
-const original = { id: 7, url: 'https://fixture.test/', title: '招聘页面', windowId: 1, active: true };
-const dedicated = { id: 9, url: 'https://fixture.test/', title: '招聘页面', windowId: 2, active: true };
+const controlled = { sessionId: 'external-session', tabId: 9, tabTitle: '正在处理的页面', url: 'https://controlled.test/article', ownership: 'agent' };
 
-test('extension discovers a new loaded tab without reload and preserves explicit selection', async () => {
-  const f = await popupFixture([original, { id: 9, windowId: 2 }]);
-  const select = f.element('#next-tab'); assert.equal(select.value, 'current'); select.value = '7';
-  f.setTabs([original, dedicated,
-    { id: 10, url: 'https://private.test/', incognito: true },
-    { id: 11, url: 'chrome://settings' },
-    { id: 12, url: 'http://127.0.0.1:12345/profilepilot-connect/test' }]);
-  f.chrome.tabs.onUpdated.emit(9, { status: 'complete', title: dedicated.title }); await f.flush();
-  assert.deepEqual(select.children.map(o => o.value), ['current', 'new', '7', '9']);
-  assert.match(select.children[3].textContent, /fixture.test（当前窗口）/);
-  assert.equal(select.value, '7', 'new tabs must not silently replace the user choice');
-  select.value = '9'; select.listeners.change(); f.setTabs([original]); f.chrome.tabs.onRemoved.emit(9); await f.flush();
-  assert.equal(select.value, '', 'a removed selection must not silently authorize another tab');
-  assert.equal(f.element('#select-tab').disabled, true);
-  assert.deepEqual(f.calls.map(c => c.method), ['getUiState'], 'refreshing choices never changes the task target');
+test('status shows the controlled tab rather than the active tab or old conversation', async () => {
+  const f = await popupFixture([{ id: 7, active: true, title: '用户正在看的页面', url: 'https://other.test' }], {
+    state: { ...controlled, task: { title: '已结束的任务', status: 'completed' } }
+  });
+  assert.equal(f.element('#page-title').textContent, controlled.tabTitle);
+  assert.equal(f.element('#page-domain').textContent, 'controlled.test');
+  assert.equal(f.element('#control-state').textContent, '正在控制');
+  assert.deepEqual(f.calls.map(c => c.method), ['state'], 'opening the popup only reads local state');
 });
-test('a slower old tab query cannot overwrite the newest tab list', async () => {
-  const f = await popupFixture([original, dedicated]); const pending = [];
-  f.chrome.tabs.query = () => new Promise(resolve => pending.push(resolve));
-  f.chrome.tabs.onUpdated.emit(9, { title: 'old title' }); await f.flush();
-  f.chrome.tabs.onRemoved.emit(9); await f.flush(); assert.equal(pending.length, 2);
-  pending[1]([original]); await f.flush(); pending[0]([original, dedicated]); await f.flush();
-  assert.deepEqual(f.element('#next-tab').children.map(o => o.value), ['current', 'new', '7']);
+
+test('ending a session clears its historical tab while the connection stays healthy', async () => {
+  const f = await popupFixture([], { state: controlled });
+  f.setState({ sessionId: undefined }); await f.poll();
+  assert.equal(f.element('#connection-label').textContent, '已连接');
+  assert.equal(f.element('#control-state').textContent, '空闲');
+  assert.equal(f.element('#page-title').textContent, '当前没有受控标签页');
+  assert.equal(f.element('#page-domain').hidden, true);
 });
-test('idle pairing does not require an existing page and explains current or new-page use', async () => {
-  const f = await popupFixture([]);
-  assert.match(f.element('#status').textContent, /直接使用当前页，也可新建页/);
-  assert.equal(f.element('#select-tab').disabled, true);
-  const html = readFileSync('extensions/profilepilot/popup.html', 'utf8');
-  assert.equal(/<select[^>]*id="tab"/.test(html), false);
-  f.element('#code').value = 'PP1.fixture'; await f.submit('#connect');
-  assert.ok(f.calls.some(c => c.method === 'connect'));
+
+test('handoff and a browser-paused session display paused without resuming control', async () => {
+  for (const patch of [{ ownership: 'user' }, { pausedByBrowser: true }]) {
+    const f = await popupFixture([], { state: controlled });
+    f.setState(patch); await f.poll();
+    assert.equal(f.element('#control-state').textContent, '已暂停');
+    assert.equal(f.element('#page-title').textContent, controlled.tabTitle);
+    assert.ok(f.calls.every(c => c.method === 'state'));
+  }
+});
+
+test('a closed target is not replaced with an unrelated active tab', async () => {
+  const f = await popupFixture([{ id: 7, active: true, title: 'Other' }], { state: controlled });
+  f.setState({ tabTitle: undefined, url: undefined }); await f.poll();
+  assert.equal(f.element('#control-state').textContent, '等待页面');
+  assert.equal(f.element('#page-title').textContent, '当前没有可用的受控标签页');
+  assert.equal(f.element('#page-domain').hidden, true);
+});
+
+test('target changes update the title and domain, and untrusted titles are plain text', async () => {
+  const f = await popupFixture([], { state: controlled });
+  f.setState({ tabId: 11, tabTitle: '<img src=x onerror=alert(1)>', url: 'https://second.test:8443/path' }); await f.poll();
+  assert.equal(f.element('#page-title').textContent, '<img src=x onerror=alert(1)>');
+  assert.equal(f.element('#page-title').innerHTML, undefined);
+  assert.equal(f.element('#page-domain').textContent, 'second.test:8443');
+  f.setState({ tabTitle: '', url: 'about:blank' }); await f.poll();
+  assert.equal(f.element('#page-title').textContent, '空白标签页');
+});
+
+test('losing connection immediately clears the old controlled page', async () => {
+  const f = await popupFixture([], { state: controlled });
+  f.setState({ connected: false }); await f.poll();
+  assert.equal(f.element('#connection-label').textContent, '未连接');
+  assert.equal(f.element('#control-state').textContent, '未连接');
+  assert.equal(f.element('#page-title').textContent, '连接后显示受控标签页');
+  assert.equal(f.element('#page-domain').hidden, true);
+  assert.equal(f.element('#reconnect').hidden, false);
 });

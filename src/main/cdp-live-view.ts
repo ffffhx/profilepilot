@@ -1,5 +1,5 @@
 import { CdpLiveTab, CdpLiveView } from "../shared/types";
-import { CdpBrowserClient, isValidCdpPort, requestCdpTargets } from "./cdp-client";
+import { CdpBrowserClient, isValidCdpPort, requestCdpJson, requestCdpTargets } from "./cdp-client";
 import { CdpTargetListEntry } from "./internal-types";
 
 // 截图比较“贵”：连一个临时 WebSocket、抓一帧 JPEG。给它单独的超时，失败只降级成
@@ -9,7 +9,7 @@ const SCREENSHOT_COMMAND_TIMEOUT = 4000;
 
 interface CaptureLiveViewOptions {
   screenshot?: boolean;
-  // 指定要展示/截图的标签页（targetId）；缺省用 /json/list 的第一个 page。
+  // 指定要展示/截图的标签页；缺省优先选择浏览器的活动标签页。
   targetId?: string;
 }
 
@@ -42,27 +42,42 @@ export async function captureCdpLiveView(port: number, options: CaptureLiveViewO
   }
 
   const pageTargets = targets.filter((target) => target.type === "page" && Boolean(target.webSocketDebuggerUrl));
-  // 选中要展示/截图的标签：优先调用方指定的 targetId（用户在 Cockpit 里点的那个），否则用第一个。
-  const active = (options.targetId && pageTargets.find((target) => target.id === options.targetId)) || pageTargets[0] || null;
+  const requested = pageTargets.find((target) => target.id === options.targetId);
+  const activeId = !requested && pageTargets.length > 1 ? await findActivePageTarget(port).catch(() => null) : null;
+  const selected = requested || pageTargets.find((target) => target.id === activeId);
+  let active = selected || pageTargets[0] || null;
+
+  let screenshot: string | null = null;
+  let screenshotError: string | null = null;
+
+  if (options.screenshot) {
+    // Older Chromium versions may not expose the active tab. Restored/discarded
+    // pages can report Internal error until rendered: try another live page only
+    // in automatic mode, never substitute an explicitly selected/active page.
+    const candidates = selected ? [selected] : pageTargets.slice(0, 5);
+    for (const candidate of candidates) {
+      try {
+        screenshot = await captureTargetScreenshot(candidate.webSocketDebuggerUrl!);
+        active = candidate;
+        screenshotError = null;
+        break;
+      } catch (error) {
+        const detail = describeError(error);
+        screenshotError = detail === "Internal error"
+          ? "此标签页尚未生成画面，页面恢复后会自动重试。"
+          : `暂时无法获取画面：${detail}`;
+        if (detail !== "Internal error") break;
+      }
+    }
+  }
+
   const tabs: CdpLiveTab[] = pageTargets.map((target) => ({
     targetId: target.id || "",
     title: (target.title || "").trim() || "(无标题)",
     url: target.url || "",
     faviconUrl: target.faviconUrl || null,
-    // 标记当前正在展示（被截图）的那个标签，前端据此高亮。
     primary: Boolean(active && target.id === active.id)
   }));
-
-  let screenshot: string | null = null;
-  let screenshotError: string | null = null;
-
-  if (options.screenshot && active?.webSocketDebuggerUrl) {
-    try {
-      screenshot = await captureTargetScreenshot(active.webSocketDebuggerUrl);
-    } catch (error) {
-      screenshotError = describeError(error);
-    }
-  }
 
   return {
     ...base,
@@ -73,6 +88,37 @@ export async function captureCdpLiveView(port: number, options: CaptureLiveViewO
     screenshot,
     screenshotError
   };
+}
+
+interface TargetInfo {
+  targetId: string;
+  type: string;
+  subtype?: string;
+  url?: string;
+  browserContextId?: string;
+  embedderData?: { tabActive?: boolean };
+}
+
+async function findActivePageTarget(port: number): Promise<string | null> {
+  // Use the same authenticated Gateway observer as the capture, without claiming
+  // an Agent session, activating a tab, or changing native window focus.
+  const version = await requestCdpJson<{ webSocketDebuggerUrl: string }>(port, "/json/version");
+  const client = await CdpBrowserClient.connect(version.webSocketDebuggerUrl, SCREENSHOT_CONNECT_TIMEOUT);
+  try {
+    const result = await client.send<{ targetInfos?: TargetInfo[] }>("Target.getTargets", {
+      filter: [{ type: "tab" }, { type: "page" }, { exclude: true }]
+    }, 1500);
+    const targets = result.targetInfos || [];
+    for (const tab of targets.filter(target => target.type === "tab" && target.embedderData?.tabActive)) {
+      const pages = targets.filter(target => target.type === "page" && !target.subtype &&
+        target.url === tab.url && target.browserContextId === tab.browserContextId);
+      // Duplicate URLs cannot identify a unique page. Leave selection automatic.
+      if (pages.length === 1) return pages[0].targetId;
+    }
+    return null;
+  } finally {
+    client.close();
+  }
 }
 
 async function captureTargetScreenshot(webSocketDebuggerUrl: string): Promise<string> {

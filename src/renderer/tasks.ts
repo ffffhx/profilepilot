@@ -1,4 +1,7 @@
 import { openTaskLink } from "./task-links";
+import { skillDefaults } from "../shared/task-skills";
+import { skillLibrary, skillForm, skillFromForm } from "./task-skills";
+import { taskTemplateMenu, positionTaskTemplateMenu } from "./task-templates";
 import { workspaceSwitcher, workspaceIdentityBar, refreshWorkspaceSwitcher } from "./workspace-switcher";
 import { tokenUsagePage } from "./task-token-usage";
 import type { TokenSource } from "../shared/task-token-usage";
@@ -21,6 +24,7 @@ import { taskMenuButton, TaskMenus, renameTaskTitle, type TaskMenuAction } from 
 import { MessageDrafts, draftKey, messageDelivery, findTaskHit, attentionReason, messageKeyAction, ScopedOperations, type MessageDraft } from "./task-interaction-model";
 import { TaskDom, autoGrow, installTaskTooltips, isAtTaskLatest, jumpOverlapsReply, scrollToTaskLatest, revealTaskReply, syncTaskScrollInsets } from "./task-interaction-dom";
 import { workbenchThread } from "./task-workbench-view";
+import { TaskChat } from "./task-chat";
 import { workbenchNavigation, searchSnippet, appearanceControls, applyAppearance } from "./task-workbench-navigation";
 import { showCommands, showArtifact, type WorkbenchCommand } from "./task-workbench-dialogs";
 
@@ -28,6 +32,7 @@ declare global { interface Window { tasks: TaskApi; } }
 const root = document.getElementById("task-app")!;
 const selects = new TaskSelects(root);
 const taskDom = new TaskDom(root);
+const taskChat = new TaskChat();
 let draftStorage: Storage | undefined;
 try { draftStorage = localStorage; } catch { /* In-memory drafts remain available. */ }
 const messageDrafts = new MessageDrafts(draftStorage);
@@ -44,12 +49,14 @@ const newlineHint = `Enter 发送 · Shift+Enter / ${platformModifier}+Enter 换
 function messageFormKey(form: HTMLFormElement): string { return form.dataset.draftKey || draftKey(form.dataset.taskId || "", form.id, form.dataset.decisionId); }
 function captureMessageDrafts(): void {
   root.querySelectorAll<HTMLFormElement>("form[data-draft-key]").forEach(form => {
+    if (form.closest("[data-task-chat-owned]")) return;
     const field = form.querySelector<HTMLTextAreaElement>("textarea[name=prompt],textarea[name=steering],textarea[name=answer]");
     if (field) messageDrafts.set(messageFormKey(form), { text: field.value, ...(form.id === "create-task" ? { attachments: [...selectedFiles] } : {}) });
   });
 }
 function restoreMessageDrafts(): void {
   root.querySelectorAll<HTMLFormElement>("form[data-draft-key]").forEach(form => {
+    if (form.closest("[data-task-chat-owned]")) return;
     const field = form.querySelector<HTMLTextAreaElement>("textarea[name=prompt],textarea[name=steering],textarea[name=answer]");
     const value = messageDrafts.get(messageFormKey(form)).text;
     if (field && field.value !== value) field.value = value;
@@ -63,6 +70,7 @@ const replyErrors = new Map<string, string>();
 function rememberForms(): void {
   captureMessageDrafts(); taskDom.capture();
   root.querySelectorAll<HTMLFormElement>("form").forEach(form => {
+    if (form.closest("[data-task-chat-owned]")) return;
     pageDrafts.set(form.dataset.draftKey || `${selected}:${form.id}`, [...form.querySelectorAll<HTMLInputElement>("input[name],textarea[name],select[name]")].filter(field => field.type !== "password" && !/apiKey|jevApiKey/i.test(field.name)).map(field => ({ name: field.name, value: field.value, checked: field.checked, type: field.type })));
     pageDetails.set(`${selected}:${form.id}`, [...form.querySelectorAll("details[open] summary")].map(summary => summary.textContent || ""));
   });
@@ -70,6 +78,7 @@ function rememberForms(): void {
 }
 function restoreForms(): void {
   root.querySelectorAll<HTMLFormElement>("form").forEach(form => {
+    if (form.closest("[data-task-chat-owned]")) return;
     const fields = pageDrafts.get(form.dataset.draftKey || `${selected}:${form.id}`);
     if (!fields) return;
     form.querySelectorAll<HTMLInputElement>("input[name],textarea[name],select[name]").forEach(field => {
@@ -80,12 +89,20 @@ function restoreForms(): void {
     form.querySelectorAll("details").forEach(node => { node.open = details.includes(node.querySelector("summary")?.textContent || ""); });
   });
 }
-function forgetForm(id: string): void { pageDrafts.delete(`${selected}:${id}`); pageDetails.delete(`${selected}:${id}`); const form = root.querySelector<HTMLFormElement>(`#${id}`); if (form?.dataset.draftKey) pageDrafts.delete(form.dataset.draftKey); }
+function forgetForm(id: string): void {
+  pageDrafts.delete(`${selected}:${id}`); pageDetails.delete(`${selected}:${id}`);
+  // Switching workflows happens on the library page, while the composer is unmounted.
+  if (id === "create-task") pageDrafts.delete(draftKey("", "create-task"));
+  const form = root.querySelector<HTMLFormElement>(`#${id}`);
+  if (form?.dataset.draftKey) pageDrafts.delete(form.dataset.draftKey);
+}
 const api = window.tasks;
 const preview = new TaskPreviewView(api);
 const inspectorPreference = "profilepilot-task-inspector-open";
 let inspectorOpen = true;
 try { inspectorOpen = localStorage.getItem(inspectorPreference) !== "false"; } catch { /* Keep the default if storage is unavailable. */ }
+const sidebarPreference = "profilepilot-task-sidebar-collapsed";
+try { root.classList.toggle("sidebar-collapsed", localStorage.getItem(sidebarPreference) === "true"); } catch { /* Keep the sidebar expanded. */ }
 let data: TaskSnapshot;
 let profiles: AppState | undefined;
 let profilesError = false;
@@ -97,6 +114,7 @@ let historyScope: "active" | "archived" = "active";
 let editMaterial = "";
 let editSchedule = "";
 let editTemplate = "";
+let creatingTemplate = false;
 let formDraft: CreateTaskInput | undefined;
 let selectedFiles: string[] = messageDrafts.get(draftKey("", "create-task")).attachments;
 
@@ -207,7 +225,7 @@ function commandMenu(): void {
     { id: "input", label: "聚焦消息输入框", run: () => focusComposer() },
     { id: "drafts", label: "恢复本任务的答复草稿", run: () => draftMenu() },
     { id: "latest", label: "回到最新消息", run: jumpLatest },
-    { id: "settings", label: "设置与外观", run: click('[data-nav="settings"]') }
+    { id: "settings", label: "Agent 设置与外观", run: click('[data-nav="settings"]') }
   ];
   if (task) commands.push(...["pause", "resume", "cancel", "takeover"].filter(action => root.querySelector(`[data-control="${action}"]`)).map(action => ({ id: action, label: ({ pause: "暂停任务", resume: "继续任务", cancel: "停止任务", takeover: "接管浏览器" })[action]!, disabled: !!root.querySelector<HTMLButtonElement>(`[data-control="${action}"]`)?.disabled, run: click(`[data-control="${action}"]`) })), { id: "export", label: "导出 Markdown", run: click('[data-action="export-readable"]') }, { id: "session", label: "会话模型、限制与授权", run: click('[data-action="session-settings"]') });
   if (task?.pending) commands.push({ id: "answer", label: "处理当前等待事项", hint: task.pending.title, run: () => focusComposer(true) });
@@ -221,6 +239,7 @@ function draftMenu(): void {
 function toast(text: string, error = false): void { const node = document.getElementById("task-toast")!; node.textContent = text; node.className = error ? "error" : ""; clearTimeout(toastTimer); toastTimer = window.setTimeout(() => node.textContent = "", 7000); }
 function updateMessageSend(): void {
   const field = root.querySelector<HTMLTextAreaElement>("#steering");
+  if (field?.closest("[data-task-chat-owned]")) return;
   const send = root.querySelector<HTMLButtonElement>("#steer-task .send-task");
   const form = field?.form;
   if (send) send.disabled = operations.running.has(`task:${form?.dataset.taskId}`) || (!field?.value.trim() && !messageDrafts.get(form ? messageFormKey(form) : "").attachments.length);
@@ -229,6 +248,7 @@ function showPending(): void {
   root.removeAttribute("aria-busy");
   const scope = selected ? `task:${selected}` : `view:${view}`;
   root.querySelectorAll<HTMLButtonElement>('button').forEach(button => {
+    if (button.closest("[data-task-chat-owned]")) return;
     const navigation = button.dataset.nav || button.dataset.task || button.dataset.taskMenu || ["focus-browser", "toggle-sidebar", "toggle-task-inspector", "commands", "jump-latest", "retry-operation", "dismiss-operation", "attention", "focus-reply", "session-settings"].includes(button.dataset.action || "");
     const urgent = ["pause", "cancel", "takeover"].includes(button.dataset.control || "");
     if (operations.running.has(scope) && !button.disabled && !navigation && !urgent) { button.disabled = true; button.dataset.pendingDisabled = scope; }
@@ -290,44 +310,43 @@ function profileAvailabilityHint(id: string): string {
   return `<p id="${id}" class="profile-availability ${profiles && available ? "has-available" : ""}" role="status">${text}</p>`;
 }
 function toolbar(title: string, _subtitle: string, extra = ""): string {
+  return `<header class="topline page-header"><div class="page-heading"><h1 title="${e(title)}">${e(title)}</h1></div><div class="header-actions">${extra}</div></header>`;
+}
+function taskSidebarToggle(): string {
   const collapsed = root.classList.contains("sidebar-collapsed");
-  return `<header class="topline page-header"><div class="page-heading"><button type="button" class="icon-button sidebar-toggle" data-action="toggle-sidebar" aria-label="${collapsed ? "展开侧栏" : "收起侧栏"}" aria-expanded="${!collapsed}" title="${collapsed ? "展开侧栏" : "收起侧栏"}">${icon("sidebar")}</button><h1 title="${e(title)}">${e(title)}</h1></div><div class="header-actions">${extra}</div></header>`;
+  const label = collapsed ? "展开任务侧栏" : "收起任务侧栏";
+  return `<button id="task-sidebar-toggle" type="button" class="icon-button sidebar-toggle" data-action="toggle-sidebar" aria-controls="task-sidebar" aria-label="${label}" aria-expanded="${!collapsed}" title="${label}">${icon("sidebar")}</button>`;
 }
 function nav(): string {
-  const links = [["materials", "folder", "资料"], ["templates", "template", "任务模板"], ["schedules", "clock", "定时任务"], ["history", "history", "全部任务"]] as const;
-  return `<aside class="sidebar" aria-label="侧栏">
+  const links = [["templates", "template", "任务模板"], ["schedules", "clock", "定时任务"], ["history", "history", "全部任务"]] as const;
+  return `<aside id="task-sidebar" class="sidebar" aria-label="任务侧栏">
     <button type="button" class="nav-item task-attention-nav" data-action="attention">待处理 <span class="attention-count">${data.tasks.filter(task => attentionReason(task, readTasks[task.id])).length}</span></button>
     <div class="sidebar-recents">${taskNavigation()}</div>
     <nav class="sidebar-tools" aria-label="工作区工具">
       ${links.map(([key, glyph, label]) => `<button class="nav-item ${view === key ? "active" : ""}" data-nav="${key}" title="${label}" ${view === key ? 'aria-current="page"' : ""}>${icon(glyph)}<span>${label}</span></button>`).join("")}
       <details class="sidebar-more"><summary>更多</summary><button class="nav-item" data-nav="usage">${icon("usage")}<span>Token 消耗</span></button><button type="button" class="nav-item" data-action="commands">命令与快捷键</button></details>
     </nav>
-    <div class="sidebar-footer"><button class="nav-item ${view === "settings" ? "active" : ""}" data-nav="settings" title="设置">${icon("settings")}<span>设置</span></button></div>
+    <div class="sidebar-footer"><button class="nav-item ${view === "settings" ? "active" : ""}" data-nav="settings" title="Agent 设置">${icon("settings")}<span>Agent 设置</span></button></div>
   </aside>`;
 }
-function formExtras(): string { return `<details class="details"><summary>任务选项 <span class="details-hint">资料、授权与运行限制</span></summary><div class="field"><label>模板名称（保存模板时使用）</label><input name="templateName" placeholder="留空则使用任务描述"></div><div class="grid-two"><div><label>使用已保存的资料</label>${data.materials.length ? data.materials.map((material) => `<label><input type="checkbox" name="material" value="${e(material.id)}">${e(material.name)} · v${material.version}</label>`).join("") : '<small>尚未添加资料，可在“资料”中保存。</small>'}</div><div><label>选择附件库中的文件</label>${data.attachments.map(file => `<label><input type="checkbox" name="attachment" value="${e(file.id)}" ${selectedFiles.includes(file.id) ? "checked" : ""}>${e(file.name)}</label>`).join("") || "<small>可先添加附件。</small>"}<br><label for="authorization">操作授权范围</label><textarea id="authorization" name="authorization" placeholder="例如：填写后让我确认再提交"></textarea></div></div><div class="field"><label for="grant-origin">允许自动执行的网站来源（可选）</label><input id="grant-origin" name="grantOrigin" type="url" placeholder="https://example.com"><small>系统 Chrome 未收紧权限时默认直接执行；以下额度用于其他连接或需要确认的模式。</small><div class="actions"><label><input type="checkbox" name="grantEffect" value="submit">允许提交 / 保存</label><label><input type="checkbox" name="grantEffect" value="send">允许发送</label><label><input type="checkbox" name="grantEffect" value="delete">允许删除</label></div><label>最多自动执行次数</label><input name="grantMax" type="number" min="1" max="500" value="10"><br><br><label for="items">批量项目（每行一项，可留空）</label><textarea id="items" name="items" placeholder="公司 / 岗位 / 链接，或逐项填写要求"></textarea></div><div class="grid-three"><div><label>时间上限（分钟）</label><input name="minutes" type="number" min="1" max="1440" value="30"></div><div><label>操作次数上限</label><input name="actions" type="number" min="1" max="10000" value="200"></div><div><label>主模型估算费用上限（USD）</label><input name="budgetUsd" type="number" min="0.01" max="1000" step="0.01" value="5"></div></div></details>`; }
+function formExtras(label = "任务选项", open = false): string { return `<details class="details" ${open ? "open" : ""}><summary>${label} <span class="details-hint">资料、授权与运行限制</span></summary><div class="field"><label>模板名称（保存模板时使用）</label><input name="templateName" placeholder="留空则使用任务描述"></div><div class="grid-two"><div><label>使用已保存的资料</label>${data.materials.length ? data.materials.map((material) => `<label><input type="checkbox" name="material" value="${e(material.id)}">${e(material.name)} · v${material.version}</label>`).join("") : '<small>尚未添加资料，可在“资料”中保存。</small>'}</div><div><label>选择附件库中的文件</label>${data.attachments.map(file => `<label><input type="checkbox" name="attachment" value="${e(file.id)}" ${selectedFiles.includes(file.id) ? "checked" : ""}>${e(file.name)}</label>`).join("") || "<small>可先添加附件。</small>"}<br><label for="authorization">操作授权范围</label><textarea id="authorization" name="authorization" placeholder="例如：填写后让我确认再提交"></textarea></div></div><div class="field"><label for="grant-origin">允许自动执行的网站来源（可选）</label><input id="grant-origin" name="grantOrigin" type="url" placeholder="https://example.com"><small>系统 Chrome 未收紧权限时默认直接执行；以下额度用于其他连接或需要确认的模式。</small><div class="actions"><label><input type="checkbox" name="grantEffect" value="submit">允许提交 / 保存</label><label><input type="checkbox" name="grantEffect" value="send">允许发送</label><label><input type="checkbox" name="grantEffect" value="delete">允许删除</label></div><label>最多自动执行次数</label><input name="grantMax" type="number" min="1" max="500" value="10"><br><br><label for="items">批量项目（每行一项，可留空）</label><textarea id="items" name="items" placeholder="公司 / 岗位 / 链接，或逐项填写要求"></textarea></div><div class="grid-three"><div><label>时间上限（分钟）</label><input name="minutes" type="number" min="1" max="1440" value="30"></div><div><label>操作次数上限</label><input name="actions" type="number" min="1" max="10000" value="200"></div><div><label>主模型估算费用上限（USD）</label><input name="budgetUsd" type="number" min="0.01" max="1000" step="0.01" value="5"></div></div></details>`; }
 function composer(): string {
   const shortcut = "Enter";
-  return `<div class="compose"><div class="compose-stage"><div class="compose-intro"><img class="compose-mark" src="./assets/profilepilot-mark.svg" alt=""><h2>今天想让浏览器做什么？</h2><p>描述你的任务，随时查看进度或接管操作。</p></div>
-    ${!data.settings.hasApiKey ? '<div class="notice setup-notice"><span>连接模型服务，即可开始第一个任务。</span><button data-nav="settings" data-focus="model">前往设置 →</button></div>' : ""}
-    <form id="create-task" class="composer task-composer" data-draft-key="${e(draftKey("", "create-task"))}"><div class="compose-context"><div class="browser-picker">${icon("browser")}<select name="profileId" aria-describedby="task-profile-availability" aria-label="任务使用的浏览器" required><option value="">选择浏览器</option>${profileOptions()}</select>${icon("chevron")}</div></div><div class="compose-input-shell"><label for="prompt" class="sr-only">告诉我你想完成什么</label><textarea id="prompt" name="prompt" data-editor-key="${e(draftKey("", "create-task"))}" data-autogrow data-autogrow-min="44" aria-describedby="task-compose-shortcuts" required placeholder="让浏览器帮你完成一件事…" rows="1">${e(messageDrafts.get(draftKey("", "create-task")).text)}</textarea>
+  return `<div class="compose"><form id="create-task" class="composer task-composer" data-draft-key="${e(draftKey("", "create-task"))}"><div class="compose-scroll" tabindex="-1" aria-label="任务内容"><div class="compose-intro"><h2>${creatingTemplate ? "新建任务模板" : "今天想让浏览器做什么？"}</h2><p>${creatingTemplate ? "填写模板名称和任务内容，保存后即可重复使用。" : "描述你的任务，随时查看进度或接管操作。"}</p></div>
+    ${!data.settings.hasApiKey ? '<div class="notice setup-notice"><span>连接模型服务，即可开始第一个任务。</span><button type="button" data-nav="settings" data-focus="model">前往设置 →</button></div>' : ""}
+    ${skillForm(formDraft?.skill, data.skills || [])}
+    <div class="compose-template-settings" ${creatingTemplate || editTemplate || formDraft?.skill ? "" : "hidden"}>${formExtras("模板设置", creatingTemplate)}</div>
+    ${nativeTaskOptions()}
+    ${data.tasks.some(task => !TERMINAL_TASKS.has(task.status)) ? `<section class="home-active"><h2>正在进行</h2>${rows(data.tasks.filter(task => !TERMINAL_TASKS.has(task.status)))}</section>` : ""}
+    </div><div class="compose-dock"><div class="compose-context"><div class="browser-picker">${icon("browser")}<select name="profileId" aria-describedby="task-profile-availability" aria-label="任务使用的浏览器" required><option value="">选择浏览器</option>${profileOptions()}</select>${icon("chevron")}</div></div><div class="compose-input-shell"><label for="prompt" class="sr-only">告诉我你想完成什么</label><textarea id="prompt" name="prompt" data-editor-key="${e(draftKey("", "create-task"))}" data-autogrow data-autogrow-min="44" aria-describedby="task-compose-shortcuts" required placeholder="${creatingTemplate ? "描述这个模板要完成的任务…" : "让浏览器帮你完成一件事…"}" rows="1">${e(messageDrafts.get(draftKey("", "create-task")).text)}</textarea><span id="task-compose-shortcuts" class="sr-only">${e(newlineHint)}</span>
       <div id="chosen-files">${selectedFiles.map(id => `<span class="file-chip">${icon("paperclip")}${e(data.attachments.find(file => file.id === id)?.name || id)}<button type="button" data-remove-file="${id}" aria-label="移除附件">×</button></span>`).join("")}</div>
-      <div class="compose-toolbar compose-actions"><button type="button" class="icon-button" data-action="attach" title="添加附件" aria-label="添加附件">${icon("plus")}</button><button type="button" class="template-button" data-action="save-template" title="${editTemplate ? "更新模板" : "保存为模板"}" aria-label="${editTemplate ? "更新模板" : "保存为模板"}">${icon("bookmark")}<span>${editTemplate ? "更新模板" : "保存模板"}</span></button><button type="button" id="task-compose-shortcuts" class="keyboard-hint" data-action="commands" title="${e(newlineHint)}" aria-label="查看输入快捷键：${e(newlineHint)}">快捷键</button><div class="model-controls">${modelPicker()}${jevEntry()}</div><button class="primary send-task" type="submit" title="开始任务（${shortcut}）" aria-label="开始任务">${icon("arrow")}</button>${formExtras()}</div></div>
-      ${nativeTaskOptions()}
-    </form>
-    </div>
+      <div class="compose-toolbar compose-actions"><button type="button" class="icon-button" data-action="attach" title="添加附件" aria-label="添加附件">${icon("plus")}</button>${creatingTemplate ? "" : `<button type="button" class="template-button" data-action="save-template" title="${editTemplate ? "更新模板" : "保存为模板"}" aria-label="${editTemplate ? "更新模板" : "保存为模板"}">${icon("bookmark")}<span>${editTemplate ? "更新模板" : "保存模板"}</span></button>`}<div class="model-controls">${modelPicker()}${jevEntry()}</div><button type="button" class="task-template-trigger" popovertarget="task-template-menu" aria-controls="task-template-menu">任务模板${icon("chevron")}</button>${creatingTemplate ? '<button class="primary save-template-primary" type="button" data-action="save-template">保存模板</button>' : `<button class="primary send-task" type="submit" title="开始任务（${shortcut}）" aria-label="开始任务">${icon("arrow")}</button>`}</div></div>
     ${profileAvailabilityHint("task-profile-availability")}
-    <div class="examples">${[
-      ["folder", "填写申请", "使用简历和资料", "帮我打开招聘官网，使用选择的资料和简历填写申请，提交前让我确认。"],
-      ["browser", "整理网页", "把信息汇总成表格", "帮我整理网页中的信息，记录标题、关键内容和来源链接，汇总成表格。"],
-      ["template", "处理后台", "按要求逐项录入", "把附件表格中的资料逐项录入后台，缺少必填信息时问我，记录每项结果。"]
-    ].map(([glyph, title, subtitle, prompt]) => `<button class="example" data-example="${e(prompt)}">${icon(glyph as "folder" | "browser" | "template")}<span><strong>${title}</strong><small>${subtitle}</small></span></button>`).join("")}</div>
-    <p class="compose-footnote">使用你自己的浏览器与账号 · 系统 Chrome 默认放权，可随时停止</p>
-  </div>`;
+    </div></form>${taskTemplateMenu(data.skills || [], data.templates)}</div>`;
 }
 function rows(tasks: BrowserTask[]): string { return tasks.length ? `<div class="task-rows">${tasks.map(task => {
   const hit = search.trim() ? searchSnippet(task, search) : undefined;
-  return `<div class="task-list-entry" data-task-row="${e(task.id)}"><button class="task-row" data-task="${e(task.id)}" data-hit="${e(hit?.id || "")}"><span class="row-icon">${icon(task.archivedAt ? "archive" : task.pinnedAt ? "pin" : "message")}</span><div class="task-row-copy"><strong>${e(task.title)}</strong><small>${e(task.profileName)} · ${date(task.updatedAt)} · ${e(attentionReason(task, readTasks[task.id]))}</small>${hit?.html || ""}</div>${pill(task)}</button>${taskMenuButton(task, "list")}</div>`;
+  return `<div class="task-list-entry" data-task-row="${e(task.id)}"><button type="button" class="task-row" data-task="${e(task.id)}" data-hit="${e(hit?.id || "")}"><span class="row-icon">${icon(task.archivedAt ? "archive" : task.pinnedAt ? "pin" : "message")}</span><div class="task-row-copy"><strong>${e(task.title)}</strong><small>${e(task.profileName)} · ${date(task.updatedAt)} · ${e(attentionReason(task, readTasks[task.id]))}</small>${hit?.html || ""}</div>${pill(task)}</button>${taskMenuButton(task, "list")}</div>`;
 }).join("")}</div>` : '<div class="empty">没有找到任务。<br>可以新建任务，或调整搜索关键词和筛选。</div>'; }
 function inspectorToggle(): string {
   const label = inspectorOpen ? "收起任务信息侧栏" : "展开任务信息侧栏";
@@ -353,7 +372,7 @@ function toggleTaskInspector(): void {
   mountTaskPreview();
 }
 function taskDetail(task: BrowserTask): string {
-  return `<header class="thread-heading"><h2 title="${e(task.title)}">${e(task.title)}</h2><span class="pill ${task.status}">${e(statusNames[task.status])}</span><div class="header-actions">${inspectorToggle()}${historyActions()}</div></header>` + workbenchThread(task, { drafts: messageDrafts, attachments: data.attachments, settings: data.settings, hint: newlineHint, status: statusNames[task.status], inspector: inspectorOpen, stream: data.streams?.[task.id], replyError: task.pending ? replyErrors.get(task.pending.id) : undefined });
+  return `<header class="thread-heading"><h2 title="${e(task.title)}">${e(task.title)}</h2><span class="pill ${task.status}">${e(statusNames[task.status])}</span>${task.skill ? `<span class="skill-run-label">${e(task.skill.title)} · v${e(task.skill.version)}</span>` : ""}<div class="header-actions">${inspectorToggle()}${historyActions()}</div></header>` + workbenchThread(task, { drafts: messageDrafts, attachments: data.attachments, settings: data.settings, hint: newlineHint, status: statusNames[task.status], inspector: inspectorOpen, stream: data.streams?.[task.id], replyError: task.pending ? replyErrors.get(task.pending.id) : undefined });
 }
 
 function materials(): string {
@@ -361,7 +380,7 @@ function materials(): string {
   return `${toolbar("资料与附件", "Personal materials", '<button data-action="export-materials">导出资料</button>')}<p class="muted">仅在任务中选择后使用。临时回答不会自动保存到这里。</p><div class="grid-two"><form id="material-form" class="panel"><h2>${material ? "编辑资料" : "添加一份资料"}</h2><div class="field"><label for="material-name">名称</label><input id="material-name" name="name" required value="${e(material?.name || "")}" placeholder="求职资料 / 工作账号信息"></div><div class="field"><label for="material-scope">适用范围</label><input id="material-scope" name="scope" value="${e(material?.scope || "")}" placeholder="例如：招聘申请"></div><div class="field"><label for="material-content">资料内容</label><textarea id="material-content" name="content" rows="9" required placeholder="姓名、联系方式、教育经历，或任务需要的具体信息">${e(material?.content || "")}</textarea></div><button class="primary">保存资料</button>${material ? '<button type="button" data-action="clear-material">取消编辑</button>' : ""}</form><div>${data.materials.map((item) => `<section class="panel"><div class="panel-header"><h2>${e(item.name)}</h2><small>v${item.version}</small></div><small>${e(item.scope || "未指定范围")}</small><p class="material-body">${e(item.content)}</p><div class="actions"><button data-edit-material="${item.id}">编辑</button><button data-delete-material="${item.id}" class="danger">删除</button></div></section>`).join("") || '<div class="empty">保存常用资料，让每次填写更省心。</div>'}</div></div><section class="panel"><div class="panel-header"><h2>附件库</h2><button data-action="import-library">＋ 添加附件</button></div>${data.attachments.map((file) => `<div class="item"><div class="task-row-copy">${e(file.name)}<p class="muted">${Math.ceil(file.size / 1024)} KB</p></div><button data-preview-artifact="${file.id}">预览</button><button data-open-file="${file.id}">打开</button><button class="danger" data-delete-file="${file.id}">删除</button></div>`).join("") || '<small>可以保存简历、表格、图片等任务文件。</small>'}</section>`;
 }
 function templates(): string {
-  return `${toolbar("任务模板", "Reusable tasks")}<p class="muted">复用操作要求、资料选择和授权范围。使用时可以修改参数，执行时重新识别网页。</p>${data.templates.length ? `<div class="grid-two">${data.templates.map(template => `<section class="panel"><h2>${e(template.name)}</h2><p>${e(template.task.prompt)}</p><small>${date(template.updatedAt)}</small><div class="actions"><button class="primary" data-use-template="${template.id}">使用 / 编辑</button><button class="danger" data-delete-template="${template.id}">删除</button></div></section>`).join("")}</div>` : '<div class="empty">在新建任务时保存模板，或从已完成的任务保存。</div>'}`;
+  return `${toolbar("任务模板", "Reusable tasks")}${skillLibrary(data.skills || [], data.skillIssues || [])}<h2 class="saved-templates-heading">我的参数模板</h2><p class="muted">保存常用条件、资料选择和授权范围，下次直接使用。</p>${data.templates.length ? `<div class="grid-two">${data.templates.map(template => `<section class="panel"><h2>${e(template.name)}</h2>${template.task.skill ? `<small>${e(data.skills?.find(skill => skill.id === template.task.skill?.id)?.title || template.task.skill.id)}</small>` : ""}<p>${e(template.task.prompt)}</p><small>${date(template.updatedAt)}</small><div class="actions"><button class="primary" data-use-template="${template.id}">使用 / 编辑</button><button class="danger" data-delete-template="${template.id}">删除</button></div></section>`).join("")}</div>` : '<div class="empty">填写工作流条件后，点击“保存模板”，即可保留这组参数。</div>'}`;
 }
 function jevSettings(): string {
   const s = data.settings;
@@ -378,10 +397,22 @@ function jevSettings(): string {
 }
 function settings(): string { const s = data.settings; return `${toolbar("Agent 设置", "Agent & privacy", '<button class="primary return-agent" data-action="return-agent">← 返回 Agent 对话</button>')}<div class="settings-wrap">${appearanceControls()}${nativeBrowserSettings(profiles?.profiles || [], data.nativeBrowsers || [], nativePairing, nativeAuthorization, data.nativeInstallations || [])}<form id="settings-form"><section class="panel"><h2>模型服务</h2><p class="muted">使用 API 密钥连接。任务所需的网页、资料和附件信息会发送给你配置的模型服务。</p><div class="field"><label for="model">模型名称</label><input id="model" name="model" value="${e(s.model)}" required></div><div class="field"><label for="baseUrl">API 地址</label><input id="baseUrl" name="baseUrl" value="${e(s.baseUrl)}" required type="url"></div><div class="field"><label for="authMode">鉴权方式</label><select id="authMode" name="authMode"><option value="" ${!s.authMode ? "selected" : ""}>自动选择</option><option value="apiKey" ${s.authMode === "apiKey" ? "selected" : ""}>API Key（x-api-key）</option><option value="bearer" ${s.authMode === "bearer" ? "selected" : ""}>Bearer Token</option></select></div><div class="field"><label for="apiKey">API 密钥 · ${s.hasApiKey ? "已由系统安全存储保护，留空保留" : "尚未配置"}</label><input id="apiKey" name="apiKey" type="password" autocomplete="new-password" placeholder="输入密钥后保存"></div><div class="actions"><button class="primary">保存设置</button><button type="button" data-action="test-connection">测试连接</button><button type="button" data-action="clear-key" class="danger">删除密钥</button></div></section><section class="panel"><h2>运行与记录</h2><div class="grid-two"><div class="field"><label>不同 Profile 的并发任务数</label><input name="maxConcurrent" type="number" min="1" max="6" value="${s.maxConcurrent}"></div><p class="muted">历史会话和产物会保留，直到你显式删除任务。关闭窗口后任务留在后台；退出应用会停止任务服务。</p></div><label><input name="saveScreenshots" type="checkbox" ${s.saveScreenshots ? "checked" : ""}>按需保存页面截图（可能包含个人信息）</label><label><input name="notifications" type="checkbox" ${s.notifications ? "checked" : ""}>需要处理或任务结束时发送桌面通知</label></section></form>${jevSettings()}<section class="panel"><h2>诊断导出</h2><p class="muted">仅导出任务状态、时间、用量及动作类型，不包含密钥、对话、网页内容、个人资料或附件路径。</p><button data-action="export-diagnostics">导出脱敏诊断</button></section></div>`; }
 function schedules(): string { return `${toolbar("定时任务", "Schedules")}<div class="notice">仅在本机应用运行时执行。错过计划会标记未执行，不会自动补交。执行时间按所选时区显示。</div><div class="grid-two"><form id="schedule-form" class="panel"><h2>${editSchedule ? "编辑计划" : "安排任务"}</h2><div class="field"><label>任务名称</label><input name="name" required></div><div class="field"><label>操作要求</label><textarea name="prompt" required></textarea></div><div class="field"><label>使用浏览器</label><select name="profileId" aria-describedby="schedule-profile-availability" required><option value="">选择浏览器</option>${profileOptions("", true)}</select>${profileAvailabilityHint("schedule-profile-availability")}</div><div class="field"><label>执行时间（按下方时区）</label><input name="at" type="datetime-local" required></div><div class="grid-two"><div class="field"><label>时区</label><input name="timezone" value="${e(Intl.DateTimeFormat().resolvedOptions().timeZone)}" required></div><div class="field"><label>重复</label><select name="repeat"><option value="once">仅一次</option><option value="daily">每天</option></select></div></div>${formExtras()}<button class="primary">保存计划</button>${editSchedule ? '<button type="button" data-action="clear-schedule">取消编辑</button>' : ""}</form><div>${data.schedules.map((schedule) => `<section class="panel"><div class="panel-header"><h2>${e(schedule.name)}</h2><span class="pill">${schedule.enabled ? "已启用" : "已停用"}</span></div><p>${e(schedule.task.prompt)}</p><p class="muted">${e(new Date(schedule.at).toLocaleString("zh-CN", { timeZone: schedule.timezone }))} · ${e(schedule.timezone)}<br>${schedule.repeat === "daily" ? "每天" : "仅一次"}</p>${schedule.missedAt ? '<p class="notice">错过计划，未执行</p>' : ""}${schedule.lastTaskId ? `<button data-task="${schedule.lastTaskId}">查看上次结果</button>` : ""}<div class="actions"><button data-edit-schedule="${schedule.id}">编辑</button><button data-toggle-schedule="${schedule.id}">${schedule.enabled ? "暂停计划" : "重新启用"}</button><button data-delete-schedule="${schedule.id}" class="danger">删除</button></div></section>`).join("") || '<div class="empty">还没有安排定时任务。</div>'}</div></div>`; }
+function updateTaskChat(immediate = false): void {
+  const task = data?.tasks.find(item => item.id === selected);
+  if (!task || !document.getElementById("task-chat")) { taskChat.dispose(); return; }
+  taskChat.update({ task, stream: data.streams?.[task.id], drafts: messageDrafts, attachments: data.attachments, settings: data.settings,
+    notify: toast,
+    send: async (id, draft, action) => {
+      await api.control(id, action, draft.text, { requestId: draft.requestId, attachmentIds: draft.attachments });
+      toast(action === "queue" ? "消息已排队，可取回编辑或撤回。" : "消息已收到。");
+    }
+  }, immediate);
+}
 function render(preserve = true): void {
   if (!data) return;
   if (composing && preserve) { renderDeferred = true; return; }
   const key = `${view}:${selected}`;
+  if (key !== renderedKey) taskChat.dispose();
   preserve = preserve && renderedKey === key;
   if (!preserve) closeTaskTooltip();
   const menuState = preserve ? selects.capture() : undefined;
@@ -392,6 +423,7 @@ function render(preserve = true): void {
   const openDetails = new Set([...root.querySelectorAll("details")].filter(node => node.open).map(detailsKey));
   const oldWorkspace = root.querySelector<HTMLElement>(".workspace");
   const workspaceScroll = oldWorkspace?.scrollTop || 0;
+  const composeScroll = root.querySelector(".compose-scroll")?.scrollTop || 0;
   const sidebarScroll = root.querySelector(".sidebar-recents")?.scrollTop || 0;
   const inspectorScroll = root.querySelector(".thread-inspector")?.scrollTop || 0;
   const active = document.activeElement as HTMLInputElement | HTMLTextAreaElement | null;
@@ -402,14 +434,14 @@ function render(preserve = true): void {
   let content = "";
   const task = selected && data.tasks.find((task) => task.id === selected);
   if (task && ["tasks", "history"].includes(view)) content = taskDetail(task);
-  else if (view === "tasks") content = `${toolbar("Agent", "任务与浏览器，一处协同", `<span class="workspace-status"><span class="task-status-dot ${data.tasks.some(task => task.status === "running") ? "running" : ""}"></span>${data.tasks.filter(task => task.status === "running").length ? `${data.tasks.filter(task => task.status === "running").length} 个任务运行中` : "准备就绪"}</span>`)}${composer()}${data.tasks.some((task) => !TERMINAL_TASKS.has(task.status)) ? `<section class="home-active"><h2>正在进行</h2>${rows(data.tasks.filter((task) => !TERMINAL_TASKS.has(task.status)))}</section>` : ""}`;
+  else if (view === "tasks") content = `${toolbar("Agent", "任务与浏览器，一处协同", `<span class="workspace-status"><span class="task-status-dot ${data.tasks.some(task => task.status === "running") ? "running" : ""}"></span>${data.tasks.filter(task => task.status === "running").length ? `${data.tasks.filter(task => task.status === "running").length} 个任务运行中` : "准备就绪"}</span>`)}${composer()}`;
   else if (view === "materials") content = materials();
   else if (view === "usage") content = toolbar("Token 消耗", "Usage") + tokenUsagePage(data, usageSource);
   else if (view === "settings") content = settings();
   else if (view === "templates") content = templates();
   else if (view === "schedules") content = schedules();
   else content = `${toolbar(showAttention ? "需要处理与完成未读" : "全部任务", "History")}<div class="history-scopes" role="group" aria-label="任务归档筛选"><button data-task-scope="active" aria-pressed="${historyScope === "active"}">未归档 <span>${data.tasks.filter(task => !task.archivedAt).length}</span></button><button data-task-scope="archived" aria-pressed="${historyScope === "archived"}">已归档 <span>${data.tasks.filter(task => task.archivedAt).length}</span></button></div><div class="topline history-filter"><input id="history-search" class="search" aria-label="搜索任务" placeholder="搜索消息、执行记录、结果与页面证据…" value="${e(search)}"><select id="history-filter" class="search" aria-label="任务状态"><option value="all">所有状态</option>${Object.entries(statusNames).map(([key, label]) => `<option value="${key}" ${filter === key ? "selected" : ""}>${label}</option>`).join("")}</select></div>${historyScope === "archived" ? '<p class="muted archive-description">归档的任务保留记录和结果，可通过“…”菜单移出归档。</p>' : ""}${rows(data.tasks.filter((task) => (historyScope === "archived" ? !!task.archivedAt : !task.archivedAt) && (filter === "all" || task.status === filter) && (!showAttention || !!attentionReason(task, readTasks[task.id])) && (!search.trim() || !!findTaskHit(task, search))).sort((a, b) => (b.archivedAt || b.updatedAt).localeCompare(a.archivedAt || a.updatedAt)))}`;
-  taskDom.update(`${workspaceSwitcher("agent")}${workspaceIdentityBar(profiles, task ? task.profileId : "", Boolean(task), data.nativeBrowsers)}<header class="agent-workspace-heading"><div><h1>Agent</h1><span>任务工作台</span></div><div class="header-actions"><button type="button" class="icon-button sidebar-toggle" data-action="toggle-sidebar" aria-label="切换任务列表" aria-expanded="${!root.classList.contains("sidebar-collapsed")}">${icon("sidebar")}</button><button class="primary new-task" data-nav="tasks">${icon("plus")}新任务</button></div></header><div class="app-frame">${nav()}<main class="workspace ${view === "tasks" && !selected ? "is-home" : selected ? "is-thread" : "is-page"}"><div class="task-operation-status" aria-label="操作状态"></div>${content}</main></div>`, key);
+  taskDom.update(`${workspaceSwitcher("agent")}${workspaceIdentityBar()}<header class="agent-workspace-heading"><div>${taskSidebarToggle()}<h1>Agent</h1><span>任务工作台</span></div><div class="header-actions"><button class="primary new-task" data-nav="tasks">${icon("plus")}新任务</button></div></header><div class="app-frame">${nav()}<main class="workspace ${view === "tasks" && !selected ? "is-home" : selected ? "is-thread" : "is-page"}"><div class="task-operation-status" aria-label="操作状态"></div>${content}</main></div>`, key);
   const recents = root.querySelector(".sidebar-recents"); if (recents) recents.scrollTop = sidebarScroll;
   taskMenus.refresh();
   const inspector = root.querySelector(".thread-inspector"); if (inspector && preserve) inspector.scrollTop = inspectorScroll;
@@ -444,6 +476,7 @@ function render(preserve = true): void {
     }
   }
   if (preserve) {
+    const scroll = root.querySelector(".compose-scroll"); if (scroll) scroll.scrollTop = composeScroll;
     root.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>("input[name]:not([name=attachment]),textarea[name],select[name]").forEach((input) => { const previous = saved.get(`${input.form?.dataset.draftKey || input.form?.id}:${input.name}:${input.type === "checkbox" ? input.value : ""}`); if (previous) { if (input.value !== previous.value) input.value = previous.value; if (input.type === "checkbox") (input as HTMLInputElement).checked = previous.checked; } });
     root.querySelectorAll("details").forEach(node => { node.open = openDetails.has(detailsKey(node)); });
     const input = (focusId ? document.getElementById(focusId) : [...root.querySelectorAll<HTMLInputElement>("input,textarea,select")].find(node => node.name === focusName && node.form?.id === focusForm)) as HTMLInputElement | undefined;
@@ -460,6 +493,7 @@ function render(preserve = true): void {
   // The workspace owns conversation scrolling. Follow the latest message only
   // when opening a task or when the reader was already at the bottom.
   const workspace = root.querySelector<HTMLElement>(".workspace");
+  updateTaskChat(true);
   restoreMessageDrafts();
   taskDom.restore();
   root.querySelectorAll<HTMLLabelElement>("label").forEach(label => {
@@ -475,6 +509,7 @@ function render(preserve = true): void {
   if (theme) theme.value = document.documentElement.dataset.taskTheme || "system";
   if (size) size.value = document.documentElement.dataset.taskFontSize || "medium";
   selects.mount(menuState);
+  positionTaskTemplateMenu(root);
   for (const id of invalidFields) {
     const field = document.getElementById(id) as HTMLInputElement | null;
     if (field && !field.validity.valid) showFieldError(field, false);
@@ -501,7 +536,7 @@ function populateTaskForm(form: HTMLFormElement, input: CreateTaskInput): void {
 }
 function formInput(form: HTMLFormElement): CreateTaskInput {
   const f = new FormData(form);
-  return { ...nativeTaskInput(f), prompt: String(f.get("prompt") || ""), profileId: String(f.get("profileId") || ""), authorization: String(f.get("authorization") || ""), materialIds: f.getAll("material").map(String), attachmentIds: [...new Set([...selectedFiles, ...f.getAll("attachment").map(String)])],
+  return { skill: skillFromForm(f) || (form.id === "schedule-form" ? data.schedules.find(item => item.id === editSchedule)?.task.skill : undefined), ...nativeTaskInput(f), prompt: String(f.get("prompt") || ""), profileId: String(f.get("profileId") || ""), authorization: String(f.get("authorization") || ""), materialIds: f.getAll("material").map(String), attachmentIds: [...new Set([...selectedFiles, ...f.getAll("attachment").map(String)])],
     grant: f.get("grantOrigin") ? { origin: String(f.get("grantOrigin")), effects: f.getAll("grantEffect").map(String) as Array<"submit" | "send" | "delete">, maxActions: Number(f.get("grantMax")) } : undefined,
     items: String(f.get("items") || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean),
     limits: { minutes: Number(f.get("minutes")), actions: Number(f.get("actions")), budgetUsd: Number(f.get("budgetUsd")) } };
@@ -553,14 +588,6 @@ document.addEventListener("compositionend", () => {
 });
 document.addEventListener("click", event => { if ((event.target as Element)?.closest?.(".task-artifact-dialog")) openTaskLink(event, url => api.openLink(url), toast); });
 root.addEventListener("auxclick", event => { openTaskLink(event, url => api.openLink(url), toast); });
-document.addEventListener("workspace-profile-selected", event => {
-  const select = root.querySelector<HTMLSelectElement>('#create-task select[name="profileId"]');
-  if (select && [...select.options].some(option => option.value === (event as CustomEvent<string>).detail)) {
-    select.value = (event as CustomEvent<string>).detail;
-    select.dispatchEvent(new Event("change", { bubbles: true }));
-    render();
-  }
-});
 root.addEventListener("click", async (event) => {
   if (openTaskLink(event, url => api.openLink(url), toast)) return;
   const button = (event.target as Element).closest<HTMLElement>("button,a"); if (!button) return;
@@ -615,14 +642,16 @@ root.addEventListener("click", async (event) => {
   if (d.action === "toggle-sidebar") {
     const collapsed = root.classList.toggle("sidebar-collapsed");
     button.setAttribute("aria-expanded", String(!collapsed));
-    button.setAttribute("aria-label", collapsed ? "展开侧栏" : "收起侧栏");
-    button.title = collapsed ? "展开侧栏" : "收起侧栏";
+    button.setAttribute("aria-label", collapsed ? "展开任务侧栏" : "收起任务侧栏");
+    button.title = collapsed ? "展开任务侧栏" : "收起任务侧栏";
+    try { localStorage.setItem(sidebarPreference, String(collapsed)); } catch { /* The current window still updates. */ }
+    window.dispatchEvent(new Event("resize"));
     return;
   }
   if (d.nav) {
     event.preventDefault();
     // Returning to the current view must not redraw the form or discard its draft.
-    if (view === d.nav && !selected) { if (d.nav === "tasks") document.getElementById("prompt")?.focus(); return; }
+    if (view === d.nav && !selected) { if (d.nav === "tasks") { if (creatingTemplate) { creatingTemplate = false; render(); } document.getElementById("prompt")?.focus(); } return; }
     if (d.nav === "settings") settingsReturn = { view, selected };
     rememberForms();
     const draft = root.querySelector<HTMLFormElement>("#create-task");
@@ -635,7 +664,33 @@ root.addEventListener("click", async (event) => {
   if (d.task) { openTask(d.task, d.hit, search); return; }
   if (d.example) { const textarea = root.querySelector<HTMLTextAreaElement>("[name=prompt]"); if (textarea) { textarea.value = textarea.value.trim() ? `${textarea.value.trim()}\n\n${d.example}` : d.example; textarea.focus(); autoGrow(textarea); captureMessageDrafts(); } return; }
   if (d.removeFile) { selectedFiles = selectedFiles.filter((id) => id !== d.removeFile); root.querySelectorAll<HTMLInputElement>('[name="attachment"]').forEach(field => { if (field.value === d.removeFile) field.checked = false; }); captureMessageDrafts(); render(); return; }
-  if (d.useTemplate) { rememberForms(); const template = data.templates.find(item => item.id === d.useTemplate)!; forgetForm("create-task"); formDraft = template.task; messageDrafts.set(draftKey("", "create-task"), { text: template.task.prompt }); editTemplate = template.id; selectedFiles = template.task.attachmentIds || []; messageDrafts.set(draftKey("", "create-task"), { attachments: selectedFiles }); view = "tasks"; selected = ""; render(false); return; }
+  if (d.action === "refresh-skills") { void act(async () => { data = await api.snapshot(); toast("工作流已刷新。"); }, false, "skills:refresh", "刷新工作流"); return; }
+  if (d.useSkill) {
+    const skill = data.skills?.find(skill => skill.id === d.useSkill); if (!skill) return;
+    const profileId = root.querySelector<HTMLSelectElement>('#create-task [name="profileId"]')?.value || formDraft?.profileId || "";
+    root.querySelector<HTMLElement>("#task-template-menu")?.hidePopover(); creatingTemplate = false;
+    rememberForms(); forgetForm("create-task"); editTemplate = ""; selected = ""; view = "tasks";
+    selectedFiles = [];
+    formDraft = { prompt: skill.goal, profileId, skill: { id: skill.id, parameters: skillDefaults(skill) } };
+    messageDrafts.set(draftKey("", "create-task"), { text: skill.goal, attachments: [] });
+    render(false); root.querySelector<HTMLInputElement>(".task-skill-inputs input:not([type=hidden])")?.focus(); return;
+  }
+  if (d.action === "remove-skill") {
+    const form = root.querySelector<HTMLFormElement>("#create-task");
+    if (form) { formDraft = formInput(form); formDraft.skill = undefined; rememberForms(); forgetForm("create-task"); render(false); }
+    return;
+  }
+  if (d.useTemplate) { root.querySelector<HTMLElement>("#task-template-menu")?.hidePopover(); creatingTemplate = false; rememberForms(); const template = data.templates.find(item => item.id === d.useTemplate)!; forgetForm("create-task"); formDraft = template.task; messageDrafts.set(draftKey("", "create-task"), { text: template.task.prompt }); editTemplate = template.id; selectedFiles = template.task.attachmentIds || []; messageDrafts.set(draftKey("", "create-task"), { attachments: selectedFiles }); view = "tasks"; selected = ""; render(false); return; }
+  if (d.action === "new-template") {
+    root.querySelector<HTMLElement>("#task-template-menu")?.hidePopover();
+    rememberForms();
+    const form = root.querySelector<HTMLFormElement>("#create-task");
+    if (form) formDraft = formInput(form);
+    selected = ""; view = "tasks"; editTemplate = ""; creatingTemplate = true; forgetForm("create-task");
+    render(false);
+    root.querySelector<HTMLInputElement>('[name="templateName"]')?.focus();
+    return;
+  }
   if (d.editMaterial) { forgetForm("material-form"); editMaterial = d.editMaterial; render(false); document.getElementById("material-name")?.focus(); return; }
   if (d.editSchedule) { forgetForm("schedule-form"); editSchedule = d.editSchedule; selectedFiles = data.schedules.find(item => item.id === editSchedule)?.task.attachmentIds || []; render(false); root.querySelector<HTMLInputElement>('#schedule-form [name="name"]')?.focus(); return; }
   if (d.action === "return-agent") { rememberForms(); view = settingsReturn.view === "settings" ? "tasks" : settingsReturn.view; selected = settingsReturn.selected; if (!["tasks", "history"].includes(view)) { view = "tasks"; selected = ""; } selectedFiles = messageDrafts.get(draftKey("", "create-task")).attachments; render(false); root.querySelector<HTMLElement>("#prompt, #answer, #steering")?.focus({ preventScroll: true }); return; }
@@ -644,7 +699,7 @@ root.addEventListener("click", async (event) => {
     const task = data.tasks.find(task => task.id === selected);
     if (!task) return;
     selected = ""; view = "tasks"; forgetForm("create-task"); editTemplate = "";
-    formDraft = { prompt: [...task.events].reverse().find(event => event.kind === "user")?.text || task.prompt, profileId: task.profileId, nativeTarget: task.nativeTarget, nativeAccess: task.nativeAccess, authorization: task.authorization, materialIds: task.materials.map(item => item.id), attachmentIds: task.attachments.map(item => item.id), items: task.items.map(item => item.label), limits: task.limits };
+    formDraft = { skill: task.skill ? { id: task.skill.id, parameters: task.skill.parameters } : undefined, prompt: [...task.events].reverse().find(event => event.kind === "user")?.text || task.prompt, profileId: task.profileId, nativeTarget: task.nativeTarget, nativeAccess: task.nativeAccess, authorization: task.authorization, materialIds: task.materials.map(item => item.id), attachmentIds: task.attachments.map(item => item.id), items: task.items.map(item => item.label), limits: task.limits };
     messageDrafts.set(draftKey("", "create-task"), { text: formDraft.prompt });
     selectedFiles = [...formDraft.attachmentIds!]; messageDrafts.set(draftKey("", "create-task"), { attachments: selectedFiles }); pageFiles.set("tasks", selectedFiles);
     render(false); document.getElementById("prompt")?.focus(); return;
@@ -673,8 +728,8 @@ root.addEventListener("click", async (event) => {
     if (d.toggleSchedule) { const schedule = data.schedules.find((item) => item.id === d.toggleSchedule)!; await api.saveSchedule({ ...schedule, enabled: !schedule.enabled }); }
     switch (d.action) {
       case "retry-items": { const ids = [...root.querySelectorAll<HTMLInputElement>("[name=retryItem]:checked")].map(input => input.value); const task = await api.retryItems(targetTask, ids); if (selected === targetTask) { selected = task.id; view = "tasks"; } break; }
-      case "save-template": { const form = root.querySelector<HTMLFormElement>("#create-task")!; const task = formInput(form); const name = String(new FormData(form).get("templateName") || task.prompt.slice(0, 48)); const saved = await api.saveTemplate({ id: editTemplate || undefined, name, task }); editTemplate = saved.id; formDraft = saved.task; toast("模板已保存，可在任务模板中重复使用。"); break; }
-      case "save-task-template": { const task = data.tasks.find(task => task.id === targetTask)!; await api.saveTemplate({ name: task.title, task: { prompt: task.prompt, profileId: task.profileId, nativeTarget: task.nativeTarget, nativeAccess: task.nativeAccess, authorization: task.authorization, materialIds: task.materials.map(item => item.id), attachmentIds: task.attachments.map(item => item.id), items: task.items.map(item => item.label), limits: task.limits, grant: task.grant } }); toast("已保存为任务模板。"); break; }
+      case "save-template": { const form = root.querySelector<HTMLFormElement>("#create-task")!; const task = formInput(form); const name = String(new FormData(form).get("templateName") || task.prompt.slice(0, 48)); const savingDraft = formDraft; const saved = await api.saveTemplate({ id: editTemplate || undefined, name, task }); if (formDraft === savingDraft) { editTemplate = saved.id; formDraft = saved.task; creatingTemplate = false; } toast("模板已保存，可在任务模板中重复使用。"); break; }
+      case "save-task-template": { const task = data.tasks.find(task => task.id === targetTask)!; await api.saveTemplate({ name: task.title, task: { skill: task.skill ? { id: task.skill.id, parameters: task.skill.parameters } : undefined, prompt: task.prompt, profileId: task.profileId, nativeTarget: task.nativeTarget, nativeAccess: task.nativeAccess, authorization: task.authorization, materialIds: task.materials.map(item => item.id), attachmentIds: task.attachments.map(item => item.id), items: task.items.map(item => item.label), limits: task.limits, grant: task.grant } }); toast("已保存为任务模板。"); break; }
       case "attach": { const files = await api.importAttachments(); const key = draftKey("", "create-task"); const draft = messageDrafts.get(key); const ids = [...new Set([...draft.attachments, ...files.map(file => file.id)])]; messageDrafts.set(key, { attachments: ids }); pageFiles.set("tasks", ids); if (!selected && view === "tasks") selectedFiles = ids; break; }
       case "import-library": await api.importAttachments(); break;
       case "back": selected = ""; break;
@@ -715,6 +770,12 @@ root.addEventListener("click", async (event) => {
     }
   }, ["pause", "cancel", "takeover"].includes(d.control || ""), targetTask ? `task:${targetTask}` : `view:${view}`, d.control ? `${({ pause: "暂停任务", resume: "继续任务", cancel: "停止任务", takeover: "接管浏览器" } as Record<string,string>)[d.control] || "更新任务"}` : button.textContent?.trim() || "处理操作");
 });
+root.addEventListener("toggle", event => {
+  if ((event.target as HTMLElement).id === "task-template-menu") positionTaskTemplateMenu(root);
+}, true);
+window.addEventListener("resize", () => positionTaskTemplateMenu(root));
+document.addEventListener("workspace-before-switch", () => root.querySelector<HTMLElement>("#task-template-menu")?.hidePopover());
+
 document.addEventListener("keydown", event => {
   if (!data || event.isComposing || composing || event.keyCode === 229 || document.querySelector("dialog[open]")) return;
   const modifier = /Mac/i.test(navigator.platform) ? event.metaKey : event.ctrlKey;
@@ -778,7 +839,9 @@ function submitMessage(form: HTMLFormElement, submitter: HTMLElement | null): vo
   }, false, id ? `task:${id}` : "view:tasks", form.id === "reply-task" ? "发送答复" : "发送消息");
 }
 root.addEventListener("submit", (event) => {
+  if ((event.target as Element).closest("[data-task-chat-owned]")) return;
   event.preventDefault(); const form = event.target as HTMLFormElement; const values = new FormData(form);
+  if (form.id === "create-task" && creatingTemplate) { form.querySelector<HTMLButtonElement>(".save-template-primary")?.click(); return; }
   if (["create-task", "reply-task", "steer-task"].includes(form.id)) { submitMessage(form, (event as SubmitEvent).submitter); return; }
   if (form.id === "task-limits-form" || form.id === "task-model-form") {
     const id = form.dataset.taskId!;
@@ -802,8 +865,7 @@ root.addEventListener("scroll", event => { if ((event.target as HTMLElement)?.ma
 root.addEventListener("focusin", event => {
   const target = event.target as HTMLElement, row = target.closest<HTMLElement>(".recent-task-row");
   if (!row?.closest(".sidebar-recents")) return;
-  // Focus styling may expand a long title. Reveal it after that layout change,
-  // without moving sidebar reading position on every stream snapshot.
+  // Keep keyboard-focused tasks visible without moving the sidebar on snapshots.
   requestAnimationFrame(() => { if (row.isConnected && document.activeElement === target) row.scrollIntoView({ block: "nearest", inline: "nearest" }); });
 });
 window.addEventListener("beforeunload", rememberForms);
@@ -878,7 +940,19 @@ void loadProfiles();
 api.onChanged((snapshot) => {
   const workspace = root.querySelector<HTMLElement>(".workspace"), old = data?.tasks.find(task => task.id === selected), next = snapshot.tasks.find(task => task.id === selected);
   if (selected && old && next && workspace && !isAtTaskLatest(workspace, 64) && (old.events.length !== next.events.length || old.result?.summary !== next.result?.summary || data.streams?.[selected]?.text !== snapshot.streams?.[selected]?.text)) unseenMessages.add(selected);
-  data = snapshot; initialLoadError = ""; if (nativePairing && data.nativeBrowsers?.some(s => s.profileId === nativePairing!.profileId && s.connected)) nativePairing = undefined; render(); });
+  data = snapshot; initialLoadError = ""; if (nativePairing && data.nativeBrowsers?.some(s => s.profileId === nativePairing!.profileId && s.connected)) nativePairing = undefined;
+  if (composing) updateTaskChat();
+  render(); });
+api.onStream?.(update => {
+  if (!data) return;
+  const task = data.tasks.find(item => item.id === update.taskId);
+  if (!task || task.events.some(event => event.streamId === update.stream.id)) return;
+  data.streams = { ...data.streams, [update.taskId]: update.stream };
+  if (selected !== update.taskId) return;
+  const workspace = root.querySelector<HTMLElement>(".workspace");
+  if (workspace && !isAtTaskLatest(workspace, 64)) unseenMessages.add(selected);
+  updateTaskChat(); updateJumpLatest();
+});
 window.profileManager.onStateChanged((state) => { profiles = state; render(); });
 window.setInterval(() => {
   if (document.hidden || window.workspacePane?.active === false) return;

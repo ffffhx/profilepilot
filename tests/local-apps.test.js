@@ -114,7 +114,8 @@ test('supervisor tracks a real process tree across service recreation, restarts 
     await assert.rejects(workerRequest({ ...record, token: 'wrong' }, 'stop'), /身份/);
     const reopened = new LocalAppsService(store);
     assert.equal((await reopened.list())[0].runtime.status, 'running');
-    await assert.rejects(reopened.start(id), /先停止/);
+    await reopened.start(id);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(store, `${id}.runtime.json`), 'utf8')).workerPid, record.workerPid, 'starting an online app must not launch another supervisor');
     await assert.rejects(reopened.remove(id), /先停止/);
     await reopened.restart(id);
     rememberWorker();
@@ -152,7 +153,16 @@ test('debug discovery supports multiple windows and inspector while rejecting re
     assert.equal((await debugTargets(debugPort, 'main')).length, 1);
     const service = new LocalAppsService(path.join(temp.root, 'store'));
     const launch = await service.save(input(temp.root, { cdpPort: debugPort }));
-    await assert.rejects(service.start(launch), /已被占用/); await service.remove(launch);
+    const external = (await service.list())[0];
+    assert.equal(external.runtime.status, 'running');
+    assert.equal(external.managed, false);
+    assert.deepEqual(external.controls, { start: false, stop: false, restart: false });
+    await service.start(launch); // Detect the external app, never launch another copy.
+    assert.equal(fs.existsSync(path.join(temp.root, 'store', `${launch}.launch.json`)), false);
+    await assert.rejects(service.stop(launch), /外部/);
+    await assert.rejects(service.restart(launch), /外部/);
+    assert.match(await service.debuggerUrl(launch, 'renderer', 'window-1'), /^devtools:/);
+    await service.remove(launch);
     const id = await service.save(input('', { mode: 'attach', cdpPort: debugPort }));
     assert.equal((await service.list())[0].runtime.status, 'running');
     assert.match(await service.debuggerUrl(id, 'renderer', 'window-1'), /^devtools:\/\/devtools\/bundled\/inspector.html\?ws=/);

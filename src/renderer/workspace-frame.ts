@@ -21,12 +21,7 @@ if (window.parent !== window && workspaceRoute(location.href, window.parent.loca
       document.dispatchEvent(new CustomEvent("workspace-visibilitychange"));
     },
     route(search: string) { document.dispatchEvent(new CustomEvent("workspace-route", { detail: search })); },
-    search() { document.querySelector<HTMLButtonElement>("[data-workspace-search]")?.click(); },
     shortcut(event: KeyboardEventInit) { return !document.dispatchEvent(new KeyboardEvent("keydown", { ...event, bubbles: true, cancelable: true })); },
-    selectProfile(id: string) {
-      const select = document.querySelector<HTMLSelectElement>("#workspace-profile");
-      if (select && !select.disabled) { select.value = id; select.dispatchEvent(new Event("change", { bubbles: true })); }
-    },
     dispose() { for (const unsubscribe of subscriptions) unsubscribe(); subscriptions.clear(); pending.clear(); }
   };
   // All IPC still originates in the trusted top-level desktop document. No Node

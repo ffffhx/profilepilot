@@ -13,6 +13,7 @@ import type { PhonesService } from "./phones/service";
 import {
   PROFILEPILOT_MANAGEMENT_MAX_MESSAGE_BYTES,
   PROFILEPILOT_PHONE_MAX_RESPONSE_BYTES,
+  PROFILEPILOT_PHONE_BASIC_MAX_RESPONSE_BYTES,
   PROFILEPILOT_MANAGEMENT_PROTOCOL_VERSION,
   profilePilotManagementRoot,
   profilePilotManagementSecretPath,
@@ -90,6 +91,7 @@ export async function startProfilePilotManagementServer(
       try {
         const { command } = JSON.parse(line);
         if (command?.action === "phone" && ["action", "wrapper-action"].includes(command.method)) maxResponseBytes = PROFILEPILOT_PHONE_MAX_RESPONSE_BYTES;
+        if (command?.action === "phone" && command.method === "basic-action") maxResponseBytes = PROFILEPILOT_PHONE_BASIC_MAX_RESPONSE_BYTES;
       } catch { /* handleRequestLine returns the normal invalid-request error */ }
       void handleRequestLine(line, token, options)
         .then((response) => writeResponse(socket, response, maxResponseBytes))

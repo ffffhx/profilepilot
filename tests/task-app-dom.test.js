@@ -23,6 +23,7 @@ for (const list of [initial.documentElement.childNodes, initial.documentElement.
 }
 Object.assign(elementPrototype, {
   matches(selector) { return matches(this, selector); },
+  closest(selector) { for (let node=this; node?.nodeType===1; node=node.parentNode) if(matches(node,selector)) return node; return null; },
   querySelectorAll(selector) { return descendants(this).filter(node => matches(node, selector)); },
   querySelector(selector) { return this.querySelectorAll(selector)[0] || null; },
   isEqualNode(other) { return serialize(this) === serialize(other); },

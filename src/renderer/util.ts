@@ -75,8 +75,8 @@ export function formatCdpPortSuggestionNote(suggestion: CdpPortSuggestion): stri
 export function formatErrorMessage(error: unknown): string {
   const rawMessage = error instanceof Error ? error.message : String(error);
   const ipcPrefix = /^Error invoking remote method '[^']+':\s*/;
-  const classPrefix = /^(ProfileManagerError|Error):\s*/;
-  const cleaned = rawMessage.replace(ipcPrefix, "").replace(classPrefix, "").trim();
+  const classPrefix = /^(ProfileManagerError|NativeControlError|Error):\s*/;
+  const cleaned = rawMessage.replace(/^Error:\s*/, "").replace(ipcPrefix, "").replace(classPrefix, "").trim();
   if (cleaned.includes("ENOENT") && cleaned.includes(".profilepilot-sync-")) {
     return "同步临时文件已被系统清理或上次任务中断，请重新点击同步，ProfilePilot 会先恢复临时状态再继续。";
   }

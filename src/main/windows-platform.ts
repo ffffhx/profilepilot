@@ -27,6 +27,8 @@ export interface WindowsTcpConnection {
 export interface WindowsSystemSnapshot {
   processes: WindowsProcessInfo[];
   tcp: WindowsTcpConnection[];
+  processesAvailable?: boolean;
+  tcpAvailable?: boolean;
 }
 
 interface CachedWindowsSnapshot {
@@ -88,7 +90,7 @@ export async function getWindowsSystemSnapshot(force = false): Promise<WindowsSy
 async function loadWindowsSystemSnapshot(): Promise<WindowsSystemSnapshot> {
   const script = String.raw`
 $ErrorActionPreference = 'SilentlyContinue'
-$processes = @(Get-CimInstance Win32_Process | ForEach-Object {
+$processes = @(Get-CimInstance Win32_Process -ErrorAction Stop | ForEach-Object {
   $started = $null
   if ($_.CreationDate) {
     try { $started = $_.CreationDate.ToUniversalTime().ToString('o') } catch {}
@@ -109,11 +111,13 @@ $processes = @(Get-CimInstance Win32_Process | ForEach-Object {
     readWindowsNetstat()
   ]);
   const snapshot = parseWindowsSystemSnapshot(stdout);
-  snapshot.tcp = parseWindowsNetstat(netstatStdout);
+  snapshot.tcp = parseWindowsNetstat(netstatStdout || "");
+  snapshot.processesAvailable = snapshot.processes.length > 0;
+  snapshot.tcpAvailable = netstatStdout !== null;
   return snapshot;
 }
 
-async function readWindowsNetstat(): Promise<string> {
+async function readWindowsNetstat(): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync("netstat", ["-ano", "-p", "tcp"], {
       windowsHide: true,
@@ -123,7 +127,7 @@ async function readWindowsNetstat(): Promise<string> {
     });
     return String(stdout || "");
   } catch {
-    return "";
+    return null;
   }
 }
 

@@ -9,7 +9,8 @@ import { z } from "zod";
 import type { LocalAppAgentState, LocalAppConfig, LocalAppInput, LocalAppView, LocalDebugTarget } from "../../shared/local-apps";
 import { LocalAppGateway } from "./gateway";
 import { atomicJson, idleRuntime, parseEnvironment, workerRequest, type LocalAppWorkerRecord } from "./protocol";
-import { serviceRuntime } from "./service-runtime";
+import { processRuntime, invalidateProcessRuntime } from "./service-runtime";
+import { resolveAppRuntime, type DebugState } from "./runtime";
 
 const port = z.number().int().min(1024).max(65535).nullable();
 const inputSchema = z.object({
@@ -21,8 +22,8 @@ const inputSchema = z.object({
 });
 type Target = LocalDebugTarget & { ws: string };
 
-export async function debugTargets(portNumber: number | null, kind: "renderer" | "main"): Promise<Target[]> {
-  if (!portNumber) return [];
+export async function probeDebugPort(portNumber: number | null, kind: "renderer" | "main"): Promise<{ state: DebugState; targets: Target[] }> {
+  if (!portNumber) return { state: "offline", targets: [] };
   try {
     const value = await new Promise<unknown>((resolve, reject) => {
       const request = http.get({ hostname: "127.0.0.1", port: portNumber, path: "/json/list", agent: false }, response => {
@@ -36,8 +37,8 @@ export async function debugTargets(portNumber: number | null, kind: "renderer" |
       const timer = setTimeout(() => request.destroy(new Error("调试连接超时。")), 900);
       request.once("error", reject); request.once("close", () => clearTimeout(timer));
     });
-    if (!Array.isArray(value)) return [];
-    return value.flatMap((entry): Target[] => {
+    if (!Array.isArray(value)) return { state: "unknown", targets: [] };
+    const targets = value.flatMap((entry): Target[] => {
       if (!entry || typeof entry !== "object" || typeof entry.id !== "string" || typeof entry.webSocketDebuggerUrl !== "string") return [];
       if (kind === "main" ? entry.type !== "node" : entry.type !== "page" && entry.type !== "webview") return [];
       try {
@@ -48,7 +49,11 @@ export async function debugTargets(portNumber: number | null, kind: "renderer" |
         return [{ id: entry.id, kind, title: String(entry.title || (kind === "main" ? "主进程" : "应用窗口")).slice(0, 500), url: String(entry.url || "").slice(0, 2000), ws: ws.href }];
       } catch { return []; }
     });
-  } catch { return []; }
+    return { state: targets.length ? "connected" : "unknown", targets };
+  } catch (error) { return { state: (error as NodeJS.ErrnoException).code === "ECONNREFUSED" ? "offline" : "unknown", targets: [] }; }
+}
+export async function debugTargets(portNumber: number | null, kind: "renderer" | "main"): Promise<Target[]> {
+  return (await probeDebugPort(portNumber, kind)).targets;
 }
 
 export class LocalAppsService {
@@ -57,6 +62,7 @@ export class LocalAppsService {
   private storePath: string;
   private agentStates = new Map<string, LocalAppAgentState>();
   private agentSync?: Promise<void>;
+  private views = new Map<string, { config: LocalAppConfig; view: LocalAppView; checkedAt: number }>();
   constructor(readonly root: string, private reservedPorts: () => Promise<Set<number>> = async () => new Set(), private gateway?: LocalAppGateway) {
     fs.mkdirSync(root, { recursive: true });
     this.storePath = path.join(root, "apps.json");
@@ -81,25 +87,48 @@ export class LocalAppsService {
     if (!record) return idleRuntime();
     if (["stopped", "failed"].includes(record.runtime.status)) return record.runtime;
     try { return await workerRequest(record, "status"); }
-    catch { return { ...record.runtime, status: "failed" as const, error: "应用管理进程无法连接；请检查应用是否仍在运行。" }; }
+    catch {
+      const gone = (pid?: number | null) => {
+        if (!pid) return true;
+        try { process.kill(pid, 0); return false; } catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
+      };
+      if (gone(record.runtime.pid) && gone(record.workerPid)) return idleRuntime();
+      return { ...idleRuntime(), status: "unknown" as const, statusDetail: "应用管理连接暂时中断，正在根据实际进程和调试连接确认运行状态。" };
+    }
+  }
+  // First paint must not wait for process scans, sockets or icon extraction.
+  // Unchecked apps stay unknown and cannot be launched from this snapshot.
+  snapshot(): LocalAppView[] {
+    return this.configs.map(config => {
+      const cached = this.views.get(config.id);
+      if (cached?.config === config && Date.now() - cached.checkedAt < 5000) {
+        return { ...cached.view, agent: this.agentStates.get(config.id) };
+      }
+      return {
+        ...config, managed: false, controls: { start: false, stop: false, restart: false },
+        runtime: { ...idleRuntime(), status: "unknown", statusDetail: "正在检查应用运行状态…" },
+        debug: { renderer: false, main: false, targets: [] }, agent: this.agentStates.get(config.id)
+      };
+    });
   }
   async list(): Promise<LocalAppView[]> {
     return Promise.all(this.configs.map(async config => {
-      if (config.mode === "service") {
-        let runtime = await serviceRuntime(config).catch(error => ({ ...idleRuntime(), status: "failed" as const, error: `服务状态读取失败：${error.message}` }));
-        if (runtime.status === "stopped") {
-          const launch = await this.runtime(config.id);
-          if (launch.status === "starting" || launch.status === "running") runtime = { ...launch, status: "starting" };
-          else if (launch.status === "failed") runtime = launch;
-        }
-        return { ...config, runtime, debug: { renderer: false, main: false, targets: [] } };
-      }
-      const runtime = config.mode === "launch" ? await this.runtime(config.id) : idleRuntime();
-      const probe = config.mode === "attach" || runtime.status === "running";
-      const [renderer, main] = probe ? await Promise.all([debugTargets(config.cdpPort, "renderer"), debugTargets(config.inspectPort, "main")]) : [[], []];
-      if (config.mode === "attach") runtime.status = renderer.length || main.length ? "running" : "stopped";
-      return { ...config, runtime, debug: { renderer: !!renderer.length, main: !!main.length, targets: [...renderer, ...main].map(({ ws, ...target }) => target) }, agent: this.agentStates.get(config.id) };
+      const view = await this.inspect(config);
+      // An edited or removed app must never inherit an older probe's result.
+      if (this.configs.includes(config)) this.views.set(config.id, { config, view, checkedAt: Date.now() });
+      return view;
     }));
+  }
+  private async inspect(config: LocalAppConfig): Promise<LocalAppView> {
+    const service = config.mode === "service";
+    const [worker, observed, renderer, main] = await Promise.all([
+      config.mode === "attach" ? Promise.resolve(idleRuntime()) : this.runtime(config.id),
+      processRuntime(config),
+      probeDebugPort(service ? null : config.cdpPort, "renderer"),
+      probeDebugPort(service ? null : config.inspectPort, "main")
+    ]);
+    const debugStates = service ? [] : [...(config.cdpPort ? [renderer.state] : []), ...(config.inspectPort ? [main.state] : [])];
+    return { ...config, ...resolveAppRuntime(config, worker, observed, debugStates), debug: { renderer: !!renderer.targets.length, main: !!main.targets.length, targets: [...renderer.targets, ...main.targets].map(({ ws, ...target }) => target) }, agent: this.agentStates.get(config.id) };
   }
   async save(input: LocalAppInput): Promise<string> {
     const parsed = inputSchema.safeParse(input);
@@ -130,6 +159,8 @@ export class LocalAppsService {
       const configs = this.configs.filter(item => item.id !== id); configs.push(next);
       configs.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
       atomicJson(this.storePath, configs); this.configs = configs;
+      this.views.delete(id);
+      invalidateProcessRuntime();
     });
     return id;
   }
@@ -155,6 +186,7 @@ export class LocalAppsService {
       await this.gateway?.detach(this.get(id));
       const configs = this.configs.filter(item => item.id !== id);
       atomicJson(this.storePath, configs); this.configs = configs;
+      this.views.delete(id);
       // Removing an entry never deletes the project or its data.
     });
   }
@@ -166,12 +198,16 @@ export class LocalAppsService {
   async start(id: string): Promise<void> {
     await this.exclusive(id, async () => {
       const config = this.get(id);
-      if (config.mode === "service" && (await serviceRuntime(config)).status === "running") return;
+      if (config.mode === "attach") throw new Error("已有应用由外部启动，不能从此处启动或停止。");
+      invalidateProcessRuntime();
+      const view = await this.inspect(config);
+      if (view.runtime.status === "running") return;
+      if (!view.controls.start) throw new Error("当前无法确认应用已停止，请先检查应用状态，避免重复启动。");
       await this.launch(id);
       if (config.mode === "service") {
         const deadline = Date.now() + 20_000;
         while (Date.now() < deadline) {
-          if ((await serviceRuntime(config)).status === "running") return;
+          if ((await this.inspect(config)).runtime.serviceReady) return;
           await new Promise(resolve => setTimeout(resolve, 750));
         }
         throw new Error("启动命令已执行，但尚未发现匹配的服务进程和监听端口，请检查启动命令、进程识别路径与服务端口。");
@@ -179,11 +215,18 @@ export class LocalAppsService {
     });
   }
   async stop(id: string): Promise<void> { await this.exclusive(id, () => this.halt(id)); }
-  async restart(id: string): Promise<void> { await this.exclusive(id, async () => { await this.halt(id); await this.launch(id); }); }
+  async restart(id: string): Promise<void> {
+    await this.exclusive(id, async () => {
+      if (!(await this.inspect(this.get(id))).controls.restart) throw new Error("此应用由外部管理或状态尚未确认，请使用应用自己的入口重启。");
+      await this.halt(id); await this.launch(id);
+    });
+  }
   private async launch(id: string): Promise<void> {
     const config = this.get(id);
     if (config.mode === "attach") throw new Error("已有应用由外部启动，不能从此处启动或停止。");
     await this.assertStopped(id);
+    invalidateProcessRuntime();
+    if (!(await this.inspect(config)).controls.start) throw new Error("应用仍在运行或状态尚未确认，请检查后再启动。");
     const reserved = await this.reservedPorts();
     for (const p of [config.cdpPort, config.inspectPort, config.servicePort]) if (p) {
       if (reserved.has(p)) throw new Error(`端口 ${p} 已被浏览器 Profile 使用。`);
@@ -223,10 +266,16 @@ export class LocalAppsService {
   }
   private async halt(id: string): Promise<void> {
     if (this.get(id).mode !== "launch") throw new Error("已有应用由外部管理，不能从此处停止。");
-    await this.gateway?.detach(this.get(id));
     const record = this.record(id);
-    if (!record || ["stopped", "failed"].includes(record.runtime.status)) return;
+    const view = await this.inspect(this.get(id));
+    if (!view.controls.stop) {
+      if (["stopped", "failed"].includes(view.runtime.status)) return;
+      throw new Error("此应用由外部管理或管理连接不可用，请使用应用自己的入口停止。");
+    }
+    if (!record) return;
+    await this.gateway?.detach(this.get(id));
     await workerRequest(record, "stop", 12_000);
+    invalidateProcessRuntime();
   }
   syncAgents(): Promise<void> {
     if (!this.gateway) return Promise.resolve();
@@ -237,7 +286,7 @@ export class LocalAppsService {
   private async syncAgentRoutes(): Promise<void> {
     const candidates = this.configs.filter(config => config.mode !== "service" && config.cdpPort && !this.operations.has(config.id));
     if (!candidates.length || !this.gateway) return;
-    let status, statusError: unknown;
+    let status: Awaited<ReturnType<LocalAppGateway["status"]>> | undefined, statusError: unknown;
     try { status = await this.gateway.status(); }
     catch (error) { statusError = error; }
     for (const candidate of candidates) {
@@ -260,8 +309,14 @@ export class LocalAppsService {
             this.configs = this.configs.map(item => item.id === config.id ? config : item);
             atomicJson(this.storePath, this.configs);
           }
-          if (config.mode === "launch" && (await this.runtime(config.id)).status !== "running") {
-            this.agentStates.set(config.id, { connected: false }); return;
+          // Gateway attachment only needs renderer readiness. Avoid a full OS
+          // process scan for every app on every background sync tick.
+          const renderer = await probeDebugPort(config.cdpPort, "renderer");
+          if (!renderer.targets.length) {
+            // The window can disappear while its Agent still owns the route.
+            // Keep confirmed occupancy visible so the user can stop that task.
+            const state = status ? this.gateway!.state(config, status) : undefined;
+            this.agentStates.set(config.id, { ...state, connected: false }); return;
           }
           if (statusError) throw statusError;
           const state = this.gateway!.state(config, status!);
@@ -283,7 +338,6 @@ export class LocalAppsService {
   }
   async debuggerUrl(id: string, kind: "renderer" | "main", targetId: string): Promise<string> {
     const config = this.get(id);
-    if (config.mode === "launch" && (await this.runtime(id)).status !== "running") throw new Error("请先启动应用。");
     const targets = await debugTargets(kind === "main" ? config.inspectPort : config.cdpPort, kind);
     const target = targets.find(item => item.id === targetId);
     if (!target) throw new Error("调试窗口已关闭或端口尚未就绪，请刷新后重试。");

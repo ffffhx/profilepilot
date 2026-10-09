@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
   "name": "ProfilePilot 浏览器连接",
-  "version": "0.2.4",
+  "version": "0.2.6",
   "description": "连接当前 Chrome Profile，操作现有或新建页面，提供侧边任务、调试、历史和下载。",
   "minimum_chrome_version": "125",
-  "host_permissions": ["http://*/*", "https://*/*"],
+  "host_permissions": ["<all_urls>"],
   "content_scripts": [{ "matches": ["http://127.0.0.1/profilepilot-connect/*"], "js": ["onboarding.js"], "run_at": "document_idle" }],
   "permissions": [
     "debugger",

@@ -1,5 +1,4 @@
 import { AccountSyncDiffResult, AccountSyncResult, AgentIntegrationDiagnostic, AgentTakeoverEvent, AppState, BifrostSnapshot, BusyState, CdpLiveView, ExtensionMigrationDiffResult, ExtensionMigrationResult, ExtensionScanResult, GlobalInstructionFileId, GlobalInstructionsSnapshot, ModalState, ProfileReadinessReceipt, ToastKind } from "./types";
-import type { StartupSettings } from "../shared/startup-settings";
 import type { TaskSnapshot } from "../shared/tasks";
 
 export const root = document.querySelector<HTMLDivElement>("#app");
@@ -27,7 +26,6 @@ export interface RendererState {
   miniScrollTop: number;
   state: AppState | null;
   profileLoadError: string | null;
-  startupSettings: StartupSettings | null;
   selectedId: string | null;
   selectedExternalDir: string | null;
   modal: ModalState;
@@ -70,7 +68,6 @@ export interface RendererState {
   clonePoolCount: number;
   clonePoolIncludeExtensions: boolean;
   clonePoolLaunchAfter: boolean;
-  clonePoolRecycleDays: number;
   globalInstructions: GlobalInstructionsSnapshot | null;
   globalInstructionsLoading: boolean;
   globalInstructionsSaving: boolean;
@@ -108,7 +105,6 @@ export const store: RendererState = {
   miniScrollTop: 0,
   state: null,
   profileLoadError: null,
-  startupSettings: null,
   selectedId: null,
   selectedExternalDir: null,
   modal: null,
@@ -149,7 +145,6 @@ export const store: RendererState = {
   clonePoolCount: 3,
   clonePoolIncludeExtensions: false,
   clonePoolLaunchAfter: false,
-  clonePoolRecycleDays: 7,
   globalInstructions: null,
   globalInstructionsLoading: false,
   globalInstructionsSaving: false,

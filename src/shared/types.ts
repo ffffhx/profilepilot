@@ -453,6 +453,7 @@ export interface AgentBrowserProfileOccupancy {
 }
 
 export interface PublicProfile {
+  avatarDataUrl?: string | null;
   id: string;
   source: ProfileSource;
   name: string;
@@ -503,6 +504,7 @@ export interface PublicProfile {
 }
 
 export interface NativeChromeProfile {
+  avatarDataUrl?: string | null;
   dirName: string;
   name: string;
   userName: string | null;

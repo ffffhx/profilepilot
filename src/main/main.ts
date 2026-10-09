@@ -1047,7 +1047,7 @@ function hideMiniWindow(): void {
   }
 }
 
-// 悬浮窗默认关闭，只由页面“悬浮窗”按钮或专用全局快捷键主动打开。
+// 悬浮窗默认关闭，只由专用全局快捷键主动打开。
 async function showMiniWindow(): Promise<void> {
   const windowRef = await createMiniWindow();
   setMiniWindowPanelOpen(false);
@@ -1584,7 +1584,7 @@ function createMainWindow(): void {
     mainWindow.loadFile(path.join(__dirname, "../../public/index.html"));
   } else {
     protectWorkspaceShell(mainWindow);
-    mainWindow.loadFile(path.join(__dirname, "../../public/workspace.html"), { query: { workspace: process.env.CPM_START_VIEW || "agent" } });
+    mainWindow.loadFile(path.join(__dirname, "../../public/workspace.html"), { query: { workspace: process.env.CPM_START_VIEW || "browser" } });
   }
   mainWindow.on("closed", () => {
     mainWindow = null;
@@ -1600,17 +1600,21 @@ async function bifrostSnapshotForRenderer(): Promise<BifrostSnapshot> {
 }
 
 function registerIpcHandlers(): void {
-  ipcMain.on(IPC_CHANNELS.setWindowAppearance, (event, background: unknown, symbols: unknown) => {
+  ipcMain.on(IPC_CHANNELS.setWindowAppearance, (event, background: unknown, symbols: unknown, guideActive: unknown = false) => {
     if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents ||
         event.senderFrame !== mainWindow.webContents.mainFrame) return;
     const isColor = (value: unknown): value is string => typeof value === "string" && /^#[\da-f]{6}$/i.test(value);
-    if (!isColor(background) || !isColor(symbols)) return;
-    const appearance = `${background}/${symbols}`;
+    if (!isColor(background) || !isColor(symbols) || typeof guideActive !== "boolean") return;
+    const appearance = `${background}/${symbols}/${guideActive}`;
     if (appearance === mainWindowAppearance) return;
     mainWindowAppearance = appearance;
     mainWindow.setBackgroundColor(background);
     if (process.platform !== "darwin") {
       mainWindow.setTitleBarOverlay({ color: background, symbolColor: symbols });
+    } else {
+      // AppKit traffic lights cannot be tinted by a web overlay. Let the guide
+      // shade cover their area, and restore the native controls when it closes.
+      mainWindow.setWindowButtonVisibility(!guideActive);
     }
   });
   ipcMain.handle(IPC_CHANNELS.getStartupSettings, () => startupSettingsManager.get());
@@ -2281,6 +2285,8 @@ function windowSnapshot(windowRef: BrowserWindow | null): Record<string, unknown
     focused: windowRef.isFocused(),
     minimized: windowRef.isMinimized(),
     alwaysOnTop: windowRef.isAlwaysOnTop(),
-    title: windowRef.getTitle()
+    title: windowRef.getTitle(),
+    backgroundColor: windowRef.getBackgroundColor(),
+    captionAppearance: windowRef === mainWindow ? mainWindowAppearance : undefined
   };
 }

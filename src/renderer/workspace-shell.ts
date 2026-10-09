@@ -1,39 +1,24 @@
-import { workspacePages, workspaceRoute, type WorkspaceId } from "../shared/workspaces";
+import { workspacePages, workspaceRoute, workspaceNavigationId, type WorkspaceId } from "../shared/workspaces";
 import { workspaceSwitcher, workspaceIdentityBar, refreshWorkspaceSwitcher } from "./workspace-switcher";
 import { createWorkspaceGuide } from "./workspace-guide";
 import "./workspace-lifecycle";
+import { experimentalAgentEnabled, onExperimentalFeaturesChanged } from "./experimental-features";
 
 type Page = { id: WorkspaceId; frame: HTMLIFrameElement; ready: boolean; search: string; timer?: number; failed?: boolean };
 const pages = new Map<WorkspaceId, Page>();
 const container = document.getElementById("workspace-pages")!;
 const loading = document.getElementById("workspace-loading")!;
-const initial = new URLSearchParams(location.search).get("workspace") || "agent";
-let requested: WorkspaceId = Object.hasOwn(workspacePages, initial) ? initial as WorkspaceId : "agent";
+const initial = new URLSearchParams(location.search).get("workspace") || "browser";
+let requested: WorkspaceId = Object.hasOwn(workspacePages, initial) ? initial as WorkspaceId : "browser";
+if (requested === "agent" && !experimentalAgentEnabled()) requested = "browser";
 let active: Page | undefined;
 document.getElementById("workspace-chrome")!.innerHTML = workspaceSwitcher(requested) + workspaceIdentityBar();
 refreshWorkspaceSwitcher();
-const guide = createWorkspaceGuide(navigate);
+const guide = createWorkspaceGuide();
 
 function pageFor(source: Window): Page | undefined {
   return [...pages.values()].find(page => page.frame.contentWindow === source &&
     workspaceRoute(source.location.href, location.href)?.id === page.id);
-}
-
-function syncIdentity(source: Window): void {
-  if (active?.frame.contentWindow !== source) return;
-  const from = source.document.querySelector(".workspace-identity");
-  const to = document.querySelector(".workspace-identity");
-  if (!from || !to) return;
-  const fromSelect = from.querySelector<HTMLSelectElement>("select")!;
-  const toSelect = to.querySelector<HTMLSelectElement>("select")!;
-  if (toSelect.innerHTML !== fromSelect.innerHTML) toSelect.innerHTML = fromSelect.innerHTML;
-  toSelect.value = fromSelect.value;
-  toSelect.disabled = fromSelect.disabled;
-  (to as HTMLElement).dataset.identityProfile = (from as HTMLElement).dataset.identityProfile;
-  const fromStatus = from.querySelector(".workspace-connection")!;
-  const toStatus = to.querySelector(".workspace-connection")!;
-  toStatus.className = fromStatus.className;
-  toStatus.querySelector("span")!.textContent = fromStatus.querySelector("span")!.textContent;
 }
 
 function activate(page: Page): void {
@@ -46,8 +31,8 @@ function activate(page: Page): void {
     page.frame.inert = false;
     document.documentElement.dataset.workspace = page.id;
     document.title = `ProfilePilot · ${workspacePages[page.id].label}`;
-    document.querySelectorAll<HTMLAnchorElement>(".workspace-link").forEach(link => {
-      const selected = link.dataset.workspace === page.id;
+    document.querySelectorAll<HTMLAnchorElement>(".workspace-link, .workspace-settings").forEach(link => {
+      const selected = link.dataset.workspace === workspaceNavigationId(page.id);
       link.classList.toggle("active", selected);
       if (selected) link.setAttribute("aria-current", "page"); else link.removeAttribute("aria-current");
       link.removeAttribute("aria-busy");
@@ -55,10 +40,10 @@ function activate(page: Page): void {
   }
   page.frame.contentWindow?.workspacePane?.setActive(true);
   if (page.search) { const search = page.search; page.search = ""; page.frame.contentWindow?.workspacePane?.route(search); }
-  syncIdentity(page.frame.contentWindow!);
   loading.hidden = true;
   document.documentElement.dataset.workspaceLoading = "false";
-  guide.showOnce();
+  if (page.id === "agent" && page.frame.contentDocument?.querySelector('[data-nav="settings"].active')) guide.close();
+  else guide.showOnce(page.id);
 }
 
 function fail(page: Page): void {
@@ -78,6 +63,7 @@ function fail(page: Page): void {
 function navigate(href: string): boolean {
   const route = workspaceRoute(href, location.href);
   if (!route) return false;
+  if (route.id === "agent" && !experimentalAgentEnabled()) return navigate(workspacePages.settings.file + "#experimental-features");
   requested = route.id;
   let page = pages.get(route.id);
   if (!page) {
@@ -88,8 +74,8 @@ function navigate(href: string): boolean {
     frame.dataset.workspace = route.id;
     frame.dataset.active = "false";
     frame.inert = true;
-    // Keep existing media-query/layout coordinates while the outer rail and
-    // title bar stay mounted. Hidden pages keep their DOM and JS state.
+    // Each page owns only the content viewport, including its dialogs.
+    // Hidden pages keep their DOM and JS state while the shell stays mounted.
     frame.setAttribute("sandbox", "allow-same-origin allow-scripts allow-forms allow-modals allow-downloads");
     page = { id: route.id, frame, ready: false, search: route.url.search };
     pages.set(route.id, page);
@@ -98,8 +84,8 @@ function navigate(href: string): boolean {
     const loadingPage = page;
     page.timer = window.setTimeout(() => fail(loadingPage), 15000);
   } else if (route.url.search) page.search = route.url.search;
-  document.querySelectorAll<HTMLAnchorElement>(".workspace-link").forEach(link => {
-    if (link.dataset.workspace === route.id && !page!.ready) link.setAttribute("aria-busy", "true");
+  document.querySelectorAll<HTMLAnchorElement>(".workspace-link, .workspace-settings").forEach(link => {
+    if (link.dataset.workspace === workspaceNavigationId(route.id) && !page!.ready) link.setAttribute("aria-busy", "true");
     else link.removeAttribute("aria-busy");
   });
   if (page.ready) activate(page);
@@ -116,7 +102,6 @@ window.workspaceHost = {
   navigate,
   openGuide: () => guide.open(),
   owns: source => Boolean(pageFor(source)),
-  syncIdentity,
   ready(source) {
     const page = pageFor(source);
     if (!page) return;
@@ -126,13 +111,9 @@ window.workspaceHost = {
 };
 document.addEventListener("click", event => {
   const target = event.target as Element;
-  if (target.closest("[data-workspace-search]")) { active?.frame.contentWindow?.workspacePane?.search(); return; }
   const link = target.closest<HTMLAnchorElement>("a[href]");
   if (!link || event.defaultPrevented || event.button !== 0 || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
   if (navigate(link.href)) event.preventDefault();
-});
-document.addEventListener("workspace-profile-selected", event => {
-  active?.frame.contentWindow?.workspacePane?.selectProfile((event as CustomEvent<string>).detail);
 });
 document.addEventListener("keydown", event => {
   if (document.querySelector(".workspace-guide[open]")) return;
@@ -142,4 +123,7 @@ document.addEventListener("keydown", event => {
   if (active.frame.contentWindow?.workspacePane?.shortcut({ key: event.key, ctrlKey: event.ctrlKey, metaKey: event.metaKey, shiftKey: event.shiftKey, altKey: event.altKey })) event.preventDefault();
 });
 window.desktopWindow?.onNavigate?.(href => navigate(href));
+onExperimentalFeaturesChanged(() => {
+  if (!experimentalAgentEnabled() && requested === "agent") { guide.close(); navigate(workspacePages.browser.file); }
+});
 navigate(workspacePages[requested].file);

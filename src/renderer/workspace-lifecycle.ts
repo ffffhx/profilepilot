@@ -6,16 +6,13 @@ declare global {
       navigate(href: string): boolean;
       openGuide(): void;
       ready(source: Window): void;
-      syncIdentity(source: Window): void;
       owns(source: Window): boolean;
     };
     workspacePane?: {
       active: boolean;
       setActive(active: boolean): void;
       route(search: string): void;
-      search(): void;
       shortcut(event: KeyboardEventInit): boolean;
-      selectProfile(id: string): void;
       dispose(): void;
     };
   }
@@ -36,10 +33,6 @@ export function navigateWorkspace(href: string): boolean {
 
 export function workspaceRendered(): void {
   if (window.workspacePane) window.parent.workspaceHost?.ready(window);
-}
-
-export function workspaceIdentityChanged(): void {
-  if (window.workspacePane?.active) window.parent.workspaceHost?.syncIdentity(window);
 }
 
 export function currentWorkspace(): WorkspaceId | undefined {

@@ -18,6 +18,7 @@ import {
 import {
   PROFILEPILOT_MANAGEMENT_MAX_MESSAGE_BYTES,
   PROFILEPILOT_PHONE_MAX_RESPONSE_BYTES,
+  PROFILEPILOT_PHONE_BASIC_MAX_RESPONSE_BYTES,
   PROFILEPILOT_MANAGEMENT_PROTOCOL_VERSION,
   profilePilotManagementSecretPath,
   profilePilotManagementSocketPath,
@@ -464,7 +465,8 @@ export async function requestProfilePilotManagement(
   signal?.throwIfAborted();
   // Phone screenshots are already bounded by the companion transport (8 MiB).
   // Allow its image plus the management envelope without relaxing request limits.
-  const maxResponseBytes = command.action === "phone" && ["action", "wrapper-action"].includes(command.method) ? PROFILEPILOT_PHONE_MAX_RESPONSE_BYTES : PROFILEPILOT_MANAGEMENT_MAX_MESSAGE_BYTES;
+  const maxResponseBytes = command.action === "phone" && command.method === "basic-action" ? PROFILEPILOT_PHONE_BASIC_MAX_RESPONSE_BYTES
+    : command.action === "phone" && ["action", "wrapper-action"].includes(command.method) ? PROFILEPILOT_PHONE_MAX_RESPONSE_BYTES : PROFILEPILOT_MANAGEMENT_MAX_MESSAGE_BYTES;
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath);
     let buffer = "";

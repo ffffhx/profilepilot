@@ -431,25 +431,6 @@ export function confirmModalView(intent: ConfirmIntent): ConfirmModalView | null
     };
   }
 
-  if (intent.kind === "recycle-clones") {
-    const candidates = store.state.profiles.filter(
-      (profile) => profile.source === "isolated" && profile.clonedFromProfileId && !profile.running
-    );
-    return {
-      kicker: "清理闲置副本",
-      title: `清理 ${intent.days} 天未使用的副本`,
-      body: [
-        `会把所有副本里、未运行、且最近启动/创建时间早于 ${intent.days} 天前的，移到废纸篓。`,
-        "运行中的副本不会被清理；移到废纸篓的目录仍可恢复。"
-      ],
-      confirmLabel: "清理闲置副本",
-      tone: "danger",
-      summary: [
-        { label: "天数阈值", value: `${intent.days} 天` },
-        { label: "当前空闲副本", value: String(candidates.length) }
-      ]
-    };
-  }
 
   const sourceProfile = store.state.profiles.find((profile) => profile.id === intent.sourceProfileId);
   const targetProfile = store.state.profiles.find((profile) => profile.id === intent.targetProfileId);
@@ -593,10 +574,6 @@ export function executeConfirmIntent(intent: ConfirmIntent): void {
     return;
   }
 
-  if (intent.kind === "recycle-clones") {
-    executeRecycleClonesConfirm(intent);
-    return;
-  }
 
   if (intent.kind === "disconnect-client") {
     executeDisconnectClientConfirm(intent);
@@ -882,19 +859,6 @@ export function executeResetCloneConfirm(intent: Extract<ConfirmIntent, { kind: 
       ? `已更新 ${emphasizeName(clone.name)} 的书签模板`
       : `已重置 ${emphasizeName(clone.name)} 的 Profile 数据`,
     { key: "reset-clone", message: `正在${windowsNativeTemplate ? "更新" : "重置"} ${clone.name}…`, profileId: intent.profileId }
-  );
-}
-
-export function executeRecycleClonesConfirm(intent: Extract<ConfirmIntent, { kind: "recycle-clones" }>): void {
-  store.modal = { kind: "clone-pool" };
-  void withBusy(
-    async () => {
-      const result = await profileApi().recycleIdleClones(intent.days);
-      store.state = result.state;
-      setToast(result.deleted.length ? `已清理 ${result.deleted.length} 个闲置副本` : "没有符合条件的闲置副本");
-    },
-    undefined,
-    { key: "recycle-clones", message: "正在清理闲置副本…" }
   );
 }
 

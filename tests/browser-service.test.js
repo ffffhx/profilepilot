@@ -118,8 +118,11 @@ test('side-panel task requests reach App over the stream and report App availabi
   const response = await f.bridge.uiHandler('native:Default', 'getUiState', { taskId: 'task-one' });
   assert.equal(response.taskServiceAvailable, true); assert.equal(response.task.id, 'task-one');
   const popup = await popupFixture([{ id: 7, active: true, windowId: 2, url: 'https://fixture.test' }], { state: { taskServiceAvailable: false } });
-  assert.equal(popup.element('#compose').hidden, true); assert.equal(popup.element('#desktop-required').hidden, false);
-  popup.setState({ taskServiceAvailable: true }); await popup.poll(); assert.equal(popup.element('#compose').hidden, false);
+  assert.equal(popup.element('#connection-label').textContent, '已连接');
+  popup.setState({ taskServiceAvailable: true }); await popup.poll();
+  assert.equal(popup.element('#connection-label').textContent, '已连接');
+  assert.equal(popup.element('#compose'), null, 'the extension is a status view regardless of App task availability');
+  assert.ok(popup.calls.every(call => call.method === 'state'));
 });
 
 test('service rejects unauthenticated/web-origin requests and does not replay a failed action', async t => {

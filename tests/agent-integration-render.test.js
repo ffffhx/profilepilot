@@ -92,58 +92,7 @@ test("onboarding skips the macOS-only Input Guard checkpoint on other platforms"
   assert.doesNotMatch(html, /data-action="request-input-guard-permission"/);
 });
 
-test("tool setup cards share one Skill installation while keeping their own CLI and Wrapper", () => {
-  const inputGuard = permission(false, true);
-  const diagnostic = diagnosticWith({
-    tools: [
-      tool("agent-browser", "installed", "agent-browser 0.27.2"),
-      tool("playwright-cli", "missing", null),
-      tool("chrome-devtools-mcp", "missing", null)
-    ],
-    wrappers: [
-      wrapper("agent-browser", true),
-      wrapper("playwright-cli", false),
-      wrapper("chrome-devtools-mcp", false)
-    ],
-    skills: [skill("profilepilot", true, false)],
-    inputGuard
-  });
-  const { renderer } = loadRenderer(inputGuard, { agentIntegrationDiagnostic: diagnostic });
-  const html = renderer.renderAgentIntegrationPanel();
-
-  assert.match(html, /使用 ppilot browser CLI 无需配置此处/);
-  assert.match(html, /01[\s\S]*真实工具/);
-  assert.match(html, /02[\s\S]*Wrapper/);
-  assert.equal((html.match(/id="tools-guide-details"/g) || []).length, 1);
-  assert.doesNotMatch(html, /data-action="install-agent-skill"|agent-browser-cdp/);
-  assert.match(html, /已安装 · 外部管理/);
-  assert.match(html, /data-action="install-agent-wrapper" data-tool="playwright-cli" disabled/);
-  assert.match(html, /data-action="copy-agent-command"[^>]+@playwright\/cli/);
-  assert.doesNotMatch(html, /npx 按需|可按需运行|生成连接命令|PROFILE ROUTE/);
-});
-
-test("an installed CLI exposes only its own Wrapper action and does not enable all tools", () => {
-  const inputGuard = permission(false, true);
-  const diagnostic = diagnosticWith({
-    tools: [
-      tool("agent-browser", "missing", null),
-      tool("playwright-cli", "installed", "0.1.14"),
-      tool("chrome-devtools-mcp", "missing", null)
-    ],
-    wrappers: [wrapper("agent-browser", false), wrapper("playwright-cli", false), wrapper("chrome-devtools-mcp", false)],
-    skills: [skill("profilepilot", false)],
-    inputGuard
-  });
-  const { renderer } = loadRenderer(inputGuard, { agentIntegrationDiagnostic: diagnostic });
-  const html = renderer.renderAgentIntegrationPanel();
-
-  assert.match(html, /data-action="install-agent-wrapper" data-tool="playwright-cli" >/);
-  assert.match(html, /data-action="install-agent-wrapper" data-tool="agent-browser" disabled/);
-  assert.match(html, /data-action="install-agent-wrapper" data-tool="chrome-devtools-mcp" disabled/);
-  assert.doesNotMatch(html, /启用三套|三套 Wrapper|共享接入层/);
-});
-
-test("one visible setup action includes CLI and Agent instructions in expandable details", () => {
+test("one visible setup action keeps the CLI card compact without expandable details", () => {
   const inputGuard = permission(false, true);
   const diagnostic = diagnosticWith({
     managementCli: managementCli(true, false),
@@ -153,14 +102,10 @@ test("one visible setup action includes CLI and Agent instructions in expandable
   const html = renderer.renderAgentIntegrationPanel();
 
   assert.match(html, /id="management-cli-title">ProfilePilot CLI/);
-  assert.match(html, /ppilot browser --cdp PORT snapshot -i/);
-  assert.match(html, /ppilot profile list --json/);
-  assert.match(html, /data-action="install-profilepilot-cli"/);
-  assert.match(html, /data-action="remove-profilepilot-cli"/);
+  assert.match(html, /<section id="tools-cli-card"/);
   assert.equal((html.match(/data-action="install-profilepilot-cli"/g) || []).length, 1);
-  assert.doesNotMatch(html, /data-action="(?:install|remove)-profilepilot-cli-skill"|id="tools-skill-details"/);
-  assert.match(html, /Agent 使用指引（随 CLI 安装）/);
-  assert.match(html, /删除必须显式添加 <code>--yes<\/code>/);
+  assert.doesNotMatch(html, /tools-cli-details|tools-guide-details|tools-gateway-details|agent-tool-grid|ppilot browser --cdp|ppilot profile list/);
+  assert.doesNotMatch(html, /data-action="(?:remove-profilepilot-cli|install-agent-wrapper|install-agent-skill)"/);
 });
 
 test("stale instructions require a unified update even when the executable is current", () => {
@@ -168,16 +113,14 @@ test("stale instructions require a unified update even when the executable is cu
   const diagnostic = diagnosticWith({ managementCli: managementCli(true, true), skills: [skill("profilepilot", true)], inputGuard });
   const { renderer, store } = loadRenderer(inputGuard, { agentIntegrationDiagnostic: diagnostic });
   let html = renderer.renderAgentIntegrationPanel();
-  assert.match(html, /ProfilePilot CLI 已就绪/);
+  assert.match(html, /id="management-cli-title">ProfilePilot CLI<\/strong><em>已就绪<\/em>/);
   store.agentIntegrationDiagnostic.skills = [{ ...skill("profilepilot", true), upToDate: false }];
   html = renderer.renderAgentIntegrationPanel();
   assert.match(html, /更新 ProfilePilot CLI/);
-  assert.doesNotMatch(html, /ProfilePilot CLI 已就绪/);
-  assert.match(html, /local\/browser-routing.md/);
-  assert.match(html, /ppilot browser status/);
+  assert.doesNotMatch(html, /<em>已就绪<\/em>/);
 });
 
-test("tools status overview does not claim readiness before diagnostics arrive", () => {
+test("tools cards do not claim readiness before diagnostics arrive", () => {
   const { renderer } = loadRenderer(null, {
     state: null,
     agentIntegrationDiagnostic: null,
@@ -185,14 +128,14 @@ test("tools status overview does not claim readiness before diagnostics arrive",
     nativeExtensionBrowsers: []
   });
   const html = renderer.renderAgentIntegrationPanel();
-  const summary = html.match(/<section class="tools-status-summary"[\s\S]*?<\/section>/)[0];
-
-  assert.equal((summary.match(/class="tools-status-item pending"/g) || []).length, 2);
-  assert.match(summary, /正在读取系统 Chrome Profile/);
-  assert.doesNotMatch(summary, /class="tools-status-item ready"|已就绪|已安装/);
+  assert.doesNotMatch(html, /tools-status-summary/);
+  assert.match(html, /class="browser-extension-panel pending"/);
+  assert.match(html, /class="tools-overview-card tools-cli-card pending"/);
+  assert.match(html, /正在读取系统 Chrome Profile/);
+  assert.doesNotMatch(html, /已就绪|已安装/);
 });
 
-test("tools overview follows the selected Profile and reports stale installations", () => {
+test("tools cards follow the selected Profile and report stale installations", () => {
   const inputGuard = permission(false, true);
   const { renderer, store } = loadRenderer(inputGuard, {
     state: { profiles: [
@@ -207,22 +150,20 @@ test("tools overview follows the selected Profile and reports stale installation
       inputGuard
     })
   });
-  const overview = () => renderer.renderAgentIntegrationPanel().match(/<section class="tools-status-summary"[\s\S]*?<\/section>/)[0];
-
-  let summary = overview();
-  assert.match(summary, /尚未连接/);
-  assert.equal((summary.match(/需要更新/g) || []).length, 1);
-  assert.doesNotMatch(summary, /class="tools-status-item ready"|已就绪/);
+  let html = renderer.renderAgentIntegrationPanel();
+  assert.match(html, /尚未连接/);
+  assert.equal((html.match(/需要更新/g) || []).length, 1);
+  assert.doesNotMatch(html, /class="browser-extension-panel ready"|已就绪/);
 
   store.nativeExtensionProfileId = "other";
-  summary = overview();
-  assert.match(summary, /已连接 · 可使用当前页/);
-  assert.equal((summary.match(/class="tools-status-item ready"/g) || []).length, 1);
+  html = renderer.renderAgentIntegrationPanel();
+  assert.match(html, /已连接 · 可使用当前页/);
+  assert.match(html, /class="browser-extension-panel ready"/);
 
   store.nativeExtensionLoading = true;
-  summary = overview();
-  assert.match(summary, /检测中…/);
-  assert.doesNotMatch(summary, /class="tools-status-item ready"/);
+  html = renderer.renderAgentIntegrationPanel();
+  assert.match(html, /检测中…/);
+  assert.doesNotMatch(html, /class="browser-extension-panel ready"/);
 });
 
 test("a complete tool installation with a missing session bridge exposes the repair step", () => {
@@ -237,25 +178,10 @@ test("a complete tool installation with a missing session bridge exposes the rep
     })
   });
   const html = renderer.renderAgentIntegrationPanel();
-  assert.match(html, /待修复会话/);
-  assert.match(html, /下一步：修复会话识别/);
   assert.match(html, /data-action="enable-shell-integration"/);
   assert.match(html, /Windows 用户 PATH/);
 });
 
-test("tools overview has one CLI card and optional compatibility and preference details", () => {
-  const { renderer } = loadRenderer(permission(false, true));
-  const html = renderer.renderAgentIntegrationPanel();
-  const cards = [...html.matchAll(/<details id="(tools-[^"]+)" class="tools-overview-card[^>]*>/g)];
-  assert.deepEqual(cards.map(match => match[1]), [
-    "tools-cli-details", "tools-gateway-details", "tools-control-preferences"
-  ]);
-  for (const [markup] of cards) assert.doesNotMatch(markup, /\sopen(?:\s|=|>)/);
-  const gateway = html.slice(html.indexOf('id="tools-gateway-details"'), html.indexOf('id="tools-control-preferences"'));
-  assert.match(gateway, /<summary[\s\S]*?查看配置[\s\S]*?<\/summary>[\s\S]*?agent-tool-grid/);
-  assert.match(html, /id="tools-connection-diagnostics"[\s\S]*?查看连接诊断/);
-  assert.match(html, /data-action="open-control-preferences" disabled/);
-});
 
 function permission(supported, granted) {
   return {

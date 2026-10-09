@@ -1,9 +1,9 @@
 * { box-sizing:border-box; }
 html,body { width:100%; height:100%; margin:0; overflow:hidden; }
-#workspace-pages { position:fixed; inset:0; }
+#workspace-pages { position:fixed; inset:var(--workspace-topbar-height) 0 0 var(--workspace-rail-width); }
 .workspace-page { position:absolute; inset:0; width:100%; height:100%; border:0; background:var(--bg); visibility:hidden; pointer-events:none; }
 .workspace-page[data-active="true"] { visibility:visible; pointer-events:auto; }
 #workspace-loading { position:fixed; top:calc(var(--workspace-topbar-height) + 18px); left:calc(var(--workspace-rail-width) + 24px); z-index:30; padding:10px 16px; border:1px solid var(--line); border-radius:6px; background:var(--panel); color:var(--muted); box-shadow:var(--shadow); font:13px/1.5 var(--font); }
 #workspace-loading[hidden] { display:none; }
 #workspace-loading button { margin-left:12px; color:var(--accent); background:none; border:0; cursor:pointer; font:inherit; }
-.workspace-link[aria-busy="true"] { outline:1px solid var(--accent); outline-offset:-1px; }
+.workspace-link[aria-busy="true"],.workspace-settings[aria-busy="true"] { outline:1px solid var(--accent); outline-offset:-1px; }

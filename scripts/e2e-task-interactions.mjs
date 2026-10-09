@@ -24,13 +24,13 @@ try {
     await d.evaluate(`window.profileManager.createProfile(${JSON.stringify(name)})`);
   }
   await d.domClick('.workspace-link[data-workspace="agent"]');
-  await d.waitFor('#create-task .select-trigger');
+  await d.waitFor('#create-task .browser-picker .select-trigger');
   await d.domClick('#create-task .send-task');
   assert.match((await d.query('#prompt-error')).text, /填写/);
   assert.equal(await d.evaluate('document.activeElement.id'), 'prompt');
   await d.domInput('#prompt', '保留这份任务草稿');
   assert.equal((await d.query('#prompt-error')).exists, false);
-  await d.domClick('#create-task .select-trigger');
+  await d.domClick('#create-task .browser-picker .select-trigger');
   await d.waitFor('.select-popover:popover-open');
   assert.equal(await d.evaluate('document.activeElement.className'), 'select-search');
   // A detected native Chrome profile can appear alongside these six fixtures,
@@ -54,13 +54,13 @@ try {
   await d.dispatch('.select-search', 'keydown', { key: 'Enter' });
   const selected = await d.evaluate('document.querySelector("select[name=profileId]").value');
   assert.ok(selected);
-  assert.match((await d.query('#create-task .select-trigger')).text, /招聘/);
+  assert.match((await d.query('#create-task .browser-picker .select-trigger')).text, /招聘/);
   assert.equal((await d.query('.select-popover')).exists, false);
   assert.equal((await d.query('[aria-invalid=true]')).count, 0);
 
   // Occupied options remain visible with an explanation, but cannot be chosen.
   await d.evaluate(`(() => { const option=document.querySelector('select[name=profileId]').options[1]; option.disabled=true; option.dataset.description='占用中 · 用户接管'; window.__disabledValue=option.value; })()`);
-  await d.domClick('#create-task .select-trigger');
+  await d.domClick('#create-task .browser-picker .select-trigger');
   await d.domClick('[role=option][aria-disabled=true]');
   assert.equal(await d.evaluate('document.querySelector("select[name=profileId]").value'), selected);
   await screenshot('browser-menu.png');
@@ -69,7 +69,7 @@ try {
   await d.dispatch('.select-search', 'keydown', { key: 'Escape' });
   assert.equal((await d.query('.select-popover')).exists, false);
   assert.equal(await d.evaluate('document.activeElement.className'), 'select-trigger');
-  await d.domClick('#create-task .select-trigger');
+  await d.domClick('#create-task .browser-picker .select-trigger');
   await d.dispatch('.select-search', 'keydown', { key: 'ArrowDown' });
   assert.ok(await d.evaluate('document.querySelector(".select-search").getAttribute("aria-activedescendant")'));
   await d.dispatch('.select-search', 'keydown', { key: 'Tab' });
@@ -77,22 +77,23 @@ try {
   await d.evaluate('document.querySelector(".select-popover .model-service-link").focus({preventScroll:true})');
   await d.dispatch('.select-popover .model-service-link', 'keydown', { key: 'Tab' });
   assert.equal((await d.query('.select-popover')).exists, false);
-  await d.domClick('#create-task .select-trigger');
+  await d.domClick('#create-task .browser-picker .select-trigger');
   await d.dispatch('#prompt', 'pointerdown');
   assert.equal((await d.query('.select-popover')).exists, false);
   for (const corner of ['top-left', 'bottom-right']) {
     await d.evaluate(`(() => {
-      const trigger=document.querySelector('#create-task .select-trigger');
+      const trigger=document.querySelector('#create-task .browser-picker .select-trigger');
       Object.assign(trigger.style,{position:'fixed',width:'220px',top:${JSON.stringify(corner)}==='top-left'?'80px':(innerHeight-70)+'px',left:${JSON.stringify(corner)}==='top-left'?'12px':(innerWidth-230)+'px'});
     })()`);
-    await d.domClick('#create-task .select-trigger');
+    await d.domClick('#create-task .browser-picker .select-trigger');
     const bounds = await d.evaluate(`(() => { const r=document.querySelector('.select-popover').getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:innerWidth,height:innerHeight}; })()`);
     assert.ok(bounds.left >= 0 && bounds.right <= bounds.width && bounds.top >= 0 && bounds.bottom <= bounds.height, JSON.stringify(bounds));
     await d.dispatch('.select-search', 'keydown', {key:'Escape'});
   }
-  await d.evaluate('document.querySelector("#create-task .select-trigger").removeAttribute("style")');
+  await d.evaluate('document.querySelector("#create-task .browser-picker .select-trigger").removeAttribute("style")');
 
-  await d.domClick('#create-task details summary');
+  await d.domClick('[popovertarget="task-template-menu"]');
+  await d.domClick('#task-template-menu [data-action="new-template"]');
   await d.domInput('[name=templateName]', '未保存的模板名称');
   await d.domClick('#agent-model-trigger');
   await d.waitFor('.model-service-link');
@@ -102,9 +103,7 @@ try {
   await d.domClick('[data-action=test-connection]');
   await d.waitFor('#task-toast', s => s.text.includes('模型配置尚未保存'));
   await settle();
-  await d.domClick('[data-nav=materials]');
-  await d.domInput('#material-name', '未保存的资料');
-  await d.domInput('#material-content', '切换页面后需要保留');
+  assert.equal((await d.query('[data-nav=materials]')).exists, false);
   await d.domClick('[data-nav=schedules]');
   await d.domInput('#schedule-form [name=name]', '未保存的计划');
   await d.domClick('[data-nav=settings]');
@@ -115,28 +114,11 @@ try {
   assert.equal(await d.evaluate('document.querySelector("#prompt").value'), '保留这份任务草稿');
   assert.equal(await d.evaluate('document.querySelector("[name=templateName]").value'), '未保存的模板名称');
   assert.equal(await d.evaluate('document.querySelector("#create-task details").open'), true);
-  await d.domClick('[data-example]');
+  assert.equal((await d.query('[data-example]')).count, 0);
   assert.match(await d.evaluate('document.querySelector("#prompt").value'), /^保留这份任务草稿/);
 
-  await d.domClick('[data-nav=materials]');
-  assert.equal(await d.evaluate('document.querySelector("#material-content").value'), '切换页面后需要保留');
-  await d.domClick('#material-form .primary');
-  await d.waitFor('.material-body');
-  assert.equal(await d.evaluate('document.querySelector("#material-name").value'), '');
-  await d.domClick('[data-delete-material]');
-  await d.waitFor('.task-confirm[open]');
-  assert.match((await d.query('.task-confirm')).text, /删除这份资料/);
-  await d.domClick('.task-confirm button[value=cancel]');
-  assert.equal((await d.evaluate('window.tasks.snapshot()')).materials.length, 1);
-  await d.domClick('[data-delete-material]');
-  await screenshot('delete-confirmation.png');
-  await d.domClick('[data-confirm-action]');
-  await d.waitFor('#task-toast', s => s.text.includes('资料已删除'));
-  assert.equal((await d.evaluate('window.tasks.snapshot()')).materials.length, 0);
-  await settle();
-
   // Every page's visible controls must have labels and stay within its viewport.
-  for (const page of ['tasks', 'materials', 'templates', 'schedules', 'history', 'settings']) {
+  for (const page of ['tasks', 'templates', 'schedules', 'history', 'settings']) {
     await d.domClick(`[data-nav="${page}"]`);
     await settle();
     const audit = await d.evaluate(`(() => {
@@ -147,5 +129,5 @@ try {
     assert.equal(audit.overflow, false, `${page}: horizontal overflow`);
     await screenshot(`${page}.png`);
   }
-  console.log('PASS interaction audit: menu search/keyboard/occupied states, refresh preservation, validation, drafts, safe deletion, and six-page control audit');
+  console.log('PASS interaction audit: menu search/keyboard/occupied states, refresh preservation, validation, drafts, and five-page control audit');
 } finally { await app.stop(); }

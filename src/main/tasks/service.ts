@@ -9,7 +9,7 @@ import { browserActionSchema, effectiveEffect, type BrowserAdapter } from "./bro
 import { TaskStore, now } from "./store";
 import { nativeBrowserAccess } from "./native-access";
 import { nextDailyOccurrence } from "../../shared/task-time";
-import { authorizeTaskRead, readTaskDocument, readTaskTable, writeTaskResult } from "./files";
+import { authorizeTaskRead, readTaskDocument, readTaskTable, writeTaskResult, registerTaskOutputs } from "./files";
 import { evaluateJevPage, jevPageState, JEV_MAX_CALLS, jevModel } from "./jev";
 import { runJevDriver } from "./jev-driver";
 import { chooseJevAction } from "./jev-actions";
@@ -37,6 +37,7 @@ export interface TaskServiceDependencies {
   chooseJev?: typeof chooseJevAction;
   taskHelper?: typeof taskHelper;
   changed(snapshot: TaskSnapshot): void;
+  streamChanged?(update: import("../../shared/tasks").TaskStreamUpdate): void;
   notify(title: string, body: string, taskId?: string): void;
   controlReceiver?(sessionId: string, waiting: boolean): void;
   closePreview?(): void;
@@ -77,6 +78,8 @@ export class TaskService {
   private readonly decisionsInFlight = new Set<string>();
   private readonly archiving = new Set<string>();
   private broadcastTimer?: NodeJS.Timeout;
+  private streamTimer?: NodeJS.Timeout;
+  private pendingStreams = new Set<string>();
   private readonly drainingQueue = new Set<string>();
   reconcileIdleNativeProfile(profileId: string): void {
     let changed = false;
@@ -131,6 +134,20 @@ export class TaskService {
       this.dependencies.changed(this.snapshot());
     }, 80);
     this.broadcastTimer.unref();
+  }
+  private broadcastStream(taskId: string): void {
+    if (!this.dependencies.streamChanged) { this.broadcast(); return; }
+    this.pendingStreams.add(taskId);
+    if (this.streamTimer || this.closed) return;
+    this.streamTimer = setTimeout(() => {
+      this.streamTimer = undefined;
+      for (const id of this.pendingStreams) {
+        const stream = this.streams.get(id);
+        if (stream) this.dependencies.streamChanged!({ taskId: id, stream });
+      }
+      this.pendingStreams.clear();
+    }, 32);
+    this.streamTimer.unref();
   }
   setLimits(id: string, limits: Partial<BrowserTask["limits"]>): void {
     const task = this.editableTask(id);
@@ -221,6 +238,7 @@ export class TaskService {
     const name = await this.dependencies.profileName(source.profileId);
     const task = this.store.create({ prompt: source.prompt, profileId: source.profileId, authorization: source.authorization, mode: source.mode, model: source.model, nativeAccess: source.nativeAccess, limits: source.limits, items: items.map(item => item!.label) }, name);
     task.sourceTaskId = source.id;
+    task.skill = source.skill ? structuredClone(source.skill) : undefined;
     task.materials = structuredClone(source.materials); task.attachments = structuredClone(source.attachments);
     task.grant = source.grant ? structuredClone(source.grant) : undefined;
     task.receipts = structuredClone(source.receipts.filter(receipt => serious(receipt.action.effect)));
@@ -271,6 +289,7 @@ export class TaskService {
     if (source.attachments.some(file => !existsSync(file.path))) throw new Error("原会话附件已删除，请先重新导入。");
     const task = this.store.create({ prompt: source.prompt || "继续对话", profileId: source.profileId, mode: source.mode, model: source.model, nativeAccess: source.nativeAccess, limits: source.limits }, source.profileName);
     task.status = "paused"; task.sourceTaskId = source.id;
+    task.skill = source.skill ? structuredClone(source.skill) : undefined;
     task.title = title || `${source.title} · 分支`;
     task.events = structuredClone(source.events); task.context = structuredClone(source.context);
     task.attachments = structuredClone(source.attachments); task.materials = structuredClone(source.materials);
@@ -489,7 +508,9 @@ export class TaskService {
     });
     run.child = worker;
     const secrets = [start.apiKey];
-    let rawStream: { id: string; text: string } | undefined;
+    let rawStream: { id: string; displayId: string; text: string } | undefined;
+    // A single SDK response can contain several text blocks with the same id.
+    const displayId = (id: string) => task.events.some(event => event.streamId === id) ? `${id}:${randomUUID()}` : id;
     worker.stdout?.resume();
     // Detect runtime memory failures without persisting arbitrary stderr, which
     // may contain provider credentials or private request data. Retain only a
@@ -505,9 +526,9 @@ export class TaskService {
       if (message.kind === "text_delta") {
         if (!run.stopped && typeof message.text === "string") {
           const id = String(message.id);
-          rawStream = { id, text: ((rawStream?.id === id ? rawStream.text : "") + message.text).slice(0, 30000) };
-          this.streams.set(task.id, { id, text: redactProviderSecrets(rawStream.text, secrets, true), updatedAt: now() });
-          this.broadcast();
+          rawStream = { id, displayId: rawStream?.id === id ? rawStream.displayId : displayId(id), text: ((rawStream?.id === id ? rawStream.text : "") + message.text).slice(0, 30000) };
+          this.streams.set(task.id, { id: rawStream.displayId, text: redactProviderSecrets(rawStream.text, secrets, true), updatedAt: now() });
+          this.broadcastStream(task.id);
         }
         // Transient deltas are polled by CLI clients, never persisted per token.
         return;
@@ -534,8 +555,10 @@ export class TaskService {
       }
       if (message.kind === "cost" && message.charge) task.costRecords = mergeCostRecords(task.costRecords || [], [message.charge]);
       if (message.kind === "text" && !run.stopped) {
-        if (!message.id || this.streams.get(task.id)?.id === message.id) { this.streams.delete(task.id); rawStream = undefined; }
-        this.store.event(task, "assistant", redactProviderSecrets(String(message.text), secrets));
+        const completesStream = !message.id || rawStream?.id === String(message.id);
+        const streamId = completesStream && rawStream ? rawStream.displayId : message.id ? displayId(String(message.id)) : undefined;
+        if (completesStream) { this.streams.delete(task.id); rawStream = undefined; }
+        this.store.event(task, "assistant", redactProviderSecrets(String(message.text), secrets), streamId);
       }
       if (message.kind === "result") {
         task.modelTokenUsage = mergeModelTokens(task.modelTokenUsage || [], message.modelTokenUsage);
@@ -594,7 +617,7 @@ export class TaskService {
     this.assertRunning(task, run);
     if (["observe", "read_page", "tabs", "browser_action", "fill_fields", "verify_account", "reconcile", "handoff"].includes(name) && !hasTaskBrowser(task)) await this.prepareBrowser(task, run);
     run.actionsAtStart ??= task.usage.actions;
-    if (task.mode === "plan" && ["terminal_run", "terminal_stop", "export_result", "fill_fields"].includes(name)) return textResult("当前为 plan 模式，仅可观察、读取和制定计划。请请求用户切换模式后再执行变更。", true);
+    if (task.mode === "plan" && ["terminal_run", "terminal_stop", "export_result", "register_outputs", "fill_fields"].includes(name)) return textResult("当前为 plan 模式，仅可观察、读取和制定计划。请请求用户切换模式后再执行变更。", true);
     if (name === "authorize_read") return typeof args.path === "string" ? authorizeTaskRead(task, args.path) : { allowed: false };
     if (name === "terminal_run") {
       const input = terminalRunSchema.parse(args);
@@ -620,6 +643,11 @@ export class TaskService {
     if (name === "terminal_stop") { run.externalAction = true; return textResult(await this.terminal.stop(task.id, args)); }
     if (name === "read_document") return readTaskDocument(task, args);
     if (name === "read_table") return textResult(await readTaskTable(task, args));
+    if (name === "register_outputs") {
+      const files = registerTaskOutputs(task, this.terminal.workspace(task.id), this.store.root, args);
+      this.store.event(task, "system", `已登记任务产物：${files.map(file => file.name).join("、")}`); this.publish();
+      return textResult(files);
+    }
     if (name === "export_result") {
       if (task.mode === "manual") {
         const input = z.object({ name: z.string().min(1).max(100), format: z.enum(["csv", "json", "markdown", "html"]),
@@ -1096,7 +1124,7 @@ export class TaskService {
       task.runningSince = undefined;
       for (const activity of task.agentActivities || []) if (activity.status === "running") { activity.status = "interrupted"; activity.updatedAt = now(); }
       const stream = this.streams.get(task.id);
-      if (stream?.text) { this.store.event(task, "assistant", stream.text); this.streams.delete(task.id); }
+      if (stream?.text) { this.store.event(task, "assistant", stream.text, stream.id); this.streams.delete(task.id); }
       if (run.stopped && !TERMINAL_TASKS.has(task.status) && task.pending?.kind !== "confirmation") this.markInterrupted(task);
       if (task.status === "running") {
         task.status = "paused"; this.markInterrupted(task);
@@ -1280,6 +1308,8 @@ export class TaskService {
     if (this.closing) return this.closing;
     this.closed = true; if (this.timer) clearInterval(this.timer);
     if (this.broadcastTimer) { clearTimeout(this.broadcastTimer); this.broadcastTimer = undefined; }
+    if (this.streamTimer) { clearTimeout(this.streamTimer); this.streamTimer = undefined; }
+    this.pendingStreams.clear();
     for (const worker of this.contextWorkers.values()) worker.cancel();
     this.dependencies.closePreview?.();
     this.closing = (async () => {

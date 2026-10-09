@@ -3,6 +3,7 @@ const fs=require('node:fs');const os=require('node:os');const path=require('node
 const {loadCli}=require('./cli-test-build.cjs');
 const {wirelessAddress,parseWirelessServices,discoverWireless,pairWireless,connectWireless}=loadCli('src/main/phones/wireless.ts');
 const {Adb}=loadCli('src/main/phones/adb.ts');const {PhonesService}=loadCli('src/main/phones/service.ts');
+const {groupPhoneDevices}=loadCli('src/shared/phone-devices.ts');
 test('wireless endpoints require local IPv4 and a valid explicit port',()=>{
   for(const value of ['192.168.1.4:37123','10.0.1.4:65535','172.31.1.1:1','169.254.5.8:40000'])assert.equal(wirelessAddress(value),value);
   for(const value of ['8.8.8.8:53','localhost:4444','127.0.0.1:4444','192.168.1.1:0','192.168.1.1:65536','192.168.1.999:4567','192.168.1.2:4000;reboot','-s','192.168.1.1'])assert.throws(()=>wirelessAddress(value));
@@ -55,7 +56,48 @@ test('wireless connect verifies actual device readiness and does not start or pa
   // Refresh may read the setup switches of an already paired USB route. It must
   // never launch the app, change a setting or perform other shell operations.
   for(const call of h.calls.filter(a=>a.includes('shell')))
-    assert.match(call[3], /^'settings' 'get' 'global' '(development_settings_enabled|adb_enabled|adb_wifi_enabled)'$/);
+    assert.match(call[3], /^(?:'getprop' 'ro.serialno'|'pm' 'path' 'io.github.profilepilot.phone'|'settings' 'get' 'global' '(development_settings_enabled|adb_enabled|adb_wifi_enabled)')$/);
+});
+
+test('unpaired Wi-Fi route replaces the old selected USB route without installing or pairing the App',async t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'pp-basic identity-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+  const usb='KNOWN-PHONE',wifi='192.168.1.2:40123',other='192.168.1.3:40234';
+  const saved={[usb]:{token:'a'.repeat(64),hardwareId:usb,model:'Same Model',transport:'usb'}};
+  fs.writeFileSync(path.join(root,'devices.json'),JSON.stringify(saved));
+  let online=true,serial=usb,now=1000;const calls=[];
+  const service=new PhonesService({root,apkPath:'',now:()=>now,adb:{run:async args=>{
+    calls.push(args);
+    if(args[0]==='devices')return online?`${wifi} device model:Same_Model\n${other} device model:Same_Model`:'';
+    if(args[3]==="'getprop' 'ro.serialno'")return args[1]===wifi?serial:'OTHER-PHONE';
+    throw new Error(`Unexpected device command: ${args.join(' ')}`);
+  }}});t.after(()=>service.close());
+  let snapshot=await service.refresh(),groups=groupPhoneDevices(snapshot.devices,usb);
+  assert.equal(groups.length,2,'same model does not merge unrelated devices');
+  assert.equal(groups[0].device.id,wifi);assert.equal(groups[0].device.hardwareId,usb);
+  assert.equal(groups[0].device.companion,'unknown');assert.equal(groups[0].device.state,null);
+  assert.deepEqual(groups[0].routes.map(d=>d.id),[usb,wifi]);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root,'devices.json'))),saved,'discovery creates no App credentials');
+  assert.equal((await service.basicStart(wifi,'view','Test','identity regression')).basic.phase,'viewing');
+  service.basicControl(wifi,'stop');
+  await service.refresh();assert.equal(calls.filter(a=>a[3]==="'getprop' 'ro.serialno'").length,2,'identity is cached while connected');
+  online=false;await service.refresh();online=true;serial='DIFFERENT-PHONE';
+  snapshot=await service.refresh();groups=groupPhoneDevices(snapshot.devices,usb);
+  assert.equal(groups.length,3,'reused Wi-Fi address must be identified again');
+  assert.equal(groups.find(g=>g.device.id===wifi).device.hardwareId,serial);
+  assert.equal(calls.some(a=>a.includes('install')||a.includes('forward')||a[3]?.includes("'am' 'start'")),false);
+});
+
+test('unavailable basic hardware identity is retried without blocking connection or grouping by model',async t=>{
+  const root=fs.mkdtempSync(path.join(os.tmpdir(),'pp-basic-identity-retry-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+  let now=1000,reads=0;
+  const service=new PhonesService({root,apkPath:'',now:()=>now,adb:{run:async args=>{
+    if(args[0]==='devices')return '192.168.1.2:40123 device model:Phone';
+    if(args[3]==="'getprop' 'ro.serialno'"){reads++;if(reads===1)throw new Error('Temporary timeout');return 'PHONE';}
+    throw new Error('Unexpected device command');
+  }}});t.after(()=>service.close());
+  let snapshot=await service.refresh();assert.equal(snapshot.devices[0].connection,'device');assert.equal(snapshot.devices[0].hardwareId,undefined);
+  await service.refresh();assert.equal(reads,1);
+  now+=30001;snapshot=await service.refresh();assert.equal(snapshot.devices[0].hardwareId,'PHONE');assert.equal(reads,2);
 });
 test('mDNS auto-connected device is matched only to its exact advertised endpoint',async t=>{
   const h=fixture(t,{mdns:true});assert.equal((await h.service.connectWireless({address:'192.168.1.2:40002'})).id,h.wifi);

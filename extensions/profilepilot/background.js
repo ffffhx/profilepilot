@@ -49,7 +49,7 @@ function requireOwner(expected) {
 }
 async function state() {
   const tab = currentTab ? await chrome.tabs.get(currentTab).catch(() => undefined) : undefined;
-  return { connected: authenticated && socket?.readyState === WebSocket.OPEN, taskTabs: true, controlGeneration: controlGeneration(), extensionVersion: chrome.runtime.getManifest?.().version || '0.2.0', installationType, installationMode, capabilities: ['tabs', 'cdp', 'cdpSessions', 'history', 'downloads', 'sidePanel'], profileId: config?.profileId, tabId: currentTab, sessionId, ownership, tabTitle: tab?.title, url: tab?.url, pausedByBrowser, connectionError, access };
+  return { connected: authenticated && socket?.readyState === WebSocket.OPEN, taskTabs: true, controlGeneration: controlGeneration(), extensionVersion: chrome.runtime.getManifest?.().version || '0.2.0', installationType, installationMode, capabilities: ['liveView', 'tabs', 'cdp', 'cdpSessions', 'history', 'downloads', 'sidePanel'], profileId: config?.profileId, tabId: currentTab, sessionId, ownership, tabTitle: tab?.title, url: tab?.url, pausedByBrowser, connectionError, access };
 }
 function assertSite(url) {
   if (!usable(url)) throw new Error('此页面不允许自动化，请选择普通网页。');
@@ -330,6 +330,32 @@ async function handle(method, p, check = () => {}) {
     return { reloading: true, version: chrome.runtime.getManifest?.().version || '0.2.0' };
   }
   if (method === 'tabs' && !p.sessionId) return (await ordinaryTabs()).map(t => ({ id: String(t.id), title: t.title, url: t.url, active: t.active, current: t.id === currentTab, discarded: Boolean(t.discarded), frozen: Boolean(t.frozen), status: t.status }));
+  if (method === 'liveView') {
+    // Read only: capture an already active tab, without attaching a debugger,
+    // changing selection, or focusing a window. Never include incognito tabs.
+    const tabs = (await chrome.tabs.query({ windowType: 'normal' })).filter(t => !t.incognito && !String(t.url || '').startsWith('chrome-extension://'));
+    const focused = await chrome.windows.getLastFocused().catch(() => null);
+    const tab = tabs.find(t => t.active && t.windowId === focused?.id) || tabs.filter(t => t.active).sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))[0];
+    let screenshot = null, screenshotError = null;
+    if (tab) {
+      if (!/^https?:\/\//i.test(tab.url || '')) screenshotError = '此浏览器内部页面不支持预览。';
+      else try {
+        screenshot = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 65 });
+        const active = await chrome.tabs.query({ windowId: tab.windowId, active: true });
+        if (active[0]?.id !== tab.id || active[0]?.url !== tab.url) { screenshot = null; screenshotError = '页面已切换，正在等待下一帧。'; }
+      } catch (error) {
+        const message = String(error?.message || error);
+        screenshotError = /<all_urls>|activeTab|permission|access.*page/i.test(message)
+          ? '扩展截图权限未生效，请在 chrome://extensions 重新加载 ProfilePilot 扩展并允许网站访问。'
+          : /minimized|view.*not.*visible|image readback failed/i.test(message)
+            ? '浏览器窗口暂时无法生成画面，恢复窗口后会自动重试。'
+            : '暂时无法抓取当前页面，正在自动重试。';
+      }
+    }
+    return { port: 0, capturedAt: new Date().toISOString(), tabCount: tabs.length,
+      tabs: tabs.map(t => ({ targetId: String(t.id), title: t.title || '', url: t.url || '', faviconUrl: null, primary: t.id === tab?.id })),
+      primaryTitle: tab?.title || null, primaryUrl: tab?.url || null, screenshot, screenshotError, error: null };
+  }
   if (method === 'history') {
     if (sessionId && (p.sessionId !== sessionId || ownership !== 'agent')) throw new Error('当前 Profile 已占用或用户正在操作浏览器。');
     const startTime = p.startTime === undefined ? 0 : Number(p.startTime), endTime = p.endTime === undefined ? Date.now() : Number(p.endTime);

@@ -54,7 +54,7 @@ async function main() {
     await openProfileMenu(driver, profileId);
     await driver.click(`[data-action="open-profile-details"][data-id="${profileId}"]`);
     await driver.waitFor(".profile-details-modal", (snapshot) => snapshot.text?.includes(RENAMED_NAME));
-    await driver.waitFor(".profile-details-cockpit", (snapshot) => snapshot.text?.includes("Cockpit"));
+    await driver.waitFor(".profile-details-cockpit", (snapshot) => snapshot.text?.includes("浏览器预览"));
     await driver.click("[data-profile-details-close]");
     await driver.waitFor(".profile-details-modal", (snapshot) => !snapshot.exists);
     step("opened the on-demand details modal and rendered the cockpit state");

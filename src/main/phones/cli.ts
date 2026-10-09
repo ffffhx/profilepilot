@@ -13,10 +13,10 @@ ppilot phone wireless-discover [--device <设备ID>]
 ppilot phone wireless-pair --params-file <配对JSON文件>
 ppilot phone wireless-connect --address <手机IP:连接端口>
 ppilot phone wireless-connect --device <设备ID>
-ppilot phone start --device <设备ID> --controller <控制者> --task <任务> [--mode view|control]
-ppilot phone pause|resume|stop --device <设备ID>
+ppilot phone start --device <设备ID> --controller <控制者> --task <任务> [--mode view|control] [--backend app|basic]
+ppilot phone pause|resume|stop --device <设备ID> [--backend app|basic]
 ppilot phone rename --device <设备ID> --name <名称>
-ppilot phone action --params-file <JSON文件> [--output <截图文件>]
+ppilot phone action --params-file <JSON文件> [--output <截图文件>] [--backend app|basic]
 ppilot phone run --device <设备ID> --file <流程JSON> [--output-dir <报告目录>] [--mode view|control] [--controller <控制者>] [--task <任务>]
 ppilot phone wrap --device <设备ID> --controller <控制者> --task <任务> [--mode view|control] -- <程序> [参数...]
 ppilot phone adb <ADB兼容命令...>
@@ -26,6 +26,10 @@ ppilot phone adb <ADB兼容命令...>
 wireless-discover 返回端口可达性及原因；--device 只查找指定手机，旧地址不可用时自动刷新一次。
 成功后使用返回的设备 ID 执行 connect，更新或连接配套 App。
 无线连接不会自动开始控制，也不会恢复已暂停的会话。
+免安装：start --backend basic 不安装手机 App。支持截图、坐标点击/滑动、返回/主页/最近应用和基础英文输入。
+basic 会话版本在 list 的 basic 字段中；后续 action、pause、resume、stop 也需指定 --backend basic。
+坐标操作前先截图；画面有效期 30 秒，输入后需重新截图。中文填写、控件识别及手机端暂停需要 App。
+两种模式不会自动切换；先结束当前会话，再执行 connect 安装配套 App。断线后须重新开始会话。
 install 自动创建安装会话，覆盖更新并保留应用数据；不卸载、不降级、不自动授予权限。支持已连接的 USB 或 Wi-Fi。
 安装要求先结束现有任务；暂停、断线或会话改变会停止安装跟踪，不会自动重试；提交到 Android 的安装可能已经完成，请先核对结果。
 action JSON: {"id":"设备ID","sessionId":"list 返回的会话ID","generation":1,"requestId":"新的UUID","action":{"kind":"tap","x":100,"y":200}}
@@ -49,7 +53,7 @@ export async function runPhoneCli(args: string[], request: (command: ProfilePilo
     const flags = new Map<string, string>();
     for (let index = 1; index < args.length; index++) {
       const key = args[index]; if (key === "--json") continue;
-      if (!["--device", "--apk", "--address", "--controller", "--task", "--mode", "--name", "--params-file", "--output", "--file", "--output-dir"].includes(key) || flags.has(key) || !args[index + 1]) throw new Error(`参数无效：${key}`);
+      if (!["--device", "--apk", "--address", "--controller", "--task", "--mode", "--name", "--params-file", "--output", "--file", "--output-dir", "--backend"].includes(key) || flags.has(key) || !args[index + 1]) throw new Error(`参数无效：${key}`);
       flags.set(key, args[++index]);
     }
     const allowed: Record<string, string[]> = { list: [], connect: ["--device"], rename: ["--device", "--name"], start: ["--device", "--controller", "--task", "--mode"], pause: ["--device"], resume: ["--device"], stop: ["--device"], action: ["--params-file", "--output"], run: ["--device", "--file", "--output-dir", "--mode", "--controller", "--task"] };
@@ -57,6 +61,9 @@ export async function runPhoneCli(args: string[], request: (command: ProfilePilo
     allowed.install = ["--device", "--apk", "--controller"];
     allowed["wireless-pair"] = ["--params-file"];
     allowed["wireless-connect"] = ["--address", "--device"];
+    for (const operation of ["start", "pause", "resume", "stop", "action"]) allowed[operation].push("--backend");
+    const backend = flags.get("--backend") || "app";
+    if (!["app", "basic"].includes(backend)) throw new Error("--backend 必须为 app 或 basic。");
     for (const key of flags.keys()) if (!allowed[method].includes(key)) throw new Error(`${method} 不支持 ${key}`);
     if (method === "install") {
       const data = await installPhoneApkCli(flags, request);
@@ -88,7 +95,7 @@ export async function runPhoneCli(args: string[], request: (command: ProfilePilo
       const id = flags.get("--device"); if (!id) throw new Error("请指定 --device，避免操作错误的手机。");
       params = method === "start" ? { id, mode: flags.get("--mode") || "control", controller: flags.get("--controller") || "本机 CLI", task: flags.get("--task") || "" } : method === "rename" ? { id, name: flags.get("--name") } : { id };
     }
-    const response = await request({ action: "phone", method, params });
+    const response = await request({ action: "phone", method: backend === "basic" ? `basic-${method}` : method, params });
     if (response.ok && flags.has("--output")) {
       const data = response.data as { result?: { base64?: string; mime?: string }; state?: unknown };
       if (!["image/jpeg", "image/png"].includes(data.result?.mime || "") || typeof data.result?.base64 !== "string") throw new Error("此操作未返回截图。");

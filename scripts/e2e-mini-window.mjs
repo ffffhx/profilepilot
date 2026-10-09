@@ -61,7 +61,7 @@ async function main() {
       step("Mini -> main restored after the macOS delivery check");
     }
 
-    await driver.click('[data-action="open-mini-window"]');
+    await driver.evaluate("window.profileManager.showMiniWindow()");
     await waitForWindow(driver, (state) => state.mini?.visible && !state.main?.visible && !state.miniPanelOpen);
     const collapsedClose = await driver.query(".mini-dock-close", { target: "mini" });
     assert.equal(collapsedClose.count, 1, "Collapsed Mini should expose a close button");
@@ -72,7 +72,7 @@ async function main() {
     await driver.evaluate("window.profileManager.showMainWindow()", { target: "mini" });
     await waitForWindow(driver, (state) => state.main?.visible && state.main.focused);
 
-    await driver.click('[data-action="open-mini-window"]');
+    await driver.evaluate("window.profileManager.showMiniWindow()");
     await waitForWindow(driver, (state) => state.mini?.visible && !state.main?.visible && !state.miniPanelOpen);
     const beforeDrag = await driver.windows();
     await driver.drag(".mini-logo-dock", 5, 75, { target: "mini" });

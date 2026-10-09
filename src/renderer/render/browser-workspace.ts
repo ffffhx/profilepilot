@@ -1,10 +1,10 @@
 import { store } from "../state";
 import type { PublicProfile, ExternalChromeInstance } from "../types";
 import { escapeHtml as e } from "../util";
-import { taskIcon } from "../task-icons";
 import { renderProfileActivityCell } from "./profiles";
 
 export function profileAvatar(profile: PublicProfile): string {
+  if (profile.avatarDataUrl && /^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/.test(profile.avatarDataUrl)) return `<span class="profile-avatar"><img src="${e(profile.avatarDataUrl)}" alt="" /></span>`;
   const color = profile.source === "native" ? 0 : [...profile.id].reduce((sum,c)=>sum+c.charCodeAt(0),0)%4;
   return `<span class="profile-avatar avatar-${color}" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4" fill="currentColor"/><path d="M4 22v-3a8 8 0 0 1 16 0v3" fill="currentColor"/></svg></span>`;
 }
@@ -16,8 +16,7 @@ export function renderBrowserInspector(profile?: PublicProfile, external?: Exter
   const label = extension?.connected ? "扩展已连接" : connected ? "Gateway 已连接" : "尚未连接";
   return `<aside class="browser-profile-inspector" aria-label="选中 Profile">
     <div class="inspector-identity">${profileAvatar(profile)}<div><h2>${e(profile.name)}</h2><span class="browser-kind"><i aria-hidden="true"></i>Chrome</span><span class="inspector-connection ${connected ? "connected" : ""}"><i></i>${label}</span></div></div>
+    <section class="browser-preview" data-browser-preview="${e(profile.id)}"></section>
     <section class="inspector-current-task"><h3>当前 Agent</h3>${renderProfileActivityCell(profile)}</section>
-    <div class="inspector-actions"><button class="primary" data-action="${profile.running ? "focus-profile" : "launch"}" data-id="${e(profile.id)}" ${store.busy ? "disabled" : ""}>${profile.running ? "显示浏览器" : "启动浏览器"}</button><button data-action="open-profile-details" data-id="${e(profile.id)}">连接设置</button>
-    ${profile.source === "isolated" ? `<button class="inspector-text-action" data-action="configure-bifrost-proxy" data-id="${e(profile.id)}">${taskIcon("settings")}代理设置</button>` : ""}<button class="inspector-text-action inspector-agent-access" data-action="toggle-agent-access" data-id="${e(profile.id)}" aria-pressed="${!profile.agentAccessDisabled}">${taskIcon("check")}${profile.agentAccessDisabled ? "允许 Agent 连接" : "已允许 Agent 连接"}</button></div>
   </aside>`;
 }

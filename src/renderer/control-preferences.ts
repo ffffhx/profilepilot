@@ -7,14 +7,17 @@ import type { ModalState } from "./types";
 import type { ControlPreferencesDomain as Domain, ControlPreferencesEditor as Editor } from "../shared/control-preferences";
 
 type Modal = Extract<ModalState, { kind: "control-preferences" }>;
-const domains: Domain[] = ["browser", "phone"];
-const labels: Record<Domain, string> = { browser: "浏览器", phone: "手机" };
+export const controlPreferencesDomains: Domain[] = ["browser", "electron", "phone"];
+const domains = controlPreferencesDomains;
+const labels: Record<Domain, string> = { browser: "浏览器", electron: "Electron", phone: "手机" };
 const descriptions: Record<Domain, string> = {
   browser: "设置优先使用的 Profile、连接方式，以及切换账号前的确认规则。",
+  electron: "设置 Electron 应用的选择、后台操作、控制标识和用户接管规则。首次提供默认说明，保存后供 Agent 读取。",
   phone: "设置优先使用的手机、默认查看或控制模式，以及操作前的确认规则。"
 };
 const examples: Record<Domain, string> = {
   browser: "例如：优先使用系统默认 Chrome Profile，通过 ProfilePilot 扩展连接。切换账号前先询问我。",
+  electron: "例如：通过应用的 Agent 端口连接，默认后台操作，保持控制标识可见。用户接管后停止操作。",
   phone: "例如：优先使用我指定的安卓手机，多台设备连接时先确认目标。默认仅查看，点击或输入前先询问我。"
 };
 const blankEditor = (): Editor => ({ loading: false, saving: false, draft: "", snapshot: null, syncAll: true, error: null });
@@ -48,7 +51,7 @@ async function loadPreferences(modal: Modal, domain: Domain): Promise<void> {
 }
 
 export async function openControlPreferences(): Promise<void> {
-  const modal: Modal = { kind: "control-preferences", activeTab: "browser", editors: { browser: blankEditor(), phone: blankEditor() }, discard: false };
+  const modal: Modal = { kind: "control-preferences", activeTab: "browser", editors: { browser: blankEditor(), electron: blankEditor(), phone: blankEditor() }, discard: false };
   store.modal = modal;
   await loadPreferences(modal, "browser");
 }
@@ -128,7 +131,7 @@ export function renderControlPreferencesModal(): string {
   const discardLabel = modal.discard === "reload" ? labels[domain] : dirty.map(item => labels[item]).join("、");
   return `<div class="modal-backdrop control-preferences-backdrop" data-action="close-modal">
     <section class="modal control-preferences-modal" role="dialog" aria-modal="true" aria-labelledby="control-preferences-title">
-      <header class="control-preferences-header"><div><h2 id="control-preferences-title">控制偏好</h2><p>告诉 Agent 如何使用你的浏览器和手机。</p></div><button type="button" data-action="close-modal" aria-label="关闭控制偏好" ${saving(modal) ? "disabled" : ""}>×</button></header>
+      <header class="control-preferences-header"><div><h2 id="control-preferences-title">控制偏好</h2><p>告诉 Agent 如何使用你的浏览器、Electron 应用和手机。</p></div><button type="button" data-action="close-modal" aria-label="关闭控制偏好" ${saving(modal) ? "disabled" : ""}>×</button></header>
       <div class="control-preferences-tabs" role="tablist" aria-label="控制对象">${domains.map(item => `<button type="button" role="tab" id="control-preferences-tab-${item}" data-action="switch-control-preferences-tab" data-preferences-tab="${item}" data-dirty="${controlPreferencesDirty(modal.editors[item])}" aria-label="${labels[item]}${controlPreferencesDirty(modal.editors[item]) ? "，有未保存的修改" : ""}" aria-selected="${domain === item}" aria-controls="control-preferences-panel-${item}" tabindex="${domain === item ? "0" : "-1"}" ${saving(modal) || modal.discard ? "disabled" : ""}>${labels[item]}</button>`).join("")}</div>
       <div class="control-preferences-panel" id="control-preferences-panel-${domain}" role="tabpanel" aria-labelledby="control-preferences-tab-${domain}" aria-busy="${editor.loading || editor.saving}">
         <p class="control-preferences-description">${descriptions[domain]}</p>

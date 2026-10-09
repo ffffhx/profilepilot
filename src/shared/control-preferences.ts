@@ -1,6 +1,6 @@
 import type { BrowserPreferencesSnapshot, BrowserPreferencesUpdate } from "./browser-preferences";
 
-export type ControlPreferencesDomain = "browser" | "phone";
+export type ControlPreferencesDomain = "browser" | "electron" | "phone";
 export interface ControlPreferencesSnapshot extends BrowserPreferencesSnapshot {
   domain: ControlPreferencesDomain;
 }

@@ -5,7 +5,7 @@ import io.github.profilepilot.phone.DebuggingSetup.Node;
 
 /** Recognize only our entry in overlay settings, or our app's overlay switch. */
 final class OverlayPermissionSetup {
-    enum Kind { NONE, OPEN_APP, ENABLE }
+    enum Kind { NONE, OPEN_APP, ENABLE, SCROLL_APP_LIST }
     record Target(Kind kind, int index) { }
     static final Target NONE = new Target(Kind.NONE, -1);
     private static final List<String> LABELS = List.of(
@@ -23,6 +23,37 @@ final class OverlayPermissionSetup {
         return overlayLabel(text) || "Allow permission".equalsIgnoreCase(text.trim());
     }
 
+    private static boolean appHeader(Node node) {
+        return node.id().endsWith(":id/entity_header_title") || node.id().endsWith(":id/app_name")
+            || node.id().endsWith(":id/app_label") || node.id().endsWith(":id/app_title");
+    }
+
+    /** Only scroll a recognized overlay application list while our app is off-screen. */
+    static Target scrollTarget(List<Node> nodes, int container, String appLabel, String appPackage) {
+        if (container < 0 || container >= nodes.size() || DebuggingSetup.dialog(nodes)) return NONE;
+        if (nodes.stream().noneMatch(node -> overlayLabel(node.text()))) return NONE;
+        int titles = 0;
+        for (int i = 0; i < nodes.size(); i++) {
+            Node node = nodes.get(i);
+            if (appHeader(node) || appLabel.equals(node.text()) || appPackage.equals(node.text())) return NONE;
+            if (!inside(nodes, i, container)) continue;
+            if (node.toggle()) return NONE;
+            if (node.id().equals("android:id/title")) {
+                if (node.text().isBlank()) return NONE;
+                int row = clickable(nodes, i, container);
+                if (row < 0 || row == container) return NONE;
+                titles++;
+            }
+        }
+        return titles >= 2 ? new Target(Kind.SCROLL_APP_LIST, container) : NONE;
+    }
+
+    static String pageFingerprint(List<Node> nodes) {
+        StringBuilder result = new StringBuilder();
+        for (Node node : nodes) if (node.id().equals("android:id/title")) result.append(node.text()).append('\n');
+        return result.toString();
+    }
+
     static Target target(List<Node> nodes, String appLabel, String appPackage) {
         if (DebuggingSetup.dialog(nodes)) return NONE;
         int own = -1;
@@ -38,9 +69,7 @@ final class OverlayPermissionSetup {
         }
         if (own < 0 || !overlayPage) return NONE;
         Node identity = nodes.get(own);
-        boolean header = identity.id().endsWith(":id/entity_header_title")
-            || identity.id().endsWith(":id/app_name") || identity.id().endsWith(":id/app_label")
-            || identity.id().endsWith(":id/app_title");
+        boolean header = appHeader(identity);
         if (header) {
             // Detail pages must have a single switch and an explicit overlay label in its row.
             int toggle = -1;
@@ -98,15 +127,26 @@ final class OverlayPermissionSetup {
     static final class Request {
         private final DebuggingSetup.Request lifetime;
         private boolean openedApp, toggled;
-        Request(SessionState owner, long now) { lifetime = new DebuggingSetup.Request(owner, now); }
+        private int scrolls;
+        private String lastPage;
+        private long lastScrollAt;
+        Request(SessionState owner, long now) { lifetime = new DebuggingSetup.Request(owner, now, 18000); }
         boolean valid(SessionState owner, long now, boolean unlocked) { return lifetime.valid(owner, now, unlocked); }
         boolean consume(Kind kind, SessionState owner, long now, boolean unlocked) {
-            if (!valid(owner, now, unlocked) || toggled || kind == Kind.NONE) return false;
+            if (!valid(owner, now, unlocked) || toggled || kind == Kind.NONE || kind == Kind.SCROLL_APP_LIST) return false;
             if (kind == Kind.OPEN_APP) {
                 if (openedApp) return false;
                 openedApp = true;
             } else toggled = true;
             return true; // Mark before dispatch: never retry an uncertain click.
+        }
+        boolean consumeScroll(String page, SessionState owner, long now, boolean unlocked) {
+            if (!valid(owner, now, unlocked) || openedApp || toggled || scrolls >= 8
+                || page.isBlank() || page.equals(lastPage) || (scrolls > 0 && now - lastScrollAt < 700)) return false;
+            lastPage = page;
+            lastScrollAt = now;
+            scrolls++;
+            return true;
         }
     }
 }

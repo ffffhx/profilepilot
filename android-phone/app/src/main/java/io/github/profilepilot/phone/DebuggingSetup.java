@@ -70,11 +70,14 @@ final class DebuggingSetup {
         private final boolean remote;
         private boolean consumed;
         Request(SessionState owner, long now) {
+            this(owner, now, 6000);
+        }
+        Request(SessionState owner, long now, long duration) {
             this.owner = owner;
             if (owner != null) owner.expire();
             generation = owner == null ? 0 : owner.generation;
             remote = owner != null && owner.active();
-            deadline = now + 6000;
+            deadline = now + duration;
         }
         boolean valid(SessionState current, long now, boolean unlocked) {
             if (current != null) current.expire();

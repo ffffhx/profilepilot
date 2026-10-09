@@ -58,7 +58,22 @@ final class OverlayPermissionAssist implements Runnable {
                     collect(root, -1, 0, nodes, handles);
                     if (DebuggingSetup.dialog(nodes)) { manual(); return; }
                     OverlayPermissionSetup.Target target = OverlayPermissionSetup.target(nodes, appLabel, service.getPackageName());
-                    if (target.kind() != OverlayPermissionSetup.Kind.NONE
+                    if (target.kind() == OverlayPermissionSetup.Kind.NONE) {
+                        for (int i = 0; i < handles.size(); i++) {
+                            AccessibilityNodeInfo node = handles.get(i);
+                            String type = String.valueOf(node.getClassName());
+                            if (!node.isScrollable() || !node.isEnabled()
+                                || !(type.endsWith("ListView") || type.endsWith("RecyclerView"))) continue;
+                            OverlayPermissionSetup.Target scroll = OverlayPermissionSetup.scrollTarget(nodes, i, appLabel, service.getPackageName());
+                            if (scroll.kind() == OverlayPermissionSetup.Kind.NONE) continue;
+                            if (target.kind() != OverlayPermissionSetup.Kind.NONE) { manual(); return; }
+                            target = scroll;
+                        }
+                    }
+                    if (target.kind() == OverlayPermissionSetup.Kind.SCROLL_APP_LIST) {
+                        if (request.consumeScroll(OverlayPermissionSetup.pageFingerprint(nodes), session(), SystemClock.elapsedRealtime(), unlocked())
+                            && !handles.get(target.index()).performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)) { manual(); return; }
+                    } else if (target.kind() != OverlayPermissionSetup.Kind.NONE
                         && !Settings.canDrawOverlays(service)
                         && request.consume(target.kind(), session(), SystemClock.elapsedRealtime(), unlocked())) {
                         if (!handles.get(target.index()).performAction(AccessibilityNodeInfo.ACTION_CLICK)) { manual(); return; }

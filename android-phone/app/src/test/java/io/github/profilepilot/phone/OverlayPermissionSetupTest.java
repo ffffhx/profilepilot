@@ -122,7 +122,7 @@ public class OverlayPermissionSetupTest {
     @Test public void expiredLockedOrChangedSessionCannotClick() {
         OverlayPermissionSetup.Request request = new OverlayPermissionSetup.Request(null, 0);
         assertFalse(request.consume(Kind.ENABLE, null, 100, false));
-        assertFalse(request.consume(Kind.ENABLE, null, 6000, true));
+        assertFalse(request.consume(Kind.ENABLE, null, 18000, true));
         AtomicLong clock = new AtomicLong(1);
         SessionState session = new SessionState(clock::get);
         session.start(session.instanceId, 0, UUID.randomUUID().toString(), "control", "pc", "agent", "setup", 1);
@@ -133,5 +133,32 @@ public class OverlayPermissionSetupTest {
         session.resume();
         assertFalse(request.consume(Kind.ENABLE, session, 300, true));
         assertFalse(request.consume(Kind.ENABLE, null, 400, true));
+    }
+    @Test public void searchesRecognizedApplicationListOnlyWhenOwnEntryIsOffscreen() {
+        List<Node> nodes = appList();
+        assertEquals(Kind.NONE, OverlayPermissionSetup.scrollTarget(nodes, 0, APP, PACKAGE).kind());
+        nodes.set(5, text(4, "第二个应用", "android:id/title", false));
+        assertEquals(Kind.SCROLL_APP_LIST, OverlayPermissionSetup.scrollTarget(nodes, 0, APP, PACKAGE).kind());
+        nodes.set(1, text(0, "应用管理", "", false));
+        assertEquals(Kind.NONE, OverlayPermissionSetup.scrollTarget(nodes, 0, APP, PACKAGE).kind());
+        assertEquals(Kind.NONE, OverlayPermissionSetup.scrollTarget(detail(false), 0, APP, PACKAGE).kind());
+    }
+    @Test public void scrollingNeverClicksOrTogglesNeighboringApps() {
+        List<Node> nodes = appList();
+        nodes.set(5, text(4, "第二个应用", "android:id/title", false));
+        nodes.add(new Node(4, "", "", true, false, true, true));
+        assertEquals(Kind.NONE, OverlayPermissionSetup.scrollTarget(nodes, 0, APP, PACKAGE).kind());
+    }
+    @Test public void scrollRequiresChangedPageAndSettlingTimeAndHasAHardLimit() {
+        OverlayPermissionSetup.Request request = new OverlayPermissionSetup.Request(null, 0);
+        assertTrue(request.consumeScroll("page0", null, 100, true));
+        assertFalse(request.consumeScroll("page0", null, 1000, true));
+        assertFalse(request.consumeScroll("page1", null, 200, true));
+        for (int i = 1; i < 8; i++) assertTrue(request.consumeScroll("page" + i, null, i * 1000, true));
+        assertFalse(request.consumeScroll("page8", null, 8000, true));
+        assertTrue(request.consume(Kind.OPEN_APP, null, 8500, true));
+        assertFalse(request.consumeScroll("page9", null, 9000, true));
+        assertTrue(request.consume(Kind.ENABLE, null, 9500, true));
+        assertFalse(request.consume(Kind.ENABLE, null, 9600, true));
     }
 }

@@ -7,6 +7,11 @@ on:
       - "v*.*.*"
   workflow_dispatch:
     inputs:
+      android_only:
+        description: "Build a signed Android APK artifact without publishing a release."
+        type: boolean
+        required: false
+        default: false
       tag:
         description: "Release tag to publish. Use latest for the rolling website download."
         required: true
@@ -71,6 +76,7 @@ jobs:
   build:
     name: Build ${{ matrix.name }}
     needs: android
+    if: ${{ !inputs.android_only }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -145,6 +151,7 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: [android, build]
+    if: ${{ !inputs.android_only }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

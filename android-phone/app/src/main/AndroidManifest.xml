@@ -1,5 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <queries>
+        <intent><action android:name="android.settings.action.MANAGE_OVERLAY_PERMISSION" /><data android:scheme="package" /></intent>
         <intent><action android:name="android.settings.APPLICATION_DEVELOPMENT_SETTINGS" /></intent>
         <intent><action android:name="android.settings.ACCESSIBILITY_DETAILS_SETTINGS" /></intent>
     </queries>

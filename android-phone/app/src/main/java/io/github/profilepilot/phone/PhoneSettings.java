@@ -7,11 +7,39 @@ import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.ResolveInfo;
 import android.os.Bundle;
+import android.net.Uri;
 import android.provider.Settings;
 import android.widget.Toast;
 
 /** User-triggered setup, with system authorization dialogs left to the user. */
 final class PhoneSettings {
+    static void openOverlayPermission(Activity activity) {
+        cancelPending();
+        Intent intent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+            Uri.parse("package:" + activity.getPackageName()));
+        PhoneAccessibility accessibility = PhoneAccessibility.current;
+        boolean assist = false;
+        try {
+            ResolveInfo target = activity.getPackageManager().resolveActivity(intent, 0);
+            if (!Settings.canDrawOverlays(activity) && accessibility != null
+                && target != null && target.activityInfo != null && target.activityInfo.exported
+                && (target.activityInfo.applicationInfo.flags & ApplicationInfo.FLAG_SYSTEM) != 0
+                && (target.activityInfo.permission == null || activity.checkSelfPermission(target.activityInfo.permission)
+                    == android.content.pm.PackageManager.PERMISSION_GRANTED)) {
+                intent.setClassName(target.activityInfo.packageName, target.activityInfo.name);
+                accessibility.prepareOverlayPermission(target.activityInfo.packageName);
+                assist = true;
+            }
+            activity.startActivity(intent);
+            if (!Settings.canDrawOverlays(activity)) Toast.makeText(activity,
+                assist ? "正在辅助开启 ProfilePilot 悬浮窗权限；如出现系统确认，请手动确认"
+                    : "请手动开启 ProfilePilot 的悬浮窗权限；开启无障碍服务后可辅助操作", Toast.LENGTH_LONG).show();
+        } catch (ActivityNotFoundException | SecurityException unavailable) {
+            cancelPending();
+            Toast.makeText(activity, "无法打开悬浮窗设置，请在系统设置的应用权限中开启 ProfilePilot 的悬浮窗权限", Toast.LENGTH_LONG).show();
+        }
+    }
+
     static void openWirelessDebugging(Activity activity) {
         openDebugging(activity, DebuggingSetup.Setting.WIRELESS);
     }
@@ -108,7 +136,7 @@ final class PhoneSettings {
         Toast.makeText(activity, "在已安装或已下载的服务中打开「ProfilePilot 手机控制」，按系统提示确认", Toast.LENGTH_LONG).show();
     }
 
-    private static void cancelPending() {
-        if (PhoneAccessibility.current != null) PhoneAccessibility.current.cancelDebugging();
+    static void cancelPending() {
+        if (PhoneAccessibility.current != null) PhoneAccessibility.current.cancelSetup();
     }
 }

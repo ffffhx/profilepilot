@@ -441,14 +441,14 @@ public final class MainActivity extends ComponentActivity {
     localCheckRow(local, 2, () -> PhoneSettings.openUsbDebugging(this));
     localCheckRow(local, 3, () -> PhoneSettings.openWirelessDebugging(this));
     localCheckRow(local, 4, null);
-    localCheckRow(local, 5, () -> startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + getPackageName()))));
+    localCheckRow(local, 5, () -> PhoneSettings.openOverlayPermission(this));
     localCheckRow(local, 6, () -> {
       if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
         requestPermissions(new String[] {Manifest.permission.POST_NOTIFICATIONS}, 1);
       else startActivity(new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName()));
     });
     localCheckRow(local, 7, () -> PhoneSettings.openAccessibility(this));
-    text(local, "USB 与 Wi-Fi 任选一种。无障碍服务开启后，点击调试项可自动定位并开启；系统授权和锁屏密码由你确认。", 12, MUTED);
+    text(local, "USB 与 Wi-Fi 任选一种。无障碍服务开启后，点击调试项或悬浮窗权限可辅助开启；系统确认和锁屏密码由你操作。", 12, MUTED);
     localServiceButton = button(local, "连接电脑服务", true, () -> {
       try { startForegroundService(new Intent(this, ControlService.class)); }
       catch (Exception error) { message("连接失败：" + error.getMessage()); }
@@ -1540,6 +1540,7 @@ public final class MainActivity extends ComponentActivity {
   @Override
   protected void onResume() {
     super.onResume();
+    PhoneSettings.cancelPending();
     if (store.statusEnabled()) {
       try { startForegroundService(new Intent(this, StatusSyncService.class)); }
       catch (Exception error) { message("状态同步未恢复，请在设备页重新开启"); }

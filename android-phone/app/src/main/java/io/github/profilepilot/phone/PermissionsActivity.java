@@ -9,7 +9,6 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
-import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -218,12 +217,8 @@ public final class PermissionsActivity extends Activity {
     title.setTypeface(null, Typeface.BOLD);
     title.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 1));
     permissionCount = text(heading, "", 12, MUTED);
-    permissionRow(permissions, 0, "电脑操作时，在屏幕顶部持续显示控制者。",
-        view ->
-            startActivity(
-                new Intent(
-                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                    Uri.parse("package:" + getPackageName()))));
+    permissionRow(permissions, 0, "电脑操作时，在屏幕顶部持续显示控制者。无障碍服务开启后，点击可辅助开启悬浮窗权限。",
+        view -> PhoneSettings.openOverlayPermission(this));
     divider(permissions);
     permissionRow(permissions, 1, "在通知栏查看控制状态，随时暂停或结束。",
         view -> {
@@ -484,6 +479,7 @@ public final class PermissionsActivity extends Activity {
   @Override
   protected void onResume() {
     super.onResume();
+    PhoneSettings.cancelPending();
     handler.removeCallbacks(refresh);
     handler.post(refresh);
   }

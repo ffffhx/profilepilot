@@ -20,8 +20,9 @@ import java.util.concurrent.CompletableFuture;
 public final class PhoneAccessibility extends AccessibilityService {
     public static volatile PhoneAccessibility current;
     private DebuggingAssist debuggingSetup;
+    private OverlayPermissionAssist overlaySetup;
     void prepareDebugging(String settingsPackage, DebuggingSetup.Setting setting) {
-        cancelDebugging();
+        cancelSetup();
         debuggingSetup = new DebuggingAssist(this, settingsPackage, setting);
         debuggingSetup.start();
     }
@@ -29,9 +30,19 @@ public final class PhoneAccessibility extends AccessibilityService {
         if (debuggingSetup != null) debuggingSetup.cancel();
         debuggingSetup = null;
     }
+    void prepareOverlayPermission(String settingsPackage) {
+        cancelSetup();
+        overlaySetup = new OverlayPermissionAssist(this, settingsPackage);
+        overlaySetup.start();
+    }
+    void cancelSetup() {
+        cancelDebugging();
+        if (overlaySetup != null) overlaySetup.cancel();
+        overlaySetup = null;
+    }
     @Override protected void onServiceConnected() { current = this; }
     @Override public void onAccessibilityEvent(AccessibilityEvent event) { }
-    @Override public void onInterrupt() { cancelDebugging(); if (ControlService.current != null) ControlService.current.localControl("pause"); }
+    @Override public void onInterrupt() { cancelSetup(); if (ControlService.current != null) ControlService.current.localControl("pause"); }
     @Override public void onDestroy() { current = null; onInterrupt(); super.onDestroy(); }
 
     public CompletableFuture<Object> perform(JSONObject action) {

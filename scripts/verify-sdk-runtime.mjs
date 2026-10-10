@@ -62,7 +62,7 @@ try {
     child.on("exit", code => { clearTimeout(timeout); if (!messages.some(m => m.kind === "result")) reject(new Error(`Worker exited ${code}: ${stderr}`)); });
   });
   child.send({ kind: "start", cwd: root, apiKey: "fixture-key-only", settings: { model: "claude-sonnet-4-6", baseUrl: `http://127.0.0.1:${server.address().port}` },
-    task: { prompt: "观察测试页面", profileName: "测试", authorization: "", materials: [], attachments, items: [], plan: [], events: [], receipts: [], needsReconciliation: false, limits: { actions: 5, budgetUsd: 1 }, usage: { actions: 0, costUsd: 0 } } });
+    task: { id: "sdk-runtime-fixture", profileId: "sdk-runtime-fixture", title: "SDK 运行时验证", prompt: "观察测试页面", profileName: "测试", authorization: "", materials: [], attachments, items: [], plan: [], events: [], receipts: [], needsReconciliation: false, limits: { actions: 5, budgetUsd: 1 }, usage: { actions: 0, costUsd: 0 } } });
   const outcome = await result;
   assert.equal(outcome.success, true, JSON.stringify(outcome));
   assert.ok(messages.some(m => m.kind === "tool" && m.name === "observe"), JSON.stringify({ requests: requests.map(r => ({ model: r.model, tools: (r.tools || []).map(t => t.name) })), messages: messages.map(m => ({ kind: m.kind, name: m.name })) }));

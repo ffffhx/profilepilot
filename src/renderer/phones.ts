@@ -5,6 +5,7 @@ import { workspaceIdentityBar, workspaceSwitcher, refreshWorkspaceSwitcher } fro
 import { taskIcon } from "./task-icons";
 import { createMobileConnections } from "./mobile-connections";
 import { openPhoneWireless } from "./phone-wireless";
+import { PhoneWirelessDiscoveryMonitor, wirelessDiscoveryPresentation } from "./phone-wireless-discovery";
 import { openPhoneCloud } from "./phone-cloud";
 import { openPhoneEmulator } from "./phone-emulator";
 import { openBasicPhone, phoneModeChoices, phoneEnhancementContent, PHONE_APP_DOWNLOAD_URL } from "./phone-basic";
@@ -28,6 +29,7 @@ let image: { id: string; instanceId: string; src: string; at: number } | null = 
 let previewSource = "", previewVersion = 0, previewAttempted = false, previewLoading = false, previewError = "";
 let noticeTimer: number;
 let pickerOptions = "";
+const wirelessDiscovery = new PhoneWirelessDiscoveryMonitor(id => window.phones.discoverWireless(id), render);
 
 root.innerHTML = `${workspaceSwitcher("phones")}${workspaceIdentityBar()}<main class="phone-shell"><header class="phone-topbar"><div><h1>手机控制</h1><p>先连接手机，再选择控制方式</p></div><label class="phone-picker" hidden><span class="sr-only">选择手机</span>${taskIcon("phone")}<select name="phoneDevice" aria-label="选择手机"></select></label></header><div class="phone-content" aria-busy="true"></div></main>`;
 refreshWorkspaceSwitcher();
@@ -70,9 +72,10 @@ function settingsRows(rows: PhoneSettingRow[], canSetup: boolean, subject = "手
 function routeCard(transport: "usb" | "wifi", route?: PhoneRoutePresentation, occupied = false): string {
   const connected = !!route?.detected, unauthorized = route?.unauthorized;
   const name = transport === "usb" ? "USB" : "Wi-Fi";
-  const label = connected ? "已连接" : unauthorized ? "等待授权" : "未连接";
+  const discovery = transport === "wifi" ? wirelessDiscoveryPresentation(wirelessDiscovery.state, route?.setting.status === "enabled") : undefined;
+  const label = connected ? "已连接" : unauthorized ? "等待授权" : discovery?.label || "未连接";
   const note = connected ? `${phonePresentation(route!.device!).displayName} · ${transport === "usb" ? "数据线已连接" : "无线调试已连接"}`
-    : unauthorized ? "请在手机上允许这台电脑进行调试。" : transport === "usb" ? "用数据线连接手机，开启 USB 调试。" : "手机与电脑在同一网络，开启无线调试。";
+    : unauthorized ? "请在手机上允许这台电脑进行调试。" : discovery?.note || "用数据线连接手机，开启 USB 调试。";
   return `<section class="phone-route" data-route="${transport}" data-debug-connected="${connected}"><span class="phone-route-icon">${icon(transport === "usb" ? "usbDebugging" : "wifi")}</span><div class="phone-route-copy"><header><h3>${name}</h3><span class="phone-route-badge" data-tone="${connected ? "ready" : unauthorized ? "warning" : "neutral"}">${label}</span></header><p class="phone-route-note">${esc(note)}</p></div><button data-action="${transport}" ${transport === "wifi" && (busy || occupied) ? "disabled" : ""}>${transport === "usb" ? "连接说明" : connected ? "连接设置" : "连接 Wi-Fi"}</button></section>`;
 }
 function connectionSection(status?: ReturnType<typeof phoneConnectionPresentation>): string {
@@ -102,6 +105,9 @@ function render(): void {
   selected = group?.device.id || "";
   if (selected) sessionStorage.setItem("phone-selected", selected);
   const device = current(), status = group && phoneConnectionPresentation(group), view = status?.view;
+  const needsDiscovery = !!device && !view?.emulator && !status?.routes.some(route => route.transport === "wifi" && route.detected);
+  wirelessDiscovery.update(needsDiscovery ? device.id : "", loaded && snapshot.adbAvailable && !busy && !document.hidden
+    && window.workspacePane?.active !== false && !document.querySelector(".phone-wireless-dialog"));
   const basicOccupied = !!device?.basic && device.basic.phase !== "stopped";
   const source = !basicOccupied && device && status?.connected && view?.directKnown ? JSON.stringify([device.id, device.state?.instanceId]) : "";
   if (source !== previewSource) {
@@ -113,7 +119,7 @@ function render(): void {
     const version = previewVersion;
     queueMicrotask(() => { if (version === previewVersion) void capture(true); });
   }
-  const nextKey = JSON.stringify([snapshot.devices.map(({ confirmedAt, ...rest }) => rest), snapshot.error, snapshot.adbAvailable, selected, busy, image?.at, previewLoading, previewError, view?.directKnown, view?.known, status?.condition, status?.routes.map(route => route.connected), loaded]);
+  const nextKey = JSON.stringify([snapshot.devices.map(({ confirmedAt, ...rest }) => rest), snapshot.error, snapshot.adbAvailable, selected, busy, image?.at, previewLoading, previewError, view?.directKnown, view?.known, status?.condition, status?.routes.map(route => route.connected), loaded, wirelessDiscovery.state]);
   if (nextKey === key) return; key = nextKey;
   const activeElement = document.activeElement;
   const focusedAction = activeElement instanceof HTMLButtonElement && root.contains(activeElement) ? activeElement.dataset.action : undefined;

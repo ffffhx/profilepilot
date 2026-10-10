@@ -104,8 +104,10 @@ const profileManagerApi: ProfileManagerApi = {
     ipcRenderer.invoke(IPC_CHANNELS.setMiniProfileOrder, ids),
   setMainProfileOrder: (ids: string[]): Promise<AppState> =>
     ipcRenderer.invoke(IPC_CHANNELS.setMainProfileOrder, ids),
-  setQuickLaunchSlot: (id: string, slot: number | null): Promise<AppState> =>
-    ipcRenderer.invoke(IPC_CHANNELS.setQuickLaunchSlot, id, slot),
+  setQuickLaunchShortcut: (id: string, shortcut: string | null): Promise<AppState> =>
+    ipcRenderer.invoke(IPC_CHANNELS.setQuickLaunchShortcut, id, shortcut),
+  setQuickLaunchRecording: (active: boolean): Promise<void> =>
+    ipcRenderer.invoke(IPC_CHANNELS.setQuickLaunchRecording, active),
   setMiniPanelPinned: (pinned: boolean): Promise<void> =>
     ipcRenderer.invoke(IPC_CHANNELS.setMiniPanelPinned, pinned),
   onMiniPanelPinnedChanged: (listener: (pinned: boolean) => void): (() => void) => {
@@ -265,6 +267,10 @@ const taskApi: TaskApi = {
     ipcRenderer.on(TASK_PREVIEW, handler); return () => ipcRenderer.removeListener(TASK_PREVIEW, handler);
   },
   snapshot: () => ipcRenderer.invoke(TASK_CHANNEL, "snapshot"),
+  getMemory: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "getMemory", ...args),
+  setMemoryEnabled: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "setMemoryEnabled", ...args),
+  writeMemory: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "writeMemory", ...args),
+  deleteMemory: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "deleteMemory", ...args),
   create: (input) => ipcRenderer.invoke(TASK_CHANNEL, "create", input),
   retryItems: (id, items) => ipcRenderer.invoke(TASK_CHANNEL, "retryItems", id, items),
   control: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "control", ...args),

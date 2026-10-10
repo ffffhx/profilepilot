@@ -1,3 +1,5 @@
+import { normalizeQuickLaunchShortcut } from "../shared/quick-launch-shortcut";
+import { QuickLaunchShortcuts } from "./quick-launch-shortcuts";
 import { promises as fs, watch, type FSWatcher } from "node:fs";
 import { app, BrowserWindow, crashReporter, globalShortcut, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, session, shell, Tray, type IpcMainInvokeEvent, type Rectangle } from "electron";
 import path from "node:path";
@@ -133,14 +135,12 @@ const UI_ZOOM_FACTOR = 1.0;
 const MINI_DOCK_SIZE = 80;
 // 一键唤起 / 聚焦 Mini 面板的全局快捷键（macOS = Cmd+Shift+P）
 const MINI_SUMMON_SHORTCUT = process.env.CPM_E2E_MINI_SHORTCUT || "CommandOrControl+Shift+P";
-// 直启置顶 profile 的全局快捷键：⌘⌥1~9 对应悬浮窗置顶列表的第 1~9 个。
-// 用 Cmd+Alt+数字 而非裸 Cmd+数字，避免抢占浏览器/编辑器里「切到第 N 个标签页」，
-// 也避开 ⌘⇧3/4/5 的 macOS 截图快捷键。
-const QUICK_LAUNCH_SLOT_COUNT = 9;
-// Gateway 事件负责实时更新；低频全量扫描只校准用户手动关闭浏览器、非 Gateway CDP 等外部变化。
+// Gateway 事件负责实时更新；低频全量扫描只校准外部变化。
 const STATE_CALIBRATION_INTERVAL_MS = 30_000;
-const QUICK_LAUNCH_ACCELERATOR = (slot: number): string => `CommandOrControl+Alt+${slot}`;
-// 正在处理中的槽位启动，防同一 profile 被连按重复拉起。
+let quickLaunchShortcuts: QuickLaunchShortcuts | null = null;
+let recordingShortcuts = false;
+let shortcutSaveQueue: Promise<unknown> = Promise.resolve();
+// 正在处理中的快捷键启动，防同一 profile 被连按重复拉起。
 const inFlightQuickLaunch = new Set<string>();
 // 名字 + 端口▸域名 + 「工具名 已连接」现在同排展示，360 不够放，加宽到 440。
 const MINI_PANEL_WIDTH = 440;
@@ -274,6 +274,8 @@ function broadcastAgentTakeover(takeover: AgentTakeoverEvent): void {
 }
 
 function broadcastAppState(state: AppState): void {
+  quickLaunchShortcuts?.sync(Object.fromEntries(state.profiles.flatMap((profile) =>
+    profile.quickLaunchShortcut ? [[profile.id, profile.quickLaunchShortcut]] : [])));
   for (const windowRef of [mainWindow, miniWindow]) {
     if (windowRef && !windowRef.isDestroyed() && !windowRef.webContents.isDestroyed()) {
       windowRef.webContents.send(IPC_CHANNELS.stateChanged, state);
@@ -1085,21 +1087,19 @@ async function summonMiniWindowViaHotkey(): Promise<void> {
   windowRef.focus();
 }
 
-// 全局快捷键触发：直启（或已运行则前置显示）指派到第 slot 个槽位的 profile。
-// 槽位映射是用户在主窗口「更多」菜单里显式指派的（PublicProfile.quickLaunchSlot）。
+// 全局快捷键触发：直启（或已运行则前置显示）绑定的 Profile。
 // 动作与悬浮窗卡片主按钮一致：运行中→显示；独立且固定端口→CDP 启动；否则普通启动。
-async function quickLaunchProfileBySlot(slot: number): Promise<void> {
+async function quickLaunchProfile(profileId: string): Promise<void> {
   let profile: PublicProfile | null = null;
   try {
     const state = await profileManager.getState();
-    profile = (state.profiles || []).find((item) => item.quickLaunchSlot === slot) || null;
+    profile = (state.profiles || []).find((item) => item.id === profileId) || null;
   } catch (error) {
-    console.warn(`[quick-launch] 读取状态失败（槽位 ${slot}）：`, error);
+    console.warn(`[quick-launch] 读取状态失败（Profile ${profileId}）：`, error);
     return;
   }
 
   if (!profile) {
-    notifyQuickLaunch("没有可直启的 Profile", `快捷键 ⌘⌥${slot} 还没有绑定 Profile，可在主窗口「更多」菜单里指派。`);
     return;
   }
 
@@ -1116,7 +1116,7 @@ async function quickLaunchProfileBySlot(slot: number): Promise<void> {
       await profileManager.launchProfile(profile.id);
     }
   } catch (error) {
-    console.warn(`[quick-launch] 槽位 ${slot}（${profile.name}）启动失败：`, error);
+    console.warn(`[quick-launch] Profile ${profileId}（${profile.name}）启动失败：`, error);
     notifyQuickLaunch("直启失败", `${profile.name}：${error instanceof Error ? error.message : String(error)}`);
   } finally {
     inFlightQuickLaunch.delete(profile.id);
@@ -1132,25 +1132,36 @@ function notifyQuickLaunch(title: string, body: string): void {
   new Notification({ title, body, silent: true }).show();
 }
 
-function registerGlobalShortcuts(): void {
-  globalShortcut.unregister(MINI_SUMMON_SHORTCUT);
-  const registered = globalShortcut.register(MINI_SUMMON_SHORTCUT, () => {
-    void summonMiniWindowViaHotkey();
-  });
-  if (!registered) {
+function registerMiniShortcut(): void {
+  if (!globalShortcut.register(MINI_SUMMON_SHORTCUT, () => { void summonMiniWindowViaHotkey(); })) {
     console.warn(`[mini] 全局快捷键注册失败（可能被占用）：${MINI_SUMMON_SHORTCUT}`);
   }
+}
 
-  for (let slot = 1; slot <= (IS_E2E_DRIVER_TEST ? 0 : QUICK_LAUNCH_SLOT_COUNT); slot += 1) {
-    const accelerator = QUICK_LAUNCH_ACCELERATOR(slot);
-    globalShortcut.unregister(accelerator);
-    const ok = globalShortcut.register(accelerator, () => {
-      void quickLaunchProfileBySlot(slot);
+function setShortcutRecording(active: boolean): void {
+  if (!quickLaunchShortcuts || recordingShortcuts === active) return;
+  recordingShortcuts = active;
+  quickLaunchShortcuts.pause(active);
+  if (active) globalShortcut.unregister(MINI_SUMMON_SHORTCUT);
+  else registerMiniShortcut();
+}
+
+async function registerGlobalShortcuts(): Promise<void> {
+  registerMiniShortcut();
+  if (IS_E2E_DRIVER_TEST) return;
+  quickLaunchShortcuts = new QuickLaunchShortcuts(globalShortcut, (id) => { void quickLaunchProfile(id); });
+  const state = await profileManager.getState();
+  quickLaunchShortcuts.sync(Object.fromEntries(state.profiles.flatMap((profile) =>
+    profile.quickLaunchShortcut ? [[profile.id, profile.quickLaunchShortcut]] : [])));
+  // A renderer disappearing or the user leaving the window must never leave hotkeys suspended.
+  app.on("browser-window-blur", () => setShortcutRecording(false));
+  app.on("web-contents-created", (_event, contents) => {
+    contents.on("destroyed", () => setShortcutRecording(false));
+    contents.on("render-process-gone", () => setShortcutRecording(false));
+    contents.on("did-start-navigation", (_event, _url, isInPlace, isMainFrame) => {
+      if (isMainFrame && !isInPlace) setShortcutRecording(false);
     });
-    if (!ok) {
-      console.warn(`[quick-launch] 全局快捷键注册失败（可能被占用）：${accelerator}`);
-    }
-  }
+  });
 }
 
 async function showMainWindow(): Promise<void> {
@@ -1702,9 +1713,25 @@ function registerIpcHandlers(): void {
     return updatedAppState();
   });
 
-  ipcMain.handle(IPC_CHANNELS.setQuickLaunchSlot, async (_event, id: string, slot: number | null): Promise<AppState> => {
-    await profileManager.setQuickLaunchSlot(id, slot ?? null);
-    return updatedAppState();
+  ipcMain.handle(IPC_CHANNELS.setQuickLaunchRecording, (_event, active: boolean): void => {
+    setShortcutRecording(active === true);
+  });
+
+  ipcMain.handle(IPC_CHANNELS.setQuickLaunchShortcut, (_event, id: string, value: string | null): Promise<AppState> => {
+    const save = async (): Promise<AppState> => {
+      const shortcut = normalizeQuickLaunchShortcut(value, process.platform);
+      if (value !== null && !shortcut) throw new Error("快捷键无效，请重新按下组合键。");
+      if (shortcut && shortcut === normalizeQuickLaunchShortcut(MINI_SUMMON_SHORTCUT, process.platform)) {
+        throw new Error("这个快捷键用于打开 Mini 面板，请换一个组合键。");
+      }
+      const persist = () => profileManager.setQuickLaunchShortcut(id, shortcut);
+      if (quickLaunchShortcuts) await quickLaunchShortcuts.save(id, shortcut, persist);
+      else await persist();
+      return updatedAppState();
+    };
+    const result = shortcutSaveQueue.then(save);
+    shortcutSaveQueue = result.catch(() => {});
+    return result;
   });
 
   ipcMain.handle(IPC_CHANNELS.setMiniPanelPinned, async (_event, pinned: boolean): Promise<void> => {
@@ -2188,7 +2215,7 @@ if (!app.requestSingleInstanceLock()) {
     phonesService = registerPhones(path.join(process.env.CPM_DATA_DIR || defaultDataDir(), "phones"), path.join(__dirname, "../android/profilepilot-phone.apk"), !IS_ELECTRON_SMOKE_TEST);
     mobileService = registerMobile(path.join(process.env.CPM_DATA_DIR || defaultDataDir(), "mobile"), taskService, profileManager, path.join(__dirname, "../android/profilepilot-phone.apk"));
     if (!IS_BACKGROUND_E2E && (!IS_ELECTRON_SMOKE_TEST || process.env.CPM_E2E_ENABLE_GLOBAL_SHORTCUTS === "1")) {
-      registerGlobalShortcuts();
+      await registerGlobalShortcuts();
     }
     createMainWindow();
     createAppTray();

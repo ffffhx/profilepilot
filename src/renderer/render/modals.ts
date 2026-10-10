@@ -2,6 +2,7 @@ import { isBusyAction } from "../busy";
 import { plannedExtensionMigrationExtensions, renderExtensionMigrationDiffPreview, renderMigrationTargetPicker } from "./extensions";
 import { bifrostMainProxyServer, DEFAULT_CLASH_PROXY_SERVER, proxyServerUsesPort } from "../proxy";
 import { store } from "../state";
+import { experimentalProxyRoutingEnabled } from "../experimental-features";
 import { BifrostSnapshot, CdpPortSuggestion, GlobalInstructionFile, PublicProfile } from "../types";
 import { escapeHtml, formatCdpPortSuggestionNote, formatDate, renderButtonLabel } from "../util";
 
@@ -401,6 +402,7 @@ export function renderCdpModal(profileId: string, portSuggestion: CdpPortSuggest
 }
 
 export function renderBifrostProxyModal(profileId: string, snapshot: BifrostSnapshot | null): string {
+  if (!experimentalProxyRoutingEnabled()) return "";
   const profile = store.state?.profiles.find((item) => item.id === profileId);
   if (!profile || profile.source !== "isolated") {
     return "";

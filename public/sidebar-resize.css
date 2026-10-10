@@ -1,0 +1,9 @@
+.sidebar-resize-handle { position:absolute; top:0; bottom:0; right:0; width:6px; z-index:25; cursor:col-resize; touch-action:none; user-select:none; -webkit-app-region:no-drag; }
+.sidebar-resize-handle::after { content:""; position:absolute; top:0; bottom:0; right:0; width:2px; background:transparent; }
+.sidebar-resize-handle:hover::after,.sidebar-resize-handle:focus-visible::after,
+html[data-sidebar-resizing="workspace"] [data-sidebar-resize="workspace"]::after,
+html[data-sidebar-resizing="tasks"] [data-sidebar-resize="tasks"]::after { background:var(--accent,#1558ed); }
+.sidebar-resize-handle:focus-visible { outline:2px solid var(--accent,#1558ed); outline-offset:-2px; }
+html[data-workspace-rail="collapsed"] [data-sidebar-resize="workspace"] { display:none; }
+html[data-sidebar-resizing],html[data-sidebar-resizing] * { cursor:col-resize !important; user-select:none !important; }
+html[data-sidebar-resizing] iframe { pointer-events:none !important; }

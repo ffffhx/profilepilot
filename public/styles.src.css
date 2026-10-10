@@ -1259,44 +1259,36 @@ h3 {
   background: var(--info-soft);
 }
 
-/* 「更多」菜单里的全局快捷键指派行：标签 + 下拉，风格贴合菜单项 */
-.menu-slot-row {
+/* 菜单中的快捷键录入框 */
+.menu-shortcut-row {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-height: 34px;
-  padding: 0 10px;
-  border-radius: 6px;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  margin: 3px 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
 }
-
-.menu-slot-label {
-  color: var(--text);
-  font-size: 12px;
-  font-weight: 650;
-  white-space: nowrap;
-}
-
-.menu-slot-select {
-  flex: none;
-  max-width: 96px;
+.menu-shortcut-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
+.menu-shortcut-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 4px 8px;
   border: 1px solid var(--line-strong);
   border-radius: 6px;
-  background: var(--panel-soft, rgba(255, 255, 255, 0.04));
-  padding: 3px 6px;
+  background: var(--panel-soft);
   color: var(--text);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 650;
-  cursor: pointer;
+  font: 12px/20px var(--font-mono);
+  cursor: text;
 }
+.menu-shortcut-input:focus { border-color: var(--accent); outline: 2px solid var(--accent-line); outline-offset: 1px; }
+.menu-shortcut-input:disabled { opacity: .5; cursor: default; }
+.menu-shortcut-row small { color: var(--muted); font-size: 10px; }
+.action-menu .menu-shortcut-clear { width: auto; min-height: 0; padding: 0 2px; color: var(--accent); font-size: 11px; }
 
-.menu-slot-select:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-/* 主表格名字行的全局快捷键角标：⌘⌥N */
+/* 主表格名字行的全局快捷键角标 */
 .slot-badge {
   display: inline-flex;
   align-items: center;

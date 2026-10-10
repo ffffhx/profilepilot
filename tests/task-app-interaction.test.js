@@ -6,7 +6,7 @@ const { taskMarkdown } = loadTsModule('src/renderer/task-rich-text.ts');
 const { richTranscript, readableTask } = loadTsModule('src/renderer/task-rich-view.ts');
 const { artifactPreviewMarkup, csvRows } = loadTsModule('src/renderer/task-workbench-dialogs.ts');
 const { workbenchNavigation, searchSnippet } = loadTsModule('src/renderer/task-workbench-navigation.ts');
-const { workbenchThread } = loadTsModule('src/renderer/task-workbench-view.ts');
+const { workbenchThread, taskQuickControls } = loadTsModule('src/renderer/task-workbench-view.ts');
 const task = (patch = {}) => ({ id: 'A', title: '任务甲', prompt: '最初要求', profileId: 'native:one', profileName: '工作账户', status: 'running', createdAt: '2026-09-27T00:00:00Z', updatedAt: '2026-09-27T01:00:00Z', events: [], items: [], plan: [], materials: [], attachments: [], receipts: [], usage: { actions: 0, elapsedMs: 0, costUsd: 0 }, limits: { minutes: 30, actions: 200, budgetUsd: 5 }, ...patch });
 const options = (drafts = new MessageDrafts()) => ({ drafts, attachments: [], settings: { model: 'model-local', retentionDays: 30 }, hint: 'Enter 发送 · Ctrl+Enter 换行', status: '执行中', inspector: false });
 function storage() { const values = new Map(); return { getItem: k => values.get(k) || null, setItem: (k, v) => values.set(k, v) }; }
@@ -125,12 +125,15 @@ test('#18 HTML preview is inert escaped text even if content has scripts', () =>
 });
 test('#1/#4/#28 controls stay outside inspector, summary and separate reply + ordinary composer coexist', () => {
   const html = workbenchThread(task({ pending: { id: 'q1', kind: 'confirmation', title: 'Approve?', details: 'details' } }), options());
-  assert.ok(html.indexOf('data-control="cancel"') < html.indexOf('id="task-inspector"'));
+  assert.match(taskQuickControls(task()), /data-control="cancel"/);
+  assert.doesNotMatch(html.slice(html.indexOf('<aside'), html.indexOf('</aside>')), /data-control="cancel"/);
   assert.match(html, /class="task-thread-status"/); assert.match(html, /class="task-decision-card"/);
   assert.match(html, /id="reply-task"/); assert.match(html, /id="task-chat-composer"/); assert.match(html, /data-decision-id="q1"/);
   assert.doesNotMatch(html, /id="task-evidence"/);
   const withEvidence = workbenchThread(task({ evidencePages: [{ title: 'Source', url: 'https://example.com', snapshot: 'Observed text' }] }), options());
-  assert.match(withEvidence, /id="task-evidence"/); assert.match(withEvidence, /Observed text/);
+  assert.doesNotMatch(withEvidence, /id="task-evidence"|Observed text/);
+  assert.doesNotMatch(withEvidence, /任务操作与记录|模型与运行状态|执行步骤与运行情况|执行记录与资料版本/);
+  assert.match(withEvidence, /<dialog id="task-session-settings"/);
 });
 test('#2/#24/#56/#57 followup has files/context/queue and scoped approval/revoke entry', () => {
   const html = workbenchThread(task({ pending: { id: 'q1', kind: 'confirmation', title: 'scope', details: '', permissionScope: { kind: 'browser', label: 'write', scope: 'https://example.com' } }, permissionRules: [{ id: 'rule1', label: 'site writes', scope: 'example.com' }], messageQueue: [{ id: 'm1', message: 'queued', attachmentIds: ['a'], createdAt: '' }] }), options());
@@ -144,9 +147,10 @@ test('#26 pin and status coexist with Profile/time/status metadata', () => {
   const html = workbenchNavigation([task({ pinnedAt: '2026-09-27' })], 'A', { running: '执行中' }, {});
   for (const pattern of [/recent-document[^>]*aria-label="执行中"/, /class="task-pin"/, /class="recent-task-copy"/, /class="recent-meta"/, /工作账户/]) assert.match(html, pattern);
 });
-test('#61/#64/#65 stream has visible pending reply; history retention and lifecycle are accurate', () => {
+test('#61/#64/#65 stream keeps its mount without redundant lifecycle notices', () => {
   const html = workbenchThread(task(), { ...options(), stream: { id: 's', text: '**streaming**', updatedAt: '' } });
-  assert.match(html, /id="task-chat"[^>]*data-task-chat-owned/); assert.match(html, /直到你显式删除任务/); assert.match(html, /关闭窗口后任务继续在后台运行/); assert.match(html, /退出 ProfilePilot 应用会停止任务服务/); assert.doesNotMatch(html, /默认保留 30 天/);
+  assert.match(html, /id="task-chat"[^>]*data-task-chat-owned/);
+  assert.doesNotMatch(html, /task-retention-note|task-lifecycle-note|默认保留 30 天/);
 });
 test('#13/#17 terminal tasks without a saved result still explain completion state', () => {
   assert.match(richTranscript(task({ status: 'failed' })), /尚无完整核实结果/);

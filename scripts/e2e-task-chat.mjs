@@ -27,6 +27,31 @@ try {
   assert.equal(await d.evaluate('getComputedStyle(document.querySelector("#steering")).resize'),'none');
   assert.equal((await d.query('[data-action=attach-message] svg')).exists,true,'attachment control has a visible icon');
   await d.waitFor('#task-prompt .task-markdown',value=>value.text.includes('保留代码'));
+  const checkLayout = async () => {
+    const layout = await d.evaluate(`(() => {
+      const rect = selector => document.querySelector(selector).getBoundingClientRect();
+      const user=rect('.history-request'), answer=rect('.history-answer'), thread=rect('.task-chat-thread');
+      const controls=[...document.querySelector('.task-followup-actions').children].filter(node=>node.getBoundingClientRect().width>0);
+      const centers=controls.map(node=>{const r=node.getBoundingClientRect();return r.y+r.height/2;});
+      const bar=document.querySelector('.task-followup-actions');
+      return {right:Math.abs(user.right-thread.right)<2,left:Math.abs(answer.left-thread.left)<2,separate:user.left>answer.left+80&&user.right>answer.right+50,oneRow:Math.max(...centers)-Math.min(...centers)<3,overflow:bar.scrollWidth>bar.clientWidth+1};
+    })()`);
+    assert.deepEqual(layout,{right:true,left:true,separate:true,oneRow:true,overflow:false},'message roles and single-row toolbar remain distinct');
+  };
+  await checkLayout();
+  assert.equal(await d.evaluate('document.querySelector("#task-inspector").hidden'),true,'browser drawer starts closed');
+  assert.equal((await d.query('.agent-workspace-heading,#task-evidence,#task-runtime,#task-provenance')).exists,false,'redundant sections are removed');
+  await d.domClick('.composer-settings');
+  assert.equal(await d.evaluate('document.querySelector("#task-session-settings").matches(":modal")'),true);
+  await d.domInput('#session-model','unsaved-model-draft');
+  await command('snapshot');await paint();
+  assert.equal(await d.evaluate('document.querySelector("#task-session-settings").matches(":modal")'),true,'snapshots keep settings modal open');
+  assert.equal((await d.query('#session-model')).value,'unsaved-model-draft','snapshots preserve settings edits');
+  await d.domClick('[data-action="close-session-settings"]');
+  await d.domClick('#task-inspector-toggle');
+  assert.equal(await d.evaluate('document.querySelector("#task-inspector").hidden'),false);
+  await d.domClick('.close-browser-panel');
+  assert.equal(await d.evaluate('document.querySelector("#task-inspector").hidden'),true);
   const ids = await state();
   await d.evaluate('window.oldMessage=document.querySelector(".history-answer");window.oldInput=document.querySelector("#steering");document.querySelector(".task-process-group").open=true');
   const text = '## 分析结果\n\n中文**重点**与 English 混排。\n\n| 项目 | 状态 |\n| --- | --- |\n| 输入 | 正常 |\n\n```javascript\nconst value = "中文";\nconsole.log(value);\n```\n\n[来源](https://example.com/report)';
@@ -85,7 +110,7 @@ try {
   assert.ok(await d.evaluate('(()=>{const w=document.querySelector(".workspace");return w.scrollHeight-w.scrollTop-w.clientHeight<80;})()'),'bottom follows growing output');
   await d.domClick('[data-chat-message-id=stream-live-response] a[data-task-link]');
   assert.equal((await state()).calls.at(-1).method,'openLink');
-  for (const [width,height] of [[1440,1000],[1000,720]]) {await d.request('resize',{width,height});await paint();assert.equal(await d.evaluate('document.documentElement.scrollWidth>innerWidth'),false);}
+  for (const [width,height] of [[1440,1000],[1000,720]]) {await d.request('resize',{width,height});await paint();assert.equal(await d.evaluate('document.documentElement.scrollWidth>innerWidth'),false);await checkLayout();}
   await d.request('resize',{width:1440,height:1000});await paint();
   await writeFile(path.join(output,'streamdown-conversation.png'),Buffer.from((await d.screenshot()).pngBase64,'base64'));
   assert.deepEqual((await state()).errors,[],'renderer has no runtime errors');

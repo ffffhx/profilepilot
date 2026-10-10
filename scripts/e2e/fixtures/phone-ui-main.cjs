@@ -19,19 +19,21 @@ if (process.env.PHONE_UI_NO_APP === '1') fs.writeFileSync(path.join(root, 'devic
 fs.writeFileSync(path.join(root, 'phone.apk'), Buffer.from([0x50,0x4b,3,4]));
 let window, driverClose;
 let wirelessConnected = false;
+const defaultWirelessServices = 'fixture _adb-tls-pairing._tcp 192.168.1.8:37123\nfixture _adb-tls-connect._tcp 192.168.1.8:40235';
+let wirelessServices = defaultWirelessServices, wirelessReachable = true;
 let emulatorConnected = false;
 let previewCalls = 0, previewBehavior = {};
 let basicFrame = { width: 320, height: 640, shade: 128 }, basicFrameBehavior = {};
 const unresponsive = new Set();
 let appInstalled = process.env.PHONE_UI_NO_APP !== '1';
 const service = new PhonesService({ root, apkPath: process.env.PHONE_UI_NO_APP === '1' ? path.join(root, 'phone.apk') : '', computer: 'UI-TEST-PC',
-  probeWireless: async () => ({reachable:true,reason:'Fixture port available'}),
+  probeWireless: async () => ({reachable:wirelessReachable,reason:'Fixture port availability'}),
   emulators: { list: async () => ['Fixture_AVD'], launch: async () => { emulatorConnected = true; } },
   adb: { run: async (args, timeout, input) => {
     adbCalls.push(args);
     if (args[2] === 'install') { appInstalled = true; return 'Success'; }
     if (args[2] === 'shell' && args[3].startsWith("'pm' 'path'")) return appInstalled ? 'package:/fixture/profilepilot.apk' : '';
-    if (args[0] === 'mdns') return 'fixture _adb-tls-pairing._tcp 192.168.1.8:37123\nfixture _adb-tls-connect._tcp 192.168.1.8:40235';
+    if (args[0] === 'mdns') return wirelessServices;
     if (args[0] === 'pair') return input === '123456\n' ? 'Successfully paired to 192.168.1.8:37123' : 'Failed to pair';
     if (args[0] === 'connect') {
       if (args[1] !== '192.168.1.8:40235') return 'failed to connect';
@@ -58,6 +60,9 @@ const service = new PhonesService({ root, apkPath: process.env.PHONE_UI_NO_APP =
   }, onChanged: value => { if (window && !window.isDestroyed()) window.webContents.send('phone-ui:changed', value); }
 });
 ipcMain.handle('phone-ui:request', async (_, method, params) => {
+  // This cloud-only device is injected as a renderer event, not a registered
+  // status channel. Keep discovery from replacing it with the service snapshot.
+  if (method === 'wireless-discover' && params?.id === 'cloud-ui-test') return { services: [], error: '' };
   if (method === 'fixture-adb-calls') return adbCalls;
   if (method === 'fixture-basic-frame') {
     const { delay, corrupt, ...frame } = params;
@@ -75,6 +80,7 @@ ipcMain.handle('phone-ui:request', async (_, method, params) => {
   return method === 'cloud-pair' ? { id: '00000000-0000-0000-0000-000000000001', uri: 'profilepilot://status?fixture=1', qrCode: nativeImage.createFromBitmap(Buffer.alloc(16 * 16 * 4, 128), {width:16,height:16}).toDataURL(), expiresAt: Date.now()+180000 } : method === 'snapshot' ? service.snapshot() : executePhoneCommand({ action: 'phone', method, params }, service);
 });
 ipcMain.handle('phone-ui:preview-calls', () => previewCalls);
+ipcMain.handle('phone-ui:wireless-discovery', (_, value, reachable) => { wirelessServices = value ?? defaultWirelessServices; wirelessReachable = reachable; });
 ipcMain.handle('phone-ui:preview-behavior', (_, value) => { previewBehavior = value; });
 ipcMain.handle('phone-ui:unresponsive', (_, id, enabled) => { if (enabled) unresponsive.add(id); else unresponsive.delete(id); return service.refresh(); });
 ipcMain.handle('phone-ui:fixture', async (_, id, changes) => { Object.assign(states[ids.indexOf(id)], changes); return service.refresh(); });

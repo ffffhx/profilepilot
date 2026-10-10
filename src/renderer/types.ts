@@ -127,8 +127,8 @@ export interface PublicProfile {
   directConnection: boolean;
   listeningPorts: number[];
   pinnedToMini: boolean;
-  // 全局快捷键 ⌘⌥N 直启的槽位（1~9）；未指派为 null。
-  quickLaunchSlot: number | null;
+  // 自定义全局快捷键；未指派为 null。
+  quickLaunchShortcut: string | null;
   clonedFromProfileId: string | null;
   clonedFromName: string | null;
   cloneCount: number;
@@ -917,7 +917,8 @@ export interface ProfileManagerApi {
   setMiniProfilePinned(id: string, pinned: boolean): Promise<AppState>;
   setMiniProfileOrder(ids: string[]): Promise<AppState>;
   setMainProfileOrder(ids: string[]): Promise<AppState>;
-  setQuickLaunchSlot(id: string, slot: number | null): Promise<AppState>;
+  setQuickLaunchShortcut(id: string, shortcut: string | null): Promise<AppState>;
+  setQuickLaunchRecording(active: boolean): Promise<void>;
   setMiniPanelPinned(pinned: boolean): Promise<void>;
   onMiniPanelPinnedChanged(listener: (pinned: boolean) => void): () => void;
   showMiniWindow(): Promise<void>;

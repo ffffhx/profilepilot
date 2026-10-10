@@ -30,6 +30,14 @@ export function renderExecutionStatus(task: BrowserTask): string {
   return `<section class="execution-status" role="status" aria-live="polite"><span class="execution-dot" aria-hidden="true"></span><div><strong>${escape(engine)}</strong><p>${escape(taskModelText(task, task.execution?.activity || "等待可用浏览器"))}</p><small data-activity-age data-at="${escape(task.execution?.at || task.updatedAt)}">正在处理</small></div></section>`;
 }
 
+export function renderAgentProgress(task: BrowserTask): string {
+  const agents = task.agentActivities || [];
+  if (!agents.length) return "";
+  const running = agents.filter(agent => agent.status === "running").length;
+  const statuses: Record<string, string> = { running: "进行中", completed: "已返回", failed: "失败", stopped: "已停止", interrupted: "已中断" };
+  return `<section class="panel task-agent-progress" aria-label="Agent 协作"><div class="panel-header"><h2>Agent 协作</h2><span class="pill" role="status">${running ? `${running} 个进行中` : "本轮已结束"}</span></div><ul class="decision-log">${agents.map(agent => `<li><div class="decision-log-title"><strong>${escape(agent.name || agent.role || "子 Agent")}</strong><span>${escape(statuses[agent.status] || agent.status)}</span></div><p>${escape(agent.description)}</p>${agent.summary ? `<details id="agent-result-${escape(agent.id)}"><summary>返回摘要</summary><p class="agent-result-text">${escape(agent.summary)}</p></details>` : ""}</li>`).join("")}</ul></section>`;
+}
+
 export function renderModelInfo(task: BrowserTask, settings: TaskSettings): string {
   const model = task.modelRuns?.at(-1);
   const configured = !model && ["queued", "paused", "waiting_user", "running"].includes(task.status);

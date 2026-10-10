@@ -1,3 +1,4 @@
+import { formatQuickLaunchShortcut } from "../../shared/quick-launch-shortcut";
 import { profileApi } from "../api";
 import { isBusyAction, renderToastBody } from "../busy";
 import { appRoot, store } from "../state";
@@ -262,7 +263,7 @@ export function sortByMiniOrder(profiles: PublicProfile[]): PublicProfile[] {
 }
 
 function renderMiniProfileCard(profile: PublicProfile): string {
-  const slot = profile.quickLaunchSlot ?? undefined;
+  const shortcut = formatQuickLaunchShortcut(profile.quickLaunchShortcut, store.state?.platform || "win32");
   const port = miniPortInfo(profile);
   const action = miniPrimaryAction(profile);
   const focusing = isBusyAction("focus-profile", { profileId: profile.id });
@@ -343,7 +344,7 @@ function renderMiniProfileCard(profile: PublicProfile): string {
         <span class="mini-node ${busyHere ? "loading" : port.kind === "live" ? "plane" : "ring"}" aria-hidden="true">${busyHere ? '<span class="mini-spinner"></span>' : port.kind === "live" ? MINI_NODE_PLANE : ""}</span>
         <span class="mini-profile-text">
           <span class="mini-profile-head">
-            ${slot ? `<span class="mini-profile-slot" title="全局快捷键 ⌘⌥${slot} 直启">⌘⌥${slot}</span>` : ""}
+            ${shortcut ? `<span class="mini-profile-slot" title="全局快捷键直启">${escapeHtml(shortcut)}</span>` : ""}
             <span class="mini-profile-name">${escapeHtml(profile.name)}</span>
             ${subLine ? `<span class="mini-profile-sub">${escapeHtml(subLine)}</span>` : ""}
           </span>

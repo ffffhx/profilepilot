@@ -180,6 +180,18 @@ export function registerTaskService(profileManager: ProfileManager): TaskService
         return;
       }
       case "snapshot": return snapshot();
+      case "getMemory":
+      case "setMemoryEnabled":
+      case "writeMemory":
+      case "deleteMemory": {
+        const profileId = z.string().min(1).max(200).parse(args[0]);
+        if (!store.data.tasks.some(task => task.profileId === profileId) && !(await profileManager.getState()).profiles.some(profile => profile.id === profileId)) throw new Error("Profile 不存在。");
+        if (method === "getMemory") return service.getMemory(profileId);
+        if (method === "setMemoryEnabled") return service.setMemoryEnabled(profileId, z.boolean().parse(args[1]));
+        const name = z.string().min(1).max(110).parse(args[1]);
+        if (method === "deleteMemory") return service.deleteMemory(profileId, name, z.string().length(64).parse(args[2]));
+        return service.writeMemory(profileId, name, z.string().max(262144).parse(args[2]), z.string().length(64).nullable().parse(args[3]));
+      }
       case "getNativeLiveView": {
         const id = z.string().regex(/^native:[^/\\]{1,100}$/).parse(args[0]);
         const state = native.states().find(item => item.profileId === id);

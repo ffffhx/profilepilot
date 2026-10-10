@@ -18,6 +18,9 @@ export interface TaskReplyOptions extends TaskMessageOptions { scope?: "once" | 
 export interface TaskQueuedMessage { id: string; message: string; attachmentIds: string[]; createdAt: string; }
 export interface TaskArtifactPreview { name: string; mime: string; text?: string; dataUrl?: string; truncated?: boolean; }
 export interface TaskContext { summary: string; throughEventId: string; compactedAt: string; }
+export interface TaskAgentActivity { id: string; name?: string; role?: string; description: string; status: string; summary?: string; updatedAt: string; }
+export interface ProfileMemoryFile { name: string; content: string; revision: string; updatedAt: string; }
+export interface ProfileMemorySnapshot { profileId: string; enabled: boolean; busy: boolean; files: ProfileMemoryFile[]; }
 export interface JevAssessment {
   status: "ready" | "uncertain" | "unavailable"; model: string; version: string; elapsedMs: number; inputTokens: number; note: string;
   answers?: { page: { type: "choice"; choice: string; probabilities?: Record<string, number> };
@@ -79,7 +82,7 @@ export interface BrowserTask {
   mode?: TaskPermissionMode; model?: string;
   permissionRules?: TaskPermissionRule[];
   context?: TaskContext;
-  agentActivities?: Array<{ id: string; description: string; status: string; updatedAt: string }>;
+  agentActivities?: TaskAgentActivity[];
   sdkTokenBaseline?: { inputTokens: number; outputTokens: number };
   costAccounting?: { version: string; sessionId: string; sdkUsd: number; originalUsd?: number; correctedAt?: string };
   cachedInputTokens?: number;
@@ -134,6 +137,7 @@ export function jevProviderFor(settings: TaskSettings): JevProvider {
   return settings.jevProvider || (settings.hasJevApiKey ? "vercel" : "typesafe");
 }
 export interface TaskSnapshot {
+  memoryPolicies?: Record<string, { enabled: boolean }>;
   skills?: TaskSkillDefinition[];
   skillIssues?: string[];
   streams?: Record<string, TaskStream>;
@@ -161,6 +165,10 @@ export interface TaskCostRecord {
   estimate?: { currency: "CNY" | "USD"; min: number; max: number; basis: string; priceDate: string };
 }
 export interface TaskApi {
+  getMemory(profileId: string): Promise<ProfileMemorySnapshot>;
+  setMemoryEnabled(profileId: string, enabled: boolean): Promise<ProfileMemorySnapshot>;
+  writeMemory(profileId: string, name: string, content: string, revision: string | null): Promise<ProfileMemorySnapshot>;
+  deleteMemory(profileId: string, name: string, revision: string): Promise<ProfileMemorySnapshot>;
   openLink(url: string): Promise<void>;
   listModels(): Promise<string[]>;
   pairNativeBrowser(profileId: string): Promise<{ code: string; expiresAt: string }>;

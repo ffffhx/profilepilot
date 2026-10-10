@@ -2,7 +2,7 @@ import type { StartupSettings } from "../shared/startup-settings";
 import { profileApi } from "./api";
 import { workspaceSwitcher, workspaceIdentityBar, refreshWorkspaceSwitcher } from "./workspace-switcher";
 import { onWorkspaceVisibilityChanged, workspaceHidden } from "./workspace-lifecycle";
-import { experimentalAgentEnabled, setExperimentalAgentEnabled, onExperimentalFeaturesChanged } from "./experimental-features";
+import { experimentalAgentEnabled, setExperimentalAgentEnabled, experimentalProxyRoutingEnabled, setExperimentalProxyRoutingEnabled, onExperimentalFeaturesChanged } from "./experimental-features";
 
 const root = document.getElementById("settings")!;
 root.innerHTML = `${workspaceSwitcher("settings")}${workspaceIdentityBar()}
@@ -34,23 +34,40 @@ root.innerHTML = `${workspaceSwitcher("settings")}${workspaceIdentityBar()}
         </div>
         <p id="experimental-agent-note" class="setting-note" role="alert" hidden></p>
       </div>
+      <div class="setting-card">
+        <div class="setting-row">
+          <div class="setting-copy"><h3 id="experimental-proxy-routing-label">代理分流（实验性）</h3><p id="experimental-proxy-routing-description">为独立 Profile 配置代理与分流规则，默认隐藏。开启后在 Profile 的更多菜单中显示“代理分流”。</p></div>
+          <div class="setting-control">
+            <span id="experimental-proxy-routing-status" role="status" aria-live="polite"></span>
+            <button type="button" class="setting-switch" role="switch" data-action="toggle-experimental-proxy-routing" aria-checked="false" aria-labelledby="experimental-proxy-routing-label" aria-describedby="experimental-proxy-routing-description experimental-proxy-routing-status experimental-proxy-routing-note"></button>
+          </div>
+        </div>
+        <p id="experimental-proxy-routing-note" class="setting-note" role="alert" hidden></p>
+      </div>
     </section>
   </main>`;
 
-const agentToggle = root.querySelector<HTMLButtonElement>('[data-action="toggle-experimental-agent"]')!;
+const experiments = [
+  { name: "agent", enabled: experimentalAgentEnabled, set: setExperimentalAgentEnabled },
+  { name: "proxy-routing", enabled: experimentalProxyRoutingEnabled, set: setExperimentalProxyRoutingEnabled }
+];
 function renderExperiments(): void {
-  const enabled = experimentalAgentEnabled();
-  agentToggle.setAttribute("aria-checked", String(enabled));
-  const label = document.getElementById("experimental-agent-status")!;
-  label.textContent = enabled ? "已开启" : "已关闭";
-  label.dataset.state = enabled ? "enabled" : "disabled";
+  for (const experiment of experiments) {
+    const enabled = experiment.enabled();
+    root.querySelector(`[data-action="toggle-experimental-${experiment.name}"]`)!.setAttribute("aria-checked", String(enabled));
+    const label = document.getElementById(`experimental-${experiment.name}-status`)!;
+    label.textContent = enabled ? "已开启" : "已关闭";
+    label.dataset.state = enabled ? "enabled" : "disabled";
+  }
 }
-agentToggle.addEventListener("click", () => {
-  const notice = document.getElementById("experimental-agent-note")!;
-  try { setExperimentalAgentEnabled(!experimentalAgentEnabled()); notice.hidden = true; }
-  catch { notice.textContent = "未能保存设置，请重试。"; notice.hidden = false; }
-  renderExperiments();
-});
+for (const experiment of experiments) {
+  root.querySelector(`[data-action="toggle-experimental-${experiment.name}"]`)!.addEventListener("click", () => {
+    const notice = document.getElementById(`experimental-${experiment.name}-note`)!;
+    try { experiment.set(!experiment.enabled()); notice.hidden = true; }
+    catch { notice.textContent = "未能保存设置，请重试。"; notice.hidden = false; }
+    renderExperiments();
+  });
+}
 onExperimentalFeaturesChanged(renderExperiments);
 renderExperiments();
 

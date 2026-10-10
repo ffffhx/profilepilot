@@ -615,6 +615,10 @@ details.task-context-tools p { font-size: var(--task-label-size); overflow-wrap:
   box-shadow: var(--task-shadow);
 }
 .task-artifact-dialog { width: min(1000px, calc(100vw - 32px)); }
+.task-memory-dialog { width: min(780px, calc(100vw - 32px)); }
+.task-memory-dialog textarea { height: min(24dvh, 240px); min-height: 110px; max-height: 40dvh; font-family: var(--mono); }
+.task-memory-dialog [data-memory-file][aria-current="true"] { border-color: var(--accent); color: var(--accent); font-weight: 650; }
+.task-memory-dialog [data-memory-content] > .actions:last-child { position: sticky; bottom: -20px; padding-block: 12px; background: var(--panel); }
 .task-command-dialog::backdrop, .task-artifact-dialog::backdrop { background: var(--task-overlay); }
 .task-command-dialog :is(header, .panel-header), .task-artifact-dialog :is(header, .panel-header) { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
 .task-command-dialog [role=option], .task-command-dialog [role=menuitem] { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; padding: 12px; text-align: left; }
@@ -706,3 +710,6 @@ details.task-context-tools p { font-size: var(--task-label-size); overflow-wrap:
   .task-status-dot { border: 1px solid CanvasText; }
   .task-pending-summary, .task-decision-summary, .operation-error { border-color: CanvasText; }
 }
+.task-agent-progress { margin-block: 12px 20px; }
+.task-agent-progress .decision-log { margin-bottom: 0; }
+.task-agent-progress .agent-result-text { white-space: pre-wrap; overflow-wrap: anywhere; }

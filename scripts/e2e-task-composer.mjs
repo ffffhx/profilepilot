@@ -26,6 +26,7 @@ try {
   await d.request('resize', { width:1400, height:950 });
   await paint();
   assert.ok(Math.abs((await geometry()).gap) < 2, 'composer sits at the bottom of the workspace');
+  assert.ok(await d.evaluate('document.querySelector(".compose-actions .model-picker .select-value").getBoundingClientRect().width > 48'), 'model name remains readable in the single-row toolbar');
   await capture('home');
   await d.domClick('[popovertarget="task-template-menu"]');
   await d.waitFor('#task-template-menu:popover-open');

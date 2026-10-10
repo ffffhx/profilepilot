@@ -1,3 +1,4 @@
+import { installQuickLaunchRecorder } from "./quick-launch-recorder";
 import { profileApi } from "./api";
 import { workspaceHidden, onWorkspaceVisibilityChanged, navigateWorkspace } from "./workspace-lifecycle";
 import { controlPreferencesDomains, leaveControlPreferences, openControlPreferences, saveControlPreferences, switchControlPreferencesTab, updateControlPreferencesDraft } from "./control-preferences";
@@ -6,6 +7,7 @@ import { applyNativeExtensionSnapshot, refreshNativeExtensionStatus } from "./st
 import { activateBusyStep, busyStepsKey, emphasizeName, focusProfileFromUi, setToast, updateBusyProgressDom, updateBusyState, withBusy } from "./busy";
 import { closeModalFromUi, executeAgentTakeoverConfirm, executeBifrostStartAndLaunch, executeConfirmIntent } from "./confirm";
 import { normalizeProxyServerInput } from "./proxy";
+import { experimentalProxyRoutingEnabled, onExperimentalFeaturesChanged } from "./experimental-features";
 import { clampCloneCount } from "./render/clone-pool";
 import { isExtensionMigrationActionItem } from "./render/extensions";
 import { focusLiveTab, openLiveZoom, refreshLiveViewNow, requestLiveViewNow, startLiveViewLoop, toggleLiveScreenshot } from "./render/live-view";
@@ -70,6 +72,18 @@ function queuePushedState(state: AppState): void {
 }
 
 profileApi().onStateChanged(queuePushedState);
+
+let proxyRoutingEnabled = experimentalProxyRoutingEnabled();
+onExperimentalFeaturesChanged(() => {
+  const enabled = experimentalProxyRoutingEnabled();
+  if (enabled === proxyRoutingEnabled) return;
+  proxyRoutingEnabled = enabled;
+  if (!enabled && (store.modal?.kind === "bifrost-proxy"
+    || store.modal?.kind === "confirm" && ["close-profile-for-bifrost", "disable-bifrost-rule", "remove-profile-bifrost-rule"].includes(store.modal.intent.kind))) {
+    store.modal = null;
+  }
+  render();
+});
 
 profileApi().onOperationProgress((progress) => {
   if (!store.busyState || store.busyState.key !== progress.key) {
@@ -423,11 +437,6 @@ function syncBifrostFormControls(form: HTMLFormElement): void {
 // 上游代理地址归一化（渲染层输入校验）：与主进程 proxy-health 规则一致，返回 scheme://host:port 或 null。
 appRoot.addEventListener("click", (event) => {
   const target = event.target instanceof Element ? event.target : null;
-  // 全局快捷键下拉是原生 <select>，点它会冒泡命中所在行的 data-action="select"，触发 render() 把
-  // 正打开的原生下拉重建掉。这里直接放行给 change 处理器，不当作行选择、也不关掉「更多」菜单。
-  if (target?.closest("[data-quick-launch-slot]")) {
-    return;
-  }
   const hadOpenProfileMenu = Boolean(store.openProfileMenuId);
   const hadAccountSyncMenu = Boolean(store.accountSyncMenuOpen);
   if (store.openProfileMenuId && !target?.closest("[data-profile-actions]")) {
@@ -674,6 +683,8 @@ appRoot.addEventListener("click", (event) => {
 
   if (!store.state) return;
   const id = actionTarget.dataset.id || null;
+  if (!experimentalProxyRoutingEnabled() && ["configure-bifrost-proxy", "prepare-bifrost-proxy", "refresh-bifrost-snapshot",
+    "disable-bifrost-rule", "remove-profile-bifrost-rule", "enable-profile-bifrost-rule"].includes(action || "")) return;
   if (action !== "toggle-profile-menu" && actionTarget.closest("[data-profile-actions]")) {
     store.openProfileMenuId = null;
   }
@@ -1989,6 +2000,8 @@ appRoot.addEventListener("click", (event) => {
   }
 });
 
+installQuickLaunchRecorder();
+
 appRoot.addEventListener("change", (event) => {
   const target = event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement ? event.target : null;
   if (!target || !store.state) {
@@ -1998,27 +2011,6 @@ appRoot.addEventListener("change", (event) => {
   if (target instanceof HTMLSelectElement && target.id === "tools-native-profile") {
     store.nativeExtensionProfileId = target.value;
     render();
-    return;
-  }
-
-  if (target instanceof HTMLSelectElement && target.matches("[data-quick-launch-slot]")) {
-    const id = target.getAttribute("data-id");
-    if (!id) {
-      return;
-    }
-    const profile = store.state.profiles.find((item) => item.id === id);
-    if (!profile) {
-      return;
-    }
-    const slot = target.value ? Number(target.value) : null;
-    store.openProfileMenuId = null;
-    void withBusy(async () => {
-      store.state = await profileApi().setQuickLaunchSlot(id, slot);
-    }, slot ? `已把 ⌘⌥${slot} 绑定到 ${emphasizeName(profile.name)}` : `已清除 ${emphasizeName(profile.name)} 的全局快捷键`, {
-      key: "quick-launch-slot",
-      message: "正在保存快捷键…",
-      profileId: id
-    });
     return;
   }
 
@@ -2249,6 +2241,7 @@ appRoot.addEventListener("submit", (event) => {
   event.preventDefault();
 
   if (bifrostProxyForm) {
+    if (!experimentalProxyRoutingEnabled()) return;
     const profileId = bifrostProxyForm.dataset.profileId;
     const profile = store.state?.profiles.find((item) => item.id === profileId);
     if (!profileId || !profile) return;

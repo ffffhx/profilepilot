@@ -10,18 +10,49 @@ const waitStatus = text => d.waitFor('#startup-status', s => s.text === text);
 try {
   const agentLink = '.workspace-link[data-workspace="agent"]';
   const agentToggle = '[data-action="toggle-experimental-agent"]';
+  const proxyToggle = '[data-action="toggle-experimental-proxy-routing"]';
   const agentVisible = () => d.evaluate(`document.querySelector(${JSON.stringify(agentLink)}).getBoundingClientRect().width > 0`, { target: 'shell' });
   assert.equal(await agentVisible(), false, 'Agent is hidden by default');
   assert.equal(await d.evaluate('document.documentElement.dataset.workspace', { target: 'shell' }), 'browser');
   assert.equal((await d.query(toggle)).exists, false);
   assert.equal((await d.query('[data-action="open-mini-window"]')).exists, false);
   assert.ok(!(await d.windows()).mini?.visible, 'floating window starts hidden');
+  await d.evaluate("window.profileManager.createProfile('Experimental proxy')");
+  const profileRow = await d.waitFor('[data-profile-row][data-id^="isolated:"]');
+  const proxyMenu = `[data-action="toggle-profile-menu"][data-id="${profileRow.attributes['data-id']}"]`;
+  const proxyAction = '[data-action="configure-bifrost-proxy"]';
+  await d.domClick(proxyMenu);
+  assert.equal((await d.query(proxyAction)).exists, false, 'proxy routing is hidden by default');
+  assert.equal((await d.query('.profile-route-track')).exists, false, 'advanced route tooltips are also hidden');
+  await d.domClick(proxyMenu);
   await d.domClick('.workspace-settings', { target: 'shell' });
   await d.waitFor('.global-settings');
   const supported = ['win32', 'darwin'].includes(process.platform);
   await waitStatus(supported ? '已开启' : '不可用');
   assert.equal((await d.query(agentToggle)).attributes['aria-checked'], 'false');
   assert.match((await d.query('#experimental-agent-description')).text, /默认隐藏/);
+  assert.equal((await d.query(proxyToggle)).attributes['aria-checked'], 'false');
+  await d.domClick(proxyToggle);
+  await d.waitFor('#experimental-proxy-routing-status', s => s.text === '已开启');
+  assert.equal((await d.query(agentToggle)).attributes['aria-checked'], 'false', 'experiments are independent');
+  await d.domClick('.workspace-link[data-workspace="browser"]');
+  await d.domClick(proxyMenu);
+  await d.waitFor(proxyAction);
+  await d.domClick(proxyAction);
+  await d.waitFor('.bifrost-proxy-modal');
+  await d.domClick('.workspace-settings', { target: 'shell' });
+  await d.waitFor(proxyToggle);
+  await d.domClick(proxyToggle);
+  await d.waitFor('#experimental-proxy-routing-status', s => s.text === '已关闭');
+  await d.domClick('.workspace-link[data-workspace="browser"]');
+  assert.equal((await d.query('.bifrost-proxy-modal')).exists, false, 'disabling closes an already-open configuration');
+  await d.domClick(proxyMenu);
+  assert.equal((await d.query(proxyAction)).exists, false, 'disabling removes the menu without reloading');
+  await d.domClick(proxyMenu);
+  await d.domClick('.workspace-settings', { target: 'shell' });
+  await d.waitFor(proxyToggle);
+  await d.domClick(proxyToggle);
+  await d.waitFor('#experimental-proxy-routing-status', s => s.text === '已开启');
   assert.equal((await d.query('#settings-form')).exists, false, 'global settings has no Agent model form');
   assert.equal(await d.evaluate(`document.querySelector('.workspace-settings').getAttribute('aria-current')`, { target: 'shell' }), 'page');
   if (supported) {
@@ -91,6 +122,9 @@ try {
   assert.equal(await agentVisible(), true);
   await d.domClick('.workspace-settings', { target: 'shell' });
   await d.waitFor('#experimental-agent-status', s => s.text === '已开启');
+  assert.equal((await d.query(proxyToggle)).attributes['aria-checked'], 'true', 'proxy opt-in survives reload');
+  await d.domClick(proxyToggle);
+  await d.waitFor('#experimental-proxy-routing-status', s => s.text === '已关闭');
   await d.domClick(agentToggle);
   await d.waitFor(agentLink, s => !s.hitMatches, { target: 'shell' });
   await d.evaluate(`window.workspaceHost.navigate('./tasks.html?task=disabled-link'); true`, { target:'shell' });
@@ -102,6 +136,7 @@ try {
   assert.equal(await agentVisible(), false, 'disabled preference also survives reload');
   await d.domClick('.workspace-settings', { target:'shell' });
   await d.waitFor('#experimental-agent-status', s=>s.text==='已关闭');
+  assert.equal((await d.query(proxyToggle)).attributes['aria-checked'], 'false', 'disabled proxy preference survives reload');
   for (const [width, height] of [[1400, 950], [560, 600]]) {
     await d.request('resize', { width, height });
     await delay(150);
@@ -113,7 +148,7 @@ try {
   await mkdir(directory, { recursive:true });
   await d.screenshot(); await delay(250);
   await writeFile(path.join(directory, 'settings.png'), Buffer.from((await d.screenshot()).pngBase64, 'base64'));
-  console.log('PASS global settings: startup states, experimental Agent defaults/enable/disable/persistence, retained drafts, opt-in routing and responsive layout');
+  console.log('PASS global settings: startup states, independent Agent/proxy experiments, default-hidden entry, live enable/disable, modal dismissal, persistence, retained drafts and responsive layout');
 } finally {
   await app.stop();
 }

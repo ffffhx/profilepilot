@@ -159,9 +159,10 @@ export interface Registry {
   // 主窗口 Profile 表格的自定义排序（拖拽调整，含数据目录级与目录内两级）；
   // 语义同 miniProfileOrder：存完整显示顺序的 profile 公开 id，未列出的排末尾、保持自然顺序。
   mainProfileOrder?: string[];
-  // 全局快捷键 ⌘⌥N 直启的槽位映射：键为槽位号 "1"~"9"，值为该槽位绑定的 profile 公开 id。
-  // 一个槽位至多一个 profile，一个 profile 至多占一个槽位（改绑时会顶掉旧的）。
+  // 旧版本的数字槽位，仅在加载时迁移。
   quickLaunchSlots?: Record<string, string>;
+  // Profile 公开 id → 用户录入的 Electron accelerator。
+  quickLaunchShortcuts?: Record<string, string>;
 }
 
 export type BrowserDriverKind = "agent-browser" | "playwright-cli" | "chrome-devtools-mcp";
@@ -480,8 +481,8 @@ export interface PublicProfile {
   directConnection: boolean;
   listeningPorts: number[];
   pinnedToMini: boolean;
-  // 全局快捷键 ⌘⌥N 直启的槽位（1~9）；未指派为 null。可在主窗口「更多」菜单里改绑。
-  quickLaunchSlot: number | null;
+  // 自定义全局快捷键；未指派为 null。
+  quickLaunchShortcut: string | null;
   // 副本池字段：克隆来源、来源名（已解析）、作为源时有多少副本指向它、项目标签。
   clonedFromProfileId: string | null;
   clonedFromName: string | null;
@@ -1058,7 +1059,8 @@ export interface ProfileManagerApi {
   setMiniProfilePinned(id: string, pinned: boolean): Promise<AppState>;
   setMiniProfileOrder(ids: string[]): Promise<AppState>;
   setMainProfileOrder(ids: string[]): Promise<AppState>;
-  setQuickLaunchSlot(id: string, slot: number | null): Promise<AppState>;
+  setQuickLaunchShortcut(id: string, shortcut: string | null): Promise<AppState>;
+  setQuickLaunchRecording(active: boolean): Promise<void>;
   setMiniPanelPinned(pinned: boolean): Promise<void>;
   onMiniPanelPinnedChanged(listener: (pinned: boolean) => void): () => void;
   showMiniWindow(): Promise<void>;

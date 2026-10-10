@@ -758,6 +758,22 @@ test("compaction worker cannot resume or persist an SDK session and has no tools
   assert.deepEqual(options.mcpServers, {});
 });
 
+test("worker enables SDK delegation but rejects child mutations through both permission paths", async t => {
+  const f = fixture(t);
+  const { options } = await sdkWorker({ task: f.task, settings: f.store.data.settings, apiKey: 'key', cwd: f.root }, []);
+  assert.ok(options.tools.includes('Agent')); assert.ok(options.tools.includes('SendMessage'));
+  assert.equal(options.env.CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS, '4');
+  assert.equal(options.env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH, '1');
+  const context = { agentID: 'child', signal: new AbortController().signal };
+  for (const name of ['Agent', 'Write', 'mcp__profilepilot__finish', 'mcp__profilepilot__browser_action', 'mcp__profilepilot__terminal_run']) {
+    assert.equal((await options.canUseTool(name, {}, context)).behavior, 'deny');
+    const result = await options.hooks.PreToolUse[0].hooks[0]({ hook_event_name: 'PreToolUse', agent_id: 'child', tool_name: name, tool_input: {}, tool_use_id: 'test' });
+    assert.equal(result.hookSpecificOutput.permissionDecision, 'deny');
+  }
+  const allowed = await options.canUseTool('Agent', { subagent_type: 'researcher', name: 'reader' }, { signal: context.signal });
+  assert.equal(allowed.behavior, 'allow');
+});
+
 test("manual mode requires approval before creating a result file and consumes it once", async t => {
   const f = fixture(t), run = f.run();
   const input = { name: "report", format: "markdown", text: "User-approved report" };
@@ -1231,16 +1247,16 @@ test("ordinary business completion still requires real evidence", async t => {
 test("worker prompt reflects native full access, explicit restrictions and pure-answer completion", async t => {
   const f = fixture(t, "acceptEdits"); f.task.profileId = "native:Default";
   const full = await sdkWorker({ task: f.task, settings: f.store.data.settings, apiKey: "key", cwd: f.root }, []);
-  assert.match(full.options.systemPrompt, /无需额外逐次浏览器确认/);
-  assert.doesNotMatch(full.options.systemPrompt, /支付交由用户完成/);
-  assert.match(full.options.systemPrompt, /responseOnly=true/);
-  assert.match(full.options.systemPrompt, /不要为纯问答制造证据/);
+  assert.match(full.options.systemPrompt.prompt, /无需额外逐次浏览器确认/);
+  assert.doesNotMatch(full.options.systemPrompt.prompt, /支付交由用户完成/);
+  assert.match(full.options.systemPrompt.prompt, /responseOnly=true/);
+  assert.match(full.options.systemPrompt.prompt, /不要为纯问答制造证据/);
   f.task.nativeAccess = { confirmActions: true };
   const confirmed = await sdkWorker({ task: f.task, settings: f.store.data.settings, apiKey: "key", cwd: f.root }, []);
-  assert.match(confirmed.options.systemPrompt, /当前启用操作确认/);
+  assert.match(confirmed.options.systemPrompt.prompt, /当前启用操作确认/);
   f.task.mode = "plan";
   const plan = await sdkWorker({ task: f.task, settings: f.store.data.settings, apiKey: "key", cwd: f.root }, []);
-  assert.match(plan.options.systemPrompt, /当前为 plan 模式/);
+  assert.match(plan.options.systemPrompt.prompt, /当前为 plan 模式/);
   const connection = await sdkWorker({ task: {}, settings: f.store.data.settings, apiKey: "key", cwd: f.root, test: true }, []);
   assert.deepEqual(connection.options.tools, []);
 });

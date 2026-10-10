@@ -5,10 +5,15 @@ import { installPhoneStatus } from "./phone-status";
 import { workspaceRendered } from "./workspace-lifecycle";
 import { openWorkspaceGuide } from "./workspace-guide";
 import { experimentalAgentEnabled, onExperimentalFeaturesChanged } from "./experimental-features";
+import { installSidebarResize, sidebarResizeHandle } from "./sidebar-resize";
 
 type Workspace = import("../shared/workspaces").WorkspaceId;
 const railPreference = "profilepilot-workspace-rail";
 const compactRail = window.matchMedia("(max-width:800px)");
+const refreshRailWidth = installSidebarResize({
+  id: "workspace", pane: "#workspace-rail", property: "--workspace-rail-custom-width",
+  preference: "profilepilot-workspace-rail-width", min: 176, max: () => Math.min(360, window.innerWidth - 520)
+});
 let railChoice: string | null = null;
 try { railChoice = localStorage.getItem(railPreference); } catch { /* Use the responsive default. */ }
 function refreshRail(): void {
@@ -20,6 +25,7 @@ function refreshRail(): void {
     button.setAttribute("aria-label", label);
     button.setAttribute("aria-expanded", String(!collapsed));
   });
+  refreshRailWidth();
 }
 refreshRail();
 compactRail.addEventListener("change", refreshRail);
@@ -46,6 +52,7 @@ export function workspaceSwitcher(current: Workspace): string {
     <nav class="workspace-links" aria-label="工作空间">${workspaces.map(([key, label, detail, href, glyph]) => `<a href="${href}" class="workspace-link${key === navigation ? " active" : ""}" data-workspace="${key}" ${key === "agent" && !experimentalAgentEnabled() ? "hidden" : ""} ${key === navigation ? 'aria-current="page"' : ""} title="${label} · ${detail}">${key === "browser" ? taskIcon("desktop") : navigationIcon(key, glyph)}<span>${label}</span></a>`).join("")}</nav>
     <a class="workspace-settings${current === "settings" ? " active" : ""}" href="./settings.html" data-workspace="settings" ${current === "settings" ? 'aria-current="page"' : ""} title="全局设置"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="m9 3-1 3-3 1-2 4 2 2v3l4 3 3-1 3 1 4-3v-3l2-2-2-4-3-1-1-3Z"/><circle cx="12" cy="11" r="3"/></svg><span>设置</span></a>
     <button type="button" class="workspace-help" data-workspace-guide aria-label="打开新手引导" title="新手引导 · 了解各个 Tab 的用途"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 1 1 4.2 1.8c-1.2.6-1.7 1.2-1.7 2.7M12 17h.01"/></svg><span>新手引导</span></button>
+    ${sidebarResizeHandle("workspace", "workspace-rail", "调整主导航宽度")}
   </aside>`;
 }
 export function workspaceIdentityBar(): string {

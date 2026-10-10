@@ -22,6 +22,9 @@ import { applyPricedCost, costBaseline } from "./cost-accounting";
 import { browserPermissionScope, terminalPermissionScope, hasSessionPermission, conversationEvents, contextDescription, redactProviderSecrets, formStructure, unresolvedExternalReceipts, preserveVerifiedReceipts, interruptReceipts, answerRemaining, actionProgress } from "./conversation";
 import type { TaskPermissionMode, TaskSettings, TaskStream, TaskAttachment, TaskMessageOptions, TaskQueuedMessage } from "../../shared/tasks";
 import { latestUserRequest, hasBrowserRequest, deferBrowserDriver } from "./turn-request";
+import { renameSdkSession } from "./sdk-session-metadata";
+import { ProfileMemory } from "./memory";
+import type { ProfileMemorySnapshot } from "../../shared/tasks";
 
 export interface TaskServiceDependencies {
   browser: BrowserAdapter;
@@ -67,6 +70,7 @@ export class TaskService {
   private readonly editingContext = new Set<string>();
   private readonly contextWorkers = new Map<string, { cancel(): void }>();
   readonly terminal: TaskTerminal;
+  readonly memory: ProfileMemory;
   private ticking = false;
   private timer?: NodeJS.Timeout;
   private closed = false;
@@ -94,6 +98,7 @@ export class TaskService {
     if (changed) this.publish();
   }
   constructor(readonly store: TaskStore, readonly dependencies: TaskServiceDependencies) {
+    this.memory = new ProfileMemory(store.root);
     this.terminal = new TaskTerminal(store.root, (id, result) => {
       const task = store.data.tasks.find(task => task.id === id);
       if (!task) return;
@@ -103,6 +108,29 @@ export class TaskService {
   }
   profileAvailability(id: string): { ready: boolean; reason?: string; code?: string } | undefined {
     return this.dependencies.profileAvailability?.(id);
+  }
+  getMemory(profileId: string): ProfileMemorySnapshot {
+    const busy = [...this.runs.keys()].some(id => this.store.get(id).profileId === profileId);
+    return { profileId, enabled: this.store.data.memoryPolicies?.[profileId]?.enabled !== false, busy, files: this.memory.list(profileId) };
+  }
+  private assertMemoryEditable(profileId: string): void {
+    if (this.closed) throw new Error("应用正在退出。");
+    if ([...this.runs.keys()].some(id => this.store.get(id).profileId === profileId)) throw new Error("请先暂停此 Profile 的任务，再修改记忆。");
+  }
+  setMemoryEnabled(profileId: string, enabled: boolean): ProfileMemorySnapshot {
+    this.assertMemoryEditable(profileId);
+    const previous = this.store.data.memoryPolicies;
+    this.store.data.memoryPolicies = { ...previous, [profileId]: { enabled } };
+    try { this.publish(); } catch (error) { this.store.data.memoryPolicies = previous; throw error; }
+    return this.getMemory(profileId);
+  }
+  writeMemory(profileId: string, name: string, content: string, revision: string | null): ProfileMemorySnapshot {
+    this.assertMemoryEditable(profileId); this.memory.write(profileId, name, content, revision);
+    return this.getMemory(profileId);
+  }
+  deleteMemory(profileId: string, name: string, revision: string): ProfileMemorySnapshot {
+    this.assertMemoryEditable(profileId); this.memory.delete(profileId, name, revision);
+    return this.getMemory(profileId);
   }
   start(): void {
     this.syncControlReceivers();
@@ -498,7 +526,12 @@ export class TaskService {
     mkdirSync(cwd, { recursive: true, mode: 0o700 });
     const settings = { ...structuredClone(this.store.data.settings), model: task.model || this.store.data.settings.model };
     recordTaskModel(task, settings);
-    const start = { kind: "start", task: structuredClone(task), settings, apiKey: this.dependencies.apiKey(), cwd, terminal: this.terminal.context(task.id) };
+    const memory = this.store.data.memoryPolicies?.[task.profileId]?.enabled !== false
+      ? { directory: this.memory.directory(task.profileId), writable: !["plan", "manual"].includes(task.mode || "") } : undefined;
+    // SDK loads MEMORY.md before invoking any tool hook. Validate existing
+    // memory files as well, so that startup cannot follow a replaced link.
+    if (memory) this.memory.list(task.profileId);
+    const start = { kind: "start", task: structuredClone(task), settings, apiKey: this.dependencies.apiKey(), cwd, terminal: this.terminal.context(task.id), memory };
     const costStart = costBaseline(task);
     if (!task.sdkSessionId) task.sdkTokenBaseline = { inputTokens: task.usage.inputTokens, outputTokens: task.usage.outputTokens };
     const inputTokenBase = task.sdkTokenBaseline?.inputTokens || 0;
@@ -548,8 +581,12 @@ export class TaskService {
       if (message.kind === "session") task.sdkSessionId = String(message.id);
       if (message.kind === "agent_activity" && typeof message.id === "string") {
         const activities = task.agentActivities ||= [];
-        const next = { id: message.id, description: redactProviderSecrets(String(message.description), secrets).slice(0, 1000), status: String(message.status).slice(0, 100), updatedAt: now() };
-        const previous = activities.findIndex(activity => activity.id === next.id);
+        const previous = activities.findIndex(activity => activity.id === message.id);
+        const next = { ...activities.find(activity => activity.id === message.id), id: message.id,
+          description: redactProviderSecrets(String(message.description || "子任务"), secrets).slice(0, 1000), status: String(message.status).slice(0, 100), updatedAt: now(),
+          ...(typeof message.name === "string" ? { name: redactProviderSecrets(message.name, secrets).slice(0, 64) } : {}),
+          ...(typeof message.role === "string" ? { role: message.role.slice(0, 64) } : {}),
+          ...(typeof message.summary === "string" ? { summary: redactProviderSecrets(message.summary, secrets).slice(0, 6000) } : {}) };
         if (previous < 0) activities.push(next); else activities[previous] = next;
         task.agentActivities = activities.slice(-100);
       }
@@ -618,7 +655,10 @@ export class TaskService {
     if (["observe", "read_page", "tabs", "browser_action", "fill_fields", "verify_account", "reconcile", "handoff"].includes(name) && !hasTaskBrowser(task)) await this.prepareBrowser(task, run);
     run.actionsAtStart ??= task.usage.actions;
     if (task.mode === "plan" && ["terminal_run", "terminal_stop", "export_result", "register_outputs", "fill_fields"].includes(name)) return textResult("当前为 plan 模式，仅可观察、读取和制定计划。请请求用户切换模式后再执行变更。", true);
-    if (name === "authorize_read") return typeof args.path === "string" ? authorizeTaskRead(task, args.path) : { allowed: false };
+    if (name === "authorize_read") return { allowed: typeof args.path === "string" && (authorizeTaskRead(task, args.path).allowed ||
+      this.store.data.memoryPolicies?.[task.profileId]?.enabled !== false && this.memory.authorize(task.profileId, args.path, "Read", false)) };
+    if (name === "authorize_memory") return { allowed: typeof args.path === "string" && this.store.data.memoryPolicies?.[task.profileId]?.enabled !== false &&
+      this.memory.authorize(task.profileId, args.path, args.tool, !["plan", "manual"].includes(task.mode || ""), args.input) };
     if (name === "terminal_run") {
       const input = terminalRunSchema.parse(args);
       validateTerminalSource(input);
@@ -1266,7 +1306,13 @@ export class TaskService {
       finally { this.archiving.delete(id); }
       if (this.closed) throw new Error("应用正在退出，任务记录已保留，请重新打开后归档。");
     }
-    if (patch.title !== undefined) task.title = patch.title;
+    if (patch.title !== undefined) {
+      const history = this.store.sdkHistory(task.id); history.refresh();
+      if (task.sdkSessionId && history.hasSession(task.sdkSessionId)) {
+        await renameSdkSession(history.directory, task.sdkSessionId, patch.title);
+      }
+      task.title = patch.title;
+    }
     if (patch.archived !== undefined) task.archivedAt = patch.archived ? task.archivedAt || now() : undefined;
     if (patch.pinned !== undefined) task.pinnedAt = patch.pinned ? task.pinnedAt || now() : undefined;
     if (task.archivedAt) task.pinnedAt = undefined;

@@ -284,9 +284,6 @@
 .workspace-layout #app :is(.action-menu,.profile-menu,.menu-panel) button.danger:hover:not(:disabled) { background:var(--danger-soft); }
 .workspace-layout #app :is(.action-menu,.profile-menu,.menu-panel) button:disabled { opacity:.45; }
 .workspace-layout #app .action-menu .action-tooltip { display:flex; width:100%; min-width:0; }
-.workspace-layout #app .menu-slot-row { display:flex; min-height:38px; padding:4px 10px; gap:12px; margin:3px 0; border-top:1px solid var(--line); border-bottom:1px solid var(--line); border-radius:0; }
-.workspace-layout #app .menu-slot-label { font:500 12px/20px var(--font); }
-.workspace-layout #app .menu-slot-select { box-sizing:border-box; width:72px; min-width:0; height:28px; min-height:28px; padding:2px 6px; font:12px/20px var(--font); border:1px solid var(--line); border-radius:5px; }
 .workspace-layout #app .account-sync-picker-option { justify-content:flex-start; text-align:left; }
 .workspace-layout #app .profile-select-trigger { display:flex; align-items:center; justify-content:space-between; width:100%; text-align:left; }
 .workspace-layout #app .profile-select-option { display:flex; align-items:center; justify-content:space-between; text-align:left; }
@@ -347,3 +344,6 @@ html.workspace-layout:has(.modal-backdrop) { overflow:hidden; }
   .workspace-layout .profiles-table { min-width:570px; }
   .workspace-layout #app .browser-preview-screen,.browser-preview-empty { max-height:240px; }
 }
+
+.workspace-layout #app .menu-shortcut-input { width:100%; min-width:0; height:32px; min-height:32px; font:12px/20px var(--font); }
+.workspace-layout #app .action-menu .menu-shortcut-clear { width:auto; min-height:0; padding:0 2px; font-size:11px; }

@@ -3,10 +3,11 @@ const test = require("node:test");
 
 const { loadTsModule } = require("./helpers/load-ts-module.js");
 
-function loadModals(profiles) {
+function loadModals(profiles, proxyRoutingEnabled = true) {
   const store = { state: { profiles } };
   const modals = loadTsModule("src/renderer/render/modals.ts", {
     stubs: {
+      "src/renderer/experimental-features": { experimentalProxyRoutingEnabled: () => proxyRoutingEnabled },
       "../state": { store },
       "src/renderer/state": { store },
       "../busy": { isBusyAction: () => false },
@@ -52,6 +53,10 @@ const SNAPSHOT = {
     ]
   }
 };
+
+test("proxy modal stays hidden until the experiment is enabled", () => {
+  assert.equal(loadModals([baseProfile()], false).renderBifrostProxyModal("p1", SNAPSHOT), "");
+});
 
 test("proxy presets use the detected Bifrost main port and the Clash 7897 default", () => {
   const proxy = loadProxyHelpers();

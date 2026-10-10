@@ -13,6 +13,7 @@ const paths = {
   settings: '<path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3" fill="var(--sidebar)"/><circle cx="15" cy="17" r="3" fill="var(--sidebar)"/>',
   browser: '<rect x="3" y="4" width="18" height="16" rx="3"/><path d="M3 9h18M7 6.5h.01M10 6.5h.01"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
+  close: '<path d="m6 6 12 12M6 18 18 6"/>',
   arrow: '<path d="M12 19V5M6 11l6-6 6 6"/>',
   chevron: '<path d="m8 10 4 4 4-4"/>',
   paperclip: '<path d="m8 12 6-6a3 3 0 0 1 4 4l-8 8a5 5 0 0 1-7-7l8-8"/>',

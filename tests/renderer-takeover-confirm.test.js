@@ -870,6 +870,11 @@ function loadMainHarness({ profile: activeProfile }) {
 
   loadTsModule("src/renderer/main.ts", {
     stubs: {
+      // These scenarios exercise proxy actions with their experiment enabled.
+      "src/renderer/experimental-features.ts": {
+        experimentalProxyRoutingEnabled: () => true,
+        onExperimentalFeaturesChanged: () => {}
+      },
       "src/renderer/api.ts": {
         profileApi() {
           return {

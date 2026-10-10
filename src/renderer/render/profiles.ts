@@ -1,6 +1,8 @@
+import { formatQuickLaunchShortcut } from "../../shared/quick-launch-shortcut";
 import { isBusyAction, profileBusyKind, profileBusyStatusLabel } from "../busy";
 import { proxyServerUsesPort } from "../proxy";
 import { store } from "../state";
+import { experimentalProxyRoutingEnabled } from "../experimental-features";
 import { AgentActivity, BifrostRuleDestination, BifrostSnapshot, CdpClientInfo, ExternalChromeInstance, ProfileReadinessReceipt, PublicProfile, SystemProxyRoute } from "../types";
 import { renderLiveViewSection } from "./live-view";
 import { profileAvatar } from "./browser-workspace";
@@ -190,7 +192,7 @@ export function renderProfileRow(profile: PublicProfile, isFirstInGroup = false,
                   : ""
               }
               ${profile.isDefault ? '<span class="native-badge inline-flex items-center justify-center border-solid border border-warn-line rounded-full px-2 py-[3px] bg-warn-soft text-warn-bright font-mono text-[10px] font-semibold tracking-[0.06em]">系统默认</span>' : ""}
-              ${profile.quickLaunchSlot ? `<span class="slot-badge" title="全局快捷键 ⌘⌥${profile.quickLaunchSlot} 直启">⌘⌥${profile.quickLaunchSlot}</span>` : ""}
+              ${profile.quickLaunchShortcut ? `<span class="slot-badge" title="全局快捷键直启">${escapeHtml(formatQuickLaunchShortcut(profile.quickLaunchShortcut, store.state?.platform || "win32"))}</span>` : ""}
             </span>
           </span>
         </div>
@@ -695,13 +697,13 @@ export function renderProfileActions(profile: PublicProfile): string {
                 ${renderButtonLabel(renaming, "修改名称", "保存中…")}
               </button>
               ${
-                profile.source === "isolated"
+                profile.source === "isolated" && experimentalProxyRoutingEnabled()
                   ? `<button type="button" class="${profile.bifrostProxy || profile.upstreamProxy || profile.directConnection ? "menu-info" : ""} ${bifrostSaving ? "loading" : ""}" data-action="configure-bifrost-proxy" data-id="${profile.id}" ${store.busy ? "disabled" : ""}>
                       ${renderButtonLabel(bifrostSaving, proxyMenuLabel(profile), "保存中…")}
                     </button>`
                   : ""
               }
-              ${renderQuickLaunchSlotRow(profile)}
+              ${renderQuickLaunchShortcutRow(profile)}
               <span class="action-tooltip" data-tooltip="${escapeHtml(deleteButtonTitle(profile))}">
                 <button type="button" class="danger ${deleting ? "loading" : ""}" data-action="delete" data-id="${profile.id}" ${deleteDisabled ? "disabled" : ""}>
                   ${renderButtonLabel(deleting, "删除 Profile", "删除中…")}
@@ -737,30 +739,19 @@ function renderAgentTakeoverButton(profile: PublicProfile): string {
   `;
 }
 
-// 「更多」菜单里的全局快捷键指派行：下拉选 ⌘⌥1~9 或「无」。
-// 选中已被别的 Profile 占用的槽位会顶掉对方（主进程 setQuickLaunchSlot 处理），下拉里用「· 占用」标注。
-function renderQuickLaunchSlotRow(profile: PublicProfile): string {
-  const current = profile.quickLaunchSlot ?? null;
-  // 各槽位当前绑定的 Profile 名，用于标注「已被谁占用」。
-  const slotOwners = new Map<number, string>();
-  (store.state?.profiles || []).forEach((item) => {
-    if (item.quickLaunchSlot) {
-      slotOwners.set(item.quickLaunchSlot, item.name);
-    }
-  });
-  const options = [`<option value=""${current === null ? " selected" : ""}>无</option>`];
-  for (let slot = 1; slot <= 9; slot += 1) {
-    const owner = slotOwners.get(slot);
-    const takenByOther = owner && current !== slot ? ` · ${owner}` : "";
-    options.push(`<option value="${slot}"${current === slot ? " selected" : ""}>⌘⌥${slot}${escapeHtml(takenByOther)}</option>`);
-  }
+// 按下组合键直接录入，不再限制为预设数字槽位。
+function renderQuickLaunchShortcutRow(profile: PublicProfile): string {
+  const current = formatQuickLaunchShortcut(profile.quickLaunchShortcut, store.state?.platform || "win32");
   return `
-    <label class="menu-slot-row">
-      <span class="menu-slot-label">全局快捷键</span>
-      <select class="menu-slot-select" data-quick-launch-slot data-id="${profile.id}" ${store.busy ? "disabled" : ""}>
-        ${options.join("")}
-      </select>
-    </label>
+    <div class="menu-shortcut-row" data-quick-launch-editor>
+      <div class="menu-shortcut-heading"><label for="quick-launch-${escapeHtml(profile.id)}">全局快捷键</label>
+        ${current ? `<button type="button" class="menu-shortcut-clear" data-clear-quick-launch data-id="${escapeHtml(profile.id)}" ${store.busy ? "disabled" : ""}>清除</button>` : ""}
+      </div>
+      <input id="quick-launch-${escapeHtml(profile.id)}" class="menu-shortcut-input" data-quick-launch-input data-id="${escapeHtml(profile.id)}"
+        type="text" readonly autocomplete="off" spellcheck="false" value="${escapeHtml(current)}" placeholder="点击后按下组合键"
+        aria-describedby="quick-launch-hint-${escapeHtml(profile.id)}" ${store.busy ? "disabled" : ""}>
+      <small id="quick-launch-hint-${escapeHtml(profile.id)}">按键即保存 · Esc 取消</small>
+    </div>
   `;
 }
 
@@ -1387,6 +1378,7 @@ function renderSystemProxyTooltip(
 }
 
 export function renderProfileProxyRoute(profile: PublicProfile): string {
+  if (!experimentalProxyRoutingEnabled()) return "";
   if (profile.source === "native") {
     const display = systemProxyDisplay(store.bifrostSnapshot);
     const tooltip = [
@@ -1680,7 +1672,7 @@ export function renderDirectConnectionRoute(): string {
 }
 
 export function renderBifrostProxyDetail(profile: PublicProfile): string {
-  if (profile.source !== "isolated") {
+  if (profile.source !== "isolated" || !experimentalProxyRoutingEnabled()) {
     return "";
   }
   if (profile.directConnection) {

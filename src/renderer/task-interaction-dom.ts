@@ -41,10 +41,12 @@ export function jumpOverlapsReply(workspace: HTMLElement, button: HTMLElement): 
 }
 
 export function syncTaskScrollInsets(workspace: HTMLElement): void {
-  const header = workspace.querySelector<HTMLElement>(".page-header");
+  const header = workspace.querySelector<HTMLElement>(".page-header,.thread-heading");
   workspace.style.setProperty("--task-header-height", `${Math.max(0, header?.getBoundingClientRect().height || 0)}px`);
   const status = workspace.querySelector<HTMLElement>(".task-thread-status");
   workspace.style.setProperty("--task-sticky-height", `${Math.max(0, status?.getBoundingClientRect().height || 0)}px`);
+  const composer = workspace.querySelector<HTMLElement>(".history-footer");
+  workspace.style.setProperty("--task-composer-height", `${Math.max(0, composer?.getBoundingClientRect().height || 0)}px`);
 }
 
 /** Reveal a pending reply in the viewport space below the sticky header/status.
@@ -60,7 +62,7 @@ export function revealTaskReply(workspace: HTMLElement, focus = false): void {
   for (let pass = 0; pass < 2; pass++) {
     const viewportTop = workspace.getBoundingClientRect().top + (workspace.clientTop || 0), viewportBottom = viewportTop + workspace.clientHeight;
     let visibleTop = viewportTop;
-    for (const bar of workspace.querySelectorAll<HTMLElement>(".page-header,.task-thread-status")) {
+    for (const bar of workspace.querySelectorAll<HTMLElement>(".page-header,.thread-heading,.task-thread-status")) {
       const rect = bar.getBoundingClientRect();
       if (rect.bottom > viewportTop && rect.top < viewportBottom) visibleTop = Math.max(visibleTop, rect.bottom);
     }

@@ -10,7 +10,7 @@ const escape = (value: unknown): string => String(value ?? "").replace(/[&<>"']/
 const date = (value: string): string => new Date(value).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 
 export function historyActions(): string {
-  return `<details class="history-menu" id="history-menu"><summary aria-label="更多任务操作" title="更多任务操作">•••</summary><div class="history-menu-items"><button data-action="edit-task">编辑为新任务</button><button data-action="save-task-template">保存为模板</button><button data-action="export-task">导出任务</button><button data-action="delete-task" class="danger">删除任务</button></div></details>`;
+  return `<details class="history-menu" id="history-menu"><summary aria-label="更多任务操作" title="更多任务操作">•••</summary><div class="history-menu-items"><button data-action="edit-task">编辑为新任务</button><button data-action="save-task-template">保存为模板</button><button data-action="export-readable">导出 Markdown</button><button data-action="export-task">导出任务</button><button data-action="mark-unread">标为未读</button><button data-action="delete-task" class="danger">删除任务</button></div></details>`;
 }
 
 const resultList = (title: string, items?: string[]): string => items?.length ? `<h3>${title}</h3><ul>${items.map(item => `<li>${renderTaskText(item)}</li>`).join("")}</ul>` : "";

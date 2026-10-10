@@ -5,7 +5,7 @@ const test = require("node:test");
 
 const { loadTsModule } = require("./helpers/load-ts-module.js");
 
-function loadProfilesRenderer(overrides = {}) {
+function loadProfilesRenderer(overrides = {}, proxyRoutingEnabled = true) {
   const store = {
     selectedId: null,
     busy: false,
@@ -21,6 +21,8 @@ function loadProfilesRenderer(overrides = {}) {
   const renderer = loadTsModule("src/renderer/render/profiles.ts", {
     cache,
     stubs: {
+      // Existing proxy rendering scenarios explicitly opt in to the experiment.
+      "src/renderer/experimental-features": { experimentalProxyRoutingEnabled: () => proxyRoutingEnabled },
       "../state": { store, dateFormatter: { format: (value) => value.toISOString() } },
       "src/renderer/state": { store, dateFormatter: { format: (value) => value.toISOString() } },
       // Exercise real row/inspector and busy-state rendering without importing
@@ -867,4 +869,16 @@ test("live observation follows selection and detail modals, and pauses outside t
   hidden = true;
   await refresh();
   assert.equal(calls.length, count, 'hidden workspaces do not capture');
+});
+
+test("disabled proxy experiment hides configuration, rule actions and details without changing saved routing", () => {
+  const { renderer } = loadProfilesRenderer({ openProfileMenuId: "p1" }, false);
+  for (const config of [{}, { bifrostProxy: { listenerPort: 18888, rules: ["worktree-a", "worktree-b"], groupRules: [] } },
+    { upstreamProxy: { server: "http://127.0.0.1:7897" } }, { directConnection: true }]) {
+    const configured = profile(config), before = JSON.stringify(configured);
+    const html = renderer.renderProfileRow(configured) + renderer.renderDetails(configured, false);
+    assert.doesNotMatch(html, /configure-bifrost-proxy|prepare-bifrost-proxy|remove-profile-bifrost-rule|enable-profile-bifrost-rule|代理分流|Bifrost 分流/);
+    assert.equal(renderer.renderProfileProxyRoute(configured), "");
+    assert.equal(JSON.stringify(configured), before);
+  }
 });

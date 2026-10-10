@@ -276,7 +276,8 @@ export async function launchProfilePilotE2e(options = {}) {
       await driver.evaluate(`localStorage.setItem('profilepilot-experimental-agent', 'true'); window.dispatchEvent(new Event('profilepilot-experimental-features-changed')); true`, { target: "shell" });
       if (["tasks", "agent"].includes(options.env?.CPM_START_VIEW)) await driver.evaluate(`window.workspaceHost.navigate('./tasks.html'); true`, { target: "shell" });
     }
-    await driver.waitFor("h1", (snapshot) => snapshot.text === (options.env?.CPM_START_VIEW === "phones" ? "手机控制" : options.env?.CPM_START_VIEW === "tools" ? "配套工具" : options.env?.CPM_START_VIEW === "settings" ? "设置" : options.experimentalAgent !== false && ["tasks", "agent"].includes(options.env?.CPM_START_VIEW) ? "Agent" : "PC 控制"), {
+    const agentHome = options.experimentalAgent !== false && ["tasks", "agent"].includes(options.env?.CPM_START_VIEW);
+    await driver.waitFor(agentHome ? "#create-task" : "h1", (snapshot) => agentHome ? snapshot.exists : snapshot.text === (options.env?.CPM_START_VIEW === "phones" ? "手机控制" : options.env?.CPM_START_VIEW === "tools" ? "配套工具" : options.env?.CPM_START_VIEW === "settings" ? "设置" : "PC 控制"), {
       timeoutMs: process.platform === "win32" ? 30_000 : 10_000
     });
     await driver.evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))', { target: "shell" });

@@ -1,5 +1,6 @@
 const { contextBridge, ipcRenderer } = require('electron');
 const call = (method, params) => ipcRenderer.invoke('phone-ui:request', method, params);
+contextBridge.exposeInMainWorld('phoneDiscoveryFixture', { set: (value, reachable = true) => ipcRenderer.invoke('phone-ui:wireless-discovery', value, reachable) });
 contextBridge.exposeInMainWorld('phoneBasicFixture', { calls: () => call('fixture-adb-calls'), frame: options => call('fixture-basic-frame', options) });
 contextBridge.exposeInMainWorld('mobile', {
   openApkFolder: () => call('fixture-apk-export'),

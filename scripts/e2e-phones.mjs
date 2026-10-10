@@ -166,6 +166,27 @@ try {
   assert.equal((await driver.query('.phone-usb-dialog')).exists, false);
   await paint();
   await writeFile(path.join(output, 'offline.png'), Buffer.from((await driver.screenshot()).pngBase64, 'base64'));
+  // Opening the homepage discovers the selected tablet without opening a wizard
+  // or establishing a debugging/control connection.
+  const connectionCalls = () => driver.evaluate('window.phoneBasicFixture.calls().then(calls => calls.filter(args => ["connect", "pair"].includes(args[0])).length)');
+  const beforeDiscovery = await connectionCalls();
+  await driver.evaluate('window.phoneDiscoveryFixture.set("adb-UI-TEST-1-xyz _adb-tls-connect._tcp 192.168.1.9:40236")');
+  await driver.domInput('[name="phoneDevice"]', 'emulator-5554');
+  await driver.domInput('[name="phoneDevice"]', 'UI-TEST-1');
+  await driver.waitFor('[data-route="wifi"] .phone-route-badge', item => item.text === '已发现 · 待连接');
+  assert.equal((await driver.query('[data-route="wifi"]')).attributes['data-debug-connected'], 'false');
+  assert.equal((await driver.query('[data-action="basic-control"]')).disabled, true);
+  assert.equal((await driver.query('.phone-wireless-dialog')).exists, false);
+  await paint();
+  await writeFile(path.join(output, 'wireless-discovered.png'), Buffer.from((await driver.screenshot()).pngBase64, 'base64'));
+  await driver.domInput('[name="phoneDevice"]', 'UI-TEST-2');
+  await driver.waitFor('[data-route="wifi"] .phone-route-badge', item => item.text === '已开启 · 待连接');
+  await driver.evaluate('window.phoneDiscoveryFixture.set("adb-UI-TEST-1-xyz _adb-tls-connect._tcp 192.168.1.9:40236", false)');
+  await driver.domInput('[name="phoneDevice"]', 'UI-TEST-1');
+  await driver.waitFor('[data-route="wifi"] .phone-route-badge', item => item.text === '发现但不可达');
+  assert.equal(await connectionCalls(), beforeDiscovery, 'background discovery never connects or pairs');
+  await driver.evaluate('window.phoneDiscoveryFixture.set(null)');
+  console.log('Homepage wireless discovery: selected device only, no control connection, unreachable endpoint and fresh switch state passed.');
   await driver.domInput('[name="phoneDevice"]', 'emulator-5554');
   await driver.waitFor('.phone-connection', item => /未连接/.test(item.text));
   assert.equal((await driver.query('[name="phoneDevice"] option:checked')).text, 'Android 模拟器');

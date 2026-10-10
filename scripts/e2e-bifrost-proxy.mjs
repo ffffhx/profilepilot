@@ -90,9 +90,13 @@ async function main() {
   const { driver } = app;
   let phase = "create profile";
   try {
-    await driver.domClick('[data-action="new-profile"]');
-    await driver.domInput("#profile-name", "Worktree A");
-    await driver.domClick('[data-create-form] button[type="submit"]');
+    await driver.domClick('.workspace-settings');
+    await driver.waitFor('[data-action="toggle-experimental-proxy-routing"]');
+    await driver.domClick('[data-action="toggle-experimental-proxy-routing"]');
+    await driver.waitFor('#experimental-proxy-routing-status', item => item.text === '已开启');
+    await driver.domClick('.workspace-link[data-workspace="browser"]');
+    await driver.waitFor('h1', item => item.text === 'PC 控制');
+    await driver.evaluate("window.profileManager.createProfile('Worktree A')");
     const profileRow = await driver.waitFor('[data-profile-row][data-id^="isolated:"]');
     const profileId = profileRow.attributes["data-id"];
     assert.ok(profileId);

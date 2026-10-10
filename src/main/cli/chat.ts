@@ -897,7 +897,7 @@ export class AgentChat {
     const page = panel.page!;
     const events: TerminalMessage[] = page.events.map(event => ({ id: event.id, role: event.kind === "action" ? "tool" : event.kind, text: event.text, ...(event.kind === "action" ? { status: "unknown" as const } : {}) }));
     if (page.stream?.text && !page.events.some(event => event.id === page.stream!.id)) events.push({ id: page.stream.id, role: "assistant", text: page.stream.text, status: "running" });
-    events.push({ id: "agent-panel-status", role: "system", text: `查看任务 ${page.task.id}\n${page.task.title} · ${page.task.status} · ${page.task.profileName}\n${page.task.pending ? `等待：${page.task.pending.title}\n${page.task.pending.details}\n` : ""}关联任务：${panel.status?.relatedTasks?.map(task => `${task.id} ${task.title || ""} ${task.status || ""}`).join("\n") || "无"}\nSDK 内嵌子 Agent（只读观察，不支持定向消息或停止）：\n${JSON.stringify(panel.status?.subagents || [], null, 2)}\n本地进程（只读）：${JSON.stringify(panel.status?.processes || [], null, 2)}` });
+    events.push({ id: "agent-panel-status", role: "system", text: `查看任务 ${page.task.id}\n${page.task.title} · ${page.task.status} · ${page.task.profileName}\n${page.task.pending ? `等待：${page.task.pending.title}\n${page.task.pending.details}\n` : ""}关联任务：${panel.status?.relatedTasks?.map(task => `${task.id} ${task.title || ""} ${task.status || ""}`).join("\n") || "无"}\n子 Agent 协作（此面板只读观察；可在对话中让主 Agent 委派、传话或停止子任务）：\n${JSON.stringify(panel.status?.subagents || [], null, 2)}\n本地进程（只读）：${JSON.stringify(panel.status?.processes || [], null, 2)}` });
     return panel.messages = events;
   }
 

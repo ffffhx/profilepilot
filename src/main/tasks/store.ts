@@ -8,6 +8,7 @@ import { updateTokenRecords } from "../../shared/task-token-usage";
 import { legacyCostCorrection } from "./cost-accounting";
 import { interruptReceipts, preserveVerifiedReceipts } from "./conversation";
 import { captureTaskSkill, taskSkillCatalog, taskSkillSelectionSchema } from "./skills";
+import { SdkTaskHistory, type StoredTask } from "./sdk-history";
 
 export const now = (): string => new Date().toISOString();
 const text = z.string().trim().min(1).max(30000);
@@ -39,6 +40,9 @@ export class TaskStore {
   private saveTimer?: ReturnType<typeof setTimeout>;
   private savedDigest?: string;
   private saveError?: Error;
+  private formatVersion = 1;
+  private histories = new Map<string, SdkTaskHistory>();
+  private sdkTitles = new Map<string, { session: string; title: string }>();
   /** Deferred failures stay visible until a successful save/flush retries them. */
   get persistenceError(): Error | undefined { return this.saveError; }
   constructor(readonly root: string) {
@@ -47,7 +51,15 @@ export class TaskStore {
     this.data = { tasks: [], materials: [], attachments: [], schedules: [], templates: [], settings: { model: "claude-sonnet-4-6", baseUrl: "https://api.anthropic.com", maxConcurrent: 2, retentionDays: 30, saveScreenshots: true, notifications: true, hasApiKey: false } };
     if (existsSync(this.file)) {
       const parsed = JSON.parse(readFileSync(this.file, "utf8"));
-      if (parsed.version !== 1 || !Array.isArray(parsed.tasks) || !Array.isArray(parsed.materials) || !Array.isArray(parsed.schedules) || !Array.isArray(parsed.attachments)) throw new Error("任务数据格式不正确，已保留原文件，请检查任务存储。");
+      if (![1, 2].includes(parsed.version) || !Array.isArray(parsed.tasks) || !Array.isArray(parsed.materials) || !Array.isArray(parsed.schedules) || !Array.isArray(parsed.attachments)) throw new Error("任务数据格式不正确，已保留原文件，请检查任务存储。");
+      this.formatVersion = parsed.version;
+      parsed.tasks = parsed.tasks.map((stored: StoredTask) => {
+        const history = this.sdkHistory(stored.id);
+        history.refresh();
+        const task = history.hydrate(stored);
+        if (stored.sdkTitle) this.sdkTitles.set(task.id, { session: stored.sdkTitle, title: task.title });
+        return task;
+      });
       this.data = { ...this.data, ...parsed, settings: { ...this.data.settings, ...parsed.settings } };
     }
     const corrections = this.data.tasks.map(task => ({ task, correction: legacyCostCorrection(root, task) })).filter(entry => entry.correction);
@@ -93,11 +105,23 @@ export class TaskStore {
     let temp: string | undefined, descriptor: number | undefined, ownsTemp = false;
     try {
       this.data.tokenRecords = updateTokenRecords(this.data.tokenRecords || [], this.data.tasks);
-      // Compact JSON keeps the existing version-1 format without whitespace I/O.
-      // Keep only a digest: caching the full history would retain another large string.
-      const serialized = JSON.stringify({ ...this.data, version: 1 });
+      // Keep only a digest: caching serialized history would retain another large string.
+      const tasks = this.data.tasks.map(task => {
+        const history = this.sdkHistory(task.id);
+        history.refresh();
+        this.refreshTitle(task, history);
+        return history.dehydrate(task);
+      });
+      const version = tasks.some(task => task.sdkTitle || task.sdkFields || task.events.some(event => event.sdkText)) ? 2 : this.formatVersion;
+      const serialized = JSON.stringify({ ...this.data, tasks, version });
       const digest = createHash("sha256").update(serialized).digest("hex");
       if (digest !== this.savedDigest || !existsSync(this.file)) {
+        // A v1 application cannot read references. Keep one pre-migration copy
+        // and write v2 only after every removed value is present in the SDK log.
+        if (version === 2 && this.formatVersion === 1 && existsSync(this.file)) {
+          const backup = `${this.file}.before-sdk-reuse.v1.bak`;
+          if (!existsSync(backup)) writeFileSync(backup, readFileSync(this.file), { mode: 0o600, flag: "wx" });
+        }
         temp = `${this.file}.${randomUUID()}.tmp`;
         descriptor = openSync(temp, "wx", 0o600);
         ownsTemp = true;
@@ -109,6 +133,8 @@ export class TaskStore {
         renameSync(temp, this.file);
         ownsTemp = false;
         this.savedDigest = digest;
+        this.formatVersion = version;
+        for (const stored of tasks) if (stored.sdkTitle) this.sdkTitles.set(stored.id, { session: stored.sdkTitle, title: this.data.tasks.find(task => task.id === stored.id)!.title });
       }
       this.saveError = undefined;
     } catch (error) {
@@ -136,6 +162,18 @@ export class TaskStore {
   flush(): void { this.save(); }
   /** Call after the service's final state changes, before application shutdown. */
   close(): void { this.flush(); }
+  sdkHistory(id: string): SdkTaskHistory {
+    if (!/^[\w-]+$/.test(id)) throw new Error("任务编号格式不正确。");
+    let history = this.histories.get(id);
+    if (!history) { history = new SdkTaskHistory(path.join(this.root, "sessions", id)); this.histories.set(id, history); }
+    return history;
+  }
+  private refreshTitle(task: BrowserTask, history: SdkTaskHistory): void {
+    const previous = this.sdkTitles.get(task.id);
+    if (!previous || previous.session !== task.sdkSessionId || task.title !== previous.title) return;
+    const title = history.title(previous.session);
+    if (title) { task.title = title; previous.title = title; }
+  }
   get(id: string): BrowserTask {
     const task = this.data.tasks.find((entry) => entry.id === id);
     if (!task) throw new Error("任务不存在。");
@@ -177,7 +215,10 @@ export class TaskStore {
     task.events.push({ id: randomUUID(), at: now(), kind, text: value.slice(0, 30000), ...(streamId ? { streamId } : {}) });
     task.updatedAt = now();
   }
-  snapshot(): TaskSnapshot { const catalog = taskSkillCatalog(); return { ...structuredClone(this.data), skills: catalog.skills, skillIssues: catalog.issues }; }
+  snapshot(): TaskSnapshot {
+    for (const task of this.data.tasks) if (this.sdkTitles.has(task.id)) { const history = this.sdkHistory(task.id); history.refresh(); this.refreshTitle(task, history); }
+    const catalog = taskSkillCatalog(); return { ...structuredClone(this.data), skills: catalog.skills, skillIssues: catalog.issues };
+  }
 }
 
 export function scrubDiagnostics(data: TaskSnapshot): unknown {

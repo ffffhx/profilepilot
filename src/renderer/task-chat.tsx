@@ -10,7 +10,7 @@ import type { BrowserTask, TaskAttachment, TaskSettings, TaskStream } from "../s
 import { TERMINAL_TASKS } from "../shared/tasks";
 import { taskLinkUrl } from "../shared/task-link";
 import { draftKey, messageDelivery, messageKeyAction, type MessageDraft, type MessageDrafts } from "./task-interaction-model";
-import { isAtTaskLatest, scrollToTaskLatest } from "./task-interaction-dom";
+import { isAtTaskLatest, scrollToTaskLatest, syncTaskScrollInsets } from "./task-interaction-dom";
 import { renderTaskEvents } from "./task-events";
 import { ChatRowCache, taskChatRows, type ChatRow } from "./task-chat-model";
 
@@ -42,8 +42,8 @@ const ChatMessage = memo(function ChatMessage() {
     <div className="tool-group-body">{row.events.map(event => <div key={event.id} id={`event-${event.id}`} dangerouslySetInnerHTML={{ __html: renderTaskEvents([event]) }} />)}</div>
   </details>;
   return <MessagePrimitive.Root asChild><article id={row.domId} data-message-id={row.sourceId || row.id}
-    data-chat-message-id={row.id} className={`${row.role === "user" ? "history-request" : "history-answer"}${row.streaming ? " task-stream" : ""}${row.final ? " task-final-answer" : ""}`}>
-    <div className="history-agent">{row.role === "user" ? "你" : row.streaming ? "Agent · 正在回复" : "Agent"}</div>
+    data-chat-message-id={row.id} aria-label={row.role === "user" ? "你的消息" : "模型回复"} className={`${row.role === "user" ? "history-request" : "history-answer"}${row.streaming ? " task-stream" : ""}${row.final ? " task-final-answer" : ""}`}>
+    <div className="history-agent">{row.role === "user" ? "你" : row.streaming ? "ProfilePilot · 正在回复" : "ProfilePilot"}</div>
     <div className="task-markdown"><MessagePrimitive.Parts components={partComponents} /></div>
     {(row.supplement || row.final && row.domId !== "task-result") && <div id={row.final ? "task-result" : undefined} className="task-result-supplement">
       {row.supplement && <Streamdown components={components} plugins={plugins} mode="static">{row.supplement}</Streamdown>}
@@ -114,15 +114,17 @@ function ChatComposer({ runtime }: { runtime: ReturnType<typeof useExternalStore
     </span>)}</div>}
     <div className="compose-toolbar task-followup-actions">
       <button type="button" data-action="attach-message" data-draft-key={key} aria-label="添加附件" title="添加附件"><svg className="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true"><path d="m8 13 7-7a3 3 0 0 1 4 4L9 20a5 5 0 0 1-7-7L13 2" /></svg></button>
+      <span className="composer-toolbar-divider" aria-hidden="true" />
+      <span className="composer-profile" title={`任务浏览器：${task.profileName}`}><svg className="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3" /><path d="M3 8h18" /></svg><span>{task.profileName}</span></span>
+      <button type="button" className="composer-model" data-action="session-settings" data-focus="session-model" title="修改后续使用的模型">{task.model || props.settings.model}</button>
+      <button type="button" className="composer-settings" data-action="session-settings" aria-label="会话设置" title="会话设置"><svg className="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><path d="M4 7h10m4 0h2M4 17h2m4 0h10" /><circle cx="16" cy="7" r="2" /><circle cx="8" cy="17" r="2" /></svg></button>
       <label className="task-followup-options"><span>发送时机</span><select name="sendMode" data-native-select aria-label="发送时机" value={draft.mode} onChange={event => {
         drafts.set(key, { mode: event.target.value === "steer" ? "steer" : "queue" }); refresh(v => v + 1);
       }}><option value="queue">下一轮</option><option value="steer" disabled={!!task.pending}>立即调整</option></select></label>
-      <button type="submit" className="primary send-task" disabled={sending || !draft.text.trim() && !draft.attachments.length} aria-label="发送">{sending ? "发送中…" : "发送 ↑"}</button>
+      <button type="submit" className="primary send-task" disabled={sending || !draft.text.trim() && !draft.attachments.length} aria-label="发送" title="Enter 发送 · Shift+Enter 换行">{sending ? "发送中…" : "发送 ↑"}</button>
     </div>
     {error && <p className="field-error" role="alert">{error} <button type="submit" disabled={sending}>重试发送</button></p>}
-    <div className="composer-meta task-context-line"><span title={task.profileName}>{task.profileName}</span><span title={task.model || props.settings.model}>{task.model || props.settings.model}</span>
-      <button type="button" data-action="session-settings">会话设置</button></div>
-    <small id="steering-help" className="chat-input-hint">Enter 发送 · Shift+Enter 换行{task.pending ? " · 当前消息将排队" : ""}</small>
+    <small id="steering-help" className="sr-only">Enter 发送 · Shift+Enter 换行{task.pending ? " · 当前消息将排队" : ""}</small>
   </form>;
 }
 
@@ -160,9 +162,11 @@ export class TaskChat {
       this.following = this.workspace ? isAtTaskLatest(this.workspace, 64) : true;
       this.workspace?.addEventListener("scroll", this.onScroll, { passive: true });
       this.observer = new ResizeObserver(() => {
+        if (this.workspace) syncTaskScrollInsets(this.workspace);
         if (this.following && this.workspace && !window.getSelection()?.toString() && !this.workspace.querySelector("#reply-task")) scrollToTaskLatest(this.workspace);
       });
       this.observer.observe(container); this.observer.observe(composer);
+      const footer = composer.closest(".history-footer"); if (footer) this.observer.observe(footer);
       immediate = true;
     }
     if (immediate) { if (this.scheduled) cancelAnimationFrame(this.scheduled); this.scheduled = undefined; flushSync(() => this.render(composer)); }

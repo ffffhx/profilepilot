@@ -181,7 +181,7 @@ try {
     }
   }
   await d.domClick('.workspace-link[data-workspace="phones"]');
-  await d.waitFor('h1', s=>s.text==='手机');
+  await d.waitFor('h1', s=>s.text==='手机控制');
   assert.equal(await shell('document.documentElement.dataset.workspaceRail'),'collapsed');
   await d.domClick('.workspace-link[data-workspace="agent"]');
   assert.equal((await d.query('#prompt')).value,draft);

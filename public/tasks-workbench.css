@@ -1,0 +1,228 @@
+/* Agent workbench: task list, conversation, and an optional browser drawer. */
+.workspace-layout #task-app {
+  --task-sidebar-default-width: 252px;
+  --task-workbench-header: 64px;
+  --task-reader-width: 854px;
+  font-family: "PingFang SC", "Microsoft YaHei UI", "Segoe UI", sans-serif;
+}
+.workspace-layout #task-app .app-frame { height: calc(100dvh - var(--workspace-topbar-height)); }
+.workspace-layout #task-app .sidebar { padding: 22px 16px 15px; gap: 12px; background: var(--sidebar); }
+.workspace-layout #task-app .task-sidebar-heading { padding: 0 8px 8px; }
+.task-sidebar-heading h1 { margin: 0; font-size: 21px; font-weight: 650; letter-spacing: -.6px; }
+.task-sidebar-heading h1 span { color: var(--subtle); opacity: .6; }
+.workspace-layout #task-app .sidebar .new-task {
+  display: flex; align-items: center; gap: 10px; min-height: 40px; margin: 0;
+  padding: 9px 13px; border: 1px solid var(--line); border-radius: 9px;
+  background: var(--panel); color: var(--ink); font-size: 12px; box-shadow: 0 2px 3px #17244503;
+}
+.workspace-layout #task-app .sidebar .new-task:hover { color: var(--accent); border-color: var(--accent-line); }
+.task-sidebar-search { display: flex; align-items: center; gap: 8px; padding: 4px 8px; margin: 0; color: var(--muted); }
+.task-sidebar-search .icon { width: 15px; height: 15px; }
+.task-sidebar-search input { min-width: 0; width: 100%; border: 0; padding: 5px 0; background: transparent; color: var(--ink); font-size: 12px; box-shadow: none; }
+.task-sidebar-search input:focus-visible { outline-offset: 3px; }
+.workspace-layout #task-app .task-attention-nav { padding-inline: 8px; color: var(--muted); font-size: 11px; }
+.workspace-layout #task-app .sidebar-recents { min-height: 60px; flex: 1; }
+.workspace-layout #task-app .sidebar-recents .nav-section-label { padding: 5px 9px 8px; color: var(--muted); font-size: 11px; }
+.workspace-layout #task-app .sidebar-task-group + .sidebar-task-group { border: 0; padding-top: 10px; margin-top: 12px; }
+.workspace-layout #task-app .sidebar .recent-task-row { border-radius: 8px; margin-bottom: 3px; }
+.workspace-layout #task-app .sidebar .recent-task { min-height: 39px; padding: 10px 9px; gap: 9px; }
+.workspace-layout #task-app .sidebar .recent-title { font-size: 12px; font-weight: 400; }
+.workspace-layout #task-app .sidebar .recent-task-row.active { background: var(--accent-soft); }
+.workspace-layout #task-app .sidebar .recent-task-row.active .recent-task { color: var(--accent); }
+.workspace-layout #task-app .recent-document { color: var(--muted); }
+.workspace-layout #task-app .sidebar .sidebar-tools { padding-top: 12px; border-top: 1px solid var(--line); }
+.workspace-layout #task-app .sidebar .sidebar-tools .nav-item,
+.workspace-layout #task-app .sidebar-footer .nav-item { min-height: 34px; padding: 7px 8px; color: var(--muted); font-size: 12px; }
+.workspace-layout #task-app .sidebar-footer { padding-top: 5px; }
+
+/* Keep the native Windows/macOS title bar; the task has just one content header. */
+.workspace-layout #task-app .workspace { --task-header-height: var(--task-workbench-header); --task-gutter: 0px; padding: 0; }
+.workspace-layout #task-app .workspace.is-home > .page-header { display: flex; }
+.workspace-layout #task-app :is(.thread-heading, .page-header) {
+  position: sticky; top: 0; z-index: 6; display: flex; flex: none; align-items: center;
+  height: var(--task-workbench-header); min-height: var(--task-workbench-header);
+  gap: 12px; padding: 0 26px; margin: 0; border-bottom: 1px solid var(--line); background: var(--panel);
+}
+.workspace-layout #task-app .page-header .page-heading { margin-right: auto; }
+.workspace-layout #task-app .workspace.is-home .page-heading h1 { font-size: 14px; font-weight: 500; }
+.workspace-layout #task-app .workspace.is-home .workspace-status { font-size: 11px; }
+.workspace-layout #task-app .thread-heading h2 { font-size: 14px; font-weight: 600; line-height: 1.5; }
+.workspace-layout #task-app .thread-heading > .pill { flex: none; padding: 2px 7px; border: 0; border-radius: 5px; font-size: 10px; }
+.workspace-layout #task-app .thread-heading > .pill.paused { background: var(--warn-soft); color: var(--warn); }
+.workspace-layout #task-app .thread-heading > .pill.completed { background: var(--success-soft); color: var(--success); }
+.workspace-layout #task-app .header-actions { display: flex; flex-wrap: nowrap; align-items: center; gap: 10px; margin-left: auto; }
+.workspace-layout #task-app .sidebar-toggle { display: inline-flex; flex: none; width: 28px; min-width: 28px; height: 30px; padding: 5px; border: 0; background: transparent; color: var(--muted); }
+.workspace-layout #task-app .thread-heading .inspector-toggle { display: inline-flex; align-items: center; gap: 7px; width: auto; height: 31px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); color: var(--muted); font-size: 11px; white-space: nowrap; }
+.workspace-layout #task-app .inspector-toggle[aria-expanded="true"] { border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent); }
+.workspace-layout #task-app .inspector-toggle > span { display: inline; }
+.workspace-layout #task-app .task-quick-controls { position: static; display: flex; flex: none; align-items: center; width: auto; padding: 0; gap: 6px; background: transparent; }
+.workspace-layout #task-app .task-quick-controls button { min-height: 31px; padding: 5px 9px; font-size: 11px; border-radius: 7px; white-space: nowrap; }
+.workspace-layout #task-app .task-quick-controls [data-control="resume"] { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
+.workspace-layout #task-app .task-quick-controls [data-control="cancel"] { color: var(--muted); border-color: transparent; background: transparent; }
+.workspace-layout #task-app .history-menu > summary { padding: 5px 7px; min-width: 27px; color: var(--muted); }
+.workspace-layout #task-app .workspace.is-page > :not(.page-header, .task-operation-status) { margin-left: 24px; margin-right: 24px; }
+.workspace-layout #task-app .task-detail,
+.workspace-layout #task-app .task-detail.inspector-collapsed { display: block; width: 100%; flex: 1; margin: 0; }
+.workspace-layout #task-app .thread-main,
+.workspace-layout #task-app .thread-main:has(#steer-task.task-composer-compact) {
+  display: flex; flex-direction: column; width: min(100%, 918px); max-width: 918px;
+  min-height: calc(100dvh - var(--workspace-topbar-height) - var(--task-workbench-header));
+  margin: 0 auto; padding: 28px 32px 0;
+}
+.workspace-layout #task-app .thread-transcript { flex: 1; padding: 0; min-width: 0; }
+.workspace-layout #task-app .thread-transcript .event-list { padding: 0; gap: 18px; }
+.workspace-layout #task-app .task-chat-thread { display: flex; flex-direction: column; gap: 0; }
+.workspace-layout #task-app .task-thread-status { padding-inline: 28px; }
+.workspace-layout #task-app .thread-main .history-footer,
+.workspace-layout #task-app .thread-main:has(#steer-task.task-composer-compact) > .history-footer {
+  position: sticky; bottom: 0; z-index: 4; flex: none; margin-top: auto;
+  padding: 14px 0 22px; background: var(--panel); border: 0;
+}
+.workspace-layout #task-app .history-files { border: 0; margin: 10px 0 20px 36px; padding: 0; }
+.workspace-layout #task-app .history-files > span { border: 1px solid var(--line); padding: 8px; border-radius: 9px; background: var(--panel); }
+.workspace-layout #task-app .history-files button { font-size: 11px; }
+.workspace-layout #task-app .task-process-group { width: 84%; margin: 6px auto 22px 0; padding: 7px 10px; border: 0; background: var(--panel-soft); border-radius: 7px; }
+.workspace-layout #task-app .task-process-group > summary { font-size: 11px; color: var(--muted); }
+.workspace-layout #task-app .execution-status { align-items: center; border: 0; padding: 0; margin: 0 0 22px; background: transparent; color: var(--muted); }
+.workspace-layout #task-app .execution-status > div { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.workspace-layout #task-app .execution-status :is(strong, p) { margin: 0; font-size: 11px; font-weight: 400; color: var(--muted); }
+.workspace-layout #task-app .execution-status small { display: none; }
+.workspace-layout #task-app .task-jump-latest { bottom: calc(var(--task-composer-height, 140px) + 10px); padding: 6px 12px; font-size: 11px; border-radius: 20px; }
+
+/* Distinct message edges: user's blue bubble on the right, model reply on the left. */
+.workspace-layout #task-app .task-chat-surface .history-request {
+  display: block; width: fit-content; max-width: 70%; margin: 0 0 34px auto;
+  padding: 0; border: 0; background: transparent; overflow-wrap: anywhere;
+}
+.workspace-layout #task-app .task-chat-surface .history-request::before { display: none; }
+.workspace-layout #task-app .task-chat-surface :is(.history-request, .history-answer) > .history-agent { position: static; width: auto; height: auto; overflow: visible; clip-path: none; }
+.workspace-layout #task-app .task-chat-surface .history-request > .history-agent { display: block; text-align: right; font-weight: 400; font-size: 11px; margin: 0 0 7px; color: var(--muted); }
+.workspace-layout #task-app .task-chat-surface .history-request > .task-markdown { padding: 13px 17px; border: 1px solid var(--accent-line); border-radius: 13px 13px 3px 13px; background: var(--task-user-bg); font-size: var(--task-body-size, 14px); line-height: 1.85; }
+.workspace-layout #task-app .task-chat-surface .history-request > .chat-message-actions { justify-content: flex-end; }
+.workspace-layout #task-app .task-chat-surface .history-answer,
+.workspace-layout #task-app .task-chat-surface #task-result.history-answer {
+  position: relative; display: block; width: 84%; max-width: 84%; margin: 0 auto 32px 0;
+  padding: 0 0 0 36px; background: transparent; border: 0; border-radius: 0; text-align: left;
+}
+.workspace-layout #task-app .task-chat-surface .history-answer::before,
+.workspace-layout #task-app .task-chat-surface #task-result.history-answer::before { display: block; width: 26px; height: 26px; top: 0; left: 0; border-radius: 8px; background-size: 19px; }
+.workspace-layout #task-app .task-chat-surface .history-answer > .history-agent { display: block; min-height: 26px; margin: 0 0 14px; padding-top: 3px; color: var(--ink); font-size: 12px; font-weight: 600; }
+.workspace-layout #task-app .task-chat-surface .history-answer > .task-markdown,
+.workspace-layout #task-app .task-chat-surface #task-result.history-answer > .task-markdown { padding: 0; border: 0; background: transparent; border-radius: 0; color: var(--ink); font-size: var(--task-body-size, 14px); line-height: 1.85; }
+.workspace-layout #task-app .task-chat-surface #task-result.history-answer > .task-markdown > p:first-child { font-weight: 400; }
+.workspace-layout #task-app .task-chat-surface .task-markdown > :first-child { margin-top: 0; }
+.workspace-layout #task-app .task-chat-surface .chat-message-actions { height: auto; margin: 8px 0 0; gap: 6px; }
+.workspace-layout #task-app .task-chat-surface .chat-message-actions button { border: 0; background: transparent; padding: 2px 5px; min-height: 24px; font-size: 10px; color: var(--muted); }
+
+/* One toolbar below the editor, including context and send controls. */
+.workspace-layout #task-app .history-footer .task-chat-surface #steer-task { display: flex; flex-direction: column; padding: 15px 14px 11px; border: 1px solid var(--line); border-radius: 13px; gap: 0; box-shadow: 0 4px 18px #24344b05; }
+.workspace-layout #task-app .task-chat-surface #steer-task:focus-within { border-color: var(--accent-line); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 6%, transparent); }
+.workspace-layout #task-app .task-chat-surface #steer-task textarea { min-height: 48px; padding: 0 5px 8px; font-size: 13px; line-height: 1.8; }
+.workspace-layout #task-app #steer-task .task-followup-actions { display: flex; flex-flow: row nowrap; align-items: center; width: 100%; gap: 7px; margin: 0; padding: 5px 0 0; }
+.workspace-layout #task-app #steer-task .task-followup-actions > button:not(.send-task) { display: inline-flex; align-items: center; justify-content: center; min-height: 29px; border: 0; background: transparent; padding: 4px 6px; color: var(--muted); border-radius: 6px; }
+.workspace-layout #task-app #steer-task .task-followup-actions > button:hover:not(:disabled) { color: var(--accent); background: var(--accent-soft); }
+.workspace-layout #task-app #steer-task .composer-toolbar-divider { width: 1px; height: 15px; background: var(--line); flex: none; }
+.workspace-layout #task-app #steer-task .composer-profile { display: flex; align-items: center; gap: 6px; min-width: 0; max-width: 180px; color: var(--muted); font-size: 11px; }
+.workspace-layout #task-app #steer-task .composer-profile .icon { width: 14px; height: 14px; flex: none; }
+.workspace-layout #task-app #steer-task .composer-profile > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-layout #task-app #steer-task .task-followup-actions > .composer-model { display: block; max-width: 170px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.workspace-layout #task-app #steer-task .task-followup-actions > .composer-settings { width: 29px; min-width: 29px; flex: none; }
+.workspace-layout #task-app #steer-task .composer-settings .icon { width: 16px; height: 16px; }
+.workspace-layout #task-app #steer-task .task-followup-options { display: flex; flex: none; align-items: center; margin: 0 0 0 auto; }
+.workspace-layout #task-app #steer-task .task-followup-options > span { display: none; }
+.workspace-layout #task-app #steer-task .task-followup-options select { width: 84px; max-width: 84px; min-height: 29px; padding: 4px; border: 0; background: var(--panel); color: var(--muted); font-size: 11px; }
+.workspace-layout #task-app #steer-task .send-task { flex: none; min-width: 65px; width: auto; min-height: 32px; height: 32px; margin: 0; padding: 5px 10px; border-radius: 7px; font-size: 12px; white-space: nowrap; }
+.workspace-layout #task-app #steer-task .chosen-files { margin: 0; max-height: 72px; overflow: auto; }
+
+/* New tasks use the same single-row context bar. */
+.workspace-layout #task-app .workspace.is-home .compose-scroll { padding: 46px 32px 20px; }
+.workspace-layout #task-app .compose-scroll .compose-intro { max-width: 790px; margin: 8vh auto 30px; text-align: center; }
+.workspace-layout #task-app .compose-intro h2 { font-size: 27px; font-weight: 600; letter-spacing: -.5px; }
+.workspace-layout #task-app .compose-intro p { font-size: 13px; color: var(--muted); margin-top: 10px; }
+.workspace-layout #task-app .compose-scroll > :not(.compose-intro) { max-width: 790px; margin-inline: auto; }
+.workspace-layout #task-app .compose-scroll .home-active { display: none; }
+.workspace-layout #task-app .compose-dock { border: 0; padding: 14px 32px 22px; }
+.workspace-layout #task-app .compose-input-shell { max-width: 854px; margin-inline: auto; padding: 15px 14px 11px; border: 1px solid var(--line); border-radius: 13px; box-shadow: 0 4px 18px #24344b05; }
+.workspace-layout #task-app #create-task .compose-dock textarea[name="prompt"] { min-height: 48px; padding: 0 5px 8px; font-size: 13px; }
+.workspace-layout #task-app .compose-actions { display: flex; flex-wrap: nowrap; gap: 7px; }
+.workspace-layout #task-app .compose-actions .browser-picker { flex: 0 1 185px; display: flex; min-width: 0; max-width: 185px; margin: 0; }
+.workspace-layout #task-app .compose-actions .browser-picker > .icon { width: 14px; height: 14px; }
+.workspace-layout #task-app .compose-actions .browser-picker > .icon:last-child { display: none; }
+.workspace-layout #task-app .compose-actions .browser-picker > .icon:first-child { display: none; }
+.workspace-layout #task-app .compose-actions .browser-picker .select-field { min-width: 0; width: 100%; }
+.workspace-layout #task-app .compose-actions :is(.select-trigger, .task-template-trigger) { min-height: 30px; font-size: 11px; padding: 4px 6px; }
+.workspace-layout #task-app .compose-actions .select-value { overflow: hidden; text-overflow: ellipsis; }
+.workspace-layout #task-app .compose-actions .model-controls { flex: 0 1 170px; flex-wrap: nowrap; min-width: 0; margin: 0; gap: 4px; }
+.workspace-layout #task-app .compose-actions .model-picker { min-width: 0; width: 100%; max-width: 170px; }
+.workspace-layout #task-app .compose-actions .model-picker .select-field { min-width: 0; width: 100%; }
+.workspace-layout #task-app .compose-actions .template-button { min-width: 29px; width: 29px; padding: 5px; }
+.workspace-layout #task-app .compose-actions .template-button > span { display: none; }
+.workspace-layout #task-app .compose-actions .send-task { margin-left: auto; flex: none; width: 32px; height: 32px; min-height: 32px; }
+.workspace-layout #task-app .compose-dock .profile-availability { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); }
+
+.workspace-layout #task-app .thread-inspector {
+  position: fixed; inset: calc(var(--workspace-topbar-height) + var(--task-workbench-header)) 0 0 auto;
+  z-index: 8; width: min(350px, 100%); max-height: none; padding: 22px;
+  margin: 0; border: 0; border-left: 1px solid var(--line); background: var(--panel);
+  border-radius: 0; box-shadow: -8px 0 30px #243a5610; overflow: auto;
+}
+.workspace-layout #task-app .thread-inspector[hidden] { display: none; }
+.workspace-layout #task-app .thread-inspector .browser-live .panel-header { padding-right: 34px; margin-bottom: 18px; }
+.workspace-layout #task-app .close-browser-panel { position: absolute; top: 21px; right: 17px; display: grid; place-items: center; width: 28px; height: 28px; padding: 5px; border: 0; background: transparent; color: var(--muted); }
+.workspace-layout #task-app .browser-live .live-stage { max-height: none; min-height: 180px; aspect-ratio: 1.3; border-radius: 8px; }
+.workspace-layout #task-app .thread-inspector .browser-takeover { border-radius: 7px; }
+.task-session-settings { width: min(460px, calc(100vw - 32px)); max-height: calc(100dvh - 48px); overflow: auto; padding: 24px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); color: var(--ink); box-shadow: var(--task-shadow); }
+.task-session-settings::backdrop { background: #20304d35; }
+.task-session-settings > header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 15px; }
+.task-session-settings > header h2 { font-size: 16px; margin: 0; }
+.task-session-settings > header button { display: grid; place-items: center; border: 0; padding: 5px; background: transparent; color: var(--muted); }
+.task-session-settings :is(form, section) { margin: 20px 0 0; padding-top: 18px; border-top: 1px solid var(--line); }
+.task-session-settings h3 { font-size: 13px; margin: 0 0 12px; }
+.task-session-settings label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 9px; }
+.task-session-settings input { width: 100%; min-width: 0; margin-top: 6px; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+.task-session-settings .session-model-row { display: flex; align-items: center; gap: 8px; }
+.task-session-settings .session-model-row input { flex: 1; margin: 0; }
+.task-session-settings .session-model-row button { flex: none; }
+.task-session-settings .session-limits { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.task-session-settings .session-profile { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.task-session-settings .muted { font-size: 12px; }
+
+@media (max-width: 1180px) {
+  .workspace-layout #task-app { --task-sidebar-default-width: 220px; }
+  .workspace-layout #task-app :is(.thread-heading, .page-header) { padding-inline: 18px; gap: 9px; }
+  .workspace-layout #task-app .thread-main { padding-inline: 24px; }
+  .workspace-layout #task-app #steer-task .composer-profile { max-width: 145px; }
+  .workspace-layout #task-app #steer-task .task-followup-actions > .composer-model { max-width: 130px; }
+}
+@media (max-width: 850px) {
+  .workspace-layout #task-app { --task-sidebar-default-width: 180px; }
+  .workspace-layout #task-app .sidebar { padding-inline: 10px; }
+  .workspace-layout #task-app .header-actions { gap: 5px; }
+  .workspace-layout #task-app .thread-main,
+  .workspace-layout #task-app .thread-main:has(#steer-task.task-composer-compact) { padding-inline: 18px; }
+  .workspace-layout #task-app #steer-task .task-followup-actions { gap: 4px; }
+  .workspace-layout #task-app #steer-task .composer-profile { max-width: 110px; }
+  .workspace-layout #task-app #steer-task .task-followup-actions > .composer-model { max-width: 100px; }
+  .workspace-layout #task-app #steer-task .task-followup-options select { width: 72px; font-size: 10px; }
+  .workspace-layout #task-app .compose-dock { padding-inline: 18px; }
+  .workspace-layout #task-app .compose-actions .task-template-trigger { font-size: 0; min-width: 24px; }
+  .workspace-layout #task-app .compose-actions .task-template-trigger .icon { display: block; }
+  .workspace-layout #task-app .compose-actions .template-button { display: none; }
+}
+@media (max-width: 650px) {
+  .workspace-layout #task-app:not(.sidebar-collapsed) .app-frame { grid-template-columns: minmax(0, 1fr); }
+  .workspace-layout #task-app .app-frame > .sidebar { display: none; }
+  .workspace-layout #task-app .app-frame > .sidebar.task-sidebar-visible { display: flex; position: fixed; inset: var(--workspace-topbar-height) auto 0 var(--workspace-rail-width); width: min(252px, 80vw); z-index: 15; box-shadow: 8px 0 24px #24365318; }
+  .workspace-layout #task-app .thread-heading .inspector-toggle { padding: 5px; width: 28px; }
+  .workspace-layout #task-app .inspector-toggle > span { display: none; }
+  .workspace-layout #task-app .thread-heading h2 { font-size: 13px; }
+  .workspace-layout #task-app .task-chat-surface .history-request { max-width: 86%; }
+  .workspace-layout #task-app .task-chat-surface .history-answer,
+  .workspace-layout #task-app .task-chat-surface #task-result.history-answer { width: 92%; max-width: 92%; padding-left: 0; }
+  .workspace-layout #task-app .task-chat-surface .history-answer > .history-agent { padding-left: 35px; }
+  .workspace-layout #task-app #steer-task .composer-profile { max-width: 100px; }
+  .workspace-layout #task-app #steer-task .composer-profile > .icon { display: none; }
+  .workspace-layout #task-app #steer-task .task-followup-actions > .composer-model { max-width: 100px; }
+  .workspace-layout #task-app #steer-task .task-followup-options select { width: 68px; }
+  .workspace-layout #task-app #steer-task .send-task { min-width: 52px; padding-inline: 6px; font-size: 11px; }
+}

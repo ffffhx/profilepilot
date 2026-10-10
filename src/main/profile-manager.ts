@@ -1,3 +1,4 @@
+import { normalizeQuickLaunchShortcut, normalizeQuickLaunchShortcuts } from "../shared/quick-launch-shortcut";
 import { createHash, randomUUID } from "node:crypto";
 import { readProfileAvatar } from "./profile-avatar";
 import { existsSync, readFileSync, promises as fs } from "node:fs";
@@ -126,8 +127,6 @@ const FOCUS_PROFILE_CACHE_TTL_MS = 60_000;
 // enough to receive the authoritative ownership result instead of reporting a
 // misleading three-second connection timeout.
 const GATEWAY_SESSION_CONTROL_TIMEOUT_MS = 12_000;
-// 全局快捷键直启的槽位数：⌘⌥1 ~ ⌘⌥9。
-const QUICK_LAUNCH_SLOT_COUNT = 9;
 
 function assertDisposableE2eProfile(profileId: string): void {
   if (process.env.CPM_E2E_DISPOSABLE_PROFILES !== "1") {
@@ -607,15 +606,10 @@ export class ProfileManager {
     const miniProfileOrder = normalizeProfileOrder(registry.miniProfileOrder, validProfileIds);
     const mainProfileOrder = normalizeProfileOrder(registry.mainProfileOrder, validProfileIds);
     const miniProfileIdSet = new Set(miniProfileIds);
-    const quickLaunchSlots = normalizeQuickLaunchSlots(registry.quickLaunchSlots, validProfileIds);
-    // 反向索引 profileId → 槽位号，填到每个 PublicProfile 上供 UI 展示。
-    const slotByProfileId = new Map<string, number>();
-    for (const [slotKey, boundId] of Object.entries(quickLaunchSlots)) {
-      slotByProfileId.set(boundId, Number(slotKey));
-    }
+    const shortcuts = normalizeQuickLaunchShortcuts(registry.quickLaunchShortcuts, undefined, process.platform, validProfileIds);
     profiles.forEach((profile) => {
       profile.pinnedToMini = miniProfileIdSet.has(profile.id);
-      profile.quickLaunchSlot = slotByProfileId.get(profile.id) ?? null;
+      profile.quickLaunchShortcut = shortcuts[profile.id] ?? null;
     });
 
     const state: AppState = {
@@ -1064,33 +1058,26 @@ export class ProfileManager {
     });
   }
 
-  // 指派 / 改绑 / 清除某 Profile 的全局快捷键槽位（⌘⌥N）。slot 传 null 清除。
-  // 语义：一个 Profile 至多占一个槽位，一个槽位至多绑一个 Profile——
-  // 把某槽位绑给新 Profile 时，会顶掉该槽位原来的 Profile，也会清掉本 Profile 之前占的槽位。
-  async setQuickLaunchSlot(profileId: string, slot: number | null): Promise<void> {
+  async setQuickLaunchShortcut(profileId: string, value: string | null): Promise<void> {
     const state = await this.getState();
     const validProfileIds = new Set(state.profiles.map((profile) => profile.id));
     if (!validProfileIds.has(profileId)) {
       throw new ProfileManagerError("没有找到这个 Profile。", "PROFILE_NOT_FOUND");
     }
-    if (slot !== null && (!Number.isInteger(slot) || slot < 1 || slot > QUICK_LAUNCH_SLOT_COUNT)) {
-      throw new ProfileManagerError(`快捷键槽位只支持 1~${QUICK_LAUNCH_SLOT_COUNT}。`, "QUICK_LAUNCH_SLOT_RANGE");
+    const shortcut = normalizeQuickLaunchShortcut(value, process.platform);
+    if (value !== null && !shortcut) {
+      throw new ProfileManagerError("请按下包含 Ctrl、Alt 或 Command 等修饰键的组合键，或使用功能键。", "QUICK_LAUNCH_INVALID");
     }
-
     await this.updateRegistry((registry) => {
-      const slots = normalizeQuickLaunchSlots(registry.quickLaunchSlots, validProfileIds);
-      // 先清掉本 Profile 之前占的槽位（一个 Profile 至多一个槽位）。
-      for (const key of Object.keys(slots)) {
-        if (slots[key] === profileId) {
-          delete slots[key];
-        }
+      const shortcuts = normalizeQuickLaunchShortcuts(registry.quickLaunchShortcuts, undefined, process.platform, validProfileIds);
+      const owner = Object.entries(shortcuts).find(([id, key]) => id !== profileId && key === shortcut);
+      if (owner) {
+        const name = state.profiles.find((profile) => profile.id === owner[0])?.name || owner[0];
+        throw new ProfileManagerError(`这个快捷键已绑定到“${name}”，请先清除原绑定。`, "QUICK_LAUNCH_CONFLICT");
       }
-      if (slot !== null) {
-        // 顶掉该槽位原来的 Profile（一个槽位至多一个 Profile），再绑给本 Profile。
-        slots[String(slot)] = profileId;
-      }
-
-      registry.quickLaunchSlots = slots;
+      if (shortcut) shortcuts[profileId] = shortcut;
+      else delete shortcuts[profileId];
+      registry.quickLaunchShortcuts = shortcuts;
     });
   }
 
@@ -3563,9 +3550,9 @@ export class ProfileManager {
       if (nextMainProfileOrder.length !== (registry.mainProfileOrder || []).length) {
         registry.mainProfileOrder = nextMainProfileOrder;
       }
-      const prunedQuickLaunchSlots = pruneQuickLaunchSlots(registry.quickLaunchSlots, profile.id);
-      if (prunedQuickLaunchSlots) {
-        registry.quickLaunchSlots = prunedQuickLaunchSlots;
+      const prunedQuickLaunchShortcuts = pruneQuickLaunchShortcuts(registry.quickLaunchShortcuts, profile.id);
+      if (prunedQuickLaunchShortcuts) {
+        registry.quickLaunchShortcuts = prunedQuickLaunchShortcuts;
       }
     });
 
@@ -3606,7 +3593,7 @@ export class ProfileManager {
         miniProfileIds: (registry.miniProfileIds || []).filter((profileId) => profileId !== deletedProfileId),
         miniProfileOrder: (registry.miniProfileOrder || []).filter((profileId) => profileId !== deletedProfileId),
         mainProfileOrder: (registry.mainProfileOrder || []).filter((profileId) => profileId !== deletedProfileId),
-        quickLaunchSlots: pruneQuickLaunchSlots(registry.quickLaunchSlots, deletedProfileId) ?? registry.quickLaunchSlots
+        quickLaunchShortcuts: pruneQuickLaunchShortcuts(registry.quickLaunchShortcuts, deletedProfileId) ?? registry.quickLaunchShortcuts
       });
       await this.saveRegistry(registry);
       try {
@@ -3656,11 +3643,11 @@ export class ProfileManager {
     const trashPath = await this.moveToTrash(subPath, dirName);
     await removeProfileFromLocalStateIn(userDataDir, dirName);
 
-    // 子 profile 若被指派过快捷键槽位，顺手清掉。
+    // 子 profile 若被指派过快捷键，顺手清掉。
     await this.updateRegistry((registry) => {
-      const prunedQuickLaunchSlots = pruneQuickLaunchSlots(registry.quickLaunchSlots, subId);
-      if (prunedQuickLaunchSlots) {
-        registry.quickLaunchSlots = prunedQuickLaunchSlots;
+      const prunedQuickLaunchShortcuts = pruneQuickLaunchShortcuts(registry.quickLaunchShortcuts, subId);
+      if (prunedQuickLaunchShortcuts) {
+        registry.quickLaunchShortcuts = prunedQuickLaunchShortcuts;
       }
     });
 
@@ -3784,7 +3771,7 @@ export class ProfileManager {
         miniProfileIds: normalizeMiniProfileIds(parsed.miniProfileIds),
         miniProfileOrder: normalizeProfileOrder(parsed.miniProfileOrder),
         mainProfileOrder: normalizeProfileOrder(parsed.mainProfileOrder),
-        quickLaunchSlots: normalizeQuickLaunchSlots(parsed.quickLaunchSlots)
+        quickLaunchShortcuts: normalizeQuickLaunchShortcuts(parsed.quickLaunchShortcuts, parsed.quickLaunchSlots, process.platform)
       };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
@@ -3953,7 +3940,7 @@ export class ProfileManager {
       directConnection: false,
       listeningPorts: runtimeProfile.listeningPorts,
       pinnedToMini: false,
-      quickLaunchSlot: null,
+      quickLaunchShortcut: null,
       clonedFromProfileId: null,
       clonedFromName: null,
       cloneCount: 0,
@@ -4001,7 +3988,7 @@ export class ProfileManager {
       directConnection: profile.directConnection === true,
       listeningPorts: runtimeProfile.listeningPorts,
       pinnedToMini: false,
-      quickLaunchSlot: null,
+      quickLaunchShortcut: null,
       clonedFromProfileId: profile.clonedFromProfileId ?? null,
       clonedFromName: null,
       cloneCount: 0,
@@ -4097,7 +4084,7 @@ export class ProfileManager {
       directConnection: false,
       listeningPorts: [],
       pinnedToMini: false,
-      quickLaunchSlot: null,
+      quickLaunchShortcut: null,
       clonedFromProfileId: null,
       clonedFromName: null,
       cloneCount: 0,
@@ -5111,40 +5098,10 @@ function normalizeProfileOrder(input: unknown, validProfileIds?: Set<string>): s
   return validProfileIds ? ids.filter((id) => validProfileIds.has(id)) : ids;
 }
 
-// 归一化全局快捷键槽位映射：只保留槽位号 1~9、profileId 合法（提供 validProfileIds 时）的项；
-// 同一个 Profile 若在多个槽位里出现，只保留槽位号最小的那个（一个 Profile 至多一个槽位）。
-function normalizeQuickLaunchSlots(input: unknown, validProfileIds?: Set<string>): Record<string, string> {
-  const result: Record<string, string> = {};
-  if (!isRecord(input)) {
-    return result;
-  }
-  const seenProfiles = new Set<string>();
-  for (let slot = 1; slot <= QUICK_LAUNCH_SLOT_COUNT; slot += 1) {
-    const value = input[String(slot)];
-    if (typeof value !== "string" || !value) {
-      continue;
-    }
-    if (validProfileIds && !validProfileIds.has(value)) {
-      continue;
-    }
-    if (seenProfiles.has(value)) {
-      continue;
-    }
-    seenProfiles.add(value);
-    result[String(slot)] = value;
-  }
-  return result;
-}
-
-// 删除某 Profile 时清掉它占用的槽位。没有变化时返回 null（调用方据此决定是否需要落盘）。
-function pruneQuickLaunchSlots(input: unknown, removedProfileId: string): Record<string, string> | null {
-  const slots = normalizeQuickLaunchSlots(input);
-  let changed = false;
-  for (const key of Object.keys(slots)) {
-    if (slots[key] === removedProfileId) {
-      delete slots[key];
-      changed = true;
-    }
-  }
-  return changed ? slots : null;
+// 删除 Profile 时释放其快捷键。
+function pruneQuickLaunchShortcuts(input: unknown, removedProfileId: string): Record<string, string> | null {
+  const shortcuts = normalizeQuickLaunchShortcuts(input, undefined, process.platform);
+  if (!Object.hasOwn(shortcuts, removedProfileId)) return null;
+  delete shortcuts[removedProfileId];
+  return shortcuts;
 }

@@ -14,6 +14,7 @@ export const isNativeTask = (task: BrowserTask): boolean => task.browserConnecti
 // The same task/approval pipeline is used by both transports. Native Chrome is
 // never launched with debugging flags and no browser credentials are copied.
 export class NativeBrowser implements BrowserAdapter {
+  private readonly groupUpdates = new WeakMap<BrowserTask, string>();
   private readonly fast: NativePage;
   private readonly stopEvents: () => void;
   constructor(readonly bridge: NativeBrowserTransport, private readonly artifactRoot: string) {
@@ -26,7 +27,19 @@ export class NativeBrowser implements BrowserAdapter {
     if (!state.taskTabs) throw new Error(NATIVE_EXTENSION_UPDATE_MESSAGE);
     if (state.ownerSessionId && state.ownerSessionId !== task.sessionId) throw new Error("这个 Profile 已由另一个任务占用。");
     if (state.ownerSessionId && state.ownership !== "agent") throw new Error("用户正在操作浏览器，请交还后继续。");
-    if (!state.ownerSessionId) await this.bridge.request(task.profileId, "claim", { sessionId: task.sessionId, ...task.nativeTarget });
+    if (!state.ownerSessionId) await this.bridge.request(task.profileId, "claim", { sessionId: task.sessionId, taskTitle: task.title, ...task.nativeTarget });
+  }
+  syncTaskState(task: BrowserTask): void {
+    const state = this.bridge.states().find(s => s.profileId === task.profileId);
+    if (!state?.connected || state.ownerSessionId !== task.sessionId || !state.capabilities?.includes("taskGroups")) return;
+    const params = { sessionId: task.sessionId, taskTitle: task.title, status: task.status, controlGeneration: state.controlGeneration };
+    const stamp = JSON.stringify(params);
+    if (this.groupUpdates.get(task) === stamp) return;
+    this.groupUpdates.set(task, stamp);
+    // Display-only and generation-bound: this must never acquire browser control.
+    void this.bridge.request(task.profileId, "taskState", params).catch(() => {
+      if (this.groupUpdates.get(task) === stamp) this.groupUpdates.delete(task);
+    });
   }
   private async request(task: BrowserTask, method: string, params: Record<string, unknown> = {}, timeoutMs?: number): Promise<any> {
     await this.claim(task);
@@ -199,9 +212,12 @@ export class NativeBrowser implements BrowserAdapter {
     // reacquire it or unexpectedly resume Chrome on the next connection.
     if (!state?.connected && action !== "resume") return;
     const generation = action === "resume" ? expectedGeneration ?? this.controlGeneration(task) : undefined;
+    const groupPhase = task.status === "failed" ? "failed"
+      : task.status === "paused" || task.status === "partial" || task.resumeContext?.reason === "用户主动接管" ? "paused"
+      : task.status === "waiting_user" ? "waiting" : undefined;
     const request = () => {
       if (action === "resume" && this.controlGeneration(task) !== generation) throw new NativeControlError("NATIVE_USER_IN_CONTROL", "用户已停止或接管，排队恢复已取消；请核查控制状态。");
-      return this.bridge.request(task.profileId, "control", { sessionId: task.sessionId, action, ...(generation ? { controlGeneration: generation } : {}) });
+      return this.bridge.request(task.profileId, "control", { sessionId: task.sessionId, action, taskTitle: task.title, groupPhase, ...(generation ? { controlGeneration: generation } : {}) });
     };
     try { await request(); }
     catch (error) {
@@ -219,6 +235,7 @@ export class NativeBrowser implements BrowserAdapter {
 export class RoutedBrowser implements BrowserAdapter {
   constructor(private readonly gateway: BrowserAdapter, readonly native: NativeBrowser) {}
   private route(task: BrowserTask): BrowserAdapter { return isNativeTask(task) ? this.native : this.gateway; }
+  syncTaskState(task: BrowserTask): void { if (isNativeTask(task)) this.native.syncTaskState(task); }
   observeFast(task: BrowserTask): Promise<BrowserObservation> { const browser = this.route(task); return browser.observeFast ? browser.observeFast(task) : browser.observe(task); }
   observe(task: BrowserTask, screenshot?: boolean, retain?: boolean): Promise<BrowserObservation> { return this.route(task).observe(task, screenshot, retain); }
   readPage(task: BrowserTask, options: PageReadOptions): Promise<BrowserObservation> {

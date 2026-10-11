@@ -50,6 +50,7 @@ export type ProfilePilotManagementCommand = ProfilePilotTaskCommand | PhoneManag
   | { action: "profile.get"; selector: string }
   | { action: "profile.create"; name: string }
   | { action: "profile.rename"; selector: string; name: string }
+  | { action: "profile.configure"; selector: string; hideAutomation: boolean }
   | { action: "profile.start"; selector: string }
   | { action: "profile.stop"; selector: string }
   | { action: "profile.delete"; selector: string; confirmed: boolean };

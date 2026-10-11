@@ -1,13 +1,21 @@
-import { BrowserWindow, ipcMain } from "electron";
+import { BrowserWindow, ipcMain, net, session } from "electron";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { isWorkspaceShell } from "../workspace-shell";
 import { PHONE_CHANNEL, PHONE_CHANGED } from "../../shared/phones";
 import { PhonesService } from "./service";
 import { executePhoneCommand } from "./management";
+import { AndroidSetup } from "./android-setup";
 
 export function registerPhones(root: string, apkPath: string, poll = true): PhonesService {
-  const service = new PhonesService({ root, apkPath, onChanged: snapshot => {
+  const service = new PhonesService({ root, apkPath, androidSetup: new AndroidSetup({
+    fetch: (input, init) => net.fetch(input instanceof URL ? input.href : input, init),
+    proxy: async () => {
+      const route = (await session.defaultSession.resolveProxy("https://dl.google.com/android/repository/repository2-3.xml")).split(";")[0].trim();
+      const match = route.match(/^(PROXY|SOCKS5?)\s+([^\s:]+):(\d+)$/);
+      return match ? [`--proxy=${match[1] === "PROXY" ? "http" : "socks"}`, `--proxy_host=${match[2]}`, `--proxy_port=${match[3]}`] : [];
+    }
+  }), onChanged: snapshot => {
     for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed() && trusted(window.webContents.getURL())) window.webContents.send(PHONE_CHANGED, snapshot);
   } });
   ipcMain.handle(PHONE_CHANNEL, async (event, method: string, params: unknown) => {

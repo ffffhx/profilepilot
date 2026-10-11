@@ -1,5 +1,6 @@
 const { contextBridge, ipcRenderer } = require('electron');
 const call = (method, params) => ipcRenderer.invoke('phone-ui:request', method, params);
+contextBridge.exposeInMainWorld('androidSetupFixture', { behavior: value => call('fixture-android-behavior', value) });
 contextBridge.exposeInMainWorld('phoneDiscoveryFixture', { set: (value, reachable = true) => ipcRenderer.invoke('phone-ui:wireless-discovery', value, reachable) });
 contextBridge.exposeInMainWorld('phoneBasicFixture', { calls: () => call('fixture-adb-calls'), frame: options => call('fixture-basic-frame', options) });
 contextBridge.exposeInMainWorld('mobile', {
@@ -10,12 +11,16 @@ contextBridge.exposeInMainWorld('mobile', {
 contextBridge.exposeInMainWorld('phones', {
   basicStart: (id, mode, controller, task) => call('basic-start', { id, mode, controller, task }),
   basicControl: (id, command) => call(`basic-${command}`, { id }),
+  basicSetMode: input => call('basic-mode', input),
   basicPerform: input => call('basic-action', input),
   cloudPair: () => call('cloud-pair'),
   snapshot: () => call('snapshot'), prepare: id => call('connect', { id }),
   inspect: id => call('inspect', { id }),
   listEmulators: () => call('emulator-list'), connectEmulator: name => call('emulator-connect', { name }),
+  androidSetupSnapshot: () => call('android-setup-snapshot'), androidSetupCatalog: () => call('android-setup-catalog'),
+  androidSetupStart: action => call('android-setup-start', action), androidSetupCancel: id => call('android-setup-cancel', {id}),
   preview: id => call('preview', { id }), openSettings: (id, setting) => call('settings', { id, setting }),
+  screen: id => call('screen', { id }),
   discoverWireless: id => call('wireless-discover', id ? {id} : {}),
   autoConnectWireless: id => call('wireless-connect', {id}),
   pairWireless: (address, code) => call('wireless-pair', { address, code }),

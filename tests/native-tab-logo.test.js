@@ -23,51 +23,51 @@ async function fixture() {
   };
   const context = vm.createContext({ chrome, URL, crypto: webcrypto, WebSocket: { OPEN: 1 }, setTimeout, clearTimeout, setInterval, clearInterval });
   vm.runInContext(readFileSync('extensions/profilepilot/background.js', 'utf8') + `
-    globalThis.api = { handle, state, flush: async () => { await Promise.all([...logoUpdates.values()]); } };`, context);
+    globalThis.api = { handle, state, legacy: () => { logoTabs.add(7); syncTabLogos(); }, flush: async () => { await Promise.all([...logoUpdates.values()]); } };`, context);
   await new Promise(resolve => setImmediate(resolve));
   const flush = async () => { await new Promise(resolve => setImmediate(resolve)); await context.api.flush(); };
   return { ...context.api, flush, chrome, tabs, icons, storage, calls };
 }
 
-test('existing tabs are marked only while controlled, without changing active tab', async () => {
+test('native task indicators preserve existing site favicons and the active tab', async () => {
   const f = await fixture();
   await f.handle('claim', { sessionId: 'one', tabId: 7 }); await f.flush();
-  assert.match(f.icons.get(7), /icon-32.png$/); assert.equal(f.icons.has(8), false);
+  assert.equal(f.icons.size, 0);
   await f.handle('switch', { sessionId: 'one', tabId: 8 }); await f.flush();
-  assert.equal(f.icons.get(7), null); assert.match(f.icons.get(8), /icon-32.png$/);
+  assert.equal(f.icons.size, 0);
   await f.handle('control', { sessionId: 'one', action: 'handoff' }); await f.flush();
-  assert.equal(f.icons.get(8), null); assert.equal(f.tabs.get(8).active, true);
+  assert.equal(f.icons.size, 0); assert.equal(f.tabs.get(8).active, true);
 });
 
-test('created tabs retain the logo after completion and are forgotten when closed', async () => {
+test('new task tabs preserve site favicons through completion and closure', async () => {
   const f = await fixture();
   await f.handle('claim', { sessionId: 'one', tabId: 7 });
   await f.handle('newTab', { sessionId: 'one', url: 'https://fixture.test/new' }); await f.flush();
-  assert.equal(f.icons.get(7), null); assert.match(f.icons.get(9), /icon-32.png$/);
+  assert.equal(f.icons.size, 0);
   await f.handle('control', { sessionId: 'one', action: 'complete' }); await f.flush();
-  assert.match(f.icons.get(9), /icon-32.png$/);
+  assert.equal(f.icons.size, 0);
   f.tabs.delete(9); f.chrome.tabs.onRemoved.emit(9); await f.flush();
   assert.deepEqual([...f.storage.tabLogos.created], []);
 });
 
-test('navigation reinjects the logo and replacement IDs retain creation provenance', async () => {
+test('navigation and replacement do not inject page markers', async () => {
   const f = await fixture();
   await f.handle('claim', { sessionId: 'one', tabId: 7 });
   await f.handle('newTab', { sessionId: 'one', url: 'https://fixture.test/new' }); await f.flush();
   const count = f.calls.length;
   f.chrome.tabs.onUpdated.emit(9, { status: 'complete' }); await f.flush();
-  assert.equal(f.calls.length, count + 1);
+  assert.equal(f.calls.length, count);
   f.tabs.set(10, { ...f.tabs.get(9), id: 10 }); f.tabs.delete(9);
   f.chrome.tabs.onReplaced.emit(10, 9); await f.flush();
-  assert.match(f.icons.get(10), /icon-32.png$/); assert.deepEqual([...f.storage.tabLogos.created], [10]);
+  assert.equal(f.icons.size, 0); assert.deepEqual([...f.storage.tabLogos.created], [10]);
 });
 
-test('takeover during a pending tab lookup cannot install a stale active logo', async () => {
+test('legacy injected favicons are restored, including during takeover', async () => {
   const f = await fixture(); let release;
   const originalGet = f.chrome.tabs.get;
   await f.handle('claim', { sessionId: 'one', tabId: 7 }); await f.flush();
   f.chrome.tabs.get = async id => { if (id === 7 && !release) await new Promise(resolve => { release = resolve; }); return originalGet(id); };
-  f.chrome.tabs.onUpdated.emit(7, { status: 'complete' });
+  f.legacy();
   await new Promise(resolve => setImmediate(resolve));
   await f.handle('control', { sessionId: 'one', action: 'handoff' });
   release(); await f.flush(); assert.equal(f.icons.get(7), null);

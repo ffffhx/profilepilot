@@ -44,12 +44,21 @@ import type {
   TakeoverAgentConnectionsResponse
 } from "./shared/types";
 
+import type { AgentZoomCommand } from "./shared/workspace-zoom";
+
 contextBridge.exposeInMainWorld("desktopWindow", {
   platform: process.platform,
   onNavigate: (listener: (href: string) => void) => {
     const handler = (_event: IpcRendererEvent, href: string) => listener(href);
     ipcRenderer.on(IPC_CHANNELS.navigateWorkspace, handler);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.navigateWorkspace, handler);
+  },
+  onAgentZoom: (listener: (command: AgentZoomCommand) => void) => {
+    const handler = (_event: IpcRendererEvent, command: AgentZoomCommand) => {
+      if (command === "in" || command === "out" || command === "reset") listener(command);
+    };
+    ipcRenderer.on(IPC_CHANNELS.zoomAgentWorkspace, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.zoomAgentWorkspace, handler);
   },
   setAppearance: (background: string, symbols: string, guideActive = false) => {
     ipcRenderer.send(IPC_CHANNELS.setWindowAppearance, background, symbols, guideActive);
@@ -328,11 +337,16 @@ contextBridge.exposeInMainWorld("localApps", localAppsApi);
 const phonesApi: PhonesApi = {
   basicStart: (id, mode, controller, task) => ipcRenderer.invoke(PHONE_CHANNEL, "basic-start", { id, mode, controller, task }),
   basicControl: (id, command) => ipcRenderer.invoke(PHONE_CHANNEL, `basic-${command}`, { id }),
+  basicSetMode: input => ipcRenderer.invoke(PHONE_CHANNEL, "basic-mode", input),
   basicPerform: input => ipcRenderer.invoke(PHONE_CHANNEL, "basic-action", input),
   snapshot: () => ipcRenderer.invoke(PHONE_CHANNEL, "snapshot"),
   cloudPair: url => ipcRenderer.invoke(PHONE_CHANNEL, "cloud-pair", { url }),
   cloudForget: id => ipcRenderer.invoke(PHONE_CHANNEL, "cloud-forget", { id }),
   listEmulators: () => ipcRenderer.invoke(PHONE_CHANNEL, "emulator-list"),
+  androidSetupSnapshot: () => ipcRenderer.invoke(PHONE_CHANNEL, "android-setup-snapshot"),
+  androidSetupCatalog: () => ipcRenderer.invoke(PHONE_CHANNEL, "android-setup-catalog"),
+  androidSetupStart: action => ipcRenderer.invoke(PHONE_CHANNEL, "android-setup-start", action),
+  androidSetupCancel: id => ipcRenderer.invoke(PHONE_CHANNEL, "android-setup-cancel", { id }),
   connectEmulator: name => ipcRenderer.invoke(PHONE_CHANNEL, "emulator-connect", { name }),
   discoverWireless: id => ipcRenderer.invoke(PHONE_CHANNEL, "wireless-discover", id ? { id } : {}),
   pairWireless: (address, code) => ipcRenderer.invoke(PHONE_CHANNEL, "wireless-pair", { address, code }),
@@ -341,6 +355,7 @@ const phonesApi: PhonesApi = {
   prepare: id => ipcRenderer.invoke(PHONE_CHANNEL, "connect", { id }),
   inspect: id => ipcRenderer.invoke(PHONE_CHANNEL, "inspect", { id }),
   preview: id => ipcRenderer.invoke(PHONE_CHANNEL, "preview", { id }),
+  screen: id => ipcRenderer.invoke(PHONE_CHANNEL, "screen", { id }),
   openSettings: (id, setting) => ipcRenderer.invoke(PHONE_CHANNEL, "settings", { id, setting }),
   rename: (id, name) => ipcRenderer.invoke(PHONE_CHANNEL, "rename", { id, name }),
   start: (id, mode, controller, task) => ipcRenderer.invoke(PHONE_CHANNEL, "start", { id, mode, controller, task }),

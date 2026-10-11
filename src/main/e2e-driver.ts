@@ -47,6 +47,7 @@ const BACKGROUND_COMMANDS = new Set([
   "compareScreenshot",
   "reload",
   "resize",
+  "workspaceZoomShortcut",
   "quit"
 ]);
 
@@ -133,6 +134,20 @@ async function executeRequest(request: E2eDriverRequest, options: E2eDriverOptio
     case "reload":
       requireWindow(options, request.target).webContents.reload();
       return true;
+    case "workspaceZoomShortcut": {
+      // Exercise native shortcut -> preload -> shell without focusing a window
+      // or injecting real desktop input in the background test mode.
+      const contents = requireWindow(options, request.target).webContents;
+      const key = request.keyCode || "0";
+      if (!["+", "=", "-", "0"].includes(key)) throw new Error("Not a workspace zoom shortcut.");
+      const modifiers = request.modifiers || [];
+      let prevented = false;
+      contents.emit("before-input-event", { preventDefault() { prevented = true; } }, {
+        type: "keyDown", key, control: modifiers.includes("control"), meta: modifiers.includes("meta"),
+        shift: modifiers.includes("shift"), alt: modifiers.includes("alt"), isComposing: false, isAutoRepeat: false
+      });
+      return { prevented, windowZoom: contents.getZoomFactor() };
+    }
     case "resize": {
       if (!Number.isInteger(request.width) || !Number.isInteger(request.height) || request.width! < 480 || request.width! > 2560 || request.height! < 360 || request.height! > 1600) {
         throw new Error("E2E window size is out of range.");

@@ -23,6 +23,7 @@ export const browserActionSchema = z.object({
 });
 export type BrowserCommand = (task: BrowserTask, args: string[]) => Promise<unknown>;
 export interface BrowserAdapter {
+  syncTaskState?(task: BrowserTask): void;
   readPage?(task: BrowserTask, options: PageReadOptions): Promise<BrowserObservation>;
   observeFast?(task: BrowserTask): Promise<BrowserObservation>;
   observe(task: BrowserTask, screenshot?: boolean, retainScreenshot?: boolean): Promise<BrowserObservation>;

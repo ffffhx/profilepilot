@@ -36,6 +36,8 @@ For the default Profile, the ProfilePilot extension controls its existing pages 
 
 ## Shared control rules
 
+For visible CAPTCHA puzzles during an authorized browser task, prefer the Agent in the **current conversation**: inspect the page and screenshot, reason about the answer, act through the same browser session, then verify the page result. Read [CAPTCHA in the current conversation](references/captcha.md) when this occurs. Do not start another Codex process or buy a solver task merely because a CAPTCHA appeared. Those are explicit alternatives when the current Agent cannot solve it or the user selects them.
+
 - Use one task session per target and one active controlling route. Never use another tool, Profile, session or direct CDP connection to bypass user takeover, an occupied Profile or a Gateway stop.
 - A user handoff preserves the session while the user acts. Resume only after explicit return of control. Observe the page again; old element references are invalid.
 - Complete a session when its work is finished; release it when the task is cancelled. Do not complete while waiting for a required user action. Use the selected route's lifecycle commands, never commands from another route.

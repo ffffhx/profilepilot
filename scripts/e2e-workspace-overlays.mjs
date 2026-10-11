@@ -66,10 +66,10 @@ try {
   for (const [workspace, trigger, selector, close] of [
     ['browser', '[data-action="open-agent-browser-setup"]', '.clone-pool-modal', '.clone-pool-modal [data-action="close-modal"]'],
     ['local-apps', '.app-topbar [data-action="add"]', 'dialog[open]', null],
-    ['phones', '.phone-empty-actions [data-action="wifi"]', 'dialog[open]', null],
+    ['phones', '.phone-list-tools [data-action="add-device"]', 'dialog[open]', null],
     ['tools', '[data-action="open-global-instructions"]', '.global-instructions-modal', '.global-instructions-modal [data-action="close-modal"]']
   ]) {
-    await d.domClick(`.workspace-link[data-workspace="${workspace}"]`);
+    await d.evaluate(`window.workspaceHost.navigate(${JSON.stringify(workspace === 'browser' ? './index.html' : `./${workspace}.html`)}); true`, { target:'shell' });
     await d.waitFor(trigger, state => state.exists && !state.disabled, { timeoutMs:30000 });
     await d.domClick(trigger);
     await d.waitFor(selector);

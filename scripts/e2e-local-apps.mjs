@@ -75,7 +75,7 @@ try {
   assert.match(await d.evaluate(`window.localApps.list().then(()=>"unexpected",error=>error.message)`), /本地应用工作区/);
   await d.domClick('[data-pc-view="local-apps"]');
   await d.waitFor('.empty-state h2');
-  assert.equal((await d.query('.workspace-link[aria-current="page"]')).text.trim(), 'PC 控制');
+  assert.equal((await d.query('.workspace-link[aria-current="page"]')).text.trim(), '控制台');
   assert.equal((await d.query('[data-pc-view="local-apps"][aria-current="page"]')).exists, true);
   assert.equal((await d.query('.workspace-link[data-workspace="local-apps"]')).exists, false);
   const results = path.join(repoRoot, 'test-results', 'local-apps'); await mkdir(results, { recursive: true });

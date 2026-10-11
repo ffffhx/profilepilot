@@ -6,11 +6,14 @@ import { z } from "zod";
 import { PHONE_PROTOCOL, type PhoneDevice, type PhonesSnapshot, type PhoneSessionState, type PhoneAction, type PhoneActionInput, type PhoneActionResult } from "../../shared/phones";
 import { groupPhoneDevices } from "../../shared/phone-devices";
 import type { PhoneSetting } from "../../shared/phones";
+import type { PhoneScreenFrame } from "../../shared/phones";
 import { Adb, COMPANION_PACKAGE, COMPANION_PORT, parseAdbDevices, deviceShell, phoneRequest, validateDeviceId, type AdbRunner } from "./adb";
 import { phoneActionSchema, isPhoneRead } from "./actions";
 import { discoverWireless, pairWireless, connectWireless, wirelessCandidates, probeWireless } from "./wireless";
 import { readDebugSettings, type DebugSettings } from "./readiness";
 import { AndroidEmulators, type EmulatorRuntime } from "./emulators";
+import { AndroidSetup } from "./android-setup";
+import type { AndroidSetupRuntime } from "../../shared/android-setup";
 import { PhoneCloud } from "./cloud";
 import { readinessSchema } from "./readiness-schema";
 import { inspectApk } from "./apk";
@@ -26,6 +29,8 @@ const sessionSchema = z.object({
   readiness: readinessSchema.optional()
 });
 type SavedPhone = { statusDeviceId?: string; token: string; name?: string; installedHash?: string; hardwareId?: string; model?: string; transport?: PhoneDevice["transport"] };
+const identitySchema = z.object({ hardwareId: z.string().regex(/^[a-zA-Z0-9_-]{1,200}$/), model: z.string().max(200), transport: z.enum(["usb", "wifi"]) });
+type PhoneIdentity = z.infer<typeof identitySchema>;
 type Route = { port: number; token: string };
 type InstallJob = { abort: AbortController; done?: Promise<void>; result: { status: "running" | "installed" | "failed" | "interrupted"; sha256: string; bytes: number; error?: string } };
 export interface PhonesOptions {
@@ -33,6 +38,7 @@ export interface PhonesOptions {
   apkPath: string;
   adb?: AdbRunner;
   emulators?: EmulatorRuntime;
+  androidSetup?: AndroidSetupRuntime;
   request?: typeof phoneRequest;
   now?: () => number;
   computer?: string;
@@ -46,12 +52,14 @@ export class PhonesService {
   private debugPending = new Map<string, Route>();
   private hardwareReadings = new Map<string, { at: number; id?: string }>();
   private saved: Record<string, SavedPhone>;
+  private identities: Record<string, PhoneIdentity>;
   private adb: AdbRunner;
   private request: typeof phoneRequest;
   private timer?: NodeJS.Timeout;
   private refreshing?: Promise<PhonesSnapshot>;
   private operations = new Set<string>();
   private actions = new Set<string>();
+  private screenReads = new Map<string, AbortController>();
   private sequence = 0;
   private observations = new Map<string, { instanceId: string; sequence: number; generation: number }>();
   private reconcile = new Set<string>();
@@ -60,8 +68,13 @@ export class PhonesService {
   private installs = new Map<string, InstallJob>();
   private closed = false;
   private wirelessBusy = false;
+  private wirelessReconnect?: Promise<void>;
+  private wirelessReconnectAbort = new AbortController();
+  private wirelessScanAt = -Infinity;
+  private wirelessAttempts = new Map<string, number>();
   private emulatorBusy = false;
   private emulators: EmulatorRuntime;
+  readonly androidSetup: AndroidSetupRuntime;
   private adbAvailable = false;
   private error = "";
   private cloud: PhoneCloud;
@@ -72,6 +85,7 @@ export class PhonesService {
     this.adb = options.adb || new Adb(); this.request = options.request || phoneRequest; this.computer = (options.computer || os.hostname()).slice(0, 120);
     this.basic = new BasicPhoneControl(this.adb, this.computer, () => this.changed(), () => this.now());
     this.emulators = options.emulators || new AndroidEmulators();
+    this.androidSetup = options.androidSetup || new AndroidSetup();
     fs.mkdirSync(options.root, { recursive: true });
     this.cloud = new PhoneCloud(options.root, () => this.changed());
     const file = path.join(options.root, "devices.json");
@@ -83,8 +97,22 @@ export class PhonesService {
       this.devices.set(id, { id, name: saved.name || saved.model || "Android 手机", model: saved.model || "Android 手机", transport: saved.transport || (id.startsWith("emulator-") ? "emulator" : /:|_adb-tls/.test(id) ? "wifi" : "usb"), connection: "missing", companion: "unavailable", state: null, confirmedAt: null, pending: null, error: "" });
       this.reconcile.add(id);
     }
+    // Remember verified basic-mode devices without creating companion credentials.
+    const identitiesFile = path.join(options.root, "device-identities.json");
+    this.identities = fs.existsSync(identitiesFile) ? z.record(z.string(), identitySchema).parse(JSON.parse(fs.readFileSync(identitiesFile, "utf8"))) : {};
+    for (const [id, identity] of Object.entries(this.identities)) {
+      try { validateDeviceId(id); } catch { continue; }
+      const device = this.devices.get(id);
+      if (device) Object.assign(device, identity, { name: this.saved[id]?.name || identity.model });
+      else this.devices.set(id, { ...identity, id, name: identity.model, connection: "missing", companion: "unavailable", state: null, confirmedAt: null, pending: null, error: "" });
+    }
   }
-  startPolling(): void { this.cloud.start(); if (!this.timer) { this.timer = setInterval(() => void this.refresh(), 2000); this.timer.unref(); void this.refresh(); } }
+  startPolling(): void {
+    if (this.closed || this.timer) return;
+    this.cloud.start();
+    const tick = () => { void this.refresh().then(() => this.reconnectWireless()).catch(() => {}); };
+    this.timer = setInterval(tick, 2000); this.timer.unref(); tick();
+  }
   snapshot(): PhonesSnapshot {
     const cloud = this.cloud.devices();
     const identityByHardware = new Map(Object.values(this.saved).filter(s => s.hardwareId && s.statusDeviceId).map(s => [s.hardwareId, s.statusDeviceId]));
@@ -123,6 +151,13 @@ export class PhonesService {
     if (command !== "stop") this.connected(id); else this.device(id);
     this.basic.control(id, command);
     return this.snapshot().devices.find(device => device.id === id)!;
+  }
+  basicSetMode(input: { id: string; sessionId: string; generation: number; mode: "view" | "control" }): PhoneDevice {
+    const parsed = z.object({ id: z.string(), sessionId: z.string().min(1), generation: z.number().int().nonnegative(), mode: z.enum(["view", "control"]) }).strict().parse(input);
+    if (this.closed) throw new Error("手机服务正在退出。");
+    this.connected(parsed.id);
+    this.basic.setMode(parsed);
+    return this.snapshot().devices.find(device => device.id === parsed.id)!;
   }
   async basicPerform(input: PhoneActionInput): Promise<PhoneActionResult> {
     const parsed = z.object({ id: z.string(), sessionId: z.string().min(1), generation: z.number().int().nonnegative(), requestId: z.string().uuid(), action: phoneActionSchema }).strict().parse(input);
@@ -240,8 +275,17 @@ export class PhonesService {
     const id = /^[a-zA-Z0-9_-]{1,200}$/.test(serial) && !["unknown", "null"].includes(serial) ? serial : undefined;
     this.hardwareReadings.set(device.id, { at: this.now(), id });
     device.hardwareId = id;
+    if (id && (device.transport === "usb" || device.transport === "wifi")) {
+      const identity: PhoneIdentity = { hardwareId: id, model: device.model.slice(0, 200), transport: device.transport };
+      if (JSON.stringify(this.identities[device.id]) !== JSON.stringify(identity)) {
+        this.identities[device.id] = identity;
+        const file = path.join(this.options.root, "device-identities.json"), tmp = `${file}.${process.pid}.tmp`;
+        fs.writeFileSync(tmp, JSON.stringify(this.identities, null, 2), { mode: 0o600 }); fs.renameSync(tmp, file);
+      }
+    }
   }
   private async disconnected(device: PhoneDevice, error: string, connection = device.connection): Promise<void> {
+    if (connection !== "device") this.screenReads.get(device.id)?.abort();
     if (connection !== "device") { this.basic.disconnect(device.id); this.hardwareReadings.delete(device.id); device.appInstallation = undefined; }
     this.debugReadings.delete(device.id); this.debugPending.delete(device.id);
     if (device.state && ["viewing", "controlling", "executing"].includes(device.state.phase)) this.reconcile.add(device.id);
@@ -324,6 +368,46 @@ export class PhonesService {
     if (!group) throw new Error("手机不存在，请刷新设备列表。");
     return group;
   }
+  private reconnectableWirelessGroups() {
+    return groupPhoneDevices(this.snapshot().devices).filter(group =>
+      group.routes.some(device => device.hardwareId || device.transport === "usb") &&
+      !group.routes.some(device => device.transport === "emulator" || device.connection === "device" || device.connection === "unauthorized" || this.operations.has(device.id) ||
+        [device.state, device.basic].some(state => state && ["viewing", "controlling", "executing", "paused"].includes(state.phase))));
+  }
+  /** Background transport recovery; never installs, pairs, starts or resumes control. */
+  reconnectWireless(): Promise<void> {
+    if (this.wirelessReconnect) return this.wirelessReconnect;
+    if (this.closed || !this.adbAvailable || this.wirelessBusy || this.now() - this.wirelessScanAt < 10000 || !this.reconnectableWirelessGroups().length) return Promise.resolve();
+    this.wirelessScanAt = this.now();
+    const signal = this.wirelessReconnectAbort.signal;
+    const adb: AdbRunner = { run: (args, timeout, input) => this.adb.run(args, timeout, input, signal) };
+    this.wirelessReconnect = (async () => {
+      const discovered = await discoverWireless(adb);
+      if (this.closed || signal.aborted) return;
+      for (const [address, at] of this.wirelessAttempts) if (this.now() - at >= 60000) this.wirelessAttempts.delete(address);
+      let attempts = 0;
+      for (const group of this.reconnectableWirelessGroups()) {
+        const candidates = wirelessCandidates(discovered.services, group.routes, this.now()).services.filter(candidate => candidate.kind === "connect");
+        for (const candidate of candidates) {
+          if (this.closed || signal.aborted || this.wirelessBusy || attempts >= 3) return;
+          if (this.wirelessAttempts.has(candidate.address)) continue;
+          this.wirelessAttempts.set(candidate.address, this.now()); attempts++;
+          const probe = await (this.options.probeWireless || probeWireless)(candidate.address);
+          // Recheck after network waits: USB may have arrived or the user may have started a session.
+          const current = this.reconnectableWirelessGroups().find(item => item.routes.some(route => group.routes.some(old => old.id === route.id)));
+          if (this.closed || signal.aborted || this.wirelessBusy || !current) break;
+          if (!probe.reachable) continue;
+          try {
+            const connected = await this.wirelessOperation(() => this.connectWirelessAddress({ address: candidate.address }, adb));
+            const expected = current.routes.map(device => device.hardwareId || (device.transport === "usb" ? device.id : ""));
+            // Discovery is only a hint; never merge another device by IP or model.
+            if (expected.includes(connected.hardwareId || "") && connected.hardwareId) break;
+          } catch { /* Keep normal polling and first-time pairing guidance available. */ }
+        }
+      }
+    })().catch(() => {}).finally(() => { this.wirelessReconnect = undefined; });
+    return this.wirelessReconnect;
+  }
   async discoverWireless(id?: string) {
     if (id) await this.cloud.refresh();
     const discovered = await discoverWireless(this.adb);
@@ -374,14 +458,16 @@ export class PhonesService {
   connectWireless(input: unknown): Promise<PhoneDevice> {
     return this.wirelessOperation(() => this.connectWirelessAddress(input));
   }
-  private async connectWirelessAddress(input: unknown): Promise<PhoneDevice> {
-      const address = await connectWireless(this.adb, input);
+  private async connectWirelessAddress(input: unknown, adb = this.adb): Promise<PhoneDevice> {
+      if (this.closed) throw new Error("手机服务正在退出。");
+      const address = await connectWireless(adb, input);
       let discoveredIds: string[] = [];
       for (let attempt = 0; attempt < 4; attempt++) {
+        if (this.closed) throw new Error("手机服务正在退出。");
         await this.refresh();
         const device = this.devices.get(address);
         if (device?.connection === "device") return structuredClone(device);
-        if (attempt === 0) discoveredIds = (await discoverWireless(this.adb)).services
+        if (attempt === 0) discoveredIds = (await discoverWireless(adb)).services
           .filter(item => item.kind === "connect" && item.address === address)
           .map(item => `${item.name}._adb-tls-connect._tcp`);
         const aliases = [...this.devices.values()].filter(item => item.connection === "device"
@@ -478,6 +564,31 @@ export class PhonesService {
       return { state: response.state, result: response.result };
     } catch (error) { this.device(id).error = (error as Error).message; throw error; }
     finally { this.actions.delete(id); this.changed(); }
+  }
+  /** Desktop inspector read: no session creation, input frame, installation or takeover. */
+  async screen(id: string): Promise<PhoneScreenFrame> {
+    const device = this.connected(id);
+    if (!this.adb.runBinary) throw new Error("当前连接不支持读取手机画面。");
+    if (this.screenReads.has(id)) throw new Error("正在获取手机画面，请稍候。");
+    const guard = () => {
+      if (this.closed || device.connection !== "device" || this.operations.has(id)) throw new Error("手机连接或状态已改变，请稍后重试。");
+      const group = groupPhoneDevices(this.snapshot().devices).find(group => group.routes.some(route => route.id === id));
+      if (group?.routes.some(route => [route.basic, route.state].some(state => state && (state.phase === "paused" || state.phase === "disconnected" && !!state.sessionId)))) throw new Error("手机会话已暂停或断开，确认会话状态后再刷新画面。");
+      return JSON.stringify(group?.routes.map(route => [route.id, route.connection, route.basic?.sessionId, route.basic?.generation, route.basic?.phase, route.state?.instanceId, route.state?.sessionId, route.state?.generation, route.state?.phase]));
+    };
+    guard();
+    const abort = new AbortController(); this.screenReads.set(id, abort);
+    try {
+      if (device.companion === "ready" && this.routes.has(id)) await this.rpc(id, "sync");
+      const version = guard(); abort.signal.throwIfAborted();
+      const png = await this.adb.runBinary(["-s", id, "exec-out", "screencap", "-p"], 12000, abort.signal);
+      abort.signal.throwIfAborted();
+      if (guard() !== version) throw new Error("手机会话已改变，本次画面已丢弃。");
+      if (png.length < 33 || !png.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10])) || png.toString("ascii", 12, 16) !== "IHDR") throw new Error("手机未返回有效画面，请解锁手机或切换页面。");
+      const width = png.readUInt32BE(16), height = png.readUInt32BE(20);
+      if (!width || !height || width > 20000 || height > 20000) throw new Error("手机画面尺寸无效。");
+      return { mime: "image/png", base64: png.toString("base64"), width, height, capturedAt: this.now() };
+    } finally { this.screenReads.delete(id); }
   }
   async preview(id: string): Promise<PhoneActionResult> {
     this.assertNoBasic();
@@ -640,6 +751,10 @@ export class PhonesService {
     });
   }
   async close(): Promise<void> {
+    for (const read of this.screenReads.values()) read.abort();
+    this.closed = true; clearInterval(this.timer); this.wirelessReconnectAbort.abort();
+    if (this.wirelessReconnect) await this.wirelessReconnect;
+    await this.androidSetup.close();
     this.basic.close();
     this.cloud.close();
     for (const job of this.installs.values()) job.abort.abort(new Error("ProfilePilot 正在退出，安装已停止。"));

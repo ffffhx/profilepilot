@@ -2,13 +2,17 @@ import { type PhoneDevice, type PhoneSetting, type PhonesSnapshot } from "../sha
 import { groupPhoneDevices } from "../shared/phone-devices";
 import { phoneConnectionPresentation, phoneEnhancementPresentation, phonePresentation, type PhoneRoutePresentation, type PhoneSettingRow } from "../shared/phone-presentation";
 import { workspaceIdentityBar, workspaceSwitcher, refreshWorkspaceSwitcher } from "./workspace-switcher";
+import { pcControlTabs } from "./pc-control";
+import { phoneListShell, renderPhoneList } from "./phone-list";
+import { phoneListItem, type PhoneListFilter } from "../shared/phone-list";
 import { taskIcon } from "./task-icons";
 import { createMobileConnections } from "./mobile-connections";
 import { openPhoneWireless } from "./phone-wireless";
 import { PhoneWirelessDiscoveryMonitor, wirelessDiscoveryPresentation } from "./phone-wireless-discovery";
 import { openPhoneCloud } from "./phone-cloud";
 import { openPhoneEmulator } from "./phone-emulator";
-import { openBasicPhone, phoneModeChoices, phoneEnhancementContent, PHONE_APP_DOWNLOAD_URL } from "./phone-basic";
+import { openBasicPhone, phoneModeChoices, PHONE_APP_DOWNLOAD_URL } from "./phone-basic";
+import { createPhoneInspector } from "./phone-inspector";
 
 const root = document.getElementById("phones")!;
 const esc = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
@@ -28,13 +32,43 @@ let selected = sessionStorage.getItem("phone-selected") || "", busy = false, key
 let image: { id: string; instanceId: string; src: string; at: number } | null = null;
 let previewSource = "", previewVersion = 0, previewAttempted = false, previewLoading = false, previewError = "";
 let noticeTimer: number;
-let pickerOptions = "";
+let filter: PhoneListFilter = "all", detailIdentity = "";
+let drawerReturnId = "";
 const wirelessDiscovery = new PhoneWirelessDiscoveryMonitor(id => window.phones.discoverWireless(id), render);
 
-root.innerHTML = `${workspaceSwitcher("phones")}${workspaceIdentityBar()}<main class="phone-shell"><header class="phone-topbar"><div><h1>手机控制</h1><p>先连接手机，再选择控制方式</p></div><label class="phone-picker" hidden><span class="sr-only">选择手机</span>${taskIcon("phone")}<select name="phoneDevice" aria-label="选择手机"></select></label></header><div class="phone-content" aria-busy="true"></div></main>`;
+root.innerHTML = `${workspaceSwitcher("phones")}${workspaceIdentityBar()}<main class="phone-shell phone-console"><header class="pc-control-header"><div class="pc-control-brand"><h1>控制台</h1><p>管理浏览器、桌面应用与 Android 设备</p></div></header>${pcControlTabs("phones")}<div class="phone-console-layout"><div class="phone-registry-column">${phoneListShell()}</div><aside class="phone-inspector" aria-label="手机画面与会话"></aside></div><button class="phone-text-button phone-mobile-entry-link" data-action="mobile" hidden>用手机管理电脑任务 →</button></main>
+  <dialog class="phone-details" aria-labelledby="phone-details-title"><header class="phone-details-top"><span>设备详情</span><button data-action="close-details" aria-label="关闭设备详情">${taskIcon("close")}</button></header><div class="phone-details-scroll"><div class="phone-details-identity"></div><div class="phone-content" aria-busy="true"></div></div></dialog>`;
+const drawer = root.querySelector<HTMLDialogElement>(".phone-details")!;
+const inspector = createPhoneInspector(root.querySelector<HTMLElement>(".phone-inspector")!);
+drawer.addEventListener("close", () => {
+  key = ""; render();
+  const button = [...root.querySelectorAll<HTMLButtonElement>('.phone-device-link')].find(button => button.dataset.deviceId === drawerReturnId);
+  (button || root.querySelector<HTMLButtonElement>('[data-action="add-device"]'))?.focus({ preventScroll: true });
+});
+drawer.addEventListener("click", event => { if (event.target === drawer) { const box = drawer.getBoundingClientRect(); if (event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom) drawer.close(); } });
 refreshWorkspaceSwitcher();
 
 const openMobileConnections = createMobileConnections();
+root.querySelector<HTMLButtonElement>('.phone-mobile-entry-link')!.hidden = !openMobileConnections;
+function showDetails(id: string): void {
+  const group = groupPhoneDevices(snapshot.devices, id).find(group => group.routes.some(route => route.id === id));
+  if (!group) { notice("这台设备已不在列表中，请刷新后重试。", true); return; }
+  selected = group.device.id; drawerReturnId = selected;
+  if (!drawer.open) drawer.showModal();
+  key = ""; render();
+}
+function addDevice(): void {
+  const dialog = document.createElement("dialog"); dialog.className = "phone-connect-dialog"; dialog.setAttribute("aria-label", "添加 Android 设备");
+  dialog.innerHTML = `<header><h2>添加 Android 设备</h2><button data-close aria-label="关闭添加设备窗口">×</button></header><p>连接手机或创建一台新的虚拟设备。</p><div class="phone-connect-choices"><button data-connect="usb">${icon("usbDebugging")}<span><strong>通过 USB 连接</strong><small>插入数据线，并在手机上允许调试连接</small></span>${taskIcon("chevron")}</button><button data-connect="wifi">${icon("wifi")}<span><strong>通过 Wi-Fi 连接</strong><small>连接同一网络，使用无线调试配对</small></span>${taskIcon("chevron")}</button><button data-connect="emulator">${taskIcon("desktop")}<span><strong>创建虚拟设备</strong><small>安装 Android 环境、下载镜像并创建新设备</small></span>${taskIcon("chevron")}</button></div>`;
+  dialog.addEventListener("click", event => { const button = (event.target as Element).closest<HTMLButtonElement>("button"); if (!button) return; dialog.close(); dialog.remove(); if (button.dataset.connect === "usb") usb(); else if (button.dataset.connect === "wifi") wireless(true); else if (button.dataset.connect === "emulator") emulator("create"); });
+  dialog.addEventListener("close", () => dialog.remove()); document.body.append(dialog); dialog.showModal();
+}
+function downloads(): void {
+  const dialog = document.createElement("dialog"); dialog.className = "phone-connect-dialog"; dialog.setAttribute("aria-label", "下载手机 App");
+  dialog.innerHTML = `<header><h2>下载手机 App</h2><button data-close aria-label="关闭下载窗口">×</button></header><p>App 为可选安装。通过 USB 或 Wi-Fi 连接后，无需安装即可查看和操作手机。</p><figure class="phone-download-qr"><img src="./assets/profilepilot-android-download.svg" width="144" height="144" alt="ProfilePilot 安卓 App 下载二维码"><figcaption>扫码下载安卓 App<small>GitHub 发布版 · Android 11+</small></figcaption><button data-action="phone-download-copy">复制下载链接</button></figure><button data-action="phone-apk">获取 APK 文件</button>`;
+  dialog.querySelector('[data-close]')!.addEventListener('click', () => dialog.close());
+  dialog.addEventListener('close', () => dialog.remove()); root.append(dialog); dialog.showModal();
+}
 function usb(): void {
   const dialog = document.createElement("dialog");
   dialog.className = "phone-connect-dialog phone-usb-dialog";
@@ -45,23 +79,24 @@ function usb(): void {
   document.body.append(dialog); dialog.showModal();
 }
 function cloud(): void {
-  openPhoneCloud(id => { selected = id; void run(async () => {}); });
+  openPhoneCloud(id => { void run(async () => { snapshot = await window.phones.snapshot(); selected = id; }); });
 }
-function emulator(): void {
+function emulator(mode: "connect" | "create" = "connect"): void {
   openPhoneEmulator(device => {
-    selected = device.id; sessionStorage.setItem("phone-selected", selected);
-    void run(async () => {});
-  });
+    void run(async () => { snapshot = await window.phones.snapshot(); selected = device.id; });
+  }, mode);
 }
-function wireless(): void {
+function wireless(otherDevice = false): void {
   openPhoneWireless((device, prepare) => {
-    selected = device.id; sessionStorage.setItem("phone-selected", selected);
-    void run(async () => { if (prepare) await window.phones.prepare(device.id); });
-  }, current()?.transport === "emulator" ? undefined : current()?.id);
+    void run(async () => { if (prepare) await window.phones.prepare(device.id); snapshot = await window.phones.snapshot(); selected = device.id; });
+  }, otherDevice || current()?.transport === "emulator" ? undefined : current()?.id);
 }
 function current(): PhoneDevice | undefined { return snapshot.devices.find(device => device.id === selected); }
 function notice(text: string, error = false): void {
   const element = document.getElementById("phone-message")!;
+  const topDialog = [...document.querySelectorAll<HTMLDialogElement>('dialog[open]')].at(-1);
+  (topDialog || document.body).append(element);
+  if (topDialog) topDialog.addEventListener('close', () => document.body.append(element), { once: true });
   element.textContent = text; element.hidden = false; element.dataset.error = String(error);
   element.setAttribute("role", error ? "alert" : "status"); clearTimeout(noticeTimer);
   noticeTimer = window.setTimeout(() => element.hidden = true, error ? 12000 : 4500);
@@ -87,50 +122,62 @@ function connectionSection(status?: ReturnType<typeof phoneConnectionPresentatio
 }
 function enhancement(device?: PhoneDevice, disabledReason = "请先在上方连接手机，再直接安装 App。"): string {
   const app = phoneEnhancementPresentation(device);
-  return phoneEnhancementContent(device, disabledReason, settingsRows(app.permissions, app.canSetup && (!device?.basic || device.basic.phase === "stopped")));
+  return `<header class="phone-mode-heading"><h3>控制增强</h3><span>可选</span></header><p class="phone-mode-description">安装 App，开启控件识别、中文填写与手机端暂停。</p>
+    <div class="phone-app-status-panel"><header><strong>ProfilePilot 安卓 App</strong><span class="phone-route-badge" data-app-installation="${app.installation}" data-tone="${app.tone}">${app.label}</span></header><p class="phone-mode-hint">${app.installation === "missing" ? "不影响免安装控制" : app.note}</p>
+    <div class="phone-install-actions"><button data-action="install-phone-app" ${disabledReason ? `disabled title="${esc(disabledReason)}"` : ""}>${app.connected ? "更新手机 App" : app.installation === "installed" ? "连接手机 App" : "安装到手机"}</button><button class="phone-text-button" data-action="inspect-app" ${!device || device.transport === "cloud" || busy ? "disabled" : ""}>重新检测</button></div></div>
+    <div class="phone-permissions" aria-label="增强功能权限">${settingsRows(app.permissions, app.canSetup && (!device?.basic || device.basic.phase === "stopped"))}</div>
+    <details class="phone-downloads" data-phone-downloads><summary>其他下载方式</summary><figure class="phone-download-qr"><img src="./assets/profilepilot-android-download.svg" width="144" height="144" alt="ProfilePilot 安卓 App 下载二维码"><figcaption>扫码下载安卓 App<small>GitHub 发布版 · Android 11+</small></figcaption><button data-action="phone-download-copy">复制下载链接</button></figure><button data-action="phone-apk">获取 APK 文件</button></details>`;
 }
 function options(device?: PhoneDevice): string {
-  return `<details class="phone-options" data-phone-options><summary>设备设置</summary><div>
+  return `<details class="phone-options" data-phone-options><summary>${taskIcon("settings")}更多设置</summary><div>
     ${device && device.transport !== "cloud" ? '<button class="phone-text-button" data-action="rename">修改设备名称</button>' : ""}
     <button class="phone-text-button" data-action="cloud-link">未连接电脑时也同步手机状态</button>
     ${device?.cloud?.channelId ? '<button class="phone-text-button" data-action="cloud-forget">移除此状态同步</button>' : ""}
-    <button class="phone-text-button" data-action="wifi">连接其他手机</button>
+    <button class="phone-text-button" data-action="add-device">添加其他设备</button>
     <button class="phone-text-button" data-action="emulator">使用本机模拟器</button>
     ${openMobileConnections ? '<button class="phone-text-button" data-action="mobile">用手机管理电脑任务</button>' : ""}
   </div></details>`;
 }
 function render(): void {
   const groups = groupPhoneDevices(snapshot.devices, selected);
-  const group = groups.find(item => item.routes.some(route => route.id === selected)) || groups[0];
+  const previous = selected;
+  const group = groups.find(item => item.routes.some(route => route.id === selected)) || (!drawer.open ? groups.find(item => item.device.connection === "device") || groups[0] : undefined);
   selected = group?.device.id || "";
+  if (drawer.open && previous && !group) { drawer.close(); notice("这台设备已从列表移除。"); }
   if (selected) sessionStorage.setItem("phone-selected", selected);
+  drawer.dataset.deviceId = selected;
+  renderPhoneList(root, snapshot, { filter, selected, loaded, busy });
   const device = current(), status = group && phoneConnectionPresentation(group), view = status?.view;
+  inspector.update(device, busy);
   const needsDiscovery = !!device && !view?.emulator && !status?.routes.some(route => route.transport === "wifi" && route.detected);
-  wirelessDiscovery.update(needsDiscovery ? device.id : "", loaded && snapshot.adbAvailable && !busy && !document.hidden
+  wirelessDiscovery.update(needsDiscovery ? device.id : "", drawer.open && loaded && snapshot.adbAvailable && !busy && !document.hidden
     && window.workspacePane?.active !== false && !document.querySelector(".phone-wireless-dialog"));
   const basicOccupied = !!device?.basic && device.basic.phase !== "stopped";
-  const source = !basicOccupied && device && status?.connected && view?.directKnown ? JSON.stringify([device.id, device.state?.instanceId]) : "";
+  const source = drawer.open && !basicOccupied && device && status?.connected && view?.directKnown ? JSON.stringify([device.id, device.state?.instanceId]) : "";
   if (source !== previewSource) {
     previewSource = source; previewVersion++; previewAttempted = false; previewError = ""; image = null;
   }
   // Capture once per connection/selection, then retain the JPEG without polling
   // the phone. Defer until this pane is visible and the phone can accept a read.
-  if (source && view?.canPreview && !image && !previewAttempted && !previewLoading && !busy && !document.hidden && window.workspacePane?.active !== false) {
+  if (source && root.querySelector<HTMLDetailsElement>('[data-phone-app-setup]')?.open && view?.canPreview && !image && !previewAttempted && !previewLoading && !busy && !document.hidden && window.workspacePane?.active !== false) {
     const version = previewVersion;
     queueMicrotask(() => { if (version === previewVersion) void capture(true); });
   }
+  if (!drawer.open) return;
   const nextKey = JSON.stringify([snapshot.devices.map(({ confirmedAt, ...rest }) => rest), snapshot.error, snapshot.adbAvailable, selected, busy, image?.at, previewLoading, previewError, view?.directKnown, view?.known, status?.condition, status?.routes.map(route => route.connected), loaded, wirelessDiscovery.state]);
   if (nextKey === key) return; key = nextKey;
   const activeElement = document.activeElement;
-  const focusedAction = activeElement instanceof HTMLButtonElement && root.contains(activeElement) ? activeElement.dataset.action : undefined;
+  const focusedAction = activeElement instanceof HTMLButtonElement && drawer.contains(activeElement) ? activeElement.dataset.action : undefined;
   const optionsOpen = root.querySelector<HTMLDetailsElement>("[data-phone-options]")?.open;
   const errorDetailsOpen = root.querySelector<HTMLDetailsElement>(".phone-error-details")?.open;
   const appSetupOpen = root.querySelector<HTMLDetailsElement>("[data-phone-app-setup]")?.open;
-  const picker = root.querySelector<HTMLSelectElement>('[name="phoneDevice"]')!;
-  picker.parentElement!.hidden = !groups.length;
-  const items = groups.map(item => `<option value="${esc(item.device.id)}">${esc(phonePresentation(item.device).displayName)}</option>`).join("");
-  if (items !== pickerOptions) { picker.innerHTML = items; pickerOptions = items; }
-  picker.value = selected; picker.disabled = busy;
+  const downloadsOpen = root.querySelector<HTMLDetailsElement>("[data-phone-downloads]")?.open;
+  const sameDevice = detailIdentity === selected;
+  detailIdentity = selected;
+  const row = group && phoneListItem(group);
+  const identity = root.querySelector<HTMLElement>(".phone-details-identity")!;
+  const heading = device && view && row ? `<span class="phone-list-icon">${taskIcon(view.emulator ? "desktop" : "phone")}</span><div><div class="phone-details-name"><h2 id="phone-details-title">${esc(view.displayName)}</h2><button data-action="rename" aria-label="修改设备名称" ${device.transport === "cloud" ? "hidden" : ""}>${taskIcon("rename")}</button></div><p>${row.kind}<span class="phone-list-status" data-tone="${row.tone}"><i></i>${esc(row.status)}</span></p></div>` : '<h2 id="phone-details-title">设备不可用</h2>';
+  if (identity.dataset.markup !== heading) { identity.innerHTML = heading; identity.dataset.markup = heading; }
   const content = root.querySelector<HTMLElement>(".phone-content")!;
   content.setAttribute("aria-busy", String(busy || !loaded));
   if (!device || !view || !status) {
@@ -167,11 +214,14 @@ function render(): void {
       </details>
       </section>${options(device)}`;
   }
-  if (appSetupOpen !== undefined) { const details = root.querySelector<HTMLDetailsElement>("[data-phone-app-setup]"); if (details) details.open = appSetupOpen || Boolean(view?.active || view?.paused || status?.issue); }
-  if (optionsOpen) { const details = root.querySelector<HTMLDetailsElement>("[data-phone-options]"); if (details) details.open = true; }
-  if (errorDetailsOpen) { const details = root.querySelector<HTMLDetailsElement>(".phone-error-details"); if (details) details.open = true; }
+  const basic = content.querySelector('.phone-basic-section'); if (basic) content.prepend(basic);
+  const connectionHeading = content.querySelector('.phone-section-heading h2'); if (connectionHeading && !view?.emulator) connectionHeading.textContent = "连接方式";
+  if (sameDevice && appSetupOpen !== undefined) { const details = root.querySelector<HTMLDetailsElement>("[data-phone-app-setup]"); if (details) details.open = appSetupOpen || Boolean(view?.active || view?.paused || status?.issue); }
+  if (sameDevice && optionsOpen) { const details = root.querySelector<HTMLDetailsElement>("[data-phone-options]"); if (details) details.open = true; }
+  if (sameDevice && downloadsOpen) { const details = root.querySelector<HTMLDetailsElement>("[data-phone-downloads]"); if (details) details.open = true; }
+  if (sameDevice && errorDetailsOpen) { const details = root.querySelector<HTMLDetailsElement>(".phone-error-details"); if (details) details.open = true; }
   if (busy) content.querySelectorAll<HTMLButtonElement>('button:not([data-action="phone-download-copy"]):not([data-action="phone-apk"])').forEach(button => button.disabled = true);
-  if (focusedAction) root.querySelector<HTMLButtonElement>(`[data-action="${focusedAction}"]`)?.focus({ preventScroll: true });
+  if (focusedAction) drawer.querySelector<HTMLButtonElement>(`[data-action="${focusedAction}"]`)?.focus({ preventScroll: true });
   updateElapsed();
 }
 function updateElapsed(): void {
@@ -208,14 +258,16 @@ async function capture(automatic = false): Promise<void> {
     }
   } finally { previewLoading = false; render(); }
 }
-root.addEventListener("change", event => {
-  const input = event.target;
-  if (!(input instanceof HTMLSelectElement) || input.name !== "phoneDevice" || busy || !snapshot.devices.some(device => device.id === input.value)) return;
-  selected = input.value; render();
-});
+root.addEventListener("toggle", event => { if ((event.target as HTMLElement).matches('[data-phone-app-setup]')) render(); }, true);
 root.addEventListener("click", event => {
-  const button = (event.target as Element).closest<HTMLButtonElement>("button"); if (!button || button.disabled) return;
+  const button = (event.target as Element).closest<HTMLButtonElement>("button");
+  if (!button) { const row = (event.target as Element).closest<HTMLElement>("[data-phone-row]"); if (row && !busy) { selected = row.dataset.phoneRow!; render(); } return; }
+  if (button.disabled) return;
   const action = button.dataset.action;
+  if (action === "close-details") { drawer.close(); return; }
+  if (action === "downloads") { downloads(); return; }
+  if (button.dataset.phoneFilter) { filter = button.dataset.phoneFilter as PhoneListFilter; render(); return; }
+  if (action === "clear-filter") { filter = "all"; render(); return; }
   if (action === "phone-apk") {
     void window.mobile.openApkFolder().then(() => notice("已打开 APK 文件所在位置，可将文件传到手机安装。")).catch(error => notice(error.message, true)); return;
   }
@@ -223,15 +275,29 @@ root.addEventListener("click", event => {
     void navigator.clipboard.writeText(PHONE_APP_DOWNLOAD_URL).then(() => notice("下载链接已复制，可在手机浏览器中打开。")).catch(() => notice("复制失败，请使用右侧二维码下载。", true)); return;
   }
   if (busy) return;
+  if (action === "add-device") { addDevice(); return; }
+  if (action === "refresh") { void run(async () => { snapshot = await window.phones.snapshot(); loaded = true; }); return; }
+  if (action === "refresh-phone-screen") { void inspector.refresh(true); return; }
+  if (action === "enlarge-phone-screen") { inspector.enlarge(); return; }
+  if (button.dataset.deviceId) {
+    const group = groupPhoneDevices(snapshot.devices, button.dataset.deviceId).find(group => group.routes.some(route => route.id === button.dataset.deviceId));
+    if (!group) { notice("这台设备已不在列表中，请刷新后重试。", true); return; }
+    selected = group.device.id;
+    if (action === "select-device") { render(); return; }
+    if (action === "details") { showDetails(selected); return; }
+  }
   if (action === "cloud-link") { cloud(); return; }
   if (action === "usb") { usb(); return; }
   if (action === "wifi") { wireless(); return; }
   if (action === "emulator") { emulator(); return; }
   if (action === "mobile") { void openMobileConnections?.(); return; }
   const device = current(); if (!device) return;
+  if (button.dataset.phoneBasicCommand) { void run(() => window.phones.basicControl(device.id, button.dataset.phoneBasicCommand as "pause" | "resume" | "stop")); return; }
   if (action === "inspect-app") { void run(() => window.phones.inspect(device.id)); return; }
-  if (action === "basic-control") {
-    void run(async () => { const started = await window.phones.basicStart(device.id, "control", "本机用户", "免安装手机控制"); openBasicPhone(started, installPhoneApp); }); return;
+  if (action === "basic-control" || action === "phone-operate") {
+    const group = groupPhoneDevices(snapshot.devices, selected).find(group => group.routes.some(route => route.id === selected));
+    if (!group || device.connection !== "device" || device.pending || phoneConnectionPresentation(group).occupied) { showDetails(device.id); return; }
+    void run(async () => { const started = await window.phones.basicStart(device.id, action === "phone-operate" ? "control" : "view", "本机用户", "免安装手机控制"); openBasicPhone(started, installPhoneApp); }); return;
   }
   if (action === "basic-open") { openBasicPhone(device, installPhoneApp); return; }
   if (action === "basic-stop") { void run(() => window.phones.basicControl(device.id, "stop")); return; }

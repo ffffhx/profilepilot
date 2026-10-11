@@ -141,6 +141,7 @@ export class TaskService {
   publish(deferPersistence = false): void {
     this.syncControlReceivers();
     if (deferPersistence) this.store.scheduleSave(); else this.store.save();
+    if (this.dependencies.browser.syncTaskState) for (const task of this.store.data.tasks) this.dependencies.browser.syncTaskState(task);
     this.broadcast();
   }
   snapshot(): TaskSnapshot {

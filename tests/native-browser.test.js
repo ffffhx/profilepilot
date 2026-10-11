@@ -13,6 +13,30 @@ const { hasTaskBrowser } = require(path.join(build, 'shared/tasks'));
 const { NATIVE_REQUIRED_CAPABILITIES } = require(path.join(build, 'main/tasks/native-compatibility'));
 const { requestNativeControl } = require(path.join(build, 'main/native-control/cli'));
 
+test('native task-group notifications forward real task status, deduplicate and never acquire control', async () => {
+  const calls = [], task = { profileId: 'native:fixture', sessionId: 'groups', title: '校招申请', status: 'waiting_user' };
+  const state = { profileId: task.profileId, connected: true, ownerSessionId: task.sessionId, controlGeneration: 'generation-1', capabilities: ['taskGroups'] };
+  const browser = new NativeBrowser({ onEvent: () => () => {}, states: () => [state], request: async (_id, method, params) => { calls.push({ method, params }); return {}; } }, os.tmpdir());
+  browser.syncTaskState(task); browser.syncTaskState(task);
+  assert.equal(calls.length, 1); assert.equal(calls[0].method, 'taskState');
+  assert.equal(calls[0].params.status, 'waiting_user'); assert.equal(calls[0].params.taskTitle, '校招申请');
+  state.controlGeneration = 'generation-2'; browser.syncTaskState(task); assert.equal(calls.length, 2);
+  state.ownerSessionId = 'another'; browser.syncTaskState(task); assert.equal(calls.length, 2);
+  state.ownerSessionId = task.sessionId; state.connected = false; browser.syncTaskState(task); assert.equal(calls.length, 2);
+  state.connected = true; state.capabilities = []; task.status = 'failed'; browser.syncTaskState(task); assert.equal(calls.length, 2);
+  browser.dispose();
+});
+
+test('native completion distinguishes failed, partial and completed task group states', async () => {
+  const calls = [], task = { profileId: 'native:fixture', sessionId: 'groups', title: '验收', status: 'failed' };
+  const browser = new NativeBrowser({ onEvent: () => () => {}, states: () => [{ profileId: task.profileId, connected: true }],
+    request: async (_id, method, params) => { calls.push({ method, params }); return {}; } }, os.tmpdir());
+  await browser.control(task, 'complete'); assert.equal(calls.at(-1).params.groupPhase, 'failed');
+  task.status = 'partial'; await browser.control(task, 'complete'); assert.equal(calls.at(-1).params.groupPhase, 'paused');
+  task.status = 'completed'; await browser.control(task, 'complete'); assert.equal(calls.at(-1).params.groupPhase, undefined);
+  browser.dispose();
+});
+
 function open(port, origin = `chrome-extension://${NATIVE_EXTENSION_ID}`) {
   return new Promise((resolve, reject) => {
     const req = http.request({ host: '127.0.0.1', port, path: '/profilepilot', headers: { Origin: origin, Connection: 'Upgrade', Upgrade: 'websocket', 'Sec-WebSocket-Key': randomBytes(16).toString('base64'), 'Sec-WebSocket-Version': '13' } });

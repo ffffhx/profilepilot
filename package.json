@@ -237,6 +237,8 @@
     "agent-session-core": "^0.1.1",
     "ai": "7.0.107",
     "exceljs": "^4.4.0",
+    "extract-zip": "^2.0.1",
+    "fast-xml-parser": "^5.11.2",
     "pdfjs-dist": "^6.3.289",
     "qrcode": "^1.5.4",
     "react": "^19.3.0",

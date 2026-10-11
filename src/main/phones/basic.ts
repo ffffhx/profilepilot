@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { PhoneActionInput, PhoneActionResult, PhoneSessionState } from "../../shared/phones";
+import type { PhoneActionInput, PhoneActionResult, PhoneBasicModeInput, PhoneSessionState } from "../../shared/phones";
 import { deviceShell, type AdbRunner } from "./adb";
 
 type Session = { state: PhoneSessionState; requests: Set<string>; pending?: AbortController; frame?: { width: number; height: number; at: number } };
@@ -28,6 +28,16 @@ export class BasicPhoneControl {
     if (command === "pause" && !["viewing", "controlling"].includes(state.phase)) throw new Error("当前会话不能暂停。");
     state.generation++;
     state.phase = command === "stop" ? "stopped" : command === "pause" ? "paused" : state.mode === "view" ? "viewing" : "controlling";
+    session.frame = undefined; session.pending?.abort(); this.changed();
+  }
+  setMode({ id, sessionId, generation, mode }: PhoneBasicModeInput): void {
+    const session = this.sessions.get(id);
+    if (!session || session.state.sessionId !== sessionId || session.state.generation !== generation) throw new Error("免安装会话已改变，请重新读取状态。");
+    const state = session.state;
+    if (!["viewing", "controlling", "paused"].includes(state.phase)) throw new Error("免安装会话已结束或断开，请重新开始。");
+    if (state.mode === mode && state.phase !== "paused") return;
+    state.mode = mode; state.phase = mode === "view" ? "viewing" : "controlling"; state.generation++;
+    state.lastAction = mode === "view" ? "已切换为查看" : "已切换为操作";
     session.frame = undefined; session.pending?.abort(); this.changed();
   }
   disconnect(id: string): void {

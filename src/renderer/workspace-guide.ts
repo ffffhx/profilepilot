@@ -10,18 +10,18 @@ const tab = (workspace: WorkspaceId, title: string, description: string): GuideS
   id: `${workspace}-tab`, workspace, selector: `.workspace-link[data-workspace="${workspace}"]`, shell: true, title, description
 });
 const steps: GuideStep[] = [
-  tab("browser", "PC 控制：管理浏览器与桌面应用", "默认展示浏览器 Profiles，保存账号、登录状态和配置。点击页面顶部的「Electron 应用」可切换到桌面应用列表。"),
+  tab("browser", "控制台：选择要控制的设备或应用", "在顶部切换浏览器 Profiles、Electron 应用与 Android 设备。控制台会记住你上次使用的分类。"),
   { id: "browser-new", workspace: "browser", selector: '.account-sync-panel [data-action="open-agent-browser-setup"]', side: "top", title: "从这里创建 Agent 浏览器", description: "选择一个已有 Profile 作为来源，创建独立的 Agent 浏览器。如果想用平时已登录的 Chrome，可以到「配套工具」连接浏览器扩展。" },
   { id: "browser-profiles", workspace: "browser", selector: ".profiles-section-head", side: "bottom", title: "在这里选择你的浏览器", description: "从下方列表选择需要的 Profile，查看连接状态、启动浏览器或管理配置。" },
-  tab("phones", "手机控制：连接 Android 与移动工作区", "这里支持电脑查看或控制 Android 手机，也能让你从手机发送电脑任务、跟进结果和处理确认。"),
-  { id: "phone-connect", workspace: "phones", selector: '.phone-connection-section', side: "bottom", title: "先连接 Android 手机", description: "USB 或 Wi-Fi 任选一种。连接成功后，点击下方“查看手机”即可使用，无需安装手机 App。" },
-  { id: "phone-mobile", workspace: "phones", selector: '[data-phone-options] [data-action="mobile"]', reveal: "[data-phone-options]", side: "top", title: "也可以用手机管理电脑任务", description: "从这个入口连接移动版，在手机上发任务、查看进度和处理确认。使用时需要电脑保持运行，手机能访问这台电脑。" },
+  { id: "phones-tab", workspace: "phones", selector: '[data-pc-view="phones"]', title: "Android 设备：集中管理你的手机", description: "每台设备只占一行，USB 与 Wi-Fi 连接自动合并。点击设备名称查看连接、安装与权限设置。" },
+  { id: "phone-connect", workspace: "phones", selector: '.phone-list-tools [data-action="add-device"]', side: "bottom", title: "先添加一台设备", description: "通过 USB、Wi-Fi 连接手机，或启动本机模拟器。选择设备后，右侧会自动显示手机画面，无需安装手机 App。" },
+  { id: "phone-mobile", workspace: "phones", selector: '.phone-mobile-entry-link', side: "top", optional: true, title: "也可以用手机管理电脑任务", description: "从这个入口连接移动版，在手机上发任务、查看进度和处理确认。使用时需要电脑保持运行，手机能访问这台电脑。" },
   tab("tools", "配套工具：完成连接与安装", "第一次使用日常 Chrome，可以先来这里。浏览器扩展负责连接，CLI 和使用指引方便外部 Agent 调用 ProfilePilot。"),
   { id: "tools-extension", workspace: "tools", selector: '[data-action="connect-browser-extension"]', side: "bottom", title: "连接你日常使用的 Chrome", description: "先在这一栏选择常用 Profile，再点击此按钮，按 Chrome 中的提示完成扩展安装与连接，就能沿用已有登录状态。" },
   { id: "tools-cli", workspace: "tools", selector: '[data-action="install-profilepilot-cli"]', side: "bottom", title: "让外部 Agent 使用 ProfilePilot", description: "需要从外部 Agent 操作浏览器或手机时，在这里安装 CLI 和配套使用指引。安装状态和更新入口也会显示在这一栏。" },
   tab("agent", "Agent：把任务交给 AI", "在这个 Tab 描述目标、查看执行过程和结果。任务进行中也可以补充要求、暂停或接管。"),
   { id: "agent-prompt", workspace: "agent", selector: "#prompt, #steering", side: "top", optional: true, title: "在输入框里说清楚目标", description: "例如：整理当前网页里的产品名称和价格，生成表格。说明预期结果，必要时附上文件；已有任务也能在这里补充要求。" },
-  { id: "local-apps-tab", workspace: "local-apps", selector: '[data-pc-view="local-apps"]', title: "Electron 应用：管理项目和服务", description: "在 PC 控制顶部切换浏览器 Profiles 和 Electron 应用。这里可以查看应用的运行与连接状态，添加本地项目或后台服务。" },
+  { id: "local-apps-tab", workspace: "local-apps", selector: '[data-pc-view="local-apps"]', title: "Electron 应用：管理项目和服务", description: "在控制台顶部切换浏览器 Profiles、Electron 应用和 Android 设备。这里可以查看应用的运行与连接状态，添加本地项目或后台服务。" },
   { id: "apps-add", workspace: "local-apps", selector: '.app-topbar [data-action="add"]', side: "left", title: "先添加一个本地项目", description: "选择项目目录并配置启动命令，以后就能在这里启动、停止和查看日志。只有需要管理本地项目时才需要添加。" },
   { id: "apps-list", workspace: "local-apps", selector: ".pc-apps-table thead", side: "bottom", title: "从表格选择应用", description: "选中一行后可以查看应用详情、管理启动配置和调试连接。应用的状态、连接方式与端口也会直接展示在表格中。" },
   { id: "settings", workspace: "agent", selector: '.sidebar-footer [data-nav="settings"]', title: "在 Agent 设置中配置模型", description: "内置 Agent 的模型服务、任务运行与记录选项在这里配置。准备好浏览器和模型后，回到 Agent 开始第一个任务。" }

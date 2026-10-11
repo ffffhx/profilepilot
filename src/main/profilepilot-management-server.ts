@@ -28,7 +28,7 @@ const CLOSE_TIMEOUT_MS = 2_000;
 
 type ManagementProfileManager = Pick<
   ProfileManager,
-  "getState" | "createProfile" | "renameProfile" | "launchProfile" | "closeProfile" | "deleteProfile"
+  "getState" | "createProfile" | "renameProfile" | "configureProfileBrowser" | "launchProfile" | "closeProfile" | "deleteProfile"
 >;
 
 export interface ProfilePilotManagementServerOptions {
@@ -159,7 +159,7 @@ export async function executeProfilePilotManagementCommand(
     if (!service) throw new ProfileManagerError("Agent 服务尚未就绪，请稍后重试。", "TASK_SERVICE_UNAVAILABLE");
     return executeTaskManagementCommand(parsed, service, async selector => resolveProfile(await options.profileManager.getState(), selector).id);
   }
-  if (!["ping", "profile.list", "profile.get", "profile.create", "profile.rename", "profile.start", "profile.stop", "profile.delete"].includes(command.action)) {
+  if (!["ping", "profile.list", "profile.get", "profile.create", "profile.rename", "profile.configure", "profile.start", "profile.stop", "profile.delete"].includes(command.action)) {
     throw new ProfileManagerError("未知的管理命令。", "MANAGEMENT_COMMAND_UNKNOWN");
   }
   if (command.action === "ping") {
@@ -191,13 +191,23 @@ export async function executeProfilePilotManagementCommand(
 
   // Explicitly narrow to profile mutations: unknown actions must never fall
   // through to deleting the selected profile.
-  if (!(command.action === "profile.rename" || command.action === "profile.start" || command.action === "profile.stop" || command.action === "profile.delete")) {
+  if (!(command.action === "profile.rename" || command.action === "profile.configure" || command.action === "profile.start" || command.action === "profile.stop" || command.action === "profile.delete")) {
     throw new ProfileManagerError("未知的管理命令。", "MANAGEMENT_COMMAND_UNKNOWN");
   }
   const before = await manager.getState();
   const profile = resolveProfile(before, command.selector);
   assertCliManageable(profile);
 
+  if (command.action === "profile.configure") {
+    if (typeof command.hideAutomation !== "boolean") {
+      throw new ProfileManagerError("hideAutomation 必须是布尔值。", "PROFILE_BROWSER_SETTINGS_INVALID");
+    }
+    const changed = (profile.hideAutomation === true) !== command.hideAutomation;
+    await manager.configureProfileBrowser(profile.id, command.hideAutomation);
+    const state = await manager.getState();
+    options.onMutation?.();
+    return { changed, restart_required: changed && profile.running, profile: toManagementProfile(resolveProfile(state, profile.id)) };
+  }
   if (command.action === "profile.rename") {
     await manager.renameProfile(profile.id, command.name);
     const state = await manager.getState();
@@ -355,6 +365,7 @@ function toManagementProfile(profile: PublicProfile, availability?: { ready: boo
     proxy_kind: proxyKind,
     project_tag: profile.projectTag,
     agent_access: profile.agentAccessDisabled ? "blocked" : "allowed",
+    hide_automation: profile.hideAutomation === true,
     ...(availability ? { task_ready: availability.ready, task_unavailable_reason: availability.reason, task_unavailable_code: availability.code } : {}),
     occupancy: occupancy ? {
       session: occupancy.session,

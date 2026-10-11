@@ -36,6 +36,7 @@ ppilot browser [--profile native:Default] [--session NAME] METHOD [--params JSON
   tabs                           List existing ordinary tabs
   claim --tab ID | --new-tab      Claim one Profile; returns a session ID
   observe | read                 Read DOM and versioned element refs
+  observe --output PATH          Save PNG and return matching version/refs/path
   action --params JSON           BrowserAction with current observation version
   pointer --params JSON          Coordinates from a screenshot observation
   screenshot [--output PATH]     PNG capture
@@ -50,6 +51,8 @@ ppilot browser [--profile native:Default] [--session NAME] METHOD [--params JSON
   --root PATH                    Override browser service data directory
 Use a session for every command after claim. Resume is explicit; never replay
 an action after timeout/disconnect. Run observe again after actions or takeover.
+For visual puzzles, the calling Agent reads observe --output's screenshotPath,
+then uses action/pointer with that observation's version. No model is started.
 Exit codes: 0 success, 64 invalid input, 69 disconnected, 75 stop/reconcile,
 1 browser error. JSON errors include a stable NATIVE_* code.
 `;
@@ -107,10 +110,14 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   const controlAlias = ["handoff", "resume", "complete", "release"].includes(method || "");
   if (!isNativeControlMethod(method) && !controlAlias) invalidInput(method ? `未知浏览器方法：${method}` : "需要浏览器方法；运行 ppilot browser --help 查看用法。");
   if (!/^[\w.-]{1,128}$/.test(requestId)) invalidInput("requestId 必须是 1–128 个字母、数字、下划线、连字符或点。");
-  if (output && method !== "screenshot") invalidInput("--output 仅支持截图。");
+  if (output && !["screenshot", "observe"].includes(method!)) invalidInput("--output 仅支持 screenshot 或 observe。");
   const positional = ["open", "switch", "cdp"].includes(method!) && args[0] && !args[0].startsWith("--") ? args.shift() : undefined;
   if (args.length) invalidInput(`未知参数：${args.join(" ")}`);
   let params = readParams(inline, file, stdin);
+  if (output && method === "observe") {
+    if (params.screenshot === false) invalidInput("observe --output 需要截图，不能同时指定 screenshot:false。");
+    params.screenshot = true;
+  }
   if (controlAlias) { params = { action: method }; method = "control"; }
   else if (method === "cdp") {
     if (!positional || !/^[A-Za-z]+\.[A-Za-z0-9]+$/.test(positional)) invalidInput("cdp 需要有效方法，例如 Runtime.evaluate。");
@@ -127,7 +134,18 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   if (newTab) params.newTab = true;
   await ensureBrowserService(root);
   const result = await requestNativeControl({ requestId, method, profileId, sessionId, params }, root);
-  if (output) {
+  if (output && method === "observe") {
+    if (typeof result?.screenshotDataUrl !== "string" || !result.screenshotDataUrl.startsWith("data:image/png;base64,") || !result.version) {
+      throw new NativeControlError("NATIVE_RENDER_UNAVAILABLE", "本次观察未取得可用截图；未写入图片，请勿使用同一路径的旧截图。可先检查页面文字和控制状态。");
+    }
+    const bytes = Buffer.from(result.screenshotDataUrl.slice("data:image/png;base64,".length), "base64");
+    if (!bytes.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex"))) throw new NativeControlError("NATIVE_RENDER_UNAVAILABLE", "本次截图格式无效；未写入图片，请勿使用旧截图。");
+    writeFileSync(output, bytes, { mode: 0o600 });
+    // Preserve the very observation used to bind pointer coordinates. A second
+    // screenshot/observe would create a different visual state. Keep image bytes
+    // out of the text tool result; the calling Agent opens this local artifact.
+    process.stdout.write(JSON.stringify({ ok: true, result: { ...result, screenshotDataUrl: undefined, screenshotPath: path.resolve(output) } }) + "\n");
+  } else if (output) {
     if (method !== "screenshot" || typeof result?.data !== "string") throw new Error("--output 仅支持截图。");
     writeFileSync(output, Buffer.from(result.data, "base64"), { mode: 0o600 }); process.stdout.write(JSON.stringify({ ok: true, path: path.resolve(output) }) + "\n");
   } else process.stdout.write(JSON.stringify({ ok: true, result }) + "\n");

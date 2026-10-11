@@ -3,6 +3,7 @@
   --task-sidebar-default-width: 252px;
   --task-workbench-header: 64px;
   --task-reader-width: 854px;
+  --task-body-size: calc(var(--task-font-size, 15px) - 2px);
   font-family: "PingFang SC", "Microsoft YaHei UI", "Segoe UI", sans-serif;
 }
 .workspace-layout #task-app .app-frame { height: calc(100dvh - var(--workspace-topbar-height)); }
@@ -67,7 +68,7 @@
 .workspace-layout #task-app .thread-main:has(#steer-task.task-composer-compact) {
   display: flex; flex-direction: column; width: min(100%, 918px); max-width: 918px;
   min-height: calc(100dvh - var(--workspace-topbar-height) - var(--task-workbench-header));
-  margin: 0 auto; padding: 28px 32px 0;
+  margin: 0 auto; padding: 20px 32px 0;
 }
 .workspace-layout #task-app .thread-transcript { flex: 1; padding: 0; min-width: 0; }
 .workspace-layout #task-app .thread-transcript .event-list { padding: 0; gap: 18px; }
@@ -76,12 +77,12 @@
 .workspace-layout #task-app .thread-main .history-footer,
 .workspace-layout #task-app .thread-main:has(#steer-task.task-composer-compact) > .history-footer {
   position: sticky; bottom: 0; z-index: 4; flex: none; margin-top: auto;
-  padding: 14px 0 22px; background: var(--panel); border: 0;
+  padding: 10px 0 14px; background: var(--panel); border: 0;
 }
 .workspace-layout #task-app .history-files { border: 0; margin: 10px 0 20px 36px; padding: 0; }
 .workspace-layout #task-app .history-files > span { border: 1px solid var(--line); padding: 8px; border-radius: 9px; background: var(--panel); }
 .workspace-layout #task-app .history-files button { font-size: 11px; }
-.workspace-layout #task-app .task-process-group { width: 84%; margin: 6px auto 22px 0; padding: 7px 10px; border: 0; background: var(--panel-soft); border-radius: 7px; }
+.workspace-layout #task-app .task-process-group { width: 84%; margin: 4px auto 16px 0; padding: 5px 10px; border: 0; background: var(--panel-soft); border-radius: 7px; }
 .workspace-layout #task-app .task-process-group > summary { font-size: 11px; color: var(--muted); }
 .workspace-layout #task-app .execution-status { align-items: center; border: 0; padding: 0; margin: 0 0 22px; background: transparent; color: var(--muted); }
 .workspace-layout #task-app .execution-status > div { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
@@ -91,33 +92,35 @@
 
 /* Distinct message edges: user's blue bubble on the right, model reply on the left. */
 .workspace-layout #task-app .task-chat-surface .history-request {
-  display: block; width: fit-content; max-width: 70%; margin: 0 0 34px auto;
+  display: block; width: fit-content; max-width: 70%; margin: 0 0 22px auto;
   padding: 0; border: 0; background: transparent; overflow-wrap: anywhere;
 }
 .workspace-layout #task-app .task-chat-surface .history-request::before { display: none; }
 .workspace-layout #task-app .task-chat-surface :is(.history-request, .history-answer) > .history-agent { position: static; width: auto; height: auto; overflow: visible; clip-path: none; }
 .workspace-layout #task-app .task-chat-surface .history-request > .history-agent { display: block; text-align: right; font-weight: 400; font-size: 11px; margin: 0 0 7px; color: var(--muted); }
-.workspace-layout #task-app .task-chat-surface .history-request > .task-markdown { padding: 13px 17px; border: 1px solid var(--accent-line); border-radius: 13px 13px 3px 13px; background: var(--task-user-bg); font-size: var(--task-body-size, 14px); line-height: 1.85; }
+.workspace-layout #task-app .task-chat-surface .history-request > .task-markdown { padding: 10px 14px; border: 1px solid var(--accent-line); border-radius: 13px 13px 3px 13px; background: var(--task-user-bg); font-size: var(--task-body-size); line-height: 1.6; }
 .workspace-layout #task-app .task-chat-surface .history-request > .chat-message-actions { justify-content: flex-end; }
 .workspace-layout #task-app .task-chat-surface .history-answer,
 .workspace-layout #task-app .task-chat-surface #task-result.history-answer {
-  position: relative; display: block; width: 84%; max-width: 84%; margin: 0 auto 32px 0;
+  position: relative; display: block; width: 84%; max-width: 84%; margin: 0 auto 22px 0;
   padding: 0 0 0 36px; background: transparent; border: 0; border-radius: 0; text-align: left;
 }
 .workspace-layout #task-app .task-chat-surface .history-answer::before,
 .workspace-layout #task-app .task-chat-surface #task-result.history-answer::before { display: block; width: 26px; height: 26px; top: 0; left: 0; border-radius: 8px; background-size: 19px; }
-.workspace-layout #task-app .task-chat-surface .history-answer > .history-agent { display: block; min-height: 26px; margin: 0 0 14px; padding-top: 3px; color: var(--ink); font-size: 12px; font-weight: 600; }
+.workspace-layout #task-app .task-chat-surface .history-answer > .history-agent { display: block; min-height: 26px; margin: 0 0 6px; padding-top: 3px; color: var(--ink); font-size: 12px; font-weight: 600; }
 .workspace-layout #task-app .task-chat-surface .history-answer > .task-markdown,
-.workspace-layout #task-app .task-chat-surface #task-result.history-answer > .task-markdown { padding: 0; border: 0; background: transparent; border-radius: 0; color: var(--ink); font-size: var(--task-body-size, 14px); line-height: 1.85; }
+.workspace-layout #task-app .task-chat-surface #task-result.history-answer > .task-markdown { padding: 0; border: 0; background: transparent; border-radius: 0; color: var(--ink); font-size: var(--task-body-size); line-height: 1.6; }
+/* Override legacy paragraph sizing so both roles follow the reading preference. */
+.workspace-layout #task-app .task-chat-surface .task-markdown p { font-size: inherit; line-height: inherit; }
 .workspace-layout #task-app .task-chat-surface #task-result.history-answer > .task-markdown > p:first-child { font-weight: 400; }
 .workspace-layout #task-app .task-chat-surface .task-markdown > :first-child { margin-top: 0; }
 .workspace-layout #task-app .task-chat-surface .chat-message-actions { height: auto; margin: 8px 0 0; gap: 6px; }
 .workspace-layout #task-app .task-chat-surface .chat-message-actions button { border: 0; background: transparent; padding: 2px 5px; min-height: 24px; font-size: 10px; color: var(--muted); }
 
 /* One toolbar below the editor, including context and send controls. */
-.workspace-layout #task-app .history-footer .task-chat-surface #steer-task { display: flex; flex-direction: column; padding: 15px 14px 11px; border: 1px solid var(--line); border-radius: 13px; gap: 0; box-shadow: 0 4px 18px #24344b05; }
+.workspace-layout #task-app .history-footer .task-chat-surface #steer-task { display: flex; flex-direction: column; padding: 10px 14px 9px; border: 1px solid var(--line); border-radius: 13px; gap: 0; box-shadow: 0 4px 18px #24344b05; }
 .workspace-layout #task-app .task-chat-surface #steer-task:focus-within { border-color: var(--accent-line); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 6%, transparent); }
-.workspace-layout #task-app .task-chat-surface #steer-task textarea { min-height: 48px; padding: 0 5px 8px; font-size: 13px; line-height: 1.8; }
+.workspace-layout #task-app .task-chat-surface #steer-task textarea { min-height: 40px; padding: 0 5px 6px; font-size: var(--task-body-size); line-height: 1.6; }
 .workspace-layout #task-app #steer-task .task-followup-actions { display: flex; flex-flow: row nowrap; align-items: center; width: 100%; gap: 7px; margin: 0; padding: 5px 0 0; }
 .workspace-layout #task-app #steer-task .task-followup-actions > button:not(.send-task) { display: inline-flex; align-items: center; justify-content: center; min-height: 29px; border: 0; background: transparent; padding: 4px 6px; color: var(--muted); border-radius: 6px; }
 .workspace-layout #task-app #steer-task .task-followup-actions > button:hover:not(:disabled) { color: var(--accent); background: var(--accent-soft); }

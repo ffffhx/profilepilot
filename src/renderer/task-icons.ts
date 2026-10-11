@@ -1,5 +1,7 @@
 const paths = {
   search: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',
+  refresh: '<path d="M20 7v5h-5M4 17v-5h5M19.5 11a7.5 7.5 0 0 0-13-5M4.5 13a7.5 7.5 0 0 0 13 5"/>',
+  shield: '<path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z"/>',
   phone: '<rect x="6" y="2" width="12" height="20" rx="3"/><path d="M10 5h4m-3 14h2"/>',
   usage: '<path d="M4 20V10m8 10V4m8 16v-7"/>',
   desktop: '<rect x="3" y="3" width="18" height="14" rx="2"/><path d="M8 21h8M12 17v4m-5-9 3 3-3 3m6 0h4"/>',

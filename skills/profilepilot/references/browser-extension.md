@@ -1,6 +1,6 @@
 # ProfilePilot Browser CLI (`ppilot browser`)
 
-Use ProfilePilot Browser CLI (`ppilot browser`) when this route was selected. It sends commands through the independent local browser service to the target Profile's extension, without invoking an additional model. Browser commands automatically start that service; the desktop App can remain closed. Install/connect the extension in the exact target Profile. Do not substitute `ppilot chat` or `ppilot run`, which start model-backed tasks.
+Use ProfilePilot Browser CLI (`ppilot browser`) when this route was selected. Page reads and actions send commands through the independent local browser service to the target Profile's extension, without invoking an additional model. Browser commands automatically start that service; the desktop App can remain closed. Install/connect the extension in the exact target Profile. Do not substitute `ppilot chat` or `ppilot run`, which start model-backed tasks.
 
 `ppilot browser connect --profile native:PROFILE_DIRECTORY` returns an installation/connection URL; open it in that exact Chrome Profile. `pair --profile native:PROFILE_DIRECTORY` returns a manual pairing code to paste into the extension. Do not print pairing codes into task logs or model-visible summaries. `service status` checks the service without launching it; `service start` starts it explicitly. `service stop` refuses while browser sessions still own Profiles. Never stop the shared service merely because one Agent finishes.
 
@@ -33,6 +33,8 @@ ppilot browser --session research screenshot --output page.png
 On Windows PowerShell 5.1/7, use `ppilot` (the installed `ppilot.ps1` entry takes precedence) or `ppilot.ps1`. This preserves `&` in URLs and uses UTF-8 for piped text within that invocation. Check `(Get-Command ppilot).Source` if routing is unclear. Explicit `ppilot.cmd` calls still pass through cmd parsing: use `--params-file` for complex inputs. When bypassing `.ps1`, PowerShell 5.1's default native pipe encoding can turn Chinese text into `?`; prefer a UTF-8 file, or set `$OutputEncoding = [Text.UTF8Encoding]::new($false)` locally before `--params-stdin`.
 
 `read --params-file read.json` supports `frameId`, `cursor`, `query`, `limit` and `textLimit` for frames, Shadow DOM and long pages. Use returned frames and pagination cursors. `pointer` needs a screenshot observation (`observe --params-file` with `{"screenshot":true}`), its version and viewport coordinates.
+
+`observe --output page.png` requests the screenshot and saves it locally while returning the matching DOM/refs, `version`, `viewport` and absolute `screenshotPath`, without base64 in stdout. Open that path with your host's image-viewing tool before reasoning about visual content. This same observation supports `pointer`; a separate `screenshot` alone does not bind a new pointer observation. If capture fails, no image path is returned: do not reuse an old file. For CAPTCHA puzzles, follow [the current-conversation workflow](captcha.md).
 
 Use `open URL`, `switch TAB_ID` and `newTab` with the same `--session`. Ordinary inputs do not focus the browser window. Chrome internal pages, discarded tabs and native dialogs have limitations; report failures rather than bringing windows forward to guess an outcome.
 

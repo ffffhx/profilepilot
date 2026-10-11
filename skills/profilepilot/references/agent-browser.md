@@ -21,6 +21,8 @@ The CLI acquires the session and may start the bound Profile. It translates the 
 
 ## Handoff and finish
 
+When a visible CAPTCHA interrupts the task, first let the current Agent inspect the same session's snapshot and screenshot using [the current-conversation workflow](captcha.md). Continue with ordinary guarded browser actions when it can solve the puzzle; do not spawn a separate model just to read the image. Use handoff when user participation is actually needed.
+
 `ppilot browser --session research --cdp PORT handoff --reason "Complete sign-in"` gives the user control while preserving the session. Stop commands and explain the required action. After explicit return, run the same prefix with `resume`, then `snapshot -i`. `wait-control` can wait for the control UI; `AGENT_CONTROL_RETURNED` requires a new snapshot and `AGENT_TASK_STOPPED` ends the task.
 
 On success use the same prefix with `complete` before the final response. On cancellation use `release`. Do not reconnect a completed session or complete while waiting for a required user action. `PROFILEPILOT_PENDING_USER_ACTION` means the task is still waiting.

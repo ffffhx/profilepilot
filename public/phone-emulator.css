@@ -1,0 +1,35 @@
+.phone-emulator-dialog { width:min(740px,calc(100vw - 36px)); max-height:calc(100dvh - 40px); overflow:auto; }
+.phone-emulator-dialog>header { align-items:flex-start; }
+.phone-emulator-dialog>header p { margin:8px 0 0; color:var(--muted); font-size:13px; line-height:1.6; }
+.emulator-tabs { display:flex; gap:8px; margin:18px 0; border-bottom:1px solid var(--line); }
+.emulator-tabs button { border:0; border-radius:0; padding:10px 16px; color:var(--muted); }
+.emulator-tabs button[aria-selected=true] { color:var(--accent); border-bottom:2px solid var(--accent); background:var(--accent-soft); }
+.emulator-section-heading { display:flex; justify-content:space-between; align-items:center; gap:12px; }
+.emulator-section-heading>button { font-size:12px; flex:none; min-height:30px; padding:5px 9px; }
+.emulator-setup-step { border:1px solid var(--line); border-radius:10px; padding:18px; margin:12px 0; }
+.emulator-setup-step h3 { display:flex; align-items:center; gap:9px; font-size:16px; margin:0; }
+.emulator-setup-step h3>span { display:grid; place-items:center; border-radius:50%; width:25px; height:25px; background:var(--accent-soft); color:var(--accent); font-size:13px; }
+.emulator-setup-step p,.emulator-license p,#emulator-existing>p { margin:10px 0; color:var(--muted); font-size:12px; line-height:1.6; }
+.emulator-components { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; }
+.emulator-components span { padding:5px 8px; border-radius:5px; background:var(--panel-soft); color:var(--muted); font-size:11px; }
+.emulator-components [data-ready=true] { color:var(--success,#19755e); background:#e8f7f0; }
+.emulator-path { overflow-wrap:anywhere; }
+.emulator-field { display:flex; flex-direction:column; gap:7px; margin:14px 0; font-size:13px; }
+.emulator-field input,.emulator-field select { min-width:0; width:100%; min-height:38px; }
+.emulator-field small { color:var(--muted); font-size:11px; }
+.emulator-config { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+.emulator-config .emulator-field { margin:0; }
+.emulator-license { padding:14px 0; font-size:12px; }
+.emulator-license summary { cursor:pointer; color:var(--accent); }
+.emulator-license [data-setup-licenses] { max-height:240px; overflow:auto; padding:12px; margin:10px 0; background:var(--panel-soft); border:1px solid var(--line); border-radius:8px; }
+.emulator-license pre { white-space:pre-wrap; overflow-wrap:anywhere; font-family:inherit; font-size:11px; line-height:1.6; margin:10px 0; }
+.emulator-license>label { display:flex; align-items:center; gap:8px; margin-top:14px; }
+.emulator-license input { width:16px; min-height:16px; flex:none; }
+.emulator-job { position:sticky; bottom:0; border:1px solid var(--accent-line); border-radius:10px; background:var(--panel-soft); margin-top:16px; padding:16px; box-shadow:0 -4px 18px #17366012; }
+.emulator-job strong { font-size:13px; overflow-wrap:anywhere; }
+.emulator-job progress { display:block; width:100%; margin-top:12px; accent-color:var(--accent); }
+.emulator-job p { font-size:12px; line-height:1.6; margin:8px 0; color:var(--muted); }
+.emulator-job-actions { display:flex; gap:8px; margin-top:10px; }
+.phone-emulator-dialog .emulator-error { color:var(--danger,#b33549); font-size:12px; line-height:1.7; overflow-wrap:anywhere; white-space:pre-wrap; }
+.phone-emulator-dialog [hidden] { display:none!important; }
+@media(max-width:620px) { .phone-emulator-dialog { padding:18px; }.emulator-setup-step { padding:14px; }.emulator-config { gap:10px; } }

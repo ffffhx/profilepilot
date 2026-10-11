@@ -118,7 +118,7 @@ try {
   // removes the entry again. Direct task links take users to the opt-in setting.
   await d.request('reload', { target: 'shell' });
   await delay(350);
-  await d.waitFor('h1', s => s.text === 'PC 控制');
+  await d.waitFor('h1', s => s.text === '控制台');
   assert.equal(await agentVisible(), true);
   await d.domClick('.workspace-settings', { target: 'shell' });
   await d.waitFor('#experimental-agent-status', s => s.text === '已开启');
@@ -132,7 +132,7 @@ try {
   assert.equal(await d.evaluate('document.documentElement.dataset.workspace', {target:'shell'}), 'settings');
   await d.request('reload', { target: 'shell' });
   await delay(350);
-  await d.waitFor('h1', s => s.text === 'PC 控制');
+  await d.waitFor('h1', s => s.text === '控制台');
   assert.equal(await agentVisible(), false, 'disabled preference also survives reload');
   await d.domClick('.workspace-settings', { target:'shell' });
   await d.waitFor('#experimental-agent-status', s=>s.text==='已关闭');

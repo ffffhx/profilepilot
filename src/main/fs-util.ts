@@ -120,6 +120,7 @@ export function normalizeProfile(profile: unknown): StoredProfile | null {
     projectTag:
       typeof candidate.projectTag === "string" && candidate.projectTag.trim() ? candidate.projectTag.trim() : null,
     agentAccessDisabled: candidate.agentAccessDisabled === true,
+    ...(candidate.hideAutomation === true ? { hideAutomation: true } : {}),
     migratedExtensions: Array.isArray(candidate.migratedExtensions)
       ? candidate.migratedExtensions
           .map(normalizeStoredMigratedExtension)

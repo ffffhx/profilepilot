@@ -170,7 +170,7 @@ function extractSmokePayload(stdout) {
 
 function verifyMainWindowSmoke(smoke, homeDir) {
   assert.equal(smoke.title, "ProfilePilot");
-    assert.equal(smoke.h1, "PC 控制");
+    assert.equal(smoke.h1, "控制台");
   assert.equal(smoke.hasBridge, true, "preload should expose window.profileManager");
 
   for (const capability of [

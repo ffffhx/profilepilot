@@ -22,13 +22,14 @@ function adapter() {
 
 test('first claim forwards flat nativeTarget only once and does not recreate on resume', async () => {
   const f = adapter(); f.state.ownerSessionId = undefined;
+  f.task.title = 'Download report';
   f.task.nativeTarget = { tabId: 321, newTab: false };
   await f.browser.tabs(f.task);
-  assert.deepEqual(f.requests[0].params, { sessionId: 'session', tabId: 321, newTab: false });
+  assert.deepEqual(f.requests[0].params, { sessionId: 'session', taskTitle: 'Download report', tabId: 321, newTab: false });
   f.state.ownerSessionId = 'session';
   await f.browser.control(f.task, 'resume');
   assert.equal(f.requests.filter(r => r.method === 'claim').length, 1);
-  assert.deepEqual(f.requests.at(-1).params, { sessionId: 'session', action: 'resume', controlGeneration: 'fixture:0' });
+  assert.deepEqual(f.requests.at(-1).params, { sessionId: 'session', action: 'resume', taskTitle: 'Download report', groupPhase: undefined, controlGeneration: 'fixture:0' });
 });
 
 test('HTTP anchor download preserves query, starts once and exposes resumable ID on timeout', async () => {

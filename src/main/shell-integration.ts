@@ -815,10 +815,15 @@ async function readWindowsUserPath(): Promise<string> {
   if (Object.prototype.hasOwnProperty.call(process.env, "PROFILEPILOT_TEST_WINDOWS_USER_PATH")) {
     return process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH || "";
   }
-  return (await runWindowsPowerShell(
-    "[Console]::OutputEncoding=[Text.Encoding]::UTF8; [Environment]::GetEnvironmentVariable('Path','User')",
-    { timeout: 5_000 }
-  )).trim();
+  try {
+    return await runWindowsPowerShell([
+      "$ErrorActionPreference='Stop'",
+      "$key=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment')",
+      "try { if ($key) { [Console]::Out.Write([string]$key.GetValue('Path','',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)) } } finally { if ($key) { $key.Dispose() } }"
+    ].join("; "), { timeout: 5_000 });
+  } catch {
+    throw new ProfileManagerError("无法读取 Windows 用户 PATH，请稍后重试检查 / 更新。", "WINDOWS_USER_PATH_READ_FAILED");
+  }
 }
 
 async function setWindowsIntegrationPathEnabled(enabled: boolean): Promise<void> {
@@ -833,15 +838,31 @@ async function setWindowsIntegrationPathEnabled(enabled: boolean): Promise<void>
   const next = nextEntries.join(";");
   if (Object.prototype.hasOwnProperty.call(process.env, "PROFILEPILOT_TEST_WINDOWS_USER_PATH")) {
     process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH = next;
-  } else {
+  } else if (next !== current) {
     const encoded = Buffer.from(next, "utf8").toString("base64");
+    try {
+      // .NET's SetEnvironmentVariable(User) broadcasts synchronously after
+      // saving. A busy window can outlast our timeout even when the write worked.
+      // Persist and verify first, preserving literal %VARIABLE% entries and type.
+      await runWindowsPowerShell([
+        "$ErrorActionPreference='Stop'",
+        `$value=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}'))`,
+        "$key=[Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')",
+        "try { $kind=[Microsoft.Win32.RegistryValueKind]::ExpandString; if ($key.GetValueNames() -contains 'Path') { $kind=$key.GetValueKind('Path') }; $key.SetValue('Path',$value,$kind); if ([string]$key.GetValue('Path','',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) -cne $value) { throw 'PATH verification failed' } } finally { $key.Dispose() }"
+      ].join("; "), { timeout: 5_000 });
+    } catch {
+      throw new ProfileManagerError("无法保存 Windows 用户 PATH，CLI 更新尚未完成。请稍后重试检查 / 更新。", "WINDOWS_USER_PATH_WRITE_FAILED");
+    }
+    // Notify other windows separately. Their response is best-effort and must
+    // not turn a verified installation into an error or expose the full PATH.
     await runWindowsPowerShell([
-      `$value=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}'))`,
-      "[Environment]::SetEnvironmentVariable('Path',$value,'User')",
+      "$ErrorActionPreference='Stop'",
       "Add-Type -Namespace ProfilePilot -Name EnvironmentBroadcast -MemberDefinition '[DllImport(\"user32.dll\", CharSet=CharSet.Unicode, SetLastError=true)] public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint Msg, System.UIntPtr wParam, string lParam, uint flags, uint timeout, out System.UIntPtr result);'",
       "$result=[UIntPtr]::Zero",
-      "[void][ProfilePilot.EnvironmentBroadcast]::SendMessageTimeout([IntPtr]0xffff,0x001A,[UIntPtr]::Zero,'Environment',2,2000,[ref]$result)"
-    ].join("; "), { timeout: 8_000 });
+      "[void][ProfilePilot.EnvironmentBroadcast]::SendMessageTimeout([IntPtr]0xffff,0x001A,[UIntPtr]::Zero,'Environment',2,100,[ref]$result)"
+    ].join("; "), { timeout: 3_000 }).catch(() => {
+      console.warn("[shell-integration] Windows 用户 PATH 已保存，环境变更通知未完成；现有终端可能需要重新打开。");
+    });
   }
   const processPath = process.env.PATH || "";
   const processRemaining = processPath

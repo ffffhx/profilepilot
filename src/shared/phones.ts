@@ -1,3 +1,5 @@
+import type { AndroidSetupAction, AndroidSetupSnapshot } from "./android-setup";
+
 export const PHONE_CHANNEL = "phones:request";
 export const PHONE_CHANGED = "phones:changed";
 export const PHONE_PROTOCOL = 1;
@@ -53,6 +55,7 @@ export interface PhoneDevice {
   error: string;
 }
 export interface PhonesSnapshot { devices: PhoneDevice[]; adbAvailable: boolean; error: string; computer: string; }
+export interface PhoneScreenFrame { mime: "image/png"; base64: string; width: number; height: number; capturedAt: number; }
 export interface PhoneWirelessService { name: string; kind: "pairing" | "connect"; address: string; source?: "phone" | "mdns"; reachable?: boolean; reason?: string; }
 export interface PhoneWirelessDiscovery { services: PhoneWirelessService[]; error: string; phoneIps?: string[]; }
 export interface PhoneSelector {
@@ -71,16 +74,22 @@ export type PhoneAction =
   | { kind: "scroll"; selector: PhoneSelector; direction: "forward" | "backward" };
 export interface PhoneActionInput { id: string; sessionId: string; generation: number; requestId: string; action: PhoneAction; }
 export interface PhoneActionResult { state: PhoneSessionState; result: unknown; }
+export interface PhoneBasicModeInput { id: string; sessionId: string; generation: number; mode: "view" | "control"; }
 export type PhoneSetting = "accessibility" | "overlay" | "notifications" | "developerOptions" | "usbDebugging" | "wirelessDebugging";
 export interface PhonesApi {
   basicStart(id: string, mode: "view" | "control", controller: string, task: string): Promise<PhoneDevice>;
   basicControl(id: string, command: "pause" | "resume" | "stop"): Promise<PhoneDevice>;
+  basicSetMode(input: PhoneBasicModeInput): Promise<PhoneDevice>;
   basicPerform(input: PhoneActionInput): Promise<PhoneActionResult>;
   cloudPair(url?: string): Promise<{ id: string; uri: string; qrCode: string; expiresAt: number }>;
   cloudForget(id: string): Promise<void>;
   snapshot(): Promise<PhonesSnapshot>;
   inspect(id: string): Promise<PhonesSnapshot>;
   listEmulators(): Promise<string[]>;
+  androidSetupSnapshot(): Promise<AndroidSetupSnapshot>;
+  androidSetupCatalog(): Promise<AndroidSetupSnapshot>;
+  androidSetupStart(action: AndroidSetupAction): Promise<AndroidSetupSnapshot>;
+  androidSetupCancel(id: string): Promise<AndroidSetupSnapshot>;
   connectEmulator(name: string): Promise<PhoneDevice>;
   discoverWireless(id?: string): Promise<PhoneWirelessDiscovery>;
   pairWireless(address: string, code: string): Promise<{ address: string }>;
@@ -88,6 +97,7 @@ export interface PhonesApi {
   autoConnectWireless(id: string): Promise<PhoneDevice>;
   prepare(id: string): Promise<PhoneDevice>;
   preview(id: string): Promise<PhoneActionResult>;
+  screen(id: string): Promise<PhoneScreenFrame>;
   openSettings(id: string, setting: PhoneSetting): Promise<void>;
   rename(id: string, name: string): Promise<void>;
   start(id: string, mode: "view" | "control", controller: string, task: string): Promise<PhoneDevice>;

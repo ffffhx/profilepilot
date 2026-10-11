@@ -36,6 +36,7 @@ async function checkShell(label) {
   assert.equal(state.active.length, 1, `${label}: no active content`);
   assert.deepEqual(state.visible, state.active);
   assert.ok(state.count <= 6);
+  await shell('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
   const image = await d.screenshot();
   const png = PNG.sync.read(Buffer.from(image.pngBase64, 'base64'));
   const sx = png.width / state.width, sy = png.height / state.height;
@@ -57,11 +58,11 @@ try {
       if (source.location.pathname.endsWith('/phones.html')) window.__delayedPhone = source;
       else window.__originalReady(source);
     }; true`);
-  await d.domClick('.workspace-link[data-workspace="phones"]');
+  await shell("window.workspaceHost.navigate('./phones.html'); true");
   await checkShell('slow first phone load');
   assert.equal(await shell(`document.documentElement.dataset.workspace`), 'browser');
   // Clicking the current tab also cancels an unfinished switch.
-  await d.domClick('.workspace-link[data-workspace="browser"]');
+  await shell("window.workspaceHost.navigate('./index.html'); true");
   assert.equal(await shell(`document.documentElement.dataset.workspaceLoading`), 'false');
   // A late response from the first click must never replace a newer selection.
   await d.domClick('.workspace-link[data-workspace="tools"]');
@@ -72,7 +73,7 @@ try {
   for (let round = 0; round < 4; round++) {
     for (const workspace of workspaces) {
       const started = performance.now();
-      await d.domClick(workspace === 'local-apps' ? '[data-pc-view="local-apps"]' : `.workspace-link[data-workspace="${workspace}"]`);
+      await shell(`window.workspaceHost.navigate(${JSON.stringify(workspace === 'browser' ? './index.html' : workspace === 'agent' ? './tasks.html' : `./${workspace}.html`)}); true`);
       await d.waitFor(`html[data-workspace="${workspace}"][data-workspace-loading="false"]`, s => s.exists, { target:'shell' });
       await checkShell(`${round}/${workspace}`);
       assert.equal(await shell(`document.documentElement.dataset.workspace`), workspace);
@@ -108,7 +109,7 @@ try {
     return window.__scrollProbe.scrollTop;
   })()`);
   assert.ok(scroll > 0, 'settings must exercise a real scrolling container');
-  await d.domClick('.workspace-link[data-workspace="browser"]');
+  await shell("window.workspaceHost.navigate('./index.html'); true");
   await d.domClick('.workspace-link[data-workspace="agent"]');
   assert.equal(await d.evaluate('window.__scrollProbe.scrollTop'), scroll, 'cached page retains its scroll position');
   await d.domClick('[data-action="return-agent"]');
@@ -121,14 +122,14 @@ try {
   await d.evaluate(`document.dispatchEvent(new KeyboardEvent('keydown', { key:'k', ctrlKey:true, metaKey:true, bubbles:true })); true`);
   assert.equal(await d.evaluate(`!!document.querySelector('dialog[open]')`), true, 'Agent command shortcut still works without header search');
   await d.evaluate(`document.querySelector('dialog[open]').close(); true`);
-  await d.domClick('.workspace-link[data-workspace="browser"]');
+  await shell("window.workspaceHost.navigate('./index.html'); true");
   await d.waitFor(`[data-profile-row][data-id="${profile.id}"]`);
   await d.domClick(`[data-profile-row][data-id="${profile.id}"]`);
   await d.waitFor('.browser-profile-inspector h2', s => s.text === '固定顶部栏测试');
   assert.equal(await shell(`document.querySelector('.workspace-identity').textContent.trim()`), '', 'list selection does not restore the removed header status');
   await assert.rejects(d.evaluate(`window.phones.start('fixture', 'control', 'fixture', 'must reject')`), /手机工作区/);
   await assert.rejects(d.evaluate(`window.localApps.list()`), /本地应用工作区/);
-  await d.domClick('.workspace-link[data-workspace="phones"]');
+  await shell("window.workspaceHost.navigate('./phones.html'); true");
   assert.deepEqual((await d.evaluate('window.phones.snapshot()')).devices, []);
   assert.equal(typeof (await d.evaluate('window.mobile.snapshot()')).enabled, 'boolean');
   // Untrusted paths, network URLs and mini mode cannot become content panes.
@@ -160,11 +161,11 @@ try {
       assert.equal(railState.contentLeft, railState.width);
       assert.ok(rail==='collapsed' ? railState.width===64 : railState.width>150);
       for (const collapsed of [false, true]) {
-        if (await d.evaluate('document.querySelector("#task-app").classList.contains("sidebar-collapsed")') !== collapsed) await d.domClick('#task-sidebar-toggle');
+        if (await d.evaluate('document.querySelector("#task-sidebar-toggle").getAttribute("aria-expanded")') !== String(!collapsed)) await d.domClick('#task-sidebar-toggle');
         await paint();
         const state = await d.evaluate(`(() => {
           const sidebar=document.querySelector('#task-sidebar'), button=document.querySelector('#task-sidebar-toggle'), workspace=document.querySelector('.workspace');
-          return {hidden:getComputedStyle(sidebar).display==='none', expanded:button.getAttribute('aria-expanded'),
+          return {hidden:getComputedStyle(sidebar).display==='none', floating:getComputedStyle(sidebar).position==='fixed', expanded:button.getAttribute('aria-expanded'),
             button:button.getBoundingClientRect().width, left:workspace.getBoundingClientRect().left,
             overflow:document.documentElement.scrollWidth>innerWidth,
             dockBottom:document.querySelector('.compose-dock').getBoundingClientRect().bottom, bottom:workspace.getBoundingClientRect().bottom};
@@ -172,7 +173,7 @@ try {
         assert.equal(state.hidden,collapsed);
         assert.equal(state.expanded,String(!collapsed));
         assert.ok(state.button>0);
-        assert.ok(collapsed ? state.left===0 : state.left>100);
+        assert.ok(collapsed || state.floating ? state.left===0 : state.left>100);
         assert.equal(state.overflow,false);
         assert.ok(Math.abs(state.dockBottom-state.bottom)<2);
         assert.equal((await d.query('#prompt')).value,draft);
@@ -180,8 +181,8 @@ try {
       }
     }
   }
-  await d.domClick('.workspace-link[data-workspace="phones"]');
-  await d.waitFor('h1', s=>s.text==='手机控制');
+  await shell("window.workspaceHost.navigate('./phones.html'); true");
+  await d.waitFor('[data-pc-view="phones"][aria-current="page"]');
   assert.equal(await shell('document.documentElement.dataset.workspaceRail'),'collapsed');
   await d.domClick('.workspace-link[data-workspace="agent"]');
   assert.equal((await d.query('#prompt')).value,draft);

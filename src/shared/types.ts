@@ -25,6 +25,9 @@ export interface StoredProfile {
   // Profile 级 Agent 策略：禁用后 Gateway 拒绝任何新 Agent Session，
   // 运行时候选清单仍保留该 Profile，但标记为不可选。
   agentAccessDisabled?: boolean;
+  // Opt-in Chromium AutomationControlled override, applied on the next launch.
+  // This changes navigator.webdriver; it does not guarantee challenge clearance.
+  hideAutomation?: boolean;
   migratedExtensions?: StoredMigratedExtension[];
 }
 
@@ -489,6 +492,7 @@ export interface PublicProfile {
   cloneCount: number;
   projectTag: string | null;
   agentAccessDisabled: boolean;
+  hideAutomation?: boolean;
   // 正驱动这个 Profile 的 CDP 客户端（持久连接到其调试端口的外部工具）；空数组=没有工具连接。
   cdpClients: CdpClientInfo[];
   // 由 ProfilePilot Gateway 管理时的权威控制状态；普通/旧式 CDP 端口为 null。

@@ -8,8 +8,7 @@ import { launchProfilePilotE2e, repoRoot } from './e2e/lib/electron-driver.mjs';
 const realKeyboard = process.env.CPM_DESKTOP_E2E === '1' && process.env.CPM_DESKTOP_E2E_ISOLATED === '1';
 const app = await launchProfilePilotE2e({ name: 'workspace navigation', mode: realKeyboard ? 'desktop' : 'background' });
 const workspaces = [
-  ['browser', 'PC 控制', './index.html'],
-  ['phones', '手机控制', './phones.html'],
+  ['browser', '控制台', './index.html'],
   ['tools', '配套工具', './tools.html'],
   ['agent', 'Agent', './tasks.html']
 ];
@@ -50,8 +49,8 @@ try {
   };
   const navigate = async (workspace, title) => {
     await d.domClick(link(workspace));
-    const heading = workspace === 'phones' ? '手机' : title;
-    await d.waitFor('h1', snapshot => snapshot.text === heading);
+    const heading = title;
+    await d.waitFor('h1', snapshot => workspace === 'agent' ? /^Agent\.?$/.test(snapshot.text) : snapshot.text === heading);
     await assertNavigation(workspace);
   };
 
@@ -83,7 +82,7 @@ try {
       await d.waitFor('.workspace-link:focus', snapshot => snapshot.attributes['data-workspace'] === workspace);
     }
     await d.press('Enter');
-    await d.waitFor('h1', snapshot => snapshot.text === 'Agent');
+    await d.waitFor('h1', snapshot => /^Agent\.?$/.test(snapshot.text));
     await assertNavigation('agent');
     await d.focus(link('agent'));
     await d.press('Enter');
@@ -91,7 +90,7 @@ try {
     await assertNavigation('agent');
   }
 
-  await navigate('browser', 'PC 控制');
+  await navigate('browser', '控制台');
   await navigate('agent', 'Agent');
   await d.waitFor('#prompt', snapshot => snapshot.value === '切换工作区后保留这份草稿');
   await d.waitFor('select[name=profileId]', snapshot => snapshot.value === profile.id);
@@ -99,7 +98,7 @@ try {
   assert.equal(await d.evaluate('document.querySelector("#create-task details").open'), true);
   await d.domClick('[data-action=toggle-sidebar]');
   await assertNavigation('agent');
-  console.log(`PASS workspace navigation: four permanent links and destinations, current selection without reload, native keyboard semantics, snapshots, collapsed sidebar and draft restoration; trusted Tab/Enter ${realKeyboard ? 'passed' : 'not run (requires isolated desktop flags)'}`);
+  console.log(`PASS workspace navigation: console/tools/Agent destinations, current selection without reload, native keyboard semantics, snapshots, collapsed sidebar and draft restoration; trusted Tab/Enter ${realKeyboard ? 'passed' : 'not run (requires isolated desktop flags)'}`);
 } finally {
   await app.stop();
 }

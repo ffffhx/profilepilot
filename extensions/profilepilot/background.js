@@ -14,6 +14,77 @@ const taskTabs = new Map();
 // Creation marks last for this Chrome session, including after a task finishes.
 const createdTabs = new Set(), logoTabs = new Set(), logoUpdates = new Map();
 const appliedLogos = new Map();
+// One native group per task/window, reused for every lifecycle state. Chrome
+// groups cannot span windows; never move or unpin a user's tab to show status.
+const taskGroups = new Map();
+let groupQueue = Promise.resolve();
+const GROUP_STATES = {
+  running: { color: 'blue', label: '执行中' }, waiting: { color: 'purple', label: '等待你处理' },
+  paused: { color: 'orange', label: '已暂停' }, completed: { color: 'green', label: '已完成' },
+  failed: { color: 'red', label: '执行异常' }, cancelled: { color: 'orange', label: '已取消' }
+};
+function groupState(phase, id = sessionId, title) {
+  if (!id || !Object.hasOwn(GROUP_STATES, phase)) return;
+  let record = taskGroups.get(id);
+  if (!record) { record = { phase, title: '', groups: {}, enrolled: [] }; taskGroups.set(id, record); }
+  record.phase = phase;
+  if (typeof title === 'string') record.title = title.replace(/[\s\u0000-\u001f]+/g, ' ').trim().slice(0, 60);
+}
+function taskPhase(status) {
+  return ({ running: 'running', queued: 'running', waiting_user: 'waiting', paused: 'paused',
+    completed: 'completed', partial: 'paused', failed: 'failed', cancelled: 'cancelled' })[status];
+}
+function saveTaskGroups() {
+  return chrome.storage.session.set({ taskGroups: { profileId: config?.profileId, tasks: [...taskGroups] } });
+}
+function syncTaskGroups() {
+  if (!chrome.tabs.group || !chrome.tabGroups?.update) return Promise.resolve();
+  groupQueue = groupQueue.catch(() => {}).then(async () => {
+    for (const [id, record] of taskGroups) {
+      const current = () => taskGroups.get(id) === record;
+      // Only a live task may add tabs. Completed groups remain where they are;
+      // dragging a tab out by hand is respected.
+      const tabs = id === sessionId ? [...allowedTabs] : [];
+      for (const tabId of tabs) {
+        if (!current() || record.enrolled.includes(tabId)) continue;
+        const tab = await chrome.tabs.get(tabId).catch(() => null);
+        if (!current() || sessionId !== id || !allowedTabs.has(tabId)) continue;
+        if (!tab || tab.incognito || tab.pinned || !usable(tab.url) || !Number.isInteger(tab.windowId)) continue;
+        let groupId = record.groups[tab.windowId];
+        const group = Number.isInteger(groupId) ? await chrome.tabGroups.get(groupId).catch(() => null) : null;
+        if (!current() || sessionId !== id || !allowedTabs.has(tabId)) continue;
+        // Validate membership as well as the ID before reusing a stored group.
+        const members = group ? await chrome.tabs.query({ groupId }).catch(() => []) : [];
+        if (!current() || sessionId !== id || !allowedTabs.has(tabId)) continue;
+        if (!group || group.windowId !== tab.windowId || group.shared || !members.some(t => record.enrolled.includes(t.id))) groupId = undefined;
+        try {
+          if (groupId === undefined) {
+            groupId = await chrome.tabs.group({ tabIds: [tabId], createProperties: { windowId: tab.windowId } });
+            if (!current()) continue;
+            record.groups[tab.windowId] = groupId;
+          } else if (tab.groupId !== groupId) await chrome.tabs.group({ groupId, tabIds: [tabId] });
+          if (!current()) continue;
+          record.enrolled.push(tabId);
+          // A tab belongs to at most one task group. Do not let a completed
+          // task recolor a group that a newer task now owns.
+          for (const [otherId, other] of taskGroups) if (otherId !== id) other.enrolled = other.enrolled.filter(t => t !== tabId);
+        } catch { /* Pinned, closing or dragged tabs must not fail page actions. */ }
+      }
+      for (const [windowId, groupId] of Object.entries(record.groups)) {
+        if (!current()) break;
+        const group = await chrome.tabGroups.get(groupId).catch(() => null);
+        const members = group ? await chrome.tabs.query({ groupId }).catch(() => []) : [];
+        if (!current()) break;
+        if (!group || group.shared || !members.some(t => record.enrolled.includes(t.id))) { delete record.groups[windowId]; continue; }
+        const visual = GROUP_STATES[record.phase] || GROUP_STATES.paused;
+        const title = `ProfilePilot${record.title ? ' · ' + record.title : ''} · ${visual.label}`;
+        if (group.color !== visual.color || group.title !== title) await chrome.tabGroups.update(groupId, { color: visual.color, title }).catch(() => {});
+      }
+    }
+    await saveTaskGroups();
+  }).catch(() => {});
+  return groupQueue;
+}
 const childSessions = new Set();
 let access = { blockedOrigins: [], confirmActions: false }, uiSequence = 0;
 const uiPending = new Map();
@@ -39,7 +110,7 @@ async function debuggerCommand(method, params = {}, previewOnly = false, cdpSess
     // input may have taken effect; never replay it automatically after a timeout.
     // A protocol error (unsupported method, stale context) is definitive. Only a
     // timeout has an uncertain outcome and must stop subsequent input.
-    if (!visualOnly && String(error.message).includes('无响应')) { ownership = 'user'; controlEpoch++; pausedByBrowser = true; await detach(); void publish(); }
+    if (!visualOnly && String(error.message).includes('无响应')) { ownership = 'user'; controlEpoch++; pausedByBrowser = true; groupState('failed'); await detach(); void publish(); }
     throw error;
   }
 }
@@ -49,7 +120,7 @@ function requireOwner(expected) {
 }
 async function state() {
   const tab = currentTab ? await chrome.tabs.get(currentTab).catch(() => undefined) : undefined;
-  return { connected: authenticated && socket?.readyState === WebSocket.OPEN, taskTabs: true, controlGeneration: controlGeneration(), extensionVersion: chrome.runtime.getManifest?.().version || '0.2.0', installationType, installationMode, capabilities: ['liveView', 'tabs', 'cdp', 'cdpSessions', 'history', 'downloads', 'sidePanel'], profileId: config?.profileId, tabId: currentTab, sessionId, ownership, tabTitle: tab?.title, url: tab?.url, pausedByBrowser, connectionError, access };
+  return { connected: authenticated && socket?.readyState === WebSocket.OPEN, taskTabs: true, controlGeneration: controlGeneration(), extensionVersion: chrome.runtime.getManifest?.().version || '0.2.0', installationType, installationMode, capabilities: ['liveView', 'tabs', 'cdp', 'cdpSessions', 'history', 'downloads', 'sidePanel', 'taskGroups'], profileId: config?.profileId, tabId: currentTab, sessionId, ownership, tabTitle: tab?.title, url: tab?.url, pausedByBrowser, connectionError, access };
 }
 function assertSite(url) {
   if (!usable(url)) throw new Error('此页面不允许自动化，请选择普通网页。');
@@ -62,6 +133,7 @@ async function ordinaryTabs() {
 }
 async function publish() {
   syncTabLogos();
+  void syncTaskGroups();
   const value = await state(); send({ type: 'state', state: value });
   await chrome.action.setBadgeText({ text: !value.connected ? '' : ownership === 'agent' ? 'AI' : '你' });
   await chrome.action.setBadgeBackgroundColor({ color: ownership === 'agent' ? '#517843' : '#8e7546' });
@@ -130,14 +202,14 @@ function saveTabLogos() {
 }
 function syncTabLogos(forceTab) {
   if (!chrome.scripting?.executeScript || !chrome.runtime.getURL) return;
-  if (sessionId && ownership === 'agent' && currentTab) logoTabs.add(currentTab);
-  for (const id of createdTabs) logoTabs.add(id);
+  // Migration only: restore icons injected by older versions. New tasks use
+  // native groups and never replace a website's favicon or title.
   void saveTabLogos().catch(() => {});
   for (const id of logoTabs) {
     const next = (logoUpdates.get(id) || Promise.resolve()).then(async () => {
       const tab = await chrome.tabs.get(id).catch(() => undefined);
       if (!tab || tab.incognito || !/^https?:\/\//.test(tab.url || '') || tab.discarded || tab.frozen || tab.status === 'unloaded') return;
-      const marked = createdTabs.has(id) || Boolean(sessionId && ownership === 'agent' && currentTab === id);
+      const marked = false;
       const stamp = `${marked}:${tab.url}`;
       if (id !== forceTab && appliedLogos.get(id) === stamp) return;
       await chrome.scripting.executeScript({ target: { tabId: id }, func: updatePageTabLogo, args: [marked ? chrome.runtime.getURL('icons/icon-32.png') : null] });
@@ -178,7 +250,7 @@ async function attachForTask(check = () => {}) {
     if (generation !== controlGeneration()) throw error;
     // A failed connection is not a user takeover. Keep it paused, and publish
     // the actual cause so the desktop doesn't ask the user to grant control again.
-    ownership = 'user'; controlEpoch++; pausedByBrowser = true; await publish(); throw error;
+    ownership = 'user'; controlEpoch++; pausedByBrowser = true; groupState('failed'); await publish(); throw error;
   }
 }
 async function stopPreview() {
@@ -368,17 +440,32 @@ async function handle(method, p, check = () => {}) {
     if (sessionId && ownership === 'user') throw new Error('用户正在操作浏览器，请交还后继续。');
     await prepareTask(p.sessionId, check, p); check();
     sessionId = p.sessionId; ownership = 'agent'; pausedByBrowser = false;
+    groupState('running', sessionId, p.taskTitle);
     await saveSelection(); check();
     await attachForTask(check);
     await publish(); return {};
   }
   if (method === 'control') {
     if (sessionId && sessionId !== p.sessionId) throw new Error('浏览器会话不匹配。');
-    if (p.action === 'resume') { await prepareTask(p.sessionId, check); check(); sessionId = p.sessionId; pausedByBrowser = false; await saveSelection(); await attachForTask(check); check(); ownership = 'agent'; }
-    else if (p.action === 'handoff') { ownership = 'user'; await clearFocusEmulation(); }
-    else if (['complete', 'release'].includes(p.action)) { ownership = 'user'; await saveSelection(); sessionId = undefined; await detach(); allowedTabs.clear(); pausedByBrowser = false; await saveSelection(); }
+    if (p.action === 'resume') { await prepareTask(p.sessionId, check); check(); sessionId = p.sessionId; pausedByBrowser = false; await saveSelection(); await attachForTask(check); check(); ownership = 'agent'; groupState('running', sessionId, p.taskTitle); }
+    else if (p.action === 'handoff') { ownership = 'user';
+      const prior = taskGroups.get(sessionId)?.phase;
+      groupState(p.groupPhase === 'paused' || prior === 'paused' ? 'paused' : prior === 'failed' ? 'failed' : 'waiting'); await clearFocusEmulation(); }
+    else if (['complete', 'release'].includes(p.action)) { ownership = 'user';
+      const phase = p.groupPhase === 'waiting' && taskGroups.get(p.sessionId)?.phase === 'paused' ? 'paused' : p.groupPhase;
+      if (sessionId || taskGroups.has(p.sessionId)) groupState(p.action === 'release' ? 'cancelled' : ['failed', 'paused', 'waiting'].includes(phase) ? phase : 'completed', p.sessionId, p.taskTitle);
+      await saveSelection(); sessionId = undefined; await detach(); allowedTabs.clear(); pausedByBrowser = false; await saveSelection(); }
     else throw new Error('未知控制操作。');
     await publish(); return {};
+  }
+  if (method === 'taskState') {
+    // A status notification is display-only. It cannot claim/resume a tab or
+    // override a user's stop (including an older notification queued in flight).
+    if (p.sessionId !== sessionId || p.controlGeneration !== controlGeneration() || !taskGroups.has(sessionId)) return { applied: false };
+    const phase = taskPhase(p.status), record = taskGroups.get(sessionId);
+    if (!phase) return { applied: false };
+    if (ownership === 'agent' || (!['failed', 'paused', 'cancelled'].includes(record.phase) && phase !== 'running')) groupState(phase, sessionId, p.taskTitle);
+    await syncTaskGroups(); return { applied: true };
   }
   if (method === 'disconnect') { await disconnect(true); return {}; }
   if (method === 'focus') {
@@ -558,9 +645,10 @@ async function openSidePanel(tabId) {
   return chrome.sidePanel.open({ tabId: tab.id });
 }
 async function disconnect(forget = false) {
-  ownership = 'user'; controlEpoch++; await detach();
+  ownership = 'user'; controlEpoch++; groupState(forget ? 'cancelled' : 'failed'); await detach();
+  await syncTaskGroups();
   const old = socket; socket = undefined; authenticated = false; clearInterval(heartbeat); old?.close();
-  if (forget) { config = undefined; sessionId = undefined; currentTab = undefined; allowedTabs.clear(); taskTabs.clear(); createdTabs.clear(); await chrome.storage.local.remove('connection'); await chrome.storage.session.remove(['selection', 'taskTabs']); }
+  if (forget) { config = undefined; sessionId = undefined; currentTab = undefined; allowedTabs.clear(); taskTabs.clear(); taskGroups.clear(); createdTabs.clear(); await chrome.storage.local.remove('connection'); await chrome.storage.session.remove(['selection', 'taskTabs', 'taskGroups']); }
   await publish();
 }
 async function connect() {
@@ -606,7 +694,7 @@ async function connect() {
       authenticated = false;
       if (event.code === 4001) connectionError = '配对码已失效或连接已撤销，请断开配对后生成新码。';
       if (event.code === 4009) connectionError = '这个 Profile 已有扩展连接，请检查是否选错了 Chrome Profile。';
-      socket = undefined; clearInterval(heartbeat); ownership = 'user'; controlEpoch++; void detach().then(publish);
+      socket = undefined; clearInterval(heartbeat); ownership = 'user'; controlEpoch++; groupState('failed'); void detach().then(publish);
       for (const pending of uiPending.values()) { clearTimeout(pending.timer); pending.reject(new Error('浏览器服务连接中断，请检查任务是否已提交。')); }
       uiPending.clear();
     };
@@ -630,13 +718,14 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 });
 chrome.debugger.onDetach.addListener((source, reason) => {
   if (source.tabId !== currentTab || !attached) return;
-  attached = false; preview = false; ownership = 'user'; controlEpoch++; pausedByBrowser = true; void publish();
+  attached = false; preview = false; ownership = 'user'; controlEpoch++; pausedByBrowser = true; groupState(reason === 'canceled_by_user' ? 'paused' : 'failed'); void publish();
 });
 chrome.tabs.onUpdated.addListener((id, change) => {
   if (id === currentTab && (change.url || change.title)) void publish();
   if (logoTabs.has(id) && (change.url || change.status === 'complete')) syncTabLogos(id);
 });
 chrome.tabs.onReplaced.addListener((addedId, removedId) => {
+  for (const record of taskGroups.values()) record.enrolled = record.enrolled.map(id => id === removedId ? addedId : id);
   if (createdTabs.delete(removedId)) createdTabs.add(addedId);
   if (logoTabs.delete(removedId)) logoTabs.add(addedId);
   appliedLogos.delete(removedId);
@@ -653,13 +742,18 @@ chrome.tabs.onReplaced.addListener((addedId, removedId) => {
   currentTab = addedId; attached = false; preview = false;
   void saveSelection().then(publish);
 });
-chrome.tabs.onCreated.addListener(tab => { if (tab.openerTabId && allowedTabs.has(tab.openerTabId) && sessionId && ownership === 'agent' && !tab.incognito) { allowedTabs.add(tab.id); createdTabs.add(tab.id); syncTabLogos(tab.id); void saveSelection(); } });
+chrome.tabs.onCreated.addListener(tab => { if (tab.openerTabId && allowedTabs.has(tab.openerTabId) && sessionId && ownership === 'agent' && !tab.incognito) { allowedTabs.add(tab.id); createdTabs.add(tab.id); void syncTaskGroups(); void saveSelection(); } });
 chrome.tabs.onRemoved.addListener(id => {
+  for (const record of taskGroups.values()) record.enrolled = record.enrolled.filter(tabId => tabId !== id);
   createdTabs.delete(id); logoTabs.delete(id); appliedLogos.delete(id);
   allowedTabs.delete(id);
   for (const saved of taskTabs.values()) { saved.tabs = saved.tabs.filter(other => other !== id); if (saved.tabId === id) saved.tabId = undefined; }
-  if (id === currentTab) { attached = false; ownership = 'user'; controlEpoch++; pausedByBrowser = Boolean(sessionId); currentTab = undefined; }
+  if (id === currentTab) { attached = false; ownership = 'user'; controlEpoch++; pausedByBrowser = Boolean(sessionId); groupState('paused'); currentTab = undefined; }
   void saveSelection().then(publish);
+});
+chrome.tabGroups?.onRemoved?.addListener(group => {
+  for (const record of taskGroups.values()) for (const [windowId, id] of Object.entries(record.groups)) if (id === group.id) delete record.groups[windowId];
+  void saveTaskGroups();
 });
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (message?.method === 'onboarding') {
@@ -680,7 +774,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   }
   if (sender.id !== chrome.runtime.id || !['popup.html', 'sidepanel.html'].some(file => sender.url?.split('#')[0] === chrome.runtime.getURL(file))) return;
   // Stop at receipt, before a slow UI request or queued command can execute.
-  if (message.method === 'takeover' || (message.method === 'taskControl' && ['stop', 'takeover'].includes(message.action))) { ownership = 'user'; controlEpoch++; void clearFocusEmulation(); void publish(); }
+  if (message.method === 'takeover' || (message.method === 'taskControl' && ['stop', 'takeover'].includes(message.action))) { ownership = 'user'; controlEpoch++; groupState('paused'); void clearFocusEmulation(); void publish(); }
   void (async () => {
     if (message.method === 'state') return state();
     if (message.method === 'confirmPersistentInstallation') {
@@ -703,7 +797,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       const next = { blockedOrigins: normalize(message.blockedOrigins || []), allowedOrigins: normalize(message.allowedOrigins || []), confirmActions: message.confirmActions === true };
       if (authenticated) await desktopUi('setAccess', next);
       access = next; await chrome.storage.local.set({ nativeAccess: access });
-      if (currentTab) { try { assertSite((await chrome.tabs.get(currentTab)).url); } catch { ownership = 'user'; controlEpoch++; await detach(); } }
+      if (currentTab) { try { assertSite((await chrome.tabs.get(currentTab)).url); } catch { ownership = 'user'; controlEpoch++; groupState('paused'); await detach(); } }
       await publish(); return { access };
     }
     if (['startTask', 'taskMessage', 'taskControl', 'taskReply'].includes(message.method)) {
@@ -718,7 +812,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       const value = JSON.parse(atob(code.slice(4).replace(/-/g, '+').replace(/_/g, '/')));
       if (value.version !== 1 || !Number.isInteger(value.port) || value.port < 1024 || value.port > 65535 || !/^native:[^/\\]{1,100}$/.test(value.profileId) || !/^[a-f0-9]{64}$/.test(value.token)) throw new Error('配对码无效。');
       await disconnect(); config = value; currentTab = undefined; pausedByBrowser = false;
-      allowedTabs.clear(); taskTabs.clear(); createdTabs.clear(); syncTabLogos();
+      allowedTabs.clear(); taskTabs.clear(); taskGroups.clear(); createdTabs.clear(); syncTabLogos();
       await chrome.storage.local.set({ connection: config }); await saveSelection();
       await connect(); return state();
     }
@@ -740,7 +834,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       return selecting;
     }
     if (message.method === 'reconnect') { await connect(); return state(); }
-    if (message.method === 'takeover') { ownership = 'user'; await publish(); return state(); }
+    if (message.method === 'takeover') { ownership = 'user'; groupState('paused'); await publish(); return state(); }
     if (message.method === 'return') {
       if (!sessionId) throw new Error('当前没有待继续的任务。');
       const expectedSession = sessionId, generation = controlGeneration();
@@ -750,7 +844,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       await prepareTask(expectedSession, check); check();
       pausedByBrowser = false; await saveSelection(); check();
       await attachForTask(check); check();
-      ownership = 'agent'; await publish(); return state();
+      ownership = 'agent'; groupState('running'); await publish(); return state();
     }
     if (message.method === 'disconnect') { await disconnect(true); return state(); }
     throw new Error('未知操作。');
@@ -797,9 +891,18 @@ void (async () => {
   if (savedAccess && Array.isArray(savedAccess.blockedOrigins)) access = { ...access, ...savedAccess };
   const selection = (await chrome.storage.session.get('selection')).selection;
   const savedTasks = (await chrome.storage.session.get('taskTabs')).taskTabs;
+  const savedGroups = (await chrome.storage.session.get('taskGroups')).taskGroups;
   const savedLogos = (await chrome.storage.session.get('tabLogos')).tabLogos;
   if (saved) {
     config = saved;
+    if (savedGroups?.profileId === config.profileId && Array.isArray(savedGroups.tasks)) {
+      for (const [id, record] of savedGroups.tasks) if (typeof id === 'string' && record && Array.isArray(record.enrolled) && record.groups && Object.hasOwn(GROUP_STATES, record.phase)) {
+        taskGroups.set(id, { phase: record.phase === 'running' ? 'paused' : record.phase,
+          title: typeof record.title === 'string' ? record.title.slice(0, 60) : '',
+          groups: Object.fromEntries(Object.entries(record.groups).filter(([windowId, groupId]) => /^\d+$/.test(windowId) && Number.isInteger(groupId) && groupId >= 0)),
+          enrolled: record.enrolled.filter(Number.isSafeInteger) });
+      }
+    }
     if (savedLogos?.profileId === config.profileId) {
       for (const id of savedLogos.created || []) if (Number.isSafeInteger(id)) createdTabs.add(id);
       for (const id of savedLogos.touched || []) if (Number.isSafeInteger(id)) logoTabs.add(id);
@@ -816,6 +919,7 @@ void (async () => {
       currentTab = saved.tabId;
     }
     syncTabLogos();
+    void syncTaskGroups();
     await connect();
   }
 })().catch(() => { connectionError = '连接配置读取失败，请重新配对。'; });

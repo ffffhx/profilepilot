@@ -25,7 +25,7 @@ let menuId = "";
 
 root.innerHTML = `${workspaceSwitcher("local-apps")}${workspaceIdentityBar()}
   <div class="pc-apps-shell">
-    <header class="app-topbar pc-control-header"><div class="pc-control-brand"><h1>PC 控制</h1><p>管理浏览器与桌面应用</p></div><div class="pc-control-actions"><button data-action="refresh">刷新</button><button class="primary" data-action="add">${taskIcon("plus")}添加应用</button></div></header>
+    <header class="app-topbar pc-control-header"><div class="pc-control-brand"><h1>控制台</h1><p>管理浏览器、桌面应用与 Android 设备</p></div><div class="pc-control-actions"><button data-action="refresh">刷新</button><button class="primary" data-action="add">${taskIcon("plus")}添加应用</button></div></header>
     ${pcControlTabs("local-apps")}
     <main class="pc-apps-layout">
       <section class="pc-apps-registry" aria-labelledby="apps-list-title"><header class="pc-apps-list-head"><div class="app-list-title"><h2 id="apps-list-title">Electron 应用</h2><span class="app-count">0</span></div><label class="app-search-field">${taskIcon("search")}<input class="app-search" type="search" aria-label="搜索应用" placeholder="搜索应用…"></label></header><div class="app-list" aria-label="本地应用列表"><p role="status">正在读取应用…</p></div><footer class="app-list-footer">Agent 操作期间，你可以随时接管或停止。</footer></section>

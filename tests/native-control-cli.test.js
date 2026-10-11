@@ -13,7 +13,8 @@ test('Browser CLI validates before dispatch and preserves portable JSON inputs',
   const cli = path.join(root, 'ppilot.cjs');
   fs.writeFileSync(cli, buildSync({ entryPoints: [path.resolve('src/main/profilepilot-cli.ts')], bundle: true, platform: 'node', format: 'cjs', write: false, logLevel: 'silent' }).outputFiles[0].contents);
   const requests = [];
-  const server = http.createServer((req, res) => { const chunks = []; req.on('data', chunk => chunks.push(chunk)); req.on('end', () => { const command = JSON.parse(Buffer.concat(chunks)); requests.push(command); res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ ok: true, result: req.url === '/native-service' ? { service: 'browser', version: 1, pid: process.pid, root } : command })); }); });
+  let browserReply = command => command;
+  const server = http.createServer((req, res) => { const chunks = []; req.on('data', chunk => chunks.push(chunk)); req.on('end', () => { const command = JSON.parse(Buffer.concat(chunks)); requests.push(command); res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ ok: true, result: req.url === '/native-service' ? { service: 'browser', version: 1, pid: process.pid, root } : browserReply(command) })); }); });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   fs.writeFileSync(path.join(root, 'native-control.json'), JSON.stringify({ version: 1, port: server.address().port, token: 'a'.repeat(64), pid: process.pid, service: 'browser', serviceVersion: 1 }));
   t.after(async () => { await new Promise(resolve => server.close(resolve)); fs.rmSync(root, { recursive: true, force: true }); });
@@ -41,11 +42,39 @@ test('Browser CLI validates before dispatch and preserves portable JSON inputs',
   const quoted = { query: '中文 "with quotes" and C:\\trailing\\', url };
   const envelope = await run(['status', '--params', JSON.stringify(quoted)], undefined, true);
   assert.equal(envelope.code, 0, envelope.stderr); assert.deepEqual(JSON.parse(envelope.stdout).result.params, quoted);
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j3ioAAAAASUVORK5CYII=';
+  const imageFile = path.join(directory, '当前验证码.png');
+  const observation = { version: 'page-image-1', snapshot: 'Verification puzzle', viewport: { width: 800, height: 600 },
+    fast: { candidates: [{ ref: 'e1', role: 'textbox', name: 'Answer' }] }, screenshotDataUrl: `data:image/png;base64,${png}` };
+  browserReply = command => {
+    assert.equal(command.method, 'observe'); assert.equal(command.sessionId, 'original-task');
+    assert.equal(command.params.screenshot, true);
+    return observation;
+  };
+  const image = await run(['--session', 'original-task', 'observe', '--output', imageFile]);
+  assert.equal(image.code, 0, image.stderr);
+  const returned = JSON.parse(image.stdout).result;
+  assert.equal(returned.version, observation.version); assert.deepEqual(returned.fast, observation.fast);
+  assert.deepEqual(returned.viewport, observation.viewport); assert.equal(returned.screenshotPath, imageFile);
+  assert.equal(returned.screenshotDataUrl, undefined); assert.ok(!image.stdout.includes(png));
+  assert.deepEqual(fs.readFileSync(imageFile), Buffer.from(png, 'base64'));
+  for (const bad of [{ ...observation, screenshotDataUrl: undefined }, { ...observation, screenshotDataUrl: 'data:image/png;base64,bm90LXBuZw==' }, { ...observation, version: undefined }]) {
+    browserReply = () => bad;
+    const failed = await run(['--session', 'original-task', 'observe', '--output', imageFile]);
+    assert.equal(failed.code, 1); assert.equal(JSON.parse(failed.stderr).code, 'NATIVE_RENDER_UNAVAILABLE');
+    assert.equal(failed.stdout, '', 'failed capture must not return an old artifact path');
+    assert.deepEqual(fs.readFileSync(imageFile), Buffer.from(png, 'base64'), 'failed capture must not overwrite the previous artifact');
+  }
+  browserReply = command => { assert.equal(command.method, 'screenshot'); return { data: png }; };
+  const standalone = await run(['screenshot', '--output', imageFile]);
+  assert.equal(standalone.code, 0); assert.equal(JSON.parse(standalone.stdout).path, imageFile);
+  browserReply = command => command;
   const count = requests.length;
   const invalid = [
     ['status', '--conversion'], ['status', '--version'], ['status', '--profile'], ['typo'], ['open'], ['open', 'not-url'], ['open', 'file:///tmp/test'],
     ['switch'], ['switch', '0'], ['switch', '--params', '{"tabId":null}'], ['claim', '--tab', '-2'], ['cdp'],
-    ['status', '--output', path.join(root, 'unexpected.png')], ['status', '--params', '{}', '--params-file', file], ['status', '--params', '[]']
+    ['status', '--output', path.join(root, 'unexpected.png')], ['status', '--params', '{}', '--params-file', file], ['status', '--params', '[]'],
+    ['observe', '--output', imageFile, '--params', '{"screenshot":false}']
   ];
   for (const args of invalid) {
     const result = await run(args);

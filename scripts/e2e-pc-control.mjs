@@ -15,7 +15,7 @@ try {
     await d.evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
     await writeFile(path.join(directory, name), Buffer.from((await d.screenshot()).pngBase64, 'base64'));
   };
-  assert.equal((await d.query('h1')).text, 'PC 控制');
+  assert.equal((await d.query('h1')).text, '控制台');
   assert.equal((await d.query('[data-pc-view="browser"][aria-current="page"]')).exists, true);
   assert.equal(await shell(`document.querySelectorAll('.workspace-link[data-workspace="local-apps"]').length`), 0);
   await capture('browser-profiles.png');
@@ -25,7 +25,7 @@ try {
   await d.request('resize', {width:1600,height:950});
   // Keep the disposable window hidden while simulating a visible pane.
   await d.evaluate('Object.defineProperty(document, "hidden", {configurable:true, get:() => false}); true');
-  assert.equal(await shell(`document.querySelector('.workspace-link[aria-current="page"]').textContent.trim()`), 'PC 控制');
+  assert.equal(await shell(`document.querySelector('.workspace-link[aria-current="page"]').textContent.trim()`), '控制台');
   const appsOrigin = await d.evaluate('performance.timeOrigin');
   const fixtures = Array.from({ length:24 }, (_, i) => ({
     id:`pc-app-${i}`, name:i === 0 ? '桌面笔记' : i === 1 ? '设计工具 · 工作项目' : `测试应用 ${i + 1}`,
@@ -118,10 +118,12 @@ try {
     assert.equal((await d.query('[data-pc-view="browser"]')).hitMatches, true);
     assert.equal((await d.query('.app-topbar [data-action="add"]')).hitMatches, true);
   }
-  // Deep links still resolve to the same pane; PC navigation always defaults to Profiles.
-  await d.domClick('.workspace-link[data-workspace="phones"]');
+  // Deep links resolve to cached panes; the console returns to its last tab.
+  await d.domClick('[data-pc-view="phones"]');
+  await d.waitFor('.phone-table');
+  await d.domClick('.workspace-link[data-workspace="tools"]');
   await d.domClick('.workspace-link[data-workspace="browser"]');
-  assert.equal((await d.query('[data-pc-view="browser"][aria-current="page"]')).exists, true);
+  await d.waitFor('[data-pc-view="phones"][aria-current="page"]');
   assert.equal(await shell(`window.workspaceHost.navigate('./local-apps.html')`), true);
   await d.waitFor('[data-pc-view="local-apps"][aria-current="page"]');
   assert.equal(await shell(`document.querySelector('.workspace-link[aria-current="page"]').dataset.workspace`), 'browser');

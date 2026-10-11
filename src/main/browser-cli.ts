@@ -3,8 +3,9 @@ import path from "node:path";
 import { runAgentBrowserWrapper, sessionFromAgentBrowserArgs } from "./agent-browser-wrapper";
 import { bundledBrowserExecutable } from "./tasks/browser-runtime";
 import { main as runExtensionCli, nativeControlError, nativeControlHelp } from "./native-control/cli";
+import { runCaptchaCli } from "./captcha/cli";
 
-export const browserCliHelp = `ppilot browser CLI (no model invocation)
+export const browserCliHelp = `ppilot browser CLI (model invocation only for captcha recognize)
 One CLI, two connections. Connection options go BEFORE the command.
 
 Extension (default): existing signed-in Chrome tabs, independent browser service.
@@ -23,6 +24,12 @@ Use the target's ProfilePilot logical port, never its native debugging port.
   ppilot browser --session TASK --cdp PORT complete
   ppilot browser --connection gateway profiles
   ppilot browser --connection gateway --help
+
+CAPTCHA: paid 2Captcha token service or Codex image recognition:
+  ppilot browser captcha --help
+  ppilot browser --session TASK --profile native:Default captcha solve
+  ppilot browser --session TASK --cdp PORT captcha solve
+  ppilot browser captcha recognize --image-file challenge.png --kind text
 
 --cdp selects Gateway; otherwise use --connection extension|gateway explicitly.
 Session can also come from the Agent host. Keep the same session for a task.
@@ -93,11 +100,12 @@ export function browserCliRuntime(bundleDir = __dirname): string {
 export async function runBrowserCli(
   input: string[], io: Pick<NodeJS.Process, "stdout" | "stderr"> = process,
   env: NodeJS.ProcessEnv = process.env,
-  runtime: { extension?: typeof runExtensionCli; gateway?: typeof runAgentBrowserWrapper; executable?: () => string } = {}
+  runtime: { extension?: typeof runExtensionCli; gateway?: typeof runAgentBrowserWrapper; executable?: () => string; captcha?: typeof runCaptchaCli } = {}
 ): Promise<number> {
   try {
     const route = parseBrowserCliRoute(input);
     const command = route.args[route.commandIndex];
+    if (command === "captcha") return await (runtime.captcha || runCaptchaCli)(route, io, env);
     if (!input.length || route.help || command === "help" || command === "--help" || command === "-h") {
       io.stdout.write(browserCliHelp);
       if (route.connection === "extension") io.stdout.write(`\n${nativeControlHelp}`);

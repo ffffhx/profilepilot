@@ -206,6 +206,9 @@ function fakeProfileManager() {
     async renameProfile(id, name) {
       profiles = profiles.map((profile) => profile.id === id ? { ...profile, name } : profile);
     },
+    async configureProfileBrowser(id, hideAutomation) {
+      profiles = profiles.map((profile) => profile.id === id ? { ...profile, hideAutomation } : profile);
+    },
     async launchProfile(id) {
       profiles = profiles.map((profile) => profile.id === id ? { ...profile, running: true } : profile);
     },
@@ -219,6 +222,29 @@ function fakeProfileManager() {
     }
   };
 }
+
+test("CLI saves a per-Profile automation setting without restarting or changing other Profiles", async () => {
+  const manager = fakeProfileManager();
+  await manager.launchProfile("isolated:friend");
+  const parsed = parseProfilePilotCliArgs(["profile", "configure", "isolated:friend", "--hide-automation", "on", "--json"]);
+  const changed = await executeProfilePilotManagementCommand(parsed.command, { profileManager: manager });
+  assert.equal(changed.profile.hide_automation, true);
+  assert.equal(changed.profile.running, true);
+  assert.equal(changed.profile.agent_access, "allowed");
+  assert.equal(changed.restart_required, true);
+  const unchanged = await executeProfilePilotManagementCommand(parsed.command, { profileManager: manager });
+  assert.equal(unchanged.changed, false);
+  assert.equal(unchanged.restart_required, false);
+  const listed = await executeProfilePilotManagementCommand({ action: "profile.list" }, { profileManager: manager });
+  assert.equal(listed.profiles[0].hide_automation, false);
+  const off = parseProfilePilotCliArgs(["profile", "configure", "isolated:friend", "--hide-automation", "off"]);
+  const disabled = await executeProfilePilotManagementCommand(off.command, { profileManager: manager });
+  assert.equal(disabled.profile.hide_automation, false);
+  await assert.rejects(() => executeProfilePilotManagementCommand({ ...parsed.command, selector: "native:Default" }, { profileManager: manager }), { code: "PROFILE_CLI_MANAGED_ONLY" });
+  await assert.rejects(() => executeProfilePilotManagementCommand({ ...parsed.command, hideAutomation: "true" }, { profileManager: manager }), { code: "PROFILE_BROWSER_SETTINGS_INVALID" });
+  assert.throws(() => parseProfilePilotCliArgs(["profile", "configure", "isolated:friend", "--hide-automation", "maybe"]), /on\|off/);
+  assert.throws(() => parseProfilePilotCliArgs(["profile", "configure", "isolated:friend"]), /configure/);
+});
 
 function rawManagementRequest(socketPath, request) {
   return new Promise((resolve, reject) => {

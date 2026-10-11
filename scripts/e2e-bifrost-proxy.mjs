@@ -95,7 +95,7 @@ async function main() {
     await driver.domClick('[data-action="toggle-experimental-proxy-routing"]');
     await driver.waitFor('#experimental-proxy-routing-status', item => item.text === '已开启');
     await driver.domClick('.workspace-link[data-workspace="browser"]');
-    await driver.waitFor('h1', item => item.text === 'PC 控制');
+    await driver.waitFor('h1', item => item.text === '控制台');
     await driver.evaluate("window.profileManager.createProfile('Worktree A')");
     const profileRow = await driver.waitFor('[data-profile-row][data-id^="isolated:"]');
     const profileId = profileRow.attributes["data-id"];

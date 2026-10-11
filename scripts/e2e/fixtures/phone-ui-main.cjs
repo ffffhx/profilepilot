@@ -4,6 +4,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { PhonesService } = require('../../../dist/main/phones/service');
 const { executePhoneCommand } = require('../../../dist/main/phones/management');
+const { AndroidSetup } = require('../../../dist/main/phones/android-setup');
+const { createAndroidFixture } = require('../../../tests/fixtures/android-setup.cjs');
 const { startE2eDriver } = require('../../../dist/main/e2e-driver');
 const fixture = process.env.PHONE_UI_FIXTURE;
 if (!fixture || !process.env.PHONE_UI_SOCKET) throw new Error('Only run through scripts/e2e-phones.mjs');
@@ -22,13 +24,15 @@ let wirelessConnected = false;
 const defaultWirelessServices = 'fixture _adb-tls-pairing._tcp 192.168.1.8:37123\nfixture _adb-tls-connect._tcp 192.168.1.8:40235';
 let wirelessServices = defaultWirelessServices, wirelessReachable = true;
 let emulatorConnected = false;
+const androidSetupFixture = createAndroidFixture(AndroidSetup, path.join(root, 'android-setup'), { delay: 250 });
 let previewCalls = 0, previewBehavior = {};
 let basicFrame = { width: 320, height: 640, shade: 128 }, basicFrameBehavior = {};
 const unresponsive = new Set();
 let appInstalled = process.env.PHONE_UI_NO_APP !== '1';
 const service = new PhonesService({ root, apkPath: process.env.PHONE_UI_NO_APP === '1' ? path.join(root, 'phone.apk') : '', computer: 'UI-TEST-PC',
   probeWireless: async () => ({reachable:wirelessReachable,reason:'Fixture port availability'}),
-  emulators: { list: async () => ['Fixture_AVD'], launch: async () => { emulatorConnected = true; } },
+  androidSetup: androidSetupFixture.runtime,
+  emulators: { list: async () => ['Fixture_AVD', ...androidSetupFixture.avds], launch: async () => { emulatorConnected = true; } },
   adb: { run: async (args, timeout, input) => {
     adbCalls.push(args);
     if (args[2] === 'install') { appInstalled = true; return 'Success'; }
@@ -60,6 +64,7 @@ const service = new PhonesService({ root, apkPath: process.env.PHONE_UI_NO_APP =
   }, onChanged: value => { if (window && !window.isDestroyed()) window.webContents.send('phone-ui:changed', value); }
 });
 ipcMain.handle('phone-ui:request', async (_, method, params) => {
+  if (method === 'fixture-android-behavior') { Object.assign(androidSetupFixture.behavior, params); return; }
   // This cloud-only device is injected as a renderer event, not a registered
   // status channel. Keep discovery from replacing it with the service snapshot.
   if (method === 'wireless-discover' && params?.id === 'cloud-ui-test') return { services: [], error: '' };

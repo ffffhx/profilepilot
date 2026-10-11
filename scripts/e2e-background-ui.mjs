@@ -37,7 +37,7 @@ async function main() {
       assert.equal((await driver.query(startupSwitch)).disabled, true);
     }
     await driver.domClick('.workspace-link[data-workspace="browser"]');
-  await driver.waitFor('h1', snapshot => snapshot.text === 'PC 控制');
+  await driver.waitFor('h1', snapshot => snapshot.text === '控制台');
 
     await assert.rejects(
       driver.click('[data-action="new-profile"]'),

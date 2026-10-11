@@ -178,7 +178,7 @@ export function parseProfilePilotCliArgs(args: string[]): ParsedCliCommand {
   const noun = positionals[0];
   const verb = positionals[1];
   if ((noun !== "profile" && noun !== "profiles") || !verb) {
-    throw new Error("用法错误：请使用 profile <list|get|create|rename|start|stop|delete>。");
+    throw new Error("用法错误：请使用 profile <list|get|create|rename|configure|start|stop|delete>。");
   }
   if (verb === "list" && positionals.length === 2) {
     return { json, command: { action: "profile.list" } };
@@ -193,6 +193,16 @@ export function parseProfilePilotCliArgs(args: string[]): ParsedCliCommand {
         ? { action, selector, confirmed: yes }
         : { action, selector }
     };
+  }
+  if (verb === "configure") {
+    if (positionals.length !== 5 || positionals[3] !== "--hide-automation" || !["on", "off"].includes(positionals[4])) {
+      throw new Error("configure 需要 <名称|ID> --hide-automation <on|off>；保存后下次启动生效。");
+    }
+    return { json, command: {
+      action: "profile.configure",
+      selector: requiredValue(positionals[2], "configure 需要 Profile 名称或 ID"),
+      hideAutomation: positionals[4] === "on"
+    } };
   }
   if (verb === "create") {
     const name = positionals[2] === "--name" && positionals.length === 4
@@ -584,6 +594,7 @@ function helpText(): string {
   ppilot profile get <名称|ID> [--json]
   ppilot profile create --name <名称> [--json]
   ppilot profile rename <名称|ID> <新名称> [--json]
+  ppilot profile configure <名称|ID> --hide-automation <on|off> [--json]
   ppilot profile start <名称|ID> [--json]
   ppilot profile stop <名称|ID> [--json]
   ppilot profile delete <名称|ID> --yes [--json]
@@ -593,6 +604,7 @@ function helpText(): string {
   logs 可在桌面应用未运行时读取本地脱敏诊断日志；--since 支持 30m、2h、7d 或 ISO 时间。
   doctor 检查桌面应用连接、版本、运行环境和最近 24 小时错误。
   修改操作仅支持 ProfilePilot 创建的独立 Profile。
+  --hide-automation 持久保存 Chromium 自动化标记设置，下次启动生效，不保证通过网站验证。
   系统 Profile 和子 Profile 可以查询，但不能通过 Profile 管理命令修改。
   CLI 通过本机受保护 Socket 调用正在运行的 ProfilePilot，不会直接修改 profiles.json。
 `;

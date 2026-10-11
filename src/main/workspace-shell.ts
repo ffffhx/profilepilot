@@ -3,6 +3,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import type { BrowserWindow } from "electron";
 import { workspaceRoute } from "../shared/workspaces";
 import { IPC_CHANNELS } from "../shared/ipc";
+import { agentZoomCommand } from "../shared/workspace-zoom";
 
 export function isWorkspaceShell(url: string, publicDir = path.resolve(__dirname, "../../public")): boolean {
   try { return path.resolve(fileURLToPath(new URL(url))) === path.join(publicDir, "workspace.html"); }
@@ -11,6 +12,13 @@ export function isWorkspaceShell(url: string, publicDir = path.resolve(__dirname
 
 export function protectWorkspaceShell(window: BrowserWindow): void {
   const base = pathToFileURL(path.resolve(__dirname, "../../public/workspace.html")).href;
+  window.webContents.on("before-input-event", (event, input) => {
+    const command = agentZoomCommand(input, process.platform);
+    if (!command) return;
+    // Native zoom is shared by every iframe. The shell routes this only to Agent.
+    event.preventDefault();
+    if (input.type === "keyDown") window.webContents.send(IPC_CHANNELS.zoomAgentWorkspace, command);
+  });
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   window.webContents.on("will-attach-webview", event => event.preventDefault());
   window.webContents.on("will-frame-navigate", event => {

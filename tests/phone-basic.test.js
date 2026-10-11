@@ -43,6 +43,41 @@ test('basic control works without a paired companion and never installs/launches
   assert.equal(fs.existsSync(path.join(h.root,'devices.json')),false);
 });
 
+test('sidebar screen reads without starting a session, installing an App, or authorizing input', async t=>{
+  const h=harness(t);await h.service.refresh();
+  const before=h.service.snapshot().devices[0];
+  const screen=await h.service.screen(h.id);
+  assert.equal(screen.width,1080);assert.equal(screen.height,2400);assert.equal(screen.capturedAt,h.now);
+  assert.equal(screen.base64,h.png.toString('base64'));
+  assert.deepEqual(h.service.snapshot().devices[0],before);
+  assert.equal(h.calls.some(a=>a.includes('install')||a.includes('forward')||a.join(' ').includes("'am' 'start'")),false);
+  await h.start();await h.service.screen(h.id);
+  await assert.rejects(h.action({kind:'tap',x:10,y:20}),/先刷新/,'passive screen is not an input frame');
+});
+
+test('sidebar captures preserve active App sessions and respect a newly reported pause', async t=>{
+  const h=harness(t,'idle');await h.service.refresh();
+  Object.assign(h.appState,{phase:'controlling',sessionId:'existing-task',generation:2});await h.service.refresh();
+  const before=structuredClone(h.appState);await h.service.screen(h.id);assert.deepEqual(h.appState,before);
+  h.appState.phase='paused';h.appState.generation++;
+  const captures=h.calls.filter(a=>a.includes('screencap')).length;
+  await assert.rejects(h.service.screen(h.id),/暂停/);
+  assert.equal(h.calls.filter(a=>a.includes('screencap')).length,captures,'fresh pause prevents screenshot transport');
+});
+
+test('sidebar rejects overlapping, stale, disconnected and invalid captures', async t=>{
+  const h=harness(t);await h.start();let release;
+  h.screenshotHook=()=>new Promise(resolve=>release=resolve);
+  const first=h.service.screen(h.id);
+  await assert.rejects(h.service.screen(h.id),/正在获取/);
+  h.service.basicControl(h.id,'pause');release(h.png);await assert.rejects(first,/暂停/);
+  h.service.basicControl(h.id,'resume');
+  const second=h.service.screen(h.id);h.online=false;await h.service.refresh();release(h.png);await assert.rejects(second);
+  h.online=true;await h.service.refresh();h.service.basicControl(h.id,'stop');
+  h.screenshotHook=null;h.png=Buffer.from('not a screen');
+  await assert.rejects(h.service.screen(h.id),/有效画面/);
+});
+
 test('basic view, bounds, freshness and unsupported input restrictions are enforced in service', async t=>{
   const h=harness(t);await h.start('view');await h.action({kind:'screenshot'});
   await assert.rejects(h.action({kind:'key',key:'home'}),/仅查看/);
@@ -65,6 +100,43 @@ test('pause, resume, duplicate IDs and disconnect never replay old input', async
   h.online=false;await h.service.refresh();assert.equal(h.state().phase,'disconnected');
   h.online=true;await h.service.refresh();assert.throws(()=>h.service.basicControl(h.id,'resume'),/断线/);
   await assert.rejects(h.action({kind:'key',key:'home'}),/断开/);
+  assert.equal(h.calls.filter(a=>a[3]?.startsWith("'input'")).length,1);
+});
+
+test('mode switching retains the session, revokes old frames and enforces view-only input', async t=>{
+  const h=harness(t);await h.start('view');
+  const original=h.state();
+  const switchMode=(mode,overrides={})=>h.service.basicSetMode({id:h.id,sessionId:h.state().sessionId,generation:h.state().generation,mode,...overrides});
+  await h.action({kind:'screenshot'});
+  switchMode('control');
+  assert.equal(h.state().sessionId,original.sessionId);
+  assert.equal(h.state().phase,'controlling');
+  assert.ok(h.state().generation>original.generation);
+  await assert.rejects(h.action({kind:'tap',x:10,y:20}),/先刷新/);
+  await h.action({kind:'screenshot'});await h.action({kind:'tap',x:10,y:20});
+  switchMode('view');
+  assert.equal(h.state().phase,'viewing');
+  await assert.rejects(h.action({kind:'key',key:'home'}),/仅查看/);
+  assert.throws(()=>switchMode('control',{generation:original.generation}),/已改变/);
+  h.service.basicControl(h.id,'pause');switchMode('view');assert.equal(h.state().phase,'viewing');
+  h.service.basicControl(h.id,'stop');assert.throws(()=>switchMode('control'),/结束或断开/);
+  await h.start('view');assert.throws(()=>switchMode('control',{sessionId:original.sessionId}),/已改变/);
+  h.online=false;await h.service.refresh();assert.throws(()=>switchMode('control'));
+});
+
+test('a mode change discards pending captures and never replays in-flight input', async t=>{
+  const h=harness(t);await h.start();
+  const switchMode=mode=>h.service.basicSetMode({id:h.id,sessionId:h.state().sessionId,generation:h.state().generation,mode});
+  let release;
+  h.screenshotHook=()=>new Promise(resolve=>release=resolve);
+  const capture=h.action({kind:'screenshot'});switchMode('view');release(h.png);
+  await assert.rejects(capture,/已改变/);
+  switchMode('control');h.screenshotHook=null;
+  await assert.rejects(h.action({kind:'tap',x:10,y:20}),/先刷新/);
+  h.inputHook=()=>new Promise(resolve=>release=resolve);
+  const input=h.action({kind:'key',key:'home'});switchMode('view');release('');
+  await assert.rejects(input,/已改变/);
+  assert.equal(h.state().phase,'viewing');
   assert.equal(h.calls.filter(a=>a[3]?.startsWith("'input'")).length,1);
 });
 

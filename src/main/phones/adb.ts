@@ -1,10 +1,10 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import type { PhoneDevice } from "../../shared/phones";
 import { isPhoneRead } from "./actions";
+import { androidSdkRoots } from "./android-paths";
 
 export const COMPANION_PACKAGE = "io.github.profilepilot.phone";
 export const COMPANION_PORT = 18761;
@@ -15,12 +15,13 @@ export interface AdbRunner {
 export function findAdb(env = process.env, platform = process.platform): string {
   if (env.PROFILEPILOT_ADB_PATH) return env.PROFILEPILOT_ADB_PATH;
   const executable = platform === "win32" ? "adb.exe" : "adb";
-  const sdkRoots = [env.ANDROID_HOME, env.ANDROID_SDK_ROOT, platform === "win32" ? path.join(env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "Android", "Sdk") : path.join(os.homedir(), "Library", "Android", "sdk"), path.join(os.homedir(), "Android", "Sdk")];
+  const sdkRoots = androidSdkRoots(env, platform);
   for (const root of sdkRoots) if (root && fs.existsSync(path.join(root, "platform-tools", executable))) return path.join(root, "platform-tools", executable);
   return executable;
 }
 export class Adb implements AdbRunner {
-  constructor(readonly executable = findAdb()) {}
+  constructor(private overrideExecutable?: string) {}
+  get executable(): string { return this.overrideExecutable || findAdb(); }
   runBinary(args: string[], timeout = 12000, signal?: AbortSignal): Promise<Buffer> {
     return new Promise((resolve, reject) => {
       execFile(this.executable, args, { windowsHide: true, timeout, signal, encoding: "buffer", maxBuffer: 24 * 1024 * 1024 }, (error, stdout, stderr) => {

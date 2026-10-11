@@ -6,6 +6,7 @@ const path = require('node:path');
 const { loadCli } = require('./cli-test-build.cjs');
 const { PhonesService } = loadCli('src/main/phones/service.ts');
 const { findEmulator, AndroidEmulators } = loadCli('src/main/phones/emulators.ts');
+const { ensureEmulatorWindowVisible } = loadCli('src/main/phones/emulator-window.ts');
 const { executePhoneCommand } = loadCli('src/main/phones/management.ts');
 
 function fixture(t, running = false) {
@@ -61,4 +62,36 @@ test('SDK emulator discovery supports Windows and macOS paths including spaces',
   assert.equal(findEmulator({ ANDROID_HOME: macRoot }, 'darwin'), macExe);
   assert.equal(findEmulator({ PROFILEPILOT_ADB_PATH: path.win32.join(windowsRoot, 'platform-tools', 'adb.exe') }, 'win32'), windowsExe);
   assert.equal(findEmulator({ PROFILEPILOT_EMULATOR_PATH: '/custom/emulator' }, 'darwin'), '/custom/emulator');
+});
+
+test('window placement is scoped to the newly spawned emulator and does not change its launch arguments', async t => {
+  const { EventEmitter } = require('node:events');
+  const child = Object.assign(new EventEmitter(), { pid: 12345, unref() {} });
+  const spawned = [], fitted = [];
+  t.mock.method(require('node:child_process'), 'spawn', (file, args, options) => {
+    spawned.push({ file, args, options });
+    queueMicrotask(() => child.emit('spawn'));
+    return child;
+  });
+  const emulator = new AndroidEmulators('C:\\Android SDK\\emulator.exe', async (...args) => { fitted.push(args); });
+  emulator.list = async () => ['Test_AVD'];
+  await emulator.launch('Test_AVD');
+  assert.deepEqual(fitted, [[12345, 'Test_AVD']]);
+  assert.deepEqual(spawned[0].args, ['-avd', 'Test_AVD']);
+  assert.equal(spawned[0].options.shell, false);
+  assert.equal(spawned[0].options.windowsHide, true);
+  // A failed spawn must not start a helper against a stale/missing PID.
+  t.mock.method(require('node:child_process'), 'spawn', () => {
+    queueMicrotask(() => child.emit('error', new Error('launch failed')));
+    return child;
+  });
+  await assert.rejects(emulator.launch('Test_AVD'), /启动失败/);
+  assert.equal(fitted.length, 1);
+});
+
+test('Windows window helper rejects malformed targets and is not invoked on macOS', async () => {
+  for (const [pid, name] of [[0, 'Test'], [NaN, 'Test'], [123, "Test'; exit"]]) {
+    await assert.rejects(ensureEmulatorWindowVisible(pid, name, 'win32'), /Invalid/);
+  }
+  await ensureEmulatorWindowVisible(12345, 'Test_AVD', 'darwin');
 });

@@ -1,16 +1,16 @@
 export const workspacePages = {
-  browser: { file: "index.html", label: "PC 控制" },
-  phones: { file: "phones.html", label: "手机控制" },
+  browser: { file: "index.html", label: "控制台" },
+  phones: { file: "phones.html", label: "控制台 · Android 设备" },
   tools: { file: "tools.html", label: "配套工具" },
   agent: { file: "tasks.html", label: "Agent" },
-  "local-apps": { file: "local-apps.html", label: "PC 控制 · Electron 应用" },
+  "local-apps": { file: "local-apps.html", label: "控制台 · Electron 应用" },
   settings: { file: "settings.html", label: "设置" }
 } as const;
 export type WorkspaceId = keyof typeof workspacePages;
 
-/** The two PC views keep separate cached panes and API permissions. */
+/** Console tabs retain separate cached panes and API permissions. */
 export function workspaceNavigationId(id: WorkspaceId): WorkspaceId {
-  return id === "local-apps" ? "browser" : id;
+  return id === "local-apps" || id === "phones" ? "browser" : id;
 }
 
 /** Only bundled workspaces in the shell's own directory are navigation targets. */

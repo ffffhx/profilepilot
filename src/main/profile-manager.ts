@@ -695,6 +695,19 @@ export class ProfileManager {
     });
   }
 
+  async configureProfileBrowser(profileId: string, hideAutomation: boolean): Promise<void> {
+    if (typeof hideAutomation !== "boolean") {
+      throw new ProfileManagerError("hideAutomation 必须是布尔值。", "PROFILE_BROWSER_SETTINGS_INVALID");
+    }
+    const ref = parseProfileId(profileId);
+    const id = this.requireIsolatedId(ref);
+    await this.updateRegistry((registry) => {
+      const profile = this.findIsolatedProfile(registry, id);
+      if (hideAutomation) profile.hideAutomation = true;
+      else delete profile.hideAutomation;
+    });
+  }
+
   async launchProfile(profileId: string, options: LaunchProfileOptions = {}): Promise<void> {
     assertDisposableE2eProfile(profileId);
     this.acquireLaunchLock(profileId);
@@ -3393,6 +3406,7 @@ export class ProfileManager {
     const chromeArgs = [
       `--user-data-dir=${profilePath}`,
       "--no-first-run",
+      ...(profile.hideAutomation === true ? ["--disable-blink-features=AutomationControlled"] : []),
       ...proxyArgs,
       ...launchPlan.launchArgs,
       ...cdpArgs,
@@ -3994,6 +4008,7 @@ export class ProfileManager {
       cloneCount: 0,
       projectTag: profile.projectTag ?? null,
       agentAccessDisabled: profile.agentAccessDisabled === true,
+      hideAutomation: profile.hideAutomation === true,
       cdpClients: [],
       gatewayControl: null,
       agentBrowserOccupancy: null,

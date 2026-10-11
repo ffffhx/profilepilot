@@ -166,6 +166,7 @@ export async function ensureConfiguredGatewayProfileRunning(
     args: [
       `--user-data-dir=${configured.userDataDir}`,
       "--no-first-run",
+      ...(configured.profile.hideAutomation === true ? ["--disable-blink-features=AutomationControlled"] : []),
       ...proxyArgs,
       ...launchPlan.launchArgs
     ]

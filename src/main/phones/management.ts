@@ -2,12 +2,26 @@ import { z } from "zod";
 import { PhonesService, phoneActionSchema } from "./service";
 export type PhoneManagementCommand = { action: "phone"; method: string; params?: unknown };
 export async function executePhoneCommand(command: PhoneManagementCommand, service: PhonesService): Promise<unknown> {
+  if (command.method === "screen") return service.screen(z.object({ id: z.string() }).strict().parse(command.params).id);
+  if (command.method === "android-setup-snapshot") return service.androidSetup.snapshot();
+  if (command.method === "android-setup-catalog") return service.androidSetup.catalog();
+  if (command.method === "android-setup-cancel") return service.androidSetup.cancel(z.object({ id: z.string().uuid() }).strict().parse(command.params).id);
+  if (command.method === "android-setup-start") {
+    const imageId = z.string().regex(/^system-images;android-\d+;google_apis;(x86_64|arm64-v8a)$/);
+    const licenseToken = z.string().regex(/^[a-f0-9]{64}$/);
+    return service.androidSetup.start(z.discriminatedUnion("kind", [
+      z.object({ kind: z.literal("environment"), licenseToken }).strict(),
+      z.object({ kind: z.literal("image"), imageId, licenseToken }).strict(),
+      z.object({ kind: z.literal("create"), imageId, name: z.string().regex(/^[A-Za-z][A-Za-z0-9_-]{0,49}$/), memoryMb: z.number().int().min(1024).max(16384), storageGb: z.number().int().min(2).max(64) }).strict()
+    ]).parse(command.params));
+  }
   if (command.method === "inspect") return service.inspect(z.object({ id: z.string() }).strict().parse(command.params).id);
   if (command.method === "basic-start") {
     const p = z.object({ id: z.string(), mode: z.enum(["view", "control"]).default("control"), controller: z.string().default("本机用户"), task: z.string().default("") }).strict().parse(command.params);
     return service.basicStart(p.id, p.mode, p.controller, p.task);
   }
   if (command.method === "basic-action") return service.basicPerform(z.object({ id: z.string(), sessionId: z.string(), generation: z.number(), requestId: z.string(), action: phoneActionSchema }).strict().parse(command.params));
+  if (command.method === "basic-mode") return service.basicSetMode(z.object({ id: z.string(), sessionId: z.string(), generation: z.number(), mode: z.enum(["view", "control"]) }).strict().parse(command.params));
   if (["basic-pause", "basic-resume", "basic-stop"].includes(command.method)) {
     const { id } = z.object({ id: z.string() }).strict().parse(command.params);
     return service.basicControl(id, command.method.slice(6) as "pause" | "resume" | "stop");

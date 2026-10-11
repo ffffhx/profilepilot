@@ -63,8 +63,8 @@ try {
   assert.equal(await shell(`document.querySelector('.guide-progress').textContent`), '1 / 3');
   assert.equal(await shell(`document.querySelector('iframe[data-active="true"]').inert`), true);
   // The real rail remains clickable while the page underneath is protected.
-  assert.equal(await shell(`(() => { const tab = document.querySelector('.workspace-link[data-workspace="phones"]'); const rect = tab.getBoundingClientRect(); return document.elementFromPoint(rect.left + 15, rect.top + rect.height / 2).closest('a') === tab; })()`), true);
-  await d.domClick('.workspace-link[data-workspace="phones"]', { target: 'shell' });
+  assert.equal(await shell(`(() => { const tab = document.querySelector('.workspace-link[data-workspace="tools"]'); const rect = tab.getBoundingClientRect(); return document.elementFromPoint(rect.left + 15, rect.top + rect.height / 2).closest('a') === tab; })()`), true);
+  await shell("window.workspaceHost.navigate('./phones.html'); true");
   await ready('phones-tab');
   assert.equal(await shell(`localStorage.getItem('profilepilot:workspace-guide:v3:browser')`), 'dismissed');
   assert.equal(await shell(`document.querySelectorAll('#workspace-guide').length`), 1);
@@ -84,7 +84,7 @@ try {
   ];
   for (const [workspace, ids] of chapters) {
     if (workspace === 'local-apps') await d.domClick('.workspace-link[data-workspace="browser"]');
-    await d.domClick(workspace === 'local-apps' ? '[data-pc-view="local-apps"]' : `.workspace-link[data-workspace="${workspace}"]`);
+    await shell(`window.workspaceHost.navigate(${JSON.stringify(workspace === 'browser' ? './index.html' : workspace === 'agent' ? './tasks.html' : `./${workspace}.html`)}); true`);
     if (!(await d.query('#workspace-guide')).exists) await d.domClick('[data-workspace-guide]');
     for (const [index, id] of ids.entries()) {
       await ready(id);
@@ -123,7 +123,7 @@ try {
   assert.equal((await d.query('#workspace-guide')).exists, false);
   for (const [workspace] of chapters) {
     if (workspace === 'local-apps') await d.domClick('.workspace-link[data-workspace="browser"]');
-    await d.domClick(workspace === 'local-apps' ? '[data-pc-view="local-apps"]' : `.workspace-link[data-workspace="${workspace}"]`);
+    await shell(`window.workspaceHost.navigate(${JSON.stringify(workspace === 'browser' ? './index.html' : workspace === 'agent' ? './tasks.html' : `./${workspace}.html`)}); true`);
     assert.equal((await d.query('#workspace-guide')).exists, false);
   }
   await shell(`localStorage.setItem('profilepilot-workspace-theme', 'dark'); true`);

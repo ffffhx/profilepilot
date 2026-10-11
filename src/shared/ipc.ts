@@ -1,6 +1,7 @@
 export const IPC_CHANNELS = {
   setWindowAppearance: "app:window:set-appearance",
   navigateWorkspace: "app:workspace:navigate",
+  zoomAgentWorkspace: "app:workspace:zoom-agent",
   getState: "profiles:get-state",
   getInitialState: "profiles:get-initial-state",
   getStartupSettings: "app:startup:get-settings",

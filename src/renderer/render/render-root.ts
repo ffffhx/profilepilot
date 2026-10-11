@@ -93,7 +93,7 @@ export function render(): void {
     <div class="shell browser-workspace">
       <a class="skip-link" href="#main-content">跳到 Profile 列表</a>
       <header class="app-header pc-control-header">
-        <div class="pc-control-brand"><h1>PC 控制</h1><p>管理浏览器与桌面应用</p></div>
+        <div class="pc-control-brand"><h1>控制台</h1><p>管理浏览器、桌面应用与 Android 设备</p></div>
         <div class="header-actions">
           <button type="button" data-action="refresh" ${store.busy ? "disabled" : ""}>${renderButtonLabel(refreshing, "刷新", "刷新中…")}</button>
           <button type="button" data-action="open-onboarding" aria-label="浏览器使用指南">···</button>

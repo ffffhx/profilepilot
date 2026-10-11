@@ -10,8 +10,26 @@ const container = document.getElementById("workspace-pages")!;
 const loading = document.getElementById("workspace-loading")!;
 const initial = new URLSearchParams(location.search).get("workspace") || "browser";
 let requested: WorkspaceId = Object.hasOwn(workspacePages, initial) ? initial as WorkspaceId : "browser";
+const consolePreference = "profilepilot-console-tab";
+let lastConsole: WorkspaceId = "browser";
+try {
+  const saved = localStorage.getItem(consolePreference) as WorkspaceId;
+  if (["browser", "local-apps", "phones"].includes(saved)) lastConsole = saved;
+} catch { /* The console still works without persistent storage. */ }
+if (requested === "browser") requested = lastConsole;
 if (requested === "agent" && !experimentalAgentEnabled()) requested = "browser";
 let active: Page | undefined;
+const agentZoomPreference = "profilepilot-agent-zoom";
+let agentZoom = 100;
+try {
+  const saved = Number(localStorage.getItem(agentZoomPreference));
+  if (Number.isFinite(saved) && saved >= 80 && saved <= 150) agentZoom = Math.round(saved / 10) * 10;
+} catch { /* Storage is optional; Agent starts at its default size. */ }
+
+function applyAgentZoom(frame: HTMLIFrameElement): void {
+  frame.style.setProperty("--agent-zoom", String(agentZoom / 100));
+  frame.dataset.zoom = String(agentZoom);
+}
 document.getElementById("workspace-chrome")!.innerHTML = workspaceSwitcher(requested) + workspaceIdentityBar();
 refreshWorkspaceSwitcher();
 const guide = createWorkspaceGuide();
@@ -31,6 +49,11 @@ function activate(page: Page): void {
     page.frame.inert = false;
     document.documentElement.dataset.workspace = page.id;
     document.title = `ProfilePilot · ${workspacePages[page.id].label}`;
+    if (workspaceNavigationId(page.id) === "browser") {
+      lastConsole = page.id;
+      try { localStorage.setItem(consolePreference, lastConsole); } catch { /* Keep the current tab in memory. */ }
+    }
+    document.querySelectorAll<HTMLAnchorElement>('.workspace-link[data-workspace="browser"], .workspace-logo').forEach(link => link.href = `./${workspacePages[lastConsole].file}`);
     document.querySelectorAll<HTMLAnchorElement>(".workspace-link, .workspace-settings").forEach(link => {
       const selected = link.dataset.workspace === workspaceNavigationId(page.id);
       link.classList.toggle("active", selected);
@@ -73,6 +96,7 @@ function navigate(href: string): boolean {
     frame.title = workspacePages[route.id].label;
     frame.dataset.workspace = route.id;
     frame.dataset.active = "false";
+    if (route.id === "agent") applyAgentZoom(frame);
     frame.inert = true;
     // Each page owns only the content viewport, including its dialogs.
     // Hidden pages keep their DOM and JS state while the shell stays mounted.
@@ -123,6 +147,12 @@ document.addEventListener("keydown", event => {
   if (active.frame.contentWindow?.workspacePane?.shortcut({ key: event.key, ctrlKey: event.ctrlKey, metaKey: event.metaKey, shiftKey: event.shiftKey, altKey: event.altKey })) event.preventDefault();
 });
 window.desktopWindow?.onNavigate?.(href => navigate(href));
+window.desktopWindow?.onAgentZoom?.(command => {
+  if (active?.id !== "agent" || document.querySelector(".workspace-guide[open]")) return;
+  agentZoom = command === "reset" ? 100 : Math.max(80, Math.min(150, agentZoom + (command === "in" ? 10 : -10)));
+  applyAgentZoom(active.frame);
+  try { localStorage.setItem(agentZoomPreference, String(agentZoom)); } catch { /* Keep the current zoom in memory. */ }
+});
 onExperimentalFeaturesChanged(() => {
   if (!experimentalAgentEnabled() && requested === "agent") { guide.close(); navigate(workspacePages.browser.file); }
 });

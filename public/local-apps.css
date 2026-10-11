@@ -18,7 +18,7 @@ button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,
 .icon { width:18px; height:18px; flex-shrink:0; }
 .pc-apps-shell { padding:0 18px 18px; background:var(--panel); }
 .app-topbar > button { min-height:36px; padding-inline:14px; }
-.pc-apps-layout { display:grid; grid-template-columns:minmax(0,1fr) 266px; gap:14px; align-items:start; }
+.pc-apps-layout { display:grid; grid-template-columns:minmax(0,1fr) 220px; gap:12px; align-items:start; }
 .pc-apps-registry { min-width:0; border:1px solid var(--line); border-radius:6px; background:var(--panel); }
 .pc-apps-list-head { min-height:59px; padding:10px 15px; display:flex; align-items:center; justify-content:space-between; gap:16px; border-bottom:1px solid var(--line); }
 .pc-apps-list-head h2 { margin:0; font-size:20px; white-space:nowrap; }
@@ -146,7 +146,13 @@ dialog::backdrop { background:#20324c55; }
 .task-confirm .actions { display:flex; justify-content:flex-end; gap:8px; margin-top:24px; }
 [hidden] { display:none!important; }
 
-@media(max-width:1060px) {
+@media(max-width:950px) {
+  .pc-apps-layout { grid-template-columns:minmax(0,1fr) 195px; }
+}
+@media(max-width:900px) {
+  .pc-apps-layout { grid-template-columns:minmax(0,1fr) 180px; }
+}
+@media(max-width:820px) {
   .pc-apps-layout { grid-template-columns:minmax(0,1fr); }
   .app-content { padding:14px 12px 10px; }
 }

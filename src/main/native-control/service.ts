@@ -120,7 +120,7 @@ export class NativeControlService {
       }
       const previous = this.sessions.get(sessionId);
       if (previous) throw new Error("此直接会话已经存在，请继续使用或显式结束。");
-      const task = { id: randomUUID(), sessionId, profileId, browserConnection: "extension", status: "running", attachments: [], outputs: [] } as unknown as BrowserTask;
+      const task = { id: randomUUID(), sessionId, title: sessionId, profileId, browserConnection: "extension", status: "running", attachments: [], outputs: [] } as unknown as BrowserTask;
       // Reserve synchronously before any I/O; two claims cannot overwrite the
       // same session or bind it to two Profiles.
       const session: Session = { task, queue: Promise.resolve(), epoch: 0, ending: false,
@@ -128,7 +128,7 @@ export class NativeControlService {
       this.updateControlState(session, this.bridge.states().find(s => s.profileId === profileId));
       this.sessions.set(sessionId, session);
       try {
-        await this.bridge.request(profileId, "claim", { sessionId, tabId: params.tabId, newTab: params.newTab === true });
+        await this.bridge.request(profileId, "claim", { sessionId, taskTitle: task.title, tabId: params.tabId, newTab: params.newTab === true });
         if (this.sessions.get(sessionId) !== session || session.ending) throw new NativeControlError("NATIVE_SESSION_CONFLICT", "此直接会话已结束或正在结束，请检查 status。");
         this.updateControlState(session, this.bridge.states().find(s => s.profileId === profileId));
         return { sessionId, profileId, state: this.bridge.states().find(s => s.profileId === profileId) };

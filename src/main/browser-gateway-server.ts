@@ -58,6 +58,7 @@ interface GatewayRoute {
   server: Server;
   connections: Set<GatewayConnection>;
   pending: Map<number, PendingRequest>;
+  inputFrames: Map<string, { again: boolean; done: Promise<void> }>;
   targetBySession: Map<string, string>;
   targetByCdpSession: Map<string, GatewayCdpSessionBinding>;
   internalCdpSessionIds: Set<string>;
@@ -99,6 +100,9 @@ interface GatewayConnection {
 
 interface GatewayCdpSessionBinding {
   targetId: string;
+  // The transport target can be an OOPIF. Only its owning page belongs in the
+  // Agent's tab affinity, which raw CDP (including captcha wait) also uses.
+  pageTargetId: string | null;
   connectionId: string;
   agentSessionId: string;
 }
@@ -171,6 +175,7 @@ export class BrowserGatewayServer {
       server,
       connections: new Set(),
       pending: new Map(),
+      inputFrames: new Map(),
       targetBySession: new Map(),
       targetByCdpSession: new Map(),
       internalCdpSessionIds: new Set(),
@@ -657,7 +662,10 @@ export class BrowserGatewayServer {
         `raw-cdp:${input.method}`
       );
       targetCommitted = route.targetCommitIntentBySession.get(input.sessionId) === intent;
-      const result = await this.sendRaw(route, input.method, input.params || {}, timeoutMs, targetSessionId);
+      const command = this.sendRaw(route, input.method, input.params || {}, timeoutMs, targetSessionId);
+      const frame = this.requestInputFrame(route, input.method, targetSessionId, assertCurrent);
+      const result = await command;
+      await frame;
       assertCurrent();
       return result;
     } catch (error) {
@@ -1275,15 +1283,17 @@ export class BrowserGatewayServer {
           isAgentTargetInteractionMethod(method)
         )
       ) {
-        const targetId = this.targetForCdpSession(route, connection, message);
-        const activityIntent = this.beginSessionTargetIntent(route, connection.identity.sessionId);
-        this.setSessionTargetIfCurrentIntent(
-          route,
-          connection.identity.sessionId,
-          targetId,
-          activityIntent,
-          `agent-cdp:${method}`
-        );
+        const targetId = route.targetByCdpSession.get(clientSessionId)?.pageTargetId;
+        if (targetId) {
+          const activityIntent = this.beginSessionTargetIntent(route, connection.identity.sessionId);
+          this.setSessionTargetIfCurrentIntent(
+            route,
+            connection.identity.sessionId,
+            targetId,
+            activityIntent,
+            `agent-cdp:${method}`
+          );
+        }
       }
       if (method === "Page.bringToFront" || method === "Target.activateTarget") {
         targetIntent = this.beginSessionTargetIntent(route, connection.identity.sessionId);
@@ -1390,6 +1400,12 @@ export class BrowserGatewayServer {
         id: backendId,
         ...(connection.targetSessionId ? { sessionId: connection.targetSessionId } : {})
       }));
+      if (connection.identity.kind === "agent") {
+        void this.requestInputFrame(route, method, connection.targetSessionId || clientSessionId, () => {
+          this.control.assertConnectionCanSend(connection.identity);
+          if (connection.parked || connection.quiescing || !route.connections.has(connection)) throw new Error("Agent input ended");
+        });
+      }
     } catch (error) {
       route.pending.delete(backendId);
       if (attachTargetId) this.decrementConnectionAttachTarget(connection, attachTargetId);
@@ -1403,6 +1419,39 @@ export class BrowserGatewayServer {
       }
       throw error;
     }
+  }
+
+  // A hidden headful Chrome tab defers coalesced mousemove and rAF work until
+  // its next compositor frame (observed input ACK fallback: 5 seconds). Capture
+  // the existing surface without a clip: Chromium temporarily resizes the view
+  // for clipped captures, so a 1x1 pulse overlapping a normal screenshot can
+  // return a 2x2 image at fractional DPR or restore another capture's view size.
+  // Low JPEG quality limits encoding cost; the image is discarded in memory.
+  // Never synthesize an input ACK or change focus/visibility/viewport emulation.
+  private requestInputFrame(route: GatewayRoute, method: string, sessionId: string | undefined, assertCurrent: () => void): Promise<void> {
+    if (!sessionId || !/^Input\.(dispatch(?:Mouse|Key|Touch)Event|insertText|imeSetComposition)$/.test(method)) return Promise.resolve();
+    const existing = route.inputFrames.get(sessionId);
+    if (existing) { existing.again = true; return existing.done; }
+    const state = { again: true, done: Promise.resolve() };
+    route.inputFrames.set(sessionId, state);
+    state.done = (async () => {
+      try {
+        while (state.again && this.routes.get(route.publicPort) === route) {
+          state.again = false;
+          assertCurrent();
+          await this.sendRaw(route, "Page.captureScreenshot", {
+            format: "jpeg", quality: 1, fromSurface: true,
+            captureBeyondViewport: false
+          }, 1_000, sessionId);
+        }
+      } catch {
+        // Unsupported targets, dialogs, detach and takeover must not change the
+        // original input's result or trigger an input retry.
+      } finally {
+        if (route.inputFrames.get(sessionId) === state) route.inputFrames.delete(sessionId);
+      }
+    })();
+    return state.done;
   }
 
   private handleBackendMessage(route: GatewayRoute, text: string): void {
@@ -1450,6 +1499,21 @@ export class BrowserGatewayServer {
     if (!pending) return;
     route.pending.delete(backendId);
     if (pending.timer) clearTimeout(pending.timer);
+    // Fail an unusable observation instead of passing a tiny PNG to the Agent
+    // as a successful full-view screenshot. Explicit small clips remain valid.
+    if (pending.method === "Page.captureScreenshot" && !pending.params?.clip && !message.error) {
+      const result = message.result as { data?: unknown } | undefined;
+      if (typeof result?.data === "string") {
+        const header = Buffer.from(result.data.slice(0, 44), "base64");
+        if (header.length >= 24 && header.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10]))) {
+          const width = header.readUInt32BE(16), height = header.readUInt32BE(20);
+          if (width <= 2 && height <= 2) {
+            delete message.result;
+            message.error = { code: -32000, message: `SCREENSHOT_INVALID_SIZE: Chrome 返回了 ${width}×${height} 像素的异常截图；请重新观察页面，不要沿用旧图坐标。` };
+          }
+        }
+      }
+    }
     if (pending.kind === "client" && pending.connection && pending.downstreamId !== undefined) {
       const result = message.result && typeof message.result === "object"
         ? message.result as Record<string, unknown>
@@ -1528,17 +1592,19 @@ export class BrowserGatewayServer {
           requestedTargetId &&
           attachedSessionId
         ) {
-          if (attachedSessionId) {
-            this.bindCdpSession(route, pending.connection, attachedSessionId, requestedTargetId);
-          }
+          const binding = this.bindCdpSession(route, pending.connection, attachedSessionId, requestedTargetId);
           if (pending.targetIntent !== undefined) {
-            this.setSessionTargetIfCurrentIntent(
-              route,
-              pending.connection.identity.sessionId,
-              requestedTargetId,
-              pending.targetIntent,
-              "agent-cdp-response:Target.attachToTarget"
-            );
+            if (binding.pageTargetId) {
+              this.setSessionTargetIfCurrentIntent(
+                route,
+                pending.connection.identity.sessionId,
+                binding.pageTargetId,
+                pending.targetIntent,
+                "agent-cdp-response:Target.attachToTarget"
+              );
+            } else {
+              this.retireSessionTargetIntent(route, pending.connection.identity.sessionId, pending.targetIntent);
+            }
           }
         } else if (
           pending.connection.identity.kind === "agent" &&
@@ -1690,19 +1756,27 @@ export class BrowserGatewayServer {
     route: GatewayRoute,
     connection: GatewayConnection,
     cdpSessionId: string,
-    targetId: string
-  ): void {
+    targetId: string,
+    pageTargetId?: string | null
+  ): GatewayCdpSessionBinding {
     const previous = route.targetByCdpSession.get(cdpSessionId);
+    const sameBinding = previous?.targetId === targetId && previous.connectionId === connection.id &&
+      previous.agentSessionId === connection.identity.sessionId;
     if (previous) {
       const previousConnection = [...route.connections].find((candidate) => candidate.id === previous.connectionId);
       previousConnection?.childSessionIds.delete(cdpSessionId);
     }
-    route.targetByCdpSession.set(cdpSessionId, {
+    const binding = {
       targetId,
+      // The attach event carries frame ancestry; the subsequent attach reply
+      // must not overwrite it with the iframe's transport target id.
+      pageTargetId: pageTargetId !== undefined ? pageTargetId : sameBinding ? previous.pageTargetId : targetId,
       connectionId: connection.id,
       agentSessionId: connection.identity.sessionId
-    });
+    };
+    route.targetByCdpSession.set(cdpSessionId, binding);
     connection.childSessionIds.add(cdpSessionId);
+    return binding;
   }
 
   private unbindCdpSession(route: GatewayRoute, cdpSessionId: string): void {
@@ -1779,7 +1853,16 @@ export class BrowserGatewayServer {
     if (route.internalCdpSessionIds.has(cdpSessionId)) return;
     if ((route.trustedAttachTargets.get(targetId) || 0) > 0) return;
     if (!connection.autoAttachEnabled && !connection.pendingAttachTargets.has(targetId)) return;
-    this.bindCdpSession(route, connection, cdpSessionId, targetId);
+    const parentSessionId = typeof message.sessionId === "string" ? message.sessionId : "";
+    const parent = route.targetByCdpSession.get(parentSessionId);
+    const pageTargetId = targetInfo?.type === "page" || route.kind === "electron" && targetInfo?.type === "webview"
+      ? targetId
+      : targetInfo?.type === "iframe" && parent?.connectionId === connection.id && parent.agentSessionId === connection.identity.sessionId
+        ? parent.pageTargetId
+        : null;
+    // An unparented iframe/worker is not a tab. Keep the existing affinity if
+    // its owning page cannot be established; never select an arbitrary page.
+    this.bindCdpSession(route, connection, cdpSessionId, targetId, pageTargetId);
   }
 
   private connectionOwnsCdpSession(
@@ -2169,7 +2252,7 @@ export class BrowserGatewayServer {
         error.method = method;
         reject(error);
       }, timeoutMs);
-      route.pending.set(id, { kind: "raw", resolve, reject, timer });
+      route.pending.set(id, { kind: "raw", resolve, reject, timer, method, params });
       try {
         route.backend.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
       } catch (error) {

@@ -11,8 +11,11 @@ const {downloadAndroidArchive} = loadCli('src/main/phones/android-install-io.ts'
 const {executePhoneCommand} = loadCli('src/main/phones/management.ts');
 const {baseXml,imageXml,createAndroidFixture,waitAndroidJob,write} = require('./fixtures/android-setup.cjs');
 function fixture(t, options) {
+  // Installation is simulated; host disk capacity must not decide its result.
+  const {freeSpaceBytes=64*1024**3,...setupOptions}=options||{};
+  t.mock.method(fs,'statfsSync',()=>({bsize:4096,bavail:Math.floor(freeSpaceBytes/4096)}));
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'pp-android-setup-'));
-  const h=createAndroidFixture(AndroidSetup,root,options);
+  const h=createAndroidFixture(AndroidSetup,root,setupOptions);
   t.after(async()=>{await h.runtime.close();assert.equal(path.dirname(root),os.tmpdir());fs.rmSync(root,{recursive:true,force:true});});return {...h,root};
 }
 async function install(h) {const s=await h.runtime.catalog();await h.runtime.start({kind:'environment',licenseToken:s.licenseToken});const done=await waitAndroidJob(h.runtime);assert.equal(done.job.status,'succeeded',done.job.error);return done;}
@@ -46,6 +49,12 @@ test('macOS Java bundle and space-containing paths use argument arrays with nati
   const h=fixture(t,{platform:'darwin',arch:'arm64'}),s=await image(h);
   assert.equal(s.images[0].abi,'arm64-v8a');assert.ok(h.calls[0].file.endsWith(path.join('Contents','Home','bin','java')));
   assert.ok(h.calls[0].args.includes('--sdk_root='+h.sdkRoot));
+});
+test('insufficient AVD disk space rejects creation before invoking tools',async t=>{
+  const h=fixture(t,{freeSpaceBytes:6*1024**3}),s=await image(h),before=h.calls.length;
+  await assert.rejects(h.runtime.start({kind:'create',imageId:s.images[0].id,name:'LowSpace',memoryMb:4096,storageGb:8}),/磁盘空间不足.*10 GB/);
+  assert.equal(h.calls.length,before);
+  assert.equal(fs.existsSync(path.join(h.avdHome,'LowSpace.ini')),false);
 });
 test('incompatible images and invalid paths are rejected before invoking tools',async t=>{
   const h=fixture(t),s=await image(h),before=h.calls.length;

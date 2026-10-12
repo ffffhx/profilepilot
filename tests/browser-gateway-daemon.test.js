@@ -433,7 +433,7 @@ if (connectIndex >= 0) {
       env,
       port
     );
-    assert.deepEqual(prepared, ["--session", "cx-wrapper", "snapshot", "--json"]);
+    assert.deepEqual(prepared, ["--session", "cx-wrapper", "--no-auto-dialog", "false", "snapshot", "--json"]);
     const calls = readFileSync(callsPath, "utf8").trim().split("\n").map(JSON.parse);
     assert.equal(calls.length, 1);
     assert.deepEqual(readJsonLines(envCallsPath), [{
@@ -443,8 +443,8 @@ if (connectIndex >= 0) {
       AGENT_BROWSER_PROXY: null,
       NO_PROXY: "127.0.0.1,localhost"
     }]);
-    assert.deepEqual(calls[0].slice(0, 3), ["--session", "cx-wrapper", "connect"]);
-    assert.match(calls[0][3], new RegExp(`^ws://127\\.0\\.0\\.1:${port}/devtools/browser/gateway\\?ticket=`));
+    assert.deepEqual(calls[0].slice(0, 5), ["--session", "cx-wrapper", "--no-auto-dialog", "false", "connect"]);
+    assert.match(calls[0][5], new RegExp(`^ws://127\\.0\\.0\\.1:${port}/devtools/browser/gateway\\?ticket=`));
     const status = await requestBrowserGateway({ action: "status" }, { homeDir: home });
     const profile = status.state.profiles.find((item) => item.publicPort === port);
     assert.equal(profile.ownerSessionId, "cx-wrapper");
@@ -841,7 +841,7 @@ process.exit(fs.existsSync(process.env.READY_PATH) ? 0 : 8);
       port,
       { quietConnect: true }
     );
-    assert.deepEqual(prepared, ["--session", "cx-wrapper-retry", "snapshot"]);
+    assert.deepEqual(prepared, ["--session", "cx-wrapper-retry", "--no-auto-dialog", "false", "snapshot"]);
     assert.equal(readFileSync(callsPath, "utf8").trim().split("\n").length, 3);
     const status = await requestBrowserGateway({ action: "status" }, { homeDir: home });
     const profile = status.state.profiles.find((item) => item.publicPort === port);

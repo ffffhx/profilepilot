@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { waitForTestChrome, cleanupRelaunchedTestChrome } from "./test-chrome-lifecycle.mjs";
+import { endOverlayTask } from "./overlay-test-controls.mjs";
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
@@ -175,7 +177,7 @@ async function main() {
   }
 
   if (chrome) {
-    await terminateProcess(chrome.child);
+    await terminateProcess(chrome.child, chrome.tempDir);
     await rm(chrome.tempDir, { recursive: true, force: true }).catch(() => undefined);
   }
 }
@@ -522,24 +524,7 @@ function overlayState(client, contextId = undefined) {
 }
 
 async function clickOverlayStopButton(client) {
-  const rect = await evaluateValue(
-    client,
-    `(() => {
-      const host = document.getElementById("__pp-agent-overlay");
-      if (!host) {
-        return null;
-      }
-      const rect = host.getBoundingClientRect();
-      return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
-    })()`,
-    1000
-  );
-  assert.ok(rect && rect.width > 0 && rect.height > 0, "Overlay host should have a clickable rect.");
-  const x = Math.round(rect.left + rect.width / 2);
-  const y = Math.round(rect.top + rect.height - 18);
-  await dispatchMouseClick(client, x, y);
-  await delay(90);
-  await dispatchMouseClick(client, x, y);
+  await endOverlayTask(client);
 }
 
 async function dispatchMouseClick(client, x, y) {
@@ -642,7 +627,7 @@ async function launchChromeWithFallback() {
       };
     } catch (error) {
       failures.push(`${attempt.mode}: ${formatError(error)}${stderr ? `\n${stderr}` : ""}`);
-      await terminateProcess(child);
+      await terminateProcess(child, tempDir);
       await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
     }
   }
@@ -724,25 +709,10 @@ async function isExecutable(file) {
 }
 
 async function waitForCdp(port, child, spawnError, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  let lastError = null;
-  while (Date.now() < deadline) {
-    if (spawnError()) {
-      throw spawnError();
-    }
-    if (child.exitCode !== null) {
-      throw new Error(`Chrome exited before CDP became ready, exit code ${child.exitCode}.`);
-    }
-    try {
-      return await requestJson(port, "/json/version", 1000);
-    } catch (error) {
-      lastError = error;
-      await delay(100);
-    }
-  }
-  throw new Error(
-    `Timed out waiting for Chrome CDP on 127.0.0.1:${port}.${lastError instanceof Error ? ` Last error: ${lastError.message}` : ""}`
-  );
+  return waitForTestChrome({
+    child, spawnError, timeoutMs, port,
+    probe: () => requestJson(port, "/json/version", 1000)
+  });
 }
 
 async function waitForTarget(port, predicate, timeoutMs, label) {
@@ -839,18 +809,19 @@ function delay(ms) {
   });
 }
 
-async function terminateProcess(child) {
-  if (!child || child.exitCode !== null || child.signalCode !== null) {
-    return;
-  }
-  child.kill("SIGTERM");
-  const exited = await Promise.race([
-    once(child, "exit").then(() => true),
-    delay(2500).then(() => false)
-  ]);
-  if (!exited && child.exitCode === null && child.signalCode === null) {
-    child.kill("SIGKILL");
-    await Promise.race([once(child, "exit"), delay(1000)]).catch(() => undefined);
+async function terminateProcess(child, tempDir) {
+  try {
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    const exit = once(child, "exit");
+    child.kill("SIGTERM");
+    const exited = await Promise.race([exit.then(() => true), delay(2500).then(() => false)]);
+    if (!exited && child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+      await Promise.race([exit, delay(1000)]).catch(() => undefined);
+    }
+  } finally {
+    // A successful Windows launcher exit can leave the real browser alive.
+    await cleanupRelaunchedTestChrome(tempDir);
   }
 }
 

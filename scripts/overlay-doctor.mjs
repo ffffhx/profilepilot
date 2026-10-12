@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { waitForTestChrome, cleanupRelaunchedTestChrome } from "./test-chrome-lifecycle.mjs";
+import { endOverlayTask } from "./overlay-test-controls.mjs";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { once } from "node:events";
@@ -458,7 +460,7 @@ async function launchChrome(url) {
       browserWsUrl: version.webSocketDebuggerUrl
     };
   } catch (error) {
-    await terminateProcess(child);
+    await terminateProcess(child, tempDir);
     await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
     const detail = stderr ? `\nChrome stderr:\n${stderr}` : "";
     throw new Error(`${formatError(error)}${detail}`);
@@ -535,24 +537,10 @@ async function isExecutable(file) {
 }
 
 async function waitForCdp(port, child, spawnError, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  let lastError = null;
-  while (Date.now() < deadline) {
-    const error = spawnError();
-    if (error) {
-      throw error;
-    }
-    if (child.exitCode !== null) {
-      throw new Error(`Chrome exited before CDP became ready, exit code ${child.exitCode}.`);
-    }
-    try {
-      return await requestJson(port, "/json/version", 1000);
-    } catch (requestError) {
-      lastError = requestError;
-      await delay(100);
-    }
-  }
-  throw new Error(`Timed out waiting for Chrome CDP on 127.0.0.1:${port}.${lastError instanceof Error ? ` Last error: ${lastError.message}` : ""}`);
+  return waitForTestChrome({
+    child, spawnError, timeoutMs, port,
+    probe: () => requestJson(port, "/json/version", 1000)
+  });
 }
 
 async function waitForInjectedTarget(port, predicate, timeoutMs, label) {
@@ -742,15 +730,7 @@ async function hostRect(client) {
 }
 
 async function clickOverlayStopButton(client) {
-  const rect = await hostRect(client);
-  if (!rect.width || !rect.height) {
-    throw new Error("Overlay host does not have a clickable rectangle.");
-  }
-  const x = Math.round(rect.left + rect.width / 2);
-  const y = Math.round(rect.top + rect.height - 18);
-  await dispatchMouseClick(client, x, y);
-  await delay(80);
-  await dispatchMouseClick(client, x, y);
+  await endOverlayTask(client);
 }
 
 async function dispatchMouseClick(client, x, y) {
@@ -964,7 +944,7 @@ async function cleanup(mode) {
   }
 
   if (chrome) {
-    await terminateProcess(chrome.child);
+    await terminateProcess(chrome.child, chrome.tempDir);
     await rm(chrome.tempDir, { recursive: true, force: true }).catch(() => undefined);
   }
   if (demoServers) {
@@ -972,18 +952,19 @@ async function cleanup(mode) {
   }
 }
 
-async function terminateProcess(child) {
-  if (!child || child.exitCode !== null || child.signalCode !== null) {
-    return;
-  }
-  child.kill("SIGTERM");
-  const exited = await Promise.race([
-    once(child, "exit").then(() => true),
-    delay(2500).then(() => false)
-  ]);
-  if (!exited && child.exitCode === null && child.signalCode === null) {
-    child.kill("SIGKILL");
-    await Promise.race([once(child, "exit"), delay(1000)]).catch(() => undefined);
+async function terminateProcess(child, tempDir) {
+  try {
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    const exit = once(child, "exit");
+    child.kill("SIGTERM");
+    const exited = await Promise.race([exit.then(() => true), delay(2500).then(() => false)]);
+    if (!exited && child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+      await Promise.race([exit, delay(1000)]).catch(() => undefined);
+    }
+  } finally {
+    // A successful Windows launcher exit can leave the real browser alive.
+    await cleanupRelaunchedTestChrome(tempDir);
   }
 }
 

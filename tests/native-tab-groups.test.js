@@ -7,7 +7,7 @@ const { webcrypto } = require('node:crypto');
 async function fixture(saved = {}) {
   const storage = saved.storage || {}, groups = saved.groups || new Map();
   const tabs = saved.tabs || new Map([7, 8, 9].map(id => [id, { id, windowId: 1, groupId: -1, url: `https://fixture.test/${id}`, active: id === 8, status: 'complete' }]));
-  const calls = []; let nextGroup = 100, nextTab = 20;
+  const calls = []; let nextGroup = Math.max(99, ...groups.keys()) + 1, nextTab = 20;
   const event = () => ({ addListener(fn) { this.emit = fn; } });
   const area = { get: async key => ({ [key]: storage[key] }), set: async value => Object.assign(storage, structuredClone(value)), remove: async keys => { for (const key of [].concat(keys)) delete storage[key]; } };
   const chrome = {
@@ -19,7 +19,12 @@ async function fixture(saved = {}) {
         if (!groups.has(groupId)) groups.set(groupId, { id: groupId, windowId: p.createProperties.windowId, color: 'grey', title: '', collapsed: false });
         for (const id of [].concat(p.tabIds)) {
           const tab = tabs.get(id); assert.equal(tab.windowId, groups.get(groupId).windowId); assert.ok(!tab.pinned);
+          const previous = tab.groupId;
           tab.groupId = groupId;
+          if (previous >= 0 && previous !== groupId && ![...tabs.values()].some(t => t.groupId === previous)) {
+            const removed = groups.get(previous); groups.delete(previous);
+            if (removed) chrome.tabGroups.onRemoved.emit(removed);
+          }
         }
         calls.push({ kind: 'group', groupId, ...p }); return groupId;
       },
@@ -31,7 +36,7 @@ async function fixture(saved = {}) {
       update: async (id, p) => { calls.push({ kind: 'visual', id, ...p }); Object.assign(groups.get(id), p); return { ...groups.get(id) }; }, onRemoved: event() },
     windows: { update: async () => assert.fail('Grouping must not focus windows') },
     scripting: { executeScript: async () => assert.fail('New tasks must preserve website icons and titles') },
-    runtime: { id: 'fixture', getURL: file => `chrome-extension://fixture/${file}`, getManifest: () => ({ version: '0.2.7' }), onMessage: event(), onInstalled: event(), onStartup: event() },
+    runtime: { id: 'fixture', getURL: file => `chrome-extension://fixture/${file}`, getManifest: () => ({ version: '0.2.8' }), onMessage: event(), onInstalled: event(), onStartup: event() },
     storage: { local: area, session: area, onChanged: event() }, alarms: { create: async () => {}, onAlarm: event() },
     action: { setBadgeText: async () => {}, setBadgeBackgroundColor: async () => {} },
     debugger: { attach: async () => {}, detach: async () => {}, sendCommand: async () => ({}), onEvent: event(), onDetach: event() }
@@ -52,7 +57,7 @@ test('one group survives running, waiting, takeover, resume and completion; unre
   const f = await fixture();
   await f.handle('claim', { sessionId: 'one', taskTitle: '校招申请', tabId: 7 }); await f.flush();
   const id = f.tabs.get(7).groupId, group = () => f.groups.get(id);
-  assert.equal(group().color, 'blue'); assert.match(group().title, /校招申请.*执行中/);
+  assert.equal(group().color, 'blue'); assert.equal(group().title, 'ProfilePilot · 执行中 1');
   assert.equal(f.tabs.get(8).groupId, -1);
   await f.handle('newTab', { sessionId: 'one', url: 'https://fixture.test/new' }); await f.flush();
   assert.equal(f.tabs.get(20).groupId, id);
@@ -132,4 +137,90 @@ test('takeover while grouping is pending cannot leave a stale blue group', async
   while (!release) await new Promise(resolve => setImmediate(resolve));
   await f.ui({ method: 'takeover' }); release(); await f.flush();
   assert.equal(f.groups.get(f.tabs.get(7).groupId).color, 'orange'); assert.equal((await f.state()).ownership, 'user');
+});
+
+test('different tasks share one window group with independent tab states and control scopes', async () => {
+  const f = await fixture();
+  await f.handle('claim', { sessionId: 'one', tabId: 7 }); await f.flush();
+  const id = f.tabs.get(7).groupId, group = () => f.groups.get(id);
+  await f.handle('control', { sessionId: 'one', action: 'complete' }); await f.flush();
+  await f.handle('claim', { sessionId: 'two', tabId: 8 }); await f.flush();
+  assert.equal(f.tabs.get(8).groupId, id);
+  assert.equal(group().title, 'ProfilePilot · 执行中 1 · 已完成 1');
+  assert.equal(group().color, 'blue');
+  await assert.rejects(f.handle('closeTab', { sessionId: 'two', tabId: 7 }), /未授权/);
+  await f.handle('control', { sessionId: 'two', action: 'complete', groupPhase: 'failed' }); await f.flush();
+  assert.equal(group().color, 'red'); assert.equal(group().title, 'ProfilePilot · 执行异常 1 · 已完成 1');
+  await f.handle('claim', { sessionId: 'three', tabId: 9 }); await f.flush();
+  assert.equal(f.tabs.get(9).groupId, id);
+  assert.equal(group().color, 'blue'); assert.equal(group().title, 'ProfilePilot · 执行中 1 · 执行异常 1 · 已完成 1');
+  await f.handle('control', { sessionId: 'three', action: 'handoff' }); await f.flush();
+  assert.equal(group().color, 'purple'); assert.match(group().title, /^ProfilePilot · 等待你处理 1/);
+  await f.handle('control', { sessionId: 'three', action: 'complete' }); await f.flush();
+  assert.equal(group().color, 'red'); assert.equal(group().title, 'ProfilePilot · 执行异常 1 · 已完成 2');
+  assert.equal(f.groups.size, 1);
+  // Reusing a page assigns its state to the new task; history cannot double-count it.
+  await f.handle('claim', { sessionId: 'four', tabId: 8 }); await f.flush();
+  assert.equal(group().title, 'ProfilePilot · 执行中 1 · 已完成 2');
+  await f.handle('control', { sessionId: 'four', action: 'complete' }); await f.flush();
+  assert.equal(group().color, 'green'); assert.equal(group().title, 'ProfilePilot · 已完成 3');
+});
+
+test('restored per-task groups merge only tracked members and preserve collapsed state', async () => {
+  const tabs = new Map([7, 8, 9, 10, 11].map(id => [id, {
+    id, windowId: 1, groupId: id === 7 ? 100 : id === 8 || id === 10 ? 101 : id === 11 ? 102 : -1,
+    url: `https://fixture.test/${id}`, active: id === 9, status: 'complete'
+  }]));
+  const groups = new Map([100, 101, 102].map(id => [id, { id, windowId: 1, color: 'green', title: 'ProfilePilot · old', collapsed: true }]));
+  const storage = { connection: { profileId: 'native:fixture' }, taskGroups: { profileId: 'native:fixture', tasks: [
+    ['one', { phase: 'completed', groups: { 1: 100 }, enrolled: [7, 9] }],
+    ['two', { phase: 'completed', groups: { 1: 101 }, enrolled: [8] }]
+  ] } };
+  const f = await fixture({ tabs, groups, storage }); await f.flush();
+  assert.equal(tabs.get(8).groupId, 100); assert.equal(groups.get(100).title, 'ProfilePilot · 已完成 2');
+  assert.equal(groups.get(100).collapsed, true);
+  assert.equal(tabs.get(9).groupId, -1); assert.equal(tabs.get(10).groupId, 101);
+  assert.equal(tabs.get(11).groupId, 102); assert.equal(groups.get(102).title, 'ProfilePilot · old');
+  const restored = await fixture(f); await restored.flush();
+  assert.equal(restored.tabs.get(8).groupId, 100);
+  assert.equal(restored.calls.some(call => call.kind === 'group'), false);
+});
+
+test('migration handles Chrome removing an emptied old group and excludes shared groups', async () => {
+  const f = await fixture();
+  f.storage.connection = { profileId: 'native:fixture' };
+  f.storage.taskGroups = { profileId: 'native:fixture', tasks: [] };
+  for (const [index, tab] of [...f.tabs.values()].entries()) {
+    const id = 200 + index; tab.groupId = id;
+    f.groups.set(id, { id, windowId: 1, color: 'green', title: 'old', shared: index === 2 });
+    f.storage.taskGroups.tasks.push([`task-${index}`, { phase: 'completed', groups: { 1: id }, enrolled: [tab.id] }]);
+  }
+  const restored = await fixture(f); await restored.flush();
+  assert.equal(restored.tabs.get(8).groupId, 200); assert.equal(restored.groups.has(201), false);
+  assert.equal(restored.tabs.get(9).groupId, 202); assert.equal(restored.groups.get(202).title, 'old');
+  assert.equal(restored.groups.get(200).title, 'ProfilePilot · 已完成 2');
+});
+
+test('state counts update on manual removal and tab closure without pulling tabs back', async () => {
+  const f = await fixture();
+  await f.handle('claim', { sessionId: 'one', tabId: 7 });
+  await f.handle('newTab', { sessionId: 'one', url: 'https://fixture.test/new' }); await f.flush();
+  const id = f.tabs.get(7).groupId;
+  await f.handle('control', { sessionId: 'one', action: 'complete' }); await f.flush();
+  f.tabs.get(7).groupId = -1; f.chrome.tabs.onUpdated.emit(7, { groupId: -1 }); await f.flush();
+  assert.equal(f.tabs.get(7).groupId, -1); assert.equal(f.groups.get(id).title, 'ProfilePilot · 已完成 1');
+  await f.handle('claim', { sessionId: 'two', tabId: 8 }); await f.flush();
+  f.tabs.delete(20); f.chrome.tabs.onRemoved.emit(20); await f.flush();
+  assert.equal(f.groups.get(id).title, 'ProfilePilot · 执行中 1');
+});
+
+test('current task colors only windows with its own tabs and never merges across windows', async () => {
+  const f = await fixture(); f.tabs.get(8).windowId = 2;
+  await f.handle('claim', { sessionId: 'one', tabId: 7 }); await f.flush();
+  const first = f.tabs.get(7).groupId;
+  await f.handle('control', { sessionId: 'one', action: 'complete' }); await f.flush();
+  await f.handle('claim', { sessionId: 'two', tabId: 8 }); await f.flush();
+  const second = f.tabs.get(8).groupId;
+  assert.notEqual(first, second); assert.equal(f.groups.get(first).color, 'green'); assert.equal(f.groups.get(second).color, 'blue');
+  assert.equal(f.tabs.get(7).windowId, 1); assert.equal(f.tabs.get(8).windowId, 2);
 });

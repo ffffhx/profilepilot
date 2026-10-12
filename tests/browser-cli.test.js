@@ -81,6 +81,28 @@ test('routing never interprets payload values or rewrites extension CDP', () => 
   assert.equal(f.args.at(-1), '--connection');
 });
 
+test('no-auto-dialog optional boolean stays in the prefix and never becomes the verb', async () => {
+  for (const setting of [[], ['true'], ['false']]) {
+    const args = ['--no-auto-dialog', ...setting, '--session', 'task', '--cdp', '9223', 'status'];
+    const route = parseBrowserCliRoute(args);
+    assert.equal(route.connection, 'gateway');
+    assert.equal(route.args[route.commandIndex], 'status');
+    const f = fixture();
+    assert.equal(await runBrowserCli(args, f.io, {}, f.runtime), 0);
+    assert.deepEqual(f.calls[0].args, [...args.slice(0, -1), 'profilepilot', 'status']);
+  }
+  for (const operation of [
+    ['fill', '@e1', '--no-auto-dialog'],
+    ['eval', '--no-auto-dialog'],
+    ['open', 'https://example.test/?--no-auto-dialog=false']
+  ]) {
+    const f = fixture();
+    const args = ['--no-auto-dialog', 'false', '--session', 'task', '--cdp', '9223', ...operation];
+    assert.equal(await runBrowserCli(args, f.io, {}, f.runtime), 0);
+    assert.deepEqual(f.calls[0].args, args, 'page payload must remain opaque');
+  }
+});
+
 test('help is local and an explicitly broken installed runtime never falls back to PATH', async () => {
   const f = fixture();
   assert.equal(await runBrowserCli(['--connection', 'gateway', '--help'], f.io, {}, f.runtime), 0);

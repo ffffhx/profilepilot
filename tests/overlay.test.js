@@ -504,168 +504,50 @@ test("agent overlay bootstrap is compatible with strict Trusted Types and CSP pa
   new vm.Script(script);
 });
 
-test("agent overlay omits the control-details affordance and persisted expansion state", () => {
+test("agent overlay exposes a single strip without a detail panel or persisted collapse", () => {
   const script = agentOverlayBootstrapScript();
-  assert.doesNotMatch(script, /detail-toggle|detailToggleButton/);
-  assert.doesNotMatch(script, /EXPANDED_KEY|toggleDetails|persistExpanded|readExpanded/);
-  assert.doesNotMatch(script, /classList\.toggle\("expanded"/);
-  assert.doesNotMatch(script, /:host\(\.locked\.expanded\)/);
-  assert.doesNotMatch(script, /⌄/);
-  assert.match(script, /:host\(\.locked\) \.head\{grid-template-columns:28px minmax\(0,1fr\)/);
-  assert.match(script, /:host\(\.locked\) \.status-stack\{display:flex;align-items:center/);
-});
-
-test("agent overlay uses a click-expanded 32px HUD with timed collapse and four-corner avoidance", () => {
-  const script = agentOverlayBootstrapScript();
-  assert.match(script, /HUD_AUTO_COLLAPSE_MS = 5000/);
-  assert.match(script, /HUD_OUTSIDE_COLLAPSE_MS = 1000/);
-  assert.match(script, /HUD_HANDOFF_PROMPT_MS = 6000/);
-  assert.match(script, /HUD_COLLISION_MARGIN_PX = 12/);
+  assert.doesNotMatch(script, /COLLAPSED_KEY|HUD_AUTO_COLLAPSE_MS|persistCollapsed|detail-toggle|target-follow|space-chip/);
+  assert.doesNotMatch(script, /overlayNode\("(?:div|details)", "(?:details|recent|sessions|target-copy)"/);
+  assert.match(script, /width:min\(340px,calc\(100vw - 32px\)\);height:44px/);
+  assert.match(script, /\[hidden\]\{display:none!important\}/);
   assert.match(script, /HUD_CORNERS = \["top-left", "top-right", "bottom-left", "bottom-right"\]/);
-  assert.match(script, /\.dot\{position:fixed;[^}]*width:32px;height:32px;pointer-events:auto/);
-  assert.match(script, /dot\.addEventListener\("click", \(\) => expand\(\)\)/);
-  assert.match(script, /event\.key === "Escape" && !collapsed/);
-  assert.match(script, /scheduleAutoCollapse\(inside \? HUD_AUTO_COLLAPSE_MS : HUD_OUTSIDE_COLLAPSE_MS\)/);
   assert.match(script, /window\.__ppAgentOverlayAvoidRect/);
-  assert.match(script, /function avoidHudForRect/);
   assert.match(script, /document\.elementFromPoint\(x, y\)/);
-  assert.match(script, /\["expand", collapsed \? dot : null\]/);
-  assert.match(script, /\["collapse", collapsed \? null : hideButton\]/);
-  assert.match(script, /if \(probe\.action === "expand"\) \{\s*expand\(\)/);
-  assert.match(script, /else if \(probe\.action === "collapse"\) \{\s*collapse\(\)/);
-  assert.match(script, /const returnError = taken \? String\(state\.stopError \|\| ""\)\.trim\(\) : ""/);
-  assert.match(script, /: returnError\s*\?\s*returnError\s*:\s*requiresUserAction/);
-  assert.match(script, /stopError && stopError !== previousStopError && isDelegatedToUser\(\)/);
-  assert.match(script, /stopConfirming \|\| state\.stopError \|\| !host/);
-  assert.doesNotMatch(script, /querySelectorAll\([^)]*\).*avoidHudForRect/);
-});
-
-test("agent overlay progress animation stays compositor-friendly", () => {
-  const script = agentOverlayBootstrapScript();
   assert.doesNotMatch(script, /transition:width/);
-  assert.doesNotMatch(script, /progressFill\.style\.width/);
-  assert.match(script, /progressFill\.style\.transform = "scaleX\(" \+ percent \/ 100 \+ "\)"/);
-  assert.match(script, /transform-origin:left center/);
 });
 
-test("agent overlay bootstrap script includes zh/en copy and locale selection", () => {
+test("agent overlay keeps concise localized state text and stable control labels", () => {
   const script = agentOverlayBootstrapScript();
-  assert.match(script, /OVERLAY_TEXT/);
-  assert.match(script, /locale/);
-  assert.match(script, /currentLocale/);
   assert.match(script, /navigator\.language/);
-  assert.match(script, /AI 正在控制 · /);
-  assert.match(script, /AI is controlling · /);
-  assert.match(script, /已接管，AI 已暂停操作/);
-  assert.match(script, /Taken over — AI paused/);
-  assert.match(script, /Agent 调试中/);
-  assert.match(script, /Agent debugging/);
-  assert.match(script, /暂时无法手动点击/);
-  assert.match(script, /正在启用点击保护/);
-  assert.match(script, /需要给“ProfilePilot Input Guard”开启辅助功能权限/);
-  assert.match(script, /Manual clicks are temporarily disabled/);
-  assert.match(script, /Agent 任务/);
-  assert.match(script, /Agent task/);
-  assert.doesNotMatch(script, /查看控制详情|Show control details/);
-  assert.match(script, /detailsHeading: "运行详情"/);
-  assert.match(script, /currentActionLabel: "当前动作"/);
-  assert.match(script, /taskProgressLabel: "任务进度"/);
-  assert.match(script, /nextStepLabel: "下一步"/);
-  assert.match(script, /recentActivityLabel: "最近活动"/);
-  assert.match(script, /backgroundOperation: "后台操作"/);
-  assert.match(script, /任务空间/);
-  assert.match(script, /Task space/);
-  assert.match(script, /projectPrefix: "项目"/);
-  assert.match(script, /branchPrefix: "分支"/);
-  assert.match(script, /sessionPrefix: "Session"/);
-  assert.match(script, /compactSessionId/);
-  assert.match(script, /spaceChip\.title = fullTaskSpaceText/);
-  assert.match(script, /const identity = \[project, branch && branch !== project/);
-  assert.doesNotMatch(script, /const label = sessionId \? project \+ " · " \+ copy\.sessionPrefix/);
-  assert.match(script, /Hard-stop notice sent/);
-  assert.match(script, /接管/);
-  assert.match(script, /returnToAgent: "交还 Agent"/);
-  assert.match(script, /offlineButton: "Agent 已离线"/);
-  assert.match(script, /releaseProfile: "释放 Profile"/);
-  assert.match(script, /confirmRelease: "再点一次释放"/);
+  assert.match(script, /Agent 操作中/);
+  assert.match(script, /Agent working/);
+  assert.match(script, /你已接管/);
+  assert.match(script, /You're in control/);
+  assert.match(script, /等待你操作/);
+  assert.match(script, /交还失败/);
+  assert.match(script, /returnToAgent: "交还"/);
   assert.match(script, /takeover: "接管"/);
   assert.match(script, /stopSingle: "结束任务"/);
-  assert.doesNotMatch(script, /takeover: "Take over"/);
-  assert.doesNotMatch(script, /stopSingle: "Stop task"/);
-  assert.doesNotMatch(script, /再点一次接管/);
-  assert.doesNotMatch(script, /Click again to take over/);
-  assert.match(script, /再点一次结束/);
-  assert.doesNotMatch(script, /confirmStop: "Click again to stop"/);
-  assert.match(script, /在 ProfilePilot 中查看/);
-  assert.match(script, /Open in ProfilePilot/);
-  assert.match(script, /targetPrefix/);
-  assert.match(script, /目标：/);
-  assert.match(script, /Target: /);
-  assert.match(script, /browser control returned to you/);
-  assert.match(script, /需要你完成一步/);
-  assert.match(script, /Your action is needed/);
+  assert.match(script, /confirmStop: "确认结束"/);
+  assert.doesNotMatch(script, /再点一次接管|Agent 调试中/);
 });
 
-test("agent overlay bootstrap script exposes fail-closed native Input Guard hit testing", () => {
+test("agent overlay native controls retain fail-closed hit testing and same-strip navigation", () => {
   const script = agentOverlayBootstrapScript();
-  assert.doesNotMatch(script, /class=\\"shield\\"/);
   assert.match(script, /:host\{[^}]*pointer-events:none/);
-  assert.doesNotMatch(script, /host\.style\.pointerEvents/);
-  assert.doesNotMatch(script, /\.shield\{/);
-  assert.doesNotMatch(script, /radial-gradient/);
-  assert.match(script, /overlayNode\("div", "status-line"\)/);
-  assert.match(script, /overlayNode\("span", "state-chip"\)/);
-  assert.match(script, /overlayNode\("span", "space-chip"\)/);
-  assert.doesNotMatch(script, /overlayNode\("button", "icon-btn detail-toggle"/);
-  assert.match(script, /overlayNode\("div", "details"/);
-  assert.match(script, /overlayNode\("div", "detail-grid"\)/);
-  assert.match(script, /overlayNode\("div", "target-copy"\)/);
-  assert.match(script, /overlayNode\("div", "target-domain"\)/);
-  assert.doesNotMatch(script, /INPUT_LOCK_EVENTS/);
-  assert.doesNotMatch(script, /beforeinput/);
-  assert.doesNotMatch(script, /shouldBlockPageInput/);
-  assert.doesNotMatch(script, /grid-template-columns:1.25fr 1fr 1.1fr .72fr/);
-  assert.match(script, /target-follow.*grid-row:4/);
-  assert.match(script, /copy\.lockedTitle/);
-  assert.match(script, /compactTaskSpaceText/);
-  assert.doesNotMatch(script, /EXPANDED_KEY|toggleDetails/);
-  assert.doesNotMatch(script, /:host\(.locked\.expanded\)/);
-  assert.match(script, /:host\(.locked\) \.details\{display:none\}/);
-  assert.match(script, /host\.classList\.toggle\("collapsed", collapsed\)/);
-  assert.match(script, /:host\(.locked\.collapsed\) \.panel\{display:none\}/);
-  assert.match(script, /:host\(.locked\.collapsed\) \.dot\{display:grid\}/);
+  assert.doesNotMatch(script, /host\.style\.pointerEvents|INPUT_LOCK_EVENTS|beforeinput|radial-gradient/);
   assert.match(script, /host\.classList\.add\("locked"\)/);
-  assert.doesNotMatch(script, /host\.classList\.toggle\("locked", !taken\)/);
-  assert.match(script, /const stopLabel = stopConfirming && stopConfirmKind === "stop" \? text\(\)\.confirmStop : isMultiSession\(\) \? text\(\)\.stopAll : text\(\)\.stopSingle/);
-  assert.doesNotMatch(script, /stopButton\.textContent = text\(\)\.takenStop/);
   assert.match(script, /signal\("resume", \{ stopAll: false \}\)/);
-  assert.match(script, /takeoverButton\.disabled = !hasBinding/);
   assert.match(script, /takeoverButton\.disabled = !hasBinding \|\| pending \|\| driverUnavailable/);
-  assert.match(script, /stopButton\.disabled = !hasBinding/);
-  assert.match(script, /const wasDelegatedToUser = isDelegatedToUser\(\)/);
-  assert.match(script, /if \(!wasDelegatedToUser\) \{\s*resetStopConfirm\(\)/);
-  assert.doesNotMatch(script, /WINDOW_GEOMETRY_SAMPLE_MS/);
-  assert.doesNotMatch(script, /window-geometry/);
-  assert.doesNotMatch(script, /window-focus/);
-  assert.doesNotMatch(script, /window-blur/);
+  assert.match(script, /stopButton\.disabled = !hasBinding \|\| pending/);
   assert.match(script, /window\.outerWidth/);
   assert.match(script, /window\.visualViewport/);
   assert.match(script, /devicePixelRatio \/ displayScale/);
   assert.match(script, /__ppAgentOverlayGuardProbe/);
   assert.match(script, /__ppAgentOverlayGuardActivate/);
-  assert.match(script, /guardActionAtClientPoint/);
-  assert.match(script, /Agent 正在后台操作/);
-  assert.match(script, /显示 Agent 标签页/);
-  assert.match(script, /自动切换标签页/);
-  assert.match(script, /role: "switch", "aria-checked": "false"/);
-  assert.match(script, /signal\("show-agent-target"\)/);
-  assert.match(script, /signal\("set-auto-follow", \{ enabled: !state\.autoFollowAgent \}\)/);
-  assert.match(script, /targetFollow\.style\.display = hasTarget && !taken \? "grid" : "none"/);
-  assert.match(script, /sessionsBlock\.style\.display = sessions\.length >= 1 \? "block" : "none"/);
-  assert.match(script, /\["expand", collapsed \? dot : null\]/);
-  assert.match(script, /\["collapse", collapsed \? null : hideButton\]/);
-  assert.match(script, /\["showAgentTarget", showAgentTargetButton\]/);
-  assert.match(script, /\["toggleAutoFollow", autoFollowButton\]/);
+  assert.match(script, /\["more", moreButton\]/);
+  assert.match(script, /\["back", backButton\]/);
+  assert.match(script, /button\.disabled \|\| button\.hidden/);
   assert.match(script, /rect\.left \+ inset/);
 });
 
@@ -750,7 +632,7 @@ test("AgentOverlayManager keeps Input Guard off while the same CDP client is pau
   await manager.dispose();
 });
 
-test("AgentOverlayManager activates a collapsed HUD probe in the clicked native window", async () => {
+test("AgentOverlayManager activates the strip menu in the clicked native window", async () => {
   const evaluations = [];
   const fakeClient = {
     onEvent: null,
@@ -763,7 +645,7 @@ test("AgentOverlayManager activates a collapsed HUD probe in the clicked native 
       if (method === "Runtime.evaluate") {
         evaluations.push(params.expression);
         if (String(params.expression).includes("__ppAgentOverlayGuardProbe")) {
-          return { result: { value: { action: "expand", signature: "live-layout" } } };
+          return { result: { value: { action: "more", signature: "live-layout" } } };
         }
         return { result: { value: true } };
       }
@@ -1816,6 +1698,63 @@ test("AgentOverlayManager rebuilds an isolated world after all known contexts fa
   await manager.pushPageUpdate(state, page, true);
 
   assert.equal(createWorldCalls, 1);
+});
+
+test("AgentOverlayManager restores updates when navigation or context destruction empties its context list", async (t) => {
+  for (const event of [
+    { method: "Runtime.executionContextDestroyed", params: { executionContextId: 7 }, frameId: "frame-1" },
+    { method: "Runtime.executionContextsCleared", params: {}, frameId: "frame-1" },
+    { method: "Page.frameNavigated", params: { frame: { id: "frame-2", url: "chrome://version/" } }, frameId: "frame-2" }
+  ]) {
+    await t.test(event.method, async () => {
+      let createWorldCalls = 0;
+      const updates = [];
+      const fakeClient = {
+        close() {},
+        async send(method, params) {
+          if (method === "Page.createIsolatedWorld") {
+            createWorldCalls += 1;
+            assert.equal(params.frameId, event.frameId);
+            return { executionContextId: 42 };
+          }
+          if (method === "Runtime.evaluate") {
+            if (String(params.expression).startsWith("globalThis.__ppAgentOverlayUpdate")) {
+              updates.push(params.contextId);
+              return { result: { type: "boolean", value: true } };
+            }
+            return { result: { type: "undefined" } };
+          }
+          return {};
+        }
+      };
+      const manager = new AgentOverlayManager({
+        onStop: async () => {},
+        inputGuard: { sync() {}, dispose() {} }
+      });
+      const state = createOverlayState({ browserClient: fakeClient, delegatedToUser: true });
+      const page = createOverlayPage({
+        url: "chrome://version/", sessionId: "session-1", mainFrameId: "frame-1",
+        activeContextId: 7, isolatedContextIds: new Set([7])
+      });
+      state.pages.set(page.targetId, page);
+      manager.ports.set(state.port, state);
+
+      try {
+        manager.handlePageEvent(state, page, event.method, event.params);
+        assert.equal(page.isolatedContextIds.size, 0);
+        await manager.pushPageUpdate(state, page, true);
+        assert.equal(createWorldCalls, 1, "the next update must rebuild the missing overlay context");
+        assert.deepEqual(updates, [42]);
+        assert.equal(state.lastPayload.ownership, "agentDelegatedToUser");
+
+        manager.handlePageEvent(state, page, "Runtime.executionContextsCleared", {});
+        await manager.pushPageUpdate(state, page, true);
+        assert.equal(createWorldCalls, 1, "repeated context loss must respect the recovery cooldown");
+      } finally {
+        await manager.dispose();
+      }
+    });
+  }
 });
 
 test("AgentOverlayManager builds page-specific no-focus target payloads", () => {

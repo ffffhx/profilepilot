@@ -12,7 +12,7 @@ import { startTaskGatewayFixture } from './task-gateway-fixture.mjs';
 const require = createRequire(import.meta.url);
 const { NativeBrowserBridge, NATIVE_EXTENSION_ID } = require('../dist/main/tasks/native-bridge');
 const { parseCliResult } = require('../dist/main/tasks/browser');
-const output = path.resolve('artifacts/tab-groups-20261010');
+const output = path.resolve('artifacts/tab-groups-20261011');
 await mkdir(output, { recursive: true });
 const siteIcon = await readFile('extensions/profilepilot/icons/icon-16.png');
 const checks = [];
@@ -54,7 +54,8 @@ try {
   const paired = await evaluate(`chrome.runtime.sendMessage(${JSON.stringify({ method: 'connect', code: pairing.code })})`);
   assert.ok(!paired.error, paired.error);
   await until(() => bridge.states().some(s => s.connected), 'Test extension did not connect');
-  const request = (method, params = {}) => bridge.request('native:GroupFixture', method, { sessionId: session, ...params });
+  let taskSession = session;
+  const request = (method, params = {}) => bridge.request('native:GroupFixture', method, { sessionId: taskSession, ...params });
   const raw = expression => request('cdp', { method: 'Runtime.evaluate', params: { expression, returnByValue: true } });
   const activeBefore = await evaluate('chrome.tabs.query({active:true}).then(tabs=>tabs.map(t=>t.id))');
 
@@ -86,10 +87,25 @@ try {
   assert.equal((await tab(oldTab)).groupId, groupId); assert.equal((await tab(created.tabId)).groupId, groupId);
   assert.equal((await evaluate('chrome.tabGroups.query({})')).length, 1);
   pass('Failure, continuation and completion reuse the same group, ending green');
+
+  const nextTab = await evaluate(`chrome.tabs.create({url:${JSON.stringify(url + '/next-task')},active:false}).then(t=>t.id)`);
+  taskSession = `${session}-next`;
+  await request('claim', { tabId: nextTab, taskTitle: '第二个任务' });
+  await until(async () => (await tab(nextTab)).groupId === groupId, 'A different task created another group');
+  await expectColor('blue');
+  await until(async () => (await group(groupId)).title === 'ProfilePilot · 执行中 1 · 已完成 2', 'Mixed tab states are not counted correctly');
+  await request('control', { action: 'complete', groupPhase: 'failed' }); await expectColor('red');
+  taskSession = `${session}-retry`;
+  await request('claim', { tabId: nextTab }); await expectColor('blue');
+  await request('control', { action: 'complete' }); await expectColor('green');
+  await until(async () => (await group(groupId)).title === 'ProfilePilot · 已完成 3', 'A reused tab was double-counted');
+  assert.equal((await evaluate('chrome.tabGroups.query({})')).length, 1);
+  pass('Separate task sessions reuse one window group, count mixed states and transfer tab status without duplication');
+
   assert.deepEqual(await evaluate('chrome.tabs.query({active:true}).then(tabs=>tabs.map(t=>t.id))'), activeBefore);
   pass('All grouping, status updates and completion leave the foreground tab unchanged');
 
-  await writeFile(path.join(output, 'result.json'), JSON.stringify({ status: 'passed', platform: process.platform, checks, group: await group(groupId), extensionVersion: '0.2.7', notVerified: ['macOS hardware', 'user default Profile (currently a temporary extension installation)'] }, null, 2));
+  await writeFile(path.join(output, 'result.json'), JSON.stringify({ status: 'passed', platform: process.platform, checks, group: await group(groupId), extensionVersion: '0.2.8', notVerified: ['macOS hardware', 'user default Profile'] }, null, 2));
   await cli(['profilepilot', 'complete']); completed = true;
 } catch (error) {
   await writeFile(path.join(output, 'result.json'), JSON.stringify({ status: 'failed', platform: process.platform, checks, error: error.message }, null, 2));

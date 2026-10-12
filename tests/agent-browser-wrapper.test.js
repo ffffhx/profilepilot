@@ -26,6 +26,7 @@ const {
   formatControlledRawCdpFailure,
   gatewaySupportsAgentActivity,
   managedGatewayAgentBrowserEnv,
+  normalizeAgentBrowserMouseArgs,
   replaceCdpPortInAgentBrowserArgs,
   resolveProfilePilotUseArgs,
   resolveRealAgentBrowser,
@@ -53,6 +54,19 @@ const {
   writeAgentBrowserSessionActivitySync
 } = require("../dist/main/agent-browser-session.js");
 const { BROWSER_GATEWAY_PROTOCOL_VERSION, browserGatewaySocketPath } = require("../dist/main/browser-gateway-client.js");
+
+test("mouse coordinates accept scaled CSS values and reject bad input", async () => {
+  const prefix = ["--session", "mouse", "--cdp=9224"];
+  assert.deepEqual(normalizeAgentBrowserMouseArgs([...prefix, "mouse", "move", "123.6", "-2.4", "--json"]), [...prefix, "mouse", "move", "124", "-2", "--json"]);
+  assert.deepEqual(normalizeAgentBrowserMouseArgs(["--session=mouse", "mouse", "move", "1e2", ".5"]), ["--session=mouse", "mouse", "move", "100", "1"]);
+  for (const args of [["fill", "#x", "mouse"], ["eval", "mouse move 1.5 2.5"], ["mouse", "move", "--help"]]) assert.deepEqual(normalizeAgentBrowserMouseArgs(args), args);
+  for (const value of ["NaN", "Infinity", "", "1x", "2147483648", "-2147483649", "--json"]) assert.throws(() => normalizeAgentBrowserMouseArgs(["mouse", "move", value, "20"]), { code: "BROWSER_MOUSE_INVALID_COORDINATES" });
+  const writes=captureProcessWrites();
+  try {
+    assert.equal(await runAgentBrowserWrapper(["--session", "bad-mouse", "--cdp", "9224", "mouse", "move", "NaN", "20"], {}),64);
+    assert.equal(JSON.parse(writes.stderr.join("")).hard_stop,false);
+  } finally {writes.restore();}
+});
 
 test("captured connect output does not wait for a descendant holding its pipes", {timeout:10000}, async () => {
   const home = makeTempHome();
@@ -154,6 +168,89 @@ test("activity verification waits for a running old Gateway route to upgrade saf
   assert.equal(gatewaySupportsAgentActivity({ ok: true, protocolVersion: 13 }), true, "active v13 routes remain compatible during the policy upgrade");
   assert.equal(gatewaySupportsAgentActivity({ ok: true, protocolVersion: 12 }), false);
   assert.equal(gatewaySupportsAgentActivity({ ok: true }), false);
+});
+
+test("Gateway pins no-auto-dialog across auto-connect and later omitted flags; changes send zero input", async () => {
+  await withDialogGatewayFixture(async ({ run, calls, env, requests }) => {
+    assert.equal(await run(["--no-auto-dialog", "snapshot"]), 0);
+    assert.equal(await run(["click", "@e1"]), 0);
+    const before = calls();
+    assert.equal(before.length, 3, "one connect, then exactly two actions");
+    assert.equal(before.filter(call => call.includes("connect")).length, 1, "omission must not reconnect and discard refs");
+    for (const call of before) assert.deepEqual(call.slice(2, 4), ["--no-auto-dialog", "true"]);
+    assert.equal(await run(["--no-auto-dialog", "false", "click", "@e2"]), 75);
+    assert.equal(await run(["click", "@e2"], { ...env, AGENT_BROWSER_NO_AUTO_DIALOG: "0" }), 75);
+    assert.deepEqual(calls(), before, "neither a driver restart nor a click may be spawned on conflict");
+    assert.equal(requests.some(request => request.action === "control"), false, "rejection must leave the original session usable");
+    assert.equal(await run(["click", "@e3"]), 0);
+  });
+});
+
+test("Gateway pins default false and a completed driver identity does not inherit old settings", async () => {
+  await withDialogGatewayFixture(async ({ run, calls, home, session, disconnect }) => {
+    assert.equal(await run(["snapshot"]), 0);
+    assert.equal(await run(["--no-auto-dialog", "click", "@e1"]), 75);
+    assert.equal(calls().length, 2);
+    const { clearBrowserGatewayDaemonIdentity } = require("../dist/main/browser-gateway-client.js");
+    clearBrowserGatewayDaemonIdentity(session, home);
+    disconnect();
+    assert.equal(await run(["--no-auto-dialog", "snapshot"]), 0);
+    assert.deepEqual(calls().slice(-2).map(call => call.slice(2, 4)), [
+      ["--no-auto-dialog", "true"], ["--no-auto-dialog", "true"]
+    ]);
+  });
+});
+
+test("Gateway preserves native env/config precedence and an explicit false overrides config true", async () => {
+  for (const setup of [
+    { env: "NO", config: true, flags: [], expected: "true" },
+    { env: "1", config: true, flags: ["--no-auto-dialog", "false"], expected: "false" },
+    { env: "false", config: false, flags: [], expected: "false" },
+    { env: "yes", config: false, flags: [], expected: "true" }
+  ]) {
+    await withDialogGatewayFixture(async ({ run, calls, env, home }) => {
+      const config = path.join(home, "native-config.json");
+      writeFileSync(config, JSON.stringify({ noAutoDialog: setup.config }));
+      assert.equal(await run(["--config", config, ...setup.flags, "snapshot"], {
+        ...env, AGENT_BROWSER_NO_AUTO_DIALOG: setup.env
+      }), 0);
+      assert.equal(await run(["click", "@e1"]), 0, "a later omission must retain the effective setting");
+      for (const call of calls()) {
+        const index = call.indexOf("--no-auto-dialog");
+        assert.deepEqual(call.slice(index, index + 2), ["--no-auto-dialog", setup.expected]);
+        assert.ok(index < call.indexOf(call.includes("connect") ? "connect" : call.includes("snapshot") ? "snapshot" : "click"));
+      }
+    });
+  }
+  assert.equal(agentBrowserCommandName(["--no-auto-dialog", "false", "click", "@e1"]), "click");
+  assert.deepEqual(normalizeAgentBrowserMouseArgs(["--no-auto-dialog", "true", "mouse", "move", "1.8", "2.2"]),
+    ["--no-auto-dialog", "true", "mouse", "move", "2", "2"]);
+});
+
+test("an unrecorded active Gateway driver accepts ordinary commands but refuses explicit dialog settings", async () => {
+  await withDialogGatewayFixture(async ({ run, calls }) => {
+    assert.equal(await run(["snapshot"]), 0);
+    assert.deepEqual(calls(), [["--session", "cx-dialog", "snapshot"]]);
+    assert.equal(await run(["--no-auto-dialog", "click", "@e1"]), 75);
+    assert.equal(calls().length, 1, "unknown old settings cannot be changed speculatively");
+  }, true);
+});
+
+test("Gateway dialog normalization preserves opaque text, scripts and URLs after the verb", async () => {
+  await withDialogGatewayFixture(async ({ run, calls }) => {
+    for (const operation of [
+      ["fill", "@e1", "--no-auto-dialog"],
+      ["fill", "@e1", "--no-auto-dialog", "false"],
+      ["eval", "--no-auto-dialog"],
+      ["eval", "JSON.stringify({value:'--no-auto-dialog',url:'https://example.test/?--no-auto-dialog=false'})"],
+      ["open", "https://example.test/?--no-auto-dialog=false"],
+      ["fill", "@e1", "--config", "payload.json"]
+    ]) {
+      assert.equal(await run(operation), 0);
+      assert.deepEqual(calls().at(-1), ["--session", "cx-dialog", "--no-auto-dialog", "false", ...operation]);
+    }
+    assert.equal(calls().filter(call => call.includes("connect")).length, 1);
+  });
 });
 
 test("profilepilot profiles uses Profile names as selection hints and publishes blocked access", async () => {
@@ -1566,6 +1663,70 @@ function makeTempHome() {
     process.platform === "win32" ? os.tmpdir() : "/tmp",
     `pp-abw-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`
   );
+}
+
+async function withDialogGatewayFixture(runTest, initiallyConnected = false) {
+  const home = makeTempHome();
+  const session = "cx-dialog";
+  const port = 9223;
+  mkdirSync(home, { recursive: true });
+  const callsPath = path.join(home, "calls.jsonl");
+  const driverPath = path.join(home, "driver.json");
+  const configPath = path.join(home, "empty-config.json");
+  writeFileSync(configPath, "{}");
+  if (initiallyConnected) writeFileSync(driverPath, JSON.stringify(false));
+  const executable = path.join(home, "agent-browser.cjs");
+  writeFileSync(executable, `#!${process.execPath}
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.DIALOG_CALLS, JSON.stringify(args) + '\\n');
+const index = args.indexOf('--no-auto-dialog');
+const value = index >= 0 ? args[index + 1] === 'true' : false;
+if (args.includes('connect')) fs.writeFileSync(process.env.DIALOG_DRIVER, JSON.stringify(value));
+else if (!fs.existsSync(process.env.DIALOG_DRIVER) || JSON.parse(fs.readFileSync(process.env.DIALOG_DRIVER, 'utf8')) !== value) process.exitCode = 92;
+`);
+  chmodSync(executable, 0o755);
+  const env = { ...process.env, HOME: home, AGENT_BROWSER_SESSION: session, AGENT_BROWSER_CONFIG: configPath,
+    AGENT_BROWSER_NO_AUTO_DIALOG: undefined, PROFILEPILOT_AGENT_BROWSER_REAL: executable,
+    DIALOG_CALLS: callsPath, DIALOG_DRIVER: driverPath };
+  writeAgentBrowserRuntimeProfilesSync([{ profileId: "profile-dialog", profileName: "Dialog", cdpPort: port, running: true }], home);
+  const requests = [];
+  const calls = () => existsSync(callsPath) ? readFileSync(callsPath, "utf8").trim().split("\n").map(JSON.parse) : [];
+  let identity;
+  const socketPath = browserGatewaySocketPath(home);
+  mkdirSync(path.dirname(socketPath), { recursive: true });
+  const server = net.createServer(socket => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", chunk => {
+      buffer += chunk;
+      const boundary = buffer.indexOf("\n");
+      if (boundary < 0) return;
+      const request = JSON.parse(buffer.slice(0, boundary));
+      requests.push(request);
+      if (request.action === "acquire") identity = request.daemonInstanceId;
+      const connectionActive = existsSync(driverPath);
+      const response = request.action === "acquire"
+        ? { ok: true, webSocketUrl: "ws://127.0.0.1:9223/devtools/browser/gateway?ticket=fixture", connectionActive }
+        : { ok: true, protocolVersion: BROWSER_GATEWAY_PROTOCOL_VERSION, ports: [port], state: { profiles: [{
+          publicPort: port, profileId: "profile-dialog", ownerSessionId: session, daemonInstanceId: identity,
+          ownership: "agent", sessionStatus: "active", connectionActive,
+          agentActivity: { generation: calls().filter(call => !call.includes("connect")).length }
+        }] } };
+      socket.end(JSON.stringify(response) + "\n");
+    });
+  });
+  await new Promise((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+  const writes = captureProcessWrites();
+  try {
+    await runTest({ home, session, env, calls, requests,
+      run: (args, childEnv = env) => runAgentBrowserWrapper(["--cdp", String(port), ...args], childEnv),
+      disconnect: () => rmSync(driverPath, { force: true }) });
+  } finally {
+    writes.restore();
+    await new Promise(resolve => server.close(resolve));
+    rmSync(home, { recursive: true, force: true });
+  }
 }
 
 function freeTcpPort() {

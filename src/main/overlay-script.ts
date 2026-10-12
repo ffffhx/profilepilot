@@ -26,12 +26,8 @@ export function agentOverlayBootstrapScript(): string {
 
   const SIGNAL_NAME = "__ppAgentOverlaySignal";
   const STORAGE_KEY = "__ppAgentOverlayPosition";
-  const COLLAPSED_KEY = "__ppAgentOverlayCollapsedV2";
   const HUD_INSET_PX = 16;
   const HUD_COLLISION_MARGIN_PX = 12;
-  const HUD_AUTO_COLLAPSE_MS = 5000;
-  const HUD_OUTSIDE_COLLAPSE_MS = 1000;
-  const HUD_HANDOFF_PROMPT_MS = 6000;
   const HUD_CORNERS = ["top-left", "top-right", "bottom-left", "bottom-right"];
   const HUD_AVOID_EVENT = "__pp-agent-overlay-avoid";
   const STOP_CONFIRM_MS = 3000;
@@ -39,7 +35,7 @@ export function agentOverlayBootstrapScript(): string {
   const HOST_REATTACH_WINDOW_MS = 10000;
   const HOST_REATTACH_BACKOFF_MS = 3000;
   // ProfilePilot 正常运行时至少每 30 秒校准一次状态。连续错过两轮以上更新，说明
-  // CDP / App 已断开；此时必须自行撤掉旧浮层，不能继续伪装成“Agent 调试中”。
+  // CDP / App 已断开；此时必须自行撤掉旧浮层，不能继续伪装成“Agent 操作中”。
   const OVERLAY_HEARTBEAT_TIMEOUT_MS = 75000;
   const OVERLAY_HEARTBEAT_CHECK_MS = 5000;
   // 合成光标 / 点击高亮层：AI 空闲 900ms 后隐藏合成光标，点击涟漪 620ms 后自动回收。
@@ -47,191 +43,55 @@ export function agentOverlayBootstrapScript(): string {
   const RIPPLE_LIFETIME_MS = 620;
   const OVERLAY_TEXT = {
     zh: {
-      revealTitle: "在 ProfilePilot 中查看",
-      hideTitle: "隐藏",
-      expandTitle: "展开 AI 操作状态",
-      sessionHeading: "会话",
-      recentSummary: "AI 最近说",
-      takenTitle: "✋ 已接管，AI 已暂停操作",
-      userActionTitle: "需要你完成一步",
-      offlineTitle: "Agent 已离线",
-      reconnectingTitle: "浏览器驱动重连中",
-      handoffTitle: "正在安全交接…",
-      operatingPrefix: "AI 正在控制 · ",
-      sessionsSuffix: " 个会话",
-      actionPrefix: "▸ ",
-      targetPrefix: "目标：",
-      takenAction: "浏览器控制权已交还给你",
-      userActionPrefix: "请在网页中完成：",
-      offlineAction: "原 Agent 已不再等待；请释放 Profile 后再开始新的 Agent 会话",
-      reconnectingAction: "Session 仍由 Agent 持有；Gateway 将在 10 秒内等待最多 3 次重连",
-      handoffAction: "正在等待当前浏览器操作结束，完成前仍禁止手动点击",
-      defaultAction: "AI 正在控制浏览器",
-      lockedTitle: "Agent 调试中",
-      lockedHint: "暂时无法手动点击",
-      backgroundTarget: (name) => "Agent 正在后台操作 " + name,
-      currentTarget: (name) => "Agent 正在操作 " + name,
-      showAgentTarget: "显示 Agent 标签页",
-      showingAgentTarget: "正在显示…",
-      autoFollow: "自动切换标签页",
-      guardStarting: "正在启用点击保护…",
-      guardUnavailable: "需要给“ProfilePilot Input Guard”开启辅助功能权限，当前尚未禁止点击",
-      defaultTask: "Agent 任务",
-      multiTaskTitle: (count) => count + " 个 Agent 任务正在控制",
-      detailsHeading: "运行详情",
-      currentActionLabel: "当前动作",
-      taskProgressLabel: "任务进度",
-      nextStepLabel: "下一步",
-      recentActivityLabel: "最近活动",
-      backgroundOperation: "后台操作",
-      currentOperation: "当前标签页",
-      ownerAgent: "Agent",
-      ownerUser: "User",
-      taskSpacePrefix: "任务空间",
-      projectPrefix: "项目",
-      branchPrefix: "分支",
-      sessionPrefix: "Session",
-      hardStopSent: "已发送 hard-stop notice",
-      takeoverHint: "你可以随时接管；接管后 Agent 会收到硬停止通知",
-      nextPrefix: "下一步：",
-      stepLabel: (index) => "第 " + index + " 步：",
-      progressDone: (done, total) => done + "/" + total + " 已完成",
-      unnamedSession: "未命名会话",
-      unknownActivity: "活动未知",
-      elapsedPrefix: "已运行 ",
-      takenElapsedPrefix: "已接管 ",
-      returnToAgent: "交还 Agent",
-      offlineButton: "Agent 已离线",
-      reconnectingButton: "驱动重连中",
-      releaseProfile: "释放 Profile",
-      confirmRelease: "再点一次释放",
+      active: "Agent 操作中",
+      taken: "你已接管",
+      needsUser: "等待你操作",
+      offline: "Agent 已离线",
+      reconnecting: "正在重连",
+      handoff: "正在交接",
+      error: "操作未完成",
+      returnError: "交还失败",
+      takenHint: "Agent 已暂停，可自由操作网页",
+      activeHint: "接管后可手动操作",
+      handoffHint: "正在等待当前操作结束",
+      offlineHint: "Agent 已离线，可在更多操作中结束任务",
+      reconnectingHint: "正在恢复浏览器连接",
+      guardStarting: "正在启用点击保护",
+      guardUnavailable: "点击保护未开启，请先接管再操作网页",
       takeover: "接管",
+      returnToAgent: "交还",
       stopSingle: "结束任务",
       stopAll: "结束全部",
-      confirmStop: "再点一次结束",
-      duration: (ms) => {
-        const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-        const hours = Math.floor(totalSeconds / 3600);
-        const minutes = Math.floor((totalSeconds % 3600) / 60);
-        const seconds = totalSeconds % 60;
-        if (hours > 0) {
-          return hours + " 小时 " + minutes + " 分";
-        }
-        if (minutes > 0) {
-          return minutes + " 分 " + seconds + " 秒";
-        }
-        return seconds + " 秒";
-      },
-      relativeTime: (ts) => {
-        const seconds = Math.max(0, Math.floor((Date.now() - ts) / 1000));
-        if (seconds < 15) {
-          return "刚刚";
-        }
-        if (seconds < 60) {
-          return seconds + " 秒前";
-        }
-        const minutes = Math.floor(seconds / 60);
-        if (minutes < 60) {
-          return minutes + " 分钟前";
-        }
-        const hours = Math.floor(minutes / 60);
-        if (hours < 24) {
-          return hours + " 小时前";
-        }
-        return new Date(ts).toLocaleDateString("zh-CN");
-      }
+      confirmStop: "确认结束",
+      confirmHint: "再次点击结束任务；返回或按 Esc 取消",
+      more: "更多操作",
+      back: "返回"
     },
     en: {
-      revealTitle: "Open in ProfilePilot",
-      hideTitle: "Hide",
-      expandTitle: "Expand AI status",
-      sessionHeading: "Sessions",
-      recentSummary: "What AI said",
-      takenTitle: "✋ Taken over — AI paused",
-      userActionTitle: "Your action is needed",
-      offlineTitle: "Agent offline",
-      reconnectingTitle: "Browser driver reconnecting",
-      handoffTitle: "Handing over safely…",
-      operatingPrefix: "AI is controlling · ",
-      sessionsSuffix: " sessions",
-      actionPrefix: "▸ ",
-      targetPrefix: "Target: ",
-      takenAction: "browser control returned to you",
-      userActionPrefix: "Complete this in the page: ",
-      offlineAction: "The original agent is no longer waiting; release this Profile before starting another agent session",
-      reconnectingAction: "The Agent still owns this Session; Gateway allows up to 3 reconnect attempts within 10 seconds",
-      handoffAction: "Waiting for the current browser action to settle; manual clicks remain disabled",
-      defaultAction: "AI is controlling this browser",
-      lockedTitle: "Agent debugging",
-      lockedHint: "Manual clicks are temporarily disabled",
-      backgroundTarget: (name) => "Agent is working in the background on " + name,
-      currentTarget: (name) => "Agent is working on " + name,
-      showAgentTarget: "Show Agent tab",
-      showingAgentTarget: "Showing…",
-      autoFollow: "Auto-switch tabs",
-      guardStarting: "正在启用点击保护…",
-      guardUnavailable: "需要给“ProfilePilot Input Guard”开启辅助功能权限，当前尚未禁止点击",
-      defaultTask: "Agent task",
-      multiTaskTitle: (count) => count + " Agent tasks are controlling",
-      detailsHeading: "Run details",
-      currentActionLabel: "Current action",
-      taskProgressLabel: "Task progress",
-      nextStepLabel: "Next step",
-      recentActivityLabel: "Recent activity",
-      backgroundOperation: "Background operation",
-      currentOperation: "Current tab",
-      ownerAgent: "Agent",
-      ownerUser: "User",
-      taskSpacePrefix: "Task space",
-      projectPrefix: "Project",
-      branchPrefix: "Branch",
-      sessionPrefix: "Session",
-      hardStopSent: "Hard-stop notice sent",
-      takeoverHint: "You can take over anytime; the agent receives a hard-stop notice",
-      nextPrefix: "Next: ",
-      stepLabel: (index) => "Step " + index + ": ",
-      progressDone: (done, total) => done + "/" + total + " completed",
-      unnamedSession: "Untitled session",
-      unknownActivity: "Activity unknown",
-      elapsedPrefix: "Running for ",
-      takenElapsedPrefix: "Taken over for ",
-      // 控制权按钮是操作协议的一部分，不跟随网页语言，避免中文应用里被页面语言切成英文。
-      returnToAgent: "交还 Agent",
-      offlineButton: "Agent 已离线",
-      reconnectingButton: "驱动重连中",
-      releaseProfile: "释放 Profile",
-      confirmRelease: "再点一次释放",
+      active: "Agent working",
+      taken: "You're in control",
+      needsUser: "Your action needed",
+      offline: "Agent offline",
+      reconnecting: "Reconnecting",
+      handoff: "Handing over",
+      error: "Action failed",
+      returnError: "Return failed",
+      takenHint: "Agent paused; you can use the page",
+      activeHint: "Take over to interact with the page",
+      handoffHint: "Waiting for the current action to finish",
+      offlineHint: "Agent offline; end the task from More",
+      reconnectingHint: "Restoring the browser connection",
+      guardStarting: "Starting click protection",
+      guardUnavailable: "Click protection is off; take over before using the page",
+      // 控制权按钮遵循应用文案，不随被控网页语言改变。
       takeover: "接管",
+      returnToAgent: "交还",
       stopSingle: "结束任务",
       stopAll: "结束全部",
-      confirmStop: "再点一次结束",
-      duration: (ms) => {
-        const totalSeconds = Math.max(0, Math.floor(ms / 1000));
-        const minutes = Math.floor(totalSeconds / 60);
-        const seconds = totalSeconds % 60;
-        if (minutes > 0) {
-          return minutes + "m " + seconds + "s";
-        }
-        return seconds + "s";
-      },
-      relativeTime: (ts) => {
-        const seconds = Math.max(0, Math.floor((Date.now() - ts) / 1000));
-        if (seconds < 15) {
-          return "just now";
-        }
-        if (seconds < 60) {
-          return seconds + "s ago";
-        }
-        const minutes = Math.floor(seconds / 60);
-        if (minutes < 60) {
-          return minutes + "m ago";
-        }
-        const hours = Math.floor(minutes / 60);
-        if (hours < 24) {
-          return hours + "h ago";
-        }
-        return new Date(ts).toLocaleDateString("en-US");
-      }
+      confirmStop: "确认结束",
+      confirmHint: "Click again to end; go back or press Esc to cancel",
+      more: "更多操作",
+      back: "返回"
     }
   };
   const STATE_DEFAULTS = {
@@ -294,12 +154,8 @@ export function agentOverlayBootstrapScript(): string {
     "inputGuardState"
   ]);
   const state = cloneStateDefaults();
-  let collapsed = readCollapsed();
+  let moreOpen = false;
   let hudCorner = readHudCorner();
-  let takenOverTimer = null;
-  let autoCollapseTimer = null;
-  let handoffPromptTimer = null;
-  let elapsedTimer = null;
   let heartbeatTimer = null;
   let lastUpdateReceivedAt = Date.now();
   let stopConfirmTimer = null;
@@ -308,42 +164,14 @@ export function agentOverlayBootstrapScript(): string {
   let host = null;
   let root = null;
   let panel = null;
-  let dot = null;
+  let statusNode = null;
+  let statusIcon = null;
   let title = null;
-  let meta = null;
-  let elapsed = null;
-  let action = null;
-  let target = null;
-  let progressText = null;
-  let progressBar = null;
-  let progressFill = null;
-  let next = null;
-  let sessionsBlock = null;
-  let sessionHeading = null;
-  let sessionList = null;
-  let recent = null;
-  let recentSummary = null;
-  let recentText = null;
-  let lockHint = null;
-  let stateChip = null;
-  let spaceChip = null;
-  let controlNote = null;
-  let targetFollow = null;
-  let targetEyebrow = null;
-  let targetStatus = null;
-  let targetDomain = null;
-  let showAgentTargetButton = null;
-  let autoFollowButton = null;
-  let detailsHeading = null;
-  let currentActionLabel = null;
-  let taskProgressLabel = null;
-  let nextStepLabel = null;
-  let recentActivityLabel = null;
-  let recentActivity = null;
+  let statusDescription = null;
   let takeoverButton = null;
   let stopButton = null;
-  let revealButton = null;
-  let hideButton = null;
+  let moreButton = null;
+  let backButton = null;
   let reducedMotionMediaQuery = null;
   let reducedMotionMediaListener = null;
   let themeMediaQuery = null;
@@ -387,282 +215,64 @@ export function agentOverlayBootstrapScript(): string {
     const styleText = [
       ":host{all:initial;position:fixed;inset:0;width:100vw;height:100vh;z-index:2147483647;pointer-events:none;color-scheme:dark}",
       ":host(.theme-light){color-scheme:light}",
-      "*{box-sizing:border-box}",
-      ".wrap{--pp-text:#f4fff9;--pp-title:#f1fff8;--pp-muted:#a6c1b8;--pp-muted-soft:#7fa89a;--pp-panel-bg:rgba(8,13,16,.88);--pp-panel-border:rgba(148,255,213,.30);--pp-panel-shadow:0 18px 50px rgba(0,0,0,.42),0 0 0 1px rgba(255,255,255,.04) inset;--pp-panel-hover-shadow:0 20px 56px rgba(0,0,0,.46),0 0 0 1px rgba(255,255,255,.06) inset;--pp-taken-bg:rgba(6,27,19,.90);--pp-taken-border:rgba(86,240,170,.58);--pp-control-bg:rgba(255,255,255,.07);--pp-control-hover-bg:rgba(255,255,255,.14);--pp-control-text:#d7fff1;--pp-control-hover-text:#ffffff;--pp-action-bg:rgba(255,255,255,.06);--pp-action-text:#f7fffb;--pp-progress-text:#effff8;--pp-progress-bg:rgba(148,255,213,.13);--pp-progress-fill-start:#35d892;--pp-progress-fill-end:#86ffd2;--pp-progress-glow:rgba(56,225,160,.55);--pp-next:#9bb7ad;--pp-sessions-bg:rgba(255,255,255,.045);--pp-sessions-border:rgba(255,255,255,.055);--pp-session-heading:#c8fff0;--pp-session-row:#afcac1;--pp-session-agent:#eafff8;--pp-session-name:#bdd7cf;--pp-session-time:#78a292;--pp-details:#a9c7bd;--pp-summary:#c9fff0;--pp-summary-hover:#ffffff;--pp-dot-bg:rgba(8,13,16,.90);--pp-dot-hover-bg:rgba(12,22,24,.94);--pp-dot-border:rgba(148,255,213,.36);--pp-dot-hover-border:rgba(148,255,213,.55);--pp-dot-shadow:0 12px 34px rgba(0,0,0,.42);--pp-stop-text:#ffe2de;--pp-stop-hover-text:#fff2ef;--pp-stop-confirm-text:#fff1dc;--pp-focus-ring:#ffffff;--pp-motion-duration:.16s;--pp-motion-ease:cubic-bezier(.2,0,0,1);--pp-hover-duration:.14s;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:var(--pp-text);user-select:none;opacity:0;transform:translateY(-4px) scale(.985);animation:ppIn var(--pp-motion-duration) var(--pp-motion-ease) forwards}",
-      ":host(.theme-light) .wrap{--pp-text:#173128;--pp-title:#0d241c;--pp-muted:#49635a;--pp-muted-soft:#5b7369;--pp-panel-bg:rgba(255,255,255,.92);--pp-panel-border:rgba(22,115,80,.34);--pp-panel-shadow:0 18px 50px rgba(20,41,34,.20),0 0 0 1px rgba(255,255,255,.70) inset;--pp-panel-hover-shadow:0 20px 56px rgba(20,41,34,.24),0 0 0 1px rgba(255,255,255,.78) inset;--pp-taken-bg:rgba(240,255,249,.94);--pp-taken-border:rgba(31,139,96,.52);--pp-control-bg:rgba(13,48,36,.08);--pp-control-hover-bg:rgba(13,48,36,.14);--pp-control-text:#14583d;--pp-control-hover-text:#083624;--pp-action-bg:rgba(22,92,67,.08);--pp-action-text:#102f25;--pp-progress-text:#173128;--pp-progress-bg:#d4e3dd;--pp-progress-fill-start:#0d7f54;--pp-progress-fill-end:#145f45;--pp-progress-glow:rgba(17,115,79,.24);--pp-next:#506b61;--pp-sessions-bg:rgba(20,91,66,.06);--pp-sessions-border:rgba(20,91,66,.14);--pp-session-heading:#135a3e;--pp-session-row:#516b62;--pp-session-agent:#123f2d;--pp-session-name:#39594e;--pp-session-time:#586e65;--pp-details:#536d63;--pp-summary:#145a40;--pp-summary-hover:#06351f;--pp-dot-bg:rgba(255,255,255,.92);--pp-dot-hover-bg:rgba(244,255,250,.96);--pp-dot-border:rgba(22,115,80,.36);--pp-dot-hover-border:rgba(22,115,80,.56);--pp-dot-shadow:0 12px 34px rgba(20,41,34,.20);--pp-stop-text:#8f2119;--pp-stop-hover-text:#68140f;--pp-stop-confirm-text:#74420d;--pp-focus-ring:#073f2b}",
-      ".panel{width:min(336px,calc(100vw - 24px));border:1px solid var(--pp-panel-border);border-radius:14px;background:var(--pp-panel-bg);backdrop-filter:blur(18px) saturate(1.35);box-shadow:var(--pp-panel-shadow);overflow:hidden;transition:border-color var(--pp-motion-duration) var(--pp-motion-ease),background var(--pp-motion-duration) var(--pp-motion-ease),box-shadow var(--pp-motion-duration) var(--pp-motion-ease),transform var(--pp-motion-duration) var(--pp-motion-ease)}",
-      ".panel:hover{box-shadow:var(--pp-panel-hover-shadow)}",
-      ".panel.taken{border-color:var(--pp-taken-border);background:var(--pp-taken-bg);transform:translateY(1px)}",
-      ".head{display:flex;align-items:center;gap:9px;min-height:40px;padding:10px 10px 8px 12px;cursor:grab}",
-      ".head:active{cursor:grabbing}",
-      ".pulse{width:9px;height:9px;border-radius:99px;background:#38e1a0;box-shadow:0 0 0 0 rgba(56,225,160,.55);animation:ppPulse 1.45s ease-out infinite;flex:0 0 auto}",
-      ".taken .pulse{background:#66f0b2}",
-      ".title{min-width:0;flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px;font-weight:760;letter-spacing:0;color:var(--pp-title)}",
-      ".icon-btn{width:26px;height:24px;border:0;border-radius:7px;background:var(--pp-control-bg);color:var(--pp-control-text);font-size:16px;line-height:20px;cursor:pointer;transition:background var(--pp-hover-duration) var(--pp-motion-ease),color var(--pp-hover-duration) var(--pp-motion-ease),transform var(--pp-hover-duration) var(--pp-motion-ease)}",
-      ".icon-btn:hover{background:var(--pp-control-hover-bg);color:var(--pp-control-hover-text)}",
-      ".icon-btn:active{transform:translateY(1px)}",
-      ".hide{font-size:18px}",
-      ".body{padding:0 12px 12px}",
-      ".meta{margin:0 0 4px 18px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--pp-muted);font-size:11px;line-height:1.3}",
-      ".elapsed{margin:0 0 8px 18px;color:var(--pp-muted-soft);font-size:10.5px;line-height:1.2;font-variant-numeric:tabular-nums}",
-      ".action{margin:0 0 9px;padding:8px 9px;border-radius:8px;background:var(--pp-action-bg);font-size:12.5px;line-height:1.35;overflow-wrap:anywhere;color:var(--pp-action-text)}",
-      ".target{margin:-4px 0 8px;color:var(--pp-next);font-size:11.5px;line-height:1.3;overflow-wrap:anywhere}",
-      ".progress-text{margin:0 0 5px;color:var(--pp-progress-text);font-size:12px;font-weight:680;line-height:1.35;overflow-wrap:anywhere}",
-      ".progress-bar{height:3px;margin:0 0 8px;border-radius:99px;background:var(--pp-progress-bg);overflow:hidden}",
-      ".progress-fill{display:block;width:100%;height:100%;border-radius:99px;background:var(--pp-progress-fill-start);transform:scaleX(0);transform-origin:left center;transition:transform .24s var(--pp-motion-ease)}",
-      ".next{margin:0 0 9px;color:var(--pp-next);font-size:11.5px;line-height:1.35;overflow-wrap:anywhere}",
-      ".sessions{margin:0 0 10px;padding:7px 8px;border-radius:8px;background:var(--pp-sessions-bg);border:1px solid var(--pp-sessions-border)}",
-      ".session-heading{margin:0 0 5px;color:var(--pp-session-heading);font-size:11px;font-weight:700}",
-      ".session-list{display:grid;gap:5px}",
-      ".session-row{display:grid;grid-template-columns:minmax(52px,.55fr) minmax(0,1fr) auto;gap:6px;align-items:center;min-height:20px;color:var(--pp-session-row);font-size:10.5px;line-height:1.25}",
-      ".session-agent{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--pp-session-agent);font-weight:680}",
-      ".session-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--pp-session-name)}",
-      ".session-time{white-space:nowrap;color:var(--pp-session-time);font-variant-numeric:tabular-nums}",
-      "details{margin:0 0 10px;color:var(--pp-details);font-size:11.5px;line-height:1.4}",
-      "summary{cursor:pointer;color:var(--pp-summary);font-weight:650;transition:color var(--pp-hover-duration) var(--pp-motion-ease)}",
-      "summary:hover{color:var(--pp-summary-hover)}",
-      ".icon-btn:focus-visible,.stop:focus-visible,.dot:focus-visible,summary:focus-visible{outline:2px solid var(--pp-focus-ring);outline-offset:2px}",
-      ".recent-text{display:block;margin-top:4px;overflow-wrap:anywhere}",
-      ".stop{width:100%;min-height:34px;border:1px solid rgba(255,113,100,.58);border-radius:9px;background:linear-gradient(180deg,rgba(255,113,100,.24),rgba(255,113,100,.11));color:var(--pp-stop-text);font-size:12px;font-weight:780;cursor:pointer;transition:background var(--pp-hover-duration) var(--pp-motion-ease),border-color var(--pp-hover-duration) var(--pp-motion-ease),color var(--pp-hover-duration) var(--pp-motion-ease),transform var(--pp-hover-duration) var(--pp-motion-ease)}",
-      ".stop:hover:not(:disabled){background:rgba(255,113,100,.28);border-color:rgba(255,135,123,.70);color:var(--pp-stop-hover-text)}",
-      ".stop:active:not(:disabled){transform:translateY(1px)}",
-      ".stop.confirm{background:linear-gradient(180deg,rgba(255,171,92,.27),rgba(255,171,92,.13));border-color:rgba(255,188,112,.68);color:var(--pp-stop-confirm-text)}",
-      ".stop:disabled{opacity:.56;cursor:default;transform:none}",
-      ".dot{display:none;width:36px;height:36px;border:1px solid var(--pp-dot-border);border-radius:99px;background:var(--pp-dot-bg);backdrop-filter:blur(14px);box-shadow:var(--pp-dot-shadow);cursor:pointer;place-items:center;transition:background var(--pp-hover-duration) var(--pp-motion-ease),border-color var(--pp-hover-duration) var(--pp-motion-ease),transform var(--pp-hover-duration) var(--pp-motion-ease)}",
-      ".dot:hover{background:var(--pp-dot-hover-bg);border-color:var(--pp-dot-hover-border);transform:translateY(-1px)}",
-      ".dot .pulse{width:11px;height:11px}",
-      ":host(.collapsed) .panel{display:none}",
-      ":host(.collapsed) .dot{display:grid}",
-      ":host(.leaving) .wrap{animation:ppOut var(--pp-motion-duration) var(--pp-motion-ease) forwards}",
-      ":host(.reduced-motion) .wrap{opacity:1;transform:none;animation:none}",
-      ":host(.leaving.reduced-motion) .wrap{opacity:0;transform:none;animation:none}",
-      ":host(.reduced-motion) .pulse{animation:none;box-shadow:none}",
-      ":host(.reduced-motion) .panel,:host(.reduced-motion) .icon-btn,:host(.reduced-motion) .progress-fill,:host(.reduced-motion) summary,:host(.reduced-motion) .stop,:host(.reduced-motion) .dot{transition:none}",
-      ":host(.reduced-motion) .panel.taken,:host(.reduced-motion) .icon-btn:active,:host(.reduced-motion) .stop:active:not(:disabled),:host(.reduced-motion) .dot:hover{transform:none}",
-      "@keyframes ppIn{to{opacity:1;transform:translateY(0) scale(1)}}",
-      "@keyframes ppOut{to{opacity:0;transform:translateY(-3px) scale(.985)}}",
-      "@keyframes ppPulse{0%{box-shadow:0 0 0 0 rgba(56,225,160,.58)}70%{box-shadow:0 0 0 9px rgba(56,225,160,0)}100%{box-shadow:0 0 0 0 rgba(56,225,160,0)}}",
-      "@keyframes ppSpin{to{transform:rotate(360deg)}}",
-      // 合成光标 / 点击高亮层：满屏 fixed 叠加、pointer-events:none，坐标即视口 CSS 像素，不抢真实指针。
-      ".pp-cursor-layer{position:fixed;inset:0;pointer-events:none;z-index:2147483646;overflow:visible}",
-      ".pp-agent-cursor{position:fixed;left:0;top:0;width:22px;height:22px;opacity:0;transform:translate(-120px,-120px);transition:transform .24s cubic-bezier(.2,0,0,1),opacity .18s ease;filter:drop-shadow(0 2px 5px rgba(0,0,0,.45));will-change:transform,opacity}",
-      ".pp-agent-cursor.show{opacity:1}",
-      ".pp-agent-cursor svg{display:block;width:100%;height:100%}",
-      ".pp-click-ripple{position:fixed;left:0;top:0;width:18px;height:18px;margin:-9px 0 0 -9px;border-radius:99px;border:2px solid rgba(56,225,160,.92);background:rgba(56,225,160,.20);box-shadow:0 0 14px rgba(56,225,160,.55);animation:ppRipple .58s cubic-bezier(.2,0,0,1) forwards}",
-      "@keyframes ppRipple{0%{opacity:.9;transform:scale(.32)}70%{opacity:.5}100%{opacity:0;transform:scale(2.7)}}",
-      ":host(.reduced-motion) .pp-agent-cursor{transition:none}",
-      ":host(.reduced-motion) .pp-click-ripple{animation:none;opacity:.5}",
-      ".wrap{position:fixed;inset:0;z-index:1;pointer-events:none}",
-      ".panel{position:absolute;left:50%;right:auto;top:auto;bottom:24px;width:min(560px,calc(100vw - 32px));border:1px solid #31454f;border-radius:14px;background:#101920;box-shadow:0 6px 8px rgba(2,6,9,.34);pointer-events:auto;transform:translateX(-50%);overflow:hidden}",
-      ".panel:hover{border-color:#3a4e59}",
-      ".panel.taken{border-color:rgba(56,225,160,.52);background:#0d1b17;transform:translateX(-50%)}",
-      ".head{min-height:42px;padding:10px 12px 7px;cursor:default}",
-      ".head:active{cursor:default}",
-      ".title{font-size:14px;font-weight:740;color:#eef5f7}",
-      ".body{display:grid;gap:7px;padding:0 12px 12px}",
-      ".details{display:grid;gap:7px}",
-      ".meta,.elapsed{margin-left:18px}",
-      ".action{margin:0;border:1px solid #25343d;background:#0d151a}",
-      ".status-line{display:none;align-items:center;gap:7px;min-width:0;color:#b9c8d0;font-size:11.5px;font-weight:650;line-height:1.3}",
-      ".status-dot{width:7px;height:7px;border-radius:99px;background:#5fb6ff;flex:0 0 auto}",
-      ".lock-hint{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
-      ".status-stack{display:none;min-width:0}",
-      ".state-row{display:flex;align-items:center;gap:6px;min-width:0;margin-top:5px}",
-      ".state-chip,.space-chip{display:inline-flex;align-items:center;min-width:0;max-width:100%;height:20px;border-radius:999px;border:1px solid #31454f;background:#15202a;padding:0 8px;color:#cbd7dc;font-size:10.5px;font-weight:680;line-height:20px;white-space:nowrap}",
-      ".state-chip{color:#92cdff;border-color:rgba(95,182,255,.38);background:rgba(95,182,255,.10)}",
-      ".space-chip{overflow:hidden;text-overflow:ellipsis}",
-      ".control-note{display:none;margin-top:5px;color:rgba(224,234,255,.58);font-size:10.5px;font-weight:650;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
-      ".target-follow{display:none;align-items:center;gap:10px;min-width:0;padding:8px 9px;border:1px solid #25343d;border-radius:10px;background:#0d151a}",
-      ".target-status{min-width:0;flex:1 1 auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#c7d5db;font-size:11px;font-weight:640}",
-      ".target-actions{display:flex;align-items:center;gap:7px;flex:0 0 auto}",
-      ".show-agent-target,.auto-follow{min-height:30px;border:1px solid #31454f;border-radius:8px;background:#15202a;color:#dbe5e9;font-size:10.5px;font-weight:700;cursor:pointer;transition:background var(--pp-hover-duration) var(--pp-motion-ease),border-color var(--pp-hover-duration) var(--pp-motion-ease),color var(--pp-hover-duration) var(--pp-motion-ease),transform var(--pp-hover-duration) var(--pp-motion-ease)}",
-      ".show-agent-target{padding:0 10px}",
-      ".auto-follow{display:inline-flex;align-items:center;gap:6px;padding:0 9px}",
-      ".auto-follow::before{content:\"\";width:18px;height:10px;border-radius:99px;background:#40515a;box-shadow:inset 0 0 0 1px rgba(255,255,255,.08);transition:background var(--pp-motion-duration) var(--pp-motion-ease),box-shadow var(--pp-motion-duration) var(--pp-motion-ease)}",
-      ".auto-follow[aria-checked=\"true\"]::before{background:#38e1a0;box-shadow:inset 8px 0 0 1px rgba(5,32,22,.62)}",
-      ".show-agent-target:hover:not(:disabled),.auto-follow:hover:not(:disabled){background:#1d2a33;border-color:#4b6572;color:#ffffff}",
-      ".show-agent-target:active:not(:disabled),.auto-follow:active:not(:disabled){transform:translateY(1px)}",
-      ".show-agent-target:disabled,.auto-follow:disabled{opacity:.55;cursor:default;transform:none}",
-      ".controls{display:grid;grid-template-columns:1fr 1fr;gap:8px}",
-      ".takeover,.stop{width:100%;min-height:36px;border-radius:10px;font-size:12.5px;font-weight:780;cursor:pointer;transition:background var(--pp-hover-duration) var(--pp-motion-ease),border-color var(--pp-hover-duration) var(--pp-motion-ease),color var(--pp-hover-duration) var(--pp-motion-ease),transform var(--pp-hover-duration) var(--pp-motion-ease)}",
-      ".takeover{border:1px solid #38e1a0;background:#38e1a0;color:#052016}",
-      ".takeover:hover:not(:disabled){background:#6ff2c0;border-color:#6ff2c0}",
-      ".takeover.confirm{background:rgba(242,177,62,.14);border-color:rgba(242,177,62,.62);color:#ffd27a}",
-      ".stop{border:1px solid rgba(255,113,100,.46);background:rgba(255,113,100,.08);color:#ffaaa1}",
-      ".stop:hover:not(:disabled){background:rgba(255,113,100,.15);border-color:rgba(255,113,100,.68);color:#ffd8d3}",
-      ".takeover:active:not(:disabled),.stop:active:not(:disabled){transform:translateY(1px)}",
-      ".takeover:disabled,.stop:disabled{opacity:.58;cursor:default;transform:none}",
-      ".hide{display:none}",
-      ":host(.delegated) .hide{display:inline-block}",
-      ":host(.locked) .panel{bottom:24px;width:min(720px,calc(100vw - 32px));min-height:72px;display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:auto auto auto;align-items:center;column-gap:16px;row-gap:1px;padding:11px 12px 11px 14px;border-radius:14px;border-color:#31454f;background:#101920;box-shadow:0 6px 8px rgba(2,6,9,.34)}",
-      ":host(.locked) .panel::before{display:none}",
-      ":host(.locked) .head{grid-column:1;grid-row:1;min-height:28px;padding:0;display:grid;grid-template-columns:29px minmax(0,1fr);gap:9px;align-items:center}",
-      ":host(.locked) .pulse{position:relative;width:28px;height:28px;border-radius:99px;background:#0d151a;border:1px solid #31454f;animation:none}",
-      ":host(.locked) .pulse::before{content:\"\";position:absolute;inset:6px;border:1.5px solid rgba(95,182,255,.30);border-top-color:#5fb6ff;border-radius:99px;animation:ppSpin 1.2s linear infinite}",
-      ":host(.locked) .pulse::after{content:\"\";position:absolute;left:50%;top:50%;width:4px;height:4px;margin:-2px 0 0 -2px;border-radius:99px;background:#92cdff}",
-      ":host(.locked) .title{font-size:14px;font-weight:720;letter-spacing:0;color:#eef5f7}",
-      ":host(.locked) .reveal,:host(.locked) .hide{display:none}",
-      ":host(.locked) .body{display:contents;padding:0}",
-      ":host(.locked) .details{display:none}",
-      ":host(.locked) .status-stack{grid-column:1;grid-row:2;display:block;min-width:0;margin-left:38px}",
-      ":host(.locked) .status-line{display:flex;gap:6px;color:#aebfc8;font-size:11px;font-weight:620}",
-      ":host(.locked) .status-dot{width:6px;height:6px;background:#5fb6ff;box-shadow:none}",
-      ":host(.locked) .state-row{margin-top:2px;min-width:0}",
-      ":host(.locked) .state-chip{display:none}",
-      ":host(.locked) .space-chip{display:block;width:100%;height:auto;padding:0;border:0;border-radius:0;background:transparent;color:#879aa5;font-size:10.25px;font-weight:580;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}",
-      ":host(.locked) .controls{grid-column:2;grid-row:1 / span 2;display:grid;grid-template-columns:100px 110px;gap:8px;align-self:center}",
-      ":host(.locked) .target-follow{grid-column:1 / -1;grid-row:3;margin-top:9px}",
-      ":host(.locked) .takeover,:host(.locked) .stop{min-height:36px;border-radius:10px;font-size:12px;font-weight:730}",
-      ":host(.locked) .takeover{border-color:#38e1a0;background:#38e1a0;color:#052016}",
-      ":host(.locked) .takeover:hover:not(:disabled){background:#6ff2c0;border-color:#6ff2c0}",
-      ":host(.locked) .stop{border-color:rgba(255,113,100,.46);background:rgba(255,113,100,.08);color:#ffaaa1}",
-      ":host(.locked) .stop:hover:not(:disabled){background:rgba(255,113,100,.15);border-color:rgba(255,113,100,.68);color:#ffd8d3}",
-      ":host(.offline.locked) .panel{border-color:rgba(242,177,62,.48)}",
-      ":host(.offline.locked) .status-dot{background:#f2b13e;box-shadow:none}",
-      ":host(.locked) .takeover:focus-visible,:host(.locked) .stop:focus-visible,:host(.locked) .show-agent-target:focus-visible,:host(.locked) .auto-follow:focus-visible{outline:2px solid #38e1a0;outline-offset:2px}",
-      // 已确认的“任务舱”视觉：只覆盖 locked 状态，delegated / native Input Guard 协议保持不变。
-      ":host(.locked) .panel{isolation:isolate;min-height:0;grid-template-rows:auto auto auto;column-gap:16px;row-gap:0;padding:10px 14px 11px 15px;border-color:#2b4350;border-radius:15px;background:#0b151c;box-shadow:0 12px 30px rgba(1,7,11,.32),inset 0 1px 0 rgba(255,255,255,.025)}",
-      ":host(.locked) .panel:hover{border-color:#365462;box-shadow:0 14px 34px rgba(1,7,11,.38),inset 0 1px 0 rgba(255,255,255,.035)}",
-      ":host(.locked) .panel::before{content:\"\";display:block;position:absolute;z-index:0;left:28px;top:33px;bottom:18px;width:1px;background:rgba(89,177,230,.46)}",
-      ":host(.locked) .panel::after{content:\"\";position:absolute;z-index:2;left:25px;bottom:16px;width:7px;height:7px;border-radius:50%;background:#64bfff;box-shadow:0 0 0 4px rgba(100,191,255,.08),0 0 13px rgba(100,191,255,.52)}",
-      ":host(.locked) .head{grid-template-columns:28px minmax(0,1fr);gap:9px;min-height:28px}",
-      ":host(.locked) .pulse{width:28px;height:28px;border-color:#36505f;background:#0d1a22;box-shadow:inset 0 0 0 4px rgba(89,177,230,.035)}",
-      ":host(.locked) .pulse::before{inset:6px;border:1px solid rgba(100,191,255,.42);animation:none}",
-      ":host(.locked) .pulse::after{width:7px;height:7px;margin:-3.5px 0 0 -3.5px;background:#64bfff;box-shadow:0 0 0 4px rgba(100,191,255,.12),0 0 12px rgba(100,191,255,.58)}",
-      ":host(.locked) .title{font-size:14px;font-weight:760;letter-spacing:.01em;color:#f0f6f8}",
-      ":host(.locked) .status-stack{display:flex;align-items:center;gap:8px;margin:2px 0 0 37px}",
-      ":host(.locked) .status-line{flex:0 1 auto;gap:6px;color:#a7b8c1;font-size:11px;line-height:1.3}",
-      ":host(.locked) .status-dot{width:7px;height:7px;background:#5ebaff;box-shadow:0 0 9px rgba(94,186,255,.35)}",
-      ":host(.locked) .state-row{flex:1 1 auto;margin-top:0;overflow:hidden}",
-      ":host(.locked) .space-chip{display:inline-flex;width:auto;max-width:100%;height:20px;padding:0 8px;border:1px solid #2a404c;border-radius:6px;background:#0e1a22;color:#8fa5b0;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:9.5px;font-weight:620;line-height:18px;letter-spacing:.025em}",
-      ":host(.locked) .controls{grid-template-columns:96px 106px;gap:8px}",
-      ":host(.locked) .takeover,:host(.locked) .stop{position:relative;min-height:38px;border-radius:9px;font-size:12px}",
-      ":host(.locked) .takeover::after,:host(.locked) .stop::after{content:\"\";position:absolute;inset:-3px 0}",
-      ":host(.locked) .takeover{background:#35dca0;border-color:#35dca0;color:#052119;box-shadow:0 5px 14px rgba(53,220,160,.10)}",
-      ":host(.locked) .takeover:hover:not(:disabled){background:#62e8b7;border-color:#62e8b7}",
-      ":host(.locked) .stop{background:rgba(255,116,105,.045);border-color:rgba(255,116,105,.54);color:#ff9d94}",
-      ":host(.locked) .stop:hover:not(:disabled){background:rgba(255,116,105,.11);border-color:rgba(255,130,119,.76);color:#ffc2bc}",
-      ":host(.locked) .control-note{margin-top:4px;color:#8296a1}",
-      ":host(.locked) .target-follow{position:relative;display:none;grid-template-columns:36px minmax(0,1fr) auto;align-items:center;gap:10px;min-height:56px;margin:8px 0 0 37px;padding:9px 10px;border-color:#263d48;border-radius:10px;background:#0a141a}",
-      ":host(.locked) .target-follow::before{content:\"\";display:block;width:32px;height:26px;border:1.5px solid #8ca0aa;border-radius:6px;background:#0c171d;box-shadow:inset 0 7px 0 #13222b}",
-      ":host(.locked) .target-follow::after{content:\"•••\";position:absolute;left:18px;top:14px;color:#8ca0aa;font-size:8px;line-height:1;letter-spacing:1px}",
-      ":host(.locked) .target-copy{min-width:0;display:grid;gap:3px}",
-      ":host(.locked) .target-eyebrow{color:#788d98;font-size:10px;font-weight:720;line-height:1.2;letter-spacing:.08em}",
-      ":host(.locked) .target-status{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e4edf1;font-size:12.5px;font-weight:700;line-height:1.35}",
-      ":host(.locked) .target-domain{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#61b9ef;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:10.5px;font-weight:620;line-height:1.3;letter-spacing:.04em}",
-      ":host(.locked) .target-actions{gap:8px;padding-left:10px;border-left:1px solid #263c47}",
-      ":host(.locked) .show-agent-target,:host(.locked) .auto-follow{position:relative;min-height:34px;border-color:#36505e;background:#101d25;color:#d9e4e9;font-size:10.5px}",
-      ":host(.locked) .show-agent-target::after,:host(.locked) .auto-follow::after{content:\"\";position:absolute;inset:-5px 0}",
-      ":host(.locked) .show-agent-target{padding:0 10px}",
-      ":host(.locked) .show-agent-target::before{content:\"↗\";margin-right:6px;color:#9ec7dc;font-size:14px}",
-      ":host(.locked) .auto-follow{padding:0 10px 0 9px;color:#9cafb8}",
-      ":host(.locked) .auto-follow::before{width:25px;height:14px;background:#3a4a53;box-shadow:inset -11px 0 0 #aab8bf}",
-      ":host(.locked) .auto-follow[aria-checked=\"true\"]::before{background:#35dca0;box-shadow:inset 11px 0 0 #e8fff7}",
-      "@media (max-width:640px){:host(.locked) .panel{grid-template-columns:minmax(0,1fr);grid-template-rows:auto auto auto auto;gap:6px;padding:10px 11px 11px 14px;width:min(430px,calc(100vw - 24px));bottom:14px}:host(.locked) .panel::before,:host(.locked) .panel::after{display:none}:host(.locked) .controls{grid-column:1;grid-row:3;width:100%;grid-template-columns:1fr 1fr;margin-top:5px}:host(.locked) .status-stack{grid-column:1;grid-row:2;margin-left:37px}:host(.locked) .target-follow{display:none;grid-column:1;grid-row:4;grid-template-columns:36px minmax(0,1fr);margin:8px 0 0;padding:9px 10px}:host(.locked) .target-follow[style*=\"grid\"]{display:grid!important}:host(.locked) .target-actions{grid-column:1 / -1;width:100%;padding:8px 0 0;border-left:0;border-top:1px solid #263c47}:host(.locked) .show-agent-target,:host(.locked) .auto-follow{flex:1 1 auto}}",
-      "@media (max-width:420px){:host(.locked) .status-stack{align-items:flex-start;flex-direction:column;gap:4px}:host(.locked) .target-actions{flex-wrap:wrap}:host(.locked) .show-agent-target,:host(.locked) .auto-follow{flex:1 1 100%}}",
-      // Minimal HUD: the full-viewport host remains input-transparent; only the
-      // 32px dock or compact panel accepts pointer events.
-      ":host(.locked) .panel,:host(.locked) .panel.taken{position:fixed;left:auto;right:16px;top:auto;bottom:16px;width:min(304px,calc(100vw - 32px));min-height:0;display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:auto auto;align-items:stretch;gap:8px;padding:12px;border:1px solid #2b4350;border-radius:14px;background:#0a1014;box-shadow:0 4px 8px rgba(0,0,0,.30);pointer-events:auto;transform:none;overflow:hidden}",
-      ":host(.locked) .panel::before,:host(.locked) .panel::after{display:none}",
-      ":host(.locked) .head{grid-column:1;grid-row:1;display:grid;grid-template-columns:22px minmax(0,1fr) 28px;gap:8px;min-height:28px;padding:0;align-items:center}",
-      ":host(.locked) .head>.pulse{width:18px;height:18px;border:1px solid #36505f;background:#0d1a22}",
-      ":host(.locked) .head>.pulse::before{inset:4px;border-color:rgba(95,182,255,.42);border-top-color:#5fb6ff;animation:ppSpin 1.2s linear infinite}",
-      ":host(.locked) .head>.pulse::after{width:5px;height:5px;margin:-2.5px 0 0 -2.5px;background:#5fb6ff;box-shadow:0 0 8px rgba(95,182,255,.48)}",
-      ":host(.locked) .title{font-size:13px;font-weight:740}",
-      ":host(.locked) .reveal{display:none}",
-      ":host(.locked) .hide{display:inline-grid;width:28px;height:28px;place-items:center;padding:0;font-size:17px}",
-      ":host(.locked) .body{display:grid;grid-template-columns:minmax(0,1fr);gap:9px;padding:0}",
-      ":host(.locked) .status-stack{grid-column:1;grid-row:auto;display:grid;gap:5px;margin:0}",
-      ":host(.locked) .status-line{display:flex;min-height:18px}",
-      ":host(.locked) .state-row{margin:0}",
-      ":host(.locked) .space-chip{display:block;width:100%;height:auto;padding:0;border:0;background:transparent;color:#879aa5;font-size:10.5px;line-height:1.35}",
-      ":host(.locked) .controls{grid-column:1;grid-row:auto;display:grid;grid-template-columns:1fr 1fr;gap:8px;width:100%}",
-      ":host(.locked) .takeover,:host(.locked) .stop{min-height:34px}",
-      ":host(.locked) .target-follow{grid-column:1;grid-row:auto;margin:0;min-height:52px}",
-      ":host(.locked) .target-follow[style*=\"grid\"]{display:grid!important}",
-      ".dot{position:fixed;left:auto;right:16px;top:auto;bottom:16px;width:32px;height:32px;pointer-events:auto;will-change:transform}",
-      ".dot .pulse,:host(.locked) .dot .pulse{width:10px;height:10px;border:0;background:#38e1a0;box-shadow:0 0 0 0 rgba(56,225,160,.50);animation:ppPulse 1.45s ease-out infinite}",
-      ".dot .pulse::before,.dot .pulse::after,:host(.locked) .dot .pulse::before,:host(.locked) .dot .pulse::after{display:none}",
-      ":host(.corner-top-left) .panel,:host(.corner-top-left) .dot{left:16px;right:auto;top:16px;bottom:auto}",
-      ":host(.corner-top-right) .panel,:host(.corner-top-right) .dot{left:auto;right:16px;top:16px;bottom:auto}",
-      ":host(.corner-bottom-left) .panel,:host(.corner-bottom-left) .dot{left:16px;right:auto;top:auto;bottom:16px}",
-      ":host(.corner-bottom-right) .panel,:host(.corner-bottom-right) .dot{left:auto;right:16px;top:auto;bottom:16px}",
-      ":host(.handoff-prompt) .panel{width:min(320px,calc(100vw - 32px));border-color:rgba(242,176,61,.58);background:#0e1012}",
-      ":host(.handoff-prompt) .head>.pulse,:host(.handoff-prompt) .status-dot{background:#f2b03d;border-color:rgba(242,176,61,.55);box-shadow:0 0 9px rgba(242,176,61,.30)}",
-      ":host(.handoff-prompt) .head>.pulse::before,:host(.handoff-prompt) .head>.pulse::after{display:none}",
-      ":host(.handoff-prompt) .takeover{border-color:#f2b03d;background:#f2b03d;color:#211707}",
-      ":host(.handoff-prompt.collapsed) .dot,:host(.offline.collapsed) .dot{border-color:rgba(242,176,61,.58)}",
-      ":host(.handoff-prompt.collapsed) .dot .pulse,:host(.offline.collapsed) .dot .pulse{background:#f2b03d;box-shadow:0 0 0 0 rgba(242,176,61,.48)}",
-      ":host(.collapsed) .panel{display:none}",
-      ":host(.locked.collapsed) .panel{display:none}",
-      ":host(.locked.collapsed) .dot{display:grid}",
-      "@media (max-width:360px){:host(.locked) .panel,:host(.handoff-prompt) .panel{width:calc(100vw - 24px)}:host(.corner-top-left) .panel,:host(.corner-bottom-left) .panel{left:12px}:host(.corner-top-right) .panel,:host(.corner-bottom-right) .panel{right:12px}}",
-      ":host(.reduced-motion.locked) .pulse::before{animation:none}"
+      "*{box-sizing:border-box} [hidden]{display:none!important}",
+      ".wrap{--pp-bg:#242628;--pp-text:#f1f3f2;--pp-muted:#a7adaa;--pp-border:#3c4041;--pp-hover:#333738;--pp-danger:#ff8d88;--pp-focus:#91c8ac;--pp-shadow:0 6px 24px rgba(0,0,0,.18);font:14px/1.4 -apple-system,BlinkMacSystemFont,'Segoe UI','Microsoft YaHei','PingFang SC',sans-serif;color:var(--pp-text);user-select:none}",
+      ":host(.theme-light) .wrap{--pp-bg:#fff;--pp-text:#252827;--pp-muted:#6f7572;--pp-border:#e0e3e1;--pp-hover:#f2f4f3;--pp-danger:#bd453f;--pp-focus:#397659;--pp-shadow:0 6px 24px rgba(24,32,28,.09)}",
+      ".panel{position:fixed;right:16px;bottom:16px;display:flex;align-items:center;gap:0;width:min(340px,calc(100vw - 32px));height:44px;padding:0 8px 0 16px;border:1px solid var(--pp-border);border-radius:14px;background:var(--pp-bg);box-shadow:var(--pp-shadow);pointer-events:auto;overflow:hidden}",
+      ".status{display:flex;align-items:center;gap:10px;flex:1;min-width:0;padding-right:8px;height:100%}",
+      ".status-icon{display:grid;place-items:center;width:18px;height:18px;flex:none;color:var(--pp-muted)}",
+      ".status-icon[data-icon=dot]::before{content:'';width:8px;height:8px;border-radius:50%;background:#20c55a}",
+      ":host(.attention) .status-icon[data-icon=dot]::before{background:#e7a51a}",
+      ":host(.offline) .status-icon[data-icon=dot]::before{background:var(--pp-muted)}",
+      ":host(.has-error) .status-icon{color:var(--pp-danger)}",
+      ".title{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;font-weight:600;letter-spacing:0}",
+      "button{appearance:none;font:inherit;color:inherit;border:0;background:none;cursor:pointer;margin:0;white-space:nowrap;touch-action:manipulation}",
+      ".control{display:inline-flex;align-items:center;justify-content:center;gap:7px;height:32px;border-radius:8px;padding:0 10px;flex:none;transition:background .14s ease,color .14s ease}",
+      ".control:hover{background:var(--pp-hover)} .control:focus-visible{outline:2px solid var(--pp-focus);outline-offset:-2px}",
+      ".control:disabled{opacity:.45;cursor:default;background:none}",
+      ".takeover,.back{position:relative;margin-left:9px;min-width:78px}",
+      ".takeover::before,.back::before{content:'';position:absolute;left:-9px;top:7px;width:1px;height:18px;background:var(--pp-border)}",
+      ".more{width:32px;padding:0;color:var(--pp-muted)}",
+      ".stop{flex:1;justify-content:flex-start;color:var(--pp-danger);padding-left:0;font-weight:600}",
+      ".stop.confirm{background:var(--pp-hover)}",
+      ".control-icon{display:grid;place-items:center;width:18px;height:18px;flex:none} svg{display:block;width:18px;height:18px}",
+      ".sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}",
+      ":host(.corner-top-left) .panel{left:16px;right:auto;top:16px;bottom:auto}",
+      ":host(.corner-top-right) .panel{left:auto;right:16px;top:16px;bottom:auto}",
+      ":host(.corner-bottom-left) .panel{left:16px;right:auto;top:auto;bottom:16px}",
+      ":host(.corner-bottom-right) .panel{left:auto;right:16px;top:auto;bottom:16px}",
+      ".pp-cursor-layer{position:fixed;inset:0;pointer-events:none;z-index:2}",
+      ".pp-agent-cursor{position:fixed;left:0;top:0;width:22px;height:22px;opacity:0;pointer-events:none;transition:transform .12s ease,opacity .12s ease;will-change:transform}",
+      ".pp-agent-cursor.show{opacity:1} .pp-agent-cursor svg{width:22px;height:22px}",
+      ".pp-click-ripple{position:fixed;width:18px;height:18px;margin:-9px 0 0 -9px;border-radius:50%;border:2px solid #38e1a0;background:rgba(56,225,160,.16);animation:ppRipple .58s ease-out forwards}",
+      "@keyframes ppRipple{from{transform:scale(.5);opacity:1}to{transform:scale(2.6);opacity:0}}",
+      ":host(.reduced-motion) *, :host(.reduced-motion) *::before{animation:none!important;transition:none!important}",
+      "@media(max-width:360px){.panel{padding-left:12px}.status{gap:7px}.title{font-size:13px}.control{padding:0 7px}.more{padding:0;width:28px}.takeover,.back{min-width:70px}}"
     ].join("");
     buildOverlayDom(root, styleText);
 
     panel = root.querySelector(".panel");
-    dot = root.querySelector(".dot");
+    statusNode = root.querySelector(".status");
+    statusIcon = root.querySelector(".status-icon");
     title = root.querySelector(".title");
-    meta = root.querySelector(".meta");
-    elapsed = root.querySelector(".elapsed");
-    action = root.querySelector(".action");
-    target = root.querySelector(".target");
-    progressText = root.querySelector(".progress-text");
-    progressBar = root.querySelector(".progress-bar");
-    progressFill = root.querySelector(".progress-fill");
-    next = root.querySelector(".next");
-    sessionsBlock = root.querySelector(".sessions");
-    sessionHeading = root.querySelector(".session-heading");
-    sessionList = root.querySelector(".session-list");
-    recent = root.querySelector(".recent");
-    recentSummary = root.querySelector(".recent summary");
-    recentText = root.querySelector(".recent-text");
-    lockHint = root.querySelector(".lock-hint");
-    stateChip = root.querySelector(".state-chip");
-    spaceChip = root.querySelector(".space-chip");
-    controlNote = root.querySelector(".control-note");
-    targetFollow = root.querySelector(".target-follow");
-    targetEyebrow = root.querySelector(".target-eyebrow");
-    targetStatus = root.querySelector(".target-status");
-    targetDomain = root.querySelector(".target-domain");
-    showAgentTargetButton = root.querySelector(".show-agent-target");
-    autoFollowButton = root.querySelector(".auto-follow");
-    detailsHeading = root.querySelector(".details-heading");
-    currentActionLabel = root.querySelector(".current-action-label");
-    taskProgressLabel = root.querySelector(".task-progress-label");
-    nextStepLabel = root.querySelector(".next-step-label");
-    recentActivityLabel = root.querySelector(".recent-activity-label");
-    recentActivity = root.querySelector(".recent-activity");
+    statusDescription = root.querySelector(".status-description");
     takeoverButton = root.querySelector(".takeover");
     stopButton = root.querySelector(".stop");
-    revealButton = root.querySelector(".reveal");
-    hideButton = root.querySelector(".hide");
+    moreButton = root.querySelector(".more");
+    backButton = root.querySelector(".back");
     cursorLayer = root.querySelector(".pp-cursor-layer");
     agentCursor = root.querySelector(".pp-agent-cursor");
-    recentSummary.tabIndex = 0;
 
     root.addEventListener("click", (event) => event.stopPropagation());
     root.addEventListener("dblclick", (event) => event.stopPropagation());
     root.addEventListener("pointerdown", (event) => event.stopPropagation());
-    root.addEventListener("pointerenter", () => scheduleAutoCollapse(HUD_AUTO_COLLAPSE_MS), true);
-    root.addEventListener("focusin", () => scheduleAutoCollapse(HUD_AUTO_COLLAPSE_MS));
-    hideButton.addEventListener("click", () => {
-      collapse();
-      signal("hide");
-    });
-    revealButton.addEventListener("click", () => signal("reveal"));
-    dot.addEventListener("click", () => expand());
     takeoverButton.addEventListener("click", () => handleStopClick("takeover"));
     stopButton.addEventListener("click", () => handleStopClick("stop"));
-    showAgentTargetButton.addEventListener("click", () => signal("show-agent-target"));
-    autoFollowButton.addEventListener("click", () => signal("set-auto-follow", { enabled: !state.autoFollowAgent }));
-    for (const control of [hideButton, revealButton, dot, takeoverButton, stopButton, showAgentTargetButton, autoFollowButton]) {
+    moreButton.addEventListener("click", () => setMoreOpen(true));
+    backButton.addEventListener("click", () => setMoreOpen(false));
+    for (const control of [takeoverButton, stopButton, moreButton, backButton]) {
       control.addEventListener("keydown", handleKeyboardClick);
     }
-    recent.addEventListener("toggle", updateInteractiveAria);
-    recentSummary.addEventListener("keydown", handleRecentSummaryKeydown);
-    // 捕获阶段监听页面上被 AI 派发（isTrusted）的按下事件，作为高亮触发源。
     agentPointerListener = handleAgentPointer;
     window.addEventListener("pointerdown", agentPointerListener, { capture: true, passive: true });
     outsidePointerListener = handleOutsidePointer;
@@ -677,11 +287,6 @@ export function agentOverlayBootstrapScript(): string {
     setupHostReconnectTracking();
     setupReducedMotionTracking();
     setupThemeTracking();
-    elapsedTimer = setInterval(() => {
-      ensureHostConnected();
-      updateElapsed();
-      renderSessionList();
-    }, 1000);
     render();
   }
 
@@ -725,119 +330,21 @@ export function agentOverlayBootstrapScript(): string {
       role: "group",
       "aria-labelledby": "pp-agent-overlay-title"
     });
-    const headNode = overlayNode("div", "head");
-    headNode.append(
-      overlayNode("span", "pulse", { "aria-hidden": "true" }),
-      overlayNode("span", "title", { id: "pp-agent-overlay-title" }),
-      overlayNode("button", "icon-btn reveal", { type: "button", title: "", "aria-label": "" }, "⧉"),
-      overlayNode("button", "icon-btn hide", {
-        type: "button",
-        title: "",
-        "aria-label": "",
-        "aria-controls": "pp-agent-overlay-panel"
-      }, "×")
+    const status = overlayNode("div", "status", { "aria-describedby": "pp-agent-overlay-status-description" });
+    status.append(
+      overlayNode("span", "status-icon", { "aria-hidden": "true" }),
+      overlayNode("span", "title", { id: "pp-agent-overlay-title", "aria-live": "polite", "aria-atomic": "true" })
     );
+    const takeover = controlNode("takeover");
+    const more = controlNode("more");
+    more.setAttribute("aria-controls", "pp-agent-overlay-panel");
+    const stop = controlNode("stop");
+    const back = controlNode("back");
+    const description = overlayNode("span", "sr-only status-description", { id: "pp-agent-overlay-status-description" });
+    panelNode.append(status, takeover, more, stop, back, description);
+    wrapNode.append(panelNode);
 
-    const bodyNode = overlayNode("div", "body");
-    const statusStackNode = overlayNode("div", "status-stack");
-    const statusLineNode = overlayNode("div", "status-line");
-    statusLineNode.append(
-      overlayNode("span", "status-dot", { "aria-hidden": "true" }),
-      overlayNode("span", "lock-hint")
-    );
-    const stateRowNode = overlayNode("div", "state-row");
-    stateRowNode.append(
-      overlayNode("span", "state-chip"),
-      overlayNode("span", "space-chip")
-    );
-    statusStackNode.append(statusLineNode, stateRowNode, overlayNode("div", "control-note"));
-    const targetFollowNode = overlayNode("div", "target-follow");
-    const targetActionsNode = overlayNode("div", "target-actions");
-    targetActionsNode.append(
-      overlayNode("button", "show-agent-target", { type: "button" }),
-      overlayNode("button", "auto-follow", { type: "button", role: "switch", "aria-checked": "false" })
-    );
-    const targetCopyNode = overlayNode("div", "target-copy");
-    targetCopyNode.append(
-      overlayNode("div", "target-eyebrow"),
-      overlayNode("div", "target-status"),
-      overlayNode("div", "target-domain")
-    );
-    targetFollowNode.append(targetCopyNode, targetActionsNode);
-
-    const detailsNode = overlayNode("div", "details", { id: "pp-agent-overlay-details" });
-    const progressBarNode = overlayNode("div", "progress-bar", {
-      role: "progressbar",
-      "aria-valuemin": "0",
-      "aria-valuemax": "100",
-      "aria-labelledby": "pp-agent-overlay-progress-text"
-    });
-    progressBarNode.append(overlayNode("span", "progress-fill"));
-    const sessionsNode = overlayNode("div", "sessions");
-    sessionsNode.append(
-      overlayNode("div", "session-heading"),
-      overlayNode("div", "session-list")
-    );
-    const recentNode = overlayNode("details", "recent");
-    recentNode.append(
-      overlayNode("summary", "", {
-        "aria-controls": "pp-agent-overlay-recent-text",
-        "aria-expanded": "false"
-      }),
-      overlayNode("span", "recent-text", { id: "pp-agent-overlay-recent-text" })
-    );
-    const actionCellNode = overlayNode("div", "detail-cell detail-action");
-    actionCellNode.append(
-      overlayNode("div", "detail-label current-action-label"),
-      overlayNode("div", "action"),
-      overlayNode("div", "target")
-    );
-    const progressCellNode = overlayNode("div", "detail-cell detail-progress");
-    progressCellNode.append(
-      overlayNode("div", "detail-label task-progress-label"),
-      overlayNode("div", "progress-text", { id: "pp-agent-overlay-progress-text" }),
-      progressBarNode
-    );
-    const nextCellNode = overlayNode("div", "detail-cell detail-next");
-    nextCellNode.append(
-      overlayNode("div", "detail-label next-step-label"),
-      overlayNode("div", "next")
-    );
-    const recentCellNode = overlayNode("div", "detail-cell detail-recent");
-    recentCellNode.append(
-      overlayNode("div", "detail-label recent-activity-label"),
-      overlayNode("div", "recent-activity"),
-      recentNode
-    );
-    const detailGridNode = overlayNode("div", "detail-grid");
-    detailGridNode.append(actionCellNode, progressCellNode, nextCellNode, recentCellNode);
-    detailsNode.append(
-      overlayNode("div", "details-heading"),
-      detailGridNode,
-      overlayNode("div", "meta"),
-      overlayNode("div", "elapsed"),
-      sessionsNode
-    );
-
-    const controlsNode = overlayNode("div", "controls");
-    controlsNode.append(
-      overlayNode("button", "takeover", { type: "button" }),
-      overlayNode("button", "stop", { type: "button" })
-    );
-    bodyNode.append(statusStackNode, targetFollowNode, detailsNode, controlsNode);
-    panelNode.append(headNode, bodyNode);
-
-    const dotNode = overlayNode("button", "dot", {
-      type: "button",
-      title: "",
-      "aria-label": "",
-      "aria-controls": "pp-agent-overlay-panel",
-      "aria-expanded": "false"
-    });
-    dotNode.append(overlayNode("span", "pulse", { "aria-hidden": "true" }));
-    wrapNode.append(panelNode, dotNode);
-
-    // 合成光标层放在 .wrap 之外：.wrap 带 transform，会成为 fixed 定位的包含块。
+    // 合成光标层独立于控制条，不接受鼠标事件。
     const cursorLayerNode = overlayNode("div", "pp-cursor-layer", { "aria-hidden": "true" });
     const cursorNode = overlayNode("span", "pp-agent-cursor");
     const svgNode = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -871,20 +378,54 @@ export function agentOverlayBootstrapScript(): string {
     return node;
   }
 
+  function controlNode(className) {
+    const button = overlayNode("button", "control " + className, { type: "button" });
+    button.append(
+      overlayNode("span", "control-icon", { "aria-hidden": "true" }),
+      overlayNode("span", "button-label")
+    );
+    return button;
+  }
+
+  // Inline SVG keeps icon metrics identical on Windows and macOS, including CJK fonts.
+  function setIcon(container, name) {
+    if (container.getAttribute("data-icon") === name) return;
+    container.setAttribute("data-icon", name);
+    container.replaceChildren();
+    if (name === "dot") return;
+    const paths = {
+      hand: "M8 13V5a2 2 0 0 1 4 0v7-9a2 2 0 0 1 4 0v9-7a2 2 0 0 1 4 0v9c0 5-3 8-7 8h-1c-2 0-4-1-5-3l-4-6a2 2 0 0 1 3-2l2 2Z",
+      play: "m7 4 13 8-13 8Z",
+      more: "M5 12h.01M12 12h.01M19 12h.01",
+      stop: "M6 4h12a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z",
+      back: "m11 5-7 7 7 7M4 12h16",
+      alert: "M12 8v5M12 17h.01M10.3 3.8 2.2 18a2 2 0 0 0 1.7 3h16.2a2 2 0 0 0 1.7-3L13.7 3.8a2 2 0 0 0-3.4 0Z"
+    };
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    for (const [key, value] of Object.entries({ viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", "stroke-width": name === "more" ? "4" : "1.7", "stroke-linecap": "round", "stroke-linejoin": "round", focusable: "false" })) {
+      svg.setAttribute(key, value);
+    }
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", paths[name] || paths.alert);
+    svg.append(path);
+    container.append(svg);
+  }
+
+  function setControl(button, label, icon, hint = label) {
+    const labelNode = button.querySelector(".button-label");
+    if (labelNode.textContent !== label) labelNode.textContent = label;
+    setIcon(button.querySelector(".control-icon"), icon);
+    button.title = hint;
+    button.setAttribute("aria-label", hint);
+  }
+
   function signal(actionName, options) {
     const binding = window[SIGNAL_NAME];
-    if (typeof binding !== "function") {
-      return;
-    }
+    if (typeof binding !== "function") return;
     const payload = { action: actionName };
-    if (actionName === "stop" && options?.reason) {
-      payload.reason = options.reason;
-    }
+    if (actionName === "stop" && options?.reason) payload.reason = options.reason;
     if ((actionName === "stop" || actionName === "resume") && !options?.stopAll && !isMultiSession() && state.session) {
       payload.session = state.session;
-    }
-    if (actionName === "set-auto-follow") {
-      payload.enabled = options?.enabled === true;
     }
     try {
       binding(JSON.stringify(payload));
@@ -1166,388 +707,53 @@ export function agentOverlayBootstrapScript(): string {
   }
 
   function render() {
-    if (!host || !panel) {
-      return;
-    }
+    if (!host || !panel) return;
     ensureHostConnected();
     const copy = text();
     const taken = isDelegatedToUser();
     const offline = state.agentOffline === true;
     const reconnecting = state.driverReconnecting === true;
-    const driverUnavailable = offline || reconnecting;
-    const pending = state.handoffPending === true && !taken;
+    const pending = state.handoffPending === true;
     const pendingUserAction = String(state.pendingUserAction || "").trim();
     const requiresUserAction = Boolean(taken && pendingUserAction);
-    const returnError = taken ? String(state.stopError || "").trim() : "";
-    const sessions = normalizedSessions();
-    applyStaticText(copy);
-    // 接管前后共用同一套紧凑状态条；delegated 只改变内容和控制权，不切回旧的大卡片。
+    const error = String(state.stopError || "").trim();
     host.classList.add("locked");
     host.classList.toggle("delegated", taken);
-    host.classList.toggle("offline", driverUnavailable);
-    host.classList.toggle("handoff-prompt", requiresUserAction);
+    host.classList.toggle("offline", offline);
+    host.classList.toggle("attention", requiresUserAction || pending || reconnecting || (!taken && state.inputGuardState !== "active"));
+    host.classList.toggle("has-error", Boolean(error));
     applyHudCorner(hudCorner);
-    panel.classList.toggle("taken", taken);
-    title.textContent = reconnecting
-      ? copy.reconnectingTitle
-      : offline
-        ? copy.offlineTitle
-        : requiresUserAction
-          ? copy.userActionTitle
-          : taken
-            ? copy.takenTitle
-            : pending
-              ? copy.handoffTitle
-              : copy.lockedTitle;
-    const metaText = primarySessionIdentity(sessions, copy, false);
-    meta.textContent = metaText;
-    meta.title = metaText;
-    meta.style.display = metaText ? "block" : "none";
-    action.textContent = reconnecting
-      ? copy.reconnectingAction
-      : offline
-        ? copy.offlineAction
-        : returnError
-          ? returnError
-          : requiresUserAction
-          ? copy.userActionPrefix + pendingUserAction
-          : taken
-            ? copy.takenAction
-            : pending
-              ? copy.handoffAction
-              : state.stopError || currentActionText(copy);
-    target.textContent = state.targetUrl ? copy.targetPrefix + state.targetUrl : "";
-    target.style.display = state.targetUrl ? "block" : "none";
-
-    renderProgress();
-    next.textContent = state.nextStep || "—";
-    next.style.display = "block";
-    renderSessionList();
-    recent.style.display = state.lastMessage ? "block" : "none";
-    recentText.textContent = state.lastMessage || "";
-    lockHint.textContent = reconnecting
-      ? copy.reconnectingAction
-      : offline
-        ? copy.offlineAction
-        : returnError
-          ? returnError
-          : requiresUserAction
-          ? pendingUserAction
-          : taken
-            ? copy.takenAction
-            : pending
-              ? copy.handoffAction
-              : compactStatusText(sessions, copy);
-    renderTargetFollow(copy, taken, pending);
-    stateChip.textContent = taken ? copy.ownerUser : copy.ownerAgent;
-    spaceChip.textContent = compactTaskSpaceText(sessions, copy);
-    spaceChip.title = fullTaskSpaceText(sessions, copy);
-    controlNote.textContent = reconnecting
-      ? copy.reconnectingAction
-      : offline
-        ? copy.offlineAction
-        : returnError
-          ? returnError
-          : requiresUserAction
-          ? copy.userActionPrefix + pendingUserAction
-          : taken
-            ? copy.hardStopSent
-            : pending
-              ? copy.handoffAction
-              : copy.takeoverHint;
-    updateElapsed();
+    const label = error ? (taken ? copy.returnError : copy.error)
+      : reconnecting ? copy.reconnecting
+      : offline ? copy.offline
+      : pending ? copy.handoff
+      : requiresUserAction ? copy.needsUser
+      : taken ? copy.taken : copy.active;
+    if (title.textContent !== label) title.textContent = label;
+    const hint = error || (reconnecting ? copy.reconnectingHint
+      : offline ? copy.offlineHint
+      : pending ? copy.handoffHint
+      : requiresUserAction ? pendingUserAction
+      : taken ? copy.takenHint
+      : state.inputGuardState === "unavailable" ? copy.guardUnavailable
+      : state.inputGuardState !== "active" ? copy.guardStarting : copy.activeHint);
+    statusNode.title = hint;
+    statusDescription.textContent = hint;
+    setIcon(statusIcon, error ? "alert" : taken && !requiresUserAction && !offline ? "hand" : "dot");
+    statusNode.hidden = moreOpen;
+    takeoverButton.hidden = moreOpen || offline || reconnecting;
+    moreButton.hidden = moreOpen;
+    stopButton.hidden = !moreOpen;
+    backButton.hidden = !moreOpen;
+    moreButton.setAttribute("aria-expanded", moreOpen ? "true" : "false");
+    setControl(moreButton, "", "more", copy.more);
+    setControl(backButton, copy.back, "back");
     updateStopButton();
-    host.classList.toggle("collapsed", collapsed);
-    updateInteractiveAria();
-  }
-
-  function renderTargetFollow(copy, taken, pending) {
-    const hasTarget = Boolean(state.agentTargetId);
-    const background = hasTarget && !state.agentTargetIsCurrentPage;
-    const label = friendlyAgentTargetName() || state.agentTargetDomain || state.agentTargetUrl || copy.defaultTask;
-    targetFollow.style.display = hasTarget && !taken ? "grid" : "none";
-    if (!hasTarget || taken) {
-      return;
-    }
-    targetEyebrow.textContent = background ? copy.backgroundOperation : copy.currentOperation;
-    targetStatus.textContent = String(state.agentTargetTitle || "").trim() || label;
-    targetStatus.title = [state.agentTargetTitle, state.agentTargetDomain, state.agentTargetUrl].filter(Boolean).join(" · ");
-    targetDomain.textContent = state.agentTargetDomain || domainFromUrl(state.agentTargetUrl);
-    targetDomain.title = state.agentTargetUrl || targetDomain.textContent;
-    if (background && !pending) {
-      lockHint.textContent = copy.backgroundTarget(label);
-    }
-    const hasBinding = typeof window[SIGNAL_NAME] === "function";
-    showAgentTargetButton.style.display = background ? "inline-block" : "none";
-    showAgentTargetButton.disabled = !hasBinding || state.targetActivationPending === true || pending;
-    showAgentTargetButton.textContent = state.targetActivationPending ? copy.showingAgentTarget : copy.showAgentTarget;
-    showAgentTargetButton.title = copy.showAgentTarget;
-    showAgentTargetButton.setAttribute("aria-label", copy.showAgentTarget);
-    autoFollowButton.disabled = !hasBinding || pending;
-    autoFollowButton.textContent = copy.autoFollow;
-    autoFollowButton.title = copy.autoFollow;
-    autoFollowButton.setAttribute("aria-label", copy.autoFollow);
-    autoFollowButton.setAttribute("aria-checked", state.autoFollowAgent ? "true" : "false");
-  }
-
-  function friendlyAgentTargetName() {
-    const title = String(state.agentTargetTitle || "").trim();
-    if (!title) {
-      return "";
-    }
-    const parts = title.split(/\s*[-–—|]\s*/).filter(Boolean);
-    return parts[parts.length - 1] || title;
-  }
-
-  function domainFromUrl(value) {
-    try {
-      return new URL(String(value || "")).hostname;
-    } catch {
-      return "";
-    }
-  }
-
-  function applyStaticText(copy) {
-    revealButton.title = copy.revealTitle;
-    revealButton.setAttribute("aria-label", copy.revealTitle);
-    hideButton.title = copy.hideTitle;
-    hideButton.setAttribute("aria-label", copy.hideTitle);
-    dot.title = copy.expandTitle;
-    dot.setAttribute("aria-label", copy.expandTitle);
-    detailsHeading.textContent = copy.detailsHeading;
-    currentActionLabel.textContent = copy.currentActionLabel;
-    taskProgressLabel.textContent = copy.taskProgressLabel;
-    nextStepLabel.textContent = copy.nextStepLabel;
-    recentActivityLabel.textContent = copy.recentActivityLabel;
-    sessionHeading.textContent = copy.sessionHeading;
-    recentSummary.textContent = copy.recentSummary;
-  }
-
-  function updateInteractiveAria() {
-    if (hideButton) {
-      hideButton.setAttribute("aria-expanded", collapsed ? "false" : "true");
-    }
-    if (dot) {
-      dot.setAttribute("aria-expanded", collapsed ? "false" : "true");
-    }
-    if (recentSummary && recent) {
-      recentSummary.setAttribute("aria-expanded", recent.open ? "true" : "false");
-    }
-  }
-
-  function handleRecentSummaryKeydown(event) {
-    if (!isActivationKey(event) || event.repeat) {
-      return;
-    }
-    event.preventDefault();
-    event.stopPropagation();
-    recent.open = !recent.open;
-    updateInteractiveAria();
-  }
-
-  function titleText(sessions, copy) {
-    if (sessions.length >= 2) {
-      return copy.operatingPrefix + sessions.length + copy.sessionsSuffix;
-    }
-    return copy.operatingPrefix + (state.agent || sessions[0]?.agent || "Agent");
-  }
-
-  function compactTitleText(sessions, copy) {
-    if (sessions.length >= 2) {
-      return copy.multiTaskTitle(sessions.length);
-    }
-    const session = sessions[0] || {};
-    return (
-      state.sessionTitle ||
-      session.sessionTitle ||
-      meaningfulActionText() ||
-      state.project ||
-      session.project ||
-      state.agent ||
-      session.agent ||
-      copy.defaultTask
-    );
-  }
-
-  function compactStatusText(sessions, copy) {
-    if (state.inputGuardState === "unavailable") {
-      return copy.guardUnavailable;
-    }
-    if (state.inputGuardState !== "active") {
-      return copy.guardStarting;
-    }
-    return copy.lockedHint;
-  }
-
-  function compactTaskSpaceText(sessions, copy) {
-    const session = sessions[0] || {};
-    const project = state.project || session.project;
-    const branch = state.branch || session.branch;
-    const identity = [project, branch && branch !== project ? branch : ""].filter(Boolean);
-    const label = identity.join(" · ") || state.sessionTitle || session.sessionTitle || state.agent || session.agent || copy.defaultTask;
-    const remaining = Math.max(0, sessions.length - 1);
-    return label + (remaining ? " · +" + remaining : "");
-  }
-
-  function fullTaskSpaceText(sessions, copy) {
-    if (!sessions.length) {
-      return primaryTaskSpaceIdentity(sessions, copy);
-    }
-    return sessions.map((session, index) => {
-      const identity = index === 0 ? primaryTaskSpaceIdentity(sessions, copy) : taskSpaceIdentity(session, copy);
-      return (session.agent || "Agent") + " · " + identity;
-    }).join("\n");
-  }
-
-  function primaryTaskSpaceIdentity(sessions, copy) {
-    const session = sessions[0] || {};
-    return taskSpaceIdentity({
-      project: state.project || session.project,
-      branch: state.branch || session.branch,
-      sessionTitle: state.sessionTitle || session.sessionTitle
-    }, copy);
-  }
-
-  function taskSpaceIdentity(session, copy) {
-    const parts = [];
-    if (session.project) {
-      parts.push(copy.projectPrefix + " " + session.project);
-    }
-    if (session.branch && session.branch !== session.project) {
-      parts.push(copy.branchPrefix + " " + session.branch);
-    }
-    return parts.join(" · ") || session.sessionTitle || copy.taskSpacePrefix + " · " + copy.defaultTask;
-  }
-
-  function primarySessionIdentity(sessions, copy, compact) {
-    const session = sessions[0] || {};
-    return sessionIdentity({
-      project: state.project || session.project,
-      session: state.session || session.session,
-      sessionTitle: state.sessionTitle || session.sessionTitle
-    }, copy, compact);
-  }
-
-  function sessionIdentity(session, copy, compact) {
-    const parts = [];
-    if (session.project) {
-      parts.push(copy.projectPrefix + " " + session.project);
-    }
-    if (session.session) {
-      parts.push(copy.sessionPrefix + " " + (compact ? compactSessionId(session.session) : session.session));
-    }
-    if (parts.length) {
-      return parts.join(" · ");
-    }
-    return session.sessionTitle || copy.taskSpacePrefix + " · " + copy.defaultTask;
-  }
-
-  function compactSessionId(value) {
-    const session = String(value || "");
-    if (session.length <= 22) {
-      return session;
-    }
-    return session.slice(0, 13) + "…" + session.slice(-4);
-  }
-
-  function currentActionText(copy) {
-    if (!state.currentAction || state.currentAction === OVERLAY_TEXT.zh.defaultAction || state.currentAction === OVERLAY_TEXT.en.defaultAction) {
-      return copy.defaultAction;
-    }
-    return state.currentAction;
-  }
-
-  function meaningfulActionText() {
-    if (!state.currentAction || state.currentAction === OVERLAY_TEXT.zh.defaultAction || state.currentAction === OVERLAY_TEXT.en.defaultAction) {
-      return "";
-    }
-    return state.currentAction;
-  }
-
-  function renderProgress() {
-    const copy = text();
-    const total = finiteNumber(state.todoTotal);
-    const done = finiteNumber(state.todoDone);
-    const hasTodo = done !== null && total !== null && total > 0;
-    if (hasTodo) {
-      progressText.textContent = copy.progressDone(Math.max(0, done), total);
-      progressText.style.display = "block";
-    } else if (state.currentStep) {
-      progressText.textContent = state.currentStep;
-      progressText.style.display = "block";
-    } else {
-      progressText.style.display = "none";
-    }
-
-    if (hasTodo) {
-      const percent = Math.max(0, Math.min(100, Math.round((Math.max(0, Math.min(done, total)) / total) * 100)));
-      progressBar.style.display = "block";
-      progressBar.setAttribute("aria-valuenow", String(percent));
-      progressBar.setAttribute("aria-valuetext", copy.progressDone(Math.max(0, done), total));
-      progressFill.style.transform = "scaleX(" + percent / 100 + ")";
-    } else {
-      progressBar.style.display = "none";
-      progressBar.removeAttribute("aria-valuenow");
-      progressBar.removeAttribute("aria-valuetext");
-      progressFill.style.transform = "scaleX(0)";
-    }
-  }
-
-  function renderSessionList() {
-    if (!sessionList) {
-      return;
-    }
-    const sessions = normalizedSessions();
-    sessionsBlock.style.display = sessions.length >= 1 ? "block" : "none";
-    if (sessions.length < 1) {
-      sessionList.textContent = "";
-      return;
-    }
-    sessionList.textContent = "";
-    const copy = text();
-    for (const item of sessions) {
-      const row = document.createElement("div");
-      row.className = "session-row";
-      const agent = document.createElement("div");
-      agent.className = "session-agent";
-      agent.textContent = item.agent || "Agent";
-      const name = document.createElement("div");
-      name.className = "session-name";
-      name.textContent = sessionIdentity(item, copy, true) || copy.unnamedSession;
-      name.title = sessionIdentity(item, copy, false);
-      const time = document.createElement("div");
-      time.className = "session-time";
-      time.textContent = item.lastActive ? formatRelativeTime(item.lastActive) : copy.unknownActivity;
-      row.append(agent, name, time);
-      sessionList.appendChild(row);
-    }
-  }
-
-  function updateElapsed() {
-    if (!elapsed) {
-      return;
-    }
-    const taken = isDelegatedToUser();
-    const startedAt = taken && state.controlSince
-      ? state.controlSince
-      : state.startedAt || normalizedSessions()[0]?.startedAt || "";
-    const startedTs = Date.parse(startedAt);
-    if (!Number.isFinite(startedTs)) {
-      elapsed.textContent = "";
-      elapsed.style.display = "none";
-    } else {
-      elapsed.textContent = (taken ? text().takenElapsedPrefix : text().elapsedPrefix) + formatDuration(Date.now() - startedTs);
-      elapsed.style.display = "block";
-    }
-    if (recentActivity) {
-      const updatedTs = Date.parse(state.updatedAt || normalizedSessions()[0]?.lastActive || "");
-      recentActivity.textContent = Number.isFinite(updatedTs) ? text().relativeTime(updatedTs) : text().unknownActivity;
-    }
   }
 
   function handleStopClick(kind) {
     const button = kind === "takeover" ? takeoverButton : stopButton;
-    if (!button || button.disabled) {
+    if (!button || button.disabled || button.hidden) {
       return;
     }
     if (kind === "takeover" && isDelegatedToUser()) {
@@ -1584,43 +790,18 @@ export function agentOverlayBootstrapScript(): string {
   }
 
   function updateStopButton() {
+    if (!takeoverButton || !stopButton) return;
+    const copy = text();
     const taken = isDelegatedToUser();
-    const offline = state.agentOffline === true;
-    const reconnecting = state.driverReconnecting === true;
-    const driverUnavailable = offline || reconnecting;
     const hasBinding = typeof window[SIGNAL_NAME] === "function";
     const pending = state.handoffPending === true;
+    const driverUnavailable = state.agentOffline === true || state.driverReconnecting === true;
     takeoverButton.disabled = !hasBinding || pending || driverUnavailable;
     stopButton.disabled = !hasBinding || pending;
-    if (driverUnavailable) {
-      const driverLabel = reconnecting ? text().reconnectingButton : text().offlineButton;
-      takeoverButton.textContent = driverLabel;
-      takeoverButton.title = driverLabel;
-      takeoverButton.setAttribute("aria-label", driverLabel);
-      const stopLabel = stopConfirming && stopConfirmKind === "stop" ? text().confirmRelease : text().releaseProfile;
-      stopButton.textContent = stopLabel;
-      stopButton.title = stopLabel;
-      stopButton.setAttribute("aria-label", stopLabel);
-      return;
-    }
-    if (taken) {
-      takeoverButton.textContent = text().returnToAgent;
-      takeoverButton.title = text().returnToAgent;
-      takeoverButton.setAttribute("aria-label", text().returnToAgent);
-      const stopLabel = stopConfirming && stopConfirmKind === "stop" ? text().confirmStop : isMultiSession() ? text().stopAll : text().stopSingle;
-      stopButton.textContent = stopLabel;
-      stopButton.title = stopLabel;
-      stopButton.setAttribute("aria-label", stopLabel);
-      return;
-    }
-    const takeoverLabel = text().takeover;
-    const stopLabel = stopConfirming && stopConfirmKind === "stop" ? text().confirmStop : isMultiSession() ? text().stopAll : text().stopSingle;
-    takeoverButton.textContent = takeoverLabel;
-    takeoverButton.title = takeoverLabel;
-    takeoverButton.setAttribute("aria-label", takeoverLabel);
-    stopButton.textContent = stopLabel;
-    stopButton.title = stopLabel;
-    stopButton.setAttribute("aria-label", stopLabel);
+    setControl(takeoverButton, taken ? copy.returnToAgent : copy.takeover, taken ? "play" : "hand");
+    const stopLabel = stopConfirming ? copy.confirmStop : isMultiSession() ? copy.stopAll : copy.stopSingle;
+    setControl(stopButton, stopLabel, "stop", stopConfirming ? copy.confirmHint : stopLabel);
+    stopButton.classList.toggle("confirm", stopConfirming);
   }
 
   function resetStopConfirm() {
@@ -1628,35 +809,10 @@ export function agentOverlayBootstrapScript(): string {
     stopConfirmKind = "";
     clearTimeout(stopConfirmTimer);
     stopConfirmTimer = null;
-    if (takeoverButton) {
-      takeoverButton.classList.remove("confirm");
-      if (state.agentOffline === true || state.driverReconnecting === true) {
-        const takeoverLabel = state.driverReconnecting === true ? text().reconnectingButton : text().offlineButton;
-        takeoverButton.textContent = takeoverLabel;
-        takeoverButton.title = takeoverLabel;
-        takeoverButton.setAttribute("aria-label", takeoverLabel);
-      } else if (isDelegatedToUser()) {
-        takeoverButton.textContent = text().returnToAgent;
-        takeoverButton.title = text().returnToAgent;
-        takeoverButton.setAttribute("aria-label", text().returnToAgent);
-      } else {
-        takeoverButton.textContent = text().takeover;
-        takeoverButton.title = text().takeover;
-        takeoverButton.setAttribute("aria-label", text().takeover);
-      }
-    }
-    if (stopButton) {
-      stopButton.classList.remove("confirm");
-      const label = (state.agentOffline === true || state.driverReconnecting === true)
-        ? text().releaseProfile
-        : isMultiSession() ? text().stopAll : text().stopSingle;
-      stopButton.textContent = label;
-      stopButton.title = label;
-      stopButton.setAttribute("aria-label", label);
-    }
+    updateStopButton();
   }
 
-  // Input Guard 在 macOS 原生层先吞掉真实点击，再把同一次按下/抬起的全局坐标和
+  // Input Guard 在 Windows/macOS 原生层先吞掉真实点击，再把同一次按下/抬起的全局坐标和
   // 事件发生时的原生窗口边界交回来。这里不缓存按钮屏幕坐标：每次都用当前页面
   // viewport、页面缩放和按钮 rect 即时换算；任何字段不完整或布局变化都返回 null。
   function guardProbe(payload) {
@@ -1718,7 +874,7 @@ export function agentOverlayBootstrapScript(): string {
     }
 
     const button = guardButtonForAction(downAction);
-    if (!button || button.disabled) {
+    if (!button || button.disabled || button.hidden) {
       return null;
     }
     const rect = button.getBoundingClientRect();
@@ -1749,14 +905,10 @@ export function agentOverlayBootstrapScript(): string {
     if (!probe || probe.signature !== expectedSignature) {
       return false;
     }
-    if (probe.action === "expand") {
-      expand();
-    } else if (probe.action === "collapse") {
-      collapse();
-    } else if (probe.action === "showAgentTarget") {
-      signal("show-agent-target");
-    } else if (probe.action === "toggleAutoFollow") {
-      signal("set-auto-follow", { enabled: !state.autoFollowAgent });
+    if (probe.action === "more") {
+      setMoreOpen(true);
+    } else if (probe.action === "back") {
+      setMoreOpen(false);
     } else {
       handleStopClick(probe.action);
     }
@@ -1802,15 +954,13 @@ export function agentOverlayBootstrapScript(): string {
 
   function guardActionAtClientPoint(point) {
     const entries = [
-      ["expand", collapsed ? dot : null],
-      ["collapse", collapsed ? null : hideButton],
+      ["more", moreButton],
+      ["back", backButton],
       ["takeover", takeoverButton],
-      ["stop", stopButton],
-      ["showAgentTarget", showAgentTargetButton],
-      ["toggleAutoFollow", autoFollowButton]
+      ["stop", stopButton]
     ];
     for (const [kind, button] of entries) {
-      if (!button || button.disabled) {
+      if (!button || button.disabled || button.hidden) {
         continue;
       }
       const rect = button.getBoundingClientRect();
@@ -1829,12 +979,10 @@ export function agentOverlayBootstrapScript(): string {
   }
 
   function guardButtonForAction(actionName) {
-    if (actionName === "expand") return dot;
-    if (actionName === "collapse") return hideButton;
+    if (actionName === "more") return moreButton;
+    if (actionName === "back") return backButton;
     if (actionName === "takeover") return takeoverButton;
     if (actionName === "stop") return stopButton;
-    if (actionName === "showAgentTarget") return showAgentTargetButton;
-    if (actionName === "toggleAutoFollow") return autoFollowButton;
     return null;
   }
 
@@ -1867,60 +1015,22 @@ export function agentOverlayBootstrapScript(): string {
     return Number.isFinite(value) ? Math.round(value * 1000) / 1000 : null;
   }
 
-  function collapse() {
-    clearTimeout(autoCollapseTimer);
-    autoCollapseTimer = null;
-    collapsed = true;
-    persistCollapsed();
+  function setMoreOpen(open, moveFocus = true) {
+    const hadFocus = Boolean(root && root.activeElement);
+    moreOpen = open;
+    resetStopConfirm();
     render();
-  }
-
-  function expand() {
-    clearTimeout(handoffPromptTimer);
-    handoffPromptTimer = null;
-    collapsed = false;
-    persistCollapsed();
-    render();
-    scheduleAutoCollapse(HUD_AUTO_COLLAPSE_MS);
-  }
-
-  function scheduleAutoCollapse(delayMs) {
-    clearTimeout(autoCollapseTimer);
-    autoCollapseTimer = null;
-    if (collapsed || tearingDown || stopConfirming || state.stopError || !host) {
-      return;
-    }
-    autoCollapseTimer = setTimeout(() => {
-      autoCollapseTimer = null;
-      if (!stopConfirming) {
-        collapse();
-      }
-    }, delayMs);
-  }
-
-  function showHandoffPrompt() {
-    clearTimeout(handoffPromptTimer);
-    clearTimeout(autoCollapseTimer);
-    collapsed = false;
-    persistCollapsed();
-    handoffPromptTimer = setTimeout(() => {
-      handoffPromptTimer = null;
-      collapse();
-    }, HUD_HANDOFF_PROMPT_MS);
+    if (moveFocus && hadFocus) (open ? backButton : moreButton)?.focus({ preventScroll: true });
   }
 
   function handleOutsidePointer(event) {
-    if (collapsed || tearingDown || !host) {
-      return;
-    }
+    if (!moreOpen || tearingDown || !host) return;
     const inside = typeof event.composedPath === "function" && event.composedPath().includes(host);
-    scheduleAutoCollapse(inside ? HUD_AUTO_COLLAPSE_MS : HUD_OUTSIDE_COLLAPSE_MS);
+    if (!inside) setMoreOpen(false, false);
   }
 
   function handleEscapeKey(event) {
-    if (event.key === "Escape" && !collapsed) {
-      collapse();
-    }
+    if (event.key === "Escape" && moreOpen) setMoreOpen(false);
   }
 
   function handleHudAvoidEvent(event) {
@@ -1928,22 +1038,6 @@ export function agentOverlayBootstrapScript(): string {
       avoidHudForRect(event && event.detail);
     } catch {
       // The click must proceed even if a page supplies malformed event detail.
-    }
-  }
-
-  function persistCollapsed() {
-    try {
-      sessionStorage.setItem(COLLAPSED_KEY, collapsed ? "1" : "0");
-    } catch {
-      // sessionStorage may be disabled.
-    }
-  }
-
-  function readCollapsed() {
-    try {
-      return sessionStorage.getItem(COLLAPSED_KEY) !== "0";
-    } catch {
-      return true;
     }
   }
 
@@ -1977,15 +1071,14 @@ export function agentOverlayBootstrapScript(): string {
   }
 
   function avoidHudForRect(input) {
-    if (!host || !panel || !dot || tearingDown) {
+    if (!host || !panel || tearingDown) {
       return false;
     }
     const targetRect = normalizeAvoidRect(input);
     if (!targetRect) {
       return false;
     }
-    const control = collapsed ? dot : panel;
-    const controlRect = control.getBoundingClientRect();
+    const controlRect = panel.getBoundingClientRect();
     if (!rectsIntersect(expandRect(targetRect, HUD_COLLISION_MARGIN_PX), controlRect)) {
       return false;
     }
@@ -2243,47 +1336,24 @@ export function agentOverlayBootstrapScript(): string {
     return value;
   }
 
-  function formatDuration(ms) {
-    return text().duration(ms);
-  }
-
-  function formatRelativeTime(iso) {
-    const ts = Date.parse(iso);
-    if (!Number.isFinite(ts)) {
-      return text().unknownActivity;
-    }
-    return text().relativeTime(ts);
-  }
-
   window.__ppAgentOverlayUpdate = (payload) => {
     if (!payload || typeof payload !== "object") {
       return false;
     }
     lastUpdateReceivedAt = Date.now();
     const wasDelegatedToUser = isDelegatedToUser();
-    const previousPendingUserAction = String(state.pendingUserAction || "").trim();
     const previousStopError = String(state.stopError || "").trim();
+    const wasPending = state.handoffPending === true;
+    const previousAttention = [state.agentOffline, state.driverReconnecting, state.pendingUserAction].join("|");
     for (const key of KNOWN_STATE_FIELDS) {
       state[key] = normalizeKnownStateValue(key, payload[key]);
     }
-    const pendingUserAction = String(state.pendingUserAction || "").trim();
-    const stopError = String(state.stopError || "").trim();
-    if (stopError && stopError !== previousStopError && isDelegatedToUser()) {
-      expand();
-    } else if (pendingUserAction && pendingUserAction !== previousPendingUserAction && isDelegatedToUser()) {
-      showHandoffPrompt();
-    } else if (!pendingUserAction) {
-      clearTimeout(handoffPromptTimer);
-      handoffPromptTimer = null;
-    }
-    if (isDelegatedToUser()) {
-      if (!wasDelegatedToUser) {
-        resetStopConfirm();
-      }
-      clearTimeout(takenOverTimer);
-      if (!pendingUserAction && !collapsed) {
-        takenOverTimer = setTimeout(() => collapse(), 5000);
-      }
+    // A control transition or new failure must leave the status visible and cancel
+    // any armed destructive action, without changing the strip's geometry.
+    const attention = [state.agentOffline, state.driverReconnecting, state.pendingUserAction].join("|");
+    if (wasDelegatedToUser !== isDelegatedToUser() || wasPending !== state.handoffPending || previousStopError !== state.stopError || previousAttention !== attention) {
+      moreOpen = false;
+      resetStopConfirm();
     }
     if (!host) {
       // bootstrap 可能是旧 CDP Session 遗留的 future-document script。只有收到
@@ -2345,10 +1415,6 @@ export function agentOverlayBootstrapScript(): string {
       return;
     }
     tearingDown = true;
-    clearTimeout(takenOverTimer);
-    clearTimeout(autoCollapseTimer);
-    clearTimeout(handoffPromptTimer);
-    clearInterval(elapsedTimer);
     clearInterval(heartbeatTimer);
     clearTimeout(cursorHideTimer);
     clearTimeout(stopConfirmTimer);

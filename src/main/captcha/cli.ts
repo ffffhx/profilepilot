@@ -7,9 +7,11 @@ import { captchaBrowser } from "./browser";
 import { captchaExpression } from "./page";
 import { captchaKey, CaptchaError, createOnce, hash, twoCaptcha, type CaptchaProvider } from "./provider";
 import { recognizeWithCodex } from "./codex";
+import { waitForCaptchaResponse } from "./wait";
 
 export const captchaHelp = `ppilot browser [connection/session options] captcha COMMAND
   detect                         Inspect supported widgets; no paid API call
+  wait [--selector CSS]           Wait for a response field; no solver/model call
   solve [--selector CSS]         Solve one standalone widget and apply its token
   recognize --image-file FILE    Ask your signed-in Codex CLI to read an image
   balance                        Query your 2Captcha account balance (USD)
@@ -37,7 +39,13 @@ recognize: --provider codex (default), --kind auto|text|grid (default auto),
   with PROFILEPILOT_CAPTCHA_CODEX_BIN (binary or bin/codex.js, not .cmd/.bat).
   Temporary image/result files are removed. No automatic recognition retry.
 
-Other commands use 2captcha (also --provider 2captcha).
+wait supports hCaptcha, Turnstile, reCAPTCHA and MTCaptcha response fields in the main
+document. Default timeout: 15000 ms; --timeout 1000-300000. It returns only
+presence, never the token. pending/not_detected with timedOut=true is not a
+rejected answer; response_present is not server verification. Multiple widgets
+need --selector; navigation or response-field changes end the wait. No clicks or submits.
+
+Paid commands use 2captcha (also --provider 2captcha).
 Set PROFILEPILOT_CAPTCHA_API_KEY or PROFILEPILOT_CAPTCHA_API_KEY_FILE locally.
 TWOCAPTCHA_API_KEY is accepted. Never pass keys in command arguments.
 --timeout MS: solve/recognize budget, 1000-300000 (default 120000).
@@ -48,6 +56,7 @@ Examples (detect/solve require an already claimed/connected session):
   ppilot browser --session TASK --profile native:Default captcha detect
   ppilot browser --session TASK --profile native:Default captcha solve
   ppilot browser --session TASK --cdp PORT captcha solve
+  ppilot browser --session TASK --cdp PORT captcha wait --timeout 15000
   ppilot browser captcha balance
   ppilot browser captcha result --task-id 123456
   ppilot browser captcha recognize --image-file challenge.png --kind text
@@ -77,7 +86,7 @@ export async function runCaptchaCli(route: Route, io: Pick<NodeJS.Process, 'stdo
     const args = route.args.slice(route.commandIndex + 1);
     if (!args.length || args[0] === 'help' || args.includes('--help') || args.includes('-h')) { io.stdout.write(captchaHelp); return 0; }
     const command = args.shift()!;
-    if (!['detect', 'solve', 'balance', 'submit', 'result', 'recognize'].includes(command)) invalid('未知验证码命令；运行 ppilot browser captcha --help。');
+    if (!['detect', 'wait', 'solve', 'balance', 'submit', 'result', 'recognize'].includes(command)) invalid('未知验证码命令；运行 ppilot browser captcha --help。');
     const values = new Map<string, string>();
     const prefix = route.args.slice(0, route.commandIndex);
     function parse(input: string[], allowed: string[]) {
@@ -91,7 +100,7 @@ export async function runCaptchaCli(route: Route, io: Pick<NodeJS.Process, 'stdo
       }
     }
     parse(prefix, ['--session', '--profile', '--root', '--cdp', '--target']);
-    parse(args, ['--provider', ...(command === 'recognize' ? ['--image-file', '--kind', '--instruction', '--model', '--timeout']
+    parse(args, command === 'wait' ? ['--selector', '--timeout'] : ['--provider', ...(command === 'recognize' ? ['--image-file', '--kind', '--instruction', '--model', '--timeout']
       : ['--state-dir', ...(command === 'solve' ? ['--selector', '--timeout'] : command === 'submit' ? ['--task-file', '--request-id'] : command === 'result' ? ['--task-id'] : [])])]);
     const output = (value: unknown) => io.stdout.write(`${JSON.stringify({ ok: true, result: value })}\n`);
     if (command === 'recognize') {
@@ -104,7 +113,7 @@ export async function runCaptchaCli(route: Route, io: Pick<NodeJS.Process, 'stdo
         instruction: values.get('--instruction'), model: values.get('--model'), timeout: Number(values.get('--timeout') || 120000) }, env));
       return 0;
     }
-    if ((values.get('--provider') || env.PROFILEPILOT_CAPTCHA_PROVIDER || '2captcha') !== '2captcha') invalid('此命令使用 2captcha；Codex 图片识别请使用 captcha recognize。');
+    if (command !== 'wait' && (values.get('--provider') || env.PROFILEPILOT_CAPTCHA_PROVIDER || '2captcha') !== '2captcha') invalid('此命令使用 2captcha；Codex 图片识别请使用 captcha recognize。');
     if (route.connection === 'gateway' && (values.has('--profile') || values.has('--root'))) invalid('Gateway 用 --cdp 选择目标；--profile/--root 仅用于扩展连接。');
     if (route.connection === 'extension' && values.has('--target')) invalid('--target 仅用于 Gateway。');
     const root = values.get('--state-dir') || env.PROFILEPILOT_CAPTCHA_STATE_DIR || path.join(env.HOME || os.homedir(), '.profilepilot', 'captcha');
@@ -131,12 +140,16 @@ export async function runCaptchaCli(route: Route, io: Pick<NodeJS.Process, 'stdo
     const sessionId = values.get('--session') || (route.connection === 'gateway'
       ? env.AGENT_BROWSER_SESSION || env.PROFILEPILOT_SESSION || (env.CODEX_THREAD_ID ? `cx-${env.CODEX_THREAD_ID}` : env.CLAUDE_CODE_SESSION_ID ? `cc-${env.CLAUDE_CODE_SESSION_ID}` : '')
       : env.PROFILEPILOT_SESSION);
-    if (!sessionId) invalid('detect/solve 需要已持有控制权的 --session；请先 claim / 连接目标。');
+    if (!sessionId) invalid('detect/wait/solve 需要已持有控制权的 --session；请先 claim / 连接目标。');
     if (route.connection === 'gateway' && !route.port) invalid('Gateway 验证码操作需要 --cdp 逻辑端口。');
-    const timeout = Number(values.get('--timeout') || 120000);
+    const timeout = Number(values.get('--timeout') || (command === 'wait' ? 15000 : 120000));
     if (!Number.isSafeInteger(timeout) || timeout < 1000 || timeout > 300000) invalid('--timeout 范围为 1000–300000 毫秒。');
     const options: CaptchaBrowserOptions = { connection: route.connection, sessionId, profileId: values.get('--profile'), port: route.port, root: values.get('--root'), targetId: values.get('--target') };
     const browser = runtime.browser || captchaBrowser(options, env);
+    if (command === 'wait') {
+      output(await waitForCaptchaResponse(browser, { timeout, selector: values.get('--selector'), now: runtime.now, sleep: runtime.sleep }));
+      return 0;
+    }
     const page = async (input: Parameters<typeof captchaExpression>[0]) => {
       const result = await browser.evaluate(captchaExpression(input));
       if (!result?.ok) throw new CaptchaError(result?.code || 'CAPTCHA_EVALUATION_FAILED', result?.error || '验证码页面状态无效。', 75, taskId);

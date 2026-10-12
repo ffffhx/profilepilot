@@ -242,7 +242,7 @@ interface PortOverlay {
 }
 
 interface GuardProbeResult {
-  action: "expand" | "collapse" | "takeover" | "stop" | "showAgentTarget" | "toggleAutoFollow";
+  action: "more" | "back" | "expand" | "collapse" | "takeover" | "stop" | "showAgentTarget" | "toggleAutoFollow";
   signature: string;
 }
 
@@ -790,7 +790,9 @@ export class AgentOverlayManager {
       const action = stringValue(value.action);
       const signature = stringValue(value.signature);
       if (
-        (action === "expand" ||
+        (action === "more" ||
+          action === "back" ||
+          action === "expand" ||
           action === "collapse" ||
           action === "takeover" ||
           action === "stop" ||
@@ -1338,7 +1340,12 @@ export class AgentOverlayManager {
 
   private handlePageEvent(state: PortOverlay, page: PageOverlay, method: string, params: unknown): void {
     if (method === "Runtime.executionContextCreated") {
-      this.handleExecutionContextCreated(page, params);
+      if (this.handleExecutionContextCreated(page, params)) {
+        // A future-document bootstrap stays hidden until it receives current
+        // state. Publish as soon as its main-frame world exists, including when
+        // the user navigates while the Agent is parked and sends no commands.
+        void this.pushPageUpdate(state, page, true).catch(() => undefined);
+      }
       return;
     }
     if (method === "Runtime.executionContextDestroyed") {
@@ -1434,24 +1441,25 @@ export class AgentOverlayManager {
     }
   }
 
-  private handleExecutionContextCreated(page: PageOverlay, params: unknown): void {
+  private handleExecutionContextCreated(page: PageOverlay, params: unknown): boolean {
     if (!isRecord(params) || !isRecord(params.context)) {
-      return;
+      return false;
     }
     const context = params.context;
     if (stringValue(context.name) !== OVERLAY_WORLD_NAME) {
-      return;
+      return false;
     }
     const contextId = numberValue(context.id);
     if (contextId === null) {
-      return;
+      return false;
     }
     const auxData = isRecord(context.auxData) ? context.auxData : null;
     const frameId = auxData ? stringValue(auxData.frameId) || undefined : undefined;
     if (!page.mainFrameId || frameId !== page.mainFrameId) {
-      return;
+      return false;
     }
     this.rememberIsolatedContext(page, contextId, frameId);
+    return true;
   }
 
   private handleFrameNavigated(page: PageOverlay, params: unknown): void {
@@ -1775,6 +1783,10 @@ export class AgentOverlayManager {
     }
     const contextIds = this.contextIdsForPage(page);
     if (!contextIds.length) {
+      // Navigation/context-destroyed events can clear every known world before a
+      // replacement is observed. Recover here too; otherwise every later update
+      // returns early and the page stays without a control overlay indefinitely.
+      await this.recoverPageContext(state, page, sessionId, now).catch(() => undefined);
       return;
     }
     let pushed = false;

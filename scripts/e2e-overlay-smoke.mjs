@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import { waitForTestChrome, cleanupRelaunchedTestChrome } from "./test-chrome-lifecycle.mjs";
+import { endOverlayTask } from "./overlay-test-controls.mjs";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -70,7 +72,7 @@ try {
     }
   ];
 
-  manager.sync({
+  const overlayInput = {
     enabled: true,
     ports: [
       {
@@ -80,7 +82,8 @@ try {
         clients
       }
     ]
-  });
+  };
+  manager.sync(overlayInput);
   step("AgentOverlayManager.sync enabled for the temporary browser.");
 
   const rootPage = await waitForInjectedTarget(
@@ -98,6 +101,20 @@ try {
   assert.equal(rootPage.state.hostPointerEvents, "none", "Strict-CSP root page overlay host must not intercept page input.");
   assert.equal(rootPage.state.hostInset, "0px", "Strict-CSP root page overlay host should cover the viewport.");
   step("Root page main world has no overlay globals, while strict-CSP computed overlay styles remain active.");
+
+  for (const controlPaused of [false, true]) {
+    manager.sync({ ...overlayInput, ports: overlayInput.ports.map(port => ({ ...port, controlPaused })) });
+    for (const url of ["chrome://version/", ROOT_URL]) {
+      await rootPageClient.send("Page.navigate", { url }, 5000);
+      await waitFor(async () => {
+        const state = await evaluateValue(rootPageClient,
+          '({ url: location.href, host: Boolean(document.getElementById("__pp-agent-overlay")), delegated: document.getElementById("__pp-agent-overlay")?.classList.contains("delegated") })');
+        return state.url === url && state.host && state.delegated === controlPaused;
+      }, 3000, "overlay after navigation without a periodic state sync");
+    }
+  }
+  manager.sync(overlayInput);
+  step("Active and delegated navigation to Chrome version and back restores the overlay without a periodic state sync.");
 
   const rootOverlayContextId = await waitForOverlayWorldContext(rootPageClient, "root page isolated overlay world");
   const isolatedGlobals = await overlayState(rootPageClient, rootOverlayContextId);
@@ -288,7 +305,7 @@ try {
   }
 
   if (chrome) {
-    await terminateProcess(chrome.child);
+    await terminateProcess(chrome.child, chrome.tempDir);
     await rm(chrome.tempDir, { recursive: true, force: true }).catch(() => undefined);
   }
 }
@@ -375,7 +392,7 @@ async function launchChromeWithFallback() {
       };
     } catch (error) {
       failures.push(`${attempt.mode}: ${error instanceof Error ? error.message : String(error)}${stderr ? `\n${stderr}` : ""}`);
-      await terminateProcess(child);
+      await terminateProcess(child, tempDir);
       await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
     }
   }
@@ -457,25 +474,10 @@ async function isExecutable(file) {
 }
 
 async function waitForCdp(port, child, spawnError, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  let lastError = null;
-  while (Date.now() < deadline) {
-    if (spawnError()) {
-      throw spawnError();
-    }
-    if (child.exitCode !== null) {
-      throw new Error(`Chrome exited before CDP became ready, exit code ${child.exitCode}.`);
-    }
-    try {
-      return await requestJson(port, "/json/version", 1000);
-    } catch (error) {
-      lastError = error;
-      await delay(100);
-    }
-  }
-  throw new Error(
-    `Timed out waiting for Chrome CDP on 127.0.0.1:${port}.${lastError instanceof Error ? ` Last error: ${lastError.message}` : ""}`
-  );
+  return waitForTestChrome({
+    child, spawnError, timeoutMs, port,
+    probe: () => requestJson(port, "/json/version", 1000)
+  });
 }
 
 async function waitForInjectedTarget(port, predicate, timeoutMs, label) {
@@ -560,27 +562,7 @@ async function waitForOverlayWorldContext(client, label) {
 }
 
 async function clickOverlayStopButton(client) {
-  const viewport = await evaluateValue(
-    client,
-    `(() => {
-      const host = document.getElementById("__pp-agent-overlay");
-      if (!host) {
-        return null;
-      }
-      return { width: window.innerWidth, height: window.innerHeight };
-    })()`,
-    1000
-  );
-  assert.ok(viewport && viewport.width > 0 && viewport.height > 0, "Overlay host should expose a viewport for clicks.");
-  // The active overlay now starts as a 32px bottom-right dock. Expand it first,
-  // then click the right-hand terminal action twice to confirm.
-  await dispatchMouseClick(client, Math.round(viewport.width - 32), Math.round(viewport.height - 32));
-  await delay(80);
-  const x = Math.round(viewport.width - 96);
-  const y = Math.round(viewport.height - 45);
-  await dispatchMouseClick(client, x, y);
-  await delay(80);
-  await dispatchMouseClick(client, x, y);
+  await endOverlayTask(client);
 }
 
 async function dispatchMouseClick(client, x, y) {
@@ -696,18 +678,19 @@ function delay(ms) {
   });
 }
 
-async function terminateProcess(child) {
-  if (!child || child.exitCode !== null || child.signalCode !== null) {
-    return;
-  }
-  child.kill("SIGTERM");
-  const exited = await Promise.race([
-    once(child, "exit").then(() => true),
-    delay(2500).then(() => false)
-  ]);
-  if (!exited && child.exitCode === null && child.signalCode === null) {
-    child.kill("SIGKILL");
-    await Promise.race([once(child, "exit"), delay(1000)]).catch(() => undefined);
+async function terminateProcess(child, tempDir) {
+  try {
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    const exit = once(child, "exit");
+    child.kill("SIGTERM");
+    const exited = await Promise.race([exit.then(() => true), delay(2500).then(() => false)]);
+    if (!exited && child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+      await Promise.race([exit, delay(1000)]).catch(() => undefined);
+    }
+  } finally {
+    // A successful Windows launcher exit can leave the real browser alive.
+    await cleanupRelaunchedTestChrome(tempDir);
   }
 }
 

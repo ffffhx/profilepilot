@@ -78,6 +78,8 @@ export function parseBrowserCliRoute(input: string[]): { connection: "extension"
         const value = input[++index];
         if (!value || value.startsWith("--")) invalid(`${name} 需要参数。`);
         args.push(value);
+      } else if (arg === "--no-auto-dialog" && ["true", "false"].includes(input[index + 1])) {
+        args.push(input[++index]);
       }
     }
   }

@@ -5,9 +5,13 @@ const { mkdtempSync, rmSync } = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const vm = require("node:vm");
+const { loadCli } = require("./cli-test-build.cjs");
 
-const { BrowserGatewayControlPlane } = require("../dist/main/browser-gateway-control.js");
-const { BrowserGatewayServer, isRawCdpMethodAllowed } = require("../dist/main/browser-gateway-server.js");
+const { BrowserGatewayControlPlane } = loadCli("src/main/browser-gateway-control.ts");
+const { BrowserGatewayServer, isRawCdpMethodAllowed } = loadCli("src/main/browser-gateway-server.ts");
+const { captchaBrowser } = loadCli("src/main/captcha/browser.ts");
+const { waitForCaptchaResponse } = loadCli("src/main/captcha/wait.ts");
 
 class FakeBackend {
   constructor() {
@@ -60,6 +64,157 @@ async function makeHarness(serverOptions = {}, kind = "browser") {
       rmSync(home, { recursive: true, force: true });
     }
   };
+}
+
+test("background input requests a frame on driver and guarded CDP routes without synthetic ACK or focus", async () => {
+  for (const raw of [false, true]) {
+    const h = await makeHarness();
+    let pendingInput;
+    try {
+      const reply=(m,result={})=>queueMicrotask(()=>h.backend.emit(JSON.stringify({id:m.id,sessionId:m.sessionId,result})));
+      h.backend.onSend=text=>{
+        const m=JSON.parse(text);
+        if(m.method==='Input.dispatchMouseEvent'){pendingInput=m;return;}
+        if(m.method==='Page.captureScreenshot'){
+          assert.ok(pendingInput,'frame requested after the input');
+          assert.equal(m.sessionId,pendingInput.sessionId);
+          assert.equal(m.params.clip,undefined,'render pulses must not resize Chromium views');
+          assert.equal(m.params.fromSurface,true);
+          assert.equal(m.params.captureBeyondViewport,false);
+          reply(pendingInput,{actualChromeAck:true});pendingInput=null;reply(m,{data:'discarded'});return;
+        }
+        reply(m,m.method==='Target.getTargets'?{targetInfos:[{targetId:'page',type:'page',title:'Fixture',url:'https://example.test'}]}:m.method==='Target.attachToTarget'?{sessionId:'flat'}:{});
+      };
+      const acquired=h.control.acquire({publicPort:h.port,sessionId:'input',daemonInstanceId:'driver'});
+      let result;
+      if(raw){result=await h.gateway.callRaw({publicPort:h.port,sessionId:'input',daemonInstanceId:'driver',targetId:'page',method:'Input.dispatchMouseEvent',params:{type:'mouseMoved',x:10,y:20},timeoutMs:500});}
+      else {
+        const ws=await openWebSocket(`ws://127.0.0.1:${h.port}/devtools/browser/gateway?ticket=${encodeURIComponent(acquired.ticket)}`);
+        let response=nextMessage(ws);ws.send(JSON.stringify({id:1,method:'Target.attachToTarget',params:{targetId:'page',flatten:true}}));await response;
+        response=nextMessage(ws);ws.send(JSON.stringify({id:2,method:'Input.dispatchMouseEvent',params:{type:'mouseMoved',x:10,y:20},sessionId:'flat'}));result=(await response).result;ws.close();
+      }
+      assert.deepEqual(result,{actualChromeAck:true});
+      const methods=h.backend.sent.map(JSON.parse).map(m=>m.method);
+      assert.equal(methods.filter(m=>m==='Input.dispatchMouseEvent').length,1);
+      assert.ok(!methods.some(m=>['Page.bringToFront','Target.activateTarget','Emulation.setFocusEmulationEnabled'].includes(m)));
+    } finally {await h.cleanup();}
+  }
+});
+
+test("input frames coalesce during a burst and stop after takeover without masking input errors", async () => {
+  const h=await makeHarness();let capture, captureCount=0;
+  const reply=(m,payload={result:{}})=>queueMicrotask(()=>h.backend.emit(JSON.stringify({id:m.id,sessionId:m.sessionId,...payload})));
+  try {
+    h.backend.onSend=text=>{
+      const m=JSON.parse(text);
+      if(m.method==='Target.attachToTarget')return reply(m,{result:{sessionId:'flat'}});
+      if(m.method==='Page.captureScreenshot'){capture=m;captureCount++;return;}
+      if(m.method==='Input.dispatchMouseEvent')return reply(m,{error:{code:-32000,message:'actual input failure'}});
+      reply(m);
+    };
+    const lease=h.control.acquire({publicPort:h.port,sessionId:'frames',daemonInstanceId:'driver'});
+    const ws=await openWebSocket(`ws://127.0.0.1:${h.port}/devtools/browser/gateway?ticket=${encodeURIComponent(lease.ticket)}`);
+    let response=nextMessage(ws);ws.send(JSON.stringify({id:1,method:'Target.attachToTarget',params:{targetId:'page',flatten:true}}));await response;
+    for(const id of [2,3]){
+      response=nextMessage(ws);ws.send(JSON.stringify({id,method:'Input.dispatchMouseEvent',sessionId:'flat',params:{type:'mouseMoved',x:id,y:id}}));
+      assert.equal((await response).error.message,'actual input failure');
+    }
+    assert.equal(captureCount,1);
+    h.control.delegateToUser('frames','user_takeover');
+    reply(capture,{result:{data:'discarded'}});
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(captureCount,1,'no queued rendering after control changes');
+    ws.close();
+  } finally {await h.cleanup();}
+});
+
+// Complete, independently encoded PNG files, not fabricated IHDR headers.
+// Keeping these fixtures inline avoids image-library or platform dependencies.
+const screenshotPngFixtures = {
+  onePixel: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAANSURBVBhXY0iZ+vY/AAYtAuY09dZ/AAAAAElFTkSuQmCC",
+  twoPixels: "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAARSURBVBhXY0iZ+vY/CDPAGABj9AuVOvfRrAAAAABJRU5ErkJggg==",
+  normal: "iVBORw0KGgoAAAANSUhEUgAAACAAAAAYCAYAAACbU/80AAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAAuSURBVEhLY0iZ+vb/QGIGdAF641EHjDpg1AGjDhh1wKgDRh0w6oBRB4w6YNQBABY2r3kHmyLXAAAAAElFTkSuQmCC",
+  narrow: "iVBORw0KGgoAAAANSUhEUgAAAAIAAAADCAYAAAC56t6BAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAARSURBVBhXY0iZ+vY/CDNgMADkFRFfhZFg+QAAAABJRU5ErkJggg=="
+};
+
+for (const route of ["driver", "raw"]) {
+  test(`Gateway ${route} rejects collapsed screenshots and preserves valid captures`, async (t) => {
+    const h = await makeHarness();
+    let ws;
+    let screenshotResult;
+    let requestId = 0;
+    const screenshotRequests = [];
+    try {
+      h.backend.onSend = (text) => {
+        const message = JSON.parse(text);
+        let result = {};
+        if (message.method === "Target.getTargets") {
+          result = { targetInfos: [{ targetId: "page", type: "page", title: "Screenshot fixture", url: "https://example.test" }] };
+        } else if (message.method === "Target.attachToTarget") {
+          result = { sessionId: "flat-screenshot" };
+        } else if (message.method === "Page.captureScreenshot") {
+          screenshotRequests.push(message);
+          result = screenshotResult;
+        }
+        queueMicrotask(() => h.backend.emit(JSON.stringify({ id: message.id, sessionId: message.sessionId, result })));
+      };
+      const acquired = h.control.acquire({ publicPort: h.port, sessionId: "screenshots", daemonInstanceId: "driver" });
+      if (route === "driver") {
+        ws = await openWebSocket(`ws://127.0.0.1:${h.port}/devtools/browser/gateway?ticket=${encodeURIComponent(acquired.ticket)}`);
+        const response = nextMessage(ws);
+        ws.send(JSON.stringify({ id: ++requestId, method: "Target.attachToTarget", params: { targetId: "page", flatten: true } }));
+        assert.deepEqual((await response).result, { sessionId: "flat-screenshot" });
+      }
+
+      const scenarios = [
+        { name: "default PNG rejects a collapsed 1x1 viewport", data: screenshotPngFixtures.onePixel, params: {}, rejected: true },
+        { name: "explicit PNG rejects a collapsed 2x2 viewport", data: screenshotPngFixtures.twoPixels, params: { format: "png" }, rejected: true },
+        { name: "an intentional 1x1 crop is returned intact", data: screenshotPngFixtures.onePixel, params: { format: "png", clip: { x: 0, y: 0, width: 1, height: 1, scale: 1 } } },
+        { name: "an intentional crop with a 2x2 bitmap is returned intact", data: screenshotPngFixtures.twoPixels, params: { format: "png", clip: { x: 5, y: 7, width: 1, height: 1, scale: 2 } } },
+        { name: "a normal 32x24 PNG is returned intact", data: screenshotPngFixtures.normal, params: { format: "png", fromSurface: true, captureBeyondViewport: false } },
+        { name: "a narrow 2x3 PNG is not mistaken for a collapsed viewport", data: screenshotPngFixtures.narrow, params: { format: "png" } }
+      ];
+      for (const scenario of scenarios) {
+        await t.test(scenario.name, async () => {
+          screenshotResult = { data: scenario.data };
+          const before = screenshotRequests.length;
+          if (route === "driver") {
+            const response = nextMessage(ws);
+            const id = ++requestId;
+            ws.send(JSON.stringify({ id, method: "Page.captureScreenshot", params: scenario.params, sessionId: "flat-screenshot" }));
+            const message = await response;
+            assert.equal(message.id, id, "the screenshot response retains its caller's request id");
+            assert.equal(message.sessionId, "flat-screenshot");
+            if (scenario.rejected) {
+              assert.equal(message.result, undefined, "a failed observation must not expose image data as success");
+              assert.equal(message.error.code, -32000);
+              assert.match(message.error.message, /SCREENSHOT_INVALID_SIZE/);
+            } else {
+              assert.equal(message.error, undefined);
+              assert.deepEqual(message.result, screenshotResult);
+            }
+          } else {
+            const capture = () => h.gateway.callRaw({
+              publicPort: h.port,
+              sessionId: "screenshots",
+              daemonInstanceId: "driver",
+              targetId: "page",
+              method: "Page.captureScreenshot",
+              params: scenario.params,
+              timeoutMs: 500
+            });
+            if (scenario.rejected) await assert.rejects(capture, /SCREENSHOT_INVALID_SIZE/);
+            else assert.deepEqual(await capture(), screenshotResult);
+          }
+          assert.equal(screenshotRequests.length, before + 1, "invalid observations are not silently recaptured");
+          assert.deepEqual(screenshotRequests.at(-1).params, scenario.params, "the caller's crop and capture options reach Chrome unchanged");
+        });
+      }
+    } finally {
+      ws?.close();
+      await h.cleanup();
+    }
+  });
 }
 
 test("Electron routes virtualize focus and webview activation and cannot create or close the application", async () => {
@@ -1199,6 +1354,105 @@ test("Gateway Raw CDP prefers the Agent Session's last attached target", async (
       "Target.detachFromTarget"
     ]);
     assert.equal(sent[1].params.targetId, "page-affinity");
+    ws.close();
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("OOPIF input preserves page affinity and captcha wait evaluates that page instead of the first tab", async () => {
+  const changes = [];
+  const h = await makeHarness({ onAgentTargetChange: (_port, change) => changes.push(change) });
+  const targets = [
+    { targetId: "initial-blank", type: "page", url: "about:blank", title: "" },
+    { targetId: "captcha-page", type: "page", url: "https://demo.test/captcha", title: "CAPTCHA demo" },
+    { targetId: "challenge-frame", type: "iframe", url: "https://challenge.test/", title: "Challenge" },
+    { targetId: "nested-frame", type: "iframe" },
+    { targetId: "unparented-frame", type: "iframe" }
+  ];
+  const context = (target) => vm.createContext({
+    window: {}, location: { href: target.url || "about:blank" },
+    document: { documentElement: { matches: () => false, querySelectorAll: () => target.targetId === "captcha-page"
+      ? [{ name: "h-captcha-response", id: "h-captcha-response-fixture", value: "" }]
+      : [] } }
+  });
+  const documents = new Map(targets.map(target => [target.targetId, context(target)]));
+  const attachedTargets = new Map();
+  const evaluatedTargets = [];
+  let nextAttach = 0;
+  try {
+    const reply = (message, result = {}) => queueMicrotask(() => h.backend.emit(JSON.stringify({
+      id: message.id, sessionId: message.sessionId, result
+    })));
+    h.backend.onSend = text => {
+      const message = JSON.parse(text);
+      if (message.method === "Target.getTargets") return reply(message, { targetInfos: targets });
+      if (message.method === "Target.attachToTarget") {
+        const sessionId = `attached-${++nextAttach}`;
+        attachedTargets.set(sessionId, message.params.targetId);
+        if (message.params.targetId === "challenge-frame") {
+          // Explicit reattach replies must retain the ancestry from the event.
+          queueMicrotask(() => h.backend.emit(JSON.stringify({
+            method: "Target.attachedToTarget", sessionId: "attached-1",
+            params: { sessionId, targetInfo: targets[2], waitingForDebugger: false }
+          })));
+        }
+        return reply(message, { sessionId });
+      }
+      if (message.method === "Runtime.evaluate" && message.params.expression.includes("__profilepilotCaptchaWaitV1")) {
+        const target = attachedTargets.get(message.sessionId);
+        evaluatedTargets.push(target);
+        return reply(message, { result: { value: vm.runInContext(message.params.expression, documents.get(target)) } });
+      }
+      reply(message);
+    };
+    const sessionId = "oopif-captcha", daemonInstanceId = "oopif-driver";
+    const acquired = h.control.acquire({ publicPort: h.port, sessionId, daemonInstanceId });
+    const ws = await openWebSocket(`ws://127.0.0.1:${h.port}/devtools/browser/gateway?ticket=${encodeURIComponent(acquired.ticket)}`);
+    let id = 0;
+    const command = async (method, params, cdpSessionId) => {
+      const response = nextMessage(ws);
+      ws.send(JSON.stringify({ id: ++id, method, params, sessionId: cdpSessionId }));
+      const result = await response;
+      assert.equal(result.error, undefined);
+      return result;
+    };
+    await command("Target.attachToTarget", { targetId: "captcha-page", flatten: true });
+    await command("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true });
+    for (const [target, cdpSessionId, parentSessionId] of [
+      [targets[2], "challenge-flat", "attached-1"],
+      [targets[3], "nested-flat", "challenge-flat"],
+      [targets[4], "unparented-flat", undefined]
+    ]) {
+      const event = nextMessage(ws);
+      h.backend.emit(JSON.stringify({
+        method: "Target.attachedToTarget", sessionId: parentSessionId,
+        params: { sessionId: cdpSessionId, targetInfo: target, waitingForDebugger: false }
+      }));
+      await event;
+      await command("Input.dispatchMouseEvent", { type: "mousePressed", x: 10, y: 20, button: "left", clickCount: 1 }, cdpSessionId);
+      const forwarded = h.backend.sent.map(JSON.parse).filter(m => m.method === "Input.dispatchMouseEvent").at(-1);
+      assert.equal(forwarded.sessionId, cdpSessionId, "input must still reach the original iframe session");
+      assert.equal((await h.gateway.getAgentTarget(h.port, sessionId))?.targetId, "captcha-page",
+        "status must not clear the page affinity after iframe input");
+    }
+    const reattach = collectMessages(ws, 2);
+    ws.send(JSON.stringify({ id: ++id, method: "Target.attachToTarget", params: { targetId: "challenge-frame", flatten: true } }));
+    await reattach;
+    assert.equal((await h.gateway.getAgentTarget(h.port, sessionId))?.targetId, "captcha-page");
+    const browser = captchaBrowser({ connection: "gateway", port: h.port, sessionId }, { HOME: h.home }, {
+      identity: () => daemonInstanceId,
+      gateway: async request => request.action === "status"
+        ? { state: h.control.snapshot() }
+        : { result: await h.gateway.callRaw(request) }
+    });
+    const result = await waitForCaptchaResponse(browser, { timeout: 0 });
+    assert.equal(result.status, "pending", "the page contains an empty response field; blank/iframe documents do not");
+    assert.equal(result.kind, "hcaptcha");
+    assert.equal(result.verified, false);
+    assert.deepEqual(evaluatedTargets, ["captcha-page"]);
+    assert.ok(changes.every(change => !change || change.targetId === "captcha-page"),
+      "no iframe or fallback blank page may become the Agent's tab target");
     ws.close();
   } finally {
     await h.cleanup();

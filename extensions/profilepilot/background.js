@@ -14,7 +14,7 @@ const taskTabs = new Map();
 // Creation marks last for this Chrome session, including after a task finishes.
 const createdTabs = new Set(), logoTabs = new Set(), logoUpdates = new Map();
 const appliedLogos = new Map();
-// One native group per task/window, reused for every lifecycle state. Chrome
+// Tasks retain their own states but share one native group per window. Chrome
 // groups cannot span windows; never move or unpin a user's tab to show status.
 const taskGroups = new Map();
 let groupQueue = Promise.resolve();
@@ -37,50 +37,102 @@ function taskPhase(status) {
 function saveTaskGroups() {
   return chrome.storage.session.set({ taskGroups: { profileId: config?.profileId, tasks: [...taskGroups] } });
 }
+const GROUP_PRIORITY = ['failed', 'waiting', 'paused', 'running', 'cancelled', 'completed'];
+const groupable = tab => tab && !tab.incognito && !tab.pinned && usable(tab.url) && Number.isInteger(tab.windowId);
+function groupOwner(tab) {
+  return [...taskGroups].find(([, record]) => record.groups[tab.windowId] === tab.groupId && record.enrolled.includes(tab.id));
+}
 function syncTaskGroups() {
   if (!chrome.tabs.group || !chrome.tabGroups?.update) return Promise.resolve();
   groupQueue = groupQueue.catch(() => {}).then(async () => {
+    const connection = config;
+    const currentConnection = () => config === connection;
+    const windowGroups = new Map(), knownGroups = new Map();
+    // Membership validates stored IDs. Never discover groups by their title:
+    // a similarly named user group is not ours to merge or recolor.
     for (const [id, record] of taskGroups) {
-      const current = () => taskGroups.get(id) === record;
-      // Only a live task may add tabs. Completed groups remain where they are;
-      // dragging a tab out by hand is respected.
+      for (const [windowId, groupId] of Object.entries(record.groups)) {
+        const group = await chrome.tabGroups.get(groupId).catch(() => null);
+        const members = group ? await chrome.tabs.query({ groupId }).catch(() => []) : [];
+        if (!currentConnection()) return;
+        if (taskGroups.get(id) !== record) break;
+        if (!group || group.shared || group.windowId !== Number(windowId) || !members.some(t => record.enrolled.includes(t.id))) {
+          delete record.groups[windowId]; continue;
+        }
+        knownGroups.set(groupId, group);
+        if (!windowGroups.has(group.windowId)) windowGroups.set(group.windowId, groupId);
+      }
+    }
+    // Migrate previous per-task groups, moving only their tracked members.
+    // Tabs dragged out by the user and unrelated tabs in those groups stay put.
+    for (const [groupId, group] of knownGroups) {
+      const target = windowGroups.get(group.windowId);
+      if (target === groupId) continue;
+      const members = await chrome.tabs.query({ groupId }).catch(() => []);
+      if (!currentConnection()) return;
+      const tabIds = members.filter(t => groupable(t) && groupOwner(t)).map(t => t.id);
+      if (!tabIds.length) continue;
+      try {
+        await chrome.tabs.group({ groupId: target, tabIds });
+        if (!currentConnection()) return;
+        for (const record of taskGroups.values()) if (record.enrolled.some(id => tabIds.includes(id))) record.groups[group.windowId] = target;
+      } catch { /* Closing or dragged tabs can be reconciled on the next sync. */ }
+    }
+    for (const [id, record] of taskGroups) {
+      const current = () => currentConnection() && taskGroups.get(id) === record;
+      // Only a live task may enroll new tabs; historical membership is visual
+      // bookkeeping, never permission to control another task's pages.
       const tabs = id === sessionId ? [...allowedTabs] : [];
       for (const tabId of tabs) {
         if (!current() || record.enrolled.includes(tabId)) continue;
         const tab = await chrome.tabs.get(tabId).catch(() => null);
         if (!current() || sessionId !== id || !allowedTabs.has(tabId)) continue;
-        if (!tab || tab.incognito || tab.pinned || !usable(tab.url) || !Number.isInteger(tab.windowId)) continue;
-        let groupId = record.groups[tab.windowId];
+        if (!groupable(tab)) continue;
+        let groupId = windowGroups.get(tab.windowId);
         const group = Number.isInteger(groupId) ? await chrome.tabGroups.get(groupId).catch(() => null) : null;
         if (!current() || sessionId !== id || !allowedTabs.has(tabId)) continue;
         // Validate membership as well as the ID before reusing a stored group.
         const members = group ? await chrome.tabs.query({ groupId }).catch(() => []) : [];
         if (!current() || sessionId !== id || !allowedTabs.has(tabId)) continue;
-        if (!group || group.windowId !== tab.windowId || group.shared || !members.some(t => record.enrolled.includes(t.id))) groupId = undefined;
+        if (!group || group.windowId !== tab.windowId || group.shared || !members.some(t => groupOwner(t))) groupId = undefined;
         try {
           if (groupId === undefined) {
             groupId = await chrome.tabs.group({ tabIds: [tabId], createProperties: { windowId: tab.windowId } });
             if (!current()) continue;
-            record.groups[tab.windowId] = groupId;
           } else if (tab.groupId !== groupId) await chrome.tabs.group({ groupId, tabIds: [tabId] });
           if (!current()) continue;
+          windowGroups.set(tab.windowId, groupId);
+          record.groups[tab.windowId] = groupId;
           record.enrolled.push(tabId);
-          // A tab belongs to at most one task group. Do not let a completed
-          // task recolor a group that a newer task now owns.
+          // A tab's displayed state belongs to its most recent task only.
           for (const [otherId, other] of taskGroups) if (otherId !== id) other.enrolled = other.enrolled.filter(t => t !== tabId);
         } catch { /* Pinned, closing or dragged tabs must not fail page actions. */ }
       }
-      for (const [windowId, groupId] of Object.entries(record.groups)) {
-        if (!current()) break;
-        const group = await chrome.tabGroups.get(groupId).catch(() => null);
-        const members = group ? await chrome.tabs.query({ groupId }).catch(() => []) : [];
-        if (!current()) break;
-        if (!group || group.shared || !members.some(t => record.enrolled.includes(t.id))) { delete record.groups[windowId]; continue; }
-        const visual = GROUP_STATES[record.phase] || GROUP_STATES.paused;
-        const title = `ProfilePilot${record.title ? ' · ' + record.title : ''} · ${visual.label}`;
-        if (group.color !== visual.color || group.title !== title) await chrome.tabGroups.update(groupId, { color: visual.color, title }).catch(() => {});
-      }
     }
+    // Chrome has one color per group. Count tabs by their own task state and
+    // prefer the current task's color only in windows containing its members.
+    const groupIds = new Set([...taskGroups.values()].flatMap(record => Object.values(record.groups)));
+    for (const groupId of groupIds) {
+      const group = await chrome.tabGroups.get(groupId).catch(() => null);
+      const members = group ? await chrome.tabs.query({ groupId }).catch(() => []) : [];
+      if (!currentConnection()) return;
+      if (!group || group.shared) continue;
+      const counts = new Map(); let activePhase;
+      for (const tab of members) {
+        const owner = groupOwner(tab);
+        if (!owner) continue;
+        const [id, record] = owner;
+        counts.set(record.phase, (counts.get(record.phase) || 0) + 1);
+        if (id === sessionId) activePhase = record.phase;
+      }
+      const phase = activePhase || GROUP_PRIORITY.find(value => counts.has(value));
+      if (!phase) continue;
+      const order = [phase, ...GROUP_PRIORITY.filter(value => value !== phase && counts.has(value))];
+      const title = `ProfilePilot · ${order.map(value => `${GROUP_STATES[value].label} ${counts.get(value)}`).join(' · ')}`;
+      const color = GROUP_STATES[phase].color;
+      if (group.color !== color || group.title !== title) await chrome.tabGroups.update(groupId, { color, title }).catch(() => {});
+    }
+    if (!currentConnection()) return;
     await saveTaskGroups();
   }).catch(() => {});
   return groupQueue;
@@ -722,10 +774,12 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 });
 chrome.tabs.onUpdated.addListener((id, change) => {
   if (id === currentTab && (change.url || change.title)) void publish();
+  if (change.groupId !== undefined || change.pinned !== undefined) void syncTaskGroups();
   if (logoTabs.has(id) && (change.url || change.status === 'complete')) syncTabLogos(id);
 });
 chrome.tabs.onReplaced.addListener((addedId, removedId) => {
   for (const record of taskGroups.values()) record.enrolled = record.enrolled.map(id => id === removedId ? addedId : id);
+  void syncTaskGroups();
   if (createdTabs.delete(removedId)) createdTabs.add(addedId);
   if (logoTabs.delete(removedId)) logoTabs.add(addedId);
   appliedLogos.delete(removedId);

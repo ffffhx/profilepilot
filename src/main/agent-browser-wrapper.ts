@@ -180,6 +180,11 @@ export function sessionFromAgentBrowserArgs(args: string[], env: NodeJS.ProcessE
 }
 
 export function agentBrowserCommandName(args: string[]): string | undefined {
+  const index = agentBrowserCommandIndex(args);
+  return index === undefined ? undefined : args[index];
+}
+
+function agentBrowserCommandIndex(args: string[]): number | undefined {
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (!arg) {
@@ -190,7 +195,7 @@ export function agentBrowserCommandName(args: string[]): string | undefined {
     }
     if (arg.startsWith("--")) {
       const [option] = arg.split("=", 1);
-      if (!arg.includes("=") && OPTIONS_WITH_VALUES.has(option)) {
+      if (!arg.includes("=") && (OPTIONS_WITH_VALUES.has(option) || noAutoDialogConsumesValue(args, index))) {
         index += 1;
       }
       continue;
@@ -198,9 +203,28 @@ export function agentBrowserCommandName(args: string[]): string | undefined {
     if (arg.startsWith("-")) {
       continue;
     }
-    return arg;
+    return index;
   }
   return undefined;
+}
+
+// agent-browser 0.34 parses mouse coordinates as i32 on every platform. CSS
+// coordinates derived from a scaled screenshot can be fractional; validate and
+// round before acquiring control, rather than failing halfway through a drag.
+export function normalizeAgentBrowserMouseArgs(args: string[]): string[] {
+  const index = agentBrowserCommandIndex(args);
+  if (index === undefined || args[index] !== "mouse" || args[index + 1] !== "move" || isAgentBrowserHelpInvocation(args)) return args;
+  const result = [...args];
+  for (const offset of [2, 3]) {
+    const value = args[index + offset];
+    const number = value && /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(value) ? Number(value) : NaN;
+    const rounded = Math.round(number);
+    if (!Number.isFinite(number) || rounded < -2147483648 || rounded > 2147483647) {
+      throw Object.assign(new Error("mouse move 需要两个有限的 CSS 坐标（x y）；小数会四舍五入到整数。"), { code: "BROWSER_MOUSE_INVALID_COORDINATES" });
+    }
+    result[index + offset] = String(rounded);
+  }
+  return result;
 }
 
 export function shouldCheckProfilePilotNotice(args: string[]): boolean {
@@ -229,6 +253,94 @@ export function managedGatewayAgentBrowserEnv(env: NodeJS.ProcessEnv): NodeJS.Pr
     }
   }
   return isolated;
+}
+
+function noAutoDialogConsumesValue(args: string[], index: number): boolean {
+  return args[index] === "--no-auto-dialog" && ["true", "false"].includes(args[index + 1]);
+}
+
+/** Keep this launch-time setting stable: changing it makes the native driver
+ * restart, and an action without --cdp would then launch an unrelated browser. */
+function prepareGatewayNoAutoDialog(
+  args: string[], env: NodeJS.ProcessEnv, sessionId: string, daemonInstanceId: string,
+  homeDir: string, connectionActive: boolean
+): { args: string[]; connectArgs: string[] } {
+  let requested: boolean | undefined;
+  const stripped: string[] = [];
+  const commandIndex = agentBrowserCommandIndex(args) ?? args.length;
+  const separator = args.indexOf("--");
+  const prefixEnd = separator < 0 ? commandIndex : Math.min(separator, commandIndex);
+  // Public CLI arguments after the verb are opaque page data (including text
+  // that is exactly "--no-auto-dialog"). Only normalize prefix options.
+  const prefix = args.slice(0, prefixEnd);
+  for (let index = 0; index < prefixEnd; index++) {
+    const arg = args[index];
+    if (arg === "--no-auto-dialog") {
+      requested = noAutoDialogConsumesValue(args, index) ? args[++index] === "true" : true;
+    } else {
+      stripped.push(arg);
+      if (OPTIONS_WITH_VALUES.has(arg) && index + 1 < args.length) stripped.push(args[++index]);
+    }
+  }
+  const envKey = Object.keys(env).find(key => process.platform === "win32"
+    ? key.toUpperCase() === "AGENT_BROWSER_NO_AUTO_DIALOG" : key === "AGENT_BROWSER_NO_AUTO_DIALOG");
+  const envValue = envKey === undefined ? undefined : env[envKey];
+  const explicit = requested !== undefined || envValue !== undefined;
+  const statePath = `${browserGatewayDaemonIdentityPath(sessionId, homeDir)}.${daemonInstanceId}.no-auto-dialog.json`;
+  const readSetting = (): boolean | undefined => {
+    try {
+      const state = JSON.parse(readFileSync(statePath, "utf8"));
+      if (state.daemonInstanceId === daemonInstanceId && typeof state.noAutoDialog === "boolean") return state.noAutoDialog;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    }
+    throw gatewayWrapperError("GATEWAY_DRIVER_CONFIG_UNKNOWN", "当前 Session 的 no-auto-dialog 配置记录不可用；未执行浏览器命令，请 complete 后使用新 Session。");
+  };
+  let pinned = readSetting();
+  // Do not guess a pre-upgrade driver's fingerprint. Ordinary implicit commands
+  // remain compatible, but an explicit setting requires a fresh known session.
+  if (pinned === undefined && connectionActive) {
+    if (explicit) throw gatewayWrapperError("GATEWAY_DRIVER_CONFIG_UNKNOWN", "当前活跃 Session 没有 no-auto-dialog 配置记录；未执行浏览器命令，请 complete 后使用新 Session 设置该选项。");
+    return { args, connectArgs: [] };
+  }
+  const desired = requested ?? (explicit || pinned === undefined
+    ? Boolean(envValue !== undefined && !["", "0", "false", "no"].includes(envValue.toLowerCase())) || configuredNoAutoDialog(prefix, env)
+    : pinned);
+  if (pinned === undefined) {
+    try {
+      // One immutable record per driver identity: concurrent first commands with
+      // different settings must not both start native drivers.
+      writeFileSync(statePath, JSON.stringify({ daemonInstanceId, noAutoDialog: desired }), { flag: "wx", mode: 0o600 });
+      pinned = desired;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      pinned = readSetting();
+    }
+  }
+  if (pinned !== desired) throw gatewayWrapperError(
+    "GATEWAY_DRIVER_CONFIG_CONFLICT",
+    `当前 Session 的 no-auto-dialog 已固定为 ${pinned}，不能改为 ${desired}；未执行浏览器命令，请 complete 后使用新 Session 更改设置。`
+  );
+  const canonical = ["--no-auto-dialog", String(pinned)];
+  stripped.push(...canonical, ...args.slice(prefixEnd));
+  return { args: stripped, connectArgs: canonical };
+}
+
+function configuredNoAutoDialog(args: string[], env: NodeJS.ProcessEnv): boolean {
+  const read = (file: string): boolean | undefined => {
+    try {
+      const value = JSON.parse(readFileSync(file, "utf8")).noAutoDialog;
+      return typeof value === "boolean" ? value : undefined;
+    } catch { return undefined; }
+  };
+  // agent-browser v0.34: explicit config replaces the default files; otherwise
+  // project settings override user settings. Rust dirs uses the Windows profile
+  // directory, while Unix honors HOME. Only this one setting is inspected here.
+  const explicitConfig = optionValue(args, "--config") ?? env.AGENT_BROWSER_CONFIG;
+  if (explicitConfig !== undefined) return read(explicitConfig) ?? false;
+  const nativeHome = process.platform === "win32" ? os.homedir() : env.HOME || os.homedir();
+  return read(path.join(process.cwd(), "agent-browser.json"))
+    ?? read(path.join(nativeHome, ".agent-browser", "config.json")) ?? false;
 }
 
 export function assertManagedGatewayLaunchOptions(args: string[]): void {
@@ -527,12 +639,16 @@ export async function runAgentBrowserWrapper(
 ): Promise<number> {
   let effectiveArgs = args;
   try {
-    effectiveArgs = resolveProfilePilotUseArgs(args, env) || args;
+    effectiveArgs = normalizeAgentBrowserMouseArgs(resolveProfilePilotUseArgs(args, env) || args);
   } catch (error) {
-    process.stderr.write(formatGatewayFailure(error, args, env));
     const errorCode = typeof error === "object" && error !== null && "code" in error
       ? String(error.code)
       : "";
+    if (errorCode === "BROWSER_MOUSE_INVALID_COORDINATES") {
+      process.stderr.write(`${JSON.stringify({ success: false, code: errorCode, error: (error as Error).message, hard_stop: false })}\n`);
+      return PROFILEPILOT_AGENT_BROWSER_USAGE_EXIT_CODE;
+    }
+    process.stderr.write(formatGatewayFailure(error, args, env));
     return errorCode === "PROFILEPILOT_SESSION_REQUIRED" || errorCode === "PROFILEPILOT_PROFILE_NAME_REQUIRED"
       ? PROFILEPILOT_AGENT_BROWSER_USAGE_EXIT_CODE
       : PROFILEPILOT_AGENT_BROWSER_HARD_STOP_EXIT_CODE;
@@ -2319,6 +2435,8 @@ export async function prepareGatewayTransport(
   }, { homeDir, timeoutMs: 3_000 });
   const webSocketUrl = typeof acquire.webSocketUrl === "string" ? acquire.webSocketUrl : "";
   if (!webSocketUrl) throw gatewayWrapperError("GATEWAY_INVALID_RESPONSE", "Gateway 没有返回 WebSocket Ticket");
+  const dialogSetting = prepareGatewayNoAutoDialog(args, env, sessionId, daemonInstanceId, homeDir, acquire.connectionActive === true);
+  args = dialogSetting.args;
   const command = agentBrowserCommandName(args);
   if (command === "connect") {
     return replaceConnectTarget(stripCdpOption(args), webSocketUrl);
@@ -2335,7 +2453,7 @@ export async function prepareGatewayTransport(
       }
       const connected = await spawnRealAgentBrowser(
         executable,
-        ["--session", sessionId, "connect", attemptWebSocketUrl],
+        ["--session", sessionId, ...dialogSetting.connectArgs, "connect", attemptWebSocketUrl],
         gatewayChildEnv,
         null,
         options.quietConnect ? "ignore" : "inherit",
@@ -3173,7 +3291,7 @@ function positionalArgs(args: string[]): string[] {
     }
     if (arg.startsWith("--")) {
       const [option] = arg.split("=", 1);
-      if (!arg.includes("=") && OPTIONS_WITH_VALUES.has(option)) {
+      if (!arg.includes("=") && (OPTIONS_WITH_VALUES.has(option) || noAutoDialogConsumesValue(args, index))) {
         index += 1;
       }
       continue;
@@ -3201,7 +3319,7 @@ function positionalArgIndices(args: string[]): number[] {
     }
     if (arg.startsWith("--")) {
       const [option] = arg.split("=", 1);
-      if (!arg.includes("=") && OPTIONS_WITH_VALUES.has(option)) {
+      if (!arg.includes("=") && (OPTIONS_WITH_VALUES.has(option) || noAutoDialogConsumesValue(args, index))) {
         index += 1;
       }
       continue;

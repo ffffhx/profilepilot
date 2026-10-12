@@ -9,9 +9,9 @@ import type { GatewayDriverKind } from "./browser-gateway-control";
 import { isRawCdpMethodAllowed } from "./browser-gateway-policy";
 
 const DEFAULT_TIMEOUT_MS = 3_000;
-// Version 16 adds protected Electron renderer connections.
+// Version 18 retains top-level page affinity after cross-origin iframe input.
 // Replace an older idle daemon, while preserving pipes for open user browsers.
-export const BROWSER_GATEWAY_PROTOCOL_VERSION = 16;
+export const BROWSER_GATEWAY_PROTOCOL_VERSION = 18;
 
 export type GatewayControlRequest =
   | { action: "ping" }

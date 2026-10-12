@@ -40,6 +40,60 @@ ppilot browser --session TASK --cdp PORT screenshot challenge.png
 
 Open the returned screenshot artifact with the host's image-viewing tool. Use the current snapshot's refs with the normal `fill` / `click` commands. Gateway snapshots do not use the extension's `version` protocol. Refresh the snapshot/screenshot when the page changes and after each input; never transplant extension action JSON into this route. For coordinate or iframe support, read the installed driver's help/core skill and use only supported commands through this same connection.
 
+Prepare the connection, supported input commands, action script and coordinate
+conversion before opening a timed challenge. Convert screenshot pixels to CSS
+viewport coordinates using the actual capture dimensions; do not assume
+devicePixelRatio is always the capture scale. Gateway `mouse move X Y` accepts
+finite decimal coordinates and rounds them for the bundled driver. Validate a
+finite drag trajectory before pressing the button; never pause with the mouse
+held down to write code or investigate another issue.
+
+Keep one active timed challenge in focus until its result is observed. Use the
+compact loop: **capture → current Agent judges → guarded action immediately →
+fresh result observation**. Prepare reusable helpers before the challenge;
+avoid switching sites or doing unrelated analysis between capture and input.
+A continuous drag is one short, previously validated trajectory, followed by
+a fresh observation. It is not permission to batch guesses from a stale image:
+if the question or tiles change, observe again before the next answer. Stop on
+control loss or an unknown input outcome; do not replay the trajectory.
+
+For timed testing, record capture start/end, action start/end, submit start/end
+and result-observed times with their evidence, plus the chosen operation budget.
+Measure that budget from capture completion to submission start (or the final
+answer input for automatic verification). It is an execution target, not the
+website's challenge TTL; record a site TTL only when the site provides it.
+Missing results, a reloaded question or an expired challenge remain separate
+outcomes, not evidence of an incorrect answer or a successful solve.
+
+Keep the first clear capture time for each question as well as the latest
+observation time. Re-observing the same question updates UI freshness, not the
+question's elapsed time or submission deadline. Reset a per-question budget
+only after observing a new question. Report both total question time and each
+step's latency for multi-page puzzles; do not present a short final step as the
+duration of the whole attempt. An exceeded local deadline aborts submission;
+record the unsubmitted attempt separately before starting a fresh question.
+
+After submitting a visible puzzle, let its asynchronous response settle:
+
+```sh
+ppilot browser --session TASK --cdp PORT captcha wait --timeout 15000
+```
+
+The same `captcha wait` command works with the existing extension session prefix.
+It only observes main-document hCaptcha / Turnstile / reCAPTCHA / MTCaptcha
+response fields (MTCaptcha's standard field is `mtcaptcha-verifiedtoken`);
+use `--selector CSS` for a specific widget/form/response field if ambiguous.
+`response_present` means a credential is present, not that the website accepted
+it; a credential already present before the wait is not a new successful solve.
+`pending` or `not_detected` with `timedOut: true` means no final result was observed,
+not an incorrect answer. Navigation, response-field removal/replacement or a
+change to its identity/form/container ends the wait; take a fresh observation.
+This does not detect every new image puzzle in an unchanged iframe or response
+field, and does not infer acceptance/rejection from generic page wording.
+Never click a stale Verify ref after a challenge closes: it may now
+refer to a Terms link or another form button. Record tool errors, incomplete
+attempts, explicit rejection and verified success separately.
+
 ## Success, uncertainty and alternatives
 
 - A successful fill/click only confirms an input was sent. Observe the verification result or the user's intended destination before continuing or reporting success.

@@ -1,10 +1,11 @@
+import { patchBrowserDom } from "./dom";
 import { workspaceSwitcher, workspaceIdentityBar, refreshWorkspaceSwitcher } from "../workspace-switcher";
 import { pcControlTabs } from "../pc-control";
 import { positionProfileMenu } from "../profile-menu-layout";
 import { refreshSelectedBrowserPreview } from "./live-view";
-import { isBusyAction, renderToastBody } from "../busy";
-import { renderConfirmModal } from "../confirm";
-import { renderControlPreferencesModal } from "../control-preferences";
+import { isBusyAction, renderToastBody } from "./busy-view";
+import { renderConfirmModal } from "./confirm";
+import { renderControlPreferencesModal } from "./control-preferences";
 import { renderSyncPanel } from "./account-sync";
 import { renderAgentIntegrationPanel, renderOnboardingModal } from "./agent-integration";
 import { renderClonePoolModal } from "./clone-pool";
@@ -74,6 +75,7 @@ export function render(): void {
 
   if (store.selectedExternalDir && !store.state?.externalInstances.some(instance => instance.userDataDir === store.selectedExternalDir)) store.selectedExternalDir = null;
   if (!store.selectedExternalDir && profiles.length && !profiles.some(profile => profile.id === store.selectedId)) store.selectedId = profiles[0].id;
+  const modalKey = store.modal ? [store.modal.kind, "profileId" in store.modal ? store.modal.profileId : "", store.modal.kind === "control-preferences" ? store.modal.activeTab : ""].join(":") : "";
   const html = `
     ${workspaceSwitcher(store.workspace === "tools" ? "tools" : "browser")}
     ${workspaceIdentityBar()}
@@ -114,6 +116,7 @@ export function render(): void {
       </main>
       ${renderSyncPanel(profiles)}
     </div>`}
+    ${store.modal ? `<div data-dom-key="modal:${escapeHtml(modalKey)}">` : ""}
     ${store.modal?.kind === "new" ? renderNewModal() : ""}
     ${store.modal?.kind === "rename" ? renderRenameModal(store.modal.profileId) : ""}
     ${store.modal?.kind === "cdp" ? renderCdpModal(store.modal.profileId, store.modal.portSuggestion) : ""}
@@ -136,6 +139,7 @@ export function render(): void {
     ${store.modal?.kind === "live-zoom" ? renderLiveZoomModal(store.modal.profileId) : ""}
     ${store.modal?.kind === "extension-migration" ? renderExtensionMigrationModal(profiles) : ""}
     ${store.modal?.kind === "confirm" ? renderConfirmModal(store.modal) : ""}
+    ${store.modal ? "</div>" : ""}
   `;
 
   // 内容没变就别重刷 DOM：避免状态快照把正 hover 的节点换掉，造成 tooltip / :hover 闪烁。
@@ -143,36 +147,9 @@ export function render(): void {
     return;
   }
   lastMainHtml = html;
-  // Preserve an unsaved rename across busy/status/toast renders of the same form.
-  const renameForm = appRoot.querySelector<HTMLFormElement>("[data-rename-form]");
-  const renameInput = renameForm?.querySelector<HTMLInputElement>("#profile-rename");
-  const renameDraft = store.modal?.kind === "rename" && renameForm?.dataset.profileId === store.modal.profileId
-    ? renameInput?.value : undefined;
-  const expandedTools = [...appRoot.querySelectorAll<HTMLDetailsElement>(".tools-workspace details[id][open]")].map(node => node.id);
-  const preferencesInput = appRoot.querySelector<HTMLTextAreaElement>("#control-preferences-editor");
-  const preferencesFocus = preferencesInput && store.modal?.kind === "control-preferences" && preferencesInput.dataset.domain === store.modal.activeTab && document.activeElement === preferencesInput
-    ? { start: preferencesInput.selectionStart, end: preferencesInput.selectionEnd, direction: preferencesInput.selectionDirection, scroll: preferencesInput.scrollTop } : null;
-  const preferencesLocationOpen = appRoot.querySelector<HTMLDetailsElement>(".control-preferences-location")?.open;
   appRoot.className = "";
-  appRoot.innerHTML = html;
+  patchBrowserDom(appRoot, html);
   refreshWorkspaceSwitcher();
   refreshSelectedBrowserPreview();
   positionProfileMenu();
-  expandedTools.forEach(id => { const node = document.getElementById(id); if (node instanceof HTMLDetailsElement) node.open = true; });
-  if (preferencesLocationOpen) {
-    const location = appRoot.querySelector<HTMLDetailsElement>(".control-preferences-location");
-    if (location) location.open = true;
-  }
-  if (preferencesFocus) {
-    const input = appRoot.querySelector<HTMLTextAreaElement>("#control-preferences-editor");
-    if (input && !input.disabled) {
-      input.focus({ preventScroll: true });
-      input.setSelectionRange(preferencesFocus.start, preferencesFocus.end, preferencesFocus.direction);
-      input.scrollTop = preferencesFocus.scroll;
-    }
-  }
-  if (renameDraft !== undefined) {
-    const input = appRoot.querySelector<HTMLInputElement>("#profile-rename");
-    if (input) input.value = renameDraft;
-  }
 }

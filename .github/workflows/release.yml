@@ -73,6 +73,13 @@ jobs:
           path: release/*
           if-no-files-found: error
 
+      - name: Upload screen camera component
+        uses: actions/upload-artifact@v4
+        with:
+          name: profilepilot-screen-camera
+          path: dist/android/profilepilot-screen-camera.dex
+          if-no-files-found: error
+
   build:
     name: Build ${{ matrix.name }}
     needs: android
@@ -112,6 +119,12 @@ jobs:
 
       - name: Verify Electron runtime installation
         run: node node_modules/electron/install.js
+
+      - name: Download screen camera component
+        uses: actions/download-artifact@v4
+        with:
+          name: profilepilot-screen-camera
+          path: dist/android
 
       - name: Download companion APK
         uses: actions/download-artifact@v4

@@ -90,7 +90,7 @@ export async function startProfilePilotManagementServer(
       let maxResponseBytes = PROFILEPILOT_MANAGEMENT_MAX_MESSAGE_BYTES;
       try {
         const { command } = JSON.parse(line);
-        if (command?.action === "phone" && ["action", "wrapper-action"].includes(command.method)) maxResponseBytes = PROFILEPILOT_PHONE_MAX_RESPONSE_BYTES;
+        if (command?.action === "phone" && ["action", "wrapper-action", "camera-command", "camera-sources"].includes(command.method)) maxResponseBytes = PROFILEPILOT_PHONE_MAX_RESPONSE_BYTES;
         if (command?.action === "phone" && command.method === "basic-action") maxResponseBytes = PROFILEPILOT_PHONE_BASIC_MAX_RESPONSE_BYTES;
       } catch { /* handleRequestLine returns the normal invalid-request error */ }
       void handleRequestLine(line, token, options)

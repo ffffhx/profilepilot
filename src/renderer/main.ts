@@ -1,3 +1,4 @@
+import { onViewInvalidated } from "./view-events";
 import { installQuickLaunchRecorder } from "./quick-launch-recorder";
 import { profileApi } from "./api";
 import { workspaceHidden, onWorkspaceVisibilityChanged, navigateWorkspace } from "./workspace-lifecycle";
@@ -17,8 +18,10 @@ import { renderGlobalInstructionDiff } from "./render/modals";
 import { render } from "./render/render-root";
 import { applyState, invalidateExtensionMigrationDiff, loadState, markOnboardingSeen, refreshAgentIntegrationDiagnostic, refreshExtensionMigrationDiff, refreshGlobalInstructions, refreshProfileReadiness, repairClaudeInstructionShell, requestInputGuardPermission, saveGlobalInstruction, setMigrationSource, undoGlobalInstruction } from "./state-actions";
 import { appRoot, store } from "./state";
-import type { AgentOverlayRevealEvent, AgentTakeoverEvent, AppState, BrowserDriverKind, ProfileProxyConfig } from "./types";
+import type { AgentOverlayRevealEvent, AgentTakeoverEvent, AppState, BrowserDriverKind, ProfileProxyConfig } from "../shared/types";
 import { deleteButtonTitle, escapeHtml, formatErrorMessage, isWindowsCrossDataDirAccountSyncUnsupported, profileAgentControlClients } from "./util";
+
+onViewInvalidated(render);
 
 const MINI_TAKEOVER_NOTICE_MS = 5000;
 const MINI_TAKEOVER_CONFIRM_MS = 2800;
@@ -27,11 +30,10 @@ const EXTERNAL_PROFILE_ID_PREFIX = "external:";
 const miniTakeoverTimers = new Map<string, number>();
 let miniTakeoverConfirmTimer: number | null = null;
 let profileRevealHighlightTimer: number | null = null;
-let hoveringTooltip = false;
 let stateInteractionDragging = false;
 
 function browserDriverKind(value: string | undefined): BrowserDriverKind | null {
-  return value === "agent-browser" || value === "playwright-cli" || value === "chrome-devtools-mcp"
+  return value === "agent-browser"
     ? value
     : null;
 }
@@ -39,16 +41,9 @@ let pendingPushedState: AppState | null = null;
 let pushedStateTimer: number | null = null;
 
 function pushedStateApplyBlocked(): boolean {
-  return Boolean(
-    store.busy ||
-    store.modal ||
-    hoveringTooltip ||
-    stateInteractionDragging ||
-    store.openProfileMenuId ||
-    store.migrationTargetMenuOpen ||
-    store.accountSyncMenuOpen ||
-    store.clonePoolMenuOpen
-  );
+  // Keyed rendering preserves forms and menus. Only an in-flight local command
+  // or drag transaction needs to finish before applying an external snapshot.
+  return store.busy || stateInteractionDragging;
 }
 
 function flushPushedState(): void {
@@ -499,14 +494,14 @@ appRoot.addEventListener("click", (event) => {
       return;
     }
     void withBusy(async () => {
-      store.nativeExtensionAuthorization = { profileId, ...await window.tasks.authorizeNativeBrowser(profileId) };
+      store.nativeExtensionAuthorization = { profileId, ...await window.browserConnection.authorizeNativeBrowser(profileId) };
       await refreshNativeExtensionStatus();
     }, "已打开浏览器扩展安装与连接页面", { key: "connect-browser-extension", message: "正在准备扩展安装与连接…" });
     return;
   }
 
   if (action === "open-browser-extension-folder") {
-    void withBusy(() => window.tasks.openNativeExtensionFolder(), undefined, {
+    void withBusy(() => window.browserConnection.openNativeExtensionFolder(), undefined, {
       key: "open-browser-extension-folder", message: "正在打开扩展文件夹…"
     });
     return;
@@ -602,7 +597,7 @@ appRoot.addEventListener("click", (event) => {
     }
     const install = action === "install-agent-wrapper" || action === "install-agent-skill";
     const skill = action === "install-agent-skill" || action === "remove-agent-skill";
-    const label = tool === "agent-browser" ? "agent-browser" : tool === "playwright-cli" ? "Playwright CLI" : "Chrome DevTools MCP";
+    const label = "agent-browser";
     void withBusy(
       async () => {
         store.agentIntegrationDiagnostic = skill
@@ -2446,23 +2441,12 @@ appRoot.addEventListener("submit", (event) => {
   });
 });
 
-// 鼠标停在带 tooltip 的元素上时延后应用事件快照，避免实时状态变化重建正 hover 的节点。
-const TOOLTIP_HOVER_SELECTOR = ".action-tooltip, [data-tooltip], [title], .conn-pill, .conn-agent-action";
-document.addEventListener("mousemove", (event) => {
-  const target = event.target as Element | null;
-  hoveringTooltip = Boolean(target?.closest?.(TOOLTIP_HOVER_SELECTOR));
-});
-document.addEventListener("mouseleave", () => {
-  hoveringTooltip = false;
-  flushPushedState();
-});
-
 if (store.viewMode === "mini") {
   render();
 }
 
 if (store.viewMode === "main") {
-  const unsubscribeNativeExtension = window.tasks.onChanged(applyNativeExtensionSnapshot);
+  const unsubscribeNativeExtension = window.browserConnection.onChanged(applyNativeExtensionSnapshot);
   window.addEventListener("unload", unsubscribeNativeExtension, { once: true });
   void refreshNativeExtensionStatus();
 }

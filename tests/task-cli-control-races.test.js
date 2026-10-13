@@ -1,3 +1,4 @@
+const { readTaskRecords } = require('./helpers/task-records.cjs');
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { randomUUID } = require("node:crypto");
@@ -24,7 +25,7 @@ for (const kind of ["question", "handoff"]) {
       assert.equal(f.task.status, status);
       assert.equal(f.task.pending, pending);
       assert.equal(f.task.events.some(event => event.text === "old reply"), false);
-      assert.equal(JSON.parse(readFileSync(f.store.file, "utf8")).tasks[0].status, status);
+      assert.equal(readTaskRecords(f.store.file).tasks[0].status, status);
       if (interruption === "takeover") assert.notEqual(pending.id, original.id);
     });
   }
@@ -182,7 +183,7 @@ function fixture(t, state) {
     }
   });
   service.tick = async () => {};
-  service.publish();
+  service.publish(task);
   t.after(async () => {
     finishReturn();
     await service.close();

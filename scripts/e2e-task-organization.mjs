@@ -5,6 +5,7 @@ import path from 'node:path';
 import { launchProfilePilotE2e, repoRoot } from './e2e/lib/electron-driver.mjs';
 const require = createRequire(import.meta.url);
 const { TaskStore } = require('../dist/main/tasks/store');
+const { TaskRecords } = require('../dist/main/tasks/records');
 const ids = [];
 const app = await launchProfilePilotE2e({ env: { CPM_START_VIEW: 'tasks' }, prepareFixture: async ({ dataDir }) => {
   const store = new TaskStore(path.join(dataDir, 'browser-tasks'));
@@ -25,7 +26,7 @@ const waitMetadata = async (id, condition) => {
   for (let i = 0; i < 60; i++) {
     const task = await d.evaluate(`window.tasks.snapshot().then(s => s.tasks.find(t => t.id === ${JSON.stringify(id)}))`);
     if (condition(task)) {
-      await d.waitFor('#task-app[aria-busy="false"]', state => state.exists);
+      await d.waitFor('.task-operation-status [data-operation]', state => state.count === 0);
       return task;
     }
     await new Promise(resolve => setTimeout(resolve, 50));
@@ -37,10 +38,11 @@ try {
   await d.waitFor('.recent-task', state => state.count === 16);
   await d.domClick(`[data-task="${ids[0]}"]`);
   await openMenu(ids[1]);
-  assert.match(await d.evaluate('document.querySelector(".page-heading h1").textContent'), /小红书/);
+  assert.match(await d.evaluate('document.querySelector(".thread-heading h2").textContent'), /小红书/);
   await d.domClick('[data-menu-action="pin"]');
   await waitMetadata(ids[1], task => !!task.pinnedAt);
-  assert.equal(await d.evaluate(`document.querySelector('[data-task-group="pinned"] [data-task]').dataset.task`), ids[1]);
+  await d.waitFor(`[data-task="${ids[1]}"] .task-pin`);
+  assert.equal(await d.evaluate(`document.querySelector('.sidebar-recents [data-task]').dataset.task`), ids[1]);
   assert.equal(await d.evaluate('document.querySelectorAll(".recent-task").length'), 16);
   await openMenu(ids[1]);
   // Menu survives normal snapshots without closing or selecting another task.
@@ -56,11 +58,11 @@ try {
   await d.domInput('#task-title-input', '  快手 · <投递记录>  ');
   await d.domClick('.task-rename button[type="submit"]');
   await waitMetadata(ids[1], task => task.title === '快手 · <投递记录>');
-  assert.equal(await d.evaluate(`document.querySelector('${sidebar(ids[1])}').previousElementSibling.textContent.trim()`), '快手 · <投递记录>');
+  await d.waitFor(`[data-task="${ids[1]}"] .recent-title`, state => state.text === '快手 · <投递记录>');
   await openMenu(ids[1]); await d.domClick('[data-menu-action="archive"]');
   await waitMetadata(ids[1], task => !!task.archivedAt && !task.pinnedAt);
   assert.equal((await d.query(sidebar(ids[1]))).exists, false);
-  assert.match(await d.evaluate('document.querySelector(".page-heading h1").textContent'), /小红书/);
+  assert.match(await d.evaluate('document.querySelector(".thread-heading h2").textContent'), /小红书/);
   await d.domClick('[data-nav="history"]');
   await d.domClick('[data-task-scope="archived"]');
   assert.equal((await d.query('.task-list-entry')).count, 1);
@@ -110,7 +112,7 @@ try {
   await d.domClick('.task-confirm[open] [data-confirm-action]');
   await d.waitFor('.task-confirm', state => !state.exists);
   await d.waitFor(sidebar(ids[3]), state => !state.exists);
-  const persisted = JSON.parse(await readFile(path.join(app.dataDir, 'browser-tasks', 'tasks.json'), 'utf8'));
+  const persisted = new TaskRecords(path.join(app.dataDir, 'browser-tasks')).read();
   assert.equal(persisted.tasks.find(task => task.id === ids[1]).title, '快手 · <投递记录>');
   assert.equal(persisted.tasks.length, 15);
   console.log('PASS: sidebar groups, all tasks, pin/unpin, rename, archive/restore, queued/paused stop confirmation, cancelled confirmation, no restart on restore, persistence, keyboard/right-click menus, live refresh, viewport bounds and safe deletion');

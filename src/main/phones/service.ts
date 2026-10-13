@@ -18,6 +18,8 @@ import { PhoneCloud } from "./cloud";
 import { readinessSchema } from "./readiness-schema";
 import { inspectApk } from "./apk";
 import { BasicPhoneControl } from "./basic";
+import { ScreenCamera, type CameraCapture } from "./screen-camera";
+import type { ScreenCameraStart, ScreenCameraCommand, ScreenCameraLease } from "../../shared/screen-camera";
 export { phoneActionSchema } from "./actions";
 
 const sessionSchema = z.object({
@@ -36,6 +38,7 @@ type InstallJob = { abort: AbortController; done?: Promise<void>; result: { stat
 export interface PhonesOptions {
   root: string;
   apkPath: string;
+  cameraCapture?: CameraCapture;
   adb?: AdbRunner;
   emulators?: EmulatorRuntime;
   androidSetup?: AndroidSetupRuntime;
@@ -79,11 +82,15 @@ export class PhonesService {
   private error = "";
   private cloud: PhoneCloud;
   private basic: BasicPhoneControl;
+  readonly screenCamera: ScreenCamera;
   private basicStarting = false;
   readonly computer: string;
   constructor(private options: PhonesOptions) {
     this.adb = options.adb || new Adb(); this.request = options.request || phoneRequest; this.computer = (options.computer || os.hostname()).slice(0, 120);
     this.basic = new BasicPhoneControl(this.adb, this.computer, () => this.changed(), () => this.now());
+    this.screenCamera = new ScreenCamera({ adb: this.adb, root: options.root,
+      dexPath: path.join(path.dirname(options.apkPath), "profilepilot-screen-camera.dex"), capture: options.cameraCapture,
+      authorize: input => this.authorizeCamera(input), changed: () => this.changed() });
     this.emulators = options.emulators || new AndroidEmulators();
     this.androidSetup = options.androidSetup || new AndroidSetup();
     fs.mkdirSync(options.root, { recursive: true });
@@ -122,7 +129,7 @@ export class PhonesService {
       const hardwareId = device.hardwareId || saved?.hardwareId;
       const identity = device.state?.statusDeviceId || saved?.statusDeviceId || identityByHardware.get(hardwareId);
       if (identity) matched.add(identity);
-      return structuredClone({ ...device, basic: this.basic.state(device.id), hardwareId, cloud: identity ? cloud.find(c => c.cloud?.report?.deviceId === identity)?.cloud : undefined });
+      return structuredClone({ ...device, screenCamera: this.screenCamera.snapshot(device.id), basic: this.basic.state(device.id), hardwareId, cloud: identity ? cloud.find(c => c.cloud?.report?.deviceId === identity)?.cloud : undefined });
     });
     devices.push(...cloud.filter(c => !c.cloud?.report || !matched.has(c.cloud.report.deviceId)));
     return { devices, adbAvailable: this.adbAvailable, error: this.error, computer: this.computer };
@@ -133,6 +140,17 @@ export class PhonesService {
   private assertNoBasic(): void {
     if (this.basicStarting || this.basic.active) throw new Error("请先结束免安装控制，再连接 App 或开始 App 会话。");
   }
+  private async authorizeCamera(input: ScreenCameraLease): Promise<{ instanceId: string; token: string }> {
+    this.assertNoBasic();
+    const device = this.connected(input.id);
+    if (this.closed || this.operations.has(input.id) || this.reconcile.has(input.id) || device.companion !== "ready") throw new Error("手机连接或控制状态已改变，请先确认手机会话");
+    const { state } = await this.rpc(input.id, "sync");
+    if (state.sessionId !== input.sessionId || state.generation !== input.generation || state.mode !== "control" || !["controlling", "executing"].includes(state.phase)) throw new Error("屏幕摄像头需要当前有效的手机控制会话；暂停后请重新开启摄像头");
+    return { instanceId: state.instanceId, token: this.routes.get(input.id)!.token };
+  }
+  async cameraProbe(id: string) { this.connected(id); return this.screenCamera.probe(id); }
+  async cameraStart(input: ScreenCameraStart) { return this.screenCamera.start(input); }
+  async cameraCommand(input: ScreenCameraCommand) { return this.screenCamera.command(input); }
   async basicStart(id: string, mode: "view" | "control", controller: string, task: string): Promise<PhoneDevice> {
     const input = z.object({ mode: z.enum(["view", "control"]), controller: z.string().trim().min(1).max(120), task: z.string().max(500) }).parse({ mode, controller, task });
     if (this.closed || this.basicStarting || this.operations.size || this.actions.size) throw new Error("手机正在处理操作，请稍后再开始免安装会话。");
@@ -543,6 +561,7 @@ export class PhonesService {
   async control(id: string, command: "pause" | "resume" | "stop"): Promise<PhoneDevice> {
     if (command === "resume") this.assertNoBasic();
     z.enum(["pause", "resume", "stop"]).parse(command);
+    if (command !== "resume") this.screenCamera.stopFor(id, command === "pause" ? "手机控制已暂停" : "手机控制已结束");
     await this.exclusive(id, command === "stop" ? "正在结束控制…" : command === "pause" ? "正在暂停…" : "正在恢复…", async () => {
       const { state } = await this.rpc(id, "sync");
       await this.rpc(id, command, { instanceId: state.instanceId, sessionId: state.sessionId, generation: state.generation });
@@ -751,6 +770,7 @@ export class PhonesService {
     });
   }
   async close(): Promise<void> {
+    this.screenCamera.stop();
     for (const read of this.screenReads.values()) read.abort();
     this.closed = true; clearInterval(this.timer); this.wirelessReconnectAbort.abort();
     if (this.wirelessReconnect) await this.wirelessReconnect;

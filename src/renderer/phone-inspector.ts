@@ -67,6 +67,12 @@ export function createPhoneInspector(container: HTMLElement) {
       html(".phone-inspector-agent", `<h3>当前 Agent</h3>${state ? `<strong>${esc(state.controller || "本机用户")}</strong>` : ""}<p class="phone-inspector-session" data-connected="${ready()}"><i></i>${label}</p>${state?.task ? `<p>${esc(state.task)}</p>` : ""}${controls}`);
       html(".phone-inspector-actions", !device ? "" : device.connection !== "device" ? `<button data-action="${device.transport === "emulator" ? "emulator" : "details"}" data-device-id="${esc(device.id)}">${device.transport === "emulator" ? "启动模拟器" : "连接设置"}</button>`
         : state && !isBasic ? "" : `<button data-action="${state && state.phase !== "disconnected" ? "basic-open" : "phone-operate"}" ${busy || state?.phase === "disconnected" ? "disabled" : ""}>${state ? "打开操作窗口" : "操作手机"}</button>`);
+      if (device?.connection === "device") {
+        const actions = find<HTMLElement>(".phone-inspector-actions");
+        let camera = actions.querySelector<HTMLButtonElement>('[data-action="screen-camera"]');
+        if (!camera) { camera = document.createElement("button"); camera.dataset.action = "screen-camera"; actions.append(camera); }
+        camera.textContent = device.screenCamera?.active ? "屏幕摄像头运行中" : "屏幕摄像头"; camera.disabled = busy;
+      }
       updateScreen(); void refresh();
     },
     enlarge() {

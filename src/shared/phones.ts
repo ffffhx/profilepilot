@@ -1,4 +1,5 @@
 import type { AndroidSetupAction, AndroidSetupSnapshot } from "./android-setup";
+import type { ScreenCameraState, ScreenCameraCapabilities, ScreenCameraSource, ScreenCameraStart, ScreenCameraCommand } from "./screen-camera";
 
 export const PHONE_CHANNEL = "phones:request";
 export const PHONE_CHANGED = "phones:changed";
@@ -36,6 +37,7 @@ export interface PhoneCloudStatus {
   report: { deviceId: string; name: string; permissions: PhoneSessionState["permissions"]; readiness: NonNullable<PhoneSessionState["readiness"]> } | null;
 }
 export interface PhoneDevice {
+  screenCamera?: ScreenCameraState;
   /** Read-only package detection on an authorized debug transport. */
   appInstallation?: { status: "installed" | "missing" | "unknown"; checkedAt: number };
   /** Explicit desktop-owned session; does not imply companion permissions. */
@@ -77,6 +79,10 @@ export interface PhoneActionResult { state: PhoneSessionState; result: unknown; 
 export interface PhoneBasicModeInput { id: string; sessionId: string; generation: number; mode: "view" | "control"; }
 export type PhoneSetting = "accessibility" | "overlay" | "notifications" | "developerOptions" | "usbDebugging" | "wirelessDebugging";
 export interface PhonesApi {
+  cameraProbe(id: string): Promise<ScreenCameraCapabilities>;
+  cameraSources(): Promise<ScreenCameraSource[]>;
+  cameraStart(input: ScreenCameraStart): Promise<ScreenCameraState>;
+  cameraCommand(input: ScreenCameraCommand): Promise<any>;
   basicStart(id: string, mode: "view" | "control", controller: string, task: string): Promise<PhoneDevice>;
   basicControl(id: string, command: "pause" | "resume" | "stop"): Promise<PhoneDevice>;
   basicSetMode(input: PhoneBasicModeInput): Promise<PhoneDevice>;

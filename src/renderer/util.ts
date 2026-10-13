@@ -1,5 +1,6 @@
 import { dateFormatter, store } from "./state";
-import { AgentActivity, BusyProgressStep, CdpClientInfo, CdpPortSuggestion, ProfileExtensionInfo, PublicProfile } from "./types";
+import type { AgentActivity, CdpClientInfo, CdpPortSuggestion, ProfileExtensionInfo, PublicProfile } from "../shared/types";
+import type { BusyProgressStep } from "./types";
 
 export function renderBusyBanner(): string {
   if (!store.busyState) {
@@ -332,8 +333,6 @@ export function isAgentDrivenCdpClient(client: CdpClientInfo): boolean {
       client.session ||
       client.title ||
       label.startsWith("agent-browser") ||
-      label.startsWith("playwright") ||
-      label.includes("chrome devtools mcp") ||
       label === "codex" ||
       label === "claude code"
   );
@@ -365,8 +364,6 @@ export function gatewayControlClient(profile: PublicProfile): CdpClientInfo | nu
 }
 
 function browserDriverLabel(kind: CdpClientInfo["driverKind"] | null | undefined): string {
-  if (kind === "playwright-cli") return "Playwright CLI";
-  if (kind === "chrome-devtools-mcp") return "Chrome DevTools MCP";
   return "agent-browser";
 }
 
@@ -567,7 +564,7 @@ export function liveAddrLabel(profile: PublicProfile): string {
   return profile.livePrimaryUrl ? hostOf(profile.livePrimaryUrl) : "";
 }
 
-// CDP 客户端标签来自 lsof 的进程名，像 agent-browser-darwin-arm64、chrome-devtools.exe，
+// CDP 客户端标签来自 lsof 的进程名，像 agent-browser-darwin-arm64、custom-driver.exe，
 // 展示时去掉平台/架构后缀和 .exe，留下工具本名。
 export function prettyCdpClientLabel(label: string): string {
   return (

@@ -28,7 +28,7 @@ try {
   assert.ok((await d.query('.profiles-table thead')).text.includes('端口'));
   assert.ok(await d.evaluate(`document.querySelector('.profiles-table th:nth-child(5)').getBoundingClientRect().width > 20`), 'port column is visible');
   assert.ok(await d.evaluate(`(() => { const cell=document.querySelector('.profile-name-cell');return cell.querySelector('.profile-pick').getBoundingClientRect().left - cell.querySelector('.profile-avatar').getBoundingClientRect().right >= 6; })()`), 'avatar and name have a consistent gap');
-  const pair = await d.evaluate(`window.tasks.pairNativeBrowser('native:Default')`);
+  const pair = await d.evaluate(`window.browserConnection.pairNativeBrowser('native:Default')`);
   const config = JSON.parse(Buffer.from(pair.code.slice(4), 'base64url').toString());
   client = await open(config.port); client.send({ type: 'hello', ...config });
   assert.equal((await client.next()).type, 'welcome');

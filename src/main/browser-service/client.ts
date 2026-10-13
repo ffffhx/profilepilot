@@ -26,7 +26,7 @@ export class BrowserServiceClient implements NativeBrowserTransport {
   installationStates() { return this.installations; }
   isDirectSession(profileId: string, sessionId: string): boolean { return this.direct.has(`${profileId}\n${sessionId}`); }
   onEvent(listener: (event: NativeEvent) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
-  configureUi(handler: NonNullable<BrowserServiceClient['uiHandler']>): void { this.uiHandler = handler; }
+  configureUi(handler: BrowserServiceClient['uiHandler']): void { this.uiHandler = handler; }
   start(): Promise<void> {
     if (this.closed) return Promise.reject(new Error('桌面浏览器连接已关闭。'));
     if (this.starting) return this.starting;
@@ -111,11 +111,15 @@ export class BrowserServiceClient implements NativeBrowserTransport {
       // CDP events must reach observation/preview subscribers even when a
       // concurrent HTTP response already delivered a newer state snapshot.
       if (fresh || event.type === 'cdp') for (const listener of this.listeners) listener(event);
+      if (fresh && event.type !== 'cdp') this.changed();
     } else if (message.type === 'ui') {
       const connection = this.connection;
       if (!connection) return;
       const handle = async () => {
-        if (!this.uiHandler) throw new Error('App 任务服务尚未准备好。');
+        if (!this.uiHandler) {
+          if (message.method === 'getUiState') return { taskServiceAvailable: false };
+          throw new Error('App 任务服务尚未准备好。');
+        }
         return this.uiHandler(message.profileId, message.method, message.params);
       };
       void handle().then(value => serviceRequest(connection, 'ui-result', [message.id, value], 20000, this.id), error => serviceRequest(connection, 'ui-result', [message.id, null, String(error.message || error)], 20000, this.id)).catch(() => {});

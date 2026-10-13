@@ -52,6 +52,7 @@ test('#6 same-task snapshots retain textarea and unchanged transcript text node 
   const dom = fixture(); const markup = '<main><article id="message">Selected text</article><form id="steer"><textarea data-editor-key="A">initial</textarea></form></main>';
   dom.update(markup, 'A');
   const editor = currentRoot.querySelector('textarea'), textNode = currentRoot.querySelector('#message').firstChild;
+  assert.equal(editor.textContent, 'initial');
   editor.liveValue = 'user is typing'; editor.nativeUndoSentinel = { edits: ['one', 'two'] };
   dom.update(markup.replace('</article>', '</article><p>new event</p>'), 'A');
   assert.equal(currentRoot.querySelector('textarea'), editor); assert.equal(editor.liveValue, 'user is typing');

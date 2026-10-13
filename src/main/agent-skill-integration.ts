@@ -7,7 +7,7 @@ import { ProfileManagerError } from "./profile-manager-error";
 
 const MANAGED_MARKER_FILE = ".profilepilot-managed.json";
 const LEGACY_SKILLS = ["agent-browser-cdp", "playwright-cli-profilepilot", "chrome-devtools-mcp-profilepilot", "profilepilot-cli"];
-const LEGACY_KEYS = ["agent-browser", "playwright-cli", "chrome-devtools-mcp", "profilepilot-cli"];
+const LEGACY_KEYS = ["agent-browser", "profilepilot-cli"];
 const mutations = new Map<string, Promise<unknown>>();
 type Target = Pick<AgentSkillTargetDiagnostic, "host" | "label" | "path">;
 type Files = Record<string, string>;

@@ -1,7 +1,7 @@
 import { profileApi } from "../api";
 import { workspaceHidden } from "../workspace-lifecycle";
 import { LiveViewEntry, store } from "../state";
-import { CdpLiveTab, CdpLiveView, PublicProfile } from "../types";
+import type { CdpLiveTab, CdpLiveView, PublicProfile } from "../../shared/types";
 import { escapeHtml, formatErrorMessage, hostOf } from "../util";
 
 // 只刷新可见工作区选中的 Profile，不抢浏览器焦点。
@@ -147,7 +147,7 @@ async function fetchLiveView(profile: PublicProfile): Promise<void> {
 
   try {
     const targetId = store.liveActiveTab[profile.id] || profile.gatewayControl?.agentTarget?.targetId;
-    const data = profile.source === "native" ? await window.tasks.getNativeLiveView(profile.id) : await profileApi().getCdpLiveView(port!, {
+    const data = profile.source === "native" ? await window.browserConnection.getNativeLiveView(profile.id) : await profileApi().getCdpLiveView(port!, {
       screenshot: store.modal?.kind === "profile-details" ? store.liveViewShowScreenshot : true,
       targetId
     });

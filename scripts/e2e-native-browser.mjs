@@ -40,9 +40,9 @@ try {
   assert.equal(await d.evaluate('document.querySelector("#native-pair-code").value.startsWith("PP1.")'), true);
   const saved = await readFile(path.join(app.dataDir, 'browser-tasks/tasks.json'), 'utf8');
   assert.equal(saved.includes('PP1.'), false);
-  await assert.rejects(d.evaluate('window.tasks.pairNativeBrowser("native:missing")'), /请选择/);
+  await assert.rejects(d.evaluate('window.browserConnection.pairNativeBrowser("native:missing")'), /请选择/);
   await assert.rejects(d.evaluate('window.tasks.create({profileId:"native:Default",prompt:"Read a page"})'), /连接/);
-  await assert.rejects(d.evaluate('window.tasks.pairNativeBrowser("isolated:fake")'), /请选择/);
+  await assert.rejects(d.evaluate('window.browserConnection.pairNativeBrowser("isolated:fake")'), /请选择/);
   await d.domClick('[data-nav="tasks"]');
   assert.equal(await d.evaluate('Boolean(document.querySelector("#create-task select[name=profileId] option[value=\\"native:Default\\"]"))'), true);
   assert.equal(await d.evaluate('document.querySelector("#native-target").value'), 'current');

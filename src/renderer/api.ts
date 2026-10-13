@@ -1,4 +1,4 @@
-import { ProfileManagerApi } from "./types";
+import type { ProfileManagerApi } from "../shared/types";
 
 declare global {
   interface Window {

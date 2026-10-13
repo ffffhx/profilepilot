@@ -1,6 +1,6 @@
-import { isBusyAction, profileBusyKind, profileBusyStatusLabel } from "../busy";
+import { isBusyAction, profileBusyKind, profileBusyStatusLabel } from "./busy-view";
 import { store } from "../state";
-import { PublicProfile } from "../types";
+import type { PublicProfile } from "../../shared/types";
 import { cdpPortLabel, escapeHtml, formatDate, isWindowsNativeAgentTemplate, profileStatusLabel, renderButtonLabel, renderOperationProgress, sourceLabel } from "../util";
 
 const CLONE_COUNT_MIN = 1;

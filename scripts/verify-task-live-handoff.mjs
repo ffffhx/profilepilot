@@ -46,7 +46,7 @@ try {
   // The fixture's independent user actor submits while the Agent is parked.
   // This never represents an actual payment or bypasses control of a real site.
   const receipt = await fetch(fixture.url + "/api/submit", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ kind: "购物", name: "验收保温杯", email: "buyer@example.test", city: "北京", submittedBy: "fixture-user" }) }).then(response => response.json());
-  store.event(task, "user", `我已经手动完成订单，回执 ${receipt.id}。现在交还浏览器，请核对提交记录。`); service.publish();
+  store.event(task, "user", `我已经手动完成订单，回执 ${receipt.id}。现在交还浏览器，请核对提交记录。`); service.publish(task);
   const sessionId = task.sdkSessionId;
   await browser.control(task, "resume"); // Gateway event, the same return event used by the browser overlay.
   const eventDeadline = Date.now() + 10000;

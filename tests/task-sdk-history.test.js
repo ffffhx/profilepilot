@@ -1,3 +1,4 @@
+const { readTaskRecords } = require('./helpers/task-records.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -31,7 +32,7 @@ function fixture(t) {
   const title = value => append({ type: 'custom-title', customTitle: value, sessionId });
   t.after(() => { store.close(); assert.equal(path.dirname(root), os.tmpdir()); fs.rmSync(root, { recursive: true, force: true }); });
   return { root, store, task, cwd, sessionId, file, append, input, assistant, title,
-    read: () => JSON.parse(fs.readFileSync(store.file, 'utf8')) };
+    read: () => readTaskRecords(store.file) };
 }
 
 test('SDK-backed bodies and exact input fields are references; product-only state stays local', t => {
@@ -46,7 +47,7 @@ test('SDK-backed bodies and exact input fields are references; product-only stat
   const expected = structuredClone(f.task);
   f.store.save();
   const saved = f.read().tasks[0];
-  assert.equal(f.read().version, 2);
+  assert.equal(f.read().version, 3);
   for (const field of ['title', 'prompt', 'attachments', 'outputs', 'materials', 'skill']) assert.equal(saved[field], undefined, field);
   assert.equal(saved.sdkTitle, f.sessionId);
   assert.equal(saved.profileId, 'native:stable-profile-id');
@@ -57,7 +58,7 @@ test('SDK-backed bodies and exact input fields are references; product-only stat
   assert.deepEqual(JSON.parse(JSON.stringify(reopened.get(f.task.id))), JSON.parse(JSON.stringify(expected)));
   assert.deepEqual(JSON.parse(JSON.stringify(reopened.snapshot().tasks[0])), JSON.parse(JSON.stringify(expected)));
   reopened.close();
-  assert.equal(JSON.parse(fs.readFileSync(f.store.file + '.before-sdk-reuse.v1.bak')).version, 1);
+  assert.equal(JSON.parse(fs.readFileSync(f.store.file)).tasks[0].record.endsWith('.json'), true);
 });
 
 test('unsent, partial and redacted messages keep their exact local text', t => {
@@ -161,7 +162,7 @@ test('branches and rewind hydrate first and do not retain references to another 
   const reopened = new TaskStore(f.root);
   const service = new TaskService(reopened, { changed: () => {}, apiKey: () => '', notify: () => {}, browser: {} });
   const branch = service.forkConversation(f.task.id);
-  const saved = JSON.parse(fs.readFileSync(reopened.file));
+  const saved = readTaskRecords(reopened.file);
   assert.ok(branch.events.some(e => e.text === '历史答复'));
   assert.equal(saved.tasks.find(t => t.id === branch.id).events.some(e => e.sdkText), false);
   reopened.event(branch, 'user', '撤回这条'); reopened.save();

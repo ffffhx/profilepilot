@@ -8,11 +8,12 @@ import type { ProfileManager } from "../profile-manager";
 import type { TaskService } from "../tasks/service";
 import { MobileService } from "./service";
 
-export function registerMobile(root: string, tasks: TaskService, profiles: ProfileManager, apk: string): MobileService {
+export function registerMobile(root: string, tasks: () => TaskService | undefined, profiles: ProfileManager, apk: string): MobileService {
   const service = new MobileService({ root, tasks, profiles: async () => {
     const state = profiles.getCachedState() || await profiles.getInitialState();
     return state.profiles.map(profile => {
-      const availability = tasks.profileAvailability(profile.id);
+      const service = tasks();
+      const availability = service ? service.profileAvailability(profile.id) : { ready: false, reason: "任务服务暂不可用" };
       return { id: profile.id, name: profile.name, source: profile.source, ready: !profile.agentAccessDisabled && availability?.ready !== false,
         reason: profile.agentAccessDisabled ? "此 Profile 已禁止 Agent 连接" : availability?.reason };
     });

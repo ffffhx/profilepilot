@@ -1,3 +1,4 @@
+const { readTaskRecords } = require('./helpers/task-records.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -32,7 +33,7 @@ function fixture(t) {
     assert.ok(path.basename(resolved).startsWith('pp-store-历史 '));
     fs.rmSync(resolved, { recursive: true, force: true });
   });
-  return { store, task, read: () => JSON.parse(fs.readFileSync(store.file, 'utf8')) };
+  return { store, task, read: () => readTaskRecords(store.file) };
 }
 
 function committedWrites(t, file) {
@@ -115,19 +116,23 @@ test('unchanged saves perform no disk replacement but a missing file is restored
   assert.equal(read().tasks[0].id, task.id);
 });
 
-test('the complete replacement is synced before rename and remains version-1 compatible', t => {
+test('task records are synced before the manifest commits the complete replacement', t => {
   const { store, task, read } = fixture(t);
   const order = [];
   const sync = fs.fsyncSync, rename = fs.renameSync;
   t.mock.method(fs, 'fsyncSync', descriptor => { sync(descriptor); order.push('synced'); });
   t.mock.method(fs, 'renameSync', (from, to) => {
     assert.equal(path.dirname(from), path.dirname(to));
-    assert.equal(JSON.parse(fs.readFileSync(from, 'utf8')).tasks[0].events.at(-1).text, '持久化边界');
+    const value = JSON.parse(fs.readFileSync(from, 'utf8'));
+    if (to === store.file) {
+      const record = path.join(store.root, 'task-records', value.tasks[0].record);
+      assert.equal(JSON.parse(fs.readFileSync(record, 'utf8')).events.at(-1).text, '持久化边界');
+    } else assert.equal(value.events.at(-1).text, '持久化边界');
     order.push('renamed'); rename(from, to);
   });
   store.event(task, 'assistant', '持久化边界'); store.save();
-  assert.deepEqual(order, ['synced', 'renamed']);
-  assert.equal(read().version, 1);
+  assert.deepEqual(order, ['synced', 'renamed', 'synced', 'renamed']);
+  assert.equal(read().version, 3);
   if (process.platform !== 'win32') assert.equal(fs.statSync(store.file).mode & 0o777, 0o600);
 });
 
@@ -141,7 +146,8 @@ for (const operation of ['writeFileSync', 'fsyncSync', 'renameSync']) {
     assert.throws(() => store.save(), error => error === expected);
     assert.equal(store.persistenceError, expected);
     assert.deepEqual(fs.readFileSync(store.file), originalBytes);
-    assert.deepEqual(fs.readdirSync(store.root), ['tasks.json']);
+    assert.deepEqual(fs.readdirSync(store.root).sort(), ['task-records', 'tasks.json']);
+    assert.equal(fs.readdirSync(path.join(store.root, 'task-records')).some(file => file.endsWith('.tmp')), false);
     injected.mock.restore();
     store.flush();
     assert.equal(store.persistenceError, undefined);
@@ -233,7 +239,7 @@ test('history benchmark reports blocking and committed writes with equivalent fi
   const legacySave = () => {
     baseline.tokenRecords = updateTokenRecords(baseline.tokenRecords || [], baseline.tasks);
     const temp = `${baselineFile}.${randomUUID()}.tmp`;
-    fs.writeFileSync(temp, JSON.stringify({ ...baseline, version: 1 }, null, 2), { encoding: 'utf8', mode: 0o600 });
+    fs.writeFileSync(temp, JSON.stringify({ ...baseline, version: 3 }, null, 2), { encoding: 'utf8', mode: 0o600 });
     fs.renameSync(temp, baselineFile);
   };
   store.data = structuredClone(seed); store.save(); legacySave();
@@ -254,32 +260,32 @@ test('history benchmark reports blocking and committed writes with equivalent fi
   const immediateStalls = [];
   started = performance.now();
   for (let i = 0; i < updates; i++) {
-    const before = performance.now(); mutate(store.data, i); store.save(); immediateStalls.push(performance.now() - before);
+    const before = performance.now(); mutate(store.data, i); store.save([store.data.tasks[0]]); immediateStalls.push(performance.now() - before);
   }
   const immediateBlockingMs = performance.now() - started;
   const immediateWrites = batchWrites;
   assert.equal(immediateWrites, updates, 'explicit critical saves never become deferred');
-  assert.deepEqual(JSON.parse(fs.readFileSync(store.file, 'utf8')), JSON.parse(fs.readFileSync(baselineFile, 'utf8')));
+  assert.deepEqual(readTaskRecords(store.file), JSON.parse(fs.readFileSync(baselineFile, 'utf8')));
   // Reset outside the measured batch so both branches start with the same history.
   store.data = structuredClone(seed); store.save(); batchWrites = 0;
   started = performance.now();
-  for (let i = 0; i < updates; i++) { mutate(store.data, i); store.scheduleSave(); }
+  for (let i = 0; i < updates; i++) { mutate(store.data, i); store.scheduleSave(80, [store.data.tasks[0]]); }
   const scheduleBlockingMs = performance.now() - started;
   started = performance.now(); store.flush();
   const flushBlockingMs = performance.now() - started;
   const beforeNoop = batchWrites;
-  started = performance.now(); store.save();
+  started = performance.now(); store.save([]);
   const noChangeBlockingMs = performance.now() - started;
   assert.equal(batchWrites, beforeNoop);
   assert.equal(baselineWrites, updates);
   assert.equal(batchWrites, 1);
-  assert.deepEqual(JSON.parse(fs.readFileSync(store.file, 'utf8')), JSON.parse(fs.readFileSync(baselineFile, 'utf8')));
+  assert.deepEqual(readTaskRecords(store.file), JSON.parse(fs.readFileSync(baselineFile, 'utf8')));
   const ms = n => Number(n.toFixed(2));
   t.diagnostic(JSON.stringify({ platform: process.platform, node: process.version, historyTasks, events: historyTasks * eventsPerTask, updates,
     baseline: { bytes: fs.statSync(baselineFile).size, writes: baselineWrites, synchronousBlockingMs: ms(baselineBlockingMs), maxSaveBlockingMs: ms(Math.max(...baselineStalls)) },
     immediate: { writes: immediateWrites, synchronousBlockingMs: ms(immediateBlockingMs), maxSaveBlockingMs: ms(Math.max(...immediateStalls)), includesFsync: true },
-    batched: { bytes: fs.statSync(store.file).size, writes: batchWrites, scheduleBlockingMs: ms(scheduleBlockingMs), flushBlockingMs: ms(flushBlockingMs), totalBlockingMs: ms(scheduleBlockingMs + flushBlockingMs) },
+    batched: { indexBytes: fs.statSync(store.file).size, writes: batchWrites, scheduleBlockingMs: ms(scheduleBlockingMs), flushBlockingMs: ms(flushBlockingMs), totalBlockingMs: ms(scheduleBlockingMs + flushBlockingMs) },
     unchangedSave: { writes: 0, blockingMs: ms(noChangeBlockingMs) },
-    limits: '24 replaceable progress updates in one burst; critical saves remain synchronous; serialization/digest are still O(history); no browser or macOS run',
+    limits: '24 replaceable progress updates in one burst; critical saves remain synchronous; serialization scales with changed-task history plus index metadata; no browser or macOS run',
   }));
 });

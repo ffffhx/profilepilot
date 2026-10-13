@@ -31,7 +31,9 @@ function loadProfilesRenderer(overrides = {}, proxyRoutingEnabled = true) {
       "src/renderer/state-actions": { loadState: async () => {} }
     }
   });
-  const inspector = loadTsModule("src/renderer/render/browser-workspace.ts", { cache });
+  const inspector = loadTsModule("src/renderer/render/browser-workspace.ts", { cache, stubs: {
+    "src/renderer/state": { store, dateFormatter: { format: value => value.toISOString() } }
+  } });
   return { renderer, inspector, store };
 }
 

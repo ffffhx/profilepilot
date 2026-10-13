@@ -28,7 +28,7 @@ test("one bundled skill serves every old installation entry point", async t => {
   const skills = await inspectAgentSkills(home);
   assert.deepEqual(skills.map(skill => [skill.key, skill.skillId]), [["profilepilot", "profilepilot"]]);
   assert.equal(skills[0].error, null);
-  for (const key of ["profilepilot", "agent-browser", "playwright-cli", "chrome-devtools-mcp", "profilepilot-cli"]) {
+  for (const key of ["profilepilot", "agent-browser", "profilepilot-cli"]) {
     assert.equal(bundledAgentSkillPath(key), bundledAgentSkillPath("profilepilot"));
     assert.deepEqual(agentSkillTargetPaths(key, home), agentSkillTargetPaths("profilepilot", home));
   }
@@ -43,7 +43,7 @@ test("one bundled skill serves every old installation entry point", async t => {
 
 test("installation updates all references and preserves personal routing across updates and removal", async t => {
   const home = fixture(t);
-  let diagnostic = await setAgentSkillEnabled("playwright-cli", true, home);
+  let diagnostic = await setAgentSkillEnabled("profilepilot", true, home);
   assert.equal(diagnostic.managedTargetCount, 3);
   assert.equal(diagnostic.upToDate, true);
   const target = diagnostic.targets[0].path;
@@ -140,7 +140,7 @@ test("missing or extra reference files mark an installation stale", async t => {
 
 test("concurrent legacy callers converge on one complete shared installation", async t => {
   const home = fixture(t);
-  const results = await Promise.all(["agent-browser", "playwright-cli", "profilepilot-cli"].map(key => setAgentSkillEnabled(key, true, home)));
+  const results = await Promise.all(["agent-browser", "profilepilot", "profilepilot-cli"].map(key => setAgentSkillEnabled(key, true, home)));
   assert.ok(results.every(result => result.installed && result.upToDate));
   for (const target of results[0].targets) {
     assert.deepEqual(fs.readdirSync(path.dirname(target.path)), ["profilepilot"]);

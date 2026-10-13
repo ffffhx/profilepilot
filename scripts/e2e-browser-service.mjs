@@ -12,7 +12,7 @@ await writeFile(path.join(chromeRoot, 'Local State'), JSON.stringify({ profile: 
 let app, connection;
 try {
   app = await launchProfilePilotE2e({ env: { CPM_START_VIEW: 'tools', CPM_NATIVE_CHROME_USER_DATA_DIR: chromeRoot } });
-  const paired = await app.driver.evaluate(`window.tasks.pairNativeBrowser('native:Default').then(value => value.code.startsWith('PP1.'))`);
+  const paired = await app.driver.evaluate(`window.browserConnection.pairNativeBrowser('native:Default').then(value => value.code.startsWith('PP1.'))`);
   assert.equal(paired, true, 'real App IPC pairs through the independent service');
   connection = readBrowserServiceConnection(path.join(app.dataDir, 'browser-tasks'));
   assert.notEqual(connection.pid, app.child.pid);

@@ -1,6 +1,6 @@
-import { isBusyAction } from "../busy";
+import { isBusyAction } from "./busy-view";
 import { store } from "../state";
-import { PublicProfile } from "../types";
+import type { PublicProfile } from "../../shared/types";
 import { escapeHtml, formatDate, isWindowsCrossDataDirAccountSyncUnsupported, profileStatusLabel, renderButtonLabel, renderOperationProgress, sourceLabel } from "../util";
 
 // 合并同步面板：可迁移的 Profile 数据 + 插件共用一对源/目标 Profile，

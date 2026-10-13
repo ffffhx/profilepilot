@@ -1,7 +1,12 @@
 import { z } from "zod";
 import { PhonesService, phoneActionSchema } from "./service";
+import { cameraStartSchema, cameraCommandSchema } from "./screen-camera";
 export type PhoneManagementCommand = { action: "phone"; method: string; params?: unknown };
 export async function executePhoneCommand(command: PhoneManagementCommand, service: PhonesService): Promise<unknown> {
+  if (command.method === "camera-sources") return service.screenCamera.sources();
+  if (command.method === "camera-probe") return service.cameraProbe(z.object({ id: z.string() }).strict().parse(command.params).id);
+  if (command.method === "camera-start") return service.cameraStart(cameraStartSchema.parse(command.params));
+  if (command.method === "camera-command") return service.cameraCommand(cameraCommandSchema.parse(command.params));
   if (command.method === "screen") return service.screen(z.object({ id: z.string() }).strict().parse(command.params).id);
   if (command.method === "android-setup-snapshot") return service.androidSetup.snapshot();
   if (command.method === "android-setup-catalog") return service.androidSetup.catalog();

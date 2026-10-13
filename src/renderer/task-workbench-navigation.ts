@@ -1,10 +1,10 @@
-import type { BrowserTask } from "../shared/tasks";
+import type { BrowserTask, TaskSummary, TaskSearchHit } from "../shared/tasks";
 import { taskIcon as icon } from "./task-icons";
 import { taskMenuButton } from "./task-navigation";
 import { escapeTaskHtml as e } from "./task-rich-text";
 import { attentionReason, findTaskHit } from "./task-interaction-model";
 
-export function workbenchNavigation(tasks: BrowserTask[], selected: string, statuses: Record<string, string>, read: Record<string, string>): string {
+export function workbenchNavigation(tasks: TaskSummary[], selected: string, statuses: Record<string, string>, read: Record<string, string>): string {
   const visible = tasks.filter(task => !task.archivedAt);
   const groups = [
     { name: "pinned", label: "置顶", items: visible.filter(task => task.pinnedAt).sort((a, b) => b.pinnedAt!.localeCompare(a.pinnedAt!)) },
@@ -19,7 +19,11 @@ export function workbenchNavigation(tasks: BrowserTask[], selected: string, stat
 }
 
 export function searchSnippet(task: BrowserTask, query: string): { id: string; html: string } | undefined {
-  const hit = findTaskHit(task, query); if (!hit) return;
+  return searchHitSnippet(findTaskHit(task, query), query);
+}
+
+export function searchHitSnippet(hit: TaskSearchHit | undefined, query: string): { id: string; html: string } | undefined {
+  if (!hit) return;
   const index = hit.text.toLocaleLowerCase().indexOf(query.trim().toLocaleLowerCase());
   const begin = Math.max(0, index - 32), end = Math.min(hit.text.length, Math.max(0, index) + query.length + 90);
   const text = hit.text.slice(begin, end);

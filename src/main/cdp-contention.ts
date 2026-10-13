@@ -32,7 +32,7 @@ interface PortObserver {
   connecting: boolean;
   targets: Map<string, TargetTrack>;
   // 当前连在这个端口上的 owner 会话集合（ownerKey → 最近一轮见到的时间戳），每轮由
-  // resolveCdpContention 用最新的驱动连接刷新；URL 变化时据此给 tab 打上 owner 戳。
+  // 维护流程用最新的驱动连接刷新；URL 变化时据此给 tab 打上 owner 戳。
   owners: Map<string, number>;
 }
 
@@ -157,7 +157,7 @@ export function ownerKeyForClient(client: CdpClientInfo): string {
 }
 
 // 每轮用最新的驱动连接刷新“端口上现在连着哪些 owner 会话”，供 URL 变化时给 tab 打戳。
-function refreshPortOwners(port: number, clients: CdpClientInfo[]): void {
+export function refreshPortOwners(port: number, clients: CdpClientInfo[]): void {
   const observer = observers.get(port);
   if (!observer) {
     return;
@@ -223,8 +223,6 @@ const FLIP_BACKS_THRESHOLD = 2;
 // 其余（单连接、一活一残留、纯残留）为 null，不打扰。
 export function resolveCdpContention(port: number, clients: CdpClientInfo[]): CdpContentionInfo {
   const now = Date.now();
-  // 先把“端口上现在连着哪些 owner 会话”记到观察者上，让后续 URL 变化能给 tab 精确打戳。
-  refreshPortOwners(port, clients);
   const activeClientCount = clients.filter((client) => {
     const at = client.lastActive ? Date.parse(client.lastActive) : NaN;
     return Number.isFinite(at) && now - at <= ACTIVE_SESSION_WINDOW_MS;

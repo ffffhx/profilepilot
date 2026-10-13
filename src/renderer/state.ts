@@ -1,5 +1,6 @@
-import { AccountSyncDiffResult, AccountSyncResult, AgentIntegrationDiagnostic, AgentTakeoverEvent, AppState, BifrostSnapshot, BusyState, CdpLiveView, ExtensionMigrationDiffResult, ExtensionMigrationResult, ExtensionScanResult, GlobalInstructionFileId, GlobalInstructionsSnapshot, ModalState, ProfileReadinessReceipt, ToastKind } from "./types";
-import type { TaskSnapshot } from "../shared/tasks";
+import type { AccountSyncDiffResult, AccountSyncResult, AgentIntegrationDiagnostic, AgentTakeoverEvent, AppState, BifrostSnapshot, CdpLiveView, ExtensionMigrationDiffResult, ExtensionMigrationResult, ExtensionScanResult, GlobalInstructionFileId, GlobalInstructionsSnapshot, ProfileReadinessReceipt } from "../shared/types";
+import type { BusyState, ModalState, ToastKind } from "./types";
+import type { BrowserConnectionSnapshot } from "../shared/browser-connection";
 
 export const root = document.querySelector<HTMLDivElement>("#app");
 
@@ -80,8 +81,8 @@ export interface RendererState {
   profileReadinessLoading: Record<string, boolean>;
   agentIntegrationDiagnostic: AgentIntegrationDiagnostic | null;
   agentIntegrationLoading: boolean;
-  nativeExtensionBrowsers: TaskSnapshot["nativeBrowsers"] | null;
-  nativeExtensionInstallations: NonNullable<TaskSnapshot["nativeInstallations"]>;
+  nativeExtensionBrowsers: BrowserConnectionSnapshot["nativeBrowsers"] | null;
+  nativeExtensionInstallations: BrowserConnectionSnapshot["nativeInstallations"];
   nativeExtensionProfileId: string | null;
   nativeExtensionLoading: boolean;
   nativeExtensionError: string | null;

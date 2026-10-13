@@ -1,3 +1,4 @@
+const { readTaskRecords } = require('./helpers/task-records.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -140,7 +141,7 @@ test('#60 failed browser return and repeated successful requests append exactly 
 test('#61 desktop snapshots expose transient streams without saving them to task history', t => {
   const f = fixture(t); f.service.streams.set(f.task.id, { id: 'stream', text: 'partial answer', updatedAt: new Date().toISOString() });
   assert.equal(f.service.snapshot().streams[f.task.id].text, 'partial answer');
-  f.service.publish(); assert.equal(JSON.parse(fs.readFileSync(f.store.file, 'utf8')).streams, undefined);
+  f.service.publish([]); assert.equal(readTaskRecords(f.store.file).streams, undefined);
 });
 
 for (const operation of ['resume', 'reply']) {
@@ -154,7 +155,7 @@ for (const operation of ['resume', 'reply']) {
     assert.equal(f.task.status, operation === 'resume' ? 'paused' : 'waiting_user');
     assert.ok(!f.task.messageReceipts?.length); assert.ok(!f.task.events.some(event => event.text === 'persist me'));
     f.store.save = save; await send(); await send();
-    const saved = JSON.parse(fs.readFileSync(f.store.file, 'utf8')).tasks[0];
+    const saved = readTaskRecords(f.store.file).tasks[0];
     assert.equal(saved.events.filter(event => event.text === 'persist me').length, 1);
     assert.equal(saved.messageReceipts.length, 1);
   });
@@ -164,7 +165,7 @@ test('#57 approval is durable before a terminal process starts', async t => {
   const f = fixture(t); f.task.status = 'waiting_user'; f.task.mode = 'manual';
   f.task.pending = { id: randomUUID(), kind: 'confirmation', title: 'Run?', details: '', createdAt: new Date().toISOString(), terminal: { runtime: 'node', command: 'console.log(1)', summary: 'test' }, permissionScope: { kind: 'terminal', scope: 'fixture', label: 'Fixture command' } };
   f.service.terminal.run = async () => {
-    const saved = JSON.parse(fs.readFileSync(f.store.file, 'utf8')).tasks[0];
+    const saved = readTaskRecords(f.store.file).tasks[0];
     assert.equal(saved.pending, undefined); assert.equal(saved.usage.actions, 1); assert.equal(saved.permissionRules.length, 1);
     assert.equal(saved.messageReceipts[0].id, 'approval-save'); assert.ok(saved.events.some(event => event.text === '确认执行'));
     return { status: 'succeeded', stdout: '', stderr: '' };

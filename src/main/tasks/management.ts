@@ -270,15 +270,16 @@ export async function executeNativeUiCommand(profileId: string, method: string, 
       (service.store.data.nativeAccessPolicies ||= {})[profileId] = policy;
       // Restrictions apply at the next read/action, including in-flight tasks;
       // a site's permission change never resumes a stopped task.
-      for (const task of service.store.data.tasks) if (task.profileId === profileId && !["completed", "partial", "failed", "cancelled"].includes(task.status)) task.nativeAccess = normalizeNativeAccess({ ...task.nativeAccess, ...input });
-      service.publish(); return state();
+      const changed = service.store.data.tasks.filter(task => task.profileId === profileId && !["completed", "partial", "failed", "cancelled"].includes(task.status));
+      for (const task of changed) task.nativeAccess = normalizeNativeAccess({ ...task.nativeAccess, ...input });
+      service.publish(changed); return state();
     }
     const task = owned(command.taskId);
     if (command.method === "taskMessage" && task.pending?.kind === "confirmation") throw new Error("请先明确批准或拒绝当前操作，普通消息不能代替确认。");
     // Persist acceptance before an asynchronous handoff. After a crash a repeat
     // returns the preserved task instead of replaying a possibly applied action.
     const record = request ? { ...request } as NonNullable<BrowserTask["nativeUiRequests"]>[number] : undefined;
-    if (record) { (task.nativeUiRequests ||= []).push(record); service.publish(); }
+    if (record) { (task.nativeUiRequests ||= []).push(record); service.publish(task); }
     try {
       if (command.method === "taskMessage") {
         if (task.pending?.kind === "question") await service.reply(task.id, task.pending.id, command.message, false);
@@ -290,7 +291,7 @@ export async function executeNativeUiCommand(profileId: string, method: string, 
         await executeTaskManagementCommand({ action: "task.control", id: task.id, control: command.action === "stop" ? "pause" : command.action }, service, async () => profileId);
       }
     } catch (error) {
-      if (record) { record.error = error instanceof Error ? error.message : String(error); service.publish(); }
+      if (record) { record.error = error instanceof Error ? error.message : String(error); service.publish(task); }
       throw error;
     }
     return state(task.id);

@@ -60,7 +60,7 @@ test("Gateway stops an active Session and rejects future acquire when Agent acce
       publicPort: port,
       sessionId: "cx-policy",
       daemonInstanceId: "daemon-policy",
-      driverKind: "chrome-devtools-mcp"
+      driverKind: "agent-browser"
     }, { homeDir: home });
 
     const updated = await requestBrowserGateway({

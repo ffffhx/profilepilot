@@ -27,3 +27,4 @@ await new Promise((resolve, reject) => {
 const output = path.join(root, 'dist', 'android'); mkdirSync(output, { recursive: true });
 copyFileSync(path.join(root, 'android-phone', 'app', 'build', 'outputs', 'apk', variant, `app-${variant}.apk`), path.join(output, 'profilepilot-phone.apk'));
 console.log(`手机配套 App（${variant}）已生成：dist/android/profilepilot-phone.apk`);
+await import('./build-screen-camera.mjs');

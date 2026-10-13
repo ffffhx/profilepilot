@@ -1,8 +1,9 @@
+import { patchBrowserDom } from "./dom";
 import { formatQuickLaunchShortcut } from "../../shared/quick-launch-shortcut";
 import { profileApi } from "../api";
-import { isBusyAction, renderToastBody } from "../busy";
+import { isBusyAction, renderToastBody } from "./busy-view";
 import { appRoot, store } from "../state";
-import { PublicProfile } from "../types";
+import type { PublicProfile } from "../../shared/types";
 import {
   agentActivityLeadText,
   agentActivityProgressText,
@@ -183,7 +184,7 @@ export function renderMini(): void {
   }
   lastMiniPanelHtml = html;
   appRoot.className = "mini-root mini-root-panel";
-  appRoot.innerHTML = html;
+  patchBrowserDom(appRoot, html);
 
   if (store.miniExpanded && previousScrollTop > 0) {
     window.requestAnimationFrame(() => {

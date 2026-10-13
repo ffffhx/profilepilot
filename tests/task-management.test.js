@@ -1,3 +1,4 @@
+const { readTaskRecords } = require('./helpers/task-records.cjs');
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { randomUUID } = require("node:crypto");
@@ -23,7 +24,7 @@ test("authenticated task commands share the desktop store and controls", async t
   assert.equal(f.store.get(id).prompt, prompt);
   await new Promise(resolve => setTimeout(resolve, 100)); // Desktop broadcasts coalesce.
   assert.equal(f.snapshots.at(-1).tasks[0].id, id);
-  assert.equal(JSON.parse(fs.readFileSync(f.store.file, "utf8")).tasks[0].id, id);
+  assert.equal(readTaskRecords(f.store.file).tasks[0].id, id);
   const listed = await f.request({ action: "task.list", limit: 1 });
   assert.equal(listed.data.total, 1);
   assert.equal(listed.data.tasks[0].id, id);

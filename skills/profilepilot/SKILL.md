@@ -28,8 +28,6 @@ Confirm the target from actual Profile IDs, extension connections or Gateway bin
 | List, inspect, create, rename, start, stop or delete Profiles | [ProfilePilot CLI: Profile management](references/profiles.md) |
 | Control the actual default Profile or another connected Profile using the ProfilePilot extension | [ProfilePilot Browser CLI](references/browser-extension.md) |
 | Control a managed Profile or registered Electron app with ppilot browser | [ppilot browser: Gateway connection](references/agent-browser.md) |
-| Use Playwright CLI with a managed Profile | [Playwright CLI through Gateway](references/playwright-cli.md) |
-| Configure/use Chrome DevTools MCP with a managed Profile | [DevTools MCP through Gateway](references/chrome-devtools-mcp.md) |
 | User explicitly selects ChatGPT `@Chrome` | [ChatGPT Chrome integration](references/chatgpt-chrome.md) |
 
 For the default Profile, the ProfilePilot extension controls its existing pages without copying the Profile. This route is independent of the Agent's model or host: Codex, Claude Code and other local Agents with CLI access can use the same `ppilot browser` commands. For other managed browser work, use the user's configured driver. If the selected route is unavailable, report the missing prerequisite; do not silently switch accounts or transport or require the user to move to ChatGPT.

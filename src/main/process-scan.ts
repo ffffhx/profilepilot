@@ -294,7 +294,7 @@ export function parseLsofListeningPort(line: string): number | null {
 }
 
 // 检测“谁在持久连接这些 CDP 端口”：找连向 127.0.0.1:<端口> 的 ESTABLISHED 客户端 socket
-// （形如 本地:xxxx->127.0.0.1:<端口>），持有方就是 agent-browser / Playwright / DevTools 等驱动工具。
+// （形如 本地:xxxx->127.0.0.1:<端口>），持有方就是 agent-browser 等驱动工具。
 // 工具无关：任何 CDP 客户端都走同一个本机 TCP 端口；WebSocket 长连接常驻 ESTABLISHED，能稳定抓到。
 export async function getCdpClientsByPort(ports: number[]): Promise<Map<number, CdpClientInfo[]>> {
   const result = new Map<number, CdpClientInfo[]>();

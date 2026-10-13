@@ -10,7 +10,6 @@ import {
   clearBrowserGatewayDaemonIdentity
 } from "./browser-gateway-client";
 import type {
-  GatewayDriverKind,
   GatewayProfileBinding
 } from "./browser-gateway-control";
 import { writeGatewayDriverNoticeSync } from "./agent-control-notice";
@@ -29,41 +28,13 @@ export interface BrowserGatewayDriverLifecycle {
   ): void;
 }
 
-interface GatewayDriverLifecycleAdapter {
-  connected(profile: GatewayProfileBinding): void;
-  reconnecting(profile: GatewayProfileBinding, reconnectDeadlineAt: string): void;
-  sessionStopped(
-    profile: GatewayProfileBinding,
-    reason: GatewayDriverSessionStopReason
-  ): void;
-}
-
 export function createBrowserGatewayDriverLifecycle(
   homeDir: string
 ): BrowserGatewayDriverLifecycle {
-  const defaultAdapter = new DefaultGatewayDriverLifecycleAdapter(homeDir);
-  const adapters = new Map<GatewayDriverKind, GatewayDriverLifecycleAdapter>([
-    ["agent-browser", new AgentBrowserGatewayDriverLifecycleAdapter(homeDir)],
-    ["playwright-cli", defaultAdapter],
-    ["chrome-devtools-mcp", defaultAdapter]
-  ]);
-  const adapterFor = (profile: GatewayProfileBinding): GatewayDriverLifecycleAdapter =>
-    adapters.get(profile.driverKind || "agent-browser") || defaultAdapter;
-
-  return {
-    connected(profile): void {
-      adapterFor(profile).connected(profile);
-    },
-    reconnecting(profile, reconnectDeadlineAt): void {
-      adapterFor(profile).reconnecting(profile, reconnectDeadlineAt);
-    },
-    sessionStopped(profile, reason): void {
-      adapterFor(profile).sessionStopped(profile, reason);
-    }
-  };
+  return new AgentBrowserGatewayDriverLifecycle(homeDir);
 }
 
-class DefaultGatewayDriverLifecycleAdapter implements GatewayDriverLifecycleAdapter {
+class AgentBrowserGatewayDriverLifecycle implements BrowserGatewayDriverLifecycle {
   constructor(protected readonly homeDir: string) {}
 
   connected(profile: GatewayProfileBinding): void {
@@ -89,25 +60,14 @@ class DefaultGatewayDriverLifecycleAdapter implements GatewayDriverLifecycleAdap
     reason: GatewayDriverSessionStopReason
   ): void {
     const sessionId = profile.ownerSessionId;
-    if (sessionId && reason === "reconnect-exhausted") {
-      writeGatewayDriverNoticeSync(this.homeDir, sessionId, profile, "exhausted");
-    }
-  }
-}
-
-class AgentBrowserGatewayDriverLifecycleAdapter
-  extends DefaultGatewayDriverLifecycleAdapter {
-  override sessionStopped(
-    profile: GatewayProfileBinding,
-    reason: GatewayDriverSessionStopReason
-  ): void {
-    const sessionId = profile.ownerSessionId;
     if (!sessionId) return;
     retireAgentBrowserSessionSync(sessionId, profile.daemonPid, this.homeDir);
     releaseAgentBrowserProfileLeasesForSessionSync(sessionId, this.homeDir);
     clearAgentBrowserControlWaitStateSync(sessionId, undefined, this.homeDir);
     clearAgentBrowserCommandStateSync(sessionId, undefined, this.homeDir);
     clearBrowserGatewayDaemonIdentity(sessionId, this.homeDir);
-    super.sessionStopped(profile, reason);
+    if (reason === "reconnect-exhausted") {
+      writeGatewayDriverNoticeSync(this.homeDir, sessionId, profile, "exhausted");
+    }
   }
 }

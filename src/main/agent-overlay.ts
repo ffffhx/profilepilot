@@ -2198,8 +2198,6 @@ export function isAgentOverlayClient(client: CdpClientInfo): boolean {
     client.driverKind ||
       client.agent ||
       label.startsWith("agent-browser") ||
-      label.startsWith("playwright") ||
-      label.includes("chrome devtools mcp") ||
       label === "codex" ||
       label === "claude code"
   );

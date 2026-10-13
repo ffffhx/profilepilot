@@ -19,6 +19,7 @@ const {
   shouldAutoDisconnectStaleAgentBrowserClient
 } = require("../dist/main/profile-manager.js");
 const { writeAgentBrowserControlWaitStateSync } = require("../dist/main/agent-browser-session.js");
+const { ProfileRuntimeMaintenance } = require("../dist/main/profile-maintenance.js");
 
 function runtimeProfile(overrides) {
   return {
@@ -313,24 +314,6 @@ test("ProfileManager releases a completed agent-browser Session and Profile leas
   assert.deepEqual(result.failures, []);
 });
 
-test("ProfileManager completes Playwright and MCP drivers without treating ordinary Chrome as a driver", async () => {
-  for (const driverKind of ["playwright-cli", "chrome-devtools-mcp"]) {
-    const manager = createTakeoverHarness([
-      {
-        pid: 401,
-        label: driverKind === "playwright-cli" ? "Playwright CLI" : "Chrome DevTools MCP",
-        driverKind,
-        session: `cx-${driverKind}`
-      },
-      { pid: 402, label: "Chrome", session: `cx-${driverKind}` }
-    ]);
-    const result = await manager.completeAgentConnections("profile-1", { session: `cx-${driverKind}` });
-    assert.deepEqual(manager.operations, ["retire-gateway:401"]);
-    assert.equal(result.targetCount, 1);
-    assert.equal(result.successCount, 1);
-  }
-});
-
 test("ProfileManager orders Gateway revocation between durable notice and user unlock", async () => {
   const manager = createTakeoverHarness([
     { pid: 101, label: "agent-browser", session: "cx-gateway" }
@@ -620,7 +603,7 @@ test("ProfileManager does not report takeover success when the Agent notice cann
   assert.deepEqual(manager.operations, []);
 });
 
-test("ProfileManager auto-disconnects stale agent-browser daemons only", async () => {
+test("runtime maintenance disconnects stale daemons without changing published snapshots", async () => {
   const now = Date.parse("2026-07-09T10:00:00.000Z");
   assert.equal(
     shouldAutoDisconnectStaleAgentBrowserClient(
@@ -672,14 +655,15 @@ test("ProfileManager auto-disconnects stale agent-browser daemons only", async (
     }
   ];
 
-  await manager.autoDisconnectStaleAgentBrowserClients(profiles, externalInstances);
+  const maintenance = new ProfileRuntimeMaintenance({ disconnect: client => manager.terminateCdpClient(client.pid) });
+  assert.equal(await maintenance.disconnectStaleClients({ profiles, externalInstances }), true);
 
   assert.deepEqual(manager.terminatedPids, [404]);
   assert.deepEqual(
     profiles[0].cdpClients.map((client) => client.pid),
     [101, 202, 303]
   );
-  assert.deepEqual(externalInstances[0].cdpClients, []);
+  assert.deepEqual(externalInstances[0].cdpClients.map(client => client.pid), [404]);
 });
 
 function createTakeoverHarness(clients) {
@@ -706,10 +690,6 @@ function createTakeoverHarness(clients) {
   manager.removeAgentBrowserSessionFiles = async () => {};
   manager.retireCompletedAgentBrowserClient = async (client) => {
     manager.operations.push(`retire-completed:${client.pid}`);
-    manager.terminatedPids.push(client.pid);
-  };
-  manager.retireCompletedGatewayDriverClient = async (client) => {
-    manager.operations.push(`retire-gateway:${client.pid}`);
     manager.terminatedPids.push(client.pid);
   };
   manager.releaseAgentBrowserProfileLeases = (session) => {

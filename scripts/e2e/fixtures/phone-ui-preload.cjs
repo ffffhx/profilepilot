@@ -9,6 +9,10 @@ contextBridge.exposeInMainWorld('mobile', {
   onChanged: () => () => {}
 });
 contextBridge.exposeInMainWorld('phones', {
+  cameraProbe: id => call('camera-probe', { id }),
+  cameraSources: () => call('camera-sources'),
+  cameraStart: input => call('camera-start', input),
+  cameraCommand: input => call('camera-command', input),
   basicStart: (id, mode, controller, task) => call('basic-start', { id, mode, controller, task }),
   basicControl: (id, command) => call(`basic-${command}`, { id }),
   basicSetMode: input => call('basic-mode', input),
@@ -30,4 +34,5 @@ contextBridge.exposeInMainWorld('phones', {
   control: (id, method) => call(method, { id }), perform: input => call('action', input),
   onChanged: listener => { const handle = (_, value) => listener(value); ipcRenderer.on('phone-ui:changed', handle); return () => ipcRenderer.removeListener('phone-ui:changed', handle); }
 });
+contextBridge.exposeInMainWorld('cameraFixture', { calls: () => call('fixture-camera-calls'), unsupported: value => call('fixture-camera-unsupported', { value }) });
 contextBridge.exposeInMainWorld('phoneFixture', { setUnresponsive: (id, enabled) => ipcRenderer.invoke('phone-ui:unresponsive', id, enabled), previewCalls: () => ipcRenderer.invoke('phone-ui:preview-calls'), previewBehavior: value => ipcRenderer.invoke('phone-ui:preview-behavior', value), setCloud: (age, readiness) => ipcRenderer.invoke('phone-ui:cloud', age, readiness), setState: (id, changes) => ipcRenderer.invoke('phone-ui:fixture', id, changes), setConnection: usb => ipcRenderer.invoke('phone-ui:connection', usb), setOffline: () => ipcRenderer.invoke('phone-ui:offline') });

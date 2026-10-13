@@ -219,7 +219,7 @@ test("handoff keeps a live desktop receiver until return or shutdown", async t =
   f.service.runs.clear();
   f.service.externalControl(f.task.sessionId, "agent", "active", "user-return");
   assert.equal(f.task.status, "queued"); assert.equal(receivers.size, 0);
-  f.task.status = "waiting_user"; f.task.pending = { kind: "handoff" }; f.service.publish();
+  f.task.status = "waiting_user"; f.task.pending = { kind: "handoff" }; f.service.publish(f.task);
   assert.equal(receivers.size, 1);
   await f.service.close(); assert.equal(receivers.size, 0);
 });

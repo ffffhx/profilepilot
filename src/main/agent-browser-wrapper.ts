@@ -3382,10 +3382,7 @@ function isAgentBrowserWrapperEntrypoint(entryPath = process.argv[1] || ""): boo
     name === "profilepilot-agent-browser-wrapper.cjs";
 }
 
-// This module also exposes shared Profile auto-start helpers. esbuild folds it
-// into the Playwright/MCP wrapper bundles, where `require.main === module` is
-// still true for the final bundle. Check the actual entry filename as well so
-// importing those helpers can never launch an accidental second driver.
+// Bundled CLI imports must not run this wrapper as a second entrypoint.
 if (require.main === module && isAgentBrowserWrapperEntrypoint()) {
   void runAgentBrowserWrapper().then(
     (exitCode) => {

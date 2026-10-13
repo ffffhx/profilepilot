@@ -424,13 +424,13 @@ test("Gateway parks agent-browser across takeover and resumes the same socket on
   }
 });
 
-test("Gateway parks Playwright across takeover and replays buffered events before resuming commands", async () => {
+test("Gateway parks agent-browser across takeover and replays buffered events before resuming commands", async () => {
   const h = await makeHarness();
   try {
     h.backend.onSend = (text) => {
       const message = JSON.parse(text);
       const result = message.method === "Target.attachToTarget"
-        ? { sessionId: "flat-playwright" }
+        ? { sessionId: "flat-agent-browser" }
         : { echoed: message.method };
       queueMicrotask(() => h.backend.emit(JSON.stringify({
         id: message.id,
@@ -440,10 +440,10 @@ test("Gateway parks Playwright across takeover and replays buffered events befor
     };
     const acquired = h.control.acquire({
       publicPort: h.port,
-      sessionId: "cx-playwright",
-      daemonInstanceId: "daemon-playwright",
-      driverKind: "playwright-cli",
-      driverLabel: "Playwright CLI"
+      sessionId: "cx-agent-browser",
+      daemonInstanceId: "daemon-agent-browser",
+      driverKind: "agent-browser",
+      driverLabel: "agent-browser CLI"
     });
     const ws = await openWebSocket(`ws://127.0.0.1:${h.port}/devtools/browser/gateway?ticket=${encodeURIComponent(acquired.ticket)}`);
 
@@ -453,12 +453,12 @@ test("Gateway parks Playwright across takeover and replays buffered events befor
       method: "Target.attachToTarget",
       params: { targetId: "page-one", flatten: true }
     }));
-    assert.deepEqual(await response, { id: 1, result: { sessionId: "flat-playwright" } });
-    assert.equal(await h.gateway.quiesceAgentSession(h.port, "cx-playwright", 500), true);
+    assert.deepEqual(await response, { id: 1, result: { sessionId: "flat-agent-browser" } });
+    assert.equal(await h.gateway.quiesceAgentSession(h.port, "cx-agent-browser", 500), true);
 
     let closed = false;
     ws.addEventListener("close", () => { closed = true; }, { once: true });
-    h.control.delegateToUser("cx-playwright", "user_takeover");
+    h.control.delegateToUser("cx-agent-browser", "user_takeover");
 
     const sentBeforeBlockedCommand = h.backend.sent.length;
     response = nextMessage(ws);
@@ -466,11 +466,11 @@ test("Gateway parks Playwright across takeover and replays buffered events befor
       id: 2,
       method: "Runtime.evaluate",
       params: { expression: "document.title" },
-      sessionId: "flat-playwright"
+      sessionId: "flat-agent-browser"
     }));
     const blocked = await response;
     assert.equal(blocked.id, 2);
-    assert.equal(blocked.sessionId, "flat-playwright");
+    assert.equal(blocked.sessionId, "flat-agent-browser");
     assert.equal(blocked.error.code, -32000);
     assert.match(blocked.error.message, /AGENT_USER_IN_CONTROL/);
     assert.equal(h.backend.sent.length, sentBeforeBlockedCommand, "parked commands must never reach Chrome");
@@ -482,17 +482,17 @@ test("Gateway parks Playwright across takeover and replays buffered events befor
     });
     h.backend.emit(JSON.stringify({
       method: "Runtime.consoleAPICalled",
-      sessionId: "flat-playwright",
+      sessionId: "flat-agent-browser",
       params: { type: "log", args: [] }
     }));
     await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(replayed, false, "user-time events must stay hidden while the driver is parked");
     assert.equal(closed, false, "a resumable driver keeps the same physical WebSocket");
 
-    h.control.returnToAgent("cx-playwright");
+    h.control.returnToAgent("cx-agent-browser");
     assert.deepEqual(await replay, {
       method: "Runtime.consoleAPICalled",
-      sessionId: "flat-playwright",
+      sessionId: "flat-agent-browser",
       params: { type: "log", args: [] }
     });
 
@@ -501,12 +501,12 @@ test("Gateway parks Playwright across takeover and replays buffered events befor
       id: 3,
       method: "Runtime.evaluate",
       params: { expression: "1 + 1" },
-      sessionId: "flat-playwright"
+      sessionId: "flat-agent-browser"
     }));
     assert.deepEqual(await response, {
       id: 3,
       result: { echoed: "Runtime.evaluate" },
-      sessionId: "flat-playwright"
+      sessionId: "flat-agent-browser"
     });
     assert.equal(closed, false);
     ws.close();

@@ -267,12 +267,6 @@ export function driverLabelFromCommand(command: string, fallback: string): strin
   if (command.includes("Codex.app") || command.includes("cua_node")) {
     return "Codex";
   }
-  if (/chrome-devtools-mcp/i.test(command)) {
-    return "Chrome DevTools MCP";
-  }
-  if (/[\\/ ]playwright/i.test(command)) {
-    return /playwright-cli/i.test(command) ? "Playwright CLI" : "Playwright";
-  }
   if (/[\\/ ]puppeteer/i.test(command)) {
     return "Puppeteer";
   }

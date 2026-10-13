@@ -1,3 +1,4 @@
+const { readTaskRecords } = require('./helpers/task-records.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -55,17 +56,17 @@ test('phone creates and controls the same persisted PC task and receives its res
   assert.equal((await f.request({ action: 'task.control', id, control: 'pause' })).data.task.status, 'paused');
   assert.equal((await f.request({ action: 'task.control', id, control: 'resume' })).data.task.status, 'queued');
   await f.request({ action: 'task.control', id, control: 'queue', message: '手机追加说明', requestId: randomUUID() });
-  const task = f.store.get(id); task.status = 'completed'; task.result = { summary: '真实服务中的任务结果', evidence: [], remaining: [] }; f.tasks.publish();
+  const task = f.store.get(id); task.status = 'completed'; task.result = { summary: '真实服务中的任务结果', evidence: [], remaining: [] }; f.tasks.publish(task);
   const detail = await f.request({ action: 'task.get', id });
   assert.equal(detail.data.task.result.summary, task.result.summary);
-  assert.equal(JSON.parse(fs.readFileSync(f.store.file, 'utf8')).tasks[0].id, id);
+  assert.equal(readTaskRecords(f.store.file).tasks[0].id, id);
   assert.equal('authorization' in detail.data.task, false); assert.equal('settings' in detail.data, false);
 });
 
 test('mobile confirmation requires explicit consent and rejects a stale decision', async t => {
   const f = await fixture(t);
   const task = f.store.create({ profileId: 'isolated:work', prompt: 'Confirmation test' }, 'Work');
-  task.status = 'waiting_user'; task.pending = { id: randomUUID(), kind: 'confirmation', title: '发送消息', details: '将向指定联系人发送测试消息。', createdAt: new Date().toISOString() }; f.tasks.publish();
+  task.status = 'waiting_user'; task.pending = { id: randomUUID(), kind: 'confirmation', title: '发送消息', details: '将向指定联系人发送测试消息。', createdAt: new Date().toISOString() }; f.tasks.publish(task);
   const state = await f.request({ action: 'sync' }); assert.equal(state.data.tasks[0].pending.id, task.pending.id);
   const command = { action: 'task.reply', id: task.id, decisionId: task.pending.id, answer: '' };
   assert.equal((await f.request(command)).error.code, 'TASK_APPROVAL_REQUIRED');
@@ -125,7 +126,7 @@ test('mobile downloads only registered task outputs and keeps PC paths private',
   const f = await fixture(t);
   const task = f.store.create({ profileId: 'isolated:work', prompt: 'Task output' }, 'Work');
   const file = { id: randomUUID(), name: 'result.txt', path: path.join(f.root, 'result.txt'), size: 6, createdAt: new Date().toISOString() };
-  fs.writeFileSync(file.path, 'result'); task.outputs = [file]; f.tasks.publish();
+  fs.writeFileSync(file.path, 'result'); task.outputs = [file]; f.tasks.publish(task);
   const detail = await f.request({ action: 'task.get', id: task.id });
   assert.equal(detail.data.task.outputs[0].path, undefined);
   const downloaded = await f.request({ action: 'task.artifact', taskId: task.id, fileId: file.id });

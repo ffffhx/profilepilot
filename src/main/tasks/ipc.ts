@@ -1,3 +1,5 @@
+import { TaskDetailCursor } from "./feed";
+import { findTaskHit } from "../../shared/task-search";
 import { BrowserWindow, dialog, ipcMain, Notification, safeStorage, shell } from "electron";
 import { fork } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -13,8 +15,7 @@ import { TaskPreviewStream } from "./preview";
 import type { ProfileManager } from "../profile-manager";
 import { defaultDataDir } from "../fs-util";
 import { WrapperBrowser } from "./browser";
-import { BrowserServiceClient } from "../browser-service/client";
-import { browserServiceLaunchInfo, saveBrowserServiceLaunch } from "../browser-service/launcher";
+import type { BrowserServiceClient } from "../browser-service/client";
 import { nativeProfileAvailability } from "./native-compatibility";
 import { executeNativeUiCommand } from "./management";
 import { NativeBrowser, RoutedBrowser, isNativeTask } from "./native-browser";
@@ -28,7 +29,7 @@ import { JEV_KEYS_URL, JEV_BILLING_URL, JEV_CONSOLE_URL, testJevConnection } fro
 import { writeAgentBrowserControlWaitStateSync, clearAgentBrowserControlWaitStateSync } from "../agent-browser-session";
 const messageOptions = z.object({ requestId: z.string().min(1).max(200).optional(), attachmentIds: z.array(z.string().uuid()).max(50).optional() }).strict();
 
-export function registerTaskService(profileManager: ProfileManager): TaskService {
+export function registerTaskService(profileManager: ProfileManager, native: BrowserServiceClient): TaskService {
   const root = path.join(process.env.CPM_DATA_DIR || defaultDataDir(), "browser-tasks");
   const store = new TaskStore(root);
   const previews = new Map<number, { taskId: string; stream: TaskPreviewStream | NativePreviewStream }>();
@@ -53,12 +54,12 @@ export function registerTaskService(profileManager: ProfileManager): TaskService
   store.data.settings.hasApiKey = existsSync(vaultPath);
   store.data.settings.hasJevApiKey = existsSync(jevVault(jevProviderFor(store.data.settings)));
   store.data.settings.jevEnabled = store.data.settings.jevEnabled === true && store.data.settings.hasJevApiKey;
-  store.save();
-  saveBrowserServiceLaunch(root, browserServiceLaunchInfo(path.resolve(__dirname, '../../..')));
-  const native = new BrowserServiceClient(root, () => broadcast());
+  store.save([]);
   let service!: TaskService;
-  const snapshot = () => ({ ...store.snapshot(), streams: Object.fromEntries(service?.streams || []), nativeBrowsers: native.states(), nativeInstallations: native.installationStates() });
-  const broadcast = () => { const value = snapshot(); for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send(TASK_CHANGED, value); };
+  let detachNative = () => {};
+  const snapshot = () => service.snapshot();
+  const detailCursors = new WeakMap<Electron.WebContents, TaskDetailCursor>();
+  const broadcast = (value: import("../../shared/tasks").TaskListUpdate) => { for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send(TASK_CHANGED, value); };
   const saveSettings = (patch: Partial<import("../../shared/tasks").TaskSettings> & { apiKey?: string }): void => {
     const input = z.object({ model: z.string().trim().min(1).max(200), baseUrl: z.string().url(), authMode: z.enum(["apiKey", "bearer"]).optional(), maxConcurrent: z.number().int().min(1).max(6), retentionDays: z.number().int().min(1).max(3650), saveScreenshots: z.boolean(), notifications: z.boolean(), apiKey: z.string().max(1000).optional() }).partial().parse(patch);
     const endpoint = new URL(input.baseUrl || store.data.settings.baseUrl);
@@ -73,13 +74,13 @@ export function registerTaskService(profileManager: ProfileManager): TaskService
     }
     const { apiKey: _secret, ...settings } = input;
     store.data.settings = { ...store.data.settings, ...settings, hasApiKey: existsSync(vaultPath) };
-    service.publish(); void service.tick(); return;
+    service.publish([]); void service.tick(); return;
   };
   service = new TaskService(store, {
     profileAvailability: id => id.startsWith("native:") ? nativeProfileAvailability(native.states().find(state => state.profileId === id)) : undefined,
     saveSettings, testConnection: () => testConnection(store, apiKey()), listModels: () => listServiceModels(store.data.settings, apiKey()),
     closePreview: () => { for (const id of previews.keys()) stopPreview(id); },
-    closeBrowser: () => native.close(),
+    closeBrowser: () => { detachNative(); native.configureUi(undefined); },
     browser: new RoutedBrowser(new WrapperBrowser(path.join(root, "artifacts")), new NativeBrowser(native, path.join(root, "artifacts"))), apiKey, jevApiKey,
     profileName: async (id) => {
       const profile = (await profileManager.getState()).profiles.find((entry) => entry.id === id);
@@ -101,7 +102,7 @@ export function registerTaskService(profileManager: ProfileManager): TaskService
       return { port, name: (await profileManager.getState()).profiles.find((profile) => profile.id === id)?.name || id };
     },
     changed: broadcast,
-    streamChanged: update => { for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send(TASK_STREAM, update); },
+    streamChanged: update => { for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed() && detailCursors.get(window.webContents)?.taskId === update.taskId) window.webContents.send(TASK_STREAM, update); },
     notify: (title, body, taskId) => {
       if (!Notification.isSupported()) return;
       const notification = new Notification({ title: `ProfilePilot · ${title}`, body });
@@ -126,7 +127,7 @@ export function registerTaskService(profileManager: ProfileManager): TaskService
     const result = await executeNativeUiCommand(profileId, method, params, service) as Record<string, unknown>;
     return { ...result, browser: native.states().find(state => state.profileId === profileId) };
   });
-  native.onEvent(event => {
+  detachNative = native.onEvent(event => {
     if (event.type === "cdp") return;
     if (event.type === "state" && event.state?.connected && event.state.taskTabs && !event.state.ownerSessionId && !event.state.pausedByBrowser) service.reconcileIdleNativeProfile(event.profileId);
     if (event.sessionId && !native.isDirectSession(event.profileId, event.sessionId)) {
@@ -135,13 +136,7 @@ export function registerTaskService(profileManager: ProfileManager): TaskService
         void native.request(event.profileId, "control", { action: "release", sessionId: event.sessionId }).catch(() => {});
       } else service.externalControl(event.sessionId, event.state?.ownership || "user", "active", event.type === "disconnected" ? "extension-disconnected" : event.state?.ownership === "agent" ? "user-return" : event.state?.pausedByBrowser ? "extension-paused" : "extension-takeover");
     }
-    broadcast();
   });
-  // The desktop subscribes to the same independent service used by the CLI.
-  // Fresh installations can start it on their first explicit browser action.
-  if (existsSync(path.join(root, 'native-browser-credentials.bin')) || existsSync(path.join(root, 'native-control.json'))) {
-    void native.start().catch(error => { console.error('浏览器服务连接失败：', error); broadcast(); });
-  }
   const idSchema = z.string().uuid();
   ipcMain.handle(TASK_CHANNEL, async (event, method: string, ...args: any[]) => {
     const url = event.senderFrame?.url || "";
@@ -179,6 +174,26 @@ export function registerTaskService(profileManager: ProfileManager): TaskService
         if (preview?.taskId === id) preview.stream.ack(frameId);
         return;
       }
+      case "list": return service.list();
+      case "detail": {
+        const id = idSchema.parse(args[0]);
+        const version = z.number().int().nonnegative().optional().parse(args[1]);
+        let cursor = detailCursors.get(event.sender);
+        if (!cursor) { cursor = new TaskDetailCursor(); detailCursors.set(event.sender, cursor); }
+        return cursor.read(service.detailTask(id), version, service.streams.get(id));
+      }
+      case "search": {
+        const query = z.string().max(1000).parse(args[0]);
+        if (!query.trim()) return [];
+        return store.data.tasks.flatMap(task => {
+          const hit = findTaskHit(task, query);
+          if (!hit) return [];
+          // Return a bounded excerpt, retaining the original DOM target.
+          const index = hit.text.normalize("NFKC").toLocaleLowerCase().indexOf(query.normalize("NFKC").trim().toLocaleLowerCase());
+          const from = Math.max(0, index - 40);
+          return [{ taskId: task.id, hit: { ...hit, text: hit.text.slice(from, from + query.length + 180) } }];
+        });
+      }
       case "snapshot": return snapshot();
       case "getMemory":
       case "setMemoryEnabled":
@@ -191,35 +206,6 @@ export function registerTaskService(profileManager: ProfileManager): TaskService
         const name = z.string().min(1).max(110).parse(args[1]);
         if (method === "deleteMemory") return service.deleteMemory(profileId, name, z.string().length(64).parse(args[2]));
         return service.writeMemory(profileId, name, z.string().max(262144).parse(args[2]), z.string().length(64).nullable().parse(args[3]));
-      }
-      case "getNativeLiveView": {
-        const id = z.string().regex(/^native:[^/\\]{1,100}$/).parse(args[0]);
-        const state = native.states().find(item => item.profileId === id);
-        if (!state?.connected) throw new Error("请先到配套工具连接浏览器扩展。");
-        if (!state.capabilities?.includes("liveView")) throw new Error("请在配套工具中更新浏览器扩展后查看实时画面。");
-        return native.request(id, "liveView", {}, 5000);
-      }
-      case "authorizeNativeBrowser":
-      case "pairNativeBrowser": {
-        const id = z.string().max(150).parse(args[0]);
-        const profile = (await profileManager.getState()).profiles.find(p => p.id === id && p.source === "native");
-        if (!profile) throw new Error("请选择本机已发现的系统 Chrome Profile。");
-        if (store.data.tasks.some(t => t.profileId === id && t.status === "running")) throw new Error("请先暂停此 Profile 上的任务，再重新配对。");
-        if (method === "authorizeNativeBrowser") {
-          const request = await native.authorize(id, profile.name);
-          await profileManager.launchProfileWithUrls(id, [request.url]);
-          await native.beginInstallation(request.url);
-          return { expiresAt: request.expiresAt };
-        }
-        return native.pair(id);
-      }
-      case "disconnectNativeBrowser": {
-        const id = z.string().max(150).parse(args[0]);
-        if (!(await profileManager.getState()).profiles.some(p => p.id === id && p.source === "native")) throw new Error("Profile 不存在。");
-        await native.disconnect(id); broadcast(); return;
-      }
-      case "openNativeExtensionFolder": {
-        await native.revealExtension(); return;
       }
       case "focusTaskBrowser": {
         const task = store.get(idSchema.parse(args[0]));
@@ -244,12 +230,12 @@ export function registerTaskService(profileManager: ProfileManager): TaskService
         if (data.id && !previous) throw new Error("资料不存在。");
         const material = { ...data, id: data.id || randomUUID(), version: (previous?.version || 0) + 1, updatedAt: now() };
         store.data.materials = [material, ...store.data.materials.filter((item) => item.id !== material.id)];
-        service.publish(); return material;
+        service.publish([]); return material;
       }
       case "deleteMaterial": {
         const id = idSchema.parse(args[0]);
         if ([...store.data.templates, ...store.data.schedules].some(item => item.task.materialIds?.includes(id))) throw new Error("资料被模板或计划引用，请先编辑相应任务。");
-        store.data.materials = store.data.materials.filter((item) => item.id !== id); service.publish(); return;
+        store.data.materials = store.data.materials.filter((item) => item.id !== id); service.publish([]); return;
       }
       case "importAttachments": {
         const result = await dialog.showOpenDialog({ title: "选择任务附件", properties: ["openFile", "multiSelections"] });
@@ -262,7 +248,7 @@ export function registerTaskService(profileManager: ProfileManager): TaskService
         if ([...store.data.templates, ...store.data.schedules].some(item => item.task.attachmentIds?.includes(id))) throw new Error("附件被模板或计划引用，请先编辑相应任务。");
         const file = store.data.attachments.find((file) => file.id === id);
         if (file && path.resolve(file.path).startsWith(path.resolve(root, "attachments") + path.sep)) rmSync(file.path, { force: true });
-        store.data.attachments = store.data.attachments.filter((file) => file.id !== id); service.publish(); return;
+        store.data.attachments = store.data.attachments.filter((file) => file.id !== id); service.publish([]); return;
       }
       case "saveSettings": return saveSettings(args[0]);
       case "testConnection": return testConnection(store, apiKey());
@@ -282,7 +268,7 @@ export function registerTaskService(profileManager: ProfileManager): TaskService
         store.data.settings.jevMode = input.mode || store.data.settings.jevMode || "driver";
         store.data.settings.hasJevApiKey = existsSync(jevVaultPath);
         store.data.settings.jevEnabled = input.enabled && store.data.settings.hasJevApiKey;
-        service.publish(); return;
+        service.publish([]); return;
       }
       case "testJevConnection": return testJevConnection(jevApiKey(), jevProviderFor(store.data.settings));
       case "openLink": {
@@ -301,16 +287,16 @@ export function registerTaskService(profileManager: ProfileManager): TaskService
         const previous = store.data.schedules.find(schedule => schedule.id === input.id);
         if (input.id && !previous) throw new Error("计划不存在。");
         const schedule: TaskSchedule = { ...previous, ...input, id: input.id || randomUUID(), missedAt: previous?.at === input.at ? previous.missedAt : undefined };
-        store.data.schedules = [schedule, ...store.data.schedules.filter((value) => value.id !== schedule.id)]; service.publish(); return schedule;
+        store.data.schedules = [schedule, ...store.data.schedules.filter((value) => value.id !== schedule.id)]; service.publish([]); return schedule;
       }
-      case "deleteSchedule": { const id = idSchema.parse(args[0]); store.data.schedules = store.data.schedules.filter((entry) => entry.id !== id); service.publish(); return; }
+      case "deleteSchedule": { const id = idSchema.parse(args[0]); store.data.schedules = store.data.schedules.filter((entry) => entry.id !== id); service.publish([]); return; }
       case "saveTemplate": {
         const input = z.object({ id: idSchema.optional(), name: z.string().trim().min(1).max(100), task: createTaskSchema }).parse(args[0]);
         if (input.id && !store.data.templates.some(template => template.id === input.id)) throw new Error("模板不存在。");
         const template = { ...input, id: input.id || randomUUID(), updatedAt: now() };
-        store.data.templates = [template, ...store.data.templates.filter(template => template.id !== input.id)]; service.publish(); return template;
+        store.data.templates = [template, ...store.data.templates.filter(template => template.id !== input.id)]; service.publish([]); return template;
       }
-      case "deleteTemplate": { const id = idSchema.parse(args[0]); store.data.templates = store.data.templates.filter(template => template.id !== id); service.publish(); return; }
+      case "deleteTemplate": { const id = idSchema.parse(args[0]); store.data.templates = store.data.templates.filter(template => template.id !== id); service.publish([]); return; }
       case "deleteTask": return service.deleteTask(idSchema.parse(args[0]));
       case "updateTaskMetadata": return service.updateTaskMetadata(idSchema.parse(args[0]), args[1]);
       case "exportData": {

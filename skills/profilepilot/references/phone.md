@@ -82,6 +82,25 @@ Read `sessionId` and `generation` from the current `list` response and generate 
 
 Prefer native selectors when the page exposes controls: `{"kind":"click","selector":{"resourceId":"com.example.app:id/save"}}`. Selectors match all supplied fields exactly: `resourceId`, `text`, `description`, `className`, `packageName`, `enabled`, `checked`, `editable`, `clickable`, `scrollable`. Use `find` to inspect matches; `click`, `fill` and `scroll` require exactly one match and resolve again on the phone at execution time. `fill` accepts `text` (including `""` to clear) without requiring focus. `scroll` takes `direction: "forward" | "backward"`. Ambiguity and incomplete/stale trees fail rather than choosing an arbitrary target. Do not blindly switch to coordinates after an uncertain action.
 
+## Screen camera for a browser QR code
+
+The screen camera supplies a computer image to an Android virtual camera. It requires a compatible Android 16+ device and ProfilePilot companion 0.3.0+, with an active App control session. It does not work in basic mode. Start with `ppilot phone camera probe --device DEVICE_ID`; a recent Android version alone does not guarantee virtual-camera or GPU support.
+
+Use the already authorized browser Profile to capture the current QR code, including its white border. Keep browser and phone sessions separate. A UTF-8 `camera.json` contains the current phone lease, for example `{"id":"DEVICE_ID","sessionId":"CURRENT_SESSION_ID","generation":1}`. Use actual values from `ppilot phone list`.
+
+```sh
+ppilot phone camera start --params-file camera.json
+ppilot phone camera frame --params-file camera.json --file qr.png
+ppilot phone camera apps --params-file camera.json
+ppilot phone camera preview --params-file camera.json --output scan.jpg
+ppilot phone camera status --params-file camera.json
+ppilot phone camera stop --params-file camera.json
+```
+
+For `camera launch`, add `component` from `camera apps` to a separate lease JSON. For `camera tap`, add `x` and `y` measured from a fresh 720 × 1280 camera preview. For `camera key`, add `"key":"back"`. These actions operate on the App's virtual display; ordinary `phone action` coordinates belong to the phone's main display. Launch the scanning App there, open its scanner, and verify its result. Stop the camera and finish only the phone session you own. Pause/takeover, disconnect and lease changes revoke camera input; never auto-resume or repeat an uncertain tap or launch.
+
+For continuous window capture, list `camera sources`, then add its exact `sourceId` and optional normalized `crop` (`x`, `y`, `width`, `height` between 0 and 1) to the start parameters. The selected window is never replaced automatically if it closes. macOS requires screen recording permission. The desktop **手机 → 屏幕摄像头** dialog provides the same source selection and App preview. A successful start or frame upload is not evidence of a successful QR scan; verify the scanning App and the original browser page.
+
 ## Reusable flows
 
 For an authorized repeated workflow, use `ppilot phone run --device DEVICE_ID --file flow.json [--output-dir DIRECTORY]`. It creates and releases its own session, so do not call `start` first or reuse an occupied session. Files are UTF-8 JSON (BOM accepted on Windows):

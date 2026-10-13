@@ -209,7 +209,7 @@ function diagnosticWith(overrides) {
 }
 
 function tool(key, availability, version) {
-  const label = key === "agent-browser" ? "agent-browser" : key === "playwright-cli" ? "Playwright CLI" : "Chrome DevTools MCP";
+  const label = "agent-browser";
   return {
     key,
     label,
@@ -217,11 +217,7 @@ function tool(key, availability, version) {
     executablePath: availability === "installed" ? `/usr/local/bin/${key}` : null,
     version,
     source: availability === "installed" ? "binary" : null,
-    installCommand: key === "agent-browser"
-      ? "npm install -g agent-browser"
-      : key === "playwright-cli"
-        ? "npm install -g @playwright/cli@latest"
-        : "npm install -g chrome-devtools-mcp@latest",
+    installCommand: "npm install -g agent-browser",
     verifyCommand: `${key} --version`,
     error: null
   };

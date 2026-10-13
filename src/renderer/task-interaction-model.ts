@@ -34,19 +34,8 @@ export function priorResult(text: string): TaskResult | undefined {
   if (!text.startsWith("上次执行结果：")) return;
   try { const result = JSON.parse(text.slice("上次执行结果：".length)); if (typeof result.summary === "string" && Array.isArray(result.evidence) && Array.isArray(result.remaining)) return result; } catch { /* Ordinary assistant text. */ }
 }
-export interface SearchHit { id: string; text: string; label: string; }
-export function taskSearchDocuments(task: BrowserTask): SearchHit[] {
-  return [{ id: "task-prompt", text: task.prompt, label: "最初要求" }, { id: "task-context", text: `${task.title} ${task.profileName}`, label: "任务" },
-    ...task.events.map(event => ({ id: `event-${event.id}`, text: event.text, label: event.kind === "user" ? "用户消息" : "执行记录" })),
-    { id: "task-result", text: [task.result?.summary, ...(task.result?.evidence || []), ...(task.result?.remaining || [])].join("\n"), label: "任务结果" },
-    ...task.items.map(item => ({ id: `item-${item.id}`, text: `${item.label}\n${item.result || ""}\n${item.evidence || ""}`, label: "逐项结果" })),
-    ...(task.evidencePages || []).map(page => ({ id: "task-evidence", text: `${page.title}\n${page.url}\n${page.snapshot}`, label: "页面证据" }))];
-}
-export function findTaskHit(task: BrowserTask, query: string): SearchHit | undefined {
-  const q = query.normalize("NFKC").toLocaleLowerCase().trim(); if (!q) return;
-  return taskSearchDocuments(task).find(row => row.text.normalize("NFKC").toLocaleLowerCase().includes(q));
-}
-export function attentionReason(task: BrowserTask, readAt?: string): string {
+export { taskSearchDocuments, findTaskHit, type SearchHit } from "../shared/task-search";
+export function attentionReason(task: Pick<BrowserTask, "status" | "updatedAt" | "archivedAt"> & { pending?: { kind: string } }, readAt?: string): string {
   if (task.archivedAt) return "";
   if (task.pending) return task.pending.kind === "confirmation" ? "等待确认" : task.pending.kind === "handoff" ? "需要接管" : "等待回答";
   if (task.status === "failed") return "执行失败";

@@ -5,23 +5,61 @@ const path = require("node:path");
 const { execFileSync } = require("node:child_process");
 const test = require("node:test");
 
-test("each real tool installs and refreshes only its own Wrapper", async () => {
+test("startup removes retired managed launchers on both platforms and preserves custom files", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "profilepilot-retired-wrappers-"));
+  const originalHome = process.env.HOME;
+  const originalWindowsUserPath = process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH;
+  process.env.HOME = home;
+  if (process.platform === "win32") process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH = "";
+  try {
+    const modulePath = require.resolve("../dist/main/shell-integration.js");
+    delete require.cache[modulePath];
+    const shell = require(modulePath);
+    const directory = path.join(home, ".profilepilot", "bin");
+    fs.mkdirSync(directory, { recursive: true });
+    const retiredFiles = [];
+    for (const driver of ["playwright-cli", "chrome-devtools-mcp"]) {
+      const signature = `PROFILEPILOT_${driver.replaceAll("-", "_").toUpperCase()}`;
+      const bundle = `profilepilot-${driver}-wrapper.cjs`;
+      const files = {
+        [driver]: `#!/bin/sh\nwrapper=\${${signature}_WRAPPER:-'${directory}/${bundle}'}\n`,
+        [`${driver}.cmd`]: `@echo off\r\nset "wrapper=${directory}/${bundle}"\r\nif defined ${signature}_WRAPPER set "wrapper=%${signature}_WRAPPER%"\r\n`,
+        [bundle]: `exports.${signature}_HARD_STOP_EXIT_CODE = 75;\n`
+      };
+      for (const [name, content] of Object.entries(files)) {
+        const filePath = path.join(directory, name);
+        fs.writeFileSync(filePath, content);
+        retiredFiles.push(filePath);
+      }
+    }
+    const agentWrapper = path.join(directory, "profilepilot-agent-browser-wrapper.cjs");
+    fs.writeFileSync(agentWrapper, "keep agent-browser");
+    assert.equal(await shell.refreshAgentBrowserWrapperIfInstalled(), true);
+    for (const file of retiredFiles) assert.equal(fs.existsSync(file), false);
+    assert.equal(fs.readFileSync(agentWrapper, "utf8"), "keep agent-browser");
+    for (const file of retiredFiles) fs.writeFileSync(file, "my custom tool");
+    assert.equal(await shell.refreshAgentBrowserWrapperIfInstalled(), false);
+    for (const file of retiredFiles) assert.equal(fs.readFileSync(file, "utf8"), "my custom tool");
+  } finally {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    if (originalWindowsUserPath === undefined) delete process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH;
+    else process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH = originalWindowsUserPath;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("agent-browser installs and refreshes its Wrapper", async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "profilepilot-shell-integration-"));
   const keys = [
     "HOME",
     "PROFILEPILOT_AGENT_BROWSER_REAL",
-    "PROFILEPILOT_PLAYWRIGHT_CLI_REAL",
-    "PROFILEPILOT_CHROME_DEVTOOLS_MCP_REAL",
     "PROFILEPILOT_TEST_WINDOWS_USER_PATH"
   ];
   const original = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
   const fakeAgentBrowser = executable(path.join(home, "fake-agent-browser"), "child-shell-ok");
-  const fakePlaywrightCli = executable(path.join(home, "fake-playwright-cli"), "playwright-shell-ok");
-  const fakeChromeDevtoolsMcp = executable(path.join(home, "fake-chrome-devtools-mcp"), "mcp-shell-ok");
   process.env.HOME = home;
   process.env.PROFILEPILOT_AGENT_BROWSER_REAL = fakeAgentBrowser;
-  process.env.PROFILEPILOT_PLAYWRIGHT_CLI_REAL = fakePlaywrightCli;
-  process.env.PROFILEPILOT_CHROME_DEVTOOLS_MCP_REAL = fakeChromeDevtoolsMcp;
   if (process.platform === "win32") process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH = "";
 
   try {
@@ -30,15 +68,18 @@ test("each real tool installs and refreshes only its own Wrapper", async () => {
     const shell = require(modulePath);
 
     let diagnostic = await shell.inspectAgentIntegration();
+    for (const retired of ["playwright-cli", "chrome-devtools-mcp"]) {
+      await assert.rejects(() => shell.setAgentWrapperEnabled(retired, true), error => error.code === "AGENT_TOOL_UNSUPPORTED");
+      await assert.rejects(() => shell.setAgentSkillEnabled(retired, true), error => error.code === "AGENT_TOOL_UNSUPPORTED");
+    }
     assert.ok(diagnostic.wrappers.every((item) => !item.wrapperInstalled && !item.launcherInstalled));
     assert.equal(diagnostic.ready, false);
+    assert.deepEqual(diagnostic.wrappers.map(item => item.key), ["agent-browser"]);
 
     diagnostic = await shell.setAgentWrapperEnabled("agent-browser", true);
     const agentWrapper = diagnostic.wrappers.find((item) => item.key === "agent-browser");
-    const otherWrappers = diagnostic.wrappers.filter((item) => item.key !== "agent-browser");
     assert.equal(agentWrapper.wrapperInstalled, true);
     assert.equal(agentWrapper.launcherInstalled, true);
-    assert.ok(otherWrappers.every((item) => !item.wrapperInstalled && !item.launcherInstalled));
     assert.equal(diagnostic.shellIntegration.installed, true);
     assert.equal(diagnostic.ready, false, "a legacy Wrapper does not install the unified CLI");
 
@@ -47,12 +88,18 @@ test("each real tool installs and refreshes only its own Wrapper", async () => {
     assert.equal(diagnostic.ready, false, "legacy tool compatibility must not mask an incomplete unified setup");
 
     fs.writeFileSync(agentWrapper.wrapperPath, "stale wrapper", "utf8");
+    if (process.platform !== "win32") {
+      const zshenv = path.join(home, ".zshenv");
+      fs.writeFileSync(zshenv, fs.readFileSync(zshenv, "utf8").replace(
+        "# <<< ProfilePilot session integration <<<",
+        "export PROFILEPILOT_PLAYWRIGHT_CLI_WRAPPER=old\nexport PROFILEPILOT_CHROME_DEVTOOLS_MCP_WRAPPER=old\n# <<< ProfilePilot session integration <<<"
+      ));
+    }
     assert.equal(await shell.refreshAgentBrowserWrapperIfInstalled(), true);
     const wrapper = fs.readFileSync(agentWrapper.wrapperPath, "utf8");
     assert.match(wrapper, /AGENT_CONTROL_RETURNED/);
     assert.match(wrapper, /GATEWAY_PROFILE_NOT_CONFIGURED/);
     assert.doesNotMatch(wrapper, /require\(["']\.\//, "installed wrapper must be self-contained");
-    assert.ok(otherWrappers.every((item) => !fs.existsSync(item.wrapperPath) && !fs.existsSync(item.launcherPath)));
 
     const launcher = fs.readFileSync(agentWrapper.launcherPath, "utf8");
     assert.match(launcher, process.platform === "win32" ? /^@echo off/ : /^#!\/bin\/sh/);
@@ -60,6 +107,7 @@ test("each real tool installs and refreshes only its own Wrapper", async () => {
     if (process.platform !== "win32") {
       assert.equal(fs.statSync(agentWrapper.launcherPath).mode & 0o111, 0o111);
       const zshenv = fs.readFileSync(path.join(home, ".zshenv"), "utf8");
+      assert.doesNotMatch(zshenv, /PLAYWRIGHT_CLI|CHROME_DEVTOOLS_MCP/);
       assert.match(zshenv, /PROFILEPILOT_SESSION="\$AGENT_BROWSER_SESSION"/);
       assert.match(zshenv, /-d "\$PROFILEPILOT_AGENT_BROWSER_BIN_DIR"/);
       assert.match(zshenv, /export PATH="\$PROFILEPILOT_AGENT_BROWSER_BIN_DIR:\$PATH"/);
@@ -107,7 +155,7 @@ test("Wrapper installation is blocked until the corresponding real CLI is instal
     delete require.cache[modulePath];
     const { setAgentWrapperEnabled } = require(modulePath);
     await assert.rejects(
-      () => setAgentWrapperEnabled("playwright-cli", true),
+      () => setAgentWrapperEnabled("agent-browser", true),
       (error) => error.code === "AGENT_TOOL_REQUIRED"
     );
   } finally {
@@ -276,16 +324,13 @@ test("unified setup recovers a failed guide update and preserves external guides
   }
 });
 
-test("agent integration diagnostics do not treat npx as an installed MCP tool", async () => {
+test("agent integration diagnostics only advertise the installed agent-browser tool", async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "profilepilot-tool-diagnostic-"));
   const bin = path.join(home, "bin");
   const keys = [
     "HOME",
     "PATH",
     "PROFILEPILOT_AGENT_BROWSER_REAL",
-    "PROFILEPILOT_PLAYWRIGHT_CLI_REAL",
-    "PROFILEPILOT_CHROME_DEVTOOLS_MCP_REAL",
-    "PROFILEPILOT_CHROME_DEVTOOLS_MCP_NPX"
   ];
   const original = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
   fs.mkdirSync(bin, { recursive: true });
@@ -295,9 +340,6 @@ test("agent integration diagnostics do not treat npx as an installed MCP tool", 
     process.env.HOME = home;
     process.env.PATH = bin;
     delete process.env.PROFILEPILOT_AGENT_BROWSER_REAL;
-    delete process.env.PROFILEPILOT_PLAYWRIGHT_CLI_REAL;
-    delete process.env.PROFILEPILOT_CHROME_DEVTOOLS_MCP_REAL;
-    delete process.env.PROFILEPILOT_CHROME_DEVTOOLS_MCP_NPX;
     const modulePath = require.resolve("../dist/main/shell-integration.js");
     delete require.cache[modulePath];
     const { inspectAgentIntegration } = require(modulePath);
@@ -307,16 +349,12 @@ test("agent integration diagnostics do not treat npx as an installed MCP tool", 
     assert.deepEqual(
       diagnostic.tools.map((tool) => [tool.key, tool.availability]),
       [
-        ["agent-browser", "missing"],
-        ["playwright-cli", "missing"],
-        ["chrome-devtools-mcp", "missing"]
+        ["agent-browser", "missing"]
       ]
     );
-    assert.equal(diagnostic.tools[2].executablePath, null);
+    assert.equal(diagnostic.tools[0].executablePath, null);
     assert.equal(diagnostic.skills.length, 1);
     assert.match(diagnostic.tools[0].installCommand, /npm install -g agent-browser/);
-    assert.match(diagnostic.tools[1].installCommand, /@playwright\/cli/);
-    assert.match(diagnostic.tools[2].installCommand, /chrome-devtools-mcp/);
   } finally {
     for (const key of keys) {
       if (original[key] === undefined) delete process.env[key];

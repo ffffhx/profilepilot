@@ -17,7 +17,7 @@ if (!store.data.tasks.length) {
   store.event(task, 'assistant', '电脑已完成准备，等待手机回答。');
   const complete = store.create({ profileId: 'isolated:android', prompt: 'Completed result sample' }, 'Android test Profile');
   complete.status = 'completed'; complete.result = { kind: 'completed', summary: '手机和电脑共享的真实任务记录。', evidence: ['Isolated test authority'], remaining: [] };
-  tasks.publish();
+  tasks.publish([task, complete]);
 }
 const service = new MobileService({ root: path.join(root, 'mobile'), tasks, computerName: 'Android Test PC', profiles: async () => [{ id: 'isolated:android', name: 'Android test Profile', source: 'isolated', ready: true }] });
 (async () => {

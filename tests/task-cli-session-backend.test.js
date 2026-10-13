@@ -1,3 +1,4 @@
+const { readTaskRecords } = require('./helpers/task-records.cjs');
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
@@ -515,7 +516,7 @@ test("task.model changes only the session model and is used by the next worker",
   assert.equal(f.task.pending, pending);
   assert.equal(f.task.sdkSessionId, "keep-conversation");
   assert.notEqual(f.store.data.settings.model, "new-model");
-  assert.equal(JSON.parse(fs.readFileSync(f.store.file, "utf8")).tasks[0].model, "new-model");
+  assert.equal(readTaskRecords(f.store.file).tasks[0].model, "new-model");
   let start;
   f.service.dependencies.worker = () => fakeWorker((_child, value) => { start = value; });
   const run = f.run();
@@ -606,7 +607,8 @@ test("stream IPC batches deltas separately from full snapshots and persists the 
   child.emit("message", {kind:"text",id:"response",text:"中文输出"});
   assert.equal(f.task.events.at(-1).streamId,updates[0].stream.id);
   await new Promise(resolve => setTimeout(resolve, 110));
-  assert.equal(snapshots.length,1); assert.equal(snapshots[0].streams[f.task.id],undefined);
+  assert.equal(snapshots.length,1); assert.equal(snapshots[0].streams,undefined);
+  assert.equal(snapshots[0].tasks[0].id,f.task.id); assert.equal(snapshots[0].tasks[0].events,undefined);
 });
 
 test("reused SDK response ids get separate block identities and id-less completion retains its delta identity", async t => {

@@ -1,3 +1,4 @@
+const { readTaskRecords } = require('./helpers/task-records.cjs');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -29,7 +30,7 @@ function fixture(t) {
   const run = { started: Date.now(), stopped: false, chain: Promise.resolve(), repeat: '', repeatCount: 0 };
   task.status = 'running'; task.port = 9223; service.runs.set(task.id, run);
   t.after(async () => { await service.close(); fs.rmSync(root, { recursive: true, force: true }); });
-  return { service, store, task, run, calls, browser, read: () => JSON.parse(fs.readFileSync(store.file, 'utf8')).tasks.find(saved => saved.id === task.id) };
+  return { service, store, task, run, calls, browser, read: () => readTaskRecords(store.file).tasks.find(saved => saved.id === task.id) };
 }
 
 test('a stuck terminal cannot delay saving paused/uncertain tasks or starting browser handoff', async t => {

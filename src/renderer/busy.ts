@@ -1,26 +1,13 @@
+import { emphasizeName, isBusyAction } from "./render/busy-view";
+export { emphasizeName, renderToastBody, isBusyAction, profileBusyKind, profileBusyStatusLabel, TOAST_NAME_START, TOAST_NAME_END } from "./render/busy-view";
+export type { ProfileBusyKind } from "./render/busy-view";
 import { profileApi } from "./api";
-import { render } from "./render/render-root";
+import { invalidateView as render } from "./view-events";
 import { loadState } from "./state-actions";
 import { appRoot, store } from "./state";
-import { BusyProgressStep, BusyState, PublicProfile, ToastKind } from "./types";
-import { escapeHtml, formatErrorMessage } from "./util";
-
-// Toast 文案里需要高亮的名字（如 Profile 名）用这对私有控制符包起来，
-// 渲染时整体转义后再把控制符替换成带样式的 <span>，避免 HTML 注入。
-export const TOAST_NAME_START = String.fromCharCode(1);
-export const TOAST_NAME_END = String.fromCharCode(2);
-
-export function emphasizeName(name: string): string {
-  return `${TOAST_NAME_START}${name}${TOAST_NAME_END}`;
-}
-
-export function renderToastBody(message: string): string {
-  return escapeHtml(message)
-    .split(TOAST_NAME_START)
-    .join('<span class="toast-name font-mono font-semibold text-accent-bright">')
-    .split(TOAST_NAME_END)
-    .join("</span>");
-}
+import type { PublicProfile } from "../shared/types";
+import type { BusyProgressStep, BusyState, ToastKind } from "./types";
+import { formatErrorMessage } from "./util";
 
 export function setToast(message: string, kind: ToastKind = "normal"): void {
   store.toast = message;
@@ -161,31 +148,6 @@ export async function focusProfileFromUi(profile: PublicProfile): Promise<void> 
     render();
     void loadState().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
   }
-}
-
-export function isBusyAction(key: string, match: Partial<Omit<BusyState, "key" | "message">> = {}): boolean {
-  const activeBusyState = store.busyState;
-  if (!activeBusyState || activeBusyState.key !== key) {
-    return false;
-  }
-
-  return Object.entries(match).every(([field, value]) => activeBusyState[field as keyof BusyState] === value);
-}
-
-export type ProfileBusyKind = "launch" | "close";
-
-export function profileBusyKind(profileId: string): ProfileBusyKind | null {
-  if (isBusyAction("launch-profile", { profileId }) || isBusyAction("launch-cdp", { profileId })) {
-    return "launch";
-  }
-  if (isBusyAction("close-profile", { profileId })) {
-    return "close";
-  }
-  return null;
-}
-
-export function profileBusyStatusLabel(kind: ProfileBusyKind): string {
-  return kind === "launch" ? "启动中" : "关闭中";
 }
 
 export function busyStepsKey(steps: BusyProgressStep[] | undefined): string {

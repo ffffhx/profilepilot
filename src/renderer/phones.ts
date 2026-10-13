@@ -13,6 +13,7 @@ import { openPhoneCloud } from "./phone-cloud";
 import { openPhoneEmulator } from "./phone-emulator";
 import { openBasicPhone, phoneModeChoices, PHONE_APP_DOWNLOAD_URL } from "./phone-basic";
 import { createPhoneInspector } from "./phone-inspector";
+import { openScreenCamera } from "./screen-camera";
 
 const root = document.getElementById("phones")!;
 const esc = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
@@ -292,6 +293,7 @@ root.addEventListener("click", event => {
   if (action === "emulator") { emulator(); return; }
   if (action === "mobile") { void openMobileConnections?.(); return; }
   const device = current(); if (!device) return;
+  if (action === "screen-camera") { void openScreenCamera(device); return; }
   if (button.dataset.phoneBasicCommand) { void run(() => window.phones.basicControl(device.id, button.dataset.phoneBasicCommand as "pause" | "resume" | "stop")); return; }
   if (action === "inspect-app") { void run(() => window.phones.inspect(device.id)); return; }
   if (action === "basic-control" || action === "phone-operate") {

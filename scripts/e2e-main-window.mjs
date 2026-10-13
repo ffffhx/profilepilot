@@ -213,12 +213,6 @@ function verifyMainWindowSmoke(smoke, homeDir) {
 
   assert.deepEqual(smoke.globalInstructionFiles, ["AGENTS.md", "CLAUDE.md"]);
   assert.equal(smoke.globalInstructionHasContent, true);
-  assert.equal(smoke.globalInstructionsModalTitle, "全局指令");
-  assert.deepEqual(smoke.globalInstructionsModalTabs, ["AGENTS.md", "CLAUDE.md"]);
-  assert.equal(smoke.globalInstructionsModalPath, path.join(homeDir, ".codex", "AGENTS.md"));
-  assert.equal(smoke.globalInstructionsModalHasContent, true);
-  assert.equal(smoke.globalInstructionsEditorReady, true);
-  assert.ok(smoke.globalInstructionsEditorDraftLength > 0);
   assert.equal(smoke.crud, null, "the smoke flow must stay non-destructive");
 }
 

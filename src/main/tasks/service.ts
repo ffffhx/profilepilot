@@ -1,3 +1,4 @@
+import { TaskListFeed } from "./feed";
 import { fork, type ChildProcess } from "node:child_process";
 import { mergeCostRecords } from "../../shared/task-cost";
 import { createHash, randomUUID } from "node:crypto";
@@ -39,7 +40,7 @@ export interface TaskServiceDependencies {
   evaluateJev?: typeof evaluateJevPage;
   chooseJev?: typeof chooseJevAction;
   taskHelper?: typeof taskHelper;
-  changed(snapshot: TaskSnapshot): void;
+  changed(update: import("../../shared/tasks").TaskListUpdate): void;
   streamChanged?(update: import("../../shared/tasks").TaskStreamUpdate): void;
   notify(title: string, body: string, taskId?: string): void;
   controlReceiver?(sessionId: string, waiting: boolean): void;
@@ -81,29 +82,32 @@ export class TaskService {
   private lastCleanup = 0;
   private readonly decisionsInFlight = new Set<string>();
   private readonly archiving = new Set<string>();
+  private readonly listFeed: TaskListFeed;
+  private readonly pendingChanges = new Set<string>();
   private broadcastTimer?: NodeJS.Timeout;
   private streamTimer?: NodeJS.Timeout;
   private pendingStreams = new Set<string>();
   private readonly drainingQueue = new Set<string>();
   reconcileIdleNativeProfile(profileId: string): void {
-    let changed = false;
+    const changed: BrowserTask[] = [];
     for (const task of this.store.data.tasks) {
       if (task.profileId !== profileId || task.browserConnection !== "extension" || task.status !== "paused" || this.runs.has(task.id) || task.pending) continue;
       task.browserConnection = undefined;
       task.resumeContext = { reason: "扩展确认原会话已释放，继续时重新核查页面", url: task.observation?.url || task.resumeContext?.url, observed: false };
       task.observation = undefined; this.markInterrupted(task);
       this.store.event(task, "system", "扩展已连接且无任务占用，已清除旧的浏览器预留；任务记录保留，继续时将重新连接并核查页面。");
-      changed = true;
+      changed.push(task);
     }
-    if (changed) this.publish();
+    if (changed.length) this.publish(changed);
   }
   constructor(readonly store: TaskStore, readonly dependencies: TaskServiceDependencies) {
+    this.listFeed = new TaskListFeed(() => ({ tasks: store.data.tasks, metadata: store.listMetadata() }));
     this.memory = new ProfileMemory(store.root);
     this.terminal = new TaskTerminal(store.root, (id, result) => {
       const task = store.data.tasks.find(task => task.id === id);
       if (!task) return;
       const outcome = { succeeded: "已完成", failed: `执行失败（退出码 ${result.exit_code ?? "未知"}）`, stopped: "已停止", timed_out: "超时，已停止", running: "运行中", interrupted: "连接中断，状态待核查" }[result.status];
-      store.event(task, "system", `终端${outcome}：${result.summary}`); this.publish();
+      store.event(task, "system", `终端${outcome}：${result.summary}`); this.publish(task);
     });
   }
   profileAvailability(id: string): { ready: boolean; reason?: string; code?: string } | undefined {
@@ -121,7 +125,7 @@ export class TaskService {
     this.assertMemoryEditable(profileId);
     const previous = this.store.data.memoryPolicies;
     this.store.data.memoryPolicies = { ...previous, [profileId]: { enabled } };
-    try { this.publish(); } catch (error) { this.store.data.memoryPolicies = previous; throw error; }
+    try { this.publish([]); } catch (error) { this.store.data.memoryPolicies = previous; throw error; }
     return this.getMemory(profileId);
   }
   writeMemory(profileId: string, name: string, content: string, revision: string | null): ProfileMemorySnapshot {
@@ -138,18 +142,38 @@ export class TaskService {
     this.timer.unref();
     void this.tick();
   }
-  publish(deferPersistence = false): void {
+  publish(changes: BrowserTask | readonly BrowserTask[], deferPersistence = false): void {
+    const tasks = Array.isArray(changes) ? changes : [changes as BrowserTask];
     this.syncControlReceivers();
-    if (deferPersistence) this.store.scheduleSave(); else this.store.save();
-    if (this.dependencies.browser.syncTaskState) for (const task of this.store.data.tasks) this.dependencies.browser.syncTaskState(task);
+    if (deferPersistence) this.store.scheduleSave(80, tasks); else this.store.save(tasks);
+    if (this.dependencies.browser.syncTaskState) for (const task of tasks) this.dependencies.browser.syncTaskState(task);
+    for (const task of tasks) this.pendingChanges.add(task.id);
     this.broadcast();
   }
   snapshot(): TaskSnapshot {
     return { ...this.store.snapshot(), streams: Object.fromEntries(this.streams) };
   }
+  list(): import("../../shared/tasks").TaskListSnapshot {
+    this.store.refreshCatalog();
+    this.flushBroadcast();
+    return this.listFeed.snapshot();
+  }
+  detailTask(id: string): BrowserTask {
+    const task = this.store.get(id), title = task.title;
+    this.store.refreshTaskTitle(id);
+    if (task.title !== title) { this.pendingChanges.add(id); this.broadcast(); }
+    return task;
+  }
+  private flushBroadcast(): void {
+    if (this.broadcastTimer) clearTimeout(this.broadcastTimer);
+    this.broadcastTimer = undefined;
+    const update = this.listFeed.update(this.pendingChanges);
+    this.pendingChanges.clear();
+    if (update) this.dependencies.changed(update);
+  }
   private commitTask(task: BrowserTask, change: () => void): void {
     const previous = structuredClone(task);
-    try { change(); this.publish(); }
+    try { change(); this.publish(task); }
     catch (error) {
       for (const key of Object.keys(task)) delete (task as unknown as Record<string, unknown>)[key];
       Object.assign(task, previous);
@@ -159,13 +183,12 @@ export class TaskService {
   private broadcast(): void {
     if (this.broadcastTimer || this.closed) return;
     this.broadcastTimer = setTimeout(() => {
-      this.broadcastTimer = undefined;
-      this.dependencies.changed(this.snapshot());
+      this.flushBroadcast();
     }, 80);
     this.broadcastTimer.unref();
   }
   private broadcastStream(taskId: string): void {
-    if (!this.dependencies.streamChanged) { this.broadcast(); return; }
+    if (!this.dependencies.streamChanged) { this.pendingChanges.add(taskId); this.broadcast(); return; }
     this.pendingStreams.add(taskId);
     if (this.streamTimer || this.closed) return;
     this.streamTimer = setTimeout(() => {
@@ -184,7 +207,7 @@ export class TaskService {
     if (!Object.keys(patch).length) throw new Error("请选择要修改的运行限制。");
     task.limits = { ...task.limits, ...patch };
     this.store.event(task, "system", `已更新会话运行限制：${task.limits.minutes} 分钟 / ${task.limits.actions} 次动作 / $${task.limits.budgetUsd}。累计用量保留，继续执行需要主动发送或恢复。`);
-    this.publish();
+    this.publish(task);
   }
   queue(id: string, removeId?: string): TaskQueuedMessage[] {
     const task = this.store.get(id);
@@ -192,7 +215,7 @@ export class TaskService {
       if (this.drainingQueue.has(id)) throw new Error("队列消息正在交付，请稍后重试。");
       if (!task.messageQueue?.some(entry => entry.id === removeId)) throw new Error("队列消息已被交付或移除，请刷新后重试；未取回任何内容。");
       task.messageQueue = (task.messageQueue || []).filter(entry => entry.id !== removeId);
-      this.publish();
+      this.publish(task);
     }
     return structuredClone(task.messageQueue || []);
   }
@@ -214,7 +237,7 @@ export class TaskService {
     if (receipt && receipt.fingerprint !== this.messageFingerprint(message, options)) throw new Error("消息编号已被其他内容使用，请创建新消息。");
     // An earlier call may have changed memory before its final save failed.
     // A retry is acknowledged only after the state is durable.
-    if (receipt) this.publish();
+    if (receipt) this.publish(task);
     return Boolean(receipt);
   }
   private acceptMessage(task: BrowserTask, message: string, options: TaskMessageOptions): void {
@@ -230,13 +253,13 @@ export class TaskService {
     try {
       await this.control(task.id, "resume", next.message, { requestId: next.id, attachmentIds: next.attachmentIds });
       task.messageQueue = task.messageQueue.filter(entry => entry.id !== next.id);
-      this.publish();
+      this.publish(task);
     } catch (error) {
       // A later pause/cancel/takeover owns the state, even when browser return
       // rejects the older queued continuation. Retain the queued payload.
       try { verifyContinuation(); } catch { return; }
       task.status = "paused";
-      this.store.event(task, "error", `排队消息尚未交付，内容已保留：${String(error)}`); this.publish();
+      this.store.event(task, "error", `排队消息尚未交付，内容已保留：${String(error)}`); this.publish(task);
     } finally { this.drainingQueue.delete(task.id); }
   }
   private syncControlReceivers(): void {
@@ -254,7 +277,7 @@ export class TaskService {
     if (this.closed) throw new Error("应用正在退出，无法创建任务。");
     const name = await this.dependencies.profileName(input.profileId);
     const task = this.store.create(input, name, nativeRequest);
-    this.publish(); void this.tick(); return task;
+    this.publish(task); void this.tick(); return task;
   }
   async retryItems(id: string, itemIds: string[]): Promise<BrowserTask> {
     if (this.closed) throw new Error("应用正在退出，无法创建任务。");
@@ -277,7 +300,7 @@ export class TaskService {
       if (items[i]!.status === "uncertain") task.items[i].status = "uncertain";
     }
     this.store.event(task, "user", `仅继续所选 ${items.length} 项；原任务中已完成的项目保持不变。沿用原资料版本和剩余自动操作额度。结果未确认的提交必须先核查，不得直接重试。`);
-    this.publish(); void this.tick(); return task;
+    this.publish(task); void this.tick(); return task;
   }
   private editableTask(id: string): BrowserTask {
     if (this.closed) throw new Error("应用正在退出，请稍后再试。");
@@ -295,20 +318,20 @@ export class TaskService {
     if (task.pending) task.status = "paused";
     task.pending = undefined;
     this.store.event(task, "system", `执行模式已设为 ${mode}${model ? `；模型 ${model}` : ""}。`);
-    this.publish();
+    this.publish(task);
   }
   setModel(id: string, model: string): void {
     const task = this.editableTask(id);
     task.model = z.string().trim().min(1).max(200).parse(model);
     this.store.event(task, "system", `后续执行的模型已设为 ${task.model}。`);
-    this.publish();
+    this.publish(task);
   }
   permissions(id: string, revokeId?: string): BrowserTask["permissionRules"] {
     const task = this.store.get(id);
     if (revokeId) {
       if (this.decisionsInFlight.has(id)) throw new Error("该确认正在处理，请稍后修改授权。");
       task.permissionRules = revokeId === "all" ? [] : (task.permissionRules || []).filter(rule => rule.id !== revokeId);
-      this.publish();
+      this.publish(task);
     }
     return structuredClone(task.permissionRules || []);
   }
@@ -330,7 +353,7 @@ export class TaskService {
     // standing execution grants, or approvals into it.
     if (eventId) this.rewindConversation(task.id, eventId);
     this.store.event(task, "system", "已从原会话创建分支；既有浏览器操作保留，继续前核查当前页面。");
-    this.publish(); return task;
+    this.publish(task); return task;
   }
   rewindConversation(id: string, eventId: string): string {
     const task = this.editableTask(id);
@@ -348,7 +371,7 @@ export class TaskService {
     task.resumeContext = { reason: "对话已回退，浏览器实际操作未撤销", observed: false };
     this.streams.delete(id);
     this.store.event(task, "system", "已回退对话上下文；浏览器、终端及文件中已经发生的操作没有撤销，操作回执保留。继续前重新核查。");
-    this.publish(); return draft;
+    this.publish(task); return draft;
   }
   async compactConversation(id: string, instructions = ""): Promise<{ beforeCharacters: number; afterCharacters: number }> {
     const task = this.editableTask(id);
@@ -365,7 +388,7 @@ export class TaskService {
       task.context = { summary, throughEventId: last.id, compactedAt: now() };
       task.sdkSessionId = undefined;
       this.store.event(task, "system", "对话已压缩，下次执行使用摘要及后续消息；完整历史仍可查看。");
-      this.publish(); return { beforeCharacters, afterCharacters: contextDescription(task).characters };
+      this.publish(task); return { beforeCharacters, afterCharacters: contextDescription(task).characters };
     } finally { this.editingContext.delete(id); }
   }
   private summarizeConversation(task: BrowserTask, prompt: string): Promise<string> {
@@ -423,7 +446,7 @@ export class TaskService {
     } catch (error) { for (const file of copied) rmSync(file.path, { force: true }); throw error; }
     this.store.data.attachments.push(...copied);
     if (task) { task.attachments.push(...structuredClone(copied)); this.store.event(task, "system", `已添加附件：${copied.map(file => file.name).join("、")}`); }
-    this.publish(); return copied;
+    this.publish(task ? [task] : []); return copied;
   }
   async tick(): Promise<void> {
     if (this.closed || this.ticking) return;
@@ -452,7 +475,7 @@ export class TaskService {
     task.runningSince = new Date(run.started).toISOString();
     task.status = "running";
     task.execution = { engine: "preparing", activity: "准备 Agent", at: now() };
-    this.store.event(task, "system", "正在准备 Agent。"); this.publish();
+    this.store.event(task, "system", "正在准备 Agent。"); this.publish(task);
     run.starting = this.startRun(task, run).catch((error) => {
       if (!run.stopped) {
         task.status = "waiting_user";
@@ -486,7 +509,7 @@ export class TaskService {
         await this.control(task.id, "pause");
       })().catch(error => {
         this.store.event(task, "error", `时间上限收尾失败：${String(error)}`);
-        this.publish();
+        this.publish(task);
       });
     }, Math.max(1000, task.limits.minutes * 60000 - task.usage.elapsedMs));
     if (this.store.data.settings.jevEnabled && this.store.data.settings.jevMode === "driver" && this.dependencies.browser.observeFast) {
@@ -503,7 +526,7 @@ export class TaskService {
         const driver = runJevDriver({ task, settings, apiKey: key, jevKey, signal: run.driverAbort.signal, current,
           observe: async () => { await this.handleTool(task, run, "observe", { fast: true }); return task.observation!; },
           tool: (name, args) => this.handleTool(task, run, name, args),
-          event: text => { this.store.event(task, "system", text); this.publish(); }, publish: () => this.publish(true),
+          event: text => { this.store.event(task, "system", text); this.publish(task); }, publish: () => this.publish(task, true),
           choose: this.dependencies.chooseJev, helper: this.dependencies.taskHelper });
         // Close/pause waits for this loop to drain, including any in-flight action.
         run.chain = driver.catch(() => {});
@@ -519,7 +542,7 @@ export class TaskService {
         if (run.stopped || task.status !== "running") return void this.endRun(task, run);
         this.store.event(task, "system", fallback || "配置已更新，交由主模型继续处理。");
         task.execution = { engine: "model", activity: "主模型继续处理", reason: fallback, at: now() };
-        task.observation = undefined; this.publish();
+        task.observation = undefined; this.publish(task);
       }
     }
     const cwd = path.join(this.store.root, "sessions", task.id);
@@ -576,7 +599,7 @@ export class TaskService {
           try { result = await this.handleTool(task, run, message.name, message.args); }
           catch (error) { result = textResult(error instanceof Error ? error.message : String(error), true); }
           this.sendWorker(run, { kind: "tool_result", id: message.id, result });
-        }).catch((error) => { this.store.event(task, "error", String(error)); this.publish(); });
+        }).catch((error) => { this.store.event(task, "error", String(error)); this.publish(task); });
         return;
       }
       if (message.kind === "session") task.sdkSessionId = String(message.id);
@@ -618,7 +641,7 @@ export class TaskService {
         task.status = "paused"; this.markInterrupted(task);
         this.store.event(task, "error", redactProviderSecrets(String(message.text), secrets));
       }
-      this.publish();
+      this.publish(task);
     });
     run.workerError = (error) => {
       if (this.runs.get(task.id) !== run) return;
@@ -638,7 +661,7 @@ export class TaskService {
       void this.endRun(task, run);
     });
     this.sendWorker(run, start);
-    this.publish();
+    this.publish(task);
   }
   private assertRunning(task: BrowserTask, run: Run): void {
     if (run.stopped || run.ending || this.runs.get(task.id) !== run || task.status !== "running") throw new Error("任务当前已停止或等待用户，不得继续执行操作。");
@@ -666,14 +689,14 @@ export class TaskService {
       const permissionScope = terminalPermissionScope(input);
       if (task.mode && !hasSessionPermission(task, permissionScope)) {
         task.pending = { id: randomUUID(), kind: "confirmation", title: input.summary, details: `${input.runtime} · ${input.cwd}\n${input.command}`, terminal: input, permissionScope, createdAt: now() };
-        task.status = "waiting_user"; this.publish(); this.stopWorker(run);
+        task.status = "waiting_user"; this.publish(task); this.stopWorker(run);
         return textResult("终端命令尚未执行，等待用户确认。停止后续操作。");
       }
       if (task.usage.actions >= task.limits.actions) return textResult("任务达到操作次数上限，请报告已有结果。", true);
       task.usage.actions++;
       run.externalAction = true;
       task.execution = { engine: "model", activity: "正在执行终端命令", at: now() };
-      this.store.event(task, "system", `终端${input.background ? "启动后台服务" : "执行"}：${input.summary}`); this.publish();
+      this.store.event(task, "system", `终端${input.background ? "启动后台服务" : "执行"}：${input.summary}`); this.publish(task);
       const result = await this.terminal.run(task.id, input);
       return textResult(result, ["failed", "timed_out"].includes(result.status));
     }
@@ -686,7 +709,7 @@ export class TaskService {
     if (name === "read_table") return textResult(await readTaskTable(task, args));
     if (name === "register_outputs") {
       const files = registerTaskOutputs(task, this.terminal.workspace(task.id), this.store.root, args);
-      this.store.event(task, "system", `已登记任务产物：${files.map(file => file.name).join("、")}`); this.publish();
+      this.store.event(task, "system", `已登记任务产物：${files.map(file => file.name).join("、")}`); this.publish(task);
       return textResult(files);
     }
     if (name === "export_result") {
@@ -695,15 +718,15 @@ export class TaskService {
           columns: z.array(z.string().max(500)).max(100).default([]), rows: z.array(z.array(z.union([z.string().max(10000), z.number().finite(), z.boolean(), z.null()])).max(100)).max(1000).default([]),
           text: z.string().max(1000000).default("") }).parse(args);
         task.pending = { id: randomUUID(), kind: "confirmation", title: `创建结果文件：${input.name}`, details: JSON.stringify(input, null, 2), exportResult: input, createdAt: now() };
-        task.status = "waiting_user"; this.publish(); this.stopWorker(run);
+        task.status = "waiting_user"; this.publish(task); this.stopWorker(run);
         return textResult("结果文件尚未创建，等待用户确认。停止后续操作。");
       }
       run.externalAction = true;
       const file = writeTaskResult(task, path.join(this.store.root, "artifacts"), args);
-      this.store.event(task, "system", `已生成结果文件：${file.name}`); this.publish(); return textResult(file);
+      this.store.event(task, "system", `已生成结果文件：${file.name}`); this.publish(task); return textResult(file);
     }
     if (name === "observe" || name === "read_page") {
-      task.execution = { engine: run.driver ? "jev" : "model", activity: "正在观察当前页面", reason: task.execution?.reason, at: now() }; this.publish(true);
+      task.execution = { engine: run.driver ? "jev" : "model", activity: "正在观察当前页面", reason: task.execution?.reason, at: now() }; this.publish(task, true);
       const pageInput = name === "read_page" ? z.object({ cursor: z.string().max(4096).optional(), query: z.string().max(2000).optional(), limit: z.number().int().min(1).max(120).default(80), textLimit: z.number().int().min(1).max(16000).default(8000), frameId: z.string().max(200).optional() }).strict().parse(args) : undefined;
       if (pageInput && !this.dependencies.browser.readPage) return textResult("当前浏览器连接不支持分页读取，请使用 observe。", true);
       const observation = pageInput ? await this.browserForTask(task).readPage!(task, pageInput) : ((run.driver && args.fast) || args.layout === true) && this.dependencies.browser.observeFast
@@ -731,7 +754,7 @@ export class TaskService {
       const { version, at, url, title, snapshot } = observation;
       const pages = (task.evidencePages || []).filter(page => page.url !== url || page.snapshot !== snapshot);
       task.evidencePages = [...pages, { version, at, url, title, snapshot: snapshot.slice(0, 60000) }].slice(-16);
-      this.publish();
+      this.publish(task);
       return { content };
     }
     if (name === "tabs") return textResult(await this.browserForTask(task).tabs(task));
@@ -744,7 +767,7 @@ export class TaskService {
         this.assertRunning(task, run);
         const observed = await this.browserForTask(task).observe(task);
         if (observed.url !== original.url || formStructure(observed) !== expected) {
-          task.observation = observed; this.publish(); return textResult({ filled: count, stopped: true, reason: "表单结构已变化，剩余填写已停止，请重新观察。" });
+          task.observation = observed; this.publish(task); return textResult({ filled: count, stopped: true, reason: "表单结构已变化，剩余填写已停止，请重新观察。" });
         }
         task.observation = observed;
         const action = { ...field, version: observed.version, effect: "edit" as const, summary: `填写字段 ${field.ref}` };
@@ -759,7 +782,7 @@ export class TaskService {
     if (name === "verify_account") {
       const { account, evidence } = z.object({ account: z.string().min(1).max(200), evidence: z.string().min(3).max(1000) }).parse(args);
       if (!this.validEvidence(task, [evidence]) || !evidence.includes(account)) throw new Error("账号核对需要当前页面中包含账号标识的原文。");
-      task.observation!.account = account; this.publish(); return textResult("已记录当前页面显示的账号。");
+      task.observation!.account = account; this.publish(task); return textResult("已记录当前页面显示的账号。");
     }
     if (name === "reconcile") {
       const input = z.object({ receiptId: z.string(), outcome: z.enum(["completed", "not_completed", "uncertain"]), evidence: z.string().min(3).max(3000) }).parse(args);
@@ -767,7 +790,7 @@ export class TaskService {
       if (!receipt || !this.validEvidence(task, [input.evidence])) throw new Error("核查需要有效操作记录和当前记录页中的原文依据。");
       receipt.reconciliation = { outcome: input.outcome, evidence: input.evidence, at: now() };
       task.needsReconciliation = unresolvedExternalReceipts(task).length > 0;
-      this.store.event(task, "system", `操作核查：${input.outcome}；页面依据：${input.evidence}`); this.publish();
+      this.store.event(task, "system", `操作核查：${input.outcome}；页面依据：${input.evidence}`); this.publish(task);
       return textResult("核查结果已记录。已完成的操作不可重复执行。");
     }
     if (name === "browser_action") {
@@ -783,7 +806,7 @@ export class TaskService {
         const target = task.observation.fast && readLinkGuard(task.observation.fast.guard, action);
         const unchangedLink = target && latest.fast && target === readLinkGuard(latest.fast.guard, action);
         if (latest.fingerprint !== task.observation.fingerprint && !unchangedLink) {
-          task.observation = latest; this.publish();
+          task.observation = latest; this.publish(task);
           return textResult("页面内容已经变化，旧动作已取消。请重新 observe 后决定操作。", true);
         }
       }
@@ -796,13 +819,13 @@ export class TaskService {
       const permissionScope = browserPermissionScope(task, action);
       if ((task.mode === "manual" || access.requiresConfirmation) && action.effect === "edit" && !hasSessionPermission(task, permissionScope)) {
         task.pending = { id: randomUUID(), kind: "confirmation", title: action.summary, details: `${task.observation?.url || ""}\n操作：${action.effect}\n${action.value || ""}`, action, permissionScope, observationVersion: task.observation?.version, createdAt: now() };
-        task.status = "waiting_user"; this.publish(); this.stopWorker(run);
+        task.status = "waiting_user"; this.publish(task); this.stopWorker(run);
         return textResult("编辑尚未执行，等待用户确认。停止后续操作。");
       }
       if (serious(action.effect)) {
         if (action.effect === "purchase") {
           task.pending = { id: randomUUID(), kind: "handoff", title: "请在浏览器中完成购买或支付", details: action.summary, createdAt: now() };
-          task.status = "waiting_user"; this.publish(); this.stopWorker(run);
+          task.status = "waiting_user"; this.publish(task); this.stopWorker(run);
           await this.controlBrowser(task, "handoff"); this.notify(task, task.pending.title);
           return textResult("已交给用户完成购买或支付，禁止继续点击。");
         }
@@ -816,7 +839,7 @@ export class TaskService {
         }
         task.pending = { id: randomUUID(), kind: "confirmation", title: action.summary, details: `${task.observation?.title || ""}\n${task.observation?.url || ""}\n操作：${action.effect}\n${action.value || ""}`, action,
           observationVersion: task.observation?.version, permissionScope, createdAt: now() };
-        task.status = "waiting_user"; this.publish(); this.stopWorker(run);
+        task.status = "waiting_user"; this.publish(task); this.stopWorker(run);
         this.notify(task, "请检查并确认操作");
         return textResult("操作尚未执行，正在等待用户确认。停止后续操作。");
       }
@@ -825,21 +848,21 @@ export class TaskService {
     if (name === "ask_user" || name === "handoff") {
       task.pending = { id: randomUUID(), kind: name === "handoff" ? "handoff" : "question",
         title: z.string().min(1).max(3000).parse(args.question || args.reason), details: String(args.details || "").slice(0, 10000), createdAt: now() };
-      task.status = "waiting_user"; this.publish();
+      task.status = "waiting_user"; this.publish(task);
       if (name === "handoff") task.resumeContext = { reason: task.pending.title, url: task.observation?.url };
       this.stopWorker(run);
       if (name === "handoff") await this.controlBrowser(task, "handoff");
       this.notify(task, task.pending.title);
       return textResult("已等待用户，停止后续操作。");
     }
-    if (name === "plan") { task.plan = z.array(z.string().max(1000)).max(30).parse(args.steps); this.publish(); return textResult("计划已更新。"); }
+    if (name === "plan") { task.plan = z.array(z.string().max(1000)).max(30).parse(args.steps); this.publish(task); return textResult("计划已更新。"); }
     if (name === "update_item") {
       const item = task.items.find((item) => item.id === args.id);
       if (!item) throw new Error("批量项目不存在。");
       const status = z.enum(["pending", "running", "waiting_user", "completed", "skipped", "failed", "uncertain"]).parse(args.status);
       if (status === "completed" && !this.validEvidence(task, [args.evidence])) throw new Error("项目完成需要当前页面中的原文依据。");
       item.status = status; item.result = String(args.result || "").slice(0, 10000); item.evidence = String(args.evidence || "").slice(0, 3000);
-      this.publish(); return textResult("项目已更新。");
+      this.publish(task); return textResult("项目已更新。");
     }
     if (name === "finish") {
       const parsed = z.object({ status: z.enum(["completed", "partial", "failed"]), responseOnly: z.boolean().default(false), summary: z.string().min(1).max(20000), evidence: z.array(z.string().min(1).max(3000)).max(30), remaining: z.array(z.string().max(3000)).max(50) }).safeParse(args);
@@ -854,7 +877,7 @@ export class TaskService {
       }
       task.status = result.status; task.result = { kind: result.responseOnly ? "answer" : result.status === "completed" ? "verified" : undefined, summary: result.responseOnly ? `已回答：${result.summary}` : result.summary, evidence: result.evidence, remaining: result.responseOnly ? answerRemaining(task, result.remaining) : result.remaining };
       if (result.status === "completed" && !result.responseOnly) { task.needsReconciliation = false; preserveVerifiedReceipts(task, now()); }
-      this.publish(); this.notify(task, result.summary);
+      this.publish(task); this.notify(task, result.summary);
       return textResult(result.responseOnly ? `已回答；仅表示对话回复完成，未声称验证外部任务。${task.result.remaining.length ? "历史未决事项已保留，请勿为本轮回答额外浏览或制造证据。" : ""}请结束本次执行。` : "结果已保存。请结束本次执行。");
     }
     throw new Error("不支持的任务工具。");
@@ -879,7 +902,7 @@ export class TaskService {
       const reason = "多次操作后仍回到相同页面，已停止重复尝试。请检查当前入口，或补充下一步线索。";
       task.pending = { id: randomUUID(), kind: "handoff", title: "需要检查当前页面", details: reason, createdAt: now() };
       task.resumeContext = { reason, url: task.observation?.url }; task.status = "waiting_user";
-      this.store.event(task, "system", reason); this.stopWorker(run); this.publish();
+      this.store.event(task, "system", reason); this.stopWorker(run); this.publish(task);
       if (hasTaskBrowser(task)) await this.controlBrowser(task, "handoff");
       throw new Error(reason);
     }
@@ -891,16 +914,16 @@ export class TaskService {
     if (action.effect !== "read") task.evidencePages = [];
     task.receipts.push(receipt); task.usage.actions++;
     task.execution = { engine: run.driver ? "jev" : "model", activity: action.summary, reason: task.execution?.reason, at: now() };
-    this.store.event(task, "action", action.summary); this.publish();
+    this.store.event(task, "action", action.summary); this.publish(task);
     try {
       const result = await this.browserForTask(task).execute(task, action);
       Object.assign(receipt, { status: "executed", result: result.slice(0, 8000) });
       task.observation = undefined;
-      this.publish(); return result;
+      this.publish(task); return result;
     } catch (error) {
       Object.assign(receipt, { status: "uncertain", result: String(error) });
       if (serious(action.effect)) task.needsReconciliation = true;
-      task.observation = undefined; this.publish(); throw error;
+      task.observation = undefined; this.publish(task); throw error;
     }
   }
   private async assessPage(task: BrowserTask, run: Run, observation: BrowserObservation): Promise<void> {
@@ -918,7 +941,7 @@ export class TaskService {
     const hash = createHash("sha256").update(JSON.stringify(state)).digest("hex");
     if (run.jevCache?.hash === hash) { observation.jev = { ...run.jevCache.result, version: observation.version }; return; }
     run.jevAbort = new AbortController();
-    const record = beginJevCall(task, "advisory"); this.publish();
+    const record = beginJevCall(task, "advisory"); this.publish(task);
     let result: JevAssessment;
     try {
       result = await (this.dependencies.evaluateJev || evaluateJevPage)(key, state, observation.version, { provider, signal: run.jevAbort.signal });
@@ -942,7 +965,7 @@ export class TaskService {
       if (run.workerError) run.workerError(error);
       else if (!((run.stopped || run.ending) && ["EPIPE", "ERR_IPC_CHANNEL_CLOSED"].includes((error as NodeJS.ErrnoException).code || ""))) {
         const id = [...this.runs].find(([, active]) => active === run)?.[0];
-        if (id) { this.store.event(this.store.get(id), "error", redactProviderSecrets(error.message, [this.dependencies.apiKey()])); this.publish(); }
+        if (id) { this.store.event(this.store.get(id), "error", redactProviderSecrets(error.message, [this.dependencies.apiKey()])); this.publish(this.store.get(id)); }
       }
     };
     if (!child.connected) {
@@ -957,7 +980,7 @@ export class TaskService {
     run.stopped = true;
     const taskId = [...this.runs].find(([, active]) => active === run)?.[0];
     if (taskId && !run.terminalStop) run.terminalStop = this.terminal.stopTask(taskId, !preserveBackground).catch(error => {
-      this.store.event(this.store.get(taskId), "error", String(error)); this.publish();
+      this.store.event(this.store.get(taskId), "error", String(error)); this.publish(this.store.get(taskId));
     });
     run.jevAbort?.abort();
     run.driverAbort?.abort();
@@ -986,12 +1009,12 @@ export class TaskService {
       const previous = task.messageQueue?.find(entry => entry.id === messageId);
       if (previous) {
         if (this.messageFingerprint(previous.message, { attachmentIds: previous.attachmentIds }) !== this.messageFingerprint(message, options)) throw new Error("队列消息编号已被其他内容使用。");
-        this.publish();
+        this.publish(task);
         await this.drainQueue(task, true); return;
       }
       if ((task.messageQueue?.length || 0) >= 100) throw new Error("排队消息已达 100 条，请先处理或移除消息。");
       (task.messageQueue ||= []).push({ id: messageId, message: message.trim(), attachmentIds: [...new Set(options.attachmentIds || [])], createdAt: now() });
-      this.publish(); await this.drainQueue(task, true); return;
+      this.publish(task); await this.drainQueue(task, true); return;
     }
     if (finished && action === "steer") return this.control(id, "resume", message, options);
     if (finished && action !== "resume") throw new Error("任务已经结束，可选择继续任务。");
@@ -1060,7 +1083,7 @@ export class TaskService {
     task.pending = action === "takeover" ? { id: randomUUID(), kind: "handoff", title: "浏览器由你操作", details: "完成后点击交还并继续，Agent 会重新观察页面。", createdAt: now() } : undefined;
     this.store.event(task, "system", action === "cancel" ? "任务已取消，已发生的操作不会撤销。" : "正在停止后续动作并交还浏览器。");
     if (run) this.stopWorker(run);
-    this.publish();
+    this.publish(task);
     // A pause during read-only startup/observation can park the controller
     // halfway through CDP initialization. Stop scheduling immediately, but give
     // the in-flight read a bounded chance to drain before handing off.
@@ -1074,7 +1097,7 @@ export class TaskService {
       if (action === "cancel") await this.releaseBrowser(task);
       else await this.controlBrowser(task, "handoff");
     }
-    if (!run) { this.publish(); void this.tick(); }
+    if (!run) { this.publish(task); void this.tick(); }
   }
   async reply(id: string, decisionId: string, answer: string, approved: boolean, scope: "once" | "session" = "once", options: TaskMessageOptions = {}): Promise<void> {
     if (this.archiving.has(id)) throw new Error("任务正在停止并归档，请稍后操作。");
@@ -1115,7 +1138,7 @@ export class TaskService {
       if (task.status !== "waiting_user" || task.pending?.id !== decisionId) throw new Error("任务状态已经改变，原确认已取消。");
       if (!task.observation || observation.fingerprint !== task.observation.fingerprint || task.observation.version !== pending.observationVersion) {
         task.pending = undefined; task.observation = undefined; task.status = "queued";
-        this.store.event(task, "system", "页面发生变化，原确认已失效。Agent 将重新检查。"); this.publish(); void this.tick(); return;
+        this.store.event(task, "system", "页面发生变化，原确认已失效。Agent 将重新检查。"); this.publish(task); void this.tick(); return;
       }
       this.commitTask(task, () => { recordResponse(); remember(); task.status = "running"; task.pending = undefined; });
       const run: Run = { started: Date.now(), stopped: false, chain: Promise.resolve(), repeat: "", repeatCount: 0 };
@@ -1123,7 +1146,7 @@ export class TaskService {
       try { run.chain = this.perform(task, run, pending.action); await run.chain; }
       catch (error) { this.store.event(task, "error", String(error)); }
       finally { this.runs.delete(id); }
-      if (this.store.get(id).status !== "running") { this.publish(); return; }
+      if (this.store.get(id).status !== "running") { this.publish(task); return; }
     }
     if (pending.kind === "confirmation" && approved && pending.terminal) {
       if (task.mode === "plan") throw new Error("plan 模式不允许执行终端命令。");
@@ -1138,7 +1161,7 @@ export class TaskService {
         await run.chain;
       } catch (error) { this.store.event(task, "error", String(error)); }
       finally { if (this.runs.get(id) === run) this.runs.delete(id); }
-      if (this.store.get(id).status !== "running") { this.publish(); return; }
+      if (this.store.get(id).status !== "running") { this.publish(task); return; }
     }
     if (pending.kind === "confirmation" && approved && pending.exportResult) {
       if (task.mode === "plan") throw new Error("plan 模式不允许创建结果文件。");
@@ -1183,7 +1206,7 @@ export class TaskService {
       }
       if (this.runs.get(task.id) === run) this.runs.delete(task.id);
       if (run.resumeAfterStop && !this.closed && task.status === "waiting_user" && task.pending?.kind === "handoff") this.acceptBrowserReturn(task);
-      this.publish(); void this.tick();
+      this.publish(task); void this.tick();
     })();
     return run.ending;
   }
@@ -1194,7 +1217,7 @@ export class TaskService {
     if (reason === "user-return" && ownership === "agent" && task.pending?.kind === "handoff" && !this.returning.has(task.id)) {
       const run = this.runs.get(task.id);
       if (run) run.resumeAfterStop = true;
-      else { this.acceptBrowserReturn(task); this.publish(); void this.tick(); }
+      else { this.acceptBrowserReturn(task); this.publish(task); void this.tick(); }
       return;
     }
     if (sessionStatus === "stopped" || (ownership === "user" && (task.status === "running" || task.pending?.kind === "confirmation"))) {
@@ -1205,7 +1228,7 @@ export class TaskService {
       task.status = sessionStatus === "stopped" ? "cancelled" : "waiting_user";
       task.observation = undefined;
       task.pending = sessionStatus === "stopped" ? undefined : { id: randomUUID(), kind: "handoff", title: connectionPaused ? "浏览器连接已暂停" : "浏览器已由用户接管", details: connectionPaused ? "连接暂停不代表你主动接管了浏览器。发送补充说明或点击继续，将尝试恢复连接并重新观察页面。" : "发送补充说明并继续后，Agent 会重新观察页面。", createdAt: now() };
-      this.publish(); this.notify(task, task.pending?.title || "任务已停止");
+      this.publish(task); this.notify(task, task.pending?.title || "任务已停止");
     }
   }
   private continuationGuard(task: BrowserTask): () => void {
@@ -1225,7 +1248,7 @@ export class TaskService {
     if (run) run.browserAccessed = true;
     if (task.browserLeaseAttempted !== true) {
       task.browserLeaseAttempted = true;
-      this.publish();
+      this.publish(task);
     }
     return this.dependencies.browser;
   }
@@ -1244,9 +1267,9 @@ export class TaskService {
     const run = this.runs.get(task.id);
     if (run?.browserRelease) return run.browserRelease;
     const release = (async () => {
-      task.browserReleasePending = true; this.publish();
+      task.browserReleasePending = true; this.publish(task);
       await this.dependencies.browser.control(task, task.status === "cancelled" ? "release" : "complete");
-      task.browserReleasePending = undefined; task.browserLeaseAttempted = false; this.publish();
+      task.browserReleasePending = undefined; task.browserLeaseAttempted = false; this.publish(task);
     })();
     // Cancel and worker exit can race. Release this run's session only once.
     if (run) run.browserRelease = release;
@@ -1278,6 +1301,7 @@ export class TaskService {
   private async scheduleDue(): Promise<void> {
     for (const schedule of this.store.data.schedules) {
       if (!schedule.enabled || Date.parse(schedule.at) > Date.now()) continue;
+      const changed: BrowserTask[] = [];
       if (Date.now() - Date.parse(schedule.at) > 5 * 60000) {
         schedule.missedAt = now();
         this.dependencies.notify(schedule.name, "错过计划时间，未自动执行。请在定时任务中重新安排。");
@@ -1285,13 +1309,14 @@ export class TaskService {
         try {
           const task = await this.create(schedule.task);
           task.scheduledBy = schedule.id; schedule.lastTaskId = task.id; schedule.lastRunAt = now();
+          changed.push(task);
         } catch (error) { schedule.missedAt = now(); this.dependencies.notify(schedule.name, String(error)); }
       }
       if (schedule.repeat === "once") schedule.enabled = false;
       else {
         schedule.at = nextDailyOccurrence(schedule.at, schedule.timezone);
       }
-      this.publish();
+      this.publish(changed);
     }
   }
   async updateTaskMetadata(id: string, input: TaskMetadataInput): Promise<void> {
@@ -1319,7 +1344,7 @@ export class TaskService {
     if (task.archivedAt) task.pinnedAt = undefined;
     task.metadataUpdatedAt = now();
     // Organizing a task is not execution activity. Preserve its timeline and result.
-    this.publish();
+    this.publish(task);
   }
   private async stopForArchive(task: BrowserTask): Promise<void> {
     const run = this.runs.get(task.id);
@@ -1349,7 +1374,7 @@ export class TaskService {
       if (!target.startsWith(path.resolve(this.store.root, sub) + path.sep)) throw new Error("无效的任务路径。");
       rmSync(target, { recursive: true, force: true });
     }
-    this.publish();
+    this.publish(task);
   }
   close(): Promise<void> {
     if (this.closing) return this.closing;
@@ -1361,6 +1386,7 @@ export class TaskService {
     this.dependencies.closePreview?.();
     this.closing = (async () => {
       const active = [...this.runs];
+      const activeTasks = active.map(([id]) => this.store.get(id));
       for (const [id, run] of active) {
         const task = this.store.get(id); this.stopWorker(run);
         if (!TERMINAL_TASKS.has(task.status)) {
@@ -1375,14 +1401,15 @@ export class TaskService {
         task.pending = undefined; task.status = "paused"; task.observation = undefined;
         this.store.event(task, "system", "应用退出，提交确认已失效；继续后会重新检查页面。");
       }
-      try { this.publish(); } catch (error) { failures.push(error); }
+      const closingTasks = [...new Set([...activeTasks, ...retained])];
+      try { this.publish(closingTasks); } catch (error) { failures.push(error); }
       // Persist paused/uncertain state and start handing back every browser
       // before waiting for terminal processes. A stuck terminal must not keep
       // a user's browser leased until the application's shutdown deadline.
       const handoffs = Promise.allSettled(retained.map(task => this.controlBrowser(task, "handoff").catch(error => {
         failures.push(error);
         this.store.event(task, "error", `退出时交还浏览器失败：${String(error)}`);
-        try { this.publish(); } catch (saveError) { failures.push(saveError); }
+        try { this.publish(task); } catch (saveError) { failures.push(saveError); }
       })));
       try { await this.terminal.close(); } catch (error) { failures.push(error); }
       await handoffs;
@@ -1398,7 +1425,7 @@ export class TaskService {
         await this.endRun(task, run);
       }));
       for (const result of settled) if (result.status === "rejected") failures.push(result.reason);
-      try { this.publish(); } catch (error) { failures.push(error); }
+      try { this.publish(closingTasks); } catch (error) { failures.push(error); }
       try { this.store.close(); } catch (error) { failures.push(error); }
       try { this.dependencies.closeBrowser?.(); } catch (error) { failures.push(error); }
       if (failures.length) throw new AggregateError(failures, "任务服务退出时出现错误；已尝试停止进程、保存状态并释放浏览器。");

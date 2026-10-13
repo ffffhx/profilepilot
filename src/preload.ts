@@ -1,9 +1,10 @@
+import { BROWSER_CONNECTION_CHANNEL, BROWSER_CONNECTION_CHANGED, type BrowserConnectionApi, type BrowserConnectionSnapshot } from "./shared/browser-connection";
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
 import { IPC_CHANNELS } from "./shared/ipc";
 import { LOCAL_APPS_CHANNEL, type LocalAppsApi } from "./shared/local-apps";
 import { PHONE_CHANNEL, PHONE_CHANGED, type PhonesApi, type PhonesSnapshot } from "./shared/phones";
 import { MOBILE_CHANNEL, MOBILE_CHANGED, type MobileApi, type MobileSnapshot } from "./shared/mobile";
-import { TASK_CHANNEL, TASK_CHANGED, TASK_STREAM, TASK_PREVIEW, type TaskApi, type TaskSnapshot, type TaskPreviewUpdate, type TaskStreamUpdate } from "./shared/tasks";
+import { TASK_CHANNEL, TASK_CHANGED, TASK_STREAM, TASK_PREVIEW, type TaskApi, type TaskListUpdate, type TaskPreviewUpdate, type TaskStreamUpdate } from "./shared/tasks";
 import type {
   AccountSyncDiffResult,
   AccountSyncRequest,
@@ -261,13 +262,22 @@ const profileManagerApi: ProfileManagerApi = {
 };
 
 contextBridge.exposeInMainWorld("profileManager", profileManagerApi);
+const browserConnectionApi: BrowserConnectionApi = {
+  pairNativeBrowser: id => ipcRenderer.invoke(BROWSER_CONNECTION_CHANNEL, "pairNativeBrowser", id),
+  getNativeLiveView: id => ipcRenderer.invoke(BROWSER_CONNECTION_CHANNEL, "getNativeLiveView", id),
+  authorizeNativeBrowser: id => ipcRenderer.invoke(BROWSER_CONNECTION_CHANNEL, "authorizeNativeBrowser", id),
+  disconnectNativeBrowser: id => ipcRenderer.invoke(BROWSER_CONNECTION_CHANNEL, "disconnectNativeBrowser", id),
+  openNativeExtensionFolder: () => ipcRenderer.invoke(BROWSER_CONNECTION_CHANNEL, "openNativeExtensionFolder"),
+  snapshot: () => ipcRenderer.invoke(BROWSER_CONNECTION_CHANNEL, "snapshot"),
+  onChanged: listener => {
+    const handler = (_event: IpcRendererEvent, snapshot: BrowserConnectionSnapshot) => listener(snapshot);
+    ipcRenderer.on(BROWSER_CONNECTION_CHANGED, handler);
+    return () => ipcRenderer.removeListener(BROWSER_CONNECTION_CHANGED, handler);
+  }
+};
+contextBridge.exposeInMainWorld("browserConnection", browserConnectionApi);
 const taskApi: TaskApi = {
   openLink: url => ipcRenderer.invoke(TASK_CHANNEL, "openLink", url),
-  pairNativeBrowser: id => ipcRenderer.invoke(TASK_CHANNEL, "pairNativeBrowser", id),
-  getNativeLiveView: id => ipcRenderer.invoke(TASK_CHANNEL, "getNativeLiveView", id),
-  authorizeNativeBrowser: id => ipcRenderer.invoke(TASK_CHANNEL, "authorizeNativeBrowser", id),
-  disconnectNativeBrowser: id => ipcRenderer.invoke(TASK_CHANNEL, "disconnectNativeBrowser", id),
-  openNativeExtensionFolder: () => ipcRenderer.invoke(TASK_CHANNEL, "openNativeExtensionFolder"),
   focusTaskBrowser: id => ipcRenderer.invoke(TASK_CHANNEL, "focusTaskBrowser", id),
   watchPreview: id => ipcRenderer.invoke(TASK_CHANNEL, "watchPreview", id),
   ackPreview: (id, frameId) => ipcRenderer.invoke(TASK_CHANNEL, "ackPreview", id, frameId),
@@ -276,6 +286,9 @@ const taskApi: TaskApi = {
     ipcRenderer.on(TASK_PREVIEW, handler); return () => ipcRenderer.removeListener(TASK_PREVIEW, handler);
   },
   snapshot: () => ipcRenderer.invoke(TASK_CHANNEL, "snapshot"),
+  list: () => ipcRenderer.invoke(TASK_CHANNEL, "list"),
+  detail: (id, version) => ipcRenderer.invoke(TASK_CHANNEL, "detail", id, version),
+  search: query => ipcRenderer.invoke(TASK_CHANNEL, "search", query),
   getMemory: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "getMemory", ...args),
   setMemoryEnabled: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "setMemoryEnabled", ...args),
   writeMemory: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "writeMemory", ...args),
@@ -308,7 +321,7 @@ const taskApi: TaskApi = {
   exportData: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "exportData", ...args),
   openArtifact: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "openArtifact", ...args),
   onChanged: (listener) => {
-    const handler = (_event: IpcRendererEvent, snapshot: TaskSnapshot): void => listener(snapshot);
+    const handler = (_event: IpcRendererEvent, snapshot: TaskListUpdate): void => listener(snapshot);
     ipcRenderer.on(TASK_CHANGED, handler); return () => ipcRenderer.removeListener(TASK_CHANGED, handler);
   },
   onStream: listener => {
@@ -336,6 +349,10 @@ const localAppsApi: LocalAppsApi = {
 contextBridge.exposeInMainWorld("localApps", localAppsApi);
 const phonesApi: PhonesApi = {
   basicStart: (id, mode, controller, task) => ipcRenderer.invoke(PHONE_CHANNEL, "basic-start", { id, mode, controller, task }),
+  cameraProbe: id => ipcRenderer.invoke(PHONE_CHANNEL, "camera-probe", { id }),
+  cameraSources: () => ipcRenderer.invoke(PHONE_CHANNEL, "camera-sources"),
+  cameraStart: input => ipcRenderer.invoke(PHONE_CHANNEL, "camera-start", input),
+  cameraCommand: input => ipcRenderer.invoke(PHONE_CHANNEL, "camera-command", input),
   basicControl: (id, command) => ipcRenderer.invoke(PHONE_CHANNEL, `basic-${command}`, { id }),
   basicSetMode: input => ipcRenderer.invoke(PHONE_CHANNEL, "basic-mode", input),
   basicPerform: input => ipcRenderer.invoke(PHONE_CHANNEL, "basic-action", input),

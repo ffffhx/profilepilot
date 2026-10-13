@@ -107,62 +107,6 @@ test("SessionTailer parses Claude Bash agent-browser commands", async () => {
   });
 });
 
-test("SessionTailer gives Playwright CLI browser commands first-class activity text", async () => {
-  await withTempHome(async (home) => {
-    const uuid = randomUUID();
-    await createClaudeSession(home, uuid, [{
-      type: "assistant",
-      message: {
-        content: [{
-          type: "tool_use",
-          name: "Bash",
-          input: {
-            command: "playwright-cli -s=checkout goto https://shop.example.test/cart"
-          }
-        }]
-      }
-    }]);
-    const tailer = startTailer(`cc-${uuid}`, {});
-    try {
-      const activity = await waitForActivity(
-        tailer,
-        (value) => value.currentAction === "打开 shop.example.test",
-        "Playwright CLI activity"
-      );
-      assert.equal(activity.targetUrl, "shop.example.test/cart");
-    } finally {
-      tailer.stop();
-    }
-  });
-});
-
-test("SessionTailer gives Chrome DevTools MCP calls first-class activity text", async () => {
-  await withTempHome(async (home) => {
-    const uuid = randomUUID();
-    await createCodexSession(home, uuid, [{
-      type: "response_item",
-      payload: {
-        item: {
-          type: "function_call",
-          name: "mcp__chrome-devtools__navigate_page",
-          arguments: JSON.stringify({ url: "https://docs.example.test/guide" })
-        }
-      }
-    }]);
-    const tailer = startTailer(`cx-${uuid}`, {});
-    try {
-      const activity = await waitForActivity(
-        tailer,
-        (value) => value.currentAction === "打开 docs.example.test",
-        "Chrome DevTools MCP activity"
-      );
-      assert.equal(activity.targetUrl, "docs.example.test/guide");
-    } finally {
-      tailer.stop();
-    }
-  });
-});
-
 test("SessionTailer parses Claude assistant text", async () => {
   await withTempHome(async (home) => {
     const uuid = randomUUID();

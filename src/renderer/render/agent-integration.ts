@@ -1,10 +1,6 @@
 import { store } from "../state";
 import { profilePilotSetupState } from "../../shared/profilepilot-setup";
-import type {
-  AgentIntegrationDiagnostic,
-  AgentSkillDiagnostic,
-  AgentWrapperDiagnostic
-} from "../types";
+import type { AgentIntegrationDiagnostic, AgentSkillDiagnostic, AgentWrapperDiagnostic } from "../../shared/types";
 import { escapeHtml, renderButtonLabel } from "../util";
 import { renderBrowserExtensionPanel } from "./browser-extension";
 

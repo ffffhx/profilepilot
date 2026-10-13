@@ -408,7 +408,7 @@ async function resolveOne(pid: number, comm: string): Promise<CachedContext> {
     };
   }
 
-  // 其余独立驱动（Playwright/Puppeteer 脚本等）是使用者自己 spawn 的短周期进程，cwd 可靠。
+  // 其余独立驱动（自定义 CDP 脚本等）是使用者自己 spawn 的短周期进程，cwd 可靠。
   // 如果这个项目目录当前正有会话在跑，按 cwd 反查到它，补上会话标题和最近活动时间：
   //   · Claude Code：cwd 直接映射成 ~/.claude/projects/<slug>/ 下的会话，取 mtime 最新的那个（=正在用的）。
   //   · Codex：按 cwd 匹配当前打开着的 rollout。

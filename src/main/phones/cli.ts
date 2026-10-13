@@ -3,6 +3,7 @@ import type { ProfilePilotManagementCommand, ProfilePilotManagementResponse } fr
 import { runPhoneFlowCli } from "./flow-cli";
 import { installPhoneApkCli } from "./install-cli";
 import { wirelessConnectSchema, wirelessPairSchema } from "./wireless";
+import { runScreenCameraCli } from "./screen-camera-cli";
 
 export const phoneHelp = `ppilot phone CLI · 手机控制
 
@@ -20,6 +21,16 @@ ppilot phone action --params-file <JSON文件> [--output <截图文件>] [--back
 ppilot phone run --device <设备ID> --file <流程JSON> [--output-dir <报告目录>] [--mode view|control] [--controller <控制者>] [--task <任务>]
 ppilot phone wrap --device <设备ID> --controller <控制者> --task <任务> [--mode view|control] -- <程序> [参数...]
 ppilot phone adb <ADB兼容命令...>
+ppilot phone camera probe --device <设备ID>
+ppilot phone camera sources
+ppilot phone camera start --params-file <当前控制会话与可选sourceId、crop的JSON>
+ppilot phone camera status|apps|launch|tap|key|stop --params-file <会话和操作JSON>
+ppilot phone camera preview --params-file <会话JSON> --output <手机App画面.jpg>
+ppilot phone camera frame --params-file <会话JSON> --file <当前浏览器二维码截图.png>
+
+屏幕摄像头需要 Android 16+、已更新的配套 App 和有效 control 会话。start 不恢复暂停会话。
+sourceId 来自 camera sources；crop 为 0–1 的 x/y/width/height。省略 sourceId 后可用 frame 提供当前 Profile 的截图。
+launch 需要 component（来自 apps），tap 需要 x/y（来自 preview），key 仅支持 back。暂停或断线后重新开启摄像头。
 
 无线配对 JSON：{"address":"192.168.1.8:37123","code":"手机显示的6位配对码"}。配对码只通过文件传入，不放在命令行。
 配对端口与连接端口不同；已配对设备优先用 wireless-connect --device 自动发现并验证当前地址。
@@ -47,6 +58,7 @@ wrap 会为子进程配置受控 adb；不支持的指令会报错，不会转�
 `;
 export async function runPhoneCli(args: string[], request: (command: ProfilePilotManagementCommand) => Promise<ProfilePilotManagementResponse>, io: Pick<NodeJS.Process, "stdout" | "stderr">): Promise<number> {
   if (!args.length || args.includes("--help") || args.includes("-h")) { io.stdout.write(phoneHelp); return 0; }
+  if (args[0] === "camera") return runScreenCameraCli(args.slice(1), request, io);
   try {
     const method = args[0];
     if (!["list", "connect", "install", "wireless-discover", "wireless-pair", "wireless-connect", "rename", "start", "pause", "resume", "stop", "action", "run"].includes(method)) throw new Error("未知手机命令。运行 ppilot phone --help 查看用法。");

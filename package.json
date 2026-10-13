@@ -9,14 +9,11 @@
   },
   "main": "dist/main/entry.js",
   "scripts": {
-    "build": "npm run build:input-guard && npm run build:phone-wrapper && tsc && npm run bundle:browser-wrappers && npm run bundle:profilepilot-cli && npm run bundle:renderer && npm run build:css",
+    "build": "npm run build:input-guard && npm run build:phone-wrapper && tsc && npm run bundle:agent-browser-wrapper && npm run bundle:profilepilot-cli && npm run bundle:renderer && npm run build:css",
     "build:phone-wrapper": "node scripts/build-phone-wrapper.mjs",
     "build:input-guard": "node scripts/build-input-guard.mjs",
     "setup:input-guard-signing": "node scripts/setup-input-guard-signing.mjs",
-    "bundle:agent-browser-wrapper": "esbuild src/main/agent-browser-wrapper.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/main/profilepilot-agent-browser-wrapper.cjs --log-level=warning",
-    "bundle:playwright-cli-wrapper": "esbuild src/main/playwright-cli-wrapper.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/main/profilepilot-playwright-cli-wrapper.cjs --log-level=warning",
-    "bundle:chrome-devtools-mcp-wrapper": "esbuild src/main/chrome-devtools-mcp-wrapper.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/main/profilepilot-chrome-devtools-mcp-wrapper.cjs --log-level=warning",
-    "bundle:browser-wrappers": "npm run bundle:agent-browser-wrapper && npm run bundle:playwright-cli-wrapper && npm run bundle:chrome-devtools-mcp-wrapper",
+    "bundle:agent-browser-wrapper": "node scripts/build-browser-wrapper.mjs",
     "bundle:profilepilot-cli": "esbuild src/main/profilepilot-cli.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/main/profilepilot-cli.cjs --external:agent-browser/package.json --log-level=warning",
     "bundle:renderer": "esbuild src/renderer/main.ts --bundle --outfile=dist/renderer/app.js --platform=browser --format=iife --target=es2022 --log-level=warning && node scripts/bundle-task-chat.mjs && esbuild src/renderer/local-apps.ts --bundle --outfile=dist/renderer/local-apps.js --platform=browser --format=iife --target=es2022 --log-level=warning && esbuild src/renderer/phones.ts --bundle --outfile=dist/renderer/phones.js --platform=browser --format=iife --target=es2022 --log-level=warning && esbuild src/renderer/settings.ts src/renderer/workspace-shell.ts src/renderer/workspace-frame.ts --bundle --outdir=dist/renderer --platform=browser --format=iife --target=es2022 --log-level=warning",
     "build:css": "tailwindcss -i ./public/styles.src.css -o ./public/app.css && tailwindcss -c tailwind.chat.config.cjs -i public/task-chat.src.css -o dist/renderer/task-chat.css --minify",
@@ -47,7 +44,6 @@
     "e2e:sync-copy": "npm run build && node scripts/e2e-sync-copy.mjs",
     "e2e:gateway": "npm run build && node scripts/e2e-gateway-control.mjs",
     "e2e:bifrost": "npm run build && node scripts/e2e-bifrost-proxy.mjs",
-    "e2e:browser-drivers": "npm run build && node scripts/e2e-browser-drivers.mjs",
     "e2e:input-guard": "npm run build && node scripts/e2e-input-guard.mjs",
     "e2e:overlay": "npm run build && node scripts/e2e-overlay-smoke.mjs",
     "e2e:stress": "npm run build && node scripts/e2e-overlay-stress.mjs",
@@ -68,7 +64,8 @@
     "verify:tasks:live": "npm run build && node scripts/verify-task-live.mjs",
     "verify:tasks:browser": "npm run build && node scripts/verify-task-browser.mjs",
     "verify:tasks:pdf": "npm run build && node scripts/verify-task-pdf.mjs",
-    "build:phone": "node scripts/build-phone.mjs"
+    "build:phone": "node scripts/build-phone.mjs",
+    "build:screen-camera": "node scripts/build-screen-camera.mjs"
   },
   "engines": {
     "node": ">=22.13.0"
@@ -252,9 +249,5 @@
       "uuid": "^11.1.1"
     }
   },
-  "pnpm": {
-    "overrides": {
-      "exceljs>uuid": "^11.1.1"
-    }
-  }
+  "packageManager": "npm@10.9.2"
 }

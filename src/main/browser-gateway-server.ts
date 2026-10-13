@@ -87,7 +87,7 @@ interface GatewayConnection {
   autoAttachSessionId?: string;
   autoAttachIntent: number;
   reconnecting: boolean;
-  // Playwright CLI / Chrome DevTools MCP 都是长驻驱动。用户接管时保留
+  // agent-browser 在用户接管时保留
   // WebSocket 和 CDP session，但封锁新命令与事件流；交还后原地恢复。
   quiescing: boolean;
   parked: boolean;
@@ -450,9 +450,7 @@ export class BrowserGatewayServer {
         // All supported Gateway drivers are safe to keep physically connected
         // while parked: commands are rejected before reaching Chrome and browser
         // events are buffered until control returns.
-        const resumable = event.profile.driverKind === "agent-browser" ||
-          event.profile.driverKind === "playwright-cli" ||
-          event.profile.driverKind === "chrome-devtools-mcp";
+        const resumable = event.profile.driverKind === "agent-browser";
         if (resumable && event.reason === "user_takeover") {
           connection.quiescing = false;
           connection.parked = true;

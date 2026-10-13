@@ -57,6 +57,14 @@ public final class ControlService extends Service {
                     connection.reportDebugSettings(input.optJSONObject("debugSettings"));
                     session.heartbeat(); result.complete(success(null));
                 }
+                else if (method.equals("camera")) {
+                    // Read-only lease check for the shell-owned virtual camera. It must not keep
+                    // a crashed desktop's lease alive or resume a paused phone session.
+                    requireReady();
+                    session.check(input.getString("instanceId"), input.getString("sessionId"), input.getLong("generation"));
+                    if (!session.active() || !session.mode.equals("control")) throw new IllegalStateException("手机控制已暂停或结束，屏幕摄像头已停止");
+                    result.complete(success(null));
+                }
                 else if (method.equals("start")) {
                     requireReady();
                     String computer = limited(input, "computer", 120);

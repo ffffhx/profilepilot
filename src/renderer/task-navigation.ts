@@ -1,18 +1,18 @@
-import { TERMINAL_TASKS, type BrowserTask } from "../shared/tasks";
+import { TERMINAL_TASKS, type TaskSummary } from "../shared/tasks";
 import { taskIcon as icon } from "./task-icons";
 
 const escape = (value: string): string => value.replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!);
 export type TaskMenuAction = "pin" | "unpin" | "archive" | "restore" | "rename" | "delete";
 
-export function taskMenuButton(task: BrowserTask, location: "sidebar" | "list"): string {
+export function taskMenuButton(task: TaskSummary, location: "sidebar" | "list"): string {
   return `<button type="button" id="task-menu-${location}-${task.id}" class="icon-button task-menu-trigger" data-task-menu="${task.id}" aria-label="管理任务：${escape(task.title)}" aria-haspopup="menu" aria-expanded="false" title="更多操作">${icon("more")}</button>`;
 }
 
-export function sidebarTasks(tasks: BrowserTask[], selected: string, statuses: Record<string, string>): string {
+export function sidebarTasks(tasks: TaskSummary[], selected: string, statuses: Record<string, string>): string {
   const visible = tasks.filter(task => !task.archivedAt);
   const pinned = visible.filter(task => task.pinnedAt).sort((a, b) => b.pinnedAt!.localeCompare(a.pinnedAt!));
   const recent = visible.filter(task => !task.pinnedAt).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-  const group = (items: BrowserTask[], label: string, name: string): string => `<section class="sidebar-task-group" aria-label="${label}" data-task-group="${name}"><div class="nav-section-label">${label}</div>${items.map(task => `<div class="recent-task-row ${selected === task.id ? "active" : ""}" data-task-row="${task.id}"><button class="recent-task" data-task="${task.id}" title="${escape(task.title)} · ${statuses[task.status]}" ${selected === task.id ? 'aria-current="page"' : ""}>${task.pinnedAt ? `<span class="task-pin" aria-label="已置顶">${icon("pin")}</span>` : `<span class="task-status-dot ${task.status}" aria-label="${statuses[task.status]}"></span>`}<span class="recent-title">${escape(task.title)}</span></button>${taskMenuButton(task, "sidebar")}</div>`).join("")}</section>`;
+  const group = (items: TaskSummary[], label: string, name: string): string => `<section class="sidebar-task-group" aria-label="${label}" data-task-group="${name}"><div class="nav-section-label">${label}</div>${items.map(task => `<div class="recent-task-row ${selected === task.id ? "active" : ""}" data-task-row="${task.id}"><button class="recent-task" data-task="${task.id}" title="${escape(task.title)} · ${statuses[task.status]}" ${selected === task.id ? 'aria-current="page"' : ""}>${task.pinnedAt ? `<span class="task-pin" aria-label="已置顶">${icon("pin")}</span>` : `<span class="task-status-dot ${task.status}" aria-label="${statuses[task.status]}"></span>`}<span class="recent-title">${escape(task.title)}</span></button>${taskMenuButton(task, "sidebar")}</div>`).join("")}</section>`;
   return `${pinned.length ? group(pinned, "置顶", "pinned") : ""}${recent.length ? group(recent, "最近任务", "recent") : ""}${!visible.length ? '<div class="nav-section-label">最近任务</div><p class="sidebar-empty">开始的任务会显示在这里</p>' : ""}`;
 }
 
@@ -22,7 +22,7 @@ export class TaskMenus {
   private taskId = "";
   private anchorId = "";
   private point?: { x: number; y: number };
-  constructor(private root: HTMLElement, private getTask: (id: string) => BrowserTask | undefined, private busy: () => boolean, private action: (id: string, action: TaskMenuAction) => void) {
+  constructor(private root: HTMLElement, private getTask: (id: string) => TaskSummary | undefined, private busy: () => boolean, private action: (id: string, action: TaskMenuAction) => void) {
     root.addEventListener("click", event => {
       const trigger = (event.target as Element).closest<HTMLButtonElement>("[data-task-menu]");
       if (!trigger) return;

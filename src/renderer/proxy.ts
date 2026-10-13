@@ -1,4 +1,4 @@
-import type { BifrostSnapshot } from "./types";
+import type { BifrostSnapshot } from "../shared/types";
 import { normalizeProxyEndpoint, parseProxyEndpoint } from "../shared/proxy-endpoint";
 
 export const DEFAULT_CLASH_PROXY_SERVER = "http://127.0.0.1:7897";

@@ -26,12 +26,13 @@ if (window.parent !== window && workspaceRoute(location.href, window.parent.loca
   };
   // All IPC still originates in the trusted top-level desktop document. No Node
   // integration, preload in subframes, remote content, or generic IPC forwarding.
-  for (const name of ["profileManager", "tasks", "localApps", "phones", "mobile"] as const) {
+  for (const name of ["profileManager", "browserConnection", "tasks", "localApps", "phones", "mobile"] as const) {
     const source = window.parent[name];
     const api = Object.fromEntries(Object.entries(source).map(([method, value]) => {
       const allowed = name === "profileManager" ||
         (name === "phones" && (workspace === "phones" || method === "snapshot" || method === "onChanged")) ||
         (name === "mobile" && workspace === "phones") || (name === "localApps" && workspace === "local-apps") ||
+        (name === "browserConnection" && ["agent", "browser", "tools"].includes(workspace)) ||
         (name === "tasks" && ["agent", "browser", "tools"].includes(workspace));
       const unavailable = name === "phones" || name === "mobile" ? "请在手机工作区操作设备。" : name === "localApps" ? "本地应用接口只能由本地应用工作区调用。" : "不允许此页面调用任务接口。";
       if (!allowed) return [method, method.startsWith("on") ? () => () => {} : () => Promise.reject(new Error(unavailable))];

@@ -1,9 +1,9 @@
+import { reconcileChildren } from "./dom-reconcile";
 type Reading = { top: number; bottom: boolean; anchor?: string; offset?: number; details: Record<string, boolean> };
 const keyOf = (node: Node): string => {
   if (!(node instanceof Element)) return "";
   return node.getAttribute("data-editor-key") || (node.id ? `${node.tagName}#${node.id}${node.getAttribute("data-decision-id") || ""}` : ["data-task-row", "data-task", "data-nav", "data-control", "data-action", "data-message-id"].map(name => node.hasAttribute(name) ? `${node.tagName}:${name}:${node.getAttribute(name)}` : "").find(Boolean) || "");
 };
-const compatible = (a: Node, b: Node): boolean => a.nodeType === b.nodeType && (!(a instanceof Element) || b instanceof Element && a.tagName === b.tagName && keyOf(a) === keyOf(b));
 
 /** The inspector can follow the conversation in normal document flow. The
  * conversation's latest position therefore ends at its composer, not the page. */
@@ -110,7 +110,7 @@ export class TaskDom {
     // Custom select controls are rebuilt by TaskSelects. Unwrap their source first.
     for (const wrapper of this.root.querySelectorAll(".select-field")) { const select = wrapper.querySelector("select"); if (select) { const clean = select.cloneNode(true) as HTMLSelectElement; clean.value = select.value; wrapper.replaceWith(clean); } }
     const template = document.createElement("template"); template.innerHTML = markup;
-    const patch = (old: Node, fresh: Node): void => {
+    const patch = (old: Node, fresh: Node, created = false): void => {
       if (old.nodeType === Node.TEXT_NODE) { if (old.nodeValue !== fresh.nodeValue) old.nodeValue = fresh.nodeValue; return; }
       if (!(old instanceof Element) || !(fresh instanceof Element)) return;
       // React owns this subtree, including textarea composition and undo history.
@@ -120,26 +120,18 @@ export class TaskDom {
       if (old.tagName.toLowerCase() === "canvas" && old.getAttribute("class")?.split(/\s+/).includes("live-canvas")) return;
       if (old.isEqualNode(fresh)) return;
       const editor = old instanceof HTMLTextAreaElement && old.hasAttribute("data-editor-key");
-      for (const attr of [...old.attributes]) if (!fresh.hasAttribute(attr.name) && !(editor && attr.name === "style")) old.removeAttribute(attr.name);
-      for (const attr of [...fresh.attributes]) if (old.getAttribute(attr.name) !== attr.value && !(editor && attr.name === "style")) old.setAttribute(attr.name, attr.value);
-      if (editor) return;
+      const keep = (name: string): boolean => editor && name === "style" || !created && old instanceof HTMLDetailsElement && name === "open";
+      for (const attr of [...old.attributes]) if (!fresh.hasAttribute(attr.name) && !keep(attr.name)) old.removeAttribute(attr.name);
+      for (const attr of [...fresh.attributes]) if (old.getAttribute(attr.name) !== attr.value && !keep(attr.name)) old.setAttribute(attr.name, attr.value);
+      if (editor) {
+        if (created) old.textContent = fresh.textContent;
+        return;
+      }
       children(old, fresh);
     };
-    const children = (old: Node, fresh: Node): void => {
-      const keyed = new Map([...old.childNodes].map(node => [keyOf(node), node]));
-      let cursor = old.firstChild;
-      for (const next of [...fresh.childNodes]) {
-        const key = keyOf(next);
-        let match: Node | undefined = key ? keyed.get(key) : cursor && compatible(cursor, next) ? cursor : undefined;
-        if (match && !compatible(match, next)) match = undefined;
-        if (key) keyed.delete(key);
-        if (!match && next instanceof HTMLTextAreaElement && next.dataset.editorKey) match = this.editors.get(next.dataset.editorKey);
-        if (match) { if (match !== cursor) old.insertBefore(match, cursor); patch(match, next); }
-        else { match = next.cloneNode(false); old.insertBefore(match, cursor); patch(match, next); }
-        cursor = match.nextSibling;
-      }
-      while (cursor) { const next = cursor.nextSibling; old.removeChild(cursor); cursor = next; }
-    };
+    const children = (old: Node, fresh: Node): void => reconcileChildren(old, fresh, {
+      key: keyOf, patch, recover: next => next instanceof HTMLTextAreaElement && next.dataset.editorKey ? this.editors.get(next.dataset.editorKey) : undefined
+    });
     children(this.root, template.content);
     this.page = page;
     for (const node of this.root.querySelectorAll<HTMLTextAreaElement>("textarea[data-editor-key]")) if (!node.closest("[data-task-chat-owned]")) this.editors.set(node.dataset.editorKey!, node);

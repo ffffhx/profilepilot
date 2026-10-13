@@ -2,6 +2,7 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('node:path');
 const { TaskStore } = require('../../../dist/main/tasks/store');
+const { TaskListFeed, TaskDetailCursor } = require('../../../dist/main/tasks/feed');
 const { startE2eDriver } = require('../../../dist/main/e2e-driver');
 const fixture = process.env.TASK_CHAT_FIXTURE;
 if (!fixture || !process.env.TASK_CHAT_SOCKET) throw new Error('Run scripts/e2e-task-chat.mjs');
@@ -15,9 +16,14 @@ const other = store.create({ profileId:'chat-test', prompt:'另一份任务的�
 let window, driverClose, stream, failNext = false, holdNext = false, releaseSend, streamId = 'live-response';
 const calls = [], errors = [];
 const snapshot = () => ({...store.snapshot(), streams:stream ? {[task.id]:stream} : {}});
-const changed = () => window.webContents.send('chat-fixture:changed', snapshot());
+const feed = new TaskListFeed(() => ({tasks:store.data.tasks,metadata:store.listMetadata()}));
+const cursor = new TaskDetailCursor();
+const changed = () => window.webContents.send('chat-fixture:changed', feed.update(new Set([task.id,other.id])));
 ipcMain.handle('chat-fixture:request', async (_, method, ...args) => {
   if (method === 'snapshot') return snapshot();
+  if (method === 'list') return feed.snapshot();
+  if (method === 'detail') return cursor.read(store.get(args[0]),args[1],args[0] === task.id ? stream : undefined);
+  if (method === 'search') return [];
   if (method === 'listModels') return ['test-model'];
   if (method === 'watchPreview' || method === 'ackPreview') return;
   if (method === 'control') {

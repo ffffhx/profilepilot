@@ -30,7 +30,7 @@ function loadStateActions(initialStore = {}, api) {
   const actions = loadTsModule("src/renderer/state-actions.ts", {
     stubs: {
       "src/renderer/api.ts": apiStub,
-      "src/renderer/render/render-root.ts": renderStub,
+      "src/renderer/view-events.ts": { invalidateView: renderStub.render },
       "src/renderer/state.ts": stateStub
     }
   });

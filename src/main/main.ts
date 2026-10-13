@@ -1,3 +1,6 @@
+import { registerBrowserConnection } from "./browser-service/desktop";
+import type { BrowserServiceClient } from "./browser-service/client";
+import { TASK_CHANNEL } from "../shared/tasks";
 import { normalizeQuickLaunchShortcut } from "../shared/quick-launch-shortcut";
 import { QuickLaunchShortcuts } from "./quick-launch-shortcuts";
 import { promises as fs, watch, type FSWatcher } from "node:fs";
@@ -108,6 +111,7 @@ installProcessCrashLogging();
 installElectronCrashLogging();
 const profileManager = createProfileManager(broadcastAgentTakeover, revealAgentOverlayProfile);
 let taskService: TaskService | undefined;
+let browserConnection: BrowserServiceClient | undefined;
 let phonesService: PhonesService | undefined;
 let mobileService: MobileService | undefined;
 let startupSettingsManager: StartupSettingsManager;
@@ -284,7 +288,7 @@ function broadcastAppState(state: AppState): void {
 }
 
 async function updatedAppState(): Promise<AppState> {
-  const state = await profileManager.getState();
+  const state = await profileManager.refreshRuntime();
   // Cached workspaces need mutation results immediately, without waiting for a
   // filesystem watch or the periodic reconciliation scan.
   broadcastAppState(state);
@@ -293,6 +297,7 @@ async function updatedAppState(): Promise<AppState> {
 
 function publishProfileResult<T extends { state: AppState }>(result: T): T {
   broadcastAppState(result.state);
+  scheduleAppStateBroadcast(0);
   return result;
 }
 
@@ -315,7 +320,7 @@ async function refreshAndBroadcastAppState(): Promise<void> {
   stateBroadcastInFlight = true;
   stateBroadcastPending = false;
   try {
-    broadcastAppState(await profileManager.getState());
+    broadcastAppState(await profileManager.refreshRuntime());
   } catch (error) {
     console.warn(`[state-coordinator] 状态校准失败：${error instanceof Error ? error.message : String(error)}`);
   } finally {
@@ -382,6 +387,7 @@ function scheduleGatewayEventReconnect(delayMs = 1_000): void {
 function startStateCoordinator(): void {
   stateCoordinatorStopping = false;
   startGatewayStateWatcher();
+  scheduleAppStateBroadcast(0);
   scheduleGatewayEventReconnect(0);
   if (!stateCalibrationTimer) {
     stateCalibrationTimer = setInterval(
@@ -1120,6 +1126,7 @@ async function quickLaunchProfile(profileId: string): Promise<void> {
     notifyQuickLaunch("直启失败", `${profile.name}：${error instanceof Error ? error.message : String(error)}`);
   } finally {
     inFlightQuickLaunch.delete(profile.id);
+    scheduleAppStateBroadcast(0);
   }
 }
 
@@ -1317,7 +1324,7 @@ function createMainWindow(): void {
                   return false;
                 };
 
-                await waitForSmokeCondition(() => document.querySelector("h1") && document.querySelector('[data-action="open-global-instructions"]'), 5000);
+                await waitForSmokeCondition(() => document.querySelector("h1") && document.querySelector('[data-profile-row]'), 5000);
 
                 const smokeResult = {
                   title: document.title,
@@ -1403,12 +1410,6 @@ function createMainWindow(): void {
                   extensionDataGuard: null,
                   globalInstructionFiles: [],
                   globalInstructionHasContent: false,
-                  globalInstructionsModalTitle: null,
-                  globalInstructionsModalTabs: [],
-                  globalInstructionsModalPath: null,
-                  globalInstructionsModalHasContent: false,
-                  globalInstructionsEditorReady: false,
-                  globalInstructionsEditorDraftLength: null,
                   crud: null
                 };
 
@@ -1416,28 +1417,7 @@ function createMainWindow(): void {
                 const globalInstructions = await window.profileManager.readGlobalInstructions();
                 smokeResult.globalInstructionFiles = globalInstructions.files.map((file) => file.fileName);
                 smokeResult.globalInstructionHasContent = globalInstructions.files.some((file) => file.exists && file.content.length > 0);
-                const globalInstructionsButton = document.querySelector('[data-action="open-global-instructions"]');
-                if (globalInstructionsButton instanceof HTMLButtonElement) {
-                  globalInstructionsButton.click();
-                  await waitForSmokeCondition(() => document.querySelector(".global-instructions-modal"), 1000);
-                  await waitForSmokeCondition(() => document.querySelector(".global-instruction-content, .global-instruction-message"), 2500);
-                  smokeResult.globalInstructionsModalTitle = document.querySelector(".global-instructions-modal h2")?.textContent || null;
-                  smokeResult.globalInstructionsModalTabs = Array.from(document.querySelectorAll(".global-instruction-tab span")).map((item) => item.textContent);
-                  smokeResult.globalInstructionsModalPath = document.querySelector(".global-instruction-meta code")?.textContent || null;
-                  smokeResult.globalInstructionsModalHasContent = Boolean(document.querySelector(".global-instruction-content")?.textContent?.length);
-                  const editButton = document.querySelector('[data-action="edit-global-instruction"]');
-                  if (editButton instanceof HTMLButtonElement && !editButton.disabled) {
-                    editButton.click();
-                    await waitForSmokeCondition(() => document.querySelector("[data-global-instruction-editor]"), 1000);
-                    const editor = document.querySelector("[data-global-instruction-editor]");
-                    smokeResult.globalInstructionsEditorReady = editor instanceof HTMLTextAreaElement;
-                    smokeResult.globalInstructionsEditorDraftLength = editor instanceof HTMLTextAreaElement ? editor.value.length : null;
-                    document.querySelector('[data-action="cancel-global-instruction-edit"]')?.click();
-                    await new Promise((done) => window.setTimeout(done, 0));
-                  }
-                  document.querySelector('.global-instructions-modal [data-action="close-modal"]')?.click();
-                  await new Promise((done) => window.setTimeout(done, 0));
-                }
+                // Control preference editing is covered by e2e-control-preferences.mjs in the Tools workspace.
                 const syncAccountButton = document.querySelector('[data-action="run-sync"]');
                 if (syncAccountButton instanceof HTMLButtonElement && !syncAccountButton.disabled) {
                   syncAccountButton.click();
@@ -1633,11 +1613,14 @@ function registerIpcHandlers(): void {
     if (typeof enabled !== "boolean") throw new TypeError("开机自启动开关必须是布尔值。");
     return startupSettingsManager.setEnabled(enabled);
   });
-  ipcMain.handle(IPC_CHANNELS.getState, async (): Promise<AppState> => updatedAppState());
+  ipcMain.handle(IPC_CHANNELS.getState, async (): Promise<AppState> => {
+    const state = await profileManager.getState();
+    broadcastAppState(state);
+    return state;
+  });
   ipcMain.handle(IPC_CHANNELS.getInitialState, (): Promise<AppState> => {
     // The coordinator already coalesces refreshes across both windows. Never
     // make page navigation wait for process, port and browser target probes.
-    if (profileManager.getCachedState() && !stateBroadcastInFlight) scheduleAppStateBroadcast();
     return profileManager.getInitialState();
   });
   ipcMain.handle(IPC_CHANNELS.getTakeoverHistory, async (): Promise<AgentTakeoverEvent[]> => profileManager.getTakeoverHistory());
@@ -1927,7 +1910,7 @@ function registerIpcHandlers(): void {
         ? { session: sessionOrOptions }
         : sessionOrOptions;
       const result = await profileManager.resumeAgentConnections(profileId, options);
-      const state = await profileManager.getState();
+      const state = await updatedAppState();
       return {
         profileId,
         profileName: state.profiles.find((profile) => profile.id === profileId)?.name || profileId,
@@ -2210,10 +2193,17 @@ if (!app.requestSingleInstanceLock()) {
     }
 
     registerIpcHandlers();
-    taskService = registerTaskService(profileManager);
+    browserConnection = registerBrowserConnection(profileManager, id => !taskService?.store.data.tasks.some(task => task.profileId === id && task.status === "running"));
+    try {
+      taskService = registerTaskService(profileManager, browserConnection);
+    } catch (error) {
+      console.error("[tasks] 初始化失败，浏览器与其他工作区仍可使用：", error);
+      ipcMain.removeHandler(TASK_CHANNEL);
+      ipcMain.handle(TASK_CHANNEL, () => { throw new Error("任务服务初始化失败，原始任务数据已保留。请检查任务存储后重启应用。"); });
+    }
     registerLocalApps(profileManager);
     phonesService = registerPhones(path.join(process.env.CPM_DATA_DIR || defaultDataDir(), "phones"), path.join(__dirname, "../android/profilepilot-phone.apk"), !IS_ELECTRON_SMOKE_TEST);
-    mobileService = registerMobile(path.join(process.env.CPM_DATA_DIR || defaultDataDir(), "mobile"), taskService, profileManager, path.join(__dirname, "../android/profilepilot-phone.apk"));
+    mobileService = registerMobile(path.join(process.env.CPM_DATA_DIR || defaultDataDir(), "mobile"), () => taskService, profileManager, path.join(__dirname, "../android/profilepilot-phone.apk"));
     if (!IS_BACKGROUND_E2E && (!IS_ELECTRON_SMOKE_TEST || process.env.CPM_E2E_ENABLE_GLOBAL_SHORTCUTS === "1")) {
       await registerGlobalShortcuts();
     }
@@ -2275,6 +2265,7 @@ const shutdown = new ShutdownCoordinator({
     { name: "mobile-connections", run: () => mobileService?.close() },
     { name: "state-coordinator", run: () => stopStateCoordinator() },
     { name: "tasks-save-and-handoff", run: () => taskService?.close() },
+    { name: "browser-connection", run: () => browserConnection?.close() },
     { name: "agent-overlay", run: () => profileManager.disposeAgentOverlay() },
     { name: "management-server", run: async () => { await managementServer?.close(); managementServer = null; } }
   ],

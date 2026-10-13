@@ -1,8 +1,8 @@
 import { profileApi } from "./api";
-import { render } from "./render/render-root";
+import { invalidateView as render } from "./view-events";
 import { store } from "./state";
-import { AppState, PublicProfile } from "./types";
-import type { TaskSnapshot } from "../shared/tasks";
+import type { AppState, PublicProfile } from "../shared/types";
+import type { BrowserConnectionSnapshot } from "../shared/browser-connection";
 import { formatErrorMessage } from "./util";
 
 const ONBOARDING_STORAGE_KEY = "profilepilot:onboarding:v1:seen";
@@ -85,7 +85,7 @@ async function inspectAgentIntegration(): Promise<void> {
 
 let nativeExtensionRevision = 0;
 
-export function applyNativeExtensionSnapshot(snapshot: TaskSnapshot): void {
+export function applyNativeExtensionSnapshot(snapshot: BrowserConnectionSnapshot): void {
   nativeExtensionRevision += 1;
   store.nativeExtensionBrowsers = snapshot.nativeBrowsers || [];
   store.nativeExtensionInstallations = snapshot.nativeInstallations || [];
@@ -100,7 +100,7 @@ export async function refreshNativeExtensionStatus(): Promise<void> {
   render();
   const revision = nativeExtensionRevision;
   try {
-    const snapshot = await window.tasks.snapshot();
+    const snapshot = await window.browserConnection.snapshot();
     if (revision === nativeExtensionRevision) applyNativeExtensionSnapshot(snapshot);
   } catch (error) {
     if (revision === nativeExtensionRevision) store.nativeExtensionError = formatErrorMessage(error);

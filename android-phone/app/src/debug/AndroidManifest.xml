@@ -1,5 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application>
+        <activity android:name=".ScreenCameraBenchmarkActivity" android:exported="true"
+            android:label="屏幕摄像头验证" android:resizeableActivity="true" />
         <activity
             android:name=".ControlBenchmarkActivity"
             android:exported="true"

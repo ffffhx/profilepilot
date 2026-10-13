@@ -168,10 +168,10 @@ export interface Registry {
   quickLaunchShortcuts?: Record<string, string>;
 }
 
-export type BrowserDriverKind = "agent-browser" | "playwright-cli" | "chrome-devtools-mcp";
+export type BrowserDriverKind = "agent-browser";
 export type AgentSkillKey = BrowserDriverKind | "profilepilot-cli" | "profilepilot";
 
-// 当前持有该 Profile CDP 端口持久连接的客户端（agent-browser / Playwright / DevTools 等）。
+// 当前持有该 Profile CDP 端口持久连接的客户端（agent-browser 等）。
 export interface CdpClientInfo {
   pid: number;
   label: string;

@@ -1,9 +1,9 @@
-import { isBusyAction } from "../busy";
+import { isBusyAction } from "./busy-view";
 import { plannedExtensionMigrationExtensions, renderExtensionMigrationDiffPreview, renderMigrationTargetPicker } from "./extensions";
 import { bifrostMainProxyServer, DEFAULT_CLASH_PROXY_SERVER, proxyServerUsesPort } from "../proxy";
 import { store } from "../state";
 import { experimentalProxyRoutingEnabled } from "../experimental-features";
-import { BifrostSnapshot, CdpPortSuggestion, GlobalInstructionFile, PublicProfile } from "../types";
+import type { BifrostSnapshot, CdpPortSuggestion, GlobalInstructionFile, PublicProfile } from "../../shared/types";
 import { escapeHtml, formatCdpPortSuggestionNote, formatDate, renderButtonLabel } from "../util";
 
 type ProxyRouteMapTone = "current" | "saved" | "preview" | "warning" | "unknown";

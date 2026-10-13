@@ -1,11 +1,11 @@
 import { formatQuickLaunchShortcut } from "../../shared/quick-launch-shortcut";
-import { isBusyAction, profileBusyKind, profileBusyStatusLabel } from "../busy";
+import { isBusyAction, profileBusyKind, profileBusyStatusLabel } from "./busy-view";
 import { proxyServerUsesPort } from "../proxy";
 import { store } from "../state";
 import { experimentalProxyRoutingEnabled } from "../experimental-features";
-import { AgentActivity, BifrostRuleDestination, BifrostSnapshot, CdpClientInfo, ExternalChromeInstance, ProfileReadinessReceipt, PublicProfile, SystemProxyRoute } from "../types";
+import type { AgentActivity, BifrostRuleDestination, BifrostSnapshot, CdpClientInfo, ExternalChromeInstance, ProfileReadinessReceipt, PublicProfile, SystemProxyRoute } from "../../shared/types";
 import { renderLiveViewSection } from "./live-view";
-import { profileAvatar } from "./browser-workspace";
+import { profileAvatar } from "./profile-avatar";
 import { NATIVE_CDP_UNSUPPORTED_NOTE, agentActivityLeadText, agentActivityProgressText, agentActivityTooltipText, agentBrowserOccupancyClient, cdpClientToolSummary, cdpLaunchButtonTitle, cdpPortLabel, cdpSessionText, contentionNotice, contentionNoticeShort, deleteButtonTitle, escapeHtml, focusButtonTitle, formatDate, formatRelativeTime, gatewayControlClient, gatewayUserHasControl, launchButtonTitle, listeningPortsNote, liveAddrLabel, prettyCdpClientLabel, profileAgentBrowserReserved, profileAgentControlClients, profileStatusLabel, profileUserHasControl, renderButtonLabel, sourceDetail, truncateText } from "../util";
 
 interface ConnectionActivityModel {
@@ -1938,7 +1938,7 @@ export function renderCdpDetail(profile: PublicProfile): string {
   return cdpRow + renderCdpClientsDetail(profile);
 }
 
-// 显示当前正持久连接该 CDP 端口的驱动工具（agent-browser / Playwright / DevTools 等）。
+// 显示当前正持久连接该 CDP 端口的驱动工具（agent-browser 等）。
 export function renderCdpClientsDetail(profile: PublicProfile): string {
   if (!profile.cdpUrl) {
     return "";
@@ -2010,7 +2010,7 @@ export function renderCdpClientsDetail(profile: PublicProfile): string {
       ${disconnectRow}
       ${renderAgentOverlaySettingRow()}
       ${renderShellIntegrationRow(profile)}
-      <small class="detail-note">列出连到 CDP 端口的工具连接。“驱动中”表示有工具在控制；每行显示驱动方与最近活动。ProfilePilot 会统一管理 agent-browser、Playwright CLI 和 Chrome DevTools MCP 的接管、交还与结束（不影响 Chrome）。</small>
+      <small class="detail-note">列出连到 CDP 端口的工具连接。“驱动中”表示有工具在控制；每行显示驱动方与最近活动。ProfilePilot 会统一管理 agent-browser 的接管、交还与结束（不影响 Chrome）。</small>
     </div>
   `;
 }
@@ -2067,10 +2067,8 @@ function renderShellIntegrationRow(profile: PublicProfile): string {
   const hasManagedDriver = profile.cdpClients.some((client) => {
     const label = client.label.toLowerCase();
     return Boolean(
-      client.driverKind ||
-        label.startsWith("agent-browser") ||
-        label.startsWith("playwright") ||
-        label.includes("chrome devtools mcp")
+      client.driverKind === "agent-browser" ||
+        label.startsWith("agent-browser")
     );
   });
   if (!hasManagedDriver) {
@@ -2080,7 +2078,7 @@ function renderShellIntegrationRow(profile: PublicProfile): string {
   const busy = isBusyAction("shell-integration");
   if (!status.installed) {
     return `
-      <small class="detail-note">启用「会话识别」后，agent-browser、Playwright CLI 和 Chrome DevTools MCP 都会携带统一的 AI 会话身份（往 ${escapeHtml(status.path)} 写一段可移除的配置，对新开会话生效）。</small>
+      <small class="detail-note">启用「会话识别」后，agent-browser 会携带统一的 AI 会话身份（往 ${escapeHtml(status.path)} 写一段可移除的配置，对新开会话生效）。</small>
       <div class="detail-session-actions">
         <button type="button" class="action-button accent ${busy ? "loading" : ""}" data-action="enable-shell-integration" ${store.busy ? "disabled" : ""}>${renderButtonLabel(busy, "启用会话识别", "写入中…")}</button>
       </div>

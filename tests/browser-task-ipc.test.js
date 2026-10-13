@@ -24,7 +24,7 @@ test("Jev credentials are isolated, omitted from snapshots, preserved by main se
   load(id => id === "electron" ? electron : id === '../browser-service/client' ? browserServiceStub : localRequire(id), module, module.exports, path.dirname(filename), { env: { ...process.env, CPM_DATA_DIR: root } });
   const event = { senderFrame: { url: pathToFileURL(path.resolve("public/tasks.html")).href } }; let service;
   try {
-    service = module.exports.registerTaskService({ getState: async () => ({ profiles: [] }) });
+    service = module.exports.registerTaskService({ getState: async () => ({ profiles: [] }) }, new browserServiceStub.BrowserServiceClient());
     service.tick = async () => {};
     assert.equal(JSON.parse(readFileSync(path.join(root, "browser-tasks", "tasks.json"), "utf8")).settings.jevMode, "driver");
     await assert.rejects(handler(event, "saveJevSettings", { enabled: true }), /请先填写/);
@@ -61,8 +61,8 @@ test("Jev credentials are isolated, omitted from snapshots, preserved by main se
     await handler(event, "saveJevSettings", { enabled: true, provider: "vercel" });
     assert.equal(service.dependencies.jevApiKey(), "gateway-fixture-secret");
     // A pre-provider release only stored the original Vercel vault and flags.
-    delete service.store.data.settings.jevProvider; service.publish(); await service.close();
-    service = module.exports.registerTaskService({ getState: async () => ({ profiles: [] }) });
+    delete service.store.data.settings.jevProvider; service.publish([]); await service.close();
+    service = module.exports.registerTaskService({ getState: async () => ({ profiles: [] }) }, new browserServiceStub.BrowserServiceClient());
     service.tick = async () => {};
     assert.equal(service.store.data.settings.jevProvider, "vercel");
     assert.equal(service.store.data.settings.jevEnabled, true);
@@ -100,7 +100,7 @@ test("task notification restores the desktop and opens the matching task", async
   load(id => id === "electron" ? electron : id === '../browser-service/client' ? browserServiceStub : localRequire(id), module, module.exports, path.dirname(filename), { env: { ...process.env, CPM_DATA_DIR: root } });
   let service;
   try {
-    service = module.exports.registerTaskService({ getState: async () => ({ profiles: [] }) });
+    service = module.exports.registerTaskService({ getState: async () => ({ profiles: [] }) }, new browserServiceStub.BrowserServiceClient());
     service.dependencies.notify("验收任务", "等待确认", "task-id");
     assert.equal(notification.options.title, "ProfilePilot · 验收任务");
     notification.handlers.click();

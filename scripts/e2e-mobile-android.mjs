@@ -4,6 +4,7 @@ import { readFile, mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import assert from 'node:assert/strict';
+import records from '../dist/main/tasks/records.js';
 const repo = process.cwd();
 const serial = process.argv[2];
 if (!/^emulator-\d+$/.test(serial || '')) throw new Error('Supply a disposable emulator serial. This test refuses physical phones.');
@@ -39,7 +40,7 @@ try {
     assert.equal(result.stdout[0], 137, `Screenshot unavailable: ${name}`);
     await writeFile(path.join(screenshots, `android-${name}.png`), result.stdout);
   }
-  const data = JSON.parse(await readFile(path.join(fixtureRoot, 'tasks/tasks.json'), 'utf8'));
+  const data = new records.TaskRecords(path.join(fixtureRoot, 'tasks')).read();
   assert.ok(data.tasks.some(task => task.prompt.startsWith('Android native UI task')));
   assert.equal(data.tasks.filter(task => task.prompt === 'Lost response replay test').length, 1);
   console.log('Passed Android native UI, PC task creation, pause/resume, draft preservation, pinned TLS, encrypted credentials, retry, replies and revocation.');

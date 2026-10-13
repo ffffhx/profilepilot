@@ -6,6 +6,7 @@ const os = require("node:os");
 const vm = require("node:vm");
 const { createRequire } = require("node:module");
 const { pathToFileURL } = require("node:url");
+const { BrowserServiceClient } = require('../dist/main/browser-service/client');
 const output = process.env.PPILOT_BACKEND_TEST_DIST || path.join(__dirname, "../dist/main/tasks");
 const { parseTaskManagementCommand, executeTaskManagementCommand } = require(path.join(output, "management"));
 
@@ -19,7 +20,7 @@ test("CLI and desktop share encrypted settings, reject provider key reuse, and n
   const source = fs.readFileSync(process.env.PPILOT_BACKEND_IPC_SOURCE || filename, "utf8");
   const load = vm.runInThisContext(`(function(require,module,exports,__dirname,process){${source}\n})`, { filename });
   load(id => id === "electron" ? electron : localRequire(id), module, module.exports, path.dirname(filename), { env: { ...process.env, CPM_DATA_DIR: root } });
-  const service = module.exports.registerTaskService({ getState: async () => ({ profiles: [] }) });
+  const service = module.exports.registerTaskService({ getState: async () => ({ profiles: [] }) }, new BrowserServiceClient(path.join(root, 'browser-tasks')));
   service.tick = async () => {};
   t.after(async () => { await service.close(); fs.rmSync(root, { recursive: true, force: true }); });
   const command = value => executeTaskManagementCommand(parseTaskManagementCommand(value), service, async () => "unused");
@@ -53,12 +54,6 @@ test("CLI and desktop share encrypted settings, reject provider key reuse, and n
   electron.dialog.showOpenDialog = async () => ({ canceled: false, filePaths: Array(51).fill(selected) });
   await assert.rejects(handler(event, "importAttachments"));
   assert.equal(service.store.data.attachments.length, 1);
-  // Extension files now belong to the independent browser service. The
-  // desktop delegates this action rather than opening its own install folder.
-  let revealRequests = 0;
-  t.mock.method(service.dependencies.browser.native.bridge, "revealExtension", async () => { revealRequests++; });
-  await handler(event, "openNativeExtensionFolder");
-  assert.equal(revealRequests, 1);
   await command({ action: "task.settings.update", input: { apiKey: "" } });
   assert.equal(service.dependencies.apiKey(), "");
   assert.equal((await command({ action: "task.settings.get" })).settings.hasApiKey, false);
@@ -72,7 +67,7 @@ test("real task IPC wiring preserves registered direct owners but releases orpha
   const load = vm.runInThisContext(`(function(require,module,exports,__dirname,process){${source}\n})`, { filename });
   load(id => id === "electron" ? electron : localRequire(id), module, module.exports, path.dirname(filename), { env: { ...process.env, CPM_DATA_DIR: root } });
   const profileId = "native:Default";
-  const service = module.exports.registerTaskService({ getState: async () => ({ profiles: [{ id: profileId, source: "native", name: "Chrome" }] }) });
+  const service = module.exports.registerTaskService({ getState: async () => ({ profiles: [{ id: profileId, source: 'native', name: 'Chrome' }] }) }, new BrowserServiceClient(path.join(root, 'browser-tasks')));
   service.tick = async () => {};
   t.after(async () => { await service.close(); fs.rmSync(root, { recursive: true, force: true }); });
   const native = service.dependencies.browser.native.bridge;

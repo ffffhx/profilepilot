@@ -1,3 +1,4 @@
+const { readTaskRecords } = require('./helpers/task-records.cjs');
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { spawn } = require("node:child_process");
@@ -77,7 +78,7 @@ test("bundled Agent CLI submits, answers, follows and continues the desktop task
   assert.equal(store.get(id).sessionId, firstSession);
   assert.equal(starts[2].task.sdkSessionId, "fixture-sdk-session");
   assert.ok(store.get(id).events.some(event => event.text === "再核验一次，保留上次记录。"));
-  assert.equal(JSON.parse(fs.readFileSync(store.file, "utf8")).tasks[0].status, "completed");
+  assert.equal(readTaskRecords(store.file).tasks[0].status, "completed");
 
   const listed = await invoke(["agent", "list", "--json"]);
   assert.equal(listed.code, 0, listed.stderr);

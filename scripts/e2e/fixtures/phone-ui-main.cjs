@@ -26,6 +26,7 @@ let wirelessServices = defaultWirelessServices, wirelessReachable = true;
 let emulatorConnected = false;
 const androidSetupFixture = createAndroidFixture(AndroidSetup, path.join(root, 'android-setup'), { delay: 250 });
 let previewCalls = 0, previewBehavior = {};
+let cameraCalls = [], cameraState, cameraUnsupported = false;
 let basicFrame = { width: 320, height: 640, shade: 128 }, basicFrameBehavior = {};
 const unresponsive = new Set();
 let appInstalled = process.env.PHONE_UI_NO_APP !== '1';
@@ -64,6 +65,21 @@ const service = new PhonesService({ root, apkPath: process.env.PHONE_UI_NO_APP =
   }, onChanged: value => { if (window && !window.isDestroyed()) window.webContents.send('phone-ui:changed', value); }
 });
 ipcMain.handle('phone-ui:request', async (_, method, params) => {
+  if (process.env.PHONE_UI_CAMERA === '1') {
+    if (method === 'fixture-camera-calls') return cameraCalls;
+    if (method === 'fixture-camera-unsupported') { cameraUnsupported = params.value; return; }
+    if (method === 'camera-probe') return { sdk: 36, release: '16', supported: !cameraUnsupported, reason: cameraUnsupported ? '此设备的图形驱动不支持屏幕摄像头' : '' };
+    if (method === 'camera-sources') return [{ id: 'window:camera-fixture:0', name: '二维码登录 · 工作 Profile', thumbnail: nativeImage.createFromPath(path.resolve('artifacts/screen-camera/qr.png')).toDataURL() }];
+    if (method === 'camera-start') { cameraCalls.push({ method, ...params }); return cameraState = { ...params, active: true, displayId: 7, cameraId: 'fixture-camera', width: 720, height: 1280, framesReceived: 1, framesRendered: 1, streams: 1, error: '' }; }
+    if (method === 'camera-command') {
+      cameraCalls.push({ method, ...params });
+      if (params.op === 'status') return cameraState;
+      if (params.op === 'apps') return { apps: [{ name: '微信', component: 'com.tencent.mm/.ui.LauncherUI' }] };
+      if (params.op === 'preview') return { mime: 'image/jpeg', base64: nativeImage.createFromPath(path.resolve('artifacts/screen-camera/qr.png')).resize({width:720,height:1280}).toJPEG(80).toString('base64'), width: 720, height: 1280 };
+      if (params.op === 'stop') cameraState.active = false;
+      return cameraState;
+    }
+  }
   if (method === 'fixture-android-behavior') { Object.assign(androidSetupFixture.behavior, params); return; }
   // This cloud-only device is injected as a renderer event, not a registered
   // status channel. Keep discovery from replacing it with the service snapshot.

@@ -1,5 +1,6 @@
-import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync, openSync, closeSync, fsyncSync, unlinkSync } from "node:fs";
+import { TaskRecords } from "./records";
+import { randomUUID } from "node:crypto";
+import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import type { BrowserTask, CreateTaskInput, TaskSnapshot, TaskEvent } from "../../shared/tasks";
@@ -38,34 +39,33 @@ export class TaskStore {
   readonly file: string;
   data: TaskSnapshot;
   private saveTimer?: ReturnType<typeof setTimeout>;
-  private savedDigest?: string;
+  private readonly records: TaskRecords;
+  private readonly pendingTasks = new Set<string>();
   private saveError?: Error;
-  private formatVersion = 1;
   private histories = new Map<string, SdkTaskHistory>();
   private sdkTitles = new Map<string, { session: string; title: string }>();
   /** Deferred failures stay visible until a successful save/flush retries them. */
   get persistenceError(): Error | undefined { return this.saveError; }
   constructor(readonly root: string) {
     mkdirSync(root, { recursive: true, mode: 0o700 });
-    this.file = path.join(root, "tasks.json");
+    this.records = new TaskRecords(root);
+    this.file = this.records.file;
     this.data = { tasks: [], materials: [], attachments: [], schedules: [], templates: [], settings: { model: "claude-sonnet-4-6", baseUrl: "https://api.anthropic.com", maxConcurrent: 2, retentionDays: 30, saveScreenshots: true, notifications: true, hasApiKey: false } };
-    if (existsSync(this.file)) {
-      const parsed = JSON.parse(readFileSync(this.file, "utf8"));
-      if (![1, 2].includes(parsed.version) || !Array.isArray(parsed.tasks) || !Array.isArray(parsed.materials) || !Array.isArray(parsed.schedules) || !Array.isArray(parsed.attachments)) throw new Error("任务数据格式不正确，已保留原文件，请检查任务存储。");
-      this.formatVersion = parsed.version;
-      parsed.tasks = parsed.tasks.map((stored: StoredTask) => {
+    const parsed = this.records.read();
+    if (parsed) {
+      const tasks = parsed.tasks.map((stored: StoredTask) => {
         const history = this.sdkHistory(stored.id);
         history.refresh();
         const task = history.hydrate(stored);
         if (stored.sdkTitle) this.sdkTitles.set(task.id, { session: stored.sdkTitle, title: task.title });
         return task;
       });
-      this.data = { ...this.data, ...parsed, settings: { ...this.data.settings, ...parsed.settings } };
+      this.data = { ...this.data, ...parsed, tasks, settings: { ...this.data.settings, ...parsed.settings } };
     }
     const corrections = this.data.tasks.map(task => ({ task, correction: legacyCostCorrection(root, task) })).filter(entry => entry.correction);
     if (corrections.length) {
       // Preserve the exact original store before applying the idempotent repair.
-      writeFileSync(`${this.file}.before-pricing-${Date.now()}.bak`, readFileSync(this.file), { mode: 0o600 });
+      this.records.backup(`.before-pricing-${Date.now()}.bak`);
       for (const { task, correction } of corrections) {
         task.costAccounting = correction!.accounting; task.cachedInputTokens = correction!.cacheReadInputTokens;
         task.usage.costUsd = correction!.costUsd;
@@ -99,67 +99,47 @@ export class TaskStore {
     this.save();
   }
   /** Synchronous durability boundary: retain this before/after external actions,
-   * user messages, permissions and task-state transitions. Also drains batching. */
-  save(): void {
+   * user messages, permissions and task-state transitions. Also drains batching.
+   * Normal mutations pass only changed tasks; [] saves metadata. Omitting changes
+   * is a full checkpoint for startup recovery or an imported/replaced snapshot. */
+  save(changes: readonly BrowserTask[] = this.data.tasks): void {
     if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = undefined; }
-    let temp: string | undefined, descriptor: number | undefined, ownsTemp = false;
+    for (const task of changes) this.pendingTasks.add(task.id);
     try {
-      this.data.tokenRecords = updateTokenRecords(this.data.tokenRecords || [], this.data.tasks);
-      // Keep only a digest: caching serialized history would retain another large string.
-      const tasks = this.data.tasks.map(task => {
+      const changed = this.data.tasks.filter(task => this.pendingTasks.has(task.id));
+      this.data.tokenRecords = updateTokenRecords(this.data.tokenRecords || [], changed);
+      const records = changed.map(task => {
         const history = this.sdkHistory(task.id);
-        history.refresh();
-        this.refreshTitle(task, history);
+        history.refresh(); this.refreshTitle(task, history);
         return history.dehydrate(task);
       });
-      const version = tasks.some(task => task.sdkTitle || task.sdkFields || task.events.some(event => event.sdkText)) ? 2 : this.formatVersion;
-      const serialized = JSON.stringify({ ...this.data, tasks, version });
-      const digest = createHash("sha256").update(serialized).digest("hex");
-      if (digest !== this.savedDigest || !existsSync(this.file)) {
-        // A v1 application cannot read references. Keep one pre-migration copy
-        // and write v2 only after every removed value is present in the SDK log.
-        if (version === 2 && this.formatVersion === 1 && existsSync(this.file)) {
-          const backup = `${this.file}.before-sdk-reuse.v1.bak`;
-          if (!existsSync(backup)) writeFileSync(backup, readFileSync(this.file), { mode: 0o600, flag: "wx" });
-        }
-        temp = `${this.file}.${randomUUID()}.tmp`;
-        descriptor = openSync(temp, "wx", 0o600);
-        ownsTemp = true;
-        writeFileSync(descriptor, serialized, { encoding: "utf8" });
-        fsyncSync(descriptor);
-        closeSync(descriptor); descriptor = undefined;
-        // Same-directory replacement leaves readers with either complete version.
-        // Never delete the old store as a Windows rename-failure fallback.
-        renameSync(temp, this.file);
-        ownsTemp = false;
-        this.savedDigest = digest;
-        this.formatVersion = version;
-        for (const stored of tasks) if (stored.sdkTitle) this.sdkTitles.set(stored.id, { session: stored.sdkTitle, title: this.data.tasks.find(task => task.id === stored.id)!.title });
+      const { tasks, ...metadata } = this.data;
+      this.records.write(metadata, tasks.map(task => task.id), records);
+      for (const stored of records) if (stored.sdkTitle) {
+        this.sdkTitles.set(stored.id, { session: stored.sdkTitle, title: this.get(stored.id).title });
       }
-      this.saveError = undefined;
+      this.pendingTasks.clear(); this.saveError = undefined;
     } catch (error) {
       this.saveError = error instanceof Error ? error : new Error(String(error));
       throw error;
-    } finally {
-      if (descriptor !== undefined) try { closeSync(descriptor); } catch { /* preserve original error */ }
-      if (ownsTemp && temp) try { unlinkSync(temp); } catch { /* old store remains intact */ }
     }
   }
   /** Only for replaceable progress/activity metadata, never action receipts or
    * messages. The first request sets the deadline; repeated updates cannot delay
    * saving forever. Serialization occurs once when the batch is drained. */
-  scheduleSave(delayMs = 80): void {
+  scheduleSave(delayMs = 80, changes: readonly BrowserTask[] = this.data.tasks): void {
     if (!Number.isFinite(delayMs) || delayMs < 0 || delayMs > 1000) throw new RangeError("保存延迟须在 0–1000ms 之间。");
+    for (const task of changes) this.pendingTasks.add(task.id);
     if (this.saveTimer) return;
     // Keep the short timer referenced so ordinary process exit cannot drop a batch.
     this.saveTimer = setTimeout(() => {
       this.saveTimer = undefined;
-      try { this.save(); }
+      try { this.save([]); }
       catch (error) { console.error("任务进度保存失败；下次保存或关闭时将重试。", error); }
     }, delayMs);
   }
-  /** Also captures direct data mutations by legacy callers, without scheduling. */
-  flush(): void { this.save(); }
+  /** Flush queued changes. Imports that replace data must explicitly call save(). */
+  flush(): void { this.save([]); }
   /** Call after the service's final state changes, before application shutdown. */
   close(): void { this.flush(); }
   sdkHistory(id: string): SdkTaskHistory {
@@ -207,13 +187,24 @@ export class TaskStore {
     };
     this.event(task, "user", parsed.prompt);
     this.data.tasks.unshift(task);
-    this.save();
+    this.save([task]);
     return task;
   }
   event(task: BrowserTask, kind: TaskEvent["kind"], value: string, streamId?: string): void {
     if (kind === "system") value = taskModelText(task, value);
     task.events.push({ id: randomUUID(), at: now(), kind, text: value.slice(0, 30000), ...(streamId ? { streamId } : {}) });
     task.updatedAt = now();
+    this.pendingTasks.add(task.id);
+  }
+  listMetadata(): import("../../shared/tasks").TaskListMetadata {
+    const { materials, attachments, schedules, templates, settings, memoryPolicies, nativeAccessPolicies, tokenRecords } = this.data;
+    return { materials, attachments, schedules, templates, settings, memoryPolicies, nativeAccessPolicies, tokenRecords, skills: this.catalog.skills, skillIssues: this.catalog.issues };
+  }
+  private catalog = taskSkillCatalog();
+  refreshCatalog(): void { this.catalog = taskSkillCatalog(); }
+  refreshTaskTitle(id: string): void {
+    const task = this.get(id);
+    if (this.sdkTitles.has(id)) { const history = this.sdkHistory(id); history.refresh(); this.refreshTitle(task, history); }
   }
   snapshot(): TaskSnapshot {
     for (const task of this.data.tasks) if (this.sdkTitles.has(task.id)) { const history = this.sdkHistory(task.id); history.refresh(); this.refreshTitle(task, history); }

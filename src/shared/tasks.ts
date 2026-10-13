@@ -143,10 +143,29 @@ export interface TaskSnapshot {
   streams?: Record<string, TaskStream>;
   nativeAccessPolicies?: Record<string, NativeAccessPolicy>;
   tokenRecords?: TaskTokenRecord[];
-  nativeInstallations?: Array<{ profileId: string; stage: string; message: string }>;
-  nativeBrowsers?: NativeBrowserState[];
   tasks: BrowserTask[]; materials: PersonalMaterial[]; attachments: TaskAttachment[];
   schedules: TaskSchedule[]; templates: TaskTemplate[]; settings: TaskSettings;
+}
+/** The desktop list never contains conversation or browser observation history. */
+export type TaskSummary = Pick<BrowserTask, "id" | "title" | "profileId" | "profileName" | "status" | "createdAt" | "updatedAt" | "pinnedAt" | "archivedAt" | "metadataUpdatedAt" | "port" | "browserConnection"> & { pending?: Pick<TaskDecision, "kind"> };
+export type TaskListMetadata = Omit<TaskSnapshot, "tasks" | "streams">;
+export type TaskListSnapshot = TaskListMetadata & { tasks: TaskSummary[]; revision: number };
+export interface TaskListUpdate {
+  revision: number;
+  tasks: TaskSummary[];
+  removed: string[];
+  metadata: Partial<TaskListMetadata>;
+  tokenRecords?: { updated: TaskTokenRecord[]; removed: string[] };
+}
+export interface TaskSearchHit { id: string; text: string; label: string; }
+export interface TaskSearchResult { taskId: string; hit: TaskSearchHit; }
+export interface TaskDetailUpdate {
+  id: string; version: number; baseVersion?: number;
+  task?: BrowserTask;
+  fields?: Partial<BrowserTask>;
+  removed?: Array<keyof BrowserTask>;
+  arrays?: Partial<Record<keyof BrowserTask, { from: number; values: unknown[] }>>;
+  stream?: TaskStream;
 }
 /** Cumulative counters per task, retained independently of task history. No prompts or credentials. */
 export interface TaskTokenRecord {
@@ -171,16 +190,14 @@ export interface TaskApi {
   deleteMemory(profileId: string, name: string, revision: string): Promise<ProfileMemorySnapshot>;
   openLink(url: string): Promise<void>;
   listModels(): Promise<string[]>;
-  pairNativeBrowser(profileId: string): Promise<{ code: string; expiresAt: string }>;
-  getNativeLiveView(profileId: string): Promise<import("./types").CdpLiveView>;
-  authorizeNativeBrowser(profileId: string): Promise<{ expiresAt: string }>;
-  disconnectNativeBrowser(profileId: string): Promise<void>;
-  openNativeExtensionFolder(): Promise<void>;
   focusTaskBrowser(id: string): Promise<void>;
   watchPreview(id: string | null): Promise<void>;
   ackPreview(id: string, frameId: number): Promise<void>;
   onPreview(listener: (update: TaskPreviewUpdate) => void): () => void;
   snapshot(): Promise<TaskSnapshot>;
+  list(): Promise<TaskListSnapshot>;
+  detail(id: string, version?: number): Promise<TaskDetailUpdate>;
+  search(query: string): Promise<TaskSearchResult[]>;
   create(input: CreateTaskInput): Promise<BrowserTask>;
   retryItems(id: string, itemIds: string[]): Promise<BrowserTask>;
   control(id: string, action: "pause" | "resume" | "takeover" | "cancel" | "rerun" | "steer" | "queue", message?: string, options?: TaskMessageOptions): Promise<void>;
@@ -207,7 +224,7 @@ export interface TaskApi {
   updateTaskMetadata(id: string, input: TaskMetadataInput): Promise<void>;
   exportData(kind: "task" | "task-markdown" | "materials" | "diagnostics", id?: string): Promise<string | null>;
   openArtifact(id: string, taskId?: string): Promise<void>;
-  onChanged(listener: (snapshot: TaskSnapshot) => void): () => void;
+  onChanged(listener: (update: TaskListUpdate) => void): () => void;
   onStream?(listener: (update: TaskStreamUpdate) => void): () => void;
 }
 export const TASK_CHANNEL = "tasks:request";
@@ -220,13 +237,5 @@ export interface TaskPreviewUpdate {
   message: string; url?: string; frame?: string; frameId?: number;
 }
 export const TERMINAL_TASKS = new Set<TaskStatus>(["completed", "partial", "failed", "cancelled"]);
-export interface NativeBrowserState {
-  taskTabs?: boolean;
-  /** Extension worker identity plus its latest stop generation. */
-  controlGeneration?: string;
-  tabId?: number;
-  pausedByBrowser?: boolean;
-  profileId: string; connected: boolean; ownerSessionId?: string; ownership: "agent" | "user";
-  tabTitle?: string; url?: string;
-}
-export function hasTaskBrowser(task: BrowserTask): boolean { return Boolean(task.port || task.browserConnection === "extension"); }
+export type { NativeBrowserState } from "./browser-connection";
+export function hasTaskBrowser(task: Pick<BrowserTask, "port" | "browserConnection">): boolean { return Boolean(task.port || task.browserConnection === "extension"); }

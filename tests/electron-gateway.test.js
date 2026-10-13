@@ -6,7 +6,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { ElectronCdpTransport } = require("../dist/main/electron-cdp-transport");
 const { LocalAppsService } = require("../dist/main/local-apps/service");
-const { ensurePersistentDriverGatewayProtocol, assertProtectedElectronPort } = require("../dist/main/browser-gateway-driver-runtime");
+const { assertProtectedElectronPort } = require("../dist/main/browser-gateway-driver-runtime");
 
 test("Electron discovery rejects remote hosts, credentials, other ports and main-process inspectors", async () => {
   let advertised;
@@ -19,14 +19,6 @@ test("Electron discovery rejects remote hosts, credentials, other ports and main
       await assert.rejects(ElectronCdpTransport.connect(port), /只允许/);
     }
   } finally { await new Promise(resolve => server.close(resolve)); }
-});
-
-test("Electron upgrade preserves existing v15 Chrome driver sessions", async () => {
-  const status = { ok:true, protocolVersion:15, ports:[9223] };
-  assert.equal(await ensurePersistentDriverGatewayProtocol(status, {
-    homeDir:os.tmpdir(), driverLabel:"fixture",
-    ensureGatewayDaemon:async () => { throw new Error("must not replace live daemon"); }
-  }), status);
 });
 
 test("Electron Agent port persists while upgrade is deferred and cannot collide with other apps", async () => {

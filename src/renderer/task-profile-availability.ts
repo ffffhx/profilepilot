@@ -1,13 +1,13 @@
 import type { BrowserTask, NativeBrowserState } from "../shared/tasks";
 import { hasTaskBrowser } from "../shared/tasks";
-import type { PublicProfile } from "./types";
+import type { PublicProfile } from "../shared/types";
 
 export interface TaskProfileAvailability {
   available: boolean;
   label: string;
 }
 
-export function taskProfileAvailability(profile: PublicProfile, tasks: BrowserTask[], nativeStates: NativeBrowserState[] = []): TaskProfileAvailability {
+export function taskProfileAvailability(profile: PublicProfile, tasks: Array<Pick<BrowserTask, "profileId" | "status" | "port" | "browserConnection">>, nativeStates: NativeBrowserState[] = []): TaskProfileAvailability {
   const occupied = (label: string): TaskProfileAvailability => ({ available: false, label });
   if (profile.source === "native") {
     const state = nativeStates.find(state => state.profileId === profile.id);

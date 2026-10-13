@@ -103,9 +103,9 @@ test("renderer CDP client text summarizes sessions and tools", () => {
       { pid: 1, label: "agent-browser-darwin-arm64" },
       { pid: 2, label: "Claude Code", agent: "Claude Code" },
       { pid: 3, label: "agent-browser" },
-      { pid: 4, label: "chrome-devtools.exe" }
+      { pid: 4, label: "custom-driver.exe" }
     ]),
-    "agent-browser ×2、Claude Code、chrome-devtools"
+    "agent-browser ×2、Claude Code、custom-driver"
   );
 });
 
@@ -173,8 +173,7 @@ test("renderer explains a Gateway handoff as pending user action", () => {
 test("renderer presents Gateway browser drivers by their verified tool identity", () => {
   const { gatewayControlClient, isAgentDrivenCdpClient } = loadUtil();
   for (const [driverKind, driverLabel] of [
-    ["playwright-cli", "Playwright CLI"],
-    ["chrome-devtools-mcp", "Chrome DevTools MCP"]
+    ["agent-browser", "agent-browser"]
   ]) {
     const client = gatewayControlClient({
       gatewayControl: {

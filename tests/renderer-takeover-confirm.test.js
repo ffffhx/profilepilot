@@ -728,7 +728,7 @@ function loadConfirmHarness(options = {}) {
     stubs: {
       "src/renderer/api.ts": apiStub,
       "src/renderer/busy.ts": busyStub,
-      "src/renderer/render/render-root.ts": renderStub,
+      "src/renderer/view-events.ts": { invalidateView: renderStub.render },
       "src/renderer/state-actions.ts": {
         invalidateExtensionMigrationDiff() {},
         loadState: async () => {}
@@ -822,7 +822,7 @@ function loadMainHarness({ profile: activeProfile }) {
   global.HTMLTextAreaElement = class {};
   global.window = {
     addEventListener() {},
-    tasks: {
+    browserConnection: {
       onChanged() { return () => {}; },
       async snapshot() { return { nativeBrowsers: [], nativeInstallations: [] }; }
     },

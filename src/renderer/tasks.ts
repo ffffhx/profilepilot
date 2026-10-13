@@ -1,3 +1,6 @@
+import { TaskData } from "./task-data";
+import type { BrowserConnectionSnapshot } from "../shared/browser-connection";
+import { workspaceRendered } from "./workspace-lifecycle";
 import { openTaskLink } from "./task-links";
 import { skillDefaults } from "../shared/task-skills";
 import { skillLibrary, skillForm, skillFromForm } from "./task-skills";
@@ -7,10 +10,10 @@ import { installSidebarResize, sidebarResizeHandle } from "./sidebar-resize";
 import { tokenUsagePage } from "./task-token-usage";
 import type { TokenSource } from "../shared/task-token-usage";
 let usageSource: TokenSource = "all";
-import type { TaskApi, TaskSnapshot, BrowserTask, TaskStatus, CreateTaskInput, JevProvider } from "../shared/tasks";
+import type { TaskApi, TaskListSnapshot, TaskSummary, TaskStream, TaskSearchHit, BrowserTask, TaskStatus, CreateTaskInput, JevProvider } from "../shared/tasks";
 import { TERMINAL_TASKS, jevProviderFor } from "../shared/tasks";
 import { zonedLocalToIso } from "../shared/task-time";
-import type { AppState } from "./types";
+import type { AppState } from "../shared/types";
 import { taskProfileAvailability } from "./task-profile-availability";
 
 import { taskIcon as icon } from "./task-icons";
@@ -22,11 +25,11 @@ import { nativeBrowserSettings, type NativePairing } from "./native-browser-sett
 import { nativeTaskOptions, nativeTaskInput } from "./native-task-options";
 import { historyActions } from "./task-history";
 import { taskMenuButton, TaskMenus, renameTaskTitle, type TaskMenuAction } from "./task-navigation";
-import { MessageDrafts, draftKey, messageDelivery, findTaskHit, attentionReason, messageKeyAction, ScopedOperations, type MessageDraft } from "./task-interaction-model";
+import { MessageDrafts, draftKey, messageDelivery, attentionReason, messageKeyAction, ScopedOperations, type MessageDraft } from "./task-interaction-model";
 import { TaskDom, autoGrow, installTaskTooltips, isAtTaskLatest, jumpOverlapsReply, scrollToTaskLatest, revealTaskReply, syncTaskScrollInsets } from "./task-interaction-dom";
 import { workbenchThread, taskQuickControls } from "./task-workbench-view";
 import { TaskChat } from "./task-chat";
-import { workbenchNavigation, searchSnippet, appearanceControls, applyAppearance } from "./task-workbench-navigation";
+import { workbenchNavigation, searchHitSnippet, appearanceControls, applyAppearance } from "./task-workbench-navigation";
 import { showCommands, showArtifact, type WorkbenchCommand } from "./task-workbench-dialogs";
 import { showProfileMemory } from "./task-memory";
 
@@ -92,8 +95,8 @@ function restoreForms(): void {
       const previous = fields.find(item => item.name === field.name && (field.type !== "checkbox" || item.value === field.value));
       if (previous) { if (field.value !== previous.value) field.value = previous.value; if (field.type === "checkbox") field.checked = previous.checked; }
     });
-    const details = pageDetails.get(`${selected}:${form.id}`) || [];
-    form.querySelectorAll("details").forEach(node => { node.open = details.includes(node.querySelector("summary")?.textContent || ""); });
+    const details = pageDetails.get(`${selected}:${form.id}`);
+    if (details) form.querySelectorAll("details").forEach(node => { node.open = details.includes(node.querySelector("summary")?.textContent || ""); });
   });
 }
 function forgetForm(id: string): void {
@@ -104,13 +107,18 @@ function forgetForm(id: string): void {
   if (form?.dataset.draftKey) pageDrafts.delete(form.dataset.draftKey);
 }
 const api = window.tasks;
+const browserConnection = window.browserConnection;
+let browserData: BrowserConnectionSnapshot = { nativeBrowsers: [], nativeInstallations: [] };
 const preview = new TaskPreviewView(api);
 const inspectorPreference = "profilepilot-task-browser-panel-open";
 let inspectorOpen = false;
 try { inspectorOpen = localStorage.getItem(inspectorPreference) === "true"; } catch { /* The browser panel starts closed. */ }
 const sidebarPreference = "profilepilot-task-sidebar-collapsed";
 try { root.classList.toggle("sidebar-collapsed", localStorage.getItem(sidebarPreference) === "true"); } catch { /* Keep the sidebar expanded. */ }
-let data: TaskSnapshot;
+let data: TaskListSnapshot & { streams?: Record<string, TaskStream> };
+let searchHits = new Map<string, TaskSearchHit>();
+let searchRequest = 0;
+let searchTimer: number;
 let profiles: AppState | undefined;
 let profilesError = false;
 let view = new URLSearchParams(location.search).get("view") || "tasks";
@@ -166,10 +174,10 @@ const statusNames: Record<TaskStatus, string> = { queued: "排队中", running: 
 const itemNames: Record<string, string> = { pending: "待处理", running: "处理中", waiting_user: "待补充", completed: "完成", skipped: "跳过", failed: "失败", uncertain: "结果未确认" };
 const e = (value: unknown): string => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]!);
 const date = (value: string): string => new Date(value).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
-const pill = (task: BrowserTask): string => `<span class="pill ${task.status}">${statusNames[task.status]}</span>`;
+const pill = (task: TaskSummary): string => `<span class="pill ${task.status}">${statusNames[task.status]}</span>`;
 const elapsed = (task: BrowserTask): number => Math.round((task.usage.elapsedMs + (task.runningSince ? Math.max(0, Date.now() - Date.parse(task.runningSince)) : 0)) / 1000);
 function taskNavigation(): string { return workbenchNavigation(data.tasks.filter(task => !sidebarSearch.trim() || `${task.title} ${task.profileName}`.toLocaleLowerCase().includes(sidebarSearch.trim().toLocaleLowerCase())), selected, statusNames, readTasks); }
-function rememberRead(task: BrowserTask, unread = false): void {
+function rememberRead(task: TaskSummary, unread = false): void {
   if (unread) readTasks[task.id] = ""; else readTasks[task.id] = task.updatedAt;
   try { localStorage.setItem("profilepilot-task-read", JSON.stringify(readTasks)); } catch { /* In-memory state remains usable. */ }
 }
@@ -194,6 +202,7 @@ function fillFollowup(text: string, attachments: string[] = [], taskId = selecte
 }
 function restoreSearchTarget(): void {
   if (!searchTarget) return;
+  if (!taskData.get(selected)) return;
   const node = document.getElementById(searchTarget); if (!node) { searchTarget = ""; return; }
   let parent: HTMLElement | null = node; while (parent) { if (parent instanceof HTMLDetailsElement) parent.open = true; parent = parent.parentElement; }
   if (searchTerm.trim()) {
@@ -220,7 +229,7 @@ function updateJumpLatest(): void {
 function jumpLatest(): void { const workspace = root.querySelector<HTMLElement>(".workspace"); if (workspace) { scrollToTaskLatest(workspace); taskDom.capture(); updateJumpLatest(); } }
 function commandMenu(): void {
   const click = (selector: string) => () => root.querySelector<HTMLButtonElement>(selector)?.click();
-  const task = data.tasks.find(task => task.id === selected);
+  const task = taskData.get(selected);
   const commands: WorkbenchCommand[] = [
     { id: "new", label: "新任务", hint: `${platformModifier}+Shift+O`, run: click('[data-nav="tasks"]') },
     { id: "search", label: "搜索全部对话与结果", run: () => { rememberForms(); view = "history"; selected = ""; showAttention = false; render(false); document.getElementById("history-search")?.focus(); } },
@@ -268,7 +277,7 @@ async function act(fn: () => Promise<unknown>, urgent = false, key = selected ? 
   const operationKey = urgent ? `${key}:control` : key;
   await operations.run(operationKey, label, async () => {
     await fn();
-    try { data = await api.snapshot(); initialLoadError = ""; render(); } catch (error) { initialLoadError = String(error); showPending(); }
+    try { await taskData.refresh(); initialLoadError = ""; render(); } catch (error) { initialLoadError = String(error); showPending(); }
   }, showPending);
 }
 async function manageTask(id: string, action: TaskMenuAction): Promise<void> {
@@ -298,13 +307,13 @@ async function manageTask(id: string, action: TaskMenuAction): Promise<void> {
 function taskProfiles() { return profiles?.profiles.filter(profile => profile.source === "native" || profile.source === "isolated" && !profile.agentAccessDisabled) || []; }
 function profileOptions(selectedId = "", scheduled = false): string {
   return profiles ? taskProfiles().map(profile => {
-    const status = taskProfileAvailability(profile, data.tasks, data.nativeBrowsers);
+    const status = taskProfileAvailability(profile, data.tasks, browserData.nativeBrowsers);
     return `<option value="${e(profile.id)}" data-label="${e(profile.name)}" data-description="${e(status.label)}${profile.source === "native" ? " · 系统 Chrome 扩展" : ""}"  ${profile.id === selectedId ? "selected" : ""}>${e(profile.name)}${profile.source === "native" ? " · 系统 Chrome 扩展" : ""} — ${status.label}</option>`;
   }).join("") : `<option value="" disabled>${profilesError ? "浏览器列表读取失败" : "正在读取浏览器列表…"}</option>`;
 }
 function profileAvailabilityHint(id: string): string {
   const candidates = taskProfiles();
-  const states = candidates.map(profile => taskProfileAvailability(profile, data.tasks, data.nativeBrowsers));
+  const states = candidates.map(profile => taskProfileAvailability(profile, data.tasks, browserData.nativeBrowsers));
   const available = states.filter(state => state.available).length;
   const disconnected = states.filter(state => state.label.startsWith("待连接")).length;
   let text = profilesError ? "浏览器状态读取失败，请重新读取。" : "正在读取浏览器状态…";
@@ -351,8 +360,8 @@ function composer(): string {
     ${profileAvailabilityHint("task-profile-availability")}
     </div></form>${taskTemplateMenu(data.skills || [], data.templates)}</div>`;
 }
-function rows(tasks: BrowserTask[]): string { return tasks.length ? `<div class="task-rows">${tasks.map(task => {
-  const hit = search.trim() ? searchSnippet(task, search) : undefined;
+function rows(tasks: TaskSummary[]): string { return tasks.length ? `<div class="task-rows">${tasks.map(task => {
+  const hit = search.trim() ? searchHitSnippet(searchHits.get(task.id), search) : undefined;
   return `<div class="task-list-entry" data-task-row="${e(task.id)}"><button type="button" class="task-row" data-task="${e(task.id)}" data-hit="${e(hit?.id || "")}"><span class="row-icon">${icon(task.archivedAt ? "archive" : task.pinnedAt ? "pin" : "message")}</span><div class="task-row-copy"><strong>${e(task.title)}</strong><small>${e(task.profileName)} · ${date(task.updatedAt)} · ${e(attentionReason(task, readTasks[task.id]))}</small>${hit?.html || ""}</div>${pill(task)}</button>${taskMenuButton(task, "list")}</div>`;
 }).join("")}</div>` : '<div class="empty">没有找到任务。<br>可以新建任务，或调整搜索关键词和筛选。</div>'; }
 function inspectorToggle(): string {
@@ -379,7 +388,9 @@ function toggleTaskInspector(): void {
   mountTaskPreview();
 }
 function taskDetail(task: BrowserTask): string {
-  return `<header class="thread-heading">${taskSidebarToggle()}<h2 title="${e(task.title)}">${e(task.title)}</h2><span class="pill ${task.status}">${e(statusNames[task.status])}</span><div class="header-actions">${taskQuickControls(task)}${inspectorToggle()}${historyActions()}</div></header>` + workbenchThread(task, { drafts: messageDrafts, attachments: data.attachments, settings: data.settings, hint: newlineHint, status: statusNames[task.status], inspector: inspectorOpen, stream: data.streams?.[task.id], replyError: task.pending ? replyErrors.get(task.pending.id) : undefined });
+  const hit = searchTerm.trim() ? searchHits.get(task.id) : undefined;
+  const evidence = hit?.id === "task-evidence" ? `<section id="task-evidence" class="panel"><h3>匹配的页面证据</h3><p class="material-body">${e(hit.text)}</p></section>` : "";
+  return `<header id="task-context" class="thread-heading">${taskSidebarToggle()}<h2 title="${e(task.title)}">${e(task.title)}</h2><span class="pill ${task.status}">${e(statusNames[task.status])}</span><div class="header-actions">${taskQuickControls(task)}${inspectorToggle()}${historyActions()}</div></header>` + evidence + workbenchThread(task, { drafts: messageDrafts, attachments: data.attachments, settings: data.settings, hint: newlineHint, status: statusNames[task.status], inspector: inspectorOpen, stream: data.streams?.[task.id], replyError: task.pending ? replyErrors.get(task.pending.id) : undefined });
 }
 
 function materials(): string {
@@ -402,10 +413,10 @@ function jevSettings(): string {
     <div class="actions"><button class="primary" type="submit">保存 Jev 设置</button><button type="button" data-action="test-jev">测试 Jev 连接</button><button type="button" data-action="clear-jev-key" class="danger">删除 Jev 密钥</button></div>
     <div class="actions"><button type="button" data-action="jev-billing">充值 / 查看余额 ↗</button><button type="button" data-action="jev-keys">创建 API Key ↗</button></div></form>`;
 }
-function settings(): string { const s = data.settings; return `${toolbar("Agent 设置", "Agent & privacy", '<button class="primary return-agent" data-action="return-agent">← 返回 Agent 对话</button>')}<div class="settings-wrap">${appearanceControls()}<section class="panel"><div class="panel-header"><h2>长期记忆</h2><button type="button" data-action="memory">管理记忆</button></div><p class="muted">同一 Profile 的任务共享稳定偏好和已确认的信息。可按 Profile 停用，或查看、编辑和删除记忆。</p></section>${nativeBrowserSettings(profiles?.profiles || [], data.nativeBrowsers || [], nativePairing, nativeAuthorization, data.nativeInstallations || [])}<form id="settings-form"><section class="panel"><h2>模型服务</h2><p class="muted">使用 API 密钥连接。任务所需的网页、资料和附件信息会发送给你配置的模型服务。</p><div class="field"><label for="model">模型名称</label><input id="model" name="model" value="${e(s.model)}" required></div><div class="field"><label for="baseUrl">API 地址</label><input id="baseUrl" name="baseUrl" value="${e(s.baseUrl)}" required type="url"></div><div class="field"><label for="authMode">鉴权方式</label><select id="authMode" name="authMode"><option value="" ${!s.authMode ? "selected" : ""}>自动选择</option><option value="apiKey" ${s.authMode === "apiKey" ? "selected" : ""}>API Key（x-api-key）</option><option value="bearer" ${s.authMode === "bearer" ? "selected" : ""}>Bearer Token</option></select></div><div class="field"><label for="apiKey">API 密钥 · ${s.hasApiKey ? "已由系统安全存储保护，留空保留" : "尚未配置"}</label><input id="apiKey" name="apiKey" type="password" autocomplete="new-password" placeholder="输入密钥后保存"></div><div class="actions"><button class="primary">保存设置</button><button type="button" data-action="test-connection">测试连接</button><button type="button" data-action="clear-key" class="danger">删除密钥</button></div></section><section class="panel"><h2>运行与记录</h2><div class="grid-two"><div class="field"><label>不同 Profile 的并发任务数</label><input name="maxConcurrent" type="number" min="1" max="6" value="${s.maxConcurrent}"></div><p class="muted">历史会话和产物会保留，直到你显式删除任务。关闭窗口后任务留在后台；退出应用会停止任务服务。</p></div><label><input name="saveScreenshots" type="checkbox" ${s.saveScreenshots ? "checked" : ""}>按需保存页面截图（可能包含个人信息）</label><label><input name="notifications" type="checkbox" ${s.notifications ? "checked" : ""}>需要处理或任务结束时发送桌面通知</label></section></form>${jevSettings()}<section class="panel"><h2>诊断导出</h2><p class="muted">仅导出任务状态、时间、用量及动作类型，不包含密钥、对话、网页内容、个人资料或附件路径。</p><button data-action="export-diagnostics">导出脱敏诊断</button></section></div>`; }
+function settings(): string { const s = data.settings; return `${toolbar("Agent 设置", "Agent & privacy", '<button class="primary return-agent" data-action="return-agent">← 返回 Agent 对话</button>')}<div class="settings-wrap">${appearanceControls()}<section class="panel"><div class="panel-header"><h2>长期记忆</h2><button type="button" data-action="memory">管理记忆</button></div><p class="muted">同一 Profile 的任务共享稳定偏好和已确认的信息。可按 Profile 停用，或查看、编辑和删除记忆。</p></section>${nativeBrowserSettings(profiles?.profiles || [], browserData.nativeBrowsers || [], nativePairing, nativeAuthorization, browserData.nativeInstallations || [])}<form id="settings-form"><section class="panel"><h2>模型服务</h2><p class="muted">使用 API 密钥连接。任务所需的网页、资料和附件信息会发送给你配置的模型服务。</p><div class="field"><label for="model">模型名称</label><input id="model" name="model" value="${e(s.model)}" required></div><div class="field"><label for="baseUrl">API 地址</label><input id="baseUrl" name="baseUrl" value="${e(s.baseUrl)}" required type="url"></div><div class="field"><label for="authMode">鉴权方式</label><select id="authMode" name="authMode"><option value="" ${!s.authMode ? "selected" : ""}>自动选择</option><option value="apiKey" ${s.authMode === "apiKey" ? "selected" : ""}>API Key（x-api-key）</option><option value="bearer" ${s.authMode === "bearer" ? "selected" : ""}>Bearer Token</option></select></div><div class="field"><label for="apiKey">API 密钥 · ${s.hasApiKey ? "已由系统安全存储保护，留空保留" : "尚未配置"}</label><input id="apiKey" name="apiKey" type="password" autocomplete="new-password" placeholder="输入密钥后保存"></div><div class="actions"><button class="primary">保存设置</button><button type="button" data-action="test-connection">测试连接</button><button type="button" data-action="clear-key" class="danger">删除密钥</button></div></section><section class="panel"><h2>运行与记录</h2><div class="grid-two"><div class="field"><label>不同 Profile 的并发任务数</label><input name="maxConcurrent" type="number" min="1" max="6" value="${s.maxConcurrent}"></div><p class="muted">历史会话和产物会保留，直到你显式删除任务。关闭窗口后任务留在后台；退出应用会停止任务服务。</p></div><label><input name="saveScreenshots" type="checkbox" ${s.saveScreenshots ? "checked" : ""}>按需保存页面截图（可能包含个人信息）</label><label><input name="notifications" type="checkbox" ${s.notifications ? "checked" : ""}>需要处理或任务结束时发送桌面通知</label></section></form>${jevSettings()}<section class="panel"><h2>诊断导出</h2><p class="muted">仅导出任务状态、时间、用量及动作类型，不包含密钥、对话、网页内容、个人资料或附件路径。</p><button data-action="export-diagnostics">导出脱敏诊断</button></section></div>`; }
 function schedules(): string { return `${toolbar("定时任务", "Schedules")}<div class="notice">仅在本机应用运行时执行。错过计划会标记未执行，不会自动补交。执行时间按所选时区显示。</div><div class="grid-two"><form id="schedule-form" class="panel"><h2>${editSchedule ? "编辑计划" : "安排任务"}</h2><div class="field"><label>任务名称</label><input name="name" required></div><div class="field"><label>操作要求</label><textarea name="prompt" required></textarea></div><div class="field"><label>使用浏览器</label><select name="profileId" aria-describedby="schedule-profile-availability" required><option value="">选择浏览器</option>${profileOptions("", true)}</select>${profileAvailabilityHint("schedule-profile-availability")}</div><div class="field"><label>执行时间（按下方时区）</label><input name="at" type="datetime-local" required></div><div class="grid-two"><div class="field"><label>时区</label><input name="timezone" value="${e(Intl.DateTimeFormat().resolvedOptions().timeZone)}" required></div><div class="field"><label>重复</label><select name="repeat"><option value="once">仅一次</option><option value="daily">每天</option></select></div></div>${formExtras()}<button class="primary">保存计划</button>${editSchedule ? '<button type="button" data-action="clear-schedule">取消编辑</button>' : ""}</form><div>${data.schedules.map((schedule) => `<section class="panel"><div class="panel-header"><h2>${e(schedule.name)}</h2><span class="pill">${schedule.enabled ? "已启用" : "已停用"}</span></div><p>${e(schedule.task.prompt)}</p><p class="muted">${e(new Date(schedule.at).toLocaleString("zh-CN", { timeZone: schedule.timezone }))} · ${e(schedule.timezone)}<br>${schedule.repeat === "daily" ? "每天" : "仅一次"}</p>${schedule.missedAt ? '<p class="notice">错过计划，未执行</p>' : ""}${schedule.lastTaskId ? `<button data-task="${schedule.lastTaskId}">查看上次结果</button>` : ""}<div class="actions"><button data-edit-schedule="${schedule.id}">编辑</button><button data-toggle-schedule="${schedule.id}">${schedule.enabled ? "暂停计划" : "重新启用"}</button><button data-delete-schedule="${schedule.id}" class="danger">删除</button></div></section>`).join("") || '<div class="empty">还没有安排定时任务。</div>'}</div></div>`; }
 function updateTaskChat(immediate = false): void {
-  const task = data?.tasks.find(item => item.id === selected);
+  const task = taskData.get(selected);
   if (!task || !document.getElementById("task-chat")) { taskChat.dispose(); return; }
   taskChat.update({ task, stream: data.streams?.[task.id], drafts: messageDrafts, attachments: data.attachments, settings: data.settings,
     notify: toast,
@@ -426,8 +437,6 @@ function render(preserve = true): void {
   const invalidFields = preserve ? [...root.querySelectorAll<HTMLElement>(".field-error")].map(node => node.id.replace(/-error$/, "")) : [];
   renderedKey = key;
   const saved = new Map<string, { value: string; checked: boolean }>();
-  const detailsKey = (node: HTMLDetailsElement): string => node.id || node.querySelector("summary")?.textContent || "";
-  const openDetails = new Set([...root.querySelectorAll("details")].filter(node => node.open).map(detailsKey));
   const oldWorkspace = root.querySelector<HTMLElement>(".workspace");
   const workspaceScroll = oldWorkspace?.scrollTop || 0;
   const composeScroll = root.querySelector(".compose-scroll")?.scrollTop || 0;
@@ -440,15 +449,17 @@ function render(preserve = true): void {
   const focusName = active?.name; const focusForm = active?.form?.id;
   if (preserve) root.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>("input[name]:not([name=attachment]),textarea[name],select[name]").forEach((input) => saved.set(`${input.form?.dataset.draftKey || input.form?.id}:${input.name}:${input.type === "checkbox" ? input.value : ""}`, { value: input.value, checked: (input as HTMLInputElement).checked }));
   let content = "";
-  const task = selected && data.tasks.find((task) => task.id === selected);
+  taskData.select(selected);
+  const task = selected && taskData.get(selected);
   if (task && ["tasks", "history"].includes(view)) content = taskDetail(task);
+  else if (view === "tasks" && selected && data.tasks.some(task => task.id === selected)) content = `<div class="loading" role="status">${e(taskData.error || "正在读取任务…")}${taskData.error ? '<button data-action="retry-load">重新读取</button>' : ""}</div>`;
   else if (view === "tasks") content = `${toolbar("新任务", "任务与浏览器，一处协同", `<span class="workspace-status"><span class="task-status-dot ${data.tasks.some(task => task.status === "running") ? "running" : ""}"></span>${data.tasks.filter(task => task.status === "running").length ? `${data.tasks.filter(task => task.status === "running").length} 个任务运行中` : "准备就绪"}</span>`)}${composer()}`;
   else if (view === "materials") content = materials();
   else if (view === "usage") content = toolbar("Token 消耗", "Usage") + tokenUsagePage(data, usageSource);
   else if (view === "settings") content = settings();
   else if (view === "templates") content = templates();
   else if (view === "schedules") content = schedules();
-  else content = `${toolbar(showAttention ? "需要处理与完成未读" : "全部任务", "History")}<div class="history-scopes" role="group" aria-label="任务归档筛选"><button data-task-scope="active" aria-pressed="${historyScope === "active"}">未归档 <span>${data.tasks.filter(task => !task.archivedAt).length}</span></button><button data-task-scope="archived" aria-pressed="${historyScope === "archived"}">已归档 <span>${data.tasks.filter(task => task.archivedAt).length}</span></button></div><div class="topline history-filter"><input id="history-search" class="search" aria-label="搜索任务" placeholder="搜索消息、执行记录、结果与页面证据…" value="${e(search)}"><select id="history-filter" class="search" aria-label="任务状态"><option value="all">所有状态</option>${Object.entries(statusNames).map(([key, label]) => `<option value="${key}" ${filter === key ? "selected" : ""}>${label}</option>`).join("")}</select></div>${historyScope === "archived" ? '<p class="muted archive-description">归档的任务保留记录和结果，可通过“…”菜单移出归档。</p>' : ""}${rows(data.tasks.filter((task) => (historyScope === "archived" ? !!task.archivedAt : !task.archivedAt) && (filter === "all" || task.status === filter) && (!showAttention || !!attentionReason(task, readTasks[task.id])) && (!search.trim() || !!findTaskHit(task, search))).sort((a, b) => (b.archivedAt || b.updatedAt).localeCompare(a.archivedAt || a.updatedAt)))}`;
+  else content = `${toolbar(showAttention ? "需要处理与完成未读" : "全部任务", "History")}<div class="history-scopes" role="group" aria-label="任务归档筛选"><button data-task-scope="active" aria-pressed="${historyScope === "active"}">未归档 <span>${data.tasks.filter(task => !task.archivedAt).length}</span></button><button data-task-scope="archived" aria-pressed="${historyScope === "archived"}">已归档 <span>${data.tasks.filter(task => task.archivedAt).length}</span></button></div><div class="topline history-filter"><input id="history-search" class="search" aria-label="搜索任务" placeholder="搜索消息、执行记录、结果与页面证据…" value="${e(search)}"><select id="history-filter" class="search" aria-label="任务状态"><option value="all">所有状态</option>${Object.entries(statusNames).map(([key, label]) => `<option value="${key}" ${filter === key ? "selected" : ""}>${label}</option>`).join("")}</select></div>${historyScope === "archived" ? '<p class="muted archive-description">归档的任务保留记录和结果，可通过“…”菜单移出归档。</p>' : ""}${rows(data.tasks.filter((task) => (historyScope === "archived" ? !!task.archivedAt : !task.archivedAt) && (filter === "all" || task.status === filter) && (!showAttention || !!attentionReason(task, readTasks[task.id])) && (!search.trim() || searchHits.has(task.id))).sort((a, b) => (b.archivedAt || b.updatedAt).localeCompare(a.archivedAt || a.updatedAt)))}`;
   taskDom.update(`${workspaceSwitcher("agent")}${workspaceIdentityBar()}<div class="app-frame">${nav()}<main class="workspace ${view === "tasks" && !selected ? "is-home" : selected ? "is-thread" : "is-page"}"><div class="task-operation-status" aria-label="操作状态"></div>${content}</main></div>`, key);
   const sessionDialog = root.querySelector<HTMLDialogElement>("#task-session-settings");
   if (sessionSettingsOpen && sessionDialog && !sessionDialog.open) sessionDialog.showModal();
@@ -488,7 +499,6 @@ function render(preserve = true): void {
   if (preserve) {
     const scroll = root.querySelector(".compose-scroll"); if (scroll) scroll.scrollTop = composeScroll;
     root.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>("input[name]:not([name=attachment]),textarea[name],select[name]").forEach((input) => { const previous = saved.get(`${input.form?.dataset.draftKey || input.form?.id}:${input.name}:${input.type === "checkbox" ? input.value : ""}`); if (previous) { if (input.value !== previous.value) input.value = previous.value; if (input.type === "checkbox") (input as HTMLInputElement).checked = previous.checked; } });
-    root.querySelectorAll("details").forEach(node => { node.open = openDetails.has(detailsKey(node)); });
     const input = (focusId ? document.getElementById(focusId) : [...root.querySelectorAll<HTMLInputElement>("input,textarea,select")].find(node => node.name === focusName && node.form?.id === focusForm)) as HTMLInputElement | undefined;
     if (!activeEditorKey || input?.getAttribute("data-editor-key") === activeEditorKey) input?.focus({ preventScroll: true });
     if (input && (!activeEditorKey || input.getAttribute("data-editor-key") === activeEditorKey) && typeof start === "number" && typeof end === "number") { try { input.setSelectionRange(start, end, direction || undefined); } catch {} }
@@ -608,7 +618,7 @@ root.addEventListener("click", async (event) => {
   if (d.action === "focus-reply") { focusComposer(true); return; }
   if (d.action === "jump-latest") { jumpLatest(); return; }
   if (d.action === "attention") { rememberForms(); view = "history"; selected = ""; historyScope = "active"; filter = "all"; search = ""; showAttention = true; render(false); return; }
-  if (d.action === "mark-unread") { const task = data.tasks.find(task => task.id === selected); if (task) { rememberRead(task, true); render(); } return; }
+  if (d.action === "mark-unread") { const task = taskData.get(selected); if (task) { rememberRead(task, true); render(); } return; }
   if (d.action === "session-settings") { const dialog = root.querySelector<HTMLDialogElement>("#task-session-settings"); if (dialog && !dialog.open) dialog.showModal(); if (d.focus === "session-model") dialog?.querySelector<HTMLInputElement>("#session-model")?.focus(); return; }
   if (d.action === "close-session-settings") { root.querySelector<HTMLDialogElement>("#task-session-settings")?.close(); root.querySelector<HTMLButtonElement>(".composer-settings")?.focus({ preventScroll: true }); return; }
   if (d.action === "retry-load") { void loadSnapshot(); return; }
@@ -620,7 +630,7 @@ root.addEventListener("click", async (event) => {
     void act(async () => { const files = await api.importAttachments(); const draft = messageDrafts.get(key); messageDrafts.set(key, { attachments: [...new Set([...draft.attachments, ...files.map(file => file.id)])] }); }, false, `task:${id}`, "添加本轮附件"); return;
   }
   if (d.copyCode !== undefined || d.copyMessage || d.editMessage || d.quoteMessage) {
-    const task = data.tasks.find(task => task.id === selected);
+    const task = taskData.get(selected);
     const id = d.copyMessage || d.editMessage || d.quoteMessage;
     const text = d.copyCode !== undefined ? button.closest(".task-code-block")?.querySelector("code")?.textContent || "" : id === "prompt" ? task?.prompt || "" : id === "result" ? [task?.result?.summary, ...(task?.result?.evidence || []), ...(task?.result?.remaining || [])].join("\n\n") : task?.events.find(event => event.id === id)?.text || "";
     if (d.editMessage) fillFollowup(text);
@@ -634,7 +644,7 @@ root.addEventListener("click", async (event) => {
   }
   if (d.removeQueued || d.editQueued) {
     const id = selected, messageId = d.removeQueued || d.editQueued!;
-    const message = data.tasks.find(task => task.id === id)?.messageQueue?.find(message => message.id === messageId);
+    const message = taskData.get(id)?.messageQueue?.find(message => message.id === messageId);
     void act(async () => { await api.queue(id, messageId); if (d.editQueued && message) fillFollowup(message.message, message.attachmentIds, id); }, false, `task:${id}`, d.editQueued ? "取回排队消息" : "撤回排队消息"); return;
   }
   if (d.revokePermission) { const id = selected; void act(() => api.permissions(id, d.revokePermission), false, `task:${id}`, "撤销会话授权"); return; }
@@ -683,11 +693,11 @@ root.addEventListener("click", async (event) => {
   if (d.task) { narrowSidebarOpen = false; openTask(d.task, d.hit, search); return; }
   if (d.example) { const textarea = root.querySelector<HTMLTextAreaElement>("[name=prompt]"); if (textarea) { textarea.value = textarea.value.trim() ? `${textarea.value.trim()}\n\n${d.example}` : d.example; textarea.focus(); autoGrow(textarea); captureMessageDrafts(); } return; }
   if (d.removeFile) { selectedFiles = selectedFiles.filter((id) => id !== d.removeFile); root.querySelectorAll<HTMLInputElement>('[name="attachment"]').forEach(field => { if (field.value === d.removeFile) field.checked = false; }); captureMessageDrafts(); render(); return; }
-  if (d.action === "refresh-skills") { void act(async () => { data = await api.snapshot(); toast("工作流已刷新。"); }, false, "skills:refresh", "刷新工作流"); return; }
+  if (d.action === "refresh-skills") { void act(async () => { await taskData.refresh(); toast("工作流已刷新。"); }, false, "skills:refresh", "刷新工作流"); return; }
   if (d.action === "memory") {
     const choices = new Map((profiles?.profiles || []).map(profile => [profile.id, { id: profile.id, name: profile.name }]));
     for (const task of data.tasks) if (!choices.has(task.profileId)) choices.set(task.profileId, { id: task.profileId, name: task.profileName });
-    showProfileMemory(api, [...choices.values()], data.tasks.find(task => task.id === selected)?.profileId || formDraft?.profileId);
+    showProfileMemory(api, [...choices.values()], taskData.get(selected)?.profileId || formDraft?.profileId);
     return;
   }
   if (d.useSkill) {
@@ -713,6 +723,8 @@ root.addEventListener("click", async (event) => {
     if (form) formDraft = formInput(form);
     selected = ""; view = "tasks"; editTemplate = ""; creatingTemplate = true; forgetForm("create-task");
     render(false);
+    const templateOptions = root.querySelector<HTMLDetailsElement>(".compose-template-settings details");
+    if (templateOptions) templateOptions.open = true;
     root.querySelector<HTMLInputElement>('[name="templateName"]')?.focus();
     return;
   }
@@ -721,7 +733,7 @@ root.addEventListener("click", async (event) => {
   if (d.action === "return-agent") { rememberForms(); view = settingsReturn.view === "settings" ? "tasks" : settingsReturn.view; selected = settingsReturn.selected; if (!["tasks", "history"].includes(view)) { view = "tasks"; selected = ""; } selectedFiles = messageDrafts.get(draftKey("", "create-task")).attachments; render(false); root.querySelector<HTMLElement>("#prompt, #answer, #steering")?.focus({ preventScroll: true }); return; }
   if (d.action === "back") { rememberForms(); selected = ""; selectedFiles = messageDrafts.get(draftKey("", "create-task")).attachments; render(false); return; }
   if (d.action === "edit-task") {
-    const task = data.tasks.find(task => task.id === selected);
+    const task = taskData.get(selected);
     if (!task) return;
     selected = ""; view = "tasks"; forgetForm("create-task"); editTemplate = "";
     formDraft = { skill: task.skill ? { id: task.skill.id, parameters: task.skill.parameters } : undefined, prompt: [...task.events].reverse().find(event => event.kind === "user")?.text || task.prompt, profileId: task.profileId, nativeTarget: task.nativeTarget, nativeAccess: task.nativeAccess, authorization: task.authorization, materialIds: task.materials.map(item => item.id), attachmentIds: task.attachments.map(item => item.id), items: task.items.map(item => item.label), limits: task.limits };
@@ -742,7 +754,7 @@ root.addEventListener("click", async (event) => {
   const targetTask = selected;
   if (destructive && !await confirmTaskAction(destructive[0], destructive[1])) return;
   void act(async () => {
-    if (d.disconnectNative) { await api.disconnectNativeBrowser(d.disconnectNative); if (nativePairing?.profileId === d.disconnectNative) nativePairing = undefined; }
+    if (d.disconnectNative) { await browserConnection.disconnectNativeBrowser(d.disconnectNative); if (nativePairing?.profileId === d.disconnectNative) nativePairing = undefined; }
     if (d.control) await api.control(targetTask, d.control as any);
     if (d.deleteTemplate) { await api.deleteTemplate(d.deleteTemplate); if (editTemplate === d.deleteTemplate) { editTemplate = ""; formDraft = undefined; } }
     if (d.deleteMaterial) { await api.deleteMaterial(d.deleteMaterial); if (editMaterial === d.deleteMaterial) { forgetForm("material-form"); editMaterial = ""; render(false); } toast("资料已删除。"); }
@@ -754,19 +766,19 @@ root.addEventListener("click", async (event) => {
     switch (d.action) {
       case "retry-items": { const ids = [...root.querySelectorAll<HTMLInputElement>("[name=retryItem]:checked")].map(input => input.value); const task = await api.retryItems(targetTask, ids); if (selected === targetTask) { selected = task.id; view = "tasks"; } break; }
       case "save-template": { const form = root.querySelector<HTMLFormElement>("#create-task")!; const task = formInput(form); const name = String(new FormData(form).get("templateName") || task.prompt.slice(0, 48)); const savingDraft = formDraft; const saved = await api.saveTemplate({ id: editTemplate || undefined, name, task }); if (formDraft === savingDraft) { editTemplate = saved.id; formDraft = saved.task; creatingTemplate = false; } toast("模板已保存，可在任务模板中重复使用。"); break; }
-      case "save-task-template": { const task = data.tasks.find(task => task.id === targetTask)!; await api.saveTemplate({ name: task.title, task: { skill: task.skill ? { id: task.skill.id, parameters: task.skill.parameters } : undefined, prompt: task.prompt, profileId: task.profileId, nativeTarget: task.nativeTarget, nativeAccess: task.nativeAccess, authorization: task.authorization, materialIds: task.materials.map(item => item.id), attachmentIds: task.attachments.map(item => item.id), items: task.items.map(item => item.label), limits: task.limits, grant: task.grant } }); toast("已保存为任务模板。"); break; }
+      case "save-task-template": { const task = taskData.get(targetTask)!; await api.saveTemplate({ name: task.title, task: { skill: task.skill ? { id: task.skill.id, parameters: task.skill.parameters } : undefined, prompt: task.prompt, profileId: task.profileId, nativeTarget: task.nativeTarget, nativeAccess: task.nativeAccess, authorization: task.authorization, materialIds: task.materials.map(item => item.id), attachmentIds: task.attachments.map(item => item.id), items: task.items.map(item => item.label), limits: task.limits, grant: task.grant } }); toast("已保存为任务模板。"); break; }
       case "attach": { const files = await api.importAttachments(); const key = draftKey("", "create-task"); const draft = messageDrafts.get(key); const ids = [...new Set([...draft.attachments, ...files.map(file => file.id)])]; messageDrafts.set(key, { attachments: ids }); pageFiles.set("tasks", ids); if (!selected && view === "tasks") selectedFiles = ids; break; }
       case "import-library": await api.importAttachments(); break;
       case "back": selected = ""; break;
       case "clear-schedule": forgetForm("schedule-form"); editSchedule = ""; selectedFiles = []; render(false); break;
       case "clear-material": forgetForm("material-form"); editMaterial = ""; render(false); break;
       case "focus-browser": await api.focusTaskBrowser(targetTask); break;
-      case "extension-folder": await api.openNativeExtensionFolder(); break;
-      case "pair-native": { const profileId = root.querySelector<HTMLSelectElement>("#native-profile")?.value; if (!profileId) throw new Error("请选择系统 Profile。"); nativePairing = { profileId, ...await api.pairNativeBrowser(profileId) }; break; }
+      case "extension-folder": await browserConnection.openNativeExtensionFolder(); break;
+      case "pair-native": { const profileId = root.querySelector<HTMLSelectElement>("#native-profile")?.value; if (!profileId) throw new Error("请选择系统 Profile。"); nativePairing = { profileId, ...await browserConnection.pairNativeBrowser(profileId) }; break; }
       case "authorize-native": {
         const profileId = root.querySelector<HTMLSelectElement>("#native-profile")?.value;
         if (!profileId) throw new Error("请选择系统 Profile。");
-        nativeAuthorization = { profileId, ...await api.authorizeNativeBrowser(profileId) };
+        nativeAuthorization = { profileId, ...await browserConnection.authorizeNativeBrowser(profileId) };
         nativePairing = undefined; break;
       }
       case "copy-native-code": if (nativePairing) { await navigator.clipboard.writeText(nativePairing.code); toast("配对码已复制，请粘贴到 Chrome 的 ProfilePilot 扩展。"); } break;
@@ -777,7 +789,7 @@ root.addEventListener("click", async (event) => {
           toast("Jev 配置尚未保存，请先点击“保存 Jev 设置”，再测试连接。", true); break;
         }
         toast("正在测试 Jev 连接…"); toast(await api.testJevConnection()); break; }
-      case "clear-jev-key": forgetForm("jev-settings-form"); await api.saveJevSettings({ enabled: false, apiKey: "" }); data = await api.snapshot(); render(false); toast("Jev 密钥已删除。"); break;
+      case "clear-jev-key": forgetForm("jev-settings-form"); await api.saveJevSettings({ enabled: false, apiKey: "" }); await taskData.refresh(); render(false); toast("Jev 密钥已删除。"); break;
       case "jev-keys": await api.openJevConsole("keys"); break;
       case "jev-billing": await api.openJevConsole("billing"); break;
       case "test-connection": {
@@ -811,7 +823,7 @@ document.addEventListener("keydown", event => {
   if (!(field instanceof HTMLTextAreaElement) || !field.matches("#prompt,#answer,#steering")) return;
   if (event.key === "/" && !field.value && !modifier) { event.preventDefault(); commandMenu(); return; }
   if (event.key === "ArrowUp" && !field.value && field.id === "steering") {
-    const task = data.tasks.find(task => task.id === selected), last = [...(task?.events || [])].reverse().find(item => item.kind === "user");
+    const task = taskData.get(selected), last = [...(task?.events || [])].reverse().find(item => item.kind === "user");
     if (last || task) { event.preventDefault(); fillFollowup(last?.text || task!.prompt); } return;
   }
   const form = field.form; if (!form || field.disabled || field.readOnly) return;
@@ -839,7 +851,7 @@ function submitMessage(form: HTMLFormElement, submitter: HTMLElement | null): vo
   captureMessageDrafts();
   const key = messageFormKey(form), id = form.dataset.taskId || "", decisionId = form.dataset.decisionId || "";
   const values = new FormData(form), approve = submitter?.getAttribute("value") !== "reject";
-  const task = data.tasks.find(task => task.id === id);
+  const task = taskData.get(id);
   const action = task && messageDelivery(task, messageDrafts.get(key).mode);
   const scope = values.get("permissionScope") === "session" ? "session" : "once";
   const sent = messageDrafts.prepare(key, `${form.id}:${decisionId}:${approve}:${scope}:${action}`, () => crypto.randomUUID());
@@ -853,7 +865,7 @@ function submitMessage(form: HTMLFormElement, submitter: HTMLElement | null): vo
       if (view === originView && selected === originSelected) { selected = created.id; selectedFiles = []; }
       toast("任务已创建。");
     } else if (form.id === "reply-task") {
-      const current = data.tasks.find(task => task.id === id)?.pending;
+      const current = taskData.get(id)?.pending;
       if (current && current.id !== decisionId) throw new Error("等待事项已变化；原答复草稿已保留，请检查当前问题后重新提交。");
       await api.reply(id, decisionId, sent.text, approve, { scope, requestId: sent.requestId, attachmentIds: sent.attachments });
       settleMessage(form, key, sent); replyErrors.delete(decisionId); toast(approve ? "答复已确认收到。" : "已拒绝本次操作。");
@@ -885,7 +897,7 @@ root.addEventListener("submit", (event) => {
 
   });
 });
-root.addEventListener("input", event => { const input = event.target as HTMLInputElement; if (input.id === "history-search") { search = input.value; render(); } if (input.id === "task-sidebar-search") { sidebarSearch = input.value; render(); } if (input instanceof HTMLTextAreaElement && input.hasAttribute("data-autogrow")) { captureMessageDrafts(); autoGrow(input); updateMessageSend(); } });
+root.addEventListener("input", event => { const input = event.target as HTMLInputElement; if (input.id === "history-search") { search = input.value; scheduleSearch(); render(); } if (input.id === "task-sidebar-search") { sidebarSearch = input.value; render(); } if (input instanceof HTMLTextAreaElement && input.hasAttribute("data-autogrow")) { captureMessageDrafts(); autoGrow(input); updateMessageSend(); } });
 root.addEventListener("scroll", event => { if ((event.target as HTMLElement)?.matches?.(".workspace")) updateJumpLatest(); }, true);
 root.addEventListener("focusin", event => {
   const target = event.target as HTMLElement, row = target.closest<HTMLElement>(".recent-task-row");
@@ -955,33 +967,48 @@ async function loadProfiles(): Promise<void> {
   }
   render();
 }
+function scheduleSearch(clear = true): void {
+  const request = ++searchRequest, query = search;
+  window.clearTimeout(searchTimer); if (clear) searchHits.clear();
+  if (!query.trim()) return;
+  searchTimer = window.setTimeout(() => {
+    void api.search(query).then(results => {
+      if (request !== searchRequest || search !== query) return;
+      searchHits = new Map(results.map(result => [result.taskId, result.hit])); render();
+    }).catch(error => { if (request === searchRequest) toast(String(error)); });
+  }, 120);
+}
+const taskData = new TaskData(api, kind => {
+  const old = taskData.get(selected), workspace = root.querySelector<HTMLElement>(".workspace");
+  if ((kind === "detail" || kind === "stream") && old && workspace && !isAtTaskLatest(workspace, 64)) unseenMessages.add(selected);
+  if (taskData.list) data = { ...taskData.list, streams: taskData.stream && selected ? { [selected]: taskData.stream } : {} };
+  if (selected && data && !data.tasks.some(task => task.id === selected)) { rememberForms(); selected = ""; }
+  initialLoadError = taskData.error;
+  if (kind === "stream") { updateTaskChat(); updateJumpLatest(); return; }
+  if (kind === "list" && search.trim()) scheduleSearch(false);
+  if (composing) updateTaskChat();
+  render();
+});
+window.addEventListener("beforeunload", () => taskData.dispose());
 async function loadSnapshot(): Promise<void> {
   if (!data) root.innerHTML = '<p class="loading" role="status">正在读取工作台…</p>';
-  try { data = await api.snapshot(); initialLoadError = ""; render(); if (!selected && view === "tasks") document.getElementById("prompt")?.focus(); }
+  try { await taskData.refresh(); initialLoadError = ""; render(); if (!selected && view === "tasks") document.getElementById("prompt")?.focus(); }
   catch (error) { initialLoadError = String(error); if (!data) root.innerHTML = `<div class="loading" role="alert">无法打开工作台：${e(initialLoadError)}<button type="button" data-action="retry-load">重新读取</button></div>`; else showPending(); }
+  finally { workspaceRendered(); }
 }
+const applyBrowserConnections = (snapshot: BrowserConnectionSnapshot) => {
+  browserData = snapshot;
+  if (nativePairing && snapshot.nativeBrowsers.some(state => state.profileId === nativePairing!.profileId && state.connected)) nativePairing = undefined;
+  render();
+};
+browserConnection.onChanged(applyBrowserConnections);
+void browserConnection.snapshot().then(applyBrowserConnections).catch(error => toast(String(error)));
 void loadSnapshot();
 void loadProfiles();
-api.onChanged((snapshot) => {
-  const workspace = root.querySelector<HTMLElement>(".workspace"), old = data?.tasks.find(task => task.id === selected), next = snapshot.tasks.find(task => task.id === selected);
-  if (selected && old && next && workspace && !isAtTaskLatest(workspace, 64) && (old.events.length !== next.events.length || old.result?.summary !== next.result?.summary || data.streams?.[selected]?.text !== snapshot.streams?.[selected]?.text)) unseenMessages.add(selected);
-  data = snapshot; initialLoadError = ""; if (nativePairing && data.nativeBrowsers?.some(s => s.profileId === nativePairing!.profileId && s.connected)) nativePairing = undefined;
-  if (composing) updateTaskChat();
-  render(); });
-api.onStream?.(update => {
-  if (!data) return;
-  const task = data.tasks.find(item => item.id === update.taskId);
-  if (!task || task.events.some(event => event.streamId === update.stream.id)) return;
-  data.streams = { ...data.streams, [update.taskId]: update.stream };
-  if (selected !== update.taskId) return;
-  const workspace = root.querySelector<HTMLElement>(".workspace");
-  if (workspace && !isAtTaskLatest(workspace, 64)) unseenMessages.add(selected);
-  updateTaskChat(); updateJumpLatest();
-});
 window.profileManager.onStateChanged((state) => { profiles = state; render(); });
 window.setInterval(() => {
   if (document.hidden || window.workspacePane?.active === false) return;
-  const node = root.querySelector("[data-elapsed]"); const task = data?.tasks.find(task => task.id === selected);
+  const node = root.querySelector("[data-elapsed]"); const task = taskData.get(selected);
   if (node && task) node.textContent = `${elapsed(task)}s`;
   const activity = root.querySelector<HTMLElement>("[data-activity-age]");
   if (activity) activity.textContent = `此步骤已等待 ${Math.max(0, Math.floor((Date.now() - Date.parse(activity.dataset.at!)) / 1000))} 秒`;

@@ -12,7 +12,7 @@ export type GatewayOwnership = "agent" | "user";
 export type GatewaySessionStatus = "active" | "stopped";
 export type GatewayAgentHealth = "online" | "waiting" | "offline";
 export type GatewayDriverState = "disconnected" | "connecting" | "connected" | "reconnecting" | "parked";
-export type GatewayDriverKind = "agent-browser" | "playwright-cli" | "chrome-devtools-mcp";
+export type GatewayDriverKind = "agent-browser";
 
 export interface GatewayProfileBinding {
   profileId: string;
@@ -109,6 +109,7 @@ export class BrowserGatewayControlError extends Error {
     readonly code:
       | "GATEWAY_PROFILE_NOT_FOUND"
       | "GATEWAY_PROFILE_NOT_RUNNING"
+      | "GATEWAY_DRIVER_UNSUPPORTED"
       | "PROFILE_LEASE_CONFLICT"
       | "PROFILE_AGENT_ACCESS_DISABLED"
       | "SESSION_ALREADY_BOUND"
@@ -706,6 +707,20 @@ function isValidProfile(value: unknown): value is GatewayProfileBinding {
 
 function normalizeLoadedProfile(profile: GatewayProfileBinding): GatewayProfileBinding {
   const normalized = cloneProfile(profile);
+  // Old driver bindings must not be restored as agent-browser sessions.
+  if (normalized.driverKind !== undefined && normalized.driverKind !== "agent-browser") {
+    normalized.ownerSessionId = undefined;
+    normalized.daemonInstanceId = undefined;
+    normalized.daemonPid = undefined;
+    normalized.driverKind = undefined;
+    normalized.driverLabel = undefined;
+    normalized.pendingUserAction = undefined;
+    normalized.ownership = "user";
+    normalized.sessionStatus = "stopped";
+    normalized.agentHealth = "offline";
+    normalized.driverState = "disconnected";
+    normalized.controlGeneration += 1;
+  }
   if (!normalized.driverState) {
     normalized.driverState = normalized.sessionStatus === "stopped"
       ? "disconnected"
@@ -752,13 +767,13 @@ function optionalString(value: string | undefined): string | undefined {
 }
 
 function normalizeDriverKind(value: GatewayDriverKind | undefined): GatewayDriverKind {
-  if (value === "playwright-cli" || value === "chrome-devtools-mcp") return value;
+  if (value !== undefined && value !== "agent-browser") {
+    throw new BrowserGatewayControlError("GATEWAY_DRIVER_UNSUPPORTED", "Gateway 仅支持 agent-browser 驱动。");
+  }
   return "agent-browser";
 }
 
-function driverLabel(kind: GatewayDriverKind): string {
-  if (kind === "playwright-cli") return "Playwright CLI";
-  if (kind === "chrome-devtools-mcp") return "Chrome DevTools MCP";
+function driverLabel(_kind: GatewayDriverKind): string {
   return "agent-browser";
 }
 

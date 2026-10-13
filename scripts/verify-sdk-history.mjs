@@ -7,6 +7,7 @@ import path from "node:path";
 import { startModelFixture } from "./task-model-fixture.mjs";
 const require = createRequire(import.meta.url);
 const { TaskStore } = require("../dist/main/tasks/store");
+const { TaskRecords } = require("../dist/main/tasks/records");
 const { TaskService } = require("../dist/main/tasks/service");
 const preview = process.argv.includes("--preview");
 const root = preview ? path.resolve("artifacts", `sdk-history-preview-${Date.now()}`, "app-data", "browser-tasks")
@@ -40,8 +41,8 @@ try {
   await service.updateTaskMetadata(task.id, { title: "SDK 会话存储验收" });
   await service.close();
 
-  const disk = JSON.parse(await readFile(store.file, "utf8"));
-  assert.equal(disk.version, 2);
+  const disk = new TaskRecords(store.root).read();
+  assert.equal(disk.version, 3);
   assert.equal(disk.tasks[0].title, undefined);
   assert.ok(disk.tasks[0].events.some(event => event.kind === "assistant" && event.sdkText && event.text === undefined));
   store = new TaskStore(root);

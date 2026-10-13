@@ -1,5 +1,5 @@
 import { store } from "../state";
-import { ExtensionMigrationDiffItem, ProfileExtensionInfo, PublicProfile } from "../types";
+import type { ExtensionMigrationDiffItem, ProfileExtensionInfo, PublicProfile } from "../../shared/types";
 import { escapeHtml, formatDate, profileStatusLabel, renderDiffItem, sourceLabel } from "../util";
 
 export function renderMigrationTargetPicker(profiles: PublicProfile[], targetId: string, excludedProfileId?: string): string {

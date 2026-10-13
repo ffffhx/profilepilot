@@ -15,7 +15,7 @@ interface Receipt { device: string; id: string; hash: string; at: number; state:
 interface Saved { version: 1; id: string; enabled: boolean; port: number; advertisedUrl: string; devices: SavedDevice[]; receipts: Receipt[]; }
 type Reply = { ok: true; data: unknown } | { ok: false; error: { code: string; message: string } };
 interface Options {
-  root: string; tasks: TaskService; profiles(): Promise<MobileProfile[]>;
+  root: string; tasks: TaskService | (() => TaskService | undefined); profiles(): Promise<MobileProfile[]>;
   changed?(snapshot: MobileSnapshot): void; computerName?: string; port?: number;
 }
 const uuid = z.string().uuid();
@@ -202,8 +202,9 @@ export class MobileService {
     finally { this.inFlight.delete(key); }
   }
   private async execute(command: Record<string, unknown>, device: SavedDevice): Promise<unknown> {
-    const service = this.options.tasks;
+    const service = typeof this.options.tasks === "function" ? this.options.tasks() : this.options.tasks;
     if (command.action === "device.disconnect") { this.revoke(device.id); return { disconnected: true }; }
+    if (!service) throw fail("任务服务暂不可用，浏览器和手机连接仍可独立使用。", "TASK_SERVICE_UNAVAILABLE");
     if (command.action === "sync") {
       const profiles = await this.options.profiles();
       const tasks = service.store.data.tasks.filter(task => !task.archivedAt).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));

@@ -1,5 +1,5 @@
 import type { NativeBrowserState } from "../shared/tasks";
-import type { PublicProfile } from "./types";
+import type { PublicProfile } from "../shared/types";
 
 const escape = (value: string): string => value.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 export interface NativePairing { profileId: string; code: string; expiresAt: string }

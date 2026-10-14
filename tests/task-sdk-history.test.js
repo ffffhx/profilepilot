@@ -10,7 +10,10 @@ const { TaskService } = require('../dist/main/tasks/service');
 const { taskModelContext } = require('../dist/main/tasks/model-context');
 
 function fixture(t) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pp-sdk-history-中文 '));
+  // The SDK resolves real paths before looking up encoded project directories.
+  // macOS exposes its temporary directory through the /var -> /private/var link.
+  const tempDir = fs.realpathSync(os.tmpdir());
+  const root = fs.mkdtempSync(path.join(tempDir, 'pp-sdk-history-中文 '));
   const store = new TaskStore(root);
   const task = store.create({ profileId: 'native:stable-profile-id', prompt: '保留原始资料，查询后生成报告。' }, '可以重命名的 Profile');
   const cwd = path.join(root, 'sessions', task.id);
@@ -30,7 +33,7 @@ function fixture(t) {
     store.event(task, 'assistant', text, id);
   };
   const title = value => append({ type: 'custom-title', customTitle: value, sessionId });
-  t.after(() => { store.close(); assert.equal(path.dirname(root), os.tmpdir()); fs.rmSync(root, { recursive: true, force: true }); });
+  t.after(() => { store.close(); assert.equal(path.dirname(root), tempDir); fs.rmSync(root, { recursive: true, force: true }); });
   return { root, store, task, cwd, sessionId, file, append, input, assistant, title,
     read: () => readTaskRecords(store.file) };
 }

@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const { readFileSync } = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
+const vm = require("node:vm");
 
 test("showMainWindow explicitly unhides and activates the macOS app", () => {
   const source = readFileSync(path.join(__dirname, "../dist/main/main.js"), "utf8");
@@ -26,14 +27,31 @@ test("main window enters Mini only through explicit user actions", () => {
   assert.doesNotMatch(rendererSource, /data-action="open-mini-window"/);
 });
 
-test("main window close exits on Windows and Linux while preserving macOS window semantics", () => {
+test("main window close hides to tray without quitting and still allows explicit exit", () => {
   const source = readFileSync(path.join(__dirname, "../src/main/main.ts"), "utf8");
-  const closeBody = source.match(/mainWindow\.on\("close"[\s\S]*?mainWindow\.loadFile/)?.[0] || "";
+  const closeHandler = source.match(/mainWindow\.on\("close",[\s\S]*?\n  \}\);/)?.[0];
+  assert.ok(closeHandler, "main window must register a close handler");
 
-  assert.match(closeBody, /appQuitting \|\| process\.platform === "darwin"/);
-  assert.match(closeBody, /event\.preventDefault\(\)/);
-  assert.match(closeBody, /appQuitting = true;[\s\S]*?app\.quit\(\)/);
-  assert.doesNotMatch(closeBody, /mainWindow\?\.hide\(\)/);
+  for (const platform of ["win32", "linux", "darwin"]) {
+    for (const appQuitting of [false, true]) {
+      const calls = [];
+      let onClose;
+      const context = {
+        process: { platform },
+        appQuitting,
+        app: { quit: () => calls.push("quit") },
+        mainWindow: {
+          on: (event, handler) => { assert.equal(event, "close"); onClose = handler; },
+          hide: () => calls.push("hide")
+        }
+      };
+      vm.runInNewContext(closeHandler, context);
+      onClose({ preventDefault: () => calls.push("preventDefault") });
+      assert.deepEqual(calls, !appQuitting && platform !== "darwin" ? ["preventDefault", "hide"] : [],
+        `${platform}, appQuitting=${appQuitting}`);
+      assert.equal(context.appQuitting, appQuitting, "closing a window must not start application shutdown");
+    }
+  }
 });
 
 test("Mini close controls hide only Mini and leave the main window hidden", () => {

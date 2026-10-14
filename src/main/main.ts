@@ -1557,17 +1557,15 @@ function createMainWindow(): void {
 
   // 最小化沿用系统行为（Windows/Linux 任务栏、macOS Dock），不自动开启悬浮窗。
 
-  // Windows/Linux 用户点击标题栏关闭就是退出；macOS 保留“关窗口但不退出 App”的平台惯例，
-  // 后续仍可通过 Dock 的 activate 事件重建主窗口。
+  // Windows/Linux 关闭主窗口时隐藏到托盘，后台服务继续运行；显式退出时允许窗口关闭。
+  // macOS 保留“关窗口但不退出 App”的平台惯例，可通过 Dock 或托盘重建主窗口。
   mainWindow.on("close", (event) => {
     if (appQuitting || process.platform === "darwin") {
       return;
     }
 
     event.preventDefault();
-    appQuitting = true;
-    shutdownReason = "main-window-close";
-    app.quit();
+    mainWindow?.hide();
   });
 
   if (smokeTest && !IS_E2E_DRIVER_TEST) {

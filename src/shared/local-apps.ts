@@ -44,7 +44,18 @@ export interface LocalAppView extends LocalAppConfig {
   runtime: LocalAppRuntime;
   debug: { renderer: boolean; main: boolean; targets: LocalDebugTarget[] };
   agent?: LocalAppAgentState;
+  connection?: LocalAppConnectionProgress;
 }
+
+export interface LocalAppConnectionProgress {
+  phase: "checking" | "closing" | "starting" | "connecting";
+  message: string;
+}
+
+export type LocalAppConnectionResult = { status: "connected" } | {
+  status: "restart-required";
+  confirmationToken: string;
+};
 
 export interface LocalAppAgentState {
   connected: boolean;
@@ -72,7 +83,7 @@ export interface LocalAppsApi {
   start(id: string): Promise<void>;
   stop(id: string): Promise<void>;
   restart(id: string): Promise<void>;
-  connect(id: string): Promise<void>;
+  connect(id: string, options?: { confirmationToken: string }): Promise<LocalAppConnectionResult>;
   preview(id: string): Promise<LocalAppPreview>;
   showWindow(id: string): Promise<void>;
   logs(id: string): Promise<string>;

@@ -35,6 +35,25 @@ function hasPath(command: string, identity: string, platform: NodeJS.Platform): 
   return false;
 }
 
+function appProcessRoots(matches: WindowsProcessInfo[], processes: WindowsProcessInfo[]): WindowsProcessInfo[] {
+  const matchingPids = new Set(matches.map(item => item.pid));
+  const byPid = new Map(processes.map(item => [item.pid, item]));
+  // Electron can fork its own executable without --type (Node workers, watchers,
+  // etc.). These descendants belong to the same app, not separate instances.
+  return matches.filter(item => {
+    const visited = new Set([item.pid]);
+    let parent = byPid.get(item.parentPid), descendant = false;
+    while (parent) {
+      // Inconsistent ancestry must not hide a possible independent instance.
+      if (visited.has(parent.pid)) return true;
+      visited.add(parent.pid);
+      if (matchingPids.has(parent.pid)) descendant = true;
+      parent = byPid.get(parent.parentPid);
+    }
+    return !descendant;
+  });
+}
+
 export function processRuntimeFromSnapshot(config: LocalAppConfig, snapshot: WindowsSystemSnapshot, platform: NodeJS.Platform = process.platform): LocalAppRuntime {
   const identities = appProcessPaths(config, platform);
   const service = config.mode === "service";
@@ -44,7 +63,8 @@ export function processRuntimeFromSnapshot(config: LocalAppConfig, snapshot: Win
     && !/^(?:cmd(?:\.exe)?|sh|bash|zsh)$/i.test(item.name)
     && !(/^(?:powershell|pwsh)(?:\.exe)?$/i.test(item.name) && /(?:^|\s)-(?:command|encodedcommand|c|ec)\b/i.test(item.commandLine)));
   const matches = (item: WindowsProcessInfo) => identities.some(identity => hasPath(item.executablePath || "", identity, platform) || hasPath(item.commandLine, identity, platform));
-  const matchingProcesses = candidates.filter(matches);
+  const matched = candidates.filter(matches);
+  const matchingProcesses = service ? matched : appProcessRoots(matched, snapshot.processes);
   const matching = matchingProcesses.find(item => owners.has(item.pid)) || (matchingProcesses.length === 1 ? matchingProcesses[0] : undefined);
   if (matching) return { ...idleRuntime(), status: "running", pid: matching.pid, startedAt: matching.startedAt, ...(service ? { serviceReady: owners.has(matching.pid) } : {}) };
   if (matchingProcesses.length > 1) return unknown("检测到多个匹配进程，暂时无法确认当前应用的服务实例，请检查应用状态。");
@@ -66,9 +86,11 @@ let posixProcesses: { expires: number; value: Promise<WindowsProcessInfo[]> } | 
 export function invalidateProcessRuntime(): void { posixProcesses = undefined; invalidateWindowsSystemSnapshot(); }
 function readPosixProcesses(): Promise<WindowsProcessInfo[]> {
   if (posixProcesses && posixProcesses.expires > Date.now()) return posixProcesses.value;
-  const value = execute("ps", ["-axo", "pid=,command="], { timeout: 4000, maxBuffer: 8 * 1024 * 1024, env: { ...process.env, LC_ALL: "C" } }).then(({ stdout }) => stdout.split("\n").flatMap(line => {
-    const match = line.match(/^\s*(\d+)\s+(.+)$/);
-    return match ? [{ pid: Number(match[1]), parentPid: 0, name: path.posix.basename(match[2].split(/\s/)[0]), commandLine: match[2], executablePath: null, startedAt: null }] : [];
+  const value = execute("ps", ["-axo", "pid=,ppid=,lstart=,command="], { timeout: 4000, maxBuffer: 8 * 1024 * 1024, env: { ...process.env, LC_ALL: "C" } }).then(({ stdout }) => stdout.split("\n").flatMap(line => {
+    const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\w{3}\s+\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+)$/);
+    if (!match) return [];
+    const started = Date.parse(match[3]);
+    return [{ pid: Number(match[1]), parentPid: Number(match[2]), name: path.posix.basename(match[4].split(/\s/)[0]), commandLine: match[4], executablePath: null, startedAt: Number.isFinite(started) ? new Date(started).toISOString() : null }];
   }));
   posixProcesses = { expires: Date.now() + 750, value };
   return value;

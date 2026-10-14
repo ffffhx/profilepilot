@@ -53,6 +53,7 @@
     "e2e:tasks": "npm run build && node scripts/e2e-browser-tasks.mjs",
     "e2e:tasks:memory": "npm run build && node scripts/e2e-task-memory.mjs",
     "e2e:local-apps": "npm run build && node scripts/e2e-local-apps.mjs",
+    "e2e:local-app-connect": "npm run build && node scripts/e2e-local-app-connect.mjs",
     "e2e:electron-gateway": "npm run build && node scripts/e2e-electron-gateway.mjs",
     "verify:tasks:sdk": "npm run build && node scripts/verify-sdk-runtime.mjs",
     "verify:tasks:collaboration": "npm run build && node scripts/verify-sdk-collaboration.mjs && node scripts/verify-sdk-collaboration.mjs --background --followup && node scripts/verify-sdk-collaboration.mjs --background --stop",

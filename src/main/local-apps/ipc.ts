@@ -89,13 +89,8 @@ export function registerLocalApps(profileManager: ProfileManager): LocalAppsServ
       case "stop": return service.stop(id);
       case "restart": return service.restart(id);
       case "connect": {
-        const config = service.get(id);
-        if (config.mode === "service") throw new Error("后台服务不支持 Agent 界面操作。");
-        if (!config.cdpPort) throw new Error("请先在连接设置中配置应用连接。");
-        await service.syncAgents();
-        const entry = (await service.list()).find(app => app.id === id);
-        if (!entry?.agent?.connected || !entry.debug.renderer || entry.runtime.status !== "running") throw new Error("尚未连接成功。请确认应用已打开，并在连接设置中检查连接方式。");
-        return;
+        const options = z.object({ confirmationToken: z.string().uuid() }).strict().optional().parse(args[1]);
+        return service.connect(id, options?.confirmationToken);
       }
       case "preview": {
         const config = service.get(id);

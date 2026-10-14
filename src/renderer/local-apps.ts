@@ -22,6 +22,7 @@ let messageTimer: number;
 let preview: LocalAppPreview | undefined;
 let previewKey = "", previewGeneration = 0, previewPending = false, previewAt = 0;
 let menuId = "";
+let closePreviewDialog: (() => void) | undefined;
 
 root.innerHTML = `${workspaceSwitcher("local-apps")}${workspaceIdentityBar()}
   <div class="pc-apps-shell">
@@ -78,7 +79,30 @@ function renderPreview(app: LocalAppView): string {
   const ready = localAppAvailability(app).ready;
   const hint = app.mode === "service" ? "后台服务没有应用画面" : !ready ? "连接应用后可查看画面" : preview?.error || "正在获取应用画面…";
   const time = preview?.capturedAt ? new Date(preview.capturedAt).toLocaleTimeString() : "";
-  return `<div class="app-preview-head"><h3>应用画面</h3>${ready ? `<button data-action="refresh-preview" aria-label="刷新应用画面" title="刷新画面">${taskIcon("history")}</button>` : ""}</div>${ready && preview?.screenshot ? `<button class="app-preview-screen" data-action="show" aria-label="显示 ${escape(app.name)} 的应用窗口"><img src="${escape(preview.screenshot)}" alt="${escape(preview.title || app.name)}的当前画面"></button><p class="app-preview-caption" title="${escape(preview.title)}">${escape(preview.title)}<small>采集于 ${escape(time)}</small></p>` : `<div class="app-preview-empty">${taskIcon("desktop")}<span>${escape(hint)}</span></div>`}`;
+  return `<div class="app-preview-head"><h3>应用画面</h3>${ready ? `<button data-action="refresh-preview" aria-label="刷新应用画面" title="刷新画面">${taskIcon("history")}</button>` : ""}</div>${ready && preview?.screenshot ? `<button class="app-preview-screen" data-action="enlarge-preview" aria-label="放大 ${escape(app.name)} 的应用画面" aria-haspopup="dialog" title="点击放大"><img src="${escape(preview.screenshot)}" alt="${escape(preview.title || app.name)}的当前画面"></button><p class="app-preview-caption" title="${escape(preview.title)}">${escape(preview.title)}<small>采集于 ${escape(time)}</small></p>` : `<div class="app-preview-empty">${taskIcon("desktop")}<span>${escape(hint)}</span></div>`}`;
+}
+function showPreviewDialog(app: LocalAppView): void {
+  if (!preview?.screenshot || closePreviewDialog) return;
+  const dialog = document.createElement("dialog");
+  dialog.className = "app-preview-dialog";
+  dialog.setAttribute("aria-labelledby", "app-preview-dialog-title");
+  const title = preview.title || app.name;
+  const origin = root.querySelector<HTMLElement>(".app-preview-screen");
+  dialog.innerHTML = `<header><h2 id="app-preview-dialog-title">${escape(title)}</h2><button aria-label="关闭大图" title="关闭（Esc）" autofocus>×</button></header><img src="${escape(preview.screenshot)}" alt="${escape(title)}的放大画面"><p>采集于 ${escape(new Date(preview.capturedAt).toLocaleTimeString())} · 按 Esc 关闭</p>`;
+  const dispose = () => {
+    dialog.remove(); closePreviewDialog = undefined;
+    if (!workspaceHidden()) (origin?.isConnected ? origin : root.querySelector<HTMLElement>(".app-preview-screen"))?.focus();
+  };
+  const close = () => { dialog.close(); dispose(); };
+  closePreviewDialog = close;
+  dialog.querySelector("button")!.addEventListener("click", close);
+  dialog.addEventListener("cancel", event => { event.preventDefault(); close(); });
+  dialog.addEventListener("click", event => {
+    if (event.target !== dialog) return;
+    const bounds = dialog.getBoundingClientRect();
+    if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) close();
+  });
+  document.body.append(dialog); dialog.showModal();
 }
 function agentDetails(app: LocalAppView): string {
   const available = localAppAvailability(app), agent = app.agent;
@@ -164,7 +188,7 @@ async function perform(action: () => Promise<unknown>, success?: string): Promis
     busy = false; await refresh().catch(error => message(errorText(error), true)); render();
   }
 }
-function errorText(error: unknown): string { return String(error instanceof Error ? error.message : error).replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ""); }
+function errorText(error: unknown): string { return String(error instanceof Error ? error.message : error).replace(/^(?:Error: )*Error invoking remote method '[^']+': (?:Error: )*/, ""); }
 
 function closeMenu(): void {
   const menu = root.querySelector<HTMLElement>(".app-menu")!;
@@ -186,21 +210,70 @@ function openMenu(app: LocalAppView, bounds: DOMRect): void {
   menu.querySelector<HTMLElement>("button:not(:disabled)")?.focus();
 }
 function showConnection(app: LocalAppView): void {
+  if (document.querySelector(".app-connection-dialog")) return;
   const dialog = document.createElement("dialog"); dialog.className = "app-connection-dialog";
   dialog.setAttribute("aria-labelledby", "connection-dialog-title");
-  dialog.innerHTML = `<h2 id="connection-dialog-title">连接 ${escape(app.name)}</h2><p>请先打开应用，并在连接设置中配置应用的连接方式。连接成功后，Agent 就能查看和操作应用。</p><p class="connection-result" role="status"></p><footer><button data-close>关闭</button><button data-settings ${app.managed ? 'disabled title="停止应用后可修改连接设置"' : ""}>连接设置</button><button class="primary" data-check>检查连接</button></footer>`;
+  dialog.setAttribute("aria-describedby", "connection-dialog-description");
+  dialog.innerHTML = `<h2 id="connection-dialog-title">连接 ${escape(app.name)}</h2><p id="connection-dialog-description">正在尝试连接已有应用…</p><p class="connection-result" role="status" aria-live="polite"></p><footer><button data-close>取消</button><button data-settings>连接设置</button><button class="primary" data-check disabled>正在连接…</button></footer>`;
   document.body.append(dialog);
-  const close = () => { dialog.close(); dialog.remove(); };
-  dialog.querySelector("[data-close]")!.addEventListener("click", close);
+  const description = dialog.querySelector<HTMLElement>("#connection-dialog-description")!;
+  const result = dialog.querySelector<HTMLElement>(".connection-result")!;
+  const button = dialog.querySelector<HTMLButtonElement>("[data-check]")!;
+  const cancel = dialog.querySelector<HTMLButtonElement>("[data-close]")!;
+  const settings = dialog.querySelector<HTMLButtonElement>("[data-settings]")!;
+  let confirmationToken: string | undefined;
+  let pending = false, disposed = false, generation = 0;
+  const close = () => {
+    if (pending || disposed) return;
+    disposed = true; generation++; dialog.close(); dialog.remove();
+    root.querySelector<HTMLElement>(`[data-app-row="${app.id}"] [data-action]`)?.focus({ preventScroll: true });
+  };
+  const connect = async () => {
+    if (pending || disposed) return;
+    const token = confirmationToken; confirmationToken = undefined;
+    pending = true; busy = true; render();
+    cancel.disabled = true; settings.disabled = true; button.disabled = true;
+    button.textContent = token ? "正在重启并连接…" : "正在连接…";
+    result.textContent = token ? "正在请求应用正常退出…" : "正在检查应用连接…";
+    result.dataset.error = "false";
+    const current = ++generation;
+    let polling = false;
+    const timer = window.setInterval(() => {
+      if (polling) return;
+      polling = true;
+      void api.list({ cached: true }).then(apps => {
+        const progress = apps.find(item => item.id === app.id)?.connection;
+        if (!disposed && current === generation && progress) result.textContent = progress.message;
+      }).catch(() => {}).finally(() => { polling = false; });
+    }, 600);
+    try {
+      const next = await api.connect(app.id, token ? { confirmationToken: token } : undefined);
+      if (next.status === "connected") {
+        pending = false; close(); message("应用已连接，可供 Agent 操作");
+      } else {
+        confirmationToken = next.confirmationToken;
+        description.textContent = `${app.name} 已在运行，但尚未开启界面连接。需要重启应用才能连接。`;
+        result.textContent = "请先保存未保存的内容；重启会中断应用中的当前任务。确认后将正常退出应用，按连接设置重新启动并验证连接。";
+        button.textContent = "重启并连接";
+      }
+    } catch (error) {
+      description.textContent = "连接未完成。处理下面的问题后，可以重试连接。";
+      result.textContent = errorText(error); result.dataset.error = "true";
+      button.textContent = "重试连接"; cancel.textContent = "关闭";
+    } finally {
+      clearInterval(timer); generation++; pending = false; busy = false;
+      cancel.disabled = false; button.disabled = false;
+      await refresh().catch(error => message(errorText(error), true)); render();
+      settings.disabled = apps.find(item => item.id === app.id)?.managed ?? app.managed;
+      if (dialog.isConnected) cancel.focus({ preventScroll: true });
+    }
+  };
+  cancel.addEventListener("click", close);
   dialog.addEventListener("cancel", event => { event.preventDefault(); close(); });
-  dialog.querySelector("[data-settings]")!.addEventListener("click", () => { close(); showForm(app); });
-  dialog.querySelector("[data-check]")!.addEventListener("click", async () => {
-    const button = dialog.querySelector<HTMLButtonElement>("[data-check]")!; button.disabled = true;
-    try { await api.connect(app.id); close(); await refresh(); message("应用已连接，可供 Agent 操作"); }
-    catch (error) { const result = dialog.querySelector(".connection-result"); if (result) result.textContent = errorText(error); }
-    finally { button.disabled = false; }
-  });
+  settings.addEventListener("click", () => { close(); showForm(apps.find(item => item.id === app.id) || app); });
+  button.addEventListener("click", () => { void connect(); });
   dialog.showModal();
+  void connect();
 }
 
 root.addEventListener("input", event => {
@@ -224,6 +297,7 @@ root.addEventListener("click", event => {
   if (action === "more") { openMenu(app, bounds!); return; }
   if (action === "connect") { showConnection(app); return; }
   if (action === "show") { void perform(() => api.showWindow(app.id)); return; }
+  if (action === "enlarge-preview") { showPreviewDialog(app); return; }
   if (action === "refresh-preview") { void refreshPreview(true); return; }
   if (action === "edit") { showForm(app); return; }
   if (action === "start" || action === "stop" || action === "restart") void perform(() => api[action](app.id));
@@ -252,6 +326,7 @@ document.addEventListener("keydown", event => {
 });
 onWorkspaceVisibilityChanged(() => {
   closeMenu(); previewGeneration++;
+  if (workspaceHidden()) closePreviewDialog?.();
   if (!workspaceHidden()) { previewAt = 0; void refresh().catch(error => message(errorText(error), true)); }
 });
 

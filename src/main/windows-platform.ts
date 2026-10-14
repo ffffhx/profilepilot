@@ -90,7 +90,38 @@ export async function getWindowsSystemSnapshot(force = false): Promise<WindowsSy
 async function loadWindowsSystemSnapshot(): Promise<WindowsSystemSnapshot> {
   const script = String.raw`
 $ErrorActionPreference = 'SilentlyContinue'
+# CIM can hide image paths for elevated processes even when a limited query is
+# permitted. Only request the image path; command-line access may still be denied.
+try {
+  Add-Type -ErrorAction Stop @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public static class ProfilePilotProcessImage {
+  [DllImport("kernel32.dll", SetLastError = true)]
+  private static extern IntPtr OpenProcess(uint access, bool inherit, uint processId);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  private static extern bool QueryFullProcessImageName(IntPtr process, uint flags, StringBuilder image, ref uint length);
+  [DllImport("kernel32.dll")]
+  private static extern bool CloseHandle(IntPtr handle);
+  public static string Read(uint processId) {
+    const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+    var handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, processId);
+    if (handle == IntPtr.Zero) return null;
+    try {
+      var image = new StringBuilder(32768);
+      uint length = (uint)image.Capacity;
+      return QueryFullProcessImageName(handle, 0, image, ref length) ? image.ToString() : null;
+    } finally { CloseHandle(handle); }
+  }
+}
+'@
+} catch { }
 $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop | ForEach-Object {
+  $imagePath = $_.ExecutablePath
+  if (-not $imagePath) {
+    try { $imagePath = [ProfilePilotProcessImage]::Read([uint32]$_.ProcessId) } catch { }
+  }
   $started = $null
   if ($_.CreationDate) {
     try { $started = $_.CreationDate.ToUniversalTime().ToString('o') } catch {}
@@ -99,8 +130,8 @@ $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop | ForEach-Object 
     pid = [int]$_.ProcessId
     parentPid = [int]$_.ParentProcessId
     name = [string]$_.Name
-    executablePath = if ($_.ExecutablePath) { [string]$_.ExecutablePath } else { $null }
-    commandLine = if ($_.CommandLine) { [string]$_.CommandLine } elseif ($_.ExecutablePath) { [string]$_.ExecutablePath } else { [string]$_.Name }
+    executablePath = if ($imagePath) { [string]$imagePath } else { $null }
+    commandLine = if ($_.CommandLine) { [string]$_.CommandLine } elseif ($imagePath) { [string]$imagePath } else { [string]$_.Name }
     startedAt = $started
   }
 })

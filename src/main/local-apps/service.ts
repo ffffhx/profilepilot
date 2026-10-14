@@ -11,6 +11,7 @@ import { LocalAppGateway } from "./gateway";
 import { atomicJson, idleRuntime, parseEnvironment, workerRequest, type LocalAppWorkerRecord } from "./protocol";
 import { processRuntime, invalidateProcessRuntime } from "./service-runtime";
 import { resolveAppRuntime, type DebugState } from "./runtime";
+import { LocalAppConnector } from "./connection";
 
 const port = z.number().int().min(1024).max(65535).nullable();
 const inputSchema = z.object({
@@ -63,6 +64,23 @@ export class LocalAppsService {
   private agentStates = new Map<string, LocalAppAgentState>();
   private agentSync?: Promise<void>;
   private views = new Map<string, { config: LocalAppConfig; view: LocalAppView; checkedAt: number }>();
+  private connector = new LocalAppConnector({
+    config: id => this.get(id), inspect: config => this.inspect(config),
+    renderer: async config => (await probeDebugPort(config.cdpPort, "renderer")).state,
+    agent: async config => {
+      if (!this.gateway) throw new Error("Agent 连接服务尚未就绪，请重新打开 ProfilePilot 后重试。");
+      const state = this.gateway.state(config, await this.gateway.status());
+      this.agentStates.set(config.id, state);
+      return state;
+    },
+    attach: async config => {
+      if (!this.gateway) throw new Error("Agent 连接服务尚未就绪。");
+      await this.syncAgentRoute(config, await this.gateway.status());
+      const error = this.agentStates.get(config.id)?.error;
+      if (error) throw new Error(error);
+    },
+    preflight: config => this.validateLaunch(config), launch: id => this.launch(id)
+  });
   constructor(readonly root: string, private reservedPorts: () => Promise<Set<number>> = async () => new Set(), private gateway?: LocalAppGateway) {
     fs.mkdirSync(root, { recursive: true });
     this.storePath = path.join(root, "apps.json");
@@ -102,12 +120,12 @@ export class LocalAppsService {
     return this.configs.map(config => {
       const cached = this.views.get(config.id);
       if (cached?.config === config && Date.now() - cached.checkedAt < 5000) {
-        return { ...cached.view, agent: this.agentStates.get(config.id) };
+        return { ...cached.view, agent: this.agentStates.get(config.id), connection: this.connector.state(config.id) };
       }
       return {
         ...config, managed: false, controls: { start: false, stop: false, restart: false },
         runtime: { ...idleRuntime(), status: "unknown", statusDetail: "正在检查应用运行状态…" },
-        debug: { renderer: false, main: false, targets: [] }, agent: this.agentStates.get(config.id)
+        debug: { renderer: false, main: false, targets: [] }, agent: this.agentStates.get(config.id), connection: this.connector.state(config.id)
       };
     });
   }
@@ -128,7 +146,7 @@ export class LocalAppsService {
       probeDebugPort(service ? null : config.inspectPort, "main")
     ]);
     const debugStates = service ? [] : [...(config.cdpPort ? [renderer.state] : []), ...(config.inspectPort ? [main.state] : [])];
-    return { ...config, ...resolveAppRuntime(config, worker, observed, debugStates), debug: { renderer: !!renderer.targets.length, main: !!main.targets.length, targets: [...renderer.targets, ...main.targets].map(({ ws, ...target }) => target) }, agent: this.agentStates.get(config.id) };
+    return { ...config, ...resolveAppRuntime(config, worker, observed, debugStates), debug: { renderer: !!renderer.targets.length, main: !!main.targets.length, targets: [...renderer.targets, ...main.targets].map(({ ws, ...target }) => target) }, agent: this.agentStates.get(config.id), connection: this.connector.state(config.id) };
   }
   async save(input: LocalAppInput): Promise<string> {
     const parsed = inputSchema.safeParse(input);
@@ -159,6 +177,7 @@ export class LocalAppsService {
       const configs = this.configs.filter(item => item.id !== id); configs.push(next);
       configs.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
       atomicJson(this.storePath, configs); this.configs = configs;
+      this.connector.forget(id);
       this.views.delete(id);
       invalidateProcessRuntime();
     });
@@ -186,6 +205,7 @@ export class LocalAppsService {
       await this.gateway?.detach(this.get(id));
       const configs = this.configs.filter(item => item.id !== id);
       atomicJson(this.storePath, configs); this.configs = configs;
+      this.connector.forget(id);
       this.views.delete(id);
       // Removing an entry never deletes the project or its data.
     });
@@ -194,6 +214,19 @@ export class LocalAppsService {
     if (this.operations.has(id)) throw new Error("此应用正在处理另一项操作，请稍后重试。");
     this.operations.add(id);
     try { return await run(); } finally { this.operations.delete(id); }
+  }
+  async connect(id: string, confirmationToken?: string) {
+    // Finish any periodic refresh and persist the Agent port before creating a
+    // restart confirmation, so background allocation cannot invalidate it.
+    await this.syncAgents();
+    return this.exclusive(id, () => this.connector.connect(id, confirmationToken));
+  }
+  private async validateLaunch(config: LocalAppConfig): Promise<void> {
+    if (config.mode !== "launch" || !config.command.trim()) throw new Error("请先在连接设置中填写启动命令。");
+    if (!path.isAbsolute(config.cwd) || !fs.statSync(config.cwd, { throwIfNoEntry: false })?.isDirectory()) throw new Error("应用项目文件夹不存在，请在连接设置中更新启动路径。");
+    parseEnvironment(config.environment);
+    const reserved = await this.reservedPorts();
+    if ([config.cdpPort, config.inspectPort, config.agentPort].some(p => p && reserved.has(p))) throw new Error("连接端口已被浏览器 Profile 使用，请在连接设置中更换端口。");
   }
   async start(id: string): Promise<void> {
     await this.exclusive(id, async () => {
@@ -291,40 +324,39 @@ export class LocalAppsService {
     catch (error) { statusError = error; }
     for (const candidate of candidates) {
       if (this.operations.has(candidate.id) || !this.configs.some(item => item.id === candidate.id)) continue;
-      await this.exclusive(candidate.id, async () => {
-        let config = this.get(candidate.id);
-        try {
-          if (!config.agentPort) {
-            const reserved = await this.reservedPorts();
-            for (const other of this.configs) for (const value of [other.cdpPort, other.inspectPort, other.servicePort, other.agentPort]) if (value) reserved.add(value);
-            let agentPort: number;
-            do {
-              agentPort = await new Promise<number>((resolve, reject) => {
-                const server = net.createServer();
-                server.once("error", reject);
-                server.listen(0, "127.0.0.1", () => { const value = (server.address() as net.AddressInfo).port; server.close(() => resolve(value)); });
-              });
-            } while (reserved.has(agentPort));
-            config = { ...config, agentPort };
-            this.configs = this.configs.map(item => item.id === config.id ? config : item);
-            atomicJson(this.storePath, this.configs);
-          }
-          // Gateway attachment only needs renderer readiness. Avoid a full OS
-          // process scan for every app on every background sync tick.
-          const renderer = await probeDebugPort(config.cdpPort, "renderer");
-          if (!renderer.targets.length) {
-            // The window can disappear while its Agent still owns the route.
-            // Keep confirmed occupancy visible so the user can stop that task.
-            const state = status ? this.gateway!.state(config, status) : undefined;
-            this.agentStates.set(config.id, { ...state, connected: false }); return;
-          }
-          if (statusError) throw statusError;
-          const state = this.gateway!.state(config, status!);
-          if (!state.connected) { await this.gateway!.attach(config); state.connected = true; }
-          this.agentStates.set(config.id, state);
-        } catch (error) { this.agentStates.set(config.id, { connected: false, error: (error as Error).message }); }
-      });
+      await this.exclusive(candidate.id, () => this.syncAgentRoute(this.get(candidate.id), status, statusError));
     }
+  }
+  private async syncAgentRoute(config: LocalAppConfig, status?: Awaited<ReturnType<LocalAppGateway["status"]>>, statusError?: unknown): Promise<void> {
+    try {
+      if (!config.agentPort) {
+        const reserved = await this.reservedPorts();
+        for (const other of this.configs) for (const value of [other.cdpPort, other.inspectPort, other.servicePort, other.agentPort]) if (value) reserved.add(value);
+        let agentPort: number;
+        do {
+          agentPort = await new Promise<number>((resolve, reject) => {
+            const server = net.createServer();
+            server.once("error", reject);
+            server.listen(0, "127.0.0.1", () => { const value = (server.address() as net.AddressInfo).port; server.close(() => resolve(value)); });
+          });
+        } while (reserved.has(agentPort));
+        config = { ...config, agentPort };
+        this.configs = this.configs.map(item => item.id === config.id ? config : item);
+        atomicJson(this.storePath, this.configs);
+      }
+      // Gateway attachment only needs renderer readiness. Avoid a full OS
+      // process scan for every app on every background sync tick.
+      const renderer = await probeDebugPort(config.cdpPort, "renderer");
+      if (!renderer.targets.length) {
+        // Keep an existing Agent's occupancy visible if its window disappears.
+        const state = status ? this.gateway!.state(config, status) : undefined;
+        this.agentStates.set(config.id, { ...state, connected: false }); return;
+      }
+      if (statusError) throw statusError;
+      const state = this.gateway!.state(config, status!);
+      if (!state.connected) { await this.gateway!.attach(config); state.connected = true; }
+      this.agentStates.set(config.id, state);
+    } catch (error) { this.agentStates.set(config.id, { connected: false, error: (error as Error).message }); }
   }
   logs(id: string): string {
     const config = this.get(id); const file = config.mode === "service" && config.logPath ? config.logPath : this.file(id, "log");

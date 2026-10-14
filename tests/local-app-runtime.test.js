@@ -57,6 +57,54 @@ test('macOS bundles and project Electron executables preserve paths with spaces'
   assert.ok(!appProcessPaths({ ...config, command: '"C:\\Program Files\\nodejs\\node.exe" script.js' }, 'win32').includes('C:\\Program Files\\nodejs\\node.exe'));
 });
 
+test('Electron workers without --type belong to their running parent on Windows and macOS', () => {
+  for (const [platform, executable] of [['win32', 'C:\\Apps\\My App.exe'], ['darwin', '/Applications/My App.app/Contents/MacOS/My App']]) {
+    const input = { ...config, cwd: '', command: `"${executable}"` };
+    const main = proc(`"${executable}"`, { executablePath: platform === 'win32' ? executable : null });
+    const worker = proc(`"${executable}" --max-old-space-size=384 session-scanner.js`, { pid: 124, parentPid: main.pid });
+    const intermediate = proc('node bridge.js', { pid: 125, parentPid: main.pid, name: 'node' });
+    const watcher = proc(`"${executable}" parcel-watcher.js`, { pid: 126, parentPid: intermediate.pid });
+    const snapshot = { tcp: [], processes: [worker, watcher, intermediate, main] };
+    const observed = processRuntimeFromSnapshot(input, snapshot, platform);
+    assert.equal(observed.status, 'running');
+    assert.equal(observed.pid, main.pid);
+    const view = resolveAppRuntime(input, idle, observed, ['offline']);
+    assert.equal(view.runtime.status, 'running');
+    assert.deepEqual(view.controls, { start: false, stop: false, restart: false });
+    assert.match(view.runtime.statusDetail, /调试连接尚未就绪/);
+
+    snapshot.processes.push({ ...main, pid: 200 });
+    assert.equal(processRuntimeFromSnapshot(input, snapshot, platform).status, 'unknown', 'independent instances remain ambiguous');
+    snapshot.tcp.push({ pid: 200, localPort: config.cdpPort, state: 'Listen' });
+    assert.equal(processRuntimeFromSnapshot(input, snapshot, platform).pid, 200, 'the configured listener identifies an independent instance');
+  }
+});
+
+test('process ancestry does not hide ambiguous cycles or change service listener selection', () => {
+  const main = proc('"C:\\Apps\\My App.exe"');
+  const child = { ...main, pid: 124, parentPid: main.pid };
+  const snapshot = { tcp: [], processes: [{ ...main, parentPid: child.pid }, child] };
+  assert.equal(processRuntimeFromSnapshot(config, snapshot, 'win32').status, 'unknown');
+  snapshot.processes = [main, child];
+  const service = { ...config, mode: 'service', serviceProcess: 'C:\\Apps\\My App.exe', servicePort: 9444 };
+  assert.equal(processRuntimeFromSnapshot(service, snapshot, 'win32').status, 'unknown');
+  snapshot.tcp.push({ pid: child.pid, localPort: service.servicePort, state: 'Listen' });
+  const observed = processRuntimeFromSnapshot(service, snapshot, 'win32');
+  assert.equal(observed.pid, child.pid);
+  assert.equal(observed.serviceReady, true);
+});
+
+test('Windows image paths establish one running app when CIM hides its command lines', () => {
+  const executable = 'C:\\Apps\\My App.exe';
+  const main = proc(executable, { executablePath: executable });
+  const worker = { ...main, pid: 124, parentPid: main.pid };
+  const observed = processRuntimeFromSnapshot(config, { tcp: [], processes: [worker, main] }, 'win32');
+  assert.equal(observed.status, 'running');
+  assert.equal(observed.pid, main.pid);
+  const hidden = { ...main, commandLine: main.name, executablePath: null };
+  assert.equal(processRuntimeFromSnapshot(config, { tcp: [], processes: [hidden] }, 'win32').status, 'unknown', 'a name alone cannot verify identity');
+});
+
 test('a closed debug port differs from occupied invalid/empty/timed-out endpoints', async () => {
   let payload = 'not JSON';
   let hang = false;

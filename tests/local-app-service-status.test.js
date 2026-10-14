@@ -55,7 +55,7 @@ test('macOS keeps lsof/ps detection and distinguishes missing process informatio
   const platform = Object.getOwnPropertyDescriptor(process, 'platform');
   Object.defineProperty(process, 'platform', { value: 'darwin' });
   t.after(() => Object.defineProperty(process, 'platform', platform));
-  let psResult = '123 /Applications/Service.app/Contents/MacOS/Service';
+  let psResult = '123 1 Tue Oct 13 10:54:27 2026 /Applications/Service.app/Contents/MacOS/Service';
   let listening = true;
   const calls = [];
   const { serviceRuntime, invalidateProcessRuntime } = loadTsModule('src/main/local-apps/service-runtime.ts', { stubs: {
@@ -77,4 +77,23 @@ test('macOS keeps lsof/ps detection and distinguishes missing process informatio
   invalidateProcessRuntime();
   assert.equal((await serviceRuntime(input)).status, 'stopped');
   assert.ok(calls.every(value => ['lsof', 'ps'].includes(value)));
+});
+
+test('macOS ps parent IDs identify one Electron app with Node workers and no debug listener', async t => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { value: 'darwin' });
+  t.after(() => Object.defineProperty(process, 'platform', platform));
+  const executable = '/Applications/My App.app/Contents/MacOS/My App';
+  const { processRuntime } = loadTsModule('src/main/local-apps/service-runtime.ts', { stubs: {
+    'node:util': { promisify: () => async (command, args) => {
+      if (command === 'lsof') throw Object.assign(new Error('No listeners'), { code: 1 });
+      assert.equal(command, 'ps');
+      assert.deepEqual(args, ['-axo', 'pid=,ppid=,lstart=,command=']);
+      return { stdout: `  123 1 Tue Oct 13 10:54:27 2026 ${executable}\n  124 123 Tue Oct 13 10:54:28 2026 ${executable} worker.js\n` };
+    } }
+  } });
+  const observed = await processRuntime({ mode: 'launch', cwd: '', command: 'open "/Applications/My App.app"', cdpPort: 9333, inspectPort: null });
+  assert.equal(observed.status, 'running');
+  assert.equal(observed.pid, 123);
+  assert.equal(observed.startedAt, new Date('Tue Oct 13 10:54:27 2026').toISOString());
 });

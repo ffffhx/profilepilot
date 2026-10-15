@@ -109,7 +109,7 @@ public final class ControlService extends Service {
     private void requireReady() {
         if (!Settings.canDrawOverlays(this)) throw new IllegalStateException("请在手机开启顶部胶囊权限");
         if (!getSystemService(NotificationManager.class).areNotificationsEnabled()) throw new IllegalStateException("请在手机开启控制状态通知");
-        if (PhoneAccessibility.current == null) throw new IllegalStateException("请在手机启用 ProfilePilot 手机控制无障碍服务");
+        if (PhoneAccessibility.current == null) throw new IllegalStateException("请在手机启用 "+getString(R.string.accessibility_name)+"无障碍服务");
         if (getSystemService(KeyguardManager.class).isKeyguardLocked()) throw new IllegalStateException("请先解锁手机");
     }
     public void localControl(String command) {
@@ -125,7 +125,10 @@ public final class ControlService extends Service {
     }
     /** Bind a user click to the session and action displayed when the button was rendered. */
     Runnable pauseOrResumeAction() {
-        String command = session.phase.equals("paused") ? "resume" : "pause";
+        return sessionControlAction(session.phase.equals("paused") ? "resume" : "pause");
+    }
+    Runnable sessionControlAction(String command) {
+        if (!command.equals("pause") && !command.equals("resume") && !command.equals("stop")) throw new IllegalArgumentException("不支持的会话操作");
         String instance = session.instanceId, id = session.sessionId;
         long version = session.generation;
         return () -> localSessionControl(command, instance, id, version);
@@ -158,7 +161,7 @@ public final class ControlService extends Service {
     }
     private Notification notification() {
         PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class), PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        Notification.Builder builder = new Notification.Builder(this, "control").setSmallIcon(R.drawable.ic_phone).setContentTitle(description()).setContentText(session.controller.isEmpty() ? "ProfilePilot 手机连接服务" : session.controller + (session.task.isEmpty() ? "" : " · " + session.task)).setContentIntent(open).setOngoing(true).setOnlyAlertOnce(true).setVisibility(Notification.VISIBILITY_PRIVATE);
+        Notification.Builder builder = new Notification.Builder(this, "control").setSmallIcon(R.drawable.ic_notification).setContentTitle(description()).setContentText(session.controller.isEmpty() ? "ProfilePilot 手机连接服务" : session.controller + (session.task.isEmpty() ? "" : " · " + session.task)).setContentIntent(open).setOngoing(true).setOnlyAlertOnce(true).setVisibility(Notification.VISIBILITY_PRIVATE);
         if (session.active()) builder.addAction(new Notification.Action.Builder(null, "暂停", commandIntent("pause", 1)).build());
         if (session.phase.equals("paused")) builder.addAction(new Notification.Action.Builder(null, "继续控制", commandIntent("resume", 3)).build());
         if (session.sessionId != null && !session.phase.equals("stopped")) builder.addAction(new Notification.Action.Builder(null, "结束控制", commandIntent("stop", 2)).build());
@@ -171,6 +174,7 @@ public final class ControlService extends Service {
             .putExtra("instanceId", session.instanceId).putExtra("sessionId", session.sessionId).putExtra("generation", session.generation);
         return PendingIntent.getService(this, id, intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
     }
+    void refreshPresentation() { render(); }
     private void render() {
         if (overlay != null) overlay.update();
         String key = description() + session.controller + session.task + session.sessionId + session.generation;

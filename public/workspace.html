@@ -12,9 +12,15 @@
   <link rel="stylesheet" href="./workspace-shell.css">
 </head>
 <body>
+  <section id="workspace-startup" role="status" aria-live="polite">
+    <h1>ProfilePilot</h1>
+    <p id="workspace-startup-status">正在打开工作区…</p>
+    <button id="workspace-startup-retry" type="button" hidden>重新加载界面</button>
+  </section>
   <div id="workspace-chrome"></div>
   <main id="workspace-pages" aria-label="工作区内容"></main>
   <div id="workspace-loading" role="status" hidden></div>
-  <script src="../dist/renderer/workspace-shell.js"></script>
+  <script src="./workspace-boot.js"></script>
+  <script src="../dist/browser/workspace-shell.js"></script>
 </body>
 </html>

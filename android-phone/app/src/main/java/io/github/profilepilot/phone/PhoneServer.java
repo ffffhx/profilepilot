@@ -17,7 +17,7 @@ final class PhoneServer implements Closeable {
     private final Handler handler;
     PhoneServer(String token, Handler handler) throws IOException {
         this.token = token; this.handler = handler;
-        server = new ServerSocket(); server.setReuseAddress(true); server.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), 18761));
+        server = new ServerSocket(); server.setReuseAddress(true); server.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"), BuildConfig.COMPANION_PORT));
         Thread accept = new Thread(() -> {
             while (!server.isClosed()) try {
                 Socket socket = server.accept();

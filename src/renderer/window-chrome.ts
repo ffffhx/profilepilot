@@ -4,6 +4,8 @@ declare global {
   interface Window {
     desktopWindow?: {
       platform: string;
+      reloadWorkspace?(): void;
+      reportStartupFailure?(reason: string): void;
       setAppearance(background: string, symbols: string, guideActive?: boolean): void;
       onNavigate?(listener: (href: string) => void): () => void;
       onAgentZoom?(listener: (command: AgentZoomCommand) => void): () => void;

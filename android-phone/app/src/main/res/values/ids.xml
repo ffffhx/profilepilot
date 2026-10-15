@@ -1,0 +1,16 @@
+<resources>
+    <item type="id" name="home_scroll" />
+    <item type="id" name="home_status" />
+    <item type="id" name="home_computer" />
+    <item type="id" name="home_more" />
+    <item type="id" name="home_permissions" />
+    <item type="id" name="home_permission_summary" />
+    <item type="id" name="home_accessibility" />
+    <item type="id" name="home_overlay" />
+    <item type="id" name="home_notifications" />
+    <item type="id" name="home_usb" />
+    <item type="id" name="home_wifi" />
+    <item type="id" name="home_pause" />
+    <item type="id" name="home_stop" />
+    <item type="id" name="sheet_close" />
+</resources>

@@ -6,15 +6,18 @@ const path = require('node:path');
 const { loadCli } = require('./cli-test-build.cjs');
 const { PhonesService } = loadCli('src/main/phones/service.ts');
 const { findEmulator, AndroidEmulators } = loadCli('src/main/phones/emulators.ts');
-const { ensureEmulatorWindowVisible } = loadCli('src/main/phones/emulator-window.ts');
+const { ensureEmulatorWindowVisible, ensureRunningEmulatorWindowVisible } = loadCli('src/main/phones/emulator-window.ts');
 const { executePhoneCommand } = loadCli('src/main/phones/management.ts');
+const { runPhoneCli } = loadCli('src/main/phones/cli.ts');
 
 function fixture(t, running = false) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pp-emulator-'));
   let launched = 0;
-  const calls = [];
+  const calls = [], fitted = [];
+  const emulators = { list: async () => ['Test_AVD'], launch: async () => { launched++; running = true; },
+    ensureVisible: async (...args) => { fitted.push(args); } };
   const service = new PhonesService({ root, apkPath: '',
-    emulators: { list: async () => ['Test_AVD'], launch: async () => { launched++; running = true; } },
+    emulators,
     adb: { run: async args => {
       calls.push(args);
       if (args[0] === 'devices') return 'REAL-PHONE device model:Real_Phone\nemulator-5556 device model:Other_Emulator' + (running ? '\nemulator-5554 device model:Test_Emulator' : '');
@@ -24,7 +27,7 @@ function fixture(t, running = false) {
     } }
   });
   t.after(async () => { await service.close(); fs.rmSync(root, { recursive: true, force: true }); });
-  return { service, calls, launched: () => launched };
+  return { service, calls, fitted, emulators, launched: () => launched };
 }
 
 test('emulator connection starts the selected AVD and never prepares or controls a phone', async t => {
@@ -40,6 +43,18 @@ test('an already running matching AVD is reused and different running devices ar
   const h = fixture(t, true);
   assert.equal((await h.service.connectEmulator('Test_AVD')).id, 'emulator-5554');
   assert.equal(h.launched(), 0);
+  assert.deepEqual(h.fitted, [['Test_AVD', 'emulator-5554']]);
+  assert.ok(h.calls.every(args => !args.includes('install') && !args.includes('am')));
+});
+
+test('window verification failure is visible and reopening can recover without restarting the emulator', async t => {
+  const h = fixture(t, true);
+  h.emulators.ensureVisible = async () => { throw Error('Window remains outside monitor'); };
+  await assert.rejects(h.service.connectEmulator('Test_AVD'), /outside monitor/);
+  h.emulators.ensureVisible = async (...args) => { h.fitted.push(args); };
+  assert.equal((await h.service.connectEmulator('Test_AVD')).id, 'emulator-5554');
+  assert.equal(h.launched(), 0);
+  assert.deepEqual(h.fitted, [['Test_AVD', 'emulator-5554']]);
 });
 
 test('unknown AVDs and injected arguments fail before any launch or device request', async t => {
@@ -94,4 +109,53 @@ test('Windows window helper rejects malformed targets and is not invoked on macO
     await assert.rejects(ensureEmulatorWindowVisible(pid, name, 'win32'), /Invalid/);
   }
   await ensureEmulatorWindowVisible(12345, 'Test_AVD', 'darwin');
+  for (const [name, id] of [['Test', 'REAL_PHONE'], ['Test', 'emulator-65536'], ['Test', 'emulator-1'], ["Test'; exit", 'emulator-5554']]) {
+    await assert.rejects(ensureRunningEmulatorWindowVisible(name, id, 'win32'), /Invalid/);
+  }
+  await ensureRunningEmulatorWindowVisible('Test_AVD', 'emulator-5554', 'darwin');
+});
+
+test('runtime never swallows failed window correction or kills a launched emulator', async t => {
+  const { EventEmitter } = require('node:events');
+  let killed = false;
+  const child = Object.assign(new EventEmitter(), { pid: 12345, unref() {}, kill() { killed = true; } });
+  t.mock.method(require('node:child_process'), 'spawn', () => {
+    queueMicrotask(() => child.emit('spawn')); return child;
+  });
+  const runtime = new AndroidEmulators('emulator', async () => { throw Error('window timeout'); }, async () => { throw Error('window timeout'); });
+  runtime.list = async () => ['Test_AVD'];
+  await assert.rejects(runtime.launch('Test_AVD'), /窗口完整可见/);
+  await assert.rejects(runtime.ensureVisible('Test_AVD', 'emulator-5554'), /移回屏幕/);
+  assert.equal(killed, false);
+});
+
+test('CLI emulator entry uses the same verified service path and rejects unrelated device/control flags', async t => {
+  const h = fixture(t, true), commands = [];
+  const io = { stdout: { write() {} }, stderr: { write() {} } };
+  const request = async command => {
+    commands.push(command);
+    return { version: 1, id: 'test', ok: true, data: await executePhoneCommand(command, h.service) };
+  };
+  assert.equal(await runPhoneCli(['emulator-list'], request, io), 0);
+  assert.equal(await runPhoneCli(['emulator-connect', '--name', 'Test_AVD'], request, io), 0);
+  assert.deepEqual(h.fitted, [['Test_AVD', 'emulator-5554']]);
+  assert.equal(h.launched(), 0);
+  for (const args of [
+    ['emulator-connect'], ['emulator-connect', '--name', 'Test_AVD; anything'],
+    ['emulator-connect', '--name', 'Test_AVD', '--device', 'REAL_PHONE'],
+    ['emulator-connect', '--name', 'Test_AVD', '--backend', 'basic'],
+    ['emulator-list', '--name', 'Test_AVD']
+  ]) assert.equal(await runPhoneCli(args, request, io), 1);
+  assert.equal(commands.length, 2);
+});
+
+test('Windows access denial explains elevation mismatch and preserves diagnostic cause', async () => {
+  for (const message of ['Access is denied', '拒绝访问。']) {
+    const cause = Error(message);
+    const runtime = new AndroidEmulators('emulator', undefined, async () => { throw cause; });
+    await assert.rejects(runtime.ensureVisible('Test_AVD', 'emulator-5554'), error => {
+      assert.match(error.message, /管理员权限/);
+      assert.equal(error.cause, cause); return true;
+    });
+  }
 });

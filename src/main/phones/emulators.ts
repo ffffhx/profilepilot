@@ -1,12 +1,20 @@
 import { execFile, spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { ensureEmulatorWindowVisible } from "./emulator-window";
+import { ensureEmulatorWindowVisible, ensureRunningEmulatorWindowVisible } from "./emulator-window";
 import { androidSdkRoots } from "./android-paths";
 
 export interface EmulatorRuntime {
   list(): Promise<string[]>;
   launch(name: string): Promise<void>;
+  ensureVisible(name: string, id: string): Promise<void>;
+}
+
+function placementError(error: unknown, fallback: string): Error {
+  const reason = error instanceof Error ? error.message : String(error);
+  return new Error(/Access is denied|拒绝访问|访问被拒绝/i.test(reason)
+    ? "Windows 阻止了窗口归位。模拟器可能以管理员权限运行，请关闭它，再从普通权限的 ProfilePilot 启动。"
+    : fallback, { cause: error });
 }
 
 export function findEmulator(env = process.env, platform = process.platform): string {
@@ -19,7 +27,8 @@ export function findEmulator(env = process.env, platform = process.platform): st
 }
 
 export class AndroidEmulators implements EmulatorRuntime {
-  constructor(private overrideExecutable?: string, private fitWindow = ensureEmulatorWindowVisible) {}
+  constructor(private overrideExecutable?: string, private fitWindow = ensureEmulatorWindowVisible,
+    private fitRunningWindow = ensureRunningEmulatorWindowVisible) {}
   private get executable(): string { return this.overrideExecutable || findEmulator(); }
   list(): Promise<string[]> {
     return new Promise((resolve, reject) => {
@@ -37,7 +46,12 @@ export class AndroidEmulators implements EmulatorRuntime {
       child.once("error", () => reject(new Error("模拟器启动失败，请在 Android Studio 的 Device Manager 中检查虚拟设备。")));
       child.once("spawn", () => { child.unref(); resolve(child.pid!); });
     });
-    // A window placement failure must not discard an otherwise usable emulator.
-    await this.fitWindow(pid, name).catch(() => console.warn("Could not fit the Android emulator window to the desktop."));
+    // Keep the emulator alive on failure, but don't report a clipped preview as ready.
+    try { await this.fitWindow(pid, name); }
+    catch (error) { throw placementError(error, "模拟器已启动，但未能确认窗口完整可见。请再次使用“启动 / 连接模拟器”自动归位。"); }
+  }
+  async ensureVisible(name: string, id: string): Promise<void> {
+    try { await this.fitRunningWindow(name, id); }
+    catch (error) { throw placementError(error, "未能将模拟器窗口移回屏幕内。请结束拖拽后，再次使用“启动 / 连接模拟器”。"); }
   }
 }

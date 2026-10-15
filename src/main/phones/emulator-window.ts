@@ -1,12 +1,25 @@
 import { runWindowsPowerShell } from "../windows-platform";
 
 /** Qt can restore an emulator above the desktop after Windows DPI scaling.
- * Fit only the newly launched AVD, then leave its window under user control.
+ * Fit only the selected AVD, then leave its window under user control.
  * macOS uses the emulator's native window placement and never runs this helper.
  */
 export async function ensureEmulatorWindowVisible(launcherPid: number, name: string, platform = process.platform): Promise<void> {
   if (platform !== "win32") return;
   if (!Number.isSafeInteger(launcherPid) || launcherPid <= 0 || !/^[\w.-]{1,200}$/.test(name)) throw new Error("Invalid emulator window target");
+  await fitEmulatorWindow(launcherPid, name, 0);
+}
+
+/** Reopening an existing AVD must also recover a window left off-screen by Qt. */
+export async function ensureRunningEmulatorWindowVisible(name: string, id: string, platform = process.platform): Promise<void> {
+  if (platform !== "win32") return;
+  const match = /^emulator-(\d{4,5})$/.exec(id);
+  const port = Number(match?.[1]);
+  if (!/^[\w.-]{1,200}$/.test(name) || !match || port < 1024 || port > 65535) throw new Error("Invalid emulator window target");
+  await fitEmulatorWindow(0, name, port);
+}
+
+async function fitEmulatorWindow(launcherPid: number, name: string, port: number): Promise<void> {
   const script = String.raw`
 $ErrorActionPreference = 'Stop'
 Add-Type @'
@@ -23,6 +36,7 @@ public static class ProfilePilotEmulatorWindow {
   [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr window, out uint process);
   [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
   [DllImport("user32.dll")] static extern bool IsIconic(IntPtr window);
+  [DllImport("user32.dll")] static extern short GetAsyncKeyState(int key);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetWindowText(IntPtr window, StringBuilder text, int length);
   [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr window, out Rect rect);
   [DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr window, uint flags);
@@ -31,8 +45,8 @@ public static class ProfilePilotEmulatorWindow {
   [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr window);
   [DllImport("user32.dll", SetLastError=true)] static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
 
-  // 0: not created yet; 1: already fits; 2: correction requested; 3: minimized.
-  public static int Fit(int[] processes, string name) {
+  // 0: not created yet; 1: already fits; 2: correction requested; 3: minimized; 4: user dragging.
+  public static int Fit(int[] processes, string name, int port) {
     var previousDpi = SetThreadDpiAwarenessContext(new IntPtr(-4));
     try {
       var targets = new HashSet<int>(processes);
@@ -43,12 +57,14 @@ public static class ProfilePilotEmulatorWindow {
         if (!targets.Contains((int)process) || !IsWindowVisible(window)) return true;
         var title = new StringBuilder(512);
         GetWindowText(window, title, title.Capacity);
-        if (!title.ToString().StartsWith("Android Emulator - " + name + ":", StringComparison.Ordinal)) return true;
+        string prefix = "Android Emulator - " + name + ":";
+        if (port > 0 ? title.ToString() != prefix + port : !title.ToString().StartsWith(prefix, StringComparison.Ordinal)) return true;
         target = window;
         return false;
       }, IntPtr.Zero);
       if (target == IntPtr.Zero) return 0;
       if (IsIconic(target)) return 3;
+      if ((GetAsyncKeyState(1) & 0x8000) != 0) return 4;
       Rect rect;
       var info = new MonitorInfo();
       info.size = Marshal.SizeOf(typeof(MonitorInfo));
@@ -80,24 +96,34 @@ public static class ProfilePilotEmulatorWindow {
 '@
 $launcherProcessId = ${launcherPid}
 $name = '${name}'
+$port = ${port}
 $targets = [Collections.Generic.HashSet[int]]::new()
-[void]$targets.Add($launcherProcessId)
+if ($launcherProcessId -gt 0) { [void]$targets.Add($launcherProcessId) }
 $elapsed = [Diagnostics.Stopwatch]::StartNew()
 $stableSince = -1
 while ($elapsed.ElapsedMilliseconds -lt 20000) {
-  # emulator.exe creates a qemu child on Windows. Scope discovery to this launch.
-  foreach ($parent in @($targets)) {
-    foreach ($child in @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $parent" -ErrorAction SilentlyContinue)) {
-      if ($child.Name -like 'qemu-system-*.exe' -or $child.Name -eq 'emulator.exe') { [void]$targets.Add([int]$child.ProcessId) }
+  if ($launcherProcessId -gt 0) {
+    # emulator.exe creates a qemu child on Windows. Scope discovery to this launch.
+    foreach ($parent in @($targets)) {
+      foreach ($child in @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $parent" -ErrorAction SilentlyContinue)) {
+        if ($child.Name -like 'qemu-system-*.exe' -or $child.Name -eq 'emulator.exe') { [void]$targets.Add([int]$child.ProcessId) }
+      }
+    }
+  } else {
+    # Existing windows must match BOTH the AVD name and the observed emulator port.
+    # Only emulator processes qualify; never move another application's window.
+    $targets.Clear()
+    foreach ($candidate in @(Get-CimInstance Win32_Process -Filter "Name LIKE 'qemu-system-%.exe' OR Name = 'emulator.exe'")) {
+      [void]$targets.Add([int]$candidate.ProcessId)
     }
   }
-  $state = [ProfilePilotEmulatorWindow]::Fit([int[]]@($targets), $name)
+  $state = [ProfilePilotEmulatorWindow]::Fit([int[]]@($targets), $name, $port)
   if ($state -eq 3) { exit 0 }
   if ($state -eq 1) {
     if ($stableSince -lt 0) { $stableSince = $elapsed.ElapsedMilliseconds }
     if ($elapsed.ElapsedMilliseconds - $stableSince -ge 2000) { exit 0 }
   } else { $stableSince = -1 }
-  if (-not (@($targets | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue }).Count)) { exit 0 }
+  if ($launcherProcessId -gt 0 -and -not (@($targets | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue }).Count)) { throw 'The emulator exited before its window could be verified.' }
   Start-Sleep -Milliseconds 250
 }
 throw 'The emulator window did not become visible within the startup timeout.'

@@ -16,6 +16,9 @@ export function createPhoneInspector(container: HTMLElement) {
   const refreshButton = find<HTMLButtonElement>('[data-action="refresh-phone-screen"]');
   let image = find<HTMLImageElement>("img"), device: PhoneDevice | undefined, busy = false;
   let key = "", generation = 0, pending = false, capturedAt = 0, attemptedAt = 0, failure = "";
+  let enlarged: { dialog: HTMLDialogElement; image: HTMLImageElement; caption: HTMLParagraphElement; deviceId: string } | undefined;
+  let liveTimer: number | undefined;
+  const live = () => !!enlarged?.dialog.open;
   const markupCache = new Map<string, string>();
   const html = (selector: string, markup: string) => { if (markupCache.get(selector) !== markup) { find<HTMLElement>(selector).innerHTML = markup; markupCache.set(selector, markup); } };
   const session = () => [device?.basic, device?.state].find(state => state && !["idle", "stopped"].includes(state.phase));
@@ -28,12 +31,28 @@ export function createPhoneInspector(container: HTMLElement) {
     placeholder.hidden = !!capturedAt; placeholder.querySelector("[role=status]")!.textContent = hint();
     image.hidden = !capturedAt; screen.disabled = !capturedAt;
     refreshButton.disabled = !ready() || busy || pending;
-    find<HTMLElement>(".phone-inspector-caption").textContent = failure || (capturedAt ? `更新于 ${new Date(capturedAt).toLocaleTimeString()} · 每 2 秒刷新` : "连接后自动刷新");
+    const status = workspaceHidden() ? "画面更新已暂停" : !ready() ? hint() : busy ? "正在处理手机操作，稍后继续更新画面" : failure ? `画面更新失败，正在重试：${failure}`
+      : capturedAt ? `更新于 ${new Date(capturedAt).toLocaleTimeString()} · ${live() ? "实时更新" : "每 2 秒刷新"}` : "正在获取手机画面…";
+    find<HTMLElement>(".phone-inspector-caption").textContent = status;
+    if (enlarged) {
+      enlarged.caption.textContent = status;
+      enlarged.image.hidden = !capturedAt;
+      if (!capturedAt) enlarged.image.removeAttribute("src");
+      else if (enlarged.image.src !== image.src) enlarged.image.src = image.src;
+    }
+    // Both views share one capture request. Only an open, visible preview needs
+    // the faster cadence; the normal sidebar keeps its existing refresh loop.
+    if (live() && !workspaceHidden() && ready() && !busy) {
+      liveTimer ??= window.setInterval(() => { void refresh(); }, 500);
+    } else if (liveTimer !== undefined) {
+      window.clearInterval(liveTimer); liveTimer = undefined;
+    }
   };
   async function refresh(force = false) {
-    if (workspaceHidden() || !ready() || busy || pending || document.querySelector('.phone-basic-dialog[open]') || !force && Date.now() - attemptedAt < 2000) return;
+    const interval = live() && !failure ? 500 : 2000;
+    if (workspaceHidden() || !ready() || busy || pending || document.querySelector('.phone-basic-dialog[open]') || !force && Date.now() - attemptedAt < interval) return;
     const bounds = container.getBoundingClientRect();
-    if (!force && (bounds.top > innerHeight || bounds.bottom < 0)) return;
+    if (!force && !live() && (bounds.top > innerHeight || bounds.bottom < 0)) return;
     const id = device!.id, version = generation; pending = true; attemptedAt = Date.now(); updateScreen();
     try {
       const frame = await window.phones.screen(id);
@@ -54,9 +73,10 @@ export function createPhoneInspector(container: HTMLElement) {
   return {
     refresh,
     update(next: PhoneDevice | undefined, working: boolean) {
+      if (enlarged && enlarged.deviceId !== next?.id) enlarged.dialog.close();
       device = next; busy = working;
       const state = session();
-      const nextKey = JSON.stringify([device?.id, device?.connection, device?.pending, state?.sessionId, state?.generation, state?.phase, workspaceHidden()]);
+      const nextKey = JSON.stringify([device?.id, device?.connection, device?.pending, state?.instanceId, state?.sessionId, state?.generation, state?.phase, workspaceHidden()]);
       if (nextKey !== key) { key = nextKey; generation++; capturedAt = 0; attemptedAt = 0; failure = ""; image.removeAttribute("src"); }
       container.dataset.deviceId = device?.id || "";
       const name = device ? phonePresentation(device).displayName : "尚未选择设备";
@@ -76,12 +96,18 @@ export function createPhoneInspector(container: HTMLElement) {
       updateScreen(); void refresh();
     },
     enlarge() {
-      if (!capturedAt) return;
+      if (!capturedAt || !device || live()) return;
       const dialog = document.createElement("dialog"); dialog.className = "phone-image-dialog"; dialog.setAttribute("aria-label", "手机画面");
       const button = document.createElement("button"); button.textContent = "×"; button.setAttribute("aria-label", "关闭大图"); button.onclick = () => dialog.close();
-      const enlarged = new Image(); enlarged.src = image.src; enlarged.alt = image.alt;
-      const caption = document.createElement("p"); caption.textContent = `采集于 ${new Date(capturedAt).toLocaleTimeString()}`;
-      dialog.append(button, enlarged, caption); dialog.addEventListener("close", () => dialog.remove()); document.body.append(dialog); dialog.showModal();
+      const preview = new Image(); preview.src = image.src; preview.alt = image.alt; preview.draggable = false;
+      const caption = document.createElement("p");
+      enlarged = { dialog, image: preview, caption, deviceId: device.id };
+      dialog.append(button, preview, caption);
+      dialog.addEventListener("close", () => {
+        if (enlarged?.dialog === dialog) { enlarged = undefined; updateScreen(); }
+        dialog.remove();
+      });
+      document.body.append(dialog); dialog.showModal(); updateScreen(); void refresh(true);
     }
   };
 }

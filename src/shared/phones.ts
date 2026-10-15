@@ -56,7 +56,10 @@ export interface PhoneDevice {
   pending: string | null;
   error: string;
 }
-export interface PhonesSnapshot { devices: PhoneDevice[]; adbAvailable: boolean; error: string; computer: string; }
+export interface PhonesSnapshot {
+  devices: PhoneDevice[]; adbAvailable: boolean; error: string; computer: string;
+  companionApp?: { packageName: string; name: string; variant: "debug" | "release" };
+}
 export interface PhoneScreenFrame { mime: "image/png"; base64: string; width: number; height: number; capturedAt: number; }
 export interface PhoneWirelessService { name: string; kind: "pairing" | "connect"; address: string; source?: "phone" | "mdns"; reachable?: boolean; reason?: string; }
 export interface PhoneWirelessDiscovery { services: PhoneWirelessService[]; error: string; phoneIps?: string[]; }

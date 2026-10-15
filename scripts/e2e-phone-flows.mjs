@@ -32,7 +32,7 @@ async function device() {
 }
 async function reset() {
   const result = await run(adb, ['-s', serial, 'shell', 'am', 'start', '-W', '-f', '0x24000000', '-n',
-    'io.github.profilepilot.phone/.ControlBenchmarkActivity', '--ez', 'bench_reset', 'true']);
+    'io.github.profilepilot.phone.debug/io.github.profilepilot.phone.ControlBenchmarkActivity', '--ez', 'bench_reset', 'true']);
   assert.equal(result.code, 0, result.stderr);
 }
 async function flowFile(name, steps) {
@@ -64,7 +64,7 @@ assert.equal(success.steps.length, 26); results.push({ case: 'developer-workflow
 assert.equal((await device()).state.phase, 'stopped');
 
 await reset();
-const menu = { resourceId: 'io.github.profilepilot.phone:id/bench_open_form' };
+const menu = { resourceId: 'io.github.profilepilot.phone.debug:id/bench_open_form' };
 const failure = report(await launch(await flowFile('断言失败 stops input', [
   { kind: 'wait', selector: menu },
   { kind: 'assert', selector: { text: 'Not present in synthetic fixture' } },

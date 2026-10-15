@@ -78,21 +78,21 @@ if (process.argv.includes('--probe')) process.exit(0);
 assert.equal(capabilities.supported, true, capabilities.reason);
 
 await run(['install', '-r', path.resolve('android-phone/app/build/outputs/apk/debug/app-debug.apk')], 120000);
-const pkg = 'io.github.profilepilot.phone', token = randomBytes(32).toString('hex'), computer = 'ScreenCameraRegression';
+const pkg = 'io.github.profilepilot.phone.debug', token = randomBytes(32).toString('hex'), computer = 'ScreenCameraRegression';
 await shell('am', 'force-stop', pkg);
 await run(['shell', deviceShell(['run-as', pkg, 'sh', '-c', 'mkdir -p shared_prefs; cat > shared_prefs/MainActivity.xml'])], 8000,
   `<?xml version="1.0" encoding="utf-8"?><map><string name="token">${token}</string><string name="computer">${computer}</string></map>`);
 await shell('appops', 'set', pkg, 'SYSTEM_ALERT_WINDOW', 'allow');
 await shell('pm', 'grant', pkg, 'android.permission.POST_NOTIFICATIONS');
 await shell('pm', 'grant', pkg, 'android.permission.CAMERA');
-await shell('settings', 'put', 'secure', 'enabled_accessibility_services', pkg + '/.PhoneAccessibility');
+await shell('settings', 'put', 'secure', 'enabled_accessibility_services', pkg + '/io.github.profilepilot.phone.PhoneAccessibility');
 await shell('settings', 'put', 'secure', 'accessibility_enabled', '1');
 await shell('input', 'keyevent', '224'); await shell('wm', 'dismiss-keyguard');
-await shell('am', 'start', '-n', pkg + '/.MainActivity', '--es', 'token', token, '--es', 'computer', computer);
+await shell('am', 'start', '-n', pkg + '/io.github.profilepilot.phone.MainActivity', '--es', 'token', token, '--es', 'computer', computer);
 await shell('settings', 'put', 'secure', 'enabled_accessibility_services', '');
-await shell('settings', 'put', 'secure', 'enabled_accessibility_services', pkg + '/.PhoneAccessibility');
-const serviceRoot = path.join(root, 'service'); mkdirSync(serviceRoot, { recursive: true });
-writeFileSync(path.join(serviceRoot, 'devices.json'), JSON.stringify({ [serial]: { token } }));
+await shell('settings', 'put', 'secure', 'enabled_accessibility_services', pkg + '/io.github.profilepilot.phone.PhoneAccessibility');
+const serviceRoot = path.join(root, 'service'); mkdirSync(path.join(serviceRoot, 'development'), { recursive: true });
+writeFileSync(path.join(serviceRoot, 'development', 'devices.json'), JSON.stringify({ [serial]: { token } }));
 const phones = new PhonesService({ root: serviceRoot, apkPath: path.resolve('dist/android/profilepilot-phone.apk'), adb, computer });
 phones.startPolling();
 try {
@@ -116,7 +116,7 @@ try {
     console.log('Virtual camera and virtual display created successfully');
   } else {
     await shell('run-as', pkg, 'rm', '-f', 'files/screen-camera-result.json');
-    await phones.cameraCommand({ ...lease, op: 'launch', component: pkg + '/.ScreenCameraBenchmarkActivity' });
+    await phones.cameraCommand({ ...lease, op: 'launch', component: pkg + '/io.github.profilepilot.phone.ScreenCameraBenchmarkActivity' });
     let decoded;
     for (let i = 0; i < 60; i++) {
       try { decoded = JSON.parse(await shell('run-as', pkg, 'cat', 'files/screen-camera-result.json')); } catch { }

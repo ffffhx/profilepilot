@@ -8,6 +8,8 @@ import { runScreenCameraCli } from "./screen-camera-cli";
 export const phoneHelp = `ppilot phone CLI · 手机控制
 
 ppilot phone list
+ppilot phone emulator-list
+ppilot phone emulator-connect --name <模拟器名称>
 ppilot phone connect --device <设备ID>
 ppilot phone install --device <设备ID> --apk <本地APK文件> [--controller <控制者>]
 ppilot phone wireless-discover [--device <设备ID>]
@@ -27,6 +29,9 @@ ppilot phone camera start --params-file <当前控制会话与可选sourceId、c
 ppilot phone camera status|apps|launch|tap|key|stop --params-file <会话和操作JSON>
 ppilot phone camera preview --params-file <会话JSON> --output <手机App画面.jpg>
 ppilot phone camera frame --params-file <会话JSON> --file <当前浏览器二维码截图.png>
+
+emulator-connect 启动或复用指定模拟器，Windows 下会检查窗口并自动缩放归位；不会安装 App 或开始控制。
+模拟器窗口跑到屏幕外时，再次运行同一条 emulator-connect 即可修复，不会重启已有模拟器。
 
 屏幕摄像头需要 Android 16+、已更新的配套 App 和有效 control 会话。start 不恢复暂停会话。
 sourceId 来自 camera sources；crop 为 0–1 的 x/y/width/height。省略 sourceId 后可用 frame 提供当前 Profile 的截图。
@@ -61,7 +66,7 @@ export async function runPhoneCli(args: string[], request: (command: ProfilePilo
   if (args[0] === "camera") return runScreenCameraCli(args.slice(1), request, io);
   try {
     const method = args[0];
-    if (!["list", "connect", "install", "wireless-discover", "wireless-pair", "wireless-connect", "rename", "start", "pause", "resume", "stop", "action", "run"].includes(method)) throw new Error("未知手机命令。运行 ppilot phone --help 查看用法。");
+    if (!["list", "emulator-list", "emulator-connect", "connect", "install", "wireless-discover", "wireless-pair", "wireless-connect", "rename", "start", "pause", "resume", "stop", "action", "run"].includes(method)) throw new Error("未知手机命令。运行 ppilot phone --help 查看用法。");
     const flags = new Map<string, string>();
     for (let index = 1; index < args.length; index++) {
       const key = args[index]; if (key === "--json") continue;
@@ -70,6 +75,8 @@ export async function runPhoneCli(args: string[], request: (command: ProfilePilo
     }
     const allowed: Record<string, string[]> = { list: [], connect: ["--device"], rename: ["--device", "--name"], start: ["--device", "--controller", "--task", "--mode"], pause: ["--device"], resume: ["--device"], stop: ["--device"], action: ["--params-file", "--output"], run: ["--device", "--file", "--output-dir", "--mode", "--controller", "--task"] };
     allowed["wireless-discover"] = ["--device"];
+    allowed["emulator-list"] = [];
+    allowed["emulator-connect"] = ["--name"];
     allowed.install = ["--device", "--apk", "--controller"];
     allowed["wireless-pair"] = ["--params-file"];
     allowed["wireless-connect"] = ["--address", "--device"];
@@ -86,7 +93,11 @@ export async function runPhoneCli(args: string[], request: (command: ProfilePilo
       io.stdout.write(JSON.stringify({ ok: data.ok, data }, null, 2) + "\n"); return data.ok ? 0 : 1;
     }
     let params: unknown = {};
-    if (method === "wireless-connect") {
+    if (method === "emulator-connect") {
+      const name = flags.get("--name");
+      if (!name || !/^[\w.-]{1,200}$/.test(name)) throw new Error("请指定 --name，使用 emulator-list 返回的模拟器名称。");
+      params = { name };
+    } else if (method === "wireless-connect") {
       const address = flags.get("--address"), id = flags.get("--device");
       if ((!address && !id) || (address && id)) throw new Error("请指定 --device 自动连接，或仅指定 --address IP:连接端口手动连接。");
       params = id ? { id } : wirelessConnectSchema.parse({ address });
@@ -103,7 +114,7 @@ export async function runPhoneCli(args: string[], request: (command: ProfilePilo
     } else if (method === "action") {
       const file = flags.get("--params-file"); if (!file) throw new Error("action 需要 --params-file。");
       if ((await fs.stat(file)).size > 32768) throw new Error("参数文件过大。"); params = JSON.parse((await fs.readFile(file, "utf8")).replace(/^\uFEFF/, ""));
-    } else if (method !== "list" && method !== "wireless-discover") {
+    } else if (method !== "list" && method !== "emulator-list" && method !== "wireless-discover") {
       const id = flags.get("--device"); if (!id) throw new Error("请指定 --device，避免操作错误的手机。");
       params = method === "start" ? { id, mode: flags.get("--mode") || "control", controller: flags.get("--controller") || "本机 CLI", task: flags.get("--task") || "" } : method === "rename" ? { id, name: flags.get("--name") } : { id };
     }

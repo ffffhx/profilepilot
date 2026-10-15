@@ -1,4 +1,12 @@
+import java.util.Properties
+
 plugins { id("com.android.application") }
+val phoneVersion = Properties().apply {
+    rootProject.file("version.properties").inputStream().use { load(it) }
+}
+val phoneVersionCode = (System.getenv("PROFILEPILOT_ANDROID_VERSION_CODE") ?: phoneVersion.getProperty("versionCode")).toInt()
+val phoneVersionName = System.getenv("PROFILEPILOT_ANDROID_VERSION_NAME") ?: phoneVersion.getProperty("versionName")
+require(phoneVersionCode in 1..2100000000 && phoneVersionName.matches(Regex("[0-9A-Za-z.+-]{1,80}"))) { "Invalid Android version" }
 android {
     namespace = "io.github.profilepilot.phone"
     compileSdk = 37
@@ -6,8 +14,11 @@ android {
         applicationId = "io.github.profilepilot.phone"
         minSdk = 30
         targetSdk = 35
-        versionCode = 6
-        versionName = "0.3.0"
+        versionCode = phoneVersionCode
+        versionName = phoneVersionName
+        buildConfigField("int", "COMPANION_PORT", "18761")
+        buildConfigField("String", "PAIRING_SCHEME", "\"profilepilot\"")
+        manifestPlaceholders["pairingScheme"] = "profilepilot"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
@@ -21,6 +32,13 @@ android {
         }
     }
     buildTypes {
+        getByName("debug") {
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-dev"
+            buildConfigField("int", "COMPANION_PORT", "18763")
+            buildConfigField("String", "PAIRING_SCHEME", "\"profilepilot-dev\"")
+            manifestPlaceholders["pairingScheme"] = "profilepilot-dev"
+        }
         getByName("release") {
             isDebuggable = false
             signingConfig = signingConfigs.getByName("release")

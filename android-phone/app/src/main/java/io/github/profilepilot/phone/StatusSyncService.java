@@ -28,7 +28,7 @@ public final class StatusSyncService extends Service {
   private Notification notification(String text) {
     PendingIntent open = PendingIntent.getActivity(this, 24, new Intent(this, MainActivity.class), PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
     PendingIntent stop = PendingIntent.getService(this, 25, new Intent(this, StatusSyncService.class).setAction("stop"), PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-    return new Notification.Builder(this, "phone-status").setSmallIcon(R.drawable.ic_phone).setContentTitle("ProfilePilot · 状态同步").setContentText(text)
+    return new Notification.Builder(this, "phone-status").setSmallIcon(R.drawable.ic_notification).setContentTitle(getString(R.string.app_name)+" · 状态同步").setContentText(text)
         .setContentIntent(open).setOngoing(true).setOnlyAlertOnce(true).addAction(new Notification.Action.Builder(null, "停止同步", stop).build()).build();
   }
 

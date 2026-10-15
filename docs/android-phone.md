@@ -30,11 +30,13 @@ npm run build:phone
 npm run start:independent
 ```
 
-手机构建包含单元测试与 Android lint，输出 `dist/android/profilepilot-phone.apk`。默认是开发用 debug APK；GitHub Release 提供使用固定发布签名的 `ProfilePilot-android.apk`，桌面发布包同时包含该 APK。普通本地桌面构建不下载 Android 工具链；需要随桌面安装包分发 APK 时，先执行手机构建。
+手机构建包含单元测试与 Android lint，输出 `dist/android/profilepilot-phone.apk` 和相邻的 `.apk.json` 构建信息。默认是“ProfilePilot 开发版”（包名 `io.github.profilepilot.phone.debug`、版本后缀 `-dev`）；GitHub Release 提供固定发布签名的“ProfilePilot 移动版”（包名 `io.github.profilepilot.phone`），桌面发布包包含同一正式 APK 及构建信息。电脑端根据随包构建信息选择连接版本，不按手机上哪个版本先打开来决定。切换本地构建类型后需重启电脑端。普通本地桌面构建不下载 Android 工具链；需要随桌面安装包分发 APK 时，先执行手机构建。
 
 发布构建使用 `node scripts/build-phone.mjs --release`，要求环境变量 `ANDROID_RELEASE_KEYSTORE`、`ANDROID_RELEASE_STORE_PASSWORD`、`ANDROID_RELEASE_KEY_ALIAS`、`ANDROID_RELEASE_KEY_PASSWORD`。CI 从仓库的 `ANDROID_RELEASE_KEYSTORE_BASE64` Secret 还原密钥文件，其他三个值使用同名 Secret；密钥和密码不进入源码、日志或 Release 附件。
 
-debug 与 release 使用不同签名，不能直接互相覆盖安装；切换前保存需要的本机资料，安装后重新配对。后续发布始终使用同一发布签名，维护者应妥善备份密钥。参见 [Android 官方签名说明](https://developer.android.com/studio/publish/app-signing)。
+开发版和正式版使用不同包名，可以同时安装；数据、权限和电脑配对分别保存，首次使用各自确认一次。开发版使用独立连接端口及 `profilepilot-dev://` 配对链接；电脑端开发版记录存放在 `phones/development/`，不会读取或覆盖正式版记录。开发版通过本地构建更新，“检查更新”页面只说明开发版用途，不访问正式版更新渠道。正式版继续通过 App 下载和安装固定签名的新版本。
+
+已有旧开发包仍可能占用正式包名，本次不会自动卸载或迁移它的数据；旧开发包转为正式签名仍需处理一次衔接，此后安装新开发版不再影响正式版。维护者应保留各自签名密钥，换开发电脑或操作系统时也应沿用开发签名；Windows/macOS 的默认 debug keystore 各自生成，不能把它们当成同一把密钥。参见 [Android 官方签名说明](https://developer.android.com/studio/publish/app-signing)。
 
 支持 Android 11/API 30 及以上。可使用 USB 调试或下方的局域网无线配对引导。Windows 某些设备的 USB 连接需要厂商 ADB 驱动；macOS 通常无需额外驱动，无线连接不依赖 USB 驱动。默认从 SDK 或 PATH 查找 ADB，也可设置 `PROFILEPILOT_ADB_PATH`。
 

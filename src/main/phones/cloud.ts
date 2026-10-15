@@ -25,7 +25,7 @@ export class PhoneCloud {
   private closed = false;
   private creating = false;
   private file: string;
-  constructor(root: string, private changed: () => void, private request = fetch, private now = Date.now) {
+  constructor(root: string, private changed: () => void, private request = fetch, private now = Date.now, private pairingScheme = "profilepilot") {
     this.file = path.join(root, "status-channels.json");
     this.channels = fs.existsSync(this.file) ? z.array(channelSchema).max(32).parse(JSON.parse(fs.readFileSync(this.file, "utf8"))) : [];
     for (const channel of this.channels) channel.url = statusUrl(channel.url);
@@ -46,7 +46,7 @@ export class PhoneCloud {
       const pairToken = randomBytes(32).toString("hex");
       const result = z.object({ expires: z.number() }).parse(await this.call(channel, "create", { pairToken }));
       this.channels.push(channel); this.persist(); this.changed();
-      const uri = `profilepilot://status?${new URLSearchParams({ url: channel.url, id: channel.id, token: pairToken })}`;
+      const uri = `${this.pairingScheme}://status?${new URLSearchParams({ url: channel.url, id: channel.id, token: pairToken })}`;
       return { id: channel.id, uri, qrCode: await QRCode.toDataURL(uri, { width: 300, margin: 1 }), expiresAt: result.expires };
     } finally { this.creating = false; }
   }

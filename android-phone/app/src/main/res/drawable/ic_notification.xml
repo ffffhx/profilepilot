@@ -1,0 +1,9 @@
+<!-- Notification icons must be a transparent silhouette, without the green tile. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="384" android:viewportHeight="384">
+    <group android:translateX="-76" android:translateY="-72">
+        <path android:fillColor="#FFFFFFFF" android:fillType="evenOdd"
+            android:pathData="M190,90 H318 C330,90 338,95 346,101 L405,147 C412,153 416,161 416,170 V186 C416,254 365,309 295,309 H256 C229,309 211,327 211,354 V385 C211,414 187,439 156,439 H150 C132,439 120,427 120,409 V157 C120,119 151,90 190,90 Z M213,156 C201,156 192,168 192,181 V270 C192,277 193,282 194,285 C205,260 228,244 255,244 H295 C324,244 345,222 345,194 V156 Z" />
+    </group>
+</vector>

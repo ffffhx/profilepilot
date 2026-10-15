@@ -6,8 +6,6 @@ import type { PhoneDevice } from "../../shared/phones";
 import { isPhoneRead } from "./actions";
 import { androidSdkRoots } from "./android-paths";
 
-export const COMPANION_PACKAGE = "io.github.profilepilot.phone";
-export const COMPANION_PORT = 18761;
 export interface AdbRunner {
   run(args: string[], timeout?: number, input?: string, signal?: AbortSignal): Promise<string>;
   runBinary?(args: string[], timeout?: number, signal?: AbortSignal): Promise<Buffer>;

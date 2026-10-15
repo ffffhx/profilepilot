@@ -7,7 +7,8 @@ import { promises as fs, watch, type FSWatcher } from "node:fs";
 import { app, BrowserWindow, crashReporter, globalShortcut, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, session, shell, Tray, type IpcMainInvokeEvent, type Rectangle } from "electron";
 import path from "node:path";
 import { IPC_CHANNELS } from "../shared/ipc";
-import { protectWorkspaceShell } from "./workspace-shell";
+import { isWorkspaceShell, protectWorkspaceShell } from "./workspace-shell";
+import { installWorkspaceDiagnostics } from "./workspace-diagnostics";
 import { registerTaskService } from "./tasks/ipc";
 import { registerMobile } from "./mobile/ipc";
 import type { MobileService } from "./mobile/service";
@@ -1230,6 +1231,11 @@ function createAppTray(): void {
           void showMainWindow();
         }
       },
+      { label: "重新加载界面", click: () => {
+        // A macOS user may have closed every window while keeping the app open.
+        if (mainWindow && !mainWindow.isDestroyed()) reloadMainWorkspace();
+        void showMainWindow();
+      } },
       { type: "separator" },
       {
         label: "退出 ProfilePilot",
@@ -1573,11 +1579,23 @@ function createMainWindow(): void {
     mainWindow.loadFile(path.join(__dirname, "../../public/index.html"));
   } else {
     protectWorkspaceShell(mainWindow);
-    mainWindow.loadFile(path.join(__dirname, "../../public/workspace.html"), { query: { workspace: process.env.CPM_START_VIEW || "browser" } });
+    installWorkspaceDiagnostics(mainWindow);
+    reloadMainWorkspace();
   }
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
+}
+
+function reloadMainWorkspace(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (isWorkspaceShell(mainWindow.webContents.getURL())) {
+    mainWindow.webContents.reloadIgnoringCache();
+  } else {
+    void mainWindow.loadFile(path.join(__dirname, "../../public/workspace.html"), {
+      query: { workspace: process.env.CPM_START_VIEW || "browser" }
+    }).catch(error => writeDiagnosticLog("error", "workspace", "workspace.open_failed", "无法打开桌面主界面", { error }));
+  }
 }
 
 async function bifrostSnapshotForRenderer(): Promise<BifrostSnapshot> {
@@ -1589,6 +1607,16 @@ async function bifrostSnapshotForRenderer(): Promise<BifrostSnapshot> {
 }
 
 function registerIpcHandlers(): void {
+  const trustedWorkspace = (event: Electron.IpcMainEvent) => mainWindow && !mainWindow.isDestroyed() &&
+    event.sender === mainWindow.webContents && event.senderFrame === mainWindow.webContents.mainFrame &&
+    isWorkspaceShell(event.senderFrame.url);
+  ipcMain.on(IPC_CHANNELS.reloadWorkspace, event => {
+    if (trustedWorkspace(event)) reloadMainWorkspace();
+  });
+  ipcMain.on(IPC_CHANNELS.workspaceStartupFailure, (event, reason: unknown) => {
+    if (!trustedWorkspace(event) || !["startup-timeout", "script-load", "script-error"].includes(String(reason))) return;
+    writeDiagnosticLog("error", "workspace", "workspace.bootstrap_failed", "桌面主界面启动失败", { reason });
+  });
   ipcMain.on(IPC_CHANNELS.setWindowAppearance, (event, background: unknown, symbols: unknown, guideActive: unknown = false) => {
     if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents ||
         event.senderFrame !== mainWindow.webContents.mainFrame) return;

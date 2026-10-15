@@ -28,7 +28,10 @@ final class ControlOverlay implements AutoCloseable {
     private String displayedSessionId;
     ControlOverlay(ControlService service) { this.service = service; windows = service.getSystemService(WindowManager.class); }
     void update() {
-        boolean show = service.session.sessionId != null && !service.session.phase.equals("stopped") && Settings.canDrawOverlays(service);
+        // Home already provides the live state and pause/end controls. An overlay
+        // there would cover its toolbar; restore it as soon as home leaves view.
+        boolean show = !MainActivity.isHomeVisible() && service.session.sessionId != null
+            && !service.session.phase.equals("stopped") && Settings.canDrawOverlays(service);
         if (!show) { close(); return; }
         if (!java.util.Objects.equals(displayedSessionId, service.session.sessionId)) close();
         if (panel == null) create();

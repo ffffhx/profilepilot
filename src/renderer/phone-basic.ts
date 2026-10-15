@@ -4,7 +4,7 @@ import { taskIcon } from "./task-icons";
 
 const escape = (value: string) => value.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 let currentDialog: HTMLDialogElement | undefined;
-export const PHONE_APP_DOWNLOAD_URL = "https://github.com/ffffhx/profilepilot/releases/latest/download/ProfilePilot-android.apk";
+export const PHONE_APP_DOWNLOAD_URL = "https://github.com/ffffhx/profilepilot/releases/download/android-latest/ProfilePilot-android.apk";
 
 export function phoneModeChoices(device: PhoneDevice | undefined, disabledReason: string): string {
   const disabled = disabledReason ? `disabled title="${escape(disabledReason)}"` : "";

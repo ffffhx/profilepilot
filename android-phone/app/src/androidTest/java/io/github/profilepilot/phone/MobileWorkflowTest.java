@@ -2,323 +2,141 @@ package io.github.profilepilot.phone;
 
 import static org.junit.Assert.*;
 
+import android.app.Dialog;
 import android.app.Instrumentation;
-import android.content.*;
+import android.content.Context;
+import android.content.Intent;
+import android.content.SharedPreferences;
 import android.graphics.Bitmap;
-import android.net.Uri;
+import android.os.Build;
 import android.os.SystemClock;
-import android.view.*;
-import android.view.accessibility.AccessibilityNodeInfo;
-import android.widget.*;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.TextView;
 import androidx.test.core.app.ActivityScenario;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
-import java.io.*;
-import java.util.*;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.lang.reflect.Field;
 import java.util.concurrent.atomic.AtomicBoolean;
-import org.json.*;
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
+/** Run only on a disposable emulator; no Android permission is granted by these tests. */
 @RunWith(AndroidJUnit4.class)
 public class MobileWorkflowTest {
-  private final Instrumentation instrumentation = InstrumentationRegistry.getInstrumentation();
-  private final Context context = instrumentation.getTargetContext();
+  private final Instrumentation instrumentation=InstrumentationRegistry.getInstrumentation();
+  private final Context context=instrumentation.getTargetContext();
+  private static final String TEST_TOKEN="a".repeat(64);
 
-  private interface Check {
-    boolean check() throws Exception;
+  private SharedPreferences pairing() { return context.getSharedPreferences("MainActivity",Context.MODE_PRIVATE); }
+  @Before public void resetFixture() throws Exception {
+    assertTrue("Use a disposable emulator",Build.HARDWARE.contains("ranchu") || Build.HARDWARE.contains("goldfish"));
+    context.stopService(new Intent(context,ControlService.class));
+    context.stopService(new Intent(context,StatusSyncService.class));
+    new ComputerStore(context).statusEnabled(false);
+    pairing().edit().clear().commit();
+    until(() -> ControlService.current==null);
   }
-
+  @After public void stopFixture() { context.stopService(new Intent(context,ControlService.class)); pairing().edit().clear().commit(); }
+  private interface Check { boolean get() throws Exception; }
   private void until(Check check) throws Exception {
-    long until = SystemClock.elapsedRealtime() + 60000;
-    while (SystemClock.elapsedRealtime() < until) {
-      if (check.check()) return;
-      SystemClock.sleep(300);
-    }
-    fail("Timed out waiting for mobile workflow");
+    long deadline=SystemClock.elapsedRealtime()+15000;
+    while (SystemClock.elapsedRealtime()<deadline) { if (check.get()) return; SystemClock.sleep(100); }
+    fail("Timed out waiting for phone home state");
   }
-
-  private View find(View view, String label) {
-    if (view instanceof TextView && ((TextView) view).getText().toString().equals(label))
-      return view;
-    if (label.contentEquals(
-        view.getContentDescription() == null ? "" : view.getContentDescription())) return view;
-    if (view instanceof ViewGroup) {
-      ViewGroup parent = (ViewGroup) view;
-      for (int i = 0; i < parent.getChildCount(); i++) {
-        View result = find(parent.getChildAt(i), label);
-        if (result != null) return result;
-      }
+  private View find(View view,String text) {
+    if (view instanceof TextView label && text.contentEquals(label.getText())) return view;
+    if (view instanceof ViewGroup group) for (int i=0;i<group.getChildCount();i++) {
+      View found=find(group.getChildAt(i),text); if (found!=null) return found;
     }
     return null;
   }
-
-  private EditText edit(View view) {
-    if (view instanceof EditText) return (EditText) view;
-    if (view instanceof ViewGroup) {
-      ViewGroup parent = (ViewGroup) view;
-      for (int i = 0; i < parent.getChildCount(); i++) {
-        EditText result = edit(parent.getChildAt(i));
-        if (result != null) return result;
-      }
-    }
-    return null;
+  private Dialog sheet(MainActivity activity) {
+    try { Field field=MainActivity.class.getDeclaredField("sheet"); field.setAccessible(true); return (Dialog)field.get(activity); }
+    catch (ReflectiveOperationException error) { throw new AssertionError(error); }
   }
-
-  private void click(ActivityScenario<MainActivity> activity, String label) {
-    activity.onActivity(
-        a -> {
-          View view = find(a.getWindow().getDecorView(), label);
-          assertNotNull("Missing control: " + label, view);
-          view.performClick();
-        });
+  private String status(MainActivity activity) { return ((TextView)activity.findViewById(R.id.home_status)).getText().toString(); }
+  private void awaitTitle(ActivityScenario<MainActivity> scenario,String title) throws Exception {
+    until(() -> { AtomicBoolean matched=new AtomicBoolean(); scenario.onActivity(a -> matched.set(title.equals(status(a)))); return matched.get(); });
   }
-
   private void screen(String name) throws Exception {
-    SystemClock.sleep(500);
-    Bitmap bitmap = instrumentation.getUiAutomation().takeScreenshot();
-    assertNotNull(bitmap);
-    File root = new File(context.getFilesDir(), "mobile-verification");
-    assertTrue(root.isDirectory() || root.mkdirs());
-    try (FileOutputStream out = new FileOutputStream(new File(root, name + ".png"))) {
-      bitmap.compress(Bitmap.CompressFormat.PNG, 100, out);
-    }
+    instrumentation.waitForIdleSync(); SystemClock.sleep(300);
+    Bitmap bitmap=instrumentation.getUiAutomation().takeScreenshot(); assertNotNull(bitmap);
+    File root=new File(context.getFilesDir(),"mobile-verification"); assertTrue(root.isDirectory() || root.mkdirs());
+    try (FileOutputStream output=new FileOutputStream(new File(root,name+".png"))) { bitmap.compress(Bitmap.CompressFormat.PNG,100,output); }
     bitmap.recycle();
   }
 
-  @Test
-  public void mobileAndPcShareTasksAndPreserveTheirTrustBoundary() throws Exception {
-    String uri = InstrumentationRegistry.getArguments().getString("pairing");
-    assertNotNull("Pass the isolated fixture pairing URI", uri);
-    JSONObject pair = RemoteClient.parsePair(uri);
-    String pc = pair.getString("id");
-    ComputerStore store = new ComputerStore(context);
-    Intent intent =
-        new Intent(context, MainActivity.class)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-    try (ActivityScenario<MainActivity> activity = ActivityScenario.launch(intent)) {
-      instrumentation.waitForIdleSync();
-      activity.onActivity(a -> {
-        View root = a.getWindow().getDecorView();
-        for (String label : new String[] {"电脑连接", "开发者选项", "USB 调试", "Wi-Fi 无线调试", "屏幕解锁", "悬浮窗 · 顶部胶囊", "控制状态通知", "无障碍服务"}) {
-          assertNotNull("Setup status must be directly on home: " + label, find(root, label));
-        }
-        assertNotNull("Pairing management remains available", find(root, "配对与连接管理"));
-        assertNull("Opening home must not start a control session", ControlService.current);
+  @Test public void homeKeepsBothDebuggingRoutesAndOnlyHomeNavigation() throws Exception {
+    try (ActivityScenario<MainActivity> scenario=ActivityScenario.launch(MainActivity.class)) {
+      scenario.onActivity(a -> {
+        View root=a.getWindow().getDecorView();
+        for (String removed:new String[]{"任务","Agent","设备","我的","连接电脑"}) assertNull(removed,find(root,removed));
+        assertNotNull(a.findViewById(R.id.home_usb)); assertNotNull(a.findViewById(R.id.home_wifi));
+        assertNotNull(find(root,"权限准备"));
+        assertFalse(a.findViewById(R.id.home_pause).isShown());
+        assertFalse(a.findViewById(R.id.home_stop).isShown());
       });
       screen("android-home");
-      Instrumentation.ActivityMonitor permissions = instrumentation.addMonitor(
-          PermissionsActivity.class.getName(), null, false);
-      try {
-        click(activity, "配对与连接管理");
-        android.app.Activity opened = instrumentation.waitForMonitorWithTimeout(permissions, 5000);
-        assertNotNull("Home must open local authorization directly", opened);
-        screen("android-permissions");
-        instrumentation.runOnMainSync(() -> {
-          View back = find(opened.getWindow().getDecorView(), "返回工作区");
-          assertNotNull("Authorization page must provide in-app back navigation", back);
-          back.performClick();
-        });
-        instrumentation.waitForIdleSync();
-      } finally {
-        instrumentation.removeMonitor(permissions);
-      }
-      click(activity, "设备");
-      click(activity, "粘贴配对链接");
-      until(() -> {
-        AccessibilityNodeInfo root = instrumentation.getUiAutomation().getRootInActiveWindow();
-        AccessibilityNodeInfo edit = accessibleEdit(root);
-        if (edit == null) return false;
-        android.os.Bundle arguments = new android.os.Bundle();
-        arguments.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, uri);
-        return edit.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments);
+      scenario.onActivity(a -> {
+        a.findViewById(R.id.home_usb).performClick();
+        assertNotNull(find(sheet(a).getWindow().getDecorView(),"USB 调试"));
+        sheet(a).findViewById(R.id.sheet_close).performClick();
+        a.findViewById(R.id.home_wifi).performClick();
+        assertNotNull(find(sheet(a).getWindow().getDecorView(),"Wi-Fi 无线调试"));
+        assertFalse(pairing().contains("token"));
+        assertNull(ControlService.current);
       });
-      dialogClick("继续");
-      until(
-          () -> {
-            AccessibilityNodeInfo root = instrumentation.getUiAutomation().getRootInActiveWindow();
-            if (root == null) return false;
-            for (AccessibilityNodeInfo node : root.findAccessibilityNodeInfosByText("连接"))
-              if ("连接".contentEquals(node.getText()) && node.isClickable()) {
-                node.performAction(AccessibilityNodeInfo.ACTION_CLICK);
-                return true;
-              }
-            return false;
-          });
-      until(() -> store.find(pc) != null);
-      JSONObject computer = store.find(pc);
-      assertEquals(
-          pc,
-          RemoteClient.read(computer, RemoteClient.object("action", "sync"))
-              .getString("computerId"));
-      JSONObject wrong = new JSONObject(computer.toString()).put("fingerprint", "0".repeat(64));
-      try {
-        RemoteClient.read(wrong, RemoteClient.object("action", "sync"));
-        fail("Wrong certificate pin accepted");
-      } catch (javax.net.ssl.SSLException expected) {
-        /* expected */
-      }
-      String raw =
-          context
-              .getSharedPreferences("mobile-workspace", Context.MODE_PRIVATE)
-              .getString("computers", "");
-      assertFalse("Token must be encrypted", raw.contains(computer.getString("token")));
-      until(
-          () -> {
-            AtomicBoolean ready = new AtomicBoolean();
-            activity.onActivity(
-                a -> {
-                  View root = a.getWindow().getDecorView();
-                  ready.set(contains(root, "已连接"));
-                });
-            return ready.get();
-          });
-      screen("android-agent");
-      String prompt = "Android native UI task " + System.currentTimeMillis();
-      activity.onActivity(
-          a -> {
-            EditText field = edit(a.getWindow().getDecorView());
-            assertNotNull(field);
-            field.setText(prompt);
-          });
-      click(activity, "任务");
-      click(activity, "首页");
-      click(activity, "Agent");
-      activity.onActivity(
-          a -> assertEquals(prompt, edit(a.getWindow().getDecorView()).getText().toString()));
-      click(activity, "发送到电脑  ↗");
-      final String[] taskId = {null};
-      until(
-          () -> {
-            JSONArray tasks =
-                RemoteClient.read(computer, RemoteClient.object("action", "task.list"))
-                    .getJSONArray("tasks");
-            for (int i = 0; i < tasks.length(); i++) {
-              JSONObject task = tasks.getJSONObject(i);
-              if (task.getString("title").contains(prompt)) {
-                taskId[0] = task.getString("id");
-                return true;
-              }
-            }
-            return false;
-          });
-      until(
-          () -> {
-            AtomicBoolean ready = new AtomicBoolean();
-            activity.onActivity(a -> ready.set(find(a.getWindow().getDecorView(), "暂停") != null));
-            return ready.get();
-          });
-      click(activity, "暂停");
-      until(
-          () ->
-              RemoteClient.read(
-                      computer, RemoteClient.object("action", "task.get", "id", taskId[0]))
-                  .getJSONObject("task")
-                  .getString("status")
-                  .equals("paused"));
-      until(
-          () -> {
-            AtomicBoolean ready = new AtomicBoolean();
-            activity.onActivity(a -> ready.set(find(a.getWindow().getDecorView(), "继续") != null));
-            return ready.get();
-          });
-      screen("android-task-paused");
-      click(activity, "继续");
-      until(
-          () ->
-              RemoteClient.read(
-                      computer, RemoteClient.object("action", "task.get", "id", taskId[0]))
-                  .getJSONObject("task")
-                  .getString("status")
-                  .equals("queued"));
-      JSONObject create =
-          RemoteClient.object(
-              "action",
-              "task.create",
-              "profile",
-              "isolated:android",
-              "input",
-              RemoteClient.object("prompt", "Lost response replay test"));
-      JSONObject envelope = RemoteClient.envelope(create);
-      store.pending(pc, envelope);
-      JSONObject first = RemoteClient.post(computer, "/v1/request", envelope, true);
-      JSONObject retry = RemoteClient.mutation(store, computer, null, true);
-      assertEquals(
-          first.getJSONObject("task").getString("id"), retry.getJSONObject("task").getString("id"));
-      assertNull(store.pending(pc));
-      click(activity, "任务");
-      screen("android-tasks");
-      click(activity, "设备");
-      screen("android-devices");
-      click(activity, "我的");
-      screen("android-settings");
-      if (android.os.Build.VERSION.SDK_INT >= 33) instrumentation.getUiAutomation().grantRuntimePermission(context.getPackageName(), android.Manifest.permission.POST_NOTIFICATIONS);
-      click(activity, "开启后台任务通知");
-      until(() -> RemoteSyncService.running && context.getSystemService(android.app.NotificationManager.class).getActiveNotifications().length > 1);
-      click(activity, "停止后台任务通知");
-      JSONArray tasks =
-          RemoteClient.read(computer, RemoteClient.object("action", "task.list"))
-              .getJSONArray("tasks");
-      JSONObject question = null;
-      for (int i = 0; i < tasks.length(); i++) {
-        JSONObject item =
-            RemoteClient.read(
-                    computer,
-                    RemoteClient.object(
-                        "action", "task.get", "id", tasks.getJSONObject(i).getString("id")))
-                .getJSONObject("task");
-        if (item.has("pending")) question = item;
-      }
-      assertNotNull(question);
-      String questionId = question.getString("id");
-      click(activity, "任务");
-      click(activity, "打开任务：" + question.getString("title"));
-      until(() -> { AtomicBoolean ready = new AtomicBoolean(); activity.onActivity(a -> ready.set(find(a.getWindow().getDecorView(), "提交回答") != null)); return ready.get(); });
-      screen("android-confirmation");
-      activity.onActivity(a -> edit(a.getWindow().getDecorView()).setText("Markdown"));
-      click(activity, "提交回答");
-      until(() -> !RemoteClient.read(computer, RemoteClient.object("action", "task.get", "id", questionId)).getJSONObject("task").has("pending"));
-      RemoteClient.mutation(
-          store, computer, RemoteClient.object("action", "device.disconnect"), false);
-      try {
-        RemoteClient.read(computer, RemoteClient.object("action", "sync"));
-        fail("Revoked credential accepted");
-      } catch (RemoteClient.ApiError expected) {
-        assertEquals("MOBILE_UNAUTHORIZED", expected.code);
-      }
-      store.remove(pc);
+      screen("android-wifi");
     }
   }
 
-  private boolean contains(View view, String text) {
-    if (view instanceof TextView && ((TextView) view).getText().toString().contains(text))
-      return true;
-    if (view instanceof ViewGroup) {
-      ViewGroup parent = (ViewGroup) view;
-      for (int i = 0; i < parent.getChildCount(); i++)
-        if (contains(parent.getChildAt(i), text)) return true;
+  @Test public void pairedComputerNeedsLiveEvidenceAndSettingsDoNotSwitchTransport() throws Exception {
+    pairing().edit().putString("token",TEST_TOKEN).putString("computer","Test computer").commit();
+    try (ActivityScenario<MainActivity> scenario=ActivityScenario.launch(MainActivity.class)) {
+      until(() -> ControlService.current!=null);
+      scenario.onActivity(a -> {
+        assertNotEquals("电脑已连接",status(a));
+        assertNull(ControlService.current.session.sessionId);
+        ControlService.current.connection.heartbeat("usb");
+      });
+      awaitTitle(scenario,"电脑已连接");
+      scenario.onActivity(a -> {
+        a.findViewById(R.id.home_wifi).performClick();
+        assertTrue(ControlService.current.connection.connected("usb"));
+        assertFalse(ControlService.current.connection.connected("wifi"));
+        assertNull(ControlService.current.session.sessionId);
+        sheet(a).findViewById(R.id.sheet_close).performClick();
+      });
+      screen("android-connected");
+      awaitTitle(scenario,"电脑连接中断");
+      screen("android-disconnected");
+      scenario.onActivity(a -> ControlService.current.connection.heartbeat("usb"));
+      awaitTitle(scenario,"电脑已连接");
+      scenario.onActivity(a -> { assertNull(ControlService.current.session.sessionId); assertFalse(a.findViewById(R.id.home_pause).isShown()); });
     }
-    return false;
   }
 
-  private AccessibilityNodeInfo accessibleEdit(AccessibilityNodeInfo node) {
-    if (node == null) return null;
-    if ("android.widget.EditText".contentEquals(node.getClassName())) return node;
-    for (int i = 0; i < node.getChildCount(); i++) {
-      AccessibilityNodeInfo result = accessibleEdit(node.getChild(i));
-      if (result != null) return result;
+  @Test public void initialPairingRequiresApprovalAndOldTaskIntentsStayOnHome() throws Exception {
+    Intent request=new Intent(context,MainActivity.class).putExtra("token",TEST_TOKEN).putExtra("computer","New computer");
+    try (ActivityScenario<MainActivity> scenario=ActivityScenario.launch(request)) {
+      scenario.onActivity(a -> { assertFalse(pairing().contains("token")); assertNotNull(sheet(a)); });
+      scenario.recreate();
+      scenario.onActivity(a -> {
+        assertFalse(pairing().contains("token"));
+        assertNotNull(find(sheet(a).getWindow().getDecorView(),"允许此电脑"));
+      });
+      screen("android-authorization");
+      scenario.onActivity(a -> {
+        find(sheet(a).getWindow().getDecorView(),"暂不允许").performClick();
+        assertFalse(pairing().contains("token")); assertNull(ControlService.current);
+        a.onNewIntent(new Intent(context,MainActivity.class).putExtra("taskId","old-task").putExtra("computerId","old-computer"));
+        assertNotNull(a.findViewById(R.id.home_wifi)); assertNull(find(a.getWindow().getDecorView(),"任务"));
+      });
     }
-    return null;
-  }
-
-  private void dialogClick(String label) throws Exception {
-    until(() -> {
-      AccessibilityNodeInfo root = instrumentation.getUiAutomation().getRootInActiveWindow();
-      if (root == null) return false;
-      for (AccessibilityNodeInfo node : root.findAccessibilityNodeInfosByText(label))
-        if (label.contentEquals(node.getText()) && node.isClickable())
-          return node.performAction(AccessibilityNodeInfo.ACTION_CLICK);
-      return false;
-    });
   }
 }

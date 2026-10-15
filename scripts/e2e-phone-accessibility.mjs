@@ -11,7 +11,7 @@ const sdk = process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT || (process
   : process.platform === 'darwin' ? path.join(os.homedir(), 'Library', 'Android', 'sdk') : path.join(os.homedir(), 'Android', 'Sdk'));
 const adb = path.join(sdk, 'platform-tools', process.platform === 'win32' ? 'adb.exe' : 'adb');
 const output = path.resolve(process.argv[3] || 'artifacts/phone-accessibility-regression');
-const component = 'io.github.profilepilot.phone/io.github.profilepilot.phone.PhoneAccessibility';
+const component = 'io.github.profilepilot.phone.debug/io.github.profilepilot.phone.PhoneAccessibility';
 await mkdir(output, { recursive: true });
 async function run(args, onOutput) {
   return new Promise((resolve, reject) => {
@@ -44,7 +44,7 @@ try {
   await run(['install', '-r', path.resolve('dist/android/profilepilot-phone.apk')]);
   await run(['install', '-r', path.resolve('android-phone/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk')]);
   logs = await run(['shell', 'am', 'instrument', '-w', '-r', '-e', 'accessibilityServiceTimeoutMs', '60000', '-e', 'class',
-    'io.github.profilepilot.phone.AccessibilitySnapshotTest', 'io.github.profilepilot.phone.test/androidx.test.runner.AndroidJUnitRunner'], text => {
+    'io.github.profilepilot.phone.AccessibilitySnapshotTest', 'io.github.profilepilot.phone.debug.test/androidx.test.runner.AndroidJUnitRunner'], text => {
     logs = text;
     if (!rebound && text.includes('BENCHMARK_ACCESSIBILITY_WAITING')) {
       rebound = true;
@@ -52,7 +52,7 @@ try {
       // framework's crashed set. Rebind only after instrumentation owns the new
       // process and has connected UiAutomation without suppressing services.
       rebindPromise = (async () => {
-        const otherServices = previousServices === 'null' ? [] : previousServices.split(':').filter(x => x && !x.startsWith('io.github.profilepilot.phone/'));
+        const otherServices = previousServices === 'null' ? [] : previousServices.split(':').filter(x => x && !x.startsWith('io.github.profilepilot.phone.debug/'));
         await restore('enabled_accessibility_services', otherServices.join(':'));
         await restore('enabled_accessibility_services', [...otherServices, component].join(':'));
         await restore('accessibility_enabled', '1');

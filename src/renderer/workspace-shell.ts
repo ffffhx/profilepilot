@@ -157,3 +157,5 @@ onExperimentalFeaturesChanged(() => {
   if (!experimentalAgentEnabled() && requested === "agent") { guide.close(); navigate(workspacePages.browser.file); }
 });
 navigate(workspacePages[requested].file);
+document.documentElement.dataset.workspaceShellReady = "true";
+window.dispatchEvent(new Event("workspace-shell-ready"));

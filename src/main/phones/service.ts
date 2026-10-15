@@ -1,13 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { PHONE_PROTOCOL, type PhoneDevice, type PhonesSnapshot, type PhoneSessionState, type PhoneAction, type PhoneActionInput, type PhoneActionResult } from "../../shared/phones";
 import { groupPhoneDevices } from "../../shared/phone-devices";
 import type { PhoneSetting } from "../../shared/phones";
 import type { PhoneScreenFrame } from "../../shared/phones";
-import { Adb, COMPANION_PACKAGE, COMPANION_PORT, parseAdbDevices, deviceShell, phoneRequest, validateDeviceId, type AdbRunner } from "./adb";
+import { Adb, parseAdbDevices, deviceShell, phoneRequest, validateDeviceId, type AdbRunner } from "./adb";
+import { readCompanion, verifyCompanionApk } from "./companion";
 import { phoneActionSchema, isPhoneRead } from "./actions";
 import { discoverWireless, pairWireless, connectWireless, wirelessCandidates, probeWireless } from "./wireless";
 import { readDebugSettings, type DebugSettings } from "./readiness";
@@ -49,6 +50,7 @@ export interface PhonesOptions {
   onChanged?: (snapshot: PhonesSnapshot) => void;
 }
 export class PhonesService {
+  private companion: ReturnType<typeof readCompanion>;
   private devices = new Map<string, PhoneDevice>();
   private routes = new Map<string, Route>();
   private debugReadings = new Map<string, { route: Route; at: number; value: DebugSettings }>();
@@ -86,6 +88,8 @@ export class PhonesService {
   private basicStarting = false;
   readonly computer: string;
   constructor(private options: PhonesOptions) {
+    this.companion = readCompanion(options.apkPath);
+    if (this.companion.variant === "debug") options = this.options = { ...options, root: path.join(options.root, "development") };
     this.adb = options.adb || new Adb(); this.request = options.request || phoneRequest; this.computer = (options.computer || os.hostname()).slice(0, 120);
     this.basic = new BasicPhoneControl(this.adb, this.computer, () => this.changed(), () => this.now());
     this.screenCamera = new ScreenCamera({ adb: this.adb, root: options.root,
@@ -94,7 +98,7 @@ export class PhonesService {
     this.emulators = options.emulators || new AndroidEmulators();
     this.androidSetup = options.androidSetup || new AndroidSetup();
     fs.mkdirSync(options.root, { recursive: true });
-    this.cloud = new PhoneCloud(options.root, () => this.changed());
+    this.cloud = new PhoneCloud(options.root, () => this.changed(), undefined, undefined, this.companion.pairingScheme);
     const file = path.join(options.root, "devices.json");
     this.saved = fs.existsSync(file) ? z.record(z.string(), z.object({ statusDeviceId: z.string().uuid().optional(), token: z.string().regex(/^[a-f0-9]{64}$/), name: z.string().max(80).optional(), installedHash: z.string().regex(/^[a-f0-9]{64}$/).optional(), hardwareId: z.string().max(200).optional(), model: z.string().max(200).optional(), transport: z.enum(["usb", "wifi", "emulator"]).optional() })).parse(JSON.parse(fs.readFileSync(file, "utf8"))) : {};
     // Remember paired devices across app restarts, but never persist permissions,
@@ -132,7 +136,8 @@ export class PhonesService {
       return structuredClone({ ...device, screenCamera: this.screenCamera.snapshot(device.id), basic: this.basic.state(device.id), hardwareId, cloud: identity ? cloud.find(c => c.cloud?.report?.deviceId === identity)?.cloud : undefined });
     });
     devices.push(...cloud.filter(c => !c.cloud?.report || !matched.has(c.cloud.report.deviceId)));
-    return { devices, adbAvailable: this.adbAvailable, error: this.error, computer: this.computer };
+    return { devices, adbAvailable: this.adbAvailable, error: this.error, computer: this.computer,
+      companionApp: { packageName: this.companion.packageName, name: this.companion.name, variant: this.companion.variant } };
   }
   cloudPair(url?: string) { return this.cloud.pair(url); }
   cloudForget(id: string) { return this.cloud.forget(id); }
@@ -200,6 +205,7 @@ export class PhonesService {
       let found = await find();
       // Reuse the exact running AVD without touching its app or control session.
       if (!found) await this.emulators.launch(name);
+      else await this.emulators.ensureVisible(name, found.id);
       const deadline = Date.now() + 90000;
       while (!found || found.connection !== "device") {
         if (this.closed) throw new Error("ProfilePilot 正在关闭，已停止等待模拟器连接。");
@@ -277,7 +283,7 @@ export class PhonesService {
     if (device.appInstallation && this.now() - device.appInstallation.checkedAt < 30000) return;
     let status: "installed" | "missing" | "unknown" = "unknown";
     try {
-      const output = (await this.adb.run(["-s", device.id, "shell", deviceShell(["pm", "path", COMPANION_PACKAGE])], 3000)).trim();
+      const output = (await this.adb.run(["-s", device.id, "shell", deviceShell(["pm", "path", this.companion.packageName])], 3000)).trim();
       if (/^package:\S+/m.test(output)) status = "installed";
       else if (!output) status = "missing";
     } catch { /* A failed query does not mean the App is missing. */ }
@@ -320,7 +326,7 @@ export class PhonesService {
   }
   private async forward(id: string): Promise<void> {
     const token = this.saved[id]?.token; if (!token) throw new Error("请先连接手机配套 App。");
-    const port = Number(await this.adb.run(["-s", id, "forward", "tcp:0", `tcp:${COMPANION_PORT}`]));
+    const port = Number(await this.adb.run(["-s", id, "forward", "tcp:0", `tcp:${this.companion.port}`]));
     if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error("ADB 未返回有效的手机连接端口。");
     this.routes.set(id, { port, token });
   }
@@ -516,8 +522,8 @@ export class PhonesService {
       }
       if (!fs.existsSync(this.options.apkPath)) throw new Error("缺少手机配套安装包，请先运行 npm run build:phone。");
       const apk = fs.readFileSync(this.options.apkPath);
-      const installedHash = createHash("sha256").update(apk).digest("hex");
-      const installed = await this.adb.run(["-s", id, "shell", deviceShell(["pm", "path", COMPANION_PACKAGE])]).catch(() => "");
+      const installedHash = verifyCompanionApk(this.options.apkPath, apk, this.companion.packageName);
+      const installed = await this.adb.run(["-s", id, "shell", deviceShell(["pm", "path", this.companion.packageName])]).catch(() => "");
       if (!installed.startsWith("package:") || this.saved[id]?.installedHash !== installedHash) {
         // ADB cannot read Electron's virtual app.asar path on either OS.
         // Materialize the exact bundled bytes in the app's private data folder.
@@ -529,7 +535,7 @@ export class PhonesService {
         ...(/^[a-zA-Z0-9_-]{1,200}$/.test(hardwareId) && !["unknown", "null"].includes(hardwareId) ? { hardwareId } : {}) }; this.persist();
       this.device(id).appInstallation = { status: "installed", checkedAt: this.now() };
       this.pairing.add(id);
-      await this.adb.run(["-s", id, "shell", deviceShell(["am", "start", "-f", "0x24000000", "-n", `${COMPANION_PACKAGE}/.MainActivity`, "--es", "token", this.saved[id].token, "--es", "computer", this.computer])]);
+      await this.adb.run(["-s", id, "shell", deviceShell(["am", "start", "-f", "0x24000000", "-n", this.companion.mainActivity, "--es", "token", this.saved[id].token, "--es", "computer", this.computer])]);
       if (!this.routes.has(id)) await this.forward(id);
       this.device(id).companion = "pairing";
       try { await this.rpc(id, "sync"); } catch { /* phone must approve first */ }
@@ -645,9 +651,9 @@ export class PhonesService {
       const { state } = await this.rpc(id, "sync");
       if (!["idle", "stopped"].includes(state.phase)) throw new Error("请先结束当前手机任务，再打开设置。");
       const options: Record<PhoneSetting, string[]> = {
-        accessibility: ["-a", "android.settings.ACCESSIBILITY_SETTINGS", "--es", ":settings:fragment_args_key", `${COMPANION_PACKAGE}/.PhoneAccessibility`],
-        overlay: ["-a", "android.settings.action.MANAGE_OVERLAY_PERMISSION", "-d", `package:${COMPANION_PACKAGE}`],
-        notifications: ["-a", "android.settings.APP_NOTIFICATION_SETTINGS", "--es", "android.provider.extra.APP_PACKAGE", COMPANION_PACKAGE],
+        accessibility: ["-a", "android.settings.ACCESSIBILITY_SETTINGS", "--es", ":settings:fragment_args_key", this.companion.accessibilityService],
+        overlay: ["-a", "android.settings.action.MANAGE_OVERLAY_PERMISSION", "-d", `package:${this.companion.packageName}`],
+        notifications: ["-a", "android.settings.APP_NOTIFICATION_SETTINGS", "--es", "android.provider.extra.APP_PACKAGE", this.companion.packageName],
         developerOptions: ["-a", "android.settings.APPLICATION_DEVELOPMENT_SETTINGS"],
         usbDebugging: ["-a", "android.settings.APPLICATION_DEVELOPMENT_SETTINGS", "--es", ":settings:fragment_args_key", "enable_adb"],
         wirelessDebugging: ["-a", "android.settings.APPLICATION_DEVELOPMENT_SETTINGS", "--es", ":settings:fragment_args_key", "toggle_adb_wireless"]

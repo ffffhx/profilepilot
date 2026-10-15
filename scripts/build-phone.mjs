@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, copyFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { phoneBuildMetadata } from './phone-build-metadata.mjs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -25,6 +26,10 @@ await new Promise((resolve, reject) => {
   child.on('error', reject); child.on('exit', code => code === 0 ? resolve() : reject(new Error(`Android 构建失败 (${code})`)));
 });
 const output = path.join(root, 'dist', 'android'); mkdirSync(output, { recursive: true });
-copyFileSync(path.join(root, 'android-phone', 'app', 'build', 'outputs', 'apk', variant, `app-${variant}.apk`), path.join(output, 'profilepilot-phone.apk'));
+const buildOutput = path.join(root, 'android-phone', 'app', 'build', 'outputs', 'apk', variant);
+const apk = readFileSync(path.join(buildOutput, `app-${variant}.apk`));
+const metadata = phoneBuildMetadata(JSON.parse(readFileSync(path.join(buildOutput, 'output-metadata.json'), 'utf8')), apk);
+writeFileSync(path.join(output, 'profilepilot-phone.apk'), apk);
+writeFileSync(path.join(output, 'profilepilot-phone.apk.json'), JSON.stringify(metadata, null, 2) + '\n');
 console.log(`手机配套 App（${variant}）已生成：dist/android/profilepilot-phone.apk`);
 await import('./build-screen-camera.mjs');

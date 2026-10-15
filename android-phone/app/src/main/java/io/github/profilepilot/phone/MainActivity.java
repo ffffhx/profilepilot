@@ -1,1576 +1,550 @@
 package io.github.profilepilot.phone;
 
 import android.Manifest;
-import android.app.*;
-import android.content.*;
+import android.app.AlertDialog;
+import android.app.Dialog;
+import android.app.NotificationManager;
+import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.RippleDrawable;
 import android.net.Uri;
-import android.os.*;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
-import android.text.*;
-import android.view.*;
-import android.view.inputmethod.InputMethodManager;
-import android.widget.*;
+import android.view.Gravity;
+import android.view.View;
+import android.view.Window;
+import android.view.WindowInsets;
+import android.view.WindowManager;
+import android.view.accessibility.AccessibilityNodeInfo;
+import android.widget.Button;
+import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.TextView;
+import android.widget.Toast;
 import androidx.activity.ComponentActivity;
-import androidx.activity.OnBackPressedCallback;
 import androidx.activity.result.ActivityResultLauncher;
-import androidx.activity.result.contract.ActivityResultContracts;
 import com.journeyapps.barcodescanner.ScanContract;
 import com.journeyapps.barcodescanner.ScanOptions;
-import java.io.OutputStream;
-import java.util.*;
-import java.util.concurrent.*;
-import org.json.*;
+import java.util.Objects;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import org.json.JSONObject;
 
-/** Native mobile workbench. The paired computer remains the task authority. */
+/** One home for real connection status, permission preparation and local control authority. */
 public final class MainActivity extends ComponentActivity {
-  private static final int BLUE = 0xff3976ed,
-      INK = 0xff233047,
-      MUTED = 0xff718097,
-      BG = 0xfff6f8fc,
-      LINE = 0xffe5ebf4;
-  private final Handler main = new Handler(Looper.getMainLooper());
-  private final ExecutorService io = Executors.newSingleThreadExecutor();
+  private static int visibleHomes;
+  static boolean isHomeVisible() { return visibleHomes>0; }
+  private static final int INK=0xff1c2926, MUTED=0xff738178, BG=0xfff7f9f7,
+      LINE=0xffe5ece7, GREEN=0xff11775d, MINT=0xffedf7f1,
+      BLUE=0xff356cd7, SOFT_BLUE=0xffeef3ff, AMBER=0xff956423, RED=0xffb64646;
+  private final Handler main=new Handler(Looper.getMainLooper());
+  private final ExecutorService io=Executors.newSingleThreadExecutor();
   private ComputerStore store;
-  private JSONObject computer, sync = new JSONObject(), detail;
-  private JSONArray taskList = new JSONArray();
-  private final LinkedHashMap<String, JSONObject> events = new LinkedHashMap<>();
-  private LinearLayout page, body, taskCards, eventCards, decisionCard, resultCard, detailActions;
-  private TextView connection, notice, taskHeading, streamText, modelInfo;
-  private TextView localStatus, localComputer, localReadiness, localSession, localPause, localStop, localServiceButton;
-  private final TextView[] localChecks = new TextView[8];
-  private final View[] localCheckRows = new View[8];
-  private static final String[] LOCAL_CHECK_NAMES = {"电脑连接", "开发者选项", "USB 调试", "Wi-Fi 无线调试", "屏幕解锁", "悬浮窗 · 顶部胶囊", "控制状态通知", "无障碍服务"};
-  private EditText prompt, followup;
-  private Spinner profiles, mode;
-  private String tab = "首页",
-      taskId = "",
-      filter = "全部",
-      query = "",
-      lastDecision = "",
-      lastResult = "",
-      lastEvents = "",
-      lastTaskCards = "",
-      sharedText = "";
-  private int cursor = 0, revision = 0, totalTasks = 0;
-  private boolean polling = false, hasMore = false, busy = false;
-  private byte[] download;
-  private final Runnable localTick = new Runnable() {
-    @Override public void run() {
-      updateLocalControl();
-      main.postDelayed(this, 1000);
-    }
+  private LinearLayout hero, computerRow, sessionActions, permissionRows, permissionSummary;
+  private TextView title, description, badge, computerName, computerTransport, pause, stop,
+      permissionCount, permissionSummaryAction, permissionHint, reassurance, serviceError;
+  private HomeIcon computerGraphic, phoneGraphic, linkGraphic;
+  private final SettingRow[] permissions=new SettingRow[3];
+  private SettingRow usb, wifi;
+  private boolean permissionsExpanded, seenConnected;
+  private int lastPermissionCount=-1;
+  private PhoneHomeState lastState;
+  private Dialog sheet;
+  private String pendingToken, pendingComputer;
+  private final Runnable tick=new Runnable() {
+    @Override public void run() { updateHome(); main.postDelayed(this,1000); }
   };
-  private final Runnable tick =
-      new Runnable() {
-        public void run() {
-          refresh(false);
-          main.postDelayed(this, 4000);
-        }
-      };
-  private final ActivityResultLauncher<ScanOptions> scanner =
-      registerForActivityResult(
-          new ScanContract(),
-          result -> {
-            if (result.getContents() != null) pair(result.getContents());
-          });
-  private final ActivityResultLauncher<String> saveFile =
-      registerForActivityResult(
-          new ActivityResultContracts.CreateDocument("application/octet-stream"),
-          uri -> {
-            if (uri != null && download != null) {
-              byte[] data = download;
-              io.execute(
-                  () -> {
-                    try (OutputStream out = getContentResolver().openOutputStream(uri)) {
-                      if (out == null) throw new IllegalStateException("无法保存文件");
-                      out.write(data);
-                      main.post(() -> message("文件已保存"));
-                    } catch (Exception error) {
-                      main.post(() -> message(error.getMessage()));
-                    }
-                  });
-            }
-            download = null;
-          });
+  private final ActivityResultLauncher<ScanOptions> scanner=registerForActivityResult(
+      new ScanContract(), result -> { if (result.getContents()!=null) pairStatus(result.getContents()); });
 
-  @Override
-  public void onCreate(Bundle state) {
+  @Override public void onCreate(Bundle state) {
     super.onCreate(state);
-    store = new ComputerStore(this);
-    getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
-      @Override public void handleOnBackPressed() {
-        if (!taskId.isEmpty()) switchTab("任务");
-        else if (!tab.equals("首页")) switchTab("首页");
-        else { setEnabled(false); getOnBackPressedDispatcher().onBackPressed(); setEnabled(true); }
-      }
-    });
-    getWindow().setStatusBarColor(BG);
-    getWindow().setNavigationBarColor(Color.WHITE);
-    getWindow()
-        .getDecorView()
-        .setSystemUiVisibility(
-            View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
-    if (state != null) {
-      tab = state.getString("tab", "首页");
-      taskId = state.getString("taskId", "");
+    store=new ComputerStore(this);
+    if (state!=null) {
+      permissionsExpanded=state.getBoolean("permissionsExpanded");
+      lastPermissionCount=state.getInt("lastPermissionCount",-1);
+      seenConnected=state.getBoolean("seenConnected");
+      pendingToken=state.getString("pendingToken"); pendingComputer=state.getString("pendingComputer");
     }
-    loadComputer();
-    consumeIntent();
-    render();
+    getWindow().setStatusBarColor(BG); getWindow().setNavigationBarColor(BG);
+    getWindow().getDecorView().setSystemUiVisibility(
+        View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+    // Retire task notifications without touching control or status-sync channels or saved credentials.
+    store.notifications(false);
+    NotificationManager notifications=getSystemService(NotificationManager.class);
+    notifications.deleteNotificationChannel("mobile-tasks");
+    notifications.deleteNotificationChannel("mobile-connection");
+    renderHome(); consumeIntent();
+    if (pendingToken!=null && sheet==null) showPairing();
   }
 
-  @Override
-  protected void onNewIntent(Intent intent) {
-    super.onNewIntent(intent);
-    setIntent(intent);
-    consumeIntent();
-    render();
-    refresh(true);
+  @Override protected void onNewIntent(Intent intent) {
+    super.onNewIntent(intent); setIntent(intent); consumeIntent(); updateHome();
   }
+
+  private SharedPreferences pairing() { return getSharedPreferences("MainActivity",MODE_PRIVATE); }
 
   private void consumeIntent() {
-    Intent intent = getIntent();
-    String token = intent.getStringExtra("token");
-    if (token != null) {
-      tab = "首页";
-      taskId = "";
-      Intent local =
-          new Intent(this, PermissionsActivity.class)
-              .putExtra("token", token)
-              .putExtra("computer", intent.getStringExtra("computer"));
-      intent.removeExtra("token");
-      intent.removeExtra("computer");
-      startActivity(local);
+    Intent intent=getIntent();
+    String token=intent.getStringExtra("token"), computer=intent.getStringExtra("computer");
+    intent.removeExtra("token"); intent.removeExtra("computer");
+    if (token!=null && token.matches("[a-f0-9]{64}") && computer!=null
+        && !computer.isBlank() && computer.length()<=120) {
+      if (token.equals(pairing().getString("token",""))
+          && computer.equals(pairing().getString("computer",""))) {
+        pendingToken=null; pendingComputer=null; dismissSheet(); ensureControlService();
+      } else if (!token.equals(pendingToken) || !computer.equals(pendingComputer)
+          || sheet==null || !sheet.isShowing()) {
+        pendingToken=token; pendingComputer=computer; showPairing();
+      }
     }
-    String pc = intent.getStringExtra("computerId");
-    if (pc != null) {
-      store.select(pc);
-      loadComputer();
-      taskId = intent.getStringExtra("taskId");
-      if (taskId == null) taskId = "";
-      tab = "任务";
-      intent.removeExtra("computerId");
-      intent.removeExtra("taskId");
-    }
+    // Old notifications and explicit share intents can outlive an upgrade. They never open a task.
+    intent.removeExtra("computerId"); intent.removeExtra("taskId");
     if (Intent.ACTION_SEND.equals(intent.getAction())) {
-      String value = intent.getStringExtra(Intent.EXTRA_TEXT);
-      if (value != null) {
-        sharedText = value.substring(0, Math.min(value.length(), 30000));
-        tab = "Agent";
-        taskId = "";
-      }
-      intent.setAction(null);
-      intent.removeExtra(Intent.EXTRA_TEXT);
+      intent.setAction(null); intent.removeExtra(Intent.EXTRA_TEXT);
+      message("请在电脑端使用任务功能。");
     }
-    Uri data = intent.getData();
-    if (data != null && ("pair".equals(data.getHost()) || "status".equals(data.getHost()))) {
-      intent.setData(null);
-      main.post(() -> pair(data.toString()));
+    Uri data=intent.getData(); intent.setData(null);
+    if (data!=null && "profilepilot".equals(data.getScheme())) {
+      if ("status".equals(data.getHost())) pairStatus(data.toString());
+      else if ("pair".equals(data.getHost()) || "task".equals(data.getHost()))
+        message("手机端仅提供连接与权限准备，请在电脑端使用任务功能。");
+    }
+    if (intent.getBooleanExtra("wirelessGuide",false)) {
+      intent.removeExtra("wirelessGuide");
+      if (pendingToken==null) showConnectionSettings(true);
     }
   }
 
-  private void loadComputer() {
-    saveDraft();
-    prompt = null;
-    try {
-      computer = store.find(store.selected());
-      if (computer == null) {
-        JSONArray all = store.all();
-        computer = all.length() > 0 ? all.getJSONObject(0) : null;
-        if (computer != null) store.select(computer.getString("id"));
-      }
-    } catch (Exception error) {
-      computer = null;
-      main.post(() -> message("电脑凭据无法读取，请重新配对：" + error.getMessage()));
-    }
-    sync = new JSONObject();
-    taskList = new JSONArray();
-    detail = null;
-    events.clear();
-    cursor = 0;
-    revision = 0;
-  }
-
-  private String pcId() {
-    return computer == null ? "" : computer.optString("id");
-  }
-
-  private int dp(int value) {
-    return Math.round(value * getResources().getDisplayMetrics().density);
-  }
-
-  private GradientDrawable background(int color, int radius, boolean border) {
-    GradientDrawable shape = new GradientDrawable();
-    shape.setColor(color);
-    shape.setCornerRadius(dp(radius));
-    if (border) shape.setStroke(dp(1), LINE);
-    return shape;
-  }
-
-  private LinearLayout column() {
-    LinearLayout out = new LinearLayout(this);
-    out.setOrientation(LinearLayout.VERTICAL);
-    return out;
-  }
-
-  private LinearLayout row() {
-    LinearLayout out = new LinearLayout(this);
-    out.setOrientation(LinearLayout.HORIZONTAL);
-    out.setGravity(Gravity.CENTER_VERTICAL);
-    return out;
-  }
-
-  private TextView text(LinearLayout parent, String value, int size, int color) {
-    TextView view = new TextView(this);
-    view.setText(value);
-    view.setTextSize(size);
-    view.setTextColor(color);
-    view.setLineSpacing(dp(3), 1);
-    view.setPadding(0, dp(5), 0, dp(5));
-    if (size >= 20) view.setTypeface(null, Typeface.BOLD);
-    parent.addView(view);
-    return view;
-  }
-
-  private TextView button(LinearLayout parent, String label, boolean primary, Runnable action) {
-    TextView view = new TextView(this);
-    view.setText(label);
-    view.setTextColor(primary ? Color.WHITE : BLUE);
-    view.setTextSize(14);
-    view.setTypeface(null, Typeface.BOLD);
-    view.setGravity(Gravity.CENTER);
-    view.setPadding(dp(15), dp(12), dp(15), dp(12));
-    view.setMinHeight(dp(48));
-    view.setBackground(background(primary ? BLUE : 0xffedf3ff, 10, false));
-    view.setClickable(true);
-    view.setFocusable(true);
-    view.setContentDescription(label);
-    view.setOnClickListener(v -> action.run());
-    LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
-    params.topMargin = dp(9);
-    parent.addView(view, params);
-    return view;
-  }
-
-  private LinearLayout card(LinearLayout parent) {
-    LinearLayout out = column();
-    out.setPadding(dp(18), dp(16), dp(18), dp(16));
-    out.setBackground(background(Color.WHITE, 16, true));
-    LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
-    params.topMargin = dp(16);
-    parent.addView(out, params);
-    return out;
-  }
-
-  private EditText input(LinearLayout parent, String hint, String value, int lines) {
-    EditText edit = new EditText(this);
-    edit.setTextColor(INK);
-    edit.setHintTextColor(0xff94a1b4);
-    edit.setTextSize(15);
-    edit.setHint(hint);
-    edit.setText(value);
-    edit.setGravity(Gravity.TOP);
-    edit.setMinLines(lines);
-    edit.setMaxLines(Math.max(lines, 8));
-    edit.setPadding(dp(12), dp(12), dp(12), dp(12));
-    edit.setBackground(background(BG, 10, true));
-    edit.setInputType(
-        android.text.InputType.TYPE_CLASS_TEXT
-            | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
-            | android.text.InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
-    edit.setFilters(new InputFilter[] {new InputFilter.LengthFilter(30000)});
-    LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
-    params.topMargin = dp(9);
-    parent.addView(edit, params);
-    return edit;
-  }
-
-  private void watch(EditText field, java.util.function.Consumer<String> changed) {
-    field.addTextChangedListener(
-        new TextWatcher() {
-          public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
-
-          public void onTextChanged(CharSequence s, int start, int before, int count) {
-            changed.accept(s.toString());
-          }
-
-          public void afterTextChanged(Editable e) {}
-        });
-  }
-
-  private void saveDraft() {
-    if (prompt != null) store.draft(pcId(), prompt.getText().toString());
-  }
-
-  private void switchTab(String name) {
-    saveDraft();
-    tab = name;
-    taskId = "";
-    detail = null;
-    render();
-    refresh(true);
-  }
-
-  private void render() {
-    saveDraft();
-    prompt = null;
-    modelInfo = null;
-    localStatus = localComputer = localReadiness = localSession = localPause = localStop = localServiceButton = null;
-    lastTaskCards = "";
-    page = column();
-    page.setBackgroundColor(BG);
-    page.setOnApplyWindowInsetsListener(
-        (view, insets) -> {
-          android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
-          view.setPadding(bars.left, bars.top, bars.right, bars.bottom);
-          return insets;
-        });
-    LinearLayout top = column();
-    top.setPadding(dp(22), dp(16), dp(22), dp(12));
-    page.addView(top);
-    LinearLayout branding = row();
-    top.addView(branding);
-    TextView brand = text(branding, "◈  ProfilePilot", 20, INK);
-    brand.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 1));
-    TextView refresh = text(branding, "刷新", 13, BLUE);
-    refresh.setMinHeight(dp(48));
-    refresh.setGravity(Gravity.CENTER);
-    refresh.setPadding(dp(12), 0, 0, 0);
-    refresh.setOnClickListener(v -> refresh(true));
-    refresh.setContentDescription("刷新工作区");
-    connection =
-        text(
-            top,
-            computer == null ? "○  尚未连接电脑" : "○  " + computer.optString("name") + " · 正在连接",
-            12,
-            MUTED);
-    connection.setOnClickListener(v -> switchTab("设备"));
-    notice = text(top, "", 12, 0xffac5c27);
-    notice.setVisibility(View.GONE);
-    ScrollView scroll = new ScrollView(this);
-    scroll.setFillViewport(true);
-    scroll.setClipToPadding(false);
-    body = column();
-    body.setFocusableInTouchMode(true);
-    body.setPadding(dp(22), dp(8), dp(22), dp(28));
-    scroll.addView(body);
-    page.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
-    LinearLayout nav = row();
-    nav.setPadding(dp(8), dp(8), dp(8), dp(10));
-    nav.setBackgroundColor(Color.WHITE);
-    String[] labels = {"首页", "Agent", "任务", "设备", "我的"}, icons = {"⌂", "✦", "☷", "▣", "◎"};
-    for (int i = 0; i < labels.length; i++) {
-      String label = labels[i];
-      TextView item = new TextView(this);
-      item.setText(icons[i] + "\n" + label);
-      item.setTextSize(13);
-      item.setLineSpacing(dp(4), 1);
-      item.setGravity(Gravity.CENTER);
-      item.setTextColor(label.equals(tab) ? BLUE : MUTED);
-      item.setMinHeight(dp(56));
-      item.setContentDescription(label);
-      item.setClickable(true);
-      item.setFocusable(true);
-      if (label.equals(tab)) item.setBackground(background(0xffedf3ff, 12, false));
-      item.setOnClickListener(v -> switchTab(label));
-      nav.addView(item, new LinearLayout.LayoutParams(0, -2, 1));
-    }
-    page.addView(nav);
-    setContentView(page);
-    taskCards = null;
-    eventCards = null;
-    profiles = null;
-    followup = null;
-    decisionCard = null;
-    resultCard = null;
-    if (!taskId.isEmpty()) detailScreen();
-    else if (tab.equals("首页")) homeScreen();
-    else if (tab.equals("Agent")) agentScreen();
-    else if (tab.equals("任务")) tasksScreen();
-    else if (tab.equals("设备")) devicesScreen();
-    else settingsScreen();
-    updateConnection();
-    pendingRequestBanner();
-  }
-
-  private void homeScreen() {
-    text(body, "手机状态", 26, INK);
-    localControlCard(true);
-    LinearLayout steps = card(body);
-    text(steps, "连接只需三步", 18, INK);
-    text(steps, "1  用 USB 连接并允许 USB 调试，或通过同一局域网无线配对。", 14, INK);
-    text(steps, "2  打开电脑端 ProfilePilot → 手机，选择这台设备并连接。", 14, INK);
-    text(steps, "3  在手机确认电脑配对，开启悬浮窗、通知和无障碍服务。", 14, INK);
-    text(steps, "连接和授权不会自动开始控制。电脑发起会话后，这里会显示控制者；你可以随时暂停或结束。", 12, MUTED);
-    LinearLayout tasks = card(body);
-    text(tasks, "也可以让电脑为你执行任务", 17, INK);
-    text(tasks, "在 Agent 页发起任务，或在任务页查看进度和结果。", 13, MUTED);
-    button(tasks, "打开 Agent", false, () -> switchTab("Agent"));
-  }
-
-  private void localControlCard(boolean prominent) {
-    LinearLayout local = card(body);
-    if (!prominent) text(local, "手机状态", 18, INK);
-    localStatus = text(local, "正在检查本机状态…", 16, BLUE);
-    localStatus.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
-    localComputer = text(local, "", 13, MUTED);
-    localReadiness = text(local, "", 13, MUTED);
-    localSession = text(local, "", 13, INK);
-    LinearLayout actions = row();
-    local.addView(actions);
-    localPause = button(actions, "暂停电脑控制", false, () -> {
-      if (ControlService.current != null) ControlService.current.localControl("pause");
-      updateLocalControl();
+  private void renderHome() {
+    LinearLayout root=column(); root.setBackgroundColor(BG);
+    root.setOnApplyWindowInsetsListener((view,insets) -> {
+      android.graphics.Insets bars=insets.getInsets(WindowInsets.Type.systemBars());
+      view.setPadding(bars.left,bars.top,bars.right,bars.bottom); return insets;
     });
-    LinearLayout.LayoutParams pauseParams = new LinearLayout.LayoutParams(0, -2, 1);
-    pauseParams.setMarginEnd(dp(8));
-    localPause.setLayoutParams(pauseParams);
-    localStop = button(actions, "结束手机控制", false, () -> {
-      if (ControlService.current != null) ControlService.current.localControl("stop");
-      updateLocalControl();
+    LinearLayout toolbar=row(); toolbar.setPadding(dp(22),dp(8),dp(12),dp(8));
+    root.addView(toolbar,new LinearLayout.LayoutParams(-1,dp(64)));
+    toolbar.addView(icon("brand",GREEN,28));
+    TextView brand=text(toolbar,BuildConfig.DEBUG ? "ProfilePilot 开发版" : "ProfilePilot",20,INK,true);
+    LinearLayout.LayoutParams brandParams=new LinearLayout.LayoutParams(0,-2,1);
+    brandParams.setMarginStart(dp(10)); brand.setLayoutParams(brandParams);
+    View more=iconButton("more","更多选项",this::showMore); more.setId(R.id.home_more); toolbar.addView(more);
+    ScrollView scroll=new ScrollView(this); scroll.setId(R.id.home_scroll);
+    scroll.setFillViewport(true); scroll.setClipToPadding(false); scroll.setVerticalScrollBarEnabled(false);
+    LinearLayout page=column(); page.setPadding(dp(20),dp(8),dp(20),dp(28));
+    scroll.addView(page); root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1)); setContentView(root);
+
+    hero=card(page,22); hero.setPadding(dp(18),dp(18),dp(18),dp(18));
+    LinearLayout heroTop=row(); hero.addView(heroTop);
+    TextView phoneLabel=text(heroTop,"这台手机",12,MUTED,false); weight(phoneLabel);
+    badge=text(heroTop,"",11,MUTED,false); badge.setPadding(dp(9),dp(5),dp(9),dp(5));
+    LinearLayout illustration=row(); illustration.setGravity(Gravity.CENTER);
+    hero.addView(illustration,new LinearLayout.LayoutParams(-1,dp(72)));
+    computerGraphic=icon("computer",MUTED,38); illustration.addView(computerGraphic);
+    View firstLine=new View(this); firstLine.setBackgroundColor(0xffc5dacf);
+    LinearLayout.LayoutParams lineParams=new LinearLayout.LayoutParams(dp(23),dp(1));
+    lineParams.setMargins(dp(12),0,dp(5),0); illustration.addView(firstLine,lineParams);
+    linkGraphic=icon("check",MUTED,18); illustration.addView(linkGraphic);
+    View secondLine=new View(this); secondLine.setBackgroundColor(0xffc5dacf);
+    LinearLayout.LayoutParams secondParams=new LinearLayout.LayoutParams(dp(23),dp(1));
+    secondParams.setMargins(dp(5),0,dp(12),0); illustration.addView(secondLine,secondParams);
+    phoneGraphic=icon("phone",MUTED,32); illustration.addView(phoneGraphic);
+    title=text(hero,"",25,INK,true); title.setId(R.id.home_status); title.setGravity(Gravity.CENTER);
+    title.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+    description=text(hero,"",12,MUTED,false); description.setGravity(Gravity.CENTER); description.setPadding(0,dp(6),0,0);
+    computerRow=row(); computerRow.setId(R.id.home_computer);
+    LinearLayout.LayoutParams computerParams=new LinearLayout.LayoutParams(-1,-2);
+    computerParams.topMargin=dp(18); hero.addView(computerRow,computerParams); computerRow.setPadding(dp(2),dp(12),dp(2),0);
+    computerRow.addView(icon("computer",GREEN,28));
+    LinearLayout computerCopy=column(); LinearLayout.LayoutParams copyParams=new LinearLayout.LayoutParams(0,-2,1);
+    copyParams.setMarginStart(dp(12)); computerRow.addView(computerCopy,copyParams);
+    computerName=text(computerCopy,"",14,INK,true); computerTransport=text(computerCopy,"",12,MUTED,false);
+    computerTransport.setPadding(0,dp(4),0,0); computerRow.addView(icon("chevron",MUTED,16));
+    clickable(computerRow,"电脑连接详情",this::showConnectionDetails);
+    sessionActions=row(); LinearLayout.LayoutParams actionsParams=new LinearLayout.LayoutParams(-1,-2);
+    actionsParams.topMargin=dp(16); hero.addView(sessionActions,actionsParams);
+    pause=button(sessionActions,"暂停控制",true,null); pause.setId(R.id.home_pause);
+    LinearLayout.LayoutParams pauseParams=new LinearLayout.LayoutParams(0,dp(48),1);
+    pauseParams.setMarginEnd(dp(8)); pause.setLayoutParams(pauseParams);
+    stop=button(sessionActions,"结束控制",false,null); stop.setId(R.id.home_stop);
+    stop.setLayoutParams(new LinearLayout.LayoutParams(0,dp(48),1)); stop.setTextColor(RED); stop.setBackground(ripple(Color.WHITE,11,true));
+    serviceError=text(page,"",12,RED,false); serviceError.setVisibility(View.GONE);
+
+    permissionCount=heading(page,"权限准备","");
+    LinearLayout permissionCard=card(page,17); permissionCard.setId(R.id.home_permissions);
+    permissionSummary=row(); permissionSummary.setId(R.id.home_permission_summary); permissionSummary.setPadding(dp(14),dp(16),dp(12),dp(16));
+    permissionSummary.addView(icon("shield",GREEN,28));
+    LinearLayout summaryCopy=column(); LinearLayout.LayoutParams summaryParams=new LinearLayout.LayoutParams(0,-2,1);
+    summaryParams.setMarginStart(dp(10)); permissionSummary.addView(summaryCopy,summaryParams);
+    text(summaryCopy,"连接与控制所需权限已就绪",13,INK,true);
+    TextView summaryHint=text(summaryCopy,"无障碍服务 · 悬浮提示 · 通知",11,MUTED,false); summaryHint.setPadding(0,dp(5),0,0);
+    permissionSummaryAction=text(permissionSummary,"查看",11,GREEN,false);
+    clickable(permissionSummary,"查看已开启的权限",() -> { permissionsExpanded=!permissionsExpanded; updateHome(); }); permissionCard.addView(permissionSummary);
+    permissionRows=column(); permissionCard.addView(permissionRows);
+    permissions[0]=setting(permissionRows,"accessibility","无障碍服务","读取屏幕、点击与输入",R.id.home_accessibility,
+        () -> launchSetting(() -> PhoneSettings.openAccessibility(this)));
+    permissions[1]=setting(permissionRows,"overlay","悬浮提示","在其他应用上显示控制状态",R.id.home_overlay,
+        () -> launchSetting(() -> PhoneSettings.openOverlayPermission(this)));
+    permissions[2]=setting(permissionRows,"bell","状态通知","在通知栏随时暂停控制",R.id.home_notifications,this::openNotifications);
+    permissionHint=text(page,"开启无障碍后，可辅助配置其余设置。",11,MUTED,false); permissionHint.setPadding(dp(3),dp(8),dp(3),0);
+
+    heading(page,"连接设置","任选一种即可");
+    LinearLayout connectionCard=card(page,17);
+    usb=setting(connectionCard,"usb","USB 调试","通过数据线连接电脑",R.id.home_usb,() -> showConnectionSettings(false));
+    wifi=setting(connectionCard,"wifi","Wi-Fi 无线调试","手机与电脑在同一局域网",R.id.home_wifi,() -> showConnectionSettings(true));
+    TextView connectionHint=text(page,"开启任意一种，电脑即可自动连接。",11,MUTED,false); connectionHint.setPadding(dp(3),dp(8),dp(3),0);
+    reassurance=text(page,"",12,MUTED,false); reassurance.setGravity(Gravity.CENTER); reassurance.setPadding(0,dp(24),0,dp(8));
+    TextView help=button(page,"连接遇到问题？",false,this::showHelp); help.setTextSize(12); help.setTextColor(MUTED); help.setBackground(ripple(BG,10,false));
+    LinearLayout.LayoutParams helpParams=new LinearLayout.LayoutParams(-1,dp(48)); helpParams.topMargin=dp(6); help.setLayoutParams(helpParams);
+    updateHome();
+  }
+
+  private void updateHome() {
+    if (title==null || isDestroyed()) return;
+    ControlService service=ControlService.current; SessionState session=service==null?null:service.session;
+    if (session!=null) session.expire();
+    PhoneReadiness ready=new PhoneReadiness(this);
+    boolean all=ready.overlay && ready.notifications && ready.accessibilityService.equals("running");
+    PhoneHomeState state=PhoneHomeState.from(new PhoneHomeState.Input(ready.computerConnected,
+        ready.usbDebugging.equals("enabled") || ready.wirelessDebugging.equals("enabled"),all,ready.unlocked,
+        seenConnected,session!=null && session.sessionId!=null,session==null?"idle":session.phase,session==null?"view":session.mode));
+    seenConnected|=ready.computerConnected;
+    if (!state.equals(lastState)) {
+      setText(title,state.title()); setText(description,state.description()); setText(badge,"●  "+state.badge());
+      int accent=switch(state.tone()) { case CONNECTED -> GREEN; case ACTIVE -> BLUE; case ATTENTION -> AMBER; default -> MUTED; };
+      int surface=switch(state.tone()) { case CONNECTED -> MINT; case ACTIVE -> SOFT_BLUE; case ATTENTION -> 0xfffcf5e9; default -> Color.WHITE; };
+      int tint=switch(state.tone()) { case CONNECTED -> 0xffdceee3; case ACTIVE -> 0xffdfe8fe; case ATTENTION -> 0xfff7e9ce; default -> 0xffeff2f0; };
+      hero.setBackground(background(surface,22,true)); badge.setTextColor(accent); badge.setBackground(background(tint,20,false));
+      computerGraphic.color(accent); phoneGraphic.color(accent); linkGraphic.color(accent);
+      sessionActions.setVisibility(state.controls()?View.VISIBLE:View.GONE);
+      setText(pause,(state.paused()?"继续":"暂停")+(state.viewing()?"查看":"控制")); pause.setContentDescription(pause.getText());
+      pause.setBackground(ripple(state.paused()?GREEN:BLUE,11,false));
+      setText(stop,"结束"+(state.viewing()?"查看":"控制")); stop.setContentDescription(stop.getText()); lastState=state;
+    }
+    linkGraphic.setVisibility(ready.computerConnected?View.VISIBLE:View.INVISIBLE);
+    String trustedName=pairing().getString("computer",""); boolean paired=!pairing().getString("token","").isEmpty();
+    computerRow.setVisibility(paired || ready.computerConnected?View.VISIBLE:View.GONE);
+    setText(computerName,(ready.computerConnected?"":"上次连接：")+(trustedName.isBlank()?"电脑":trustedName));
+    String owner=state.controls() && session!=null && !session.controller.isBlank()?" · "+session.controller:"";
+    setText(computerTransport,ready.computerConnected?transportLabel(ready)+owner:"当前未连接");
+    computerRow.setContentDescription(computerName.getText()+"，"+computerTransport.getText()+"，查看连接详情");
+    if (service!=null && state.controls()) {
+      Runnable toggle=service.pauseOrResumeAction(), end=service.sessionControlAction("stop");
+      pause.setOnClickListener(view -> { toggle.run(); updateHome(); }); stop.setOnClickListener(view -> { end.run(); updateHome(); });
+    }
+    boolean[] enabled={ready.accessibilityService.equals("running"),ready.overlay,ready.notifications}; int count=0;
+    for (int i=0;i<3;i++) {
+      if (enabled[i]) count++;
+      permissions[i].status(enabled[i]?"已开启":i==0 && !ready.accessibilityService.equals("disabled")?"去检查":"去开启",GREEN);
+      permissions[i].icon.color(enabled[i]?0xff7c9284:GREEN);
+    }
+    setText(permissions[0].detail,switch(ready.accessibilityService) {
+      case "enabled" -> "已开启，但服务没有运行"; case "unknown" -> "暂时无法确认服务状态"; default -> "读取屏幕、点击与输入";
     });
-    localStop.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 1));
-    localStop.setTextColor(0xffaa3446);
-    localStop.setBackground(background(0xffffedf0, 10, false));
-    localCheckRow(local, 0, null);
-    localCheckRow(local, 1, () -> PhoneSettings.openDeveloperOptions(this));
-    localCheckRow(local, 2, () -> PhoneSettings.openUsbDebugging(this));
-    localCheckRow(local, 3, () -> PhoneSettings.openWirelessDebugging(this));
-    localCheckRow(local, 4, null);
-    localCheckRow(local, 5, () -> PhoneSettings.openOverlayPermission(this));
-    localCheckRow(local, 6, () -> {
-      if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
-        requestPermissions(new String[] {Manifest.permission.POST_NOTIFICATIONS}, 1);
-      else startActivity(new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName()));
+    if (count==3 && lastPermissionCount>=0 && lastPermissionCount!=3) permissionsExpanded=false;
+    lastPermissionCount=count; setText(permissionCount,count==3?"全部已就绪":"还需处理 "+(3-count)+" 项");
+    permissionCount.setTextColor(count==3?GREEN:MUTED); permissionSummary.setVisibility(count==3?View.VISIBLE:View.GONE);
+    permissionRows.setVisibility(count<3 || permissionsExpanded?View.VISIBLE:View.GONE); permissionHint.setVisibility(count<3?View.VISIBLE:View.GONE);
+    setText(permissionSummaryAction,permissionsExpanded?"收起":"查看"); permissionSummary.setContentDescription(permissionsExpanded?"收起已开启的权限":"查看已开启的权限");
+    boolean anyDebug=ready.usbDebugging.equals("enabled") || ready.wirelessDebugging.equals("enabled");
+    updateDebugRow(usb,ready.usbConnected,ready.usbDebugging,ready.debugLabel("usbDebugging"),anyDebug);
+    updateDebugRow(wifi,ready.wifiConnected,ready.wirelessDebugging,ready.debugLabel("wirelessDebugging"),anyDebug);
+    setText(reassurance,state.controls()?"手机的控制权始终在你手中。\n锁屏或连接中断时，会停止操作。"
+        :ready.computerConnected?(all?"手机准备好了。\n需要使用时，在电脑上开始。":"完成权限准备后，即可由电脑使用。") : "");
+    reassurance.setVisibility(ready.computerConnected?View.VISIBLE:View.GONE);
+  }
+
+  private void updateDebugRow(SettingRow row,boolean connected,String state,String label,boolean anyDebug) {
+    String value=connected?"当前使用":state.equals("enabled")?"已开启":state.equals("disabled")?"未开启":"待确认";
+    row.status(value,connected || state.equals("enabled")?GREEN:state.equals("disabled") && anyDebug?MUTED:AMBER);
+    row.view.setContentDescription(row.name.getText()+"，"+(connected?"当前使用":label)+"，查看设置");
+  }
+  private String transportLabel(PhoneReadiness ready) {
+    if (ready.usbConnected && ready.wifiConnected) return "USB 与 Wi-Fi 连接在线";
+    if (ready.usbConnected) return "USB 连接"; if (ready.wifiConnected) return "Wi-Fi 连接";
+    ControlService service=ControlService.current;
+    return service!=null && service.connection.connected("emulator")?"模拟器连接":ready.computerConnected?"电脑连接在线":"未连接";
+  }
+  private void ensureControlService() {
+    if (ControlService.current!=null || !pairing().getString("token","").matches("[a-f0-9]{64}")) return;
+    try { startForegroundService(new Intent(this,ControlService.class)); serviceError.setVisibility(View.GONE); }
+    catch (RuntimeException error) {
+      setText(serviceError,"连接服务暂未启动，请重新打开 App 或查看连接帮助。"); serviceError.setVisibility(View.VISIBLE);
+    }
+  }
+
+  private void showPairing() {
+    if (pendingToken==null || isFinishing() || isDestroyed()) return;
+    String requestedToken=pendingToken, requestedComputer=pendingComputer;
+    LinearLayout content=showSheet("允许这台电脑连接？");
+    text(content,requestedComputer,21,INK,true);
+    paragraph(content,"请确认这是你正在使用的电脑。允许后，该电脑可连接手机；开启所需权限后才能查看或控制。");
+    if (!pairing().getString("token","").isEmpty()) paragraph(content,"确认将替换原电脑授权，并结束原电脑的当前控制。");
+    actionButton(content,"允许此电脑",true,() -> {
+      if (!Objects.equals(requestedToken,pendingToken) || !Objects.equals(requestedComputer,pendingComputer)) return;
+      ControlService service=ControlService.current;
+      if (service!=null) { service.localControl("stop"); stopService(new Intent(this,ControlService.class)); }
+      pairing().edit().putString("token",requestedToken).putString("computer",requestedComputer).apply();
+      pendingToken=null; pendingComputer=null; seenConnected=false; dismissSheet();
+      try { startForegroundService(new Intent(this,ControlService.class)); }
+      catch (RuntimeException error) { message("连接服务暂未启动，请重新打开 App。"); }
+      updateHome();
     });
-    localCheckRow(local, 7, () -> PhoneSettings.openAccessibility(this));
-    text(local, "USB 与 Wi-Fi 任选一种。无障碍服务开启后，点击调试项或悬浮窗权限可辅助开启；系统确认和锁屏密码由你操作。", 12, MUTED);
-    localServiceButton = button(local, "连接电脑服务", true, () -> {
-      try { startForegroundService(new Intent(this, ControlService.class)); }
-      catch (Exception error) { message("连接失败：" + error.getMessage()); }
+    actionButton(content,"暂不允许",false,() -> { pendingToken=null; pendingComputer=null; dismissSheet(); });
+    sheet.setOnDismissListener(dialog -> {
+      if (Objects.equals(requestedToken,pendingToken)) { pendingToken=null; pendingComputer=null; }
     });
-    button(local, "配对与连接管理", false, () -> startActivity(new Intent(this, PermissionsActivity.class)));
-    button(local, "Wi-Fi 连接指南", false,
-        () -> startActivity(new Intent(this, PermissionsActivity.class).putExtra("wirelessGuide", true)));
-    updateLocalControl();
   }
 
-  private void localCheckRow(LinearLayout parent, int index, Runnable action) {
-    View divider = new View(this);
-    divider.setBackgroundColor(LINE);
-    parent.addView(divider, new LinearLayout.LayoutParams(-1, dp(1)));
-    LinearLayout item = row();
-    item.setMinimumHeight(dp(action == null ? 40 : 48));
-    parent.addView(item, new LinearLayout.LayoutParams(-1, -2));
-    TextView name = text(item, LOCAL_CHECK_NAMES[index], 14, INK);
-    name.setPadding(0, dp(5), dp(8), dp(5));
-    name.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 1));
-    localChecks[index] = text(item, "正在检测", 13, MUTED);
-    localChecks[index].setMaxWidth(dp(170));
-    localChecks[index].setGravity(Gravity.END);
-    if (action != null) {
-      item.setFocusable(true);
-      item.setBackground(new android.graphics.drawable.RippleDrawable(android.content.res.ColorStateList.valueOf(0x223976ed), null, background(Color.WHITE, 8, false)));
-      item.setOnClickListener(view -> action.run());
-    }
-    localCheckRows[index] = item;
+  private void showConnectionSettings(boolean wireless) {
+    PhoneReadiness ready=new PhoneReadiness(this); String name=wireless?"Wi-Fi 无线调试":"USB 调试";
+    String key=wireless?"wirelessDebugging":"usbDebugging";
+    boolean enabled=(wireless?ready.wirelessDebugging:ready.usbDebugging).equals("enabled");
+    LinearLayout content=showSheet(name);
+    paragraph(content,"USB 和 Wi-Fi 任选一种即可。完成调试设置与必要授权后，电脑会自动连接。");
+    SettingRow developer=setting(content,"phone","开发者选项","调试设置的系统入口",View.NO_ID,
+        () -> launchSetting(() -> PhoneSettings.openDeveloperOptions(this)));
+    developer.status(ready.debugLabel("developerOptions"),MUTED); info(content,name,ready.debugLabel(key));
+    if (wireless) {
+      paragraph(content,"1  手机和电脑处于同一局域网，电脑端 ProfilePilot 保持运行。\n\n2  开启无线调试，按系统提示允许当前网络。\n\n3  首次使用时，按电脑提示完成系统配对；之后由电脑自动连接。");
+    } else paragraph(content,"1  使用支持数据传输的 USB 线连接电脑。\n\n2  开启 USB 调试，手机弹出授权时允许你的电脑。\n\n3  电脑端 ProfilePilot 运行时会自动连接，首页会自动更新。");
+    if (PhoneAccessibility.current!=null && !enabled) paragraph(content,"可辅助打开开关，系统确认由你完成。");
+    actionButton(content,enabled?"查看系统设置":PhoneAccessibility.current!=null?"辅助开启调试":"前往开启调试",true,
+        () -> launchSetting(() -> { if (wireless) PhoneSettings.openWirelessDebugging(this); else PhoneSettings.openUsbDebugging(this); }));
+  }
+  private void showMore() {
+    LinearLayout content=showSheet("更多");
+    menuItem(content,"检查更新",() -> { dismissSheet(); startActivity(new Intent(this,UpdateActivity.class)); });
+    menuItem(content,"电脑连接详情",this::showConnectionDetails); menuItem(content,"手机状态同步",this::showStatusSync); menuItem(content,"连接帮助",this::showHelp);
+    if (!pairing().getString("token","").isEmpty()) menuItem(content,"更换电脑",this::confirmForget);
+    paragraph(content,getString(R.string.app_name)+" · 手机连接助手\n版本 "+BuildConfig.VERSION_NAME).setTextSize(11);
+  }
+  private void showConnectionDetails() {
+    PhoneReadiness ready=new PhoneReadiness(this); LinearLayout content=showSheet("电脑连接详情");
+    String computer=pairing().getString("computer","");
+    info(content,ready.computerConnected?"当前电脑":"上次授权电脑",computer.isBlank()?"尚未授权":computer);
+    info(content,"当前连接",transportLabel(ready)); info(content,"控制状态",lastState==null?"未在控制":lastState.title());
+    info(content,"手机屏幕",ready.unlocked?"已解锁":"已锁屏");
+    paragraph(content,ready.computerConnected?"已检测到电脑的实际连接。":"开启调试并完成必要授权后，电脑会自动连接。已配对或状态同步在线，不代表电脑当前已连接。");
+    if (!computer.isBlank()) actionButton(content,"更换电脑",false,this::confirmForget).setTextColor(RED);
+  }
+  private void confirmForget() {
+    LinearLayout content=showSheet("更换连接的电脑？");
+    paragraph(content,"将结束当前控制，解除这台电脑的手机控制授权，并停止状态同步。再次连接需要重新授权。已开启的手机权限会保留。");
+    actionButton(content,"结束连接并更换",true,() -> {
+      ControlService service=ControlService.current; if (service!=null) service.localControl("stop");
+      stopService(new Intent(this,ControlService.class)); pairing().edit().remove("token").remove("computer").apply();
+      store.statusEnabled(false); stopService(new Intent(this,StatusSyncService.class));
+      pendingToken=null; pendingComputer=null; seenConnected=false; dismissSheet(); main.postDelayed(this::updateHome,150);
+    }).setBackground(ripple(RED,11,false));
+    actionButton(content,"暂不更换",false,this::dismissSheet);
+  }
+  private void showHelp() {
+    LinearLayout content=showSheet("连接遇到问题？"); text(content,"先检查手机",15,INK,true);
+    paragraph(content,"保持解锁；电脑端 ProfilePilot 保持运行；确认 USB 调试或 Wi-Fi 无线调试已开启。已配对的电脑会自动连接，首次授权仍需你在手机确认。");
+    text(content,"USB 连接",15,INK,true);
+    paragraph(content,"检查数据线是否支持数据传输，并确认手机上的调试授权。Windows 电脑还可能需要手机厂商的 ADB 驱动；macOS 通常无需单独安装驱动。");
+    text(content,"Wi-Fi 连接",15,INK,true);
+    paragraph(content,"确保处于同一局域网，无线调试保持开启；电脑接同一路由器的网线也可以。首次按电脑提示完成系统配对，更换网络后等待电脑重新发现并连接。");
+    text(content,"权限提示",15,INK,true);
+    paragraph(content,"无障碍服务已开启但未运行时，可到系统设置重新开启。系统无法提供开关状态时，会显示待确认，可点击设置项手动核对。");
+    paragraph(content,"自动恢复连接不会自动继续控制。需要在电脑重新开始，或在有效的暂停会话中手动继续。");
   }
 
-  private void updateLocalControl() {
-    if (localStatus == null) return;
-    SharedPreferences preferences = getSharedPreferences("MainActivity", MODE_PRIVATE);
-    boolean paired = !preferences.getString("token", "").isEmpty();
-    ControlService service = ControlService.current;
-    SessionState session = service == null ? null : service.session;
-    PhoneReadiness readiness = new PhoneReadiness(this);
-    String phase = session == null ? "" : session.phase;
-    boolean active = session != null && session.active();
-    String status = !paired ? "等待电脑配对"
-        : service == null ? "已配对 · 连接服务未启动"
-        : phase.equals("idle") ? readiness.computerConnected ? "已连接，未控制" : "等待电脑连接"
-        : service.description();
-    setLocalText(localStatus, status);
-    localStatus.setTextColor(active ? 0xff19755e : BLUE);
-    setLocalText(localComputer, paired
-        ? "已授权电脑：" + preferences.getString("computer", "电脑")
-        : "请先在电脑端「手机」页面发起连接。");
-    setLocalCheck(0, readiness.usbConnected && readiness.wifiConnected ? "USB 与无线已连接" : readiness.usbConnected ? "USB 已连接" : readiness.wifiConnected ? "无线已连接" : readiness.computerConnected ? "已连接" : "未连接", readiness.computerConnected);
-    setLocalCheck(1, readiness.debugLabel("developerOptions"), readiness.developerOptions.equals("enabled"));
-    setLocalCheck(2, readiness.debugLabel("usbDebugging"), readiness.usbDebugging.equals("enabled"));
-    setLocalCheck(3, readiness.debugLabel("wirelessDebugging"), readiness.wirelessDebugging.equals("enabled"));
-    setLocalCheck(4, readiness.unlocked ? "已解锁" : "已锁屏", readiness.unlocked);
-    setLocalCheck(5, readiness.overlay ? "已开启" : "未开启", readiness.overlay);
-    setLocalCheck(6, readiness.notifications ? "已开启" : "未开启", readiness.notifications);
-    setLocalCheck(7, readiness.accessibilityLabel(), readiness.accessibilityService.equals("running"));
-    ArrayList<String> missing = new ArrayList<>();
-    if (!paired) missing.add("允许电脑配对");
-    if (!readiness.computerConnected) missing.add("连接电脑");
-    if (!readiness.overlay) missing.add("开启悬浮窗");
-    if (!readiness.notifications) missing.add("开启通知");
-    if (!readiness.accessibilityService.equals("running")) missing.add("检查无障碍服务");
-    if (!readiness.unlocked) missing.add("解锁手机");
-    setLocalText(localReadiness, missing.isEmpty() ? "权限与连接已就绪" : "待完成：" + String.join("、", missing));
-    localReadiness.setTextColor(missing.isEmpty() ? 0xff19755e : BLUE);
-    localServiceButton.setVisibility(paired && service == null ? View.VISIBLE : View.GONE);
-    boolean ongoing = session != null && session.sessionId != null
-        && !phase.equals("stopped") && !phase.equals("idle");
-    localSession.setVisibility(ongoing ? View.VISIBLE : View.GONE);
-    if (ongoing) setLocalText(localSession,
-        "控制者：" + (session.controller.isEmpty() ? "电脑" : session.controller)
-        + "\n任务：" + (session.task.isEmpty() ? "手机会话" : session.task));
-    boolean paused = phase.equals("paused");
-    setLocalText(localPause, paused ? "继续电脑控制" : "暂停电脑控制");
-    localPause.setVisibility(active || paused ? View.VISIBLE : View.GONE);
-    if (service != null) {
-      Runnable toggle = service.pauseOrResumeAction();
-      localPause.setOnClickListener(view -> { toggle.run(); updateLocalControl(); });
-    }
-    localStop.setVisibility(ongoing ? View.VISIBLE : View.GONE);
-  }
-
-  private void setLocalText(TextView view, String value) {
-    if (!value.contentEquals(view.getText())) view.setText(value);
-  }
-
-  private void setLocalCheck(int index, String value, boolean ready) {
-    setLocalText(localChecks[index], value);
-    localChecks[index].setTextColor(ready ? 0xff19755e : MUTED);
-    localChecks[index].setTypeface(null, ready ? Typeface.BOLD : Typeface.NORMAL);
-    String action = index == 2 || index == 3 ? "，定位并开启" + LOCAL_CHECK_NAMES[index]
-        : index == 7 ? "，打开本应用的无障碍设置" : "，打开系统设置";
-    localCheckRows[index].setContentDescription(LOCAL_CHECK_NAMES[index] + "，" + value + (localCheckRows[index].isClickable() ? action : ""));
-  }
-
-  private void agentScreen() {
-    text(body, "随时开始，\n让电脑为你执行。", 29, INK);
-    text(body, "你的浏览器、登录状态与任务，始终在同一处。", 14, MUTED);
-    LinearLayout composer = card(body);
-    text(composer, "今天想完成什么？", 17, INK);
-    String initial = !sharedText.isEmpty() ? sharedText : store.draft(pcId());
-    sharedText = "";
-    prompt = input(composer, "描述任务，或分享链接到这里…", initial, 5);
-    watch(prompt, value -> store.draft(pcId(), value));
-    text(composer, "执行 Profile", 12, MUTED);
-    profiles = new Spinner(this);
-    composer.addView(profiles, new LinearLayout.LayoutParams(-1, dp(48)));
-    updateProfiles();
-    text(composer, "执行方式", 12, MUTED);
-    mode = new Spinner(this);
-    mode.setAdapter(
-        new ArrayAdapter<>(
-            this,
-            android.R.layout.simple_spinner_dropdown_item,
-            new String[] {"按需确认 · 自动执行", "先制定计划", "每步手动确认"}));
-    String savedMode = store.draft(pcId() + ":mode");
-    mode.setSelection(savedMode.equals("plan") ? 1 : savedMode.equals("manual") ? 2 : 0);
-    mode.setOnItemSelectedListener(
-        new AdapterView.OnItemSelectedListener() {
-          @Override
-          public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-            store.draft(pcId() + ":mode", new String[] {"acceptEdits", "plan", "manual"}[position]);
-          }
-
-          @Override
-          public void onNothingSelected(AdapterView<?> parent) {}
+  private void showStatusSync() {
+    io.execute(() -> {
+      JSONObject link=null; try { link=store.statusLink(false); } catch (Exception ignored) { }
+      JSONObject saved=link;
+      postAlive(() -> {
+        LinearLayout content=showSheet("手机状态同步");
+        paragraph(content,"同步权限、锁屏、调试开关和当前 Wi-Fi 地址，帮助已绑定的电脑自动发现手机。不上传屏幕或控制凭据。");
+        paragraph(content,"状态同步无需同一 Wi-Fi；无线控制仍需同一局域网并完成配对。同步在线不代表电脑已连接。");
+        if (saved!=null) {
+          info(content,"服务器",saved.optString("url")); info(content,"同步状态",store.statusEnabled()?StatusSyncService.message:"已停止同步");
+          boolean enabled=store.statusEnabled();
+          actionButton(content,enabled?"停止状态同步":"开启状态同步",!enabled,() -> {
+            store.statusEnabled(!enabled); if (enabled) stopService(new Intent(this,StatusSyncService.class)); else startStatusSync(); dismissSheet();
+          });
+        } else paragraph(content,"在电脑「手机」页面打开状态同步，扫描生成的二维码或粘贴状态同步链接。");
+        actionButton(content,"扫描状态同步二维码",false,() -> {
+          dismissSheet(); scanner.launch(new ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+              .setPrompt("扫描电脑上的状态同步二维码").setBeepEnabled(false).setOrientationLocked(false));
         });
-    composer.addView(mode, new LinearLayout.LayoutParams(-1, dp(48)));
-    modelInfo = text(composer, "模型：" + sync.optString("model", "使用电脑当前模型"), 12, MUTED);
-    button(
-        composer,
-        "发送到电脑  ↗",
-        true,
-        () -> {
-          if (!connected()) return;
-          if (!sync.optBoolean("canControl", true)) {
-            message("此手机当前仅可查看，请在电脑修改授权");
-            return;
-          }
-          JSONArray available = sync.optJSONArray("profiles");
-          int index = profiles.getSelectedItemPosition();
-          JSONObject profile = available == null ? null : available.optJSONObject(index);
-          String value = prompt.getText().toString().trim();
-          if (value.isEmpty()) {
-            prompt.setError("请描述任务");
-            return;
-          }
-          if (profile == null || !profile.optBoolean("ready")) {
-            message(
-                profile == null ? "请选择可用 Profile" : profile.optString("reason", "此 Profile 暂不可用"));
-            return;
-          }
-          String selectedMode =
-              new String[] {"acceptEdits", "plan", "manual"}[mode.getSelectedItemPosition()];
-          mutate(
-              RemoteClient.object(
-                  "action",
-                  "task.create",
-                  "profile",
-                  profile.optString("id"),
-                  "input",
-                  RemoteClient.object("prompt", value, "mode", selectedMode)),
-              false,
-              result -> {
-                store.draft(pcId(), "");
-                if (prompt != null) prompt.setText("");
-                openTask(result.optJSONObject("task").optString("id"));
-              });
-        });
-    LinearLayout tips = card(body);
-    text(tips, "从一个小任务开始", 15, INK);
-    text(tips, "整理网页资料、比较产品、处理重复操作。任务需要确认时，你会在「任务」中看到。", 13, MUTED);
-    if (computer == null) button(tips, "连接你的电脑", false, () -> switchTab("设备"));
+        actionButton(content,"粘贴状态同步链接",false,this::pasteStatusLink);
+      });
+    });
   }
-
-  private void updateProfiles() {
-    if (profiles == null) return;
-    JSONArray list = sync.optJSONArray("profiles");
-    List<String> names = new ArrayList<>();
-    List<String> ids = new ArrayList<>();
-    if (list != null)
-      for (int i = 0; i < list.length(); i++) {
-        JSONObject p = list.optJSONObject(i);
-        ids.add(p.optString("id"));
-        names.add(p.optString("name") + (p.optBoolean("ready") ? "" : " · 暂不可用"));
-      }
-    if (names.isEmpty()) names.add("连接电脑后选择 Profile");
-    String key = ids.toString() + names.toString();
-    if (key.equals(profiles.getTag())) return;
-    int selected = ids.indexOf(store.draft(pcId() + ":profile"));
-    profiles.setOnItemSelectedListener(null);
-    profiles.setAdapter(
-        new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, names));
-    profiles.setSelection(Math.max(0, selected));
-    profiles.setTag(key);
-    profiles.setOnItemSelectedListener(
-        new AdapterView.OnItemSelectedListener() {
-          @Override
-          public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-            if (position >= 0 && position < ids.size()) store.draft(pcId() + ":profile", ids.get(position));
-          }
-
-          @Override
-          public void onNothingSelected(AdapterView<?> parent) {}
-        });
+  private void pasteStatusLink() {
+    dismissSheet(); EditText input=new EditText(this); input.setHint(BuildConfig.PAIRING_SCHEME+"://status…");
+    input.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_URI); input.setMaxLines(4);
+    new AlertDialog.Builder(this).setTitle("状态同步链接").setView(input).setNegativeButton("取消",null)
+        .setPositiveButton("继续",(dialog,which) -> pairStatus(input.getText().toString())).show();
   }
-
-  private void tasksScreen() {
-    text(body, "任务", 29, INK);
-    text(body, "从发起到完成，每一步都看得见。", 14, MUTED);
-    EditText search = input(body, "搜索任务…", query, 1);
-    watch(
-        search,
-        value -> {
-          query = value;
-          renderTaskCards();
-        });
-    Spinner filters = new Spinner(this);
-    String[] values = {"全部", "进行中", "待确认", "已完成"};
-    filters.setAdapter(
-        new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, values));
-    filters.setSelection(Arrays.asList(values).indexOf(filter));
-    body.addView(filters, new LinearLayout.LayoutParams(-1, dp(48)));
-    filters.setOnItemSelectedListener(
-        new android.widget.AdapterView.OnItemSelectedListener() {
-          public void onItemSelected(
-              android.widget.AdapterView<?> p, View v, int position, long id) {
-            filter = values[position];
-            renderTaskCards();
-          }
-
-          public void onNothingSelected(android.widget.AdapterView<?> p) {}
-        });
-    taskCards = column();
-    body.addView(taskCards);
-    renderTaskCards();
-  }
-
-  private void renderTaskCards() {
-    if (taskCards == null) return;
-    String rendered = taskList.toString() + filter + query + totalTasks;
-    if (lastTaskCards.equals(rendered)) return;
-    lastTaskCards = rendered;
-    taskCards.removeAllViews();
-    int shown = 0;
-    for (int i = 0; i < taskList.length(); i++) {
-      JSONObject task = taskList.optJSONObject(i);
-      String status = task.optString("status"), id = task.optString("id");
-      if (!task.optString("title")
-          .toLowerCase(Locale.ROOT)
-          .contains(query.toLowerCase(Locale.ROOT))) continue;
-      if (filter.equals("待确认") && !status.equals("waiting_user")) continue;
-      if (filter.equals("进行中") && !Arrays.asList("running", "queued", "paused").contains(status))
-        continue;
-      if (filter.equals("已完成")
-          && !Arrays.asList("completed", "partial", "failed", "cancelled").contains(status))
-        continue;
-      LinearLayout item = card(taskCards);
-      text(
-          item,
-          statusLabel(status) + "  ·  " + task.optString("profileName"),
-          12,
-          status.equals("waiting_user") ? 0xffac5c27 : BLUE);
-      text(item, task.optString("title"), 17, INK);
-      text(item, task.optString("updatedAt").replace("T", " ").replace("Z", " UTC"), 11, MUTED);
-      item.setOnClickListener(v -> openTask(id));
-      item.setClickable(true);
-      item.setFocusable(true);
-      item.setContentDescription("打开任务：" + task.optString("title"));
-      shown++;
-    }
-    if (shown == 0) {
-      LinearLayout empty = card(taskCards);
-      text(empty, computer == null ? "连接电脑，任务就会出现在这里" : "暂无匹配的任务", 17, INK);
-      text(empty, "在 Agent 页发起一个任务，或刷新查看电脑上的记录。", 13, MUTED);
-    }
-    if (totalTasks > taskList.length()) button(taskCards, "加载更多任务", false, this::loadMoreTasks);
-  }
-
-  private void loadMoreTasks() {
-    if (!connected() || busy) return;
-    int offset = taskList.length();
-    String pc = pcId();
-    JSONObject target = computer;
-    busy = true;
-    io.execute(
-        () -> {
-          try {
-            JSONObject data =
-                RemoteClient.read(
-                    target,
-                    RemoteClient.object("action", "task.list", "offset", offset, "limit", 50));
-            main.post(
-                () -> {
-                  busy = false;
-                  if (!pc.equals(pcId())) return;
-                  JSONArray next = data.optJSONArray("tasks");
-                  for (int i = 0; next != null && i < next.length(); i++)
-                    taskList.put(next.optJSONObject(i));
-                  totalTasks = data.optInt("total");
-                  renderTaskCards();
-                });
-          } catch (Exception e) {
-            main.post(
-                () -> {
-                  busy = false;
-                  message(e.getMessage());
-                });
-          }
-        });
-  }
-
-  static String statusLabel(String value) {
-    return switch (value) {
-      case "running" -> "执行中";
-      case "queued" -> "排队中";
-      case "waiting_user" -> "等待确认";
-      case "paused" -> "已暂停";
-      case "completed" -> "已完成";
-      case "partial" -> "部分完成";
-      case "failed" -> "执行失败";
-      case "cancelled" -> "已取消";
-      default -> value;
-    };
-  }
-
-  private void openTask(String id) {
-    saveDraft();
-    taskId = id;
-    tab = "任务";
-    detail = null;
-    events.clear();
-    cursor = 0;
-    revision = 0;
-    lastDecision = "";
-    lastResult = "";
-    lastEvents = "";
-    render();
-    refresh(true);
-  }
-
-  private void detailScreen() {
-    button(body, "‹ 返回任务列表", false, () -> switchTab("任务"));
-    taskHeading = text(body, detail == null ? "正在读取任务…" : detail.optString("title"), 23, INK);
-    detailActions = row();
-    body.addView(detailActions);
-    decisionCard = card(body);
-    decisionCard.setVisibility(View.GONE);
-    resultCard = card(body);
-    resultCard.setVisibility(View.GONE);
-    eventCards = column();
-    body.addView(eventCards);
-    streamText = text(body, "", 14, MUTED);
-    LinearLayout compose = card(body);
-    followup = input(compose, "补充要求…", store.draft(pcId() + ":" + taskId), 2);
-    watch(followup, value -> store.draft(pcId() + ":" + taskId, value));
-    button(
-        compose,
-        "发送补充",
-        true,
-        () -> {
-          String value = followup.getText().toString().trim();
-          if (value.isEmpty()) return;
-          String status = detail == null ? "" : detail.optString("status");
-          String control =
-              Arrays.asList("paused", "completed", "failed", "partial", "cancelled")
-                      .contains(status)
-                  ? "resume"
-                  : "steer";
-          mutate(
-              RemoteClient.object(
-                  "action", "task.control", "id", taskId, "control", control, "message", value),
-              false,
-              result -> {
-                store.draft(pcId() + ":" + taskId, "");
-                if (followup != null) followup.setText("");
-                refresh(true);
-              });
-        });
-    lastDecision = "";
-    lastResult = "";
-    lastEvents = "";
-    updateDetail();
-  }
-
-  private void smallButton(LinearLayout row, String label, Runnable action) {
-    TextView b = button(row, label, false, action);
-    LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -2, 1);
-    params.setMargins(dp(3), dp(8), dp(3), 0);
-    b.setLayoutParams(params);
-  }
-
-  private void updateDetail() {
-    if (detail == null || eventCards == null) return;
-    taskHeading.setText(detail.optString("title") + "\n" + statusLabel(detail.optString("status")));
-    detailActions.removeAllViews();
-    String status = detail.optString("status");
-    if (Arrays.asList("running", "queued", "waiting_user").contains(status))
-      smallButton(detailActions, "暂停", () -> control("pause"));
-    if (Arrays.asList("paused", "failed", "partial", "completed", "cancelled").contains(status))
-      smallButton(detailActions, "继续", () -> control("resume"));
-    if (!Arrays.asList("completed", "cancelled", "failed").contains(status))
-      smallButton(
-          detailActions,
-          "结束任务",
-          () ->
-              new AlertDialog.Builder(this)
-                  .setTitle("结束这个任务？")
-                  .setMessage("电脑会停止执行，已有记录与结果会保留。")
-                  .setNegativeButton("返回", null)
-                  .setPositiveButton("结束", (d, w) -> control("cancel"))
-                  .show());
-    JSONObject pending = detail.optJSONObject("pending");
-    String decision = pending == null ? "" : pending.toString();
-    if (!lastDecision.equals(decision)) {
-      lastDecision = decision;
-      decisionCard.removeAllViews();
-      decisionCard.setVisibility(pending == null ? View.GONE : View.VISIBLE);
-      if (pending != null) {
-        text(decisionCard, "需要你的确认", 12, BLUE);
-        text(decisionCard, pending.optString("title"), 18, INK);
-        text(decisionCard, pending.optString("details"), 14, INK).setTextIsSelectable(true);
-        if (pending.optJSONObject("action") != null)
-          text(decisionCard, pending.optJSONObject("action").optString("summary"), 13, MUTED);
-        if (pending.optJSONObject("terminal") != null)
-          text(decisionCard, pending.optJSONObject("terminal").toString(), 12, INK)
-              .setTextIsSelectable(true);
-        EditText answer =
-            input(decisionCard, "回答或补充说明…", store.draft(pcId() + ":" + pending.optString("id")), 2);
-        watch(answer, value -> store.draft(pcId() + ":" + pending.optString("id"), value));
-        String kind = pending.optString("kind");
-        if (kind.equals("question"))
-          button(
-              decisionCard, "提交回答", true, () -> reply(pending, answer.getText().toString(), false));
-        else {
-          button(
-              decisionCard,
-              kind.equals("handoff") ? "已在电脑完成，交还 Agent" : "允许这一次",
-              true,
-              () -> reply(pending, answer.getText().toString(), true));
-          if (!kind.equals("handoff"))
-            button(
-                decisionCard,
-                "拒绝操作",
-                false,
-                () -> reply(pending, answer.getText().toString(), false));
-        }
-      }
-    }
-    String results =
-        detail.optString("result") + detail.optString("outputs") + detail.optString("items");
-    if (!lastResult.equals(results)) {
-      lastResult = results;
-      resultCard.removeAllViews();
-      JSONObject result = detail.optJSONObject("result");
-      JSONArray outputs = detail.optJSONArray("outputs"), items = detail.optJSONArray("items");
-      boolean visible =
-          result != null
-              || outputs != null && outputs.length() > 0
-              || items != null && items.length() > 0;
-      resultCard.setVisibility(visible ? View.VISIBLE : View.GONE);
-      if (result != null) {
-        text(resultCard, "任务结果", 17, INK);
-        text(resultCard, result.optString("summary"), 14, INK).setTextIsSelectable(true);
-        for (String field : new String[] {"evidence", "remaining"}) {
-          JSONArray values = result.optJSONArray(field);
-          if (values != null && values.length() > 0) {
-            text(resultCard, field.equals("evidence") ? "依据" : "待完成", 12, BLUE);
-            for (int i = 0; i < values.length(); i++)
-              text(resultCard, values.optString(i), 13, MUTED).setTextIsSelectable(true);
-          }
-        }
-      }
-      if (items != null)
-        for (int i = 0; i < items.length(); i++) {
-          JSONObject item = items.optJSONObject(i);
-          text(
-              resultCard,
-              item.optString("label") + " · " + statusLabel(item.optString("status")),
-              13,
-              INK);
-          if (!item.optString("result").isEmpty())
-            text(resultCard, item.optString("result"), 13, MUTED);
-        }
-      if (outputs != null)
-        for (int i = 0; i < outputs.length(); i++) {
-          JSONObject file = outputs.optJSONObject(i);
-          button(resultCard, "↓  " + file.optString("name"), false, () -> artifact(file));
-        }
-    }
-    String eventKey = events.toString() + hasMore;
-    if (!lastEvents.equals(eventKey)) {
-      lastEvents = eventKey;
-      eventCards.removeAllViews();
-      if (events.isEmpty()) text(eventCards, "正在等待电脑的执行记录…", 13, MUTED);
-      for (JSONObject event : events.values()) {
-        LinearLayout item = card(eventCards);
-        String kind = event.optString("kind");
-        text(
-            item,
-            kind.equals("user")
-                ? "你"
-                : kind.equals("assistant")
-                    ? "Agent"
-                    : kind.equals("error") ? "执行提示" : "进度 · " + kind,
-            11,
-            BLUE);
-        text(item, event.optString("text"), 14, INK).setTextIsSelectable(true);
-      }
-      if (hasMore) button(eventCards, "加载后续记录", false, () -> refresh(true));
-    }
-  }
-
-  private void control(String action) {
-    mutate(
-        RemoteClient.object("action", "task.control", "id", taskId, "control", action),
-        false,
-        result -> refresh(true));
-  }
-
-  private void reply(JSONObject pending, String answer, boolean approved) {
-    if (pending.optString("kind").equals("question") && answer.trim().isEmpty()) {
-      message("请填写回答");
-      return;
-    }
-    mutate(
-        RemoteClient.object(
-            "action",
-            "task.reply",
-            "id",
-            taskId,
-            "decisionId",
-            pending.optString("id"),
-            "answer",
-            answer,
-            "approved",
-            approved,
-            "scope",
-            "once"),
-        false,
-        result -> {
-          store.draft(pcId() + ":" + pending.optString("id"), "");
-          refresh(true);
-        });
-  }
-
-  private void artifact(JSONObject file) {
-    if (!connected()) return;
-    String id = taskId;
-    JSONObject target = computer;
-    message("正在读取文件…");
-    io.execute(
-        () -> {
-          try {
-            JSONObject data =
-                RemoteClient.read(
-                    target,
-                    RemoteClient.object(
-                        "action", "task.artifact", "taskId", id, "fileId", file.optString("id")));
-            byte[] bytes =
-                android.util.Base64.decode(data.getString("base64"), android.util.Base64.DEFAULT);
-            main.post(
-                () -> {
-                  if (isDestroyed()) return;
-                  download = bytes;
-                  saveFile.launch(data.optString("name", "result.bin"));
-                });
-          } catch (Exception e) {
-            main.post(() -> message(e.getMessage()));
-          }
-        });
-  }
-
-  private void devicesScreen() {
-    text(body, "连接你的工作区", 29, INK);
-    text(body, "一台手机，随时连接你的多台电脑。", 14, MUTED);
-    LinearLayout connect = card(body);
-    text(connect, "添加电脑", 18, INK);
-    text(connect, "电脑打开「手机 → 连接移动版」，生成二维码。", 13, MUTED);
-    button(
-        connect,
-        "扫码连接电脑",
-        true,
-        () ->
-            scanner.launch(
-                new ScanOptions()
-                    .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                    .setPrompt("扫描电脑上的 ProfilePilot 配对码")
-                    .setBeepEnabled(false)
-                    .setOrientationLocked(false)));
-    button(
-        connect,
-        "粘贴配对链接",
-        false,
-        () -> {
-          EditText entry = new EditText(this);
-          entry.setHint("profilepilot://pair?…");
-          new AlertDialog.Builder(this)
-              .setTitle("粘贴配对链接")
-              .setView(entry)
-              .setNegativeButton("取消", null)
-              .setPositiveButton("继续", (d, w) -> pair(entry.getText().toString()))
-              .show();
-        });
-    try {
-      JSONArray all = store.all();
-      for (int i = 0; i < all.length(); i++) {
-        JSONObject item = all.getJSONObject(i);
-        String id = item.getString("id");
-        LinearLayout card = card(body);
-        text(card, item.optString("name") + (id.equals(pcId()) ? "  ·  当前电脑" : ""), 18, INK);
-        text(card, item.optString("url"), 12, MUTED);
-        if (!id.equals(pcId()))
-          button(
-              card,
-              "切换到这台电脑",
-              true,
-              () -> {
-                saveDraft();
-                store.select(id);
-                loadComputer();
-                taskId = "";
-                render();
-                refresh(true);
-              });
-        button(card, "修改连接地址", false, () -> editAddress(item));
-        button(card, "移除电脑与授权", false, () -> removeComputer(item));
-      }
-    } catch (Exception e) {
-      text(body, e.getMessage(), 13, 0xffac5c27);
-    }
-    statusSyncCard();
-    localControlCard(false);
-  }
-
-  private void settingsScreen() {
-    text(body, "我的工作区", 29, INK);
-    text(body, "让任务持续执行，让决定回到你手中。", 14, MUTED);
-    LinearLayout notification = card(body);
-    text(notification, "任务通知", 18, INK);
-    text(notification, "保持后台连接，在任务需要确认或完成时提醒。系统省电策略或电脑离线可能延迟通知。", 13, MUTED);
-    boolean enabled = store.notifications();
-    button(
-        notification,
-        enabled ? "停止后台任务通知" : "开启后台任务通知",
-        !enabled,
-        () -> {
-          if (enabled) {
-            store.notifications(false);
-            stopService(new Intent(this, RemoteSyncService.class));
-            render();
-          } else {
-            if (Build.VERSION.SDK_INT >= 33
-                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)
-                    != PackageManager.PERMISSION_GRANTED) {
-              requestPermissions(new String[] {Manifest.permission.POST_NOTIFICATIONS}, 32);
-              return;
-            }
-            enableNotifications();
-          }
-        });
-    button(
-        notification,
-        "系统通知设置",
-        false,
-        () ->
-            startActivity(
-                new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                    .putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName())));
-    LinearLayout info = card(body);
-    text(info, "ProfilePilot 移动版", 18, INK);
-    text(
-        info,
-        "v0.2.0 · Android\n\n"
-            + "电脑负责执行与保存任务。手机负责发起、查看和确认。关闭 App 或断开手机不会终止电脑任务。\n\n"
-            + "连接信息仅存于本机，凭据由 Android Keystore 加密。你可随时在电脑撤销这台手机的授权。",
-        14,
-        MUTED);
-    button(info, "管理已连接电脑", false, () -> switchTab("设备"));
-    // The fixture activity is packaged only in debug APKs. Expose a local entry
-    // so developer flows can open it through the same managed phone controls.
-    if ((getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
-      button(info, "手机控制测试页", false, () -> startActivity(
-          new Intent().setClassName(this, getPackageName() + ".ControlBenchmarkActivity")
-              .putExtra("bench_reset", true)));
-    }
-  }
-
-  private void enableNotifications() {
-    if (!getSystemService(NotificationManager.class).areNotificationsEnabled()) {
-      message("请先在系统设置中允许任务通知");
-      return;
-    }
-    try {
-      startForegroundService(new Intent(this, RemoteSyncService.class));
-      store.notifications(true);
-      render();
-    } catch (Exception e) {
-      message(e.getMessage());
-    }
-  }
-
-  @Override
-  public void onRequestPermissionsResult(int request, String[] permissions, int[] results) {
-    super.onRequestPermissionsResult(request, permissions, results);
-    if (request == 32 && results.length > 0 && results[0] == PackageManager.PERMISSION_GRANTED)
-      enableNotifications();
-  }
-
-  private void editAddress(JSONObject item) {
-    EditText entry = new EditText(this);
-    entry.setText(item.optString("url"));
-    new AlertDialog.Builder(this)
-        .setTitle("电脑连接地址")
-        .setMessage("可使用同一网络地址或可达的 VPN 地址。电脑身份仍须与首次配对一致。")
-        .setView(entry)
-        .setNegativeButton("取消", null)
-        .setPositiveButton(
-            "保存",
-            (d, w) -> {
-              try {
-                item.put("url", RemoteClient.endpoint(entry.getText().toString()));
-                store.save(item);
-                if (item.optString("id").equals(pcId())) computer = item;
-                render();
-                refresh(true);
-              } catch (Exception e) {
-                message(e.getMessage());
-              }
-            })
-        .show();
-  }
-
-  private void removeComputer(JSONObject item) {
-    new AlertDialog.Builder(this)
-        .setTitle("移除「" + item.optString("name") + "」？")
-        .setMessage("会撤销此手机的连接授权。电脑上的任务会继续保留。")
-        .setNegativeButton("取消", null)
-        .setPositiveButton(
-            "移除",
-            (d, w) -> {
-              io.execute(
-                  () -> {
-                    try {
-                      RemoteClient.mutation(
-                          store, item, RemoteClient.object("action", "device.disconnect"), false);
-                      store.remove(item.getString("id"));
-                      main.post(
-                          () -> {
-                            loadComputer();
-                            render();
-                          });
-                    } catch (Exception e) {
-                      main.post(
-                          () ->
-                              new AlertDialog.Builder(this)
-                                  .setTitle("未能联系电脑")
-                                  .setMessage(e.getMessage() + "\n\n可仅删除手机上的凭据；之后仍需在电脑撤销此手机授权。")
-                                  .setNegativeButton("返回", null)
-                                  .setPositiveButton(
-                                      "仅从手机移除",
-                                      (dialog, which) -> {
-                                        try {
-                                          store.remove(item.optString("id"));
-                                          loadComputer();
-                                          render();
-                                        } catch (Exception error) {
-                                          message(error.getMessage());
-                                        }
-                                      })
-                                  .show());
-                    }
-                  });
-            })
-        .show();
-  }
-
-  private void pair(String value) {
-    if ("status".equals(Uri.parse(value.trim()).getHost())) { pairStatus(value); return; }
-    try {
-      JSONObject target = RemoteClient.parsePair(value);
-      new AlertDialog.Builder(this)
-          .setTitle("连接「" + target.getString("name") + "」？")
-          .setMessage(
-              "地址："
-                  + target.getString("url")
-                  + "\n\n只连接你自己电脑上刚生成的配对码。配对后可以查看任务，并向该电脑发送操作。\n\n设备指纹："
-                  + target.getString("fingerprint").substring(0, 16)
-                  + "…")
-          .setNegativeButton("取消", null)
-          .setPositiveButton(
-              "连接",
-              (d, w) -> {
-                message("正在安全连接…");
-                io.execute(
-                    () -> {
-                      try {
-                        JSONObject result =
-                            RemoteClient.post(
-                                target,
-                                "/v1/pair",
-                                RemoteClient.object(
-                                    "token",
-                                    target.getString("token"),
-                                    "clientId",
-                                    store.clientId(),
-                                    "name",
-                                    Build.MANUFACTURER + " " + Build.MODEL),
-                                false);
-                        if (!target.getString("id").equals(result.getString("computerId"))
-                            || !target
-                                .getString("fingerprint")
-                                .equals(result.getString("fingerprint")))
-                          throw new IllegalStateException("配对电脑身份不一致");
-                        target
-                            .put("token", result.getString("token"))
-                            .put("deviceId", result.getString("deviceId"))
-                            .put("name", result.getString("computerName"));
-                        store.save(target);
-                        store.select(target.getString("id"));
-                        main.post(
-                            () -> {
-                              saveDraft();
-                              loadComputer();
-                              tab = "Agent";
-                              taskId = "";
-                              render();
-                              refresh(true);
-                            });
-                      } catch (Exception error) {
-                        main.post(() -> message("连接失败：" + error.getMessage()));
-                      }
-                    });
-              })
-          .show();
-    } catch (Exception e) {
-      message("无法识别配对信息：" + e.getMessage());
-    }
-  }
-
   private void pairStatus(String value) {
     try {
-      JSONObject target = StatusSyncClient.parse(value);
-      new AlertDialog.Builder(this).setTitle("开启手机状态同步")
-          .setMessage("向服务器上报权限、锁屏、调试开关及当前 Wi-Fi 地址和发现的无线调试端口，帮助已绑定的电脑自动连接。不上传屏幕或控制凭据。\n\n服务器：" + target.getString("url") + "\n\n可在设备页或通知栏停止同步。")
-          .setNegativeButton("取消", null).setPositiveButton("开启同步", (d, w) -> io.execute(() -> {
-            try {
-              StatusSyncClient.pair(this, target);
-              main.post(() -> { startForegroundService(new Intent(this, StatusSyncService.class)); render(); message("状态同步已开启，电脑无需连接手机即可查看"); });
-            } catch (Exception error) { main.post(() -> message("状态同步配对失败：" + error.getMessage())); }
-          })).show();
-    } catch (Exception error) { message("无法识别状态同步链接"); }
-  }
-
-  private void statusSyncCard() {
-    LinearLayout panel = card(body);
-    text(panel, "手机状态同步", 18, INK);
-    text(panel, "同步权限和当前 Wi-Fi 连接地址，帮助电脑自动发现手机。状态同步无需同一 Wi-Fi；无线控制仍需同一局域网并完成配对。", 13, MUTED);
-    try {
-      org.json.JSONArray ips = WirelessNetwork.snapshot(this).getJSONArray("wifiIpv4");
-      StringBuilder addresses = new StringBuilder();
-      for (int i = 0; i < ips.length(); i++) { if (i > 0) addresses.append("、"); addresses.append(ips.getString(i)); }
-      text(panel, ips.length() == 0 ? "当前未取得 Wi-Fi 局域网地址" : "当前 Wi-Fi IP：" + addresses, 13, MUTED);
-    } catch (Exception ignored) { }
-    try {
-      JSONObject link = store.statusLink(false);
-      if (link == null) { text(panel, "电脑打开「手机 → 连接手机 → 通过服务器同步状态」，在本页扫码或粘贴配对链接。", 13, MUTED); return; }
-      text(panel, link.getString("url"), 12, MUTED);
-      boolean enabled = store.statusEnabled();
-      text(panel, enabled ? StatusSyncService.message : "同步已停止", 14, MUTED);
-      if (StatusSyncService.lastReportedAt > 0) text(panel, "最后上报：" + java.text.DateFormat.getTimeInstance().format(new java.util.Date(StatusSyncService.lastReportedAt)), 12, MUTED);
-      button(panel, enabled ? "停止状态同步" : "开启状态同步", !enabled, () -> {
-        store.statusEnabled(!enabled);
-        if (enabled) stopService(new Intent(this, StatusSyncService.class));
-        else startForegroundService(new Intent(this, StatusSyncService.class));
-        render();
+      JSONObject target=StatusSyncClient.parse(value); LinearLayout content=showSheet("开启手机状态同步？");
+      paragraph(content,"向以下服务器上报权限、锁屏、调试开关及当前 Wi-Fi 地址和发现的无线调试端口，帮助已绑定的电脑自动连接。不上传屏幕或控制凭据。");
+      paragraph(content,target.getString("url")); paragraph(content,"可在「更多 → 手机状态同步」或通知栏停止同步。");
+      actionButton(content,"开启同步",true,() -> {
+        dismissSheet(); io.execute(() -> {
+          try { StatusSyncClient.pair(this,target); postAlive(() -> { startStatusSync(); message("手机状态同步已开启。"); }); }
+          catch (Exception error) { postAlive(() -> message("状态同步配对失败，请检查网络或重新扫码。")); }
+        });
       });
-    } catch (Exception error) { text(panel, "同步配置无法读取，请重新扫码", 13, MUTED); }
+    } catch (Exception error) { message("请使用电脑生成的手机状态同步链接。"); }
   }
-
-  private boolean connected() {
-    if (computer == null) {
-      message("请先在设备页连接电脑");
-      return false;
+  private void startStatusSync() {
+    try { startForegroundService(new Intent(this,StatusSyncService.class)); }
+    catch (RuntimeException error) { message("状态同步暂未启动，可在更多选项中重新开启。"); }
+  }
+  private void openNotifications() {
+    dismissSheet();
+    if (Build.VERSION.SDK_INT>=33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)!=PackageManager.PERMISSION_GRANTED
+        && (!pairing().getBoolean("notificationRequested",false) || shouldShowRequestPermissionRationale(Manifest.permission.POST_NOTIFICATIONS))) {
+      pairing().edit().putBoolean("notificationRequested",true).apply();
+      requestPermissions(new String[] {Manifest.permission.POST_NOTIFICATIONS},1);
     }
-    return true;
+    else launchSetting(() -> startActivity(new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE,getPackageName())));
+  }
+  private void launchSetting(Runnable action) {
+    dismissSheet(); try { action.run(); } catch (RuntimeException error) { message("无法打开该设置，请在系统设置中手动检查。"); }
   }
 
-  private void message(String value) {
-    if (isDestroyed()) return;
-    if (notice != null) {
-      notice.setText(value == null ? "操作未完成" : value);
-      notice.setVisibility(View.VISIBLE);
-    } else Toast.makeText(this, value, Toast.LENGTH_LONG).show();
-  }
-
-  private void pendingRequestBanner() {
-    if (computer == null) return;
-    try {
-      if (store.pending(pcId()) != null) {
-        LinearLayout pending = card(body);
-        text(pending, "上次操作的结果尚未确认", 15, 0xffac5c27);
-        text(pending, "网络可能在提交后断开。可用同一请求编号查询结果，避免重复执行。", 13, MUTED);
-        button(
-            pending,
-            "重试原请求",
-            true,
-            () ->
-                mutate(
-                    null,
-                    true,
-                    result -> {
-                      JSONObject task = result.optJSONObject("task");
-                      if (task != null) openTask(task.optString("id"));
-                      else {
-                        render();
-                        refresh(true);
-                      }
-                    }));
-        button(
-            pending,
-            "已核对任务，清除待确认标记",
-            false,
-            () ->
-                new AlertDialog.Builder(this)
-                    .setTitle("已经核对电脑任务？")
-                    .setMessage("清除标记不会撤销已执行的操作。请先在任务列表确认结果，避免重复提交。")
-                    .setNegativeButton("返回", null)
-                    .setPositiveButton(
-                        "已核对",
-                        (d, w) -> {
-                          try {
-                            store.pending(pcId(), null);
-                            render();
-                          } catch (Exception e) {
-                            message(e.getMessage());
-                          }
-                        })
-                    .show());
+  private LinearLayout showSheet(String heading) {
+    dismissSheet(); Dialog dialog=new Dialog(this); dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+    LinearLayout panel=column(); panel.setPadding(dp(22),dp(8),dp(22),dp(18));
+    GradientDrawable surface=background(Color.WHITE,0,false); float radius=dp(24);
+    surface.setCornerRadii(new float[] {radius,radius,radius,radius,0,0,0,0}); panel.setBackground(surface);
+    View handle=new View(this); handle.setBackground(background(0xffdce3de,4,false));
+    LinearLayout.LayoutParams handleParams=new LinearLayout.LayoutParams(dp(32),dp(4));
+    handleParams.gravity=Gravity.CENTER_HORIZONTAL; handleParams.bottomMargin=dp(10); panel.addView(handle,handleParams);
+    LinearLayout top=row(); panel.addView(top); TextView sheetTitle=text(top,heading,20,INK,true); weight(sheetTitle);
+    View close=iconButton("close","关闭面板",this::dismissSheet); close.setId(R.id.sheet_close); top.addView(close);
+    ScrollView scroll=new ScrollView(this) {
+      @Override protected void onMeasure(int widthSpec,int heightSpec) {
+        int maximum=(int)(getResources().getDisplayMetrics().heightPixels*.7f);
+        super.onMeasure(widthSpec,View.MeasureSpec.makeMeasureSpec(maximum,View.MeasureSpec.AT_MOST));
       }
-    } catch (Exception e) {
-      message(e.getMessage());
+    };
+    LinearLayout content=column(); content.setPadding(0,dp(8),0,dp(12)); scroll.addView(content); panel.addView(scroll);
+    dialog.setContentView(panel); dialog.setCanceledOnTouchOutside(true); sheet=dialog;
+    Window window=dialog.getWindow();
+    if (window!=null) {
+      window.setBackgroundDrawableResource(android.R.color.transparent); window.setGravity(Gravity.BOTTOM);
+      window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND); window.setDimAmount(.28f); window.setNavigationBarColor(Color.WHITE);
     }
+    dialog.show(); if (window!=null) window.setLayout(-1,-2); return content;
   }
 
-  private void mutate(
-      JSONObject command, boolean retry, java.util.function.Consumer<JSONObject> success) {
-    if (!connected() || busy) return;
-    busy = true;
-    String pc = pcId();
-    JSONObject target = computer;
-    message("正在提交…");
-    hideKeyboard();
-    io.execute(
-        () -> {
-          try {
-            JSONObject result = RemoteClient.mutation(store, target, command, retry);
-            main.post(
-                () -> {
-                  busy = false;
-                  if (isDestroyed() || !pc.equals(pcId())) return;
-                  message("操作已同步到电脑");
-                  success.accept(result);
-                });
-          } catch (Exception error) {
-            main.post(
-                () -> {
-                  busy = false;
-                  if (!pc.equals(pcId())) return;
-                  render();
-                  message(error.getMessage());
-                });
-          }
-        });
+  private void dismissSheet() { if (sheet!=null) { Dialog current=sheet; sheet=null; current.dismiss(); } }
+  private void postAlive(Runnable action) { main.post(() -> { if (!isFinishing() && !isDestroyed()) action.run(); }); }
+  private void message(String value) { Toast.makeText(this,value,Toast.LENGTH_LONG).show(); }
+  private int dp(int value) { return Math.round(value*getResources().getDisplayMetrics().density); }
+  private LinearLayout column() { LinearLayout view=new LinearLayout(this); view.setOrientation(LinearLayout.VERTICAL); return view; }
+  private LinearLayout row() { LinearLayout view=new LinearLayout(this); view.setOrientation(LinearLayout.HORIZONTAL); view.setGravity(Gravity.CENTER_VERTICAL); return view; }
+  private void weight(View view) { view.setLayoutParams(new LinearLayout.LayoutParams(0,-2,1)); }
+  private HomeIcon icon(String name,int color,int size) { HomeIcon icon=new HomeIcon(this,name,color); icon.setLayoutParams(new LinearLayout.LayoutParams(dp(size),dp(size))); return icon; }
+  private GradientDrawable background(int color,int radius,boolean border) {
+    GradientDrawable drawable=new GradientDrawable(); drawable.setColor(color); drawable.setCornerRadius(dp(radius));
+    if (border) drawable.setStroke(dp(1),LINE); return drawable;
   }
-
-  private void updateConnection() {
-    if (connection == null) return;
-    connection.setVisibility(tab.equals("首页") && taskId.isEmpty() ? View.GONE : View.VISIBLE);
-    connection.setText(
-        computer == null
-            ? "○  尚未连接电脑"
-            : (sync.has("at") ? "●  " : "○  ")
-                + computer.optString("name")
-                + (sync.has("at")
-                    ? (sync.optBoolean("canControl") ? " · 已连接" : " · 仅查看")
-                    : " · 等待连接"));
-    connection.setTextColor(sync.has("at") ? BLUE : MUTED);
+  private RippleDrawable ripple(int color,int radius,boolean border) {
+    return new RippleDrawable(ColorStateList.valueOf(0x1811775d),background(color,radius,border),background(Color.WHITE,radius,false));
   }
-
-  private void refresh(boolean requested) {
-    if (computer == null || polling || isDestroyed()) return;
-    polling = true;
-    JSONObject target = computer;
-    String pc = pcId(), id = taskId;
-    int after = cursor, rev = revision;
-    io.execute(
-        () -> {
-          try {
-            JSONObject data = RemoteClient.read(target, RemoteClient.object("action", "sync"));
-            JSONObject task =
-                id.isEmpty()
-                    ? null
-                    : RemoteClient.read(
-                        target,
-                        RemoteClient.object(
-                            "action",
-                            "task.get",
-                            "id",
-                            id,
-                            "after",
-                            after,
-                            "revision",
-                            rev,
-                            "limit",
-                            100));
-            main.post(
-                () -> {
-                  polling = false;
-                  if (isDestroyed() || !pc.equals(pcId())) return;
-                  sync = data;
-                  JSONArray updated = data.optJSONArray("tasks");
-                  if (taskList.length() <= 50 || requested) {
-                    taskList = updated == null ? new JSONArray() : updated;
-                    totalTasks = data.optInt("total");
-                  } else {
-                    for (int i = 0; updated != null && i < updated.length(); i++)
-                      try {
-                        taskList.put(i, updated.getJSONObject(i));
-                      } catch (JSONException ignored) {
-                      }
-                  }
-                  updateConnection();
-                  updateProfiles();
-                  if (modelInfo != null) modelInfo.setText("模型：" + sync.optString("model", "使用电脑当前模型"));
-                  if (taskId.isEmpty()) renderTaskCards();
-                  if (task != null && id.equals(taskId)) {
-                    detail = task.optJSONObject("task");
-                    if (task.optBoolean("reset")) events.clear();
-                    JSONArray incoming = task.optJSONArray("events");
-                    for (int i = 0; incoming != null && i < incoming.length(); i++) {
-                      JSONObject event = incoming.optJSONObject(i);
-                      events.put(event.optString("id"), event);
-                    }
-                    cursor = task.optInt("cursor");
-                    revision = task.optInt("revision");
-                    hasMore = task.optBoolean("hasMore");
-                    updateDetail();
-                    JSONObject stream = task.optJSONObject("stream");
-                    if (streamText != null)
-                      streamText.setText(
-                          stream == null
-                              ? ""
-                              : stream.optString(
-                                  "text", stream.optString("partialText", "Agent 正在思考…")));
-                  }
-                  if (requested && notice != null) notice.setVisibility(View.GONE);
-                });
-          } catch (Exception e) {
-            main.post(
-                () -> {
-                  polling = false;
-                  if (!pc.equals(pcId()) || isDestroyed()) return;
-                  connection.setText("○  " + target.optString("name") + " · 暂不可达");
-                  connection.setTextColor(MUTED);
-                  if (requested) message("连接未完成：" + e.getMessage() + "。电脑须开机，手机须能访问电脑地址。");
-                });
-          }
-        });
+  private LinearLayout card(LinearLayout parent,int radius) {
+    LinearLayout card=column(); card.setBackground(background(Color.WHITE,radius,true)); card.setClipToOutline(true);
+    parent.addView(card,new LinearLayout.LayoutParams(-1,-2)); return card;
   }
-
-  private void hideKeyboard() {
-    View focus = getCurrentFocus();
-    if (focus != null) {
-      getSystemService(InputMethodManager.class).hideSoftInputFromWindow(focus.getWindowToken(), 0);
-      focus.clearFocus();
-    }
+  private TextView text(LinearLayout parent,String value,int size,int color,boolean bold) {
+    TextView text=new TextView(this); text.setText(value); text.setTextSize(size); text.setTextColor(color);
+    text.setIncludeFontPadding(false); text.setLineSpacing(dp(3),1); if (bold) text.setTypeface(null,Typeface.BOLD);
+    parent.addView(text,new LinearLayout.LayoutParams(parent.getOrientation()==LinearLayout.HORIZONTAL?-2:-1,-2)); return text;
   }
-
-  @Override
-  protected void onSaveInstanceState(Bundle out) {
-    saveDraft();
-    out.putString("tab", tab);
-    out.putString("taskId", taskId);
-    super.onSaveInstanceState(out);
+  private TextView heading(LinearLayout parent,String title,String suffix) {
+    LinearLayout row=row(); LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(-1,-2);
+    params.topMargin=dp(24); params.bottomMargin=dp(12); parent.addView(row,params);
+    TextView name=text(row,title,16,INK,true); weight(name); return text(row,suffix,11,MUTED,false);
   }
-
-  @Override
-  protected void onResume() {
-    super.onResume();
-    PhoneSettings.cancelPending();
-    if (store.statusEnabled()) {
-      try { startForegroundService(new Intent(this, StatusSyncService.class)); }
-      catch (Exception error) { message("状态同步未恢复，请在设备页重新开启"); }
-    }
-    main.removeCallbacks(localTick);
-    main.post(localTick);
-    main.removeCallbacks(tick);
-    main.post(tick);
-    if (computer != null && store.notifications() && !RemoteSyncService.running)
-      try {
-        startForegroundService(new Intent(this, RemoteSyncService.class));
-      } catch (Exception error) {
-        message("后台连接未恢复：" + error.getMessage());
+  private TextView paragraph(LinearLayout parent,String value) {
+    TextView text=text(parent,value,13,MUTED,false); text.setLineSpacing(dp(5),1); text.setPadding(0,dp(8),0,dp(14)); return text;
+  }
+  private void clickable(View view,String description,Runnable action) {
+    view.setFocusable(true); view.setContentDescription(description); view.setOnClickListener(v -> action.run());
+    view.setAccessibilityDelegate(new View.AccessibilityDelegate() {
+      @Override public void onInitializeAccessibilityNodeInfo(View host,AccessibilityNodeInfo info) {
+        super.onInitializeAccessibilityNodeInfo(host,info); info.setClassName(Button.class.getName());
       }
+    });
   }
-
-  @Override
-  protected void onPause() {
-    main.removeCallbacks(localTick);
-    main.removeCallbacks(tick);
-    saveDraft();
-    super.onPause();
+  private View iconButton(String name,String description,Runnable action) {
+    LinearLayout button=row(); button.setGravity(Gravity.CENTER); button.setLayoutParams(new LinearLayout.LayoutParams(dp(48),dp(48)));
+    button.setBackground(ripple(BG,12,false)); button.addView(icon(name,MUTED,22)); clickable(button,description,action); return button;
   }
-
-  @Override
-  protected void onDestroy() {
-    main.removeCallbacks(localTick);
-    main.removeCallbacks(tick);
-    io.shutdownNow();
-    super.onDestroy();
+  private TextView button(LinearLayout parent,String value,boolean primary,Runnable action) {
+    TextView button=text(parent,value,14,primary?Color.WHITE:GREEN,true); button.setGravity(Gravity.CENTER);
+    button.setMinHeight(dp(48)); button.setPadding(dp(12),dp(12),dp(12),dp(12)); button.setBackground(ripple(primary?GREEN:MINT,11,false));
+    clickable(button,value,action==null?() -> {}:action); return button;
   }
+  private TextView actionButton(LinearLayout parent,String value,boolean primary,Runnable action) {
+    TextView button=button(parent,value,primary,action); LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(-1,-2);
+    params.topMargin=dp(10); button.setLayoutParams(params); return button;
+  }
+  private void menuItem(LinearLayout parent,String value,Runnable action) {
+    LinearLayout item=row(); item.setMinimumHeight(dp(54)); TextView label=text(item,value,15,INK,false); weight(label);
+    item.addView(icon("chevron",MUTED,16)); item.setBackground(ripple(Color.WHITE,10,false)); clickable(item,value,action); parent.addView(item);
+  }
+  private void info(LinearLayout parent,String label,String value) {
+    LinearLayout item=row(); item.setPadding(0,dp(14),0,dp(14)); parent.addView(item); TextView name=text(item,label,13,INK,false); weight(name);
+    TextView detail=text(item,value,12,MUTED,false); detail.setGravity(Gravity.END); detail.setLayoutParams(new LinearLayout.LayoutParams(0,-2,1.4f));
+  }
+  private SettingRow setting(LinearLayout parent,String icon,String label,String detail,int id,Runnable action) {
+    if (parent.getChildCount()>0) { View line=new View(this); line.setBackgroundColor(LINE); parent.addView(line,new LinearLayout.LayoutParams(-1,dp(1))); }
+    SettingRow item=new SettingRow(icon,label,detail,action); if (id!=View.NO_ID) item.view.setId(id);
+    parent.addView(item.view,new LinearLayout.LayoutParams(-1,-2)); return item;
+  }
+  private final class SettingRow {
+    final LinearLayout view; final TextView name,detail,value; final HomeIcon icon;
+    SettingRow(String glyph,String label,String hint,Runnable action) {
+      view=row(); view.setMinimumHeight(dp(80)); view.setPadding(dp(14),dp(14),dp(12),dp(14));
+      view.setBackground(ripple(Color.WHITE,10,false)); icon=icon(glyph,MUTED,23); view.addView(icon);
+      LinearLayout copy=column(); LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(0,-2,1);
+      params.setMarginStart(dp(12)); params.setMarginEnd(dp(6)); view.addView(copy,params);
+      name=text(copy,label,14,INK,true); detail=text(copy,hint,11,MUTED,false); detail.setPadding(0,dp(5),0,0);
+      value=text(view,"",12,GREEN,false); value.setMaxWidth(dp(88)); value.setGravity(Gravity.END);
+      HomeIcon arrow=icon("chevron",0xff92a197,14); LinearLayout.LayoutParams arrowParams=new LinearLayout.LayoutParams(dp(14),dp(14));
+      arrowParams.setMarginStart(dp(3)); view.addView(arrow,arrowParams); clickable(view,label+"，查看设置",action);
+    }
+    void status(String label,int color) { setText(value,label); value.setTextColor(color); view.setContentDescription(name.getText()+"，"+label+"，查看设置"); }
+  }
+  private void setText(TextView view,String value) { if (!value.contentEquals(view.getText())) view.setText(value); }
 
+  @Override protected void onSaveInstanceState(Bundle state) {
+    state.putBoolean("permissionsExpanded",permissionsExpanded); state.putInt("lastPermissionCount",lastPermissionCount);
+    state.putBoolean("seenConnected",seenConnected); state.putString("pendingToken",pendingToken); state.putString("pendingComputer",pendingComputer);
+    super.onSaveInstanceState(state);
+  }
+  @Override protected void onResume() {
+    super.onResume(); PhoneSettings.cancelPending(); ensureControlService(); if (store.statusEnabled()) startStatusSync();
+    main.removeCallbacks(tick); main.post(tick);
+  }
+  @Override protected void onStart() {
+    super.onStart(); visibleHomes++;
+    if (ControlService.current!=null) ControlService.current.refreshPresentation();
+  }
+  @Override protected void onStop() {
+    visibleHomes=Math.max(0,visibleHomes-1);
+    if (ControlService.current!=null) ControlService.current.refreshPresentation();
+    super.onStop();
+  }
+  @Override protected void onPause() { main.removeCallbacks(tick); super.onPause(); }
+  @Override protected void onDestroy() { main.removeCallbacksAndMessages(null); dismissSheet(); io.shutdownNow(); super.onDestroy(); }
 }

@@ -49,6 +49,8 @@ import type { AgentZoomCommand } from "./shared/workspace-zoom";
 
 contextBridge.exposeInMainWorld("desktopWindow", {
   platform: process.platform,
+  reloadWorkspace: () => ipcRenderer.send(IPC_CHANNELS.reloadWorkspace),
+  reportStartupFailure: (reason: string) => ipcRenderer.send(IPC_CHANNELS.workspaceStartupFailure, reason),
   onNavigate: (listener: (href: string) => void) => {
     const handler = (_event: IpcRendererEvent, href: string) => listener(href);
     ipcRenderer.on(IPC_CHANNELS.navigateWorkspace, handler);

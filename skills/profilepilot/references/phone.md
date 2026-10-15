@@ -4,6 +4,12 @@ Read `local/phone-control.md` beside the skill entrypoint if it exists. Apply th
 
 Phone control needs the ProfilePilot desktop app running and an authorized ADB connection. App mode additionally needs the Android companion paired with its required permissions. An explicitly selected basic mode needs no phone App. Set up the connection with `ppilot phone`; the desktop **手机** workspace is also available. Users confirm Android permissions themselves. Keep browser and phone task lifecycles separate.
 
+## Android emulator preview
+
+Use `ppilot phone emulator-list`, then `ppilot phone emulator-connect --name ACTUAL_AVD_NAME` to start or reopen the selected emulator. The desktop **启动 / 连接模拟器** action uses the same path. On Windows it checks the window against the monitor's work area and adjusts an off-screen position or oversized window, including when reusing an already running emulator. A correction failure is reported instead of claiming the preview is ready. Existing minimized windows are left minimized.
+
+Do not launch `emulator.exe` directly or through a custom shell/CIM process that bypasses this check. If a window is outside the screen, run the same `emulator-connect` command again; it reuses the AVD without reinstalling its App, restarting the emulator, or starting/resuming control. If the installed CLI lacks these commands, update the desktop CLI and instructions together first. Verify that the window and title bar are inside the desktop before handing over a preview. Phone setup and interaction still use the returned device ID and the session rules below.
+
 ## Optional basic mode without a phone App
 
 Use `ppilot phone start --device DEVICE_ID --backend basic --mode view|control --controller AGENT_NAME --task TASK_DESCRIPTION` only when the user selects or authorizes basic mode. Do not use it as an automatic fallback for an unavailable App or to bypass a paused/occupied session. The same target selection and user takeover rules apply. End existing sessions before switching modes; only one basic session is allowed at a time.

@@ -19,7 +19,7 @@ final class StatusSyncClient {
 
   static JSONObject parse(String value) throws Exception {
     Uri uri = Uri.parse(value.trim());
-    if (!"profilepilot".equals(uri.getScheme()) || !"status".equals(uri.getHost())) throw new IllegalArgumentException("不是状态同步配对链接");
+    if (!BuildConfig.PAIRING_SCHEME.equals(uri.getScheme()) || !"status".equals(uri.getHost())) throw new IllegalArgumentException("请使用当前版本对应的电脑配对链接");
     String id = uri.getQueryParameter("id"), token = uri.getQueryParameter("token");
     if (id == null || !id.matches("[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}")
         || token == null || !token.matches("[a-f0-9]{64}")) throw new IllegalArgumentException("配对信息不完整");

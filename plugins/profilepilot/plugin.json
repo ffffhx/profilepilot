@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "profilepilot",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Use your signed-in Chrome tabs, managed browsers, Electron apps, and Android devices through the local ProfilePilot CLI.",
   "author": {
     "name": "ffffhx",

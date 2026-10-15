@@ -49,6 +49,26 @@ public class OverlayPermissionSetupTest {
         nodes.set(4, text(3, "Allow display over other apps", "android:id/title", false));
         assertEquals(Kind.ENABLE, target(nodes).kind());
     }
+    @Test public void recognizesRealmeOverlayPermissionForDevelopmentApp() {
+        List<Node> nodes = detail(false);
+        nodes.set(1, text(0, "悬浮窗", "", false));
+        nodes.set(2, text(0, "ProfilePilot 开发版", "com.android.settings:id/entity_header_title", false));
+        nodes.set(4, text(3, "授予悬浮窗权限", "android:id/title", false));
+        nodes.set(5, new Node(3, "关闭", "android:id/switch_widget", true, false, true, false));
+        assertEquals(new Target(Kind.ENABLE, 3), OverlayPermissionSetup.target(nodes,
+            "ProfilePilot 开发版", PACKAGE + ".debug"));
+        assertEquals(Kind.NONE, target(nodes).kind());
+        nodes.set(5, new Node(3, "开启", "android:id/switch_widget", true, true, true, false));
+        assertEquals(Kind.NONE, OverlayPermissionSetup.target(nodes,
+            "ProfilePilot 开发版", PACKAGE + ".debug").kind());
+    }
+    @Test public void distinguishesDevelopmentAndOriginalAppInSameList() {
+        List<Node> nodes = appList();
+        nodes.set(3, text(2, "ProfilePilot 开发版", "android:id/title", false));
+        assertEquals(new Target(Kind.OPEN_APP, 2), OverlayPermissionSetup.target(nodes,
+            "ProfilePilot 开发版", PACKAGE + ".debug"));
+        assertEquals(new Target(Kind.OPEN_APP, 4), target(nodes));
+    }
     @Test public void doesNotDisableCheckedSwitchOrClickDisabledSwitch() {
         assertEquals(Kind.NONE, target(detail(true)).kind());
         List<Node> nodes = detail(false);
@@ -122,7 +142,7 @@ public class OverlayPermissionSetupTest {
     @Test public void expiredLockedOrChangedSessionCannotClick() {
         OverlayPermissionSetup.Request request = new OverlayPermissionSetup.Request(null, 0);
         assertFalse(request.consume(Kind.ENABLE, null, 100, false));
-        assertFalse(request.consume(Kind.ENABLE, null, 18000, true));
+        assertFalse(request.consume(Kind.ENABLE, null, OverlayPermissionSetup.REQUEST_TIMEOUT_MS, true));
         AtomicLong clock = new AtomicLong(1);
         SessionState session = new SessionState(clock::get);
         session.start(session.instanceId, 0, UUID.randomUUID().toString(), "control", "pc", "agent", "setup", 1);
@@ -154,11 +174,20 @@ public class OverlayPermissionSetupTest {
         assertTrue(request.consumeScroll("page0", null, 100, true));
         assertFalse(request.consumeScroll("page0", null, 1000, true));
         assertFalse(request.consumeScroll("page1", null, 200, true));
-        for (int i = 1; i < 8; i++) assertTrue(request.consumeScroll("page" + i, null, i * 1000, true));
-        assertFalse(request.consumeScroll("page8", null, 8000, true));
-        assertTrue(request.consume(Kind.OPEN_APP, null, 8500, true));
-        assertFalse(request.consumeScroll("page9", null, 9000, true));
-        assertTrue(request.consume(Kind.ENABLE, null, 9500, true));
-        assertFalse(request.consume(Kind.ENABLE, null, 9600, true));
+        for (int i = 1; i < OverlayPermissionSetup.MAX_SCROLLS; i++)
+            assertTrue(request.consumeScroll("page" + i, null, i * 1000, true));
+        long finished = OverlayPermissionSetup.MAX_SCROLLS * 1000L;
+        assertFalse(request.consumeScroll("limit", null, finished, true));
+        assertTrue(request.consume(Kind.OPEN_APP, null, finished + 500, true));
+        assertFalse(request.consumeScroll("later", null, finished + 1000, true));
+        assertTrue(request.consume(Kind.ENABLE, null, finished + 1500, true));
+        assertFalse(request.consume(Kind.ENABLE, null, finished + 1600, true));
+    }
+    @Test public void reachesLatinAppAfterMoreThanEightPagesAndSlowSettingsTransitions() {
+        OverlayPermissionSetup.Request request = new OverlayPermissionSetup.Request(null, 0);
+        for (int page = 0; page < 12; page++)
+            assertTrue(request.consumeScroll("Chinese apps " + page, null, 100 + page * 1600L, true));
+        assertTrue(request.consume(Kind.OPEN_APP, null, 21000, true));
+        assertTrue(request.consume(Kind.ENABLE, null, 23000, true));
     }
 }

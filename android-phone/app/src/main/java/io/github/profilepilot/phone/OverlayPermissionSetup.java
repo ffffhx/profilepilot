@@ -5,6 +5,8 @@ import io.github.profilepilot.phone.DebuggingSetup.Node;
 
 /** Recognize only our entry in overlay settings, or our app's overlay switch. */
 final class OverlayPermissionSetup {
+    static final int MAX_SCROLLS = 32;
+    static final long REQUEST_TIMEOUT_MS = 45000;
     enum Kind { NONE, OPEN_APP, ENABLE, SCROLL_APP_LIST }
     record Target(Kind kind, int index) { }
     static final Target NONE = new Target(Kind.NONE, -1);
@@ -12,7 +14,7 @@ final class OverlayPermissionSetup {
         "Display over other apps", "Allow display over other apps", "Draw over other apps",
         "Appear on top", "Permit drawing over other apps", "显示在其他应用的上层", "在其他应用上层显示",
         "允许显示在其他应用的上层", "允许在其他应用上层显示", "允许显示在其他应用上层",
-        "悬浮窗", "悬浮窗权限", "显示悬浮窗", "允许显示悬浮窗", "允许悬浮窗",
+        "悬浮窗", "悬浮窗权限", "显示悬浮窗", "允许显示悬浮窗", "允许悬浮窗", "授予悬浮窗权限",
         "顯示在其他應用程式上層", "允許顯示在其他應用程式上層");
 
     private static boolean overlayLabel(String text) {
@@ -130,7 +132,8 @@ final class OverlayPermissionSetup {
         private int scrolls;
         private String lastPage;
         private long lastScrollAt;
-        Request(SessionState owner, long now) { lifetime = new DebuggingSetup.Request(owner, now, 18000); }
+        // Some OEMs sort Latin names after every Chinese app, placing us many pages down.
+        Request(SessionState owner, long now) { lifetime = new DebuggingSetup.Request(owner, now, REQUEST_TIMEOUT_MS); }
         boolean valid(SessionState owner, long now, boolean unlocked) { return lifetime.valid(owner, now, unlocked); }
         boolean consume(Kind kind, SessionState owner, long now, boolean unlocked) {
             if (!valid(owner, now, unlocked) || toggled || kind == Kind.NONE || kind == Kind.SCROLL_APP_LIST) return false;
@@ -141,7 +144,7 @@ final class OverlayPermissionSetup {
             return true; // Mark before dispatch: never retry an uncertain click.
         }
         boolean consumeScroll(String page, SessionState owner, long now, boolean unlocked) {
-            if (!valid(owner, now, unlocked) || openedApp || toggled || scrolls >= 8
+            if (!valid(owner, now, unlocked) || openedApp || toggled || scrolls >= MAX_SCROLLS
                 || page.isBlank() || page.equals(lastPage) || (scrolls > 0 && now - lastScrollAt < 700)) return false;
             lastPage = page;
             lastScrollAt = now;

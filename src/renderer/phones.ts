@@ -310,7 +310,7 @@ root.addEventListener("click", event => {
     const group = groupPhoneDevices(snapshot.devices, selected).find(item => item.routes.some(route => route.id === selected));
     const route = group?.routes.find(route => route.id === button.dataset.connectRoute);
     if (!group || !route || route.connection !== "device" || phoneConnectionPresentation(group).occupied) return;
-    void run(async () => { await window.phones.prepare(route.id); selected = route.id; notice(`请在${route.transport === "emulator" ? "模拟器里的" : "手机"} App 中确认连接与权限。`); });
+    void run(async () => { await window.phones.prepare(route.id); selected = route.id; notice(`App 已打开，正在自动连接；如需控制，请在${route.transport === "emulator" ? "模拟器里的" : "手机"} App 中完成权限准备。`); });
   }
   if (button.dataset.settingOpen) {
     const setting = button.dataset.settingOpen as PhoneSetting;

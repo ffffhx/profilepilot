@@ -2,7 +2,7 @@
 
 Read `local/phone-control.md` beside the skill entrypoint if it exists. Apply the user's preferred device, view/control mode and confirmation rules within the current task's authorization. These preferences are Agent instructions, not permission toggles; they cannot enable USB debugging or accessibility, authorize a new device, or resume a paused session.
 
-Phone control needs the ProfilePilot desktop app running and an authorized ADB connection. App mode additionally needs the Android companion paired with its required permissions. An explicitly selected basic mode needs no phone App. Set up the connection with `ppilot phone`; the desktop **手机** workspace is also available. Users confirm Android permissions themselves. Keep browser and phone task lifecycles separate.
+Phone control needs the ProfilePilot desktop app running and an authorized ADB connection. App mode additionally needs the Android companion connected with its required permissions. `ppilot phone connect` automatically pairs the companion over the system-authorized debugging connection; there is no extra App confirmation. Users still confirm Android USB/wireless debugging authorization and permissions themselves. An explicitly selected basic mode needs no phone App. Set up the connection with `ppilot phone`; the desktop **手机** workspace is also available. Keep browser and phone task lifecycles separate.
 
 ## Android emulator preview
 
@@ -16,7 +16,7 @@ Use `ppilot phone start --device DEVICE_ID --backend basic --mode view|control -
 
 Read `sessionId` and `generation` from the device's **basic** field in `list`, not its App `state`. Add `--backend basic` to `action`, `pause`, `resume` and `stop`. Supported actions are `screenshot` (PNG), `tap`, `swipe`, `key` and basic ASCII `text` (typing, not replacing a field). Capture a screenshot before coordinate input; the frame expires after 30 seconds and after any input. Chinese text, native selectors and flows need App mode. Never replay duplicate or uncertain inputs. A disconnect invalidates the session and requires a new explicit start.
 
-Basic mode's pause/stop controls live on the desktop; it has no phone-side capsule, notification or accessibility protection. The UI refreshes screenshots periodically, not video. `run`, `wrap` and generic `install` still require the App. To install ProfilePilot's App, first stop basic control, then use `ppilot phone connect --device DEVICE_ID`; users confirm the phone-side pairing and permissions. The desktop offers the same transition through “结束控制并安装 App”.
+Basic mode's pause/stop controls live on the desktop; it has no phone-side capsule, notification or accessibility protection. The UI refreshes screenshots periodically, not video. `run`, `wrap` and generic `install` still require the App. To install ProfilePilot's App, first stop basic control, then use `ppilot phone connect --device DEVICE_ID`; the App connects automatically, while users confirm its Android permissions. The desktop offers the same transition through “结束控制并安装 App”.
 
 ## Wi-Fi connection through the CLI
 

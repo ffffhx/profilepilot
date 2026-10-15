@@ -32,12 +32,12 @@ await run(['install', '-r', path.join(repo, 'android-phone/app/build/outputs/apk
 const logs = await run(['shell', 'am', 'instrument', '-w', '-r', '-e', 'class',
   'io.github.profilepilot.phone.MobileWorkflowTest', 'io.github.profilepilot.phone.debug.test/androidx.test.runner.AndroidJUnitRunner']);
 await writeFile(path.join(output, 'android-instrumentation.log'), logs);
-assert.match(logs, /OK \(3 tests\)/, logs);
-for (const name of ['home', 'wifi', 'connected', 'disconnected', 'authorization']) {
+assert.match(logs, /OK \(8 tests\)/, logs);
+for (const name of ['home', 'wifi', 'connected', 'disconnected', 'auto-connected']) {
   const result = await promisify(execFile)(adb, ['-s', serial, 'exec-out', 'run-as', 'io.github.profilepilot.phone.debug', 'cat',
     `files/mobile-verification/android-${name}.png`], { windowsHide: true, encoding: 'buffer', maxBuffer: 12 * 1024 * 1024 });
   assert.equal(result.stdout[0], 137, `Screenshot unavailable: ${name}`);
   await writeFile(path.join(output, `android-${name}.png`), result.stdout);
 }
 await run(['shell', 'am', 'start', '-n', 'io.github.profilepilot.phone.debug/io.github.profilepilot.phone.MainActivity']);
-console.log('Passed native home, separate USB/Wi-Fi settings, real connection evidence, disconnect/reconnect, initial approval and legacy-intent handling.');
+console.log('Passed native home, USB/Wi-Fi settings, connection evidence, automatic debugging pairing, public-entry isolation and session preservation.');

@@ -5,6 +5,7 @@ import static org.junit.Assert.*;
 import android.app.Dialog;
 import android.app.Instrumentation;
 import android.content.Context;
+import android.content.ComponentName;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
@@ -121,22 +122,107 @@ public class MobileWorkflowTest {
     }
   }
 
-  @Test public void initialPairingRequiresApprovalAndOldTaskIntentsStayOnHome() throws Exception {
+  @Test public void debuggingPairingConnectsWithoutApprovalAndOldTaskIntentsStayOnHome() throws Exception {
     Intent request=new Intent(context,MainActivity.class).putExtra("token",TEST_TOKEN).putExtra("computer","New computer");
     try (ActivityScenario<MainActivity> scenario=ActivityScenario.launch(request)) {
-      scenario.onActivity(a -> { assertFalse(pairing().contains("token")); assertNotNull(sheet(a)); });
+      until(() -> ControlService.current!=null);
+      String instance=ControlService.current.session.instanceId;
+      scenario.onActivity(a -> {
+        assertEquals(TEST_TOKEN,pairing().getString("token","")); assertNull(sheet(a));
+        assertNull(ControlService.current.session.sessionId);
+        assertEquals("idle",ControlService.current.session.phase);
+      });
       scenario.recreate();
       scenario.onActivity(a -> {
-        assertFalse(pairing().contains("token"));
-        assertNotNull(find(sheet(a).getWindow().getDecorView(),"允许此电脑"));
+        assertNull(sheet(a)); assertEquals(instance,ControlService.current.session.instanceId);
+        a.onNewIntent(new Intent(context,MainActivity.class).putExtra("token",TEST_TOKEN).putExtra("computer","New computer"));
+        assertEquals(instance,ControlService.current.session.instanceId);
       });
-      screen("android-authorization");
+      screen("android-auto-connected");
       scenario.onActivity(a -> {
-        find(sheet(a).getWindow().getDecorView(),"暂不允许").performClick();
-        assertFalse(pairing().contains("token")); assertNull(ControlService.current);
         a.onNewIntent(new Intent(context,MainActivity.class).putExtra("taskId","old-task").putExtra("computerId","old-computer"));
         assertNotNull(a.findViewById(R.id.home_wifi)); assertNull(find(a.getWindow().getDecorView(),"任务"));
       });
     }
+  }
+
+  @Test public void publicLauncherCannotPairOrReplaceComputer() throws Exception {
+    Intent launcher=context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
+    assertNotNull(launcher);
+    assertEquals("io.github.profilepilot.phone.LauncherActivity",launcher.getComponent().getClassName());
+    launcher.putExtra("token",TEST_TOKEN).putExtra("computer","Untrusted app");
+    try (ActivityScenario<MainActivity> scenario=ActivityScenario.launch(launcher)) {
+      scenario.onActivity(a -> {
+        assertFalse(pairing().contains("token")); assertNull(ControlService.current); assertNull(sheet(a));
+        pairing().edit().putString("token","b".repeat(64)).putString("computer","Existing computer").commit();
+        a.onNewIntent(new Intent(launcher).putExtra("token",TEST_TOKEN).putExtra("computer","Untrusted app"));
+        assertEquals("b".repeat(64),pairing().getString("token",""));
+        assertEquals("Existing computer",pairing().getString("computer",""));
+      });
+    }
+  }
+
+  @Test public void malformedConnectionDoesNotCreatePairing() {
+    // Match the explicit desktop Intent when exercising onNewIntent. ActivityScenario
+    // tracks lifecycle by Intent.filterEquals, including the original action/categories.
+    try (ActivityScenario<MainActivity> scenario=ActivityScenario.launch(new Intent(context,MainActivity.class))) {
+      scenario.onActivity(a -> {
+        for (String token:new String[]{"", "bad-token", "a".repeat(65)})
+          a.onNewIntent(new Intent(context,MainActivity.class).putExtra("token",token).putExtra("computer","Computer"));
+        for (String computer:new String[]{"", " ", "a".repeat(121)})
+          a.onNewIntent(new Intent(context,MainActivity.class).putExtra("token",TEST_TOKEN).putExtra("computer",computer));
+        assertFalse(pairing().contains("token")); assertNull(ControlService.current); assertNull(sheet(a));
+      });
+    }
+  }
+
+  @Test public void reconnectNeverResumesOrReplacesAnUnfinishedSession() throws Exception {
+    Intent request=new Intent(context,MainActivity.class).putExtra("token",TEST_TOKEN).putExtra("computer","Computer");
+    try (ActivityScenario<MainActivity> scenario=ActivityScenario.launch(request)) {
+      until(() -> ControlService.current!=null);
+      scenario.onActivity(a -> {
+        SessionState session=ControlService.current.session;
+        session.start(session.instanceId,session.generation,java.util.UUID.randomUUID().toString(),"control","Computer","Test","Test",1);
+        session.pause("User paused");
+        long generation=session.generation;
+        a.onNewIntent(new Intent(request));
+        assertSame(session,ControlService.current.session);
+        assertEquals("paused",session.phase); assertEquals(generation,session.generation);
+        for (String phase:new String[]{"viewing","controlling","executing","paused","disconnected"}) {
+          session.phase=phase;
+          a.onNewIntent(new Intent(context,MainActivity.class).putExtra("token","b".repeat(64)).putExtra("computer","Other computer"));
+          assertEquals(TEST_TOKEN,pairing().getString("token",""));
+          assertSame(session,ControlService.current.session); assertEquals(phase,session.phase);
+        }
+        session.stop("Test finished");
+      });
+    }
+  }
+
+  @Test public void idleComputerCanBeReplacedWithoutApproval() throws Exception {
+    Intent request=new Intent(context,MainActivity.class).putExtra("token",TEST_TOKEN).putExtra("computer","First computer");
+    try (ActivityScenario<MainActivity> scenario=ActivityScenario.launch(request)) {
+      until(() -> ControlService.current!=null);
+      ControlService previous=ControlService.current;
+      scenario.onActivity(a -> a.onNewIntent(new Intent(context,MainActivity.class)
+          .putExtra("token","b".repeat(64)).putExtra("computer","Second computer")));
+      until(() -> ControlService.current!=null && ControlService.current!=previous);
+      scenario.onActivity(a -> {
+        assertEquals("b".repeat(64),pairing().getString("token",""));
+        assertEquals("Second computer",ControlService.current.session.computer);
+        assertEquals("idle",ControlService.current.session.phase); assertNull(sheet(a));
+      });
+    }
+  }
+
+  @Test public void debuggingEntryRequiresSystemPermissionWhileLauncherRemainsPublic() throws Exception {
+    var packages=context.getPackageManager();
+    assertEquals("android.permission.DUMP",packages.getActivityInfo(new ComponentName(context,MainActivity.class),0).permission);
+    assertEquals(android.content.pm.PackageManager.PERMISSION_GRANTED,
+        packages.checkPermission("android.permission.DUMP","com.android.shell"));
+    assertEquals(android.content.pm.PackageManager.PERMISSION_DENIED,
+        packages.checkPermission("android.permission.DUMP",instrumentation.getContext().getPackageName()));
+    Intent launcher=packages.getLaunchIntentForPackage(context.getPackageName());
+    assertNotNull(launcher); assertNull(packages.getActivityInfo(launcher.getComponent(),0).permission);
   }
 }

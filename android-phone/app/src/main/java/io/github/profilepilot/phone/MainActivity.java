@@ -34,7 +34,6 @@ import androidx.activity.ComponentActivity;
 import androidx.activity.result.ActivityResultLauncher;
 import com.journeyapps.barcodescanner.ScanContract;
 import com.journeyapps.barcodescanner.ScanOptions;
-import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import org.json.JSONObject;
@@ -59,7 +58,6 @@ public final class MainActivity extends ComponentActivity {
   private int lastPermissionCount=-1;
   private PhoneHomeState lastState;
   private Dialog sheet;
-  private String pendingToken, pendingComputer;
   private final Runnable tick=new Runnable() {
     @Override public void run() { updateHome(); main.postDelayed(this,1000); }
   };
@@ -73,7 +71,6 @@ public final class MainActivity extends ComponentActivity {
       permissionsExpanded=state.getBoolean("permissionsExpanded");
       lastPermissionCount=state.getInt("lastPermissionCount",-1);
       seenConnected=state.getBoolean("seenConnected");
-      pendingToken=state.getString("pendingToken"); pendingComputer=state.getString("pendingComputer");
     }
     getWindow().setStatusBarColor(BG); getWindow().setNavigationBarColor(BG);
     getWindow().getDecorView().setSystemUiVisibility(
@@ -84,7 +81,6 @@ public final class MainActivity extends ComponentActivity {
     notifications.deleteNotificationChannel("mobile-tasks");
     notifications.deleteNotificationChannel("mobile-connection");
     renderHome(); consumeIntent();
-    if (pendingToken!=null && sheet==null) showPairing();
   }
 
   @Override protected void onNewIntent(Intent intent) {
@@ -97,15 +93,14 @@ public final class MainActivity extends ComponentActivity {
     Intent intent=getIntent();
     String token=intent.getStringExtra("token"), computer=intent.getStringExtra("computer");
     intent.removeExtra("token"); intent.removeExtra("computer");
-    if (token!=null && token.matches("[a-f0-9]{64}") && computer!=null
+    // Android protects this component with DUMP; ordinary apps and browser links
+    // enter through LauncherActivity and must never be able to replace a computer.
+    boolean debuggingEntry=intent.getComponent()!=null
+        && getPackageName().equals(intent.getComponent().getPackageName())
+        && MainActivity.class.getName().equals(intent.getComponent().getClassName());
+    if (debuggingEntry && token!=null && token.matches("[a-f0-9]{64}") && computer!=null
         && !computer.isBlank() && computer.length()<=120) {
-      if (token.equals(pairing().getString("token",""))
-          && computer.equals(pairing().getString("computer",""))) {
-        pendingToken=null; pendingComputer=null; dismissSheet(); ensureControlService();
-      } else if (!token.equals(pendingToken) || !computer.equals(pendingComputer)
-          || sheet==null || !sheet.isShowing()) {
-        pendingToken=token; pendingComputer=computer; showPairing();
-      }
+      connectComputer(token,computer);
     }
     // Old notifications and explicit share intents can outlive an upgrade. They never open a task.
     intent.removeExtra("computerId"); intent.removeExtra("taskId");
@@ -121,7 +116,7 @@ public final class MainActivity extends ComponentActivity {
     }
     if (intent.getBooleanExtra("wirelessGuide",false)) {
       intent.removeExtra("wirelessGuide");
-      if (pendingToken==null) showConnectionSettings(true);
+      showConnectionSettings(true);
     }
   }
 
@@ -282,27 +277,20 @@ public final class MainActivity extends ComponentActivity {
     }
   }
 
-  private void showPairing() {
-    if (pendingToken==null || isFinishing() || isDestroyed()) return;
-    String requestedToken=pendingToken, requestedComputer=pendingComputer;
-    LinearLayout content=showSheet("允许这台电脑连接？");
-    text(content,requestedComputer,21,INK,true);
-    paragraph(content,"请确认这是你正在使用的电脑。允许后，该电脑可连接手机；开启所需权限后才能查看或控制。");
-    if (!pairing().getString("token","").isEmpty()) paragraph(content,"确认将替换原电脑授权，并结束原电脑的当前控制。");
-    actionButton(content,"允许此电脑",true,() -> {
-      if (!Objects.equals(requestedToken,pendingToken) || !Objects.equals(requestedComputer,pendingComputer)) return;
-      ControlService service=ControlService.current;
-      if (service!=null) { service.localControl("stop"); stopService(new Intent(this,ControlService.class)); }
-      pairing().edit().putString("token",requestedToken).putString("computer",requestedComputer).apply();
-      pendingToken=null; pendingComputer=null; seenConnected=false; dismissSheet();
-      try { startForegroundService(new Intent(this,ControlService.class)); }
-      catch (RuntimeException error) { message("连接服务暂未启动，请重新打开 App。"); }
-      updateHome();
-    });
-    actionButton(content,"暂不允许",false,() -> { pendingToken=null; pendingComputer=null; dismissSheet(); });
-    sheet.setOnDismissListener(dialog -> {
-      if (Objects.equals(requestedToken,pendingToken)) { pendingToken=null; pendingComputer=null; }
-    });
+  private void connectComputer(String token,String computer) {
+    if (token.equals(pairing().getString("token","")) && computer.equals(pairing().getString("computer",""))) {
+      ensureControlService(); return;
+    }
+    ControlService service=ControlService.current;
+    if (service!=null && !service.session.phase.equals("idle") && !service.session.phase.equals("stopped")) {
+      message("请先结束当前控制会话，再连接另一台电脑。"); return;
+    }
+    if (service!=null) stopService(new Intent(this,ControlService.class));
+    pairing().edit().putString("token",token).putString("computer",computer).apply();
+    seenConnected=false; dismissSheet();
+    try { startForegroundService(new Intent(this,ControlService.class)); }
+    catch (RuntimeException error) { message("连接服务暂未启动，请重新打开 App。"); }
+    updateHome();
   }
 
   private void showConnectionSettings(boolean wireless) {
@@ -339,18 +327,18 @@ public final class MainActivity extends ComponentActivity {
   }
   private void confirmForget() {
     LinearLayout content=showSheet("更换连接的电脑？");
-    paragraph(content,"将结束当前控制，解除这台电脑的手机控制授权，并停止状态同步。再次连接需要重新授权。已开启的手机权限会保留。");
+    paragraph(content,"将结束当前控制，清除电脑连接记录，并停止状态同步。之后可在电脑端重新连接。已开启的手机权限会保留。");
     actionButton(content,"结束连接并更换",true,() -> {
       ControlService service=ControlService.current; if (service!=null) service.localControl("stop");
       stopService(new Intent(this,ControlService.class)); pairing().edit().remove("token").remove("computer").apply();
       store.statusEnabled(false); stopService(new Intent(this,StatusSyncService.class));
-      pendingToken=null; pendingComputer=null; seenConnected=false; dismissSheet(); main.postDelayed(this::updateHome,150);
+      seenConnected=false; dismissSheet(); main.postDelayed(this::updateHome,150);
     }).setBackground(ripple(RED,11,false));
     actionButton(content,"暂不更换",false,this::dismissSheet);
   }
   private void showHelp() {
     LinearLayout content=showSheet("连接遇到问题？"); text(content,"先检查手机",15,INK,true);
-    paragraph(content,"保持解锁；电脑端 ProfilePilot 保持运行；确认 USB 调试或 Wi-Fi 无线调试已开启。已配对的电脑会自动连接，首次授权仍需你在手机确认。");
+    paragraph(content,"保持解锁；电脑端 ProfilePilot 保持运行；确认 USB 调试或 Wi-Fi 无线调试已开启。通过系统调试授权的电脑可直接连接，无需在 App 内再次确认。");
     text(content,"USB 连接",15,INK,true);
     paragraph(content,"检查数据线是否支持数据传输，并确认手机上的调试授权。Windows 电脑还可能需要手机厂商的 ADB 驱动；macOS 通常无需单独安装驱动。");
     text(content,"Wi-Fi 连接",15,INK,true);
@@ -529,7 +517,7 @@ public final class MainActivity extends ComponentActivity {
 
   @Override protected void onSaveInstanceState(Bundle state) {
     state.putBoolean("permissionsExpanded",permissionsExpanded); state.putInt("lastPermissionCount",lastPermissionCount);
-    state.putBoolean("seenConnected",seenConnected); state.putString("pendingToken",pendingToken); state.putString("pendingComputer",pendingComputer);
+    state.putBoolean("seenConnected",seenConnected);
     super.onSaveInstanceState(state);
   }
   @Override protected void onResume() {

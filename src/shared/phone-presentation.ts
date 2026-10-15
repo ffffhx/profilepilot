@@ -153,7 +153,7 @@ export function phonePresentation(device: PhoneDevice, now = Date.now()) {
     : device.transport === "cloud" ? device.cloud?.paired ? "手机暂未更新状态，请检查手机网络或打开 ProfilePilot App。" : "请用手机 ProfilePilot App 扫码，开启状态同步。"
     : device.connection === "unauthorized" ? emulator ? "请在模拟器窗口中确认此电脑的调试连接。" : "请解锁手机，并在手机上允许此电脑进行 USB 调试。"
     : !connected ? emulator ? "启动本机模拟器后会自动检测连接，无需 USB 数据线或真实手机。" : device.transport === "wifi" ? "请确认手机与电脑在同一网络，并开启无线调试。" : "请用 USB 连接手机，并在手机上允许连接。"
-    : device.companion === "pairing" ? `请在${subject}里的 ProfilePilot App 中确认与这台电脑配对。`
+    : device.companion === "pairing" ? `正在连接${subject}里的 ProfilePilot App，请保持 App 打开。`
     : device.companion !== "ready" ? `${subject}已连接，还需要连接${subject}里的 ProfilePilot App。`
     : !known ? `正在等待${subject}更新状态，请保持连接。`
     : paused ? `任务已暂停，你可以自行操作${subject}。`

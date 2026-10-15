@@ -284,7 +284,7 @@ test('opening companion cannot replace an active control session', async t => {
   assert.equal(h.calls.some(call => call[0] === 'adb' && call[3] === 'install'), false);
 });
 
-test('first pairing remains a user action state while the phone service is not started yet', async t => {
+test('initial connection stays pending until the companion service responds', async t => {
   const h = harness(t); fs.writeFileSync(path.join(h.root, 'phone.apk'), 'test APK bytes'); await h.service.refresh();
   h.fail = true; const pending = await h.service.prepare(h.id);
   assert.equal(pending.companion, 'pairing'); assert.equal(pending.error, '');

@@ -1,0 +1,20 @@
+{
+  "name": "profilepilot",
+  "interface": {
+    "displayName": "ProfilePilot"
+  },
+  "plugins": [
+    {
+      "name": "profilepilot",
+      "source": {
+        "source": "local",
+        "path": "./plugins/profilepilot"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

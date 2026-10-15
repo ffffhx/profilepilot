@@ -9,6 +9,9 @@
   },
   "main": "dist/main/entry.js",
   "scripts": {
+    "plugin:sync": "node scripts/package-codex-plugin.mjs --sync",
+    "plugin:check": "node scripts/package-codex-plugin.mjs --check && node --test tests/codex-plugin-package.test.mjs",
+    "plugin:pack": "node scripts/package-codex-plugin.mjs --pack",
     "build": "npm run build:input-guard && npm run build:phone-wrapper && tsc && npm run bundle:agent-browser-wrapper && npm run bundle:profilepilot-cli && npm run bundle:renderer && npm run build:css",
     "build:phone-wrapper": "node scripts/build-phone-wrapper.mjs",
     "build:input-guard": "node scripts/build-input-guard.mjs",

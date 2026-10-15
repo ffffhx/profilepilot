@@ -1,0 +1,56 @@
+name: Verify Codex Plugin
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Plugin package and install (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.14.0
+          cache: npm
+      - name: Install test dependencies without application lifecycle scripts
+        run: npm ci --ignore-scripts
+      - name: Validate and package
+        run: |
+          npm run plugin:check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm run plugin:pack
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install Codex CLI
+        run: npm install --global @openai/codex@0.161.0
+      - name: Install the plugin in an isolated configuration
+        run: |
+          $pluginTestRoot = Join-Path $env:RUNNER_TEMP 'profilepilot-codex-install'
+          New-Item -ItemType Directory -Force -Path $pluginTestRoot | Out-Null
+          $env:CODEX_HOME = $pluginTestRoot
+          codex plugin marketplace add $env:GITHUB_WORKSPACE --json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $installed = codex plugin add profilepilot@profilepilot --json | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($installed.pluginId -ne 'profilepilot@profilepilot') { throw 'Incorrect installed plugin' }
+          $manifest = Get-Content -Raw -LiteralPath (Join-Path $installed.installedPath 'plugin.json') | ConvertFrom-Json
+          if ($manifest.extensions.'com.openai'.requires_local_executor -ne $true) { throw 'Desktop requirement lost' }
+          $setupPath = Join-Path $installed.installedPath $manifest.extensions.'com.openai'.onboardingSkill
+          if (-not (Test-Path -LiteralPath $setupPath)) { throw 'Onboarding skill not installed' }
+          codex plugin list --json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: profilepilot-plugin-${{ matrix.os }}
+          path: dist/plugins/*
+          if-no-files-found: error

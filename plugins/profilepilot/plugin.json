@@ -1,0 +1,39 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "profilepilot",
+  "version": "0.1.0",
+  "description": "Use your signed-in Chrome tabs, managed browsers, Electron apps, and Android devices through the local ProfilePilot CLI.",
+  "author": {
+    "name": "ffffhx",
+    "url": "https://github.com/ffffhx"
+  },
+  "homepage": "https://ffffhx.github.io/profilepilot/",
+  "repository": "https://github.com/ffffhx/profilepilot",
+  "license": "MIT",
+  "keywords": ["browser", "android", "desktop", "automation"],
+  "extensions": {
+    "com.openai": {
+      "requires_local_executor": true,
+      "interface": {
+        "displayName": "ProfilePilot",
+        "shortDescription": "Use your browser and Android",
+        "longDescription": "Work with your existing signed-in Chrome tabs, managed browser profiles, registered Electron apps, and connected Android devices. ProfilePilot provides local CLI commands for observing pages and screens, performing requested interactions, and handing control back to you. Requires a local desktop execution environment, ProfilePilot CLI on Windows or macOS, and the selected browser extension or device connection. Android and managed-profile features also require the ProfilePilot desktop app. The plugin includes instructions and setup guidance; it does not install the desktop application, browser extension, or Android companion automatically. Website sign-ins and device permissions remain under your control. No hosted MCP server is included.",
+        "developerName": "ffffhx",
+        "category": "Productivity",
+        "capabilities": ["Browser automation", "Android device control", "Browser profile management", "Electron app interaction"],
+        "websiteURL": "https://ffffhx.github.io/profilepilot/",
+        "supportURL": "https://github.com/ffffhx/profilepilot/issues",
+        "privacyPolicyURL": "https://github.com/ffffhx/profilepilot/blob/main/docs/profilepilot-plugin-privacy.md",
+        "defaultPrompt": [
+          "Help me connect ProfilePilot to my signed-in Chrome browser.",
+          "Summarize the page in the browser tab I choose.",
+          "Show my connected Android devices and help me select one."
+        ],
+        "brandColor": "#167D5A",
+        "composerIcon": "./assets/icon.svg",
+        "logo": "./assets/icon.svg"
+      },
+      "onboardingSkill": "./skills/setup/SKILL.md"
+    }
+  }
+}

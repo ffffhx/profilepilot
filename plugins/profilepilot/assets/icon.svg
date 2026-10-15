@@ -1,0 +1,26 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="ProfilePilot">
+  <defs>
+    <radialGradient id="pp-bg" cx="50%" cy="34%" r="82%">
+      <stop offset="0%" stop-color="#17262f"/>
+      <stop offset="100%" stop-color="#0a1014"/>
+    </radialGradient>
+    <linearGradient id="pp-plane" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#82f5c9"/>
+      <stop offset="100%" stop-color="#2bbd86"/>
+    </linearGradient>
+    <filter id="pp-glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="3.2" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <rect x="16" y="16" width="224" height="224" rx="54" fill="url(#pp-bg)" stroke="#38e1a0" stroke-opacity="0.32" stroke-width="1.5"/>
+  <path d="M70 196 A 80 80 0 0 1 70 92" fill="none" stroke="#38e1a0" stroke-opacity="0.16" stroke-width="3" stroke-linecap="round"/>
+  <path d="M92 210 A 96 96 0 0 1 60 150" fill="none" stroke="#38e1a0" stroke-opacity="0.10" stroke-width="3" stroke-linecap="round"/>
+  <g filter="url(#pp-glow)">
+    <path d="M128 54 L182 186 L128 156 L74 186 Z" fill="url(#pp-plane)"/>
+    <path d="M128 54 L128 156 L74 186 Z" fill="#27a877" fill-opacity="0.55"/>
+  </g>
+</svg>

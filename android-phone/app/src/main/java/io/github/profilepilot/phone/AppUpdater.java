@@ -19,19 +19,18 @@ import java.util.function.Consumer;
 
 /** Application-scoped work survives Activity recreation without retaining its views. */
 final class AppUpdater {
-  enum Stage { IDLE, DEVELOPMENT, CHECKING, AVAILABLE, CURRENT, INCOMPATIBLE, DOWNLOADING, VERIFYING, READY, ERROR }
+  enum Stage { IDLE, CHECKING, AVAILABLE, CURRENT, INCOMPATIBLE, DOWNLOADING, VERIFYING, READY, ERROR }
   record State(Stage stage,UpdateRelease release,int percent,String message) {
     boolean busy() { return stage==Stage.CHECKING || stage==Stage.DOWNLOADING || stage==Stage.VERIFYING; }
   }
   private static AppUpdater instance;
   static synchronized AppUpdater get(Context context) {
-    if (instance==null) instance=new AppUpdater(context,new UpdateTransfer(),BuildConfig.VERSION_CODE,!BuildConfig.DEBUG);
+    if (instance==null) instance=new AppUpdater(context,new UpdateTransfer(),BuildConfig.VERSION_CODE);
     return instance;
   }
   private final Context context;
   private final UpdateTransfer transfer;
   private final long installedCode;
-  private final boolean onlineUpdates;
   private final Handler main=new Handler(Looper.getMainLooper());
   private final ExecutorService worker=Executors.newSingleThreadExecutor();
   private final Set<Consumer<State>> listeners=new HashSet<>();
@@ -41,11 +40,7 @@ final class AppUpdater {
   private int generation;
 
   AppUpdater(Context context,UpdateTransfer transfer,long installedCode) {
-    this(context,transfer,installedCode,true);
-  }
-  AppUpdater(Context context,UpdateTransfer transfer,long installedCode,boolean onlineUpdates) {
     this.context=context.getApplicationContext(); this.transfer=transfer; this.installedCode=installedCode;
-    this.onlineUpdates=onlineUpdates;
     directory=new File(context.getFilesDir(),"updates");
   }
   State state() { return state; }
@@ -63,7 +58,6 @@ final class AppUpdater {
   }
 
   void check() {
-    if (!onlineUpdates) { set(new State(Stage.DEVELOPMENT,null,0,"当前为开发版")); return; }
     if (state.busy()) return;
     int ticket=++generation; set(new State(Stage.CHECKING,null,0,"正在检查更新…"));
     pending=worker.submit(() -> {
@@ -85,7 +79,6 @@ final class AppUpdater {
   }
 
   void download() {
-    if (!onlineUpdates) return;
     UpdateRelease release=state.release();
     if (state.busy() || release==null || !release.newerThan(installedCode) || release.minSdk()>Build.VERSION.SDK_INT) return;
     int ticket=++generation; set(new State(Stage.DOWNLOADING,release,0,"正在下载…"));
@@ -116,7 +109,6 @@ final class AppUpdater {
   }
 
   void prepareInstall(Consumer<File> ready) {
-    if (!onlineUpdates) return;
     if (state.stage()!=Stage.READY) return;
     UpdateRelease release=state.release(); int ticket=++generation;
     set(new State(Stage.VERIFYING,release,100,"正在准备安装…"));

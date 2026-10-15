@@ -6,6 +6,17 @@ const escape = (value: string) => value.replace(/[&<>"']/g, c => ({ "&": "&amp;"
 let currentDialog: HTMLDialogElement | undefined;
 export const PHONE_APP_DOWNLOAD_URL = "https://github.com/ffffhx/profilepilot/releases/download/android-latest/ProfilePilot-android.apk";
 
+export function phoneAppDownload(variant?: "debug" | "release") {
+  return variant === "debug" ? {
+    url: "https://github.com/ffffhx/profilepilot/releases/download/android-dev-latest/ProfilePilot-android-dev.apk",
+    qr: "./assets/profilepilot-android-dev-download.svg", label: "开发版"
+  } : { url: PHONE_APP_DOWNLOAD_URL, qr: "./assets/profilepilot-android-download.svg", label: "正式版" };
+}
+export function phoneDownloadFigure(variant?: "debug" | "release"): string {
+  const download = phoneAppDownload(variant);
+  return `<figure class="phone-download-qr"><img src="${download.qr}" width="144" height="144" alt="ProfilePilot 安卓 App 下载二维码"><figcaption>扫码下载${download.label}<small>Android 11+</small></figcaption><button data-action="phone-download-copy">复制下载链接</button></figure>`;
+}
+
 export function phoneModeChoices(device: PhoneDevice | undefined, disabledReason: string): string {
   const disabled = disabledReason ? `disabled title="${escape(disabledReason)}"` : "";
   return `<section class="phone-card phone-control-section phone-basic-section" aria-label="免安装控制">

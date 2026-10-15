@@ -8,7 +8,7 @@
 
 排查问题时，要检查是否存在 Windows 和 macOS 的兼容性差异。
 
-安卓 App 例外：修改 android-phone 或安卓构建/发布依赖后 push 到 main，自动构建、固定签名并发布到 android-latest 更新渠道，手机可检查并下载安装。已明确授权此自动构建，无需每次推送再询问；CI 自动递增 versionCode，不要为每次构建回写版本提交。
+安卓 App 例外：日常本地与手机均使用开发版。修改 android-phone 或安卓构建/发布依赖后 push 到 main，由 android-development.yml 自动构建、使用与本地相同的固定开发签名并发布到 android-dev-latest，手机可直接检查并更新开发版。已明确授权此自动构建，无需每次推送再询问；使用 npm run build:phone 构建，保留固定开发密钥，版本号由脚本生成以兼容在线更新和本地调试。正式版 android-latest 仅在明确发布时通过 release.yml 手动/tag 构建。
 
 其他代码 push 到 main 不自动构建/发布。官网部署 deploy-pages.yml 仍手动触发；Windows/macOS 安装包仅在手动运行 release.yml 或推送 v*.*.* tag 时构建。要额外触发这些构建时，先问我：
 - 要：push 完用 `gh workflow run <workflow>`（如 `deploy-pages.yml` / `release.yml`）手动触发对应构建。

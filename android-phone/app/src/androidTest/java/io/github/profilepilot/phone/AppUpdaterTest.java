@@ -47,7 +47,7 @@ public class AppUpdaterTest {
     manifest=new JSONObject().put("schemaVersion",1).put("applicationId",context.getPackageName())
         .put("versionCode",BuildConfig.VERSION_CODE).put("versionName",BuildConfig.VERSION_NAME).put("minSdk",30)
         .put("notes","更新测试").put("size",apk.length).put("sha256",sha.toString())
-        .put("url","https://github.com/ffffhx/profilepilot/releases/download/latest/ProfilePilot-android.apk");
+        .put("url","https://github.com/ffffhx/profilepilot/releases/download/android-dev-latest/ProfilePilot-android-dev.apk");
     instance=AppUpdater.class.getDeclaredField("instance"); instance.setAccessible(true);
     original=(AppUpdater)instance.get(null);
     clearDownloads();

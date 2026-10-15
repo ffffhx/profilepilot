@@ -21,6 +21,15 @@ public class UpdateReleaseTest {
     assertTrue(release.newerThan(7)); assertFalse(release.newerThan(8)); assertFalse(release.newerThan(9));
     assertEquals("新增更新\n保留设置",release.notes());
   }
+  @Test public void developmentAcceptsItsOwnPackageAndAssetAndRejectsStableUpdates() throws Exception {
+    String development="io.github.profilepilot.phone.debug";
+    JSONObject json=manifest().put("applicationId",development)
+        .put("url","https://github.com/ffffhx/profilepilot/releases/download/android-dev-1200000/ProfilePilot-android-dev.apk");
+    assertTrue(UpdateRelease.parse(json.toString(),development).newerThan(7));
+    assertThrows(Exception.class,() -> UpdateRelease.parse(json.toString(),"io.github.profilepilot.phone"));
+    json.put("url","https://github.com/ffffhx/profilepilot/releases/download/android-latest/ProfilePilot-android.apk");
+    assertThrows(Exception.class,() -> UpdateRelease.parse(json.toString(),development));
+  }
   @Test public void rejectsWrongAppUntrustedUrlsMalformedNumbersAndUnboundedFiles() throws Exception {
     Object[][] bad={{"schemaVersion",2},{"applicationId","another.app"},{"versionCode",0},
         {"versionCode",8.5},{"versionCode","8"},{"size",UpdateRelease.MAX_APK_BYTES+1},{"size",0},

@@ -4,8 +4,6 @@ import static org.junit.Assert.*;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.content.ComponentName;
-import android.view.View;
-import androidx.test.core.app.ActivityScenario;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
 import org.junit.Test;
@@ -28,18 +26,9 @@ public class BuildVariantTest {
     assertEquals(context.getPackageName(),packages.resolveContentProvider(context.getPackageName()+".updates",0).packageName);
   }
 
-  @Test public void developmentUpdaterNeverContactsReleaseFeedOrOffersInstall() throws Exception {
-    AppUpdater updater=new AppUpdater(context,new UpdateTransfer() {
-      @Override String manifest() { fail("Development app must not fetch the release feed"); return ""; }
-    },BuildConfig.VERSION_CODE,false);
-    InstrumentationRegistry.getInstrumentation().runOnMainSync(() -> {
-      updater.check(); updater.download(); updater.prepareInstall(file -> fail("No release install"));
-      assertEquals(AppUpdater.Stage.DEVELOPMENT,updater.state().stage());
-    });
-    try (ActivityScenario<UpdateActivity> scenario=ActivityScenario.launch(UpdateActivity.class)) {
-      scenario.onActivity(activity -> assertEquals(View.GONE,activity.findViewById(R.id.update_action).getVisibility()));
-      scenario.recreate();
-      scenario.onActivity(activity -> assertEquals(View.GONE,activity.findViewById(R.id.update_action).getVisibility()));
-    }
+  @Test public void developmentUpdaterUsesOnlyDevelopmentFeed() {
+    assertEquals("https://github.com/ffffhx/profilepilot/releases/download/android-dev-latest/ProfilePilot-android-dev-update.json",
+        UpdateRelease.MANIFEST_URL);
+    assertFalse(UpdateRelease.MANIFEST_URL.contains("/android-latest/"));
   }
 }

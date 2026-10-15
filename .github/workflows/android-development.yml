@@ -1,0 +1,90 @@
+name: Publish Android Development Update
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "android-phone/**"
+      - "android-camera/**"
+      - "scripts/build-phone.mjs"
+      - "scripts/phone-build-metadata.mjs"
+      - "scripts/build-screen-camera.mjs"
+      - "scripts/android-development-*.mjs"
+      - "scripts/android-update-channels.mjs"
+      - "scripts/prepare-android-update.mjs"
+      - "scripts/publish-android-update.mjs"
+      - ".github/workflows/android-development.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: profilepilot-android-development
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build signed development APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Test development updates and release isolation
+        run: node --test tests/android-update.test.js tests/android-release.test.js tests/android-development.test.js
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
+      - name: Install Android SDK
+        run: sdkmanager "platforms;android-37.0" "build-tools;36.0.0" "platform-tools"
+      - name: Restore fixed development signing key
+        env:
+          DEVELOPMENT_KEYSTORE_BASE64: ${{ secrets.ANDROID_DEVELOPMENT_KEYSTORE_BASE64 }}
+        run: |
+          test -n "$DEVELOPMENT_KEYSTORE_BASE64"
+          printf '%s' "$DEVELOPMENT_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/profilepilot-development.keystore"
+          chmod 600 "$RUNNER_TEMP/profilepilot-development.keystore"
+      - name: Build and verify development APK
+        env:
+          ANDROID_DEVELOPMENT_KEYSTORE: ${{ runner.temp }}/profilepilot-development.keystore
+          ANDROID_DEVELOPMENT_STORE_PASSWORD: ${{ secrets.ANDROID_DEVELOPMENT_STORE_PASSWORD }}
+          ANDROID_DEVELOPMENT_KEY_ALIAS: ${{ secrets.ANDROID_DEVELOPMENT_KEY_ALIAS }}
+          ANDROID_DEVELOPMENT_KEY_PASSWORD: ${{ secrets.ANDROID_DEVELOPMENT_KEY_PASSWORD }}
+        run: |
+          node scripts/build-phone.mjs --development-ci
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs dist/android/profilepilot-phone.apk
+          node scripts/prepare-android-update.mjs --development
+      - uses: actions/upload-artifact@v4
+        with:
+          name: profilepilot-android-development
+          path: release/ProfilePilot-android-dev*
+          if-no-files-found: error
+
+  publish:
+    name: Publish development update feed
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          name: profilepilot-android-development
+          path: release
+      - name: Publish APK and development update feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/publish-android-update.mjs --development

@@ -102,15 +102,19 @@ test('corrupted files, source collisions and invalid commits cannot publish an u
   await assert.rejects(publishAndroidUpdate(remote, assets(), 'b'.repeat(40)), /another commit/);
   await assert.rejects(publishAndroidUpdate(new Remote(), assets(), 'main'), /full source commit/);
 });
-test('workflow separates automatic Android publication from desktop builds and requires full Git history', () => {
+test('stable release stays explicit and development publication runs on main with full Git history', () => {
   const workflow = readFileSync(path.join(root, '.github/workflows/release.yml'), 'utf8');
-  assert.match(workflow, /branches: \[main\]/);
-  assert.match(workflow, /paths:[\s\S]*"android-phone\/\*\*"/);
+  const development = readFileSync(path.join(root, '.github/workflows/android-development.yml'), 'utf8');
+  assert.doesNotMatch(workflow, /branches: \[main\]/);
+  assert.match(development, /branches: \[main\]/);
+  assert.match(development, /paths:[\s\S]*"android-phone\/\*\*"/);
+  assert.match(development, /fetch-depth: 0/);
+  assert.match(development, /publish-android-update.mjs --development/);
   assert.match(workflow, /fetch-depth: 0/);
   assert.match(workflow, /group: profilepilot-release-packages/);
   assert.match(workflow, /publish_android:[\s\S]*node scripts\/publish-android-update.mjs/);
   assert.match(workflow, /build:\n[\s\S]*github.event_name == 'workflow_dispatch' \|\| startsWith\(github.ref, 'refs\/tags\/'\)/);
-  const source = readFileSync(path.join(root, 'android-phone/app/src/main/java/io/github/profilepilot/phone/UpdateRelease.java'), 'utf8');
+  const source = readFileSync(path.join(root, 'android-phone/app/build.gradle.kts'), 'utf8');
   const download = readFileSync(path.join(root, 'src/renderer/phone-basic.ts'), 'utf8');
   const site = readFileSync(path.join(root, 'site/index.html'), 'utf8');
   for (const entry of [source, download, site]) assert.match(entry, /releases\/download\/android-latest\/ProfilePilot-android/);

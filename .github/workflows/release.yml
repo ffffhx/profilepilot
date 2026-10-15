@@ -1,21 +1,10 @@
 name: Build Release Packages
 
 on:
-  # Android changes publish automatically; desktop packages still require a tag or manual run.
+  # Daily main builds use android-development.yml. Stable releases are explicit.
   push:
-    branches: [main]
     tags:
       - "v*.*.*"
-    paths:
-      - "android-phone/**"
-      - "android-camera/**"
-      - "scripts/build-phone.mjs"
-      - "scripts/phone-build-metadata.mjs"
-      - "scripts/build-screen-camera.mjs"
-      - "scripts/android-release-version.mjs"
-      - "scripts/prepare-android-update.mjs"
-      - "scripts/publish-android-update.mjs"
-      - ".github/workflows/release.yml"
   workflow_dispatch:
     inputs:
       android_only:

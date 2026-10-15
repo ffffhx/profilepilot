@@ -34,9 +34,13 @@ npm run start:independent
 
 发布构建使用 `node scripts/build-phone.mjs --release`，要求环境变量 `ANDROID_RELEASE_KEYSTORE`、`ANDROID_RELEASE_STORE_PASSWORD`、`ANDROID_RELEASE_KEY_ALIAS`、`ANDROID_RELEASE_KEY_PASSWORD`。CI 从仓库的 `ANDROID_RELEASE_KEYSTORE_BASE64` Secret 还原密钥文件，其他三个值使用同名 Secret；密钥和密码不进入源码、日志或 Release 附件。
 
-开发版和正式版使用不同包名，可以同时安装；数据、权限和电脑配对分别保存，首次使用各自确认一次。开发版使用独立连接端口及 `profilepilot-dev://` 配对链接；电脑端开发版记录存放在 `phones/development/`，不会读取或覆盖正式版记录。开发版通过本地构建更新，“检查更新”页面只说明开发版用途，不访问正式版更新渠道。正式版继续通过 App 下载和安装固定签名的新版本。
+日常只需使用开发版：手机“更多 → 检查更新”下载 `android-dev-latest` 中的新开发版；电脑本地构建也覆盖同一个开发版，配对和设置保留。开发版使用固定签名、独立连接端口及 `profilepilot-dev://` 配对链接，电脑配对记录存放在 `phones/development/`。正式版保持独立包名、数据和更新渠道；无需同时安装它才能开发或在线更新。
 
-已有旧开发包仍可能占用正式包名，本次不会自动卸载或迁移它的数据；旧开发包转为正式签名仍需处理一次衔接，此后安装新开发版不再影响正式版。维护者应保留各自签名密钥，换开发电脑或操作系统时也应沿用开发签名；Windows/macOS 的默认 debug keystore 各自生成，不能把它们当成同一把密钥。参见 [Android 官方签名说明](https://developer.android.com/studio/publish/app-signing)。
+固定开发密钥保存在 `~/.profilepilot/android-signing/development.keystore`，也可通过 `ANDROID_DEVELOPMENT_KEYSTORE` 指定；密码与别名可分别设置 `ANDROID_DEVELOPMENT_STORE_PASSWORD`、`ANDROID_DEVELOPMENT_KEY_ALIAS`、`ANDROID_DEVELOPMENT_KEY_PASSWORD`。构建会核对仓库中的公开证书指纹，拒绝误用另一台电脑新生成的 debug 密钥。换 Windows/macOS 开发电脑时，私下迁移同一把密钥；不要提交 keystore。CI 使用对应四项 Secret（密钥项为 `ANDROID_DEVELOPMENT_KEYSTORE_BASE64`），输出签名一致且可调试的 APK。
+
+`main` 上的安卓改动由 `android-development.yml` 自动构建并发布开发版；`release.yml` 保留正式版的手动/tag 发布。开发版按完整 Git 历史计数分配版本区间：CI 使用 `1000000 + 提交数 × 1000`，本地调试使用同一区间的 `+999`；因此在线版本可以被同一提交的本地构建覆盖，下一次提交的云端版本也能覆盖本地构建。重复本地构建使用相同版本号，允许覆盖安装。拉取更新代码后再本地构建，避免旧分支版本低于手机已装版本；不要强制降级或清除手机数据。直接构建请使用 `npm run build:phone`，它会设置版本号并核对固定签名。
+
+已有旧开发包仍可能占用正式包名，不自动卸载或迁移它的数据；保留的独立开发版不需要转成正式签名即可在线更新。参见 [Android 官方签名说明](https://developer.android.com/studio/publish/app-signing)。
 
 支持 Android 11/API 30 及以上。可使用 USB 调试或下方的局域网无线配对引导。Windows 某些设备的 USB 连接需要厂商 ADB 驱动；macOS 通常无需额外驱动，无线连接不依赖 USB 驱动。默认从 SDK 或 PATH 查找 ADB，也可设置 `PROFILEPILOT_ADB_PATH`。
 

@@ -42,7 +42,7 @@ public final class UpdateActivity extends ComponentActivity {
     back.setOnClickListener(view -> finish()); root.addView(back,new LinearLayout.LayoutParams(-2,dp(52)));
     ScrollView scroll=new ScrollView(this); root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
     LinearLayout page=new LinearLayout(this); page.setOrientation(LinearLayout.VERTICAL); page.setPadding(dp(24),dp(16),dp(24),dp(32)); scroll.addView(page);
-    text(page,"软件更新",28,INK,true);
+    text(page,BuildConfig.DEBUG?"开发版更新":"软件更新",28,INK,true);
     text(page,"当前版本 "+BuildConfig.VERSION_NAME,14,MUTED,false);
     LinearLayout card=new LinearLayout(this); card.setOrientation(LinearLayout.VERTICAL); card.setPadding(dp(20),dp(20),dp(20),dp(20));
     GradientDrawable background=new GradientDrawable(); background.setColor(0xffffffff); background.setCornerRadius(dp(20)); card.setBackground(background);
@@ -65,14 +65,6 @@ public final class UpdateActivity extends ComponentActivity {
   @Override protected void onResume() { super.onResume(); if (updater!=null) render(updater.state()); }
 
   private void render(AppUpdater.State state) {
-    if (state.stage()==AppUpdater.Stage.DEVELOPMENT) {
-      status.setText(state.message());
-      detail.setText("开发版由电脑构建和安装，不接收正式版更新。"); detail.setVisibility(View.VISIBLE);
-      notes.setVisibility(View.GONE); progress.setVisibility(View.GONE);
-      action.setVisibility(View.GONE); cancel.setVisibility(View.GONE);
-      hint.setText("日常使用和在线更新请打开 ProfilePilot 移动版。两个版本可以同时安装，数据和权限分别保存。");
-      return;
-    }
     status.setText(state.message()); UpdateRelease release=state.release();
     boolean newer=release!=null && release.newerThan(BuildConfig.VERSION_CODE);
     detail.setText(newer ? "版本 "+release.versionName()+"  ·  "+String.format(Locale.getDefault(),"%.1f MB",release.size()/1048576.0) : "");

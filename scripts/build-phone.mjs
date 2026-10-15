@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { phoneBuildMetadata } from './phone-build-metadata.mjs';
+import { developmentVersion } from './android-development-version.mjs';
+import { developmentSigning } from './android-development-signing.mjs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +10,13 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const release = process.argv.includes('--release');
 const variant = release ? 'release' : 'debug';
+let buildEnv = { ...process.env };
+if (!release) {
+  const version = developmentVersion(root, !process.argv.includes('--development-ci'));
+  buildEnv = { ...developmentSigning(root), PROFILEPILOT_ANDROID_VERSION_CODE: String(version.versionCode),
+    PROFILEPILOT_ANDROID_VERSION_NAME: version.versionName };
+  console.log(`开发版：${version.versionName}-dev (${version.versionCode})`);
+}
 if (release) {
   for (const name of ['ANDROID_RELEASE_KEYSTORE', 'ANDROID_RELEASE_STORE_PASSWORD', 'ANDROID_RELEASE_KEY_ALIAS', 'ANDROID_RELEASE_KEY_PASSWORD']) {
     if (!process.env[name]) throw new Error(`Android 发布签名缺少环境变量：${name}`);
@@ -22,7 +31,7 @@ const args = ['-classpath', path.join(root, 'android-phone', 'gradle', 'wrapper'
 if (process.argv.includes('--offline')) args.push('--offline');
 if (process.argv.includes('--instrumentation')) args.push(':app:assembleDebugAndroidTest');
 await new Promise((resolve, reject) => {
-  const child = spawn(java, args, { cwd: path.join(root, 'android-phone'), env: { ...process.env, ANDROID_HOME: sdk }, windowsHide: true, stdio: 'inherit' });
+  const child = spawn(java, args, { cwd: path.join(root, 'android-phone'), env: { ...buildEnv, ANDROID_HOME: sdk }, windowsHide: true, stdio: 'inherit' });
   child.on('error', reject); child.on('exit', code => code === 0 ? resolve() : reject(new Error(`Android 构建失败 (${code})`)));
 });
 const output = path.join(root, 'dist', 'android'); mkdirSync(output, { recursive: true });

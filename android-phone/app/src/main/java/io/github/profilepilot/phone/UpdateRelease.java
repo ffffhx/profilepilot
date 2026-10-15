@@ -8,7 +8,7 @@ import org.json.JSONObject;
 record UpdateRelease(long versionCode, String versionName, int minSdk, String notes,
                      String url, long size, String sha256) {
   static final long MAX_APK_BYTES=150L*1024*1024;
-  static final String MANIFEST_URL="https://github.com/ffffhx/profilepilot/releases/download/android-latest/ProfilePilot-android-update.json";
+  static final String MANIFEST_URL=BuildConfig.UPDATE_MANIFEST_URL;
 
   static UpdateRelease parse(String text) throws Exception {
     return parse(text,"io.github.profilepilot.phone");
@@ -22,11 +22,12 @@ record UpdateRelease(long versionCode, String versionName, int minSdk, String no
     String name=json.getString("versionName"), notes=json.optString("notes","");
     String url=json.getString("url"), hash=json.getString("sha256").toLowerCase(Locale.ROOT);
     URI uri=new URI(url);
+    String apkName="io.github.profilepilot.phone.debug".equals(applicationId)?"ProfilePilot-android-dev":"ProfilePilot-android";
     if (code<1 || code>2100000000L || name.isBlank() || name.length()>80 || sdk<30 || sdk>1000
         || size<4 || size>MAX_APK_BYTES || !hash.matches("[a-f0-9]{64}") || notes.length()>16000
         || !"https".equals(uri.getScheme()) || !"github.com".equals(uri.getHost())
         || uri.getPort()!=-1 || uri.getUserInfo()!=null || uri.getQuery()!=null || uri.getFragment()!=null
-        || !uri.getRawPath().matches("/ffffhx/profilepilot/releases/download/[A-Za-z0-9._%-]+/ProfilePilot-android\\.apk"))
+        || !uri.getRawPath().matches("/ffffhx/profilepilot/releases/download/[A-Za-z0-9._%-]+/"+apkName+"\\.apk"))
       throw new IllegalArgumentException("更新信息不完整或下载地址无效");
     return new UpdateRelease(code,name,(int)sdk,notes,url,size,hash);
   }

@@ -18,12 +18,20 @@ android {
         versionName = phoneVersionName
         buildConfigField("int", "COMPANION_PORT", "18761")
         buildConfigField("String", "PAIRING_SCHEME", "\"profilepilot\"")
+        buildConfigField("String", "UPDATE_MANIFEST_URL", "\"https://github.com/ffffhx/profilepilot/releases/download/android-latest/ProfilePilot-android-update.json\"")
         manifestPlaceholders["pairingScheme"] = "profilepilot"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     buildFeatures { buildConfig = true }
     signingConfigs {
+        getByName("debug") {
+            storeFile = file(System.getenv("ANDROID_DEVELOPMENT_KEYSTORE")
+                ?: "${System.getProperty("user.home")}/.profilepilot/android-signing/development.keystore")
+            storePassword = System.getenv("ANDROID_DEVELOPMENT_STORE_PASSWORD") ?: "android"
+            keyAlias = System.getenv("ANDROID_DEVELOPMENT_KEY_ALIAS") ?: "androiddebugkey"
+            keyPassword = System.getenv("ANDROID_DEVELOPMENT_KEY_PASSWORD") ?: "android"
+        }
         create("release") {
             System.getenv("ANDROID_RELEASE_KEYSTORE")?.let { storeFile = file(it) }
             storePassword = System.getenv("ANDROID_RELEASE_STORE_PASSWORD")
@@ -37,6 +45,7 @@ android {
             versionNameSuffix = "-dev"
             buildConfigField("int", "COMPANION_PORT", "18763")
             buildConfigField("String", "PAIRING_SCHEME", "\"profilepilot-dev\"")
+            buildConfigField("String", "UPDATE_MANIFEST_URL", "\"https://github.com/ffffhx/profilepilot/releases/download/android-dev-latest/ProfilePilot-android-dev-update.json\"")
             manifestPlaceholders["pairingScheme"] = "profilepilot-dev"
         }
         getByName("release") {

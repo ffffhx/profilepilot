@@ -11,7 +11,7 @@ import { openPhoneWireless } from "./phone-wireless";
 import { PhoneWirelessDiscoveryMonitor, wirelessDiscoveryPresentation } from "./phone-wireless-discovery";
 import { openPhoneCloud } from "./phone-cloud";
 import { openPhoneEmulator } from "./phone-emulator";
-import { openBasicPhone, phoneModeChoices, PHONE_APP_DOWNLOAD_URL } from "./phone-basic";
+import { openBasicPhone, phoneModeChoices, phoneAppDownload, phoneDownloadFigure } from "./phone-basic";
 import { createPhoneInspector } from "./phone-inspector";
 import { openScreenCamera } from "./screen-camera";
 
@@ -66,7 +66,7 @@ function addDevice(): void {
 }
 function downloads(): void {
   const dialog = document.createElement("dialog"); dialog.className = "phone-connect-dialog"; dialog.setAttribute("aria-label", "下载手机 App");
-  dialog.innerHTML = `<header><h2>下载手机 App</h2><button data-close aria-label="关闭下载窗口">×</button></header><p>App 为可选安装。通过 USB 或 Wi-Fi 连接后，无需安装即可查看和操作手机。</p><figure class="phone-download-qr"><img src="./assets/profilepilot-android-download.svg" width="144" height="144" alt="ProfilePilot 安卓 App 下载二维码"><figcaption>扫码下载安卓 App<small>GitHub 发布版 · Android 11+</small></figcaption><button data-action="phone-download-copy">复制下载链接</button></figure><button data-action="phone-apk">获取 APK 文件</button>`;
+  dialog.innerHTML = `<header><h2>下载手机 App</h2><button data-close aria-label="关闭下载窗口">×</button></header><p>App 为可选安装。通过 USB 或 Wi-Fi 连接后，无需安装即可查看和操作手机。</p>${phoneDownloadFigure(snapshot.companionApp?.variant)}<button data-action="phone-apk">获取 APK 文件</button>`;
   dialog.querySelector('[data-close]')!.addEventListener('click', () => dialog.close());
   dialog.addEventListener('close', () => dialog.remove()); root.append(dialog); dialog.showModal();
 }
@@ -125,11 +125,11 @@ function enhancement(device?: PhoneDevice, disabledReason = "请先在上方连�
   const app = phoneEnhancementPresentation(device);
   const appName = snapshot.companionApp?.name || "ProfilePilot 安卓 App";
   return `<header class="phone-mode-heading"><h3>控制增强</h3><span>可选</span></header><p class="phone-mode-description">安装 App，开启控件识别、中文填写与手机端暂停。</p>
-    ${snapshot.companionApp?.variant === "debug" ? '<p class="phone-mode-hint">当前连接和安装开发版，可与正式版同时使用。下方二维码下载的是正式版。</p>' : ""}
+    ${snapshot.companionApp?.variant === "debug" ? '<p class="phone-mode-hint">当前使用开发版，可在手机内检查更新，也可继续通过电脑调试。</p>' : ""}
     <div class="phone-app-status-panel"><header><strong>${esc(appName)}</strong><span class="phone-route-badge" data-app-installation="${app.installation}" data-tone="${app.tone}">${app.label}</span></header><p class="phone-mode-hint">${app.installation === "missing" ? "不影响免安装控制" : app.note}</p>
     <div class="phone-install-actions"><button data-action="install-phone-app" ${disabledReason ? `disabled title="${esc(disabledReason)}"` : ""}>${app.connected ? "更新手机 App" : app.installation === "installed" ? "连接手机 App" : "安装到手机"}</button><button class="phone-text-button" data-action="inspect-app" ${!device || device.transport === "cloud" || busy ? "disabled" : ""}>重新检测</button></div></div>
     <div class="phone-permissions" aria-label="增强功能权限">${settingsRows(app.permissions, app.canSetup && (!device?.basic || device.basic.phase === "stopped"))}</div>
-    <details class="phone-downloads" data-phone-downloads><summary>其他下载方式</summary><figure class="phone-download-qr"><img src="./assets/profilepilot-android-download.svg" width="144" height="144" alt="ProfilePilot 安卓 App 下载二维码"><figcaption>扫码下载安卓 App<small>GitHub 发布版 · Android 11+</small></figcaption><button data-action="phone-download-copy">复制下载链接</button></figure><button data-action="phone-apk">获取 APK 文件</button></details>`;
+    <details class="phone-downloads" data-phone-downloads><summary>其他下载方式</summary>${phoneDownloadFigure(snapshot.companionApp?.variant)}<button data-action="phone-apk">获取 APK 文件</button></details>`;
 }
 function options(device?: PhoneDevice): string {
   return `<details class="phone-options" data-phone-options><summary>${taskIcon("settings")}更多设置</summary><div>
@@ -275,7 +275,7 @@ root.addEventListener("click", event => {
     void window.mobile.openApkFolder().then(() => notice("已打开 APK 文件所在位置，可将文件传到手机安装。")).catch(error => notice(error.message, true)); return;
   }
   if (action === "phone-download-copy") {
-    void navigator.clipboard.writeText(PHONE_APP_DOWNLOAD_URL).then(() => notice("下载链接已复制，可在手机浏览器中打开。")).catch(() => notice("复制失败，请使用右侧二维码下载。", true)); return;
+    void navigator.clipboard.writeText(phoneAppDownload(snapshot.companionApp?.variant).url).then(() => notice("下载链接已复制，可在手机浏览器中打开。")).catch(() => notice("复制失败，请使用右侧二维码下载。", true)); return;
   }
   if (busy) return;
   if (action === "add-device") { addDevice(); return; }

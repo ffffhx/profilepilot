@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="ProfilePilot 浏览器连接扩展的数据用途、信息流向、本机保存、删除方式与用户控制说明。">
+<title>浏览器扩展隐私说明 · ProfilePilot</title>
+<link rel="icon" href="../public/assets/profilepilot-mark.svg" type="image/svg+xml">
+<style>
+:root{color-scheme:light dark;font-family:system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;color:#18342c;background:#f4f8f6;line-height:1.85}
+*{box-sizing:border-box}body{margin:0}header,main,footer{max-width:840px;margin:auto;padding:24px}header{padding-top:36px}header a{display:inline-flex;gap:10px;align-items:center;text-decoration:none;font-weight:750;color:inherit}header img{width:34px;height:34px}main{margin-top:4px;margin-bottom:32px;padding:40px;background:#fff;border:1px solid #d8e6df;border-radius:20px}h1{font-size:clamp(24px,4vw,34px);line-height:1.4;margin:0 0 16px;letter-spacing:-.03em}h2{font-size:21px;margin-top:36px}p,li{font-size:16px}li+li{margin-top:12px}ul{padding-left:24px}a{color:#08764f;overflow-wrap:anywhere}a:focus-visible{outline:3px solid #169367;outline-offset:4px}footer{font-size:14px;padding-bottom:40px;color:#50695f}
+@media(prefers-color-scheme:dark){:root{color:#d9eee3;background:#101a16}main{background:#16231d;border-color:#2f493a}a{color:#80e8b6}footer{color:#a0b6a8}}
+@media(max-width:600px){header,footer{padding:20px}main{border-radius:0;border-left:0;border-right:0;padding:24px 20px}}
+@media print{:root{color:#000;background:#fff}header,footer{display:none}main{border:0;margin:0;max-width:none;padding:0}a{color:#000}}
+</style></head><body><header><a href="../"><img src="../public/assets/profilepilot-mark.svg" alt="">ProfilePilot</a></header><main><h1>ProfilePilot 浏览器连接：隐私说明</h1>
+<p>更新日期：2026 年 10 月 15 日。发布者：ffffhx，ProfilePilot 项目维护者。</p>
+<p>本说明适用于 ProfilePilot 浏览器连接扩展及其与本机 ProfilePilot 浏览器服务的连接。扩展需要配套 CLI 或桌面应用；通过 CLI 使用外部 Agent 时，桌面窗口可以关闭。</p>
+<h2>处理哪些信息、用于什么</h2>
+<ul><li>网页与标签页：任务需要的页面标题、网址、文本、页面结构、选择内容、截图及输入内容，用于理解页面和执行用户请求。</li><li>浏览历史与下载：按请求查询的浏览记录、下载网址、文件名、状态和任务下载文件，用于查找页面或处理任务结果。</li><li>调试信息：按任务需要取得的网络、控制台、性能和 frame 信息，用于网页诊断与自动化。网页内容、截图或调试信息可能包含个人信息、登录后内容及其他敏感字段。</li><li>连接与控制状态：Profile 标识、配对信息、站点偏好、任务标签组、会话标识及控制权，用于连接恢复、区分任务以及用户暂停、停止和接管。</li></ul>
+<p>默认完整访问支持用户指定的跨网站任务；可限制站点范围。此扩展连接功能不复制整个 Chrome 用户数据目录或登录数据库，也不会因安装扩展而主动上传完整浏览历史。</p>
+<h2>信息流向</h2>
+<p>扩展通过 127.0.0.1 上的本机回环连接与 ProfilePilot 浏览器服务通信。扩展不向发布者运营的遥测服务器发送浏览数据，不投放广告，也不出售用户数据。</p>
+<p>任务观察结果会返回调用它的桌面应用或外部 Agent。页面内容、截图、附件、输入和调试结果可能由这些调用方发送给用户配置或使用的模型服务，适用相应服务的设置和隐私条款。用户请求的网页操作还可能把信息提交给目标网站。整个使用流程不保证所有数据都留在设备内。</p>
+<p>访问项目主页、下载安装包或提交反馈时，GitHub 等承载服务会按其自身隐私规则处理访问信息。桌面应用的其他可选功能不因安装本扩展而自动启用；启用时应另行考虑其接收方和设置。</p>
+<h2>本机保存与删除</h2>
+<p>扩展私有存储保存配对与站点偏好；会话存储用于标签页选择和任务标签组恢复。本机服务保存连接配置及必要运行状态。任务历史、诊断日志、下载文件和主动保存的截图可能保存在调用方或用户选择的本机目录。</p>
+<p>这些数据没有统一的按天自动到期承诺。用户可解除配对、移除扩展，并在对应应用、Agent 或文件目录中删除任务记录和保存的文件。移除扩展不会同时删除桌面应用、CLI、Agent 记录或已经下载的文件。第三方服务自行决定其收到的数据的保存和删除方式。</p>
+<p>连接使用配对验证和本机监听，扩展凭据保存在扩展私有存储。请勿将配对码、访问令牌或未经脱敏的记录发到公开反馈中。</p>
+<h2>用户控制与数据用途限制</h2>
+<p>可选择任务使用的 Profile 和页面，调整站点权限，随时暂停、停止、接管或解除配对。停止任务不会撤销已经提交给网站的操作，也不会删除已发送给第三方服务的信息。</p>
+<p>ProfilePilot 对通过 Chrome API 获得的信息的使用和转移遵守 Chrome Web Store 用户数据政策，包括 Limited Use 要求。相关信息用于提供用户请求的浏览器任务功能，不用于广告投放、出售给数据经纪商或判断信贷资格。</p>
+<h2>联系方式</h2>
+<p>项目主页：<a href="https://github.com/ffffhx/profilepilot">https://github.com/ffffhx/profilepilot</a></p>
+<p>隐私问题和支持：<a href="https://github.com/ffffhx/profilepilot/issues">https://github.com/ffffhx/profilepilot/issues</a></p>
+<p>GitHub Issues 是公开页面。请先描述不含敏感信息的问题；需要提供私人材料时，先请求合适的私密反馈方式。</p></main><footer><a href="../">返回项目首页</a> · <a href="https://github.com/ffffhx/profilepilot/issues">联系项目维护者</a></footer></body></html>

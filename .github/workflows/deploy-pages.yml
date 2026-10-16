@@ -29,6 +29,7 @@ jobs:
           cp site/index.html _site/index.html
           cp site/styles.css _site/site/styles.css
           cp site/script.js _site/site/script.js
+          cp site/extension-privacy.html _site/site/extension-privacy.html
           cp -R public/assets _site/public/assets
           cp docs/screenshots/workspace-agent.png _site/docs/screenshots/
 

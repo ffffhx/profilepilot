@@ -43,6 +43,7 @@ export interface PhoneDevice {
   /** Explicit desktop-owned session; does not imply companion permissions. */
   basic?: PhoneSessionState;
   id: string;
+  transportId?: string;
   /** Verified hardware identity shared by USB and wireless routes. */
   hardwareId?: string;
   name: string;

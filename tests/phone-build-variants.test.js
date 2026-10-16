@@ -44,6 +44,7 @@ test('development connect, repeated install and settings never use release packa
     calls.push(args);
     if (args[0] === 'devices') return 'TEST-PHONE device model:Test';
     if (args.includes('tcp:0')) return '28000';
+    if (args[2] === 'install') return 'Success';
     if (args[3]?.startsWith("'pm' 'path'")) return 'package:/data/app/debug/base.apk';
     if (args[3] === "'getprop' 'ro.serialno'") return 'TEST-PHONE';
     return '';

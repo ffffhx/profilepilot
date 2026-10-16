@@ -5,10 +5,12 @@ import http from "node:http";
 import type { PhoneDevice } from "../../shared/phones";
 import { isPhoneRead } from "./actions";
 import { androidSdkRoots } from "./android-paths";
+import { spawnAdb, type AdbProcess, type AdbProcessOptions } from "./adb-process";
 
 export interface AdbRunner {
   run(args: string[], timeout?: number, input?: string, signal?: AbortSignal): Promise<string>;
   runBinary?(args: string[], timeout?: number, signal?: AbortSignal): Promise<Buffer>;
+  spawn?(args: string[], options: AdbProcessOptions): AdbProcess;
 }
 export function findAdb(env = process.env, platform = process.platform): string {
   if (env.PROFILEPILOT_ADB_PATH) return env.PROFILEPILOT_ADB_PATH;
@@ -20,6 +22,7 @@ export function findAdb(env = process.env, platform = process.platform): string 
 export class Adb implements AdbRunner {
   constructor(private overrideExecutable?: string) {}
   get executable(): string { return this.overrideExecutable || findAdb(); }
+  spawn(args: string[], options: AdbProcessOptions): AdbProcess { return spawnAdb(this.executable, args, options); }
   runBinary(args: string[], timeout = 12000, signal?: AbortSignal): Promise<Buffer> {
     return new Promise((resolve, reject) => {
       execFile(this.executable, args, { windowsHide: true, timeout, signal, encoding: "buffer", maxBuffer: 24 * 1024 * 1024 }, (error, stdout, stderr) => {
@@ -53,7 +56,7 @@ export function parseAdbDevices(output: string): PhoneDevice[] {
     if (!match) return [];
     try { validateDeviceId(match[1]); } catch { return []; }
     const model = match[3]?.match(/(?:^|\s)model:(\S+)/)?.[1]?.replaceAll("_", " ") || "Android 手机";
-    return [{ id: match[1], name: model, model, transport: match[1].startsWith("emulator-") ? "emulator" : /:|_adb-tls/.test(match[1]) ? "wifi" : "usb", connection: match[2] as PhoneDevice["connection"], companion: "unknown", state: null, confirmedAt: null, pending: null, error: "" }];
+    return [{ id: match[1], transportId: match[3]?.match(/(?:^|\s)transport_id:(\d+)/)?.[1], name: model, model, transport: match[1].startsWith("emulator-") ? "emulator" : /:|_adb-tls/.test(match[1]) ? "wifi" : "usb", connection: match[2] as PhoneDevice["connection"], companion: "unknown", state: null, confirmedAt: null, pending: null, error: "" }];
   });
 }
 export function phoneRequest(port: number, token: string, method: string, body: unknown = {}): Promise<unknown> {

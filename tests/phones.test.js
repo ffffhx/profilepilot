@@ -20,7 +20,7 @@ function harness(t) {
     calls.push(['adb', ...args]); if (args[0] === 'devices') return h.deviceOutput; if (args.includes('tcp:0')) return '18762';
     if (args[2] === 'shell' && args[3].startsWith("'settings' 'get' 'global'")) return h.debugHook ? h.debugHook(args[3]) : '';
     if (args[2] === 'shell' && args[3].includes("'pm' 'path'")) return h.installed ? 'package:/data/app/test/base.apk' : '';
-    if (args[2] === 'install') h.installed = true;
+    if (args[2] === 'install') { h.installed = true; return 'Success'; }
     return '';
   } }, request: async (port, receivedToken, method, body) => {
     assert.equal(receivedToken, token); calls.push([method, body]);

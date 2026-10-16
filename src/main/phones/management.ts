@@ -3,6 +3,31 @@ import { PhonesService, phoneActionSchema } from "./service";
 import { cameraStartSchema, cameraCommandSchema } from "./screen-camera";
 export type PhoneManagementCommand = { action: "phone"; method: string; params?: unknown };
 export async function executePhoneCommand(command: PhoneManagementCommand, service: PhonesService): Promise<unknown> {
+  if (command.method === "host") return service.hostCommand(z.object({ args: z.array(z.string().max(32768)).min(1).max(3) }).strict().parse(command.params).args);
+  if (command.method === "wireless-disconnect") return service.disconnectWireless(z.object({ id: z.string() }).strict().parse(command.params).id);
+  if (command.method === "connect") {
+    // Existing desktop "install/connect" buttons retain their explicit setup
+    // behavior. The CLI always sends update:false for connection-only use.
+    const p = z.object({ id: z.string(), update: z.boolean().default(true) }).strict().parse(command.params);
+    return service.prepare(p.id, p.update);
+  }
+  if (command.method === "adb-start") {
+    const p = z.object({ lease: z.string().uuid(), generation: z.number().int().nonnegative(), requestId: z.string().uuid(), args: z.array(z.string()).min(1).max(512), timeoutMs: z.number().int().optional(), cwd: z.string().optional(), stdin: z.boolean().optional() }).strict().parse(command.params);
+    return service.adbJobs.start(p);
+  }
+  if (command.method === "adb-status" || command.method === "adb-cancel") {
+    const p = z.object({ lease: z.string().uuid(), jobId: z.string().uuid(), offset: z.number().int().nonnegative().optional() }).strict().parse(command.params);
+    return command.method === "adb-status" ? service.adbJobs.status(p.lease, p.jobId, p.offset) : service.adbJobs.cancel(p.lease, p.jobId);
+  }
+  if (command.method === "adb-input") {
+    const p = z.object({ lease: z.string().uuid(), jobId: z.string().uuid(), sequence: z.number().int().nonnegative(), data: z.string().max(87384), eof: z.boolean().optional() }).strict().parse(command.params);
+    return service.adbJobs.input(p.lease, p.jobId, p.sequence, p.data, p.eof);
+  }
+  if (["package-info", "packages", "diagnose"].includes(command.method)) {
+    const p = z.object({ id: z.string(), packageName: z.string().optional(), scope: z.enum(["all", "user", "system"]).optional(), filter: z.string().optional() }).strict().parse(command.params);
+    return service.inspectPhone(p.id, command.method === "package-info" ? "app" : command.method as "packages" | "diagnose", p);
+  }
+  if (command.method === "update") return service.prepare(z.object({ id: z.string() }).strict().parse(command.params).id, true);
   if (command.method === "camera-sources") return service.screenCamera.sources();
   if (command.method === "camera-probe") return service.cameraProbe(z.object({ id: z.string() }).strict().parse(command.params).id);
   if (command.method === "camera-start") return service.cameraStart(cameraStartSchema.parse(command.params));
@@ -48,8 +73,8 @@ export async function executePhoneCommand(command: PhoneManagementCommand, servi
     return "id" in input ? service.autoConnectWireless(input.id) : service.connectWireless(input);
   }
   if (method === "wrapper-start") {
-    const p = z.object({ id: z.string(), mode: z.enum(["view", "control"]), controller: z.string(), task: z.string() }).strict().parse(command.params);
-    return service.startWrapper(p.id, p.mode, p.controller, p.task);
+    const p = z.object({ id: z.string(), mode: z.enum(["view", "control"]), controller: z.string(), task: z.string(), backend: z.enum(["app", "basic"]).default("app") }).strict().parse(command.params);
+    return service.startWrapper(p.id, p.mode, p.controller, p.task, p.backend);
   }
   if (method === "wrapper-action") {
     const p = z.object({ lease: z.string().uuid(), generation: z.number().int().nonnegative(), action: phoneActionSchema, requestId: z.string().uuid() }).strict().parse(command.params);
@@ -71,7 +96,6 @@ export async function executePhoneCommand(command: PhoneManagementCommand, servi
   if (method === "start") { const input = z.object({ id: z.string(), mode: z.enum(["view", "control"]).default("control"), controller: z.string().default("本机用户"), task: z.string().default("") }).strict().parse(command.params); return service.start(input.id, input.mode, input.controller, input.task); }
   const { id } = z.object({ id: z.string() }).strict().parse(command.params);
   if (method === "preview") return service.preview(id);
-  if (method === "connect") return service.prepare(id);
   if (method === "pause" || method === "resume" || method === "stop") return service.control(id, method);
   throw new Error("不支持此手机命令。");
 }

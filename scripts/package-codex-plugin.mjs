@@ -13,7 +13,7 @@ const generatedSources = {
   "assets/icon.svg": "public/assets/profilepilot-mark.svg",
   "LICENSE": "LICENSE",
   ...Object.fromEntries([
-    "browser-extension.md", "agent-browser.md", "profiles.md", "phone.md", "captcha.md"
+    "browser-extension.md", "agent-browser.md", "profiles.md", "phone.md", "phone-adb.md", "captcha.md"
   ].map(name => [`skills/profilepilot/references/${name}`, `skills/profilepilot/references/${name}`]))
 };
 export const packageFiles = [

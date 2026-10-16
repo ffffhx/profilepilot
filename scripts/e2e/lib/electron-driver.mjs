@@ -277,7 +277,8 @@ export async function launchProfilePilotE2e(options = {}) {
       if (["tasks", "agent"].includes(options.env?.CPM_START_VIEW)) await driver.evaluate(`window.workspaceHost.navigate('./tasks.html'); true`, { target: "shell" });
     }
     const agentHome = options.experimentalAgent !== false && ["tasks", "agent"].includes(options.env?.CPM_START_VIEW);
-    await driver.waitFor(agentHome ? "#create-task" : "h1", (snapshot) => agentHome ? snapshot.exists : snapshot.text === (options.env?.CPM_START_VIEW === "tools" ? "配套工具" : options.env?.CPM_START_VIEW === "settings" ? "设置" : "控制台"), {
+    const phoneHome = options.env?.CPM_START_VIEW === "phones";
+    await driver.waitFor(agentHome ? "#create-task" : phoneHome ? "#phones" : "h1", (snapshot) => agentHome || phoneHome ? snapshot.exists : snapshot.text === (options.env?.CPM_START_VIEW === "tools" ? "配套工具" : options.env?.CPM_START_VIEW === "settings" ? "设置" : "控制台"), {
       timeoutMs: process.platform === "win32" ? 30_000 : 10_000
     });
     await driver.evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))', { target: "shell" });

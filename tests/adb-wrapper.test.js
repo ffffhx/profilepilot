@@ -15,12 +15,15 @@ const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQ
 
 function io() { const out = [], err = []; return { stdout: { write: s => out.push(Buffer.from(s)) }, stderr: { write: s => err.push(String(s)) }, out: () => Buffer.concat(out), err: () => err.join('') }; }
 const device = () => ({ id: 'PHONE1', model: 'Test Phone', name: 'Test Phone', connection: 'device', companion: 'ready', transport: 'usb', state: { sessionId: randomUUID(), generation: 5, phase: 'controlling', mode: 'control' } });
-test('parses normal ADB syntax without invoking a shell; rejects injection, arbitrary commands and changed semantics', () => {
+test('keeps native ADB commands behind a classified managed request and never permits host selector overrides', () => {
   assert.deepEqual(parseAdb(['-s', 'PHONE1', 'shell', 'input tap 10 20']).action, { kind: 'tap', x: 10, y: 20 });
   assert.equal(parseAdb(['shell', 'input', 'swipe', '1', '2', '3', '4']).action.duration, 300);
   assert.equal(parseAdb(['shell', 'input', 'keyevent', 'KEYCODE_APP_SWITCH']).action.key, 'recents');
   assert.deepEqual(parseAdb(['exec-out', 'screencap', '-p']).action, { kind: 'screenshot', format: 'png' });
-  for (const argv of [ ['shell', 'input tap 1 2; reboot'], ['shell', 'sh', '-c', 'input tap 1 2'], ['shell', 'input', 'text', 'secret'], ['shell', 'input', 'keyevent', '4', '3'], ['shell', 'input', 'swipe', '1','2','3','4','9999'], ['shell'], ['install','x.apk'], ['forward','tcp:1','tcp:2'], ['-P','5038','devices'], ['exec-out','input','tap','1','2'], ['shell','screencap','-p','/sdcard/x.png'] ]) assert.throws(() => parseAdb(argv));
+  for (const argv of [ ['shell', 'input tap 1 2; reboot'], ['shell', 'sh', '-c', 'input tap 1 2'], ['shell', 'input', 'text', 'hello'], ['shell', 'input', 'keyevent', '4', '3'], ['shell'], ['install','x.apk'], ['forward','tcp:1','tcp:2'], ['exec-out','input','tap','1','2'], ['shell','screencap','-p','/sdcard/x.png'] ]) {
+    assert.equal(parseAdb(argv).kind, 'command'); assert.equal(parseAdb(argv).mode, 'control'); assert.deepEqual(parseAdb(argv).args, argv);
+  }
+  for (const argv of [['-P','5038','devices'], ['-H','elsewhere','shell'], ['kill-server'], ['shell','input','swipe','1','2','3','4','9999']]) assert.throws(() => parseAdb(argv));
 });
 test('requires explicit target and keeps child argv intact, including its help flags', () => {
   assert.throws(() => parsePhoneWrap(['--', 'python', 'a.py']), /--device/);

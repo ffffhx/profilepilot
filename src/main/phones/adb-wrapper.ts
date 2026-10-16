@@ -4,50 +4,61 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { PhoneAction, PhoneActionResult, PhoneDevice, PhonesSnapshot } from "../../shared/phones";
 import type { ProfilePilotManagementCommand, ProfilePilotManagementResponse } from "../profilepilot-management-protocol";
+import { adbCommand } from "./adb-command";
+import { streamAdb } from "./adb-cli-stream";
 
 type Request = (command: ProfilePilotManagementCommand) => Promise<ProfilePilotManagementResponse>;
 type IO = Pick<NodeJS.Process, "stdout" | "stderr">;
 function fail(message: string): never { throw new Error(message); }
 export const adbHelp = `ppilot phone CLI · ADB 兼容命令
-用法：ppilot phone wrap --device <ID> --controller <名称> --task <任务> [--mode view|control] -- <程序> [参数...]
+用法：ppilot phone wrap --device <ID> --controller <名称> --task <任务> [--mode view|control] [--backend app|basic] -- <程序> [参数...]
 命令：ppilot phone adb <ADB兼容命令...>
 子进程可照常执行 adb，也可使用环境变量 ADB 指向的可执行文件。
-支持：devices [-l]、get-state、get-serialno、shell input tap X Y、
-shell input swipe X Y X2 Y2 [50..2000毫秒]、shell input keyevent 3|4|187、
-exec-out screencap -p（原始尺寸 PNG），也支持 shell screencap -p。
-支持 -s <ID>、-d、-e，但只能操作本任务选定的设备。
-可用 ppilot phone adb --output <本地文件> exec-out screencap -p，避免旧版 PowerShell 重定向损坏 PNG。
-input text、任意 shell、安装、端口转发、后台服务、scrcpy 暂不支持；不会回退到原生 ADB。
-手机暂停会拒绝新输入；结束或失联后任务失效，不自动重试或恢复。
+支持 shell/exec-in/exec-out、push/pull/sync、install/install-multiple/install-multi-package/uninstall、
+logcat/bugreport/jdwp/track-jdwp/track-app、forward/reverse、完整 input、get-state/get-serialno/get-devpath/features、
+wait-for-*、reboot/root/unroot/remount/verity/sideload/usb/tcpip/reconnect/attach/detach、emu。
+常用 UI 操作与原始 PNG 截图继续通过手机 App 执行；其他命令由桌面托管 ADB 进程。
+支持 -s <ID>、-t <transport ID>、-d（USB）、-e（TCP/IP/模拟器），只能选本任务设备。
+--output <新文件> 保存二进制输出，--input <文件> 提供二进制 stdin，--timeout-ms <100..3600000> 设置时限。
+默认 120 秒。view 仅允许已识别的查询；任意 Shell、stdin、设备写入和未知语法需要 control。
+forward/reverse 使用 --no-rebind，只能移除本任务的映射；暂停/结束时清理，不会移除配套 App 通道。
+主机 version/host-features/server-status/mdns/start-server/kill-server/keygen 用 phone host；无线连接用 wireless-*。
+手机暂停会停止本地进程；结束或失联后任务失效，不自动重试或恢复。退出码 75 表示需核对结果。
+中止不能撤销已完成的写入，也不能保证结束已脱离连接的手机后台进程。明确使用 --backend basic 时由桌面管理会话。
 `;
 
-export type ParsedAdb = { serial?: string; transport?: "usb" | "emulator"; output?: string } & (
+export type ParsedAdb = { serial?: string; transportId?: string; transport?: "usb" | "local"; output?: string; input?: string; timeoutMs?: number } & (
   | { kind: "help" | "version" | "state" | "serial" }
   | { kind: "devices"; long: boolean }
   | { kind: "action"; action: PhoneAction }
+  | { kind: "command"; args: string[]; mode: "view" | "control" }
 );
 export function parseAdb(args: string[]): ParsedAdb {
-  const input = [...args]; let serial: string | undefined, transport: "usb" | "emulator" | undefined, output: string | undefined;
+  const input = [...args]; let serial: string | undefined, transportId: string | undefined, transport: "usb" | "local" | undefined, output: string | undefined, stdinFile: string | undefined, timeoutMs: number | undefined;
   while (input[0]?.startsWith("-")) {
     const flag = input.shift();
     if (flag === "--help" || flag === "-h") { if (input.length) fail("help 不接受额外参数。"); return { kind: "help" }; }
     if (flag === "--version") { if (input.length) fail("version 不接受额外参数。"); return { kind: "version" }; }
-    if (flag === "-s" && !serial && !transport) { serial = input.shift(); if (!serial || serial.startsWith("-")) fail("-s 需要设备 ID。"); }
-    else if ((flag === "-d" || flag === "-e") && !serial && !transport) transport = flag === "-d" ? "usb" : "emulator";
+    if (flag === "-s" && !serial && !transport && !transportId) { serial = input.shift(); if (!serial || serial.startsWith("-")) fail("-s 需要设备 ID。"); }
+    else if (flag === "-t" && !serial && !transport && !transportId) { transportId = input.shift(); if (!/^[1-9]\d*$/.test(transportId || "")) fail("-t 需要 transport ID。"); }
+    else if ((flag === "-d" || flag === "-e") && !serial && !transport && !transportId) transport = flag === "-d" ? "usb" : "local";
     else if (flag === "--output" && !output) { output = input.shift(); if (!output) fail("--output 需要本地文件路径。"); }
+    else if (flag === "--input" && !stdinFile) { stdinFile = input.shift(); if (!stdinFile) fail("--input 需要本地文件路径。"); }
+    else if (flag === "--timeout-ms" && timeoutMs === undefined) { const value = input.shift(); timeoutMs = Number(value); if (!/^\d+$/.test(value || "") || timeoutMs < 100 || timeoutMs > 3600000) fail("超时须为 100–3600000 毫秒。"); }
     else fail(`不支持的 ADB 选项：${flag}。不会转交原生 ADB。`);
   }
   const [command, ...tail] = input;
-  const selected = { serial, transport, output };
-  if (output && !["shell", "exec-out"].includes(command)) fail("--output 仅用于 PNG 截图。");
+  const selected = { serial, transport, output, ...(transportId ? { transportId } : {}), ...(stdinFile ? { input: stdinFile } : {}), ...(timeoutMs ? { timeoutMs } : {}) };
+  if ((output || stdinFile || timeoutMs) && ["devices", "help", "version", "get-state", "get-serialno"].includes(command)) fail("此查询不接受输入/输出文件或超时参数。");
   if (command === "devices" && (tail.length === 0 || tail.length === 1 && tail[0] === "-l")) return { ...selected, kind: "devices", long: tail.length === 1 };
   if (["help", "version", "get-state", "get-serialno"].includes(command) && !tail.length) return { ...selected, kind: ({ help: "help", version: "version", "get-state": "state", "get-serialno": "serial" } as const)[command as "help"] };
-  if (!["shell", "exec-out"].includes(command)) fail("不支持此 ADB 命令。运行 ppilot phone adb --help 查看支持范围。");
+  const native = () => { const checked = adbCommand(input); return { ...selected, kind: "command" as const, args: checked.args, mode: checked.mode }; };
+  if (!["shell", "exec-out"].includes(command) || stdinFile) return native();
   // Only a fixed grammar of literal numeric input is accepted. No shell is
   // launched; metacharacters, nested sh, redirections and scripts cannot pass.
   const words = tail.length === 1 ? tail[0].trim().split(/\s+/) : tail;
   if (words.join(" ") === "screencap -p") return { ...selected, kind: "action", action: { kind: "screenshot", format: "png" } };
-  if (command !== "shell" || words[0] !== "input" || output) fail("只支持指定的 input 操作与 screencap -p；不会执行任意 shell。");
+  if (command !== "shell" || words[0] !== "input" || output) return native();
   const actionWords = words.slice(1);
   if (actionWords[0] === "touchscreen") actionWords.shift();
   const [operation, ...values] = actionWords;
@@ -59,7 +70,7 @@ export function parseAdb(args: string[]): ParsedAdb {
   if (operation === "swipe" && [4, 5].includes(values.length)) return { ...selected, kind: "action", action: { kind: "swipe", x: integer(values[0]), y: integer(values[1]), toX: integer(values[2]), toY: integer(values[3]), duration: values[4] ? integer(values[4], 50, 2000) : 300 } };
   const keys: Record<string, "home" | "back" | "recents"> = { "3": "home", "4": "back", "187": "recents", HOME: "home", BACK: "back", APP_SWITCH: "recents", KEYCODE_HOME: "home", KEYCODE_BACK: "back", KEYCODE_APP_SWITCH: "recents" };
   if (operation === "keyevent" && values.length === 1 && keys[values[0]]) return { ...selected, kind: "action", action: { kind: "key", key: keys[values[0]] } };
-  fail("不支持此 input 指令；首版支持 tap、swipe 和 Home/Back/最近应用。input text 不会被转换成替换整个输入框的操作。");
+  return native();
 }
 async function call<T>(request: Request, method: string, params: unknown = {}): Promise<T> {
   const response = await request({ action: "phone", method, params });
@@ -67,13 +78,14 @@ async function call<T>(request: Request, method: string, params: unknown = {}): 
   return response.data as T;
 }
 function selectDevice(parsed: ParsedAdb, device: PhoneDevice): void {
-  if (parsed.serial && parsed.serial !== device.id || parsed.transport && parsed.transport !== device.transport) fail("ADB 目标与托管任务的手机不同，已拒绝跨设备操作。");
+  if (parsed.transportId && parsed.transportId !== device.transportId) fail("ADB transport ID 与托管设备不符。");
+  if (parsed.serial && parsed.serial !== device.id || parsed.transport === "usb" && device.transport !== "usb" || parsed.transport === "local" && !["wifi", "emulator"].includes(device.transport)) fail("ADB 目标与托管任务的手机不同，已拒绝跨设备操作。");
 }
 export async function runAdbCli(args: string[], request: Request, io: IO = process, env: NodeJS.ProcessEnv = process.env): Promise<number> {
   try {
     const parsed = parseAdb(args);
     if (parsed.kind === "help") { io.stdout.write(adbHelp); return 0; }
-    if (parsed.kind === "version") { io.stdout.write("ppilot phone CLI · ADB compatibility v1 (managed commands only)\n"); return 0; }
+    if (parsed.kind === "version") { io.stdout.write("ppilot phone CLI · ADB compatibility v2 (managed commands)\n"); return 0; }
     const lease = env.PROFILEPILOT_PHONE_LEASE;
     if (parsed.kind === "devices") {
       const devices = lease ? [await call<PhoneDevice>(request, "wrapper-state", { lease })] : (await call<PhonesSnapshot>(request, "list")).devices;
@@ -87,9 +99,14 @@ export async function runAdbCli(args: string[], request: Request, io: IO = proce
     const device = await call<PhoneDevice>(request, "wrapper-state", { lease }); selectDevice(parsed, device);
     if (parsed.kind === "serial") { io.stdout.write(device.id + "\n"); return 0; }
     if (parsed.kind === "state") { io.stdout.write(device.connection === "device" ? "device\n" : "offline\n"); return 0; }
-    if (parsed.kind !== "action") fail("不支持此 ADB 命令。");
     const state = device.state;
     if (!state || !["viewing", "controlling"].includes(state.phase)) fail("手机已暂停、结束或断开，ADB 指令未执行。恢复后请发出新指令，不能重放旧输入。");
+    if (parsed.kind === "command") {
+      const stdin = !!parsed.input || parsed.args[0] === "exec-in" || parsed.args[0] === "shell" && (parsed.args.length === 1 || parsed.args.includes("-tt"));
+      if ((parsed.mode === "control" || stdin) && state.mode !== "control") fail("此 ADB 命令需要 control 会话。");
+      return await streamAdb(parsed.args, lease, state.generation, request, io, { output: parsed.output, input: parsed.input, timeoutMs: parsed.timeoutMs, stdin });
+    }
+    if (parsed.kind !== "action") fail("不支持此 ADB 命令。");
     const response = await call<PhoneActionResult>(request, "wrapper-action", { lease, generation: state.generation, requestId: randomUUID(), action: parsed.action });
     if (parsed.action.kind === "screenshot") {
       const result = response.result as { mime?: string; base64?: string; width?: number; height?: number };
@@ -108,18 +125,19 @@ export function parsePhoneWrap(args: string[]) {
     // Windows PowerShell consumes a bare -- when invoking the .ps1 CLI
     // launcher. The first positional program still unambiguously ends our flags.
     separator = 0; commandOffset = 0;
-    while (separator + 1 < args.length && ["--device", "--controller", "--task", "--mode"].includes(args[separator])) separator += 2;
+    while (separator + 1 < args.length && ["--device", "--controller", "--task", "--mode", "--backend"].includes(args[separator])) separator += 2;
   }
   if (separator + commandOffset >= args.length || args[separator + commandOffset].startsWith("-")) fail("请用 -- 分隔托管设置和要启动的程序。\n" + adbHelp);
   const flags = new Map<string, string>();
   for (let i = 0; i < separator; i += 2) {
     const key = args[i];
-    if (!["--device", "--controller", "--task", "--mode"].includes(key) || flags.has(key) || i + 1 >= separator) fail("托管参数无效：" + key);
+    if (!["--device", "--controller", "--task", "--mode", "--backend"].includes(key) || flags.has(key) || i + 1 >= separator) fail("托管参数无效：" + key);
     flags.set(key, args[i + 1]);
   }
   const id = flags.get("--device"); if (!id) fail("请指定 --device，避免控制错误的手机。");
   const mode = flags.get("--mode") || "control"; if (mode !== "view" && mode !== "control") fail("--mode 只能是 view 或 control。");
-  return { id, mode: mode as "view" | "control", controller: flags.get("--controller") || "ADB 托管工具", task: flags.get("--task") || path.basename(args[separator + commandOffset]), command: args.slice(separator + commandOffset) };
+  const backend = flags.get("--backend") || "app"; if (backend !== "app" && backend !== "basic") fail("--backend 只能是 app 或 basic。");
+  return { id, mode: mode as "view" | "control", backend, controller: flags.get("--controller") || "ADB 托管工具", task: flags.get("--task") || path.basename(args[separator + commandOffset]), command: args.slice(separator + commandOffset) };
 }
 
 export function wrapperEnvironment(env: NodeJS.ProcessEnv, bin: string, cli: string, lease: string, id: string, platform = process.platform): NodeJS.ProcessEnv {

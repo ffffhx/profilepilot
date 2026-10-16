@@ -16,7 +16,7 @@ Use `ppilot phone start --device DEVICE_ID --backend basic --mode view|control -
 
 Read `sessionId` and `generation` from the device's **basic** field in `list`, not its App `state`. Add `--backend basic` to `action`, `pause`, `resume` and `stop`. Supported actions are `screenshot` (PNG), `tap`, `swipe`, `key` and basic ASCII `text` (typing, not replacing a field). Capture a screenshot before coordinate input; the frame expires after 30 seconds and after any input. Chinese text, native selectors and flows need App mode. Never replay duplicate or uncertain inputs. A disconnect invalidates the session and requires a new explicit start.
 
-Basic mode's pause/stop controls live on the desktop; it has no phone-side capsule, notification or accessibility protection. The UI refreshes screenshots periodically, not video. `run`, `wrap` and generic `install` still require the App. To install ProfilePilot's App, first stop basic control, then use `ppilot phone connect --device DEVICE_ID`; the App connects automatically, while users confirm its Android permissions. The desktop offers the same transition through “结束控制并安装 App”.
+Basic mode's pause/stop controls live on the desktop; it has no phone-side capsule, notification or accessibility protection. The UI refreshes screenshots periodically, not video. `run` and the dedicated `install` command require the App. `wrap`, `exec` and `app` also support an explicitly selected `--backend basic`; never choose it as an automatic fallback. To install ProfilePilot's App, first stop basic control, then use `ppilot phone update --device DEVICE_ID`; users confirm required Android permissions. The desktop offers the same transition through “结束控制并安装 App”.
 
 ## Wi-Fi connection through the CLI
 
@@ -40,7 +40,7 @@ ppilot phone list
 ppilot phone connect --device RETURNED_WIFI_DEVICE_ID
 ```
 
-Use the actual returned ID, which can be an IP:port or an mDNS service name. `connect --device` may update/open the companion; it does not start control. It can reuse an existing USB companion pairing after verifying the same hardware, but USB authorization is not proof of Android wireless-debugging pairing. Reconcile session ownership before switching transports; never use Wi-Fi to bypass a paused or occupied USB session.
+Use the actual returned ID, which can be an IP:port or an mDNS service name. `connect --device` connects/opens the existing companion without installing or updating it; it does not start control. Use `update --device` for an authorized installation/update of the bundled companion. Connection can reuse an existing USB companion pairing after verifying the same hardware, but USB authorization is not proof of Android wireless-debugging pairing. Reconcile session ownership before switching transports; never use Wi-Fi to bypass a paused or occupied USB session. `wireless-disconnect --device` disconnects the selected Wi-Fi route after its tasks end and suppresses automatic reconnection until an explicit connection request.
 
 If wireless pairing is required, ask the user to open **开发者选项 → 无线调试 → 使用配对码配对** and keep the popup open. The phone and computer must be on the same LAN; the computer may use Ethernet. Use the popup's pairing address and six-digit code in a temporary UTF-8 JSON file (BOM accepted):
 
@@ -60,11 +60,15 @@ The desktop **手机 → 无线连接手机** wizard is optional. Do not require
 
 ## Install an APK
 
-`ppilot phone install --device DEVICE_ID --apk "/absolute/path/app.apk" --controller Codex` installs a local signed APK through ProfilePilot over the selected USB or Wi-Fi connection. It creates and ends its own control session; do not call `start` first. The companion must be ready and existing sessions must be ended with the user's authorization. `connect` installs or updates only ProfilePilot's companion, while `install` handles other apps.
+`ppilot phone install --device DEVICE_ID --apk "/absolute/path/app.apk" --controller Codex` installs a local signed APK through ProfilePilot over the selected USB or Wi-Fi connection. It creates and ends its own control session; do not call `start` first. The companion must be ready and existing sessions must be ended with the user's authorization. `update` installs or updates the bundled ProfilePilot companion; `connect` leaves APK bytes unchanged. The `install` command handles other apps.
 
 The command stages and verifies the requested APK bytes, uses Android's normal signature/update checks, and preserves existing app data. It does not uninstall, downgrade, grant permissions, launch the installed app, resume a paused session, or accept arbitrary ADB flags. Pause, disconnect, lease expiry or ownership changes stop the host installer; an Android install already submitted may still finish. Reconcile the actual result before any retry. A CLI success means Android returned `Success` under the same active session. Use normal `ppilot phone` actions for subsequent UI checks.
 
 ## Select and start
+
+For installed versions, first use `ppilot phone inspect --device DEVICE_ID [--package com.example.app]` (defaults to ProfilePilot). It reads versionName/versionCode, timestamps, all APK paths and raw evidence without an App session or installation. Unknown fields remain null. Use `packages --device DEVICE_ID [--scope all|user|system] [--filter example]` for app discovery and `diagnose --device DEVICE_ID` for build/display/process/service/window diagnostics. Query failures do not prove absence.
+
+Read [Managed ADB and app workflows](phone-adb.md) for Shell, files, logs, package export/lifecycle, split installation, forwarding, host diagnostics and maintenance commands. These are now managed `ppilot phone` capabilities; a raw ADB exception is unnecessary for supported operations.
 
 1. Run `ppilot phone list` and identify the intended connected device. Use its actual ID, not an assumed serial or a model name alone. Respect saved preferences; ask when multiple devices are ambiguous or the preferred device is unavailable.
 2. Inspect its current session. Do not stop, replace or resume someone else's session. If the task only needs observation, use view mode; input needs control mode and any confirmation required by the user's preferences.
@@ -125,7 +129,7 @@ Use actual observed IDs/text and open the correct page before running. `wait` de
 
 Read-only flows default to view mode; input flows require control. Only observations repeat. Pause, disconnect, ambiguous targets or uncertain input stop the flow; it never resumes automatically. A rerun starts at step one: reconcile the prior outcome and current page first. Exit 0 means success; exit 1 means failure. Reports give step durations and failure positions without input content. `--output-dir` opts into local reports and failure screenshots/snapshots, which may contain page content; evidence is skipped after ownership changes. Update both desktop CLI and Android App for selector support.
 
-For existing scripts, `ppilot phone wrap --device DEVICE_ID --controller AGENT_NAME --task TASK_DESCRIPTION --mode view -- PROGRAM ARGS` starts a managed process with an ADB-compatible wrapper. Use control mode for authorized input. `ppilot phone adb --help` lists the supported subset. A tool that hardcodes a native ADB executable, uses unsupported commands or directly uses scrcpy is not automatically covered. Do not bypass the managed route after a rejected operation. On Windows use an actual executable, or an explicit interpreter for scripts and .cmd files.
+For existing scripts, `ppilot phone wrap --device DEVICE_ID --controller AGENT_NAME --task TASK_DESCRIPTION --mode view -- PROGRAM ARGS` starts a managed process with the ADB adapter described in [Managed ADB and app workflows](phone-adb.md). Use control mode for authorized input. A tool that hardcodes a native ADB executable or opens a direct ADB socket is not automatically covered by `wrap`. Do not bypass the managed route after a rejected operation. On Windows use an actual executable, or an explicit interpreter for scripts and .cmd files.
 
 ## Pause and finish
 

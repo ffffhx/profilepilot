@@ -36,18 +36,32 @@ export async function discoverWireless(adb: AdbRunner): Promise<PhoneWirelessDis
 // Reports are hints, not connection authority. Use only a fresh report from the
 // selected phone's authenticated channel; never join arbitrary IPs to old ports.
 export function wirelessCandidates(services: PhoneWirelessService[], routes: PhoneDevice[], now: number) {
-  const reports = routes.filter(device => device.cloud?.paired && device.cloud.report && device.cloud.reportedAt !== null
-    && now - device.cloud.reportedAt >= 0 && now - device.cloud.reportedAt < 45000);
-  const phoneIps = [...new Set(reports.flatMap(device => device.cloud!.report!.readiness.network?.wifiIpv4 || []))];
+  const reports = routes.flatMap(device => [
+    ...(device.connection === "device" && device.companion === "ready" && device.confirmedAt != null && device.state?.readiness?.network
+      ? [{ at: device.confirmedAt, network: device.state.readiness.network }] : []),
+    ...(device.cloud?.paired && device.cloud.report?.readiness.network && device.cloud.reportedAt != null
+      ? [{ at: device.cloud.reportedAt, network: device.cloud.report.readiness.network }] : [])
+  ]).filter(report => now - report.at >= 0 && now - report.at < 45000).sort((a, b) => b.at - a.at);
+  // The newest authenticated observation wins; combining old/new IPs revives stale advertisements.
+  const report = reports[0];
+  const phoneIps = [...new Set(report?.network.wifiIpv4 || [])];
   const hardware = [...new Set(routes.map(device => device.hardwareId || (device.transport === "usb" ? device.id : "")).filter(Boolean))];
   const result: PhoneWirelessService[] = [];
-  for (const device of reports) {
-    const cloud = device.cloud!;
-    for (const endpoint of cloud.report!.readiness.network?.adbEndpoints || []) {
-      if (endpoint.ageMs + now - cloud.reportedAt! >= 45000 || !phoneIps.includes(endpoint.address.split(":")[0])) continue;
+  if (report) {
+    for (const endpoint of report.network.adbEndpoints || []) {
+      if (endpoint.ageMs + now - report.at >= 45000 || !phoneIps.includes(endpoint.address.split(":")[0])) continue;
       if (result.some(item => item.kind === "connect" && item.address === endpoint.address)) continue;
       result.push({ name: "手机上报", kind: "connect", address: wirelessAddress(endpoint.address), source: "phone" });
     }
+  }
+  // A verified live ADB route can be newer than its mDNS advertisement.
+  for (const device of routes) {
+    if (device.connection !== "device" || device.transport !== "wifi" || !device.hardwareId) continue;
+    try {
+      const address = wirelessAddress(device.id);
+      if (phoneIps.length && !phoneIps.includes(address.split(":")[0])) continue;
+      if (!result.some(item => item.address === address)) result.push({ name: device.name, kind: "connect", address, source: "adb" });
+    } catch { /* mDNS transport IDs are resolved through their advertisement below. */ }
   }
   for (const service of services) {
     const host = service.address.split(":")[0];

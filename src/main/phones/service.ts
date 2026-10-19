@@ -232,7 +232,29 @@ export class PhonesService {
   }
   private now(): number { return this.options.now?.() ?? Date.now(); }
   private device(id: string): PhoneDevice { validateDeviceId(id); const device = this.devices.get(id); if (!device) throw new Error("手机不存在，请刷新设备列表。"); return device; }
-  private connected(id: string): PhoneDevice { if (this.adbSuspended || this.hostBusy) throw new Error("ADB 主机服务已停用或正在变更连接。"); const device = this.device(id); if (device.connection !== "device") throw new Error(device.transport === "emulator" ? "模拟器未连接，请先启动模拟器并确认调试连接。" : "手机未连接或尚未授权 USB 调试。"); return device; }
+  private liveAliases(device: PhoneDevice): PhoneDevice[] {
+    const hardware = device.hardwareId || this.saved[device.id]?.hardwareId;
+    return hardware ? [...this.devices.values()].filter(other => other.id !== device.id
+      && other.connection === "device" && other.hardwareId === hardware) : [];
+  }
+  private connectionError(device: PhoneDevice): string {
+    if (device.transport === "emulator") return device.connection === "unauthorized"
+      ? "请在模拟器窗口中确认此电脑的调试连接。" : "模拟器未连接，请先启动模拟器并确认调试连接。";
+    if (device.transport === "wifi") {
+      if (device.connection === "unauthorized") return "无线调试尚未授权此电脑，请在手机的无线调试页面完成配对。";
+      const alternatives = this.liveAliases(device);
+      return alternatives.length === 1 ? `原无线连接已失效；同一台手机当前在线地址为 ${alternatives[0].id}。请连接该地址并重新确认会话。`
+        : "无线调试连接已离线，IP 或端口可能已变化。请重新发现当前连接地址；保持手机解锁并开启无线调试。";
+    }
+    return device.connection === "unauthorized" ? "请在手机上允许此电脑进行 USB 调试。"
+      : "USB 连接已断开，请检查数据线并重新连接手机。";
+  }
+  private connected(id: string): PhoneDevice {
+    if (this.adbSuspended || this.hostBusy) throw new Error("ADB 主机服务已停用或正在变更连接。");
+    const device = this.device(id);
+    if (device.connection !== "device") throw new Error(this.connectionError(device));
+    return device;
+  }
   refresh(): Promise<PhonesSnapshot> {
     if (this.adbSuspended) return Promise.resolve(this.snapshot());
     if (this.refreshing) return this.refreshing;
@@ -256,7 +278,7 @@ export class PhonesService {
         this.devices.set(device.id, device);
         const saved = this.saved[device.id];
         if (saved && (saved.model !== next.model || saved.transport !== next.transport)) { saved.model = next.model.slice(0, 200); saved.transport = next.transport; metadataChanged = true; }
-        if (device.connection !== "device") { await this.disconnected(device, device.connection === "unauthorized" ? device.transport === "emulator" ? "请在模拟器窗口中确认此电脑的调试连接。" : "请在手机上允许此电脑进行 USB 调试。" : "ADB 连接离线。", device.connection); continue; }
+        if (device.connection !== "device") { await this.disconnected(device, this.connectionError(device), device.connection); continue; }
         if (this.operations.has(device.id)) continue;
         await this.identifyHardware(device);
         await this.inspectInstallation(device);
@@ -423,6 +445,14 @@ export class PhonesService {
           saved.statusDeviceId = incoming.statusDeviceId; this.persist();
         }
         this.pairing.delete(id);
+        // Offline routes are history, not additional owners of this phone. Only
+        // a newer authenticated observation of the same instance retires them.
+        for (const alias of this.devices.values()) {
+          if (alias.id === id || alias.connection === "device" || !alias.state
+              || alias.state.instanceId !== incoming.instanceId || alias.state.generation > incoming.generation
+              || !device.hardwareId || (alias.hardwareId || this.saved[alias.id]?.hardwareId) !== device.hardwareId) continue;
+          alias.state = null; alias.confirmedAt = null;
+        }
       }
     }
     if (!response.ok) {
@@ -498,12 +528,25 @@ export class PhonesService {
     return this.wirelessReconnect;
   }
   async discoverWireless(id?: string) {
+    await this.refresh();
     if (id) await this.cloud.refresh();
-    const discovered = await discoverWireless(this.adb);
-    const candidates = id ? wirelessCandidates(discovered.services, this.wirelessGroup(id).routes, this.now())
-      : { services: discovered.services.slice(0, 16), phoneIps: [] as string[] };
-    const services = await Promise.all(candidates.services.map(async item => ({ ...item, ...await (this.options.probeWireless || probeWireless)(item.address) })));
-    return { ...candidates, services, error: discovered.error };
+    const scan = async () => {
+      const discovered = await discoverWireless(this.adb);
+      const groups = id ? [this.wirelessGroup(id)] : groupPhoneDevices(this.snapshot().devices);
+      const knownHardware = groups.flatMap(group => group.routes.map(route => route.hardwareId).filter(Boolean));
+      const selected = groups.map(group => wirelessCandidates(discovered.services, group.routes, this.now()));
+      const all = [...selected.flatMap(result => result.services), ...(!id ? discovered.services.filter(service =>
+        !knownHardware.some(hardware => service.name.startsWith(`adb-${hardware}-`))) : [])];
+      const candidates = all.filter((item, index) => all.findIndex(other => other.kind === item.kind && other.address === item.address) === index).slice(0, 16);
+      const services = await Promise.all(candidates.map(async item => ({ ...item, ...await (this.options.probeWireless || probeWireless)(item.address) })));
+      return { services, phoneIps: [...new Set(selected.flatMap(result => result.phoneIps))], error: discovered.error };
+    };
+    let result = await scan();
+    if (!result.error && !result.services.some(item => item.reachable && item.kind === "connect")) {
+      await new Promise(resolve => setTimeout(resolve, 700));
+      result = await scan(); // Replace stale results, never accumulate expired endpoints.
+    }
+    return result;
   }
   autoConnectWireless(id: string): Promise<PhoneDevice> {
     for (const device of this.wirelessGroup(id).routes) this.wirelessDisabled.delete(device.hardwareId || device.id);
@@ -569,7 +612,13 @@ export class PhonesService {
   }
   async prepare(id: string, update = true): Promise<PhoneDevice> {
     this.assertNoBasic();
+    await this.refresh();
+    if (!update && this.device(id).connection !== "device") {
+      const alternatives = this.liveAliases(this.device(id));
+      if (alternatives.length === 1) id = alternatives[0].id;
+    }
     await this.exclusive(id, "正在连接手机…", async () => {
+      const confirmedRoute = this.routes.has(id) && this.device(id).companion === "ready" && !this.reconcile.has(id);
       // USB and wireless transports can identify the same physical phone with
       // different ADB IDs. Reuse its existing app pairing without rotating its
       // credential or replacing a control session on the other transport.
@@ -584,6 +633,14 @@ export class PhonesService {
       if (this.routes.has(id)) {
         let state: PhoneSessionState | undefined;
         try { state = (await this.rpc(id, "sync")).state; } catch { /* recover a disconnected companion */ }
+        // An established route stays unchanged. A newly authenticated route must
+        // reconcile lingering control before returning; it never inherits input.
+        if (state && !update) {
+          if (!confirmedRoute && ["viewing", "controlling", "executing"].includes(state.phase)) {
+            await this.rpc(id, "pause", { instanceId: state.instanceId, sessionId: state.sessionId, generation: state.generation });
+          }
+          return;
+        }
         if (state && ["viewing", "controlling", "executing", "paused"].includes(state.phase)) throw new Error("请先结束手机会话，再打开或更新配套 App。");
       }
       const installed = await this.adb.run(["-s", id, "shell", deviceShell(["pm", "path", this.companion.packageName])]).catch(() => "");
@@ -856,10 +913,16 @@ export class PhonesService {
       this.wrappers.delete(lease); return;
     }
     this.installs.get(lease)?.abort.abort(new Error("安装会话已结束。"));
-    await this.exclusive(owner.id, "正在结束 ADB 托管任务…", async () => {
-      const { state } = await this.rpc(owner.id, "sync");
+    const original = this.device(owner.id);
+    const alternatives = this.liveAliases(original).filter(device => device.companion === "ready" && this.routes.has(device.id));
+    const id = original.connection === "device" && this.routes.has(original.id) ? original.id
+      : alternatives.length === 1 ? alternatives[0].id : original.id;
+    // A changed port may be used to end this exact owned task, never to resume
+    // commands or transfer its input authority to the replacement transport.
+    await this.exclusive(id, "正在结束 ADB 托管任务…", async () => {
+      const { state } = await this.rpc(id, "sync");
       if (state.instanceId === owner.instanceId && state.sessionId === owner.sessionId && !["idle", "stopped", "disconnected"].includes(state.phase)) {
-        await this.rpc(owner.id, "stop", { instanceId: state.instanceId, sessionId: state.sessionId, generation: state.generation });
+        await this.rpc(id, "stop", { instanceId: state.instanceId, sessionId: state.sessionId, generation: state.generation });
       }
       this.wrappers.delete(lease);
       this.installs.delete(lease);

@@ -62,7 +62,7 @@ export interface PhonesSnapshot {
   companionApp?: { packageName: string; name: string; variant: "debug" | "release" };
 }
 export interface PhoneScreenFrame { mime: "image/png"; base64: string; width: number; height: number; capturedAt: number; }
-export interface PhoneWirelessService { name: string; kind: "pairing" | "connect"; address: string; source?: "phone" | "mdns"; reachable?: boolean; reason?: string; }
+export interface PhoneWirelessService { name: string; kind: "pairing" | "connect"; address: string; source?: "phone" | "mdns" | "adb"; reachable?: boolean; reason?: string; }
 export interface PhoneWirelessDiscovery { services: PhoneWirelessService[]; error: string; phoneIps?: string[]; }
 export interface PhoneSelector {
   resourceId?: string; text?: string; description?: string; className?: string; packageName?: string;

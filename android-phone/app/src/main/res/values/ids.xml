@@ -8,6 +8,7 @@
     <item type="id" name="home_accessibility" />
     <item type="id" name="home_overlay" />
     <item type="id" name="home_notifications" />
+    <item type="id" name="home_developer" />
     <item type="id" name="home_usb" />
     <item type="id" name="home_wifi" />
     <item type="id" name="home_pause" />

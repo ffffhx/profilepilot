@@ -53,7 +53,7 @@ public final class MainActivity extends ComponentActivity {
       permissionCount, permissionSummaryAction, permissionHint, reassurance, serviceError;
   private HomeIcon computerGraphic, phoneGraphic, linkGraphic;
   private final SettingRow[] permissions=new SettingRow[3];
-  private SettingRow usb, wifi;
+  private SettingRow developer, usb, wifi;
   private boolean permissionsExpanded, seenConnected;
   private int lastPermissionCount=-1;
   private PhoneHomeState lastState;
@@ -192,11 +192,13 @@ public final class MainActivity extends ComponentActivity {
     permissions[2]=setting(permissionRows,"bell","状态通知","在通知栏随时暂停控制",R.id.home_notifications,this::openNotifications);
     permissionHint=text(page,"开启无障碍后，可辅助配置其余设置。",11,MUTED,false); permissionHint.setPadding(dp(3),dp(8),dp(3),0);
 
-    heading(page,"连接设置","任选一种即可");
+    heading(page,"连接设置","USB / Wi-Fi 二选一");
     LinearLayout connectionCard=card(page,17);
+    developer=setting(connectionCard,"phone","开发者选项","USB / Wi-Fi 调试的前置设置",R.id.home_developer,
+        () -> launchSetting(() -> PhoneSettings.openDeveloperOptions(this)));
     usb=setting(connectionCard,"usb","USB 调试","通过数据线连接电脑",R.id.home_usb,() -> showConnectionSettings(false));
     wifi=setting(connectionCard,"wifi","Wi-Fi 无线调试","手机与电脑在同一局域网",R.id.home_wifi,() -> showConnectionSettings(true));
-    TextView connectionHint=text(page,"开启任意一种，电脑即可自动连接。",11,MUTED,false); connectionHint.setPadding(dp(3),dp(8),dp(3),0);
+    TextView connectionHint=text(page,"先开启开发者选项，再任选一种调试方式。",11,MUTED,false); connectionHint.setPadding(dp(3),dp(8),dp(3),0);
     reassurance=text(page,"",12,MUTED,false); reassurance.setGravity(Gravity.CENTER); reassurance.setPadding(0,dp(24),0,dp(8));
     TextView help=button(page,"连接遇到问题？",false,this::showHelp); help.setTextSize(12); help.setTextColor(MUTED); help.setBackground(ripple(BG,10,false));
     LinearLayout.LayoutParams helpParams=new LinearLayout.LayoutParams(-1,dp(48)); helpParams.topMargin=dp(6); help.setLayoutParams(helpParams);
@@ -250,6 +252,7 @@ public final class MainActivity extends ComponentActivity {
     permissionCount.setTextColor(count==3?GREEN:MUTED); permissionSummary.setVisibility(count==3?View.VISIBLE:View.GONE);
     permissionRows.setVisibility(count<3 || permissionsExpanded?View.VISIBLE:View.GONE); permissionHint.setVisibility(count<3?View.VISIBLE:View.GONE);
     setText(permissionSummaryAction,permissionsExpanded?"收起":"查看"); permissionSummary.setContentDescription(permissionsExpanded?"收起已开启的权限":"查看已开启的权限");
+    developer.status(ready.debugLabel("developerOptions"),debugStateColor(ready.developerOptions));
     boolean anyDebug=ready.usbDebugging.equals("enabled") || ready.wirelessDebugging.equals("enabled");
     updateDebugRow(usb,ready.usbConnected,ready.usbDebugging,ready.debugLabel("usbDebugging"),anyDebug);
     updateDebugRow(wifi,ready.wifiConnected,ready.wirelessDebugging,ready.debugLabel("wirelessDebugging"),anyDebug);
@@ -300,9 +303,6 @@ public final class MainActivity extends ComponentActivity {
     boolean enabled=state.equals("enabled");
     LinearLayout content=showSheet(name);
     paragraph(content,"USB 和 Wi-Fi 任选一种即可。完成调试设置与必要授权后，电脑会自动连接。");
-    SettingRow developer=setting(content,"phone","开发者选项","调试设置的系统入口",View.NO_ID,
-        () -> launchSetting(() -> PhoneSettings.openDeveloperOptions(this)));
-    developer.status(ready.debugLabel("developerOptions"),debugStateColor(ready.developerOptions));
     info(content,name,ready.debugLabel(key),debugStateColor(state));
     if (wireless) {
       paragraph(content,"1  手机和电脑处于同一局域网，电脑端 ProfilePilot 保持运行。\n\n2  开启无线调试，按系统提示允许当前网络。\n\n3  首次使用时，按电脑提示完成系统配对；之后由电脑自动连接。");

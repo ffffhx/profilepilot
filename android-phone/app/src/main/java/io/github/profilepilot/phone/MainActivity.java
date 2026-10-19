@@ -296,12 +296,14 @@ public final class MainActivity extends ComponentActivity {
   private void showConnectionSettings(boolean wireless) {
     PhoneReadiness ready=new PhoneReadiness(this); String name=wireless?"Wi-Fi 无线调试":"USB 调试";
     String key=wireless?"wirelessDebugging":"usbDebugging";
-    boolean enabled=(wireless?ready.wirelessDebugging:ready.usbDebugging).equals("enabled");
+    String state=wireless?ready.wirelessDebugging:ready.usbDebugging;
+    boolean enabled=state.equals("enabled");
     LinearLayout content=showSheet(name);
     paragraph(content,"USB 和 Wi-Fi 任选一种即可。完成调试设置与必要授权后，电脑会自动连接。");
     SettingRow developer=setting(content,"phone","开发者选项","调试设置的系统入口",View.NO_ID,
         () -> launchSetting(() -> PhoneSettings.openDeveloperOptions(this)));
-    developer.status(ready.debugLabel("developerOptions"),MUTED); info(content,name,ready.debugLabel(key));
+    developer.status(ready.debugLabel("developerOptions"),debugStateColor(ready.developerOptions));
+    info(content,name,ready.debugLabel(key),debugStateColor(state));
     if (wireless) {
       paragraph(content,"1  手机和电脑处于同一局域网，电脑端 ProfilePilot 保持运行。\n\n2  开启无线调试，按系统提示允许当前网络。\n\n3  首次使用时，按电脑提示完成系统配对；之后由电脑自动连接。");
     } else paragraph(content,"1  使用支持数据传输的 USB 线连接电脑。\n\n2  开启 USB 调试，手机弹出授权时允许你的电脑。\n\n3  电脑端 ProfilePilot 运行时会自动连接，首页会自动更新。");
@@ -491,8 +493,14 @@ public final class MainActivity extends ComponentActivity {
     item.addView(icon("chevron",MUTED,16)); item.setBackground(ripple(Color.WHITE,10,false)); clickable(item,value,action); parent.addView(item);
   }
   private void info(LinearLayout parent,String label,String value) {
+    info(parent,label,value,MUTED);
+  }
+  private int debugStateColor(String state) {
+    return switch(state) { case "enabled" -> GREEN; case "disabled" -> MUTED; default -> AMBER; };
+  }
+  private void info(LinearLayout parent,String label,String value,int color) {
     LinearLayout item=row(); item.setPadding(0,dp(14),0,dp(14)); parent.addView(item); TextView name=text(item,label,13,INK,false); weight(name);
-    TextView detail=text(item,value,12,MUTED,false); detail.setGravity(Gravity.END); detail.setLayoutParams(new LinearLayout.LayoutParams(0,-2,1.4f));
+    TextView detail=text(item,value,12,color,false); detail.setGravity(Gravity.END); detail.setLayoutParams(new LinearLayout.LayoutParams(0,-2,1.4f));
   }
   private SettingRow setting(LinearLayout parent,String icon,String label,String detail,int id,Runnable action) {
     if (parent.getChildCount()>0) { View line=new View(this); line.setBackgroundColor(LINE); parent.addView(line,new LinearLayout.LayoutParams(-1,dp(1))); }

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { PhoneActionInput, PhoneActionResult, PhoneBasicModeInput, PhoneSessionState } from "../../shared/phones";
 import { deviceShell, type AdbRunner } from "./adb";
+import { captureAdbScreen } from "./screenshot";
 
 type Session = { state: PhoneSessionState; requests: Set<string>; pending?: AbortController; frame?: { width: number; height: number; at: number } };
 const occupied = (state: PhoneSessionState) => !["stopped", "disconnected"].includes(state.phase);
@@ -76,11 +77,7 @@ export class BasicPhoneControl {
       let result: unknown;
       if (action.kind === "screenshot") {
         session.frame = undefined;
-        if (!this.adb.runBinary) throw new Error("当前 ADB 不支持读取手机画面。");
-        const png = await this.adb.runBinary(["-s", id, "exec-out", "screencap", "-p"], 12000, abort.signal); check();
-        if (png.length < 33 || !png.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10])) || png.toString("ascii", 12, 16) !== "IHDR") throw new Error("手机未返回有效画面，请解锁手机或切换到允许截图的页面。");
-        const width = png.readUInt32BE(16), height = png.readUInt32BE(20);
-        if (!width || !height || width > 20000 || height > 20000) throw new Error("手机画面尺寸无效。");
+        const { png, width, height } = await captureAdbScreen(this.adb, id, abort.signal, check); check();
         session.frame = { width, height, at: this.now() };
         result = { mime: "image/png", base64: png.toString("base64"), width, height };
       } else {

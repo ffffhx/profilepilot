@@ -35,7 +35,7 @@ function harness(t, options = {}) {
     live: async (_,expected,command) => {
       assert.equal(expected,3);
       if (command.op==='probe') return {protocol:1};
-      if (command.op==='frame') { captures++; if(options.fail && captures===3) throw Error('device lost'); return options.frame || fixture.frame; }
+      if (command.op==='frame') { captures++; if(options.fail && captures===3) throw Error('device lost'); if(options.delay)await wait(options.delay); return options.frame || fixture.frame; }
       points.push(command); return {accepted:true};
     }
   };
@@ -99,7 +99,31 @@ test('CLI defaults to observation and validates before requesting a phone', visi
   const request=async c=>{calls.push(c);return {ok:true,data:{}};};
   assert.equal(await runGameFollowCli(['start','--device','phone','--config',file],request,io),0);
   assert.equal(calls[0].params.mode,'observe');
+  assert.equal(calls[0].params.backend,'app');
   assert.equal(await runGameFollowCli(['stop','--run-id','bad'],request,io),1);assert.equal(calls.length,1);
+  assert.equal(await runGameFollowCli(['start','--device','phone','--config',file,'--backend','basic'],request,io),0);
+  assert.equal(calls[1].params.backend,'basic');
+  assert.equal(await runGameFollowCli(['start','--device','phone','--config',file,'--backend','automatic'],request,io),1);
+  assert.equal(calls.length,2);
+});
+
+test('basic backend is explicitly carried to the owned wrapper and reported in status',vision,async t=>{
+  const h=harness(t),start=h.host.startWrapper;let backend;
+  h.host.startWrapper=async(...args)=>{backend=args[4];return start(...args);};
+  const state=await h.manager.command({op:'start',id:'emulator',mode:'observe',backend:'basic',config:fixture.config});
+  assert.equal(backend,'basic');assert.equal(state.backend,'basic');
+  await until(async()=> (await h.manager.command({op:'status'})).frames>=1);
+  await h.manager.command({op:'stop',runId:state.runId});
+  assert.equal(h.points.length,0);assert.equal(h.stopped(),1);
+});
+
+test('basic follow permits slow emulator captures while retaining bounded touch requests',vision,async t=>{
+  const h=harness(t,{delay:1100});
+  const state=await h.manager.command({op:'start',id:'emulator',mode:'control',backend:'basic',config:fixture.config});
+  await until(()=>h.points.length>=2);
+  assert.deepEqual(h.points[0].points,[]);assert.equal(h.points[1].points.length,1);
+  await h.manager.command({op:'stop',runId:state.runId});
+  assert.equal(h.stopped(),1);
 });
 test('management carries calibration images above 1 MiB while keeping ordinary requests bounded', vision, async t => {
   const { startProfilePilotManagementServer }=require('../dist/main/profilepilot-management-server');

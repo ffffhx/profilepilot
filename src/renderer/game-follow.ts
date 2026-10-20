@@ -31,6 +31,8 @@ export async function openGameFollower(device?: PhoneDevice) {
         <div class="gf-tools"><button data-gf-tool="wall">画障碍</button><button data-gf-tool="erase">擦除</button><button data-gf-clear>清空障碍</button></div>
         <label>绕墙留白 <select data-gf-clearance><option value="0">不扩展</option><option value="1" selected>1 格</option><option value="2">2 格</option></select></label>
       </section><section><h3>3 · 跟随设置</h3>
+        <label>控制方式<select data-gf-backend><option value="app">手机 App · 连续移动</option><option value="basic">免安装 · 分段移动</option></select></label>
+        <p>旧版安卓模拟器可选择免安装模式，每次移动最多 350 毫秒，速度受截图延迟影响。</p>
         <label>方案名称<input data-gf-name maxlength="80" value="队友跟随"></label>
         <label>识别阈值<input data-gf-confidence type="number" min=".65" max=".999" step=".01" value=".90"></label>
         <label>跟随距离（地图宽度 %）<input data-gf-distance type="number" min="2" max="30" value="8"></label>
@@ -246,7 +248,8 @@ export async function openGameFollower(device?: PhoneDevice) {
   async function start(mode: "observe" | "control") {
     if (!device) throw new Error("请先连接手机");
     readSettings(); demo = undefined;
-    const state: FollowStatus = await window.phones.followCommand({ op: "start", id: device.id, mode, config });
+    const backend = find<HTMLSelectElement>("[data-gf-backend]").value as "app" | "basic";
+    const state: FollowStatus = await window.phones.followCommand({ op: "start", id: device.id, mode, backend, config });
     runId = state.runId; running = state.running;
     if (closed) { if (runId) await window.phones.followCommand({ op: "stop", runId }); return; }
     status.textContent = mode === "observe" ? "正在识别手机画面，不发送移动操作" : "正在开始跟随";

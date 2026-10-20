@@ -13,7 +13,7 @@ export const phoneHelp = `ppilot phone CLI · 手机控制
 ppilot phone list
 ppilot phone follow runtime|setup|status|load
 ppilot phone follow save --config <校准JSON>
-ppilot phone follow start --device <设备ID> --config <校准JSON> [--mode observe|control]
+ppilot phone follow start --device <设备ID> --config <校准JSON> [--mode observe|control] [--backend app|basic]
 ppilot phone follow stop --run-id <status返回的任务ID>
 ppilot phone follow analyze --params-file <包含config和frame的JSON>
 ppilot phone emulator-list

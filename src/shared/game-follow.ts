@@ -31,6 +31,7 @@ export interface FollowStatus {
   runId?: string;
   deviceId?: string;
   mode?: "observe" | "control";
+  backend?: "app" | "basic";
   frames: number;
   actions: number;
   fps: number;
@@ -43,5 +44,5 @@ export type FollowCommand =
   | { op: "runtime" | "setup" | "status" }
   | { op: "load" | "save"; config?: GameFollowConfig }
   | { op: "analyze"; config: GameFollowConfig; frame: FollowFrame }
-  | { op: "start"; id: string; mode: "observe" | "control"; config: GameFollowConfig }
+  | { op: "start"; id: string; mode: "observe" | "control"; backend?: "app" | "basic"; config: GameFollowConfig }
   | { op: "stop"; runId: string };

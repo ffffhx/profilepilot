@@ -19,6 +19,12 @@ export async function ensureRunningEmulatorWindowVisible(name: string, id: strin
   await fitEmulatorWindow(0, name, port);
 }
 
+export async function ensureTencentEmulatorWindowVisible(pid: number, platform = process.platform): Promise<void> {
+  if (platform !== "win32") return;
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("Invalid emulator window target");
+  await fitEmulatorWindow(pid, "Tencent_GameLoop", 0);
+}
+
 async function fitEmulatorWindow(launcherPid: number, name: string, port: number): Promise<void> {
   const script = String.raw`
 $ErrorActionPreference = 'Stop'
@@ -58,7 +64,9 @@ public static class ProfilePilotEmulatorWindow {
         var title = new StringBuilder(512);
         GetWindowText(window, title, title.Capacity);
         string prefix = "Android Emulator - " + name + ":";
-        if (port > 0 ? title.ToString() != prefix + port : !title.ToString().StartsWith(prefix, StringComparison.Ordinal)) return true;
+        if (name == "Tencent_GameLoop") {
+          if (!title.ToString().StartsWith("腾讯手游助手", StringComparison.Ordinal)) return true;
+        } else if (port > 0 ? title.ToString() != prefix + port : !title.ToString().StartsWith(prefix, StringComparison.Ordinal)) return true;
         target = window;
         return false;
       }, IntPtr.Zero);
@@ -106,7 +114,7 @@ while ($elapsed.ElapsedMilliseconds -lt 20000) {
     # emulator.exe creates a qemu child on Windows. Scope discovery to this launch.
     foreach ($parent in @($targets)) {
       foreach ($child in @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $parent" -ErrorAction SilentlyContinue)) {
-        if ($child.Name -like 'qemu-system-*.exe' -or $child.Name -eq 'emulator.exe') { [void]$targets.Add([int]$child.ProcessId) }
+        if ($child.Name -like 'qemu-system-*.exe' -or $child.Name -eq 'emulator.exe' -or ($name -eq 'Tencent_GameLoop' -and $child.Name -eq 'AndroidEmulator.exe')) { [void]$targets.Add([int]$child.ProcessId) }
       }
     }
   } else {

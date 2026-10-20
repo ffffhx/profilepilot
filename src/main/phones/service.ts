@@ -21,6 +21,7 @@ import { inspectApk } from "./apk";
 import { PhoneInspection } from "./inspection";
 import { ManagedAdbJobs } from "./adb-jobs";
 import { BasicPhoneControl } from "./basic";
+import { captureAdbScreen } from "./screenshot";
 import { ScreenCamera, type CameraCapture } from "./screen-camera";
 import type { ScreenCameraStart, ScreenCameraCommand, ScreenCameraLease } from "../../shared/screen-camera";
 import { GameFollower } from "./game-follow";
@@ -73,7 +74,7 @@ export class PhonesService {
   private observations = new Map<string, { instanceId: string; sequence: number; generation: number }>();
   private reconcile = new Set<string>();
   private pairing = new Set<string>();
-  private wrappers = new Map<string, { id: string; sessionId: string; instanceId: string; seenAt: number; closing: boolean; backend: "app" | "basic" }>();
+  private wrappers = new Map<string, { id: string; sessionId: string; instanceId: string; seenAt: number; closing: boolean; backend: "app" | "basic"; followSequence?: number }>();
   private installs = new Map<string, InstallJob>();
   private closed = false;
   private wirelessBusy = false;
@@ -211,6 +212,14 @@ export class PhonesService {
     this.emulatorBusy = true;
     try {
       if (!(await this.emulators.list()).includes(name)) throw new Error("模拟器不存在，请重新选择虚拟设备。");
+      const local = await this.emulators.connectLocal?.(name);
+      if (local) {
+        if (!/^127\.0\.0\.1:\d{4,5}$/.test(local)) throw new Error("本机模拟器连接地址无效");
+        const output = await this.adb.run(["connect", local], 10000);
+        if (!/connected to|already connected/i.test(output)) throw new Error("本机模拟器尚未连接");
+        await this.refresh();
+        return this.connected(local);
+      }
       const find = async () => {
         const candidates = parseAdbDevices(await this.adb.run(["devices", "-l"])).filter(device => device.transport === "emulator");
         for (const device of candidates) {
@@ -742,12 +751,9 @@ export class PhonesService {
     try {
       if (device.companion === "ready" && this.routes.has(id)) await this.rpc(id, "sync");
       const version = guard(); abort.signal.throwIfAborted();
-      const png = await this.adb.runBinary(["-s", id, "exec-out", "screencap", "-p"], 12000, abort.signal);
-      abort.signal.throwIfAborted();
-      if (guard() !== version) throw new Error("手机会话已改变，本次画面已丢弃。");
-      if (png.length < 33 || !png.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10])) || png.toString("ascii", 12, 16) !== "IHDR") throw new Error("手机未返回有效画面，请解锁手机或切换页面。");
-      const width = png.readUInt32BE(16), height = png.readUInt32BE(20);
-      if (!width || !height || width > 20000 || height > 20000) throw new Error("手机画面尺寸无效。");
+      const check = () => { if (guard() !== version) throw new Error("手机会话已改变，本次画面已丢弃。"); };
+      const { png, width, height } = await captureAdbScreen(this.adb, id, abort.signal, check);
+      check(); abort.signal.throwIfAborted();
       return { mime: "image/png", base64: png.toString("base64"), width, height, capturedAt: this.now() };
     } finally { this.screenReads.delete(id); }
   }
@@ -837,6 +843,30 @@ export class PhonesService {
   }
   private async followLive(lease: string, generation: number, command: object): Promise<unknown> {
     const owner = this.wrapper(lease), device = this.connected(owner.id);
+    if (owner.backend === "basic") {
+      const state = this.pulseWrapper(lease).state!;
+      if (state.generation !== generation || !["viewing", "controlling"].includes(state.phase)
+        || this.operations.has(owner.id) || this.actions.has(owner.id)) throw new Error("手机已暂停或切换会话，跟随已停止");
+      const coordinate = z.number().int().nonnegative().max(20000);
+      const input = z.discriminatedUnion("op", [
+        z.object({ op: z.literal("probe") }).strict(),
+        z.object({ op: z.literal("frame") }).strict(),
+        z.object({ op: z.literal("touch"), sequence: z.number().int().positive(), ttlMs: z.number().int().min(1).max(1500),
+          points: z.array(z.object({ id: z.literal(0), x: coordinate, y: coordinate, fromX: coordinate, fromY: coordinate }).strict()).max(1) }).strict()
+      ]).parse(command);
+      if (input.op === "probe") return { protocol: 1, input: "bounded-swipes", maxStrokeMs: 350 };
+      if (input.op === "frame") return (await this.performWrapper(lease, generation, { kind: "screenshot" }, randomUUID())).result;
+      if (state.mode !== "control") throw new Error("仅查看会话不能操作手机。");
+      if (input.sequence <= (owner.followSequence || 0)) throw new Error("此移动已提交过，不会重复执行。");
+      owner.followSequence = input.sequence;
+      const point = input.points[0];
+      if (!point) return { accepted: true };
+      // A finite swipe releases on-device even if the host disconnects.
+      // Basic control retains its frame, bounds, mode and ownership checks.
+      return (await this.performWrapper(lease, generation, { kind: "swipe",
+        x: point.fromX, y: point.fromY, toX: point.x, toY: point.y, duration: Math.min(350, input.ttlMs)
+      }, randomUUID())).result;
+    }
     if (owner.backend !== "app" || device.companion !== "ready" || this.reconcile.has(owner.id)
       || this.operations.has(owner.id) || this.actions.has(owner.id)) throw new Error("手机连接或操作状态已改变");
     this.actions.add(owner.id);

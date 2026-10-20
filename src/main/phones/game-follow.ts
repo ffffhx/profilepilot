@@ -32,7 +32,7 @@ export const followCommandSchema = z.discriminatedUnion("op", [
   z.object({ op: z.enum(["runtime", "setup", "status", "load"]) }).strict(),
   z.object({ op: z.literal("save"), config: gameFollowConfigSchema }).strict(),
   z.object({ op: z.literal("analyze"), config: gameFollowConfigSchema, frame: frameSchema }).strict(),
-  z.object({ op: z.literal("start"), id: z.string().min(1).max(200), mode: z.enum(["observe", "control"]), config: gameFollowConfigSchema }).strict(),
+  z.object({ op: z.literal("start"), id: z.string().min(1).max(200), mode: z.enum(["observe", "control"]), backend: z.enum(["app", "basic"]).default("app"), config: gameFollowConfigSchema }).strict(),
   z.object({ op: z.literal("stop"), runId: z.string().uuid() }).strict()
 ]);
 type Python = { executable: string; args: string[] };
@@ -85,7 +85,7 @@ export class VisionWorker {
   close() { this.ended = true; this.fail(new Error("视觉处理已停止")); this.child.kill(); }
 }
 export interface FollowHost {
-  startWrapper(id: string, mode: "view" | "control", controller: string, task: string): Promise<{ lease: string; device: PhoneDevice }>;
+  startWrapper(id: string, mode: "view" | "control", controller: string, task: string, backend?: "app" | "basic"): Promise<{ lease: string; device: PhoneDevice }>;
   pulseWrapper(lease: string): PhoneDevice;
   stopWrapper(lease: string): Promise<void>;
   live(lease: string, generation: number, command: object): Promise<any>;
@@ -172,13 +172,13 @@ export class GameFollower {
       } catch (error) { this.preview?.close(); this.preview = undefined; throw error; }
       finally { this.analyzing = false; }
     }
-    if (command.op === "start") return this.start(command.id, command.mode, command.config);
+    if (command.op === "start") return this.start(command.id, command.mode, command.config, command.backend);
     throw new Error("未知视觉跟随操作");
   }
   private async ready() {
     if (!this.python && !(await this.runtime()).available) throw new Error("视觉组件未就绪，请先安装");
   }
-  private async start(id: string, mode: "observe" | "control", config: GameFollowConfig): Promise<FollowStatus> {
+  private async start(id: string, mode: "observe" | "control", config: GameFollowConfig, backend: "app" | "basic"): Promise<FollowStatus> {
     if (this.closing) throw new Error("ProfilePilot 正在退出");
     if (this.run && !this.run.cancelled) throw new Error("请先停止当前跟随任务");
     if (this.analyzing) throw new Error("请等待当前图像分析完成");
@@ -186,33 +186,33 @@ export class GameFollower {
     let started!: () => void;
     run.starting = new Promise<void>(resolve => { started = resolve; });
     this.run = run;
-    this.value = { running: false, runId: run.id, deviceId: id, mode, frames: 0, actions: 0, fps: 0, error: "" };
+    this.value = { running: false, runId: run.id, deviceId: id, mode, backend, frames: 0, actions: 0, fps: 0, error: "" };
     try {
       await this.ready();
       if (run.cancelled) throw new Error("跟随任务已停止");
       run.worker = new VisionWorker(this.python!, this.script);
       await run.worker.request({ op: "configure", config });
-      const owner = await this.host.startWrapper(id, mode === "observe" ? "view" : "control", "本机视觉跟随", config.name);
+      const owner = await this.host.startWrapper(id, mode === "observe" ? "view" : "control", "本机视觉跟随", config.name, backend);
       run.lease = owner.lease; run.generation = owner.device.state!.generation;
       if (run.cancelled) throw new Error("跟随任务已停止");
       const probe = await this.host.live(run.lease, run.generation, { op: "probe" });
       if (probe?.protocol !== 1) throw new Error("请更新手机开发版 App，以启用视觉跟随");
       if (run.cancelled) throw new Error("跟随任务已停止");
-      this.value = { running: true, runId: run.id, deviceId: id, mode, frames: 0, actions: 0, fps: 0, error: "" };
+      this.value = { running: true, runId: run.id, deviceId: id, mode, backend, frames: 0, actions: 0, fps: 0, error: "" };
       run.heartbeat = setInterval(() => {
         try {
           const state = this.host.pulseWrapper(run.lease!).state;
           if (!state || state.generation !== run.generation || !["viewing", "controlling", "executing"].includes(state.phase)) throw new Error("手机已暂停或会话已改变");
         } catch (error) { this.value.error = (error as Error).message; void this.stop(run); }
       }, 1000);
-      run.done = this.loop(run, config, mode);
+      run.done = this.loop(run, config, mode, backend);
       return structuredClone(this.value);
     } catch (error) {
       run.cancelled = true; clearInterval(run.heartbeat); run.worker?.close();
       await this.cleanup(run); throw error;
     } finally { started(); }
   }
-  private async loop(run: Run, config: GameFollowConfig, mode: "observe" | "control") {
+  private async loop(run: Run, config: GameFollowConfig, mode: "observe" | "control", backend: "app" | "basic") {
     const began = Date.now();
     try {
       while (!run.cancelled) {
@@ -225,7 +225,9 @@ export class GameFollower {
         this.value.frame = frame; this.value.analysis = analysis; this.value.frames++;
         this.value.fps = Math.round(this.value.frames * 10000 / Math.max(1, Date.now() - began)) / 10;
         if (mode === "control") {
-          const direction = Date.now() - at < 1000 ? analysis.direction : null;
+          // File captures on older emulators are slower; their movement is a
+          // bounded 350 ms stroke. Never move from an unboundedly delayed frame.
+          const direction = Date.now() - at < (backend === "basic" ? 3000 : 1000) ? analysis.direction : null;
           const joystick = config.joystick, rotation = joystick.rotation * Math.PI / 180;
           const dx = direction ? direction.x * Math.cos(rotation) - direction.y * Math.sin(rotation) : 0;
           const dy = direction ? direction.x * Math.sin(rotation) + direction.y * Math.cos(rotation) : 0;

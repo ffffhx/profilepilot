@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
+const { crc32, deflateSync } = require('node:zlib');
 const { loadCli } = require('./cli-test-build.cjs');
 const { PhonesService } = loadCli('src/main/phones/service.ts');
 const { Adb } = loadCli('src/main/phones/adb.ts');
@@ -11,7 +12,12 @@ const { runPhoneCli } = loadCli('src/main/phones/cli.ts');
 
 function harness(t, appPhase) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pp-basic-'));
-  const png = Buffer.alloc(33); Buffer.from([137,80,78,71,13,10,26,10]).copy(png); png.write('IHDR', 12); png.writeUInt32BE(1080,16); png.writeUInt32BE(2400,20);
+  const chunk = (type, data) => {
+    const b=Buffer.alloc(data.length+12);b.writeUInt32BE(data.length);b.write(type,4);data.copy(b,8);
+    b.writeUInt32BE(crc32(b.subarray(4,-4)),b.length-4);return b;
+  };
+  const header=Buffer.alloc(13);header.writeUInt32BE(1080);header.writeUInt32BE(2400,4);header[8]=8;header[9]=6;
+  const png=Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]),chunk('IHDR',header),chunk('IDAT',deflateSync(Buffer.alloc((1080*4+1)*2400))),chunk('IEND',Buffer.alloc(0))]);
   const h = { root, id:'SERIAL-1', calls:[], online:true, now:1000, png, inputHook:null, screenshotHook:null };
   if (appPhase) fs.writeFileSync(path.join(root,'devices.json'),JSON.stringify({[h.id]:{token:'a'.repeat(64)}}));
   h.appState={protocol:1,instanceId:'app-instance',sessionId:appPhase==='idle'?null:'app-session',generation:1,phase:appPhase||'idle',mode:'control',computer:'pc',controller:'Existing',task:'Existing task',startedAt:1000,lastAction:'',permissions:{overlay:true,notifications:true,accessibility:true}};
@@ -192,4 +198,37 @@ test('CLI requires explicit basic backend and dispatches lifecycle without insta
   assert.equal(calls[1].method,'basic-stop');
   assert.equal(await runPhoneCli(['connect','--device','SERIAL-1','--backend','basic'],request,io),1);
   assert.equal(await runPhoneCli(['start','--device','SERIAL-1','--backend','other'],request,io),1);
+});
+
+test('basic following uses fresh screenshots and bounded strokes, rejects replay and stops on pause',async t=>{
+  const h=harness(t);
+  const {lease,device}=await h.service.startWrapper(h.id,'control','Test','follow','basic');
+  const generation=device.state.generation;
+  const live=command=>h.service.followLive(lease,generation,command);
+  const touch={op:'touch',sequence:1,ttlMs:1200,points:[{id:0,fromX:100,fromY:200,x:150,y:250}]};
+  assert.equal((await live({op:'probe'})).maxStrokeMs,350);
+  await assert.rejects(live(touch),/先刷新/);
+  await live({op:'frame'});
+  await live({...touch,sequence:2});
+  assert.ok(h.calls.some(a=>a[3]==="'input' 'swipe' '100' '200' '150' '250' '350'"));
+  await assert.rejects(live({...touch,sequence:2}),/重复执行/);
+  await assert.rejects(live({...touch,sequence:3}),/先刷新/);
+  await live({op:'touch',sequence:4,ttlMs:1200,points:[]});
+  assert.equal(h.calls.filter(a=>a[3]?.startsWith("'input'")).length,1);
+  h.service.basicControl(h.id,'pause');
+  await assert.rejects(live({op:'frame'}),/暂停/);
+  await assert.rejects(live({...touch,sequence:5}),/暂停/);
+  await h.service.stopWrapper(lease);
+  assert.equal(h.state().phase,'stopped');
+});
+
+test('basic observe never sends touches and stale wrapper generations cannot control',async t=>{
+  const h=harness(t);
+  const {lease,device}=await h.service.startWrapper(h.id,'view','Test','observe','basic');
+  await h.service.followLive(lease,device.state.generation,{op:'frame'});
+  await assert.rejects(h.service.followLive(lease,device.state.generation,{op:'touch',sequence:1,ttlMs:1200,points:[]}),/仅查看/);
+  h.service.basicSetMode({id:h.id,sessionId:h.state().sessionId,generation:h.state().generation,mode:'control'});
+  await assert.rejects(h.service.followLive(lease,device.state.generation,{op:'frame'}),/会话/);
+  assert.equal(h.calls.filter(a=>a[3]?.startsWith("'input'")).length,0);
+  await h.service.stopWrapper(lease);
 });

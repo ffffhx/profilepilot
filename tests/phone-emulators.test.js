@@ -47,6 +47,23 @@ test('an already running matching AVD is reused and different running devices ar
   assert.ok(h.calls.every(args => !args.includes('install') && !args.includes('am')));
 });
 
+test('external local emulator route is window-verified before managed ADB connection',async t=>{
+  const h=fixture(t),order=[];
+  h.emulators.connectLocal=async()=>{order.push('fit');return '127.0.0.1:5555';};
+  const original=h.service.adb.run.bind(h.service.adb);
+  h.service.adb.run=async args=>{
+    if(args[0]==='connect'){order.push('connect');assert.equal(args[1],'127.0.0.1:5555');return 'connected to 127.0.0.1:5555';}
+    if(args[0]==='devices')return '127.0.0.1:5555 device model:Test_Emulator';
+    return original(args);
+  };
+  const result=await h.service.connectEmulator('Test_AVD');
+  assert.equal(result.id,'127.0.0.1:5555');assert.deepEqual(order,['fit','connect']);
+  assert.equal(h.launched(),0);assert.equal(result.state,null);
+  h.emulators.connectLocal=async()=> '192.168.1.12:5555';
+  await assert.rejects(h.service.connectEmulator('Test_AVD'),/地址无效/);
+  assert.deepEqual(order,['fit','connect']);
+});
+
 test('window verification failure is visible and reopening can recover without restarting the emulator', async t => {
   const h = fixture(t, true);
   h.emulators.ensureVisible = async () => { throw Error('Window remains outside monitor'); };
@@ -113,6 +130,28 @@ test('Windows window helper rejects malformed targets and is not invoked on macO
     await assert.rejects(ensureRunningEmulatorWindowVisible(name, id, 'win32'), /Invalid/);
   }
   await ensureRunningEmulatorWindowVisible('Test_AVD', 'emulator-5554', 'darwin');
+});
+
+test('early emulator exit retains startup diagnostics without leaving a host file descriptor open', async t => {
+  const { EventEmitter } = require('node:events');
+  let descriptor;
+  t.mock.method(require('node:child_process'), 'spawn', (_file, _args, options) => {
+    descriptor = options.stdio[2];
+    fs.writeSync(descriptor, 'ERROR: Cannot create userdata partition\n');
+    const child = Object.assign(new EventEmitter(), { pid: 12345, unref() {} });
+    queueMicrotask(() => child.emit('spawn'));
+    return child;
+  });
+  const runtime = new AndroidEmulators('emulator', async () => { throw Error('emulator exited'); });
+  runtime.list = async () => ['Test_AVD'];
+  await assert.rejects(runtime.launch('Test_AVD'), error => {
+    const file = error.message.split('启动日志：')[1];
+    assert.ok(path.isAbsolute(file));
+    assert.match(fs.readFileSync(file, 'utf8'), /Cannot create userdata/);
+    assert.throws(() => fs.fstatSync(descriptor), /EBADF/);
+    t.after(() => fs.rmSync(path.dirname(file), { recursive: true, force: true }));
+    return true;
+  });
 });
 
 test('runtime never swallows failed window correction or kills a launched emulator', async t => {

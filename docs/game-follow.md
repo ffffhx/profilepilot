@@ -20,7 +20,11 @@
 6. 先点击 **仅观察手机**检查识别与路线，再停止观察，点击 **开始跟随**。需要实机校准地图方向与摇杆方向的关系；不能假定所有游戏、分辨率和布局都相同。
 7. 桌面停止、关闭跟随窗口、手机暂停/结束、断线或会话改变都会终止跟随。不会自动恢复手机上主动暂停的会话。
 
-识别丢失、匹配不唯一、连续帧未确认、没有路线或位置卡住时不发送移动方向。手机触控带有最长 1.5 秒有效期，当前发送值为 1.2 秒；没有新指令时自动松开。当前截图循环默认间隔 400 ms，实际帧率在界面显示，受手机截图与传输速度限制，并非 20 FPS 视频流。
+Android 11 以下的模拟器可在**控制方式**中明确选择**免安装 · 分段移动**，无需安装手机 App。此模式沿用 basic 会话，每次拖动最多 350 ms，完成后释放，再获取画面；暂停后不会提交新动作，已提交的短拖动可能完成。移动速度受截图和传输延迟影响，不能等同于手机 App 的连续触控。某些模拟器的直接截图流会截断，桌面会校验完整 PNG，并在同一有效会话中通过临时文件重新截图。
+
+识别丢失、匹配不唯一、连续帧未确认、没有路线或位置卡住时不发送移动方向。App 模式触控带有最长 1.5 秒有效期，当前发送值为 1.2 秒；没有新指令时自动松开。App 模式单帧处理超过 1 秒、basic 模式超过 3 秒时跳过该帧移动。当前截图循环默认间隔 400 ms，实际帧率在界面显示，受手机截图与传输速度限制，并非 20 FPS 视频流。
+
+Windows 已安装的腾讯手游助手可通过 `ppilot phone emulator-list` 列出的 `Tencent_GameLoop` 连接；该入口复用或启动默认 100 号引擎，验证其本机调试端口和窗口位置。手游助手要求管理员权限，首次启动可能出现 Windows 授权弹窗；ProfilePilot 本身保持普通权限。连接不会安装 App 或开启控制会话。macOS 不显示此 Windows 引擎。
 
 ## 视觉运行环境
 
@@ -39,6 +43,7 @@ ppilot phone follow start --device <实际设备ID> --config calibration.json --
 ppilot phone follow status
 ppilot phone follow stop --run-id <status返回的runId>
 ppilot phone follow start --device <实际设备ID> --config calibration.json --mode control
+ppilot phone follow start --device <实际模拟器ID> --config calibration.json --mode observe --backend basic
 ppilot phone follow analyze --params-file frame.json
 ```
 

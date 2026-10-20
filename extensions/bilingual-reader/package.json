@@ -1,0 +1,22 @@
+{
+  "name": "bilingual-reader",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "双语伴读 — a local-first bilingual reading extension",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "tsc --noEmit",
+    "test": "node scripts/test.mjs",
+    "preview": "node scripts/preview.mjs",
+    "preview:start": "node scripts/start-preview.mjs",
+    "pack": "node scripts/pack.mjs"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.326",
+    "esbuild": "^0.25.0",
+    "fake-indexeddb": "^6.2.6",
+    "jsdom": "^26.1.0",
+    "typescript": "^5.8.3"
+  }
+}

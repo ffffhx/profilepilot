@@ -1,0 +1,12 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>双语伴读</title><link rel="stylesheet" href="app.css"></head>
+<body class="popup">
+  <header class="popup-header"><a class="brand" href="options.html" target="_blank"><span class="brand-mark">伴</span><span>双语伴读<small>BILINGUAL READER</small></span></a><button id="open-options" class="icon-button" aria-label="打开设置">⚙</button></header>
+  <div class="popup-intro"><p class="eyebrow">A LITTLE CLOSER TO THE WORLD</p><h1>好内容，不止一种语言。</h1><p id="page-host" class="muted">正在连接当前网页…</p></div>
+  <div class="popup-language"><label>从<select id="popup-source" aria-label="原文语言"></select></label><span>→</span><label>到<select id="popup-target" aria-label="目标语言"></select></label></div>
+  <button id="toggle-page" class="button primary translate-button" disabled><span>↗</span> 翻译此页</button>
+  <p class="popup-status" id="page-status" role="status">正在读取页面状态…</p>
+  <div class="popup-service"><span class="engine-icon">◈</span><div><strong id="provider-name">浏览器本地翻译</strong><small id="provider-description">文本在本机处理</small></div><button id="change-provider" class="text-button">更换 ↗</button></div>
+  <div class="popup-rule"><label for="site-mode">此网站</label><select id="site-mode"><option value="manual">手动翻译</option><option value="auto">总是翻译</option><option value="exclude">不翻译</option></select></div>
+  <footer class="popup-footer"><span>保留原文，自在阅读。</span><span><kbd id="popup-shortcut">Alt</kbd> <kbd>T</kbd></span></footer>
+  <script src="popup.js" type="module"></script>
+</body></html>

@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>双语伴读 · 翻译设置</title><link rel="icon" href="icons/32.png"><link rel="stylesheet" href="app.css"></head>
+<body class="settings-page">
+  <aside class="sidebar">
+    <a class="brand" href="options.html"><span class="brand-mark">伴</span><span>双语伴读<small>BILINGUAL READER</small></span></a>
+    <p class="nav-caption">你的阅读空间</p>
+    <nav aria-label="设置导航">
+      <a href="#engine" class="nav-item active"><span>⌘</span>翻译服务<span class="nav-arrow">↗</span></a>
+      <a href="#reading" class="nav-item"><span>▤</span>阅读偏好</a>
+      <a href="#glossary" class="nav-item"><span>文</span>我的术语</a>
+      <a href="#sites" class="nav-item"><span>◎</span>站点规则</a>
+      <a href="#data" class="nav-item"><span>▥</span>数据管理</a>
+    </nav>
+    <div class="sidebar-bottom"><span class="local-dot"></span> 设置保存在这台设备<small>每一种语言，都值得读懂。<br>双语伴读 · 0.1.0</small></div>
+  </aside>
+  <main class="workspace">
+    <header class="topbar"><span>设置 <span class="crumb">/</span> 翻译与阅读</span><a class="text-link" href="guide.html" target="_blank">使用指南 ↗</a></header>
+    <div id="preview-notice" class="preview-notice" hidden>这是设置界面的本地预览，配置仅保存在此预览中。<a href="guide.html">安装扩展</a> 后可翻译实际网页。</div>
+    <div class="page-heading"><div><p class="eyebrow">READ BEYOND LANGUAGE</p><h1>让世界，以你的语言展开。</h1><p class="muted">保留原文的温度，让理解自然发生。</p></div><span class="heading-tag">原文 + 译文</span></div>
+    <form id="settings-form" novalidate>
+      <div class="settings-grid">
+        <div class="settings-main">
+          <section class="card" id="engine">
+            <div class="section-title"><span class="section-number">01</span><div><h2>选择你的翻译引擎</h2><p>从本地轻量翻译，到你熟悉的 AI 模型。</p></div></div>
+            <div class="engine-cards" role="radiogroup" aria-label="翻译服务">
+              <label class="engine-option"><input type="radio" name="provider" value="browser" checked><span class="engine-icon">◈</span><strong>浏览器本地翻译</strong><span>无需 API Key，文本在本机处理</span><em>LOCAL</em></label>
+              <label class="engine-option"><input type="radio" name="provider" value="custom"><span class="engine-icon">✳</span><strong>自定义 AI 接口</strong><span>连接兼容 Chat Completions 的服务</span><em>YOUR MODEL</em></label>
+            </div>
+            <div id="native-info" class="info-box"><span>◌</span><div><strong>轻量、私密，开箱即读</strong><p>需要支持 Translator API 的 Chrome。首次使用会下载语言包；可用性取决于浏览器、设备和语言组合。<span id="native-availability"></span></p></div></div>
+            <div id="custom-fields" hidden>
+              <label class="field">API 地址<input name="endpoint" type="url" placeholder="https://api.example.com/v1" autocomplete="url"><small>可填写服务根地址、/v1 或完整的 /chat/completions 地址。</small></label>
+              <div class="field-row">
+                <label class="field">模型名称<input name="model" placeholder="服务提供商给出的模型 ID" autocomplete="off"></label>
+                <label class="field">API Key<span class="password-field"><input name="apiKey" type="password" placeholder="本机服务可留空" autocomplete="off"><button type="button" id="show-key" aria-label="显示 API Key">显示</button></span></label>
+              </div>
+              <p class="field-note">密钥仅保存在扩展的本机存储中，不参与配置导出。翻译时，所选正文和页面标题会发送给你配置的服务。</p>
+            </div>
+            <div class="divider"></div>
+            <div class="field-row languages"><label class="field">原文语言<select name="sourceLanguage" id="source-language"></select></label><span class="language-arrow">→</span><label class="field">翻译为<select name="targetLanguage" id="target-language"></select></label></div>
+            <div class="test-row"><button type="button" id="test-provider" class="button secondary"><span>↗</span> 测试翻译</button><span id="test-result" role="status" class="test-result">用一句短文，确认一切准备就绪。</span></div>
+          </section>
+          <section class="card" id="reading">
+            <div class="section-title"><span class="section-number">02</span><div><h2>读得舒服，更读得进去</h2><p>让译文融入网页，保持熟悉的阅读节奏。</p></div></div>
+            <span class="field-label">译文样式</span>
+            <div class="style-options">
+              <label><input type="radio" name="style" value="subtle" checked><span class="style-sample subtle"><i></i><b></b><b></b></span><strong>轻盈侧线</strong></label>
+              <label><input type="radio" name="style" value="card"><span class="style-sample card-sample"><i></i><b></b><b></b></span><strong>柔和底色</strong></label>
+              <label><input type="radio" name="style" value="underline"><span class="style-sample underline"><i></i><b></b><b></b></span><strong>细线分隔</strong></label>
+            </div>
+            <label class="range-label" for="font-size">译文字号 <output id="font-output">100%</output></label>
+            <input type="range" id="font-size" name="fontSize" min="80" max="140" step="5" value="100">
+            <div class="setting-line"><div><strong>划词翻译</strong><p>选中文字，即可查看译文并复制。</p></div><label class="switch"><input type="checkbox" name="selectionEnabled" checked aria-label="开启划词翻译"><span></span></label></div>
+            <div class="setting-line"><div><strong>并发请求数</strong><p>影响自定义 AI 接口。较小的值更适合限速服务。</p></div><select name="concurrency" class="compact-select" aria-label="并发请求数"><option value="1">1 个</option><option value="2">2 个</option><option value="3">3 个</option></select></div>
+          </section>
+          <section class="card" id="glossary">
+            <div class="section-title"><span class="section-number">03</span><div><h2>熟悉的词，始终如一</h2><p>术语偏好随请求提供给自定义 AI 引擎。本地引擎不使用术语表。</p></div></div>
+            <label class="field">术语表<textarea name="glossary" rows="5" placeholder="一行一条，例如：&#10;context window = 上下文窗口&#10;pull request = 合并请求&#10;React = React"></textarea></label>
+          </section>
+          <section class="card" id="sites">
+            <div class="section-title"><span class="section-number">04</span><div><h2>为常去的地方，留一点偏爱</h2><p>每行填写一个域名，精确匹配；排除规则优先。</p></div></div>
+            <div class="field-row"><label class="field">自动翻译<textarea name="autoSites" rows="4" placeholder="developer.mozilla.org&#10;每行一个域名"></textarea></label><label class="field">不翻译这些站点<textarea name="excludedSites" rows="4" placeholder="不需要翻译的域名"></textarea></label></div>
+          </section>
+          <section class="card" id="data">
+            <div class="section-title"><span class="section-number">05</span><div><h2>你的数据，由你掌握</h2><p>缓存保留 14 天，最多 1,500 条；更换模型、语言或术语会使用新的缓存。</p></div></div>
+            <div class="data-actions"><button type="button" class="button secondary" id="export-settings">导出配置</button><button type="button" class="button secondary" id="import-settings">导入配置</button><button type="button" class="button quiet" id="clear-cache">清空翻译缓存</button><input type="file" accept=".json,application/json" id="import-file" hidden></div><p class="field-note" id="cache-count">正在读取缓存…</p>
+          </section>
+        </div>
+        <aside class="reading-aside">
+          <div class="reading-preview"><div class="preview-title"><span class="local-dot"></span> 阅读效果预览 <span>LIVE</span></div>
+            <div class="paper"><span class="paper-category">A SMALL WINDOW TO THE WORLD</span><h3>The joy of<br>understanding.</h3><div class="paper-rule"></div><p class="english">A different language is a different vision of life.</p><p id="sample-translation" class="sample-translation">另一种语言，是看待生活的另一种视角。</p><p class="english small">Keep the original. Find your own understanding.</p><p class="sample-secondary">保留原文，找到属于你的理解。</p><span class="paper-footer">READ SLOWLY. GO FURTHER. <span>↗</span></span></div>
+            <p class="preview-caption">示例译文 · 实际结果由所选引擎生成</p>
+          </div>
+          <div class="tip"><span>⌨</span><div><strong>阅读，不必打断。</strong><p><kbd id="shortcut-key">Alt</kbd> + <kbd>T</kbd><br>随时切换原文与双语。</p></div></div>
+          <a class="demo-link" href="demo.html" target="_blank">打开交互示例 <span>↗</span></a>
+        </aside>
+      </div>
+      <footer class="save-bar"><div><span id="save-dot" class="local-dot"></span><span id="save-status" role="status">你的偏好，只属于你。</span></div><button type="submit" class="button primary" id="save-button">保存设置 <span>→</span></button></footer>
+    </form>
+  </main>
+  <script src="options.js" type="module"></script>
+</body></html>

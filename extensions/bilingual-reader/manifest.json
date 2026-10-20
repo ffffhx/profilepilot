@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "双语伴读 · Bilingual Reader",
+  "version": "0.1.0",
+  "description": "保留原文，逐段双语阅读。支持浏览器本地翻译、自定义 AI 服务、划词翻译、术语表与站点设置。",
+  "permissions": ["storage", "activeTab", "contextMenus"],
+  "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": {
+    "default_title": "双语伴读",
+    "default_popup": "popup.html",
+    "default_icon": { "16": "icons/16.png", "32": "icons/32.png" }
+  },
+  "options_page": "options.html",
+  "icons": { "16": "icons/16.png", "48": "icons/48.png", "128": "icons/128.png" },
+  "content_scripts": [{
+    "matches": ["https://*/*", "http://*/*"],
+    "js": ["content.js"],
+    "run_at": "document_idle",
+    "all_frames": false
+  }],
+  "commands": {
+    "toggle-translation": {
+      "suggested_key": { "default": "Alt+T", "mac": "Alt+T" },
+      "description": "开启或关闭当前网页双语翻译"
+    }
+  },
+  "content_security_policy": { "extension_pages": "script-src 'self'; object-src 'self'" }
+}

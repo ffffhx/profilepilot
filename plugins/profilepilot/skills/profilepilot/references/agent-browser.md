@@ -1,6 +1,6 @@
 # ppilot browser CLI: Gateway connection
 
-Use `ppilot browser` for managed Chrome or registered Electron apps. ProfilePilot includes the agent-browser driver and guarded Wrapper in this CLI; users install only the CLI from the app. For general driver operations, read `ppilot browser --connection gateway skills get core`. Existing agent-browser syntax such as snapshot/click/fill remains available after the unified prefix.
+Use `ppilot browser` for managed Chrome or registered Electron apps. ProfilePilot includes its own TypeScript browser engine and guarded Wrapper; users install only the CLI from the app. Read `ppilot browser --connection gateway --help` for the bundled engine's supported commands. Familiar snapshot/click/fill syntax remains available after the unified prefix.
 
 ```text
 Agent → ppilot browser CLI → internal driver + control protection → Gateway → Chrome/Electron
@@ -44,3 +44,11 @@ Use the same `ppilot browser --session TASK --cdp PORT` prefix for:
 - `cdp capabilities`, then `cdp call METHOD --params-stdin` if supported. The controlled bridge keeps Gateway ownership and method restrictions. Extension-route `ppilot browser cdp METHOD` has different arguments; do not mix the two connections.
 
 Compatibility: the former `agent-browser --cdp PORT COMMAND` maps to `ppilot browser --cdp PORT COMMAND`; `agent-browser profilepilot ACTION` maps to `ppilot browser --connection gateway ACTION`. Do not require the legacy launcher for new tasks.
+
+## Engine behavior
+
+Use a fresh `snapshot` after navigation, frame/tab changes, a new snapshot, or control return; `@e...` refs belong to that snapshot. Closing the selected tab requires an explicit `tab ID` before further page actions. `tab list` remains available for recovery. Electron targets retain Gateway restrictions on creating or closing application windows.
+
+`batch --stdin` accepts a JSON array of command argument arrays. `--bail` stops at the first failure; any failed row makes the overall command fail. A batch cannot change session or connection, connect, disconnect, or nest another batch. Use the regular guarded lifecycle commands separately.
+
+Commands run serially in a session. A transport timeout never causes action replay. After an uncertain timeout, inspect session/page state before deciding what to do next. Use the installed command help; this engine does not include upstream cloud-provider integrations.

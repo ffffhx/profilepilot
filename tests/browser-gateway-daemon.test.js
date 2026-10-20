@@ -25,6 +25,30 @@ test("Gateway gives a waiting Agent enough time to reconnect after user return",
   assert.equal(DEFAULT_DRIVER_RECONNECT_GRACE_MS, 30_000);
 });
 
+test("TS engine refuses an old Gateway before acquiring or sending browser input", async () => {
+  const home = mkdtempSync(path.join(gatewayTempDir, "pp-ts-upgrade-"));
+  const daemon = testGatewayDaemon(home);
+  const handle = daemon.handleRequest.bind(daemon);
+  const actions = [];
+  daemon.handleRequest = async text => {
+    actions.push(JSON.parse(text).action);
+    const result = await handle(text);
+    return { ...result, protocolVersion: 18 };
+  };
+  await daemon.start();
+  try {
+    await assert.rejects(() => prepareGatewayTransport(
+      path.join(home, "profilepilot-browser-engine.cjs"),
+      ["--session", "upgrade-fixture", "--cdp", "9223", "click", "#submit"],
+      { ...process.env, HOME: home, PROFILEPILOT_BROWSER_CLI: "1" }
+    ), error => error.code === "GATEWAY_UPGRADE_REQUIRED");
+    assert.deepEqual(actions, ["status"]);
+  } finally {
+    await daemon.stop();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("Gateway client rejects unsafe Raw CDP before contacting a daemon during upgrade", async () => {
   const home = mkdtempSync(path.join(gatewayTempDir, "pp-raw-policy-"));
   try {

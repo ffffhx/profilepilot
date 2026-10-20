@@ -16,6 +16,9 @@ export function portableCommandInvocation(
   args: string[],
   env: NodeJS.ProcessEnv = process.env
 ): PortableCommandInvocation {
+  if (path.basename(executable) === "profilepilot-browser-engine.cjs") {
+    return { executable: process.execPath, args: [executable, ...args] };
+  }
   if (process.platform !== "win32") {
     return { executable, args };
   }
@@ -95,7 +98,6 @@ export function execPortableCommandSync(
 
 function portableCommandEnvironment(executable: string, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   if (
-    process.platform === "win32" &&
     Boolean(process.versions.electron) &&
     [".js", ".cjs", ".mjs"].includes(path.extname(executable).toLowerCase())
   ) {

@@ -1,16 +1,16 @@
 # 浏览器执行器与任务恢复
 
-## 2026-09-22 的实现选择
+## 2026-10-20 的执行器
 
-应用内任务固定调用随安装包分发的 agent-browser 0.34.0 原生执行器，通过已有 Wrapper 和 ProfilePilot Gateway 使用目标 Profile。用户无需全局安装 agent-browser、Node 或 npm；应用任务也不再从 PATH 或 npx 缓存选择浏览器执行器。外部 Agent 的 CLI 集成仍保持原来的行为。
+应用内任务和 `ppilot browser --connection gateway` 使用项目自己的 TypeScript 引擎（`src/main/browser-engine`），通过已有 Wrapper 和 ProfilePilot Gateway 使用目标 Profile。默认扩展连接继续使用项目的 TypeScript 浏览器服务。用户无需全局安装 agent-browser、Node 或 npm；安装包使用 Electron 自带的 Node 运行时。
 
-依赖版本和包完整性锁定在 package-lock.json。Windows 安装包携带 x64 执行器；macOS 安装包携带 Darwin 执行器。打包前检查目标文件，随包保存 Apache-2.0 和上游 a11y 相关许可证。任务适配器仍通过 BrowserAdapter 隔离，Jev 和主模型调用相同的任务服务，后续可以替换执行器。
+Windows/macOS 分发同一份 JavaScript 引擎和锁定版本的 Playwright Core，放在 `resources/browser-runtime`，保留依赖许可证。构建不下载浏览器；只连接 Gateway 管理的现有 Chrome/Electron。任务适配器仍通过 BrowserAdapter 隔离，Jev 和主模型调用相同的任务服务。
 
-这消除了终端用户的独立安装和全局版本依赖，应用本身仍依赖上游执行器。没有把上游 Rust 代码改写为 TypeScript，也没有声称完全移除第三方依赖。
+命令、会话服务、引用失效和连接复用由本项目维护，CDP 与 DOM 操作复用 Playwright Core 的 JavaScript 实现。已移除 agent-browser 包及 Rust 可执行文件。旧 `agent-browser` 启动器、会话目录和 Gateway 驱动标识作为兼容接口保留，不再代表使用 Rust。支持范围与验证入口见 [TS 引擎迁移记录](typescript-browser-engine.md)；不承诺上游所有命令、插件及浏览器供应商的逐项兼容。
 
 ## 对照的上游实现
 
-- [agent-browser](https://github.com/vercel-labs/agent-browser)：当前核心位于 cli/src/native，使用 Rust 实现浏览器会话、CDP、页面快照和动作。直接复制核心需要维护另一套 Rust 构建及上游补丁；保留原生运行时并隔离调用边界更适合当前 Electron 应用。
+- [agent-browser](https://github.com/vercel-labs/agent-browser)：此前使用的执行器；当前保留常用命令习惯与生命周期接口，执行已迁移到本项目 TS 引擎。
 - [Browser Use 的 BrowserSession](https://github.com/browser-use/browser-use/blob/main/browser_use/browser/session.py)：Python 通过 cdp_use 的 CDPClient 管理浏览器目标和会话，结合事件与页面状态处理。接入整个项目会引入 Python 运行时和另一套会话生命周期，不能自动解决本应用的 Gateway 独占与人工交还要求。
 - [Browser Use Jev Ultrafast](https://github.com/browser-use/jev-ultrafast)：从页面生成编号控件，Jev 选择动作和目标，文字生成按需调用辅助模型。ProfilePilot 已参考这一设计独立实现快速路径；它不是完整 Browser Use 的替代品，不能把演示成绩当作复杂网站可靠性保证。
 

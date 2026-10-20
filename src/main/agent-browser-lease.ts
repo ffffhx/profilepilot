@@ -564,7 +564,7 @@ export function retireAgentBrowserSessionSync(
     rmSync(path.join(agentBrowserDir, `${session}.sock`), { force: true });
     // Windows uses TCP sidecars instead of the Unix socket. Leaving these behind
     // can route the next CLI invocation to a retired daemon's port.
-    for (const extension of ["port", "stream"]) {
+    for (const extension of ["port", "stream", "engine.json", "engine-lock"]) {
       rmSync(path.join(agentBrowserDir, `${session}.${extension}`), { force: true });
     }
   }

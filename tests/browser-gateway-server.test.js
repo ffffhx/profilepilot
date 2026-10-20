@@ -1881,6 +1881,15 @@ test("Gateway finishes old Agent CDP cleanup before accepting a reconnect for th
       sessionId: "new-flat"
     }));
     assert.deepEqual(await response, { id: 5, result: {}, sessionId: "new-flat" });
+    response = nextMessage(newWs);
+    newWs.send(JSON.stringify({
+      id: 6, method: "Target.setAutoAttach",
+      params: { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }
+    }));
+    assert.deepEqual(await response, { id: 6, result: {} });
+    assert.equal(h.backend.sent.map(JSON.parse).filter(message =>
+      message.method === "Target.setAutoAttach" && message.params.autoAttach === true && !message.sessionId
+    ).length, 1, "TS reconnect restores root Auto-Attach so existing tabs are discovered");
     newWs.close();
   } finally {
     await h.cleanup();

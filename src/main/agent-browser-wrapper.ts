@@ -65,6 +65,7 @@ import {
 } from "./bifrost-proxy";
 import { validateUnpackedExtensionPath } from "./unpacked-extension";
 import { spawnPortableCommand } from "./portable-command";
+import { bundledBrowserExecutable } from "./tasks/browser-runtime";
 
 export { ensureConfiguredGatewayProfileRunning } from "./browser-gateway-driver-runtime";
 
@@ -515,7 +516,21 @@ export function resolveRealAgentBrowser(env: NodeJS.ProcessEnv = process.env, se
   if (explicit && isExecutableFile(explicit) && !isProfilePilotLauncher(explicit)) {
     return explicit;
   }
+  // Compatibility launchers use the same project-owned TypeScript engine.
+  // An explicitly broken runtime must never select a different installation.
+  if (explicit) return null;
+  const manifest = path.join(path.dirname(selfPath), "browser-runtime.json");
+  if (existsSync(manifest)) {
+    try {
+      const { executable } = JSON.parse(readFileSync(manifest, "utf8"));
+      return typeof executable === "string" && path.isAbsolute(executable) && path.basename(executable) === "profilepilot-browser-engine.cjs" && isExecutableFile(executable) ? executable : null;
+    } catch { return null; }
+  }
+  try { return bundledBrowserExecutable(); } catch { return null; }
+}
 
+/** Legacy discovery retained for diagnostics/tests of older installations. */
+export function resolveLegacyAgentBrowser(env: NodeJS.ProcessEnv = process.env, selfPath = process.argv[1] || ""): string | null {
   let output = "";
   if (process.platform !== "win32") {
     try {
@@ -2398,6 +2413,11 @@ export async function prepareGatewayTransport(
     await ensureBrowserGatewayDaemon({ homeDir });
     status = await requestBrowserGateway({ action: "status" }, { homeDir, timeoutMs: 800 });
   }
+  if (path.basename(executable) === "profilepilot-browser-engine.cjs" &&
+      typeof status.protocolVersion === "number" && status.protocolVersion < 19) {
+    throw gatewayWrapperError("GATEWAY_UPGRADE_REQUIRED",
+      "当前 Gateway 仍在使用旧版连接协议。请先结束并关闭受管理的浏览器 / Electron 连接，再重启 ProfilePilot 完成 Gateway 更新；未执行浏览器动作。");
+  }
   const initiallyActivePorts = Array.isArray(status.ports) ? status.ports.map(Number) : [];
   if (
     env.PROFILEPILOT_BROWSER_CLI !== "1" &&
@@ -2461,6 +2481,9 @@ export async function prepareGatewayTransport(
       );
       lastConnectError = connected.error;
       lastDiagnostic = connected.diagnostic || "";
+      if (connected.status !== 0 && lastDiagnostic) {
+        process.stderr.write(`[ProfilePilot] Browser engine connection: ${lastDiagnostic.replace(/wss?:\/\/\S+/g, "[Gateway endpoint]").slice(-4096)}\n`);
+      }
       lastConnectStatus = connected.status;
       // complete/takeover may have run while the native connect command was pending.
       // Never let its late result reacquire a released session with the old identity.
@@ -3355,7 +3378,7 @@ function isExecutableFile(filePath: string): boolean {
     if (!stats.isFile()) {
       return false;
     }
-    accessSync(filePath, fsConstants.X_OK);
+    accessSync(filePath, /\.[cm]?js$/i.test(filePath) ? fsConstants.R_OK : fsConstants.X_OK);
     return true;
   } catch {
     return false;

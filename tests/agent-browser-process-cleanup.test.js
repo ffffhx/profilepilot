@@ -16,6 +16,19 @@ test('macOS paths and quoted temporary directories are recognized',()=>{
  assert.deepEqual(temporaryBrowserChildren([p],10,'/tmp/with space'),[p]);
  assert.equal(isDriverProcess({pid:10,parentPid:1,command:'/usr/local/bin/agent-browser'}),true);
 });
+
+test('TypeScript engine cleanup requires the Node/Electron service entry, not an argument mentioning it',()=>{
+ for(const command of [
+  '"C:\\Program Files\\nodejs\\node.exe" "C:\\App\\browser-runtime\\profilepilot-browser-engine.cjs" --engine-service "C:\\Users\\fixture" task',
+  '/usr/local/bin/node /app/browser-runtime/profilepilot-browser-engine.cjs --engine-service /tmp/fixture task',
+  '"/Applications/ProfilePilot.app/Contents/MacOS/ProfilePilot" "/Applications/ProfilePilot.app/Contents/Resources/browser-runtime/profilepilot-browser-engine.cjs" --engine-service /tmp/fixture task'
+ ]) assert.equal(isDriverProcess({pid:10,parentPid:1,command}),true,command);
+ for(const command of [
+  'node other.js /app/profilepilot-browser-engine.cjs --engine-service /tmp task',
+  'powershell.exe -Command node /app/profilepilot-browser-engine.cjs --engine-service',
+  'node /app/profilepilot-browser-engine.cjs --version'
+ ]) assert.equal(isDriverProcess({pid:10,parentPid:1,command}),false,command);
+});
 test('connect diagnostics distinguish IPC, authorization, refusal and startup without leaking output',()=>{
  assert.equal(classifyGatewayConnectFailure('Failed to read: os error 10060').code,'AGENT_DRIVER_IPC_TIMEOUT');
  const auth=classifyGatewayConnectFailure('401 Unauthorized ws://localhost/?ticket=SECRET');

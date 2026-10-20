@@ -1,10 +1,8 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 
-export function browserBinaryName(platform = process.platform, arch = process.arch): string {
-  const target = platform === "win32" && arch === "arm64" ? "x64" : arch;
-  if (!["win32", "darwin", "linux"].includes(platform) || !["x64", "arm64"].includes(target)) throw new Error("当前系统暂不支持内置浏览器执行器。");
-  return `agent-browser-${platform}-${target}${platform === "win32" ? ".exe" : ""}`;
+export function browserBinaryName(_platform = process.platform, _arch = process.arch): string {
+  return "profilepilot-browser-engine.cjs";
 }
 
 // The task runtime is private to the application. Never discover a user's CLI
@@ -18,7 +16,7 @@ export function bundledBrowserExecutable(options: { resourcesPath?: string; pack
     if (exists(packaged)) return packaged;
     if (exists(path.join(resources, "app.asar"))) throw new Error("安装包缺少内置浏览器执行器，请重新安装 ProfilePilot。");
   }
-  const local = path.join(options.packageRoot || path.dirname(require.resolve("agent-browser/package.json")), "bin", binary);
+  const local = path.join(options.packageRoot || path.resolve(__dirname, __dirname.endsWith("tasks") ? "../.." : ".."), "browser-runtime", binary);
   if (exists(local)) return local;
   throw new Error("应用依赖中的浏览器执行器缺失，请重新安装项目依赖或 ProfilePilot。");
 }

@@ -143,7 +143,7 @@ test("agent-browser installs and refreshes its Wrapper", async () => {
   }
 });
 
-test("Wrapper installation is blocked until the corresponding real CLI is installed", async () => {
+test("compatibility launcher installs from the bundled TS engine with no global driver on PATH", async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "profilepilot-wrapper-prerequisite-"));
   const originalHome = process.env.HOME;
   const originalPath = process.env.PATH;
@@ -154,10 +154,8 @@ test("Wrapper installation is blocked until the corresponding real CLI is instal
     const modulePath = require.resolve("../dist/main/shell-integration.js");
     delete require.cache[modulePath];
     const { setAgentWrapperEnabled } = require(modulePath);
-    await assert.rejects(
-      () => setAgentWrapperEnabled("agent-browser", true),
-      (error) => error.code === "AGENT_TOOL_REQUIRED"
-    );
+    const result = await setAgentWrapperEnabled("agent-browser", true);
+    assert.equal(result.wrappers.find(item => item.key === "agent-browser").launcherInstalled, true);
   } finally {
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
@@ -210,7 +208,7 @@ test("ProfilePilot CLI installs, updates and removes its bundled instructions to
     const browserVersion = execFileSync(process.execPath, [diagnostic.managementCli.bundlePath, "browser", "--connection", "gateway", "--version"], {
       encoding: "utf8", env: { ...process.env, HOME: home, PATH: path.join(home, "empty-bin"), PROFILEPILOT_AGENT_BROWSER_REAL: "missing-global-driver" }
     });
-    assert.match(browserVersion, /agent-browser/);
+    assert.match(browserVersion, /ProfilePilot TypeScript browser engine/);
     fs.unlinkSync(browserManifest);
     assert.equal((await shell.inspectProfilePilotCli()).upToDate, false);
     await shell.refreshAgentBrowserWrapperIfInstalled();
@@ -324,7 +322,7 @@ test("unified setup recovers a failed guide update and preserves external guides
   }
 });
 
-test("agent integration diagnostics only advertise the installed agent-browser tool", async () => {
+test("agent integration diagnostics report the bundled TS engine without a global driver", async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "profilepilot-tool-diagnostic-"));
   const bin = path.join(home, "bin");
   const keys = [
@@ -349,12 +347,12 @@ test("agent integration diagnostics only advertise the installed agent-browser t
     assert.deepEqual(
       diagnostic.tools.map((tool) => [tool.key, tool.availability]),
       [
-        ["agent-browser", "missing"]
+        ["agent-browser", "installed"]
       ]
     );
-    assert.equal(diagnostic.tools[0].executablePath, null);
+    assert.match(diagnostic.tools[0].executablePath, /profilepilot-browser-engine\.cjs$/);
     assert.equal(diagnostic.skills.length, 1);
-    assert.match(diagnostic.tools[0].installCommand, /npm install -g agent-browser/);
+    assert.match(diagnostic.tools[0].verifyCommand, /ppilot browser/);
   } finally {
     for (const key of keys) {
       if (original[key] === undefined) delete process.env[key];

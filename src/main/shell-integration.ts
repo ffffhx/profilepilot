@@ -168,10 +168,10 @@ export async function inspectAgentIntegration(): Promise<AgentIntegrationDiagnos
   const tools: AgentToolDiagnostic[] = await Promise.all([
     inspectBinaryTool({
       key: "agent-browser",
-      label: "agent-browser",
+      label: "ProfilePilot TypeScript 浏览器引擎",
       executablePath: agentBrowserPath,
-      installCommand: "npm install -g agent-browser && agent-browser install",
-      verifyCommand: "agent-browser --version"
+      installCommand: "在 ProfilePilot 中更新 / 重装 CLI",
+      verifyCommand: "ppilot browser --connection gateway --version"
     })
   ]);
 
@@ -545,6 +545,7 @@ async function installBrowserDriverWrapper(input: {
   launcherPath: string;
   wrapperSignature: string;
 }): Promise<void> {
+  const browserExecutable = bundledBrowserExecutable();
   const sourcePath = path.join(__dirname, input.wrapperFileName);
   let source = "";
   try {
@@ -557,12 +558,13 @@ async function installBrowserDriverWrapper(input: {
   }
   await writeTextFileAtomic(input.wrapperPath, source);
   await fs.chmod(input.wrapperPath, 0o755).catch(() => undefined);
+  await writeTextFileAtomic(path.join(path.dirname(input.wrapperPath), "browser-runtime.json"), JSON.stringify({ executable: browserExecutable }));
 
   const launcher = process.platform === "win32" ? windowsBrowserLauncherContent(input) : [
     "#!/bin/sh",
     `wrapper=\${${input.wrapperSignature}:-${shellQuote(input.wrapperPath)}}`,
     `runtime=\${${NODE_RUNTIME_SIGNATURE}:-${shellQuote(NODE_RUNTIME_PATH)}}`,
-    'if command -v node >/dev/null 2>&1; then',
+    'if command -v node >/dev/null 2>&1 && node -e \'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)\' >/dev/null 2>&1; then',
     '  exec node "$wrapper" "$@"',
     "fi",
     'if [ -x "$runtime" ]; then',
@@ -577,8 +579,8 @@ async function installBrowserDriverWrapper(input: {
 }
 
 async function installProfilePilotCliFiles(): Promise<void> {
-  // Resolve before writing any CLI files. The application ships the native
-  // browser driver on Windows and macOS; no global npm install is required.
+  // Resolve before writing any CLI files. The same TypeScript engine ships on
+  // Windows and macOS; it uses the installed Node/Electron runtime.
   const browserExecutable = bundledBrowserExecutable();
   const sourcePath = path.join(__dirname, MANAGEMENT_CLI_BUNDLE_FILE_NAME);
   let source = "";
@@ -638,7 +640,7 @@ function profilePilotCliLauncherContent(): string {
     "#!/bin/sh",
     `cli=${shellQuote(profilePilotCliBundlePath())}`,
     `runtime=\${${NODE_RUNTIME_SIGNATURE}:-${shellQuote(NODE_RUNTIME_PATH)}}`,
-    'if command -v node >/dev/null 2>&1; then',
+    'if command -v node >/dev/null 2>&1 && node -e \'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)\' >/dev/null 2>&1; then',
     '  exec node "$cli" "$@"',
     "fi",
     'if [ -x "$runtime" ]; then',
@@ -664,6 +666,8 @@ function windowsBrowserLauncherContent(input: {
     `if defined ${NODE_RUNTIME_SIGNATURE} set "runtime=%${NODE_RUNTIME_SIGNATURE}%"`,
     "where node >nul 2>nul",
     "if errorlevel 1 goto profilepilot_electron_runtime",
+    "node -e \"process.exit(Number(process.versions.node.split('.')[0]) >= 22 ? 0 : 1)\" >nul 2>nul",
+    "if errorlevel 1 goto profilepilot_electron_runtime",
     "node \"%wrapper%\" %*",
     "exit /b %errorlevel%",
     ":profilepilot_electron_runtime",
@@ -687,6 +691,8 @@ function windowsCliLauncherContent(): string {
     `set "runtime=${batchValue(NODE_RUNTIME_PATH)}"`,
     `if defined ${NODE_RUNTIME_SIGNATURE} set "runtime=%${NODE_RUNTIME_SIGNATURE}%"`,
     "where node >nul 2>nul",
+    "if errorlevel 1 goto profilepilot_electron_runtime",
+    "node -e \"process.exit(Number(process.versions.node.split('.')[0]) >= 22 ? 0 : 1)\" >nul 2>nul",
     "if errorlevel 1 goto profilepilot_electron_runtime",
     "node \"%cli%\" %*",
     "exit /b %errorlevel%",
@@ -720,6 +726,7 @@ export function windowsPowerShellCliLauncherContent(cliPath = profilePilotCliBun
     "  if (-not $env:PROFILEPILOT_SESSION -and $env:AGENT_BROWSER_SESSION) { $env:PROFILEPILOT_SESSION = $env:AGENT_BROWSER_SESSION }",
     "  if ($env:PROFILEPILOT_NODE_RUNTIME) { $ppilotRuntime = $env:PROFILEPILOT_NODE_RUNTIME }",
     "  $ppilotNode = Get-Command node -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1",
+    "  if ($ppilotNode) { $ppilotNodeVersion = & $ppilotNode.Source --version; if ($ppilotNodeVersion -notmatch '^v(\\d+)\\.' -or [int]$Matches[1] -lt 22) { $ppilotNode = $null } }",
     "  if ($ppilotNode) { $ppilotRuntime = $ppilotNode.Source }",
     "  elseif (Test-Path -LiteralPath $ppilotRuntime -PathType Leaf) { $env:ELECTRON_RUN_AS_NODE = '1' }",
     "  else { [Console]::Error.WriteLine('[ProfilePilot] Node/Electron runtime unavailable.'); exit 127 }",

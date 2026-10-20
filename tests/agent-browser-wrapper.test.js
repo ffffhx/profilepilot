@@ -681,7 +681,7 @@ test("profilepilot bifrost command hot-updates rules for a running Profile on th
   rmSync(home, { recursive: true, force: true });
 });
 
-test("agent-browser wrapper skips the managed child-shell launcher when resolving the real CLI", () => {
+test("compatibility wrapper ignores managed and global PATH launchers in favor of the bundled TS engine", () => {
   const home = makeTempHome();
   const commandName = process.platform === "win32" ? "agent-browser.cmd" : "agent-browser";
   const managedLauncher = path.join(home, ".profilepilot", "bin", commandName);
@@ -700,7 +700,7 @@ test("agent-browser wrapper skips the managed child-shell launcher when resolvin
       HOME: home,
       PATH: process.env.PATH,
       PROFILEPILOT_AGENT_BROWSER_LAUNCHER: managedLauncher
-    }, path.join(home, "profilepilot-agent-browser-wrapper.cjs")), realAgentBrowser);
+    }, path.join(home, "profilepilot-agent-browser-wrapper.cjs")), require('../dist/main/tasks/browser-runtime').bundledBrowserExecutable());
   } finally {
     if (originalPath === undefined) delete process.env.PATH;
     else process.env.PATH = originalPath;

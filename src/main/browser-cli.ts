@@ -4,6 +4,7 @@ import { runAgentBrowserWrapper, sessionFromAgentBrowserArgs } from "./agent-bro
 import { bundledBrowserExecutable } from "./tasks/browser-runtime";
 import { main as runExtensionCli, nativeControlError, nativeControlHelp } from "./native-control/cli";
 import { runCaptchaCli } from "./captcha/cli";
+import { engineHelp } from "./browser-engine/arguments";
 
 export const browserCliHelp = `ppilot browser CLI (model invocation only for captcha recognize)
 One CLI, two connections. Connection options go BEFORE the command.
@@ -111,7 +112,7 @@ export async function runBrowserCli(
     if (!input.length || route.help || command === "help" || command === "--help" || command === "-h") {
       io.stdout.write(browserCliHelp);
       if (route.connection === "extension") io.stdout.write(`\n${nativeControlHelp}`);
-      else io.stdout.write("Gateway verbs: open, snapshot, click, fill, eval, screenshot, tab, get, wait…\nLifecycle: status, handoff, wait-control, resume, complete, release.\nAdditional: profiles, use NAME, readiness, cdp, extension, device, bifrost.\nDriver command reference: ppilot browser --connection gateway skills get core\n");
+      else io.stdout.write(`${engineHelp}\nAdditional: profiles, use NAME, readiness, cdp, extension, device, bifrost.\n`);
       return 0;
     }
     if (route.connection === "extension") { await (runtime.extension || runExtensionCli)(route.args); return 0; }

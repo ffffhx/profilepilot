@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import type { AgentCliTransport } from "../profilepilot-agent-cli";
+import { windowsPowerShellExecutable } from "../windows-platform";
 
 export interface ServiceLaunchInfo { executable: string; args: string[]; cwd: string }
 
@@ -30,7 +31,7 @@ export async function startService(info: ServiceLaunchInfo): Promise<void> {
   await fs.access(info.executable); await fs.access(info.cwd);
   if (process.platform === "win32") {
     await new Promise<void>((resolve, reject) => {
-      const child = spawn("powershell.exe", ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(windowsDetachedScript(info), "utf16le").toString("base64")], { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
+      const child = spawn(windowsPowerShellExecutable(), ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(windowsDetachedScript(info), "utf16le").toString("base64")], { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
       let error = "";
       child.stderr?.on("data", chunk => { error = (error + chunk.toString()).slice(-3000); });
       child.once("error", reject);

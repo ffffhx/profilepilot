@@ -91,6 +91,7 @@ interface GatewayConnection {
   // WebSocket 和 CDP session，但封锁新命令与事件流；交还后原地恢复。
   quiescing: boolean;
   parked: boolean;
+  downloadBehaviorOverridden?: boolean;
   parkedEvents: string[];
   parkedEventBytes: number;
   agentCdpGeneration: number;
@@ -1133,6 +1134,9 @@ export class BrowserGatewayServer {
         this.options.onAgentConnectionChange?.(route.publicPort, false, connection.identity);
       }
       const cleanupActions: Array<() => Promise<unknown>> = [];
+      if (connection.downloadBehaviorOverridden) {
+        cleanupActions.push(() => this.sendRaw(route, "Browser.setDownloadBehavior", { behavior: "default", eventsEnabled: false }, 2_000));
+      }
       for (const [id, pending] of route.pending) {
         if (pending.connection !== connection) continue;
         if (pending.internalAttachTargetId) {
@@ -1329,20 +1333,26 @@ export class BrowserGatewayServer {
         message = { ...message, params: { ...params, flatten: true } };
         targetIntent = this.beginSessionTargetIntent(route, connection.identity.sessionId);
       } else if (method === "Target.setAutoAttach") {
-        if (connection.reconnecting) {
+        if (connection.reconnecting && clientSessionId && !connection.autoAttachEnabled) {
           // The old daemon's scoped Auto-Attach controller has already been
           // disabled during the reconnect barrier. Reinstalling it immediately
           // makes Chromium replace the freshly attached primary session, while
           // agent-browser keeps using the pre-replacement id. The replacement
           // daemon already attached its working page explicitly, so this setup
           // call is redundant and can be acknowledged without touching Chrome.
+          // The TS engine starts with browser-level Auto-Attach instead of an
+          // explicit page attachment. That root request and its later child
+          // controllers must reach Chromium to restore pages and iframe events.
           this.sendClientResponse(connection, downstreamId, { result: {} }, clientSessionId);
           return;
         }
         message = { ...message, params: { ...params, flatten: true } };
       }
     }
-    if (method === "Browser.setDownloadBehavior") message = { ...message, params: chromiumDownloadParams(params) };
+    if (method === "Browser.setDownloadBehavior") {
+      message = { ...message, params: chromiumDownloadParams(params) };
+      if (params.behavior !== "default") connection.downloadBehaviorOverridden = true;
+    }
     const attachTargetId = connection.identity.kind === "agent" && method === "Target.attachToTarget" && typeof params.targetId === "string"
       ? params.targetId
       : "";
@@ -1575,6 +1585,7 @@ export class BrowserGatewayServer {
         return;
       }
       if (!message.error) {
+        if (pending.method === "Browser.setDownloadBehavior" && pending.params?.behavior === "default") pending.connection.downloadBehaviorOverridden = false;
         const createdTargetId = typeof result?.targetId === "string" ? result.targetId : "";
         if (
           pending.connection.identity.kind === "internal" &&

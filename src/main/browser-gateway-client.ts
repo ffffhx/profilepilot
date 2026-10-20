@@ -9,9 +9,9 @@ import type { GatewayDriverKind } from "./browser-gateway-control";
 import { isRawCdpMethodAllowed } from "./browser-gateway-policy";
 
 const DEFAULT_TIMEOUT_MS = 3_000;
-// Version 18 retains top-level page affinity after cross-origin iframe input.
+// Version 19 restores browser-level Auto-Attach for the TypeScript engine.
 // Replace an older idle daemon, while preserving pipes for open user browsers.
-export const BROWSER_GATEWAY_PROTOCOL_VERSION = 18;
+export const BROWSER_GATEWAY_PROTOCOL_VERSION = 19;
 
 export type GatewayControlRequest =
   | { action: "ping" }

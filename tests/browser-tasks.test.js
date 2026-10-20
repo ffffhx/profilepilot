@@ -344,7 +344,8 @@ test("a managed launcher from another HOME cannot be selected as the real browse
   const root = mkdtempSync(path.join(os.tmpdir(), "pp-launcher-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   writeFileSync(path.join(root, "agent-browser.cmd"), '@echo off\nnode "C:\\other\\profilepilot-agent-browser-wrapper.cjs" %*');
-  assert.equal(resolveRealAgentBrowser({ PATH: root, HOME: path.join(root, "unrelated-home"), PATHEXT: ".CMD" }), null);
+  assert.equal(resolveRealAgentBrowser({ PATH: root, HOME: path.join(root, "unrelated-home"), PATHEXT: ".CMD" }),
+    require("../dist/main/tasks/browser-runtime").bundledBrowserExecutable());
 });
 test("a simultaneous duplicate approval cannot execute twice", async (t) => {
   const f = fixture(t); await f.service.handleTool(f.task, f.run, "observe", {});

@@ -12,12 +12,14 @@
     "plugin:sync": "node scripts/package-codex-plugin.mjs --sync",
     "plugin:check": "node scripts/package-codex-plugin.mjs --check && node --test tests/codex-plugin-package.test.mjs",
     "plugin:pack": "node scripts/package-codex-plugin.mjs --pack",
-    "build": "npm run build:input-guard && npm run build:phone-wrapper && tsc && npm run bundle:agent-browser-wrapper && npm run bundle:profilepilot-cli && npm run bundle:renderer && npm run build:css",
+    "build": "npm run build:input-guard && npm run build:phone-wrapper && tsc && npm run build:browser-engine && npm run bundle:agent-browser-wrapper && npm run bundle:profilepilot-cli && npm run bundle:renderer && npm run build:css",
+    "build:browser-engine": "node scripts/build-browser-engine.mjs",
+    "verify:browser-engine": "npm run build && node scripts/verify-typescript-browser.mjs && node scripts/verify-typescript-browser.mjs --electron",
     "build:phone-wrapper": "node scripts/build-phone-wrapper.mjs",
     "build:input-guard": "node scripts/build-input-guard.mjs",
     "setup:input-guard-signing": "node scripts/setup-input-guard-signing.mjs",
     "bundle:agent-browser-wrapper": "node scripts/build-browser-wrapper.mjs",
-    "bundle:profilepilot-cli": "esbuild src/main/profilepilot-cli.ts --bundle --platform=node --format=cjs --target=node20 --outfile=dist/main/profilepilot-cli.cjs --external:agent-browser/package.json --log-level=warning",
+    "bundle:profilepilot-cli": "esbuild src/main/profilepilot-cli.ts --bundle --platform=node --format=cjs --target=node22 --outfile=dist/main/profilepilot-cli.cjs --log-level=warning",
     "bundle:renderer": "esbuild src/renderer/main.ts --bundle --outfile=dist/browser/app.js --platform=browser --format=iife --target=es2022 --log-level=warning && node scripts/bundle-task-chat.mjs && esbuild src/renderer/local-apps.ts --bundle --outfile=dist/browser/local-apps.js --platform=browser --format=iife --target=es2022 --log-level=warning && esbuild src/renderer/phones.ts --bundle --outfile=dist/browser/phones.js --platform=browser --format=iife --target=es2022 --log-level=warning && esbuild src/renderer/settings.ts src/renderer/workspace-shell.ts src/renderer/workspace-frame.ts --bundle --outdir=dist/browser --platform=browser --format=iife --target=es2022 --log-level=warning",
     "build:css": "tailwindcss -i ./public/styles.src.css -o ./public/app.css && tailwindcss -c tailwind.chat.config.cjs -i public/task-chat.src.css -o dist/browser/task-chat.css --minify",
     "watch:css": "tailwindcss -i ./public/styles.src.css -o ./public/app.css --watch",
@@ -97,7 +99,8 @@
       "CHANGELOG.md",
       "LICENSE",
       "package.json",
-      "!node_modules/agent-browser/bin/agent-browser-*"
+      "!dist/browser-runtime/**/*",
+      "!node_modules/playwright-core/**/*"
     ],
     "mac": {
       "category": "public.app-category.developer-tools",
@@ -129,22 +132,12 @@
           "to": "profilepilot-extension"
         },
         {
-          "from": "node_modules/agent-browser/bin",
-          "to": "browser-runtime",
-          "filter": [
-            "agent-browser-darwin-*"
-          ]
+          "from": "dist/browser-runtime",
+          "to": "browser-runtime"
         },
         {
-          "from": "node_modules/agent-browser/LICENSE",
-          "to": "browser-runtime/LICENSE-agent-browser"
-        },
-        {
-          "from": "node_modules/agent-browser/cli/src/native/a11y",
-          "to": "browser-runtime/licenses",
-          "filter": [
-            "LICENSE*"
-          ]
+          "from": "dist/browser-runtime/node_modules/playwright-core",
+          "to": "browser-runtime/node_modules/playwright-core"
         }
       ]
     },
@@ -182,22 +175,12 @@
           "to": "profilepilot-extension"
         },
         {
-          "from": "node_modules/agent-browser/bin",
-          "to": "browser-runtime",
-          "filter": [
-            "agent-browser-win32-x64.exe"
-          ]
+          "from": "dist/browser-runtime",
+          "to": "browser-runtime"
         },
         {
-          "from": "node_modules/agent-browser/LICENSE",
-          "to": "browser-runtime/LICENSE-agent-browser"
-        },
-        {
-          "from": "node_modules/agent-browser/cli/src/native/a11y",
-          "to": "browser-runtime/licenses",
-          "filter": [
-            "LICENSE*"
-          ]
+          "from": "dist/browser-runtime/node_modules/playwright-core",
+          "to": "browser-runtime/node_modules/playwright-core"
         }
       ]
     },
@@ -217,7 +200,8 @@
         "repo": "profilepilot"
       }
     ],
-    "beforePack": "scripts/verify-browser-runtime.cjs"
+    "beforePack": "scripts/verify-browser-runtime.cjs",
+    "afterPack": "scripts/verify-packaged-browser-runtime.cjs"
   },
   "devDependencies": {
     "@types/node": "^25.9.1",
@@ -236,13 +220,13 @@
     "@assistant-ui/react-streamdown": "^0.3.19",
     "@streamdown/cjk": "^1.0.4",
     "@streamdown/code": "^1.1.1",
-    "agent-browser": "0.34.0",
     "agent-session-core": "^0.1.1",
     "ai": "7.0.107",
     "exceljs": "^4.4.0",
     "extract-zip": "^2.0.1",
     "fast-xml-parser": "^5.11.2",
     "pdfjs-dist": "^6.3.289",
+    "playwright-core": "1.64.1",
     "qrcode": "^1.5.4",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",

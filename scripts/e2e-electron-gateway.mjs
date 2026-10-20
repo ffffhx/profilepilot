@@ -13,7 +13,7 @@ const { requestBrowserGateway } = require("../dist/main/browser-gateway-client")
 const electronPath = require("electron");
 const wrapper = path.join(repoRoot, "dist/main/profilepilot-agent-browser-wrapper.cjs");
 const unifiedCli = process.env.PPILOT_BROWSER_CLI_E2E === "1";
-const real = path.join(repoRoot, "node_modules/agent-browser/bin", process.platform === "win32" ? "agent-browser-win32-x64.exe" : `agent-browser-${process.platform}-${process.arch}`);
+const real = path.join(repoRoot, "dist/browser-runtime/profilepilot-browser-engine.cjs");
 async function freePort() {
   const server = net.createServer();
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));

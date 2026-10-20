@@ -11,6 +11,9 @@ export function driverProcessSnapshot(): DriverProcess[] {
   return execFileSync('ps',['-axo','pid=,ppid=,command='],{encoding:'utf8',timeout:5000,maxBuffer:8*1024*1024}).split('\n').flatMap(line=>{const m=line.match(/^\s*(\d+)\s+(\d+)\s+(.+)$/);return m?[{pid:Number(m[1]),parentPid:Number(m[2]),command:m[3]}]:[]});
 }
 export function isDriverProcess(p:DriverProcess):boolean {
+  // Only the exact Node/Electron service entry is eligible for termination.
+  // A shell or editor mentioning its filename is not an engine process.
+  if (/^(?:"[^"\r\n]*[\\/](?:node|electron|ProfilePilot)(?:\.exe)?"|(?:[^\s"\r\n]*[\\/])?(?:node|electron|ProfilePilot)(?:\.exe)?)\s+(?:"[^"\r\n]*[\\/]profilepilot-browser-engine\.cjs"|[^\s"\r\n]*[\\/]profilepilot-browser-engine\.cjs)\s+--engine-service(?:\s|$)/i.test(p.command)) return true;
   // Match the executable, not a command mentioning agent-browser in its arguments.
   return /^(?:"[^"\r\n]*[\\/])?agent-browser(?:-win32-(?:x64|arm64))?(?:\.exe)?(?:"|\s|$)/i.test(p.command) || /^(?:[^\s"\r\n]*[\\/])agent-browser(?:\s|$)/i.test(p.command);
 }

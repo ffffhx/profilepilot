@@ -82,6 +82,7 @@
     "productName": "ProfilePilot",
     "copyright": "Copyright 2026 ffffhx",
     "asar": true,
+    "asarUnpack": ["public/vision/*.py"],
     "electronDist": "node_modules/electron/dist",
     "directories": {
       "buildResources": "build",

@@ -1,0 +1,94 @@
+package io.github.profilepilot.phone;
+
+import android.accessibilityservice.AccessibilityService;
+import android.accessibilityservice.GestureDescription;
+import android.graphics.Path;
+import android.graphics.Rect;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.SystemClock;
+import org.json.JSONArray;
+import org.json.JSONObject;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.function.BooleanSupplier;
+
+/** Bounded, continuously held strokes. All access is confined to the main looper. */
+final class FollowTouch {
+    private record Point(float x, float y, float fromX, float fromY) { }
+    private record Held(GestureDescription.StrokeDescription stroke, float x, float y) { }
+    private final AccessibilityService service;
+    private final Handler main = new Handler(Looper.getMainLooper());
+    private final Map<Integer, Held> held = new LinkedHashMap<>();
+    private Map<Integer, Point> desired = new LinkedHashMap<>();
+    private BooleanSupplier authorized = () -> false;
+    private long expires;
+    private boolean inFlight;
+    private String error = "";
+    FollowTouch(AccessibilityService service) { this.service = service; }
+    void update(JSONArray points, int ttlMs, BooleanSupplier authorized) throws Exception {
+        if (!error.isEmpty()) throw new IllegalStateException(error);
+        if (ttlMs < 100 || ttlMs > 1500 || points.length() > 5) throw new IllegalArgumentException("持续触控参数无效");
+        Rect bounds = service.getSystemService(android.view.WindowManager.class).getMaximumWindowMetrics().getBounds();
+        Map<Integer, Point> next = new LinkedHashMap<>();
+        for (int i = 0; i < points.length(); i++) {
+            JSONObject p = points.getJSONObject(i);
+            int id = p.getInt("id");
+            if (id < 0 || id > 4 || next.containsKey(id)) throw new IllegalArgumentException("触点编号无效");
+            float x = coordinate(p, "x", bounds.width()), y = coordinate(p, "y", bounds.height());
+            float fromX = p.has("fromX") ? coordinate(p, "fromX", bounds.width()) : x;
+            float fromY = p.has("fromY") ? coordinate(p, "fromY", bounds.height()) : y;
+            next.put(id, new Point(x, y, fromX, fromY));
+        }
+        this.authorized = authorized;
+        if (!authorized.getAsBoolean()) throw new IllegalStateException("手机会话已改变");
+        desired = next; expires = SystemClock.uptimeMillis() + ttlMs;
+        if (!inFlight) step();
+    }
+    private static float coordinate(JSONObject p, String key, int limit) throws Exception {
+        double value = p.getDouble(key);
+        if (!Double.isFinite(value) || value < 0 || value >= limit) throw new IllegalArgumentException("触点超出屏幕");
+        return (float) value;
+    }
+    void release() { desired.clear(); expires = 0; if (!inFlight) step(); }
+    boolean active() { return inFlight || !held.isEmpty() || !desired.isEmpty(); }
+    private void step() {
+        if (!authorized.getAsBoolean() || SystemClock.uptimeMillis() >= expires) desired.clear();
+        if (desired.isEmpty() && held.isEmpty()) return;
+        GestureDescription.Builder builder = new GestureDescription.Builder();
+        Map<Integer, Held> next = new LinkedHashMap<>();
+        for (Map.Entry<Integer, Held> entry : held.entrySet()) {
+            Held old = entry.getValue();
+            Point point = desired.get(entry.getKey());
+            Path path = new Path(); path.moveTo(old.x, old.y);
+            float x = point == null ? old.x : point.x, y = point == null ? old.y : point.y;
+            path.lineTo(x, y);
+            GestureDescription.StrokeDescription stroke = old.stroke.continueStroke(path, 0, 80, point != null);
+            builder.addStroke(stroke);
+            if (point != null) next.put(entry.getKey(), new Held(stroke, x, y));
+        }
+        for (Map.Entry<Integer, Point> entry : desired.entrySet()) {
+            if (held.containsKey(entry.getKey())) continue;
+            Point point = entry.getValue();
+            Path path = new Path(); path.moveTo(point.fromX, point.fromY); path.lineTo(point.x, point.y);
+            GestureDescription.StrokeDescription stroke = new GestureDescription.StrokeDescription(path, 0, 80, true);
+            builder.addStroke(stroke); next.put(entry.getKey(), new Held(stroke, point.x, point.y));
+        }
+        inFlight = true;
+        boolean accepted = service.dispatchGesture(builder.build(), new AccessibilityService.GestureResultCallback() {
+            @Override public void onCompleted(GestureDescription description) {
+                inFlight = false; held.clear(); held.putAll(next); step();
+            }
+            @Override public void onCancelled(GestureDescription description) {
+                inFlight = false; held.clear(); desired.clear();
+                error = "持续触控被取消，已暂停；请重新开始跟随";
+                if (ControlService.current != null) ControlService.current.localControl("pause");
+            }
+        }, main);
+        if (!accepted) {
+            inFlight = false; held.clear(); desired.clear();
+            error = "系统未接受持续触控，已暂停";
+            if (ControlService.current != null) ControlService.current.localControl("pause");
+        }
+    }
+}

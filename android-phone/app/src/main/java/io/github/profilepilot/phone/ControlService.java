@@ -20,6 +20,7 @@ public final class ControlService extends Service {
     private PhoneServer server;
     private ControlOverlay overlay;
     private String lastNotification = "";
+    private long followSequence;
     private final BroadcastReceiver screenOff = new BroadcastReceiver() { @Override public void onReceive(Context context, Intent intent) { session.pause("手机已锁屏，控制已暂停"); render(); } };
     private final Runnable tick = new Runnable() { public void run() {
         session.expire();
@@ -69,20 +70,50 @@ public final class ControlService extends Service {
                     requireReady();
                     String computer = limited(input, "computer", 120);
                     if (!computer.equals(getSharedPreferences("MainActivity", MODE_PRIVATE).getString("computer", ""))) throw new IllegalStateException("控制电脑与配对记录不一致");
+                    PhoneAccessibility.current.resetFollowTouch();
                     session.start(input.getString("instanceId"), input.getLong("generation"), input.getString("sessionId"), input.getString("mode"), computer, limited(input, "controller", 120), limited(input, "task", 500), System.currentTimeMillis());
-                    receipts.clear(); render(); result.complete(success(null));
+                    receipts.clear(); followSequence = 0;
+                    render(); result.complete(success(null));
                 } else if (method.equals("pause") || method.equals("resume") || method.equals("stop")) {
                     session.check(input.getString("instanceId"), input.getString("sessionId"), input.getLong("generation"));
                     if (method.equals("resume")) { requireReady(); session.resume(); }
                     else if (method.equals("pause")) session.pause("电脑已暂停控制"); else session.stop("电脑已结束控制");
                     render(); result.complete(success(null));
-                } else if (method.equals("action")) action(input, result);
+                } else if (method.equals("follow")) follow(input, result);
+                else if (method.equals("action")) action(input, result);
                 else throw new IllegalArgumentException("不支持此控制请求");
             } catch (Exception error) { result.complete(failure(error)); }
         });
         // Timeout is uncertain to the caller. The receipt lets the SAME request
         // id be queried without sending duplicate input; no automatic replay.
         return result.get(6, TimeUnit.SECONDS);
+    }
+    private void follow(JSONObject input, CompletableFuture<JSONObject> result) throws Exception {
+        requireReady();
+        String op = input.getString("op");
+        session.authorize(input.getString("instanceId"), input.getString("sessionId"), input.getLong("generation"), op.equals("touch"));
+        if (op.equals("probe")) {
+            result.complete(success(new JSONObject().put("protocol", 1))); return;
+        }
+        if (op.equals("touch")) {
+            long sequence = input.getLong("sequence");
+            if (sequence <= followSequence) throw new IllegalStateException("持续触控指令已过期，不会重放");
+            followSequence = sequence;
+            String instance = session.instanceId, id = session.sessionId;
+            long generation = session.generation;
+            PhoneAccessibility.current.followTouch(input, () -> {
+                session.expire();
+                return session.active() && session.mode.equals("control") && instance.equals(session.instanceId)
+                    && id.equals(session.sessionId) && generation == session.generation;
+            });
+            result.complete(success(new JSONObject().put("accepted", true))); return;
+        }
+        if (!op.equals("frame")) throw new IllegalArgumentException("未知视觉跟随请求");
+        long generation = session.generation;
+        session.begin("视觉跟随 · 获取画面");
+        PhoneAccessibility.current.perform(new JSONObject().put("kind", "screenshot").put("nativeSize", true)).whenComplete((value, error) -> main.post(() -> {
+            session.finish(generation); render(); result.complete(error == null ? success(value) : failure(error));
+        }));
     }
     private void action(JSONObject input, CompletableFuture<JSONObject> result) throws Exception {
         String requestId = input.getString("requestId");
@@ -176,11 +207,13 @@ public final class ControlService extends Service {
     }
     void refreshPresentation() { render(); }
     private void render() {
+        if (!session.active() && PhoneAccessibility.current != null) PhoneAccessibility.current.releaseFollowTouch();
         if (overlay != null) overlay.update();
         String key = description() + session.controller + session.task + session.sessionId + session.generation;
         if (!key.equals(lastNotification)) { lastNotification = key; getSystemService(NotificationManager.class).notify(1, notification()); }
     }
     @Override public void onDestroy() {
+        if (PhoneAccessibility.current != null) PhoneAccessibility.current.releaseFollowTouch();
         session.stop("连接服务已关闭"); main.removeCallbacksAndMessages(null); if (overlay != null) overlay.close();
         try { unregisterReceiver(screenOff); } catch (Exception ignored) { }
         if (server != null) try { server.close(); } catch (Exception ignored) { }

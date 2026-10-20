@@ -23,6 +23,7 @@ import { ManagedAdbJobs } from "./adb-jobs";
 import { BasicPhoneControl } from "./basic";
 import { ScreenCamera, type CameraCapture } from "./screen-camera";
 import type { ScreenCameraStart, ScreenCameraCommand, ScreenCameraLease } from "../../shared/screen-camera";
+import { GameFollower } from "./game-follow";
 export { phoneActionSchema } from "./actions";
 
 const sessionSchema = z.object({
@@ -91,6 +92,7 @@ export class PhonesService {
   private cloud: PhoneCloud;
   private basic: BasicPhoneControl;
   readonly screenCamera: ScreenCamera;
+  readonly gameFollower: GameFollower;
   readonly adbJobs: ManagedAdbJobs;
   private basicStarting = false;
   readonly computer: string;
@@ -100,6 +102,12 @@ export class PhonesService {
     this.adb = options.adb || new Adb(); this.request = options.request || phoneRequest; this.computer = (options.computer || os.hostname()).slice(0, 120);
     this.adbJobs = new ManagedAdbJobs(this.adb, (lease, generation, mode, acquire) => this.authorizeAdb(lease, generation, mode, acquire), path.join(options.root, "adb-forwards.json"));
     this.basic = new BasicPhoneControl(this.adb, this.computer, () => this.changed(), () => this.now());
+    this.gameFollower = new GameFollower(options.root, {
+      startWrapper: (...args) => this.startWrapper(...args),
+      pulseWrapper: lease => this.pulseWrapper(lease),
+      stopWrapper: lease => this.stopWrapper(lease),
+      live: (lease, generation, command) => this.followLive(lease, generation, command)
+    });
     this.screenCamera = new ScreenCamera({ adb: this.adb, root: options.root,
       dexPath: path.join(path.dirname(options.apkPath), "profilepilot-screen-camera.dex"), capture: options.cameraCapture,
       authorize: input => this.authorizeCamera(input), changed: () => this.changed() });
@@ -827,6 +835,19 @@ export class PhonesService {
     const input = { id: owner.id, sessionId: owner.sessionId, generation, requestId, action };
     return owner.backend === "basic" ? this.basicPerform(input) : this.perform(input);
   }
+  private async followLive(lease: string, generation: number, command: object): Promise<unknown> {
+    const owner = this.wrapper(lease), device = this.connected(owner.id);
+    if (owner.backend !== "app" || device.companion !== "ready" || this.reconcile.has(owner.id)
+      || this.operations.has(owner.id) || this.actions.has(owner.id)) throw new Error("手机连接或操作状态已改变");
+    this.actions.add(owner.id);
+    try {
+      const response = await this.rpc(owner.id, "follow", { ...command, instanceId: owner.instanceId, sessionId: owner.sessionId, generation });
+      if (response.state.instanceId !== owner.instanceId || response.state.sessionId !== owner.sessionId
+        || response.state.generation !== generation || !["viewing", "controlling"].includes(response.state.phase))
+        throw new Error("手机已暂停或切换会话，跟随已停止");
+      return response.result;
+    } finally { this.actions.delete(owner.id); }
+  }
   private async authorizeAdb(lease: string, generation: number, mode: "view" | "control", acquire: boolean) {
     const owner = this.wrapper(lease), device = await this.wrapperState(lease), state = device.state!;
     if (this.closed || device.connection !== "device" || owner.backend === "app" && (device.companion !== "ready" || this.reconcile.has(owner.id))
@@ -929,6 +950,7 @@ export class PhonesService {
     });
   }
   async close(): Promise<void> {
+    await this.gameFollower.close();
     this.screenCamera.stop();
     for (const read of this.screenReads.values()) read.abort();
     for (const read of this.inspections) read.abort();

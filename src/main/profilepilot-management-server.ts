@@ -12,6 +12,7 @@ import { executePhoneCommand } from "./phones/management";
 import type { PhonesService } from "./phones/service";
 import {
   PROFILEPILOT_MANAGEMENT_MAX_MESSAGE_BYTES,
+  PROFILEPILOT_FOLLOW_MAX_REQUEST_BYTES,
   PROFILEPILOT_PHONE_MAX_RESPONSE_BYTES,
   PROFILEPILOT_PHONE_BASIC_MAX_RESPONSE_BYTES,
   PROFILEPILOT_MANAGEMENT_PROTOCOL_VERSION,
@@ -78,7 +79,7 @@ export async function startProfilePilotManagementServer(
       if (!accepting) { socket.destroy(); return; }
       if (handled) return;
       buffer += chunk;
-      if (Buffer.byteLength(buffer, "utf8") > PROFILEPILOT_MANAGEMENT_MAX_MESSAGE_BYTES) {
+      if (Buffer.byteLength(buffer, "utf8") > PROFILEPILOT_FOLLOW_MAX_REQUEST_BYTES) {
         handled = true;
         writeResponse(socket, errorResponse("unknown", "MANAGEMENT_REQUEST_TOO_LARGE", "管理请求超过大小限制。"));
         return;
@@ -90,7 +91,12 @@ export async function startProfilePilotManagementServer(
       let maxResponseBytes = PROFILEPILOT_MANAGEMENT_MAX_MESSAGE_BYTES;
       try {
         const { command } = JSON.parse(line);
-        if (command?.action === "phone" && ["action", "wrapper-action", "camera-command", "camera-sources", "package-info", "packages", "diagnose"].includes(command.method)) maxResponseBytes = PROFILEPILOT_PHONE_MAX_RESPONSE_BYTES;
+        const follow = command?.action === "phone" && command.method === "follow-command";
+        if (!follow && Buffer.byteLength(line, "utf8") > PROFILEPILOT_MANAGEMENT_MAX_MESSAGE_BYTES) {
+          writeResponse(socket, errorResponse("unknown", "MANAGEMENT_REQUEST_TOO_LARGE", "管理请求超过大小限制。")); return;
+        }
+        if (follow && command.params?.op === "setup") socket.setTimeout(360_000);
+        if (command?.action === "phone" && ["action", "wrapper-action", "camera-command", "camera-sources", "package-info", "packages", "diagnose", "follow-command"].includes(command.method)) maxResponseBytes = PROFILEPILOT_PHONE_MAX_RESPONSE_BYTES;
         if (command?.action === "phone" && command.method === "basic-action") maxResponseBytes = PROFILEPILOT_PHONE_BASIC_MAX_RESPONSE_BYTES;
       } catch { /* handleRequestLine returns the normal invalid-request error */ }
       void handleRequestLine(line, token, options)

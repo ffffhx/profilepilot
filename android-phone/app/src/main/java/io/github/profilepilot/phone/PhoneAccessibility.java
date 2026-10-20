@@ -19,6 +19,16 @@ import java.util.concurrent.CompletableFuture;
 
 public final class PhoneAccessibility extends AccessibilityService {
     public static volatile PhoneAccessibility current;
+    private FollowTouch followTouch;
+    void followTouch(JSONObject input, java.util.function.BooleanSupplier authorized) throws Exception {
+        if (followTouch == null) followTouch = new FollowTouch(this);
+        followTouch.update(input.getJSONArray("points"), input.optInt("ttlMs", 1200), authorized);
+    }
+    void releaseFollowTouch() { if (followTouch != null) followTouch.release(); }
+    void resetFollowTouch() {
+        if (followTouch != null && followTouch.active()) throw new IllegalStateException("正在释放上一任务的触点，请稍候");
+        followTouch = null;
+    }
     private DebuggingAssist debuggingSetup;
     private OverlayPermissionAssist overlaySetup;
     void prepareDebugging(String settingsPackage, DebuggingSetup.Setting setting) {
@@ -42,7 +52,7 @@ public final class PhoneAccessibility extends AccessibilityService {
     }
     @Override protected void onServiceConnected() { current = this; }
     @Override public void onAccessibilityEvent(AccessibilityEvent event) { }
-    @Override public void onInterrupt() { cancelSetup(); if (ControlService.current != null) ControlService.current.localControl("pause"); }
+    @Override public void onInterrupt() { cancelSetup(); releaseFollowTouch(); if (ControlService.current != null) ControlService.current.localControl("pause"); }
     @Override public void onDestroy() { current = null; onInterrupt(); super.onDestroy(); }
 
     public CompletableFuture<Object> perform(JSONObject action) {
@@ -98,16 +108,17 @@ public final class PhoneAccessibility extends AccessibilityService {
                 String format = action.optString("format", "jpeg");
                 if (!format.equals("jpeg") && !format.equals("png")) throw new IllegalArgumentException("不支持此截图格式");
                 boolean png = format.equals("png");
+                boolean nativeSize = png || action.optBoolean("nativeSize", false);
                 takeScreenshot(Display.DEFAULT_DISPLAY, getMainExecutor(), new TakeScreenshotCallback() {
                     @Override public void onSuccess(ScreenshotResult screenshot) {
                         HardwareBuffer buffer = screenshot.getHardwareBuffer(); Bitmap bitmap = null, scaled = null;
                         try {
                             bitmap = Bitmap.wrapHardwareBuffer(buffer, screenshot.getColorSpace());
                             if (bitmap == null) throw new IllegalStateException("无法读取屏幕画面");
-                            int width = png ? bitmap.getWidth() : Math.min(1080, bitmap.getWidth()), height = Math.round((float) bitmap.getHeight() * width / bitmap.getWidth());
+                            int width = nativeSize ? bitmap.getWidth() : Math.min(1080, bitmap.getWidth()), height = Math.round((float) bitmap.getHeight() * width / bitmap.getWidth());
                             // ADB screencap consumers use pixel coordinates. Preserve the
                             // physical size and PNG bytes; never silently return a thumbnail.
-                            scaled = png ? bitmap.copy(Bitmap.Config.ARGB_8888, false) : Bitmap.createScaledBitmap(bitmap, width, height, true);
+                            scaled = nativeSize ? bitmap.copy(Bitmap.Config.ARGB_8888, false) : Bitmap.createScaledBitmap(bitmap, width, height, true);
                             if (scaled == null) throw new IllegalStateException("无法转换屏幕画面");
                             ByteArrayOutputStream bytes = new ByteArrayOutputStream(); scaled.compress(png ? Bitmap.CompressFormat.PNG : Bitmap.CompressFormat.JPEG, png ? 100 : 75, bytes);
                             if (bytes.size() > 5 * 1024 * 1024) throw new IllegalStateException("截图超过 5 MiB，未缩小画面，请更换页面后重新获取");

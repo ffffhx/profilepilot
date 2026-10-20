@@ -120,4 +120,10 @@ app.whenReady().then(async () => {
   await window.loadFile(path.join(__dirname, '../../../public/phones.html'));
   driverClose = startE2eDriver({ socketPath: process.env.PHONE_UI_SOCKET, mode: process.env.PHONE_UI_NO_APP === '1' ? 'desktop' : 'background', getWindow: () => window, getWindowSnapshot: () => ({ main: { visible: window.isVisible(), focused: window.isFocused() } }), triggerMiniHotkeyHandler: async () => {} });
 }).catch(error => { console.error(error); app.exit(1); });
+let closing = false;
+app.on('before-quit', event => {
+  if (closing) return;
+  event.preventDefault(); closing = true;
+  void service.close().finally(() => app.quit());
+});
 app.on('will-quit', () => driverClose?.());

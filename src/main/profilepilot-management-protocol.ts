@@ -6,6 +6,8 @@ import type { PhoneManagementCommand } from "./phones/management";
 
 export const PROFILEPILOT_MANAGEMENT_PROTOCOL_VERSION = 1;
 export const PROFILEPILOT_MANAGEMENT_MAX_MESSAGE_BYTES = 1024 * 1024;
+// Two calibration templates and one frame, each capped at 4 million base64 bytes.
+export const PROFILEPILOT_FOLLOW_MAX_REQUEST_BYTES = 13 * 1024 * 1024;
 export const PROFILEPILOT_PHONE_MAX_RESPONSE_BYTES = 9 * 1024 * 1024;
 // Basic mode returns native PNGs (at most 24 MiB), encoded as base64.
 export const PROFILEPILOT_PHONE_BASIC_MAX_RESPONSE_BYTES = 33 * 1024 * 1024;

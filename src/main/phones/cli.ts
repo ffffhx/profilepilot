@@ -6,10 +6,16 @@ import { wirelessConnectSchema, wirelessPairSchema } from "./wireless";
 import { runScreenCameraCli } from "./screen-camera-cli";
 import { executeAdbCli } from "./adb-cli-stream";
 import { phoneAppCli } from "./app-cli";
+import { runGameFollowCli } from "./game-follow-cli";
 
 export const phoneHelp = `ppilot phone CLI · 手机控制
 
 ppilot phone list
+ppilot phone follow runtime|setup|status|load
+ppilot phone follow save --config <校准JSON>
+ppilot phone follow start --device <设备ID> --config <校准JSON> [--mode observe|control]
+ppilot phone follow stop --run-id <status返回的任务ID>
+ppilot phone follow analyze --params-file <包含config和frame的JSON>
 ppilot phone emulator-list
 ppilot phone emulator-connect --name <模拟器名称>
 ppilot phone connect --device <设备ID>
@@ -81,6 +87,7 @@ kill-server 会持续停用轮询，直到显式 start-server；改变共享主�
 export async function runPhoneCli(args: string[], request: (command: ProfilePilotManagementCommand) => Promise<ProfilePilotManagementResponse>, io: Pick<NodeJS.Process, "stdout" | "stderr">): Promise<number> {
   if (!args.length || args.includes("--help") || args.includes("-h")) { io.stdout.write(phoneHelp); return 0; }
   if (args[0] === "camera") return runScreenCameraCli(args.slice(1), request, io);
+  if (args[0] === "follow") return runGameFollowCli(args.slice(1), request, io);
   try {
     const method = args[0];
     if (!["list", "emulator-list", "emulator-connect", "connect", "update", "inspect", "packages", "diagnose", "exec", "host", "app", "install", "wireless-discover", "wireless-pair", "wireless-connect", "wireless-disconnect", "rename", "start", "pause", "resume", "stop", "action", "run"].includes(method)) throw new Error("未知手机命令。运行 ppilot phone --help 查看用法。");

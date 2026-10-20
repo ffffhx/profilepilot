@@ -83,6 +83,7 @@ export interface PhoneActionResult { state: PhoneSessionState; result: unknown; 
 export interface PhoneBasicModeInput { id: string; sessionId: string; generation: number; mode: "view" | "control"; }
 export type PhoneSetting = "accessibility" | "overlay" | "notifications" | "developerOptions" | "usbDebugging" | "wirelessDebugging";
 export interface PhonesApi {
+  followCommand(command: import("./game-follow").FollowCommand): Promise<any>;
   cameraProbe(id: string): Promise<ScreenCameraCapabilities>;
   cameraSources(): Promise<ScreenCameraSource[]>;
   cameraStart(input: ScreenCameraStart): Promise<ScreenCameraState>;

@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('mobile', {
   onChanged: () => () => {}
 });
 contextBridge.exposeInMainWorld('phones', {
+  followCommand: command => call('follow-command', command),
   cameraProbe: id => call('camera-probe', { id }),
   cameraSources: () => call('camera-sources'),
   cameraStart: input => call('camera-start', input),

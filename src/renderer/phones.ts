@@ -14,6 +14,7 @@ import { openPhoneEmulator } from "./phone-emulator";
 import { openBasicPhone, phoneModeChoices, phoneAppDownload, phoneDownloadFigure } from "./phone-basic";
 import { createPhoneInspector } from "./phone-inspector";
 import { openScreenCamera } from "./screen-camera";
+import { openGameFollower } from "./game-follow";
 
 const root = document.getElementById("phones")!;
 const esc = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
@@ -40,6 +41,7 @@ const wirelessDiscovery = new PhoneWirelessDiscoveryMonitor(id => window.phones.
 root.innerHTML = `${workspaceSwitcher("phones")}${workspaceIdentityBar()}<main class="phone-shell phone-console"><header class="pc-control-header"><div class="pc-control-brand"><h1>控制台</h1><p>管理浏览器、桌面应用与 Android 设备</p></div></header>${pcControlTabs("phones")}<div class="phone-console-layout"><div class="phone-registry-column">${phoneListShell()}</div><aside class="phone-inspector" aria-label="手机画面与会话"></aside></div><button class="phone-text-button phone-mobile-entry-link" data-action="mobile" hidden>用手机管理电脑任务 →</button></main>
   <dialog class="phone-details" aria-labelledby="phone-details-title"><header class="phone-details-top"><span>设备详情</span><button data-action="close-details" aria-label="关闭设备详情">${taskIcon("close")}</button></header><div class="phone-details-scroll"><div class="phone-details-identity"></div><div class="phone-content" aria-busy="true"></div></div></dialog>`;
 const drawer = root.querySelector<HTMLDialogElement>(".phone-details")!;
+root.querySelector(".pc-control-header")!.insertAdjacentHTML("beforeend", '<button class="phone-text-button" data-action="game-follow">视觉跟随</button>');
 const inspector = createPhoneInspector(root.querySelector<HTMLElement>(".phone-inspector")!);
 drawer.addEventListener("close", () => {
   key = ""; render();
@@ -278,6 +280,7 @@ root.addEventListener("click", event => {
     void navigator.clipboard.writeText(phoneAppDownload(snapshot.companionApp?.variant).url).then(() => notice("下载链接已复制，可在手机浏览器中打开。")).catch(() => notice("复制失败，请使用右侧二维码下载。", true)); return;
   }
   if (busy) return;
+  if (action === "game-follow") { void openGameFollower(current()); return; }
   if (action === "add-device") { addDevice(); return; }
   if (action === "refresh") { void run(async () => { snapshot = await window.phones.snapshot(); loaded = true; }); return; }
   if (action === "refresh-phone-screen") { void inspector.refresh(true); return; }

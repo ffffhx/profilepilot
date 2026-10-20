@@ -350,6 +350,7 @@ const localAppsApi: LocalAppsApi = {
 };
 contextBridge.exposeInMainWorld("localApps", localAppsApi);
 const phonesApi: PhonesApi = {
+  followCommand: command => ipcRenderer.invoke(PHONE_CHANNEL, "follow-command", command),
   basicStart: (id, mode, controller, task) => ipcRenderer.invoke(PHONE_CHANNEL, "basic-start", { id, mode, controller, task }),
   cameraProbe: id => ipcRenderer.invoke(PHONE_CHANNEL, "camera-probe", { id }),
   cameraSources: () => ipcRenderer.invoke(PHONE_CHANNEL, "camera-sources"),

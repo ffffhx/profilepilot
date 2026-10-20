@@ -191,7 +191,10 @@ export class GameFollower {
       await this.ready();
       if (run.cancelled) throw new Error("跟随任务已停止");
       run.worker = new VisionWorker(this.python!, this.script);
-      await run.worker.request({ op: "configure", config });
+      // Basic captures can take up to 3 s plus a bounded 350 ms gesture.
+      // Recognition continuity must tolerate that cadence; frame age below
+      // still independently prevents movement from an overly delayed capture.
+      await run.worker.request({ op: "configure", config, maxFrameGapMs: backend === "basic" ? 4000 : 1500 });
       const owner = await this.host.startWrapper(id, mode === "observe" ? "view" : "control", "本机视觉跟随", config.name, backend);
       run.lease = owner.lease; run.generation = owner.device.state!.generation;
       if (run.cancelled) throw new Error("跟随任务已停止");

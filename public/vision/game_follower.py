@@ -95,8 +95,9 @@ def route(start, goal, walk):
 
 
 class Follower:
-    def __init__(self, config):
+    def __init__(self, config, max_frame_gap=1.5):
         self.config = config
+        self.max_frame_gap = max_frame_gap
         self.templates = [decode(config["selfTemplate"]), decode(config["targetTemplate"])]
         grid = config["grid"]
         blocked = np.zeros((grid["rows"], grid["columns"]), np.uint8)
@@ -137,7 +138,7 @@ class Follower:
         else:
             position = (own["x"], own["y"])
             # Teleport, stale input, or a switched target require reacquisition.
-            if self.last and (math.dist(self.last, position) > .2 or now - self.last_at > 1.5):
+            if self.last and (math.dist(self.last, position) > .2 or now - self.last_at > self.max_frame_gap):
                 self.hits = 0
                 self.history.clear()
             self.last, self.last_at = position, now
@@ -157,7 +158,8 @@ class Follower:
                 self.history.clear()
             else:
                 self.history.append((now, position))
-                while self.history and now - self.history[0][0] > 3.5:
+                # Retain four observations even when emulator captures are slow.
+                while len(self.history) > 4 and now - self.history[0][0] > 3.5:
                     self.history.popleft()
                 stuck = (len(self.history) > 3 and now - self.history[0][0] > 2.5
                          and max(math.dist(position, p) for _, p in self.history) < .012)
@@ -188,7 +190,7 @@ def main():
             if op == "probe":
                 value = {"version": cv2.__version__}
             elif op == "configure":
-                follower = Follower(request["config"])
+                follower = Follower(request["config"], request.get("maxFrameGapMs", 1500) / 1000)
                 value = {"ready": True}
             elif op == "analyze":
                 if follower is None:

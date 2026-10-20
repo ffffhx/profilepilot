@@ -77,6 +77,35 @@ class VisionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "分辨率"):
             f.analyze(encoded(frame[:200, :200]), 21)
 
+    def test_slow_frames_confirm_but_a_long_gap_requires_reacquisition(self):
+        config, frame, _, _ = fixture()
+        f = vision.Follower(config, max_frame_gap=4)
+        self.assertEqual(f.analyze(encoded(frame), 10)["phase"], "confirming")
+        self.assertEqual(f.analyze(encoded(frame), 12.1)["phase"], "following")
+        late = f.analyze(encoded(frame), 16.2)
+        self.assertEqual(late["phase"], "confirming")
+        self.assertIsNone(late["direction"])
+        self.assertEqual(f.analyze(encoded(frame), 18.3)["phase"], "following")
+
+    def test_stuck_detection_keeps_enough_history_at_low_frame_rates(self):
+        config, frame, _, _ = fixture()
+        f = vision.Follower(config, max_frame_gap=4)
+        results = [f.analyze(encoded(frame), 10 + i * 2.1) for i in range(5)]
+        self.assertEqual(results[1]["phase"], "following")
+        self.assertEqual(results[-1]["phase"], "stuck")
+        self.assertIsNone(results[-1]["direction"])
+
+    def test_fast_frames_do_not_keep_old_movement_in_stuck_history(self):
+        config, frame, own, _ = fixture()
+        f = vision.Follower(config, max_frame_gap=4)
+        for i in range(10):
+            frame[90:108, 40:85] = 25
+            x = 45 + i * 2
+            frame[90:108, x:x+18] = own
+            f.analyze(encoded(frame), 10 + i * .4)
+        results = [f.analyze(encoded(frame), 14 + i * .4) for i in range(9)]
+        self.assertTrue(any(r["phase"] == "stuck" and r["direction"] is None for r in results))
+
     def test_close_target_stops_after_confirmation(self):
         config, frame, _, target = fixture()
         frame[90:108, 155:173] = 25

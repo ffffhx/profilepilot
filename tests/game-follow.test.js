@@ -13,7 +13,7 @@ let fixture;
 try { fixture = JSON.parse(execFileSync(python, ['tests/game-follow-vision.py', '--fixture'], { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })); } catch {}
 const vision = fixture ? {} : { skip: 'Python/OpenCV not installed; run tests/game-follow-vision.py in the vision environment' };
 const wait = ms => new Promise(r => setTimeout(r, ms));
-async function until(fn) { for (let i = 0; i < 80; i++) { if (await fn()) return; await wait(75); } throw Error('condition timed out'); }
+async function until(fn, timeoutMs = 6000) { const deadline=Date.now()+timeoutMs; while(Date.now()<deadline) { if (await fn()) return; await wait(75); } throw Error('condition timed out'); }
 
 test('validates map, dimensions, obstacles, and joystick extent before starting', vision, () => {
   assert.ok(gameFollowConfigSchema.safeParse(fixture.config).success);
@@ -118,13 +118,26 @@ test('basic backend is explicitly carried to the owned wrapper and reported in s
 });
 
 test('basic follow permits slow emulator captures while retaining bounded touch requests',vision,async t=>{
-  const h=harness(t,{delay:1100});
+  const h=harness(t,{delay:2100});
   const state=await h.manager.command({op:'start',id:'emulator',mode:'control',backend:'basic',config:fixture.config});
   await until(()=>h.points.length>=2);
   assert.deepEqual(h.points[0].points,[]);assert.equal(h.points[1].points.length,1);
   await h.manager.command({op:'stop',runId:state.runId});
   assert.equal(h.stopped(),1);
 });
+
+for (const [backend, delay] of [['app',1100],['basic',3100]]) {
+  test(`${backend} follow releases input when a recognized frame exceeds its age limit`,vision,async t=>{
+    const h=harness(t,{delay});
+    const state=await h.manager.command({op:'start',id:'phone',mode:'control',backend,config:fixture.config});
+    await until(()=>h.points.length>=2,10000);
+    const status=await h.manager.command({op:'status'});
+    assert.ok(status.analysis.direction,'vision recognized a direction, but capture was too slow to use it');
+    assert.ok(h.points.every(p=>p.points.length===0));
+    assert.equal(status.actions,0);
+    await h.manager.command({op:'stop',runId:state.runId});
+  });
+}
 test('management carries calibration images above 1 MiB while keeping ordinary requests bounded', vision, async t => {
   const { startProfilePilotManagementServer }=require('../dist/main/profilepilot-management-server');
   const { requestProfilePilotManagement }=require('../dist/main/profilepilot-cli');

@@ -53,7 +53,8 @@ public final class MainActivity extends ComponentActivity {
       permissionCount, permissionSummaryAction, permissionHint, reassurance, serviceError;
   private HomeIcon computerGraphic, phoneGraphic, linkGraphic;
   private final SettingRow[] permissions=new SettingRow[3];
-  private SettingRow developer, usb, wifi;
+  private SettingRow developer;
+  private DebugOption wifi, usb;
   private boolean permissionsExpanded, seenConnected;
   private int lastPermissionCount=-1;
   private PhoneHomeState lastState;
@@ -190,14 +191,20 @@ public final class MainActivity extends ComponentActivity {
     permissions[1]=setting(permissionRows,"overlay","悬浮提示","在其他应用上显示控制状态",R.id.home_overlay,
         () -> launchSetting(() -> PhoneSettings.openOverlayPermission(this)));
     permissions[2]=setting(permissionRows,"bell","状态通知","在通知栏随时暂停控制",R.id.home_notifications,this::openNotifications);
+    developer=setting(permissionCard,"phone","开发者选项","USB / Wi-Fi 调试的前置设置",R.id.home_developer,
+        () -> launchSetting(() -> PhoneSettings.openDeveloperOptions(this)));
     permissionHint=text(page,"开启无障碍后，可辅助配置其余设置。",11,MUTED,false); permissionHint.setPadding(dp(3),dp(8),dp(3),0);
 
-    heading(page,"连接设置","USB / Wi-Fi 二选一");
+    heading(page,"连接设置","任选一种即可");
     LinearLayout connectionCard=card(page,17);
-    developer=setting(connectionCard,"phone","开发者选项","USB / Wi-Fi 调试的前置设置",R.id.home_developer,
-        () -> launchSetting(() -> PhoneSettings.openDeveloperOptions(this)));
-    usb=setting(connectionCard,"usb","USB 调试","通过数据线连接电脑",R.id.home_usb,() -> showConnectionSettings(false));
-    wifi=setting(connectionCard,"wifi","Wi-Fi 无线调试","手机与电脑在同一局域网",R.id.home_wifi,() -> showConnectionSettings(true));
+    LinearLayout connectionOptions=row(); connectionCard.addView(connectionOptions,new LinearLayout.LayoutParams(-1,-2));
+    wifi=new DebugOption("wifi","Wi-Fi 无线调试","手机与电脑\n在同一局域网",R.id.home_wifi,() -> showConnectionSettings(true));
+    usb=new DebugOption("usb","USB 调试","通过数据线\n连接电脑",R.id.home_usb,() -> showConnectionSettings(false));
+    connectionOptions.addView(wifi.view,new LinearLayout.LayoutParams(0,-1,1));
+    View connectionDivider=new View(this); connectionDivider.setBackgroundColor(LINE);
+    LinearLayout.LayoutParams dividerParams=new LinearLayout.LayoutParams(dp(1),-1);
+    dividerParams.setMargins(0,dp(14),0,dp(14)); connectionOptions.addView(connectionDivider,dividerParams);
+    connectionOptions.addView(usb.view,new LinearLayout.LayoutParams(0,-1,1));
     TextView connectionHint=text(page,"先开启开发者选项，再任选一种调试方式。",11,MUTED,false); connectionHint.setPadding(dp(3),dp(8),dp(3),0);
     reassurance=text(page,"",12,MUTED,false); reassurance.setGravity(Gravity.CENTER); reassurance.setPadding(0,dp(24),0,dp(8));
     TextView help=button(page,"连接遇到问题？",false,this::showHelp); help.setTextSize(12); help.setTextColor(MUTED); help.setBackground(ripple(BG,10,false));
@@ -248,23 +255,24 @@ public final class MainActivity extends ComponentActivity {
       case "enabled" -> "已开启，但服务没有运行"; case "unknown" -> "暂时无法确认服务状态"; default -> "读取屏幕、点击与输入";
     });
     if (count==3 && lastPermissionCount>=0 && lastPermissionCount!=3) permissionsExpanded=false;
-    lastPermissionCount=count; setText(permissionCount,count==3?"全部已就绪":"还需处理 "+(3-count)+" 项");
-    permissionCount.setTextColor(count==3?GREEN:MUTED); permissionSummary.setVisibility(count==3?View.VISIBLE:View.GONE);
+    lastPermissionCount=count; int pending=3-count+(ready.developerOptions.equals("enabled")?0:1);
+    setText(permissionCount,pending==0?"全部已就绪":"还需处理 "+pending+" 项");
+    permissionCount.setTextColor(pending==0?GREEN:MUTED); permissionSummary.setVisibility(count==3?View.VISIBLE:View.GONE);
     permissionRows.setVisibility(count<3 || permissionsExpanded?View.VISIBLE:View.GONE); permissionHint.setVisibility(count<3?View.VISIBLE:View.GONE);
     setText(permissionSummaryAction,permissionsExpanded?"收起":"查看"); permissionSummary.setContentDescription(permissionsExpanded?"收起已开启的权限":"查看已开启的权限");
     developer.status(ready.debugLabel("developerOptions"),debugStateColor(ready.developerOptions));
     boolean anyDebug=ready.usbDebugging.equals("enabled") || ready.wirelessDebugging.equals("enabled");
-    updateDebugRow(usb,ready.usbConnected,ready.usbDebugging,ready.debugLabel("usbDebugging"),anyDebug);
-    updateDebugRow(wifi,ready.wifiConnected,ready.wirelessDebugging,ready.debugLabel("wirelessDebugging"),anyDebug);
+    updateDebugOption(wifi,ready.wifiConnected,ready.wirelessDebugging,ready.debugLabel("wirelessDebugging"),anyDebug);
+    updateDebugOption(usb,ready.usbConnected,ready.usbDebugging,ready.debugLabel("usbDebugging"),anyDebug);
     setText(reassurance,state.controls()?"手机的控制权始终在你手中。\n锁屏或连接中断时，会停止操作。"
         :ready.computerConnected?(all?"手机准备好了。\n需要使用时，在电脑上开始。":"完成权限准备后，即可由电脑使用。") : "");
     reassurance.setVisibility(ready.computerConnected?View.VISIBLE:View.GONE);
   }
 
-  private void updateDebugRow(SettingRow row,boolean connected,String state,String label,boolean anyDebug) {
+  private void updateDebugOption(DebugOption option,boolean connected,String state,String label,boolean anyDebug) {
     String value=connected?"当前使用":state.equals("enabled")?"已开启":state.equals("disabled")?"未开启":"待确认";
-    row.status(value,connected || state.equals("enabled")?GREEN:state.equals("disabled") && anyDebug?MUTED:AMBER);
-    row.view.setContentDescription(row.name.getText()+"，"+(connected?"当前使用":label)+"，查看设置");
+    option.status(value,connected || state.equals("enabled")?GREEN:state.equals("disabled") && anyDebug?MUTED:AMBER);
+    option.view.setContentDescription(option.name.getText()+"，"+(connected?"当前使用":label)+"，查看设置");
   }
   private String transportLabel(PhoneReadiness ready) {
     if (ready.usbConnected && ready.wifiConnected) return "USB 与 Wi-Fi 连接在线";
@@ -520,6 +528,39 @@ public final class MainActivity extends ComponentActivity {
       arrowParams.setMarginStart(dp(3)); view.addView(arrow,arrowParams); clickable(view,label+"，查看设置",action);
     }
     void status(String label,int color) { setText(value,label); value.setTextColor(color); view.setContentDescription(name.getText()+"，"+label+"，查看设置"); }
+  }
+  private final class DebugOption {
+    final LinearLayout view;
+    final TextView name,value;
+    private int statusColor;
+    DebugOption(String glyph,String label,String hint,int id,Runnable action) {
+      view=column(); view.setId(id); view.setPadding(dp(12),dp(16),dp(12),dp(4));
+      view.setBackground(ripple(Color.WHITE,0,false));
+      LinearLayout top=row(); top.setGravity(Gravity.TOP); view.addView(top);
+      top.addView(icon(glyph,GREEN,26));
+      LinearLayout copy=column(); LinearLayout.LayoutParams copyParams=new LinearLayout.LayoutParams(0,-2,1);
+      copyParams.setMarginStart(dp(10)); top.addView(copy,copyParams);
+      name=text(copy,label,14,INK,true);
+      TextView detail=text(copy,hint,11,MUTED,false); detail.setPadding(0,dp(6),0,0); detail.setMinLines(2);
+      // Equal-height columns keep status badges and actions aligned when either description wraps.
+      view.addView(new View(MainActivity.this),new LinearLayout.LayoutParams(-1,0,1));
+      LinearLayout footer=column(); LinearLayout.LayoutParams footerParams=new LinearLayout.LayoutParams(-1,-2);
+      footerParams.setMarginStart(dp(36)); footerParams.topMargin=dp(8); view.addView(footer,footerParams);
+      value=text(footer,"",12,GREEN,false); value.setPadding(dp(8),dp(5),dp(8),dp(5));
+      value.setLayoutParams(new LinearLayout.LayoutParams(-2,-2));
+      LinearLayout link=row(); link.setMinimumHeight(dp(48)); footer.addView(link);
+      text(link,"查看设置",12,GREEN,false);
+      HomeIcon arrow=icon("chevron",MUTED,13); LinearLayout.LayoutParams arrowParams=new LinearLayout.LayoutParams(dp(13),dp(13));
+      arrowParams.setMarginStart(dp(6)); link.addView(arrow,arrowParams);
+      clickable(view,label+"，查看设置",action);
+    }
+    void status(String label,int color) {
+      setText(value,"●  "+label);
+      if (statusColor!=color) {
+        statusColor=color; value.setTextColor(color);
+        value.setBackground(background(color==GREEN?MINT:color==AMBER?0xfffcf5e9:0xffeff2f0,20,false));
+      }
+    }
   }
   private void setText(TextView view,String value) { if (!value.contentEquals(view.getText())) view.setText(value); }
 

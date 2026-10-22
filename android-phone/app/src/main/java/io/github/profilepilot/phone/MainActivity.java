@@ -358,7 +358,7 @@ public final class MainActivity extends ComponentActivity {
       recovery.enabled(!recovery.enabled()); refreshRecoveryServices(); showRecovery();
     }).setId(R.id.recovery_toggle);
     info(content,"高级恢复授权",recovery.authorized()?"已授权":"未授权",recovery.authorized()?GREEN:AMBER);
-    paragraph(content,"高级恢复可重启权限仍开启但未运行的无障碍服务，并在观察到 Wi-Fi 断开重连后尝试恢复无线调试。每项最多尝试 3 次 / 30 分钟，无持续唤醒。");
+    paragraph(content,"高级恢复可重启权限仍开启但未运行的无障碍服务，在 Wi-Fi 断开重连后恢复无线调试；调试开关已开启但 ADB 服务持续停止时，也会尝试重启调试服务。每项最多尝试 3 次 / 30 分钟，无持续唤醒。");
     paragraph(content,"无障碍权限已关闭、无线调试在网络稳定时被关闭，都会保留关闭状态。若在断网期间手动关闭调试，请同时关闭自动恢复。新网络的系统授权仍需你确认。");
     if (!recovery.authorized()) paragraph(content,"高级恢复需要已授权电脑额外授予系统设置权限；未授权时仍可使用后台服务恢复。");
     TextView advanced=actionButton(content,recovery.advanced()?"关闭高级恢复":"开启高级恢复",false,() -> {

@@ -9,6 +9,19 @@ final class RecoveryPolicy {
     private long networkLostAt = -1, networkReadyAt = -1, missingSince = -1;
     private int attempts;
     private long nextAttempt;
+    private long stoppedAdbSince = -1;
+
+    boolean recoverStoppedAdb(long now, boolean eligible, String state) {
+        // Missing/denied property reads are not evidence of a stopped daemon.
+        if (!eligible || !"stopped".equals(state)) { stoppedAdbSince = -1; return false; }
+        if (stoppedAdbSince < 0 || now < stoppedAdbSince) stoppedAdbSince = now;
+        return now - stoppedAdbSince >= MISSING_SERVICE_MS;
+    }
+    void stoppedAdbAttempt(long now) { stoppedAdbSince = now; }
+
+    static boolean canCompleteWifiRestart(long now, long startedAt, boolean enabled, Boolean debugging) {
+        return enabled && Boolean.FALSE.equals(debugging) && startedAt > 0 && now >= startedAt && now - startedAt < 10_000;
+    }
 
     void networkLost(long now) {
         if (wifiWasEnabled && networkLostAt < 0) {

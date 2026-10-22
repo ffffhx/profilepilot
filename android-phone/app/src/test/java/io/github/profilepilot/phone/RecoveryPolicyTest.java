@@ -4,6 +4,34 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class RecoveryPolicyTest {
+    @Test public void stoppedDaemonNeedsRepeatedEvidenceAndDoesNotTreatUnknownAsFailure() {
+        RecoveryPolicy p = new RecoveryPolicy();
+        assertFalse(p.recoverStoppedAdb(1000, true, "stopped"));
+        assertFalse(p.recoverStoppedAdb(20999, true, "stopped"));
+        assertTrue(p.recoverStoppedAdb(21000, true, "stopped"));
+        p.stoppedAdbAttempt(21000);
+        assertFalse(p.recoverStoppedAdb(22000, true, "stopped"));
+        assertFalse(p.recoverStoppedAdb(42000, true, "unknown"));
+        assertFalse(p.recoverStoppedAdb(43000, true, "stopped"));
+        assertFalse(p.recoverStoppedAdb(64000, true, "restarting"));
+        assertFalse(p.recoverStoppedAdb(65000, true, "running"));
+    }
+    @Test public void manualOffMissingPermissionNetworkLossOrLiveConnectionCancelsDaemonRecovery() {
+        RecoveryPolicy p = new RecoveryPolicy();
+        p.recoverStoppedAdb(1000, true, "stopped");
+        assertFalse(p.recoverStoppedAdb(22000, false, "stopped"));
+        assertFalse(p.recoverStoppedAdb(23000, true, "stopped"));
+        assertTrue(p.recoverStoppedAdb(43000, true, "stopped"));
+    }
+    @Test public void wifiRestartOnlyCompletesItsOwnRecentOffWithCurrentAuthorization() {
+        assertTrue(RecoveryPolicy.canCompleteWifiRestart(1750, 1000, true, false));
+        assertFalse(RecoveryPolicy.canCompleteWifiRestart(1750, 0, true, false));
+        assertFalse(RecoveryPolicy.canCompleteWifiRestart(1750, 1000, false, false));
+        assertFalse(RecoveryPolicy.canCompleteWifiRestart(1750, 1000, true, null));
+        assertFalse(RecoveryPolicy.canCompleteWifiRestart(1750, 1000, true, true));
+        assertFalse(RecoveryPolicy.canCompleteWifiRestart(11000, 1000, true, false));
+        assertFalse(RecoveryPolicy.canCompleteWifiRestart(500, 1000, true, false));
+    }
     private RecoveryPolicy lostWifi() {
         RecoveryPolicy p = new RecoveryPolicy();
         p.observeWifi(0, true, true);

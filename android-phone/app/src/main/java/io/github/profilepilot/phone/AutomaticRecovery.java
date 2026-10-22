@@ -13,6 +13,8 @@ import android.os.SystemClock;
 import android.provider.Settings;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /** Runs only inside the visible foreground connection service; no wake lock or exact alarms. */
 final class AutomaticRecovery implements AutoCloseable {
@@ -24,6 +26,9 @@ final class AutomaticRecovery implements AutoCloseable {
     private final RecoveryPolicy policy = new RecoveryPolicy();
     private final String own;
     private boolean closed, registered, awaitingAccessibility, awaitingWifi;
+    private boolean probingAdb, restartingWifi;
+    private final ExecutorService daemonProbe = Executors.newSingleThreadExecutor();
+    private Set<Network> restartNetworks;
     private final Runnable check = new Runnable() {
         @Override public void run() {
             if (closed) return;
@@ -58,6 +63,7 @@ final class AutomaticRecovery implements AutoCloseable {
             registered = true;
             service.getContentResolver().registerContentObserver(Settings.Global.getUriFor("adb_wifi_enabled"), false, observer);
             service.getContentResolver().registerContentObserver(Settings.Secure.getUriFor(Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES), false, observer);
+            completeWifiRestart();
             main.post(check);
         } catch (RuntimeException unavailable) {
             settings.record("系统限制了自动恢复检测，请打开连接设置检查"); close();
@@ -78,14 +84,14 @@ final class AutomaticRecovery implements AutoCloseable {
         long now = SystemClock.elapsedRealtime();
         boolean authorized = settings.authorized(), connected = !networks.isEmpty();
         Boolean debugging = wifiDebugging();
-        if (awaitingWifi && Boolean.TRUE.equals(debugging)) {
-            awaitingWifi = false; settings.record("无线调试开关已恢复，等待电脑重新发现连接");
+        if (awaitingWifi && service.connection.connected("wifi")) {
+            awaitingWifi = false; settings.record("无线调试已恢复，电脑已重新连接；旧控制会话未恢复");
         }
         if (awaitingAccessibility && PhoneAccessibility.current != null) {
             awaitingAccessibility = false; settings.record("无障碍服务已恢复；旧控制会话保持暂停");
         }
-        policy.observeWifi(now, connected, debugging);
-        if (policy.recoverWifi(now, connected, debugging, authorized)) {
+        if (!restartingWifi) policy.observeWifi(now, connected, debugging);
+        if (!restartingWifi && policy.recoverWifi(now, connected, debugging, authorized)) {
             policy.wifiAttempt(now);
             if (settings.takeAttempt("wifi")) {
                 try {
@@ -95,6 +101,7 @@ final class AutomaticRecovery implements AutoCloseable {
                 } catch (RuntimeException denied) { settings.record("无线调试恢复被系统拒绝，请检查高级授权"); }
             } else settings.record("无线调试恢复次数已达上限，请检查网络后手动开启");
         }
+        inspectAdbDaemon();
         try {
             String enabled = Settings.Secure.getString(service.getContentResolver(), Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
             if (policy.recoverAccessibility(now, RecoveryServiceList.contains(enabled, own), PhoneAccessibility.current != null, authorized)) {
@@ -103,6 +110,66 @@ final class AutomaticRecovery implements AutoCloseable {
                 // Do not overwrite the last useful result on every subsequent tick.
             }
         } catch (RuntimeException denied) { settings.record("无法检查无障碍服务，请在系统设置核对"); }
+    }
+    private boolean canInspectAdb() {
+        return !closed && settings.advanced() && settings.authorized() && settings.paired()
+            && !networks.isEmpty() && Boolean.TRUE.equals(wifiDebugging())
+            && !service.connection.connected() && !service.session.active() && !restartingWifi;
+    }
+    private void inspectAdbDaemon() {
+        if (!canInspectAdb()) {
+            policy.recoverStoppedAdb(SystemClock.elapsedRealtime(), false, "unknown");
+            return;
+        }
+        if (probingAdb) return;
+        probingAdb = true;
+        daemonProbe.execute(() -> {
+            String state = AdbDaemonProbe.read();
+            main.post(() -> {
+                probingAdb = false;
+                if (closed) return;
+                long now = SystemClock.elapsedRealtime();
+                if (policy.recoverStoppedAdb(now, canInspectAdb(), state)) {
+                    policy.stoppedAdbAttempt(now);
+                    if (settings.takeAttempt("wifi")) restartWifi();
+                }
+            });
+        });
+    }
+    @SuppressLint("ApplySharedPref")
+    private void restartWifi() {
+        if (!canInspectAdb()) return;
+        // Journal only this short OFF/ON transaction, never a user's disabled setting.
+        long at = System.currentTimeMillis();
+        if (!settings.prefs.edit().putLong("wifi_restart_at", at).commit()) return;
+        restartNetworks = new HashSet<>(networks);
+        restartingWifi = true;
+        try {
+            if (Settings.Global.putInt(service.getContentResolver(), "adb_wifi_enabled", 0)) {
+                settings.record("无线调试已开启但 ADB 服务持续停止，正在重启调试服务");
+                main.postDelayed(this::completeWifiRestart, 750);
+                return;
+            }
+        } catch (RuntimeException denied) { settings.record("系统拒绝重启无线调试，请手动关闭后重新开启"); }
+        clearWifiRestart();
+    }
+    @SuppressLint("ApplySharedPref")
+    private void clearWifiRestart() {
+        restartingWifi = false; restartNetworks = null;
+        settings.prefs.edit().remove("wifi_restart_at").commit();
+    }
+    private void completeWifiRestart() {
+        long at = settings.prefs.getLong("wifi_restart_at", 0);
+        if (at == 0) return;
+        try {
+            boolean allowed = settings.advanced() && settings.authorized() && settings.paired() && !networks.isEmpty()
+                && (restartNetworks == null || restartNetworks.equals(networks));
+            if (RecoveryPolicy.canCompleteWifiRestart(System.currentTimeMillis(), at, allowed, wifiDebugging())) {
+                awaitingWifi = Settings.Global.putInt(service.getContentResolver(), "adb_wifi_enabled", 1);
+                settings.record(awaitingWifi ? "已请求重启无线调试，等待电脑重新连接；旧控制会话未恢复" : "系统未接受无线调试重启，请手动检查");
+            }
+        } catch (RuntimeException denied) { settings.record("无线调试重启未完成，请在系统设置重新开启"); }
+        finally { clearWifiRestart(); }
     }
     private void rebind(String enabled) {
         if (!settings.advanced() || PhoneAccessibility.current != null || !RecoveryServiceList.contains(enabled, own)) return;
@@ -139,6 +206,8 @@ final class AutomaticRecovery implements AutoCloseable {
     }
     @Override public void close() {
         closed = true; main.removeCallbacksAndMessages(null);
+        daemonProbe.shutdownNow();
+        completeWifiRestart();
         // Roll back only our own short-lived edit, including when recovery is turned off mid-rebind.
         restoreOwnedRebind();
         if (registered) { connectivity.unregisterNetworkCallback(network); registered = false; }

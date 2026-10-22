@@ -38,6 +38,15 @@ const USAGE_EXIT_CODE = 2;
 const SERVER_UNAVAILABLE_EXIT_CODE = 69;
 const COMMAND_FAILED_EXIT_CODE = 1;
 
+function phoneWrapperRequestTimeout(command: ProfilePilotManagementCommand): number {
+  const action = command.action === "phone" && command.method === "wrapper-action"
+    ? (command.params as { action?: { kind?: string; format?: string } } | undefined)?.action : undefined;
+  // One native PNG can spend 15 seconds assembling immutable chunks after sync
+  // and capture. Only this known read receives more time; input and cleanup keep
+  // their existing bound, and neither the transfer TTL nor replay policy changes.
+  return action?.kind === "screenshot" && action.format === "png" ? REQUEST_TIMEOUT_MS : 10_000;
+}
+
 interface ParsedManagementCliCommand {
   command: ProfilePilotManagementCommand;
   json: boolean;
@@ -87,7 +96,7 @@ export async function runProfilePilotCli(
   const phoneAdb = args[0] === "phone" && args[1] === "adb";
   if (args[0] === "adb" || phoneAdb || args[0] === "phone" && args[1] === "wrap") {
     const env = runtime.env || process.env;
-    const request = runtime.request || (command => requestProfilePilotManagement(command, runtime.homeDir || os.homedir(), env, 10_000));
+    const request = runtime.request || (command => requestProfilePilotManagement(command, runtime.homeDir || os.homedir(), env, phoneWrapperRequestTimeout(command)));
     return args[0] === "adb" || phoneAdb ? runAdbCli(args.slice(phoneAdb ? 2 : 1), request, io, env) : runPhoneWrap(args.slice(2), request, io, env);
   }
   if (args[0] === "phone") {
@@ -526,7 +535,7 @@ export async function requestProfilePilotManagement(
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath);
     let buffer = "";
-    let settled = false;
+    let settled = false, connected = false;
     const finish = (error?: Error, response?: ProfilePilotManagementResponse): void => {
       if (settled) return;
       settled = true;
@@ -538,11 +547,13 @@ export async function requestProfilePilotManagement(
     const abort = (): void => finish(Object.assign(new Error("终端连接已中断。"), { name: "AbortError" }));
     signal?.addEventListener("abort", abort, { once: true });
     socket.setEncoding("utf8");
-    socket.setTimeout(timeoutMs, () => finish(Object.assign(new Error("连接 ProfilePilot 管理服务超时。"), { code: "ETIMEDOUT" })));
+    socket.setTimeout(timeoutMs, () => finish(Object.assign(new Error(connected
+      ? "等待 ProfilePilot 管理服务返回结果超时。请先核对操作结果，不要直接重放。"
+      : "连接 ProfilePilot 管理服务超时。"), { code: "ETIMEDOUT" })));
     socket.once("error", (error) => finish(error));
     socket.once("end", () => finish(Object.assign(new Error("ProfilePilot 管理连接已关闭。"), { code: "ECONNRESET" })));
     socket.once("close", () => finish(Object.assign(new Error("ProfilePilot 管理连接已关闭。"), { code: "ECONNRESET" })));
-    socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
+    socket.once("connect", () => { connected = true; socket.write(`${JSON.stringify(request)}\n`); });
     socket.on("data", (chunk: string) => {
       buffer += chunk;
       if (Buffer.byteLength(buffer, "utf8") > maxResponseBytes) {

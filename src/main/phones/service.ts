@@ -29,6 +29,7 @@ import type { ScreenCameraStart, ScreenCameraCommand, ScreenCameraLease } from "
 import { GameFollower } from "./game-follow";
 import { FollowRecovery } from "./follow-recovery";
 export { phoneActionSchema } from "./actions";
+export type PhoneCommandSource = "desktop" | "external";
 
 const sessionSchema = z.object({
   statusDeviceId: z.string().uuid().optional(),
@@ -72,6 +73,8 @@ export class PhonesService {
   private operations = new Set<string>();
   private actions = new Set<string>();
   private screenReads = new Map<string, AbortController>();
+  private captureStarting = new Map<string, number>();
+  private captureSessions = new Map<string, { instanceId: string; sessionId: string; generation: number; backend: "app" | "basic" }>();
   private inspections = new Set<AbortController>();
   private sequence = 0;
   private observations = new Map<string, { instanceId: string; sequence: number; generation: number }>();
@@ -157,10 +160,19 @@ export class PhonesService {
       const identity = device.state?.statusDeviceId || saved?.statusDeviceId || identityByHardware.get(hardwareId);
       if (identity) matched.add(identity);
       const visualFollowActive = [...this.wrappers.values()].some(owner => owner.id === device.id && owner.visualFollow && !owner.closing);
-      return structuredClone({ ...device, visualFollowActive, screenCamera: this.screenCamera.snapshot(device.id), basic: this.basic.state(device.id), hardwareId, cloud: identity ? cloud.find(c => c.cloud?.report?.deviceId === identity)?.cloud : undefined });
+      const basic = this.basic.state(device.id);
+      const taskCaptureActive = !!this.captureStarting.get(device.id) || this.actions.has(device.id);
+      return structuredClone({ ...device, visualFollowActive, taskCaptureActive, screenCamera: this.screenCamera.snapshot(device.id), basic, hardwareId, cloud: identity ? cloud.find(c => c.cloud?.report?.deviceId === identity)?.cloud : undefined });
     });
     for (const group of groupPhoneDevices(devices)) {
       if (group.routes.some(route => route.visualFollowActive)) for (const route of group.routes) route.visualFollowActive = true;
+      const owners = group.routes.flatMap(route => { const owner = this.captureSessions.get(route.id); return owner ? [owner] : []; });
+      const taskCaptureActive = group.routes.some(route => route.taskCaptureActive || route.connection === "device" && owners.some(owner => {
+        const state = owner.backend === "basic" ? route.basic : route.state;
+        return state?.instanceId === owner.instanceId && state.sessionId === owner.sessionId
+          && state.generation >= owner.generation && ["viewing", "controlling", "executing"].includes(state.phase);
+      }));
+      if (taskCaptureActive) for (const route of group.routes) route.taskCaptureActive = true;
     }
     devices.push(...cloud.filter(c => !c.cloud?.report || !matched.has(c.cloud.report.deviceId)));
     return { devices, adbAvailable: this.adbAvailable, error: this.error, computer: this.computer,
@@ -169,6 +181,48 @@ export class PhonesService {
   cloudPair(url?: string) { return this.cloud.pair(url); }
   cloudForget(id: string) { return this.cloud.forget(id); }
   private changed(): void { this.options.onChanged?.(this.snapshot()); }
+  private captureRoutes(id: string): PhoneDevice[] {
+    return groupPhoneDevices(this.snapshot().devices).find(group => group.routes.some(route => route.id === id))?.routes || [];
+  }
+  private cancelScreenReads(id: string): void {
+    for (const routeId of new Set([id, ...this.captureRoutes(id).map(route => route.id)])) this.screenReads.get(routeId)?.abort();
+  }
+  private reserveTaskCapture(id: string): () => void {
+    validateDeviceId(id);
+    this.captureStarting.set(id, (this.captureStarting.get(id) || 0) + 1);
+    this.cancelScreenReads(id); this.changed();
+    return () => {
+      const remaining = (this.captureStarting.get(id) || 1) - 1;
+      if (remaining) this.captureStarting.set(id, remaining); else this.captureStarting.delete(id);
+      this.changed();
+    };
+  }
+  private ownTaskCapture(id: string, state: PhoneSessionState, backend: "app" | "basic"): void {
+    if (!state.sessionId || ["idle", "stopped", "disconnected"].includes(state.phase)) return;
+    this.captureSessions.set(id, { instanceId: state.instanceId, sessionId: state.sessionId, generation: state.generation, backend });
+    this.cancelScreenReads(id); this.changed();
+  }
+  private reconcileCaptureSession(id: string, state: PhoneSessionState): void {
+    const routes = new Set([id, ...this.captureRoutes(id).map(route => route.id)]);
+    for (const [routeId, owner] of this.captureSessions) {
+      if (owner.backend !== "app" || !routes.has(routeId)) continue;
+      if (routeId === id && owner.instanceId !== state.instanceId) this.captureSessions.delete(routeId);
+      else if (owner.instanceId === state.instanceId && state.generation >= owner.generation) {
+        if (state.sessionId !== owner.sessionId || ["idle", "stopped"].includes(state.phase)) this.captureSessions.delete(routeId);
+        else owner.generation = state.generation;
+      }
+    }
+  }
+  private guardPreview(id: string, ownOperation = false): PhoneDevice[] {
+    const routes = this.captureRoutes(id);
+    if (routes.some(route => route.visualFollowActive)) throw new Error("视觉跟随正在采集画面，请在视觉跟随窗口查看；结束后恢复手机预览。");
+    if (routes.some(route => [route.basic, route.state].some(state => state && (state.phase === "paused" || state.phase === "disconnected" && !!state.sessionId))))
+      throw new Error("手机会话已暂停或断开，确认会话状态后再刷新画面。");
+    if (routes.some(route => route.taskCaptureActive)) throw new Error("手机任务正在使用画面，任务结束后恢复预览。");
+    if (routes.some(route => this.actions.has(route.id) || this.operations.has(route.id) && !(ownOperation && route.id === id)))
+      throw new Error("手机正在处理操作，请稍后刷新画面。");
+    return routes;
+  }
   private assertNoBasic(): void {
     if (this.basicStarting || this.basic.active) throw new Error("请先结束免安装控制，再连接 App 或开始 App 会话。");
   }
@@ -183,23 +237,28 @@ export class PhonesService {
   async cameraProbe(id: string) { this.connected(id); return this.screenCamera.probe(id); }
   async cameraStart(input: ScreenCameraStart) { return this.screenCamera.start(input); }
   async cameraCommand(input: ScreenCameraCommand) { return this.screenCamera.command(input); }
-  async basicStart(id: string, mode: "view" | "control", controller: string, task: string): Promise<PhoneDevice> {
+  async basicStart(id: string, mode: "view" | "control", controller: string, task: string, source: PhoneCommandSource = "desktop"): Promise<PhoneDevice> {
     const input = z.object({ mode: z.enum(["view", "control"]), controller: z.string().trim().min(1).max(120), task: z.string().max(500) }).parse({ mode, controller, task });
     if (this.closed || this.basicStarting || this.operations.size || this.actions.size) throw new Error("手机正在处理操作，请稍后再开始免安装会话。");
     this.basicStarting = true;
+    let releaseCapture = () => {};
     try {
+      if (source === "external") releaseCapture = this.reserveTaskCapture(id);
       await this.refresh(); this.connected(id);
       // Treat an unresolved/paused App session as occupied, including aliases.
       if ([...this.devices.values()].some(d => d.state?.sessionId && !["idle", "stopped"].includes(d.state.phase))) throw new Error("请先结束已有的手机 App 会话，再开始免安装控制。");
       if (this.closed) throw new Error("手机服务正在退出。");
+      this.cancelScreenReads(id);
       this.basic.start(id, input.mode, input.controller, input.task);
+      if (source === "external") this.ownTaskCapture(id, this.basic.state(id)!, "basic");
       return this.snapshot().devices.find(device => device.id === id)!;
-    } finally { this.basicStarting = false; }
+    } finally { this.basicStarting = false; releaseCapture(); }
   }
   basicControl(id: string, command: "pause" | "resume" | "stop"): PhoneDevice {
     z.enum(["pause", "resume", "stop"]).parse(command);
     if (command !== "stop") this.connected(id); else this.device(id);
     this.basic.control(id, command);
+    if (command === "stop") this.captureSessions.delete(id);
     return this.snapshot().devices.find(device => device.id === id)!;
   }
   basicSetMode(input: { id: string; sessionId: string; generation: number; mode: "view" | "control" }): PhoneDevice {
@@ -212,9 +271,11 @@ export class PhonesService {
   async basicPerform(input: PhoneActionInput): Promise<PhoneActionResult> {
     const parsed = z.object({ id: z.string(), sessionId: z.string().min(1), generation: z.number().int().nonnegative(), requestId: z.string().uuid(), action: phoneActionSchema }).strict().parse(input);
     if (this.closed) throw new Error("手机服务正在退出。");
-    if (this.actions.has(parsed.id) || this.operations.has(parsed.id)) throw new Error("手机上一项操作尚未结束。");
+    if (this.captureRoutes(parsed.id).some(route => this.actions.has(route.id) || this.operations.has(route.id))) throw new Error("手机上一项操作尚未结束。");
     this.connected(parsed.id);
-    return this.basic.perform(parsed);
+    this.actions.add(parsed.id); this.cancelScreenReads(parsed.id); this.changed();
+    try { return await this.basic.perform(parsed); }
+    finally { this.actions.delete(parsed.id); this.changed(); }
   }
   listEmulators(): Promise<string[]> { return this.emulators.list(); }
   async connectEmulator(name: string): Promise<PhoneDevice> {
@@ -549,6 +610,7 @@ export class PhonesService {
       if (accept) {
         this.observations.set(id, { instanceId: incoming.instanceId, sequence, generation: incoming.generation });
         device.state = response.state; device.confirmedAt = this.now(); device.companion = "ready"; device.error = "";
+        this.reconcileCaptureSession(id, incoming);
         const saved = this.saved[id];
         if (saved && incoming.statusDeviceId && saved.statusDeviceId !== incoming.statusDeviceId) {
           saved.statusDeviceId = incoming.statusDeviceId; this.persist();
@@ -597,8 +659,9 @@ export class PhonesService {
   }
   private async exclusive<T>(id: string, label: string, work: () => Promise<T>): Promise<T> {
     if (this.closed) throw new Error("手机服务正在退出。");
-    if (this.operations.has(id)) throw new Error("此手机正在处理另一项操作。");
+    if (this.captureRoutes(id).some(route => this.operations.has(route.id))) throw new Error("此手机正在处理另一项操作。");
     const device = this.connected(id); this.operations.add(id); device.pending = label; this.changed();
+    this.cancelScreenReads(id);
     try { return await work(); }
     catch (error) { device.error = (error as Error).message; throw error; }
     finally { this.operations.delete(id); device.pending = null; this.changed(); }
@@ -805,7 +868,7 @@ export class PhonesService {
     }
     this.persist(); this.changed();
   }
-  async start(id: string, mode: "view" | "control", controller: string, task: string): Promise<PhoneDevice> {
+  async start(id: string, mode: "view" | "control", controller: string, task: string, source: PhoneCommandSource = "desktop"): Promise<PhoneDevice> {
     this.assertNoBasic();
     const input = z.object({ mode: z.enum(["view", "control"]), controller: z.string().trim().min(1).max(120), task: z.string().trim().max(500) }).parse({ mode, controller, task });
     await this.exclusive(id, "等待手机确认会话…", async () => {
@@ -814,8 +877,9 @@ export class PhonesService {
       const readiness = phoneReadiness({ ...this.device(id), state, companion: "ready" });
       if (!readiness.readyToStart) throw Object.assign(new Error(readiness.checks.filter(c => c.status === "blocked").map(c => c.message).join(" ")),
         { code: "PHONE_NOT_READY", details: readiness });
-      await this.rpc(id, "start", { ...input, instanceId: state.instanceId, generation: state.generation, sessionId: randomUUID(), computer: this.computer });
-    }); return structuredClone(this.device(id));
+      const started = await this.rpc(id, "start", { ...input, instanceId: state.instanceId, generation: state.generation, sessionId: randomUUID(), computer: this.computer });
+      if (source === "external") this.ownTaskCapture(id, started.state, "app");
+    }); return this.snapshot().devices.find(device => device.id === id)!;
   }
   async control(id: string, command: "pause" | "resume" | "stop"): Promise<PhoneDevice> {
     if (command === "resume") this.assertNoBasic();
@@ -824,15 +888,15 @@ export class PhonesService {
     await this.exclusive(id, command === "stop" ? "正在结束控制…" : command === "pause" ? "正在暂停…" : "正在恢复…", async () => {
       const { state } = await this.rpc(id, "sync");
       await this.rpc(id, command, { instanceId: state.instanceId, sessionId: state.sessionId, generation: state.generation });
-    }); return structuredClone(this.device(id));
+    }); return this.snapshot().devices.find(device => device.id === id)!;
   }
   async perform(input: PhoneActionInput): Promise<PhoneActionResult> {
     this.assertNoBasic();
     const { id, sessionId, generation, requestId, action } = z.object({ id: z.string(), sessionId: z.string().min(1).max(100), generation: z.number().int().nonnegative(), requestId: z.string().uuid(), action: phoneActionSchema }).strict().parse(input);
     const device = this.connected(id);
     if (device.companion !== "ready" || this.reconcile.has(id)) throw new Error("手机连接需要重新确认，请等待状态同步后由用户恢复会话。");
-    if (this.closed || this.operations.has(id) || this.actions.has(id)) throw new Error("手机正在处理操作或交接控制权。");
-    this.actions.add(id);
+    if (this.closed || this.captureRoutes(id).some(route => this.operations.has(route.id) || this.actions.has(route.id))) throw new Error("手机正在处理操作或交接控制权。");
+    this.actions.add(id); this.cancelScreenReads(id); this.changed();
     try {
       const { state } = await this.rpc(id, "sync");
       if (state.sessionId !== sessionId || state.generation !== generation) throw new Error("手机会话已改变，请重新读取状态；不要重放输入。");
@@ -847,13 +911,11 @@ export class PhonesService {
   async screen(id: string): Promise<PhoneScreenFrame> {
     const device = this.connected(id);
     if (!this.adb.runBinary) throw new Error("当前连接不支持读取手机画面。");
-    if (this.screenReads.has(id)) throw new Error("正在获取手机画面，请稍候。");
+    if (this.captureRoutes(id).some(route => this.screenReads.has(route.id))) throw new Error("正在获取手机画面，请稍候。");
     const guard = () => {
       if (this.closed || device.connection !== "device" || this.operations.has(id)) throw new Error("手机连接或状态已改变，请稍后重试。");
-      const group = groupPhoneDevices(this.snapshot().devices).find(group => group.routes.some(route => route.id === id));
-      if (group?.routes.some(route => route.visualFollowActive)) throw new Error("视觉跟随正在采集画面，请在视觉跟随窗口查看；结束后恢复手机预览。");
-      if (group?.routes.some(route => [route.basic, route.state].some(state => state && (state.phase === "paused" || state.phase === "disconnected" && !!state.sessionId)))) throw new Error("手机会话已暂停或断开，确认会话状态后再刷新画面。");
-      return JSON.stringify(group?.routes.map(route => [route.id, route.connection, route.basic?.sessionId, route.basic?.generation, route.basic?.phase, route.state?.instanceId, route.state?.sessionId, route.state?.generation, route.state?.phase]));
+      const routes = this.guardPreview(id);
+      return JSON.stringify(routes.map(route => [route.id, route.connection, route.basic?.sessionId, route.basic?.generation, route.basic?.phase, route.state?.instanceId, route.state?.sessionId, route.state?.generation, route.state?.phase]));
     };
     guard();
     const abort = new AbortController(); this.screenReads.set(id, abort);
@@ -870,9 +932,10 @@ export class PhonesService {
     this.assertNoBasic();
     const device = this.connected(id);
     if (device.companion !== "ready" || this.reconcile.has(id)) throw new Error("请先连接手机 App，并确认会话状态。");
-    if (this.actions.has(id)) throw new Error("手机正在执行操作，请稍后刷新画面。");
+    this.guardPreview(id);
     return this.exclusive(id, "正在获取手机画面…", async () => {
       let { state } = await this.rpc(id, "sync");
+      this.guardPreview(id, true);
       if (["paused", "disconnected", "executing"].includes(state.phase)) throw new Error("手机已暂停、断开或正在执行操作，请确认状态后查看画面。");
       let owned: PhoneSessionState | undefined;
       if (["idle", "stopped"].includes(state.phase)) {
@@ -946,13 +1009,16 @@ export class PhonesService {
     });
   }
   async startWrapper(id: string, mode: "view" | "control", controller: string, task: string, backend: "app" | "basic" = "app", recoverTransport = false): Promise<{ lease: string; device: PhoneDevice }> {
-    await this.refresh();
-    let device = backend === "basic" ? await this.basicStart(id, mode, controller, task) : await this.start(id, mode, controller, task);
-    if (backend === "basic") device = { ...device, state: device.basic! };
-    const lease = randomUUID();
-    this.wrappers.set(lease, { id, sessionId: device.state!.sessionId!, instanceId: device.state!.instanceId, seenAt: this.now(), closing: false, backend,
-      ...(recoverTransport && backend === "app" ? { recovery: new FollowRecovery<PhoneDevice>(), recoveryGeneration: device.state!.generation, recoveryMode: mode } : {}) });
-    return { lease, device };
+    const releaseCapture = this.reserveTaskCapture(id);
+    try {
+      await this.refresh();
+      let device = backend === "basic" ? await this.basicStart(id, mode, controller, task, "external") : await this.start(id, mode, controller, task, "external");
+      if (backend === "basic") device = { ...device, state: device.basic! };
+      const lease = randomUUID();
+      this.wrappers.set(lease, { id, sessionId: device.state!.sessionId!, instanceId: device.state!.instanceId, seenAt: this.now(), closing: false, backend,
+        ...(recoverTransport && backend === "app" ? { recovery: new FollowRecovery<PhoneDevice>(), recoveryGeneration: device.state!.generation, recoveryMode: mode } : {}) });
+      return { lease, device };
+    } finally { releaseCapture(); }
   }
   private wrapper(lease: string) {
     z.string().uuid().parse(lease);
@@ -1019,8 +1085,7 @@ export class PhonesService {
   private claimFollowCapture(owner: { id: string; visualFollow?: boolean }): void {
     if (owner.visualFollow) return;
     owner.visualFollow = true;
-    const group = groupPhoneDevices(this.snapshot().devices).find(group => group.routes.some(route => route.id === owner.id));
-    for (const route of group?.routes || []) this.screenReads.get(route.id)?.abort();
+    this.cancelScreenReads(owner.id);
     this.changed();
   }
   private async followLive(lease: string, generation: number, command: object): Promise<unknown> {
@@ -1182,7 +1247,7 @@ export class PhonesService {
     this.basic.close();
     this.cloud.close();
     for (const job of this.installs.values()) job.abort.abort(new Error("ProfilePilot 正在退出，安装已停止。"));
-    this.closed = true; this.wrappers.clear(); clearInterval(this.timer);
+    this.closed = true; this.wrappers.clear(); this.captureStarting.clear(); this.captureSessions.clear(); clearInterval(this.timer);
     this.debugReadings.clear(); this.debugPending.clear();
     if (this.refreshing) await this.refreshing;
     await Promise.allSettled([...this.routes].map(async ([id, route]) => {

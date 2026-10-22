@@ -163,7 +163,7 @@ export function phonePresentation(device: PhoneDevice, now = Date.now()) {
     : permissionsReady ? "连接正常，控制所需权限已就绪。" : "连接正常，正在检测控制权限。";
   return { emulator, subject, displayName, connected, known, directKnown, cloudOnline, cloudSource, unresponsive, permissions, settings, missing, permissionsReady, active, paused, locked, note,
     label: cloudSource ? "状态同步在线 · 控制未连接" : device.transport === "cloud" ? device.cloud?.paired ? "状态同步离线" : "等待手机扫码" : device.connection === "unauthorized" ? `等待${subject}授权` : connected ? `${subject}已连接` : `${subject}未连接`,
-    canPreview: directKnown && permissionsReady && !locked && !device.pending && (idle || active && state?.phase !== "executing"),
+    canPreview: directKnown && permissionsReady && !locked && !device.pending && !device.taskCaptureActive && !device.visualFollowActive && (idle || active && state?.phase !== "executing"),
     canSetup: idle && !device.pending
   };
 }

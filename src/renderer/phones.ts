@@ -232,7 +232,7 @@ function render(): void {
     const hasTask = view.active || view.paused;
     const taskLabel = view.paused ? "任务已暂停" : `${state?.controller || "Agent"}${state?.mode === "view" ? " 正在查看屏幕" : " 正在操作"}`;
     const fallbackError = !status.issue && device.error && !["手机连接已断开。", "ADB 连接离线。"].includes(device.error) ? device.error : "";
-    const previewNote = status.issue ? "手机 App 恢复响应后自动显示画面" : !status.connected ? "连接后自动显示手机画面" : view.paused ? "任务已暂停，继续后可查看画面" : view.locked ? "请先解锁手机，再查看画面" : !view.permissionsReady ? "控制权限就绪后自动显示画面" : previewLoading ? "正在获取手机画面…" : previewError ? "画面获取失败，可点击重试" : "连接后自动显示 · 可手动刷新";
+    const previewNote = status.issue ? "手机 App 恢复响应后自动显示画面" : !status.connected ? "连接后自动显示手机画面" : view.paused ? "任务已暂停，继续后可查看画面" : device.taskCaptureActive || device.visualFollowActive ? "手机任务期间暂停预览，结束后自动恢复" : view.locked ? "请先解锁手机，再查看画面" : !view.permissionsReady ? "控制权限就绪后自动显示画面" : previewLoading ? "正在获取手机画面…" : previewError ? "画面获取失败，可点击重试" : "连接后自动显示 · 可手动刷新";
     content.innerHTML = `${connectionSection(status)}${phoneModeChoices(device, modeDisabledReason)}
       <section class="phone-card phone-control-section phone-enhanced-section" data-connected="${status.connected}" aria-label="控制增强">
       ${enhancement(device, modeDisabledReason)}

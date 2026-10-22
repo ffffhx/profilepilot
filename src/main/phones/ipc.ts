@@ -28,7 +28,7 @@ export function registerPhones(root: string, apkPath: string, poll = true): Phon
     if (!trusted(url, true)) throw new Error("请在手机工作区操作设备。");
     if (method === "follow-command" && (params as { op?: string })?.op === "start") {
       const owner = event.sender;
-      const result = await executePhoneCommand({ action: "phone", method, params }, service) as { runId: string };
+      const result = await executePhoneCommand({ action: "phone", method, params }, service, "desktop") as { runId: string };
       if (followOwner && !followOwner.contents.isDestroyed()) followOwner.contents.removeListener("destroyed", followOwner.stop);
       const stop = () => { void service.gameFollower.command({ op: "stop", runId: result.runId }).catch(() => {}); };
       if (owner.isDestroyed()) stop();
@@ -48,7 +48,7 @@ export function registerPhones(root: string, apkPath: string, poll = true): Phon
         return result;
       } catch (error) { detached(); throw error; }
     }
-    return executePhoneCommand({ action: "phone", method, params }, service);
+    return executePhoneCommand({ action: "phone", method, params }, service, "desktop");
   });
   if (poll) service.startPolling(); return service;
 }

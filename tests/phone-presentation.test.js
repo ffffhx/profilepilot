@@ -9,6 +9,17 @@ test('connected phone presents six live switches and offers an on-demand screens
   assert.equal([...view.permissions, ...view.settings].filter(row => row.status === 'enabled').length, 6);
   assert.equal(view.active, false); assert.equal(view.settings[1].value, '已开启');
 });
+
+test('task capture blocks details preview and clearing ownership restores it', () => {
+  for (const flag of ['taskCaptureActive', 'visualFollowActive']) {
+    const phone = { ...device(), [flag]: true };
+    assert.equal(phonePresentation(phone, 1000).canPreview, false);
+    phone[flag] = false;
+    assert.equal(phonePresentation(phone, 1000).canPreview, true);
+    phone.state.phase = 'paused';
+    assert.equal(phonePresentation(phone, 1000).canPreview, false);
+  }
+});
 test('offline, stale or unavailable companion data never remains green', () => {
   for (const change of [{ connection: 'missing' }, { confirmedAt: null }, { confirmedAt: 0 }, { companion: 'unavailable' }]) {
     const view = phonePresentation({ ...device(), ...change }, 10000);

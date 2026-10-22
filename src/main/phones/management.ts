@@ -1,16 +1,16 @@
 import { z } from "zod";
-import { PhonesService, phoneActionSchema } from "./service";
+import { PhonesService, phoneActionSchema, type PhoneCommandSource } from "./service";
 import { cameraStartSchema, cameraCommandSchema } from "./screen-camera";
 import { followCommandSchema } from "./game-follow";
 export type PhoneManagementCommand = { action: "phone"; method: string; params?: unknown };
-export async function executePhoneCommand(command: PhoneManagementCommand, service: PhonesService): Promise<unknown> {
-  try { return await executeValidatedPhoneCommand(command, service); }
+export async function executePhoneCommand(command: PhoneManagementCommand, service: PhonesService, source: PhoneCommandSource = "external"): Promise<unknown> {
+  try { return await executeValidatedPhoneCommand(command, service, source); }
   catch (error) {
     if (error instanceof z.ZodError) throw Object.assign(new Error(`手机参数无效：${[...new Set(error.issues.map(issue => issue.path.join(".") || "params"))].join("、")}。请按 phone --help 修正，不使用失败结果构造动作。`), { code: "PHONE_INVALID_REQUEST" });
     throw error;
   }
 }
-async function executeValidatedPhoneCommand(command: PhoneManagementCommand, service: PhonesService): Promise<unknown> {
+async function executeValidatedPhoneCommand(command: PhoneManagementCommand, service: PhonesService, source: PhoneCommandSource): Promise<unknown> {
   if (command.method === "accessibility-repair") {
     const p = z.object({ id: z.string().min(1), autoRestore: z.boolean().optional() }).strict().parse(command.params);
     return service.repairAccessibility(p.id, p.autoRestore);
@@ -65,7 +65,7 @@ async function executeValidatedPhoneCommand(command: PhoneManagementCommand, ser
   if (command.method === "inspect") return service.inspect(z.object({ id: z.string() }).strict().parse(command.params).id);
   if (command.method === "basic-start") {
     const p = z.object({ id: z.string(), mode: z.enum(["view", "control"]).default("control"), controller: z.string().default("本机用户"), task: z.string().default("") }).strict().parse(command.params);
-    return service.basicStart(p.id, p.mode, p.controller, p.task);
+    return service.basicStart(p.id, p.mode, p.controller, p.task, source);
   }
   if (command.method === "basic-action") return service.basicPerform(z.object({ id: z.string(), sessionId: z.string(), generation: z.number(), requestId: z.string(), action: phoneActionSchema }).strict().parse(command.params));
   if (command.method === "basic-mode") return service.basicSetMode(z.object({ id: z.string(), sessionId: z.string(), generation: z.number(), mode: z.enum(["view", "control"]) }).strict().parse(command.params));
@@ -110,7 +110,7 @@ async function executeValidatedPhoneCommand(command: PhoneManagementCommand, ser
   }
   if (method === "action") return service.perform(z.object({ id: z.string(), sessionId: z.string(), generation: z.number(), requestId: z.string(), action: phoneActionSchema }).strict().parse(command.params));
   if (method === "rename") { const input = z.object({ id: z.string(), name: z.string() }).strict().parse(command.params); await service.rename(input.id, input.name); return service.snapshot(); }
-  if (method === "start") { const input = z.object({ id: z.string(), mode: z.enum(["view", "control"]).default("control"), controller: z.string().default("本机用户"), task: z.string().default("") }).strict().parse(command.params); return service.start(input.id, input.mode, input.controller, input.task); }
+  if (method === "start") { const input = z.object({ id: z.string(), mode: z.enum(["view", "control"]).default("control"), controller: z.string().default("本机用户"), task: z.string().default("") }).strict().parse(command.params); return service.start(input.id, input.mode, input.controller, input.task, source); }
   const { id } = z.object({ id: z.string() }).strict().parse(command.params);
   if (method === "preview") return service.preview(id);
   if (method === "pause" || method === "resume" || method === "stop") return service.control(id, method);

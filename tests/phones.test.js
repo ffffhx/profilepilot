@@ -8,6 +8,7 @@ const { loadCli } = require('./cli-test-build.cjs');
 const { PhonesService } = loadCli('src/main/phones/service.ts');
 const { parseAdbDevices, deviceShell, validateDeviceId } = loadCli('src/main/phones/adb.ts');
 const { runPhoneCli } = loadCli('src/main/phones/cli.ts');
+const { executePhoneCommand } = loadCli('src/main/phones/management.ts');
 
 function harness(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pp-phone-'));
@@ -393,22 +394,25 @@ test('a newer poll cached during follow capture cannot reject the next touch aft
   await h.service.stopWrapper(owner.lease);
 });
 
-test('starting visual follow aborts a pending capture on another physical alias before its first RPC', async t => {
+test('starting any wrapper aborts a pending capture on another physical alias before its first RPC', async t => {
   const h = harness(t); await h.service.refresh();
-  const owner = await h.service.startWrapper(h.id, 'control', 'Codex', 'follow');
   const primary = h.service.devices.get(h.id), alias = '192.168.0.2:40000';
   primary.hardwareId = 'physical-phone';
   h.service.devices.set(alias, { ...primary, id: alias, transport: 'wifi', companion: 'unknown' });
+  h.deviceOutput += `\n${alias} device model:Test_Phone`;
   let entered;
   let aborted = false;
   const started = new Promise(resolve => entered = resolve);
   h.service.adb.runBinary = async (_, __, signal) => new Promise((resolve, reject) => {
     signal.addEventListener('abort', () => { aborted = true; reject(Error('preview capture aborted')); }, { once: true }); entered();
   });
-  h.hook = method => { if (method === 'follow') assert.equal(aborted, true, 'cancel full capture before probing follow'); };
+  h.hook = method => { if (method === 'start' || method === 'follow') assert.equal(aborted, true, 'cancel full capture before starting the task'); };
   const capture = h.service.screen(alias);
   const rejected = assert.rejects(capture, /preview capture aborted/);
   await started;
+  const owner = await h.service.startWrapper(h.id, 'control', 'Codex', 'follow');
+  assert.ok(h.service.snapshot().devices.every(device => device.taskCaptureActive));
+  await assert.rejects(h.service.screen(alias), /手机任务正在使用/);
   await h.service.followLive(owner.lease, h.state.generation, { op: 'probe' });
   await rejected;
   assert.equal(h.service.snapshot().devices[0].state.phase, 'controlling');
@@ -416,6 +420,115 @@ test('starting visual follow aborts a pending capture on another physical alias 
   await assert.rejects(h.service.screen(alias), /视觉跟随正在采集/);
   await h.service.stopWrapper(owner.lease);
   assert.ok(h.service.snapshot().devices.every(device => !device.visualFollowActive));
+  assert.ok(h.service.snapshot().devices.every(device => !device.taskCaptureActive));
+});
+
+test('ordinary external wrappers reserve capture without activating visual follow and release it on stop', async t => {
+  const h = harness(t); await h.service.refresh();
+  let captures = 0;
+  h.service.adb.runBinary = async () => { captures++; throw Error('desktop preview available'); };
+  const owner = await h.service.startWrapper(h.id, 'view', '本机用户', 'ordinary PNG script');
+  assert.equal(owner.device.taskCaptureActive, true, 'the start response includes the same ownership as list');
+  const active = h.service.snapshot().devices[0];
+  assert.equal(active.taskCaptureActive, true); assert.equal(active.visualFollowActive, false);
+  await assert.rejects(h.service.screen(h.id), /手机任务正在使用/);
+  const before = h.calls.length;
+  await assert.rejects(h.service.preview(h.id), /手机任务正在使用/);
+  assert.equal(h.calls.length, before, 'drawer must not submit another screenshot RPC');
+  assert.equal(captures, 0);
+  await h.service.performWrapper(owner.lease, h.state.generation, {kind:'screenshot'}, randomUUID());
+  await h.service.stopWrapper(owner.lease);
+  assert.equal(h.service.snapshot().devices[0].taskCaptureActive, false);
+  await assert.rejects(h.service.screen(h.id), /desktop preview available/);
+  assert.equal(captures, 1);
+});
+
+test('management caller identity owns capture; controller text cannot impersonate desktop ownership', async t => {
+  const h = harness(t); await h.service.refresh();
+  h.service.adb.runBinary = async () => { throw Error('desktop preview available'); };
+  const command = {action:'phone', method:'start', params:{id:h.id,mode:'view',controller:'本机用户',task:'manual CLI'}};
+  const started = await executePhoneCommand(command,h.service);
+  assert.equal(started.taskCaptureActive,true);
+  assert.equal(h.service.snapshot().devices[0].taskCaptureActive,true);
+  await assert.rejects(h.service.screen(h.id),/手机任务正在使用/);
+  await executePhoneCommand({action:'phone',method:'pause',params:{id:h.id}},h.service);
+  assert.equal(h.service.snapshot().devices[0].taskCaptureActive,false,'paused owners are not active capture leases');
+  await assert.rejects(h.service.screen(h.id),/暂停/);
+  const resumed = await executePhoneCommand({action:'phone',method:'resume',params:{id:h.id}},h.service);
+  assert.equal(resumed.taskCaptureActive,true,'explicit resume restores the same external capture ownership');
+  await assert.rejects(h.service.screen(h.id),/手机任务正在使用/);
+  const stopped = await executePhoneCommand({action:'phone',method:'stop',params:{id:h.id}},h.service);
+  assert.equal(stopped.taskCaptureActive,false);
+  assert.equal(h.service.snapshot().devices[0].taskCaptureActive,false);
+  await executePhoneCommand({...command,params:{...command.params,controller:'Codex'}},h.service,'desktop');
+  assert.equal(h.service.snapshot().devices[0].taskCaptureActive,false);
+  await assert.rejects(h.service.screen(h.id),/desktop preview available/);
+  await assert.rejects(executePhoneCommand({...command,params:{...command.params,source:'desktop'}},h.service),/手机参数无效/);
+});
+
+test('external basic sessions suspend inspector capture but desktop basic sessions retain their previews', async t => {
+  const h = harness(t); await h.service.refresh();
+  h.service.adb.runBinary = async () => { throw Error('desktop preview available'); };
+  const command={action:'phone',method:'basic-start',params:{id:h.id,mode:'control',controller:'本机用户',task:'basic CLI'}};
+  await executePhoneCommand(command,h.service);
+  assert.equal(h.service.snapshot().devices[0].taskCaptureActive,true);
+  await assert.rejects(h.service.screen(h.id),/手机任务正在使用/);
+  h.service.basicControl(h.id,'stop');
+  assert.equal(h.service.snapshot().devices[0].taskCaptureActive,false);
+  await executePhoneCommand(command,h.service,'desktop');
+  assert.equal(h.service.snapshot().devices[0].taskCaptureActive,false);
+  await assert.rejects(h.service.screen(h.id),/desktop preview available/);
+});
+
+test('an action in a desktop session cancels alias capture and only blocks preview until the action finishes', async t => {
+  const h = harness(t); await h.service.refresh();
+  await executePhoneCommand({action:'phone',method:'start',params:{id:h.id,mode:'control'}},h.service,'desktop');
+  const primary=h.service.devices.get(h.id),alias='192.168.0.2:40000';primary.hardwareId='same-phone';
+  h.service.devices.set(alias,{...primary,id:alias,transport:'wifi',companion:'unknown'});
+  let captureEntered,actionEntered,releaseAction,aborted=false;
+  const capturing=new Promise(resolve=>captureEntered=resolve),acting=new Promise(resolve=>actionEntered=resolve);
+  h.service.adb.runBinary=async(_args,_timeout,signal)=>new Promise((_resolve,reject)=>{
+    signal.addEventListener('abort',()=>{aborted=true;reject(Error('capture cancelled by action'));},{once:true});captureEntered();
+  });
+  const pendingCapture=h.service.screen(alias),captureRejected=assert.rejects(pendingCapture,/capture cancelled by action/);
+  await capturing;
+  h.hook=(method)=>{if(method==='action'){
+    assert.equal(aborted,true);actionEntered();return new Promise(resolve=>releaseAction=()=>resolve({ok:true,state:structuredClone(h.state),result:{accepted:true}}));
+  }};
+  const action=executePhoneCommand({action:'phone',method:'action',params:{id:h.id,sessionId:h.state.sessionId,generation:h.state.generation,requestId:randomUUID(),action:{kind:'screenshot'}}},h.service);
+  await acting;await captureRejected;
+  assert.ok(h.service.snapshot().devices.every(device=>device.taskCaptureActive));
+  await assert.rejects(h.service.screen(alias),/手机任务正在使用/);
+  await assert.rejects(h.service.preview(h.id),/手机任务正在使用/);
+  releaseAction();await action;
+  assert.ok(h.service.snapshot().devices.every(device=>!device.taskCaptureActive));
+  h.service.adb.runBinary=async()=>{throw Error('desktop preview available');};
+  await assert.rejects(h.service.screen(alias),/desktop preview available/);
+});
+
+test('capture ownership cannot leak across a replaced session or different physical devices', async t => {
+  const h=harness(t);await h.service.refresh();
+  await executePhoneCommand({action:'phone',method:'start',params:{id:h.id,mode:'view'}},h.service);
+  const primary=h.service.devices.get(h.id);primary.hardwareId='owned-phone';
+  h.service.devices.set('OTHER',{...primary,id:'OTHER',hardwareId:'different-phone'});
+  assert.equal(h.service.snapshot().devices.find(d=>d.id==='OTHER').taskCaptureActive,false);
+  Object.assign(h.state,{sessionId:'replacement-desktop',generation:h.state.generation+1});await h.service.refresh();
+  assert.equal(h.service.snapshot().devices.find(d=>d.id===h.id).taskCaptureActive,false);
+});
+
+test('failed wrapper and invalid basic starts release capture reservations for subsequent desktop use', async t => {
+  const h = harness(t); await h.service.refresh();
+  h.hook = method => { if (method === 'start') throw Error('start rejected'); };
+  await assert.rejects(h.service.startWrapper(h.id, 'view', 'Agent', 'task'), /start rejected/);
+  assert.equal(h.service.snapshot().devices[0].taskCaptureActive, false);
+  assert.equal(h.service.captureStarting.size, 0);
+  h.hook = undefined;
+  await h.service.refresh();
+  await assert.rejects(executePhoneCommand({ action: 'phone', method: 'basic-start', params: { id: 'invalid device id' } }, h.service));
+  assert.equal(h.service.captureStarting.size, 0);
+  const next = await executePhoneCommand({ action: 'phone', method: 'basic-start', params: { id: h.id } }, h.service, 'desktop');
+  assert.equal(next.taskCaptureActive, false);
+  assert.equal(next.basic.phase, 'controlling');
 });
 
 test('a newer heartbeat never hides an uncertain input result', async t => {

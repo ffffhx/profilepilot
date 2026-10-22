@@ -40,6 +40,8 @@ export interface PhoneDevice {
   screenCamera?: ScreenCameraState;
   /** An active visual-follow lease owns capture; sidebar previews must wait. */
   visualFollowActive?: boolean;
+  /** A host-owned task or action is using this physical phone's capture path. */
+  taskCaptureActive?: boolean;
   /** Read-only package detection on an authorized debug transport. */
   appInstallation?: { status: "installed" | "missing" | "unknown"; checkedAt: number };
   /** Explicit desktop-owned session; does not imply companion permissions. */

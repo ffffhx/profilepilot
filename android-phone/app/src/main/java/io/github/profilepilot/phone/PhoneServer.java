@@ -39,6 +39,7 @@ final class PhoneServer implements Closeable {
                 if (name.equals("content-length")) { if (length != -1) throw new IOException("Duplicate length"); length = Integer.parseInt(value); }
                 if (name.equals("transfer-encoding")) throw new IOException("Chunked requests unsupported");
             }
+            timing.mark("headersRead");
             JSONObject response;
             if (!MessageDigest.isEqual(("Bearer " + token).getBytes(StandardCharsets.UTF_8), authorization.getBytes(StandardCharsets.UTF_8))) {
                 response = new JSONObject().put("ok", false).put("code", "PAIRING_REQUIRED").put("error", "请在手机 App 中确认电脑配对");
@@ -46,6 +47,7 @@ final class PhoneServer implements Closeable {
                 if (!request.matches("POST /[a-z][a-z-]{0,63} HTTP/1\\.[01]") || length < 0 || length > 32768) throw new IOException("Invalid request");
                 byte[] bytes = new byte[length]; int offset = 0;
                 while (offset < length) { int count = input.read(bytes, offset, length - offset); if (count < 0) throw new IOException("Incomplete body"); offset += count; }
+                timing.mark("bodyRead");
                 String method = request.split(" ")[1].substring(1);
                 JSONObject body = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
                 timing.operation(method, body.optString("op", "")); timing.mark("read");

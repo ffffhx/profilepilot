@@ -4,6 +4,7 @@ import path from "node:path";
 import http from "node:http";
 import { performance } from "node:perf_hooks";
 import type { PhoneDevice } from "../../shared/phones";
+import type { PhoneRequestTiming } from "../../shared/game-follow";
 import { isPhoneRead } from "./actions";
 import { androidSdkRoots } from "./android-paths";
 import { spawnAdb, type AdbProcess, type AdbProcessOptions } from "./adb-process";
@@ -82,20 +83,60 @@ export function parseAdbDevices(output: string): PhoneDevice[] {
     return [{ id: match[1], transportId: match[3]?.match(/(?:^|\s)transport_id:(\d+)/)?.[1], name: model, model, transport: match[1].startsWith("emulator-") ? "emulator" : /:|_adb-tls/.test(match[1]) ? "wifi" : "usb", connection: match[2] as PhoneDevice["connection"], companion: "unknown", state: null, confirmedAt: null, pending: null, error: "" }];
   });
 }
+const requestTimings: PhoneRequestTiming[] = [];
+/** Last twelve completed requests only. Never retains routes, credentials, bodies or error text. */
+export function phoneRequestTimings(since: number): PhoneRequestTiming[] {
+  return requestTimings.filter(value => value.at >= since).map(value => ({ ...value }));
+}
+function timingOperation(method: string, body: unknown): PhoneRequestTiming["operation"] {
+  if (method === "sync") return "sync";
+  const op = body && typeof body === "object" ? (body as { op?: unknown }).op : undefined;
+  if (method === "follow") {
+    if (op === "frame") return "follow-frame";
+    if (op === "touch") return "follow-touch";
+    if (op === "probe") return "follow-probe";
+  }
+  return "other";
+}
 export function phoneRequest(port: number, token: string, method: string, body: unknown = {}): Promise<unknown> {
   return new Promise((resolve, reject) => {
+    const began = performance.now();
+    const timing: PhoneRequestTiming = { at: Date.now(), operation: timingOperation(method, body), totalMs: 0, responseBytes: 0, outcome: "error" };
+    const elapsed = () => Math.round(performance.now() - began);
+    let recorded = false;
+    const finish = (outcome: PhoneRequestTiming["outcome"]) => {
+      if (recorded) return;
+      recorded = true; timing.totalMs = elapsed(); timing.outcome = outcome;
+      requestTimings.push({ ...timing });
+      if (requestTimings.length > 12) requestTimings.shift();
+    };
+    const fail = (error: Error) => { finish("error"); reject(error); };
     const payload = JSON.stringify(body);
     const request = http.request({ hostname: "127.0.0.1", port, method: "POST", path: `/${method}`, agent: false, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) } }, response => {
+      timing.headersMs = elapsed();
       const chunks: Buffer[] = []; let size = 0;
-      response.on("data", chunk => { size += chunk.length; if (size > 8 * 1024 * 1024) request.destroy(new Error("手机响应超过大小限制。")); else chunks.push(chunk); });
-      response.on("error", reject);
-      response.on("end", () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf8"))); } catch { reject(new Error("手机返回了无效响应。")); } });
+      response.on("data", chunk => {
+        timing.firstDataMs ??= elapsed(); size += chunk.length; timing.responseBytes = size;
+        if (size > 8 * 1024 * 1024) request.destroy(new Error("手机响应超过大小限制。")); else chunks.push(chunk);
+      });
+      response.on("error", fail);
+      response.on("end", () => {
+        timing.endMs = elapsed();
+        try { const value = JSON.parse(Buffer.concat(chunks).toString("utf8")); finish("complete"); resolve(value); }
+        catch { fail(new Error("手机返回了无效响应。")); }
+      });
     });
+    request.once("socket", socket => {
+      timing.socketMs = elapsed();
+      if (socket.connecting) socket.once("connect", () => { timing.connectedMs = elapsed(); });
+      else timing.connectedMs = elapsed();
+    });
+    request.once("finish", () => { timing.sentMs = elapsed(); });
     const action = (body as { action?: { kind?: string } } | null)?.action;
     const timeoutMessage = method === "action" && !isPhoneRead(action?.kind || "")
       ? "手机没有返回这次操作的结果。请先查看手机，确认点击或输入是否已生效，再决定是否重试。"
       : "手机 App 超过 7 秒没有回复。请解锁手机并打开 ProfilePilot，再检查连接是否恢复。";
     request.setTimeout(7000, () => request.destroy(new Error(timeoutMessage)));
-    request.on("error", reject); request.end(payload);
+    request.on("error", fail); request.end(payload);
   });
 }

@@ -6,7 +6,7 @@ import { monitorEventLoopDelay, performance, type IntervalHistogram } from "node
 import { z } from "zod";
 import type { FollowAnalysis, FollowCommand, FollowFrame, FollowRuntime, FollowStatus, GameFollowConfig } from "../../shared/game-follow";
 import type { PhoneDevice } from "../../shared/phones";
-import { adbLaunchDelays } from "./adb";
+import { adbLaunchDelays, phoneRequestTimings } from "./adb";
 
 const unit = z.number().finite().min(0).max(1);
 const image = z.string().min(16).max(4_000_000).regex(/^[A-Za-z0-9+/]*={0,2}$/);
@@ -252,7 +252,8 @@ export class GameFollower {
   private sampleHostTimings(run: Run) {
     this.value.timings = { ...this.value.timings,
       eventLoopMaxDelayMs: Math.round((run.eventLoop?.max || 0) / 1_000_000),
-      slowAdbStarts: adbLaunchDelays(run.beganAt ?? Date.now()) };
+      slowAdbStarts: adbLaunchDelays(run.beganAt ?? Date.now()),
+      httpRequests: phoneRequestTimings(run.beganAt ?? Date.now()) };
   }
   private async loop(run: Run, config: GameFollowConfig, mode: "observe" | "control", backend: "app" | "basic") {
     const began = Date.now();

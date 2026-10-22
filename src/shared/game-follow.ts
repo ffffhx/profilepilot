@@ -31,6 +31,13 @@ export interface FollowAnalysis {
   distance?: number;
 }
 export interface FollowFrame { mime: string; base64: string; width: number; height: number; }
+/** Host HTTP events, in milliseconds from request start. Sent means locally flushed, not phone receipt. */
+export interface PhoneRequestTiming {
+  at: number;
+  operation: "sync" | "follow-frame" | "follow-touch" | "follow-probe" | "other";
+  socketMs?: number; connectedMs?: number; sentMs?: number; headersMs?: number; firstDataMs?: number; endMs?: number;
+  totalMs: number; responseBytes: number; outcome: "complete" | "error";
+}
 export interface FollowStatus {
   running: boolean;
   runId?: string;
@@ -46,6 +53,7 @@ export interface FollowStatus {
     captureMs?: number; analysisMs?: number; inputMs?: number; heartbeatMs?: number; heartbeatGapMs?: number;
     heartbeatTimerLagMs?: number; maxHeartbeatTimerLagMs?: number; eventLoopMaxDelayMs?: number;
     slowAdbStarts?: { at: number; operation: string; resolveMs: number; spawnMs: number }[];
+    httpRequests?: PhoneRequestTiming[];
   };
   analysis?: FollowAnalysis;
   frame?: FollowFrame;

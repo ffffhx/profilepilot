@@ -66,3 +66,11 @@ node scripts/preview-game-follow.mjs
 测试覆盖真实像素匹配、连续帧确认、完整绕墙闭环、目标丢失与歧义、卡住释放、会话取消，以及桌面校准/演示/保存流程。界面测试中的手机 I/O 是模拟的；独立预览运行实际桌面 App，使用单独数据目录并关闭设备轮询。
 
 当前实现是基础视觉跟随，不包含自动放技能、治疗、逃跑或战斗决策。真实游戏中的成功率、持续触控兼容性和方向参数仍需连接设备验证。Windows 上已执行本地构建和界面测试；macOS 路径及进程启动方式已适配，但尚未在 macOS 真机运行。
+
+### Android 持续触控回归
+
+Android 的续接手势若只有不变的触点、没有按下、移动或抬起事件，会被判为失败。保持摇杆方向时应保留已经按下的触点，等方向变化再续接；本地仍每 80 ms 检查会话授权和指令有效期，到期或停止时提交抬起。坐标统一取整，避免亚像素变化在 Android 内部取整后变成空手势。对应系统行为见 [Android 13 MotionEventInjector](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/android13-release/services/accessibility/java/com/android/server/accessibility/MotionEventInjector.java)。
+
+`FollowTouchTest` 使用开发版的本地空白测试页面，检查持续按住、转向、主动释放、指令过期与撤销授权。先运行 `node scripts/build-phone.mjs --instrumentation`，安装开发版和测试 APK，再由测试宿主执行该测试类。测试需要已授权且实际运行的无障碍服务，不会修改系统权限。Instrumentation 会重启配套进程，测试宿主必须恢复连接；不要把受管命令因 App 重启而断开误报为测试成功。本次经用户明确授权使用 ADB 等待 instrumentation 完整结果，并通过 `ppilot phone connect` 和 `accessibility-repair` 恢复服务；不能因此为其他任务推断原生 ADB 授权。
+
+2026-10-22 真我 GT Neo5 SE 真机 `FollowTouchTest` 已通过：保持按下后继续移动、显式松手、TTL 到期松手和授权失效松手均符合预期。测试使用独立测试页面；它验证触控链路，不代表整局游戏的图像识别和路线跟随质量已通过验收。

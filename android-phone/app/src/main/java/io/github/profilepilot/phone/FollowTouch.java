@@ -19,6 +19,7 @@ final class FollowTouch {
     private record Held(GestureDescription.StrokeDescription stroke, float x, float y) { }
     private final AccessibilityService service;
     private final Handler main = new Handler(Looper.getMainLooper());
+    private final Runnable advance = this::step;
     private final Map<Integer, Held> held = new LinkedHashMap<>();
     private Map<Integer, Point> desired = new LinkedHashMap<>();
     private BooleanSupplier authorized = () -> false;
@@ -48,13 +49,28 @@ final class FollowTouch {
     private static float coordinate(JSONObject p, String key, int limit) throws Exception {
         double value = p.getDouble(key);
         if (!Double.isFinite(value) || value < 0 || value >= limit) throw new IllegalArgumentException("触点超出屏幕");
-        return (float) value;
+        // Android rounds gesture coordinates to pixels. Keep our held position
+        // in the same space so a subpixel update cannot become an empty gesture.
+        return Math.min(limit - 1, Math.round((float) value));
     }
     void release() { desired.clear(); expires = 0; if (!inFlight) step(); }
     boolean active() { return inFlight || !held.isEmpty() || !desired.isEmpty(); }
     private void step() {
+        main.removeCallbacks(advance);
         if (!authorized.getAsBoolean() || SystemClock.uptimeMillis() >= expires) desired.clear();
         if (desired.isEmpty() && held.isEmpty()) return;
+        boolean changed = !held.keySet().equals(desired.keySet());
+        for (Map.Entry<Integer, Held> entry : held.entrySet()) {
+            Point point = desired.get(entry.getKey());
+            if (point != null && (point.x != entry.getValue().x || point.y != entry.getValue().y)) changed = true;
+        }
+        if (!changed) {
+            // A continued pointer stays down between gestures. A stationary
+            // continuation has no DOWN, MOVE or UP event, so Android rejects it.
+            // Keep the previous stroke and still check authorization/TTL often.
+            main.postDelayed(advance, 80);
+            return;
+        }
         GestureDescription.Builder builder = new GestureDescription.Builder();
         Map<Integer, Held> next = new LinkedHashMap<>();
         for (Map.Entry<Integer, Held> entry : held.entrySet()) {

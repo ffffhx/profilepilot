@@ -23,6 +23,15 @@ export interface GameFollowConfig {
     ring: { hueMin: number; hueMax: number; saturationMin: number; valueMin: number; radiusPixels: number };
     alive: { portraitTemplate: string; portraitRegion: FollowRect; healthBarRegion: FollowRect };
   };
+  /** Experimental camera projection; calibrated native pixels for this hero/layout. */
+  cameraAssist?: {
+    referenceWidth: number; referenceHeight: number;
+    targetLabel: string; healthBarTemplate: string;
+    healthBar: { width: number; height: number; offsetX: number; offsetY: number };
+    region: FollowRect;
+    matrix: [[number, number], [number, number], [number, number]];
+    anchorBounds: FollowRect;
+  };
 }
 export interface FollowDetection extends FollowPoint { confidence: number; }
 export interface FollowAnalysis {
@@ -35,7 +44,7 @@ export interface FollowAnalysis {
   elapsedMs: number;
   source?: "minimap" | "labels";
   selfSource?: "template" | "marker";
-  targetSource?: "template" | "partial" | "labels";
+  targetSource?: "template" | "partial" | "labels" | "camera";
   distance?: number;
 }
 export interface FollowFrame {
@@ -44,6 +53,9 @@ export interface FollowFrame {
   width: number; height: number;
   /** Integer native-pixel bounds of the encoded image; absent means a full frame. */
   region?: FollowRect;
+  /** Android uptime, attached to these exact pixels; never a host timestamp. */
+  cameraProof?: { version: 1; epoch: number; sequence: number; x: number; y: number;
+    heldSinceUptimeMs: number; capturedAtUptimeMs: number; expiresAtUptimeMs: number };
 }
 /** Host HTTP events, in milliseconds from request start. Sent means locally flushed, not phone receipt. */
 export interface PhoneRequestTiming {
@@ -77,6 +89,7 @@ export interface FollowStatus {
 export interface FollowRuntime { available: boolean; python: string; version: string; error: string; }
 export type FollowCommand =
   | { op: "runtime" | "setup" | "status" }
+  | { op: "camera-sample"; id: string; x: number; y: number; outputDir: string }
   | { op: "load" | "save"; config?: GameFollowConfig }
   | { op: "analyze"; config: GameFollowConfig; frame: FollowFrame }
   | { op: "start"; id: string; mode: "observe" | "control"; backend?: "app" | "basic"; recoverTransport?: boolean; config: GameFollowConfig }

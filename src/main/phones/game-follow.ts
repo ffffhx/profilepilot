@@ -7,7 +7,9 @@ import { z } from "zod";
 import type { FollowAnalysis, FollowCommand, FollowFrame, FollowRuntime, FollowStatus, GameFollowConfig } from "../../shared/game-follow";
 import type { PhoneDevice } from "../../shared/phones";
 import { adbLaunchDelays, phoneRequestTimings } from "./adb";
-import { captureReadyAt } from "./screenshot-transfer";
+import { cameraProofSchema, captureReadyAt } from "./screenshot-transfer";
+import { GameFollowCamera } from "./game-follow-camera";
+import { CameraSampler, cameraSampleCommandSchema } from "./camera-sample";
 
 const unit = z.number().finite().min(0).max(1);
 const image = z.string().min(16).max(4_000_000).regex(/^[A-Za-z0-9+/]*={0,2}$/);
@@ -37,17 +39,34 @@ export const gameFollowConfigSchema = z.object({
       saturationMin: z.number().int().min(1).max(255), valueMin: z.number().int().min(1).max(255),
       radiusPixels: z.number().finite().min(5).max(100) }).strict().refine(r => r.hueMin <= r.hueMax, "颜色范围无效"),
     alive: z.object({ portraitTemplate: image.max(256_000), portraitRegion: hudRect, healthBarRegion: hudRect }).strict()
+  }).strict().optional(),
+  cameraAssist: z.object({
+    referenceWidth: z.number().int().min(100).max(5000), referenceHeight: z.number().int().min(100).max(5000),
+    targetLabel: image.max(256_000), healthBarTemplate: image.max(256_000),
+    healthBar: z.object({ width: z.number().int().min(20).max(500), height: z.number().int().min(8).max(80),
+      offsetX: z.number().finite().min(-500).max(500), offsetY: z.number().finite().min(-100).max(200) }).strict(),
+    region: rect,
+    matrix: z.tuple([z.tuple([z.number().finite().min(-10000).max(10000), z.number().finite().min(-10000).max(10000)]),
+      z.tuple([z.number().finite().min(-10000).max(10000), z.number().finite().min(-10000).max(10000)]),
+      z.tuple([z.number().finite().min(-10000).max(10000), z.number().finite().min(-10000).max(10000)])]),
+    anchorBounds: z.object({ x: z.number().finite().nonnegative(), y: z.number().finite().nonnegative(),
+      width: z.number().finite().positive(), height: z.number().finite().positive() }).strict()
   }).strict().optional()
 }).strict().refine(c => c.width * c.height <= 8_000_000, "画面过大")
+  .refine(c => !c.cameraAssist || c.cameraAssist.referenceWidth === c.width && c.cameraAssist.referenceHeight === c.height
+    && c.cameraAssist.anchorBounds.x + c.cameraAssist.anchorBounds.width <= c.width
+    && c.cameraAssist.anchorBounds.y + c.cameraAssist.anchorBounds.height <= c.height, "镜头校准尺寸或有效范围不匹配")
   .refine(c => {
     const j = c.joystick, r = j.radius * Math.min(c.width, c.height);
     return j.x * c.width >= r && (1 - j.x) * c.width >= r && j.y * c.height >= r && (1 - j.y) * c.height >= r;
   }, "摇杆范围超出屏幕");
 const frameSchema = z.object({ mime: z.enum(["image/jpeg", "image/png"]), base64: image,
   width: z.number().int().min(100).max(5000), height: z.number().int().min(100).max(5000),
+  cameraProof: cameraProofSchema.optional(),
   region: z.object({ x: z.number().int().nonnegative(), y: z.number().int().nonnegative(),
     width: z.number().int().positive(), height: z.number().int().positive() }).strict().optional()
-}).strict().refine(f => !f.region || f.region.x + f.region.width <= f.width && f.region.y + f.region.height <= f.height, "截图区域超出原始画面");
+}).strict().refine(f => !f.region || f.region.x + f.region.width <= f.width && f.region.y + f.region.height <= f.height, "截图区域超出原始画面")
+  .refine(f => !f.cameraProof || !f.region && f.cameraProof.x < f.width && f.cameraProof.y < f.height, "镜头凭据需要完整画面");
 
 function mapCaptureRegion(config: GameFollowConfig) {
   const r = config.map, x = Math.floor(r.x * config.width), y = Math.floor(r.y * config.height);
@@ -58,6 +77,7 @@ function mapCaptureRegion(config: GameFollowConfig) {
   return { x, y, width: right - x, height: bottom - y };
 }
 export const followCommandSchema = z.discriminatedUnion("op", [
+  cameraSampleCommandSchema,
   z.object({ op: z.enum(["runtime", "setup", "status", "load"]) }).strict(),
   z.object({ op: z.literal("save"), config: gameFollowConfigSchema }).strict(),
   z.object({ op: z.literal("analyze"), config: gameFollowConfigSchema, frame: frameSchema }).strict(),
@@ -125,8 +145,9 @@ type Run = { id: string; lease?: string; generation: number; sequence: number; c
   recoverTransport: boolean; recoveryEpoch: number; recovery?: Promise<boolean>; resetVision?: boolean;
   worker?: VisionWorker; starting?: Promise<void>; done?: Promise<void>; stop?: Promise<void>; cleanup?: Promise<void>; heartbeat?: NodeJS.Timeout;
   heartbeatPending?: Promise<void>; lastHeartbeatAt?: number; heartbeatTickAt?: number;
-  beganAt?: number; eventLoop?: IntervalHistogram };
+  beganAt?: number; eventLoop?: IntervalHistogram; camera?: GameFollowCamera };
 export class GameFollower {
+  private readonly cameraSampler: CameraSampler;
   private python?: Python;
   private preview?: VisionWorker;
   private previewConfig = "";
@@ -136,7 +157,7 @@ export class GameFollower {
   private closing = false;
   private value: FollowStatus = { running: false, frames: 0, actions: 0, fps: 0, error: "" };
   readonly script = path.resolve(__dirname, "../../../public/vision/game_follower.py").replace(/app\.asar([\\/])/, "app.asar.unpacked$1");
-  constructor(private root: string, private host: FollowHost) {}
+  constructor(private root: string, private host: FollowHost) { this.cameraSampler = new CameraSampler(host); }
   private get managedPython() { return path.join(this.root, "vision-runtime", process.platform === "win32" ? "Scripts/python.exe" : "bin/python"); }
   private candidates(): Python[] {
     return [
@@ -188,9 +209,14 @@ export class GameFollower {
       if (this.run?.id !== command.runId) throw new Error("跟随任务已改变，请刷新状态");
       await this.stop(this.run); return structuredClone(this.value);
     }
+    if (this.cameraSampler.busy) throw new Error("请等待镜头标定采样结束");
     if (this.run) {
       if (!this.run.cancelled) throw new Error("请先停止当前跟随任务");
       await this.stop(this.run);
+    }
+    if (command.op === "camera-sample") {
+      if (this.analyzing) throw new Error("上一帧仍在分析");
+      return this.cameraSampler.sample(command);
     }
     if (command.op === "analyze") {
       if (this.analyzing) throw new Error("上一帧仍在分析");
@@ -215,6 +241,7 @@ export class GameFollower {
     if (!this.python && !(await this.runtime()).available) throw new Error("视觉组件未就绪，请先安装");
   }
   private async start(id: string, mode: "observe" | "control", config: GameFollowConfig, backend: "app" | "basic", recoverTransport = false): Promise<FollowStatus> {
+    if (config.cameraAssist && backend !== "app") throw new Error("镜头辅助需要手机 App 模式");
     if (this.closing) throw new Error("ProfilePilot 正在退出");
     if (this.run && !this.run.cancelled) throw new Error("请先停止当前跟随任务");
     if (this.analyzing) throw new Error("请等待当前图像分析完成");
@@ -237,6 +264,8 @@ export class GameFollower {
       if (run.cancelled) throw new Error("跟随任务已停止");
       const probe = await this.host.live(run.lease, run.generation, { op: "probe" });
       if (probe?.protocol !== 1) throw new Error("请更新手机开发版 App，以启用视觉跟随");
+      if (config.cameraAssist && probe?.cameraFrameProvenance !== 1) throw new Error("请更新手机开发版 App，以启用镜头画面凭据");
+      run.camera = new GameFollowCamera({ enabled: !!config.cameraAssist, mode, backend, provenanceVersion: probe?.cameraFrameProvenance });
       if (run.cancelled) throw new Error("跟随任务已停止");
       this.value = { running: true, runId: run.id, deviceId: id, mode, backend, frames: 0, actions: 0, fps: 0, error: "" };
       run.beganAt = Date.now(); run.heartbeatTickAt = performance.now();
@@ -291,6 +320,7 @@ export class GameFollower {
     });
   }
   private tryRecover(run: Run): Promise<boolean> {
+    run.camera?.invalidate("transport-gap");
     if (run.cancelled || !run.recoverTransport || !this.host.recoverWrapper) return Promise.resolve(false);
     if (run.recovery) return run.recovery;
     run.recoveryEpoch++; this.value.recovering = true;
@@ -308,20 +338,25 @@ export class GameFollower {
   }
   private async loop(run: Run, config: GameFollowConfig, mode: "observe" | "control", backend: "app" | "basic") {
     const began = Date.now();
-    const region = backend === "app" && config.capture !== "full" && !config.nearby && !config.targetPartial ? mapCaptureRegion(config) : undefined;
+    const region = backend === "app" && config.capture !== "full" && !config.nearby && !config.targetPartial && !config.cameraAssist ? mapCaptureRegion(config) : undefined;
     try {
       while (!run.cancelled) {
         if (run.recovery && !await run.recovery) throw new Error(this.value.error || "跟随连接恢复失败");
         if (run.cancelled) break;
         if (run.resetVision) {
           run.resetVision = false;
+          if (mode === "control" && config.cameraAssist) {
+            await this.host.live(run.lease!, run.generation, { op: "touch", sequence: ++run.sequence, points: [], ttlMs: 1200 });
+            if (run.cancelled) break;
+          }
           await run.worker!.request({ op: "configure", config, maxFrameGapMs: 1500 });
           if (run.cancelled) break;
         }
         const epoch = run.recoveryEpoch;
         try {
           const at = Date.now(), requestAt = performance.now();
-          const rawFrame = await this.host.live(run.lease!, run.generation, { op: "frame", ...(region ? { region } : {}) });
+          const rawFrame = await this.host.live(run.lease!, run.generation, { op: "frame", ...(region ? { region } : {}),
+            ...(config.cameraAssist ? { cameraFrameProvenance: 1 } : {}) });
           const frame: FollowFrame = frameSchema.parse(rawFrame);
           const capturedAt = Date.now();
           // Wi-Fi latency can vary between requests. A late capture followed by an
@@ -338,7 +373,9 @@ export class GameFollower {
           if (run.cancelled) break;
           if (epoch !== run.recoveryEpoch) continue;
           if (frame.width !== config.width || frame.height !== config.height) throw new Error("手机分辨率或方向已改变，请重新校准");
-          const analysis: FollowAnalysis = await run.worker!.request({ op: "analyze", base64: frame.base64, region: frame.region });
+          const cameraContext = run.camera?.beforeAnalyze(frame.cameraProof, performance.now());
+          const analysis: FollowAnalysis = await run.worker!.request({ op: "analyze", base64: frame.base64, region: frame.region,
+            ...(cameraContext ? { cameraContext } : {}) });
           if (run.cancelled) break;
           if (epoch !== run.recoveryEpoch) continue;
           this.value.frame = frame; this.value.analysis = analysis; this.value.frames++;
@@ -347,17 +384,35 @@ export class GameFollower {
           if (mode === "control") {
             // File captures on older emulators are slower; their movement is a
             // bounded 350 ms stroke. Never move from an unboundedly delayed frame.
-            const direction = Date.now() - at < (backend === "basic" ? 3000 : 1000) ? analysis.direction : null;
+            const nativeTarget = analysis.target && analysis.target.confidence >= config.confidence
+              ? { x: (config.map.x + analysis.target.x * config.map.width) * config.width,
+                y: (config.map.y + analysis.target.y * config.map.height) * config.height } : undefined;
+            const cameraPlan = run.camera?.afterAnalyze({
+              fullTarget: analysis.targetSource === "template" ? nativeTarget : undefined,
+              cameraTarget: analysis.targetSource === "camera" ? nativeTarget : undefined,
+              lost: !nativeTarget
+            }, performance.now() - requestAt, performance.now());
+            const direction = Date.now() - at < (backend === "basic" ? 3000 : 1000)
+              && !cameraPlan?.stopJoystick && (analysis.targetSource !== "camera" || cameraPlan?.allowCameraMovement)
+              ? analysis.direction : null;
             const joystick = config.joystick, rotation = joystick.rotation * Math.PI / 180;
             const dx = direction ? direction.x * Math.cos(rotation) - direction.y * Math.sin(rotation) : 0;
             const dy = direction ? direction.x * Math.sin(rotation) + direction.y * Math.cos(rotation) : 0;
             const cx = Math.round(joystick.x * config.width), cy = Math.round(joystick.y * config.height);
             const radius = joystick.radius * Math.min(config.width, config.height);
             const points = direction ? [{ id: 0, x: Math.round(cx + dx * radius), y: Math.round(cy + dy * radius), fromX: cx, fromY: cy }] : [];
+            if (cameraPlan?.point) points.push({ id: 1, x: cameraPlan.point.x, y: cameraPlan.point.y,
+              fromX: cameraPlan.point.x, fromY: cameraPlan.point.y });
             const inputAt = Date.now();
-            await this.host.live(run.lease!, run.generation, { op: "touch", sequence: ++run.sequence, points, ttlMs: 1200 });
+            const sequence = ++run.sequence;
+            const accepted = await this.host.live(run.lease!, run.generation, { op: "touch", sequence, points, ttlMs: cameraPlan?.ttlMs ?? 1200 });
             if (run.cancelled) break;
             if (epoch !== run.recoveryEpoch) continue;
+            if (config.cameraAssist && (accepted?.accepted !== true || accepted?.acceptedSequence !== sequence)) {
+              run.camera?.invalidate("uncertain-input"); throw new Error("手机未确认本次镜头触控，已停止操作");
+            }
+            if (cameraPlan && !run.camera!.commit(cameraPlan, sequence, performance.now()))
+              throw new Error("镜头触控确认已过期，已停止操作");
             this.value.timings = { ...this.value.timings, inputMs: Date.now() - inputAt };
             if (direction) this.value.actions++;
           }
@@ -372,6 +427,7 @@ export class GameFollower {
     } catch (error) { if (!run.cancelled) this.value.error = (error as Error).message; }
     finally {
       // Do not await run.done from inside its own cleanup.
+      run.camera?.invalidate("cancel");
       run.cancelled = true;
       clearInterval(run.heartbeat); this.sampleHostTimings(run); run.eventLoop?.disable(); run.worker?.close();
       await this.cleanup(run);
@@ -380,6 +436,7 @@ export class GameFollower {
   }
   private async stop(run: Run) {
     if (run.stop) return run.stop;
+    run.camera?.invalidate("cancel");
     run.cancelled = true; clearInterval(run.heartbeat); run.eventLoop?.disable(); run.worker?.close();
     run.stop = (async () => {
       // Revoking the phone session releases held touches even if a frame is pending.
@@ -396,5 +453,5 @@ export class GameFollower {
     run.cleanup ||= this.host.stopWrapper(run.lease).catch(error => { this.value.error ||= (error as Error).message; });
     await run.cleanup;
   }
-  async close() { this.closing = true; if (this.run) await this.stop(this.run); this.preview?.close(); }
+  async close() { this.closing = true; await this.cameraSampler.close(); if (this.run) await this.stop(this.run); this.preview?.close(); }
 }

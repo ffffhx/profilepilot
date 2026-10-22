@@ -438,6 +438,15 @@ class Follower:
                                  config['confidence'], max_frame_gap) for i, t in enumerate(self.templates)]
         self.marker = SelfMarker(config['selfMarker'], max_frame_gap) if config.get('selfMarker') else None
         self.partial = TargetPartial(self.templates[1], config['targetPartial'], config['width'], config['height'], max_frame_gap) if config.get('targetPartial') else None
+        self.camera = None
+        if config.get('cameraAssist'):
+            # Also supports offline callers loading this worker by absolute path.
+            import importlib.util
+            from pathlib import Path
+            spec = importlib.util.spec_from_file_location('game_follow_camera', Path(__file__).with_name('game_follow_camera.py'))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            self.camera = module.CameraLocator(config)
         self.labels = [white_text(decode(config['nearby'][key])) for key in ('selfLabel', 'targetLabel')] if config.get('nearby') else None
         grid = config["grid"]
         blocked = np.zeros((grid["rows"], grid["columns"]), np.uint8)
@@ -455,9 +464,9 @@ class Follower:
         self.near = False
         self.target_last = None
 
-    def analyze(self, frame, now=None, region=None):
+    def analyze(self, frame, now=None, region=None, cameraContext=None):
         try:
-            return self._analyze(frame, now, region)
+            return self._analyze(frame, now, region, cameraContext)
         except Exception:
             # Invalid frame metadata or pixels also break strict consecutiveness.
             # Preview callers can submit another frame after an analysis error.
@@ -466,7 +475,7 @@ class Follower:
                 self.partial.last_time = None
             raise
 
-    def _analyze(self, frame, now=None, region=None):
+    def _analyze(self, frame, now=None, region=None, cameraContext=None):
         began = time.monotonic()
         now = began if now is None else now
         c = self.config
@@ -484,6 +493,8 @@ class Follower:
                 raise ValueError("姓名识别需要完整画面，不能使用裁剪图像")
             if self.partial:
                 raise ValueError("部分队友识别需要完整画面中的存活提示，不能使用裁剪图像")
+            if self.camera:
+                raise ValueError("镜头辅助需要完整画面")
             r = c['map']
             left, top = math.floor(r['x'] * c['width']), math.floor(r['y'] * c['height'])
             right = min(c['width'], max(math.ceil((r['x'] + r['width']) * c['width']),
@@ -517,6 +528,15 @@ class Follower:
         partial = self.partial.locate(minimap, image, now) if self.partial else None
         if not target_reliable and partial:
             target, target_reliable, target_source = partial, True, 'partial'
+        # The host supplies a context only when this frame proves the previously
+        # acknowledged camera hold. This current-image path never teaches the
+        # portrait tracker a projected position or reuses an old name location.
+        camera_target = self.camera.locate(image, cameraContext) if self.camera and cameraContext else None
+        if not target_reliable and camera_target:
+            target = dict(x=(camera_target['x']-x)/w, y=(camera_target['y']-y)/h,
+                          confidence=camera_target['confidence'])
+            target_reliable = target['confidence'] >= c['confidence']
+            target_source = 'camera'
         result = {"phase": "lost", "message": "未可靠识别自己或队友，已松开摇杆",
                   "self": own, "target": target, "targetSource": target_source, "path": [], "direction": None}
         if self.marker:
@@ -627,7 +647,7 @@ def main():
             elif op == "analyze":
                 if follower is None:
                     raise ValueError("请先校准小地图")
-                value = follower.analyze(request["base64"], region=request.get("region"))
+                value = follower.analyze(request["base64"], region=request.get("region"), cameraContext=request.get('cameraContext'))
             else:
                 raise ValueError("未知视觉请求")
             response = {"id": request.get("id"), "ok": True, "data": value}

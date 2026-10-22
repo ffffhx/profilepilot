@@ -18,6 +18,7 @@ ppilot phone follow save --config <校准JSON>
 ppilot phone follow start --device <设备ID> --config <校准JSON> [--mode observe|control] [--backend app|basic] [--recover-transport true|false]
 ppilot phone follow stop --run-id <status返回的任务ID>
 ppilot phone follow analyze --params-file <包含config和frame的JSON>
+ppilot phone follow camera-sample --device <设备ID> --x <原生X> --y <原生Y> --output <新建绝对目录>
 ppilot phone emulator-list
 ppilot phone emulator-connect --name <模拟器名称>
 ppilot phone connect --device <设备ID>

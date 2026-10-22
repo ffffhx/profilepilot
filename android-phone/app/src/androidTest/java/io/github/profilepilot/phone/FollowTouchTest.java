@@ -42,6 +42,47 @@ public class FollowTouchTest {
     private JSONObject finger(int id, int x, int y) throws Exception {
         return new JSONObject().put("id", id).put("x", x).put("y", y);
     }
+    private record MotionSample(long at, float x, float y) { }
+    /** Test-page samples, read and written on the main looper only. */
+    private static final class EndpointTrace {
+        MotionSample previous, actual, delivered;
+        boolean hasHistory;
+        void add(MotionEvent event) {
+            delivered = new MotionSample(event.getEventTime(), event.getRawX(), event.getRawY());
+            hasHistory = event.getHistorySize() > 0;
+            float offsetX = event.getRawX() - event.getX(), offsetY = event.getRawY() - event.getY();
+            for (int i = 0; i < event.getHistorySize(); i++) addActual(new MotionSample(event.getHistoricalEventTime(i),
+                event.getHistoricalX(i) + offsetX, event.getHistoricalY(i) + offsetY));
+            if (!hasHistory) addActual(delivered);
+        }
+        private void addActual(MotionSample sample) {
+            if (actual == null || sample.at > actual.at) { previous = actual; actual = sample; }
+        }
+        void assertEndpoint(int fromX, int fromY, int x, int y, String trace) {
+            assertNotNull(actual); assertNotNull(delivered);
+            String message = "Endpoint current/history samples:\n" + trace;
+            // Injection must still reach the requested endpoint within 2 px.
+            assertEquals(message, x, actual.x, 2f); assertEquals(message, y, actual.y, 2f);
+            if (Math.abs(delivered.x - x) <= 2 && Math.abs(delivered.y - y) <= 2) return;
+            // Android 13 InputConsumer appends a VSYNC prediction to MOVE. Do
+            // not accept arbitrary overshoot merely because history hit target:
+            // require two real samples, its bounded future timestamp and the
+            // corresponding linear prediction, also within 2 px on each axis.
+            assertTrue(message, hasHistory); assertNotNull(message, previous);
+            long delta = actual.at - previous.at, ahead = delivered.at - actual.at;
+            assertTrue(message, delta >= 2 && delta <= 20);
+            assertTrue(message, ahead > 0 && ahead <= Math.min(delta / 2.0, 8));
+            // Both source samples must also agree with this commanded 80 ms
+            // straight stroke, allowing one pixel of framework rounding.
+            assertTrue(message, Math.abs(actual.x - previous.x) <= Math.abs(x - fromX) * delta / 80f + 1);
+            assertTrue(message, Math.abs(actual.y - previous.y) <= Math.abs(y - fromY) * delta / 80f + 1);
+            float predictedX = actual.x + (actual.x - previous.x) * ahead / delta;
+            float predictedY = actual.y + (actual.y - previous.y) * ahead / delta;
+            assertEquals(message, predictedX, delivered.x, 2f); assertEquals(message, predictedY, delivered.y, 2f);
+            Log.i("PPFollowTouchTest", "stationary resampled endpoint actualX=" + actual.x + " deliveredX=" + delivered.x
+                + " deviationX=" + (delivered.x - x) + " predictionMs=" + ahead + " sampleDeltaMs=" + delta);
+        }
+    }
     @Test public void newPointerStartsAfterContinuationButFreshGesturesStartImmediately() {
         Path path = new Path(); path.moveTo(100, 100); path.lineTo(150, 100);
         var fresh = FollowTouch.newStroke(path, false);
@@ -126,6 +167,10 @@ public class FollowTouchTest {
         AtomicReference<View> surface = new AtomicReference<>();
         AtomicBoolean authorized = new AtomicBoolean(true);
         AtomicInteger active = new AtomicInteger(), maximum = new AtomicInteger(), cancels = new AtomicInteger(), downs = new AtomicInteger();
+        AtomicInteger cameraPointer = new AtomicInteger(-1), cameraSamples = new AtomicInteger(), cameraPresses = new AtomicInteger();
+        AtomicInteger cameraNextDownCount = new AtomicInteger();
+        AtomicReference<Float> cameraMaximumError = new AtomicReference<>(0f);
+        int[] cameraPosition = new int[2];
         try (ActivityScenario<ControlBenchmarkActivity> activity = ActivityScenario.launch(
                 new Intent(instrumentation.getTargetContext(), ControlBenchmarkActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))) {
             activity.onActivity(a -> {
@@ -134,6 +179,19 @@ public class FollowTouchTest {
                     maximum.set(Math.max(maximum.get(), event.getPointerCount()));
                     int action = event.getActionMasked();
                     if (action == MotionEvent.ACTION_DOWN) downs.incrementAndGet();
+                    if ((action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN)
+                        && event.getPointerCount() == cameraNextDownCount.get()) {
+                        int index = event.getActionIndex();
+                        cameraPointer.set(event.getPointerId(index)); cameraNextDownCount.set(0); cameraPresses.incrementAndGet();
+                    }
+                    int cameraIndex = event.findPointerIndex(cameraPointer.get());
+                    if (cameraIndex >= 0) {
+                        cameraSamples.incrementAndGet();
+                        cameraMaximumError.set(Math.max(cameraMaximumError.get(), Math.max(
+                            Math.abs(event.getRawX(cameraIndex) - cameraPosition[0]), Math.abs(event.getRawY(cameraIndex) - cameraPosition[1]))));
+                    }
+                    if (action == MotionEvent.ACTION_CANCEL || action == MotionEvent.ACTION_UP
+                        || action == MotionEvent.ACTION_POINTER_UP && event.getPointerId(event.getActionIndex()) == cameraPointer.get()) cameraPointer.set(-1);
                     if (action != MotionEvent.ACTION_MOVE) Log.i("PPFollowTouchTest", "action=" + MotionEvent.actionToString(event.getAction())
                         + " pointers=" + event.getPointerCount() + " changedId=" + event.getPointerId(event.getActionIndex()));
                     if (action == MotionEvent.ACTION_CANCEL) { cancels.incrementAndGet(); active.set(0); }
@@ -150,6 +208,8 @@ public class FollowTouchTest {
             int cx = origin[0] + size[0] * 3 / 4, cy = origin[1] + size[1] / 4;
             int jx = origin[0] + size[0] / 4, jy = origin[1] + size[1] * 3 / 4;
             main(() -> {
+                cameraPosition[0] = cx; cameraPosition[1] = cy;
+                cameraNextDownCount.set(1);
                 touch.get().update(new JSONArray().put(finger(1, cx, cy)), 1200, authorized::get, 1);
                 assertNull("Receipt must not claim applied camera", touch.get().cameraSnapshot());
             });
@@ -175,18 +235,32 @@ public class FollowTouchTest {
             // assistance is armed while the joystick was already held.
             main(() -> touch.get().update(new JSONArray().put(finger(0, jx, jy)), 1200, authorized::get, 5));
             SystemClock.sleep(250); assertEquals(1, active.get());
-            main(() -> touch.get().update(new JSONArray().put(finger(0, jx, jy)).put(finger(1, cx, cy)), 1200, authorized::get, 6));
+            main(() -> {
+                cameraNextDownCount.set(2);
+                touch.get().update(new JSONArray().put(finger(0, jx, jy)).put(finger(1, cx, cy)), 1200, authorized::get, 6);
+            });
             SystemClock.sleep(250); assertEquals("Adding camera must preserve joystick", 2, active.get());
             main(() -> touch.get().update(new JSONArray().put(finger(0, jx + 50, jy)), 1200, authorized::get, 7));
             SystemClock.sleep(250); assertEquals("Dropping camera must preserve joystick", 1, active.get());
             main(() -> { assertNull(touch.get().cameraSnapshot()); touch.get().release(); });
             SystemClock.sleep(250); assertEquals(0, active.get());
-            main(() -> touch.get().update(new JSONArray().put(finger(0, jx, jy)).put(finger(1, cx, cy)), 200, authorized::get, 8));
+            main(() -> {
+                cameraNextDownCount.set(2);
+                touch.get().update(new JSONArray().put(finger(0, jx, jy)).put(finger(1, cx, cy)), 200, authorized::get, 8);
+            });
             SystemClock.sleep(500); assertEquals("Both pointers expire without another command", 0, active.get());
             main(() -> { assertFalse(touch.get().active()); assertNull(touch.get().cameraSnapshot()); });
-            main(() -> touch.get().update(new JSONArray().put(finger(0, jx, jy)).put(finger(1, cx, cy)), 1200, authorized::get, 9));
+            main(() -> {
+                cameraNextDownCount.set(2);
+                touch.get().update(new JSONArray().put(finger(0, jx, jy)).put(finger(1, cx, cy)), 1200, authorized::get, 9);
+            });
             SystemClock.sleep(250); assertEquals(2, active.get()); authorized.set(false);
             SystemClock.sleep(250); assertEquals(0, active.get()); assertEquals(0, cancels.get());
+            assertTrue("Camera pointer must have been observed in the target View", cameraSamples.get() >= 8);
+            assertEquals("Every camera press must be measured, without filtering by coordinate accuracy", 4, cameraPresses.get());
+            assertTrue("Stationary camera must stay within 2px in delivered events, including joystick moves; maximum="
+                + cameraMaximumError.get(), cameraMaximumError.get() <= 2);
+            Log.i("PPFollowTouchTest", "camera deliveredSamples=" + cameraSamples.get() + " maximumErrorPx=" + cameraMaximumError.get());
             main(() -> assertNull(touch.get().cameraSnapshot()));
         } finally {
             authorized.set(false);
@@ -206,7 +280,8 @@ public class FollowTouchTest {
         AtomicReference<FollowTouch> touch = new AtomicReference<>();
         AtomicBoolean authorized = new AtomicBoolean(true);
         AtomicInteger downs = new AtomicInteger(), ups = new AtomicInteger(), cancels = new AtomicInteger();
-        AtomicReference<Float> lastX = new AtomicReference<>(0f);
+        EndpointTrace endpoint = new EndpointTrace();
+        AtomicReference<String> eventTrace = new AtomicReference<>("");
         AtomicReference<View> surface = new AtomicReference<>();
         try (ActivityScenario<ControlBenchmarkActivity> activity = ActivityScenario.launch(
                 new Intent(instrumentation.getTargetContext(), ControlBenchmarkActivity.class)
@@ -220,7 +295,19 @@ public class FollowTouchTest {
                         case MotionEvent.ACTION_UP -> ups.incrementAndGet();
                         case MotionEvent.ACTION_CANCEL -> cancels.incrementAndGet();
                     }
-                    lastX.set(event.getRawX()); return true;
+                    endpoint.add(event);
+                    // Keep actual samples when diagnosing platform batching or
+                    // resampling. Do not relax endpoint accuracy on a guess.
+                    StringBuilder sample = new StringBuilder("action=").append(MotionEvent.actionToString(event.getAction()))
+                        .append(" time=").append(event.getEventTime()).append(" delivered=").append(SystemClock.uptimeMillis())
+                        .append(" rawX=").append(event.getRawX()).append(" rawY=").append(event.getRawY()).append(" history=");
+                    float offsetX = event.getRawX() - event.getX(), offsetY = event.getRawY() - event.getY();
+                    for (int i = 0; i < event.getHistorySize(); i++) sample.append('[').append(event.getHistoricalEventTime(i))
+                        .append(',').append(event.getHistoricalX(i) + offsetX).append(',').append(event.getHistoricalY(i) + offsetY).append(']');
+                    String line = sample.toString(); Log.i("PPFollowTouchTest", "stationary " + line);
+                    String trace = eventTrace.get() + line + "\n";
+                    eventTrace.set(trace.substring(Math.max(0, trace.length() - 6000)));
+                    return true;
                 });
                 a.setContentView(view); surface.set(view);
                 touch.set(new FollowTouch(PhoneAccessibility.current));
@@ -234,9 +321,13 @@ public class FollowTouchTest {
             SystemClock.sleep(600);
             main(() -> assertTrue("A stationary continued pointer must remain held", touch.get().active()));
             assertEquals(1, downs.get()); assertEquals(0, ups.get()); assertEquals(0, cancels.get());
-            main(() -> touch.get().update(point(x + 50, y, x), 1200, authorized::get));
+            main(() -> {
+                Log.i("PPFollowTouchTest", "stationary move requestedX=" + (x + 50) + " fromX=" + x + " uptime=" + SystemClock.uptimeMillis());
+                touch.get().update(point(x + 50, y, x), 1200, authorized::get);
+            });
             SystemClock.sleep(250);
-            assertEquals(x + 50, lastX.get(), 2f); assertEquals(1, downs.get());
+            main(() -> endpoint.assertEndpoint(x, y, x + 50, y, eventTrace.get()));
+            assertEquals(1, downs.get());
             main(() -> touch.get().release()); SystemClock.sleep(250);
             assertEquals(1, ups.get());
             main(() -> assertFalse(touch.get().active()));

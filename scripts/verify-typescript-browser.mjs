@@ -89,6 +89,17 @@ try {
   }
   console.log("registered isolated browser", chromePid, port);
   await command(["open", url]);
+  const common = (await command(["observe", "--output", path.join(root, "共同观察.png")])).result;
+  assert.equal(common.availability.dom.status, "available");
+  assert.ok((await readFile(common.screenshotPath)).length > 100);
+  const commonRef = common.fast.candidates.find(c => c.role === "textbox" && c.label === "Name").ref;
+  const actionFile = path.join(root, "动作 参数.json");
+  await writeFile(actionFile, '\uFEFF' + JSON.stringify({ kind: "fill", version: common.version, ref: commonRef, value: '中文 "$()" `literal`' }));
+  assert.equal((await command(["action", "--params-file", actionFile])).result.actionOutcome, "completed");
+  assert.equal((await command(["get", "value", "#name"])).value, '中文 "$()" `literal`');
+  const staleCommon = await command(["action", "--params-file", actionFile], 1);
+  assert.match(staleCommon.stdout, /BROWSER_STALE_REF/);
+  console.log("PASS common observe/action JSON contract, Chinese input, screenshot and consumed version");
   const snapshot = await command(["snapshot", "-i"]);
   const serviceRecord = JSON.parse(await readFile(path.join(home, ".agent-browser", `${session}.engine.json`), "utf8"));
   const unauthorized = await fetch(`http://127.0.0.1:${serviceRecord.port}/command`, { method: "POST", body: JSON.stringify({ ping: true }) });

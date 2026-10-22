@@ -22,6 +22,22 @@ async function command(w, id, method, params) {
   return w.messages.find(message => message.id === id);
 }
 
+test('socket preview does not block tab queries or claims while Chrome capture remains pending', async t => {
+  const w = await worker(); t.after(w.close);
+  const started = deferred(), capture = deferred();
+  t.after(() => capture.resolve('data:image/jpeg;base64,frame'));
+  w.chrome.windows.getLastFocused = async () => ({ id: 1 });
+  w.chrome.tabs.captureVisibleTab = () => { started.resolve(); return capture.promise; };
+  w.socket.receive({ id: 301, method: 'liveView', params: {} });
+  await started.promise;
+  const tabs = await command(w, 302, 'tabs', {});
+  assert.equal(tabs.error, undefined);
+  assert.equal(tabs.result.length, 2);
+  const claim = await command(w, 303, 'claim', { sessionId: 'preview-independent', tabId: 7 });
+  assert.equal(claim.error, undefined);
+  assert.equal(w.messages.some(m => m.id === 301), false, 'control completes before the native capture settles');
+});
+
 test('worker rejects a resume carrying permission from before a repeated stop, even if desktop has not observed state', async t => {
   const w = await worker(); t.after(w.close);
   await w.handle('claim', { sessionId: 'one', tabId: 7 });

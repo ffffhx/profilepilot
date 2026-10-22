@@ -6,6 +6,8 @@ export interface NativeBrowserState {
   controlGeneration?: string;
   tabId?: number;
   pausedByBrowser?: boolean;
+  /** A technical interruption, distinct from the user taking control. */
+  controlIssue?: { code: string; message: string };
   profileId: string;
   connected: boolean;
   ownerSessionId?: string;

@@ -8,9 +8,11 @@ import { spawn } from "node:child_process";
 import { BrowserEngine } from "./engine";
 import { ENGINE_VERSION, EngineError, type EngineCommand } from "./arguments";
 import { startService } from "../cli/service-launcher";
+import { controlRecovery, type ControlRecovery } from "../../shared/control-recovery";
+import { writeControlTrace } from "../control-trace";
 
 interface ServiceRecord { version: string; pid: number; port: number; token: string; session: string; root: string }
-export interface EngineResponse { success: boolean; data?: unknown; error?: string; code?: string }
+export interface EngineResponse { success: boolean; data?: unknown; error?: string; code?: string; recovery?: ControlRecovery; requestId?: string; partialResult?: unknown }
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 export const engineRoot = (env = process.env) => path.resolve(env.AGENT_BROWSER_SOCKET_DIR || path.join(env.HOME || os.homedir(), ".agent-browser"));
@@ -123,17 +125,27 @@ export async function serveEngine(root: string, session: string): Promise<void> 
       let pending = results.get(input.id);
       if (!pending) {
         pending = queue.then(async (): Promise<EngineResponse> => {
+          const startedAt = Date.now();
+          let failureCode: string | undefined;
           try {
             const data = await engine.execute(input.command);
-            return data?.failed ? { success: false, data, error: "One or more batch commands failed", code: "BROWSER_BATCH_FAILED" } : { success: true, data };
+            return data?.failed ? { success: false, data, error: "One or more batch commands failed", code: "BROWSER_BATCH_FAILED", requestId: input.id, recovery: controlRecovery("BROWSER_BATCH_FAILED") } : { success: true, data, requestId: input.id };
           }
           catch (error) {
             if (input.command.args[0] === "connect") {
               const message = String(error instanceof Error ? error.message : error).replace(/wss?:\/\/\S+/g, "[Gateway endpoint]");
               await appendFile(path.join(root, `${session}.engine.log`), JSON.stringify({ at: new Date().toISOString(), command: "connect", error: message }) + "\n", { mode: 0o600 }).catch(() => {});
             }
-            return { success: false, error: error instanceof Error ? error.message : String(error), code: (error as EngineError).code || "BROWSER_ENGINE_ERROR" };
-          } finally { lastActivity = Date.now(); }
+            const code = (error as EngineError).code || "BROWSER_ENGINE_ERROR";
+            failureCode = code;
+            return { success: false, error: error instanceof Error ? error.message : String(error), code,
+              requestId: input.id, recovery: controlRecovery(code, ["observe", "snapshot", "screenshot", "get", "read"].includes(input.command.args[0]) ? { actionOutcome: "not-applicable" } : {}),
+              ...((error as any)?.partialResult ? { partialResult: (error as any).partialResult } : {}) };
+          } finally {
+            lastActivity = Date.now();
+            writeControlTrace(root, "gateway", { requestId: input.id, sessionId: session, method: input.command.args[0],
+              durationMs: lastActivity - startedAt, code: failureCode, recovery: failureCode ? controlRecovery(failureCode) : undefined });
+          }
         });
         queue = pending;
         results.set(input.id, pending);

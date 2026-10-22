@@ -47,6 +47,14 @@ test('an already running matching AVD is reused and different running devices ar
   assert.ok(h.calls.every(args => !args.includes('install') && !args.includes('am')));
 });
 
+test('a shared poll started before AVD connection cannot turn successful startup into a stale missing-device error', async t => {
+  const h = fixture(t, true);
+  const refresh = h.service.refresh.bind(h.service); let calls = 0;
+  h.service.refresh = async () => ++calls === 1 ? h.service.snapshot() : refresh();
+  assert.equal((await h.service.connectEmulator('Test_AVD')).id, 'emulator-5554');
+  assert.equal(calls, 2); assert.equal(h.launched(), 0);
+});
+
 test('external local emulator route is window-verified before managed ADB connection',async t=>{
   const h=fixture(t),order=[];
   h.emulators.connectLocal=async()=>{order.push('fit');return '127.0.0.1:5555';};

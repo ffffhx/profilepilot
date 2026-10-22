@@ -4,6 +4,17 @@ import { cameraStartSchema, cameraCommandSchema } from "./screen-camera";
 import { followCommandSchema } from "./game-follow";
 export type PhoneManagementCommand = { action: "phone"; method: string; params?: unknown };
 export async function executePhoneCommand(command: PhoneManagementCommand, service: PhonesService): Promise<unknown> {
+  try { return await executeValidatedPhoneCommand(command, service); }
+  catch (error) {
+    if (error instanceof z.ZodError) throw Object.assign(new Error(`手机参数无效：${[...new Set(error.issues.map(issue => issue.path.join(".") || "params"))].join("、")}。请按 phone --help 修正，不使用失败结果构造动作。`), { code: "PHONE_INVALID_REQUEST" });
+    throw error;
+  }
+}
+async function executeValidatedPhoneCommand(command: PhoneManagementCommand, service: PhonesService): Promise<unknown> {
+  if (command.method === "readiness") {
+    const p = z.object({ id: z.string().min(1), backend: z.enum(["app", "basic"]).default("app") }).strict().parse(command.params);
+    return service.readiness(p.id, p.backend);
+  }
   if (command.method === "follow-command") return service.gameFollower.command(followCommandSchema.parse(command.params));
   if (command.method === "host") return service.hostCommand(z.object({ args: z.array(z.string().max(32768)).min(1).max(3) }).strict().parse(command.params).args);
   if (command.method === "wireless-disconnect") return service.disconnectWireless(z.object({ id: z.string() }).strict().parse(command.params).id);

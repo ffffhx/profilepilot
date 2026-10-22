@@ -8,7 +8,7 @@ const { NativeBrowser } = require('../src/main/tasks/native-browser.ts');
 const { publicNativeObservation } = require('../src/main/native-control/service.ts');
 
 function formFixture() {
-  const nodes = [], events = [];
+  const nodes = [], events = [], inputs = [];
   class Input { get value() { return this._value || ''; } set value(value) { this._value = value; } }
   const doc = { title: 'Synthetic form', body: { innerText: 'Synthetic form' }, activeElement: null,
     querySelectorAll: selector => selector === 'div,span,img,svg,li' ? [] : nodes,
@@ -37,10 +37,56 @@ function formFixture() {
     catch (error) { return { exceptionDetails: { text: error.message } }; }
   };
   const browser = new FastBrowser(async () => {}, async (_task, method, params) => {
+    if (method === 'Input.dispatchMouseEvent') { inputs.push(params); return {}; }
     assert.equal(method, 'Runtime.evaluate'); return evaluate(params.expression);
   });
-  return { browser, doc, context, nodes, select, input, other, evaluate, events };
+  return { browser, doc, context, nodes, select, input, other, evaluate, events, inputs };
 }
+
+test('editable comboboxes and select controls accept clicks without filling or losing action guards', async () => {
+  const f = formFixture();
+  f.input.getAttribute = name => ({ 'aria-label': 'School', role: 'combobox', 'aria-haspopup': 'listbox' })[name] || null;
+  for (const [target, label] of [[f.input, 'School'], [f.select, 'Topics']]) {
+    f.doc.elementFromPoint = () => target;
+    const observation = await f.browser.observe({});
+    const candidate = observation.fast.candidates.find(c => c.label === label);
+    const value = target.value;
+    f.other.value = 'unrelated widget updated';
+    await f.browser.execute({ observation }, { kind: 'click', ref: candidate.ref });
+    assert.deepEqual(f.inputs.slice(-2).map(p => p.type), ['mousePressed', 'mouseReleased']);
+    assert.equal(target.value, value);
+    target.disabled = true;
+    const stopped = await f.browser.observe({});
+    const before = f.inputs.length;
+    await assert.rejects(f.browser.execute({ observation: stopped }, { kind: 'click', ref: candidate.ref }), /禁用|失效/);
+    assert.equal(f.inputs.length, before);
+    target.disabled = false;
+  }
+  f.input.type = 'file';
+  f.input.getAttribute = name => name === 'aria-label' ? 'Attachment' : null;
+  f.doc.elementFromPoint = () => f.input;
+  const upload = await f.browser.observe({});
+  const file = upload.fast.candidates.find(c => c.label === 'Attachment');
+  assert.equal(file.role, 'fileupload');
+  const count = f.inputs.length;
+  await assert.rejects(f.browser.execute({ observation: upload }, { kind: 'click', ref: file.ref }), /类型不匹配/);
+  assert.equal(f.inputs.length, count, 'file inputs retain the explicit attachment-only upload path');
+});
+
+test('field edits tolerate unrelated controls changing but reject changes in their own form', async () => {
+  const f = formFixture(); f.doc.elementFromPoint = () => f.input;
+  let observation = await f.browser.observe({});
+  let ref = observation.fast.candidates.find(c => c.label === 'Name').ref;
+  f.other.value = 'unrelated update';
+  await f.browser.execute({ observation }, { kind: 'fill', ref, value: 'intended' });
+  assert.equal(f.input.value, 'intended');
+  const form = { action: 'https://fixture.test/submit', method: 'post', elements: [f.input, f.other] };
+  f.input.form = form; f.other.form = form;
+  observation = await f.browser.observe({}); ref = observation.fast.candidates.find(c => c.label === 'Name').ref;
+  f.other.value = 'same form changed';
+  await assert.rejects(f.browser.execute({ observation }, { kind: 'fill', ref, value: 'unexpected' }), /变化/);
+  assert.equal(f.input.value, 'intended');
+});
 
 test('multiple selected values survive public projection, option filtering and snapshot text', async () => {
   const f = formFixture(); f.select.options[2].selected = true;

@@ -2,8 +2,9 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import type { NativeBrowserBridge, NativeEvent } from '../tasks/native-bridge';
 import type { NativeInstallDriver } from '../tasks/native-installer';
-import { nativeControlError } from '../native-control/errors';
+import { nativeFailurePayload } from '../native-control/errors';
 import { BROWSER_SERVICE_VERSION } from './connection';
+import { RUNNING_CONTROL_BUILD } from '../runtime-identity';
 
 export class BrowserServiceHost {
   private sequence = 0;
@@ -58,12 +59,12 @@ export class BrowserServiceHost {
       const result = await this.invoke(method, args, clientId);
       reply(200, { ok: true, result, snapshot: this.snapshot() });
     } catch (error) {
-      const failure = nativeControlError(error); reply(400, { ok: false, error: failure.message, code: failure.code });
+      reply(400, nativeFailurePayload(error));
     }
   }
   private async invoke(method: string, args: any[], clientId?: string): Promise<unknown> {
     if (this.stopping) throw new Error('浏览器服务正在停止。');
-    if (method === 'ping') return { service: 'browser', version: BROWSER_SERVICE_VERSION, pid: process.pid, root: this.root };
+    if (method === 'ping') return { service: 'browser', version: BROWSER_SERVICE_VERSION, pid: process.pid, root: this.root, build: RUNNING_CONTROL_BUILD };
     if (method === 'snapshot') return this.snapshot();
     if (method === 'pair') return this.bridge.pair(args[0]);
     if (method === 'authorize') {

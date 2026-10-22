@@ -7,10 +7,12 @@ import { runScreenCameraCli } from "./screen-camera-cli";
 import { executeAdbCli } from "./adb-cli-stream";
 import { phoneAppCli } from "./app-cli";
 import { runGameFollowCli } from "./game-follow-cli";
+import { controlRecovery } from "../../shared/control-recovery";
 
 export const phoneHelp = `ppilot phone CLI · 手机控制
 
 ppilot phone list
+ppilot phone readiness|doctor --device <设备ID> [--backend app|basic]
 ppilot phone follow runtime|setup|status|load
 ppilot phone follow save --config <校准JSON>
 ppilot phone follow start --device <设备ID> --config <校准JSON> [--mode observe|control] [--backend app|basic]
@@ -88,9 +90,10 @@ export async function runPhoneCli(args: string[], request: (command: ProfilePilo
   if (!args.length || args.includes("--help") || args.includes("-h")) { io.stdout.write(phoneHelp); return 0; }
   if (args[0] === "camera") return runScreenCameraCli(args.slice(1), request, io);
   if (args[0] === "follow") return runGameFollowCli(args.slice(1), request, io);
+  let dispatching = false;
   try {
-    const method = args[0];
-    if (!["list", "emulator-list", "emulator-connect", "connect", "update", "inspect", "packages", "diagnose", "exec", "host", "app", "install", "wireless-discover", "wireless-pair", "wireless-connect", "wireless-disconnect", "rename", "start", "pause", "resume", "stop", "action", "run"].includes(method)) throw new Error("未知手机命令。运行 ppilot phone --help 查看用法。");
+    const method = args[0] === "doctor" ? "readiness" : args[0];
+    if (!["readiness", "list", "emulator-list", "emulator-connect", "connect", "update", "inspect", "packages", "diagnose", "exec", "host", "app", "install", "wireless-discover", "wireless-pair", "wireless-connect", "wireless-disconnect", "rename", "start", "pause", "resume", "stop", "action", "run"].includes(method)) throw new Error("未知手机命令。运行 ppilot phone --help 查看用法。");
     const flags = new Map<string, string>();
     for (let index = 1; index < args.length; index++) {
       const key = args[index]; if (key === "--json") continue;
@@ -106,6 +109,7 @@ export async function runPhoneCli(args: string[], request: (command: ProfilePilo
     allowed.inspect = ["--device", "--package"];
     allowed.packages = ["--device", "--scope", "--filter"];
     allowed.diagnose = ["--device"];
+    allowed.readiness = ["--device", "--backend"];
     allowed.exec = ["--device", "--params-file", "--mode", "--controller", "--task", "--backend"];
     allowed.host = ["--params-file"];
     allowed.app = ["--device", "--params-file", "--backend", "--controller"];
@@ -116,13 +120,15 @@ export async function runPhoneCli(args: string[], request: (command: ProfilePilo
     const backend = flags.get("--backend") || "app";
     if (!["app", "basic"].includes(backend)) throw new Error("--backend 必须为 app 或 basic。");
     for (const key of flags.keys()) if (!allowed[method].includes(key)) throw new Error(`${method} 不支持 ${key}`);
-    if (method === "exec") return await executeAdbCli(flags, request, io);
-    if (method === "app") return await phoneAppCli(flags, request, io);
+    if (method === "exec") { dispatching = true; return await executeAdbCli(flags, request, io); }
+    if (method === "app") { dispatching = true; return await phoneAppCli(flags, request, io); }
     if (method === "install") {
+      dispatching = true;
       const data = await installPhoneApkCli(flags, request);
       io.stdout.write(JSON.stringify({ ok: true, data }, null, 2) + "\n"); return 0;
     }
     if (method === "run") {
+      dispatching = true;
       const data = await runPhoneFlowCli(flags, request) as { ok: boolean };
       io.stdout.write(JSON.stringify({ ok: data.ok, data }, null, 2) + "\n"); return data.ok ? 0 : 1;
     }
@@ -156,13 +162,26 @@ export async function runPhoneCli(args: string[], request: (command: ProfilePilo
       params = method === "start" ? { id, mode: flags.get("--mode") || "control", controller: flags.get("--controller") || "本机 CLI", task: flags.get("--task") || "" } : method === "rename" ? { id, name: flags.get("--name") } : method === "inspect" ? { id, packageName: flags.get("--package") } : method === "packages" ? { id, scope: flags.get("--scope"), filter: flags.get("--filter") } : { id };
     }
     if (method === "connect") params = { ...(params as { id: string }), update: false };
-    const response = await request({ action: "phone", method: backend === "basic" ? `basic-${method}` : method === "inspect" ? "package-info" : method, params });
+    if (method === "readiness") params = { ...(params as { id: string }), backend };
+    if (method === "action") {
+      const p = params as Record<string, unknown>;
+      if (!p || typeof p !== "object" || typeof p.sessionId !== "string" || !p.sessionId.trim() ||
+          typeof p.id !== "string" || !Number.isInteger(p.generation) || typeof p.requestId !== "string") {
+        throw Object.assign(new Error("action 需要成功 start/list 返回的 id、sessionId、generation 和新的 requestId；start 失败时停止后续调用，先运行 phone readiness。"), { code: "PHONE_INVALID_REQUEST" });
+      }
+    }
+    dispatching = true;
+    const response = await request({ action: "phone", method: method === "readiness" ? method : backend === "basic" ? `basic-${method}` : method === "inspect" ? "package-info" : method, params });
     if (response.ok && flags.has("--output")) {
       const data = response.data as { result?: { base64?: string; mime?: string }; state?: unknown };
       if (!["image/jpeg", "image/png"].includes(data.result?.mime || "") || typeof data.result?.base64 !== "string") throw new Error("此操作未返回截图。");
       await fs.writeFile(flags.get("--output")!, Buffer.from(data.result.base64, "base64"));
       response.data = { state: data.state, output: flags.get("--output") };
     }
-    io.stdout.write(JSON.stringify(response, null, 2) + "\n"); return response.ok ? 0 : 1;
-  } catch (error) { io.stderr.write(JSON.stringify({ ok: false, error: (error as Error).message }) + "\n"); return 1; }
+    const result = response.ok ? response : { ...response, recovery: controlRecovery(response.error.code) };
+    io.stdout.write(JSON.stringify(result, null, 2) + "\n"); return response.ok ? 0 : 1;
+  } catch (error) {
+    const code = typeof (error as { code?: unknown })?.code === "string" ? (error as { code: string }).code : dispatching ? "PHONE_EXECUTION_ERROR" : "PHONE_INVALID_REQUEST";
+    io.stderr.write(JSON.stringify({ ok: false, code, error: (error as Error).message, recovery: controlRecovery(code) }) + "\n"); return 1;
+  }
 }

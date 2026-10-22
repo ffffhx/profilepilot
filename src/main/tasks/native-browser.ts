@@ -1,4 +1,5 @@
 import { mkdirSync, writeFileSync } from "node:fs";
+import { stat } from "node:fs/promises";
 import path from "node:path";
 import type { BrowserAction, BrowserObservation, BrowserTask } from "../../shared/tasks";
 import { browserActionSchema, type BrowserAdapter } from "./browser";
@@ -26,7 +27,10 @@ export class NativeBrowser implements BrowserAdapter {
     if (!state?.connected) throw new Error("系统 Chrome 扩展未连接，请先在扩展中连接此 Profile。");
     if (!state.taskTabs) throw new Error(NATIVE_EXTENSION_UPDATE_MESSAGE);
     if (state.ownerSessionId && state.ownerSessionId !== task.sessionId) throw new Error("这个 Profile 已由另一个任务占用。");
-    if (state.ownerSessionId && state.ownership !== "agent") throw new Error("用户正在操作浏览器，请交还后继续。");
+    if (state.ownerSessionId && state.ownership !== "agent") {
+      if (state.controlIssue) throw new NativeControlError(state.controlIssue.code, state.controlIssue.message);
+      throw new Error("用户正在操作浏览器，请交还后继续。");
+    }
     if (!state.ownerSessionId) await this.bridge.request(task.profileId, "claim", { sessionId: task.sessionId, taskTitle: task.title, ...task.nativeTarget });
   }
   syncTaskState(task: BrowserTask): void {
@@ -52,36 +56,53 @@ export class NativeBrowser implements BrowserAdapter {
   readPage(task: BrowserTask, options: PageReadOptions = {}): Promise<BrowserObservation> { return this.fast.observe(task, options); }
   resetObservation(task: BrowserTask): void { this.fast.resetSelection(task); task.observation = undefined; }
   async screenshot(task: BrowserTask, params: Record<string, unknown> = {}): Promise<any> {
-    return (await this.fast.captureScreenshot(task, params)).result;
+    const capture = await this.fast.captureScreenshot(task, params, true);
+    return { ...capture.result, capturedAt: capture.capturedAt, stable: capture.stable,
+      coordinateObservation: false };
   }
   async observe(task: BrowserTask, screenshot = false, retainScreenshot = true): Promise<BrowserObservation> {
     let observation = await this.fast.reobserve(task);
+    const availability = (): NonNullable<BrowserObservation["availability"]> => ({
+      dom: { status: "available", observedAt: observation.at || new Date().toISOString() },
+      screenshot: { status: screenshot ? "unavailable" : "not-requested" },
+      coordinates: { status: "unavailable", reason: "需要与当前观察匹配的稳定截图。" }
+    });
+    observation.availability = availability();
     // A fresh background about:blank page may have no compositor frame on
     // Windows. Its empty DOM is sufficient; requesting an image can hang Chrome
     // until the task is incorrectly interrupted before its first navigation.
     if (screenshot && observation.url === "about:blank") {
       observation.snapshot += "\n当前是新建的空白任务页，没有可截图的内容。请根据任务打开目标网站。";
+      observation.availability.screenshot.reason = "空白任务页没有可验证的绘制内容。";
       return observation;
     }
     if (screenshot) {
-      let result, visual;
+      let result, visual, capturedAt, stable, captureState;
       try {
-        ({ result, visual } = await this.fast.captureScreenshot(task));
+        ({ result, visual, capturedAt, stable, captureState } = await this.fast.captureScreenshot(task, {}, true));
         // Capturing can wake a hidden renderer and replace its virtualized DOM.
         // Bind refs/version to that final page, never to the pre-capture list.
         observation = await this.fast.reobserve(task);
-        if (JSON.stringify(await this.fast.visualState(task)) !== JSON.stringify(visual)) throw new Error("截图之后页面坐标已变化，无法绑定当前画面。");
+        stable = stable !== false && JSON.stringify(await this.fast.visualState(task)) === JSON.stringify(visual);
+        if (stable && captureState) stable = JSON.stringify(await this.fast.captureState(task)) === JSON.stringify(captureState);
       } catch (error) {
         const state = this.bridge.states().find(s => s.profileId === task.profileId);
         // Keep the successful DOM read when only the image is unavailable.
         // A real takeover, disconnect or session change still stops the task.
         if (!state?.connected || state.ownerSessionId !== task.sessionId || state.ownership !== "agent" || state.pausedByBrowser) throw error;
         observation = await this.fast.reobserve(task);
+        observation.availability = availability();
+        observation.availability.screenshot = { status: "unavailable", code: (error as { code?: string })?.code || "NATIVE_RENDER_UNAVAILABLE",
+          reason: (error instanceof Error ? error.message : String(error)).slice(0, 1000) };
         observation.snapshot += "\n截图暂不可用。请根据本次读取的页面文字和控件继续；不能据此判断页面的视觉外观。";
         return observation;
       }
       observation.screenshotDataUrl = `data:image/png;base64,${result.data}`;
-      Object.assign(observation.fast!, { visual });
+      observation.availability = availability();
+      observation.availability.screenshot = { status: "available", capturedAt: capturedAt || new Date().toISOString() };
+      observation.availability.coordinates = stable ? { status: "available" } : { status: "unavailable", reason: "页面在截图期间变化或仍有动画；图片可查看，请通过新观察的元素引用操作，不能据此点击坐标。" };
+      if (stable) Object.assign(observation.fast!, { visual, captureState });
+      else observation.snapshot += "\n当前截图可查看；页面仍在变化，坐标操作不可用，请按本次元素引用操作。";
       observation.viewport = { width: visual.width, height: visual.height, x: visual.x, y: visual.y, scrollWidth: visual.scrollWidth, scrollHeight: visual.scrollHeight };
       if (retainScreenshot) {
         const dir = taskArtifactDirectory(this.artifactRoot, task.id);
@@ -151,6 +172,20 @@ export class NativeBrowser implements BrowserAdapter {
   private async assertFresh(task: BrowserTask): Promise<void> {
     await this.fast.assertFresh(task);
   }
+  async uploadFiles(task: BrowserTask, ref: string, files: string[]): Promise<string> {
+    for (const file of files) {
+      if (!path.isAbsolute(file) || !(await stat(file).catch(() => undefined))?.isFile()) throw new NativeControlError("NATIVE_INVALID_REQUEST", "upload.files 必须指向已有的绝对文件路径。");
+    }
+    await this.assertFresh(task);
+    const candidate = task.observation?.fast?.candidates.find(c => c.ref === ref.replace(/^@/, ""));
+    if (candidate?.role !== "fileupload" || (files.length > 1 && !candidate.multiple)) throw new NativeControlError("NATIVE_INVALID_REQUEST", "请选择观察中的文件上传控件；多个文件需要 multiple 控件。");
+    const { result, frame } = await this.fast.node(task, ref.replace(/^@/, ""), "node => node", false);
+    const objectId = result?.objectId;
+    if (!objectId) throw new NativeControlError("NATIVE_OBSERVATION_STALE", "上传控件已失效，请重新观察。");
+    try { await this.raw(task, "DOM.setFileInputFiles", { objectId, files }, frame.session); }
+    finally { await this.raw(task, "Runtime.releaseObject", { objectId }, frame.session).catch(() => {}); }
+    return "文件已选择；请重新观察核查文件名和上传结果。";
+  }
   async download(task: BrowserTask, input: NativeDownloadInput): Promise<{ download: NativeDownloadItem; file?: import("../../shared/tasks").TaskAttachment }> {
     const operation = input.operation || "start", timeoutMs = input.timeoutMs ?? 60000;
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300000) throw new Error("下载等待时间必须在 1–300000 毫秒内。");
@@ -195,7 +230,7 @@ export class NativeBrowser implements BrowserAdapter {
     const viewport = task.observation.viewport;
     if (!viewport || !Number.isFinite(input.x) || !Number.isFinite(input.y) || input.x < 0 || input.y < 0 || input.x >= viewport.width || input.y >= viewport.height) throw new Error("指针坐标超出截图视口。");
     await this.request(task, "preparePointer");
-    await this.fast.pointer(task, input, visual);
+    await this.fast.pointer(task, input, visual, (task.observation?.fast as any)?.captureState);
     return "指针操作已执行；请重新观察确认结果。";
   }
   dispose(): void { this.stopEvents(); }

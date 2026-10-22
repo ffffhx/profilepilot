@@ -33,7 +33,7 @@ export function serviceRequest(connection: BrowserServiceConnection, method: str
       res.on('end', () => {
         try {
           const value = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-          if (!value.ok) reject(new NativeControlError(value.code || 'NATIVE_BROWSER_ERROR', value.error || '浏览器服务请求失败。'));
+          if (!value.ok) reject(new NativeControlError(value.code || 'NATIVE_BROWSER_ERROR', value.error || '浏览器服务请求失败。', value.recovery));
           else resolve(value);
         } catch (error) { reject(error); }
       });

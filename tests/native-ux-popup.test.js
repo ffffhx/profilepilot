@@ -2,6 +2,17 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { popupFixture } = require('./helpers/native-popup-fixture.cjs');
 
+test('connection failures show their cause while a real takeover remains a normal pause', async () => {
+  const f = await popupFixture([], { state: { sessionId: 'one', tabId: 7, url: 'https://fixture.test', tabTitle: 'Login', ownership: 'user', pausedByBrowser: true,
+    controlIssue: { code: 'NATIVE_EXTENSION_FRAME_CONFLICT', message: 'Chrome 阻止调试含有其他扩展内容的页面。' } } });
+  assert.equal(f.element('#control-state').textContent, '连接受阻');
+  assert.match(f.element('#page-note').textContent, /其他扩展/);
+  f.setState({ controlIssue: undefined }); await f.poll();
+  assert.equal(f.element('#control-state').textContent, '已暂停');
+  assert.equal(f.element('#page-note').textContent, '浏览器操作已暂停');
+  assert.ok(f.calls.every(c => c.method === 'state'), 'diagnostics never take control');
+});
+
 test('popup and side panel contain only connection and controlled-page UI after pairing', async () => {
   for (const sidePanel of [false, true]) {
     const f = await popupFixture([], { sidePanel, state: { installationMode: 'temporary' } });

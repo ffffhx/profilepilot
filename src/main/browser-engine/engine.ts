@@ -1,11 +1,12 @@
 import { chromium, type Browser, type BrowserContext, type Page, type Frame, type Locator, type Dialog, type Request, type Response } from "playwright-core";
-import { mkdir, mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { EngineError, type EngineCommand, required, option, has, positiveNumber, splitCommand, parseEngineCommand } from "./arguments";
 import { EngineReferences } from "./snapshot";
 import { EngineTransport } from "./transport";
+import { parseCommonBrowserAction } from "../../shared/browser-contract";
 
 interface NetworkRecord { id: string; url: string; method: string; type: string; status?: number; failure?: string; request: Request; response?: Response }
 export class BrowserEngine {
@@ -163,6 +164,8 @@ export class BrowserEngine {
     const { page, frame, context } = this.current();
     const arg = (i: number, label: string) => required(args[i], label);
     switch (verb) {
+      case "observe": return this.observeCommon(args);
+      case "action": return this.actionCommon(args);
       case "open": case "goto": case "navigate": {
         const url = arg(0, "URL");
         await frame.goto(/^[a-z][a-z0-9+.-]*:/i.test(url) ? url : `https://${url}`, { waitUntil: "domcontentloaded" });
@@ -262,6 +265,54 @@ export class BrowserEngine {
         throw new EngineError("Invalid clipboard command", "BROWSER_INVALID_ARGUMENTS");
       default: throw new EngineError(`Unknown browser command: ${verb}`, "BROWSER_INVALID_ARGUMENTS");
     }
+  }
+  private async observeCommon(args: string[]) {
+    const { page, frame } = this.current();
+    const input = JSON.parse(option(args, "--params") || "{}");
+    const output = option(args, "--output");
+    let image: Buffer | undefined, capturedAt: string | undefined, imageError: string | undefined;
+    if (input.screenshot === true || output) {
+      try { image = await page.screenshot({ type: "png" }); capturedAt = new Date().toISOString(); }
+      catch (error) {
+        // Check the same guarded connection before returning a DOM-only result.
+        await this.transport!.request("Browser.getVersion");
+        imageError = error instanceof Error ? error.message : String(error);
+      }
+    }
+    const observed = await this.references.snapshot(page, frame, []);
+    const at = new Date().toISOString();
+    if (output && image) await writeFile(output, image, { mode: 0o600 });
+    const observation = { version: observed.version, at, url: frame.url(), title: await page.title(), snapshot: observed.snapshot,
+      fast: { candidates: Object.entries(observed.refs).map(([ref, item]) => ({ ref, role: item.role, label: item.name,
+        kind: ["textbox", "searchbox", "spinbutton"].includes(item.role) ? "fill" : item.role === "combobox" ? "select" : "click" })) },
+      availability: { dom: { status: "available", observedAt: at },
+        screenshot: { status: image ? "available" : input.screenshot || output ? "unavailable" : "not-requested", capturedAt, reason: imageError },
+        coordinates: { status: "unavailable", reason: "通过本次元素引用操作；独立截图不作为坐标授权。" } },
+      ...(image ? output ? { screenshotPath: path.resolve(output) } : { screenshotDataUrl: `data:image/png;base64,${image.toString("base64")}` } : {}) };
+    if (output && !image) throw Object.assign(new EngineError("截图不可用；partialResult 包含本次 DOM，不使用已有的输出文件。", "BROWSER_RENDER_UNAVAILABLE"), { partialResult: observation });
+    return observation;
+  }
+  private async actionCommon(args: string[]) {
+    const action = parseCommonBrowserAction(JSON.parse(required(option(args, "--params"), "--params")));
+    if (!this.references.version || action.version !== this.references.version) throw new EngineError("动作未执行：version 已失效，请重新 observe。", "BROWSER_STALE_REF");
+    const { page, frame } = this.current();
+    try {
+      const locator = action.ref ? this.references.locator(page, frame, action.ref) : undefined;
+      if (action.kind === "press") {
+        if (locator) await locator.press(action.value!); else await page.keyboard.press(action.value!);
+      } else if (action.kind === "scroll") {
+        const direction = action.value || "down";
+        const delta = { up: [0, -600], down: [0, 600], left: [-600, 0], right: [600, 0] }[direction]!;
+        if (locator) await locator.evaluate((el, [left, top]) => el.scrollBy({ left, top, behavior: "instant" }), delta);
+        else await frame.evaluate(([left, top]) => window.scrollBy({ left, top, behavior: "instant" }), delta);
+      } else {
+        if (action.kind === "upload") for (const file of action.files!) {
+          if (!path.isAbsolute(file) || !(await stat(file).catch(() => undefined))?.isFile()) throw new EngineError("upload.files 必须指向已有的绝对文件路径。", "BROWSER_INVALID_ARGUMENTS");
+        }
+        await this.interact(locator!, action.kind, action.kind === "upload" ? action.files! : action.value !== undefined ? [action.value] : []);
+      }
+      return { action: action.kind, actionOutcome: "completed", nextStep: "reobserve" };
+    } finally { this.references.clear(); }
   }
   private async interact(locator: Locator, verb: string, args: string[]): Promise<any> {
     switch (verb) {
@@ -395,7 +446,7 @@ export class BrowserEngine {
   }
   private async screenshot(args: string[]): Promise<any> {
     const { page, frame } = this.current();
-    const destination = path.resolve(args[0] && !args[0].startsWith("-") ? args[0] : path.join(option(args, "--screenshot-dir") || os.tmpdir(), `profilepilot-${randomUUID()}.png`));
+    const destination = path.resolve(option(args, "--output") || (args[0] && !args[0].startsWith("-") ? args[0] : path.join(option(args, "--screenshot-dir") || os.tmpdir(), `profilepilot-${randomUUID()}.png`)));
     await mkdir(path.dirname(destination), { recursive: true });
     const quality = option(args, "--screenshot-quality", "--quality");
     const type = option(args, "--screenshot-format") || (/\.jpe?g$/i.test(destination) ? "jpeg" : "png");
@@ -423,7 +474,7 @@ export class BrowserEngine {
     } finally {
       if (snapshot) await page.evaluate(id => document.getElementById(id)?.remove(), overlayId).catch(() => {});
     }
-    return { path: destination, ...(snapshot ? { refs: snapshot.refs, snapshot: snapshot.snapshot } : {}) };
+    return { path: destination, capturedAt: new Date().toISOString(), coordinateObservation: false, ...(snapshot ? { refs: snapshot.refs, snapshot: snapshot.snapshot } : {}) };
   }
   private async download(selector: string, destination: string): Promise<any> {
     const { page } = this.current();

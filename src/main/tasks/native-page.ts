@@ -138,7 +138,7 @@ export class NativePage {
       return this.cdp(task, method, params, frame.session);
     });
   }
-  private async synchronizePaint(task: BrowserTask, frame?: Frame): Promise<void> {
+  private async synchronizePaint(task: BrowserTask, frame?: Frame, settle = true): Promise<void> {
     // Hidden Chrome renderers can update scrollY without dispatching scroll,
     // rAF or IntersectionObserver. A screenshot requests compositor frames; it
     // does not focus the tab. Wait for two quiet frames after that wake-up so
@@ -158,7 +158,7 @@ export class NativePage {
       const tick=()=>{
         const animating=document.getAnimations().some(a=>a.playState==='running'&&Number.isFinite(a.effect?.getComputedTiming().endTime));
         quiet=!animating&&revision===previous?quiet+1:0;previous=revision;
-        if(quiet>=2){state.ready=true;observer.disconnect();}else raf=requestAnimationFrame(tick);
+         if(!${settle}||quiet>=2){state.ready=true;observer.disconnect();}else raf=requestAnimationFrame(tick);
       };
       window[key]=state;observer.observe(document,{subtree:true,childList:true,attributes:true,characterData:true});
       timer=setTimeout(()=>{state.dispose();delete window[key]},11000);raf=requestAnimationFrame(tick);return true;
@@ -197,7 +197,7 @@ export class NativePage {
     if (result.exceptionDetails || !result.result?.value) throw new Error("无法确认截图的页面坐标。");
     return result.result.value;
   }
-  private async captureState(task: BrowserTask): Promise<{ visual: any; frames: any[] }> {
+  async captureState(task: BrowserTask): Promise<{ visual: any; frames: any[] }> {
     const state = await this.discover(task), frames = [];
     for (const frame of [...state.frames.values()].sort((a, b) => a.id.localeCompare(b.id))) {
       const response = await this.cdp(task, "Runtime.evaluate", { expression: `/*profilepilot-capture-state*/(()=>{
@@ -213,17 +213,20 @@ export class NativePage {
           state.roots=roots;
         }
         const ids=roots.map(root=>{let id=state.ids.get(root);if(!id){id=state.next++;state.ids.set(root,id)}return id});
-        return {url:location.href,document:performance.timeOrigin,revision:state.revision,roots:ids};
+        return {url:location.href,document:performance.timeOrigin,revision:state.revision,roots:ids,
+          animating:document.getAnimations().some(a=>a.playState==='running')};
       })()`, contextId: await this.context(task, frame), returnByValue: true }, frame.session);
       if (response.exceptionDetails || !response.result?.value) throw new NativePaintError("无法确认截图的 frame 页面状态。");
       frames.push({ id: frame.id, parentId: frame.parentId, session: frame.session, loaderId: frame.loaderId, ...response.result.value });
     }
     return { visual: await this.visualState(task), frames };
   }
-  async captureScreenshot(task: BrowserTask, params: Record<string, unknown> = {}): Promise<{ result: any; visual: any }> {
+  async captureScreenshot(task: BrowserTask, params: Record<string, unknown> = {}, allowDynamic = false): Promise<{ result: any; visual: any; capturedAt: string; stable: boolean; captureState: unknown }> {
     if ((await this.visualState(task)).url === "about:blank") throw new NativePaintError("当前是空白任务页，没有可截图的内容。请先打开目标网站。");
     for (let attempt = 0; attempt < 3; attempt++) {
-      await this.synchronizePaint(task);
+      // A visual inspection needs a fresh compositor frame, not an entirely
+      // motionless document. Coordinates still require a matching stable state.
+      await this.synchronizePaint(task, undefined, !allowDynamic);
       const before = await this.captureState(task);
       let result;
       try { result = await this.cdp(task, "Page.captureScreenshot", { format: "png", captureBeyondViewport: false, ...params }); }
@@ -235,15 +238,18 @@ export class NativePage {
         throw error;
       }
       if (typeof result.data !== "string" || !result.data) throw new NativePaintError("浏览器未返回画面。");
-      await this.synchronizePaint(task);
+      const capturedAt = new Date().toISOString();
+      if (!allowDynamic) await this.synchronizePaint(task);
       const after = await this.captureState(task);
-      if (JSON.stringify(before) === JSON.stringify(after)) return { result, visual: after.visual };
+      const stable = JSON.stringify(before) === JSON.stringify(after) && !after.frames.some(frame => frame.animating);
+      if (stable || allowDynamic) return { result, visual: after.visual, capturedAt, stable, captureState: after };
     }
     throw new NativePaintError("截图期间页面持续变化，未返回过时画面。请等待页面稳定后再次截图。");
   }
-  async pointer(task: BrowserTask, input: { kind: "click" | "hover"; x: number; y: number }, expectedVisual: any): Promise<void> {
+  async pointer(task: BrowserTask, input: { kind: "click" | "hover"; x: number; y: number }, expectedVisual: any, expectedCapture?: unknown): Promise<void> {
     await this.synchronizePaint(task);
     await this.assertFresh(task);
+    if (expectedCapture && JSON.stringify(await this.captureState(task)) !== JSON.stringify(expectedCapture)) throw new Error("截图内容已变化，坐标动作未执行；请重新观察。");
     const state = await this.discover(task), root = [...state.frames.values()].find(frame => !frame.parentId);
     if (!root || JSON.stringify(await this.visualState(task)) !== JSON.stringify(expectedVisual)) throw new Error("截图页面或视口已变化，请重新截图后执行指针操作。");
     await this.cdp(task, "Emulation.setFocusEmulationEnabled", { enabled: true });
@@ -328,7 +334,9 @@ export class NativePage {
       const result = await this.scoped(task, frame).execute({ ...task, observation: localObservation }, { ...action, ref: local }, pointer ? async () => {
         // Scroll both ancestor frames and the target before waiting for paint.
         // Validate frame ownership and the target again before dispatching once.
-        await this.synchronizePaint(task, frame);
+        // Ref actions revalidate the target and hit-test after this fresh frame;
+        // unrelated live widgets need not stop mutating for a click to work.
+        await this.synchronizePaint(task, frame, false);
         await this.discover(task);
         this.binding(task);
       } : undefined);

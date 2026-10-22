@@ -8,6 +8,11 @@ import { ensureChatService } from "./cli/service-launcher";
 import { runPhoneCli } from "./phones/cli";
 import { runAdbCli, runPhoneWrap } from "./phones/adb-wrapper";
 import { runBrowserCli } from "./browser-cli";
+import path from "node:path";
+import { createBrowserDoctor, type DoctorCheck } from "./control-doctor";
+import { RUNNING_CONTROL_BUILD } from "./runtime-identity";
+import { phoneReadiness } from "../shared/phone-readiness";
+import type { PhonesSnapshot } from "../shared/phones";
 import { parseAgentCliArgs, runAgentCli, type AgentCliRuntime, type AgentCliTransport, type ParsedAgentCliCommand } from "./profilepilot-agent-cli";
 import {
   getDiagnosticLogStats,
@@ -50,6 +55,8 @@ interface ParsedLogsCliCommand {
 interface ParsedDoctorCliCommand {
   local: "doctor";
   json: boolean;
+  profileId?: string;
+  deviceId?: string;
 }
 
 export type ParsedCliCommand = ParsedManagementCliCommand | ParsedLogsCliCommand | ParsedDoctorCliCommand | ParsedAgentCliCommand;
@@ -127,7 +134,7 @@ export async function runProfilePilotCli(
     return 0;
   }
   if ("local" in parsed && parsed.local === "doctor") {
-    const report = await createDoctorReport(homeDir, env);
+    const report = await createDoctorReport(homeDir, env, parsed);
     if (parsed.json) io.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     else io.stdout.write(formatDoctorReport(report));
     return report.status === "error" ? COMMAND_FAILED_EXIT_CODE : 0;
@@ -168,8 +175,16 @@ export function parseProfilePilotCliArgs(args: string[]): ParsedCliCommand {
   if (args[0] === "logs") return parseLogsArgs(args.slice(1), json);
   if (args[0] === "doctor") {
     const extra = args.slice(1).filter((arg) => arg !== "--json");
-    if (extra.length) throw new Error(`doctor 不支持参数：${extra.join(" ")}`);
-    return { local: "doctor", json };
+    const parsed: ParsedDoctorCliCommand = { local: "doctor", json };
+    for (let i = 0; i < extra.length; i += 2) {
+      const value = extra[i + 1];
+      if (!value || value.startsWith("--")) throw new Error(`${extra[i]} 需要目标参数。`);
+      if (extra[i] === "--profile" && !parsed.profileId) parsed.profileId = value;
+      else if (extra[i] === "--device" && !parsed.deviceId) parsed.deviceId = value;
+      else throw new Error(`doctor 不支持参数：${extra[i]}`);
+    }
+    if (parsed.profileId && parsed.deviceId) throw new Error("请一次指定一个 --profile 或 --device；不指定则检查全部连接概况。");
+    return parsed;
   }
   const positionals = args.filter((arg) => arg !== "--json" && arg !== "--yes");
   if (positionals[0] === "status" && positionals.length === 1) {
@@ -353,6 +368,10 @@ export interface ProfilePilotDoctorReport {
   status: "ok" | "warning" | "error";
   checked_at: string;
   cli_version: string;
+  build: typeof RUNNING_CONTROL_BUILD;
+  checks: DoctorCheck[];
+  browser: Awaited<ReturnType<typeof createBrowserDoctor>>;
+  phones: { devices: unknown[]; error?: string };
   runtime: {
     node: string;
     platform: string;
@@ -364,6 +383,7 @@ export interface ProfilePilotDoctorReport {
     protocol_version: number | null;
     pid: number | null;
     error: string | null;
+    build?: { buildId?: string; entry?: string; runtime?: string } | null;
   };
   logs: ReturnType<typeof getDiagnosticLogStats> & {
     recent_errors: number;
@@ -373,7 +393,8 @@ export interface ProfilePilotDoctorReport {
 
 export async function createDoctorReport(
   homeDir = os.homedir(),
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
+  target: { profileId?: string; deviceId?: string } = {}
 ): Promise<ProfilePilotDoctorReport> {
   let appStatus: ProfilePilotDoctorReport["app"];
   try {
@@ -385,7 +406,8 @@ export async function createDoctorReport(
       version: typeof data.app_version === "string" ? data.app_version : null,
       protocol_version: typeof data.protocol_version === "number" ? data.protocol_version : null,
       pid: typeof data.pid === "number" ? data.pid : null,
-      error: null
+      error: null,
+      build: data.build && typeof data.build === "object" ? data.build : null
     };
   } catch (error) {
     const candidate = error as NodeJS.ErrnoException;
@@ -407,10 +429,28 @@ export async function createDoctorReport(
     limit: 5_000
   });
   const latestError = recentErrors.at(-1);
+  const checks: DoctorCheck[] = [];
+  const aligned = RUNNING_CONTROL_BUILD.buildId && appStatus.build?.buildId === RUNNING_CONTROL_BUILD.buildId;
+  checks.push({ id: "desktop-build", status: aligned ? "ok" : "warning", message: aligned ? "桌面与 CLI 的实际运行构建一致。" : "桌面与 CLI 构建不同或尚未确认。",
+    ...(aligned ? {} : { nextStep: "核对运行路径，更新 CLI 后重启桌面；浏览器扩展路径可独立于桌面运行。" }) });
+  const browserRoot = env.PROFILEPILOT_NATIVE_ROOT || (env.CPM_DATA_DIR ? path.join(env.CPM_DATA_DIR, "browser-tasks") : homeDir !== os.homedir() ? path.join(homeDir, ".profilepilot", "browser-tasks") : undefined);
+  const [browser, phones] = await Promise.all([
+    createBrowserDoctor({ root: browserRoot, profileId: target.profileId }),
+    (async (): Promise<ProfilePilotDoctorReport["phones"]> => {
+      if (!appStatus.running) return { devices: [], error: "手机控制需要桌面服务运行。" };
+      try {
+        const response = await requestProfilePilotManagement(target.deviceId ? { action: "phone", method: "readiness", params: { id: target.deviceId } } : { action: "phone", method: "list" }, homeDir, env, target.deviceId ? 20000 : 6000);
+        if (!response.ok) return { devices: [], error: response.error.message };
+        return { devices: target.deviceId ? [response.data] : (response.data as PhonesSnapshot).devices.map(device => phoneReadiness(device)) };
+      } catch (error) { return { devices: [], error: error instanceof Error ? error.message : String(error) }; }
+    })()
+  ]);
+  const targetFailed = target.profileId && browser.status === "error" || target.deviceId && (phones.error || phones.devices.some(d => !(d as { readyToStart?: boolean }).readyToStart));
   return {
-    status: appStatus.running ? (recentErrors.length ? "warning" : "ok") : "warning",
+    status: targetFailed ? "error" : !appStatus.running || recentErrors.length || checks.some(c => c.status !== "ok") || browser.status !== "ok" ? "warning" : "ok",
     checked_at: new Date().toISOString(),
     cli_version: PROFILEPILOT_CLI_VERSION,
+    build: RUNNING_CONTROL_BUILD, checks, browser, phones,
     runtime: {
       node: process.version,
       platform: process.platform,
@@ -442,6 +482,12 @@ function formatDoctorReport(report: ProfilePilotDoctorReport): string {
     `ProfilePilot Doctor：${state}`,
     `桌面应用：${app}`,
     `CLI：v${report.cli_version} · Node ${report.runtime.node} · ${report.runtime.platform}/${report.runtime.arch}`,
+    `CLI 路径：${report.build.entry}`,
+    ...report.checks.map(check => `${check.id}：${check.message}${check.nextStep ? ` ${check.nextStep}` : ""}`),
+    `浏览器诊断：${report.browser.status} · ${report.browser.profiles.length} 个目标`,
+    ...report.browser.checks.filter(check => check.status !== "ok").map(check => `${check.id}：${check.message} ${check.nextStep || ""}`),
+    ...report.browser.profiles.flatMap(profile => profile.checks.filter(check => check.status !== "ok").map(check => `${profile.profileId} / ${check.id}：${check.message} ${check.nextStep || ""}`)),
+    `手机诊断：${report.phones.devices.length} 个目标${report.phones.error ? ` · ${report.phones.error}` : ""}（完整能力信息使用 --json）`,
     `诊断日志：${report.logs.files} 个文件 · ${formatBytes(report.logs.bytes)} · 最近 24 小时 ${report.logs.recent_errors} 个错误`,
     `日志路径：${report.logs.active_file}${latest}`,
     ""
@@ -588,7 +634,7 @@ function helpText(): string {
   ppilot <run|chat|list|show|watch|reply|resume|pause|cancel|takeover|send> [参数]
   ppilot chat --help
   ppilot status [--json]
-  ppilot doctor [--json]
+  ppilot doctor [--profile PROFILE_ID | --device DEVICE_ID] [--json]
   ppilot logs [--level <级别>] [--since <时间>] [--limit <数量>] [--follow] [--json]
   ppilot profile list [--json]
   ppilot profile get <名称|ID> [--json]

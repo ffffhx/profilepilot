@@ -5,6 +5,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { PHONE_PROTOCOL, type PhoneDevice, type PhonesSnapshot, type PhoneSessionState, type PhoneAction, type PhoneActionInput, type PhoneActionResult } from "../../shared/phones";
 import { groupPhoneDevices } from "../../shared/phone-devices";
+import { phoneReadiness, type PhoneRuntimeEvidence } from "../../shared/phone-readiness";
 import type { PhoneSetting } from "../../shared/phones";
 import type { PhoneScreenFrame } from "../../shared/phones";
 import { Adb, parseAdbDevices, deviceShell, phoneRequest, validateDeviceId, type AdbRunner } from "./adb";
@@ -218,6 +219,7 @@ export class PhonesService {
         const output = await this.adb.run(["connect", local], 10000);
         if (!/connected to|already connected/i.test(output)) throw new Error("本机模拟器尚未连接");
         await this.refresh();
+        if (this.devices.get(local)?.connection !== "device") await this.refresh();
         return this.connected(local);
       }
       const find = async () => {
@@ -240,6 +242,9 @@ export class PhonesService {
         found = await find();
       }
       await this.refresh();
+      // refresh() can join a desktop poll begun before this AVD connected.
+      // Finish that poll and obtain one current snapshot before reporting failure.
+      if (this.devices.get(found.id)?.connection !== "device") await this.refresh();
       return this.connected(found.id);
     } finally { this.emulatorBusy = false; }
   }
@@ -327,6 +332,31 @@ export class PhonesService {
     if (this.refreshing) await this.refreshing;
     this.device(id).appInstallation = undefined;
     return this.refresh();
+  }
+  async readiness(id: string, backend: "app" | "basic" = "app") {
+    await this.refresh();
+    const device = this.snapshot().devices.find(d => d.id === id);
+    if (!device) throw Object.assign(new Error("未找到指定设备，请先运行 ppilot phone list。"), { code: "PHONE_INVALID_TARGET" });
+    if (device.connection !== "device" || device.transport === "cloud") return phoneReadiness(device, {}, backend);
+    const identity = device.hardwareId;
+    const abort = new AbortController(); this.inspections.add(abort);
+    try {
+      const [boot, sdk, app] = await Promise.allSettled([
+        this.adb.run(["-s", id, "shell", deviceShell(["getprop", "sys.boot_completed"])], 3000, undefined, abort.signal),
+        this.adb.run(["-s", id, "shell", deviceShell(["getprop", "ro.build.version.sdk"])], 3000, undefined, abort.signal),
+        new PhoneInspection(this.adb).app(id, this.companion.packageName, abort.signal)
+      ]);
+      abort.signal.throwIfAborted();
+      const current = this.snapshot().devices.find(d => d.id === id);
+      if (!current || current.connection !== "device" || current.hardwareId !== identity) throw Object.assign(new Error("检查期间设备身份或连接改变，请重新读取状态。"), { code: "PHONE_DISCONNECTED" });
+      const runtime: PhoneRuntimeEvidence = {
+        responding: [boot, sdk, app].some(result => result.status === "fulfilled"),
+        bootCompleted: boot.status === "fulfilled" && /^(0|1)$/.test(boot.value.trim()) ? boot.value.trim() === "1" : null,
+        sdk: sdk.status === "fulfilled" && /^\d+$/.test(sdk.value.trim()) ? Number(sdk.value.trim()) : null,
+        app: app.status === "fulfilled" ? { status: app.value.status, packageName: app.value.packageName, versionCode: app.value.versionCode, versionName: app.value.versionName } : { status: "unknown" }
+      };
+      return phoneReadiness(current, runtime, backend);
+    } finally { this.inspections.delete(abort); }
   }
   async inspectPhone(id: string, kind: "app" | "packages" | "diagnose", options: { packageName?: string; scope?: "all" | "user" | "system"; filter?: string } = {}) {
     await this.refresh();
@@ -705,7 +735,10 @@ export class PhonesService {
     const input = z.object({ mode: z.enum(["view", "control"]), controller: z.string().trim().min(1).max(120), task: z.string().trim().max(500) }).parse({ mode, controller, task });
     await this.exclusive(id, "等待手机确认会话…", async () => {
       const { state } = await this.rpc(id, "sync");
-      if (["viewing", "controlling", "executing", "paused"].includes(state.phase)) throw new Error("手机已有会话，请继续该会话或先结束。");
+      if (["viewing", "controlling", "executing", "paused"].includes(state.phase)) throw Object.assign(new Error("手机已有会话，请继续该会话或先结束。"), { code: "PHONE_SESSION_CONFLICT" });
+      const readiness = phoneReadiness({ ...this.device(id), state, companion: "ready" });
+      if (!readiness.readyToStart) throw Object.assign(new Error(readiness.checks.filter(c => c.status === "blocked").map(c => c.message).join(" ")),
+        { code: "PHONE_NOT_READY", details: readiness });
       await this.rpc(id, "start", { ...input, instanceId: state.instanceId, generation: state.generation, sessionId: randomUUID(), computer: this.computer });
     }); return structuredClone(this.device(id));
   }

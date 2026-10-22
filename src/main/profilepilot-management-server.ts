@@ -1,4 +1,7 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
+import { RUNNING_CONTROL_BUILD } from "./runtime-identity";
+import { writeControlTrace } from "./control-trace";
+import { controlRecovery } from "../shared/control-recovery";
 import { promises as fs } from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -171,6 +174,7 @@ export async function executeProfilePilotManagementCommand(
   if (command.action === "ping") {
     return {
       service: "ProfilePilot",
+      build: RUNNING_CONTROL_BUILD,
       app_version: options.appVersion || null,
       protocol_version: PROFILEPILOT_MANAGEMENT_PROTOCOL_VERSION,
       pid: process.pid
@@ -276,7 +280,8 @@ async function handleRequestLine(
     return errorResponse(id, "MANAGEMENT_COMMAND_REQUIRED", "管理请求缺少 command。" );
   }
   const startedAt = Date.now();
-  const metadata = managementCommandMetadata(request.command);
+  const metadata = { ...managementCommandMetadata(request.command), requestId: id };
+  let failureCode: string | undefined;
   writeDiagnosticLog("info", "management-cli", "command.started", `开始执行 ${request.command.action}`, metadata);
   try {
     const data = await executeProfilePilotManagementCommand(request.command, options);
@@ -287,15 +292,25 @@ async function handleRequestLine(
     return { version: 1, id, ok: true, data };
   } catch (error) {
     const candidate = error as { code?: unknown; message?: unknown };
+    failureCode = typeof candidate?.code === "string" ? candidate.code : "PROFILEPILOT_MANAGEMENT_ERROR";
     writeDiagnosticLog("error", "management-cli", "command.failed", `${request.command.action} 执行失败`, {
       ...metadata,
       duration_ms: Date.now() - startedAt,
       error_code: typeof candidate?.code === "string" ? candidate.code : null,
       // Task errors can contain model text or user answers. Diagnostic logs
       // only record the error code for these commands.
-      ...(request.command.action.startsWith("task.") ? {} : { error: typeof candidate?.message === "string" ? candidate.message : String(error) })
+      ...(request.command.action.startsWith("task.") || request.command.action === "phone" ? {} : { error: typeof candidate?.message === "string" ? candidate.message : String(error) })
     });
     return responseFromError(id, error);
+  } finally {
+    if (request.command.action === "phone") {
+      const params = request.command.params as any;
+      writeControlTrace(profilePilotManagementRoot(options.homeDir || os.homedir(), options.env || process.env), "phone", {
+        requestId: id, sessionId: params?.sessionId, target: params?.id, generation: params?.generation,
+        method: request.command.method, durationMs: Date.now() - startedAt, code: failureCode,
+        recovery: failureCode ? controlRecovery(failureCode) : undefined
+      });
+    }
   }
 }
 

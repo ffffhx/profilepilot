@@ -98,7 +98,11 @@ test('legacy error mapping distinguishes parameter names from stale observations
 test('only known visual read timeouts are render failures without changing ownership errors', () => {
   const { nativeControlError, NativeControlError } = loadCli('src/main/native-control/errors.ts');
   for (const message of ['截图无响应，已停止等待。', '实时画面无响应，已停止等待。']) {
-    assert.deepEqual(nativeControlError(new Error(message)), { code: 'NATIVE_RENDER_UNAVAILABLE', message, exitCode: 1 });
+    const result = nativeControlError(new Error(message));
+    const { recovery, ...legacy } = result;
+    assert.deepEqual(legacy, { code: 'NATIVE_RENDER_UNAVAILABLE', message, exitCode: 1 });
+    assert.equal(recovery.requiresUser, false); assert.equal(recovery.automaticReplay, false);
+    assert.equal(recovery.nextStep, 'reobserve');
     const explicit = nativeControlError(new NativeControlError('NATIVE_USER_IN_CONTROL', message));
     assert.equal(explicit.code, 'NATIVE_USER_IN_CONTROL'); assert.equal(explicit.exitCode, 75);
   }
@@ -116,7 +120,9 @@ test('exact completed-scroll paint timeout wrappers retain render classification
   for (const detail of ['截图无响应，已停止等待。', '实时画面无响应，已停止等待。']) {
     const message = wrap(detail);
     const wrapped = Object.assign(new Error(message), { code: undefined });
-    assert.deepEqual(nativeControlError(wrapped), { code: 'NATIVE_RENDER_UNAVAILABLE', message, exitCode: 1 });
+    const { recovery, ...legacy } = nativeControlError(wrapped);
+    assert.deepEqual(legacy, { code: 'NATIVE_RENDER_UNAVAILABLE', message, exitCode: 1 });
+    assert.equal(recovery.actionOutcome, 'completed'); assert.equal(recovery.automaticReplay, false);
     const explicit = nativeControlError(new NativeControlError('NATIVE_USER_IN_CONTROL', message));
     assert.equal(explicit.code, 'NATIVE_USER_IN_CONTROL'); assert.equal(explicit.exitCode, 75);
   }

@@ -1,4 +1,4 @@
-export const ENGINE_VERSION = "1.0.0";
+export const ENGINE_VERSION = "1.1.0";
 export class EngineError extends Error {
   constructor(message: string, readonly code = "BROWSER_ENGINE_ERROR") { super(message); }
 }

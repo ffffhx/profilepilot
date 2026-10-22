@@ -5,12 +5,17 @@ import { bundledBrowserExecutable } from "./tasks/browser-runtime";
 import { main as runExtensionCli, nativeControlError, nativeControlHelp } from "./native-control/cli";
 import { runCaptchaCli } from "./captcha/cli";
 import { engineHelp } from "./browser-engine/arguments";
+import { controlRecovery } from "../shared/control-recovery";
+import { createBrowserDoctor, parseBrowserDoctorArgs, waitForBrowserControl } from "./control-doctor";
+import { browserContract, commonBrowserHelp } from "../shared/browser-contract";
 
 export const browserCliHelp = `ppilot browser CLI (model invocation only for captcha recognize)
 One CLI, two connections. Connection options go BEFORE the command.
 
 Extension (default): existing signed-in Chrome tabs, independent browser service.
   ppilot browser status
+  ppilot browser --profile native:Default doctor
+  ppilot browser --profile native:Default --session TASK wait-control --timeout 30000
   ppilot browser --profile native:Default tabs
   ppilot browser --connection extension --help
 
@@ -40,7 +45,7 @@ remain compatible. A takeover/conflict never triggers a switch to another route.
 
 const VALUE_OPTIONS = new Set([
   "--session", "--profile", "--root", "--request-id", "--output", "--params", "--params-file",
-  "--tab", "--cdp-session", "--timeout", "--format", "--log-level", "--target"
+  "--tab", "--cdp-session", "--timeout", "--format", "--log-level", "--target", "--controller", "--task"
 ]);
 const INTERNAL_COMMANDS = new Set(["use", "profiles", "readiness", "status", "handoff", "wait-control", "resume", "complete", "release", "close", "cdp", "extension", "device", "bifrost"]);
 const LOCAL_COMMANDS = new Set(["help", "version", "skills"]);
@@ -107,15 +112,25 @@ export async function runBrowserCli(
 ): Promise<number> {
   try {
     const route = parseBrowserCliRoute(input);
-    const command = route.args[route.commandIndex];
+    let command = route.args[route.commandIndex];
     if (command === "captcha") return await (runtime.captcha || runCaptchaCli)(route, io, env);
     if (!input.length || route.help || command === "help" || command === "--help" || command === "-h") {
-      io.stdout.write(browserCliHelp);
+      io.stdout.write(browserCliHelp + "\n" + commonBrowserHelp);
       if (route.connection === "extension") io.stdout.write(`\n${nativeControlHelp}`);
       else io.stdout.write(`${engineHelp}\nAdditional: profiles, use NAME, readiness, cdp, extension, device, bifrost.\n`);
       return 0;
     }
+    if (["capabilities", "schema"].includes(command)) {
+      io.stdout.write(JSON.stringify({ ok: true, result: { ...browserContract, connection: route.connection,
+        runtimeVerified: false, nextStep: "运行目标 doctor/readiness 检查实际可用性。" } }) + "\n"); return 0;
+    }
+    if (route.connection === "extension" && ["doctor", "readiness", "wait-control"].includes(command)) {
+      const options = parseBrowserDoctorArgs(route.args);
+      const result = command === "wait-control" ? await waitForBrowserControl(options) : await createBrowserDoctor(options);
+      io.stdout.write(JSON.stringify({ ok: true, result }) + "\n"); return 0;
+    }
     if (route.connection === "extension") { await (runtime.extension || runExtensionCli)(route.args); return 0; }
+    if (command === "doctor") { route.args[route.commandIndex] = command = "readiness"; }
     if (!command && !route.args.includes("--version") && !route.args.includes("-V")) invalid("需要浏览器命令；运行 ppilot browser --help 查看用法。");
     if (route.args.slice(0, route.commandIndex).some(arg => arg === "--profile" || arg.startsWith("--profile="))) invalid("Gateway 使用 --cdp 选择目标；--profile 用于扩展连接。");
     const internal = INTERNAL_COMMANDS.has(command);
@@ -135,9 +150,10 @@ export async function runBrowserCli(
   } catch (error) {
     const code = (error as { code?: string })?.code;
     const failure = code === "BROWSER_CLI_INVALID_ARGUMENTS"
-      ? { code, message: (error as Error).message, exitCode: 64 }
+      ? { code, message: (error as Error).message, exitCode: 64, recovery: controlRecovery(code) }
       : nativeControlError(error);
-    io.stderr.write(`${JSON.stringify({ ok: false, code: failure.code, error: failure.message })}\n`);
+    const { message, exitCode: _exitCode, ...details } = failure;
+    io.stderr.write(`${JSON.stringify({ ok: false, ...details, error: message })}\n`);
     return failure.exitCode;
   }
 }

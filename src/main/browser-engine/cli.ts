@@ -2,10 +2,13 @@ import { readFileSync, appendFileSync } from "node:fs";
 import path from "node:path";
 import { ENGINE_VERSION, engineHelp, parseEngineCommand } from "./arguments";
 import { sendEngineCommand, serveEngine } from "./service";
+import { normalizeCommonInput } from "./common-input";
+import { controlRecovery } from "../../shared/control-recovery";
 
 export async function main(args = process.argv.slice(2)): Promise<number> {
   if (args[0] === "--engine-service") { await serveEngine(args[1], args[2]); return 0; }
   const command = parseEngineCommand(args);
+  command.args = normalizeCommonInput(command.args);
   if (command.args[0] === "version") { process.stdout.write(`ProfilePilot TypeScript browser engine ${ENGINE_VERSION}\n`); return 0; }
   if (["help", "skills"].includes(command.args[0])) { process.stdout.write(engineHelp); return 0; }
   if (command.args[0] === "eval") {
@@ -16,7 +19,10 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
     command.args = ["batch", "--commands-json", readFileSync(0, "utf8"), ...(command.args.includes("--bail") ? ["--bail"] : [])];
   }
   const response = await sendEngineCommand(command);
-  if (command.json || !response.success) process.stdout.write(JSON.stringify(response) + "\n");
+  if (["observe", "action"].includes(command.args[0])) process.stdout.write(JSON.stringify(response.success
+    ? { ok: true, result: response.data, requestId: response.requestId }
+    : { ok: false, code: response.code, message: response.error, recovery: response.recovery, requestId: response.requestId, partialResult: response.partialResult }) + "\n");
+  else if (command.json || !response.success) process.stdout.write(JSON.stringify(response) + "\n");
   else {
     const data = response.data as any;
     const value = data?.snapshot ?? data?.text ?? data?.title ?? data?.url ?? data?.path ?? data?.result ?? data;
@@ -26,7 +32,8 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
 }
 if (require.main === module) {
   void main().then(code => { process.exitCode = code; }).catch(error => {
-    const result = { success: false, code: error.code || "BROWSER_ENGINE_ERROR", error: error.message || String(error) };
+    const code = error.code || "BROWSER_ENGINE_ERROR";
+    const result = { ok: false, success: false, code, message: error.message || String(error), error: error.message || String(error), recovery: controlRecovery(code) };
     if (process.argv[2] === "--engine-service") {
       try { appendFileSync(path.join(process.argv[3], `${process.argv[4]}.engine.log`), JSON.stringify(result) + "\n", { mode: 0o600 }); } catch {}
     }

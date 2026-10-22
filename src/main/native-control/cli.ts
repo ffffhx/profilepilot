@@ -3,14 +3,15 @@ import { randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { defaultDataDir } from "../fs-util";
-import { NativeControlError, nativeControlError } from "./errors";
+import { NativeControlError, nativeControlError, nativeFailurePayload } from "./errors";
 import { isNativeControlMethod } from "./protocol";
 import { ensureBrowserService } from '../browser-service/launcher';
 import { browserServiceRoot, readBrowserServiceConnection, processAlive, serviceRequest } from '../browser-service/connection';
+import { controlRecovery } from '../../shared/control-recovery';
 export { nativeControlError } from "./errors";
 
 export function nativeControlRoot(): string { return process.env.PROFILEPILOT_NATIVE_ROOT || path.join(process.env.CPM_DATA_DIR || defaultDataDir(), "browser-tasks"); }
-export async function requestNativeControl(command: any, root = nativeControlRoot()): Promise<any> {
+export async function requestNativeControl(command: any, root = nativeControlRoot(), timeoutMs = 310000): Promise<any> {
   let connection;
   try { connection = JSON.parse(readFileSync(path.join(root, "native-control.json"), "utf8")); }
   catch { throw new Error("浏览器服务未运行，请运行 ppilot browser status 自动启动并检查连接。"); }
@@ -21,9 +22,14 @@ export async function requestNativeControl(command: any, root = nativeControlRoo
       const chunks: Buffer[] = []; let bytes = 0;
       res.on("data", chunk => { bytes += chunk.length; if (bytes > 32 * 1024 * 1024) { res.destroy(); reject(new Error("响应超过 32 MiB，请缩小读取范围。")); } else chunks.push(chunk); });
       res.on("error", reject);
-      res.on("end", () => { try { const value = JSON.parse(Buffer.concat(chunks).toString("utf8")); value.ok ? resolve(value.result) : reject(new NativeControlError(value.code || "NATIVE_BROWSER_ERROR", value.error)); } catch (error) { reject(error); } });
+      res.on("end", () => { try {
+        const value = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        if (value.ok) resolve(value.result);
+        else reject(Object.assign(new NativeControlError(value.code || "NATIVE_BROWSER_ERROR", value.error, value.recovery),
+          { requestId: value.requestId, sessionId: value.sessionId, partialResult: value.partialResult }));
+      } catch (error) { reject(error); } });
     });
-    req.setTimeout(310000, () => req.destroy(new Error("直接请求超时；先核查当前状态，不要重新触发动作。")));
+    req.setTimeout(timeoutMs, () => req.destroy(new Error("直接请求超时；先核查当前状态，不要重新触发动作。")));
     req.on("error", error => reject(new Error(`本地浏览器连接失败：${error.message}`))); req.end(body);
   });
 }
@@ -35,6 +41,7 @@ ppilot browser [--profile native:Default] [--session NAME] METHOD [--params JSON
   service start | status | stop   Manage the independent background service
   tabs                           List existing ordinary tabs
   claim --tab ID | --new-tab      Claim one Profile; returns a session ID
+  --controller NAME --task TEXT  Identify the owner/task in status (claim only)
   observe | read                 Read DOM and versioned element refs
   observe --output PATH          Save PNG and return matching version/refs/path
   action --params JSON           BrowserAction with current observation version
@@ -97,9 +104,11 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   const boolean = (name: string): boolean => { const index = args.indexOf(name); if (index < 0) return false; args.splice(index, 1); return true; };
   const profileId = flag("--profile"), sessionId = flag("--session"), root = flag("--root"), requestId = flag("--request-id") || randomUUID();
   const output = flag("--output"), cdpSessionId = flag("--cdp-session"), tabId = flag("--tab"), newTab = boolean("--new-tab");
+  const controller = flag("--controller"), task = flag("--task");
   const inline = flag("--params"), file = flag("--params-file"), stdin = boolean("--params-stdin");
   if ([inline !== undefined, file !== undefined, stdin].filter(Boolean).length > 1) invalidInput("只使用一种 params 输入方式。");
   let method = args.shift();
+  if ((controller !== undefined || task !== undefined) && method !== "claim") invalidInput("--controller 和 --task 仅用于 claim。");
   if (method === 'pair' || method === 'connect') {
     if (!profileId || !/^native:[^/\\]{1,100}$/.test(profileId) || ['.', '..'].includes(profileId.slice(7))) invalidInput('请用 --profile native:目录名称 指定要配对的 Chrome Profile。');
     if (args.length || sessionId || output || tabId || newTab || inline !== undefined || file !== undefined || stdin) invalidInput('pair/connect 只接受 --profile 和 --root。');
@@ -114,6 +123,11 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   const positional = ["open", "switch", "cdp"].includes(method!) && args[0] && !args[0].startsWith("--") ? args.shift() : undefined;
   if (args.length) invalidInput(`未知参数：${args.join(" ")}`);
   let params = readParams(inline, file, stdin);
+  if (method === "claim") {
+    if (controller !== undefined) params.controller = controller;
+    if (task !== undefined) params.task = task;
+    params.source ??= process.env.CODEX_THREAD_ID ? `codex:${process.env.CODEX_THREAD_ID}` : process.env.CLAUDE_CODE_SESSION_ID ? `claude:${process.env.CLAUDE_CODE_SESSION_ID}` : undefined;
+  }
   if (output && method === "observe") {
     if (params.screenshot === false) invalidInput("observe --output 需要截图，不能同时指定 screenshot:false。");
     params.screenshot = true;
@@ -136,7 +150,8 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   const result = await requestNativeControl({ requestId, method, profileId, sessionId, params }, root);
   if (output && method === "observe") {
     if (typeof result?.screenshotDataUrl !== "string" || !result.screenshotDataUrl.startsWith("data:image/png;base64,") || !result.version) {
-      throw new NativeControlError("NATIVE_RENDER_UNAVAILABLE", "本次观察未取得可用截图；未写入图片，请勿使用同一路径的旧截图。可先检查页面文字和控制状态。");
+      throw Object.assign(new NativeControlError("NATIVE_RENDER_UNAVAILABLE", "本次观察未取得可用截图；未写入图片，请勿使用同一路径的旧截图。partialResult 保留本次 DOM 观察。",
+        controlRecovery("NATIVE_RENDER_UNAVAILABLE", { actionOutcome: "not-applicable" })), { partialResult: result, requestId, sessionId });
     }
     const bytes = Buffer.from(result.screenshotDataUrl.slice("data:image/png;base64,".length), "base64");
     if (!bytes.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex"))) throw new NativeControlError("NATIVE_RENDER_UNAVAILABLE", "本次截图格式无效；未写入图片，请勿使用旧截图。");
@@ -144,15 +159,15 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     // Preserve the very observation used to bind pointer coordinates. A second
     // screenshot/observe would create a different visual state. Keep image bytes
     // out of the text tool result; the calling Agent opens this local artifact.
-    process.stdout.write(JSON.stringify({ ok: true, result: { ...result, screenshotDataUrl: undefined, screenshotPath: path.resolve(output) } }) + "\n");
+    process.stdout.write(JSON.stringify({ ok: true, requestId, result: { ...result, screenshotDataUrl: undefined, screenshotPath: path.resolve(output) } }) + "\n");
   } else if (output) {
     if (method !== "screenshot" || typeof result?.data !== "string") throw new Error("--output 仅支持截图。");
-    writeFileSync(output, Buffer.from(result.data, "base64"), { mode: 0o600 }); process.stdout.write(JSON.stringify({ ok: true, path: path.resolve(output) }) + "\n");
-  } else process.stdout.write(JSON.stringify({ ok: true, result }) + "\n");
+    writeFileSync(output, Buffer.from(result.data, "base64"), { mode: 0o600 }); process.stdout.write(JSON.stringify({ ok: true, requestId, path: path.resolve(output), capturedAt: result.capturedAt, stable: result.stable, coordinateObservation: false }) + "\n");
+  } else process.stdout.write(JSON.stringify({ ok: true, requestId, result }) + "\n");
 }
 export function reportNativeControlError(error: unknown): void {
   const result = nativeControlError(error);
-  process.stderr.write(JSON.stringify({ ok: false, code: result.code, error: result.message }) + "\n"); process.exitCode = result.exitCode;
+  process.stderr.write(JSON.stringify(nativeFailurePayload(error)) + "\n"); process.exitCode = result.exitCode;
 }
 // esbuild flattens this reusable module into ppilot's entry module. Its own
 // require.main guard would then also be true, executing the request twice.

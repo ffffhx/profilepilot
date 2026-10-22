@@ -53,7 +53,9 @@ test('browser route sends exactly one authenticated request through installed ma
   assert.equal(result.code, 0, result.stderr); assert.equal(requests.length, 1);
   assert.equal(requests[0].method, 'observe'); assert.equal(requests[0].sessionId, 'fixture-session');
   assert.deepEqual(requests[0].params, { layout: true });
-  assert.deepEqual(JSON.parse(result.stdout), { ok: true, result: { connected: true } });
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.requestId, requests[0].requestId);
+  assert.deepEqual({ ok: payload.ok, result: payload.result }, { ok: true, result: { connected: true } });
 });
 
 test('browser errors preserve structured exit codes and do not retry uncertain actions', async t => {

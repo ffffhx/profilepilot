@@ -441,6 +441,9 @@ export async function inspectProfilePilotCli(): Promise<ProfilePilotCliDiagnosti
         fs.readFile(profilePilotCliLauncherPath(), "utf8")
       ]);
       upToDate = source === installed && launcher === profilePilotCliLauncherContent();
+      const sourceManifest = await fs.readFile(path.join(__dirname, "control-build.json"), "utf8").catch(() => "");
+      const installedManifest = await fs.readFile(path.join(path.dirname(profilePilotCliBundlePath()), "control-build.json"), "utf8").catch(() => "");
+      upToDate = sourceManifest === installedManifest && upToDate;
       const browserRuntime = JSON.parse(await fs.readFile(path.join(path.dirname(profilePilotCliBundlePath()), "browser-runtime.json"), "utf8"));
       upToDate = browserRuntime.executable === bundledBrowserExecutable() && upToDate;
       for (const file of profilePilotPowerShellLauncherPaths()) {
@@ -483,6 +486,7 @@ async function updateProfilePilotCli(enabled: boolean): Promise<AgentIntegration
     await setInstalledAgentSkillEnabled("profilepilot", false, integrationHomeDir());
     await Promise.all([
       fs.rm(profilePilotCliBundlePath(), { force: true }),
+      fs.rm(path.join(path.dirname(profilePilotCliBundlePath()), "control-build.json"), { force: true }),
       fs.rm(path.join(path.dirname(profilePilotCliBundlePath()), "app-launch.json"), { force: true }),
       fs.rm(path.join(path.dirname(profilePilotCliBundlePath()), "browser-service-launch.json"), { force: true }),
       fs.rm(path.join(path.dirname(profilePilotCliBundlePath()), "browser-runtime.json"), { force: true }),
@@ -593,6 +597,13 @@ async function installProfilePilotCliFiles(): Promise<void> {
     );
   }
   await writeTextFileAtomic(profilePilotCliBundlePath(), source);
+  const buildManifestPath = path.join(__dirname, "control-build.json");
+  const installedManifestPath = path.join(path.dirname(profilePilotCliBundlePath()), "control-build.json");
+  try { await writeTextFileAtomic(installedManifestPath, await fs.readFile(buildManifestPath, "utf8")); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    await fs.rm(installedManifestPath, { force: true });
+  }
   await fs.chmod(profilePilotCliBundlePath(), 0o755).catch(() => undefined);
   await writeTextFileAtomic(path.join(path.dirname(profilePilotCliBundlePath()), "browser-runtime.json"), JSON.stringify({ executable: browserExecutable }));
   // The ADB wrapper is opt-in per phone task. Keep it out of global PATH;

@@ -189,6 +189,30 @@ test('continuous screenshot changes are bounded and blank task pages skip all ca
   assert.equal(blank.captures, 0);
 });
 
+test('dynamic visual capture returns a fresh image without claiming coordinate stability', async () => {
+  const f = fixture({ alwaysMutate: true });
+  const capture = await f.page.captureScreenshot(f.task, {}, true);
+  assert.equal(capture.stable, false); assert.ok(Date.parse(capture.capturedAt));
+  assert.ok(capture.result.data);
+  assert.equal(f.calls.filter(call => call.method === 'Page.captureScreenshot' && call.params.format === 'png').length, 1);
+  assert.equal(f.calls.some(call => /bringToFront|activateTarget|dispatchMouse/.test(call.method)), false);
+});
+
+test('dynamic observation keeps screenshot and DOM but rejects coordinate input', async () => {
+  const state = { profileId: 'native:test', connected: true, ownership: 'agent', ownerSessionId: 'one' };
+  const browser = new NativeBrowser({ states: () => [state], onEvent: () => () => {} }, 'unused-artifacts');
+  const task = { profileId: state.profileId, sessionId: 'one' }, visual = { width: 800, height: 600, x: 0, y: 0 };
+  browser.fast.reobserve = async () => ({ version: 'new', at: new Date().toISOString(), url: 'https://fixture.test', snapshot: 'dynamic', fast: {} });
+  browser.fast.captureScreenshot = async () => ({ result: { data: 'cG5n' }, visual, stable: false, capturedAt: '2026-10-22T01:00:00Z' });
+  browser.fast.visualState = async () => visual;
+  const observation = await browser.observe(task, true, false); task.observation = observation;
+  assert.equal(observation.availability.screenshot.status, 'available');
+  assert.equal(observation.availability.dom.status, 'available');
+  assert.equal(observation.availability.coordinates.status, 'unavailable');
+  assert.equal(observation.fast.visual, undefined);
+  await assert.rejects(browser.pointer(task, { kind: 'click', x: 1, y: 1, version: 'new' }), /截图和 version/);
+});
+
 test('navigation clears a previous query even if the task still holds the old observation', async () => {
   for (const event of [false, true, 'same-document']) {
     const f = fixture(); f.task.observation = await f.page.observe(f.task, { query: 'old-specific-result', limit: 10 });
@@ -228,7 +252,7 @@ test('NativeBrowser screenshot uses the stable entry and resetObservation discar
   const task = { observation: { version: 'old' } }; let reset = 0;
   browser.fast.resetSelection = selected => { assert.equal(selected, task); reset++; };
   browser.fast.captureScreenshot = async (selected, params) => { assert.equal(selected, task); assert.deepEqual(params, { format: 'jpeg' }); return { result: { data: 'final' } }; };
-  assert.deepEqual(await browser.screenshot(task, { format: 'jpeg' }), { data: 'final' });
+  assert.deepEqual(await browser.screenshot(task, { format: 'jpeg' }), { data: 'final', capturedAt: undefined, stable: undefined, coordinateObservation: false });
   browser.resetObservation(task); assert.equal(reset, 1); assert.equal(task.observation, undefined);
 });
 

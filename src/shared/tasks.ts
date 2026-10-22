@@ -29,6 +29,11 @@ export interface JevAssessment {
   confidence?: Record<string, number>;
 }
 export interface BrowserObservation {
+  availability?: {
+    dom: { status: "available"; observedAt: string };
+    screenshot: { status: "available" | "unavailable" | "not-requested"; capturedAt?: string; code?: string; reason?: string };
+    coordinates: { status: "available" | "unavailable"; reason?: string };
+  };
   page?: { frameId?: string; nextCursor?: string; totalControls: number; totalText: number; offset: number; textOffset: number; query?: string };
   frames?: Array<{ id: string; parentId?: string; url: string; name?: string; oopif: boolean }>;
   version: string; fingerprint: string; at: string; url: string; title: string;

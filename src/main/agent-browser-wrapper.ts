@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
+import { controlRecovery } from "../shared/control-recovery";
 import {
   accessSync,
   constants as fsConstants,
@@ -442,6 +443,7 @@ export function formatHardStopNotice(match: ProfilePilotNoticeMatch): string {
     {
       source: "ProfilePilot",
       error_code: notice.code,
+      recovery: controlRecovery(notice.code),
       hard_stop: true,
       reason: notice.reason,
       ownership: notice.ownership,
@@ -1051,6 +1053,7 @@ export function formatProfileLeaseConflict(
     {
       source: "ProfilePilot",
       error_code: "PROFILE_ALREADY_IN_USE",
+      recovery: controlRecovery("PROFILE_LEASE_CONFLICT"),
       // wrapper 已尝试过当前快照中的候选；只有候选耗尽或并发竞争失败时才会进入此 hard-stop。
       hard_stop: true,
       blocked_profile_hard_stop: true,
@@ -2806,6 +2809,7 @@ function formatGatewayFailure(error: unknown, args: string[], env: NodeJS.Proces
   return `${JSON.stringify({
     source: "ProfilePilot Gateway",
     error_code: code,
+    recovery: controlRecovery(code),
     hard_stop: true,
     message: typeof candidate?.message === "string" ? candidate.message : String(error || "Gateway error"),
     session: sessionFromAgentBrowserArgs(args, env) || null,
@@ -2848,6 +2852,7 @@ export function formatControlledRawCdpFailure(
   return `${JSON.stringify({
     source: "ProfilePilot Gateway",
     error_code: code,
+    recovery: controlRecovery(code),
     hard_stop: false,
     message: typeof candidate?.message === "string" ? candidate.message : String(error || "Raw CDP method denied"),
     session: sessionFromAgentBrowserArgs(args, env) || null,

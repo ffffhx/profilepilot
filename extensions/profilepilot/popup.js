@@ -24,7 +24,8 @@ function render(state) {
   const hasSession = Boolean(state.connected && state.sessionId);
   const hasTab = hasSession && Number.isSafeInteger(state.tabId) && state.tabId > 0 && Boolean(state.tabTitle || state.url);
   const controlling = hasTab && state.ownership === 'agent' && !state.pausedByBrowser;
-  $('#control-state').textContent = !state.connected ? '未连接' : hasTab ? controlling ? '正在控制' : '已暂停' : hasSession ? '等待页面' : '空闲';
+  const issue = hasSession && !controlling ? state.controlIssue : undefined;
+  $('#control-state').textContent = !state.connected ? '未连接' : hasTab ? controlling ? '正在控制' : issue ? '连接受阻' : '已暂停' : hasSession ? '等待页面' : '空闲';
   $('#control-state').className = 'control-state' + (controlling ? ' active' : hasTab ? ' paused' : '');
   $('#page-title').textContent = hasTab ? state.tabTitle || (state.url === 'about:blank' ? '空白标签页' : state.url) : !state.connected ? '连接后显示受控标签页' : hasSession ? '当前没有可用的受控标签页' : '当前没有受控标签页';
   let domain = '';
@@ -33,7 +34,7 @@ function render(state) {
   }
   $('#page-domain').textContent = domain;
   $('#page-domain').hidden = !domain;
-  $('#page-note').textContent = hasTab ? controlling ? '' : '浏览器操作已暂停' : !state.connected ? '正在等待浏览器服务连接' : hasSession ? '等待 Agent 选择标签页' : 'Agent 开始控制后，标签页会显示在这里';
+  $('#page-note').textContent = issue?.message || (hasTab ? controlling ? '' : '浏览器操作已暂停' : !state.connected ? '正在等待浏览器服务连接' : hasSession ? '等待 Agent 选择标签页' : 'Agent 开始控制后，标签页会显示在这里');
   $('#page-note').hidden = !$('#page-note').textContent;
   $('#status').textContent = $('#connection-label').textContent + ' · ' + $('#control-state').textContent;
 }

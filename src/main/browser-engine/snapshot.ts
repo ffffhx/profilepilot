@@ -1,4 +1,4 @@
-import { randomInt } from "node:crypto";
+import { randomInt, randomUUID } from "node:crypto";
 import type { Page, Frame, Locator } from "playwright-core";
 import { EngineError, has, option } from "./arguments";
 
@@ -6,7 +6,8 @@ import { EngineError, has, option } from "./arguments";
 export class EngineReferences {
   private next = randomInt(100000, 900000);
   private refs = new Map<string, { page: Page; locator: Locator }>();
-  clear(): void { this.refs.clear(); }
+  version?: string;
+  clear(): void { this.refs.clear(); this.version = undefined; }
   async boxes(page: Page): Promise<Array<{ ref: string; x: number; y: number; width: number; height: number }>> {
     const boxes = [];
     for (const [ref, entry] of this.refs) {
@@ -24,7 +25,7 @@ export class EngineReferences {
     }
     return frame.locator(selector);
   }
-  async snapshot(page: Page, frame: Frame, args: string[]): Promise<{ snapshot: string; refs: Record<string, { role: string; name: string }> }> {
+  async snapshot(page: Page, frame: Frame, args: string[]): Promise<{ snapshot: string; version: string; refs: Record<string, { role: string; name: string }> }> {
     const depth = option(args, "--depth", "-d");
     if (depth !== undefined && (!/^\d+$/.test(depth) || Number(depth) > 100)) throw new EngineError("Invalid snapshot depth", "BROWSER_INVALID_ARGUMENTS");
     const selector = option(args, "--selector", "-s");
@@ -54,6 +55,7 @@ export class EngineReferences {
       snapshot = snapshot.split("\n").filter(line => /^\s*-\s+(?:button|link|textbox|searchbox|combobox|checkbox|radio|switch|slider|spinbutton|tab|menuitem|option|treeitem)\b/.test(line)).join("\n");
     }
     if (has(args, "-c", "--compact")) snapshot = snapshot.split("\n").filter(line => !/^\s*-\s+(?:generic|group):?\s*$/.test(line)).join("\n");
-    return { snapshot, refs: metadata };
+    this.version = randomUUID();
+    return { snapshot, version: this.version, refs: metadata };
   }
 }

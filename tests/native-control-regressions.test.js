@@ -25,6 +25,19 @@ async function fixture(t) {
   return { service, request, calls, state, setNavigation: value => { navigation = value; } };
 }
 
+test('technical interruptions reach the CLI unchanged and never execute queued page work', async t => {
+  const { request, state, calls } = await fixture(t);
+  state.ownership = 'user'; state.pausedByBrowser = true;
+  state.controlIssue = { code: 'NATIVE_EXTENSION_FRAME_CONFLICT', message: 'Chrome 阻止调试含有其他扩展内容的页面。' };
+  const count = calls.length;
+  for (const method of ['observe', 'open', 'cdp']) {
+    await assert.rejects(request(method, { url: 'https://fixture.test', method: 'Runtime.evaluate' }), error => error.code === state.controlIssue.code);
+  }
+  assert.equal(calls.length, count);
+  state.controlIssue = undefined;
+  await assert.rejects(request('observe'), error => error.code === 'NATIVE_USER_IN_CONTROL');
+});
+
 test('direct observations omit internal guards but retain exact links and server-side action checks', async t => {
   const { service, request } = await fixture(t);
   const guard = 'private DOM guard '.repeat(2000);

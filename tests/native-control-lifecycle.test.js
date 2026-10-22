@@ -47,6 +47,33 @@ function fixture(t, intercept = async () => {}) {
   return { service, request, calls, states, publish };
 }
 
+test('owner diagnostics identify the task without treating inactivity as permission to steal it', async t => {
+  const { request, calls, publish } = fixture(t);
+  await request('claim', { controller: 'Codex', task: '检查开题附件', source: 'codex:fixture' });
+  const first = (await request('status')).sessions[0];
+  assert.equal(first.controller, 'Codex'); assert.equal(first.title, '检查开题附件');
+  assert.equal(first.source, 'codex:fixture'); assert.ok(Date.parse(first.startedAt));
+  assert.equal(first.pendingRequests, 0); assert.equal(first.ownership, 'agent');
+  await assert.rejects(request('claim', {}, { sessionId: 'other' }), e =>
+    e.code === 'NATIVE_SESSION_CONFLICT' && /检查开题附件/.test(e.message) && e.recovery.nextStep === 'wait-for-owner');
+  assert.equal(calls.filter(c => c.method === 'claim').length, 1);
+  publish({ ownership: 'user', pausedByBrowser: true, controlIssue: { code: 'NATIVE_DEBUGGER_DETACHED', message: 'closed' } });
+  const paused = (await request('status')).sessions[0];
+  assert.equal(paused.pauseReason, 'NATIVE_DEBUGGER_DETACHED');
+  assert.equal(paused.nextStep, 'inspect-state');
+});
+
+test('failed observations retain request correlation and distinguish technical recovery from handoff', async t => {
+  const { request, publish } = fixture(t);
+  await request('claim');
+  publish({ ownership: 'user', pausedByBrowser: true, controlIssue: { code: 'NATIVE_EXTENSION_FRAME_CONFLICT', message: 'extension frame' } });
+  await assert.rejects(request('observe', {}, { requestId: 'read-1' }), e => {
+    assert.equal(e.requestId, 'read-1'); assert.equal(e.sessionId, 'audit');
+    assert.equal(e.recovery.requiresUser, false); assert.equal(e.recovery.nextStep, 'check-connection');
+    assert.equal(e.recovery.actionOutcome, 'not-applicable'); return true;
+  });
+});
+
 test('complete and release invalidate a resume queued behind active page work', async t => {
   for (const action of ['complete', 'release']) await t.test(action, async t => {
     const started = deferred(), finish = deferred();

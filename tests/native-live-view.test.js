@@ -5,7 +5,7 @@ const { readFileSync } = require('node:fs');
 const { webcrypto } = require('node:crypto');
 const manifest = JSON.parse(readFileSync('extensions/profilepilot/manifest.json', 'utf8'));
 
-async function fixture() {
+async function fixture(fastTimeouts = false) {
   const calls = [], tabs = [
     { id: 1, windowId: 10, active: true, url: 'https://one.example/', title: 'One' },
     { id: 2, windowId: 20, active: true, url: 'https://two.example/', title: 'Two' },
@@ -28,10 +28,10 @@ async function fixture() {
     action: { setBadgeText: async () => {}, setBadgeBackgroundColor: async () => {} },
     debugger: { attach: async () => { throw Error('Must not attach'); }, onEvent: event(), onDetach: event() }
   };
-  const context = vm.createContext({ chrome, URL, crypto: webcrypto, WebSocket: { OPEN: 1 }, setTimeout, clearTimeout, setInterval, clearInterval });
-  vm.runInContext(readFileSync('extensions/profilepilot/background.js', 'utf8') + '\nglobalThis.preview = () => handle("liveView", {});', context);
+  const context = vm.createContext({ chrome, URL, crypto: webcrypto, WebSocket: { OPEN: 1 }, setTimeout: fastTimeouts ? (fn,ms)=>setTimeout(fn,Math.min(ms,20)) : setTimeout, clearTimeout, setInterval, clearInterval });
+  vm.runInContext(readFileSync('extensions/profilepilot/background.js', 'utf8') + '\nglobalThis.preview = () => handle("liveView", {});globalThis.readTabs = () => handle("tabs", {});', context);
   await new Promise(resolve => setImmediate(resolve));
-  return { preview: context.preview, chrome, tabs, calls };
+  return { preview: context.preview, readTabs: context.readTabs, chrome, tabs, calls };
 }
 
 test('preview uses the selected Profile active window without control or incognito access', async () => {
@@ -59,4 +59,26 @@ test('missing screenshot permission provides an actionable extension reload mess
   const result = await f.preview();
   assert.equal(result.screenshot, null);
   assert.match(result.screenshotError, /chrome:\/\/extensions.*重新加载/);
+});
+
+test('a captured image is discarded when active-tab verification fails', async () => {
+  const f = await fixture(), query = f.chrome.tabs.query;
+  f.chrome.tabs.query = async q => { if (q.active) throw Error('tab verification failed'); return query(q); };
+  const result = await f.preview();
+  assert.equal(result.screenshot, null);
+  assert.ok(result.screenshotError);
+});
+
+test('a never-resolving preview is bounded, keeps only one native capture and leaves tab reads usable', async () => {
+  const f = await fixture(true); let captures=0;
+  f.chrome.tabs.captureVisibleTab = () => { captures++; return new Promise(()=>{}); };
+  for(let i=0;i<3;i++) {
+    const result = await f.preview();
+    assert.equal(result.screenshot,null); assert.match(result.screenshotError,/不受.*阻塞/);
+    assert.equal((await f.readTabs()).length,2);
+  }
+  assert.equal(captures,1);
+  f.tabs[1].id = 99;
+  assert.equal((await f.preview()).screenshot,null);
+  assert.equal(captures,1,'a pending capture is not reused for a different tab');
 });

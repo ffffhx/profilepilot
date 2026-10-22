@@ -212,6 +212,7 @@ export function pageSnapshot(documentId: string, native = false, slice: PageSlic
     // A broad section may contain the entire live feed. Bind the target to its
     // nearest record/form context and keep that container's identity as well.
     const contextNode = node.closest('label,fieldset,tr,article,[role="listitem"],[role="menu"],[role="dialog"]') || node.parentElement;
+    if (type === "file") candidate.multiple = (node as HTMLInputElement).multiple;
     const contextId = contextNode && contextIdentity(contextNode);
     const searchBinding = searchBindings.get(node);
     values.push(JSON.stringify([kind !== "click" ? String(node.isContentEditable ? node.innerText : (node as HTMLInputElement).value || "") : "", node.getAttribute("href"), node.getAttribute("type"), node.getAttribute("formaction"), node.getAttribute("target"), form?.action, form?.method, form?.target,
@@ -341,7 +342,11 @@ export function readLinkGuard(guard: string, action: BrowserAction): string | un
     if (legacy && action.effect !== "read") return;
     const search = candidate.dom?.search === true;
     const legacyLink = legacy && candidate.role === "link" && /^https?:\/\//i.test(candidate.href || "") && !candidate.submit;
-    const safe = action.kind === "hover" || (action.kind === "click" && (candidate.dom?.effect === "read" || legacyLink)) || (action.kind === "fill" && search) ||
+    // A field edit depends on this field and its complete form context/values,
+    // not unrelated controls elsewhere. Submit/click guards stay conservative.
+    const scopedEdit = !legacy && ["fill", "select"].includes(action.kind) && candidate.dom?.effect === "edit";
+    const fieldClick = !legacy && action.kind === "click" && ["fill", "select"].includes(candidate.kind) && candidate.role !== "fileupload" && !candidate.submit && candidate.dom?.effect === "edit";
+    const safe = scopedEdit || fieldClick || action.kind === "hover" || (action.kind === "click" && (candidate.dom?.effect === "read" || legacyLink)) || (action.kind === "fill" && search) ||
       (action.kind === "press" && /^(Enter|Return)$/i.test(action.value || "") && search && focus?.focusedRef === ref);
     if (!safe) return;
     // Only explicit social counters are volatile for modern navigation links.
@@ -396,7 +401,9 @@ function prepareAction(expected: { document: string; guard: string }, action: Br
       before, after, moved: { x: after.x - before.x, y: after.y - before.y }, atBoundary: Math.abs(coordinate - boundary) <= 1 } };
   }
   if (!node?.isConnected || !candidate) throw new Error("目标元素已失效，动作未执行。");
-  if ((action.kind === "fill" && candidate.kind !== "fill") || (action.kind === "select" && candidate.kind !== "select") || (action.kind === "click" && candidate.kind !== "click")) throw new Error("目标类型不匹配。");
+  // Inputs and comboboxes can be clicked to focus/open their picker as well as
+  // filled. File inputs still require the explicit upload/attachment path.
+  if ((action.kind === "fill" && candidate.kind !== "fill") || (action.kind === "select" && candidate.kind !== "select") || (action.kind === "click" && (candidate.role === "fileupload" || !["click", "fill", "select"].includes(candidate.kind)))) throw new Error("目标类型不匹配。");
   let value = action.value || "";
   const fillInputType = action.kind === "fill" && node.tagName === "INPUT" ? (node as HTMLInputElement).type : undefined;
   const assertWritable = () => {

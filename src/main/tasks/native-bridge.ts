@@ -8,7 +8,7 @@ import type { NativeBrowserState } from "../../shared/tasks";
 import { NativeOnboarding } from "./native-onboarding";
 import type { NativeInstallDriver } from "./native-installer";
 import { NativeControlService } from "../native-control/service";
-import { NativeControlError, nativeControlError } from "../native-control/errors";
+import { NativeControlError, nativeFailurePayload } from "../native-control/errors";
 import { nativeExtensionReady, NATIVE_EXTENSION_UPDATE_MESSAGE } from "./native-compatibility";
 
 interface Pairing { token: string; expiresAt: number; }
@@ -159,7 +159,7 @@ export class NativeBrowserBridge {
       req.setTimeout(0);
       const result = await this.control.request(JSON.parse(Buffer.concat(chunks).toString("utf8")));
       respond(200, { ok: true, result });
-    } catch (error) { const failure = nativeControlError(error); respond(400, { ok: false, code: failure.code, error: failure.message }); }
+    } catch (error) { respond(400, nativeFailurePayload(error)); }
   }
   beginInstallation(url: string): void { this.onboarding.start(url); }
   installationStates() { return this.onboarding.states(); }
@@ -200,6 +200,8 @@ export class NativeBrowserBridge {
       if (!state || !["agent", "user"].includes(state.ownership)) throw new Error("Invalid state");
       connection.state = { profileId, connected: true, extensionVersion: typeof state.extensionVersion === "string" ? state.extensionVersion.slice(0, 40) : undefined, installationType: typeof state.installationType === "string" ? state.installationType.slice(0, 40) : undefined, installationMode: typeof state.installationMode === "string" ? state.installationMode.slice(0, 40) : undefined, capabilities: Array.isArray(state.capabilities) ? state.capabilities.filter((s: unknown) => typeof s === "string").slice(0, 30) : undefined, taskTabs: false, pausedByBrowser: state.pausedByBrowser === true, tabId: Number.isSafeInteger(state.tabId) ? state.tabId : undefined, ownership: state.ownership, ownerSessionId: typeof state.sessionId === "string" ? state.sessionId : undefined,
         controlGeneration: typeof state.controlGeneration === "string" && /^[a-z0-9-]{1,80}:[0-9]{1,16}$/i.test(state.controlGeneration) ? state.controlGeneration : undefined,
+        controlIssue: state.ownership === "user" && /^NATIVE_[A-Z_]{1,64}$/.test(state.controlIssue?.code) && typeof state.controlIssue?.message === "string"
+          ? { code: state.controlIssue.code, message: state.controlIssue.message.slice(0, 1000) } : undefined,
         tabTitle: typeof state.tabTitle === "string" ? state.tabTitle.slice(0, 300) : undefined, url: typeof state.url === "string" ? state.url.slice(0, 2000) : undefined } as NativeConnectionState;
       connection.state.taskTabs = nativeExtensionReady({ ...connection.state, taskTabs: state.taskTabs });
       if (connection.state.taskTabs) this.onboarding.connected(profileId);
@@ -220,7 +222,8 @@ export class NativeBrowserBridge {
     }
     const pending = connection.pending.get(message?.id); if (!pending) return;
     connection.pending.delete(message.id); clearTimeout(pending.timer);
-    if (message.error) pending.reject(new Error(String(message.error).slice(0, 1000)));
+    if (message.error) pending.reject(typeof message.code === "string" && /^NATIVE_[A-Z_]{1,64}$/.test(message.code)
+      ? new NativeControlError(message.code, String(message.error).slice(0, 1000)) : new Error(String(message.error).slice(0, 1000)));
     else pending.resolve(message.result);
   }
   async request(profileId: string, method: string, params: Record<string, unknown> = {}, timeoutMs = 15000): Promise<any> {

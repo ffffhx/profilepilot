@@ -17,6 +17,12 @@ final class RecoverySettings {
     }
     boolean enabled() { return prefs.getBoolean("enabled", false); }
     boolean advanced() { return enabled() && prefs.getBoolean("advanced", false); }
+    boolean accessibilityOn() { return enabled() && prefs.getBoolean("accessibility_on", false); }
+    void accessibilityOn(boolean value) {
+        SharedPreferences.Editor edit = prefs.edit().putBoolean("accessibility_on", value);
+        if (value && !prefs.getBoolean("accessibility_on", false)) edit.putInt("accessibility_attempts", 0).putLong("accessibility_window", System.currentTimeMillis());
+        edit.commit();
+    }
     boolean authorized() { return context.checkSelfPermission(Manifest.permission.WRITE_SECURE_SETTINGS) == PackageManager.PERMISSION_GRANTED; }
     boolean paired() { return context.getSharedPreferences("MainActivity", Context.MODE_PRIVATE).getString("token", "").matches("[a-f0-9]{64}"); }
     void enabled(boolean value) {

@@ -359,11 +359,15 @@ public final class MainActivity extends ComponentActivity {
     }).setId(R.id.recovery_toggle);
     info(content,"高级恢复授权",recovery.authorized()?"已授权":"未授权",recovery.authorized()?GREEN:AMBER);
     paragraph(content,"高级恢复可重启权限仍开启但未运行的无障碍服务，在 Wi-Fi 断开重连后恢复无线调试；调试开关已开启但 ADB 服务持续停止时，也会尝试重启调试服务。每项最多尝试 3 次 / 30 分钟，无持续唤醒。");
-    paragraph(content,"无障碍权限已关闭、无线调试在网络稳定时被关闭，都会保留关闭状态。若在断网期间手动关闭调试，请同时关闭自动恢复。新网络的系统授权仍需你确认。");
+    paragraph(content,"默认保留已关闭的无障碍权限。若开启下方“自动开启无障碍”，App 重启或检测到权限关闭时会重新开启自己的服务；要保持关闭，请先关闭该选项。无线调试在网络稳定时被关闭仍会保留；若在断网期间手动关闭调试，请同时关闭自动恢复。");
     if (!recovery.authorized()) paragraph(content,"高级恢复需要已授权电脑额外授予系统设置权限；未授权时仍可使用后台服务恢复。");
     TextView advanced=actionButton(content,recovery.advanced()?"关闭高级恢复":"开启高级恢复",false,() -> {
       recovery.advanced(!recovery.advanced()); refreshRecoveryServices(); showRecovery();
     }); advanced.setId(R.id.recovery_advanced); advanced.setEnabled(recovery.enabled()); advanced.setAlpha(recovery.enabled()?1f:0.45f);
+    TextView accessibility=actionButton(content,recovery.accessibilityOn()?"关闭自动开启无障碍":"开启自动开启无障碍",false,() -> {
+      recovery.accessibilityOn(!recovery.accessibilityOn()); refreshRecoveryServices(); showRecovery();
+    }); accessibility.setId(R.id.recovery_accessibility); accessibility.setEnabled(recovery.enabled() && (recovery.authorized() || recovery.accessibilityOn()));
+    paragraph(content,"自动开启无障碍需要高级恢复授权，只影响 ProfilePilot 自己的服务，不会继续旧控制任务。");
     info(content,"最近一次结果",recovery.lastResult());
     if (recovery.lastResultAt()>0) paragraph(content,java.text.DateFormat.getDateTimeInstance().format(new java.util.Date(recovery.lastResultAt()))).setTextSize(11);
     paragraph(content,"系统“强行停止”、厂商禁止后台运行或调试授权被撤销后，App 不能保证自行恢复。请允许 ProfilePilot 后台运行；无需关闭整台手机的省电功能。");

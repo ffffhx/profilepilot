@@ -14,6 +14,7 @@
     <item type="id" name="home_recovery" />
     <item type="id" name="recovery_toggle" />
     <item type="id" name="recovery_advanced" />
+    <item type="id" name="recovery_accessibility" />
     <item type="id" name="home_pause" />
     <item type="id" name="home_stop" />
     <item type="id" name="sheet_close" />

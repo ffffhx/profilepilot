@@ -11,6 +11,10 @@ export async function executePhoneCommand(command: PhoneManagementCommand, servi
   }
 }
 async function executeValidatedPhoneCommand(command: PhoneManagementCommand, service: PhonesService): Promise<unknown> {
+  if (command.method === "accessibility-repair") {
+    const p = z.object({ id: z.string().min(1), autoRestore: z.boolean().optional() }).strict().parse(command.params);
+    return service.repairAccessibility(p.id, p.autoRestore);
+  }
   if (command.method === "readiness") {
     const p = z.object({ id: z.string().min(1), backend: z.enum(["app", "basic"]).default("app") }).strict().parse(command.params);
     return service.readiness(p.id, p.backend);

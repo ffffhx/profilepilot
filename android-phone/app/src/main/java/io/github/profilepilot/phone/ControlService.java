@@ -47,7 +47,7 @@ public final class ControlService extends Service {
             localSessionControl(intent.getAction(), intent.getStringExtra("instanceId"), intent.getStringExtra("sessionId"), intent.getLongExtra("generation", -1));
         }
         RecoverySettings settings = new RecoverySettings(this);
-        if (settings.advanced() && settings.paired()) {
+        if ((settings.advanced() || settings.accessibilityOn()) && settings.paired()) {
             if (recovery == null) recovery = new AutomaticRecovery(this);
         } else if (recovery != null) { recovery.close(); recovery = null; }
         if (intent == null && settings.enabled()) settings.record("系统已重启连接服务；旧控制会话未恢复");
@@ -63,6 +63,22 @@ public final class ControlService extends Service {
                     connection.heartbeat(input.optString("transport", "unknown"));
                     connection.reportDebugSettings(input.optJSONObject("debugSettings"));
                     session.heartbeat(); result.complete(success(null));
+                }
+                else if (method.equals("accessibility-recovery")) {
+                    if (!session.phase.equals("idle") && !session.phase.equals("stopped")) throw new IllegalStateException("请先结束当前手机任务，再恢复无障碍服务");
+                    RecoverySettings settings = new RecoverySettings(this);
+                    if (input.getString("op").equals("repair")) {
+                        AccessibilityRecovery.enable(this);
+                        if (input.has("autoRestore")) {
+                            boolean value = input.getBoolean("autoRestore");
+                            if (value) settings.enabled(true);
+                            settings.accessibilityOn(value);
+                            startForegroundService(new Intent(this, ControlService.class));
+                        }
+                        settings.record("电脑已请求开启无障碍服务；旧控制会话未恢复");
+                        AccessibilityRecovery.rebind(this);
+                    } else if (!input.getString("op").equals("status")) throw new IllegalArgumentException("未知恢复操作");
+                    result.complete(success(new JSONObject().put("authorized", settings.authorized()).put("autoRestore", settings.accessibilityOn()).put("enabled", AccessibilityRecovery.enabled(this))));
                 }
                 else if (method.equals("camera")) {
                     // Read-only lease check for the shell-owned virtual camera. It must not keep

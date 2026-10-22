@@ -4,6 +4,13 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class RecoveryServiceListTest {
+    @Test public void enablingOurServicePreservesOtherServicesAndDoesNotDuplicateShortNames() {
+        assertEquals("test/.Service", RecoveryServiceList.with(null, "test/.Service"));
+        assertEquals("test/.Service", RecoveryServiceList.with("", "test/.Service"));
+        assertEquals("reader/.TalkBack:test/.Service", RecoveryServiceList.with("reader/.TalkBack", "test/.Service"));
+        assertEquals("reader/.TalkBack:test/.Service", RecoveryServiceList.with("reader/.TalkBack:", "test/.Service"));
+        assertEquals("reader/.TalkBack:test/.Service", RecoveryServiceList.with("reader/.TalkBack:test/.Service", "test/test.Service"));
+    }
     @Test public void ownShortAndFullNamesMatchWithoutConfusingReleaseAndDevelopment() {
         assertTrue(RecoveryServiceList.contains("test/.Service", "test/test.Service"));
         assertFalse(RecoveryServiceList.contains("test/test.Service", "test.debug/test.Service"));

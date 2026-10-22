@@ -13,6 +13,18 @@ function harness() {
     io: { stdout: { write: value => stdout.push(value) }, stderr: { write: value => stderr.push(value) } } };
 }
 
+test('accessibility setup preserves explicit auto-restore choice and rejects ambiguous values', async () => {
+  for (const [flag, expected] of [[undefined, undefined], ['on', true], ['off', false]]) {
+    const h = harness();
+    const args = ['accessibility-repair', '--device', 'SERIAL-1', ...(flag ? ['--auto-restore', flag] : [])];
+    assert.equal(await runPhoneCli(args, h.request, h.io), 0);
+    assert.deepEqual(h.calls, [{ action: 'phone', method: 'accessibility-repair', params: { id: 'SERIAL-1', ...(expected === undefined ? {} : { autoRestore: expected }) } }]);
+  }
+  const h = harness();
+  assert.equal(await runPhoneCli(['accessibility-repair', '--device', 'SERIAL-1', '--auto-restore', 'yes'], h.request, h.io), 1);
+  assert.equal(h.calls.length, 0);
+});
+
 test('discovery and explicit connection use managed phone commands without starting a session', async () => {
   const h = harness();
   assert.equal(await runPhoneCli(['wireless-discover'], h.request, h.io), 0);

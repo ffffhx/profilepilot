@@ -41,6 +41,34 @@ test('desktop preview creates and releases its own read-only session', async t =
   assert.deepEqual(h.calls.find(c => c[0] === 'action')[1].action, { kind: 'screenshot' });
   assert.equal(h.calls.filter(c => c[0] === 'stop').length, 1);
 });
+
+test('accessibility repair bootstraps a disabled service without starting a control lease', async t => {
+  const h = harness(t); h.state.permissions.accessibility = false;
+  h.hook = (method, body) => {
+    if (method !== 'accessibility-recovery') return;
+    if (body.op === 'repair') { h.state.permissions.accessibility = true; h.autoRestore = body.autoRestore; }
+    return { ok: true, state: structuredClone(h.state), result: { authorized: h.state.permissions.accessibility, enabled: body.op === 'repair' ? false : h.state.permissions.accessibility, autoRestore: h.autoRestore ?? false } };
+  };
+  const result = await h.service.repairAccessibility(h.id, true);
+  assert.equal(result.running, true); assert.equal(result.autoRestore, true);
+  assert.equal(result.enabled, true);
+  assert.equal(h.state.phase, 'idle'); assert.equal(h.state.sessionId, null);
+  assert.ok(h.calls.some(c => c[0] === 'adb' && c.at(-1).includes("'pm' 'grant'") && c.at(-1).includes('android.permission.WRITE_SECURE_SETTINGS')));
+  assert.equal(h.calls.filter(c => ['start', 'resume', 'action'].includes(c[0])).length, 0);
+});
+
+test('accessibility repair rejects occupied or paused sessions and unsupported companions before granting permissions', async t => {
+  for (const phase of ['controlling', 'paused']) {
+    const h = harness(t); await h.service.refresh(); h.state.phase = phase; h.calls.length = 0;
+    await assert.rejects(h.service.repairAccessibility(h.id, true), /先结束/);
+    assert.equal(h.calls.filter(c => c[0] === 'accessibility-recovery').length, 0);
+    assert.ok(!h.calls.some(c => c[0] === 'adb' && String(c.at(-1)).includes("'grant'")));
+  }
+  const h = harness(t);
+  h.hook = method => { if (method === 'accessibility-recovery') throw new Error('unsupported companion'); };
+  await assert.rejects(h.service.repairAccessibility(h.id), /unsupported companion/);
+  assert.ok(!h.calls.some(c => c[0] === 'adb' && String(c.at(-1)).includes("'grant'")));
+});
 test('preview observes an existing task without starting or ending it', async t => {
   const h = harness(t); await h.service.refresh();
   await h.service.start(h.id, 'control', 'Agent', 'keep task'); h.calls.length = 0;

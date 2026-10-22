@@ -818,6 +818,36 @@ export class PhonesService {
       }
     });
   }
+  async repairAccessibility(id: string, autoRestore?: boolean): Promise<unknown> {
+    this.assertNoBasic();
+    await this.refresh();
+    return this.exclusive(id, "正在恢复无障碍服务…", async () => {
+      const check = async () => {
+        const { state } = await this.rpc(id, "sync");
+        if (!["idle", "stopped"].includes(state.phase)) throw new Error("请先结束当前手机任务，再恢复无障碍服务。");
+      };
+      await check();
+      // This authenticated setup endpoint works before accessibility is ready.
+      // Older companions reject it before any permission is granted.
+      const status = await this.rpc(id, "accessibility-recovery", { op: "status" });
+      if (!(status.result as { authorized?: boolean })?.authorized) {
+        await check();
+        await this.adb.run(["-s", id, "shell", deviceShell(["pm", "grant", this.companion.packageName, "android.permission.WRITE_SECURE_SETTINGS"])]);
+      }
+      await check();
+      const repaired = await this.rpc(id, "accessibility-recovery", { op: "repair", ...(autoRestore === undefined ? {} : { autoRestore }) });
+      let state = repaired.state;
+      for (let attempt = 0; attempt < 20 && !state.permissions.accessibility; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 250));
+        ({ state } = await this.rpc(id, "sync"));
+        if (!["idle", "stopped"].includes(state.phase)) throw new Error("恢复期间手机会话已变化，请重新检查状态。");
+      }
+      // Rebinding temporarily removes our component. Report settings after the
+      // wait rather than the pre-bind snapshot returned by the repair request.
+      const finalStatus = await this.rpc(id, "accessibility-recovery", { op: "status" });
+      return { id, ...(finalStatus.result as object), running: finalStatus.state.permissions.accessibility, phase: finalStatus.state.phase };
+    });
+  }
   async openSettings(id: string, setting: PhoneSetting): Promise<void> {
     this.assertNoBasic();
     const target = z.enum(["accessibility", "overlay", "notifications", "developerOptions", "usbDebugging", "wirelessDebugging"]).parse(setting);

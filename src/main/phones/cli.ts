@@ -22,6 +22,7 @@ ppilot phone emulator-list
 ppilot phone emulator-connect --name <模拟器名称>
 ppilot phone connect --device <设备ID>
 ppilot phone update --device <设备ID>
+ppilot phone accessibility-repair --device <设备ID> [--auto-restore on|off]
 ppilot phone inspect --device <设备ID> [--package <包名>]
 ppilot phone packages --device <设备ID> [--scope all|user|system] [--filter <包名片段>]
 ppilot phone diagnose --device <设备ID>
@@ -60,6 +61,8 @@ launch 需要 component（来自 apps），tap 需要 x/y（来自 preview），
 wireless-discover 返回端口可达性及原因；--device 只查找指定手机，旧地址不可用时自动刷新一次。
 成功后使用返回的设备 ID 执行 connect，连接已有配套 App；connect 不安装或更新。
 update 明确安装或更新电脑随附的配套 App。inspect 只读查询版本，默认查询 ProfilePilot；不需要配套 App 会话。
+accessibility-repair 需要用户授权：通过已配对 App 恢复其无障碍服务，必要时通过 ADB 授予系统设置权限；无需先开启无障碍。
+--auto-restore on 保存自动开启无障碍的选择，off 关闭此自动恢复；省略时只修复本次，不改变选择。此命令不会开始或恢复控制会话。
 packages 列出或搜索应用；diagnose 读取系统、屏幕、进程和服务诊断，保留原始输出及部分失败。
 无线连接不会自动开始控制，也不会恢复已暂停的会话。
 免安装：start --backend basic 不安装手机 App。支持截图、坐标点击/滑动、返回/主页/最近应用和基础英文输入。
@@ -93,11 +96,11 @@ export async function runPhoneCli(args: string[], request: (command: ProfilePilo
   let dispatching = false;
   try {
     const method = args[0] === "doctor" ? "readiness" : args[0];
-    if (!["readiness", "list", "emulator-list", "emulator-connect", "connect", "update", "inspect", "packages", "diagnose", "exec", "host", "app", "install", "wireless-discover", "wireless-pair", "wireless-connect", "wireless-disconnect", "rename", "start", "pause", "resume", "stop", "action", "run"].includes(method)) throw new Error("未知手机命令。运行 ppilot phone --help 查看用法。");
+    if (!["accessibility-repair", "readiness", "list", "emulator-list", "emulator-connect", "connect", "update", "inspect", "packages", "diagnose", "exec", "host", "app", "install", "wireless-discover", "wireless-pair", "wireless-connect", "wireless-disconnect", "rename", "start", "pause", "resume", "stop", "action", "run"].includes(method)) throw new Error("未知手机命令。运行 ppilot phone --help 查看用法。");
     const flags = new Map<string, string>();
     for (let index = 1; index < args.length; index++) {
       const key = args[index]; if (key === "--json") continue;
-      if (!["--device", "--apk", "--address", "--controller", "--task", "--mode", "--name", "--params-file", "--output", "--file", "--output-dir", "--backend", "--package", "--scope", "--filter"].includes(key) || flags.has(key) || !args[index + 1]) throw new Error(`参数无效：${key}`);
+      if (!["--auto-restore", "--device", "--apk", "--address", "--controller", "--task", "--mode", "--name", "--params-file", "--output", "--file", "--output-dir", "--backend", "--package", "--scope", "--filter"].includes(key) || flags.has(key) || !args[index + 1]) throw new Error(`参数无效：${key}`);
       flags.set(key, args[++index]);
     }
     const allowed: Record<string, string[]> = { list: [], connect: ["--device"], rename: ["--device", "--name"], start: ["--device", "--controller", "--task", "--mode"], pause: ["--device"], resume: ["--device"], stop: ["--device"], action: ["--params-file", "--output"], run: ["--device", "--file", "--output-dir", "--mode", "--controller", "--task"] };
@@ -106,6 +109,7 @@ export async function runPhoneCli(args: string[], request: (command: ProfilePilo
     allowed["emulator-connect"] = ["--name"];
     allowed.install = ["--device", "--apk", "--controller"];
     allowed.update = ["--device"];
+    allowed["accessibility-repair"] = ["--device", "--auto-restore"];
     allowed.inspect = ["--device", "--package"];
     allowed.packages = ["--device", "--scope", "--filter"];
     allowed.diagnose = ["--device"];
@@ -162,6 +166,10 @@ export async function runPhoneCli(args: string[], request: (command: ProfilePilo
       params = method === "start" ? { id, mode: flags.get("--mode") || "control", controller: flags.get("--controller") || "本机 CLI", task: flags.get("--task") || "" } : method === "rename" ? { id, name: flags.get("--name") } : method === "inspect" ? { id, packageName: flags.get("--package") } : method === "packages" ? { id, scope: flags.get("--scope"), filter: flags.get("--filter") } : { id };
     }
     if (method === "connect") params = { ...(params as { id: string }), update: false };
+    if (method === "accessibility-repair" && flags.has("--auto-restore")) {
+      if (!["on", "off"].includes(flags.get("--auto-restore")!)) throw new Error("--auto-restore 必须为 on 或 off。");
+      params = { ...(params as { id: string }), autoRestore: flags.get("--auto-restore") === "on" };
+    }
     if (method === "readiness") params = { ...(params as { id: string }), backend };
     if (method === "action") {
       const p = params as Record<string, unknown>;

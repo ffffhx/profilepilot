@@ -133,6 +133,8 @@ For existing scripts, `ppilot phone wrap --device DEVICE_ID --controller AGENT_N
 
 ## Pause and finish
 
+Before starting, `ppilot phone readiness --device DEVICE_ID` (alias `doctor`) reports transport, boot, companion version, accessibility, overlay, notifications and session ownership together. Capability fields distinguish native selectors, screenshots and input; a working ADB transport alone does not prove App control is ready. `ppilot doctor --device DEVICE_ID --json` includes desktop/CLI versions. A missing permission fails start before a session RPC. Do not construct `action` from a failed start or a null sessionId. Failures include `recovery` with cause, stage and action outcome; a rejected or timed-out action is not automatically replayable. Inspect `--backend basic` only when that mode is intended; readiness never switches backends or takes over an existing App session.
+
 - Use `ppilot phone pause --device DEVICE_ID` for a pause and `ppilot phone stop --device DEVICE_ID` when your task finishes or is cancelled. Managed `wrap` tasks normally end their owned session when the process exits.
 - A user pause, stop or disconnect invalidates queued actions. Stop issuing input, read fresh state and wait for explicit return of control before resuming your own session. Do not resume automatically or replay a failed action with a new UUID.
 - The phone checks session identity, generation and heartbeat. Its pause/stop controls remain authoritative regardless of preference text. A suspended Agent task does not imply permission to keep controlling the phone.

@@ -47,6 +47,8 @@ Compatibility: the former `agent-browser --cdp PORT COMMAND` maps to `ppilot bro
 
 ## Engine behavior
 
+The common contract also supports `observe [--output PATH]` and `action --params-file ACTION.json` (or `--params-stdin`). Use `ppilot browser schema` for supported actions and fields. Observe returns an `ok/result` envelope with version, DOM, refs and separate screenshot/coordinate availability; an action must carry that version and consumes it. Use UTF-8 JSON files for Chinese text and literal quotes on both Windows and macOS. Legacy snapshot/click commands keep their existing format; quote legacy PowerShell refs such as `'@e3'`. `doctor` aliases the guarded Gateway readiness check. Read `recovery.actionOutcome` after a common-command failure and never replay unknown input.
+
 Use a fresh `snapshot` after navigation, frame/tab changes, a new snapshot, or control return; `@e...` refs belong to that snapshot. Closing the selected tab requires an explicit `tab ID` before further page actions. `tab list` remains available for recovery. Electron targets retain Gateway restrictions on creating or closing application windows.
 
 `batch --stdin` accepts a JSON array of command argument arrays. `--bail` stops at the first failure; any failed row makes the overall command fail. A batch cannot change session or connection, connect, disconnect, or nest another batch. Use the regular guarded lifecycle commands separately.

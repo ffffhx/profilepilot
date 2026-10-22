@@ -133,6 +133,27 @@ test('discovery refreshes unreachable cached advertisements once, without changi
   assert.ok(!h.calls.some(call => ['start', 'stop', 'resume'].includes(call[0]) || ['connect', 'kill-server', 'pair', 'install'].includes(call[1])));
 });
 
+test('automatic reconnection selects a reachable collision-renamed advertisement without a manually supplied port', async t => {
+  const h = fixture(t); h.online = [];
+  const original = h.service.adb.run;
+  h.service.adb.run = async args => {
+    if (args[0] === 'mdns') {
+      h.calls.push(['adb', ...args]);
+      return `adb-PHONE-xyz\t_adb-tls-connect._tcp\t${h.old}\r\nadb-PHONE-xyz (2)\t_adb-tls-connect._tcp\t${h.next}`;
+    }
+    if (args[0] === 'connect') {
+      h.calls.push(['adb', ...args]); h.online = [args[1]];
+      return `connected to ${args[1]}`;
+    }
+    return original(args);
+  };
+  await h.service.refresh();
+  const connected = await h.service.autoConnectWireless(h.old);
+  assert.equal(connected.id, h.next); assert.equal(connected.hardwareId, 'PHONE');
+  assert.deepEqual(h.calls.filter(c => c[0] === 'adb' && c[1] === 'connect'), [['adb', 'connect', h.next]]);
+  assert.ok(!h.calls.some(c => ['start', 'resume', 'action'].includes(c[0]) || ['kill-server', 'pair', 'install'].includes(c[1])));
+});
+
 test('fresh direct App observations supersede old cloud addresses; expired observations do not', () => {
   const route = { id: 'USB', hardwareId: 'PHONE', transport: 'usb', connection: 'device', companion: 'ready', confirmedAt: 2000,
     state: { readiness: { network: { wifiIpv4: ['192.168.1.9'], adbEndpoints: [] } } },

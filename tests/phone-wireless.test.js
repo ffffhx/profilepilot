@@ -12,6 +12,23 @@ test('mDNS parser separates pairing from connection ports and excludes legacy de
   const records=parseWirelessServices('List of discovered mdns services\nfoo _adb-tls-pairing._tcp 192.168.1.2:40001\r\nfoo _adb-tls-connect._tcp. 192.168.1.2:40002\nold _adb._tcp 192.168.1.3:5555\nevil _adb-tls-connect._tcp 8.8.8.8:443\nrepeat _adb-tls-connect._tcp 192.168.1.2:40002');
   assert.deepEqual(records.map(r=>[r.kind,r.address]),[['pairing','192.168.1.2:40001'],['connect','192.168.1.2:40002']]);
 });
+test('mDNS collision names preserve the new endpoint alongside an unreachable old advertisement',()=>{
+  for(const newline of ['\r\n','\n']) {
+    const records=parseWirelessServices([
+      'List of discovered mdns services',
+      'adb-PHONE-xyz\t_adb-tls-connect._tcp\t192.168.1.2:42967',
+      'adb-PHONE-xyz (2)\t_adb-tls-connect._tcp\t192.168.1.2:40225',
+      '手机 配对 (3)  _adb-tls-pairing._tcp.  192.168.1.2:40555',
+      'invalid name _adb-tls-connect._tcp 192.168.1.2:40225 extra',
+      'invalid name _adb-tls-connect._tcp 8.8.8.8:443',
+    ].join(newline));
+    assert.deepEqual(records,[
+      {name:'adb-PHONE-xyz',kind:'connect',address:'192.168.1.2:42967'},
+      {name:'adb-PHONE-xyz (2)',kind:'connect',address:'192.168.1.2:40225'},
+      {name:'手机 配对 (3)',kind:'pairing',address:'192.168.1.2:40555'},
+    ]);
+  }
+});
 test('pairing code travels on stdin only; success does not return its credential',async()=>{
   const calls=[];const result=await pairWireless({run:async(...args)=>{calls.push(args);return 'Enter pairing code: Successfully paired to 192.168.1.2:40001 [guid=abcd]'}},{address:'192.168.1.2:40001',code:'012345'});
   assert.deepEqual(calls[0],[['pair','192.168.1.2:40001'],20000,'012345\n']);assert.deepEqual(result,{address:'192.168.1.2:40001'});

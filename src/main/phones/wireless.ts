@@ -16,11 +16,13 @@ export const wirelessPairSchema = z.object({ address: z.string().max(80).transfo
 export function parseWirelessServices(text: string): PhoneWirelessService[] {
   const result: PhoneWirelessService[] = [];
   for (const line of text.split(/\r?\n/)) {
-    const parts = line.trim().split(/\s+/);
-    if (parts.length !== 3 || !/^_adb-tls-(pairing|connect)\._tcp\.?$/.test(parts[1])) continue;
+    // DNS-SD collision resolution may append " (2)" to the instance name.
+    // Read the fixed service-type/address columns without splitting that name.
+    const match = line.trim().match(/^(.+?)\s+_adb-tls-(pairing|connect)\._tcp\.?\s+(\S+)$/);
+    if (!match) continue;
     try {
-      const address = wirelessAddress(parts[2]), kind = parts[1].includes("pairing") ? "pairing" : "connect";
-      if (!result.some(item => item.kind === kind && item.address === address)) result.push({ name: parts[0].slice(0, 200), kind, address });
+      const address = wirelessAddress(match[3]), kind = match[2] as "pairing" | "connect";
+      if (!result.some(item => item.kind === kind && item.address === address)) result.push({ name: match[1].slice(0, 200), kind, address });
     } catch { /* Not a supported local IPv4 endpoint. */ }
   }
   return result;

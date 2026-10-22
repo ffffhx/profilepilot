@@ -11,15 +11,24 @@ export function captureReadyAt(frame: unknown): number | undefined {
 }
 type Response = { state: PhoneSessionState; result?: unknown };
 type Owner = Pick<PhoneSessionState, "instanceId" | "sessionId" | "generation">;
+const uptime = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+/** Phone uptime values only: evidence for these pixels, never a lease or host clock. */
+export const cameraProofSchema = z.object({ version: z.literal(1), epoch: uptime, sequence: uptime.min(1),
+  x: z.number().int().nonnegative().max(19999), y: z.number().int().nonnegative().max(19999),
+  heldSinceUptimeMs: uptime, capturedAtUptimeMs: uptime, expiresAtUptimeMs: uptime
+}).strict().refine(proof => proof.heldSinceUptimeMs <= proof.capturedAtUptimeMs
+  && proof.capturedAtUptimeMs < proof.expiresAtUptimeMs, "镜头画面凭据时间无效");
 const descriptorSchema = z.object({ mime: z.enum(["image/png", "image/jpeg"]),
   width: z.number().int().positive().max(20000), height: z.number().int().positive().max(20000),
   region: z.object({ x: z.number().int().nonnegative(), y: z.number().int().nonnegative(),
     width: z.number().int().positive(), height: z.number().int().positive() }).strict().optional(),
+  cameraProof: cameraProofSchema.optional(),
   transfer: z.object({ protocol: z.literal(1), id: z.string().uuid(), length: z.number().int().positive().max(MAX_CHARS),
     chunkSize: z.literal(CHUNK_CHARS), ttlMs: z.literal(15000) }).strict()
 }).strict().refine(frame => !frame.region || frame.region.x < frame.width && frame.region.y < frame.height
   && frame.region.width <= frame.width - frame.region.x && frame.region.height <= frame.height - frame.region.y,
-  "截图区域超出原始画面");
+  "截图区域超出原始画面").refine(frame => !frame.cameraProof || !frame.region
+    && frame.cameraProof.x < frame.width && frame.cameraProof.y < frame.height, "镜头画面凭据需要完整原始画面");
 const chunkSchema = z.object({ id: z.string().uuid(), offset: z.number().int().nonnegative(),
   base64: z.string().min(1).max(CHUNK_CHARS).regex(/^[A-Za-z0-9+/]+={0,2}$/), done: z.boolean() }).strict();
 
@@ -50,6 +59,7 @@ export async function assembleScreenshot(initial: Response, owner: Owner,
   }
   check(response.state);
   const result = { mime: frame.mime, width: frame.width, height: frame.height,
+    ...(frame.cameraProof ? { cameraProof: frame.cameraProof } : {}),
     ...(frame.region ? { region: frame.region } : {}), base64: chunks.join("") };
   // Preserve descriptor receipt only for this exact, completely assembled image.
   // The association neither crosses JSON/IPC nor changes the public frame shape.

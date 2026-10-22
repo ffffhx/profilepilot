@@ -26,7 +26,7 @@ public final class PhoneAccessibility extends AccessibilityService {
     private FollowTouch followTouch;
     void followTouch(JSONObject input, java.util.function.BooleanSupplier authorized) throws Exception {
         if (followTouch == null) followTouch = new FollowTouch(this);
-        followTouch.update(input.getJSONArray("points"), input.optInt("ttlMs", 1200), authorized);
+        followTouch.update(input.getJSONArray("points"), input.optInt("ttlMs", 1200), authorized, input.getLong("sequence"));
     }
     void releaseFollowTouch() { if (followTouch != null) followTouch.release(); }
     void resetFollowTouch() {
@@ -124,6 +124,9 @@ public final class PhoneAccessibility extends AccessibilityService {
                 if (!format.equals("jpeg") && !format.equals("png")) throw new IllegalArgumentException("不支持此截图格式");
                 boolean png = format.equals("png");
                 boolean nativeSize = png || action.optBoolean("nativeSize", false);
+                // Only explicitly negotiated full follow frames carry provenance.
+                FollowTouch cameraOwner = action.optInt("cameraFrameProvenance", 0) == 1 && nativeSize && region == null ? followTouch : null;
+                FollowCameraProof.Snapshot cameraBefore = cameraOwner == null ? null : cameraOwner.cameraSnapshot();
                 pendingScreenshots.add(result);
                 result.whenComplete((value, error) -> pendingScreenshots.remove(result));
                 if (timing != null) timing.mark("captureRequested");
@@ -131,8 +134,12 @@ public final class PhoneAccessibility extends AccessibilityService {
                     @Override public void onSuccess(ScreenshotResult screenshot) {
                         if (timing != null) timing.mark("captureReady");
                         HardwareBuffer buffer = screenshot.getHardwareBuffer();
-                        if (timing != null) timing.mark("encodeQueued");
-                        screenshots.submit(buffer, () -> encodeScreenshot(screenshot, png, nativeSize, timing, region), result);
+                        try {
+                            JSONObject cameraProof = cameraOwner == null || cameraOwner != followTouch ? null
+                                : cameraOwner.cameraCaptured(cameraBefore, screenshot.getTimestamp());
+                            if (timing != null) timing.mark("encodeQueued");
+                            screenshots.submit(buffer, () -> encodeScreenshot(screenshot, png, nativeSize, timing, region, cameraProof), result);
+                        } catch (Exception error) { buffer.close(); result.completeExceptionally(error); }
                     }
                     @Override public void onFailure(int code) { result.completeExceptionally(new IllegalStateException("当前画面无法截图（系统返回 " + code + "）")); }
                 });
@@ -140,7 +147,7 @@ public final class PhoneAccessibility extends AccessibilityService {
         } catch (Exception error) { result.completeExceptionally(error); }
         return result;
     }
-    private JSONObject encodeScreenshot(ScreenshotResult screenshot, boolean png, boolean nativeSize, ControlTiming timing, ScreenshotRegion region) throws Exception {
+    private JSONObject encodeScreenshot(ScreenshotResult screenshot, boolean png, boolean nativeSize, ControlTiming timing, ScreenshotRegion region, JSONObject cameraProof) throws Exception {
         if (timing != null) timing.mark("encodeStarted");
         Bitmap bitmap = null, scaled = null, cropped = null;
         try {
@@ -162,6 +169,7 @@ public final class PhoneAccessibility extends AccessibilityService {
             if (bytes.size() > 5 * 1024 * 1024) throw new IllegalStateException("截图超过 5 MiB，未缩小画面，请更换页面后重新获取");
             JSONObject encoded = new JSONObject().put("mime", png ? "image/png" : "image/jpeg").put("base64", Base64.encodeToString(bytes.toByteArray(), Base64.NO_WRAP)).put("width", bitmap.getWidth()).put("height", bitmap.getHeight());
             if (region != null) encoded.put("region", region.toJson());
+            if (cameraProof != null) encoded.put("cameraProof", cameraProof);
             if (timing != null) timing.mark("base64");
             return encoded;
         } finally {

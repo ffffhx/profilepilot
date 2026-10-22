@@ -26,8 +26,13 @@ final class FollowTouch {
     private long expires;
     private boolean inFlight;
     private String error = "";
+    private final FollowCameraProof camera = new FollowCameraProof();
+    private long sequence;
     FollowTouch(AccessibilityService service) { this.service = service; }
     void update(JSONArray points, int ttlMs, BooleanSupplier authorized) throws Exception {
+        update(points, ttlMs, authorized, sequence + 1);
+    }
+    void update(JSONArray points, int ttlMs, BooleanSupplier authorized, long sequence) throws Exception {
         if (!error.isEmpty()) throw new IllegalStateException(error);
         if (ttlMs < 100 || ttlMs > 1500 || points.length() > 5) throw new IllegalArgumentException("持续触控参数无效");
         Rect bounds = service.getSystemService(android.view.WindowManager.class).getMaximumWindowMetrics().getBounds();
@@ -43,7 +48,10 @@ final class FollowTouch {
         }
         this.authorized = authorized;
         if (!authorized.getAsBoolean()) throw new IllegalStateException("手机会话已改变");
-        desired = next; expires = SystemClock.uptimeMillis() + ttlMs;
+        long now = SystemClock.uptimeMillis();
+        desired = next; expires = now + ttlMs; this.sequence = sequence;
+        Point cameraPoint = next.get(1);
+        camera.request(sequence, cameraPoint == null ? null : new FollowCameraProof.Point((int) cameraPoint.x, (int) cameraPoint.y), expires, now);
         if (!inFlight) step();
     }
     private static float coordinate(JSONObject p, String key, int limit) throws Exception {
@@ -53,11 +61,23 @@ final class FollowTouch {
         // in the same space so a subpixel update cannot become an empty gesture.
         return Math.min(limit - 1, Math.round((float) value));
     }
-    void release() { desired.clear(); expires = 0; if (!inFlight) step(); }
+    void release() { camera.invalidate(); desired.clear(); expires = 0; if (!inFlight) step(); }
+    FollowCameraProof.Snapshot cameraSnapshot() {
+        if (!authorized.getAsBoolean()) { camera.invalidate(); return null; }
+        return camera.snapshot(SystemClock.uptimeMillis());
+    }
+    JSONObject cameraCaptured(FollowCameraProof.Snapshot before, long capturedAt) throws Exception {
+        if (!authorized.getAsBoolean()) { camera.invalidate(); return null; }
+        return camera.captured(before, capturedAt, SystemClock.uptimeMillis());
+    }
+    private FollowCameraProof.Point cameraPoint(Map<Integer, Held> points) {
+        Held point = points.get(1);
+        return point == null ? null : new FollowCameraProof.Point((int) point.x, (int) point.y);
+    }
     boolean active() { return inFlight || !held.isEmpty() || !desired.isEmpty(); }
     private void step() {
         main.removeCallbacks(advance);
-        if (!authorized.getAsBoolean() || SystemClock.uptimeMillis() >= expires) desired.clear();
+        if (!authorized.getAsBoolean() || SystemClock.uptimeMillis() >= expires) { camera.invalidate(); desired.clear(); }
         if (desired.isEmpty() && held.isEmpty()) return;
         boolean changed = !held.keySet().equals(desired.keySet());
         for (Map.Entry<Integer, Held> entry : held.entrySet()) {
@@ -65,6 +85,7 @@ final class FollowTouch {
             if (point != null && (point.x != entry.getValue().x || point.y != entry.getValue().y)) changed = true;
         }
         if (!changed) {
+            camera.applied(camera.request(), cameraPoint(held), SystemClock.uptimeMillis());
             // A continued pointer stays down between gestures. A stationary
             // continuation has no DOWN, MOVE or UP event, so Android rejects it.
             // Keep the previous stroke and still check authorization/TTL often.
@@ -91,18 +112,22 @@ final class FollowTouch {
             builder.addStroke(stroke); next.put(entry.getKey(), new Held(stroke, point.x, point.y));
         }
         inFlight = true;
+        FollowCameraProof.Request cameraRequest = camera.request();
         boolean accepted = service.dispatchGesture(builder.build(), new AccessibilityService.GestureResultCallback() {
             @Override public void onCompleted(GestureDescription description) {
-                inFlight = false; held.clear(); held.putAll(next); step();
+                inFlight = false; held.clear(); held.putAll(next);
+                if (authorized.getAsBoolean()) camera.applied(cameraRequest, cameraPoint(next), SystemClock.uptimeMillis());
+                else camera.invalidate();
+                step();
             }
             @Override public void onCancelled(GestureDescription description) {
-                inFlight = false; held.clear(); desired.clear();
+                camera.invalidate(); inFlight = false; held.clear(); desired.clear();
                 error = "持续触控被取消，已暂停；请重新开始跟随";
                 if (ControlService.current != null) ControlService.current.localControl("pause");
             }
         }, main);
         if (!accepted) {
-            inFlight = false; held.clear(); desired.clear();
+            camera.invalidate(); inFlight = false; held.clear(); desired.clear();
             error = "系统未接受持续触控，已暂停";
             if (ControlService.current != null) ControlService.current.localControl("pause");
         }

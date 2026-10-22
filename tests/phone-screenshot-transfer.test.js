@@ -60,6 +60,31 @@ test('chunked JPEG frames retain native screen dimensions and optional crop orig
   }
 });
 
+const cameraProof = () => ({ version: 1, epoch: 2, sequence: 4, x: 340, y: 210,
+  heldSinceUptimeMs: 100, capturedAtUptimeMs: 300, expiresAtUptimeMs: 1300 });
+test('camera proof belongs to the immutable frame and is not refreshed while pages arrive', async () => {
+  const f = fixture(); f.initial.result.cameraProof = cameraProof(); let now = 10000;
+  const result = await assembleScreenshot(f.initial, owner, async ({ offset }) => {
+    // Later phone/host state cannot change the descriptor's original proof.
+    f.initial.result.cameraProof.epoch = 99; now += 100;
+    return f.page(offset);
+  }, () => true, () => now);
+  assert.deepEqual(result.result.cameraProof, cameraProof());
+  assert.deepEqual(JSON.parse(JSON.stringify(result.result)).cameraProof, cameraProof());
+  assert.deepEqual(Buffer.from(result.result.base64, 'base64'), f.png);
+});
+test('invalid camera proof fails before any pages, including cropped or out-of-screen frames', async () => {
+  for (const patch of [{ version: 2 }, { sequence: 0 }, { epoch: -1 }, { x: 2772 }, { y: 1240 },
+    { heldSinceUptimeMs: 301 }, { expiresAtUptimeMs: 300 }, { capturedAtUptimeMs: NaN }, { extra: true }]) {
+    const f = fixture(); f.initial.result.cameraProof = { ...cameraProof(), ...patch };
+    let calls = 0;
+    await assert.rejects(assembleScreenshot(f.initial, owner, async () => { calls++; }, () => true));
+    assert.equal(calls, 0);
+  }
+  const f = fixture(); f.initial.result.cameraProof = cameraProof(); f.initial.result.region = { x: 0, y: 0, width: 425, height: 425 };
+  await assert.rejects(assembleScreenshot(f.initial, owner, () => { throw Error('unexpected page'); }, () => true));
+});
+
 test('capture readiness belongs only to the fully assembled host object and cannot be serialized or forged', async () => {
   const f = fixture(); let now = 40;
   const output = await assembleScreenshot(f.initial, owner, async ({ offset }) => {

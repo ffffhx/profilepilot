@@ -47,6 +47,9 @@ final class ScreenshotTransfer {
             ScreenshotRegion region = ScreenshotRegion.from(image.getJSONObject("region"));
             region.requireWithin(width, height); metadata.put("region", region.toJson());
         }
+        // Copy the proof associated with these exact pixels; never consult a
+        // later touch state while pages are downloaded or renew its TTL.
+        if (image.has("cameraProof")) metadata.put("cameraProof", new JSONObject(image.getJSONObject("cameraProof").toString()));
         return metadata;
     }
 

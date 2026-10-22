@@ -87,6 +87,22 @@ public class ScreenshotTransferTest {
         assertThrows(IllegalStateException.class, () -> transfer.offerIfLarge(image(new byte[90000]), instance, id, generation));
     }
 
+    @Test public void cameraProofStaysWithOriginalPixelsAndDoesNotRenewLease() throws Exception {
+        start();
+        JSONObject proof = new JSONObject().put("version", 1).put("epoch", 2).put("sequence", 4)
+            .put("x", 340).put("y", 210).put("heldSinceUptimeMs", 100).put("capturedAtUptimeMs", 300).put("expiresAtUptimeMs", 1300);
+        JSONObject frame = image(new byte[90000]).put("cameraProof", proof);
+        JSONObject descriptor = transfer.offerIfLarge(frame, session.instanceId, session.sessionId, session.generation);
+        String frozen = descriptor.getJSONObject("cameraProof").toString();
+        proof.put("epoch", 999).put("x", 900);
+        assertEquals(2, descriptor.getJSONObject("cameraProof").getLong("epoch"));
+        String id = descriptor.getJSONObject("transfer").getString("id");
+        now[0] = 1500; read(id, 0);
+        assertEquals(frozen, descriptor.getJSONObject("cameraProof").toString());
+        assertEquals(1, session.lastHeartbeat);
+        assertFalse(read(id, ScreenshotTransfer.CHUNK_CHARS).has("cameraProof"));
+    }
+
     @Test public void chunksNeverRenewLeaseAndCacheExpiresEvenWithRealHeartbeats() throws Exception {
         start(); String id = offer(new byte[90000]).getString("id");
         now[0] = 7000; read(id, 0); assertEquals(1, session.lastHeartbeat);

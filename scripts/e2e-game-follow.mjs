@@ -150,7 +150,36 @@ try {
     await driver.waitFor('[data-gf-stop]', e => e.disabled);
   }
   await driver.domClick('[data-gf-close]');
-  console.log('PASS: real OpenCV demo, persistence, crop origin and physical dimensions, calibration lock/recovery, invalid crop rejection, and dialog cleanup. Phone I/O is mocked; this is not hardware acceptance.');
+  await driver.waitFor('.game-follow-dialog', e => !e.exists);
+
+  // An external (for example CLI-owned) follow run must also suspend an already
+  // open live inspector. Real service snapshots drive both renderer views.
+  await driver.waitFor('[data-action="enlarge-phone-screen"]', e => !e.disabled);
+  await driver.domClick('[data-action="enlarge-phone-screen"]');
+  await driver.waitFor('.phone-image-dialog[open]');
+  const screenCalls = () => driver.evaluate(`window.phones.followCommand({op:'fixture-follow-screen-calls'})`);
+  const beforeLive = await screenCalls();
+  await delay(700);
+  assert.ok(await screenCalls() > beforeLive, 'open inspector must actually refresh before follow owns capture');
+  const external = await driver.evaluate(`window.phones.followCommand({op:'start',id:'UI-TEST-1',mode:'observe',backend:'app'})`);
+  await driver.waitFor('.phone-inspector-caption', e => e.text.includes('视觉跟随期间暂停预览'));
+  await driver.waitFor('.phone-image-dialog p', e => e.text.includes('视觉跟随期间暂停预览'));
+  assert.equal((await driver.query('[data-action="refresh-phone-screen"]')).disabled, true);
+  const suppressedAt = await screenCalls();
+  await delay(2200);
+  assert.equal(await screenCalls(), suppressedAt, 'follow ownership suppresses both the 500ms live timer and normal sidebar refresh');
+  assert.equal(await driver.evaluate('document.querySelector(".phone-image-dialog img").hidden'), true,
+    'an older full screenshot must not remain presented as a live preview');
+  await driver.evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+  await delay(100);
+  await writeFile(path.join(output,'desktop-follow-preview-paused.png'),Buffer.from((await driver.screenshot()).pngBase64,'base64'));
+  await driver.evaluate(`window.phones.followCommand({op:'stop',runId:${JSON.stringify(external.runId)}})`);
+  await driver.waitFor('.phone-image-dialog p', e => e.text.includes('实时更新'));
+  assert.ok(await screenCalls() > suppressedAt, 'ending follow resumes screenshot requests for the existing preview');
+  assert.equal(await driver.evaluate('document.querySelector(".phone-image-dialog img").hidden'), false);
+  await driver.domClick('.phone-image-dialog button');
+  await driver.waitFor('.phone-image-dialog', e => !e.exists);
+  console.log('PASS: real OpenCV demo, persistence, crop origin and physical dimensions, calibration lock/recovery, invalid crop rejection, live/sidebar preview suppression and resume, and dialog cleanup. Phone I/O is mocked; this is not hardware acceptance.');
 } finally {
   if (driver) await driver.request('quit').catch(() => {});
   for (let i=0; i<30 && child.exitCode===null; i++) await delay(100);

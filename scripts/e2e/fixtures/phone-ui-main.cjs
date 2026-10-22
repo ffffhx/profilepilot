@@ -29,7 +29,8 @@ const androidSetupFixture = createAndroidFixture(AndroidSetup, path.join(root, '
 let previewCalls = 0, previewBehavior = {};
 let cameraCalls = [], cameraState, cameraUnsupported = false;
 let basicFrame = { width: 320, height: 640, shade: 128 }, basicFrameBehavior = {};
-let followUiFrame, followUiFullFrame, followUiStatus;
+let followUiFrame, followUiFullFrame, followUiStatus, followUiLease;
+let followUiScreenCalls = 0;
 const unresponsive = new Set();
 let appInstalled = process.env.PHONE_UI_NO_APP !== '1';
 const service = new PhonesService({ root, apkPath: process.env.PHONE_UI_NO_APP === '1' ? path.join(root, 'phone.apk') : '', computer: 'UI-TEST-PC',
@@ -70,22 +71,35 @@ ipcMain.handle('phone-ui:request', async (_, method, params) => {
   // Only the follow renderer regression uses these injected phone responses.
   // Runtime setup, pixel analysis and calibration persistence still use the real service.
   if (process.env.PHONE_UI_GAME_FOLLOW === '1') {
-    if (method === 'screen' && followUiFullFrame) return structuredClone(followUiFullFrame);
+    if (method === 'screen') {
+      followUiScreenCalls++;
+      if (followUiFullFrame) return structuredClone({ ...followUiFullFrame, capturedAt: Date.now() });
+    }
     if (method === 'follow-command') {
+      if (params.op === 'fixture-follow-screen-calls') return followUiScreenCalls;
       if (params.op === 'fixture-follow-frame') {
         followUiFrame = params.frame;
         if (params.fullFrame) followUiFullFrame = params.fullFrame;
         return { configured: true };
       }
       if (followUiFrame && params.op === 'start') {
+        // Exercise real lease ownership and snapshot events. Only the phone
+        // transport and frame loop are synthetic; do not inject UI-only flags.
+        followUiLease = await service.startWrapper(params.id, params.mode === 'control' ? 'control' : 'view', 'UI fixture', 'Visual follow');
+        await service.followLive(followUiLease.lease, followUiLease.device.state.generation, { op: 'probe' });
         followUiStatus = { running: true, runId: randomUUID(), deviceId: params.id, mode: params.mode,
           backend: params.backend, frames: 1, actions: 0, fps: 2, error: '' };
         return structuredClone(followUiStatus);
       }
-      if (followUiStatus && params.op === 'status') return structuredClone({ ...followUiStatus, frame: followUiFrame });
+      if (followUiStatus && params.op === 'status') {
+        if (followUiStatus.running && followUiLease) service.pulseWrapper(followUiLease.lease);
+        return structuredClone({ ...followUiStatus, frame: followUiFrame });
+      }
       if (followUiStatus && params.op === 'stop') {
         if (params.runId !== followUiStatus.runId) throw new Error('Fixture follow run changed');
         followUiStatus.running = false;
+        if (followUiLease) await service.stopWrapper(followUiLease.lease);
+        followUiLease = undefined;
         return structuredClone(followUiStatus);
       }
     }

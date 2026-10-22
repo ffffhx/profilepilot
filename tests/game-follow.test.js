@@ -17,9 +17,10 @@ async function until(fn, timeoutMs = 6000) { const deadline=Date.now()+timeoutMs
 
 test('validates map, dimensions, obstacles, and joystick extent before starting', vision, () => {
   assert.ok(gameFollowConfigSchema.safeParse(fixture.config).success);
+  for (const capture of ['auto','full']) assert.equal(gameFollowConfigSchema.parse({...fixture.config,capture}).capture,capture);
   for (const patch of [{ width: Infinity }, { map: {...fixture.config.map,x:.9} },
     { joystick: {...fixture.config.joystick,x:0} }, { grid: {...fixture.config.grid,blocked:[1600]} },
-    { confidence:.1 }, { intervalMs:10 }]) assert.equal(gameFollowConfigSchema.safeParse({...fixture.config,...patch}).success,false);
+    { confidence:.1 }, { intervalMs:10 }, { capture:'scaled' }, { capture:true }]) assert.equal(gameFollowConfigSchema.safeParse({...fixture.config,...patch}).success,false);
 });
 test('OpenCV finds image targets, routes around obstacles and rejects ambiguous frames', vision, () => {
   execFileSync(python, ['tests/game-follow-vision.py'], { windowsHide: true, stdio: 'pipe' });
@@ -58,6 +59,71 @@ test('observe runs real vision without sending touch, and stops its own lease on
   assert.equal((await h.manager.command({op:'status'})).frame.region,undefined,'old companions may still return full frames');
 });
 
+test('opt-in recovery discards uncertain touch and requires two freshly captured frames', vision, async t => {
+  const h = harness(t), original = h.host.live, calls = []; let recoveries = 0;
+  h.host.live = async (...args) => {
+    const command = args[2]; calls.push(structuredClone(command));
+    if (command.op === 'touch' && command.sequence === 2) throw new Error('TLS transport lost');
+    return original(...args);
+  };
+  h.host.recoverWrapper = async () => { recoveries++; return { state: { generation: 3, phase: 'controlling' } }; };
+  const started = await h.manager.command({ op: 'start', id: 'phone', mode: 'control', recoverTransport: true, config: fixture.config });
+  await until(() => h.points.some(command => command.sequence >= 4 && command.points.length));
+  await h.manager.command({ op: 'stop', runId: started.runId });
+  const failed = calls.findIndex(command => command.op === 'touch' && command.sequence === 2);
+  assert.equal(calls[failed].points.length, 1);
+  assert.equal(calls[failed + 1].op, 'frame');
+  assert.deepEqual(calls[failed + 2].points, []);
+  assert.equal(calls[failed + 2].sequence, 3);
+  assert.equal(calls[failed + 3].op, 'frame');
+  assert.equal(calls[failed + 4].points.length, 1);
+  assert.equal(calls[failed + 4].sequence, 4);
+  assert.equal(calls.filter(command => command.op === 'touch' && command.sequence === 2).length, 1);
+  assert.equal(recoveries, 1); assert.equal((await h.manager.command({ op: 'status' })).recoveries, 1);
+  assert.ok(calls.filter(command => command.op === 'touch').every(command => command.ttlMs === 1200));
+});
+
+test('stop during an opted-in reconnect never captures or touches after late recovery', vision, async t => {
+  const h = harness(t, { fail: true }); let release, entered;
+  const arrived = new Promise(resolve => { entered = resolve; });
+  h.host.recoverWrapper = () => { entered(); return new Promise(resolve => { release = resolve; }); };
+  const started = await h.manager.command({ op: 'start', id: 'phone', mode: 'control', recoverTransport: true, config: fixture.config });
+  await arrived;
+  const count = h.points.length, captures = h.captures();
+  const stopped = h.manager.command({ op: 'stop', runId: started.runId });
+  release({ state: { generation: 3, phase: 'controlling' } }); await stopped;
+  assert.equal(h.points.length, count); assert.equal(h.captures(), captures);
+  assert.equal((await h.manager.command({ op: 'status' })).running, false);
+});
+
+test('heartbeat recovery discards a frame already in flight before reconfirming movement', vision, async t => {
+  const h = harness(t), original = h.host.live, calls = []; let captures = 0, release, entered;
+  const heldFrame = new Promise(resolve => { entered = resolve; });
+  h.host.live = async (...args) => {
+    const command = args[2]; calls.push(structuredClone(command));
+    if (command.op === 'frame' && ++captures === 3) {
+      entered(); return new Promise(resolve => { release = resolve; });
+    }
+    return original(...args);
+  };
+  let heartbeats = 0;
+  h.host.syncWrapper = async () => {
+    if (++heartbeats === 1) { await heldFrame; throw new Error('heartbeat transport lost'); }
+    return { state: { generation: 3, phase: 'controlling' } };
+  };
+  h.host.recoverWrapper = async () => ({ state: { generation: 3, phase: 'controlling' } });
+  const started = await h.manager.command({ op: 'start', id: 'phone', mode: 'control', recoverTransport: true, config: fixture.config });
+  await until(async () => (await h.manager.command({ op: 'status' })).recoveries === 1);
+  const gap = calls.length;
+  release(fixture.frame);
+  await until(() => h.points.some(command => command.sequence >= 4 && command.points.length));
+  await h.manager.command({ op: 'stop', runId: started.runId });
+  assert.equal(calls[gap].op, 'frame', 'the pending old frame must not produce a decision');
+  assert.equal(calls[gap + 1].sequence, 3); assert.deepEqual(calls[gap + 1].points, []);
+  assert.equal(calls[gap + 2].op, 'frame'); assert.equal(calls[gap + 3].points.length, 1);
+  assert.equal((await h.manager.command({ op: 'status' })).error, '');
+});
+
 test('native region frames retain screen dimensions through live vision and preview analysis', vision, async t => {
   const region={x:0,y:0,width:200,height:200};
   const base64=execFileSync(python,['-c',
@@ -75,6 +141,28 @@ test('native region frames retain screen dimensions through live vision and prev
   await h.manager.command({op:'stop',runId:started.runId});
   const preview=await h.manager.command({op:'analyze',config:fixture.config,frame:cropped});
   assert.ok(preview.self); assert.ok(preview.target);
+});
+
+test('full capture preserves native screen pixels while analyzing the configured minimap', vision, async t => {
+  const h=harness(t), requests=[], live=h.host.live, analyses=[];
+  h.host.live=(...args)=>{if(args[2].op==='frame')requests.push(args[2]);return live(...args);};
+  for (const capture of ['auto','full']) {
+    requests.length=0;
+    const config={...fixture.config,capture};
+    const started=await h.manager.command({op:'start',id:'phone',mode:'observe',config});
+    await until(async()=>{const s=await h.manager.command({op:'status'});return s.frames>=2||!s.running;});
+    const status=await h.manager.command({op:'status'});
+    assert.equal(status.error,''); assert.ok(status.frames>=2);
+    assert.deepEqual(requests[0].region,capture==='auto'?{x:0,y:0,width:200,height:200}:undefined);
+    assert.equal(status.frame.width,fixture.config.width); assert.equal(status.frame.height,fixture.config.height);
+    assert.equal(status.frame.base64,fixture.frame.base64); assert.equal(status.frame.region,undefined);
+    const {elapsedMs,...analysis}=status.analysis;
+    analyses.push(analysis);
+    await h.manager.command({op:'stop',runId:started.runId});
+  }
+  assert.deepEqual(analyses[1],analyses[0],'capture mode does not enlarge the vision map or change coordinates');
+  assert.ok(analyses[1].self); assert.ok(analyses[1].target); assert.ok(analyses[1].direction);
+  assert.equal(h.points.length,0);
 });
 
 test('region requests include half-pixel crop boundaries and nearby recognition retains full frames', vision, async t => {
@@ -246,6 +334,14 @@ test('CLI defaults to observation and validates before requesting a phone', visi
   assert.equal(calls[1].params.backend,'basic');
   assert.equal(await runGameFollowCli(['start','--device','phone','--config',file,'--backend','automatic'],request,io),1);
   assert.equal(calls.length,2);
+  assert.equal(calls[0].params.recoverTransport,undefined);
+  for(const value of ['true','false']) {
+    assert.equal(await runGameFollowCli(['start','--device','phone','--config',file,'--recover-transport',value],request,io),0);
+    assert.equal(calls.at(-1).params.recoverTransport,value==='true');
+  }
+  for(const value of ['yes','1','TRUE'])
+    assert.equal(await runGameFollowCli(['start','--device','phone','--config',file,'--recover-transport',value],request,io),1);
+  assert.equal(calls.length,4);
 });
 
 test('basic backend is explicitly carried to the owned wrapper and reported in status',vision,async t=>{

@@ -141,11 +141,20 @@ public final class ControlService extends Service {
         }
         if (!op.equals("frame")) throw new IllegalArgumentException("未知视觉跟随请求");
         ScreenshotRegion region = input.has("region") ? ScreenshotRegion.from(input.getJSONObject("region")) : null;
+        boolean chunkedFrame = ScreenshotTransfer.PROTOCOL.equals(input.optString("imageTransfer"));
         long generation = session.generation;
         session.begin("视觉跟随 · 获取画面");
         PhoneAccessibility.current.perform(new JSONObject().put("kind", "screenshot").put("nativeSize", true), timing, region).whenComplete((value, error) -> main.post(() -> {
             timing.mark("captureDone");
-            session.finish(generation); render(); timing.mark("rendered"); result.complete(error == null ? success(value, timing) : failure(error));
+            session.finish(generation); render(); timing.mark("rendered");
+            try {
+                if (error != null) result.complete(failure(error));
+                else {
+                    Object output = chunkedFrame ? screenshots.offerIfLarge((JSONObject) value,
+                        input.getString("instanceId"), input.getString("sessionId"), generation) : value;
+                    result.complete(success(output, timing));
+                }
+            } catch (Exception failure) { result.complete(failure(failure)); }
         }));
     }
     private void action(JSONObject input, CompletableFuture<JSONObject> result, ControlTiming timing) throws Exception {

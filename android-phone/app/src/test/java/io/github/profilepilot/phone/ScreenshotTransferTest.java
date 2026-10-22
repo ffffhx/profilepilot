@@ -48,6 +48,45 @@ public class ScreenshotTransferTest {
         assertThrows(IllegalStateException.class, () -> read(stoppedId, 0));
     }
 
+    @Test public void negotiatedFollowFramesKeepSmallRegionsDirectAndPageLargeJpegWithoutResizing() throws Exception {
+        start();
+        JSONObject region = new ScreenshotRegion(120, 36, 425, 425).toJson();
+        JSONObject small = image(new byte[ScreenshotTransfer.CHUNK_CHARS * 3 / 4]).put("mime", "image/jpeg").put("region", region);
+        assertSame(small, transfer.offerIfLarge(small, session.instanceId, session.sessionId, session.generation));
+        assertFalse(small.has("transfer")); assertEquals(1, session.lastHeartbeat);
+        byte[] bytes = new byte[300000]; new Random(77).nextBytes(bytes);
+        JSONObject large = image(bytes).put("mime", "image/jpeg").put("region", region);
+        JSONObject offered = transfer.offerIfLarge(large, session.instanceId, session.sessionId, session.generation);
+        assertEquals("image/jpeg", offered.getString("mime"));
+        assertEquals(2772, offered.getInt("width")); assertEquals(1240, offered.getInt("height"));
+        assertEquals(new ScreenshotRegion(120, 36, 425, 425), ScreenshotRegion.from(offered.getJSONObject("region")));
+        assertFalse(offered.has("base64"));
+        region.put("x", 999); assertEquals(120, offered.getJSONObject("region").getInt("x"));
+        JSONObject descriptor = offered.getJSONObject("transfer"); String id = descriptor.getString("id");
+        StringBuilder assembled = new StringBuilder();
+        for (int offset = 0; offset < descriptor.getInt("length"); offset += ScreenshotTransfer.CHUNK_CHARS)
+            assembled.append(read(id, offset).getString("base64"));
+        assertArrayEquals(bytes, Base64.getDecoder().decode(assembled.toString()));
+        assertEquals(1, session.lastHeartbeat);
+        JSONObject full = transfer.offerIfLarge(image(bytes).put("mime", "image/jpeg"), session.instanceId, session.sessionId, session.generation);
+        assertFalse(full.has("region")); assertTrue(full.has("transfer"));
+        String stale = full.getJSONObject("transfer").getString("id");
+        transfer.offerIfLarge(image(new byte[90]), session.instanceId, session.sessionId, session.generation);
+        assertThrows(IllegalStateException.class, () -> read(stale, 0));
+    }
+
+    @Test public void followFrameRegionsAndLateSmallFramesCannotBypassValidation() throws Exception {
+        start();
+        for (int size : new int[] { 90, 90000 }) {
+            JSONObject bad = image(new byte[size]).put("region", new ScreenshotRegion(2600, 0, 425, 425).toJson());
+            assertThrows(IllegalArgumentException.class, () -> transfer.offerIfLarge(bad, session.instanceId, session.sessionId, session.generation));
+        }
+        String instance = session.instanceId, id = session.sessionId; long generation = session.generation;
+        session.pause("takeover");
+        assertThrows(IllegalStateException.class, () -> transfer.offerIfLarge(image(new byte[90]), instance, id, generation));
+        assertThrows(IllegalStateException.class, () -> transfer.offerIfLarge(image(new byte[90000]), instance, id, generation));
+    }
+
     @Test public void chunksNeverRenewLeaseAndCacheExpiresEvenWithRealHeartbeats() throws Exception {
         start(); String id = offer(new byte[90000]).getString("id");
         now[0] = 7000; read(id, 0); assertEquals(1, session.lastHeartbeat);

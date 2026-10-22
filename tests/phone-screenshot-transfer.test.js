@@ -4,7 +4,7 @@ const { randomBytes, randomUUID } = require('node:crypto');
 const http = require('node:http');
 const { loadCli } = require('./cli-test-build.cjs');
 const { assembleScreenshot } = loadCli('src/main/phones/screenshot-transfer.ts');
-const { phoneRequest } = loadCli('src/main/phones/adb.ts');
+const { phoneRequest, phoneRequestTimings } = loadCli('src/main/phones/adb.ts');
 const owner = { instanceId: 'instance', sessionId: 'session', generation: 7 };
 const state = { ...owner, phase: 'viewing' };
 const CHUNK = 48 * 1024;
@@ -35,11 +35,40 @@ test('small HTTP screenshot pages preserve every PNG byte and the original resul
   assert.deepEqual(output.result, { mime: 'image/png', width: 2772, height: 1240, base64: f.base64 });
   assert.equal(offsets.length, Math.ceil(f.base64.length / CHUNK));
   assert.ok(offsets.every((offset, i) => offset === i * CHUNK));
+  const timings = phoneRequestTimings(0);
+  assert.ok(timings.length > 0);
+  assert.ok(timings.every(value => value.operation === 'screenshot-chunk' && value.responseBytes < 50 * 1024));
 });
 
 test('old companion full screenshots and rejected captures never request pages', async () => {
   for (const initial of [{ state, result: { mime: 'image/png', base64: 'old-full-image' } }, { state, result: null }]) {
     assert.equal(await assembleScreenshot(initial, owner, () => { throw new Error('unexpected page'); }, () => true), initial);
+  }
+});
+
+test('chunked JPEG frames retain native screen dimensions and optional crop origin', async () => {
+  for (const region of [undefined, { x: 120, y: 36, width: 425, height: 425 }]) {
+    const f = fixture(400000); f.initial.result.mime = 'image/jpeg';
+    if (region) f.initial.result.region = region;
+    let pages = 0;
+    const output = await assembleScreenshot(f.initial, owner, async ({ offset }) => {
+      pages++; return f.page(offset);
+    }, () => true);
+    assert.deepEqual(output.result, { mime: 'image/jpeg', width: 2772, height: 1240,
+      ...(region ? { region } : {}), base64: f.base64 });
+    assert.equal(pages, Math.ceil(f.base64.length / CHUNK));
+  }
+});
+
+test('invalid frame regions reject before downloading any chunk', async () => {
+  for (const region of [
+    { x: -1, y: 0, width: 425, height: 425 }, { x: 0.5, y: 0, width: 425, height: 425 },
+    { x: 2600, y: 0, width: 425, height: 425 }, { x: 0, y: 1200, width: 425, height: 425 },
+    { x: 0, y: 0, width: 0, height: 425 }, { x: 0, y: 0, width: 425, height: 425, extra: 1 }
+  ]) {
+    const f = fixture(); f.initial.result.region = region; let calls = 0;
+    await assert.rejects(assembleScreenshot(f.initial, owner, async () => { calls++; }, () => true));
+    assert.equal(calls, 0);
   }
 });
 

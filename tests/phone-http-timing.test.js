@@ -72,3 +72,21 @@ test('late completion from an earlier run is excluded by request start time', as
   const nextRunAt = Date.now(); release(); await pending;
   assert.equal(phoneRequestTimings(nextRunAt).length, 0);
 });
+
+test('cancelling a recovery request closes its socket and never accepts the late response', async t => {
+  let arrived, closed, lateReply;
+  const ready = new Promise(resolve => { arrived = resolve; });
+  const disconnected = new Promise(resolve => { closed = resolve; });
+  const port = await listen(t, (request, reply) => {
+    request.resume(); reply.on('close', closed);
+    lateReply = () => reply.end('{"ok":true}'); arrived();
+  });
+  const controller = new AbortController(), since = Date.now();
+  const pending = phoneRequest(port, 'private-token', 'sync', {}, controller.signal);
+  const rejected = assert.rejects(pending, error => error.name === 'AbortError');
+  await ready; controller.abort(); await rejected; await disconnected;
+  lateReply(); await delay(20);
+  const observed = phoneRequestTimings(since);
+  assert.equal(observed.length, 1); assert.equal(observed[0].outcome, 'error');
+  assert.equal(observed[0].responseBytes, 0);
+});

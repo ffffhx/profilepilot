@@ -27,6 +27,7 @@ import { assembleScreenshot, SCREENSHOT_TRANSFER } from "./screenshot-transfer";
 import { ScreenCamera, type CameraCapture } from "./screen-camera";
 import type { ScreenCameraStart, ScreenCameraCommand, ScreenCameraLease } from "../../shared/screen-camera";
 import { GameFollower } from "./game-follow";
+import { FollowRecovery } from "./follow-recovery";
 export { phoneActionSchema } from "./actions";
 
 const sessionSchema = z.object({
@@ -76,7 +77,8 @@ export class PhonesService {
   private observations = new Map<string, { instanceId: string; sequence: number; generation: number }>();
   private reconcile = new Set<string>();
   private pairing = new Set<string>();
-  private wrappers = new Map<string, { id: string; sessionId: string; instanceId: string; seenAt: number; closing: boolean; backend: "app" | "basic"; followSequence?: number; visualFollow?: boolean }>();
+  private wrappers = new Map<string, { id: string; sessionId: string; instanceId: string; seenAt: number; closing: boolean; backend: "app" | "basic"; followSequence?: number; visualFollow?: boolean;
+    recovery?: FollowRecovery<PhoneDevice>; recoveryGeneration?: number; recoveryMode?: "view" | "control" }>();
   private installs = new Map<string, InstallJob>();
   private closed = false;
   private wirelessBusy = false;
@@ -109,6 +111,7 @@ export class PhonesService {
       startWrapper: (...args) => this.startWrapper(...args),
       pulseWrapper: lease => this.pulseWrapper(lease),
       syncWrapper: lease => this.wrapperState(lease, true),
+      recoverWrapper: (lease, generation) => this.recoverFollow(lease, generation),
       stopWrapper: lease => this.stopWrapper(lease),
       live: (lease, generation, command) => this.followLive(lease, generation, command)
     });
@@ -307,15 +310,20 @@ export class PhonesService {
         const saved = this.saved[device.id];
         if (saved && (saved.model !== next.model || saved.transport !== next.transport)) { saved.model = next.model.slice(0, 200); saved.transport = next.transport; metadataChanged = true; }
         if (device.connection !== "device") { await this.disconnected(device, this.connectionError(device), device.connection); continue; }
+        // Only this live, explicitly opted-in follower may reconcile its own
+        // brief transport loss. Other wrappers retain the normal pause policy.
+        if (this.awaitingFollowRecovery(device.id)) continue;
         if (this.operations.has(device.id)) continue;
         await this.identifyHardware(device);
         await this.inspectInstallation(device);
         let polledRoute: Route | undefined;
         try {
+          if (this.awaitingFollowRecovery(device.id)) continue;
           if (!this.routes.has(device.id) && this.saved[device.id]) await this.forward(device.id);
           if (this.routes.has(device.id)) {
             polledRoute = this.routes.get(device.id);
             const { state } = await this.rpc(device.id, "sync", {}, true);
+            if (this.awaitingFollowRecovery(device.id)) continue;
             if (!["idle", "stopped"].includes(state.phase)) this.basic.close();
             // A new desktop process or a recovered link must not silently
             // inherit an old controller's authority, even within the phone TTL.
@@ -456,6 +464,11 @@ export class PhonesService {
     }
   }
   private async disconnected(device: PhoneDevice, error: string, connection = device.connection): Promise<void> {
+    for (const owner of this.wrappers.values()) {
+      if (owner.id === device.id && owner.visualFollow && !owner.closing && this.now() - owner.seenAt < 8000
+        && device.state?.instanceId === owner.instanceId && device.state.sessionId === owner.sessionId
+        && device.state.generation === owner.recoveryGeneration && ["viewing", "controlling", "executing"].includes(device.state.phase)) owner.recovery?.lost();
+    }
     if (connection !== "device") this.screenReads.get(device.id)?.abort();
     if (connection !== "device") { this.basic.disconnect(device.id); this.hardwareReadings.delete(device.id); device.appInstallation = undefined; }
     this.debugReadings.delete(device.id); this.debugPending.delete(device.id);
@@ -471,10 +484,14 @@ export class PhonesService {
       await this.adb.run(["-s", device.id, "forward", "--remove", `tcp:${route.port}`]).catch(() => {});
     }
   }
-  private async forward(id: string): Promise<void> {
+  private async forward(id: string, signal?: AbortSignal): Promise<void> {
     const token = this.saved[id]?.token; if (!token) throw new Error("请先连接手机配套 App。");
-    const port = Number(await this.adb.run(["-s", id, "forward", "tcp:0", `tcp:${this.companion.port}`]));
+    const port = Number(await this.adb.run(["-s", id, "forward", "tcp:0", `tcp:${this.companion.port}`], signal ? 2000 : 8000, undefined, signal));
     if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error("ADB 未返回有效的手机连接端口。");
+    if (signal?.aborted) {
+      void this.adb.run(["-s", id, "forward", "--remove", `tcp:${port}`]).catch(() => {});
+      signal.throwIfAborted();
+    }
     this.routes.set(id, { port, token });
   }
   private connectionEvent(device: PhoneDevice, route: Route, method: string, outcome: "invalidated" | "superseded", error: unknown): void {
@@ -492,7 +509,7 @@ export class PhonesService {
       fs.writeFileSync(tmp, JSON.stringify(events, null, 2), { mode: 0o600 }); fs.renameSync(tmp, file);
     } catch { /* Diagnostics cannot interfere with control revocation. */ }
   }
-  private async rpc(id: string, method: string, body: unknown = {}, background = false): Promise<{ state: PhoneSessionState; result?: unknown }> {
+  private async rpc(id: string, method: string, body: unknown = {}, background = false, signal?: AbortSignal): Promise<{ state: PhoneSessionState; result?: unknown }> {
     const route = this.routes.get(id); if (!route) throw new Error("请先连接手机配套 App。");
     const sequence = ++this.sequence;
     const device = this.device(id);
@@ -501,9 +518,10 @@ export class PhonesService {
     const syncBody = { transport: device.transport, ...(reading?.route === route && ageMs < 6000 ? { debugSettings: { ...reading.value, ageMs } } : {}) };
     const action = (body as { action?: { kind?: string; format?: string } })?.action;
     const screenshot = method === "action" && action?.kind === "screenshot" && action.format === "png";
-    const requestBody = method === "sync" ? syncBody : screenshot ? { ...body as object, imageTransfer: SCREENSHOT_TRANSFER } : body;
+    const capturedImage = screenshot || method === "follow" && (body as { op?: string })?.op === "frame";
+    const requestBody = method === "sync" ? syncBody : capturedImage ? { ...body as object, imageTransfer: SCREENSHOT_TRANSFER } : body;
     let raw: unknown;
-    try { raw = await this.request(route.port, route.token, method, requestBody); }
+    try { raw = await this.request(route.port, route.token, method, requestBody, signal); }
     catch (error) {
       if (this.routes.get(id) === route) {
         // Only a background observation can be superseded by newer, recent
@@ -519,6 +537,7 @@ export class PhonesService {
       }
       throw error;
     }
+    signal?.throwIfAborted();
     if (this.routes.get(id) !== route) throw new Error("手机连接已改变，请重新读取状态；不要重放输入。");
     const response = z.object({ ok: z.boolean(), code: z.string().optional(), error: z.string().optional(), state: sessionSchema.optional(), result: z.unknown().optional() }).parse(raw);
     if (response.state) {
@@ -552,15 +571,15 @@ export class PhonesService {
     if (!response.state) throw new Error("手机未返回控制状态。");
     if (sequence > (route.success?.sequence || 0)) route.success = { sequence, at: this.now() };
     if (method === "sync") this.refreshDebugSettings(id, route);
-    if (screenshot) {
+    if (capturedImage) {
       const owner = body as { instanceId: string; sessionId: string; generation: number };
       return assembleScreenshot({ state: response.state, result: response.result },
         { instanceId: owner.instanceId, sessionId: owner.sessionId, generation: owner.generation },
-        page => this.rpc(id, "screenshot-chunk", page),
+        page => this.rpc(id, "screenshot-chunk", page, false, signal),
         // A later-started poll may cache "executing" while this capture encodes.
         // Every returned page separately proves the same owner is now ready;
         // this cache only rejects revoked ownership, not that older busy phase.
-        () => !this.closed && this.routes.get(id) === route && device.companion === "ready" && !this.reconcile.has(id)
+        () => !signal?.aborted && !this.closed && this.routes.get(id) === route && device.companion === "ready" && !this.reconcile.has(id)
           && device.state?.instanceId === owner.instanceId && device.state.sessionId === owner.sessionId
           && device.state.generation === owner.generation && ["viewing", "controlling", "executing"].includes(device.state.phase));
     }
@@ -926,12 +945,13 @@ export class PhonesService {
       if (/Error:|Exception|unable to resolve Intent/i.test(output)) throw new Error("此手机无法直接打开该设置，请在手机设置中手动开启。");
     });
   }
-  async startWrapper(id: string, mode: "view" | "control", controller: string, task: string, backend: "app" | "basic" = "app"): Promise<{ lease: string; device: PhoneDevice }> {
+  async startWrapper(id: string, mode: "view" | "control", controller: string, task: string, backend: "app" | "basic" = "app", recoverTransport = false): Promise<{ lease: string; device: PhoneDevice }> {
     await this.refresh();
     let device = backend === "basic" ? await this.basicStart(id, mode, controller, task) : await this.start(id, mode, controller, task);
     if (backend === "basic") device = { ...device, state: device.basic! };
     const lease = randomUUID();
-    this.wrappers.set(lease, { id, sessionId: device.state!.sessionId!, instanceId: device.state!.instanceId, seenAt: this.now(), closing: false, backend });
+    this.wrappers.set(lease, { id, sessionId: device.state!.sessionId!, instanceId: device.state!.instanceId, seenAt: this.now(), closing: false, backend,
+      ...(recoverTransport && backend === "app" ? { recovery: new FollowRecovery<PhoneDevice>(), recoveryGeneration: device.state!.generation, recoveryMode: mode } : {}) });
     return { lease, device };
   }
   private wrapper(lease: string) {
@@ -939,6 +959,41 @@ export class PhonesService {
     const owner = this.wrappers.get(lease);
     if (this.closed || !owner || owner.closing || this.now() - owner.seenAt >= 8000) throw new Error("ADB 托管任务已结束或失联，请重新启动任务；不会自动恢复旧操作。");
     return owner;
+  }
+  private awaitingFollowRecovery(id: string): boolean {
+    return [...this.wrappers.values()].some(owner => owner.id === id && !owner.closing
+      && this.now() - owner.seenAt < 8000 && owner.recovery?.waiting);
+  }
+  private async recoverFollow(lease: string, generation: number): Promise<PhoneDevice> {
+    const owner = this.wrapper(lease), device = this.device(owner.id), recovery = owner.recovery;
+    const check = () => {
+      if (this.wrapper(lease) !== owner || !owner.visualFollow || owner.backend !== "app" || !recovery
+        || generation !== owner.recoveryGeneration || device.state?.instanceId !== owner.instanceId
+        || device.state.sessionId !== owner.sessionId || device.state.generation !== generation
+        || device.state.mode !== owner.recoveryMode || ["paused", "stopped", "idle"].includes(device.state.phase))
+        throw new Error("手机实例、会话或控制权已改变，不能恢复跟随。");
+    };
+    check();
+    return recovery!.recover(check, async signal => {
+      try {
+        if (!this.routes.has(owner.id)) await this.forward(owner.id, signal);
+        signal.throwIfAborted(); check();
+        const { state } = await this.rpc(owner.id, "sync", {}, false, signal);
+        signal.throwIfAborted(); check();
+        if (state.instanceId !== owner.instanceId || state.sessionId !== owner.sessionId || state.generation !== generation
+          || state.mode !== owner.recoveryMode || !["viewing", "controlling", "executing"].includes(state.phase)
+          || !Object.values(state.permissions).every(Boolean) || state.readiness?.unlocked === false)
+          throw new Error("手机未确认原来的有效会话，跟随已停止。");
+        if (state.phase === "executing") return undefined;
+        this.reconcile.delete(owner.id); device.connection = "device"; owner.seenAt = this.now();
+        return structuredClone(device);
+      } catch (error) {
+        // A rejected/authenticated response is final. Only a failed transport
+        // (which rpc removed) or a failed forward may be observed again.
+        if (signal.aborted || this.routes.has(owner.id)) throw error;
+        check(); return undefined;
+      }
+    });
   }
   pulseWrapper(lease: string): PhoneDevice {
     const owner = this.wrapper(lease), device = this.device(owner.id), state = owner.backend === "basic" ? this.basic.state(owner.id) : device.state;
@@ -1091,6 +1146,7 @@ export class PhonesService {
     z.string().uuid().parse(lease);
     const owner = this.wrappers.get(lease); if (!owner) return;
     owner.closing = true; // Revoke first, including when phone cleanup must retry.
+    owner.recovery?.cancel();
     await this.adbJobs.release(lease);
     if (owner.backend === "basic") {
       const state = this.basic.state(owner.id);

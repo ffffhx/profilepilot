@@ -143,6 +143,35 @@ test('native PNG screenshots negotiate bounded pages and retain the public scree
   assert.equal(h.service.snapshot().devices[0].companion, 'ready');
 });
 
+test('follow frames negotiate bounded JPEG pages while small and legacy frames stay direct', async t => {
+  const h = harness(t), owner = await h.service.startWrapper(h.id, 'view', 'Agent', 'follow');
+  const id = randomUUID(), size = 48 * 1024, base64 = Buffer.alloc(300000, 47).toString('base64');
+  const region = { x: 120, y: 36, width: 425, height: 425 };
+  let chunked = true, frames = 0, pages = 0;
+  h.hook = (method, body) => {
+    if (method === 'follow') {
+      if (body.op !== 'frame') { assert.equal(body.imageTransfer, undefined); return; }
+      frames++; assert.equal(body.imageTransfer, 'base64-chunks-v1'); assert.deepEqual(body.region, region);
+      return { ok: true, state: structuredClone(h.state), result: { mime: 'image/jpeg', width: 2772, height: 1240, region,
+        ...(chunked ? { transfer: { protocol: 1, id, length: base64.length, chunkSize: size, ttlMs: 15000 } } : { base64: 'AAAA' }) } };
+    }
+    if (method === 'screenshot-chunk') {
+      pages++; assert.equal(body.transferId, id); assert.equal(body.sessionId, owner.device.state.sessionId);
+      return { ok: true, state: structuredClone(h.state), result: { id, offset: body.offset,
+        base64: base64.slice(body.offset, body.offset + size), done: body.offset + size >= base64.length } };
+    }
+  };
+  await h.service.followLive(owner.lease, h.state.generation, { op: 'probe' });
+  const frame = await h.service.followLive(owner.lease, h.state.generation, { op: 'frame', region });
+  assert.deepEqual(frame, { mime: 'image/jpeg', width: 2772, height: 1240, region, base64 });
+  assert.equal(frames, 1); assert.equal(pages, Math.ceil(base64.length / size));
+  const downloaded = pages; chunked = false;
+  const direct = await h.service.followLive(owner.lease, h.state.generation, { op: 'frame', region });
+  assert.equal(direct.base64, 'AAAA'); assert.deepEqual(direct.region, region);
+  assert.equal(frames, 2); assert.equal(pages, downloaded, 'small and legacy direct responses do not request chunks');
+  await h.service.stopWrapper(owner.lease);
+});
+
 test('phone rejection between PNG pages keeps the observed pause and never returns a partial image', async t => {
   const h = harness(t), owner = await h.service.startWrapper(h.id, 'view', 'Agent', 'PNG');
   const id = randomUUID(), size = 48 * 1024; let pages = 0;

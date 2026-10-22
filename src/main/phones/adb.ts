@@ -90,6 +90,7 @@ export function phoneRequestTimings(since: number): PhoneRequestTiming[] {
 }
 function timingOperation(method: string, body: unknown): PhoneRequestTiming["operation"] {
   if (method === "sync") return "sync";
+  if (method === "screenshot-chunk") return "screenshot-chunk";
   const op = body && typeof body === "object" ? (body as { op?: unknown }).op : undefined;
   if (method === "follow") {
     if (op === "frame") return "follow-frame";
@@ -98,7 +99,7 @@ function timingOperation(method: string, body: unknown): PhoneRequestTiming["ope
   }
   return "other";
 }
-export function phoneRequest(port: number, token: string, method: string, body: unknown = {}): Promise<unknown> {
+export function phoneRequest(port: number, token: string, method: string, body: unknown = {}, signal?: AbortSignal): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const began = performance.now();
     const timing: PhoneRequestTiming = { at: Date.now(), operation: timingOperation(method, body), totalMs: 0, responseBytes: 0, outcome: "error" };
@@ -112,7 +113,7 @@ export function phoneRequest(port: number, token: string, method: string, body: 
     };
     const fail = (error: Error) => { finish("error"); reject(error); };
     const payload = JSON.stringify(body);
-    const request = http.request({ hostname: "127.0.0.1", port, method: "POST", path: `/${method}`, agent: false, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) } }, response => {
+    const request = http.request({ hostname: "127.0.0.1", port, method: "POST", path: `/${method}`, agent: false, signal, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) } }, response => {
       timing.headersMs = elapsed();
       const chunks: Buffer[] = []; let size = 0;
       response.on("data", chunk => {

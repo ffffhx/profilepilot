@@ -15,7 +15,7 @@ ppilot phone list
 ppilot phone readiness|doctor --device <设备ID> [--backend app|basic]
 ppilot phone follow runtime|setup|status|load
 ppilot phone follow save --config <校准JSON>
-ppilot phone follow start --device <设备ID> --config <校准JSON> [--mode observe|control] [--backend app|basic]
+ppilot phone follow start --device <设备ID> --config <校准JSON> [--mode observe|control] [--backend app|basic] [--recover-transport true|false]
 ppilot phone follow stop --run-id <status返回的任务ID>
 ppilot phone follow analyze --params-file <包含config和frame的JSON>
 ppilot phone emulator-list

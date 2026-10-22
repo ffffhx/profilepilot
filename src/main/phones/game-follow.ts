@@ -23,6 +23,7 @@ export const gameFollowConfigSchema = z.object({
     rotation: z.number().finite().min(-180).max(180) }).strict(),
   confidence: z.number().finite().min(.65).max(.999), stopDistance: z.number().finite().min(.02).max(.3),
   intervalMs: z.number().int().min(350).max(1000),
+  capture: z.enum(["auto", "full"]).optional(),
   nearby: z.object({ selfLabel: image, targetLabel: image, region: rect,
     pixelsPerMapUnit: z.number().finite().min(100).max(100000) }).strict().optional(),
   selfMarker: z.object({ hueMin: z.number().int().min(0).max(179), hueMax: z.number().int().min(0).max(179),
@@ -51,7 +52,7 @@ export const followCommandSchema = z.discriminatedUnion("op", [
   z.object({ op: z.enum(["runtime", "setup", "status", "load"]) }).strict(),
   z.object({ op: z.literal("save"), config: gameFollowConfigSchema }).strict(),
   z.object({ op: z.literal("analyze"), config: gameFollowConfigSchema, frame: frameSchema }).strict(),
-  z.object({ op: z.literal("start"), id: z.string().min(1).max(200), mode: z.enum(["observe", "control"]), backend: z.enum(["app", "basic"]).default("app"), config: gameFollowConfigSchema }).strict(),
+  z.object({ op: z.literal("start"), id: z.string().min(1).max(200), mode: z.enum(["observe", "control"]), backend: z.enum(["app", "basic"]).default("app"), recoverTransport: z.boolean().optional(), config: gameFollowConfigSchema }).strict(),
   z.object({ op: z.literal("stop"), runId: z.string().uuid() }).strict()
 ]);
 type Python = { executable: string; args: string[] };
@@ -104,13 +105,15 @@ export class VisionWorker {
   close() { this.ended = true; this.fail(new Error("视觉处理已停止")); this.child.kill(); }
 }
 export interface FollowHost {
-  startWrapper(id: string, mode: "view" | "control", controller: string, task: string, backend?: "app" | "basic"): Promise<{ lease: string; device: PhoneDevice }>;
+  startWrapper(id: string, mode: "view" | "control", controller: string, task: string, backend?: "app" | "basic", recoverTransport?: boolean): Promise<{ lease: string; device: PhoneDevice }>;
   pulseWrapper(lease: string): PhoneDevice;
   syncWrapper(lease: string): Promise<PhoneDevice>;
+  recoverWrapper?(lease: string, generation: number): Promise<PhoneDevice>;
   stopWrapper(lease: string): Promise<void>;
   live(lease: string, generation: number, command: object): Promise<any>;
 }
 type Run = { id: string; lease?: string; generation: number; sequence: number; cancelled: boolean;
+  recoverTransport: boolean; recoveryEpoch: number; recovery?: Promise<boolean>; resetVision?: boolean;
   worker?: VisionWorker; starting?: Promise<void>; done?: Promise<void>; stop?: Promise<void>; cleanup?: Promise<void>; heartbeat?: NodeJS.Timeout;
   heartbeatPending?: Promise<void>; lastHeartbeatAt?: number; heartbeatTickAt?: number;
   beganAt?: number; eventLoop?: IntervalHistogram };
@@ -196,17 +199,18 @@ export class GameFollower {
       } catch (error) { this.preview?.close(); this.preview = undefined; throw error; }
       finally { this.analyzing = false; }
     }
-    if (command.op === "start") return this.start(command.id, command.mode, command.config, command.backend);
+    if (command.op === "start") return this.start(command.id, command.mode, command.config, command.backend, command.recoverTransport);
     throw new Error("未知视觉跟随操作");
   }
   private async ready() {
     if (!this.python && !(await this.runtime()).available) throw new Error("视觉组件未就绪，请先安装");
   }
-  private async start(id: string, mode: "observe" | "control", config: GameFollowConfig, backend: "app" | "basic"): Promise<FollowStatus> {
+  private async start(id: string, mode: "observe" | "control", config: GameFollowConfig, backend: "app" | "basic", recoverTransport = false): Promise<FollowStatus> {
     if (this.closing) throw new Error("ProfilePilot 正在退出");
     if (this.run && !this.run.cancelled) throw new Error("请先停止当前跟随任务");
     if (this.analyzing) throw new Error("请等待当前图像分析完成");
-    const run: Run = { id: randomUUID(), generation: 0, sequence: 0, cancelled: false };
+    const run: Run = { id: randomUUID(), generation: 0, sequence: 0, cancelled: false,
+      recoverTransport: recoverTransport && backend === "app", recoveryEpoch: 0 };
     let started!: () => void;
     run.starting = new Promise<void>(resolve => { started = resolve; });
     this.run = run;
@@ -219,7 +223,7 @@ export class GameFollower {
       // Recognition continuity must tolerate that cadence; frame age below
       // still independently prevents movement from an overly delayed capture.
       await run.worker.request({ op: "configure", config, maxFrameGapMs: backend === "basic" ? 4000 : 1500 });
-      const owner = await this.host.startWrapper(id, mode === "observe" ? "view" : "control", "本机视觉跟随", config.name, backend);
+      const owner = await this.host.startWrapper(id, mode === "observe" ? "view" : "control", "本机视觉跟随", config.name, backend, run.recoverTransport);
       run.lease = owner.lease; run.generation = owner.device.state!.generation;
       if (run.cancelled) throw new Error("跟随任务已停止");
       const probe = await this.host.live(run.lease, run.generation, { op: "probe" });
@@ -229,6 +233,7 @@ export class GameFollower {
       run.beganAt = Date.now(); run.heartbeatTickAt = performance.now();
       run.eventLoop = monitorEventLoopDelay({ resolution: 20 }); run.eventLoop.enable();
       run.heartbeat = setInterval(() => {
+        const epoch = run.recoveryEpoch;
         try {
           // Measure when this host timer actually runs, independently of the
           // authenticated phone response. A late timer is not lease evidence.
@@ -237,6 +242,7 @@ export class GameFollower {
           this.value.timings = { ...this.value.timings, heartbeatTimerLagMs: lag,
             maxHeartbeatTimerLagMs: Math.max(this.value.timings?.maxHeartbeatTimerLagMs || 0, lag) };
           this.sampleHostTimings(run);
+          if (run.recovery) return;
           const state = this.host.pulseWrapper(run.lease!).state;
           if (!state || state.generation !== run.generation || !["viewing", "controlling", "executing"].includes(state.phase)) throw new Error("手机已暂停或会话已改变");
           // pulseWrapper only keeps the host-side owner alive. The phone's
@@ -244,7 +250,7 @@ export class GameFollower {
           // while discovery, another device, or this capture is slow.
           const sentAt = Date.now();
           if (!run.heartbeatPending) run.heartbeatPending = this.host.syncWrapper(run.lease!).then(device => {
-            if (run.cancelled || this.run !== run) return;
+            if (run.cancelled || this.run !== run || epoch !== run.recoveryEpoch) return;
             const current = device.state;
             if (!current || current.generation !== run.generation || !["viewing", "controlling", "executing"].includes(current.phase)) throw new Error("手机已暂停或会话已改变");
             const now = Date.now();
@@ -252,9 +258,9 @@ export class GameFollower {
               ...(run.lastHeartbeatAt === undefined ? {} : { heartbeatGapMs: now - run.lastHeartbeatAt }) };
             run.lastHeartbeatAt = now;
           }).catch(error => {
-            if (!run.cancelled && this.run === run) { this.value.error = (error as Error).message; void this.stop(run); }
+            this.heartbeatFailed(run, epoch, error);
           }).finally(() => { run.heartbeatPending = undefined; });
-        } catch (error) { this.value.error = (error as Error).message; void this.stop(run); }
+        } catch (error) { this.heartbeatFailed(run, epoch, error); }
       }, 1000);
       run.done = this.loop(run, config, mode, backend);
       return structuredClone(this.value);
@@ -269,43 +275,83 @@ export class GameFollower {
       slowAdbStarts: adbLaunchDelays(run.beganAt ?? Date.now()),
       httpRequests: phoneRequestTimings(run.beganAt ?? Date.now()) };
   }
+  private heartbeatFailed(run: Run, epoch: number, error: unknown): void {
+    if (run.cancelled || this.run !== run || epoch !== run.recoveryEpoch) return;
+    void this.tryRecover(run).then(recovered => {
+      if (!recovered && !run.cancelled) { this.value.error ||= (error as Error).message; void this.stop(run); }
+    });
+  }
+  private tryRecover(run: Run): Promise<boolean> {
+    if (run.cancelled || !run.recoverTransport || !this.host.recoverWrapper) return Promise.resolve(false);
+    if (run.recovery) return run.recovery;
+    run.recoveryEpoch++; this.value.recovering = true;
+    run.recovery = Promise.resolve().then(() => this.host.recoverWrapper!(run.lease!, run.generation)).then(device => {
+      if (run.cancelled || this.run !== run) return false;
+      if (device.state?.generation !== run.generation || !["viewing", "controlling"].includes(device.state.phase))
+        throw new Error("手机未确认原来的有效会话，跟随已停止。");
+      // Never use an analysis from before the gap. Configure resets tracking,
+      // requiring two fresh observations before any new movement decision.
+      run.resetVision = true; this.value.analysis = undefined; this.value.error = "";
+      this.value.recoveries = (this.value.recoveries || 0) + 1; return true;
+    }).catch(error => { if (!run.cancelled && this.run === run) this.value.error = (error as Error).message; return false; })
+      .finally(() => { if (this.run === run) this.value.recovering = false; run.recovery = undefined; });
+    return run.recovery;
+  }
   private async loop(run: Run, config: GameFollowConfig, mode: "observe" | "control", backend: "app" | "basic") {
     const began = Date.now();
-    const region = backend === "app" && !config.nearby ? mapCaptureRegion(config) : undefined;
+    const region = backend === "app" && config.capture !== "full" && !config.nearby ? mapCaptureRegion(config) : undefined;
     try {
       while (!run.cancelled) {
-        const at = Date.now();
-        const frame: FollowFrame = frameSchema.parse(await this.host.live(run.lease!, run.generation, { op: "frame", ...(region ? { region } : {}) }));
-        const capturedAt = Date.now();
-        // Wi-Fi latency can vary between requests. A late capture followed by an
-        // early one can violate Android's screenshot interval even when host
-        // request starts are spaced correctly. For App capture, begin the next
-        // interval only after this response, when the phone has surely captured.
-        const nextFrameAt = (backend === "app" ? Date.now() : at) + config.intervalMs;
+        if (run.recovery && !await run.recovery) throw new Error(this.value.error || "跟随连接恢复失败");
         if (run.cancelled) break;
-        if (frame.width !== config.width || frame.height !== config.height) throw new Error("手机分辨率或方向已改变，请重新校准");
-        const analysis: FollowAnalysis = await run.worker!.request({ op: "analyze", base64: frame.base64, region: frame.region });
-        if (run.cancelled) break;
-        this.value.frame = frame; this.value.analysis = analysis; this.value.frames++;
-        this.value.timings = { ...this.value.timings, captureMs: capturedAt - at, analysisMs: Date.now() - capturedAt, inputMs: 0 };
-        this.value.fps = Math.round(this.value.frames * 10000 / Math.max(1, Date.now() - began)) / 10;
-        if (mode === "control") {
-          // File captures on older emulators are slower; their movement is a
-          // bounded 350 ms stroke. Never move from an unboundedly delayed frame.
-          const direction = Date.now() - at < (backend === "basic" ? 3000 : 1000) ? analysis.direction : null;
-          const joystick = config.joystick, rotation = joystick.rotation * Math.PI / 180;
-          const dx = direction ? direction.x * Math.cos(rotation) - direction.y * Math.sin(rotation) : 0;
-          const dy = direction ? direction.x * Math.sin(rotation) + direction.y * Math.cos(rotation) : 0;
-          const cx = Math.round(joystick.x * config.width), cy = Math.round(joystick.y * config.height);
-          const radius = joystick.radius * Math.min(config.width, config.height);
-          const points = direction ? [{ id: 0, x: Math.round(cx + dx * radius), y: Math.round(cy + dy * radius), fromX: cx, fromY: cy }] : [];
-          const inputAt = Date.now();
-          await this.host.live(run.lease!, run.generation, { op: "touch", sequence: ++run.sequence, points, ttlMs: 1200 });
+        if (run.resetVision) {
+          run.resetVision = false;
+          await run.worker!.request({ op: "configure", config, maxFrameGapMs: 1500 });
           if (run.cancelled) break;
-          this.value.timings = { ...this.value.timings, inputMs: Date.now() - inputAt };
-          if (direction) this.value.actions++;
         }
-        await new Promise(resolve => setTimeout(resolve, Math.max(0, nextFrameAt - Date.now())));
+        const epoch = run.recoveryEpoch;
+        try {
+          const at = Date.now();
+          const frame: FollowFrame = frameSchema.parse(await this.host.live(run.lease!, run.generation, { op: "frame", ...(region ? { region } : {}) }));
+          const capturedAt = Date.now();
+          // Wi-Fi latency can vary between requests. A late capture followed by an
+          // early one can violate Android's screenshot interval even when host
+          // request starts are spaced correctly. For App capture, begin the next
+          // interval only after this response, when the phone has surely captured.
+          const nextFrameAt = (backend === "app" ? Date.now() : at) + config.intervalMs;
+          if (run.cancelled) break;
+          if (epoch !== run.recoveryEpoch) continue;
+          if (frame.width !== config.width || frame.height !== config.height) throw new Error("手机分辨率或方向已改变，请重新校准");
+          const analysis: FollowAnalysis = await run.worker!.request({ op: "analyze", base64: frame.base64, region: frame.region });
+          if (run.cancelled) break;
+          if (epoch !== run.recoveryEpoch) continue;
+          this.value.frame = frame; this.value.analysis = analysis; this.value.frames++;
+          this.value.timings = { ...this.value.timings, captureMs: capturedAt - at, analysisMs: Date.now() - capturedAt, inputMs: 0 };
+          this.value.fps = Math.round(this.value.frames * 10000 / Math.max(1, Date.now() - began)) / 10;
+          if (mode === "control") {
+            // File captures on older emulators are slower; their movement is a
+            // bounded 350 ms stroke. Never move from an unboundedly delayed frame.
+            const direction = Date.now() - at < (backend === "basic" ? 3000 : 1000) ? analysis.direction : null;
+            const joystick = config.joystick, rotation = joystick.rotation * Math.PI / 180;
+            const dx = direction ? direction.x * Math.cos(rotation) - direction.y * Math.sin(rotation) : 0;
+            const dy = direction ? direction.x * Math.sin(rotation) + direction.y * Math.cos(rotation) : 0;
+            const cx = Math.round(joystick.x * config.width), cy = Math.round(joystick.y * config.height);
+            const radius = joystick.radius * Math.min(config.width, config.height);
+            const points = direction ? [{ id: 0, x: Math.round(cx + dx * radius), y: Math.round(cy + dy * radius), fromX: cx, fromY: cy }] : [];
+            const inputAt = Date.now();
+            await this.host.live(run.lease!, run.generation, { op: "touch", sequence: ++run.sequence, points, ttlMs: 1200 });
+            if (run.cancelled) break;
+            if (epoch !== run.recoveryEpoch) continue;
+            this.value.timings = { ...this.value.timings, inputMs: Date.now() - inputAt };
+            if (direction) this.value.actions++;
+          }
+          await new Promise(resolve => setTimeout(resolve, Math.max(0, nextFrameAt - Date.now())));
+        } catch (error) {
+          if (run.cancelled) break;
+          if (epoch !== run.recoveryEpoch) continue;
+          if (await this.tryRecover(run)) continue;
+          throw error;
+        }
       }
     } catch (error) { if (!run.cancelled) this.value.error = (error as Error).message; }
     finally {

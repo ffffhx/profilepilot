@@ -18,14 +18,36 @@ final class ScreenshotTransfer {
 
     JSONObject offer(JSONObject image, String instanceId, String sessionId, long generation) throws Exception {
         session.authorize(instanceId, sessionId, generation, false);
+        JSONObject metadata = metadata(image);
+        String base64 = image.getString("base64");
+        entry = new Entry(UUID.randomUUID().toString(), instanceId, sessionId, generation, clock.getAsLong(), base64);
+        return metadata.put("transfer", new JSONObject().put("protocol", 1).put("id", entry.id).put("length", base64.length())
+            .put("chunkSize", CHUNK_CHARS).put("ttlMs", TTL_MS));
+    }
+
+    /** Small minimap frames need no extra round trip; large frames use the same immutable cache. */
+    JSONObject offerIfLarge(JSONObject image, String instanceId, String sessionId, long generation) throws Exception {
+        session.authorize(instanceId, sessionId, generation, false);
+        if (image.getString("base64").length() > CHUNK_CHARS) return offer(image, instanceId, sessionId, generation);
+        metadata(image);
+        clear();
+        return image;
+    }
+
+    private JSONObject metadata(JSONObject image) throws Exception {
         String base64 = image.getString("base64"), mime = image.getString("mime");
         if ((!mime.equals("image/png") && !mime.equals("image/jpeg")) || base64.isEmpty()
                 || base64.length() > MAX_CHARS || base64.length() % 4 != 0)
             throw new IllegalArgumentException("截图数据超出传输范围");
-        entry = new Entry(UUID.randomUUID().toString(), instanceId, sessionId, generation, clock.getAsLong(), base64);
-        return new JSONObject().put("mime", mime).put("width", image.getInt("width")).put("height", image.getInt("height"))
-            .put("transfer", new JSONObject().put("protocol", 1).put("id", entry.id).put("length", base64.length())
-                .put("chunkSize", CHUNK_CHARS).put("ttlMs", TTL_MS));
+        int width = image.getInt("width"), height = image.getInt("height");
+        if (width <= 0 || height <= 0 || width > 20000 || height > 20000)
+            throw new IllegalArgumentException("截图原始尺寸无效");
+        JSONObject metadata = new JSONObject().put("mime", mime).put("width", width).put("height", height);
+        if (image.has("region")) {
+            ScreenshotRegion region = ScreenshotRegion.from(image.getJSONObject("region"));
+            region.requireWithin(width, height); metadata.put("region", region.toJson());
+        }
+        return metadata;
     }
 
     JSONObject read(String instanceId, String sessionId, long generation, String transferId, int offset) throws Exception {

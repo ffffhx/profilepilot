@@ -235,6 +235,55 @@ test('delayed observation cannot overwrite a completed pause', async t => {
   await h.service.control(h.id, 'pause'); release(); await poll;
   assert.equal(h.service.snapshot().devices[0].state.phase, 'paused');
 });
+
+test('a failed old poll cannot tear down a route with a newer successful phone response', async t => {
+  const h = harness(t); await h.service.refresh();
+  const owner = await h.service.startWrapper(h.id, 'control', 'Codex', 'follow');
+  let rejectPoll, observed; const arrived = new Promise(resolve => observed = resolve); let first = true;
+  h.hook = method => { if (method === 'sync' && first) {
+    first = false; observed(); return new Promise((_, reject) => rejectPoll = reject);
+  } };
+  const poll = h.service.refresh(); await arrived;
+  await h.service.followLive(owner.lease, h.state.generation, { op: 'frame' });
+  rejectPoll(new Error('old poll socket reset')); await poll;
+  assert.equal(h.service.snapshot().devices[0].companion, 'ready');
+  assert.equal(h.service.snapshot().devices[0].state.phase, 'controlling');
+  assert.ok(!h.calls.some(c => c.includes('--remove')));
+  await h.service.followLive(owner.lease, h.state.generation, { op: 'touch', sequence: 1, points: [], ttlMs: 1200 });
+  assert.ok(!h.calls.some(c => ['resume', 'pause'].includes(c[0])));
+  await h.service.stopWrapper(owner.lease);
+});
+
+test('a newer heartbeat never hides an uncertain input result', async t => {
+  const h = harness(t); await h.service.refresh();
+  const device = await h.service.start(h.id, 'control', 'Codex', 'input');
+  let rejectInput, observed; const arrived = new Promise(resolve => observed = resolve);
+  h.hook = method => { if (method === 'action') {
+    observed(); return new Promise((_, reject) => rejectInput = reject);
+  } };
+  const action = h.service.perform({ id: h.id, sessionId: device.state.sessionId, generation: device.state.generation,
+    requestId: randomUUID(), action: { kind: 'key', key: 'home' } });
+  await arrived; await h.service.rpc(h.id, 'sync');
+  rejectInput(new Error('input result unknown')); await assert.rejects(action, /unknown/);
+  assert.equal(h.service.snapshot().devices[0].companion, 'unavailable');
+  assert.equal(h.calls.filter(c => c[0] === 'action').length, 1);
+});
+
+test('a stale poll without a recent successful response still invalidates the route once', async t => {
+  const h = harness(t); h.now = 10000; await h.service.refresh();
+  await h.service.start(h.id, 'control', 'Codex', 'test');
+  let rejectPoll, observed; const arrived = new Promise(resolve => observed = resolve); let first = true;
+  h.hook = method => { if (method === 'sync' && first) {
+    first = false; observed(); return new Promise((_, reject) => rejectPoll = reject);
+  } };
+  const poll = h.service.refresh(); await arrived; await h.service.rpc(h.id, 'sync');
+  h.now += 7000; rejectPoll(new Error('link lost')); await poll;
+  assert.equal(h.service.snapshot().devices[0].companion, 'unavailable');
+  assert.equal(h.calls.filter(c => c.includes('--remove')).length, 1);
+  const log = JSON.parse(fs.readFileSync(path.join(h.root, 'connection-events.json'), 'utf8'));
+  assert.equal(log.at(-1).method, 'sync'); assert.equal(log.at(-1).reason, 'link lost');
+  assert.ok(!JSON.stringify(log).includes('a'.repeat(64)));
+});
 test('a late response from an old companion instance cannot restore its session', async t => {
   const h = harness(t); await h.service.refresh(); await h.service.start(h.id, 'control', 'test', 'inspect');
   let release, observed; const arrived = new Promise(resolve => observed = resolve); let first = true;

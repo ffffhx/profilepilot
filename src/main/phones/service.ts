@@ -39,7 +39,7 @@ const sessionSchema = z.object({
 type SavedPhone = { statusDeviceId?: string; token: string; name?: string; installedHash?: string; hardwareId?: string; model?: string; transport?: PhoneDevice["transport"] };
 const identitySchema = z.object({ hardwareId: z.string().regex(/^[a-zA-Z0-9_-]{1,200}$/), model: z.string().max(200), transport: z.enum(["usb", "wifi"]) });
 type PhoneIdentity = z.infer<typeof identitySchema>;
-type Route = { port: number; token: string };
+type Route = { port: number; token: string; success?: { sequence: number; at: number } };
 type InstallJob = { abort: AbortController; done?: Promise<void>; result: { status: "running" | "installed" | "failed" | "interrupted"; sha256: string; bytes: number; error?: string } };
 export interface PhonesOptions {
   root: string;
@@ -107,6 +107,7 @@ export class PhonesService {
     this.gameFollower = new GameFollower(options.root, {
       startWrapper: (...args) => this.startWrapper(...args),
       pulseWrapper: lease => this.pulseWrapper(lease),
+      syncWrapper: lease => this.wrapperState(lease, true),
       stopWrapper: lease => this.stopWrapper(lease),
       live: (lease, generation, command) => this.followLive(lease, generation, command)
     });
@@ -304,10 +305,12 @@ export class PhonesService {
         if (this.operations.has(device.id)) continue;
         await this.identifyHardware(device);
         await this.inspectInstallation(device);
+        let polledRoute: Route | undefined;
         try {
           if (!this.routes.has(device.id) && this.saved[device.id]) await this.forward(device.id);
           if (this.routes.has(device.id)) {
-            const { state } = await this.rpc(device.id, "sync");
+            polledRoute = this.routes.get(device.id);
+            const { state } = await this.rpc(device.id, "sync", {}, true);
             if (!["idle", "stopped"].includes(state.phase)) this.basic.close();
             // A new desktop process or a recovered link must not silently
             // inherit an old controller's authority, even within the phone TTL.
@@ -317,8 +320,14 @@ export class PhonesService {
             this.reconcile.delete(device.id);
           }
         } catch (error) {
+          // rpc already invalidates its exact failed route. An old poll must
+          // never remove a replacement forward or overwrite its newer state.
+          if (this.routes.get(device.id) !== polledRoute) continue;
           if ((error as { code?: string }).code === "PAIRING_REQUIRED") { this.pairing.add(device.id); device.companion = "pairing"; device.error = (error as Error).message; }
-          else await this.disconnected(device, (error as Error).message);
+          else {
+            if (polledRoute) this.connectionEvent(device, polledRoute, "poll", "invalidated", error);
+            await this.disconnected(device, (error as Error).message);
+          }
         }
       }
       if (metadataChanged) this.persist();
@@ -463,7 +472,22 @@ export class PhonesService {
     if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error("ADB 未返回有效的手机连接端口。");
     this.routes.set(id, { port, token });
   }
-  private async rpc(id: string, method: string, body: unknown = {}): Promise<{ state: PhoneSessionState; result?: unknown }> {
+  private connectionEvent(device: PhoneDevice, route: Route, method: string, outcome: "invalidated" | "superseded", error: unknown): void {
+    // Keep the first transport cause, rather than only a later ECONNREFUSED
+    // against a removed forward. No tokens, request bodies or screen data.
+    try {
+      const file = path.join(this.options.root, "connection-events.json");
+      const previous = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : [];
+      const events = Array.isArray(previous) ? previous.slice(-63) : [];
+      const fault = error as { message?: string; code?: string };
+      events.push({ at: this.now(), device: device.id, port: route.port, method, outcome,
+        phase: device.state?.phase, generation: device.state?.generation,
+        code: String(fault.code || "").slice(0, 80), reason: String(fault.message || error).replace(/[a-f0-9]{64}/gi, "[redacted]").slice(0, 400) });
+      const tmp = `${file}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(events, null, 2), { mode: 0o600 }); fs.renameSync(tmp, file);
+    } catch { /* Diagnostics cannot interfere with control revocation. */ }
+  }
+  private async rpc(id: string, method: string, body: unknown = {}, background = false): Promise<{ state: PhoneSessionState; result?: unknown }> {
     const route = this.routes.get(id); if (!route) throw new Error("请先连接手机配套 App。");
     const sequence = ++this.sequence;
     const device = this.device(id);
@@ -473,7 +497,18 @@ export class PhonesService {
     let raw: unknown;
     try { raw = await this.request(route.port, route.token, method, method === "sync" ? syncBody : body); }
     catch (error) {
-      if (this.routes.get(id) === route) await this.disconnected(device, (error as Error).message);
+      if (this.routes.get(id) === route) {
+        // Only a background observation can be superseded by newer, recent
+        // authenticated evidence on this same forward. Never hide an uncertain
+        // action result, reconnect a failed route, or resume a phone lease.
+        if (background && method === "sync" && route.success && route.success.sequence > sequence
+          && this.now() - route.success.at < 1500 && device.companion === "ready" && device.state && !this.reconcile.has(id)) {
+          this.connectionEvent(device, route, method, "superseded", error);
+          return { state: structuredClone(device.state) };
+        }
+        this.connectionEvent(device, route, method, "invalidated", error);
+        await this.disconnected(device, (error as Error).message);
+      }
       throw error;
     }
     if (this.routes.get(id) !== route) throw new Error("手机连接已改变，请重新读取状态；不要重放输入。");
@@ -507,6 +542,7 @@ export class PhonesService {
       throw Object.assign(new Error(response.error || "手机拒绝了操作。"), { code: response.code });
     }
     if (!response.state) throw new Error("手机未返回控制状态。");
+    if (sequence > (route.success?.sequence || 0)) route.success = { sequence, at: this.now() };
     if (method === "sync") this.refreshDebugSettings(id, route);
     return { state: response.state, result: response.result };
   }
@@ -889,9 +925,9 @@ export class PhonesService {
     owner.seenAt = this.now();
     return structuredClone({ ...device, state });
   }
-  async wrapperState(lease: string): Promise<PhoneDevice> {
+  async wrapperState(lease: string, background = false): Promise<PhoneDevice> {
     const owner = this.wrapper(lease);
-    if (owner.backend === "app") await this.rpc(owner.id, "sync");
+    if (owner.backend === "app") await this.rpc(owner.id, "sync", {}, background);
     this.wrapper(lease);
     const device = this.device(owner.id), state = owner.backend === "basic" ? this.basic.state(owner.id) : device.state;
     if (!state || state.instanceId !== owner.instanceId || state.sessionId !== owner.sessionId) throw new Error("手机已切换会话，不能沿用旧 ADB 任务。");

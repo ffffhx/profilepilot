@@ -54,15 +54,17 @@ public final class ControlService extends Service {
         return settings.enabled() && settings.paired() && server != null ? START_STICKY : START_NOT_STICKY;
     }
     @Override public IBinder onBind(Intent intent) { return null; }
-    private JSONObject handle(String method, JSONObject input) throws Exception {
+    private JSONObject handle(String method, JSONObject input, ControlTiming timing) throws Exception {
         CompletableFuture<JSONObject> result = new CompletableFuture<>();
+        timing.mark("mainQueued");
         main.post(() -> {
+            timing.mark("main");
             try {
                 session.expire();
                 if (method.equals("sync")) {
                     connection.heartbeat(input.optString("transport", "unknown"));
                     connection.reportDebugSettings(input.optJSONObject("debugSettings"));
-                    session.heartbeat(); result.complete(success(null));
+                    session.heartbeat(); result.complete(success(null, timing));
                 }
                 else if (method.equals("accessibility-recovery")) {
                     if (!session.phase.equals("idle") && !session.phase.equals("stopped")) throw new IllegalStateException("请先结束当前手机任务，再恢复无障碍服务");
@@ -101,7 +103,7 @@ public final class ControlService extends Service {
                     if (method.equals("resume")) { requireReady(); session.resume(); }
                     else if (method.equals("pause")) session.pause("电脑已暂停控制"); else session.stop("电脑已结束控制");
                     render(); result.complete(success(null));
-                } else if (method.equals("follow")) follow(input, result);
+                } else if (method.equals("follow")) follow(input, result, timing);
                 else if (method.equals("action")) action(input, result);
                 else throw new IllegalArgumentException("不支持此控制请求");
             } catch (Exception error) { result.complete(failure(error)); }
@@ -110,12 +112,13 @@ public final class ControlService extends Service {
         // id be queried without sending duplicate input; no automatic replay.
         return result.get(6, TimeUnit.SECONDS);
     }
-    private void follow(JSONObject input, CompletableFuture<JSONObject> result) throws Exception {
+    private void follow(JSONObject input, CompletableFuture<JSONObject> result, ControlTiming timing) throws Exception {
         requireReady();
+        timing.mark("ready");
         String op = input.getString("op");
         session.authorize(input.getString("instanceId"), input.getString("sessionId"), input.getLong("generation"), op.equals("touch"));
         if (op.equals("probe")) {
-            result.complete(success(new JSONObject().put("protocol", 1))); return;
+            result.complete(success(new JSONObject().put("protocol", 1), timing)); return;
         }
         if (op.equals("touch")) {
             long sequence = input.getLong("sequence");
@@ -128,13 +131,14 @@ public final class ControlService extends Service {
                 return session.active() && session.mode.equals("control") && instance.equals(session.instanceId)
                     && id.equals(session.sessionId) && generation == session.generation;
             });
-            result.complete(success(new JSONObject().put("accepted", true))); return;
+            result.complete(success(new JSONObject().put("accepted", true), timing)); return;
         }
         if (!op.equals("frame")) throw new IllegalArgumentException("未知视觉跟随请求");
         long generation = session.generation;
         session.begin("视觉跟随 · 获取画面");
-        PhoneAccessibility.current.perform(new JSONObject().put("kind", "screenshot").put("nativeSize", true)).whenComplete((value, error) -> main.post(() -> {
-            session.finish(generation); render(); result.complete(error == null ? success(value) : failure(error));
+        PhoneAccessibility.current.perform(new JSONObject().put("kind", "screenshot").put("nativeSize", true), timing).whenComplete((value, error) -> main.post(() -> {
+            timing.mark("captureDone");
+            session.finish(generation); render(); timing.mark("rendered"); result.complete(error == null ? success(value, timing) : failure(error));
         }));
     }
     private void action(JSONObject input, CompletableFuture<JSONObject> result) throws Exception {
@@ -196,12 +200,24 @@ public final class ControlService extends Service {
         android.widget.Toast.makeText(this, error.getMessage(), android.widget.Toast.LENGTH_LONG).show();
     }
     JSONObject state() throws Exception {
+        return state(null);
+    }
+    private JSONObject state(ControlTiming timing) throws Exception {
         session.expire();
+        if (timing != null) timing.mark("stateStart");
         PhoneReadiness readiness = new PhoneReadiness(this);
-        return new JSONObject().put("protocol", 1).put("statusDeviceId", new ComputerStore(this).clientId()).put("instanceId", session.instanceId).put("sessionId", session.sessionId == null ? JSONObject.NULL : session.sessionId).put("generation", session.generation).put("phase", session.phase).put("mode", session.mode).put("computer", session.computer).put("controller", session.controller).put("task", session.task).put("startedAt", session.startedAt == 0 ? JSONObject.NULL : session.startedAt).put("lastAction", session.lastAction).put("permissions", new JSONObject().put("overlay", readiness.overlay).put("notifications", readiness.notifications).put("accessibility", readiness.accessibilityService.equals("running"))).put("readiness", readiness.json());
+        if (timing != null) timing.mark("readiness");
+        String deviceId = new ComputerStore(this).clientId();
+        if (timing != null) timing.mark("identity");
+        JSONObject value = new JSONObject().put("protocol", 1).put("statusDeviceId", deviceId).put("instanceId", session.instanceId).put("sessionId", session.sessionId == null ? JSONObject.NULL : session.sessionId).put("generation", session.generation).put("phase", session.phase).put("mode", session.mode).put("computer", session.computer).put("controller", session.controller).put("task", session.task).put("startedAt", session.startedAt == 0 ? JSONObject.NULL : session.startedAt).put("lastAction", session.lastAction).put("permissions", new JSONObject().put("overlay", readiness.overlay).put("notifications", readiness.notifications).put("accessibility", readiness.accessibilityService.equals("running"))).put("readiness", readiness.json());
+        if (timing != null) timing.mark("stateDone");
+        return value;
     }
     private JSONObject success(Object value) {
-        try { return new JSONObject().put("ok", true).put("state", state()).put("result", value == null ? JSONObject.NULL : value); }
+        return success(value, null);
+    }
+    private JSONObject success(Object value, ControlTiming timing) {
+        try { return new JSONObject().put("ok", true).put("state", state(timing)).put("result", value == null ? JSONObject.NULL : value); }
         catch (Exception error) { throw new IllegalStateException(error); }
     }
     private JSONObject failure(Throwable error) {

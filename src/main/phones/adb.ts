@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
+import { performance } from "node:perf_hooks";
 import type { PhoneDevice } from "../../shared/phones";
 import { isPhoneRead } from "./actions";
 import { androidSdkRoots } from "./android-paths";
@@ -12,6 +13,21 @@ export interface AdbRunner {
   runBinary?(args: string[], timeout?: number, signal?: AbortSignal): Promise<Buffer>;
   spawn?(args: string[], options: AdbProcessOptions): AdbProcess;
 }
+type AdbLaunchDelay = { at: number; operation: string; resolveMs: number; spawnMs: number };
+const slowLaunches: AdbLaunchDelay[] = [];
+/** Bounded timing evidence only; never retain argv, device IDs or credentials. */
+export function adbLaunchDelays(since: number): AdbLaunchDelay[] {
+  return slowLaunches.filter(value => value.at >= since).map(value => ({ ...value }));
+}
+function recordLaunch(args: string[], began: number, resolved: number): void {
+  const finished = performance.now();
+  if (finished - began < 100) return;
+  const command = args[0] === "-s" ? args[2] : args[0];
+  const operation = command === "shell" ? (args[3]?.startsWith("'settings' 'get' 'global'") ? "settings" : "shell")
+    : ["devices", "forward", "connect", "disconnect", "mdns", "version"].includes(command) ? command : "other";
+  slowLaunches.push({ at: Date.now(), operation, resolveMs: Math.round(resolved - began), spawnMs: Math.round(finished - resolved) });
+  if (slowLaunches.length > 8) slowLaunches.shift();
+}
 export function findAdb(env = process.env, platform = process.platform): string {
   if (env.PROFILEPILOT_ADB_PATH) return env.PROFILEPILOT_ADB_PATH;
   const executable = platform === "win32" ? "adb.exe" : "adb";
@@ -20,26 +36,33 @@ export function findAdb(env = process.env, platform = process.platform): string 
   return executable;
 }
 export class Adb implements AdbRunner {
-  constructor(private overrideExecutable?: string) {}
+  constructor(private overrideExecutable?: string, private launch: typeof execFile = execFile) {}
   get executable(): string { return this.overrideExecutable || findAdb(); }
-  spawn(args: string[], options: AdbProcessOptions): AdbProcess { return spawnAdb(this.executable, args, options); }
+  spawn(args: string[], options: AdbProcessOptions): AdbProcess {
+    const began = performance.now(), executable = this.executable, resolved = performance.now();
+    try { return spawnAdb(executable, args, options); }
+    finally { recordLaunch(args, began, resolved); }
+  }
   runBinary(args: string[], timeout = 12000, signal?: AbortSignal): Promise<Buffer> {
     return new Promise((resolve, reject) => {
-      execFile(this.executable, args, { windowsHide: true, timeout, signal, encoding: "buffer", maxBuffer: 24 * 1024 * 1024 }, (error, stdout, stderr) => {
+      const began = performance.now(), executable = this.executable, resolved = performance.now();
+      try { this.launch(executable, args, { windowsHide: true, timeout, signal, encoding: "buffer", maxBuffer: 24 * 1024 * 1024 }, (error, stdout, stderr) => {
         if (error) reject(new Error(`手机画面获取失败：${error.code === "ENOENT" ? "未找到 Android Platform Tools" : stderr.toString("utf8").trim().slice(0, 300) || "连接中断或超时"}`));
         else resolve(stdout);
-      });
+      }); } finally { recordLaunch(args, began, resolved); }
     });
   }
   run(args: string[], timeout = 8000, input?: string, signal?: AbortSignal): Promise<string> {
     return new Promise((resolve, reject) => {
-      const child = execFile(this.executable, args, { windowsHide: true, timeout, signal, encoding: "utf8", maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
+      const began = performance.now(), executable = this.executable, resolved = performance.now();
+      let child;
+      try { child = this.launch(executable, args, { windowsHide: true, timeout, signal, encoding: "utf8", maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
       if (error) {
         // Never echo argv: pairing arguments contain the device credential.
         const detail = input !== undefined ? "配对未完成，请核对地址和最新配对码。" : String([stderr, stdout].filter(Boolean).join("\n") || error.code || "连接超时").replace(/[a-f0-9]{64}/g, "[credential]").trim().slice(0, 800);
         reject(Object.assign(new Error(error.code === "ENOENT" ? "未找到 ADB，请安装 Android Platform Tools，或设置 PROFILEPILOT_ADB_PATH。" : `ADB 操作失败：${detail}`), { code: error.code }));
       } else resolve(stdout.trim());
-      });
+      }); } finally { recordLaunch(args, began, resolved); }
       child.stdin?.on("error", () => { /* execFile completion reports a failed process. */ });
       child.stdin?.end(input);
     });

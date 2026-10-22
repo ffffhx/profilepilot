@@ -2,9 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn, execFile, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { monitorEventLoopDelay, performance, type IntervalHistogram } from "node:perf_hooks";
 import { z } from "zod";
 import type { FollowAnalysis, FollowCommand, FollowFrame, FollowRuntime, FollowStatus, GameFollowConfig } from "../../shared/game-follow";
 import type { PhoneDevice } from "../../shared/phones";
+import { adbLaunchDelays } from "./adb";
 
 const unit = z.number().finite().min(0).max(1);
 const image = z.string().min(16).max(4_000_000).regex(/^[A-Za-z0-9+/]*={0,2}$/);
@@ -20,7 +22,12 @@ export const gameFollowConfigSchema = z.object({
   joystick: z.object({ x: unit, y: unit, radius: z.number().finite().min(.01).max(.2),
     rotation: z.number().finite().min(-180).max(180) }).strict(),
   confidence: z.number().finite().min(.65).max(.999), stopDistance: z.number().finite().min(.02).max(.3),
-  intervalMs: z.number().int().min(350).max(1000)
+  intervalMs: z.number().int().min(350).max(1000),
+  nearby: z.object({ selfLabel: image, targetLabel: image, region: rect,
+    pixelsPerMapUnit: z.number().finite().min(100).max(100000) }).strict().optional(),
+  selfMarker: z.object({ hueMin: z.number().int().min(0).max(179), hueMax: z.number().int().min(0).max(179),
+    saturationMin: z.number().int().min(0).max(255), valueMin: z.number().int().min(0).max(255),
+    radiusPixels: z.number().finite().min(3).max(100) }).strict().refine(m => m.hueMin <= m.hueMax, "颜色范围无效").optional()
 }).strict().refine(c => c.width * c.height <= 8_000_000, "画面过大")
   .refine(c => {
     const j = c.joystick, r = j.radius * Math.min(c.width, c.height);
@@ -87,11 +94,14 @@ export class VisionWorker {
 export interface FollowHost {
   startWrapper(id: string, mode: "view" | "control", controller: string, task: string, backend?: "app" | "basic"): Promise<{ lease: string; device: PhoneDevice }>;
   pulseWrapper(lease: string): PhoneDevice;
+  syncWrapper(lease: string): Promise<PhoneDevice>;
   stopWrapper(lease: string): Promise<void>;
   live(lease: string, generation: number, command: object): Promise<any>;
 }
 type Run = { id: string; lease?: string; generation: number; sequence: number; cancelled: boolean;
-  worker?: VisionWorker; starting?: Promise<void>; done?: Promise<void>; stop?: Promise<void>; cleanup?: Promise<void>; heartbeat?: NodeJS.Timeout };
+  worker?: VisionWorker; starting?: Promise<void>; done?: Promise<void>; stop?: Promise<void>; cleanup?: Promise<void>; heartbeat?: NodeJS.Timeout;
+  heartbeatPending?: Promise<void>; lastHeartbeatAt?: number; heartbeatTickAt?: number;
+  beganAt?: number; eventLoop?: IntervalHistogram };
 export class GameFollower {
   private python?: Python;
   private preview?: VisionWorker;
@@ -202,18 +212,47 @@ export class GameFollower {
       if (probe?.protocol !== 1) throw new Error("请更新手机开发版 App，以启用视觉跟随");
       if (run.cancelled) throw new Error("跟随任务已停止");
       this.value = { running: true, runId: run.id, deviceId: id, mode, backend, frames: 0, actions: 0, fps: 0, error: "" };
+      run.beganAt = Date.now(); run.heartbeatTickAt = performance.now();
+      run.eventLoop = monitorEventLoopDelay({ resolution: 20 }); run.eventLoop.enable();
       run.heartbeat = setInterval(() => {
         try {
+          // Measure when this host timer actually runs, independently of the
+          // authenticated phone response. A late timer is not lease evidence.
+          const tickAt = performance.now(), lag = Math.max(0, Math.round(tickAt - run.heartbeatTickAt! - 1000));
+          run.heartbeatTickAt = tickAt;
+          this.value.timings = { ...this.value.timings, heartbeatTimerLagMs: lag,
+            maxHeartbeatTimerLagMs: Math.max(this.value.timings?.maxHeartbeatTimerLagMs || 0, lag) };
+          this.sampleHostTimings(run);
           const state = this.host.pulseWrapper(run.lease!).state;
           if (!state || state.generation !== run.generation || !["viewing", "controlling", "executing"].includes(state.phase)) throw new Error("手机已暂停或会话已改变");
+          // pulseWrapper only keeps the host-side owner alive. The phone's
+          // separate eight-second lease needs a real authenticated sync, even
+          // while discovery, another device, or this capture is slow.
+          const sentAt = Date.now();
+          if (!run.heartbeatPending) run.heartbeatPending = this.host.syncWrapper(run.lease!).then(device => {
+            if (run.cancelled || this.run !== run) return;
+            const current = device.state;
+            if (!current || current.generation !== run.generation || !["viewing", "controlling", "executing"].includes(current.phase)) throw new Error("手机已暂停或会话已改变");
+            const now = Date.now();
+            this.value.timings = { ...this.value.timings, heartbeatMs: now - sentAt,
+              ...(run.lastHeartbeatAt === undefined ? {} : { heartbeatGapMs: now - run.lastHeartbeatAt }) };
+            run.lastHeartbeatAt = now;
+          }).catch(error => {
+            if (!run.cancelled && this.run === run) { this.value.error = (error as Error).message; void this.stop(run); }
+          }).finally(() => { run.heartbeatPending = undefined; });
         } catch (error) { this.value.error = (error as Error).message; void this.stop(run); }
       }, 1000);
       run.done = this.loop(run, config, mode, backend);
       return structuredClone(this.value);
     } catch (error) {
-      run.cancelled = true; clearInterval(run.heartbeat); run.worker?.close();
+      run.cancelled = true; clearInterval(run.heartbeat); run.eventLoop?.disable(); run.worker?.close();
       await this.cleanup(run); throw error;
     } finally { started(); }
+  }
+  private sampleHostTimings(run: Run) {
+    this.value.timings = { ...this.value.timings,
+      eventLoopMaxDelayMs: Math.round((run.eventLoop?.max || 0) / 1_000_000),
+      slowAdbStarts: adbLaunchDelays(run.beganAt ?? Date.now()) };
   }
   private async loop(run: Run, config: GameFollowConfig, mode: "observe" | "control", backend: "app" | "basic") {
     const began = Date.now();
@@ -221,6 +260,7 @@ export class GameFollower {
       while (!run.cancelled) {
         const at = Date.now();
         const frame: FollowFrame = frameSchema.parse(await this.host.live(run.lease!, run.generation, { op: "frame" }));
+        const capturedAt = Date.now();
         // Wi-Fi latency can vary between requests. A late capture followed by an
         // early one can violate Android's screenshot interval even when host
         // request starts are spaced correctly. For App capture, begin the next
@@ -231,6 +271,7 @@ export class GameFollower {
         const analysis: FollowAnalysis = await run.worker!.request({ op: "analyze", base64: frame.base64 });
         if (run.cancelled) break;
         this.value.frame = frame; this.value.analysis = analysis; this.value.frames++;
+        this.value.timings = { ...this.value.timings, captureMs: capturedAt - at, analysisMs: Date.now() - capturedAt, inputMs: 0 };
         this.value.fps = Math.round(this.value.frames * 10000 / Math.max(1, Date.now() - began)) / 10;
         if (mode === "control") {
           // File captures on older emulators are slower; their movement is a
@@ -242,7 +283,10 @@ export class GameFollower {
           const cx = Math.round(joystick.x * config.width), cy = Math.round(joystick.y * config.height);
           const radius = joystick.radius * Math.min(config.width, config.height);
           const points = direction ? [{ id: 0, x: Math.round(cx + dx * radius), y: Math.round(cy + dy * radius), fromX: cx, fromY: cy }] : [];
+          const inputAt = Date.now();
           await this.host.live(run.lease!, run.generation, { op: "touch", sequence: ++run.sequence, points, ttlMs: 1200 });
+          if (run.cancelled) break;
+          this.value.timings = { ...this.value.timings, inputMs: Date.now() - inputAt };
           if (direction) this.value.actions++;
         }
         await new Promise(resolve => setTimeout(resolve, Math.max(0, nextFrameAt - Date.now())));
@@ -251,14 +295,14 @@ export class GameFollower {
     finally {
       // Do not await run.done from inside its own cleanup.
       run.cancelled = true;
-      clearInterval(run.heartbeat); run.worker?.close();
+      clearInterval(run.heartbeat); this.sampleHostTimings(run); run.eventLoop?.disable(); run.worker?.close();
       await this.cleanup(run);
       this.value.running = false;
     }
   }
   private async stop(run: Run) {
     if (run.stop) return run.stop;
-    run.cancelled = true; clearInterval(run.heartbeat); run.worker?.close();
+    run.cancelled = true; clearInterval(run.heartbeat); run.eventLoop?.disable(); run.worker?.close();
     run.stop = (async () => {
       // Revoking the phone session releases held touches even if a frame is pending.
       await this.cleanup(run);

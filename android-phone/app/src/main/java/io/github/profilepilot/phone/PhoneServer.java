@@ -10,7 +10,7 @@ import java.util.concurrent.*;
 
 /** ADB forwards to a loopback-only endpoint; no phone LAN listener is opened. */
 final class PhoneServer implements Closeable {
-    interface Handler { JSONObject handle(String method, JSONObject body) throws Exception; }
+    interface Handler { JSONObject handle(String method, JSONObject body, ControlTiming timing) throws Exception; }
     private final ServerSocket server;
     private final ThreadPoolExecutor workers = new ThreadPoolExecutor(2, 4, 30, TimeUnit.SECONDS, new ArrayBlockingQueue<>(12));
     private final String token;
@@ -21,11 +21,13 @@ final class PhoneServer implements Closeable {
         Thread accept = new Thread(() -> {
             while (!server.isClosed()) try {
                 Socket socket = server.accept();
-                try { workers.execute(() -> serve(socket)); } catch (RejectedExecutionException error) { socket.close(); }
+                ControlTiming timing = new ControlTiming();
+                try { workers.execute(() -> serve(socket, timing)); } catch (RejectedExecutionException error) { socket.close(); }
             } catch (IOException error) { if (!server.isClosed()) android.util.Log.w("ProfilePilot", "Phone connection failed"); }
         }, "phone-control-accept"); accept.setDaemon(true); accept.start();
     }
-    private void serve(Socket socket) {
+    private void serve(Socket socket, ControlTiming timing) {
+        timing.mark("worker");
         try (socket) {
             socket.setSoTimeout(7000); InputStream input = socket.getInputStream();
             String request = line(input); String authorization = ""; int length = -1, total = request.length();
@@ -44,12 +46,19 @@ final class PhoneServer implements Closeable {
                 if (!request.matches("POST /[a-z][a-z-]{0,63} HTTP/1\\.[01]") || length < 0 || length > 32768) throw new IOException("Invalid request");
                 byte[] bytes = new byte[length]; int offset = 0;
                 while (offset < length) { int count = input.read(bytes, offset, length - offset); if (count < 0) throw new IOException("Incomplete body"); offset += count; }
-                try { response = handler.handle(request.split(" ")[1].substring(1), new JSONObject(new String(bytes, StandardCharsets.UTF_8))); }
+                String method = request.split(" ")[1].substring(1);
+                JSONObject body = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
+                timing.operation(method, body.optString("op", "")); timing.mark("read");
+                try { response = handler.handle(method, body, timing); }
                 catch (Exception error) { response = new JSONObject().put("ok", false).put("code", "PHONE_ERROR").put("error", error.getMessage() == null ? "手机未完成请求" : error.getMessage()); }
             }
+            timing.mark("handled");
             byte[] bytes = response.toString().getBytes(StandardCharsets.UTF_8);
+            timing.mark("encoded");
             OutputStream output = socket.getOutputStream(); output.write(("HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: " + bytes.length + "\r\n\r\n").getBytes(StandardCharsets.US_ASCII)); output.write(bytes); output.flush();
+            timing.mark("written");
         } catch (Exception ignored) { /* no credential-bearing request logging */ }
+        finally { timing.finish(); }
     }
     private static String line(InputStream input) throws IOException {
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();

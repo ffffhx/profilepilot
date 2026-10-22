@@ -179,6 +179,8 @@ export async function openGameFollower(device?: PhoneDevice) {
     if (!selected || selected.width * canvas.width < 6 || selected.height * canvas.height < 6) { draw(); return; }
     if (tool === "map") {
       config.map = selected; config.selfTemplate = ""; config.targetTemplate = ""; config.grid.blocked = [];
+      delete config.nearby;
+      delete config.selfMarker;
       status.textContent = "小地图已选取，接着框选自己和队友图标";
     } else if (tool === "self" || tool === "target") {
       const r = config.map;
@@ -186,6 +188,8 @@ export async function openGameFollower(device?: PhoneDevice) {
         status.textContent = "请在已选的小地图内框选图标"; draw(); return;
       }
       if (tool === "self") config.selfTemplate = crop(selected); else config.targetTemplate = crop(selected);
+      delete config.nearby;
+      if (tool === "self") delete config.selfMarker;
       status.textContent = tool === "self" ? "自己图标已选取" : "跟随对象已选取";
     }
     analysis = undefined; settings(); draw(); buttons();

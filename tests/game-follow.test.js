@@ -31,6 +31,7 @@ function harness(t, options = {}) {
   const host = {
     startWrapper: async (_,mode) => { phase = mode === 'view' ? 'viewing':'controlling'; return { lease:randomUUID(),device:{state:{generation}} }; },
     pulseWrapper: () => ({state:{generation,phase}}),
+    syncWrapper: async () => ({state:{generation,phase}}),
     stopWrapper: async () => { stopped++; phase='stopped'; },
     live: async (_,expected,command) => {
       assert.equal(expected,3);
@@ -92,6 +93,64 @@ test('capture failure stops, stale stop IDs cannot stop another run', vision, as
   await until(async()=> !(await h.manager.command({op:'status'})).running);
   assert.match((await h.manager.command({op:'status'})).error,/device lost/);
   assert.equal(h.stopped(),1);assert.ok(state.runId);
+});
+
+test('follow renews the phone heartbeat independently while capture is pending', vision, async t => {
+  const h=harness(t,{delay:2500});
+  let heartbeats=0;
+  const sync=h.host.syncWrapper;
+  h.host.syncWrapper=async(...args)=>{heartbeats++;return sync(...args);};
+  const started=await h.manager.command({op:'start',id:'phone',mode:'observe',config:fixture.config});
+  await until(()=>heartbeats>=2,2400);
+  assert.equal((await h.manager.command({op:'status'})).frames,0);
+  await h.manager.command({op:'stop',runId:started.runId});
+});
+
+test('host diagnostics distinguish timer blocking from a slow phone response', vision, async t => {
+  const h=harness(t);
+  const started=await h.manager.command({op:'start',id:'phone',mode:'observe',config:fixture.config});
+  await wait(50); // Let the histogram establish its 20ms sampling timer.
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,1200);
+  await until(async()=> (await h.manager.command({op:'status'})).timings?.maxHeartbeatTimerLagMs>=150,2000);
+  const status=await h.manager.command({op:'status'});
+  assert.ok(status.timings.eventLoopMaxDelayMs>=1000);
+  assert.equal(status.running,true);assert.equal(status.error,'');
+  assert.equal(h.points.length,0,'diagnostics do not authorize input');
+  await h.manager.command({op:'stop',runId:started.runId});
+  const next=await h.manager.command({op:'start',id:'phone',mode:'observe',config:fixture.config});
+  await until(async()=> (await h.manager.command({op:'status'})).timings?.eventLoopMaxDelayMs!==undefined);
+  assert.ok((await h.manager.command({op:'status'})).timings.eventLoopMaxDelayMs<1000,'new run resets its histogram');
+  await h.manager.command({op:'stop',runId:next.runId});
+});
+
+test('a failed phone heartbeat stops following without automatically restarting', vision, async t => {
+  const h=harness(t);
+  h.host.syncWrapper=async()=>{throw Error('phone heartbeat lost');};
+  await h.manager.command({op:'start',id:'phone',mode:'control',config:fixture.config});
+  await until(async()=>!(await h.manager.command({op:'status'})).running,2500);
+  assert.match((await h.manager.command({op:'status'})).error,/phone heartbeat lost/);
+  const count=h.points.length;
+  await wait(1100);
+  assert.equal(h.points.length,count);
+  assert.equal(h.stopped(),1);
+});
+
+test('heartbeat requests do not overlap and a late failure cannot stop a newer run', vision, async t => {
+  const h=harness(t);
+  let reject, calls=0;
+  const pending=new Promise((_,no)=>reject=no);
+  h.host.syncWrapper=()=>{calls++;return pending;};
+  const first=await h.manager.command({op:'start',id:'phone',mode:'observe',config:fixture.config});
+  await until(()=>calls===1);
+  await wait(1100);
+  assert.equal(calls,1);
+  await h.manager.command({op:'stop',runId:first.runId});
+  h.host.syncWrapper=async()=>h.host.pulseWrapper();
+  const next=await h.manager.command({op:'start',id:'phone',mode:'observe',config:fixture.config});
+  reject(Error('old heartbeat failed'));
+  await wait(100);
+  const status=await h.manager.command({op:'status'});
+  assert.equal(status.runId,next.runId);assert.equal(status.running,true);assert.equal(status.error,'');
 });
 test('closing during startup releases a late lease before close resolves', vision, async t => {
   const h=harness(t);
@@ -158,6 +217,8 @@ for (const [backend, delay] of [['app',1100],['basic',3100]]) {
     assert.ok(status.analysis.direction,'vision recognized a direction, but capture was too slow to use it');
     assert.ok(h.points.every(p=>p.points.length===0));
     assert.equal(status.actions,0);
+    assert.ok(status.timings.captureMs>=delay-30);
+    assert.ok(status.timings.analysisMs>=0);
     await h.manager.command({op:'stop',runId:state.runId});
   });
 }

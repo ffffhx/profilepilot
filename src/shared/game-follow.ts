@@ -14,6 +14,8 @@ export interface GameFollowConfig {
   confidence: number;
   stopDistance: number;
   intervalMs: number;
+  nearby?: { selfLabel: string; targetLabel: string; region: FollowRect; pixelsPerMapUnit: number };
+  selfMarker?: { hueMin: number; hueMax: number; saturationMin: number; valueMin: number; radiusPixels: number };
 }
 export interface FollowDetection extends FollowPoint { confidence: number; }
 export interface FollowAnalysis {
@@ -24,6 +26,9 @@ export interface FollowAnalysis {
   path: FollowPoint[];
   direction: FollowPoint | null;
   elapsedMs: number;
+  source?: "minimap" | "labels";
+  selfSource?: "template" | "marker";
+  distance?: number;
 }
 export interface FollowFrame { mime: string; base64: string; width: number; height: number; }
 export interface FollowStatus {
@@ -36,6 +41,12 @@ export interface FollowStatus {
   actions: number;
   fps: number;
   error: string;
+  /** Observed durations only. Diagnostics never renew or authorize a phone lease. */
+  timings?: {
+    captureMs?: number; analysisMs?: number; inputMs?: number; heartbeatMs?: number; heartbeatGapMs?: number;
+    heartbeatTimerLagMs?: number; maxHeartbeatTimerLagMs?: number; eventLoopMaxDelayMs?: number;
+    slowAdbStarts?: { at: number; operation: string; resolveMs: number; spawnMs: number }[];
+  };
   analysis?: FollowAnalysis;
   frame?: FollowFrame;
 }

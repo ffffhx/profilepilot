@@ -1,6 +1,7 @@
 import base64
 import importlib.util
 import json
+import math
 import pathlib
 import sys
 import unittest
@@ -33,6 +34,28 @@ def fixture():
                   joystick=dict(x=.2, y=.8, radius=.07, rotation=0),
                   confidence=.9, stopDistance=.06, intervalMs=350)
     return config, frame, own, target
+
+
+def label_fixture():
+    config, frame, _, _ = fixture()
+    rng = np.random.default_rng(42)
+    labels = []
+    for x, colour in [(260, (40, 220, 50)), (320, (240, 150, 40))]:
+        name = np.zeros((14, 42, 3), np.uint8)
+        name[rng.random((14, 42)) > .65] = 255
+        labels.append(name)
+        frame[190:204, x:x+42] = name
+        frame[206:211, x-8:x+50] = colour
+    config['nearby'] = dict(selfLabel=encoded(labels[0]), targetLabel=encoded(labels[1]),
+                            region=dict(x=.35, y=.3, width=.55, height=.45), pixelsPerMapUnit=600)
+    return config, frame
+
+
+def marker_fixture():
+    config, frame, own, _ = fixture()
+    config['selfMarker'] = dict(hueMin=40, hueMax=85, saturationMin=90, valueMin=130, radiusPixels=12)
+    cv2.circle(frame, (54, 99), 12, (40, 220, 50), 2)
+    return config, frame, own
 
 
 class VisionTests(unittest.TestCase):
@@ -116,6 +139,186 @@ class VisionTests(unittest.TestCase):
         result = f.analyze(encoded(frame), 10.4)
         self.assertEqual(result["phase"], "near")
         self.assertIsNone(result["direction"])
+
+    def test_brief_occlusion_releases_then_reacquires_without_extra_idle_frame(self):
+        config, frame, _, target = fixture()
+        f = vision.Follower(config)
+        f.analyze(encoded(frame), 10)
+        self.assertEqual(f.analyze(encoded(frame), 10.4)['phase'], 'following')
+        frame[90:108, 155:173] = 25
+        self.assertIsNone(f.analyze(encoded(frame), 10.8)['direction'])
+        frame[90:108, 155:173] = target
+        self.assertEqual(f.analyze(encoded(frame), 11.2)['phase'], 'following')
+        frame[90:108, 155:173] = 25
+        self.assertIsNone(f.analyze(encoded(frame), 13)['direction'])
+        frame[90:108, 155:173] = target
+        self.assertEqual(f.analyze(encoded(frame), 13.4)['phase'], 'confirming')
+
+    def test_tracker_uses_recent_identity_but_never_emits_a_missing_position(self):
+        _, frame, _, target = fixture()
+        tracker = vision.Tracker(target, False, .9, 1.5)
+        first = tracker.locate(frame[:200, :200], 10)
+        frame[10:28, 10:28] = target  # Identical distant icon cannot steal a recent track.
+        second = tracker.locate(frame[:200, :200], 10.4)
+        self.assertAlmostEqual(second['x'], first['x'])
+        self.assertIsNone(tracker.locate(frame[:200, :200], 12), 'expired identity must face global ambiguity')
+        frame[:] = 25
+        found = tracker.locate(frame[:200, :200], 12.4)
+        self.assertTrue(found is None or found['confidence'] < .9)
+
+    def test_lookahead_keeps_straight_motion_smooth_and_cannot_cut_a_corner(self):
+        walk = np.ones((40, 40), bool)
+        own = {'x': .272, 'y': .49}
+        points = [{'x': (x+.5)/40, 'y': .4875} for x in range(10, 21)]
+        aim = vision.steering(own, points, walk)
+        self.assertGreater(aim['x'], points[1]['x'])
+        self.assertLess(abs(math.atan2(aim['y']-own['y'], aim['x']-own['x'])), .06)
+        corner = np.array([[1, 0], [0, 1]], bool)
+        self.assertFalse(vision.visible({'x': .25, 'y': .25}, {'x': .75, 'y': .75}, corner))
+
+    def test_near_distance_has_a_small_hysteresis_band(self):
+        config, frame, _, target = fixture()
+        config['grid']['blocked'] = []; config['stopDistance'] = .2
+        frame[90:108, 155:173] = 25
+        frame[90:108, 80:98] = target
+        f = vision.Follower(config)
+        f.analyze(encoded(frame), 10)
+        self.assertEqual(f.analyze(encoded(frame), 10.4)['phase'], 'near')
+        frame[90:108, 80:98] = 25; frame[90:108, 88:106] = target
+        self.assertEqual(f.analyze(encoded(frame), 10.8)['phase'], 'near')
+        frame[90:108, 88:106] = 25; frame[90:108, 99:117] = target
+        self.assertEqual(f.analyze(encoded(frame), 11.2)['phase'], 'following')
+
+    def test_visible_names_recover_an_occluded_map_icon_without_bypassing_walls(self):
+        config, frame = label_fixture()
+        frame[90:108, 155:173] = 25  # Target hidden on minimap; self remains current.
+        f = vision.Follower(config)
+        self.assertEqual(f.analyze(encoded(frame), 10)['phase'], 'confirming')
+        result = f.analyze(encoded(frame), 10.4)
+        self.assertEqual(result['source'], 'labels')
+        self.assertEqual(result['phase'], 'following')
+        self.assertAlmostEqual(result['target']['x']-result['self']['x'], .1)
+        config['grid']['blocked'] = [y*40+13 for y in range(40)]
+        config['grid']['clearance'] = 0
+        self.assertEqual(vision.Follower(config).analyze(encoded(frame), 10)['phase'], 'no-path')
+
+    def test_chat_names_or_dead_heroes_never_replace_a_map_observation(self):
+        config, frame = label_fixture()
+        frame[90:108, 155:173] = 25
+        frame[206:211, 312:370] = 25  # No ally health bar under the matching name.
+        result = vision.Follower(config).analyze(encoded(frame), 10)
+        self.assertEqual(result['phase'], 'lost')
+        self.assertIsNone(result['direction'])
+
+    def test_without_any_map_anchor_labels_only_establish_nearness(self):
+        config, frame = label_fixture()
+        frame[90:108, 45:63] = 25; frame[90:108, 155:173] = 25
+        result = vision.Follower(config).analyze(encoded(frame), 10)
+        self.assertEqual(result['phase'], 'lost')
+        self.assertIsNone(result['direction'])
+        config['stopDistance'] = .12
+        result = vision.Follower(config).analyze(encoded(frame), 10)
+        self.assertEqual(result['phase'], 'near')
+        self.assertEqual(result['source'], 'labels')
+        self.assertIsNone(result['direction'])
+
+    def test_self_marker_measures_current_motion_through_partial_avatar_occlusion(self):
+        config, frame, _ = marker_fixture()
+        f = vision.Follower(config)
+        f.analyze(encoded(frame), 10)
+        self.assertEqual(f.analyze(encoded(frame), 10.4)['phase'], 'following')
+        frame[82:117, 36:76] = 25
+        cv2.circle(frame, (58, 99), 12, (40, 220, 50), 2)
+        # One quadrant of the coloured ring and the entire portrait are hidden.
+        frame[84:100, 58:74] = 25
+        result = f.analyze(encoded(frame), 10.8)
+        self.assertEqual(result['selfSource'], 'marker')
+        self.assertEqual(result['phase'], 'following')
+        self.assertGreater(result['self']['x'], .28, 'must measure the new ring, not emit the last avatar point')
+        self.assertLess(abs(result['self']['x']-.29), .012)
+        frame[82:117, 36:76] = 25
+        result = f.analyze(encoded(frame), 11.2)
+        self.assertEqual(result['phase'], 'lost')
+        self.assertIsNone(result['direction'])
+
+    def test_self_marker_cannot_initialize_identity_or_reacquire_after_a_gap(self):
+        config, frame, _ = marker_fixture()
+        f = vision.Follower(config)
+        f.analyze(encoded(frame), 10)
+        frame[90:108, 45:63] = 25
+        self.assertEqual(f.analyze(encoded(frame), 10.4)['selfSource'], 'marker')
+        self.assertEqual(f.analyze(encoded(frame), 12)['phase'], 'lost')
+        self.assertEqual(vision.Follower(config).analyze(encoded(frame), 12)['phase'], 'lost')
+        without_marker = {key: value for key, value in config.items() if key != 'selfMarker'}
+        self.assertEqual(vision.Follower(without_marker).analyze(encoded(frame), 12)['phase'], 'lost')
+
+    def test_self_marker_rejects_ambiguous_rings_and_unrelated_green_ui(self):
+        config, original, _ = marker_fixture()
+        def prepared():
+            f = vision.Follower(config)
+            f.analyze(encoded(original), 10)
+            frame = original.copy(); frame[65:135, 15:95] = 25
+            return f, frame
+        f, frame = prepared()
+        for center in [(40, 99), (69, 99)]:
+            cv2.circle(frame, center, 12, (40, 220, 50), 2)
+        result = f.analyze(encoded(frame), 10.4)
+        self.assertEqual(result['phase'], 'lost')
+        self.assertIsNone(result['direction'])
+        for kind in ('disk', 'square', 'rectangle', 'ellipse', 'line', 'short_arc', 'wrong_radius', 'wrong_colour', 'distant'):
+            with self.subTest(kind=kind):
+                f, frame = prepared(); green = (40, 220, 50)
+                if kind == 'disk': cv2.circle(frame, (54, 99), 12, green, -1)
+                if kind == 'square': cv2.rectangle(frame, (42, 87), (66, 111), green, 2)
+                if kind == 'rectangle': cv2.rectangle(frame, (39, 90), (69, 108), green, 2)
+                if kind == 'ellipse': cv2.ellipse(frame, (54, 99), (16, 9), 0, 0, 360, green, 2)
+                if kind == 'line': cv2.line(frame, (42, 87), (66, 111), green, 3)
+                if kind == 'short_arc': cv2.ellipse(frame, (54, 99), (12, 12), 0, 0, 100, green, 2)
+                if kind == 'wrong_radius': cv2.circle(frame, (54, 99), 22, green, 2)
+                if kind == 'wrong_colour': cv2.circle(frame, (54, 99), 12, (240, 150, 40), 2)
+                if kind == 'distant': cv2.circle(frame, (120, 40), 12, green, 2)
+                result = f.analyze(encoded(frame), 10.4)
+                self.assertEqual(result['phase'], 'lost')
+                self.assertIsNone(result['direction'])
+
+    def test_self_marker_does_not_substitute_for_the_target(self):
+        config, frame, _ = marker_fixture()
+        f = vision.Follower(config)
+        f.analyze(encoded(frame), 10)
+        frame[90:108, 45:63] = 25; frame[90:108, 155:173] = 25
+        result = f.analyze(encoded(frame), 10.4)
+        self.assertEqual(result['selfSource'], 'marker')
+        self.assertEqual(result['phase'], 'lost')
+        self.assertIsNone(result['direction'])
+
+    def test_self_marker_can_continue_only_while_each_position_is_currently_visible(self):
+        config, original, _ = marker_fixture()
+        f = vision.Follower(config)
+        f.analyze(encoded(original), 10)
+        for i in range(1, 9):
+            frame = original.copy(); frame[80:120, 35:90] = 25
+            cv2.circle(frame, (54+i*2, 99), 12, (40, 220, 50), 2)
+            result = f.analyze(encoded(frame), 10+i*.4)
+            self.assertEqual(result['selfSource'], 'marker')
+            self.assertLess(abs(result['self']['x']-(54+i*2)/200), .012)
+        frame[80:120, 35:90] = 25
+        result = f.analyze(encoded(frame), 13.6)
+        self.assertEqual(result['phase'], 'lost')
+        self.assertIsNone(result['direction'])
+
+    def test_a_new_avatar_observation_that_disagrees_with_the_marker_revokes_it(self):
+        config, frame, own = marker_fixture()
+        f = vision.Follower(config)
+        f.analyze(encoded(frame), 10)
+        frame[90:108, 45:63] = 25
+        frame[150:168, 100:118] = own
+        observed = f.analyze(encoded(frame), 10.4)
+        self.assertEqual(observed['selfSource'], 'template')
+        self.assertGreater(observed['self']['x'], .5)
+        frame[150:168, 100:118] = 25
+        result = f.analyze(encoded(frame), 10.8)
+        self.assertEqual(result['phase'], 'lost', 'the old visible ring cannot revive a displaced avatar identity')
+        self.assertIsNone(result['direction'])
 
     def test_closed_loop_reaches_teammate_without_crossing_wall(self):
         config, _, own_icon, target_icon = fixture()

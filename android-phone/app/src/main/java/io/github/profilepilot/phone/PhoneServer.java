@@ -50,7 +50,10 @@ final class PhoneServer implements Closeable {
                 timing.mark("bodyRead");
                 String method = request.split(" ")[1].substring(1);
                 JSONObject body = new JSONObject(new String(bytes, StandardCharsets.UTF_8));
-                timing.operation(method, body.optString("op", "")); timing.mark("read");
+                String op = body.optString("op", "");
+                JSONObject action = body.optJSONObject("action");
+                if (method.equals("action") && action != null && action.optString("kind").equals("screenshot")) op = "screenshot";
+                timing.operation(method, op); timing.mark("read");
                 try { response = handler.handle(method, body, timing); }
                 catch (Exception error) { response = new JSONObject().put("ok", false).put("code", "PHONE_ERROR").put("error", error.getMessage() == null ? "手机未完成请求" : error.getMessage()); }
             }

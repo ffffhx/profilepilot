@@ -14,6 +14,8 @@ final class ControlTiming {
         if (!BuildConfig.DEBUG) return;
         if (method.equals("sync")) operation = "sync";
         else if (method.equals("follow") && (op.equals("frame") || op.equals("touch") || op.equals("probe"))) operation = "follow-" + op;
+        else if (method.equals("action") && op.equals("screenshot")) operation = "screenshot";
+        else if (method.equals("screenshot-chunk")) operation = "screenshot-chunk";
     }
     synchronized void mark(String stage) {
         if (!BuildConfig.DEBUG || finished || stages.length() > 1200) return;

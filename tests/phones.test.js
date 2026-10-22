@@ -119,6 +119,79 @@ test('ADB wrapper owns a single phone session, enforces view mode and never repl
   assert.equal(h.state.phase, 'stopped');
   await assert.rejects(h.service.wrapperState(owner.lease), /已结束或失联/);
 });
+
+test('native PNG screenshots negotiate bounded pages and retain the public screenshot shape', async t => {
+  const h = harness(t), owner = await h.service.startWrapper(h.id, 'view', 'Agent', 'PNG');
+  const id = randomUUID(), base64 = Buffer.alloc(100000, 43).toString('base64'), size = 48 * 1024;
+  h.hook = (method, body) => {
+    if (method === 'action') {
+      assert.equal(body.imageTransfer, 'base64-chunks-v1');
+      assert.deepEqual(body.action, { kind: 'screenshot', format: 'png' });
+      return { ok: true, state: structuredClone(h.state), result: { mime: 'image/png', width: 2772, height: 1240,
+        transfer: { protocol: 1, id, length: base64.length, chunkSize: size, ttlMs: 15000 } } };
+    }
+    if (method === 'screenshot-chunk') {
+      assert.equal(body.transferId, id); assert.equal(body.generation, owner.device.state.generation);
+      return { ok: true, state: structuredClone(h.state), result: { id, offset: body.offset,
+        base64: base64.slice(body.offset, body.offset + size), done: body.offset + size >= base64.length } };
+    }
+  };
+  const result = await h.service.performWrapper(owner.lease, owner.device.state.generation, { kind: 'screenshot', format: 'png' }, randomUUID());
+  assert.deepEqual(result.result, { mime: 'image/png', width: 2772, height: 1240, base64 });
+  assert.equal(h.calls.filter(c => c[0] === 'action').length, 1);
+  assert.equal(h.calls.filter(c => c[0] === 'screenshot-chunk').length, 3);
+  assert.equal(h.service.snapshot().devices[0].companion, 'ready');
+});
+
+test('phone rejection between PNG pages keeps the observed pause and never returns a partial image', async t => {
+  const h = harness(t), owner = await h.service.startWrapper(h.id, 'view', 'Agent', 'PNG');
+  const id = randomUUID(), size = 48 * 1024; let pages = 0;
+  h.hook = (method, body) => {
+    if (method === 'action') return { ok: true, state: structuredClone(h.state), result: { mime: 'image/png', width: 2772, height: 1240,
+      transfer: { protocol: 1, id, length: size * 3, chunkSize: size, ttlMs: 15000 } } };
+    if (method === 'screenshot-chunk') {
+      if (++pages === 2) {
+        h.state.generation++; h.state.phase = 'paused';
+        return { ok: false, code: 'PHONE_REJECTED', error: '手机已暂停', state: structuredClone(h.state) };
+      }
+      return { ok: true, state: structuredClone(h.state), result: { id, offset: body.offset, base64: 'A'.repeat(size), done: false } };
+    }
+  };
+  await assert.rejects(h.service.performWrapper(owner.lease, owner.device.state.generation, { kind: 'screenshot', format: 'png' }, randomUUID()), /已暂停/);
+  assert.equal(pages, 2); assert.equal(h.calls.filter(c => c[0] === 'action').length, 1);
+  const device = h.service.snapshot().devices[0]; assert.equal(device.companion, 'ready'); assert.equal(device.state.phase, 'paused');
+});
+
+test('a concurrent poll during PNG capture cannot invalidate its later completed response', async t => {
+  const h = harness(t), owner = await h.service.startWrapper(h.id, 'control', 'Agent', 'PNG');
+  const id = randomUUID(), base64 = Buffer.alloc(50000, 37).toString('base64'), size = 48 * 1024;
+  let capturing, finishCapture;
+  const arrived = new Promise(resolve => { capturing = resolve; });
+  h.hook = (method, body) => {
+    if (method === 'action') {
+      h.state.phase = 'executing'; capturing();
+      return new Promise(resolve => { finishCapture = () => {
+        h.state.phase = 'controlling';
+        resolve({ ok: true, state: structuredClone(h.state), result: { mime: 'image/png', width: 2772, height: 1240,
+          transfer: { protocol: 1, id, length: base64.length, chunkSize: size, ttlMs: 15000 } } });
+      }; });
+    }
+    if (method === 'screenshot-chunk') return { ok: true, state: structuredClone(h.state), result: { id, offset: body.offset,
+      base64: base64.slice(body.offset, body.offset + size), done: body.offset + size >= base64.length } };
+  };
+  const pending = h.service.performWrapper(owner.lease, owner.device.state.generation, { kind: 'screenshot', format: 'png' }, randomUUID());
+  await arrived;
+  // This later-started poll observes encoding in flight, so its sequence is newer
+  // than the eventual action result even though it describes an earlier phase.
+  await h.service.refresh();
+  assert.equal(h.service.snapshot().devices[0].state.phase, 'executing');
+  finishCapture();
+  const result = await pending;
+  assert.equal(result.result.base64, base64); assert.equal(result.state.phase, 'controlling');
+  assert.equal(h.calls.filter(c => c[0] === 'action').length, 1);
+  assert.equal(h.calls.filter(c => c[0] === 'screenshot-chunk').length, 2);
+  assert.equal(h.service.snapshot().devices[0].state.phase, 'controlling');
+});
 test('wrapper pause/resume rejects an old action generation but permits newly requested input', async t => {
   const h = harness(t), owner = await h.service.startWrapper(h.id, 'control', 'Agent', 'test');
   const oldGeneration = owner.device.state.generation;
@@ -252,6 +325,68 @@ test('a failed old poll cannot tear down a route with a newer successful phone r
   await h.service.followLive(owner.lease, h.state.generation, { op: 'touch', sequence: 1, points: [], ttlMs: 1200 });
   assert.ok(!h.calls.some(c => ['resume', 'pause'].includes(c[0])));
   await h.service.stopWrapper(owner.lease);
+});
+
+test('visual follow suspends sidebar captures and releases that restriction when stopped', async t => {
+  const h = harness(t); await h.service.refresh();
+  const owner = await h.service.startWrapper(h.id, 'view', 'Codex', 'observe follow');
+  let captures = 0;
+  h.service.adb.runBinary = async () => { captures++; throw Error('preview capture resumed'); };
+  await h.service.followLive(owner.lease, h.state.generation, { op: 'probe' });
+  assert.equal(h.service.snapshot().devices[0].visualFollowActive, true);
+  await assert.rejects(h.service.screen(h.id), /视觉跟随正在采集/);
+  assert.equal(captures, 0);
+  await h.service.stopWrapper(owner.lease);
+  assert.equal(h.service.snapshot().devices[0].visualFollowActive, false);
+  await assert.rejects(h.service.screen(h.id), /preview capture resumed/);
+  assert.equal(captures, 1);
+});
+
+test('a newer poll cached during follow capture cannot reject the next touch after capture completes', async t => {
+  const h = harness(t); await h.service.refresh();
+  const owner = await h.service.startWrapper(h.id, 'control', 'Codex', 'follow');
+  let entered, release;
+  const arrived = new Promise(resolve => entered = resolve);
+  h.hook = (method, body) => {
+    if (method === 'follow' && body.op === 'frame') {
+      h.state.phase = 'executing'; entered();
+      return new Promise(resolve => release = () => {
+        h.state.phase = 'controlling'; resolve({ ok: true, state: structuredClone(h.state), result: {} });
+      });
+    }
+  };
+  const capture = h.service.followLive(owner.lease, h.state.generation, { op: 'frame' });
+  await arrived; await h.service.refresh(); release(); await capture;
+  assert.equal(h.service.snapshot().devices[0].state.phase, 'executing');
+  await h.service.followLive(owner.lease, h.state.generation, { op: 'touch', sequence: 1, points: [], ttlMs: 1200 });
+  assert.equal(h.service.snapshot().devices[0].state.phase, 'controlling');
+  assert.equal(h.calls.filter(call => call[0] === 'follow' && call[1].op === 'touch').length, 1);
+  await h.service.stopWrapper(owner.lease);
+});
+
+test('starting visual follow aborts a pending capture on another physical alias before its first RPC', async t => {
+  const h = harness(t); await h.service.refresh();
+  const owner = await h.service.startWrapper(h.id, 'control', 'Codex', 'follow');
+  const primary = h.service.devices.get(h.id), alias = '192.168.0.2:40000';
+  primary.hardwareId = 'physical-phone';
+  h.service.devices.set(alias, { ...primary, id: alias, transport: 'wifi', companion: 'unknown' });
+  let entered;
+  let aborted = false;
+  const started = new Promise(resolve => entered = resolve);
+  h.service.adb.runBinary = async (_, __, signal) => new Promise((resolve, reject) => {
+    signal.addEventListener('abort', () => { aborted = true; reject(Error('preview capture aborted')); }, { once: true }); entered();
+  });
+  h.hook = method => { if (method === 'follow') assert.equal(aborted, true, 'cancel full capture before probing follow'); };
+  const capture = h.service.screen(alias);
+  const rejected = assert.rejects(capture, /preview capture aborted/);
+  await started;
+  await h.service.followLive(owner.lease, h.state.generation, { op: 'probe' });
+  await rejected;
+  assert.equal(h.service.snapshot().devices[0].state.phase, 'controlling');
+  assert.ok(h.service.snapshot().devices.every(device => device.visualFollowActive));
+  await assert.rejects(h.service.screen(alias), /视觉跟随正在采集/);
+  await h.service.stopWrapper(owner.lease);
+  assert.ok(h.service.snapshot().devices.every(device => !device.visualFollowActive));
 });
 
 test('a newer heartbeat never hides an uncertain input result', async t => {

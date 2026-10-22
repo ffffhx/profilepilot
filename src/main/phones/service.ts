@@ -23,6 +23,7 @@ import { PhoneInspection } from "./inspection";
 import { ManagedAdbJobs } from "./adb-jobs";
 import { BasicPhoneControl } from "./basic";
 import { captureAdbScreen } from "./screenshot";
+import { assembleScreenshot, SCREENSHOT_TRANSFER } from "./screenshot-transfer";
 import { ScreenCamera, type CameraCapture } from "./screen-camera";
 import type { ScreenCameraStart, ScreenCameraCommand, ScreenCameraLease } from "../../shared/screen-camera";
 import { GameFollower } from "./game-follow";
@@ -75,7 +76,7 @@ export class PhonesService {
   private observations = new Map<string, { instanceId: string; sequence: number; generation: number }>();
   private reconcile = new Set<string>();
   private pairing = new Set<string>();
-  private wrappers = new Map<string, { id: string; sessionId: string; instanceId: string; seenAt: number; closing: boolean; backend: "app" | "basic"; followSequence?: number }>();
+  private wrappers = new Map<string, { id: string; sessionId: string; instanceId: string; seenAt: number; closing: boolean; backend: "app" | "basic"; followSequence?: number; visualFollow?: boolean }>();
   private installs = new Map<string, InstallJob>();
   private closed = false;
   private wirelessBusy = false;
@@ -152,8 +153,12 @@ export class PhonesService {
       const hardwareId = device.hardwareId || saved?.hardwareId;
       const identity = device.state?.statusDeviceId || saved?.statusDeviceId || identityByHardware.get(hardwareId);
       if (identity) matched.add(identity);
-      return structuredClone({ ...device, screenCamera: this.screenCamera.snapshot(device.id), basic: this.basic.state(device.id), hardwareId, cloud: identity ? cloud.find(c => c.cloud?.report?.deviceId === identity)?.cloud : undefined });
+      const visualFollowActive = [...this.wrappers.values()].some(owner => owner.id === device.id && owner.visualFollow && !owner.closing);
+      return structuredClone({ ...device, visualFollowActive, screenCamera: this.screenCamera.snapshot(device.id), basic: this.basic.state(device.id), hardwareId, cloud: identity ? cloud.find(c => c.cloud?.report?.deviceId === identity)?.cloud : undefined });
     });
+    for (const group of groupPhoneDevices(devices)) {
+      if (group.routes.some(route => route.visualFollowActive)) for (const route of group.routes) route.visualFollowActive = true;
+    }
     devices.push(...cloud.filter(c => !c.cloud?.report || !matched.has(c.cloud.report.deviceId)));
     return { devices, adbAvailable: this.adbAvailable, error: this.error, computer: this.computer,
       companionApp: { packageName: this.companion.packageName, name: this.companion.name, variant: this.companion.variant } };
@@ -494,8 +499,11 @@ export class PhonesService {
     const reading = this.debugReadings.get(id);
     const ageMs = reading ? Math.max(0, this.now() - reading.at) : Infinity;
     const syncBody = { transport: device.transport, ...(reading?.route === route && ageMs < 6000 ? { debugSettings: { ...reading.value, ageMs } } : {}) };
+    const action = (body as { action?: { kind?: string; format?: string } })?.action;
+    const screenshot = method === "action" && action?.kind === "screenshot" && action.format === "png";
+    const requestBody = method === "sync" ? syncBody : screenshot ? { ...body as object, imageTransfer: SCREENSHOT_TRANSFER } : body;
     let raw: unknown;
-    try { raw = await this.request(route.port, route.token, method, method === "sync" ? syncBody : body); }
+    try { raw = await this.request(route.port, route.token, method, requestBody); }
     catch (error) {
       if (this.routes.get(id) === route) {
         // Only a background observation can be superseded by newer, recent
@@ -544,6 +552,18 @@ export class PhonesService {
     if (!response.state) throw new Error("手机未返回控制状态。");
     if (sequence > (route.success?.sequence || 0)) route.success = { sequence, at: this.now() };
     if (method === "sync") this.refreshDebugSettings(id, route);
+    if (screenshot) {
+      const owner = body as { instanceId: string; sessionId: string; generation: number };
+      return assembleScreenshot({ state: response.state, result: response.result },
+        { instanceId: owner.instanceId, sessionId: owner.sessionId, generation: owner.generation },
+        page => this.rpc(id, "screenshot-chunk", page),
+        // A later-started poll may cache "executing" while this capture encodes.
+        // Every returned page separately proves the same owner is now ready;
+        // this cache only rejects revoked ownership, not that older busy phase.
+        () => !this.closed && this.routes.get(id) === route && device.companion === "ready" && !this.reconcile.has(id)
+          && device.state?.instanceId === owner.instanceId && device.state.sessionId === owner.sessionId
+          && device.state.generation === owner.generation && ["viewing", "controlling", "executing"].includes(device.state.phase));
+    }
     return { state: response.state, result: response.result };
   }
   private refreshDebugSettings(id: string, route: Route): void {
@@ -812,6 +832,7 @@ export class PhonesService {
     const guard = () => {
       if (this.closed || device.connection !== "device" || this.operations.has(id)) throw new Error("手机连接或状态已改变，请稍后重试。");
       const group = groupPhoneDevices(this.snapshot().devices).find(group => group.routes.some(route => route.id === id));
+      if (group?.routes.some(route => route.visualFollowActive)) throw new Error("视觉跟随正在采集画面，请在视觉跟随窗口查看；结束后恢复手机预览。");
       if (group?.routes.some(route => [route.basic, route.state].some(state => state && (state.phase === "paused" || state.phase === "disconnected" && !!state.sessionId)))) throw new Error("手机会话已暂停或断开，确认会话状态后再刷新画面。");
       return JSON.stringify(group?.routes.map(route => [route.id, route.connection, route.basic?.sessionId, route.basic?.generation, route.basic?.phase, route.state?.instanceId, route.state?.sessionId, route.state?.generation, route.state?.phase]));
     };
@@ -940,6 +961,13 @@ export class PhonesService {
     const input = { id: owner.id, sessionId: owner.sessionId, generation, requestId, action };
     return owner.backend === "basic" ? this.basicPerform(input) : this.perform(input);
   }
+  private claimFollowCapture(owner: { id: string; visualFollow?: boolean }): void {
+    if (owner.visualFollow) return;
+    owner.visualFollow = true;
+    const group = groupPhoneDevices(this.snapshot().devices).find(group => group.routes.some(route => route.id === owner.id));
+    for (const route of group?.routes || []) this.screenReads.get(route.id)?.abort();
+    this.changed();
+  }
   private async followLive(lease: string, generation: number, command: object): Promise<unknown> {
     const owner = this.wrapper(lease), device = this.connected(owner.id);
     if (owner.backend === "basic") {
@@ -953,7 +981,10 @@ export class PhonesService {
         z.object({ op: z.literal("touch"), sequence: z.number().int().positive(), ttlMs: z.number().int().min(1).max(1500),
           points: z.array(z.object({ id: z.literal(0), x: coordinate, y: coordinate, fromX: coordinate, fromY: coordinate }).strict()).max(1) }).strict()
       ]).parse(command);
-      if (input.op === "probe") return { protocol: 1, input: "bounded-swipes", maxStrokeMs: 350 };
+      if (input.op === "probe") {
+        this.claimFollowCapture(owner);
+        return { protocol: 1, input: "bounded-swipes", maxStrokeMs: 350 };
+      }
       if (input.op === "frame") return (await this.performWrapper(lease, generation, { kind: "screenshot" }, randomUUID())).result;
       if (state.mode !== "control") throw new Error("仅查看会话不能操作手机。");
       if (input.sequence <= (owner.followSequence || 0)) throw new Error("此移动已提交过，不会重复执行。");
@@ -968,6 +999,10 @@ export class PhonesService {
     }
     if (owner.backend !== "app" || device.companion !== "ready" || this.reconcile.has(owner.id)
       || this.operations.has(owner.id) || this.actions.has(owner.id)) throw new Error("手机连接或操作状态已改变");
+    const state = device.state;
+    if (!state || state.instanceId !== owner.instanceId || state.sessionId !== owner.sessionId
+      || state.generation !== generation || !["viewing", "controlling", "executing"].includes(state.phase)) throw new Error("手机已暂停或切换会话，跟随已停止");
+    this.claimFollowCapture(owner);
     this.actions.add(owner.id);
     try {
       const response = await this.rpc(owner.id, "follow", { ...command, instanceId: owner.instanceId, sessionId: owner.sessionId, generation });

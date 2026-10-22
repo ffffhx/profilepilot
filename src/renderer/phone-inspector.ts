@@ -22,11 +22,11 @@ export function createPhoneInspector(container: HTMLElement) {
   const markupCache = new Map<string, string>();
   const html = (selector: string, markup: string) => { if (markupCache.get(selector) !== markup) { find<HTMLElement>(selector).innerHTML = markup; markupCache.set(selector, markup); } };
   const session = () => [device?.basic, device?.state].find(state => state && !["idle", "stopped"].includes(state.phase));
-  const ready = () => !!device && device.connection === "device" && !device.pending && !["paused", "disconnected"].includes(session()?.phase || "");
+  const ready = () => !!device && device.connection === "device" && !device.pending && !device.visualFollowActive && !["paused", "disconnected"].includes(session()?.phase || "");
   const hint = () => !device ? "选择设备后显示手机画面" : device.connection === "unauthorized" ? "请在手机上确认调试授权"
     : device.connection !== "device" ? device.transport === "emulator" ? "启动模拟器后自动显示画面" : "连接手机后自动显示画面"
     : session()?.phase === "paused" ? "会话已暂停，恢复后更新画面" : session()?.phase === "disconnected" ? "请先结束已断开的会话"
-    : device.pending || failure || "正在获取手机画面…";
+    : device.visualFollowActive ? "视觉跟随期间暂停预览，请在视觉跟随窗口查看画面" : device.pending || failure || "正在获取手机画面…";
   const updateScreen = () => {
     placeholder.hidden = !!capturedAt; placeholder.querySelector("[role=status]")!.textContent = hint();
     image.hidden = !capturedAt; screen.disabled = !capturedAt;
@@ -76,7 +76,7 @@ export function createPhoneInspector(container: HTMLElement) {
       if (enlarged && enlarged.deviceId !== next?.id) enlarged.dialog.close();
       device = next; busy = working;
       const state = session();
-      const nextKey = JSON.stringify([device?.id, device?.connection, device?.pending, state?.instanceId, state?.sessionId, state?.generation, state?.phase, workspaceHidden()]);
+      const nextKey = JSON.stringify([device?.id, device?.connection, device?.pending, device?.visualFollowActive, state?.instanceId, state?.sessionId, state?.generation, state?.phase, workspaceHidden()]);
       if (nextKey !== key) { key = nextKey; generation++; capturedAt = 0; attemptedAt = 0; failure = ""; image.removeAttribute("src"); }
       container.dataset.deviceId = device?.id || "";
       const name = device ? phonePresentation(device).displayName : "尚未选择设备";

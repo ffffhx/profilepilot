@@ -38,6 +38,8 @@ export interface PhoneCloudStatus {
 }
 export interface PhoneDevice {
   screenCamera?: ScreenCameraState;
+  /** An active visual-follow lease owns capture; sidebar previews must wait. */
+  visualFollowActive?: boolean;
   /** Read-only package detection on an authorized debug transport. */
   appInstallation?: { status: "installed" | "missing" | "unknown"; checkedAt: number };
   /** Explicit desktop-owned session; does not imply companion permissions. */

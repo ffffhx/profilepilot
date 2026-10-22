@@ -16,6 +16,7 @@ public final class ControlService extends Service {
     final ConnectionState connection = new ConnectionState(SystemClock::elapsedRealtime);
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Map<String, Receipt> receipts = new LinkedHashMap<>();
+    private final ScreenshotTransfer screenshots = new ScreenshotTransfer(session, SystemClock::elapsedRealtime);
     private record Receipt(String fingerprint, CompletableFuture<JSONObject> future) { }
     private PhoneServer server;
     private ControlOverlay overlay;
@@ -96,7 +97,7 @@ public final class ControlService extends Service {
                     if (!computer.equals(getSharedPreferences("MainActivity", MODE_PRIVATE).getString("computer", ""))) throw new IllegalStateException("控制电脑与配对记录不一致");
                     PhoneAccessibility.current.resetFollowTouch();
                     session.start(input.getString("instanceId"), input.getLong("generation"), input.getString("sessionId"), input.getString("mode"), computer, limited(input, "controller", 120), limited(input, "task", 500), System.currentTimeMillis());
-                    receipts.clear(); followSequence = 0;
+                    receipts.clear(); screenshots.clear(); followSequence = 0;
                     render(); result.complete(success(null));
                 } else if (method.equals("pause") || method.equals("resume") || method.equals("stop")) {
                     session.check(input.getString("instanceId"), input.getString("sessionId"), input.getLong("generation"));
@@ -104,7 +105,12 @@ public final class ControlService extends Service {
                     else if (method.equals("pause")) session.pause("电脑已暂停控制"); else session.stop("电脑已结束控制");
                     render(); result.complete(success(null));
                 } else if (method.equals("follow")) follow(input, result, timing);
-                else if (method.equals("action")) action(input, result);
+                else if (method.equals("screenshot-chunk")) {
+                    requireReady();
+                    result.complete(success(screenshots.read(input.getString("instanceId"), input.getString("sessionId"),
+                        input.getLong("generation"), input.getString("transferId"), input.getInt("offset")), timing));
+                }
+                else if (method.equals("action")) action(input, result, timing);
                 else throw new IllegalArgumentException("不支持此控制请求");
             } catch (Exception error) { result.complete(failure(error)); }
         });
@@ -142,7 +148,7 @@ public final class ControlService extends Service {
             session.finish(generation); render(); timing.mark("rendered"); result.complete(error == null ? success(value, timing) : failure(error));
         }));
     }
-    private void action(JSONObject input, CompletableFuture<JSONObject> result) throws Exception {
+    private void action(JSONObject input, CompletableFuture<JSONObject> result, ControlTiming timing) throws Exception {
         String requestId = input.getString("requestId");
         if (!requestId.matches("[a-fA-F0-9-]{36}")) throw new IllegalArgumentException("操作标识无效");
         String fingerprint = digest(input.toString());
@@ -153,6 +159,8 @@ public final class ControlService extends Service {
         }
         if (receipts.size() >= 1000) throw new IllegalStateException("会话操作数已达上限，请结束后创建新会话");
         JSONObject action = input.getJSONObject("action"); String kind = action.getString("kind");
+        boolean chunkedScreenshot = kind.equals("screenshot") && action.optString("format").equals("png")
+            && ScreenshotTransfer.PROTOCOL.equals(input.optString("imageTransfer"));
         boolean isInput = !kind.equals("snapshot") && !kind.equals("screenshot") && !kind.equals("find");
         requireReady();
         session.authorize(input.getString("instanceId"), input.getString("sessionId"), input.getLong("generation"), isInput);
@@ -160,8 +168,17 @@ public final class ControlService extends Service {
         receipts.put(requestId, new Receipt(fingerprint, result));
         session.begin(switch (kind) { case "tap", "click" -> "点击控件"; case "swipe", "scroll" -> "滚动页面"; case "text", "fill" -> "输入文字"; case "key" -> "执行导航按键"; case "snapshot", "find" -> "读取当前页面"; case "screenshot" -> "获取屏幕画面"; default -> "处理操作"; });
         render();
-        PhoneAccessibility.current.perform(action).whenComplete((value, error) -> main.post(() -> {
-            session.finish(generation); render(); result.complete(error == null ? success(value) : failure(error));
+        PhoneAccessibility.current.perform(action, timing).whenComplete((value, error) -> main.post(() -> {
+            timing.mark("actionDone");
+            session.finish(generation); render();
+            try {
+                if (error != null) result.complete(failure(error));
+                else {
+                    Object output = chunkedScreenshot ? screenshots.offer((JSONObject) value,
+                        input.getString("instanceId"), input.getString("sessionId"), generation) : value;
+                    result.complete(success(output, timing));
+                }
+            } catch (Exception failure) { result.complete(failure(failure)); }
         }));
     }
     private void requireReady() {
@@ -246,12 +263,14 @@ public final class ControlService extends Service {
     }
     void refreshPresentation() { render(); }
     private void render() {
+        screenshots.prune();
         if (!session.active() && PhoneAccessibility.current != null) PhoneAccessibility.current.releaseFollowTouch();
         if (overlay != null) overlay.update();
         String key = description() + session.controller + session.task + session.sessionId + session.generation;
         if (!key.equals(lastNotification)) { lastNotification = key; getSystemService(NotificationManager.class).notify(1, notification()); }
     }
     @Override public void onDestroy() {
+        screenshots.clear();
         if (recovery != null) { recovery.close(); recovery = null; }
         if (PhoneAccessibility.current != null) PhoneAccessibility.current.releaseFollowTouch();
         session.stop("连接服务已关闭"); main.removeCallbacksAndMessages(null); if (overlay != null) overlay.close();

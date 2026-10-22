@@ -13,6 +13,8 @@ const unit = z.number().finite().min(0).max(1);
 const image = z.string().min(16).max(4_000_000).regex(/^[A-Za-z0-9+/]*={0,2}$/);
 const rect = z.object({ x: unit, y: unit, width: unit.min(.015), height: unit.min(.015) }).strict()
   .refine(r => r.x + r.width <= 1.00001 && r.y + r.height <= 1.00001, "选区超出画面");
+const hudRect = z.object({ x: unit, y: unit, width: unit.min(.001), height: unit.min(.001) }).strict()
+  .refine(r => r.x + r.width <= 1 && r.y + r.height <= 1, "存活提示选区超出画面");
 export const gameFollowConfigSchema = z.object({
   version: z.literal(1), name: z.string().trim().min(1).max(80),
   width: z.number().int().min(100).max(5000), height: z.number().int().min(100).max(5000),
@@ -29,7 +31,13 @@ export const gameFollowConfigSchema = z.object({
     pixelsPerMapUnit: z.number().finite().min(100).max(100000) }).strict().optional(),
   selfMarker: z.object({ hueMin: z.number().int().min(0).max(179), hueMax: z.number().int().min(0).max(179),
     saturationMin: z.number().int().min(0).max(255), valueMin: z.number().int().min(0).max(255),
-    radiusPixels: z.number().finite().min(3).max(100) }).strict().refine(m => m.hueMin <= m.hueMax, "颜色范围无效").optional()
+    radiusPixels: z.number().finite().min(3).max(100) }).strict().refine(m => m.hueMin <= m.hueMax, "颜色范围无效").optional(),
+  targetPartial: z.object({
+    ring: z.object({ hueMin: z.number().int().min(0).max(179), hueMax: z.number().int().min(0).max(179),
+      saturationMin: z.number().int().min(1).max(255), valueMin: z.number().int().min(1).max(255),
+      radiusPixels: z.number().finite().min(5).max(100) }).strict().refine(r => r.hueMin <= r.hueMax, "颜色范围无效"),
+    alive: z.object({ portraitTemplate: image.max(256_000), portraitRegion: hudRect, healthBarRegion: hudRect }).strict()
+  }).strict().optional()
 }).strict().refine(c => c.width * c.height <= 8_000_000, "画面过大")
   .refine(c => {
     const j = c.joystick, r = j.radius * Math.min(c.width, c.height);
@@ -300,7 +308,7 @@ export class GameFollower {
   }
   private async loop(run: Run, config: GameFollowConfig, mode: "observe" | "control", backend: "app" | "basic") {
     const began = Date.now();
-    const region = backend === "app" && config.capture !== "full" && !config.nearby ? mapCaptureRegion(config) : undefined;
+    const region = backend === "app" && config.capture !== "full" && !config.nearby && !config.targetPartial ? mapCaptureRegion(config) : undefined;
     try {
       while (!run.cancelled) {
         if (run.recovery && !await run.recovery) throw new Error(this.value.error || "跟随连接恢复失败");

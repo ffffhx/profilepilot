@@ -448,9 +448,196 @@ class VisionTests(unittest.TestCase):
         self.assertTrue(any(p[1] < .13 or p[1] > .87 for p in travelled))
 
 
+def partial_fixture(full=False, offset=0):
+    rng = np.random.default_rng(702)
+    own = rng.integers(40, 250, (18, 18, 3), dtype=np.uint8)
+    target = rng.integers(20, 240, (41, 41, 3), dtype=np.uint8)
+    frame = np.full((480, 640, 3), 25, np.uint8)
+    frame[190:208, 60:78] = own
+    frame[180:221, 280+offset:321+offset] = target
+    if not full:
+        frame[180:221, 300+offset:321+offset] = 25
+    cv2.circle(frame, (300+offset, 200), 26, (255, 160, 40), 2)
+    portrait = cv2.resize(target, (60, 60), interpolation=cv2.INTER_NEAREST)
+    frame[20:80, 470:530] = portrait
+    frame[84:92, 470:530] = (255, 160, 40)
+    config = dict(version=1, name='partial fixture', width=640, height=480,
+                  map=dict(x=0, y=0, width=425/640, height=425/480),
+                  selfTemplate=encoded(own), targetTemplate=encoded(target), selfRotates=False,
+                  grid=dict(columns=40, rows=40, blocked=[], clearance=0),
+                  joystick=dict(x=.2, y=.8, radius=.07, rotation=0),
+                  confidence=.9, stopDistance=.06, intervalMs=350,
+                  targetPartial=dict(ring=dict(hueMin=85, hueMax=130, saturationMin=75,
+                                               valueMin=180, radiusPixels=26),
+                                     alive=dict(portraitTemplate=encoded(portrait),
+                                                portraitRegion=dict(x=470/640, y=20/480, width=60/640, height=60/480),
+                                                healthBarRegion=dict(x=470/640, y=84/480, width=60/640, height=8/480))))
+    return config, frame, target
+
+
+class TargetPartialTests(unittest.TestCase):
+    def test_opt_in_reacquires_from_three_current_partial_faces_without_old_full_anchor(self):
+        config, frame, _ = partial_fixture()
+        default = vision.Follower({k: v for k, v in config.items() if k != 'targetPartial'})
+        for tick in range(4):
+            self.assertIsNone(default.analyze(encoded(frame), 10+tick*.4)['direction'])
+        follower = vision.Follower(config)
+        for tick in range(4):
+            _, observed, _ = partial_fixture(offset=tick*2)
+            result = follower.analyze(encoded(observed), 10+tick*.4)
+            if tick < 2:
+                self.assertIsNone(result['direction'])
+                self.assertNotEqual(result['targetSource'], 'partial')
+            else:
+                self.assertEqual(result['targetSource'], 'partial')
+                self.assertAlmostEqual(result['target']['x'], (300.5+tick*2)/425)
+        self.assertEqual(result['phase'], 'following')
+        self.assertIsNotNone(result['direction'])
+
+    def test_full_path_wins_but_only_strict_current_evidence_primes_partial_history(self):
+        config, full, _ = partial_fixture(full=True)
+        follower = vision.Follower(config)
+        for now in (10, 10.4):
+            result = follower.analyze(encoded(full), now)
+            self.assertEqual(result['targetSource'], 'template')
+        _, partial, _ = partial_fixture()
+        result = follower.analyze(encoded(partial), 10.8)
+        self.assertEqual(result['targetSource'], 'partial')
+        self.assertEqual(result['phase'], 'following')
+        # Complete portraits lacking team colour remain usable by the unchanged
+        # complete-template path, but must not count toward strict partial history.
+        full_no_ring = full.copy()
+        cv2.circle(full_no_ring, (300, 200), 26, (25, 25, 25), 4)
+        follower = vision.Follower(config)
+        self.assertEqual(follower.analyze(encoded(full_no_ring), 20)['targetSource'], 'template')
+        self.assertEqual(follower.analyze(encoded(full_no_ring), 20.4)['targetSource'], 'template')
+        self.assertNotEqual(follower.analyze(encoded(partial), 20.8)['targetSource'], 'partial')
+
+    def test_missing_identity_team_arc_or_living_hud_breaks_consecutive_confirmation(self):
+        config, good, _ = partial_fixture()
+        for failure in ('face', 'ring', 'portrait', 'health'):
+            with self.subTest(failure=failure):
+                tracker = vision.Follower(config).partial
+                self.assertIsNone(tracker.locate(good[:425, :425], good, 10))
+                self.assertIsNone(tracker.locate(good[:425, :425], good, 10.4))
+                bad = good.copy()
+                if failure == 'face': bad[180:221, 280:321] = 25
+                if failure == 'ring': cv2.circle(bad, (300, 200), 26, (20, 20, 255), 4)
+                if failure == 'portrait': bad[20:80, 470:530] = 25
+                if failure == 'health': bad[84:92, 470:530] = 25
+                self.assertIsNone(tracker.locate(bad[:425, :425], bad, 10.8))
+                for now in (11.2, 11.6):
+                    self.assertIsNone(tracker.locate(good[:425, :425], good, now))
+                self.assertIsNotNone(tracker.locate(good[:425, :425], good, 12))
+
+    def test_partial_never_returns_a_stale_location_or_bypasses_missing_self(self):
+        config, good, _ = partial_fixture()
+        follower = vision.Follower(config)
+        for now in (10, 10.4, 10.8): follower.analyze(encoded(good), now)
+        missing = good.copy(); missing[170:233, 270:333] = 25
+        result = follower.analyze(encoded(missing), 11.2)
+        self.assertNotEqual(result['targetSource'], 'partial')
+        self.assertIsNone(result['direction'])
+        missing_self = good.copy(); missing_self[190:208, 60:78] = 25
+        for now in (12, 12.4, 12.8, 13.2):
+            result = follower.analyze(encoded(missing_self), now)
+            self.assertIsNone(result['direction'])
+        self.assertEqual(result['targetSource'], 'partial')
+        self.assertEqual(result['phase'], 'lost')
+
+    def test_nonmonotonic_stale_and_implausible_motion_require_new_three_frame_sequence(self):
+        config, good, _ = partial_fixture()
+        for break_at in (10.4, 9, 13):
+            with self.subTest(break_at=break_at):
+                tracker = vision.Follower(config).partial
+                for now in (10, 10.4): self.assertIsNone(tracker.locate(good[:425, :425], good, now))
+                self.assertIsNone(tracker.locate(good[:425, :425], good, break_at))
+                self.assertIsNone(tracker.locate(good[:425, :425], good, break_at+.4))
+        tracker = vision.Follower(config).partial
+        for now in (10, 10.4): tracker.locate(good[:425, :425], good, now)
+        _, moved, _ = partial_fixture(offset=-90)
+        self.assertIsNone(tracker.locate(moved[:425, :425], moved, 10.8))
+        self.assertIsNone(tracker.locate(moved[:425, :425], moved, 11.2))
+        current = tracker.locate(moved[:425, :425], moved, 11.6)
+        self.assertAlmostEqual(current['x'], 210.5/425)
+
+    def test_all_raw_half_candidates_compete_before_quadrant_or_team_filtering(self):
+        config, image, target = partial_fixture()
+        tracker = vision.Follower(config).partial
+        self.assertIsNotNone(tracker.candidate(image[:425, :425]))
+        duplicate = image.copy()
+        duplicate[60:101, 100:141] = target
+        duplicate[60:101, 120:141] = 25
+        cv2.circle(duplicate, (120, 80), 26, (20, 20, 255), 2)
+        self.assertIsNone(tracker.candidate(duplicate[:425, :425]), 'a red competing face cannot be filtered out before uniqueness')
+        # One competing quarter fails .95 while its raw half stays within .04
+        # of the true match. Its failure must not remove it from competition.
+        competitor = duplicate.copy()
+        competitor[80:101, 100:120] = (target[20:41, :20].astype(float)*.78).astype(np.uint8)
+        self.assertIsNone(tracker.candidate(competitor[:425, :425]), 'quarter filtering must not manufacture a unique winner')
+
+    def test_current_face_requires_both_fixed_score_thresholds(self):
+        config, image, _ = partial_fixture()
+        tracker = vision.Follower(config).partial
+        bad = image.copy(); bad[200:221, 280:300] = (bad[200:221, 280:300].astype(float)*.78).astype(np.uint8)
+        self.assertIsNone(tracker.candidate(bad[:425, :425]))
+        bad = image.copy(); bad[180:221, 280:300] = (bad[180:221, 280:300].astype(float)*.83).astype(np.uint8)
+        self.assertIsNone(tracker.candidate(bad[:425, :425]))
+
+    def test_team_arc_requires_current_visible_identity_sector_and_contiguous_support(self):
+        config, image, _ = partial_fixture()
+        tracker = vision.Follower(config).partial
+        candidate = tracker.candidate(image[:425, :425])
+        self.assertTrue(tracker.team_arc(image[:425, :425], candidate))
+        for kind in ('red', 'no-ring', 'wrong-radius', 'fragmented', 'hidden-half'):
+            with self.subTest(kind=kind):
+                bad = image.copy(); cv2.circle(bad, (300, 200), 26, (25, 25, 25), 5)
+                if kind == 'red': cv2.circle(bad, (300, 200), 26, (20, 20, 255), 2)
+                if kind == 'wrong-radius': cv2.circle(bad, (300, 200), 40, (255, 160, 40), 2)
+                if kind == 'fragmented':
+                    for start in (95, 155, 215): cv2.ellipse(bad, (300, 200), (26, 26), 0, start, start+30, (255, 160, 40), 2)
+                if kind == 'hidden-half': cv2.ellipse(bad, (300, 200), (26, 26), 0, -85, 85, (255, 160, 40), 2)
+                self.assertFalse(tracker.team_arc(bad[:425, :425], candidate))
+
+    def test_partial_requires_full_native_frame_and_valid_hud_calibration(self):
+        config, image, _ = partial_fixture()
+        with self.assertRaisesRegex(ValueError, '存活提示'):
+            vision.Follower(config).analyze(encoded(image[:425, :425]), 10,
+                region=dict(x=0, y=0, width=425, height=425))
+        config['targetPartial']['alive']['portraitRegion']['width'] = 59/640
+        with self.assertRaisesRegex(ValueError, '模板与校准区域尺寸'):
+            vision.Follower(config)
+        config, _, _ = partial_fixture()
+        config['targetPartial']['ring']['radiusPixels'] = 15
+        with self.assertRaisesRegex(ValueError, '外侧'):
+            vision.Follower(config)
+
+    def test_missing_hud_or_gray_portrait_cannot_reconfirm_partial_identity(self):
+        config, image, _ = partial_fixture()
+        tracker = vision.Follower(config).partial
+        self.assertTrue(tracker.alive(image))
+        gray = image.copy()
+        gray[20:80, 470:530] = cv2.cvtColor(cv2.cvtColor(gray[20:80, 470:530], cv2.COLOR_BGR2GRAY), cv2.COLOR_GRAY2BGR)
+        self.assertFalse(tracker.alive(gray))
+        empty = np.full_like(image, 25)
+        for now in (10, 10.4, 10.8, 11.2):
+            self.assertIsNone(tracker.locate(empty[:425, :425], empty, now))
+
+    def test_invalid_intermediate_frame_cannot_be_skipped_for_confirmation(self):
+        config, image, _ = partial_fixture()
+        follower = vision.Follower(config)
+        for now in (10, 10.4): follower.analyze(encoded(image), now)
+        with self.assertRaises(ValueError): follower.analyze(encoded(image[:100, :100]), 10.6)
+        for now in (10.8, 11.2):
+            self.assertNotEqual(follower.analyze(encoded(image), now)['targetSource'], 'partial')
+        self.assertEqual(follower.analyze(encoded(image), 11.6)['targetSource'], 'partial')
+
+
 if __name__ == "__main__":
     if "--fixture" in sys.argv:
         config, frame, _, _ = fixture()
-        print(json.dumps(dict(config=config, frame=dict(mime="image/png", base64=encoded(frame), width=640, height=360))))
+        partial_config, partial_frame, _ = partial_fixture()
+        print(json.dumps(dict(config=config, frame=dict(mime="image/png", base64=encoded(frame), width=640, height=360),
+                              partialConfig=partial_config, partialFrame=dict(mime="image/png", base64=encoded(partial_frame), width=640, height=480))))
     else:
         unittest.main()

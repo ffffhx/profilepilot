@@ -18,6 +18,11 @@ export interface GameFollowConfig {
   capture?: "auto" | "full";
   nearby?: { selfLabel: string; targetLabel: string; region: FollowRect; pixelsPerMapUnit: number };
   selfMarker?: { hueMin: number; hueMax: number; saturationMin: number; valueMin: number; radiusPixels: number };
+  /** Experimental, explicitly calibrated partial target identity; requires full native frames. */
+  targetPartial?: {
+    ring: { hueMin: number; hueMax: number; saturationMin: number; valueMin: number; radiusPixels: number };
+    alive: { portraitTemplate: string; portraitRegion: FollowRect; healthBarRegion: FollowRect };
+  };
 }
 export interface FollowDetection extends FollowPoint { confidence: number; }
 export interface FollowAnalysis {
@@ -30,6 +35,7 @@ export interface FollowAnalysis {
   elapsedMs: number;
   source?: "minimap" | "labels";
   selfSource?: "template" | "marker";
+  targetSource?: "template" | "partial" | "labels";
   distance?: number;
 }
 export interface FollowFrame {

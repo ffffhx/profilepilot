@@ -78,6 +78,147 @@ class Tracker:
         return found
 
 
+class TargetPartial:
+    """Current partial identity plus team colour and a calibrated living HUD.
+
+    Every frame must pass the same fixed gates, even when the ordinary complete
+    template wins. History only confirms three consecutive measurements; it
+    never supplies a missing coordinate or filters global identity competitors.
+    """
+    shapes = [tuple(j for j in range(4) if j != i) for i in range(4)] + [
+        (0, 1), (2, 3), (0, 2), (1, 3)]
+
+    def __init__(self, template, config, width, height, max_gap):
+        h, w = template.shape[:2]
+        if h != w or w < 9 or w > 129 or w % 2 != 1 or float(template.std()) < 6:
+            raise ValueError("部分头像需要 9–129 像素的奇数边长方形彩色模板")
+        self.template, self.width, self.config, self.max_gap = template, w, config, max_gap
+        if config['ring']['radiusPixels'] - 2 <= w / 2:
+            raise ValueError("队友颜色圆弧应位于头像模板外侧，请重新校准半径")
+        yy, xx = np.indices((h, w))
+        quadrants = (yy >= h//2)*2 + (xx >= w//2)
+        circle = np.zeros((h, w), np.uint8)
+        cv2.ellipse(circle, (w//2, h//2), (w//2-1, h//2-1), 0, 0, 360, 1, -1)
+        self.prepared = []
+        for quadrant in range(4):
+            binary = np.repeat(((circle > 0) & (quadrants == quadrant)).astype(np.float32)[:, :, None], 3, axis=2)
+            masked = template.astype(np.float32) * binary
+            self.prepared.append((binary, masked, float(np.sum(masked*masked))))
+        self.angles = np.arange(144)*2*math.pi/144
+        self.angle_quadrants = (np.sin(self.angles) >= 0)*2 + (np.cos(self.angles) >= 0)
+        alive = config['alive']
+        self.portrait = decode(alive['portraitTemplate'])
+        self.hud_regions = []
+        for key in ('portraitRegion', 'healthBarRegion'):
+            r = alive[key]
+            x, y, rw, rh = round(r['x']*width), round(r['y']*height), round(r['width']*width), round(r['height']*height)
+            if x < 0 or y < 0 or rw < 3 or rh < 3 or x+rw > width or y+rh > height:
+                raise ValueError("队友存活提示区域尺寸或边界无效")
+            self.hud_regions.append((x, y, rw, rh))
+        _, _, pw, ph = self.hud_regions[0]
+        if self.portrait.shape[:2] != (ph, pw) or min(pw, ph) < 12 or float(self.portrait.std()) < 6:
+            raise ValueError("队友顶部头像模板与校准区域尺寸不一致")
+        self.portrait_mask = np.zeros((ph, pw), np.uint8)
+        cv2.ellipse(self.portrait_mask, (pw//2, ph//2), (max(1, pw//2-4), max(1, ph//2-4)), 0, 0, 360, 255, -1)
+        self.history = deque(maxlen=3)
+        self.last_time = None
+
+    def alive(self, frame):
+        x, y, w, h = self.hud_regions[0]
+        portrait = frame[y:y+h, x:x+w]
+        score = 1-float(cv2.matchTemplate(portrait, self.portrait, cv2.TM_SQDIFF_NORMED, mask=self.portrait_mask)[0, 0])
+        hsv = cv2.cvtColor(portrait, cv2.COLOR_BGR2HSV)
+        colour = (hsv[:, :, 1] >= 50) & (hsv[:, :, 2] >= 50) & (self.portrait_mask != 0)
+        if not math.isfinite(score) or score < .9 or np.count_nonzero(colour) < np.count_nonzero(self.portrait_mask)*.1:
+            return False
+        x, y, w, h = self.hud_regions[1]
+        hsv = cv2.cvtColor(frame[y:y+h, x:x+w], cv2.COLOR_BGR2HSV)
+        ring = self.config['ring']
+        blue = ((hsv[:, :, 0] >= ring['hueMin']) & (hsv[:, :, 0] <= ring['hueMax'])
+                & (hsv[:, :, 1] >= ring['saturationMin']) & (hsv[:, :, 2] >= 100))
+        return np.count_nonzero(np.sum(blue, axis=1) >= max(8, w*.5)) >= 2
+
+    def candidate(self, image):
+        if min(image.shape[:2]) < self.width:
+            return None
+        pixels = image.astype(np.float32)
+        squared = pixels*pixels
+        quarters, energies, differences, template_energies = [], [], [], []
+        for binary, masked, energy in self.prepared:
+            sums = cv2.matchTemplate(squared, binary, cv2.TM_CCORR)
+            cross = cv2.matchTemplate(pixels, masked, cv2.TM_CCORR)
+            difference = np.maximum(0, sums+energy-2*cross)
+            quarters.append(1-difference/np.sqrt(np.maximum(sums*energy, 1e-9)))
+            energies.append(sums); differences.append(difference); template_energies.append(energy)
+        raw, valid = [], []
+        for indices in self.shapes:
+            scores = 1-sum(differences[i] for i in indices)/np.sqrt(np.maximum(
+                sum(energies[i] for i in indices)*sum(template_energies[i] for i in indices), 1e-9))
+            scores = np.nan_to_num(scores, nan=-1, posinf=-1, neginf=-1)
+            raw.append(scores)
+            filtered = scores.copy()
+            filtered[np.minimum.reduce([quarters[i] for i in indices]) < .95] = -1
+            valid.append(filtered)
+        combined = np.maximum.reduce(valid)
+        _, score, _, (x, y) = cv2.minMaxLoc(combined)
+        if score < .97:
+            return None
+        shape = max(range(len(self.shapes)), key=lambda i: float(valid[i][y, x]))
+        # Compete against RAW scores for all shapes, including candidates rejected
+        # by quadrant/colour/HUD gates. Filtering them would fake uniqueness.
+        second = np.maximum.reduce(raw)
+        yy, xx = np.ogrid[:second.shape[0], :second.shape[1]]
+        second[(xx-x)**2+(yy-y)**2 < (self.width*.61)**2] = -1
+        if score-float(second.max()) < .04:
+            return None
+        return {'x': x+self.width/2, 'y': y+self.width/2, 'confidence': float(min(1, score)),
+                'quadrants': self.shapes[shape]}
+
+    def team_arc(self, image, candidate):
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        c = self.config['ring']
+        blue = ((hsv[:, :, 0] >= c['hueMin']) & (hsv[:, :, 0] <= c['hueMax'])
+                & (hsv[:, :, 1] >= c['saturationMin']) & (hsv[:, :, 2] >= c['valueMin']))
+        radii = c['radiusPixels'] + np.arange(-2, 3)
+        xx = np.rint(candidate['x']+np.cos(self.angles[:, None])*radii).astype(int)
+        yy = np.rint(candidate['y']+np.sin(self.angles[:, None])*radii).astype(int)
+        inside = (xx >= 0) & (xx < image.shape[1]) & (yy >= 0) & (yy < image.shape[0])
+        values = np.zeros_like(inside)
+        values[inside] = blue[yy[inside], xx[inside]]
+        selected = np.isin(self.angle_quadrants, candidate['quadrants'])
+        matched = np.any(values, axis=1) & selected
+        if np.count_nonzero(matched)/max(1, np.count_nonzero(selected)) < .4:
+            return False
+        longest = run = 0
+        for value in np.tile(matched, 2):
+            run = run+1 if value else 0
+            longest = max(longest, run)
+        return min(longest, 144)*2.5 >= 80
+
+    def locate(self, image, frame, now):
+        previous = self.last_time
+        self.last_time = now
+        if not math.isfinite(now) or previous is not None and now <= previous:
+            self.history.clear()
+            return None
+        if previous is not None and now-previous > self.max_gap:
+            self.history.clear()
+        candidate = self.candidate(image) if self.alive(frame) else None
+        if candidate is None or not self.team_arc(image, candidate):
+            self.history.clear()
+            return None
+        if self.history:
+            at, old = self.history[-1]
+            delta = math.hypot((candidate['x']-old['x'])/image.shape[1], (candidate['y']-old['y'])/image.shape[0])
+            if delta > .035+.18*(now-at):
+                self.history.clear()
+        self.history.append((now, candidate))
+        if len(self.history) < 3 or now-self.history[0][0] > 3:
+            return None
+        return {'x': candidate['x']/image.shape[1], 'y': candidate['y']/image.shape[0],
+                'confidence': candidate['confidence']}
+
+
 class SelfMarker:
     """An opt-in coloured ring can continue a recently verified self identity.
 
@@ -296,6 +437,7 @@ class Follower:
         self.trackers = [Tracker(t, config['selfRotates'] if i == 0 else False,
                                  config['confidence'], max_frame_gap) for i, t in enumerate(self.templates)]
         self.marker = SelfMarker(config['selfMarker'], max_frame_gap) if config.get('selfMarker') else None
+        self.partial = TargetPartial(self.templates[1], config['targetPartial'], config['width'], config['height'], max_frame_gap) if config.get('targetPartial') else None
         self.labels = [white_text(decode(config['nearby'][key])) for key in ('selfLabel', 'targetLabel')] if config.get('nearby') else None
         grid = config["grid"]
         blocked = np.zeros((grid["rows"], grid["columns"]), np.uint8)
@@ -314,6 +456,17 @@ class Follower:
         self.target_last = None
 
     def analyze(self, frame, now=None, region=None):
+        try:
+            return self._analyze(frame, now, region)
+        except Exception:
+            # Invalid frame metadata or pixels also break strict consecutiveness.
+            # Preview callers can submit another frame after an analysis error.
+            if self.partial:
+                self.partial.history.clear()
+                self.partial.last_time = None
+            raise
+
+    def _analyze(self, frame, now=None, region=None):
         began = time.monotonic()
         now = began if now is None else now
         c = self.config
@@ -329,6 +482,8 @@ class Follower:
                 raise ValueError("裁剪图像尺寸与区域不一致")
             if c.get('nearby') is not None:
                 raise ValueError("姓名识别需要完整画面，不能使用裁剪图像")
+            if self.partial:
+                raise ValueError("部分队友识别需要完整画面中的存活提示，不能使用裁剪图像")
             r = c['map']
             left, top = math.floor(r['x'] * c['width']), math.floor(r['y'] * c['height'])
             right = min(c['width'], max(math.ceil((r['x'] + r['width']) * c['width']),
@@ -355,11 +510,18 @@ class Follower:
         if marker:
             own, own_reliable = marker, True
             self.trackers[0].last, self.trackers[0].at = own, now
+        target_source = 'template'
+        target_reliable = target and target['confidence'] >= c['confidence']
+        # Maintain strict partial evidence on every frame, without replacing a
+        # reliable complete avatar or teaching the complete tracker partial history.
+        partial = self.partial.locate(minimap, image, now) if self.partial else None
+        if not target_reliable and partial:
+            target, target_reliable, target_source = partial, True, 'partial'
         result = {"phase": "lost", "message": "未可靠识别自己或队友，已松开摇杆",
-                  "self": own, "target": target, "path": [], "direction": None}
+                  "self": own, "target": target, "targetSource": target_source, "path": [], "direction": None}
         if self.marker:
             result['selfSource'] = 'marker' if marker else 'template'
-        valid = own_reliable and target and target['confidence'] >= c['confidence']
+        valid = own_reliable and target_reliable
         if valid and math.dist((own["x"], own["y"]), (target["x"], target["y"])) < 0.015:
             valid = False
         result['source'] = 'minimap'
@@ -371,11 +533,12 @@ class Follower:
                 distance = math.hypot(dx, dy)
                 if .003 < distance < .16:
                     reliable_own = own_reliable
-                    reliable_target = target and target['confidence'] >= c['confidence']
+                    reliable_target = target_reliable
                     # One current map anchor plus two visible names recovers the
                     # occluded icon. Navigation still uses the calibrated walls.
                     if reliable_own and not reliable_target:
                         target = dict(x=own['x']+dx, y=own['y']+dy, confidence=min(n['confidence'] for n in names))
+                        result['targetSource'] = 'labels'
                     elif reliable_target and not reliable_own:
                         own = dict(x=target['x']-dx, y=target['y']-dy, confidence=min(n['confidence'] for n in names))
                     elif not reliable_own and not reliable_target:

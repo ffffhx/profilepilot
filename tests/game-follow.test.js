@@ -22,6 +22,21 @@ test('validates map, dimensions, obstacles, and joystick extent before starting'
     { joystick: {...fixture.config.joystick,x:0} }, { grid: {...fixture.config.grid,blocked:[1600]} },
     { confidence:.1 }, { intervalMs:10 }, { capture:'scaled' }, { capture:true }]) assert.equal(gameFollowConfigSchema.safeParse({...fixture.config,...patch}).success,false);
 });
+
+test('partial target recognition is opt-in and requires bounded ring and living-HUD calibration', vision, () => {
+  assert.equal(gameFollowConfigSchema.parse(fixture.config).targetPartial, undefined);
+  const config = fixture.partialConfig, partial = config.targetPartial;
+  assert.deepEqual(gameFollowConfigSchema.parse(config).targetPartial, partial);
+  for (const targetPartial of [true, {}, { ring: partial.ring }, { ...partial, confidence: .6 },
+    { ...partial, ring: { ...partial.ring, radiusPixels: 0 } },
+    { ...partial, ring: { ...partial.ring, hueMin: 131, hueMax: 130 } },
+    { ...partial, ring: { ...partial.ring, valueMin: 0 } },
+    { ...partial, alive: { ...partial.alive, portraitTemplate: '' } },
+    { ...partial, alive: { ...partial.alive, portraitTemplate: 'A'.repeat(256004) } },
+    { ...partial, alive: { ...partial.alive, portraitRegion: { x: .99, y: 0, width: .1, height: .1 } } },
+    { ...partial, alive: { ...partial.alive, healthBarRegion: { x: 0, y: 0, width: 0, height: .1 } } }])
+    assert.equal(gameFollowConfigSchema.safeParse({ ...config, targetPartial }).success, false);
+});
 test('OpenCV finds image targets, routes around obstacles and rejects ambiguous frames', vision, () => {
   execFileSync(python, ['tests/game-follow-vision.py'], { windowsHide: true, stdio: 'pipe' });
 });
@@ -198,6 +213,20 @@ test('region requests include half-pixel crop boundaries and nearby recognition 
   await until(()=>requests.length>0);
   assert.equal(requests[0].region,undefined);
   await h.manager.command({op:'stop',runId:basic.runId});
+});
+
+test('opt-in partial identity captures the full living HUD and exposes its current target source', vision, async t => {
+  const h = harness(t, { frame: fixture.partialFrame }), requests = [], live = h.host.live;
+  h.host.live = (...args) => { if (args[2].op === 'frame') requests.push(args[2]); return live(...args); };
+  const started = await h.manager.command({ op: 'start', id: 'phone', mode: 'observe', config: fixture.partialConfig });
+  await until(async () => (await h.manager.command({ op: 'status' })).analysis?.targetSource === 'partial');
+  const result = await h.manager.command({ op: 'status' });
+  await h.manager.command({ op: 'stop', runId: started.runId });
+  assert.equal(result.error, '');
+  assert.ok(result.frames >= 3);
+  assert.ok(requests.every(request => request.region === undefined));
+  assert.ok(result.analysis.target.confidence >= .97);
+  assert.equal(h.points.length, 0, 'observe must not send input while exercising real vision');
 });
 
 test('invalid region metadata or mismatched encoded pixels stop before any touch', vision, async t => {

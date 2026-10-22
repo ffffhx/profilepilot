@@ -221,6 +221,11 @@ export class GameFollower {
       while (!run.cancelled) {
         const at = Date.now();
         const frame: FollowFrame = frameSchema.parse(await this.host.live(run.lease!, run.generation, { op: "frame" }));
+        // Wi-Fi latency can vary between requests. A late capture followed by an
+        // early one can violate Android's screenshot interval even when host
+        // request starts are spaced correctly. For App capture, begin the next
+        // interval only after this response, when the phone has surely captured.
+        const nextFrameAt = (backend === "app" ? Date.now() : at) + config.intervalMs;
         if (run.cancelled) break;
         if (frame.width !== config.width || frame.height !== config.height) throw new Error("手机分辨率或方向已改变，请重新校准");
         const analysis: FollowAnalysis = await run.worker!.request({ op: "analyze", base64: frame.base64 });
@@ -240,7 +245,7 @@ export class GameFollower {
           await this.host.live(run.lease!, run.generation, { op: "touch", sequence: ++run.sequence, points, ttlMs: 1200 });
           if (direction) this.value.actions++;
         }
-        await new Promise(resolve => setTimeout(resolve, Math.max(0, config.intervalMs - (Date.now() - at))));
+        await new Promise(resolve => setTimeout(resolve, Math.max(0, nextFrameAt - Date.now())));
       }
     } catch (error) { if (!run.cancelled) this.value.error = (error as Error).message; }
     finally {

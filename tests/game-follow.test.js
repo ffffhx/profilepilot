@@ -52,6 +52,29 @@ test('observe runs real vision without sending touch, and stops its own lease on
   assert.equal(h.points.length,0);assert.equal(h.stopped(),1);
   assert.equal((await h.manager.command({op:'status'})).running,false);
 });
+test('app screenshots respect the phone interval when consecutive Wi-Fi requests have different delays', vision, async t => {
+  const h=harness(t), live=h.host.live;
+  const arrivals=[];
+  h.host.live=async(...args)=>{
+    if(args[2].op==='frame') {
+      // The first request reaches Android late; the second reaches it immediately.
+      // Spacing host request starts alone would compress the phone-side interval.
+      if(arrivals.length===0) await wait(300);
+      const now=performance.now(), previous=arrivals.at(-1);
+      arrivals.push(now);
+      if(previous!==undefined && now-previous<333) throw Error('Android screenshot interval too short');
+    }
+    return live(...args);
+  };
+  const state=await h.manager.command({op:'start',id:'phone',mode:'observe',config:{...fixture.config,intervalMs:400}});
+  await until(async()=>{const s=await h.manager.command({op:'status'});return s.frames>=3 || !s.running;});
+  const status=await h.manager.command({op:'status'});
+  assert.equal(status.error,'');
+  assert.ok(status.frames>=3);
+  assert.ok(arrivals.slice(1).every((at,i)=>at-arrivals[i]>=333));
+  await h.manager.command({op:'stop',runId:state.runId});
+  assert.equal(h.stopped(),1);
+});
 test('control confirms target first, sends bounded strokes, and cannot replay after pause', vision, async t => {
   const h=harness(t);
   await h.manager.command({op:'start',id:'phone',mode:'control',config:fixture.config});

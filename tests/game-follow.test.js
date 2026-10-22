@@ -6,7 +6,7 @@ const os = require('node:os');
 const { randomUUID } = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const { loadCli } = require('./cli-test-build.cjs');
-const { GameFollower, gameFollowConfigSchema, followCommandSchema } = loadCli('src/main/phones/game-follow.ts');
+const { GameFollower, gameFollowConfigSchema, followCommandSchema, assembleScreenshot } = loadCli('tests/fixtures/game-follow-entry.ts');
 const { runGameFollowCli } = loadCli('src/main/phones/game-follow-cli.ts');
 const python = process.env.PROFILEPILOT_PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
 let fixture;
@@ -46,6 +46,18 @@ function harness(t, options = {}) {
   t.after(async()=>{await manager.close();fs.rmSync(root,{recursive:true,force:true});});
   return { manager, host, points, pause:()=>{generation++;phase='paused';}, stopped:()=>stopped, captures:()=>captures };
 }
+
+async function chunkedFrame(delayMs) {
+  const state = { instanceId: 'fixture', sessionId: 'session', generation: 3, phase: 'controlling' };
+  const { base64, ...image } = fixture.frame, id = randomUUID(), chunkSize = 48 * 1024;
+  const response = await assembleScreenshot({ state, result: { ...image,
+    transfer: { protocol: 1, id, length: base64.length, chunkSize, ttlMs: 15000 } } }, state,
+  async ({ offset }) => {
+    if (offset === 0) await wait(delayMs);
+    return { state, result: { id, offset, base64: base64.slice(offset, offset + chunkSize), done: offset + chunkSize >= base64.length } };
+  }, () => true);
+  return response.result;
+}
 test('observe runs real vision without sending touch, and stops its own lease once', vision, async t => {
   const h=harness(t);
   const live=h.host.live, requests=[];
@@ -64,10 +76,11 @@ test('opt-in recovery discards uncertain touch and requires two freshly captured
   h.host.live = async (...args) => {
     const command = args[2]; calls.push(structuredClone(command));
     if (command.op === 'touch' && command.sequence === 2) throw new Error('TLS transport lost');
+    if (command.op === 'frame') return chunkedFrame(80);
     return original(...args);
   };
   h.host.recoverWrapper = async () => { recoveries++; return { state: { generation: 3, phase: 'controlling' } }; };
-  const started = await h.manager.command({ op: 'start', id: 'phone', mode: 'control', recoverTransport: true, config: fixture.config });
+  const started = await h.manager.command({ op: 'start', id: 'phone', mode: 'control', recoverTransport: true, config: { ...fixture.config, capture: 'full' } });
   await until(() => h.points.some(command => command.sequence >= 4 && command.points.length));
   await h.manager.command({ op: 'stop', runId: started.runId });
   const failed = calls.findIndex(command => command.op === 'touch' && command.sequence === 2);
@@ -222,6 +235,47 @@ test('app screenshots respect the phone interval when consecutive Wi-Fi requests
   assert.ok(arrivals.slice(1).every((at,i)=>at-arrivals[i]>=333));
   await h.manager.command({op:'stop',runId:state.runId});
   assert.equal(h.stopped(),1);
+});
+
+test('full chunked cadence counts page download time while ROI keeps the post-response interval', vision, async t => {
+  for (const { capture, downloadMs } of [{ capture: 'full', downloadMs: 200 },
+    { capture: 'full', downloadMs: 430 }, { capture: 'auto', downloadMs: 200 }]) {
+    const h = harness(t), live = h.host.live, requests = [], ready = [], finished = [];
+    h.host.live = async (...args) => {
+      if (args[2].op !== 'frame') return live(...args);
+      requests.push(performance.now());
+      if (requests.length === 1) await wait(180); // first capture reaches Android later
+      ready.push(performance.now());
+      const frame = await chunkedFrame(downloadMs);
+      finished.push(performance.now()); return frame;
+    };
+    const started = await h.manager.command({ op: 'start', id: 'phone', mode: 'observe',
+      config: { ...fixture.config, intervalMs: 350, capture } });
+    await until(async () => (await h.manager.command({ op: 'status' })).frames >= 3);
+    await h.manager.command({ op: 'stop', runId: started.runId });
+    for (let i = 1; i < requests.length; i++) {
+      assert.ok(requests[i] - ready[i - 1] >= 333, 'phone capture completion still precedes the next request by the interval');
+      if (capture === 'auto') assert.ok(requests[i] - finished[i - 1] >= 333, 'ROI cadence is unchanged even if a companion returns a full chunked frame');
+      else if (downloadMs < 350) assert.ok(requests[i] - ready[i - 1] < 450, 'fast pages leave only the remaining part of the interval');
+      else assert.ok(requests[i] - finished[i - 1] < 200, 'slow pages must not incur a second 350ms wait');
+    }
+    assert.equal((await h.manager.command({ op: 'status' })).error, '');
+  }
+});
+
+test('chunked cadence does not relax the one-second movement age or trust a JSON timestamp', vision, async t => {
+  const h = harness(t), live = h.host.live;
+  h.host.live = (...args) => args[2].op === 'frame' ? chunkedFrame(1100) : live(...args);
+  const started = await h.manager.command({ op: 'start', id: 'phone', mode: 'control', config: { ...fixture.config, capture: 'full' } });
+  await until(() => h.points.length >= 2);
+  const status = await h.manager.command({ op: 'status' });
+  assert.ok(status.analysis.direction); assert.ok(h.points.every(command => !command.points.length));
+  assert.equal(status.actions, 0);
+  await h.manager.command({ op: 'stop', runId: started.runId });
+  const fake = harness(t, { frame: { ...fixture.frame, captureReadyAt: performance.now() - 60000 } });
+  await fake.manager.command({ op: 'start', id: 'phone', mode: 'control', config: { ...fixture.config, capture: 'full' } });
+  await until(async () => !(await fake.manager.command({ op: 'status' })).running);
+  assert.equal(fake.points.length, 0); assert.notEqual((await fake.manager.command({ op: 'status' })).error, '');
 });
 test('control confirms target first, sends bounded strokes, and cannot replay after pause', vision, async t => {
   const h=harness(t);

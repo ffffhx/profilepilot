@@ -7,6 +7,7 @@ import { z } from "zod";
 import type { FollowAnalysis, FollowCommand, FollowFrame, FollowRuntime, FollowStatus, GameFollowConfig } from "../../shared/game-follow";
 import type { PhoneDevice } from "../../shared/phones";
 import { adbLaunchDelays, phoneRequestTimings } from "./adb";
+import { captureReadyAt } from "./screenshot-transfer";
 
 const unit = z.number().finite().min(0).max(1);
 const image = z.string().min(16).max(4_000_000).regex(/^[A-Za-z0-9+/]*={0,2}$/);
@@ -311,14 +312,21 @@ export class GameFollower {
         }
         const epoch = run.recoveryEpoch;
         try {
-          const at = Date.now();
-          const frame: FollowFrame = frameSchema.parse(await this.host.live(run.lease!, run.generation, { op: "frame", ...(region ? { region } : {}) }));
+          const at = Date.now(), requestAt = performance.now();
+          const rawFrame = await this.host.live(run.lease!, run.generation, { op: "frame", ...(region ? { region } : {}) });
+          const frame: FollowFrame = frameSchema.parse(rawFrame);
           const capturedAt = Date.now();
           // Wi-Fi latency can vary between requests. A late capture followed by an
           // early one can violate Android's screenshot interval even when host
-          // request starts are spaced correctly. For App capture, begin the next
-          // interval only after this response, when the phone has surely captured.
-          const nextFrameAt = (backend === "app" ? Date.now() : at) + config.intervalMs;
+          // request starts are spaced correctly. A full chunked App frame already
+          // proves capture completion when its descriptor arrives: downloading its
+          // pages may count toward the interval. Only trust the host-local timestamp
+          // attached to this exact image; ROI/legacy/basic retain their cadence.
+          const completedAt = performance.now();
+          const readyAt = backend === "app" && !region && !frame.region ? captureReadyAt(rawFrame) : undefined;
+          const intervalAt = backend === "basic" ? requestAt
+            : readyAt !== undefined && readyAt >= requestAt && readyAt <= completedAt ? readyAt : completedAt;
+          const nextFrameAt = intervalAt + config.intervalMs;
           if (run.cancelled) break;
           if (epoch !== run.recoveryEpoch) continue;
           if (frame.width !== config.width || frame.height !== config.height) throw new Error("手机分辨率或方向已改变，请重新校准");
@@ -345,7 +353,7 @@ export class GameFollower {
             this.value.timings = { ...this.value.timings, inputMs: Date.now() - inputAt };
             if (direction) this.value.actions++;
           }
-          await new Promise(resolve => setTimeout(resolve, Math.max(0, nextFrameAt - Date.now())));
+          await new Promise(resolve => setTimeout(resolve, Math.max(0, nextFrameAt - performance.now())));
         } catch (error) {
           if (run.cancelled) break;
           if (epoch !== run.recoveryEpoch) continue;

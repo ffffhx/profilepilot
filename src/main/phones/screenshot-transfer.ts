@@ -4,6 +4,11 @@ import type { PhoneSessionState } from "../../shared/phones";
 
 export const SCREENSHOT_TRANSFER = "base64-chunks-v1";
 const CHUNK_CHARS = 48 * 1024, MAX_CHARS = Math.ceil(5 * 1024 * 1024 / 3) * 4;
+const captureReadyTimes = new WeakMap<object, number>();
+/** Host monotonic receipt time of a validated descriptor, never phone/JSON metadata. */
+export function captureReadyAt(frame: unknown): number | undefined {
+  return frame !== null && typeof frame === "object" ? captureReadyTimes.get(frame) : undefined;
+}
 type Response = { state: PhoneSessionState; result?: unknown };
 type Owner = Pick<PhoneSessionState, "instanceId" | "sessionId" | "generation">;
 const descriptorSchema = z.object({ mime: z.enum(["image/png", "image/jpeg"]),
@@ -44,6 +49,10 @@ export async function assembleScreenshot(initial: Response, owner: Owner,
     chunks.push(chunk.base64);
   }
   check(response.state);
-  return { state: response.state, result: { mime: frame.mime, width: frame.width, height: frame.height,
-    ...(frame.region ? { region: frame.region } : {}), base64: chunks.join("") } };
+  const result = { mime: frame.mime, width: frame.width, height: frame.height,
+    ...(frame.region ? { region: frame.region } : {}), base64: chunks.join("") };
+  // Preserve descriptor receipt only for this exact, completely assembled image.
+  // The association neither crosses JSON/IPC nor changes the public frame shape.
+  captureReadyTimes.set(result, began);
+  return { state: response.state, result };
 }

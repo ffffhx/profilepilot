@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const { randomBytes, randomUUID } = require('node:crypto');
 const http = require('node:http');
 const { loadCli } = require('./cli-test-build.cjs');
-const { assembleScreenshot } = loadCli('src/main/phones/screenshot-transfer.ts');
+const { assembleScreenshot, captureReadyAt } = loadCli('src/main/phones/screenshot-transfer.ts');
 const { phoneRequest, phoneRequestTimings } = loadCli('src/main/phones/adb.ts');
 const owner = { instanceId: 'instance', sessionId: 'session', generation: 7 };
 const state = { ...owner, phase: 'viewing' };
@@ -58,6 +58,21 @@ test('chunked JPEG frames retain native screen dimensions and optional crop orig
       ...(region ? { region } : {}), base64: f.base64 });
     assert.equal(pages, Math.ceil(f.base64.length / CHUNK));
   }
+});
+
+test('capture readiness belongs only to the fully assembled host object and cannot be serialized or forged', async () => {
+  const f = fixture(); let now = 40;
+  const output = await assembleScreenshot(f.initial, owner, async ({ offset }) => {
+    now += 25; return f.page(offset);
+  }, () => true, () => now);
+  assert.equal(captureReadyAt(output.result), 40);
+  assert.equal(captureReadyAt(f.initial.result), undefined);
+  assert.equal(captureReadyAt({ ...output.result, captureReadyAt: 40 }), undefined);
+  assert.equal(captureReadyAt(JSON.parse(JSON.stringify(output.result))), undefined);
+  assert.deepEqual(Object.keys(output.result).sort(), ['mime', 'width', 'height', 'base64'].sort());
+  const old = { state, result: { mime: 'image/png', base64: 'old-full-image' } };
+  await assembleScreenshot(old, owner, () => { throw Error('unexpected'); }, () => true);
+  assert.equal(captureReadyAt(old.result), undefined);
 });
 
 test('invalid frame regions reject before downloading any chunk', async () => {

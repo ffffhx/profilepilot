@@ -4,12 +4,19 @@ import static org.junit.Assert.*;
 import android.app.Instrumentation;
 import android.app.UiAutomation;
 import android.content.Intent;
+import android.graphics.BitmapFactory;
+import android.graphics.Path;
 import android.os.SystemClock;
+import android.util.Base64;
+import android.util.Log;
 import android.view.MotionEvent;
 import android.view.View;
 import androidx.test.core.app.ActivityScenario;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
+import java.lang.reflect.Field;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -35,6 +42,81 @@ public class FollowTouchTest {
     private JSONObject finger(int id, int x, int y) throws Exception {
         return new JSONObject().put("id", id).put("x", x).put("y", y);
     }
+    @Test public void newPointerStartsAfterContinuationButFreshGesturesStartImmediately() {
+        Path path = new Path(); path.moveTo(100, 100); path.lineTo(150, 100);
+        var fresh = FollowTouch.newStroke(path, false);
+        var added = FollowTouch.newStroke(path, true);
+        assertEquals(0, fresh.getStartTime()); assertEquals(80, fresh.getDuration());
+        assertEquals(1, added.getStartTime()); assertEquals(79, added.getDuration());
+        assertEquals(80, added.getStartTime() + added.getDuration());
+        assertTrue(fresh.willContinue()); assertTrue(added.willContinue());
+    }
+    @Test public void nativeScreenshotProvesAppliedCameraAndReleaseRemovesProof() throws Exception {
+        instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES);
+        long deadline = SystemClock.elapsedRealtime() + 60000;
+        while (PhoneAccessibility.current == null && SystemClock.elapsedRealtime() < deadline) SystemClock.sleep(50);
+        PhoneAccessibility service = PhoneAccessibility.current;
+        assertNotNull("Companion accessibility service must be connected", service);
+        Field field = PhoneAccessibility.class.getDeclaredField("followTouch"); field.setAccessible(true);
+        AtomicReference<FollowTouch> previous = new AtomicReference<>(), touch = new AtomicReference<>();
+        AtomicBoolean authorized = new AtomicBoolean(true);
+        AtomicReference<View> surface = new AtomicReference<>();
+        try (ActivityScenario<ControlBenchmarkActivity> activity = ActivityScenario.launch(
+                new Intent(instrumentation.getTargetContext(), ControlBenchmarkActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))) {
+            activity.onActivity(a -> {
+                View view = new View(a); view.setBackgroundColor(android.graphics.Color.DKGRAY);
+                view.setOnTouchListener((v, event) -> true); a.setContentView(view); surface.set(view);
+            });
+            main(() -> {
+                previous.set((FollowTouch) field.get(service));
+                assertTrue("Fixture must not replace an active task", previous.get() == null || !previous.get().active());
+                touch.set(new FollowTouch(service)); field.set(service, touch.get());
+            });
+            SystemClock.sleep(300);
+            int[] origin = new int[2], size = new int[2];
+            main(() -> { surface.get().getLocationOnScreen(origin); size[0] = surface.get().getWidth(); size[1] = surface.get().getHeight(); });
+            assertTrue(size[0] > 300 && size[1] > 300);
+            int cx = origin[0] + size[0] * 3 / 4, cy = origin[1] + size[1] / 4;
+            main(() -> touch.get().update(new JSONArray().put(finger(1, cx, cy)), 1200, authorized::get, 1));
+            SystemClock.sleep(300);
+            AtomicReference<FollowCameraProof.Snapshot> before = new AtomicReference<>();
+            AtomicReference<CompletableFuture<Object>> capture = new AtomicReference<>();
+            long[] requestedAt = new long[1];
+            main(() -> {
+                touch.get().update(new JSONArray().put(finger(1, cx, cy)), 1200, authorized::get, 2);
+                before.set(touch.get().cameraSnapshot()); assertNotNull(before.get());
+                assertTrue(SystemClock.uptimeMillis() - before.get().heldSince() >= 250);
+                requestedAt[0] = SystemClock.uptimeMillis();
+                capture.set(service.perform(new JSONObject().put("kind", "screenshot").put("nativeSize", true).put("cameraFrameProvenance", 1)));
+            });
+            JSONObject frame = (JSONObject) capture.get().get(5, TimeUnit.SECONDS);
+            long returnedAt = SystemClock.uptimeMillis();
+            JSONObject proof = frame.getJSONObject("cameraProof");
+            assertEquals(1, proof.getInt("version")); assertEquals(cx, proof.getInt("x")); assertEquals(cy, proof.getInt("y"));
+            assertEquals(before.get().epoch(), proof.getLong("epoch")); assertEquals(2, proof.getLong("sequence"));
+            assertEquals(before.get().heldSince(), proof.getLong("heldSinceUptimeMs"));
+            assertEquals(before.get().expires(), proof.getLong("expiresAtUptimeMs"));
+            long capturedAt = proof.getLong("capturedAtUptimeMs");
+            assertTrue("ScreenshotResult timestamp must use phone uptime", capturedAt >= requestedAt[0] && capturedAt <= returnedAt);
+            assertTrue(capturedAt >= before.get().heldSince() && capturedAt < before.get().expires());
+            byte[] bytes = Base64.decode(frame.getString("base64"), Base64.DEFAULT);
+            BitmapFactory.Options bounds = new BitmapFactory.Options(); bounds.inJustDecodeBounds = true;
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
+            assertEquals(frame.getInt("width"), bounds.outWidth); assertEquals(frame.getInt("height"), bounds.outHeight);
+            Log.i("PPFollowTouchTest", "nativeProof epoch=" + proof.getLong("epoch") + " sequence=2 captureAgeMs=" + (returnedAt - capturedAt));
+            main(() -> { touch.get().release(); assertNull(touch.get().cameraSnapshot()); });
+            SystemClock.sleep(400);
+            main(() -> capture.set(service.perform(new JSONObject().put("kind", "screenshot").put("nativeSize", true).put("cameraFrameProvenance", 1))));
+            JSONObject released = (JSONObject) capture.get().get(5, TimeUnit.SECONDS);
+            assertFalse("A new screenshot after release must carry no camera proof", released.has("cameraProof"));
+        } finally {
+            authorized.set(false);
+            if (touch.get() != null) {
+                main(() -> touch.get().release()); SystemClock.sleep(200);
+                main(() -> { if (field.get(service) == touch.get()) field.set(service, previous.get()); });
+            }
+        }
+    }
     @Test public void cameraPointerSurvivesJoystickChangesAndBothReleaseOnExpiryOrRevocation() throws Exception {
         instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES);
         long deadline = SystemClock.elapsedRealtime() + 60000;
@@ -43,7 +125,7 @@ public class FollowTouchTest {
         AtomicReference<FollowTouch> touch = new AtomicReference<>();
         AtomicReference<View> surface = new AtomicReference<>();
         AtomicBoolean authorized = new AtomicBoolean(true);
-        AtomicInteger active = new AtomicInteger(), maximum = new AtomicInteger(), cancels = new AtomicInteger();
+        AtomicInteger active = new AtomicInteger(), maximum = new AtomicInteger(), cancels = new AtomicInteger(), downs = new AtomicInteger();
         try (ActivityScenario<ControlBenchmarkActivity> activity = ActivityScenario.launch(
                 new Intent(instrumentation.getTargetContext(), ControlBenchmarkActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))) {
             activity.onActivity(a -> {
@@ -51,6 +133,9 @@ public class FollowTouchTest {
                 view.setOnTouchListener((v, event) -> {
                     maximum.set(Math.max(maximum.get(), event.getPointerCount()));
                     int action = event.getActionMasked();
+                    if (action == MotionEvent.ACTION_DOWN) downs.incrementAndGet();
+                    if (action != MotionEvent.ACTION_MOVE) Log.i("PPFollowTouchTest", "action=" + MotionEvent.actionToString(event.getAction())
+                        + " pointers=" + event.getPointerCount() + " changedId=" + event.getPointerId(event.getActionIndex()));
                     if (action == MotionEvent.ACTION_CANCEL) { cancels.incrementAndGet(); active.set(0); }
                     else active.set(action == MotionEvent.ACTION_UP ? 0
                         : event.getPointerCount() - (action == MotionEvent.ACTION_POINTER_UP ? 1 : 0));
@@ -72,7 +157,8 @@ public class FollowTouchTest {
             AtomicReference<FollowCameraProof.Snapshot> first = new AtomicReference<>();
             main(() -> { first.set(touch.get().cameraSnapshot()); assertNotNull(first.get()); });
             main(() -> touch.get().update(new JSONArray().put(finger(0, jx, jy)).put(finger(1, cx, cy)), 1200, authorized::get, 2));
-            SystemClock.sleep(250); assertEquals(2, active.get()); assertEquals(2, maximum.get());
+            SystemClock.sleep(250); assertEquals("Adding joystick must preserve the held camera", 2, active.get()); assertEquals(2, maximum.get());
+            assertEquals("Adding a finger must not restart the gesture", 1, downs.get());
             main(() -> touch.get().update(new JSONArray().put(finger(0, jx + 50, jy)).put(finger(1, cx, cy)), 1200, authorized::get, 3));
             SystemClock.sleep(250); assertEquals(2, active.get());
             main(() -> {
@@ -82,12 +168,23 @@ public class FollowTouchTest {
                 touch.get().update(new JSONArray().put(finger(1, cx, cy)), 1200, authorized::get, 4);
             });
             SystemClock.sleep(250); assertEquals("Dropping joystick must preserve camera", 1, active.get());
+            assertEquals(1, downs.get()); assertEquals(0, cancels.get());
             main(() -> { assertNotNull(touch.get().cameraSnapshot()); touch.get().release(); assertNull(touch.get().cameraSnapshot()); });
             SystemClock.sleep(250); assertEquals(0, active.get());
-            main(() -> touch.get().update(new JSONArray().put(finger(0, jx, jy)).put(finger(1, cx, cy)), 200, authorized::get, 5));
+            // Also cover the opposite addition/removal order used when camera
+            // assistance is armed while the joystick was already held.
+            main(() -> touch.get().update(new JSONArray().put(finger(0, jx, jy)), 1200, authorized::get, 5));
+            SystemClock.sleep(250); assertEquals(1, active.get());
+            main(() -> touch.get().update(new JSONArray().put(finger(0, jx, jy)).put(finger(1, cx, cy)), 1200, authorized::get, 6));
+            SystemClock.sleep(250); assertEquals("Adding camera must preserve joystick", 2, active.get());
+            main(() -> touch.get().update(new JSONArray().put(finger(0, jx + 50, jy)), 1200, authorized::get, 7));
+            SystemClock.sleep(250); assertEquals("Dropping camera must preserve joystick", 1, active.get());
+            main(() -> { assertNull(touch.get().cameraSnapshot()); touch.get().release(); });
+            SystemClock.sleep(250); assertEquals(0, active.get());
+            main(() -> touch.get().update(new JSONArray().put(finger(0, jx, jy)).put(finger(1, cx, cy)), 200, authorized::get, 8));
             SystemClock.sleep(500); assertEquals("Both pointers expire without another command", 0, active.get());
             main(() -> { assertFalse(touch.get().active()); assertNull(touch.get().cameraSnapshot()); });
-            main(() -> touch.get().update(new JSONArray().put(finger(0, jx, jy)).put(finger(1, cx, cy)), 1200, authorized::get, 6));
+            main(() -> touch.get().update(new JSONArray().put(finger(0, jx, jy)).put(finger(1, cx, cy)), 1200, authorized::get, 9));
             SystemClock.sleep(250); assertEquals(2, active.get()); authorized.set(false);
             SystemClock.sleep(250); assertEquals(0, active.get()); assertEquals(0, cancels.get());
             main(() -> assertNull(touch.get().cameraSnapshot()));

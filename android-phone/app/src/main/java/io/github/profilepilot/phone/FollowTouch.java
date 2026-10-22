@@ -7,6 +7,7 @@ import android.graphics.Rect;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.util.Log;
 import org.json.JSONArray;
 import org.json.JSONObject;
 import java.util.LinkedHashMap;
@@ -15,6 +16,8 @@ import java.util.function.BooleanSupplier;
 
 /** Bounded, continuously held strokes. All access is confined to the main looper. */
 final class FollowTouch {
+    private static final String TAG = "PPFollowTouch";
+    private static final int STROKE_MS = 80;
     private record Point(float x, float y, float fromX, float fromY) { }
     private record Held(GestureDescription.StrokeDescription stroke, float x, float y) { }
     private final AccessibilityService service;
@@ -28,6 +31,7 @@ final class FollowTouch {
     private String error = "";
     private final FollowCameraProof camera = new FollowCameraProof();
     private long sequence;
+    private long dispatchSequence;
     FollowTouch(AccessibilityService service) { this.service = service; }
     void update(JSONArray points, int ttlMs, BooleanSupplier authorized) throws Exception {
         update(points, ttlMs, authorized, sequence + 1);
@@ -61,7 +65,19 @@ final class FollowTouch {
         // in the same space so a subpixel update cannot become an empty gesture.
         return Math.min(limit - 1, Math.round((float) value));
     }
-    void release() { camera.invalidate(); desired.clear(); expires = 0; if (!inFlight) step(); }
+    static GestureDescription.StrokeDescription newStroke(Path path, boolean continuing) {
+        int startMs = continuing ? 1 : 0;
+        return new GestureDescription.StrokeDescription(path, startMs, STROKE_MS - startMs, true);
+    }
+    void release() {
+        if (active()) trace("release", "requested");
+        camera.invalidate(); desired.clear(); expires = 0; if (!inFlight) step();
+    }
+    private void trace(String event, String detail) {
+        if (BuildConfig.DEBUG) Log.d(TAG, "event=" + event + " sequence=" + sequence
+            + " dispatch=" + dispatchSequence + " held=" + held.keySet() + " desired=" + desired.keySet()
+            + " inFlight=" + inFlight + " remainingMs=" + Math.max(0, expires - SystemClock.uptimeMillis()) + " " + detail);
+    }
     FollowCameraProof.Snapshot cameraSnapshot() {
         if (!authorized.getAsBoolean()) { camera.invalidate(); return null; }
         return camera.snapshot(SystemClock.uptimeMillis());
@@ -77,7 +93,11 @@ final class FollowTouch {
     boolean active() { return inFlight || !held.isEmpty() || !desired.isEmpty(); }
     private void step() {
         main.removeCallbacks(advance);
-        if (!authorized.getAsBoolean() || SystemClock.uptimeMillis() >= expires) { camera.invalidate(); desired.clear(); }
+        boolean allowed = authorized.getAsBoolean();
+        if (!allowed || SystemClock.uptimeMillis() >= expires) {
+            if (!desired.isEmpty()) trace("release", allowed ? "expired" : "authorization_revoked");
+            camera.invalidate(); desired.clear();
+        }
         if (desired.isEmpty() && held.isEmpty()) return;
         boolean changed = !held.keySet().equals(desired.keySet());
         for (Map.Entry<Integer, Held> entry : held.entrySet()) {
@@ -89,7 +109,7 @@ final class FollowTouch {
             // A continued pointer stays down between gestures. A stationary
             // continuation has no DOWN, MOVE or UP event, so Android rejects it.
             // Keep the previous stroke and still check authorization/TTL often.
-            main.postDelayed(advance, 80);
+            main.postDelayed(advance, STROKE_MS);
             return;
         }
         GestureDescription.Builder builder = new GestureDescription.Builder();
@@ -100,33 +120,51 @@ final class FollowTouch {
             Path path = new Path(); path.moveTo(old.x, old.y);
             float x = point == null ? old.x : point.x, y = point == null ? old.y : point.y;
             path.lineTo(x, y);
-            GestureDescription.StrokeDescription stroke = old.stroke.continueStroke(path, 0, 80, point != null);
+            GestureDescription.StrokeDescription stroke = old.stroke.continueStroke(path, 0, STROKE_MS, point != null);
             builder.addStroke(stroke);
             if (point != null) next.put(entry.getKey(), new Held(stroke, x, y));
         }
+        // MotionEventInjector.prepareToContinueOldGesture requires the FIRST
+        // gesture step to contain exactly the previously held pointers. A new
+        // pointer at time 0 makes that continuation fail and cancels every finger.
+        // A 1 ms start is a GestureDescription key point (not rounded to the
+        // sampling interval), so additions follow the old-only initial step.
+        // Keep the same 80 ms end time and leave fresh/single-pointer starts alone.
+        int newStartMs = held.isEmpty() ? 0 : 1;
+        int additions = 0;
         for (Map.Entry<Integer, Point> entry : desired.entrySet()) {
             if (held.containsKey(entry.getKey())) continue;
             Point point = entry.getValue();
             Path path = new Path(); path.moveTo(point.fromX, point.fromY); path.lineTo(point.x, point.y);
-            GestureDescription.StrokeDescription stroke = new GestureDescription.StrokeDescription(path, 0, 80, true);
+            GestureDescription.StrokeDescription stroke = newStroke(path, !held.isEmpty());
             builder.addStroke(stroke); next.put(entry.getKey(), new Held(stroke, point.x, point.y));
+            additions++;
         }
         inFlight = true;
+        long dispatched = ++dispatchSequence, dispatchedAt = SystemClock.uptimeMillis();
+        trace("dispatch", "additions=" + additions + " newStartMs=" + newStartMs);
         FollowCameraProof.Request cameraRequest = camera.request();
         boolean accepted = service.dispatchGesture(builder.build(), new AccessibilityService.GestureResultCallback() {
             @Override public void onCompleted(GestureDescription description) {
+                trace("completed", "callbackDispatch=" + dispatched + " elapsedMs=" + (SystemClock.uptimeMillis() - dispatchedAt));
                 inFlight = false; held.clear(); held.putAll(next);
                 if (authorized.getAsBoolean()) camera.applied(cameraRequest, cameraPoint(next), SystemClock.uptimeMillis());
                 else camera.invalidate();
                 step();
             }
             @Override public void onCancelled(GestureDescription description) {
+                // Android's public callback provides no cancellation reason.
+                // Keep the actual callback and topology visible, without
+                // attributing it to user input or a framework rule speculatively.
+                trace("cancelled", "reason=system_callback_unspecified callbackDispatch=" + dispatched
+                    + " elapsedMs=" + (SystemClock.uptimeMillis() - dispatchedAt));
                 camera.invalidate(); inFlight = false; held.clear(); desired.clear();
                 error = "持续触控被取消，已暂停；请重新开始跟随";
                 if (ControlService.current != null) ControlService.current.localControl("pause");
             }
         }, main);
         if (!accepted) {
+            trace("rejected", "reason=dispatch_returned_false");
             camera.invalidate(); inFlight = false; held.clear(); desired.clear();
             error = "系统未接受持续触控，已暂停";
             if (ControlService.current != null) ControlService.current.localControl("pause");

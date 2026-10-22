@@ -43,6 +43,39 @@ root.innerHTML = `${workspaceSwitcher("phones")}${workspaceIdentityBar()}<main c
 const drawer = root.querySelector<HTMLDialogElement>(".phone-details")!;
 root.querySelector(".pc-control-header")!.insertAdjacentHTML("beforeend", '<button class="phone-text-button" data-action="game-follow">视觉跟随</button>');
 const inspector = createPhoneInspector(root.querySelector<HTMLElement>(".phone-inspector")!);
+const deviceMenu = document.createElement("div");
+deviceMenu.id = "phone-device-menu"; deviceMenu.className = "phone-device-menu"; deviceMenu.popover = "manual";
+deviceMenu.setAttribute("role", "menu"); deviceMenu.setAttribute("aria-label", "设备操作");
+deviceMenu.innerHTML = '<button type="button" role="menuitem" data-action="rename">修改名称</button>';
+root.append(deviceMenu);
+let menuAnchor: HTMLButtonElement | undefined;
+function closeDeviceMenu(restoreFocus = false): void {
+  deviceMenu.hidePopover(); menuAnchor?.setAttribute("aria-expanded", "false");
+  if (restoreFocus) menuAnchor?.focus({ preventScroll: true });
+}
+function openDeviceMenu(button: HTMLButtonElement): void {
+  if (deviceMenu.matches(":popover-open") && menuAnchor === button) { closeDeviceMenu(true); return; }
+  closeDeviceMenu(); menuAnchor = button;
+  const item = deviceMenu.querySelector<HTMLButtonElement>("button")!;
+  item.dataset.deviceId = button.dataset.deviceId;
+  deviceMenu.showPopover(); button.setAttribute("aria-expanded", "true");
+  const bounds = button.getBoundingClientRect();
+  deviceMenu.style.left = `${Math.max(8, Math.min(bounds.right - deviceMenu.offsetWidth, innerWidth - deviceMenu.offsetWidth - 8))}px`;
+  deviceMenu.style.top = `${Math.max(8, Math.min(bounds.bottom + 6, innerHeight - deviceMenu.offsetHeight - 8))}px`;
+  item.focus({ preventScroll: true });
+}
+deviceMenu.addEventListener("toggle", () => {
+  menuAnchor?.setAttribute("aria-expanded", String(deviceMenu.matches(":popover-open")));
+});
+deviceMenu.addEventListener("keydown", event => {
+  if (event.key === "Escape") { event.preventDefault(); closeDeviceMenu(true); }
+  if (event.key === "Tab") closeDeviceMenu(true);
+});
+for (const eventName of ["pointerdown", "focusin"]) document.addEventListener(eventName, event => {
+  if (!deviceMenu.contains(event.target as Node) && !(event.target as Element).closest('[data-action="device-menu"]')) closeDeviceMenu();
+});
+window.addEventListener("resize", () => closeDeviceMenu());
+document.addEventListener("scroll", () => closeDeviceMenu(), { capture: true, passive: true });
 drawer.addEventListener("close", () => {
   key = ""; render();
   const button = [...root.querySelectorAll<HTMLButtonElement>('.phone-device-link')].find(button => button.dataset.deviceId === drawerReturnId);
@@ -135,7 +168,6 @@ function enhancement(device?: PhoneDevice, disabledReason = "请先在上方连�
 }
 function options(device?: PhoneDevice): string {
   return `<details class="phone-options" data-phone-options><summary>${taskIcon("settings")}更多设置</summary><div>
-    ${device && device.transport !== "cloud" ? '<button class="phone-text-button" data-action="rename">修改设备名称</button>' : ""}
     <button class="phone-text-button" data-action="cloud-link">未连接电脑时也同步手机状态</button>
     ${device?.cloud?.channelId ? '<button class="phone-text-button" data-action="cloud-forget">移除此状态同步</button>' : ""}
     <button class="phone-text-button" data-action="add-device">添加其他设备</button>
@@ -152,6 +184,7 @@ function render(): void {
   if (selected) sessionStorage.setItem("phone-selected", selected);
   drawer.dataset.deviceId = selected;
   renderPhoneList(root, snapshot, { filter, selected, loaded, busy });
+  if (busy || !menuAnchor?.isConnected || document.hidden || window.workspacePane?.active === false) closeDeviceMenu();
   const device = current(), status = group && phoneConnectionPresentation(group), view = status?.view;
   inspector.update(device, busy);
   const needsDiscovery = !!device && !view?.emulator && !status?.routes.some(route => route.transport === "wifi" && route.detected);
@@ -181,7 +214,7 @@ function render(): void {
   detailIdentity = selected;
   const row = group && phoneListItem(group);
   const identity = root.querySelector<HTMLElement>(".phone-details-identity")!;
-  const heading = device && view && row ? `<span class="phone-list-icon">${taskIcon(view.emulator ? "desktop" : "phone")}</span><div><div class="phone-details-name"><h2 id="phone-details-title">${esc(view.displayName)}</h2><button data-action="rename" aria-label="修改设备名称" ${device.transport === "cloud" ? "hidden" : ""}>${taskIcon("rename")}</button></div><p>${row.kind}<span class="phone-list-status" data-tone="${row.tone}"><i></i>${esc(row.status)}</span></p></div>` : '<h2 id="phone-details-title">设备不可用</h2>';
+  const heading = device && view && row ? `<span class="phone-list-icon">${taskIcon(view.emulator ? "desktop" : "phone")}</span><div><div class="phone-details-name"><h2 id="phone-details-title">${esc(view.displayName)}</h2></div><p>${row.kind}<span class="phone-list-status" data-tone="${row.tone}"><i></i>${esc(row.status)}</span></p></div>` : '<h2 id="phone-details-title">设备不可用</h2>';
   if (identity.dataset.markup !== heading) { identity.innerHTML = heading; identity.dataset.markup = heading; }
   const content = root.querySelector<HTMLElement>(".phone-content")!;
   content.setAttribute("aria-busy", String(busy || !loaded));
@@ -280,6 +313,7 @@ root.addEventListener("click", event => {
     void navigator.clipboard.writeText(phoneAppDownload(snapshot.companionApp?.variant).url).then(() => notice("下载链接已复制，可在手机浏览器中打开。")).catch(() => notice("复制失败，请使用右侧二维码下载。", true)); return;
   }
   if (busy) return;
+  if (action === "device-menu") { openDeviceMenu(button); return; }
   if (action === "game-follow") { void openGameFollower(current()); return; }
   if (action === "add-device") { addDevice(); return; }
   if (action === "refresh") { void run(async () => { snapshot = await window.phones.snapshot(); loaded = true; }); return; }
@@ -322,7 +356,7 @@ root.addEventListener("click", event => {
   if (action === "cloud-forget") void run(() => window.phones.cloudForget(`cloud-${device.cloud?.channelId}`));
   if (action === "pause" || action === "resume" || action === "stop") void run(() => window.phones.control(device.id, action));
   if (action === "screenshot") void capture();
-  if (action === "rename") rename(device);
+  if (action === "rename") { closeDeviceMenu(true); rename(device); }
   if (action === "enlarge" && image) {
     const dialog = document.createElement("dialog"); dialog.className = "phone-image-dialog"; dialog.setAttribute("aria-label", "手机画面");
     dialog.innerHTML = `<button aria-label="关闭大图">×</button><img src="${image.src}" alt="${esc(device.name)}最近一次的画面"><p>采集于 ${new Date(image.at).toLocaleTimeString()} · 非实时画面</p>`;
@@ -333,8 +367,8 @@ async function installPhoneApp(id: string): Promise<void> {
   await run(async () => { await window.phones.prepare(id); notice("App 已安装并打开，请在手机上确认配对和所需权限。"); });
 }
 function rename(device: PhoneDevice): void {
-  const dialog = document.createElement("dialog"); dialog.className = "phone-name-dialog"; dialog.setAttribute("aria-label", "修改手机名称");
-  dialog.innerHTML = `<form><h3>修改手机名称</h3><label>名称<input name="name" maxlength="80" required value="${esc(device.name)}"></label><footer><button type="button" data-cancel>取消</button><button type="submit" class="primary">保存</button></footer></form>`;
+  const dialog = document.createElement("dialog"); dialog.className = "phone-name-dialog"; dialog.setAttribute("aria-label", "修改名称");
+  dialog.innerHTML = `<form><h3>修改名称</h3><label>名称<input name="name" maxlength="80" required value="${esc(device.name)}"></label><footer><button type="button" data-cancel>取消</button><button type="submit" class="primary">保存</button></footer></form>`;
   document.body.append(dialog); dialog.querySelector("[data-cancel]")!.addEventListener("click", () => dialog.close()); dialog.addEventListener("close", () => dialog.remove());
   dialog.addEventListener("submit", event => { event.preventDefault(); const name = dialog.querySelector("input")!.value; dialog.close(); void run(() => window.phones.rename(device.id, name)); }); dialog.showModal();
 }

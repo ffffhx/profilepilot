@@ -130,11 +130,24 @@ try {
   assert.ok('open' in (await d.query('[data-phone-downloads]')).attributes,'live refresh retains disclosure state');
   await d.domClick('[data-phone-downloads] summary');
   await shot('02-device-details.png');
-  await d.domClick('.phone-details [data-action="rename"]');
+  await close();
+  await select('UI-TEST-2');
+  await d.domClick(`${row('UI-TEST-1')} [data-action="device-menu"]`);
+  await d.waitFor('#phone-device-menu:popover-open');
+  await shot('device-menu.png');
+  await d.dispatch('#phone-device-menu', 'keydown', { key: 'Escape', bubbles: true });
+  assert.equal((await d.query('#phone-device-menu:popover-open')).count, 0);
+  assert.equal(await d.evaluate('document.activeElement.dataset.deviceId'), 'UI-TEST-1');
+  await d.domClick(`${row('UI-TEST-1')} [data-action="device-menu"]`);
+  await d.domClick('#phone-device-menu [data-action="rename"]');
   await d.domInput('.phone-name-dialog input','<手机 & 名称>');
   await d.domClick('.phone-name-dialog [type="submit"]');
-  await d.waitFor('#phone-details-title',s=>s.text==='<手机 & 名称>');
+  await d.waitFor('.phone-inspector-heading h2',s=>s.text==='<手机 & 名称>');
+  assert.equal((await d.query(`${row('UI-TEST-2')} strong`)).text, 'UI Test Phone 2');
+  await d.evaluate('location.reload();true');
+  await d.waitFor(`${row('UI-TEST-1')} strong`,s=>s.text==='<手机 & 名称>');
   assert.match((await d.query(row('UI-TEST-1'))).text,/<手机 & 名称>/);
+  await details('UI-TEST-1');
   await close();
   assert.equal(await d.evaluate('document.activeElement.dataset.deviceId'),'UI-TEST-1');
   // The selected row determines the sidebar and explicit input target.

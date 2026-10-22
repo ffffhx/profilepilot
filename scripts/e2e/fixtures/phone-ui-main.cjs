@@ -2,6 +2,7 @@
 const { app, BrowserWindow, ipcMain, nativeImage } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
+const { randomUUID } = require('node:crypto');
 const { PhonesService } = require('../../../dist/main/phones/service');
 const { executePhoneCommand } = require('../../../dist/main/phones/management');
 const { AndroidSetup } = require('../../../dist/main/phones/android-setup');
@@ -28,6 +29,7 @@ const androidSetupFixture = createAndroidFixture(AndroidSetup, path.join(root, '
 let previewCalls = 0, previewBehavior = {};
 let cameraCalls = [], cameraState, cameraUnsupported = false;
 let basicFrame = { width: 320, height: 640, shade: 128 }, basicFrameBehavior = {};
+let followUiFrame, followUiFullFrame, followUiStatus;
 const unresponsive = new Set();
 let appInstalled = process.env.PHONE_UI_NO_APP !== '1';
 const service = new PhonesService({ root, apkPath: process.env.PHONE_UI_NO_APP === '1' ? path.join(root, 'phone.apk') : '', computer: 'UI-TEST-PC',
@@ -65,6 +67,29 @@ const service = new PhonesService({ root, apkPath: process.env.PHONE_UI_NO_APP =
   }, onChanged: value => { if (window && !window.isDestroyed()) window.webContents.send('phone-ui:changed', value); }
 });
 ipcMain.handle('phone-ui:request', async (_, method, params) => {
+  // Only the follow renderer regression uses these injected phone responses.
+  // Runtime setup, pixel analysis and calibration persistence still use the real service.
+  if (process.env.PHONE_UI_GAME_FOLLOW === '1') {
+    if (method === 'screen' && followUiFullFrame) return structuredClone(followUiFullFrame);
+    if (method === 'follow-command') {
+      if (params.op === 'fixture-follow-frame') {
+        followUiFrame = params.frame;
+        if (params.fullFrame) followUiFullFrame = params.fullFrame;
+        return { configured: true };
+      }
+      if (followUiFrame && params.op === 'start') {
+        followUiStatus = { running: true, runId: randomUUID(), deviceId: params.id, mode: params.mode,
+          backend: params.backend, frames: 1, actions: 0, fps: 2, error: '' };
+        return structuredClone(followUiStatus);
+      }
+      if (followUiStatus && params.op === 'status') return structuredClone({ ...followUiStatus, frame: followUiFrame });
+      if (followUiStatus && params.op === 'stop') {
+        if (params.runId !== followUiStatus.runId) throw new Error('Fixture follow run changed');
+        followUiStatus.running = false;
+        return structuredClone(followUiStatus);
+      }
+    }
+  }
   if (process.env.PHONE_UI_CAMERA === '1') {
     if (method === 'fixture-camera-calls') return cameraCalls;
     if (method === 'fixture-camera-unsupported') { cameraUnsupported = params.value; return; }

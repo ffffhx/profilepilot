@@ -134,9 +134,10 @@ public final class ControlService extends Service {
             result.complete(success(new JSONObject().put("accepted", true), timing)); return;
         }
         if (!op.equals("frame")) throw new IllegalArgumentException("未知视觉跟随请求");
+        ScreenshotRegion region = input.has("region") ? ScreenshotRegion.from(input.getJSONObject("region")) : null;
         long generation = session.generation;
         session.begin("视觉跟随 · 获取画面");
-        PhoneAccessibility.current.perform(new JSONObject().put("kind", "screenshot").put("nativeSize", true), timing).whenComplete((value, error) -> main.post(() -> {
+        PhoneAccessibility.current.perform(new JSONObject().put("kind", "screenshot").put("nativeSize", true), timing, region).whenComplete((value, error) -> main.post(() -> {
             timing.mark("captureDone");
             session.finish(generation); render(); timing.mark("rendered"); result.complete(error == null ? success(value, timing) : failure(error));
         }));

@@ -1,10 +1,13 @@
 import base64
 import importlib.util
+import io
 import json
 import math
 import pathlib
 import sys
 import unittest
+from contextlib import redirect_stdout
+from unittest.mock import patch
 sys.dont_write_bytecode = True
 
 import cv2
@@ -99,6 +102,103 @@ class VisionTests(unittest.TestCase):
         self.assertEqual(f.analyze(encoded(frame), 20)["phase"], "confirming")
         with self.assertRaisesRegex(ValueError, "分辨率"):
             f.analyze(encoded(frame[:200, :200]), 21)
+
+    def test_cropped_map_preserves_full_frame_tracking_navigation_and_marker(self):
+        config, original, _ = marker_fixture()
+        # Fractional map edges require the host's floor/ceil coverage, while
+        # perception retains its existing round-based map coordinates.
+        config['map'] = dict(x=73.25/640, y=51.25/360, width=200.4/640, height=200.4/360)
+        region = dict(x=73, y=51, width=201, height=201)
+        full, cropped = vision.Follower(config), vision.Follower(config)
+        for tick in range(3):
+            observed = original.copy()
+            if tick == 2:
+                observed[82:117, 36:76] = 25
+                cv2.circle(observed, (58, 99), 12, (40, 220, 50), 2)
+                observed[84:100, 58:74] = 25
+            frame = np.full_like(original, 90)
+            frame[51:251, 73:273] = observed[:200, :200]
+            expected = full.analyze(encoded(frame), 10 + tick * .4)
+            found = cropped.analyze(encoded(frame[51:252, 73:274]), 10 + tick * .4, region=region)
+            expected.pop('elapsedMs'); found.pop('elapsedMs')
+            self.assertEqual(found, expected)
+        self.assertEqual(found['phase'], 'following')
+        self.assertEqual(found['selfSource'], 'marker')
+        self.assertIsNotNone(found['direction'])
+
+    def test_cropped_map_rejects_malformed_out_of_bounds_and_incomplete_regions(self):
+        config, frame, _, _ = fixture()
+        crop = encoded(frame[:200, :200])
+        valid = dict(x=0, y=0, width=200, height=200)
+        invalid = [[], {}, {'x': 0}, {**valid, 'x': False}, {**valid, 'y': 0.0},
+                   {**valid, 'width': '200'}, {**valid, 'height': float('inf')},
+                   {**valid, 'x': -1}, {**valid, 'y': -1}, {**valid, 'width': 0},
+                   {**valid, 'height': -1}, {**valid, 'x': 500}, {**valid, 'y': 300}]
+        for region in invalid:
+            with self.subTest(region=region), self.assertRaises(ValueError):
+                vision.Follower(config).analyze(crop, 10, region=region)
+        with self.assertRaisesRegex(ValueError, '尺寸与区域'):
+            vision.Follower(config).analyze(crop, 10, region={**valid, 'width': 201})
+        with self.assertRaisesRegex(ValueError, '完整小地图'):
+            vision.Follower(config).analyze(encoded(frame[:200, 1:201]), 10, region={**valid, 'x': 1})
+        # Even a crop containing the old rounded map must cover the fractional edge.
+        config['map']['width'] = 200.4 / 640
+        with self.assertRaisesRegex(ValueError, '完整小地图'):
+            vision.Follower(config).analyze(crop, 10, region=valid)
+        config['map']['width'] = 200 / 640
+        config['map']['height'] = 200.4 / 360
+        with self.assertRaisesRegex(ValueError, '完整小地图'):
+            vision.Follower(config).analyze(crop, 10, region=valid)
+
+    def test_cropped_frame_cannot_enable_nearby_label_analysis(self):
+        config, frame = label_fixture()
+        with self.assertRaisesRegex(ValueError, '姓名识别需要完整画面'):
+            vision.Follower(config).analyze(encoded(frame[:200, :200]), 10,
+                                            region=dict(x=0, y=0, width=200, height=200))
+        self.assertEqual(vision.Follower(config).analyze(encoded(frame), 10)['phase'], 'confirming')
+
+    def test_crop_coverage_includes_independently_rounded_map_edges(self):
+        for axis, size, dimension in [('x', 'width', 640), ('y', 'height', 360)]:
+            with self.subTest(axis=axis):
+                config, frame, _, _ = fixture()
+                config['map'][axis] = 1.5 / dimension
+                config['map'][size] = 201.5 / dimension
+                region = dict(x=0, y=0, width=200, height=200)
+                region[axis], region[size] = 1, 202
+                def crop():
+                    return encoded(frame[region['y']:region['y']+region['height'],
+                                         region['x']:region['x']+region['width']])
+                # ceil(1.5 + 201.5) = 203, but round(1.5) + round(201.5) = 204.
+                with self.assertRaisesRegex(ValueError, '完整小地图'):
+                    vision.Follower(config).analyze(crop(), 10, region=region)
+                region[size] += 1
+                self.assertEqual(vision.Follower(config).analyze(crop(), 10, region=region)['phase'], 'confirming')
+
+    def test_crop_coverage_clamps_floating_point_map_edges_to_screen(self):
+        config, frame, _, _ = fixture()
+        config['map'] = dict(x=0, y=0, width=1.0000000000000002, height=1.0000000000000002)
+        config['grid']['blocked'] = []
+        region = dict(x=0, y=0, width=640, height=360)
+        full = vision.Follower(config).analyze(encoded(frame), 10)
+        cropped = vision.Follower(config).analyze(encoded(frame), 10, region=region)
+        full.pop('elapsedMs'); cropped.pop('elapsedMs')
+        self.assertEqual(full, cropped)
+
+    def test_json_line_worker_accepts_region_and_reports_invalid_crop(self):
+        config, frame, _, _ = fixture()
+        region = dict(x=0, y=0, width=200, height=200)
+        requests = [dict(id=1, op='configure', config=config),
+                    dict(id=2, op='analyze', base64=encoded(frame[:200, :200]), region=region),
+                    dict(id=3, op='analyze', base64=encoded(frame[:199, :200]), region=region)]
+        output = io.StringIO()
+        with patch.object(sys, 'stdin', io.StringIO('\n'.join(json.dumps(r) for r in requests))), redirect_stdout(output):
+            vision.main()
+        replies = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual([r['id'] for r in replies], [1, 2, 3])
+        self.assertTrue(replies[1]['ok'])
+        self.assertEqual(replies[1]['data']['phase'], 'confirming')
+        self.assertFalse(replies[2]['ok'])
+        self.assertIn('尺寸与区域', replies[2]['error'])
 
     def test_slow_frames_confirm_but_a_long_gap_requires_reacquisition(self):
         config, frame, _, _ = fixture()

@@ -6,7 +6,7 @@ const os = require('node:os');
 const { randomUUID } = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const { loadCli } = require('./cli-test-build.cjs');
-const { GameFollower, gameFollowConfigSchema } = loadCli('src/main/phones/game-follow.ts');
+const { GameFollower, gameFollowConfigSchema, followCommandSchema } = loadCli('src/main/phones/game-follow.ts');
 const { runGameFollowCli } = loadCli('src/main/phones/game-follow-cli.ts');
 const python = process.env.PROFILEPILOT_PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
 let fixture;
@@ -47,11 +47,70 @@ function harness(t, options = {}) {
 }
 test('observe runs real vision without sending touch, and stops its own lease once', vision, async t => {
   const h=harness(t);
+  const live=h.host.live, requests=[];
+  h.host.live=(...args)=>{if(args[2].op==='frame')requests.push(args[2]);return live(...args);};
   const started=await h.manager.command({op:'start',id:'phone',mode:'observe',config:fixture.config});
   await until(async()=> (await h.manager.command({op:'status'})).frames>=2);
   await h.manager.command({op:'stop',runId:started.runId});
   assert.equal(h.points.length,0);assert.equal(h.stopped(),1);
   assert.equal((await h.manager.command({op:'status'})).running,false);
+  assert.deepEqual(requests[0].region,{x:0,y:0,width:200,height:200});
+  assert.equal((await h.manager.command({op:'status'})).frame.region,undefined,'old companions may still return full frames');
+});
+
+test('native region frames retain screen dimensions through live vision and preview analysis', vision, async t => {
+  const region={x:0,y:0,width:200,height:200};
+  const base64=execFileSync(python,['-c',
+    'import sys,json,base64,cv2,numpy as np; v=json.load(sys.stdin); im=cv2.imdecode(np.frombuffer(base64.b64decode(v["base64"]),np.uint8),cv2.IMREAD_COLOR); print(base64.b64encode(cv2.imencode(".png",im[:200,:200])[1]).decode())'],
+    {input:JSON.stringify(fixture.frame),encoding:'utf8',windowsHide:true}).trim();
+  const cropped={...fixture.frame,base64,region};
+  const h=harness(t,{frame:cropped});
+  const started=await h.manager.command({op:'start',id:'phone',mode:'control',config:fixture.config});
+  await until(async()=>{const s=await h.manager.command({op:'status'});return s.frames>=2||!s.running;});
+  const status=await h.manager.command({op:'status'});
+  assert.equal(status.error,''); assert.equal(status.frame.width,fixture.config.width);
+  assert.deepEqual(status.frame.region,region); assert.ok(status.analysis.self); assert.ok(status.analysis.target);
+  await until(()=>h.points.length>=2);
+  assert.equal(h.points[1].points.length,1);
+  await h.manager.command({op:'stop',runId:started.runId});
+  const preview=await h.manager.command({op:'analyze',config:fixture.config,frame:cropped});
+  assert.ok(preview.self); assert.ok(preview.target);
+});
+
+test('region requests include half-pixel crop boundaries and nearby recognition retains full frames', vision, async t => {
+  const h=harness(t), requests=[], live=h.host.live;
+  h.host.live=(...args)=>{if(args[2].op==='frame')requests.push(args[2]);return live(...args);};
+  const config={...fixture.config,map:{x:35.5/640,y:35.5/360,width:21.5/640,height:21.5/360}};
+  const first=await h.manager.command({op:'start',id:'phone',mode:'observe',config});
+  await until(()=>requests.length>0);
+  assert.deepEqual(requests[0].region,{x:35,y:35,width:23,height:23});
+  await h.manager.command({op:'stop',runId:first.runId});
+  requests.length=0;
+  const nearby={selfLabel:fixture.config.selfTemplate,targetLabel:fixture.config.targetTemplate,
+    region:{x:0,y:0,width:1,height:1},pixelsPerMapUnit:600};
+  const next=await h.manager.command({op:'start',id:'phone',mode:'observe',config:{...fixture.config,nearby}});
+  await until(()=>requests.length>0);
+  assert.equal(requests[0].region,undefined);
+  await h.manager.command({op:'stop',runId:next.runId});
+  requests.length=0;
+  const basic=await h.manager.command({op:'start',id:'phone',mode:'observe',backend:'basic',config:fixture.config});
+  await until(()=>requests.length>0);
+  assert.equal(requests[0].region,undefined);
+  await h.manager.command({op:'stop',runId:basic.runId});
+});
+
+test('invalid region metadata or mismatched encoded pixels stop before any touch', vision, async t => {
+  for(const region of [{x:-1,y:0,width:200,height:200},{x:0.5,y:0,width:200,height:200},
+    {x:0,y:0,width:0,height:200},{x:639,y:0,width:2,height:200}])
+    assert.equal(followCommandSchema.safeParse({op:'analyze',config:fixture.config,frame:{...fixture.frame,region}}).success,false);
+  for(const region of [{x:639,y:0,width:2,height:200},{x:0,y:0,width:200,height:200}]) {
+    // Second case claims a 200px image while the encoded pixels are still 640px wide.
+    const h=harness(t,{frame:{...fixture.frame,region}});
+    await h.manager.command({op:'start',id:'phone',mode:'control',config:fixture.config});
+    await until(async()=>!(await h.manager.command({op:'status'})).running);
+    assert.notEqual((await h.manager.command({op:'status'})).error,'');
+    assert.equal(h.points.length,0); assert.equal(h.stopped(),1);
+  }
 });
 test('app screenshots respect the phone interval when consecutive Wi-Fi requests have different delays', vision, async t => {
   const h=harness(t), live=h.host.live;

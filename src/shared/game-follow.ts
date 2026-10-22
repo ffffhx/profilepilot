@@ -30,7 +30,13 @@ export interface FollowAnalysis {
   selfSource?: "template" | "marker";
   distance?: number;
 }
-export interface FollowFrame { mime: string; base64: string; width: number; height: number; }
+export interface FollowFrame {
+  mime: string; base64: string;
+  /** Native full-screen dimensions, including when only a region is encoded. */
+  width: number; height: number;
+  /** Integer native-pixel bounds of the encoded image; absent means a full frame. */
+  region?: FollowRect;
+}
 /** Host HTTP events, in milliseconds from request start. Sent means locally flushed, not phone receipt. */
 export interface PhoneRequestTiming {
   at: number;

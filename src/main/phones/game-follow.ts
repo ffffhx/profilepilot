@@ -34,7 +34,19 @@ export const gameFollowConfigSchema = z.object({
     return j.x * c.width >= r && (1 - j.x) * c.width >= r && j.y * c.height >= r && (1 - j.y) * c.height >= r;
   }, "摇杆范围超出屏幕");
 const frameSchema = z.object({ mime: z.enum(["image/jpeg", "image/png"]), base64: image,
-  width: z.number().int().min(100).max(5000), height: z.number().int().min(100).max(5000) }).strict();
+  width: z.number().int().min(100).max(5000), height: z.number().int().min(100).max(5000),
+  region: z.object({ x: z.number().int().nonnegative(), y: z.number().int().nonnegative(),
+    width: z.number().int().positive(), height: z.number().int().positive() }).strict().optional()
+}).strict().refine(f => !f.region || f.region.x + f.region.width <= f.width && f.region.y + f.region.height <= f.height, "截图区域超出原始画面");
+
+function mapCaptureRegion(config: GameFollowConfig) {
+  const r = config.map, x = Math.floor(r.x * config.width), y = Math.floor(r.y * config.height);
+  // Include the independently rounded origin/size used by existing vision,
+  // including half-pixel ties, without resampling the minimap's native pixels.
+  const right = Math.min(config.width, Math.max(Math.ceil((r.x + r.width) * config.width), Math.round(r.x * config.width) + Math.round(r.width * config.width)));
+  const bottom = Math.min(config.height, Math.max(Math.ceil((r.y + r.height) * config.height), Math.round(r.y * config.height) + Math.round(r.height * config.height)));
+  return { x, y, width: right - x, height: bottom - y };
+}
 export const followCommandSchema = z.discriminatedUnion("op", [
   z.object({ op: z.enum(["runtime", "setup", "status", "load"]) }).strict(),
   z.object({ op: z.literal("save"), config: gameFollowConfigSchema }).strict(),
@@ -178,7 +190,9 @@ export class GameFollower {
           this.preview?.close(); this.preview = new VisionWorker(this.python!, this.script);
           await this.preview.request({ op: "configure", config: command.config }); this.previewConfig = key;
         }
-        return await this.preview.request({ op: "analyze", base64: command.frame.base64 }) as FollowAnalysis;
+        if (command.frame.width !== command.config.width || command.frame.height !== command.config.height)
+          throw new Error("手机分辨率或方向已改变，请重新校准");
+        return await this.preview.request({ op: "analyze", base64: command.frame.base64, region: command.frame.region }) as FollowAnalysis;
       } catch (error) { this.preview?.close(); this.preview = undefined; throw error; }
       finally { this.analyzing = false; }
     }
@@ -257,10 +271,11 @@ export class GameFollower {
   }
   private async loop(run: Run, config: GameFollowConfig, mode: "observe" | "control", backend: "app" | "basic") {
     const began = Date.now();
+    const region = backend === "app" && !config.nearby ? mapCaptureRegion(config) : undefined;
     try {
       while (!run.cancelled) {
         const at = Date.now();
-        const frame: FollowFrame = frameSchema.parse(await this.host.live(run.lease!, run.generation, { op: "frame" }));
+        const frame: FollowFrame = frameSchema.parse(await this.host.live(run.lease!, run.generation, { op: "frame", ...(region ? { region } : {}) }));
         const capturedAt = Date.now();
         // Wi-Fi latency can vary between requests. A late capture followed by an
         // early one can violate Android's screenshot interval even when host
@@ -269,7 +284,7 @@ export class GameFollower {
         const nextFrameAt = (backend === "app" ? Date.now() : at) + config.intervalMs;
         if (run.cancelled) break;
         if (frame.width !== config.width || frame.height !== config.height) throw new Error("手机分辨率或方向已改变，请重新校准");
-        const analysis: FollowAnalysis = await run.worker!.request({ op: "analyze", base64: frame.base64 });
+        const analysis: FollowAnalysis = await run.worker!.request({ op: "analyze", base64: frame.base64, region: frame.region });
         if (run.cancelled) break;
         this.value.frame = frame; this.value.analysis = analysis; this.value.frames++;
         this.value.timings = { ...this.value.timings, captureMs: capturedAt - at, analysisMs: Date.now() - capturedAt, inputMs: 0 };

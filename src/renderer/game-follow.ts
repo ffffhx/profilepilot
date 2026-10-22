@@ -51,7 +51,7 @@ export async function openGameFollower(device?: PhoneDevice) {
   };
   const resize = new ResizeObserver(fitCanvas); resize.observe(canvasWrap);
   const status = find<HTMLElement>("[data-gf-status]"), metrics = find<HTMLElement>("[data-gf-metrics]");
-  let config = baseConfig(), frame: FollowFrame | undefined, image: HTMLImageElement | undefined;
+  let config = baseConfig(), frame: FollowFrame | undefined, image: HTMLImageElement | HTMLCanvasElement | undefined;
   let analysis: FollowAnalysis | undefined, tool = "map", drag: FollowPoint | undefined, selection: FollowRect | undefined;
   let closed = false, busy = false, running = false, replaying = false, runId: string | undefined;
   let poll: ReturnType<typeof setTimeout> | undefined, replayTimer: ReturnType<typeof setTimeout> | undefined;
@@ -74,6 +74,8 @@ export async function openGameFollower(device?: PhoneDevice) {
     find<HTMLButtonElement>("[data-gf-analyze]").disabled ||= !ready();
     find<HTMLButtonElement>("[data-gf-replay]").disabled ||= !ready() || (!demo && frames.length < 2);
     find<HTMLButtonElement>("[data-gf-capture]").disabled ||= !device || device.connection !== "device";
+    // A live crop has no pixels outside the map. Calibration requires a fresh full screenshot.
+    for (const button of dialog.querySelectorAll<HTMLButtonElement>("[data-gf-tool]")) button.disabled ||= !!frame?.region;
     for (const input of dialog.querySelectorAll<HTMLInputElement | HTMLSelectElement>("input,select")) input.disabled = busy || running || replaying;
   }
   function readSettings() {
@@ -129,17 +131,29 @@ export async function openGameFollower(device?: PhoneDevice) {
       loaded.src = `data:${next.mime};base64,${next.base64}`;
     });
     if (closed) return;
-    if (reset && (loaded.naturalWidth !== config.width || loaded.naturalHeight !== config.height)) {
-      config = baseConfig(); config.width = loaded.naturalWidth; config.height = loaded.naturalHeight; settings();
+    const region = next.region, width = region ? next.width : loaded.naturalWidth, height = region ? next.height : loaded.naturalHeight;
+    if (region && (!Number.isInteger(width) || !Number.isInteger(height) || width < 100 || height < 100 || width * height > 8_000_000
+      || !Object.values(region).every(Number.isInteger) || region.x < 0 || region.y < 0 || region.width < 1 || region.height < 1
+      || region.x + region.width > width || region.y + region.height > height
+      || loaded.naturalWidth !== region.width || loaded.naturalHeight !== region.height)) throw new Error("小地图画面尺寸无效，请重新获取画面");
+    if (reset && (width !== config.width || height !== config.height)) {
+      config = baseConfig(); config.width = width; config.height = height; settings();
       status.textContent = "新画面尺寸已载入，请重新选取小地图和目标";
     }
-    image = loaded; frame = { ...next, width: loaded.naturalWidth, height: loaded.naturalHeight };
-    if (frame.base64.length > 4_000_000) {
+    image = loaded; frame = { ...next, width, height };
+    if (region) {
+      const surface = document.createElement("canvas"); surface.width = width; surface.height = height;
+      const context = surface.getContext("2d")!;
+      context.fillStyle = "#111827"; context.fillRect(0, 0, width, height);
+      context.drawImage(loaded, region.x, region.y); image = surface;
+      source.textContent = "仅更新小地图 · 重新校准请获取手机画面";
+    }
+    if (!region && frame.base64.length > 4_000_000) {
       const compact = document.createElement("canvas"); compact.width = frame.width; compact.height = frame.height;
       compact.getContext("2d")!.drawImage(loaded, 0, 0);
       frame = { ...frame, mime: "image/jpeg", base64: compact.toDataURL("image/jpeg", .9).split(",")[1] };
     }
-    canvas.width = loaded.naturalWidth; canvas.height = loaded.naturalHeight; fitCanvas();
+    canvas.width = width; canvas.height = height; fitCanvas();
     find<HTMLElement>("[data-gf-empty]").hidden = true; draw(); buttons();
   }
   function crop(r: FollowRect): string {
@@ -164,7 +178,7 @@ export async function openGameFollower(device?: PhoneDevice) {
     config.grid.blocked = [...cells]; analysis = undefined; draw();
   }
   canvas.onpointerdown = event => {
-    if (busy || running || replaying || !image || event.button !== 0) return;
+    if (busy || running || replaying || !image || frame?.region || event.button !== 0) return;
     drag = point(event); canvas.setPointerCapture(event.pointerId);
     if (tool === "joystick") { config.joystick = { ...config.joystick, ...drag }; drag = undefined; draw(); }
     else if (tool === "wall" || tool === "erase") paint(drag);

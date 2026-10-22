@@ -313,11 +313,36 @@ class Follower:
         self.near = False
         self.target_last = None
 
-    def analyze(self, frame, now=None):
+    def analyze(self, frame, now=None, region=None):
         began = time.monotonic()
         now = began if now is None else now
         c = self.config
         image = decode(frame)
+        if region is not None:
+            if not isinstance(region, dict) or any(type(region.get(key)) is not int
+                                                   for key in ('x', 'y', 'width', 'height')):
+                raise ValueError("裁剪区域必须包含整数像素坐标和尺寸")
+            rx, ry, rw, rh = (region[key] for key in ('x', 'y', 'width', 'height'))
+            if rx < 0 or ry < 0 or rw <= 0 or rh <= 0 or rx + rw > c['width'] or ry + rh > c['height']:
+                raise ValueError("裁剪区域超出校准画面边界")
+            if image.shape[:2] != (rh, rw):
+                raise ValueError("裁剪图像尺寸与区域不一致")
+            if c.get('nearby') is not None:
+                raise ValueError("姓名识别需要完整画面，不能使用裁剪图像")
+            r = c['map']
+            left, top = math.floor(r['x'] * c['width']), math.floor(r['y'] * c['height'])
+            right = min(c['width'], max(math.ceil((r['x'] + r['width']) * c['width']),
+                                       round(r['x'] * c['width']) + round(r['width'] * c['width'])))
+            bottom = min(c['height'], max(math.ceil((r['y'] + r['height']) * c['height']),
+                                         round(r['y'] * c['height']) + round(r['height'] * c['height'])))
+            if rx > left or ry > top or rx + rw < right or ry + rh < bottom:
+                raise ValueError("裁剪区域必须覆盖完整小地图")
+            if c['width'] * c['height'] * 3 > 24000000:
+                raise ValueError("校准画面尺寸过大")
+            # Preserve the existing pixel coordinates and map rounding exactly.
+            canvas = np.zeros((c['height'], c['width'], 3), np.uint8)
+            canvas[ry:ry+rh, rx:rx+rw] = image
+            image = canvas
         if image.shape[1] != c["width"] or image.shape[0] != c["height"]:
             raise ValueError("手机分辨率或方向已改变，请重新校准")
         r = c["map"]
@@ -439,7 +464,7 @@ def main():
             elif op == "analyze":
                 if follower is None:
                     raise ValueError("请先校准小地图")
-                value = follower.analyze(request["base64"])
+                value = follower.analyze(request["base64"], region=request.get("region"))
             else:
                 raise ValueError("未知视觉请求")
             response = {"id": request.get("id"), "ok": True, "data": value}

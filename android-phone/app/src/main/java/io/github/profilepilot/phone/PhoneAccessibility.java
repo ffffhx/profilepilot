@@ -68,6 +68,9 @@ public final class PhoneAccessibility extends AccessibilityService {
         return perform(action, null);
     }
     CompletableFuture<Object> perform(JSONObject action, ControlTiming timing) {
+        return perform(action, timing, null);
+    }
+    CompletableFuture<Object> perform(JSONObject action, ControlTiming timing, ScreenshotRegion region) {
         CompletableFuture<Object> result = new CompletableFuture<>();
         try {
             String kind = action.getString("kind");
@@ -129,7 +132,7 @@ public final class PhoneAccessibility extends AccessibilityService {
                         if (timing != null) timing.mark("captureReady");
                         HardwareBuffer buffer = screenshot.getHardwareBuffer();
                         if (timing != null) timing.mark("encodeQueued");
-                        screenshots.submit(buffer, () -> encodeScreenshot(screenshot, png, nativeSize, timing), result);
+                        screenshots.submit(buffer, () -> encodeScreenshot(screenshot, png, nativeSize, timing, region), result);
                     }
                     @Override public void onFailure(int code) { result.completeExceptionally(new IllegalStateException("当前画面无法截图（系统返回 " + code + "）")); }
                 });
@@ -137,25 +140,35 @@ public final class PhoneAccessibility extends AccessibilityService {
         } catch (Exception error) { result.completeExceptionally(error); }
         return result;
     }
-    private JSONObject encodeScreenshot(ScreenshotResult screenshot, boolean png, boolean nativeSize, ControlTiming timing) throws Exception {
+    private JSONObject encodeScreenshot(ScreenshotResult screenshot, boolean png, boolean nativeSize, ControlTiming timing, ScreenshotRegion region) throws Exception {
         if (timing != null) timing.mark("encodeStarted");
-        Bitmap bitmap = null, scaled = null;
+        Bitmap bitmap = null, scaled = null, cropped = null;
         try {
             bitmap = Bitmap.wrapHardwareBuffer(screenshot.getHardwareBuffer(), screenshot.getColorSpace());
             if (bitmap == null) throw new IllegalStateException("无法读取屏幕画面");
+            if (region != null) {
+                if (!nativeSize) throw new IllegalArgumentException("截图区域需要原始像素尺寸");
+                region.requireWithin(bitmap.getWidth(), bitmap.getHeight());
+            }
             int width = nativeSize ? bitmap.getWidth() : Math.min(1080, bitmap.getWidth()), height = Math.round((float) bitmap.getHeight() * width / bitmap.getWidth());
             // Preserve physical pixels for ADB and native follow frames. Only
             // ordinary JPEG previews use the existing 1080px thumbnail behavior.
             scaled = nativeSize ? bitmap.copy(Bitmap.Config.ARGB_8888, false) : Bitmap.createScaledBitmap(bitmap, width, height, true);
             if (scaled == null) throw new IllegalStateException("无法转换屏幕画面");
+            cropped = region == null ? scaled : Bitmap.createBitmap(scaled, region.x(), region.y(), region.width(), region.height());
             if (timing != null) timing.mark("bitmapCopied");
-            ByteArrayOutputStream bytes = new ByteArrayOutputStream(); scaled.compress(png ? Bitmap.CompressFormat.PNG : Bitmap.CompressFormat.JPEG, png ? 100 : 75, bytes);
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream(); cropped.compress(png ? Bitmap.CompressFormat.PNG : Bitmap.CompressFormat.JPEG, png ? 100 : 75, bytes);
             if (timing != null) timing.mark("compressed");
             if (bytes.size() > 5 * 1024 * 1024) throw new IllegalStateException("截图超过 5 MiB，未缩小画面，请更换页面后重新获取");
             JSONObject encoded = new JSONObject().put("mime", png ? "image/png" : "image/jpeg").put("base64", Base64.encodeToString(bytes.toByteArray(), Base64.NO_WRAP)).put("width", bitmap.getWidth()).put("height", bitmap.getHeight());
+            if (region != null) encoded.put("region", region.toJson());
             if (timing != null) timing.mark("base64");
             return encoded;
-        } finally { if (scaled != null && scaled != bitmap) scaled.recycle(); if (bitmap != null) bitmap.recycle(); }
+        } finally {
+            if (cropped != null && cropped != scaled && cropped != bitmap) cropped.recycle();
+            if (scaled != null && scaled != bitmap) scaled.recycle();
+            if (bitmap != null) bitmap.recycle();
+        }
     }
     private int coordinate(JSONObject action, String key, int max) throws Exception {
         double value = action.getDouble(key); if (!Double.isFinite(value) || value != Math.floor(value) || value < 0 || value >= max) throw new IllegalArgumentException("坐标超出当前屏幕范围"); return (int) value;

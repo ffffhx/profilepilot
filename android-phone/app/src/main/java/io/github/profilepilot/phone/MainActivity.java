@@ -53,7 +53,7 @@ public final class MainActivity extends ComponentActivity {
       permissionCount, permissionSummaryAction, permissionHint, reassurance, serviceError;
   private HomeIcon computerGraphic, phoneGraphic, linkGraphic;
   private final SettingRow[] permissions=new SettingRow[3];
-  private SettingRow developer;
+  private SettingRow developer, recoveryRow;
   private DebugOption wifi, usb;
   private boolean permissionsExpanded, seenConnected;
   private int lastPermissionCount=-1;
@@ -205,6 +205,7 @@ public final class MainActivity extends ComponentActivity {
     LinearLayout.LayoutParams dividerParams=new LinearLayout.LayoutParams(dp(1),-1);
     dividerParams.setMargins(0,dp(14),0,dp(14)); connectionOptions.addView(connectionDivider,dividerParams);
     connectionOptions.addView(usb.view,new LinearLayout.LayoutParams(0,-1,1));
+    recoveryRow=setting(connectionCard,"shield","自动恢复","后台连接服务与已授权的系统服务",R.id.home_recovery,this::showRecovery);
     TextView connectionHint=text(page,"先开启开发者选项，再任选一种调试方式。",11,MUTED,false); connectionHint.setPadding(dp(3),dp(8),dp(3),0);
     reassurance=text(page,"",12,MUTED,false); reassurance.setGravity(Gravity.CENTER); reassurance.setPadding(0,dp(24),0,dp(8));
     TextView help=button(page,"连接遇到问题？",false,this::showHelp); help.setTextSize(12); help.setTextColor(MUTED); help.setBackground(ripple(BG,10,false));
@@ -264,6 +265,8 @@ public final class MainActivity extends ComponentActivity {
     boolean anyDebug=ready.usbDebugging.equals("enabled") || ready.wirelessDebugging.equals("enabled");
     updateDebugOption(wifi,ready.wifiConnected,ready.wirelessDebugging,ready.debugLabel("wirelessDebugging"),anyDebug);
     updateDebugOption(usb,ready.usbConnected,ready.usbDebugging,ready.debugLabel("usbDebugging"),anyDebug);
+    RecoverySettings recovery=new RecoverySettings(this);
+    recoveryRow.status(recovery.enabled()?"已开启":"未开启",recovery.enabled()?GREEN:MUTED);
     setText(reassurance,state.controls()?"手机的控制权始终在你手中。\n锁屏或连接中断时，会停止操作。"
         :ready.computerConnected?(all?"手机准备好了。\n需要使用时，在电脑上开始。":"完成权限准备后，即可由电脑使用。") : "");
     reassurance.setVisibility(ready.computerConnected?View.VISIBLE:View.GONE);
@@ -322,7 +325,7 @@ public final class MainActivity extends ComponentActivity {
   private void showMore() {
     LinearLayout content=showSheet("更多");
     menuItem(content,"检查更新",() -> { dismissSheet(); startActivity(new Intent(this,UpdateActivity.class)); });
-    menuItem(content,"电脑连接详情",this::showConnectionDetails); menuItem(content,"手机状态同步",this::showStatusSync); menuItem(content,"连接帮助",this::showHelp);
+    menuItem(content,"电脑连接详情",this::showConnectionDetails); menuItem(content,"手机状态同步",this::showStatusSync); menuItem(content,"自动恢复",this::showRecovery); menuItem(content,"连接帮助",this::showHelp);
     if (!pairing().getString("token","").isEmpty()) menuItem(content,"更换电脑",this::confirmForget);
     paragraph(content,getString(R.string.app_name)+" · 手机连接助手\n版本 "+BuildConfig.VERSION_NAME).setTextSize(11);
   }
@@ -339,12 +342,40 @@ public final class MainActivity extends ComponentActivity {
     LinearLayout content=showSheet("更换连接的电脑？");
     paragraph(content,"将结束当前控制，清除电脑连接记录，并停止状态同步。之后可在电脑端重新连接。已开启的手机权限会保留。");
     actionButton(content,"结束连接并更换",true,() -> {
+      RecoverySettings recovery=new RecoverySettings(this); recovery.enabled(false); recovery.advanced(false);
       ControlService service=ControlService.current; if (service!=null) service.localControl("stop");
       stopService(new Intent(this,ControlService.class)); pairing().edit().remove("token").remove("computer").apply();
       store.statusEnabled(false); stopService(new Intent(this,StatusSyncService.class));
       seenConnected=false; dismissSheet(); main.postDelayed(this::updateHome,150);
     }).setBackground(ripple(RED,11,false));
     actionButton(content,"暂不更换",false,this::dismissSheet);
+  }
+  private void showRecovery() {
+    RecoverySettings recovery=new RecoverySettings(this);
+    LinearLayout content=showSheet("自动恢复");
+    paragraph(content,"开启后，系统回收、手机重启或 App 更新后会尝试恢复后台连接服务。恢复连接不会继续旧控制会话，也不会重放操作。");
+    actionButton(content,recovery.enabled()?"关闭自动恢复":"开启自动恢复",true,() -> {
+      recovery.enabled(!recovery.enabled()); refreshRecoveryServices(); showRecovery();
+    }).setId(R.id.recovery_toggle);
+    info(content,"高级恢复授权",recovery.authorized()?"已授权":"未授权",recovery.authorized()?GREEN:AMBER);
+    paragraph(content,"高级恢复可重启权限仍开启但未运行的无障碍服务，并在观察到 Wi-Fi 断开重连后尝试恢复无线调试。每项最多尝试 3 次 / 30 分钟，无持续唤醒。");
+    paragraph(content,"无障碍权限已关闭、无线调试在网络稳定时被关闭，都会保留关闭状态。若在断网期间手动关闭调试，请同时关闭自动恢复。新网络的系统授权仍需你确认。");
+    if (!recovery.authorized()) paragraph(content,"高级恢复需要已授权电脑额外授予系统设置权限；未授权时仍可使用后台服务恢复。");
+    TextView advanced=actionButton(content,recovery.advanced()?"关闭高级恢复":"开启高级恢复",false,() -> {
+      recovery.advanced(!recovery.advanced()); refreshRecoveryServices(); showRecovery();
+    }); advanced.setId(R.id.recovery_advanced); advanced.setEnabled(recovery.enabled()); advanced.setAlpha(recovery.enabled()?1f:0.45f);
+    info(content,"最近一次结果",recovery.lastResult());
+    if (recovery.lastResultAt()>0) paragraph(content,java.text.DateFormat.getDateTimeInstance().format(new java.util.Date(recovery.lastResultAt()))).setTextSize(11);
+    paragraph(content,"系统“强行停止”、厂商禁止后台运行或调试授权被撤销后，App 不能保证自行恢复。请允许 ProfilePilot 后台运行；无需关闭整台手机的省电功能。");
+    actionButton(content,"查看应用后台设置",false,() -> launchSetting(() -> startActivity(new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,Uri.parse("package:"+getPackageName())))));
+    actionButton(content,"刷新状态",false,this::showRecovery);
+  }
+  private void refreshRecoveryServices() {
+    try {
+      if (new RecoverySettings(this).paired()) startForegroundService(new Intent(this,ControlService.class));
+      if (store.statusEnabled()) startForegroundService(new Intent(this,StatusSyncService.class));
+    } catch (RuntimeException unavailable) { new RecoverySettings(this).record("请保持 App 打开，稍后重新尝试启动连接服务"); }
+    updateHome();
   }
   private void showHelp() {
     LinearLayout content=showSheet("连接遇到问题？"); text(content,"先检查手机",15,INK,true);

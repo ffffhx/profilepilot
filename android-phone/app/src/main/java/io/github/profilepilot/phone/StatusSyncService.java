@@ -56,7 +56,7 @@ public final class StatusSyncService extends Service {
   @Override public int onStartCommand(Intent intent, int flags, int startId) {
     if (intent != null && "stop".equals(intent.getAction())) { store.statusEnabled(false); stopSelf(); }
     else worker.execute(this::sync);
-    return START_NOT_STICKY;
+    return store.statusEnabled() && new RecoverySettings(this).enabled() ? START_STICKY : START_NOT_STICKY;
   }
   @Override public IBinder onBind(Intent intent) { return null; }
   @Override public void onDestroy() { closed = true; WirelessNetwork.stop(); worker.shutdownNow(); main.removeCallbacksAndMessages(null); stopForeground(STOP_FOREGROUND_REMOVE); super.onDestroy(); }

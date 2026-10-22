@@ -11,6 +11,9 @@
     <item type="id" name="home_developer" />
     <item type="id" name="home_usb" />
     <item type="id" name="home_wifi" />
+    <item type="id" name="home_recovery" />
+    <item type="id" name="recovery_toggle" />
+    <item type="id" name="recovery_advanced" />
     <item type="id" name="home_pause" />
     <item type="id" name="home_stop" />
     <item type="id" name="sheet_close" />

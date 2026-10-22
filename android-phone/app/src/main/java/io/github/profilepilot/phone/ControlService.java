@@ -19,6 +19,7 @@ public final class ControlService extends Service {
     private record Receipt(String fingerprint, CompletableFuture<JSONObject> future) { }
     private PhoneServer server;
     private ControlOverlay overlay;
+    private AutomaticRecovery recovery;
     private String lastNotification = "";
     private long followSequence;
     private final BroadcastReceiver screenOff = new BroadcastReceiver() { @Override public void onReceive(Context context, Intent intent) { session.pause("手机已锁屏，控制已暂停"); render(); } };
@@ -45,7 +46,12 @@ public final class ControlService extends Service {
         if (intent != null && ("pause".equals(intent.getAction()) || "resume".equals(intent.getAction()) || "stop".equals(intent.getAction()))) {
             localSessionControl(intent.getAction(), intent.getStringExtra("instanceId"), intent.getStringExtra("sessionId"), intent.getLongExtra("generation", -1));
         }
-        return START_NOT_STICKY;
+        RecoverySettings settings = new RecoverySettings(this);
+        if (settings.advanced() && settings.paired()) {
+            if (recovery == null) recovery = new AutomaticRecovery(this);
+        } else if (recovery != null) { recovery.close(); recovery = null; }
+        if (intent == null && settings.enabled()) settings.record("系统已重启连接服务；旧控制会话未恢复");
+        return settings.enabled() && settings.paired() && server != null ? START_STICKY : START_NOT_STICKY;
     }
     @Override public IBinder onBind(Intent intent) { return null; }
     private JSONObject handle(String method, JSONObject input) throws Exception {
@@ -213,6 +219,7 @@ public final class ControlService extends Service {
         if (!key.equals(lastNotification)) { lastNotification = key; getSystemService(NotificationManager.class).notify(1, notification()); }
     }
     @Override public void onDestroy() {
+        if (recovery != null) { recovery.close(); recovery = null; }
         if (PhoneAccessibility.current != null) PhoneAccessibility.current.releaseFollowTouch();
         session.stop("连接服务已关闭"); main.removeCallbacksAndMessages(null); if (overlay != null) overlay.close();
         try { unregisterReceiver(screenOff); } catch (Exception ignored) { }

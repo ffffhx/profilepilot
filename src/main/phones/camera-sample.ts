@@ -22,6 +22,10 @@ const TTL_MS = 1200, SETTLE_MS = 450;
 // changes the single sample or autonomous follower's 1200ms input lifetime.
 const SEQUENCE_TTL_MS = 1500;
 type Runtime = { now: () => number; wait: (ms: number, signal: AbortSignal) => Promise<void> };
+function cameraPointChange(probe: { cameraPointChange?: unknown }) {
+  return probe.cameraPointChange === "release-newdown" ? "release-newdown"
+    : probe.cameraPointChange === undefined ? "legacy-unreported" : "unrecognized";
+}
 
 /** Validate the native JPEG dimensions without changing any encoded bytes. */
 function imageFrame(value: unknown) {
@@ -84,11 +88,14 @@ export class CameraSampler {
     const files: { name: string; content: Buffer | string }[] = [];
     const event = (kind: string, data: object = {}) => events.push({ kind, atMs: this.runtime.now() - began, ...data });
     const plan = { version: 1, deviceId: command.id, steps, ttlMs: SEQUENCE_TTL_MS, settleMs: SETTLE_MS,
-      releaseGuardMs: 160, startedAt, cameraOnly: true };
+      releaseGuardMs: 160, startedAt, cameraOnly: true,
+      // continue is a host point update; native code may UP/DOWN internally.
+      hostContinueMeaning: "update-desired-point-without-host-release", nativeStrategySource: "probe.json" };
     // Freeze the plan before acquiring control. Completed and rejected captures
     // are written only after cleanup, together with an explicit partial manifest.
     await fs.writeFile(path.join(command.outputDir, "plan.json"), JSON.stringify(plan, null, 2) + "\n", { flag: "wx" });
     let lease: string | undefined, generation = 0, sequence = 0, attempted = false, failure: unknown;
+    let nativeCameraPointChange: ReturnType<typeof cameraPointChange> | "not-probed" = "not-probed";
     let owner: { instanceId: string; sessionId: string; generation: number } | undefined;
     let prior: { point: { x: number; y: number }; sentAt: number; ackAt: number; proof: z.infer<typeof cameraProofSchema> } | undefined;
     const sameOwner = () => {
@@ -133,6 +140,9 @@ export class CameraSampler {
       current();
       const probe = await this.host.live(lease, generation, { op: "probe" }); current();
       if (probe?.protocol !== 1 || probe?.cameraFrameProvenance !== 1) throw new Error("手机 App 不支持镜头画面凭据，请更新开发版");
+      nativeCameraPointChange = cameraPointChange(probe);
+      files.push({ name: "probe.json", content: JSON.stringify({ protocol: 1, cameraFrameProvenance: 1, nativeCameraPointChange }, null, 2) + "\n" });
+      event("native-camera-strategy", { nativeCameraPointChange });
       const baselineCapture = await capture("baseline"), baseline = baselineCapture.image.frame; current();
       if (baseline.cameraProof) throw new Error("新采样会话仍有镜头触点，已停止");
       files.push({ name: "baseline.json", content: JSON.stringify(keepImage("baseline.jpg", baselineCapture.image), null, 2) + "\n" });
@@ -181,7 +191,7 @@ export class CameraSampler {
         const captured = await capture(`${directory}/sample`);
         const proof = captured.image.frame.cameraProof;
         const metadata: Record<string, unknown> = { version: 1, deviceId: command.id, ...keepImage(`${directory}/sample.jpg`, captured.image),
-          touchAck: record.touchAck, mode: step.mode, index: index + 1, valid: false,
+          touchAck: record.touchAck, mode: step.mode, nativeCameraPointChange, index: index + 1, valid: false,
           timing: { clock: "host-monotonic-durations-ms", sentAtMs: sent.sentAt - began, ackAtMs: sent.ackAt - began,
             frameAtMs: captured.requestedAt - began, receivedAtMs: captured.receivedAt - began,
             ackMs: sent.ackAt - sent.sentAt, waitMs: captured.requestedAt - sent.ackAt,
@@ -198,7 +208,7 @@ export class CameraSampler {
             || continuing && (proof.epoch !== previous.proof.epoch + (changed ? 1 : 0)
               || (changed ? proof.heldSinceUptimeMs <= previous.proof.capturedAtUptimeMs : proof.heldSinceUptimeMs !== previous.proof.heldSinceUptimeMs))
             || !continuing && (proof.epoch <= previous.proof.epoch || proof.heldSinceUptimeMs <= previous.proof.capturedAtUptimeMs)))
-            throw new Error("镜头序列 epoch 或应用时间不连续，不能混用新按下与移动");
+            throw new Error("镜头序列 epoch 或应用时间不连续，不能混用失效后重建与连续请求");
           metadata.valid = true; record.status = "captured"; record.cameraProof = proof;
           prior = { point, sentAt: sent.sentAt, ackAt: sent.ackAt, proof };
         } catch (error) { metadata.error = (error as Error).message; throw error; }
@@ -237,7 +247,7 @@ export class CameraSampler {
     }
     if (signal.aborted && !failure) failure = new Error("镜头采样已取消");
     if (outputErrors.length) failure = new Error([...(failure ? [(failure as Error).message] : []), "部分诊断文件保存失败"].join("；"));
-    const manifest = { ...plan, complete: !failure, error: failure ? (failure as Error).message : "", steps: records, events, savedFiles, outputErrors };
+    const manifest = { ...plan, nativeCameraPointChange, complete: !failure, error: failure ? (failure as Error).message : "", steps: records, events, savedFiles, outputErrors };
     await fs.writeFile(path.join(command.outputDir, "sequence.json"), JSON.stringify(manifest, null, 2) + "\n", { flag: "wx" });
     if (failure) throw new Error(`${(failure as Error).message}；序列诊断保存在 ${command.outputDir}`);
     return { directory: command.outputDir, metadataPath: path.join(command.outputDir, "sequence.json"), ...manifest };
@@ -298,6 +308,7 @@ export class CameraSampler {
         throw new Error("镜头画面缺少与本次触点一致且稳定的凭据");
       metadata = { version: 1, deviceId: command.id, image: "sample.jpg", mime: image.frame.mime,
         width: image.frame.width, height: image.frame.height,
+        nativeCameraPointChange: cameraPointChange(probe),
         sha256: createHash("sha256").update(image.bytes).digest("hex"),
         touchAck: { sequence: ack.acceptedSequence, point, ttlMs: TTL_MS }, cameraProof: proof,
         timing: { clock: "host-monotonic-durations-ms", ackMs: ackAt - sentAt, waitMs: frameAt - ackAt,

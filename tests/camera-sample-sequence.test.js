@@ -34,7 +34,7 @@ async function fixture(t, hooks = {}) {
     pulseWrapper(lease) { calls.push(['pulse', lease]); return { state }; },
     async live(lease, generation, input) {
       calls.push(['live', lease, generation, structuredClone(input), now]);
-      if (input.op === 'probe') return { protocol: 1, cameraFrameProvenance: 1 };
+      if (input.op === 'probe') return { protocol: 1, cameraFrameProvenance: 1, ...(hooks.probe || {}) };
       if (input.op === 'touch') {
         const point = input.points[0];
         if (point) holdNumber++;
@@ -72,6 +72,7 @@ test('eight-step plan uses one lease/id1, preserves native bytes, changes epoch 
   const f = await fixture(t), result = await f.sampler.sample(f.command);
   assert.equal(result.complete, true);
   assert.equal(result.ttlMs, 1500);
+  assert.equal(result.nativeCameraPointChange, 'legacy-unreported');
   assert.equal(f.calls.filter(c => c[0] === 'start').length, 1);
   assert.equal(f.calls.filter(c => c[0] === 'stop').length, 1);
   assert.equal(f.calls.filter(c => c[0] === 'sync').length, 8);
@@ -125,6 +126,20 @@ test('schema/CLI accept explicit array and preserve it across management boundar
     '--output', f.command.outputDir, '--steps-file', file], async c => { requests.push(c); return { ok: true }; },
     { stdout: { write() {} }, stderr: { write() {} } }), 0);
   assert.deepEqual(requests[0].params, f.command);
+});
+
+test('diagnostic records native re-press capability independently of host continue mode', async t => {
+  for (const strategy of ['release-newdown', 'future-unknown']) {
+    const f = await fixture(t, { probe: { cameraPointChange: strategy } });
+    const result = await f.sampler.sample(f.command);
+    const expected = strategy === 'release-newdown' ? strategy : 'unrecognized';
+    assert.equal(result.nativeCameraPointChange, expected);
+    const probe = JSON.parse(await fs.readFile(path.join(f.command.outputDir, 'probe.json'), 'utf8'));
+    assert.equal(probe.nativeCameraPointChange, expected);
+    const second = JSON.parse(await fs.readFile(path.join(f.command.outputDir, 'step-02/sample.json'), 'utf8'));
+    assert.equal(second.mode, 'continue'); assert.equal(second.nativeCameraPointChange, expected);
+    assert.equal(result.hostContinueMeaning, 'update-desired-point-without-host-release');
+  }
 });
 
 test('expired continue is not silently converted to a new DOWN and preserves labelled partial images', async t => {

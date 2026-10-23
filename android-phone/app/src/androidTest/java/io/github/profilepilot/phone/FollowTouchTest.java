@@ -15,6 +15,8 @@ import androidx.test.core.app.ActivityScenario;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
 import java.lang.reflect.Field;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -342,6 +344,118 @@ public class FollowTouchTest {
             main(() -> assertFalse(touch.get().active()));
         } finally {
             authorized.set(false);
+            if (touch.get() != null) { main(() -> touch.get().release()); SystemClock.sleep(200); }
+        }
+    }
+    @Test public void cameraChangesRepressOnlyCameraAndNeverReplayAcrossUpBoundary() throws Exception {
+        instrumentation.getUiAutomation(UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES);
+        long deadline = SystemClock.elapsedRealtime() + 60000;
+        while (PhoneAccessibility.current == null && SystemClock.elapsedRealtime() < deadline) SystemClock.sleep(50);
+        assertNotNull(PhoneAccessibility.current);
+        AtomicReference<FollowTouch> touch = new AtomicReference<>();
+        AtomicReference<View> surface = new AtomicReference<>();
+        AtomicBoolean authorized = new AtomicBoolean(true);
+        AtomicInteger joystickId = new AtomicInteger(-1), cameraId = new AtomicInteger(-1);
+        AtomicInteger joystickUps = new AtomicInteger(), cameraUps = new AtomicInteger(), cancels = new AtomicInteger(), gestureDowns = new AtomicInteger();
+        AtomicReference<Operation> onCameraUp = new AtomicReference<>();
+        List<Float> cameraDownX = new ArrayList<>(); // Main-looper access only.
+        AtomicReference<FollowCameraProof.Snapshot> first = new AtomicReference<>();
+        try (ActivityScenario<ControlBenchmarkActivity> activity = ActivityScenario.launch(
+                new Intent(instrumentation.getTargetContext(), ControlBenchmarkActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))) {
+            activity.onActivity(a -> {
+                View view = new View(a); view.setBackgroundColor(android.graphics.Color.DKGRAY);
+                view.setOnTouchListener((v, event) -> {
+                    int action = event.getActionMasked(), index = event.getActionIndex(), id = event.getPointerId(index);
+                    if (action == MotionEvent.ACTION_DOWN) { joystickId.set(id); gestureDowns.incrementAndGet(); }
+                    if (action == MotionEvent.ACTION_POINTER_DOWN) {
+                        assertEquals("Only the camera is added to this fixture's held joystick", 2, event.getPointerCount());
+                        cameraId.set(id); cameraDownX.add(event.getRawX(index));
+                    }
+                    if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP) {
+                        if (id == joystickId.get()) joystickUps.incrementAndGet();
+                        if (id == cameraId.get()) {
+                            cameraUps.incrementAndGet(); cameraId.set(-1);
+                            Operation operation = onCameraUp.getAndSet(null);
+                            if (operation != null) {
+                                try { operation.run(); } catch (Exception error) { throw new RuntimeException(error); }
+                            }
+                        }
+                    }
+                    if (action == MotionEvent.ACTION_CANCEL) cancels.incrementAndGet();
+                    return true;
+                });
+                a.setContentView(view); surface.set(view); touch.set(new FollowTouch(PhoneAccessibility.current));
+            });
+            SystemClock.sleep(300);
+            int[] origin = new int[2], size = new int[2];
+            main(() -> { surface.get().getLocationOnScreen(origin); size[0] = surface.get().getWidth(); size[1] = surface.get().getHeight(); });
+            assertTrue(size[0] > 300 && size[1] > 300);
+            int jx = origin[0] + size[0] / 4, jy = origin[1] + size[1] * 3 / 4;
+            int cx = origin[0] + size[0] * 3 / 4, cy = origin[1] + size[1] / 4;
+            main(() -> touch.get().update(new JSONArray().put(finger(0, jx, jy)), 1200, authorized::get, 1));
+            SystemClock.sleep(200);
+            main(() -> touch.get().update(new JSONArray().put(finger(0, jx, jy)).put(finger(1, cx, cy)), 1200, authorized::get, 2));
+            SystemClock.sleep(250);
+            main(() -> {
+                first.set(touch.get().cameraSnapshot()); assertNotNull(first.get());
+                touch.get().update(new JSONArray().put(finger(0, jx + 20, jy)).put(finger(1, cx + 8, cy)), 1200, authorized::get, 3);
+                assertNull("A newly accepted camera point is not yet applied", touch.get().cameraSnapshot());
+            });
+            SystemClock.sleep(300);
+            main(() -> {
+                assertEquals(2, cameraDownX.size()); assertEquals(cx + 8, cameraDownX.get(1), 2f);
+                assertEquals(1, cameraUps.get()); assertEquals(0, joystickUps.get()); assertEquals(1, gestureDowns.get());
+                var proof = touch.get().cameraSnapshot(); assertNotNull(proof);
+                assertEquals(first.get().epoch() + 1, proof.epoch()); assertEquals(3, proof.sequence());
+                assertTrue(proof.heldSince() > first.get().heldSince());
+                first.set(proof);
+                touch.get().update(new JSONArray().put(finger(0, jx + 20, jy)).put(finger(1, cx + 8, cy)), 1200, authorized::get, 4);
+            });
+            SystemClock.sleep(120);
+            main(() -> {
+                assertEquals("Same-point renewal must not repress", 2, cameraDownX.size());
+                assertEquals(first.get().heldSince(), touch.get().cameraSnapshot().heldSince());
+                onCameraUp.set(() -> {
+                    assertNull("No proof between UP and fresh DOWN", touch.get().cameraSnapshot());
+                    touch.get().update(new JSONArray().put(finger(0, jx + 20, jy)).put(finger(1, cx - 8, cy)), 1200, authorized::get, 6);
+                });
+                touch.get().update(new JSONArray().put(finger(0, jx + 20, jy)).put(finger(1, cx + 24, cy)), 1200, authorized::get, 5);
+            });
+            SystemClock.sleep(300);
+            main(() -> {
+                assertEquals(3, cameraDownX.size()); assertEquals("Superseded +24 point must never be pressed", cx - 8, cameraDownX.get(2), 2f);
+                assertEquals(0, joystickUps.get()); assertEquals(1, gestureDowns.get());
+                var proof = touch.get().cameraSnapshot(); assertNotNull(proof); assertEquals(6, proof.sequence()); assertEquals(cx - 8, proof.point().x());
+                onCameraUp.set(() -> authorized.set(false));
+                touch.get().update(new JSONArray().put(finger(0, jx, jy)).put(finger(1, cx + 8, cy)), 1200, authorized::get, 7);
+            });
+            SystemClock.sleep(350);
+            main(() -> { assertEquals(3, cameraDownX.size()); assertFalse(touch.get().active()); assertNull(touch.get().cameraSnapshot()); });
+            // Deliberately stall this isolated test View after camera UP. The
+            // desired TTL expires before the next dispatch, so no DOWN is legal.
+            authorized.set(true);
+            main(() -> touch.get().update(new JSONArray().put(finger(0, jx, jy)).put(finger(1, cx, cy)), 1200, authorized::get, 8));
+            SystemClock.sleep(250);
+            int[] beforeExpiry = new int[1];
+            main(() -> {
+                beforeExpiry[0] = cameraDownX.size();
+                onCameraUp.set(() -> SystemClock.sleep(150));
+                touch.get().update(new JSONArray().put(finger(0, jx, jy)).put(finger(1, cx + 8, cy)), 100, authorized::get, 9);
+            });
+            SystemClock.sleep(550);
+            main(() -> { assertEquals(beforeExpiry[0], cameraDownX.size()); assertFalse(touch.get().active()); assertNull(touch.get().cameraSnapshot()); });
+            main(() -> touch.get().update(new JSONArray().put(finger(0, jx, jy)).put(finger(1, cx, cy)), 1200, authorized::get, 10));
+            SystemClock.sleep(250);
+            int[] beforeRelease = new int[1];
+            main(() -> {
+                beforeRelease[0] = cameraDownX.size(); onCameraUp.set(() -> touch.get().release());
+                touch.get().update(new JSONArray().put(finger(0, jx, jy)).put(finger(1, cx + 8, cy)), 1200, authorized::get, 11);
+            });
+            SystemClock.sleep(350);
+            main(() -> { assertEquals(beforeRelease[0], cameraDownX.size()); assertFalse(touch.get().active()); assertNull(touch.get().cameraSnapshot()); });
+            assertEquals("Two-stage camera change must not cancel Android's gesture", 0, cancels.get());
+        } finally {
+            onCameraUp.set(null); authorized.set(false);
             if (touch.get() != null) { main(() -> touch.get().release()); SystemClock.sleep(200); }
         }
     }

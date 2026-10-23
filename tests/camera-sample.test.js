@@ -58,6 +58,7 @@ test('saves exact native JPEG and matching proof only after releasing and stoppi
   assert.equal(metadata.sha256, createHash('sha256').update(jpeg).digest('hex'));
   assert.deepEqual(metadata.cameraProof, proof());
   assert.deepEqual(metadata.touchAck, { sequence: 1, point: { x: 316, y: 218 }, ttlMs: 1200 });
+  assert.equal(metadata.nativeCameraPointChange, 'legacy-unreported');
   assert.equal(metadata.timing.waitMs, 450);
   assert.equal(metadata.timing.holdToFrameMs, 1000);
   assert.equal(JSON.stringify(metadata).includes('private-'), false);

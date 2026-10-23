@@ -16,6 +16,7 @@ import java.util.function.BooleanSupplier;
 
 /** Bounded, continuously held strokes. All access is confined to the main looper. */
 final class FollowTouch {
+    static final String CAMERA_POINT_CHANGE = "release-newdown";
     private static final String TAG = "PPFollowTouch";
     private static final int STROKE_MS = 80;
     private record Point(float x, float y, float fromX, float fromY) { }
@@ -114,9 +115,16 @@ final class FollowTouch {
         }
         GestureDescription.Builder builder = new GestureDescription.Builder();
         Map<Integer, Held> next = new LinkedHashMap<>();
+        Held oldCamera = held.get(1);
+        Point wantedCamera = desired.get(1);
+        // The game can ignore short camera MOVE strokes even when Android
+        // completes them. End only id 1 first; its replacement is added by the
+        // next step after this UP completes. Other held fingers remain continuous.
+        boolean repressCamera = oldCamera != null && wantedCamera != null
+            && (oldCamera.x != wantedCamera.x || oldCamera.y != wantedCamera.y);
         for (Map.Entry<Integer, Held> entry : held.entrySet()) {
             Held old = entry.getValue();
-            Point point = desired.get(entry.getKey());
+            Point point = repressCamera && entry.getKey() == 1 ? null : desired.get(entry.getKey());
             Path path = new Path(); path.moveTo(old.x, old.y);
             float x = point == null ? old.x : point.x, y = point == null ? old.y : point.y;
             path.lineTo(x, y);
@@ -133,20 +141,29 @@ final class FollowTouch {
         int newStartMs = held.isEmpty() ? 0 : 1;
         int additions = 0;
         for (Map.Entry<Integer, Point> entry : desired.entrySet()) {
+            // During camera UP, held still contains id 1, so it cannot also be
+            // added here. The completion callback re-reads the latest desired
+            // map/authorization/TTL; it never queues a captured replacement point.
             if (held.containsKey(entry.getKey())) continue;
             Point point = entry.getValue();
-            Path path = new Path(); path.moveTo(point.fromX, point.fromY); path.lineTo(point.x, point.y);
+            Path path = new Path();
+            if (entry.getKey() == 1) path.moveTo(point.x, point.y);
+            else path.moveTo(point.fromX, point.fromY);
+            path.lineTo(point.x, point.y);
             GestureDescription.StrokeDescription stroke = newStroke(path, !held.isEmpty());
             builder.addStroke(stroke); next.put(entry.getKey(), new Held(stroke, point.x, point.y));
             additions++;
         }
         inFlight = true;
-        long dispatched = ++dispatchSequence, dispatchedAt = SystemClock.uptimeMillis();
-        trace("dispatch", "additions=" + additions + " newStartMs=" + newStartMs);
+        long dispatched = ++dispatchSequence, dispatchedAt = SystemClock.uptimeMillis(), commandSequence = sequence;
+        String cameraStage = repressCamera ? "release-for-change" : oldCamera == null && wantedCamera != null ? "fresh-down" : "unchanged-or-release";
         FollowCameraProof.Request cameraRequest = camera.request();
+        trace("dispatch", "additions=" + additions + " newStartMs=" + newStartMs + " cameraStage=" + cameraStage
+            + " cameraEpoch=" + cameraRequest.epoch() + " cameraPoint=" + (wantedCamera == null ? "none" : wantedCamera.x + "," + wantedCamera.y));
         boolean accepted = service.dispatchGesture(builder.build(), new AccessibilityService.GestureResultCallback() {
             @Override public void onCompleted(GestureDescription description) {
-                trace("completed", "callbackDispatch=" + dispatched + " elapsedMs=" + (SystemClock.uptimeMillis() - dispatchedAt));
+                trace("completed", "callbackDispatch=" + dispatched + " callbackSequence=" + commandSequence
+                    + " cameraStage=" + cameraStage + " elapsedMs=" + (SystemClock.uptimeMillis() - dispatchedAt));
                 inFlight = false; held.clear(); held.putAll(next);
                 if (authorized.getAsBoolean()) camera.applied(cameraRequest, cameraPoint(next), SystemClock.uptimeMillis());
                 else camera.invalidate();

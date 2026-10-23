@@ -71,4 +71,36 @@ public class FollowCameraProofTest {
         camera.applied(camera.request(), b, 380); assertNull(camera.snapshot(400));
         camera.applied(camera.request(), a, 1500); assertNull(camera.snapshot(1501));
     }
+    @Test public void changingPointRequiresNewDownAfterCameraUpEvenIfJoystickContinues() throws Exception {
+        held(); var before = camera.snapshot(200);
+        camera.request(2, b, 1500, 300); var change = camera.request();
+        // First dispatch ends only camera id 1. Completing id 0's continuation
+        // cannot attest the replacement camera while there is no held id 1.
+        camera.applied(change, null, 380);
+        assertNull(camera.snapshot(390)); assertNull(camera.captured(before, 385, 390));
+        camera.applied(change, b, 460);
+        var after = camera.snapshot(470);
+        assertEquals(before.epoch() + 1, after.epoch()); assertEquals(460, after.heldSince());
+        assertNotNull(camera.captured(after, 480, 490));
+    }
+    @Test public void updatesDuringCameraUpDoNotProveOrRestoreSupersededDown() throws Exception {
+        held(); camera.request(2, b, 1500, 300); var previous = camera.request();
+        camera.request(3, a, 1550, 350); var latest = camera.request();
+        camera.applied(previous, null, 380); assertNull(camera.snapshot(390));
+        camera.applied(previous, b, 460); assertNull(camera.snapshot(470));
+        camera.applied(latest, a, 540);
+        var proof = camera.snapshot(550); assertEquals(3, proof.sequence()); assertEquals(540, proof.heldSince());
+        camera.request(4, null, 1700, 560);
+        camera.applied(latest, a, 600); assertNull(camera.snapshot(610));
+    }
+    @Test public void samePointRenewalDuringRepressDoesNotShortcutDownOrExtendAppliedTime() throws Exception {
+        held(); camera.request(2, b, 1500, 300); var change = camera.request();
+        camera.request(3, b, 1550, 350);
+        camera.applied(change, null, 380); assertNull(camera.snapshot(390));
+        camera.applied(change, b, 460);
+        var proof = camera.snapshot(470); assertEquals(3, proof.sequence()); assertEquals(460, proof.heldSince());
+        camera.request(4, a, 600, 500); var expiring = camera.request();
+        camera.applied(expiring, null, 580); assertNull(camera.snapshot(590));
+        camera.applied(expiring, a, 660); assertNull(camera.snapshot(670));
+    }
 }

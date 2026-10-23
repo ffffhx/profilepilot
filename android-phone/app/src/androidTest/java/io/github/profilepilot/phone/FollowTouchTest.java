@@ -6,6 +6,8 @@ import android.app.UiAutomation;
 import android.content.Intent;
 import android.graphics.BitmapFactory;
 import android.graphics.Path;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Base64;
 import android.util.Log;
@@ -36,6 +38,11 @@ public class FollowTouchTest {
         instrumentation.runOnMainSync(() -> {
             try { operation.run(); } catch (Exception error) { throw new RuntimeException(error); }
         });
+    }
+    private void after(int ms, Operation operation) {
+        new Handler(Looper.getMainLooper()).postDelayed(() -> {
+            try { operation.run(); } catch (Exception error) { throw new RuntimeException(error); }
+        }, ms);
     }
     private JSONArray point(int x, int y, int fromX) throws Exception {
         return new JSONArray().put(new JSONObject().put("id", 0).put("x", x).put("y", y)
@@ -359,6 +366,8 @@ public class FollowTouchTest {
         AtomicInteger joystickUps = new AtomicInteger(), cameraUps = new AtomicInteger(), cancels = new AtomicInteger(), gestureDowns = new AtomicInteger();
         AtomicReference<Operation> onCameraUp = new AtomicReference<>();
         List<Float> cameraDownX = new ArrayList<>(); // Main-looper access only.
+        long[] lastCameraUpAt = { -1 };
+        float[] lastJoystickX = { -1 };
         AtomicReference<FollowCameraProof.Snapshot> first = new AtomicReference<>();
         try (ActivityScenario<ControlBenchmarkActivity> activity = ActivityScenario.launch(
                 new Intent(instrumentation.getTargetContext(), ControlBenchmarkActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))) {
@@ -369,11 +378,16 @@ public class FollowTouchTest {
                     if (action == MotionEvent.ACTION_DOWN) { joystickId.set(id); gestureDowns.incrementAndGet(); }
                     if (action == MotionEvent.ACTION_POINTER_DOWN) {
                         assertEquals("Only the camera is added to this fixture's held joystick", 2, event.getPointerCount());
+                        if (lastCameraUpAt[0] >= 0) assertTrue("New camera DOWN must follow actual UP by at least 100ms",
+                            event.getEventTime() - lastCameraUpAt[0] >= FollowTouch.CAMERA_REPRESS_GAP_MS);
                         cameraId.set(id); cameraDownX.add(event.getRawX(index));
                     }
+                    int joystickIndex = event.findPointerIndex(joystickId.get());
+                    if (joystickIndex >= 0) lastJoystickX[0] = event.getRawX(joystickIndex);
                     if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP) {
                         if (id == joystickId.get()) joystickUps.incrementAndGet();
                         if (id == cameraId.get()) {
+                            lastCameraUpAt[0] = event.getEventTime();
                             cameraUps.incrementAndGet(); cameraId.set(-1);
                             Operation operation = onCameraUp.getAndSet(null);
                             if (operation != null) {
@@ -401,7 +415,7 @@ public class FollowTouchTest {
                 touch.get().update(new JSONArray().put(finger(0, jx + 20, jy)).put(finger(1, cx + 8, cy)), 1200, authorized::get, 3);
                 assertNull("A newly accepted camera point is not yet applied", touch.get().cameraSnapshot());
             });
-            SystemClock.sleep(300);
+            SystemClock.sleep(400);
             main(() -> {
                 assertEquals(2, cameraDownX.size()); assertEquals(cx + 8, cameraDownX.get(1), 2f);
                 assertEquals(1, cameraUps.get()); assertEquals(0, joystickUps.get()); assertEquals(1, gestureDowns.get());
@@ -415,31 +429,33 @@ public class FollowTouchTest {
             main(() -> {
                 assertEquals("Same-point renewal must not repress", 2, cameraDownX.size());
                 assertEquals(first.get().heldSince(), touch.get().cameraSnapshot().heldSince());
-                onCameraUp.set(() -> {
+                // Re-evaluate a new desired point and joystick movement during
+                // the release dwell; never enqueue the superseded +24 camera.
+                onCameraUp.set(() -> after(30, () -> {
                     assertNull("No proof between UP and fresh DOWN", touch.get().cameraSnapshot());
-                    touch.get().update(new JSONArray().put(finger(0, jx + 20, jy)).put(finger(1, cx - 8, cy)), 1200, authorized::get, 6);
-                });
+                    touch.get().update(new JSONArray().put(finger(0, jx + 40, jy)).put(finger(1, cx - 8, cy)), 1200, authorized::get, 6);
+                }));
                 touch.get().update(new JSONArray().put(finger(0, jx + 20, jy)).put(finger(1, cx + 24, cy)), 1200, authorized::get, 5);
             });
-            SystemClock.sleep(300);
+            SystemClock.sleep(400);
             main(() -> {
                 assertEquals(3, cameraDownX.size()); assertEquals("Superseded +24 point must never be pressed", cx - 8, cameraDownX.get(2), 2f);
                 assertEquals(0, joystickUps.get()); assertEquals(1, gestureDowns.get());
+                assertEquals("Joystick must accept the latest direction during camera dwell", jx + 40, lastJoystickX[0], 2f);
                 var proof = touch.get().cameraSnapshot(); assertNotNull(proof); assertEquals(6, proof.sequence()); assertEquals(cx - 8, proof.point().x());
-                onCameraUp.set(() -> authorized.set(false));
+                onCameraUp.set(() -> after(30, () -> authorized.set(false)));
                 touch.get().update(new JSONArray().put(finger(0, jx, jy)).put(finger(1, cx + 8, cy)), 1200, authorized::get, 7);
             });
             SystemClock.sleep(350);
             main(() -> { assertEquals(3, cameraDownX.size()); assertFalse(touch.get().active()); assertNull(touch.get().cameraSnapshot()); });
-            // Deliberately stall this isolated test View after camera UP. The
-            // desired TTL expires before the next dispatch, so no DOWN is legal.
+            // The 100ms TTL expires during the natural 80ms UP + 100ms dwell.
+            // No artificial View stall or expiry extension is needed or allowed.
             authorized.set(true);
             main(() -> touch.get().update(new JSONArray().put(finger(0, jx, jy)).put(finger(1, cx, cy)), 1200, authorized::get, 8));
             SystemClock.sleep(250);
             int[] beforeExpiry = new int[1];
             main(() -> {
                 beforeExpiry[0] = cameraDownX.size();
-                onCameraUp.set(() -> SystemClock.sleep(150));
                 touch.get().update(new JSONArray().put(finger(0, jx, jy)).put(finger(1, cx + 8, cy)), 100, authorized::get, 9);
             });
             SystemClock.sleep(550);
@@ -448,7 +464,7 @@ public class FollowTouchTest {
             SystemClock.sleep(250);
             int[] beforeRelease = new int[1];
             main(() -> {
-                beforeRelease[0] = cameraDownX.size(); onCameraUp.set(() -> touch.get().release());
+                beforeRelease[0] = cameraDownX.size(); onCameraUp.set(() -> after(30, () -> touch.get().release()));
                 touch.get().update(new JSONArray().put(finger(0, jx, jy)).put(finger(1, cx + 8, cy)), 1200, authorized::get, 11);
             });
             SystemClock.sleep(350);

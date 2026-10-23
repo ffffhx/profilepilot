@@ -125,7 +125,8 @@ public final class ControlService extends Service {
         session.authorize(input.getString("instanceId"), input.getString("sessionId"), input.getLong("generation"), op.equals("touch"));
         if (op.equals("probe")) {
             result.complete(success(new JSONObject().put("protocol", 1).put("cameraFrameProvenance", 1)
-                .put("cameraPointChange", FollowTouch.CAMERA_POINT_CHANGE), timing)); return;
+                .put("cameraPointChange", FollowTouch.CAMERA_POINT_CHANGE)
+                .put("cameraRepressGapMs", FollowTouch.CAMERA_REPRESS_GAP_MS), timing)); return;
         }
         if (op.equals("touch")) {
             long sequence = input.getLong("sequence");

@@ -73,6 +73,7 @@ test('eight-step plan uses one lease/id1, preserves native bytes, changes epoch 
   assert.equal(result.complete, true);
   assert.equal(result.ttlMs, 1500);
   assert.equal(result.nativeCameraPointChange, 'legacy-unreported');
+  assert.equal(result.nativeCameraRepressGapMs, null);
   assert.equal(f.calls.filter(c => c[0] === 'start').length, 1);
   assert.equal(f.calls.filter(c => c[0] === 'stop').length, 1);
   assert.equal(f.calls.filter(c => c[0] === 'sync').length, 8);
@@ -139,6 +140,22 @@ test('diagnostic records native re-press capability independently of host contin
     const second = JSON.parse(await fs.readFile(path.join(f.command.outputDir, 'step-02/sample.json'), 'utf8'));
     assert.equal(second.mode, 'continue'); assert.equal(second.nativeCameraPointChange, expected);
     assert.equal(result.hostContinueMeaning, 'update-desired-point-without-host-release');
+  }
+});
+
+test('declared native release gap is preserved without inventing timing for legacy/invalid probes', async t => {
+  for (const gap of [100, 0, undefined, -1, 100.5, '100', 1501]) {
+    const expected = typeof gap === 'number' && Number.isSafeInteger(gap) && gap >= 0 && gap <= 1500 ? gap : null;
+    const f = await fixture(t, { probe: { cameraPointChange: 'release-newdown', cameraRepressGapMs: gap } });
+    const result = await f.sampler.sample(f.command);
+    assert.equal(result.nativeCameraRepressGapMs, expected);
+    const manifest = await f.manifest(); assert.equal(manifest.nativeCameraRepressGapMs, expected);
+    const probe = JSON.parse(await fs.readFile(path.join(f.command.outputDir, 'probe.json'), 'utf8'));
+    assert.equal(probe.nativeCameraRepressGapMs, expected);
+    const second = JSON.parse(await fs.readFile(path.join(f.command.outputDir, 'step-02/sample.json'), 'utf8'));
+    assert.equal(second.nativeCameraRepressGapMs, expected); assert.equal(second.mode, 'continue');
+    assert.equal(second.touchAck.ttlMs, 1500); assert.equal(second.timing.waitMs, 450);
+    assert.equal(manifest.events.find(e => e.kind === 'native-camera-strategy').nativeCameraRepressGapMs, expected);
   }
 });
 

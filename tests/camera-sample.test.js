@@ -59,6 +59,7 @@ test('saves exact native JPEG and matching proof only after releasing and stoppi
   assert.deepEqual(metadata.cameraProof, proof());
   assert.deepEqual(metadata.touchAck, { sequence: 1, point: { x: 316, y: 218 }, ttlMs: 1200 });
   assert.equal(metadata.nativeCameraPointChange, 'legacy-unreported');
+  assert.equal(metadata.nativeCameraRepressGapMs, null);
   assert.equal(metadata.timing.waitMs, 450);
   assert.equal(metadata.timing.holdToFrameMs, 1000);
   assert.equal(JSON.stringify(metadata).includes('private-'), false);
@@ -67,6 +68,16 @@ test('saves exact native JPEG and matching proof only after releasing and stoppi
     { op: 'touch', sequence: 1, ttlMs: 1200, points: [{ id: 1, x: 316, y: 218 }] },
     { op: 'frame', cameraFrameProvenance: 1 }, { op: 'touch', sequence: 2, ttlMs: 100, points: [] } ]);
   released(f);
+});
+
+test('single sample records native release-gap capability without changing its 1200ms TTL', async t => {
+  const f = await fixture(t, { live(input) {
+    if (input.op === 'probe') return { protocol: 1, cameraFrameProvenance: 1, cameraPointChange: 'release-newdown', cameraRepressGapMs: 100 };
+  } });
+  const result = await f.sampler.sample(f.command);
+  const metadata = JSON.parse(await fs.readFile(result.metadataPath, 'utf8'));
+  assert.equal(metadata.nativeCameraRepressGapMs, 100); assert.equal(metadata.touchAck.ttlMs, 1200);
+  assert.equal(metadata.timing.waitMs, 450); released(f);
 });
 
 test('existing output directory fails before acquiring phone, without overwrite', async t => {

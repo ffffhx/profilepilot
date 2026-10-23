@@ -17,6 +17,7 @@ import java.util.function.BooleanSupplier;
 /** Bounded, continuously held strokes. All access is confined to the main looper. */
 final class FollowTouch {
     static final String CAMERA_POINT_CHANGE = "release-newdown";
+    static final int CAMERA_REPRESS_GAP_MS = 100;
     private static final String TAG = "PPFollowTouch";
     private static final int STROKE_MS = 80;
     private record Point(float x, float y, float fromX, float fromY) { }
@@ -33,6 +34,7 @@ final class FollowTouch {
     private final FollowCameraProof camera = new FollowCameraProof();
     private long sequence;
     private long dispatchSequence;
+    private long cameraDownNotBefore;
     FollowTouch(AccessibilityService service) { this.service = service; }
     void update(JSONArray points, int ttlMs, BooleanSupplier authorized) throws Exception {
         update(points, ttlMs, authorized, sequence + 1);
@@ -94,15 +96,23 @@ final class FollowTouch {
     boolean active() { return inFlight || !held.isEmpty() || !desired.isEmpty(); }
     private void step() {
         main.removeCallbacks(advance);
+        long now = SystemClock.uptimeMillis();
         boolean allowed = authorized.getAsBoolean();
-        if (!allowed || SystemClock.uptimeMillis() >= expires) {
+        if (!allowed || now >= expires) {
             if (!desired.isEmpty()) trace("release", allowed ? "expired" : "authorization_revoked");
             camera.invalidate(); desired.clear();
         }
         if (desired.isEmpty() && held.isEmpty()) return;
-        boolean changed = !held.keySet().equals(desired.keySet());
+        // The target game may process an immediate UP/DOWN as a camera release.
+        // Wait after the UP completion callback (later than injection), while
+        // continuing every other finger. Keep only a time gate, never a queued
+        // point: each wake/update re-reads the latest desired map, owner and TTL.
+        long cameraWait = !held.containsKey(1) && desired.containsKey(1) ? Math.max(0, cameraDownNotBefore - now) : 0;
+        Map<Integer, Point> effective = desired;
+        if (cameraWait > 0) { effective = new LinkedHashMap<>(desired); effective.remove(1); }
+        boolean changed = !held.keySet().equals(effective.keySet());
         for (Map.Entry<Integer, Held> entry : held.entrySet()) {
-            Point point = desired.get(entry.getKey());
+            Point point = effective.get(entry.getKey());
             if (point != null && (point.x != entry.getValue().x || point.y != entry.getValue().y)) changed = true;
         }
         if (!changed) {
@@ -110,13 +120,14 @@ final class FollowTouch {
             // A continued pointer stays down between gestures. A stationary
             // continuation has no DOWN, MOVE or UP event, so Android rejects it.
             // Keep the previous stroke and still check authorization/TTL often.
-            main.postDelayed(advance, STROKE_MS);
+            long wait = cameraWait > 0 ? Math.min(STROKE_MS, cameraWait) : STROKE_MS;
+            main.postDelayed(advance, Math.max(1, Math.min(wait, expires - now)));
             return;
         }
         GestureDescription.Builder builder = new GestureDescription.Builder();
         Map<Integer, Held> next = new LinkedHashMap<>();
         Held oldCamera = held.get(1);
-        Point wantedCamera = desired.get(1);
+        Point wantedCamera = effective.get(1);
         // The game can ignore short camera MOVE strokes even when Android
         // completes them. End only id 1 first; its replacement is added by the
         // next step after this UP completes. Other held fingers remain continuous.
@@ -124,7 +135,7 @@ final class FollowTouch {
             && (oldCamera.x != wantedCamera.x || oldCamera.y != wantedCamera.y);
         for (Map.Entry<Integer, Held> entry : held.entrySet()) {
             Held old = entry.getValue();
-            Point point = repressCamera && entry.getKey() == 1 ? null : desired.get(entry.getKey());
+            Point point = repressCamera && entry.getKey() == 1 ? null : effective.get(entry.getKey());
             Path path = new Path(); path.moveTo(old.x, old.y);
             float x = point == null ? old.x : point.x, y = point == null ? old.y : point.y;
             path.lineTo(x, y);
@@ -140,7 +151,7 @@ final class FollowTouch {
         // Keep the same 80 ms end time and leave fresh/single-pointer starts alone.
         int newStartMs = held.isEmpty() ? 0 : 1;
         int additions = 0;
-        for (Map.Entry<Integer, Point> entry : desired.entrySet()) {
+        for (Map.Entry<Integer, Point> entry : effective.entrySet()) {
             // During camera UP, held still contains id 1, so it cannot also be
             // added here. The completion callback re-reads the latest desired
             // map/authorization/TTL; it never queues a captured replacement point.
@@ -164,6 +175,10 @@ final class FollowTouch {
             @Override public void onCompleted(GestureDescription description) {
                 trace("completed", "callbackDispatch=" + dispatched + " callbackSequence=" + commandSequence
                     + " cameraStage=" + cameraStage + " elapsedMs=" + (SystemClock.uptimeMillis() - dispatchedAt));
+                if (oldCamera != null && !next.containsKey(1)) {
+                    cameraDownNotBefore = SystemClock.uptimeMillis() + CAMERA_REPRESS_GAP_MS;
+                    trace("camera-gap", "afterCallbackMs=" + CAMERA_REPRESS_GAP_MS + " downNotBeforeUptimeMs=" + cameraDownNotBefore);
+                }
                 inFlight = false; held.clear(); held.putAll(next);
                 if (authorized.getAsBoolean()) camera.applied(cameraRequest, cameraPoint(next), SystemClock.uptimeMillis());
                 else camera.invalidate();

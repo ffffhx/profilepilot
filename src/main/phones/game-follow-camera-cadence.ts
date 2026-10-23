@@ -11,8 +11,11 @@ export type CameraCaptureWindow = Readonly<{
 // 80ms is its UP stroke duration; callbacks and dispatch can still run late.
 // A later frame must independently pass the native proof's 250ms stable gate.
 const RESELECT_MS = 80 + 100 + 250;
-const FIRST_DOWN_MS = 250;
+// ACK can precede the actual DOWN callback: the prior 250ms schedule produced
+// native stable ages of 212-216ms. Keep a 50ms scheduling margin, not new proof.
+const FIRST_DOWN_MS = 300;
 const CHECK_MS = 25;
+export const CAMERA_ACK_RESERVE_MS = 50;
 
 /** Only a newly added or changed id1 needs an additional capture interval. */
 export function cameraCaptureWindow(previous: Point | undefined, next: Point | null,

@@ -23,7 +23,7 @@ test('a completed full-frame download cannot bypass the post-recenter capture wi
 });
 
 test('initial DOWN, same-point renewal and camera release keep distinct scheduling semantics', () => {
-  assert.deepEqual(cameraCaptureWindow(undefined, newPoint, 100, 130, 1200), { notBefore: 380, expiresAt: 1300 });
+  assert.deepEqual(cameraCaptureWindow(undefined, newPoint, 100, 130, 1500), { notBefore: 430, expiresAt: 1600 });
   assert.equal(cameraCaptureWindow(oldPoint, { ...oldPoint }, 100, 130, 1200), undefined);
   assert.equal(cameraCaptureWindow(oldPoint, null, 100, 130, 1200), undefined);
   assert.equal(cameraCaptureWindow(undefined, null, 100, 130, 1200), undefined);

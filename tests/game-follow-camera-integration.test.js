@@ -301,7 +301,7 @@ test('two current full portraits can lead id1 after loss but never supply a joys
   assert.deepEqual(h.touches[1].points.map(p => p.id), [0]);
   assert.deepEqual(h.touches[2].points.map(p => p.id), [1]);
   assert.ok(h.touches[2].points[0].x > 300 && h.touches[2].points[0].x < 500);
-  assert.equal(h.touches[2].ttlMs, 1200);
+  assert.equal(h.touches[2].ttlMs, 1500);
   assert.deepEqual(h.touches[3].points.map(p => p.id), [1], 'next camera direction still needs its own applied proof');
   assert.ok(h.requests().filter(r => r.op === 'analyze').every(r => !r.cameraContext));
 });
@@ -356,7 +356,7 @@ test('host forwards a validated marker self seed below portrait confidence, but 
   const started = await h.start({ config: c }); await until(() => h.touches.length >= 3);
   assert.deepEqual(h.touches[1].points.map(p => p.id), [0]);
   assert.deepEqual(h.touches[2].points, [{ id: 1, x: 333, y: 290, fromX: 333, fromY: 290 }]);
-  assert.equal(h.touches[2].ttlMs, 1200);
+  assert.equal(h.touches[2].ttlMs, 1500);
   const status = await h.manager.command({ op: 'status' });
   assert.equal(status.camera.placement.seedSource, 'marker'); assert.equal(status.actions, 2);
   assert.equal(status.camera.placement.prediction, undefined);
@@ -461,7 +461,7 @@ test('chunked full capture waits after recenter ACK without renewing its held jo
   assert.deepEqual(h.touches[3].points.map(p => p.id), [0, 1], 'new current stable proof keeps movement');
   const recenter = h.calls.findIndex(c => c.op === 'touch' && c.sequence === h.touches[2].sequence);
   assert.equal(h.calls[recenter + 1].op, 'frame', 'no keepalive or renewed input is inserted into the wait');
-  assert.equal(h.touches[2].ttlMs, 1200);
+  assert.equal(h.touches[2].ttlMs, 1500);
 });
 
 test('stopping during the camera capture window releases promptly without a late capture or input', async t => {
@@ -477,7 +477,8 @@ test('stopping during the camera capture window releases promptly without a late
 
 test('a first recentered capture that crosses the original TTL is discarded and released before another capture', async t => {
   const h = harness(t, { cameraOffset: .02, frameProof: movedCameraProof,
-    chunkDelayMs: h => h.captures === 4 ? 850 : 0 });
+    chunkDelayMs: h => h.captures === 4 ? 850 : 0,
+    touch: async c => { if (c.sequence === 3) await wait(250); return { accepted: true, acceptedSequence: c.sequence }; } });
   const started = await h.start(); await until(() => h.captures >= 5); await h.stop(started);
   const captureIndices = h.calls.map((c, i) => c.op === 'frame' ? i : -1).filter(i => i >= 0);
   const between = h.calls.slice(captureIndices[3] + 1, captureIndices[4]);
@@ -488,4 +489,59 @@ test('a first recentered capture that crosses the original TTL is discarded and 
   assert.equal(requests.slice(0, configuredAgain).filter(r => r.op === 'analyze').length, 3,
     'expired capture never reaches vision or supplies a direction');
   assert.equal((await h.manager.command({ op: 'status' })).error, '');
+});
+
+test('camera input with less than 50ms of old hold remaining releases and remeasures instead of sending its planned direction', async t => {
+  const h = harness(t, { cameraOffset: .02, frameProof: movedCameraProof,
+    chunkDelayMs: h => h.captures === 4 ? 845 : 0,
+    touch: async c => { if (c.sequence === 3) await wait(200); return { accepted: true, acceptedSequence: c.sequence }; } });
+  const started = await h.start({ recoverTransport: true }); await until(() => h.captures >= 5);
+  const status = await h.manager.command({ op: 'status' }); await h.stop(started);
+  assert.deepEqual(h.touches.find(c => c.sequence === 4).points, []);
+  assert.equal(status.camera.releaseReasons['input-ack-reserve'], 1);
+  assert.equal(status.running, true); assert.equal(status.error, ''); assert.equal(h.recoveries, 0);
+  assert.ok(h.requests().filter(r => r.op === 'configure').length >= 2);
+});
+
+function nearDeadline(t, patch = {}) {
+  return harness(t, { cameraOffset: .02, frameProof: movedCameraProof,
+    chunkDelayMs: h => h.captures === 4 ? 800 : 0,
+    touch: async c => {
+      if (c.sequence === 3) await wait(100);
+      if (c.sequence === 4) { await wait(220); if (patch.unknown) return { accepted: true, acceptedSequence: 3 }; }
+      if (c.sequence === 5 && patch.release === 'wrong-ack') return { accepted: true, acceptedSequence: 4 };
+      if (c.sequence === 5 && patch.release === 'transport-error') throw Error('release transport lost');
+      return { accepted: true, acceptedSequence: c.sequence };
+    } });
+}
+
+test('an exact but late camera ACK is released with a newer verified sequence before fresh measurement', async t => {
+  const h = nearDeadline(t), started = await h.start({ recoverTransport: true });
+  await until(() => h.captures >= 5);
+  const status = await h.manager.command({ op: 'status' }); await h.stop(started);
+  assert.deepEqual(h.touches.find(c => c.sequence === 4).points.map(p => p.id), [0, 1]);
+  assert.deepEqual(h.touches.find(c => c.sequence === 5).points, []);
+  assert.equal(h.touches.filter(c => c.sequence === 4).length, 1, 'known input is never replayed');
+  const release = h.calls.findIndex(c => c.op === 'touch' && c.sequence === 5);
+  assert.equal(h.calls[release + 1].op, 'frame');
+  assert.equal(status.running, true); assert.equal(status.error, ''); assert.equal(h.recoveries, 0);
+  assert.equal(status.camera.releaseReasons['late-input-ack'], 1);
+  assert.ok(h.requests().filter(r => r.op === 'configure').length >= 2);
+});
+
+test('a wrong late ACK remains fatal even with transport recovery enabled', async t => {
+  const h = nearDeadline(t, { unknown: true }); await h.start({ recoverTransport: true });
+  await until(async () => !(await h.manager.command({ op: 'status' })).running);
+  assert.equal(h.touches.length, 4); assert.equal(h.captures, 4); assert.equal(h.recoveries, 0);
+  assert.equal(h.stopped, 1); assert.match((await h.manager.command({ op: 'status' })).error, /未确认/);
+});
+
+test('failure or uncertainty in the mandatory release ends the run without recovering or taking another frame', async t => {
+  for (const release of ['wrong-ack', 'transport-error']) {
+    const h = nearDeadline(t, { release }); await h.start({ recoverTransport: true });
+    await until(async () => !(await h.manager.command({ op: 'status' })).running);
+    assert.equal(h.touches.length, 5); assert.deepEqual(h.touches[4].points, []);
+    assert.equal(h.captures, 4); assert.equal(h.recoveries, 0); assert.equal(h.stopped, 1);
+    assert.match((await h.manager.command({ op: 'status' })).error, /未确认释放|release transport lost/);
+  }
 });

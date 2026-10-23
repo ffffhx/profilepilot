@@ -224,7 +224,9 @@ export class GameFollowCamera {
       if (reason === "arm" || reason === "arm-self" || reason === "switch-search-self" || reason === "switch-search-target"
         || reason === "weak-search-arm") this.armAttempts++;
       const value: CameraPlan = Object.freeze({ id: ++this.nextId, point: point ? copyPoint(point) : null,
-        stopJoystick, allowCameraMovement, reason, ttlMs: point ? Math.min(1200, remaining) : 1200 });
+        // Android accepts at most 1500ms. Camera settling and full-frame
+        // analysis share that bound; search/weak-visit deadlines can shorten it.
+        stopJoystick, allowCameraMovement, reason, ttlMs: point ? Math.min(1500, remaining) : 1200 });
       this.pending = { plan: value, createdAt: now, role }; this.reason = reason; return value;
     };
     if (!this.enabled) return plan(null, false, false, "disabled");

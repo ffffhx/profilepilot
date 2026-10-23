@@ -7,7 +7,7 @@ import pathlib
 import sys
 import unittest
 from contextlib import redirect_stdout
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 sys.dont_write_bytecode = True
 
 import cv2
@@ -70,6 +70,65 @@ def partial_arc_fixture():
 
 
 class VisionTests(unittest.TestCase):
+    def test_current_full_target_skips_unused_camera_without_changing_navigation(self):
+        config, frame, _, _ = fixture()
+        baseline, follower = vision.Follower(config), vision.Follower(config)
+        follower.camera = Mock()
+        follower.camera.locate.side_effect = AssertionError('reliable full target must not run camera matching')
+        context = dict(point=dict(x=100, y=100), epoch=0, sequence=1)
+        for now in (10, 10.4):
+            expected = baseline.analyze(encoded(frame), now)
+            result = follower.analyze(encoded(frame), now, cameraContext=context)
+            expected.pop('elapsedMs'); result.pop('elapsedMs')
+            self.assertEqual(result, expected)
+        self.assertEqual(result['targetSource'], 'template')
+        self.assertEqual(result['phase'], 'following')
+        follower.camera.locate.assert_not_called()
+
+    def test_only_confirmed_current_partial_target_skips_camera_matching(self):
+        config, frame, _ = partial_fixture()
+        baseline, follower = vision.Follower(config), vision.Follower(config)
+        follower.camera = Mock()
+        follower.camera.locate.return_value = None
+        context = dict(point=dict(x=200, y=200), epoch=0, sequence=1)
+        for index, now in enumerate((10, 10.4, 10.8, 11.2)):
+            expected = baseline.analyze(encoded(frame), now)
+            result = follower.analyze(encoded(frame), now, cameraContext=context)
+            expected.pop('elapsedMs'); result.pop('elapsedMs')
+            self.assertEqual(result, expected)
+            self.assertEqual(follower.camera.locate.call_count, min(index+1, 2))
+        self.assertEqual(result['targetSource'], 'partial')
+        # A previously confirmed partial face does not suppress camera fallback
+        # once its current pixels disappear.
+        frame[170:233, 270:333] = 25
+        result = follower.analyze(encoded(frame), 11.6, cameraContext=context)
+        self.assertEqual(follower.camera.locate.call_count, 3)
+        self.assertEqual(result['phase'], 'lost')
+        self.assertIsNone(result['direction'])
+
+    def test_missing_target_still_uses_only_current_camera_evidence_and_context(self):
+        config, frame, _, _ = fixture()
+        frame[90:108, 155:173] = 25
+        follower = vision.Follower(config)
+        follower.camera = Mock()
+        follower.camera.locate.return_value = dict(x=164, y=99, confidence=.95)
+        self.assertEqual(follower.analyze(encoded(frame), 10)['phase'], 'lost')
+        follower.camera.locate.assert_not_called()
+        context = dict(point=dict(x=100, y=100), epoch=0, sequence=1)
+        for now in (10.4, 10.8):
+            result = follower.analyze(encoded(frame), now, cameraContext=context)
+            self.assertEqual(result['targetSource'], 'camera')
+            self.assertAlmostEqual(result['target']['x'], 164/200)
+            self.assertEqual(follower.camera.locate.call_args.args[1], context)
+            self.assertIsNone(follower.trackers[1].last, 'camera evidence must not teach avatar history')
+        self.assertEqual(follower.camera.locate.call_count, 2)
+        self.assertEqual(result['phase'], 'following')
+        follower.camera.locate.return_value = None
+        result = follower.analyze(encoded(frame), 11.2, cameraContext=context)
+        self.assertEqual(follower.camera.locate.call_count, 3)
+        self.assertEqual(result['phase'], 'lost')
+        self.assertIsNone(result['direction'])
+
     def test_pixels_are_detected_and_route_goes_around_wall(self):
         config, frame, _, _ = fixture()
         f = vision.Follower(config)

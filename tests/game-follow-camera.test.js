@@ -131,26 +131,26 @@ test('a changed camera point requires new proof and cannot inherit the previous 
 });
 
 test('host TTL, phone capture expiry and host expiry during analysis release instead of renewing', () => {
-  const host = armed(); assert.equal(host.beforeAnalyze(proof(), 1300), undefined);
-  assert.equal(host.afterAnalyze(lost, 30, 1310).point, null);
+  const host = armed(); assert.equal(host.beforeAnalyze(proof(), 1600), undefined);
+  assert.equal(host.afterAnalyze(lost, 30, 1610).point, null);
   const phone = armed(); assert.equal(phone.beforeAnalyze(proof({ capturedAtUptimeMs: 101200 }), 400), undefined);
   assert.equal(phone.afterAnalyze(lost, 30, 410).point, null);
-  const analysis = armed(); assert.ok(analysis.beforeAnalyze(proof(), 1200));
-  const p = analysis.afterAnalyze({ ...lost, cameraTarget: target }, 500, 1300);
+  const analysis = armed(); assert.ok(analysis.beforeAnalyze(proof(), 1500));
+  const p = analysis.afterAnalyze({ ...lost, cameraTarget: target }, 500, 1600);
   assert.equal(p.point, null); assert.equal(p.stopJoystick, true); assert.equal(p.reason, 'hold-expired');
 });
 
 test('pre-capture wait is not double-counted against the remaining phone lease', () => {
-  const m = armed(); // plan at host100, ACK at105, conservative host expiry1300.
+  const m = armed(); // plan at host100, ACK at105, conservative host expiry1600.
   // Phone receipt at102 and application at180, with uptime offset100000.
-  // Frame request begins450; capture750; pixels arrive1000; decision1050.
+  // Frame request begins750; capture1050; pixels arrive1300; decision1350.
   // Capture-to-expiry552 is shorter than total request age600, but the capture
-  // is valid and decision still precedes host1300 and actual phone expiry1302.
+  // is valid and decision still precedes host1600 and actual phone expiry1602.
   assert.ok(m.beforeAnalyze(proof({ heldSinceUptimeMs: 100180,
-    capturedAtUptimeMs: 100750, expiresAtUptimeMs: 101302 }), 1000));
-  const p = m.afterAnalyze({ ...lost, cameraTarget: target }, 600, 1050);
+    capturedAtUptimeMs: 101050, expiresAtUptimeMs: 101602 }), 1300));
+  const p = m.afterAnalyze({ ...lost, cameraTarget: target }, 600, 1350);
   assert.equal(p.allowCameraMovement, true); assert.equal(p.stopJoystick, false);
-  assert.equal(p.ttlMs, 1200, 'no TTL limit was extended');
+  assert.equal(p.ttlMs, 1500, 'the fixed native maximum remains independent of frame-age arithmetic');
 });
 
 test('stale frames at one second release and cannot refresh the recent reliable position', () => {
@@ -214,25 +214,25 @@ test('late or invalid ACK cannot grant a hold; immutable plans prevent coordinat
   m.beforeAnalyze(undefined, 100); const p = m.afterAnalyze(lost, 20, 100);
   assert.ok(Object.isFrozen(p)); assert.ok(Object.isFrozen(p.point));
   assert.equal(m.commit({ ...p }, 2, 200), false);
-  assert.equal(m.commit(p, 2, 1300), false); assert.equal(m.state, 'releasing');
+  assert.equal(m.commit(p, 2, 1600), false); assert.equal(m.state, 'releasing');
   const regressed = armed(); assert.throws(() => regressed.beforeAnalyze(proof(), 1), /monotonic/);
   const badSequence = armed(); badSequence.beforeAnalyze(undefined, 400);
   assert.equal(badSequence.commit(badSequence.afterAnalyze(lost, 30, 410), 2, 420), false);
 });
 
 test('continuous matching current camera evidence tracks beyond six seconds without lengthening touch TTL', () => {
-  const m = armed(); let sequence = 2, expires = 1300;
+  const m = armed(); let sequence = 2, expires = 1600;
   for (let now = 600; now <= 18600; now += 600) {
     assert.ok(m.beforeAnalyze(proof({ sequence, heldSinceUptimeMs: 100180,
       capturedAtUptimeMs: 100000 + now - 100, expiresAtUptimeMs: 100000 + expires }), now));
     const p = m.afterAnalyze({ ...lost, cameraTarget: { x: 241, y: 299 } }, 400, now);
     assert.equal(p.allowCameraMovement, true); assert.equal(p.stopJoystick, false);
-    assert.equal(p.ttlMs, 1200); assert.deepEqual(p.point, target, 'fixed point is unchanged');
+    assert.equal(p.ttlMs, 1500); assert.deepEqual(p.point, target, 'fixed point is unchanged');
     assert.ok(m.commit(p, ++sequence, now + 5)); expires = now + p.ttlMs;
     const status = m.status(now + 5);
     assert.equal(status.evidenceAgeMs, 405);
     assert.equal(status.searchRemainingMs, 5595);
-    assert.equal(status.ttlRemainingMs, 1195);
+    assert.equal(status.ttlRemainingMs, 1495);
   }
   assert.ok(m.status(18605).holdAgeMs > 18000);
   assert.equal(m.status(18605).releaseRequests, 0);
@@ -240,7 +240,7 @@ test('continuous matching current camera evidence tracks beyond six seconds with
 });
 
 test('missing current target stops id0 immediately and proof alone cannot renew search after successful tracking', () => {
-  const m = armed(); let sequence = 2, expires = 1300;
+  const m = armed(); let sequence = 2, expires = 1600;
   for (let now = 600; now <= 7200; now += 600) {
     assert.ok(m.beforeAnalyze(proof({ sequence, heldSinceUptimeMs: 100180,
       capturedAtUptimeMs: 100000 + now - 100, expiresAtUptimeMs: 100000 + expires }), now));
@@ -254,7 +254,7 @@ test('missing current target stops id0 immediately and proof alone cannot renew 
     const p = m.afterAnalyze(lost, 400, now);
     assert.equal(p.stopJoystick, true); assert.equal(p.allowCameraMovement, false);
     assert.equal(p.reason, 'searching-current-target'); assert.deepEqual(p.point, target);
-    assert.equal(p.ttlMs, Math.min(1200, 12800 - now));
+    assert.equal(p.ttlMs, Math.min(1500, 12800 - now));
     m.commit(p, ++sequence, now + 5); expires = now + p.ttlMs;
   }
   m.beforeAnalyze(undefined, 12800);
@@ -288,7 +288,7 @@ test('unproven camera coordinates cannot extend search and snapshots cannot auth
 
 test('post-extension TTL expiry, stale input, recovery and cancel still revoke all camera evidence', () => {
   for (const failure of ['ttl', 'stale', 'recovery', 'cancel']) {
-    const m = armed(); let sequence = 2, expires = 1300;
+    const m = armed(); let sequence = 2, expires = 1600;
     for (let now = 600; now <= 7200; now += 600) {
       m.beforeAnalyze(proof({ sequence, heldSinceUptimeMs: 100180,
         capturedAtUptimeMs: 100000 + now - 100, expiresAtUptimeMs: 100000 + expires }), now);
@@ -327,20 +327,20 @@ test('dynamic2 full portrait pair leads the lost-frame camera only, with unchang
   m.beforeAnalyze(undefined, 1050);
   const p = m.afterAnalyze({ ...lost, captureMs: 500, cameraTarget: { x: 400, y: 400 } }, 100, 1050);
   assert.deepEqual(p.point, { x: 308, y: 179 }, 'old arm was 294,169');
-  assert.equal(p.stopJoystick, true); assert.equal(p.allowCameraMovement, false); assert.equal(p.ttlMs, 1200);
+  assert.equal(p.stopJoystick, true); assert.equal(p.allowCameraMovement, false); assert.equal(p.ttlMs, 1500);
   const prediction = m.status(1050).placement.prediction;
   assert.equal(prediction.applied, true); assert.equal(prediction.horizonMs, 1000);
   assert.ok(Math.abs(prediction.speedMapPxPerSecond.x-14.4)<1e-8);
   assert.ok(Math.abs(prediction.speedMapPxPerSecond.y-10.28)<1e-8);
   assert.equal(m.status(1050).speedMapPxPerSecond, undefined, 'recenter speed still clears on a missing frame');
-  m.commit(p, 3, 1055); assert.equal(m.status(1055).ttlRemainingMs, 1195);
+  m.commit(p, 3, 1055); assert.equal(m.status(1055).ttlRemainingMs, 1495);
   assert.equal(m.status(1055).searchRemainingMs, 5995);
   assert.equal(m.beforeAnalyze(proof({ sequence: 3, x: 294, y: 169 }), 1300), undefined);
   const waiting = m.afterAnalyze({ ...lost, cameraTarget: target }, 100, 1300);
   assert.equal(waiting.stopJoystick, true); assert.equal(waiting.allowCameraMovement, false);
   m.commit(waiting, 4, 1305);
-  m.beforeAnalyze(undefined, 2500);
-  assert.equal(m.afterAnalyze(lost, 100, 2500).reason, 'hold-expired');
+  m.beforeAnalyze(undefined, 2800);
+  assert.equal(m.afterAnalyze(lost, 100, 2800).reason, 'hold-expired');
 });
 
 test('single full, nonadjacent full, large gap and expired pair do not lead the camera', () => {
@@ -385,7 +385,7 @@ test('dynamic3 frame145 full then146 current marker selects the newer self searc
   m.beforeAnalyze(undefined, 1836);
   const arm = m.afterAnalyze({ fullTarget: target, lost: false }, 600, 1836);
   assert.equal(arm.reason, 'arm-self'); assert.deepEqual(arm.point, { x: 333, y: 290 });
-  assert.equal(arm.stopJoystick, true); assert.equal(arm.allowCameraMovement, false); assert.equal(arm.ttlMs, 1200);
+  assert.equal(arm.stopJoystick, true); assert.equal(arm.allowCameraMovement, false); assert.equal(arm.ttlMs, 1500);
   assert.equal(m.status(1836).placement.seedSource, 'marker');
   assert.equal(m.status(1836).placement.prediction, undefined, 'marker seed does not reuse full speed');
   m.commit(arm, 3, 1841);
@@ -393,8 +393,8 @@ test('dynamic3 frame145 full then146 current marker selects the newer self searc
   const oldView = m.afterAnalyze({ fullTarget: target, cameraSelf: marker, lost: false }, 100, 2200);
   assert.equal(oldView.stopJoystick, true); assert.equal(oldView.allowCameraMovement, false);
   m.commit(oldView, 4, 2205);
-  m.beforeAnalyze(undefined, 3400);
-  const expired = m.afterAnalyze({ fullTarget: target, lost: false }, 100, 3400);
+  m.beforeAnalyze(undefined, 3700);
+  const expired = m.afterAnalyze({ fullTarget: target, lost: false }, 100, 3700);
   assert.equal(expired.reason, 'hold-expired'); assert.equal(expired.point, null);
 });
 
@@ -444,7 +444,7 @@ test('target-to-self search switch prefers a newer current marker without renewi
   assert.equal(p.reason, 'switch-search-self'); assert.deepEqual(p.point, marker);
   assert.equal(p.stopJoystick, true); assert.equal(p.allowCameraMovement, false);
   assert.equal(m.status(410).placement.seedSource, 'marker'); assert.equal(m.status(410).searchRemainingMs, 5690);
-  m.commit(p, 3, 420); assert.equal(m.status(420).ttlRemainingMs, 1190);
+  m.commit(p, 3, 420); assert.equal(m.status(420).ttlRemainingMs, 1490);
   assert.equal(m.beforeAnalyze(proof({ sequence: 3, capturedAtUptimeMs: 100700 }), 700), undefined);
 });
 
@@ -455,7 +455,7 @@ test('current edge evidence recenters now; old epoch and unsettled new point can
   assert.ok(m.beforeAnalyze(proof(), 400));
   const p = m.afterAnalyze({ ...lost, cameraTarget: { x: 248, y: 300 } }, 30, 410);
   assert.equal(p.reason, 'recenter-current-target'); assert.deepEqual(p.point, { x: 248, y: 300 });
-  assert.equal(p.allowCameraMovement, true); assert.equal(p.stopJoystick, false); assert.equal(p.ttlMs, 1200);
+  assert.equal(p.allowCameraMovement, true); assert.equal(p.stopJoystick, false); assert.equal(p.ttlMs, 1500);
   m.commit(p, 3, 420);
   assert.equal(m.state, 'arming');
   assert.equal(m.beforeAnalyze(proof({ sequence: 3, x: 248, capturedAtUptimeMs: 100600 }), 600), undefined, 'old epoch even with new coordinates');
@@ -527,7 +527,7 @@ test('full target and ACKs cannot extend a self search without current self evid
 test('either role may use the same proof, and loss, expiry or recovery never supplies an old self coordinate', () => {
   for (const failure of ['missing-proof', 'missing-self', 'stale', 'recovery', 'ttl']) {
     const { m, self } = selfArmed();
-    const now = failure === 'ttl' ? 1300 : 400;
+    const now = failure === 'ttl' ? 1600 : 400;
     if (failure === 'recovery') m.invalidate('recovery');
     m.beforeAnalyze(failure === 'missing-proof' ? undefined : proof({ ...self }), now);
     const p = m.afterAnalyze({ fullTarget: target,
@@ -611,7 +611,7 @@ test('game8 restored current self switches its hold to missing target search wit
   assert.equal(p.reason, 'switch-search-target'); assert.deepEqual(p.point, target);
   assert.equal(p.stopJoystick, true); assert.equal(p.allowCameraMovement, false);
   assert.equal(m.status(410).searchRemainingMs, 5690); assert.equal(m.status(410).placement.seedSource, 'full');
-  m.commit(p, 3, 420); assert.equal(m.status(420).role, 'target'); assert.equal(m.status(420).ttlRemainingMs, 1190);
+  m.commit(p, 3, 420); assert.equal(m.status(420).role, 'target'); assert.equal(m.status(420).ttlRemainingMs, 1490);
   assert.equal(m.beforeAnalyze(proof({ ...self, sequence: 3, capturedAtUptimeMs: 100700 }), 700), undefined);
   const old = m.afterAnalyze({ currentSelf: restored, cameraTarget: target, lost: true }, 20, 710);
   assert.equal(old.stopJoystick, true); assert.equal(old.allowCameraMovement, false); m.commit(old, 4, 720);
@@ -834,4 +834,16 @@ test('strict camera identity permits normal tracking but does not reset weak vis
   m.beforeAnalyze(undefined, 1300);
   const exhausted = m.afterAnalyze(weakObservation({ weakTargetCandidates: [{ x: 400, y: 300, score: .9 }] }), 20, 1300);
   assert.equal(exhausted.point, null, 'camera identity did not reset visits or populate recent full history');
+});
+
+test('only camera holds use the native 1500ms bound; release and ordinary movement stay at 1200ms', () => {
+  const disabled = new GameFollowCamera({ ...options, enabled: false });
+  assert.equal(disabled.afterAnalyze({ fullTarget: target, lost: false }, 0, 0).ttlMs, 1200);
+  const m = armed();
+  m.beforeAnalyze(undefined, 400);
+  const hold = m.afterAnalyze(lost, 20, 400);
+  assert.equal(hold.ttlMs, 1500);
+  assert.equal(m.commit(hold, 3, 405, 1501), false, 'caller cannot exceed native maximum');
+  const release = m.afterAnalyze(lost, 20, 410);
+  assert.equal(release.point, null); assert.equal(release.ttlMs, 1200);
 });

@@ -9,7 +9,7 @@ import type { PhoneDevice } from "../../shared/phones";
 import { adbLaunchDelays, phoneRequestTimings } from "./adb";
 import { cameraProofSchema, captureReadyAt } from "./screenshot-transfer";
 import { GameFollowCamera } from "./game-follow-camera";
-import { cameraCaptureWindow, waitForCameraCapture, type CameraCaptureWindow } from "./game-follow-camera-cadence";
+import { CAMERA_ACK_RESERVE_MS, cameraCaptureWindow, waitForCameraCapture, type CameraCaptureWindow } from "./game-follow-camera-cadence";
 import { CameraSampler, cameraSampleCommandSchema } from "./camera-sample";
 
 const unit = z.number().finite().min(0).max(1);
@@ -372,8 +372,8 @@ export class GameFollower {
     const began = Date.now(), cameraEnabled = !!(config.cameraAssist || config.selfCameraAssist);
     const region = backend === "app" && config.capture !== "full" && !config.nearby && !config.targetPartial && !cameraEnabled ? mapCaptureRegion(config) : undefined;
     let pendingCapture: CameraCaptureWindow | undefined;
-    const expireCameraCapture = () => {
-      run.camera?.invalidate("capture-window-expired"); this.sampleCameraStatus(run);
+    const resetCameraEvidence = (reason: string) => {
+      run.camera?.invalidate(reason); this.sampleCameraStatus(run);
       pendingCapture = undefined; this.value.analysis = undefined;
       // The next iteration releases input before capturing, then starts fresh
       // vision evidence. Waiting never sends a touch keepalive or renews its TTL.
@@ -385,16 +385,24 @@ export class GameFollower {
         if (run.cancelled) break;
         if (run.resetVision) {
           run.resetVision = false; pendingCapture = undefined;
+          const resetEpoch = run.recoveryEpoch;
           if (mode === "control" && cameraEnabled) {
-            await this.host.live(run.lease!, run.generation, { op: "touch", sequence: ++run.sequence, points: [], ttlMs: 1200 });
+            const sequence = ++run.sequence;
+            const released = await this.host.live(run.lease!, run.generation, { op: "touch", sequence, points: [], ttlMs: 1200 });
             if (run.cancelled) break;
+            if (resetEpoch !== run.recoveryEpoch) continue;
+            // A failed or uncertain release ends the run (this block is outside
+            // transport retry). Never resume after merely requesting finger UP.
+            if (released?.accepted !== true || released?.acceptedSequence !== sequence)
+              throw new Error("手机未确认释放触点，已停止跟随");
           }
           await run.worker!.request({ op: "configure", config, maxFrameGapMs: 1500 });
           if (run.cancelled) break;
+          if (resetEpoch !== run.recoveryEpoch) continue;
         }
         const epoch = run.recoveryEpoch;
         try {
-          if (pendingCapture && performance.now() >= pendingCapture.expiresAt) { expireCameraCapture(); continue; }
+          if (pendingCapture && performance.now() >= pendingCapture.expiresAt) { resetCameraEvidence("capture-window-expired"); continue; }
           const at = Date.now(), requestAt = performance.now();
           const rawFrame = await this.host.live(run.lease!, run.generation, { op: "frame", ...(region ? { region } : {}),
             ...(cameraEnabled ? { cameraFrameProvenance: 1 } : {}) });
@@ -413,7 +421,7 @@ export class GameFollower {
           const nextFrameAt = intervalAt + config.intervalMs;
           if (run.cancelled) break;
           if (epoch !== run.recoveryEpoch) continue;
-          if (pendingCapture && completedAt >= pendingCapture.expiresAt) { expireCameraCapture(); continue; }
+          if (pendingCapture && completedAt >= pendingCapture.expiresAt) { resetCameraEvidence("capture-window-expired"); continue; }
           pendingCapture = undefined;
           if (frame.width !== config.width || frame.height !== config.height) throw new Error("手机分辨率或方向已改变，请重新校准");
           const cameraContext = run.camera?.beforeAnalyze(frame.cameraProof, performance.now());
@@ -466,17 +474,31 @@ export class GameFollower {
             const points = direction ? [{ id: 0, x: Math.round(cx + dx * radius), y: Math.round(cy + dy * radius), fromX: cx, fromY: cy }] : [];
             if (cameraPlan?.point) points.push({ id: 1, x: cameraPlan.point.x, y: cameraPlan.point.y,
               fromX: cameraPlan.point.x, fromY: cameraPlan.point.y });
+            const beforeInput = run.camera?.status(performance.now());
+            if (cameraPlan?.point && beforeInput?.point && beforeInput.ttlRemainingMs < CAMERA_ACK_RESERVE_MS) {
+              resetCameraEvidence("input-ack-reserve"); continue;
+            }
             const inputAt = Date.now();
             const sequence = ++run.sequence;
             const accepted = await this.host.live(run.lease!, run.generation, { op: "touch", sequence, points, ttlMs: cameraPlan?.ttlMs ?? 1200 });
             if (run.cancelled) break;
             if (epoch !== run.recoveryEpoch) continue;
             if (cameraEnabled && (accepted?.accepted !== true || accepted?.acceptedSequence !== sequence)) {
-              run.camera?.invalidate("uncertain-input"); this.sampleCameraStatus(run); throw new Error("手机未确认本次镜头触控，已停止操作");
+              run.camera?.invalidate("uncertain-input"); this.sampleCameraStatus(run);
+              this.value.error = "手机未确认本次镜头触控，已停止操作"; break;
             }
             const acknowledgedAt = performance.now();
-            if (cameraPlan && !run.camera!.commit(cameraPlan, sequence, acknowledgedAt))
-              throw new Error("镜头触控确认已过期，已停止操作");
+            if (cameraPlan && !run.camera!.commit(cameraPlan, sequence, acknowledgedAt)) {
+              if (cameraEnabled && accepted?.accepted === true && accepted?.acceptedSequence === sequence
+                && run.camera!.status(acknowledgedAt).reason === "late-input-ack") {
+                // This sequence is known accepted. Do not replay it or treat
+                // its old hold as continuous: explicitly release a newer seq,
+                // verify that ACK, reset vision, then measure another frame.
+                this.value.timings = { ...this.value.timings, inputMs: Date.now() - inputAt };
+                resetCameraEvidence("late-input-ack"); continue;
+              }
+              this.value.error = "镜头触控确认已过期，已停止操作"; break;
+            }
             pendingCapture = cameraPlan ? cameraCaptureWindow(previousCameraPoint, cameraPlan.point,
               cameraPlanAt, acknowledgedAt, cameraPlan.ttlMs) : undefined;
             if (cameraEnabled) this.value.camera = run.camera!.status(performance.now());
@@ -490,7 +512,7 @@ export class GameFollower {
             // still needs its own matching applied and stable native proof.
             const waited = await waitForCameraCapture(pendingCapture, nextFrameAt,
               () => !run.cancelled && this.run === run && epoch === run.recoveryEpoch && !run.recovery);
-            if (waited === "expired") expireCameraCapture();
+            if (waited === "expired") resetCameraEvidence("capture-window-expired");
             if (waited === "cancelled") { pendingCapture = undefined; continue; }
           } else await new Promise(resolve => setTimeout(resolve, Math.max(0, nextFrameAt - performance.now())));
         } catch (error) {

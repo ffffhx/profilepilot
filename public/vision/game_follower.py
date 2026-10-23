@@ -690,7 +690,9 @@ class Follower:
         # The host supplies a context only when this frame proves the previously
         # acknowledged camera hold. This current-image path never teaches the
         # portrait tracker a projected position or reuses an old name location.
-        camera_target = self.camera.locate(image, cameraContext) if self.camera and cameraContext else None
+        # Full/confirmed partial identity already wins below. Avoid searching
+        # names and HP for a result that cannot affect this frame or any history.
+        camera_target = self.camera.locate(image, cameraContext) if self.camera and cameraContext and not target_reliable else None
         if not target_reliable and camera_target:
             target = dict(x=(camera_target['x']-x)/w, y=(camera_target['y']-y)/h,
                           confidence=camera_target['confidence'])

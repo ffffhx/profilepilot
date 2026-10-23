@@ -57,7 +57,8 @@ readline.createInterface({input:process.stdin}).on('line', line=>{
     recoverWrapper: async () => { h.recoveries++; return device; },
     live: async (_, generation, command) => {
       assert.equal(generation, 3); h.calls.push(structuredClone(command));
-      if (command.op === 'probe') return { protocol: 1, ...(options.capability === false ? {} : { cameraFrameProvenance: 1 }) };
+      if (command.op === 'probe') return { protocol: 1, ...(options.capability === false ? {} : { cameraFrameProvenance: 1 }),
+        ...(options.legacyCamera ? {} : { cameraPointChange: options.cameraPointChange ?? 'release-newdown' }) };
       if (command.op === 'frame') {
         h.captures++;
         const cameraProof = options.frameProof?.(h);
@@ -87,8 +88,27 @@ test('camera integration rejects missing capability and basic backend before cap
   assert.equal(basic.starts, 0); assert.equal(basic.captures, 0); assert.equal(basic.touches.length, 0);
 });
 
+test('camera control refuses legacy MOVE companions for either camera role before any frame or input', async t => {
+  for (const options of [{ legacyCamera: true }, { cameraPointChange: 'continuous-move' }]) {
+    for (const role of ['target', 'self']) {
+      const h = harness(t, options), calibrated = config();
+      if (role === 'self') { calibrated.selfCameraAssist = { ...calibrated.cameraAssist, team: 'green' }; delete calibrated.cameraAssist; }
+      await assert.rejects(h.start({ config: calibrated }), /镜头换点时松开重按/);
+      assert.equal(h.captures, 0); assert.equal(h.touches.length, 0); assert.equal(h.stopped, 1);
+    }
+  }
+});
+
+test('legacy camera policy does not block ordinary minimap control', async t => {
+  const h = harness(t, { legacyCamera: true }), calibrated = config(); delete calibrated.cameraAssist;
+  const started = await h.start({ config: calibrated });
+  await until(() => h.touches.length >= 1); await h.stop(started);
+  assert.ok(h.touches.some(c => c.points.some(p => p.id === 0)));
+  assert.ok(h.touches.every(c => c.points.every(p => p.id !== 1)));
+});
+
 test('camera observe requests negotiated full frames but cannot touch or acquire a held-camera context', async t => {
-  const h = harness(t, { frameProof: h => proof(1, h.captures) });
+  const h = harness(t, { legacyCamera: true, frameProof: h => proof(1, h.captures) });
   const started = await h.start({ mode: 'observe' });
   await until(async () => (await h.manager.command({ op: 'status' })).frames >= 3); await h.stop(started);
   assert.equal(h.touches.length, 0);

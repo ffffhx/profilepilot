@@ -116,7 +116,7 @@ test('full target must remain reliable across multiple frames for delayed releas
   m.beforeAnalyze(undefined, 1200); p = m.afterAnalyze({ fullTarget: target, lost: false }, 30, 1210);
   assert.deepEqual(p.point, target, 'one intervening loss resets release confirmation'); m.commit(p, 6, 1220);
   m.beforeAnalyze(undefined, 1500); p = m.afterAnalyze({ fullTarget: target, lost: false }, 30, 1510);
-  assert.equal(p.point, null); assert.equal(p.stopJoystick, true); assert.equal(p.reason, 'full-target-restored');
+  assert.equal(p.point, null); assert.equal(p.stopJoystick, false); assert.equal(p.reason, 'full-target-restored');
   m.commit(p, 7, 1520); assert.equal(m.state, 'idle');
 });
 
@@ -163,14 +163,14 @@ test('stale frames at one second release and cannot refresh the recent reliable 
   }
 });
 
-test('renewals cannot extend the six-second camera hold budget', () => {
+test('ACK renewals without current target evidence cannot extend six-second search', () => {
   const m = armed(); let sequence = 2;
   for (let now = 600; now < 6100; now += 500) {
     m.beforeAnalyze(undefined, now); const p = m.afterAnalyze(lost, 30, now);
     assert.deepEqual(p.point, target); assert.ok(p.ttlMs <= 6100 - now); m.commit(p, ++sequence, now + 5);
   }
   m.beforeAnalyze(undefined, 6100); const release = m.afterAnalyze(lost, 30, 6110);
-  assert.equal(release.point, null); assert.ok(['hold-budget', 'hold-expired'].includes(release.reason));
+  assert.equal(release.point, null); assert.equal(release.reason, 'search-expired');
   m.commit(release, ++sequence, 6120); m.beforeAnalyze(undefined, 6200);
   assert.equal(m.afterAnalyze(lost, 30, 6210).point, null, 'exhausted history cannot immediately restart another budget');
 });
@@ -192,7 +192,7 @@ test('less than Android minimum 100 ms of budget releases instead of sending an 
     m.beforeAnalyze(undefined, now); m.commit(m.afterAnalyze(lost, 30, now), ++sequence, now + 5);
   }
   m.beforeAnalyze(undefined, 6050); const p = m.afterAnalyze(lost, 0, 6050);
-  assert.equal(p.point, null); assert.equal(p.stopJoystick, true); assert.equal(p.reason, 'hold-budget');
+  assert.equal(p.point, null); assert.equal(p.stopJoystick, true); assert.equal(p.reason, 'search-expired');
   assert.equal(p.ttlMs, 1200);
 });
 
@@ -218,4 +218,88 @@ test('late or invalid ACK cannot grant a hold; immutable plans prevent coordinat
   const regressed = armed(); assert.throws(() => regressed.beforeAnalyze(proof(), 1), /monotonic/);
   const badSequence = armed(); badSequence.beforeAnalyze(undefined, 400);
   assert.equal(badSequence.commit(badSequence.afterAnalyze(lost, 30, 410), 2, 420), false);
+});
+
+test('continuous matching current camera evidence tracks beyond six seconds without lengthening touch TTL', () => {
+  const m = armed(); let sequence = 2, expires = 1300;
+  for (let now = 600; now <= 18600; now += 600) {
+    assert.ok(m.beforeAnalyze(proof({ sequence, heldSinceUptimeMs: 100180,
+      capturedAtUptimeMs: 100000 + now - 100, expiresAtUptimeMs: 100000 + expires }), now));
+    const p = m.afterAnalyze({ ...lost, cameraTarget: { x: 241, y: 299 } }, 400, now);
+    assert.equal(p.allowCameraMovement, true); assert.equal(p.stopJoystick, false);
+    assert.equal(p.ttlMs, 1200); assert.deepEqual(p.point, target, 'fixed point is unchanged');
+    assert.ok(m.commit(p, ++sequence, now + 5)); expires = now + p.ttlMs;
+    const status = m.status(now + 5);
+    assert.equal(status.evidenceAgeMs, 405);
+    assert.equal(status.searchRemainingMs, 5595);
+    assert.equal(status.ttlRemainingMs, 1195);
+  }
+  assert.ok(m.status(18605).holdAgeMs > 18000);
+  assert.equal(m.status(18605).releaseRequests, 0);
+  assert.equal(m.status(18605).armAttempts, 1);
+});
+
+test('missing current target stops id0 immediately and proof alone cannot renew search after successful tracking', () => {
+  const m = armed(); let sequence = 2, expires = 1300;
+  for (let now = 600; now <= 7200; now += 600) {
+    assert.ok(m.beforeAnalyze(proof({ sequence, heldSinceUptimeMs: 100180,
+      capturedAtUptimeMs: 100000 + now - 100, expiresAtUptimeMs: 100000 + expires }), now));
+    const p = m.afterAnalyze({ ...lost, cameraTarget: target }, 400, now);
+    m.commit(p, ++sequence, now + 5); expires = now + p.ttlMs;
+  }
+  // Last evidence is conservatively dated to request start6800, search ends12800.
+  for (let now = 7800; now < 12800; now += 600) {
+    assert.ok(m.beforeAnalyze(proof({ sequence, heldSinceUptimeMs: 100180,
+      capturedAtUptimeMs: 100000 + now - 100, expiresAtUptimeMs: 100000 + expires }), now));
+    const p = m.afterAnalyze(lost, 400, now);
+    assert.equal(p.stopJoystick, true); assert.equal(p.allowCameraMovement, false);
+    assert.equal(p.reason, 'searching-current-target'); assert.deepEqual(p.point, target);
+    assert.equal(p.ttlMs, Math.min(1200, 12800 - now));
+    m.commit(p, ++sequence, now + 5); expires = now + p.ttlMs;
+  }
+  m.beforeAnalyze(undefined, 12800);
+  const release = m.afterAnalyze({ ...lost, cameraTarget: target }, 400, 12800);
+  assert.equal(release.point, null); assert.equal(release.reason, 'search-expired');
+  assert.equal(release.stopJoystick, true); m.commit(release, ++sequence, 12805);
+  const status = m.status(12805);
+  assert.equal(status.state, 'idle'); assert.equal(status.releaseRequests, 1);
+  assert.deepEqual(status.releaseReasons, { 'search-expired': 1 });
+  m.beforeAnalyze(undefined, 13400);
+  assert.equal(m.afterAnalyze(lost, 400, 13400).point, null, 'no camera history can rearm after loss');
+});
+
+test('unproven camera coordinates cannot extend search and snapshots cannot authorize or mutate it', () => {
+  const m = armed(); let sequence = 2;
+  for (let now = 600; now < 6100; now += 500) {
+    m.beforeAnalyze(proof({ sequence: sequence - 1, capturedAtUptimeMs: 100000 + now,
+      expiresAtUptimeMs: 102000 + now }), now);
+    const p = m.afterAnalyze({ ...lost, cameraTarget: target }, 30, now);
+    assert.equal(p.stopJoystick, true); assert.equal(p.allowCameraMovement, false);
+    assert.equal(m.status(now).searchRemainingMs, 6100 - now);
+    const snapshot = m.status(now); snapshot.point.x = 999; snapshot.releaseReasons.fake = 999;
+    m.status(now + 999999); // Reading a future time cannot extend or expire input authority.
+    assert.equal(m.status(now).point.x, target.x);
+    assert.equal(m.status(now).releaseReasons.fake, undefined);
+    m.commit(p, ++sequence, now + 5);
+  }
+  m.beforeAnalyze(undefined, 6100);
+  assert.equal(m.afterAnalyze(lost, 30, 6100).reason, 'search-expired');
+});
+
+test('post-extension TTL expiry, stale input, recovery and cancel still revoke all camera evidence', () => {
+  for (const failure of ['ttl', 'stale', 'recovery', 'cancel']) {
+    const m = armed(); let sequence = 2, expires = 1300;
+    for (let now = 600; now <= 7200; now += 600) {
+      m.beforeAnalyze(proof({ sequence, heldSinceUptimeMs: 100180,
+        capturedAtUptimeMs: 100000 + now - 100, expiresAtUptimeMs: 100000 + expires }), now);
+      const p = m.afterAnalyze({ ...lost, cameraTarget: target }, 400, now);
+      m.commit(p, ++sequence, now + 5); expires = now + p.ttlMs;
+    }
+    const now = failure === 'ttl' ? expires : 7800;
+    if (failure === 'recovery' || failure === 'cancel') m.invalidate(failure);
+    m.beforeAnalyze(proof({ sequence, heldSinceUptimeMs: 100180,
+      capturedAtUptimeMs: 100000 + now - 100, expiresAtUptimeMs: 100000 + expires }), now);
+    const p = m.afterAnalyze({ ...lost, cameraTarget: target }, failure === 'stale' ? 1000 : 400, now);
+    assert.equal(p.point, null); assert.equal(p.stopJoystick, true); assert.equal(p.allowCameraMovement, false);
+  }
 });

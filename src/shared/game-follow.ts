@@ -64,6 +64,24 @@ export interface PhoneRequestTiming {
   socketMs?: number; connectedMs?: number; sentMs?: number; headersMs?: number; firstDataMs?: number; endMs?: number;
   totalMs: number; responseBytes: number; outcome: "complete" | "error";
 }
+/** Host observations and planned transitions only; never permission to renew input. */
+export interface FollowCameraStatus {
+  state: "idle" | "arming" | "held" | "releasing";
+  reason: string;
+  point?: FollowPoint;
+  sequence?: number;
+  holdAgeMs: number;
+  evidenceAgeMs?: number;
+  searchRemainingMs: number;
+  ttlRemainingMs: number;
+  /** Validated proof for the last analyzed frame; sequence may precede the new ACK above. */
+  frameProof: boolean;
+  frameProofSequence?: number;
+  frameTarget: "none" | "full" | "camera";
+  armAttempts: number;
+  releaseRequests: number;
+  releaseReasons: Record<string, number>;
+}
 export interface FollowStatus {
   running: boolean;
   recovering?: boolean;
@@ -85,6 +103,7 @@ export interface FollowStatus {
   };
   analysis?: FollowAnalysis;
   frame?: FollowFrame;
+  camera?: FollowCameraStatus;
 }
 export interface FollowRuntime { available: boolean; python: string; version: string; error: string; }
 export type FollowCommand =

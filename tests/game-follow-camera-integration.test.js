@@ -40,7 +40,7 @@ readline.createInterface({input:process.stdin}).on('line', line=>{
  const req=JSON.parse(line); fs.appendFileSync(${JSON.stringify(log)},JSON.stringify(req)+'\\n');
  let data={ready:true};
  if(req.op==='analyze') {
-  frames++; const lost=frames===2, camera=frames>=3;
+  frames++; const lost=frames===2, camera=frames>=3 && frames<${options.fullAt ?? 1000000};
   data={phase:lost?'lost':'following',message:'fixture',self:{x:.2,y:.2,confidence:.99},
    target:lost?null:{x:.5,y:.5,confidence:.99},targetSource:camera?'camera':'template',
    source:'minimap',direction:lost?null:{x:1,y:0},path:[],elapsedMs:1};
@@ -94,6 +94,21 @@ test('camera observe requests negotiated full frames but cannot touch or acquire
   assert.ok(h.calls.filter(c => c.op === 'frame').every(c => c.cameraFrameProvenance === 1 && !('region' in c)));
   assert.ok(h.requests().filter(r => r.op === 'analyze').every(r => !r.cameraContext));
   assert.equal((await h.manager.command({ op: 'status' })).actions, 0);
+});
+
+test('full portrait restoration releases only camera, retains current joystick, and publishes transition counts', async t => {
+  const h = harness(t, { fullAt: 5, frameProof: h => h.captures < 3 ? undefined : proof(h.touches.at(-1).sequence, h.captures) });
+  const started = await h.start();
+  await until(() => h.touches.length >= 7);
+  assert.deepEqual(h.touches[4].points.map(p => p.id), [0, 1]);
+  assert.deepEqual(h.touches[5].points.map(p => p.id), [0, 1]);
+  assert.deepEqual(h.touches[6].points.map(p => p.id), [0], 'full current direction is not dropped when id1 is released');
+  const status = await h.manager.command({ op: 'status' });
+  assert.equal(status.camera.armAttempts, 1); assert.equal(status.camera.releaseRequests, 1);
+  assert.deepEqual(status.camera.releaseReasons, { 'full-target-restored': 1 });
+  assert.equal(status.camera.state, 'idle'); assert.equal(status.camera.frameTarget, 'full');
+  assert.equal(status.camera.searchRemainingMs, 0);
+  await h.stop(started);
 });
 
 test('real follower allows current camera proof and blocks stale or changed-hold directions independently of vision', async t => {

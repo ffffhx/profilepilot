@@ -313,6 +313,9 @@ export class GameFollower {
       slowAdbStarts: adbLaunchDelays(run.beganAt ?? Date.now()),
       httpRequests: phoneRequestTimings(run.beganAt ?? Date.now()) };
   }
+  private sampleCameraStatus(run: Run) {
+    if (this.run === run && this.value.camera && run.camera) this.value.camera = run.camera.status(performance.now());
+  }
   private heartbeatFailed(run: Run, epoch: number, error: unknown): void {
     if (run.cancelled || this.run !== run || epoch !== run.recoveryEpoch) return;
     void this.tryRecover(run).then(recovered => {
@@ -321,6 +324,7 @@ export class GameFollower {
   }
   private tryRecover(run: Run): Promise<boolean> {
     run.camera?.invalidate("transport-gap");
+    this.sampleCameraStatus(run);
     if (run.cancelled || !run.recoverTransport || !this.host.recoverWrapper) return Promise.resolve(false);
     if (run.recovery) return run.recovery;
     run.recoveryEpoch++; this.value.recovering = true;
@@ -392,6 +396,7 @@ export class GameFollower {
               cameraTarget: analysis.targetSource === "camera" ? nativeTarget : undefined,
               lost: !nativeTarget
             }, performance.now() - requestAt, performance.now());
+            if (config.cameraAssist) this.value.camera = run.camera!.status(performance.now());
             const direction = Date.now() - at < (backend === "basic" ? 3000 : 1000)
               && !cameraPlan?.stopJoystick && (analysis.targetSource !== "camera" || cameraPlan?.allowCameraMovement)
               ? analysis.direction : null;
@@ -409,10 +414,11 @@ export class GameFollower {
             if (run.cancelled) break;
             if (epoch !== run.recoveryEpoch) continue;
             if (config.cameraAssist && (accepted?.accepted !== true || accepted?.acceptedSequence !== sequence)) {
-              run.camera?.invalidate("uncertain-input"); throw new Error("手机未确认本次镜头触控，已停止操作");
+              run.camera?.invalidate("uncertain-input"); this.sampleCameraStatus(run); throw new Error("手机未确认本次镜头触控，已停止操作");
             }
             if (cameraPlan && !run.camera!.commit(cameraPlan, sequence, performance.now()))
               throw new Error("镜头触控确认已过期，已停止操作");
+            if (config.cameraAssist) this.value.camera = run.camera!.status(performance.now());
             this.value.timings = { ...this.value.timings, inputMs: Date.now() - inputAt };
             if (direction) this.value.actions++;
           }
@@ -428,6 +434,7 @@ export class GameFollower {
     finally {
       // Do not await run.done from inside its own cleanup.
       run.camera?.invalidate("cancel");
+      this.sampleCameraStatus(run);
       run.cancelled = true;
       clearInterval(run.heartbeat); this.sampleHostTimings(run); run.eventLoop?.disable(); run.worker?.close();
       await this.cleanup(run);
@@ -437,6 +444,7 @@ export class GameFollower {
   private async stop(run: Run) {
     if (run.stop) return run.stop;
     run.camera?.invalidate("cancel");
+    this.sampleCameraStatus(run);
     run.cancelled = true; clearInterval(run.heartbeat); run.eventLoop?.disable(); run.worker?.close();
     run.stop = (async () => {
       // Revoking the phone session releases held touches even if a frame is pending.

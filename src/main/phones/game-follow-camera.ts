@@ -1,3 +1,5 @@
+import type { FollowCameraStatus } from "../../shared/game-follow";
+
 /** Native minimap pixels. This module never sends input or derives movement from history. */
 export type CameraPoint = Readonly<{ x: number; y: number }>;
 export type CameraProof = Readonly<{
@@ -22,10 +24,11 @@ export type GameFollowCameraOptions = {
 };
 type Hold = {
   point: CameraPoint; sequence: number; startedAt: number; expiresAt: number;
+  searchDeadline: number; evidenceAt?: number;
   epoch?: number; heldSince?: number; lastCapture?: number;
 };
 type CurrentFrame = { context: CameraContext };
-const STABLE_MS = 250, RECENT_MS = 3000, BUDGET_MS = 6000, FRAME_MS = 1000, RELEASE_MS = 500;
+const STABLE_MS = 250, RECENT_MS = 3000, SEARCH_MS = 6000, FRAME_MS = 1000, RELEASE_MS = 500;
 const validPoint = (point: CameraPoint | undefined): point is CameraPoint => !!point
   && Number.isFinite(point.x) && point.x >= 0 && Number.isFinite(point.y) && point.y >= 0;
 const samePoint = (a: CameraPoint, b: CameraPoint) => a.x === b.x && a.y === b.y;
@@ -53,6 +56,13 @@ export class GameFollowCamera {
   private lastNow = -Infinity;
   private releaseRequired = false;
   private reason = "idle";
+  private frameProof = false;
+  private frameProofSequence?: number;
+  private frameTarget: FollowCameraStatus["frameTarget"] = "none";
+  private armAttempts = 0;
+  private releaseRequests = 0;
+  private releaseReasons: Record<string, number> = {};
+  private releaseRecorded = false;
 
   constructor(options: GameFollowCameraOptions) {
     this.enabled = options.enabled && options.mode === "control" && options.backend === "app"
@@ -64,10 +74,32 @@ export class GameFollowCamera {
     return this.releaseRequired ? "releasing" : !this.hold ? "idle" : this.hold.epoch !== undefined ? "held" : "arming";
   }
 
+  /** A snapshot does not advance clocks, extend deadlines, or prove phone state. */
+  status(now: number): FollowCameraStatus {
+    const hold = this.hold, remaining = (deadline: number) => Math.max(0, Math.floor(deadline - now));
+    return { state: this.state, reason: this.reason,
+      ...(hold ? { point: copyPoint(hold.point), sequence: hold.sequence } : {}),
+      holdAgeMs: hold ? Math.max(0, Math.floor(now - hold.startedAt)) : 0,
+      ...(hold?.evidenceAt !== undefined ? { evidenceAgeMs: Math.max(0, Math.floor(now - hold.evidenceAt)) } : {}),
+      searchRemainingMs: hold ? remaining(hold.searchDeadline) : 0, ttlRemainingMs: hold ? remaining(hold.expiresAt) : 0,
+      frameProof: this.frameProof, ...(this.frameProofSequence !== undefined ? { frameProofSequence: this.frameProofSequence } : {}),
+      frameTarget: this.frameTarget, armAttempts: this.armAttempts,
+      releaseRequests: this.releaseRequests, releaseReasons: { ...this.releaseReasons } };
+  }
+
+  private recordRelease(reason: string) {
+    if (!this.releaseRecorded && (this.hold || this.pending?.plan.point || this.releaseRequired)) {
+      this.releaseRecorded = true; this.releaseRequests++;
+      this.releaseReasons[reason] = (this.releaseReasons[reason] || 0) + 1;
+    }
+  }
+
   invalidate(reason: string): void {
+    this.recordRelease(reason);
     this.releaseRequired ||= !!this.hold || !!this.pending?.plan.point;
     this.hold = undefined; this.recent = undefined; this.frame = undefined;
     this.fullSince = undefined; this.fullCount = 0; this.pending = undefined; this.reason = reason;
+    this.frameProof = false; this.frameProofSequence = undefined; this.frameTarget = "none";
   }
 
   private clock(now: number): void {
@@ -79,12 +111,12 @@ export class GameFollowCamera {
   }
 
   private expire(now: number): void {
-    if (this.hold && (now >= this.hold.expiresAt || now - this.hold.startedAt >= BUDGET_MS))
-      this.invalidate(now >= this.hold.expiresAt ? "hold-expired" : "hold-budget");
+    if (this.hold && (now >= this.hold.expiresAt || now >= this.hold.searchDeadline))
+      this.invalidate(now >= this.hold.searchDeadline ? "search-expired" : "hold-expired");
   }
 
   beforeAnalyze(proof: CameraProof | undefined, now: number): CameraContext | undefined {
-    this.clock(now); this.frame = undefined;
+    this.clock(now); this.frame = undefined; this.frameProof = false; this.frameProofSequence = undefined; this.frameTarget = "none";
     // A caller cannot silently continue after an input with no known ACK.
     if (this.pending) this.invalidate("unacknowledged-input");
     this.expire(now);
@@ -106,6 +138,7 @@ export class GameFollowCamera {
     hold.epoch = proof.epoch; hold.heldSince = proof.heldSinceUptimeMs; hold.lastCapture = proof.capturedAtUptimeMs;
     const context: CameraContext = Object.freeze({ point: copyPoint(hold.point), epoch: proof.epoch, sequence: proof.sequence });
     this.frame = { context };
+    this.frameProof = true; this.frameProofSequence = proof.sequence;
     return context;
   }
 
@@ -114,10 +147,12 @@ export class GameFollowCamera {
     if (this.pending) this.invalidate("unacknowledged-input");
     const current = this.frame; this.frame = undefined;
     const plan = (point: CameraPoint | null, stopJoystick: boolean, allowCameraMovement: boolean, reason: string) => {
-      const remaining = this.hold ? Math.floor(this.hold.startedAt + BUDGET_MS - now) : BUDGET_MS;
+      const remaining = this.hold ? Math.floor(this.hold.searchDeadline - now) : SEARCH_MS;
       if (point && remaining < 100) {
-        this.invalidate("hold-budget"); point = null; stopJoystick = true; allowCameraMovement = false; reason = "hold-budget";
+        this.invalidate("search-expired"); point = null; stopJoystick = true; allowCameraMovement = false; reason = "search-expired";
       }
+      if (!point) this.recordRelease(reason);
+      if (reason === "arm") this.armAttempts++;
       const value: CameraPlan = Object.freeze({ id: ++this.nextId, point: point ? copyPoint(point) : null,
         stopJoystick, allowCameraMovement, reason, ttlMs: point ? Math.min(1200, remaining) : 1200 });
       this.pending = { plan: value, createdAt: now }; this.reason = reason; return value;
@@ -128,26 +163,35 @@ export class GameFollowCamera {
     }
     if (this.releaseRequired) return plan(null, true, false, this.reason);
     const full = validPoint(analysis.fullTarget) ? analysis.fullTarget : undefined;
+    const proven = !!current && !!this.hold && current.context.sequence === this.hold.sequence;
+    const cameraCurrent = proven && validPoint(analysis.cameraTarget);
+    this.frameTarget = full ? "full" : cameraCurrent ? "camera" : "none";
     if (full) this.recent = { point: copyPoint({ x: Math.round(full.x), y: Math.round(full.y) }), observedAt: now - frameAgeMs };
     if (!this.hold) {
       if (!full && analysis.lost && this.recent && now - this.recent.observedAt <= RECENT_MS)
         return plan(this.recent.point, true, false, "arm");
       return plan(null, !full && analysis.lost, false, "idle");
     }
+    if (full || cameraCurrent) {
+      // Only current visual evidence renews the SEARCH horizon. Use the request
+      // start as a conservative observation time; neither ACKs nor proof alone
+      // extend it. The independent touch TTL is still checked before and after
+      // analysis and is never extended here. Without evidence, id0 stops now.
+      this.hold.evidenceAt = now - frameAgeMs;
+      this.hold.searchDeadline = Math.max(this.hold.searchDeadline, this.hold.evidenceAt + SEARCH_MS);
+    }
     if (full) {
       this.fullSince ??= now; this.fullCount++;
       if (this.fullCount >= 2 && now - this.fullSince >= RELEASE_MS)
-        return plan(null, true, false, "full-target-restored");
+        return plan(null, false, false, "full-target-restored");
     } else { this.fullSince = undefined; this.fullCount = 0; }
     // expire(now) enforces plan-created-at + the exact ACKed TTL. Plan creation
     // precedes phone receipt, so that host deadline cannot outlast the phone's
     // receipt + TTL. The matching proof separately validates the capture instant.
     // Do not subtract the whole request age from phone expiry-minus-capture:
     // that would count time spent waiting BEFORE capture as post-capture age.
-    const proven = !!current && !!this.hold && current.context.sequence === this.hold.sequence;
-    const cameraCurrent = proven && validPoint(analysis.cameraTarget);
     return plan(this.hold.point, !full && !cameraCurrent, !full && cameraCurrent,
-      full ? "full-target-confirming" : cameraCurrent ? "held-current-target" : "await-current-evidence");
+      full ? "full-target-confirming" : cameraCurrent ? "held-current-target" : "searching-current-target");
   }
 
   /** ACK means accepted, not yet applied. Only a later matching frame proves application. */
@@ -162,17 +206,19 @@ export class GameFollowCamera {
     this.pending = undefined; this.lastSequence = sequence; this.frame = undefined;
     if (!plan.point) {
       this.hold = undefined; this.releaseRequired = false; this.fullSince = undefined; this.fullCount = 0;
+      this.releaseRecorded = false;
       return true;
     }
     // Start the host TTL before transmission (plan creation), never at late ACK.
     if (now >= pending.createdAt + ttlMs || this.hold &&
-      (now >= this.hold.expiresAt || now - this.hold.startedAt >= BUDGET_MS)) {
+      (now >= this.hold.expiresAt || now >= this.hold.searchDeadline)) {
       this.releaseRequired = true; this.invalidate("late-input-ack"); return false;
     }
     if (this.hold && samePoint(plan.point, this.hold.point)) {
       this.hold.sequence = sequence; this.hold.expiresAt = pending.createdAt + ttlMs;
     } else {
-      this.hold = { point: copyPoint(plan.point), sequence, startedAt: pending.createdAt, expiresAt: pending.createdAt + ttlMs };
+      this.hold = { point: copyPoint(plan.point), sequence, startedAt: pending.createdAt, expiresAt: pending.createdAt + ttlMs,
+        searchDeadline: pending.createdAt + SEARCH_MS };
       this.fullSince = undefined; this.fullCount = 0;
     }
     return true;

@@ -7,6 +7,13 @@ export type CameraPlacementConfig = Pick<GameFollowConfig, "width" | "height" | 
   cameraAssist: Pick<Assist, "referenceWidth" | "referenceHeight" | "matrix" | "anchorBounds" | "projectionErrorPx">;
 };
 export type CameraPlacement = FollowCameraPlacement;
+export type CameraArmLead = {
+  /** Measured from two adjacent current full portraits only. */
+  speedMapPxPerSecond?: CameraPoint;
+  sampleIntervalMs?: number;
+  intervalMs: number;
+  captureMs: number;
+};
 export type CameraRecenterFrame = {
   /** Same-frame host-validated context and camera-source target, never history. */
   context?: CameraContext;
@@ -65,7 +72,8 @@ function centered(g: Geometry, target: CameraPoint) {
 }
 
 /** Old full-target evidence can select a camera point only; it cannot justify id0. */
-export function planCameraArm(config: CameraPlacementConfig, full: { target?: CameraPoint; ageMs: number }): CameraPlacement {
+export function planCameraArm(config: CameraPlacementConfig, full: { target?: CameraPoint; ageMs: number },
+  lead?: CameraArmLead): CameraPlacement {
   const g = geometry(config);
   if (!g) return reject("invalid-calibration");
   if (!point(full.target) || !inside(full.target, g.map) || !nonnegative(full.ageMs) || full.ageMs > 3000)
@@ -74,7 +82,33 @@ export function planCameraArm(config: CameraPlacementConfig, full: { target?: Ca
   if (!p) return reject("camera-point-outside-map");
   const predictedAnchor = anchorFor(g, full.target, p);
   if (!anchorInside(predictedAnchor, g.bounds)) return reject("quantized-center-outside-calibration");
-  return { action: "arm", reason: "calibrated-center", point: p, center: g.center, predictedAnchor, frameRemainingMs: 0 };
+  const baseline: CameraPlacement = { action: "arm", reason: "calibrated-center", point: p, center: g.center, predictedAnchor, frameRemainingMs: 0 };
+  if (!lead) return baseline;
+  const prediction: NonNullable<CameraPlacement["prediction"]> = {
+    applied: false, reason: "no-adjacent-full-speed", ageMs: full.ageMs, horizonMs: 0, observedPoint: { ...full.target }
+  };
+  baseline.prediction = prediction;
+  if (!point(lead.speedMapPxPerSecond) || !Number.isFinite(lead.sampleIntervalMs)
+    || lead.sampleIntervalMs! <= 0 || lead.sampleIntervalMs! > 1500) return baseline;
+  prediction.speedMapPxPerSecond = { ...lead.speedMapPxPerSecond };
+  prediction.sampleIntervalMs = lead.sampleIntervalMs;
+  if (full.ageMs > 1000) { prediction.reason = "full-evidence-too-old"; return baseline; }
+  if (!nonnegative(lead.intervalMs) || !nonnegative(lead.captureMs)) {
+    prediction.reason = "invalid-latency-budget"; return baseline;
+  }
+  // observedAt is the host request start, conservatively including time before
+  // the phone captured the full portrait. This is a bounded search, not movement.
+  prediction.horizonMs = Math.min(1000, full.ageMs + Math.max(250, lead.intervalMs, lead.captureMs));
+  const aim = { x: full.target.x + lead.speedMapPxPerSecond.x*prediction.horizonMs/1000,
+    y: full.target.y + lead.speedMapPxPerSecond.y*prediction.horizonMs/1000 };
+  if (!point(aim) || !inside(aim, g.map)) { prediction.reason = "predicted-target-outside-map"; return baseline; }
+  prediction.aimPoint = aim;
+  const aimedPoint = centered(g, aim);
+  if (!aimedPoint) { prediction.reason = "predicted-camera-outside-map"; return baseline; }
+  const aimedAnchor = anchorFor(g, aim, aimedPoint);
+  if (!anchorInside(aimedAnchor, g.bounds)) { prediction.reason = "predicted-center-outside-calibration"; return baseline; }
+  prediction.applied = true; prediction.reason = "adjacent-full-speed";
+  return { ...baseline, reason: "calibrated-center-led", point: aimedPoint, predictedAnchor: aimedAnchor };
 }
 
 /**

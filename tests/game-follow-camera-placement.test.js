@@ -143,3 +143,42 @@ test('phone uptime origin cannot change placement and remaining frame time is di
   assert.equal('ttlMs' in late, false, 'planner must not pretend a shared phone TTL is a per-pointer frame deadline');
   assert.equal('allowCameraMovement' in late, false, 'placement alone never grants movement');
 });
+
+test('initial camera lead includes full evidence age and latency but is bounded to one second', () => {
+  const c = config(), full = { target: { x: 293.5, y: 169.5 }, ageMs: 550 };
+  const lead = { speedMapPxPerSecond: { x: 14.4, y: 10.28 }, sampleIntervalMs: 500, intervalMs: 350, captureMs: 500 };
+  const p = planCameraArm(c, full, lead);
+  assert.equal(p.reason, 'calibrated-center-led'); assert.equal(p.prediction.applied, true);
+  assert.equal(p.prediction.horizonMs, 1000);
+  near(p.prediction.aimPoint.x, 307.9); near(p.prediction.aimPoint.y, 179.78);
+  const shorter = planCameraArm(c, { ...full, ageMs: 100 }, { ...lead, captureMs: 50 });
+  assert.equal(shorter.prediction.horizonMs, 450);
+  const settling = planCameraArm(c, { ...full, ageMs: 100 }, { ...lead, intervalMs: 20, captureMs: 50 });
+  assert.equal(settling.prediction.horizonMs, 350);
+  assert.equal(p.frameRemainingMs, 0); assert.equal('ttlMs' in p, false);
+});
+
+test('old or unqualified speed uses the original arm, with an explicit rejected prediction', () => {
+  const c = config(), full = { target: hold, ageMs: 200 };
+  const lead = { speedMapPxPerSecond: { x: 14.4, y: 10.28 }, sampleIntervalMs: 500, intervalMs: 350, captureMs: 300 };
+  for (const patch of [{ speedMapPxPerSecond: undefined }, { sampleIntervalMs: 0 }, { sampleIntervalMs: 1501 },
+    { speedMapPxPerSecond: { x: Infinity, y: 0 } }, { captureMs: NaN }]) {
+    const p = planCameraArm(c, full, { ...lead, ...patch });
+    assert.equal(p.prediction.applied, false); assert.deepEqual(p.point, planCameraArm(c, full).point);
+  }
+  const old = planCameraArm(c, { ...full, ageMs: 1001 }, lead);
+  assert.equal(old.prediction.reason, 'full-evidence-too-old'); assert.equal(old.prediction.applied, false);
+  assert.equal(planCameraArm(c, { ...full, ageMs: 1000 }, lead).prediction.applied, true);
+});
+
+test('out-of-map prediction and rounded camera point both fall back without edge clamping', () => {
+  const c = config(), full = { target: { x: 520, y: 218 }, ageMs: 600 };
+  const lead = { speedMapPxPerSecond: { x: 10, y: 0 }, sampleIntervalMs: 500, intervalMs: 500, captureMs: 300 };
+  const p = planCameraArm(c, full, lead);
+  assert.equal(p.prediction.reason, 'predicted-target-outside-map'); assert.equal(p.prediction.applied, false);
+  assert.deepEqual(p.point, planCameraArm(c, full).point); assert.notEqual(p.point.x, 524);
+  const edge = { target: { x: 105, y: 218 }, ageMs: 600 };
+  const cameraOutside = planCameraArm(c, edge, { ...lead, speedMapPxPerSecond: { x: -4.9, y: 0 } });
+  assert.equal(cameraOutside.prediction.reason, 'predicted-camera-outside-map');
+  assert.deepEqual(cameraOutside.point, planCameraArm(c, edge).point);
+});

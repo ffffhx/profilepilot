@@ -186,6 +186,24 @@ test('initial arm applies calibrated center offset instead of assuming the label
   assert.deepEqual(h.touches[1].points, [{ id: 1, x: 298, y: 199, fromX: 298, fromY: 199 }]);
 });
 
+test('two current full portraits can lead id1 after loss but never supply a joystick coordinate', async t => {
+  const h = harness(t, { frames: [
+    { target: { x: .45, y: .5, confidence: .99 }, targetSource: 'template' },
+    { target: { x: .5, y: .5, confidence: .99 }, targetSource: 'template', direction: { x: 1, y: 0 } },
+    // Deliberately challenge the host with a direction despite no current target.
+    { target: null, targetSource: 'template', direction: { x: 1, y: 0 } }
+  ] });
+  const started = await h.start();
+  await until(() => h.touches.length >= 4); await h.stop(started);
+  assert.deepEqual(h.touches[0].points.map(p => p.id), [0]);
+  assert.deepEqual(h.touches[1].points.map(p => p.id), [0]);
+  assert.deepEqual(h.touches[2].points.map(p => p.id), [1]);
+  assert.ok(h.touches[2].points[0].x > 300 && h.touches[2].points[0].x < 500);
+  assert.equal(h.touches[2].ttlMs, 1200);
+  assert.deepEqual(h.touches[3].points.map(p => p.id), [1], 'next camera direction still needs its own applied proof');
+  assert.ok(h.requests().filter(r => r.op === 'analyze').every(r => !r.cameraContext));
+});
+
 test('self camera is independently opt-in with mandatory green identity and reference bounds', () => {
   const c = config(); c.selfCameraAssist = { ...c.cameraAssist, team: 'green' }; delete c.cameraAssist;
   assert.ok(gameFollowConfigSchema.safeParse(c).success);

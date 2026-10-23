@@ -21,6 +21,8 @@ export type CameraObservation = {
   currentSelf?: CameraPoint;
   cameraSelf?: CameraPoint;
   selfLost?: boolean;
+  /** Host-monotonic capture/assembly duration; camera search planning only. */
+  captureMs?: number;
 };
 export type CameraPlan = Readonly<{
   id: number; point: CameraPoint | null; stopJoystick: boolean;
@@ -42,6 +44,8 @@ type Hold = {
   previousEpoch?: number;
 };
 type CurrentFrame = { context: CameraContext; proof: CameraProof };
+type FullObservation = { point: CameraPoint; at: number };
+type RecentFull = { point: CameraPoint; observedAt: number; speed?: CameraPoint; intervalMs?: number };
 const STABLE_MS = 250, RECENT_MS = 3000, SEARCH_MS = 6000, FRAME_MS = 1000, RELEASE_MS = 500;
 const validPoint = (point: CameraPoint | undefined): point is CameraPoint => !!point
   && Number.isFinite(point.x) && point.x >= 0 && Number.isFinite(point.y) && point.y >= 0;
@@ -60,8 +64,10 @@ const copyPoint = (p: CameraPoint): CameraPoint => Object.freeze({ x: p.x, y: p.
 export class GameFollowCamera {
   private readonly enabled: boolean;
   private hold?: Hold;
-  private recent?: { point: CameraPoint; observedAt: number };
-  private recentSelf?: { point: CameraPoint; observedAt: number };
+  private recent?: RecentFull;
+  private recentSelf?: RecentFull;
+  private previousFull?: FullObservation;
+  private previousFullSelf?: FullObservation;
   private frame?: CurrentFrame;
   private fullSince?: number;
   private fullCount = 0;
@@ -136,6 +142,7 @@ export class GameFollowCamera {
     this.frameSelf = "none";
     this.placement = undefined; this.observation = undefined; this.speed = undefined;
     this.selfObservation = undefined; this.selfSpeed = undefined;
+    this.previousFull = undefined; this.previousFullSelf = undefined;
   }
 
   private clock(now: number): void {
@@ -223,14 +230,22 @@ export class GameFollowCamera {
         ? { x: (measured.x-previous.point.x)*1000/dt, y: (measured.y-previous.point.y)*1000/dt } : undefined;
       // Only adjacent current measurements estimate speed. A missing frame is
       // not silently bridged; history is never a movement coordinate.
-      return { speed, observation: measured ? { point: copyPoint(measured), at: observedAt } : undefined };
+      return { speed, intervalMs: speed ? dt : undefined, observation: measured ? { point: copyPoint(measured), at: observedAt } : undefined };
     };
     const targetMotion = motion(full || cameraTarget, this.observation);
     this.speed = targetMotion.speed; this.observation = targetMotion.observation;
     const selfMotion = motion(fullSelf || cameraSelf, this.selfObservation);
     this.selfSpeed = selfMotion.speed; this.selfObservation = selfMotion.observation;
-    if (full) this.recent = { point: copyPoint(full), observedAt };
-    if (fullSelf) this.recentSelf = { point: copyPoint(fullSelf), observedAt };
+    // Keep the last adjacent FULL pair for initial id1 selection after loss.
+    // Camera/partial/marker frames break the pair and cannot teach this speed.
+    // A saved pair survives loss only as recent history; arm caps it at 1 second.
+    const fullMotion = motion(full, this.previousFull), fullSelfMotion = motion(fullSelf, this.previousFullSelf);
+    this.previousFull = fullMotion.observation; this.previousFullSelf = fullSelfMotion.observation;
+    if (full) this.recent = { point: copyPoint(full), observedAt, speed: fullMotion.speed, intervalMs: fullMotion.intervalMs };
+    if (fullSelf) this.recentSelf = { point: copyPoint(fullSelf), observedAt, speed: fullSelfMotion.speed, intervalMs: fullSelfMotion.intervalMs };
+    const armPlacement = (config: CameraPlacementConfig, recent: RecentFull) => planCameraArm(config,
+      { target: recent.point, ageMs: now-recent.observedAt }, { speedMapPxPerSecond: recent.speed,
+        sampleIntervalMs: recent.intervalMs, intervalMs: this.intervalMs, captureMs: analysis.captureMs ?? 0 });
     if (!this.hold) {
       const armTarget = this.targetEnabled && !targetCurrent && analysis.lost
         && this.recent && now-this.recent.observedAt <= RECENT_MS;
@@ -241,7 +256,7 @@ export class GameFollowCamera {
         const recent = (armTarget ? this.recent : this.recentSelf)!;
         const placement = armTarget ? this.placementConfig : this.selfPlacementConfig;
         if (placement) {
-          this.placement = planCameraArm(placement, { target: recent.point, ageMs: now-recent.observedAt });
+          this.placement = armPlacement(placement, recent);
           if (this.placement.action !== "arm" || !this.placement.point) return plan(null, true, false, "arm-placement-rejected", role);
           return plan(this.placement.point, true, false, armTarget ? "arm" : "arm-self", role);
         }
@@ -268,8 +283,7 @@ export class GameFollowCamera {
     // fresh applied proof for a changed point just like any other camera move.
     if (this.hold.role === "target" && full && !selfCurrent && this.selfPlacementConfig
       && this.recentSelf && now-this.recentSelf.observedAt <= RECENT_MS) {
-      this.placement = planCameraArm(this.selfPlacementConfig,
-        { target: this.recentSelf.point, ageMs: now-this.recentSelf.observedAt });
+      this.placement = armPlacement(this.selfPlacementConfig, this.recentSelf);
       if (this.placement.action === "arm" && this.placement.point)
         return plan(this.placement.point, true, false, "switch-search-self", "self");
       return plan(this.hold.point, true, false, "self-switch-placement-rejected");

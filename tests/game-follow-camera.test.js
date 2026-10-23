@@ -307,6 +307,75 @@ const placement = { width: 1000, height: 500, map: { x: 0, y: 0, width: 1, heigh
   cameraAssist: { referenceWidth: 1000, referenceHeight: 500,
     matrix: [[.02, 0], [0, .02], [-10, -5]], anchorBounds: { x: 0, y: 0, width: 1000, height: 500 } } };
 
+function cameraFullPair(m, role = 'target', gap = 500) {
+  const observe = point => role === 'self' ? { fullSelf: point, fullTarget: target, lost: false }
+    : { fullTarget: point, lost: false };
+  m.beforeAnalyze(undefined, 100);
+  m.commit(m.afterAnalyze(observe({ x: 286.3, y: 164.36 }), 100, 100), 1, 105);
+  m.beforeAnalyze(undefined, gap+100);
+  m.commit(m.afterAnalyze(observe({ x: 293.5, y: 169.5 }), 100, gap+100), 2, gap+105);
+}
+
+test('dynamic2 full portrait pair leads the lost-frame camera only, with unchanged proof and TTL gates', () => {
+  // Actual frame 14/15 displacement and calibrated affine; timestamps controlled
+  // here exercise the bound and are not a claim of live camera recovery.
+  const actual = { width: 2772, height: 1240, map: { x: 120/2772, y: 0, width: 425/2772, height: 425/1240 },
+    cameraAssist: { referenceWidth: 2772, referenceHeight: 1240,
+      matrix: [[.03134552196601158,-.000019410593445561446],[-.000562810361805513,.05202441025993644],[-45.38083595559168,-22.39426870327259]],
+      anchorBounds: { x: 1000, y: 330, width: 900, height: 240 } } };
+  const m = new GameFollowCamera({ ...options, placement: actual, intervalMs: 350 }); cameraFullPair(m);
+  m.beforeAnalyze(undefined, 1050);
+  const p = m.afterAnalyze({ ...lost, captureMs: 500, cameraTarget: { x: 400, y: 400 } }, 100, 1050);
+  assert.deepEqual(p.point, { x: 308, y: 179 }, 'old arm was 294,169');
+  assert.equal(p.stopJoystick, true); assert.equal(p.allowCameraMovement, false); assert.equal(p.ttlMs, 1200);
+  const prediction = m.status(1050).placement.prediction;
+  assert.equal(prediction.applied, true); assert.equal(prediction.horizonMs, 1000);
+  assert.ok(Math.abs(prediction.speedMapPxPerSecond.x-14.4)<1e-8);
+  assert.ok(Math.abs(prediction.speedMapPxPerSecond.y-10.28)<1e-8);
+  assert.equal(m.status(1050).speedMapPxPerSecond, undefined, 'recenter speed still clears on a missing frame');
+  m.commit(p, 3, 1055); assert.equal(m.status(1055).ttlRemainingMs, 1195);
+  assert.equal(m.status(1055).searchRemainingMs, 5995);
+  assert.equal(m.beforeAnalyze(proof({ sequence: 3, x: 294, y: 169 }), 1300), undefined);
+  const waiting = m.afterAnalyze({ ...lost, cameraTarget: target }, 100, 1300);
+  assert.equal(waiting.stopJoystick, true); assert.equal(waiting.allowCameraMovement, false);
+  m.commit(waiting, 4, 1305);
+  m.beforeAnalyze(undefined, 2500);
+  assert.equal(m.afterAnalyze(lost, 100, 2500).reason, 'hold-expired');
+});
+
+test('single full, nonadjacent full, large gap and expired pair do not lead the camera', () => {
+  for (const kind of ['single', 'nonadjacent', 'large-gap', 'expired']) {
+    const m = new GameFollowCamera({ ...options, placement }); let sequence = 0, now;
+    const full = (p, at) => { m.beforeAnalyze(undefined, at); m.commit(m.afterAnalyze({ fullTarget: p, lost: false }, 0, at), ++sequence, at); };
+    full({ x: 230, y: 300 }, 0);
+    if (kind === 'nonadjacent') {
+      // A current partial is valid for other purposes, but cannot bridge the two full portraits.
+      m.beforeAnalyze(undefined, 200);
+      m.commit(m.afterAnalyze({ currentTarget: target, lost: false }, 0, 200), ++sequence, 200);
+    }
+    if (kind !== 'single') full(target, kind === 'large-gap' ? 1501 : 500);
+    now = kind === 'large-gap' ? 1600 : kind === 'expired' ? 1501 : 600;
+    m.beforeAnalyze(undefined, now);
+    const p = m.afterAnalyze({ ...lost, captureMs: 400 }, 10, now);
+    assert.equal(p.stopJoystick, true); assert.equal(p.allowCameraMovement, false);
+    assert.deepEqual(p.point, kind === 'single' ? { x: 230, y: 300 } : target);
+    assert.equal(m.status(now).placement.prediction.applied, false, kind);
+  }
+});
+
+test('self camera lead uses only its own adjacent full pair and recovery discards both histories', () => {
+  const m = new GameFollowCamera({ ...options, targetEnabled: false, selfPlacement: placement }); cameraFullPair(m, 'self');
+  m.beforeAnalyze(undefined, 1050);
+  const p = m.afterAnalyze({ fullTarget: target, lost: false, captureMs: 500 }, 100, 1050);
+  assert.equal(p.reason, 'arm-self'); assert.deepEqual(p.point, { x: 308, y: 180 });
+  assert.equal(p.stopJoystick, true); assert.equal(p.allowCameraMovement, false);
+  m.commit(p, 3, 1055); m.invalidate('recovery');
+  m.beforeAnalyze(undefined, 1100);
+  m.commit(m.afterAnalyze({ fullTarget: target, lost: false }, 0, 1100), 4, 1100);
+  m.beforeAnalyze(undefined, 1200);
+  assert.equal(m.afterAnalyze({ fullTarget: target, lost: false }, 0, 1200).point, null);
+});
+
 test('current edge evidence recenters now; old epoch and unsettled new point cannot authorize the next frame', () => {
   const m = new GameFollowCamera({ ...options, placement, intervalMs: 350 });
   m.commit(m.afterAnalyze({ fullTarget: target, lost: false }, 0, 0), 1, 5);

@@ -415,7 +415,7 @@ export class GameFollower {
               fullSelf: (!analysis.selfSource || analysis.selfSource === "template") ? nativeSelf : undefined,
               currentSelf: analysis.selfSource !== "camera" ? nativeSelf : undefined,
               cameraSelf: config.selfCameraAssist && analysis.selfSource === "camera" ? nativeSelf : undefined,
-              lost: !nativeTarget, selfLost: !nativeSelf
+              lost: !nativeTarget, selfLost: !nativeSelf, captureMs: completedAt - requestAt
             }, performance.now() - requestAt, performance.now());
             if (cameraEnabled) this.value.camera = run.camera!.status(performance.now());
             const direction = Date.now() - at < (backend === "basic" ? 3000 : 1000)

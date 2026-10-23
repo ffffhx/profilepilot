@@ -88,6 +88,12 @@ export interface FollowCameraPlacement {
   margin?: FollowPoint;
   coverageInsufficient?: boolean;
   speedKnown?: boolean;
+  /** Camera-search aim only. Never a current target/self position or id0 authority. */
+  prediction?: {
+    applied: boolean; reason: string; ageMs: number; horizonMs: number;
+    speedMapPxPerSecond?: FollowPoint; sampleIntervalMs?: number;
+    observedPoint: FollowPoint; aimPoint?: FollowPoint;
+  };
   frameRemainingMs: number;
 }
 /** Host observations and planned transitions only; never permission to renew input. */

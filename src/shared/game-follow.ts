@@ -148,7 +148,8 @@ export interface FollowStatus {
 export interface FollowRuntime { available: boolean; python: string; version: string; error: string; }
 export type FollowCommand =
   | { op: "runtime" | "setup" | "status" }
-  | { op: "camera-sample"; id: string; x: number; y: number; outputDir: string }
+  | { op: "camera-sample"; id: string; x: number; y: number; outputDir: string;
+      steps?: { x: number; y: number; mode: "continue" | "release-newdown" }[] }
   | { op: "load" | "save"; config?: GameFollowConfig }
   | { op: "analyze"; config: GameFollowConfig; frame: FollowFrame }
   | { op: "start"; id: string; mode: "observe" | "control"; backend?: "app" | "basic"; recoverTransport?: boolean; config: GameFollowConfig }

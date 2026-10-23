@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { loadCli } = require('./cli-test-build.cjs');
-const { GameFollower } = loadCli('src/main/phones/game-follow.ts');
+const { GameFollower, gameFollowConfigSchema } = loadCli('src/main/phones/game-follow.ts');
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(check) {
   const end = Date.now() + 6000;
@@ -20,7 +20,7 @@ function config() {
     stopDistance: .1, intervalMs: 350,
     cameraAssist: { referenceWidth: 1000, referenceHeight: 500, targetLabel: image, healthBarTemplate: image,
       healthBar: { width: 60, height: 12, offsetX: 0, offsetY: 20 },
-      region: { x: .1, y: .1, width: .8, height: .8 }, matrix: [[1, 0], [0, 1], [0, 0]],
+      region: { x: .1, y: .1, width: .8, height: .8 }, matrix: [[.02, 0], [0, .02], [-10, -5]],
       anchorBounds: { x: 0, y: 0, width: 1000, height: 500 } } };
 }
 function proof(sequence, frame, patch = {}) {
@@ -42,8 +42,9 @@ readline.createInterface({input:process.stdin}).on('line', line=>{
  if(req.op==='analyze') {
   frames++; const lost=frames===2, camera=frames>=3 && frames<${options.fullAt ?? 1000000};
   data={phase:lost?'lost':'following',message:'fixture',self:{x:.2,y:.2,confidence:.99},
-   target:lost?null:{x:.5,y:.5,confidence:.99},targetSource:camera?'camera':'template',
+   target:lost?null:{x:.5+(camera?${options.cameraOffset ?? 0}:0),y:.5,confidence:.99},targetSource:camera?'camera':'template',
    source:'minimap',direction:lost?null:{x:1,y:0},path:[],elapsedMs:1};
+  Object.assign(data, ${JSON.stringify(options.frames ?? [])}[frames-1] || {});
  }
  process.stdout.write(JSON.stringify({id:req.id,ok:true,data})+'\\n');
 });`);
@@ -155,4 +156,100 @@ test('recovery releases uncertain camera input and cannot reuse pre-gap proof or
   assert.equal(h.calls[lost + 2].op, 'frame');
   const analyses = h.requests().filter(r => r.op === 'analyze');
   assert.equal(analyses[3].cameraContext, undefined);
+});
+
+test('recenter keeps this frame direction and waits only for the new applied stable proof on following frames', async t => {
+  const h = harness(t, { cameraOffset: .02, frameProof: h => {
+    if (h.captures < 3) return;
+    const prior = h.touches.at(-1), point = prior.points.find(p => p.id === 1);
+    return proof(prior.sequence, h.captures, h.captures === 3 ? {} : {
+      x: point.x, y: point.y, epoch: 8, heldSinceUptimeMs: 101200,
+      capturedAtUptimeMs: h.captures === 4 ? 101400 : 101800+(h.captures-5)*400 });
+  } });
+  const started = await h.start();
+  await until(() => h.touches.length >= 5); await h.stop(started);
+  assert.deepEqual(h.touches[1].points.map(p => p.id), [1]);
+  assert.deepEqual(h.touches[2].points.map(p => p.id), [0, 1]);
+  assert.equal(h.touches[2].points[1].x, 308, 'current edge target becomes the new centered hold');
+  assert.deepEqual(h.touches[3].points.map(p => p.id), [1], 'new point is not settled for 250ms yet');
+  assert.deepEqual(h.touches[4].points.map(p => p.id), [0, 1], 'one valid stable new proof resumes current movement');
+  const requests = h.requests().filter(r => r.op === 'analyze');
+  assert.equal(requests[2].cameraContext.point.x, 300);
+  assert.equal(requests[3].cameraContext, undefined);
+  assert.equal(requests[4].cameraContext.point.x, 308);
+});
+
+test('initial arm applies calibrated center offset instead of assuming the label lies at projection zero', async t => {
+  const h = harness(t), c = config(); c.cameraAssist.matrix[2] = [-8, -4];
+  const started = await h.start({ config: c });
+  await until(() => h.touches.length >= 2); await h.stop(started);
+  assert.deepEqual(h.touches[1].points, [{ id: 1, x: 298, y: 199, fromX: 298, fromY: 199 }]);
+});
+
+test('self camera is independently opt-in with mandatory green identity and reference bounds', () => {
+  const c = config(); c.selfCameraAssist = { ...c.cameraAssist, team: 'green' }; delete c.cameraAssist;
+  assert.ok(gameFollowConfigSchema.safeParse(c).success);
+  for (const patch of [{ team: undefined }, { team: 'blue' }, { referenceWidth: 999 }, { anchorBounds: { x: 950, y: 0, width: 100, height: 100 } }])
+    assert.equal(gameFollowConfigSchema.safeParse({ ...c, selfCameraAssist: { ...c.selfCameraAssist, ...patch } }).success, false);
+  assert.equal(gameFollowConfigSchema.safeParse({ ...config(), cameraAssist: { ...config().cameraAssist, team: 'green' } }).success, false);
+});
+
+test('self-only assistance uses full frames, validates its own proof and retains camera until both identities return', async t => {
+  const fullTarget = { target: { x: .5, y: .5, confidence: .99 }, targetSource: 'template', direction: { x: 1, y: 0 } };
+  const cameraSelf = { ...fullTarget, self: { x: .2, y: .2, confidence: .85 }, selfSource: 'camera' };
+  const markerSelf = { ...fullTarget, self: { x: .2, y: .2, confidence: .7 }, selfSource: 'marker' };
+  const h = harness(t, { frames: [{ ...fullTarget, selfSource: 'template' }, { ...fullTarget, self: null },
+    cameraSelf, cameraSelf, cameraSelf, cameraSelf, cameraSelf, markerSelf, markerSelf, markerSelf],
+    frameProof: h => h.captures < 3 ? undefined : proof(h.captures === 4 ? 2 : h.touches.at(-1).sequence,
+      h.captures, { x: 180, y: 80 }) });
+  const c = config(); c.selfCameraAssist = { ...c.cameraAssist, team: 'green' }; delete c.cameraAssist;
+  const started = await h.start({ config: c });
+  await until(() => h.touches.length >= 10);
+  assert.ok(h.calls.filter(c => c.op === 'frame').every(c => c.cameraFrameProvenance === 1 && !c.region));
+  assert.deepEqual(h.touches[1].points.map(p => p.id), [1]); assert.equal(h.touches[1].points[0].x, 180);
+  assert.deepEqual(h.touches[2].points.map(p => p.id), [0, 1], 'camera locator threshold is independent of portrait threshold');
+  assert.deepEqual(h.touches[3].points.map(p => p.id), [1], 'stale sequence cannot authorize own camera coordinates');
+  assert.deepEqual(h.touches[6].points.map(p => p.id), [0, 1], 'full target alone does not release self camera');
+  assert.deepEqual(h.touches[7].points.map(p => p.id), [0, 1], 'current marker may confirm restoration without avatar confidence');
+  assert.deepEqual(h.touches[9].points.map(p => p.id), [0]);
+  const status = await h.manager.command({ op: 'status' });
+  assert.equal(status.camera.releaseReasons['full-pair-restored'], 1);
+  await h.stop(started);
+});
+
+test('self assistance alone still requires capability and cannot use the basic backend', async t => {
+  const c = config(); c.selfCameraAssist = { ...c.cameraAssist, team: 'green' }; delete c.cameraAssist;
+  const old = harness(t, { capability: false }); await assert.rejects(old.start({ config: c }), /镜头画面凭据/);
+  assert.equal(old.captures, 0); assert.equal(old.touches.length, 0);
+  const basic = harness(t); await assert.rejects(basic.start({ config: c, backend: 'basic' }), /App/);
+  assert.equal(basic.starts, 0);
+});
+
+test('target camera proof cannot opt into an unconfigured self camera locator', async t => {
+  const h = harness(t, { frames: [{}, {}, { selfSource: 'camera' }],
+    frameProof: h => h.captures < 3 ? undefined : proof(h.touches.at(-1).sequence, h.captures) });
+  const started = await h.start(); await until(() => h.touches.length >= 3); await h.stop(started);
+  assert.deepEqual(h.touches[2].points.map(p => p.id), [1], 'a target proof does not enable a different unconfigured identity source');
+});
+
+test('full target restoration while self disappears switches the held camera directly without release or stale movement', async t => {
+  const fullTarget = { target: { x: .5, y: .5, confidence: .99 }, targetSource: 'template', direction: { x: 1, y: 0 } };
+  const ownCamera = { ...fullTarget, self: { x: .2, y: .2, confidence: .85 }, selfSource: 'camera' };
+  const h = harness(t, { frames: [{ selfSource: 'template' }, { selfSource: 'template' },
+    { ...fullTarget, self: null }, ownCamera, ownCamera, ownCamera], frameProof: h => {
+      if (h.captures < 3) return;
+      return proof(h.touches.at(-1).sequence, h.captures, h.captures < 5 ? {} : {
+        x: 180, y: 80, epoch: 8, heldSinceUptimeMs: 101200 });
+    } });
+  const c = config(); c.selfCameraAssist = { ...c.cameraAssist, team: 'green' };
+  const started = await h.start({ config: c }); await until(() => h.touches.length >= 6);
+  assert.equal(h.touches[1].points[0].x, 300, 'first search uses target calibration');
+  assert.deepEqual(h.touches[2].points, [{ id: 1, x: 180, y: 80, fromX: 180, fromY: 80 }]);
+  assert.deepEqual(h.touches[3].points.map(p => p.id), [1], 'previous target-view proof cannot supply current self');
+  assert.deepEqual(h.touches[4].points.map(p => p.id), [0, 1]);
+  assert.deepEqual(h.touches[5].points.map(p => p.id), [0, 1], 'full target does not release a camera still needed for self');
+  const status = await h.manager.command({ op: 'status' });
+  assert.equal(status.camera.role, 'self'); assert.equal(status.camera.armAttempts, 2);
+  assert.equal(status.camera.releaseRequests, 0);
+  await h.stop(started);
 });

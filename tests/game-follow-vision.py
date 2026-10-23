@@ -61,6 +61,14 @@ def marker_fixture():
     return config, frame, own
 
 
+def partial_arc_fixture():
+    config, frame, own, _ = fixture()
+    config['selfMarker'] = dict(hueMin=40, hueMax=85, saturationMin=90, valueMin=130,
+                                radiusPixels=24, partialArc=True)
+    cv2.circle(frame, (54, 99), 24, (40, 220, 50), 3)
+    return config, frame, own
+
+
 class VisionTests(unittest.TestCase):
     def test_pixels_are_detected_and_route_goes_around_wall(self):
         config, frame, _, _ = fixture()
@@ -420,6 +428,90 @@ class VisionTests(unittest.TestCase):
         self.assertEqual(result['phase'], 'lost', 'the old visible ring cannot revive a displaced avatar identity')
         self.assertIsNone(result['direction'])
 
+    def test_partial_self_arc_is_opt_in_and_measures_current_motion(self):
+        config, original, _ = partial_arc_fixture()
+        f = vision.Follower(config)
+        self.assertEqual(f.analyze(encoded(original), 10)['selfSource'], 'template')
+        f.analyze(encoded(original), 10.4)
+        frame = original.copy(); frame[65:135, 15:95] = 25
+        cv2.ellipse(frame, (58, 99), (24, 24), 0, 20, 150, (40, 220, 50), 3)
+        result = f.analyze(encoded(frame), 10.8)
+        self.assertEqual(result['selfSource'], 'marker')
+        self.assertEqual(result['phase'], 'following')
+        self.assertAlmostEqual(result['self']['x'], 58/200, delta=.01)
+        self.assertGreater(result['self']['x'], 56/200, 'must not emit the old full-avatar coordinate')
+        config['selfMarker']['partialArc'] = False
+        legacy = vision.Follower(config); legacy.analyze(encoded(original), 10)
+        self.assertEqual(legacy.analyze(encoded(frame), 10.4)['phase'], 'lost')
+
+    def test_partial_self_arc_has_no_identity_without_a_recent_complete_avatar(self):
+        config, original, _ = partial_arc_fixture()
+        frame = original.copy(); frame[65:135, 15:95] = 25
+        cv2.ellipse(frame, (54, 99), (24, 24), 0, 20, 150, (40, 220, 50), 3)
+        f = vision.Follower(config, max_frame_gap=4)
+        self.assertEqual(f.analyze(encoded(frame), 10)['phase'], 'lost')
+        f.analyze(encoded(original), 11)
+        self.assertEqual(f.analyze(encoded(frame), 11.4)['selfSource'], 'marker')
+        self.assertEqual(f.analyze(encoded(frame), 13)['phase'], 'lost', 'partial identity expires after 1.5s even in basic mode')
+        self.assertEqual(f.analyze(encoded(frame), 13.4)['phase'], 'lost', 'visible arc cannot reinitialize expired identity')
+
+    def test_partial_self_arc_competes_globally_before_motion_filtering(self):
+        config, original, _ = partial_arc_fixture()
+        for kind in ('second-ring', 'invalid-solid-competitor'):
+            with self.subTest(kind=kind):
+                f = vision.Follower(config); f.analyze(encoded(original), 10)
+                frame = original.copy(); frame[65:135, 15:95] = 25
+                cv2.ellipse(frame, (54, 99), (24, 24), 0, 20, 150, (40, 220, 50), 3)
+                # Outside the recent-position search box. The disk is not an
+                # eligible ring, but its raw score must still compete.
+                cv2.circle(frame, (160, 35), 24, (40, 220, 50), 3 if kind == 'second-ring' else -1)
+                result = f.analyze(encoded(frame), 10.4)
+                self.assertEqual(result['phase'], 'lost')
+                self.assertIsNone(result['direction'])
+
+    def test_partial_self_arc_continues_with_current_measurements_but_rejects_time_reversal(self):
+        config, original, _ = partial_arc_fixture()
+        f = vision.Follower(config); f.analyze(encoded(original), 10)
+        for i in range(1, 9):
+            frame = original.copy(); frame[65:135, 15:110] = 25
+            cv2.ellipse(frame, (54+i*2, 99), (24, 24), 0, 20, 150, (40, 220, 50), 3)
+            result = f.analyze(encoded(frame), 10+i*.4)
+            self.assertEqual(result['selfSource'], 'marker')
+            self.assertAlmostEqual(result['self']['x'], (54+i*2)/200, delta=.01)
+        self.assertEqual(f.analyze(encoded(frame), 12.9)['phase'], 'lost')
+        self.assertEqual(f.analyze(encoded(frame), 13.6)['phase'], 'lost', 'time reversal cleared identity; current arc cannot reinitialize it')
+
+    def test_partial_self_arc_rejects_missing_pixels_unrelated_shapes_and_motion_jumps(self):
+        config, original, _ = partial_arc_fixture()
+        for kind in ('none', 'disk', 'rectangle', 'line', 'short-arc', 'wrong-radius', 'wrong-colour', 'distant'):
+            with self.subTest(kind=kind):
+                f = vision.Follower(config); f.analyze(encoded(original), 10)
+                frame = original.copy(); frame[65:135, 15:95] = 25; green = (40, 220, 50)
+                if kind == 'disk': cv2.circle(frame, (54, 99), 24, green, -1)
+                if kind == 'rectangle': cv2.rectangle(frame, (30, 75), (78, 123), green, 3)
+                if kind == 'line': cv2.line(frame, (30, 75), (78, 123), green, 4)
+                if kind == 'short-arc': cv2.ellipse(frame, (54, 99), (24, 24), 0, 20, 80, green, 3)
+                if kind == 'wrong-radius': cv2.circle(frame, (54, 99), 35, green, 3)
+                if kind == 'wrong-colour': cv2.circle(frame, (54, 99), 24, (240, 150, 40), 3)
+                if kind == 'distant': cv2.circle(frame, (150, 35), 24, green, 3)
+                result = f.analyze(encoded(frame), 10.4)
+                self.assertEqual(result['phase'], 'lost')
+                self.assertIsNone(result['direction'])
+
+    def test_partial_self_arc_never_replaces_a_missing_target_or_a_new_avatar(self):
+        config, original, own = partial_arc_fixture()
+        f = vision.Follower(config); f.analyze(encoded(original), 10)
+        frame = original.copy(); frame[90:108, 45:63] = 25; frame[90:108, 155:173] = 25
+        result = f.analyze(encoded(frame), 10.4)
+        self.assertEqual(result['selfSource'], 'marker')
+        self.assertIsNone(result['direction'])
+        frame[150:168, 100:118] = own
+        result = f.analyze(encoded(frame), 10.8)
+        self.assertEqual(result['selfSource'], 'template')
+        self.assertGreater(result['self']['x'], .5)
+        frame[150:168, 100:118] = 25
+        self.assertEqual(f.analyze(encoded(frame), 11.2)['phase'], 'lost')
+
     def test_closed_loop_reaches_teammate_without_crossing_wall(self):
         config, _, own_icon, target_icon = fixture()
         config["stopDistance"] = .12  # Keep the 18 px icons apart on the 200 px map.
@@ -504,13 +596,15 @@ class TargetPartialTests(unittest.TestCase):
         result = follower.analyze(encoded(partial), 10.8)
         self.assertEqual(result['targetSource'], 'partial')
         self.assertEqual(result['phase'], 'following')
-        # Complete portraits lacking team colour remain usable by the unchanged
-        # complete-template path, but must not count toward strict partial history.
+        # Explicit partial ring calibration also gates complete portraits; a
+        # missing current team ring cannot prime either tracker or partial history.
         full_no_ring = full.copy()
         cv2.circle(full_no_ring, (300, 200), 26, (25, 25, 25), 4)
         follower = vision.Follower(config)
-        self.assertEqual(follower.analyze(encoded(full_no_ring), 20)['targetSource'], 'template')
-        self.assertEqual(follower.analyze(encoded(full_no_ring), 20.4)['targetSource'], 'template')
+        for now in (20, 20.4):
+            found = follower.analyze(encoded(full_no_ring), now)
+            self.assertIsNone(found['target'])
+            self.assertIsNone(found['direction'])
         self.assertNotEqual(follower.analyze(encoded(partial), 20.8)['targetSource'], 'partial')
 
     def test_missing_identity_team_arc_or_living_hud_breaks_consecutive_confirmation(self):
@@ -631,6 +725,103 @@ class TargetPartialTests(unittest.TestCase):
         for now in (10.8, 11.2):
             self.assertNotEqual(follower.analyze(encoded(image), now)['targetSource'], 'partial')
         self.assertEqual(follower.analyze(encoded(image), 11.6)['targetSource'], 'partial')
+
+
+class TargetRingTests(unittest.TestCase):
+    def configured(self):
+        config, frame, target = partial_fixture(full=True)
+        config['targetRing'] = config.pop('targetPartial')['ring']
+        return config, frame, target
+
+    def test_standalone_ring_does_not_enable_partial_or_require_hud(self):
+        config, frame, _ = self.configured()
+        frame[20:92, 470:530] = 25
+        follower = vision.Follower(config)
+        self.assertIsNone(follower.partial)
+        follower.analyze(encoded(frame), 10)
+        result = follower.analyze(encoded(frame), 10.4)
+        self.assertEqual(result['targetSource'], 'template')
+        self.assertEqual(result['phase'], 'following')
+        # Ring-only still supports native minimap ROI, without enabling any
+        # unconfigured half-face identity or full-screen living-HUD analysis.
+        crop = vision.Follower(config)
+        observed = crop.analyze(encoded(frame[:425, :425]), 10,
+            region=dict(x=0, y=0, width=425, height=425))
+        self.assertAlmostEqual(observed['target']['x'], 300.5/425)
+
+    def test_unique_identical_enemy_or_self_face_does_not_pass_current_blue_ring(self):
+        config, original, target = self.configured()
+        for colour in [(20, 20, 255), (40, 220, 50), (25, 25, 25)]:
+            with self.subTest(colour=colour):
+                frame = original.copy()
+                cv2.circle(frame, (300, 200), 26, colour, 5)
+                self.assertGreater(vision.match(frame[:425, :425], target)['confidence'], .99)
+                follower = vision.Follower(config)
+                for now in (10, 10.4, 10.8):
+                    result = follower.analyze(encoded(frame), now)
+                    self.assertIsNone(result['target'])
+                    self.assertIsNone(result['direction'])
+                    self.assertIsNone(follower.trackers[1].last)
+                legacy = vision.Follower({k: v for k, v in config.items() if k != 'targetRing'})
+                legacy.analyze(encoded(frame), 10)
+                self.assertEqual(legacy.analyze(encoded(frame), 10.4)['phase'], 'following',
+                                 'unconfigured full portrait matching stays compatible')
+
+    def test_tracker_checks_current_ring_before_accepting_or_teaching_red_replacement(self):
+        config, original, _ = self.configured()
+        follower = vision.Follower(config)
+        follower.analyze(encoded(original), 10)
+        anchor, at = dict(follower.trackers[1].last), follower.trackers[1].at
+        enemy = original.copy(); cv2.circle(enemy, (300, 200), 26, (20, 20, 255), 5)
+        result = follower.analyze(encoded(enemy), 10.4)
+        self.assertIsNone(result['direction']); self.assertIsNone(result['target'])
+        self.assertEqual(follower.trackers[1].last, anchor)
+        self.assertEqual(follower.trackers[1].at, at)
+
+    def test_blue_and_red_identical_faces_keep_raw_ambiguity_and_current_blue_tracking(self):
+        config, original, target = self.configured()
+        both = original.copy(); both[60:101, 100:141] = target
+        cv2.circle(both, (120, 80), 26, (20, 20, 255), 2)
+        self.assertIsNone(vision.match(both[:425, :425], target))
+        fresh = vision.Follower(config)
+        self.assertIsNone(fresh.analyze(encoded(both), 10)['direction'],
+                          'team filtering cannot manufacture raw global uniqueness')
+        tracked = vision.Follower(config); tracked.analyze(encoded(original), 10)
+        result = tracked.analyze(encoded(both), 10.4)
+        self.assertAlmostEqual(result['target']['x'], 300.5/425)
+        self.assertEqual(result['phase'], 'following', 'current blue local candidate remains usable')
+        # A red replacement in that local search cannot be accepted even when
+        # the previous blue observation was recent and the face is identical.
+        cv2.circle(both, (300, 200), 26, (20, 20, 255), 5)
+        self.assertIsNone(tracked.analyze(encoded(both), 10.8)['direction'])
+
+    def test_overlapping_red_ring_and_insufficient_blue_arc_are_rejected(self):
+        config, original, _ = self.configured()
+        ring = vision.Follower(config).target_ring
+        found = dict(x=300.5/425, y=200.5/425)
+        for kind in ('short-blue', 'blue-over-red', 'wrong-radius'):
+            with self.subTest(kind=kind):
+                frame = original.copy(); cv2.circle(frame, (300, 200), 26, (25, 25, 25), 5)
+                if kind == 'short-blue':
+                    cv2.ellipse(frame, (300, 200), (26, 26), 0, 0, 60, (255, 160, 40), 3)
+                elif kind == 'blue-over-red':
+                    cv2.circle(frame, (300, 200), 26, (20, 20, 255), 3)
+                    cv2.ellipse(frame, (300, 200), (26, 26), 0, 0, 180, (255, 160, 40), 3)
+                    self.assertTrue(vision.team_arc(frame[:425, :425],
+                        dict(x=300.5, y=200.5, quadrants=(0, 1, 2, 3)), config['targetRing']))
+                else:
+                    cv2.circle(frame, (300, 200), 39, (255, 160, 40), 3)
+                self.assertFalse(ring.accept(frame[:425, :425], found))
+
+    def test_explicit_ring_precedes_partial_fallback_and_requires_exterior_geometry(self):
+        config, _, _ = partial_fixture(full=True)
+        fallback = vision.Follower(config)
+        self.assertEqual(fallback.target_ring.config, config['targetPartial']['ring'])
+        config['targetRing'] = dict(config['targetPartial']['ring'], radiusPixels=28)
+        self.assertEqual(vision.Follower(config).target_ring.config['radiusPixels'], 28)
+        config['targetRing']['radiusPixels'] = 20
+        with self.assertRaisesRegex(ValueError, '外侧'):
+            vision.Follower(config)
 
 
 if __name__ == "__main__":

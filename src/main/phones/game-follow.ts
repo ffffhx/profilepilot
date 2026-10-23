@@ -17,6 +17,22 @@ const rect = z.object({ x: unit, y: unit, width: unit.min(.015), height: unit.mi
   .refine(r => r.x + r.width <= 1.00001 && r.y + r.height <= 1.00001, "选区超出画面");
 const hudRect = z.object({ x: unit, y: unit, width: unit.min(.001), height: unit.min(.001) }).strict()
   .refine(r => r.x + r.width <= 1 && r.y + r.height <= 1, "存活提示选区超出画面");
+const targetRingSchema = z.object({ hueMin: z.number().int().min(0).max(179), hueMax: z.number().int().min(0).max(179),
+  saturationMin: z.number().int().min(1).max(255), valueMin: z.number().int().min(1).max(255),
+  radiusPixels: z.number().finite().min(5).max(100) }).strict().refine(r => r.hueMin <= r.hueMax, "颜色范围无效");
+const cameraAssistSchema = z.object({
+    referenceWidth: z.number().int().min(100).max(5000), referenceHeight: z.number().int().min(100).max(5000),
+    targetLabel: image.max(256_000), healthBarTemplate: image.max(256_000),
+    healthBar: z.object({ width: z.number().int().min(20).max(500), height: z.number().int().min(8).max(80),
+      offsetX: z.number().finite().min(-500).max(500), offsetY: z.number().finite().min(-100).max(200) }).strict(),
+    region: rect,
+    matrix: z.tuple([z.tuple([z.number().finite().min(-10000).max(10000), z.number().finite().min(-10000).max(10000)]),
+      z.tuple([z.number().finite().min(-10000).max(10000), z.number().finite().min(-10000).max(10000)]),
+      z.tuple([z.number().finite().min(-10000).max(10000), z.number().finite().min(-10000).max(10000)])]),
+    anchorBounds: z.object({ x: z.number().finite().nonnegative(), y: z.number().finite().nonnegative(),
+      width: z.number().finite().positive(), height: z.number().finite().positive() }).strict(),
+    projectionErrorPx: z.number().finite().nonnegative().max(100).optional()
+  }).strict();
 export const gameFollowConfigSchema = z.object({
   version: z.literal(1), name: z.string().trim().min(1).max(80),
   width: z.number().int().min(100).max(5000), height: z.number().int().min(100).max(5000),
@@ -33,29 +49,19 @@ export const gameFollowConfigSchema = z.object({
     pixelsPerMapUnit: z.number().finite().min(100).max(100000) }).strict().optional(),
   selfMarker: z.object({ hueMin: z.number().int().min(0).max(179), hueMax: z.number().int().min(0).max(179),
     saturationMin: z.number().int().min(0).max(255), valueMin: z.number().int().min(0).max(255),
-    radiusPixels: z.number().finite().min(3).max(100) }).strict().refine(m => m.hueMin <= m.hueMax, "颜色范围无效").optional(),
+    radiusPixels: z.number().finite().min(3).max(100), partialArc: z.boolean().optional()
+  }).strict().refine(m => m.hueMin <= m.hueMax, "颜色范围无效").optional(),
+  targetRing: targetRingSchema.optional(),
   targetPartial: z.object({
-    ring: z.object({ hueMin: z.number().int().min(0).max(179), hueMax: z.number().int().min(0).max(179),
-      saturationMin: z.number().int().min(1).max(255), valueMin: z.number().int().min(1).max(255),
-      radiusPixels: z.number().finite().min(5).max(100) }).strict().refine(r => r.hueMin <= r.hueMax, "颜色范围无效"),
+    ring: targetRingSchema,
     alive: z.object({ portraitTemplate: image.max(256_000), portraitRegion: hudRect, healthBarRegion: hudRect }).strict()
   }).strict().optional(),
-  cameraAssist: z.object({
-    referenceWidth: z.number().int().min(100).max(5000), referenceHeight: z.number().int().min(100).max(5000),
-    targetLabel: image.max(256_000), healthBarTemplate: image.max(256_000),
-    healthBar: z.object({ width: z.number().int().min(20).max(500), height: z.number().int().min(8).max(80),
-      offsetX: z.number().finite().min(-500).max(500), offsetY: z.number().finite().min(-100).max(200) }).strict(),
-    region: rect,
-    matrix: z.tuple([z.tuple([z.number().finite().min(-10000).max(10000), z.number().finite().min(-10000).max(10000)]),
-      z.tuple([z.number().finite().min(-10000).max(10000), z.number().finite().min(-10000).max(10000)]),
-      z.tuple([z.number().finite().min(-10000).max(10000), z.number().finite().min(-10000).max(10000)])]),
-    anchorBounds: z.object({ x: z.number().finite().nonnegative(), y: z.number().finite().nonnegative(),
-      width: z.number().finite().positive(), height: z.number().finite().positive() }).strict()
-  }).strict().optional()
+  cameraAssist: cameraAssistSchema.extend({ team: z.literal("blue").optional() }).strict().optional(),
+  selfCameraAssist: cameraAssistSchema.extend({ team: z.literal("green") }).strict().optional()
 }).strict().refine(c => c.width * c.height <= 8_000_000, "画面过大")
-  .refine(c => !c.cameraAssist || c.cameraAssist.referenceWidth === c.width && c.cameraAssist.referenceHeight === c.height
-    && c.cameraAssist.anchorBounds.x + c.cameraAssist.anchorBounds.width <= c.width
-    && c.cameraAssist.anchorBounds.y + c.cameraAssist.anchorBounds.height <= c.height, "镜头校准尺寸或有效范围不匹配")
+  .refine(c => [c.cameraAssist, c.selfCameraAssist].every(a => !a || a.referenceWidth === c.width && a.referenceHeight === c.height
+    && a.anchorBounds.x + a.anchorBounds.width <= c.width
+    && a.anchorBounds.y + a.anchorBounds.height <= c.height), "镜头校准尺寸或有效范围不匹配")
   .refine(c => {
     const j = c.joystick, r = j.radius * Math.min(c.width, c.height);
     return j.x * c.width >= r && (1 - j.x) * c.width >= r && j.y * c.height >= r && (1 - j.y) * c.height >= r;
@@ -241,7 +247,7 @@ export class GameFollower {
     if (!this.python && !(await this.runtime()).available) throw new Error("视觉组件未就绪，请先安装");
   }
   private async start(id: string, mode: "observe" | "control", config: GameFollowConfig, backend: "app" | "basic", recoverTransport = false): Promise<FollowStatus> {
-    if (config.cameraAssist && backend !== "app") throw new Error("镜头辅助需要手机 App 模式");
+    if ((config.cameraAssist || config.selfCameraAssist) && backend !== "app") throw new Error("镜头辅助需要手机 App 模式");
     if (this.closing) throw new Error("ProfilePilot 正在退出");
     if (this.run && !this.run.cancelled) throw new Error("请先停止当前跟随任务");
     if (this.analyzing) throw new Error("请等待当前图像分析完成");
@@ -264,8 +270,11 @@ export class GameFollower {
       if (run.cancelled) throw new Error("跟随任务已停止");
       const probe = await this.host.live(run.lease, run.generation, { op: "probe" });
       if (probe?.protocol !== 1) throw new Error("请更新手机开发版 App，以启用视觉跟随");
-      if (config.cameraAssist && probe?.cameraFrameProvenance !== 1) throw new Error("请更新手机开发版 App，以启用镜头画面凭据");
-      run.camera = new GameFollowCamera({ enabled: !!config.cameraAssist, mode, backend, provenanceVersion: probe?.cameraFrameProvenance });
+      if ((config.cameraAssist || config.selfCameraAssist) && probe?.cameraFrameProvenance !== 1) throw new Error("请更新手机开发版 App，以启用镜头画面凭据");
+      run.camera = new GameFollowCamera({ enabled: !!(config.cameraAssist || config.selfCameraAssist), mode, backend,
+        provenanceVersion: probe?.cameraFrameProvenance, targetEnabled: !!config.cameraAssist, intervalMs: config.intervalMs,
+        ...(config.cameraAssist ? { placement: { ...config, cameraAssist: config.cameraAssist } } : {}),
+        ...(config.selfCameraAssist ? { selfPlacement: { ...config, cameraAssist: config.selfCameraAssist } } : {}) });
       if (run.cancelled) throw new Error("跟随任务已停止");
       this.value = { running: true, runId: run.id, deviceId: id, mode, backend, frames: 0, actions: 0, fps: 0, error: "" };
       run.beganAt = Date.now(); run.heartbeatTickAt = performance.now();
@@ -341,15 +350,15 @@ export class GameFollower {
     return run.recovery;
   }
   private async loop(run: Run, config: GameFollowConfig, mode: "observe" | "control", backend: "app" | "basic") {
-    const began = Date.now();
-    const region = backend === "app" && config.capture !== "full" && !config.nearby && !config.targetPartial && !config.cameraAssist ? mapCaptureRegion(config) : undefined;
+    const began = Date.now(), cameraEnabled = !!(config.cameraAssist || config.selfCameraAssist);
+    const region = backend === "app" && config.capture !== "full" && !config.nearby && !config.targetPartial && !cameraEnabled ? mapCaptureRegion(config) : undefined;
     try {
       while (!run.cancelled) {
         if (run.recovery && !await run.recovery) throw new Error(this.value.error || "跟随连接恢复失败");
         if (run.cancelled) break;
         if (run.resetVision) {
           run.resetVision = false;
-          if (mode === "control" && config.cameraAssist) {
+          if (mode === "control" && cameraEnabled) {
             await this.host.live(run.lease!, run.generation, { op: "touch", sequence: ++run.sequence, points: [], ttlMs: 1200 });
             if (run.cancelled) break;
           }
@@ -360,7 +369,7 @@ export class GameFollower {
         try {
           const at = Date.now(), requestAt = performance.now();
           const rawFrame = await this.host.live(run.lease!, run.generation, { op: "frame", ...(region ? { region } : {}),
-            ...(config.cameraAssist ? { cameraFrameProvenance: 1 } : {}) });
+            ...(cameraEnabled ? { cameraFrameProvenance: 1 } : {}) });
           const frame: FollowFrame = frameSchema.parse(rawFrame);
           const capturedAt = Date.now();
           // Wi-Fi latency can vary between requests. A late capture followed by an
@@ -388,17 +397,31 @@ export class GameFollower {
           if (mode === "control") {
             // File captures on older emulators are slower; their movement is a
             // bounded 350 ms stroke. Never move from an unboundedly delayed frame.
-            const nativeTarget = analysis.target && analysis.target.confidence >= config.confidence
-              ? { x: (config.map.x + analysis.target.x * config.map.width) * config.width,
-                y: (config.map.y + analysis.target.y * config.map.height) * config.height } : undefined;
+            const toNative = (point: FollowAnalysis["target"]) => point
+              && Number.isFinite(point.x) && point.x >= 0 && point.x <= 1
+              && Number.isFinite(point.y) && point.y >= 0 && point.y <= 1
+              ? { x: (config.map.x + point.x * config.map.width) * config.width,
+                y: (config.map.y + point.y * config.map.height) * config.height } : undefined;
+            // Camera and marker locators already enforce their own current-pixel
+            // thresholds. Do not reapply the unrelated portrait threshold.
+            const nativeTarget = analysis.target && (analysis.targetSource === "camera"
+              || analysis.target.confidence >= config.confidence) ? toNative(analysis.target) : undefined;
+            const nativeSelf = analysis.self && (analysis.selfSource === "camera" || analysis.selfSource === "marker"
+              || analysis.self.confidence >= config.confidence) ? toNative(analysis.self) : undefined;
             const cameraPlan = run.camera?.afterAnalyze({
               fullTarget: analysis.targetSource === "template" ? nativeTarget : undefined,
-              cameraTarget: analysis.targetSource === "camera" ? nativeTarget : undefined,
-              lost: !nativeTarget
+              currentTarget: analysis.targetSource !== "camera" ? nativeTarget : undefined,
+              cameraTarget: config.cameraAssist && analysis.targetSource === "camera" ? nativeTarget : undefined,
+              fullSelf: (!analysis.selfSource || analysis.selfSource === "template") ? nativeSelf : undefined,
+              currentSelf: analysis.selfSource !== "camera" ? nativeSelf : undefined,
+              cameraSelf: config.selfCameraAssist && analysis.selfSource === "camera" ? nativeSelf : undefined,
+              lost: !nativeTarget, selfLost: !nativeSelf
             }, performance.now() - requestAt, performance.now());
-            if (config.cameraAssist) this.value.camera = run.camera!.status(performance.now());
+            if (cameraEnabled) this.value.camera = run.camera!.status(performance.now());
             const direction = Date.now() - at < (backend === "basic" ? 3000 : 1000)
-              && !cameraPlan?.stopJoystick && (analysis.targetSource !== "camera" || cameraPlan?.allowCameraMovement)
+              && !cameraPlan?.stopJoystick
+              && (analysis.targetSource !== "camera" || !!config.cameraAssist && cameraPlan?.allowCameraMovement)
+              && (analysis.selfSource !== "camera" || !!config.selfCameraAssist && cameraPlan?.allowCameraMovement)
               ? analysis.direction : null;
             const joystick = config.joystick, rotation = joystick.rotation * Math.PI / 180;
             const dx = direction ? direction.x * Math.cos(rotation) - direction.y * Math.sin(rotation) : 0;
@@ -413,12 +436,12 @@ export class GameFollower {
             const accepted = await this.host.live(run.lease!, run.generation, { op: "touch", sequence, points, ttlMs: cameraPlan?.ttlMs ?? 1200 });
             if (run.cancelled) break;
             if (epoch !== run.recoveryEpoch) continue;
-            if (config.cameraAssist && (accepted?.accepted !== true || accepted?.acceptedSequence !== sequence)) {
+            if (cameraEnabled && (accepted?.accepted !== true || accepted?.acceptedSequence !== sequence)) {
               run.camera?.invalidate("uncertain-input"); this.sampleCameraStatus(run); throw new Error("手机未确认本次镜头触控，已停止操作");
             }
             if (cameraPlan && !run.camera!.commit(cameraPlan, sequence, performance.now()))
               throw new Error("镜头触控确认已过期，已停止操作");
-            if (config.cameraAssist) this.value.camera = run.camera!.status(performance.now());
+            if (cameraEnabled) this.value.camera = run.camera!.status(performance.now());
             this.value.timings = { ...this.value.timings, inputMs: Date.now() - inputAt };
             if (direction) this.value.actions++;
           }

@@ -1,7 +1,11 @@
-"""Current-frame name/complete-blue-HP camera observations; no device access.
+"""Current-frame name/complete-team-HP camera observations; no device access.
 
-CameraLocator takes the complete follow config. cameraAssist.referenceWidth and
-referenceHeight must equal config.width/height. Templates are base64 PNG pixels.
+CameraLocator takes the complete follow config and an optional assist_key:
+cameraAssist (default, target) or selfCameraAssist (own hero). Both use independent
+templates, geometry, matrix and bounds. targetLabel names the own hero when used
+in selfCameraAssist. team defaults to blue; selfCameraAssist requires explicit
+green. referenceWidth/referenceHeight must equal config.width/height. Templates
+are base64 PNG pixels.
 region and config.map are normalized full-image rectangles; anchorBounds and
 healthBar.{width,height,offsetX,offsetY} use native image pixels. HP offsets locate
 its top-left corner relative to the name-template center (not remaining fill).
@@ -82,9 +86,17 @@ def _template(encoded, field):
     return cv2.cvtColor(image, cv2.COLOR_BGRA2GRAY if image.shape[2] == 4 else cv2.COLOR_BGR2GRAY)
 
 
-def _blue(image):
+def _colour(image, team):
     h, s, v = cv2.split(cv2.cvtColor(image, cv2.COLOR_BGR2HSV))
-    return (h >= 85) & (h <= 130) & (s >= 75) & (v >= 100)
+    if team == "green":
+        return (h >= 35) & (h <= 85) & (s >= 95) & (v >= 95)
+    if team == "blue":
+        return (h >= 85) & (h <= 130) & (s >= 75) & (v >= 100)
+    raise ValueError("camera team must be blue or green")
+
+
+def _blue(image):
+    return _colour(image, "blue")
 
 
 def _longest_run(binary):
@@ -95,7 +107,7 @@ def _longest_run(binary):
     return maximum
 
 
-def _frame_evidence(image, x, y, w, h, reference):
+def _frame_evidence(image, x, y, w, h, reference, team="blue"):
     if x < 4 or y < 4 or x+w+4 > image.shape[1] or y+h+4 > image.shape[0]:
         return None
     patch = image[y:y+h, x:x+w]
@@ -103,15 +115,21 @@ def _frame_evidence(image, x, y, w, h, reference):
     delta = (gray.astype(np.float64)-reference)**2
     edges = {"top": gray[0, 4:-4] <= 85, "bottom": gray[-1, 4:-4] <= 85,
              "right": gray[2:-2, -1] <= 35}
-    if any(float(v.mean()) < .96 or _longest_run(~v) > 3 for v in edges.values()):
-        return None
+    for key, edge in edges.items():
+        # A short right border can have fewer than 25 samples: .96 then
+        # accidentally requires every pixel to be dark. Permit one isolated
+        # raster outlier there, while retaining the full-column RMSE and the
+        # exterior contrast checks below. Other edges keep their original gate.
+        covered = float(edge.mean()) >= .96 or (key == "right" and np.count_nonzero(~edge) == 1)
+        if not covered or _longest_run(~edge) > 3:
+            return None
     rmses = {"top": float(np.sqrt(delta[0, 4:-4].mean())),
              "bottom": float(np.sqrt(delta[-1, 4:-4].mean())),
              "leftEndpoint": float(np.sqrt(delta[:, :3].mean())),
              "rightEndpoint": float(np.sqrt(delta[:, -1:].mean()))}
     if max(rmses[k] for k in ("top", "bottom", "rightEndpoint")) > 18 or rmses["leftEndpoint"] > 75:
         return None
-    if float(_blue(patch[4:-4, 5:14]).mean()) < .45 or float(_blue(patch[4:-4, :2]).mean()) > .20:
+    if float(_colour(patch[4:-4, 5:14], team).mean()) < .45 or float(_colour(patch[4:-4, :2], team).mean()) > .20:
         return None
     outside = cv2.cvtColor(image[y+2:y+h-2, x+w:x+w+4], cv2.COLOR_BGR2GRAY)
     contrast = float(np.median(outside)-np.median(gray[2:-2, -1]))
@@ -122,7 +140,7 @@ def _frame_evidence(image, x, y, w, h, reference):
     if _longest_run(np.sum(neutral, axis=0) >= 2) > 4:
         return None
     inside = patch[3:-3, 5:-5]
-    colour = _blue(inside)
+    colour = _colour(inside, team)
     hsv = cv2.cvtColor(inside, cv2.COLOR_BGR2HSV)
     red = ((hsv[:, :, 0] < 13) | (hsv[:, :, 0] > 165)) & (hsv[:, :, 1] >= 95) & (hsv[:, :, 2] >= 120)
     if float(red.mean()) > .03:
@@ -140,7 +158,7 @@ def _frame_evidence(image, x, y, w, h, reference):
             "rightBoundaryContrast": contrast, "remainingColourFraction": float(colour.mean())}
 
 
-def _frame_candidates(area, reference):
+def _frame_candidates(area, reference, team="blue"):
     """Vectorize necessary gates before detailed checks, preserving competitors.
 
     A dense field with over 400 survivors is rejected, rather than checking only
@@ -166,16 +184,17 @@ def _frame_candidates(area, reference):
     for key in ("top", "bottom", "right"):
         mask = masks[key]
         dark = (gray <= (35 if key == "right" else 85)).astype(np.float32)
-        possible &= corr(dark, mask)/mask.sum() >= .96-1e-6
+        minimum = min(.96, 1-1/mask.sum()) if key == "right" else .96
+        possible &= corr(dark, mask)/mask.sum() >= minimum-1e-6
     # Necessary current blue-to-dark left endpoint transition. Uniform dark or
     # blue UI fields cannot generate hundreds of expensive frame candidates.
-    blue = _blue(area).astype(np.float32)
+    colour = _colour(area, team).astype(np.float32)
     fill = np.zeros((h, w), np.float32)
     fill[4:-4, 5:14] = 1
     endpoint = np.zeros((h, w), np.float32)
     endpoint[4:-4, :2] = 1
-    possible &= corr(blue, fill)/fill.sum() >= .45-1e-6
-    possible &= corr(blue, endpoint)/endpoint.sum() <= .20+1e-6
+    possible &= corr(colour, fill)/fill.sum() >= .45-1e-6
+    possible &= corr(colour, endpoint)/endpoint.sum() <= .20+1e-6
     # The exact endpoint RMSE uses the entire last column, unlike dark coverage.
     masks["right"][:, -1] = 1
     for key, limit in (("top", 18), ("bottom", 18), ("right", 18), ("left", 75)):
@@ -189,20 +208,29 @@ def _frame_candidates(area, reference):
 
 
 class CameraLocator:
-    def __init__(self, config):
+    def __init__(self, config, assist_key="cameraAssist"):
         config = _object(config, "config")
+        if assist_key not in ("cameraAssist", "selfCameraAssist"):
+            raise ValueError("camera assist key must be cameraAssist or selfCameraAssist")
         self.width = _integer(config.get("width"), "width", 1)
         self.height = _integer(config.get("height"), "height", 1)
         if self.width*self.height > 8_000_000:
             raise ValueError("camera image dimensions exceed the pixel budget")
-        assist = _object(config.get("cameraAssist"), "cameraAssist")
+        assist = _object(config.get(assist_key), assist_key)
+        self.team = assist.get("team", "blue")
+        if self.team not in ("blue", "green"):
+            raise ValueError(assist_key + ".team must be blue or green")
+        if assist_key == "selfCameraAssist" and self.team != "green":
+            raise ValueError("selfCameraAssist.team must be explicitly green")
+        if assist_key == "cameraAssist" and self.team != "blue":
+            raise ValueError("cameraAssist.team must be blue")
         if (_integer(assist.get("referenceWidth"), "referenceWidth", 1) != self.width
                 or _integer(assist.get("referenceHeight"), "referenceHeight", 1) != self.height):
             raise ValueError("camera reference dimensions do not match config")
         self.map = _rectangle(config.get("map"), "map", self.width, self.height, True)
-        bounds = _rectangle(assist.get("region"), "cameraAssist.region", self.width, self.height, True)
+        bounds = _rectangle(assist.get("region"), assist_key + ".region", self.width, self.height, True)
         self.region = (math.floor(bounds[0]), math.floor(bounds[1]), math.ceil(bounds[2]), math.ceil(bounds[3]))
-        self.anchor_bounds = _rectangle(assist.get("anchorBounds"), "anchorBounds", self.width, self.height)
+        self.anchor_bounds = _rectangle(assist.get("anchorBounds"), assist_key + ".anchorBounds", self.width, self.height)
         self.name_template = _template(assist.get("targetLabel"), "targetLabel")
         nh, nw = self.name_template.shape
         if not 12 <= nh <= 70 or not 24 <= nw <= 500 or float(self.name_template.std()) < 15:
@@ -269,13 +297,13 @@ class CameraLocator:
         right, bottom = min(self.width, ex+w+46), min(self.height, ey+h+44)
         if right-left < w or bottom-top < h:
             return None
-        candidates = _frame_candidates(image[top:bottom, left:right], self.hp_template)
+        candidates = _frame_candidates(image[top:bottom, left:right], self.hp_template, self.team)
         if candidates is None:
             return None
         accepted = []
         for xx, yy, distance in candidates:
             bx, by = left+xx, top+yy
-            evidence = _frame_evidence(image, bx, by, w, h, self.hp_template)
+            evidence = _frame_evidence(image, bx, by, w, h, self.hp_template, self.team)
             if evidence:
                 accepted.append({"x": bx+(w-1)/2, "y": by+(h-1)/2, "left": bx, "top": by,
                                  "width": w, "height": h, "rmse": math.sqrt(max(0., distance)), **evidence})

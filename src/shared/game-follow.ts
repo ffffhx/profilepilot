@@ -1,5 +1,19 @@
 export interface FollowPoint { x: number; y: number; }
 export interface FollowRect extends FollowPoint { width: number; height: number; }
+export interface FollowTargetRing {
+  hueMin: number; hueMax: number; saturationMin: number; valueMin: number; radiusPixels: number;
+}
+export interface FollowCameraAssist {
+  referenceWidth: number; referenceHeight: number;
+  /** This is the selected hero's own label in selfCameraAssist. */
+  targetLabel: string; healthBarTemplate: string;
+  healthBar: { width: number; height: number; offsetX: number; offsetY: number };
+  region: FollowRect;
+  matrix: [[number, number], [number, number], [number, number]];
+  anchorBounds: FollowRect;
+  /** Native minimap pixels; conservative placement margin, defaults to 3. */
+  projectionErrorPx?: number;
+}
 export interface GameFollowConfig {
   version: 1;
   name: string;
@@ -17,21 +31,20 @@ export interface GameFollowConfig {
   /** Auto captures only the minimap when possible; full retains native world-view pixels. */
   capture?: "auto" | "full";
   nearby?: { selfLabel: string; targetLabel: string; region: FollowRect; pixelsPerMapUnit: number };
-  selfMarker?: { hueMin: number; hueMax: number; saturationMin: number; valueMin: number; radiusPixels: number };
+  selfMarker?: { hueMin: number; hueMax: number; saturationMin: number; valueMin: number; radiusPixels: number;
+    /** Opt-in current partial-circle evidence; radius measures the coloured ring's centre line. */
+    partialArc?: boolean };
+  /** Current ally-ring evidence for full target portraits; does not enable partial inference. */
+  targetRing?: FollowTargetRing;
   /** Experimental, explicitly calibrated partial target identity; requires full native frames. */
   targetPartial?: {
-    ring: { hueMin: number; hueMax: number; saturationMin: number; valueMin: number; radiusPixels: number };
+    ring: FollowTargetRing;
     alive: { portraitTemplate: string; portraitRegion: FollowRect; healthBarRegion: FollowRect };
   };
   /** Experimental camera projection; calibrated native pixels for this hero/layout. */
-  cameraAssist?: {
-    referenceWidth: number; referenceHeight: number;
-    targetLabel: string; healthBarTemplate: string;
-    healthBar: { width: number; height: number; offsetX: number; offsetY: number };
-    region: FollowRect;
-    matrix: [[number, number], [number, number], [number, number]];
-    anchorBounds: FollowRect;
-  };
+  cameraAssist?: FollowCameraAssist & { team?: "blue" };
+  /** Independent opt-in own-hero calibration, with current green HP evidence. */
+  selfCameraAssist?: FollowCameraAssist & { team: "green" };
 }
 export interface FollowDetection extends FollowPoint { confidence: number; }
 export interface FollowAnalysis {
@@ -43,7 +56,7 @@ export interface FollowAnalysis {
   direction: FollowPoint | null;
   elapsedMs: number;
   source?: "minimap" | "labels";
-  selfSource?: "template" | "marker";
+  selfSource?: "template" | "marker" | "camera";
   targetSource?: "template" | "partial" | "labels" | "camera";
   distance?: number;
 }
@@ -64,6 +77,19 @@ export interface PhoneRequestTiming {
   socketMs?: number; connectedMs?: number; sentMs?: number; headersMs?: number; firstDataMs?: number; endMs?: number;
   totalMs: number; responseBytes: number; outcome: "complete" | "error";
 }
+/** Placement diagnostics only. A current frame, owner and proof still authorize input. */
+export interface FollowCameraPlacement {
+  action: "arm" | "keep" | "recenter" | "reject";
+  reason: string;
+  point?: FollowPoint;
+  anchor?: FollowPoint;
+  center?: FollowPoint;
+  predictedAnchor?: FollowPoint;
+  margin?: FollowPoint;
+  coverageInsufficient?: boolean;
+  speedKnown?: boolean;
+  frameRemainingMs: number;
+}
 /** Host observations and planned transitions only; never permission to renew input. */
 export interface FollowCameraStatus {
   state: "idle" | "arming" | "held" | "releasing";
@@ -78,9 +104,15 @@ export interface FollowCameraStatus {
   frameProof: boolean;
   frameProofSequence?: number;
   frameTarget: "none" | "full" | "camera";
+  frameSelf?: "none" | "full" | "current" | "camera";
+  /** Chooses calibration for placement only; both locators may use the same proof. */
+  role?: "target" | "self";
   armAttempts: number;
   releaseRequests: number;
   releaseReasons: Record<string, number>;
+  recenterAttempts: number;
+  placement?: FollowCameraPlacement;
+  speedMapPxPerSecond?: FollowPoint;
 }
 export interface FollowStatus {
   running: boolean;

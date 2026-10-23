@@ -56,7 +56,7 @@ class Tracker:
         self.confidence, self.max_gap = confidence, max_gap
         self.last, self.at = None, 0
 
-    def locate(self, image, now):
+    def locate(self, image, now, accept=None):
         h, w = image.shape[:2]
         th, tw = self.template.shape[:2]
         found = None
@@ -71,11 +71,74 @@ class Tracker:
             if found:
                 found['x'] = (x + found['x'] * (right-x)) / w
                 found['y'] = (y + found['y'] * (bottom-y)) / h
+                if accept and not accept(image, found):
+                    found = None
         if not found or found['confidence'] < self.confidence:
             found = match(image, self.template, self.rotates)
+            if found and accept and not accept(image, found):
+                found = None
         if found and found['confidence'] >= self.confidence:
             self.last, self.at = found, now
         return found
+
+
+def team_arc(image, candidate, config):
+    """Current calibrated team colour around the selected identity sectors.
+
+    Identity competition happens before this gate. Colour never filters raw
+    competing faces to manufacture a unique match.
+    """
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    blue = ((hsv[:, :, 0] >= config['hueMin']) & (hsv[:, :, 0] <= config['hueMax'])
+            & (hsv[:, :, 1] >= config['saturationMin']) & (hsv[:, :, 2] >= config['valueMin']))
+    angles = np.arange(144)*2*math.pi/144
+    quadrants = (np.sin(angles) >= 0)*2 + (np.cos(angles) >= 0)
+    radii = config['radiusPixels'] + np.arange(-2, 3)
+    xx = np.rint(candidate['x']+np.cos(angles[:, None])*radii).astype(int)
+    yy = np.rint(candidate['y']+np.sin(angles[:, None])*radii).astype(int)
+    inside = (xx >= 0) & (xx < image.shape[1]) & (yy >= 0) & (yy < image.shape[0])
+    values = np.zeros_like(inside)
+    values[inside] = blue[yy[inside], xx[inside]]
+    selected = np.isin(quadrants, candidate['quadrants'])
+    matched = np.any(values, axis=1) & selected
+    if np.count_nonzero(matched)/max(1, np.count_nonzero(selected)) < .4:
+        return False
+    longest = run = 0
+    for value in np.tile(matched, 2):
+        run = run+1 if value else 0
+        longest = max(longest, run)
+    return min(longest, 144)*2.5 >= 80
+
+
+class TargetRing:
+    """Opt-in team evidence for full portraits, including tracked candidates.
+
+    This does not enable partial-face inference or use history as team evidence.
+    A rejected current candidate must not update the portrait tracker's anchor.
+    """
+    def __init__(self, template, config):
+        self.config = config
+        if config['radiusPixels']-2 <= max(template.shape[:2])/2:
+            raise ValueError("队友颜色圆弧应位于头像模板外侧，请重新校准半径")
+
+    def accept(self, image, found):
+        x, y = found['x']*image.shape[1], found['y']*image.shape[0]
+        if not team_arc(image, dict(x=x, y=y, quadrants=(0, 1, 2, 3)), self.config):
+            return False
+        # A neighbouring blue icon can overlap a red enemy ring. Retain the
+        # measured private full-avatar gate's red veto rather than treating a
+        # blue fragment as sufficient evidence that an otherwise red icon is ally.
+        radius = self.config['radiusPixels']
+        left, top = max(0, math.floor(x-radius-2)), max(0, math.floor(y-radius-2))
+        right = min(image.shape[1], math.ceil(x+radius+3))
+        bottom = min(image.shape[0], math.ceil(y+radius+3))
+        yy, xx = np.mgrid[top:bottom, left:right]
+        distance = (xx-x)**2+(yy-y)**2
+        annulus = (distance >= (radius-2)**2) & (distance <= (radius+2)**2)
+        hsv = cv2.cvtColor(image[top:bottom, left:right], cv2.COLOR_BGR2HSV)
+        red = (((hsv[:, :, 0] <= 10) | (hsv[:, :, 0] >= 170))
+               & (hsv[:, :, 1] >= 110) & (hsv[:, :, 2] >= 100))
+        return np.count_nonzero(red & annulus)/max(1, np.count_nonzero(annulus)) <= .15
 
 
 class TargetPartial:
@@ -175,25 +238,7 @@ class TargetPartial:
                 'quadrants': self.shapes[shape]}
 
     def team_arc(self, image, candidate):
-        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-        c = self.config['ring']
-        blue = ((hsv[:, :, 0] >= c['hueMin']) & (hsv[:, :, 0] <= c['hueMax'])
-                & (hsv[:, :, 1] >= c['saturationMin']) & (hsv[:, :, 2] >= c['valueMin']))
-        radii = c['radiusPixels'] + np.arange(-2, 3)
-        xx = np.rint(candidate['x']+np.cos(self.angles[:, None])*radii).astype(int)
-        yy = np.rint(candidate['y']+np.sin(self.angles[:, None])*radii).astype(int)
-        inside = (xx >= 0) & (xx < image.shape[1]) & (yy >= 0) & (yy < image.shape[0])
-        values = np.zeros_like(inside)
-        values[inside] = blue[yy[inside], xx[inside]]
-        selected = np.isin(self.angle_quadrants, candidate['quadrants'])
-        matched = np.any(values, axis=1) & selected
-        if np.count_nonzero(matched)/max(1, np.count_nonzero(selected)) < .4:
-            return False
-        longest = run = 0
-        for value in np.tile(matched, 2):
-            run = run+1 if value else 0
-            longest = max(longest, run)
-        return min(longest, 144)*2.5 >= 80
+        return team_arc(image, candidate, self.config['ring'])
 
     def locate(self, image, frame, now):
         previous = self.last_time
@@ -228,9 +273,67 @@ class SelfMarker:
     not authorize movement.
     """
     def __init__(self, config, max_gap):
-        self.config, self.max_gap = config, max_gap
+        self.config = config
+        self.max_gap = min(max_gap, 1.5) if config.get('partialArc') else max_gap
         self.last, self.at, self.offset = None, 0, None
         self.angles = np.linspace(0, 2*math.pi, 72, endpoint=False)
+        if config.get('partialArc'):
+            radius = config['radiusPixels']
+            extent = math.ceil(radius+6)
+            yy, xx = np.mgrid[-extent:extent+1, -extent:extent+1]
+            self.arc_kernel = (np.abs(np.hypot(xx, yy)-radius) <= 1.8).astype(np.float32)
+            angles = np.arange(144)*math.pi/72
+            self.arc_cos, self.arc_sin = np.cos(angles), np.sin(angles)
+
+    def partial_arcs(self, image):
+        """Fit the calibrated radius to CURRENT colour pixels over the whole map.
+
+        Geometry alone is not identity. locate() still requires a recent full
+        avatar anchor, current displacement and uniqueness before using it.
+        Competing raw peaks are retained even if their arc checks fail.
+        """
+        c = self.config
+        radius = c['radiusPixels']
+        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+        mask = ((hsv[:, :, 0] >= c['hueMin']) & (hsv[:, :, 0] <= c['hueMax'])
+                & (hsv[:, :, 1] >= c['saturationMin']) & (hsv[:, :, 2] >= c['valueMin']))
+        votes = cv2.filter2D(mask.astype(np.float32), -1, self.arc_kernel, borderType=cv2.BORDER_CONSTANT)
+        h, w = mask.shape
+        def hits(x, y, radii):
+            xx = np.rint(x+self.arc_cos[:, None]*np.asarray(radii)).astype(int)
+            yy = np.rint(y+self.arc_sin[:, None]*np.asarray(radii)).astype(int)
+            inside = (xx >= 0) & (xx < w) & (yy >= 0) & (yy < h)
+            values = np.zeros_like(inside)
+            values[inside] = mask[yy[inside], xx[inside]]
+            return values.any(axis=1)
+        candidates = []
+        suppression = max(3, round(radius*10/24))
+        for _ in range(12):
+            _, score, _, (x, y) = cv2.minMaxLoc(votes)
+            if score < 55*radius/24:
+                break
+            votes[max(0, y-suppression):y+suppression+1, max(0, x-suppression):x+suppression+1] = -1
+            support = hits(x, y, radius+np.array([-1.5, -.5, .5, 1.5]))
+            longest = run = 0
+            for value in np.tile(support, 2):
+                run = run+1 if value else 0
+                longest = max(longest, run)
+            count = int(np.count_nonzero(support))
+            quadrants = [int(np.count_nonzero(part)) for part in np.split(support, 4)]
+            valid = (min(longest, 144)*2.5 >= 100 and count >= 44
+                     and sum(count >= 8 for count in quadrants) >= 2
+                     and np.count_nonzero(hits(x, y, [radius*.65])) <= 36
+                     and np.count_nonzero(hits(x, y, [radius*1.3])) <= 36)
+            candidates.append(dict(x=x, y=y, score=score, confidence=count/144, valid=valid))
+        eligible = [p for p in candidates if p['valid']]
+        if not eligible:
+            return []
+        best = max(eligible, key=lambda p: p['score'])
+        competitors = [p['score'] for p in candidates
+                       if math.hypot(p['x']-best['x'], p['y']-best['y']) >= max(5, radius*15/24)]
+        if best['score']-max(competitors, default=0) < 25*radius/24:
+            return []
+        return [dict(x=best['x']/w, y=best['y']/h, confidence=best['confidence'])]
 
     def rings(self, image):
         c = self.config
@@ -295,8 +398,13 @@ class SelfMarker:
         margin = self.config['radiusPixels']*1.6+4
         x, y = max(0, math.floor((center['x']-radius)*w-margin)), max(0, math.floor((center['y']-radius)*h-margin))
         right, bottom = min(w, math.ceil((center['x']+radius)*w+margin)), min(h, math.ceil((center['y']+radius)*h+margin))
-        candidates = self.rings(image[y:bottom, x:right])
-        candidates = [dict(p, x=(p['x']*(right-x)+x)/w, y=(p['y']*(bottom-y)+y)/h) for p in candidates]
+        if self.config.get('partialArc'):
+            # Global competition must happen before the recent-identity filter;
+            # cropping first could make a second visible marker disappear.
+            candidates = self.partial_arcs(image)
+        else:
+            candidates = self.rings(image[y:bottom, x:right])
+            candidates = [dict(p, x=(p['x']*(right-x)+x)/w, y=(p['y']*(bottom-y)+y)/h) for p in candidates]
         if own is not None:
             distance = max(4, self.config['radiusPixels']*.25)
             candidates = [p for p in candidates if math.hypot((p['x']-own['x'])*w, (p['y']-own['y'])*h) <= distance]
@@ -438,15 +546,23 @@ class Follower:
                                  config['confidence'], max_frame_gap) for i, t in enumerate(self.templates)]
         self.marker = SelfMarker(config['selfMarker'], max_frame_gap) if config.get('selfMarker') else None
         self.partial = TargetPartial(self.templates[1], config['targetPartial'], config['width'], config['height'], max_frame_gap) if config.get('targetPartial') else None
+        ring = config.get('targetRing')
+        if ring is None and config.get('targetPartial'):
+            ring = config['targetPartial']['ring']
+        self.target_ring = TargetRing(self.templates[1], ring) if ring is not None else None
         self.camera = None
-        if config.get('cameraAssist'):
+        self.self_camera = None
+        if config.get('cameraAssist') or config.get('selfCameraAssist'):
             # Also supports offline callers loading this worker by absolute path.
             import importlib.util
             from pathlib import Path
             spec = importlib.util.spec_from_file_location('game_follow_camera', Path(__file__).with_name('game_follow_camera.py'))
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
-            self.camera = module.CameraLocator(config)
+            if config.get('cameraAssist'):
+                self.camera = module.CameraLocator(config)
+            if config.get('selfCameraAssist'):
+                self.self_camera = module.CameraLocator(config, 'selfCameraAssist')
         self.labels = [white_text(decode(config['nearby'][key])) for key in ('selfLabel', 'targetLabel')] if config.get('nearby') else None
         grid = config["grid"]
         blocked = np.zeros((grid["rows"], grid["columns"]), np.uint8)
@@ -493,7 +609,7 @@ class Follower:
                 raise ValueError("姓名识别需要完整画面，不能使用裁剪图像")
             if self.partial:
                 raise ValueError("部分队友识别需要完整画面中的存活提示，不能使用裁剪图像")
-            if self.camera:
+            if self.camera or self.self_camera:
                 raise ValueError("镜头辅助需要完整画面")
             r = c['map']
             left, top = math.floor(r['x'] * c['width']), math.floor(r['y'] * c['height'])
@@ -515,12 +631,22 @@ class Follower:
         x, y = round(r["x"] * c["width"]), round(r["y"] * c["height"])
         w, h = round(r["width"] * c["width"]), round(r["height"] * c["height"])
         minimap = image[y:y+h, x:x+w]
-        own, target = [tracker.locate(minimap, now) for tracker in self.trackers]
+        own = self.trackers[0].locate(minimap, now)
+        target = self.trackers[1].locate(minimap, now, self.target_ring.accept if self.target_ring else None)
         own_reliable = own and own['confidence'] >= c['confidence']
         marker = self.marker.locate(minimap, own if own_reliable else None, now) if self.marker else None
         if marker:
             own, own_reliable = marker, True
             self.trackers[0].last, self.trackers[0].at = own, now
+        self_source = 'marker' if marker else 'template'
+        # Both camera identities use this exact frame/context independently.
+        # Complete current name/HP evidence does not teach either portrait or
+        # marker history, and its confidence is not an avatar-template score.
+        camera_own = self.self_camera.locate(image, cameraContext) if self.self_camera and cameraContext and not own_reliable else None
+        if camera_own:
+            own = dict(x=(camera_own['x']-x)/w, y=(camera_own['y']-y)/h,
+                       confidence=camera_own['confidence'])
+            own_reliable, self_source = True, 'camera'
         target_source = 'template'
         target_reliable = target and target['confidence'] >= c['confidence']
         # Maintain strict partial evidence on every frame, without replacing a
@@ -535,12 +661,11 @@ class Follower:
         if not target_reliable and camera_target:
             target = dict(x=(camera_target['x']-x)/w, y=(camera_target['y']-y)/h,
                           confidence=camera_target['confidence'])
-            target_reliable = target['confidence'] >= c['confidence']
+            target_reliable = True
             target_source = 'camera'
         result = {"phase": "lost", "message": "未可靠识别自己或队友，已松开摇杆",
-                  "self": own, "target": target, "targetSource": target_source, "path": [], "direction": None}
-        if self.marker:
-            result['selfSource'] = 'marker' if marker else 'template'
+                  "self": own, "selfSource": self_source, "target": target, "targetSource": target_source,
+                  "path": [], "direction": None}
         valid = own_reliable and target_reliable
         if valid and math.dist((own["x"], own["y"]), (target["x"], target["y"])) < 0.015:
             valid = False

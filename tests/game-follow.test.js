@@ -37,6 +37,26 @@ test('partial target recognition is opt-in and requires bounded ring and living-
     { ...partial, alive: { ...partial.alive, healthBarRegion: { x: 0, y: 0, width: 0, height: .1 } } }])
     assert.equal(gameFollowConfigSchema.safeParse({ ...config, targetPartial }).success, false);
 });
+
+test('partial self arcs require an explicit boolean and retain calibrated colour and radius bounds', vision, () => {
+  const selfMarker = { hueMin: 40, hueMax: 85, saturationMin: 90, valueMin: 130, radiusPixels: 24 };
+  assert.equal(gameFollowConfigSchema.parse({ ...fixture.config, selfMarker }).selfMarker.partialArc, undefined);
+  for (const partialArc of [false, true]) assert.equal(gameFollowConfigSchema.parse({
+    ...fixture.config, selfMarker: { ...selfMarker, partialArc }
+  }).selfMarker.partialArc, partialArc);
+  for (const patch of [{ partialArc: 'true' }, { partialArc: 1 }, { partialArc: null },
+    { partialArc: true, radiusPixels: 0 }, { partialArc: true, hueMin: 100, hueMax: 85 }])
+    assert.equal(gameFollowConfigSchema.safeParse({ ...fixture.config, selfMarker: { ...selfMarker, ...patch } }).success, false);
+});
+test('full target ring is independently opt-in and does not enable partial inference or living HUD', vision, () => {
+  const targetRing = { hueMin: 85, hueMax: 130, saturationMin: 100, valueMin: 100, radiusPixels: 25 };
+  const parsed = gameFollowConfigSchema.parse({ ...fixture.config, targetRing });
+  assert.deepEqual(parsed.targetRing, targetRing); assert.equal(parsed.targetPartial, undefined);
+  assert.equal(gameFollowConfigSchema.parse(fixture.config).targetRing, undefined);
+  for (const patch of [null, true, {}, { ...targetRing, radiusPixels: 0 }, { ...targetRing, hueMin: 131 },
+    { ...targetRing, valueMin: 0 }, { ...targetRing, saturationMin: 256 }, { ...targetRing, team: 'green' }])
+    assert.equal(gameFollowConfigSchema.safeParse({ ...fixture.config, targetRing: patch }).success, false);
+});
 test('OpenCV finds image targets, routes around obstacles and rejects ambiguous frames', vision, () => {
   execFileSync(python, ['tests/game-follow-vision.py'], { windowsHide: true, stdio: 'pipe' });
 });

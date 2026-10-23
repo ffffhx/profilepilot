@@ -552,6 +552,7 @@ class Follower:
         self.target_ring = TargetRing(self.templates[1], ring) if ring is not None else None
         self.camera = None
         self.self_camera = None
+        self.viewport_guard = None
         if config.get('cameraAssist') or config.get('selfCameraAssist'):
             # Also supports offline callers loading this worker by absolute path.
             import importlib.util
@@ -563,6 +564,15 @@ class Follower:
                 self.camera = module.CameraLocator(config)
             if config.get('selfCameraAssist'):
                 self.self_camera = module.CameraLocator(config, 'selfCameraAssist')
+        if config.get('cameraViewportGuard') is not None:
+            if not (self.camera or self.self_camera):
+                raise ValueError('视野框校验需要镜头辅助')
+            import importlib.util
+            from pathlib import Path
+            spec = importlib.util.spec_from_file_location('game_follow_viewport', Path(__file__).with_name('game_follow_viewport.py'))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            self.viewport_guard = module.CameraViewportGuard(config)
         self.labels = [white_text(decode(config['nearby'][key])) for key in ('selfLabel', 'targetLabel')] if config.get('nearby') else None
         grid = config["grid"]
         blocked = np.zeros((grid["rows"], grid["columns"]), np.uint8)
@@ -627,6 +637,14 @@ class Follower:
             image = canvas
         if image.shape[1] != c["width"] or image.shape[0] != c["height"]:
             raise ValueError("手机分辨率或方向已改变，请重新校准")
+        viewport_evidence = None
+        if self.viewport_guard and cameraContext is not None:
+            viewport_evidence = self.viewport_guard.check(image, cameraContext)
+            # A native held finger does not prove the game consumed the camera
+            # input. Reject only camera-derived coordinates, never current full
+            # portraits, and never substitute the observed box as a new point.
+            if not viewport_evidence['accepted']:
+                cameraContext = None
         r = c["map"]
         x, y = round(r["x"] * c["width"]), round(r["y"] * c["height"])
         w, h = round(r["width"] * c["width"]), round(r["height"] * c["height"])
@@ -666,6 +684,8 @@ class Follower:
         result = {"phase": "lost", "message": "未可靠识别自己或队友，已松开摇杆",
                   "self": own, "selfSource": self_source, "target": target, "targetSource": target_source,
                   "path": [], "direction": None}
+        if viewport_evidence is not None:
+            result['cameraViewport'] = viewport_evidence
         valid = own_reliable and target_reliable
         if valid and math.dist((own["x"], own["y"]), (target["x"], target["y"])) < 0.015:
             valid = False

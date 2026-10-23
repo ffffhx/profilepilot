@@ -75,6 +75,40 @@ def following_own_fixture():
 
 
 class CameraTests(unittest.TestCase):
+    def test_follower_viewport_guard_blocks_only_camera_coordinates_and_preserves_full_portraits(self):
+        config, small, _, own = following_own_fixture()
+        image = np.full((1240, 2772, 3), 80, np.uint8)
+        image[:500, :900] = small
+        config.update(width=2772, height=1240,
+                      map=dict(x=120/2772, y=0, width=425/2772, height=425/1240),
+                      cameraViewportGuard=dict(version=1, referenceWidth=2772, referenceHeight=1240))
+        assist = config['selfCameraAssist']
+        assist.update(referenceWidth=2772, referenceHeight=1240,
+                      region=dict(x=225/2772, y=75/1240, width=675/2772, height=400/1240))
+        good = image.copy()
+        cv2.rectangle(good, (244, 169), (356, 231), (255, 255, 255), 2)
+        shifted = image.copy()
+        cv2.rectangle(shifted, (264, 169), (376, 231), (255, 255, 255), 2)
+        for frame, accepted in [(good, True), (image, False), (shifted, False)]:
+            with self.subTest(accepted=accepted, shifted=frame is shifted):
+                follower = worker.Follower(copy.deepcopy(config))
+                with patch.object(follower.self_camera, 'locate', wraps=follower.self_camera.locate) as locate:
+                    result = follower.analyze(encoded(frame), 10, cameraContext=context(300, 200))
+                    self.assertEqual(result['cameraViewport']['accepted'], accepted)
+                    self.assertEqual(result['selfSource'] == 'camera', accepted)
+                    self.assertEqual(locate.call_count, int(accepted))
+                self.assertIsNone(follower.trackers[0].last, 'camera coordinates never teach full identity history')
+        # Missing viewport must not discard current independent full identity.
+        image[310:328, 380:398] = own
+        follower = worker.Follower(config)
+        follower.analyze(encoded(image), 10, cameraContext=context(300, 200))
+        result = follower.analyze(encoded(image), 10.4, cameraContext=context(300, 200))
+        self.assertFalse(result['cameraViewport']['accepted'])
+        self.assertEqual(result['selfSource'], 'template')
+        self.assertEqual(result['targetSource'], 'template')
+        self.assertEqual(result['phase'], 'following')
+        self.assertIsNotNone(result['direction'])
+
     def test_follower_current_self_camera_can_follow_without_teaching_avatar_history(self):
         config, image, _, _ = following_own_fixture()
         follower = worker.Follower(config)

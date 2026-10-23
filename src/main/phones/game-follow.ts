@@ -57,11 +57,17 @@ export const gameFollowConfigSchema = z.object({
     alive: z.object({ portraitTemplate: image.max(256_000), portraitRegion: hudRect, healthBarRegion: hudRect }).strict()
   }).strict().optional(),
   cameraAssist: cameraAssistSchema.extend({ team: z.literal("blue").optional() }).strict().optional(),
-  selfCameraAssist: cameraAssistSchema.extend({ team: z.literal("green") }).strict().optional()
+  selfCameraAssist: cameraAssistSchema.extend({ team: z.literal("green") }).strict().optional(),
+  cameraViewportGuard: z.object({ version: z.literal(1), referenceWidth: z.literal(2772),
+    referenceHeight: z.literal(1240) }).strict().optional()
 }).strict().refine(c => c.width * c.height <= 8_000_000, "画面过大")
   .refine(c => [c.cameraAssist, c.selfCameraAssist].every(a => !a || a.referenceWidth === c.width && a.referenceHeight === c.height
     && a.anchorBounds.x + a.anchorBounds.width <= c.width
     && a.anchorBounds.y + a.anchorBounds.height <= c.height), "镜头校准尺寸或有效范围不匹配")
+  .refine(c => !c.cameraViewportGuard || (c.cameraAssist || c.selfCameraAssist)
+    && c.width === 2772 && c.height === 1240
+    && [c.map.x * c.width - 120, c.map.y * c.height, c.map.width * c.width - 425,
+      c.map.height * c.height - 425].every(delta => Math.abs(delta) <= 1e-6), "视野框校验需要已标定的原生布局及镜头辅助")
   .refine(c => {
     const j = c.joystick, r = j.radius * Math.min(c.width, c.height);
     return j.x * c.width >= r && (1 - j.x) * c.width >= r && j.y * c.height >= r && (1 - j.y) * c.height >= r;
@@ -410,9 +416,10 @@ export class GameFollower {
                 y: (config.map.y + point.y * config.map.height) * config.height } : undefined;
             // Camera and marker locators already enforce their own current-pixel
             // thresholds. Do not reapply the unrelated portrait threshold.
-            const nativeTarget = analysis.target && (analysis.targetSource === "camera"
+            const viewportAccepted = !config.cameraViewportGuard || analysis.cameraViewport?.accepted === true;
+            const nativeTarget = analysis.target && (analysis.targetSource !== "camera" || viewportAccepted) && (analysis.targetSource === "camera"
               || analysis.target.confidence >= config.confidence) ? toNative(analysis.target) : undefined;
-            const nativeSelf = analysis.self && (analysis.selfSource === "camera" || analysis.selfSource === "marker"
+            const nativeSelf = analysis.self && (analysis.selfSource !== "camera" || viewportAccepted) && (analysis.selfSource === "camera" || analysis.selfSource === "marker"
               || analysis.self.confidence >= config.confidence) ? toNative(analysis.self) : undefined;
             const cameraPlan = run.camera?.afterAnalyze({
               fullTarget: analysis.targetSource === "template" ? nativeTarget : undefined,
@@ -427,8 +434,8 @@ export class GameFollower {
             if (cameraEnabled) this.value.camera = run.camera!.status(performance.now());
             const direction = Date.now() - at < (backend === "basic" ? 3000 : 1000)
               && !cameraPlan?.stopJoystick
-              && (analysis.targetSource !== "camera" || !!config.cameraAssist && cameraPlan?.allowCameraMovement)
-              && (analysis.selfSource !== "camera" || !!config.selfCameraAssist && cameraPlan?.allowCameraMovement)
+              && (analysis.targetSource !== "camera" || viewportAccepted && !!config.cameraAssist && cameraPlan?.allowCameraMovement)
+              && (analysis.selfSource !== "camera" || viewportAccepted && !!config.selfCameraAssist && cameraPlan?.allowCameraMovement)
               ? analysis.direction : null;
             const joystick = config.joystick, rotation = joystick.rotation * Math.PI / 180;
             const dx = direction ? direction.x * Math.cos(rotation) - direction.y * Math.sin(rotation) : 0;

@@ -23,6 +23,13 @@ function config() {
       region: { x: .1, y: .1, width: .8, height: .8 }, matrix: [[.02, 0], [0, .02], [-10, -5]],
       anchorBounds: { x: 0, y: 0, width: 1000, height: 500 } } };
 }
+function viewportConfig() {
+  const c = config(); c.width = 2772; c.height = 1240;
+  c.map = { x: 120 / 2772, y: 0, width: 425 / 2772, height: 425 / 1240 };
+  c.cameraAssist.referenceWidth = 2772; c.cameraAssist.referenceHeight = 1240;
+  c.cameraViewportGuard = { version: 1, referenceWidth: 2772, referenceHeight: 1240 };
+  return c;
+}
 function proof(sequence, frame, patch = {}) {
   return { version: 1, epoch: 7, sequence, x: 300, y: 200, heldSinceUptimeMs: 100000,
     capturedAtUptimeMs: 100000 + frame * 400, expiresAtUptimeMs: 101500 + frame * 400, ...patch };
@@ -63,7 +70,8 @@ readline.createInterface({input:process.stdin}).on('line', line=>{
       if (command.op === 'frame') {
         h.captures++;
         const cameraProof = options.frameProof?.(h);
-        return { mime: 'image/jpeg', width: 1000, height: 500, base64: 'A'.repeat(16), ...(cameraProof ? { cameraProof } : {}) };
+        return { mime: 'image/jpeg', width: options.nativeViewport ? 2772 : 1000,
+          height: options.nativeViewport ? 1240 : 500, base64: 'A'.repeat(16), ...(cameraProof ? { cameraProof } : {}) };
       }
       h.touches.push(structuredClone(command));
       if (options.touch) return options.touch(command, h);
@@ -79,6 +87,34 @@ readline.createInterface({input:process.stdin}).on('line', line=>{
   t.after(async () => { await h.manager.close(); fs.rmSync(root, { recursive: true, force: true }); });
   return h;
 }
+
+test('viewport calibration is explicit, fixed to its measured layout and cannot widen its thresholds', () => {
+  const c = viewportConfig(); assert.equal(gameFollowConfigSchema.safeParse(c).success, true);
+  for (const patch of [{ cameraViewportGuard: { ...c.cameraViewportGuard, version: 2 } },
+    { cameraViewportGuard: { ...c.cameraViewportGuard, maxCenterDistance: 20 } },
+    { cameraViewportGuard: { ...c.cameraViewportGuard, referenceWidth: 1000 } },
+    { width: 2771 }, { map: { ...c.map, x: 121 / 2772 } },
+    { map: { ...c.map, height: 424 / 1240 } }, { cameraAssist: undefined }]) {
+    assert.equal(gameFollowConfigSchema.safeParse({ ...c, ...patch }).success, false);
+  }
+});
+
+test('viewport rejection or absence blocks camera movement while current full portraits remain usable', async t => {
+  for (const accepted of [undefined, false, true]) {
+    const evidence = accepted === undefined ? {} : { cameraViewport: { accepted, reason: 'fixture' } };
+    const h = harness(t, { nativeViewport: true, fullAt: 5,
+      frames: [{}, {}, evidence, evidence, evidence, evidence],
+      frameProof: h => {
+        const touch = h.touches.at(-1), point = touch?.points.find(p => p.id === 1);
+        return point ? proof(touch.sequence, h.captures, { x: point.x, y: point.y }) : undefined;
+      } });
+    const started = await h.start({ config: viewportConfig() });
+    await until(() => h.touches.length >= 6); await h.stop(started);
+    assert.equal(h.touches[2].points.some(p => p.id === 0), accepted === true);
+    assert.ok(h.touches[0].points.some(p => p.id === 0), 'initial full evidence is independent of viewport');
+    assert.ok(h.touches[4].points.some(p => p.id === 0), 'restored current full evidence remains usable');
+  }
+});
 
 test('camera integration rejects missing capability and basic backend before capturing or touching', async t => {
   const old = harness(t, { capability: false });

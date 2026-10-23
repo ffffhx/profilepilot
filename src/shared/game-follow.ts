@@ -45,6 +45,8 @@ export interface GameFollowConfig {
   cameraAssist?: FollowCameraAssist & { team?: "blue" };
   /** Independent opt-in own-hero calibration, with current green HP evidence. */
   selfCameraAssist?: FollowCameraAssist & { team: "green" };
+  /** Opt-in current viewport check for the measured native 2772x1240 layout. */
+  cameraViewportGuard?: { version: 1; referenceWidth: 2772; referenceHeight: 1240 };
 }
 export interface FollowDetection extends FollowPoint { confidence: number; }
 export interface FollowAnalysis {
@@ -58,6 +60,8 @@ export interface FollowAnalysis {
   source?: "minimap" | "labels";
   selfSource?: "template" | "marker" | "camera";
   targetSource?: "template" | "partial" | "labels" | "camera";
+  cameraViewport?: { accepted: boolean; reason: string; centerDistanceMapPx: number | null;
+    observedBox: Record<string, unknown> | null; colorEvidence: Record<string, unknown> | null };
   distance?: number;
 }
 export interface FollowFrame {

@@ -81,6 +81,8 @@ export interface PhoneRequestTiming {
 export interface FollowCameraPlacement {
   action: "arm" | "keep" | "recenter" | "reject";
   reason: string;
+  /** Historical id1 search selection only; never current-position or movement authority. */
+  seedSource?: "full" | "marker";
   point?: FollowPoint;
   anchor?: FollowPoint;
   center?: FollowPoint;

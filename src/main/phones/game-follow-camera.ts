@@ -19,6 +19,8 @@ export type CameraObservation = {
   fullSelf?: CameraPoint;
   /** Current full portrait or green minimap marker; never a past tracker point. */
   currentSelf?: CameraPoint;
+  /** Explicit current marker identity already accepted by vision; must match currentSelf. Search seed only. */
+  markerSelf?: CameraPoint;
   cameraSelf?: CameraPoint;
   selfLost?: boolean;
   /** Host-monotonic capture/assembly duration; camera search planning only. */
@@ -65,7 +67,7 @@ export class GameFollowCamera {
   private readonly enabled: boolean;
   private hold?: Hold;
   private recent?: RecentFull;
-  private recentSelf?: RecentFull;
+  private recentSelf?: RecentFull & { source: "full" | "marker" };
   private previousFull?: FullObservation;
   private previousFullSelf?: FullObservation;
   private frame?: CurrentFrame;
@@ -198,7 +200,7 @@ export class GameFollowCamera {
         this.invalidate("search-expired"); point = null; stopJoystick = true; allowCameraMovement = false; reason = "search-expired";
       }
       if (!point) this.recordRelease(reason);
-      if (reason === "arm" || reason === "arm-self" || reason === "switch-search-self") this.armAttempts++;
+      if (reason === "arm" || reason === "arm-self" || reason === "switch-search-self" || reason === "switch-search-target") this.armAttempts++;
       const value: CameraPlan = Object.freeze({ id: ++this.nextId, point: point ? copyPoint(point) : null,
         stopJoystick, allowCameraMovement, reason, ttlMs: point ? Math.min(1200, remaining) : 1200 });
       this.pending = { plan: value, createdAt: now, role }; this.reason = reason; return value;
@@ -218,6 +220,8 @@ export class GameFollowCamera {
     // non-camera target source, but it can never seed full-portrait history.
     const nonCameraTarget = full || (selfEnabled && validPoint(analysis.currentTarget) ? analysis.currentTarget : undefined);
     const nonCameraSelf = fullSelf || (validPoint(analysis.currentSelf) ? analysis.currentSelf : undefined);
+    const markerSelf = selfEnabled && validPoint(analysis.markerSelf) && nonCameraSelf
+      && samePoint(analysis.markerSelf, nonCameraSelf) ? analysis.markerSelf : undefined;
     const targetCurrent = nonCameraTarget || cameraTarget, selfCurrent = nonCameraSelf || cameraSelf;
     const stopJoystick = !targetCurrent || selfEnabled && !selfCurrent;
     const allowCameraMovement = !!proven && !!(cameraTarget || cameraSelf) && !stopJoystick;
@@ -242,10 +246,20 @@ export class GameFollowCamera {
     const fullMotion = motion(full, this.previousFull), fullSelfMotion = motion(fullSelf, this.previousFullSelf);
     this.previousFull = fullMotion.observation; this.previousFullSelf = fullSelfMotion.observation;
     if (full) this.recent = { point: copyPoint(full), observedAt, speed: fullMotion.speed, intervalMs: fullMotion.intervalMs };
-    if (fullSelf) this.recentSelf = { point: copyPoint(fullSelf), observedAt, speed: fullSelfMotion.speed, intervalMs: fullSelfMotion.intervalMs };
-    const armPlacement = (config: CameraPlacementConfig, recent: RecentFull) => planCameraArm(config,
-      { target: recent.point, ageMs: now-recent.observedAt }, { speedMapPxPerSecond: recent.speed,
-        sampleIntervalMs: recent.intervalMs, intervalMs: this.intervalMs, captureMs: analysis.captureMs ?? 0 });
+    if (fullSelf) this.recentSelf = { point: copyPoint(fullSelf), observedAt, source: "full",
+      speed: fullSelfMotion.speed, intervalMs: fullSelfMotion.intervalMs };
+    else if (markerSelf && (!this.recentSelf || observedAt > this.recentSelf.observedAt)) {
+      // The marker already passed current-pixel identity checks in vision. A
+      // newer measurement can replace the self search seed, never supply id0 or
+      // teach full-portrait velocity. Camera observations cannot enter here.
+      this.recentSelf = { point: copyPoint(markerSelf), observedAt, source: "marker" };
+    }
+    const armPlacement = (config: CameraPlacementConfig, recent: RecentFull & { source?: "full" | "marker" }) => ({
+      ...planCameraArm(config, { target: recent.point, ageMs: now-recent.observedAt },
+        recent.source === "marker" ? undefined : { speedMapPxPerSecond: recent.speed,
+          sampleIntervalMs: recent.intervalMs, intervalMs: this.intervalMs, captureMs: analysis.captureMs ?? 0 }),
+      seedSource: recent.source ?? "full"
+    });
     if (!this.hold) {
       const armTarget = this.targetEnabled && !targetCurrent && analysis.lost
         && this.recent && now-this.recent.observedAt <= RECENT_MS;
@@ -278,7 +292,7 @@ export class GameFollowCamera {
     } else { this.fullSince = undefined; this.fullCount = 0; }
     // A restored target no longer needs the old search point. Do not wait for
     // that search to expire (and discard recentSelf) before seeking a missing
-    // self. This historical full portrait chooses id1 only; id0 stops now. The
+    // self. This validated historical search seed chooses id1 only; id0 stops now. The
     // existing search deadline and TTL remain unchanged, and commit requires
     // fresh applied proof for a changed point just like any other camera move.
     if (this.hold.role === "target" && full && !selfCurrent && this.selfPlacementConfig
@@ -287,6 +301,16 @@ export class GameFollowCamera {
       if (this.placement.action === "arm" && this.placement.point)
         return plan(this.placement.point, true, false, "switch-search-self", "self");
       return plan(this.hold.point, true, false, "self-switch-placement-rejected");
+    }
+    // Symmetric recovery: an independently visible self no longer needs this
+    // view. A recent FULL target may select id1, but cannot supply current id0.
+    // Camera-only self evidence cannot switch away from the view it depends on.
+    if (this.hold.role === "self" && nonCameraSelf && !targetCurrent && this.targetEnabled && this.placementConfig
+      && this.recent && now-this.recent.observedAt <= RECENT_MS) {
+      this.placement = armPlacement(this.placementConfig, this.recent);
+      if (this.placement.action === "arm" && this.placement.point)
+        return plan(this.placement.point, true, false, "switch-search-target", "target");
+      return plan(this.hold.point, true, false, "target-switch-placement-rejected");
     }
     // The hold role chooses geometry, never who may be identified in this frame.
     // If the first role is now full, a current camera-only second role may take

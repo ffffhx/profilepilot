@@ -414,6 +414,7 @@ export class GameFollower {
               cameraTarget: config.cameraAssist && analysis.targetSource === "camera" ? nativeTarget : undefined,
               fullSelf: (!analysis.selfSource || analysis.selfSource === "template") ? nativeSelf : undefined,
               currentSelf: analysis.selfSource !== "camera" ? nativeSelf : undefined,
+              markerSelf: analysis.selfSource === "marker" ? nativeSelf : undefined,
               cameraSelf: config.selfCameraAssist && analysis.selfSource === "camera" ? nativeSelf : undefined,
               lost: !nativeTarget, selfLost: !nativeSelf, captureMs: completedAt - requestAt
             }, performance.now() - requestAt, performance.now());

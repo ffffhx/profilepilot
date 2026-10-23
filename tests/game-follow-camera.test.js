@@ -376,6 +376,78 @@ test('self camera lead uses only its own adjacent full pair and recovery discard
   assert.equal(m.afterAnalyze({ fullTarget: target, lost: false }, 0, 1200).point, null);
 });
 
+test('dynamic3 frame145 full then146 current marker selects the newer self search point without leading or moving', () => {
+  const m = new GameFollowCamera({ ...options, targetEnabled: false, selfPlacement: placement });
+  const fullSelf = { x: 332.5, y: 298.5 }, marker = { x: 332.5, y: 289.5 };
+  m.commit(m.afterAnalyze({ fullTarget: target, fullSelf, lost: false }, 600, 600), 1, 605);
+  m.beforeAnalyze(undefined, 1200);
+  m.commit(m.afterAnalyze({ fullTarget: target, currentSelf: marker, markerSelf: marker, lost: false }, 600, 1200), 2, 1205);
+  m.beforeAnalyze(undefined, 1836);
+  const arm = m.afterAnalyze({ fullTarget: target, lost: false }, 600, 1836);
+  assert.equal(arm.reason, 'arm-self'); assert.deepEqual(arm.point, { x: 333, y: 290 });
+  assert.equal(arm.stopJoystick, true); assert.equal(arm.allowCameraMovement, false); assert.equal(arm.ttlMs, 1200);
+  assert.equal(m.status(1836).placement.seedSource, 'marker');
+  assert.equal(m.status(1836).placement.prediction, undefined, 'marker seed does not reuse full speed');
+  m.commit(arm, 3, 1841);
+  assert.equal(m.beforeAnalyze(proof({ sequence: 3, x: 333, y: 299 }), 2200), undefined);
+  const oldView = m.afterAnalyze({ fullTarget: target, cameraSelf: marker, lost: false }, 100, 2200);
+  assert.equal(oldView.stopJoystick, true); assert.equal(oldView.allowCameraMovement, false);
+  m.commit(oldView, 4, 2205);
+  m.beforeAnalyze(undefined, 3400);
+  const expired = m.afterAnalyze({ fullTarget: target, lost: false }, 100, 3400);
+  assert.equal(expired.reason, 'hold-expired'); assert.equal(expired.point, null);
+});
+
+test('a self marker search seed must be explicitly typed, current and newer than its full anchor', () => {
+  const old = { x: 180, y: 200 }, newer = { x: 190, y: 210 };
+  for (const kind of ['untyped', 'no-current', 'mismatch', 'older']) {
+    const m = new GameFollowCamera({ ...options, targetEnabled: false, selfPlacement: placement });
+    m.commit(m.afterAnalyze({ fullTarget: target, fullSelf: old, lost: false }, 0, 600), 1, 600);
+    m.beforeAnalyze(undefined, 700);
+    m.commit(m.afterAnalyze({ fullTarget: target, lost: false,
+      ...(kind === 'no-current' ? {} : { currentSelf: newer }),
+      ...(kind === 'untyped' ? {} : { markerSelf: kind === 'mismatch' ? old : newer })
+    }, kind === 'older' ? 500 : 0, 700), 2, 700);
+    // no-current can already begin the old search; every path must retain it.
+    m.beforeAnalyze(undefined, 800);
+    const p = m.afterAnalyze({ fullTarget: target, lost: false }, 0, 800);
+    assert.deepEqual(p.point, old, kind); assert.equal(p.stopJoystick, true);
+    assert.equal(p.allowCameraMovement, false);
+  }
+});
+
+test('marker-only validated self seed expires and recovery discards it; it cannot seed a target search', () => {
+  const self = { x: 180, y: 200 };
+  for (const kind of ['expired', 'recovery', 'cancel', 'stale-frame']) {
+    const m = new GameFollowCamera({ ...options, placement, selfPlacement: placement });
+    m.commit(m.afterAnalyze({ fullTarget: target, currentSelf: self, markerSelf: self, lost: false }, 0, 0), 1, 0);
+    if (kind === 'recovery' || kind === 'cancel') m.invalidate(kind);
+    const now = kind === 'expired' ? 3001 : 100;
+    m.beforeAnalyze(undefined, now);
+    const p = m.afterAnalyze({ fullTarget: target, lost: false }, kind === 'stale-frame' ? 1000 : 0, now);
+    assert.equal(p.point, null, kind); assert.equal(p.stopJoystick, true); assert.equal(p.allowCameraMovement, false);
+  }
+  const m = new GameFollowCamera({ ...options, placement, selfPlacement: placement });
+  m.commit(m.afterAnalyze({ currentTarget: target, currentSelf: self, markerSelf: self, lost: false }, 0, 0), 1, 0);
+  m.beforeAnalyze(undefined, 100);
+  assert.equal(m.afterAnalyze({ currentSelf: self, markerSelf: self, lost: true }, 0, 100).point, null);
+});
+
+test('target-to-self search switch prefers a newer current marker without renewing the search deadline', () => {
+  const old = { x: 180, y: 200 }, marker = { x: 190, y: 210 };
+  const m = new GameFollowCamera({ ...options, placement, selfPlacement: placement });
+  m.commit(m.afterAnalyze({ fullTarget: target, fullSelf: old, lost: false }, 0, 0), 1, 0);
+  m.beforeAnalyze(undefined, 100);
+  m.commit(m.afterAnalyze({ currentSelf: marker, markerSelf: marker, lost: true }, 0, 100), 2, 100);
+  assert.ok(m.beforeAnalyze(proof(), 400));
+  const p = m.afterAnalyze({ fullTarget: target, lost: false }, 20, 410);
+  assert.equal(p.reason, 'switch-search-self'); assert.deepEqual(p.point, marker);
+  assert.equal(p.stopJoystick, true); assert.equal(p.allowCameraMovement, false);
+  assert.equal(m.status(410).placement.seedSource, 'marker'); assert.equal(m.status(410).searchRemainingMs, 5690);
+  m.commit(p, 3, 420); assert.equal(m.status(420).ttlRemainingMs, 1190);
+  assert.equal(m.beforeAnalyze(proof({ sequence: 3, capturedAtUptimeMs: 100700 }), 700), undefined);
+});
+
 test('current edge evidence recenters now; old epoch and unsettled new point cannot authorize the next frame', () => {
   const m = new GameFollowCamera({ ...options, placement, intervalMs: 350 });
   m.commit(m.afterAnalyze({ fullTarget: target, lost: false }, 0, 0), 1, 5);
@@ -422,7 +494,7 @@ test('self camera needs current proof and a current target; target restoration a
   assert.equal(noTarget.allowCameraMovement, false); assert.equal(noTarget.stopJoystick, true);
 });
 
-test('both current non-camera identities must return before releasing self camera; marker does not seed full history', () => {
+test('both current non-camera identities must return before release; untyped current self does not seed search history', () => {
   const { m, self } = selfArmed(); let sequence = 2;
   for (const now of [400, 700, 1000]) {
     m.beforeAnalyze(undefined, now);
@@ -491,14 +563,14 @@ test('a target hold switches to recent full-self search when target returns and 
   assert.deepEqual(current.point, self); assert.equal(m.status(910).releaseRequests, 0);
 });
 
-test('self-search switch cannot use expired, marker-only, or out-of-map full-self history', () => {
+test('self-search switch cannot use expired, untyped-current-only, or out-of-map full-self history', () => {
   const self = { x: 180, y: 200 };
-  for (const kind of ['expired', 'marker-only', 'out-of-map']) {
+  for (const kind of ['expired', 'untyped-current-only', 'out-of-map']) {
     const selfPlacement = structuredClone(placement);
     if (kind === 'out-of-map') selfPlacement.cameraAssist.matrix[2] = [1000, 1000];
     const m = new GameFollowCamera({ ...options, placement, selfPlacement });
     m.commit(m.afterAnalyze({ fullTarget: target,
-      ...(kind === 'marker-only' ? { currentSelf: self } : { fullSelf: self }), lost: false }, 0, 0), 1, 0);
+      ...(kind === 'untyped-current-only' ? { currentSelf: self } : { fullSelf: self }), lost: false }, 0, 0), 1, 0);
     m.beforeAnalyze(undefined, 100); m.commit(m.afterAnalyze(lost, 0, 100), 2, 100);
     let sequence = 2;
     if (kind === 'expired') for (const now of [1000, 2000, 3000]) {
@@ -523,4 +595,71 @@ test('switching search role at the same coordinate retains physical epoch but ne
   assert.ok(m.beforeAnalyze(proof({ sequence: 3, capturedAtUptimeMs: 100700, expiresAtUptimeMs: 102000 }), 700));
   const ready = m.afterAnalyze({ fullTarget: target, cameraSelf: target, lost: false }, 20, 710);
   assert.equal(ready.allowCameraMovement, true); assert.equal(ready.stopJoystick, false);
+});
+
+test('game8 restored current self switches its hold to missing target search without extending budget or reusing proof', () => {
+  // Reproduces the frame152-158 role state with controlled time: own minimap
+  // identity returns while target is absent, and the old self hold is unhelpful.
+  const self = { x: 180, y: 200 }, restored = { x: 190, y: 210 };
+  const m = new GameFollowCamera({ ...options, placement, selfPlacement: placement });
+  m.commit(m.afterAnalyze({ fullTarget: target, fullSelf: self, lost: false }, 0, 0), 1, 5);
+  m.beforeAnalyze(undefined, 100);
+  m.commit(m.afterAnalyze({ fullTarget: target, lost: false }, 20, 100), 2, 105);
+  assert.equal(m.status(105).role, 'self');
+  assert.ok(m.beforeAnalyze(proof({ ...self }), 400));
+  const p = m.afterAnalyze({ currentSelf: restored, markerSelf: restored, lost: true }, 20, 410);
+  assert.equal(p.reason, 'switch-search-target'); assert.deepEqual(p.point, target);
+  assert.equal(p.stopJoystick, true); assert.equal(p.allowCameraMovement, false);
+  assert.equal(m.status(410).searchRemainingMs, 5690); assert.equal(m.status(410).placement.seedSource, 'full');
+  m.commit(p, 3, 420); assert.equal(m.status(420).role, 'target'); assert.equal(m.status(420).ttlRemainingMs, 1190);
+  assert.equal(m.beforeAnalyze(proof({ ...self, sequence: 3, capturedAtUptimeMs: 100700 }), 700), undefined);
+  const old = m.afterAnalyze({ currentSelf: restored, cameraTarget: target, lost: true }, 20, 710);
+  assert.equal(old.stopJoystick, true); assert.equal(old.allowCameraMovement, false); m.commit(old, 4, 720);
+  assert.ok(m.beforeAnalyze(proof({ sequence: 4, epoch: 8, heldSinceUptimeMs: 100500,
+    capturedAtUptimeMs: 100900, expiresAtUptimeMs: 102000 }), 900));
+  const valid = m.afterAnalyze({ currentSelf: restored, cameraTarget: target, lost: true }, 20, 910);
+  assert.equal(valid.stopJoystick, false); assert.equal(valid.allowCameraMovement, true);
+});
+
+test('self-to-target switching requires enabled target, recent full history and independent current self', () => {
+  const self = { x: 180, y: 200 };
+  for (const kind of ['disabled-target', 'no-target-placement', 'camera-self-only', 'expired-target', 'out-of-map']) {
+    const targetPlacement = structuredClone(placement);
+    if (kind === 'out-of-map') targetPlacement.cameraAssist.matrix[2] = [1000, 1000];
+    const m = new GameFollowCamera({ ...options, targetEnabled: kind !== 'disabled-target',
+      ...(kind === 'no-target-placement' ? {} : { placement: targetPlacement }), selfPlacement: placement });
+    m.commit(m.afterAnalyze({ fullTarget: target, fullSelf: self, lost: false }, 0, 0), 1, 0);
+    m.beforeAnalyze(undefined, 100);
+    m.commit(m.afterAnalyze({ fullTarget: target, lost: false }, 20, 100), 2, 100);
+    let sequence = 2;
+    if (kind === 'expired-target') for (const now of [1000,2000,3000]) {
+      m.beforeAnalyze(undefined, now); m.commit(m.afterAnalyze({ lost: true }, 20, now), ++sequence, now);
+    }
+    const now = kind === 'expired-target' ? 3400 : 400;
+    m.beforeAnalyze(proof({ ...self, sequence, capturedAtUptimeMs: 100000+now,
+      expiresAtUptimeMs: 101200+now }), now);
+    const p = m.afterAnalyze({ lost: true, ...(kind === 'camera-self-only' ? { cameraSelf: self } : { currentSelf: self }) }, 20, now);
+    assert.deepEqual(p.point, self, kind); assert.notEqual(p.reason, 'switch-search-target');
+    assert.equal(p.stopJoystick, true); assert.equal(p.allowCameraMovement, false);
+    assert.equal(m.status(now).role, 'self');
+  }
+});
+
+test('self-to-target role change cannot restart search or exceed its final TTL budget', () => {
+  const self = { x: 180, y: 200 }, m = new GameFollowCamera({ ...options, placement, selfPlacement: placement });
+  m.commit(m.afterAnalyze({ fullTarget: target, fullSelf: self, lost: false }, 0, 0), 1, 0);
+  m.beforeAnalyze(undefined, 100); m.commit(m.afterAnalyze({ fullTarget: target, lost: false }, 0, 100), 2, 100);
+  let sequence = 2;
+  for (const now of [1000,2000,3000,4000,5000,5900]) {
+    m.beforeAnalyze(undefined, now);
+    // Full target alone can update its seed, but cannot renew a missing-self search.
+    m.commit(m.afterAnalyze({ fullTarget: target, lost: false }, 0, now), ++sequence, now);
+  }
+  m.beforeAnalyze(undefined, 5990);
+  const p = m.afterAnalyze({ currentSelf: self, lost: true }, 0, 5990);
+  assert.equal(p.reason, 'switch-search-target'); assert.equal(p.ttlMs, 110);
+  assert.equal(m.status(5990).searchRemainingMs, 110); m.commit(p, ++sequence, 5995);
+  m.beforeAnalyze(undefined, 6100);
+  const end = m.afterAnalyze({ currentSelf: self, lost: true }, 0, 6100);
+  assert.equal(end.point, null); assert.equal(end.reason, 'search-expired'); assert.equal(end.stopJoystick, true);
 });

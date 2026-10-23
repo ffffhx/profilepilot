@@ -243,6 +243,41 @@ test('self assistance alone still requires capability and cannot use the basic b
   assert.equal(basic.starts, 0);
 });
 
+test('host forwards a validated marker self seed below portrait confidence, but lost-frame movement remains blocked', async t => {
+  const fullTarget = { target: { x: .5, y: .5, confidence: .99 }, targetSource: 'template', direction: { x: 1, y: 0 } };
+  const h = harness(t, { frames: [
+    { ...fullTarget, self: { x: .58125, y: .74625, confidence: .99 }, selfSource: 'template' },
+    { ...fullTarget, self: { x: .58125, y: .72375, confidence: .7 }, selfSource: 'marker' },
+    { ...fullTarget, self: null, selfSource: 'marker' }
+  ] });
+  const c = config(); c.selfCameraAssist = { ...c.cameraAssist, team: 'green' }; delete c.cameraAssist;
+  const started = await h.start({ config: c }); await until(() => h.touches.length >= 3);
+  assert.deepEqual(h.touches[1].points.map(p => p.id), [0]);
+  assert.deepEqual(h.touches[2].points, [{ id: 1, x: 333, y: 290, fromX: 333, fromY: 290 }]);
+  assert.equal(h.touches[2].ttlMs, 1200);
+  const status = await h.manager.command({ op: 'status' });
+  assert.equal(status.camera.placement.seedSource, 'marker'); assert.equal(status.actions, 2);
+  assert.equal(status.camera.placement.prediction, undefined);
+  await h.stop(started);
+});
+
+test('camera, low-confidence full and out-of-map self results cannot replace the full search seed', async t => {
+  for (const invalid of [
+    { selfSource: 'camera', self: { x: .3, y: .3, confidence: .99 } },
+    { selfSource: 'template', self: { x: .3, y: .3, confidence: .7 } },
+    { selfSource: 'marker', self: { x: .3, y: 1.1, confidence: .7 } }
+  ]) {
+    const fullTarget = { target: { x: .5, y: .5, confidence: .99 }, targetSource: 'template', direction: { x: 1, y: 0 } };
+    const h = harness(t, { frames: [{ ...fullTarget, selfSource: 'template' }, { ...fullTarget, ...invalid }, { ...fullTarget, self: null }] });
+    const c = config(); c.selfCameraAssist = { ...c.cameraAssist, team: 'green' }; delete c.cameraAssist;
+    const started = await h.start({ config: c }); await until(() => h.touches.length >= 3);
+    assert.deepEqual(h.touches[1].points, [{ id: 1, x: 180, y: 80, fromX: 180, fromY: 80 }]);
+    assert.deepEqual(h.touches[2].points.map(p => p.id), [1]);
+    assert.equal((await h.manager.command({ op: 'status' })).actions, 1);
+    await h.stop(started);
+  }
+});
+
 test('target camera proof cannot opt into an unconfigured self camera locator', async t => {
   const h = harness(t, { frames: [{}, {}, { selfSource: 'camera' }],
     frameProof: h => h.captures < 3 ? undefined : proof(h.touches.at(-1).sequence, h.captures) });
@@ -270,4 +305,37 @@ test('full target restoration while self disappears switches the held camera dir
   assert.equal(status.camera.role, 'self'); assert.equal(status.camera.armAttempts, 2);
   assert.equal(status.camera.releaseRequests, 0);
   await h.stop(started);
+});
+
+test('current marker self restoration switches id1 to missing target and rejects the prior self-view proof', async t => {
+  const fullTarget = { target: { x: .5, y: .5, confidence: .99 }, targetSource: 'template', direction: { x: 1, y: 0 } };
+  const marker = { self: { x: .2, y: .2, confidence: .7 }, selfSource: 'marker', direction: { x: 1, y: 0 } };
+  const currentCameraTarget = { ...marker, target: fullTarget.target, targetSource: 'camera' };
+  const h = harness(t, { frames: [{ ...fullTarget, selfSource: 'template' }, { ...fullTarget, self: null },
+    { ...marker, target: null, targetSource: 'template' }, currentCameraTarget, currentCameraTarget, currentCameraTarget],
+    frameProof: h => h.captures < 3 ? undefined : proof(h.touches.at(-1).sequence, h.captures,
+      h.captures < 5 ? { x: 180, y: 80 } : { epoch: 8, heldSinceUptimeMs: 101200 }) });
+  const c = config(); c.selfCameraAssist = { ...c.cameraAssist, team: 'green' };
+  const started = await h.start({ config: c }); await until(() => h.touches.length >= 6);
+  assert.deepEqual(h.touches[1].points, [{ id: 1, x: 180, y: 80, fromX: 180, fromY: 80 }]);
+  assert.deepEqual(h.touches[2].points, [{ id: 1, x: 300, y: 200, fromX: 300, fromY: 200 }]);
+  assert.deepEqual(h.touches[3].points.map(p => p.id), [1]);
+  assert.deepEqual(h.touches[4].points.map(p => p.id), [0,1]);
+  assert.deepEqual(h.touches[5].points.map(p => p.id), [0,1]);
+  const status = await h.manager.command({ op: 'status' });
+  assert.equal(status.camera.role, 'target'); assert.equal(status.camera.armAttempts, 2);
+  assert.equal(status.camera.releaseRequests, 0); await h.stop(started);
+});
+
+test('self-only configuration never switches its hold to a target search on marker restoration', async t => {
+  const fullTarget = { target: { x: .5, y: .5, confidence: .99 }, targetSource: 'template', direction: { x: 1, y: 0 } };
+  const marker = { self: { x: .2, y: .2, confidence: .7 }, selfSource: 'marker', target: null, targetSource: 'template', direction: { x: 1, y: 0 } };
+  const h = harness(t, { frames: [{ ...fullTarget, selfSource: 'template' }, { ...fullTarget, self: null }, marker, marker] });
+  const c = config(); c.selfCameraAssist = { ...c.cameraAssist, team: 'green' }; delete c.cameraAssist;
+  const started = await h.start({ config: c }); await until(() => h.touches.length >= 4);
+  for (const touch of h.touches.slice(1,4))
+    assert.deepEqual(touch.points, [{ id: 1, x: 180, y: 80, fromX: 180, fromY: 80 }]);
+  const status = await h.manager.command({ op: 'status' });
+  assert.equal(status.camera.role, 'self'); assert.equal(status.camera.armAttempts, 1);
+  assert.equal(status.actions, 1); await h.stop(started);
 });

@@ -18,6 +18,9 @@ const frameSchema = z.object({ mime: z.literal("image/jpeg"), width: z.number().
   cameraProof: cameraProofSchema.optional() }).strict();
 const ackSchema = z.object({ accepted: z.literal(true), acceptedSequence: z.number().int().positive().max(Number.MAX_SAFE_INTEGER) });
 const TTL_MS = 1200, SETTLE_MS = 450;
+// Explicit sequence diagnostics use FollowTouch's existing maximum. This never
+// changes the single sample or autonomous follower's 1200ms input lifetime.
+const SEQUENCE_TTL_MS = 1500;
 type Runtime = { now: () => number; wait: (ms: number, signal: AbortSignal) => Promise<void> };
 
 /** Validate the native JPEG dimensions without changing any encoded bytes. */
@@ -80,7 +83,7 @@ export class CameraSampler {
     const events: object[] = [], records: Record<string, unknown>[] = [];
     const files: { name: string; content: Buffer | string }[] = [];
     const event = (kind: string, data: object = {}) => events.push({ kind, atMs: this.runtime.now() - began, ...data });
-    const plan = { version: 1, deviceId: command.id, steps, ttlMs: TTL_MS, settleMs: SETTLE_MS,
+    const plan = { version: 1, deviceId: command.id, steps, ttlMs: SEQUENCE_TTL_MS, settleMs: SETTLE_MS,
       releaseGuardMs: 160, startedAt, cameraOnly: true };
     // Freeze the plan before acquiring control. Completed and rejected captures
     // are written only after cleanup, together with an explicit partial manifest.
@@ -145,7 +148,7 @@ export class CameraSampler {
           // ACK only means accepted. Wait beyond the last hold's phone expiry:
           // receipt of its ACK is later than phone.update, so ACK+TTL is an upper
           // bound in host elapsed time. An extra two stroke periods permits UP.
-          const releaseWaitMs = Math.max(250, previous.ackAt + TTL_MS + 160 - this.runtime.now());
+          const releaseWaitMs = Math.max(250, previous.ackAt + SEQUENCE_TTL_MS + 160 - this.runtime.now());
           event("release-wait", { index: index + 1, releaseWaitMs });
           await this.runtime.wait(releaseWaitMs, signal); current();
           const released = await capture(`${directory}/release`);
@@ -165,15 +168,15 @@ export class CameraSampler {
         await this.host.syncWrapper(lease); current();
         event("lease-sync", { index: index + 1, elapsedMs: this.runtime.now() - syncAt });
         const continuing = !!previous && step.mode === "continue";
-        if (continuing && this.runtime.now() >= previous.sentAt + TTL_MS) throw new Error("连续镜头保持已过期，禁止改为重新按下");
-        const sent = await touch([{ id: 1, ...point }], TTL_MS);
+        if (continuing && this.runtime.now() >= previous.sentAt + SEQUENCE_TTL_MS) throw new Error("连续镜头保持已过期，禁止改为重新按下");
+        const sent = await touch([{ id: 1, ...point }], SEQUENCE_TTL_MS);
         const withinHold = () => {
           current();
-          if (this.runtime.now() >= sent.sentAt + TTL_MS) throw new Error("镜头采样超过 1200ms 保持时限，画面已丢弃");
+          if (this.runtime.now() >= sent.sentAt + SEQUENCE_TTL_MS) throw new Error("镜头序列采样超过 1500ms 保持时限，画面已丢弃");
         };
         withinHold();
-        if (continuing && sent.ackAt >= previous.sentAt + TTL_MS) throw new Error("连续镜头确认超过前一保持时限，序列已停止");
-        record.touchAck = { sequence: sent.sequence, point, ttlMs: TTL_MS };
+        if (continuing && sent.ackAt >= previous.sentAt + SEQUENCE_TTL_MS) throw new Error("连续镜头确认超过前一保持时限，序列已停止");
+        record.touchAck = { sequence: sent.sequence, point, ttlMs: SEQUENCE_TTL_MS };
         await this.runtime.wait(SETTLE_MS, signal); withinHold();
         const captured = await capture(`${directory}/sample`);
         const proof = captured.image.frame.cameraProof;
@@ -189,7 +192,7 @@ export class CameraSampler {
           const changed = !previous || previous.point.x !== point.x || previous.point.y !== point.y;
           if (!proof || proof.sequence !== sent.sequence || proof.x !== point.x || proof.y !== point.y
             || proof.capturedAtUptimeMs - proof.heldSinceUptimeMs < 250
-            || (!continuing || changed) && proof.expiresAtUptimeMs - proof.heldSinceUptimeMs > TTL_MS)
+            || (!continuing || changed) && proof.expiresAtUptimeMs - proof.heldSinceUptimeMs > SEQUENCE_TTL_MS)
             throw new Error("镜头画面缺少与本次触点一致且稳定的凭据");
           if (previous && (proof.capturedAtUptimeMs <= previous.proof.capturedAtUptimeMs
             || continuing && (proof.epoch !== previous.proof.epoch + (changed ? 1 : 0)

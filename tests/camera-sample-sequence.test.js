@@ -71,12 +71,14 @@ async function fixture(t, hooks = {}) {
 test('eight-step plan uses one lease/id1, preserves native bytes, changes epoch for MOVE and fresh DOWN', async t => {
   const f = await fixture(t), result = await f.sampler.sample(f.command);
   assert.equal(result.complete, true);
+  assert.equal(result.ttlMs, 1500);
   assert.equal(f.calls.filter(c => c[0] === 'start').length, 1);
   assert.equal(f.calls.filter(c => c[0] === 'stop').length, 1);
   assert.equal(f.calls.filter(c => c[0] === 'sync').length, 8);
   assert.equal(f.calls.find(c => c[0] === 'start')[1].at(-1), false);
   const touches = f.touches(), holds = touches.filter(c => c.points.length);
   assert.deepEqual(holds.map(c => c.points), f.command.steps.map(({ x, y }) => [{ id: 1, x, y }]));
+  assert.ok(holds.every(c => c.ttlMs === 1500));
   assert.deepEqual(touches.map(c => c.sequence), Array.from({ length: touches.length }, (_, i) => i + 1));
   assert.equal(touches.filter(c => !c.points.length).length, 4); // Three transitions and final cleanup.
   assert.equal(touches.at(-1).points.length, 0);
@@ -94,11 +96,12 @@ test('eight-step plan uses one lease/id1, preserves native bytes, changes epoch 
   for (const i of [6, 7, 8]) {
     const released = JSON.parse(await fs.readFile(path.join(f.command.outputDir, `step-0${i}`, 'release.json'), 'utf8'));
     assert.equal(released.proofAbsent, true);
-    assert.equal(released.releaseWaitMs, 395);
+    assert.equal(released.releaseWaitMs, 695);
     assert.deepEqual(await fs.readFile(path.join(f.command.outputDir, `step-0${i}`, 'release.jpg')), jpeg);
   }
   assert.equal(JSON.stringify(result).includes('private-'), false);
-  assert.deepEqual(JSON.parse(await fs.readFile(path.join(f.command.outputDir, 'plan.json'), 'utf8')).steps, steps());
+  const plan = JSON.parse(await fs.readFile(path.join(f.command.outputDir, 'plan.json'), 'utf8'));
+  assert.deepEqual(plan.steps, steps()); assert.equal(plan.ttlMs, 1500);
 });
 
 test('rejects invalid sequence length, first step, extra fields and all out-of-screen points before input', async t => {
@@ -125,21 +128,66 @@ test('schema/CLI accept explicit array and preserve it across management boundar
 });
 
 test('expired continue is not silently converted to a new DOWN and preserves labelled partial images', async t => {
-  const f = await fixture(t, { frame(value, { holdNumber, tick }) { if (holdNumber === 2) tick(250); } });
-  await assert.rejects(f.sampler.sample(f.command), /1200ms/);
+  const f = await fixture(t, { frame(value, { holdNumber, tick }) { if (holdNumber === 2) tick(550); } });
+  await assert.rejects(f.sampler.sample(f.command), /1500ms/);
   assert.equal(f.touches().filter(c => c.points.length).length, 2);
   assert.equal(f.touches().at(-1).points.length, 0);
   const report = await f.manifest(); assert.equal(report.complete, false);
   assert.deepEqual(report.steps.map(s => s.status), ['captured', 'failed']);
   const bad = JSON.parse(await fs.readFile(path.join(f.command.outputDir, 'step-02/sample.json'), 'utf8'));
-  assert.equal(bad.valid, false); assert.match(bad.error, /1200ms/);
+  assert.equal(bad.valid, false); assert.match(bad.error, /1500ms/);
   assert.deepEqual(await fs.readFile(path.join(f.command.outputDir, 'step-02/sample.jpg')), jpeg);
+});
+
+test('sequence capture accepts 1499ms but rejects the exact 1500ms host deadline', async t => {
+  for (const extra of [534, 535]) { // Normal hold receipt takes 965ms in this fixture.
+    const f = await fixture(t, { frame(value, { holdNumber, tick }) { if (holdNumber === 1 && value.cameraProof) tick(extra); } });
+    f.command.steps.forEach(step => { step.mode = 'release-newdown'; });
+    if (extra === 534) {
+      const result = await f.sampler.sample(f.command); assert.equal(result.complete, true);
+      const first = JSON.parse(await fs.readFile(path.join(f.command.outputDir, 'step-01/sample.json'), 'utf8'));
+      assert.equal(first.timing.holdToFrameMs, 1499);
+    } else {
+      await assert.rejects(f.sampler.sample(f.command), /1500ms/);
+      assert.equal(f.touches().filter(c => c.points.length).length, 1);
+      assert.equal((await f.manifest()).steps[0].status, 'failed');
+    }
+  }
+});
+
+test('246ms observed MOVE ACK fits sequence TTL; continuation still rejects the exact previous 1500ms deadline', async t => {
+  for (const extra of [231, 519, 520]) {
+    const f = await fixture(t, { touch(input, { holdNumber, tick }) { if (input.points.length && holdNumber === 2) tick(extra); } });
+    // Normal first hold=965ms, next ACK=15ms+extra. Relative to previous
+    // send the ACK is 1211, 1499 or 1500ms, respectively.
+    if (extra < 520) {
+      const result = await f.sampler.sample(f.command); assert.equal(result.complete, true);
+      assert.equal(result.events.find(e => e.kind === 'touch-ack' && e.sequence === 2).elapsedMs, 15 + extra);
+    } else {
+      await assert.rejects(f.sampler.sample(f.command), /确认超过前一保持时限/);
+      assert.equal(f.touches().filter(c => c.points.length).length, 2);
+      assert.equal((await f.manifest()).steps[1].status, 'failed');
+    }
+  }
+});
+
+test('sequence keeps stable250 proof threshold and rejects new proof lifetime above1500', async t => {
+  for (const kind of ['stable250', 'stable249', 'ttl1501']) {
+    const f = await fixture(t, { frame(value, { holdNumber }) {
+      if (holdNumber !== 1 || !value.cameraProof) return;
+      const p = value.cameraProof;
+      if (kind === 'ttl1501') p.expiresAtUptimeMs = p.heldSinceUptimeMs + 1501;
+      else p.heldSinceUptimeMs = p.capturedAtUptimeMs - (kind === 'stable250' ? 250 : 249);
+    } });
+    if (kind === 'stable250') assert.equal((await f.sampler.sample(f.command)).complete, true);
+    else { await assert.rejects(f.sampler.sample(f.command), /稳定的凭据/); assert.equal(f.touches().filter(c => c.points.length).length, 1); }
+  }
 });
 
 test('late continuation ACK and expired/recreated epoch fail without subsequent step or replay', async t => {
   for (const kind of ['late-ack', 'epoch-jump', 'old-point', 'same-epoch']) {
     const f = await fixture(t, {
-      touch(input, { holdNumber, tick }) { if (kind === 'late-ack' && input.points.length && holdNumber === 2) tick(250); },
+      touch(input, { holdNumber, tick }) { if (kind === 'late-ack' && input.points.length && holdNumber === 2) tick(550); },
       frame(value, { holdNumber }) {
         if (holdNumber !== 2 || !value.cameraProof) return;
         if (kind === 'epoch-jump') value.cameraProof.epoch++;
@@ -156,7 +204,7 @@ test('late continuation ACK and expired/recreated epoch fail without subsequent 
 
 test('slow lease heartbeat never extends the held pointer deadline or starts a fresh continuation', async t => {
   let synced = 0;
-  const f = await fixture(t, { sync({ tick }) { if (++synced === 2) tick(250); } });
+  const f = await fixture(t, { sync({ tick }) { if (++synced === 2) tick(550); } });
   await assert.rejects(f.sampler.sample(f.command), /连续镜头保持已过期/);
   assert.equal(f.touches().filter(c => c.points.length).length, 1);
   assert.equal(f.touches().at(-1).points.length, 0);
@@ -181,7 +229,7 @@ test('same-point continuation retains epoch and heldSince while renewing only ex
   assert.equal(result.complete, true);
   assert.equal(result.steps[1].cameraProof.epoch, result.steps[0].cameraProof.epoch);
   assert.equal(result.steps[1].cameraProof.heldSinceUptimeMs, result.steps[0].cameraProof.heldSinceUptimeMs);
-  assert.ok(result.steps[1].cameraProof.expiresAtUptimeMs - result.steps[1].cameraProof.heldSinceUptimeMs > 1200);
+  assert.ok(result.steps[1].cameraProof.expiresAtUptimeMs - result.steps[1].cameraProof.heldSinceUptimeMs > 1500);
 });
 
 test('pause/stop/replacement never receives cleanup touch; stop is limited to original lease', async t => {

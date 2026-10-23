@@ -46,17 +46,39 @@ export async function assembleScreenshot(initial: Response, owner: Owner,
       throw new Error("手机会话已改变，本次截图已丢弃。");
     if (now() - began >= transfer.ttlMs) throw new Error("手机截图传输已过期，请重新获取画面。");
   };
-  let response = initial;
-  for (let offset = 0; offset < transfer.length; offset += CHUNK_CHARS) {
-    check(response.state);
-    response = await read({ ...owner, transferId: transfer.id, offset });
-    check(response.state);
-    const chunk = chunkSchema.parse(response.result), expected = Math.min(CHUNK_CHARS, transfer.length - offset);
-    if (chunk.id !== transfer.id || chunk.offset !== offset || chunk.base64.length !== expected
-      || chunk.done !== (offset + expected === transfer.length) || !chunk.done && chunk.base64.includes("="))
-      throw new Error("手机截图分块不完整或已改变，本次画面已丢弃。");
-    chunks.push(chunk.base64);
-  }
+  let response = initial, failed = false, failure: unknown;
+  const page = async (offset: number) => {
+    try {
+      check(response.state);
+      const received = await read({ ...owner, transferId: transfer.id, offset });
+      check(received.state);
+      const chunk = chunkSchema.parse(received.result), expected = Math.min(CHUNK_CHARS, transfer.length - offset);
+      if (chunk.id !== transfer.id || chunk.offset !== offset || chunk.base64.length !== expected
+        || chunk.done !== (offset + expected === transfer.length) || !chunk.done && chunk.base64.includes("="))
+        throw new Error("手机截图分块不完整或已改变，本次画面已丢弃。");
+      chunks[offset / CHUNK_CHARS] = chunk.base64;
+      response = received;
+    } catch (error) {
+      if (!failed) { failed = true; failure = error; }
+    }
+  };
+  check(initial.state);
+  // The companion clears this immutable cache as soon as the LAST page is
+  // read. Fetch at most two non-final pages concurrently, then read that last
+  // page behind a barrier. Never retry, replace a capture, or publish a partial
+  // image; after failure let already-issued reads settle without issuing more.
+  const lastOffset = Math.floor((transfer.length - 1) / CHUNK_CHARS) * CHUNK_CHARS;
+  let nextOffset = 0;
+  const worker = async () => {
+    while (!failed && nextOffset < lastOffset) {
+      const offset = nextOffset; nextOffset += CHUNK_CHARS;
+      await page(offset);
+    }
+  };
+  await Promise.all([worker(), worker()]);
+  if (failed) throw failure;
+  await page(lastOffset);
+  if (failed) throw failure;
   check(response.state);
   const result = { mime: frame.mime, width: frame.width, height: frame.height,
     ...(frame.cameraProof ? { cameraProof: frame.cameraProof } : {}),

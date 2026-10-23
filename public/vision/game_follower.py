@@ -553,6 +553,7 @@ class Follower:
         self.camera = None
         self.self_camera = None
         self.viewport_guard = None
+        self.weak_search = None
         if config.get('cameraAssist') or config.get('selfCameraAssist'):
             # Also supports offline callers loading this worker by absolute path.
             import importlib.util
@@ -573,6 +574,20 @@ class Follower:
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
             self.viewport_guard = module.CameraViewportGuard(config)
+        if config.get('targetWeakSearch') is not None:
+            if not (self.camera and self.target_ring and self.viewport_guard):
+                raise ValueError('候选镜头搜索需要独立目标镜头校准、队友颜色环和视野框校验')
+            # Reuse the existing calibrated, current-frame living HUD gate only.
+            # This does not enable partial identity or call its history/locator.
+            living_hud = TargetPartial(self.templates[1],
+                dict(ring=ring, alive=config['targetWeakSearch']['alive']),
+                config['width'], config['height'], max_frame_gap)
+            import importlib.util
+            from pathlib import Path
+            spec = importlib.util.spec_from_file_location('game_follow_weak_search', Path(__file__).with_name('game_follow_weak_search.py'))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            self.weak_search = module.WeakCameraSearch(config, self.templates[1], self.target_ring.accept, living_hud.alive)
         self.labels = [white_text(decode(config['nearby'][key])) for key in ('selfLabel', 'targetLabel')] if config.get('nearby') else None
         grid = config["grid"]
         blocked = np.zeros((grid["rows"], grid["columns"]), np.uint8)
@@ -686,6 +701,11 @@ class Follower:
                   "path": [], "direction": None}
         if viewport_evidence is not None:
             result['cameraViewport'] = viewport_evidence
+        if self.weak_search:
+            # Proposals are not detections. They cannot populate target, teach
+            # either tracker, or participate in this frame's movement decision.
+            result['weakTargetCandidates'] = self.weak_search.candidates(minimap, image,
+                bool(own_reliable and self_source != 'camera')) if not target_reliable else []
         valid = own_reliable and target_reliable
         if valid and math.dist((own["x"], own["y"]), (target["x"], target["y"])) < 0.015:
             valid = False

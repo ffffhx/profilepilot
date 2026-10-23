@@ -25,6 +25,8 @@ export type CameraObservation = {
   selfLost?: boolean;
   /** Host-monotonic capture/assembly duration; camera search planning only. */
   captureMs?: number;
+  /** Current living-HUD/blue-ring proposals. Native pixels, SEARCH ONLY; never identity. */
+  weakTargetCandidates?: ReadonlyArray<CameraPoint & { score: number }>;
 };
 export type CameraPlan = Readonly<{
   id: number; point: CameraPoint | null; stopJoystick: boolean;
@@ -37,6 +39,7 @@ export type GameFollowCameraOptions = {
   targetEnabled?: boolean;
   selfPlacement?: CameraPlacementConfig;
   intervalMs?: number;
+  weakSearch?: boolean;
 };
 type Hold = {
   role: "target" | "self";
@@ -97,6 +100,11 @@ export class GameFollowCamera {
   private selfObservation?: { point: CameraPoint; at: number };
   private selfSpeed?: CameraPoint;
   private speed?: CameraPoint;
+  private readonly weakSearchEnabled: boolean;
+  // Retained across release/expiry/recovery. Only a current FULL target resets
+  // this loss episode; weak points, partials and camera identity cannot renew it.
+  private weakEpisode?: { deadline: number; visited: CameraPoint[]; unconfirmed: boolean };
+  private weakVisit?: { point: CameraPoint; startedAt: number };
 
   constructor(options: GameFollowCameraOptions) {
     this.enabled = options.enabled && options.mode === "control" && options.backend === "app"
@@ -105,6 +113,7 @@ export class GameFollowCamera {
     this.selfPlacementConfig = options.selfPlacement;
     this.targetEnabled = options.targetEnabled ?? true;
     this.intervalMs = options.intervalMs ?? 350;
+    this.weakSearchEnabled = options.weakSearch === true && this.targetEnabled && !!this.placementConfig;
   }
 
   get state(): "idle" | "arming" | "held" | "releasing" {
@@ -145,6 +154,7 @@ export class GameFollowCamera {
     this.placement = undefined; this.observation = undefined; this.speed = undefined;
     this.selfObservation = undefined; this.selfSpeed = undefined;
     this.previousFull = undefined; this.previousFullSelf = undefined;
+    this.weakVisit = undefined;
   }
 
   private clock(now: number): void {
@@ -193,14 +203,26 @@ export class GameFollowCamera {
     this.clock(now); this.expire(now);
     if (this.pending) this.invalidate("unacknowledged-input");
     const current = this.frame; this.frame = undefined;
+    let searchingForTarget = false;
     const plan = (point: CameraPoint | null, stopJoystick: boolean, allowCameraMovement: boolean, reason: string,
       role: "target" | "self" = this.hold?.role ?? "target") => {
-      const remaining = this.hold ? Math.floor(this.hold.searchDeadline - now) : SEARCH_MS;
+      if (this.weakSearchEnabled && point && role === "target" && searchingForTarget && !this.weakEpisode)
+        this.weakEpisode = { deadline: this.hold?.searchDeadline ?? now+SEARCH_MS, visited: [], unconfirmed: false };
+      let remaining = this.hold ? Math.floor(this.hold.searchDeadline - now) : SEARCH_MS;
+      if (point && this.weakVisit && samePoint(point, this.weakVisit.point)) {
+        remaining = Math.min(remaining, Math.floor(this.weakVisit.startedAt+1500-now),
+          Math.floor((this.weakEpisode?.deadline ?? now)-now));
+        if (remaining < 100) {
+          this.weakVisit = undefined; point = null; stopJoystick = true; allowCameraMovement = false;
+          reason = "weak-search-expired";
+        }
+      }
       if (point && remaining < 100) {
         this.invalidate("search-expired"); point = null; stopJoystick = true; allowCameraMovement = false; reason = "search-expired";
       }
       if (!point) this.recordRelease(reason);
-      if (reason === "arm" || reason === "arm-self" || reason === "switch-search-self" || reason === "switch-search-target") this.armAttempts++;
+      if (reason === "arm" || reason === "arm-self" || reason === "switch-search-self" || reason === "switch-search-target"
+        || reason === "weak-search-arm") this.armAttempts++;
       const value: CameraPlan = Object.freeze({ id: ++this.nextId, point: point ? copyPoint(point) : null,
         stopJoystick, allowCameraMovement, reason, ttlMs: point ? Math.min(1200, remaining) : 1200 });
       this.pending = { plan: value, createdAt: now, role }; this.reason = reason; return value;
@@ -223,6 +245,13 @@ export class GameFollowCamera {
     const markerSelf = selfEnabled && validPoint(analysis.markerSelf) && nonCameraSelf
       && samePoint(analysis.markerSelf, nonCameraSelf) ? analysis.markerSelf : undefined;
     const targetCurrent = nonCameraTarget || cameraTarget, selfCurrent = nonCameraSelf || cameraSelf;
+    searchingForTarget = !targetCurrent;
+    if (full) { this.weakEpisode = undefined; this.weakVisit = undefined; }
+    else if (targetCurrent && this.weakEpisode) {
+      // Real current identity can continue normal tracking, but is not a new
+      // weak-search budget and cannot erase the number of views already tried.
+      this.weakEpisode.unconfirmed = false; this.weakVisit = undefined;
+    }
     const stopJoystick = !targetCurrent || selfEnabled && !selfCurrent;
     const allowCameraMovement = !!proven && !!(cameraTarget || cameraSelf) && !stopJoystick;
     this.frameTarget = full ? "full" : cameraTarget ? "camera" : "none";
@@ -260,6 +289,43 @@ export class GameFollowCamera {
           sampleIntervalMs: recent.intervalMs, intervalMs: this.intervalMs, captureMs: analysis.captureMs ?? 0 }),
       seedSource: recent.source ?? "full"
     });
+    if (this.weakSearchEnabled && !targetCurrent && analysis.lost) {
+      if (this.weakVisit) {
+        if (!nonCameraSelf) {
+          this.weakVisit = undefined;
+          return plan(null, true, false, "weak-search-self-lost");
+        }
+        if (!proven && now < this.weakVisit.startedAt+1500)
+          return plan(this.weakVisit.point, true, false, "weak-search-wait");
+        // This view produced its first stable frame (without strict identity),
+        // or timed out. Never renew it from the weak pixels or ACK alone.
+        this.weakVisit = undefined;
+      }
+      const episode = this.weakEpisode;
+      const canVisit = !!nonCameraSelf && (!episode || episode.visited.length < 2 && now+100 <= episode.deadline);
+      // Let an ordinary, newly armed view produce a frame before replacing it.
+      const pendingOrdinary = this.hold && !episode?.unconfirmed && !proven && now-this.hold.startedAt < 1500;
+      if (canVisit && !pendingOrdinary && Array.isArray(analysis.weakTargetCandidates)) {
+        for (const candidate of analysis.weakTargetCandidates.slice(0, 2)) {
+          const score = candidate?.score;
+          if (!validPoint(candidate) || !Number.isFinite(score) || score < .8 || score > 1
+              || episode?.visited.some(old => Math.hypot(old.x-candidate.x, old.y-candidate.y) <= 20)) continue;
+          // Placement consumes no velocity and labels no identity. It only
+          // centers a current search proposal in the original calibrated domain.
+          const placement = planCameraArm(this.placementConfig!, { target: candidate, ageMs: frameAgeMs });
+          if (placement.action !== "arm" || !placement.point) continue;
+          this.placement = { ...placement, reason: "weak-current-pixel-search" };
+          this.weakEpisode ??= { deadline: this.hold?.searchDeadline ?? now+SEARCH_MS, visited: [], unconfirmed: false };
+          if (now+100 > this.weakEpisode.deadline) break;
+          this.weakEpisode.visited.push(copyPoint(candidate));
+          this.weakEpisode.unconfirmed = true;
+          this.weakVisit = { point: copyPoint(placement.point), startedAt: now };
+          return plan(placement.point, true, false, "weak-search-arm", "target");
+        }
+      }
+      if (this.weakEpisode?.unconfirmed)
+        return plan(null, true, false, "weak-search-exhausted");
+    }
     if (!this.hold) {
       const armTarget = this.targetEnabled && !targetCurrent && analysis.lost
         && this.recent && now-this.recent.observedAt <= RECENT_MS;
@@ -365,7 +431,8 @@ export class GameFollowCamera {
     } else {
       const old = this.hold;
       this.hold = { role: pending.role, point: copyPoint(plan.point), sequence, startedAt: pending.createdAt, expiresAt: pending.createdAt + ttlMs,
-        searchDeadline: old?.searchDeadline ?? pending.createdAt + SEARCH_MS,
+        searchDeadline: this.weakVisit ? Math.min(old?.searchDeadline ?? pending.createdAt+SEARCH_MS, this.weakEpisode!.deadline)
+          : old?.searchDeadline ?? pending.createdAt + SEARCH_MS,
         ...(old?.evidenceAt !== undefined ? { evidenceAt: old.evidenceAt } : {}),
         ...(old?.epoch !== undefined ? { previousEpoch: old.epoch } : {}) };
       this.fullSince = undefined; this.fullCount = 0;

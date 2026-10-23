@@ -9,6 +9,7 @@ import type { PhoneDevice } from "../../shared/phones";
 import { adbLaunchDelays, phoneRequestTimings } from "./adb";
 import { cameraProofSchema, captureReadyAt } from "./screenshot-transfer";
 import { GameFollowCamera } from "./game-follow-camera";
+import { cameraCaptureWindow, waitForCameraCapture, type CameraCaptureWindow } from "./game-follow-camera-cadence";
 import { CameraSampler, cameraSampleCommandSchema } from "./camera-sample";
 
 const unit = z.number().finite().min(0).max(1);
@@ -59,7 +60,10 @@ export const gameFollowConfigSchema = z.object({
   cameraAssist: cameraAssistSchema.extend({ team: z.literal("blue").optional() }).strict().optional(),
   selfCameraAssist: cameraAssistSchema.extend({ team: z.literal("green") }).strict().optional(),
   cameraViewportGuard: z.object({ version: z.literal(1), referenceWidth: z.literal(2772),
-    referenceHeight: z.literal(1240) }).strict().optional()
+    referenceHeight: z.literal(1240) }).strict().optional(),
+  targetWeakSearch: z.object({ version: z.literal(1), alive: z.object({
+    portraitTemplate: image.max(256_000), portraitRegion: hudRect, healthBarRegion: hudRect
+  }).strict() }).strict().optional()
 }).strict().refine(c => c.width * c.height <= 8_000_000, "画面过大")
   .refine(c => [c.cameraAssist, c.selfCameraAssist].every(a => !a || a.referenceWidth === c.width && a.referenceHeight === c.height
     && a.anchorBounds.x + a.anchorBounds.width <= c.width
@@ -68,6 +72,8 @@ export const gameFollowConfigSchema = z.object({
     && c.width === 2772 && c.height === 1240
     && [c.map.x * c.width - 120, c.map.y * c.height, c.map.width * c.width - 425,
       c.map.height * c.height - 425].every(delta => Math.abs(delta) <= 1e-6), "视野框校验需要已标定的原生布局及镜头辅助")
+  .refine(c => !c.targetWeakSearch || !!(c.cameraAssist && c.targetRing && c.cameraViewportGuard),
+    "候选镜头搜索需要独立目标镜头校准、队友颜色环和视野框校验")
   .refine(c => {
     const j = c.joystick, r = j.radius * Math.min(c.width, c.height);
     return j.x * c.width >= r && (1 - j.x) * c.width >= r && j.y * c.height >= r && (1 - j.y) * c.height >= r;
@@ -285,6 +291,7 @@ export class GameFollower {
         throw new Error("请更新手机开发版 App，以在镜头换点时松开重按并留出释放间隔");
       run.camera = new GameFollowCamera({ enabled: !!(config.cameraAssist || config.selfCameraAssist), mode, backend,
         provenanceVersion: probe?.cameraFrameProvenance, targetEnabled: !!config.cameraAssist, intervalMs: config.intervalMs,
+        weakSearch: !!config.targetWeakSearch,
         ...(config.cameraAssist ? { placement: { ...config, cameraAssist: config.cameraAssist } } : {}),
         ...(config.selfCameraAssist ? { selfPlacement: { ...config, cameraAssist: config.selfCameraAssist } } : {}) });
       if (run.cancelled) throw new Error("跟随任务已停止");
@@ -364,12 +371,20 @@ export class GameFollower {
   private async loop(run: Run, config: GameFollowConfig, mode: "observe" | "control", backend: "app" | "basic") {
     const began = Date.now(), cameraEnabled = !!(config.cameraAssist || config.selfCameraAssist);
     const region = backend === "app" && config.capture !== "full" && !config.nearby && !config.targetPartial && !cameraEnabled ? mapCaptureRegion(config) : undefined;
+    let pendingCapture: CameraCaptureWindow | undefined;
+    const expireCameraCapture = () => {
+      run.camera?.invalidate("capture-window-expired"); this.sampleCameraStatus(run);
+      pendingCapture = undefined; this.value.analysis = undefined;
+      // The next iteration releases input before capturing, then starts fresh
+      // vision evidence. Waiting never sends a touch keepalive or renews its TTL.
+      run.resetVision = true;
+    };
     try {
       while (!run.cancelled) {
         if (run.recovery && !await run.recovery) throw new Error(this.value.error || "跟随连接恢复失败");
         if (run.cancelled) break;
         if (run.resetVision) {
-          run.resetVision = false;
+          run.resetVision = false; pendingCapture = undefined;
           if (mode === "control" && cameraEnabled) {
             await this.host.live(run.lease!, run.generation, { op: "touch", sequence: ++run.sequence, points: [], ttlMs: 1200 });
             if (run.cancelled) break;
@@ -379,6 +394,7 @@ export class GameFollower {
         }
         const epoch = run.recoveryEpoch;
         try {
+          if (pendingCapture && performance.now() >= pendingCapture.expiresAt) { expireCameraCapture(); continue; }
           const at = Date.now(), requestAt = performance.now();
           const rawFrame = await this.host.live(run.lease!, run.generation, { op: "frame", ...(region ? { region } : {}),
             ...(cameraEnabled ? { cameraFrameProvenance: 1 } : {}) });
@@ -397,6 +413,8 @@ export class GameFollower {
           const nextFrameAt = intervalAt + config.intervalMs;
           if (run.cancelled) break;
           if (epoch !== run.recoveryEpoch) continue;
+          if (pendingCapture && completedAt >= pendingCapture.expiresAt) { expireCameraCapture(); continue; }
+          pendingCapture = undefined;
           if (frame.width !== config.width || frame.height !== config.height) throw new Error("手机分辨率或方向已改变，请重新校准");
           const cameraContext = run.camera?.beforeAnalyze(frame.cameraProof, performance.now());
           const analysis: FollowAnalysis = await run.worker!.request({ op: "analyze", base64: frame.base64, region: frame.region,
@@ -421,6 +439,7 @@ export class GameFollower {
               || analysis.target.confidence >= config.confidence) ? toNative(analysis.target) : undefined;
             const nativeSelf = analysis.self && (analysis.selfSource !== "camera" || viewportAccepted) && (analysis.selfSource === "camera" || analysis.selfSource === "marker"
               || analysis.self.confidence >= config.confidence) ? toNative(analysis.self) : undefined;
+            const cameraPlanAt = performance.now(), previousCameraPoint = run.camera?.status(cameraPlanAt).point;
             const cameraPlan = run.camera?.afterAnalyze({
               fullTarget: analysis.targetSource === "template" ? nativeTarget : undefined,
               currentTarget: analysis.targetSource !== "camera" ? nativeTarget : undefined,
@@ -429,8 +448,10 @@ export class GameFollower {
               currentSelf: analysis.selfSource !== "camera" ? nativeSelf : undefined,
               markerSelf: analysis.selfSource === "marker" ? nativeSelf : undefined,
               cameraSelf: config.selfCameraAssist && analysis.selfSource === "camera" ? nativeSelf : undefined,
+              weakTargetCandidates: config.targetWeakSearch && nativeSelf && analysis.selfSource !== "camera"
+                ? analysis.weakTargetCandidates : undefined,
               lost: !nativeTarget, selfLost: !nativeSelf, captureMs: completedAt - requestAt
-            }, performance.now() - requestAt, performance.now());
+            }, cameraPlanAt - requestAt, cameraPlanAt);
             if (cameraEnabled) this.value.camera = run.camera!.status(performance.now());
             const direction = Date.now() - at < (backend === "basic" ? 3000 : 1000)
               && !cameraPlan?.stopJoystick
@@ -453,13 +474,25 @@ export class GameFollower {
             if (cameraEnabled && (accepted?.accepted !== true || accepted?.acceptedSequence !== sequence)) {
               run.camera?.invalidate("uncertain-input"); this.sampleCameraStatus(run); throw new Error("手机未确认本次镜头触控，已停止操作");
             }
-            if (cameraPlan && !run.camera!.commit(cameraPlan, sequence, performance.now()))
+            const acknowledgedAt = performance.now();
+            if (cameraPlan && !run.camera!.commit(cameraPlan, sequence, acknowledgedAt))
               throw new Error("镜头触控确认已过期，已停止操作");
+            pendingCapture = cameraPlan ? cameraCaptureWindow(previousCameraPoint, cameraPlan.point,
+              cameraPlanAt, acknowledgedAt, cameraPlan.ttlMs) : undefined;
             if (cameraEnabled) this.value.camera = run.camera!.status(performance.now());
             this.value.timings = { ...this.value.timings, inputMs: Date.now() - inputAt };
             if (direction) this.value.actions++;
           }
-          await new Promise(resolve => setTimeout(resolve, Math.max(0, nextFrameAt - performance.now())));
+          if (pendingCapture) {
+            // A prior frame's descriptor/download cadence may already have
+            // elapsed at this ACK. Do not spend the next capture on an immediate
+            // camera transition. This is only a scheduling hint: the next frame
+            // still needs its own matching applied and stable native proof.
+            const waited = await waitForCameraCapture(pendingCapture, nextFrameAt,
+              () => !run.cancelled && this.run === run && epoch === run.recoveryEpoch && !run.recovery);
+            if (waited === "expired") expireCameraCapture();
+            if (waited === "cancelled") { pendingCapture = undefined; continue; }
+          } else await new Promise(resolve => setTimeout(resolve, Math.max(0, nextFrameAt - performance.now())));
         } catch (error) {
           if (run.cancelled) break;
           if (epoch !== run.recoveryEpoch) continue;

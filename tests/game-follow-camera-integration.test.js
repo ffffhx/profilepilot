@@ -3,8 +3,9 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { randomUUID } = require('node:crypto');
 const { loadCli } = require('./cli-test-build.cjs');
-const { GameFollower, gameFollowConfigSchema } = loadCli('src/main/phones/game-follow.ts');
+const { GameFollower, gameFollowConfigSchema, assembleScreenshot } = loadCli('tests/fixtures/game-follow-entry.ts');
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(check) {
   const end = Date.now() + 6000;
@@ -28,6 +29,14 @@ function viewportConfig() {
   c.map = { x: 120 / 2772, y: 0, width: 425 / 2772, height: 425 / 1240 };
   c.cameraAssist.referenceWidth = 2772; c.cameraAssist.referenceHeight = 1240;
   c.cameraViewportGuard = { version: 1, referenceWidth: 2772, referenceHeight: 1240 };
+  return c;
+}
+function weakConfig() {
+  const c = viewportConfig();
+  c.targetRing = { hueMin: 85, hueMax: 130, saturationMin: 75, valueMin: 100, radiusPixels: 25 };
+  c.targetWeakSearch = { version: 1, alive: { portraitTemplate: 'A'.repeat(16),
+    portraitRegion: { x: .5, y: 0, width: .025, height: .06 },
+    healthBarRegion: { x: .5, y: .07, width: .025, height: .003 } } };
   return c;
 }
 function proof(sequence, frame, patch = {}) {
@@ -55,7 +64,7 @@ readline.createInterface({input:process.stdin}).on('line', line=>{
  }
  process.stdout.write(JSON.stringify({id:req.id,ok:true,data})+'\\n');
 });`);
-  const h = { calls: [], captures: 0, stopped: 0, starts: 0, touches: [], recoveries: 0 };
+  const h = { calls: [], captures: 0, stopped: 0, starts: 0, touches: [], recoveries: 0, captureTimes: [], touchTimes: [] };
   const device = { state: { generation: 3, phase: 'controlling' } };
   const host = {
     startWrapper: async (_, mode) => { h.starts++; device.state.phase = mode === 'view' ? 'viewing' : 'controlling'; return { lease: 'test-owner', device }; },
@@ -68,12 +77,22 @@ readline.createInterface({input:process.stdin}).on('line', line=>{
         ...(options.legacyCamera ? {} : { cameraPointChange: options.cameraPointChange ?? 'release-newdown',
           ...(options.missingCameraGap ? {} : { cameraRepressGapMs: options.cameraRepressGapMs ?? 100 }) }) };
       if (command.op === 'frame') {
-        h.captures++;
+        h.captures++; h.captureTimes.push(performance.now());
         const cameraProof = options.frameProof?.(h);
-        return { mime: 'image/jpeg', width: options.nativeViewport ? 2772 : 1000,
+        const frame = { mime: 'image/jpeg', width: options.nativeViewport ? 2772 : 1000,
           height: options.nativeViewport ? 1240 : 500, base64: 'A'.repeat(16), ...(cameraProof ? { cameraProof } : {}) };
+        if (options.chunkDelayMs) {
+          const id = randomUUID(), state = { instanceId: 'test-instance', sessionId: 'test-session', generation: 3, phase: 'controlling' };
+          const { base64, ...image } = frame;
+          return (await assembleScreenshot({ state, result: { ...image, transfer: {
+            protocol: 1, id, length: base64.length, chunkSize: 48 * 1024, ttlMs: 15000 } } }, state, async () => {
+              await wait(options.chunkDelayMs(h));
+              return { state, result: { id, offset: 0, base64, done: true } };
+            }, () => true)).result;
+        }
+        return frame;
       }
-      h.touches.push(structuredClone(command));
+      h.touches.push(structuredClone(command)); h.touchTimes.push(performance.now());
       if (options.touch) return options.touch(command, h);
       return { accepted: true, acceptedSequence: command.sequence };
     }
@@ -96,6 +115,30 @@ test('viewport calibration is explicit, fixed to its measured layout and cannot 
     { width: 2771 }, { map: { ...c.map, x: 121 / 2772 } },
     { map: { ...c.map, height: 424 / 1240 } }, { cameraAssist: undefined }]) {
     assert.equal(gameFollowConfigSchema.safeParse({ ...c, ...patch }).success, false);
+  }
+});
+
+test('weak camera search requires independent camera, ring, viewport and calibrated current HUD', () => {
+  const c = weakConfig(); assert.equal(gameFollowConfigSchema.safeParse(c).success, true);
+  for (const patch of [{ cameraAssist: undefined }, { targetRing: undefined }, { cameraViewportGuard: undefined },
+    { targetWeakSearch: { ...c.targetWeakSearch, minScore: .5 } },
+    { targetWeakSearch: { ...c.targetWeakSearch, alive: undefined } },
+    { targetWeakSearch: { ...c.targetWeakSearch, version: 2 } }])
+    assert.equal(gameFollowConfigSchema.safeParse({ ...c, ...patch }).success, false);
+});
+
+test('weak worker proposals can select only id1 and require explicit opt-in and current non-camera self', async t => {
+  for (const kind of ['enabled', 'disabled', 'missing-self', 'camera-self']) {
+    const lost = { phase: 'lost', target: null, targetSource: 'template', direction: { x: 1, y: 0 },
+      selfSource: kind === 'camera-self' ? 'camera' : 'template',
+      ...(kind === 'missing-self' ? { self: null } : {}),
+      weakTargetCandidates: [{ x: 310, y: 200, score: .85 }] };
+    const h = harness(t, { nativeViewport: true, frames: [lost, lost, lost] });
+    const c = weakConfig(); if (kind === 'disabled') delete c.targetWeakSearch;
+    const started = await h.start({ config: c }); await until(() => h.touches.length >= 2);
+    assert.ok(h.touches.slice(0, 2).every(touch => touch.points.every(p => p.id !== 0)), 'proposals never authorize movement');
+    assert.equal(h.touches[0].points.some(p => p.id === 1), kind === 'enabled');
+    await h.stop(started);
   }
 });
 
@@ -397,4 +440,52 @@ test('self-only configuration never switches its hold to a target search on mark
   const status = await h.manager.command({ op: 'status' });
   assert.equal(status.camera.role, 'self'); assert.equal(status.camera.armAttempts, 1);
   assert.equal(status.actions, 1); await h.stop(started);
+});
+
+function movedCameraProof(h) {
+  if (h.captures < 3) return;
+  const prior = h.touches.at(-1), point = prior.points.find(p => p.id === 1);
+  if (!point) return;
+  return proof(prior.sequence, h.captures, h.captures === 3 ? {} : {
+    x: point.x, y: point.y, epoch: 8, heldSinceUptimeMs: 101200,
+    capturedAtUptimeMs: 101600 + (h.captures - 4) * 400 });
+}
+
+test('chunked full capture waits after recenter ACK without renewing its held joystick or TTL', async t => {
+  const h = harness(t, { cameraOffset: .02, frameProof: movedCameraProof,
+    chunkDelayMs: h => h.captures === 3 ? 430 : 0 });
+  const started = await h.start(); await until(() => h.touches.length >= 4); await h.stop(started);
+  assert.deepEqual(h.touches[2].points.map(p => p.id), [0, 1]);
+  assert.equal(h.touches[2].points[1].x, 308);
+  assert.ok(h.captureTimes[3] - h.touchTimes[2] >= 425, 'previous download must not bypass the new 430ms hint');
+  assert.deepEqual(h.touches[3].points.map(p => p.id), [0, 1], 'new current stable proof keeps movement');
+  const recenter = h.calls.findIndex(c => c.op === 'touch' && c.sequence === h.touches[2].sequence);
+  assert.equal(h.calls[recenter + 1].op, 'frame', 'no keepalive or renewed input is inserted into the wait');
+  assert.equal(h.touches[2].ttlMs, 1200);
+});
+
+test('stopping during the camera capture window releases promptly without a late capture or input', async t => {
+  const h = harness(t, { cameraOffset: .02, frameProof: movedCameraProof,
+    chunkDelayMs: h => h.captures === 3 ? 430 : 0 });
+  const started = await h.start(); await until(() => h.touches.length >= 3);
+  const count = h.captures, touches = h.touches.length, at = performance.now();
+  await h.stop(started);
+  assert.ok(performance.now() - at < 250, 'stop interrupts the 430ms wait');
+  await wait(450);
+  assert.equal(h.captures, count); assert.equal(h.touches.length, touches); assert.equal(h.stopped, 1);
+});
+
+test('a first recentered capture that crosses the original TTL is discarded and released before another capture', async t => {
+  const h = harness(t, { cameraOffset: .02, frameProof: movedCameraProof,
+    chunkDelayMs: h => h.captures === 4 ? 850 : 0 });
+  const started = await h.start(); await until(() => h.captures >= 5); await h.stop(started);
+  const captureIndices = h.calls.map((c, i) => c.op === 'frame' ? i : -1).filter(i => i >= 0);
+  const between = h.calls.slice(captureIndices[3] + 1, captureIndices[4]);
+  assert.equal(between.length, 1); assert.equal(between[0].op, 'touch');
+  assert.deepEqual(between[0].points, [], 'old camera and joystick release before another screenshot');
+  const requests = h.requests(), configuredAgain = requests.findIndex((r, i) => i > 0 && r.op === 'configure');
+  assert.ok(configuredAgain > 0);
+  assert.equal(requests.slice(0, configuredAgain).filter(r => r.op === 'analyze').length, 3,
+    'expired capture never reaches vision or supplies a direction');
+  assert.equal((await h.manager.command({ op: 'status' })).error, '');
 });

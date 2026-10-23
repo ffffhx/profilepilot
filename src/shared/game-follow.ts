@@ -47,6 +47,9 @@ export interface GameFollowConfig {
   selfCameraAssist?: FollowCameraAssist & { team: "green" };
   /** Opt-in current viewport check for the measured native 2772x1240 layout. */
   cameraViewportGuard?: { version: 1; referenceWidth: 2772; referenceHeight: 1240 };
+  /** Candidate points choose a bounded camera search only; never movement or identity. */
+  targetWeakSearch?: { version: 1;
+    alive: { portraitTemplate: string; portraitRegion: FollowRect; healthBarRegion: FollowRect } };
 }
 export interface FollowDetection extends FollowPoint { confidence: number; }
 export interface FollowAnalysis {
@@ -62,6 +65,8 @@ export interface FollowAnalysis {
   targetSource?: "template" | "partial" | "labels" | "camera";
   cameraViewport?: { accepted: boolean; reason: string; centerDistanceMapPx: number | null;
     observedBox: Record<string, unknown> | null; colorEvidence: Record<string, unknown> | null };
+  /** Current native-pixel camera search proposals, deliberately separate from target. */
+  weakTargetCandidates?: { x: number; y: number; score: number }[];
   distance?: number;
 }
 export interface FollowFrame {

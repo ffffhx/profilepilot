@@ -663,3 +663,175 @@ test('self-to-target role change cannot restart search or exceed its final TTL b
   const end = m.afterAnalyze({ currentSelf: self, lost: true }, 0, 6100);
   assert.equal(end.point, null); assert.equal(end.reason, 'search-expired'); assert.equal(end.stopJoystick, true);
 });
+
+const weakSelf = { x: 180, y: 200 };
+const weakCandidates = [{ ...target, score: .85 }, { x: 310, y: 310, score: .82 }];
+const weakObservation = (patch = {}) => ({ lost: true, currentSelf: weakSelf, weakTargetCandidates: weakCandidates, ...patch });
+function weakArmed(patch = {}) {
+  const m = new GameFollowCamera({ ...options, placement, weakSearch: true, ...patch });
+  m.beforeAnalyze(undefined, 0);
+  const p = m.afterAnalyze(weakObservation(), 20, 0);
+  assert.equal(p.reason, 'weak-search-arm'); assert.equal(p.stopJoystick, true); assert.equal(p.allowCameraMovement, false);
+  assert.equal(m.commit(p, 1, 5), true);
+  return m;
+}
+
+test('weak search needs explicit opt-in, current independent self, age and fixed proposal score', () => {
+  for (const item of [
+    { opts: { weakSearch: false } }, { opts: { placement: undefined } }, { opts: { targetEnabled: false } },
+    { opts: { mode: 'observe' } }, { opts: { backend: 'basic' } },
+    { frame: { currentSelf: undefined } }, { frame: { currentSelf: undefined, cameraSelf: weakSelf } },
+    { frame: { weakTargetCandidates: [] } }, { age: 1000 }, { age: NaN },
+    { frame: { weakTargetCandidates: [{ ...target, score: .799999 }] } },
+    { frame: { weakTargetCandidates: [{ ...target, score: NaN }] } },
+    { frame: { weakTargetCandidates: [{ ...target, score: Infinity }] } },
+    { frame: { weakTargetCandidates: [{ x: 1001, y: 20, score: .85 }] } },
+    { frame: { weakTargetCandidates: [{ x: -1, y: 20, score: .85 }] } }
+  ]) {
+    const m = new GameFollowCamera({ ...options, placement, weakSearch: true, ...item.opts });
+    m.beforeAnalyze(undefined, 0);
+    const p = m.afterAnalyze(weakObservation(item.frame), item.age ?? 20, 0);
+    assert.equal(p.point, null, JSON.stringify(item)); assert.equal(p.allowCameraMovement, false);
+  }
+  const m = new GameFollowCamera({ ...options, placement, weakSearch: true });
+  const p = m.afterAnalyze(weakObservation({ weakTargetCandidates: [{ ...target, score: .8 }] }), 999, 1000);
+  assert.equal(p.reason, 'weak-search-arm'); assert.deepEqual(p.point, target);
+});
+
+test('weak proposals never teach full history, identity or velocity and only the first two may choose a view', () => {
+  const m = weakArmed();
+  assert.equal(m.status(5).frameTarget, 'none');
+  assert.equal(m.status(5).speedMapPxPerSecond, undefined);
+  assert.equal(m.status(5).placement.prediction, undefined);
+  assert.equal(m.status(5).placement.seedSource, undefined);
+  m.beforeAnalyze(undefined, 400);
+  const waiting = m.afterAnalyze(weakObservation({ cameraTarget: target }), 20, 400);
+  assert.equal(waiting.reason, 'weak-search-wait'); assert.equal(waiting.allowCameraMovement, false);
+  m.commit(waiting, 2, 405);
+  m.invalidate('transport-gap');
+  m.beforeAnalyze(undefined, 500); m.commit(m.afterAnalyze(lost, 20, 500), 3, 505);
+  m.beforeAnalyze(undefined, 600);
+  assert.equal(m.afterAnalyze({ lost: true, currentSelf: weakSelf }, 20, 600).point, null,
+    'old weak pixels cannot initialize an ordinary recent-full search');
+  const n = new GameFollowCamera({ ...options, placement, weakSearch: true });
+  const p = n.afterAnalyze(weakObservation({ weakTargetCandidates: [
+    { ...target, score: .5 }, { ...target, score: .6 }, { ...target, score: .99 }
+  ] }), 20, 0);
+  assert.equal(p.point, null, 'third proposal cannot replace rejected raw top two');
+});
+
+test('first stable weak view without identity advances once, then second view exhausts the episode', () => {
+  const m = weakArmed();
+  assert.ok(m.beforeAnalyze(proof({ sequence: 1 }), 400));
+  const second = m.afterAnalyze(weakObservation(), 20, 410);
+  assert.equal(second.reason, 'weak-search-arm'); assert.deepEqual(second.point, { x: 310, y: 310 });
+  assert.equal(second.stopJoystick, true); assert.equal(second.allowCameraMovement, false);
+  assert.equal(m.commit(second, 2, 415), true);
+  assert.equal(m.status(415).searchRemainingMs, 5585, 'second visit preserves the first deadline');
+  assert.equal(m.beforeAnalyze(proof({ sequence: 2, capturedAtUptimeMs: 100600 }), 650), undefined,
+    'old-point proof cannot verify the new viewpoint');
+  const wait = m.afterAnalyze(weakObservation(), 20, 660); assert.equal(wait.reason, 'weak-search-wait');
+  m.commit(wait, 3, 665);
+  assert.ok(m.beforeAnalyze(proof({ x: 310, y: 310, epoch: 8, sequence: 3,
+    heldSinceUptimeMs: 100500, capturedAtUptimeMs: 100800, expiresAtUptimeMs: 102000 }), 900));
+  const release = m.afterAnalyze(weakObservation(), 20, 910);
+  assert.equal(release.point, null); assert.equal(release.reason, 'weak-search-exhausted');
+  m.commit(release, 4, 915);
+  for (const at of [1000,3000,6000,10000]) {
+    m.beforeAnalyze(undefined, at);
+    const p = m.afterAnalyze(weakObservation({ weakTargetCandidates: [{ x: 400, y: 300, score: .9 }] }), 20, at);
+    assert.equal(p.point, null); assert.equal(p.allowCameraMovement, false); m.commit(p, at, at+5);
+  }
+});
+
+test('a weak view is bounded to 1.5 seconds even when ACKs arrive but no stable proof does', () => {
+  const m = weakArmed();
+  let sequence = 1;
+  for (const at of [400,800,1200,1400]) {
+    m.beforeAnalyze(undefined, at);
+    const p = m.afterAnalyze(weakObservation(), 20, at);
+    assert.equal(p.reason, 'weak-search-wait'); assert.equal(p.stopJoystick, true);
+    assert.ok(at+p.ttlMs <= 1500); m.commit(p, ++sequence, at);
+  }
+  m.beforeAnalyze(undefined, 1500);
+  const expired = m.afterAnalyze(weakObservation(), 20, 1500);
+  assert.equal(expired.point, null); m.commit(expired, ++sequence, 1500);
+  m.beforeAnalyze(undefined, 1510);
+  const second = m.afterAnalyze(weakObservation(), 20, 1510);
+  assert.equal(second.reason, 'weak-search-arm'); assert.deepEqual(second.point, { x: 310, y: 310 });
+  m.commit(second, ++sequence, 1515);
+  assert.equal(m.status(1515).searchRemainingMs, 4485);
+});
+
+test('current self loss releases a weak view immediately and camera-self alone cannot sustain it', () => {
+  for (const own of [{}, { cameraSelf: weakSelf }]) {
+    const m = weakArmed(); m.beforeAnalyze(undefined, 200);
+    const p = m.afterAnalyze(weakObservation({ currentSelf: undefined, ...own }), 20, 200);
+    assert.equal(p.point, null); assert.equal(p.reason, 'weak-search-self-lost'); assert.equal(p.stopJoystick, true);
+  }
+});
+
+test('weak jitter cannot spend the second visit on the same avatar-sized region', () => {
+  const m = weakArmed(); assert.ok(m.beforeAnalyze(proof({ sequence: 1 }), 400));
+  const p = m.afterAnalyze(weakObservation({ weakTargetCandidates: [{ x: 260, y: 300, score: .9 }] }), 20, 410);
+  assert.equal(p.point, null); m.commit(p, 2, 415);
+  m.beforeAnalyze(undefined, 500);
+  const distinct = m.afterAnalyze(weakObservation({ weakTargetCandidates: [{ x: 261, y: 300, score: .9 }] }), 20, 500);
+  assert.equal(distinct.reason, 'weak-search-arm');
+});
+
+test('weak search inherits an existing normal search deadline and cannot restart it after release', () => {
+  const m = new GameFollowCamera({ ...options, placement, weakSearch: true });
+  m.commit(m.afterAnalyze({ fullTarget: target, lost: false }, 0, 0), 1, 0);
+  m.beforeAnalyze(undefined, 100); m.commit(m.afterAnalyze({ lost: true, currentSelf: weakSelf }, 20, 100), 2, 100);
+  let sequence = 2;
+  for (const at of [1000,2000,3000,4000,5000]) {
+    m.beforeAnalyze(undefined, at); m.commit(m.afterAnalyze({ lost: true, currentSelf: weakSelf }, 20, at), ++sequence, at);
+  }
+  m.beforeAnalyze(undefined, 5990);
+  const p = m.afterAnalyze(weakObservation({ weakTargetCandidates: [{ x: 310, y: 310, score: .82 }] }), 20, 5990);
+  assert.equal(p.reason, 'weak-search-arm'); assert.equal(p.ttlMs, 110); m.commit(p, ++sequence, 5995);
+  m.beforeAnalyze(undefined, 6100);
+  const release = m.afterAnalyze(weakObservation(), 20, 6100);
+  assert.equal(release.point, null); m.commit(release, ++sequence, 6105);
+  m.beforeAnalyze(undefined, 6200);
+  assert.equal(m.afterAnalyze(weakObservation(), 20, 6200).point, null);
+});
+
+test('only current full target resets exhausted weak visits, never partial evidence', () => {
+  for (const reset of ['partial','full']) {
+    const m = weakArmed({ selfPlacement: placement });
+    assert.ok(m.beforeAnalyze(proof({ sequence: 1 }), 400));
+    m.commit(m.afterAnalyze(weakObservation(), 20, 410), 2, 415);
+    assert.ok(m.beforeAnalyze(proof({ x: 310, y: 310, epoch: 8, sequence: 2,
+      heldSinceUptimeMs: 100500, capturedAtUptimeMs: 100800, expiresAtUptimeMs: 102000 }), 900));
+    m.commit(m.afterAnalyze(weakObservation(), 20, 910), 3, 915);
+    m.beforeAnalyze(undefined, 1000);
+    m.commit(m.afterAnalyze({ currentSelf: weakSelf, lost: false,
+      ...(reset==='full' ? { fullTarget: target } : { currentTarget: target }) }, 20, 1000), 4, 1005);
+    m.beforeAnalyze(undefined, 1100);
+    const p = m.afterAnalyze(weakObservation(), 20, 1100);
+    assert.equal(p.reason==='weak-search-arm', reset==='full');
+    if (reset==='partial') assert.equal(p.point, null);
+  }
+});
+
+test('strict camera identity permits normal tracking but does not reset weak visit count', () => {
+  const m = weakArmed(); assert.ok(m.beforeAnalyze(proof({ sequence: 1 }), 400));
+  const confirmed = m.afterAnalyze(weakObservation({ cameraTarget: target }), 20, 410);
+  assert.equal(confirmed.allowCameraMovement, true); assert.equal(confirmed.stopJoystick, false);
+  m.commit(confirmed, 2, 415);
+  assert.ok(m.beforeAnalyze(proof({ sequence: 2, capturedAtUptimeMs: 100700 }), 700));
+  const second = m.afterAnalyze(weakObservation(), 20, 710);
+  assert.equal(second.reason, 'weak-search-arm'); assert.deepEqual(second.point, { x: 310, y: 310 });
+  m.commit(second, 3, 715);
+  assert.ok(m.beforeAnalyze(proof({ x: 310, y: 310, epoch: 8, sequence: 3,
+    heldSinceUptimeMs: 100800, capturedAtUptimeMs: 101100, expiresAtUptimeMs: 102000 }), 1100));
+  const again = m.afterAnalyze(weakObservation({ cameraTarget: { x: 310, y: 310 } }), 20, 1110);
+  assert.equal(again.allowCameraMovement, true); m.commit(again, 4, 1115);
+  m.invalidate('transport-gap'); m.beforeAnalyze(undefined, 1200);
+  m.commit(m.afterAnalyze(weakObservation(), 20, 1200), 5, 1205);
+  m.beforeAnalyze(undefined, 1300);
+  const exhausted = m.afterAnalyze(weakObservation({ weakTargetCandidates: [{ x: 400, y: 300, score: .9 }] }), 20, 1300);
+  assert.equal(exhausted.point, null, 'camera identity did not reset visits or populate recent full history');
+});

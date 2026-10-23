@@ -187,9 +187,7 @@ test('phone rejection between PNG pages keeps the observed pause and never retur
       return { ok: true, state: structuredClone(h.state), result: { id, offset: body.offset, base64: 'A'.repeat(size), done: false } };
     }
   };
-  // Either the phone's rejection or its already-observed pause can settle a
-  // concurrent page first. Both must preserve the authoritative paused state.
-  await assert.rejects(h.service.performWrapper(owner.lease, owner.device.state.generation, { kind: 'screenshot', format: 'png' }, randomUUID()), /已暂停|会话已改变/);
+  await assert.rejects(h.service.performWrapper(owner.lease, owner.device.state.generation, { kind: 'screenshot', format: 'png' }, randomUUID()), /已暂停/);
   assert.equal(pages, 2); assert.equal(h.calls.filter(c => c[0] === 'action').length, 1);
   const device = h.service.snapshot().devices[0]; assert.equal(device.companion, 'ready'); assert.equal(device.state.phase, 'paused');
 });

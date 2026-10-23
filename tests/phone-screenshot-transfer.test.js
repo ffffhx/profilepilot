@@ -34,7 +34,7 @@ test('small HTTP screenshot pages preserve every PNG byte and the original resul
   assert.deepEqual(Buffer.from(output.result.base64, 'base64'), f.png);
   assert.deepEqual(output.result, { mime: 'image/png', width: 2772, height: 1240, base64: f.base64 });
   assert.equal(offsets.length, Math.ceil(f.base64.length / CHUNK));
-  assert.ok(offsets.slice().sort((a, b) => a - b).every((offset, i) => offset === i * CHUNK));
+  assert.ok(offsets.every((offset, i) => offset === i * CHUNK));
   const timings = phoneRequestTimings(0);
   assert.ok(timings.length > 0);
   assert.ok(timings.every(value => value.operation === 'screenshot-chunk' && value.responseBytes < 50 * 1024));
@@ -43,89 +43,6 @@ test('small HTTP screenshot pages preserve every PNG byte and the original resul
 test('old companion full screenshots and rejected captures never request pages', async () => {
   for (const initial of [{ state, result: { mime: 'image/png', base64: 'old-full-image' } }, { state, result: null }]) {
     assert.equal(await assembleScreenshot(initial, owner, () => { throw new Error('unexpected page'); }, () => true), initial);
-  }
-});
-
-const turn = () => new Promise(resolve => setImmediate(resolve));
-function deferred() {
-  let resolve, reject;
-  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-  return { promise, resolve, reject };
-}
-
-test('two non-final pages overlap, preserve byte order, and the last page cannot clear an in-flight cache', async () => {
-  const f = fixture(140000), last = Math.floor((f.base64.length - 1) / CHUNK) * CHUNK;
-  const pending = new Map(), requested = [], completed = new Set();
-  let active = 0, maximum = 0, cacheExists = true;
-  const output = assembleScreenshot(f.initial, owner, async ({ offset }) => {
-    requested.push(offset); active++; maximum = Math.max(maximum, active);
-    assert.equal(cacheExists, true, 'the terminal page invalidates the immutable phone cache');
-    if (offset === last) {
-      assert.equal(active, 1, 'terminal read must be alone behind the completion barrier');
-      assert.equal(completed.size, last / CHUNK);
-      cacheExists = false; active--; return f.page(offset);
-    }
-    const gate = deferred(); pending.set(offset, gate); await gate.promise;
-    assert.equal(cacheExists, true, 'a delayed earlier page must survive until its response is read');
-    completed.add(offset); active--; return f.page(offset);
-  }, () => true);
-  assert.deepEqual(requested, [0, CHUNK]);
-  pending.get(CHUNK).resolve(); await turn();
-  assert.deepEqual(requested, [0, CHUNK, 2 * CHUNK]);
-  pending.get(2 * CHUNK).resolve(); await turn();
-  assert.equal(requested.includes(last), false, 'first page is still in flight');
-  pending.get(0).resolve();
-  const result = await output;
-  assert.equal(maximum, 2); assert.equal(cacheExists, false);
-  assert.deepEqual(Buffer.from(result.result.base64, 'base64'), f.png, 'completion order cannot change image byte order');
-  assert.deepEqual(requested, [0, CHUNK, 2 * CHUNK, last]);
-});
-
-test('a failed parallel page stops scheduling and settles its peer without retrying or reading the terminal page', async () => {
-  const f = fixture(400000), pending = new Map(), requested = []; let settled = false;
-  const output = assembleScreenshot(f.initial, owner, async ({ offset }) => {
-    requested.push(offset); const gate = deferred(); pending.set(offset, gate);
-    await gate.promise; return f.page(offset);
-  }, () => true).then(value => ({ value }), error => ({ error })).finally(() => { settled = true; });
-  assert.deepEqual(requested, [0, CHUNK]);
-  pending.get(0).reject(new Error('first page link failed')); await turn();
-  assert.equal(settled, false, 'already-issued peer must finish before the transfer settles');
-  assert.deepEqual(requested, [0, CHUNK], 'failure cannot schedule another page or replay capture');
-  pending.get(CHUNK).resolve();
-  const result = await output;
-  assert.match(result.error.message, /first page link failed/); assert.equal(result.value, undefined);
-  assert.deepEqual(requested, [0, CHUNK]);
-});
-
-test('pause, owner replacement, and TTL expiry while parallel pages are pending never issue a final read', async () => {
-  for (const mutation of ['route', 'generation', 'phase', 'ttl']) {
-    const f = fixture(140000), pending = new Map(), requested = []; let current = true, now = 0;
-    const output = assembleScreenshot(f.initial, owner, async ({ offset }) => {
-      requested.push(offset); const gate = deferred(); pending.set(offset, gate);
-      return await gate.promise;
-    }, () => current, () => now).then(value => ({ value }), error => ({ error }));
-    assert.deepEqual(requested, [0, CHUNK]);
-    if (mutation === 'route') current = false;
-    if (mutation === 'ttl') now = 15000;
-    const changed = f.page(CHUNK);
-    if (mutation === 'generation') changed.state = { ...state, generation: 8 };
-    if (mutation === 'phase') changed.state = { ...state, phase: 'paused' };
-    pending.get(CHUNK).resolve(changed); await turn();
-    assert.deepEqual(requested, [0, CHUNK]);
-    pending.get(0).resolve(f.page(0));
-    const result = await output;
-    assert.ok(result.error, mutation); assert.equal(result.value, undefined);
-    assert.deepEqual(requested, [0, CHUNK]);
-  }
-});
-
-test('single-page and exact-boundary images use their terminal page exactly once', async () => {
-  for (const bytes of [20, CHUNK * 3 / 4 - 8]) {
-    const f = fixture(bytes), offsets = [];
-    const output = await assembleScreenshot(f.initial, owner, async ({ offset }) => {
-      offsets.push(offset); return f.page(offset);
-    }, () => true);
-    assert.deepEqual(offsets, [0]); assert.equal(output.result.base64, f.base64);
   }
 });
 
@@ -216,7 +133,7 @@ test('each authoritative PNG page still requires a completed phone phase', async
     await assert.rejects(assembleScreenshot(f.initial, owner, async ({ offset }) => {
       calls++; return { ...f.page(offset), state: { ...state, phase } };
     }, () => true), /会话已改变/);
-    assert.equal(calls, 2, 'only the two already-issued pages may complete after rejection');
+    assert.equal(calls, 1);
   }
 });
 
@@ -231,7 +148,7 @@ test('mismatched, truncated, oversized and incomplete pages fail closed', async 
   ]) {
     const f = fixture(); let calls = 0;
     await assert.rejects(assembleScreenshot(f.initial, owner, async ({ offset }) => { calls++; const page = f.page(offset); mutate(page); return page; }, () => true));
-    assert.equal(calls, 2, 'malformed data cannot schedule beyond the two already-issued pages');
+    assert.equal(calls, 1);
   }
   const f = fixture();
   await assert.rejects(assembleScreenshot(f.initial, owner, async () => { throw new Error('link lost'); }, () => true), /link lost/);

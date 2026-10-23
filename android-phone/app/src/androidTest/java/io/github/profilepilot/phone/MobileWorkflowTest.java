@@ -14,6 +14,7 @@ import android.os.SystemClock;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.TextView;
+import android.widget.Switch;
 import androidx.test.core.app.ActivityScenario;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
@@ -60,6 +61,10 @@ public class MobileWorkflowTest {
     try { Field field=MainActivity.class.getDeclaredField("sheet"); field.setAccessible(true); return (Dialog)field.get(activity); }
     catch (ReflectiveOperationException error) { throw new AssertionError(error); }
   }
+  private Dialog settings(MainActivity activity) {
+    try { Field field=MainActivity.class.getDeclaredField("settingsDialog"); field.setAccessible(true); return (Dialog)field.get(activity); }
+    catch (ReflectiveOperationException error) { throw new AssertionError(error); }
+  }
   private String status(MainActivity activity) { return ((TextView)activity.findViewById(R.id.home_status)).getText().toString(); }
   private void awaitTitle(ActivityScenario<MainActivity> scenario,String title) throws Exception {
     until(() -> { AtomicBoolean matched=new AtomicBoolean(); scenario.onActivity(a -> matched.set(title.equals(status(a)))); return matched.get(); });
@@ -79,6 +84,7 @@ public class MobileWorkflowTest {
         for (String removed:new String[]{"任务","Agent","设备","我的","连接电脑"}) assertNull(removed,find(root,removed));
         assertNotNull(a.findViewById(R.id.home_usb)); assertNotNull(a.findViewById(R.id.home_wifi));
         assertNotNull(find(root,"权限准备"));
+        assertNull(a.findViewById(R.id.home_recovery));
         assertFalse(a.findViewById(R.id.home_pause).isShown());
         assertFalse(a.findViewById(R.id.home_stop).isShown());
       });
@@ -94,6 +100,32 @@ public class MobileWorkflowTest {
       });
       screen("android-wifi");
     }
+  }
+
+  @Test public void settingsDefaultsPersistAndMasterSwitchPreservesChildChoices() throws Exception {
+    RecoverySettings recovery=new RecoverySettings(context); recovery.prefs.edit().clear().commit();
+    try (ActivityScenario<MainActivity> scenario=ActivityScenario.launch(MainActivity.class)) {
+      scenario.onActivity(a -> {
+        a.findViewById(R.id.home_more).performClick();
+        assertNotNull(settings(a));
+        Switch master=settings(a).findViewById(R.id.recovery_toggle);
+        Switch advanced=settings(a).findViewById(R.id.recovery_advanced);
+        Switch accessibility=settings(a).findViewById(R.id.recovery_accessibility);
+        assertTrue(master.isChecked()); assertTrue(advanced.isChecked()); assertTrue(accessibility.isChecked());
+        advanced.performClick(); assertFalse(recovery.advancedPreference());
+        master.performClick(); assertFalse(recovery.enabled()); assertFalse(recovery.accessibilityOn());
+        assertTrue(accessibility.isChecked()); assertFalse(accessibility.isEnabled());
+        master.performClick(); assertTrue(recovery.accessibilityOn()); assertFalse(recovery.advanced());
+        settings(a).findViewById(R.id.settings_close).performClick();
+        assertNull(settings(a)); a.findViewById(R.id.home_more).performClick();
+        assertFalse(((Switch)settings(a).findViewById(R.id.recovery_advanced)).isChecked());
+        // The settings dialog remains behind a detail sheet, so Back returns to settings.
+        settings(a).findViewById(R.id.home_recovery).performClick(); assertNotNull(sheet(a));
+        sheet(a).findViewById(R.id.sheet_close).performClick(); assertTrue(settings(a).isShowing());
+        ((Switch)settings(a).findViewById(R.id.recovery_advanced)).performClick();
+      });
+      screen("android-settings");
+    } finally { recovery.prefs.edit().clear().commit(); }
   }
 
   @Test public void pairedComputerNeedsLiveEvidenceAndSettingsDoNotSwitchTransport() throws Exception {

@@ -1,6 +1,10 @@
 <resources>
     <item type="id" name="home_scroll" />
     <item type="id" name="home_status" />
+    <item type="id" name="home_connection" />
+    <item type="id" name="home_status_description" />
+    <item type="id" name="settings_close" />
+    <item type="id" name="settings_scroll" />
     <item type="id" name="home_computer" />
     <item type="id" name="home_more" />
     <item type="id" name="home_permissions" />

@@ -6,7 +6,7 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 
-// Persist opt-in and retry budgets before a process can die or an external setting changes.
+// Recovery defaults on; explicitly saved choices and retry budgets survive process death.
 @SuppressLint("ApplySharedPref")
 final class RecoverySettings {
     private final Context context;
@@ -15,12 +15,14 @@ final class RecoverySettings {
         this.context = context;
         prefs = context.getSharedPreferences("automatic_recovery", Context.MODE_PRIVATE);
     }
-    boolean enabled() { return prefs.getBoolean("enabled", false); }
-    boolean advanced() { return enabled() && prefs.getBoolean("advanced", false); }
-    boolean accessibilityOn() { return enabled() && prefs.getBoolean("accessibility_on", false); }
+    boolean enabled() { return prefs.getBoolean("enabled", true); }
+    boolean advancedPreference() { return prefs.getBoolean("advanced", true); }
+    boolean accessibilityPreference() { return prefs.getBoolean("accessibility_on", true); }
+    boolean advanced() { return enabled() && advancedPreference(); }
+    boolean accessibilityOn() { return enabled() && accessibilityPreference(); }
     void accessibilityOn(boolean value) {
         SharedPreferences.Editor edit = prefs.edit().putBoolean("accessibility_on", value);
-        if (value && !prefs.getBoolean("accessibility_on", false)) edit.putInt("accessibility_attempts", 0).putLong("accessibility_window", System.currentTimeMillis());
+        if (value && !accessibilityPreference()) edit.putInt("accessibility_attempts", 0).putLong("accessibility_window", System.currentTimeMillis());
         edit.commit();
     }
     boolean authorized() { return context.checkSelfPermission(Manifest.permission.WRITE_SECURE_SETTINGS) == PackageManager.PERMISSION_GRANTED; }

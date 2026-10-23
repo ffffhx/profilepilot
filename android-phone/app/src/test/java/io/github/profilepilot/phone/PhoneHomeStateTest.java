@@ -6,7 +6,7 @@ import org.junit.Test;
 public class PhoneHomeStateTest {
   private PhoneHomeState state(boolean connected, boolean debugging, boolean permissions,
       boolean unlocked, boolean seen, boolean session, String phase, String mode) {
-    return PhoneHomeState.from(new PhoneHomeState.Input(connected, debugging, permissions,
+    return PhoneHomeState.from(new PhoneHomeState.Input(connected, debugging ? PhoneHomeState.Debugging.READY : PhoneHomeState.Debugging.OFF, permissions,
         unlocked, seen, session, phase, mode));
   }
 
@@ -14,8 +14,12 @@ public class PhoneHomeStateTest {
     PhoneHomeState home=state(false,true,true,true,false,false,"idle","control");
     assertEquals(PhoneHomeState.Tone.NEUTRAL,home.tone());
     assertFalse(home.controls());
-    assertEquals("等待电脑自动连接",home.title());
-    assertEquals("还没有电脑连接",state(false,false,true,true,false,false,"idle","control").title());
+    assertEquals("等待电脑连接",home.title());
+    PhoneHomeState blocked=state(false,false,true,true,false,false,"idle","control");
+    assertEquals("暂时无法连接",blocked.title());
+    assertEquals(PhoneHomeState.Tone.ATTENTION,blocked.tone());
+    assertEquals(PhoneHomeState.Action.SETTINGS,blocked.action());
+    assertFalse(blocked.connected());
   }
 
   @Test public void connectionDoesNotImplyAnActiveControlSession() {
@@ -30,6 +34,33 @@ public class PhoneHomeStateTest {
     assertEquals(PhoneHomeState.Tone.CONNECTED,home.tone());
     assertTrue(home.description().contains("权限"));
     assertFalse(home.controls());
+    assertTrue(home.needsAttention());
+  }
+
+  @Test public void uncertainSystemReadDoesNotClaimDebuggingIsOff() {
+    assertEquals(PhoneHomeState.Debugging.UNKNOWN,PhoneHomeState.debugging("unknown","disabled"));
+    assertEquals(PhoneHomeState.Debugging.READY,PhoneHomeState.debugging("unknown","enabled"));
+    assertEquals(PhoneHomeState.Debugging.OFF,PhoneHomeState.debugging("disabled","disabled"));
+    PhoneHomeState home=PhoneHomeState.from(new PhoneHomeState.Input(false,PhoneHomeState.Debugging.UNKNOWN,true,true,false,false,"idle","control"));
+    assertEquals(PhoneHomeState.Tone.NEUTRAL,home.tone());
+    assertEquals(PhoneHomeState.Action.SETTINGS,home.action());
+    assertTrue(home.description().contains("待确认"));
+  }
+
+  @Test public void lockedPhonePreservesLiveConnectionAndHasNoSessionActions() {
+    PhoneHomeState home=state(true,false,true,false,true,false,"idle","control");
+    assertTrue(home.connected());
+    assertEquals(PhoneHomeState.Tone.CONNECTED,home.tone());
+    assertTrue(home.needsAttention());
+    assertFalse(home.controls());
+    assertEquals(PhoneHomeState.Action.DETAILS,home.action());
+  }
+
+  @Test public void disabledDebuggingAfterDisconnectOffersSettingsInsteadOfEndlessWaiting() {
+    PhoneHomeState home=state(false,false,true,true,true,true,"disconnected","control");
+    assertEquals(PhoneHomeState.Action.SETTINGS,home.action());
+    assertFalse(home.controls());
+    assertFalse(home.connected());
   }
 
   @Test public void missingHeartbeatHidesControlsEvenWhenSessionStillLooksActive() {

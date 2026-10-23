@@ -9,7 +9,7 @@ import android.view.View;
 
 /** Small native line icons; no font-dependent glyphs or bitmap scaling. */
 final class HomeIcon extends View {
-  private final String name;
+  private String name;
   private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
   private final Drawable brand;
   private int color;
@@ -23,6 +23,7 @@ final class HomeIcon extends View {
   }
 
   void color(int value) { if (color != value) { color = value; invalidate(); } }
+  void name(String value) { if (!name.equals(value)) { name = value; invalidate(); } }
 
   @Override protected void onDraw(Canvas canvas) {
     super.onDraw(canvas);
@@ -44,6 +45,42 @@ final class HomeIcon extends View {
         canvas.drawRoundRect(2.5f,3.5f,21.5f,16.5f,2,2,paint);
         line(canvas,6,12.5f,18,12.5f); line(canvas,12,16.5f,12,21); line(canvas,9,21,15,21);
       }
+      case "computer-wait", "computer-check", "computer-alert", "computer-control", "disconnected" -> {
+        canvas.drawRoundRect(2,3,20,15,2,2,paint);
+        line(canvas,10,15,10,20); line(canvas,6,20,13,20);
+        if ("computer-control".equals(name)) {
+          paint.setStyle(Paint.Style.FILL); path(canvas,true,14,11,23,16,19,17,17,22);
+        } else {
+          paint.setStyle(Paint.Style.FILL); paint.setColor(getContext().getResources().getColor(android.R.color.white,null));
+          canvas.drawCircle(18,17,6,paint); paint.setColor(color); paint.setStyle(Paint.Style.STROKE);
+          if ("disconnected".equals(name)) {
+            path(canvas,false,14,16,16,14,18,14); path(canvas,false,18,20,20,20,22,18);
+            line(canvas,15,22,21,12);
+          } else {
+            canvas.drawCircle(18,17,5,paint);
+            if ("computer-wait".equals(name)) path(canvas,false,18,14,18,17,20,18);
+            else if ("computer-check".equals(name)) path(canvas,false,15.5f,17,17.3f,19,20.5f,15);
+            else { line(canvas,18,14,18,17); paint.setStyle(Paint.Style.FILL); canvas.drawCircle(18,20,.7f,paint); }
+          }
+        }
+      }
+      case "eye" -> {
+        Path eye=new Path(); eye.moveTo(1,12); eye.cubicTo(7,2,17,2,23,12);
+        eye.cubicTo(17,22,7,22,1,12); canvas.drawPath(eye,paint); canvas.drawCircle(12,12,3,paint);
+      }
+      case "pause-circle" -> { canvas.drawCircle(12,12,10,paint); line(canvas,9,8,9,16); line(canvas,15,8,15,16); }
+      case "settings" -> {
+        Path gear=new Path();
+        for (int i=0;i<32;i++) {
+          double angle=i*Math.PI/16; float radius=i%4==0 || i%4==3?10:8;
+          float x=12+(float)Math.cos(angle)*radius,y=12+(float)Math.sin(angle)*radius;
+          if(i==0) gear.moveTo(x,y); else gear.lineTo(x,y);
+        }
+        gear.close(); canvas.drawPath(gear,paint); canvas.drawCircle(12,12,3.2f,paint);
+      }
+      case "back" -> { path(canvas,false,11,4,3,12,11,20); line(canvas,3,12,21,12); }
+      case "sync" -> { canvas.drawArc(3,3,21,21,205,145,false,paint); canvas.drawArc(3,3,21,21,25,145,false,paint); path(canvas,false,15,3,21,3,21,9); path(canvas,false,9,21,3,21,3,15); }
+      case "update" -> { canvas.drawCircle(12,12,10,paint); path(canvas,false,7,11,12,6,17,11); line(canvas,12,6,12,18); }
       case "phone" -> {
         canvas.drawRoundRect(6,2,18,22,2.5f,2.5f,paint);
         line(canvas,10,5,14,5); line(canvas,11,19,13,19);

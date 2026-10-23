@@ -28,6 +28,7 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 import androidx.activity.ComponentActivity;
@@ -43,22 +44,23 @@ public final class MainActivity extends ComponentActivity {
   private static int visibleHomes;
   static boolean isHomeVisible() { return visibleHomes>0; }
   private static final int INK=0xff1c2926, MUTED=0xff738178, BG=0xfff7f9f7,
-      LINE=0xffe5ece7, GREEN=0xff11775d, MINT=0xffedf7f1,
-      BLUE=0xff356cd7, SOFT_BLUE=0xffeef3ff, AMBER=0xff956423, RED=0xffb64646;
+      LINE=0xffe5ece7, GREEN=0xff147457, MINT=0xffeef8f2,
+      AMBER=0xff96520b, RED=0xffb64646;
   private final Handler main=new Handler(Looper.getMainLooper());
   private final ExecutorService io=Executors.newSingleThreadExecutor();
   private ComputerStore store;
-  private LinearLayout hero, computerRow, sessionActions, permissionRows, permissionSummary;
-  private TextView title, description, badge, computerName, computerTransport, pause, stop,
-      permissionCount, permissionSummaryAction, permissionHint, reassurance, serviceError;
-  private HomeIcon computerGraphic, phoneGraphic, linkGraphic;
+  private LinearLayout permissionRows, permissionSummary;
+  private ConnectionCard connectionCard;
+  private TextView permissionCount, permissionSummaryAction, permissionHint, serviceError;
   private final SettingRow[] permissions=new SettingRow[3];
-  private SettingRow developer, recoveryRow;
+  private SettingRow developer;
   private DebugOption wifi, usb;
   private boolean permissionsExpanded, seenConnected;
   private int lastPermissionCount=-1;
   private PhoneHomeState lastState;
   private Dialog sheet;
+  private Dialog settingsDialog;
+  private TextView recoveryAuthorization;
   private final Runnable tick=new Runnable() {
     @Override public void run() { updateHome(); main.postDelayed(this,1000); }
   };
@@ -133,46 +135,14 @@ public final class MainActivity extends ComponentActivity {
     TextView brand=text(toolbar,BuildConfig.DEBUG ? "ProfilePilot 开发版" : "ProfilePilot",20,INK,true);
     LinearLayout.LayoutParams brandParams=new LinearLayout.LayoutParams(0,-2,1);
     brandParams.setMarginStart(dp(10)); brand.setLayoutParams(brandParams);
-    View more=iconButton("more","更多选项",this::showMore); more.setId(R.id.home_more); toolbar.addView(more);
+    View more=iconButton("settings","设置",this::showSettings); more.setId(R.id.home_more); toolbar.addView(more);
     ScrollView scroll=new ScrollView(this); scroll.setId(R.id.home_scroll);
     scroll.setFillViewport(true); scroll.setClipToPadding(false); scroll.setVerticalScrollBarEnabled(false);
     LinearLayout page=column(); page.setPadding(dp(20),dp(8),dp(20),dp(28));
     scroll.addView(page); root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1)); setContentView(root);
 
-    hero=card(page,22); hero.setPadding(dp(18),dp(18),dp(18),dp(18));
-    LinearLayout heroTop=row(); hero.addView(heroTop);
-    TextView phoneLabel=text(heroTop,"这台手机",12,MUTED,false); weight(phoneLabel);
-    badge=text(heroTop,"",11,MUTED,false); badge.setPadding(dp(9),dp(5),dp(9),dp(5));
-    LinearLayout illustration=row(); illustration.setGravity(Gravity.CENTER);
-    hero.addView(illustration,new LinearLayout.LayoutParams(-1,dp(72)));
-    computerGraphic=icon("computer",MUTED,38); illustration.addView(computerGraphic);
-    View firstLine=new View(this); firstLine.setBackgroundColor(0xffc5dacf);
-    LinearLayout.LayoutParams lineParams=new LinearLayout.LayoutParams(dp(23),dp(1));
-    lineParams.setMargins(dp(12),0,dp(5),0); illustration.addView(firstLine,lineParams);
-    linkGraphic=icon("check",MUTED,18); illustration.addView(linkGraphic);
-    View secondLine=new View(this); secondLine.setBackgroundColor(0xffc5dacf);
-    LinearLayout.LayoutParams secondParams=new LinearLayout.LayoutParams(dp(23),dp(1));
-    secondParams.setMargins(dp(5),0,dp(12),0); illustration.addView(secondLine,secondParams);
-    phoneGraphic=icon("phone",MUTED,32); illustration.addView(phoneGraphic);
-    title=text(hero,"",25,INK,true); title.setId(R.id.home_status); title.setGravity(Gravity.CENTER);
-    title.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
-    description=text(hero,"",12,MUTED,false); description.setGravity(Gravity.CENTER); description.setPadding(0,dp(6),0,0);
-    computerRow=row(); computerRow.setId(R.id.home_computer);
-    LinearLayout.LayoutParams computerParams=new LinearLayout.LayoutParams(-1,-2);
-    computerParams.topMargin=dp(18); hero.addView(computerRow,computerParams); computerRow.setPadding(dp(2),dp(12),dp(2),0);
-    computerRow.addView(icon("computer",GREEN,28));
-    LinearLayout computerCopy=column(); LinearLayout.LayoutParams copyParams=new LinearLayout.LayoutParams(0,-2,1);
-    copyParams.setMarginStart(dp(12)); computerRow.addView(computerCopy,copyParams);
-    computerName=text(computerCopy,"",14,INK,true); computerTransport=text(computerCopy,"",12,MUTED,false);
-    computerTransport.setPadding(0,dp(4),0,0); computerRow.addView(icon("chevron",MUTED,16));
-    clickable(computerRow,"电脑连接详情",this::showConnectionDetails);
-    sessionActions=row(); LinearLayout.LayoutParams actionsParams=new LinearLayout.LayoutParams(-1,-2);
-    actionsParams.topMargin=dp(16); hero.addView(sessionActions,actionsParams);
-    pause=button(sessionActions,"暂停控制",true,null); pause.setId(R.id.home_pause);
-    LinearLayout.LayoutParams pauseParams=new LinearLayout.LayoutParams(0,dp(48),1);
-    pauseParams.setMarginEnd(dp(8)); pause.setLayoutParams(pauseParams);
-    stop=button(sessionActions,"结束控制",false,null); stop.setId(R.id.home_stop);
-    stop.setLayoutParams(new LinearLayout.LayoutParams(0,dp(48),1)); stop.setTextColor(RED); stop.setBackground(ripple(Color.WHITE,11,true));
+    connectionCard=new ConnectionCard(this,this::showConnectionDetails,this::showConnectionSetup,this::showHelp);
+    page.addView(connectionCard,new LinearLayout.LayoutParams(-1,-2));
     serviceError=text(page,"",12,RED,false); serviceError.setVisibility(View.GONE);
 
     permissionCount=heading(page,"权限准备","");
@@ -196,8 +166,8 @@ public final class MainActivity extends ComponentActivity {
     permissionHint=text(page,"开启无障碍后，可辅助配置其余设置。",11,MUTED,false); permissionHint.setPadding(dp(3),dp(8),dp(3),0);
 
     heading(page,"连接设置","任选一种即可");
-    LinearLayout connectionCard=card(page,17);
-    LinearLayout connectionOptions=row(); connectionCard.addView(connectionOptions,new LinearLayout.LayoutParams(-1,-2));
+    LinearLayout debugCard=card(page,17);
+    LinearLayout connectionOptions=row(); debugCard.addView(connectionOptions,new LinearLayout.LayoutParams(-1,-2));
     wifi=new DebugOption("wifi","Wi-Fi 无线调试","手机与电脑\n在同一局域网",R.id.home_wifi,() -> showConnectionSettings(true));
     usb=new DebugOption("usb","USB 调试","通过数据线\n连接电脑",R.id.home_usb,() -> showConnectionSettings(false));
     connectionOptions.addView(wifi.view,new LinearLayout.LayoutParams(0,-1,1));
@@ -205,46 +175,27 @@ public final class MainActivity extends ComponentActivity {
     LinearLayout.LayoutParams dividerParams=new LinearLayout.LayoutParams(dp(1),-1);
     dividerParams.setMargins(0,dp(14),0,dp(14)); connectionOptions.addView(connectionDivider,dividerParams);
     connectionOptions.addView(usb.view,new LinearLayout.LayoutParams(0,-1,1));
-    recoveryRow=setting(connectionCard,"shield","自动恢复","后台连接服务与已授权的系统服务",R.id.home_recovery,this::showRecovery);
-    TextView connectionHint=text(page,"先开启开发者选项，再任选一种调试方式。",11,MUTED,false); connectionHint.setPadding(dp(3),dp(8),dp(3),0);
-    reassurance=text(page,"",12,MUTED,false); reassurance.setGravity(Gravity.CENTER); reassurance.setPadding(0,dp(24),0,dp(8));
     TextView help=button(page,"连接遇到问题？",false,this::showHelp); help.setTextSize(12); help.setTextColor(MUTED); help.setBackground(ripple(BG,10,false));
     LinearLayout.LayoutParams helpParams=new LinearLayout.LayoutParams(-1,dp(48)); helpParams.topMargin=dp(6); help.setLayoutParams(helpParams);
     updateHome();
   }
 
   private void updateHome() {
-    if (title==null || isDestroyed()) return;
+    if (connectionCard==null || isDestroyed()) return;
     ControlService service=ControlService.current; SessionState session=service==null?null:service.session;
     if (session!=null) session.expire();
     PhoneReadiness ready=new PhoneReadiness(this);
     boolean all=ready.overlay && ready.notifications && ready.accessibilityService.equals("running");
     PhoneHomeState state=PhoneHomeState.from(new PhoneHomeState.Input(ready.computerConnected,
-        ready.usbDebugging.equals("enabled") || ready.wirelessDebugging.equals("enabled"),all,ready.unlocked,
+        PhoneHomeState.debugging(ready.usbDebugging,ready.wirelessDebugging),all,ready.unlocked,
         seenConnected,session!=null && session.sessionId!=null,session==null?"idle":session.phase,session==null?"view":session.mode));
     seenConnected|=ready.computerConnected;
-    if (!state.equals(lastState)) {
-      setText(title,state.title()); setText(description,state.description()); setText(badge,"●  "+state.badge());
-      int accent=switch(state.tone()) { case CONNECTED -> GREEN; case ACTIVE -> BLUE; case ATTENTION -> AMBER; default -> MUTED; };
-      int surface=switch(state.tone()) { case CONNECTED -> MINT; case ACTIVE -> SOFT_BLUE; case ATTENTION -> 0xfffcf5e9; default -> Color.WHITE; };
-      int tint=switch(state.tone()) { case CONNECTED -> 0xffdceee3; case ACTIVE -> 0xffdfe8fe; case ATTENTION -> 0xfff7e9ce; default -> 0xffeff2f0; };
-      hero.setBackground(background(surface,22,true)); badge.setTextColor(accent); badge.setBackground(background(tint,20,false));
-      computerGraphic.color(accent); phoneGraphic.color(accent); linkGraphic.color(accent);
-      sessionActions.setVisibility(state.controls()?View.VISIBLE:View.GONE);
-      setText(pause,(state.paused()?"继续":"暂停")+(state.viewing()?"查看":"控制")); pause.setContentDescription(pause.getText());
-      pause.setBackground(ripple(state.paused()?GREEN:BLUE,11,false));
-      setText(stop,"结束"+(state.viewing()?"查看":"控制")); stop.setContentDescription(stop.getText()); lastState=state;
-    }
-    linkGraphic.setVisibility(ready.computerConnected?View.VISIBLE:View.INVISIBLE);
     String trustedName=pairing().getString("computer",""); boolean paired=!pairing().getString("token","").isEmpty();
-    computerRow.setVisibility(paired || ready.computerConnected?View.VISIBLE:View.GONE);
-    setText(computerName,(ready.computerConnected?"":"上次连接：")+(trustedName.isBlank()?"电脑":trustedName));
-    String owner=state.controls() && session!=null && !session.controller.isBlank()?" · "+session.controller:"";
-    setText(computerTransport,ready.computerConnected?transportLabel(ready)+owner:"当前未连接");
-    computerRow.setContentDescription(computerName.getText()+"，"+computerTransport.getText()+"，查看连接详情");
+    connectionCard.render(state,trustedName,paired || ready.computerConnected); lastState=state;
     if (service!=null && state.controls()) {
       Runnable toggle=service.pauseOrResumeAction(), end=service.sessionControlAction("stop");
-      pause.setOnClickListener(view -> { toggle.run(); updateHome(); }); stop.setOnClickListener(view -> { end.run(); updateHome(); });
+      connectionCard.pause.setOnClickListener(view -> { toggle.run(); updateHome(); });
+      connectionCard.stop.setOnClickListener(view -> { end.run(); updateHome(); });
     }
     boolean[] enabled={ready.accessibilityService.equals("running"),ready.overlay,ready.notifications}; int count=0;
     for (int i=0;i<3;i++) {
@@ -265,11 +216,7 @@ public final class MainActivity extends ComponentActivity {
     boolean anyDebug=ready.usbDebugging.equals("enabled") || ready.wirelessDebugging.equals("enabled");
     updateDebugOption(wifi,ready.wifiConnected,ready.wirelessDebugging,ready.debugLabel("wirelessDebugging"),anyDebug);
     updateDebugOption(usb,ready.usbConnected,ready.usbDebugging,ready.debugLabel("usbDebugging"),anyDebug);
-    RecoverySettings recovery=new RecoverySettings(this);
-    recoveryRow.status(recovery.enabled()?"已开启":"未开启",recovery.enabled()?GREEN:MUTED);
-    setText(reassurance,state.controls()?"手机的控制权始终在你手中。\n锁屏或连接中断时，会停止操作。"
-        :ready.computerConnected?(all?"手机准备好了。\n需要使用时，在电脑上开始。":"完成权限准备后，即可由电脑使用。") : "");
-    reassurance.setVisibility(ready.computerConnected?View.VISIBLE:View.GONE);
+    updateRecoveryAuthorization();
   }
 
   private void updateDebugOption(DebugOption option,boolean connected,String state,String label,boolean anyDebug) {
@@ -322,12 +269,82 @@ public final class MainActivity extends ComponentActivity {
     actionButton(content,enabled?"查看系统设置":PhoneAccessibility.current!=null?"辅助开启调试":"前往开启调试",true,
         () -> launchSetting(() -> { if (wireless) PhoneSettings.openWirelessDebugging(this); else PhoneSettings.openUsbDebugging(this); }));
   }
-  private void showMore() {
-    LinearLayout content=showSheet("更多");
-    menuItem(content,"检查更新",() -> { dismissSheet(); startActivity(new Intent(this,UpdateActivity.class)); });
-    menuItem(content,"电脑连接详情",this::showConnectionDetails); menuItem(content,"手机状态同步",this::showStatusSync); menuItem(content,"自动恢复",this::showRecovery); menuItem(content,"连接帮助",this::showHelp);
-    if (!pairing().getString("token","").isEmpty()) menuItem(content,"更换电脑",this::confirmForget);
-    paragraph(content,getString(R.string.app_name)+" · 手机连接助手\n版本 "+BuildConfig.VERSION_NAME).setTextSize(11);
+  private void showConnectionSetup() {
+    LinearLayout content=showSheet("连接设置");
+    paragraph(content,"开启 USB 或 Wi-Fi 调试，任选一种即可。");
+    menuItem(content,"USB 调试",() -> showConnectionSettings(false));
+    menuItem(content,"Wi-Fi 无线调试",() -> showConnectionSettings(true));
+  }
+
+  private void showSettings() {
+    if (settingsDialog!=null) return;
+    Dialog dialog=new Dialog(this,android.R.style.Theme_Material_Light_NoActionBar);
+    settingsDialog=dialog;
+    LinearLayout root=column(); root.setBackgroundColor(BG);
+    root.setOnApplyWindowInsetsListener((view,insets) -> {
+      android.graphics.Insets bars=insets.getInsets(WindowInsets.Type.systemBars());
+      view.setPadding(bars.left,bars.top,bars.right,bars.bottom); return insets;
+    });
+    LinearLayout toolbar=row(); toolbar.setPadding(dp(8),dp(8),dp(20),dp(8)); root.addView(toolbar,new LinearLayout.LayoutParams(-1,dp(64)));
+    View back=iconButton("back","返回首页",dialog::dismiss); back.setId(R.id.settings_close); toolbar.addView(back);
+    text(toolbar,"设置",20,INK,true);
+    ScrollView scroll=new ScrollView(this); scroll.setId(R.id.settings_scroll); scroll.setVerticalScrollBarEnabled(false);
+    LinearLayout page=column(); page.setPadding(dp(20),0,dp(20),dp(24)); scroll.addView(page); root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
+    heading(page,"自动恢复","默认全部开启");
+    LinearLayout recoveryCard=card(page,17); RecoverySettings recovery=new RecoverySettings(this);
+    Switch enabled=recoveryToggle(recoveryCard,"后台服务自动恢复","系统回收、重启或更新后恢复连接",R.id.recovery_toggle,recovery.enabled());
+    Switch advanced=recoveryToggle(recoveryCard,"高级恢复","恢复异常的无障碍服务与无线调试",R.id.recovery_advanced,recovery.advancedPreference());
+    Switch accessibility=recoveryToggle(recoveryCard,"自动开启无障碍","权限关闭时重新开启本应用服务",R.id.recovery_accessibility,recovery.accessibilityPreference());
+    Runnable refresh=() -> {
+      advanced.setEnabled(recovery.enabled()); accessibility.setEnabled(recovery.enabled());
+      advanced.setAlpha(recovery.enabled()?1f:.45f); accessibility.setAlpha(recovery.enabled()?1f:.45f);
+      refreshRecoveryServices(); updateRecoveryAuthorization();
+    };
+    advanced.setEnabled(recovery.enabled()); accessibility.setEnabled(recovery.enabled());
+    advanced.setAlpha(recovery.enabled()?1f:.45f); accessibility.setAlpha(recovery.enabled()?1f:.45f);
+    enabled.setOnCheckedChangeListener((view,value) -> { recovery.enabled(value); refresh.run(); });
+    advanced.setOnCheckedChangeListener((view,value) -> { recovery.advanced(value); refresh.run(); });
+    accessibility.setOnCheckedChangeListener((view,value) -> { recovery.accessibilityOn(value); refresh.run(); });
+    recoveryAuthorization=text(page,"",11,MUTED,false); recoveryAuthorization.setPadding(dp(3),dp(12),dp(3),0);
+    TextView recoveryHint=text(page,"恢复连接后，控制任务需手动继续。",11,MUTED,false); recoveryHint.setPadding(dp(3),dp(6),dp(3),0);
+    TextView details=button(page,"恢复详情与后台设置",false,this::showRecovery);
+    details.setTextSize(12); details.setBackground(ripple(BG,10,false)); details.setId(R.id.home_recovery);
+    heading(page,"连接与同步",""); LinearLayout connection=card(page,17);
+    setting(connection,"computer","电脑连接详情","",View.NO_ID,this::showConnectionDetails);
+    setting(connection,"sync","手机状态同步","",View.NO_ID,this::showStatusSync);
+    heading(page,"关于",""); LinearLayout about=card(page,17);
+    setting(about,"update","检查更新","",View.NO_ID,() -> startActivity(new Intent(this,UpdateActivity.class)));
+    setting(about,"help","连接帮助","",View.NO_ID,this::showHelp);
+    if (!pairing().getString("token","").isEmpty()) {
+      TextView forget=button(page,"更换电脑",false,this::confirmForget); forget.setTextColor(RED); forget.setBackground(ripple(BG,10,false));
+    }
+    TextView version=text(page,getString(R.string.app_name)+" · "+BuildConfig.VERSION_NAME,11,MUTED,false); version.setGravity(Gravity.CENTER); version.setPadding(0,dp(16),0,0);
+    dialog.setContentView(root); dialog.setOnDismissListener(ignored -> { settingsDialog=null; recoveryAuthorization=null; });
+    Window window=dialog.getWindow();
+    if (window!=null) {
+      window.setStatusBarColor(BG); window.setNavigationBarColor(BG);
+      window.getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+          | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+    }
+    dialog.show(); if (window!=null) window.setLayout(-1,-1); updateRecoveryAuthorization();
+  }
+
+  private Switch recoveryToggle(LinearLayout parent,String label,String hint,int id,boolean checked) {
+    if (parent.getChildCount()>0) { View divider=new View(this); divider.setBackgroundColor(LINE); parent.addView(divider,new LinearLayout.LayoutParams(-1,dp(1))); }
+    LinearLayout item=row(); item.setPadding(dp(14),dp(14),dp(14),dp(14)); item.setMinimumHeight(dp(76)); parent.addView(item,new LinearLayout.LayoutParams(-1,-2));
+    LinearLayout copy=column(); LinearLayout.LayoutParams copyParams=new LinearLayout.LayoutParams(0,-2,1); copyParams.setMarginEnd(dp(12)); item.addView(copy,copyParams);
+    text(copy,label,14,INK,true); TextView detail=text(copy,hint,11,MUTED,false); detail.setPadding(0,dp(5),0,0);
+    Switch toggle=new Switch(this); toggle.setId(id); toggle.setShowText(false); toggle.setSwitchMinWidth(dp(44)); toggle.setMinimumHeight(dp(48)); toggle.setContentDescription(label+"，"+hint);
+    toggle.setThumbTintList(ColorStateList.valueOf(Color.WHITE));
+    toggle.setTrackTintList(new ColorStateList(new int[][] {new int[] {android.R.attr.state_checked},new int[] {}},new int[] {GREEN,0xffb6c2bb}));
+    toggle.setChecked(checked); item.addView(toggle,new LinearLayout.LayoutParams(-2,-2)); return toggle;
+  }
+
+  private void updateRecoveryAuthorization() {
+    if (recoveryAuthorization==null) return;
+    RecoverySettings recovery=new RecoverySettings(this);
+    setText(recoveryAuthorization,recovery.authorized()?"高级恢复已获授权，按上方开关生效。":"高级恢复和自动开启无障碍需电脑授权后生效。");
+    recoveryAuthorization.setTextColor(recovery.authorized()?MUTED:AMBER);
   }
   private void showConnectionDetails() {
     PhoneReadiness ready=new PhoneReadiness(this); LinearLayout content=showSheet("电脑连接详情");
@@ -346,27 +363,18 @@ public final class MainActivity extends ComponentActivity {
       ControlService service=ControlService.current; if (service!=null) service.localControl("stop");
       stopService(new Intent(this,ControlService.class)); pairing().edit().remove("token").remove("computer").apply();
       store.statusEnabled(false); stopService(new Intent(this,StatusSyncService.class));
-      seenConnected=false; dismissSheet(); main.postDelayed(this::updateHome,150);
+      seenConnected=false; dismissSheet(); if (settingsDialog!=null) settingsDialog.dismiss(); main.postDelayed(this::updateHome,150);
     }).setBackground(ripple(RED,11,false));
     actionButton(content,"暂不更换",false,this::dismissSheet);
   }
   private void showRecovery() {
     RecoverySettings recovery=new RecoverySettings(this);
-    LinearLayout content=showSheet("自动恢复");
+    LinearLayout content=showSheet("自动恢复详情");
     paragraph(content,"开启后，系统回收、手机重启或 App 更新后会尝试恢复后台连接服务。恢复连接不会继续旧控制会话，也不会重放操作。");
-    actionButton(content,recovery.enabled()?"关闭自动恢复":"开启自动恢复",true,() -> {
-      recovery.enabled(!recovery.enabled()); refreshRecoveryServices(); showRecovery();
-    }).setId(R.id.recovery_toggle);
     info(content,"高级恢复授权",recovery.authorized()?"已授权":"未授权",recovery.authorized()?GREEN:AMBER);
     paragraph(content,"高级恢复可重启权限仍开启但未运行的无障碍服务，在 Wi-Fi 断开重连后恢复无线调试；调试开关已开启但 ADB 服务持续停止时，也会尝试重启调试服务。每项最多尝试 3 次 / 30 分钟，无持续唤醒。");
-    paragraph(content,"默认保留已关闭的无障碍权限。若开启下方“自动开启无障碍”，App 重启或检测到权限关闭时会重新开启自己的服务；要保持关闭，请先关闭该选项。无线调试在网络稳定时被关闭仍会保留；若在断网期间手动关闭调试，请同时关闭自动恢复。");
+    paragraph(content,"“自动开启无障碍”默认开启，获得电脑授权后，App 重启或检测到权限关闭时会重新开启自己的服务；要保持关闭，请在设置中关闭该选项。无线调试在网络稳定时被关闭仍会保留；若在断网期间手动关闭调试，请同时关闭自动恢复。");
     if (!recovery.authorized()) paragraph(content,"高级恢复需要已授权电脑额外授予系统设置权限；未授权时仍可使用后台服务恢复。");
-    TextView advanced=actionButton(content,recovery.advanced()?"关闭高级恢复":"开启高级恢复",false,() -> {
-      recovery.advanced(!recovery.advanced()); refreshRecoveryServices(); showRecovery();
-    }); advanced.setId(R.id.recovery_advanced); advanced.setEnabled(recovery.enabled()); advanced.setAlpha(recovery.enabled()?1f:0.45f);
-    TextView accessibility=actionButton(content,recovery.accessibilityOn()?"关闭自动开启无障碍":"开启自动开启无障碍",false,() -> {
-      recovery.accessibilityOn(!recovery.accessibilityOn()); refreshRecoveryServices(); showRecovery();
-    }); accessibility.setId(R.id.recovery_accessibility); accessibility.setEnabled(recovery.enabled() && (recovery.authorized() || recovery.accessibilityOn()));
     paragraph(content,"自动开启无障碍需要高级恢复授权，只影响 ProfilePilot 自己的服务，不会继续旧控制任务。");
     info(content,"最近一次结果",recovery.lastResult());
     if (recovery.lastResultAt()>0) paragraph(content,java.text.DateFormat.getDateTimeInstance().format(new java.util.Date(recovery.lastResultAt()))).setTextSize(11);
@@ -426,7 +434,7 @@ public final class MainActivity extends ComponentActivity {
     try {
       JSONObject target=StatusSyncClient.parse(value); LinearLayout content=showSheet("开启手机状态同步？");
       paragraph(content,"向以下服务器上报权限、锁屏、调试开关及当前 Wi-Fi 地址和发现的无线调试端口，帮助已绑定的电脑自动连接。不上传屏幕或控制凭据。");
-      paragraph(content,target.getString("url")); paragraph(content,"可在「更多 → 手机状态同步」或通知栏停止同步。");
+      paragraph(content,target.getString("url")); paragraph(content,"可在「设置 → 手机状态同步」或通知栏停止同步。");
       actionButton(content,"开启同步",true,() -> {
         dismissSheet(); io.execute(() -> {
           try { StatusSyncClient.pair(this,target); postAlive(() -> { startStatusSync(); message("手机状态同步已开启。"); }); }
@@ -437,7 +445,7 @@ public final class MainActivity extends ComponentActivity {
   }
   private void startStatusSync() {
     try { startForegroundService(new Intent(this,StatusSyncService.class)); }
-    catch (RuntimeException error) { message("状态同步暂未启动，可在更多选项中重新开启。"); }
+    catch (RuntimeException error) { message("状态同步暂未启动，可在设置中重新开启。"); }
   }
   private void openNotifications() {
     dismissSheet();
@@ -558,6 +566,7 @@ public final class MainActivity extends ComponentActivity {
       LinearLayout copy=column(); LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(0,-2,1);
       params.setMarginStart(dp(12)); params.setMarginEnd(dp(6)); view.addView(copy,params);
       name=text(copy,label,14,INK,true); detail=text(copy,hint,11,MUTED,false); detail.setPadding(0,dp(5),0,0);
+      if (hint.isEmpty()) { detail.setVisibility(View.GONE); view.setMinimumHeight(dp(58)); }
       value=text(view,"",12,GREEN,false); value.setMaxWidth(dp(88)); value.setGravity(Gravity.END);
       HomeIcon arrow=icon("chevron",0xff92a197,14); LinearLayout.LayoutParams arrowParams=new LinearLayout.LayoutParams(dp(14),dp(14));
       arrowParams.setMarginStart(dp(3)); view.addView(arrow,arrowParams); clickable(view,label+"，查看设置",action);
@@ -618,5 +627,5 @@ public final class MainActivity extends ComponentActivity {
     super.onStop();
   }
   @Override protected void onPause() { main.removeCallbacks(tick); super.onPause(); }
-  @Override protected void onDestroy() { main.removeCallbacksAndMessages(null); dismissSheet(); io.shutdownNow(); super.onDestroy(); }
+  @Override protected void onDestroy() { main.removeCallbacksAndMessages(null); dismissSheet(); if (settingsDialog!=null) settingsDialog.dismiss(); io.shutdownNow(); super.onDestroy(); }
 }

@@ -58,7 +58,8 @@ readline.createInterface({input:process.stdin}).on('line', line=>{
     live: async (_, generation, command) => {
       assert.equal(generation, 3); h.calls.push(structuredClone(command));
       if (command.op === 'probe') return { protocol: 1, ...(options.capability === false ? {} : { cameraFrameProvenance: 1 }),
-        ...(options.legacyCamera ? {} : { cameraPointChange: options.cameraPointChange ?? 'release-newdown' }) };
+        ...(options.legacyCamera ? {} : { cameraPointChange: options.cameraPointChange ?? 'release-newdown',
+          ...(options.missingCameraGap ? {} : { cameraRepressGapMs: options.cameraRepressGapMs ?? 100 }) }) };
       if (command.op === 'frame') {
         h.captures++;
         const cameraProof = options.frameProof?.(h);
@@ -88,8 +89,10 @@ test('camera integration rejects missing capability and basic backend before cap
   assert.equal(basic.starts, 0); assert.equal(basic.captures, 0); assert.equal(basic.touches.length, 0);
 });
 
-test('camera control refuses legacy MOVE companions for either camera role before any frame or input', async t => {
-  for (const options of [{ legacyCamera: true }, { cameraPointChange: 'continuous-move' }]) {
+test('camera control refuses legacy MOVE or unnegotiated release gaps for either role before any frame or input', async t => {
+  for (const options of [{ legacyCamera: true }, { cameraPointChange: 'continuous-move' },
+    { missingCameraGap: true }, { cameraRepressGapMs: 0 }, { cameraRepressGapMs: 99 },
+    { cameraRepressGapMs: '100' }, { cameraRepressGapMs: 1000 }]) {
     for (const role of ['target', 'self']) {
       const h = harness(t, options), calibrated = config();
       if (role === 'self') { calibrated.selfCameraAssist = { ...calibrated.cameraAssist, team: 'green' }; delete calibrated.cameraAssist; }

@@ -272,10 +272,11 @@ export class GameFollower {
       if (probe?.protocol !== 1) throw new Error("请更新手机开发版 App，以启用视觉跟随");
       if ((config.cameraAssist || config.selfCameraAssist) && probe?.cameraFrameProvenance !== 1) throw new Error("请更新手机开发版 App，以启用镜头画面凭据");
       // Gesture completion alone does not prove the game adopted a small camera
-      // MOVE. Camera projection requires the companion's release/new-DOWN policy.
+      // MOVE. An immediate UP/new-DOWN can also leave the game self-centered.
+      // Require the versioned release policy and its bounded release interval.
       if (mode === "control" && (config.cameraAssist || config.selfCameraAssist)
-        && probe?.cameraPointChange !== "release-newdown")
-        throw new Error("请更新手机开发版 App，以在镜头换点时松开重按，避免使用未实际移动的视角");
+        && (probe?.cameraPointChange !== "release-newdown" || probe?.cameraRepressGapMs !== 100))
+        throw new Error("请更新手机开发版 App，以在镜头换点时松开重按并留出释放间隔");
       run.camera = new GameFollowCamera({ enabled: !!(config.cameraAssist || config.selfCameraAssist), mode, backend,
         provenanceVersion: probe?.cameraFrameProvenance, targetEnabled: !!config.cameraAssist, intervalMs: config.intervalMs,
         ...(config.cameraAssist ? { placement: { ...config, cameraAssist: config.cameraAssist } } : {}),

@@ -203,6 +203,10 @@ function syncTaskGroups() {
   return groupQueue;
 }
 const childSessions = new Set();
+let debugFrameCapture = false;
+// Protocol follow-ups must run while a page command awaits a network response.
+// Never allow Runtime.evaluate/Input/DOM mutations to bypass the action queue.
+const debugFollowups = new Set(['Network.enable','Network.disable','Network.getResponseBody','Runtime.enable','Runtime.runIfWaitingForDebugger','Log.enable','Performance.enable','Target.setAutoAttach','Fetch.enable','Fetch.disable','Fetch.continueRequest','Fetch.fulfillRequest','Fetch.failRequest','Tracing.start','Tracing.end']);
 let access = { blockedOrigins: [], confirmActions: false }, uiSequence = 0;
 const uiPending = new Map();
 let previewCapture;
@@ -252,7 +256,7 @@ function requireOwner(expected) {
 }
 async function state() {
   const tab = currentTab ? await chrome.tabs.get(currentTab).catch(() => undefined) : undefined;
-  return { connected: authenticated && socket?.readyState === WebSocket.OPEN, extensionUi: Boolean(extensionUi), taskTabs: true, controlGeneration: controlGeneration(), extensionVersion: chrome.runtime.getManifest?.().version || '0.2.0', installationType, installationMode, capabilities: ['extensionUi', 'liveView', 'tabs', 'cdp', 'cdpSessions', 'history', 'downloads', 'sidePanel', 'taskGroups'], profileId: config?.profileId, tabId: currentTab, sessionId, ownership, tabTitle: tab?.title, url: tab?.url, pausedByBrowser, controlIssue, connectionError, access };
+  return { connected: authenticated && socket?.readyState === WebSocket.OPEN, extensionUi: Boolean(extensionUi), taskTabs: true, controlGeneration: controlGeneration(), extensionVersion: chrome.runtime.getManifest?.().version || '0.2.0', installationType, installationMode, capabilities: ['debugCapture', 'extensionUi', 'liveView', 'tabs', 'cdp', 'cdpSessions', 'history', 'downloads', 'sidePanel', 'taskGroups'], profileId: config?.profileId, tabId: currentTab, sessionId, ownership, tabTitle: tab?.title, url: tab?.url, pausedByBrowser, controlIssue, connectionError, access };
 }
 function assertSite(url) {
   if (!usable(url)) throw new Error('此页面不允许自动化，请选择普通网页。');
@@ -421,7 +425,7 @@ async function detach() {
   // would prevent takeover/release from ever reaching Chrome.
   if (debuggerRecovery) debuggerRecovery.cancelled = true;
   const tabId = currentTab; const wasAttached = attached; attached = false; preview = false;
-  childSessions.clear();
+  childSessions.clear(); debugFrameCapture = false;
   if (wasAttached) await bounded(chrome.debugger.detach({ tabId }), 1000, '停止浏览器调试超时。').catch(() => {});
   await releaseFrameGuards();
 }
@@ -714,7 +718,10 @@ async function handle(method, p, check = () => {}) {
     if (typeof p.method !== 'string' || !/^[A-Za-z]+\.[A-Za-z0-9]+$/.test(p.method)) throw new Error('无效的 CDP 方法。');
     if (p.cdpSessionId && !childSessions.has(p.cdpSessionId)) throw new Error('子 frame 调试会话已失效，请重新观察。');
     if (p.method === 'Page.navigate') assertSite(p.params?.url);
-    await attach(check); check(); requireOwner(p.sessionId); return debuggerCommand(p.method, p.params || {}, false, p.cdpSessionId);
+    await attach(check); check(); requireOwner(p.sessionId);
+    if(p.debugCapture===true && p.method==='Target.setAutoAttach')debugFrameCapture=p.params?.waitForDebuggerOnStart===true;
+    const cdpParams=p.method==='Target.setAutoAttach'&&p.params?.autoAttach&&debugFrameCapture?{...p.params,waitForDebuggerOnStart:true}:p.params||{};
+    return debuggerCommand(p.method, cdpParams, false, p.cdpSessionId);
   }
   if (method.startsWith('downloads.')) return handleDownload(method, p, check);
   throw new Error('未知扩展操作。');
@@ -875,7 +882,7 @@ async function connect() {
       };
       // Read-only preview capture and download waiting must not hold the action
       // queue: Chrome may leave a hidden-window capture pending indefinitely.
-      if (message.method === 'downloads.wait' || message.method === 'liveView') void execute();
+      if (message.method === 'downloads.wait' || message.method === 'liveView' || (message.method==='cdp' && message.params?.debugCapture===true && debugFollowups.has(message.params.method))) void execute();
       else commandQueue = commandQueue.then(execute);
     };
     ws.onclose = event => {
@@ -911,7 +918,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
   // inserted extension frame. Recover only when that guard proves a recent
   // removal in this same controlled document. Never replay the CDP command.
   if (reason !== 'canceled_by_user' && ownership === 'agent' && !pausedByBrowser && frameGuards.size && !debuggerRecovery) {
-    attached = false; preview = false; childSessions.clear();
+    attached = false; preview = false; childSessions.clear(); debugFrameCapture = false;
     const tabId = currentTab, owner = sessionId, generation = controlGeneration(), since = lastAttachedAt;
     const job = { cancelled: false, promise: undefined };
     const check = () => {

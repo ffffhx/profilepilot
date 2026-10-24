@@ -216,3 +216,19 @@ test('local HTTP discovery/authentication/status works without a model or platfo
     assert.equal(JSON.stringify(status).includes(connection.token), false);
   } finally { bridge.close(); assert.equal(fs.existsSync(path.join(root, 'native-control.json')), false); fs.rmSync(root, { recursive: true, force: true }); }
 });
+
+test('debug protocol follow-ups can resolve an intercepted request while evaluation waits; takeover still stops them', async t => {
+  const w=await worker();t.after(w.close);await w.handle('claim',{sessionId:'one',tabId:7});
+  let unblock;const blocked=new Promise(resolve=>unblock=resolve);
+  w.chrome.debugger.sendCommand=async(_target,method)=>{w.calls.push(method);if(method==='Runtime.evaluate')await blocked;return{};};
+  w.socket.receive({id:100,method:'cdp',params:{sessionId:'one',method:'Runtime.evaluate'}});
+  await new Promise(r=>setImmediate(r));
+  w.socket.receive({id:101,method:'cdp',params:{sessionId:'one',method:'Fetch.fulfillRequest',debugCapture:true,params:{requestId:'pending',responseCode:200}}});
+  await new Promise(r=>setImmediate(r));assert.ok(w.messages.some(m=>m.id===101&&!m.error));
+  w.socket.receive({id:102,method:'cdp',params:{sessionId:'one',method:'Runtime.evaluate',debugCapture:true}});
+  await new Promise(r=>setImmediate(r));assert.equal(w.calls.filter(c=>c==='Runtime.evaluate').length,1);
+  w.socket.receive({id:103,method:'control',params:{sessionId:'one',action:'handoff'}});
+  w.socket.receive({id:104,method:'cdp',params:{sessionId:'one',method:'Network.getResponseBody',debugCapture:true,params:{requestId:'pending'}}});
+  await new Promise(r=>setImmediate(r));assert.ok(w.messages.find(m=>m.id===104)?.error);
+  unblock();await new Promise(r=>setImmediate(r));
+});

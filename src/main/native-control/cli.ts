@@ -8,6 +8,7 @@ import { isNativeControlMethod } from "./protocol";
 import { ensureBrowserService } from '../browser-service/launcher';
 import { browserServiceRoot, readBrowserServiceConnection, processAlive, serviceRequest } from '../browser-service/connection';
 import { controlRecovery } from '../../shared/control-recovery';
+import { debugMethods, parseDebugArgs } from '../browser-debug/arguments';
 export { nativeControlError } from "./errors";
 
 export function nativeControlRoot(): string { return process.env.PROFILEPILOT_NATIVE_ROOT || path.join(process.env.CPM_DATA_DIR || defaultDataDir(), "browser-tasks"); }
@@ -55,7 +56,15 @@ ppilot browser [--profile native:Default] [--session NAME] METHOD [--params JSON
   extension-ui status|observe    Chrome approval status / versioned button refs
   extension-ui click            params {version,ref}; no password values exposed
   extension-ui disconnect       Close CDP companion before ordinary page commands
-  debug                          Enable Runtime/Network/Log/Performance events
+  debug start|status|stop         Collect Network/Runtime/Log events for this owned tab
+  network requests               --filter URL --type fetch,xhr --method POST --status 4xx --failed
+  network request ID             Request detail; --offset N --text-limit N --no-body
+  network clear                  Clear the query list; active HAR keeps its records
+  network har start|stop [PATH]   --content text|all|none; proactively retain response bodies
+  network route URL              --abort OR --body TEXT [--status 200 --content-type TYPE]
+  network unroute [URL] | routes  Remove matching/all routes or list them
+  console | errors               --filter TEXT --level error --since CURSOR --limit N --clear
+  profiler start|stop [PATH]      CDP performance trace JSON (trace is an alias)
   events --params JSON           Read events after {since:cursor,limit:100}
   history --params JSON          {query,startTime,endTime,maxResults}
   download --params JSON         Download and register a local output
@@ -125,10 +134,11 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   const controlAlias = ["handoff", "resume", "complete", "release"].includes(method || "");
   if (!isNativeControlMethod(method) && !controlAlias) invalidInput(method ? `未知浏览器方法：${method}` : "需要浏览器方法；运行 ppilot browser --help 查看用法。");
   if (!/^[\w.-]{1,128}$/.test(requestId)) invalidInput("requestId 必须是 1–128 个字母、数字、下划线、连字符或点。");
-  if (output && !["screenshot", "observe"].includes(method!)) invalidInput("--output 仅支持 screenshot 或 observe。");
+  if (output && !["screenshot", "observe",...debugMethods].includes(method!)) invalidInput("--output 仅支持截图或调试导出。");
   const positional = ["open", "switch", "cdp", "extension-ui"].includes(method!) && args[0] && !args[0].startsWith("--") ? args.shift() : undefined;
-  if (args.length) invalidInput(`未知参数：${args.join(" ")}`);
   let params = readParams(inline, file, stdin);
+  if(debugMethods.includes(method!)){params=parseDebugArgs(method!,args,params);if(output)params.path=output;args.length=0;}
+  if (args.length) invalidInput(`未知参数：${args.join(" ")}`);
   if (method === 'extension-ui') {
     if (positional !== undefined) params.action = positional;
     if (!['connect', 'status', 'observe', 'click', 'disconnect'].includes(params.action)) invalidInput('extension-ui 需要 connect/status/observe/click/disconnect。');
@@ -170,7 +180,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     // screenshot/observe would create a different visual state. Keep image bytes
     // out of the text tool result; the calling Agent opens this local artifact.
     process.stdout.write(JSON.stringify({ ok: true, requestId, result: { ...result, screenshotDataUrl: undefined, screenshotPath: path.resolve(output) } }) + "\n");
-  } else if (output) {
+  } else if (output && method==='screenshot') {
     if (method !== "screenshot" || typeof result?.data !== "string") throw new Error("--output 仅支持截图。");
     writeFileSync(output, Buffer.from(result.data, "base64"), { mode: 0o600 }); process.stdout.write(JSON.stringify({ ok: true, requestId, path: path.resolve(output), capturedAt: result.capturedAt, stable: result.stable, coordinateObservation: false }) + "\n");
   } else process.stdout.write(JSON.stringify({ ok: true, requestId, result }) + "\n");

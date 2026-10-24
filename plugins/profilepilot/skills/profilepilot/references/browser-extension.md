@@ -50,6 +50,9 @@ Use `open URL`, `switch TAB_ID` and `newTab` with the same `--session`. Ordinary
 
 ## Debugging and downloads
 
+See [Network, Console and performance inspection](browser-debug.md) for request
+filters, retained bodies/HAR, iframe capture, mocks and performance recording.
+
 `debug` enables Runtime/Network/Log/Performance events; `events` takes `{ "since": 0, "limit": 100 }`. Continue from the returned cursor; honor `hasMore` and `dropped`. `cdp METHOD --params-file params.json` exposes the domains Chrome's extension debugger supports, not an unrestricted browser-level CDP server. Use `--cdp-session ID` for child frames; keep the task's `--session` separately.
 
 `history` takes `{ "query": "example", "maxResults": 100 }` and searches the target Profile's history. Query only the scope the task needs.

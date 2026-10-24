@@ -1,4 +1,4 @@
-import { chromium, type Browser, type BrowserContext, type Page, type Frame, type Locator, type Dialog, type Request, type Response } from "playwright-core";
+import { chromium, type Browser, type BrowserContext, type Page, type Frame, type Locator, type Dialog } from "playwright-core";
 import { mkdir, mkdtemp, readFile, writeFile, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -7,8 +7,9 @@ import { EngineError, type EngineCommand, required, option, has, positiveNumber,
 import { EngineReferences } from "./snapshot";
 import { EngineTransport } from "./transport";
 import { parseCommonBrowserAction } from "../../shared/browser-contract";
+import { BrowserDebugSession } from '../browser-debug/session';
+import { parseDebugArgs } from '../browser-debug/arguments';
 
-interface NetworkRecord { id: string; url: string; method: string; type: string; status?: number; failure?: string; request: Request; response?: Response }
 export class BrowserEngine {
   connectionStage = "disconnected";
   private browser?: Browser;
@@ -21,21 +22,22 @@ export class BrowserEngine {
   private selectedTargetId?: string;
   private references = new EngineReferences();
   private dialogs = new Map<Page, Dialog>();
-  private network = new Map<Request, NetworkRecord>();
-  private requestSequence = 0;
-  private messages: Array<{ type: string; text: string; at: string }> = [];
-  private errors: string[] = [];
   private noAutoDialog = false;
   private timeout = 15000;
   private transport?: EngineTransport;
   private artifactsDir?: string;
-  invalidateReferences(): void { this.references.clear(); }
+  private debug?: BrowserDebugSession;
+  private debugSessionId?: string;
+  private debugTarget?: string;
+  private debugAllowed = true;
+  invalidateReferences(): void { this.references.clear(); this.debugAllowed=false;this.debug?.suspend('control-changed'); }
 
   async disconnect(): Promise<void> {
     this.connectionStage = "disconnected";
+    this.debug?.suspend('disconnected');this.debug=undefined;this.debugSessionId=undefined;this.debugTarget=undefined;this.debugAllowed=false;
     const browser = this.browser;
     this.browser = undefined; this.context = undefined; this.page = undefined; this.frame = undefined;
-    this.references.clear(); this.tabs.clear(); this.dialogs.clear(); this.network.clear();
+    this.references.clear(); this.tabs.clear(); this.dialogs.clear();
     // connectOverCDP close disconnects this client; it does not close the user's Chrome.
     this.transport?.close(); this.transport = undefined;
     await browser?.close();
@@ -51,13 +53,14 @@ export class BrowserEngine {
     this.connectionStage = "opening Gateway transport";
     const transport = await EngineTransport.connect(endpoint);
     this.transport = transport;
+    transport.onEvent(event=>this.debug?.event(event));
     this.artifactsDir = await mkdtemp(path.join(os.tmpdir(), "profilepilot-browser-"));
     let browser: Browser;
     this.connectionStage = "initializing browser";
     try { browser = await chromium.connectOverCDP(transport, { timeout: 20000, noDefaults: true, artifactsDir: this.artifactsDir }); }
     catch (error) { transport.close(); this.transport = undefined; throw error; }
     this.browser = browser; this.endpoint = endpoint;
-    browser.on("disconnected", () => { if (this.browser === browser) { this.page = undefined; this.references.clear(); } });
+    browser.on("disconnected", () => { if (this.browser === browser) { this.page = undefined; this.references.clear();this.debugAllowed=false;this.debug?.suspend('disconnected'); } });
     const context = browser.contexts()[0];
     if (!context) { await this.disconnect(); throw new EngineError("Browser did not expose its default context"); }
     this.context = context;
@@ -65,12 +68,6 @@ export class BrowserEngine {
     context.setDefaultNavigationTimeout(30000);
     for (const page of context.pages()) this.register(page);
     context.on("page", page => this.register(page));
-    context.on("request", request => {
-      this.network.set(request, { id: `r${++this.requestSequence}`, url: request.url(), method: request.method(), type: request.resourceType(), request });
-      if (this.network.size > 1000) this.network.delete(this.network.keys().next().value!);
-    });
-    context.on("response", response => { const record = this.network.get(response.request()); if (record) { record.response = response; record.status = response.status(); } });
-    context.on("requestfailed", request => { const record = this.network.get(request); if (record) record.failure = request.failure()?.errorText; });
     let selected: Page | undefined;
     if (this.selectedTargetId) {
       for (const page of context.pages()) {
@@ -103,20 +100,34 @@ export class BrowserEngine {
       if (this.noAutoDialog) this.dialogs.set(page, dialog);
       else void dialog.dismiss().catch(() => {});
     });
-    page.on("console", message => {
-      this.messages.push({ type: message.type(), text: message.text(), at: new Date().toISOString() });
-      if (this.messages.length > 1000) this.messages.shift();
-    });
-    page.on("pageerror", error => { this.errors.push(error.message); if (this.errors.length > 1000) this.errors.shift(); });
+
   }
   private identifyPage(page: Page): Promise<string> {
     const marker = `profilepilot_target_${randomUUID()}`;
     return this.transport!.identifyTarget(marker, () => page.evaluate(`/* ${marker} */ 0`));
   }
   private async select(page: Page): Promise<void> {
+    if(this.page && this.page!==page)await this.detachDebug();
     this.register(page); this.page = page; this.frame = page.mainFrame(); this.references.clear();
     this.selectedTargetId = await this.identifyPage(page);
     this.tabs.get(page)!.targetId = this.selectedTargetId;
+  }
+  private async detachDebug():Promise<void>{
+    this.debug?.suspend('target-changed');
+    const id=this.debugSessionId;this.debugSessionId=undefined;this.debugTarget=undefined;
+    if(id)await this.transport?.request('Target.detachFromTarget',{sessionId:id});
+  }
+  private async debugCommand(method:string,args:string[]):Promise<any>{
+    const params=parseDebugArgs(method,args);
+    this.current();this.debugAllowed=true;
+    if(this.debugTarget!==this.selectedTargetId)await this.detachDebug();
+    if(!this.debug){
+      const check=()=>{this.current();if(!this.debugAllowed)throw new EngineError('Debug capture stopped after control changed','BROWSER_USER_IN_CONTROL');};
+      this.debug=new BrowserDebugSession({check,send:(method,params,session)=>{check();return this.transport!.request(method,params,session);}},path.resolve('browser-debug-artifacts'));
+    }
+    if(!this.debugSessionId){this.debugSessionId=await this.transport!.attachDebug(this.selectedTargetId!);this.debugTarget=this.selectedTargetId;}
+    this.debug.bindTarget(this.selectedTargetId!,this.debugSessionId);
+    return this.debug.command(method,params);
   }
   private current(): { page: Page; frame: Frame; context: BrowserContext } {
     if (!this.browser?.isConnected() || !this.context) throw new EngineError("Browser session is disconnected. Reconnect through ProfilePilot Gateway.", "BROWSER_DISCONNECTED");
@@ -225,7 +236,7 @@ export class BrowserEngine {
       case "download": return this.download(arg(0, "selector"), path.resolve(arg(1, "download path")));
       case "cookies": return this.cookies(args);
       case "storage": return this.storage(args);
-      case "network": return this.networkCommand(args);
+      case "network": case "debug": case "profiler": return this.debugCommand(verb,args);
       case "dialog": {
         const dialog = this.dialogs.get(page);
         if (!dialog) throw new EngineError("No pending dialog");
@@ -235,8 +246,7 @@ export class BrowserEngine {
       }
       case "set": return this.settings(args);
       case "state": return this.state(args);
-      case "console": { const messages = [...this.messages]; if (has(args, "--clear")) this.messages = []; return { messages }; }
-      case "errors": { const errors = [...this.errors]; if (has(args, "--clear")) this.errors = []; return { errors }; }
+      case "console": case "errors": return this.debugCommand(verb,args);
       case "trace":
         if (args[0] === "start") { await context.tracing.start({ screenshots: true, snapshots: true }); return {}; }
         if (args[0] === "stop") { const destination = path.resolve(args[1] || `trace-${Date.now()}.zip`); await context.tracing.stop({ path: destination }); return { path: destination }; }
@@ -513,30 +523,6 @@ export class BrowserEngine {
       if (op) return { value: store.getItem(op) };
       return { storage: Object.fromEntries(Array.from({ length: store.length }, (_, i) => { const k = store.key(i)!; return [k, store.getItem(k)]; })) };
     }, { kind, op: args[1], key: args[2], value: args[3] });
-  }
-  private async networkCommand(args: string[]): Promise<any> {
-    const { context } = this.current();
-    if (args[0] === "route") {
-      const pattern = required(args[1], "URL pattern"), body = option(args, "--body");
-      await context.route(pattern, async route => {
-        if (has(args, "--abort")) await route.abort();
-        else if (body !== undefined) await route.fulfill({ body, contentType: option(args, "--content-type") || "application/json", status: Number(option(args, "--status") || 200) });
-        else await route.continue();
-      });
-      return {};
-    }
-    if (args[0] === "unroute") { await context.unroute(required(args[1], "URL pattern")); return {}; }
-    if (args[0] === "requests") {
-      const filter = option(args, "--filter");
-      return { requests: [...this.network.values()].filter(r => !filter || r.url.includes(filter)).map(({ request, response, ...r }) => r) };
-    }
-    if (args[0] === "request") {
-      const record = [...this.network.values()].find(r => r.id === args[1]);
-      if (!record) throw new EngineError("Unknown request id");
-      const { request, response, ...r } = record;
-      return { ...r, requestHeaders: await request.allHeaders(), postData: request.postData(), responseHeaders: await response?.allHeaders(), body: (await response?.text().catch(() => undefined))?.slice(0, 1000000) };
-    }
-    throw new EngineError("Unknown network operation", "BROWSER_INVALID_ARGUMENTS");
   }
   private async settings(args: string[]): Promise<any> {
     const { page, context } = this.current();

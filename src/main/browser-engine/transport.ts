@@ -12,11 +12,21 @@ export class EngineTransport implements ConnectOverCDPTransport {
   private forwarded = new Map<number, number>();
   private targets = new Map<string, string>();
   private observations = new Map<string, string | undefined>();
+  private listeners = new Set<(event: any)=>void>();
+  private ownSessions = new Set<string>();
+  private attaching = new Set<string>();
+  onEvent(listener:(event:any)=>void):()=>void { this.listeners.add(listener);return()=>this.listeners.delete(listener); }
   private pending = new Map<number, { resolve(value: any): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>();
   private constructor(private socket: WebSocket) {
     socket.addEventListener("message", event => {
       let message: any;
       try { message = JSON.parse(String(event.data)); } catch { this.close(); return; }
+      let own = this.ownSessions.has(message.sessionId);
+      if(message.method==='Target.attachedToTarget' && (own || this.attaching.has(message.params.targetInfo.targetId))) {
+        this.ownSessions.add(message.params.sessionId);own=true;
+      }
+      if(message.method==='Target.detachedFromTarget' && this.ownSessions.delete(message.params.sessionId))own=true;
+      if(message.method)for(const listener of this.listeners)listener(message);
       if (message.method === "Target.attachedToTarget") this.targets.set(message.params.sessionId, message.params.targetInfo.targetId);
       if (message.method === "Target.detachedFromTarget") this.targets.delete(message.params.sessionId);
       const pending = this.pending.get(message.id);
@@ -25,6 +35,7 @@ export class EngineTransport implements ConnectOverCDPTransport {
         message.error ? pending.reject(new EngineError(message.error.message, "BROWSER_CDP_ERROR")) : pending.resolve(message.result);
         return;
       }
+      if(own)return;
       if (typeof message.id === "number") {
         const original = this.forwarded.get(message.id);
         if (original === undefined) return;
@@ -81,15 +92,20 @@ export class EngineTransport implements ConnectOverCDPTransport {
       return target;
     } finally { this.observations.delete(marker); }
   }
-  request(method: string, params: Record<string, unknown> = {}): Promise<any> {
+  request(method: string, params: Record<string, unknown> = {}, sessionId?: string): Promise<any> {
     if (this.socket.readyState !== WebSocket.OPEN) return Promise.reject(new EngineError("Gateway disconnected", "BROWSER_DISCONNECTED"));
     const id = ++this.sequence;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { this.pending.delete(id); reject(new EngineError(`CDP ${method} timed out`, "BROWSER_CDP_TIMEOUT")); }, 15000);
       this.pending.set(id, { resolve, reject, timer });
-      try { this.socket.send(JSON.stringify({ id, method, params })); }
+      try { this.socket.send(JSON.stringify({ id, method, params, sessionId })); }
       catch (error) { clearTimeout(timer); this.pending.delete(id); reject(error); }
     });
+  }
+  async attachDebug(targetId:string):Promise<string> {
+    this.attaching.add(targetId);
+    try { const result=await this.request('Target.attachToTarget',{targetId,flatten:true});this.ownSessions.add(result.sessionId);return result.sessionId; }
+    finally { this.attaching.delete(targetId); }
   }
   close(): void { this.socket.close(); }
 }

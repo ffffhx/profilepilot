@@ -8,6 +8,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import {debugFixture,verifyBrowserDebug} from './browser-debug-checks.mjs';
 const require = createRequire(import.meta.url);
 const { BrowserGatewayDaemon } = require("../dist/main/browser-gateway-daemon");
 const { requestBrowserGateway } = require("../dist/main/browser-gateway-client");
@@ -27,6 +28,7 @@ const cliEntry = process.env.PP_ENGINE_CLI || path.resolve("dist/main/profilepil
 const daemon = new BrowserGatewayDaemon(home);
 let chromePid, port, electron;
 const server = http.createServer((req, res) => {
+  if(debugFixture(req,res))return;
   if (req.url === "/file") { res.writeHead(200, { "Content-Type": "text/plain", "Content-Disposition": 'attachment; filename="report.txt"' }); res.end("typescript-download"); return; }
   if (req.url === "/api") { res.writeHead(200, { "Content-Type": "application/json" }); res.end('{"original":true}'); return; }
   res.setHeader("Content-Type", "text/html;charset=utf-8");
@@ -74,7 +76,7 @@ try {
     const source = path.join(root, "fixture.cjs"), ready = path.join(root, "ready");
     await writeFile(source, `const {app,BrowserWindow}=require('electron');app.setPath('userData',${JSON.stringify(path.join(root, "electron"))});app.whenReady().then(async()=>{const w=new BrowserWindow({show:false,webPreferences:{offscreen:true,backgroundThrottling:false}});await w.loadURL('about:blank');require('fs').writeFileSync(${JSON.stringify(ready)},'ready');});`);
     const childEnv = { ...process.env }; delete childEnv.ELECTRON_RUN_AS_NODE;
-    electron = spawn(require("electron"), [`--remote-debugging-port=${backendPort}`, source], { env: childEnv, stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
+    electron = spawn(require("electron"), ['--site-per-process',`--remote-debugging-port=${backendPort}`, source], { env: childEnv, stdio: ["ignore", "ignore", "pipe"], windowsHide: true });
     electron.stderr.on("data", chunk => { if (process.env.PP_ENGINE_TRACE) process.stderr.write(chunk); });
     for (let i = 0; ; i++) {
       if (await readFile(ready, "utf8").catch(() => "") === "ready") break;
@@ -145,6 +147,12 @@ try {
   assert.equal((await command(["eval", "fetch('/api').then(r=>r.json())"])).result.mocked, true);
   await command(["network", "unroute", "**/api"]);
   console.log("PASS screenshot, upload/download, cookies/storage and network routing");
+  if(process.argv.includes('--debug'))await verifyBrowserDebug({
+    command:(method,params)=>command([method,'--params',JSON.stringify(params)]),
+    evaluate:async expression=>(await command(['eval',expression])).result,
+    navigate:address=>command(['open',address]),baseUrl:url,
+    outputDir:path.resolve('artifacts',`browser-debug-${Date.now()}`,process.argv.includes('--electron')?'electron':'chrome')
+  });
   const annotated = await command(["screenshot", path.join(root, "annotated.png"), "--annotate"]);
   assert.match(annotated.snapshot, /Increment/);
   assert.equal((await command(["eval", "document.querySelectorAll('[data-profilepilot-overlay=screenshot]').length"])).result, 0);

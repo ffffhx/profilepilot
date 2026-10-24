@@ -1,4 +1,4 @@
-export const ENGINE_VERSION = "1.1.0";
+export const ENGINE_VERSION = "1.2.0";
 export class EngineError extends Error {
   constructor(message: string, readonly code = "BROWSER_ENGINE_ERROR") { super(message); }
 }
@@ -109,7 +109,12 @@ eval JS | eval --stdin | eval -b BASE64
 download SELECTOR PATH | cookies [set NAME VALUE|clear]
 storage local|session [KEY|set KEY VALUE|clear]
 network route PATTERN [--abort|--body TEXT] | network unroute PATTERN
-network requests [--filter TEXT] | network request ID
+debug start|status|stop
+network requests [--filter TEXT --type fetch,xhr --method POST --status 4xx --failed --since N --limit N]
+network request ID [--offset N --text-limit N --no-body] | network clear | network routes
+network har start [--content text|all|none] | network har stop [PATH]
+profiler start | profiler stop [PATH] (Chrome performance trace JSON)
+console | errors [--filter TEXT --level error --since N --limit N --clear]
 dialog accept [TEXT] | dialog dismiss
 set viewport W H | set geo LAT LON | set offline on|off
 set headers JSON | set credentials USER PASSWORD | set media dark|light

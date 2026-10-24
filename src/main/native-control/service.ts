@@ -12,8 +12,14 @@ import { isNativeControlMethod } from "./protocol";
 import { nativeExtensionReady, NATIVE_EXTENSION_UPDATE_MESSAGE } from "../tasks/native-compatibility";
 import { NativeExtensionUi } from './extension-ui';
 import { listSiteAdapters } from '../site-adapters/catalog';
+import { BrowserDebugSession, type DebugEvent } from '../browser-debug/session';
 
 interface Session {
+  debug?: BrowserDebugSession;
+  debugTab?: number;
+  debugEpoch?: number;
+  debugFrames?: Map<string,DebugEvent>;
+  frameTab?: number;
   task: BrowserTask;
   queue: Promise<unknown>;
   epoch: number;
@@ -67,12 +73,28 @@ export class NativeControlService {
       if (event.type === "disconnected" || event.type === "state") {
         for (const session of this.sessions.values()) if (session.task.profileId === event.profileId) this.updateControlState(session, event.type === "state" ? event.state : undefined);
       }
+      if (event.type === 'cdp' && event.method && event.sessionId) {
+        const session = this.sessions.get(event.sessionId);
+        if (session?.task.profileId === event.profileId && session.frameTab===event.tabId) {
+          const frameEvent={method:event.method,params:event.params,sessionId:event.cdpSessionId};
+          if(event.method==='Target.attachedToTarget' && event.params?.targetInfo?.type==='iframe'){
+            session.debugFrames??=new Map();session.debugFrames.set(event.params.sessionId,frameEvent);
+          }
+          if(event.method==='Target.detachedFromTarget'){
+            const removed=new Set<string>([event.params?.sessionId]);
+            for(const [id,frame] of session.debugFrames||[])if(frame.sessionId&&removed.has(frame.sessionId))removed.add(id);
+            for(const id of removed)session.debugFrames?.delete(id);
+          }
+          if(event.tabId === session.debugTab)session.debug?.event(frameEvent);
+        }
+      }
     });
   }
-  close(): void { this.unsubscribe(); this.extensionUi.close(); this.browser.dispose?.(); }
+  close(): void { for(const session of this.sessions.values())session.debug?.suspend('service-closed'); this.unsubscribe(); this.extensionUi.close(); this.browser.dispose?.(); }
   hasSessions(): boolean { return this.sessions.size > 0; }
   ownsSession(profileId: string, sessionId: string): boolean { return this.sessions.get(sessionId)?.task.profileId === profileId; }
   private updateControlState(session: Session, state: NativeEvent["state"]): void {
+    if(session.frameTab!==state?.tabId)session.debugFrames?.clear();session.frameTab=state?.tabId;
     const next = { connected: state?.connected === true, owned: state?.ownerSessionId === session.task.sessionId,
       agent: state?.ownership === "agent", paused: state?.pausedByBrowser === true, generation: state?.controlGeneration };
     const previous = session.control;
@@ -82,6 +104,8 @@ export class NativeControlService {
         (previous.agent && !next.agent) || (!previous.paused && next.paused) ||
         (previous.generation !== undefined && previous.generation !== next.generation)) session.epoch++;
     session.control = next;
+    if (session.debug && (session.debugEpoch !== session.epoch || session.debugTab !== state?.tabId || !next.connected || !next.owned || !next.agent || next.paused)) {session.debug.suspend('control-or-tab-changed');session.debugFrames?.clear();}
+    if(!next.connected||!next.owned||!next.agent||next.paused)session.debugFrames?.clear();
     if (previous.generation !== undefined && previous.generation !== next.generation) this.extensionUi.cancel(session.task.sessionId);
     if (!next.connected || !next.owned || !next.agent || next.paused) {
       session.task.observation = undefined; this.extensionUi.cancel(session.task.sessionId);
@@ -221,7 +245,7 @@ export class NativeControlService {
         // Invalidate queued resume/actions before awaiting the extension. Keep
         // the reservation until termination succeeds, and allow explicit retry
         // after failure without ever reopening this generation for new work.
-        session.ending = true; session.epoch++; task.observation = undefined;
+        session.ending = true; session.epoch++; task.observation = undefined; session.debug?.suspend('session-ended');
         this.extensionUi.cancel(task.sessionId);
         const result = (async () => {
           if (!this.bridge.states().find(s => s.profileId === task.profileId)?.connected) throw new NativeControlError("NATIVE_DISCONNECTED", "扩展断线，尚未确认会话结束；已保留会话身份。重连后请显式 complete 或 release，不会自动恢复或重放。");
@@ -233,7 +257,7 @@ export class NativeControlService {
         try { return await result; }
         finally { if (session.termination === result) session.termination = undefined; }
       }
-      if (params.action === "handoff") { session.epoch++; session.control.agent = false; this.extensionUi.cancel(task.sessionId); }
+      if (params.action === "handoff") { session.epoch++; session.control.agent = false; session.debug?.suspend('user-control'); this.extensionUi.cancel(task.sessionId); }
     }
     // Bind permission before joining the service queue. The extension also
     // checks this original token, including if its newer state arrives late.
@@ -300,11 +324,22 @@ export class NativeControlService {
         } finally { task.observation = undefined; }
       }
       if (method === "screenshot") return this.browser.screenshot(task, params);
-      if (method === "debug") {
-        const domains = params.domains || ["Runtime", "Network", "Log", "Performance"];
-        if (!Array.isArray(domains) || domains.some(d => !/^[A-Za-z]+$/.test(d))) throw new Error("调试域无效。");
-        for (const domain of domains) await this.bridge.request(task.profileId, "cdp", { sessionId: task.sessionId, method: `${domain}.enable`, params: {} });
-        return { domains, cursor: this.cursor };
+      if (['debug','network','console','errors','trace','profiler'].includes(method)) {
+        if(!state.capabilities?.includes('debugCapture'))throw new NativeControlError('NATIVE_EXTENSION_UPDATE_REQUIRED','Network 调试需要扩展 0.2.14+；请更新/重新加载 ProfilePilot 扩展后再试。');
+        if (!session.debug) {
+          const check = () => {
+            const now = this.bridge.states().find(s=>s.profileId===task.profileId);
+            if (session.ending || this.sessions.get(task.sessionId)!==session || session.debugEpoch!==session.epoch || !now?.connected || now.ownerSessionId!==task.sessionId || now.ownership!=='agent' || now.pausedByBrowser || now.tabId!==session.debugTab)
+              throw new NativeControlError('NATIVE_USER_IN_CONTROL','调试采集已停止；请检查控制状态。');
+          };
+          session.debug = new BrowserDebugSession({check,send:(cdpMethod,cdpParams,cdpSessionId)=>{
+            check(); return this.bridge.request(task.profileId,'cdp',{sessionId:task.sessionId,method:cdpMethod,params:cdpParams,cdpSessionId,debugCapture:true});
+          }},path.join(this.root,'native-control-artifacts',task.sessionId));
+        }
+        session.debugEpoch=epoch;session.debugTab=state.tabId;
+        session.debug.bindTarget(String(state.tabId));
+        session.debug.setFrameSessions([...(session.debugFrames?.values()||[])]);
+        return session.debug.command(method,params);
       }
       if (method === "download") {
         const download = (this.browser as any).download;

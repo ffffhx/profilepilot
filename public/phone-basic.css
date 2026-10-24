@@ -63,9 +63,10 @@ dialog.phone-basic-dialog { width:min(1000px,calc(100vw - 40px)); max-width:1000
 .phone-basic-modes { display:flex; gap:4px; padding:4px; border:1px solid #dce5f1; border-radius:10px; background:#eff3f8; }
 .phone-basic-body { display:grid; gap:16px; }
 .phone-basic-screen { min-height:320px; display:flex; align-items:center; justify-content:center; background:#eff3f8; border-radius:12px; overflow:hidden; }
-.phone-basic-screen img { display:block; width:auto; height:auto; max-height:calc(100dvh - 260px); max-width:100%; touch-action:none; user-select:none; }
+.phone-basic-screen img,.phone-basic-screen canvas { display:block; width:auto; height:auto; max-height:calc(100dvh - 260px); max-width:100%; touch-action:none; user-select:none; }
 .phone-basic-screen img[hidden],.phone-basic-screen [hidden] { display:none; }
-.phone-basic-screen img[data-interactive=true] { cursor:crosshair; }
+.phone-basic-screen [data-interactive=true] { cursor:crosshair; }
+@media(max-width:680px) { .phone-basic-screen canvas { max-height:50dvh; } }
 .phone-basic-dialog button { min-height:36px; border:1px solid #dce5f1; border-radius:7px; padding:7px 12px; background:white; color:#183156; font-size:12px; }
 .phone-basic-modes button { min-width:60px; border-color:transparent; background:transparent; font-weight:600; }
 .phone-basic-modes button[aria-pressed=true] { background:#175cff; color:#fff; box-shadow:0 2px 5px #175cff26; }

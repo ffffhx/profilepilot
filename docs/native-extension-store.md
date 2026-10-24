@@ -54,7 +54,7 @@ ProfilePilot 浏览器连接将你当前的 Chrome Profile 连接到电脑上的
 | downloads | 跟踪任务下载、完成确认与本地后续处理。 |
 | sidePanel | 在浏览器侧边栏显示连接状态、当前受控标签页和配对入口。 |
 | contextMenus | 选中文字和当前页的任务入口。 |
-| scripting | 安装/启动时恢复合法本机邀请页入口。 |
+| scripting | 安装/启动时恢复合法本机邀请页入口；在已授权的任务页面临时移开阻断调试的其他扩展 iframe，交还控制后恢复。 |
 | http/https 全站 | 用户指定网页、跨域上下文与任务下载；对应默认完整访问。 |
 
 management.getSelf 仅识别自身安装类型，不请求 management 权限。

@@ -7,6 +7,8 @@ import type { BrowserAction, BrowserObservation, BrowserTask, Effect } from "../
 import { requestBrowserGateway } from "../browser-gateway-client";
 import { FastBrowser, domControlEffect, pageViewport, type DomCandidate, type PageReadOptions } from "./fast-browser";
 import { bundledBrowserExecutable } from "./browser-runtime";
+import { runSiteAdapter, siteEvaluationValue } from "../site-adapters/runner";
+import type { SiteInput, SiteResult } from "../site-adapters/catalog";
 
 export const browserActionSchema = z.object({
   kind: z.enum(["open", "click", "hover", "fill", "select", "check", "uncheck", "press", "scroll", "upload", "download", "back", "switch_tab", "close_tab"]),
@@ -23,6 +25,7 @@ export const browserActionSchema = z.object({
 });
 export type BrowserCommand = (task: BrowserTask, args: string[]) => Promise<unknown>;
 export interface BrowserAdapter {
+  siteAdapter?(task: BrowserTask, input: SiteInput, check?: (url: string) => void): Promise<SiteResult>;
   syncTaskState?(task: BrowserTask): void;
   readPage?(task: BrowserTask, options: PageReadOptions): Promise<BrowserObservation>;
   observeFast?(task: BrowserTask): Promise<BrowserObservation>;
@@ -86,6 +89,12 @@ export function effectiveEffect(action: BrowserAction, observation?: BrowserObse
   return action.effect;
 }
 export class WrapperBrowser implements BrowserAdapter {
+  async siteAdapter(task: BrowserTask, input: SiteInput, check?: (url: string) => void): Promise<SiteResult> {
+    task.observation = undefined;
+    return runSiteAdapter(input, { check, access: task.nativeAccess,
+      evaluate: async expression => siteEvaluationValue(await this.fast.raw(task, "Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true })),
+      open: url => this.execute(task, { kind: "open", value: url, effect: "read", summary: "打开网站适配页面" }) });
+  }
   private readonly fast: FastBrowser;
   private readonly command: BrowserCommand;
   private readonly usesGateway: boolean;

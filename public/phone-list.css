@@ -32,6 +32,8 @@
 .phone-list-status { display:inline-flex; align-items:center; gap:8px; font-size:12px; overflow-wrap:anywhere; }
 .phone-list-status i { width:7px; height:7px; border-radius:50%; background:#7a8799; flex:none; }
 .phone-list-status[data-tone=ready] i { background:#199768; }.phone-list-status[data-tone=warning] i { background:#bf8730; }
+.phone-connection-cell { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.phone-connection-button { min-height:28px; padding:3px 9px; font-size:11px; color:var(--accent); border-color:var(--accent-line); }
 .phone-session { display:block; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .phone-session-cell { display:flex; align-items:center; gap:8px; }
 .phone-session-cell .phone-session { flex:1; min-width:0; }
@@ -124,7 +126,9 @@
 .phone-inspector-preview-head .icon { width:15px; height:15px; }
 .phone-inspector-screen { display:flex; width:100%; height:clamp(180px,calc(100dvh - 560px),360px); padding:0; overflow:hidden; border:1px solid var(--line); background:var(--panel-soft); border-radius:6px; }
 .phone-inspector-screen:disabled { opacity:1; cursor:default; }
-.phone-inspector-screen img { display:block; width:100%; height:100%; object-fit:contain; }
+.phone-inspector-screen img,.phone-inspector-screen canvas { display:block; width:100%; height:100%; object-fit:contain; }
+.phone-image-dialog canvas { max-width:100%; max-height:calc(90dvh - 80px); object-fit:contain; }
+.phone-image-dialog [hidden] { display:none!important; }
 .phone-inspector-placeholder { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:10px; width:100%; height:100%; padding:14px; font-size:12px; font-weight:400; line-height:1.7; color:var(--muted); }
 .phone-inspector-placeholder>.icon { width:28px; height:32px; }
 .phone-inspector-caption { margin:8px 0 0; font-size:10px; line-height:1.6; color:var(--muted); overflow-wrap:anywhere; }

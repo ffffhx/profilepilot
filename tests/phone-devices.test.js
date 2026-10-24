@@ -46,3 +46,9 @@ test('equal live routes keep selection stable and disconnected historical state 
   b.connection = 'missing'; b.state.phase = 'paused'; b.state.generation = 100;
   assert.equal(groupPhoneDevices([b, a], b.id)[0].device, a);
 });
+
+test('a fresh connected route supplies the inspector even when the selected alias has a stale App state', () => {
+  const old = phone('usb', { hardwareId: 'same', confirmedAt: Date.now() - 9000 });
+  const current = phone('wifi', { hardwareId: 'same', confirmedAt: Date.now(), transport: 'wifi' });
+  assert.equal(groupPhoneDevices([old, current], old.id)[0].device, current);
+});

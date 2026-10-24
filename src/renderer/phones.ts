@@ -1,4 +1,4 @@
-import { type PhoneDevice, type PhoneSetting, type PhonesSnapshot } from "../shared/phones";
+import { phoneAppConnected, type PhoneDevice, type PhoneSetting, type PhonesSnapshot } from "../shared/phones";
 import { groupPhoneDevices } from "../shared/phone-devices";
 import { phoneConnectionPresentation, phoneEnhancementPresentation, phonePresentation, type PhoneRoutePresentation, type PhoneSettingRow } from "../shared/phone-presentation";
 import { workspaceIdentityBar, workspaceSwitcher, refreshWorkspaceSwitcher } from "./workspace-switcher";
@@ -141,18 +141,18 @@ function settingsRows(rows: PhoneSettingRow[], canSetup: boolean, subject = "手
   return rows.map(row => `<div class="phone-setting" data-setting="${row.key}"><div class="phone-setting-info"><span class="phone-setting-icon">${icon(row.key)}</span><div><span class="phone-setting-name">${row.label}</span>${row.description ? `<p>${row.description}</p>` : ""}</div></div><div class="phone-setting-result"><span class="phone-setting-status" data-status="${row.status}" ${row.status === "unknown" ? `title="${esc(row.description || `${subject}尚未返回此开关的当前状态`)}"` : ""}>${row.status === "enabled" ? taskIcon("check") : ""}${row.value}</span>${row.status === "disabled" ? `<button class="phone-text-button" data-setting-open="${row.key}" ${canSetup && !busy ? "" : `disabled title="请先建立控制连接并结束当前任务，再打开${subject}设置"`}>去开启</button>` : ""}</div></div>`).join("");
 }
 function routeCard(transport: "usb" | "wifi", route?: PhoneRoutePresentation, occupied = false): string {
-  const connected = !!route?.detected, unauthorized = route?.unauthorized;
+  const connected = !!route?.connected, detected = !!route?.detected, unauthorized = route?.unauthorized;
   const name = transport === "usb" ? "USB" : "Wi-Fi";
   const discovery = transport === "wifi" ? wirelessDiscoveryPresentation(wirelessDiscovery.state, route?.setting.status === "enabled") : undefined;
-  const label = connected ? "已连接" : unauthorized ? "等待授权" : discovery?.label || "未连接";
+  const label = connected ? "已连接" : detected ? "可连接" : unauthorized ? "等待授权" : discovery?.label || "未连接";
   const note = connected ? `${phonePresentation(route!.device!).displayName} · ${transport === "usb" ? "数据线已连接" : "无线调试已连接"}`
-    : unauthorized ? "请在手机上允许这台电脑进行调试。" : discovery?.note || "用数据线连接手机，开启 USB 调试。";
+    : detected ? "点击连接，接通手机 App 后显示画面。" : unauthorized ? "请在手机上允许这台电脑进行调试。" : discovery?.note || "用数据线连接手机，开启 USB 调试。";
   return `<section class="phone-route" data-route="${transport}" data-debug-connected="${connected}"><span class="phone-route-icon">${icon(transport === "usb" ? "usbDebugging" : "wifi")}</span><div class="phone-route-copy"><header><h3>${name}</h3><span class="phone-route-badge" data-tone="${connected ? "ready" : unauthorized ? "warning" : "neutral"}">${label}</span></header><p class="phone-route-note">${esc(note)}</p></div><button data-action="${transport}" ${transport === "wifi" && (busy || occupied) ? "disabled" : ""}>${transport === "usb" ? "连接说明" : connected ? "连接设置" : "连接 Wi-Fi"}</button></section>`;
 }
 function connectionSection(status?: ReturnType<typeof phoneConnectionPresentation>): string {
   const emulator = status?.view.emulator;
   return `<section class="phone-card phone-connection-section" aria-label="连接手机"><header class="phone-section-heading"><div><h2>${emulator ? "连接模拟器" : "连接手机"}</h2><p>${emulator ? "启动本机模拟器，即可使用下方控制功能。" : "USB 或 Wi-Fi，任选一种即可"}</p></div></header>
-    ${emulator ? `<div class="phone-emulator-connection"><span class="phone-route-badge" data-tone="${current()?.connection === "device" ? "ready" : "neutral"}">${current()?.connection === "device" ? "模拟器已连接" : "模拟器未连接"}</span><button data-action="emulator">启动 / 连接模拟器</button></div>` : `<div class="phone-route-grid">${(["usb", "wifi"] as const).map(transport => routeCard(transport, status?.routes.find(route => route.transport === transport), status?.occupied)).join("")}</div>`}
+    ${emulator ? `<div class="phone-emulator-connection"><span class="phone-route-badge" data-tone="${status?.connected ? "ready" : "neutral"}">${status?.connected ? "模拟器已连接" : current()?.connection === "device" ? "可连接" : "模拟器未连接"}</span><button data-action="emulator">启动 / 连接模拟器</button></div>` : `<div class="phone-route-grid">${(["usb", "wifi"] as const).map(transport => routeCard(transport, status?.routes.find(route => route.transport === transport), status?.occupied)).join("")}</div>`}
     ${!status ? `<p class="phone-mode-hint phone-empty">${loaded ? "连接后会自动识别手机，无需安装 App。" : "正在查找手机…"}</p>` : ""}
     ${snapshot.error ? `<p class="phone-error" role="alert">${esc(snapshot.error)}</p>` : ""}</section>`;
 }
@@ -318,7 +318,6 @@ root.addEventListener("click", event => {
   if (action === "add-device") { addDevice(); return; }
   if (action === "refresh") { void run(async () => { snapshot = await window.phones.snapshot(); loaded = true; }); return; }
   if (action === "refresh-phone-screen") { void inspector.refresh(true); return; }
-  if (action === "enlarge-phone-screen") { inspector.enlarge(); return; }
   if (button.dataset.deviceId) {
     const group = groupPhoneDevices(snapshot.devices, button.dataset.deviceId).find(group => group.routes.some(route => route.id === button.dataset.deviceId));
     if (!group) { notice("这台设备已不在列表中，请刷新后重试。", true); return; }
@@ -332,13 +331,29 @@ root.addEventListener("click", event => {
   if (action === "emulator") { emulator(); return; }
   if (action === "mobile") { void openMobileConnections?.(); return; }
   const device = current(); if (!device) return;
+  if (action === "connect-phone") {
+    if (device.appInstallation?.status === "missing") { showDetails(device.id); notice("请先在设备设置中安装手机 App，再点击连接。", true); return; }
+    void run(async () => {
+      const connected = await window.phones.connect(device.id); selected = connected.id;
+      if (!phoneAppConnected(connected)) throw new Error(connected.error || "手机 App 尚未连接，请打开手机上的 ProfilePilot 后重试。");
+      notice("手机已连接。");
+    }); return;
+  }
+  if (action === "disconnect-phone") {
+    void run(async () => { await window.phones.disconnect(device.id); notice("已断开；手机端将在数秒内更新连接状态。"); }); return;
+  }
   if (action === "screen-camera") { void openScreenCamera(device); return; }
   if (button.dataset.phoneBasicCommand) { void run(() => window.phones.basicControl(device.id, button.dataset.phoneBasicCommand as "pause" | "resume" | "stop")); return; }
   if (action === "inspect-app") { void run(() => window.phones.inspect(device.id)); return; }
-  if (action === "basic-control" || action === "phone-operate") {
+  if (action === "enlarge-phone-screen") {
+    if (device.basic && !["idle", "stopped"].includes(device.basic.phase)) { openBasicPhone(device, installPhoneApp); return; }
+    // Existing App sessions and capture owners keep their current authority.
+    if (device.state && !["idle", "stopped"].includes(device.state.phase) || device.visualFollowActive || device.taskCaptureActive) { inspector.enlarge(); return; }
+  }
+  if (action === "basic-control" || action === "enlarge-phone-screen") {
     const group = groupPhoneDevices(snapshot.devices, selected).find(group => group.routes.some(route => route.id === selected));
     if (!group || device.connection !== "device" || device.pending || phoneConnectionPresentation(group).occupied) { showDetails(device.id); return; }
-    void run(async () => { const started = await window.phones.basicStart(device.id, action === "phone-operate" ? "control" : "view", "本机用户", "免安装手机控制"); openBasicPhone(started, installPhoneApp); }); return;
+    void run(async () => { const started = await window.phones.basicStart(device.id, "control", "本机用户", "免安装手机控制"); openBasicPhone(started, installPhoneApp); }); return;
   }
   if (action === "basic-open") { openBasicPhone(device, installPhoneApp); return; }
   if (action === "basic-stop") { void run(() => window.phones.basicControl(device.id, "stop")); return; }
@@ -347,7 +362,7 @@ root.addEventListener("click", event => {
     const group = groupPhoneDevices(snapshot.devices, selected).find(item => item.routes.some(route => route.id === selected));
     const route = group?.routes.find(route => route.id === button.dataset.connectRoute);
     if (!group || !route || route.connection !== "device" || phoneConnectionPresentation(group).occupied) return;
-    void run(async () => { await window.phones.prepare(route.id); selected = route.id; notice(`App 已打开，正在自动连接；如需控制，请在${route.transport === "emulator" ? "模拟器里的" : "手机"} App 中完成权限准备。`); });
+    void run(async () => { await window.phones.connect(route.id); selected = route.id; notice(`App 已打开，正在连接；如需控制，请在${route.transport === "emulator" ? "模拟器里的" : "手机"} App 中完成权限准备。`); });
   }
   if (button.dataset.settingOpen) {
     const setting = button.dataset.settingOpen as PhoneSetting;

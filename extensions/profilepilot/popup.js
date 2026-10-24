@@ -25,7 +25,7 @@ function render(state) {
   const hasTab = hasSession && Number.isSafeInteger(state.tabId) && state.tabId > 0 && Boolean(state.tabTitle || state.url);
   const controlling = hasTab && state.ownership === 'agent' && !state.pausedByBrowser;
   const issue = hasSession && !controlling ? state.controlIssue : undefined;
-  $('#control-state').textContent = !state.connected ? '未连接' : hasTab ? controlling ? '正在控制' : issue ? '连接受阻' : '已暂停' : hasSession ? '等待页面' : '空闲';
+  $('#control-state').textContent = !state.connected ? '未连接' : hasTab ? controlling ? state.extensionUi ? '扩展界面模式' : '正在控制' : issue ? '连接受阻' : '已暂停' : hasSession ? '等待页面' : '空闲';
   $('#control-state').className = 'control-state' + (controlling ? ' active' : hasTab ? ' paused' : '');
   $('#page-title').textContent = hasTab ? state.tabTitle || (state.url === 'about:blank' ? '空白标签页' : state.url) : !state.connected ? '连接后显示受控标签页' : hasSession ? '当前没有可用的受控标签页' : '当前没有受控标签页';
   let domain = '';

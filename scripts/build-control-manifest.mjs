@@ -15,6 +15,7 @@ async function files(directory) {
   return result;
 }
 const entries = {};
+entries['public/phone-video/preview.dex'] = hash(await readFile(path.join(root, 'public/phone-video/preview.dex')));
 for (const file of (await files(path.join(root, 'dist/main'))).sort()) {
   entries[path.relative(root, file).replaceAll('\\', '/')] = hash(await readFile(file));
 }

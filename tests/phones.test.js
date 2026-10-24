@@ -33,6 +33,58 @@ function harness(t) {
   } });
   return h;
 }
+test('App disconnect persists across polls and restart until an explicit connection', async t => {
+  const h = harness(t); h.installed = true; await h.service.refresh();
+  const disconnected = await executePhoneCommand({ action: 'phone', method: 'disconnect', params: { id: h.id } }, h.service, 'desktop');
+  assert.equal(disconnected.connection, 'device'); assert.equal(disconnected.companion, 'unavailable');
+  assert.equal(disconnected.state, null); assert.equal(disconnected.confirmedAt, null);
+  const syncs = () => h.calls.filter(c => c[0] === 'sync').length, before = syncs();
+  await h.service.refresh(); await h.service.refresh(); assert.equal(syncs(), before);
+  await assert.rejects(h.service.preview(h.id), /先连接/);
+  const restarted = new PhonesService(h.service.options);
+  try {
+    await restarted.refresh(); assert.equal(syncs(), before, 'restart preserves an intentional disconnect');
+    const connected = await restarted.prepare(h.id, false);
+    assert.equal(connected.companion, 'ready');
+    await restarted.refresh(); assert.ok(syncs() > before);
+    assert.ok(!h.calls.some(c => c.includes('install')), 'reconnecting never installs or updates the App');
+  } finally { await restarted.close(); await h.service.close(); }
+});
+
+test('disconnect closes all aliases and blocks a new Wi-Fi port for the same hardware', async t => {
+  const h = harness(t); await h.service.refresh();
+  const primary = h.service.devices.get(h.id), alias = '192.168.1.8:45000';
+  primary.hardwareId = 'physical-phone';
+  h.service.devices.set(alias, { ...primary, id: alias, transport: 'wifi' });
+  h.service.saved[alias] = { ...h.service.saved[h.id], hardwareId: 'physical-phone' };
+  h.service.routes.set(alias, { port: 18763, token: 'a'.repeat(64) });
+  h.service.devices.set('OLD-USB', { ...primary, id: 'OLD-USB', connection: 'missing', companion: 'unavailable', state: { ...primary.state, phase: 'paused', instanceId: 'old-app' } });
+  await h.service.disconnect(h.id);
+  assert.equal(h.service.routes.size, 0);
+  assert.ok(h.service.snapshot().devices.every(d => d.companion === 'unavailable' && !d.state));
+  const newId = '192.168.1.8:45001';
+  h.service.devices.set(newId, { ...primary, id: newId, transport: 'wifi' });
+  h.service.saved[newId] = { ...h.service.saved[alias] };
+  h.service.hardwareReadings.set(newId, { at: Date.now(), id: 'physical-phone' });
+  h.deviceOutput += `\n${newId} device model:Test_Phone`;
+  h.calls.length = 0; await h.service.refresh();
+  assert.equal(h.service.routes.size, 0);
+  assert.ok(!h.calls.some(c => c[0] === 'sync' || c.includes('tcp:0')));
+  await h.service.close();
+});
+
+test('disconnect rejects a task or paused session without revoking or resuming it', async t => {
+  const h = harness(t); await h.service.refresh();
+  for (const phase of ['controlling', 'paused']) {
+    h.service.devices.get(h.id).state.phase = phase;
+    await assert.rejects(h.service.disconnect(h.id), /先结束/);
+    assert.equal(h.service.devices.get(h.id).state.phase, phase);
+    assert.equal(h.service.appDisconnected.size, 0);
+  }
+  assert.ok(!h.calls.some(c => ['pause', 'resume', 'stop'].includes(c[0])));
+  h.service.devices.get(h.id).state.phase = 'idle'; await h.service.close();
+});
+
 test('desktop preview creates and releases its own read-only session', async t => {
   const h = harness(t); await h.service.refresh();
   const result = await h.service.preview(h.id);
@@ -398,7 +450,7 @@ test('starting any wrapper aborts a pending capture on another physical alias be
   const h = harness(t); await h.service.refresh();
   const primary = h.service.devices.get(h.id), alias = '192.168.0.2:40000';
   primary.hardwareId = 'physical-phone';
-  h.service.devices.set(alias, { ...primary, id: alias, transport: 'wifi', companion: 'unknown' });
+  h.service.devices.set(alias, { ...primary, id: alias, transport: 'wifi' });
   h.deviceOutput += `\n${alias} device model:Test_Phone`;
   let entered;
   let aborted = false;
@@ -484,7 +536,7 @@ test('an action in a desktop session cancels alias capture and only blocks previ
   const h = harness(t); await h.service.refresh();
   await executePhoneCommand({action:'phone',method:'start',params:{id:h.id,mode:'control'}},h.service,'desktop');
   const primary=h.service.devices.get(h.id),alias='192.168.0.2:40000';primary.hardwareId='same-phone';
-  h.service.devices.set(alias,{...primary,id:alias,transport:'wifi',companion:'unknown'});
+  h.service.devices.set(alias,{...primary,id:alias,transport:'wifi'});
   let captureEntered,actionEntered,releaseAction,aborted=false;
   const capturing=new Promise(resolve=>captureEntered=resolve),acting=new Promise(resolve=>actionEntered=resolve);
   h.service.adb.runBinary=async(_args,_timeout,signal)=>new Promise((_resolve,reject)=>{

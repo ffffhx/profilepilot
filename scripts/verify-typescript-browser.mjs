@@ -19,6 +19,7 @@ const root = await mkdtemp(path.join(os.tmpdir(), "pp-ts-engine-"));
 const home = path.join(root, "home");
 await mkdir(home);
 const session = `ts-engine-${randomUUID()}`;
+const siteInputFile = path.join(root, "site-input.json");
 const env = { ...process.env, HOME: home, PROFILEPILOT_GATEWAY_HOME: home, CPM_DATA_DIR: path.join(root, "data"), AGENT_BROWSER_SOCKET_DIR: path.join(home, ".agent-browser"), ELECTRON_RUN_AS_NODE: "1" };
 if (process.env.PP_ENGINE_EMPTY_PATH === "1") env.PATH = "";
 const cliHost = process.env.PP_ENGINE_HOST || process.execPath;
@@ -201,14 +202,30 @@ try {
     const taskRef = observation.snapshot.match(/button "Increment".*?\[ref=(e\d+)\]/)?.[1];
     assert.ok(taskRef);
     await adapter.execute(task, { kind: "click", ref: taskRef, effect: "edit", summary: "Increment isolated fixture" });
+    // Deterministic transport contract only; live website availability is tested
+    // separately through the user's explicitly owned extension session.
+    await command(["network", "route", "https://www.zhihu.com/hot", "--body", '<!doctype html><title>Isolated site adapter fixture</title>']);
+    await command(["network", "route", "**/api/v3/feed/topstory/hot-lists/total*", "--body", JSON.stringify({ data: [{ target: { id: '1234567890123456789', title: 'Adapter gateway fixture' } }] })]);
+    await command(["open", "https://www.zhihu.com/hot"]);
+    const input = { operation: 'zhihu.hot', params: { limit: 1 } };
+    await writeFile(siteInputFile, '\uFEFF' + JSON.stringify(input));
+    const cliSite = (await command(["site", "--params-file", siteInputFile])).result;
+    assert.equal(cliSite.status, 'ok');
+    assert.equal(cliSite.items[0].id, '1234567890123456789');
+    assert.equal(cliSite.items[0].title, 'Adapter gateway fixture');
+    const builtInSite = await adapter.siteAdapter(task, input);
+    assert.deepEqual(builtInSite.items, cliSite.items);
+    await command(["open", url]);
   } finally {
     for (const key of Object.keys(env)) if (key in savedEnv) process.env[key] = savedEnv[key]; else delete process.env[key];
   }
-  console.log("PASS serialized concurrent commands and desktop task adapter");
+  console.log("PASS serialized concurrent commands, desktop task adapter and site reads through packaged Gateway CLI/WrapperBrowser");
   const other = await command(["snapshot"], 75, `${session}-other`);
   assert.match(other.stderr, /PROFILE_LEASE_CONFLICT|PROFILE_ALREADY_IN_USE/);
   await command(["handoff", "--reason", "isolated acceptance fixture"]);
   await command(["click", "#increment"], 75);
+  const siteAfterHandoff = await command(["site", "--params-file", siteInputFile], 75);
+  assert.match(siteAfterHandoff.stdout + siteAfterHandoff.stderr, /USER_IN_CONTROL|control|控制|handoff|接管/i);
   await requestBrowserGateway({ action: "control", sessionId: session, command: "return" }, { homeDir: home });
   await command(["resume"]);
   await command(["snapshot"]);

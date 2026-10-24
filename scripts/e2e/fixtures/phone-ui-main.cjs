@@ -20,7 +20,7 @@ fs.writeFileSync(path.join(root, 'devices.json'), JSON.stringify({ ...Object.fro
 const states = ids.map((id, index) => ({ protocol: 1, instanceId: `ui-instance-${index}`, sessionId: null, generation: 0, phase: 'idle', mode: 'view', computer: 'UI-TEST-PC', controller: '', task: '', startedAt: null, lastAction: '', permissions: { overlay: true, notifications: true, accessibility: true }, readiness: { unlocked: true, computerConnected: true, usbConnected: true, wifiConnected: false, developerOptions: 'enabled', usbDebugging: 'enabled', wirelessDebugging: 'enabled', accessibilityService: 'running' } }));
 if (process.env.PHONE_UI_NO_APP === '1') fs.writeFileSync(path.join(root, 'devices.json'), '{}');
 fs.writeFileSync(path.join(root, 'phone.apk'), Buffer.from([0x50,0x4b,3,4]));
-let window, driverClose;
+let window, driverClose, pollTimer, cloudShown = false;
 let wirelessConnected = false;
 const defaultWirelessServices = 'fixture _adb-tls-pairing._tcp 192.168.1.8:37123\nfixture _adb-tls-connect._tcp 192.168.1.8:40235';
 let wirelessServices = defaultWirelessServices, wirelessReachable = true;
@@ -28,7 +28,7 @@ let emulatorConnected = false;
 const androidSetupFixture = createAndroidFixture(AndroidSetup, path.join(root, 'android-setup'), { delay: 250 });
 let previewCalls = 0, previewBehavior = {};
 let cameraCalls = [], cameraState, cameraUnsupported = false;
-let basicFrame = { width: 320, height: 640, shade: 128 }, basicFrameBehavior = {};
+let basicFrame = { width: 320, height: 640, shade: 128 }, basicFrameBehavior = {}, corruptFile = false;
 let followUiFrame, followUiFullFrame, followUiStatus, followUiLease;
 let followUiScreenCalls = 0;
 const unresponsive = new Set();
@@ -39,6 +39,16 @@ const service = new PhonesService({ root, apkPath: process.env.PHONE_UI_NO_APP =
   emulators: { list: async () => ['Fixture_AVD', ...androidSetupFixture.avds], launch: async () => { emulatorConnected = true; } },
   adb: { run: async (args, timeout, input) => {
     adbCalls.push(args);
+    if (args[2] === 'shell' && args[3].startsWith("'screencap'")) {
+      const behavior = basicFrameBehavior; basicFrameBehavior = {};
+      if (behavior.corrupt) corruptFile = true;
+      if (behavior.delay) await new Promise(resolve => setTimeout(resolve, behavior.delay));
+      return '';
+    }
+    if (args[2] === 'pull') {
+      const png = nativeImage.createFromBitmap(Buffer.alloc(basicFrame.width * basicFrame.height * 4, basicFrame.shade), basicFrame).toPNG();
+      fs.writeFileSync(args[4], corruptFile ? png.subarray(0, 33) : png); corruptFile = false; return '';
+    }
     if (args[2] === 'install') { appInstalled = true; return 'Success'; }
     if (args[2] === 'shell' && args[3].startsWith("'pm' 'path'")) return appInstalled ? 'package:/fixture/profilepilot.apk' : '';
     if (args[0] === 'mdns') return wirelessServices;
@@ -54,6 +64,7 @@ const service = new PhonesService({ root, apkPath: process.env.PHONE_UI_NO_APP =
   }, runBinary: async args => {
     adbCalls.push(args);
     const behavior = basicFrameBehavior; basicFrameBehavior = {};
+    corruptFile = !!behavior.corrupt;
     if (behavior.delay) await new Promise(resolve => setTimeout(resolve, behavior.delay));
     const png = nativeImage.createFromBitmap(Buffer.alloc(basicFrame.width * basicFrame.height * 4, basicFrame.shade), basicFrame).toPNG();
     return behavior.corrupt ? png.subarray(0, 33) : png;
@@ -143,10 +154,11 @@ ipcMain.handle('phone-ui:preview-calls', () => previewCalls);
 ipcMain.handle('phone-ui:wireless-discovery', (_, value, reachable) => { wirelessServices = value ?? defaultWirelessServices; wirelessReachable = reachable; });
 ipcMain.handle('phone-ui:preview-behavior', (_, value) => { previewBehavior = value; });
 ipcMain.handle('phone-ui:unresponsive', (_, id, enabled) => { if (enabled) unresponsive.add(id); else unresponsive.delete(id); return service.refresh(); });
-ipcMain.handle('phone-ui:fixture', async (_, id, changes) => { Object.assign(states[ids.indexOf(id)], changes); return service.refresh(); });
+ipcMain.handle('phone-ui:fixture', async (_, id, changes) => { cloudShown = false; Object.assign(states[ids.indexOf(id)], changes); return service.refresh(); });
 ipcMain.handle('phone-ui:connection', async (_, usb) => { aliasConnected = true; usbConnected = usb; return service.refresh(); });
 ipcMain.handle('phone-ui:offline', async () => { aliasConnected = false; usbConnected = false; return service.refresh(); });
 ipcMain.handle('phone-ui:cloud', (_, age, readiness = {}) => {
+  cloudShown = true;
   const cloud = { id: 'cloud-ui-test', name: 'Cloud Test Phone', model: 'Cloud Test Phone', transport: 'cloud', connection: 'missing', companion: 'unavailable', state: null, confirmedAt: null, pending: null, error: '', cloud: { paired: true, reportedAt: Date.now() - age, report: { deviceId: 'diagnostic-fixture', name: 'Cloud Test Phone', permissions: { overlay: true, notifications: true, accessibility: true }, readiness: { unlocked: true, computerConnected: false, usbConnected: false, wifiConnected: false, developerOptions: 'unconfirmed', usbDebugging: 'unconfirmed', wirelessDebugging: 'unconfirmed', accessibilityService: 'running' } } } };
   Object.assign(cloud.cloud.report.readiness, readiness);
   const value = service.snapshot(); value.devices.push(cloud);
@@ -154,6 +166,7 @@ ipcMain.handle('phone-ui:cloud', (_, age, readiness = {}) => {
 });
 app.whenReady().then(async () => {
   await service.refresh();
+  if (process.env.PHONE_UI_POLL === '1') pollTimer = setInterval(() => { if (!cloudShown) void service.refresh(); }, 2000);
   window = new BrowserWindow({ width: 1440, height: 1080, show: false, webPreferences: { preload: path.join(__dirname, 'phone-ui-preload.cjs'), contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } });
   window.webContents.on('render-process-gone', (_, detail) => { console.error(detail); app.exit(1); });
   await window.loadFile(path.join(__dirname, '../../../public/phones.html'));
@@ -163,6 +176,7 @@ let closing = false;
 app.on('before-quit', event => {
   if (closing) return;
   event.preventDefault(); closing = true;
+  clearInterval(pollTimer);
   void service.close().finally(() => app.quit());
 });
 app.on('will-quit', () => driverClose?.());

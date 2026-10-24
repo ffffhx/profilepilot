@@ -142,7 +142,8 @@ test('a companion explicitly reporting disconnection is not shown as connected',
   assert.equal(overview(phone).view.canPreview, false);
   assert.equal(overview(phone).view.canSetup, false);
   phone.state.readiness.computerConnected = true; phone.state.phase = 'disconnected';
-  assert.equal(overview(phone).connected, false);
+  assert.equal(overview(phone).connected, true, 'a disconnected task does not negate the live App heartbeat');
+  assert.equal(overview(phone).view.canPreview, false);
 });
 
 test('an unresponsive companion distinguishes recognized transport from unreadable permissions', () => {
@@ -159,7 +160,7 @@ test('an unresponsive companion distinguishes recognized transport from unreadab
     assert.match(status.issue.lastState, /上次.*尚未确认/);
     assert.match(status.issue.steps.join(' '), /解锁.*ProfilePilot/);
     assert.equal(status.issue.detail, 'read ECONNRESET');
-    if (transport !== 'emulator') assert.equal(status.routes.find(route => route.transport === transport).label, 'App 未响应');
+    if (transport !== 'emulator') assert.equal(status.routes.find(route => route.transport === transport).label, '可连接');
     assert.match(status.issue.steps[1], transport === 'wifi' ? /同一网络/ : transport === 'usb' ? /USB/ : /模拟器/);
   }
 });

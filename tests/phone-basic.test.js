@@ -27,6 +27,7 @@ function harness(t, appPhase) {
     if (args[2] === 'shell' && args[3].startsWith("'input'")) return h.inputHook ? h.inputHook(args) : '';
     return '';
   }, runBinary: async args => { h.calls.push(args); return h.screenshotHook ? h.screenshotHook() : h.png; } };
+  h.adb = adb;
   h.service = new PhonesService({root, apkPath:path.join(root,'phone.apk'), adb, now:()=>h.now, request:async(_port,_token,method)=>{
     if (method==='pause'||method==='stop') {h.appState.phase=method==='pause'?'paused':'stopped';h.appState.generation++;}
     return {ok:true,state:structuredClone(h.appState)};
@@ -49,9 +50,44 @@ test('basic control works without a paired companion and never installs/launches
   assert.equal(fs.existsSync(path.join(h.root,'devices.json')),false);
 });
 
-test('sidebar screen reads without starting a session, installing an App, or authorizing input', async t=>{
+test('desktop video retains its basic lease during its own screenshot and input, then stops on pause',async t=>{
+  const h=harness(t);await h.start();let callbacks,finish;
+  h.adb.spawn=(_args,options)=>{callbacks=options;return{done:new Promise(r=>finish=r),async write(){},end(){finish({code:0})},abort(){finish({code:0})}}};
+  const lease={sessionId:h.state().sessionId,generation:h.state().generation};
+  await assert.rejects(h.service.startScreenVideo(h.id,new AbortController().signal,{...lease,generation:99}),/会话已改变/);
+  const stream=await h.service.startScreenVideo(h.id,new AbortController().signal,lease);
+  const push=()=>callbacks.stdout(Buffer.from('PPV1 '+JSON.stringify({type:'frame',codec:'avc1.42001f',key:true,timestamp:100,width:480,height:1080,screenWidth:1080,screenHeight:2400,data:'AAoNGv8='})+'\r\n'));
+  let release;h.screenshotHook=()=>new Promise(r=>release=r);
+  const capture=h.action({kind:'screenshot'});while(!release)await new Promise(r=>setImmediate(r));
+  push();assert.equal((await stream.read()).packets.length,1,'its own screenshot cannot revoke the live video');
+  release(h.png);await capture;
+  release=null;h.inputHook=()=>new Promise(r=>release=r);
+  const input=h.action({kind:'tap',x:100,y:200});while(!release)await new Promise(r=>setImmediate(r));
+  push();assert.equal((await stream.read()).packets.length,1,'video continues throughout authorized input');
+  release('');await input;
+  h.service.basicControl(h.id,'pause');push();assert.equal((await stream.read()).packets.length,0);
+  await assert.rejects(h.service.startScreenVideo(h.id,new AbortController().signal,lease),/会话已改变/);
+});
+
+test('video cannot attach to an external task even with its current basic session identity',async t=>{
+  const h=harness(t);await h.service.basicStart(h.id,'view','Agent','external','external');
+  const lease={sessionId:h.state().sessionId,generation:h.state().generation};
+  await assert.rejects(h.service.startScreenVideo(h.id,new AbortController().signal,lease),/手机任务正在使用画面/);
+});
+
+test('sidebar requires the App connection even when the debug transport is available', async t=>{
   const h=harness(t);await h.service.refresh();
+  await assert.rejects(h.service.screen(h.id), /先连接手机 App/);
+  assert.equal(h.calls.some(a=>a.includes('screencap')),false);
+  await h.start();
+  await assert.rejects(h.service.screen(h.id), /先连接手机 App/);
+  assert.equal((await h.action({kind:'screenshot'})).result.mime,'image/png', 'explicit basic session retains its own capture');
+});
+
+test('connected sidebar reads without creating a session or authorizing input', async t=>{
+  const h=harness(t,'idle');await h.service.refresh();
   const before=h.service.snapshot().devices[0];
+  h.calls.length=0;
   const screen=await h.service.screen(h.id);
   assert.equal(screen.width,1080);assert.equal(screen.height,2400);assert.equal(screen.capturedAt,h.now);
   assert.equal(screen.base64,h.png.toString('base64'));
@@ -72,13 +108,17 @@ test('sidebar captures preserve active App sessions and respect a newly reported
 });
 
 test('sidebar rejects overlapping, stale, disconnected and invalid captures', async t=>{
-  const h=harness(t);await h.start();let release;
+  const h=harness(t,'idle');await h.start();let release;
   h.screenshotHook=()=>new Promise(resolve=>release=resolve);
   const first=h.service.screen(h.id);
+  while (!release) await new Promise(resolve=>setImmediate(resolve));
   await assert.rejects(h.service.screen(h.id),/正在获取/);
   h.service.basicControl(h.id,'pause');release(h.png);await assert.rejects(first,/暂停/);
   h.service.basicControl(h.id,'resume');
-  const second=h.service.screen(h.id);h.online=false;await h.service.refresh();release(h.png);await assert.rejects(second);
+  release=null;
+  const second=h.service.screen(h.id), rejected=assert.rejects(second);
+  while (!release) await new Promise(resolve=>setImmediate(resolve));
+  h.online=false;await h.service.refresh();release(h.png);await rejected;
   h.online=true;await h.service.refresh();h.service.basicControl(h.id,'stop');
   h.screenshotHook=null;h.png=Buffer.from('not a screen');
   await assert.rejects(h.service.screen(h.id),/有效画面/);

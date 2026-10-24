@@ -7,6 +7,8 @@ import type { PageReadOptions } from "./fast-browser";
 import type { NativeBrowserTransport } from "./native-bridge";
 import { NATIVE_EXTENSION_UPDATE_MESSAGE } from "./native-compatibility";
 import { NativeControlError } from "../native-control/errors";
+import { runSiteAdapter, siteEvaluationValue } from "../site-adapters/runner";
+import type { SiteInput, SiteResult } from "../site-adapters/catalog";
 import { NativePage } from "./native-page";
 import { registerNativeDownload, taskArtifactDirectory, type NativeDownloadInput, type NativeDownloadItem } from "./native-downloads";
 
@@ -15,6 +17,21 @@ export const isNativeTask = (task: BrowserTask): boolean => task.browserConnecti
 // The same task/approval pipeline is used by both transports. Native Chrome is
 // never launched with debugging flags and no browser credentials are copied.
 export class NativeBrowser implements BrowserAdapter {
+  async siteAdapter(task: BrowserTask, input: SiteInput, check?: (url: string) => void): Promise<SiteResult> {
+    await this.claim(task);
+    const generation = this.bridge.states().find(s => s.profileId === task.profileId)?.controlGeneration;
+    this.resetObservation(task);
+    const guard = (url: string) => {
+      check?.(url);
+      const state = this.bridge.states().find(s => s.profileId === task.profileId);
+      if (!state?.connected) throw new NativeControlError("NATIVE_DISCONNECTED", "浏览器已断开，适配读取停止。");
+      if (state.ownerSessionId !== task.sessionId) throw new NativeControlError("NATIVE_SESSION_CONFLICT", "会话控制权已改变，适配读取停止。");
+      if (state.controlGeneration !== generation || state.ownership !== "agent" || state.pausedByBrowser) throw new NativeControlError("NATIVE_USER_IN_CONTROL", "用户接管后，适配读取停止；请显式交还后重试。");
+    };
+    return runSiteAdapter(input, { check: guard, access: task.nativeAccess,
+      evaluate: async expression => siteEvaluationValue(await this.raw(task, "Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true })),
+      open: async url => { const response = await this.request(task, "open", { url }); if (response?.errorText) throw new Error(response.errorText); return response; } });
+  }
   private readonly groupUpdates = new WeakMap<BrowserTask, string>();
   private readonly fast: NativePage;
   private readonly stopEvents: () => void;
@@ -268,6 +285,11 @@ export class NativeBrowser implements BrowserAdapter {
 }
 
 export class RoutedBrowser implements BrowserAdapter {
+  siteAdapter(task: BrowserTask, input: SiteInput, check?: (url: string) => void): Promise<SiteResult> {
+    const browser = this.route(task);
+    if (!browser.siteAdapter) throw new Error("此连接不支持网站适配器。");
+    return browser.siteAdapter(task, input, check);
+  }
   constructor(private readonly gateway: BrowserAdapter, readonly native: NativeBrowser) {}
   private route(task: BrowserTask): BrowserAdapter { return isNativeTask(task) ? this.native : this.gateway; }
   syncTaskState(task: BrowserTask): void { if (isNativeTask(task)) this.native.syncTaskState(task); }

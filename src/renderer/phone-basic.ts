@@ -1,6 +1,8 @@
 import type { PhoneAction, PhoneDevice, PhonesSnapshot } from "../shared/phones";
 import { phoneEnhancementPresentation } from "../shared/phone-presentation";
 import { taskIcon } from "./task-icons";
+import { PhoneVideoPreview } from "./phone-video";
+import { workspaceHidden } from "./workspace-lifecycle";
 
 const escape = (value: string) => value.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 let currentDialog: HTMLDialogElement | undefined;
@@ -40,7 +42,7 @@ export function phoneEnhancementContent(device: PhoneDevice | undefined, disable
     </div><figure class="phone-download-qr"><img src="./assets/profilepilot-android-download.svg" width="144" height="144" alt="ProfilePilot 安卓 App 下载二维码"><figcaption>扫码下载安卓 App<small>GitHub 发布版 · Android 11+</small></figcaption><button data-action="phone-download-copy">复制下载链接</button></figure></div>`;
 }
 
-/** The image is a periodically refreshed screenshot, never advertised as video. */
+/** Live video while this explicit viewing/control dialog is visible. */
 export function openBasicPhone(device: PhoneDevice, onInstall: (id: string) => Promise<void>): void {
   if (currentDialog) { currentDialog.focus(); return; }
   const initial = device.basic;
@@ -51,12 +53,24 @@ export function openBasicPhone(device: PhoneDevice, onInstall: (id: string) => P
   const dialog = document.createElement("dialog"); currentDialog = dialog;
   dialog.className = "phone-basic-dialog"; dialog.setAttribute("aria-label", "免安装手机控制");
   dialog.innerHTML = `<header><div><h2>${escape(device.name)} · 手机画面</h2><p class="phone-basic-status" role="status"></p></div><div class="phone-basic-toolbar"><div class="phone-basic-modes" role="group" aria-label="手机交互模式"><button data-basic-mode="view" aria-pressed="false">查看</button><button data-basic-mode="control" aria-pressed="false">操作</button></div><button data-basic-close aria-label="结束并关闭" title="结束并关闭">×</button></div></header>
-    <div class="phone-basic-body"><div class="phone-basic-screen"><img alt="手机当前画面" draggable="false" hidden><span data-basic-placeholder>正在获取手机画面…</span></div>
+    <div class="phone-basic-body"><div class="phone-basic-screen"><canvas aria-label="手机实时画面" hidden></canvas><img alt="手机当前画面" draggable="false" hidden><span data-basic-placeholder>正在获取手机画面…</span></div>
       <p class="phone-basic-error" role="alert" hidden></p>
       <div class="phone-basic-upgrade"><div><strong>需要更多功能？</strong><p>App 提供控件识别、中文填写、手机端暂停和状态同步。</p></div><button data-basic-install>结束会话并安装 App</button></div>
     </div>`;
   const screenContainer = dialog.querySelector<HTMLElement>(".phone-basic-screen")!;
   let screen = screenContainer.querySelector<HTMLImageElement>("img")!;
+  const canvas = screenContainer.querySelector<HTMLCanvasElement>("canvas")!;
+  let videoPainted = false, screenshotAt = 0;
+  const video = new PhoneVideoPreview((picture, packet) => {
+    if (!active() || workspaceHidden()) return;
+    if (packet?.screenWidth && packet.screenHeight && frame && (frame.width !== packet.screenWidth || frame.height !== packet.screenHeight)) {
+      frame = undefined; pointer = undefined; void send({ kind: "screenshot" });
+    }
+    if (canvas.width !== picture.displayWidth || canvas.height !== picture.displayHeight) { canvas.width = picture.displayWidth; canvas.height = picture.displayHeight; }
+    canvas.getContext("2d", { alpha: false })?.drawImage(picture, 0, 0);
+    videoPainted = true; update();
+  }, () => { videoPainted = false; update(); if (active()) void send({ kind: "screenshot" }); });
+  const shownScreen = () => videoPainted ? canvas : screen;
   const error = dialog.querySelector<HTMLElement>(".phone-basic-error")!;
   const active = () => ["viewing", "controlling"].includes(state.phase) && !closing && !switching;
   const disable = (button: HTMLButtonElement, unavailable: boolean) => {
@@ -67,7 +81,8 @@ export function openBasicPhone(device: PhoneDevice, onInstall: (id: string) => P
   };
   const update = () => {
     const status = dialog.querySelector<HTMLElement>(".phone-basic-status")!;
-    const label = state.phase === "paused" ? "已暂停，选择查看或操作以继续。" : state.phase === "disconnected" ? "连接已断开，请关闭后重新连接。" : state.phase === "stopped" ? "会话已结束。" : switching ? "正在切换模式…" : state.mode === "view" ? "查看态 · 画面每 2 秒自动刷新，切换至操作可点击或拖动。" : "操作态 · 在画面上点击或拖动，画面每 2 秒自动刷新。";
+    const preview = video.active ? "实时视频" : "连续预览";
+    const label = state.phase === "paused" ? "已暂停，选择查看或操作以继续。" : state.phase === "disconnected" ? "连接已断开，请关闭后重新连接。" : state.phase === "stopped" ? "会话已结束。" : switching ? "正在切换模式…" : workspaceHidden() ? "画面更新已暂停" : state.mode === "view" ? `查看态 · ${preview}，切换至操作可点击或拖动。` : `操作态 · ${preview}，在画面上点击或拖动。`;
     if (status.textContent !== label) status.textContent = label;
     dialog.querySelectorAll<HTMLButtonElement>("[data-basic-mode]").forEach(button => {
       button.setAttribute("aria-pressed", String(button.dataset.basicMode === state.mode));
@@ -75,12 +90,15 @@ export function openBasicPhone(device: PhoneDevice, onInstall: (id: string) => P
       button.textContent = `${state.phase === "paused" ? "继续" : ""}${button.dataset.basicMode === "view" ? "查看" : "操作"}`;
     });
     disable(dialog.querySelector<HTMLButtonElement>("[data-basic-install]")!, closing || ["disconnected", "stopped"].includes(state.phase));
-    screen.dataset.interactive = String(active() && state.mode === "control" && !!frame && (!busy || refreshing));
+    if (!active() || workspaceHidden()) videoPainted = false;
+    screen.hidden = !screen.hasAttribute("src") || videoPainted; canvas.hidden = !videoPainted;
+    shownScreen().dataset.interactive = String(active() && state.mode === "control" && !!frame && (!busy || refreshing));
     screenContainer.setAttribute("aria-busy", String(refreshing));
+    video.setTarget(active() && !workspaceHidden() ? id : "", { sessionId, generation: state.generation });
   };
   const message = (cause: unknown) => { error.hidden = false; error.textContent = String((cause as Error).message || cause).replace(/^Error invoking remote method '[^']+': Error: /, ""); };
   async function send(action: PhoneAction): Promise<void> {
-    if (busy || !active() || (action.kind !== "screenshot" && state.mode !== "control")) return;
+    if (busy || !active() || workspaceHidden() || (action.kind !== "screenshot" && state.mode !== "control")) return;
     const generation = state.generation; busy = true; refreshing = action.kind === "screenshot"; update();
     try {
       const response = await window.phones.basicPerform({ id, sessionId, generation, requestId: crypto.randomUUID(), action });
@@ -102,6 +120,7 @@ export function openBasicPhone(device: PhoneDevice, onInstall: (id: string) => P
           screen.replaceWith(next); screen = next;
         }
         frame = { width: result.width, height: result.height, generation };
+        screenshotAt = Date.now();
         dialog.querySelector<HTMLElement>("[data-basic-placeholder]")!.hidden = true;
       } else frame = undefined;
       error.textContent = ""; error.hidden = true;
@@ -141,15 +160,24 @@ export function openBasicPhone(device: PhoneDevice, onInstall: (id: string) => P
     });
   }));
   dialog.querySelector("[data-basic-install]")!.addEventListener("click", () => void finish().then(() => onInstall(id)).catch(message));
-  const point = (e: PointerEvent) => { const r = screen.getBoundingClientRect(); return frame ? { x: Math.max(0, Math.min(frame.width - 1, Math.floor((e.clientX-r.left)/r.width*frame.width))), y: Math.max(0, Math.min(frame.height - 1, Math.floor((e.clientY-r.top)/r.height*frame.height))) } : undefined; };
-  screenContainer.addEventListener("pointerdown", e => { if (e.target !== screen || e.button !== 0 || busy || !active() || state.mode !== "control" || !frame) return; e.preventDefault(); const p = point(e)!; pointer = { ...p, at: Date.now(), pointerId: e.pointerId }; screenContainer.setPointerCapture(e.pointerId); });
+  const point = (e: PointerEvent) => { const r = shownScreen().getBoundingClientRect(); return frame ? { x: Math.max(0, Math.min(frame.width - 1, Math.floor((e.clientX-r.left)/r.width*frame.width))), y: Math.max(0, Math.min(frame.height - 1, Math.floor((e.clientY-r.top)/r.height*frame.height))) } : undefined; };
+  screenContainer.addEventListener("pointerdown", e => { if (e.target !== shownScreen() || e.button !== 0 || busy || !active() || state.mode !== "control" || !frame) return; e.preventDefault(); const p = point(e)!; pointer = { ...p, at: Date.now(), pointerId: e.pointerId }; screenContainer.setPointerCapture(e.pointerId); });
   screenContainer.addEventListener("pointerup", e => {
     const start = pointer; pointer = undefined; if (!start || start.pointerId !== e.pointerId || !active() || state.mode !== "control" || !frame || frame.generation !== state.generation) return;
     const end = point(e)!; const distance = Math.hypot(end.x-start.x, end.y-start.y);
     void send(distance < 12 ? { kind: "tap", x: start.x, y: start.y } : { kind: "swipe", x: start.x, y: start.y, toX: end.x, toY: end.y, duration: Math.max(100, Math.min(1500, Date.now()-start.at)) });
   });
   screenContainer.addEventListener("pointercancel", () => { pointer = undefined; });
-  const timer = window.setInterval(() => { if (!pointer && !document.hidden && window.workspacePane?.active !== false) void send({ kind: "screenshot" }); }, 2000);
-  dialog.addEventListener("close", () => { clearInterval(timer); unsubscribe(); currentDialog = undefined; dialog.remove(); });
+  const visibility = () => { update(); if (!workspaceHidden()) void send({ kind: "screenshot" }); };
+  document.addEventListener("visibilitychange", visibility); document.addEventListener("workspace-visibilitychange", visibility);
+  const timer = window.setInterval(() => {
+    update();
+    // Screenshots retain the existing native-coordinate input authorization;
+    // video never creates or extends input authority. No duplicate video capture.
+    if (!pointer && !workspaceHidden() && (!video.active || Date.now() - screenshotAt >= 10000)) void send({ kind: "screenshot" });
+  }, 500);
+  const dispose = () => { video.stop(); clearInterval(timer); unsubscribe(); document.removeEventListener("visibilitychange", visibility); document.removeEventListener("workspace-visibilitychange", visibility); };
+  window.addEventListener("pagehide", dispose, { once: true });
+  dialog.addEventListener("close", () => { dispose(); window.removeEventListener("pagehide", dispose); currentDialog = undefined; dialog.remove(); });
   document.body.append(dialog); dialog.showModal(); update(); void send({ kind: "screenshot" });
 }

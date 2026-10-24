@@ -22,6 +22,7 @@ async function executeValidatedPhoneCommand(command: PhoneManagementCommand, ser
   if (command.method === "follow-command") return service.gameFollower.command(followCommandSchema.parse(command.params));
   if (command.method === "host") return service.hostCommand(z.object({ args: z.array(z.string().max(32768)).min(1).max(3) }).strict().parse(command.params).args);
   if (command.method === "wireless-disconnect") return service.disconnectWireless(z.object({ id: z.string() }).strict().parse(command.params).id);
+  if (command.method === "disconnect") return service.disconnect(z.object({ id: z.string() }).strict().parse(command.params).id);
   if (command.method === "connect") {
     // Existing desktop "install/connect" buttons retain their explicit setup
     // behavior. The CLI always sends update:false for connection-only use.

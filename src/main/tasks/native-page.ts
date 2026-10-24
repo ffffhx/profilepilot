@@ -40,7 +40,7 @@ export class NativePage {
   event(event: { type: string; profileId: string; sessionId?: string; cdpSessionId?: string; tabId?: number; method?: string; params?: any; state?: any }): void {
     for (const [key, state] of this.states) {
       if (!key.startsWith(`${event.profileId}\0`) || (event.sessionId && !key.startsWith(`${event.profileId}\0${event.sessionId}\0`))) continue;
-      if (event.type === "disconnected" || (event.type === "state" && (event.state?.ownership !== "agent" || (state.tabId !== undefined && state.tabId !== event.state?.tabId)))) {
+      if (event.type === "disconnected" || (event.type === "cdp" && event.method === "ProfilePilot.debuggerReconnected") || (event.type === "state" && (event.state?.ownership !== "agent" || (state.tabId !== undefined && state.tabId !== event.state?.tabId)))) {
         this.states.delete(key); continue;
       }
       if (event.type === "state") state.tabId = event.state?.tabId;

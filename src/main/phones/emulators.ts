@@ -58,7 +58,10 @@ export class AndroidEmulators implements EmulatorRuntime {
     let pid: number;
     try {
       pid = await new Promise<number>((resolve, reject) => {
-        const child = spawn(this.executable, ["-avd", name], { detached: true, windowsHide: true, stdio: ["ignore", output, output], shell: false });
+        // On Windows DETACHED_PROCESS leaves the launcher without a console, so
+        // its QEMU child opens a new terminal. Let QEMU inherit the launcher's
+        // hidden console instead; keep the detached session on macOS/Linux.
+        const child = spawn(this.executable, ["-avd", name], { detached: process.platform !== "win32", windowsHide: true, stdio: ["ignore", output, output], shell: false });
         child.once("error", () => reject(new Error(`模拟器启动失败，请检查启动日志：${log}`)));
         child.once("spawn", () => { child.unref(); resolve(child.pid!); });
       });

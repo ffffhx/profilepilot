@@ -43,12 +43,18 @@ ppilot browser [--profile native:Default] [--session NAME] METHOD [--params JSON
   claim --tab ID | --new-tab      Claim one Profile; returns a session ID
   --controller NAME --task TEXT  Identify the owner/task in status (claim only)
   observe | read                 Read DOM and versioned element refs
+  sites                          List site adapters and their input schemas
+  site --params-file PATH        {operation:"zhihu.hot",params:{limit:10}}
   observe --output PATH          Save PNG and return matching version/refs/path
   action --params JSON           BrowserAction with current observation version
   pointer --params JSON          Coordinates from a screenshot observation
   screenshot [--output PATH]     PNG capture
   open URL | switch ID | newTab   Select or create a page
   cdp METHOD --params JSON       Full Chrome-supported CDP, --cdp-session ID for OOPIF
+  extension-ui connect          Current tab's extension UI; params {extensionId}
+  extension-ui status|observe    Chrome approval status / versioned button refs
+  extension-ui click            params {version,ref}; no password values exposed
+  extension-ui disconnect       Close CDP companion before ordinary page commands
   debug                          Enable Runtime/Network/Log/Performance events
   events --params JSON           Read events after {since:cursor,limit:100}
   history --params JSON          {query,startTime,endTime,maxResults}
@@ -120,9 +126,13 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   if (!isNativeControlMethod(method) && !controlAlias) invalidInput(method ? `未知浏览器方法：${method}` : "需要浏览器方法；运行 ppilot browser --help 查看用法。");
   if (!/^[\w.-]{1,128}$/.test(requestId)) invalidInput("requestId 必须是 1–128 个字母、数字、下划线、连字符或点。");
   if (output && !["screenshot", "observe"].includes(method!)) invalidInput("--output 仅支持 screenshot 或 observe。");
-  const positional = ["open", "switch", "cdp"].includes(method!) && args[0] && !args[0].startsWith("--") ? args.shift() : undefined;
+  const positional = ["open", "switch", "cdp", "extension-ui"].includes(method!) && args[0] && !args[0].startsWith("--") ? args.shift() : undefined;
   if (args.length) invalidInput(`未知参数：${args.join(" ")}`);
   let params = readParams(inline, file, stdin);
+  if (method === 'extension-ui') {
+    if (positional !== undefined) params.action = positional;
+    if (!['connect', 'status', 'observe', 'click', 'disconnect'].includes(params.action)) invalidInput('extension-ui 需要 connect/status/observe/click/disconnect。');
+  }
   if (method === "claim") {
     if (controller !== undefined) params.controller = controller;
     if (task !== undefined) params.task = task;

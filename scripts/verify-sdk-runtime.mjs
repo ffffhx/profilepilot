@@ -33,7 +33,10 @@ const server = http.createServer(async (req, res) => {
   const block = turn === 0 ? { type: "text", text: "Auxiliary fixture response" }
     : turn <= 2 ? { type: "tool_use", id: `tool_read_${turn}`, name: "Read", input: { file_path: turn === 1 ? unselectedFile : selectedFile } }
     : turn === 3 ? { type: "tool_use", id: "tool_pdf", name: "Read", input: { file_path: pdfFile } }
-    : turn === 4 ? { type: "tool_use", id: "tool_observe", name: "mcp__profilepilot__observe", input: { screenshot: false, layout: false } } : { type: "text", text: "SDK transport verified" };
+    : turn === 4 ? { type: "tool_use", id: "tool_observe", name: "mcp__profilepilot__observe", input: { screenshot: false, layout: false } }
+    : turn === 5 ? { type: "tool_use", id: "tool_sites", name: "mcp__profilepilot__site_adapters", input: { site: "zhihu" } }
+    : turn === 6 ? { type: "tool_use", id: "tool_site", name: "mcp__profilepilot__site_read", input: { operation: "zhihu.hot", params: { limit: 5 } } }
+    : { type: "text", text: "SDK transport verified" };
   const stop = block.type === "tool_use" ? "tool_use" : "end_turn";
   const message = { id: `msg_${turn}`, type: "message", role: "assistant", model: body.model, content: [block], stop_reason: stop, stop_sequence: null, usage: { input_tokens: 100, output_tokens: 20 } };
   if (!body.stream) { res.setHeader("content-type", "application/json"); res.end(JSON.stringify(message)); return; }
@@ -73,6 +76,11 @@ try {
   assert.equal(JSON.stringify(requests).includes('"type":"document"'), false);
   assert.ok(JSON.stringify(requests.at(-1).messages).includes("read_document"), "PDF Read denial must explain the supported tool");
   const advertised = requests.flatMap(r => (r.tools || []).map(t => t.name));
+  for (const name of ["site_adapters", "site_read"]) {
+    assert.ok(advertised.includes(`mcp__profilepilot__${name}`), `${name} must survive SDK schema conversion`);
+    assert.ok(messages.some(m => m.kind === "tool" && m.name === name), `${name} must traverse the real MCP transport`);
+  }
+  assert.deepEqual(messages.find(m => m.kind === "tool" && m.name === "site_read").args, { operation: "zhihu.hot", params: { limit: 5 } });
   assert.equal(advertised.includes("Bash"), false);
   const output = path.resolve("test-results/browser-tasks"); await mkdir(output, { recursive: true });
   await writeFile(path.join(output, "sdk-transport-result.json"), JSON.stringify({ passed: true, at: new Date().toISOString(), model: "deterministic local fixture, not a live model", requests: requests.length, tools: [...new Set(advertised)], toolCalls: messages.filter(m => m.kind === "tool").map(m => m.name) }, null, 2));

@@ -2,9 +2,10 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { phoneList } = require('../dist/shared/phone-list');
 const phone = (id, extra = {}) => ({ id, name: id, model: 'Test phone', transport: 'usb', connection: 'device', companion: 'unknown', state: null, confirmedAt: null, pending: null, error: '', ...extra });
+const connected = () => ({ companion: 'ready', confirmedAt: Date.now(), state: { phase: 'idle', permissions: {}, readiness: { computerConnected: true } } });
 
 test('list counts hardware, searches names and routes, and keeps offline records', () => {
-  const devices = [phone('usb-one', { name: 'My Phone', hardwareId: 'one' }), phone('10.0.0.2:1234', { transport: 'wifi', hardwareId: 'one' }), phone('offline', { connection: 'missing' })];
+  const devices = [phone('usb-one', { ...connected(), name: 'My Phone', hardwareId: 'one' }), phone('10.0.0.2:1234', { ...connected(), transport: 'wifi', hardwareId: 'one' }), phone('offline', { connection: 'missing' })];
   const all = phoneList(devices);
   assert.equal(all.all.length, 2); assert.equal(all.online, 1);
   assert.equal(all.items[0].connection, 'USB / Wi-Fi');
@@ -16,10 +17,23 @@ test('list counts hardware, searches names and routes, and keeps offline records
   assert.equal(phoneList(devices).items[0].connection, 'Wi-Fi');
 });
 
-test('debug connection enables basic viewing without companion installation', () => {
+test('debug connection is only available, not a connected App or a preview', () => {
   const item = phoneList([phone('connected', { companion: 'unavailable' })]).items[0];
-  assert.equal(item.online, true); assert.equal(item.action, 'basic-control');
-  assert.equal(item.status, '已连接'); assert.equal(item.session, '空闲');
+  assert.equal(item.online, false); assert.equal(item.available, true);
+  assert.equal(item.status, '可连接'); assert.equal(item.session, '—');
+});
+
+test('only a fresh App heartbeat counts as connected, independently of ended task state', () => {
+  const device = phone('app', connected());
+  assert.equal(phoneList([device]).online, 1);
+  device.state.phase = 'disconnected';
+  assert.equal(phoneList([device]).items[0].status, '已连接');
+  device.state.readiness.computerConnected = false;
+  assert.equal(phoneList([device]).items[0].status, '可连接');
+  device.state.readiness.computerConnected = true;
+  device.confirmedAt -= 8001;
+  assert.equal(phoneList([device]).online, 0);
+  assert.equal(phoneList([device], '', 'offline').items.length, 1);
 });
 
 test('unauthorized, emulator and cloud-only records never claim a control connection', () => {
@@ -48,5 +62,5 @@ test('a recovered Wi-Fi route offers a new view instead of reopening the disconn
   ]).items[0];
   assert.equal(item.id, '192.168.1.2:40000');
   assert.equal(item.action, 'basic-control'); assert.equal(item.actionLabel, '查看手机');
-  assert.equal(item.session, '空闲');
+  assert.equal(item.status, '可连接'); assert.equal(item.session, '—');
 });

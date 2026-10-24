@@ -1,11 +1,11 @@
-import { phoneActive, type PhoneDevice } from "./phones";
+import { phoneActive, phoneAppConnected, type PhoneDevice } from "./phones";
 
 export interface PhoneDeviceGroup { device: PhoneDevice; routes: PhoneDevice[]; }
 
 function priority(device: PhoneDevice): number {
   if (device.basic && !["stopped", "disconnected"].includes(device.basic.phase)) return 4;
   if (device.connection !== "device") return device.connection === "unauthorized" ? 1 : 0;
-  if (device.companion !== "ready") return 2;
+  if (!phoneAppConnected(device)) return 2;
   return 3;
 }
 

@@ -41,7 +41,7 @@ async function worker() {
   vm.runInContext(fs.readFileSync('extensions/profilepilot/background.js', 'utf8') + '\nglobalThis.api={handle,state,connectTest:()=>{config={port:12345,profileId:"native:fixture",token:"fixture"};return connect();}};', context);
   await new Promise(r => setImmediate(r));
   await context.api.connectTest();
-  return { ...context.api, calls, messages, downloads, tabs, chrome, socket, close: () => socket.close(), ui: value => new Promise(resolve => runtimeListener(value, { id: 'fixture', url: 'chrome-extension://fixture/sidepanel.html' }, resolve)) };
+  return { ...context.api, calls, messages, downloads, tabs, chrome, socket, close: () => socket.close(), content: (value, sender) => new Promise(resolve => runtimeListener(value, sender, resolve)), ui: value => new Promise(resolve => runtimeListener(value, { id: 'fixture', url: 'chrome-extension://fixture/sidepanel.html' }, resolve)) };
 }
 
 test('full-access existing tabs, background/minimized pointer, history and OOPIF event routing', async t => {

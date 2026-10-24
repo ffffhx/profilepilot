@@ -10,6 +10,8 @@ import { parseCommonBrowserAction } from "../../shared/browser-contract";
 import { writeControlTrace } from "../control-trace";
 import { isNativeControlMethod } from "./protocol";
 import { nativeExtensionReady, NATIVE_EXTENSION_UPDATE_MESSAGE } from "../tasks/native-compatibility";
+import { NativeExtensionUi } from './extension-ui';
+import { listSiteAdapters } from '../site-adapters/catalog';
 
 interface Session {
   task: BrowserTask;
@@ -45,6 +47,7 @@ export function publicNativeObservation(observation: BrowserObservation): unknow
 }
 export class NativeControlService {
   private readonly browser: NativeBrowser;
+  private readonly extensionUi: NativeExtensionUi;
   private readonly sessions = new Map<string, Session>();
   private readonly receipts = new Map<string, Receipt>();
   private readonly statusReceipts = new Map<string, Receipt>();
@@ -55,6 +58,7 @@ export class NativeControlService {
   private readonly unsubscribe: () => void;
   constructor(private readonly bridge: NativeBrowserBridge, private readonly root: string) {
     this.browser = new NativeBrowser(bridge, path.join(root, "native-control-artifacts"));
+    this.extensionUi = new NativeExtensionUi(bridge);
     this.unsubscribe = bridge.onEvent(event => {
       const entry = { ...event, cursor: ++this.cursor, at: new Date().toISOString() };
       const bytes = Buffer.byteLength(JSON.stringify(entry));
@@ -65,7 +69,7 @@ export class NativeControlService {
       }
     });
   }
-  close(): void { this.unsubscribe(); this.browser.dispose?.(); }
+  close(): void { this.unsubscribe(); this.extensionUi.close(); this.browser.dispose?.(); }
   hasSessions(): boolean { return this.sessions.size > 0; }
   ownsSession(profileId: string, sessionId: string): boolean { return this.sessions.get(sessionId)?.task.profileId === profileId; }
   private updateControlState(session: Session, state: NativeEvent["state"]): void {
@@ -78,7 +82,10 @@ export class NativeControlService {
         (previous.agent && !next.agent) || (!previous.paused && next.paused) ||
         (previous.generation !== undefined && previous.generation !== next.generation)) session.epoch++;
     session.control = next;
-    if (!next.connected || !next.owned || !next.agent || next.paused) session.task.observation = undefined;
+    if (previous.generation !== undefined && previous.generation !== next.generation) this.extensionUi.cancel(session.task.sessionId);
+    if (!next.connected || !next.owned || !next.agent || next.paused) {
+      session.task.observation = undefined; this.extensionUi.cancel(session.task.sessionId);
+    }
   }
   request(command: any): Promise<unknown> {
     if (!command || typeof command !== "object" || !isNativeControlMethod(command.method)) return Promise.reject(new NativeControlError("NATIVE_INVALID_REQUEST", "需要有效的浏览器操作 method。"));
@@ -143,6 +150,7 @@ export class NativeControlService {
       idleMs: Math.max(0, Date.now() - Date.parse(session.lastActivityAt)), pendingRequests: session.pendingRequests,
       generation: session.epoch, ownership: state?.ownership, pauseReason,
       lastMethod: session.lastMethod, lastRequestId: session.lastRequestId,
+      extensionUi: this.extensionUi.status(id),
       ...(session.ending ? { ending: true } : {}),
       nextStep: session.ending ? "release" : pauseReason ? "inspect-state" : "continue-owned-session" };
   }
@@ -159,6 +167,7 @@ export class NativeControlService {
   }
   private async execute(command: any): Promise<unknown> {
     const { method, params = {} } = command;
+    if (method === "sites") return listSiteAdapters(params.site);
     if (method === "status") return { protocolVersion: 1, profiles: this.bridge.states(), sessions: [...this.sessions].map(([id, s]) => this.sessionSnapshot(id, s)), cursor: this.cursor };
     if (method === "claim") {
       const profileId = this.profile(command.profileId), sessionId = command.sessionId || `direct-${randomUUID()}`;
@@ -204,6 +213,7 @@ export class NativeControlService {
     if (!session) throw new Error("直接会话不存在或浏览器服务已重启，请重新 claim；不会重放旧动作。");
     const task = session.task;
     if (command.profileId && command.profileId !== task.profileId) throw new Error("会话 Profile 不匹配。");
+    if (method === 'extension-ui' && params.action === 'status') return this.extensionUi.status(task.sessionId);
     if (method === "control") {
       if (!["handoff", "resume", "complete", "release"].includes(params.action)) throw new NativeControlError("NATIVE_INVALID_REQUEST", "无效的控制动作。");
       if (["complete", "release"].includes(params.action)) {
@@ -212,6 +222,7 @@ export class NativeControlService {
         // the reservation until termination succeeds, and allow explicit retry
         // after failure without ever reopening this generation for new work.
         session.ending = true; session.epoch++; task.observation = undefined;
+        this.extensionUi.cancel(task.sessionId);
         const result = (async () => {
           if (!this.bridge.states().find(s => s.profileId === task.profileId)?.connected) throw new NativeControlError("NATIVE_DISCONNECTED", "扩展断线，尚未确认会话结束；已保留会话身份。重连后请显式 complete 或 release，不会自动恢复或重放。");
           await this.browser.control(task, params.action);
@@ -222,7 +233,7 @@ export class NativeControlService {
         try { return await result; }
         finally { if (session.termination === result) session.termination = undefined; }
       }
-      if (params.action === "handoff") { session.epoch++; session.control.agent = false; }
+      if (params.action === "handoff") { session.epoch++; session.control.agent = false; this.extensionUi.cancel(task.sessionId); }
     }
     // Bind permission before joining the service queue. The extension also
     // checks this original token, including if its newer state arrives late.
@@ -249,6 +260,15 @@ export class NativeControlService {
         if (state.controlIssue) throw new NativeControlError(state.controlIssue.code, state.controlIssue.message);
         throw new NativeControlError("NATIVE_USER_IN_CONTROL", "用户已接管或浏览器已停止，请显式交还后重新观察。");
       }
+      if (method === 'extension-ui') {
+        task.observation = undefined;
+        if (params.action === 'connect') return this.extensionUi.start(task.profileId, task.sessionId, params.extensionId);
+        if (params.action === 'observe') return this.extensionUi.observe(task.sessionId);
+        if (params.action === 'click') return this.extensionUi.click(task.sessionId, params);
+        if (params.action === 'disconnect') return this.extensionUi.disconnect(task.sessionId);
+        throw new NativeControlError('NATIVE_INVALID_REQUEST', 'extension-ui 支持 connect/status/observe/click/disconnect。');
+      }
+      if (this.extensionUi.has(task.sessionId) && !['tabs', 'events'].includes(method)) throw new NativeControlError('NATIVE_EXTENSION_UI_ACTIVE', '请先 extension-ui disconnect，再操作普通网页。');
       if (method === "events") {
         const since = Number(params.since || 0), limit = Math.min(1000, Math.max(1, Number(params.limit) || 100));
         const selected = this.events.filter(e => e.profileId === task.profileId && (!e.sessionId || e.sessionId === task.sessionId) && e.cursor > since);
@@ -260,6 +280,9 @@ export class NativeControlService {
         task.observation = observation;
         return publicNativeObservation(observation);
       }
+      if (method === "site") return this.browser.siteAdapter(task, params, () => {
+        if (session.ending || session.epoch !== epoch || this.sessions.get(task.sessionId) !== session) throw new NativeControlError("NATIVE_USER_IN_CONTROL", "会话已改变，网站适配读取停止。");
+      });
       if (method === "action" || method === "pointer") {
         if (!task.observation || params.version !== task.observation.version) throw new NativeControlError("NATIVE_OBSERVATION_STALE", "动作必须携带最近 observe/read 的 version；动作、交还后请重新观察。");
         const observation = task.observation;

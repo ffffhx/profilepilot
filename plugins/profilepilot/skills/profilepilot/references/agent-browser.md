@@ -54,3 +54,7 @@ Use a fresh `snapshot` after navigation, frame/tab changes, a new snapshot, or c
 `batch --stdin` accepts a JSON array of command argument arrays. `--bail` stops at the first failure; any failed row makes the overall command fail. A batch cannot change session or connection, connect, disconnect, or nest another batch. Use the regular guarded lifecycle commands separately.
 
 Commands run serially in a session. A transport timeout never causes action replay. After an uncertain timeout, inspect session/page state before deciding what to do next. Use the installed command help; this engine does not include upstream cloud-provider integrations.
+# Website adapters
+
+Supported search, detail and comment operations are also available through the
+same Gateway session. See [structured website reads](site-adapters.md).

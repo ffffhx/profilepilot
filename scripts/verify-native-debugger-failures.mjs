@@ -27,12 +27,12 @@ const foreign = path.join(root, 'foreign'); await mkdir(foreign);
 await writeFile(path.join(foreign, 'manifest.json'), JSON.stringify({ manifest_version: 3, name: 'Local foreign-frame fixture', version: '1.0.0',
   web_accessible_resources: [{ resources: ['frame.html'], matches: ['http://127.0.0.1/*'] }] }));
 await writeFile(path.join(foreign, 'frame.html'), '<!doctype html><title>Local extension fixture</title><p>Test extension frame</p>');
-let foreignId, dismiss = false, dismissed = false;
+let foreignId, report = {};
 const server = createServer((req, res) => {
-  if (req.url === '/mode') { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ dismiss })); return; }
-  if (req.url === '/dismissed') { dismissed = true; res.end('ok'); return; }
+  if (req.url.startsWith('/report?')) { report = JSON.parse(new URL(req.url, 'http://fixture').searchParams.get('value')); res.end('ok'); return; }
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.end(`<!doctype html><title>Debugger conflict fixture</title><body>
+    <svg width="20" height="20"><path d="M0 0L20 20" stroke="black"/></svg><math><mi>x</mi></math>
     <label>School <input aria-label="School" role="combobox" aria-haspopup="listbox" aria-expanded="false" onclick="this.setAttribute('aria-expanded','true');document.querySelector('#options').hidden=false"></label>
     <p id="options" hidden>School option opened</p>
     <label>Attachment<input id="upload" type="file" multiple></label>
@@ -40,7 +40,18 @@ const server = createServer((req, res) => {
     <style>@keyframes pulse{from{opacity:1}to{opacity:.5}}#ticker{animation:pulse .2s infinite alternate}</style>
     <script>setInterval(()=>{document.querySelector('#ticker').textContent=Date.now();document.querySelector('#unrelated').value=Date.now()},40)</script>
     ${req.url === '/conflict' ? `<iframe id="foreign" src="chrome-extension://${foreignId}/frame.html"></iframe>
-    <script>setInterval(async()=>{if((await(await fetch('/mode')).json()).dismiss){document.querySelector('#foreign')?.remove();document.body.dataset.dismissed='true';await fetch('/dismissed');}},100)</script>` : ''}
+    <iframe id="ordinary" srcdoc="<p>Ordinary site frame</p>"></iframe>
+    <script>
+      let shadow, edits = 0;
+      window.addForeignOverlay = () => {
+        const host = document.createElement('fixture-overlay'); shadow = host.attachShadow({mode:'closed'});
+        const frame = document.createElement('iframe'); frame.src = 'chrome-extension://${foreignId}/frame.html';
+        shadow.append(frame); document.body.append(host);
+      };
+      document.querySelector('input[aria-label="School"]').addEventListener('input', () => { edits++; window.addForeignOverlay(); });
+      setInterval(()=>fetch('/report?value='+encodeURIComponent(JSON.stringify({foreign:!!document.querySelector('#foreign'),
+        shadow:!!shadow?.querySelector('iframe'),ordinary:!!document.querySelector('#ordinary'),edits}))),100);
+    </script>` : ''}
   </body>`);
 });
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -119,21 +130,30 @@ try {
   await direct('control', {action:'complete'});
   pass('Direct service reports task owner/conflict, accepts Chinese field/file paths, and rejects reused versions');
   task.nativeTarget = { tabId: tabs.find(t => t.url.endsWith('/conflict')).id };
-  await assert.rejects(browser.observe(task), error => error.code === 'NATIVE_EXTENSION_FRAME_CONFLICT');
-  assert.equal(bridge.states()[0].controlIssue.code, 'NATIVE_EXTENSION_FRAME_CONFLICT');
-  await assert.rejects(browser.observe(task), error => error.code === 'NATIVE_EXTENSION_FRAME_CONFLICT');
-  pass('Actual foreign-extension iframe is classified correctly; repeated reads do not claim user takeover');
-  // Emulate the user dismissing this test-only frame via the fixture's own UI.
-  dismiss = true; await until(() => dismissed, 'Fixture frame dismissal');
-  await browser.control(task, 'resume');
+  task.observation = await browser.observe(task);
+  assert.match(task.observation.snapshot, /School/);
+  await until(() => report.foreign === false && report.ordinary === true, 'Automatic frame suppression');
   assert.equal(bridge.states()[0].controlIssue, undefined);
+  pass('Existing foreign-extension frame is suspended before attach; ordinary iframe remains');
+  const school = task.observation.fast.candidates.find(c => c.label === 'School');
+  try { await browser.execute(task, {kind:'fill',ref:school.ref,value:'one edit',effect:'edit',summary:'Trigger test-only extension overlay'}); }
+  catch (error) { assert.equal(error.code, 'NATIVE_DEBUGGER_RECOVERED', error.message); }
   assert.match((await browser.observe(task)).snapshot, /School/);
-  pass('Explicit resume succeeds after the conflicting test frame is gone');
+  await until(() => report.edits === 1 && report.shadow === false, 'Closed shadow overlay suppression');
+  assert.equal(bridge.states()[0].ownership, 'agent');
+  pass('Typing creates a closed-shadow extension frame; connection recovers automatically without replaying input');
   await browser.control(task, 'handoff');
+  await until(() => report.foreign === true && report.shadow === true, 'Restore extension frames on handoff');
   assert.equal(bridge.states()[0].controlIssue, undefined);
   await assert.rejects(browser.observe(task), /用户正在/);
-  pass('Real handoff continues to block input');
+  pass('Handoff restores both overlays and continues to block agent input');
+  await browser.control(task, 'resume');
+  assert.match((await browser.observe(task)).snapshot, /School/);
+  await until(() => report.foreign === false && report.shadow === false, 'Resume suppresses restored overlays');
+  assert.equal(report.edits, 1);
+  pass('Explicit return suppresses restored overlays again without repeating the edit');
   await browser.control(task, 'complete');
+  await until(() => report.foreign === true && report.shadow === true, 'Restore extension frames on completion');
   await writeFile(path.join(output, 'result.json'), JSON.stringify({ status: 'passed', platform: process.platform, extensionVersion: JSON.parse(await readFile('extensions/profilepilot/manifest.json','utf8')).version, checks,
     notVerified: ['macOS hardware', 'user default Profile extension update'], boundary: 'Chrome foreign-extension frame restriction is retained; no other extension is disabled or inspected.' }, null, 2));
 } finally {

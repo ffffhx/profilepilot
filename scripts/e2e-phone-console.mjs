@@ -10,7 +10,7 @@ const require = createRequire(import.meta.url);
 const fixture = await mkdtemp(path.join(os.tmpdir(), 'pp-phone-console-'));
 const socket = process.platform === 'win32' ? `\\\\.\\pipe\\pp-phone-console-${process.pid}` : path.join(fixture, 'driver.sock');
 const output = path.join(repoRoot, 'artifacts/phone-console'); await mkdir(output, {recursive:true});
-const child = spawn(require('electron'), [path.join(repoRoot, 'scripts/e2e/fixtures/phone-ui-main.cjs')], {cwd:repoRoot,windowsHide:true,env:{...process.env,PHONE_UI_FIXTURE:fixture,PHONE_UI_SOCKET:socket},stdio:['ignore','pipe','pipe']});
+const child = spawn(require('electron'), [path.join(repoRoot, 'scripts/e2e/fixtures/phone-ui-main.cjs')], {cwd:repoRoot,windowsHide:true,env:{...process.env,PHONE_UI_FIXTURE:fixture,PHONE_UI_SOCKET:socket,PHONE_UI_POLL:'1'},stdio:['ignore','pipe','pipe']});
 let d, logs=''; child.stdout.on('data', v=>logs+=v);child.stderr.on('data', v=>logs+=v);
 const row = id => `[data-phone-row="${id}"]`;
 try {
@@ -46,7 +46,7 @@ try {
   assert.equal(await d.evaluate('window.phoneFixture.previewCalls()'),0,'sidebar does not start an App preview session');
   assert.equal(await d.evaluate(`(async()=>{const devices=(await window.phones.snapshot()).devices;return devices.every(d=>!d.basic&&(!d.state||d.state.phase==='idle'));})()`),true,'automatic screen display leaves control sessions unchanged');
   assert.equal(await d.evaluate(`(()=>{const list=document.querySelector('.phone-registry').getBoundingClientRect(),side=document.querySelector('.phone-inspector').getBoundingClientRect();return side.left>=list.right&&Math.abs(side.top-list.top)<2;})()`),true,'screen is beside the list');
-  const screenReads = () => d.evaluate(`(async()=> (await window.phoneBasicFixture.calls()).filter(a=>a.includes('screencap')).length)()`);
+  const screenReads = () => d.evaluate(`(async()=> (await window.phoneBasicFixture.calls()).filter(a=>a.includes('screencap') || a[2]==='shell' && a[3]?.startsWith("'screencap'")).length)()`);
   const beforeRefresh = await screenReads();
   await d.evaluate(`window.firstSidebarImage=document.querySelector('.phone-inspector-screen img');true`);
   await delay(3200);
@@ -58,23 +58,35 @@ try {
   assert.equal(await screenReads(),hiddenReads,'hidden pane stops capturing');
   await d.evaluate(`window.workspacePane.active=true;document.dispatchEvent(new Event('workspace-visibilitychange'));true`);
   await d.waitFor('.phone-inspector-screen',s=>!s.disabled);
+  assert.equal((await d.query('.phone-inspector [data-action="phone-operate"], .phone-inspector [data-action="basic-open"]')).count,0,'preview is the only phone-control entry in the sidebar');
+  await d.domClick('.phone-inspector-screen');
+  await d.waitFor('.phone-basic-dialog[open] .phone-basic-screen img',s=>s.attributes['data-interactive']==='true');
+  await d.waitFor('.phone-basic-screen',s=>s.attributes['aria-busy']==='false');
+  assert.equal(await d.evaluate(`(async()=> (await window.phones.snapshot()).devices.find(d=>d.id==='UI-TEST-1').basic.phase)()`),'controlling');
+  await shot('00-interactive-phone-preview.png');
+  await d.domClick('[data-basic-close]');await d.waitFor('.phone-basic-dialog',s=>!s.exists);
+  assert.equal(await d.evaluate(`(async()=> (await window.phones.snapshot()).devices.find(d=>d.id==='UI-TEST-1').basic.phase)()`),'stopped','closing the preview ends its own control session');
+  // An already active App session still opens its existing read-only monitor.
+  await d.evaluate(`window.phoneFixture.setState('UI-TEST-1',{phase:'viewing',sessionId:'fixture-view-session'})`);
+  await d.waitFor('.phone-inspector-screen',s=>!s.disabled);
   await d.domClick('.phone-inspector-screen');await d.waitFor('.phone-image-dialog[open]');
+  assert.equal(await d.evaluate(`(async()=> (await window.phones.snapshot()).devices.find(d=>d.id==='UI-TEST-1').basic.phase)()`),'stopped','opening an occupied App preview does not start or replace control');
   const preview = '.phone-image-dialog img';
-  await d.waitFor('.phone-image-dialog p',s=>s.text.includes('实时更新'));
+  await d.waitFor('.phone-image-dialog p',s=>/实时更新|每 2 秒刷新|连续预览/.test(s.text));
   const firstPreview = (await d.query(preview)).attributes.src;
   await d.evaluate('window.phoneBasicFixture.frame({shade:180,width:640,height:320})');
   await d.waitFor(preview,s=>s.attributes.src!==firstPreview);
   assert.equal(await d.evaluate(`document.querySelector('${preview}').naturalWidth`),640,'enlarged preview receives new pixels and rotation');
   assert.equal((await d.query(preview)).attributes.src,(await d.query('.phone-inspector-screen img')).attributes.src,'sidebar and dialog share the same frame');
-  const liveReads = await screenReads(); await delay(1700);
-  assert.ok(await screenReads()>=liveReads+2,'open dialog refreshes faster than the sidebar');
+  const liveReads = await screenReads(); await delay(4500);
+  assert.ok(await screenReads()>liveReads,'open dialog keeps refreshing when video is unavailable');
   // Corrupt frames must not replace the last decoded image, and reads recover.
   const lastGood = (await d.query(preview)).attributes.src;
   await d.evaluate('window.phoneBasicFixture.frame({shade:200,corrupt:true})');
   await d.waitFor('.phone-image-dialog p',s=>s.text.includes('更新失败'));
   assert.equal((await d.query(preview)).attributes.src,lastGood);
   await d.waitFor(preview,s=>s.attributes.src!==lastGood);
-  await d.waitFor('.phone-image-dialog p',s=>s.text.includes('实时更新'));
+  await d.waitFor('.phone-image-dialog p',s=>/实时更新|每 2 秒刷新|连续预览/.test(s.text));
   // Slow reads stay single-flight even while the live timer and sidebar tick.
   await d.evaluate('window.phoneBasicFixture.frame({shade:210,delay:1800})');
   await d.waitFor('[data-action="refresh-phone-screen"]',s=>s.disabled);
@@ -96,13 +108,13 @@ try {
   assert.equal((await d.query(preview)).attributes.src,undefined,'paused sessions clear the enlarged stale frame');
   const pausedReads = await screenReads(); await delay(1200);
   assert.equal(await screenReads(),pausedReads);
-  await d.evaluate(`window.phoneFixture.setState('UI-TEST-1',{phase:'idle'})`);
+  await d.evaluate(`window.phoneFixture.setState('UI-TEST-1',{phase:'viewing'})`);
   await d.waitFor(preview,s=>!!s.attributes.src);
   await d.domClick('.phone-image-dialog button');
   await d.waitFor('.phone-image-dialog',s=>!s.exists);
   await delay(200);
   const closedReads = await screenReads(); await delay(1700);
-  assert.ok(await screenReads()<=closedReads+1,'closing stops the fast loop and restores sidebar cadence');
+  assert.ok(await screenReads()<=closedReads+4,'closing retains a bounded sidebar capture cadence');
   await d.domClick('.phone-inspector-screen');
   await d.waitFor('.phone-image-dialog[open]');
   assert.equal((await d.query('.phone-image-dialog')).count,1,'reopening does not accumulate dialogs');
@@ -113,11 +125,27 @@ try {
   assert.equal(await screenReads(),offlineReads);
   await select('UI-TEST-2');
   await d.waitFor('.phone-image-dialog',s=>!s.exists);
+  await d.evaluate(`window.phoneFixture.setState('UI-TEST-1',{phase:'idle',sessionId:null})`);
   await d.evaluate('window.phoneFixture.setConnection(true)');
   await select('UI-TEST-1');
   await d.evaluate('window.phoneBasicFixture.frame({shade:128,width:320,height:640})');
   await d.waitFor('.phone-inspector-screen',s=>!s.disabled);
   await shot('01-device-list.png');
+  // Device discovery is distinct from the App connection used by both screens.
+  await d.domClick(`${row('UI-TEST-1')} [data-action="disconnect-phone"]`);
+  await d.waitFor(`${row('UI-TEST-1')} .phone-list-status`,s=>s.text==='可连接');
+  await d.waitFor('.phone-inspector-screen',s=>s.disabled);
+  assert.equal((await d.query('.phone-inspector-screen img')).attributes.src,undefined);
+  const disconnectedReads = await screenReads(); await delay(2400);
+  assert.equal(await screenReads(),disconnectedReads,'disconnect stops polling screenshots');
+  assert.equal((await d.query(`${row('UI-TEST-1')} [data-action="connect-phone"]`)).disabled,false);
+  await shot('07-available-connect.png');
+  const installsBefore = (await d.evaluate('window.phoneBasicFixture.calls()')).filter(args=>args.includes('install')).length;
+  await d.domClick('.phone-inspector [data-action="connect-phone"]');
+  await d.waitFor(`${row('UI-TEST-1')} .phone-list-status`,s=>s.text==='已连接');
+  await d.waitFor('.phone-inspector-screen',s=>!s.disabled);
+  assert.equal((await d.evaluate('window.phoneBasicFixture.calls()')).filter(args=>args.includes('install')).length,installsBefore);
+  await shot('08-connected-disconnect.png');
   await d.domClick('[data-phone-filter="offline"]');
   await d.waitFor('[data-phone-row]',s=>s.count===1);
   assert.equal((await d.query('[data-phone-row]')).attributes['data-phone-row'],'emulator-5554');
@@ -144,7 +172,9 @@ try {
   await d.domClick('.phone-name-dialog [type="submit"]');
   await d.waitFor('.phone-inspector-heading h2',s=>s.text==='<手机 & 名称>');
   assert.equal((await d.query(`${row('UI-TEST-2')} strong`)).text, 'UI Test Phone 2');
-  await d.evaluate('location.reload();true');
+  await d.request('reload');
+  // The reload command acknowledges navigation before the new context exists.
+  await delay(1000);
   await d.waitFor(`${row('UI-TEST-1')} strong`,s=>s.text==='<手机 & 名称>');
   assert.match((await d.query(row('UI-TEST-1'))).text,/<手机 & 名称>/);
   await details('UI-TEST-1');
@@ -152,11 +182,12 @@ try {
   assert.equal(await d.evaluate('document.activeElement.dataset.deviceId'),'UI-TEST-1');
   // The selected row determines the sidebar and explicit input target.
   await select('UI-TEST-2');
-  await d.domClick('.phone-inspector [data-action="phone-operate"]');
+  await d.waitFor('.phone-inspector-screen',s=>!s.disabled);
+  await d.domClick('.phone-inspector-screen');
   await d.waitFor('.phone-basic-dialog[open]');
   const snapshot=await d.evaluate('window.phones.snapshot()');
   assert.equal(snapshot.devices.find(x=>x.id==='UI-TEST-2').basic.phase,'controlling');
-  assert.ok(!snapshot.devices.find(x=>x.id==='UI-TEST-1').basic);
+  assert.equal(snapshot.devices.find(x=>x.id==='UI-TEST-1').basic.phase,'stopped');
   await d.domClick('[data-basic-close]');
   await d.waitFor('.phone-basic-dialog',s=>!s.exists);
   await details('UI-TEST-1');
@@ -243,6 +274,9 @@ try {
   assert.equal((await d.query('dialog[open]')).count,0,'list returns without leftover dialogs');
   await shot('06-phone-sidebar.png');
   console.log('PASS phone console: persistent sidebar, passive refresh, explicit operation, list selection, grouped routes, settings, connection dialogs, responsive layout');
+} catch (error) {
+  console.error('Phone console failure state:', await d?.evaluate(`(async()=>({text:document.body.innerText.slice(0,2500),devices:(await window.phones.snapshot()).devices.map(d=>({id:d.id,connection:d.connection,companion:d.companion,phase:d.state?.phase,confirmedAt:d.confirmedAt}))}))()`).catch(e=>String(e)));
+  throw error;
 } finally {
   if(d){await d.request('quit',{},1000).catch(()=>{});d.close();}
   for(let i=0;i<50&&child.exitCode===null;i++)await delay(100);
@@ -250,7 +284,7 @@ try {
   if(path.dirname(path.resolve(fixture))!==path.resolve(os.tmpdir())||!path.basename(fixture).startsWith('pp-phone-console-'))throw new Error('Invalid fixture path');
   await rm(fixture,{recursive:true,force:true,maxRetries:10,retryDelay:100});
 }
-const app=await launchProfilePilotE2e({experimentalAgent:false});
+const app=await launchProfilePilotE2e({experimentalAgent:false,env:{CPM_START_VIEW:'phones'}});
 try {
   const d=app.driver, shell=expression=>d.evaluate(expression,{target:'shell'});
   await d.domClick('[data-pc-view="phones"]');await d.waitFor('.phone-list-empty');

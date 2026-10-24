@@ -1,5 +1,9 @@
 # ProfilePilot Browser CLI (`ppilot browser`)
 
+For supported website search, details, comments and transcripts, see
+[structured website reads](site-adapters.md). Use `ppilot browser sites` to
+discover capabilities, then `site --params-file` in the same owned session.
+
 Use ProfilePilot Browser CLI (`ppilot browser`) when this route was selected. Page reads and actions send commands through the independent local browser service to the target Profile's extension, without invoking an additional model. Browser commands automatically start that service; the desktop App can remain closed. Install/connect the extension in the exact target Profile. Do not substitute `ppilot chat` or `ppilot run`, which start model-backed tasks.
 
 `ppilot browser connect --profile native:PROFILE_DIRECTORY` returns an installation/connection URL; open it in that exact Chrome Profile. `pair --profile native:PROFILE_DIRECTORY` returns a manual pairing code to paste into the extension. Do not print pairing codes into task logs or model-visible summaries. `service status` checks the service without launching it; `service start` starts it explicitly. `service stop` refuses while browser sessions still own Profiles. Never stop the shared service merely because one Agent finishes.
@@ -51,6 +55,44 @@ Use `open URL`, `switch TAB_ID` and `newTab` with the same `--session`. Ordinary
 `history` takes `{ "query": "example", "maxResults": 100 }` and searches the target Profile's history. Query only the scope the task needs.
 
 `download --params-file download.json` accepts an explicit HTTP(S) URL, filename and timeout. Track the returned download ID. After timeout, query/wait for that ID instead of starting another download. Page-triggered blob/data downloads can be ambiguous; do not claim a file is captured unless the returned artifact is registered and verified.
+
+## Extension UI companion (0.2.13+)
+
+When the user authorizes interaction with a password-manager overlay, use the
+current task's `extension-ui` mode. It connects the local browser service to the
+same Chrome through browser-level CDP, with the paired extension retaining task
+ownership and supplying the exact tab/target mapping. It uses no desktop input.
+Do not activate this route silently for ordinary page tasks or after takeover.
+
+```sh
+ppilot browser --session TASK extension-ui connect --params-file extension.json
+ppilot browser --session TASK extension-ui status
+ppilot browser --session TASK extension-ui observe
+ppilot browser --session TASK extension-ui click --params-file button.json
+ppilot browser --session TASK extension-ui disconnect
+ppilot browser --session TASK observe
+```
+
+`extension.json` contains `{"extensionId":"TARGET_EXTENSION_ID"}`; obtain the
+actual ID from the installed target extension. Chrome remote debugging must be
+enabled in `chrome://inspect/#remote-debugging`. `connect` returns `authorizing`
+immediately. Ask the user to accept Chrome's connection dialog while this request
+is alive; poll `status` until `ready` or `failed`. The service keeps the connection
+across commands, so authorization is not requested for every read or click.
+After `failed`, inspect the cause and disconnect before an explicit new attempt.
+
+`observe` returns visible button/link labels within the selected extension's
+frames embedded in the authorized tab. `button.json` contains the returned
+`{"version":"...","ref":"x1"}`. Every click consumes that observation; inspect
+the resulting UI or page before another click. Password fields are not exposed.
+Choose the correct account from observed labels; a click acknowledgment does not
+prove login succeeded. This mode does not unlock a vault, supply biometrics, or
+approve an OS passkey dialog. Browser toolbar popups and extension workers are
+outside its scope. Normal page commands remain blocked until `disconnect`.
+
+Handoff, completion, release, loss of ownership, extension disconnection or
+Chrome CDP disconnection stop the companion. Resume never silently reconnects
+it. Do not open a second CDP connection to bypass these controls.
 
 ## Control lifecycle
 

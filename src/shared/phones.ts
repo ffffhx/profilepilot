@@ -66,6 +66,8 @@ export interface PhonesSnapshot {
   companionApp?: { packageName: string; name: string; variant: "debug" | "release" };
 }
 export interface PhoneScreenFrame { mime: "image/png"; base64: string; width: number; height: number; capturedAt: number; }
+export interface PhoneVideoPacket { codec: string; key: boolean; timestamp: number; data: Uint8Array; width?: number; height?: number; screenWidth?: number; screenHeight?: number; }
+export interface PhoneVideoSession { sessionId: string; generation: number; }
 export interface PhoneWirelessService { name: string; kind: "pairing" | "connect"; address: string; source?: "phone" | "mdns" | "adb"; reachable?: boolean; reason?: string; }
 export interface PhoneWirelessDiscovery { services: PhoneWirelessService[]; error: string; phoneIps?: string[]; }
 export interface PhoneSelector {
@@ -110,9 +112,14 @@ export interface PhonesApi {
   pairWireless(address: string, code: string): Promise<{ address: string }>;
   connectWireless(address: string): Promise<PhoneDevice>;
   autoConnectWireless(id: string): Promise<PhoneDevice>;
+  connect(id: string): Promise<PhoneDevice>;
+  disconnect(id: string): Promise<PhoneDevice>;
   prepare(id: string): Promise<PhoneDevice>;
   preview(id: string): Promise<PhoneActionResult>;
   screen(id: string): Promise<PhoneScreenFrame>;
+  videoStart(id: string, basic?: PhoneVideoSession): Promise<{ streamId: string }>;
+  videoRead(streamId: string): Promise<{ packets: PhoneVideoPacket[]; error: string }>;
+  videoStop(streamId: string): Promise<void>;
   openSettings(id: string, setting: PhoneSetting): Promise<void>;
   rename(id: string, name: string): Promise<void>;
   start(id: string, mode: "view" | "control", controller: string, task: string): Promise<PhoneDevice>;
@@ -120,13 +127,19 @@ export interface PhonesApi {
   perform(input: PhoneActionInput): Promise<PhoneActionResult>;
   onChanged(listener: (snapshot: PhonesSnapshot) => void): () => void;
 }
+/** Match the companion's heartbeat-based connection, independently of task ownership. */
+export function phoneAppConnected(device: PhoneDevice, now = Date.now()): boolean {
+  return device.connection === "device" && device.companion === "ready" && !!device.state
+    && device.confirmedAt !== null && now - device.confirmedAt < 8000
+    && device.state.readiness?.computerConnected !== false;
+}
 export function phoneStatus(device: PhoneDevice): string {
   if (device.pending) return device.pending;
   if (device.connection === "unauthorized") return device.transport === "emulator" ? "等待模拟器确认调试连接" : "等待手机授权 USB 调试";
   if (device.connection !== "device") return "连接中断 · 状态待确认";
   if (device.companion === "pairing") return "等待手机配对";
   if (device.companion !== "ready" && device.state?.phase === "disconnected") return "连接中断 · 状态待确认";
-  if (device.companion !== "ready" || !device.state) return "已连接 · 配套 App 未就绪";
+  if (!phoneAppConnected(device) || !device.state) return "可连接";
   if (device.state.phase === "executing" && device.state.mode === "view") return "正在查看 · 获取页面";
   if (device.state.phase === "controlling") return device.state.task.trim() ? "任务进行中" : "控制会话进行中";
   return ({ idle: "已连接，未控制", viewing: "屏幕查看中", executing: "控制中 · 执行任务", paused: "已暂停 · 手机可自行操作", stopped: "已结束", disconnected: "连接中断 · 已停止接受指令" })[device.state.phase];

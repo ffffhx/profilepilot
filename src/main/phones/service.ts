@@ -3,7 +3,7 @@ import path from "node:path";
 import os from "node:os";
 import { randomBytes, randomUUID } from "node:crypto";
 import { z } from "zod";
-import { PHONE_PROTOCOL, type PhoneDevice, type PhonesSnapshot, type PhoneSessionState, type PhoneAction, type PhoneActionInput, type PhoneActionResult } from "../../shared/phones";
+import { PHONE_PROTOCOL, phoneAppConnected, type PhoneDevice, type PhonesSnapshot, type PhoneSessionState, type PhoneAction, type PhoneActionInput, type PhoneActionResult } from "../../shared/phones";
 import { groupPhoneDevices } from "../../shared/phone-devices";
 import { phoneReadiness, type PhoneRuntimeEvidence } from "../../shared/phone-readiness";
 import type { PhoneSetting } from "../../shared/phones";
@@ -28,6 +28,7 @@ import { ScreenCamera, type CameraCapture } from "./screen-camera";
 import type { ScreenCameraStart, ScreenCameraCommand, ScreenCameraLease } from "../../shared/screen-camera";
 import { GameFollower } from "./game-follow";
 import { FollowRecovery } from "./follow-recovery";
+import { PhoneVideoStream } from "./screen-video";
 export { phoneActionSchema } from "./actions";
 export type PhoneCommandSource = "desktop" | "external";
 
@@ -73,6 +74,7 @@ export class PhonesService {
   private operations = new Set<string>();
   private actions = new Set<string>();
   private screenReads = new Map<string, AbortController>();
+  private screenVideos = new Map<string, AbortController>();
   private captureStarting = new Map<string, number>();
   private captureSessions = new Map<string, { instanceId: string; sessionId: string; generation: number; backend: "app" | "basic" }>();
   private inspections = new Set<AbortController>();
@@ -90,6 +92,7 @@ export class PhonesService {
   private wirelessScanAt = -Infinity;
   private wirelessAttempts = new Map<string, number>();
   private wirelessDisabled = new Set<string>();
+  private appDisconnected = new Set<string>();
   private emulatorBusy = false;
   private emulators: EmulatorRuntime;
   readonly androidSetup: AndroidSetupRuntime;
@@ -124,6 +127,8 @@ export class PhonesService {
     this.emulators = options.emulators || new AndroidEmulators();
     this.androidSetup = options.androidSetup || new AndroidSetup();
     fs.mkdirSync(options.root, { recursive: true });
+    const disconnectedFile = path.join(options.root, "app-disconnected.json");
+    if (fs.existsSync(disconnectedFile)) this.appDisconnected = new Set(z.array(z.string().min(1).max(240)).parse(JSON.parse(fs.readFileSync(disconnectedFile, "utf8"))));
     this.cloud = new PhoneCloud(options.root, () => this.changed(), undefined, undefined, this.companion.pairingScheme);
     const file = path.join(options.root, "devices.json");
     this.saved = fs.existsSync(file) ? z.record(z.string(), z.object({ statusDeviceId: z.string().uuid().optional(), token: z.string().regex(/^[a-f0-9]{64}$/), name: z.string().max(80).optional(), installedHash: z.string().regex(/^[a-f0-9]{64}$/).optional(), hardwareId: z.string().max(200).optional(), model: z.string().max(200).optional(), transport: z.enum(["usb", "wifi", "emulator"]).optional() })).parse(JSON.parse(fs.readFileSync(file, "utf8"))) : {};
@@ -184,8 +189,10 @@ export class PhonesService {
   private captureRoutes(id: string): PhoneDevice[] {
     return groupPhoneDevices(this.snapshot().devices).find(group => group.routes.some(route => route.id === id))?.routes || [];
   }
-  private cancelScreenReads(id: string): void {
-    for (const routeId of new Set([id, ...this.captureRoutes(id).map(route => route.id)])) this.screenReads.get(routeId)?.abort();
+  private cancelScreenReads(id: string, keepVideo = false): void {
+    for (const routeId of new Set([id, ...this.captureRoutes(id).map(route => route.id)])) {
+      this.screenReads.get(routeId)?.abort(); if (!keepVideo) this.screenVideos.get(routeId)?.abort();
+    }
   }
   private reserveTaskCapture(id: string): () => void {
     validateDeviceId(id);
@@ -213,13 +220,15 @@ export class PhonesService {
       }
     }
   }
-  private guardPreview(id: string, ownOperation = false): PhoneDevice[] {
+  private guardPreview(id: string, ownOperation = false, basicInput = false): PhoneDevice[] {
     const routes = this.captureRoutes(id);
     if (routes.some(route => route.visualFollowActive)) throw new Error("视觉跟随正在采集画面，请在视觉跟随窗口查看；结束后恢复手机预览。");
     if (routes.some(route => [route.basic, route.state].some(state => state && (state.phase === "paused" || state.phase === "disconnected" && !!state.sessionId))))
       throw new Error("手机会话已暂停或断开，确认会话状态后再刷新画面。");
-    if (routes.some(route => route.taskCaptureActive)) throw new Error("手机任务正在使用画面，任务结束后恢复预览。");
-    if (routes.some(route => this.actions.has(route.id) || this.operations.has(route.id) && !(ownOperation && route.id === id)))
+    const ownBasicAction = basicInput && this.actions.has(id) && !routes.some(route => this.captureStarting.has(route.id)
+      || route.id !== id && this.actions.has(route.id) || this.captureSessions.has(route.id));
+    if (routes.some(route => route.taskCaptureActive) && !ownBasicAction) throw new Error("手机任务正在使用画面，任务结束后恢复预览。");
+    if (routes.some(route => this.actions.has(route.id) && !(basicInput && route.id === id) || this.operations.has(route.id) && !(ownOperation && route.id === id)))
       throw new Error("手机正在处理操作，请稍后刷新画面。");
     return routes;
   }
@@ -257,7 +266,7 @@ export class PhonesService {
   basicControl(id: string, command: "pause" | "resume" | "stop"): PhoneDevice {
     z.enum(["pause", "resume", "stop"]).parse(command);
     if (command !== "stop") this.connected(id); else this.device(id);
-    this.basic.control(id, command);
+    this.cancelScreenReads(id); this.basic.control(id, command);
     if (command === "stop") this.captureSessions.delete(id);
     return this.snapshot().devices.find(device => device.id === id)!;
   }
@@ -265,7 +274,7 @@ export class PhonesService {
     const parsed = z.object({ id: z.string(), sessionId: z.string().min(1), generation: z.number().int().nonnegative(), mode: z.enum(["view", "control"]) }).strict().parse(input);
     if (this.closed) throw new Error("手机服务正在退出。");
     this.connected(parsed.id);
-    this.basic.setMode(parsed);
+    this.cancelScreenReads(parsed.id); this.basic.setMode(parsed);
     return this.snapshot().devices.find(device => device.id === parsed.id)!;
   }
   async basicPerform(input: PhoneActionInput): Promise<PhoneActionResult> {
@@ -273,7 +282,7 @@ export class PhonesService {
     if (this.closed) throw new Error("手机服务正在退出。");
     if (this.captureRoutes(parsed.id).some(route => this.actions.has(route.id) || this.operations.has(route.id))) throw new Error("手机上一项操作尚未结束。");
     this.connected(parsed.id);
-    this.actions.add(parsed.id); this.cancelScreenReads(parsed.id); this.changed();
+    this.actions.add(parsed.id); this.cancelScreenReads(parsed.id, true); this.changed();
     try { return await this.basic.perform(parsed); }
     finally { this.actions.delete(parsed.id); this.changed(); }
   }
@@ -377,6 +386,7 @@ export class PhonesService {
         if (this.operations.has(device.id)) continue;
         await this.identifyHardware(device);
         await this.inspectInstallation(device);
+        if (this.appConnectionDisabled(device)) continue;
         let polledRoute: Route | undefined;
         try {
           if (this.awaitingFollowRecovery(device.id)) continue;
@@ -495,6 +505,41 @@ export class PhonesService {
     const output = await this.adb.run(["disconnect", id], 10000);
     return { id, output };
   }
+  private appConnectionDisabled(device: PhoneDevice): boolean {
+    const hardware = device.hardwareId || this.saved[device.id]?.hardwareId;
+    return this.appDisconnected.has(`route:${device.id}`) || !!hardware && this.appDisconnected.has(`hardware:${hardware}`);
+  }
+  private setAppDisconnected(id: string, disabled: boolean): void {
+    const device = this.device(id), hardware = device.hardwareId || this.saved[id]?.hardwareId;
+    const keys = new Set([`route:${id}`, ...this.captureRoutes(id).map(route => `route:${route.id}`)]);
+    if (hardware) {
+      keys.add(`hardware:${hardware}`);
+      for (const [alias, saved] of Object.entries(this.saved)) if (saved.hardwareId === hardware) keys.add(`route:${alias}`);
+      for (const [alias, identity] of Object.entries(this.identities)) if (identity.hardwareId === hardware) keys.add(`route:${alias}`);
+    }
+    for (const key of keys) { if (disabled) this.appDisconnected.add(key); else this.appDisconnected.delete(key); }
+    const file = path.join(this.options.root, "app-disconnected.json"), tmp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify([...this.appDisconnected]), { mode: 0o600 }); fs.renameSync(tmp, file);
+  }
+  /** Disconnect the App on every route for this phone, keeping discovery available. */
+  async disconnect(id: string): Promise<PhoneDevice> {
+    if (this.refreshing) await this.refreshing;
+    await this.exclusive(id, "正在断开…", async () => {
+      const routes = this.captureRoutes(id);
+      if (routes.some(route => this.actions.has(route.id) || route.connection === "device" && [route.state, route.basic].some(state => state && ["viewing", "controlling", "executing", "paused"].includes(state.phase))))
+        throw new Error("请先结束这台手机的会话，再断开连接。");
+      this.setAppDisconnected(id, true);
+      for (const route of routes) {
+        const device = this.devices.get(route.id); if (!device) continue;
+        this.screenCamera.stopFor(route.id, "手机连接已断开");
+        this.pairing.delete(route.id);
+        await this.disconnected(device, "");
+        device.state = null; device.confirmedAt = null;
+        this.observations.delete(route.id); this.captureSessions.delete(route.id);
+      }
+    });
+    return structuredClone(this.device(id));
+  }
   private async inspectInstallation(device: PhoneDevice): Promise<void> {
     if (device.appInstallation && this.now() - device.appInstallation.checkedAt < 30000) return;
     let status: "installed" | "missing" | "unknown" = "unknown";
@@ -530,7 +575,7 @@ export class PhonesService {
         && device.state?.instanceId === owner.instanceId && device.state.sessionId === owner.sessionId
         && device.state.generation === owner.recoveryGeneration && ["viewing", "controlling", "executing"].includes(device.state.phase)) owner.recovery?.lost();
     }
-    if (connection !== "device") this.screenReads.get(device.id)?.abort();
+    this.screenReads.get(device.id)?.abort(); this.screenVideos.get(device.id)?.abort();
     if (connection !== "device") { this.basic.disconnect(device.id); this.hardwareReadings.delete(device.id); device.appInstallation = undefined; }
     this.debugReadings.delete(device.id); this.debugPending.delete(device.id);
     if (device.state && ["viewing", "controlling", "executing"].includes(device.state.phase)) this.reconcile.add(device.id);
@@ -824,6 +869,7 @@ export class PhonesService {
           if (!confirmedRoute && ["viewing", "controlling", "executing"].includes(state.phase)) {
             await this.rpc(id, "pause", { instanceId: state.instanceId, sessionId: state.sessionId, generation: state.generation });
           }
+          this.setAppDisconnected(id, false);
           return;
         }
         if (state && ["viewing", "controlling", "executing", "paused"].includes(state.phase)) throw new Error("请先结束手机会话，再打开或更新配套 App。");
@@ -852,6 +898,7 @@ export class PhonesService {
       if (!this.routes.has(id)) await this.forward(id);
       this.device(id).companion = "pairing";
       try { await this.rpc(id, "sync"); } catch { /* phone must approve first */ }
+      this.setAppDisconnected(id, false);
     });
     return structuredClone(this.device(id));
   }
@@ -908,11 +955,38 @@ export class PhonesService {
     finally { this.actions.delete(id); this.changed(); }
   }
   /** Desktop inspector read: no session creation, input frame, installation or takeover. */
+  async startScreenVideo(id: string, signal: AbortSignal, basic?: { sessionId: string; generation: number }): Promise<PhoneVideoStream> {
+    const device = this.connected(id);
+    const guard = () => {
+      if (this.closed || device.connection !== "device") throw new Error("手机连接已断开。");
+      if (basic) {
+        const state = this.basic.state(id);
+        if (!state || state.sessionId !== basic.sessionId || state.generation !== basic.generation || !["viewing", "controlling"].includes(state.phase)) throw new Error("手机操作会话已改变，视频已停止。");
+      } else if (!phoneAppConnected(device, this.now()) || this.appConnectionDisabled(device)) throw new Error("请先连接手机 App，再查看画面。");
+      return JSON.stringify(this.guardPreview(id, false, !!basic).map(route => [route.id, route.connection, route.basic?.sessionId, route.basic?.generation,
+        route.basic?.phase, route.state?.instanceId, route.state?.sessionId, route.state?.generation, route.state?.phase]));
+    };
+    const version = guard(); signal.throwIfAborted();
+    for (const route of this.captureRoutes(id)) this.screenVideos.get(route.id)?.abort();
+    const controller = new AbortController(); this.screenVideos.set(id, controller);
+    const abort = () => controller.abort(); signal.addEventListener("abort", abort, { once: true });
+    controller.signal.addEventListener("abort", () => {
+      signal.removeEventListener("abort", abort);
+      if (this.screenVideos.get(id) === controller) this.screenVideos.delete(id);
+    }, { once: true });
+    const stream = new PhoneVideoStream(this.adb, id, () => {
+      if (guard() !== version) throw new Error("手机会话已改变，视频预览已停止。");
+    }, controller.signal);
+    try { await stream.start(); return stream; }
+    catch (error) { controller.abort(); stream.stop(); throw error; }
+  }
+  /** Desktop inspector read: no session creation, input frame, installation or takeover. */
   async screen(id: string): Promise<PhoneScreenFrame> {
     const device = this.connected(id);
     if (!this.adb.runBinary) throw new Error("当前连接不支持读取手机画面。");
     if (this.captureRoutes(id).some(route => this.screenReads.has(route.id))) throw new Error("正在获取手机画面，请稍候。");
     const guard = () => {
+      if (!phoneAppConnected(device, this.now()) || this.appConnectionDisabled(device)) throw new Error("请先连接手机 App，再查看画面。");
       if (this.closed || device.connection !== "device" || this.operations.has(id)) throw new Error("手机连接或状态已改变，请稍后重试。");
       const routes = this.guardPreview(id);
       return JSON.stringify(routes.map(route => [route.id, route.connection, route.basic?.sessionId, route.basic?.generation, route.basic?.phase, route.state?.instanceId, route.state?.sessionId, route.state?.generation, route.state?.phase]));
@@ -1238,6 +1312,7 @@ export class PhonesService {
     await this.gameFollower.close();
     this.screenCamera.stop();
     for (const read of this.screenReads.values()) read.abort();
+    for (const video of this.screenVideos.values()) video.abort();
     for (const read of this.inspections) read.abort();
     this.closed = true; clearInterval(this.timer); this.wirelessReconnectAbort.abort();
     let commandCleanupError: unknown;

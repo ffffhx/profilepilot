@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('phones', {
   basicPerform: input => call('basic-action', input),
   cloudPair: () => call('cloud-pair'),
   snapshot: () => call('snapshot'), prepare: id => call('connect', { id }),
+  connect: id => call('connect', { id, update: false }), disconnect: id => call('disconnect', { id }),
   inspect: id => call('inspect', { id }),
   listEmulators: () => call('emulator-list'), connectEmulator: name => call('emulator-connect', { name }),
   androidSetupSnapshot: () => call('android-setup-snapshot'), androidSetupCatalog: () => call('android-setup-catalog'),

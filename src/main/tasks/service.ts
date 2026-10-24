@@ -1,4 +1,5 @@
 import { TaskListFeed } from "./feed";
+import { listSiteAdapters, planSiteAdapter } from "../site-adapters/catalog";
 import { fork, type ChildProcess } from "node:child_process";
 import { mergeCostRecords } from "../../shared/task-cost";
 import { createHash, randomUUID } from "node:crypto";
@@ -676,7 +677,7 @@ export class TaskService {
   }
   async handleTool(task: BrowserTask, run: Run, name: string, args: any): Promise<any> {
     this.assertRunning(task, run);
-    if (["observe", "read_page", "tabs", "browser_action", "fill_fields", "verify_account", "reconcile", "handoff"].includes(name) && !hasTaskBrowser(task)) await this.prepareBrowser(task, run);
+    if (["observe", "read_page", "site_read", "tabs", "browser_action", "fill_fields", "verify_account", "reconcile", "handoff"].includes(name) && !hasTaskBrowser(task)) await this.prepareBrowser(task, run);
     run.actionsAtStart ??= task.usage.actions;
     if (task.mode === "plan" && ["terminal_run", "terminal_stop", "export_result", "register_outputs", "fill_fields"].includes(name)) return textResult("当前为 plan 模式，仅可观察、读取和制定计划。请请求用户切换模式后再执行变更。", true);
     if (name === "authorize_read") return { allowed: typeof args.path === "string" && (authorizeTaskRead(task, args.path).allowed ||
@@ -724,6 +725,26 @@ export class TaskService {
       run.externalAction = true;
       const file = writeTaskResult(task, path.join(this.store.root, "artifacts"), args);
       this.store.event(task, "system", `已生成结果文件：${file.name}`); this.publish(task); return textResult(file);
+    }
+    if (name === "site_adapters") return textResult(listSiteAdapters(z.object({ site: z.string().max(80).optional() }).strict().parse(args).site));
+    if (name === "site_read") {
+      const input = z.object({ operation: z.string().max(80), params: z.record(z.string(), z.unknown()).default({}) }).strict().parse(args);
+      const plan = planSiteAdapter(input);
+      const check = (url: string) => { this.assertRunning(task, run); const access = nativeBrowserAccess(task, { effect: "read" }, url); if (!access.allowed) throw new Error(access.reason); };
+      check(plan.url);
+      const browser = this.browserForTask(task);
+      if (!browser.siteAdapter) return textResult("此浏览器连接不支持网站适配器。", true);
+      if (task.usage.actions >= task.limits.actions) return textResult("任务达到操作次数上限。", true);
+      task.usage.actions++;
+      task.execution = { engine: "model", activity: `正在读取 ${input.operation}`, at: now() }; this.publish(task, true);
+      const result = await browser.siteAdapter(task, input, check);
+      this.assertRunning(task, run);
+      if (!["error", "blocked"].includes(result.status)) {
+        const snapshot = JSON.stringify(result.items);
+        task.evidencePages = [...(task.evidencePages || []), { version: randomUUID(), at: result.source.checkedAt, url: result.source.url, title: input.operation, snapshot: snapshot.slice(0, 60000) }].slice(-16);
+      }
+      this.publish(task);
+      return textResult(result, ["error", "blocked"].includes(result.status));
     }
     if (name === "observe" || name === "read_page") {
       task.execution = { engine: run.driver ? "jev" : "model", activity: "正在观察当前页面", reason: task.execution?.reason, at: now() }; this.publish(task, true);
@@ -860,7 +881,7 @@ export class TaskService {
       const item = task.items.find((item) => item.id === args.id);
       if (!item) throw new Error("批量项目不存在。");
       const status = z.enum(["pending", "running", "waiting_user", "completed", "skipped", "failed", "uncertain"]).parse(args.status);
-      if (status === "completed" && !this.validEvidence(task, [args.evidence])) throw new Error("项目完成需要当前页面中的原文依据。");
+      if (status === "completed" && !this.validEvidence(task, [args.evidence], true)) throw new Error("项目完成需要已读取页面或适配结果中的原文依据。");
       item.status = status; item.result = String(args.result || "").slice(0, 10000); item.evidence = String(args.evidence || "").slice(0, 3000);
       this.publish(task); return textResult("项目已更新。");
     }

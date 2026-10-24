@@ -46,15 +46,21 @@ try {
   await driver.request('resize',{width:1440,height:1080});
   // Open the existing phone viewer from the new details drawer.
   await driver.domClick('.phone-details [data-action="basic-control"]');
-  await driver.waitFor('.phone-basic-dialog[open] .phone-basic-screen img',x=>x.attributes['data-interactive']==='false' && !x.attributes.hidden);
+  await driver.waitFor('.phone-basic-dialog[open] .phone-basic-screen img',x=>x.attributes['data-interactive']==='true' && !x.attributes.hidden);
   await driver.waitFor('.phone-basic-screen',x=>x.attributes['aria-busy']==='false');
-  assert.equal((await state()).devices[0].basic.phase,'viewing');
+  assert.equal((await state()).devices[0].basic.phase,'controlling');
   const sessionId=(await state()).devices[0].basic.sessionId;
-  assert.equal((await driver.query('[data-basic-mode="view"]')).attributes['aria-pressed'],'true');
+  assert.equal((await driver.query('[data-basic-mode="control"]')).attributes['aria-pressed'],'true');
   assert.equal((await driver.query('.phone-basic-nav, [data-basic-refresh], .phone-basic-auto, [data-basic-pause]')).count,0,'old control panel is removed');
   assert.equal((await driver.query('[data-basic-close]')).count,1,'close is the single end-session control');
   await driver.click('.phone-basic-screen img');
-  assert.equal((await calls()).some(a=>a[3]?.startsWith("'input'")),false,'view mode ignores clicks');
+  await driver.waitFor('.phone-basic-screen',x=>x.attributes['aria-busy']==='false');
+  assert.ok((await calls()).some(a=>a[3]?.startsWith("'input' 'tap'")),'opening the preview allows input without a mode switch');
+  await driver.domClick('[data-basic-mode="view"]');
+  await driver.waitFor('[data-basic-mode="view"]',x=>x.attributes['aria-pressed']==='true' && !x.disabled);
+  const viewInputs=(await calls()).filter(a=>a[3]?.startsWith("'input'")).length;
+  await driver.click('.phone-basic-screen img');
+  assert.equal((await calls()).filter(a=>a[3]?.startsWith("'input'")).length,viewInputs,'explicit view mode ignores clicks');
   await writeFile(path.join(output,'view.png'),Buffer.from((await driver.screenshot()).pngBase64,'base64'));
   await driver.domClick('[data-basic-mode="control"]');
   await driver.waitFor('.phone-basic-screen img',x=>x.attributes['data-interactive']==='true');
@@ -163,7 +169,7 @@ try {
   await driver.evaluate('window.phoneFixture.setConnection(false)');
   await driver.waitFor('.phone-details [data-action="basic-control"]',x=>!x.disabled);
   assert.equal(await driver.evaluate('document.querySelector(".phone-details").dataset.deviceId'),'192.168.1.9:40236');
-  assert.match((await driver.query('[data-route="wifi"] .phone-route-badge')).text,/已连接/);
+  assert.match((await driver.query('[data-route="wifi"] .phone-route-badge')).text,/可连接/);
   assert.equal((await driver.query('[data-action="install-phone-app"]')).disabled,false);
   await driver.evaluate('window.phones.basicStart(document.querySelector(".phone-details").dataset.deviceId, "view", "UI test", "Read-only session")');
   await driver.domClick('.phone-details [data-action="basic-open"]');
@@ -181,7 +187,7 @@ try {
   assert.match((await driver.query('#phone-mode-hint')).text,/请先在上方/);
   assert.equal((await driver.query('[data-action="phone-apk"]')).disabled,false,'APK export stays available while offline');
   assert.equal((await driver.query('[data-action="phone-download-copy"]')).disabled,false,'download URL stays available while offline');
-  console.log('Basic phone UI passed: default view, mode switch, click/drag, cancelled gesture, steady auto-refresh, decoded-frame swap, decode failure, paused/stale frames, narrow layout, install transition, disconnect.');
+  console.log('Basic phone UI passed: immediate control on open, explicit view mode, mode switch, click/drag, cancelled gesture, steady auto-refresh, decoded-frame swap, decode failure, paused/stale frames, narrow layout, install transition, disconnect.');
 }finally{
   if(driver){await driver.request('quit',{},1000).catch(()=>{});driver.close();}
   for(let i=0;i<50&&child.exitCode===null;i++)await delay(100);
@@ -189,8 +195,9 @@ try {
   if(path.dirname(fixture)!==path.resolve(os.tmpdir())||!path.basename(fixture).startsWith('pp-phone-basic-ui-'))throw new Error('Invalid fixture cleanup target');
   await rm(fixture,{recursive:true,force:true,maxRetries:10,retryDelay:100});
 }
-const app=await launchProfilePilotE2e({experimentalAgent:false,env:{CPM_START_VIEW:'tools'}});
+const app=await launchProfilePilotE2e({experimentalAgent:false,env:{CPM_START_VIEW:'phones'}});
 try{
+  await app.driver.evaluate("window.workspaceHost.navigate('./tools.html'); true",{target:'shell'});
   await app.driver.waitFor('#tools-phone-app');
   assert.match((await app.driver.query('#tools-phone-app')).text,/可选安装/);
   await app.driver.domClick('.tools-phone-link');await app.driver.waitFor('.phone-list-empty');

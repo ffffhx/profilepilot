@@ -42,6 +42,9 @@ test('Browser CLI validates before dispatch and preserves portable JSON inputs',
   const quoted = { query: '中文 "with quotes" and C:\\trailing\\', url };
   const envelope = await run(['status', '--params', JSON.stringify(quoted)], undefined, true);
   assert.equal(envelope.code, 0, envelope.stderr); assert.deepEqual(JSON.parse(envelope.stdout).result.params, quoted);
+  const ui = await run(['--session', 'original-task', 'extension-ui', 'connect', '--params-stdin'], JSON.stringify({ extensionId: 'a'.repeat(32) }));
+  assert.equal(ui.code, 0, ui.stderr);
+  assert.deepEqual(JSON.parse(ui.stdout).result.params, { action: 'connect', extensionId: 'a'.repeat(32) });
   const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j3ioAAAAASUVORK5CYII=';
   const imageFile = path.join(directory, '当前验证码.png');
   const observation = { version: 'page-image-1', snapshot: 'Verification puzzle', viewport: { width: 800, height: 600 },
@@ -74,7 +77,7 @@ test('Browser CLI validates before dispatch and preserves portable JSON inputs',
     ['status', '--conversion'], ['status', '--version'], ['status', '--profile'], ['typo'], ['open'], ['open', 'not-url'], ['open', 'file:///tmp/test'],
     ['switch'], ['switch', '0'], ['switch', '--params', '{"tabId":null}'], ['claim', '--tab', '-2'], ['cdp'],
     ['status', '--output', path.join(root, 'unexpected.png')], ['status', '--params', '{}', '--params-file', file], ['status', '--params', '[]'],
-    ['observe', '--output', imageFile, '--params', '{"screenshot":false}']
+    ['observe', '--output', imageFile, '--params', '{"screenshot":false}'], ['extension-ui'], ['extension-ui', 'eval']
   ];
   for (const args of invalid) {
     const result = await run(args);

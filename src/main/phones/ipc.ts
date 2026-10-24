@@ -8,6 +8,8 @@ import { executePhoneCommand } from "./management";
 import { AndroidSetup } from "./android-setup";
 import { desktopCameraCapture } from "./screen-camera-capture";
 import { cameraStartSchema } from "./screen-camera";
+import { z } from "zod";
+import type { PhoneVideoStream } from "./screen-video";
 
 export function registerPhones(root: string, apkPath: string, poll = true): PhonesService {
   const service = new PhonesService({ root, apkPath, cameraCapture: desktopCameraCapture(), androidSetup: new AndroidSetup({
@@ -21,11 +23,46 @@ export function registerPhones(root: string, apkPath: string, poll = true): Phon
     for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed() && trusted(window.webContents.getURL())) window.webContents.send(PHONE_CHANGED, snapshot);
   } });
   let followOwner: { contents: Electron.WebContents; stop: () => void } | undefined;
+  const videos = new Map<number, { controller: AbortController; stream?: PhoneVideoStream; stop(): void }>();
   ipcMain.handle(PHONE_CHANNEL, async (event, method: string, params: unknown) => {
     const url = event.senderFrame?.url || "";
     if (event.senderFrame !== event.sender.mainFrame || !trusted(url)) throw new Error("手机接口仅供 ProfilePilot 工作区使用。");
     if (method === "snapshot") return service.snapshot();
     if (!trusted(url, true)) throw new Error("请在手机工作区操作设备。");
+    if (method === "video-start") {
+      const { id, basic } = z.object({ id: z.string().min(1).max(200), basic: z.object({ sessionId: z.string().min(1).max(100), generation: z.number().int().nonnegative() }).strict().optional() }).strict().parse(params);
+      const owner = event.sender, window = BrowserWindow.fromWebContents(owner);
+      if (!window?.isVisible() || window.isMinimized()) throw new Error("预览窗口不可见。");
+      videos.get(owner.id)?.stop();
+      const item = { controller: new AbortController(), stream: undefined as PhoneVideoStream | undefined, stop: () => {
+        item.controller.abort(); item.stream?.stop();
+        owner.removeListener("destroyed", item.stop); owner.removeListener("render-process-gone", item.stop);
+        window.removeListener("hide", item.stop); window.removeListener("minimize", item.stop);
+        if (videos.get(owner.id) === item) videos.delete(owner.id);
+      } };
+      videos.set(owner.id, item);
+      owner.once("destroyed", item.stop); owner.once("render-process-gone", item.stop);
+      window.once("hide", item.stop); window.once("minimize", item.stop);
+      try {
+        item.stream = await service.startScreenVideo(id, item.controller.signal, basic);
+        item.controller.signal.throwIfAborted();
+        return { streamId: item.stream.id };
+      } catch (error) { item.stop(); throw error; }
+    }
+    if (method === "video-read" || method === "video-stop") {
+      const { streamId } = z.object({ streamId: z.string().uuid() }).strict().parse(params);
+      const item = videos.get(event.sender.id);
+      if (!item?.stream || item.stream.id !== streamId) {
+        if (method === "video-stop") return;
+        throw new Error("视频预览已停止。");
+      }
+      if (method === "video-stop") { item.stop(); return; }
+      try {
+        const result = await item.stream.read();
+        if (result.error) item.stop();
+        return result;
+      } catch (error) { item.stop(); throw error; }
+    }
     if (method === "follow-command" && (params as { op?: string })?.op === "start") {
       const owner = event.sender;
       const result = await executePhoneCommand({ action: "phone", method, params }, service, "desktop") as { runId: string };

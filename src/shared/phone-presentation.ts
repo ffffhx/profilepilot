@@ -1,4 +1,4 @@
-import { phoneActive, type PhoneDevice, type PhoneSetting } from "./phones";
+import { phoneActive, phoneAppConnected, type PhoneDevice, type PhoneSetting } from "./phones";
 import type { PhoneDeviceGroup } from "./phone-devices";
 
 export interface PhoneSettingRow {
@@ -22,7 +22,7 @@ export interface PhoneRoutePresentation {
 /** Connection to THIS computer comes from local evidence; reports only describe phone readiness. */
 export function phoneConnectionPresentation(group: PhoneDeviceGroup, now = Date.now()) {
   const view = phonePresentation(group.device, now);
-  const live = group.routes.filter(route => phonePresentation(route, now).directKnown && route.state?.phase !== "disconnected" && route.state?.readiness?.computerConnected !== false);
+  const live = group.routes.filter(route => phoneAppConnected(route, now));
   const connected = live.length > 0;
   const occupied = group.routes.some(route => {
     const state = phonePresentation(route, now);
@@ -43,7 +43,7 @@ export function phoneConnectionPresentation(group: PhoneDeviceGroup, now = Date.
     const condition: PhoneConnectionCondition = detected ? "ready"
       : setting.status === "disabled" || developer?.status === "disabled" ? "blocked"
       : setting.status === "enabled" && developer?.status === "enabled" ? "ready" : "unknown";
-    const label = connected ? "已连接" : unauthorized ? "等待授权" : unresponsive ? "App 未响应" : detected ? "已就绪"
+    const label = connected ? "已连接" : unauthorized ? "等待授权" : detected ? "可连接" : unresponsive ? "App 未响应"
       : condition === "blocked" ? "未就绪" : condition === "unknown" ? "待确认" : transport === "usb" ? "等待插线" : "待连接";
     const note = connected ? "已与这台电脑建立连接" : unauthorized ? "请在手机上允许此电脑的调试连接"
       : unresponsive ? "电脑能识别此连接，但手机 App 暂时没有回复"
@@ -110,9 +110,10 @@ export function phonePresentation(device: PhoneDevice, now = Date.now()) {
   const displayName = emulator && device.name === "Android 手机" ? "Android 模拟器"
     : device.name === "Android 手机" && device.cloud?.report?.name ? device.cloud.report.name : device.name;
   const state = device.state;
-  const connected = device.connection === "device";
-  const unresponsive = connected && device.companion === "unavailable" && (!!device.error || device.confirmedAt !== null);
-  const directKnown = connected && device.companion === "ready" && !!state && device.confirmedAt !== null && now - device.confirmedAt < 8000;
+  const transportConnected = device.connection === "device";
+  const connected = phoneAppConnected(device, now);
+  const unresponsive = transportConnected && device.companion === "unavailable" && (!!device.error || device.confirmedAt !== null);
+  const directKnown = connected;
   const cloudOnline = !!device.cloud?.report && device.cloud.reportedAt !== null && now - device.cloud.reportedAt < 45000;
   const cloudSource = !directKnown && cloudOnline;
   const known = directKnown || cloudOnline;
@@ -152,9 +153,9 @@ export function phonePresentation(device: PhoneDevice, now = Date.now()) {
   const note = cloudSource ? "手机正在通过服务器同步状态。查看画面或操作手机时，再建立控制连接。"
     : device.transport === "cloud" ? device.cloud?.paired ? "手机暂未更新状态，请检查手机网络或打开 ProfilePilot App。" : "请用手机 ProfilePilot App 扫码，开启状态同步。"
     : device.connection === "unauthorized" ? emulator ? "请在模拟器窗口中确认此电脑的调试连接。" : "请解锁手机，并在手机上允许此电脑进行 USB 调试。"
-    : !connected ? emulator ? "启动本机模拟器后会自动检测连接，无需 USB 数据线或真实手机。" : device.transport === "wifi" ? "请确认手机与电脑在同一网络，并开启无线调试。" : "请用 USB 连接手机，并在手机上允许连接。"
+    : !transportConnected ? emulator ? "启动本机模拟器后会自动检测连接，无需 USB 数据线或真实手机。" : device.transport === "wifi" ? "请确认手机与电脑在同一网络，并开启无线调试。" : "请用 USB 连接手机，并在手机上允许连接。"
     : device.companion === "pairing" ? `正在连接${subject}里的 ProfilePilot App，请保持 App 打开。`
-    : device.companion !== "ready" ? `${subject}已连接，还需要连接${subject}里的 ProfilePilot App。`
+    : !connected ? `${subject}可连接，点击“连接”接通 ProfilePilot App。`
     : !known ? `正在等待${subject}更新状态，请保持连接。`
     : paused ? `任务已暂停，你可以自行操作${subject}。`
     : locked ? `请先解锁${subject}，再查看画面或执行任务。`
@@ -162,7 +163,7 @@ export function phonePresentation(device: PhoneDevice, now = Date.now()) {
     : active ? state?.mode === "view" ? `连接正常，正在查看${subject}画面。` : "连接正常，正在执行你的任务。"
     : permissionsReady ? "连接正常，控制所需权限已就绪。" : "连接正常，正在检测控制权限。";
   return { emulator, subject, displayName, connected, known, directKnown, cloudOnline, cloudSource, unresponsive, permissions, settings, missing, permissionsReady, active, paused, locked, note,
-    label: cloudSource ? "状态同步在线 · 控制未连接" : device.transport === "cloud" ? device.cloud?.paired ? "状态同步离线" : "等待手机扫码" : device.connection === "unauthorized" ? `等待${subject}授权` : connected ? `${subject}已连接` : `${subject}未连接`,
+    label: cloudSource ? "状态同步在线 · 控制未连接" : device.transport === "cloud" ? device.cloud?.paired ? "状态同步离线" : "等待手机扫码" : device.connection === "unauthorized" ? `等待${subject}授权` : connected ? `${subject}已连接` : transportConnected ? "可连接" : `${subject}未连接`,
     canPreview: directKnown && permissionsReady && !locked && !device.pending && !device.taskCaptureActive && !device.visualFollowActive && (idle || active && state?.phase !== "executing"),
     canSetup: idle && !device.pending
   };

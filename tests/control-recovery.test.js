@@ -5,13 +5,15 @@ const { controlRecovery, parseControlRecovery } = loadCli('src/shared/control-re
 const { NativeControlError, nativeFailurePayload } = loadCli('src/main/native-control/errors.ts');
 
 test('recovery preserves uncertain execution and never automatically replays an interrupted input', () => {
-  for (const code of ['NATIVE_TIMEOUT_UNCERTAIN', 'NATIVE_DISCONNECTED', 'NATIVE_DEBUGGER_DETACHED', 'PHONE_REJECTED']) {
+  for (const code of ['NATIVE_TIMEOUT_UNCERTAIN', 'NATIVE_DISCONNECTED', 'NATIVE_DEBUGGER_DETACHED', 'NATIVE_DEBUGGER_RECOVERED', 'PHONE_REJECTED']) {
     const result = controlRecovery(code);
     assert.equal(result.actionOutcome, 'unknown'); assert.equal(result.automaticReplay, false);
   }
   assert.equal(controlRecovery('NATIVE_USER_IN_CONTROL').requiresUser, true);
   assert.equal(controlRecovery('NATIVE_EXTENSION_FRAME_CONFLICT').requiresUser, false);
   assert.equal(controlRecovery('NATIVE_OBSERVATION_STALE').actionOutcome, 'not-executed');
+  assert.equal(controlRecovery('NATIVE_DEBUGGER_RECOVERED').requiresUser, false);
+  assert.equal(controlRecovery('NATIVE_DEBUGGER_RECOVERED').nextStep, 'reobserve');
 });
 
 test('validated recovery survives JSON transport with request correlation', () => {

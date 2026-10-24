@@ -22,6 +22,7 @@ ppilot phone follow camera-sample --device <设备ID> --x <原生X> --y <原生Y
 ppilot phone emulator-list
 ppilot phone emulator-connect --name <模拟器名称>
 ppilot phone connect --device <设备ID>
+ppilot phone disconnect --device <设备ID>
 ppilot phone update --device <设备ID>
 ppilot phone accessibility-repair --device <设备ID> [--auto-restore on|off]
 ppilot phone inspect --device <设备ID> [--package <包名>]
@@ -61,6 +62,7 @@ launch 需要 component（来自 apps），tap 需要 x/y（来自 preview），
 配对端口与连接端口不同；已配对设备优先用 wireless-connect --device 自动发现并验证当前地址。
 wireless-discover 返回端口可达性及原因；--device 只查找指定手机，旧地址不可用时自动刷新一次。
 成功后使用返回的设备 ID 执行 connect，连接已有配套 App；connect 不安装或更新。
+disconnect 断开这台手机所有 USB / Wi-Fi App 连接并停止画面，保留调试通道；须先结束任务，再断开。显式 connect 前不会自动重连 App。
 update 明确安装或更新电脑随附的配套 App。inspect 只读查询版本，默认查询 ProfilePilot；不需要配套 App 会话。
 accessibility-repair 需要用户授权：通过已配对 App 恢复其无障碍服务，必要时通过 ADB 授予系统设置权限；无需先开启无障碍。
 --auto-restore on 保存自动开启无障碍的选择，off 关闭此自动恢复；省略时只修复本次，不改变选择。此命令不会开始或恢复控制会话。
@@ -97,7 +99,7 @@ export async function runPhoneCli(args: string[], request: (command: ProfilePilo
   let dispatching = false;
   try {
     const method = args[0] === "doctor" ? "readiness" : args[0];
-    if (!["accessibility-repair", "readiness", "list", "emulator-list", "emulator-connect", "connect", "update", "inspect", "packages", "diagnose", "exec", "host", "app", "install", "wireless-discover", "wireless-pair", "wireless-connect", "wireless-disconnect", "rename", "start", "pause", "resume", "stop", "action", "run"].includes(method)) throw new Error("未知手机命令。运行 ppilot phone --help 查看用法。");
+    if (!["accessibility-repair", "readiness", "list", "emulator-list", "emulator-connect", "connect", "disconnect", "update", "inspect", "packages", "diagnose", "exec", "host", "app", "install", "wireless-discover", "wireless-pair", "wireless-connect", "wireless-disconnect", "rename", "start", "pause", "resume", "stop", "action", "run"].includes(method)) throw new Error("未知手机命令。运行 ppilot phone --help 查看用法。");
     const flags = new Map<string, string>();
     for (let index = 1; index < args.length; index++) {
       const key = args[index]; if (key === "--json") continue;
@@ -110,6 +112,7 @@ export async function runPhoneCli(args: string[], request: (command: ProfilePilo
     allowed["emulator-connect"] = ["--name"];
     allowed.install = ["--device", "--apk", "--controller"];
     allowed.update = ["--device"];
+    allowed.disconnect = ["--device"];
     allowed["accessibility-repair"] = ["--device", "--auto-restore"];
     allowed.inspect = ["--device", "--package"];
     allowed.packages = ["--device", "--scope", "--filter"];

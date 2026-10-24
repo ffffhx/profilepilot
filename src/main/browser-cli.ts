@@ -8,9 +8,17 @@ import { engineHelp } from "./browser-engine/arguments";
 import { controlRecovery } from "../shared/control-recovery";
 import { createBrowserDoctor, parseBrowserDoctorArgs, waitForBrowserControl } from "./control-doctor";
 import { browserContract, commonBrowserHelp } from "../shared/browser-contract";
+import { listSiteAdapters } from "./site-adapters/catalog";
+import { runGatewaySiteCli } from "./site-adapters/gateway-cli";
 
 export const browserCliHelp = `ppilot browser CLI (model invocation only for captcha recognize)
 One CLI, two connections. Connection options go BEFORE the command.
+
+Site adapters (selected Profile and current task tab; read only):
+  ppilot browser sites [SITE]
+  ppilot browser --session TASK site --params-file request.json
+  ppilot browser --session TASK --cdp PORT site --params-file request.json
+  request.json: {"operation":"zhihu.hot","params":{"limit":10}}
 
 Extension (default): existing signed-in Chrome tabs, independent browser service.
   ppilot browser status
@@ -113,6 +121,14 @@ export async function runBrowserCli(
   try {
     const route = parseBrowserCliRoute(input);
     let command = route.args[route.commandIndex];
+    if (command === "sites") {
+      if (route.args.length > route.commandIndex + 2) invalid("sites 只接受一个可选网站名。");
+      io.stdout.write(JSON.stringify({ ok: true, result: listSiteAdapters(route.args[route.commandIndex + 1]) }) + "\n"); return 0;
+    }
+    if (command === "site" && route.connection === "gateway") {
+      const result = await runGatewaySiteCli(route.args, route.commandIndex, route.port, env);
+      io.stdout.write(JSON.stringify({ ok: true, result }) + "\n"); return 0;
+    }
     if (command === "captcha") return await (runtime.captcha || runCaptchaCli)(route, io, env);
     if (!input.length || route.help || command === "help" || command === "--help" || command === "-h") {
       io.stdout.write(browserCliHelp + "\n" + commonBrowserHelp);

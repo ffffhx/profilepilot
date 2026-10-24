@@ -8,21 +8,22 @@ export type PhoneListFilter = "all" | "online" | "offline";
 export function phoneListItem(group: PhoneDeviceGroup) {
   const device = group.device;
   const view = phonePresentation(device);
-  const online = group.routes.some(route => route.connection === "device");
+  const online = phoneConnectionPresentation(group).connected;
+  const available = group.routes.some(route => route.connection === "device");
   const unauthorized = group.routes.some(route => route.connection === "unauthorized");
   const basic = group.routes.find(route => route.basic && !["stopped", "disconnected"].includes(route.basic.phase))?.basic;
   const occupied = phoneConnectionPresentation(group).occupied;
   const transports = [...new Set(group.routes.filter(route => route.connection === "device").map(route => route.transport))];
   if (!transports.length) transports.push(device.transport);
   const connection = transports.map(transport => ({ usb: "USB", wifi: "Wi-Fi", emulator: "本机", cloud: "状态同步" })[transport]).join(" / ");
-  const status = device.pending || (online ? "已连接" : unauthorized ? "等待授权" : view.emulator ? "未启动" : view.cloudOnline ? "仅状态同步" : "未连接");
+  const status = device.pending || (online ? "已连接" : available ? "可连接" : unauthorized ? "等待授权" : view.emulator ? "未启动" : view.cloudOnline ? "仅状态同步" : "未连接");
   const session = basic ? basic.phase === "disconnected" ? "连接中断" : basic.phase === "paused" ? "已暂停" : basic.mode === "view" ? "正在查看" : "正在操作"
     : occupied ? view.paused ? "已暂停" : `${device.state?.controller || "Agent"} · ${device.state?.mode === "view" ? "正在查看" : "正在操作"}` : online ? "空闲" : "—";
   const action = basic ? "basic-open" : occupied ? "details" : "basic-control";
   const actionLabel = "查看手机";
   const actionHint = online ? "" : unauthorized ? "请先在手机上确认调试授权" : view.emulator ? "模拟器未启动，请在设备详情中启动" : "设备未连接，连接后即可查看";
   return { id: device.id, name: view.displayName, kind: view.emulator ? "本机模拟器" : "Android 设备", emulator: view.emulator,
-    online, connection, status, tone: online ? "ready" : unauthorized || device.pending ? "warning" : "neutral", session, action, actionLabel, actionHint,
+    online, available, occupied: occupied || !!basic, connection, status, tone: online ? "ready" : available || unauthorized || device.pending ? "warning" : "neutral", session, action, actionLabel, actionHint,
     pending: !!device.pending, search: [view.displayName, device.model, ...group.routes.map(route => route.id)].join(" ").toLocaleLowerCase() };
 }
 

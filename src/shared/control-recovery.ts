@@ -28,6 +28,14 @@ export function controlRecovery(code: string, context: Partial<Pick<ControlRecov
     stage: "ownership", actionOutcome: "not-executed", requiresUser: false, nextStep: "wait-for-owner",
     instruction: "读取 status 中的占用任务和暂停原因，等待原任务释放或明确交接；不要替换会话绕过占用。"
   };
+  else if (code === "NATIVE_DEBUGGER_RECOVERED") result = {
+    stage: "observation", actionOutcome: "unknown", requiresUser: false, nextStep: "reobserve",
+    instruction: "扩展浮层引起的调试连接中断已自动恢复，任务仍持有控制权。重新观察页面核查先前操作的结果；不要重新提交或重放输入，也无需请求用户交还控制。"
+  };
+  else if (code === 'NATIVE_EXTENSION_UI_ACTIVE') result = {
+    stage: 'validation', actionOutcome: 'not-executed', requiresUser: false, nextStep: 'check-readiness',
+    instruction: '当前会话处于扩展界面模式。使用 extension-ui observe/click；先 disconnect 再继续普通网页操作。'
+  };
   else if (/EXTENSION_FRAME_CONFLICT|DEBUGGER_BUSY|DEBUGGER_UNAVAILABLE/.test(code)) result = {
     stage: "connection", actionOutcome: "unknown", requiresUser: false, nextStep: "check-connection",
     instruction: "运行目标 doctor 并处理扩展框架或调试器冲突。技术故障不代表用户接管；连接修复后重新观察并核查结果。"

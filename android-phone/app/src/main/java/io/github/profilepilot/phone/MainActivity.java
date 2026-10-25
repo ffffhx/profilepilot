@@ -167,14 +167,15 @@ public final class MainActivity extends ComponentActivity {
 
     heading(page,"连接设置","任选一种即可");
     LinearLayout debugCard=card(page,17);
-    LinearLayout connectionOptions=row(); debugCard.addView(connectionOptions,new LinearLayout.LayoutParams(-1,-2));
+    LinearLayout connectionOptions=row(); connectionOptions.setGravity(Gravity.TOP);
+    debugCard.addView(connectionOptions,new LinearLayout.LayoutParams(-1,-2));
     wifi=new DebugOption("wifi","Wi-Fi 无线调试","手机与电脑\n在同一局域网",R.id.home_wifi,() -> showConnectionSettings(true));
     usb=new DebugOption("usb","USB 调试","通过数据线\n连接电脑",R.id.home_usb,() -> showConnectionSettings(false));
-    connectionOptions.addView(wifi.view,new LinearLayout.LayoutParams(0,-1,1));
+    connectionOptions.addView(wifi.view,new LinearLayout.LayoutParams(0,-2,1));
     View connectionDivider=new View(this); connectionDivider.setBackgroundColor(LINE);
     LinearLayout.LayoutParams dividerParams=new LinearLayout.LayoutParams(dp(1),-1);
     dividerParams.setMargins(0,dp(14),0,dp(14)); connectionOptions.addView(connectionDivider,dividerParams);
-    connectionOptions.addView(usb.view,new LinearLayout.LayoutParams(0,-1,1));
+    connectionOptions.addView(usb.view,new LinearLayout.LayoutParams(0,-2,1));
     TextView help=button(page,"连接遇到问题？",false,this::showHelp); help.setTextSize(12); help.setTextColor(MUTED); help.setBackground(ripple(BG,10,false));
     LinearLayout.LayoutParams helpParams=new LinearLayout.LayoutParams(-1,dp(48)); helpParams.topMargin=dp(6); help.setLayoutParams(helpParams);
     updateHome();
@@ -255,19 +256,28 @@ public final class MainActivity extends ComponentActivity {
   }
 
   private void showConnectionSettings(boolean wireless) {
-    PhoneReadiness ready=new PhoneReadiness(this); String name=wireless?"Wi-Fi 无线调试":"USB 调试";
-    String key=wireless?"wirelessDebugging":"usbDebugging";
-    String state=wireless?ready.wirelessDebugging:ready.usbDebugging;
-    boolean enabled=state.equals("enabled");
-    LinearLayout content=showSheet(name);
-    paragraph(content,"USB 和 Wi-Fi 任选一种即可。完成调试设置与必要授权后，电脑会自动连接。");
-    info(content,name,ready.debugLabel(key),debugStateColor(state));
+    LinearLayout content=showSheet(wireless?"Wi-Fi 无线调试":"USB 调试");
+    paragraph(content,"USB 和 Wi-Fi 任选一种即可。");
     if (wireless) {
-      paragraph(content,"1  手机和电脑处于同一局域网，电脑端 ProfilePilot 保持运行。\n\n2  开启无线调试，按系统提示允许当前网络。\n\n3  首次使用时，按电脑提示完成系统配对；之后由电脑自动连接。");
-    } else paragraph(content,"1  使用支持数据传输的 USB 线连接电脑。\n\n2  开启 USB 调试，手机弹出授权时允许你的电脑。\n\n3  电脑端 ProfilePilot 运行时会自动连接，首页会自动更新。");
-    if (PhoneAccessibility.current!=null && !enabled) paragraph(content,"可辅助打开开关，系统确认由你完成。");
-    actionButton(content,enabled?"查看系统设置":PhoneAccessibility.current!=null?"辅助开启调试":"前往开启调试",true,
+      connectionStep(content,1,"手机与电脑连接同一局域网，电脑端 ProfilePilot 保持运行。");
+      connectionStep(content,2,"在系统设置中开启无线调试，并允许当前网络。");
+      connectionStep(content,3,"首次按电脑提示完成配对，之后自动连接。");
+    } else {
+      connectionStep(content,1,"使用支持数据传输的 USB 线连接手机和电脑。");
+      connectionStep(content,2,"在系统设置中开启 USB 调试，并允许电脑调试。");
+      connectionStep(content,3,"电脑端 ProfilePilot 保持运行，授权后自动连接。");
+    }
+    actionButton(content,"打开系统设置",true,
         () -> launchSetting(() -> { if (wireless) PhoneSettings.openWirelessDebugging(this); else PhoneSettings.openUsbDebugging(this); }));
+  }
+  private void connectionStep(LinearLayout parent,int number,String instruction) {
+    LinearLayout step=row(); step.setGravity(Gravity.TOP); step.setBaselineAligned(false); step.setPadding(0,dp(6),0,dp(10));
+    parent.addView(step,new LinearLayout.LayoutParams(-1,-2));
+    TextView marker=text(step,Integer.toString(number),14,GREEN,true); marker.setGravity(Gravity.CENTER);
+    marker.setBackground(background(MINT,18,false)); marker.setLayoutParams(new LinearLayout.LayoutParams(dp(36),dp(36)));
+    TextView copy=text(step,instruction,14,INK,false); copy.setLineSpacing(dp(5),1);
+    LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(0,-2,1); params.setMarginStart(dp(14)); params.topMargin=dp(4);
+    copy.setLayoutParams(params);
   }
   private void showConnectionSetup() {
     LinearLayout content=showSheet("连接设置");
@@ -559,7 +569,7 @@ public final class MainActivity extends ComponentActivity {
     parent.addView(item.view,new LinearLayout.LayoutParams(-1,-2)); return item;
   }
   private final class SettingRow {
-    final LinearLayout view; final TextView name,detail,value; final HomeIcon icon;
+    final LinearLayout view; final TextView name,detail; final StatusBadge value; final HomeIcon icon;
     SettingRow(String glyph,String label,String hint,Runnable action) {
       view=row(); view.setMinimumHeight(dp(80)); view.setPadding(dp(14),dp(14),dp(12),dp(14));
       view.setBackground(ripple(Color.WHITE,10,false)); icon=icon(glyph,MUTED,23); view.addView(icon);
@@ -567,16 +577,32 @@ public final class MainActivity extends ComponentActivity {
       params.setMarginStart(dp(12)); params.setMarginEnd(dp(6)); view.addView(copy,params);
       name=text(copy,label,14,INK,true); detail=text(copy,hint,11,MUTED,false); detail.setPadding(0,dp(5),0,0);
       if (hint.isEmpty()) { detail.setVisibility(View.GONE); view.setMinimumHeight(dp(58)); }
-      value=text(view,"",12,GREEN,false); value.setMaxWidth(dp(88)); value.setGravity(Gravity.END);
+      value=new StatusBadge(); value.setVisibility(View.GONE); view.addView(value,new LinearLayout.LayoutParams(-2,-2));
       HomeIcon arrow=icon("chevron",0xff92a197,14); LinearLayout.LayoutParams arrowParams=new LinearLayout.LayoutParams(dp(14),dp(14));
       arrowParams.setMarginStart(dp(3)); view.addView(arrow,arrowParams); clickable(view,label+"，查看设置",action);
     }
-    void status(String label,int color) { setText(value,label); value.setTextColor(color); view.setContentDescription(name.getText()+"，"+label+"，查看设置"); }
+    void status(String label,int color) { value.status(label,color); value.setVisibility(View.VISIBLE); view.setContentDescription(name.getText()+"，"+label+"，查看设置"); }
+  }
+  private final class StatusBadge extends TextView {
+    private int statusColor;
+    StatusBadge() {
+      super(MainActivity.this); setTextSize(12); setIncludeFontPadding(false); setSingleLine(true);
+      setTypeface(Typeface.create("sans-serif-medium",Typeface.NORMAL)); setGravity(Gravity.CENTER);
+      setPadding(dp(8),dp(5),dp(8),dp(5));
+    }
+    void status(String label,int color) {
+      MainActivity.this.setText(this,"●  "+label);
+      if (statusColor!=color) {
+        statusColor=color; setTextColor(color);
+        GradientDrawable surface=background(color==GREEN?MINT:color==AMBER?0xfffcf5e9:0xffeff2f0,20,false);
+        surface.setStroke(dp(1),color==GREEN?0xffc7e6d8:color==AMBER?0xffecd8b7:0xffe1e6e2); setBackground(surface);
+      }
+    }
   }
   private final class DebugOption {
     final LinearLayout view;
-    final TextView name,value;
-    private int statusColor;
+    final TextView name;
+    final StatusBadge value;
     DebugOption(String glyph,String label,String hint,int id,Runnable action) {
       view=column(); view.setId(id); view.setPadding(dp(12),dp(16),dp(12),dp(4));
       view.setBackground(ripple(Color.WHITE,0,false));
@@ -586,25 +612,17 @@ public final class MainActivity extends ComponentActivity {
       copyParams.setMarginStart(dp(10)); top.addView(copy,copyParams);
       name=text(copy,label,14,INK,true);
       TextView detail=text(copy,hint,11,MUTED,false); detail.setPadding(0,dp(6),0,0); detail.setMinLines(2);
-      // Equal-height columns keep status badges and actions aligned when either description wraps.
-      view.addView(new View(MainActivity.this),new LinearLayout.LayoutParams(-1,0,1));
+      // Keep the footer next to its description; never stretch it to fill the viewport.
       LinearLayout footer=column(); LinearLayout.LayoutParams footerParams=new LinearLayout.LayoutParams(-1,-2);
-      footerParams.setMarginStart(dp(36)); footerParams.topMargin=dp(8); view.addView(footer,footerParams);
-      value=text(footer,"",12,GREEN,false); value.setPadding(dp(8),dp(5),dp(8),dp(5));
-      value.setLayoutParams(new LinearLayout.LayoutParams(-2,-2));
+      footerParams.setMarginStart(dp(36)); footerParams.topMargin=dp(12); view.addView(footer,footerParams);
+      value=new StatusBadge(); footer.addView(value,new LinearLayout.LayoutParams(-2,-2));
       LinearLayout link=row(); link.setMinimumHeight(dp(48)); footer.addView(link);
       text(link,"查看设置",12,GREEN,false);
       HomeIcon arrow=icon("chevron",MUTED,13); LinearLayout.LayoutParams arrowParams=new LinearLayout.LayoutParams(dp(13),dp(13));
       arrowParams.setMarginStart(dp(6)); link.addView(arrow,arrowParams);
       clickable(view,label+"，查看设置",action);
     }
-    void status(String label,int color) {
-      setText(value,"●  "+label);
-      if (statusColor!=color) {
-        statusColor=color; value.setTextColor(color);
-        value.setBackground(background(color==GREEN?MINT:color==AMBER?0xfffcf5e9:0xffeff2f0,20,false));
-      }
-    }
+    void status(String label,int color) { value.status(label,color); }
   }
   private void setText(TextView view,String value) { if (!value.contentEquals(view.getText())) view.setText(value); }
 

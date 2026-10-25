@@ -34,8 +34,14 @@ public final class ControlService extends Service {
         String token = getSharedPreferences("MainActivity", MODE_PRIVATE).getString("token", "");
         if (!token.matches("[a-f0-9]{64}")) { stopSelf(); return; }
         session.computer = getSharedPreferences("MainActivity", MODE_PRIVATE).getString("computer", "电脑");
-        getSystemService(NotificationManager.class).createNotificationChannel(new NotificationChannel("control", "电脑控制状态", NotificationManager.IMPORTANCE_LOW));
-        startForeground(1, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
+        // DEFAULT keeps the icon visible when the system hides low-importance notifications.
+        // Channel settings remain user-owned on upgrades; never recreate a channel to override them.
+        NotificationChannel channel = new NotificationChannel("control", "连接与控制状态", NotificationManager.IMPORTANCE_DEFAULT);
+        channel.setSound(null, null);
+        channel.enableVibration(false);
+        channel.setDescription("在顶部状态栏显示连接、查看、控制或暂停图标，下拉可查看详情并暂停或结束控制");
+        getSystemService(NotificationManager.class).createNotificationChannel(channel);
+        startForeground(1, notification(ControlNotificationState.from(connection, session)), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
         overlay = new ControlOverlay(this);
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(screenOff, new IntentFilter(Intent.ACTION_SCREEN_OFF), Context.RECEIVER_NOT_EXPORTED);
         else registerReceiver(screenOff, new IntentFilter(Intent.ACTION_SCREEN_OFF));
@@ -65,7 +71,7 @@ public final class ControlService extends Service {
                 if (method.equals("sync")) {
                     connection.heartbeat(input.optString("transport", "unknown"));
                     connection.reportDebugSettings(input.optJSONObject("debugSettings"));
-                    session.heartbeat(); result.complete(success(null, timing));
+                    session.heartbeat(); render(); result.complete(success(null, timing));
                 }
                 else if (method.equals("accessibility-recovery")) {
                     if (!session.phase.equals("idle") && !session.phase.equals("stopped")) throw new IllegalStateException("请先结束当前手机任务，再恢复无障碍服务");
@@ -263,12 +269,25 @@ public final class ControlService extends Service {
         String owner = session.controller.isBlank() ? session.computer : session.controller;
         return session.active() ? owner + " · " + session.statusLabel() : session.statusLabel();
     }
-    private Notification notification() {
+    private Notification notification(ControlNotificationState status) {
         PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class), PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        Notification.Builder builder = new Notification.Builder(this, "control").setSmallIcon(R.drawable.ic_notification).setContentTitle(description()).setContentText(session.controller.isEmpty() ? "ProfilePilot 手机连接服务" : session.controller + (session.task.isEmpty() ? "" : " · " + session.task)).setContentIntent(open).setOngoing(true).setOnlyAlertOnce(true).setVisibility(Notification.VISIBILITY_PRIVATE);
-        if (session.active()) builder.addAction(new Notification.Action.Builder(null, "暂停", commandIntent("pause", 1)).build());
-        if (session.phase.equals("paused")) builder.addAction(new Notification.Action.Builder(null, "继续控制", commandIntent("resume", 3)).build());
-        if (session.sessionId != null && !session.phase.equals("stopped")) builder.addAction(new Notification.Action.Builder(null, "结束控制", commandIntent("stop", 2)).build());
+        int icon = switch (status.kind()) {
+            case WAITING -> R.drawable.ic_notification;
+            case CONNECTED -> R.drawable.ic_status_connected;
+            case VIEWING -> R.drawable.ic_status_viewing;
+            case CONTROLLING -> R.drawable.ic_status_controlling;
+            case PAUSED -> R.drawable.ic_status_paused;
+            case DISCONNECTED -> R.drawable.ic_status_disconnected;
+        };
+        Notification.Builder builder = new Notification.Builder(this, "control").setSmallIcon(icon)
+            .setContentTitle(status.title()).setContentText(status.text())
+            .setStyle(new Notification.BigTextStyle().bigText(status.details()))
+            .setContentIntent(open).setOngoing(true).setOnlyAlertOnce(true).setShowWhen(false)
+            .setCategory(Notification.CATEGORY_SERVICE).setVisibility(Notification.VISIBILITY_PRIVATE);
+        if (Build.VERSION.SDK_INT >= 31) builder.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE);
+        if (status.canPause()) builder.addAction(new Notification.Action.Builder(null, "暂停", commandIntent("pause", 1)).build());
+        if (status.canResume()) builder.addAction(new Notification.Action.Builder(null, session.mode.equals("view") ? "继续查看" : "继续控制", commandIntent("resume", 3)).build());
+        if (status.canStop()) builder.addAction(new Notification.Action.Builder(null, session.mode.equals("view") ? "结束查看" : "结束控制", commandIntent("stop", 2)).build());
         return builder.build();
     }
     private PendingIntent commandIntent(String command, int id) {
@@ -283,8 +302,9 @@ public final class ControlService extends Service {
         screenshots.prune();
         if (!session.active() && PhoneAccessibility.current != null) PhoneAccessibility.current.releaseFollowTouch();
         if (overlay != null) overlay.update();
-        String key = description() + session.controller + session.task + session.sessionId + session.generation;
-        if (!key.equals(lastNotification)) { lastNotification = key; getSystemService(NotificationManager.class).notify(1, notification()); }
+        ControlNotificationState status = ControlNotificationState.from(connection, session);
+        String key = status.toString() + session.instanceId + session.sessionId + session.generation;
+        if (!key.equals(lastNotification)) { lastNotification = key; getSystemService(NotificationManager.class).notify(1, notification(status)); }
     }
     @Override public void onDestroy() {
         screenshots.clear();

@@ -21,6 +21,7 @@ final class ConnectionState {
         return last != null && clock.getAsLong() - last < SessionState.LEASE_MS;
     }
     boolean connected() { return contacts.keySet().stream().anyMatch(this::connected); }
+    boolean seenConnected() { return !contacts.isEmpty(); }
     void reportDebugSettings(JSONObject report) {
         if (report == null) return;
         long age = Math.max(0, report.optLong("ageMs", 6000));

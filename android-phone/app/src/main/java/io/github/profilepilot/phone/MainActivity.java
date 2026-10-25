@@ -160,7 +160,7 @@ public final class MainActivity extends ComponentActivity {
         () -> launchSetting(() -> PhoneSettings.openAccessibility(this)));
     permissions[1]=setting(permissionRows,"overlay","悬浮提示","在其他应用上显示控制状态",R.id.home_overlay,
         () -> launchSetting(() -> PhoneSettings.openOverlayPermission(this)));
-    permissions[2]=setting(permissionRows,"bell","状态通知","在通知栏随时暂停控制",R.id.home_notifications,this::openNotifications);
+    permissions[2]=setting(permissionRows,"bell","状态通知","顶部显示连接与控制状态，下拉可暂停",R.id.home_notifications,this::openNotifications);
     developer=setting(permissionCard,"phone","开发者选项","USB / Wi-Fi 调试的前置设置",R.id.home_developer,
         () -> launchSetting(() -> PhoneSettings.openDeveloperOptions(this)));
     permissionHint=text(page,"开启无障碍后，可辅助配置其余设置。",11,MUTED,false); permissionHint.setPadding(dp(3),dp(8),dp(3),0);
@@ -464,7 +464,16 @@ public final class MainActivity extends ComponentActivity {
       pairing().edit().putBoolean("notificationRequested",true).apply();
       requestPermissions(new String[] {Manifest.permission.POST_NOTIFICATIONS},1);
     }
-    else launchSetting(() -> startActivity(new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE,getPackageName())));
+    else launchSetting(() -> {
+      NotificationManager manager=getSystemService(NotificationManager.class);
+      android.app.NotificationChannel channel=manager.getNotificationChannel("control");
+      if (manager.areNotificationsEnabled() && channel!=null) {
+        if (channel.getImportance()<NotificationManager.IMPORTANCE_DEFAULT)
+          message("若顶部没有图标，请将「连接与控制状态」设为普通通知，并开启状态栏显示；声音和振动可关闭。");
+        startActivity(new Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+            .putExtra(Settings.EXTRA_APP_PACKAGE,getPackageName()).putExtra(Settings.EXTRA_CHANNEL_ID,"control"));
+      } else startActivity(new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE,getPackageName()));
+    });
   }
   private void launchSetting(Runnable action) {
     dismissSheet(); try { action.run(); } catch (RuntimeException error) { message("无法打开该设置，请在系统设置中手动检查。"); }

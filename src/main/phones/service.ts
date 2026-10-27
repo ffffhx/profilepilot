@@ -12,6 +12,7 @@ import { Adb, parseAdbDevices, deviceShell, phoneRequest, validateDeviceId, type
 import { readCompanion, verifyCompanionApk } from "./companion";
 import { phoneActionSchema, isPhoneRead } from "./actions";
 import { discoverWireless, pairWireless, connectWireless, wirelessCandidates, probeWireless } from "./wireless";
+import { discoverNearbyApps } from "./lan-discovery";
 import { readDebugSettings, type DebugSettings } from "./readiness";
 import { AndroidEmulators, type EmulatorRuntime } from "./emulators";
 import { AndroidSetup } from "./android-setup";
@@ -56,6 +57,7 @@ export interface PhonesOptions {
   now?: () => number;
   computer?: string;
   probeWireless?: typeof probeWireless;
+  discoverNearbyApps?: typeof discoverNearbyApps;
   onChanged?: (snapshot: PhonesSnapshot) => void;
 }
 export class PhonesService {
@@ -758,8 +760,9 @@ export class PhonesService {
     return this.wirelessReconnect;
   }
   async discoverWireless(id?: string) {
-    await this.refresh();
-    if (id) await this.cloud.refresh();
+    const nearby = !id ? (this.options.discoverNearbyApps || discoverNearbyApps)().catch(() => ({ apps: [], appError: "局域网设备发现暂不可用，请检查网络权限和防火墙。" })) : undefined;
+    // Nearby App discovery must not wait for disconnected ADB/companion routes.
+    if (id) { await this.refresh(); await this.cloud.refresh(); }
     const scan = async () => {
       const discovered = await discoverWireless(this.adb);
       const groups = id ? [this.wirelessGroup(id)] : groupPhoneDevices(this.snapshot().devices);
@@ -776,7 +779,7 @@ export class PhonesService {
       await new Promise(resolve => setTimeout(resolve, 700));
       result = await scan(); // Replace stale results, never accumulate expired endpoints.
     }
-    return result;
+    return { ...result, ...(nearby ? await nearby : {}) };
   }
   autoConnectWireless(id: string): Promise<PhoneDevice> {
     for (const device of this.wirelessGroup(id).routes) this.wirelessDisabled.delete(device.hardwareId || device.id);

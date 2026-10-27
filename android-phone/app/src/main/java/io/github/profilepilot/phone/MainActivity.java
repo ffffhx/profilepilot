@@ -646,9 +646,11 @@ public final class MainActivity extends ComponentActivity {
   }
   @Override protected void onStart() {
     super.onStart(); visibleHomes++;
+    LanDiscovery.acquire(this);
     if (ControlService.current!=null) ControlService.current.refreshPresentation();
   }
   @Override protected void onStop() {
+    LanDiscovery.release(this);
     visibleHomes=Math.max(0,visibleHomes-1);
     if (ControlService.current!=null) ControlService.current.refreshPresentation();
     super.onStop();

@@ -69,7 +69,8 @@ export interface PhoneScreenFrame { mime: "image/png"; base64: string; width: nu
 export interface PhoneVideoPacket { codec: string; key: boolean; timestamp: number; data: Uint8Array; width?: number; height?: number; screenWidth?: number; screenHeight?: number; }
 export interface PhoneVideoSession { sessionId: string; generation: number; }
 export interface PhoneWirelessService { name: string; kind: "pairing" | "connect"; address: string; source?: "phone" | "mdns" | "adb"; reachable?: boolean; reason?: string; }
-export interface PhoneWirelessDiscovery { services: PhoneWirelessService[]; error: string; phoneIps?: string[]; }
+export interface PhoneNearbyApp { id: string; name: string; ip: string; version: string; variant: "debug" | "release"; wirelessDebugging: "enabled" | "disabled" | "unconfirmed"; }
+export interface PhoneWirelessDiscovery { services: PhoneWirelessService[]; error: string; apps?: PhoneNearbyApp[]; appError?: string; phoneIps?: string[]; }
 export interface PhoneSelector {
   resourceId?: string; text?: string; description?: string; className?: string; packageName?: string;
   enabled?: boolean; checked?: boolean; editable?: boolean; clickable?: boolean; scrollable?: boolean;

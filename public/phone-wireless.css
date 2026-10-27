@@ -24,6 +24,18 @@
 .wireless-discovery > span { font-size:12px; color:var(--muted,#718097); flex:1; min-width:100px; }
 .wireless-discovery [data-services] { display:flex; gap:8px; flex-wrap:wrap; width:100%; }
 .wireless-discovery [data-services]:empty { display:none; }
+.wireless-discovery [data-apps] { display:grid; gap:8px; width:100%; }
+.wireless-discovery [data-apps]:empty { display:none; }
+.wireless-app { display:flex; justify-content:space-between; align-items:center; gap:14px; width:100%; padding:12px; text-align:left; }
+.wireless-app strong,.wireless-app small { display:block; overflow-wrap:anywhere; }
+.wireless-app small { margin-top:5px; color:var(--muted,#718097); font-size:12px; }
+.wireless-app > span:last-child { flex-shrink:0; color:var(--accent,#2459dd); font-size:12px; }
+.wireless-app[aria-pressed=true] { border-color:var(--accent,#2459dd); background:#f0f5ff; }
+.wireless-setup { font-size:13px; }
+.wireless-setup summary { cursor:pointer; }
+.wireless-setup ol { margin-top:14px; }
+[data-selected-app] { padding:14px; border-radius:10px; background:#f0f5ff; font-size:13px; }
+[data-selected-app] p { margin-top:6px; line-height:1.7; }
 .wireless-result { color:var(--success,#19755e); font-weight:600; font-size:14px; }
 .wireless-body .wireless-port-tip { padding:10px 12px; background:#fff6df; color:#785720; border-radius:8px; }
 .wireless-body .wireless-error { color:var(--danger,#a83248); line-height:1.6; }

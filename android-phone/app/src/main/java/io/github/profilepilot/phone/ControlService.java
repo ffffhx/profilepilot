@@ -48,6 +48,7 @@ public final class ControlService extends Service {
         try { server = new PhoneServer(token, this::handle); }
         catch (Exception error) { session.lastAction = "连接服务启动失败，请重试"; stopSelf(); return; }
         main.post(tick);
+        LanDiscovery.acquire(this);
     }
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent != null && ("pause".equals(intent.getAction()) || "resume".equals(intent.getAction()) || "stop".equals(intent.getAction()))) {
@@ -307,6 +308,7 @@ public final class ControlService extends Service {
         if (!key.equals(lastNotification)) { lastNotification = key; getSystemService(NotificationManager.class).notify(1, notification(status)); }
     }
     @Override public void onDestroy() {
+        LanDiscovery.release(this);
         screenshots.clear();
         if (recovery != null) { recovery.close(); recovery = null; }
         if (PhoneAccessibility.current != null) PhoneAccessibility.current.releaseFollowTouch();

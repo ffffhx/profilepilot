@@ -24,6 +24,7 @@ let window, driverClose, pollTimer, cloudShown = false;
 let wirelessConnected = false;
 const defaultWirelessServices = 'fixture _adb-tls-pairing._tcp 192.168.1.8:37123\nfixture _adb-tls-connect._tcp 192.168.1.8:40235';
 let wirelessServices = defaultWirelessServices, wirelessReachable = true;
+let nearbyApps = [], nearbyScans = 0;
 let emulatorConnected = false;
 const androidSetupFixture = createAndroidFixture(AndroidSetup, path.join(root, 'android-setup'), { delay: 250 });
 let previewCalls = 0, previewBehavior = {};
@@ -34,6 +35,7 @@ let followUiScreenCalls = 0;
 const unresponsive = new Set();
 let appInstalled = process.env.PHONE_UI_NO_APP !== '1';
 const service = new PhonesService({ root, apkPath: process.env.PHONE_UI_NO_APP === '1' ? path.join(root, 'phone.apk') : '', computer: 'UI-TEST-PC',
+  discoverNearbyApps: async () => { nearbyScans++; return { apps: nearbyApps, appError: '' }; },
   probeWireless: async () => ({reachable:wirelessReachable,reason:'Fixture port availability'}),
   androidSetup: androidSetupFixture.runtime,
   emulators: { list: async () => ['Fixture_AVD', ...androidSetupFixture.avds], launch: async () => { emulatorConnected = true; } },
@@ -135,6 +137,8 @@ ipcMain.handle('phone-ui:request', async (_, method, params) => {
   // status channel. Keep discovery from replacing it with the service snapshot.
   if (method === 'wireless-discover' && params?.id === 'cloud-ui-test') return { services: [], error: '' };
   if (method === 'fixture-adb-calls') return adbCalls;
+  if (method === 'fixture-nearby-apps') { nearbyApps = params.apps; return; }
+  if (method === 'fixture-nearby-scans') return nearbyScans;
   if (method === 'fixture-basic-frame') {
     const { delay, corrupt, ...frame } = params;
     basicFrame = { ...basicFrame, ...frame }; basicFrameBehavior = { delay, corrupt }; return;

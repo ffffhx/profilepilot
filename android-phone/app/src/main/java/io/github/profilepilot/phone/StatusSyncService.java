@@ -22,6 +22,7 @@ public final class StatusSyncService extends Service {
     getSystemService(NotificationManager.class).createNotificationChannel(new NotificationChannel("phone-status", "手机状态同步", NotificationManager.IMPORTANCE_LOW));
     startForeground(24, notification("准备上报手机状态…"), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE);
     WirelessNetwork.start(this);
+    LanDiscovery.acquire(this);
     worker.scheduleWithFixedDelay(this::sync, 0, 15, TimeUnit.SECONDS);
   }
 
@@ -59,5 +60,5 @@ public final class StatusSyncService extends Service {
     return store.statusEnabled() && new RecoverySettings(this).enabled() ? START_STICKY : START_NOT_STICKY;
   }
   @Override public IBinder onBind(Intent intent) { return null; }
-  @Override public void onDestroy() { closed = true; WirelessNetwork.stop(); worker.shutdownNow(); main.removeCallbacksAndMessages(null); stopForeground(STOP_FOREGROUND_REMOVE); super.onDestroy(); }
+  @Override public void onDestroy() { closed = true; LanDiscovery.release(this); WirelessNetwork.stop(); worker.shutdownNow(); main.removeCallbacksAndMessages(null); stopForeground(STOP_FOREGROUND_REMOVE); super.onDestroy(); }
 }

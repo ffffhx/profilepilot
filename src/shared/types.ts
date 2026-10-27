@@ -539,6 +539,7 @@ export interface ShellIntegrationStatus {
   managed: boolean;
   path: string;
   error: string | null;
+  warning?: string | null;
 }
 
 export type AgentToolAvailability = "installed" | "missing" | "error";

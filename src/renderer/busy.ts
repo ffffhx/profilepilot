@@ -15,10 +15,29 @@ export function setToast(message: string, kind: ToastKind = "normal"): void {
   render();
 
   window.clearTimeout(store.toastTimer);
+  store.toastTimer = undefined;
+  // Keep errors available while the user reads or copies diagnostics.
+  if (kind === "error") return;
   store.toastTimer = window.setTimeout(() => {
     store.toast = null;
     render();
   }, 3200);
+}
+
+export function handleToastAction(event: Event): void {
+  const target = event.target instanceof Element ? event.target : null;
+  if (target?.closest("[data-toast-dismiss]")) {
+    window.clearTimeout(store.toastTimer);
+    store.toast = null;
+    render();
+  }
+  const copy = target?.closest<HTMLButtonElement>("[data-toast-copy]");
+  if (copy && store.toast) {
+    const message = store.toast;
+    void Promise.resolve().then(() => navigator.clipboard.writeText(message)).then(() => {
+      copy.textContent = "已复制";
+    }).catch(() => { copy.textContent = "复制失败，请展开后手动选择文本"; });
+  }
 }
 
 export function activateBusyStep(steps: BusyProgressStep[], activeLabel: string): BusyProgressStep[] {

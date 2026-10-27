@@ -45,7 +45,11 @@ test('a broadcast timeout cannot fail a verified Windows PATH update', onlyWindo
     assert.ok(options.timeout <= 3000);
     throw Object.assign(new Error('Command failed: internal environment command'), { killed: true });
   });
-  assert.equal((await shell.setShellIntegrationEnabled(true)).installed, true);
+  const status = await shell.setShellIntegrationEnabled(true);
+  assert.equal(status.installed, true);
+  assert.match(status.warning, /PATH 已保存/);
+  assert.match(status.warning, /WINDOWS_ENVIRONMENT_NOTIFY_FAILED/);
+  assert.doesNotMatch(status.warning, /Command failed/);
   assert.equal(current, [...managed, '%USERPROFILE%\\Tools', 'C:\\中文 工具'].join(';'));
   assert.equal(writes, 1); assert.equal(broadcasts, 1);
   await shell.setShellIntegrationEnabled(true);
@@ -61,16 +65,79 @@ test('real Windows PATH failures stay failures with a concise error', onlyWindow
   t.mock.method(windows, 'runWindowsPowerShell', async script => {
     if (script.includes("OpenSubKey('Environment')")) return 'C:\\Keep';
     if (script.includes('SendMessageTimeout')) broadcasts++;
-    throw new Error('Command failed: powershell.exe private PATH contents');
+    throw Object.assign(new Error('Command failed: powershell.exe private PATH contents'), {
+      code: 1, stderr: "Access to the registry key is denied.\nFullyQualifiedErrorId: UnauthorizedAccessException\nFromBase64String('U0VDUkVUX1BBVEg=')"
+    });
   });
   await assert.rejects(shell.setShellIntegrationEnabled(true), error => {
     assert.equal(error.code, 'WINDOWS_USER_PATH_WRITE_FAILED');
     assert.match(error.message, /无法保存 Windows 用户 PATH/);
     assert.doesNotMatch(error.message, /powershell|private|Command failed/);
+    assert.match(error.message, /UnauthorizedAccessException/);
+    assert.match(error.message, /退出码：1/);
+    assert.doesNotMatch(error.message, /U0VDUkVUX1BBVEg=/);
+    assert.match(error.message, /PATH 已省略/);
     return true;
   });
   assert.equal(broadcasts, 0);
   assert.equal(process.env.PATH, originalPath);
+});
+
+test('a writer timeout after saving is reconciled with the persisted PATH', onlyWindows, async t => {
+  restoreEnvironment(t);
+  let current = 'C:\\Keep', broadcasts = 0;
+  t.mock.method(windows, 'runWindowsPowerShell', async script => {
+    if (script.includes("OpenSubKey('Environment')")) return current;
+    if (script.includes("CreateSubKey('Environment')")) {
+      current = Buffer.from(script.match(/FromBase64String\('([^']+)'\)/)[1], 'base64').toString('utf8');
+      throw Object.assign(new Error('Command failed: write timed out'), { killed: true });
+    }
+    broadcasts++;
+    return '';
+  });
+  const status = await shell.setShellIntegrationEnabled(true);
+  assert.equal(status.installed, true);
+  assert.equal(status.warning, null);
+  assert.equal(broadcasts, 1);
+  for (const entry of managed) assert.ok(process.env.PATH.split(';').includes(entry));
+});
+
+test('unreadable PATH after a failed write reports an unknown outcome', onlyWindows, async t => {
+  restoreEnvironment(t);
+  const originalPath = process.env.PATH;
+  let writing = false;
+  t.mock.method(windows, 'runWindowsPowerShell', async script => {
+    if (!writing && script.includes("OpenSubKey('Environment')")) return 'C:\\Keep';
+    writing = true;
+    throw Object.assign(new Error('Command failed: private command'), { code: 1, stderr: 'Registry unavailable' });
+  });
+  await assert.rejects(shell.setShellIntegrationEnabled(true), error => {
+    assert.equal(error.code, 'WINDOWS_USER_PATH_VERIFY_FAILED');
+    assert.match(error.message, /无法确认/);
+    assert.match(error.message, /Registry unavailable/);
+    return true;
+  });
+  assert.equal(process.env.PATH, originalPath);
+});
+
+test('native Windows notification failure is surfaced without undoing installation', onlyWindows, async t => {
+  restoreEnvironment(t);
+  const run = windows.runWindowsPowerShell;
+  let current = 'C:\\Keep';
+  t.mock.method(console, 'warn', () => {});
+  t.mock.method(windows, 'runWindowsPowerShell', async (script, options) => {
+    if (script.includes("OpenSubKey('Environment')")) return current;
+    if (script.includes("CreateSubKey('Environment')")) {
+      current = Buffer.from(script.match(/FromBase64String\('([^']+)'\)/)[1], 'base64').toString('utf8');
+      return '';
+    }
+    // Compile the production P/Invoke in real PowerShell and target an invalid
+    // window handle, without broadcasting to the user's other applications.
+    return run(script.replace('[IntPtr]0xffff', '[IntPtr]0x123'), { ...options, timeout: 10000 });
+  });
+  const status = await shell.setShellIntegrationEnabled(true);
+  assert.equal(status.installed, true);
+  assert.match(status.warning, /Environment notification failed/);
 });
 
 test('Windows registry I/O preserves Unicode, quotes and expandable PATH entries', onlyWindows, async t => {

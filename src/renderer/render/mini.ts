@@ -174,7 +174,7 @@ export function renderMini(): void {
             </footer>`
           : ""
       }
-      ${store.toast ? `<div class="mini-toast ${store.toastKind === "error" ? "error" : ""}" role="status">${renderToastBody(store.toast)}</div>` : ""}
+      ${store.toast ? `<div class="mini-toast ${store.toastKind === "error" ? "error" : ""}" role="status">${renderToastBody(store.toast, store.toastKind)}</div>` : ""}
     </div>
   `;
 

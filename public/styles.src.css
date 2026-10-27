@@ -4061,6 +4061,35 @@ body:not(.booted) .layout {
 
 /* ---- toast ---- */
 
+.toast,
+.mini-toast {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  max-height: calc(100vh - 36px);
+  overflow-y: auto;
+  user-select: text;
+}
+
+.toast-summary { display: flex; align-items: flex-start; gap: 12px; }
+.toast-summary span { flex: 1; min-width: 0; }
+.toast-summary button { flex: none; padding: 0 5px; }
+.toast-diagnostics { margin-top: 10px; min-width: 0; }
+.toast-diagnostics summary { cursor: pointer; }
+.toast-diagnostics,
+.tools-diagnostic-error { overflow-wrap: anywhere; }
+.toast-diagnostics pre {
+  max-height: min(320px, 45vh);
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  font-weight: 400;
+  margin: 8px 0;
+  user-select: text;
+}
+.toast-copy { margin-top: 10px; font-size: 12px; }
+.tools-path-warning { color: var(--warning, #eac078); font-size: 12px; padding: 0 14px 14px; }
+
 .toast.error {
   border-color: var(--danger-line);
   background: #1c0d0b;

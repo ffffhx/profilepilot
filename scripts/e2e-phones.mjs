@@ -108,9 +108,9 @@ try {
   await driver.waitFor('.phone-emulator-dialog[open]');
   await driver.domClick('.phone-emulator-dialog [data-close]');
   assert.equal((await driver.query('.phone-details')).attributes['data-device-id'], 'UI-TEST-1');
-  await driver.domClick('[data-phone-options] [data-action="add-device"]');
-  await driver.domClick('[data-connect="wifi"]');
+  await driver.domClick('.phone-route [data-action="wifi"]');
   await driver.waitFor('.phone-wireless-dialog[open]');
+  await driver.domClick('[data-first-pair]');
   await driver.waitFor('[data-next]');
   await paint();
   await writeFile(path.join(output, 'wireless-guide.png'), Buffer.from((await driver.screenshot()).pngBase64, 'base64'));
@@ -143,8 +143,8 @@ try {
   assert.equal(wireless.state, null, 'pairing/connecting must not start control or install the app');
   await driver.domClick('[data-finish]');
   await driver.waitFor('#phone-details-title', item => item.text === 'Wireless Test Phone');
-  await driver.domClick('[data-phone-options] [data-action="add-device"]');
-  await driver.domClick('[data-connect="wifi"]');
+  await driver.domClick('.phone-route [data-action="wifi"]');
+  await driver.domClick('[data-first-pair]');
   await driver.waitFor('[data-direct]');
   await driver.domClick('[data-direct]');
   await driver.waitFor('[data-connect-form]');
@@ -361,9 +361,9 @@ try {
   assert.equal((await realApp.driver.query('[data-action="connect"]')).count, 0);
   assert.equal((await realApp.driver.query('[data-phone-row]')).count, 0);
   await realApp.driver.domClick('.phone-list-tools [data-action="add-device"]');
-  await realApp.driver.domClick('[data-connect="usb"]');
-  await realApp.driver.waitFor('.phone-usb-dialog[open]');
-  await realApp.driver.domClick('.phone-usb-dialog footer [data-close]');
+  await realApp.driver.domClick('[data-connect="real"]');
+  await realApp.driver.waitFor('.phone-add-dialog[open]');
+  await realApp.driver.domClick('.phone-add-dialog [data-close]');
   assert.equal((await realApp.driver.query('[data-phone-row]')).count, 0, 'no phantom device after cancelling the first connection');
   await realApp.driver.domClick('[data-action="mobile"]');
   await realApp.driver.waitFor('.mobile-dialog[open]');

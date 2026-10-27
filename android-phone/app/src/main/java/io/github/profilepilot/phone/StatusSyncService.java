@@ -37,15 +37,18 @@ public final class StatusSyncService extends Service {
     if (closed || sending) return;
     sending = true;
     try {
-      if (!store.statusEnabled()) { stopSelf(); return; }
+      if (!store.anyStatusEnabled()) { stopSelf(); return; }
       JSONObject link = store.statusLink(false);
-      if (link == null) { store.statusEnabled(false); stopSelf(); return; }
+      if (link == null) store.statusEnabled(false);
       CompletableFuture<JSONObject> snapshot = new CompletableFuture<>();
       // Control state is owned by the main thread; reporting must never pulse its lease.
       main.post(() -> { try { snapshot.complete(StatusSyncClient.report(this)); } catch (Exception e) { snapshot.completeExceptionally(e); } });
       JSONObject report = snapshot.get(3, TimeUnit.SECONDS);
-      if (closed || !store.statusEnabled()) return;
-      StatusSyncClient.request(link, "report", link.getString("token"), new JSONObject().put("report", report));
+      if (closed || !store.anyStatusEnabled()) return;
+      Exception failure = null;
+      if (store.statusEnabled() && link != null) try { StatusSyncClient.request(link, "report", link.getString("token"), new JSONObject().put("report", report)); } catch (Exception error) { failure = error; }
+      if (store.deviceSyncEnabled()) StatusSyncClient.syncDeviceCodes(this, report);
+      if (failure != null) throw failure;
       lastReportedAt = System.currentTimeMillis(); message = "已上报 · 无需连接电脑";
     } catch (Exception error) { message = "暂未上报，请检查网络或重新扫码"; }
     finally {
@@ -55,9 +58,9 @@ public final class StatusSyncService extends Service {
   }
 
   @Override public int onStartCommand(Intent intent, int flags, int startId) {
-    if (intent != null && "stop".equals(intent.getAction())) { store.statusEnabled(false); stopSelf(); }
+    if (intent != null && "stop".equals(intent.getAction())) { store.statusEnabled(false); store.deviceSyncEnabled(false); stopSelf(); }
     else worker.execute(this::sync);
-    return store.statusEnabled() && new RecoverySettings(this).enabled() ? START_STICKY : START_NOT_STICKY;
+    return store.anyStatusEnabled() && new RecoverySettings(this).enabled() ? START_STICKY : START_NOT_STICKY;
   }
   @Override public IBinder onBind(Intent intent) { return null; }
   @Override public void onDestroy() { closed = true; LanDiscovery.release(this); WirelessNetwork.stop(); worker.shutdownNow(); main.removeCallbacksAndMessages(null); stopForeground(STOP_FOREGROUND_REMOVE); super.onDestroy(); }

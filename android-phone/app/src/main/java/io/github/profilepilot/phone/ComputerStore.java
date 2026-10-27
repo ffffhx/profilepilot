@@ -125,6 +125,19 @@ final class ComputerStore {
 
   boolean statusEnabled() { return prefs.getBoolean("status-enabled", false); }
   void statusEnabled(boolean value) { prefs.edit().putBoolean("status-enabled", value).commit(); }
+  boolean discoveryEnabled() { return prefs.getBoolean("discovery-enabled", false); }
+  void discoveryEnabled(boolean value) { prefs.edit().putBoolean("discovery-enabled", value).commit(); }
+  JSONArray deviceLinks() throws Exception {
+    synchronized (LOCK) { return new JSONArray(decrypt(prefs.getString("device-links", ""))); }
+  }
+  void deviceLinks(JSONArray links) throws Exception {
+    synchronized (LOCK) {
+      if (!prefs.edit().putString("device-links", encrypt(links.toString())).commit()) throw new IllegalStateException("无法保存设备码配置");
+    }
+  }
+  boolean deviceSyncEnabled() { return prefs.getBoolean("device-sync-enabled", false); }
+  void deviceSyncEnabled(boolean value) { prefs.edit().putBoolean("device-sync-enabled", value).commit(); }
+  boolean anyStatusEnabled() { return statusEnabled() || deviceSyncEnabled(); }
 
   void select(String id) {
     prefs.edit().putString("selected", id).apply();

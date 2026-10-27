@@ -52,7 +52,9 @@ export interface PhoneDevice {
   hardwareId?: string;
   name: string;
   model: string;
-  transport: "usb" | "wifi" | "emulator" | "cloud";
+  transport: "usb" | "wifi" | "emulator" | "cloud" | "registered";
+  /** Registration is metadata only; it never grants a debug/control connection. */
+  registration?: { deviceId: string; source: "lan" | "code"; address?: string };
   cloud?: PhoneCloudStatus;
   connection: "device" | "offline" | "unauthorized" | "missing";
   companion: "unknown" | "unavailable" | "pairing" | "ready";
@@ -69,7 +71,7 @@ export interface PhoneScreenFrame { mime: "image/png"; base64: string; width: nu
 export interface PhoneVideoPacket { codec: string; key: boolean; timestamp: number; data: Uint8Array; width?: number; height?: number; screenWidth?: number; screenHeight?: number; }
 export interface PhoneVideoSession { sessionId: string; generation: number; }
 export interface PhoneWirelessService { name: string; kind: "pairing" | "connect"; address: string; source?: "phone" | "mdns" | "adb"; reachable?: boolean; reason?: string; }
-export interface PhoneNearbyApp { id: string; name: string; ip: string; version: string; variant: "debug" | "release"; wirelessDebugging: "enabled" | "disabled" | "unconfirmed"; }
+export interface PhoneNearbyApp { id: string; deviceId?: string; name: string; ip: string; version: string; variant: "debug" | "release"; wirelessDebugging: "enabled" | "disabled" | "unconfirmed"; }
 export interface PhoneWirelessDiscovery { services: PhoneWirelessService[]; error: string; apps?: PhoneNearbyApp[]; appError?: string; phoneIps?: string[]; }
 export interface PhoneSelector {
   resourceId?: string; text?: string; description?: string; className?: string; packageName?: string;
@@ -101,6 +103,10 @@ export interface PhonesApi {
   basicPerform(input: PhoneActionInput): Promise<PhoneActionResult>;
   cloudPair(url?: string): Promise<{ id: string; uri: string; qrCode: string; expiresAt: number }>;
   cloudForget(id: string): Promise<void>;
+  discoverDevices(): Promise<{ apps: PhoneNearbyApp[]; appError: string }>;
+  addNearby(id: string): Promise<PhoneDevice>;
+  addDeviceCode(code: string, url?: string): Promise<PhoneDevice>;
+  forgetRegistered(id: string): Promise<void>;
   snapshot(): Promise<PhonesSnapshot>;
   inspect(id: string): Promise<PhonesSnapshot>;
   listEmulators(): Promise<string[]>;

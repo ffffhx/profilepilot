@@ -23,6 +23,22 @@ try {
   assert.equal((await request('status', writer)).status, 401);
   assert.equal((await request('report', reader, { report })).status, 401);
   console.log('Public HTTPS pairing, diagnostic upload/read and credential isolation passed; no ADB used.');
+  const codeId = randomUUID(), codeWriter = randomBytes(32).toString('hex'), codeReader = randomBytes(32).toString('hex');
+  let codeCreated = false;
+  try {
+    const offer = await request('device-code-create', codeWriter, { id: codeId, report });
+    assert.equal(offer.status, 200); codeCreated = true;
+    assert.match(offer.body.code, /^[A-HJ-NP-Z2-9]{12}$/);
+    const added = await request('device-code-add', codeReader, { code: offer.body.code });
+    assert.equal(added.status, 200); assert.equal(added.body.id, codeId); assert.equal(added.body.deviceId, deviceId);
+    assert.equal((await request('device-code-add', codeReader, { code: offer.body.code })).status, 200);
+    assert.equal((await request('device-code-add', reader, { code: offer.body.code })).status, 409);
+    assert.equal((await request('status', codeReader, { id: codeId })).status, 200);
+    assert.equal((await request('status', codeWriter, { id: codeId })).status, 401);
+    console.log('Public HTTPS device-code creation, addition, lost-response retry and single-use protection passed.');
+  } finally {
+    if (codeCreated) assert.equal((await request('device-code-revoke', codeWriter, { id: codeId })).status, 200);
+  }
 } finally {
   if (created) {
     assert.equal((await request('revoke', reader)).status, 200);

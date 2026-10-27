@@ -21,4 +21,10 @@ public class LanDiscoveryProtocolTest {
     for (String request : new String[]{"{}", "{", "x".repeat(257), "{\"protocol\":\"profilepilot-discovery-v1\",\"type\":\"scan\",\"nonce\":\"bad\"}"}) assertNull(reply(request));
     assertNull(reply(new JSONObject().put("protocol", LanDiscoveryProtocol.PROTOCOL).put("type", "control").put("nonce", "a".repeat(32)).toString()));
   }
+  @Test public void optedInDiscoveryIncludesInstallationIdentityButNoControlCredentials() throws Exception {
+    byte[] request = new JSONObject().put("protocol", LanDiscoveryProtocol.PROTOCOL).put("type", "scan").put("nonce", "a".repeat(32)).toString().getBytes(StandardCharsets.UTF_8);
+    JSONObject result = new JSONObject(new String(LanDiscoveryProtocol.reply(request, 0, request.length, "temporary", "Phone", "1", true, "disabled", "4adacb66-890f-4faa-8d47-d1862aeb3477"), StandardCharsets.UTF_8));
+    assertEquals("4adacb66-890f-4faa-8d47-d1862aeb3477", result.getString("deviceId"));
+    assertFalse(result.has("token")); assertFalse(result.has("sessionId")); assertFalse(result.has("hardwareId"));
+  }
 }

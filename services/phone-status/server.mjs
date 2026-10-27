@@ -1,7 +1,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual, randomInt } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { isIPv4 } from 'node:net';
 
@@ -78,7 +78,7 @@ export function createStatusServer({ root, now = Date.now, trustedProxy = false 
   };
   const clean = () => {
     let dirty = false;
-    for (const [id, c] of channels) if (!c.writer && c.expires <= now()) {
+    for (const [id, c] of channels) if ((!c.writer || c.codeHash && !c.reader) && c.expires <= now()) {
       channels.delete(id); reports.delete(id); dirty = true;
     }
     for (const [id, item] of reports) if (now() - item.at > 86400000) reports.delete(id);
@@ -100,6 +100,30 @@ export function createStatusServer({ root, now = Date.now, trustedProxy = false 
       const credential = /^Bearer ([a-f0-9]{64})$/.exec(req.headers.authorization || '')?.[1];
       requireValue(credential, 'Unauthorized', 401);
       const digest = hash(credential), channel = channels.get(input.id);
+      if (req.url === '/v1/device-code-create') {
+        const report = validateReport(input.report);
+        if (channel) requireValue(same(channel.writer, digest) && channel.deviceId === report.deviceId && !channel.reader, 'Device code already used', 409);
+        else { limit('create:' + address, 12, 3600000); clean(); requireValue(channels.size < 256, 'Service capacity reached', 503); }
+        const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+        let code;
+        do { code = Array.from({ length: 12 }, () => alphabet[randomInt(alphabet.length)]).join(''); }
+        while ([...channels.values()].some(c => c.codeHash === hash(code)));
+        const expires = now() + 600000;
+        channels.set(input.id, { writer: digest, deviceId: report.deviceId, codeHash: hash(code), expires, createdAt: now() });
+        reports.set(input.id, { report, at: now() }); persist();
+        send(200, { code, expires }); return;
+      }
+      if (req.url === '/v1/device-code-add') {
+        limit('code:' + address, 12, 60000);
+        requireValue(typeof input.code === 'string' && /^[A-HJ-NP-Z2-9]{12}$/.test(input.code), 'Invalid device code');
+        const entry = [...channels].find(([, c]) => c.codeHash === hash(input.code));
+        requireValue(entry && entry[1].expires > now(), 'Device code expired or unavailable', 404);
+        const [id, target] = entry;
+        requireValue(!target.reader || same(target.reader, digest), 'Device code already used', 409);
+        target.reader = digest; persist();
+        const item = reports.get(id);
+        send(200, { id, deviceId: target.deviceId, name: item?.report.name || 'Android 手机', paired: true, report: item?.report || null, ageMs: item ? Math.max(0, now() - item.at) : null }); return;
+      }
       if (req.url === '/v1/create') {
         requireValue(token.test(input.pairToken));
         if (channel) { requireValue(same(channel.reader, digest), 'Unauthorized', 401); send(200, { expires: channel.expires }); return; }
@@ -110,6 +134,10 @@ export function createStatusServer({ root, now = Date.now, trustedProxy = false 
         send(200, { expires }); return;
       }
       requireValue(channel, 'Channel unavailable', 404);
+      if (req.url === '/v1/device-code-revoke') {
+        requireValue(channel.codeHash && same(channel.writer, digest), 'Unauthorized', 401);
+        channels.delete(input.id); reports.delete(input.id); persist(); send(200, { ok: true }); return;
+      }
       if (req.url === '/v1/claim') {
         requireValue(token.test(input.writeToken) && uuid.test(input.deviceId));
         const writer = hash(input.writeToken);
@@ -120,7 +148,8 @@ export function createStatusServer({ root, now = Date.now, trustedProxy = false 
         requireValue(same(channel.writer, digest), 'Unauthorized', 401);
         limit('report:' + input.id, 30, 60000);
         const report = validateReport(input.report); requireValue(report.deviceId === channel.deviceId, 'Device changed', 403);
-        reports.set(input.id, { report, at: now() }); send(200, { ok: true }); return;
+        requireValue(!channel.codeHash || channel.reader || channel.expires > now(), 'Device code expired', 404);
+        reports.set(input.id, { report, at: now() }); send(200, { ok: true, paired: !!channel.reader }); return;
       }
       requireValue(same(channel.reader, digest), 'Unauthorized', 401);
       if (req.url === '/v1/status') {

@@ -10,6 +10,7 @@ import { createMobileConnections } from "./mobile-connections";
 import { openPhoneWireless } from "./phone-wireless";
 import { PhoneWirelessDiscoveryMonitor, wirelessDiscoveryPresentation } from "./phone-wireless-discovery";
 import { openPhoneCloud } from "./phone-cloud";
+import { openPhoneAdd } from "./phone-add";
 import { openPhoneEmulator } from "./phone-emulator";
 import { openBasicPhone, phoneModeChoices, phoneAppDownload, phoneDownloadFigure } from "./phone-basic";
 import { createPhoneInspector } from "./phone-inspector";
@@ -95,8 +96,8 @@ function showDetails(id: string): void {
 }
 function addDevice(): void {
   const dialog = document.createElement("dialog"); dialog.className = "phone-connect-dialog"; dialog.setAttribute("aria-label", "添加 Android 设备");
-  dialog.innerHTML = `<header><h2>添加 Android 设备</h2><button data-close aria-label="关闭添加设备窗口">×</button></header><p>连接手机或创建一台新的虚拟设备。</p><div class="phone-connect-choices"><button data-connect="usb">${icon("usbDebugging")}<span><strong>通过 USB 连接</strong><small>插入数据线，并在手机上允许调试连接</small></span>${taskIcon("chevron")}</button><button data-connect="wifi">${icon("wifi")}<span><strong>通过 Wi-Fi 连接</strong><small>自动发现同一网络中的 ProfilePilot 设备</small></span>${taskIcon("chevron")}</button><button data-connect="emulator">${taskIcon("desktop")}<span><strong>创建虚拟设备</strong><small>安装 Android 环境、下载镜像并创建新设备</small></span>${taskIcon("chevron")}</button></div>`;
-  dialog.addEventListener("click", event => { const button = (event.target as Element).closest<HTMLButtonElement>("button"); if (!button) return; dialog.close(); dialog.remove(); if (button.dataset.connect === "usb") usb(); else if (button.dataset.connect === "wifi") wireless(true); else if (button.dataset.connect === "emulator") emulator("create"); });
+  dialog.innerHTML = `<header><h2>添加 Android 设备</h2><button data-close aria-label="关闭添加设备窗口">×</button></header><p>添加手机、平板，或创建一台新的虚拟设备。</p><div class="phone-connect-choices"><button data-connect="real">${taskIcon("phone")}<span><strong>添加真实设备</strong><small>同一网络扫描，或通过设备码跨网络添加</small></span>${taskIcon("chevron")}</button><button data-connect="emulator">${taskIcon("desktop")}<span><strong>创建虚拟设备</strong><small>安装 Android 环境、下载镜像并创建新设备</small></span>${taskIcon("chevron")}</button></div>`;
+  dialog.addEventListener("click", event => { const button = (event.target as Element).closest<HTMLButtonElement>("button"); if (!button) return; dialog.close(); dialog.remove(); if (button.dataset.connect === "real") openPhoneAdd((device, configure) => { void run(async () => { snapshot = await window.phones.snapshot(); selected = device.id; if (configure) showDetails(device.id); }); }, snapshot.companionApp?.variant); else if (button.dataset.connect === "emulator") emulator("create"); });
   dialog.addEventListener("close", () => dialog.remove()); document.body.append(dialog); dialog.showModal();
 }
 function downloads(): void {
@@ -125,7 +126,7 @@ function emulator(mode: "connect" | "create" = "connect"): void {
 function wireless(otherDevice = false): void {
   openPhoneWireless((device, prepare) => {
     void run(async () => { if (prepare) await window.phones.prepare(device.id); snapshot = await window.phones.snapshot(); selected = device.id; });
-  }, otherDevice || current()?.transport === "emulator" ? undefined : current()?.id);
+  }, otherDevice || current()?.transport === "emulator" || current()?.transport === "registered" ? undefined : current()?.id);
 }
 function current(): PhoneDevice | undefined { return snapshot.devices.find(device => device.id === selected); }
 function notice(text: string, error = false): void {
@@ -162,7 +163,7 @@ function enhancement(device?: PhoneDevice, disabledReason = "请先在上方连�
   return `<header class="phone-mode-heading"><h3>控制增强</h3><span>可选</span></header><p class="phone-mode-description">安装 App，开启控件识别、中文填写与手机端暂停。</p>
     ${snapshot.companionApp?.variant === "debug" ? '<p class="phone-mode-hint">当前使用开发版，可在手机内检查更新，也可继续通过电脑调试。</p>' : ""}
     <div class="phone-app-status-panel"><header><strong>${esc(appName)}</strong><span class="phone-route-badge" data-app-installation="${app.installation}" data-tone="${app.tone}">${app.label}</span></header><p class="phone-mode-hint">${app.installation === "missing" ? "不影响免安装控制" : app.note}</p>
-    <div class="phone-install-actions"><button data-action="install-phone-app" ${disabledReason ? `disabled title="${esc(disabledReason)}"` : ""}>${app.connected ? "更新手机 App" : app.installation === "installed" ? "连接手机 App" : "安装到手机"}</button><button class="phone-text-button" data-action="inspect-app" ${!device || device.transport === "cloud" || busy ? "disabled" : ""}>重新检测</button></div></div>
+    <div class="phone-install-actions"><button data-action="install-phone-app" ${disabledReason ? `disabled title="${esc(disabledReason)}"` : ""}>${app.connected ? "更新手机 App" : app.installation === "installed" ? "连接手机 App" : "安装到手机"}</button><button class="phone-text-button" data-action="inspect-app" ${!device || device.transport === "cloud" || device.transport === "registered" || busy ? "disabled" : ""}>重新检测</button></div></div>
     <div class="phone-permissions" aria-label="增强功能权限">${settingsRows(app.permissions, app.canSetup && (!device?.basic || device.basic.phase === "stopped"))}</div>
     <details class="phone-downloads" data-phone-downloads><summary>其他下载方式</summary>${phoneDownloadFigure(snapshot.companionApp?.variant)}<button data-action="phone-apk">获取 APK 文件</button></details>`;
 }
@@ -170,6 +171,7 @@ function options(device?: PhoneDevice): string {
   return `<details class="phone-options" data-phone-options><summary>${taskIcon("settings")}更多设置</summary><div>
     <button class="phone-text-button" data-action="cloud-link">未连接电脑时也同步手机状态</button>
     ${device?.cloud?.channelId ? '<button class="phone-text-button" data-action="cloud-forget">移除此状态同步</button>' : ""}
+    ${device?.transport === "registered" ? '<button class="phone-text-button" data-action="registration-forget">移除此设备</button>' : ""}
     <button class="phone-text-button" data-action="add-device">添加其他设备</button>
     <button class="phone-text-button" data-action="emulator">使用本机模拟器</button>
     ${openMobileConnections ? '<button class="phone-text-button" data-action="mobile">用手机管理电脑任务</button>' : ""}
@@ -369,6 +371,7 @@ root.addEventListener("click", event => {
     void run(async () => { await window.phones.openSettings(device.id, setting); notice(["developerOptions", "usbDebugging", "wirelessDebugging"].includes(setting) && device.state?.readiness?.developerOptions === "disabled" ? "已打开手机设置。请连续点击版本号，再按系统提示开启开发者选项。" : `已在${device.transport === "emulator" ? "模拟器" : "手机"}打开设置，请在${device.transport === "emulator" ? "模拟器窗口内" : "手机上"}开启并确认系统提示。`); });
   }
   if (action === "cloud-forget") void run(() => window.phones.cloudForget(`cloud-${device.cloud?.channelId}`));
+  if (action === "registration-forget") void run(async () => { await window.phones.forgetRegistered(device.id); drawer.close(); });
   if (action === "pause" || action === "resume" || action === "stop") void run(() => window.phones.control(device.id, action));
   if (action === "screenshot") void capture();
   if (action === "rename") { closeDeviceMenu(true); rename(device); }

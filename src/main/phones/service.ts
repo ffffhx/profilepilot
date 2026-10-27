@@ -18,6 +18,8 @@ import { AndroidEmulators, type EmulatorRuntime } from "./emulators";
 import { AndroidSetup } from "./android-setup";
 import type { AndroidSetupRuntime } from "../../shared/android-setup";
 import { PhoneCloud } from "./cloud";
+import { PhoneRegistry } from "./registry";
+import type { PhoneNearbyApp } from "../../shared/phones";
 import { readinessSchema } from "./readiness-schema";
 import { inspectApk } from "./apk";
 import { PhoneInspection } from "./inspection";
@@ -103,6 +105,9 @@ export class PhonesService {
   private hostBusy = false;
   private error = "";
   private cloud: PhoneCloud;
+  private registry: PhoneRegistry;
+  private nearby = new Map<string, { app: PhoneNearbyApp; at: number }>();
+
   private basic: BasicPhoneControl;
   readonly screenCamera: ScreenCamera;
   readonly gameFollower: GameFollower;
@@ -132,6 +137,7 @@ export class PhonesService {
     const disconnectedFile = path.join(options.root, "app-disconnected.json");
     if (fs.existsSync(disconnectedFile)) this.appDisconnected = new Set(z.array(z.string().min(1).max(240)).parse(JSON.parse(fs.readFileSync(disconnectedFile, "utf8"))));
     this.cloud = new PhoneCloud(options.root, () => this.changed(), undefined, undefined, this.companion.pairingScheme);
+    this.registry = new PhoneRegistry(options.root);
     const file = path.join(options.root, "devices.json");
     this.saved = fs.existsSync(file) ? z.record(z.string(), z.object({ statusDeviceId: z.string().uuid().optional(), token: z.string().regex(/^[a-f0-9]{64}$/), name: z.string().max(80).optional(), installedHash: z.string().regex(/^[a-f0-9]{64}$/).optional(), hardwareId: z.string().max(200).optional(), model: z.string().max(200).optional(), transport: z.enum(["usb", "wifi", "emulator"]).optional() })).parse(JSON.parse(fs.readFileSync(file, "utf8"))) : {};
     // Remember paired devices across app restarts, but never persist permissions,
@@ -158,7 +164,9 @@ export class PhonesService {
     this.timer = setInterval(tick, 2000); this.timer.unref(); tick();
   }
   snapshot(): PhonesSnapshot {
-    const cloud = this.cloud.devices();
+    const cloud = this.cloud.devices().sort((a, b) => (b.cloud?.reportedAt || 0) - (a.cloud?.reportedAt || 0));
+    const registered = this.registry.devices();
+    const registrationId = (device: PhoneDevice) => device.registration?.deviceId || device.cloud?.report?.deviceId;
     const identityByHardware = new Map(Object.values(this.saved).filter(s => s.hardwareId && s.statusDeviceId).map(s => [s.hardwareId, s.statusDeviceId]));
     const matched = new Set<string>();
     const devices: PhoneDevice[] = [...this.devices.values()].map(device => {
@@ -169,7 +177,8 @@ export class PhonesService {
       const visualFollowActive = [...this.wrappers.values()].some(owner => owner.id === device.id && owner.visualFollow && !owner.closing);
       const basic = this.basic.state(device.id);
       const taskCaptureActive = !!this.captureStarting.get(device.id) || this.actions.has(device.id);
-      return structuredClone({ ...device, visualFollowActive, taskCaptureActive, screenCamera: this.screenCamera.snapshot(device.id), basic, hardwareId, cloud: identity ? cloud.find(c => c.cloud?.report?.deviceId === identity)?.cloud : undefined });
+      return structuredClone({ ...device, visualFollowActive, taskCaptureActive, screenCamera: this.screenCamera.snapshot(device.id), basic, hardwareId, registration: identity ? [...registered, ...cloud].find(c => registrationId(c) === identity)?.registration : undefined,
+        cloud: identity ? cloud.find(c => registrationId(c) === identity)?.cloud : undefined });
     });
     for (const group of groupPhoneDevices(devices)) {
       if (group.routes.some(route => route.visualFollowActive)) for (const route of group.routes) route.visualFollowActive = true;
@@ -181,12 +190,34 @@ export class PhonesService {
       }));
       if (taskCaptureActive) for (const route of group.routes) route.taskCaptureActive = true;
     }
-    devices.push(...cloud.filter(c => !c.cloud?.report || !matched.has(c.cloud.report.deviceId)));
+    for (const device of cloud) {
+      const identity = registrationId(device);
+      if (identity && matched.has(identity)) continue;
+      devices.push(device); if (identity) matched.add(identity);
+    }
+    devices.push(...registered.filter(c => !matched.has(c.registration!.deviceId)));
     return { devices, adbAvailable: this.adbAvailable, error: this.error, computer: this.computer,
       companionApp: { packageName: this.companion.packageName, name: this.companion.name, variant: this.companion.variant } };
   }
   cloudPair(url?: string) { return this.cloud.pair(url); }
   cloudForget(id: string) { return this.cloud.forget(id); }
+  async discoverDevices() {
+    const result = await (this.options.discoverNearbyApps || discoverNearbyApps)();
+    this.nearby.clear();
+    for (const app of result.apps) this.nearby.set(app.id, { app, at: this.now() });
+    return result;
+  }
+  addNearby(id: string): PhoneDevice {
+    const found = this.nearby.get(id);
+    if (!found || this.now() - found.at > 30000) throw new Error("扫描结果已过期，请重新扫描并选择手机。");
+    const registered = this.registry.add(found.app); this.changed();
+    return this.snapshot().devices.find(d => d.registration?.deviceId === found.app.deviceId) || registered;
+  }
+  async addDeviceCode(code: string, url?: string): Promise<PhoneDevice> {
+    const added = await this.cloud.addCode(code, url);
+    return this.snapshot().devices.find(d => d.registration?.deviceId === added.registration?.deviceId) || added;
+  }
+  forgetRegistered(id: string): void { this.registry.forget(id); this.changed(); }
   private changed(): void { this.options.onChanged?.(this.snapshot()); }
   private captureRoutes(id: string): PhoneDevice[] {
     return groupPhoneDevices(this.snapshot().devices).find(group => group.routes.some(route => route.id === id))?.routes || [];
@@ -906,7 +937,10 @@ export class PhonesService {
     return structuredClone(this.device(id));
   }
   async rename(id: string, name: string): Promise<void> {
-    this.device(id); const next = z.string().trim().min(1).max(80).parse(name);
+    const next = z.string().trim().min(1).max(80).parse(name);
+    if (id.startsWith("registered-")) { this.registry.rename(id, next); this.changed(); return; }
+    if (id.startsWith("cloud-")) { this.cloud.rename(id, next); return; }
+    this.device(id);
     this.saved[id] = { ...this.saved[id], token: this.saved[id]?.token || randomBytes(32).toString("hex"), name: next };
     const group = groupPhoneDevices(this.snapshot().devices).find(item => item.routes.some(route => route.id === id))!;
     const hardwareIds = new Set(group.routes.map(route => route.hardwareId).filter(Boolean));

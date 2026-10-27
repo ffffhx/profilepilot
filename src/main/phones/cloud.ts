@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { z } from "zod";
 import QRCode from "qrcode";
 import type { PhoneCloudStatus, PhoneDevice } from "../../shared/phones";
@@ -8,7 +8,7 @@ import { readinessSchema } from "./readiness-schema";
 
 export const DEFAULT_STATUS_URL = "https://124-221-36-36.anyip.dev:8443/profilepilot-status";
 const credential = z.string().regex(/^[a-f0-9]{64}$/);
-const channelSchema = z.object({ id: z.string().uuid(), token: credential, url: z.string().url(), name: z.string().max(80) });
+const channelSchema = z.object({ id: z.string().uuid(), token: credential, url: z.string().url(), name: z.string().max(80), deviceId: z.string().uuid().optional(), renamed: z.boolean().optional() });
 const reportSchema = z.object({ deviceId: z.string().uuid(), name: z.string().min(1).max(80), permissions: z.object({ accessibility: z.boolean(), overlay: z.boolean(), notifications: z.boolean() }), readiness: readinessSchema });
 export function statusUrl(value: string): string {
   const url = new URL(value);
@@ -33,7 +33,7 @@ export class PhoneCloud {
   private persist(): void { fs.writeFileSync(this.file + ".tmp", JSON.stringify(this.channels), { mode: 0o600 }); fs.renameSync(this.file + ".tmp", this.file); }
   private async call(channel: Channel, method: string, extra = {}): Promise<unknown> {
     const response = await this.request(`${channel.url}/v1/${method}`, { method: "POST", redirect: "error", headers: { Authorization: `Bearer ${channel.token}`, "Content-Type": "application/json" }, body: JSON.stringify({ id: channel.id, ...extra }), signal: AbortSignal.timeout(8000) });
-    if (!response.ok) throw new Error(response.status === 404 || response.status === 401 ? "状态同步已失效，请移除后重新扫码配对。" : `状态服务器暂不可达（${response.status}）`);
+    if (!response.ok) throw new Error(method === "device-code-add" ? response.status === 404 ? "设备码不存在或已过期，请在手机上生成新码。" : response.status === 409 ? "设备码已被使用，请在手机上生成新码。" : response.status === 429 ? "尝试次数过多，请稍后再试。" : `设备码添加失败（${response.status}），请确认服务器已更新。` : response.status === 404 || response.status === 401 ? "状态同步已失效，请移除后重新扫码配对。" : `状态服务器暂不可达（${response.status}）`);
     const body = await response.text(); if (body.length > 16384) throw new Error("状态响应过大。"); return JSON.parse(body);
   }
   start(): void { if (!this.timer && !this.closed) { this.timer = setInterval(() => void this.refresh(), 10000); this.timer.unref(); void this.refresh(); } }
@@ -55,6 +55,33 @@ export class PhoneCloud {
     try { await this.call(channel, "revoke"); } catch (error) { if (!(error as Error).message.includes("已失效")) throw error; }
     this.channels = this.channels.filter(c => c !== channel); this.states.delete(channel.id); this.errors.delete(channel.id); this.persist(); this.changed();
   }
+  async addCode(value: string, url = DEFAULT_STATUS_URL): Promise<PhoneDevice> {
+    const code = value.replace(/[\s-]/g, "").toUpperCase();
+    if (!/^[A-HJ-NP-Z2-9]{12}$/.test(code)) throw new Error("请输入手机上显示的 12 位设备码。");
+    if (this.creating) throw new Error("正在添加设备，请稍候。");
+    if (this.channels.length >= 32) throw new Error("请先移除不用的设备。");
+    this.creating = true;
+    try {
+      const endpoint = statusUrl(url), fingerprint = createHash("sha256").update(endpoint + code).digest("hex");
+      const pendingFile = this.file + ".adding";
+      const pendingSchema = z.object({ fingerprint: z.string(), channel: channelSchema });
+      let pending = fs.existsSync(pendingFile) ? pendingSchema.parse(JSON.parse(fs.readFileSync(pendingFile, "utf8"))) : undefined;
+      if (pending?.fingerprint !== fingerprint) pending = { fingerprint, channel: { id: randomUUID(), token: randomBytes(32).toString("hex"), url: endpoint, name: "Android 手机" } };
+      fs.writeFileSync(pendingFile, JSON.stringify(pending), { mode: 0o600 });
+      const result = z.object({ id: z.string().uuid(), deviceId: z.string().uuid(), name: z.string().min(1).max(80), paired: z.literal(true), report: reportSchema.nullable(), ageMs: z.number().nonnegative().nullable() }).parse(await this.call(pending.channel, "device-code-add", { code }));
+      const channel = { ...pending.channel, id: result.id, name: result.name, deviceId: result.deviceId };
+      const old = this.channels.find(c => c.id === result.id);
+      if (!old) this.channels.push(channel);
+      this.states.set(result.id, { paired: true, report: result.report, reportedAt: result.report && result.ageMs !== null ? this.now() - result.ageMs : null });
+      this.persist(); fs.unlinkSync(pendingFile); this.changed();
+      return this.devices().find(d => d.id === `cloud-${result.id}`)!;
+    } finally { this.creating = false; }
+  }
+  rename(id: string, name: string): void {
+    const channel = this.channels.find(c => `cloud-${c.id}` === id);
+    if (!channel) throw new Error("设备不存在。");
+    channel.name = name; channel.renamed = true; this.persist(); this.changed();
+  }
   refresh(): Promise<void> {
     if (this.closed) return Promise.resolve();
     if (this.pending) return this.pending;
@@ -65,11 +92,15 @@ export class PhoneCloud {
         if (this.closed || !this.channels.includes(channel)) return;
         this.states.set(channel.id, { paired: result.paired, report: result.report, reportedAt: result.report && result.ageMs !== null ? startedAt - result.ageMs : null });
         this.errors.delete(channel.id);
-        if (result.report && result.report.name !== channel.name) { channel.name = result.report.name; this.persist(); }
+        if (result.report && (result.report.deviceId !== channel.deviceId || !channel.renamed && result.report.name !== channel.name)) {
+          channel.deviceId = result.report.deviceId;
+          if (!channel.renamed) channel.name = result.report.name;
+          this.persist();
+        }
       } catch (error) { if (!this.closed && this.channels.includes(channel)) this.errors.set(channel.id, (error as Error).message); }
     })).then(() => { if (!this.closed) this.changed(); }).finally(() => { this.pending = undefined; });
     return this.pending;
   }
-  devices(): PhoneDevice[] { return this.channels.map(c => ({ id: `cloud-${c.id}`, name: c.name, model: c.name, transport: "cloud", connection: "missing", companion: "unavailable", state: null, confirmedAt: null, pending: null, error: this.errors.get(c.id) || "", cloud: { ...(this.states.get(c.id) || { paired: false, report: null, reportedAt: null }), channelId: c.id } })); }
+  devices(): PhoneDevice[] { return this.channels.map(c => ({ id: `cloud-${c.id}`, name: c.name, model: c.name, transport: "cloud", connection: "missing", companion: "unavailable", state: null, confirmedAt: null, pending: null, error: this.errors.get(c.id) || "", registration: c.deviceId ? { deviceId: c.deviceId, source: "code" } : undefined, cloud: { ...(this.states.get(c.id) || { paired: !!c.deviceId, report: null, reportedAt: null }), channelId: c.id } })); }
   close(): void { this.closed = true; clearInterval(this.timer); }
 }

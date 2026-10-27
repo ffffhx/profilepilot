@@ -151,6 +151,7 @@ export function phonePresentation(device: PhoneDevice, now = Date.now()) {
   const idle = directKnown && !!state && ["idle", "stopped"].includes(state.phase);
   const locked = known && diagnostics?.readiness?.unlocked === false;
   const note = cloudSource ? "手机正在通过服务器同步状态。查看画面或操作手机时，再建立控制连接。"
+    : device.transport === "registered" ? "设备已保存。查看画面或操作手机时，再配置 Wi-Fi 或 USB 调试连接。"
     : device.transport === "cloud" ? device.cloud?.paired ? "手机暂未更新状态，请检查手机网络或打开 ProfilePilot App。" : "请用手机 ProfilePilot App 扫码，开启状态同步。"
     : device.connection === "unauthorized" ? emulator ? "请在模拟器窗口中确认此电脑的调试连接。" : "请解锁手机，并在手机上允许此电脑进行 USB 调试。"
     : !transportConnected ? emulator ? "启动本机模拟器后会自动检测连接，无需 USB 数据线或真实手机。" : device.transport === "wifi" ? "请确认手机与电脑在同一网络，并开启无线调试。" : "请用 USB 连接手机，并在手机上允许连接。"
@@ -163,7 +164,7 @@ export function phonePresentation(device: PhoneDevice, now = Date.now()) {
     : active ? state?.mode === "view" ? `连接正常，正在查看${subject}画面。` : "连接正常，正在执行你的任务。"
     : permissionsReady ? "连接正常，控制所需权限已就绪。" : "连接正常，正在检测控制权限。";
   return { emulator, subject, displayName, connected, known, directKnown, cloudOnline, cloudSource, unresponsive, permissions, settings, missing, permissionsReady, active, paused, locked, note,
-    label: cloudSource ? "状态同步在线 · 控制未连接" : device.transport === "cloud" ? device.cloud?.paired ? "状态同步离线" : "等待手机扫码" : device.connection === "unauthorized" ? `等待${subject}授权` : connected ? `${subject}已连接` : transportConnected ? "可连接" : `${subject}未连接`,
+    label: cloudSource ? "状态同步在线 · 控制未连接" : device.registration && !transportConnected ? "已添加 · 未连接控制" : device.transport === "cloud" ? device.cloud?.paired ? "状态同步离线" : "等待手机扫码" : device.connection === "unauthorized" ? `等待${subject}授权` : connected ? `${subject}已连接` : transportConnected ? "可连接" : `${subject}未连接`,
     canPreview: directKnown && permissionsReady && !locked && !device.pending && !device.taskCaptureActive && !device.visualFollowActive && (idle || active && state?.phase !== "executing"),
     canSetup: idle && !device.pending
   };

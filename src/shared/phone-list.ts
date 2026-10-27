@@ -15,8 +15,8 @@ export function phoneListItem(group: PhoneDeviceGroup) {
   const occupied = phoneConnectionPresentation(group).occupied;
   const transports = [...new Set(group.routes.filter(route => route.connection === "device").map(route => route.transport))];
   if (!transports.length) transports.push(device.transport);
-  const connection = transports.map(transport => ({ usb: "USB", wifi: "Wi-Fi", emulator: "本机", cloud: "状态同步" })[transport]).join(" / ");
-  const status = device.pending || (online ? "已连接" : available ? "可连接" : unauthorized ? "等待授权" : view.emulator ? "未启动" : view.cloudOnline ? "仅状态同步" : "未连接");
+  const connection = transports.map(transport => ({ usb: "USB", wifi: "Wi-Fi", emulator: "本机", cloud: "状态同步", registered: "待配置连接" })[transport]).join(" / ");
+  const status = device.pending || (online ? "已连接" : available ? "可连接" : unauthorized ? "等待授权" : view.emulator ? "未启动" : view.cloudOnline ? "仅状态同步" : device.registration ? "已添加 · 未连接控制" : "未连接");
   const session = basic ? basic.phase === "disconnected" ? "连接中断" : basic.phase === "paused" ? "已暂停" : basic.mode === "view" ? "正在查看" : "正在操作"
     : occupied ? view.paused ? "已暂停" : `${device.state?.controller || "Agent"} · ${device.state?.mode === "view" ? "正在查看" : "正在操作"}` : online ? "空闲" : "—";
   const action = basic ? "basic-open" : occupied ? "details" : "basic-control";

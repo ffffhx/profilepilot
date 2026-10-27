@@ -9,7 +9,7 @@ export const PHONE_DISCOVERY_PORT = 41243;
 export const PHONE_DISCOVERY_GROUP = "239.255.80.80";
 const protocol = "profilepilot-discovery-v1";
 const replySchema = z.object({ protocol: z.literal(protocol), type: z.literal("phone"), nonce: z.string(),
-  id: z.string().uuid(), name: z.string().min(1).max(100), version: z.string().max(100),
+  id: z.string().uuid(), deviceId: z.string().uuid().optional(), name: z.string().min(1).max(100), version: z.string().max(100),
   variant: z.enum(["debug", "release"]), wirelessDebugging: z.enum(["enabled", "disabled", "unconfirmed"]) });
 const ipv4 = (value: string) => value.split(".").reduce((result, part) => (result * 256 + Number(part)) >>> 0, 0);
 const fromIpv4 = (value: number) => [24, 16, 8, 0].map(shift => (value >>> shift) & 255).join(".");
@@ -23,7 +23,7 @@ export function discoveryReply(data: Buffer, address: string, nonce: string, int
     const result = replySchema.parse(JSON.parse(data.toString("utf8")));
     if (result.nonce !== nonce) return;
     const { id, name, version, variant, wirelessDebugging } = result;
-    return { id, name, version, variant, wirelessDebugging, ip: address };
+    return { id, ...(result.deviceId ? { deviceId: result.deviceId } : {}), name, version, variant, wirelessDebugging, ip: address };
   } catch { return; }
 }
 export async function discoverNearbyApps(): Promise<{ apps: PhoneNearbyApp[]; appError: string }> {

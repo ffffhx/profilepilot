@@ -81,6 +81,13 @@ async function executeValidatedPhoneCommand(command: PhoneManagementCommand, ser
   if (command.method === "wrapper-install-status") return service.installWrapperStatus(z.object({ lease: z.string().uuid() }).strict().parse(command.params).lease);
   if (command.method === "cloud-pair") return service.cloudPair(z.object({ url: z.string().max(2000).optional() }).strict().parse(command.params || {}).url);
   if (command.method === "cloud-forget") return service.cloudForget(z.object({ id: z.string().regex(/^cloud-[a-f0-9-]{36}$/) }).strict().parse(command.params).id);
+  if (command.method === "device-discover") return service.discoverDevices();
+  if (command.method === "device-add-nearby") return service.addNearby(z.object({ id: z.string().uuid() }).strict().parse(command.params).id);
+  if (command.method === "device-add-code") {
+    const input = z.object({ code: z.string().max(40), url: z.string().max(2000).optional() }).strict().parse(command.params);
+    return service.addDeviceCode(input.code, input.url);
+  }
+  if (command.method === "device-forget") return service.forgetRegistered(z.object({ id: z.string().regex(/^registered-[a-f0-9-]{36}$/) }).strict().parse(command.params).id);
   const method = z.enum(["list", "connect", "rename", "start", "pause", "resume", "stop", "action", "preview", "settings", "emulator-list", "emulator-connect", "wireless-discover", "wireless-pair", "wireless-connect", "wrapper-start", "wrapper-pulse", "wrapper-state", "wrapper-action", "wrapper-stop"]).parse(command.method);
   if (method === "emulator-list") return service.listEmulators();
   if (method === "emulator-connect") return service.connectEmulator(z.object({ name: z.string().regex(/^[\w.-]{1,200}$/) }).strict().parse(command.params).name);

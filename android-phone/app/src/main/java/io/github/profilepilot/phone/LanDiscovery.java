@@ -42,6 +42,7 @@ final class LanDiscovery {
     // Keep discovery while the user visits system wireless-debugging settings.
     if (current.owners.isEmpty()) current.main.postDelayed(current.expire, 120000);
   }
+  static void settingsChanged() { if (current != null) current.reopen(); }
   private LanDiscovery(Context context) {
     this.context = context; connectivity = context.getSystemService(ConnectivityManager.class);
     try { connectivity.registerNetworkCallback(new NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
@@ -50,6 +51,7 @@ final class LanDiscovery {
   }
   private void reopen() {
     stopSocket();
+    if (!new ComputerStore(context).discoveryEnabled()) return;
     try {
       List<LinkAddress> links = new ArrayList<>();
       Set<NetworkInterface> interfaces = new HashSet<>();
@@ -77,7 +79,8 @@ final class LanDiscovery {
       DatagramPacket packet = new DatagramPacket(buffer, buffer.length); listener.receive(packet);
       if (!(packet.getAddress() instanceof Inet4Address) || !sameNetwork(packet.getAddress(), links)) continue;
       long now = SystemClock.elapsedRealtime(); if (now - lastReply < 100) continue;
-      byte[] response = LanDiscoveryProtocol.reply(buffer, packet.getOffset(), packet.getLength(), id, Build.MODEL, BuildConfig.VERSION_NAME, BuildConfig.DEBUG, wireless);
+      if (!new ComputerStore(context).discoveryEnabled()) continue;
+      byte[] response = LanDiscoveryProtocol.reply(buffer, packet.getOffset(), packet.getLength(), id, Build.MODEL, BuildConfig.VERSION_NAME, BuildConfig.DEBUG, wireless, new ComputerStore(context).clientId());
       if (response != null) { listener.send(new DatagramPacket(response, response.length, packet.getAddress(), packet.getPort())); lastReply = now; }
     } catch (Exception ignored) {
       listener.close(); main.post(() -> { if (socket == listener) stopSocket(); });

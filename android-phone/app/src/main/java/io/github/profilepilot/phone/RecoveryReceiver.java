@@ -11,7 +11,7 @@ public final class RecoveryReceiver extends BroadcastReceiver {
         RecoverySettings recovery = new RecoverySettings(context);
         if (!recovery.enabled()) return;
         if (recovery.paired()) start(context, ControlService.class, recovery);
-        if (new ComputerStore(context).statusEnabled()) start(context, StatusSyncService.class, recovery);
+        if (new ComputerStore(context).anyStatusEnabled()) start(context, StatusSyncService.class, recovery);
     }
     private void start(Context context, Class<?> service, RecoverySettings recovery) {
         try { context.startForegroundService(new Intent(context, service)); }

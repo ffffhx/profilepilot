@@ -143,6 +143,8 @@ public final class MainActivity extends ComponentActivity {
 
     connectionCard=new ConnectionCard(this,this::showConnectionDetails,this::showConnectionSetup,this::showHelp);
     page.addView(connectionCard,new LinearLayout.LayoutParams(-1,-2));
+    LinearLayout registration=card(page,17);
+    setting(registration,"phone","添加到电脑","同网自动发现 · 跨网络设备码",View.NO_ID,this::showDeviceRegistration);
     serviceError=text(page,"",12,RED,false); serviceError.setVisibility(View.GONE);
 
     permissionCount=heading(page,"权限准备","");
@@ -395,7 +397,7 @@ public final class MainActivity extends ComponentActivity {
   private void refreshRecoveryServices() {
     try {
       if (new RecoverySettings(this).paired()) startForegroundService(new Intent(this,ControlService.class));
-      if (store.statusEnabled()) startForegroundService(new Intent(this,StatusSyncService.class));
+      if (store.anyStatusEnabled()) startForegroundService(new Intent(this,StatusSyncService.class));
     } catch (RuntimeException unavailable) { new RecoverySettings(this).record("请保持 App 打开，稍后重新尝试启动连接服务"); }
     updateHome();
   }
@@ -411,6 +413,52 @@ public final class MainActivity extends ComponentActivity {
     paragraph(content,"自动恢复连接不会自动继续控制。需要在电脑重新开始，或在有效的暂停会话中手动继续。");
   }
 
+  private void showDeviceRegistration() {
+    io.execute(() -> {
+      try {
+        org.json.JSONArray links=store.deviceLinks();
+        postAlive(() -> {
+          LinearLayout content=showSheet("添加到电脑");
+          paragraph(content,"添加设备无需开启开发者选项或调试。需要查看和操作手机时，再配置 Wi-Fi 或 USB 连接。");
+          Switch discovery=recoveryToggle(content,"允许局域网发现","电脑与手机在同一网络，保持此 App 打开即可扫描添加",View.NO_ID,store.discoveryEnabled());
+          discovery.setOnCheckedChangeListener((button,checked) -> { store.discoveryEnabled(checked); LanDiscovery.settingsChanged(); });
+          text(content,"跨网络添加",16,INK,true);
+          paragraph(content,"生成设备码，在电脑「添加真实设备 → 设备码添加」输入。设备码 10 分钟内有效，只能添加到一台电脑；添加后同步手机状态，不会开启控制。");
+          for (int i=0;i<links.length();i++) {
+            JSONObject link=links.optJSONObject(i); if (link==null) continue;
+            String code=link.optString("code"), id=link.optString("id");
+            boolean expired=link.optLong("expires")<=System.currentTimeMillis();
+            String label=link.optBoolean("paired")?"已添加到电脑":expired?"设备码已过期":"等待电脑添加";
+            if (!code.isEmpty() && !expired) {
+              String formatted=code.replaceAll("(.{4})(?!$)","$1-");
+              TextView display=text(content,formatted,24,GREEN,true); display.setTextIsSelectable(true);
+              paragraph(content,"有效至 "+java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(new java.util.Date(link.optLong("expires"))));
+              actionButton(content,"复制设备码",false,() -> { getSystemService(android.content.ClipboardManager.class).setPrimaryClip(android.content.ClipData.newPlainText("ProfilePilot 设备码",formatted)); message("已复制设备码"); });
+            }
+            paragraph(content,label);
+            actionButton(content,link.optBoolean("paired")?"移除此电脑的状态访问":"撤销此设备码",false,() -> {
+              dismissSheet(); io.execute(() -> { try { StatusSyncClient.revokeDeviceCode(this,id); postAlive(this::showDeviceRegistration); } catch (Exception error) { postAlive(() -> message(error.getMessage())); } });
+            });
+          }
+          EditText server=new EditText(this); server.setSingleLine(true); server.setText(StatusSyncClient.DEFAULT_URL); server.setHint("设备码服务器 HTTPS 地址");
+          server.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_URI);
+          server.setVisibility(View.GONE); content.addView(server);
+          actionButton(content,"自定义服务器",false,() -> server.setVisibility(server.getVisibility()==View.VISIBLE?View.GONE:View.VISIBLE));
+          actionButton(content,"生成新设备码",true,() -> {
+            try {
+              String url=StatusSyncClient.endpoint(server.getText().toString().trim());
+              JSONObject report=StatusSyncClient.report(this); dismissSheet(); message("正在生成设备码…");
+              io.execute(() -> { try { StatusSyncClient.createDeviceCode(this,url,report); postAlive(() -> { startStatusSync(); showDeviceRegistration(); }); } catch (Exception error) { postAlive(() -> message(error.getMessage())); } });
+            } catch (Exception error) { message(error.getMessage()); }
+          });
+          if (links.length()>0) actionButton(content,"刷新添加状态",false,this::showDeviceRegistration);
+          if (links.length()>0) actionButton(content,store.deviceSyncEnabled()?"暂停设备码连接的状态同步":"恢复设备码连接的状态同步",false,() -> {
+            store.deviceSyncEnabled(!store.deviceSyncEnabled()); if (store.anyStatusEnabled()) startStatusSync(); else stopService(new Intent(this,StatusSyncService.class)); dismissSheet();
+          });
+        });
+      } catch (Exception error) { postAlive(() -> message("无法读取设备添加设置，请重试。")); }
+    });
+  }
   private void showStatusSync() {
     io.execute(() -> {
       JSONObject link=null; try { link=store.statusLink(false); } catch (Exception ignored) { }
@@ -423,7 +471,7 @@ public final class MainActivity extends ComponentActivity {
           info(content,"服务器",saved.optString("url")); info(content,"同步状态",store.statusEnabled()?StatusSyncService.message:"已停止同步");
           boolean enabled=store.statusEnabled();
           actionButton(content,enabled?"停止状态同步":"开启状态同步",!enabled,() -> {
-            store.statusEnabled(!enabled); if (enabled) stopService(new Intent(this,StatusSyncService.class)); else startStatusSync(); dismissSheet();
+            store.statusEnabled(!enabled); if (!store.anyStatusEnabled()) stopService(new Intent(this,StatusSyncService.class)); else startStatusSync(); dismissSheet();
           });
         } else paragraph(content,"在电脑「手机」页面打开状态同步，扫描生成的二维码或粘贴状态同步链接。");
         actionButton(content,"扫描状态同步二维码",false,() -> {
@@ -641,7 +689,7 @@ public final class MainActivity extends ComponentActivity {
     super.onSaveInstanceState(state);
   }
   @Override protected void onResume() {
-    super.onResume(); PhoneSettings.cancelPending(); ensureControlService(); if (store.statusEnabled()) startStatusSync();
+    super.onResume(); PhoneSettings.cancelPending(); ensureControlService(); if (store.anyStatusEnabled()) startStatusSync();
     main.removeCallbacks(tick); main.post(tick);
   }
   @Override protected void onStart() {

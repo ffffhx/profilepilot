@@ -21,7 +21,7 @@ export function openPhoneWireless(onConnected: (device: PhoneDevice, prepare: bo
         <h3>自动连接这台手机</h3><p>读取手机最新上报的地址，查找无线调试端口并验证连接。手机和电脑需在同一局域网。</p>
         <p class="wireless-note">连接不会开始控制，也不会恢复暂停的会话。</p>
         <div class="wireless-footer"><button data-manual>手动连接</button><button data-first-pair>首次配对</button><button class="primary" data-auto type="submit">重新查找并连接</button></div>` : step === 1 ? `
-        <h3>附近的 ProfilePilot 设备</h3><p>在手机上打开 ProfilePilot，并连接同一局域网。无需先开启无线调试；电脑也可以接入同一路由器的网线。</p>
+        <h3>附近的 ProfilePilot 设备</h3><p>手机打开 ProfilePilot → 添加到电脑 → 开启「允许局域网发现」，并连接同一局域网。无需先开启无线调试；电脑也可以接入同一路由器的网线。</p>
         <div class="wireless-discovery wireless-nearby"><button type="button" data-scan>重新扫描</button><span data-discovery-status role="status">正在扫描…</span><div data-apps></div><div data-services></div></div>
         <div data-selected-app hidden></div>
         <details class="wireless-setup"><summary>首次连接怎么准备？</summary><ol class="wireless-instructions"><li><strong>打开开发者选项</strong><span>在手机设置中搜索「开发者选项」。若尚未开启，在「关于手机」连续点击版本号，按系统提示开启。</span></li><li><strong>开启「无线调试」</strong><span>在手机上确认允许当前网络。</span></li><li><strong>选择「使用配对码配对」</strong><span>保持这个弹窗打开，下一步输入它显示的 6 位配对码。</span></li></ol></details>

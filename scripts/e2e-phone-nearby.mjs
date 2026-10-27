@@ -32,8 +32,10 @@ try {
   await driver.evaluate('window.phoneDiscoveryFixture.set("")');
   await driver.evaluate(`window.phoneNearbyFixture.set([{ id: 'b5547b10-3843-487b-ab31-46ec92cf5854', name: '测试手机 <&>', ip: '192.168.1.8', version: '0.3.6-dev', variant: 'debug', wirelessDebugging: 'disabled' }])`);
   const open = async () => {
-    await driver.domClick('.phone-list-tools [data-action="add-device"]'); await driver.domClick('[data-connect="wifi"]');
+    if (!('open' in (await driver.query('.phone-details')).attributes)) await driver.domClick('.phone-inspector [data-action="details"]');
+    await driver.domClick('.phone-route [data-action="wifi"]');
     await driver.waitFor('.phone-wireless-dialog[open]');
+    if ((await driver.query('[data-first-pair]')).exists) await driver.domClick('[data-first-pair]');
   };
   await open();
   await driver.waitFor('[data-nearby-app="0"]');

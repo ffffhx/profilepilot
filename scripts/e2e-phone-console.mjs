@@ -208,9 +208,9 @@ try {
   assert.equal((await d.query('[data-phone-row]')).count,3,'removing selected device closes details without switching targets');
   await d.domClick('.phone-list-tools [data-action="add-device"]');
   await d.waitFor('.phone-connect-choices');
-  await d.domClick('[data-connect="usb"]');
-  await d.waitFor('.phone-usb-dialog[open]');
-  await d.domClick('.phone-usb-dialog footer [data-close]');
+  await d.domClick('[data-connect="real"]');
+  await d.waitFor('.phone-add-dialog[open]');
+  await d.domClick('.phone-add-dialog [data-close]');
   await addEmulator();
   await d.waitFor('[data-setup-image] option', s=>s.text.includes('Android 15'));
   assert.equal((await d.query('[data-setup-install]')).disabled,true,'installation requires explicit license consent');

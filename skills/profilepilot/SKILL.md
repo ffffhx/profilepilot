@@ -1,6 +1,6 @@
 ---
 name: profilepilot
-description: "Control the user's browser or Android phone with ProfilePilot CLI. Use ppilot browser for signed-in Chrome tabs, managed Chrome/Electron and Profile management; use ppilot phone for Android viewing, input and managed ADB tools. Follow personal control preferences and user takeover."
+description: "Control browsers, Android phones, or remote computers with ProfilePilot CLI. Use ppilot browser for local Chrome/Electron, ppilot phone for Android, and ppilot remote for ClipRelay-connected computers, browser Profiles and Windows controls. Follow personal control preferences and user takeover."
 ---
 
 # ProfilePilot CLI — Agent 使用指引
@@ -12,6 +12,8 @@ Naming: **ProfilePilot CLI** is the user-facing installation, including the `ppi
 The extension route uses an independent browser service, automatically started by `ppilot browser`; the desktop App is optional for external Agent browser control. Profile management, built-in AI tasks and other desktop features still use the App. Each route needs only its selected CLI, extension or host integration.
 
 ## Choose the route first
+
+For another computer, read [ppilot remote: computer control](references/remote.md) and use `ppilot remote`. Select the exact discovered device before reading its Profiles or windows. The local `ppilot browser` and `ppilot profile` commands target this computer; they are not substitutes for a remote target. ClipRelay's installed application supplies the connection background service; MCP setup is optional.
 
 Before connecting, read the personal preferences for the selected target if present beside this file: `local/browser-routing.md` for browsers, `local/electron-control.md` for Electron apps, `local/phone-control.md` for phones. These are edited in the app's **控制偏好 → 浏览器 / Electron / 手机** tabs. For Electron, if its dedicated preference file is absent, consult any Electron-specific instructions in the older `local/browser-routing.md`. Absence is normal and does not prevent use. They guide target selection, connection or control mode and action confirmations; they do not grant permissions or override user takeover. Follow current user instructions and applicable AGENTS.md first.
 

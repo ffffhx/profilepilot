@@ -8,6 +8,7 @@ import { ensureChatService } from "./cli/service-launcher";
 import { runPhoneCli } from "./phones/cli";
 import { runAdbCli, runPhoneWrap } from "./phones/adb-wrapper";
 import { runBrowserCli } from "./browser-cli";
+import { runRemoteCli } from "./remote-control-cli";
 import path from "node:path";
 import { createBrowserDoctor, type DoctorCheck } from "./control-doctor";
 import { RUNNING_CONTROL_BUILD } from "./runtime-identity";
@@ -93,6 +94,7 @@ export async function runProfilePilotCli(
     }
   }
   // Keep the former top-level adb spelling as a compatibility alias.
+  if (args[0] === "remote") return runRemoteCli(args.slice(1), io, runtime);
   const phoneAdb = args[0] === "phone" && args[1] === "adb";
   if (args[0] === "adb" || phoneAdb || args[0] === "phone" && args[1] === "wrap") {
     const env = runtime.env || process.env;
@@ -639,6 +641,7 @@ function helpText(): string {
   ppilot --resume <任务ID>                     继续已有对话
   ppilot browser <method>                     ppilot browser CLI：扩展 / Gateway 统一浏览器控制
   ppilot browser --help                       浏览器命令与会话说明
+  ppilot remote --help                        远程电脑、浏览器、Electron 与 Windows 控件
   ppilot phone --help                         ppilot phone CLI：设备、会话与手机控制
   ppilot phone wrap --help                    为脚本或工具建立手机控制会话
   ppilot phone adb --help                     ADB 兼容命令

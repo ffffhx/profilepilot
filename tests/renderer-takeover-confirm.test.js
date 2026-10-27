@@ -500,6 +500,17 @@ test("renderer takeover util filters agent-driven CDP clients", () => {
   );
 });
 
+test("toast clicks reach their controller once both inside and outside the app root", async () => {
+  const harness = loadMainHarness({ profile: profile({}) });
+  try {
+    harness.click({ toastCopy: "" }, true);
+    harness.click({ toastDismiss: "" });
+    assert.deepEqual(harness.calls.toastActions, [{ toastCopy: "" }, { toastDismiss: "" }]);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
 test("renderer mini takeover requires a second click before executing", async () => {
   const harness = loadMainHarness({
     profile: profile({
@@ -776,11 +787,13 @@ function loadMainHarness({ profile: activeProfile }) {
     renders: 0,
     setProfileProxyArgs: [],
     timers: [],
-    toasts: []
+    toasts: [],
+    toastActions: []
   };
   let timerId = 0;
   let busyPromise = Promise.resolve();
   const listeners = new Map();
+  const documentListeners = new Map();
   const appRoot = {
     addEventListener(type, handler) {
       if (!listeners.has(type)) {
@@ -844,7 +857,10 @@ function loadMainHarness({ profile: activeProfile }) {
     }
   };
   global.document = {
-    addEventListener() {},
+    addEventListener(type, handler) {
+      if (!documentListeners.has(type)) documentListeners.set(type, []);
+      documentListeners.get(type).push(handler);
+    },
     body: {
       classList: {
         add() {},
@@ -908,6 +924,9 @@ function loadMainHarness({ profile: activeProfile }) {
           return `<${name}>`;
         },
         focusProfileFromUi: async () => {},
+        handleToastAction(event) {
+          calls.toastActions.push(event.target.dataset);
+        },
         setToast(message, kind = "normal") {
           calls.toasts.push({ message, kind });
         },
@@ -998,10 +1017,12 @@ function loadMainHarness({ profile: activeProfile }) {
 
   return {
     calls,
-    click(dataset) {
+    click(dataset, outsideAppRoot = false) {
       const clickHandlers = listeners.get("click") || [];
       assert.ok(clickHandlers.length, "expected main click handler to be registered");
-      clickHandlers[0]({ target: new FakeElement(dataset) });
+      const event = { target: new FakeElement(dataset) };
+      if (!outsideAppRoot) for (const handler of clickHandlers) handler(event);
+      for (const handler of documentListeners.get("click") || []) handler(event);
     },
     async cleanup() {
       await busyPromise;

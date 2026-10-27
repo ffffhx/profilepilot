@@ -132,7 +132,7 @@ export async function getShellIntegrationStatus(): Promise<ShellIntegrationStatu
     try {
       const userPath = await readWindowsUserPath();
       const installed = windowsIntegrationPathEntries().every((entry) => windowsPathIncludes(userPath, entry));
-      return { ...base, installed, managed: installed };
+      return { ...base, installed, managed: installed, warning: windowsPathWarning };
     } catch (error) {
       return { ...base, error: error instanceof Error ? error.message : String(error) };
     }
@@ -766,6 +766,21 @@ function windowsSessionEnvironmentLines(): string[] {
   ];
 }
 
+let windowsPathWarning: string | null = null;
+
+function windowsPathFailure(summary: string, code: string, error: unknown): ProfileManagerError {
+  const failure = error as { message?: string; stderr?: string; code?: string | number; killed?: boolean; signal?: string } | null;
+  // Electron only transports Error.message. Preserve diagnostics without
+  // execFile's command or the encoded user PATH, keeping the summary first.
+  const detail = String(failure?.stderr || (failure?.message?.startsWith("Command failed:") ? "" : failure?.message) || "系统未返回错误详情。")
+    .replace(/FromBase64String\('[A-Za-z0-9+/=]*'\)/g, "FromBase64String('[PATH 已省略]')");
+  return new ProfileManagerError([
+    summary, "", `错误代码：${code}`, `系统：${process.platform} ${os.release()}`,
+    `退出码：${failure?.code ?? "未返回"}；超时 / 终止：${failure?.killed ? "是" : "否"}；信号：${failure?.signal || "无"}`,
+    detail.trim()
+  ].join("\n"), code);
+}
+
 async function readWindowsUserPath(): Promise<string> {
   if (Object.prototype.hasOwnProperty.call(process.env, "PROFILEPILOT_TEST_WINDOWS_USER_PATH")) {
     return process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH || "";
@@ -776,8 +791,8 @@ async function readWindowsUserPath(): Promise<string> {
       "$key=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment')",
       "try { if ($key) { [Console]::Out.Write([string]$key.GetValue('Path','',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)) } } finally { if ($key) { $key.Dispose() } }"
     ].join("; "), { timeout: 5_000 });
-  } catch {
-    throw new ProfileManagerError("无法读取 Windows 用户 PATH，请稍后重试检查 / 更新。", "WINDOWS_USER_PATH_READ_FAILED");
+  } catch (error) {
+    throw windowsPathFailure("无法读取 Windows 用户 PATH，请稍后重试检查 / 更新。", "WINDOWS_USER_PATH_READ_FAILED", error);
   }
 }
 
@@ -805,18 +820,33 @@ async function setWindowsIntegrationPathEnabled(enabled: boolean): Promise<void>
         "$key=[Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')",
         "try { $kind=[Microsoft.Win32.RegistryValueKind]::ExpandString; if ($key.GetValueNames() -contains 'Path') { $kind=$key.GetValueKind('Path') }; $key.SetValue('Path',$value,$kind); if ([string]$key.GetValue('Path','',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) -cne $value) { throw 'PATH verification failed' } } finally { $key.Dispose() }"
       ].join("; "), { timeout: 5_000 });
-    } catch {
-      throw new ProfileManagerError("无法保存 Windows 用户 PATH，CLI 更新尚未完成。请稍后重试检查 / 更新。", "WINDOWS_USER_PATH_WRITE_FAILED");
+    } catch (error) {
+      // A terminated PowerShell may already have written the value. Reconcile
+      // actual state before reporting failure or updating this process's PATH.
+      let saved: string;
+      try { saved = await readWindowsUserPath(); }
+      catch (verificationError) {
+        const failure = windowsPathFailure("无法确认 Windows 用户 PATH 是否已保存，请重新检查 / 更新。", "WINDOWS_USER_PATH_VERIFY_FAILED", error);
+        failure.message += `\n\n回读结果：${verificationError instanceof Error ? verificationError.message : String(verificationError)}`;
+        throw failure;
+      }
+      if (saved !== next) {
+        throw windowsPathFailure("无法保存 Windows 用户 PATH，CLI 更新尚未完成。请稍后重试检查 / 更新。", "WINDOWS_USER_PATH_WRITE_FAILED", error);
+      }
     }
     // Notify other windows separately. Their response is best-effort and must
     // not turn a verified installation into an error or expose the full PATH.
+    windowsPathWarning = null;
     await runWindowsPowerShell([
       "$ErrorActionPreference='Stop'",
-      "Add-Type -Namespace ProfilePilot -Name EnvironmentBroadcast -MemberDefinition '[DllImport(\"user32.dll\", CharSet=CharSet.Unicode, SetLastError=true)] public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint Msg, System.UIntPtr wParam, string lParam, uint flags, uint timeout, out System.UIntPtr result);'",
+      "Add-Type -Namespace ProfilePilot -Name EnvironmentBroadcast -MemberDefinition '[DllImport(\"kernel32.dll\")] public static extern void SetLastError(uint error); [DllImport(\"user32.dll\", CharSet=CharSet.Unicode, SetLastError=true)] public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint Msg, System.UIntPtr wParam, string lParam, uint flags, uint timeout, out System.UIntPtr result);'",
       "$result=[UIntPtr]::Zero",
-      "[void][ProfilePilot.EnvironmentBroadcast]::SendMessageTimeout([IntPtr]0xffff,0x001A,[UIntPtr]::Zero,'Environment',2,100,[ref]$result)"
-    ].join("; "), { timeout: 3_000 }).catch(() => {
-      console.warn("[shell-integration] Windows 用户 PATH 已保存，环境变更通知未完成；现有终端可能需要重新打开。");
+      "[ProfilePilot.EnvironmentBroadcast]::SetLastError(0)",
+      "$sent=[ProfilePilot.EnvironmentBroadcast]::SendMessageTimeout([IntPtr]0xffff,0x001A,[UIntPtr]::Zero,'Environment',2,100,[ref]$result)",
+      "if ($sent -eq [IntPtr]::Zero) { throw ('Environment notification failed (Win32 error {0})' -f [Runtime.InteropServices.Marshal]::GetLastWin32Error()) }"
+    ].join("; "), { timeout: 3_000 }).catch((error) => {
+      windowsPathWarning = windowsPathFailure("Windows 用户 PATH 已保存，但环境变更通知未完成。请重新打开终端；若仍未生效，请注销并重新登录 Windows。", "WINDOWS_ENVIRONMENT_NOTIFY_FAILED", error).message;
+      console.warn(`[shell-integration] ${windowsPathWarning}`);
     });
   }
   const processPath = process.env.PATH || "";

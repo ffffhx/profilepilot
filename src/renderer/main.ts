@@ -5,7 +5,7 @@ import { workspaceHidden, onWorkspaceVisibilityChanged, navigateWorkspace } from
 import { controlPreferencesDomains, leaveControlPreferences, openControlPreferences, saveControlPreferences, switchControlPreferencesTab, updateControlPreferencesDraft } from "./control-preferences";
 import { profilePilotSetupState } from "../shared/profilepilot-setup";
 import { applyNativeExtensionSnapshot, refreshNativeExtensionStatus } from "./state-actions";
-import { activateBusyStep, busyStepsKey, emphasizeName, focusProfileFromUi, setToast, updateBusyProgressDom, updateBusyState, withBusy } from "./busy";
+import { activateBusyStep, busyStepsKey, emphasizeName, focusProfileFromUi, handleToastAction, setToast, updateBusyProgressDom, updateBusyState, withBusy } from "./busy";
 import { closeModalFromUi, executeAgentTakeoverConfirm, executeBifrostStartAndLaunch, executeConfirmIntent } from "./confirm";
 import { normalizeProxyServerInput } from "./proxy";
 import { experimentalProxyRoutingEnabled, onExperimentalFeaturesChanged } from "./experimental-features";
@@ -431,6 +431,7 @@ function syncBifrostFormControls(form: HTMLFormElement): void {
 
 // 上游代理地址归一化（渲染层输入校验）：与主进程 proxy-health 规则一致，返回 scheme://host:port 或 null。
 appRoot.addEventListener("click", (event) => {
+  handleToastAction(event);
   const target = event.target instanceof Element ? event.target : null;
   const hadOpenProfileMenu = Boolean(store.openProfileMenuId);
   const hadAccountSyncMenu = Boolean(store.accountSyncMenuOpen);

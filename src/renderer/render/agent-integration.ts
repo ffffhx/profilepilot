@@ -85,6 +85,7 @@ export function renderAgentIntegrationPanel(): string {
           ${renderInputGuardPermissionCard("integration")}
         </div>
       </details>
+      ${diagnostic?.shellIntegration.warning ? `<details class="tools-path-warning toast-diagnostics"><summary>${escapeHtml(diagnostic.shellIntegration.warning.split("\n")[0])}</summary><pre>${escapeHtml(diagnostic.shellIntegration.warning)}</pre></details>` : ""}
     </section>`;
 }
 

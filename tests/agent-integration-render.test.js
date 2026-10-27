@@ -208,6 +208,20 @@ function diagnosticWith(overrides) {
   };
 }
 
+test("a verified PATH update keeps the CLI ready and exposes notification diagnostics", () => {
+  const warning = 'Windows 用户 PATH 已保存，但环境变更通知未完成。\n错误代码：WINDOWS_ENVIRONMENT_NOTIFY_FAILED';
+  const diagnostic = diagnosticWith({
+    managementCli: managementCli(true, true),
+    shellIntegration: { supported: true, installed: true, managed: true, path: 'HKCU\\Environment\\Path', error: null, warning }
+  });
+  const { renderer } = loadRenderer(permission(false, true), { agentIntegrationDiagnostic: diagnostic });
+  const html = renderer.renderAgentIntegrationPanel();
+  assert.match(html, /<em>已就绪<\/em>/);
+  assert.match(html, /<details class="tools-path-warning toast-diagnostics">/);
+  assert.match(html, /WINDOWS_ENVIRONMENT_NOTIFY_FAILED/);
+  assert.doesNotMatch(html, /修复 ProfilePilot CLI/);
+});
+
 function tool(key, availability, version) {
   const label = "agent-browser";
   return {

@@ -429,9 +429,12 @@ function syncBifrostFormControls(form: HTMLFormElement): void {
   }
 }
 
+// Main-window toasts live outside appRoot; mini-window toasts live inside it.
+// Register their shared controller once, independently of rendering.
+document.addEventListener("click", handleToastAction);
+
 // 上游代理地址归一化（渲染层输入校验）：与主进程 proxy-health 规则一致，返回 scheme://host:port 或 null。
 appRoot.addEventListener("click", (event) => {
-  handleToastAction(event);
   const target = event.target instanceof Element ? event.target : null;
   const hadOpenProfileMenu = Boolean(store.openProfileMenuId);
   const hadAccountSyncMenu = Boolean(store.accountSyncMenuOpen);

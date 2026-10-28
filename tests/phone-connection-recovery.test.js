@@ -19,6 +19,7 @@ function fixture(t) {
     phase: 'idle', mode: 'control', computer: 'pc', controller: '', task: '', startedAt: null,
     lastAction: '', permissions: { overlay: true, notifications: true, accessibility: true } };
   h.service = new PhonesService({ root, apkPath: '', now: () => h.now, computer: 'pc',
+    discoverNearbyApps: async () => ({ apps: [] }),
     probeWireless: async address => ({ reachable: address === next, reason: '端口拒绝连接' }),
     adb: { run: async args => {
       h.calls.push(['adb', ...args]);
@@ -167,6 +168,7 @@ test('fresh direct App observations supersede old cloud addresses; expired obser
 
 test('verified live Wi-Fi endpoint is discoverable even when mDNS reports only its old port', async t => {
   const h = fixture(t); h.online = [h.next];
+  await h.service.refresh();
   const result = await h.service.discoverWireless();
   assert.equal(h.scans, 1);
   assert.equal(result.services[0].address, h.next); assert.equal(result.services[0].source, 'adb');

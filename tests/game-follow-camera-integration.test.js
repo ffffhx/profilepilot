@@ -492,9 +492,22 @@ test('a first recentered capture that crosses the original TTL is discarded and 
 });
 
 test('camera input with less than 50ms of old hold remaining releases and remeasures instead of sending its planned direction', async t => {
-  const h = harness(t, { cameraOffset: .02, frameProof: movedCameraProof,
-    chunkDelayMs: h => h.captures === 4 ? 845 : 0,
-    touch: async c => { if (c.sequence === 3) await wait(200); return { accepted: true, acceptedSequence: c.sequence }; } });
+  // Real subprocess/timer latency can overshoot this 50ms window on CI and
+  // exercise capture expiry instead. Hold the clock at the intended boundary
+  // while the real vision subprocess and input loop complete this frame.
+  const realNow = performance.now.bind(performance);
+  let offset = 0, frozenAt, lastNow = realNow(), deadline;
+  t.mock.method(performance, 'now', () => (lastNow = frozenAt ?? realNow() + offset));
+  const h = harness(t, { cameraOffset: .02,
+    frameProof: h => {
+      if (h.captures === 4) frozenAt = deadline - 25;
+      return movedCameraProof(h);
+    },
+    touch: async c => {
+      if (c.sequence === 3) { deadline = lastNow + c.ttlMs; offset += 200; }
+      if (c.sequence === 4 && frozenAt !== undefined) { offset = frozenAt - realNow(); frozenAt = undefined; }
+      return { accepted: true, acceptedSequence: c.sequence };
+    } });
   const started = await h.start({ recoverTransport: true }); await until(() => h.captures >= 5);
   const status = await h.manager.command({ op: 'status' }); await h.stop(started);
   assert.deepEqual(h.touches.find(c => c.sequence === 4).points, []);

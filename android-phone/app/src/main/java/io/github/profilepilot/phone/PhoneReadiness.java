@@ -103,6 +103,6 @@ final class PhoneReadiness {
             .put("wirelessDebugging", wirelessDebugging).put("accessibilityService", accessibilityService)
             .put("debugReasons", new JSONObject().put("developerOptions", developerReading.reason)
                 .put("usbDebugging", usbReading.reason).put("wirelessDebugging", wirelessReading.reason))
-            .put("appVersion", BuildConfig.VERSION_NAME).put("network", WirelessNetwork.snapshot(context));
+            .put("appVersion", BuildConfig.VERSION_NAME).put("sdk", android.os.Build.VERSION.SDK_INT).put("network", WirelessNetwork.snapshot(context));
     }
 }

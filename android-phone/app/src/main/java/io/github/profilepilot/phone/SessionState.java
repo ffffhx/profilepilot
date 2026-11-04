@@ -7,7 +7,7 @@ import java.util.function.LongSupplier;
 public final class SessionState {
     public static final long LEASE_MS = 8000;
     public final String instanceId = UUID.randomUUID().toString();
-    public String sessionId = null, phase = "idle", mode = "view", computer = "", controller = "", task = "", lastAction = "";
+    public String sessionId = null, phase = "idle", mode = "view", computer = "", controller = "", task = "", lastAction = "", pauseCause = "";
     public long generation = 0, startedAt = 0, lastHeartbeat = 0;
     private String lastPhoneAction = "";
     private long lastPhoneActionAt;
@@ -17,7 +17,7 @@ public final class SessionState {
     public synchronized void heartbeat() { expire(); lastHeartbeat = clock.getAsLong(); }
     public synchronized void expire() {
         if (active() && clock.getAsLong() - lastHeartbeat >= LEASE_MS) {
-            generation++; phase = "disconnected"; lastAction = "电脑连接中断，已停止接受指令";
+            generation++; phase = "disconnected"; pauseCause = ""; lastAction = "电脑连接中断，已停止接受指令";
         }
     }
     public synchronized void check(String instance, String session, long version) {
@@ -31,13 +31,13 @@ public final class SessionState {
         if (!nextMode.equals("view") && !nextMode.equals("control")) throw new IllegalArgumentException("控制模式无效");
         sessionId = session; mode = nextMode; computer = host; controller = owner; task = title;
         generation++; phase = mode.equals("view") ? "viewing" : "controlling"; startedAt = wallTime; lastHeartbeat = clock.getAsLong(); lastAction = "会话已开始";
-        lastPhoneAction = ""; lastPhoneActionAt = 0;
+        lastPhoneAction = ""; lastPhoneActionAt = 0; pauseCause = "";
     }
-    public synchronized void pause(String reason) { if (active()) { generation++; phase = "paused"; lastAction = reason; } }
-    public synchronized void stop(String reason) { if (sessionId != null && !phase.equals("stopped")) { generation++; phase = "stopped"; lastAction = reason; } }
+    public synchronized void pause(String reason) { if (active()) { generation++; phase = "paused"; pauseCause = "manual"; lastAction = reason; } }
+    public synchronized void stop(String reason) { if (sessionId != null && !phase.equals("stopped")) { generation++; phase = "stopped"; pauseCause = ""; lastAction = reason; } }
     public synchronized void resume() {
         expire(); if (!phase.equals("paused")) throw new IllegalStateException("仅暂停的会话可以恢复；断线或结束后需要新建会话");
-        generation++; phase = mode.equals("view") ? "viewing" : "controlling"; lastHeartbeat = clock.getAsLong(); lastAction = "会话已恢复";
+        generation++; phase = mode.equals("view") ? "viewing" : "controlling"; lastHeartbeat = clock.getAsLong(); lastAction = "会话已恢复"; pauseCause = "";
     }
     public synchronized void resumeFromPhone(String instance, String session, long version) {
         check(instance, session, version);

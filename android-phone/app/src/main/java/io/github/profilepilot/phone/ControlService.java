@@ -19,6 +19,10 @@ public final class ControlService extends Service {
     private final ScreenshotTransfer screenshots = new ScreenshotTransfer(session, SystemClock::elapsedRealtime);
     private record Receipt(String fingerprint, CompletableFuture<JSONObject> future) { }
     private PhoneServer server;
+    private InternetPhoneClient internet;
+    private InternetPhonePackages packages;
+    private final PhonePeerPolicy peers = new PhonePeerPolicy();
+    private volatile long internetEpoch;
     private ControlOverlay overlay;
     private AutomaticRecovery recovery;
     private String lastNotification = "";
@@ -26,13 +30,15 @@ public final class ControlService extends Service {
     private final BroadcastReceiver screenOff = new BroadcastReceiver() { @Override public void onReceive(Context context, Intent intent) { session.pause("手机已锁屏，控制已暂停"); render(); } };
     private final Runnable tick = new Runnable() { public void run() {
         session.expire();
-        if (session.active() && (!Settings.canDrawOverlays(ControlService.this) || !getSystemService(NotificationManager.class).areNotificationsEnabled() || PhoneAccessibility.current == null)) session.pause("控制提示或操作权限已关闭");
+        if (packages != null) packages.tick();
+        if (session.active() && (!Settings.canDrawOverlays(ControlService.this) || !getSystemService(NotificationManager.class).areNotificationsEnabled() || PhoneAccessibility.current == null)) { session.pause("控制提示或操作权限已关闭"); session.pauseCause = "permission"; }
         render(); main.postDelayed(this, 1000);
     } };
     @Override public void onCreate() {
         super.onCreate(); current = this;
+        packages = new InternetPhonePackages(this);
         String token = getSharedPreferences("MainActivity", MODE_PRIVATE).getString("token", "");
-        if (!token.matches("[a-f0-9]{64}")) { stopSelf(); return; }
+        if (!token.matches("[a-f0-9]{64}") && !InternetPhoneSettings.enabled(this)) { stopSelf(); return; }
         session.computer = getSharedPreferences("MainActivity", MODE_PRIVATE).getString("computer", "电脑");
         // DEFAULT keeps the icon visible when the system hides low-importance notifications.
         // Channel settings remain user-owned on upgrades; never recreate a channel to override them.
@@ -45,12 +51,13 @@ public final class ControlService extends Service {
         overlay = new ControlOverlay(this);
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(screenOff, new IntentFilter(Intent.ACTION_SCREEN_OFF), Context.RECEIVER_NOT_EXPORTED);
         else registerReceiver(screenOff, new IntentFilter(Intent.ACTION_SCREEN_OFF));
-        try { server = new PhoneServer(token, this::handle); }
+        try { if (token.matches("[a-f0-9]{64}")) server = new PhoneServer(token, this::handle); }
         catch (Exception error) { session.lastAction = "连接服务启动失败，请重试"; stopSelf(); return; }
         main.post(tick);
         LanDiscovery.acquire(this);
     }
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
+        refreshInternet();
         if (intent != null && ("pause".equals(intent.getAction()) || "resume".equals(intent.getAction()) || "stop".equals(intent.getAction()))) {
             localSessionControl(intent.getAction(), intent.getStringExtra("instanceId"), intent.getStringExtra("sessionId"), intent.getLongExtra("generation", -1));
         }
@@ -59,20 +66,51 @@ public final class ControlService extends Service {
             if (recovery == null) recovery = new AutomaticRecovery(this);
         } else if (recovery != null) { recovery.close(); recovery = null; }
         if (intent == null && settings.enabled()) settings.record("系统已重启连接服务；旧控制会话未恢复");
-        return settings.enabled() && settings.paired() && server != null ? START_STICKY : START_NOT_STICKY;
+        return settings.enabled() && settings.paired() && (server != null || internet != null) ? START_STICKY : START_NOT_STICKY;
     }
     @Override public IBinder onBind(Intent intent) { return null; }
     private JSONObject handle(String method, JSONObject input, ControlTiming timing) throws Exception {
+        return handlePeer("adb", getSharedPreferences("MainActivity", MODE_PRIVATE).getString("computer", ""), 0, method, input, timing, () -> true);
+    }
+    void refreshInternet() {
+        JSONObject link = InternetPhoneSettings.enabled(this) ? InternetPhoneSettings.link(this) : null;
+        if (internet != null && (link == null || !internet.serverId().equals(link.optString("serverId")))) {
+            String oldPeer = "internet:" + internet.serverId();
+            internetEpoch++; internet.close(); internet = null;
+            if (peers.owns(oldPeer)) session.pause("外网连接已关闭，控制已暂停");
+        }
+        if (internet == null && link != null) {
+            long epoch = ++internetEpoch;
+            String peer = "internet:" + link.optString("serverId"), computer = link.optString("computer");
+            try { internet = new InternetPhoneClient(link,
+                (method, body, timing, valid) -> handlePeer(peer, computer, epoch, method, body, timing, valid),
+                () -> main.post(() -> {
+                    if (epoch == internetEpoch && peers.owns(peer)) {
+                        session.pause("外网连接中断，控制已暂停；请核对状态后继续"); render();
+                    }
+                }));
+            } catch (Exception error) { session.lastAction = "外网连接启动失败，请重新打开 App"; }
+        }
+        render();
+    }
+    boolean internetConnected() { return internet != null && internet.connected; }
+    boolean canPairInternet() { return !session.phase.equals("paused") && (!session.active() || peers.owns("adb")); }
+    String internetStatus() { return internet == null ? "外网控制已关闭" : internet.status; }
+    private JSONObject handlePeer(String peer, String computerName, long epoch, String method, JSONObject input, ControlTiming timing, java.util.function.BooleanSupplier valid) throws Exception {
         CompletableFuture<JSONObject> result = new CompletableFuture<>();
         timing.mark("mainQueued");
         main.post(() -> {
             timing.mark("main");
             try {
+                if (!valid.getAsBoolean() || epoch != 0 && (epoch != internetEpoch || !InternetPhoneSettings.enabled(this)))
+                    throw new PhoneControlException("PHONE_DISCONNECTED", "外网连接已关闭，拒绝待执行指令");
                 session.expire();
+                peers.check(peer, method, session.phase);
                 if (method.equals("sync")) {
                     connection.heartbeat(input.optString("transport", "unknown"));
                     connection.reportDebugSettings(input.optJSONObject("debugSettings"));
-                    session.heartbeat(); render(); result.complete(success(null, timing));
+                    if (peers.owns(peer)) session.heartbeat();
+                    render(); result.complete(success(new JSONObject().put("peerOwnsSession", peers.owns(peer)), timing));
                 }
                 else if (method.equals("accessibility-recovery")) {
                     if (!session.phase.equals("idle") && !session.phase.equals("stopped")) throw new IllegalStateException("请先结束当前手机任务，再恢复无障碍服务");
@@ -101,9 +139,10 @@ public final class ControlService extends Service {
                 else if (method.equals("start")) {
                     requireReady();
                     String computer = limited(input, "computer", 120);
-                    if (!computer.equals(getSharedPreferences("MainActivity", MODE_PRIVATE).getString("computer", ""))) throw new IllegalStateException("控制电脑与配对记录不一致");
+                    if (!computer.equals(computerName)) throw new IllegalStateException("控制电脑与配对记录不一致");
                     PhoneAccessibility.current.resetFollowTouch();
                     session.start(input.getString("instanceId"), input.getLong("generation"), input.getString("sessionId"), input.getString("mode"), computer, limited(input, "controller", 120), limited(input, "task", 500), System.currentTimeMillis());
+                    peers.claim(peer);
                     receipts.clear(); screenshots.clear(); followSequence = 0;
                     render(); result.complete(success(null));
                 } else if (method.equals("pause") || method.equals("resume") || method.equals("stop")) {
@@ -111,6 +150,38 @@ public final class ControlService extends Service {
                     if (method.equals("resume")) { requireReady(); session.resume(); }
                     else if (method.equals("pause")) session.pause("电脑已暂停控制"); else session.stop("电脑已结束控制");
                     render(); result.complete(success(null));
+                } else if (method.equals("package-inspect")) {
+                    result.complete(success(packages.inspect(input.getString("packageName"))));
+                } else if (method.equals("package-install-receipt") || method.equals("package-install-cancel")) {
+                    String jobId = input.getString("jobId");
+                    packages.receipt(peer, jobId); // Match the authenticated submitting computer.
+                    if (method.equals("package-install-cancel")) { packages.cancel(jobId); }
+                    result.complete(success(packages.receipt(peer, jobId)));
+                } else if (method.equals("package-launch") || method.startsWith("package-install")) {
+                    if (!peer.startsWith("internet:")) throw new PhoneControlException("PHONE_OPERATION_UNSUPPORTED", "此接口仅供外网配对使用");
+                    requireReady();
+                    String instance=input.getString("instanceId"), id=input.getString("sessionId"); long generation=input.getLong("generation");
+                    if (method.equals("package-install-status") || method.equals("package-install-cancel")) {
+                        session.check(instance,id,generation);
+                        if (!session.active() || !session.mode.equals("control")) throw new PhoneControlException("PHONE_SESSION_STALE", "安装会话已改变");
+                    } else session.authorize(instance,id,generation,true);
+                    if (method.equals("package-launch")) {
+                        result.complete(success(packages.launch(input.getString("packageName"))));
+                    } else if (method.equals("package-install")) {
+
+                        result.complete(success(packages.start(input, () -> {
+                            requireReady(); session.check(instance,id,generation);
+                            if (!session.active() || !session.mode.equals("control") || !peers.owns(peer) || epoch != internetEpoch || !InternetPhoneSettings.enabled(this))
+                                throw new PhoneControlException("PHONE_SESSION_STALE", "安装所属会话已改变");
+                        })));
+                    } else if (method.equals("package-install-status")) result.complete(success(packages.status(input.getString("jobId"))));
+                    else if (method.equals("package-install-cancel")) { packages.cancel(input.getString("jobId")); result.complete(success(null)); }
+                    else throw new IllegalArgumentException("不支持此安装请求");
+                } else if (method.equals("wake")) {
+                    PowerManager.WakeLock wake = getSystemService(PowerManager.class).newWakeLock(
+                        PowerManager.SCREEN_BRIGHT_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP, "ProfilePilot:internet-wake");
+                    wake.acquire(2000);
+                    result.complete(success(new JSONObject().put("unlocked", !getSystemService(KeyguardManager.class).isKeyguardLocked())));
                 } else if (method.equals("follow")) follow(input, result, timing);
                 else if (method.equals("screenshot-chunk")) {
                     requireReady();
@@ -251,7 +322,7 @@ public final class ControlService extends Service {
         if (timing != null) timing.mark("readiness");
         String deviceId = new ComputerStore(this).clientId();
         if (timing != null) timing.mark("identity");
-        JSONObject value = new JSONObject().put("protocol", 1).put("statusDeviceId", deviceId).put("instanceId", session.instanceId).put("sessionId", session.sessionId == null ? JSONObject.NULL : session.sessionId).put("generation", session.generation).put("phase", session.phase).put("mode", session.mode).put("computer", session.computer).put("controller", session.controller).put("task", session.task).put("startedAt", session.startedAt == 0 ? JSONObject.NULL : session.startedAt).put("lastAction", session.lastAction).put("permissions", new JSONObject().put("overlay", readiness.overlay).put("notifications", readiness.notifications).put("accessibility", readiness.accessibilityService.equals("running"))).put("readiness", readiness.json());
+        JSONObject value = new JSONObject().put("protocol", 1).put("statusDeviceId", deviceId).put("instanceId", session.instanceId).put("sessionId", session.sessionId == null ? JSONObject.NULL : session.sessionId).put("generation", session.generation).put("phase", session.phase).put("mode", session.mode).put("pauseCause", session.pauseCause).put("computer", session.computer).put("controller", session.controller).put("task", session.task).put("startedAt", session.startedAt == 0 ? JSONObject.NULL : session.startedAt).put("lastAction", session.lastAction).put("permissions", new JSONObject().put("overlay", readiness.overlay).put("notifications", readiness.notifications).put("accessibility", readiness.accessibilityService.equals("running"))).put("readiness", readiness.json());
         if (timing != null) timing.mark("stateDone");
         return value;
     }
@@ -263,7 +334,7 @@ public final class ControlService extends Service {
         catch (Exception error) { throw new IllegalStateException(error); }
     }
     private JSONObject failure(Throwable error) {
-        try { return new JSONObject().put("ok", false).put("code", "PHONE_REJECTED").put("error", error.getMessage() == null ? "手机未完成操作" : error.getMessage()).put("state", state()); }
+        try { return new JSONObject().put("ok", false).put("code", error instanceof PhoneControlException rejection ? rejection.code : "PHONE_REJECTED").put("error", error.getMessage() == null ? "手机未完成操作" : error.getMessage()).put("state", state()); }
         catch (Exception ignored) { return new JSONObject(); }
     }
     String description() {
@@ -308,6 +379,9 @@ public final class ControlService extends Service {
         if (!key.equals(lastNotification)) { lastNotification = key; getSystemService(NotificationManager.class).notify(1, notification(status)); }
     }
     @Override public void onDestroy() {
+        if (packages != null) packages.close();
+        internetEpoch++;
+        if (internet != null) { internet.close(); internet = null; }
         LanDiscovery.release(this);
         screenshots.clear();
         if (recovery != null) { recovery.close(); recovery = null; }
@@ -317,6 +391,7 @@ public final class ControlService extends Service {
         if (server != null) try { server.close(); } catch (Exception ignored) { }
         current = null; super.onDestroy();
     }
+    void internetInstallResult(Intent intent) { if (packages != null) packages.result(intent); }
     private static String limited(JSONObject input, String key, int max) throws Exception { String value = input.getString(key); if (value.length() > max) throw new IllegalArgumentException("文本超出长度限制"); return value; }
     private static String digest(String value) throws Exception { byte[] bytes = java.security.MessageDigest.getInstance("SHA-256").digest(value.getBytes(java.nio.charset.StandardCharsets.UTF_8)); StringBuilder hex = new StringBuilder(); for (byte b : bytes) hex.append(String.format(java.util.Locale.ROOT, "%02x", b & 255)); return hex.toString(); }
 }

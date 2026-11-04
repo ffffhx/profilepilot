@@ -21,6 +21,7 @@ public final class ControlService extends Service {
     private PhoneServer server;
     private InternetPhoneClient internet;
     private InternetPhonePackages packages;
+    private boolean packageObservationPending;
     private final PhonePeerPolicy peers = new PhonePeerPolicy();
     private volatile long internetEpoch;
     private ControlOverlay overlay;
@@ -153,12 +154,23 @@ public final class ControlService extends Service {
                     else if (method.equals("pause")) session.pause("电脑已暂停控制"); else session.stop("电脑已结束控制");
                     render(); result.complete(success(null));
                 } else if (method.equals("package-inspect")) {
-                    result.complete(success(packages.inspect(input.getString("packageName"))));
+                    String name = input.getString("packageName");
+                    packageObservation(() -> packages.inspect(name), () -> {
+                        if (!valid.getAsBoolean() || epoch != 0 && (epoch != internetEpoch || !InternetPhoneSettings.enabled(this)))
+                            throw new PhoneControlException("PHONE_DISCONNECTED", "外网连接已关闭");
+                        peers.check(peer, method, session.phase);
+                    }, result);
                 } else if (method.equals("package-install-receipt") || method.equals("package-install-cancel")) {
                     String jobId = input.getString("jobId");
-                    packages.receipt(peer, jobId); // Match the authenticated submitting computer.
-                    if (method.equals("package-install-cancel")) { packages.cancel(jobId); }
-                    result.complete(success(packages.receipt(peer, jobId)));
+                    packages.authorizeReceipt(peer, jobId); // Match the authenticated submitting computer.
+                    if (method.equals("package-install-cancel")) {
+                        packages.cancel(jobId);
+                        result.complete(success(packages.receipt(peer, jobId, false)));
+                    } else packageObservation(() -> packages.receipt(peer, jobId), () -> {
+                        if (!valid.getAsBoolean() || epoch != 0 && (epoch != internetEpoch || !InternetPhoneSettings.enabled(this)))
+                            throw new PhoneControlException("PHONE_DISCONNECTED", "外网连接已关闭");
+                        peers.check(peer, method, session.phase);
+                    }, result);
                 } else if (method.equals("package-launch") || method.startsWith("package-install")) {
                     if (!peer.startsWith("internet:")) throw new PhoneControlException("PHONE_OPERATION_UNSUPPORTED", "此接口仅供外网配对使用");
                     requireReady();
@@ -197,6 +209,24 @@ public final class ControlService extends Service {
         // Timeout is uncertain to the caller. The receipt lets the SAME request
         // id be queried without sending duplicate input; no automatic replay.
         return result.get(6, TimeUnit.SECONDS);
+    }
+    /** Hashes can be large: keep input, capsule, heartbeat and cancellation on the main loop responsive. */
+    private void packageObservation(Callable<JSONObject> observation, Runnable validate, CompletableFuture<JSONObject> result) {
+        if (packageObservationPending) throw new PhoneControlException("PHONE_TARGET_BUSY", "正在核对安装内容，请等待本次查询完成");
+        packageObservationPending = true;
+        Thread worker = new Thread(() -> {
+            try {
+                JSONObject evidence = observation.call();
+                main.post(() -> {
+                    packageObservationPending = false;
+                    try { validate.run(); result.complete(success(evidence)); }
+                    catch (Exception error) { result.complete(failure(error)); }
+                });
+            } catch (Exception error) {
+                main.post(() -> { packageObservationPending = false; result.complete(failure(error)); });
+            }
+        }, "phone-package-evidence");
+        worker.setDaemon(true); worker.start();
     }
     private void follow(JSONObject input, CompletableFuture<JSONObject> result, ControlTiming timing) throws Exception {
         requireReady();

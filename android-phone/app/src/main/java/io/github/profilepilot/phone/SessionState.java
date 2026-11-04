@@ -9,6 +9,7 @@ public final class SessionState {
     public final String instanceId = UUID.randomUUID().toString();
     public String sessionId = null, phase = "idle", mode = "view", computer = "", controller = "", task = "", lastAction = "", pauseCause = "";
     public long generation = 0, startedAt = 0, lastHeartbeat = 0;
+    public boolean keepScreenOn = true;
     private String lastPhoneAction = "";
     private long lastPhoneActionAt;
     private final LongSupplier clock;

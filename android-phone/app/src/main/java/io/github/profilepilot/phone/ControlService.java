@@ -24,6 +24,7 @@ public final class ControlService extends Service {
     private final PhonePeerPolicy peers = new PhonePeerPolicy();
     private volatile long internetEpoch;
     private ControlOverlay overlay;
+    private PowerManager.WakeLock screenLock;
     private AutomaticRecovery recovery;
     private String lastNotification = "";
     private long followSequence;
@@ -143,6 +144,7 @@ public final class ControlService extends Service {
                     PhoneAccessibility.current.resetFollowTouch();
                     session.start(input.getString("instanceId"), input.getLong("generation"), input.getString("sessionId"), input.getString("mode"), computer, limited(input, "controller", 120), limited(input, "task", 500), System.currentTimeMillis());
                     peers.claim(peer);
+                    session.keepScreenOn = input.optBoolean("keepScreenOn", true);
                     receipts.clear(); screenshots.clear(); followSequence = 0;
                     render(); result.complete(success(null));
                 } else if (method.equals("pause") || method.equals("resume") || method.equals("stop")) {
@@ -371,6 +373,7 @@ public final class ControlService extends Service {
     }
     void refreshPresentation() { render(); }
     private void render() {
+        updateScreenLock();
         screenshots.prune();
         if (!session.active() && PhoneAccessibility.current != null) PhoneAccessibility.current.releaseFollowTouch();
         if (overlay != null) overlay.update();
@@ -379,6 +382,7 @@ public final class ControlService extends Service {
         if (!key.equals(lastNotification)) { lastNotification = key; getSystemService(NotificationManager.class).notify(1, notification(status)); }
     }
     @Override public void onDestroy() {
+        if (screenLock != null) { try { screenLock.release(); } catch (RuntimeException ignored) { } screenLock = null; }
         if (packages != null) packages.close();
         internetEpoch++;
         if (internet != null) { internet.close(); internet = null; }
@@ -392,6 +396,21 @@ public final class ControlService extends Service {
         current = null; super.onDestroy();
     }
     void internetInstallResult(Intent intent) { if (packages != null) packages.result(intent); }
+    /** Keep an already unlocked display awake only while its owned task is active. */
+    private void updateScreenLock() {
+        boolean hold = session.keepScreenOn && session.active() && getSystemService(PowerManager.class).isInteractive();
+        if (hold) {
+            if (screenLock == null) {
+                screenLock = getSystemService(PowerManager.class).newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK, "ProfilePilot:phone-control");
+                screenLock.setReferenceCounted(false);
+            }
+            // Renewed by the service tick; bounded if the UI thread stalls.
+            screenLock.acquire(SessionState.LEASE_MS);
+        } else if (screenLock != null) {
+            try { screenLock.release(); } catch (RuntimeException ignored) { }
+            screenLock = null;
+        }
+    }
     private static String limited(JSONObject input, String key, int max) throws Exception { String value = input.getString(key); if (value.length() > max) throw new IllegalArgumentException("文本超出长度限制"); return value; }
     private static String digest(String value) throws Exception { byte[] bytes = java.security.MessageDigest.getInstance("SHA-256").digest(value.getBytes(java.nio.charset.StandardCharsets.UTF_8)); StringBuilder hex = new StringBuilder(); for (byte b : bytes) hex.append(String.format(java.util.Locale.ROOT, "%02x", b & 255)); return hex.toString(); }
 }

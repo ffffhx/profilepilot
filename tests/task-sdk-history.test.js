@@ -11,8 +11,8 @@ const { taskModelContext } = require('../dist/main/tasks/model-context');
 
 function fixture(t) {
   // The SDK resolves real paths before looking up encoded project directories.
-  // macOS exposes its temporary directory through the /var -> /private/var link.
-  const tempDir = fs.realpathSync(os.tmpdir());
+  // Resolve both macOS /var links and Windows runner 8.3 paths (RUNNER~1).
+  const tempDir = fs.realpathSync.native(os.tmpdir());
   const root = fs.mkdtempSync(path.join(tempDir, 'pp-sdk-history-中文 '));
   const store = new TaskStore(root);
   const task = store.create({ profileId: 'native:stable-profile-id', prompt: '保留原始资料，查询后生成报告。' }, '可以重命名的 Profile');

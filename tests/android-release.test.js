@@ -113,7 +113,7 @@ test('stable release stays explicit and development publication runs on main wit
   assert.match(workflow, /fetch-depth: 0/);
   assert.match(workflow, /group: profilepilot-release-packages/);
   assert.match(workflow, /publish_android:[\s\S]*node scripts\/publish-android-update.mjs/);
-  assert.match(workflow, /build:\n[\s\S]*github.event_name == 'workflow_dispatch' \|\| startsWith\(github.ref, 'refs\/tags\/'\)/);
+  assert.match(workflow, /build:\r?\n[\s\S]*github.event_name == 'workflow_dispatch' \|\| startsWith\(github.ref, 'refs\/tags\/'\)/);
   const source = readFileSync(path.join(root, 'android-phone/app/build.gradle.kts'), 'utf8');
   const download = readFileSync(path.join(root, 'src/renderer/phone-basic.ts'), 'utf8');
   const site = readFileSync(path.join(root, 'site/index.html'), 'utf8');

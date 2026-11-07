@@ -19,6 +19,7 @@ function fixture(t) {
     phase: 'idle', mode: 'control', computer: 'pc', controller: '', task: '', startedAt: null,
     lastAction: '', permissions: { overlay: true, notifications: true, accessibility: true } };
   h.service = new PhonesService({ root, apkPath: '', now: () => h.now, computer: 'pc',
+    discoverNearbyApps: async () => ({ apps: [] }),
     probeWireless: async address => ({ reachable: address === next, reason: '端口拒绝连接' }),
     adb: { run: async args => {
       h.calls.push(['adb', ...args]);

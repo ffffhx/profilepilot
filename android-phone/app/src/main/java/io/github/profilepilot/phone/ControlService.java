@@ -442,11 +442,14 @@ public final class ControlService extends Service {
      */
     private void updateScreenLock() {
         boolean want = session.keepScreenOn && session.active() && getSystemService(PowerManager.class).isInteractive();
-        if (want && screenLock == null) {
-            PowerManager.WakeLock lock = getSystemService(PowerManager.class).newWakeLock(
-                PowerManager.SCREEN_BRIGHT_WAKE_LOCK | PowerManager.ON_AFTER_RELEASE, "ProfilePilot:phone-control");
-            lock.setReferenceCounted(false);
-            try { lock.acquire(); screenLock = lock; android.util.Log.i("ProfilePilot", "screen wake lock acquired"); }
+        if (want) {
+            if (screenLock == null) {
+                screenLock = getSystemService(PowerManager.class).newWakeLock(
+                    PowerManager.SCREEN_BRIGHT_WAKE_LOCK | PowerManager.ON_AFTER_RELEASE, "ProfilePilot:phone-control");
+                screenLock.setReferenceCounted(false);
+            }
+            // Renewed by the service tick; bounded if the UI thread stalls.
+            try { screenLock.acquire(SessionState.LEASE_MS); }
             catch (RuntimeException error) { android.util.Log.w("ProfilePilot", "screen wake lock failed", error); }
         } else if (!want && screenLock != null) {
             try { screenLock.release(); } catch (RuntimeException ignored) { }

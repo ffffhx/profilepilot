@@ -21,7 +21,7 @@ public final class SessionState {
     public synchronized void heartbeat() { expire(); lastHeartbeat = clock.getAsLong(); }
     public synchronized void expire() {
         if (active() && clock.getAsLong() - lastHeartbeat >= LEASE_MS) {
-            generation++; phase = "disconnected"; lastAction = "电脑连接中断，已停止接受指令";
+            generation++; phase = "disconnected"; pauseCause = ""; lastAction = "电脑连接中断，已停止接受指令";
         }
     }
     public synchronized void check(String instance, String session, long version) {

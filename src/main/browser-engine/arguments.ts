@@ -55,6 +55,7 @@ export function positiveNumber(value: string, label: string): number {
   return n;
 }
 export function required(value: string | undefined, label: string): string {
+  if (label === "selector" && (value === undefined || !value.trim())) throw new EngineError("Missing selector. PowerShell refs must be quoted: click '@e1'. Read a fresh snapshot before using refs.", "BROWSER_INVALID_ARGUMENTS");
   if (value === undefined) throw new EngineError(`Missing ${label}`, "BROWSER_INVALID_ARGUMENTS");
   return value;
 }

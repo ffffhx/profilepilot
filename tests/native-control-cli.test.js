@@ -19,8 +19,9 @@ test('Browser CLI validates before dispatch and preserves portable JSON inputs',
   fs.writeFileSync(path.join(root, 'native-control.json'), JSON.stringify({ version: 1, port: server.address().port, token: 'a'.repeat(64), pid: process.pid, service: 'browser', serviceVersion: 1 }));
   t.after(async () => { await new Promise(resolve => server.close(resolve)); fs.rmSync(root, { recursive: true, force: true }); });
   const run = (args, input, envelope = false) => new Promise(resolve => {
-    const argv = ['browser', '--root', root, ...args];
-    const env = envelope ? { ...process.env, PROFILEPILOT_LAUNCHER_ARGV: Buffer.from(JSON.stringify(argv)).toString('base64') } : process.env;
+    const argv = ['--task-kind', 'verification', 'browser', '--root', root, ...args];
+    const env = { ...process.env, PROFILEPILOT_MANAGEMENT_ROOT: path.join(root, 'management'),
+      ...(envelope ? { PROFILEPILOT_LAUNCHER_ARGV: Buffer.from(JSON.stringify(argv)).toString('base64') } : {}) };
     const child = spawn(process.execPath, [cli, ...(envelope ? ['--profilepilot-argv-env'] : argv)], { env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     let stdout = '', stderr = ''; child.stdout.setEncoding('utf8').on('data', value => stdout += value); child.stderr.setEncoding('utf8').on('data', value => stderr += value); child.stdin.end(input);
     child.on('close', code => resolve({ code, stdout, stderr }));
@@ -37,6 +38,12 @@ test('Browser CLI validates before dispatch and preserves portable JSON inputs',
   assert.equal(JSON.parse(overridden.stdout).result.params.url, 'https://override.example/');
   const overriddenTab = await run(['switch', '8', '--params-file', file]);
   assert.equal(JSON.parse(overriddenTab.stdout).result.params.tabId, 8);
+  for (const args of [['--json', 'claim', '--new-tab'], ['claim', '--new-tab', '--json'], ['newTab', url, '--json'], ['status', '--json']]) {
+    const result = await run(args);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(JSON.parse(result.stdout).ok, true);
+    if (args[0] === 'newTab') assert.equal(JSON.parse(result.stdout).result.params.url, url);
+  }
   const stdin = await run(['status', '--params-stdin'], '\uFEFF{"query":"人工智能 热点"}');
   assert.equal(stdin.code, 0, stdin.stderr); assert.equal(JSON.parse(stdin.stdout).result.params.query, '人工智能 热点');
   const quoted = { query: '中文 "with quotes" and C:\\trailing\\', url };
@@ -77,7 +84,7 @@ test('Browser CLI validates before dispatch and preserves portable JSON inputs',
     ['status', '--conversion'], ['status', '--version'], ['status', '--profile'], ['typo'], ['open'], ['open', 'not-url'], ['open', 'file:///tmp/test'],
     ['switch'], ['switch', '0'], ['switch', '--params', '{"tabId":null}'], ['claim', '--tab', '-2'], ['cdp'],
     ['status', '--output', path.join(root, 'unexpected.png')], ['status', '--params', '{}', '--params-file', file], ['status', '--params', '[]'],
-    ['observe', '--output', imageFile, '--params', '{"screenshot":false}'], ['extension-ui'], ['extension-ui', 'eval']
+    ['observe', '--output', imageFile, '--params', '{"screenshot":false}'], ['extension-ui'], ['extension-ui', 'eval'], ['newTab', 'file:///private'], ['newTab', 'not-url']
   ];
   for (const args of invalid) {
     const result = await run(args);
@@ -88,6 +95,14 @@ test('Browser CLI validates before dispatch and preserves portable JSON inputs',
   assert.equal(missing.code, 64); assert.match(JSON.parse(missing.stderr).error, /无法读取 params 文件.*missing\.json.*ENOENT/);
   const malformed = await run(['status', '--params', '{']);
   assert.equal(malformed.code, 64); assert.match(JSON.parse(malformed.stderr).error, /JSON 语法无效/);
+  const wrongRoute = await run(['get', 'attr', 'e1', 'href']);
+  assert.equal(wrongRoute.code, 64); assert.match(JSON.parse(wrongRoute.stderr).error, /当前使用 extension.*Gateway.*fast.candidates/);
+  for (const args of [['observe', '--help'], ['schema', 'action'], ['help', 'claim'], ['schema', '--help']]) {
+    const result = await run(args);
+    assert.equal(result.code, 0, result.stderr);
+    assert.ok(result.stdout.length < 2500, 'command guidance stays bounded');
+    if (args[0] === 'schema' && args[1] === 'action') assert.equal(JSON.parse(result.stdout).result.operation.input.required.includes('version'), true);
+  }
   assert.equal(requests.length, count, 'invalid input must not reach the desktop service');
 });
 

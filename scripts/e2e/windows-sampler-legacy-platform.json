@@ -1,0 +1,10 @@
+{
+  "format": 1,
+  "source": "src/main/windows-platform.ts",
+  "sha256": "645958b10f0ccc82b07c48c751fafeb7d86e761ba037c6d6c2baff292ec65373",
+  "frozenFrom": "pp-windows-sampler-uGYc1o",
+  "observedAt": "2026-10-29T22:37:53.808Z",
+  "description": "Historical read-only performance baseline before production native sampler integration. This exact source already includes separate IPv4 and IPv6 netstat reads; process and file-lock sampling use PowerShell plus Add-Type. It is not the current windows-platform implementation.",
+  "allowedPaths": ["getWindowsSystemSnapshot(force=true)", "findWindowsProcessesLockingPaths(paths, strict=true)", "readWindowsNetstat()"],
+  "limitations": "Other historical exports remain in the byte-identical source for reproducibility, but the harness does not expose or call them. No current production sampler dependency may be imported by this baseline."
+}

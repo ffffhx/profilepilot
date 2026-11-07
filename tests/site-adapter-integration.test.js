@@ -24,7 +24,7 @@ function fixture(t) {
 
 test('built-in Agent discovers sites, enforces origin policy, records evidence and accepts verified finish', async t => {
   const f = fixture(t);
-  assert.equal(JSON.parse((await f.service.handleTool(f.task, f.run, 'site_adapters', {})).content[0].text).length, 18);
+  assert.equal(JSON.parse((await f.service.handleTool(f.task, f.run, 'site_adapters', {})).content[0].text).length, 21);
   f.task.nativeAccess = { blockedOrigins: ['https://www.zhihu.com'] };
   await assert.rejects(f.service.handleTool(f.task, f.run, 'site_read', { operation: 'zhihu.hot' }), /限制/);
   assert.equal(f.reads(), 0);
@@ -59,6 +59,6 @@ test('external site discovery is local and identical for extension/Gateway witho
     let output = '', routed = false;
     const code = await runBrowserCli([...prefix, 'sites'], { stdout: { write: s => output += s }, stderr: { write: () => {} } }, {},
       { extension: async () => { routed = true; }, gateway: async () => { routed = true; return 0; } });
-    assert.equal(code, 0); assert.equal(JSON.parse(output).result.length, 18); assert.equal(routed, false);
+    assert.equal(code, 0); assert.equal(JSON.parse(output).result.length, 21); assert.equal(routed, false);
   }
 });

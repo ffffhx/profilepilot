@@ -25,7 +25,9 @@ import { agentControlNoticePaths, errorMessage, externalUserDataDirFromProfileId
 import { normalizeMiniProfileIds, normalizeProfileOrder } from "./profile-layout";
 import { ProfileRuntimeMaintenance } from "./profile-maintenance";
 import { ProfileManagerError } from "./profile-manager-error";
-import { ProfileStateReader, type CollectedProfileState } from "./profile-state";
+import type { InputGuardFactory } from "./input-guard";
+import { ProfileStateReader, type CollectedProfileState, type ControlAdmissionState } from "./profile-state";
+import type { WindowsControlSample } from './windows-platform';
 import { requestWindowsProcessClose, windowsForegroundProcessId } from "./windows-platform";
 export { AgentControlClientsStatus,agentBrowserRuntimeProfilesFromPublicProfiles,agentControlNoticePaths,agentControlStatusForClients,areAllAgentControlClientsPaused,compatibilityCdpPorts,gatewayManagedPortSet,gatewayOverlayControl,makeAgentControlNotice,pendingUserActionFromControlNoticeSync,shouldAutoDisconnectStaleAgentBrowserClient,stripManagedCdpRuntimeMetadata } from "./profile-connections";
 
@@ -60,6 +62,10 @@ function assertDisposableE2eProfile(profileId: string): void {
 interface ProfileManagerEvents {
   onAgentTakeover?: (event: AgentTakeoverEvent) => void;
   onAgentOverlayReveal?: (event: AgentOverlayRevealEvent) => void;
+}
+
+export interface ProfileManagerOptions {
+  inputGuardFactory?: InputGuardFactory;
 }
 
 interface TakeoverTarget {
@@ -200,11 +206,13 @@ export class ProfileManager {
 
   constructor(
     private readonly dataDir = defaultDataDir(),
-    private readonly events: ProfileManagerEvents = {}
+    private readonly events: ProfileManagerEvents = {},
+    options: ProfileManagerOptions = {}
   ) {
     this.profilesDir = path.join(dataDir, "profiles");
     this.registryPath = path.join(dataDir, "profiles.json");
     this.agentOverlayManager = new AgentOverlayManager({
+      inputGuardFactory: options.inputGuardFactory,
       // 控制权提示是本产品的中文操作协议，不在 app.ready 之前读取 Electron locale，
       // 避免启动阶段取不到语言时把左侧状态文案错误回退成英文。
       locale: "zh",
@@ -216,7 +224,7 @@ export class ProfileManager {
     });
     this.stateReader = new ProfileStateReader({
       dataDir, profilesDir: this.profilesDir,
-      loadRegistry: () => this.loadRegistry(),
+      loadRegistry: strict => this.loadRegistry(strict),
       readGatewayStatus: () => this.readGatewayStatus(),
       getActivity: clients => this.agentOverlayManager.getActivity(clients)
     });
@@ -266,6 +274,15 @@ export class ProfileManager {
 
   async getState(): Promise<AppState> {
     return (await this.collectState()).state;
+  }
+
+  // A control decision must not turn a best-effort display scan into proof that
+  // a process is unmanaged or idle. This path does not update presentation
+  // caches or run registry/lease/overlay maintenance.
+  async getStateForControlAdmission(windowsSample?: Promise<WindowsControlSample>): Promise<ControlAdmissionState> {
+    const collected = await this.stateReader.collectForControlAdmission(windowsSample);
+    if (!collected.controlDiscovery) throw new Error('PROFILE_DISCOVERY_INCOMPLETE');
+    return collected;
   }
 
   private async collectState(): Promise<CollectedProfileState> {
@@ -3260,10 +3277,14 @@ export class ProfileManager {
     });
   }
 
-  private async loadRegistry(): Promise<Registry> {
+  private async loadRegistry(strict = false): Promise<Registry> {
     try {
       const raw = await fs.readFile(this.registryPath, "utf8");
       const parsed = JSON.parse(raw) as Partial<Registry>;
+      const normalizedProfiles = Array.isArray(parsed.profiles) ? parsed.profiles.map(normalizeProfile) : [];
+      if (strict && (!Array.isArray(parsed.profiles) || normalizedProfiles.some(profile => !profile) ||
+        new Set(normalizedProfiles.map(profile => profile?.id)).size !== normalizedProfiles.length ||
+        new Set(normalizedProfiles.map(profile => profile?.dirName)).size !== normalizedProfiles.length)) throw new Error('PROFILE_REGISTRY_INCOMPLETE');
       const nativeProfiles =
         parsed.nativeProfiles && typeof parsed.nativeProfiles === "object"
           ? normalizeNativeProfileMetadata(parsed.nativeProfiles)
@@ -3274,9 +3295,7 @@ export class ProfileManager {
           : {};
 
       return {
-        profiles: Array.isArray(parsed.profiles)
-          ? (parsed.profiles.map(normalizeProfile).filter(Boolean) as StoredProfile[])
-          : [],
+        profiles: normalizedProfiles.filter(Boolean) as StoredProfile[],
         nativeProfiles,
         accountSyncRecords,
         takeoverHistory: normalizeTakeoverHistory(parsed.takeoverHistory),
@@ -3613,12 +3632,13 @@ export class ProfileManager {
 
 export function createProfileManager(
   onAgentTakeover?: (event: AgentTakeoverEvent) => void,
-  onAgentOverlayReveal?: (event: AgentOverlayRevealEvent) => void
+  onAgentOverlayReveal?: (event: AgentOverlayRevealEvent) => void,
+  options: ProfileManagerOptions = {}
 ): ProfileManager {
   return new ProfileManager(process.env.CPM_DATA_DIR || defaultDataDir(), {
     onAgentTakeover,
     onAgentOverlayReveal
-  });
+  }, options);
 }
 
 export function cloneProfileMode(

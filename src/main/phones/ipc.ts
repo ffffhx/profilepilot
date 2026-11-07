@@ -1,4 +1,4 @@
-import { BrowserWindow, ipcMain, net, session } from "electron";
+import { BrowserWindow, dialog, ipcMain, net, session, shell } from "electron";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { isWorkspaceShell } from "../workspace-shell";
@@ -12,7 +12,7 @@ import { z } from "zod";
 import type { PhoneVideoStream } from "./screen-video";
 
 export function registerPhones(root: string, apkPath: string, poll = true): PhonesService {
-  const service = new PhonesService({ root, apkPath, cameraCapture: desktopCameraCapture(), androidSetup: new AndroidSetup({
+  const service = new PhonesService({ root, apkPath, iphoneFetch: (input, init) => net.fetch(input instanceof URL ? input.href : input, init), cameraCapture: desktopCameraCapture(), androidSetup: new AndroidSetup({
     fetch: (input, init) => net.fetch(input instanceof URL ? input.href : input, init),
     proxy: async () => {
       const route = (await session.defaultSession.resolveProxy("https://dl.google.com/android/repository/repository2-3.xml")).split(";")[0].trim();
@@ -29,6 +29,18 @@ export function registerPhones(root: string, apkPath: string, poll = true): Phon
     if (event.senderFrame !== event.sender.mainFrame || !trusted(url)) throw new Error("手机接口仅供 ProfilePilot 工作区使用。");
     if (method === "snapshot") return service.snapshot();
     if (!trusted(url, true)) throw new Error("请在手机工作区操作设备。");
+    if (method === "iphone-select-file") {
+      z.object({ kind: z.literal("ipa") }).strict().parse(params);
+      const result = await dialog.showOpenDialog({ title: "选择已签名的 iPhone 控制组件", properties: ["openFile"], filters: [{ name: "iPhone IPA", extensions: ["ipa"] }] });
+      return result.canceled ? null : result.filePaths[0];
+    }
+    if (method === "iphone-open-guide") {
+      const { kind } = z.object({ kind: z.enum(["driver", "signer"]) }).strict().parse(params);
+      return shell.openExternal(kind === "driver" ? "https://apps.microsoft.com/detail/9np83lwlpz9k" : "https://sideloadly.io/");
+    }
+    if (method === "iphone-show-artifact") {
+      z.object({}).strict().parse(params); shell.showItemInFolder((await service.iphones.tools.prepareWda()).ipa); return;
+    }
     if (method === "video-start") {
       const { id, basic } = z.object({ id: z.string().min(1).max(200), basic: z.object({ sessionId: z.string().min(1).max(100), generation: z.number().int().nonnegative() }).strict().optional() }).strict().parse(params);
       const owner = event.sender, window = BrowserWindow.fromWebContents(owner);

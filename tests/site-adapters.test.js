@@ -18,10 +18,10 @@ async function page(operation, params, body, overrides = {}, access) {
   return { result: JSON.parse(JSON.stringify(result)), calls };
 }
 
-test('catalog exposes all 18 promised operations, schemas and explicit city; unknown filters fail closed', () => {
+test('catalog exposes all 21 promised operations, schemas and explicit city; unknown filters fail closed', () => {
   const all = listSiteAdapters();
-  assert.equal(all.length, 18); assert.equal(new Set(all.map(s => s.operation.split('.')[0])).size, 8);
-  assert.deepEqual(all.reduce((a, d) => (a[d.batch] = (a[d.batch] || 0) + 1, a), {}), { 1: 7, 2: 6, 3: 5 });
+  assert.equal(all.length, 21); assert.equal(new Set(all.map(s => s.operation.split('.')[0])).size, 9);
+  assert.deepEqual(all.reduce((a, d) => (a[d.batch] = (a[d.batch] || 0) + 1, a), {}), { 1: 7, 2: 6, 3: 5, 4: 3 });
   assert.ok(all.every(d => d.readOnly && d.input.type === 'object'));
   assert.throws(() => planSiteAdapter({ operation: 'boss.search', params: { query: '前端' } }));
   assert.throws(() => planSiteAdapter({ operation: 'zhihu.search', params: { query: 'hello', salary: 123 } }));

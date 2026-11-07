@@ -16,6 +16,7 @@ import { openBasicPhone, phoneModeChoices, phoneAppDownload, phoneDownloadFigure
 import { createPhoneInspector } from "./phone-inspector";
 import { openScreenCamera } from "./screen-camera";
 import { openGameFollower } from "./game-follow";
+import { openIphoneAdd, openIphoneScreen, renderIphonePane } from "./iphone";
 
 const root = document.getElementById("phones")!;
 const esc = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
@@ -42,12 +43,15 @@ const wirelessDiscovery = new PhoneWirelessDiscoveryMonitor(id => window.phones.
 root.innerHTML = `${workspaceSwitcher("phones")}${workspaceIdentityBar()}<main class="phone-shell phone-console"><header class="pc-control-header"><div class="pc-control-brand"><h1>控制台</h1><p>管理浏览器、桌面应用与 Android 设备</p></div></header>${pcControlTabs("phones")}<div class="phone-console-layout"><div class="phone-registry-column">${phoneListShell()}</div><aside class="phone-inspector" aria-label="手机画面与会话"></aside></div><button class="phone-text-button phone-mobile-entry-link" data-action="mobile" hidden>用手机管理电脑任务 →</button></main>
   <dialog class="phone-details" aria-labelledby="phone-details-title"><header class="phone-details-top"><span>设备详情</span><button data-action="close-details" aria-label="关闭设备详情">${taskIcon("close")}</button></header><div class="phone-details-scroll"><div class="phone-details-identity"></div><div class="phone-content" aria-busy="true"></div></div></dialog>`;
 const drawer = root.querySelector<HTMLDialogElement>(".phone-details")!;
+root.querySelector(".pc-control-brand p")!.textContent = "管理浏览器、桌面应用与 Android / iPhone 设备";
 root.querySelector(".pc-control-header")!.insertAdjacentHTML("beforeend", '<button class="phone-text-button" data-action="game-follow">视觉跟随</button>');
 const inspector = createPhoneInspector(root.querySelector<HTMLElement>(".phone-inspector")!);
+const iphonePane = document.createElement("aside"); iphonePane.className = "phone-inspector iphone-inspector"; iphonePane.hidden = true;
+root.querySelector(".phone-console-layout")!.append(iphonePane);
 const deviceMenu = document.createElement("div");
 deviceMenu.id = "phone-device-menu"; deviceMenu.className = "phone-device-menu"; deviceMenu.popover = "manual";
 deviceMenu.setAttribute("role", "menu"); deviceMenu.setAttribute("aria-label", "设备操作");
-deviceMenu.innerHTML = '<button type="button" role="menuitem" data-action="rename">修改名称</button>';
+deviceMenu.innerHTML = '<button type="button" role="menuitem" data-action="rename">修改名称</button><button type="button" role="menuitem" data-action="unlock-secret">解锁凭据</button>';
 root.append(deviceMenu);
 let menuAnchor: HTMLButtonElement | undefined;
 function closeDeviceMenu(restoreFocus = false): void {
@@ -57,8 +61,11 @@ function closeDeviceMenu(restoreFocus = false): void {
 function openDeviceMenu(button: HTMLButtonElement): void {
   if (deviceMenu.matches(":popover-open") && menuAnchor === button) { closeDeviceMenu(true); return; }
   closeDeviceMenu(); menuAnchor = button;
+  const device = snapshot.devices.find(item => item.id === button.dataset.deviceId);
+  for (const item of deviceMenu.querySelectorAll<HTMLButtonElement>("button")) item.dataset.deviceId = button.dataset.deviceId;
+  deviceMenu.querySelector<HTMLButtonElement>('[data-action="unlock-secret"]')!.hidden = device?.platform === "ios";
+  deviceMenu.querySelector<HTMLButtonElement>('[data-action="unlock-secret"]')!.textContent = device?.unlockSecret?.saved ? "解锁凭据 · 已保存" : "解锁凭据";
   const item = deviceMenu.querySelector<HTMLButtonElement>("button")!;
-  item.dataset.deviceId = button.dataset.deviceId;
   deviceMenu.showPopover(); button.setAttribute("aria-expanded", "true");
   const bounds = button.getBoundingClientRect();
   deviceMenu.style.left = `${Math.max(8, Math.min(bounds.right - deviceMenu.offsetWidth, innerWidth - deviceMenu.offsetWidth - 8))}px`;
@@ -88,6 +95,7 @@ refreshWorkspaceSwitcher();
 const openMobileConnections = createMobileConnections();
 root.querySelector<HTMLButtonElement>('.phone-mobile-entry-link')!.hidden = !openMobileConnections;
 function showDetails(id: string): void {
+  if (snapshot.devices.find(device => device.id === id)?.platform === "ios") { selected = id; if (drawer.open) drawer.close(); render(); return; }
   const group = groupPhoneDevices(snapshot.devices, id).find(group => group.routes.some(route => route.id === id));
   if (!group) { notice("这台设备已不在列表中，请刷新后重试。", true); return; }
   selected = group.device.id; drawerReturnId = selected;
@@ -97,7 +105,10 @@ function showDetails(id: string): void {
 function addDevice(): void {
   const dialog = document.createElement("dialog"); dialog.className = "phone-connect-dialog"; dialog.setAttribute("aria-label", "添加 Android 设备");
   dialog.innerHTML = `<header><h2>添加 Android 设备</h2><button data-close aria-label="关闭添加设备窗口">×</button></header><p>添加手机、平板，或创建一台新的虚拟设备。</p><div class="phone-connect-choices"><button data-connect="real">${taskIcon("phone")}<span><strong>添加真实设备</strong><small>同一网络扫描，或通过设备码跨网络添加</small></span>${taskIcon("chevron")}</button><button data-connect="emulator">${taskIcon("desktop")}<span><strong>创建虚拟设备</strong><small>安装 Android 环境、下载镜像并创建新设备</small></span>${taskIcon("chevron")}</button></div>`;
-  dialog.addEventListener("click", event => { const button = (event.target as Element).closest<HTMLButtonElement>("button"); if (!button) return; dialog.close(); dialog.remove(); if (button.dataset.connect === "real") openPhoneAdd((device, configure) => { void run(async () => { snapshot = await window.phones.snapshot(); selected = device.id; if (configure) showDetails(device.id); }); }, snapshot.companionApp?.variant); else if (button.dataset.connect === "emulator") emulator("create"); });
+  dialog.setAttribute("aria-label", "添加设备"); dialog.querySelector("h2")!.textContent = "添加设备";
+  dialog.querySelector('[data-connect="real"] strong')!.textContent = "Android 真机";
+  dialog.querySelector(".phone-connect-choices")!.insertAdjacentHTML("afterbegin", `<button data-connect="iphone">${taskIcon("phone")}<span><strong>iPhone 真机</strong><small>准备 USB 工具、签名组件并连接 iPhone</small></span>${taskIcon("chevron")}</button>`);
+  dialog.addEventListener("click", event => { const button = (event.target as Element).closest<HTMLButtonElement>("button"); if (!button) return; dialog.close(); dialog.remove(); if (button.dataset.connect === "iphone") openIphoneAdd(device => { void run(async () => { snapshot = await window.phones.snapshot(); selected = device.id; }); }); else if (button.dataset.connect === "real") openPhoneAdd((device, configure) => { void run(async () => { snapshot = await window.phones.snapshot(); selected = device.id; if (configure) showDetails(device.id); }); }, snapshot.companionApp?.variant); else if (button.dataset.connect === "emulator") emulator("create"); });
   dialog.addEventListener("close", () => dialog.remove()); document.body.append(dialog); dialog.showModal();
 }
 function downloads(): void {
@@ -105,6 +116,87 @@ function downloads(): void {
   dialog.innerHTML = `<header><h2>下载手机 App</h2><button data-close aria-label="关闭下载窗口">×</button></header><p>App 为可选安装。通过 USB 或 Wi-Fi 连接后，无需安装即可查看和操作手机。</p>${phoneDownloadFigure(snapshot.companionApp?.variant)}<button data-action="phone-apk">获取 APK 文件</button>`;
   dialog.querySelector('[data-close]')!.addEventListener('click', () => dialog.close());
   dialog.addEventListener('close', () => dialog.remove()); root.append(dialog); dialog.showModal();
+}
+function openUnlockSecret(device: PhoneDevice): void {
+  const status = device.unlockSecret;
+  const dialog = document.createElement("dialog");
+  dialog.className = "phone-connect-dialog phone-unlock-dialog";
+  dialog.setAttribute("aria-label", "手机解锁凭据");
+  const saved = status?.saved ? `已保存：${status.kind === "pattern" ? "锁屏图案" : "PIN 或密码"} · ${new Date(status.savedAt || 0).toLocaleString()}` : "尚未保存";
+  dialog.innerHTML = `<header><h2>手机解锁凭据</h2><button data-close aria-label="关闭解锁凭据窗口">×</button></header>
+    <p>保存后，命令行可用 <code>ppilot phone unlock --device ${esc(device.id)} --stored</code> 在锁屏时自动解锁。凭据由系统安全存储（Windows DPAPI / macOS Keychain）加密，保存后不会显示回来。</p>
+    <p class="phone-unlock-status">${esc(saved)}</p>
+    <label class="phone-unlock-field">类型<select data-unlock-kind><option value="pattern">锁屏图案</option><option value="credential">PIN 或密码</option></select></label>
+    <div class="phone-pattern-picker" data-pattern-picker>
+      <p class="phone-pattern-help">按你解锁时连线的顺序依次点选下面的点，至少 4 个；连线穿过的中间点由手机自动算入。</p>
+      <div class="phone-pattern-grid" role="group" aria-label="锁屏图案九点">
+        ${Array.from({ length: 9 }, (_, index) => `<button type="button" data-pattern-dot="${index + 1}" aria-pressed="false" aria-label="第 ${index + 1} 个点">${index + 1}</button>`).join("")}
+      </div>
+      <p class="phone-pattern-sequence" data-pattern-sequence>尚未选择</p>
+      <button type="button" class="phone-text-button" data-pattern-clear>清除重选</button>
+    </div>
+    <label class="phone-unlock-field" data-credential-field hidden>凭据<input type="password" data-unlock-value autocomplete="off" spellcheck="false" placeholder="手机锁屏 PIN 或密码"></label>
+    <label class="phone-unlock-allow"><input type="checkbox" data-unlock-allow checked> 允许命令行与 Agent 使用</label>
+    <p class="phone-unlock-note">任何能以你的系统账户运行的代码都能让 App 使用它；它保护的是手机丢失，不是电脑账户被入侵。</p>
+    ${status?.available === false ? '<p class="phone-unlock-note" role="alert">此系统不支持安全存储，无法保存解锁凭据。</p>' : ""}
+    <footer><button class="primary" data-save ${status?.available === false ? "disabled" : ""}>保存</button>${status?.saved ? "<button data-delete>删除已保存凭据</button>" : ""}</footer>`;
+  const close = () => { dialog.close(); dialog.remove(); };
+  const kind = dialog.querySelector<HTMLSelectElement>("[data-unlock-kind]")!;
+  const picker = dialog.querySelector<HTMLElement>("[data-pattern-picker]")!;
+  const credentialField = dialog.querySelector<HTMLElement>("[data-credential-field]")!;
+  const sequence = dialog.querySelector<HTMLElement>("[data-pattern-sequence]")!;
+  const save = dialog.querySelector<HTMLButtonElement>("[data-save]")!;
+  const dotButtons = [...dialog.querySelectorAll<HTMLButtonElement>("[data-pattern-dot]")];
+  const dots: number[] = [];
+  const paintDots = () => {
+    for (const button of dotButtons) {
+      const dot = Number(button.dataset.patternDot), order = dots.indexOf(dot);
+      button.dataset.selected = String(order !== -1);
+      button.textContent = order === -1 ? String(dot) : String(order + 1);
+      button.setAttribute("aria-pressed", String(order !== -1));
+      button.setAttribute("aria-label", order === -1 ? `第 ${dot} 个点` : `第 ${dot} 个点，第 ${order + 1} 步`);
+    }
+    sequence.textContent = dots.length ? dots.join(" → ") : "尚未选择";
+  };
+  const syncKind = () => {
+    const pattern = kind.value === "pattern";
+    picker.hidden = !pattern;
+    credentialField.hidden = pattern;
+    save.disabled = status?.available === false || (pattern && dots.length < 4);
+  };
+  kind.addEventListener("change", syncKind);
+  for (const button of dotButtons) button.addEventListener("click", () => {
+    const dot = Number(button.dataset.patternDot), index = dots.indexOf(dot);
+    if (index === -1) { if (dots.length < 9) dots.push(dot); }
+    else if (index === dots.length - 1) dots.pop();
+    else return;
+    paintDots(); syncKind();
+  });
+  dialog.querySelector("[data-pattern-clear]")!.addEventListener("click", () => { dots.length = 0; paintDots(); syncKind(); });
+  dialog.querySelector("[data-close]")!.addEventListener("click", close);
+  dialog.addEventListener("click", event => { if (event.target === dialog) close(); });
+  save.addEventListener("click", () => {
+    const kindValue = kind.value as "pattern" | "credential";
+    const value = kindValue === "pattern" ? dots.join("") : dialog.querySelector<HTMLInputElement>("[data-unlock-value]")!.value;
+    const allowAgent = dialog.querySelector<HTMLInputElement>("[data-unlock-allow]")!.checked;
+    if (kindValue === "pattern" && dots.length < 4) { notice("请按顺序至少点选 4 个点。", true); return; }
+    if (!value) { notice("请输入锁屏 PIN 或密码。", true); return; }
+    void run(async () => {
+      const next = await window.phones.saveUnlockSecret({ id: device.id, kind: kindValue, value, allowAgent });
+      dialog.querySelector<HTMLInputElement>("[data-unlock-value]")!.value = "";
+      notice(next.saved ? "已加密保存解锁凭据。" : "未能保存解锁凭据。", !next.saved);
+      close();
+    });
+  });
+  paintDots(); syncKind();
+  dialog.querySelector<HTMLButtonElement>("[data-delete]")?.addEventListener("click", () => {
+    void run(async () => {
+      const next = await window.phones.deleteUnlockSecret(device.id);
+      notice(next.removed ? "已删除保存的解锁凭据。" : "没有可删除的解锁凭据。");
+      close();
+    });
+  });
+  document.body.append(dialog); dialog.showModal();
 }
 function usb(): void {
   const dialog = document.createElement("dialog");
@@ -169,6 +261,7 @@ function enhancement(device?: PhoneDevice, disabledReason = "请先在上方连�
 }
 function options(device?: PhoneDevice): string {
   return `<details class="phone-options" data-phone-options><summary>${taskIcon("settings")}更多设置</summary><div>
+    ${device ? `<button class="phone-text-button" data-action="unlock-secret" data-device-id="${esc(device.id)}">解锁凭据${device.unlockSecret?.saved ? " · 已保存" : ""}</button>` : ""}
     <button class="phone-text-button" data-action="cloud-link">未连接电脑时也同步手机状态</button>
     ${device?.cloud?.channelId ? '<button class="phone-text-button" data-action="cloud-forget">移除此状态同步</button>' : ""}
     ${device?.transport === "registered" ? '<button class="phone-text-button" data-action="registration-forget">移除此设备</button>' : ""}
@@ -188,7 +281,10 @@ function render(): void {
   renderPhoneList(root, snapshot, { filter, selected, loaded, busy });
   if (busy || !menuAnchor?.isConnected || document.hidden || window.workspacePane?.active === false) closeDeviceMenu();
   const device = current(), status = group && phoneConnectionPresentation(group), view = status?.view;
-  inspector.update(device, busy);
+  root.querySelector<HTMLElement>(".phone-inspector:not(.iphone-inspector)")!.hidden = device?.platform === "ios";
+  inspector.update(device?.platform === "ios" ? undefined : device, busy);
+  renderIphonePane(iphonePane, device);
+  if (device?.platform === "ios") { wirelessDiscovery.update("", false); return; }
   const needsDiscovery = !!device && !view?.emulator && !status?.routes.some(route => route.transport === "wifi" && route.detected);
   wirelessDiscovery.update(needsDiscovery ? device.id : "", drawer.open && loaded && snapshot.adbAvailable && !busy && !document.hidden
     && window.workspacePane?.active !== false && !document.querySelector(".phone-wireless-dialog"));
@@ -244,7 +340,7 @@ function render(): void {
         <section class="phone-summary-item"><h3>手机 App 是否已连接</h3><div class="phone-connection" data-ready="${status.connected}" role="status"><span class="phone-summary-symbol">${status.connected ? taskIcon("check") : '<span class="phone-dot"></span>'}</span><strong>${status.connectionLabel}</strong></div><p class="phone-connection-note">${esc(status.connectionNote)}</p></section>
         <section class="phone-summary-item"><h3>权限与调试准备</h3><div class="phone-readiness" data-condition="${status.condition}" role="status"><span class="phone-summary-symbol">${status.condition === "ready" ? taskIcon("check") : '<span class="phone-dot"></span>'}</span><strong>${status.label}</strong></div><p>${esc(status.note)}</p></section>
       </div>
-      ${hasTask ? `<div class="phone-task-strip" data-paused="${view.paused}"><div class="phone-task-heading"><span class="phone-dot"></span><strong>${esc(taskLabel)}</strong><span data-elapsed></span></div><p>${esc(state?.task || "手机会话")}</p><div class="phone-task-actions">${view.paused ? `<button data-action="resume" ${disabled}>继续任务</button>` : `<button data-action="pause" ${disabled}>${icon("pause")}暂停</button>`}<button data-action="stop" ${disabled}>结束任务</button></div></div>` : ""}
+      ${hasTask ? `<div class="phone-task-strip" data-paused="${view.paused}"><div class="phone-task-heading"><span class="phone-dot"></span><strong>${esc(taskLabel)}</strong><span data-elapsed></span></div><p>${esc(state?.task || "手机会话")}</p><div class="phone-task-actions">${view.awaitingUnlock ? `<button data-action="wake" ${disabled}>点亮屏幕</button>` : view.paused ? `<button data-action="resume" ${disabled}>继续任务</button>` : `<button data-action="pause" ${disabled}>${icon("pause")}暂停</button>`}<button data-action="stop" ${disabled}>结束任务</button></div></div>` : ""}
       ${status.issue ? `<section class="phone-connection-help" role="status" aria-label="手机连接恢复提示"><strong>${esc(status.issue.title)}</strong><p>${esc(status.issue.description)}</p>${status.issue.lastState ? `<p>${esc(status.issue.lastState)}</p>` : ""}<ol>${status.issue.steps.map(step => `<li>${esc(step)}</li>`).join("")}</ol>${status.issue.detail ? `<details class="phone-error-details"><summary>技术详情</summary><p>${esc(status.issue.detail)}</p></details>` : ""}</section>` : ""}
       ${(device.transport !== "cloud" && snapshot.error) || fallbackError ? `<p class="phone-error" role="alert">${esc((device.transport !== "cloud" && snapshot.error) || fallbackError)}</p>` : ""}
       <div class="phone-debug-settings">${settingsRows(view.settings, view.canSetup)}</div>
@@ -333,6 +429,16 @@ root.addEventListener("click", event => {
   if (action === "emulator") { emulator(); return; }
   if (action === "mobile") { void openMobileConnections?.(); return; }
   const device = current(); if (!device) return;
+  if (device.platform === "ios") {
+    if (action === "rename") { rename(device); return; }
+    void run(async () => {
+      if (action === "connect-phone") await window.phones.connect(device.id);
+      else if (action === "disconnect-phone") await window.phones.disconnect(device.id);
+      else if (action === "iphone-view" || action === "iphone-control") openIphoneScreen(await window.phones.start(device.id, action === "iphone-view" ? "view" : "control", "本机用户", "iPhone 真机控制"));
+      else if (action === "iphone-pause" || action === "iphone-stop") await window.phones.control(device.id, action === "iphone-pause" ? "pause" : "stop");
+      else if (action === "iphone-remove") await window.phones.iphoneForget(device.id);
+    }); return;
+  }
   if (action === "connect-phone") {
     if (device.appInstallation?.status === "missing") { showDetails(device.id); notice("请先在设备设置中安装手机 App，再点击连接。", true); return; }
     void run(async () => {
@@ -373,6 +479,10 @@ root.addEventListener("click", event => {
   if (action === "cloud-forget") void run(() => window.phones.cloudForget(`cloud-${device.cloud?.channelId}`));
   if (action === "registration-forget") void run(async () => { await window.phones.forgetRegistered(device.id); drawer.close(); });
   if (action === "pause" || action === "resume" || action === "stop") void run(() => window.phones.control(device.id, action));
+  if (action === "wake") {
+    void run(async () => { const next = await window.phones.wake(device.id); snapshot = { ...snapshot, devices: snapshot.devices.map(item => item.id === next.id ? next : item) }; notice(next.state?.readiness?.unlocked === false ? "屏幕已点亮，仍在锁屏；需要解锁后才能继续控制。" : "已请求点亮屏幕。"); });
+  }
+  if (action === "unlock-secret") { closeDeviceMenu(); openUnlockSecret(device); return; }
   if (action === "screenshot") void capture();
   if (action === "rename") { closeDeviceMenu(true); rename(device); }
   if (action === "enlarge" && image) {

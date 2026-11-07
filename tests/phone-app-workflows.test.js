@@ -39,16 +39,30 @@ test('app launch resolves the selected package and quotes the exact component un
 test('export acquires all split APKs with exact hashes and partial failures preserve completed files',async t=>{
   const h=harness(t),directory=path.join(h.root,'export');h.failPull=2;
   const {code,result}=await h.run({operation:'export',packageName:'io.example.app',outputDir:directory});
-  assert.equal(code,1);assert.equal(result.coverage,'partial');assert.equal(result.artifacts.length,1);assert.equal(h.calls[0].params.mode,'view');
+  assert.equal(code,75);assert.equal(result.coverage,'partial');assert.equal(result.artifacts.length,1);assert.equal(h.calls[0].params.mode,'view');
+  assert.equal(result.code,'PHONE_EXECUTION_UNCERTAIN');assert.equal(result.recovery.actionOutcome,'unknown');
+  assert.equal(result.recovery.nextStep,'inspect-result');assert.equal(result.recovery.automaticReplay,false);
+  assert.equal(h.pulls,2,'partial acquisition must not replay the failed transfer');
+  assert.equal(result.evidence.at(-1).code,1,'retain the native failure separately from the CLI recovery exit');
   const bytes=fs.readFileSync(result.artifacts[0].path);assert.equal(result.artifacts[0].sha256,createHash('sha256').update(bytes).digest('hex'));
   assert.equal(h.calls.at(-1).method,'wrapper-stop');
 });
 test('export refuses colliding names and preexisting output directories before transfer',async t=>{
   const h=harness(t);h.paths='package:/data/app/base.apk\npackage:/other/base.apk';
-  assert.equal((await h.run({operation:'export',packageName:'io.example.app',outputDir:path.join(h.root,'new')})).code,1);assert.equal(h.pulls,0);
-  h.paths='package:/data/app/base.apk';assert.equal((await h.run({operation:'export',packageName:'io.example.app',outputDir:h.root})).code,1);assert.equal(h.pulls,0);
+  const collision=await h.run({operation:'export',packageName:'io.example.app',outputDir:path.join(h.root,'new')});
+  assert.equal(collision.code,1);assert.equal(collision.result.code,'PHONE_APP_NOT_READY');
+  assert.equal(collision.result.recovery.actionOutcome,'not-executed');assert.equal(h.pulls,0);
+  assert.equal(fs.existsSync(path.join(h.root,'new')),false);
+  h.paths='package:/data/app/base.apk';
+  const existing=await h.run({operation:'export',packageName:'io.example.app',outputDir:h.root});
+  assert.equal(existing.code,2);assert.equal(existing.result.code,'PHONE_INVALID_REQUEST');
+  assert.equal(existing.result.recovery.actionOutcome,'not-executed');assert.equal(existing.result.recovery.nextStep,'fix-input');
+  assert.equal(h.pulls,0);assert.equal(h.calls.filter(c=>c.method==='adb-start').length,2,'only the two read-only package queries are dispatched');
 });
 test('invalid stdin file fails before a command starts and never emits an unhandled stream error',async t=>{
-  const h=harness(t);await assert.rejects(streamAdb(['exec-in','cat'],'lease',1,h.request,{stdout:{write(){}},stderr:{write(){}}},{input:path.join(h.root,'missing')}),/ENOENT/);
+  const h=harness(t);await assert.rejects(streamAdb(['exec-in','cat'],'lease',1,h.request,{stdout:{write(){}},stderr:{write(){}}},{input:path.join(h.root,'missing')}),error=>{
+    assert.equal(error.code,'PHONE_INVALID_REQUEST');assert.equal(error.details.recovery.actionOutcome,'not-executed');
+    assert.equal(error.details.recovery.nextStep,'fix-input');assert.equal(error.details.recovery.automaticReplay,false);return true;
+  });
   assert.equal(h.calls.length,0);await new Promise(r=>setTimeout(r,30));
 });

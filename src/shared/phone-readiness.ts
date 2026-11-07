@@ -16,8 +16,8 @@ export function phoneReadiness(device: PhoneDevice, runtime: PhoneRuntimeEvidenc
   const online = device.connection === "device";
   const companion = online && device.companion === "ready" && !!device.state;
   const state = backend === "basic" ? (online ? device.basic : undefined) : companion ? device.state : undefined;
-  add("transport", online ? "ready" : "blocked", online ? "ADB 当前将此设备登记为在线。" : `当前连接：${device.connection}。`,
-    online ? undefined : device.connection === "unauthorized" ? "在设备确认 Android 调试授权。" : "重新发现并验证此物理设备的 USB/Wi-Fi 路由。");
+  add("transport", online ? "ready" : "blocked", online ? device.transport === "internet" ? "手机已主动建立 HTTPS 外网控制连接。" : "ADB 当前将此设备登记为在线。" : `当前连接：${device.connection}。`,
+    online ? undefined : device.transport === "internet" ? "在手机 ProfilePilot 检查外网控制连接；无需无线调试或 Tailscale。" : device.connection === "unauthorized" ? "在设备确认 Android 调试授权。" : "重新发现并验证此物理设备的 USB/Wi-Fi 路由。");
   if (runtime.responding !== undefined) add("device-response", runtime.responding ? "ready" : "blocked",
     runtime.responding ? "本次设备只读命令已响应。" : "ADB 列表显示在线，但本次设备只读命令全部失败或超时。",
     runtime.responding ? undefined : "检查设备是否唤醒及当前调试地址；通过 ppilot phone wireless-discover/diagnose 核查，不把缓存在线状态当作可控制。");
@@ -43,7 +43,7 @@ export function phoneReadiness(device: PhoneDevice, runtime: PhoneRuntimeEvidenc
   const otherSession = other?.sessionId && ["viewing", "controlling", "executing", "paused"].includes(other.phase);
   add("ownership", session || otherSession ? "blocked" : "ready", session || otherSession ? "此设备已有活动或暂停会话。" : "没有已知活动会话。",
     session || otherSession ? "继续原有会话或明确结束后再开始；不要通过另一条路由绕过占用。" : undefined);
-  if (state?.readiness?.unlocked === false) add("screen", "unknown", "屏幕当前锁定，画面和输入能力需核验。", "解锁目标设备后重新观察。");
+  if (state?.readiness?.unlocked === false) add("screen", backend === "app" ? "blocked" : "unknown", "屏幕当前锁定，画面和输入能力需核验。", "按已有授权解锁目标设备后重新读取状态和 generation。");
   const ready = checks.every(c => c.status !== "blocked");
   const usable = online && runtime.responding !== false && (backend === "basic" || companion && state?.permissions.accessibility === true);
   return {

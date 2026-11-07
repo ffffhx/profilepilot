@@ -13,8 +13,11 @@ const generatedSources = {
   "assets/icon.svg": "public/assets/profilepilot-mark.svg",
   "LICENSE": "LICENSE",
   ...Object.fromEntries([
-    "browser-extension.md", "agent-browser.md", "browser-debug.md", "profiles.md", "phone.md", "phone-adb.md", "captcha.md", "site-adapters.md"
-  ].map(name => [`skills/profilepilot/references/${name}`, `skills/profilepilot/references/${name}`]))
+    "browser-extension.md", "agent-browser.md", "browser-debug.md", "profiles.md", "phone.md", "iphone.md", "phone-adb.md", "captcha.md", "site-adapters.md", "desktop.md", "gpui.md", "cli-diagnostics.md"
+  ].map(name => [`skills/profilepilot/references/${name}`, `skills/profilepilot/references/${name}`])),
+  ...Object.fromEntries([
+    "browser-routing.md", "electron-control.md", "phone-control.md"
+  ].map(name => [`skills/profilepilot/templates/${name}`, `skills/profilepilot/templates/${name}`]))
 };
 export const packageFiles = [
   "plugin.json", "skills/profilepilot/SKILL.md", "skills/setup/SKILL.md",

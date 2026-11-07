@@ -16,6 +16,10 @@ type NativeObservation = PagedObservation & { frames?: FrameInfo[]; fast?: NonNu
 class NativePaintError extends Error {
   readonly code = "NATIVE_RENDER_UNAVAILABLE";
 }
+function staleFrameSession(error: unknown): boolean {
+  return (error as { code?: string })?.code === "NATIVE_FRAME_SESSION_STALE" ||
+    (error instanceof Error && error.message === "子 frame 调试会话已失效，请重新观察。");
+}
 function visualReadTimedOut(error: unknown): boolean {
   const code = (error as { code?: unknown })?.code;
   return error instanceof Error && error.message === "截图无响应，已停止等待。" &&
@@ -36,6 +40,31 @@ export class NativePage {
     let state = this.states.get(key);
     if (!state) { state = { sessions: new Map(), initialized: new Set(), frames: new Map(), refs: new Map(), nextRef: 1, generation: ++this.serial }; this.states.set(key, state); }
     return state;
+  }
+  private async recoverFrameRead<T>(task: BrowserTask, read: () => Promise<T>): Promise<T> {
+    const key = this.key(task), state = this.state(task);
+    try { return await read(); }
+    catch (error) {
+      if (!staleFrameSession(error)) throw error;
+      // Ownership/tab events remove the state. Recovery must never reacquire a
+      // released session, switch targets, or revive a user-paused operation.
+      const current = () => {
+        if (this.states.get(key) !== state) throw Object.assign(new Error("控制状态已改变，frame 读取恢复已停止。请检查 status。"), { code: "NATIVE_USER_IN_CONTROL" });
+      };
+      current();
+      const snapshot = await this.cdp(task, "ProfilePilot.getFrameSessions");
+      current();
+      if (!Number.isSafeInteger(snapshot?.tabId) || snapshot.tabId <= 0 || !Array.isArray(snapshot?.sessions) || snapshot.sessions.length > 1000 ||
+          (state.tabId !== undefined && snapshot.tabId !== state.tabId) ||
+          snapshot.sessions.some((entry: any) => typeof entry?.sessionId !== "string" || !entry.sessionId ||
+            (entry.parentSessionId !== undefined && typeof entry.parentSessionId !== "string"))) throw error;
+      state.sessions = new Map(snapshot.sessions.map((entry: { sessionId: string; parentSessionId?: string }) => [entry.sessionId, entry.parentSessionId]));
+      state.initialized.clear(); state.frames.clear(); state.refs.clear(); state.selection = undefined;
+      state.tabId = snapshot.tabId; state.generation = ++this.serial; task.observation = undefined;
+      // Exactly one fresh, read-only discovery. A second failure is surfaced;
+      // input paths never enter this wrapper and no prior action is replayed.
+      return read();
+    }
   }
   event(event: { type: string; profileId: string; sessionId?: string; cdpSessionId?: string; tabId?: number; method?: string; params?: any; state?: any }): void {
     for (const [key, state] of this.states) {
@@ -262,16 +291,22 @@ export class NativePage {
       }
     } finally { await this.cdp(task, "Emulation.setFocusEmulationEnabled", { enabled: false }).catch(() => {}); }
   }
-  async reobserve(task: BrowserTask): Promise<NativeObservation> {
+  reobserve(task: BrowserTask): Promise<NativeObservation> {
+    return this.recoverFrameRead(task, () => this.reobserveOnce(task));
+  }
+  private async reobserveOnce(task: BrowserTask): Promise<NativeObservation> {
     const state = await this.discover(task);
     let prior = task.observation as NativeObservation | undefined;
     const binding = prior?.fast?.native, frame = binding && state.frames.get(binding.frameId);
     if (!binding || !frame || binding.generation !== state.generation || binding.url !== frame.url || binding.loaderId !== frame.loaderId || binding.session !== frame.session) prior = undefined;
     const selection = state.selection;
     const range = prior?.fast?.slice || selection?.slice;
-    return this.observe(task, { frameId: prior?.fast?.native?.frameId || selection?.frameId }, prior?.fast?.native ? { ...range, refs: Object.values(prior.fast.native.refs) } : range, true);
+    return this.observeOnce(task, { frameId: prior?.fast?.native?.frameId || selection?.frameId }, prior?.fast?.native ? { ...range, refs: Object.values(prior.fast.native.refs) } : range, true);
   }
-  async observe(task: BrowserTask, options: PageReadOptions = {}, range?: PageSlice, fallbackToRoot = false): Promise<NativeObservation> {
+  observe(task: BrowserTask, options: PageReadOptions = {}, range?: PageSlice, fallbackToRoot = false): Promise<NativeObservation> {
+    return this.recoverFrameRead(task, () => this.observeOnce(task, options, range, fallbackToRoot));
+  }
+  private async observeOnce(task: BrowserTask, options: PageReadOptions = {}, range?: PageSlice, fallbackToRoot = false): Promise<NativeObservation> {
     const state = await this.discover(task);
     let frameId = options.frameId, cursor = options.cursor;
     if (cursor) {

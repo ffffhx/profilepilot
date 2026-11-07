@@ -7,10 +7,12 @@ const reason = z.enum(PHONE_DEBUG_REASONS).optional();
 /** Optional diagnostics retain compatibility with companions released before 0.2.1. */
 export const readinessSchema = z.object({
   unlocked: z.boolean(), computerConnected: z.boolean(), usbConnected: z.boolean(), wifiConnected: z.boolean(),
+  unattended: z.boolean().optional(), charging: z.boolean().optional(), unattendedActive: z.boolean().optional(),
   developerOptions: debug, usbDebugging: debug, wirelessDebugging: debug,
   accessibilityService: z.enum(["running", "enabled", "disabled", "unknown"]),
   debugReasons: z.object({ developerOptions: reason, usbDebugging: reason, wirelessDebugging: reason }).optional(),
   appVersion: z.string().min(1).max(40).regex(/^[\w.+-]+$/).optional(),
+  sdk: z.number().int().min(1).max(1000).optional(),
   network: z.object({
     wifiIpv4: z.array(z.string().refine(value => { try { return wirelessAddress(value + ":1") === value + ":1"; } catch { return false; } })).max(8),
     adbEndpoints: z.array(z.object({ address: z.string().refine(value => { try { wirelessAddress(value); return true; } catch { return false; } }), ageMs: z.number().int().min(0).max(60000) })).max(8)

@@ -26,10 +26,12 @@ if (window.parent !== window && workspaceRoute(location.href, window.parent.loca
   };
   // All IPC still originates in the trusted top-level desktop document. No Node
   // integration, preload in subframes, remote content, or generic IPC forwarding.
-  for (const name of ["profileManager", "browserConnection", "tasks", "localApps", "phones", "mobile"] as const) {
+  for (const name of ["profileManager", "browserConnection", "tasks", "localApps", "phones", "mobile", "desktopControl", "gpuiControl"] as const) {
     const source = window.parent[name];
     const api = Object.fromEntries(Object.entries(source).map(([method, value]) => {
       const allowed = name === "profileManager" ||
+        (name === "desktopControl" && workspace === "desktop") ||
+        (name === "gpuiControl" && workspace === "gpui") ||
         (name === "phones" && (workspace === "phones" || method === "snapshot" || method === "onChanged")) ||
         (name === "mobile" && workspace === "phones") || (name === "localApps" && workspace === "local-apps") ||
         (name === "browserConnection" && ["agent", "browser", "tools"].includes(workspace)) ||

@@ -148,11 +148,11 @@ ipcMain.handle('phone-ui:request', async (_, method, params) => {
     previewCalls++;
     const behavior = previewBehavior; previewBehavior = {};
     if (behavior.fail) throw new Error('Fixture screenshot unavailable');
-    const response = await executePhoneCommand({ action: 'phone', method, params }, service);
+    const response = await executePhoneCommand({ action: 'phone', method, params }, service, 'desktop');
     if (behavior.delay) await new Promise(resolve => setTimeout(resolve, behavior.delay));
     return response;
   }
-  return method === 'cloud-pair' ? { id: '00000000-0000-0000-0000-000000000001', uri: 'profilepilot://status?fixture=1', qrCode: nativeImage.createFromBitmap(Buffer.alloc(16 * 16 * 4, 128), {width:16,height:16}).toDataURL(), expiresAt: Date.now()+180000 } : method === 'snapshot' ? service.snapshot() : executePhoneCommand({ action: 'phone', method, params }, service);
+  return method === 'cloud-pair' ? { id: '00000000-0000-0000-0000-000000000001', uri: 'profilepilot://status?fixture=1', qrCode: nativeImage.createFromBitmap(Buffer.alloc(16 * 16 * 4, 128), {width:16,height:16}).toDataURL(), expiresAt: Date.now()+180000 } : method === 'snapshot' ? service.snapshot() : executePhoneCommand({ action: 'phone', method, params }, service, 'desktop');
 });
 ipcMain.handle('phone-ui:preview-calls', () => previewCalls);
 ipcMain.handle('phone-ui:wireless-discovery', (_, value, reachable) => { wirelessServices = value ?? defaultWirelessServices; wirelessReachable = reachable; });

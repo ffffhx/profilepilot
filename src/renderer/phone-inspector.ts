@@ -40,7 +40,7 @@ export function createPhoneInspector(container: HTMLElement) {
   const hint = () => !device ? "选择设备后显示手机画面" : device.connection === "unauthorized" ? "请在手机上确认调试授权"
     : device.connection !== "device" ? device.transport === "emulator" ? "启动模拟器后自动显示画面" : "连接手机后自动显示画面"
     : !connected() ? "点击连接后显示手机画面"
-    : session()?.phase === "paused" ? "会话已暂停，恢复后更新画面" : session()?.phase === "disconnected" ? "请先结束已断开的会话"
+    : session()?.phase === "paused" ? session()?.pauseCause === "screen" ? "手机已熄屏，解锁后自动更新画面" : "会话已暂停，恢复后更新画面" : session()?.phase === "disconnected" ? "请先结束已断开的会话"
     : device.visualFollowActive ? "视觉跟随期间暂停预览，请在视觉跟随窗口查看画面" : device.taskCaptureActive ? "手机任务期间暂停预览，结束后自动恢复" : device.pending || failure || "正在获取手机画面…";
   const updateScreen = () => {
     placeholder.hidden = !!capturedAt; placeholder.querySelector("[role=status]")!.textContent = hint();
@@ -115,9 +115,12 @@ export function createPhoneInspector(container: HTMLElement) {
       container.dataset.deviceId = device?.id || "";
       const name = device ? phonePresentation(device).displayName : "尚未选择设备";
       html(".phone-inspector-heading", `<span class="phone-inspector-avatar">${taskIcon(device?.transport === "emulator" ? "desktop" : "phone")}</span><div><h2>${esc(name)}</h2><p>${device?.transport === "emulator" ? "本机模拟器" : "Android 设备"}</p></div>${device ? `<button data-action="details" data-device-id="${esc(device.id)}" title="设备设置" aria-label="设备设置">${taskIcon("settings")}</button>` : ""}`);
-      const label = !connected() ? "等待设备连接" : state ? state.phase === "paused" ? "已暂停" : state.phase === "disconnected" ? "会话已断开" : state.mode === "control" ? "正在操作" : "正在查看" : ready() ? "可供 Agent 操作" : "等待设备就绪";
+      const awaitingUnlock = state?.phase === "paused" && state.pauseCause === "screen";
+      const label = !connected() ? "等待设备连接" : state ? state.phase === "paused" ? awaitingUnlock ? "等待解锁 · 解锁后自动继续" : "已暂停" : state.phase === "disconnected" ? "会话已断开" : state.mode === "control" ? "正在操作" : "正在查看" : ready() ? "可供 Agent 操作" : "等待设备就绪";
       const isBasic = state === device?.basic;
-      const controls = state && device ? `<div class="phone-inspector-session-actions">${state.phase !== "disconnected" ? `<button ${isBasic ? `data-phone-basic-command="${state.phase === "paused" ? "resume" : "pause"}"` : `data-action="${state.phase === "paused" ? "resume" : "pause"}"`} ${busy ? "disabled" : ""}>${state.phase === "paused" ? "继续" : "暂停"}</button>` : ""}<button ${isBasic ? 'data-phone-basic-command="stop"' : 'data-action="stop"'} ${busy ? "disabled" : ""}>结束会话</button></div>` : "";
+      const locked = device?.connection === "device" && device.state?.readiness?.unlocked === false;
+      const wake = !isBasic && (awaitingUnlock || locked) ? `<button data-action="wake" ${busy ? "disabled" : ""}>点亮屏幕</button>` : "";
+      const controls = state && device ? `<div class="phone-inspector-session-actions">${state.phase !== "disconnected" ? `<button ${isBasic ? `data-phone-basic-command="${state.phase === "paused" ? "resume" : "pause"}"` : `data-action="${state.phase === "paused" ? "resume" : "pause"}"`} ${busy ? "disabled" : ""}>${state.phase === "paused" ? "继续" : "暂停"}</button>` : ""}${wake}<button ${isBasic ? 'data-phone-basic-command="stop"' : 'data-action="stop"'} ${busy ? "disabled" : ""}>结束会话</button></div>` : "";
       html(".phone-inspector-agent", `<h3>当前 Agent</h3>${state ? `<strong>${esc(state.controller || "本机用户")}</strong>` : ""}<p class="phone-inspector-session" data-connected="${ready()}"><i></i>${label}</p>${state?.task ? `<p>${esc(state.task)}</p>` : ""}${controls}`);
       const occupied = !!state && ["viewing", "controlling", "executing", "paused"].includes(state.phase);
       const connectionButton = device?.connection === "device" ? `<button data-action="${connected() ? "disconnect-phone" : "connect-phone"}" data-device-id="${esc(device.id)}" ${busy || device.pending || occupied ? "disabled" : ""} ${occupied ? 'title="请先结束当前会话"' : ""}>${connected() ? "断开" : "连接"}</button>` : "";

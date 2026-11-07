@@ -48,6 +48,11 @@ final class ControlOverlay implements AutoCloseable {
         Runnable toggle = service.pauseOrResumeAction();
         pause.setOnClickListener(view -> toggle.run());
         details.setVisibility(expanded ? View.VISIBLE : View.GONE);
+        // Keep the display on only while the computer actually owns control. A
+        // paused session must let the phone sleep normally.
+        int flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+            | (service.session.keepScreenOn && service.session.active() ? WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON : 0);
+        if (params.flags != flags) { params.flags = flags; windows.updateViewLayout(panel, params); }
     }
     private void create() {
         panel = new LinearLayout(service); panel.setOrientation(LinearLayout.VERTICAL); panel.setPadding(dp(15), dp(8), dp(15), dp(8));
@@ -60,7 +65,9 @@ final class ControlOverlay implements AutoCloseable {
         pause = button(buttons, "暂停", () -> service.localControl("pause")); button(buttons, "结束控制", () -> service.localControl("stop"));
         button(buttons, "回到顶部", () -> { params.y = dp(8); windows.updateViewLayout(panel, params); });
         int screen = service.getResources().getDisplayMetrics().widthPixels;
-        params = new WindowManager.LayoutParams(Math.min(dp(320), screen - dp(24)), WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT);
+        int flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+            | (service.session.keepScreenOn && service.session.active() ? WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON : 0);
+        params = new WindowManager.LayoutParams(Math.min(dp(320), screen - dp(24)), WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, flags, PixelFormat.TRANSLUCENT);
         params.gravity = Gravity.TOP | Gravity.LEFT;
         android.content.SharedPreferences preferences = service.getSharedPreferences("overlay", 0);
         params.x = Math.max(dp(8), Math.min(screen - params.width - dp(8), preferences.getInt("x", (screen - params.width) / 2)));

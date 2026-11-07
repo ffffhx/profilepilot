@@ -1,7 +1,7 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { RUNNING_CONTROL_BUILD } from "./runtime-identity";
 import { writeControlTrace } from "./control-trace";
-import { controlRecovery } from "../shared/control-recovery";
+import { controlRecovery, parseControlRecovery, type ControlRecovery } from "../shared/control-recovery";
 import { promises as fs } from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -12,7 +12,12 @@ import { writeDiagnosticLog } from "./diagnostic-log";
 import type { TaskService } from "./tasks/service";
 import { executeTaskManagementCommand, parseTaskManagementCommand } from "./tasks/management";
 import { executePhoneCommand } from "./phones/management";
+import { WirelessFailure } from "./phones/wireless-diagnostics";
 import type { PhonesService } from "./phones/service";
+import type { DesktopService } from "./desktop/service";
+import type { GpuiService } from "./gpui/service";
+import type { LocalAppsService } from "./local-apps/service";
+import { executeLocalAppManagementCommand } from "./local-apps/management";
 import {
   PROFILEPILOT_MANAGEMENT_MAX_MESSAGE_BYTES,
   PROFILEPILOT_FOLLOW_MAX_REQUEST_BYTES,
@@ -39,6 +44,9 @@ export interface ProfilePilotManagementServerOptions {
   profileManager: ManagementProfileManager;
   getTaskService?: () => TaskService | undefined;
   getPhoneService?: () => PhonesService | undefined;
+  getDesktopService?: () => DesktopService | undefined;
+  getGpuiService?: () => GpuiService | undefined;
+  getLocalAppsService?: () => LocalAppsService | undefined;
   homeDir?: string;
   env?: NodeJS.ProcessEnv;
   appVersion?: string;
@@ -100,7 +108,9 @@ export async function startProfilePilotManagementServer(
         }
         if (follow && command.params?.op === "setup") socket.setTimeout(360_000);
         if (command?.action === "phone" && ["action", "wrapper-action", "camera-command", "camera-sources", "package-info", "packages", "diagnose", "follow-command"].includes(command.method)) maxResponseBytes = PROFILEPILOT_PHONE_MAX_RESPONSE_BYTES;
-        if (command?.action === "phone" && command.method === "basic-action") maxResponseBytes = PROFILEPILOT_PHONE_BASIC_MAX_RESPONSE_BYTES;
+        if (command?.action === "phone" && (command.method === "basic-action" || command.method === "action" && String((command.params as { id?: string })?.id || "").startsWith("iphone-"))) maxResponseBytes = PROFILEPILOT_PHONE_BASIC_MAX_RESPONSE_BYTES;
+        if (command?.action === "desktop") maxResponseBytes = 4 * 1024 * 1024;
+        if (command?.action === "gpui") maxResponseBytes = 33 * 1024 * 1024;
       } catch { /* handleRequestLine returns the normal invalid-request error */ }
       void handleRequestLine(line, token, options)
         .then((response) => writeResponse(socket, response, maxResponseBytes))
@@ -154,9 +164,26 @@ export async function startProfilePilotManagementServer(
 
 export async function executeProfilePilotManagementCommand(
   command: ProfilePilotManagementCommand,
-  options: Pick<ProfilePilotManagementServerOptions, "profileManager" | "appVersion" | "onMutation" | "getTaskService" | "getPhoneService">
+  options: Pick<ProfilePilotManagementServerOptions, "profileManager" | "appVersion" | "onMutation" | "getTaskService" | "getPhoneService" | "getDesktopService" | "getLocalAppsService" | "getGpuiService">
 ): Promise<unknown> {
   if (typeof command?.action !== "string") throw new ProfileManagerError("管理请求缺少 command。", "MANAGEMENT_COMMAND_REQUIRED");
+  if (command.action === "gpui") {
+    const service = options.getGpuiService?.();
+    if (!service) throw new ProfileManagerError("GPUI 服务尚未就绪，请更新并重启 ProfilePilot。", "GPUI_UNAVAILABLE");
+    return service.execute(command);
+  }
+  if (command.action === "local-app") {
+    const service = options.getLocalAppsService?.();
+    if (!service) throw new ProfileManagerError("本地应用服务尚未就绪，请更新并重新打开 ProfilePilot。", "LOCAL_APP_SERVICE_UNAVAILABLE");
+    const result = await executeLocalAppManagementCommand(command, service);
+    if (command.method === "connect" || command.method === "configure") options.onMutation?.();
+    return result;
+  }
+  if (command.action === "desktop") {
+    const service = options.getDesktopService?.();
+    if (!service) throw new ProfileManagerError("桌面控制服务尚未就绪。", "DESKTOP_SERVICE_UNAVAILABLE");
+    return service.execute(command);
+  }
   if (command.action === "phone") {
     const service = options.getPhoneService?.();
     if (!service) throw new ProfileManagerError("手机服务尚未就绪。", "PHONE_SERVICE_UNAVAILABLE");
@@ -282,6 +309,7 @@ async function handleRequestLine(
   const startedAt = Date.now();
   const metadata = { ...managementCommandMetadata(request.command), requestId: id };
   let failureCode: string | undefined;
+  let failureRecovery: ControlRecovery | undefined;
   writeDiagnosticLog("info", "management-cli", "command.started", `开始执行 ${request.command.action}`, metadata);
   try {
     const data = await executeProfilePilotManagementCommand(request.command, options);
@@ -293,28 +321,33 @@ async function handleRequestLine(
   } catch (error) {
     const candidate = error as { code?: unknown; message?: unknown };
     failureCode = typeof candidate?.code === "string" ? candidate.code : "PROFILEPILOT_MANAGEMENT_ERROR";
+    failureRecovery = parseControlRecovery((error as any)?.details?.recovery) || controlRecovery(failureCode);
     writeDiagnosticLog("error", "management-cli", "command.failed", `${request.command.action} 执行失败`, {
       ...metadata,
       duration_ms: Date.now() - startedAt,
       error_code: typeof candidate?.code === "string" ? candidate.code : null,
+      ...(error instanceof WirelessFailure ? { wireless: error.details.wireless } : {}),
       // Task errors can contain model text or user answers. Diagnostic logs
       // only record the error code for these commands.
       ...(request.command.action.startsWith("task.") || request.command.action === "phone" ? {} : { error: typeof candidate?.message === "string" ? candidate.message : String(error) })
     });
     return responseFromError(id, error);
   } finally {
-    if (request.command.action === "phone") {
-      const params = request.command.params as any;
-      writeControlTrace(profilePilotManagementRoot(options.homeDir || os.homedir(), options.env || process.env), "phone", {
-        requestId: id, sessionId: params?.sessionId, target: params?.id, generation: params?.generation,
-        method: request.command.method, durationMs: Date.now() - startedAt, code: failureCode,
-        recovery: failureCode ? controlRecovery(failureCode) : undefined
+    if (["phone", "desktop", "gpui", "local-app"].includes(request.command.action)) {
+      const command = request.command as any, params = command.params;
+      const route = command.action === "local-app" ? "electron" : command.action;
+      writeControlTrace(profilePilotManagementRoot(options.homeDir || os.homedir(), options.env || process.env), route, {
+        requestId: id, sessionId: params?.sessionId || command.session, target: params?.id || command.windowId || command.target || command.selector, generation: params?.generation,
+        method: command.method, actionKind: params?.action?.kind || params?.kind || command.tool,
+        actionRequestId: params?.requestId || command.requestId, durationMs: Date.now() - startedAt, code: failureCode,
+        ok: !failureCode, recovery: failureRecovery
       });
     }
   }
 }
 
 function managementCommandMetadata(command: ProfilePilotManagementCommand): Record<string, unknown> {
+  if (command.action === "phone") return { action: command.action, method: command.method };
   if (command.action.startsWith("task.")) return { action: command.action };
   if (command.action === "ping" || command.action === "profile.list") return { action: command.action };
   if (command.action === "profile.create") return { action: command.action, profile_name: command.name };

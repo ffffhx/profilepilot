@@ -25,6 +25,7 @@ export async function runGatewaySiteCli(args: string[], commandIndex: number, po
     return response.result;
   };
   return runSiteAdapter(input, {
+    cacheScope: `${port}:${sessionId}:${daemonInstanceId}`,
     evaluate: async expression => siteEvaluationValue(await rawCdp("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true })),
     open: async url => { const result = await rawCdp("Page.navigate", { url }) as any; if (result?.errorText) throw new Error(result.errorText); return result; }
   });

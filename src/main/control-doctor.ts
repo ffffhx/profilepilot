@@ -6,6 +6,41 @@ import { nativeExtensionReady } from "./tasks/native-compatibility";
 import { RUNNING_CONTROL_BUILD } from "./runtime-identity";
 import { NativeControlError } from "./native-control/errors";
 import { controlRecovery } from "../shared/control-recovery";
+import type { ProfilePilotManagementCommand, ProfilePilotManagementResponse } from './profilepilot-management-protocol';
+import { electronRouting, desktopRouting, gpuiRouting, unavailableRouting, type ControlRoute } from './control-routing';
+
+export interface ControlDoctorTarget {
+  profileId?: string; deviceId?: string; electronId?: string; windowId?: string; gpuiTarget?: string;
+  sessionId?: string; route?: ControlRoute;
+}
+
+/** Read-only discovery shares the normal management authorization boundary. */
+export async function createApplicationDoctor(target: ControlDoctorTarget,
+  request: (command: ProfilePilotManagementCommand) => Promise<ProfilePilotManagementResponse>) {
+  const call = async (command: ProfilePilotManagementCommand) => {
+    try {
+      const response = await request(command);
+      return response.ok ? { data: response.data as any } : { error: response.error };
+    } catch (error) { return { error: { code: 'CONTROL_DISCOVERY_UNAVAILABLE', message: error instanceof Error ? error.message : String(error) } }; }
+  };
+  const selectedRoute = target.route || (target.electronId ? 'electron' : target.windowId ? 'desktop' : target.gpuiTarget ? 'gpui' : target.profileId ? 'browser' : target.deviceId ? 'phone' : undefined);
+  const [electron, desktop, gpui] = await Promise.all([
+    !selectedRoute || selectedRoute === 'electron' ? call(target.electronId ? { action: 'local-app', method: 'inspect', selector: target.electronId } : { action: 'local-app', method: 'list' }) : undefined,
+    !selectedRoute || selectedRoute === 'desktop' ? call({ action: 'desktop', method: target.windowId ? 'doctor' : 'status', ...(target.windowId ? { windowId: target.windowId } : {}), ...(target.sessionId ? { session: target.sessionId } : {}) }) : undefined,
+    !selectedRoute || selectedRoute === 'gpui' ? call({ action: 'gpui', method: 'status' }) : undefined
+  ]);
+  const listing = gpui?.data?.backend && selectedRoute === 'gpui' ? await call({ action: 'gpui', method: 'list' }) : undefined;
+  const electronApps = electron?.data?.app ? [electron.data.app] : electron?.data?.apps || [];
+  const result = {
+    ...(electron ? { electron: { ...electron, targets: electronApps.map((app: any) => ({ id: app.id, routing: electronRouting(app, target.sessionId) })),
+      ...(!electronApps.length ? { routing: electron.error && electron.error.code !== 'LOCAL_APP_NOT_FOUND'
+        ? unavailableRouting('electron', electron.error.message) : electronRouting() } : {}) } } : {}),
+    ...(desktop ? { desktop: { ...desktop, routing: desktopRouting(desktop.data, target.sessionId, target.windowId) } } : {}),
+    ...(gpui ? { gpui: { ...gpui, ...(listing ? { discovery: listing } : {}), routing: gpui.error ? unavailableRouting('gpui', gpui.error.message)
+      : listing?.error ? unavailableRouting('gpui', listing.error.message) : gpuiRouting(gpui.data, listing?.data?.apps || [], target.gpuiTarget, target.sessionId) } } : {})
+  };
+  return { selectedRoute: selectedRoute || null, readOnly: true, automaticClaim: false, automaticResume: false, ...result };
+}
 
 export interface DoctorCheck { id: string; status: "ok" | "warning" | "error"; message: string; nextStep?: string; }
 export function browserReadiness(snapshot: any, expectedVersion?: string, profileId?: string, sessionId?: string) {
@@ -29,6 +64,7 @@ export function browserReadiness(snapshot: any, expectedVersion?: string, profil
     return { profileId: p.profileId, connected: !!p.connected, extensionVersion: p.extensionVersion || null,
       installationType: p.installationType || null, installationMode: p.installationMode || null, capabilities: p.capabilities || [],
       owner: sessions.find(s => s.sessionId === p.ownerSessionId) || (p.ownerSessionId ? { sessionId: p.ownerSessionId, ownership: p.ownership } : null),
+      debuggerDiagnostic: p.debuggerDiagnostic,
       readyToClaim: usable && !p.ownerSessionId, readyToObserve: usable && p.ownerSessionId === sessionId && p.ownership === "agent" && !p.pausedByBrowser,
       observationVerified: false, checks };
   });

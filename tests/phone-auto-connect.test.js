@@ -16,11 +16,11 @@ function fixture(t) {
       probeWireless: async address => { h.probes.push(address); if (h.probeHook) await h.probeHook(); return { reachable: h.reachable, reason: '' }; },
       adb: { run: async (args, timeout, input, signal) => {
         h.calls.push(args);
-        if (args[0] === 'devices') return (h.usb ? `KNOWN ${h.connection} model:Phone\n` : '') + (h.wifi ? `${h.address} device model:Phone` : '');
+        if (args[0] === 'devices') return (h.usb ? `KNOWN ${h.connection} model:Phone\n` : '') + (h.wifi ? `${h.alias || h.address} device model:Phone` : '');
         if (args[0] === 'mdns') return h.services ?? `adb-KNOWN-xyz _adb-tls-connect._tcp ${h.address}`;
         if (args[0] === 'connect') {
           if (h.connectHook) return h.connectHook(signal);
-          if (h.fail) return 'failed to authenticate';
+          if (h.fail) return h.fail === 'auth' ? 'failed to authenticate' : 'failed to connect';
           h.wifi = true; return `connected to ${args[1]}`;
         }
         if (args[3] === "'getprop' 'ro.serialno'") return args[1] === 'KNOWN' ? 'KNOWN' : h.serial;
@@ -59,6 +59,60 @@ test('regular service polling reconnects without opening a dialog or clicking co
   assert.equal(service.snapshot().devices.find(d => d.id === h.address).connection, 'device');
 });
 
+test('host ADB restart with empty mDNS recovers only the recently verified Wi-Fi endpoint', async t => {
+  const h = fixture(t), service = h.create(); h.usb = false; h.wifi = true;
+  await service.refresh(); await h.offline(service); h.services = ''; h.now += 5000;
+  await service.reconnectWireless();
+  assert.equal(h.wifi, true); assert.deepEqual(h.connects().map(args => args[1]), [h.address]);
+  assert.ok(!h.calls.some(args => ['pair', 'install'].includes(args[0])));
+});
+
+test('another outage after successful recovery is not held by the previous attempt cooldown', async t => {
+  const h = fixture(t), service = h.create(); h.usb = false; h.wifi = true;
+  await service.refresh(); h.services = '';
+  for (let round = 0; round < 3; round++) {
+    await h.offline(service); h.now += 10000; await service.reconnectWireless();
+    assert.equal(h.wifi, true); assert.equal(h.connects().length, round + 1);
+  }
+});
+
+test('a live mDNS-only route retains its resolved endpoint across an empty discovery cache', async t => {
+  const h = fixture(t), service = h.create(); h.usb = false; h.wifi = true;
+  h.alias = 'adb-KNOWN-xyz._adb-tls-connect._tcp';
+  await service.refresh();
+  await h.offline(service); h.services = ''; h.alias = undefined; h.now += 5000;
+  await service.reconnectWireless();
+  assert.deepEqual(h.connects().map(args => args[1]), [h.address]);
+  assert.equal(service.snapshot().devices.find(d => d.id === h.address).hardwareId, 'KNOWN');
+  assert.equal(service.snapshot().devices.find(d => d.id === h.address).connection, 'device');
+});
+
+test('a live mDNS alias does not cache a different instance of the same phone', async t => {
+  const h = fixture(t), service = h.create(); h.usb = false; h.wifi = true;
+  h.alias = 'adb-KNOWN-current._adb-tls-connect._tcp';
+  await service.refresh();
+  await h.offline(service); h.services = ''; h.now += 5000;
+  await service.reconnectWireless();
+  assert.equal(h.connects().length, 0);
+});
+
+test('recent endpoint fallback expires and is not loaded from historical saved routes after restart', async t => {
+  const h = fixture(t), first = h.create(); h.usb = false; h.wifi = true;
+  await first.refresh(); await h.offline(first); h.services = ''; h.now += 60000;
+  await first.reconnectWireless(); assert.equal(h.connects().length, 0);
+  await first.close(); const restarted = h.create(); await restarted.refresh();
+  await restarted.reconnectWireless(); assert.equal(h.connects().length, 0);
+});
+
+test('a recent endpoint reused by another phone never inherits the expected identity or control', async t => {
+  const h = fixture(t), service = h.create(); h.usb = false; h.wifi = true;
+  await service.refresh(); await h.offline(service); h.services = ''; h.serial = 'OTHER'; h.now += 5000;
+  await service.reconnectWireless();
+  const online = service.snapshot().devices.find(d => d.connection === 'device');
+  assert.equal(online.hardwareId, 'OTHER'); assert.equal(online.state, null);
+  assert.ok(!h.calls.some(args => ['pair', 'install', 'forward'].includes(args[0])));
+});
+
 test('recovery only uses fresh connection endpoints for the known phone, never pairing ports or stale saved IPs', async t => {
   const h = fixture(t), service = h.create(); await service.refresh(); await h.offline(service);
   h.services = 'adb-OTHER-x _adb-tls-connect._tcp 192.168.1.3:42000\nadb-KNOWN-x _adb-tls-pairing._tcp 192.168.1.9:43000';
@@ -79,6 +133,26 @@ test('failed or unreachable endpoints are throttled and new ports can recover im
   await service.reconnectWireless(); assert.equal(h.connects().length, 2);
   h.now += 10000; h.address = '192.168.1.9:41002'; h.reachable = true; h.fail = false;
   await service.reconnectWireless(); assert.equal(h.connects().length, 3);
+});
+
+test('authentication failure is visible across polls and backs off without losing explicit recovery', async t => {
+  const h = fixture(t), service = h.create(); await service.refresh(); await h.offline(service);
+  h.fail = 'auth'; await service.reconnectWireless();
+  assert.match(service.snapshot().devices.find(d => d.id === 'KNOWN').error, /PHONE_WIFI_AUTH_REQUIRED/);
+  await service.refresh();
+  assert.match(service.snapshot().devices.find(d => d.id === 'KNOWN').error, /重新配对/);
+  h.now += 60000; await service.reconnectWireless(); assert.equal(h.connects().length, 1);
+  h.fail = false;
+  const restored = await service.autoConnectWireless('KNOWN');
+  assert.equal(restored.connection, 'device');
+  assert.ok(service.snapshot().devices.every(d => !d.error.includes('PHONE_WIFI_AUTH_REQUIRED')));
+});
+
+test('background authentication backoff is bounded and does not permanently block external re-pairing', async t => {
+  const h = fixture(t), service = h.create(); await service.refresh(); await h.offline(service);
+  h.fail = 'auth'; await service.reconnectWireless();
+  h.fail = false; h.now += 300000; await service.reconnectWireless();
+  assert.equal(h.connects().length, 2); assert.equal(h.wifi, true);
 });
 
 test('authorization and paused sessions are respected; recovered transport never resumes a disconnected basic session', async t => {

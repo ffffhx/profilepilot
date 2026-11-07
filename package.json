@@ -12,7 +12,10 @@
     "plugin:sync": "node scripts/package-codex-plugin.mjs --sync",
     "plugin:check": "node scripts/package-codex-plugin.mjs --check && node --test tests/codex-plugin-package.test.mjs",
     "plugin:pack": "node scripts/package-codex-plugin.mjs --pack",
-    "build": "node scripts/build-phone-video.mjs --check && npm run build:input-guard && npm run build:phone-wrapper && tsc && npm run build:browser-engine && npm run bundle:agent-browser-wrapper && npm run bundle:profilepilot-cli && npm run bundle:renderer && npm run build:css && node scripts/build-control-manifest.mjs",
+    "build": "node scripts/build-phone-video.mjs --check && npm run build:input-guard && npm run build:input-observer && npm run build:desktop && npm run build:windows-sampler && npm run build:phone-wrapper && tsc && npm run build:browser-engine && npm run bundle:agent-browser-wrapper && npm run bundle:profilepilot-cli && npm run bundle:renderer && npm run build:css && node scripts/build-control-manifest.mjs",
+    "build:windows-sampler": "node scripts/build-windows-sampler.mjs --production",
+    "build:desktop": "node scripts/build-desktop.mjs",
+    "build:input-observer": "node scripts/build-input-observer.mjs --production",
     "build:phone-video": "node scripts/build-phone-video.mjs",
     "build:browser-engine": "node scripts/build-browser-engine.mjs",
     "verify:browser-engine": "npm run build && node scripts/verify-typescript-browser.mjs && node scripts/verify-typescript-browser.mjs --electron",
@@ -21,7 +24,7 @@
     "setup:input-guard-signing": "node scripts/setup-input-guard-signing.mjs",
     "bundle:agent-browser-wrapper": "node scripts/build-browser-wrapper.mjs",
     "bundle:profilepilot-cli": "esbuild src/main/profilepilot-cli.ts --bundle --platform=node --format=cjs --target=node22 --outfile=dist/main/profilepilot-cli.cjs --log-level=warning",
-    "bundle:renderer": "esbuild src/renderer/main.ts --bundle --outfile=dist/browser/app.js --platform=browser --format=iife --target=es2022 --log-level=warning && node scripts/bundle-task-chat.mjs && esbuild src/renderer/local-apps.ts --bundle --outfile=dist/browser/local-apps.js --platform=browser --format=iife --target=es2022 --log-level=warning && esbuild src/renderer/phones.ts --bundle --outfile=dist/browser/phones.js --platform=browser --format=iife --target=es2022 --log-level=warning && esbuild src/renderer/settings.ts src/renderer/workspace-shell.ts src/renderer/workspace-frame.ts --bundle --outdir=dist/browser --platform=browser --format=iife --target=es2022 --log-level=warning",
+    "bundle:renderer": "esbuild src/renderer/main.ts --bundle --outfile=dist/browser/app.js --platform=browser --format=iife --target=es2022 --log-level=warning && node scripts/bundle-task-chat.mjs && esbuild src/renderer/local-apps.ts --bundle --outfile=dist/browser/local-apps.js --platform=browser --format=iife --target=es2022 --log-level=warning && esbuild src/renderer/phones.ts --bundle --outfile=dist/browser/phones.js --platform=browser --format=iife --target=es2022 --log-level=warning && esbuild src/renderer/gpui.ts src/renderer/desktop.ts src/renderer/settings.ts src/renderer/workspace-shell.ts src/renderer/workspace-frame.ts --bundle --outdir=dist/browser --platform=browser --format=iife --target=es2022 --log-level=warning",
     "build:css": "tailwindcss -i ./public/styles.src.css -o ./public/app.css && tailwindcss -c tailwind.chat.config.cjs -i public/task-chat.src.css -o dist/browser/task-chat.css --minify",
     "watch:css": "tailwindcss -i ./public/styles.src.css -o ./public/app.css --watch",
     "start": "npm run start:independent",
@@ -73,7 +76,15 @@
     "verify:tasks:browser": "npm run build && node scripts/verify-task-browser.mjs",
     "verify:tasks:pdf": "npm run build && node scripts/verify-task-pdf.mjs",
     "build:phone": "node scripts/build-phone.mjs",
-    "build:screen-camera": "node scripts/build-screen-camera.mjs"
+    "build:screen-camera": "node scripts/build-screen-camera.mjs",
+    "build:gpui": "node scripts/build-gpui.mjs",
+    "eval:list": "node benchmarks/agent-tasks/run.mjs list",
+    "eval:smoke": "node benchmarks/agent-tasks/run.mjs smoke",
+    "eval:run": "node benchmarks/agent-tasks/run.mjs run",
+    "eval:report": "node benchmarks/agent-tasks/run.mjs report",
+    "eval:compare": "node benchmarks/agent-tasks/run.mjs compare",
+    "eval:serve": "node benchmarks/agent-tasks/run.mjs serve",
+    "test:evals": "node --test tests/agent-task-*.test.mjs"
   },
   "engines": {
     "node": ">=22.13.0"
@@ -85,7 +96,9 @@
     "productName": "ProfilePilot",
     "copyright": "Copyright 2026 ffffhx",
     "asar": true,
-    "asarUnpack": ["public/vision/*.py"],
+    "asarUnpack": [
+      "public/vision/*.py"
+    ],
     "electronDist": "node_modules/electron/dist",
     "directories": {
       "buildResources": "build",
@@ -168,6 +181,22 @@
           "to": "icon.ico"
         },
         {
+          "from": "dist/native/ProfilePilot.Desktop.exe",
+          "to": "native/ProfilePilot.Desktop.exe"
+        },
+        {
+          "from": "dist/native/ProfilePilot.InputObserver.exe",
+          "to": "native/ProfilePilot.InputObserver.exe"
+        },
+        {
+          "from": "dist/native/ProfilePilot.WindowsSampler.exe",
+          "to": "native/ProfilePilot.WindowsSampler.exe"
+        },
+        {
+          "from": "native/desktop/LICENSE",
+          "to": "native/desktop-LICENSE"
+        },
+        {
           "from": "native/input-guard-win.ps1",
           "to": "native/input-guard-win.ps1"
         },
@@ -206,9 +235,11 @@
   },
   "devDependencies": {
     "@types/node": "^25.9.1",
+    "@types/plist": "3.0.5",
     "@types/qrcode": "^1.5.6",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
+    "@types/yazl": "3.3.0",
     "electron": "^42.3.3",
     "electron-builder": "^26.15.2",
     "esbuild": "^0.28.1",
@@ -228,11 +259,13 @@
     "fast-xml-parser": "^5.11.2",
     "pdfjs-dist": "^6.3.289",
     "playwright-core": "1.64.1",
+    "plist": "3.1.0",
     "qrcode": "^1.5.4",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "selfsigned": "^5.5.0",
     "streamdown": "^2.7.0",
+    "yazl": "3.3.1",
     "zod": "^4.6.5"
   },
   "overrides": {

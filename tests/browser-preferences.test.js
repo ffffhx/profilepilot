@@ -23,7 +23,8 @@ test('first in-app save creates UTF-8 preferences for installed clients, includi
   const { home, files } = fixture(t);
   const initial = await readBrowserPreferences(home);
   assert.equal(initial.exists, false);
-  assert.equal(initial.content, '');
+  assert.equal(initial.defaulted, true);
+  assert.match(initial.content, /^# 浏览器控制偏好/);
   const content = '# 个人浏览器偏好\r\n默认 Chrome，通过扩展连接。\r\n';
   const saved = await save(home, initial, content);
   assert.equal(saved.content, content);

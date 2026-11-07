@@ -147,6 +147,8 @@ test("compatibility launcher installs from the bundled TS engine with no global 
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "profilepilot-wrapper-prerequisite-"));
   const originalHome = process.env.HOME;
   const originalPath = process.env.PATH;
+  const originalWindowsUserPath = process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH;
+  if (process.platform === "win32") process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH = "";
   process.env.HOME = home;
   process.env.PATH = path.join(home, "empty-bin");
   fs.mkdirSync(process.env.PATH, { recursive: true });
@@ -161,6 +163,8 @@ test("compatibility launcher installs from the bundled TS engine with no global 
     else process.env.HOME = originalHome;
     if (originalPath === undefined) delete process.env.PATH;
     else process.env.PATH = originalPath;
+    if (originalWindowsUserPath === undefined) delete process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH;
+    else process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH = originalWindowsUserPath;
     fs.rmSync(home, { recursive: true, force: true });
   }
 });

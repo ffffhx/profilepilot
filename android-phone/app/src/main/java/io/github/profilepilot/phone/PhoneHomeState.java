@@ -8,7 +8,8 @@ record PhoneHomeState(Kind kind, String title, String description, boolean viewi
   enum Action { DETAILS, SETTINGS, HELP }
 
   record Input(boolean connected, Debugging debugging, boolean permissionsReady,
-               boolean unlocked, boolean seenConnected, boolean hasSession, String phase, String mode) { }
+               boolean unlocked, boolean seenConnected, boolean hasSession, String phase, String mode,
+               String pauseCause) { }
 
   static Debugging debugging(String usb, String wifi) {
     if ("enabled".equals(usb) || "enabled".equals(wifi)) return Debugging.READY;
@@ -55,12 +56,18 @@ record PhoneHomeState(Kind kind, String title, String description, boolean viewi
           input.debugging() == Debugging.READY ? "调试已开启，请保持电脑端运行" : "调试状态待确认，请检查连接设置",
           viewing, input.debugging() == Debugging.UNKNOWN);
     }
-    if (ongoing && "paused".equals(input.phase()))
-      return new PhoneHomeState(Kind.PAUSED, viewing ? "查看已暂停" : "控制已暂停",
-          !input.unlocked() ? "请先解锁手机，再手动继续"
+    if (ongoing && "paused".equals(input.phase())) {
+      boolean screen = "screen".equals(input.pauseCause());
+      return new PhoneHomeState(Kind.PAUSED,
+          screen ? (viewing ? "查看等待解锁" : "控制等待解锁") : viewing ? "查看已暂停" : "控制已暂停",
+          screen ? !input.unlocked() ? "手机已熄屏，解锁后自动继续"
+                  : !input.permissionsReady() ? "解锁后需恢复下方权限才会自动继续"
+                  : "屏幕已点亮，正在自动继续"
+              : !input.unlocked() ? "请先解锁手机，再手动继续"
               : !input.permissionsReady() ? "请先恢复下方权限，再手动继续"
               : viewing ? "屏幕查看已暂停，需手动继续" : "当前由你操作，电脑操作已暂停",
           viewing, !input.unlocked() || !input.permissionsReady());
+    }
     if (ongoing)
       return new PhoneHomeState(viewing ? Kind.VIEWING : Kind.CONTROLLING,
           viewing ? "电脑正在查看" : "电脑正在控制",

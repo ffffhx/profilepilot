@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import type { PhoneAction, PhoneActionResult, PhoneDevice } from "../../shared/phones";
 import type { ProfilePilotManagementCommand, ProfilePilotManagementResponse } from "../profilepilot-management-protocol";
 import { executePhoneFlow, phoneFlowNeedsControl, phoneFlowSchema, type PhoneFlowReport } from "./flow";
+import { phoneResponseError } from "./errors";
 
 type Request = (command: ProfilePilotManagementCommand) => Promise<ProfilePilotManagementResponse>;
 export async function runPhoneFlowCli(flags: Map<string, string>, request: Request): Promise<unknown> {
@@ -18,7 +19,7 @@ export async function runPhoneFlowCli(flags: Map<string, string>, request: Reque
   if (directory) await fs.mkdir(directory, { recursive: true });
   const call = async <T>(method: string, params: unknown): Promise<T> => {
     const response = await request({ action: "phone", method, params });
-    if (!response.ok) throw new Error(response.error?.message || "手机操作失败，流程已停止");
+    if (!response.ok) throw phoneResponseError(response);
     return response.data as T;
   };
   let lease: string | undefined, device: PhoneDevice | undefined, timer: NodeJS.Timeout | undefined;

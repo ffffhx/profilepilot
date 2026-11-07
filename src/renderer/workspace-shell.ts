@@ -14,7 +14,7 @@ const consolePreference = "profilepilot-console-tab";
 let lastConsole: WorkspaceId = "browser";
 try {
   const saved = localStorage.getItem(consolePreference) as WorkspaceId;
-  if (["browser", "local-apps", "phones"].includes(saved)) lastConsole = saved;
+  if (["browser", "local-apps", "phones", "desktop", "gpui"].includes(saved)) lastConsole = saved;
 } catch { /* The console still works without persistent storage. */ }
 if (requested === "browser") requested = lastConsole;
 if (requested === "agent" && !experimentalAgentEnabled()) requested = "browser";

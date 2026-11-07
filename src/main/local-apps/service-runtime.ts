@@ -2,7 +2,7 @@
 import path from "node:path";
 import { promisify } from "node:util";
 import type { LocalAppConfig, LocalAppRuntime } from "../../shared/local-apps";
-import { getWindowsSystemSnapshot, invalidateWindowsSystemSnapshot, type WindowsProcessInfo, type WindowsSystemSnapshot } from "../windows-platform";
+import { getWindowsSystemSnapshot, invalidateWindowsSystemSnapshot, type WindowsProcessInfo, type WindowsSystemSnapshot, type WindowsSystemEvidence, type WindowsControlSample } from "../windows-platform";
 import { idleRuntime } from "./protocol";
 
 const execute = promisify(execFile);
@@ -35,7 +35,7 @@ function hasPath(command: string, identity: string, platform: NodeJS.Platform): 
   return false;
 }
 
-function appProcessRoots(matches: WindowsProcessInfo[], processes: WindowsProcessInfo[]): WindowsProcessInfo[] {
+function appProcessRoots(matches: WindowsProcessInfo[], processes: readonly WindowsProcessInfo[]): WindowsProcessInfo[] {
   const matchingPids = new Set(matches.map(item => item.pid));
   const byPid = new Map(processes.map(item => [item.pid, item]));
   // Electron can fork its own executable without --type (Node workers, watchers,
@@ -54,7 +54,7 @@ function appProcessRoots(matches: WindowsProcessInfo[], processes: WindowsProces
   });
 }
 
-export function processRuntimeFromSnapshot(config: LocalAppConfig, snapshot: WindowsSystemSnapshot, platform: NodeJS.Platform = process.platform): LocalAppRuntime {
+export function processRuntimeFromSnapshot(config: LocalAppConfig, snapshot: WindowsSystemEvidence, platform: NodeJS.Platform = process.platform): LocalAppRuntime {
   const identities = appProcessPaths(config, platform);
   const service = config.mode === "service";
   const ports = service ? [config.servicePort] : [config.cdpPort, config.inspectPort];
@@ -98,9 +98,11 @@ function readPosixProcesses(): Promise<WindowsProcessInfo[]> {
 
 // Read OS listeners without connecting: some tray apps treat even an empty TCP
 // probe as an incoming delivery. macOS uses ps/lsof; Windows uses CIM/netstat.
-export async function processRuntime(config: LocalAppConfig): Promise<LocalAppRuntime> {
+export async function processRuntime(config: LocalAppConfig, options: { windowsSample?: Promise<WindowsControlSample> } = {}): Promise<LocalAppRuntime> {
   try {
-    if (process.platform === "win32") return processRuntimeFromSnapshot(config, await getWindowsSystemSnapshot());
+    if (process.platform === "win32") return processRuntimeFromSnapshot(config,
+      options.windowsSample ? (await options.windowsSample).snapshot : await getWindowsSystemSnapshot());
+    if (options.windowsSample) return unknown('Windows process evidence is unavailable on this platform.');
     const processes = await readPosixProcesses();
     const ports = (config.mode === "service" ? [config.servicePort] : [config.cdpPort, config.inspectPort]).filter((value): value is number => !!value);
     const tcp: WindowsSystemSnapshot["tcp"] = [];

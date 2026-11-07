@@ -6,8 +6,11 @@ import { performance } from "node:perf_hooks";
 import type { PhoneDevice } from "../../shared/phones";
 import type { PhoneRequestTiming } from "../../shared/game-follow";
 import { isPhoneRead } from "./actions";
+import { phoneFailure } from "./errors";
 import { androidSdkRoots } from "./android-paths";
 import { spawnAdb, type AdbProcess, type AdbProcessOptions } from "./adb-process";
+import { sanitizeWirelessOutput, type WirelessEvidence } from "./wireless-diagnostics";
+import { WirelessServerLog } from "./wireless-server-log";
 
 export interface AdbRunner {
   run(args: string[], timeout?: number, input?: string, signal?: AbortSignal): Promise<string>;
@@ -37,7 +40,10 @@ export function findAdb(env = process.env, platform = process.platform): string 
   return executable;
 }
 export class Adb implements AdbRunner {
-  constructor(private overrideExecutable?: string, private launch: typeof execFile = execFile) {}
+  private serverLog?: WirelessServerLog;
+  constructor(private overrideExecutable?: string, private launch: typeof execFile = execFile, serverLog?: WirelessServerLog) {
+    this.serverLog = serverLog || (launch === execFile ? new WirelessServerLog(() => this.runProcess(["server-status"], 1500)) : undefined);
+  }
   get executable(): string { return this.overrideExecutable || findAdb(); }
   spawn(args: string[], options: AdbProcessOptions): AdbProcess {
     const began = performance.now(), executable = this.executable, resolved = performance.now();
@@ -54,14 +60,47 @@ export class Adb implements AdbRunner {
     });
   }
   run(args: string[], timeout = 8000, input?: string, signal?: AbortSignal): Promise<string> {
+    if (this.serverLog && ["pair", "connect"].includes(args[0]) && /^\d+(?:\.\d+){3}:\d+$/.test(args[1] || ""))
+      return this.runWireless(args, timeout, input, signal);
+    return this.runProcess(args, timeout, input, signal);
+  }
+  private async runWireless(args: string[], timeout: number, input?: string, signal?: AbortSignal): Promise<string> {
+    const cursor = await this.serverLog!.capture();
+    let output: string;
+    try {
+      output = await this.runProcess(args, timeout, input, signal);
+    } catch (error) {
+      const server = await this.serverLog!.finish(cursor, args[0], args[1], !signal?.aborted);
+      if (server && error instanceof Error) {
+        const failure = error as Error & { wirelessEvidence?: WirelessEvidence };
+        failure.wirelessEvidence = { ...failure.wirelessEvidence, server };
+      }
+      throw error;
+    }
+    const success = args[0] === "pair" ? output.includes(`Successfully paired to ${args[1]}`)
+      : output.split(/\r?\n/).some(line => ["connected to ", "already connected to "].some(prefix => line.trim() === prefix + args[1]));
+    const server = await this.serverLog!.finish(cursor, args[0], args[1], !success && !signal?.aborted);
+    if (!success && server) throw Object.assign(new Error("无线调试连接失败。"), {
+      wirelessEvidence: { exitCode: 0, stdout: sanitizeWirelessOutput(output), server } satisfies WirelessEvidence
+    });
+    return output;
+  }
+  private runProcess(args: string[], timeout = 8000, input?: string, signal?: AbortSignal): Promise<string> {
     return new Promise((resolve, reject) => {
       const began = performance.now(), executable = this.executable, resolved = performance.now();
       let child;
       try { child = this.launch(executable, args, { windowsHide: true, timeout, signal, encoding: "utf8", maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
       if (error) {
+        const wirelessEvidence: WirelessEvidence | undefined = ["pair", "connect", "mdns"].includes(args[0]) ? {
+          exitCode: error.code ?? undefined,
+          signal: error.signal || undefined,
+          timedOut: !!error.killed && !signal?.aborted && performance.now() - began >= timeout,
+          stdout: sanitizeWirelessOutput(String(stdout || "")),
+          stderr: sanitizeWirelessOutput(String(stderr || ""))
+        } : undefined;
         // Never echo argv: pairing arguments contain the device credential.
         const detail = input !== undefined ? "配对未完成，请核对地址和最新配对码。" : String([stderr, stdout].filter(Boolean).join("\n") || error.code || "连接超时").replace(/[a-f0-9]{64}/g, "[credential]").trim().slice(0, 800);
-        reject(Object.assign(new Error(error.code === "ENOENT" ? "未找到 ADB，请安装 Android Platform Tools，或设置 PROFILEPILOT_ADB_PATH。" : `ADB 操作失败：${detail}`), { code: error.code }));
+        reject(Object.assign(new Error(error.code === "ENOENT" ? "未找到 ADB，请安装 Android Platform Tools，或设置 PROFILEPILOT_ADB_PATH。" : `ADB 操作失败：${detail}`), { code: error.code, ...(wirelessEvidence ? { wirelessEvidence } : {}) }));
       } else resolve(stdout.trim());
       }); } finally { recordLaunch(args, began, resolved); }
       child.stdin?.on("error", () => { /* execFile completion reports a failed process. */ });
@@ -111,7 +150,12 @@ export function phoneRequest(port: number, token: string, method: string, body: 
       requestTimings.push({ ...timing });
       if (requestTimings.length > 12) requestTimings.shift();
     };
-    const fail = (error: Error) => { finish("error"); reject(error); };
+    const fail = (error: Error) => {
+      finish("error");
+      const sent = timing.connectedMs !== undefined && timing.sentMs !== undefined;
+      reject(phoneFailure(sent ? "PHONE_EXECUTION_UNCERTAIN" : "PHONE_CONNECT_FAILED", error.message,
+        sent && method !== "sync" ? "unknown" : "not-executed"));
+    };
     const payload = JSON.stringify(body);
     const request = http.request({ hostname: "127.0.0.1", port, method: "POST", path: `/${method}`, agent: false, signal, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) } }, response => {
       timing.headersMs = elapsed();

@@ -88,6 +88,16 @@ public class ControlNotificationStateTest {
         assertFalse(status().canResume());
     }
 
+    @Test public void screenOffPauseWaitsForUnlockAndReturnsWithoutAClick() {
+        start("control"); session.pauseForScreen("screen off");
+        assertEquals("控制等待解锁", status().title());
+        assertTrue(status().details().contains("解锁后自动继续"));
+        assertTrue(status().canResume()); assertTrue(status().canStop());
+        session.autoResume("unlocked");
+        assertEquals("电脑正在控制", status().title());
+        assertFalse(status().canResume());
+    }
+
     @Test public void endedOrExpiredTasksDoNotLeakOldTaskDetailsIntoConnectedStatus() {
         for (boolean expire : new boolean[] {false, true}) {
             start("control");

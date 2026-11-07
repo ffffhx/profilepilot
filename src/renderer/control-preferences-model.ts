@@ -30,5 +30,5 @@ export function controlPreferencesDirty(editor: Editor): boolean {
 export const dirtyDomains = (modal: Modal) => domains.filter(domain => controlPreferencesDirty(modal.editors[domain]));
 
 export function statusText(editor: Editor): string {
-  return editor.loading ? "正在读取…" : controlPreferencesDirty(editor) ? "有未保存的修改" : editor.snapshot?.exists ? "已与本地内容同步" : "保存后创建个人偏好";
+  return editor.loading ? "正在读取…" : controlPreferencesDirty(editor) ? "有未保存的修改" : editor.snapshot?.exists ? "已与本地内容同步" : editor.snapshot?.defaulted ? "通用默认，保存后写入本地偏好" : "保存后创建个人偏好";
 }

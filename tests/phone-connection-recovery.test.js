@@ -62,7 +62,8 @@ test('connect on a former port selects the verified live route without launching
 test('connection-only preparation preserves a manually paused session and fresh start still refuses it', async t => {
   const h = fixture(t); await h.service.refresh();
   await h.service.start(h.old, 'control', 'User', 'manual task'); await h.service.control(h.old, 'pause');
-  h.online = [h.next]; await h.service.refresh(); h.calls.length = 0;
+  h.online = [h.next]; await h.service.refresh();
+  h.calls.length = 0;
   const connected = await h.service.prepare(h.old, false);
   assert.equal(connected.state.phase, 'paused'); assert.equal(connected.state.controller, 'User');
   await assert.rejects(h.service.start(h.next, 'control', 'Codex', 'replacement'), /已有会话/);
@@ -73,11 +74,14 @@ test('connection-only preparation preserves a manually paused session and fresh 
 test('a newly prepared route pauses lingering control instead of inheriting its input authority', async t => {
   const h = fixture(t); await h.service.refresh();
   const original = await h.service.start(h.old, 'control', 'Codex', 'old task');
-  h.online = [h.next]; await h.service.refresh(); h.calls.length = 0;
+  h.online = [h.next]; await h.service.refresh();
+  // The lost route pauses the session during reconciliation, before prepare.
+  const pauses = h.calls.filter(call => call[0] === 'pause').length;
+  h.calls.length = 0;
   const connected = await h.service.prepare(h.old, false);
   assert.equal(connected.state.phase, 'paused');
   assert.equal(connected.state.sessionId, original.state.sessionId);
-  assert.equal(h.calls.filter(call => call[0] === 'pause').length, 1);
+  assert.equal(pauses, 1);
   assert.ok(!h.calls.some(call => ['start', 'resume', 'action'].includes(call[0])));
   await assert.rejects(h.service.perform({ id: h.next, sessionId: connected.state.sessionId,
     generation: connected.state.generation, requestId: randomUUID(), action: { kind: 'key', key: 'home' } }), /暂停/);
@@ -97,9 +101,12 @@ test('closing a failed managed task after a port change ends only its exact owne
   await assert.rejects(h.service.stopWrapper(owner.lease), /无线/);
   h.state.phase = 'paused'; h.state.generation++;
   h.online = [h.next]; await h.service.refresh();
-  await h.service.prepare(h.old, false); h.calls.length = 0;
+  await h.service.prepare(h.old, false);
+  // Reconnection ends the failed task's exact session during preparation.
+  const stops = h.calls.filter(call => call[0] === 'stop').length;
+  h.calls.length = 0;
   await h.service.refresh();
-  assert.equal(h.state.phase, 'stopped'); assert.equal(h.calls.filter(call => call[0] === 'stop').length, 1);
+  assert.equal(h.state.phase, 'stopped'); assert.equal(stops, 1);
   assert.ok(!h.calls.some(call => ['start', 'resume', 'action'].includes(call[0]) || call.includes('install')));
   await assert.rejects(h.service.performWrapper(owner.lease, owner.device.state.generation, { kind: 'key', key: 'home' }, randomUUID()), /结束|失联/);
   assert.equal(h.service.wrappers.size, 0);
@@ -167,6 +174,7 @@ test('fresh direct App observations supersede old cloud addresses; expired obser
 
 test('verified live Wi-Fi endpoint is discoverable even when mDNS reports only its old port', async t => {
   const h = fixture(t); h.online = [h.next];
+  await h.service.refresh();
   const result = await h.service.discoverWireless();
   assert.equal(h.scans, 1);
   assert.equal(result.services[0].address, h.next); assert.equal(result.services[0].source, 'adb');

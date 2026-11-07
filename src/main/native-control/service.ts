@@ -159,7 +159,8 @@ export class NativeControlService {
     } finally {
       if (command.method !== "status" || failureCode) writeControlTrace(this.root, "extension", {
         requestId: command.requestId, sessionId: command.sessionId, target: session?.task.profileId || command.profileId,
-        method: command.method, durationMs: Date.now() - startedAt, generation: session?.epoch, code: failureCode, recovery,
+        method: command.method, actionKind: typeof command.params?.kind === "string" ? command.params.kind : undefined,
+        ok: !failureCode, durationMs: Date.now() - startedAt, generation: session?.epoch, code: failureCode, recovery,
         extensionVersion: this.bridge.states().find(s => s.profileId === (session?.task.profileId || command.profileId))?.extensionVersion
       });
       if (session && command.method !== "status") { session.pendingRequests--; session.lastActivityAt = new Date().toISOString(); }

@@ -12,6 +12,7 @@ import { atomicJson, idleRuntime, parseEnvironment, workerRequest, type LocalApp
 import { processRuntime, invalidateProcessRuntime } from "./service-runtime";
 import { resolveAppRuntime, type DebugState } from "./runtime";
 import { LocalAppConnector } from "./connection";
+import type { WindowsControlSample } from '../windows-platform';
 
 const port = z.number().int().min(1024).max(65535).nullable();
 const inputSchema = z.object({
@@ -137,11 +138,21 @@ export class LocalAppsService {
       return view;
     }));
   }
-  private async inspect(config: LocalAppConfig): Promise<LocalAppView> {
+  async listForControlAdmission(windowsSample: Promise<WindowsControlSample>): Promise<LocalAppView[]> {
+    if (process.platform !== 'win32') throw new Error('PROFILE_WINDOWS_SAMPLE_UNSUPPORTED');
+    // Configuration mutations replace this array. Keep the exact revision and
+    // immutable row values for this collection; never update UI view caches.
+    const revision = this.configs;
+    const rows = revision.map(config => Object.freeze({ ...config }));
+    const views = await Promise.all(rows.map(config => this.inspect(config, { windowsSample })));
+    if (this.configs !== revision) throw new Error('PROFILE_LOCAL_APPS_CONFIG_CHANGED');
+    return structuredClone(views);
+  }
+  private async inspect(config: LocalAppConfig, options: { windowsSample?: Promise<WindowsControlSample> } = {}): Promise<LocalAppView> {
     const service = config.mode === "service";
     const [worker, observed, renderer, main] = await Promise.all([
       config.mode === "attach" ? Promise.resolve(idleRuntime()) : this.runtime(config.id),
-      processRuntime(config),
+      processRuntime(config, options),
       probeDebugPort(service ? null : config.cdpPort, "renderer"),
       probeDebugPort(service ? null : config.inspectPort, "main")
     ]);

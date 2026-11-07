@@ -3,6 +3,15 @@ const assert = require('node:assert/strict');
 const { loadCli } = require('./cli-test-build.cjs');
 const { phonePresentation, phoneConnectionPresentation } = loadCli('src/shared/phone-presentation.ts');
 const device = () => ({ id: 'phone', name: 'Phone', model: 'Phone', transport: 'wifi', connection: 'device', companion: 'ready', confirmedAt: 1000, pending: null, error: '', state: { phase: 'idle', sessionId: null, permissions: { overlay: true, accessibility: true, notifications: true }, readiness: { unlocked: true, developerOptions: 'enabled', usbDebugging: 'enabled', wirelessDebugging: 'enabled', accessibilityService: 'running', usbConnected: false, wifiConnected: true } } });
+
+test('Wi-Fi certificate rejection is shown as re-pairing, not missing permissions or a healthy connection', () => {
+  const phone = { ...device(), connection: 'missing', companion: 'unavailable', error: '手机认证失败 PHONE_WIFI_AUTH_REQUIRED' };
+  const wifi = phoneConnectionPresentation({ device: phone, routes: [phone] }, 1000).routes.find(r => r.transport === 'wifi');
+  assert.equal(wifi.connected, false); assert.equal(wifi.condition, 'blocked');
+  assert.equal(wifi.label, '需要重新配对'); assert.match(wifi.note, /最新配对码/);
+  phone.connection = 'device'; phone.companion = 'ready';
+  assert.equal(phoneConnectionPresentation({ device: phone, routes: [phone] }, 1000).routes.find(r => r.transport === 'wifi').label, '已连接');
+});
 test('connected phone presents six live switches and offers an on-demand screenshot', () => {
   const view = phonePresentation(device(), 1000);
   assert.equal(view.label, '手机已连接'); assert.equal(view.canPreview, true);
@@ -45,6 +54,17 @@ test('paused task stays connected while screenshots and permission navigation st
   assert.equal(view.label, '手机已连接'); assert.equal(view.paused, true); assert.equal(view.canPreview, false); assert.equal(view.canSetup, false);
   phone.state.phase = 'idle'; phone.state.readiness.unlocked = false;
   assert.equal(phonePresentation(phone, 1000).canPreview, false);
+});
+
+test('a screen-off pause is a wait for unlock, not a manual pause', () => {
+  const phone = device(); phone.state.phase = 'paused'; phone.state.pauseCause = 'screen';
+  const view = phonePresentation(phone, 1000);
+  assert.equal(view.paused, true); assert.equal(view.awaitingUnlock, true);
+  assert.match(view.note, /解锁后会自行继续/);
+  const group = { device: phone, routes: [phone] };
+  assert.match(phoneConnectionPresentation(group, 1000).connectionNote, /解锁后自动继续/);
+  phone.state.pauseCause = 'manual';
+  assert.equal(phonePresentation(phone, 1000).awaitingUnlock, false);
 });
 
 test('offline emulator explains local startup without showing phone debugging switches', () => {

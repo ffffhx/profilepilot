@@ -2,6 +2,7 @@ import { BROWSER_CONNECTION_CHANNEL, BROWSER_CONNECTION_CHANGED, type BrowserCon
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
 import { IPC_CHANNELS } from "./shared/ipc";
 import { LOCAL_APPS_CHANNEL, type LocalAppsApi } from "./shared/local-apps";
+import { DESKTOP_CHANNEL, DESKTOP_CHANGED, type DesktopApi, type DesktopStatus, type DesktopReturnExpectation } from "./shared/desktop";
 import { PHONE_CHANNEL, PHONE_CHANGED, type PhonesApi, type PhonesSnapshot } from "./shared/phones";
 import { MOBILE_CHANNEL, MOBILE_CHANGED, type MobileApi, type MobileSnapshot } from "./shared/mobile";
 import { TASK_CHANNEL, TASK_CHANGED, TASK_STREAM, TASK_PREVIEW, type TaskApi, type TaskListUpdate, type TaskPreviewUpdate, type TaskStreamUpdate } from "./shared/tasks";
@@ -350,6 +351,21 @@ const localAppsApi: LocalAppsApi = {
 };
 contextBridge.exposeInMainWorld("localApps", localAppsApi);
 const phonesApi: PhonesApi = {
+  iphoneSetup: () => ipcRenderer.invoke(PHONE_CHANNEL, "iphone-setup", {}),
+  iphoneDoctor: () => ipcRenderer.invoke(PHONE_CHANNEL, "iphone-doctor", {}),
+  iphonePrepareWda: () => ipcRenderer.invoke(PHONE_CHANNEL, "iphone-prepare-wda", {}),
+  iphoneUsbStart: input => ipcRenderer.invoke(PHONE_CHANNEL, "iphone-usb-start", input),
+  iphoneUsbStatus: () => ipcRenderer.invoke(PHONE_CHANNEL, "iphone-usb-status", {}),
+  iphoneUsbStop: udid => ipcRenderer.invoke(PHONE_CHANNEL, "iphone-usb-stop", { udid }),
+  iphoneInstallSigned: (udid, ipa) => ipcRenderer.invoke(PHONE_CHANNEL, "iphone-install-signed", { udid, ipa }),
+  iphoneSelectFile: kind => ipcRenderer.invoke(PHONE_CHANNEL, "iphone-select-file", { kind }),
+  iphoneOpenGuide: kind => ipcRenderer.invoke(PHONE_CHANNEL, "iphone-open-guide", { kind }),
+  iphoneShowArtifact: () => ipcRenderer.invoke(PHONE_CHANNEL, "iphone-show-artifact", {}),
+  iphoneSigningSetup: () => ipcRenderer.invoke(PHONE_CHANNEL, "iphone-signing-setup", {}),
+  iphoneSignSideloadly: (udid, bundleId) => ipcRenderer.invoke(PHONE_CHANNEL, "iphone-sign-sideloadly", { udid, bundleId }),
+  iphoneRevealDeveloperMode: udid => ipcRenderer.invoke(PHONE_CHANNEL, "iphone-devmode-reveal", { udid }),
+  iphoneAdd: input => ipcRenderer.invoke(PHONE_CHANNEL, "iphone-add", input),
+  iphoneForget: id => ipcRenderer.invoke(PHONE_CHANNEL, "iphone-forget", { id }),
   followCommand: command => ipcRenderer.invoke(PHONE_CHANNEL, "follow-command", command),
   basicStart: (id, mode, controller, task) => ipcRenderer.invoke(PHONE_CHANNEL, "basic-start", { id, mode, controller, task }),
   cameraProbe: id => ipcRenderer.invoke(PHONE_CHANNEL, "camera-probe", { id }),
@@ -387,8 +403,11 @@ const phonesApi: PhonesApi = {
   videoStop: streamId => ipcRenderer.invoke(PHONE_CHANNEL, "video-stop", { streamId }),
   openSettings: (id, setting) => ipcRenderer.invoke(PHONE_CHANNEL, "settings", { id, setting }),
   rename: (id, name) => ipcRenderer.invoke(PHONE_CHANNEL, "rename", { id, name }),
-  start: (id, mode, controller, task) => ipcRenderer.invoke(PHONE_CHANNEL, "start", { id, mode, controller, task }),
-  control: (id, command) => ipcRenderer.invoke(PHONE_CHANNEL, command, { id }),
+  start: (id, mode, controller, task, keepScreenOn) => ipcRenderer.invoke(PHONE_CHANNEL, "start", { id, mode, controller, task, ...(keepScreenOn === undefined ? {} : { keepScreenOn }) }),
+  control: (id, command, expected) => ipcRenderer.invoke(PHONE_CHANNEL, command, expected ? { id, expected } : { id }),
+  wake: id => ipcRenderer.invoke(PHONE_CHANNEL, "wake", { id }),
+  saveUnlockSecret: input => ipcRenderer.invoke(PHONE_CHANNEL, "unlock-secret-save", input),
+  deleteUnlockSecret: id => ipcRenderer.invoke(PHONE_CHANNEL, "unlock-secret-delete", { id }),
   perform: input => ipcRenderer.invoke(PHONE_CHANNEL, "action", input),
   onChanged: listener => {
     const handler = (_event: IpcRendererEvent, snapshot: PhonesSnapshot) => listener(snapshot);
@@ -396,3 +415,28 @@ const phonesApi: PhonesApi = {
   }
 };
 contextBridge.exposeInMainWorld("phones", phonesApi);
+const desktopApi: DesktopApi = {
+  status: () => ipcRenderer.invoke(DESKTOP_CHANNEL, 'status'),
+  windows: () => ipcRenderer.invoke(DESKTOP_CHANNEL, 'windows'),
+  preview: id => ipcRenderer.invoke(DESKTOP_CHANNEL, 'preview', id),
+  control: (action: 'return' | 'takeover' | 'stop', expected?: DesktopReturnExpectation) => ipcRenderer.invoke(DESKTOP_CHANNEL, 'control', action === 'return'
+    ? { action, session: expected?.session, generation: expected?.generation, revision: expected?.revision } : action),
+  onChanged: listener => {
+    const handler = (_event: IpcRendererEvent, status: DesktopStatus) => listener(status);
+    ipcRenderer.on(DESKTOP_CHANGED, handler); return () => ipcRenderer.removeListener(DESKTOP_CHANGED, handler);
+  }
+};
+contextBridge.exposeInMainWorld('desktopControl', desktopApi);
+
+const gpuiApi: import('./shared/gpui').GpuiApi = {
+  ready: () => ipcRenderer.invoke('profilepilot:gpui', 'ready'),
+  status: () => ipcRenderer.invoke('profilepilot:gpui', 'status'),
+  apps: () => ipcRenderer.invoke('profilepilot:gpui', 'apps'),
+  configure: () => ipcRenderer.invoke('profilepilot:gpui', 'configure'),
+  control: (action, session, revision) => ipcRenderer.invoke('profilepilot:gpui', 'control', { action, session, revision }),
+  onChanged: listener => {
+    const handler = (_event: IpcRendererEvent, value: import('./shared/gpui').GpuiStatus) => listener(value);
+    ipcRenderer.on('profilepilot:gpui-changed', handler); return () => ipcRenderer.removeListener('profilepilot:gpui-changed', handler);
+  }
+};
+contextBridge.exposeInMainWorld('gpuiControl', gpuiApi);

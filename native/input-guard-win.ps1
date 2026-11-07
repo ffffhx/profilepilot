@@ -32,6 +32,9 @@ public static class ProfilePilotWindowsInputGuard
     private static uint messageThreadId;
     private static int capturedPid;
     private static IntPtr capturedWindow = IntPtr.Zero;
+    private const string InstanceMutexName = @"Local\ProfilePilot.InputObserver";
+    private static IntPtr lifetimeMutex = IntPtr.Zero;
+    private static int stopRequested;
 
     private delegate IntPtr LowLevelMouseProc(int code, IntPtr message, IntPtr data);
 
@@ -73,6 +76,12 @@ public static class ProfilePilotWindowsInputGuard
     private static extern IntPtr GetModuleHandle(string moduleName);
     [DllImport("kernel32.dll")]
     private static extern uint GetCurrentThreadId();
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateMutexW(IntPtr attributes, bool initialOwner, string name);
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr handle);
+    [DllImport("user32.dll")]
+    private static extern bool PeekMessage(out MSG message, IntPtr window, uint minimum, uint maximum, uint remove);
     [DllImport("user32.dll")]
     private static extern int GetMessage(out MSG message, IntPtr window, uint minimum, uint maximum);
     [DllImport("user32.dll")]
@@ -94,7 +103,10 @@ public static class ProfilePilotWindowsInputGuard
 
     public static int Run()
     {
+        if (!AcquireInstance()) { EmitStatus("hook-create-failed", 0, null); return 2; }
         messageThreadId = GetCurrentThreadId();
+        MSG ignored;
+        PeekMessage(out ignored, IntPtr.Zero, 0, 0, 0);
         hook = SetWindowsHookEx(WH_MOUSE_LL, HookProc, GetModuleHandle(null), 0);
         if (hook == IntPtr.Zero)
         {
@@ -109,7 +121,7 @@ public static class ProfilePilotWindowsInputGuard
         try
         {
             MSG message;
-            while (GetMessage(out message, IntPtr.Zero, 0, 0) > 0)
+            while (Interlocked.CompareExchange(ref stopRequested, 0, 0) == 0 && GetMessage(out message, IntPtr.Zero, 0, 0) > 0)
             {
                 TranslateMessage(ref message);
                 DispatchMessage(ref message);
@@ -123,6 +135,31 @@ public static class ProfilePilotWindowsInputGuard
         return 0;
     }
 
+    // New and compatibility helpers share one existence lease. Holding the
+    // non-inheritable handle until OS process teardown also covers unhook
+    // failure; never release it early or terminate the other owner.
+    private static bool AcquireInstance()
+    {
+        if (lifetimeMutex != IntPtr.Zero) return false;
+        IntPtr handle = CreateMutexW(IntPtr.Zero, false, InstanceMutexName);
+        int error = Marshal.GetLastWin32Error();
+        if (handle == IntPtr.Zero || error == 183)
+        {
+            if (handle != IntPtr.Zero) CloseHandle(handle);
+            Console.Error.WriteLine("INPUT_OBSERVER_INSTANCE_UNAVAILABLE:" + error.ToString(CultureInfo.InvariantCulture));
+            return false;
+        }
+        lifetimeMutex = handle;
+        return true;
+    }
+
+    private static void Stop()
+    {
+        Interlocked.Exchange(ref stopRequested, 1);
+        // The queue is created before the command reader starts.
+        PostThreadMessage(messageThreadId, WM_QUIT, UIntPtr.Zero, IntPtr.Zero);
+    }
+
     private static void ReadCommands()
     {
         string line;
@@ -131,7 +168,7 @@ public static class ProfilePilotWindowsInputGuard
             line = line.Trim();
             if (String.Equals(line, "QUIT", StringComparison.OrdinalIgnoreCase))
             {
-                PostThreadMessage(messageThreadId, WM_QUIT, UIntPtr.Zero, IntPtr.Zero);
+                Stop();
                 return;
             }
             if (!line.StartsWith("SET", StringComparison.OrdinalIgnoreCase) || (line.Length > 3 && !Char.IsWhiteSpace(line[3])))
@@ -163,7 +200,7 @@ public static class ProfilePilotWindowsInputGuard
                 EmitStatus("sync-complete", 0, GuardedPids.Count);
             }
         }
-        PostThreadMessage(messageThreadId, WM_QUIT, UIntPtr.Zero, IntPtr.Zero);
+        Stop();
     }
 
     private static IntPtr HookCallback(int code, IntPtr messageValue, IntPtr data)

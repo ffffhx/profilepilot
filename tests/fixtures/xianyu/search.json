@@ -1,0 +1,472 @@
+{
+  "ret": [
+    "SUCCESS::调用成功"
+  ],
+  "data": {
+    "resultList": [
+      {
+        "data": {
+          "item": {
+            "main": {
+              "exContent": {
+                "itemId": "101",
+                "title": "英睿达DDR5 4800MHz 32GB笔记本内存，型号CT 32G48C40S5.M16A1，SODIMM接口，1.1V电压，CL40时序。美光原厂颗粒，功能正常，无维修，插上即用。成色有轻微使用痕迹，具体见图。支持自提，售出不退。",
+                "price": [
+                  {
+                    "type": "sign",
+                    "text": "¥"
+                  },
+                  {
+                    "type": "integer",
+                    "text": "2380"
+                  }
+                ],
+                "area": "安徽",
+                "picUrl": "https://img.alicdn.com/test.jpg",
+                "fishTags": {
+                  "r2": {
+                    "tagList": [
+                      {
+                        "data": {
+                          "gradientColors": [
+                            "#F7F7CC",
+                            "#FFFFFF"
+                          ],
+                          "color": "#48483B",
+                          "borderRadius": "9",
+                          "size": "12",
+                          "labelId": "752",
+                          "lineHeight": "1.2",
+                          "gradientDirection": "to right",
+                          "gradientType": "linear",
+                          "type": "gradientImageText",
+                          "content": "19小时前发布",
+                          "height": "16",
+                          "leftImage": {
+                            "marginRight": "2",
+                            "width": "14",
+                            "url": "https://gw.alicdn.com/imgextra/i3/O1CN01Z6BeDa1w4qA2xZLFJ_!!6000000006255-2-tps-42-42.png",
+                            "height": "14",
+                            "marginLeft": "2"
+                          }
+                        },
+                        "utParams": {
+                          "args": {
+                            "LabelSystem2.0": "1",
+                            "content": "19小时前发布"
+                          },
+                          "arg1": "106_tag_r2_752"
+                        }
+                      }
+                    ],
+                    "config": {
+                      "mutualLabelBizGroup": "true"
+                    }
+                  },
+                  "r3": {
+                    "tagList": [
+                      {
+                        "data": {
+                          "color": "#999999",
+                          "size": "12",
+                          "labelId": "9",
+                          "lineHeight": "1.3",
+                          "bold": "false",
+                          "type": "text",
+                          "content": "6人想要",
+                          "marginLeft": "4"
+                        },
+                        "utParams": {
+                          "args": {
+                            "LabelSystem2.0": "1",
+                            "content": "6人想要"
+                          },
+                          "arg1": "106_tag_r3_9"
+                        }
+                      }
+                    ],
+                    "config": {
+                      "mutualLabelBizGroup": "false"
+                    }
+                  },
+                  "r4": {
+                    "tagList": [
+                      {
+                        "data": {
+                          "bgColor": "#FFF4EB",
+                          "color": "#FF7900",
+                          "borderRadius": "8",
+                          "size": "11",
+                          "labelId": "750",
+                          "borderPaddingLeft": "6",
+                          "lineHeight": "1.3",
+                          "borderPaddingRight": "6",
+                          "type": "gradientImageText",
+                          "content": "百分百好评",
+                          "height": "16"
+                        },
+                        "utParams": {
+                          "args": {
+                            "LabelSystem2.0": "1",
+                            "content": "百分百好评"
+                          },
+                          "arg1": "106_tag_r4_750"
+                        }
+                      }
+                    ],
+                    "config": {
+                      "mutualLabelBizGroup": "false"
+                    }
+                  },
+                  "r1": {
+                    "tagList": [
+                      {
+                        "data": {
+                          "marginRight": "4",
+                          "labelId": "13",
+                          "width": "28",
+                          "type": "img",
+                          "alignment": "middle",
+                          "content": "freeShippingIcon",
+                          "url": "https://gw.alicdn.com/imgextra/i1/O1CN017BILHl1VNARooBnhe_!!6000000002640-2-tps-84-60.png",
+                          "height": "20"
+                        },
+                        "utParams": {
+                          "args": {
+                            "LabelSystem2.0": "1",
+                            "content": "freeShippingIcon"
+                          },
+                          "arg1": "106_tag_r1_13"
+                        }
+                      }
+                    ],
+                    "config": {
+                      "mutualLabelBizGroup": "false"
+                    }
+                  }
+                },
+                "isAliMaMaAD": false
+              },
+              "clickParam": {
+                "args": {
+                  "keyword": "DDR5 32GB",
+                  "page": "1",
+                  "publishTime": "1792845858000",
+                  "tag": "freeship/credit-6",
+                  "idle_search_adx": "-1"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "data": {
+          "item": {
+            "main": {
+              "exContent": {
+                "itemId": "102",
+                "title": "铭瑄DDR5瑷雪内存条16GB*2 6000频率 海力士A-die 时序C30（AMD优选） 非常新，通电时间短 没时间玩电脑拆了卖掉（显卡已售） 还有电源、主板、CPU待售 支持川A双流航空港自提",
+                "price": [
+                  {
+                    "type": "sign",
+                    "text": "¥"
+                  },
+                  {
+                    "type": "integer",
+                    "text": "2988"
+                  }
+                ],
+                "area": "四川",
+                "picUrl": "https://img.alicdn.com/test.jpg",
+                "fishTags": {
+                  "r2": {
+                    "tagList": [
+                      {
+                        "data": {
+                          "color": "#999999",
+                          "size": "12",
+                          "labelId": "36",
+                          "lineHeight": "1.33",
+                          "bold": "false",
+                          "type": "gradientImageText",
+                          "content": "几乎全新"
+                        },
+                        "utParams": {
+                          "args": {
+                            "LabelSystem2.0": "1",
+                            "content": "几乎全新"
+                          },
+                          "arg1": "106_tag_r2_36"
+                        }
+                      },
+                      {
+                        "data": {
+                          "color": "#999999",
+                          "size": "12",
+                          "labelId": "38",
+                          "lineHeight": "1.33",
+                          "bold": "false",
+                          "type": "gradientImageText",
+                          "content": "MAXSUN/铭瑄"
+                        },
+                        "utParams": {
+                          "args": {
+                            "LabelSystem2.0": "1",
+                            "content": "MAXSUN/铭瑄"
+                          },
+                          "arg1": "106_tag_r2_38"
+                        }
+                      },
+                      {
+                        "data": {
+                          "color": "#999999",
+                          "size": "12",
+                          "labelId": "350",
+                          "lineHeight": "1.33",
+                          "bold": "false",
+                          "type": "gradientImageText",
+                          "content": "功能完好无维修"
+                        },
+                        "utParams": {
+                          "args": {
+                            "LabelSystem2.0": "1",
+                            "content": "功能完好无维修"
+                          },
+                          "arg1": "106_tag_r2_350"
+                        }
+                      }
+                    ],
+                    "config": {
+                      "delimiterMarginRight": "4.5",
+                      "delimiterWidth": "0.5",
+                      "delimiterPosition": "between",
+                      "delimiterColor": "#D6D6D6",
+                      "delimiterHeight": "10",
+                      "hasDelimiter": "true",
+                      "delimiterMarginLeft": "4.5",
+                      "delimiterMarginBottom": "3",
+                      "mutualLabelBizGroup": "true",
+                      "delimiterMarginTop": "3"
+                    }
+                  },
+                  "r3": {
+                    "tagList": [
+                      {
+                        "data": {
+                          "color": "#999999",
+                          "size": "12",
+                          "labelId": "9",
+                          "lineHeight": "1.3",
+                          "bold": "false",
+                          "type": "text",
+                          "content": "3人想要",
+                          "marginLeft": "4"
+                        },
+                        "utParams": {
+                          "args": {
+                            "LabelSystem2.0": "1",
+                            "content": "3人想要"
+                          },
+                          "arg1": "106_tag_r3_9"
+                        }
+                      }
+                    ],
+                    "config": {
+                      "mutualLabelBizGroup": "false"
+                    }
+                  },
+                  "r4": {
+                    "tagList": [
+                      {
+                        "data": {
+                          "bgColor": "#FFF4EB",
+                          "color": "#FF7900",
+                          "borderRadius": "8",
+                          "size": "11",
+                          "labelId": "750",
+                          "borderPaddingLeft": "6",
+                          "lineHeight": "1.3",
+                          "borderPaddingRight": "6",
+                          "type": "gradientImageText",
+                          "content": "百分百好评",
+                          "height": "16"
+                        },
+                        "utParams": {
+                          "args": {
+                            "LabelSystem2.0": "1",
+                            "content": "百分百好评"
+                          },
+                          "arg1": "106_tag_r4_750"
+                        }
+                      }
+                    ],
+                    "config": {
+                      "mutualLabelBizGroup": "false"
+                    }
+                  },
+                  "r1": {
+                    "tagList": [
+                      {
+                        "data": {
+                          "marginRight": "4",
+                          "labelId": "13",
+                          "width": "28",
+                          "type": "img",
+                          "alignment": "middle",
+                          "content": "freeShippingIcon",
+                          "url": "https://gw.alicdn.com/imgextra/i1/O1CN017BILHl1VNARooBnhe_!!6000000002640-2-tps-84-60.png",
+                          "height": "20"
+                        },
+                        "utParams": {
+                          "args": {
+                            "LabelSystem2.0": "1",
+                            "content": "freeShippingIcon"
+                          },
+                          "arg1": "106_tag_r1_13"
+                        }
+                      }
+                    ],
+                    "config": {
+                      "mutualLabelBizGroup": "false"
+                    }
+                  }
+                },
+                "isAliMaMaAD": false
+              },
+              "clickParam": {
+                "args": {
+                  "keyword": "DDR5 32GB",
+                  "page": "1",
+                  "publishTime": "1792732226000",
+                  "tag": "freeship/credit-6",
+                  "idle_search_adx": "-1"
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "data": {
+          "item": {
+            "main": {
+              "exContent": {
+                "itemId": "103",
+                "title": "阿斯加特 DDR5 6000 16G×2 32G c28时序 海力士颗粒 台式机内存条 黑色金手指 带金属散热马甲6000MHz（CL28） 自用升级拆机 功能正常 没修过 成色很新 金手指干净 插上即用 两条一起出 组双通道或开XMP都稳上海可自提 外地邮费自理到货记得拍开箱视频和测试视频 爽快的来 不退不换 不议价",
+                "price": [
+                  {
+                    "type": "sign",
+                    "text": "¥"
+                  },
+                  {
+                    "type": "integer",
+                    "text": "3200"
+                  }
+                ],
+                "area": "上海",
+                "picUrl": "https://img.alicdn.com/test.jpg",
+                "fishTags": {
+                  "r2": {
+                    "tagList": [
+                      {
+                        "data": {
+                          "gradientColors": [
+                            "#F7F7CC",
+                            "#FFFFFF"
+                          ],
+                          "color": "#48483B",
+                          "borderRadius": "9",
+                          "size": "12",
+                          "labelId": "752",
+                          "lineHeight": "1.2",
+                          "gradientDirection": "to right",
+                          "gradientType": "linear",
+                          "type": "gradientImageText",
+                          "content": "14小时前发布",
+                          "height": "16",
+                          "leftImage": {
+                            "marginRight": "2",
+                            "width": "14",
+                            "url": "https://gw.alicdn.com/imgextra/i3/O1CN01Z6BeDa1w4qA2xZLFJ_!!6000000006255-2-tps-42-42.png",
+                            "height": "14",
+                            "marginLeft": "2"
+                          }
+                        },
+                        "utParams": {
+                          "args": {
+                            "LabelSystem2.0": "1",
+                            "content": "14小时前发布"
+                          },
+                          "arg1": "106_tag_r2_752"
+                        }
+                      }
+                    ],
+                    "config": {
+                      "mutualLabelBizGroup": "true"
+                    }
+                  },
+                  "r4": {
+                    "tagList": [
+                      {
+                        "data": {
+                          "bgColor": "#FFF4EB",
+                          "color": "#FF7900",
+                          "borderRadius": "8",
+                          "size": "11",
+                          "labelId": "750",
+                          "borderPaddingLeft": "6",
+                          "lineHeight": "1.3",
+                          "borderPaddingRight": "6",
+                          "type": "gradientImageText",
+                          "content": "百分百好评",
+                          "height": "16"
+                        },
+                        "utParams": {
+                          "args": {
+                            "LabelSystem2.0": "1",
+                            "content": "百分百好评"
+                          },
+                          "arg1": "106_tag_r4_750"
+                        }
+                      }
+                    ],
+                    "config": {
+                      "mutualLabelBizGroup": "false"
+                    }
+                  }
+                },
+                "isAliMaMaAD": false
+              },
+              "clickParam": {
+                "args": {
+                  "keyword": "DDR5 32GB",
+                  "page": "1",
+                  "publishTime": "1792863817000",
+                  "tag": "credit-4",
+                  "idle_search_adx": "-1"
+                }
+              }
+            }
+          }
+        }
+      }
+    ],
+    "resultInfo": {
+      "trackParams": {
+        "q": "DDR5+32GB",
+        "page": "1"
+      },
+      "searchResControlFields": {
+        "minPrice": 100,
+        "maxPrice": 9999999900,
+        "nextPage": true
+      },
+      "sqiControlFields": {
+        "userInputOriginalSearchKeywords": "DDR5 32GB",
+        "filterPersonal": false
+      },
+      "hasNextPage": true
+    }
+  }
+}

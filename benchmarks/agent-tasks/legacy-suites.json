@@ -1,0 +1,1070 @@
+{
+  "schemaVersion": "1.0.0",
+  "catalogVersion": "1.0.0",
+  "scope": "scripts/ 根目录 bench-、benchmark-、verify-、e2e- 的现有可执行脚本清单；辅助fixture、报表脚本及tests单测不计独立suite。",
+  "executionPolicy": "仅供索引；eval命令不自动执行这些脚本。运行前读取脚本的模型、构建、登录、会话、设备和成本要求。",
+  "classifications": {
+    "benchmark": "组件性能或指定外部/站点任务实验；必须使用各自口径。",
+    "reliability": "执行器、协议、恢复、状态机的确定性/受控回归。",
+    "acceptance": "应用界面或真实环境验收；通常不是可重置的开放Agent任务。"
+  },
+  "entries": [
+    {
+      "path": "scripts/bench-jev-garden.mjs",
+      "classification": "benchmark",
+      "scope": "外部任务实验",
+      "limitation": "依赖相邻 garden-lab、已登记隔离Profile与模型配置；固定外部任务/版本，不与本目录seed分母合并。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/bench-overlay.mjs",
+      "classification": "benchmark",
+      "scope": "组件性能",
+      "limitation": "多标签 overlay 注入、同步和连接开销；没有Agent业务任务，不是模型成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/bench-page-navigation.mjs",
+      "classification": "benchmark",
+      "scope": "组件性能",
+      "limitation": "Electron 页面切换耗时；固定动作与少量轮次，不能外推业务任务完成率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/benchmark-site-adapters.mjs",
+      "classification": "benchmark",
+      "scope": "站点适配器A/B",
+      "limitation": "真实站点与同一已持有会话的模型A/B；动态内容和权限影响可比性，不是独立工具排名。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-background-ui.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-bifrost-proxy.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-browser-preview.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-browser-service.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-browser-tasks.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-cli-setup.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-control-preferences.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-desktop-ui.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-electron-gateway.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-game-follow.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-gateway-control.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-global-settings.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-input-guard.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-local-app-connect.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-local-apps.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-main-window.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-mini-window.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-mobile-android.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-mobile.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-model-picker.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-native-browser.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-native-install.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-overlay-smoke.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-overlay-stress.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-page-navigation.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-pc-control.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-phone-accessibility.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-phone-basic.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-phone-console.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-phone-flows.mjs",
+      "classification": "reliability",
+      "scope": "手机流程引擎",
+      "limitation": "要求一次性模拟器与伴侣权限；原生ADB仅fixture reset，脚本步骤覆盖不能当手机Agent业务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-phone-nearby.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-phone-registration.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-phone-wireless-diagnostics.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-phones.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-profile-rename.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-quick-launch-shortcuts.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-render-stability.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-screen-camera-capture.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-screen-camera-ui.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-screen-camera.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-sidebar-resize.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-startup-isolation.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-sync-copy.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-task-chat.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-task-collaboration.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-task-composer.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-task-history.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-task-interactions.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-task-links.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-task-memory.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-task-organization.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-task-pricing.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-task-progress.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-task-reply.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-task-scroll.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-task-skills.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-template-jev-entry.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-token-usage.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-visual-regression.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-workspace-guide.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-workspace-overlays.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-workspace-recovery.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-workspace-shell.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-workspace-switcher.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/e2e-workspace-zoom.mjs",
+      "classification": "acceptance",
+      "scope": "应用/界面验收",
+      "limitation": "固定脚本或界面断言；可能启动应用、控制测试Profile或设备，需按脚本检查前置条件，不能视为Agent任务成绩。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-android-variants.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-background-input.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-browser-runtime.cjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-browser-service.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-capture-input.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-desktop-capture.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-desktop-dialog-cleanup.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-desktop-dialogs.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-desktop-input-markers.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-desktop-input-observer.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-desktop-keyboard.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-desktop-lease-expiry.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-desktop-notice-chain.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-desktop-notice.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-desktop-observer-fault.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-desktop-observer-startup.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-desktop-parent-death.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-desktop-provider-block.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-desktop-screen-region.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-desktop-session-cycles.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-desktop-state.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-desktop-takeover.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-desktop-toolbar-layout.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-desktop-ui-return.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-desktop-wgc.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-desktop-window-state.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-desktop.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-emulator-window.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-foreground-grant.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-installed-control.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-jev-package.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-native-blob.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-native-browser.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-native-control.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-native-debug.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-native-debugger-failures.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-native-default-reuse.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-native-dom.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-native-extension-ui.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-native-input-frames.mjs",
+      "classification": "reliability",
+      "scope": "扩展输入与frame",
+      "limitation": "需要调用者提供已持有会话；本地页面的iframe/输入回归，不能自动接管默认Profile。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-native-install-lifecycle.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-native-install.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-native-onboarding-tab.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-native-tab-groups.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-native-task-service.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-native-ux.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-overlay.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-packaged-browser-runtime.cjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-phone-status.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-phone-video-codec.cjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-sdk-collaboration.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-sdk-history.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-sdk-memory.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-sdk-runtime.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-site-adapters.mjs",
+      "classification": "acceptance",
+      "scope": "真实站点只读验收",
+      "limitation": "需要已持有会话，真实站点内容/登录状态不可重置；不得作为稳定、随机化业务oracle。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-task-agent-dogfood.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-task-baseline.mjs",
+      "classification": "reliability",
+      "scope": "通用SDK对照样例",
+      "limitation": "使用相同 WrapperBrowser 后端的一次受控模型样例；附件仅文件名、CSV仅关键词检查，不是独立竞品基线或统计成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-task-browser.mjs",
+      "classification": "reliability",
+      "scope": "浏览器执行器",
+      "limitation": "固定执行器动作和本地fixture；不测开放任务规划，旧上传fixture只传文件名。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-task-fast-guards.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-task-integration.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-task-jev-driver.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-task-live-batch.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-task-live-handoff.mjs",
+      "classification": "reliability",
+      "scope": "真实模型交接",
+      "limitation": "独立本地actor完成订单后Agent核对；必须区分actor与Agent贡献，不涉及真实支付。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-task-live-jev.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-task-live.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-task-pause-runtime.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-task-pause-transport.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-task-pdf.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-task-preview.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-task-pricing.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-task-profile-reuse.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-task-provider.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-task-recovery.mjs",
+      "classification": "reliability",
+      "scope": "提交恢复",
+      "limitation": "脚本化模型验证重启/已提交回包丢失等生命周期；可以复用状态机思路，不是开放Agent得分。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-task-terminal.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-task-viewport.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-typescript-browser.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-wgc-capture.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-windows-sampler-client.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-windows-sampler-watchdog.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-windows-sampler.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-windows-tcp.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    },
+    {
+      "path": "scripts/verify-xianyu.mjs",
+      "classification": "reliability",
+      "scope": "组件/执行链回归",
+      "limitation": "固定协议、状态或执行链验证；部分脚本调用模型/真实服务，应检查各自前置条件；不自动映射为本任务集成功率。",
+      "automaticExecution": false
+    }
+  ]
+}

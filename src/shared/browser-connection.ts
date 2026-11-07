@@ -1,4 +1,5 @@
 import type { CdpLiveView } from "./types";
+import type { DebuggerDiagnostic } from "./debugger-diagnostic";
 
 export interface NativeBrowserState {
   taskTabs?: boolean;
@@ -8,6 +9,7 @@ export interface NativeBrowserState {
   pausedByBrowser?: boolean;
   /** A technical interruption, distinct from the user taking control. */
   controlIssue?: { code: string; message: string };
+  debuggerDiagnostic?: DebuggerDiagnostic;
   profileId: string;
   connected: boolean;
   ownerSessionId?: string;

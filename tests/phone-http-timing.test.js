@@ -83,7 +83,11 @@ test('cancelling a recovery request closes its socket and never accepts the late
   });
   const controller = new AbortController(), since = Date.now();
   const pending = phoneRequest(port, 'private-token', 'sync', {}, controller.signal);
-  const rejected = assert.rejects(pending, error => error.name === 'AbortError');
+  const rejected = assert.rejects(pending, error => {
+    assert.equal(error.code, 'PHONE_EXECUTION_UNCERTAIN', 'the request was already received before cancellation');
+    assert.equal(error.details.recovery.actionOutcome, 'not-executed', 'sync does not dispatch a phone action');
+    assert.equal(error.details.recovery.automaticReplay, false); return true;
+  });
   await ready; controller.abort(); await rejected; await disconnected;
   lateReply(); await delay(20);
   const observed = phoneRequestTimings(since);

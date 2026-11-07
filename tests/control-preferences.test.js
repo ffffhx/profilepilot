@@ -5,7 +5,9 @@ const path = require('node:path');
 const test = require('node:test');
 const { readControlPreferences: read, writeControlPreferences: write } = require('../dist/main/control-preferences.js');
 const { readBrowserPreferences } = require('../dist/main/browser-preferences.js');
-const { agentSkillTargetPaths } = require('../dist/main/agent-skill-integration.js');
+const { agentSkillTargetPaths, bundledAgentSkillPath } = require('../dist/main/agent-skill-integration.js');
+
+const template = name => path.join(bundledAgentSkillPath('profilepilot'), 'templates', name);
 
 function fixture(t) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ppilot 控制偏好-'));
@@ -25,6 +27,7 @@ test('Electron defaults are read-only until saved, independent of browser and ph
   const browser = await read('browser', home), phone = await read('phone', home);
   const electron = await read('electron', home);
   assert.equal(electron.exists, false);
+  assert.equal(electron.defaulted, true);
   assert.ok(electron.content.includes('ppilot browser'));
   for (const location of electron.locations) assert.equal(fs.existsSync(location.path), false);
   await assert.rejects(write({ domain: 'electron', content: 'Wrong tab', expectedRevision: browser.revision, syncAll: true }, home), /其他会话修改/);
@@ -39,12 +42,44 @@ test('Electron defaults are read-only until saved, independent of browser and ph
   assert.equal((await read('electron', home)).content, '');
 });
 
+test('shipped templates back new users with generic rules until a personal file exists', async t => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ppilot 控制偏好-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  for (const target of agentSkillTargetPaths('profilepilot', home)) {
+    fs.mkdirSync(target.path, { recursive: true });
+    fs.writeFileSync(path.join(target.path, 'SKILL.md'), '# ProfilePilot');
+  }
+  const shipped = {
+    browser: fs.readFileSync(template('browser-routing.md'), 'utf8'),
+    electron: fs.readFileSync(template('electron-control.md'), 'utf8'),
+    phone: fs.readFileSync(template('phone-control.md'), 'utf8')
+  };
+  for (const domain of Object.keys(shipped)) {
+    const snapshot = await read(domain, home);
+    assert.equal(snapshot.content, shipped[domain], domain);
+    assert.equal(snapshot.exists, false, domain);
+    assert.equal(snapshot.defaulted, true, domain);
+    assert.equal(fs.existsSync(snapshot.path), false, 'templates never create local files by themselves');
+  }
+  // Defaults stay generic: no machine-specific Profile, device or port choices.
+  assert.ok(!shipped.browser.includes('系统默认 Profile') && !shipped.phone.includes('RMX'));
+  const saved = await save(home, await read('phone', home), shipped.phone);
+  assert.equal(saved.defaulted, false);
+  for (const location of saved.locations) assert.equal(fs.readFileSync(location.path, 'utf8'), shipped.phone);
+  assert.equal(fs.readFileSync(template('phone-control.md'), 'utf8'), shipped.phone, 'saving personal text never edits the template');
+  fs.writeFileSync(saved.locations[0].path, '优先使用我指定的手机。');
+  const personal = await read('phone', home);
+  assert.equal(personal.content, '优先使用我指定的手机。');
+  assert.equal(personal.defaulted, false);
+});
+
 test('phone saves create UTF-8 files for clients and never modify the existing browser policy or revision', async t => {
   const { home, files } = fixture(t);
   const browser = await readBrowserPreferences(home);
   const phone = await read('phone', home);
   assert.equal(phone.exists, false);
-  assert.equal(phone.content, '');
+  assert.equal(phone.defaulted, true);
+  assert.equal(phone.content, fs.readFileSync(template('phone-control.md'), 'utf8'));
   const text = '# 手机控制偏好\r\n优先使用我指定的安卓设备；默认仅查看。\r\n';
   const saved = await save(home, phone, text);
   for (const file of files) assert.equal(fs.readFileSync(file, 'utf8'), text);

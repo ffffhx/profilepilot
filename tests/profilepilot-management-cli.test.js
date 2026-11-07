@@ -15,6 +15,17 @@ const {
   requestProfilePilotManagement
 } = require("../dist/main/profilepilot-cli.js");
 
+test("browser profile commands retain the management API and legacy aliases", () => {
+  for (const args of [
+    ['list', '--json'], ['get', 'native:Default'], ['create', '--name', '中文 Profile'],
+    ['rename', 'isolated:test', '新名称'], ['configure', 'isolated:test', '--hide-automation', 'on'],
+    ['start', 'isolated:test'], ['stop', 'isolated:test'], ['delete', 'isolated:test', '--yes', '--json']
+  ]) {
+    assert.deepEqual(parseProfilePilotCliArgs(['browser', 'profile', ...args]), parseProfilePilotCliArgs(['profile', ...args]));
+  }
+  assert.equal(parseProfilePilotCliArgs(['browser', 'profile', 'delete', 'isolated:test']).command.confirmed, false);
+});
+
 test("profile readiness distinguishes a legacy extension and refreshes after upgrade", async () => {
   const { nativeProfileAvailability, NATIVE_REQUIRED_CAPABILITIES } = require('../dist/main/tasks/native-compatibility');
   const manager = fakeProfileManager();

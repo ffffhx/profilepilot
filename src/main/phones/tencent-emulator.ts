@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { getWindowsSystemSnapshot, runWindowsPowerShell } from "../windows-platform";
 import { ensureTencentEmulatorWindowVisible } from "./emulator-window";
+import { ensureTencentMemoryAvailable } from "./emulator-memory";
 
 export const TENCENT_EMULATOR = "Tencent_GameLoop";
 const quote = (value: string) => `'${value.replaceAll("'", "''")}'`;
@@ -9,7 +10,8 @@ const quote = (value: string) => `'${value.replaceAll("'", "''")}'`;
 /** Tencent's installed Windows engine; never creates an SDK AVD or alters its data. */
 export class TencentEmulator {
   constructor(private platform = process.platform, private powershell = runWindowsPowerShell,
-    private fitWindow = ensureTencentEmulatorWindowVisible, private snapshot = getWindowsSystemSnapshot) {}
+    private fitWindow = ensureTencentEmulatorWindowVisible, private snapshot = getWindowsSystemSnapshot,
+    private checkMemory = ensureTencentMemoryAvailable) {}
   async executable(): Promise<string | undefined> {
     if (this.platform !== "win32") return undefined;
     const directory = (await this.powershell(String.raw`
@@ -39,6 +41,7 @@ if (Test-Path -LiteralPath $key) { (Get-ItemProperty -LiteralPath $key).InstallP
     if (!executable) throw new Error("未找到已安装的腾讯手游助手");
     let running = await this.running(executable);
     if (!running) {
+      await this.checkMemory();
       // Tencent declares requireAdministrator. Use Windows consent rather than
       // elevating ProfilePilot or disabling UAC; ShellExecute also detaches it.
       await this.powershell(`

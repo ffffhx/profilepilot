@@ -491,7 +491,7 @@ appRoot.addEventListener("click", (event) => {
   if (action === "connect-browser-extension") {
     const profileId = store.nativeExtensionProfileId;
     if (!profileId || !store.state?.profiles.some(profile => profile.id === profileId && profile.source === "native")) {
-      setToast("请先选择系统 Chrome Profile", "error");
+      setToast("未发现系统 Chrome Profile，请先打开 Chrome 后检测连接", "error");
       return;
     }
     void withBusy(async () => {
@@ -2001,12 +2001,6 @@ installQuickLaunchRecorder();
 appRoot.addEventListener("change", (event) => {
   const target = event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement ? event.target : null;
   if (!target || !store.state) {
-    return;
-  }
-
-  if (target instanceof HTMLSelectElement && target.id === "tools-native-profile") {
-    store.nativeExtensionProfileId = target.value;
-    render();
     return;
   }
 

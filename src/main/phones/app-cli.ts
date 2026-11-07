@@ -1,25 +1,23 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { z } from "zod";
+import type { Readable } from "node:stream";
 import { packageName } from "./inspection";
 import { deviceShell } from "./adb";
 import { streamAdb } from "./adb-cli-stream";
 import type { ProfilePilotManagementCommand, ProfilePilotManagementResponse } from "../profilepilot-management-protocol";
+import { readPhoneParams } from "./cli-input";
+import { phoneAppParamsSchema } from "./cli-contract";
+import { phoneErrorResult, phoneExitCode, phoneResponseError, phoneFailure } from "./errors";
 
-export async function phoneAppCli(flags: Map<string, string>, request: (command: ProfilePilotManagementCommand) => Promise<ProfilePilotManagementResponse>, io: Pick<NodeJS.Process, "stdout" | "stderr">): Promise<number> {
-  const id = flags.get("--device"), file = flags.get("--params-file");
-  if (!id || !file || (await fs.stat(file)).size > 32768) throw new Error("app 需要 --device 和有效的 --params-file。");
-  const input = z.discriminatedUnion("operation", [
-    z.object({ operation: z.literal("launch"), packageName: z.string() }).strict(),
-    z.object({ operation: z.literal("stop"), packageName: z.string() }).strict(),
-    z.object({ operation: z.literal("uninstall"), packageName: z.string(), keepData: z.boolean().optional() }).strict(),
-    z.object({ operation: z.literal("export"), packageName: z.string(), outputDir: z.string() }).strict()
-  ]).parse(JSON.parse((await fs.readFile(file, "utf8")).replace(/^\uFEFF/, "")));
+export async function phoneAppCli(flags: Map<string, string>, request: (command: ProfilePilotManagementCommand) => Promise<ProfilePilotManagementResponse>, io: Pick<NodeJS.Process, "stdout" | "stderr">, stdin: Readable = process.stdin): Promise<number> {
+  const id = flags.get("--device");
+  if (!id) throw new Error("app 需要 --device。");
+  const input = phoneAppParamsSchema.parse(await readPhoneParams(flags, 32768, stdin));
   packageName(input.packageName);
   const call = async <T>(method: string, params: unknown): Promise<T> => {
     const response = await request({ action: "phone", method, params });
-    if (!response.ok) throw new Error(response.error.message); return response.data as T;
+    if (!response.ok) throw phoneResponseError(response); return response.data as T;
   };
   let lease: string | undefined, generation = 0, timer: NodeJS.Timeout | undefined, pulsing: Promise<void> | undefined, pulseError: Error | undefined;
   const artifacts: { remote: string; path: string; sha256: string; bytes: number }[] = [], evidence: { args: string[]; code: number; stdout: string; stderr: string }[] = [];
@@ -32,30 +30,37 @@ export async function phoneAppCli(flags: Map<string, string>, request: (command:
     if (code !== 0 || /(?:^|\n)(?:Error:|Failure\s*\[|Exception)/.test(result.stdout)) throw new Error(`Android 命令未成功（${code}）：${result.stderr || result.stdout}`);
     return result.stdout;
   };
+  let failed = false;
   try {
-    const owner = await call<{ lease: string; device: { state: { generation: number } } }>("wrapper-start", {
+    const owner = await call<{ lease: string; device: { transport?: string; state: { generation: number } } }>("wrapper-start", {
       id, mode: input.operation === "export" ? "view" : "control", backend: flags.get("--backend") || "app", controller: flags.get("--controller") || "ProfilePilot CLI", task: `应用 ${input.operation}: ${input.packageName}`
-    }); lease = owner.lease; generation = owner.device.state.generation;
+    }); lease = owner.lease;
+    if (!owner.device?.state || !Number.isInteger(owner.device.state.generation)) throw phoneFailure("PHONE_RESPONSE_MISSING", "手机未返回有效控制会话；应用操作尚未提交。");
+    generation = owner.device.state.generation;
     timer = setInterval(() => {
       if (pulsing || pulseError) return;
       pulsing = call("wrapper-pulse", { lease }).then(() => {}).catch(error => { pulseError = error; }).finally(() => { pulsing = undefined; });
     }, 1000);
-    if (input.operation === "launch") {
+    if (owner.device.transport === "internet") {
+      if (input.operation !== "launch") throw phoneFailure("PHONE_OPERATION_UNSUPPORTED", "外网应用命令支持 launch；停止、卸载等操作请使用受控的手机系统界面。");
+      await call("wrapper-internet-launch", { lease, generation, packageName: input.packageName });
+    } else if (input.operation === "launch") {
       const resolution = await execute(["shell", "cmd", "package", "resolve-activity", "--brief", input.packageName]);
       const component = resolution.split(/\r?\n/).map(s => s.trim()).filter(s => /^[\w.]+\/[\w.$]+$/.test(s)).at(-1);
-      if (!component || component.split("/")[0] !== input.packageName) throw new Error("没有找到此应用的启动 Activity。");
+      if (!component || component.split("/")[0] !== input.packageName) throw phoneFailure("PHONE_APP_NOT_READY", "没有找到此应用的启动 Activity；未提交启动操作。");
       await execute(["shell", deviceShell(["am", "start", "-W", "-n", component])]);
     } else if (input.operation === "stop") await execute(["shell", "am", "force-stop", input.packageName]);
     else if (input.operation === "uninstall") await execute(["uninstall", ...(input.keepData ? ["-k"] : []), input.packageName]);
     else {
       const output = await execute(["shell", "pm", "path", input.packageName]);
       const lines = output.split(/\r?\n/).filter(Boolean);
-      if (!lines.length || lines.some(line => !/^package:\/[^\x00-\x1f]+\.apk$/.test(line))) throw new Error("无法确认完整 APK 路径；未创建导出目录。");
+      if (!lines.length || lines.some(line => !/^package:\/[^\x00-\x1f]+\.apk$/.test(line))) throw phoneFailure("PHONE_APP_NOT_READY", "无法确认完整 APK 路径；未创建导出目录。");
       const paths = lines.map(line => line.slice(8)), names = paths.map(remote => path.posix.basename(remote));
       if (names.some(name => /[<>:"\\|?*]/.test(name) || /[. ]$/.test(name) || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name))
-          || new Set(names.map(name => name.toLowerCase())).size !== names.length) throw new Error("APK 文件名不适合此导出目录或发生名称冲突。");
+          || new Set(names.map(name => name.toLowerCase())).size !== names.length) throw phoneFailure("PHONE_APP_NOT_READY", "APK 文件名不适合此导出目录或发生名称冲突；未开始导出。");
       const directory = path.resolve(input.outputDir);
-      await fs.mkdir(directory); // Exclusive: preserve an existing acquisition.
+      try { await fs.mkdir(directory); } // Exclusive: preserve an existing acquisition.
+      catch { throw phoneFailure("PHONE_INVALID_REQUEST", "导出目录已存在或不可创建；未开始导出，请提供新目录。"); }
       for (let n = 0; n < paths.length; n++) {
         const local = path.join(directory, names[n]);
         await execute(["pull", paths[n], local]);
@@ -69,9 +74,11 @@ export async function phoneAppCli(flags: Map<string, string>, request: (command:
     }
     io.stdout.write(JSON.stringify({ ok: true, id, ...input, artifacts, evidence }, null, 2) + "\n"); return 0;
   } catch (error) {
-    io.stdout.write(JSON.stringify({ ok: false, id, ...input, error: (error as Error).message, artifacts, evidence, coverage: artifacts.length ? "partial" : "none" }, null, 2) + "\n"); return 1;
+    failed = true;
+    const failure = phoneErrorResult(error, true);
+    io.stdout.write(JSON.stringify({ ...failure, id, ...input, artifacts, evidence, coverage: artifacts.length ? "partial" : "none" }, null, 2) + "\n"); return phoneExitCode(failure.recovery);
   } finally {
     clearInterval(timer); await pulsing;
-    if (lease) await call("wrapper-stop", { lease });
+    if (lease) { try { await call("wrapper-stop", { lease }); } catch (error) { if (!failed) throw error; } }
   }
 }

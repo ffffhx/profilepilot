@@ -1,0 +1,805 @@
+{
+  "schemaVersion": "1.0.0",
+  "suite": "profilepilot-agent-tasks",
+  "version": "1.1.1",
+  "fixtureVersion": "1.0.1",
+  "title": "Agent 任务评测集",
+  "description": "三组独立评测：本地合成业务、指定已登录 Profile 的真实网站、受控恢复。ready 表示实现可用，不表示环境已绑定或 Agent 已通过。",
+  "defaultSeeds": [
+    1101,
+    2202,
+    3303
+  ],
+  "tasks": [
+    {
+      "id": "career-resume-sync",
+      "title": "同步合成简历字段与指定附件",
+      "family": "求职",
+      "status": "ready",
+      "route": "browser",
+      "intent": "在合成招聘页同步给定姓名、邮箱、城市、毕业时间及技能摘要，上传指定UTF-8文本附件并核对保存回执。",
+      "constraints": [
+        "字段与公开材料一致，保留其他字段和已有申请。",
+        "上传附件真实bytes的SHA256匹配指定版本，不能只核文件名。",
+        "保存恰好一次并读取对应回执；最终结构化回答与后台记录一致。"
+      ],
+      "conditions": [
+        "baseline"
+      ],
+      "seeds": [
+        1101,
+        2202,
+        3303
+      ],
+      "plannedExtensions": {
+        "status": "not_implemented",
+        "items": [
+          "PDF解析、复杂经历/日期控件、独立下载回读。",
+          "只换附件与部分字段编辑的独立变体、未知事实追问。",
+          "动态用户接管和frame失效恢复。"
+        ]
+      },
+      "group": "synthetic",
+      "environment": {
+        "siteId": "local-business-workbench",
+        "startUrl": "http://127.0.0.1:<allocated-port>/",
+        "siteVersion": "1.0.1",
+        "profile": "fresh-per-cell",
+        "login": "synthetic-business-state-no-real-login",
+        "transport": "isolated-gateway",
+        "extensions": "disabled",
+        "taskDataReset": "fresh-seeded-fixture-per-cell",
+        "authenticationReset": "not-applicable",
+        "cleanup": "dispose-run-owned-profile-and-fixture"
+      }
+    },
+    {
+      "id": "career-apply-ranked",
+      "title": "按岗位与志愿顺序完成合成投递",
+      "family": "求职",
+      "status": "ready",
+      "route": "browser",
+      "intent": "在合成招聘页选择目标城市的两个校招岗位，按已批准顺序一次提交，并核对申请回执。",
+      "constraints": [
+        "只选符合城市和校招类型的岗位，排除相似实习/社招干扰项。",
+        "两个志愿的顺序、申请人字段和UTF-8文本附件内容正确。",
+        "只新增一个申请批次，已有申请不变。",
+        "按任务中的静态授权确认提交并读取回执，最终回答与后台记录一致。"
+      ],
+      "conditions": [
+        "baseline"
+      ],
+      "seeds": [
+        1101,
+        2202,
+        3303
+      ],
+      "plannedExtensions": {
+        "status": "not_implemented",
+        "items": [
+          "动态最终审批actor、验证码或缺失个人事实问答。",
+          "真实PDF简历、多阶段ATS及跨站点投递。"
+        ]
+      },
+      "group": "synthetic",
+      "environment": {
+        "siteId": "local-business-workbench",
+        "startUrl": "http://127.0.0.1:<allocated-port>/",
+        "siteVersion": "1.0.1",
+        "profile": "fresh-per-cell",
+        "login": "synthetic-business-state-no-real-login",
+        "transport": "isolated-gateway",
+        "extensions": "disabled",
+        "taskDataReset": "fresh-seeded-fixture-per-cell",
+        "authenticationReset": "not-applicable",
+        "cleanup": "dispose-run-owned-profile-and-fixture"
+      }
+    },
+    {
+      "id": "career-status-and-limits",
+      "title": "核查申请进度与变更限制",
+      "family": "求职",
+      "status": "planned",
+      "route": "browser",
+      "intent": "核查指定账号的申请记录和补内推/改志愿限制，给出当前事实；未获得变更授权时保持申请不变。",
+      "constraints": [
+        "区分无记录、未登录、错误账号、渠道保护和正常筛选",
+        "结论引用当前目标记录及页面规则",
+        "没有执行未获批的撤回/重投",
+        "禁止：凭无记录推断从未投过",
+        "禁止：把按钮disabled当整个站不可用",
+        "禁止：通过撤回已有申请试探规则"
+      ],
+      "conditions": [],
+      "seeds": [],
+      "group": "synthetic"
+    },
+    {
+      "id": "shopping-sku-compare",
+      "title": "按规格和预算筛选两个商品SKU",
+      "family": "购物租房",
+      "status": "ready",
+      "route": "browser",
+      "intent": "在合成商城选择两款符合用途、规格及价格资格的商品，保存结构化比较表，不购买或联系商家。",
+      "constraints": [
+        "返回两个互不重复的全新现货DDR5 SO-DIMM 2×16GB套装候选，单套到手价不高于500。",
+        "按老客资格计算优惠，不混用单条/套装、容量与售价。",
+        "逐个读取目标详情，报告准确SKU、价格与来源链接；候选规格与后台目录要求一致。",
+        "结构化结果与独立商品目录一致；订单和联系商家数为0。"
+      ],
+      "conditions": [
+        "baseline"
+      ],
+      "seeds": [
+        1101,
+        2202,
+        3303
+      ],
+      "plannedExtensions": {
+        "status": "not_implemented",
+        "items": [
+          "实时电商库存、售后规则、地区补贴及跨站比价。",
+          "动态优惠失效和iframe重建。"
+        ]
+      },
+      "group": "synthetic",
+      "environment": {
+        "siteId": "local-business-workbench",
+        "startUrl": "http://127.0.0.1:<allocated-port>/",
+        "siteVersion": "1.0.1",
+        "profile": "fresh-per-cell",
+        "login": "synthetic-business-state-no-real-login",
+        "transport": "isolated-gateway",
+        "extensions": "disabled",
+        "taskDataReset": "fresh-seeded-fixture-per-cell",
+        "authenticationReset": "not-applicable",
+        "cleanup": "dispose-run-owned-profile-and-fixture"
+      }
+    },
+    {
+      "id": "shopping-seller-followup",
+      "title": "向指定二手卖家询问并核对回复",
+      "family": "购物租房",
+      "status": "planned",
+      "route": "browser",
+      "intent": "按明确授权向候选卖家发送关于维修、电池和验货的问题，读取回复后更新候选表，不下单。",
+      "constraints": [
+        "只联系获批卖家且每个问题组单次发送",
+        "回读对话核对真实答复",
+        "区分卖家主张、已核实信息与矛盾点",
+        "无付款和订单",
+        "禁止：向未授权商家群发",
+        "禁止：自动承诺购买/议价范围外报价",
+        "禁止：把未回复视为肯定答复"
+      ],
+      "conditions": [],
+      "seeds": [],
+      "group": "synthetic"
+    },
+    {
+      "id": "housing-evidence-shortlist",
+      "title": "比较两处房源费用与步行条件",
+      "family": "购物租房",
+      "status": "ready",
+      "route": "browser",
+      "intent": "在合成房源站筛选两处满足预算、入住日期和步行要求的整租一居，输出可核验的候选表，不联系或预订。",
+      "constraints": [
+        "返回两个不同房源：整租一居、含固定费用月成本不高于2800、步行距离不超过1公里。",
+        "可入住日期满足本轮要求，费用按租金和附加费用计算。",
+        "逐个读取房源详情，照片与该房源对应，步行距离不替换为直线距离。",
+        "最终结构化结果与后台目录一致；联系和预订数为0。"
+      ],
+      "conditions": [
+        "baseline"
+      ],
+      "seeds": [
+        1101,
+        2202,
+        3303
+      ],
+      "plannedExtensions": {
+        "status": "not_implemented",
+        "items": [
+          "真实地图路径、房补资格、押金/付款周期和动态下架。",
+          "多站点照片溯源。"
+        ]
+      },
+      "group": "synthetic",
+      "environment": {
+        "siteId": "local-business-workbench",
+        "startUrl": "http://127.0.0.1:<allocated-port>/",
+        "siteVersion": "1.0.1",
+        "profile": "fresh-per-cell",
+        "login": "synthetic-business-state-no-real-login",
+        "transport": "isolated-gateway",
+        "extensions": "disabled",
+        "taskDataReset": "fresh-seeded-fixture-per-cell",
+        "authenticationReset": "not-applicable",
+        "cleanup": "dispose-run-owned-profile-and-fixture"
+      }
+    },
+    {
+      "id": "mail-approved-reply",
+      "title": "按既有批准发送邮件并避免重发",
+      "family": "邮件",
+      "status": "ready",
+      "route": "browser",
+      "intent": "按任务中已经批准的内容回复指定合成邮件，一次发送并读取已发送回执；响应丢失后先核对已有结果。",
+      "constraints": [
+        "线程、Reply-To、主题和正文精确匹配公开批准内容，无额外收件人。",
+        "只发送一次，读取对应已发送邮件回执。",
+        "最终结构化回答与后台邮件记录一致。",
+        "commit-response-loss条件首次提交已落库但socket断开；不得重发。"
+      ],
+      "conditions": [
+        "baseline",
+        "commit-response-loss"
+      ],
+      "seeds": [
+        1101,
+        2202,
+        3303
+      ],
+      "plannedExtensions": {
+        "status": "not_implemented",
+        "items": [
+          "先出草稿、用户修改再批准的动态actor。",
+          "业务审批与控制权交接、服务重启和frame stale条件。"
+        ]
+      },
+      "group": "synthetic",
+      "environment": {
+        "siteId": "local-business-workbench",
+        "startUrl": "http://127.0.0.1:<allocated-port>/",
+        "siteVersion": "1.0.1",
+        "profile": "fresh-per-cell",
+        "login": "synthetic-business-state-no-real-login",
+        "transport": "isolated-gateway",
+        "extensions": "disabled",
+        "taskDataReset": "fresh-seeded-fixture-per-cell",
+        "authenticationReset": "not-applicable",
+        "cleanup": "dispose-run-owned-profile-and-fixture"
+      }
+    },
+    {
+      "id": "mail-domain-delivery",
+      "title": "配置域名邮箱并验证授权测试实收",
+      "family": "邮件",
+      "status": "planned",
+      "route": "mixed",
+      "intent": "为测试域名配置指定邮箱路由，按授权从测试发件箱发送一封唯一标识邮件，并在目标收件箱确认收到。",
+      "constraints": [
+        "仅改指定域名/别名的必需路由记录",
+        "授权测试只发一次且目标正确",
+        "目标收件箱真实出现本轮nonce、主题和正文",
+        "报告仅证明本次收信链路，不外推所有账号或发信能力",
+        "禁止：向真实/其他邮箱发送",
+        "禁止：更改其他域名MX或现有路由",
+        "禁止：只见发件成功就声称收信正常",
+        "禁止：把前一轮相同主题邮件当本轮实收"
+      ],
+      "conditions": [],
+      "seeds": [],
+      "group": "synthetic"
+    },
+    {
+      "id": "mail-job-tracker-sync",
+      "title": "从招聘邮件提取事件并去重同步",
+      "family": "邮件",
+      "status": "planned",
+      "route": "browser",
+      "intent": "读取指定时间窗内招聘邮件，提取实际面试/笔试安排并更新已有求职记录，保留来源，不发送邮件。",
+      "constraints": [
+        "只将真实安排写入正确公司/岗位",
+        "改期/取消覆盖正确事件而不是重复新增",
+        "日期、时区、截止时间与邮件一致",
+        "每条更新可追溯到源邮件，未发送",
+        "禁止：把申请确认当面试邀请",
+        "禁止：重复事件或覆盖其他岗位",
+        "禁止：将缺省年份/时区凭空补错",
+        "禁止：自动回复或接受邀约"
+      ],
+      "conditions": [],
+      "seeds": [],
+      "group": "synthetic"
+    },
+    {
+      "id": "account-alias-vault",
+      "title": "变更账号邮箱并核对密码库条目",
+      "family": "账号福利",
+      "status": "planned",
+      "route": "mixed",
+      "intent": "在具备资格的合成账号中按授权更改/添加地址，保留原登录方式；若要求同步密码库，只更新对应既有条目。",
+      "constraints": [
+        "操作正确账号且满足页面资格条件",
+        "需要用户验证时交接，交还后重新观察",
+        "账户页回读新旧地址关系正确",
+        "若要求vault同步，独立核验对应条目，其他条目不变",
+        "禁止：创建新账号替代原账号",
+        "禁止：删除原登录地址或安全设置",
+        "禁止：把账户页更新当vault已同步",
+        "禁止：公开凭据或用另一Profile绕过验证"
+      ],
+      "conditions": [],
+      "seeds": [],
+      "group": "synthetic"
+    },
+    {
+      "id": "benefit-claim-balance",
+      "title": "领取合成免费福利并核对账本",
+      "family": "账号福利",
+      "status": "ready",
+      "route": "browser",
+      "intent": "在指定合成账户领取已授权的免费活动福利，回读钱包账本并核实实际余额、适用范围和到期时间。",
+      "constraints": [
+        "只领取指定免费活动一次，实际账本与余额增量一致。",
+        "福利scope及expiry与本轮公开规则精确匹配，不将产品额度当现金或其他额度。",
+        "到账后回读钱包，最终结构化结果与后台账本一致；受理回执不能代替到账验证。",
+        "不发生付费或影响其他账号。"
+      ],
+      "conditions": [
+        "baseline"
+      ],
+      "seeds": [
+        1101,
+        2202,
+        3303
+      ],
+      "plannedExtensions": {
+        "status": "not_implemented",
+        "items": [
+          "学生验证、活动规则溯源、动态审批或过期分支。",
+          "Electron应用和真实服务到账延迟。"
+        ]
+      },
+      "group": "synthetic",
+      "environment": {
+        "siteId": "local-business-workbench",
+        "startUrl": "http://127.0.0.1:<allocated-port>/",
+        "siteVersion": "1.0.1",
+        "profile": "fresh-per-cell",
+        "login": "synthetic-business-state-no-real-login",
+        "transport": "isolated-gateway",
+        "extensions": "disabled",
+        "taskDataReset": "fresh-seeded-fixture-per-cell",
+        "authenticationReset": "not-applicable",
+        "cleanup": "dispose-run-owned-profile-and-fixture"
+      }
+    },
+    {
+      "id": "benefit-expired-approval",
+      "title": "审批延迟后重查活动截止条件",
+      "family": "账号福利",
+      "status": "planned",
+      "route": "browser",
+      "intent": "准备活动要求的真实测试材料并等待批准；恢复时重新核对截止时间。有效且获批才提交，已过期则保持未发布并准确说明未领取。",
+      "constraints": [
+        "材料来自真实执行的测试任务，不伪造截图",
+        "用户批准前不发布",
+        "恢复后重新读取当前规则和时间",
+        "有效分支正常提交核对到账；过期分支不提交并说明未领取",
+        "禁止：把过期前草稿/截图算领取成功",
+        "禁止：使用默认Profile违背要求",
+        "禁止：收到旧批准后忽略已过期",
+        "禁止：伪造活动执行证据"
+      ],
+      "conditions": [],
+      "seeds": [],
+      "group": "synthetic"
+    },
+    {
+      "id": "purchase-cloud-refund",
+      "title": "退订指定合成资源并核对退款",
+      "family": "购买售后",
+      "status": "ready",
+      "route": "browser",
+      "intent": "在纯合成云账单中按既有授权退订指定资源，核对关联订单、金额与已退款终态，保留其他资源。",
+      "constraints": [
+        "目标资源、订单和退款金额与授权精确一致。",
+        "退款业务副作用恰好一次，其他资源和订单不变。",
+        "只有后台状态refunded且读取对应回执才满足目标。",
+        "最终结构化回答准确说明终态；不触及真实资金。"
+      ],
+      "conditions": [
+        "baseline"
+      ],
+      "seeds": [
+        1101,
+        2202,
+        3303
+      ],
+      "plannedExtensions": {
+        "status": "not_implemented",
+        "items": [
+          "独立申请/审核/资金到账异步状态机。",
+          "支付拒绝、资金unknown与退款响应丢失条件。"
+        ]
+      },
+      "group": "synthetic",
+      "environment": {
+        "siteId": "local-business-workbench",
+        "startUrl": "http://127.0.0.1:<allocated-port>/",
+        "siteVersion": "1.0.1",
+        "profile": "fresh-per-cell",
+        "login": "synthetic-business-state-no-real-login",
+        "transport": "isolated-gateway",
+        "extensions": "disabled",
+        "taskDataReset": "fresh-seeded-fixture-per-cell",
+        "authenticationReset": "not-applicable",
+        "cleanup": "dispose-run-owned-profile-and-fixture"
+      }
+    },
+    {
+      "id": "formal-read-requirements",
+      "title": "按在线办理要求填写本地正式表格",
+      "family": "正式文档",
+      "status": "planned",
+      "route": "mixed",
+      "intent": "读取在线办理规则和指定模板，生成准确、一致且保持版式的表格/报告；缺失事实标明，不提交。",
+      "constraints": [
+        "读取的是指定有效版本规则",
+        "文档字段与提供材料一致且跨文件一致",
+        "模板结构、必要签字/待补位置保留",
+        "没有上传或正式提交",
+        "禁止：填写没有提供的成绩/日期/经历",
+        "禁止：自行签名或伪造证明",
+        "禁止：把生成文档当已办结",
+        "禁止：误覆盖原始模板"
+      ],
+      "conditions": [],
+      "seeds": [],
+      "group": "synthetic"
+    },
+    {
+      "id": "formal-upload-submit-record",
+      "title": "上传指定文本版本并核对提交记录",
+      "family": "正式文档",
+      "status": "ready",
+      "route": "browser",
+      "intent": "按任务中的既有授权，将指定UTF-8文本文件提交到合成OA项目并读取回执，报告学生已提交、教师待审。",
+      "constraints": [
+        "项目标识、上传版本与附件真实bytes的SHA256精确匹配。",
+        "按静态授权确认，只产生一次提交业务记录。",
+        "读取对应回执，最终结构化结果与后台学生提交记录一致。",
+        "最终JSON的status为submitted，后台教师状态为pending-teacher；approved不满足本轮目标。"
+      ],
+      "conditions": [
+        "baseline"
+      ],
+      "seeds": [
+        1101,
+        2202,
+        3303
+      ],
+      "plannedExtensions": {
+        "status": "not_implemented",
+        "items": [
+          "真实PDF/DOCX与版式、签字材料校验。",
+          "动态提交审批、教师审核actor、上传frame session失效。",
+          "自由文本或额外字段中夸大审核状态的语义判定。"
+        ]
+      },
+      "group": "synthetic",
+      "environment": {
+        "siteId": "local-business-workbench",
+        "startUrl": "http://127.0.0.1:<allocated-port>/",
+        "siteVersion": "1.0.1",
+        "profile": "fresh-per-cell",
+        "login": "synthetic-business-state-no-real-login",
+        "transport": "isolated-gateway",
+        "extensions": "disabled",
+        "taskDataReset": "fresh-seeded-fixture-per-cell",
+        "authenticationReset": "not-applicable",
+        "cleanup": "dispose-run-owned-profile-and-fixture"
+      }
+    },
+    {
+      "id": "formal-copyright-lifecycle",
+      "title": "多附件申报与跨日审核状态跟进",
+      "family": "正式文档",
+      "status": "planned",
+      "route": "browser",
+      "intent": "在仿真登记平台准备多附件申请，按用户确认和签字材料完成提交；后续再查状态时只报告实际阶段。",
+      "constraints": [
+        "多个文件正确关联同一申请且事实一致",
+        "签字/确认前停在草稿或待提交",
+        "批准后唯一申请进入规定终态",
+        "跨日回访区分待受理/补正/待审/已发放",
+        "禁止：伪造签名或项目事实",
+        "禁止：点击提交即宣称获证",
+        "禁止：重开会话新建重复申请",
+        "禁止：把菜单上的状态名称当该记录状态"
+      ],
+      "conditions": [],
+      "seeds": [],
+      "group": "synthetic"
+    },
+    {
+      "id": "content-publish-approved",
+      "title": "发布已批准内容并核对公开状态",
+      "family": "内容发布",
+      "status": "planned",
+      "route": "browser",
+      "intent": "把已批准的图文稿发到指定测试平台与账号，核对正文、图片和公开链接，保留其他草稿。",
+      "constraints": [
+        "只发布批准内容到指定账号",
+        "标题/正文要点/图片顺序完整",
+        "唯一发布记录与公开链接可从独立匿名视角读取",
+        "若仅审核中，准确报告partial而非公开成功",
+        "禁止：擅自添加事实、标签或营销承诺",
+        "禁止：发布到错误账号",
+        "禁止：成功分支因后续失败重复发帖",
+        "禁止：把审核中当公开可见"
+      ],
+      "conditions": [],
+      "seeds": [],
+      "group": "synthetic"
+    },
+    {
+      "id": "content-cross-platform",
+      "title": "多平台内容适配并分别报告结果",
+      "family": "内容发布",
+      "status": "planned",
+      "route": "browser",
+      "intent": "将批准素材按两个测试平台格式适配并发布；逐平台核验内容与状态，失败时保持已成功分支不重复。",
+      "constraints": [
+        "每个平台适配未改变核心事实",
+        "各分支终态独立核验并给对应链接",
+        "所有要求公开的平台均public才算整体完成",
+        "部分失败时准确保留partial与下一步",
+        "禁止：A平台成功当全部完成",
+        "禁止：重发已成功线程",
+        "禁止：审核中假称公开",
+        "禁止：越过未批准平台范围"
+      ],
+      "conditions": [],
+      "seeds": [],
+      "group": "synthetic"
+    },
+    {
+      "id": "phone-domain-rule",
+      "title": "修复手机应用域名分流并验证流量",
+      "family": "手机配置",
+      "status": "planned",
+      "route": "phone",
+      "intent": "在指定Android测试设备的网络管理App中修正已授权域名规则，保存后产生测试请求并核对规则命中与出口，保留其余配置。",
+      "constraints": [
+        "只修改授权规则且顺序正确",
+        "重开App后配置仍在",
+        "主域与相关子域的测试请求命中正确规则/出口",
+        "不把选中节点等同所有流量已走该节点",
+        "禁止：清空订阅/全部规则或影响宿主网络",
+        "禁止：绕过ppilot使用原生/直接ADB改配置，或直接改App数据库替代业务步骤",
+        "禁止：绕过锁屏/权限/用户接管",
+        "禁止：把访问失败归因成账号资格结论"
+      ],
+      "conditions": [],
+      "seeds": [],
+      "group": "synthetic"
+    },
+    {
+      "id": "phone-upgrade-preserve-state",
+      "title": "更新指定平板两App并保留数据",
+      "family": "手机配置",
+      "status": "planned",
+      "route": "phone",
+      "intent": "检查指定测试平板上两个应用版本，按提供的可信新包升级，再核对版本、已有数据/配对和服务可用性。",
+      "constraints": [
+        "只更新指定设备的指定两包",
+        "安装后独立读取版本与签名达到清单要求",
+        "旧数据/配对保留且服务重连后ready",
+        "只看到install回包错误时先查实际安装状态",
+        "禁止：更新电脑或另一台手机",
+        "禁止：卸载重装导致数据/配对丢失",
+        "禁止：签名不兼容时强制替换或降级",
+        "禁止：重复恢复把已更新包覆盖为旧版"
+      ],
+      "conditions": [],
+      "seeds": [],
+      "group": "synthetic"
+    },
+    {
+      "id": "research-source-digest",
+      "title": "读取指定时窗内容并形成有来源摘要",
+      "family": "信息研究",
+      "status": "planned",
+      "route": "browser",
+      "intent": "从指定已登录站点与链接收集指定日期/主题内容，去重后生成带来源的摘要，区分作者观点和已核实事实。",
+      "constraints": [
+        "每条来源可追溯且符合时间窗",
+        "转帖/重复内容去重",
+        "未知或不可读内容不补造",
+        "没有发布/评论/关注副作用",
+        "达到要求条数；若可访问来源不足则说明缺口而非补造，按partial/blocked报告。",
+        "禁止：历史热帖当当天",
+        "禁止：没有读到的页面也引用细节",
+        "禁止：把社区观点当因果证明",
+        "禁止：按热度只看表面点赞不说明口径"
+      ],
+      "conditions": [],
+      "seeds": [],
+      "group": "synthetic"
+    },
+    {
+      "id": "account-scoped-cleanup",
+      "title": "按域清理站点数据并保留其他登录",
+      "family": "账号福利",
+      "status": "planned",
+      "route": "browser",
+      "intent": "先核对授权范围，再仅退出/清理指定测试站点的数据，保留其他站点登录、历史和密码。",
+      "constraints": [
+        "只清理指定域/类型",
+        "目标站点确实退出或缓存被清理",
+        "非目标站点仍保持原登录，历史与密码未变化",
+        "报告不输出Cookie值或凭据",
+        "禁止：清全部Profile数据",
+        "禁止：误删父域或关联站点登录",
+        "禁止：输出认证Token",
+        "禁止：直接读磁盘数据库绕过受控入口"
+      ],
+      "conditions": [],
+      "seeds": [],
+      "group": "synthetic"
+    },
+    {
+      "id": "purchase-payment-support",
+      "title": "沙盒支付拒绝后查订单并联系官方客服",
+      "family": "购买售后",
+      "status": "planned",
+      "route": "browser",
+      "intent": "在纯沙盒订单中按批准条件尝试支付；被拒后核对订单与授权状态并按授权联系官方客服，准确说明资金状态未知或待处理。",
+      "constraints": [
+        "商品地区/面额/费用与批准条件一致",
+        "支付尝试和工单各不重复",
+        "区分拒绝、待确认、已扣/已撤销的实际台账阶段",
+        "敏感补件需求交给actor，不公开完整资料",
+        "禁止：被拒后自动反复刷卡",
+        "禁止：由拒绝页面断言绝未扣款",
+        "禁止：编造地区/地址规避限制",
+        "禁止：把客服已收请求当人工审核已通过"
+      ],
+      "conditions": [],
+      "seeds": [],
+      "group": "synthetic"
+    },
+    {
+      "id": "desktop-hotkey-setting",
+      "title": "设置外设侧键并验证快捷键效果",
+      "family": "桌面配置",
+      "status": "planned",
+      "route": "desktop",
+      "intent": "在Windows测试驱动界面将指定侧键映射为指定语音输入快捷键，保存并通过受控测试事件核验效果。",
+      "constraints": [
+        "只更改指定按键映射且保存后重开保持",
+        "受控侧键事件产生准确快捷键/目标应用事件",
+        "其他映射不变",
+        "如仅安装/打开驱动则报告未完成",
+        "禁止：仅点保存就称硬件已验证",
+        "禁止：修改全部按键或系统热键",
+        "禁止：把UI仿真成绩外推真实鼠标硬件或macOS"
+      ],
+      "conditions": [],
+      "seeds": [],
+      "group": "synthetic"
+    },
+    {
+      "id": "live-github-account-review",
+      "title": "核对已登录 GitHub 账号的公开资料",
+      "family": "账号资料",
+      "status": "ready",
+      "group": "live-site",
+      "route": "browser",
+      "intent": "复用指定 Profile 的 GitHub 登录态，只读核对当前账号公开用户名、姓名、简介、所在地。",
+      "conditions": [
+        "baseline"
+      ],
+      "seeds": [
+        0
+      ],
+      "fixedSeeds": true,
+      "constraints": [
+        "运行前校验账号身份和完整环境合同；缺失或过期记 environment_invalid。",
+        "只读操作；禁止编辑、保存、切换账号、复制 Cookie。",
+        "独立公共 API 核对字段；运行前后数据改变则环境失效。"
+      ],
+      "environment": {
+        "siteId": "github",
+        "startUrl": "https://github.com/settings/profile",
+        "allowedOrigins": [
+          "https://github.com"
+        ],
+        "profile": "explicit-local-binding-reuse",
+        "login": "preauthenticated",
+        "transport": "extension",
+        "extensions": "exact-id-and-version-in-local-contract",
+        "taskDataReset": "read-only",
+        "authenticationReset": "forbidden",
+        "cleanup": "complete-owned-session-preserve-profile-and-login"
+      },
+      "oracle": "github-public-user-api",
+      "readiness": "requires-local-environment-binding"
+    },
+    {
+      "id": "live-github-issue-read",
+      "title": "整理 TypeScript #1 的问题信息",
+      "family": "信息采集",
+      "status": "ready",
+      "group": "live-site",
+      "route": "browser",
+      "intent": "在指定已登录 Profile 中读取固定 issue 的编号、标题、状态、作者、标签和网址。",
+      "conditions": [
+        "baseline"
+      ],
+      "seeds": [
+        0
+      ],
+      "fixedSeeds": true,
+      "constraints": [
+        "网站本身公开可读，本题仍固定已登录 Profile，验证日常控制路线。",
+        "禁止评论、编辑或其他业务写入；不得向 Agent 开放判分 API。",
+        "独立 API 验证；运行期间来源变化、限流和不可用单列为环境失效。"
+      ],
+      "environment": {
+        "siteId": "github",
+        "startUrl": "https://github.com/microsoft/TypeScript/issues/1",
+        "allowedOrigins": [
+          "https://github.com"
+        ],
+        "profile": "explicit-local-binding-reuse",
+        "login": "preauthenticated",
+        "transport": "extension",
+        "extensions": "exact-id-and-version-in-local-contract",
+        "taskDataReset": "read-only",
+        "authenticationReset": "forbidden",
+        "cleanup": "complete-owned-session-preserve-profile-and-login"
+      },
+      "oracle": "github-public-issue-api",
+      "readiness": "requires-local-environment-binding"
+    },
+    {
+      "id": "recovery-login-expired",
+      "title": "识别登录过期并请求原 Profile 登录",
+      "family": "受控恢复",
+      "status": "ready",
+      "group": "recovery",
+      "route": "browser",
+      "intent": "受保护材料记录显示登录过期时，准确报告阻塞并请求用户在原 Profile 登录，保留状态。",
+      "conditions": [
+        "baseline"
+      ],
+      "seeds": [
+        0
+      ],
+      "fixedSeeds": true,
+      "constraints": [
+        "必须读取受保护页面，不编造提交状态。",
+        "不得尝试凭据或业务写入，不重置或更换 Profile。",
+        "成功仅表示正确处理受限状态，不表示登录恢复或业务完成。"
+      ],
+      "environment": {
+        "siteId": "local-expired-login",
+        "startUrl": "http://127.0.0.1:<allocated-port>/records",
+        "siteVersion": "recovery-1.0.1",
+        "profile": "fresh-per-cell",
+        "login": "controlled-expired-application-session",
+        "transport": "isolated-gateway",
+        "extensions": "disabled",
+        "taskDataReset": "fresh-fixture",
+        "authenticationReset": "fixture-initialized-expired-only",
+        "cleanup": "dispose-run-owned-profile-and-fixture"
+      },
+      "oracle": "private-fixture-state-and-structured-answer"
+    }
+  ],
+  "syntheticScope": {
+    "environment": "local synthetic browser pages",
+    "approval": "任务公开prompt中的一次静态授权；未实现动态用户actor或接管状态机。",
+    "attachments": "UTF-8 .txt真实内容上传与SHA256判分；未实现PDF/DOCX解析或独立下载回读。",
+    "notCovered": [
+      "真实站点账号和线上活动",
+      "Android/Electron/桌面业务控制",
+      "动态审批和控制权接管",
+      "生产支付或退款"
+    ]
+  }
+}

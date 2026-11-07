@@ -2,6 +2,10 @@ import os from "node:os";
 import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { randomUUID } from "node:crypto";
+import { sampleWindowsProcesses, sampleWindowsFileLocks, type WindowsSamplerReadContext } from './windows-sampler';
+import { WINDOWS_SAMPLER_LIMITS, validateWindowsSamplerRequest, type WindowsSamplerIdentityReason } from './windows-sampler-protocol';
+import { profileFileProcessChanged } from './profile-process-change';
 
 const execFileAsync = promisify(execFile);
 const SNAPSHOT_TTL_MS = 750;
@@ -12,7 +16,12 @@ export interface WindowsProcessInfo {
   name: string;
   executablePath: string | null;
   commandLine: string;
+  commandLineAvailable?: boolean;
   startedAt: string | null;
+  // Strict control evidence only. CIM startedAt remains display data.
+  creationFileTime?: string | null;
+  identityStatus?: 'confirmed' | 'unavailable';
+  identityReason?: WindowsSamplerIdentityReason;
 }
 
 export interface WindowsTcpConnection {
@@ -29,6 +38,97 @@ export interface WindowsSystemSnapshot {
   tcp: WindowsTcpConnection[];
   processesAvailable?: boolean;
   tcpAvailable?: boolean;
+  processesComplete?: boolean;
+  tcpComplete?: boolean;
+}
+
+export type WindowsSystemEvidence = Readonly<Omit<WindowsSystemSnapshot, 'processes' | 'tcp'>> & {
+  readonly processes: readonly Readonly<WindowsProcessInfo>[];
+  readonly tcp: readonly Readonly<WindowsTcpConnection>[];
+};
+export interface WindowsControlSample {
+  readonly snapshotId: string;
+  readonly capturedAt: number;
+  readonly snapshot: WindowsSystemEvidence;
+  // Internal only: never copied into public discovery/lastKnown metadata.
+  readonly context?: WindowsSamplerReadContext;
+}
+
+export function createWindowsReadContext(): WindowsSamplerReadContext {
+  return { deadlineAt: Date.now() + 8000, now: Date.now, signal: new AbortController().signal };
+}
+function requireReadBudget(context: WindowsSamplerReadContext): number {
+  if (context.signal.aborted) throw new Error('WINDOWS_SAMPLER_CANCELLED');
+  const now = context.now(), remaining = context.deadlineAt - now;
+  if (!Number.isFinite(now) || !Number.isFinite(context.deadlineAt) || remaining <= 0) throw new Error('WINDOWS_SAMPLER_TIMEOUT');
+  return remaining;
+}
+
+/** A control round owns this read. Never reuse or retimestamp the UI TTL cache.
+ * CIM and netstat still observe a time interval, not an atomic OS transaction. */
+export async function collectWindowsControlSample(context: WindowsSamplerReadContext = createWindowsReadContext()): Promise<WindowsControlSample> {
+  if (process.platform !== 'win32') throw new Error('PROFILE_WINDOWS_SAMPLE_UNSUPPORTED');
+  requireReadBudget(context);
+  const capturedAt = context.now(), snapshotId = randomUUID();
+  // Do not release the collection while a failed sibling still owns netstat
+  // children. A later admission must not stack scans behind that early error.
+  const [processRead, tcpRead] = await Promise.allSettled([sampleWindowsProcesses(context), readWindowsNetstat(context)]);
+  if (processRead.status === 'rejected') throw processRead.reason;
+  if (tcpRead.status === 'rejected') throw tcpRead.reason;
+  const processes = processRead.value, netstat = tcpRead.value;
+  requireReadBudget(context);
+  const value: WindowsSystemSnapshot = { processes: processes.processes, tcp: netstat?.connections || [],
+    processesAvailable: processes.processes.length > 0, processesComplete: processes.complete,
+    tcpAvailable: netstat !== null, tcpComplete: netstat !== null && netstat.complete };
+  const snapshot = Object.freeze({ ...value,
+    processes: Object.freeze(value.processes.map(row => Object.freeze({ ...row }))),
+    tcp: Object.freeze(value.tcp.map(row => Object.freeze({ ...row }))) });
+  return Object.freeze({ snapshotId, capturedAt, snapshot, context });
+}
+
+export interface WindowsFileProcessIdentity { pid: number; creationFileTime: string }
+/** All batches are one read: count/UTF8 bounds and cross-batch identity checks
+ * apply before publishing any rows. No partial result or per-batch new lease. */
+export async function findWindowsProcessIdentitiesLockingPaths(paths: string[], options: {
+  context?: WindowsSamplerReadContext;
+} = {}): Promise<Map<string, WindowsFileProcessIdentity[]>> {
+  const context = options.context || createWindowsReadContext();
+  requireReadBudget(context);
+  const aliases = new Map<string, string[]>();
+  for (const file of paths) { const key = file.toLowerCase(); const values = aliases.get(key) || []; if (!values.includes(file)) values.push(file); aliases.set(key, values); }
+  if (aliases.size > 4096) throw new Error('PROFILE_FILE_SCAN_TOO_LARGE');
+  const batches: string[][] = []; let batch: string[] = [];
+  const fits = (files: string[]) => {
+    if (files.length > WINDOWS_SAMPLER_LIMITS.paths) return false;
+    try { validateWindowsSamplerRequest({ version: 1, requestId: '11111111-1111-4111-8111-111111111111', operation: 'fileLocks', params: { paths: files } }); return true; }
+    catch (error) { if ((error as { code?: string }).code === 'WINDOWS_SAMPLER_REQUEST_TOO_LARGE') return false; throw error; }
+  };
+  for (const values of aliases.values()) {
+    const file = values[0];
+    if (!fits([...batch, file])) { if (batch.length) batches.push(batch); batch = []; if (!fits([file])) throw new Error('PROFILE_FILE_SCAN_TOO_LARGE'); }
+    batch.push(file);
+  }
+  if (batch.length) batches.push(batch);
+  const result = new Map<string, WindowsFileProcessIdentity[]>(), births = new Map<number, string>(); let count = 0;
+  for (const files of batches) {
+    requireReadBudget(context);
+    const reply = await sampleWindowsFileLocks(files, context);
+    requireReadBudget(context);
+    if (reply.complete !== true) throw new Error('PROFILE_FILE_SCAN_INCOMPLETE');
+    for (const row of reply.rows) {
+      if (++count > WINDOWS_SAMPLER_LIMITS.lockRows) throw new Error('PROFILE_FILE_SCAN_TOO_LARGE');
+      const previous = births.get(row.pid);
+      if (previous !== undefined && previous !== row.creationFileTime) throw profileFileProcessChanged('windows_rm_birth_join', row.pid, births.size,
+        undefined, { origin: 'restart_manager_batch', reason: 'batch_conflict' });
+      births.set(row.pid, row.creationFileTime);
+      for (const file of aliases.get(row.path.toLowerCase()) || []) {
+        const values = result.get(file) || [];
+        if (!values.some(value => value.pid === row.pid)) values.push({ pid: row.pid, creationFileTime: row.creationFileTime });
+        result.set(file, values);
+      }
+    }
+  }
+  return result;
 }
 
 interface CachedWindowsSnapshot {
@@ -132,34 +232,63 @@ $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop | ForEach-Object 
     name = [string]$_.Name
     executablePath = if ($imagePath) { [string]$imagePath } else { $null }
     commandLine = if ($_.CommandLine) { [string]$_.CommandLine } elseif ($imagePath) { [string]$imagePath } else { [string]$_.Name }
+    commandLineAvailable = [bool]$_.CommandLine
     startedAt = $started
   }
 })
 [PSCustomObject]@{ processes = $processes } | ConvertTo-Json -Compress -Depth 4
 `;
-  const [stdout, netstatStdout] = await Promise.all([
+  const [stdout, netstat] = await Promise.all([
     runWindowsPowerShell(script, { timeout: 8_000, maxBuffer: 32 * 1024 * 1024 }),
     readWindowsNetstat()
   ]);
   const snapshot = parseWindowsSystemSnapshot(stdout);
-  snapshot.tcp = parseWindowsNetstat(netstatStdout || "");
+  snapshot.tcp = netstat?.connections || [];
   snapshot.processesAvailable = snapshot.processes.length > 0;
-  snapshot.tcpAvailable = netstatStdout !== null;
+  snapshot.tcpAvailable = netstat !== null;
+  snapshot.tcpComplete = netstat !== null && netstat.complete;
   return snapshot;
 }
 
-async function readWindowsNetstat(): Promise<string | null> {
-  try {
-    const { stdout } = await execFileAsync("netstat", ["-ano", "-p", "tcp"], {
-      windowsHide: true,
-      encoding: "utf8",
-      timeout: 5_000,
-      maxBuffer: 16 * 1024 * 1024
-    });
-    return String(stdout || "");
-  } catch {
-    return null;
-  }
+export function windowsNetstatComplete(input: string, protocol?: 'tcp' | 'tcpv6'): boolean {
+  // Other TCP states are irrelevant to listening/established ownership, but a
+  // malformed TCP row cannot be silently removed from a strict control read.
+  const lines = input.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  // Column labels are localized, but netstat's last PID column is not. An
+  // empty table needs this envelope; arbitrary nonempty stdout is not evidence.
+  const header = lines.findIndex(line => /\sPID$/i.test(line) && line.split(/\s{2,}/).length >= 4);
+  if (header < 0) return false;
+  return lines.slice(header + 1).every(line => {
+    const match = line.trim().match(/^TCP\s+(\S+)\s+(\S+)\s+(\S+)\s+(\d+)$/i);
+    if (!match) return false;
+    const local = parseWindowsNetstatAddress(match[1]), remote = parseWindowsNetstatAddress(match[2]);
+    const validState = /^(?:LISTENING|LISTEN|ESTABLISHED|CLOSED|SYN_SENT|SYN_RECEIVED|SYN_RCVD|FIN_WAIT_1|FIN_WAIT_2|CLOSE_WAIT|CLOSING|LAST_ACK|TIME_WAIT|DELETE_TCB|BOUND)$/i.test(match[3]);
+    const familyMatches = !protocol || local && remote &&
+      local.address.includes(':') === (protocol === 'tcpv6') && remote.address.includes(':') === (protocol === 'tcpv6');
+    return Boolean(validState && local && remote && familyMatches && local.port <= 65535 && remote.port <= 65535 && nonNegativeInteger(match[4]) !== null);
+  });
+}
+
+async function readWindowsNetstat(context?: WindowsSamplerReadContext): Promise<{ connections: WindowsTcpConnection[]; complete: boolean } | null> {
+  // Windows -p tcp excludes IPv6. Both independent tables must be complete
+  // before absence of a listener can certify a control route as unused.
+  const tables = await Promise.all((['tcp', 'tcpv6'] as const).map(async protocol => {
+    try {
+      const remaining = context ? requireReadBudget(context) : 5000;
+      const { stdout, stderr } = await execFileAsync("netstat", ["-ano", "-p", protocol], {
+        windowsHide: true, encoding: "utf8", timeout: Math.min(5000, remaining),
+        ...(context ? { signal: context.signal } : {}), maxBuffer: 16 * 1024 * 1024
+      });
+      const text = String(stdout || "");
+      return { connections: parseWindowsNetstat(text), complete: !String(stderr || "").trim() && windowsNetstatComplete(text, protocol) };
+    } catch { return null; }
+  }));
+  if (tables.every(table => table === null)) return null;
+  // Preserve useful partial evidence for display/diagnosis without duplicating
+  // rows or promoting one successful address family to a complete snapshot.
+  const rows = tables.flatMap(table => table?.connections || []);
+  return { connections: [...new Map(rows.map(row => [JSON.stringify(row), row])).values()],
+    complete: tables.every(table => table !== null && table.complete) };
 }
 
 export function parseWindowsNetstat(input: string): WindowsTcpConnection[] {
@@ -210,19 +339,24 @@ export function parseWindowsSystemSnapshot(input: string): WindowsSystemSnapshot
   try {
     value = JSON.parse(input.trim());
   } catch {
-    return { processes: [], tcp: [] };
+    return { processes: [], tcp: [], processesComplete: false };
   }
-  if (!isRecord(value)) return { processes: [], tcp: [] };
+  if (!isRecord(value)) return { processes: [], tcp: [], processesComplete: false };
+  let processesComplete = Array.isArray(value.processes);
   const processes = arrayValue(value.processes).flatMap((entry) => {
-    if (!isRecord(entry)) return [];
+    if (!isRecord(entry)) { processesComplete = false; return []; }
+    // PID 0 is the real System Idle Process and is intentionally not targetable.
+    if (entry.pid === 0) return [];
     const pid = positiveInteger(entry.pid);
-    if (!pid) return [];
+    if (!pid) { processesComplete = false; return []; }
+    if (!stringValue(entry.name) || nonNegativeInteger(entry.parentPid) === null) processesComplete = false;
     return [{
       pid,
       parentPid: nonNegativeInteger(entry.parentPid) ?? 0,
       name: stringValue(entry.name) || "process",
       executablePath: stringValue(entry.executablePath),
       commandLine: stringValue(entry.commandLine) || stringValue(entry.executablePath) || stringValue(entry.name) || "",
+      commandLineAvailable: typeof entry.commandLineAvailable === 'boolean' ? entry.commandLineAvailable : Boolean(stringValue(entry.commandLine)),
       startedAt: isoDateValue(entry.startedAt)
     } satisfies WindowsProcessInfo];
   });
@@ -241,7 +375,8 @@ export function parseWindowsSystemSnapshot(input: string): WindowsSystemSnapshot
       remotePort
     } satisfies WindowsTcpConnection];
   });
-  return { processes, tcp };
+  if (new Set(processes.map(item => item.pid)).size !== processes.length) processesComplete = false;
+  return { processes, tcp, processesComplete };
 }
 
 export async function windowsForegroundProcessId(): Promise<number | null> {
@@ -382,18 +517,22 @@ $count = [ProfilePilotWindowClose]::Close([int[]]@(${targets.join(",")}))
   }
 }
 
-export async function findWindowsProcessesLockingPaths(paths: string[]): Promise<Map<string, number[]>> {
+export async function findWindowsProcessesLockingPaths(paths: string[], options: { strict?: boolean } = {}): Promise<Map<string, number[]>> {
   const uniquePaths = [...new Set(paths.filter(Boolean))];
   const result = new Map<string, number[]>();
   if (process.platform !== "win32" || !uniquePaths.length) return result;
   const encoded = Buffer.from(JSON.stringify(uniquePaths), "utf8").toString("base64");
   const script = String.raw`
+$ErrorActionPreference = '${options.strict ? 'Stop' : 'Continue'}'
 Add-Type @'
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
-public static class ProfilePilotRestartManager {
+using System.Text;
+public static partial class ProfilePilotRestartManager {
   private const int ERROR_MORE_DATA = 234;
+  private static readonly bool Strict = ${options.strict ? 'true' : 'false'};
+  private static int[] Failed(string phase, int code) { if (Strict) throw new InvalidOperationException("PROFILE_FILE_SCAN_"+phase+"_FAILED_"+code); return new int[0]; }
   [StructLayout(LayoutKind.Sequential)]
   private struct RM_UNIQUE_PROCESS {
     public int ProcessId;
@@ -413,34 +552,56 @@ public static class ProfilePilotRestartManager {
     [MarshalAs(UnmanagedType.Bool)] public bool Restartable;
   }
   [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
-  private static extern int RmStartSession(out uint handle, int flags, string sessionKey);
+  private static extern int RmStartSession(out uint handle, uint flags, StringBuilder sessionKey);
   [DllImport("rstrtmgr.dll", CharSet = CharSet.Unicode)]
   private static extern int RmRegisterResources(uint handle, uint fileCount, string[] fileNames, uint appCount, IntPtr applications, uint serviceCount, string[] serviceNames);
   [DllImport("rstrtmgr.dll")]
   private static extern int RmGetList(uint handle, out uint needed, ref uint count, [In, Out] RM_PROCESS_INFO[] affectedApps, ref uint rebootReasons);
   [DllImport("rstrtmgr.dll")]
   private static extern int RmEndSession(uint handle);
+  private delegate int ListQuery(out uint needed, ref uint count, RM_PROCESS_INFO[] entries, ref uint reasons);
+  private static int[] ReadProcesses(ListQuery read) {
+    uint needed = 0;
+    uint count = 0;
+    uint reasons = 0;
+    RM_PROCESS_INFO[] entries = null;
+    // RmGetList refreshes the list on every call. Capacity can grow between
+    // sizing and filling; retry only ERROR_MORE_DATA in this same RM session.
+    // The caller's discovery timestamp remains the start of the entire read.
+    for (var attempt = 0; attempt < 4; attempt++) {
+      uint capacity = entries == null ? 0 : (uint)entries.Length;
+      count = capacity;
+      var status = read(out needed, ref count, entries, ref reasons);
+      if (status == 0) {
+        if (needed > count || count > capacity) return Failed("LIST", 13);
+        var pids = new HashSet<int>();
+        for (var index = 0; index < count; index++) {
+          var pid = entries[index].Process.ProcessId;
+          if (pid <= 0) return Failed("LIST", 13);
+          pids.Add(pid);
+        }
+        var result = new int[pids.Count];
+        pids.CopyTo(result);
+        return result;
+      }
+      if (status != ERROR_MORE_DATA) return Failed("LIST", status);
+      if (needed <= capacity || needed > 16384) return Failed("LIST", 13);
+      if (attempt == 3) return Failed("LIST", ERROR_MORE_DATA);
+      entries = new RM_PROCESS_INFO[needed];
+    }
+    return Failed("LIST", ERROR_MORE_DATA);
+  }
   public static int[] GetLockingProcesses(string filePath) {
     uint handle;
-    var key = Guid.NewGuid().ToString("N");
-    if (RmStartSession(out handle, 0, key) != 0) return new int[0];
+    var key = new StringBuilder(33);
+    var start = RmStartSession(out handle, 0, key);
+    if (start != 0) return Failed("START", start);
     try {
-      if (RmRegisterResources(handle, 1, new [] { filePath }, 0, IntPtr.Zero, 0, new string[0]) != 0) return new int[0];
-      uint needed = 0;
-      uint count = 0;
-      uint reasons = 0;
-      var empty = new RM_PROCESS_INFO[0];
-      var status = RmGetList(handle, out needed, ref count, empty, ref reasons);
-      if (status != ERROR_MORE_DATA || needed == 0) return new int[0];
-      var entries = new RM_PROCESS_INFO[needed];
-      count = needed;
-      status = RmGetList(handle, out needed, ref count, entries, ref reasons);
-      if (status != 0) return new int[0];
-      var pids = new HashSet<int>();
-      for (var index = 0; index < count; index++) if (entries[index].Process.ProcessId > 0) pids.Add(entries[index].Process.ProcessId);
-      var result = new int[pids.Count];
-      pids.CopyTo(result);
-      return result;
+      var registered = RmRegisterResources(handle, 1, new [] { filePath }, 0, IntPtr.Zero, 0, new string[0]);
+      if (registered != 0) return Failed("REGISTER", registered);
+      return ReadProcesses(delegate(out uint needed, ref uint count, RM_PROCESS_INFO[] entries, ref uint reasons) {
+        return RmGetList(handle, out needed, ref count, entries, ref reasons);
+      });
     } finally {
       RmEndSession(handle);
     }
@@ -448,26 +609,34 @@ public static class ProfilePilotRestartManager {
 }
 '@
 $json = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encoded}'))
-$paths = @($json | ConvertFrom-Json)
+# Windows PowerShell 5.1 emits a JSON array as one pipeline object. Wrapping
+# that pipeline with @() nests it and casts all paths to one joined string.
+$paths = ConvertFrom-Json -InputObject $json
 $rows = @()
 foreach ($filePath in $paths) {
   foreach ($lockingPid in [ProfilePilotRestartManager]::GetLockingProcesses([string]$filePath)) {
     $rows += [PSCustomObject]@{ path = [string]$filePath; pid = [int]$lockingPid }
   }
 }
-@($rows) | ConvertTo-Json -Compress
+ConvertTo-Json -InputObject @($rows) -Compress
 `;
   try {
     const stdout = await runWindowsPowerShell(script, { timeout: 10_000, maxBuffer: 8 * 1024 * 1024 });
     const parsed = stdout.trim() ? JSON.parse(stdout.trim()) as unknown : [];
+    if (options.strict && (!stdout.trim() || !Array.isArray(parsed))) throw new Error('PROFILE_FILE_SCAN_INVALID');
     for (const row of arrayValue(parsed)) {
-      if (!isRecord(row)) continue;
+      if (!isRecord(row)) { if (options.strict) throw new Error('PROFILE_FILE_SCAN_INVALID'); continue; }
       const filePath = stringValue(row.path);
       const pid = positiveInteger(row.pid);
-      if (!filePath || !pid) continue;
+      if (!filePath || !pid || !uniquePaths.includes(filePath)) { if (options.strict) throw new Error('PROFILE_FILE_SCAN_INVALID'); continue; }
       result.set(filePath, [...new Set([...(result.get(filePath) || []), pid])]);
     }
-  } catch {
+  } catch (error) {
+    if (options.strict) {
+      const reason = String((error as NodeJS.ErrnoException & { stderr?: unknown }).stderr || '').match(/PROFILE_FILE_SCAN_(?:START|REGISTER|LIST)_FAILED_\d{1,10}/)?.[0];
+      if (reason) throw new Error(reason);
+      throw error;
+    }
     // Restart Manager is a best-effort precision layer; command-line discovery remains available.
   }
   return result;

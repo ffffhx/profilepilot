@@ -7,7 +7,7 @@ public class PhoneHomeStateTest {
   private PhoneHomeState state(boolean connected, boolean debugging, boolean permissions,
       boolean unlocked, boolean seen, boolean session, String phase, String mode) {
     return PhoneHomeState.from(new PhoneHomeState.Input(connected, debugging ? PhoneHomeState.Debugging.READY : PhoneHomeState.Debugging.OFF, permissions,
-        unlocked, seen, session, phase, mode));
+        unlocked, seen, session, phase, mode, ""));
   }
 
   @Test public void enabledDebuggingIsReadinessNotConnectionEvidence() {
@@ -41,7 +41,7 @@ public class PhoneHomeStateTest {
     assertEquals(PhoneHomeState.Debugging.UNKNOWN,PhoneHomeState.debugging("unknown","disabled"));
     assertEquals(PhoneHomeState.Debugging.READY,PhoneHomeState.debugging("unknown","enabled"));
     assertEquals(PhoneHomeState.Debugging.OFF,PhoneHomeState.debugging("disabled","disabled"));
-    PhoneHomeState home=PhoneHomeState.from(new PhoneHomeState.Input(false,PhoneHomeState.Debugging.UNKNOWN,true,true,false,false,"idle","control"));
+    PhoneHomeState home=PhoneHomeState.from(new PhoneHomeState.Input(false,PhoneHomeState.Debugging.UNKNOWN,true,true,false,false,"idle","control",""));
     assertEquals(PhoneHomeState.Tone.NEUTRAL,home.tone());
     assertEquals(PhoneHomeState.Action.SETTINGS,home.action());
     assertTrue(home.description().contains("待确认"));
@@ -86,6 +86,16 @@ public class PhoneHomeStateTest {
     assertTrue(view.description().contains("不能点击"));
     assertTrue(control.controls()); assertFalse(control.viewing());
     assertEquals(PhoneHomeState.Tone.ACTIVE,control.tone());
+  }
+
+  @Test public void screenOffPauseExplainsThatUnlockingContinuesAutomatically() {
+    PhoneHomeState home=PhoneHomeState.from(new PhoneHomeState.Input(true,PhoneHomeState.Debugging.READY,true,false,true,true,"paused","control","screen"));
+    assertTrue(home.paused()); assertTrue(home.controls());
+    assertEquals("控制等待解锁",home.title());
+    assertTrue(home.description().contains("解锁后自动继续"));
+    PhoneHomeState manual=PhoneHomeState.from(new PhoneHomeState.Input(true,PhoneHomeState.Debugging.READY,true,false,true,true,"paused","control","manual"));
+    assertEquals("控制已暂停",manual.title());
+    assertTrue(manual.description().contains("手动继续"));
   }
 
   @Test public void pausedSessionRemainsPausedAndExplainsMissingReadiness() {

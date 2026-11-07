@@ -1,0 +1,39 @@
+:root { color-scheme: light dark; --desktop-bg: #fff; --desktop-muted: #697384; --desktop-line: #e5e9ef; --desktop-soft: #f6f8fb; --desktop-text: #202b3b; }
+*, *::before, *::after { box-sizing: border-box; }
+@media (prefers-color-scheme: dark) { :root { --desktop-bg: #181d26; --desktop-muted: #a3afbf; --desktop-line: #303b4c; --desktop-soft: #202936; --desktop-text: #e7edf7; } }
+body { margin: 0; background: var(--desktop-bg); color: var(--desktop-text); font: 14px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif; }
+button { font: inherit; cursor: pointer; padding: 7px 13px; border: 1px solid var(--desktop-line); border-radius: 7px; background: var(--desktop-bg); color: inherit; }
+button:hover { background: var(--desktop-soft); } button:disabled { opacity: .5; cursor: default; }
+button:focus-visible { outline: 2px solid #2676ee; outline-offset: 2px; }
+.desktop-shell { padding: 24px 28px; }
+.desktop-header { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.desktop-header h1 { margin: 0; font-size: 25px; }
+.desktop-header p { color: var(--desktop-muted); margin: 4px 0 20px; }
+.desktop-layout { display: grid; grid-template-columns: minmax(270px, 36%) 1fr; gap: 24px; margin-top: 24px; }
+.desktop-panel { border: 1px solid var(--desktop-line); border-radius: 12px; overflow: hidden; min-width: 0; }
+.desktop-panel h2 { font-size: 15px; margin: 0; padding: 16px 18px; border-bottom: 1px solid var(--desktop-line); }
+#desktop-windows { max-height: 65vh; overflow: auto; padding: 6px; }
+.desktop-window { width: 100%; border: 0; border-radius: 7px; text-align: left; padding: 11px 12px; display: block; margin: 2px 0; }
+.desktop-window[aria-current="true"] { background: #2676ee16; box-shadow: inset 3px 0 #2676ee; }
+.desktop-window strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.desktop-window small, .desktop-help, .desktop-empty { color: var(--desktop-muted); }
+.desktop-empty { padding: 20px; } .desktop-detail { padding: 20px; }
+#desktop-preview { height: clamp(160px, 28vh, 200px); display: grid; place-items: center; background: var(--desktop-soft); border-radius: 8px; overflow: hidden; }
+#desktop-preview img { display: block; width: 100%; height: 100%; min-height: 0; object-fit: contain; }
+#desktop-preview p { padding: 20px; color: var(--desktop-muted); }
+#desktop-selected { margin: 0 0 12px; overflow-wrap: anywhere; }
+.desktop-help code { display: block; padding: 12px; margin: 8px 0; border-radius: 7px; background: var(--desktop-soft); user-select: text; overflow-wrap: anywhere; }
+#desktop-session { display: flex; align-items: center; gap: 12px; padding: 13px 16px; margin-top: 18px; background: var(--desktop-soft); border-radius: 8px; }
+#desktop-session .desktop-session-summary { flex: 1; min-width: 0; }
+#desktop-session span { display: block; overflow-wrap: anywhere; }
+#desktop-pause-reason { margin: 4px 0 0; font-size: 12px; color: var(--desktop-muted); }
+#desktop-error { color: #c34343; margin-top: 14px; } [hidden] { display: none !important; }
+.desktop-notice { min-height: 100vh; overflow: hidden; padding: 8px 16px; border: 1px solid var(--desktop-line); border-radius: 10px; }
+.desktop-notice-title { display: flex; align-items: center; justify-content: space-between; -webkit-app-region: drag; }
+.desktop-notice-title span { font-size: 12px; color: var(--desktop-muted); }
+.desktop-notice p { margin: 4px 0 6px; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.desktop-notice #control-error { color: #a12622; white-space: normal; overflow-wrap: anywhere; max-height: 48px; overflow-y: auto; line-height: 1.35; }
+.desktop-notice #control-reason { color: var(--desktop-muted); white-space: normal; line-height: 1.35; }
+.desktop-notice-actions { display: flex; align-items: center; gap: 8px; }
+.desktop-notice-actions button { padding: 4px 12px; } .desktop-notice-actions small { color: var(--desktop-muted); margin-left: auto; }
+@media (max-width: 850px) { .desktop-shell { padding: 20px; } .desktop-layout { grid-template-columns: 1fr; } #desktop-windows { max-height: 260px; } }

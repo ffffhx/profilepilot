@@ -90,7 +90,7 @@ test('CLI accepts BOM and paths with spaces, owns and cleans its session and wri
   assert.ok(!h.out.includes('do-not-log-this'));
 });
 test('view mode validates before starting; read-only flows automatically use view',async t=>{
-  const h=cliHarness(t,[{kind:'click',selector:target}]);assert.equal(await h.run(['--mode','view']),1);assert.equal(h.calls.length,0);
+  const h=cliHarness(t,[{kind:'click',selector:target}]);assert.equal(await h.run(['--mode','view']),2);assert.equal(h.calls.length,0);
   const read=cliHarness(t,[{kind:'assert',selector:target}]);assert.equal(await read.run(),0);assert.equal(read.calls[0].params.mode,'view');
 });
 test('phone pause during response cancels remaining steps without rebasing generation or collecting screenshots',async t=>{
@@ -101,8 +101,8 @@ test('phone pause during response cancels remaining steps without rebasing gener
   assert.equal(h.calls.at(-1).method,'wrapper-stop'); assert.match(JSON.parse(h.out).data.error,/会话已改变/);
 });
 test('occupied device is not stopped when session acquisition fails',async t=>{
-  const h=cliHarness(t,[{kind:'click',selector:target}]); h.request=async c=>{h.calls.push(c);return {ok:false,error:{message:'occupied'}};};
-  assert.equal(await h.run(),1);assert.deepEqual(h.calls.map(c=>c.method),['wrapper-start']);
+  const h=cliHarness(t,[{kind:'click',selector:target}]); h.request=async c=>{h.calls.push(c);return {ok:false,error:{code:'PHONE_SESSION_CONFLICT',message:'occupied'}};};
+  assert.equal(await h.run(),75);assert.deepEqual(h.calls.map(c=>c.method),['wrapper-start']);
 });
 
 test('failed setup and cleanup always remove CLI signal handlers',async t=>{
@@ -111,7 +111,7 @@ test('failed setup and cleanup always remove CLI signal handlers',async t=>{
   h.request=async c=>c.method==='wrapper-start'
     ?{ok:true,data:{lease:randomUUID(),device:{state:null}}}
     :{ok:false,error:{message:'cleanup disconnected'}};
-  assert.equal(await h.run(),1);
+  assert.equal(await h.run(),75);
   assert.equal(process.listenerCount('SIGINT'),before.int);
   assert.equal(process.listenerCount('SIGTERM'),before.term);
 });

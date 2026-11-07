@@ -9,10 +9,15 @@ import { ensureBrowserService } from '../browser-service/launcher';
 import { browserServiceRoot, readBrowserServiceConnection, processAlive, serviceRequest } from '../browser-service/connection';
 import { controlRecovery } from '../../shared/control-recovery';
 import { debugMethods, parseDebugArgs } from '../browser-debug/arguments';
+import { extensionCommandHint } from '../../shared/browser-command-contract';
+import { noteControlTraceCommand, noteControlTraceResponse } from '../control-trace-context';
+import { COMMON_BROWSER_ACTIONS } from '../../shared/browser-contract';
 export { nativeControlError } from "./errors";
 
 export function nativeControlRoot(): string { return process.env.PROFILEPILOT_NATIVE_ROOT || path.join(process.env.CPM_DATA_DIR || defaultDataDir(), "browser-tasks"); }
 export async function requestNativeControl(command: any, root = nativeControlRoot(), timeoutMs = 310000): Promise<any> {
+  noteControlTraceCommand({ session: command.sessionId, target: command.profileId,
+    params: { kind: (COMMON_BROWSER_ACTIONS as readonly string[]).includes(command.params?.kind) ? command.params.kind : undefined, requestId: command.requestId } });
   let connection;
   try { connection = JSON.parse(readFileSync(path.join(root, "native-control.json"), "utf8")); }
   catch { throw new Error("浏览器服务未运行，请运行 ppilot browser status 自动启动并检查连接。"); }
@@ -25,6 +30,7 @@ export async function requestNativeControl(command: any, root = nativeControlRoo
       res.on("error", reject);
       res.on("end", () => { try {
         const value = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        noteControlTraceResponse({ ok: value.ok, requestId: value.requestId || command.requestId, code: value.code, recovery: value.recovery });
         if (value.ok) resolve(value.result);
         else reject(Object.assign(new NativeControlError(value.code || "NATIVE_BROWSER_ERROR", value.error, value.recovery),
           { requestId: value.requestId, sessionId: value.sessionId, partialResult: value.partialResult }));
@@ -50,7 +56,7 @@ ppilot browser [--profile native:Default] [--session NAME] METHOD [--params JSON
   action --params JSON           BrowserAction with current observation version
   pointer --params JSON          Coordinates from a screenshot observation
   screenshot [--output PATH]     PNG capture
-  open URL | switch ID | newTab   Select or create a page
+  open URL | switch ID | newTab [URL]   Select or create a page
   cdp METHOD --params JSON       Full Chrome-supported CDP, --cdp-session ID for OOPIF
   extension-ui connect          Current tab's extension UI; params {extensionId}
   extension-ui status|observe    Chrome approval status / versioned button refs
@@ -121,6 +127,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   const output = flag("--output"), cdpSessionId = flag("--cdp-session"), tabId = flag("--tab"), newTab = boolean("--new-tab");
   const controller = flag("--controller"), task = flag("--task");
   const inline = flag("--params"), file = flag("--params-file"), stdin = boolean("--params-stdin");
+  boolean("--json"); // Extension responses are always JSON; match Gateway's output flag.
   if ([inline !== undefined, file !== undefined, stdin].filter(Boolean).length > 1) invalidInput("只使用一种 params 输入方式。");
   let method = args.shift();
   if ((controller !== undefined || task !== undefined) && method !== "claim") invalidInput("--controller 和 --task 仅用于 claim。");
@@ -132,13 +139,13 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     process.stdout.write(JSON.stringify({ ok: true, result }) + '\n'); return;
   }
   const controlAlias = ["handoff", "resume", "complete", "release"].includes(method || "");
-  if (!isNativeControlMethod(method) && !controlAlias) invalidInput(method ? `未知浏览器方法：${method}` : "需要浏览器方法；运行 ppilot browser --help 查看用法。");
+  if (!isNativeControlMethod(method) && !controlAlias) invalidInput(method ? extensionCommandHint(method) || `未知浏览器方法：${method}。运行 ppilot browser --connection extension schema 查看可用命令。` : "需要浏览器方法；运行 ppilot browser --help 查看用法。");
   if (!/^[\w.-]{1,128}$/.test(requestId)) invalidInput("requestId 必须是 1–128 个字母、数字、下划线、连字符或点。");
   if (output && !["screenshot", "observe",...debugMethods].includes(method!)) invalidInput("--output 仅支持截图或调试导出。");
-  const positional = ["open", "switch", "cdp", "extension-ui"].includes(method!) && args[0] && !args[0].startsWith("--") ? args.shift() : undefined;
+  const positional = ["open", "newTab", "switch", "cdp", "extension-ui"].includes(method!) && args[0] && !args[0].startsWith("--") ? args.shift() : undefined;
   let params = readParams(inline, file, stdin);
   if(debugMethods.includes(method!)){params=parseDebugArgs(method!,args,params);if(output)params.path=output;args.length=0;}
-  if (args.length) invalidInput(`未知参数：${args.join(" ")}`);
+  if (args.length) invalidInput(`未知参数：${args.join(" ")}。运行 ppilot browser ${method} --help 查看当前连接的用法。`);
   if (method === 'extension-ui') {
     if (positional !== undefined) params.action = positional;
     if (!['connect', 'status', 'observe', 'click', 'disconnect'].includes(params.action)) invalidInput('extension-ui 需要 connect/status/observe/click/disconnect。');
@@ -156,12 +163,12 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   else if (method === "cdp") {
     if (!positional || !/^[A-Za-z]+\.[A-Za-z0-9]+$/.test(positional)) invalidInput("cdp 需要有效方法，例如 Runtime.evaluate。");
     params = { method: positional, params, cdpSessionId };
-  } else if (method === "open") {
+  } else if (method === "open" || (method === "newTab" && (positional !== undefined || params.url !== undefined))) {
     if (positional !== undefined) params.url = positional;
-    if (typeof params.url !== "string") invalidInput("open 需要字符串 URL；使用 open URL 或 params 中的 url。");
+    if (typeof params.url !== "string") invalidInput(`${method} 需要字符串 URL；使用 ${method} URL 或 params 中的 url。`);
     let url: URL;
-    try { url = new URL(params.url); } catch { invalidInput("open 需要有效 URL；使用 open URL 或 params 中的 url。"); }
-    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) invalidInput("open 只支持不含凭据的 HTTP/HTTPS 页面。");
+    try { url = new URL(params.url); } catch { invalidInput(`${method} 需要有效 URL；使用 ${method} URL 或 params 中的 url。`); }
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) invalidInput(`${method} 只支持不含凭据的 HTTP/HTTPS 页面。`);
   } else if (method === "switch" && positional !== undefined) params.tabId = positiveTabId(positional);
   if (tabId !== undefined) params.tabId = positiveTabId(tabId);
   if (method === "switch" || params.tabId !== undefined) params.tabId = positiveTabId(params.tabId);

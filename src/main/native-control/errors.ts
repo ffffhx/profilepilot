@@ -25,6 +25,7 @@ export function nativeControlError(error: unknown): { code: string; message: str
     // Older extension workers can still return Chrome's raw error text.
     : /Cannot access a chrome-extension:\/\/ URL of different extension/i.test(message) ? "NATIVE_EXTENSION_FRAME_CONFLICT"
     : /Another debugger is already attached|Debugger is occupied/i.test(message) ? "NATIVE_DEBUGGER_BUSY"
+    : message === "子 frame 调试会话已失效，请重新观察。" ? "NATIVE_FRAME_SESSION_STALE"
     : /未知参数|未知浏览器方法|未知直接操作|需要.*参数|params 必须|JSON 语法/.test(message) ? "NATIVE_INVALID_REQUEST"
     : /(?:最新|最近|观察|携带).*version|version.*(?:过期|失效|不匹配)|重新观察|引用.*失效|页面.*变化/.test(message) ? "NATIVE_OBSERVATION_STALE"
     : /另一个任务|Profile.*占用|会话.*匹配|会话.*不存在|会话.*存在/.test(message) ? "NATIVE_SESSION_CONFLICT"
@@ -40,7 +41,7 @@ export function nativeControlError(error: unknown): { code: string; message: str
   return { code, message, recovery,
     ...(detail?.partialResult !== undefined ? { partialResult: detail.partialResult } : {}),
     ...(detail?.requestId ? { requestId: detail.requestId } : {}), ...(detail?.sessionId ? { sessionId: detail.sessionId } : {}),
-    exitCode: ["NATIVE_USER_IN_CONTROL", "NATIVE_SESSION_CONFLICT", "NATIVE_OBSERVATION_STALE", "NATIVE_TIMEOUT_UNCERTAIN"].includes(code) ? 75 : code === "NATIVE_DISCONNECTED" ? 69 : code === "NATIVE_INVALID_REQUEST" ? 64 : 1 };
+    exitCode: ["NATIVE_USER_IN_CONTROL", "NATIVE_SESSION_CONFLICT", "NATIVE_OBSERVATION_STALE", "NATIVE_FRAME_SESSION_STALE", "NATIVE_TIMEOUT_UNCERTAIN"].includes(code) ? 75 : code === "NATIVE_DISCONNECTED" ? 69 : code === "NATIVE_INVALID_REQUEST" ? 64 : 1 };
 }
 
 export function nativeFailurePayload(error: unknown) {

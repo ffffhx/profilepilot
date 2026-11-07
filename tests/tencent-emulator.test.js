@@ -46,8 +46,23 @@ test('fresh launch requests Windows consent and verifies the resulting engine wi
   t.mock.method(fs,'existsSync',()=>true);
   let reads=0;const scripts=[],fitted=[];
   const runtime=new TencentEmulator('win32',async script=>{scripts.push(script);return script.includes('InstallPath')?directory:'';},
-    async pid=>fitted.push(pid),async()=>reads++?snapshot():{processes:[],tcp:[]});
+    async pid=>fitted.push(pid),async()=>reads++?snapshot():{processes:[],tcp:[]},async()=>{});
   assert.equal(await runtime.connect(),'127.0.0.1:5555');
   assert.match(scripts[1],/-Verb RunAs -WindowStyle Hidden/);
   assert.ok(scripts[1].includes(executable));assert.deepEqual(fitted,[1234]);
+});
+
+test('low memory stops Tencent before the elevation request, but does not block reuse', async t => {
+  t.mock.method(fs, 'existsSync', () => true);
+  const scripts = [];
+  let checks = 0, running = false;
+  const runtime = new TencentEmulator('win32', async script => { scripts.push(script); return directory; }, async () => {},
+    async () => running ? snapshot() : { processes: [], tcp: [] },
+    async () => { checks++; throw Error('内存不足'); });
+  await assert.rejects(runtime.connect(), /内存不足/);
+  assert.equal(scripts.length, 1);
+  assert.equal(checks, 1);
+  running = true;
+  assert.equal(await runtime.connect(), '127.0.0.1:5555');
+  assert.equal(checks, 1);
 });

@@ -1,12 +1,32 @@
 # ProfilePilot CLI（`ppilot`）
 
+本机控制按目标分为四组：`ppilot browser`（浏览器）、`ppilot electron`（Electron 应用）、`ppilot desktop`（Windows 原生窗口和系统对话框）、`ppilot phone`（安卓手机）。`ppilot desktop` 不依赖 ClipRelay，macOS 暂不支持此入口；操作流程见[本机桌面控制指引](../skills/profilepilot/references/desktop.md)。配套工具中的 CLI 卡片可点击展开，查看各组用途和命令入口。
+
+Profile 的增删改查、配置与启停归入 `ppilot browser profile <操作>`，例如 `ppilot browser profile list --json`。原来的 `ppilot profile <操作>` 保留兼容。Electron 使用 `ppilot electron list` 查询已接入 Gateway 的应用，再以 `ppilot electron --session TASK --cdp PORT snapshot -i` 操作其页面；PORT 必须是该应用的 Agent 逻辑端口。它与浏览器共用页面引擎和接管机制，但不会选择浏览器 Profile，也不包含原生菜单、托盘或系统对话框控制。
+
 ProfilePilot CLI 的命令名是 `ppilot`，提供 Profile 管理、浏览器操作和内置 Agent 对话等入口。本文介绍内置 Agent 对话与任务命令：它们使用 ProfilePilot 的模型配置、任务记录和浏览器连接。对话命令启动时会连接本机服务；服务未运行时，使用安装 CLI 时保存的启动信息在后台独立启动。任务同时显示在桌面界面，可通过任务 ID 找回。
 
 在桌面应用“配套工具”中点击“安装 ProfilePilot CLI”，同时安装命令工具和 Agent 使用指引（内部 skill ID 为 `profilepilot`）。更新时两者一起检查，已有 CLI 在应用启动时同步配套指引；详情中可查看各组件和客户端的状态。Windows 提供 `ppilot.ps1` / `ppilot.cmd` 启动器，macOS 使用 `ppilot` shell 启动器；安装后新开终端即可运行 `ppilot`。模型也可以在终端的 `/login`、`/config` 中配置。开发环境可用 `node dist/main/profilepilot-cli.cjs` 替代命令名（先执行 `npm run build`）。
 
 在“配套工具 → 控制偏好”中，通过“浏览器”和“手机”两个 Tab 编辑 Agent 的操作指引。切换 Tab 保留草稿，保存只作用于当前 Tab；可选择同步到其他 Agent。浏览器偏好继续使用 `local/browser-routing.md`，手机偏好使用 `local/phone-control.md`，Agent 按任务目标读取对应文件。偏好不代替设备授权或暂停/接管机制。
 
+还没保存过个人偏好时，使用 Agent 使用指引自带的 `templates/` 通用默认（后台操作、用户接管与确认时机），新安装即可生效。保存后写入 `local/` 下的同名文件，个人文件优先于模板；更新 ProfilePilot CLI 时模板随指引刷新，个人文件保留且不会被覆盖。
+
 两类个人偏好在更新和移除时保留。移除只归档本应用管理的指引，外部维护的 Skill 或链接保持不变；其版本不一致会在详情中提示，不会被标为全部就绪。
+
+## 控制命令发现与恢复
+
+使用 `ppilot <入口> schema <命令>` 或 `ppilot <入口> <命令> --help` 查询窄范围契约，例如 `ppilot phone schema action`、`ppilot desktop action --help`。浏览器需按实际连接选择 `--connection extension|gateway`；不同路由的专属命令不要混用。JSON 文件与 stdin 都接受 UTF-8 BOM；手机支持 `--params-stdin`，不能与 `--params-file` 同时使用。PowerShell 的元素引用写作 `'@e123'`。
+
+`ppilot doctor --route electron|desktop|gpui --session TASK` 返回推荐入口、可用操作、控制权状态和下一条命令，也可通过 `--electron NAME_OR_ID`、`--window ID`、`--gpui TARGET_ID` 指定实际目标。Electron `register` 只登记；连接准备使用 `inspect`/`connect`，不会因未登记自动改走桌面控制。足够完成任务的专用 Skill/API 仍优先。
+
+手机恢复结果区分参数错误、未满足前置条件、会话占用、用户接管和在途结果未知。`not-executed` 表示本次操作未发送执行；`unknown` 要先核查结果。浏览器 `NATIVE_FRAME_SESSION_STALE` 与元素过期分开：观察允许一次同目标只读缓存重建，不重放动作或自动交还用户控制权。
+
+## 使用统计
+
+控制命令的路由前可加 `--task-kind real|verification`、`--task-id TASK`、`--operation-id STEP`；恢复步骤可加 `--recovery-of STEP`，例如 `ppilot --task-kind verification --task-id ui-check desktop status`。路由后的文本和脚本参数不会被重新解释为统计选项。同一任务/逻辑操作保持相同标识，未标注的任务类型保留为 `unspecified`。
+
+`ppilot trace report --since 14d --task-kind verification --json` 只读汇总各入口的调用、显式操作首次成功率、首次有效操作前的命令数、显式关联恢复耗时和需要用户处理的原因。记录只含白名单元数据与哈希标识，不含正文、URL、图片、凭据或任意错误消息。CLI 统计排除服务端事件，避免双计数；每个入口保留两个 2 MiB 文件，缺失/轮转/窗口边界可能使历史不完整，不能当成完整任务成功率。完整使用约定见[诊断指引](../skills/profilepilot/references/cli-diagnostics.md)。
 
 ## 连续对话
 

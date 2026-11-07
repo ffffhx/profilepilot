@@ -113,7 +113,7 @@ test('window placement is scoped to the newly spawned emulator and does not chan
     queueMicrotask(() => child.emit('spawn'));
     return child;
   });
-  const emulator = new AndroidEmulators('C:\\Android SDK\\emulator.exe', async (...args) => { fitted.push(args); });
+  const emulator = new AndroidEmulators('C:\\Android SDK\\emulator.exe', async (...args) => { fitted.push(args); }, undefined, async () => {});
   emulator.list = async () => ['Test_AVD'];
   await emulator.launch('Test_AVD');
   assert.deepEqual(fitted, [[12345, 'Test_AVD']]);
@@ -150,7 +150,7 @@ test('early emulator exit retains startup diagnostics without leaving a host fil
     queueMicrotask(() => child.emit('spawn'));
     return child;
   });
-  const runtime = new AndroidEmulators('emulator', async () => { throw Error('emulator exited'); });
+  const runtime = new AndroidEmulators('emulator', async () => { throw Error('emulator exited'); }, undefined, async () => {});
   runtime.list = async () => ['Test_AVD'];
   await assert.rejects(runtime.launch('Test_AVD'), error => {
     const file = error.message.split('启动日志：')[1];
@@ -169,7 +169,7 @@ test('runtime never swallows failed window correction or kills a launched emulat
   t.mock.method(require('node:child_process'), 'spawn', () => {
     queueMicrotask(() => child.emit('spawn')); return child;
   });
-  const runtime = new AndroidEmulators('emulator', async () => { throw Error('window timeout'); }, async () => { throw Error('window timeout'); });
+  const runtime = new AndroidEmulators('emulator', async () => { throw Error('window timeout'); }, async () => { throw Error('window timeout'); }, async () => {});
   runtime.list = async () => ['Test_AVD'];
   await assert.rejects(runtime.launch('Test_AVD'), /窗口完整可见/);
   await assert.rejects(runtime.ensureVisible('Test_AVD', 'emulator-5554'), /移回屏幕/);
@@ -192,7 +192,7 @@ test('CLI emulator entry uses the same verified service path and rejects unrelat
     ['emulator-connect', '--name', 'Test_AVD', '--device', 'REAL_PHONE'],
     ['emulator-connect', '--name', 'Test_AVD', '--backend', 'basic'],
     ['emulator-list', '--name', 'Test_AVD']
-  ]) assert.equal(await runPhoneCli(args, request, io), 1);
+  ]) assert.equal(await runPhoneCli(args, request, io), 2);
   assert.equal(commands.length, 2);
 });
 
@@ -205,4 +205,27 @@ test('Windows access denial explains elevation mismatch and preserves diagnostic
       assert.equal(error.cause, cause); return true;
     });
   }
+});
+
+test('memory rejection prevents spawning and the service remains retryable', async t => {
+  const h = fixture(t);
+  let checks = 0;
+  const runtime = new AndroidEmulators('must-not-execute', undefined, undefined, async name => {
+    assert.equal(name, 'Test_AVD'); checks++; throw Error('内存不足，已取消启动');
+  });
+  runtime.list = h.emulators.list;
+  t.mock.method(require('node:child_process'), 'spawn', () => assert.fail('must not spawn'));
+  const originalLaunch = h.emulators.launch;
+  h.emulators.launch = name => runtime.launch(name);
+  for (let attempt = 0; attempt < 2; attempt++) await assert.rejects(h.service.connectEmulator('Test_AVD'), /内存不足/);
+  assert.equal(checks, 2);
+  assert.equal(h.launched(), 0);
+  h.emulators.launch = originalLaunch;
+  assert.equal((await h.service.connectEmulator('Test_AVD')).id, 'emulator-5554');
+});
+
+test('an existing AVD can still connect when new launches would fail the memory check', async t => {
+  const h = fixture(t, true);
+  h.emulators.launch = async () => assert.fail('running AVD must not check startup memory');
+  assert.equal((await h.service.connectEmulator('Test_AVD')).id, 'emulator-5554');
 });

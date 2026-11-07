@@ -10,6 +10,8 @@ import type { NativeInstallDriver } from "./native-installer";
 import { NativeControlService } from "../native-control/service";
 import { NativeControlError, nativeFailurePayload } from "../native-control/errors";
 import { nativeExtensionReady, NATIVE_EXTENSION_UPDATE_MESSAGE } from "./native-compatibility";
+import { parseDebuggerDiagnostic } from "../../shared/debugger-diagnostic";
+import { writeControlTrace } from "../control-trace";
 
 interface Pairing { token: string; expiresAt: number; }
 interface Connection {
@@ -195,6 +197,16 @@ export class NativeBrowserBridge {
     connection.lastSeen = Date.now();
     const profileId = connection.state.profileId;
     if (message?.type === "heartbeat") { connection.peer.sendText('{"type":"heartbeat"}'); return; }
+    if (message?.type === "debuggerDiagnostic") {
+      const diagnostic = parseDebuggerDiagnostic(message.diagnostic);
+      if (diagnostic) {
+        connection.state.debuggerDiagnostic = diagnostic;
+        writeControlTrace(this.root, "extension", { requestId: diagnostic.id, sessionId: connection.state.ownerSessionId,
+          target: profileId, method: `debugger.${diagnostic.phase}`, durationMs: 0,
+          code: diagnostic.code, debuggerDiagnostic: diagnostic });
+      }
+      return;
+    }
     if (message?.type === "state") {
       const state = message.state;
       if (!state || !["agent", "user"].includes(state.ownership)) throw new Error("Invalid state");
@@ -202,6 +214,7 @@ export class NativeBrowserBridge {
         controlGeneration: typeof state.controlGeneration === "string" && /^[a-z0-9-]{1,80}:[0-9]{1,16}$/i.test(state.controlGeneration) ? state.controlGeneration : undefined,
         controlIssue: state.ownership === "user" && /^NATIVE_[A-Z_]{1,64}$/.test(state.controlIssue?.code) && typeof state.controlIssue?.message === "string"
           ? { code: state.controlIssue.code, message: state.controlIssue.message.slice(0, 1000) } : undefined,
+        debuggerDiagnostic: parseDebuggerDiagnostic(state.debuggerDiagnostic),
         tabTitle: typeof state.tabTitle === "string" ? state.tabTitle.slice(0, 300) : undefined, url: typeof state.url === "string" ? state.url.slice(0, 2000) : undefined } as NativeConnectionState;
       connection.state.taskTabs = nativeExtensionReady({ ...connection.state, taskTabs: state.taskTabs });
       if (connection.state.taskTabs) this.onboarding.connected(profileId);

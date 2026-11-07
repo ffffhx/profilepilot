@@ -34,7 +34,7 @@ export interface InputGuardClick {
   endedAt: number;
 }
 
-interface InputGuardMouseMessage {
+export interface InputGuardMouseMessage {
   type: "mouse";
   pid: number;
   phase: "down" | "up";
@@ -50,6 +50,7 @@ interface InputGuardMouseMessage {
 export interface InputGuardStatusMessage {
   type: "status";
   status: string;
+  reason?: string;
   pid?: number;
   activeCount?: number;
 }
@@ -61,9 +62,14 @@ export interface InputGuardController {
   dispose(): void | Promise<void>;
 }
 
-export interface MacInputGuardOptions {
+export interface InputGuardCallbacks {
   onClick: (click: InputGuardClick) => void;
   onStatus?: (message: InputGuardStatusMessage) => void;
+}
+
+export type InputGuardFactory = (callbacks: InputGuardCallbacks) => InputGuardController;
+
+export interface MacInputGuardOptions extends InputGuardCallbacks {
   helperPath?: string;
   platform?: NodeJS.Platform;
   spawnHelper?: (helperPath: string) => InputGuardProcess;
@@ -235,31 +241,8 @@ export class MacInputGuard implements InputGuardController {
 
     const down = this.mouseDown.get(key);
     this.mouseDown.delete(key);
-    if (!down || message.button !== 0 || !down.window || !message.window) {
-      return;
-    }
-    if (
-      down.pid !== message.pid ||
-      down.windowId <= 0 ||
-      down.windowId !== message.windowId ||
-      message.timestamp < down.timestamp ||
-      message.timestamp - down.timestamp > CLICK_MAX_DURATION_NS ||
-      Math.abs(down.displayScale - message.displayScale) > 0.01 ||
-      !sameWindowBounds(down.window, message.window)
-    ) {
-      return;
-    }
-
-    this.options.onClick({
-      pid: message.pid,
-      windowId: message.windowId,
-      displayScale: message.displayScale,
-      window: message.window,
-      down: { x: down.x, y: down.y },
-      up: { x: message.x, y: message.y },
-      startedAt: down.timestamp,
-      endedAt: message.timestamp
-    });
+    const click = matchInputGuardClick(down, message);
+    if (click) this.options.onClick(click);
   }
 
   private writeWantedPids(): void {
@@ -333,6 +316,17 @@ export class MacInputGuard implements InputGuardController {
 
 function supportsInputGuardPlatform(platform: NodeJS.Platform): boolean {
   return platform === "darwin" || platform === "win32";
+}
+
+// Pure shared pairing policy. Keep macOS and the shared Windows broker adapter
+// on the same duration, scale and unmoved-window rules.
+export function matchInputGuardClick(down: InputGuardMouseMessage | undefined, up: InputGuardMouseMessage): InputGuardClick | null {
+  if (!down || down.phase !== 'down' || up.phase !== 'up' || down.button !== up.button || up.button !== 0 || !down.window || !up.window) return null;
+  if (down.pid !== up.pid || down.windowId <= 0 || down.windowId !== up.windowId || up.timestamp < down.timestamp
+    || up.timestamp - down.timestamp > CLICK_MAX_DURATION_NS || Math.abs(down.displayScale - up.displayScale) > 0.01
+    || !sameWindowBounds(down.window, up.window)) return null;
+  return { pid: up.pid, windowId: up.windowId, displayScale: up.displayScale, window: { ...up.window },
+    down: { x: down.x, y: down.y }, up: { x: up.x, y: up.y }, startedAt: down.timestamp, endedAt: up.timestamp };
 }
 
 export function parseInputGuardOutputLine(line: string): InputGuardMessage | null {

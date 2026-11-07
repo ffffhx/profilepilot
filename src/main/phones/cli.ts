@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import type { Readable } from "node:stream";
 import type { ProfilePilotManagementCommand, ProfilePilotManagementResponse } from "../profilepilot-management-protocol";
 import { runPhoneFlowCli } from "./flow-cli";
 import { installPhoneApkCli } from "./install-cli";
@@ -7,11 +8,25 @@ import { runScreenCameraCli } from "./screen-camera-cli";
 import { executeAdbCli } from "./adb-cli-stream";
 import { phoneAppCli } from "./app-cli";
 import { runGameFollowCli } from "./game-follow-cli";
-import { controlRecovery } from "../../shared/control-recovery";
+import { runIphoneCli } from "./iphone-cli";
+import { runInternetPhoneCli } from "./internet-cli";
+import { phoneErrorResult, phoneExitCode, phoneResponseError, phoneFailure } from "./errors";
+import { readPhoneParams } from "./cli-input";
+import { phoneBooleanFlags, phoneCommandFlags, phoneGroupFlags, phoneCommandContract, phoneCommandHelp, phoneActionParamsSchema, phoneHostParamsSchema } from "./cli-contract";
 
 export const phoneHelp = `ppilot phone CLI · 手机控制
 
 ppilot phone list
+ppilot phone internet status
+ppilot phone internet configure --params-file <启用和HTTPS地址JSON>
+ppilot phone internet pair --output <新配对文件>
+ppilot phone internet forget --device <internet-设备ID>
+ppilot phone internet install-status --device <internet-设备ID> --job <安装返回的jobId>
+ppilot phone schema [命令]
+ppilot phone <命令> --help
+ppilot phone iphone --help
+ppilot phone iphone add --endpoint <WebDriverAgent地址> [--name <名称>]
+ppilot phone iphone remove --device <iphone-ID>
 ppilot phone readiness|doctor --device <设备ID> [--backend app|basic]
 ppilot phone follow runtime|setup|status|load
 ppilot phone follow save --config <校准JSON>
@@ -37,8 +52,14 @@ ppilot phone wireless-pair --params-file <配对JSON文件>
 ppilot phone wireless-connect --address <手机IP:连接端口>
 ppilot phone wireless-connect --device <设备ID>
 ppilot phone wireless-disconnect --device <设备ID>
-ppilot phone start --device <设备ID> --controller <控制者> --task <任务> [--mode view|control] [--backend app|basic]
+ppilot phone start --device <设备ID> --controller <控制者> --task <任务> [--mode view|control] [--backend app|basic] [--keep-screen-on on|off]
 ppilot phone pause|resume|stop --device <设备ID> [--backend app|basic]
+ppilot phone wake --device <设备ID>
+ppilot phone unattended --device <设备ID> [--op on|off|status]
+ppilot phone unlock --device <设备ID> [--pattern 1478] [--pattern-geometry cx,cy,step]
+ppilot phone unlock --device <设备ID> --save --kind pattern|credential [--allow-agent on|off]
+ppilot phone unlock --device <设备ID> --stored [--pattern-geometry cx,cy,step]
+ppilot phone unlock --device <设备ID> --forget
 ppilot phone rename --device <设备ID> --name <名称>
 ppilot phone action --params-file <JSON文件> [--output <截图文件>] [--backend app|basic]
 ppilot phone run --device <设备ID> --file <流程JSON> [--output-dir <报告目录>] [--mode view|control] [--controller <控制者>] [--task <任务>]
@@ -58,7 +79,7 @@ emulator-connect 启动或复用指定模拟器，Windows 下会检查窗口并�
 sourceId 来自 camera sources；crop 为 0–1 的 x/y/width/height。省略 sourceId 后可用 frame 提供当前 Profile 的截图。
 launch 需要 component（来自 apps），tap 需要 x/y（来自 preview），key 仅支持 back。暂停或断线后重新开启摄像头。
 
-无线配对 JSON：{"address":"192.168.1.8:37123","code":"手机显示的6位配对码"}。配对码只通过文件传入，不放在命令行。
+无线配对 JSON：{"address":"192.168.1.8:37123","code":"手机显示的6位配对码"}。配对码通过参数文件或 --params-stdin 传入，不放在命令行。
 配对端口与连接端口不同；已配对设备优先用 wireless-connect --device 自动发现并验证当前地址。
 wireless-discover 返回端口可达性及原因；--device 只查找指定手机，旧地址不可用时自动刷新一次。
 成功后使用返回的设备 ID 执行 connect，连接已有配套 App；connect 不安装或更新。
@@ -88,62 +109,117 @@ exec 自动建立/结束任务；wrap 为现有脚本配置受控 adb。完整�
 app 参数：{"operation":"launch|stop|uninstall|export","packageName":"com.example.app"}；export 另需 outputDir，导出全部 split APK 和 SHA-256。
 host 参数：{"args":["server-status"]}；支持 version、host-features、mdns、start-server、kill-server、reconnect offline 和 keygen。
 kill-server 会持续停用轮询，直到显式 start-server；改变共享主机连接前必须结束所有手机任务。
+控制期间配套 App 默认保持亮屏（--keep-screen-on off 关闭）；熄屏只会暂停，解锁后自动继续，不需要手动恢复。
+wake 通过 ADB 点亮屏幕并尝试解除无密码的滑动锁屏，不会尝试身份验证。
+unattended 控制配套 App 的“充电时保持 ADB 响应”：开启后仅在充电时持有唤醒锁，锁屏休眠后电脑仍能连接并解锁。
+无人值守只在充电时生效，拔电自动释放；也可在手机 App 的“设置 → 无人值守”里开关。
+unlock 从标准输入读取 PIN 或密码（不进命令行），点亮、上滑并提交；失败或结果不明不会自动重试。
+图案锁用 --pattern：4–9 个不重复的 1–9 数字（如 1478），通过连续的 DOWN/MOVE/UP 绘制。
+图案坐标默认从锁屏画面自动检测；检测不到时用上次成功的坐标或按屏幕比例估算。
+检测失败或估算不准时，用 --pattern-geometry cx,cy,step 或 cx,cy,stepX,stepY 指定点阵中心与间距。
+默认估算约为 cx=屏幕宽/2、cy=屏幕高×0.717、step=屏幕宽×0.252，可按实际锁屏微调。
+--save 从标准输入读取凭据（不回显），用系统安全存储加密保存到桌面 App 的数据目录，不会写回命令行或输出。
+--stored 使用已保存的凭据解锁；--forget 删除。桌面 App 的“设备详情 → 解锁凭据”可以保存、查看状态和删除。
+保存的凭据只在允许命令行与 Agent 使用时才会被 --stored 使用；它保护的是手机丢失，不防电脑账户被入侵。
 只管理经过此入口的操作，不会拦截绕过此 CLI 直接使用原生 ADB 的指令。
+JSON 参数命令支持 --params-file 或 --params-stdin（二选一，UTF-8）；stdin 不兼用作 ADB 二进制输入。
 设备和会话命令输出 JSON；adb 保留兼容的文本/PNG 输出；wrap 保留子程序输出。
 截图使用 --output 保存到本地文件。旧命令 ppilot adb 仍作为 ppilot phone adb 的兼容别名。
 `;
-export async function runPhoneCli(args: string[], request: (command: ProfilePilotManagementCommand) => Promise<ProfilePilotManagementResponse>, io: Pick<NodeJS.Process, "stdout" | "stderr">): Promise<number> {
-  if (!args.length || args.includes("--help") || args.includes("-h")) { io.stdout.write(phoneHelp); return 0; }
-  if (args[0] === "camera") return runScreenCameraCli(args.slice(1), request, io);
-  if (args[0] === "follow") return runGameFollowCli(args.slice(1), request, io);
+/** Read a lock credential without putting it in argv, a file, or the result. */
+async function readCredential(io: Pick<NodeJS.Process, "stdout" | "stderr">, input: Readable): Promise<string> {
+  const stdin = input as NodeJS.ReadStream;
+  const value = (line: string) => {
+    const credential = line.replace(/[\r\n]+$/g, "");
+    if (!credential) throw new Error("未从标准输入读取到解锁凭据。");
+    return credential;
+  };
+  if (stdin.isTTY) {
+    io.stderr.write("输入手机 PIN 或密码（不回显），回车确认：");
+    return await new Promise<string>((resolve, reject) => {
+      let typed = "";
+      const wasRaw = stdin.isRaw;
+      const cleanup = () => {
+        stdin.removeListener("data", onData);
+        if (stdin.isTTY) stdin.setRawMode(wasRaw ?? false);
+        stdin.pause(); io.stderr.write("\n");
+      };
+      const onData = (chunk: string) => {
+        for (const char of chunk) {
+          if (char === "\u0003") { cleanup(); reject(new Error("已取消输入解锁凭据。")); return; }
+          if (char === "\r" || char === "\n") {
+            cleanup();
+            try { resolve(value(typed)); } catch (error) { reject(error); }
+            return;
+          }
+          if (char === "\u007f" || char === "\b") { typed = typed.slice(0, -1); continue; }
+          typed += char;
+        }
+      };
+      stdin.setEncoding("utf8"); stdin.setRawMode(true); stdin.resume();
+      stdin.on("data", onData);
+    });
+  }
+  const chunks: Buffer[] = [];
+  let ended = false;
+  await new Promise<void>((resolve, reject) => {
+    const done = () => { if (!ended) { ended = true; stdin.pause(); resolve(); } };
+    stdin.on("data", chunk => {
+      const buffer = Buffer.from(chunk); chunks.push(buffer);
+      if (buffer.includes(10)) done();
+    });
+    stdin.once("end", done); stdin.once("error", reject); stdin.resume();
+  });
+  return value(Buffer.concat(chunks).toString("utf8").split(/\r?\n/)[0]);
+}
+
+export async function runPhoneCli(args: string[], request: (command: ProfilePilotManagementCommand) => Promise<ProfilePilotManagementResponse>, io: Pick<NodeJS.Process, "stdout" | "stderr">, input: Readable = process.stdin): Promise<number> {
+  if (!args.length || ["--help", "-h"].includes(args[0])) { io.stdout.write(phoneHelp); return 0; }
   let dispatching = false;
+  const dispatch = (command: ProfilePilotManagementCommand) => { dispatching = true; return request(command); };
   try {
+    if (args[0] === "schema") {
+      if (args.length > 3) throw phoneFailure("PHONE_INVALID_REQUEST", "用法：ppilot phone schema [命令 [子命令]]");
+      const group = args.length === 2 ? phoneGroupFlags[args[1]] : undefined;
+      io.stdout.write(JSON.stringify(group ? { version: 1, command: `ppilot phone ${args[1]}`, commands: Object.keys(group) } : args[1] ? phoneCommandContract(args.slice(1).join(" ")) : { version: 1, commands: Object.keys(phoneCommandFlags), aliases: { doctor: "readiness" }, groups: Object.keys(phoneGroupFlags) }, null, 2) + "\n");
+      return 0;
+    }
+    if (args.includes("--help") || args.includes("-h") || args.length === 1 && phoneGroupFlags[args[0]]) {
+      const group = phoneGroupFlags[args[0]];
+      const op = args[1] && !args[1].startsWith("-") ? args[1] : undefined;
+      io.stdout.write(group && !op ? `ppilot phone ${args[0]} <命令>\n\n${Object.keys(group).join(" | ")}\n\n使用 ppilot phone ${args[0]} <命令> --help 或 ppilot phone schema ${args[0]} <命令> 查看格式。\n` : phoneCommandHelp(group ? `${args[0]} ${op}` : args[0])); return 0;
+    }
+    if (args[0] === "iphone") return runIphoneCli(args.slice(1), dispatch, io);
+    if (args[0] === "internet") return await runInternetPhoneCli(args.slice(1), dispatch, io, input);
+    if (args[0] === "camera") return runScreenCameraCli(args.slice(1), dispatch, io, input);
+    if (args[0] === "follow") return runGameFollowCli(args.slice(1), dispatch, io, input);
     const method = args[0] === "doctor" ? "readiness" : args[0];
-    if (!["accessibility-repair", "readiness", "list", "emulator-list", "emulator-connect", "connect", "disconnect", "update", "inspect", "packages", "diagnose", "exec", "host", "app", "install", "wireless-discover", "wireless-pair", "wireless-connect", "wireless-disconnect", "rename", "start", "pause", "resume", "stop", "action", "run"].includes(method)) throw new Error("未知手机命令。运行 ppilot phone --help 查看用法。");
+    if (!phoneCommandFlags[method]) throw new Error("未知手机命令。运行 ppilot phone schema 查看命令列表。");
     const flags = new Map<string, string>();
+    const booleans = phoneBooleanFlags;
     for (let index = 1; index < args.length; index++) {
       const key = args[index]; if (key === "--json") continue;
-      if (!["--auto-restore", "--device", "--apk", "--address", "--controller", "--task", "--mode", "--name", "--params-file", "--output", "--file", "--output-dir", "--backend", "--package", "--scope", "--filter"].includes(key) || flags.has(key) || !args[index + 1]) throw new Error(`参数无效：${key}`);
+      if (booleans.has(key)) { if (flags.has(key)) throw new Error(`参数重复：${key}`); flags.set(key, "on"); continue; }
+      if (!phoneCommandFlags[method].includes(key) || flags.has(key) || !args[index + 1] || args[index + 1].startsWith("--")) throw new Error(`参数无效或缺少值：${key}`);
       flags.set(key, args[++index]);
     }
-    const allowed: Record<string, string[]> = { list: [], connect: ["--device"], rename: ["--device", "--name"], start: ["--device", "--controller", "--task", "--mode"], pause: ["--device"], resume: ["--device"], stop: ["--device"], action: ["--params-file", "--output"], run: ["--device", "--file", "--output-dir", "--mode", "--controller", "--task"] };
-    allowed["wireless-discover"] = ["--device"];
-    allowed["emulator-list"] = [];
-    allowed["emulator-connect"] = ["--name"];
-    allowed.install = ["--device", "--apk", "--controller"];
-    allowed.update = ["--device"];
-    allowed.disconnect = ["--device"];
-    allowed["accessibility-repair"] = ["--device", "--auto-restore"];
-    allowed.inspect = ["--device", "--package"];
-    allowed.packages = ["--device", "--scope", "--filter"];
-    allowed.diagnose = ["--device"];
-    allowed.readiness = ["--device", "--backend"];
-    allowed.exec = ["--device", "--params-file", "--mode", "--controller", "--task", "--backend"];
-    allowed.host = ["--params-file"];
-    allowed.app = ["--device", "--params-file", "--backend", "--controller"];
-    allowed["wireless-disconnect"] = ["--device"];
-    allowed["wireless-pair"] = ["--params-file"];
-    allowed["wireless-connect"] = ["--address", "--device"];
-    for (const operation of ["start", "pause", "resume", "stop", "action"]) allowed[operation].push("--backend");
+    const allowed = phoneCommandFlags;
     const backend = flags.get("--backend") || "app";
     if (!["app", "basic"].includes(backend)) throw new Error("--backend 必须为 app 或 basic。");
     for (const key of flags.keys()) if (!allowed[method].includes(key)) throw new Error(`${method} 不支持 ${key}`);
-    if (method === "exec") { dispatching = true; return await executeAdbCli(flags, request, io); }
-    if (method === "app") { dispatching = true; return await phoneAppCli(flags, request, io); }
+    if (method === "exec") return await executeAdbCli(flags, dispatch, io, input);
+    if (method === "app") return await phoneAppCli(flags, dispatch, io, input);
     if (method === "install") {
-      dispatching = true;
-      const data = await installPhoneApkCli(flags, request);
+      const data = await installPhoneApkCli(flags, dispatch);
       io.stdout.write(JSON.stringify({ ok: true, data }, null, 2) + "\n"); return 0;
     }
     if (method === "run") {
-      dispatching = true;
-      const data = await runPhoneFlowCli(flags, request) as { ok: boolean };
+      const data = await runPhoneFlowCli(flags, dispatch) as { ok: boolean };
       io.stdout.write(JSON.stringify({ ok: data.ok, data }, null, 2) + "\n"); return data.ok ? 0 : 1;
     }
     let params: unknown = {};
     if (method === "host") {
-      const file = flags.get("--params-file"); if (!file || (await fs.stat(file)).size > 32768) throw new Error("host 需要有效的 --params-file。");
-      params = JSON.parse((await fs.readFile(file, "utf8")).replace(/^\uFEFF/, ""));
+      params = phoneHostParamsSchema.parse(await readPhoneParams(flags, 32768, input));
     } else if (method === "emulator-connect") {
       const name = flags.get("--name");
       if (!name || !/^[\w.-]{1,200}$/.test(name)) throw new Error("请指定 --name，使用 emulator-list 返回的模拟器名称。");
@@ -155,16 +231,12 @@ export async function runPhoneCli(args: string[], request: (command: ProfilePilo
     } else if (method === "wireless-discover") {
       params = flags.has("--device") ? { id: flags.get("--device") } : {};
     } else if (method === "wireless-pair") {
-      const file = flags.get("--params-file");
-      if (!file) throw new Error("wireless-pair 需要 --params-file（address 和 code）。");
-      if ((await fs.stat(file)).size > 32768) throw new Error("参数文件过大。");
-      const content = await fs.readFile(file, "utf8");
+      const content = await readPhoneParams(flags, 32768, input);
       // Do not include invalid JSON excerpts or schema inputs containing the code in errors.
-      try { params = wirelessPairSchema.parse(JSON.parse(content.replace(/^\uFEFF/, ""))); }
+      try { params = wirelessPairSchema.parse(content); }
       catch { throw new Error("配对参数无效：请提供 JSON 格式的局域网 address 和 6 位 code。"); }
     } else if (method === "action") {
-      const file = flags.get("--params-file"); if (!file) throw new Error("action 需要 --params-file。");
-      if ((await fs.stat(file)).size > 32768) throw new Error("参数文件过大。"); params = JSON.parse((await fs.readFile(file, "utf8")).replace(/^\uFEFF/, ""));
+      params = phoneActionParamsSchema.parse(await readPhoneParams(flags, 32768, input));
     } else if (method !== "list" && method !== "emulator-list" && method !== "wireless-discover") {
       const id = flags.get("--device"); if (!id) throw new Error("请指定 --device，避免操作错误的手机。");
       params = method === "start" ? { id, mode: flags.get("--mode") || "control", controller: flags.get("--controller") || "本机 CLI", task: flags.get("--task") || "" } : method === "rename" ? { id, name: flags.get("--name") } : method === "inspect" ? { id, packageName: flags.get("--package") } : method === "packages" ? { id, scope: flags.get("--scope"), filter: flags.get("--filter") } : { id };
@@ -175,6 +247,49 @@ export async function runPhoneCli(args: string[], request: (command: ProfilePilo
       params = { ...(params as { id: string }), autoRestore: flags.get("--auto-restore") === "on" };
     }
     if (method === "readiness") params = { ...(params as { id: string }), backend };
+    if (method === "unattended") {
+      const op = flags.get("--op") ?? "status";
+      if (!["on", "off", "status"].includes(op)) throw new Error("--op 必须为 on、off 或 status。");
+      params = { ...(params as { id: string }), op };
+    }
+    if (method === "start" && flags.has("--keep-screen-on")) {
+      const value = flags.get("--keep-screen-on");
+      if (!["on", "off"].includes(value!)) throw new Error("--keep-screen-on 必须为 on 或 off。");
+      params = { ...(params as object), keepScreenOn: value === "on" };
+    }
+    let requestMethod = method;
+    if (method === "unlock") {
+      const pattern = flags.get("--pattern");
+      const stored = flags.has("--stored"), save = flags.has("--save"), forget = flags.has("--forget");
+      if ([stored, save, forget].filter(Boolean).length > 1) throw new Error("--stored、--save、--forget 不能同时使用。");
+      if (stored) {
+        if (pattern !== undefined || flags.has("--kind") || flags.has("--allow-agent")) throw new Error("--stored 不能和 --pattern、--kind、--allow-agent 一起使用。");
+        params = { ...(params as { id: string }), ...(flags.has("--pattern-geometry") ? { patternGeometry: flags.get("--pattern-geometry") } : {}) };
+        requestMethod = "unlock-stored";
+      } else if (forget) {
+        if (pattern !== undefined || flags.has("--pattern-geometry") || flags.has("--kind") || flags.has("--allow-agent")) throw new Error("--forget 不能和其他解锁参数一起使用。");
+        requestMethod = "unlock-secret-delete";
+      } else if (save) {
+        const kind = flags.get("--kind");
+        if (!kind || !["pattern", "credential"].includes(kind)) throw new Error("--save 需要 --kind pattern|credential。");
+        if (pattern !== undefined || flags.has("--pattern-geometry")) throw new Error("--save 从标准输入读取凭据，不要同时传 --pattern。");
+        // No echo and no argv: the value only travels over local IPC.
+        const value = await readCredential(io, input);
+        if (kind === "pattern" && (!/^[1-9]{4,9}$/.test(value) || new Set(value).size !== value.length)) throw new Error("图案必须是 4–9 个不重复的 1–9 数字。");
+        const allowAgent = flags.get("--allow-agent") ?? "on";
+        if (!["on", "off"].includes(allowAgent)) throw new Error("--allow-agent 必须为 on 或 off。");
+        params = { ...(params as { id: string }), kind, value, allowAgent: allowAgent === "on" };
+        requestMethod = "unlock-secret-save";
+      } else if (pattern !== undefined) {
+        if (!/^[1-9]{4,9}$/.test(pattern) || new Set(pattern).size !== pattern.length) throw new Error("--pattern 必须是 4–9 个不重复的 1–9 数字，例如 1478。");
+        params = { ...(params as { id: string }), pattern, ...(flags.has("--pattern-geometry") ? { patternGeometry: flags.get("--pattern-geometry") } : {}) };
+      } else {
+        if (flags.has("--pattern-geometry")) throw new Error("--pattern-geometry 需要和 --pattern 或 --stored 一起使用。");
+        params = { ...(params as { id: string }), credential: await readCredential(io, input) };
+      }
+      if (flags.has("--kind") && !save) throw new Error("--kind 只能和 --save 一起使用。");
+      if (flags.has("--allow-agent") && !save) throw new Error("--allow-agent 只能和 --save 一起使用。");
+    }
     if (method === "action") {
       const p = params as Record<string, unknown>;
       if (!p || typeof p !== "object" || typeof p.sessionId !== "string" || !p.sessionId.trim() ||
@@ -182,18 +297,18 @@ export async function runPhoneCli(args: string[], request: (command: ProfilePilo
         throw Object.assign(new Error("action 需要成功 start/list 返回的 id、sessionId、generation 和新的 requestId；start 失败时停止后续调用，先运行 phone readiness。"), { code: "PHONE_INVALID_REQUEST" });
       }
     }
-    dispatching = true;
-    const response = await request({ action: "phone", method: method === "readiness" ? method : backend === "basic" ? `basic-${method}` : method === "inspect" ? "package-info" : method, params });
+    const response = await dispatch({ action: "phone", method: requestMethod === "readiness" ? requestMethod : backend === "basic" ? `basic-${requestMethod}` : requestMethod === "inspect" ? "package-info" : requestMethod, params });
     if (response.ok && flags.has("--output")) {
       const data = response.data as { result?: { base64?: string; mime?: string }; state?: unknown };
       if (!["image/jpeg", "image/png"].includes(data.result?.mime || "") || typeof data.result?.base64 !== "string") throw new Error("此操作未返回截图。");
       await fs.writeFile(flags.get("--output")!, Buffer.from(data.result.base64, "base64"));
       response.data = { state: data.state, output: flags.get("--output") };
     }
-    const result = response.ok ? response : { ...response, recovery: controlRecovery(response.error.code) };
-    io.stdout.write(JSON.stringify(result, null, 2) + "\n"); return response.ok ? 0 : 1;
+    const failure = response.ok ? undefined : phoneErrorResult(phoneResponseError(response), true);
+    const result = response.ok ? response : { ...response, recovery: failure!.recovery };
+    io.stdout.write(JSON.stringify(result, null, 2) + "\n"); return failure ? phoneExitCode(failure.recovery) : 0;
   } catch (error) {
-    const code = typeof (error as { code?: unknown })?.code === "string" ? (error as { code: string }).code : dispatching ? "PHONE_EXECUTION_ERROR" : "PHONE_INVALID_REQUEST";
-    io.stderr.write(JSON.stringify({ ok: false, code, error: (error as Error).message, recovery: controlRecovery(code) }) + "\n"); return 1;
+    const failure = phoneErrorResult(error, dispatching);
+    io.stderr.write(JSON.stringify(failure) + "\n"); return phoneExitCode(failure.recovery);
   }
 }

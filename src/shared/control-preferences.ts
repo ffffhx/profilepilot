@@ -3,6 +3,8 @@ import type { BrowserPreferencesSnapshot, BrowserPreferencesUpdate } from "./bro
 export type ControlPreferencesDomain = "browser" | "electron" | "phone";
 export interface ControlPreferencesSnapshot extends BrowserPreferencesSnapshot {
   domain: ControlPreferencesDomain;
+  /** Showing the Skill's generic default because no personal file exists yet. */
+  defaulted: boolean;
 }
 export interface ControlPreferencesUpdate extends BrowserPreferencesUpdate {
   domain: ControlPreferencesDomain;

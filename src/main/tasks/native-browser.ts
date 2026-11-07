@@ -28,7 +28,7 @@ export class NativeBrowser implements BrowserAdapter {
       if (state.ownerSessionId !== task.sessionId) throw new NativeControlError("NATIVE_SESSION_CONFLICT", "会话控制权已改变，适配读取停止。");
       if (state.controlGeneration !== generation || state.ownership !== "agent" || state.pausedByBrowser) throw new NativeControlError("NATIVE_USER_IN_CONTROL", "用户接管后，适配读取停止；请显式交还后重试。");
     };
-    return runSiteAdapter(input, { check: guard, access: task.nativeAccess,
+    return runSiteAdapter(input, { check: guard, access: task.nativeAccess, cacheScope: `${task.profileId}:${task.sessionId}:${generation}`,
       evaluate: async expression => siteEvaluationValue(await this.raw(task, "Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true })),
       open: async url => { const response = await this.request(task, "open", { url }); if (response?.errorText) throw new Error(response.errorText); return response; } });
   }
@@ -67,6 +67,9 @@ export class NativeBrowser implements BrowserAdapter {
     return this.bridge.request(task.profileId, method, { ...params, sessionId: task.sessionId }, timeoutMs);
   }
   private raw(task: BrowserTask, method: string, params: Record<string, unknown> = {}, cdpSessionId?: string): Promise<any> {
+    if (method === "ProfilePilot.getFrameSessions" && !this.bridge.states().find(s => s.profileId === task.profileId)?.capabilities?.includes("frameSessionSnapshot")) {
+      throw new NativeControlError("NATIVE_EXTENSION_UPDATE_REQUIRED", "当前扩展不支持 frame 会话重新发现。请通过现有安装入口更新 / 重新加载扩展，再检查原会话状态；不会重放页面操作。");
+    }
     return this.request(task, "cdp", { method, params, ...(cdpSessionId ? { cdpSessionId } : {}) });
   }
   observeFast(task: BrowserTask): Promise<BrowserObservation> { return this.fast.reobserve(task); }

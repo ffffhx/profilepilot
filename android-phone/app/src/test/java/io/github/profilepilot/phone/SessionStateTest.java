@@ -5,6 +5,38 @@ import java.util.concurrent.atomic.AtomicLong;
 import static org.junit.Assert.*;
 
 public class SessionStateTest {
+    @Test public void typedRejectionsDistinguishUserTakeoverScreenPauseAndStaleInput() {
+        SessionState state = start(new AtomicLong(1), "control");
+        long before = state.generation;
+        state.pauseForScreen("screen off");
+        PhoneControlException screen = assertThrows(PhoneControlException.class,
+            () -> state.authorize(state.instanceId, state.sessionId, before, true));
+        assertEquals("PHONE_SCREEN_LOCKED", screen.code);
+        assertEquals("not-executed", screen.actionOutcome);
+        assertTrue(state.autoResume("unlocked"));
+        PhoneControlException stale = assertThrows(PhoneControlException.class,
+            () -> state.authorize(state.instanceId, state.sessionId, before, true));
+        assertEquals("PHONE_SESSION_STALE", stale.code);
+        state.pause("user takeover");
+        PhoneControlException user = assertThrows(PhoneControlException.class,
+            () -> state.authorize(state.instanceId, state.sessionId, before, true));
+        assertEquals("PHONE_USER_IN_CONTROL", user.code);
+        assertEquals("not-executed", user.actionOutcome);
+        assertFalse(state.autoResume("screen unlocked"));
+    }
+    @Test public void occupiedAndViewOnlyRejectionsAreExplicitAndDoNotReplaceTheOwner() {
+        SessionState state = start(new AtomicLong(1), "view");
+        String id = state.sessionId;
+        PhoneControlException conflict = assertThrows(PhoneControlException.class,
+            () -> state.start(state.instanceId, state.generation, UUID.randomUUID().toString(), "control", "pc", "new", "", 1000));
+        assertEquals("PHONE_SESSION_CONFLICT", conflict.code);
+        assertEquals(id, state.sessionId);
+        PhoneControlException permission = assertThrows(PhoneControlException.class,
+            () -> state.authorize(state.instanceId, state.sessionId, state.generation, true));
+        assertEquals("PHONE_PERMISSION_REQUIRED", permission.code);
+        assertEquals("not-executed", permission.actionOutcome);
+        state.authorize(state.instanceId, state.sessionId, state.generation, false);
+    }
     private SessionState start(AtomicLong clock, String mode) {
         SessionState state = new SessionState(clock::get);
         state.start(state.instanceId, 0, UUID.randomUUID().toString(), mode, "computer", "agent", "task", 1000);
@@ -113,5 +145,34 @@ public class SessionStateTest {
         assertThrows(IllegalStateException.class, () -> state.resumeFromPhone(state.instanceId, oldSession, state.generation));
         assertThrows(IllegalStateException.class, () -> state.resumeFromPhone("old-instance", state.sessionId, state.generation));
         assertEquals("paused", state.phase);
+    }
+    @Test public void screenOffPauseResumesOnUnlockButAManualPauseNeverDoes() {
+        SessionState state = start(new AtomicLong(1), "control"); long before = state.generation;
+        state.pauseForScreen("screen off");
+        assertEquals("paused", state.phase); assertEquals("screen", state.pauseCause);
+        assertEquals("已暂停 · 等待解锁", state.statusLabel());
+        assertTrue(state.generation > before);
+        // A queued command from the screen-on generation still cannot run.
+        assertThrows(IllegalStateException.class, () -> state.authorize(state.instanceId, state.sessionId, before, true));
+        assertTrue(state.autoResume("unlocked"));
+        assertEquals("controlling", state.phase); assertEquals("", state.pauseCause);
+        state.pause("user takeover");
+        assertFalse(state.autoResume("unlocked"));
+        assertEquals("paused", state.phase); assertEquals("manual", state.pauseCause);
+        assertFalse(state.autoResume("unlocked"));
+    }
+    @Test public void screenPauseCannotAutoResumeAfterTheComputerLeaseExpires() {
+        AtomicLong clock = new AtomicLong(1); SessionState state = start(clock, "control");
+        state.pauseForScreen("screen off");
+        clock.addAndGet(SessionState.LEASE_MS);
+        assertFalse(state.autoResume("unlocked"));
+        assertEquals("disconnected", state.phase);
+        assertThrows(IllegalStateException.class, state::resume);
+    }
+    @Test public void manualPauseIsTheOnlyPauseThatKeepsItsLabelAfterRepeatedTicks() {
+        SessionState state = start(new AtomicLong(1), "view");
+        state.pause("permission");
+        assertFalse(state.autoResume("unlocked"));
+        assertEquals("已暂停 · 手机由你操作", state.statusLabel());
     }
 }

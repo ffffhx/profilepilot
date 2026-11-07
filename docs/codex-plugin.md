@@ -10,7 +10,7 @@ The public plugin is a desktop-only, skills-only integration with the existing `
 - `.agents/plugins/marketplace.json`: Git/repository marketplace catalog.
 - `skills/profilepilot/references/`: canonical command references shared with the desktop app.
 
-The packaging script copies only named references, the existing logo, and the MIT license into the plugin directory. Commit those generated copies so Git marketplace users can install without building the desktop app. Never copy `local/` or a whole installed skill directory. Edit shared references at their canonical paths, then run:
+The packaging script copies only named references, the generic control-preference templates, the existing logo, and the MIT license into the plugin directory. Commit those generated copies so Git marketplace users can install without building the desktop app. Never copy `local/` or a whole installed skill directory. Edit shared references at their canonical paths, then run:
 
 ```sh
 npm run plugin:sync

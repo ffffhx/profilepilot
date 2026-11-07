@@ -65,7 +65,7 @@ public final class MainActivity extends ComponentActivity {
     @Override public void run() { updateHome(); main.postDelayed(this,1000); }
   };
   private final ActivityResultLauncher<ScanOptions> scanner=registerForActivityResult(
-      new ScanContract(), result -> { if (result.getContents()!=null) pairStatus(result.getContents()); });
+      new ScanContract(), result -> { if (result.getContents()!=null) pairLink(result.getContents()); });
 
   @Override public void onCreate(Bundle state) {
     super.onCreate(state);
@@ -112,8 +112,8 @@ public final class MainActivity extends ComponentActivity {
       message("请在电脑端使用任务功能。");
     }
     Uri data=intent.getData(); intent.setData(null);
-    if (data!=null && "profilepilot".equals(data.getScheme())) {
-      if ("status".equals(data.getHost())) pairStatus(data.toString());
+    if (data!=null && BuildConfig.PAIRING_SCHEME.equals(data.getScheme())) {
+      if ("internet".equals(data.getHost()) || "status".equals(data.getHost())) pairLink(data.toString());
       else if ("pair".equals(data.getHost()) || "task".equals(data.getHost()))
         message("手机端仅提供连接与权限准备，请在电脑端使用任务功能。");
     }
@@ -145,6 +145,7 @@ public final class MainActivity extends ComponentActivity {
     page.addView(connectionCard,new LinearLayout.LayoutParams(-1,-2));
     LinearLayout registration=card(page,17);
     setting(registration,"phone","添加到电脑","同网自动发现 · 跨网络设备码",View.NO_ID,this::showDeviceRegistration);
+    setting(registration,"wifi","外网控制","连接云端电脑 · 无需同一 Wi-Fi",View.NO_ID,this::showInternetControl);
     serviceError=text(page,"",12,RED,false); serviceError.setVisibility(View.GONE);
 
     permissionCount=heading(page,"权限准备","");
@@ -189,11 +190,18 @@ public final class MainActivity extends ComponentActivity {
     if (session!=null) session.expire();
     PhoneReadiness ready=new PhoneReadiness(this);
     boolean all=ready.overlay && ready.notifications && ready.accessibilityService.equals("running");
+    boolean keepScreen=session!=null && session.keepScreenOn && session.active();
+    if (keepScreen) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+    else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     PhoneHomeState state=PhoneHomeState.from(new PhoneHomeState.Input(ready.computerConnected,
         PhoneHomeState.debugging(ready.usbDebugging,ready.wirelessDebugging),all,ready.unlocked,
-        seenConnected,session!=null && session.sessionId!=null,session==null?"idle":session.phase,session==null?"view":session.mode));
+        seenConnected,session!=null && session.sessionId!=null,session==null?"idle":session.phase,session==null?"view":session.mode,
+        session==null?"":session.pauseCause));
     seenConnected|=ready.computerConnected;
     String trustedName=pairing().getString("computer",""); boolean paired=!pairing().getString("token","").isEmpty();
+    if (service!=null && service.connection.connected("internet")) trustedName=InternetPhoneSettings.name(this);
+    if (session!=null && (session.active() || session.phase.equals("paused"))) trustedName=session.computer;
+    paired|=InternetPhoneSettings.link(this)!=null;
     connectionCard.render(state,trustedName,paired || ready.computerConnected); lastState=state;
     if (service!=null && state.controls()) {
       Runnable toggle=service.pauseOrResumeAction(), end=service.sessionControlAction("stop");
@@ -210,7 +218,7 @@ public final class MainActivity extends ComponentActivity {
       case "enabled" -> "已开启，但服务没有运行"; case "unknown" -> "暂时无法确认服务状态"; default -> "读取屏幕、点击与输入";
     });
     if (count==3 && lastPermissionCount>=0 && lastPermissionCount!=3) permissionsExpanded=false;
-    lastPermissionCount=count; int pending=3-count+(ready.developerOptions.equals("enabled")?0:1);
+    lastPermissionCount=count; int pending=3-count+(ready.developerOptions.equals("enabled") || InternetPhoneSettings.enabled(this)?0:1);
     setText(permissionCount,pending==0?"全部已就绪":"还需处理 "+pending+" 项");
     permissionCount.setTextColor(pending==0?GREEN:MUTED); permissionSummary.setVisibility(count==3?View.VISIBLE:View.GONE);
     permissionRows.setVisibility(count<3 || permissionsExpanded?View.VISIBLE:View.GONE); permissionHint.setVisibility(count<3?View.VISIBLE:View.GONE);
@@ -231,10 +239,11 @@ public final class MainActivity extends ComponentActivity {
     if (ready.usbConnected && ready.wifiConnected) return "USB 与 Wi-Fi 连接在线";
     if (ready.usbConnected) return "USB 连接"; if (ready.wifiConnected) return "Wi-Fi 连接";
     ControlService service=ControlService.current;
+    if (service!=null && service.connection.connected("internet")) return "外网控制连接";
     return service!=null && service.connection.connected("emulator")?"模拟器连接":ready.computerConnected?"电脑连接在线":"未连接";
   }
   private void ensureControlService() {
-    if (ControlService.current!=null || !pairing().getString("token","").matches("[a-f0-9]{64}")) return;
+    if (ControlService.current!=null || !pairing().getString("token","").matches("[a-f0-9]{64}") && !InternetPhoneSettings.enabled(this)) return;
     try { startForegroundService(new Intent(this,ControlService.class)); serviceError.setVisibility(View.GONE); }
     catch (RuntimeException error) {
       setText(serviceError,"连接服务暂未启动，请重新打开 App 或查看连接帮助。"); serviceError.setVisibility(View.VISIBLE);
@@ -321,6 +330,26 @@ public final class MainActivity extends ComponentActivity {
     TextView recoveryHint=text(page,"恢复连接后，控制任务需手动继续。",11,MUTED,false); recoveryHint.setPadding(dp(3),dp(6),dp(3),0);
     TextView details=button(page,"恢复详情与后台设置",false,this::showRecovery);
     details.setTextSize(12); details.setBackground(ripple(BG,10,false)); details.setId(R.id.home_recovery);
+    heading(page,"无人值守","仅充电时生效");
+    LinearLayout unattendedCard=card(page,17);
+    Switch unattended=recoveryToggle(unattendedCard,"充电时保持 ADB 响应","屏幕熄灭并锁屏后，电脑仍能点亮并解锁手机",R.id.unattended_toggle,PhoneSettings.unattended(this));
+    TextView unattendedHint=text(page,"",11,MUTED,false); unattendedHint.setPadding(dp(3),dp(12),dp(3),0);
+    Runnable refreshUnattended=() -> {
+      boolean unattendedOn=PhoneSettings.unattended(this);
+      ControlService service=ControlService.current;
+      boolean holdingLock=service!=null && service.unattendedActive();
+      boolean pluggedIn=service!=null && service.charging();
+      setText(unattendedHint, !unattendedOn ? "已关闭：手机休眠后无线 ADB 可能断开。"
+          : pluggedIn ? holdingLock ? "已开启：正在充电，保持 ADB 响应；拔电后自动暂停。" : "已开启：等待充电状态确认。"
+          : "已开启：当前未充电，不会保持唤醒；插电后自动生效。");
+      unattendedHint.setTextColor(unattendedOn && pluggedIn ? GREEN : MUTED);
+    };
+    unattended.setOnCheckedChangeListener((view,value) -> {
+      PhoneSettings.unattended(this,value);
+      if (ControlService.current!=null) ControlService.current.refreshUnattended();
+      refreshUnattended.run();
+    });
+    refreshUnattended.run();
     heading(page,"连接与同步",""); LinearLayout connection=card(page,17);
     setting(connection,"computer","电脑连接详情","",View.NO_ID,this::showConnectionDetails);
     setting(connection,"sync","手机状态同步","",View.NO_ID,this::showStatusSync);
@@ -481,6 +510,61 @@ public final class MainActivity extends ComponentActivity {
         actionButton(content,"粘贴状态同步链接",false,this::pasteStatusLink);
       });
     });
+  }
+  private void showInternetControl() {
+    JSONObject link=InternetPhoneSettings.link(this);
+    LinearLayout content=showSheet("外网控制");
+    paragraph(content,"手机通过网络连接云端电脑。配对后，电脑可在控制会话中读取屏幕、点击、输入和安装应用；手机上的暂停与结束始终有效。");
+    if (link!=null) {
+      info(content,"电脑",link.optString("computer")); info(content,"地址",link.optString("url"));
+      ControlService service=ControlService.current;
+      info(content,"状态",service==null?"连接服务未启动":service.internetStatus());
+      boolean enabled=InternetPhoneSettings.enabled(this);
+      actionButton(content,enabled?"断开外网控制":"连接云端电脑",!enabled,() -> {
+        InternetPhoneSettings.enabled(this,!enabled);
+        if (ControlService.current!=null) ControlService.current.refreshInternet();
+        else ensureControlService();
+        dismissSheet(); updateHome();
+      });
+      actionButton(content,"移除云端配对",false,() -> new AlertDialog.Builder(this).setTitle("移除云端配对？")
+          .setMessage("当前云端控制会暂停，之后需要重新配对。")
+          .setNegativeButton("取消",null).setPositiveButton("移除",(dialog,which) -> {
+            InternetPhoneSettings.forget(this);
+            if (ControlService.current!=null) ControlService.current.refreshInternet();
+            dismissSheet(); updateHome();
+          }).show());
+      return;
+    }
+    actionButton(content,"扫描云端配对二维码",true,() -> {
+      dismissSheet(); scanner.launch(new ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+          .setPrompt("扫描云端电脑生成的外网控制二维码").setBeepEnabled(false).setOrientationLocked(false));
+    });
+    actionButton(content,"粘贴云端配对链接",false,() -> {
+      dismissSheet(); EditText input=new EditText(this); input.setHint(BuildConfig.PAIRING_SCHEME+"://internet…");
+      input.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_URI); input.setMaxLines(4);
+      new AlertDialog.Builder(this).setTitle("外网控制配对链接").setView(input).setNegativeButton("取消",null)
+          .setPositiveButton("继续",(dialog,which) -> pairInternet(input.getText().toString())).show();
+    });
+  }
+  private void pairLink(String value) {
+    if ("internet".equals(Uri.parse(value).getHost())) pairInternet(value); else pairStatus(value);
+  }
+  private void pairInternet(String value) {
+    try {
+      JSONObject target=InternetPhoneProtocol.parse(value,BuildConfig.PAIRING_SCHEME);
+      LinearLayout content=showSheet("允许这台电脑通过外网控制？");
+      info(content,"电脑",target.getString("computer")); info(content,"地址",target.getString("url"));
+      paragraph(content,"允许它发起屏幕查看、点击、输入和应用安装会话。每次控制都会显示提示，你可以随时暂停、结束或移除配对。");
+      actionButton(content,"允许并连接",true,() -> {
+        dismissSheet(); io.execute(() -> {
+          try { InternetPhoneSettings.pair(this,target); postAlive(() -> {
+            if (ControlService.current!=null) ControlService.current.refreshInternet(); else ensureControlService();
+            updateHome(); message("已配对云端电脑，等待建立外网连接。");
+          }); }
+          catch (Exception error) { postAlive(() -> message("外网配对未完成，请检查网络、链接有效期及现有配对。")); }
+        });
+      });
+    } catch (Exception error) { message("请使用当前开发版电脑生成的外网控制配对链接。"); }
   }
   private void pasteStatusLink() {
     dismissSheet(); EditText input=new EditText(this); input.setHint(BuildConfig.PAIRING_SCHEME+"://status…");

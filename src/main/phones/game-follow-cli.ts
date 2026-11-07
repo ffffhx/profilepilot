@@ -1,22 +1,26 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import type { Readable } from "node:stream";
 import type { ProfilePilotManagementCommand, ProfilePilotManagementResponse } from "../profilepilot-management-protocol";
 import { followCommandSchema } from "./game-follow";
 import { cameraSampleCommandSchema } from "./camera-sample";
+import { readPhoneParams } from "./cli-input";
+import { phoneErrorResult, phoneExitCode, phoneResponseError } from "./errors";
+import { phoneGroupFlags } from "./cli-contract";
 
 export async function runGameFollowCli(args: string[], request: (command: ProfilePilotManagementCommand) => Promise<ProfilePilotManagementResponse>,
-  io: Pick<NodeJS.Process, "stdout" | "stderr">): Promise<number> {
+  io: Pick<NodeJS.Process, "stdout" | "stderr">, input: Readable = process.stdin): Promise<number> {
+  let dispatched = false;
   try {
     const [op, ...rest] = args;
     const values = new Map<string, string>();
     for (let i = 0; i < rest.length; i += 2) {
-      if (!["--device", "--mode", "--backend", "--config", "--run-id", "--params-file", "--recover-transport", "--x", "--y", "--output", "--steps-file"].includes(rest[i]) || !rest[i + 1] || values.has(rest[i]))
+      if (rest[i] === "--params-stdin" && !values.has(rest[i])) { values.set(rest[i], "on"); i--; continue; }
+      if (!["--device", "--mode", "--backend", "--config", "--run-id", "--params-file", "--recover-transport", "--x", "--y", "--output", "--steps-file"].includes(rest[i]) || !rest[i + 1] || rest[i + 1].startsWith("--") || values.has(rest[i]))
         throw new Error("视觉跟随参数无效");
       values.set(rest[i], rest[i + 1]);
     }
-    const allowed: Record<string, string[]> = { runtime: [], setup: [], status: [], load: [], save: ["--config"],
-      start: ["--device", "--mode", "--backend", "--config", "--recover-transport"], stop: ["--run-id"], analyze: ["--params-file"],
-      "camera-sample": ["--device", "--x", "--y", "--output", "--steps-file"] };
+    const allowed = phoneGroupFlags.follow;
     if (!(op in allowed) || [...values.keys()].some(k => !allowed[op].includes(k))) throw new Error("未知视觉跟随命令或参数");
     if (values.has("--recover-transport") && !["true", "false"].includes(values.get("--recover-transport")!))
       throw new Error("--recover-transport 仅接受 true 或 false");
@@ -32,9 +36,11 @@ export async function runGameFollowCli(args: string[], request: (command: Profil
       ? { op, id: values.get("--device"), mode: values.get("--mode") || "observe", backend: values.get("--backend") || "app",
         ...(values.has("--recover-transport") ? { recoverTransport: values.get("--recover-transport") === "true" } : {}), config: await read(values.get("--config")) }
       : op === "save" ? { op, config: await read(values.get("--config")) }
-      : op === "analyze" ? { ...await read(values.get("--params-file")), op }
+      : op === "analyze" ? { ...await readPhoneParams(values, 12000000, input), op }
       : op === "stop" ? { op, runId: values.get("--run-id") } : { op });
+    dispatched = true;
     const response = await request({ action: "phone", method: "follow-command", params });
+    if (!response.ok) throw phoneResponseError(response);
     io.stdout.write(JSON.stringify(response, null, 2) + "\n"); return response.ok ? 0 : 1;
-  } catch (error) { io.stderr.write(JSON.stringify({ ok: false, error: (error as Error).message }) + "\n"); return 1; }
+  } catch (error) { const result = phoneErrorResult(error, dispatched); io.stderr.write(JSON.stringify(result) + "\n"); return phoneExitCode(result.recovery); }
 }

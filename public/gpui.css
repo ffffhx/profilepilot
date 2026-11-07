@@ -1,0 +1,20 @@
+body { margin:0; background:#f5f7fa; color:#182333; font:14px/1.55 system-ui,sans-serif; }
+.gpui-shell { max-width:1200px; padding:28px 34px; margin:auto; }
+.gpui-header { display:flex; align-items:center; justify-content:space-between; gap:20px; margin-bottom:20px; }
+h1 { margin:0; font-size:26px; letter-spacing:-.6px; } h2 { margin:0 0 14px; font-size:17px; } h3 { margin:0; font-size:15px; }
+p { margin:6px 0; } .muted { color:#64748b; }
+button { cursor:pointer; background:white; border:1px solid #ccd5df; border-radius:7px; padding:7px 12px; color:#22344b; font:inherit; }
+button:hover { background:#edf3fa; } button:focus-visible { outline:3px solid #9bc2ef; } button:disabled { opacity:.5; cursor:wait; }
+.gpui-panels { display:grid; grid-template-columns:minmax(0,1fr) minmax(280px,.8fr); gap:20px; margin-top:22px; }
+.gpui-panel { padding:22px; border:1px solid #dce3eb; border-radius:12px; background:#fff; }
+.gpui-card { padding:16px 0; border-top:1px solid #e5ebf2; overflow-wrap:anywhere; }
+.gpui-card:first-of-type { border-top:0; }
+.gpui-shell > .gpui-panel { margin-top:20px; padding:22px; border:1px solid #dce3eb; }
+.gpui-actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
+.gpui-state { display:inline-block; border-radius:20px; padding:2px 8px; background:#e6f4ec; color:#286444; margin-left:8px; font-size:12px; }
+.gpui-state.paused { background:#fff1d7; color:#875b0b; }
+code { display:block; padding:12px; border-radius:6px; margin-top:10px; background:#f1f5f9; overflow-wrap:anywhere; white-space:pre-wrap; font:12px/1.6 Consolas,monospace; }
+#gpui-error { background:#fff0ed; color:#a32c21; border-radius:7px; padding:10px 14px; margin-top:15px; }
+.gpui-notice .gpui-shell { padding:16px; } .gpui-notice .gpui-panel { padding:14px; }
+.gpui-notice h1 { font-size:18px; } .gpui-notice .gpui-panels { display:block; margin-top:12px; }
+@media(max-width:800px) { .gpui-panels { grid-template-columns:1fr; } .gpui-shell { padding:20px; } }

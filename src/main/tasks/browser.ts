@@ -91,7 +91,7 @@ export function effectiveEffect(action: BrowserAction, observation?: BrowserObse
 export class WrapperBrowser implements BrowserAdapter {
   async siteAdapter(task: BrowserTask, input: SiteInput, check?: (url: string) => void): Promise<SiteResult> {
     task.observation = undefined;
-    return runSiteAdapter(input, { check, access: task.nativeAccess,
+    return runSiteAdapter(input, { check, access: task.nativeAccess, cacheScope: `${task.profileId}:${task.sessionId}`,
       evaluate: async expression => siteEvaluationValue(await this.fast.raw(task, "Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true })),
       open: url => this.execute(task, { kind: "open", value: url, effect: "read", summary: "打开网站适配页面" }) });
   }

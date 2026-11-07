@@ -2,26 +2,28 @@ import { promises as fs } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
-import { agentSkillTargetPaths } from "./agent-skill-integration";
+import { agentSkillTargetPaths, bundledAgentSkillPath } from "./agent-skill-integration";
 import type { ControlPreferencesDomain, ControlPreferencesSnapshot, ControlPreferencesUpdate } from "../shared/control-preferences";
 
 const MAX_BYTES = 1024 * 1024;
 const writes = new Map<string, Promise<unknown>>();
-const electronDefaults = `# Electron 控制偏好
-
-- 使用 ProfilePilot 本地应用中登记的目标，通过 ppilot browser 连接该应用自己的 Agent 逻辑端口，不直连原始调试端口。
-- 默认后台读取、点击、输入和截图，不主动激活窗口或抢占前台；不要为了查看界面而重启应用或打开 DevTools。
-- 保持一应用一会话。用户接管后停止操作，明确交还后重新观察界面再继续；完成任务后结束会话。
-- 控制时使用 ProfilePilot 的控制悬浮标识；需要显示标识时，保持 ProfilePilot 运行并开启悬浮层。标识未显示时先检查状态，不假定已正常显示。
-- 应用未登记、调试连接未就绪或目标不明确时，先说明缺少的条件，不擅自切换应用。
-- 按实际 Windows / macOS 环境操作；应用自身的启动焦点和原生弹窗不属于后台操作保证。
-`;
 
 function definition(domain: ControlPreferencesDomain) {
   if (domain === "browser") return { label: "浏览器控制偏好", file: "browser-routing.md" };
   if (domain === "electron") return { label: "Electron 控制偏好", file: "electron-control.md" };
   if (domain === "phone") return { label: "手机控制偏好", file: "phone-control.md" };
   throw new Error("不支持的控制偏好类型。");
+}
+
+// Generic defaults ship inside the Skill so they reach every installation and
+// stay out of the per-user local/ policy. Personal saves always win.
+async function template(domain: ControlPreferencesDomain): Promise<string> {
+  try {
+    const content = await fs.readFile(path.join(bundledAgentSkillPath("profilepilot"), "templates", definition(domain).file), "utf8");
+    return Buffer.byteLength(content, "utf8") <= MAX_BYTES ? content : "";
+  } catch {
+    return "";
+  }
 }
 
 async function preferenceFiles(homeDir: string, domain: ControlPreferencesDomain) {
@@ -49,10 +51,10 @@ async function preferenceFiles(homeDir: string, domain: ControlPreferencesDomain
   return files;
 }
 
-function snapshot(files: Awaited<ReturnType<typeof preferenceFiles>>, domain: ControlPreferencesDomain): ControlPreferencesSnapshot {
+function snapshot(files: Awaited<ReturnType<typeof preferenceFiles>>, domain: ControlPreferencesDomain, defaults = ""): ControlPreferencesSnapshot {
   const primary = files.find(file => file.exists) || files[0];
   return {
-    domain, content: primary.exists ? primary.content : domain === "electron" ? electronDefaults : primary.content, exists: primary.exists, path: primary.path,
+    domain, content: primary.exists ? primary.content : defaults, exists: primary.exists, defaulted: !primary.exists && defaults !== "", path: primary.path,
     revision: createHash("sha256").update(JSON.stringify({ domain, files })).digest("hex"),
     locations: files.map(({ label, path }) => ({ label, path })),
     differs: files.some(file => file.exists && file.content !== primary.content)
@@ -60,7 +62,8 @@ function snapshot(files: Awaited<ReturnType<typeof preferenceFiles>>, domain: Co
 }
 
 export async function readControlPreferences(domain: ControlPreferencesDomain, homeDir = process.env.HOME || os.homedir()): Promise<ControlPreferencesSnapshot> {
-  return snapshot(await preferenceFiles(homeDir, domain), domain);
+  const files = await preferenceFiles(homeDir, domain);
+  return snapshot(files, domain, files.some(file => file.exists) ? "" : await template(domain));
 }
 
 async function writeAtomic(file: string, content: string) {

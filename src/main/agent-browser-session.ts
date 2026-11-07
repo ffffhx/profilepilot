@@ -387,7 +387,8 @@ export function readAgentBrowserSessionActivitySync(
 export async function readActiveAgentBrowserSessionActivityClientsByPort(
   ports: number[],
   homeDir = os.homedir(),
-  now = Date.now()
+  now = Date.now(),
+  presentation: { includeRepository?: boolean } = {}
 ): Promise<Map<number, CdpClientInfo[]>> {
   const result = new Map<number, CdpClientInfo[]>();
   const portSet = new Set(ports.filter(isValidTcpPort));
@@ -408,7 +409,7 @@ export async function readActiveAgentBrowserSessionActivityClientsByPort(
       .filter((name) => name.endsWith(".json"))
       .map(async (name) => {
         const filePath = path.join(activityDir, name);
-        const activity = await readActiveAgentBrowserSessionActivity(filePath, now);
+        const activity = await readActiveAgentBrowserSessionActivity(filePath, now, presentation.includeRepository !== false);
         if (!activity || !portSet.has(activity.cdpPort)) {
           if (activity === null) {
             await rm(filePath, { force: true }).catch(() => undefined);
@@ -430,7 +431,8 @@ export async function readActiveAgentBrowserSessionActivityClientsByPort(
 
 async function readActiveAgentBrowserSessionActivity(
   filePath: string,
-  now: number
+  now: number,
+  includeRepository: boolean
 ): Promise<AgentBrowserSessionActivity | null | undefined> {
   try {
     const parsed = JSON.parse(await readFile(filePath, "utf8")) as Partial<AgentBrowserSessionActivity>;
@@ -439,8 +441,11 @@ async function readActiveAgentBrowserSessionActivity(
       return null;
     }
     const expiresAt = Date.parse(activity.expiresAt);
+    // The normalized activity, including its original session/PID/port/TTL,
+    // is still used to synthesize occupancy. Only optional git display fields
+    // are omitted by control admission; stored project/branch stay intact.
     return Number.isFinite(expiresAt) && expiresAt > now
-      ? enrichAgentBrowserSessionActivityRepository(activity)
+      ? includeRepository ? enrichAgentBrowserSessionActivityRepository(activity) : activity
       : null;
   } catch {
     return undefined;

@@ -4,6 +4,8 @@ import path from 'node:path';
 import { launchProfilePilotE2e, repoRoot } from './e2e/lib/electron-driver.mjs';
 
 // Exercise the real renderer, preload and file writer in a disposable home.
+const browserTemplate = await readFile(path.join(repoRoot, 'skills/profilepilot/templates/browser-routing.md'), 'utf8');
+const phoneTemplate = await readFile(path.join(repoRoot, 'skills/profilepilot/templates/phone-control.md'), 'utf8');
 const app = await launchProfilePilotE2e({ env: { CPM_START_VIEW: 'tools', PROFILEPILOT_TEST_WINDOWS_USER_PATH: '' } });
 try {
   const d = app.driver;
@@ -18,7 +20,10 @@ try {
   await d.waitFor(textarea, s => s.exists && !s.disabled);
   const locations = await d.evaluate('window.profileManager.readControlPreferences("browser").then(snapshot => snapshot.locations)');
   assert.ok(locations.every(location => path.resolve(location.path).startsWith(path.resolve(app.homeDir) + path.sep)), 'Never test saves against real user preferences');
-  assert.equal((await d.query(textarea)).value, '');
+  // A fresh installation starts from the Skill's generic template, not an empty box.
+  assert.equal((await d.query(textarea)).value, browserTemplate);
+  assert.equal((await d.query('[data-control-preferences-state]')).text, '通用默认，保存后写入本地偏好');
+  assert.match((await d.query('.control-preferences-hint')).text, /通用默认/);
   const content = '# 个人浏览器偏好\n\n- 默认使用系统 Chrome，通过 ProfilePilot 扩展连接。\n- 切换账号前先询问我。\n\n<script>这是普通文字，不应执行。</script>\n';
   await d.domInput(textarea, content);
   await d.domClick(save);
@@ -86,7 +91,8 @@ try {
   await d.domInput(textarea, browserDraft);
   await d.domClick(phoneTab);
   await d.waitFor(textarea, s => s.exists && !s.disabled);
-  assert.equal((await d.query(textarea)).value, '');
+  assert.equal((await d.query(textarea)).value, phoneTemplate);
+  assert.equal((await d.query('[data-control-preferences-state]')).text, '通用默认，保存后写入本地偏好');
   const phoneLocations = await d.evaluate('window.profileManager.readControlPreferences("phone").then(snapshot => snapshot.locations)');
   assert.ok(phoneLocations.every(location => path.resolve(location.path).startsWith(path.resolve(app.homeDir) + path.sep)));
   await d.domInput(textarea, phoneContent);
@@ -161,5 +167,7 @@ try {
   for (const file of files) assert.equal(await readFile(file, 'utf8'), browserDraft);
   for (const file of phoneFiles) assert.equal(await readFile(file, 'utf8'), phoneContent);
   for (const file of electronFiles) assert.equal(await readFile(file, 'utf8'), electronContent);
-  console.log('PASS browser + Electron + phone tabs, independent drafts/saves, conflict recovery, keyboard navigation, client sync and CLI update preservation');
+  // The refreshed guide keeps its generic templates and never absorbs personal text.
+  assert.equal(await readFile(path.join(app.homeDir, '.agents/skills/profilepilot/templates/browser-routing.md'), 'utf8'), browserTemplate);
+  console.log('PASS browser + Electron + phone tabs, template defaults, independent drafts/saves, conflict recovery, keyboard navigation, client sync and CLI update preservation');
 } finally { await app.stop(); }

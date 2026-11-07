@@ -366,9 +366,59 @@ test('view-only session refuses input without forwarding it to the phone', async
 test('phone-side pause revokes old desktop generation before another input', async t => {
   const h = harness(t); await h.service.refresh(); const device = await h.service.start(h.id, 'control', 'test', 'inspect');
   h.state.generation++; h.state.phase = 'paused';
-  await assert.rejects(h.service.perform({ id: h.id, sessionId: device.state.sessionId, generation: device.state.generation, requestId: randomUUID(), action: { kind: 'key', key: 'home' } }), /会话已改变/);
+  await assert.rejects(h.service.perform({ id: h.id, sessionId: device.state.sessionId, generation: device.state.generation, requestId: randomUUID(), action: { kind: 'key', key: 'home' } }), { code: 'PHONE_USER_IN_CONTROL' });
   assert.equal(h.calls.some(c => c[0] === 'action'), false);
   assert.equal(h.service.snapshot().devices[0].state.phase, 'paused');
+});
+
+test('phone preconditions preserve typed outcomes and do not dispatch input or replace the owner', async t => {
+  for (const [change, code, requiresUser] of [
+    [h => { h.state.phase = 'paused'; h.state.pauseCause = 'manual'; h.state.generation++; }, 'PHONE_USER_IN_CONTROL', true],
+    [h => { h.state.phase = 'paused'; h.state.pauseCause = 'screen'; h.state.generation++; }, 'PHONE_SCREEN_LOCKED', false],
+    [h => { h.state.generation++; }, 'PHONE_SESSION_STALE', false],
+    [h => { h.state.mode = 'view'; }, 'PHONE_PERMISSION_REQUIRED', false]
+  ]) {
+    const h = harness(t); await h.service.refresh(); const device = await h.service.start(h.id, 'control', 'test', 'inspect');
+    const params = { id: h.id, sessionId: device.state.sessionId, generation: device.state.generation, requestId: randomUUID(), action: { kind: 'tap', x: 1, y: 2 } };
+    change(h);
+    await assert.rejects(h.service.perform(params), error => {
+      assert.equal(error.code, code); assert.equal(error.details.recovery.actionOutcome, 'not-executed');
+      assert.equal(error.details.recovery.requiresUser, requiresUser); return true;
+    });
+    assert.equal(h.calls.filter(c => c[0] === 'action').length, 0);
+    assert.equal(h.calls.filter(c => ['start', 'resume'].includes(c[0])).length, 1);
+    await h.service.close();
+  }
+});
+
+test('start distinguishes user-granted permissions from repairable accessibility and does not create a session', async t => {
+  for (const permission of ['overlay', 'notifications', 'accessibility']) {
+    const h = harness(t); await h.service.refresh(); h.state.permissions[permission] = false;
+    await assert.rejects(h.service.start(h.id, 'control', 'test', 'inspect'), error => {
+      assert.equal(error.code, permission === 'accessibility' ? 'PHONE_PERMISSION_REQUIRED' : 'PHONE_USER_PERMISSION_REQUIRED');
+      assert.equal(error.details.recovery.actionOutcome, 'not-executed');
+      assert.equal(error.details.recovery.requiresUser, permission !== 'accessibility'); return true;
+    });
+    assert.equal(h.calls.filter(c => c[0] === 'start').length, 0); await h.service.close();
+  }
+});
+
+test('phone preserves Android typed rejections, legacy uncertainty and actual transport dispatch boundaries', async t => {
+  const { phoneFailure } = loadCli('src/main/phones/errors.ts');
+  for (const [reply, code, outcome] of [
+    [() => ({ ok: false, code: 'PHONE_PERMISSION_REQUIRED', error: 'permission missing', actionOutcome: 'not-executed' }), 'PHONE_PERMISSION_REQUIRED', 'not-executed'],
+    [() => ({ ok: false, error: 'legacy rejection without execution evidence' }), 'PHONE_REJECTED', 'unknown'],
+    [() => { throw phoneFailure('PHONE_CONNECT_FAILED', 'refused before request bytes', 'not-executed'); }, 'PHONE_CONNECT_FAILED', 'not-executed'],
+    [() => { throw new Error('response lost after dispatch'); }, 'PHONE_EXECUTION_UNCERTAIN', 'unknown']
+  ]) {
+    const h = harness(t); await h.service.refresh(); const device = await h.service.start(h.id, 'control', 'test', 'inspect');
+    h.hook = async method => method === 'action' ? reply() : undefined;
+    await assert.rejects(h.service.perform({ id: h.id, sessionId: device.state.sessionId, generation: device.state.generation, requestId: randomUUID(), action: { kind: 'key', key: 'back' } }), error => {
+      assert.equal(error.code, code); assert.equal(error.details.recovery.actionOutcome, outcome); return true;
+    });
+    assert.equal(h.calls.filter(c => c[0] === 'action').length, 1, 'a rejection or uncertain result must not be replayed');
+    await h.service.close();
+  }
 });
 
 test('selectors remain subject to phone generation and view-mode checks', async t => {
@@ -379,7 +429,7 @@ test('selectors remain subject to phone generation and view-mode checks', async 
     await assert.rejects(h.service.perform({ ...input, requestId: randomUUID(), action }), /仅查看/);
   }
   h.state.phase = 'paused'; h.state.generation++;
-  await assert.rejects(h.service.perform({ ...input, action: { kind:'find',selector:{text:'Save'} } }), /会话已改变/);
+  await assert.rejects(h.service.perform({ ...input, action: { kind:'find',selector:{text:'Save'} } }), { code: 'PHONE_USER_IN_CONTROL' });
   assert.equal(h.calls.filter(c => c[0] === 'action').length, 1);
 });
 test('delayed observation cannot overwrite a completed pause', async t => {
@@ -668,8 +718,8 @@ test('CLI requires an explicit device and rejects unsupported flags', async () =
   let calls = 0, error = '';
   const io = { stdout: { write() {} }, stderr: { write(value) { error += value; } } };
   const request = async () => { calls++; return { ok: true, data: {} }; };
-  assert.equal(await runPhoneCli(['start'], request, io), 1); assert.match(error, /--device/);
-  assert.equal(await runPhoneCli(['list','--device','oops'], request, io), 1); assert.equal(calls, 0);
+  assert.equal(await runPhoneCli(['start'], request, io), 2); assert.match(error, /--device/);
+  assert.equal(await runPhoneCli(['list','--device','oops'], request, io), 2); assert.equal(calls, 0);
 });
 
 test('prepare materializes bundled APK bytes and opens without reinstalling unchanged package', async t => {

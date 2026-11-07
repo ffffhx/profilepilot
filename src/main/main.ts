@@ -9,10 +9,18 @@ import path from "node:path";
 import { IPC_CHANNELS } from "../shared/ipc";
 import { isWorkspaceShell, protectWorkspaceShell } from "./workspace-shell";
 import { installWorkspaceDiagnostics } from "./workspace-diagnostics";
+import { mainWindowInitialVisibility, waitForMainWindowFirstPaint } from "./main-window-first-paint";
 import { registerTaskService } from "./tasks/ipc";
 import { registerMobile } from "./mobile/ipc";
 import type { MobileService } from "./mobile/service";
 import { registerLocalApps } from "./local-apps/ipc";
+import { registerDesktop } from "./desktop/ipc";
+import { registerGpui } from "./gpui/ipc";
+import { WindowsInputRuntime, closeInputControl } from "./desktop/input-runtime";
+import { createRuntimeDesktopAdmission, createWindowsDesktopDiscovery } from "./desktop/runtime-admission";
+import type { WindowsControlSample } from "./windows-platform";
+import { closeWindowsSampler } from "./windows-sampler";
+import type { DesktopService } from "./desktop/service";
 import { registerPhones } from "./phones/ipc";
 import type { PhonesService } from "./phones/service";
 import type { TaskService } from "./tasks/service";
@@ -110,15 +118,21 @@ if (process.platform === "darwin" && (START_IN_BACKGROUND || IS_BACKGROUND_E2E))
 initializeDiagnosticLogging({ appVersion: app.getVersion() });
 installProcessCrashLogging();
 installElectronCrashLogging();
-const profileManager = createProfileManager(broadcastAgentTakeover, revealAgentOverlayProfile);
+const windowsInputRuntime = process.platform === "win32" ? new WindowsInputRuntime() : undefined;
+const profileManager = createProfileManager(broadcastAgentTakeover, revealAgentOverlayProfile,
+  windowsInputRuntime ? { inputGuardFactory: windowsInputRuntime.browserGuard } : {});
 let taskService: TaskService | undefined;
 let browserConnection: BrowserServiceClient | undefined;
 let phonesService: PhonesService | undefined;
+let desktopService: DesktopService | undefined;
+let localAppsService: ReturnType<typeof registerLocalApps> | undefined;
+let gpuiService: ReturnType<typeof registerGpui> | undefined;
 let mobileService: MobileService | undefined;
 let startupSettingsManager: StartupSettingsManager;
 let shutdownReason = "electron";
 let appQuitting = false;
 let mainWindow: BrowserWindow | null = null;
+let mainWindowFirstPaint: ReturnType<typeof waitForMainWindowFirstPaint> | null = null;
 let mainWindowAppearance = "";
 let miniWindow: BrowserWindow | null = null;
 let appTray: Tray | null = null;
@@ -1058,6 +1072,7 @@ function hideMiniWindow(): void {
 
 // 悬浮窗默认关闭，只由专用全局快捷键主动打开。
 async function showMiniWindow(): Promise<void> {
+  cancelMainWindowFirstPaint("mini-request");
   const windowRef = await createMiniWindow();
   setMiniWindowPanelOpen(false);
   await waitForMiniWindowFirstPaint(windowRef, ".mini-logo-glyph");
@@ -1070,6 +1085,7 @@ async function showMiniWindow(): Promise<void> {
 // 全局快捷键触发：把 Mini 面板唤到眼前。
 // 已展开且在前台 → 收起；否则 → 确保可见、展开、置顶并聚焦（类似 Spotlight 行为）。
 async function summonMiniWindowViaHotkey(): Promise<void> {
+  cancelMainWindowFirstPaint("mini-request");
   if (!miniWindow || miniWindow.isDestroyed()) {
     await showMiniWindow();
   } else if (!miniWindow.isVisible()) {
@@ -1173,7 +1189,7 @@ async function registerGlobalShortcuts(): Promise<void> {
 }
 
 async function showMainWindow(): Promise<void> {
-  if (IS_BACKGROUND_E2E) return;
+  if (IS_BACKGROUND_E2E || appQuitting) return;
   // second-instance can arrive while the primary process is still awaiting Gateway/CLI startup.
   // Do not create a renderer until IPC handlers are registered, otherwise its first getState call
   // permanently leaves the window on the "No handler registered" error screen.
@@ -1185,6 +1201,7 @@ async function showMainWindow(): Promise<void> {
   if (!mainWindow || mainWindow.isDestroyed()) {
     createMainWindow();
   }
+  cancelMainWindowFirstPaint("explicit-show");
 
   // 从系统任务栏、Dock 或托盘重新打开时，先恢复已最小化的主窗口。
   if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isMinimized()) {
@@ -1264,21 +1281,36 @@ function createProgressReporter(
   };
 }
 
+function cancelMainWindowFirstPaint(reason: string): void {
+  mainWindowFirstPaint?.cancel(reason);
+  mainWindowFirstPaint = null;
+}
+
 function createMainWindow(): void {
+  cancelMainWindowFirstPaint("window-replaced");
   const smokeTest = IS_ELECTRON_SMOKE_TEST;
+  const visibility = mainWindowInitialVisibility({ platform: process.platform,
+    background: START_IN_BACKGROUND, backgroundE2e: IS_BACKGROUND_E2E,
+    smokeTest, driverTest: IS_E2E_DRIVER_TEST });
   mainWindowAppearance = "#f6faff/#576a83";
 
   // Workspace colors also style the native caption buttons; macOS keeps its traffic lights.
   nativeTheme.themeSource = "system";
 
-  // 默认窗口尺寸随 UI_ZOOM_FACTOR 一起放大，保证缩放后二栏布局仍有原来的可用空间。
-  mainWindow = new BrowserWindow({
-    width: Math.round(1120 * UI_ZOOM_FACTOR),
-    height: Math.round(760 * UI_ZOOM_FACTOR),
-    minWidth: 860,
-    minHeight: 620,
+  // Headless/cloud displays can be smaller than the preferred window. Fit the
+  // complete window, including its controls, inside the usable display area.
+  const mainWorkArea = screen.getPrimaryDisplay().workArea;
+  const mainWidth = Math.min(Math.round(1120 * UI_ZOOM_FACTOR), Math.max(1, mainWorkArea.width - 24));
+  const mainHeight = Math.min(Math.round(760 * UI_ZOOM_FACTOR), Math.max(1, mainWorkArea.height - 24));
+  const windowRef = new BrowserWindow({
+    x: mainWorkArea.x + Math.floor((mainWorkArea.width - mainWidth) / 2),
+    y: mainWorkArea.y + Math.floor((mainWorkArea.height - mainHeight) / 2),
+    width: mainWidth,
+    height: mainHeight,
+    minWidth: Math.min(860, mainWidth),
+    minHeight: Math.min(620, mainHeight),
     autoHideMenuBar: process.platform !== "darwin",
-    show: !IS_BACKGROUND_E2E && !START_IN_BACKGROUND && (!smokeTest || IS_E2E_DRIVER_TEST),
+    show: visibility.show,
     focusable: !IS_BACKGROUND_E2E,
     title: APP_TITLE,
     icon: WINDOW_ICON_PATH,
@@ -1297,7 +1329,22 @@ function createMainWindow(): void {
       sandbox: false
     }
   });
-
+  mainWindow = windowRef;
+  if (visibility.waitForFirstPaint) {
+    const windowId = windowRef.id;
+    // Keep paintWhenInitiallyHidden at its default true. This is only the
+    // shell's first rendered frame, not proof that dynamic iframes are ready.
+    mainWindowFirstPaint = waitForMainWindowFirstPaint({
+      window: windowRef,
+      isCurrent: () => mainWindow === windowRef,
+      isQuitting: () => appQuitting,
+      onSettled: result => writeDiagnosticLog(result.trigger === "timeout" ? "warn" : "info", "workspace",
+        `workspace.first_paint_${result.trigger === "cancel" ? "cancelled" : result.trigger === "timeout" ? "timeout" : "ready"}`,
+        result.trigger === "timeout" ? "等待主窗口首帧超时，按当前可见意图处理" : "主窗口首次显示等待已结束",
+        { ...result, windowId,
+          mainFrameLoading: !windowRef.isDestroyed() && !windowRef.webContents.isDestroyed() ? windowRef.webContents.isLoadingMainFrame() : null })
+    });
+  }
 
   if (process.platform === "win32") {
     // Development runs use electron.exe; identify its taskbar button as ProfilePilot too.
@@ -1571,7 +1618,7 @@ function createMainWindow(): void {
     }
 
     event.preventDefault();
-    mainWindow?.hide();
+    windowRef.hide();
   });
 
   if (smokeTest && !IS_E2E_DRIVER_TEST) {
@@ -1583,7 +1630,10 @@ function createMainWindow(): void {
     reloadMainWorkspace();
   }
   mainWindow.on("closed", () => {
-    mainWindow = null;
+    if (mainWindow === windowRef) {
+      cancelMainWindowFirstPaint("closed");
+      mainWindow = null;
+    }
   });
 }
 
@@ -2206,6 +2256,9 @@ if (!app.requestSingleInstanceLock()) {
         profileManager,
         getTaskService: () => taskService,
         getPhoneService: () => phonesService,
+        getDesktopService: () => desktopService,
+        getLocalAppsService: () => localAppsService,
+        getGpuiService: () => gpuiService,
         appVersion: app.getVersion(),
         onMutation: () => scheduleAppStateBroadcast(0)
       }).catch((error) => {
@@ -2227,7 +2280,32 @@ if (!app.requestSingleInstanceLock()) {
       ipcMain.removeHandler(TASK_CHANNEL);
       ipcMain.handle(TASK_CHANNEL, () => { throw new Error("任务服务初始化失败，原始任务数据已保留。请检查任务存储后重启应用。"); });
     }
-    registerLocalApps(profileManager);
+    const localApps = localAppsService = registerLocalApps(profileManager);
+    const getDesktopCatalog = async (sample?: Promise<WindowsControlSample>) => {
+      const state = await profileManager.getStateForControlAdmission(sample);
+      return { profiles: state.profiles, externalInstances: state.externalInstances, discovery: state.controlDiscovery };
+    };
+    const desktopDiscovery = process.platform === 'win32'
+      ? { discovery: createWindowsDesktopDiscovery({ catalog: getDesktopCatalog, apps: sample => localApps.listForControlAdmission(sample),
+        onRetry: evidence => writeDiagnosticLog('info', 'desktop', 'desktop.discovery.retry',
+          'Windows 桌面发现整轮重采记录；发现结果发布不表示已授予控制权。', evidence) }) }
+      : { catalog: getDesktopCatalog, apps: () => localApps.list() };
+    const desktopAdmission = createRuntimeDesktopAdmission(desktopDiscovery);
+    desktopService = registerDesktop({ inputObserver: windowsInputRuntime?.observeDesktop, admission: async target => {
+      const decision = await desktopAdmission(target);
+      if (gpuiService?.reserved(target.pid)) return { status: 'occupied', reason: '目标由 GPUI 调试会话保留，请从 GPUI 页面接管或停止。', code: 'DESKTOP_TARGET_OCCUPIED', matches: [], gaps: [] };
+      return decision;
+    } });
+    gpuiService = registerGpui({ directory: path.join(process.env.CPM_DATA_DIR || defaultDataDir(), 'gpui'), guardFactory: windowsInputRuntime?.browserGuard,
+      occupied: pid => desktopService?.status().session?.window.pid === pid,
+      openPanel: async () => {
+        await showMainWindow();
+        const contents = mainWindow?.webContents;
+        if (!contents || contents.isDestroyed()) throw new Error('ProfilePilot 窗口不可用。');
+        const navigate = () => { if (!contents.isDestroyed()) contents.send(IPC_CHANNELS.navigateWorkspace, './gpui.html'); };
+        if (contents.isLoadingMainFrame()) contents.once('did-finish-load', navigate);
+        else navigate();
+      } });
     phonesService = registerPhones(path.join(process.env.CPM_DATA_DIR || defaultDataDir(), "phones"), path.join(__dirname, "../android/profilepilot-phone.apk"), !IS_ELECTRON_SMOKE_TEST);
     mobileService = registerMobile(path.join(process.env.CPM_DATA_DIR || defaultDataDir(), "mobile"), () => taskService, profileManager, path.join(__dirname, "../android/profilepilot-phone.apk"));
     if (!IS_BACKGROUND_E2E && (!IS_ELECTRON_SMOKE_TEST || process.env.CPM_E2E_ENABLE_GLOBAL_SHORTCUTS === "1")) {
@@ -2287,12 +2365,18 @@ app.on("window-all-closed", () => {
 
 const shutdown = new ShutdownCoordinator({
   stages: [
+    { name: "gpui-sessions", run: () => gpuiService?.close() },
     { name: "phone-sessions", run: () => phonesService?.close() },
+    { name: "input-control", run: () => closeInputControl({
+      closeDesktop: () => desktopService?.close(),
+      closeOverlay: () => profileManager.disposeAgentOverlay(),
+      closeRuntime: () => windowsInputRuntime?.dispose()
+    }) },
+    { name: "windows-discovery", run: () => closeWindowsSampler() },
     { name: "mobile-connections", run: () => mobileService?.close() },
     { name: "state-coordinator", run: () => stopStateCoordinator() },
     { name: "tasks-save-and-handoff", run: () => taskService?.close() },
     { name: "browser-connection", run: () => browserConnection?.close() },
-    { name: "agent-overlay", run: () => profileManager.disposeAgentOverlay() },
     { name: "management-server", run: async () => { await managementServer?.close(); managementServer = null; } }
   ],
   log: (level, event, message, details) => writeDiagnosticLog(level, "app", event, message, details),
@@ -2304,6 +2388,8 @@ const shutdown = new ShutdownCoordinator({
 
 app.on("before-quit", (event) => {
   appQuitting = true;
+  pendingShowMainWindow = false;
+  cancelMainWindowFirstPaint("quit");
   shutdown.beforeQuit(event, shutdownReason);
 });
 

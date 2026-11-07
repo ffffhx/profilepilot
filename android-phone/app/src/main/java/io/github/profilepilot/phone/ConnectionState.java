@@ -13,7 +13,7 @@ final class ConnectionState {
     private long debugValidUntil;
     ConnectionState(LongSupplier clock) { this.clock = clock; }
     void heartbeat(String transport) {
-        String route = switch (transport) { case "usb", "wifi", "emulator" -> transport; default -> "unknown"; };
+        String route = switch (transport) { case "usb", "wifi", "emulator", "internet" -> transport; default -> "unknown"; };
         contacts.put(route, clock.getAsLong());
     }
     boolean connected(String transport) {

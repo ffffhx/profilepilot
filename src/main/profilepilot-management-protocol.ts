@@ -3,6 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import type { BrowserTask, CreateTaskInput, TaskEvent, TaskStream, TaskSettings, TaskPermissionMode, TaskMessageOptions } from "../shared/tasks";
 import type { PhoneManagementCommand } from "./phones/management";
+import type { DesktopCommand } from "./desktop/service";
+import type { GpuiCommand } from "./gpui/service";
+import type { LocalAppManagementCommand } from "./local-apps/management";
 
 export const PROFILEPILOT_MANAGEMENT_PROTOCOL_VERSION = 1;
 export const PROFILEPILOT_MANAGEMENT_MAX_MESSAGE_BYTES = 1024 * 1024;
@@ -46,7 +49,7 @@ export type ManagementTaskSummary = Pick<ManagementTask,
 
 export interface ManagementTaskPage { task: ManagementTask; events: TaskEvent[]; cursor: number; hasMore: boolean; stream?: TaskStream; revision?: number; reset?: boolean; }
 
-export type ProfilePilotManagementCommand = ProfilePilotTaskCommand | PhoneManagementCommand
+export type ProfilePilotManagementCommand = ProfilePilotTaskCommand | PhoneManagementCommand | DesktopCommand | LocalAppManagementCommand | GpuiCommand
   | { action: "ping" }
   | { action: "profile.list" }
   | { action: "profile.get"; selector: string }

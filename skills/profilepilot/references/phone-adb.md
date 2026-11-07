@@ -47,6 +47,12 @@ Forward/reverse mappings use `--no-rebind` and belong to their task. Removal onl
 
 App sessions retain the phone capsule and pause/stop controls. Explicit `--backend basic` uses desktop controls without a companion; never switch backends to bypass user takeover. Pausing stops the local ADB process and rejects further commands/stdin. It cannot undo completed writes or guarantee termination of a deliberately detached remote process. A tool that opens a native ADB socket or hardcodes its own adb executable bypasses the managed adapter and is not covered merely by `wrap`.
 
+## Screen access
+
+`ppilot phone wake --device DEVICE_ID` dispatches `input keyevent 224` and a best-effort `wm dismiss-keyguard`; it requires an online authorized device and no active screenshot/input operation, but it does not require a session. `ppilot phone unlock --device DEVICE_ID` reads the PIN/password from stdin (interactive input is not echoed; piped input is one line), then swipes, types and submits it. The credential is never written to a params file, output or log; it is visible only in the transient ADB process arguments. `ppilot phone unattended --device DEVICE_ID --op on|off|status` toggles the companion's charging-only idle keep-alive (partial wake lock + Wi-Fi lock) so ADB remains reachable while the screen is off; it never bypasses the lock screen.
+
+Pattern locks use `--pattern 1235789`; the digits stay on the desktop and only the derived dot coordinates are sent as `input motionevent` events. `--stored` unlocks with the credential saved in the desktop App (OS-encrypted, metadata only in snapshots); `--forget` deletes it. Saved credentials only work when “允许命令行与 Agent 使用” is on, and the vault cannot protect against code already running as the desktop user. The dot grid is auto-detected from the lock screen when possible, otherwise the last verified geometry or a default estimate is used; `--pattern-geometry cx,cy,step` forces coordinates. Neither command bypasses a secure lock, and `unlock` never retries an uncertain attempt. The companion App's own `pauseCause: "screen"` sessions resume automatically after unlock; do not issue `resume` for them.
+
 ## Host and transport operations
 
 Use `ppilot phone host --params-file host.json`:

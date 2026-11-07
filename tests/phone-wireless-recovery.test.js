@@ -33,6 +33,15 @@ test('one physical phone with USB and historical Wi-Fi records yields one endpoi
   assert.equal(value.services.length,1);
   assert.equal(value.services[0].address,'192.168.1.9:41000');
 });
+
+test('a fresh authenticated phone IP supersedes the recent host endpoint without mixing IPs and ports', () => {
+  const recent = [{ hardwareId:'PHONE123', address:'192.168.1.8:44000', at:1000 }];
+  assert.deepEqual(wirelessCandidates([], [route()], 2000, recent).services.map(s => s.address), ['192.168.1.9:41000']);
+  const noReport = { id:'PHONE123', transport:'usb', hardwareId:'PHONE123' };
+  assert.deepEqual(wirelessCandidates([], [noReport], 2000, recent).services.map(s => s.address), ['192.168.1.8:44000']);
+  assert.equal(wirelessCandidates([], [noReport], 61000, recent).services.length, 0);
+  assert.equal(wirelessCandidates([], [noReport], 500, recent).services.length, 0);
+});
 test('desktop and status relay validate private address ownership and keep old reports compatible', async () => {
   const {validateReport}=await import('../services/phone-status/server.mjs');
   const report={deviceId:'00000000-0000-0000-0000-000000000001',name:'phone',permissions:{overlay:true,accessibility:true,notifications:true},readiness:readiness()};
@@ -58,7 +67,7 @@ test('CLI supports selected-device discovery and auto connection, rejects mixed 
   const calls=[],io={stdout:{write(){}},stderr:{write(){}}},request=async c=>{calls.push(c);return {ok:true,data:{}}};
   assert.equal(await runPhoneCli(['wireless-discover','--device','PHONE123'],request,io),0);
   assert.equal(await runPhoneCli(['wireless-connect','--device','PHONE123'],request,io),0);
-  assert.equal(await runPhoneCli(['wireless-connect','--device','PHONE123','--address','192.168.1.9:41000'],request,io),1);
+  assert.equal(await runPhoneCli(['wireless-connect','--device','PHONE123','--address','192.168.1.9:41000'],request,io),2);
   assert.deepEqual(calls.map(c=>c.params),[{id:'PHONE123'},{id:'PHONE123'}]);
 });
 

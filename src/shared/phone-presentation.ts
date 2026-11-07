@@ -37,15 +37,15 @@ export function phoneConnectionPresentation(group: PhoneDeviceGroup, now = Date.
     const connected = !!device && live.includes(device);
     const detected = device?.connection === "device";
     const unresponsive = !!device && phonePresentation(device, now).unresponsive;
-    const unauthorized = device?.connection === "unauthorized";
+    const unauthorized = device?.connection === "unauthorized" || transport === "wifi" && !detected && candidates.some(route => route.error.includes("PHONE_WIFI_AUTH_REQUIRED"));
     const setting = view.settings.find(row => row.key === (transport === "usb" ? "usbDebugging" : "wirelessDebugging"))!;
     // A current authorized transport is stronger evidence than an unreadable system switch.
-    const condition: PhoneConnectionCondition = detected ? "ready"
+    const condition: PhoneConnectionCondition = detected ? "ready" : unauthorized ? "blocked"
       : setting.status === "disabled" || developer?.status === "disabled" ? "blocked"
       : setting.status === "enabled" && developer?.status === "enabled" ? "ready" : "unknown";
-    const label = connected ? "已连接" : unauthorized ? "等待授权" : detected ? "可连接" : unresponsive ? "App 未响应"
+    const label = connected ? "已连接" : unauthorized ? transport === "wifi" ? "需要重新配对" : "等待授权" : detected ? "可连接" : unresponsive ? "App 未响应"
       : condition === "blocked" ? "未就绪" : condition === "unknown" ? "待确认" : transport === "usb" ? "等待插线" : "待连接";
-    const note = connected ? "已与这台电脑建立连接" : unauthorized ? "请在手机上允许此电脑的调试连接"
+    const note = connected ? "已与这台电脑建立连接" : unauthorized ? transport === "wifi" ? "手机未通过此电脑的认证，请用最新配对码重新配对" : "请在手机上允许此电脑的调试连接"
       : unresponsive ? "电脑能识别此连接，但手机 App 暂时没有回复"
       : detected ? "电脑已识别手机，等待连接手机 App"
       : condition === "blocked" ? developer?.status === "disabled" ? "请先在手机上开启开发者选项" : `请在手机上开启${transport === "usb" ? "USB 调试" : "无线调试"}`
@@ -66,7 +66,7 @@ export function phoneConnectionPresentation(group: PhoneDeviceGroup, now = Date.
     : condition === "ready" ? view.emulator ? "模拟器与控制权限已就绪。" : connected ? `已验证 ${live.map(route => route.transport === "usb" ? "USB" : "Wi-Fi").filter((value, index, all) => all.indexOf(value) === index).join("、")} 连接。` : `权限与调试开关已就绪；${ready.join(" / ")} 连接尚未验证。`
     : condition === "blocked" ? "USB 和 Wi-Fi 均未就绪，请开启下方调试开关。"
     : view.emulator ? "启动模拟器后检测连接条件。" : "控制权限已开启，连接方式仍待确认。";
-  const connectionNote = connected ? view.paused ? "任务已暂停，连接仍然保留。" : view.locked ? "手机已锁屏，操作前请先解锁。"
+  const connectionNote = connected ? view.awaitingUnlock ? "手机已熄屏，解锁后自动继续控制。" : view.paused ? "任务已暂停，连接仍然保留。" : view.locked ? "手机已锁屏，操作前请先解锁。"
     : view.emulator ? "本机模拟器已连接。" : `已通过 ${live.map(route => route.transport === "usb" ? "USB" : "Wi-Fi").filter((value, index, all) => all.indexOf(value) === index).join("、")} 连接这台电脑。`
     : group.device.pending || (unresponsive ? "电脑仍能识别设备，正在等待手机 App 回复。" : routes.some(route => route.detected) ? "已识别手机，请在下方完成 App 连接。" : view.emulator ? "启动本机模拟器后建立连接。" : "还没有与这台电脑建立连接。" );
   // Old observations can help explain what happened, but never establish the
@@ -148,6 +148,7 @@ export function phonePresentation(device: PhoneDevice, now = Date.now()) {
   const missing = permissions.filter(item => item.status === "disabled").length;
   const permissionsReady = permissions.every(item => item.status === "enabled");
   const active = directKnown && phoneActive(device), paused = directKnown && state?.phase === "paused";
+  const awaitingUnlock = paused && state?.pauseCause === "screen";
   const idle = directKnown && !!state && ["idle", "stopped"].includes(state.phase);
   const locked = known && diagnostics?.readiness?.unlocked === false;
   const note = cloudSource ? "手机正在通过服务器同步状态。查看画面或操作手机时，再建立控制连接。"
@@ -158,12 +159,13 @@ export function phonePresentation(device: PhoneDevice, now = Date.now()) {
     : device.companion === "pairing" ? `正在连接${subject}里的 ProfilePilot App，请保持 App 打开。`
     : !connected ? `${subject}可连接，点击“连接”接通 ProfilePilot App。`
     : !known ? `正在等待${subject}更新状态，请保持连接。`
+    : awaitingUnlock ? `${subject}已熄屏；解锁后会自行继续，不必手动恢复会话。`
     : paused ? `任务已暂停，你可以自行操作${subject}。`
     : locked ? `请先解锁${subject}，再查看画面或执行任务。`
     : missing ? `连接正常，有 ${missing} 项控制权限尚未就绪。`
     : active ? state?.mode === "view" ? `连接正常，正在查看${subject}画面。` : "连接正常，正在执行你的任务。"
     : permissionsReady ? "连接正常，控制所需权限已就绪。" : "连接正常，正在检测控制权限。";
-  return { emulator, subject, displayName, connected, known, directKnown, cloudOnline, cloudSource, unresponsive, permissions, settings, missing, permissionsReady, active, paused, locked, note,
+  return { emulator, subject, displayName, connected, known, directKnown, cloudOnline, cloudSource, unresponsive, permissions, settings, missing, permissionsReady, active, paused, awaitingUnlock, locked, note,
     label: cloudSource ? "状态同步在线 · 控制未连接" : device.registration && !transportConnected ? "已添加 · 未连接控制" : device.transport === "cloud" ? device.cloud?.paired ? "状态同步离线" : "等待手机扫码" : device.connection === "unauthorized" ? `等待${subject}授权` : connected ? `${subject}已连接` : transportConnected ? "可连接" : `${subject}未连接`,
     canPreview: directKnown && permissionsReady && !locked && !device.pending && !device.taskCaptureActive && !device.visualFollowActive && (idle || active && state?.phase !== "executing"),
     canSetup: idle && !device.pending

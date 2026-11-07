@@ -67,6 +67,8 @@ import {
 import { validateUnpackedExtensionPath } from "./unpacked-extension";
 import { spawnPortableCommand } from "./portable-command";
 import { bundledBrowserExecutable } from "./tasks/browser-runtime";
+import { controlTraceContext, noteControlTraceCommand, noteControlTraceResponse } from "./control-trace-context";
+import { COMMON_BROWSER_ACTIONS } from "../shared/browser-contract";
 
 export { ensureConfiguredGatewayProfileRunning } from "./browser-gateway-driver-runtime";
 
@@ -125,6 +127,9 @@ const OPTIONS_WITH_VALUES = new Set([
   "--viewport"
 ]);
 const SAFE_SESSION_RE = /^[A-Za-z0-9._-]+$/;
+function gatewayHome(env: NodeJS.ProcessEnv = process.env): string {
+  return env.PROFILEPILOT_GATEWAY_HOME || env.HOME || os.homedir();
+}
 // Handoff can drain a command, clear emulation, and reveal/focus the target in
 // three separately bounded phases. Do not abandon the control RPC mid-transition.
 const HANDOFF_GATEWAY_TIMEOUT_MS = 18_000;
@@ -338,6 +343,8 @@ function configuredNoAutoDialog(args: string[], env: NodeJS.ProcessEnv): boolean
   // agent-browser v0.34: explicit config replaces the default files; otherwise
   // project settings override user settings. Rust dirs uses the Windows profile
   // directory, while Unix honors HOME. Only this one setting is inspected here.
+  // This is the native driver's own config location, not Gateway state; a
+  // PROFILEPILOT_GATEWAY_HOME override must not change what that driver reads.
   const explicitConfig = optionValue(args, "--config") ?? env.AGENT_BROWSER_CONFIG;
   if (explicitConfig !== undefined) return read(explicitConfig) ?? false;
   const nativeHome = process.platform === "win32" ? os.homedir() : env.HOME || os.homedir();
@@ -389,7 +396,7 @@ export function profilePilotNoticePaths(homeDir: string, session: string): strin
 
 export function clearProfilePilotNoticesForSession(
   session: string,
-  homeDir = os.homedir(),
+  homeDir = gatewayHome(),
   onlyReason?: AgentControlNotice["reason"]
 ): string[] {
   const safeSession = safeSessionName(session);
@@ -427,7 +434,7 @@ export function findActiveProfilePilotNotice(
   if (!session) {
     return null;
   }
-  const homeDir = env.HOME || os.homedir();
+  const homeDir = gatewayHome(env);
   for (const filePath of profilePilotNoticePaths(homeDir, session)) {
     const notice = readActiveNotice(filePath, now);
     if (notice) {
@@ -439,6 +446,7 @@ export function findActiveProfilePilotNotice(
 
 export function formatHardStopNotice(match: ProfilePilotNoticeMatch): string {
   const notice = match.notice;
+  noteControlTraceResponse({ ok: false, code: notice.code, recovery: controlRecovery(notice.code) });
   return `${JSON.stringify(
     {
       source: "ProfilePilot",
@@ -474,7 +482,7 @@ export function consumeProfilePilotReturnNotice(
   if (!session) {
     return null;
   }
-  const homeDir = env.HOME || os.homedir();
+  const homeDir = gatewayHome(env);
   const paths = profilePilotNoticePaths(homeDir, session);
   for (const filePath of paths) {
     const notice = readActiveReturnNotice(filePath, now);
@@ -548,7 +556,7 @@ export function resolveLegacyAgentBrowser(env: NodeJS.ProcessEnv = process.env, 
   const self = realpathOrInput(selfPath);
   const managedLauncher = realpathOrInput(
     env.PROFILEPILOT_AGENT_BROWSER_LAUNCHER || path.join(
-      env.HOME || os.homedir(),
+      gatewayHome(env),
       ".profilepilot",
       "bin",
       process.platform === "win32" ? "agent-browser.cmd" : "agent-browser"
@@ -577,7 +585,7 @@ export function resolveLegacyAgentBrowser(env: NodeJS.ProcessEnv = process.env, 
   // npx 安装的 agent-browser 外层是 Node 脚本，但包内带与平台匹配的原生 CLI。
   // ProfilePilot 的 shell wrapper 本身可由 Electron 的 Node runtime 启动，因此这里直接
   // 找原生 CLI，避免用户还必须全局安装一份 node/npm 才能让控制协议生效。
-  for (const candidate of cachedNativeAgentBrowserCandidates(env.HOME || os.homedir())) {
+  for (const candidate of cachedNativeAgentBrowserCandidates(gatewayHome(env))) {
     const real = realpathOrInput(candidate);
     if (real !== self && isExecutableFile(candidate)) {
       return candidate;
@@ -671,6 +679,7 @@ export async function runAgentBrowserWrapper(
       : PROFILEPILOT_AGENT_BROWSER_HARD_STOP_EXIT_CODE;
   }
 
+  noteControlTraceCommand({ session: sessionFromAgentBrowserArgs(effectiveArgs, env) });
   const internalExitCode = await runProfilePilotInternalCommand(effectiveArgs, env);
   if (internalExitCode !== null) {
     return internalExitCode;
@@ -709,20 +718,20 @@ export async function runAgentBrowserWrapper(
   if (leaseContext?.acquisition.replacedLease) {
     const retired = retireReplacedAgentBrowserLeaseOwnerSync(
       leaseContext.acquisition.replacedLease,
-      env.HOME || os.homedir()
+      gatewayHome(env)
     );
     if (!retired) {
       releaseAgentBrowserProfileLeaseSync(
         leaseContext.cdpPort,
         leaseContext.session,
-        env.HOME || os.homedir()
+        gatewayHome(env)
       );
       process.stderr.write(formatProfileLeaseReclaimFailure(leaseContext.acquisition.replacedLease, leaseContext.session));
       return PROFILEPILOT_AGENT_BROWSER_LEASE_CONFLICT_EXIT_CODE;
     }
   }
 
-  const homeDir = env.HOME || os.homedir();
+  const homeDir = gatewayHome(env);
   const managedGatewayRoute = Boolean(
     leaseContext && (
       findConfiguredAgentBrowserProfileByPortSync(leaseContext.cdpPort, env, homeDir) ||
@@ -844,7 +853,7 @@ export function resolveProfilePilotUseArgs(
     );
   }
 
-  const homeDir = env.HOME || os.homedir();
+  const homeDir = gatewayHome(env);
   const profiles = listAgentBrowserProfileCatalogSync({ requestedSession: session }, homeDir);
   const exact = profiles.filter((profile) => profile.profileName === profileName);
   const matches = exact.length
@@ -923,7 +932,7 @@ function beginBrowserCommandState(
     command,
     cdpPort: resolvedCdpPort || cdpPortFromAgentBrowserArgs(args),
     startedAt: new Date().toISOString(),
-    homeDir: env.HOME || os.homedir()
+    homeDir: gatewayHome(env)
   };
   writeAgentBrowserCommandStateSync({
     commandId: context.commandId,
@@ -958,17 +967,27 @@ export function spawnRealAgentBrowser(
   captureDiagnostic = false
 ): Promise<SpawnedAgentBrowserResult> {
   return new Promise((resolve) => {
+    const traceEnabled = !captureDiagnostic && stdio === "inherit" && Boolean(controlTraceContext.getStore());
+    let traceBuffer = "";
     let settled = false;
     let drainTimer: ReturnType<typeof setTimeout> | undefined;
     const finish = (result: SpawnedAgentBrowserResult): void => {
       if (settled) return;
       settled = true;
       if (drainTimer) clearTimeout(drainTimer);
+      if (traceEnabled && traceBuffer.length <= 65536) for (const line of traceBuffer.split("\n")) {
+        try {
+          const receipt = JSON.parse(line);
+          if ((COMMON_BROWSER_ACTIONS as readonly string[]).includes(receipt.actionKind)) noteControlTraceCommand({ params: { kind: receipt.actionKind } });
+          noteControlTraceResponse({ ok: receipt.ok, requestId: receipt.requestId, code: receipt.code, recovery: receipt.recovery });
+        } catch { /* Unsupported drivers send no metadata. */ }
+      }
       resolve(result);
     };
     let child;
     try {
-      child = spawnPortableCommand(executable, args, { env, stdio: captureDiagnostic ? ["ignore", "pipe", "pipe"] : stdio, windowsHide: true });
+      child = spawnPortableCommand(executable, args, { env: traceEnabled ? { ...env, PROFILEPILOT_CONTROL_TRACE_FD: "3" } : env,
+        stdio: captureDiagnostic ? ["ignore", "pipe", "pipe"] : traceEnabled ? ["inherit", "inherit", "inherit", "pipe"] : stdio, windowsHide: true });
     } catch (error) {
       finish({ status: null, signal: null, error: error as Error & { code?: string } });
       return;
@@ -986,6 +1005,17 @@ export function spawnRealAgentBrowser(
       }, commandState.homeDir);
     }
     let diagnostic = "";
+    if (traceEnabled) {
+      const channel = child.stdio[3];
+      channel?.on("data", (chunk: Buffer) => {
+        if (traceBuffer.length <= 65536) { traceBuffer += chunk.toString("utf8"); if (traceBuffer.length > 65536) traceBuffer = " ".repeat(65537); }
+      });
+      channel?.on("error", () => { /* Metadata must not affect the child result. */ });
+      child.once("exit", (status, signal) => {
+        if (settled) return;
+        drainTimer = setTimeout(() => { channel?.destroy(); finish({ status, signal, diagnostic }); }, 200);
+      });
+    }
     if (captureDiagnostic) {
       const collect = (chunk: Buffer): void => { diagnostic = (diagnostic + chunk.toString()).slice(-8192); };
       child.stdout?.on("data", collect);
@@ -1024,7 +1054,8 @@ export function formatProfileLeaseConflict(
   originalArgs: string[] = [],
   env: NodeJS.ProcessEnv = process.env
 ): string {
-  const homeDir = env.HOME || os.homedir();
+  noteControlTraceResponse({ ok: false, code: "PROFILE_ALREADY_IN_USE", recovery: controlRecovery("PROFILE_ALREADY_IN_USE") });
+  const homeDir = gatewayHome(env);
   const candidates = findAvailableAgentBrowserProfileCandidatesSync({
     excludedPort: lease.cdpPort,
     requestedSession,
@@ -1174,7 +1205,7 @@ export function acquireProfileLeaseForCommandWithAutomaticSwitch(
     return { args, lease, automaticSwitch: null };
   }
   const requestedSession = sessionFromAgentBrowserArgs(args, env);
-  const homeDir = env.HOME || os.homedir();
+  const homeDir = gatewayHome(env);
   const candidates = findAvailableAgentBrowserProfileCandidatesSync({
     excludedPort: lease.lease.cdpPort,
     requestedSession,
@@ -1212,7 +1243,7 @@ function acquireProfileLeaseForCommand(
   if (!session) {
     return null;
   }
-  const homeDir = env.HOME || os.homedir();
+  const homeDir = gatewayHome(env);
   const existingLease = findAgentBrowserProfileLeaseForSessionSync(session, homeDir);
   const activity = readAgentBrowserSessionActivitySync(session, homeDir);
   const cdpPort = cdpPortFromAgentBrowserArgs(args) || existingLease?.cdpPort || activity?.cdpPort;
@@ -1245,7 +1276,7 @@ function renewProfileLeaseAfterSuccess(
   args: string[],
   env: NodeJS.ProcessEnv
 ): void {
-  const homeDir = env.HOME || os.homedir();
+  const homeDir = gatewayHome(env);
   const target = resolveAgentBrowserProfileTargetSync(context.cdpPort, env, homeDir);
   acquireAgentBrowserProfileLeaseSync({
     cdpPort: context.cdpPort,
@@ -1268,7 +1299,7 @@ function releaseNewProfileLeaseAfterFailure(context: AgentBrowserLeaseContext | 
   if (!context || context.acquisition.status === "renewed") {
     return;
   }
-  releaseAgentBrowserProfileLeaseSync(context.cdpPort, context.session, env.HOME || os.homedir());
+  releaseAgentBrowserProfileLeaseSync(context.cdpPort, context.session, gatewayHome(env));
 }
 
 function shouldVerifyGatewayActivity(args: string[]): boolean {
@@ -1284,7 +1315,7 @@ async function readGatewayAgentActivity(
   context: AgentBrowserLeaseContext,
   env: NodeJS.ProcessEnv
 ): Promise<GatewayAgentActivityRead> {
-  const homeDir = env.HOME || os.homedir();
+  const homeDir = gatewayHome(env);
   const daemonInstanceId = readOrCreateBrowserGatewayDaemonIdentity(context.session, homeDir);
   const status = await requestBrowserGateway({ action: "status" }, { homeDir, timeoutMs: 3_000 });
   if (!gatewaySupportsAgentActivity(status)) {
@@ -1323,7 +1354,7 @@ async function retireDetachedGatewaySession(
   context: AgentBrowserLeaseContext,
   env: NodeJS.ProcessEnv
 ): Promise<void> {
-  const homeDir = env.HOME || os.homedir();
+  const homeDir = gatewayHome(env);
   const daemonPid = readAgentBrowserDaemonPidSync(homeDir, context.session);
   retireAgentBrowserSessionSync(context.session, daemonPid, homeDir);
   await controlGatewaySessionIfManaged(context.session, "stop", homeDir).catch(() => undefined);
@@ -1348,7 +1379,7 @@ async function runProfilePilotInternalCommand(
     return PROFILEPILOT_AGENT_BROWSER_USAGE_EXIT_CODE;
   }
 
-  const homeDir = env.HOME || os.homedir();
+  const homeDir = gatewayHome(env);
   if (action === "profiles") {
     const session = sessionFromAgentBrowserArgs(args, env);
     const profiles = listAgentBrowserProfileCatalogSync({
@@ -2398,7 +2429,7 @@ export async function prepareGatewayTransport(
   const sessionId = sessionFromAgentBrowserArgs(args, env);
   const publicPort = resolvedCdpPort || cdpPortFromAgentBrowserArgs(args);
   if (!sessionId || !publicPort) return args;
-  const homeDir = env.HOME || os.homedir();
+  const homeDir = gatewayHome(env);
   assertProtectedElectronPort(publicPort, homeDir);
   let status: GatewayControlResponse | null = null;
   try {
@@ -2806,6 +2837,7 @@ function gatewayWrapperError(code: string, message: string): Error & { code: str
 function formatGatewayFailure(error: unknown, args: string[], env: NodeJS.ProcessEnv): string {
   const candidate = error as { code?: unknown; message?: unknown } | null;
   const code = typeof candidate?.code === "string" ? candidate.code : "GATEWAY_ERROR";
+  noteControlTraceResponse({ ok: false, code, recovery: controlRecovery(code) });
   return `${JSON.stringify({
     source: "ProfilePilot Gateway",
     error_code: code,
@@ -2849,6 +2881,7 @@ export function formatControlledRawCdpFailure(
     typeof candidate?.code === "string"
       ? candidate.code
       : "RAW_CDP_METHOD_DENIED";
+  noteControlTraceResponse({ ok: false, code, recovery: controlRecovery(code) });
   return `${JSON.stringify({
     source: "ProfilePilot Gateway",
     error_code: code,
@@ -3033,7 +3066,7 @@ function writeProfilePilotControlNoticeSync(
 function acknowledgeRequestedTakeover(args: string[], env: NodeJS.ProcessEnv): void {
   const session = sessionFromAgentBrowserArgs(args, env);
   if (!session) return;
-  const homeDir = env.HOME || os.homedir();
+  const homeDir = gatewayHome(env);
   const current = readAnyProfilePilotControlNotice(session, homeDir);
   if (
     !current ||
@@ -3212,7 +3245,7 @@ function writeSessionActivityIfBrowserOperation(args: string[], env: NodeJS.Proc
   if (!session || !cdpPort || !command) {
     return;
   }
-  const homeDir = env.HOME || os.homedir();
+  const homeDir = gatewayHome(env);
   try {
     writeAgentBrowserSessionActivitySync({
       session,

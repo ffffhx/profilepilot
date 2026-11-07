@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { PhoneActionInput, PhoneActionResult, PhoneBasicModeInput, PhoneSessionState } from "../../shared/phones";
 import { deviceShell, type AdbRunner } from "./adb";
 import { captureAdbScreen } from "./screenshot";
+import { phoneFailure } from "./errors";
 
 type Session = { state: PhoneSessionState; requests: Set<string>; pending?: AbortController; frame?: { width: number; height: number; at: number } };
 const occupied = (state: PhoneSessionState) => !["stopped", "disconnected"].includes(state.phase);
@@ -13,7 +14,7 @@ export class BasicPhoneControl {
   state(id: string): PhoneSessionState | undefined { const session = this.sessions.get(id); return session ? structuredClone(session.state) : undefined; }
   get active(): boolean { return [...this.sessions.values()].some(s => occupied(s.state) || !!s.pending); }
   start(id: string, mode: "view" | "control", controller: string, task: string): void {
-    if (this.active) throw new Error("请先结束已有的免安装会话，再开始新会话。");
+    if (this.active) throw phoneFailure("PHONE_SESSION_CONFLICT", "请先结束已有的免安装会话，再开始新会话。");
     this.sessions.set(id, { requests: new Set(), state: {
       protocol: 1, instanceId: randomUUID(), sessionId: randomUUID(), generation: 1,
       phase: mode === "view" ? "viewing" : "controlling", mode, computer: this.computer, controller, task,
@@ -51,18 +52,19 @@ export class BasicPhoneControl {
   async perform(input: PhoneActionInput): Promise<PhoneActionResult> {
     const { id, action, sessionId, generation, requestId } = input;
     const session = this.sessions.get(id), state = session?.state;
-    if (!session || !state || state.sessionId !== sessionId || state.generation !== generation) throw new Error("免安装会话已改变，请重新读取状态。");
-    if (!["viewing", "controlling"].includes(state.phase)) throw new Error("免安装会话已暂停、结束或断开。");
-    if (session.pending) throw new Error("上一项手机操作尚未完成。");
-    if (session.requests.has(requestId)) throw new Error("此操作已提交过，不会重复执行；请先核对手机画面。");
+    if (state?.phase === "paused") throw phoneFailure("PHONE_USER_IN_CONTROL", "免安装会话已暂停，请等待用户交还控制。");
+    if (!session || !state || state.sessionId !== sessionId || state.generation !== generation) throw phoneFailure("PHONE_SESSION_STALE", "免安装会话已改变，请重新读取状态。");
+    if (!["viewing", "controlling"].includes(state.phase)) throw phoneFailure("PHONE_SESSION_ENDED", "免安装会话已暂停、结束或断开。");
+    if (session.pending) throw phoneFailure("PHONE_TARGET_BUSY", "上一项手机操作尚未完成。");
+    if (session.requests.has(requestId)) throw phoneFailure("PHONE_REQUEST_ALREADY_SUBMITTED", "此操作已提交过，不会重复执行；请先核对手机画面。", "unknown");
     if (session.requests.size >= 4096) throw new Error("本次会话操作数已达上限，请结束后重新开始。");
-    if (action.kind !== "screenshot" && state.mode !== "control") throw new Error("仅查看会话不能操作手机。");
+    if (action.kind !== "screenshot" && state.mode !== "control") throw phoneFailure("PHONE_PERMISSION_REQUIRED", "仅查看会话不能操作手机。");
     let command: string[] | undefined;
     if (action.kind === "tap" || action.kind === "swipe") {
       const frame = session.frame;
-      if (!frame || this.now() - frame.at > 30000) throw new Error("请先刷新手机画面，再点击或滑动。");
+      if (!frame || this.now() - frame.at > 30000) throw phoneFailure("PHONE_OBSERVATION_STALE", "请先刷新手机画面，再点击或滑动。");
       const valid = (x: number, y: number) => x >= 0 && y >= 0 && x < frame.width && y < frame.height;
-      if (!valid(action.x, action.y) || action.kind === "swipe" && !valid(action.toX, action.toY)) throw new Error("操作位置超出手机画面。");
+      if (!valid(action.x, action.y) || action.kind === "swipe" && !valid(action.toX, action.toY)) throw phoneFailure("PHONE_INVALID_REQUEST", "操作位置超出手机画面。");
       command = action.kind === "tap" ? ["input", "tap", String(action.x), String(action.y)]
         : ["input", "swipe", String(action.x), String(action.y), String(action.toX), String(action.toY), String(action.duration || 350)];
     } else if (action.kind === "key") {
@@ -90,7 +92,8 @@ export class BasicPhoneControl {
     } catch (error) {
       // An uncertain input is never retried and requires an explicit resume.
       if (action.kind !== "screenshot" && state.generation === generation) this.control(id, "pause");
-      throw error;
+      if ((error as { code?: string }).code?.startsWith("PHONE_")) throw error;
+      throw phoneFailure("PHONE_EXECUTION_UNCERTAIN", (error as Error).message, action.kind === "screenshot" ? "not-applicable" : "unknown");
     } finally { if (session.pending === abort) session.pending = undefined; this.changed(); }
   }
 }

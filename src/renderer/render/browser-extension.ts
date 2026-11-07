@@ -28,19 +28,14 @@ function extensionPresentation() {
 }
 
 export function renderBrowserExtensionPanel(): string {
-  const { profiles, profilesPending, profilePlaceholder, selected, browser, ready, loading, status, message, tone } = extensionPresentation();
+  const { profiles, profilesPending, selected, browser, ready, loading, status, message, tone } = extensionPresentation();
 
   return `<section class="browser-extension-panel ${tone}" aria-labelledby="browser-extension-title" data-tools-search="ProfilePilot 浏览器扩展 Chrome 连接 Profile 安装">
     <div class="tools-extension-main">
       <span class="tools-extension-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M9 4H5a1 1 0 0 0-1 1v4a3 3 0 1 1 0 6v4a1 1 0 0 0 1 1h4a3 3 0 1 1 6 0h4a1 1 0 0 0 1-1v-4a3 3 0 1 0 0-6V5a1 1 0 0 0-1-1h-4a3 3 0 1 0-6 0Z"/></svg></span>
       <div class="tools-extension-copy">
         <div class="tools-extension-title"><strong id="browser-extension-title">ProfilePilot 浏览器扩展</strong><span class="tools-inline-status" title="${escapeHtml(status)}">${tone === "pending" ? "检测中" : tone === "ready" ? "已连接" : "待连接"}</span></div>
-        <div class="tools-extension-profile"><label for="tools-native-profile">当前使用：</label>
-        <select id="tools-native-profile" ${!profiles.length || store.busy ? "disabled" : ""}>
-          ${profiles.length ? profiles.map(profile => `<option value="${escapeHtml(profile.id)}" ${profile.id === selected?.id ? "selected" : ""}>${escapeHtml(profile.name)} · ${escapeHtml(profile.dirName)}</option>`).join("") : `<option value="">${profilePlaceholder}</option>`}
-        </select>
-        </div>
-        <p>复用当前页面与登录状态，随时开始任务</p>
+        <p>控制系统默认 Profile 时，需要安装此浏览器扩展。</p>
       </div>
       <div class="browser-extension-controls">
         <button type="button" data-action="refresh-browser-extension" ${loading || store.busy ? "disabled" : ""}>${renderButtonLabel(Boolean(loading), "检测连接", "检测中…")}</button>

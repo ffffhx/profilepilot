@@ -14,8 +14,11 @@ try {
   assert.equal((await d.query('[data-action="install-profilepilot-cli-skill"]')).count, 0);
   await d.domClick(install);
   await d.waitFor(status, state => state.text === "已就绪", { timeoutMs: 20000 });
+  assert.equal(await d.evaluate('document.querySelector("#tools-cli-card").open'), false);
   await d.domClick('#management-cli-title');
-  assert.equal((await d.query('#tools-cli-card summary, #tools-cli-card .tools-disclosure-body, #tools-gateway-details')).count, 0);
+  assert.equal(await d.evaluate('document.querySelector("#tools-cli-card").open'), true);
+  assert.equal((await d.query('#tools-cli-card .tools-cli-category')).count, 3);
+  assert.deepEqual(await d.evaluate('Array.from(document.querySelectorAll(".tools-cli-namespace"), element => element.textContent)'), ['ppilot browser', 'ppilot electron', 'ppilot phone']);
   const skillRoot = path.join(app.homeDir, '.agents/skills/profilepilot');
   const policy = path.join(skillRoot, 'local/browser-routing.md');
   await mkdir(path.dirname(policy), { recursive: true });
@@ -25,9 +28,16 @@ try {
   await d.domClick('#tools-connection-diagnostics > summary');
   await d.domClick('[data-action="refresh-agent-integration"]');
   await d.waitFor(status, state => state.text === "需要更新");
+  assert.equal(await d.evaluate('document.querySelector("#tools-cli-card").open'), true, 'refresh preserves expansion');
   await d.waitFor(install, state => !state.disabled);
   await d.domClick(install);
   await d.waitFor(status, state => state.text === "已就绪", { timeoutMs: 20000 });
+  assert.equal(await d.evaluate('document.querySelector("#tools-cli-card").open'), true, 'install button does not collapse the card');
+  await d.focus('#tools-cli-card > summary');
+  await d.press('Space');
+  assert.equal(await d.evaluate('document.querySelector("#tools-cli-card").open'), false);
+  await d.press('Return');
+  assert.equal(await d.evaluate('document.querySelector("#tools-cli-card").open'), true);
   assert.equal(await readFile(policy, 'utf8'), 'Keep this chosen Profile and connection.');
   assert.match(await readFile(path.join(skillRoot, 'references/agent-browser.md'), 'utf8'), /ppilot browser/);
   const artifacts = path.join(repoRoot, 'artifacts/cli-setup-20261005');
@@ -36,10 +46,10 @@ try {
   await d.screenshot();
   await new Promise(resolve => setTimeout(resolve, 1200));
   await writeFile(path.join(artifacts, 'unified-setup.png'), Buffer.from((await d.screenshot()).pngBase64, 'base64'));
-  // Removal remains an installer capability; the compact card has no details or removal action.
+  // Removal remains an installer capability, separate from the command guide.
   await d.evaluate('window.profileManager.setProfilePilotCliEnabled(false)');
   assert.equal(await readFile(policy, 'utf8'), 'Keep this chosen Profile and connection.');
   await assert.rejects(readFile(path.join(skillRoot, 'SKILL.md')), { code: 'ENOENT' });
   await assert.rejects(readFile(path.join(app.homeDir, '.profilepilot/cli/profilepilot-cli.cjs')), { code: 'ENOENT' });
-  console.log('PASS compact CLI card, install/update, no compatibility section, real IPC removal, personal routing preserved');
+  console.log('PASS expandable CLI categories, keyboard, install/update, real IPC removal, personal routing preserved');
 } finally { await app.stop(); }

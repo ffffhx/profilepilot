@@ -38,7 +38,11 @@
 [data-selected-app] p { margin-top:6px; line-height:1.7; }
 .wireless-result { color:var(--success,#19755e); font-weight:600; font-size:14px; }
 .wireless-body .wireless-port-tip { padding:10px 12px; background:#fff6df; color:#785720; border-radius:8px; }
-.wireless-body .wireless-error { color:var(--danger,#a83248); line-height:1.6; }
+.wireless-body .wireless-error { color:var(--danger,#a83248); line-height:1.7; padding:12px 14px; border:1px solid currentColor; border-radius:9px; font-size:13px; }
+.wireless-error p { white-space:pre-line; overflow-wrap:anywhere; margin:0; }
+.wireless-error details { color:var(--muted,#718097); margin-top:10px; font-size:12px; }
+.wireless-error summary { cursor:pointer; }
+.wireless-error details p { margin-top:8px; }
 .wireless-help { border-top:1px solid var(--line,#d7e3f4); padding-top:14px; font-size:12px; }
 .wireless-help summary { cursor:pointer; color:var(--muted,#718097); }
 .wireless-help p { margin-top:8px; }

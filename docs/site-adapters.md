@@ -1,6 +1,6 @@
 # Website adapters
 
-ProfilePilot provides 18 structured read operations across eight websites. The
+ProfilePilot provides 21 structured read operations across nine websites. The
 extension CLI, Gateway CLI, and built-in Agent share the same catalog and page
 read implementation. Requests execute inside the selected browser session;
 there is no Node HTTP crawler, cookie export or second browser identity.
@@ -53,6 +53,11 @@ existing segments and precise timestamps. It does not transcribe audio.
 The implementation was written independently. bb-browser/bb-sites informed the
 design discussion, but their adapter source was not copied into this project.
 No third-party adapter package is bundled.
+
+Xianyu search/detail/region reads and its comparison/history workflow are
+described in [Xianyu adapters](xianyu-adapters.md). SDK reads use short guarded
+polls; item details read the already-loaded product page. Failed reads cannot
+be recorded as empty successful scans or as evidence that an item was sold.
 
 ## Verification and measurement
 

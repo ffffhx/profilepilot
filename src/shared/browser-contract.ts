@@ -31,7 +31,8 @@ export const browserContract = {
   ]
 } as const;
 export const commonBrowserHelp = `Common contract v${BROWSER_CONTRACT_VERSION} (extension / Gateway / Electron):
-  capabilities | schema                    Local command/capability contract
+  capabilities | schema [COMMAND]          Local command/capability contract
+  COMMAND --help | help COMMAND            Help for the selected connection
   observe [--output PATH]                   JSON DOM, version, refs and availability
   action --params-file ACTION.json          ${COMMON_BROWSER_ACTIONS.join(" | ")}
   action --params-stdin                     UTF-8 JSON; no shell escaping of values

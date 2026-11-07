@@ -1,0 +1,12 @@
+{
+  "protocolVersion": 1,
+  "id": "profilepilot-sdk",
+  "command": "$NODE",
+  "args": ["$REPO/benchmarks/agent-tasks/adapters/profilepilot-sdk.mjs"],
+  "agent": "claude-agent-sdk",
+  "model": "configured",
+  "tool": "profilepilot",
+  "toolVersion": "local-build",
+  "track": "matched-browser-dom",
+  "environment": "isolated-profilepilot-gateway"
+}

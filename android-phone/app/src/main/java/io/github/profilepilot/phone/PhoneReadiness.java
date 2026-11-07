@@ -12,6 +12,7 @@ import org.json.JSONObject;
 /** Read-only system diagnostics; local history only remembers confirmed setup. */
 final class PhoneReadiness {
     final boolean overlay, notifications, unlocked, computerConnected, usbConnected, wifiConnected;
+    final boolean unattended, charging, unattendedActive;
     final String accessibilityService, developerOptions, usbDebugging, wirelessDebugging;
     final boolean developerOptionsSeenEnabled;
     private final DebugSettingReading developerReading, usbReading, wirelessReading;
@@ -27,6 +28,9 @@ final class PhoneReadiness {
         computerConnected = service != null && service.connection.connected();
         usbConnected = service != null && service.connection.connected("usb");
         wifiConnected = service != null && service.connection.connected("wifi");
+        unattended = PhoneSettings.unattended(context);
+        charging = service != null ? service.charging() : UnattendedPolicy.charging(context);
+        unattendedActive = service != null && service.unattendedActive();
         ConnectionState connection = service == null ? new ConnectionState(android.os.SystemClock::elapsedRealtime) : service.connection;
         developerReading = connection.debugReading("developerOptions", read(context, Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, true), false);
         developerOptions = developerReading.state;
@@ -99,10 +103,11 @@ final class PhoneReadiness {
     JSONObject json() throws Exception {
         return new JSONObject().put("unlocked", unlocked).put("computerConnected", computerConnected)
             .put("usbConnected", usbConnected).put("wifiConnected", wifiConnected)
+            .put("unattended", unattended).put("charging", charging).put("unattendedActive", unattendedActive)
             .put("developerOptions", developerOptions).put("usbDebugging", usbDebugging)
             .put("wirelessDebugging", wirelessDebugging).put("accessibilityService", accessibilityService)
             .put("debugReasons", new JSONObject().put("developerOptions", developerReading.reason)
                 .put("usbDebugging", usbReading.reason).put("wirelessDebugging", wirelessReading.reason))
-            .put("appVersion", BuildConfig.VERSION_NAME).put("network", WirelessNetwork.snapshot(context));
+            .put("appVersion", BuildConfig.VERSION_NAME).put("sdk", android.os.Build.VERSION.SDK_INT).put("network", WirelessNetwork.snapshot(context));
     }
 }

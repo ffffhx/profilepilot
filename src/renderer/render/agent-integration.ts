@@ -102,14 +102,35 @@ function renderManagementCliPanel(diagnostic: AgentIntegrationDiagnostic | null,
   const status = pending ? "检测中" : setup.status;
   const action = setup.ready ? "检查 / 更新" : setup.needsUpdate ? "更新 ProfilePilot CLI" : setup.hasParts ? "修复 ProfilePilot CLI" : "安装 ProfilePilot CLI";
   return `
-    <section id="tools-cli-card" aria-labelledby="management-cli-title" class="tools-overview-card tools-cli-card ${pending ? "pending" : setup.ready ? "ready" : "blocked"}" data-tools-search="ProfilePilot CLI ppilot browser electron phone Skill Agent 使用指引 扩展 Gateway 终端 命令 安装">
-      <div class="tools-overview-summary">
+    <details id="tools-cli-card" aria-labelledby="management-cli-title" class="tools-overview-card tools-cli-card ${pending ? "pending" : setup.ready ? "ready" : "blocked"}" data-tools-search="ProfilePilot CLI ppilot browser electron phone Skill Agent 使用指引 扩展 Gateway 终端 命令 安装">
+      <summary class="tools-overview-summary">
         ${overviewIcon("cli")}
         <span class="tools-overview-copy"><span class="tools-overview-title"><strong id="management-cli-title">ProfilePilot CLI</strong><em>${status}</em></span>
-          <span class="tools-overview-line"><small>命令工具与 Agent 使用指引，一次安装，一起更新</small><button type="button" data-action="install-profilepilot-cli" ${pending ? "disabled" : ""}>${pending ? "检测中…" : action}</button></span>
+          <span class="tools-overview-line"><small>浏览器、Electron 应用、安卓手机 · 展开查看命令</small><button type="button" data-action="install-profilepilot-cli" ${pending ? "disabled" : ""}>${pending ? "检测中…" : action}</button></span>
         </span>
+        <span class="tools-cli-arrow" aria-hidden="true">›</span>
+      </summary>
+      <div class="tools-disclosure-body">
+        <p>三类控制命令与 Agent 使用指引，一次安装，一起更新。</p>
+        <div class="tools-cli-categories">
+          <article class="tools-cli-category" aria-labelledby="tools-cli-browser-title">
+            <h3 id="tools-cli-browser-title">浏览器 Profile</h3>
+            <code class="tools-cli-namespace">ppilot browser</code>
+            <p>管理 Profile，复用登录态，操作网页与标签页。</p>
+          </article>
+          <article class="tools-cli-category" aria-labelledby="tools-cli-electron-title">
+            <h3 id="tools-cli-electron-title">Electron 应用</h3>
+            <code class="tools-cli-namespace">ppilot electron</code>
+            <p>连接已登记应用，读取窗口内容、点击、输入与截图。</p>
+          </article>
+          <article class="tools-cli-category" aria-labelledby="tools-cli-phone-title">
+            <h3 id="tools-cli-phone-title">安卓手机</h3>
+            <code class="tools-cli-namespace">ppilot phone</code>
+            <p>连接真机或模拟器，查看屏幕、操作控件与管理控制会话。</p>
+          </article>
+        </div>
       </div>
-    </section>`;
+    </details>`;
 }
 
 function renderControlPreferences(diagnostic: AgentIntegrationDiagnostic | null, pending: boolean): string {

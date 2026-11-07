@@ -432,10 +432,10 @@ test('CLI defaults to observation and validates before requesting a phone', visi
   assert.equal(await runGameFollowCli(['start','--device','phone','--config',file],request,io),0);
   assert.equal(calls[0].params.mode,'observe');
   assert.equal(calls[0].params.backend,'app');
-  assert.equal(await runGameFollowCli(['stop','--run-id','bad'],request,io),1);assert.equal(calls.length,1);
+  assert.equal(await runGameFollowCli(['stop','--run-id','bad'],request,io),2);assert.equal(calls.length,1);
   assert.equal(await runGameFollowCli(['start','--device','phone','--config',file,'--backend','basic'],request,io),0);
   assert.equal(calls[1].params.backend,'basic');
-  assert.equal(await runGameFollowCli(['start','--device','phone','--config',file,'--backend','automatic'],request,io),1);
+  assert.equal(await runGameFollowCli(['start','--device','phone','--config',file,'--backend','automatic'],request,io),2);
   assert.equal(calls.length,2);
   assert.equal(calls[0].params.recoverTransport,undefined);
   for(const value of ['true','false']) {
@@ -443,7 +443,7 @@ test('CLI defaults to observation and validates before requesting a phone', visi
     assert.equal(calls.at(-1).params.recoverTransport,value==='true');
   }
   for(const value of ['yes','1','TRUE'])
-    assert.equal(await runGameFollowCli(['start','--device','phone','--config',file,'--recover-transport',value],request,io),1);
+    assert.equal(await runGameFollowCli(['start','--device','phone','--config',file,'--recover-transport',value],request,io),2);
   assert.equal(calls.length,4);
 });
 

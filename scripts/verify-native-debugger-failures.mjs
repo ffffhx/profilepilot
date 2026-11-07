@@ -4,8 +4,6 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { createServer } from 'node:http';
 import net from 'node:net';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, mkdir, writeFile, rm, readFile } from 'node:fs/promises';
 import os from 'node:os';
@@ -13,23 +11,22 @@ import path from 'node:path';
 const require = createRequire(import.meta.url);
 const { NativeBrowserBridge, NATIVE_EXTENSION_ID } = require('../dist/main/tasks/native-bridge');
 const { NativeBrowser } = require('../dist/main/tasks/native-browser');
-const { parseCliResult } = require('../dist/main/tasks/browser');
 const { BrowserGatewayDaemon } = require('../dist/main/browser-gateway-daemon');
 const { requestBrowserGateway } = require('../dist/main/browser-gateway-client');
 const { getDirectChromeCommand } = require('../dist/main/chrome-launch');
 const root = await mkdtemp(path.join(os.tmpdir(), 'pp-debugger-conflict-'));
-const home = path.join(root, 'home'); await mkdir(home);
-const env = { ...process.env, HOME: home, PROFILEPILOT_GATEWAY_HOME: home, CPM_DATA_DIR: path.join(root, 'data'),
-  AGENT_BROWSER_SOCKET_DIR: path.join(home, '.agent-browser'), ELECTRON_RUN_AS_NODE: '1' };
+const gatewayHome = path.join(root, 'gateway'); await mkdir(gatewayHome);
 const output = path.resolve('artifacts/native-debugger-failures');
 await mkdir(output, { recursive: true });
 const foreign = path.join(root, 'foreign'); await mkdir(foreign);
 await writeFile(path.join(foreign, 'manifest.json'), JSON.stringify({ manifest_version: 3, name: 'Local foreign-frame fixture', version: '1.0.0',
   web_accessible_resources: [{ resources: ['frame.html'], matches: ['http://127.0.0.1/*'] }] }));
 await writeFile(path.join(foreign, 'frame.html'), '<!doctype html><title>Local extension fixture</title><p>Test extension frame</p>');
-let foreignId, report = {};
+let foreignId, report = {}, submissions = 0;
 const server = createServer((req, res) => {
+  const pathname = new URL(req.url, 'http://fixture').pathname;
   if (req.url.startsWith('/report?')) { report = JSON.parse(new URL(req.url, 'http://fixture').searchParams.get('value')); res.end('ok'); return; }
+  if (pathname === '/submitted') submissions++;
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.end(`<!doctype html><title>Debugger conflict fixture</title><body>
     <svg width="20" height="20"><path d="M0 0L20 20" stroke="black"/></svg><math><mi>x</mi></math>
@@ -39,7 +36,8 @@ const server = createServer((req, res) => {
     <input aria-label="Unrelated" id="unrelated"><span id="ticker"></span>
     <style>@keyframes pulse{from{opacity:1}to{opacity:.5}}#ticker{animation:pulse .2s infinite alternate}</style>
     <script>setInterval(()=>{document.querySelector('#ticker').textContent=Date.now();document.querySelector('#unrelated').value=Date.now()},40)</script>
-    ${req.url === '/conflict' ? `<iframe id="foreign" src="chrome-extension://${foreignId}/frame.html"></iframe>
+    ${pathname === '/submitted' ? '<h1>Submission completed</h1>' : ''}
+    ${pathname === '/conflict' ? `<form action="/submitted"><button>Submit once</button></form><iframe id="foreign" src="chrome-extension://${foreignId}/frame.html"></iframe>
     <iframe id="ordinary" srcdoc="<p>Ordinary site frame</p>"></iframe>
     <script>
       let shadow, edits = 0;
@@ -60,12 +58,36 @@ const profileId = 'native:DebuggerFixture', bootstrap = `debugger-bootstrap-${ra
 const task = { id: randomUUID(), sessionId: `debugger-qa-${randomUUID()}`, profileId, browserConnection: 'extension', status: 'running', attachments: [] };
 const checks = [];
 let gateway, bridge, browser, daemon, bootstrapDone = false;
+const bootstrapIdentity = { sessionId: bootstrap, daemonInstanceId: randomUUID() };
+let bootstrapTarget;
+const gatewayRequest = async body => {
+  const response = await requestBrowserGateway(body, { homeDir: gatewayHome, timeoutMs: 30000 });
+  if (!response.ok) throw Object.assign(new Error(response.message || response.error_code), { code: response.error_code });
+  return response;
+};
+// Bootstrap through the guarded Gateway API with an explicit storage root.
+// No HOME overrides or independently launched browser engine are required.
 const cli = async args => {
-  try {
-    const { stdout } = await promisify(execFile)(process.execPath, [path.resolve('dist/main/profilepilot-agent-browser-wrapper.cjs'), '--session', bootstrap, '--cdp', String(gateway.port), '--json', ...args],
-      { windowsHide: true, timeout: 45000, maxBuffer: 4 * 1024 * 1024, env });
-    return parseCliResult(stdout);
-  } catch (error) { throw Error(String(error.stderr || error.stdout || error.message).replace(/PP1\.[\w-]+/g, '[pairing]')); }
+  const identity = { publicPort: gateway.port, ...bootstrapIdentity };
+  if (args[0] === 'profilepilot' && ['complete', 'release'].includes(args[1])) {
+    return gatewayRequest({ action: 'control', sessionId: bootstrap, command: 'complete' });
+  }
+  if (args[0] === 'profilepilot' && args[1] === 'extension') {
+    const response = await gatewayRequest({ action: 'load-unpacked-extension', ...identity, extensionPath: args[3] });
+    return { extension_id: response.result.id };
+  }
+  if (args[0] === 'open' || args[0] === 'tab') {
+    const response = await gatewayRequest({ action: 'raw-cdp', ...identity, method: 'Target.createTarget',
+      params: { url: args.at(-1), background: true } });
+    bootstrapTarget = response.result.targetId; return response.result;
+  }
+  if (args[0] === 'eval') {
+    const response = await gatewayRequest({ action: 'raw-cdp', ...identity, targetId: bootstrapTarget,
+      method: 'Runtime.evaluate', params: { expression: Buffer.from(args[2], 'base64').toString('utf8'), awaitPromise: true, returnByValue: true } });
+    assert.ok(!response.result.exceptionDetails, 'Bootstrap page evaluation failed');
+    return { result: response.result.result.value };
+  }
+  throw Error('Unknown fixture bootstrap command');
 };
 const until = async (check, label) => {
   const deadline = Date.now() + 15000;
@@ -74,15 +96,16 @@ const until = async (check, label) => {
 };
 const pass = name => { checks.push(name); console.log('PASS', name); };
 try {
-  // Register the disposable browser explicitly, with the same home for the
-  // daemon and child CLI. Windows os.homedir() does not follow HOME.
-  daemon = new BrowserGatewayDaemon(home); await daemon.start();
+  daemon = new BrowserGatewayDaemon(gatewayHome); await daemon.start();
   const reservation = net.createServer(); await new Promise(resolve => reservation.listen(0, '127.0.0.1', resolve));
   const port = reservation.address().port; await new Promise(resolve => reservation.close(resolve));
-  await requestBrowserGateway({ action: 'launch-profile', profileId: 'debugger-fixture', profileName: 'Debugger conflict fixture', publicPort: port,
+  // Automation mode retains the pipe when Windows starts from an elevated
+  // test runner; the retired AutoDeElevate feature flag no longer does so.
+  await gatewayRequest({ action: 'launch-profile', profileId: 'debugger-fixture', profileName: 'Debugger conflict fixture', publicPort: port,
     executable: getDirectChromeCommand(), args: [`--user-data-dir=${path.join(root, 'chrome')}`, '--headless=new', '--no-first-run', '--no-default-browser-check',
-      ...(process.platform === 'win32' ? ['--disable-features=AutoDeElevate'] : []), 'about:blank'] }, { homeDir: home, timeoutMs: 15000 });
-  gateway = { port, close: () => requestBrowserGateway({ action: 'unregister-profile', publicPort: port, closeChrome: true }, { homeDir: home }) };
+      '--enable-automation', '--enable-unsafe-extension-debugging', 'about:blank'] });
+  gateway = { port, close: () => gatewayRequest({ action: 'unregister-profile', publicPort: port, closeChrome: true }) };
+  await gatewayRequest({ action: 'acquire', publicPort: port, ...bootstrapIdentity, driverKind: 'agent-browser', driverLabel: 'Isolated extension verification' });
   await cli(['open', url + '/clean']);
   const loaded = await cli(['profilepilot', 'extension', 'load-unpacked', foreign]);
   foreignId = loaded.extension_id;
@@ -154,7 +177,27 @@ try {
   pass('Explicit return suppresses restored overlays again without repeating the edit');
   await browser.control(task, 'complete');
   await until(() => report.foreign === true && report.shadow === true, 'Restore extension frames on completion');
+  // Reclaim explicitly for a separate navigation: the old guard's pagehide
+  // restores suspended frames while Chrome replaces the document. A new page
+  // has no lastRemovedAt evidence and must still remain controllable.
+  task.id = randomUUID(); task.sessionId = `navigation-qa-${randomUUID()}`;
+  await browser.request(task, 'cdp', {method:'Runtime.evaluate',params:{expression:'for(let i=1;i<1000;i++)clearInterval(i);document.querySelector("#ticker").remove()',returnByValue:true}});
+  task.observation = await browser.observe(task);
+  const submit = task.observation.fast.candidates.find(c => c.label === 'Submit once');
+  assert.ok(submit);
+  try { await browser.execute(task, {kind:'click',ref:submit.ref,effect:'submit',summary:'Submit local fixture once'}); }
+  catch (error) { assert.equal(error.code, 'NATIVE_DEBUGGER_RECOVERED', error.message); }
+  await until(async () => {
+    try { task.observation = await browser.observe(task); return task.observation.snapshot.includes('Submission completed'); }
+    catch (error) { if (error.code === 'NATIVE_DEBUGGER_RECOVERED') return false; throw error; }
+  }, 'Observe new document after submit');
+  assert.equal(submissions, 1, 'Navigation submission is never replayed');
+  assert.equal(bridge.states()[0].ownership, 'agent');
+  const navigationDiagnostic = bridge.states()[0].debuggerDiagnostic;
+  await browser.control(task, 'complete');
+  pass('Real Chrome navigates away from suspended extension frames and reads the new document without replaying submission');
   await writeFile(path.join(output, 'result.json'), JSON.stringify({ status: 'passed', platform: process.platform, extensionVersion: JSON.parse(await readFile('extensions/profilepilot/manifest.json','utf8')).version, checks,
+    navigationDiagnostic,
     notVerified: ['macOS hardware', 'user default Profile extension update'], boundary: 'Chrome foreign-extension frame restriction is retained; no other extension is disabled or inspected.' }, null, 2));
 } finally {
   await browser?.control(task, 'release').catch(() => {}); browser?.dispose(); bridge?.close();

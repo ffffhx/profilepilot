@@ -18,3 +18,9 @@ public/app.css
 # Python runtime cache
 __pycache__/
 *.pyc
+
+# Local desktop verification reports, screenshots and compiled test helpers
+.tools/desktop-verification/
+.tools/input-observer-build/
+.tools/wgc-verification/
+.tools/consent-research/

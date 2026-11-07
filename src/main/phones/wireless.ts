@@ -2,6 +2,7 @@ import { isIPv4, createConnection } from "node:net";
 import { z } from "zod";
 import type { AdbRunner } from "./adb";
 import type { PhoneDevice, PhoneWirelessDiscovery, PhoneWirelessService } from "../../shared/phones";
+import { WirelessFailure, wirelessEvidence, sanitizeWirelessOutput } from "./wireless-diagnostics";
 
 export function wirelessAddress(value: string): string {
   const match = value.trim().match(/^([0-9.]+):([0-9]{1,5})$/);
@@ -28,16 +29,17 @@ export function parseWirelessServices(text: string): PhoneWirelessService[] {
   return result;
 }
 export async function discoverWireless(adb: AdbRunner): Promise<PhoneWirelessDiscovery> {
+  const began = Date.now();
   try { return { services: parseWirelessServices(await adb.run(["mdns", "services"], 6000)), error: "" }; }
   catch (error) {
-    return { services: [], error: (error as { code?: string }).code === "ENOENT"
-      ? "未找到 ADB，请安装 Android Platform Tools 后重试。"
-      : "自动发现暂不可用，可手动输入手机显示的地址。检查 Platform Tools 版本、同网连接及防火墙。" };
+    const failure = new WirelessFailure("discovery", undefined, began, wirelessEvidence(error));
+    return { services: [], error: failure.message, diagnostic: failure.details.wireless };
   }
 }
 // Reports are hints, not connection authority. Use only a fresh report from the
 // selected phone's authenticated channel; never join arbitrary IPs to old ports.
-export function wirelessCandidates(services: PhoneWirelessService[], routes: PhoneDevice[], now: number) {
+export interface VerifiedWirelessEndpoint { hardwareId: string; address: string; at: number; }
+export function wirelessCandidates(services: PhoneWirelessService[], routes: PhoneDevice[], now: number, recent: Iterable<VerifiedWirelessEndpoint> = []) {
   const reports = routes.flatMap(device => [
     ...(device.connection === "device" && device.companion === "ready" && device.confirmedAt != null && device.state?.readiness?.network
       ? [{ at: device.confirmedAt, network: device.state.readiness.network }] : []),
@@ -72,6 +74,18 @@ export function wirelessCandidates(services: PhoneWirelessService[], routes: Pho
     if (!phoneIps.includes(host) && !hardware.some(id => service.name.startsWith(`adb-${id}-`))) continue;
     if (!result.some(item => item.kind === service.kind && item.address === service.address)) result.push({ ...service, source: "mdns" });
   }
+  // Restarting the host ADB server can temporarily empty its mDNS cache while
+  // the phone still listens on the same port. Only retry a route verified in
+  // THIS desktop process within the last minute, never historical saved IPs.
+  for (const endpoint of recent) {
+    if (!hardware.includes(endpoint.hardwareId) || now - endpoint.at < 0 || now - endpoint.at >= 60000) continue;
+    try {
+      const address = wirelessAddress(endpoint.address);
+      if (phoneIps.length && !phoneIps.includes(address.split(":")[0])) continue;
+      if (!result.some(item => item.kind === "connect" && item.address === address))
+        result.push({ name: "最近验证的连接", kind: "connect", address, source: "adb" });
+    } catch { /* Invalid hints never become connection targets. */ }
+  }
   return { services: result.slice(0, 16), phoneIps };
 }
 
@@ -87,36 +101,29 @@ export function probeWireless(address: string): Promise<{ reachable: boolean; re
   });
 }
 
-function connectionError(output: string): Error {
-  const reason = /refused|10061|拒绝/i.test(output) ? "端口拒绝连接，地址可能已过期。请重新发现；仍失败时重新开启手机无线调试。"
-    : /authenticate|authentication|unauthorized|pairing/i.test(output) ? "此电脑尚未通过无线调试认证，请在手机上重新配对。"
-    : /timed? out|10060|unreachable|超时/i.test(output) ? "网络连接超时。请检查同一网络、访客网络隔离及防火墙。"
-    : "请重新发现当前地址；首次使用需要在手机上完成无线调试配对。";
-  return new Error("手机未建立无线连接：" + reason);
-}
 export async function pairWireless(adb: AdbRunner, input: unknown): Promise<{ address: string }> {
   const { address, code } = wirelessPairSchema.parse(input);
+  const began = Date.now();
   let output: string;
   try {
     // Keep the short-lived code out of argv, process listings, logs and storage.
     output = await adb.run(["pair", address], 20000, `${code}\n`);
   } catch (error) {
-    if ((error as { code?: string }).code === "ENOENT") throw new Error("未找到 ADB，请安装 Android Platform Tools 后重试。");
-    throw new Error("配对未完成。请保持手机配对码窗口打开，核对配对地址和最新的 6 位码；同时确认两端处于同一局域网。");
+    throw new WirelessFailure("pairing", address, began, wirelessEvidence(error));
   }
-  if (!output.includes(`Successfully paired to ${address}`)) throw new Error("手机未确认配对成功。请重新打开「使用配对码配对」，输入新的配对地址和配对码。");
+  if (!output.includes(`Successfully paired to ${address}`)) throw new WirelessFailure("pairing", address, began, { exitCode: 0, stdout: sanitizeWirelessOutput(output) });
   return { address };
 }
 export async function connectWireless(adb: AdbRunner, input: unknown): Promise<string> {
   const { address } = wirelessConnectSchema.parse(input);
+  const began = Date.now();
   let output: string;
   try { output = await adb.run(["connect", address], 15000); }
   catch (error) {
-    if ((error as { code?: string }).code === "ENOENT") throw new Error("未找到 ADB，请安装 Android Platform Tools 后重试。");
-    throw connectionError((error as Error).message);
+    throw new WirelessFailure("connection", address, began, wirelessEvidence(error));
   }
   if (!output.split(/\r?\n/).some(line => line.trim() === `connected to ${address}` || line.trim() === `already connected to ${address}`)) {
-    throw connectionError(output);
+    throw new WirelessFailure("connection", address, began, { exitCode: 0, stdout: sanitizeWirelessOutput(output) });
   }
   return address;
 }

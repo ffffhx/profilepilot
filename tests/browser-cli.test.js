@@ -116,3 +116,53 @@ test('help is local and an explicitly broken installed runtime never falls back 
     assert.equal(browserCliRuntime(dir), process.execPath);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test('route-specific schema and command help stay local and exclude the other connection', async () => {
+  for (const connection of ['extension', 'gateway']) {
+    const f = fixture();
+    assert.equal(await runBrowserCli(['--connection', connection, 'schema', 'action'], f.io, {}, f.runtime), 0);
+    const result = JSON.parse(f.output().stdout).result;
+    assert.equal(result.connection, connection); assert.equal(result.command, 'action');
+    assert.ok(result.operation.input.required.includes('version')); assert.equal(f.calls.length, 0);
+    const cdp = fixture();
+    assert.equal(await runBrowserCli(['--connection', connection, 'schema', 'cdp'], cdp.io, {}, cdp.runtime), 0);
+    assert.equal(JSON.parse(cdp.output().stdout).result.operation.usage.startsWith('cdp call'), connection === 'gateway');
+  }
+  const gateway = fixture();
+  assert.equal(await runBrowserCli(['--connection', 'gateway', 'get', '--help'], gateway.io, {}, gateway.runtime), 0);
+  assert.match(gateway.output().stdout, /get attr SELECTOR ATTRIBUTE/);
+  assert.doesNotMatch(gateway.output().stdout, /claim|profile create/);
+  assert.equal(gateway.calls.length, 0);
+  const extension = fixture();
+  assert.equal(await runBrowserCli(['schema', 'get'], extension.io, {}, extension.runtime), 64);
+  assert.equal(extension.calls.length, 0);
+});
+
+test('delegated captcha help keeps its dedicated handler', async () => {
+  const f = fixture(); let calls = 0;
+  f.runtime.captcha = async route => { calls++; assert.equal(route.args.at(-1), '--help'); return 0; };
+  assert.equal(await runBrowserCli(['captcha', '--help'], f.io, {}, f.runtime), 0);
+  assert.equal(calls, 1); assert.equal(f.calls.length, 0);
+});
+
+test('Gateway accepts trailing json without consuming literal values or option payloads', async () => {
+  for (const operation of [['click', '@e1'], ['fill', '@e1', 'text'], ['get', 'attr', '@e1', 'href'], ['status']]) {
+    const f = fixture(), prefix = ['--session', 'task', '--cdp', '9223'];
+    assert.equal(await runBrowserCli([...prefix, ...operation, '--json'], f.io, {}, f.runtime), 0);
+    assert.deepEqual(f.calls[0].args, [...prefix, '--json', ...(operation[0] === 'status' ? ['profilepilot'] : []), ...operation]);
+  }
+  for (const operation of [['fill', '@e1', '--json'], ['eval', '--json'], ['get', 'attr', '@e1', '--json'], ['handoff', '--reason', '--json']]) {
+    const f = fixture(), prefix = ['--session', 'task', '--cdp', '9223'];
+    assert.equal(await runBrowserCli([...prefix, ...operation], f.io, {}, f.runtime), 0);
+    assert.deepEqual(f.calls[0].args, [...prefix, ...(operation[0] === 'handoff' ? ['profilepilot'] : []), ...operation]);
+  }
+});
+
+test('missing or empty selectors explain PowerShell quoting before opening a Gateway connection', async () => {
+  for (const operation of [['click'], ['click', ''], ['fill', '', 'text'], ['hover', '--json']]) {
+    const f = fixture();
+    assert.equal(await runBrowserCli(['--session', 'task', '--cdp', '9223', ...operation], f.io, {}, f.runtime), 64);
+    assert.match(JSON.parse(f.output().stderr).error, /PowerShell.*'@e1'/);
+    assert.equal(f.calls.length, 0);
+  }
+});

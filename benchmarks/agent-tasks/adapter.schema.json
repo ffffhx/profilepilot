@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ProfilePilot agent-task adapter configuration",
+  "type": "object",
+  "required": ["protocolVersion", "id", "agent", "model", "tool", "toolVersion", "track", "environment", "command", "args"],
+  "properties": {
+    "protocolVersion": { "const": 1 },
+    "id": { "type": "string", "minLength": 1 },
+    "agent": { "type": "string", "minLength": 1 },
+    "model": { "type": "string", "minLength": 1, "description": "Exact model ID, or configured resolved in response metadata." },
+    "tool": { "type": "string", "minLength": 1 },
+    "toolVersion": { "type": "string", "minLength": 1 },
+    "track": { "type": "string", "minLength": 1 },
+    "environment": { "enum": ["isolated-profilepilot-gateway", "existing-profilepilot-extension", "external-browser"] },
+    "command": { "type": "string", "minLength": 1, "description": "Executable, never a shell command. $NODE expands to the runner's Node executable." },
+    "args": { "type": "array", "items": { "type": "string" }, "description": "Argv elements. $REPO expands to the repository root; whitespace is preserved." }
+  },
+  "additionalProperties": false
+}

@@ -26,7 +26,7 @@ final class RecoverySettings {
         edit.commit();
     }
     boolean authorized() { return context.checkSelfPermission(Manifest.permission.WRITE_SECURE_SETTINGS) == PackageManager.PERMISSION_GRANTED; }
-    boolean paired() { return context.getSharedPreferences("MainActivity", Context.MODE_PRIVATE).getString("token", "").matches("[a-f0-9]{64}"); }
+    boolean paired() { return InternetPhoneSettings.enabled(context) || context.getSharedPreferences("MainActivity", Context.MODE_PRIVATE).getString("token", "").matches("[a-f0-9]{64}"); }
     void enabled(boolean value) {
         prefs.edit().putBoolean("enabled", value).commit();
         record(value ? "已开启后台服务恢复" : "已关闭自动恢复");

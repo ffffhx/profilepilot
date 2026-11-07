@@ -213,7 +213,7 @@ test('CLI rejects missing, fractional, negative, implicit-session and duplicate 
   for (const args of invalid) {
     let called = false;
     assert.equal(await runGameFollowCli(args, async () => { called = true; return { ok: true }; },
-      { stdout: { write() {} }, stderr: { write() {} } }), 1);
+      { stdout: { write() {} }, stderr: { write() {} } }), 2);
     assert.equal(called, false);
   }
 });

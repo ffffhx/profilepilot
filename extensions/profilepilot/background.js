@@ -19,7 +19,12 @@ function renewExtensionUi() {
 // task's top document may temporarily suspend foreign extension iframes.
 const frameGuards = new Map();
 let frameGuardAttachPermit;
-let debuggerRecovery, lastAttachedAt = 0, debuggerRecoverySerial = 0;
+let debuggerRecovery, debuggerRecoverySerial = 0, debuggerRecoveryBudget, debuggerDiagnostic;
+function reportDebugger(reason, phase, attempts = 0, code) {
+  debuggerDiagnostic = { id: crypto.randomUUID(), at: new Date().toISOString(),
+    reason: ['target_closed', 'canceled_by_user'].includes(reason) ? reason : 'unknown', phase, attempts, ...(code ? { code } : {}) };
+  send({ type: 'debuggerDiagnostic', sessionId, diagnostic: debuggerDiagnostic });
+}
 function frameGuardPermission(message, sender) {
   if (extensionUi) return { allowed: false };
   if (sender.id !== chrome.runtime.id || sender.frameId !== 0 || !sender.tab || sender.tab.incognito ||
@@ -42,12 +47,15 @@ async function releaseFrameGuards() {
     { method: 'frameGuard.release', token: guard.token }, guard.documentId ? { documentId: guard.documentId } : { frameId: 0 })),
     1000, '恢复扩展浮层超时。').catch(() => {})));
 }
-async function prepareFrameGuard(check) {
+async function prepareFrameGuard(check, strict = false) {
   if (!chrome.scripting?.executeScript || !sessionId || (ownership !== 'agent' && frameGuardAttachPermit !== controlGeneration())) return;
   // The static document-start script handles navigation. This injection also
   // covers pages opened before installation or before this task was claimed.
   const result = await bounded(chrome.scripting.executeScript({ target: { tabId: currentTab, frameIds: [0] },
-    files: ['frame-guard.js'], injectImmediately: true }), 3000, '扩展浮层兼容处理超时。').catch(() => undefined);
+    files: ['frame-guard.js'], injectImmediately: true }), 3000, '扩展浮层兼容处理超时。').catch(error => {
+      if (strict) throw Object.assign(new Error(`扩展浮层预检查失败：${String(error.message || error)}`), { code: 'NATIVE_FRAME_GUARD_UNAVAILABLE' });
+      return undefined;
+    });
   check();
   return result;
 }
@@ -202,7 +210,14 @@ function syncTaskGroups() {
   }).catch(() => {});
   return groupQueue;
 }
-const childSessions = new Set();
+const childSessions = new Map();
+function forgetChildSession(id) {
+  for (const [child, entry] of childSessions) if (entry.parentSessionId === id) forgetChildSession(child);
+  childSessions.delete(id);
+}
+function staleFrameSession() {
+  return Object.assign(new Error('子 frame 调试会话已失效；请重新发现当前标签页的 frame 并重新观察，不要重放输入。'), { code: 'NATIVE_FRAME_SESSION_STALE' });
+}
 let debugFrameCapture = false;
 // Protocol follow-ups must run while a page command awaits a network response.
 // Never allow Runtime.evaluate/Input/DOM mutations to bypass the action queue.
@@ -210,6 +225,7 @@ const debugFollowups = new Set(['Network.enable','Network.disable','Network.getR
 let access = { blockedOrigins: [], confirmActions: false }, uiSequence = 0;
 const uiPending = new Map();
 let previewCapture;
+const inputFrames = new Map();
 const downloadOwners = new Map(), downloadArms = new Map();
 const PREVIEW_METHODS = new Set(['Page.enable', 'Page.startScreencast', 'Page.stopScreencast', 'Page.screencastFrameAck', 'Emulation.setFocusEmulationEnabled']);
 const send = message => { if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message)); };
@@ -220,20 +236,63 @@ async function bounded(operation, timeout, message) {
   try { return await Promise.race([operation, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), timeout); })]); }
   finally { clearTimeout(timer); }
 }
+// Hidden headful Chrome can defer input ACKs and mousemove/rAF delivery for
+// five seconds until it draws another frame. Request that frame alongside the
+// real input, as the Gateway does. Capture the root surface (including OOPIFs)
+// without clipping/resizing it, activating a tab, or emulating focus.
+function requestInputFrame(tabId) {
+  const owner = sessionId, epoch = controlEpoch, recovery = debuggerRecoverySerial;
+  const current = () => attached && ownership === 'agent' && !pausedByBrowser && !extensionUi &&
+    currentTab === tabId && sessionId === owner && controlEpoch === epoch && debuggerRecoverySerial === recovery;
+  if (!owner || !current()) return;
+  const existing = inputFrames.get(tabId);
+  if (existing?.owner === owner && existing.epoch === epoch && existing.recovery === recovery) {
+    existing.again = true; return;
+  }
+  const frame = { owner, epoch, recovery, again: true };
+  inputFrames.set(tabId, frame);
+  void (async () => {
+    try {
+      while (frame.again && current() && inputFrames.get(tabId) === frame) {
+        frame.again = false;
+        const started = Date.now();
+        // Keep the slot until Chrome settles, even if capture is slow. Timing
+        // out and forgetting an unresolved capture could flood Chrome with
+        // overlapping captures. None of this promise delays the input result.
+        await chrome.debugger.sendCommand({ tabId }, 'Page.captureScreenshot', {
+          format: 'jpeg', quality: 1, fromSurface: true, captureBeyondViewport: false
+        });
+        if (Date.now() - started >= 1000) break;
+      }
+    } catch {
+      // A failed visual read must not turn successful input into a failure,
+      // hide an input error, reconnect the debugger, or replay the input.
+    } finally {
+      if (inputFrames.get(tabId) === frame) inputFrames.delete(tabId);
+    }
+  })();
+}
 async function debuggerCommand(method, params = {}, previewOnly = false, cdpSessionId) {
   // A background tab may have no compositor frame. Visual reads are optional
   // and cannot cause uncertain input, so timing out must not revoke ownership.
   const visualOnly = previewOnly || method === 'Page.captureScreenshot';
   const recoverySerial = debuggerRecoverySerial;
   try {
-    return await bounded(chrome.debugger.sendCommand({ tabId: currentTab, ...(cdpSessionId ? { sessionId: cdpSessionId } : {}) }, method, params), visualOnly ? 2500 : 10000,
+    const tabId = currentTab;
+    const operation = chrome.debugger.sendCommand({ tabId, ...(cdpSessionId ? { sessionId: cdpSessionId } : {}) }, method, params);
+    if (!previewOnly && /^Input\.(dispatch(?:Mouse|Key|Touch)Event|insertText|imeSetComposition)$/.test(method)) requestInputFrame(tabId);
+    return await bounded(operation, visualOnly ? 2500 : 10000,
       `${previewOnly ? '实时画面' : visualOnly ? '截图' : method === 'Runtime.evaluate' ? '页面读取或操作' : '浏览器操作'}无响应，已停止等待。`);
   } catch (error) {
+    if (cdpSessionId && /Session with given id not found|No session with given id/i.test(String(error.message))) {
+      forgetChildSession(cdpSessionId);
+      throw staleFrameSession();
+    }
     if (/Detached while handling command|Debugger is not attached|Session with given id not found/i.test(String(error.message))) {
       // The browser's detach event can arrive just after the command rejection.
       for (let turn = 0; turn < 5 && !debuggerRecovery && recoverySerial === debuggerRecoverySerial && ownership === 'agent'; turn++) await delay(20);
       if ((debuggerRecovery && await debuggerRecovery.promise) || recoverySerial !== debuggerRecoverySerial) {
-        throw Object.assign(new Error('扩展浮层中断了连接，现已自动恢复。上一操作可能已执行，请重新观察页面核查结果，不要重放输入或提交。'), { code: 'NATIVE_DEBUGGER_RECOVERED' });
+        throw Object.assign(new Error('页面调试连接已自动恢复。上一操作可能已执行，请重新观察页面核查结果，不要重放输入或提交。'), { code: 'NATIVE_DEBUGGER_RECOVERED' });
       }
     }
     // Stop the debugger before allowing another task command to run. In-flight
@@ -256,7 +315,7 @@ function requireOwner(expected) {
 }
 async function state() {
   const tab = currentTab ? await chrome.tabs.get(currentTab).catch(() => undefined) : undefined;
-  return { connected: authenticated && socket?.readyState === WebSocket.OPEN, extensionUi: Boolean(extensionUi), taskTabs: true, controlGeneration: controlGeneration(), extensionVersion: chrome.runtime.getManifest?.().version || '0.2.0', installationType, installationMode, capabilities: ['debugCapture', 'extensionUi', 'liveView', 'tabs', 'cdp', 'cdpSessions', 'history', 'downloads', 'sidePanel', 'taskGroups'], profileId: config?.profileId, tabId: currentTab, sessionId, ownership, tabTitle: tab?.title, url: tab?.url, pausedByBrowser, controlIssue, connectionError, access };
+  return { connected: authenticated && socket?.readyState === WebSocket.OPEN, extensionUi: Boolean(extensionUi), taskTabs: true, controlGeneration: controlGeneration(), extensionVersion: chrome.runtime.getManifest?.().version || '0.2.0', installationType, installationMode, capabilities: ['debugCapture', 'extensionUi', 'liveView', 'tabs', 'cdp', 'cdpSessions', 'frameSessionSnapshot', 'history', 'downloads', 'sidePanel', 'taskGroups'], profileId: config?.profileId, tabId: currentTab, sessionId, ownership, tabTitle: tab?.title, url: tab?.url, pausedByBrowser, controlIssue, debuggerDiagnostic, connectionError, access };
 }
 function assertSite(url) {
   if (!usable(url)) throw new Error('此页面不允许自动化，请选择普通网页。');
@@ -372,7 +431,7 @@ async function attach(check = () => {}, duringRecovery = false) {
   if (tab.discarded || tab.frozen || tab.status === 'unloaded') {
     throw new Error('标签页正在休眠；请显式打开该页恢复后继续，后台操作不会切换当前页面。');
   }
-  const guardResult = /^https?:\/\//.test(tab.url) ? await prepareFrameGuard(check) : undefined;
+  const guardResult = /^https?:\/\//.test(tab.url) ? await prepareFrameGuard(check, duringRecovery) : undefined;
   if (attached) return;
   // If another extension owns the debugger, surface Chrome's error; never detach it.
   const target = { tabId: currentTab };
@@ -390,7 +449,7 @@ async function attach(check = () => {}, duringRecovery = false) {
     }
   })().then(() => {
     if (expired) { void chrome.debugger.detach(target).catch(() => {}); return; }
-    attached = true; lastAttachedAt = Date.now();
+    attached = true;
   });
   try { await bounded(attaching, 4000, '无法连接授权标签页，请检查 Chrome 的调试提示后继续。'); check(); }
   catch (error) { expired = true; if (attached) await detach(); throw debuggerFailure(error); }
@@ -421,6 +480,7 @@ async function clearFocusEmulation() {
 }
 async function detach() {
   clearExtensionUi();
+  inputFrames.clear();
   // Detach itself stops screencasting. Waiting for a stuck Page command first
   // would prevent takeover/release from ever reaching Chrome.
   if (debuggerRecovery) debuggerRecovery.cancelled = true;
@@ -716,9 +776,15 @@ async function handle(method, p, check = () => {}) {
   }
   if (method === 'cdp') {
     if (typeof p.method !== 'string' || !/^[A-Za-z]+\.[A-Za-z0-9]+$/.test(p.method)) throw new Error('无效的 CDP 方法。');
-    if (p.cdpSessionId && !childSessions.has(p.cdpSessionId)) throw new Error('子 frame 调试会话已失效，请重新观察。');
+    if (p.cdpSessionId && !childSessions.has(p.cdpSessionId)) throw staleFrameSession();
     if (p.method === 'Page.navigate') assertSite(p.params?.url);
     await attach(check); check(); requireOwner(p.sessionId);
+    // Local, read-only reconciliation of this owned tab's debugger children.
+    // Never enumerate targets in other tabs or reattach a detached child.
+    if (p.method === 'ProfilePilot.getFrameSessions') {
+      if (p.cdpSessionId) throw staleFrameSession();
+      return { tabId: currentTab, sessions: [...childSessions].filter(([, entry]) => entry.type === 'iframe').map(([sessionId, entry]) => ({ sessionId, parentSessionId: entry.parentSessionId })) };
+    }
     if(p.debugCapture===true && p.method==='Target.setAutoAttach')debugFrameCapture=p.params?.waitForDebuggerOnStart===true;
     const cdpParams=p.method==='Target.setAutoAttach'&&p.params?.autoAttach&&debugFrameCapture?{...p.params,waitForDebuggerOnStart:true}:p.params||{};
     return debuggerCommand(p.method, cdpParams, false, p.cdpSessionId);
@@ -901,8 +967,8 @@ async function connect() {
 }
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (source.tabId !== currentTab || !attached) return;
-  if (method === 'Target.attachedToTarget' && params.sessionId) childSessions.add(params.sessionId);
-  if (method === 'Target.detachedFromTarget' && params.sessionId) childSessions.delete(params.sessionId);
+  if (method === 'Target.attachedToTarget' && params.sessionId) childSessions.set(params.sessionId, { parentSessionId: source.sessionId, type: params.targetInfo?.type });
+  if (method === 'Target.detachedFromTarget' && params.sessionId) forgetChildSession(params.sessionId);
   if (method === 'Page.downloadWillBegin') {
     for (const arm of downloadArms.values()) if (arm.sessionId === sessionId && !arm.id && (!arm.frameId || arm.frameId === params.frameId) && (!arm.url || arm.url === params.url)) {
       if (arm.began && arm.began.guid !== params.guid) arm.error = '多次下载事件无法唯一关联，请使用明确下载地址。';
@@ -913,31 +979,66 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   send({ type: 'cdp', sessionId, cdpSessionId: source.sessionId, tabId: source.tabId, method, params });
 });
 chrome.debugger.onDetach.addListener((source, reason) => {
-  if (source.tabId !== currentTab || !attached) return;
-  // Chrome can detach before a MutationObserver gets to suspend a newly
-  // inserted extension frame. Recover only when that guard proves a recent
-  // removal in this same controlled document. Never replay the CDP command.
-  if (reason !== 'canceled_by_user' && ownership === 'agent' && !pausedByBrowser && frameGuards.size && !debuggerRecovery) {
+  if (source.tabId !== currentTab || (!attached && !debuggerRecovery)) return;
+  inputFrames.clear();
+  // Cancellation can arrive while an attach promise is pending. It must win
+  // even though our attached flag has not been set yet.
+  if (reason === 'canceled_by_user') {
+    if (debuggerRecovery) debuggerRecovery.cancelled = true;
+    reportDebugger(reason, 'cancelled'); controlIssue = undefined;
     attached = false; preview = false; childSessions.clear(); debugFrameCapture = false;
-    const tabId = currentTab, owner = sessionId, generation = controlGeneration(), since = lastAttachedAt;
+    ownership = 'user'; controlEpoch++; pausedByBrowser = true; groupState('paused');
+    void releaseFrameGuards().then(publish); return;
+  }
+  if (!attached) return;
+  reportDebugger(reason, 'detached');
+  // A document navigation loses the old guard's removal history. Reconnect
+  // only the same still-authorized live HTTP(S) tab; Chrome enforces access and
+  // debugger exclusivity. This restores transport, never a command or input.
+  if (reason === 'target_closed' && ownership === 'agent' && !pausedByBrowser && allowedTabs.has(currentTab) && !debuggerRecovery) {
+    attached = false; preview = false; childSessions.clear(); debugFrameCapture = false;
+    const tabId = currentTab, owner = sessionId, generation = controlGeneration();
     const job = { cancelled: false, promise: undefined };
     const check = () => {
       if (job.cancelled || currentTab !== tabId || sessionId !== owner || controlGeneration() !== generation || ownership !== 'agent' || pausedByBrowser) throw Error('控制状态已改变，自动恢复已取消。');
     };
     debuggerRecovery = job;
     job.promise = (async () => {
+      let attempts = 0;
       try {
-        // Give the isolated-world observer one turn to process insertion.
+        const scope = `${generation}:${tabId}`;
+        if (debuggerRecoveryBudget?.scope !== scope || Date.now() - debuggerRecoveryBudget.started > 10000) {
+          debuggerRecoveryBudget = { scope, started: Date.now(), count: 0 };
+        }
+        if (++debuggerRecoveryBudget.count > 3) throw Object.assign(new Error('同一页面反复断开，已停止自动重连；请检查页面扩展或调试器冲突。'), { code: 'NATIVE_DEBUGGER_RECOVERY_LIMIT' });
+        // Let navigation/frame disposal settle without waiting indefinitely.
         await delay(50); check();
-        const results = await prepareFrameGuard(check); check();
-        if (!results?.some(entry => entry.result?.active && entry.result.lastRemovedAt >= since && Date.now() - entry.result.lastRemovedAt < 1500)) throw Error('未确认扩展浮层已移开。');
-        await attach(check, true); check();
+        for (attempts = 1; attempts <= 2; attempts++) {
+          const tab = await bounded(chrome.tabs.get(tabId), 1000, '检查调试标签页超时。'); check();
+          if (!allowedTabs.has(tabId) || tab.incognito || !/^https?:\/\//.test(tab.url || '') || tab.discarded || tab.frozen || tab.status === 'unloaded') {
+            throw Object.assign(new Error('原调试标签页已关闭、休眠或不再是可控制的网页。'), { code: 'NATIVE_DEBUGGER_TARGET_UNAVAILABLE' });
+          }
+          reportDebugger(reason, 'attaching', attempts);
+          try { await attach(check, true); check(); break; }
+          catch (error) {
+            check();
+            // A document can be replaced between tabs.get and script/attach.
+            // Busy/forbidden targets are definitive; never keep retrying them.
+            const transient = error.code === 'NATIVE_FRAME_GUARD_UNAVAILABLE' ||
+              (error.code === 'NATIVE_DEBUGGER_UNAVAILABLE' && /No (?:tab|target)|target closed|frame.*(?:removed|not found)|document.*(?:unloaded|changed)/i.test(error.message));
+            if (attempts === 2 || !transient) throw error;
+            await delay(150); check();
+          }
+        }
         debuggerRecoverySerial++; controlIssue = undefined;
+        reportDebugger(reason, 'recovered', attempts);
         send({ type: 'cdp', sessionId, tabId: currentTab, method: 'ProfilePilot.debuggerReconnected', params: {} });
         await publish(); return true;
-      } catch {
+      } catch (cause) {
         if (!job.cancelled && currentTab === tabId && sessionId === owner && controlGeneration() === generation && ownership === 'agent') {
-          rememberIssue(Object.assign(new Error('Chrome 调试连接已断开，自动恢复未成功；请检查当前页面和连接。'), { code: 'NATIVE_DEBUGGER_DETACHED' }));
+          const error = debuggerFailure(cause);
+          reportDebugger(reason, 'failed', attempts, error.code);
+          rememberIssue(Object.assign(new Error(`Chrome 调试连接断开（${reason}），恢复失败：${error.message}`), { code: error.code }));
           ownership = 'user'; controlEpoch++; pausedByBrowser = true; groupState('failed'); await releaseFrameGuards(); await publish();
         }
         return false;
@@ -945,9 +1046,9 @@ chrome.debugger.onDetach.addListener((source, reason) => {
     })();
     return;
   }
-  if (reason === 'canceled_by_user') controlIssue = undefined;
-  else rememberIssue(Object.assign(new Error('Chrome 已断开当前页面的调试连接。请检查页面是否关闭、跳转到受限内容或出现其他扩展浮层，再恢复连接；这不代表用户主动接管。'), { code: 'NATIVE_DEBUGGER_DETACHED' }));
-  attached = false; preview = false; ownership = 'user'; controlEpoch++; pausedByBrowser = true; groupState(reason === 'canceled_by_user' ? 'paused' : 'failed'); void releaseFrameGuards().then(publish);
+  reportDebugger(reason, 'failed', 0, 'NATIVE_DEBUGGER_DETACHED');
+  rememberIssue(Object.assign(new Error(`Chrome 已断开当前页面的调试连接（${reason}）；请检查目标状态。`), { code: 'NATIVE_DEBUGGER_DETACHED' }));
+  attached = false; preview = false; ownership = 'user'; controlEpoch++; pausedByBrowser = true; groupState('failed'); void releaseFrameGuards().then(publish);
 });
 chrome.tabs.onUpdated.addListener((id, change) => {
   if (id === currentTab && (change.url || change.title)) void publish();

@@ -86,6 +86,7 @@ interface GatewayConnection {
   autoAttachEnabled: boolean;
   autoAttachSessionId?: string;
   autoAttachIntent: number;
+  autoAttachScopes: Set<string | undefined>;
   reconnecting: boolean;
   // agent-browser 在用户接管时保留
   // WebSocket 和 CDP session，但封锁新命令与事件流；交还后原地恢复。
@@ -1111,6 +1112,7 @@ export class BrowserGatewayServer {
       pendingAttachTargets: new Map(),
       autoAttachEnabled: false,
       autoAttachIntent: 0,
+      autoAttachScopes: new Set(),
       reconnecting,
       quiescing: false,
       parked: false,
@@ -1169,15 +1171,18 @@ export class BrowserGatewayServer {
       if (connection.targetSessionId) {
         cleanupActions.push(() => this.detachInternalTarget(route, connection.targetSessionId as string, 2_000));
       }
-      const resetsAutoAttach = connection.autoAttachEnabled;
-      if (cleanupActions.length > 0 || resetsAutoAttach) {
+      const autoAttachScopes = [...connection.autoAttachScopes];
+      if (cleanupActions.length > 0 || autoAttachScopes.length > 0) {
         const cleanup = (async () => {
-          if (resetsAutoAttach) {
-            await this.sendRaw(route, "Target.setAutoAttach", {
+          if (autoAttachScopes.length > 0) {
+            // Chromium keeps separate browser/page/iframe controllers. Reset
+            // every scope before detaching pages, including the browser scope
+            // (undefined), or future Electron windows can remain paused forever.
+            await Promise.allSettled(autoAttachScopes.map(sessionId => this.sendRaw(route, "Target.setAutoAttach", {
               autoAttach: false,
               waitForDebuggerOnStart: false,
               flatten: true
-            }, 2_000, connection.autoAttachSessionId).catch(() => undefined);
+            }, 2_000, sessionId)));
             await this.waitForTargetLifecycleQuiet(route, 50, 500);
           }
           await Promise.allSettled(cleanupActions.map((cleanupAction) => cleanupAction()));
@@ -1374,6 +1379,9 @@ export class BrowserGatewayServer {
       autoAttachIntent = ++connection.autoAttachIntent;
       connection.autoAttachEnabled = params.autoAttach;
       connection.autoAttachSessionId = params.autoAttach ? clientSessionId : undefined;
+      // Retain touched scopes even after disable/failure: the connection can
+      // close while that reply is pending, before Chromium confirms the reset.
+      if (params.autoAttach) connection.autoAttachScopes.add(clientSessionId);
     }
     if (
       connection.identity.kind === "agent" &&

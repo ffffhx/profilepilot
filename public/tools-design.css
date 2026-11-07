@@ -53,9 +53,6 @@
 .tools-workspace .tools-inline-status::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .tools-workspace .browser-extension-panel.ready .tools-inline-status { color: var(--tools-success); }
 .tools-workspace .browser-extension-panel.pending .tools-inline-status { color: var(--tools-muted); }
-.tools-workspace .tools-extension-profile { display: flex; align-items: center; gap: 7px; margin-top: 7px; }
-.workspace-layout #app .tools-workspace .tools-extension-profile label { margin: 0; flex-shrink: 0; color: var(--tools-muted); font-size: 11px; font-weight: 400; }
-.workspace-layout #app .tools-workspace .tools-extension-profile select { width: auto; max-width: 280px; min-width: 150px; min-height: 28px; border: 1px solid var(--tools-line); border-radius: 5px; background: #f9fbff; padding: 3px 24px 3px 9px; color: var(--tools-ink); font: 12px/1.5 var(--font,sans-serif); }
 .tools-workspace .tools-extension-copy > p { margin: 6px 0 0; color: var(--tools-muted); font-size: 11px; line-height: 1.5; }
 .tools-workspace .browser-extension-controls { display: flex; align-items: center; gap: 8px; margin: 0; padding: 0; border: 0; }
 .workspace-layout #app .tools-workspace .browser-extension-controls button,
@@ -81,8 +78,17 @@
 .tools-workspace .tools-cli-card { grid-column: 1 / -1; }
 .tools-workspace .tools-guide-target { color: var(--tools-muted); font-size: 12px; line-height: 1.6; }
 .tools-workspace .tools-overview-summary { display: grid; grid-template-columns: 44px minmax(0,1fr); align-items: center; gap: 14px; min-height: 106px; padding: 17px 20px; cursor: pointer; list-style: none; }
-.tools-workspace .tools-cli-card > .tools-overview-summary,
 .tools-workspace .tools-preferences-card > .tools-overview-summary { cursor: default; }
+.tools-workspace .tools-cli-card > .tools-overview-summary { grid-template-columns: 44px minmax(0,1fr) 16px; }
+.tools-workspace .tools-cli-card > summary:hover { background: #f8faff; border-radius: 8px; }
+.tools-workspace .tools-cli-arrow { color: var(--tools-muted); text-align: center; font-size: 23px; line-height: 1; }
+.tools-workspace .tools-cli-card[open] .tools-cli-arrow { transform: rotate(90deg); }
+.tools-workspace .tools-cli-categories { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 14px; }
+.tools-workspace .tools-cli-category { min-width: 0; padding: 16px; border: 1px solid var(--tools-line); border-radius: 7px; background: #f8faff; }
+.tools-workspace .tools-cli-category h3 { margin: 0 0 8px; color: var(--tools-ink); font: 650 14px/1.5 var(--font,sans-serif); }
+.tools-workspace .tools-cli-category code { overflow-wrap: anywhere; font: 11px/1.7 var(--font-mono,monospace); }
+.tools-workspace .tools-cli-category .tools-cli-namespace { color: var(--tools-accent); font-size: 13px; }
+.tools-workspace .tools-cli-category p { margin: 10px 0 0; color: var(--tools-muted); font-size: 12px; line-height: 1.7; }
 .tools-workspace .tools-overview-summary::-webkit-details-marker,
 .tools-workspace .tools-diagnostics > summary::-webkit-details-marker,
 .tools-workspace .tools-extension-help > summary::-webkit-details-marker { display: none; }
@@ -182,8 +188,7 @@
 .tools-workspace .input-guard-permission.ready .input-guard-controls em { color: var(--tools-success); }
 .tools-workspace .input-guard-permission.blocked .input-guard-controls em { color: var(--tools-attention); }
 .workspace-layout #app .tools-workspace .input-guard-controls button { min-height: 32px; font-size: 11px; }
-.tools-workspace summary:focus-visible,
-.tools-workspace #tools-native-profile:focus-visible { outline: 2px solid var(--tools-accent); outline-offset: 3px; border-radius: 6px; }
+.tools-workspace summary:focus-visible { outline: 2px solid var(--tools-accent); outline-offset: 3px; border-radius: 6px; }
 @container tools-content (max-width: 1000px) {
   .tools-workspace .tools-extension-main { grid-template-columns: 44px minmax(180px,1fr) auto; gap: 12px; }
   .tools-workspace .tools-extension-icon { width: 44px; height: 44px; }
@@ -196,11 +201,11 @@
   .tools-workspace .agent-tool-grid { grid-template-columns: minmax(0,1fr); }
 }
 @container tools-content (max-width: 760px) {
+  .tools-workspace .tools-cli-categories { grid-template-columns: minmax(0,1fr); }
   .tools-workspace .tools-extension-main { grid-template-columns: 44px minmax(0,1fr); }
   .tools-workspace .browser-extension-controls { grid-column: 2; }
   .tools-workspace .tools-overview-grid { grid-template-columns: minmax(0,1fr); }
   .tools-workspace .tools-overview-summary { min-height: 102px; }
-  .workspace-layout #app .tools-workspace .tools-extension-profile select { max-width: 100%; }
   .tools-workspace .agent-session-bridge { grid-template-columns: minmax(0,1fr); }
   .tools-workspace .agent-session-bridge > span,
   .workspace-layout #app .tools-workspace .agent-session-bridge > button { grid-column: auto; grid-row: auto; justify-self: start; }

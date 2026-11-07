@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://profilepilot.local/schemas/agent-task-environments-1.0.0.json",
+  "title": "Agent task environment contracts and local-only identity bindings",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["environments", "bindings"],
+  "properties": {
+    "environments": {
+      "type": "object", "minProperties": 1, "additionalProperties": false,
+      "patternProperties": { "^[a-z0-9][a-z0-9._-]{0,95}$": { "$ref": "#/$defs/contract" } }
+    },
+    "bindings": { "$ref": "#/$defs/bindings" },
+    "attestation": { "$ref": "#/$defs/attestation" }
+  },
+  "$defs": {
+    "alias": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,95}$", "maxLength": 96 },
+    "publicUrl": { "type": "string", "format": "public-url", "maxLength": 2048, "description": "Absolute HTTP(S) page URL without credentials, query or fragment. HTTP is allowed only on loopback." },
+    "origin": { "type": "string", "format": "origin", "maxLength": 512 },
+    "profileId": { "type": "string", "minLength": 1, "maxLength": 256, "description": "Private runtime Profile binding; never include in published environment summaries." },
+    "identitySha256": { "type": "string", "pattern": "^[a-f0-9]{64}$", "description": "Local-only digest of a stable site account identity, produced by the trusted preflight preparer." },
+    "attestation": {
+      "type": "object", "additionalProperties": false, "required": ["checkedAt", "extensionId", "network"],
+      "properties": {
+        "checkedAt": { "type": "string", "format": "date-time", "description": "Operator verification time; live extension runs require evidence no older than 24 hours." },
+        "extensionId": { "type": "string", "pattern": "^[a-p]{32}$" },
+        "network": { "$ref": "#/$defs/network" }
+      },
+      "description": "Explicit operator attestation, not automated browser readback. Never store proxy credentials, cookies or tokens."
+    },
+    "transport": {
+      "type": "object", "additionalProperties": false, "required": ["kind"],
+      "properties": {
+        "kind": { "enum": ["gateway", "extension"] },
+        "extension": {
+          "type": "object", "additionalProperties": false, "required": ["id", "version"],
+          "properties": { "id": { "type": "string", "pattern": "^[a-p]{32}$" }, "version": { "type": "string", "pattern": "^[0-9]+(?:\\.[0-9]+){0,3}$" } }
+        }
+      }
+    },
+    "platform": {
+      "type": "object", "additionalProperties": false, "required": ["os", "arch", "release"],
+      "properties": { "os": { "enum": ["win32", "darwin", "linux"] }, "arch": { "enum": ["x64", "arm64"] }, "release": { "type": "string", "minLength": 1, "maxLength": 96, "pattern": "^[A-Za-z0-9._+ -]+$" } }
+    },
+    "browser": {
+      "type": "object", "additionalProperties": false, "required": ["name", "version", "mode"],
+      "properties": { "name": { "enum": ["chrome", "chromium", "edge"] }, "version": { "type": "string", "pattern": "^[0-9]+(?:\\.[0-9A-Za-z-]+){1,5}$", "maxLength": 96 }, "mode": { "enum": ["headed", "headless"] } }
+    },
+    "viewport": {
+      "type": "object", "additionalProperties": false, "required": ["width", "height", "deviceScaleFactor"],
+      "properties": { "width": { "type": "integer", "minimum": 320, "maximum": 10000 }, "height": { "type": "integer", "minimum": 200, "maximum": 10000 }, "deviceScaleFactor": { "type": "number", "minimum": 0.25, "maximum": 8 } }
+    },
+    "network": {
+      "type": "object", "additionalProperties": false, "required": ["mode", "egressAlias"],
+      "properties": { "mode": { "enum": ["direct", "proxy"] }, "egressAlias": { "$ref": "#/$defs/alias" } },
+      "description": "Pin the preparer's named egress policy, not a proxy URL, password or access token."
+    },
+    "cleanup": {
+      "type": "object", "additionalProperties": false, "required": ["taskData", "profile"],
+      "properties": { "taskData": { "enum": ["run-owned-only", "retain"] }, "profile": { "enum": ["retain", "dispose-run-owned"] } }
+    },
+    "contract": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schemaVersion", "track", "siteId", "startUrl", "allowedOrigins", "profile", "login", "transport", "platform", "browser", "viewport", "locale", "timezone", "network", "taskData", "cleanup"],
+      "properties": {
+        "schemaVersion": { "const": "1.0.0" },
+        "track": { "enum": ["synthetic", "live-site", "recovery"] },
+        "siteId": { "$ref": "#/$defs/alias" },
+        "startUrl": { "$ref": "#/$defs/publicUrl" },
+        "allowedOrigins": { "type": "array", "minItems": 1, "maxItems": 16, "uniqueItems": true, "items": { "$ref": "#/$defs/origin" } },
+        "profile": {
+          "type": "object", "additionalProperties": false, "required": ["strategy"],
+          "properties": { "strategy": { "enum": ["fresh", "reuse"] }, "binding": { "$ref": "#/$defs/alias" } }
+        },
+        "login": {
+          "type": "object", "additionalProperties": false, "required": ["state", "maxEvidenceAgeSeconds"],
+          "properties": { "state": { "enum": ["none", "preauthenticated", "expired"] }, "accountAlias": { "$ref": "#/$defs/alias" }, "maxEvidenceAgeSeconds": { "type": "integer", "minimum": 1, "maximum": 3600 } }
+        },
+        "transport": { "$ref": "#/$defs/transport" },
+        "platform": { "$ref": "#/$defs/platform" },
+        "browser": { "$ref": "#/$defs/browser" },
+        "viewport": { "$ref": "#/$defs/viewport" },
+        "locale": { "type": "string", "format": "locale", "maxLength": 64 },
+        "timezone": { "type": "string", "format": "timezone", "maxLength": 96 },
+        "network": { "$ref": "#/$defs/network" },
+        "taskData": {
+          "type": "object", "additionalProperties": false, "required": ["strategy", "namespace", "authReset"],
+          "properties": { "strategy": { "enum": ["seeded-reset", "run-owned", "read-only"] }, "namespace": { "$ref": "#/$defs/alias" }, "authReset": { "const": "forbidden" } }
+        },
+        "cleanup": { "$ref": "#/$defs/cleanup" }
+      }
+    },
+    "bindings": {
+      "type": "object", "additionalProperties": false, "required": ["profiles", "accounts"],
+      "properties": {
+        "profiles": { "type": "object", "additionalProperties": false, "patternProperties": { "^[a-z0-9][a-z0-9._-]{0,95}$": { "$ref": "#/$defs/profileId" } } },
+        "accounts": {
+          "type": "object", "additionalProperties": false,
+          "patternProperties": { "^[a-z0-9][a-z0-9._-]{0,95}$": {
+            "type": "object", "additionalProperties": false, "required": ["siteId", "identitySha256"],
+            "properties": { "siteId": { "$ref": "#/$defs/alias" }, "identitySha256": { "$ref": "#/$defs/identitySha256" } }
+          } }
+        }
+      }
+    }
+  }
+}

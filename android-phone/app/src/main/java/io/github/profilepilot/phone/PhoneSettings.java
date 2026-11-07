@@ -139,4 +139,13 @@ final class PhoneSettings {
     static void cancelPending() {
         if (PhoneAccessibility.current != null) PhoneAccessibility.current.cancelSetup();
     }
+
+    /** Opt-in idle wake lock: only while charging, so unattended ADB stays reachable. */
+    static boolean unattended(android.content.Context context) {
+        return context.getSharedPreferences("phone_setup", android.content.Context.MODE_PRIVATE).getBoolean("unattended", false);
+    }
+
+    static void unattended(android.content.Context context, boolean enabled) {
+        context.getSharedPreferences("phone_setup", android.content.Context.MODE_PRIVATE).edit().putBoolean("unattended", enabled).apply();
+    }
 }

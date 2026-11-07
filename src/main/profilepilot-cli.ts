@@ -8,10 +8,16 @@ import { ensureChatService } from "./cli/service-launcher";
 import { runPhoneCli } from "./phones/cli";
 import { runAdbCli, runPhoneWrap } from "./phones/adb-wrapper";
 import { runBrowserCli } from "./browser-cli";
+import { runElectronCli } from "./electron-cli";
 import { runRemoteCli } from "./remote-control-cli";
+import { runDesktopCli } from "./desktop/cli";
+import { runGpuiCli } from "./gpui/cli";
 import path from "node:path";
-import { createBrowserDoctor, type DoctorCheck } from "./control-doctor";
+import { createBrowserDoctor, createApplicationDoctor, type ControlDoctorTarget, type DoctorCheck } from "./control-doctor";
 import { RUNNING_CONTROL_BUILD } from "./runtime-identity";
+import { runWithControlTrace } from "./control-trace-cli";
+import { noteControlTraceCommand, noteControlTraceResponse } from "./control-trace-context";
+import type { electronRouting } from "./control-routing";
 import { phoneReadiness } from "../shared/phone-readiness";
 import type { PhonesSnapshot } from "../shared/phones";
 import { parseAgentCliArgs, runAgentCli, type AgentCliRuntime, type AgentCliTransport, type ParsedAgentCliCommand } from "./profilepilot-agent-cli";
@@ -62,7 +68,7 @@ interface ParsedLogsCliCommand {
   follow: boolean;
 }
 
-interface ParsedDoctorCliCommand {
+interface ParsedDoctorCliCommand extends ControlDoctorTarget {
   local: "doctor";
   json: boolean;
   profileId?: string;
@@ -93,8 +99,15 @@ export async function runProfilePilotCli(
       return 64;
     }
   }
+  return runWithControlTrace(args, io, runtime, runProfilePilotCommand);
+}
+
+async function runProfilePilotCommand(args: string[], io: Pick<NodeJS.Process, "stdout" | "stderr">,
+  runtime: AgentCliRuntime & { homeDir?: string; env?: NodeJS.ProcessEnv; request?: AgentCliTransport }): Promise<number> {
   // Keep the former top-level adb spelling as a compatibility alias.
   if (args[0] === "remote") return runRemoteCli(args.slice(1), io, runtime);
+  if (args[0] === "gpui") return runGpuiCli(args.slice(1), runtime.request || (command => requestProfilePilotManagement(command, runtime.homeDir || os.homedir(), runtime.env || process.env, 90_000)), io);
+  if (args[0] === "desktop") return runDesktopCli(args.slice(1), runtime.request || (command => requestProfilePilotManagement(command, runtime.homeDir || os.homedir(), runtime.env || process.env)), io, runtime.stdin, runtime.homeDir);
   const phoneAdb = args[0] === "phone" && args[1] === "adb";
   if (args[0] === "adb" || phoneAdb || args[0] === "phone" && args[1] === "wrap") {
     const env = runtime.env || process.env;
@@ -102,9 +115,14 @@ export async function runProfilePilotCli(
     return args[0] === "adb" || phoneAdb ? runAdbCli(args.slice(phoneAdb ? 2 : 1), request, io, env) : runPhoneWrap(args.slice(2), request, io, env);
   }
   if (args[0] === "phone") {
-    return runPhoneCli(args.slice(1), runtime.request || (command => requestProfilePilotManagement(command, runtime.homeDir || os.homedir(), runtime.env || process.env, 125_000)), io);
+    return runPhoneCli(args.slice(1), runtime.request || (command => requestProfilePilotManagement(command, runtime.homeDir || os.homedir(), runtime.env || process.env, 125_000)), io, runtime.stdin);
   }
-  if (args[0] === "browser") {
+  if (args[0] === "electron") {
+    return runElectronCli(args.slice(1), io, runtime.env || process.env, {
+      request: runtime.request || (command => requestProfilePilotManagement(command, runtime.homeDir || os.homedir(), runtime.env || process.env, 90_000))
+    });
+  }
+  if (args[0] === "browser" && !["profile", "profiles"].includes(args[1])) {
     return runBrowserCli(args.slice(1), io, runtime.env || process.env);
   }
   // The short command opens chat directly. Keep the explicit agent namespace
@@ -145,7 +163,7 @@ export async function runProfilePilotCli(
     return 0;
   }
   if ("local" in parsed && parsed.local === "doctor") {
-    const report = await createDoctorReport(homeDir, env, parsed);
+    const report = await createDoctorReport(homeDir, env, parsed, runtime.request);
     if (parsed.json) io.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     else io.stdout.write(formatDoctorReport(report));
     return report.status === "error" ? COMMAND_FAILED_EXIT_CODE : 0;
@@ -192,9 +210,15 @@ export function parseProfilePilotCliArgs(args: string[]): ParsedCliCommand {
       if (!value || value.startsWith("--")) throw new Error(`${extra[i]} 需要目标参数。`);
       if (extra[i] === "--profile" && !parsed.profileId) parsed.profileId = value;
       else if (extra[i] === "--device" && !parsed.deviceId) parsed.deviceId = value;
+      else if (extra[i] === '--electron' && !parsed.electronId) parsed.electronId = value;
+      else if (extra[i] === '--window' && !parsed.windowId && /^[a-f0-9]{32}$/.test(value)) parsed.windowId = value;
+      else if (extra[i] === '--gpui' && !parsed.gpuiTarget) parsed.gpuiTarget = value;
+      else if (extra[i] === '--session' && !parsed.sessionId && /^[A-Za-z0-9._:-]{1,100}$/.test(value)) parsed.sessionId = value;
+      else if (extra[i] === '--route' && !parsed.route && ['browser', 'phone', 'electron', 'desktop', 'gpui'].includes(value)) parsed.route = value as ControlDoctorTarget['route'];
       else throw new Error(`doctor 不支持参数：${extra[i]}`);
     }
-    if (parsed.profileId && parsed.deviceId) throw new Error("请一次指定一个 --profile 或 --device；不指定则检查全部连接概况。");
+    const targets = [parsed.profileId && 'browser', parsed.deviceId && 'phone', parsed.electronId && 'electron', parsed.windowId && 'desktop', parsed.gpuiTarget && 'gpui'].filter(Boolean);
+    if (targets.length > 1 || parsed.route && targets.length && targets[0] !== parsed.route) throw new Error('doctor 一次选择一个目标；--route 必须与 --profile/--device/--electron/--window/--gpui 一致。');
     return parsed;
   }
   const positionals = args.filter((arg) => arg !== "--json" && arg !== "--yes");
@@ -253,6 +277,7 @@ export function parseProfilePilotCliArgs(args: string[]): ParsedCliCommand {
 }
 
 function normalizeCliArgs(args: string[]): string[] {
+  if (args[0] === "browser" && ["profile", "profiles"].includes(args[1])) return args.slice(1);
   if (!args.length) return ["agent", "chat"];
   if (["run", "chat", "list", "show", "watch", "reply", "resume", "pause", "cancel", "takeover", "send"].includes(args[0])) {
     return ["agent", ...args];
@@ -383,6 +408,7 @@ export interface ProfilePilotDoctorReport {
   checks: DoctorCheck[];
   browser: Awaited<ReturnType<typeof createBrowserDoctor>>;
   phones: { devices: unknown[]; error?: string };
+  applications: Awaited<ReturnType<typeof createApplicationDoctor>>;
   runtime: {
     node: string;
     platform: string;
@@ -405,11 +431,13 @@ export interface ProfilePilotDoctorReport {
 export async function createDoctorReport(
   homeDir = os.homedir(),
   env: NodeJS.ProcessEnv = process.env,
-  target: { profileId?: string; deviceId?: string } = {}
+  target: ControlDoctorTarget = {},
+  transport?: AgentCliTransport
 ): Promise<ProfilePilotDoctorReport> {
+  const request = (command: ProfilePilotManagementCommand, timeout = 3000) => transport ? transport(command) : requestProfilePilotManagement(command, homeDir, env, timeout);
   let appStatus: ProfilePilotDoctorReport["app"];
   try {
-    const response = await requestProfilePilotManagement({ action: "ping" }, homeDir, env, 3_000);
+    const response = await request({ action: "ping" });
     if (!response.ok) throw new Error(`${response.error.message} (${response.error.code})`);
     const data = response.data as Record<string, unknown>;
     appStatus = {
@@ -445,23 +473,27 @@ export async function createDoctorReport(
   checks.push({ id: "desktop-build", status: aligned ? "ok" : "warning", message: aligned ? "桌面与 CLI 的实际运行构建一致。" : "桌面与 CLI 构建不同或尚未确认。",
     ...(aligned ? {} : { nextStep: "核对运行路径，更新 CLI 后重启桌面；浏览器扩展路径可独立于桌面运行。" }) });
   const browserRoot = env.PROFILEPILOT_NATIVE_ROOT || (env.CPM_DATA_DIR ? path.join(env.CPM_DATA_DIR, "browser-tasks") : homeDir !== os.homedir() ? path.join(homeDir, ".profilepilot", "browser-tasks") : undefined);
-  const [browser, phones] = await Promise.all([
-    createBrowserDoctor({ root: browserRoot, profileId: target.profileId }),
+  const [browser, phones, applications] = await Promise.all([
+    createBrowserDoctor({ root: browserRoot, profileId: target.profileId, sessionId: target.sessionId }),
     (async (): Promise<ProfilePilotDoctorReport["phones"]> => {
       if (!appStatus.running) return { devices: [], error: "手机控制需要桌面服务运行。" };
       try {
-        const response = await requestProfilePilotManagement(target.deviceId ? { action: "phone", method: "readiness", params: { id: target.deviceId } } : { action: "phone", method: "list" }, homeDir, env, target.deviceId ? 20000 : 6000);
+        const response = await request(target.deviceId ? { action: "phone", method: "readiness", params: { id: target.deviceId } } : { action: "phone", method: "list" }, target.deviceId ? 20000 : 6000);
         if (!response.ok) return { devices: [], error: response.error.message };
         return { devices: target.deviceId ? [response.data] : (response.data as PhonesSnapshot).devices.map(device => phoneReadiness(device)) };
       } catch (error) { return { devices: [], error: error instanceof Error ? error.message : String(error) }; }
-    })()
+    })(),
+    createApplicationDoctor(target, command => request(command, 6000))
   ]);
-  const targetFailed = target.profileId && browser.status === "error" || target.deviceId && (phones.error || phones.devices.some(d => !(d as { readyToStart?: boolean }).readyToStart));
+  const applicationFailure = applications.selectedRoute === 'electron' ? !!applications.electron?.error
+    : applications.selectedRoute === 'desktop' ? !!applications.desktop?.error || ['unsupported', 'repair-required'].includes(applications.desktop?.routing.state || '')
+    : applications.selectedRoute === 'gpui' ? !!applications.gpui?.error || !!applications.gpui?.discovery?.error : false;
+  const targetFailed = applicationFailure || target.profileId && browser.status === "error" || target.deviceId && (phones.error || phones.devices.some(d => !(d as { readyToStart?: boolean }).readyToStart));
   return {
     status: targetFailed ? "error" : !appStatus.running || recentErrors.length || checks.some(c => c.status !== "ok") || browser.status !== "ok" ? "warning" : "ok",
     checked_at: new Date().toISOString(),
     cli_version: PROFILEPILOT_CLI_VERSION,
-    build: RUNNING_CONTROL_BUILD, checks, browser, phones,
+    build: RUNNING_CONTROL_BUILD, checks, browser, phones, applications,
     runtime: {
       node: process.version,
       platform: process.platform,
@@ -489,6 +521,12 @@ function formatDoctorReport(report: ProfilePilotDoctorReport): string {
   const latest = report.logs.latest_error
     ? `\n最近错误：${report.logs.latest_error.timestamp} ${report.logs.latest_error.component}/${report.logs.latest_error.event} ${report.logs.latest_error.message}`
     : "";
+  const routingRows = [
+    ...(report.applications.electron?.targets || []).map((target: { id: string; routing: ReturnType<typeof electronRouting> }) => ({ label: target.id, routing: target.routing })),
+    ...(report.applications.electron?.routing ? [{ label: 'electron', routing: report.applications.electron.routing }] : []),
+    ...(report.applications.desktop ? [{ label: 'desktop', routing: report.applications.desktop.routing }] : []),
+    ...(report.applications.gpui ? [{ label: 'gpui', routing: report.applications.gpui.routing }] : [])
+  ];
   return [
     `ProfilePilot Doctor：${state}`,
     `桌面应用：${app}`,
@@ -499,6 +537,7 @@ function formatDoctorReport(report: ProfilePilotDoctorReport): string {
     ...report.browser.checks.filter(check => check.status !== "ok").map(check => `${check.id}：${check.message} ${check.nextStep || ""}`),
     ...report.browser.profiles.flatMap(profile => profile.checks.filter(check => check.status !== "ok").map(check => `${profile.profileId} / ${check.id}：${check.message} ${check.nextStep || ""}`)),
     `手机诊断：${report.phones.devices.length} 个目标${report.phones.error ? ` · ${report.phones.error}` : ""}（完整能力信息使用 --json）`,
+    ...routingRows.map(({ label, routing }) => `${label}：${routing.state} · ${routing.detail}\n下一步：${report.runtime.platform === 'win32' ? routing.nextCommand.powershell : routing.nextCommand.posix}`),
     `诊断日志：${report.logs.files} 个文件 · ${formatBytes(report.logs.bytes)} · 最近 24 小时 ${report.logs.recent_errors} 个错误`,
     `日志路径：${report.logs.active_file}${latest}`,
     ""
@@ -515,9 +554,12 @@ export async function requestProfilePilotManagement(
   command: ProfilePilotManagementCommand,
   homeDir = os.homedir(),
   env: NodeJS.ProcessEnv = process.env,
-  timeoutMs = command.action === "phone" && command.method === "follow-command" && (command.params as { op?: string })?.op === "setup" ? 360_000 : REQUEST_TIMEOUT_MS,
+  // Desktop action --observe includes two admission checks, the input and two
+  // native reads. Its bounded stages can exceed the generic 35-second window.
+  timeoutMs = command.action === "phone" && ["iphone-signing-setup", "iphone-sign-sideloadly"].includes(command.method) ? 360_000 : command.action === "phone" && ["iphone-setup", "iphone-prepare-wda", "iphone-install-signed"].includes(command.method) ? 180_000 : command.action === "phone" && command.method === "follow-command" && (command.params as { op?: string })?.op === "setup" ? 360_000 : command.action === "desktop" ? 60_000 : REQUEST_TIMEOUT_MS,
   signal?: AbortSignal
 ): Promise<ProfilePilotManagementResponse> {
+  noteControlTraceCommand(command);
   signal?.throwIfAborted();
   const [token, socketPath] = await Promise.all([
     fs.readFile(profilePilotManagementSecretPath(homeDir, env), "utf8").then((value) => value.trim()),
@@ -532,7 +574,7 @@ export async function requestProfilePilotManagement(
   signal?.throwIfAborted();
   // Phone screenshots are already bounded by the companion transport (8 MiB).
   // Allow its image plus the management envelope without relaxing request limits.
-  const maxResponseBytes = command.action === "phone" && command.method === "basic-action" ? PROFILEPILOT_PHONE_BASIC_MAX_RESPONSE_BYTES
+  const maxResponseBytes = command.action === "gpui" ? 33 * 1024 * 1024 : command.action === "desktop" ? 4 * 1024 * 1024 : command.action === "phone" && (command.method === "basic-action" || command.method === "action" && String((command.params as { id?: string })?.id || "").startsWith("iphone-")) ? PROFILEPILOT_PHONE_BASIC_MAX_RESPONSE_BYTES
     : command.action === "phone" && ["action", "wrapper-action", "camera-command", "camera-sources", "package-info", "packages", "diagnose", "follow-command"].includes(command.method) ? PROFILEPILOT_PHONE_MAX_RESPONSE_BYTES : PROFILEPILOT_MANAGEMENT_MAX_MESSAGE_BYTES;
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath);
@@ -544,7 +586,7 @@ export async function requestProfilePilotManagement(
       signal?.removeEventListener("abort", abort);
       socket.destroy();
       if (error) reject(error);
-      else if (response) resolve(response);
+      else if (response) { noteControlTraceResponse(response); resolve(response); }
     };
     const abort = (): void => finish(Object.assign(new Error("终端连接已中断。"), { name: "AbortError" }));
     signal?.addEventListener("abort", abort, { once: true });
@@ -641,6 +683,10 @@ function helpText(): string {
   ppilot --resume <任务ID>                     继续已有对话
   ppilot browser <method>                     ppilot browser CLI：扩展 / Gateway 统一浏览器控制
   ppilot browser --help                       浏览器命令与会话说明
+  ppilot browser profile <操作>               Profile 查询、创建、重命名、配置、启动、停止、删除
+  ppilot electron --help                      Electron 应用窗口控制与会话说明
+  ppilot desktop --help                       本机 Windows 桌面、原生窗口与控件
+  ppilot gpui --help                          GPUI 应用元素树、交互、截图与性能调试
   ppilot remote --help                        远程电脑、浏览器、Electron 与 Windows 控件
   ppilot phone --help                         ppilot phone CLI：设备、会话与手机控制
   ppilot phone wrap --help                    为脚本或工具建立手机控制会话
@@ -648,21 +694,26 @@ function helpText(): string {
   ppilot <run|chat|list|show|watch|reply|resume|pause|cancel|takeover|send> [参数]
   ppilot chat --help
   ppilot status [--json]
-  ppilot doctor [--profile PROFILE_ID | --device DEVICE_ID] [--json]
+  ppilot trace report [--since 14d] [--task-kind real|verification] [--json]
+  控制命令的路由前可加 --task-kind real|verification --task-id TASK --operation-id STEP；恢复步骤可加 --recovery-of STEP。
+  ppilot doctor [--profile ID | --device ID | --electron NAME_OR_ID | --window ID | --gpui TARGET_ID]
+                [--route browser|phone|electron|desktop|gpui] [--session TASK] [--json]
   ppilot logs [--level <级别>] [--since <时间>] [--limit <数量>] [--follow] [--json]
-  ppilot profile list [--json]
-  ppilot profile get <名称|ID> [--json]
-  ppilot profile create --name <名称> [--json]
-  ppilot profile rename <名称|ID> <新名称> [--json]
-  ppilot profile configure <名称|ID> --hide-automation <on|off> [--json]
-  ppilot profile start <名称|ID> [--json]
-  ppilot profile stop <名称|ID> [--json]
-  ppilot profile delete <名称|ID> --yes [--json]
+  ppilot browser profile list [--json]
+  ppilot browser profile get <名称|ID> [--json]
+  ppilot browser profile create --name <名称> [--json]
+  ppilot browser profile rename <名称|ID> <新名称> [--json]
+  ppilot browser profile configure <名称|ID> --hide-automation <on|off> [--json]
+  ppilot browser profile start <名称|ID> [--json]
+  ppilot browser profile stop <名称|ID> [--json]
+  ppilot browser profile delete <名称|ID> --yes [--json]
 
 说明：
+  ppilot profile <操作> 保留为 ppilot browser profile <操作> 的兼容入口。
   对话需要交互终端；任务与桌面应用同步，桌面应用需保持运行。
   logs 可在桌面应用未运行时读取本地脱敏诊断日志；--since 支持 30m、2h、7d 或 ISO 时间。
   doctor 检查桌面应用连接、版本、运行环境和最近 24 小时错误。
+  doctor 的路由/下一步只读发现，不接管、恢复、重启或切换工具；优先专用 Skill/API/CLI，界面使用目标入口。
   修改操作仅支持 ProfilePilot 创建的独立 Profile。
   --hide-automation 持久保存 Chromium 自动化标记设置，下次启动生效，不保证通过网站验证。
   系统 Profile 和子 Profile 可以查询，但不能通过 Profile 管理命令修改。

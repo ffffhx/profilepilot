@@ -1,4 +1,5 @@
-import { existsSync } from "node:fs";
+import { existsSync, promises as fs } from "node:fs";
+import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import type {
@@ -13,15 +14,153 @@ import { readActiveAgentBrowserSessionActivityClientsByPort } from "./agent-brow
 import { isValidTcpPort, makeCdpUrl, parseRemoteDebuggingPort, requestCdpVersionInfo } from "./cdp-client";
 import { POSIX_LOCALE_ENV, compareNumbers, earlierIsoDate, execFileAsync, uniqueNumbers } from "./fs-util";
 import { RuntimeProfile } from "./internal-types";
+import { profileFileProcessChanged, type ProfileProcessChangeDetails } from './profile-process-change';
 import { resolveClientContexts } from "./session-context";
-import { findWindowsProcessesLockingPaths, getWindowsSystemSnapshot, type WindowsProcessInfo } from "./windows-platform";
+import { findWindowsProcessesLockingPaths, findWindowsProcessIdentitiesLockingPaths, collectWindowsControlSample, createWindowsReadContext, getWindowsSystemSnapshot, type WindowsProcessInfo, type WindowsSystemEvidence, type WindowsControlSample } from "./windows-platform";
+import type { WindowsSamplerReadContext } from './windows-sampler';
+import { isWindowsCreationFileTime, type WindowsSamplerIdentityReason } from './windows-sampler-protocol';
+
+export interface ControlDiscovery {
+  snapshotId: string;
+  capturedAt: number;
+  // Complete process enumeration and all unscoped discovery steps succeeded.
+  // A scoped gap still prevents admitting every process in its impact set.
+  complete: true;
+  processPids: number[];
+  scopedGaps: { code: 'PROFILE_BROWSER_COMMAND_LINE_UNAVAILABLE'; processPids: number[] }[];
+}
+
+export interface RuntimeScanOptions {
+  strict?: boolean;
+  processes?: RuntimeProcessInfo[];
+  windowsSnapshot?: WindowsSystemEvidence;
+  windowsReadContext?: WindowsSamplerReadContext;
+  // Internal until ProfileStateReader completes every strict discovery step.
+  controlDiscovery?: ControlDiscovery;
+}
+
+// One control-admission collection shares the exact process/TCP evidence that
+// produced its catalog. A later successful scan cannot certify earlier rows.
+export async function createControlRuntimeScan(windowsSample?: Promise<WindowsControlSample>): Promise<RuntimeScanOptions> {
+  let capturedAt = Date.now(), snapshotId: string = randomUUID();
+  const options: RuntimeScanOptions = { strict: true };
+  if (windowsSample && process.platform !== 'win32') throw new Error('PROFILE_WINDOWS_SAMPLE_UNSUPPORTED');
+  if (process.platform === 'win32') {
+    // Even compatibility samples without an internal context consume the
+    // original call's fixed budget while pending, not a fresh post-await one.
+    const fallbackContext = createWindowsReadContext();
+    const sample = await (windowsSample || collectWindowsControlSample(fallbackContext));
+    {
+      if (!sample || !sample.snapshot || typeof sample.snapshotId !== 'string' || !sample.snapshotId.trim() || !Number.isFinite(sample.capturedAt) || sample.capturedAt < 0)
+        throw new Error('PROFILE_WINDOWS_SAMPLE_INVALID');
+      capturedAt = sample.capturedAt; snapshotId = sample.snapshotId;
+    }
+    options.windowsReadContext = sample.context || fallbackContext;
+    const snapshot = options.windowsSnapshot = sample.snapshot;
+    requireWindowsEvidence(snapshot, options);
+    const processPids = snapshot.processes.map(item => item.pid);
+    if (processPids.some(pid => !Number.isSafeInteger(pid) || pid <= 0) || new Set(processPids).size !== processPids.length)
+      throw new Error('PROFILE_PROCESS_SCAN_INVALID_ROW');
+    const affected = unavailableBrowserImpact(snapshot.processes);
+    options.controlDiscovery = { snapshotId, capturedAt, complete: true, processPids,
+      scopedGaps: affected.length ? [{ code: 'PROFILE_BROWSER_COMMAND_LINE_UNAVAILABLE', processPids: affected }] : [] };
+  }
+  options.processes = await listRuntimeProcesses(options);
+  options.controlDiscovery ||= { snapshotId, capturedAt, complete: true,
+    processPids: options.processes.map(item => item.pid), scopedGaps: [] };
+  return options;
+}
+
+function unavailableBrowserCommandLine(item: WindowsProcessInfo): boolean {
+  return item.commandLineAvailable !== true && isChromiumBrowserMainProcess(item.executablePath || item.name);
+}
+
+function unavailableBrowserImpact(processes: readonly WindowsProcessInfo[]): number[] {
+  const byPid = new Map(processes.map(item => [item.pid, item]));
+  const affected = new Set<number>();
+  for (const item of processes.filter(unavailableBrowserCommandLine)) {
+    affected.add(item.pid);
+    // The existing file/profile mapper can attribute a child to a browser
+    // ancestor. Include those dependencies, even through non-browser parents.
+    const seen = new Set<number>();
+    let current = byPid.get(item.parentPid);
+    while (current && !seen.has(current.pid)) {
+      seen.add(current.pid);
+      if (isChromiumBrowserMainProcess(current.executablePath || current.name) ||
+        (current.commandLineAvailable === true && isChromiumBrowserMainProcess(current.commandLine))) affected.add(current.pid);
+      current = byPid.get(current.parentPid);
+    }
+  }
+  // Include every descendant, regardless of executable name. A target is
+  // excluded only by membership in this complete same-scan dependency set.
+  const children = new Map<number, number[]>();
+  for (const item of processes) {
+    const values = children.get(item.parentPid) || [];
+    values.push(item.pid); children.set(item.parentPid, values);
+  }
+  const pending = [...affected];
+  for (let index = 0; index < pending.length; index++) for (const pid of children.get(pending[index]) || []) {
+    if (!affected.has(pid)) { affected.add(pid); pending.push(pid); }
+  }
+  return [...affected].sort((left, right) => left - right);
+}
+
+function windowsCommand(item: WindowsProcessInfo, strict?: boolean): string {
+  // imagePath/name is useful display fallback, never evidence of Default,
+  // user-data-dir, profile-directory, or a main browser process in strict mode.
+  return strict && item.commandLineAvailable !== true ? '' : item.commandLine;
+}
+
+function requireWindowsEvidence(snapshot: WindowsSystemEvidence, options: RuntimeScanOptions, tcp = false): void {
+  if (!options.strict) return;
+  if (snapshot.processesAvailable !== true || snapshot.processesComplete !== true) throw new Error('PROFILE_PROCESS_SCAN_INCOMPLETE');
+  if (tcp && (snapshot.tcpAvailable !== true || snapshot.tcpComplete !== true)) throw new Error('PROFILE_TCP_SCAN_INCOMPLETE');
+}
+
+function emptyLsofResult(error: unknown): boolean {
+  const failure = error as { code?: unknown; stdout?: unknown; stderr?: unknown };
+  return failure?.code === 1 && String(failure.stdout || '').trim() === '' && String(failure.stderr || '').trim() === '';
+}
 
 export type RuntimeProcessInfo = RuntimeProfile & {
   pid: number;
   command: string;
   parentPid?: number;
   executablePath?: string | null;
+  creationFileTime?: string | null;
+  identityStatus?: 'confirmed' | 'unavailable';
+  identityReason?: WindowsSamplerIdentityReason;
 };
+
+export function requireWindowsRuntimeIdentity(row: RuntimeProcessInfo, options: RuntimeScanOptions): void {
+  if (!options.strict || process.platform !== 'win32' || !options.windowsSnapshot) return;
+  const original = options.windowsSnapshot.processes.find(value => value.pid === row.pid);
+  if (!original || original.identityStatus !== 'confirmed' || row.identityStatus !== 'confirmed'
+      || !isWindowsCreationFileTime(original.creationFileTime) || row.creationFileTime !== original.creationFileTime) {
+    const unavailable = !original || original.identityStatus !== 'confirmed' || row.identityStatus !== 'confirmed';
+    const identityReason = original?.identityStatus !== 'confirmed' ? original?.identityReason : row.identityReason;
+    throw profileFileProcessChanged('profile_runtime_birth_join', row.pid, options.windowsSnapshot.processes.length, options.controlDiscovery,
+      { origin: 'runtime_profile', reason: unavailable ? 'unavailable' : !isWindowsCreationFileTime(original.creationFileTime) || !isWindowsCreationFileTime(row.creationFileTime) ? 'invalid_birth' : 'birth_mismatch',
+        ...(unavailable && identityReason ? { identityReason } : {}) });
+  }
+}
+
+function requireWindowsIdentity(row: WindowsProcessInfo, options: RuntimeScanOptions, stage: 'windows_rm_birth_join' | 'windows_parent_identity',
+  origin: ProfileProcessChangeDetails['origin']): string {
+  if (row.identityStatus !== 'confirmed' || !isWindowsCreationFileTime(row.creationFileTime))
+    throw profileFileProcessChanged(stage, row.pid, options.windowsSnapshot?.processes.length || 0, options.controlDiscovery,
+      { origin, reason: row.identityStatus !== 'confirmed' ? 'unavailable' : 'invalid_birth',
+        ...(row.identityStatus !== 'confirmed' && row.identityReason ? { identityReason: row.identityReason } : {}) });
+  return row.creationFileTime;
+}
+function windowsParent(row: WindowsProcessInfo, byPid: Map<number, WindowsProcessInfo>, options: RuntimeScanOptions): WindowsProcessInfo | undefined {
+  const parent = byPid.get(row.parentPid);
+  if (options.strict && parent) {
+    const birth = requireWindowsIdentity(row, options, 'windows_parent_identity', 'parent_chain'), parentBirth = requireWindowsIdentity(parent, options, 'windows_parent_identity', 'parent_chain');
+    if (BigInt(parentBirth) > BigInt(birth)) throw profileFileProcessChanged('windows_parent_identity', parent.pid, byPid.size, options.controlDiscovery, { origin: 'parent_chain', reason: 'parent_newer' });
+  }
+  return parent;
+}
 
 export function makeNativeRuntimeKey(dirName: string): string {
   return `native:${dirName}`;
@@ -61,29 +200,48 @@ export function parseRuntimeProcess(line: string): (RuntimeProfile & { pid: numb
   };
 }
 
-export async function listRuntimeProcesses(): Promise<RuntimeProcessInfo[]> {
+export async function listRuntimeProcesses(options: RuntimeScanOptions = {}): Promise<RuntimeProcessInfo[]> {
+  if (options.processes) return options.processes;
   if (process.platform === "win32") {
-    const snapshot = await getWindowsSystemSnapshot();
+    const snapshot = options.windowsSnapshot || await getWindowsSystemSnapshot();
+    requireWindowsEvidence(snapshot, options);
+    const scoped = new Set(options.controlDiscovery?.scopedGaps.flatMap(gap => gap.processPids));
+    if (options.strict && snapshot.processes.some(item => unavailableBrowserCommandLine(item) && !scoped.has(item.pid)))
+      throw new Error('PROFILE_BROWSER_COMMAND_LINE_UNAVAILABLE');
     return snapshot.processes.map((processInfo) => ({
       pid: processInfo.pid,
       parentPid: processInfo.parentPid,
       executablePath: processInfo.executablePath,
+      ...(processInfo.identityStatus ? { identityStatus: processInfo.identityStatus, creationFileTime: processInfo.creationFileTime,
+        ...(processInfo.identityReason ? { identityReason: processInfo.identityReason } : {}) } : {}),
       pids: [processInfo.pid],
-      browserPids: isChromiumBrowserMainProcess(processInfo.commandLine) ? [processInfo.pid] : [],
+      browserPids: isChromiumBrowserMainProcess(windowsCommand(processInfo, options.strict)) ? [processInfo.pid] : [],
       startedAt: processInfo.startedAt,
-      cdpPort: parseRemoteDebuggingPort(processInfo.commandLine),
+      cdpPort: parseRemoteDebuggingPort(windowsCommand(processInfo, options.strict)),
       listeningPorts: [],
-      command: processInfo.commandLine
+      command: windowsCommand(processInfo, options.strict)
     }));
   }
-  const { stdout } = await execFileAsync("ps", ["-axo", "pid=,lstart=,command="], {
+  const { stdout, stderr } = await execFileAsync("ps", [...(options.strict ? ['-ww'] : []), "-axo", "pid=,lstart=,command="], {
     maxBuffer: 1024 * 1024 * 8,
+    ...(options.strict ? { timeout: 8000 } : {}),
     env: POSIX_LOCALE_ENV
   });
-  return stdout.split("\n").flatMap((line) => {
+  if (options.strict && String(stderr || '').trim()) throw new Error('PROFILE_PROCESS_SCAN_INCOMPLETE');
+  const rows = stdout.split("\n").filter(line => line.trim());
+  if (options.strict && !rows.length) throw new Error('PROFILE_PROCESS_SCAN_EMPTY');
+  const seen = new Set<number>();
+  const processes = rows.flatMap((line) => {
+    if (options.strict && /^\s*0\s/.test(line)) return []; // Kernel PID is not a browser/window candidate.
     const processInfo = parseRuntimeProcess(line);
+    if (options.strict && (!processInfo || !Number.isSafeInteger(processInfo.pid) || processInfo.pid <= 0 || !processInfo.startedAt || !processInfo.command.trim()))
+      throw new Error('PROFILE_PROCESS_SCAN_INVALID_ROW');
+    if (options.strict && processInfo && seen.has(processInfo.pid)) throw new Error('PROFILE_PROCESS_SCAN_INVALID_ROW');
+    if (processInfo) seen.add(processInfo.pid);
     return processInfo ? [processInfo] : [];
   });
+  if (options.strict && !processes.length) throw new Error('PROFILE_PROCESS_SCAN_EMPTY');
+  return processes;
 }
 
 export function parsePsStartTime(value: string): string | null {
@@ -129,7 +287,7 @@ export function addRuntimeProcess(
   runtime.set(key, profile);
 }
 
-export async function attachListeningPorts(runtime: Map<string, RuntimeProfile>): Promise<void> {
+export async function attachListeningPorts(runtime: Map<string, RuntimeProfile>, options: RuntimeScanOptions = {}): Promise<void> {
   const knownPids = new Set<number>();
   for (const profile of runtime.values()) {
     for (const pid of profile.pids) {
@@ -141,19 +299,20 @@ export async function attachListeningPorts(runtime: Map<string, RuntimeProfile>)
     return;
   }
 
-  const portsByPid = await getListeningPortsByPid(knownPids);
+  const portsByPid = await getListeningPortsByPid(knownPids, options);
   for (const profile of runtime.values()) {
     const listeningPorts = profile.pids.flatMap((pid) => portsByPid.get(pid) || []);
     profile.listeningPorts = uniqueNumbers(profile.listeningPorts.concat(listeningPorts)).sort(compareNumbers);
   }
 }
 
-export async function getListeningPortsByPid(targetPids: Set<number>): Promise<Map<number, number[]>> {
+export async function getListeningPortsByPid(targetPids: Set<number>, options: RuntimeScanOptions = {}): Promise<Map<number, number[]>> {
   const portsByPid = new Map<number, number[]>();
 
   if (process.platform === "win32") {
     try {
-      const snapshot = await getWindowsSystemSnapshot();
+      const snapshot = options.windowsSnapshot || await getWindowsSystemSnapshot();
+      requireWindowsEvidence(snapshot, options, true);
       for (const connection of snapshot.tcp) {
         if (connection.state.toLowerCase() !== "listen" || !targetPids.has(connection.pid)) continue;
         if (!isValidTcpPort(connection.localPort)) continue;
@@ -162,43 +321,55 @@ export async function getListeningPortsByPid(targetPids: Set<number>): Promise<M
           uniqueNumbers([...(portsByPid.get(connection.pid) || []), connection.localPort]).sort(compareNumbers)
         );
       }
-    } catch {
+    } catch (error) {
+      if (options.strict) throw error;
       // Return the empty, conservative snapshot below.
     }
     return portsByPid;
   }
 
   try {
-    const { stdout } = await execFileAsync("lsof", ["-nP", "-iTCP", "-sTCP:LISTEN"], {
-      maxBuffer: 1024 * 1024 * 8
+    const { stdout, stderr } = await execFileAsync("lsof", ["-nP", "-iTCP", "-sTCP:LISTEN"], {
+      maxBuffer: 1024 * 1024 * 8,
+      ...(options.strict ? { timeout: 8000 } : {})
     });
+    if (options.strict && String(stderr || '').trim()) throw new Error('PROFILE_TCP_SCAN_INCOMPLETE');
 
     for (const line of stdout.split("\n")) {
       const pid = parseLsofPid(line);
+      if (options.strict && line.trim() && !line.trim().startsWith('COMMAND') && !pid) throw new Error('PROFILE_TCP_SCAN_INVALID_ROW');
       if (!pid || !targetPids.has(pid)) {
         continue;
       }
 
       const port = parseLsofListeningPort(line);
       if (!port) {
+        if (options.strict) throw new Error('PROFILE_TCP_SCAN_INVALID_ROW');
         continue;
       }
 
       portsByPid.set(pid, uniqueNumbers([...(portsByPid.get(pid) || []), port]).sort(compareNumbers));
     }
-  } catch {
+  } catch (error) {
+    if (options.strict && !emptyLsofResult(error)) throw error;
     return portsByPid;
   }
 
   return portsByPid;
 }
 
-export async function getOpenProfilePidsByPath(profilePaths: string[]): Promise<Map<string, number[]>> {
+export async function getOpenProfilePidsByPath(profilePaths: string[], options: RuntimeScanOptions = {}): Promise<Map<string, number[]>> {
+  if (options.strict && process.platform === 'win32') options.windowsReadContext ||= createWindowsReadContext();
   const profileByCandidatePath = new Map<string, string>();
   for (const profilePath of profilePaths) {
     for (const relativePath of PROFILE_OPEN_FILE_RELATIVE_PATHS) {
       const candidatePath = path.join(profilePath, relativePath);
-      if (existsSync(candidatePath)) {
+      let exists = options.strict ? false : existsSync(candidatePath);
+      if (options.strict) {
+        try { exists = (await fs.stat(candidatePath)).isFile(); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && (error as NodeJS.ErrnoException).code !== 'ENOTDIR') throw error; exists = false; }
+      }
+      if (exists) {
         profileByCandidatePath.set(candidatePath, profilePath);
       }
     }
@@ -210,15 +381,26 @@ export async function getOpenProfilePidsByPath(profilePaths: string[]): Promise<
 
   if (process.platform === "win32") {
     try {
-      const snapshot = await getWindowsSystemSnapshot();
-      const result = windowsOpenProfilePids(profilePaths, snapshot.processes);
-      const lockers = await findWindowsProcessesLockingPaths([...profileByCandidatePath.keys()]);
-      const processByPid = new Map(snapshot.processes.map((processInfo) => [processInfo.pid, processInfo]));
+      if (options.strict && !options.windowsSnapshot) {
+        const scan = await createControlRuntimeScan(collectWindowsControlSample(options.windowsReadContext));
+        options.windowsSnapshot = scan.windowsSnapshot; options.controlDiscovery ||= scan.controlDiscovery;
+      }
+      const snapshot = options.windowsSnapshot || await getWindowsSystemSnapshot();
+      requireWindowsEvidence(snapshot, options);
+      const associationProcesses = options.strict ? snapshot.processes.map(item => ({ ...item, commandLine: windowsCommand(item, true) })) : snapshot.processes;
+      const result = windowsOpenProfilePids(profilePaths, associationProcesses, options);
+      const lockers = options.strict
+        ? await findWindowsProcessIdentitiesLockingPaths([...profileByCandidatePath.keys()], { context: options.windowsReadContext })
+        : new Map([...await findWindowsProcessesLockingPaths([...profileByCandidatePath.keys()])].map(([file, pids]) => [file, pids.map(pid => ({ pid, creationFileTime: '' }))]));
+      const processByPid = new Map(associationProcesses.map((processInfo) => [processInfo.pid, processInfo]));
       for (const [candidatePath, pids] of lockers) {
         const profilePath = profileByCandidatePath.get(candidatePath);
         if (!profilePath) continue;
         const resolved = new Set(result.get(profilePath) || []);
-        for (const pid of pids) {
+        for (const { pid, creationFileTime } of pids) {
+          if (options.strict && !processByPid.has(pid)) throw profileFileProcessChanged('windows_rm_pid_join', pid, processByPid.size, options.controlDiscovery);
+          if (options.strict && requireWindowsIdentity(processByPid.get(pid)!, options, 'windows_rm_birth_join', 'restart_manager') !== creationFileTime)
+            throw profileFileProcessChanged('windows_rm_birth_join', pid, processByPid.size, options.controlDiscovery, { origin: 'restart_manager', reason: 'birth_mismatch' });
           resolved.add(pid);
           let current = processByPid.get(pid);
           const seen = new Set<number>();
@@ -228,25 +410,29 @@ export async function getOpenProfilePidsByPath(profilePaths: string[]): Promise<
               resolved.add(current.pid);
               break;
             }
-            current = processByPid.get(current.parentPid);
+            current = windowsParent(current, processByPid, options);
           }
         }
         if (resolved.size) result.set(profilePath, [...resolved]);
       }
       return result;
-    } catch {
+    } catch (error) {
+      if (options.strict) throw error;
       return new Map();
     }
   }
 
   let stdout = "";
   try {
-    ({ stdout } = await execFileAsync(
+    const result = await execFileAsync(
       "lsof",
       ["-nP", "-F", "pn", "--", ...profileByCandidatePath.keys()],
-      { maxBuffer: 1024 * 1024 * 8 }
-    ));
-  } catch {
+      { maxBuffer: 1024 * 1024 * 8, ...(options.strict ? { timeout: 8000 } : {}) }
+    );
+    if (options.strict && String(result.stderr || '').trim()) throw new Error('PROFILE_FILE_SCAN_INCOMPLETE');
+    stdout = result.stdout;
+  } catch (error) {
+    if (options.strict && !emptyLsofResult(error)) throw error;
     return new Map();
   }
 
@@ -256,17 +442,24 @@ export async function getOpenProfilePidsByPath(profilePaths: string[]): Promise<
     if (line.startsWith("p")) {
       const pid = Number(line.slice(1));
       currentPid = Number.isInteger(pid) && pid > 0 ? pid : null;
+      if (options.strict && currentPid === null) throw new Error('PROFILE_FILE_SCAN_INVALID_ROW');
       continue;
     }
 
+    // lsof 4.88–4.93.2 emits f even when it was not requested by -F.
+    if (line.startsWith('f') && currentPid !== null && line.length > 1) continue;
+
     if (!line.startsWith("n") || currentPid === null) {
+      if (options.strict && line.trim()) throw new Error('PROFILE_FILE_SCAN_INVALID_ROW');
       continue;
     }
 
     const profilePath = profileByCandidatePath.get(line.slice(1));
     if (!profilePath) {
+      if (options.strict) throw new Error('PROFILE_FILE_SCAN_INVALID_PATH');
       continue;
     }
+    if (options.strict && options.processes && !options.processes.some(item => item.pid === currentPid)) throw profileFileProcessChanged('posix_lsof_pid_join', currentPid, options.processes.length, options.controlDiscovery);
     pidsByProfile.set(profilePath, uniqueNumbers([...(pidsByProfile.get(profilePath) || []), currentPid]));
   }
 
@@ -296,7 +489,9 @@ export function parseLsofListeningPort(line: string): number | null {
 // 检测“谁在持久连接这些 CDP 端口”：找连向 127.0.0.1:<端口> 的 ESTABLISHED 客户端 socket
 // （形如 本地:xxxx->127.0.0.1:<端口>），持有方就是 agent-browser 等驱动工具。
 // 工具无关：任何 CDP 客户端都走同一个本机 TCP 端口；WebSocket 长连接常驻 ESTABLISHED，能稳定抓到。
-export async function getCdpClientsByPort(ports: number[]): Promise<Map<number, CdpClientInfo[]>> {
+export async function getCdpClientsByPort(
+  ports: number[], options: RuntimeScanOptions = {}, presentation: { includeActivityRepository?: boolean } = {}
+): Promise<Map<number, CdpClientInfo[]>> {
   const result = new Map<number, CdpClientInfo[]>();
   const targetPorts = uniqueNumbers(ports.filter((port) => isValidTcpPort(port)));
   if (!targetPorts.length) {
@@ -306,7 +501,8 @@ export async function getCdpClientsByPort(ports: number[]): Promise<Map<number, 
 
   if (process.platform === "win32") {
     try {
-      const snapshot = await getWindowsSystemSnapshot();
+      const snapshot = options.windowsSnapshot || await getWindowsSystemSnapshot();
+      requireWindowsEvidence(snapshot, options, true);
       const processByPid = new Map(snapshot.processes.map((item) => [item.pid, item]));
       for (const connection of snapshot.tcp) {
         if (connection.state.toLowerCase() !== "established" || !portSet.has(connection.remotePort)) continue;
@@ -318,7 +514,8 @@ export async function getCdpClientsByPort(ports: number[]): Promise<Map<number, 
         }
         result.set(connection.remotePort, clients);
       }
-    } catch {
+    } catch (error) {
+      if (options.strict) throw error;
       // Continue with activity/lease metadata even when the OS snapshot fails.
     }
   } else {
@@ -328,10 +525,14 @@ export async function getCdpClientsByPort(ports: number[]): Promise<Map<number, 
     // 这里列出全部 ESTABLISHED TCP，再用下面的 portSet 在代码里过滤，稳。
     let stdout = "";
     try {
-      ({ stdout } = await execFileAsync("lsof", ["-nP", "-iTCP", "-sTCP:ESTABLISHED", "-Fpcn"], {
-        maxBuffer: 1024 * 1024 * 8
-      }));
-    } catch {
+      const result = await execFileAsync("lsof", ["-nP", "-iTCP", "-sTCP:ESTABLISHED", "-Fpcn"], {
+        maxBuffer: 1024 * 1024 * 8,
+        ...(options.strict ? { timeout: 8000 } : {})
+      });
+      if (options.strict && String(result.stderr || '').trim()) throw new Error('PROFILE_TCP_SCAN_INCOMPLETE');
+      stdout = result.stdout;
+    } catch (error) {
+      if (options.strict && !emptyLsofResult(error)) throw error;
       stdout = "";
     }
 
@@ -340,27 +541,34 @@ export async function getCdpClientsByPort(ports: number[]): Promise<Map<number, 
     for (const line of stdout.split("\n")) {
       if (line.startsWith("p")) {
         pid = Number(line.slice(1)) || null;
+        if (options.strict && (!Number.isSafeInteger(pid) || Number(pid) <= 0)) throw new Error('PROFILE_TCP_SCAN_INVALID_ROW');
         label = "";
         continue;
       }
       if (line.startsWith("c")) {
+        if (options.strict && pid === null) throw new Error('PROFILE_TCP_SCAN_INVALID_ROW');
         label = line.slice(1).trim();
         continue;
       }
+      if (line.startsWith('f') && pid !== null && line.length > 1) continue;
       if (line.startsWith("n") && pid !== null) {
+        const endpoints = line.slice(1).match(/^.+:(\d+)->.+:(\d+)$/);
+        if (options.strict && (!endpoints || !isValidTcpPort(Number(endpoints[1])) || !isValidTcpPort(Number(endpoints[2])))) throw new Error('PROFILE_TCP_SCAN_INVALID_ROW');
         if (pid === process.pid) continue;
         const port = parseCdpClientRemotePort(line.slice(1));
         if (port === null || !portSet.has(port)) continue;
         const clients = result.get(port) || [];
         if (!clients.some((client) => client.pid === pid)) clients.push({ pid, label: label || "unknown" });
         result.set(port, clients);
+        continue;
       }
+      if (options.strict && line.trim()) throw new Error('PROFILE_TCP_SCAN_INVALID_ROW');
     }
   }
 
-  await dropOwnAppClients(result);
+  await dropOwnAppClients(result, options);
   await applyClientContexts(result);
-  await applyAgentBrowserSessionActivities(result, targetPorts);
+  await applyAgentBrowserSessionActivities(result, targetPorts, presentation.includeActivityRepository !== false);
   applyDelegatedAgentBrowserProfileLeases(result, targetPorts);
   collapseDuplicateNamedSessionClients(result);
   // 同端口多条连接按“最近活动”降序：UI 主展示（表格药丸/tooltip 首条/行内时间）取的是
@@ -458,9 +666,10 @@ export function clientFromDelegatedAgentBrowserProfileLease(lease: AgentBrowserP
 
 async function applyAgentBrowserSessionActivities(
   byPort: Map<number, CdpClientInfo[]>,
-  targetPorts: number[]
+  targetPorts: number[],
+  includeRepository = true
 ): Promise<void> {
-  const activityClientsByPort = await readActiveAgentBrowserSessionActivityClientsByPort(targetPorts);
+  const activityClientsByPort = await readActiveAgentBrowserSessionActivityClientsByPort(targetPorts, undefined, undefined, { includeRepository });
   for (const [port, activityClients] of activityClientsByPort) {
     const clients = byPort.get(port) || [];
     for (const activityClient of activityClients) {
@@ -491,7 +700,7 @@ async function applyAgentBrowserSessionActivities(
 // 注意只按“可执行路径 == 本进程 execPath”精确匹配，绝不能按进程名 Electron 过滤——
 // VS Code 等一大票工具都是 Electron 壳，它们连 CDP 时可能是真驱动。
 // ps 查询失败或查不到某 pid 时保守放行（宁可多显示，不可漏掉真驱动方）。
-async function dropOwnAppClients(byPort: Map<number, CdpClientInfo[]>): Promise<void> {
+async function dropOwnAppClients(byPort: Map<number, CdpClientInfo[]>, options: RuntimeScanOptions = {}): Promise<void> {
   const pids = uniqueNumbers([...byPort.values()].flat().map((client) => client.pid));
   if (!pids.length) {
     return;
@@ -500,7 +709,7 @@ async function dropOwnAppClients(byPort: Map<number, CdpClientInfo[]>): Promise<
   const ownPids = new Set<number>();
   if (process.platform === "win32") {
     try {
-      const snapshot = await getWindowsSystemSnapshot();
+      const snapshot = options.windowsSnapshot || await getWindowsSystemSnapshot();
       const ownExecutable = normalizeFilesystemPath(process.execPath);
       for (const processInfo of snapshot.processes) {
         if (pids.includes(processInfo.pid) && processInfo.executablePath && normalizeFilesystemPath(processInfo.executablePath) === ownExecutable) {
@@ -707,13 +916,16 @@ export function externalInstanceLabel(userDataDir: string): string {
   return path.basename(userDataDir) || userDataDir;
 }
 
-export async function findExternalChromeInstances(knownUserDataDirs: string[]): Promise<ExternalChromeInstance[]> {
+export async function findExternalChromeInstances(
+  knownUserDataDirs: string[], options: RuntimeScanOptions = {}, presentation: { includeDisplayCdpUrl?: boolean } = {}
+): Promise<ExternalChromeInstance[]> {
   const known = new Set(knownUserDataDirs.map(normalizeFilesystemPath));
 
   let processes: RuntimeProcessInfo[] = [];
   try {
-    processes = await listRuntimeProcesses();
-  } catch {
+    processes = await listRuntimeProcesses(options);
+  } catch (error) {
+    if (options.strict) throw error;
     return [];
   }
 
@@ -747,8 +959,10 @@ export async function findExternalChromeInstances(knownUserDataDirs: string[]): 
   }
 
   const instances = [...byDir.values()];
+  // Admission needs PID/port/occupancy evidence, not a clickable display URL.
+  // Skipping this probe does not erase a declared port or a failed scan.
   await Promise.all(
-    instances.map(async (instance) => {
+    (presentation.includeDisplayCdpUrl === false ? [] : instances).map(async (instance) => {
       if (instance.cdpPort === null) {
         return;
       }
@@ -825,7 +1039,7 @@ export async function getChromeProcessPids(): Promise<number[]> {
   }
 }
 
-function windowsOpenProfilePids(profilePaths: string[], processes: WindowsProcessInfo[]): Map<string, number[]> {
+function windowsOpenProfilePids(profilePaths: string[], processes: readonly WindowsProcessInfo[], options: RuntimeScanOptions = {}): Map<string, number[]> {
   const result = new Map<string, number[]>();
   const mainProcesses = processes.filter((processInfo) => isGoogleChromeMainProcess(processInfo.commandLine));
   const byPid = new Map(processes.map((processInfo) => [processInfo.pid, processInfo]));
@@ -835,7 +1049,7 @@ function windowsOpenProfilePids(profilePaths: string[], processes: WindowsProces
     while (current && !seen.has(current.pid)) {
       seen.add(current.pid);
       if (isGoogleChromeMainProcess(current.commandLine)) return current.pid;
-      current = byPid.get(current.parentPid);
+      current = windowsParent(current, byPid, options);
     }
     return null;
   };
@@ -846,13 +1060,17 @@ function windowsOpenProfilePids(profilePaths: string[], processes: WindowsProces
       const command = processInfo.commandLine;
       const profileDirectory = parseProfileDirectoryFlag(command);
       if (profileDirectory === dirName || normalizeFilesystemPath(command).includes(normalizeFilesystemPath(profilePath))) {
+        if (options.strict) requireWindowsIdentity(processInfo, options, 'windows_rm_birth_join', 'profile_command');
         matched.add(processInfo.pid);
         const mainPid = mainPidFor(processInfo);
         if (mainPid) matched.add(mainPid);
       }
     }
     if (dirName === "Default") {
-      for (const processInfo of mainProcesses.filter((item) => isImplicitDefaultChromeProcess(item.commandLine))) matched.add(processInfo.pid);
+      for (const processInfo of mainProcesses.filter((item) => isImplicitDefaultChromeProcess(item.commandLine))) {
+        if (options.strict) requireWindowsIdentity(processInfo, options, 'windows_rm_birth_join', 'profile_command');
+        matched.add(processInfo.pid);
+      }
     }
     if (matched.size) result.set(profilePath, [...matched]);
   }

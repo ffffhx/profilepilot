@@ -24,7 +24,7 @@ export function renderControlPreferencesModal(): string {
         <label class="control-preferences-label" for="control-preferences-editor">${labels[domain]}控制偏好 <span>支持普通文字和 Markdown</span></label>
         <textarea id="control-preferences-editor" data-domain="${domain}" spellcheck="false" ${unavailable ? "disabled" : ""} placeholder="${editor.loading ? "正在读取偏好…" : examples[domain]}">${escapeHtml(editor.draft)}</textarea>
         <div class="control-preferences-options"><span data-control-preferences-state role="status">${statusText(editor)}</span>${snapshot && snapshot.locations.length > 1 ? `<label><input type="checkbox" data-control-preferences-sync ${editor.syncAll ? "checked" : ""} ${unavailable ? "disabled" : ""}> 同时同步到其他 Agent</label>` : ""}</div>
-        <p class="control-preferences-hint">${domain === "phone" ? "偏好用于指导 Agent；手机授权、暂停和结束控制仍由手机控制机制执行。" : "偏好用于指导 Agent；已有的连接权限和用户接管机制继续生效。"}</p>
+        <p class="control-preferences-hint">${snapshot?.defaulted ? `当前为随 Skill 发布的通用默认，只包含后台操作、接管和确认规则；保存后写入本地偏好并在更新时保留。${domain === "phone" ? "手机授权、暂停和结束控制仍由手机控制机制执行。" : ""}` : domain === "phone" ? "偏好用于指导 Agent；手机授权、暂停和结束控制仍由手机控制机制执行。" : "偏好用于指导 Agent；已有的连接权限和用户接管机制继续生效。"}</p>
         ${snapshot ? `<details class="control-preferences-location"><summary>保存位置</summary><p>${escapeHtml(snapshot.path)}</p><p>更新 ProfilePilot CLI 时会保留这些个人偏好。</p></details>` : ""}
       </div>
       ${otherDirty ? `<p class="control-preferences-other-draft">${otherDirty} Tab 还有未保存的修改。</p>` : ""}

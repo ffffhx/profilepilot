@@ -72,7 +72,9 @@ test('changed APK is rejected before installation; request cannot be replayed in
   const h = harness(t), checked = await inspectApk(h.apk), task = await owner(h);
   fs.appendFileSync(h.apk, 'changed');
   await h.service.installWrapper(task.lease, task.device.state.generation, h.apk, checked.sha256);
-  assert.match((await finished(h.service, task.lease)).error, /APK 已改变/);
+  const result = await finished(h.service, task.lease);
+  assert.match(result.error, /APK 已改变/); assert.equal(result.code, 'PHONE_INVALID_REQUEST');
+  assert.equal(result.recovery.actionOutcome, 'not-executed');
   await assert.rejects(h.service.installWrapper(task.lease, task.device.state.generation, h.apk, checked.sha256), /不要重试/);
   assert.equal(h.calls.filter(args => args[2] === 'install').length, 0);
 });
@@ -86,6 +88,8 @@ test('phone-side pause aborts the install process, preserves pause and reports u
   await h.service.installWrapper(task.lease, task.device.state.generation, h.apk, checked.sha256);
   const result = await finished(h.service, task.lease);
   assert.equal(result.status, 'interrupted'); assert.match(result.error, /核对手机上的安装结果/);
+  assert.equal(result.code, 'PHONE_USER_IN_CONTROL'); assert.equal(result.recovery.actionOutcome, 'unknown');
+  assert.equal(result.recovery.requiresUser, true);
   assert.equal(h.state.phase, 'paused');
   assert.equal(h.calls.filter(args => args[2] === 'install').length, 1);
 });
@@ -96,6 +100,7 @@ test('Android failure output is not reported as success', async t => {
   await h.service.installWrapper(task.lease, task.device.state.generation, h.apk, checked.sha256);
   const result = await finished(h.service, task.lease);
   assert.equal(result.status, 'failed'); assert.match(result.error, /INSTALL_FAILED_UPDATE_INCOMPATIBLE/);
+  assert.equal(result.code, 'PHONE_INSTALL_FAILED'); assert.equal(result.recovery.actionOutcome, 'completed');
 });
 
 test('CLI manages one lease and resolves Unicode paths without exposing arbitrary ADB flags', async t => {
@@ -111,7 +116,7 @@ test('CLI manages one lease and resolves Unicode paths without exposing arbitrar
   assert.deepEqual(calls.map(c => c.method), ['wrapper-start', 'wrapper-install', 'wrapper-install-status', 'wrapper-stop']);
   assert.equal(calls[1].params.apk, h.apk);
   calls.length = 0;
-  assert.equal(await runPhoneCli(['install', '--device', h.id, '--apk', h.apk, '-g'], request, io), 1);
+  assert.equal(await runPhoneCli(['install', '--device', h.id, '--apk', h.apk, '-g'], request, io), 2);
   assert.equal(calls.length, 0);
 });
 
@@ -120,4 +125,27 @@ test('non-APK, folders and malformed archives fail before acquiring phone contro
   await assert.rejects(inspectApk(h.root), /APK/);
   fs.writeFileSync(h.apk, 'not a zip');
   await assert.rejects(inspectApk(h.apk), /APK/);
+});
+
+test('install CLI preserves typed acquisition and post-submission outcomes despite cleanup failure', async t => {
+  const { phoneFailure } = loadCli('src/main/phones/errors.ts');
+  const h = harness(t);
+  for (const submitted of [false, true]) {
+    const calls = []; let output = '';
+    const code = submitted ? 'PHONE_USER_IN_CONTROL' : 'PHONE_SESSION_CONFLICT';
+    const failure = phoneFailure(code, 'fixture rejection', submitted ? 'unknown' : 'not-executed');
+    const request = async command => {
+      calls.push(command.method);
+      if (command.method === 'wrapper-start') return submitted
+        ? { ok: true, data: { lease: 'owned', device: { state: { generation: 1 } } } }
+        : { ok: false, error: { code, message: failure.message, details: failure.details } };
+      if (command.method === 'wrapper-install-status') return { ok: true, data: { status: 'interrupted', error: failure.message, code, recovery: failure.details.recovery } };
+      if (command.method === 'wrapper-stop') return { ok: false, error: { code: 'CLEANUP_FAILED', message: 'cleanup failed' } };
+      return { ok: true, data: {} };
+    };
+    assert.equal(await runPhoneCli(['install', '--device', h.id, '--apk', h.apk], request, { stdout: { write() {} }, stderr: { write(v) { output += v; } } }), 75);
+    const result = JSON.parse(output); assert.equal(result.code, code);
+    assert.equal(result.recovery.actionOutcome, submitted ? 'unknown' : 'not-executed');
+    assert.deepEqual(calls, submitted ? ['wrapper-start', 'wrapper-install', 'wrapper-install-status', 'wrapper-stop'] : ['wrapper-start']);
+  }
 });

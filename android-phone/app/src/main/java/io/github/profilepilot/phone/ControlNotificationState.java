@@ -17,12 +17,13 @@ record ControlNotificationState(Kind kind, String title, String text, String det
         else if (paused) kind = Kind.PAUSED;
         else if (active) kind = viewing ? Kind.VIEWING : Kind.CONTROLLING;
         else kind = Kind.CONNECTED;
+        boolean screen = paused && "screen".equals(session.pauseCause);
         String title = switch (kind) {
             case WAITING -> "等待电脑连接";
             case CONNECTED -> "电脑已连接";
             case VIEWING -> "电脑正在查看";
             case CONTROLLING -> "电脑正在控制";
-            case PAUSED -> viewing ? "查看已暂停" : "控制已暂停";
+            case PAUSED -> screen ? viewing ? "查看等待解锁" : "控制等待解锁" : viewing ? "查看已暂停" : "控制已暂停";
             case DISCONNECTED -> "电脑连接中断";
         };
         String summary = switch (kind) {
@@ -30,7 +31,7 @@ record ControlNotificationState(Kind kind, String title, String text, String det
             case CONNECTED -> "当前未控制手机";
             case VIEWING -> "仅查看屏幕，不能点击或输入";
             case CONTROLLING -> "可读取屏幕、点击和输入，随时可暂停";
-            case PAUSED -> "当前由你操作，需手动继续";
+            case PAUSED -> screen ? "手机已熄屏，解锁后自动继续" : "当前由你操作，需手动继续";
             case DISCONNECTED -> "已停止接受指令，等待电脑重新连接";
         };
         String computer = session.computer.isBlank() ? "电脑" : session.computer;

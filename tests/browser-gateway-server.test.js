@@ -1759,6 +1759,40 @@ test("Gateway preserves flattened Agent auto-attach ownership without leaking ot
   }
 });
 
+test("Gateway clears browser and page auto-attach controllers after an Electron session ends", async () => {
+  for (const disablePage of [false, true]) {
+    const h = await makeHarness({}, "electron");
+    try {
+      h.backend.onSend = text => {
+        const message = JSON.parse(text);
+        const result = message.method === "Target.attachToTarget" ? {sessionId:"page-flat"} : {};
+        queueMicrotask(() => h.backend.emit(JSON.stringify({id:message.id, sessionId:message.sessionId, result})));
+      };
+      const acquired = h.control.acquire({publicPort:h.port, sessionId:"electron-cleanup", daemonInstanceId:"driver"});
+      const ws = await openWebSocket(`ws://127.0.0.1:${h.port}/devtools/browser/gateway?ticket=${encodeURIComponent(acquired.ticket)}`);
+      let id = 0;
+      const command = async (method, params, sessionId) => {
+        const response = nextMessage(ws);
+        ws.send(JSON.stringify({id:++id, method, params, sessionId}));
+        assert.equal((await response).error, undefined);
+      };
+      await command("Target.setAutoAttach", {autoAttach:true, waitForDebuggerOnStart:true, flatten:true});
+      await command("Target.attachToTarget", {targetId:"page", flatten:true});
+      await command("Target.setAutoAttach", {autoAttach:true, waitForDebuggerOnStart:true, flatten:true}, "page-flat");
+      if (disablePage) await command("Target.setAutoAttach", {autoAttach:false, waitForDebuggerOnStart:false, flatten:true}, "page-flat");
+      h.backend.sent.length = 0;
+      ws.close();
+      await waitFor(() => h.backend.sent.map(JSON.parse).some(message => message.method === "Target.detachFromTarget"), "page detached");
+      const cleanup = h.backend.sent.map(JSON.parse);
+      const resets = cleanup.filter(message => message.method === "Target.setAutoAttach" && !message.params.autoAttach);
+      assert.ok(resets.some(message => !message.sessionId), "browser controller must not leave future windows waiting for a debugger");
+      assert.ok(resets.some(message => message.sessionId === "page-flat"), "page controller is cleaned too");
+      assert.ok(resets.every(message => message.params.waitForDebuggerOnStart === false));
+      assert.ok(cleanup.indexOf(resets.at(-1)) < cleanup.findIndex(message => message.method === "Target.detachFromTarget"));
+    } finally { await h.cleanup(); }
+  }
+});
+
 test("Gateway finishes old Agent CDP cleanup before accepting a reconnect for the same Session", async () => {
   const h = await makeHarness();
   try {

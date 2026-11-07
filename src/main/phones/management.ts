@@ -11,6 +11,56 @@ export async function executePhoneCommand(command: PhoneManagementCommand, servi
   }
 }
 async function executeValidatedPhoneCommand(command: PhoneManagementCommand, service: PhonesService, source: PhoneCommandSource): Promise<unknown> {
+  if (command.method === "internet-configure") return service.internet.configure(command.params);
+  if (command.method === "internet-status" || command.method === "internet-pair") {
+    z.object({}).strict().parse(command.params || {});
+    return command.method === "internet-pair" ? service.internet.pair() : service.internet.status();
+  }
+  if (command.method === "internet-forget") {
+    const { id } = z.object({ id: z.string().regex(/^internet-[a-f0-9-]{36}$/) }).strict().parse(command.params);
+    return service.forgetInternet(id);
+  }
+  if (command.method === "internet-install-status") {
+    const { id, jobId } = z.object({ id: z.string().regex(/^internet-[a-f0-9-]{36}$/), jobId: z.string().uuid() }).strict().parse(command.params);
+    return service.internetInstallReceipt(id, jobId);
+  }
+  if (command.method === "iphone-add") return service.iphones.add(command.params);
+  if (command.method === "iphone-usb-start") return service.iphones.startUsb(command.params);
+  if (command.method === "iphone-signing-setup") { z.object({}).strict().parse(command.params || {}); return service.iphones.signing.setup(); }
+  if (command.method === "iphone-sign-sideloadly") {
+    const p = z.object({ udid: z.string(), bundleId: z.string().optional() }).strict().parse(command.params);
+    return service.iphones.maintain(p.udid, () => service.iphones.signing.repair(p.udid, p.bundleId));
+  }
+  if (command.method === "iphone-usb-stop") return service.iphones.stopUsb(z.object({ udid: z.string() }).strict().parse(command.params).udid);
+  if (command.method === "iphone-usb-status" || command.method === "iphone-prepare-wda") {
+    z.object({}).strict().parse(command.params || {});
+    return command.method === "iphone-usb-status" ? service.iphones.usb.status() : service.iphones.tools.prepareWda();
+  }
+  if (command.method === "iphone-install-signed") {
+    const p = z.object({ udid: z.string(), ipa: z.string() }).strict().parse(command.params);
+    return service.iphones.maintain(p.udid, () => service.iphones.tools.installSigned(p.udid, p.ipa));
+  }
+  if (["iphone-setup", "iphone-doctor", "iphone-devices"].includes(command.method)) {
+    z.object({}).strict().parse(command.params || {});
+    return command.method === "iphone-setup" ? service.iphones.tools.setup() : command.method === "iphone-devices" ? service.iphones.tools.devices() : service.iphones.tools.doctor();
+  }
+  if (command.method === "iphone-devmode-reveal") return service.iphones.tools.revealDeveloperMode(z.object({ udid: z.string() }).strict().parse(command.params).udid);
+  if (command.method === "iphone-forget") return service.iphones.forget(z.object({ id: z.string() }).strict().parse(command.params).id);
+  const deviceId = command.params && typeof command.params === "object" && "id" in command.params ? String(command.params.id) : "";
+  if (deviceId.startsWith("iphone-")) {
+    const idOnly = () => z.object({ id: z.string() }).strict().parse(command.params).id;
+    if (command.method === "connect") { const p = z.object({ id: z.string(), update: z.boolean().optional() }).strict().parse(command.params); return service.iphones.connect(p.id); }
+    if (command.method === "disconnect") return service.iphones.disconnect(idOnly());
+    if (command.method === "start") return service.iphones.start(command.params);
+    if (command.method === "action") return service.iphones.perform(command.params as any);
+    if (["pause", "resume", "stop"].includes(command.method)) {
+      const p = z.object({ id: z.string(), expected: z.object({ sessionId: z.string(), generation: z.number().int().nonnegative() }).strict().optional() }).strict().parse(command.params);
+      return service.iphones.control(p.id, command.method as "pause" | "resume" | "stop", p.expected);
+    }
+    if (command.method === "rename") { const p = z.object({ id: z.string(), name: z.string() }).strict().parse(command.params); service.iphones.rename(p.id, p.name); return service.snapshot(); }
+    if (command.method === "inspect") { await service.iphones.connect(idOnly()); return service.snapshot(); }
+    throw new Error("此命令不适用于 iPhone。使用 start、action、pause、resume、stop；Android 的 ADB、APK 和无障碍设置不能用于 iPhone。");
+  }
   if (command.method === "accessibility-repair") {
     const p = z.object({ id: z.string().min(1), autoRestore: z.boolean().optional() }).strict().parse(command.params);
     return service.repairAccessibility(p.id, p.autoRestore);
@@ -78,6 +128,10 @@ async function executeValidatedPhoneCommand(command: PhoneManagementCommand, ser
     const p = z.object({ lease: z.string().uuid(), generation: z.number().int().nonnegative(), apk: z.string().min(1).max(32768), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict().parse(command.params);
     return service.installWrapper(p.lease, p.generation, p.apk, p.sha256);
   }
+  if (command.method === "wrapper-internet-launch") {
+    const p = z.object({ lease: z.string().uuid(), generation: z.number().int().nonnegative(), packageName: z.string().regex(/^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)*$/).max(255) }).strict().parse(command.params);
+    return service.internetLaunchWrapper(p.lease, p.generation, p.packageName);
+  }
   if (command.method === "wrapper-install-status") return service.installWrapperStatus(z.object({ lease: z.string().uuid() }).strict().parse(command.params).lease);
   if (command.method === "cloud-pair") return service.cloudPair(z.object({ url: z.string().max(2000).optional() }).strict().parse(command.params || {}).url);
   if (command.method === "cloud-forget") return service.cloudForget(z.object({ id: z.string().regex(/^cloud-[a-f0-9-]{36}$/) }).strict().parse(command.params).id);
@@ -88,7 +142,7 @@ async function executeValidatedPhoneCommand(command: PhoneManagementCommand, ser
     return service.addDeviceCode(input.code, input.url);
   }
   if (command.method === "device-forget") return service.forgetRegistered(z.object({ id: z.string().regex(/^registered-[a-f0-9-]{36}$/) }).strict().parse(command.params).id);
-  const method = z.enum(["list", "connect", "rename", "start", "pause", "resume", "stop", "action", "preview", "settings", "emulator-list", "emulator-connect", "wireless-discover", "wireless-pair", "wireless-connect", "wrapper-start", "wrapper-pulse", "wrapper-state", "wrapper-action", "wrapper-stop"]).parse(command.method);
+  const method = z.enum(["list", "connect", "rename", "start", "pause", "resume", "stop", "action", "preview", "settings", "wake", "unlock", "unlock-stored", "unlock-secret-save", "unlock-secret-delete", "unattended", "emulator-list", "emulator-connect", "wireless-discover", "wireless-pair", "wireless-connect", "wrapper-start", "wrapper-pulse", "wrapper-state", "wrapper-action", "wrapper-stop"]).parse(command.method);
   if (method === "emulator-list") return service.listEmulators();
   if (method === "emulator-connect") return service.connectEmulator(z.object({ name: z.string().regex(/^[\w.-]{1,200}$/) }).strict().parse(command.params).name);
   if (method === "wireless-discover") return service.discoverWireless(z.object({ id: z.string().optional() }).strict().parse(command.params || {}).id);
@@ -111,14 +165,37 @@ async function executeValidatedPhoneCommand(command: PhoneManagementCommand, ser
     if (method === "wrapper-state") return service.wrapperState(lease);
     return service.stopWrapper(lease);
   }
-  if (method === "list") return service.refresh();
+  if (method === "wake") return service.wake(z.object({ id: z.string().min(1).max(200) }).strict().parse(command.params).id);
+  if (method === "unlock-stored") {
+    const p = z.object({ id: z.string().min(1).max(200), patternGeometry: z.string().min(1).max(100).optional() }).strict().parse(command.params);
+    return service.unlockStored(p.id, p.patternGeometry);
+  }
+  if (method === "unlock-secret-save") {
+    // The value is validated and encrypted in the service; it is never returned.
+    const p = z.object({ id: z.string().min(1).max(200), kind: z.enum(["pattern", "credential"]), value: z.string().min(1).max(64), allowAgent: z.boolean().default(true) }).strict().parse(command.params);
+    return service.saveUnlockSecret(p.id, { kind: p.kind, value: p.value, allowAgent: p.allowAgent });
+  }
+  if (method === "unlock-secret-delete") return service.deleteUnlockSecret(z.object({ id: z.string().min(1).max(200) }).strict().parse(command.params).id);
+  if (method === "unattended") {
+    const p = z.object({ id: z.string().min(1).max(200), op: z.enum(["on", "off", "status"]).default("status") }).strict().parse(command.params);
+    return service.unattended(p.id, p.op);
+  }
+  if (method === "unlock") {
+    // Credentials only travel over the local management channel; errors never echo them.
+    const p = z.object({ id: z.string().min(1).max(200), credential: z.string().min(1).max(64).optional(), pattern: z.string().min(4).max(9).optional(), patternGeometry: z.string().min(1).max(100).optional() }).strict().parse(command.params);
+    if (p.pattern !== undefined) return service.unlockPattern(p.id, p.pattern, p.patternGeometry);
+    if (p.credential === undefined) throw new Error("unlock 需要 credential 或 pattern。");
+    if (p.patternGeometry !== undefined) throw new Error("patternGeometry 只能和 pattern 一起使用。");
+    return service.unlock(p.id, p.credential);
+  }
+  if (method === "list") { await service.iphones.refresh(); return service.refresh(); }
   if (method === "settings") {
     const input = z.object({ id: z.string(), setting: z.enum(["accessibility", "overlay", "notifications", "developerOptions", "usbDebugging", "wirelessDebugging"]) }).strict().parse(command.params);
     return service.openSettings(input.id, input.setting);
   }
   if (method === "action") return service.perform(z.object({ id: z.string(), sessionId: z.string(), generation: z.number(), requestId: z.string(), action: phoneActionSchema }).strict().parse(command.params));
   if (method === "rename") { const input = z.object({ id: z.string(), name: z.string() }).strict().parse(command.params); await service.rename(input.id, input.name); return service.snapshot(); }
-  if (method === "start") { const input = z.object({ id: z.string(), mode: z.enum(["view", "control"]).default("control"), controller: z.string().default("本机用户"), task: z.string().default("") }).strict().parse(command.params); return service.start(input.id, input.mode, input.controller, input.task, source); }
+  if (method === "start") { const input = z.object({ id: z.string(), mode: z.enum(["view", "control"]).default("control"), controller: z.string().default("本机用户"), task: z.string().default(""), keepScreenOn: z.boolean().default(true) }).strict().parse(command.params); return service.start(input.id, input.mode, input.controller, input.task, source, input.keepScreenOn); }
   const { id } = z.object({ id: z.string() }).strict().parse(command.params);
   if (method === "preview") return service.preview(id);
   if (method === "pause" || method === "resume" || method === "stop") return service.control(id, method);

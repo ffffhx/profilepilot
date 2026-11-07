@@ -1,6 +1,20 @@
 import type { PhoneDevice, PhoneNearbyApp, PhoneWirelessDiscovery, PhoneWirelessService } from "../shared/phones";
 
 const escape = (value: string) => value.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
+/** Electron preserves Error.message across IPC, but drops custom Error fields. */
+export function showWirelessFailure(container: HTMLElement, error: unknown): void {
+  const message = (error instanceof Error ? error.message : String(error)).replace(/^Error invoking remote method '[^']+': (?:Error|WirelessFailure): /, "");
+  const [guidance, ...diagnostic] = message.split("\n诊断编号：");
+  container.replaceChildren();
+  const text = document.createElement("p"); text.textContent = guidance; container.append(text);
+  if (diagnostic.length) {
+    const details = document.createElement("details"), summary = document.createElement("summary"), body = document.createElement("p");
+    summary.textContent = "诊断详情";
+    body.textContent = `诊断编号：${diagnostic.join("\n诊断编号：")}\n可用此编号在 ProfilePilot 诊断日志中查找对应记录。`;
+    details.append(summary, body); container.append(details);
+  }
+  container.hidden = false;
+}
 export function openPhoneWireless(onConnected: (device: PhoneDevice, prepare: boolean) => void, deviceId?: string): void {
   if (document.querySelector(".phone-wireless-dialog")) return;
   const dialog = document.createElement("dialog");
@@ -85,7 +99,10 @@ export function openPhoneWireless(onConnected: (device: PhoneDevice, prepare: bo
     }
     const previousServices = services;
     services = result.services.filter(item => item.kind === (step === 2 ? "pairing" : "connect") && (!selectedApp || item.address.split(":")[0] === selectedApp.ip) && (step !== 3 || !pairingHost || item.address.split(":")[0] === pairingHost));
-    label!.textContent = result.error || (services.length ? "已检查当前端口，点击可达地址填入" : result.phoneIps?.length ? `手机当前 IP：${result.phoneIps.join("、")}，尚未发现连接端口` : "暂未发现，可重新查找或手动填写");
+    label!.textContent = result.error ? "自动发现失败，可以手动填写地址" : (services.length ? "已检查当前端口；可达不代表已配对，点击地址填入" : result.phoneIps?.length ? `手机当前 IP：${result.phoneIps.join("、")}，尚未发现连接端口` : "暂未发现，可重新查找或手动填写");
+    const errorLabel = dialog.querySelector<HTMLElement>(".wireless-error")!;
+    errorLabel.hidden = !result.error;
+    if (result.error) showWirelessFailure(errorLabel, new Error(result.error));
     const list = dialog.querySelector<HTMLElement>("[data-services]")!;
     list.innerHTML = services.map((item, i) => `<button type="button" data-candidate="${i}" data-unreachable="${item.reachable === false}" ${item.reachable === false ? "disabled" : ""} title="${escape(item.reason || "")}">${escape(item.address)}${item.reachable === false ? " · 不可达" : item.reachable ? " · 可达" : ""}</button>`).join("");
     const available = services.filter(item => item.reachable !== false);
@@ -123,7 +140,7 @@ export function openPhoneWireless(onConnected: (device: PhoneDevice, prepare: bo
     }));
     const errorLabel = dialog.querySelector<HTMLElement>(".wireless-error")!;
     errorLabel.hidden = !result.error || apps.length > 0;
-    if (result.error && !apps.length) errorLabel.textContent = result.error;
+    if (result.error && !apps.length) showWirelessFailure(errorLabel, new Error(result.error));
   }
   async function autoConnect(): Promise<void> {
     if (busy || !deviceId) return;
@@ -141,7 +158,7 @@ export function openPhoneWireless(onConnected: (device: PhoneDevice, prepare: bo
     dialog.querySelectorAll<HTMLInputElement | HTMLButtonElement>("input,button").forEach(element => element.disabled = true);
     dialog.setAttribute("aria-busy", "true");
     try { await action(); }
-    catch (error) { if (dialog.isConnected) { const label = dialog.querySelector<HTMLElement>(".wireless-error")!; label.hidden = false; label.textContent = (error as Error).message.replace(/^Error invoking remote method '[^']+': Error: /, ""); } }
+    catch (error) { if (dialog.isConnected) showWirelessFailure(dialog.querySelector<HTMLElement>(".wireless-error")!, error); }
     finally {
       busy = false; dialog.removeAttribute("aria-busy");
       if (submit?.isConnected) submit.textContent = submitLabel || "重试";

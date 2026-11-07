@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { xianyuSearchSchema, xianyuDetailSchema, xianyuRegionsSchema } from "./xianyu-schema";
 
 const query = z.string().trim().min(1).max(200);
 const page = z.number().int().min(1).max(100).default(1);
@@ -8,6 +9,9 @@ const cursor = z.string().max(300).optional();
 const itemOffset = z.number().int().min(0).max(5000).default(0);
 const url = z.string().url().max(2000);
 const definitions = {
+  "xianyu.search": { batch: 4, title: "闲鱼商品搜索", schema: xianyuSearchSchema },
+  "xianyu.detail": { batch: 4, title: "闲鱼商品详情", schema: xianyuDetailSchema },
+  "xianyu.regions": { batch: 4, title: "闲鱼地区选项", schema: xianyuRegionsSchema },
   "boss.search": { batch: 1, title: "BOSS 岗位搜索", schema: z.object({ query, city: z.string().regex(/^\d{9}$/), page, limit: limit.transform(n => Math.min(n, 30)), itemOffset }) },
   "boss.detail": { batch: 1, title: "BOSS 岗位 JD", schema: z.object({ id, securityId: z.string().min(1).max(1000).optional() }) },
   "bilibili.search": { batch: 1, title: "Bilibili 视频搜索", schema: z.object({ query, page, limit, sort: z.enum(["totalrank", "click", "pubdate", "dm", "stow"]).default("totalrank") }) },
@@ -51,13 +55,17 @@ export function planSiteAdapter(input: SiteInput): SitePlan {
   if (!Object.hasOwn(definitions, input?.operation)) throw new Error("未知网站操作；先用 sites 列出适配能力。");
   const operation = input.operation as SiteOperation;
   const params = definitions[operation].schema.strict().parse(input.params ?? {}) as Record<string, any>;
+  if (operation === "xianyu.search" && params.minPrice !== undefined && params.maxPrice !== undefined && params.minPrice > params.maxPrice) throw new Error("最低价格不能高于最高价格。");
+  if (operation === "xianyu.search" && params.region?.area && !params.region.city) throw new Error("指定区县时需要同时提供城市。");
   const site = operation.split(".")[0], q = encodeURIComponent(params.query || "");
   let target = "", reuseOrigin = true;
   const hosts: Record<string, string[]> = {
+    xianyu: ["www.goofish.com"],
     boss: ["www.zhipin.com"], bilibili: ["www.bilibili.com", "search.bilibili.com"], zhihu: ["www.zhihu.com"],
     smzdm: ["search.smzdm.com"], reddit: ["www.reddit.com"], xiaohongshu: ["www.xiaohongshu.com"],
     wechat: ["weixin.sogou.com", "mp.weixin.qq.com"], youtube: ["www.youtube.com"]
   };
+  if (site === "xianyu") target = operation === "xianyu.detail" ? `https://www.goofish.com/item?id=${params.id}` : operation === "xianyu.search" ? `https://www.goofish.com/search?q=${q}` : "https://www.goofish.com/";
   if (site === "boss") { target = operation === "boss.detail" ? `https://www.zhipin.com/job_detail/${params.id}.html` : `https://www.zhipin.com/web/geek/jobs?query=${q}&city=${params.city}&page=${params.page}`; reuseOrigin = operation === "boss.detail" && Boolean(params.securityId); }
   if (site === "bilibili") target = "https://www.bilibili.com/";
   if (site === "zhihu") target = "https://www.zhihu.com/hot";

@@ -15,6 +15,10 @@ export interface PhoneSessionState {
   generation: number;
   phase: PhonePhase;
   mode: "view" | "control";
+  /** Only "screen" pauses resume by themselves after the phone is unlocked. */
+  pauseCause?: "manual" | "screen" | "permission" | "";
+  /** The companion holds the display awake while this session is active. */
+  keepScreenOn?: boolean;
   computer: string;
   controller: string;
   task: string;
@@ -23,10 +27,13 @@ export interface PhoneSessionState {
   permissions: { overlay: boolean; notifications: boolean; accessibility: boolean };
   readiness?: {
     unlocked: boolean; computerConnected: boolean; usbConnected: boolean; wifiConnected: boolean;
+    /** Opt-in idle ADB keep-alive while charging, reported by newer companions. */
+    unattended?: boolean; charging?: boolean; unattendedActive?: boolean;
     developerOptions: "enabled" | "disabled" | "unconfirmed"; usbDebugging: "enabled" | "disabled" | "unconfirmed"; wirelessDebugging: "enabled" | "disabled" | "unconfirmed";
     accessibilityService: "running" | "enabled" | "disabled" | "unknown";
     debugReasons?: Partial<Record<"developerOptions" | "usbDebugging" | "wirelessDebugging", PhoneDebugReason>>;
     appVersion?: string;
+    sdk?: number;
     network?: { wifiIpv4: string[]; adbEndpoints: { address: string; ageMs: number }[] };
   };
 }
@@ -36,7 +43,20 @@ export interface PhoneCloudStatus {
   reportedAt: number | null;
   report: { deviceId: string; name: string; permissions: PhoneSessionState["permissions"]; readiness: NonNullable<PhoneSessionState["readiness"]> } | null;
 }
+export interface PhoneUnlockSecret {
+  /** OS secure storage (DPAPI/Keychain) is usable on this machine. */
+  available: boolean;
+  saved: boolean;
+  kind: "pattern" | "credential" | null;
+  savedAt: number | null;
+  allowAgent: boolean;
+}
 export interface PhoneDevice {
+  /** Absent on older saved Android records. */
+  platform?: "android" | "ios";
+  iphone?: { endpoint: string; driver: "wda"; osVersion?: string; udid?: string };
+  /** Metadata only; the value never returns to the renderer or CLI. */
+  unlockSecret?: PhoneUnlockSecret;
   screenCamera?: ScreenCameraState;
   /** An active visual-follow lease owns capture; sidebar previews must wait. */
   visualFollowActive?: boolean;
@@ -52,7 +72,7 @@ export interface PhoneDevice {
   hardwareId?: string;
   name: string;
   model: string;
-  transport: "usb" | "wifi" | "emulator" | "cloud" | "registered";
+  transport: "usb" | "wifi" | "emulator" | "cloud" | "registered" | "internet";
   /** Registration is metadata only; it never grants a debug/control connection. */
   registration?: { deviceId: string; source: "lan" | "code"; address?: string };
   cloud?: PhoneCloudStatus;
@@ -72,7 +92,7 @@ export interface PhoneVideoPacket { codec: string; key: boolean; timestamp: numb
 export interface PhoneVideoSession { sessionId: string; generation: number; }
 export interface PhoneWirelessService { name: string; kind: "pairing" | "connect"; address: string; source?: "phone" | "mdns" | "adb"; reachable?: boolean; reason?: string; }
 export interface PhoneNearbyApp { id: string; deviceId?: string; name: string; ip: string; version: string; variant: "debug" | "release"; wirelessDebugging: "enabled" | "disabled" | "unconfirmed"; }
-export interface PhoneWirelessDiscovery { services: PhoneWirelessService[]; error: string; apps?: PhoneNearbyApp[]; appError?: string; phoneIps?: string[]; }
+export interface PhoneWirelessDiscovery { services: PhoneWirelessService[]; error: string; apps?: PhoneNearbyApp[]; appError?: string; phoneIps?: string[]; diagnostic?: { diagnosticId: string; stage: string; reason: string }; }
 export interface PhoneSelector {
   resourceId?: string; text?: string; description?: string; className?: string; packageName?: string;
   enabled?: boolean; checked?: boolean; editable?: boolean; clickable?: boolean; scrollable?: boolean;
@@ -92,6 +112,21 @@ export interface PhoneActionResult { state: PhoneSessionState; result: unknown; 
 export interface PhoneBasicModeInput { id: string; sessionId: string; generation: number; mode: "view" | "control"; }
 export type PhoneSetting = "accessibility" | "overlay" | "notifications" | "developerOptions" | "usbDebugging" | "wirelessDebugging";
 export interface PhonesApi {
+  iphoneSetup(): Promise<import("./iphones").IphoneToolsStatus>;
+  iphoneDoctor(): Promise<import("./iphones").IphoneToolsStatus>;
+  iphonePrepareWda(): Promise<import("./iphones").IphoneWdaArtifact>;
+  iphoneUsbStart(input: { udid: string; bundleId?: string; name?: string }): Promise<import("./iphones").IphoneUsbStatus>;
+  iphoneUsbStatus(): Promise<import("./iphones").IphoneUsbStatus[]>;
+  iphoneUsbStop(udid: string): Promise<void>;
+  iphoneInstallSigned(udid: string, ipa: string): Promise<{ nextStep: string }>;
+  iphoneSelectFile(kind: "ipa"): Promise<string | null>;
+  iphoneOpenGuide(kind: "driver" | "signer"): Promise<void>;
+  iphoneShowArtifact(): Promise<void>;
+  iphoneSigningSetup(): Promise<{ ready: boolean }>;
+  iphoneSignSideloadly(udid: string, bundleId?: string): Promise<{ bundleId: string; expiresAt: string; nextStep: string }>;
+  iphoneRevealDeveloperMode(udid: string): Promise<{ udid: string; nextStep: string }>;
+  iphoneAdd(input: { endpoint: string; name?: string }): Promise<PhoneDevice>;
+  iphoneForget(id: string): Promise<void>;
   followCommand(command: import("./game-follow").FollowCommand): Promise<any>;
   cameraProbe(id: string): Promise<ScreenCameraCapabilities>;
   cameraSources(): Promise<ScreenCameraSource[]>;
@@ -129,13 +164,17 @@ export interface PhonesApi {
   videoStop(streamId: string): Promise<void>;
   openSettings(id: string, setting: PhoneSetting): Promise<void>;
   rename(id: string, name: string): Promise<void>;
-  start(id: string, mode: "view" | "control", controller: string, task: string): Promise<PhoneDevice>;
-  control(id: string, command: "pause" | "resume" | "stop"): Promise<PhoneDevice>;
+  start(id: string, mode: "view" | "control", controller: string, task: string, keepScreenOn?: boolean): Promise<PhoneDevice>;
+  control(id: string, command: "pause" | "resume" | "stop", expected?: { sessionId: string; generation: number }): Promise<PhoneDevice>;
+  wake(id: string): Promise<PhoneDevice>;
+  saveUnlockSecret(input: { id: string; kind: "pattern" | "credential"; value: string; allowAgent: boolean }): Promise<PhoneUnlockSecret>;
+  deleteUnlockSecret(id: string): Promise<{ removed: boolean } & PhoneUnlockSecret>;
   perform(input: PhoneActionInput): Promise<PhoneActionResult>;
   onChanged(listener: (snapshot: PhonesSnapshot) => void): () => void;
 }
 /** Match the companion's heartbeat-based connection, independently of task ownership. */
 export function phoneAppConnected(device: PhoneDevice, now = Date.now()): boolean {
+  if (device.platform === "ios") return device.connection === "device" && device.companion === "ready" && device.confirmedAt !== null && now - device.confirmedAt < 8000;
   return device.connection === "device" && device.companion === "ready" && !!device.state
     && device.confirmedAt !== null && now - device.confirmedAt < 8000
     && device.state.readiness?.computerConnected !== false;
@@ -149,6 +188,12 @@ export function phoneStatus(device: PhoneDevice): string {
   if (!phoneAppConnected(device) || !device.state) return "可连接";
   if (device.state.phase === "executing" && device.state.mode === "view") return "正在查看 · 获取页面";
   if (device.state.phase === "controlling") return device.state.task.trim() ? "任务进行中" : "控制会话进行中";
-  return ({ idle: "已连接，未控制", viewing: "屏幕查看中", executing: "控制中 · 执行任务", paused: "已暂停 · 手机可自行操作", stopped: "已结束", disconnected: "连接中断 · 已停止接受指令" })[device.state.phase];
+  return device.state.phase === "paused" && device.state.pauseCause === "screen"
+    ? "等待解锁 · 解锁后自动继续"
+    : ({ idle: "已连接，未控制", viewing: "屏幕查看中", executing: "控制中 · 执行任务", paused: "已暂停 · 手机可自行操作", stopped: "已结束", disconnected: "连接中断 · 已停止接受指令" })[device.state.phase];
+}
+/** A screen-off pause is waiting for an unlock, not for a manual resume click. */
+export function phoneAwaitingUnlock(device: PhoneDevice | undefined): boolean {
+  return !!device?.state && device.state.phase === "paused" && device.state.pauseCause === "screen";
 }
 export const phoneActive = (device: PhoneDevice): boolean => !!device.state && ["viewing", "controlling", "executing"].includes(device.state.phase) && device.companion === "ready" && device.connection === "device";

@@ -34,11 +34,15 @@ test('foreign-extension attach failure retains the cause and session without ret
 test('technical detach differs from a real user stop, which overrides a previous failure', async t => {
   const w = await worker(); t.after(w.close);
   await w.handle('claim', { sessionId: 'one', tabId: 7 });
+  const attach = w.chrome.debugger.attach;
+  w.chrome.debugger.attach = async () => { throw Error('Another debugger is already attached'); };
   w.chrome.debugger.onDetach.fire({ tabId: 7 }, 'target_closed');
-  assert.equal((await w.state()).controlIssue.code, 'NATIVE_DEBUGGER_DETACHED');
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal((await w.state()).controlIssue.code, 'NATIVE_DEBUGGER_BUSY');
   await w.ui({ method: 'takeover' });
   assert.equal((await w.state()).controlIssue, undefined);
   await assert.rejects(w.handle('cdp', { sessionId: 'one', method: 'Input.insertText' }), /用户正在操作/);
+  w.chrome.debugger.attach = attach;
   await w.handle('control', { sessionId: 'one', action: 'resume', controlGeneration: (await w.state()).controlGeneration });
   w.chrome.debugger.onDetach.fire({ tabId: 7 }, 'canceled_by_user');
   assert.equal((await w.state()).controlIssue, undefined);
@@ -48,7 +52,9 @@ test('technical detach differs from a real user stop, which overrides a previous
 test('failed resume cannot overwrite a newer user stop with a stale technical error', async t => {
   const w = await worker(); t.after(w.close);
   await w.handle('claim', { sessionId: 'one', tabId: 7 });
+  w.chrome.debugger.attach = async () => { throw Error('Another debugger is already attached'); };
   w.chrome.debugger.onDetach.fire({ tabId: 7 }, 'target_closed');
+  await new Promise(resolve => setTimeout(resolve, 100));
   const generation = (await w.state()).controlGeneration;
   w.chrome.debugger.attach = async () => { await w.ui({ method: 'takeover' }); throw Error(conflict); };
   await assert.rejects(w.handle('control', { sessionId: 'one', action: 'resume', controlGeneration: generation }));

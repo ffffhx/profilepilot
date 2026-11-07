@@ -21,7 +21,7 @@ test('accessibility setup preserves explicit auto-restore choice and rejects amb
     assert.deepEqual(h.calls, [{ action: 'phone', method: 'accessibility-repair', params: { id: 'SERIAL-1', ...(expected === undefined ? {} : { autoRestore: expected }) } }]);
   }
   const h = harness();
-  assert.equal(await runPhoneCli(['accessibility-repair', '--device', 'SERIAL-1', '--auto-restore', 'yes'], h.request, h.io), 1);
+  assert.equal(await runPhoneCli(['accessibility-repair', '--device', 'SERIAL-1', '--auto-restore', 'yes'], h.request, h.io), 2);
   assert.equal(h.calls.length, 0);
 });
 
@@ -42,7 +42,7 @@ test('missing or invalid endpoints and unrelated flags fail before reaching the 
     ['wireless-discover', '--address', '192.168.1.8:40002'], ['wireless-pair', '--code', '012345'],
   ]) {
     const h = harness();
-    assert.equal(await runPhoneCli(args, h.request, h.io), 1);
+    assert.equal(await runPhoneCli(args, h.request, h.io), 2);
     assert.equal(h.calls.length, 0);
     assert.ok(!h.stderr.join('').includes('012345'));
   }
@@ -67,7 +67,7 @@ test('malformed pairing documents do not leak the pairing code in parser errors'
   for (const content of ['{"code":"012345", BROKEN}', '{"address":"8.8.8.8:53","code":"012345"}']) {
     fs.writeFileSync(file, content);
     const h = harness();
-    assert.equal(await runPhoneCli(['wireless-pair', '--params-file', file], h.request, h.io), 1);
+    assert.equal(await runPhoneCli(['wireless-pair', '--params-file', file], h.request, h.io), 2);
     assert.equal(h.calls.length, 0);
     assert.ok(!h.stderr.join('').includes('012345'));
   }

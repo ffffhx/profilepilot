@@ -5,6 +5,7 @@ import path from "node:path";
 import { ensureEmulatorWindowVisible, ensureRunningEmulatorWindowVisible } from "./emulator-window";
 import { androidSdkRoots } from "./android-paths";
 import { TencentEmulator, TENCENT_EMULATOR } from "./tencent-emulator";
+import { ensureAvdMemoryAvailable } from "./emulator-memory";
 
 export interface EmulatorRuntime {
   list(): Promise<string[]>;
@@ -32,7 +33,7 @@ export function findEmulator(env = process.env, platform = process.platform): st
 export class AndroidEmulators implements EmulatorRuntime {
   private tencent = new TencentEmulator();
   constructor(private overrideExecutable?: string, private fitWindow = ensureEmulatorWindowVisible,
-    private fitRunningWindow = ensureRunningEmulatorWindowVisible) {}
+    private fitRunningWindow = ensureRunningEmulatorWindowVisible, private checkMemory = ensureAvdMemoryAvailable) {}
   private get executable(): string { return this.overrideExecutable || findEmulator(); }
   async list(): Promise<string[]> {
     const tencent = !this.overrideExecutable && await this.tencent.executable() ? [TENCENT_EMULATOR] : [];
@@ -53,6 +54,7 @@ export class AndroidEmulators implements EmulatorRuntime {
   async launch(name: string): Promise<void> {
     // Only launch a configured AVD; never interpret a device name as shell code.
     if (!(await this.list()).includes(name)) throw new Error("模拟器不存在，请重新选择虚拟设备。");
+    await this.checkMemory(name);
     const log = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "ppilot-emulator-")), "startup.log");
     const output = fs.openSync(log, "w");
     let pid: number;

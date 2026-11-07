@@ -1,26 +1,41 @@
 import { app } from "electron";
+import { promises as fs } from 'node:fs';
 import path from "node:path";
 import { normalizeQuickLaunchShortcuts } from "../shared/quick-launch-shortcut";
-import type { AppState, CdpClientInfo, NativeChromeProfile, PublicProfile, Registry, StoredProfile } from "../shared/types";
+import type { AppState, CdpClientInfo, ExternalChromeInstance, NativeChromeProfile, PublicProfile, Registry, StoredProfile } from "../shared/types";
 import { readActiveAgentBrowserProfileOccupancySync } from "./agent-browser-lease";
 import { isAgentOverlayClient } from "./agent-overlay";
 import { type GatewayControlResponse } from "./browser-gateway-client";
 import { makeCdpUrl, requestCdpTargets } from "./cdp-client";
 import { resolveCdpContention } from "./cdp-contention";
 import { frontmostMacProcessId, getDirectChromeCommand, makeIsolatedProfileId, makeIsolatedSubProfileId, makeNativeProfileId, nativeChromeUserDataDir, readIsolatedProfileUserName, resolveIsolatedProfileDataPath, scanChromeProfilesInDir, scanNativeChromeProfiles } from "./chrome-launch";
-import { isSameFilesystemPath } from "./fs-util";
+import { isSameFilesystemPath, isSafePathSegment } from "./fs-util";
 import { RuntimeProfile } from "./internal-types";
-import { addRuntimeProcess, attachListeningPorts, emptyRuntimeProfile, findExternalChromeInstances, getCdpClientsByPort, getOpenProfilePidsByPath, isImplicitDefaultChromeProcess, listRuntimeProcesses, makeNativeRuntimeKey, mergeRuntimeProfiles, parseProfileDirectoryFlag, parseUserDataDirFlag } from "./process-scan";
+import { addRuntimeProcess, attachListeningPorts, createControlRuntimeScan, emptyRuntimeProfile, findExternalChromeInstances, getCdpClientsByPort, getOpenProfilePidsByPath, isGoogleChromeMainProcess, isImplicitDefaultChromeProcess, listRuntimeProcesses, makeNativeRuntimeKey, mergeRuntimeProfiles, parseProfileDirectoryFlag, parseUserDataDirFlag, type RuntimeScanOptions, type ControlDiscovery } from "./process-scan";
 import { readProfileAvatar } from "./profile-avatar";
 import { compatibilityCdpPorts, enrichCdpClientSessionIdentities, filterCdpDriverClients, gatewayConnectedClients, gatewayControlsByPort, gatewayManagedPortSet, gatewayOverlayClients, gatewayProfilesFromResponse, stripManagedCdpRuntimeMetadata } from "./profile-connections";
 import { normalizeMiniProfileIds, normalizeProfileOrder } from "./profile-layout";
 import { getShellIntegrationStatus } from "./shell-integration";
-export interface CollectedProfileState { state: AppState; gatewayStatus: GatewayControlResponse | null; }
+import type { WindowsControlSample } from './windows-platform';
+import { profileFileProcessChanged } from './profile-process-change';
+import { requireWindowsRuntimeIdentity } from './process-scan';
+export interface CollectedProfileState { state: AppState; gatewayStatus: GatewayControlResponse | null; controlDiscovery?: ControlDiscovery; }
+export type ControlAdmissionProfile = Pick<PublicProfile, 'id' | 'source' | 'pids' | 'browserPids' | 'cdpPort' | 'fixedCdpPort' | 'gatewayControl' | 'agentBrowserOccupancy' | 'cdpClients'>;
+export interface ControlAdmissionState {
+  profiles: ControlAdmissionProfile[];
+  externalInstances: Pick<ExternalChromeInstance, 'pid' | 'cdpPort' | 'cdpClients'>[];
+  controlDiscovery: ControlDiscovery;
+}
+
+function controlProfile(profile: ControlAdmissionProfile): ControlAdmissionProfile {
+  const { id, source, pids, browserPids, cdpPort, fixedCdpPort, gatewayControl, agentBrowserOccupancy, cdpClients } = profile;
+  return { id, source, pids, browserPids, cdpPort, fixedCdpPort, gatewayControl, agentBrowserOccupancy, cdpClients };
+}
 
 interface ProfileStateInput {
   dataDir: string;
   profilesDir: string;
-  loadRegistry(): Promise<Registry>;
+  loadRegistry(strict?: boolean): Promise<Registry>;
   readGatewayStatus(): Promise<GatewayControlResponse | null>;
   getActivity(clients: CdpClientInfo[]): PublicProfile["agentActivity"];
 }
@@ -31,64 +46,96 @@ export class ProfileStateReader {
   private isolatedProfilePath(profile: StoredProfile): string {
     return path.join(this.input.profilesDir, profile.dirName);
   }
-  async collect(): Promise<CollectedProfileState> {
+  async collect(options: { strictDiscovery?: boolean } = {}): Promise<CollectedProfileState> {
+    return this.collectInternal({ ...options, admissionOnly: false });
+  }
+  async collectForControlAdmission(windowsSample?: Promise<WindowsControlSample>): Promise<ControlAdmissionState> {
+    return this.collectInternal({ strictDiscovery: true, admissionOnly: true, windowsSample });
+  }
+  private async collectInternal(options: { strictDiscovery: true; admissionOnly: true; windowsSample?: Promise<WindowsControlSample> }): Promise<ControlAdmissionState>;
+  private async collectInternal(options: { strictDiscovery?: boolean; admissionOnly: false }): Promise<CollectedProfileState>;
+  private async collectInternal(options: { strictDiscovery?: boolean; admissionOnly: boolean; windowsSample?: Promise<WindowsControlSample> }): Promise<CollectedProfileState | ControlAdmissionState> {
+    const strict = options.strictDiscovery === true;
     const gatewayStatus = await this.input.readGatewayStatus();
-    const registry = await this.input.loadRegistry();
-    const nativeChromeProfiles = await scanNativeChromeProfiles();
+    const registry = await this.input.loadRegistry(strict);
+    const scan: RuntimeScanOptions = strict ? await createControlRuntimeScan(options.windowsSample) : {};
+    const nativeChromeProfiles = strict ? await this.scanProfilesForControl(nativeChromeUserDataDir()) : await scanNativeChromeProfiles();
     const nativePaths = nativeChromeProfiles.map((profile) => profile.path);
     const isolatedPaths = registry.profiles.map((profile) => this.isolatedProfilePath(profile));
-    const runtime = await this.getRuntime(nativePaths.concat(isolatedPaths), nativeChromeProfiles);
+    const runtime = await this.getRuntime(nativePaths.concat(isolatedPaths), nativeChromeProfiles, scan);
+    if (strict) {
+      const mapped = new Set([...runtime.values()].flatMap(value => value.pids));
+      const nativeRoot = nativeChromeUserDataDir();
+      for (const item of scan.processes || []) {
+        if (!isGoogleChromeMainProcess(item.command)) continue;
+        const userDataDir = parseUserDataDirFlag(item.command);
+        if ((!userDataDir || await this.sameControlPath(userDataDir, nativeRoot)) && !mapped.has(item.pid)) throw new Error('PROFILE_NATIVE_PROCESS_UNRESOLVED');
+      }
+    }
     await this.mergeGatewayRuntime(runtime, registry, gatewayStatus);
 
     const nativeProfiles = nativeChromeProfiles.map((profile) => this.toNativePublicProfile(profile, registry, runtime));
-    const isolatedProfiles = (await Promise.all(
-      registry.profiles.map((profile) => this.toIsolatedPublicProfile(profile, runtime))
-    )).sort((a, b) => {
+    const isolatedRows = options.admissionOnly
+      ? { kind: 'control' as const, profiles: registry.profiles.slice().sort((a, b) => {
+          const time = (profile: StoredProfile) => runtime.get(this.isolatedProfilePath(profile))?.startedAt || profile.lastLaunchedAt || profile.createdAt || '';
+          return time(b).localeCompare(time(a));
+        }).map(profile => this.toIsolatedControlProfile(profile, runtime)) }
+      : { kind: 'display' as const, profiles: (await Promise.all(
+        registry.profiles.map((profile) => this.toIsolatedPublicProfile(profile, runtime))
+      )).sort((a, b) => {
         const aTime = a.lastLaunchedAt || a.createdAt || "";
         const bTime = b.lastLaunchedAt || b.createdAt || "";
         return bTime.localeCompare(aTime);
-      });
+      }) };
     // 隔离 user-data-dir 里额外的子 profile（在 Chrome 里手动新建、本工具没登记的）也枚举出来，
     // 挂到各自所属的隔离目录组下，和系统 Profile 一样成行展示（支持启动/显示）。
-    const isolatedSubProfiles = await this.buildIsolatedSubProfiles(registry, runtime);
-    const profiles = [...nativeProfiles, ...isolatedProfiles, ...isolatedSubProfiles];
-    const frontmostPid = process.env.CPM_E2E_DETERMINISTIC === "1"
-      ? null
-      : await frontmostMacProcessId();
-    profiles.forEach((profile) => {
-      profile.windowActivation = !profile.running
-        ? "not_running"
-        : (process.platform !== "darwin" && process.platform !== "win32") || frontmostPid === null
-          ? "unknown"
-          : profile.pids.includes(frontmostPid)
-            ? "foreground"
-            : "background";
-    });
+    const isolatedSubProfiles = await this.buildIsolatedSubProfiles(registry, runtime, scan);
+    const rows = isolatedRows.kind === 'control'
+      ? { kind: 'control' as const, profiles: [...nativeProfiles.map(controlProfile), ...isolatedRows.profiles, ...isolatedSubProfiles.map(controlProfile)] }
+      : { kind: 'display' as const, isolatedCount: isolatedRows.profiles.length, profiles: [...nativeProfiles, ...isolatedRows.profiles, ...isolatedSubProfiles] };
+    if (rows.kind === 'display') {
+      const profiles = rows.profiles;
+      const frontmostPid = strict || process.env.CPM_E2E_DETERMINISTIC === "1"
+        ? null
+        : await frontmostMacProcessId();
+      profiles.forEach((profile) => {
+        profile.windowActivation = !profile.running
+          ? "not_running"
+          : (process.platform !== "darwin" && process.platform !== "win32") || frontmostPid === null
+            ? "unknown"
+            : profile.pids.includes(frontmostPid)
+              ? "foreground"
+              : "background";
+      });
 
-    // 补算副本组信息：每个副本解析出源名，每个源统计有多少副本指向它。
-    const profileNameById = new Map(profiles.map((profile) => [profile.id, profile.name]));
-    const cloneCountBySource = new Map<string, number>();
-    for (const profile of profiles) {
-      if (profile.clonedFromProfileId) {
-        cloneCountBySource.set(profile.clonedFromProfileId, (cloneCountBySource.get(profile.clonedFromProfileId) || 0) + 1);
+      // 补算副本组信息：每个副本解析出源名，每个源统计有多少副本指向它。
+      const profileNameById = new Map(profiles.map((profile) => [profile.id, profile.name]));
+      const cloneCountBySource = new Map<string, number>();
+      for (const profile of profiles) {
+        if (profile.clonedFromProfileId) {
+          cloneCountBySource.set(profile.clonedFromProfileId, (cloneCountBySource.get(profile.clonedFromProfileId) || 0) + 1);
+        }
       }
+      profiles.forEach((profile) => {
+        profile.clonedFromName = profile.clonedFromProfileId ? profileNameById.get(profile.clonedFromProfileId) || null : null;
+        profile.cloneCount = cloneCountBySource.get(profile.id) || 0;
+      });
     }
+    const profiles = rows.profiles;
     profiles.forEach((profile) => {
-      profile.clonedFromName = profile.clonedFromProfileId ? profileNameById.get(profile.clonedFromProfileId) || null : null;
-      profile.cloneCount = cloneCountBySource.get(profile.id) || 0;
       const candidatePort = profile.cdpPort ?? (profile.source === "isolated" ? profile.fixedCdpPort : null);
       if (candidatePort !== null) {
         profile.agentBrowserOccupancy = readActiveAgentBrowserProfileOccupancySync(candidatePort);
       }
     });
 
-    const externalInstances = process.env.CPM_E2E_DETERMINISTIC === "1"
+    const externalInstances = !strict && process.env.CPM_E2E_DETERMINISTIC === "1"
       ? []
       : await findExternalChromeInstances([
           ...isolatedPaths,
           nativeChromeUserDataDir(),
           this.input.dataDir
-        ]);
+        ], scan, { includeDisplayCdpUrl: !options.admissionOnly });
 
     // 标记“谁在持久连接这些 Profile / 外部实例的 CDP 端口”（agent-browser 等驱动工具）。
     const profileCdpPorts = profiles
@@ -102,7 +149,7 @@ export class ProfileStateReader {
     // 本地 socket/activity/lease 扫描只服务 Gateway 未管理的旧式端口。
     // 受管端口无论是 9223、9224 还是任意其它端口，都只能由 Gateway 供数。
     const compatibilityPorts = compatibilityCdpPorts(cdpPorts, gatewayStatus);
-    const cdpClientsByPort = await getCdpClientsByPort(compatibilityPorts);
+    const cdpClientsByPort = await getCdpClientsByPort(compatibilityPorts, scan, { includeActivityRepository: !options.admissionOnly });
     const gatewayControlByPort = gatewayControlsByPort(gatewayStatus);
     // ProfilePilot 自己也会连这些 CDP 端口去抓实时观测数据（标签页 / 截图），
     // 这些自连接不是“外部驱动工具”，必须排除，否则会把自己显示成“驱动中：Electron”。
@@ -141,21 +188,32 @@ export class ProfileStateReader {
           );
       instance.agentActivity = null;
     });
-    await enrichCdpClientSessionIdentities([
+    // Canonical archive representations and diagnostics are presentation only;
+    // admission retains the original session/owner/client evidence above.
+    if (!options.admissionOnly) await enrichCdpClientSessionIdentities([
       ...profiles.flatMap((profile) => profile.cdpClients),
       ...externalInstances.flatMap((instance) => instance.cdpClients || [])
     ]);
+    // Publish only after every strict mapping and ownership-related read above
+    // succeeds. Presentation fields are neither fabricated nor collected for
+    // this path; the original process sampling time is preserved unchanged.
+    if (rows.kind === 'control') {
+      if (!scan.controlDiscovery) throw new Error('PROFILE_DISCOVERY_INCOMPLETE');
+      return { profiles: rows.profiles, externalInstances: externalInstances.map(({ pid, cdpPort, cdpClients }) => ({ pid, cdpPort, cdpClients })),
+        controlDiscovery: scan.controlDiscovery };
+    }
+    const displayProfiles = rows.profiles;
     // 实时摘要：每个有 CDP 端口的 Profile 当前停在哪个页面、开了几个标签（轻量，不抓截图）。
     // 给表格行 / 悬浮窗卡片 / 「在飞中」总览统一供数；详情侧栏的画面截图仍走独立的 getCdpLiveView。
     const liveSummaryByPort = new Map<number, { primaryUrl: string | null; tabCount: number }>();
     await Promise.all(
-      [...new Set(profileCdpPorts)].map(async (port) => {
+      (strict ? [] : [...new Set(profileCdpPorts)]).map(async (port) => {
         const targets = await requestCdpTargets(port).catch(() => []);
         const pages = targets.filter((target) => target.type === "page");
         liveSummaryByPort.set(port, { primaryUrl: pages[0]?.url || null, tabCount: pages.length });
       })
     );
-    profiles.forEach((profile) => {
+    displayProfiles.forEach((profile) => {
       if (profile.cdpPort === null) {
         return;
       }
@@ -164,14 +222,14 @@ export class ProfileStateReader {
       profile.liveTabCount = summary?.tabCount ?? null;
     });
 
-    profiles.forEach((profile) => {
+    displayProfiles.forEach((profile) => {
       if (profile.cdpPort !== null && profile.cdpUrl) {
         profile.cdpContention = resolveCdpContention(profile.cdpPort, profile.cdpClients);
       }
     });
 
     const agentOverlayEnabled = registry.agentOverlayEnabled !== false;
-    profiles.forEach((profile) => {
+    displayProfiles.forEach((profile) => {
       profile.agentActivity = agentOverlayEnabled
         ? this.input.getActivity(gatewayOverlayClients(profile)) : null;
     });
@@ -180,15 +238,15 @@ export class ProfileStateReader {
         ? this.input.getActivity((instance.cdpClients || []).filter(isAgentOverlayClient)) : null;
     });
 
-    const runningProfiles = profiles.filter((profile) => profile.running);
-    const lastLaunchedProfile = profiles.find((profile) => profile.lastLaunchedAt) || null;
-    const validProfileIds = new Set(profiles.map((profile) => profile.id));
+    const runningProfiles = displayProfiles.filter((profile) => profile.running);
+    const lastLaunchedProfile = displayProfiles.find((profile) => profile.lastLaunchedAt) || null;
+    const validProfileIds = new Set(displayProfiles.map((profile) => profile.id));
     const miniProfileIds = normalizeMiniProfileIds(registry.miniProfileIds, validProfileIds);
     const miniProfileOrder = normalizeProfileOrder(registry.miniProfileOrder, validProfileIds);
     const mainProfileOrder = normalizeProfileOrder(registry.mainProfileOrder, validProfileIds);
     const miniProfileIdSet = new Set(miniProfileIds);
     const shortcuts = normalizeQuickLaunchShortcuts(registry.quickLaunchShortcuts, undefined, process.platform, validProfileIds);
-    profiles.forEach((profile) => {
+    displayProfiles.forEach((profile) => {
       profile.pinnedToMini = miniProfileIdSet.has(profile.id);
       profile.quickLaunchShortcut = shortcuts[profile.id] ?? null;
     });
@@ -198,9 +256,9 @@ export class ProfileStateReader {
       appTitle: "ProfilePilot",
       dataDir: this.input.dataDir,
       profilesDir: this.input.profilesDir,
-      profiles,
+      profiles: displayProfiles,
       nativeProfileCount: nativeProfiles.length,
-      isolatedProfileCount: isolatedProfiles.length,
+      isolatedProfileCount: rows.isolatedCount,
       nativeChromeProfiles,
       runningProfiles,
       currentProfile: runningProfiles[0] || lastLaunchedProfile,
@@ -213,7 +271,10 @@ export class ProfileStateReader {
       agentOverlayEnabled,
       shellIntegration: await getShellIntegrationStatus()
     };
-    return { state, gatewayStatus };
+    // Scoped process gaps are published only after the remaining strict
+    // Local State, file-lock, registry, external and TCP discovery has finished.
+    if (strict && !scan.controlDiscovery) throw new Error('PROFILE_DISCOVERY_INCOMPLETE');
+    return { state, gatewayStatus, ...(strict ? { controlDiscovery: scan.controlDiscovery } : {}) };
   }
   async mergeGatewayRuntime(
     runtime: Map<string, RuntimeProfile>,
@@ -248,7 +309,37 @@ export class ProfileStateReader {
     }
   }
 
-  async getRuntime(profilePaths: string[], nativeProfiles: NativeChromeProfile[]): Promise<Map<string, RuntimeProfile>> {
+  private pathKey(value: string): string {
+    const resolved = path.resolve(value); return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  }
+  private async sameControlPath(left: string, right: string): Promise<boolean> {
+    if (this.pathKey(left) === this.pathKey(right)) return true;
+    const resolve = async (value: string): Promise<string | null> => {
+      try { return await fs.realpath(value); }
+      catch (error) { if (['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code || '')) return null; throw error; }
+    };
+    const [resolvedLeft, resolvedRight] = await Promise.all([resolve(left), resolve(right)]);
+    // An absent directory cannot alias a differently named running directory.
+    // Permission/I/O failures above still leave the association unknown.
+    if (resolvedLeft === null || resolvedRight === null) return false;
+    return this.pathKey(resolvedLeft) === this.pathKey(resolvedRight);
+  }
+  async scanProfilesForControl(userDataDir: string): Promise<NativeChromeProfile[]> {
+    let raw: string;
+    try { raw = await fs.readFile(path.join(userDataDir, 'Local State'), 'utf8'); }
+    catch (error) { if (['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code || '')) return []; throw error; }
+    const value = JSON.parse(raw) as { profile?: { info_cache?: unknown } };
+    const cache = value?.profile?.info_cache;
+    if (!cache || typeof cache !== 'object' || Array.isArray(cache)) throw new Error('PROFILE_LOCAL_STATE_INCOMPLETE');
+    return Object.entries(cache).map(([dirName, item]) => {
+      if (!isSafePathSegment(dirName) || !item || typeof item !== 'object' || Array.isArray(item)) throw new Error('PROFILE_LOCAL_STATE_INVALID');
+      const info = item as { name?: unknown; user_name?: unknown };
+      return { dirName, name: typeof info.name === 'string' && info.name.trim() ? info.name : dirName,
+        userName: typeof info.user_name === 'string' && info.user_name.trim() ? info.user_name : null,
+        path: path.join(userDataDir, dirName), userDataDir, isDefault: dirName === 'Default' };
+    });
+  }
+  async getRuntime(profilePaths: string[], nativeProfiles: NativeChromeProfile[], options: RuntimeScanOptions = {}): Promise<Map<string, RuntimeProfile>> {
     const runtime = new Map<string, RuntimeProfile>();
     const nativeDirNames = nativeProfiles.map((profile) => profile.dirName);
     const defaultNativeKey = nativeDirNames.includes("Default") ? makeNativeRuntimeKey("Default") : null;
@@ -259,29 +350,31 @@ export class ProfileStateReader {
 
     try {
       const processesByPid = new Map<number, RuntimeProfile & { pid: number; command: string }>();
-      const processes = await listRuntimeProcesses();
+      const processes = await listRuntimeProcesses(options);
       for (const processInfo of processes) {
         processesByPid.set(processInfo.pid, processInfo);
 
         const { command } = processInfo;
         const userDataDir = parseUserDataDirFlag(command);
         const profileDirectory = parseProfileDirectoryFlag(command);
+        const nativeProcess = !options.strict || !userDataDir || await this.sameControlPath(userDataDir, nativeChromeUserDataDir());
 
         // A normally opened Chrome often does not include --profile-directory.
         // Treat that main browser process as the Default profile.
-        if (defaultNativeKey && isImplicitDefaultChromeProcess(command)) {
+        if (defaultNativeKey && (isImplicitDefaultChromeProcess(command) ||
+          (options.strict && nativeProcess && isGoogleChromeMainProcess(command) && !profileDirectory))) {
           addRuntimeProcess(runtime, defaultNativeKey, processInfo);
         }
 
         for (const profilePath of profilePaths) {
-          if (!userDataDir || !(await isSameFilesystemPath(userDataDir, profilePath))) {
+          if (!userDataDir || !(await (options.strict ? this.sameControlPath(userDataDir, profilePath) : isSameFilesystemPath(userDataDir, profilePath)))) {
             continue;
           }
           addRuntimeProcess(runtime, profilePath, processInfo);
         }
 
         for (const dirName of nativeDirNames) {
-          if (profileDirectory !== dirName) {
+          if (profileDirectory !== dirName || !nativeProcess) {
             continue;
           }
           addRuntimeProcess(runtime, makeNativeRuntimeKey(dirName), processInfo);
@@ -289,7 +382,7 @@ export class ProfileStateReader {
       }
 
       const nativeProfilesByPath = new Map(nativeProfiles.map((profile) => [profile.path, profile]));
-      const openProfilePids = await getOpenProfilePidsByPath(nativeProfiles.map((profile) => profile.path));
+      const openProfilePids = await getOpenProfilePidsByPath(nativeProfiles.map((profile) => profile.path), options);
       for (const [profilePath, pids] of openProfilePids) {
         const profile = nativeProfilesByPath.get(profilePath);
         if (!profile) {
@@ -298,13 +391,15 @@ export class ProfileStateReader {
         for (const pid of pids) {
           const processInfo = processesByPid.get(pid);
           if (processInfo) {
+            requireWindowsRuntimeIdentity(processInfo, options);
             addRuntimeProcess(runtime, makeNativeRuntimeKey(profile.dirName), processInfo);
-          }
+          } else if (options.strict) throw profileFileProcessChanged('profile_runtime_pid_join', pid, processesByPid.size, options.controlDiscovery);
         }
       }
 
-      await attachListeningPorts(runtime);
-    } catch {
+      await attachListeningPorts(runtime, options);
+    } catch (error) {
+      if (options.strict) throw error;
       return runtime;
     }
 
@@ -364,6 +459,13 @@ export class ProfileStateReader {
     };
   }
 
+  private toIsolatedControlProfile(profile: StoredProfile, runtime: Map<string, RuntimeProfile>): ControlAdmissionProfile {
+    const runtimeProfile = runtime.get(this.isolatedProfilePath(profile)) || emptyRuntimeProfile();
+    return { id: makeIsolatedProfileId(profile.id), source: 'isolated', pids: runtimeProfile.pids,
+      browserPids: runtimeProfile.browserPids || [], cdpPort: runtimeProfile.cdpPort,
+      fixedCdpPort: profile.fixedCdpPort ?? null, gatewayControl: null, agentBrowserOccupancy: null, cdpClients: [] };
+  }
+
   async toIsolatedPublicProfile(profile: StoredProfile, runtime: Map<string, RuntimeProfile>): Promise<PublicProfile> {
     const profilePath = this.isolatedProfilePath(profile);
     const runtimeProfile = runtime.get(profilePath) || emptyRuntimeProfile();
@@ -371,9 +473,8 @@ export class ProfileStateReader {
     const profileDataPath = await resolveIsolatedProfileDataPath(profilePath);
 
     return {
-      id: makeIsolatedProfileId(profile.id),
+      ...this.toIsolatedControlProfile(profile, runtime),
       avatarDataUrl: await readProfileAvatar(profileDataPath),
-      source: "isolated",
       name: profile.name,
       dirName: profile.dirName,
       path: profilePath,
@@ -386,11 +487,7 @@ export class ProfileStateReader {
       deletable: true,
       running: runtimeProfile.pids.length > 0,
       windowActivation: runtimeProfile.pids.length ? "unknown" : "not_running",
-      pids: runtimeProfile.pids,
-      browserPids: runtimeProfile.browserPids || [],
-      cdpPort: runtimeProfile.cdpPort,
       cdpUrl: makeCdpUrl(runtimeProfile.cdpPort),
-      fixedCdpPort: profile.fixedCdpPort ?? null,
       bifrostProxy: profile.bifrostProxy ?? null,
       upstreamProxy: profile.upstreamProxy ?? null,
       directConnection: profile.directConnection === true,
@@ -403,9 +500,6 @@ export class ProfileStateReader {
       projectTag: profile.projectTag ?? null,
       agentAccessDisabled: profile.agentAccessDisabled === true,
       hideAutomation: profile.hideAutomation === true,
-      cdpClients: [],
-      gatewayControl: null,
-      agentBrowserOccupancy: null,
       livePrimaryUrl: null,
       liveTabCount: null,
       cdpContention: null,
@@ -415,19 +509,36 @@ export class ProfileStateReader {
 
   async buildIsolatedSubProfiles(
     registry: Registry,
-    runtime: Map<string, RuntimeProfile>
+    runtime: Map<string, RuntimeProfile>,
+    options: RuntimeScanOptions = {}
   ): Promise<PublicProfile[]> {
+    if (options.strict && process.platform === 'win32') {
+      // One bounded RM stream for the whole strict collection. Starting one
+      // helper per parent would overflow the bounded client queue and fragment
+      // cross-parent process identity evidence.
+      const groups = await Promise.all(registry.profiles.map(async parent => {
+        const userDataDir = this.isolatedProfilePath(parent);
+        const extras = (await this.scanProfilesForControl(userDataDir)).filter(sub => sub.dirName !== 'Default');
+        return { parent, userDataDir, extras };
+      }));
+      const openPids = await getOpenProfilePidsByPath(groups.flatMap(group => group.extras.map(sub => sub.path)), options);
+      return groups.flatMap(({ parent, userDataDir, extras }) => {
+        const parentRuntime = runtime.get(userDataDir) || emptyRuntimeProfile();
+        return extras.map(sub => this.toIsolatedSubPublicProfile(parent, sub, userDataDir,
+          openPids.get(sub.path) || [], parentRuntime.browserPids || [], parentRuntime.cdpPort));
+      });
+    }
     const rows = await Promise.all(
       registry.profiles.map(async (parent) => {
         const userDataDir = this.isolatedProfilePath(parent);
         // 登记 Profile 代表的是 Default 子目录——排除它，只留 Chrome 里额外新建的子 profile，
         // 避免和已展示的登记 Profile 重复。（直接排除 Default，省掉每轮的磁盘打分开销。）
-        const extras = (await scanChromeProfilesInDir(userDataDir)).filter((sub) => sub.dirName !== "Default");
+        const extras = (await (options.strict ? this.scanProfilesForControl(userDataDir) : scanChromeProfilesInDir(userDataDir))).filter((sub) => sub.dirName !== "Default");
         if (!extras.length) {
           return [];
         }
         // 子 profile 是否运行：按各自的 profile 目录看有没有被 Chrome 进程打开（与父实例共享 CDP 端口）。
-        const openPids = await getOpenProfilePidsByPath(extras.map((sub) => sub.path));
+        const openPids = await getOpenProfilePidsByPath(extras.map((sub) => sub.path), options);
         const parentRuntime = runtime.get(userDataDir) || emptyRuntimeProfile();
         const parentCdpPort = parentRuntime.cdpPort;
         return extras.map((sub) =>

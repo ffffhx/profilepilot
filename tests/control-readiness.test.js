@@ -42,9 +42,11 @@ test('phone doctor is read-only and a null session is rejected locally before de
   assert.deepEqual(calls, [{ action: 'phone', method: 'readiness', params: { id: 'device-1', backend: 'basic' } }]);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'phone readiness 空格 ')); t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const file = path.join(root, '动作.json'); fs.writeFileSync(file, JSON.stringify({ id: 'device-1', sessionId: null, generation: 1, requestId: 'new', action: { kind: 'tap', x: 1, y: 1 } }));
-  assert.equal(await runPhoneCli(['action', '--params-file', file], request, io), 1);
+  assert.equal(await runPhoneCli(['action', '--params-file', file], request, io), 2);
   assert.equal(calls.length, 1); const failure = JSON.parse(output.at(-1));
   assert.equal(failure.code, 'PHONE_INVALID_REQUEST'); assert.equal(failure.recovery.actionOutcome, 'not-executed');
+  assert.equal(failure.recovery.stage, 'validation'); assert.equal(failure.recovery.nextStep, 'fix-input');
+  assert.equal(failure.recovery.automaticReplay, false);
 });
 
 test('browser diagnostics distinguish incompatible, stale, occupied and technically interrupted targets', () => {

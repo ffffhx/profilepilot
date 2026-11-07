@@ -236,8 +236,8 @@ test('CLI requires explicit basic backend and dispatches lifecycle without insta
   assert.equal(calls[0].method,'basic-start');
   assert.equal(await runPhoneCli(['stop','--device','SERIAL-1','--backend','basic'],request,io),0);
   assert.equal(calls[1].method,'basic-stop');
-  assert.equal(await runPhoneCli(['connect','--device','SERIAL-1','--backend','basic'],request,io),1);
-  assert.equal(await runPhoneCli(['start','--device','SERIAL-1','--backend','other'],request,io),1);
+  assert.equal(await runPhoneCli(['connect','--device','SERIAL-1','--backend','basic'],request,io),2);
+  assert.equal(await runPhoneCli(['start','--device','SERIAL-1','--backend','other'],request,io),2);
 });
 
 test('basic following uses fresh screenshots and bounded strokes, rejects replay and stops on pause',async t=>{

@@ -7,6 +7,8 @@ import {
   MacInputGuard,
   type InputGuardClick,
   type InputGuardController,
+  type InputGuardCallbacks,
+  type InputGuardFactory,
   type InputGuardWindowBounds
 } from "./input-guard";
 import { SessionTailer, type SessionTailerBase } from "./session-tail";
@@ -92,7 +94,7 @@ export interface AgentOverlayActivateTargetRequest {
   profileName: string;
 }
 
-interface AgentOverlayManagerOptions {
+export interface AgentOverlayManagerOptions {
   locale?: OverlayLocale;
   onStop: (request: AgentOverlayStopRequest) => Promise<void>;
   onResume?: (request: AgentOverlayResumeRequest) => Promise<void>;
@@ -104,6 +106,7 @@ interface AgentOverlayManagerOptions {
   requestVersionInfo?: (port: number) => Promise<CdpVersionInfo>;
   connectBrowser?: (webSocketDebuggerUrl: string, timeoutMs: number) => Promise<OverlayBrowserClient>;
   inputGuard?: InputGuardController;
+  inputGuardFactory?: InputGuardFactory;
 }
 
 // 底层 overlay 状态（时间窗驱动的实现细节）：active＝AI 在驱动；takenOver＝用户刚接管、
@@ -278,7 +281,7 @@ export class AgentOverlayManager {
   private disposed = false;
 
   constructor(private readonly options: AgentOverlayManagerOptions) {
-    this.inputGuard = options.inputGuard || new MacInputGuard({
+    const callbacks: InputGuardCallbacks = {
       onClick: (click) => {
         this.guardClickChain = this.guardClickChain
           .then(() => this.handleInputGuardClick(click))
@@ -301,7 +304,8 @@ export class AgentOverlayManager {
           void this.pushAllUpdates();
         }
       }
-    });
+    };
+    this.inputGuard = options.inputGuard ?? (options.inputGuardFactory ? options.inputGuardFactory(callbacks) : new MacInputGuard(callbacks));
   }
 
   sync(input: AgentOverlaySyncInput): void {

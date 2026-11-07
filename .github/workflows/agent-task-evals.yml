@@ -1,0 +1,45 @@
+name: Agent task evaluation harness
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "benchmarks/agent-tasks/**"
+      - "tests/agent-task-*.test.mjs"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/agent-task-evals.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  harness:
+    name: Fixture and grader checks (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run test:evals
+      - run: npm run eval:smoke
+      - name: Committed mail response-loss self-test
+        run: npm run eval:smoke -- --tasks mail-approved-reply --condition commit-response-loss
+      - name: Expired-login recovery self-test
+        run: npm run eval:smoke -- --group recovery
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: harness-reports-${{ matrix.os }}
+          path: |
+            test-results/agent-tasks/**/manifest.json
+            test-results/agent-tasks/**/report.json
+            test-results/agent-tasks/**/report.html

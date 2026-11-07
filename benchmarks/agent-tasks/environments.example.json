@@ -1,0 +1,133 @@
+{
+  "environments": {
+    "live-github-account-review": {
+      "schemaVersion": "1.0.0",
+      "track": "live-site",
+      "siteId": "github",
+      "startUrl": "https://github.com/settings/profile",
+      "allowedOrigins": [
+        "https://github.com"
+      ],
+      "profile": {
+        "strategy": "reuse",
+        "binding": "github-evaluation-profile"
+      },
+      "login": {
+        "state": "preauthenticated",
+        "accountAlias": "github-evaluation-account",
+        "maxEvidenceAgeSeconds": 300
+      },
+      "transport": {
+        "kind": "extension",
+        "extension": {
+          "id": "REPLACE_EXTENSION_ID",
+          "version": "REPLACE_EXTENSION_VERSION"
+        }
+      },
+      "platform": {
+        "os": "win32",
+        "arch": "x64",
+        "release": "REPLACE_OS_RELEASE"
+      },
+      "browser": {
+        "name": "chrome",
+        "version": "REPLACE_BROWSER_VERSION",
+        "mode": "headed"
+      },
+      "viewport": {
+        "width": 1280,
+        "height": 800,
+        "deviceScaleFactor": 1
+      },
+      "locale": "zh-CN",
+      "timezone": "Asia/Shanghai",
+      "network": {
+        "mode": "direct",
+        "egressAlias": "replace-verified-egress"
+      },
+      "taskData": {
+        "strategy": "read-only",
+        "namespace": "github-account-review",
+        "authReset": "forbidden"
+      },
+      "cleanup": {
+        "taskData": "retain",
+        "profile": "retain"
+      }
+    },
+    "live-github-issue-read": {
+      "schemaVersion": "1.0.0",
+      "track": "live-site",
+      "siteId": "github",
+      "startUrl": "https://github.com/microsoft/TypeScript/issues/1",
+      "allowedOrigins": [
+        "https://github.com"
+      ],
+      "profile": {
+        "strategy": "reuse",
+        "binding": "github-evaluation-profile"
+      },
+      "login": {
+        "state": "preauthenticated",
+        "accountAlias": "github-evaluation-account",
+        "maxEvidenceAgeSeconds": 300
+      },
+      "transport": {
+        "kind": "extension",
+        "extension": {
+          "id": "REPLACE_EXTENSION_ID",
+          "version": "REPLACE_EXTENSION_VERSION"
+        }
+      },
+      "platform": {
+        "os": "win32",
+        "arch": "x64",
+        "release": "REPLACE_OS_RELEASE"
+      },
+      "browser": {
+        "name": "chrome",
+        "version": "REPLACE_BROWSER_VERSION",
+        "mode": "headed"
+      },
+      "viewport": {
+        "width": 1280,
+        "height": 800,
+        "deviceScaleFactor": 1
+      },
+      "locale": "zh-CN",
+      "timezone": "Asia/Shanghai",
+      "network": {
+        "mode": "direct",
+        "egressAlias": "replace-verified-egress"
+      },
+      "taskData": {
+        "strategy": "read-only",
+        "namespace": "github-issue-read",
+        "authReset": "forbidden"
+      },
+      "cleanup": {
+        "taskData": "retain",
+        "profile": "retain"
+      }
+    }
+  },
+  "attestation": {
+    "checkedAt": "REPLACE_VERIFICATION_TIMESTAMP_ISO",
+    "extensionId": "REPLACE_EXTENSION_ID",
+    "network": {
+      "mode": "direct",
+      "egressAlias": "replace-verified-egress"
+    }
+  },
+  "bindings": {
+    "profiles": {
+      "github-evaluation-profile": "REPLACE_LOCAL_PROFILE_ID"
+    },
+    "accounts": {
+      "github-evaluation-account": {
+        "siteId": "github",
+        "identitySha256": "REPLACE_LOCALLY_VERIFIED_IDENTITY_SHA256"
+      }
+    }
+  }
+}

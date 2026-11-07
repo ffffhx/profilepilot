@@ -8,17 +8,36 @@ import { engineHelp } from "./browser-engine/arguments";
 import { controlRecovery } from "../shared/control-recovery";
 import { createBrowserDoctor, parseBrowserDoctorArgs, waitForBrowserControl } from "./control-doctor";
 import { browserContract, commonBrowserHelp } from "../shared/browser-contract";
+import { browserCommandHelp, browserRouteCommands } from "../shared/browser-command-contract";
 import { listSiteAdapters } from "./site-adapters/catalog";
 import { runGatewaySiteCli } from "./site-adapters/gateway-cli";
+import { runXianyuCli } from "./site-adapters/xianyu-cli";
 
 export const browserCliHelp = `ppilot browser CLI (model invocation only for captcha recognize)
 One CLI, two connections. Connection options go BEFORE the command.
+
+Profile management (desktop app required):
+  ppilot browser profile list [--json]
+  ppilot browser profile get <NAME|ID> [--json]
+  ppilot browser profile create --name NAME [--json]
+  ppilot browser profile rename <NAME|ID> NEW_NAME [--json]
+  ppilot browser profile configure <NAME|ID> --hide-automation <on|off> [--json]
+  ppilot browser profile start <NAME|ID> [--json]
+  ppilot browser profile stop <NAME|ID> [--json]
+  ppilot browser profile delete <NAME|ID> --yes [--json]
+  Legacy ppilot profile commands remain supported.
+
+Electron applications have their own entry: ppilot electron --help.
+The existing browser --cdp entry remains compatible for registered apps.
 
 Site adapters (selected Profile and current task tab; read only):
   ppilot browser sites [SITE]
   ppilot browser --session TASK site --params-file request.json
   ppilot browser --session TASK --cdp PORT site --params-file request.json
   request.json: {"operation":"zhihu.hot","params":{"limit":10}}
+
+Xianyu search, comparison and price tracking:
+  ppilot browser xianyu --help
 
 Extension (default): existing signed-in Chrome tabs, independent browser service.
   ppilot browser status
@@ -31,7 +50,7 @@ Gateway: managed Chrome / registered Electron, using the bundled browser driver.
 Use the target's ProfilePilot logical port, never its native debugging port.
   ppilot browser --session TASK --cdp PORT snapshot -i
   ppilot browser --session TASK --cdp PORT open https://example.com
-  ppilot browser --session TASK --cdp PORT click @e3
+  ppilot browser --session TASK --cdp PORT click '@e3'
   ppilot browser --session TASK --cdp PORT status
   ppilot browser --session TASK --cdp PORT handoff --reason "Complete sign-in"
   ppilot browser --session TASK --cdp PORT resume
@@ -121,9 +140,19 @@ export async function runBrowserCli(
   try {
     const route = parseBrowserCliRoute(input);
     let command = route.args[route.commandIndex];
+    const tail = route.args.slice(route.commandIndex + 1);
+    const narrowHelp = command === "help" && tail.length === 1 ? tail[0]
+      : tail.length === 1 && ["--help", "-h"].includes(tail[0]) ? command : undefined;
+    if (narrowHelp && !["xianyu", "captcha", "site", "sites"].includes(command)) {
+      const help = browserCommandHelp(route.connection, narrowHelp);
+      if (!help) invalid(`${route.connection} 连接没有 ${narrowHelp} 的命令说明；运行 ppilot browser --connection ${route.connection} schema 查看可用命令。`);
+      io.stdout.write(help); return 0;
+    }
+    if (command === "xianyu") return await runXianyuCli(route, io, env);
     if (command === "sites") {
-      if (route.args.length > route.commandIndex + 2) invalid("sites 只接受一个可选网站名。");
-      io.stdout.write(JSON.stringify({ ok: true, result: listSiteAdapters(route.args[route.commandIndex + 1]) }) + "\n"); return 0;
+      const sites = tail.filter(arg => arg !== "--json");
+      if (sites.length > 1) invalid("sites 只接受一个可选网站名。");
+      io.stdout.write(JSON.stringify({ ok: true, result: listSiteAdapters(sites[0]) }) + "\n"); return 0;
     }
     if (command === "site" && route.connection === "gateway") {
       const result = await runGatewaySiteCli(route.args, route.commandIndex, route.port, env);
@@ -137,7 +166,10 @@ export async function runBrowserCli(
       return 0;
     }
     if (["capabilities", "schema"].includes(command)) {
+      const requested = tail.filter(arg => arg !== "--json");
+      if (requested.length > 1 || (requested[0] && !browserRouteCommands(route.connection)[requested[0]])) invalid(`用法：ppilot browser --connection ${route.connection} schema [COMMAND]。可用命令：${Object.keys(browserRouteCommands(route.connection)).join(", ")}`);
       io.stdout.write(JSON.stringify({ ok: true, result: { ...browserContract, connection: route.connection,
+        ...(requested[0] ? { command: requested[0], operation: browserRouteCommands(route.connection)[requested[0]] } : { routeOperations: browserRouteCommands(route.connection) }),
         runtimeVerified: false, nextStep: "运行目标 doctor/readiness 检查实际可用性。" } }) + "\n"); return 0;
     }
     if (route.connection === "extension" && ["doctor", "readiness", "wait-control"].includes(command)) {
@@ -148,6 +180,17 @@ export async function runBrowserCli(
     if (route.connection === "extension") { await (runtime.extension || runExtensionCli)(route.args); return 0; }
     if (command === "doctor") { route.args[route.commandIndex] = command = "readiness"; }
     if (!command && !route.args.includes("--version") && !route.args.includes("-V")) invalid("需要浏览器命令；运行 ppilot browser --help 查看用法。");
+    // A trailing output switch is harmless for fixed-arity commands. Preserve
+    // literal fill/eval values and option values that happen to be '--json'.
+    const arity: Record<string, number> = { status: 0, readiness: 0, complete: 0, release: 0, resume: 0, handoff: 0, profiles: 0,
+      observe: 0, action: 0, snapshot: 0, screenshot: 0, open: 1, click: 1, hover: 1, fill: 2, type: 2, eval: 1,
+      get: tail[0] === "attr" ? 3 : ["title", "url"].includes(tail[0]) ? 1 : 2 };
+    if (tail.at(-1) === "--json" && arity[command] !== undefined && tail.length > arity[command] &&
+        !new Set([...VALUE_OPTIONS, "--reason", "--selector", "-s", "-d"]).has(tail.at(-2) || "")) {
+      route.args.pop(); route.args.splice(route.commandIndex, 0, "--json"); route.commandIndex++;
+    }
+    if (["click", "dblclick", "hover", "focus", "fill", "type", "check", "uncheck", "select", "upload", "scrollintoview"].includes(command) &&
+        (!tail[0]?.trim() || tail[0] === "--json")) invalid(`${command} 需要非空 selector。PowerShell 中 @e1 会被当作变量展开，请写 '@e1'；例如 ppilot browser --session TASK --cdp PORT ${command} '@e1'${["fill", "type"].includes(command) ? " '文本'" : ""}。`);
     if (route.args.slice(0, route.commandIndex).some(arg => arg === "--profile" || arg.startsWith("--profile="))) invalid("Gateway 使用 --cdp 选择目标；--profile 用于扩展连接。");
     const internal = INTERNAL_COMMANDS.has(command);
     const local = LOCAL_COMMANDS.has(command) || !command && route.args.some(arg => arg === "--version" || arg === "-V");

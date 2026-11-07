@@ -160,7 +160,14 @@ ppilot phone run --device DEVICE_ID --file "flows/save-form.json" --output-dir "
 
 - 手机拥有控制会话的最终授权；暂停或结束会递增 generation，使已排队的旧指令失效。已交给 Android 执行的手势可能完成，最长两秒；不会再接受后续指令。
 - 电脑每两秒同步状态。手机八秒收不到心跳会停止接受指令。短暂断线后电脑也会先暂停仍存活的会话；完全过期后需要新建会话。重启不会自动恢复控制。
-- 锁屏、关闭必要权限、停止配套服务会暂停或结束控制。退出桌面应用会尽力结束会话；电脑崩溃时由手机心跳超时兜底。
+- 控制期间配套 App 默认保持亮屏：前台窗口用 `FLAG_KEEP_SCREEN_ON`，App 转到后台后由 `SCREEN_BRIGHT_WAKE_LOCK` 兜底（Android 的窗口标志只在窗口位于前台时延长息屏）。`ppilot phone start --keep-screen-on off` 可关闭；任何暂停、结束或服务退出都会立即释放，不留后台常亮。
+- 熄屏会暂停会话（`pauseCause: "screen"`，界面显示“等待解锁”），但**不需要手动恢复**：手机解锁后每秒检查一次亮屏且无锁屏，满足条件时自动继续，会话与 generation 照常递增，旧指令仍然失效。用户手动暂停（`pauseCause: "manual"`）和权限丢失不会自动恢复。
+- 电脑端也可以主动介入：`ppilot phone wake --device ID` 发 `KEYCODE_WAKEUP` 并尝试解除无密码的滑动锁屏；`ppilot phone unlock --device ID` 从标准输入读取 PIN/密码、上滑输入并提交；图案锁用 `ppilot phone unlock --device ID --pattern 1478`。两者都不会绕过安全锁，`unlock` 失败或结果不明时不会自动重试。PIN 只出现在 ADB 进程参数中，不写入参数文件、输出或日志。图案的原始数字不进入 ADB 参数——电脑只发送九个点换算后的坐标。
+- 图案坐标优先取锁屏截图自动检测到的点阵；检测不到（安全锁屏截图全黑、壁纸干扰）时使用这台设备上次成功解锁的坐标，再退化到按屏幕比例估算的默认值。成功解锁后会按硬件标识保存坐标（`pattern-layout.json`，只有几何数据）。可用 `--pattern-geometry cx,cy,step` 或 `cx,cy,stepX,stepY` 覆盖。
+- 桌面 App 在设备列表每行右侧的 ⋮ 菜单里提供“解锁凭据”（设备详情 → 更多设置里也有同一入口），可以按手机保存图案或 PIN/密码；不要求手机当前已连接。凭据由 Electron `safeStorage`（Windows DPAPI、macOS Keychain）加密后写入 App 数据目录的 `unlock-secrets.json`；渲染进程和 CLI 只能看到“是否已保存、类型、时间、是否允许 Agent”这些元数据，读不到原值。命令行可用 `--stored` 直接使用保存的凭据，`--save --kind pattern|credential` 从标准输入保存，`--forget` 删除。
+- 保存凭据意味着“允许这台电脑在锁屏时解锁手机”，适合睡前让 Agent 继续作业；默认允许命令行与 Agent 使用，可在保存时关闭。它防的是手机丢失，不防电脑账户被入侵：任何能以该 Windows 账户运行的代码都能让 App 解密并使用凭据。手机重启后的首次解锁仍需人工完成。
+- 配套 App 的“设置 → 无人值守”提供“充电时保持 ADB 响应”：开启后仅在插电（AC/USB/无线/底座）时持有 `PARTIAL_WAKE_LOCK` 和 Wi-Fi 高性能锁，屏幕仍可熄灭并锁屏，但 CPU、网络和 ADB 保持响应，电脑可随时点亮并解锁。拔电、关闭开关或服务退出会立即释放。它不阻止锁屏，也不替代解锁凭据；命令行用 `ppilot phone unattended --device ID --op on|off|status` 查看或切换。Android 的 Doze 只在未充电时进入，因此插电配合此选项能避免无线调试在夜里“睡死”。
+- 关闭必要权限、停止配套服务会暂停或结束控制。退出桌面应用会尽力结束会话；电脑崩溃时由手机心跳超时兜底。
 - 手机服务只监听 `127.0.0.1`，通过 ADB 转发和每设备随机凭据连接；不会监听手机局域网。截图和页面内容按请求返回，不写动作内容日志。
 - 通过下方 Wrapper 启动的工具，其受支持 ADB 命令纳入此会话。绕过 Wrapper 直接调用原生 ADB、scrcpy 或其他远控软件的操作不受此会话管理，也无法可靠归属。
 - 第一版不包含实时视频、厂商原生灵动岛、操作轨迹、跨网络中继。

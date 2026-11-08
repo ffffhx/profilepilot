@@ -43,7 +43,7 @@ import org.json.JSONObject;
 public final class MainActivity extends ComponentActivity {
   private static int visibleHomes;
   static boolean isHomeVisible() { return visibleHomes>0; }
-  private static final int INK=0xff1c2926, MUTED=0xff738178, BG=0xfff7f9f7,
+  private static final int INK=0xff1c2926, MUTED=0xff5d7063, BG=0xfff7f9f7,
       LINE=0xffe5ece7, GREEN=0xff147457, MINT=0xffeef8f2,
       AMBER=0xff96520b, RED=0xffb64646;
   private final Handler main=new Handler(Looper.getMainLooper());

@@ -18,7 +18,6 @@ export function renderOnboardingModal(): string {
       <section class="modal onboarding-modal" role="dialog" aria-modal="true" aria-labelledby="onboarding-title">
         <div class="onboarding-head">
           <div>
-            <span class="modal-kicker">First Flight</span>
             <h2 id="onboarding-title">一次安装，准备好 Agent 工具</h2>
           </div>
           <button type="button" class="modal-icon-close" data-action="dismiss-onboarding" aria-label="关闭新手引导">×</button>
@@ -27,7 +26,7 @@ export function renderOnboardingModal(): string {
         <div class="onboarding-route" aria-label="接入顺序">
           <article>
             <span>01</span>
-            <div><strong>安装 ProfilePilot CLI</strong><p>自动配置命令工具和 Agent 使用指引，一起更新并保留个人控制偏好。</p></div>
+            <div><strong>安装 ProfilePilot CLI</strong><p>自动配置命令工具和 Agent 使用指引，一起更新，提供统一的操作规范。</p></div>
           </article>
           <i aria-hidden="true"></i>
           <article>
@@ -42,7 +41,6 @@ export function renderOnboardingModal(): string {
         </div>
         ${renderInputGuardPermissionCard("onboarding")}
         <div class="onboarding-safety-note">
-          <span>CONTROL RULE</span>
           <p>用户接管浏览器时，CLI 会停止 Agent 操作；随附指引会指导 Agent 等待交还控制。</p>
         </div>
         <div class="modal-actions onboarding-actions">
@@ -56,7 +54,7 @@ export function renderOnboardingModal(): string {
 
 export function renderAgentIntegrationPanel(): string {
   const diagnostic = store.agentIntegrationDiagnostic;
-  const pending = store.agentIntegrationLoading || store.busy || !diagnostic;
+  const pending = store.agentIntegrationLoading || store.busyState?.key === "profilepilot-management-cli" || !diagnostic;
   return `
     <section class="agent-integration-page" aria-labelledby="agent-integration-title">
       <h2 id="agent-integration-title" class="tools-visually-hidden">Agent 工作环境</h2>
@@ -67,17 +65,17 @@ export function renderAgentIntegrationPanel(): string {
           <div class="tools-overview-summary">
             <span class="tools-overview-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="6" y="2" width="12" height="20" rx="3"/><path d="M10 5h4m-3 14h2"/></svg></span>
             <span class="tools-overview-copy"><span class="tools-overview-title"><strong id="tools-phone-app-title">ProfilePilot 安卓 App</strong><em>可选安装</em></span>
-              <span class="tools-overview-line"><small>基础控制免安装；App 增加控件识别、中文填写、手机端暂停与状态同步</small><a class="tools-phone-link" href="./phones.html">安装与连接</a></span>
+              <span class="tools-overview-line"><small>基础控制免安装；App 增加控件识别、中文填写、手机端暂停与状态同步</small></span>
             </span>
+            <a class="tools-phone-link" href="./phones.html">安装与连接</a>
           </div>
         </section>
-        ${renderControlPreferences(diagnostic, pending)}
       </div>
       <details id="tools-connection-diagnostics" class="tools-diagnostics">
         <summary><span class="tools-help-icon" aria-hidden="true">?</span><span>需要帮助？查看连接诊断</span><span class="tools-diagnostic-arrow" aria-hidden="true">›</span></summary>
         <div class="tools-disclosure-body">
           <div class="agent-section-heading"><div><strong>连接诊断</strong><p>安装统一 CLI，再确认目标 Profile 的扩展或 Gateway 连接。</p></div>
-            <button type="button" data-action="refresh-agent-integration" ${pending ? "disabled" : ""}>${renderButtonLabel(pending, "重新检测", "检测中…")}</button>
+            <button type="button" data-action="refresh-agent-integration" ${pending || store.busy ? "disabled" : ""}>${renderButtonLabel(pending, "重新检测", "检测中…")}</button>
           </div>
           ${diagnostic?.inspectedAt ? `<p class="tools-inspected-at">最近检测：${escapeHtml(new Date(diagnostic.inspectedAt).toLocaleString())}</p>` : ""}
           ${[diagnostic?.managementCli?.error, unifiedSkill(diagnostic)?.error, diagnostic?.shellIntegration.error].filter(Boolean).map(error => `<p class="tools-diagnostic-error" role="alert">${escapeHtml(error!)}</p>`).join("")}
@@ -106,8 +104,9 @@ function renderManagementCliPanel(diagnostic: AgentIntegrationDiagnostic | null,
       <summary class="tools-overview-summary">
         ${overviewIcon("cli")}
         <span class="tools-overview-copy"><span class="tools-overview-title"><strong id="management-cli-title">ProfilePilot CLI</strong><em>${status}</em></span>
-          <span class="tools-overview-line"><small>浏览器、Electron 应用、安卓手机 · 展开查看命令</small><button type="button" data-action="install-profilepilot-cli" ${pending ? "disabled" : ""}>${pending ? "检测中…" : action}</button></span>
+          <span class="tools-overview-line"><small>浏览器、Electron 应用、安卓手机 · 展开查看命令</small></span>
         </span>
+        <button type="button" data-action="install-profilepilot-cli" ${pending || store.busy ? "disabled" : ""}>${renderButtonLabel(pending, action, "处理中…")}</button>
         <span class="tools-cli-arrow" aria-hidden="true">›</span>
       </summary>
       <div class="tools-disclosure-body">
@@ -133,18 +132,6 @@ function renderManagementCliPanel(diagnostic: AgentIntegrationDiagnostic | null,
     </details>`;
 }
 
-function renderControlPreferences(diagnostic: AgentIntegrationDiagnostic | null, pending: boolean): string {
-  const skill = unifiedSkill(diagnostic);
-  const canEdit = !pending && Boolean(skill?.installedTargetCount);
-  return `<section id="tools-control-preferences" aria-labelledby="control-preferences-card-title" class="tools-overview-card tools-preferences-card" data-tools-search="控制偏好 浏览器 Electron 手机 安卓 Profile 设备 连接方式 browser electron phone 编辑">
-    <div class="tools-overview-summary">
-      ${overviewIcon("preferences")}
-      <span class="tools-overview-copy"><span class="tools-overview-title"><strong id="control-preferences-card-title">控制偏好</strong></span>
-        <span class="tools-overview-line"><small>浏览器、Electron 应用与手机的使用规则</small><button type="button" data-action="open-control-preferences" ${canEdit ? "" : "disabled"}>编辑偏好</button></span>
-      </span>
-    </div>
-  </section>`;
-}
 function renderSessionBridge(diagnostic: AgentIntegrationDiagnostic | null): string {
   const wrappers = installedWrapperCount(diagnostic);
   const shell = diagnostic?.shellIntegration;
@@ -184,12 +171,12 @@ function renderInputGuardPermissionCard(context: "onboarding" | "integration"): 
         ? "正在检查点击保护"
         : "等待辅助功能授权";
   const status = state === "ready"
-    ? "PROTECTED"
+    ? "已授权"
     : state === "skipped"
-      ? "NOT REQUIRED"
+      ? "无需授权"
       : state === "pending"
-        ? "CHECKING"
-        : "ACTION NEEDED";
+        ? "检查中"
+        : "待授权";
   const detail = state === "ready"
     ? "Agent 控制浏览器时，可以拦截受管 Chrome 窗口的鼠标点击、拖动与滚动。"
     : state === "skipped"
@@ -197,7 +184,7 @@ function renderInputGuardPermissionCard(context: "onboarding" | "integration"): 
         ? "Windows Input Guard 使用系统鼠标钩子，无需额外的辅助功能授权。"
         : "Input Guard 的辅助功能权限只在 macOS 上需要。"
       : state === "pending"
-        ? "正在确认 ProfilePilot Input Guard 的 macOS 辅助功能权限。"
+        ? "正在确认当前系统的点击保护是否可用。"
         : "不授权不影响 Profile 管理和 Agent 连接，但无法阻止 Agent 操作期间的手动点击。";
   const labelId = `input-guard-permission-${context}`;
 
@@ -205,7 +192,6 @@ function renderInputGuardPermissionCard(context: "onboarding" | "integration"): 
     <section class="input-guard-permission ${context} ${state}" aria-labelledby="${labelId}">
       <div class="input-guard-mark" aria-hidden="true"><span>IG</span></div>
       <div class="input-guard-copy">
-        <span>${windows ? "WINDOWS INPUT GUARD" : "MACOS SAFETY CHECKPOINT"}</span>
         <strong id="${labelId}">${title}</strong>
         <p>${detail}</p>
         ${permission?.error ? `<small class="input-guard-error">${escapeHtml(permission.error)}</small>` : ""}

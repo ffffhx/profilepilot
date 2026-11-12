@@ -2,6 +2,14 @@
 let socket, config, currentTab, sessionId, ownership = 'user', attached = false, pausedByBrowser = false;
 let heartbeat, preview = false, connecting, authenticated = false, connectionError = '', commandQueue = Promise.resolve();
 let controlEpoch = 0;
+const connectionDiagnostics = globalThis.ProfilePilotConnectionDiagnostics;
+let connectionStartedAt = 0, lastConnectionCheckpoint = 0, lastServerMessageAt = 0;
+const connectionLog = (event, details = {}) => { void connectionDiagnostics?.record(event, details); };
+async function publishConnectionDiagnostics() {
+  if (!connectionDiagnostics || !authenticated) return;
+  const report = await connectionDiagnostics.report();
+  if (authenticated) send({ type: 'connectionDiagnostics', events: report.events });
+}
 // A technical interruption is not a user takeover. Keep its cause until an
 // explicit resume succeeds or the user actually takes control.
 let controlIssue;
@@ -617,6 +625,7 @@ async function handle(method, p, check = () => {}) {
   if (method === 'extension.reload') {
     if (sessionId) throw new Error('当前 Profile 仍有任务（包括已接管任务），请结束后更新扩展。');
     if (installationMode === 'temporary') throw new Error('当前为临时安装，Chrome 可能在重载后禁用扩展。请先完成持久安装，并在扩展中明确确认后再更新。');
+    connectionLog('reload-requested');
     setTimeout(() => chrome.runtime.reload(), 100);
     return { reloading: true, version: chrome.runtime.getManifest?.().version || '0.2.0' };
   }
@@ -907,6 +916,7 @@ async function openSidePanel(tabId) {
   return chrome.sidePanel.open({ tabId: tab.id });
 }
 async function disconnect(forget = false) {
+  connectionLog('disconnect-requested', { paired: Boolean(config), step: forget ? 'forget-pairing' : 'replace-connection' });
   ownership = 'user'; controlEpoch++; groupState(forget ? 'cancelled' : 'failed'); await detach();
   await syncTaskGroups();
   const old = socket; socket = undefined; authenticated = false; clearInterval(heartbeat); old?.close();
@@ -914,13 +924,20 @@ async function disconnect(forget = false) {
   await publish();
 }
 async function connect() {
-  if (connecting || !config || socket?.readyState === WebSocket.OPEN) return connecting;
+  if (connecting || !config || socket?.readyState === WebSocket.OPEN) {
+    if (config && !authenticated && connectionStartedAt && Date.now() - connectionStartedAt >= 15000)
+      connectionLog('connect-pending', { port: config.port, elapsedMs: Date.now() - connectionStartedAt, step: connecting ? 'socket-opening' : 'authentication' });
+    return connecting;
+  }
   connecting = (async () => {
     authenticated = false; connectionError = '';
+    connectionStartedAt = Date.now();
+    connectionLog('connect-attempt', { port: config.port });
     const ws = new WebSocket(`ws://127.0.0.1:${config.port}/profilepilot`); socket = ws;
-    ws.onopen = () => send({ type: 'hello', profileId: config.profileId, token: config.token });
+    ws.onopen = () => { connectionLog('socket-open', { port: config.port }); send({ type: 'hello', profileId: config.profileId, token: config.token }); };
     ws.onmessage = event => {
       let message; try { message = JSON.parse(event.data); } catch { return; }
+      lastServerMessageAt = Date.now();
       if (message.type === 'ui-result') {
         const pending = uiPending.get(message.id);
         if (pending) { uiPending.delete(message.id); clearTimeout(pending.timer); message.error ? pending.reject(new Error(message.error)) : pending.resolve(message.result); }
@@ -928,6 +945,8 @@ async function connect() {
       }
       if (message.type === 'welcome') {
         authenticated = true;
+        connectionLog('authenticated', { port: config.port, elapsedMs: Date.now() - connectionStartedAt });
+        void publishConnectionDiagnostics();
         clearInterval(heartbeat); heartbeat = setInterval(() => send({ type: 'heartbeat' }), 20000);
         void publish(); return;
       }
@@ -953,6 +972,7 @@ async function connect() {
     };
     ws.onclose = event => {
       if (socket !== ws) return;
+      connectionLog('socket-close', { port: config?.port, closeCode: event.code, wasClean: event.wasClean, authenticated });
       authenticated = false;
       if (event.code === 4001) connectionError = '配对码已失效或连接已撤销，请断开配对后生成新码。';
       if (event.code === 4009) connectionError = '这个 Profile 已有扩展连接，请检查是否选错了 Chrome Profile。';
@@ -960,7 +980,7 @@ async function connect() {
       for (const pending of uiPending.values()) { clearTimeout(pending.timer); pending.reject(new Error('浏览器服务连接中断，请检查任务是否已提交。')); }
       uiPending.clear();
     };
-    ws.onerror = () => {};
+    ws.onerror = () => { connectionLog('socket-error', { port: config?.port, authenticated }); };
     await new Promise(resolve => { ws.addEventListener('open', resolve, { once: true }); ws.addEventListener('error', resolve, { once: true }); });
   })().finally(() => { connecting = undefined; });
   return connecting;
@@ -1087,19 +1107,38 @@ chrome.tabGroups?.onRemoved?.addListener(group => {
   for (const record of taskGroups.values()) for (const [windowId, id] of Object.entries(record.groups)) if (id === group.id) delete record.groups[windowId];
   void saveTaskGroups();
 });
+const onboardingInvitations = new Map();
+function onboardingInvitation(url) {
+  const pending = onboardingInvitations.get(url);
+  if (pending) return pending;
+  const work = (async () => {
+    const id = new URL(url).pathname.split('/').pop();
+    const key = `onboarding:${id}`;
+    // The page can be reinjected on install/startup or reopened after a failed
+    // redirect. Keep the single-use delivery in extension-only session storage.
+    const saved = (await chrome.storage.session.get(key))[key];
+    if (saved && saved.expiresAt > Date.now()) return saved;
+    if (saved) await chrome.storage.session.remove(key);
+    // POST carries the extension Origin, which the desktop strictly checks.
+    const response = await fetch(`${url}/pair`, { method: 'POST', credentials: 'omit', redirect: 'error', cache: 'no-store' });
+    if (!response.ok) throw new Error('连接请求已过期或已使用，请返回应用重新点击授权并连接。');
+    const invitation = await response.json();
+    await chrome.storage.session.set({ [key]: invitation });
+    return invitation;
+  })();
+  onboardingInvitations.set(url, work);
+  void work.finally(() => { if (onboardingInvitations.get(url) === work) onboardingInvitations.delete(url); }).catch(() => {});
+  return work;
+}
+
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (message?.method === 'frameGuard') { respond(frameGuardPermission(message, sender)); return; }
   if (message?.method === 'onboarding') {
     if (sender.id !== chrome.runtime.id || sender.frameId !== 0 || !sender.tab || sender.tab.incognito || !/^http:\/\/127\.0\.0\.1:[0-9]+\/profilepilot-connect\/[a-f0-9]{48}$/.test(sender.url || '')) return;
     void (async () => {
       if (sessionId) throw new Error('当前 Profile 有任务尚未结束，请先结束任务后连接。');
-      // Chrome omits Origin on extension GET requests with host permissions.
-      // POST carries the extension Origin, which the desktop strictly checks.
-      const response = await fetch(`${sender.url}/pair`, { method: 'POST', credentials: 'omit', redirect: 'error', cache: 'no-store' });
-      if (!response.ok) throw new Error('连接请求已过期或已使用，请返回应用重新点击授权并连接。');
-      const invitation = await response.json();
+      await onboardingInvitation(sender.url);
       const id = new URL(sender.url).pathname.split('/').pop();
-      await chrome.storage.session.set({ [`onboarding:${id}`]: invitation });
       await chrome.tabs.update(sender.tab.id, { url: chrome.runtime.getURL(`popup.html#setup=${id}`) });
       respond({ result: {} });
     })().catch(error => respond({ error: error.message }));
@@ -1184,7 +1223,15 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   })().then(result => respond({ result }), error => respond({ error: String(error.message || error) }));
   return true;
 });
-chrome.alarms.onAlarm.addListener(alarm => { if (alarm.name === 'reconnect') void connect(); });
+chrome.alarms.onAlarm.addListener(alarm => {
+  if (alarm.name !== 'reconnect') return;
+  if (authenticated && Date.now() - lastConnectionCheckpoint >= 300000) {
+    lastConnectionCheckpoint = Date.now();
+    connectionLog('heartbeat-checkpoint', { port: config?.port, authenticated, elapsedMs: Date.now() - lastServerMessageAt });
+    void publishConnectionDiagnostics();
+  }
+  void connect();
+});
 chrome.storage.onChanged?.addListener((changes, area) => {
   if (area === 'local' && changes.profilepilotInstallation) {
     installationMode = changes.profilepilotInstallation.newValue?.mode;
@@ -1204,8 +1251,8 @@ async function installed() {
     await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['onboarding.js'] }).catch(() => {});
   }
 }
-chrome.runtime.onInstalled?.addListener(() => { void installed(); });
-chrome.runtime.onStartup?.addListener(() => { void installed(); void connect(); });
+chrome.runtime.onInstalled?.addListener(() => { connectionLog('extension-installed'); void installed(); });
+chrome.runtime.onStartup?.addListener(() => { connectionLog('browser-startup'); void installed(); void connect(); });
 chrome.contextMenus?.onClicked.addListener((info, tab) => {
   if (!tab?.id || tab.incognito || !usable(tab.url)) return;
   // Invoke open while Chrome still considers this a user gesture.
@@ -1215,19 +1262,25 @@ chrome.contextMenus?.onClicked.addListener((info, tab) => {
 });
 // Chrome extension service workers do not support top-level await. Register all
 // listeners synchronously, then restore only a previously paired connection.
+let connectionInitializationStep = 'alarms';
 void (async () => {
   await chrome.alarms.create('reconnect', { periodInMinutes: 0.5 });
+  connectionInitializationStep = 'installation';
   try { installationType = (await chrome.management?.getSelf())?.installType; } catch {}
   installationMode = (await chrome.storage.local.get('profilepilotInstallation')).profilepilotInstallation?.mode;
+  connectionInitializationStep = 'connection-storage';
   const saved = (await chrome.storage.local.get('connection')).connection;
+  connectionInitializationStep = 'access-storage';
   const savedAccess = (await chrome.storage.local.get('nativeAccess')).nativeAccess;
   if (savedAccess && Array.isArray(savedAccess.blockedOrigins)) access = { ...access, ...savedAccess };
+  connectionInitializationStep = 'session-storage';
   const selection = (await chrome.storage.session.get('selection')).selection;
   const savedTasks = (await chrome.storage.session.get('taskTabs')).taskTabs;
   const savedGroups = (await chrome.storage.session.get('taskGroups')).taskGroups;
   const savedLogos = (await chrome.storage.session.get('tabLogos')).tabLogos;
   if (saved) {
     config = saved;
+    connectionInitializationStep = 'restore-session';
     if (savedGroups?.profileId === config.profileId && Array.isArray(savedGroups.tasks)) {
       for (const [id, record] of savedGroups.tasks) if (typeof id === 'string' && record && Array.isArray(record.enrolled) && record.groups && Object.hasOwn(GROUP_STATES, record.phase)) {
         taskGroups.set(id, { phase: record.phase === 'running' ? 'paused' : record.phase,
@@ -1253,6 +1306,11 @@ void (async () => {
     }
     syncTabLogos();
     void syncTaskGroups();
+    connectionInitializationStep = 'connect';
     await connect();
   }
-})().catch(() => { connectionError = '连接配置读取失败，请重新配对。'; });
+  connectionLog('worker-ready', { paired: Boolean(config) });
+})().catch(error => {
+  connectionLog('initialization-failed', { step: connectionInitializationStep, ...connectionDiagnostics?.errorInfo(error) });
+  connectionError = '扩展初始化失败，请先导出连接诊断；现有配对已保留。';
+});

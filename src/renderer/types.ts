@@ -107,7 +107,6 @@ export type ModalState =
   | { kind: "clone-pool" }
   | { kind: "clone-tag"; profileId: string }
   | { kind: "global-instructions" }
-  | { kind: "control-preferences"; activeTab: import("../shared/control-preferences").ControlPreferencesDomain; editors: Record<import("../shared/control-preferences").ControlPreferencesDomain, import("../shared/control-preferences").ControlPreferencesEditor>; discard: false | "close" | "reload" }
   | { kind: "onboarding" }
   | { kind: "profile-details"; profileId: string }
   | { kind: "external-details"; userDataDir: string }

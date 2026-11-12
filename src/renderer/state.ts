@@ -82,6 +82,7 @@ export interface RendererState {
   agentIntegrationDiagnostic: AgentIntegrationDiagnostic | null;
   agentIntegrationLoading: boolean;
   nativeExtensionBrowsers: BrowserConnectionSnapshot["nativeBrowsers"] | null;
+  nativeExtensionService: BrowserConnectionSnapshot["nativeService"];
   nativeExtensionInstallations: BrowserConnectionSnapshot["nativeInstallations"];
   nativeExtensionProfileId: string | null;
   nativeExtensionLoading: boolean;
@@ -159,6 +160,7 @@ export const store: RendererState = {
   agentIntegrationDiagnostic: null,
   agentIntegrationLoading: false,
   nativeExtensionBrowsers: null,
+  nativeExtensionService: undefined,
   nativeExtensionInstallations: [],
   nativeExtensionProfileId: null,
   nativeExtensionLoading: false,

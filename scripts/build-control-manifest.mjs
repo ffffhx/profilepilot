@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -20,6 +21,9 @@ async function files(directory) {
 }
 export async function buildControlManifest(projectRoot = root, platform = process.platform) {
 const root = projectRoot, entries = {};
+let commit = '';
+try { commit = execFileSync('git', ['rev-parse', 'HEAD'], {cwd: root, encoding: 'utf8', windowsHide: true}).trim(); } catch { /* Source archives have no .git. */ }
+await writeFile(path.join(root, 'dist/main/build-channel.json'), JSON.stringify({commit}) + '\n');
 entries['public/phone-video/preview.dex'] = hash(await readFile(path.join(root, 'public/phone-video/preview.dex')));
 if (platform === 'win32') {
   entries['native/input-guard-win.ps1'] = hash(await readFile(path.join(root, 'native/input-guard-win.ps1')));

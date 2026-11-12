@@ -4,13 +4,14 @@ import os from "node:os";
 import { randomUUID } from "node:crypto";
 import type { Readable } from "node:stream";
 import { RemoteControlConnection, RemoteSessionStore, remoteError, type RemoteSession } from "./remote-control-client";
+import { observeAfterAction } from './action-feedback';
 
 type Io = { stdout: { write(value: string): unknown }; stderr: { write(value: string): unknown } };
 export interface RemoteCliRuntime { homeDir?: string; env?: NodeJS.ProcessEnv; stdin?: Readable; }
 export interface RemoteCommand {
   kind: "devices" | "connect" | "sessions" | "disconnect" | "execute";
   json: boolean; session?: string; deviceId?: string; leaseSeconds?: number; operation?: string;
-  params: Record<string, unknown>; paramsFile?: string; paramsStdin?: boolean; requestId?: string; output?: string;
+  params: Record<string, unknown>; paramsFile?: string; paramsStdin?: boolean; requestId?: string; output?: string; observeAfter?: boolean;
 }
 export const remoteCliHelp = () => `ProfilePilot 远程控制：ppilot remote <命令>
   devices [--json]                            列出可发现及已配对电脑
@@ -29,6 +30,8 @@ export const remoteCliHelp = () => `ProfilePilot 远程控制：ppilot remote <�
   window action --session ID --params-file action.json
 
 所有命令支持 --json；action 也可用 --params-stdin 读取 UTF-8 JSON。
+browser action/navigate 和 window action 默认附带操作后的观察；目标端未提供时，本机等待 500ms 后读取同一目标。
+--no-observe 跳过本机追加观察（目标端已有的反馈仍保留）。observationStatus:unavailable 不表示动作失败，不要重放输入。
 动作包含最近观察的 version、ref、kind 等参数；使用 --request-id 32位十六进制值查询同一请求回执，不能改参数重放。
 命令结束后会话在 ClipRelay 后台限时保留；后续命令延长有效期，任务结束必须 disconnect。
 截图保存在本机并返回路径；--output 不覆盖已有文件。普通操作返回 JSON，日志不混入 stdout。
@@ -39,7 +42,7 @@ export const remoteCliHelp = () => `ProfilePilot 远程控制：ppilot remote <�
 
 export function parseRemoteCliArgs(args: string[]): RemoteCommand {
   const words: string[] = [], options = new Map<string, string | true>();
-  const booleans = new Set(["json", "new-tab", "yes", "params-stdin"]);
+  const booleans = new Set(["json", "new-tab", "yes", "params-stdin", "no-observe"]);
   const known = new Set([...booleans, "session", "browser", "profile", "window", "tab", "url", "name", "hide-automation", "lease-seconds", "params-file", "request-id", "output"]);
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -93,12 +96,13 @@ export function parseRemoteCliArgs(args: string[]): RemoteCommand {
       }
       if (verb === "tab-close") { allowed.push("tab"); parsed.params.tabId = tab(); }
       if (verb === "action") allowed.push("params-file", "params-stdin");
+      if (verb === 'action' || verb === 'navigate') allowed.push('no-observe');
       break;
     }
     case "window":
       exactWords(2); if (!["observe", "screenshot", "action"].includes(words[1])) bad("不支持这个窗口命令。");
       parsed.operation = "window." + words[1];
-      if (words[1] === "action") allowed.push("params-file", "params-stdin");
+      if (words[1] === "action") allowed.push("params-file", "params-stdin", "no-observe");
       else { allowed.push("window", "output"); parsed.params.windowId = requireOption("window"); parsed.output = get("output"); if (parsed.output) parsed.params.screenshot = true; }
       break;
     default: bad("请选择 remote 命令，运行 ppilot remote --help 查看用法。");
@@ -112,6 +116,7 @@ export function parseRemoteCliArgs(args: string[]): RemoteCommand {
     parsed.paramsFile = get("params-file"); parsed.paramsStdin = options.has("params-stdin");
   }
   parsed.requestId = get("request-id");
+  parsed.observeAfter = !options.has('no-observe');
   if (parsed.requestId && !/^[a-f0-9]{32}$/.test(parsed.requestId)) bad("--request-id 需要 32 位十六进制值。");
   return parsed;
 }
@@ -150,8 +155,64 @@ async function saveImages(value: any, command: RemoteCommand, home: string): Pro
 
 function nestedFailure(value: any): number {
   if (!value || typeof value !== "object") return 0;
+  if (value.ok === false) return /UNKNOWN|STALE|STOPPED|ENDED|CONTROL|SESSION/.test(String(value.code || value.error?.code || '')) ? 75 : 1;
   if (Number.isInteger(value.exitCode) && (value.exitCode !== 0 || value.data?.ok === false)) return value.exitCode === 75 ? 75 : 1;
-  return Object.values(value).reduce<number>((code, item) => Math.max(code, nestedFailure(item)), 0);
+  return Math.max(nestedFailure(value.data), nestedFailure(value.result));
+}
+
+/** Only unwrap transport envelopes, never search arbitrary page nodes for metadata. */
+export function remotePayload(value: any): any {
+  for (let i = 0; i < 8 && value && typeof value === 'object'; i++) {
+    if (value.actionOutcome || value.observationStatus || value.observation || value.version || value.snapshot || value.nodes || value.elements || value.tree || value.image || value.executed) return value;
+    const next = value.data ?? value.result;
+    if (!next || typeof next !== 'object') break;
+    value = next;
+  }
+  return value;
+}
+export async function remoteActionFeedback(command: RemoteCommand, result: any, call: (message: Record<string, unknown>) => Promise<any>): Promise<any> {
+  if (command.observeAfter === false || !['browser.action', 'browser.navigate', 'window.action'].includes(command.operation || '') || nestedFailure(result)) return result;
+  const payload = remotePayload(result);
+  if (payload?.actionOutcome && payload.actionOutcome !== 'completed' || payload?.executed === false) return result;
+  const receipt = { ...payload, ...(result.requestId ? { requestId: result.requestId } : {}), ...(result.expiresAt ? { expiresAt: result.expiresAt } : {}) };
+  // A newer remote browser already observes in its own queue. Preserve its
+  // receipt (including unavailable observations) without waiting/reading twice.
+  if (payload?.actionOutcome === 'completed' && ['available', 'unavailable'].includes(payload.observationStatus))
+    return receipt;
+  if (payload?.executed === true && payload.observation && !payload.requiresObservation)
+    return { ...receipt, actionOutcome: 'completed', observationStatus: 'available', nextStep: 'use-observation' };
+  const feedback = await observeAfterAction({ invalidate: () => {}, errorCode: 'REMOTE_OBSERVATION_FAILED',
+    observe: async () => {
+      const browser = command.operation!.startsWith('browser.');
+      const id = browser ? command.params.browserId : command.params.windowId;
+      if (typeof id !== 'string' || !id) throw remoteError('REMOTE_OBSERVATION_TARGET_REQUIRED');
+      const observed = await call({ method: 'execute', params: { session: command.session,
+        operation: browser ? 'browser.observe' : 'window.observe', params: browser ? { browserId: id } : { windowId: id },
+        requestId: randomUUID().replaceAll('-', '') } });
+      if (nestedFailure(observed)) throw remoteError('REMOTE_OBSERVATION_UNAVAILABLE');
+      const observation = remotePayload(observed);
+      if (!observation || typeof observation !== 'object' || observation.ok === false ||
+        !['version', 'snapshot', 'nodes', 'elements', 'tree', 'image'].some(key => observation[key] !== undefined)) throw remoteError('REMOTE_OBSERVATION_INVALID');
+      return observation;
+    }
+  });
+  return { ...receipt, ...feedback };
+}
+
+export async function saveRemoteFeedbackImages(result: any, command: RemoteCommand, home: string): Promise<any> {
+  try { return await saveImages(result, command, home); }
+  catch (error) {
+    if (result?.actionOutcome !== 'completed') throw error;
+    // Never print binary data from a failed save, or turn confirmed input into
+    // an input failure that callers might retry.
+    const stripImages = (value: any): any => {
+      if (!value || typeof value !== 'object') return value;
+      if (Array.isArray(value)) return value.map(stripImages);
+      return Object.fromEntries(Object.entries(value).filter(([key]) => !(key === 'data' && String(value.mimeType).startsWith('image/'))).map(([key, item]) => [key, stripImages(item)]));
+    };
+    return { ...stripImages(result), observation: undefined, observationStatus: 'unavailable', nextStep: 'observe-or-check-control',
+      observationError: { code: 'REMOTE_OBSERVATION_WRITE_FAILED', message: '动作已执行，但操作后的截图未保存。请重新观察，不要重复动作。' } };
+  }
 }
 
 export async function runRemoteCli(args: string[], io: Io = process, runtime: RemoteCliRuntime = {}): Promise<number> {
@@ -180,8 +241,9 @@ export async function runRemoteCli(args: string[], io: Io = process, runtime: Re
     } else {
       result = await connection.call({ method: "execute", params: { session: command.session, operation: command.operation, params: command.params, requestId: command.requestId } });
       if (saved && Number.isFinite(result.expiresAt)) { saved.expiresAt = result.expiresAt; await store.save(saved); }
+      result = await remoteActionFeedback(command, result, message => connection.call(message));
     }
-    const failed = nestedFailure(result); result = await saveImages(result, command, home);
+    const failed = nestedFailure(result); result = await saveRemoteFeedbackImages(result, command, home);
     write({ ok: failed === 0, ...result }); return failed;
   } catch (cause) {
     const error = cause as Error & { code?: string; requestId?: string };

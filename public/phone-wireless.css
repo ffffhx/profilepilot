@@ -1,5 +1,7 @@
 .phone-wireless-dialog { width:min(610px,calc(100vw - 40px)); max-height:calc(100vh - 48px); padding:0; border:1px solid var(--line,#d7e3f4); border-radius:18px; color:var(--ink,#233047); background:var(--panel,#fff); box-shadow:0 24px 80px #17366033; }
 .phone-wireless-dialog::backdrop { background:#12244366; }
+/* Keep the controls in place when connection feedback expands below them. */
+.phone-wireless-dialog { margin-block-start:clamp(24px,7dvh,64px); max-height:calc(100dvh - clamp(24px,7dvh,64px) - 24px); scrollbar-gutter:stable; }
 .wireless-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; padding:24px 28px 18px; }
 .wireless-heading h2 { font-size:24px; margin-top:5px; }
 .wireless-heading [data-close] { font-size:23px; min-width:34px; padding:0 8px; border-color:transparent; }

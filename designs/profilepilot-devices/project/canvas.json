@@ -1,0 +1,70 @@
+{
+  "v": 3,
+  "createdOnFiles": {
+    "v": 1,
+    "at": "2026-11-12T07:16:52.426Z"
+  },
+  "title": "ProfilePilot · 设备管理",
+  "launch": {
+    "view": "canvas"
+  },
+  "pages": [],
+  "boards": {
+    "Main.dc.html": {
+      "x": 0,
+      "y": 0,
+      "w": 1440,
+      "h": 1000,
+      "title": "01 · 全部设备",
+      "expand": "fill",
+      "is_interactive": true
+    },
+    "Device.dc.html": {
+      "x": 1520,
+      "y": 0,
+      "w": 1440,
+      "h": 1000,
+      "title": "02 · 手机与控制权",
+      "expand": "fill",
+      "is_interactive": true
+    },
+    "Connect.dc.html": {
+      "x": 3040,
+      "y": 0,
+      "w": 1440,
+      "h": 1000,
+      "title": "03 · 添加设备",
+      "expand": "fill",
+      "is_interactive": true
+    }
+  },
+  "order": [
+    "Main.dc.html",
+    "Device.dc.html",
+    "Connect.dc.html"
+  ],
+  "notes": {
+    "overview": {
+      "x": 0,
+      "y": -300,
+      "kind": "title1",
+      "maxW": 4480,
+      "text": "设备，一眼掌握。控制，始终由你。"
+    },
+    "context": {
+      "x": 0,
+      "y": 1100,
+      "w": 420,
+      "text": "沿用 ProfilePilot「晴空控制台」的蓝白配色、中文系统字体与 8px 圆角。所有设备名称、连接状态均为原型示例；不会连接或操作真实设备。",
+      "fill": "blue"
+    },
+    "interaction": {
+      "x": 520,
+      "y": 1100,
+      "w": 420,
+      "text": "可体验：按类型筛选、搜索设备、查看状态、打开设备详情、切换控制权、选择添加方式。手机详情与添加流程均可返回设备列表。",
+      "fill": "gray"
+    }
+  },
+  "designSystems": []
+}

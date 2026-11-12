@@ -1,5 +1,7 @@
 export const DESKTOP_CHANNEL = 'desktop:request';
 export const DESKTOP_CHANGED = 'desktop:changed';
+export type DesktopMode = 'interactive' | 'background';
+export const backgroundDesktopActions = ['invoke', 'set_value', 'toggle', 'select', 'expand', 'collapse', 'scroll'] as const;
 export interface DesktopWindow {
   id: string; title: string; process: string; pid: number; className: string; nativeHandle?: string;
   /** Fresh catalog samples; ownership is a Win32 window relation, not control permission or proof of modality. */
@@ -60,7 +62,7 @@ export interface DesktopStatus {
     generation?: string; epoch?: string; reason?: string; message?: string; certainty?: 'observed' | 'unknown';
     unobservedTestDriver?: true;
   };
-  session: null | { name: string; window: DesktopWindow; state: 'active' | 'paused'; expiresAt: number; revision: number; };
+  session: null | { name: string; window: DesktopWindow; mode?: DesktopMode; state: 'active' | 'paused'; expiresAt: number; revision: number; };
 }
 /** Bind the user's return click to the exact state displayed in that document. */
 export interface DesktopReturnExpectation { session: string; generation: string; revision: number; }

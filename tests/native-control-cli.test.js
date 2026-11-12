@@ -7,6 +7,7 @@ const { spawn } = require('node:child_process');
 const test = require('node:test');
 const { buildSync } = require('esbuild');
 const { loadCli } = require('./cli-test-build.cjs');
+const { BROWSER_SERVICE_VERSION } = loadCli('src/main/browser-service/connection.ts');
 
 test('Browser CLI validates before dispatch and preserves portable JSON inputs', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ppilot-native-cli-'));
@@ -14,9 +15,9 @@ test('Browser CLI validates before dispatch and preserves portable JSON inputs',
   fs.writeFileSync(cli, buildSync({ entryPoints: [path.resolve('src/main/profilepilot-cli.ts')], bundle: true, platform: 'node', format: 'cjs', write: false, logLevel: 'silent' }).outputFiles[0].contents);
   const requests = [];
   let browserReply = command => command;
-  const server = http.createServer((req, res) => { const chunks = []; req.on('data', chunk => chunks.push(chunk)); req.on('end', () => { const command = JSON.parse(Buffer.concat(chunks)); requests.push(command); res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ ok: true, result: req.url === '/native-service' ? { service: 'browser', version: 1, pid: process.pid, root } : browserReply(command) })); }); });
+  const server = http.createServer((req, res) => { const chunks = []; req.on('data', chunk => chunks.push(chunk)); req.on('end', () => { const command = JSON.parse(Buffer.concat(chunks)); requests.push(command); res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ ok: true, result: req.url === '/native-service' ? { service: 'browser', version: BROWSER_SERVICE_VERSION, pid: process.pid, root } : browserReply(command) })); }); });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  fs.writeFileSync(path.join(root, 'native-control.json'), JSON.stringify({ version: 1, port: server.address().port, token: 'a'.repeat(64), pid: process.pid, service: 'browser', serviceVersion: 1 }));
+  fs.writeFileSync(path.join(root, 'native-control.json'), JSON.stringify({ version: 1, port: server.address().port, token: 'a'.repeat(64), pid: process.pid, service: 'browser', serviceVersion: BROWSER_SERVICE_VERSION }));
   t.after(async () => { await new Promise(resolve => server.close(resolve)); fs.rmSync(root, { recursive: true, force: true }); });
   const run = (args, input, envelope = false) => new Promise(resolve => {
     const argv = ['--task-kind', 'verification', 'browser', '--root', root, ...args];

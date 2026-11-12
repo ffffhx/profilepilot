@@ -58,13 +58,23 @@ namespace ProfilePilot.Desktop {
         string version="";
         long observed;
         bool imageReady;
+        Target backgroundTarget;
+        string backgroundWindowId;
+        static bool BackgroundAction(string kind){return kind=="invoke" || kind=="set_value" || kind=="toggle" || kind=="select" || kind=="expand" || kind=="collapse" || kind=="scroll";}
+        void CheckBackground(){
+            if(backgroundTarget==null)return;
+            AutomationJson.Require(Valid(backgroundTarget),"DESKTOP_WINDOW_CHANGED");
+            uint pid=0;IntPtr foreground=GetForegroundWindow();
+            AutomationJson.Require(foreground!=IntPtr.Zero && GetWindowThreadProcessId(foreground,out pid)!=0,"DESKTOP_BACKGROUND_TARGET_ACTIVE");
+            AutomationJson.Require(pid!=(uint)backgroundTarget.Pid,"DESKTOP_BACKGROUND_TARGET_ACTIVE");
+        }
         Rect imageBounds;
         bool physicalCoordinates;
         readonly UIntPtr inputMarker;
         public AutomationWindows():this(DesktopHost.InputMarker(new string[0])){}
         public AutomationWindows(UIntPtr marker){if(marker==UIntPtr.Zero)throw new ArgumentException("Input marker must be nonzero");inputMarker=marker;}
         public Func<bool> Allowed=()=>true;
-        void CheckControl(){AutomationJson.Require(Allowed(),"DESKTOP_USER_STOPPED");AutomationJson.Require(DesktopHost.IsInteractiveDesktop(),"DESKTOP_DESKTOP_LOCKED");}
+        void CheckControl(){AutomationJson.Require(Allowed(),"DESKTOP_USER_STOPPED");AutomationJson.Require(DesktopHost.IsInteractiveDesktop(),"DESKTOP_DESKTOP_LOCKED");CheckBackground();}
         readonly Stopwatch clock=Stopwatch.StartNew();
         public bool HasObservation {get{return selected!=null && clock.ElapsedMilliseconds-observed<30000;}}
         delegate bool EnumProc(IntPtr handle,IntPtr data);
@@ -348,6 +358,7 @@ namespace ProfilePilot.Desktop {
             AutomationJson.Fields(p,"windowId,screenshot,screenshotOnly");string id=AutomationJson.Text(p,"windowId");Target target;
             bool screenshotOnly=AutomationJson.Flag(p,"screenshotOnly");AutomationJson.Require(!screenshotOnly || screenshot);
             AutomationJson.Require(targets.TryGetValue(id,out target) && Valid(target),"DESKTOP_WINDOW_CHANGED");
+            if(backgroundTarget!=null)AutomationJson.Require(id==backgroundWindowId,"DESKTOP_WINDOW_CHANGED");
             selected=null;elements.Clear();version=Guid.NewGuid().ToString("N");imageReady=false;
             var nodes=new List<object>();var gaps=new HashSet<string>();var queue=new Queue<Tuple<AutomationElement,int,int>>();
             var watch=Stopwatch.StartNew();int textBudget=32768;
@@ -369,6 +380,7 @@ namespace ProfilePilot.Desktop {
                 var item=queue.Dequeue();var element=item.Item1;int limit=Math.Min(4096,textBudget);
                 IntPtr rootHandle=item.Item3==-1?target.Handle:IntPtr.Zero;
                 var snapshot=ReadSnapshot(element,limit,checkpoint,rootHandle);
+                if(backgroundTarget!=null)snapshot.Actions=snapshot.Actions.Where(action=>action=="text" || BackgroundAction(action)).ToArray();
                 // UIA subtrees in Chromium and hosted Windows apps may be owned
                 // by renderer processes. Scope by the observed window ancestry.
                 string reference="e"+nodes.Count;int index=nodes.Count;
@@ -768,6 +780,7 @@ namespace ProfilePilot.Desktop {
         object Action(Dictionary<string,object> p){
             CheckControl();
             string kind=ValidateAction(p);
+            if(backgroundTarget!=null){AutomationJson.Require(BackgroundAction(kind),"DESKTOP_BACKGROUND_ACTION_DENIED");CheckBackground();}
             AutomationJson.Require(HasObservation && Valid(selected) && AutomationJson.Text(p,"version")==version,"DESKTOP_OBSERVATION_STALE");
             string reference=AutomationJson.Text(p,"ref");Element element=null;WindowPattern windowPattern=null;bool shellInvoke=false;
             if(reference!=""){
@@ -787,10 +800,12 @@ namespace ProfilePilot.Desktop {
                     var rootClass=new StringBuilder(256);
                     AutomationJson.Require(GetClassName(selected.Handle,rootClass,rootClass.Capacity)>0,"DESKTOP_WINDOW_CHANGED");
                     shellInvoke=DesktopShellInvocation.UsesPointer(rootClass.ToString(),current.Role,current.Actions.Contains("invoke"));
+                    if(backgroundTarget!=null)AutomationJson.Require(!shellInvoke,"DESKTOP_BACKGROUND_ACTION_DENIED");
                     if(shellInvoke)kind="click";
                 }
             }
             bool physical=kind=="click" || kind=="double_click" || kind=="move" || kind=="drag" || kind=="wheel" || kind=="type_text" || kind=="press_key";
+            if(backgroundTarget!=null){AutomationJson.Require(!physical && selectedId==backgroundWindowId,"DESKTOP_BACKGROUND_ACTION_DENIED");CheckBackground();}
             if(physical)CheckInitialInput(p,kind);
             CheckControl();
             version=""; // Consume BEFORE input. An unknown result cannot replay this observation.
@@ -900,7 +915,7 @@ namespace ProfilePilot.Desktop {
                     }
                 }
             }else throw new AutomationFault("DESKTOP_ACTION_UNSUPPORTED");
-            CheckControl();
+            CheckControl();CheckBackground();
             }catch(Exception error){failure=error;}
             finally{
                 // A zero-count down was not inserted and must not get a stray up.
@@ -939,6 +954,14 @@ namespace ProfilePilot.Desktop {
                     return details;
                 }
                 CheckControl();if(op=="windows"){AutomationJson.Fields(p,"");return Windows();}
+                if(op=="control.background"){
+                    AutomationJson.Fields(p,"windowId");string id=AutomationJson.Text(p,"windowId");Target target;
+                    AutomationJson.Require(targets.TryGetValue(id,out target) && Valid(target),"DESKTOP_WINDOW_CHANGED");
+                    AutomationJson.Require(backgroundTarget==null || backgroundWindowId==id,"DESKTOP_MODE_CONFLICT");
+                    backgroundTarget=target;backgroundWindowId=id;version="";imageReady=false;
+                    CheckBackground();
+                    return new {mode="background",backgroundTarget=new {pid=target.Pid,window=target.Handle.ToInt64().ToString()}};
+                }
                 if(op=="window.observe" || op=="window.screenshot")return Observe(p,op=="window.screenshot");
                 if(op=="window.action")return Action(p);
                 throw new AutomationFault("DESKTOP_BAD_REQUEST");

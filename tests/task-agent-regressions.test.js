@@ -56,7 +56,7 @@ test('idle extension clears only a stale paused reservation, retaining task hist
 test('read-only URL navigation leaves a changing page, while DOM actions still reject stale refs', async t => {
   const f = fixture(t);
   const result = await f.service.handleTool(f.task, f.run, 'browser_action', { kind: 'open', value: 'https://example.test/records', effect: 'read', summary: '查看记录' });
-  assert.equal(result.isError, false); assert.deepEqual(f.counts(), { observations: 0, actions: 1 });
+  assert.equal(result.isError, false); assert.deepEqual(f.counts(), { observations: 1, actions: 1 });
   f.task.observation = { version: 'v1', fingerprint: 'old-carousel', snapshot: '', url: 'https://example.test/start' };
   const stale = await f.service.handleTool(f.task, f.run, 'browser_action', { kind: 'click', version: 'v1', ref: 'e1', effect: 'read', summary: '点击记录' });
   assert.equal(stale.isError, true); assert.equal(f.counts().actions, 1);
@@ -66,7 +66,7 @@ test('switching tabs uses a tab ID, not an old page DOM version', async t => {
   const f = fixture(t);
   const result = await f.service.handleTool(f.task, f.run, 'browser_action', { kind: 'switch_tab', value: 't1', effect: 'read', summary: 'Return to entry tab' });
   assert.equal(result.isError, false);
-  assert.deepEqual(f.counts(), { observations: 0, actions: 1 });
+  assert.deepEqual(f.counts(), { observations: 1, actions: 1 });
   f.task.resumeContext = { returnedAt: new Date().toISOString(), observed: false };
   const unobserved = await f.service.handleTool(f.task, f.run, 'browser_action', { kind: 'switch_tab', value: 't1', effect: 'read', summary: 'Return to entry tab' });
   assert.equal(unobserved.isError, true);

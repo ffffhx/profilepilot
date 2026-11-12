@@ -2,6 +2,7 @@ import http from 'node:http';
 import { randomUUID } from 'node:crypto';
 import type { NativeBrowserTransport, NativeBrowserBridge, NativeConnectionState, NativeEvent } from '../tasks/native-bridge';
 import type { PreparedNativeExtension } from '../tasks/native-installer';
+import type { NativeBrowserServiceState } from '../../shared/browser-connection';
 import { ensureBrowserService } from './launcher';
 import { serviceRequest, readBrowserServiceConnection, processAlive, type BrowserServiceConnection } from './connection';
 
@@ -17,12 +18,14 @@ export class BrowserServiceClient implements NativeBrowserTransport {
   private retry?: NodeJS.Timeout;
   private sequence = -1;
   private browsers: NativeConnectionState[] = [];
+  private service: NativeBrowserServiceState = { status: 'idle' };
   private installations: ReturnType<NativeBrowserBridge['installationStates']> = [];
   private direct = new Set<string>();
   private listeners = new Set<(event: NativeEvent) => void>();
   private uiHandler?: (profileId: string, method: string, params: Record<string, unknown>) => Promise<unknown>;
   constructor(private readonly root: string, private readonly changed: () => void = () => {}) {}
   states(): NativeConnectionState[] { return this.browsers.map(state => ({ ...state })); }
+  serviceState(): NativeBrowserServiceState { return { ...this.service }; }
   installationStates() { return this.installations; }
   isDirectSession(profileId: string, sessionId: string): boolean { return this.direct.has(`${profileId}\n${sessionId}`); }
   onEvent(listener: (event: NativeEvent) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
@@ -30,8 +33,14 @@ export class BrowserServiceClient implements NativeBrowserTransport {
   start(): Promise<void> {
     if (this.closed) return Promise.reject(new Error('桌面浏览器连接已关闭。'));
     if (this.starting) return this.starting;
+    if (this.service.status === 'idle') { this.service = { status: 'connecting' }; this.changed(); }
     this.starting = this.connect();
-    void this.starting.catch(() => { this.starting = undefined; this.scheduleReconnect(); });
+    void this.starting.catch(error => {
+      this.starting = undefined;
+      if (this.closed) return;
+      this.service = { status: 'disconnected', error: error instanceof Error ? error.message : String(error) };
+      this.changed(); this.scheduleReconnect();
+    });
     return this.starting;
   }
   private async connect(): Promise<void> {
@@ -63,6 +72,7 @@ export class BrowserServiceClient implements NativeBrowserTransport {
         if (ended) return; ended = true;
         if (this.stream === req) {
           this.stream = undefined; this.connection = undefined; this.starting = undefined;
+          this.service = { status: 'disconnected', error: error.message };
           const previous = this.browsers; this.browsers = previous.map(s => ({ ...s, connected: false }));
           for (const state of previous) if (state.connected) for (const listener of this.listeners) listener({ type: 'disconnected', profileId: state.profileId, sessionId: state.ownerSessionId });
           this.changed(); this.scheduleReconnect();
@@ -95,7 +105,7 @@ export class BrowserServiceClient implements NativeBrowserTransport {
   }
   private receive(message: any): void {
     if (message.type === 'stopping') this.autoStart = false;
-    else if (message.type === 'snapshot') { this.autoStart = true; this.applySnapshot(message.snapshot); }
+    else if (message.type === 'snapshot') { this.autoStart = true; this.service = { status: 'connected' }; this.applySnapshot(message.snapshot); }
     else if (message.type === 'event') {
       const event = message.event as NativeEvent;
       const fresh = message.sequence > this.sequence;

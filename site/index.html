@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="让 AI 使用你已登录的 Chrome，管理本地应用与 Android 手机。在桌面、终端和手机之间发起任务、跟进结果，随时暂停或接管。"
+      content="让 AI 使用你已登录的 Chrome，管理本地应用与 Android 手机。在桌面与终端发起任务，手机端准备连接与权限，随时暂停或接管。"
     />
     <title>ProfilePilot - 浏览器、桌面与 Android 的 AI 工作区</title>
     <link rel="icon" href="public/assets/profilepilot-mark.svg" type="image/svg+xml" />
@@ -41,7 +41,6 @@
         </div>
 
         <div class="hero-copy">
-          <p class="eyebrow">Browser · Desktop · Android</p>
           <h1 id="hero-title">ProfilePilot</h1>
           <p class="hero-lede">
             让 AI 沿用你的 Chrome 登录状态，连接本地应用与 Android 手机。在一个工作区里发起任务、查看执行过程和结果，随时暂停或接管。
@@ -69,20 +68,19 @@
       </section>
 
       <section class="section workflow-section" id="workflows">
-        <div class="section-kicker">Workflows</div>
         <div class="section-head">
           <h2>从连接浏览器，到完成第一个任务。</h2>
           <p>新手引导会逐步高亮真实的 Tab 和按钮，说明每个入口的作用。先连接浏览器，再配置模型，回到 Agent 描述目标。</p>
         </div>
 
         <div class="workflow-tabs" role="tablist" aria-label="ProfilePilot 工作流">
-          <button class="active" type="button" role="tab" aria-selected="true" data-workflow="native">连接浏览器</button>
-          <button type="button" role="tab" aria-selected="false" data-workflow="extensions">创建任务</button>
-          <button type="button" role="tab" aria-selected="false" data-workflow="account">本地应用</button>
-          <button type="button" role="tab" aria-selected="false" data-workflow="cdp">手机协作</button>
+          <button class="active" id="workflow-tab-native" type="button" role="tab" aria-selected="true" aria-controls="workflow-panel" tabindex="0" data-workflow="native">连接浏览器</button>
+          <button id="workflow-tab-extensions" type="button" role="tab" aria-selected="false" aria-controls="workflow-panel" tabindex="-1" data-workflow="extensions">创建任务</button>
+          <button id="workflow-tab-account" type="button" role="tab" aria-selected="false" aria-controls="workflow-panel" tabindex="-1" data-workflow="account">本地应用</button>
+          <button id="workflow-tab-cdp" type="button" role="tab" aria-selected="false" aria-controls="workflow-panel" tabindex="-1" data-workflow="cdp">连接手机</button>
         </div>
 
-        <div class="workflow-board">
+        <div class="workflow-board" id="workflow-panel" role="tabpanel" aria-labelledby="workflow-tab-native" tabindex="0">
           <article class="workflow-copy" data-workflow-copy>
             <span>01</span>
             <h3>连接你已经登录的 Chrome</h3>
@@ -99,34 +97,32 @@
       </section>
 
       <section class="section feature-section" id="features">
-        <div class="section-kicker">Control surface</div>
         <div class="section-head compact">
           <h2>浏览器、项目与手机，各有清楚的入口。</h2>
-          <p>桌面负责执行与管理；终端和 Android 移动版让你在其他入口继续处理同一份任务。</p>
+          <p>桌面负责执行与管理，CLI 为外部 Agent 提供控制入口；Android App 帮你准备手机连接与权限。</p>
         </div>
         <div class="feature-grid">
           <article><span class="feature-index">A</span><h3>Agent 任务</h3><p>描述目标、补充文件，查看执行过程和结果；常用任务可保存为模板或安排定时执行。</p></article>
           <article><span class="feature-index">B</span><h3>浏览器环境</h3><p>管理日常 Chrome 和独立 Profile，查看连接状态，按需同步账号数据与扩展。</p></article>
           <article><span class="feature-index">C</span><h3>本地应用</h3><p>登记开发项目和后台服务，集中查看启动状态、端口与日志，连接支持调试的 Electron 应用。</p></article>
-          <article><span class="feature-index">D</span><h3>Android 手机</h3><p>通过 USB 或 Wi-Fi 查看、控制 Android；在手机上向电脑发任务、跟进进度和处理确认。</p></article>
+          <article><span class="feature-index">D</span><h3>Android 手机</h3><p>通过 USB 或 Wi-Fi 查看、控制 Android；手机 App 集中展示连接状态、权限准备，以及暂停和停止控制的入口。</p></article>
           <article><span class="feature-index">E</span><h3>CLI 与外部 Agent</h3><p>在配套工具中安装 ppilot 和使用指引，从终端对话或让外部 Agent 操作浏览器与手机。</p></article>
           <article><span class="feature-index">F</span><h3>逐步高亮引导</h3><p>框住真实 Tab、按钮和内容，在旁边说明用途。支持上一步、下一步、跳过与随时重新打开。</p></article>
         </div>
       </section>
 
       <section class="compare-section" id="compare">
-        <div class="compare-copy"><div class="section-kicker">Get started</div><h2>选好工作环境，再说出你的目标。</h2><p>内置 Agent 的模型在左下角「设置」中配置。只需要直接控制工具时，也可以使用 CLI 和你自己的 Agent。</p></div>
+        <div class="compare-copy"><h2>选好工作环境，再说出你的目标。</h2><p>内置 Agent 的模型在左下角「设置」中配置。只需要直接控制工具时，也可以使用 CLI 和你自己的 Agent。</p></div>
         <div class="compare-table" role="table" aria-label="使用场景与连接入口">
           <div class="compare-row head" role="row"><span role="columnheader">你想做什么</span><span role="columnheader">入口</span><span role="columnheader">准备工作</span><span role="columnheader">接下来</span></div>
           <div class="compare-row" role="row"><span role="cell">使用日常浏览器</span><span role="cell">配套工具</span><span role="cell">选择 Chrome Profile，连接扩展</span><span role="cell">回到 Agent 发起任务</span></div>
           <div class="compare-row" role="row"><span role="cell">独立环境测试</span><span role="cell">浏览器</span><span role="cell">新建独立 Profile，按需准备账号</span><span role="cell">交给 Agent 或人工测试</span></div>
           <div class="compare-row" role="row"><span role="cell">管理本地项目</span><span role="cell">本地应用</span><span role="cell">添加项目目录与启动命令</span><span role="cell">启动、查看状态与日志</span></div>
-          <div class="compare-row" role="row"><span role="cell">手机跟进任务</span><span role="cell">手机</span><span role="cell">安装 Android APK，配对电脑</span><span role="cell">发送任务、查看进度与确认</span></div>
+          <div class="compare-row" role="row"><span role="cell">连接 Android 手机</span><span role="cell">手机设备</span><span role="cell">连接 USB 或 Wi-Fi，按需安装配套 App</span><span role="cell">准备权限，在电脑端查看与控制</span></div>
         </div>
       </section>
 
       <section class="section safety-section">
-        <div class="section-kicker">Safety stance</div>
         <div class="safety-layout">
           <h2>会话数据很敏感，所以每一步都应该可见、可撤回。</h2>
           <div class="safety-list">
@@ -148,9 +144,8 @@
 
       <section class="download-section" id="download">
         <div class="install-copy">
-          <div class="section-kicker">Download</div>
           <h2>从官网直接下载 ProfilePilot。</h2>
-          <p>安装包发布在 GitHub Release。支持 macOS、Windows，以及 Android 11 或以上的手机。手机管理电脑任务时，电脑需要保持运行且能从手机访问。</p>
+          <p>安装包发布在 GitHub Release。支持 macOS、Windows，以及 Android 11 或以上的手机。Android App 用于连接与权限准备，任务在电脑端发起。</p>
         </div>
         <div class="download-panel" aria-label="ProfilePilot 下载链接">
           <a class="download-card primary" href="https://github.com/ffffhx/profilepilot/releases/latest/download/ProfilePilot-mac-arm64.dmg">

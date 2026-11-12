@@ -185,22 +185,55 @@ export function createWindowsDesktopDiscovery(options: {
   };
 }
 
+const expiredRead = (context: DesktopAdmissionReadContext) => context.signal.aborted
+  || !Number.isFinite(context.deadlineAt) || context.now() >= context.deadlineAt;
+
+// Subscribe once to the underlying read. Individual callers can detach even
+// when an OS provider never settles, without cancelling a live sibling.
+function shareAdmissionRead<T>(request: Promise<T>): (context: DesktopAdmissionReadContext) => Promise<T> {
+  let outcome: PromiseSettledResult<T> | undefined;
+  const waiters = new Set<() => void>();
+  const publish = (result: PromiseSettledResult<T>) => {
+    outcome = result;
+    for (const finish of [...waiters]) finish();
+  };
+  void request.then(value => publish({ status: 'fulfilled', value }), reason => publish({ status: 'rejected', reason }));
+  return context => new Promise<T>((resolve, reject) => {
+    const finish = () => {
+      const expired = expiredRead(context);
+      if (!expired && !outcome) return;
+      waiters.delete(finish);
+      context.signal.removeEventListener('abort', finish);
+      if (expired) reject(new Error('provider_timeout'));
+      else if (outcome!.status === 'fulfilled') resolve(outcome!.value);
+      else reject(outcome!.reason);
+    };
+    if (!expiredRead(context) && !outcome) {
+      waiters.add(finish);
+      context.signal.addEventListener('abort', finish, { once: true });
+    }
+    finish();
+  });
+}
+
 export function createRuntimeDesktopAdmission(options: RuntimeDesktopAdmissionOptions) {
   const now = options.now || Date.now;
   // A timed-out OS process scan cannot be synchronously cancelled. Share it
   // until it settles instead of stacking more scans on repeated requests.
   const sampled = <T>(read: () => Promise<T>) => {
-    let pending: Promise<AdmissionSnapshot<T>> | undefined;
-    return () => {
-      if (pending) return pending;
+    let pending: ReturnType<typeof shareAdmissionRead<AdmissionSnapshot<T>>> | undefined;
+    return (context: DesktopAdmissionReadContext) => {
+      if (expiredRead(context)) return Promise.reject(new Error('provider_timeout'));
+      if (pending) return pending(context);
       const capturedAt = now();
       const request = Promise.resolve().then(read).then(value => ({ state: 'ready' as const, value, capturedAt }));
-      pending = request;
-      void request.then(() => { if (pending === request) pending = undefined; }, () => { if (pending === request) pending = undefined; });
-      return request;
+      const join = pending = shareAdmissionRead(request);
+      void request.then(() => { if (pending === join) pending = undefined; }, () => { if (pending === join) pending = undefined; });
+      return join(context);
     };
   };
-  type PendingDiscovery = { catalog: Promise<AdmissionSnapshot<DesktopAdmissionCatalog>>; apps: Promise<AdmissionSnapshot<DesktopAdmissionApps>>;
+  type PendingDiscovery = { catalog: ReturnType<typeof shareAdmissionRead<AdmissionSnapshot<DesktopAdmissionCatalog>>>;
+    apps: ReturnType<typeof shareAdmissionRead<AdmissionSnapshot<DesktopAdmissionApps>>>;
     contexts: { catalog?: DesktopAdmissionReadContext; apps?: DesktopAdmissionReadContext } };
   let pendingDiscovery: PendingDiscovery | undefined;
   const discoveryRound = (source: 'catalog' | 'apps', context: DesktopAdmissionReadContext): PendingDiscovery => {
@@ -213,23 +246,25 @@ export function createRuntimeDesktopAdmission(options: RuntimeDesktopAdmissionOp
     const capturedAt = now();
     const contexts: PendingDiscovery['contexts'] = { [source]: context };
     const reads = Promise.resolve().then(() => options.discovery!(contexts));
+    const catalog = reads.then(value => value.catalog).then(value => ({ state: 'ready' as const, value, capturedAt }));
+    const apps = reads.then(value => value.apps).then(value => ({ state: 'ready' as const, value, capturedAt }));
     const round: PendingDiscovery = {
       contexts,
-      catalog: reads.then(value => value.catalog).then(value => ({ state: 'ready', value, capturedAt })),
-      apps: reads.then(value => value.apps).then(value => ({ state: 'ready', value, capturedAt }))
+      catalog: shareAdmissionRead(catalog),
+      apps: shareAdmissionRead(apps)
     };
     pendingDiscovery = round;
     // A fast sibling must not start another OS scan while the other source is
     // still running or has timed out at the caller. Each source keeps its own
     // result/error; joining the round never refreshes either timestamp.
-    void Promise.allSettled([round.catalog, round.apps]).then(() => {
+    void Promise.allSettled([catalog, apps]).then(() => {
       if (pendingDiscovery === round) pendingDiscovery = undefined;
     });
     return round;
   };
   return createDesktopAdmission({
-    catalog: options.discovery ? context => discoveryRound('catalog', context).catalog : sampled(options.catalog),
-    apps: options.discovery ? context => discoveryRound('apps', context).apps : sampled(async (): Promise<DesktopAdmissionApps> => {
+    catalog: options.discovery ? context => expiredRead(context) ? Promise.reject(new Error('provider_timeout')) : discoveryRound('catalog', context).catalog(context) : sampled(options.catalog),
+    apps: options.discovery ? context => expiredRead(context) ? Promise.reject(new Error('provider_timeout')) : discoveryRound('apps', context).apps(context) : sampled(async (): Promise<DesktopAdmissionApps> => {
       const applications = await options.apps!();
       if (!options.appsControl) return { applications };
       try { return { applications, control: await options.appsControl(applications) }; }

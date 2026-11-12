@@ -524,7 +524,7 @@ export class FastBrowser {
     // barrier, without another scroll that would invalidate that painted frame.
     const result = await prepare(synchronize ? "validate" : undefined);
     if (!result) throw new Error("无法验证操作结果。");
-    if (action.kind === "scroll") return `滚动结果：${JSON.stringify(result.scroll)}；需要重新观察确认页面内容。`;
+    if (action.kind === "scroll") return `滚动结果：${JSON.stringify(result.scroll)}；请根据页面观察确认内容。`;
     if (action.kind === "hover") {
       if (!Number.isFinite(result.x) || !Number.isFinite(result.y)) throw new Error("无效的目标位置。");
       await this.raw(task, "Input.dispatchMouseEvent", { type: "mouseMoved", x: result.x, y: result.y, button: "none" });
@@ -533,7 +533,7 @@ export class FastBrowser {
       await this.raw(task, "Input.dispatchMouseEvent", { type: "mousePressed", x: result.x, y: result.y, button: "left", clickCount: 1 });
       await this.raw(task, "Input.dispatchMouseEvent", { type: "mouseReleased", x: result.x, y: result.y, button: "left", clickCount: 1 });
     }
-    return "操作已执行；需要重新观察确认结果。";
+    return "操作已执行；请根据页面观察确认结果。";
   }
   reobserve(task: BrowserTask): Promise<PagedObservation> {
     const prior = task.observation?.fast as (NonNullable<BrowserObservation["fast"]> & { slice?: PageSlice }) | undefined;

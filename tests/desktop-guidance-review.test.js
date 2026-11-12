@@ -28,6 +28,7 @@ function rendererFixture(options = {}) {
     querySelectorAll(selector) { return selector === '[data-control]' ? controls : this.children; }
   }
   for (const key of ['takeover', 'return', 'stop']) { const button = new Element(); button.dataset.control = key; controls.push(button); }
+  element('desktop-mode').value = 'background';
   let current = idle(), windows = [target], truncated = false, notify;
   const api = {
     status: async () => current,
@@ -41,6 +42,8 @@ function rendererFixture(options = {}) {
     window: { desktopControl: api, addEventListener() {} }, Image: Element,
     setInterval: () => 1, clearInterval() {}, require(id) {
       if (id === './desktop-status') return { followDesktopStatus };
+      if (id === './task-icons') return { taskIcon: () => '' };
+      if (id === './button-label') return { renderButtonLabel: (_loading, label) => label, setButtonLoading() {} };
       if (id === './workspace-switcher') return { workspaceSwitcher: () => '', workspaceIdentityBar: () => '', refreshWorkspaceSwitcher() {} };
       if (id === './pc-control') return { pcControlTabs: () => '' };
       if (id === './workspace-lifecycle') return { onWorkspaceVisibilityChanged() {} };
@@ -71,10 +74,22 @@ function serviceFixture() {
 const command = (method, session, extra = {}) => ({ action: 'desktop', method, session, ...extra });
 function suggestedSession(fixture) {
   const text = fixture.element('desktop-command').textContent;
-  const match = /^ppilot desktop claim --session ([a-zA-Z0-9._:-]{1,100}) --window ([a-f0-9]{32})$/.exec(text);
+  const match = /^ppilot desktop claim --session ([a-zA-Z0-9._:-]{1,100}) --window ([a-f0-9]{32}) --mode (background|interactive)$/.exec(text);
   assert.ok(match, 'A selected idle window needs a concrete, copyable claim example'); assert.equal(match[2], target.id);
   return match[1];
 }
+
+test('mode choice reaches the claim example and an owned session displays its locked policy', async () => {
+  const f = rendererFixture(); await f.select();
+  assert.match(f.element('desktop-command').textContent, /--mode background$/);
+  f.element('desktop-mode').value = 'interactive'; f.element('desktop-mode').onchange();
+  assert.match(f.element('desktop-command').textContent, /--mode interactive$/);
+  assert.match(f.element('desktop-mode-help').textContent, /前台交互/);
+  const active = owned('ready'); active.session.mode = 'background'; f.publish(active);
+  assert.equal(f.element('desktop-mode').value, 'background'); assert.equal(f.element('desktop-mode').disabled, true);
+  assert.match(f.element('desktop-mode-help').textContent, /不移动鼠标/);
+  f.publish(idle()); assert.equal(f.element('desktop-mode').disabled, false);
+});
 
 test('a target missing from a partial list clears its old title and hides the stale claim example', async () => {
   const f = rendererFixture(); await f.select(); assert.equal(f.element('desktop-selected').textContent, target.title);
@@ -160,7 +175,7 @@ test('platform unavailability clears an existing image and excludes a late windo
   f.publish({ ...idle(), available: false, reason: 'Component unavailable' });
   finish({ windows: [target], truncated: false }); await turn();
   assert.equal(f.element('desktop-preview').children.length, 0);
-  assert.equal(f.element('desktop-windows').children.length, 0);
+  assert.equal(f.element('desktop-windows').children.filter(row => row.dataset.window).length, 0);
   assert.equal(f.element('desktop-command').hidden, true);
   assert.equal(f.calls.length, 0);
 });
@@ -173,7 +188,7 @@ test('a late window list cannot cross unavailable-to-available generations', asy
   f.publish({ ...idle(), available: false, reason: 'Component unavailable' });
   f.publish(idle());
   finish({ windows: [target], truncated: false }); await turn();
-  assert.equal(f.element('desktop-windows').children.length, 0, 'the older available generation must not restore selectable rows');
+  assert.equal(f.element('desktop-windows').children.filter(row => row.dataset.window).length, 0, 'the older available generation must not restore selectable rows');
   assert.equal(f.element('desktop-preview').children.length, 0);
   assert.equal(f.element('desktop-command').hidden, true);
   assert.notEqual(f.element('desktop-selected').textContent, target.title);

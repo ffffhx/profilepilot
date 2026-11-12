@@ -24,3 +24,9 @@ __pycache__/
 .tools/input-observer-build/
 .tools/wgc-verification/
 .tools/consent-research/
+
+# Local development and verification output
+.tools/*-runtime.json
+.tools/action-feedback-*-schema.json
+.tools/extension-status-review-*/
+.tools/extension-status-review-path.txt

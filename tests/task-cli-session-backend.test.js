@@ -1348,8 +1348,34 @@ test("service read_page uses selected frame/range for click preflight and consec
       : { version: "v1", fields: [{ ref: "e81", value: "first" }, { ref: "e82", value: "second" }] });
     assert.equal(result.isError, false);
     assert.equal(f.executed.length, tool === "browser_action" ? 1 : 2);
-    assert.ok(checks >= (tool === "browser_action" ? 1 : 2));
-    assert.equal(f.task.observation, undefined);
+    assert.ok(checks >= (tool === "browser_action" ? 2 : 4));
+    assert.equal(f.task.observation.page.frameId, "nested");
+    assert.equal(f.task.observation.page.offset, 80);
+  }
+});
+
+test("built-in actions return fresh evidence and keep executed receipts on post-action read failure", async t => {
+  for (const failRead of [false, true]) {
+    const f = fixture(t, 'acceptEdits'), run = f.run();
+    f.service.dependencies.browser.observe = async () => {
+      if (!f.executed.length) return { ...f.observation };
+      if (failRead) throw new Error('page closed');
+      return { ...f.observation, version: 'v2', snapshot: 'Saved successfully' };
+    };
+    const result = await f.service.handleTool(f.task, run, 'browser_action', {
+      kind: 'fill', version: 'v1', ref: 'e1', value: 'name', effect: 'edit', summary: 'Fill name'
+    });
+    const feedback = JSON.parse(result.content[0].text);
+    assert.equal(feedback.actionOutcome, 'completed');
+    assert.equal(feedback.observationStatus, failRead ? 'unavailable' : 'available');
+    assert.equal(f.executed.length, 1);
+    assert.equal(f.task.receipts.at(-1).status, 'executed');
+    if (failRead) assert.equal(f.task.observation, undefined);
+    else {
+      assert.equal(feedback.observation.version, 'v2');
+      assert.equal(f.task.observation.version, 'v2');
+      assert.equal(f.task.evidencePages.at(-1).snapshot, 'Saved successfully');
+    }
   }
 });
 

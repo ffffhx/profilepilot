@@ -1,7 +1,7 @@
 :root {
   color-scheme: light;
   --ink: #102b56;
-  --muted: #637b9a;
+  --muted: #536b8c;
   --line: #d9e4f3;
   --blue: #075ff0;
   --sky: #eaf3ff;
@@ -14,7 +14,7 @@
 html { overflow: hidden; }
 body { width: 420px; max-width: 100%; max-height: 600px; margin: 0; padding: 0 16px 16px; overflow: hidden auto; scrollbar-width: thin; scrollbar-color: #c9d8ed transparent; }
 body.side-panel { width: 100%; max-width: 680px; height: 100vh; height: 100dvh; max-height: none; margin-inline: auto; }
-body.authorization-page { width: min(480px, 100%); max-height: 100vh; margin: 24px auto; }
+body.authorization-page { width: min(480px, 100%); max-height: calc(100vh - 48px); max-height: calc(100dvh - 48px); margin: 24px auto; }
 h1, h2, p { margin: 0; }
 h1 { font-size: 21px; font-weight: 700; line-height: 1.2; letter-spacing: -.5px; }
 h2 { font-size: 14px; font-weight: 600; }
@@ -50,9 +50,13 @@ button:focus-visible, textarea:focus-visible { outline: 2px solid var(--blue); o
 #page-title { font-size: 14px; font-weight: 600; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
 #page-domain, #page-note { font-size: 12px; color: var(--muted); margin-top: 4px; }
 #reconnect { margin-top: 12px; width: 100%; }
+.diagnostics-footer { margin-top: 20px; padding-top: 12px; border-top: 1px solid var(--line); }
+#diagnostics-note { margin-top: 6px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .connect-form { display: grid; gap: 10px; margin-top: 20px; }
 .connect-form label, .connect-form small { font-size: 12px; color: var(--muted); }
 textarea { width: 100%; min-height: 76px; resize: vertical; padding: 10px; border: 1px solid var(--line); border-radius: 7px; font-size: 12px; }
+textarea::placeholder { color: var(--muted); opacity: 1; }
+textarea[readonly] { background: #f4f8ff; }
 .connect-form .primary { width: 100%; min-height: 38px; }
 #error { margin-top: 12px; padding: 10px 12px; border-radius: 7px; color: #b52e45; background: #fff3f5; font-size: 12px; overflow-wrap: anywhere; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }

@@ -6,6 +6,7 @@ import { nativeExtensionReady } from "./tasks/native-compatibility";
 import { RUNNING_CONTROL_BUILD } from "./runtime-identity";
 import { NativeControlError } from "./native-control/errors";
 import { controlRecovery } from "../shared/control-recovery";
+import { readExtensionConnectionDiagnostics } from './extension-connection-diagnostics';
 import type { ProfilePilotManagementCommand, ProfilePilotManagementResponse } from './profilepilot-management-protocol';
 import { electronRouting, desktopRouting, gpuiRouting, unavailableRouting, type ControlRoute } from './control-routing';
 
@@ -49,11 +50,13 @@ export function browserReadiness(snapshot: any, expectedVersion?: string, profil
   return profiles.filter(p => !profileId || p.profileId === profileId).map(p => {
     const checks: DoctorCheck[] = [];
     const add = (id: string, status: DoctorCheck["status"], message: string, nextStep?: string) => checks.push({ id, status, message, ...(nextStep ? { nextStep } : {}) });
-    add("connection", p.connected ? "ok" : "error", p.connected ? "扩展当前已连接。" : "扩展当前未连接。", p.connected ? undefined : "使用 browser connect 在指定 Profile 完成连接。");
+    add("connection", p.connected ? "ok" : "error", p.connected ? "扩展当前已连接。" : "扩展当前未连接。", p.connected ? undefined : "先检查 connectionDiagnostics，并从扩展弹窗导出连接诊断及保留 Chrome 扩展错误；不要先清除配对或重新加载。");
     const compatible = nativeExtensionReady(p);
-    add("capabilities", compatible ? "ok" : "error", compatible ? "扩展满足控制协议与基础能力。" : "扩展版本或能力不兼容。", compatible ? undefined : "更新指定 Profile 的扩展并重新检查。");
-    const aligned = expectedVersion === p.extensionVersion;
-    add("extension-version", aligned ? "ok" : "warning", `实际扩展 ${p.extensionVersion || "未知"}；当前构建配套 ${expectedVersion || "未知"}。`, aligned ? undefined : "核对实际运行扩展版本，必要时通过安装入口加载配套版本；新于配套版本时检查兼容性。");
+    const capabilitiesKnown = !!p.connected && typeof p.extensionVersion === "string" && Array.isArray(p.capabilities);
+    add("capabilities", !capabilitiesKnown ? "warning" : compatible ? "ok" : "error", !capabilitiesKnown ? "尚无法确认扩展版本与能力。" : compatible ? "扩展满足控制协议与基础能力。" : "扩展版本或能力不兼容。", !capabilitiesKnown ? "待扩展连接并上报状态后重新检查。" : compatible ? undefined : "更新指定 Profile 的扩展并重新检查。");
+    const versionKnown = !!p.connected && !!p.extensionVersion;
+    const aligned = versionKnown && !!expectedVersion && expectedVersion === p.extensionVersion;
+    add("extension-version", aligned ? "ok" : "warning", `实际扩展 ${versionKnown ? p.extensionVersion : "尚未确认"}；当前构建配套 ${expectedVersion || "未知"}。`, !versionKnown ? "待扩展连接并上报版本后重新检查。" : aligned ? undefined : "核对实际运行扩展版本，必要时通过安装入口加载配套版本；新于配套版本时检查兼容性。");
     add("installation", p.installationMode === "temporary" ? "warning" : p.installationType ? "ok" : "warning",
       p.installationMode === "temporary" ? "扩展为临时安装，重启 Chrome 后需重新验证；不会自动重载。" : `安装类型：${p.installationType || "尚未确认"}。`);
     if (p.controlIssue) add("control", "error", p.controlIssue.message, controlRecovery(p.controlIssue.code).instruction);
@@ -94,7 +97,8 @@ export async function createBrowserDoctor(options: { root?: string; profileId?: 
   const all = [...checks, ...profiles.flatMap(p => p.checks)];
   return { target: "browser", connection: "extension", checkedAt: new Date().toISOString(),
     status: all.some(c => c.status === "error") ? "error" : all.some(c => c.status === "warning") ? "warning" : "ok",
-    cli: RUNNING_CONTROL_BUILD, service, profiles, checks, diagnosticsDirectory: path.join(root, "control-diagnostics"), observationVerified: false };
+    cli: RUNNING_CONTROL_BUILD, service, profiles, checks, diagnosticsDirectory: path.join(root, "control-diagnostics"),
+    connectionDiagnostics: readExtensionConnectionDiagnostics(root, options.profileId), observationVerified: false };
 }
 
 export function parseBrowserDoctorArgs(args: string[]) {

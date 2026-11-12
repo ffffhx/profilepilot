@@ -6,6 +6,9 @@ import { escapeHtml, formatDate, isWindowsCrossDataDirAccountSyncUnsupported, pr
 // 合并同步面板：可迁移的 Profile 数据 + 插件共用一对源/目标 Profile，
 // 默认两项都同步，也可以只勾其中一项。
 export function renderSyncPanel(profiles: PublicProfile[]): string {
+  if (profiles.length < 2) {
+    return `<section class="account-sync-panel sync-unavailable"><div><h2>Profile 同步</h2><p>有两个 Profile 后，可以在它们之间同步数据与插件。</p></div><button type="button" data-action="open-agent-browser-setup" ${store.busy ? "disabled" : ""}>创建 Agent 浏览器</button></section>`;
+  }
   const sourceId = store.accountSyncSourceId || profiles[0]?.id || "";
   const sourceProfile = profiles.find((profile) => profile.id === sourceId) || null;
   const targetId =
@@ -23,14 +26,12 @@ export function renderSyncPanel(profiles: PublicProfile[]): string {
   const syncButtonLabel = "同步";
   const syncingLabel = runningBlocker ? "关闭并同步中…" : "同步中…";
   const launchLabel = runningBlocker ? "同步后重新启动并恢复标签页" : "同步后启动目标";
-  const cancelRequested = Boolean(syncingAccount && store.busyState?.cancelRequested);
-  const pausedAccountSync = Boolean(syncingAccount && store.busyState?.paused);
 
   return `
     <section class="account-sync-panel" data-account-sync aria-busy="${syncingAccount ? "true" : "false"}">
       <div class="section-head">
         <div>
-          <h2>同步</h2>
+          <h2>Profile 同步</h2>
           <span class="section-subtitle block mt-1 text-muted text-[12px] leading-[1.45]">同步可迁移的 Profile 数据与插件，并按需启动目标 Profile</span>
         </div>
         <button type="button" class="primary agent-browser-cta" data-action="open-agent-browser-setup" ${store.busy ? "disabled" : ""}>
@@ -70,16 +71,7 @@ export function renderSyncPanel(profiles: PublicProfile[]): string {
             <button type="button" class="primary ${syncingAccount ? "loading" : ""}" data-action="run-sync" ${store.busy || !canSync ? "disabled" : ""}>
               ${renderButtonLabel(syncingAccount, syncButtonLabel, syncingLabel)}
             </button>
-            ${
-              syncingAccount
-                ? `<button type="button" class="action-button account-sync-pause ${pausedAccountSync ? "accent" : "cdp"}" data-action="toggle-account-sync-pause" ${cancelRequested ? "disabled" : ""}>
-                    ${pausedAccountSync ? "继续同步" : "暂停同步"}
-                  </button>
-                  <button type="button" class="action-button warn account-sync-cancel ${cancelRequested ? "loading" : ""}" data-action="cancel-account-sync" ${cancelRequested ? "disabled" : ""}>
-                    ${renderButtonLabel(cancelRequested, "终止同步", "正在终止…")}
-                  </button>`
-                : ""
-            }
+
           </div>
         </div>
       </div>
@@ -98,7 +90,10 @@ export function renderSyncPanel(profiles: PublicProfile[]): string {
 export function renderAccountSyncLoading(sourceProfile: PublicProfile | null, targetProfile: PublicProfile | null): string {
   const sourceName = sourceProfile?.name || "源 Profile";
   const targetName = targetProfile?.name || "目标 Profile";
-  return renderOperationProgress("account-sync", `账号同步：${sourceName} 到 ${targetName}`);
+  const cancelRequested = Boolean(store.busyState?.cancelRequested);
+  const pausedAccountSync = Boolean(store.busyState?.paused);
+  const controls = `<button type="button" class="action-button account-sync-pause ${pausedAccountSync ? "accent" : "cdp"}" data-action="toggle-account-sync-pause" ${cancelRequested ? "disabled" : ""}>${pausedAccountSync ? "继续同步" : "暂停同步"}</button><button type="button" class="action-button warn account-sync-cancel" data-action="cancel-account-sync" ${cancelRequested ? "disabled" : ""}>${renderButtonLabel(cancelRequested, "终止同步", "正在终止…")}</button>`;
+  return renderOperationProgress("account-sync", `账号同步：${sourceName} 到 ${targetName}`, controls);
 }
 
 export function renderAccountSyncPicker(

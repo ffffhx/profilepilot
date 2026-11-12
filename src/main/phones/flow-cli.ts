@@ -48,7 +48,7 @@ export async function runPhoneFlowCli(flags: Map<string, string>, request: Reque
     timer.unref();
     const perform = async (action: PhoneAction): Promise<unknown> => {
       checkState(expected);
-      const response = await call<PhoneActionResult>("wrapper-action", { lease, generation: expected.generation, requestId: randomUUID(), action });
+      const response = await call<PhoneActionResult>("wrapper-action", { lease, generation: expected.generation, requestId: randomUUID(), action, observeAfter: false });
       checkState(response.state);
       return response.result;
     };

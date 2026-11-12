@@ -145,14 +145,16 @@ export class AgentChat {
       this.render();
       this.schedule(async () => {
         const [profileData, settings] = await Promise.all([
-          this.request<{ profiles: Profile[] }>({ action: "profile.list" }),
+          this.request<{ profiles: Profile[]; defaultProfile?: { id: string; name: string } | null }>({ action: "profile.list" }),
           this.request<{ settings: TaskSettings }>({ action: "task.settings.get" })
         ]);
         this.settings = settings.settings;
         this.profiles = profileData.profiles.filter(p => p.agent_access !== "blocked" && ["native", "isolated"].includes(p.source));
-        const selector = this.options.parsed.profile || prefs.defaultProfile;
+        const selector = this.options.parsed.profile || profileData.defaultProfile?.id;
         this.profile = this.profiles.find(p => p.id === selector || p.name === selector);
         if (this.options.parsed.profile && !this.profile && !this.options.parsed.id) throw new Error("指定的 Profile 不可用，请使用 /profile 重新选择。");
+        if (!this.options.parsed.profile && profileData.defaultProfile && !this.profile && !this.options.parsed.id)
+          throw new Error(`默认 Profile“${profileData.defaultProfile.name}”不可用，请连接该 Profile，或在浏览器页面重新设置默认目标。`);
         if (this.options.parsed.id) await this.attach(this.options.parsed.id);
         if (!this.task && !this.profile) await this.profileMenu(false);
         else if (this.options.prompt) await this.submitMessage({ text: this.options.prompt, paths: [] });
@@ -521,7 +523,7 @@ export class AgentChat {
       this.profiles = data.profiles.filter(profile => profile.agent_access !== "blocked" && ["native", "isolated"].includes(profile.source));
       this.profile = this.profiles.find(profile => profile.id === this.profile?.id);
     }
-    this.openPopup("选择浏览器 Profile · 以后自动使用此选择", this.profiles.map(profile => ({ label: profile.name,
+    this.openPopup("选择本次任务使用的浏览器 Profile", this.profiles.map(profile => ({ label: profile.name,
       description: profile.task_ready === false ? this.profileUnavailableReason(profile) : profile.source === "native" ? "已登记的浏览器" : "独立浏览器",
       choose: async () => {
         if (this.task?.running) throw new Error("请先暂停当前任务，或 /clear 开始新会话。");
@@ -533,7 +535,6 @@ export class AgentChat {
         }
         if (this.profile?.id !== profile.id && !this.task) this.conversationId = randomUUID();
         this.profile = profile;
-        await this.preferences.saveSettings({ defaultProfile: profile.id });
         this.notice = `已选择 ${profile.name}`;
         if (this.options.prompt && !this.task) { const prompt = this.options.prompt; this.options.prompt = undefined; await this.submitMessage({ text: prompt, paths: [] }); }
       } })), true);

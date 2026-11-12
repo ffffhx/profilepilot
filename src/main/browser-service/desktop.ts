@@ -21,7 +21,7 @@ export function registerBrowserConnection(
   saveBrowserServiceLaunch(root, browserServiceLaunchInfo(path.resolve(__dirname, "../../..")));
   const client = new BrowserServiceClient(root, () => broadcast());
   const snapshot = (): BrowserConnectionSnapshot => ({
-    nativeBrowsers: client.states(), nativeInstallations: client.installationStates()
+    nativeBrowsers: client.states(), nativeInstallations: client.installationStates(), nativeService: client.serviceState()
   });
   const broadcast = (): void => {
     const value = snapshot();

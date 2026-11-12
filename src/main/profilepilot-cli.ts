@@ -227,11 +227,19 @@ export function parseProfilePilotCliArgs(args: string[]): ParsedCliCommand {
   }
   const noun = positionals[0];
   const verb = positionals[1];
+  if (noun === "app") {
+    if (positionals.length !== 2 || !["status", "quit", "restart"].includes(verb)) throw new Error("用法：ppilot app <status|quit|restart> [--json]。");
+    return {json, command: {action: "app", method: verb as "status" | "quit" | "restart"}};
+  }
   if ((noun !== "profile" && noun !== "profiles") || !verb) {
     throw new Error("用法错误：请使用 profile <list|get|create|rename|configure|start|stop|delete>。");
   }
   if (verb === "list" && positionals.length === 2) {
     return { json, command: { action: "profile.list" } };
+  }
+  if (verb === "default") {
+    if (positionals.length > 3) throw new Error("用法：profile default [名称|ID|--clear]。");
+    return { json, command: { action: "profile.default", ...(positionals[2] !== undefined ? { selector: positionals[2] === "--clear" ? null : requiredValue(positionals[2], "需要 Profile 名称或 ID") } : {}) } };
   }
   if (verb === "get" || verb === "start" || verb === "stop" || verb === "delete") {
     const selector = requiredValue(positionals[2], `${verb} 需要 Profile 名称或 ID`);
@@ -647,9 +655,13 @@ function formatHumanSuccess(response: ProfilePilotManagementResponse, action?: P
     const rows = profiles.map((profile) => {
       const state = profile.running ? "运行中" : "未运行";
       const access = profile.agent_access === "blocked" ? "Agent 禁止" : "Agent 可用";
-      return `${state.padEnd(5)}  ${access.padEnd(8)}  ${String(profile.name)}  ${String(profile.id)}`;
+      return `${profile.is_agent_default ? "[默认] " : ""}${state.padEnd(5)}  ${access.padEnd(8)}  ${String(profile.name)}  ${String(profile.id)}`;
     });
     return `${rows.join("\n")}\n`;
+  }
+  if (action === "profile.default") {
+    const saved = data.saved as { id: string; name: string } | null;
+    return saved ? `默认 Profile：${saved.name} · ${saved.id}${data.profile ? "" : " · 当前不可用"}\n` : "尚未设置默认 Profile。\n";
   }
   if (action === "profile.get") {
     return `${formatProfile(data.profile as Record<string, unknown>)}\n`;
@@ -694,11 +706,13 @@ function helpText(): string {
   ppilot <run|chat|list|show|watch|reply|resume|pause|cancel|takeover|send> [参数]
   ppilot chat --help
   ppilot status [--json]
+  ppilot app <status|quit|restart> [--json]
   ppilot trace report [--since 14d] [--task-kind real|verification] [--json]
   控制命令的路由前可加 --task-kind real|verification --task-id TASK --operation-id STEP；恢复步骤可加 --recovery-of STEP。
   ppilot doctor [--profile ID | --device ID | --electron NAME_OR_ID | --window ID | --gpui TARGET_ID]
                 [--route browser|phone|electron|desktop|gpui] [--session TASK] [--json]
   ppilot logs [--level <级别>] [--since <时间>] [--limit <数量>] [--follow] [--json]
+  ppilot browser profile default [名称|ID|--clear] [--json]
   ppilot browser profile list [--json]
   ppilot browser profile get <名称|ID> [--json]
   ppilot browser profile create --name <名称> [--json]

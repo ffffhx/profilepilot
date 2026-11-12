@@ -32,6 +32,7 @@ import { TaskChat } from "./task-chat";
 import { workbenchNavigation, searchHitSnippet, appearanceControls, applyAppearance } from "./task-workbench-navigation";
 import { showCommands, showArtifact, type WorkbenchCommand } from "./task-workbench-dialogs";
 import { showProfileMemory } from "./task-memory";
+import { taskErrorMessage } from "./task-errors";
 
 declare global { interface Window { tasks: TaskApi; } }
 const root = document.getElementById("task-app")!;
@@ -248,7 +249,7 @@ function draftMenu(): void {
   const id = selected;
   showCommands(messageDrafts.entries(id).map(([key, draft]) => ({ id: key, label: draft.text.slice(0, 80) || "附件草稿", hint: JSON.parse(key)[1] === "reply-task" ? "问题答复草稿；载入普通消息，不会自动确认" : "消息草稿", run: () => fillFollowup(draft.text, draft.attachments, id) })), platformModifier);
 }
-function toast(text: string, error = false): void { const node = document.getElementById("task-toast")!; node.textContent = text; node.className = error ? "error" : ""; clearTimeout(toastTimer); toastTimer = window.setTimeout(() => node.textContent = "", 7000); }
+function toast(text: string, error = false): void { const node = document.getElementById("task-toast")!; node.textContent = taskErrorMessage(text); node.className = error ? "error" : ""; clearTimeout(toastTimer); toastTimer = window.setTimeout(() => node.textContent = "", 7000); }
 function updateMessageSend(): void {
   const field = root.querySelector<HTMLTextAreaElement>("#steering");
   if (field?.closest("[data-task-chat-owned]")) return;
@@ -269,15 +270,15 @@ function showPending(): void {
   const indicator = document.getElementById("task-operation-pending");
   if (indicator) indicator.hidden = true;
   const status = root.querySelector(".task-operation-status");
-  if (status) status.innerHTML = [...operations.running].map(([key, label]) => `<p role="status" class="task-state" data-operation="${e(key)}">${e(label)}…</p>`).join("") + [...operations.errors].map(([key, error]) => `<div class="operation-error" role="alert"><strong>${e(error.label)}未完成</strong><p>${e(error.message)}</p><button type="button" data-action="retry-operation" data-operation="${e(key)}">重试</button><button type="button" data-action="dismiss-operation" data-operation="${e(key)}">关闭提示</button></div>`).join("");
-  if (status && initialLoadError) status.insertAdjacentHTML("beforeend", `<div class="operation-error" role="alert">工作台状态更新失败：${e(initialLoadError)}<button type="button" data-action="retry-load">重新读取状态</button></div>`);
+  if (status) status.innerHTML = [...operations.running].map(([key, label]) => `<p role="status" class="task-state" data-operation="${e(key)}">${e(label)}…</p>`).join("") + [...operations.errors].map(([key, error]) => `<div class="operation-error" role="alert"><strong>${e(error.label)}未完成</strong><p>${e(taskErrorMessage(error.message))}</p><button type="button" data-action="retry-operation" data-operation="${e(key)}">重试</button><button type="button" data-action="dismiss-operation" data-operation="${e(key)}">关闭提示</button></div>`).join("");
+  if (status && initialLoadError) status.insertAdjacentHTML("beforeend", `<div class="operation-error" role="alert">工作台状态更新失败：${e(taskErrorMessage(initialLoadError))}<button type="button" data-action="retry-load">重新读取状态</button></div>`);
   updateMessageSend();
 }
 async function act(fn: () => Promise<unknown>, urgent = false, key = selected ? `task:${selected}` : `view:${view}`, label = "处理操作"): Promise<void> {
   const operationKey = urgent ? `${key}:control` : key;
   await operations.run(operationKey, label, async () => {
     await fn();
-    try { await taskData.refresh(); initialLoadError = ""; render(); } catch (error) { initialLoadError = String(error); showPending(); }
+    try { await taskData.refresh(); initialLoadError = ""; render(); } catch (error) { initialLoadError = taskErrorMessage(error); showPending(); }
   }, showPending);
 }
 async function manageTask(id: string, action: TaskMenuAction): Promise<void> {
@@ -319,10 +320,16 @@ function profileAvailabilityHint(id: string): string {
   let text = profilesError ? "浏览器状态读取失败，请重新读取。" : "正在读取浏览器状态…";
   if (profiles) text = !candidates.length ? "暂无可用于任务的浏览器，请在“浏览器”中添加或启用。"
     : `${available ? `${available} 个空闲` : "暂无空闲浏览器"} · ${candidates.length - available - disconnected} 个占用中${disconnected ? ` · ${disconnected} 个系统 Profile 待连接` : ""}。${disconnected ? "纯文字任务可直接开始；浏览器工具使用前需连接系统 Chrome。" : available ? "未启动的空闲浏览器在首次使用浏览器工具时启动；纯文字任务无需连接。" : "纯文字任务可开始；网页任务使用工具时会检查连接与占用。"}`;
-  return `<p id="${id}" class="profile-availability ${profiles && available ? "has-available" : ""}" role="status">${text}</p>`;
+  return `<p id="${id}" class="profile-availability ${profiles && available ? "has-available" : ""} ${profilesError || profiles && !candidates.length ? "needs-browser" : ""}" role="status">${text}</p>`;
 }
 function toolbar(title: string, _subtitle: string, extra = ""): string {
   return `<header class="topline page-header">${taskSidebarToggle()}<div class="page-heading"><h1 title="${e(title)}">${e(title)}</h1></div><div class="header-actions">${extra}</div></header>`;
+}
+function taskLoadState(error = "", detail = false): string {
+  return `<section class="task-load-state" role="${error ? "alert" : "status"}" ${error ? "" : 'aria-busy="true"'}><span class="task-load-icon" aria-hidden="true">${icon(error ? "history" : "clock")}</span><h2>${error ? detail ? "暂时无法读取任务" : "暂时无法打开 Agent" : detail ? "正在读取任务…" : "正在打开 Agent…"}</h2><p>${error ? e(taskErrorMessage(error)) : "正在读取本机保存的任务与设置。"}</p>${error ? '<button type="button" class="primary" data-action="retry-load">重新读取</button>' : ""}</section>`;
+}
+function renderStartup(error = ""): void {
+  root.innerHTML = `${workspaceSwitcher("agent")}${workspaceIdentityBar()}<div class="app-frame task-startup-frame"><main class="workspace is-startup"><header class="page-header"><div class="page-heading"><h1>Agent</h1></div></header>${taskLoadState(error)}</main></div>`;
 }
 function taskSidebarToggle(): string {
   const collapsed = window.innerWidth <= 650 ? !narrowSidebarOpen : root.classList.contains("sidebar-collapsed");
@@ -356,7 +363,7 @@ function composer(): string {
     ${data.tasks.some(task => !TERMINAL_TASKS.has(task.status)) ? `<section class="home-active"><h2>正在进行</h2>${rows(data.tasks.filter(task => !TERMINAL_TASKS.has(task.status)))}</section>` : ""}
     </div><div class="compose-dock"><div class="compose-input-shell"><label for="prompt" class="sr-only">告诉我你想完成什么</label><textarea id="prompt" name="prompt" data-editor-key="${e(draftKey("", "create-task"))}" data-autogrow data-autogrow-min="44" aria-describedby="task-compose-shortcuts" required placeholder="${creatingTemplate ? "描述这个模板要完成的任务…" : "让浏览器帮你完成一件事…"}" rows="1">${e(messageDrafts.get(draftKey("", "create-task")).text)}</textarea><span id="task-compose-shortcuts" class="sr-only">${e(newlineHint)}</span>
       <div id="chosen-files">${selectedFiles.map(id => `<span class="file-chip">${icon("paperclip")}${e(data.attachments.find(file => file.id === id)?.name || id)}<button type="button" data-remove-file="${id}" aria-label="移除附件">×</button></span>`).join("")}</div>
-      <div class="compose-toolbar compose-actions"><button type="button" class="icon-button" data-action="attach" title="添加附件" aria-label="添加附件">${icon("paperclip")}</button><div class="browser-picker">${icon("browser")}<select name="profileId" aria-describedby="task-profile-availability" aria-label="任务使用的浏览器" required><option value="">选择浏览器</option>${profileOptions()}</select>${icon("chevron")}</div>${creatingTemplate ? "" : `<button type="button" class="template-button" data-action="save-template" title="${editTemplate ? "更新模板" : "保存为模板"}" aria-label="${editTemplate ? "更新模板" : "保存为模板"}">${icon("bookmark")}<span>${editTemplate ? "更新模板" : "保存模板"}</span></button>`}<div class="model-controls">${modelPicker()}</div><button type="button" class="task-template-trigger" popovertarget="task-template-menu" aria-controls="task-template-menu">任务模板${icon("chevron")}</button>${creatingTemplate ? '<button class="primary save-template-primary" type="button" data-action="save-template">保存模板</button>' : `<button class="primary send-task" type="submit" title="开始任务（${shortcut}）" aria-label="开始任务">${icon("arrow")}</button>`}</div></div>
+      <div class="compose-toolbar compose-actions"><button type="button" class="icon-button" data-action="attach" title="添加附件" aria-label="添加附件">${icon("paperclip")}</button><div class="browser-picker">${icon("browser")}<select name="profileId" aria-describedby="task-profile-availability" aria-label="任务使用的浏览器" required><option value="">选择浏览器</option>${profileOptions(formDraft?.profileId || profiles?.defaultProfile?.id || "")}</select>${icon("chevron")}</div>${creatingTemplate ? "" : `<button type="button" class="template-button" data-action="save-template" title="${editTemplate ? "更新模板" : "保存为模板"}" aria-label="${editTemplate ? "更新模板" : "保存为模板"}">${icon("bookmark")}<span>${editTemplate ? "更新模板" : "保存模板"}</span></button>`}<div class="model-controls">${modelPicker()}</div><button type="button" class="task-template-trigger" popovertarget="task-template-menu" aria-controls="task-template-menu">任务模板${icon("chevron")}</button>${creatingTemplate ? '<button class="primary save-template-primary" type="button" data-action="save-template">保存模板</button>' : `<button class="primary send-task" type="submit" title="开始任务（${shortcut}）" aria-label="开始任务">${icon("arrow")}</button>`}</div></div>
     ${profileAvailabilityHint("task-profile-availability")}
     </div></form>${taskTemplateMenu(data.skills || [], data.templates)}</div>`;
 }
@@ -413,7 +420,7 @@ function jevSettings(): string {
     <div class="actions"><button class="primary" type="submit">保存 Jev 设置</button><button type="button" data-action="test-jev">测试 Jev 连接</button><button type="button" data-action="clear-jev-key" class="danger">删除 Jev 密钥</button></div>
     <div class="actions"><button type="button" data-action="jev-billing">充值 / 查看余额 ↗</button><button type="button" data-action="jev-keys">创建 API Key ↗</button></div></form>`;
 }
-function settings(): string { const s = data.settings; return `${toolbar("Agent 设置", "Agent & privacy", '<button class="primary return-agent" data-action="return-agent">← 返回 Agent 对话</button>')}<div class="settings-wrap">${appearanceControls()}<section class="panel"><div class="panel-header"><h2>长期记忆</h2><button type="button" data-action="memory">管理记忆</button></div><p class="muted">同一 Profile 的任务共享稳定偏好和已确认的信息。可按 Profile 停用，或查看、编辑和删除记忆。</p></section>${nativeBrowserSettings(profiles?.profiles || [], browserData.nativeBrowsers || [], nativePairing, nativeAuthorization, browserData.nativeInstallations || [])}<form id="settings-form"><section class="panel"><h2>模型服务</h2><p class="muted">使用 API 密钥连接。任务所需的网页、资料和附件信息会发送给你配置的模型服务。</p><div class="field"><label for="model">模型名称</label><input id="model" name="model" value="${e(s.model)}" required></div><div class="field"><label for="baseUrl">API 地址</label><input id="baseUrl" name="baseUrl" value="${e(s.baseUrl)}" required type="url"></div><div class="field"><label for="authMode">鉴权方式</label><select id="authMode" name="authMode"><option value="" ${!s.authMode ? "selected" : ""}>自动选择</option><option value="apiKey" ${s.authMode === "apiKey" ? "selected" : ""}>API Key（x-api-key）</option><option value="bearer" ${s.authMode === "bearer" ? "selected" : ""}>Bearer Token</option></select></div><div class="field"><label for="apiKey">API 密钥 · ${s.hasApiKey ? "已由系统安全存储保护，留空保留" : "尚未配置"}</label><input id="apiKey" name="apiKey" type="password" autocomplete="new-password" placeholder="输入密钥后保存"></div><div class="actions"><button class="primary">保存设置</button><button type="button" data-action="test-connection">测试连接</button><button type="button" data-action="clear-key" class="danger">删除密钥</button></div></section><section class="panel"><h2>运行与记录</h2><div class="grid-two"><div class="field"><label>不同 Profile 的并发任务数</label><input name="maxConcurrent" type="number" min="1" max="6" value="${s.maxConcurrent}"></div><p class="muted">历史会话和产物会保留，直到你显式删除任务。关闭窗口后任务留在后台；退出应用会停止任务服务。</p></div><label><input name="saveScreenshots" type="checkbox" ${s.saveScreenshots ? "checked" : ""}>按需保存页面截图（可能包含个人信息）</label><label><input name="notifications" type="checkbox" ${s.notifications ? "checked" : ""}>需要处理或任务结束时发送桌面通知</label></section></form>${jevSettings()}<section class="panel"><h2>诊断导出</h2><p class="muted">仅导出任务状态、时间、用量及动作类型，不包含密钥、对话、网页内容、个人资料或附件路径。</p><button data-action="export-diagnostics">导出脱敏诊断</button></section></div>`; }
+function settings(): string { const s = data.settings; return `${toolbar("Agent 设置", "Agent & privacy", '<button class="primary return-agent" data-action="return-agent">← 返回 Agent 对话</button>')}<div class="settings-wrap">${appearanceControls()}<section class="panel"><div class="panel-header"><h2>长期记忆</h2><button type="button" data-action="memory">管理记忆</button></div><p class="muted">同一 Profile 的任务共享稳定偏好和已确认的信息。可按 Profile 停用，或查看、编辑和删除记忆。</p></section>${nativeBrowserSettings(profiles?.profiles || [], browserData.nativeBrowsers || [], nativePairing, nativeAuthorization, browserData.nativeInstallations || [], browserData.nativeService)}<form id="settings-form"><section class="panel"><h2>模型服务</h2><p class="muted">使用 API 密钥连接。任务所需的网页、资料和附件信息会发送给你配置的模型服务。</p><div class="field"><label for="model">模型名称</label><input id="model" name="model" value="${e(s.model)}" required></div><div class="field"><label for="baseUrl">API 地址</label><input id="baseUrl" name="baseUrl" value="${e(s.baseUrl)}" required type="url"></div><div class="field"><label for="authMode">鉴权方式</label><select id="authMode" name="authMode"><option value="" ${!s.authMode ? "selected" : ""}>自动选择</option><option value="apiKey" ${s.authMode === "apiKey" ? "selected" : ""}>API Key（x-api-key）</option><option value="bearer" ${s.authMode === "bearer" ? "selected" : ""}>Bearer Token</option></select></div><div class="field"><label for="apiKey">API 密钥 · ${s.hasApiKey ? "已由系统安全存储保护，留空保留" : "尚未配置"}</label><input id="apiKey" name="apiKey" type="password" autocomplete="new-password" placeholder="输入密钥后保存"></div><div class="actions"><button class="primary">保存设置</button><button type="button" data-action="test-connection">测试连接</button><button type="button" data-action="clear-key" class="danger">删除密钥</button></div></section><section class="panel"><h2>运行与记录</h2><div class="grid-two"><div class="field"><label>不同 Profile 的并发任务数</label><input name="maxConcurrent" type="number" min="1" max="6" value="${s.maxConcurrent}"></div><p class="muted">历史会话和产物会保留，直到你显式删除任务。关闭窗口后任务留在后台；退出应用会停止任务服务。</p></div><label><input name="saveScreenshots" type="checkbox" ${s.saveScreenshots ? "checked" : ""}>按需保存页面截图（可能包含个人信息）</label><label><input name="notifications" type="checkbox" ${s.notifications ? "checked" : ""}>需要处理或任务结束时发送桌面通知</label></section></form>${jevSettings()}<section class="panel"><h2>诊断导出</h2><p class="muted">仅导出任务状态、时间、用量及动作类型，不包含密钥、对话、网页内容、个人资料或附件路径。</p><button data-action="export-diagnostics">导出脱敏诊断</button></section></div>`; }
 function schedules(): string { return `${toolbar("定时任务", "Schedules")}<div class="notice">仅在本机应用运行时执行。错过计划会标记未执行，不会自动补交。执行时间按所选时区显示。</div><div class="grid-two"><form id="schedule-form" class="panel"><h2>${editSchedule ? "编辑计划" : "安排任务"}</h2><div class="field"><label>任务名称</label><input name="name" required></div><div class="field"><label>操作要求</label><textarea name="prompt" required></textarea></div><div class="field"><label>使用浏览器</label><select name="profileId" aria-describedby="schedule-profile-availability" required><option value="">选择浏览器</option>${profileOptions("", true)}</select>${profileAvailabilityHint("schedule-profile-availability")}</div><div class="field"><label>执行时间（按下方时区）</label><input name="at" type="datetime-local" required></div><div class="grid-two"><div class="field"><label>时区</label><input name="timezone" value="${e(Intl.DateTimeFormat().resolvedOptions().timeZone)}" required></div><div class="field"><label>重复</label><select name="repeat"><option value="once">仅一次</option><option value="daily">每天</option></select></div></div>${formExtras()}<button class="primary">保存计划</button>${editSchedule ? '<button type="button" data-action="clear-schedule">取消编辑</button>' : ""}</form><div>${data.schedules.map((schedule) => `<section class="panel"><div class="panel-header"><h2>${e(schedule.name)}</h2><span class="pill">${schedule.enabled ? "已启用" : "已停用"}</span></div><p>${e(schedule.task.prompt)}</p><p class="muted">${e(new Date(schedule.at).toLocaleString("zh-CN", { timeZone: schedule.timezone }))} · ${e(schedule.timezone)}<br>${schedule.repeat === "daily" ? "每天" : "仅一次"}</p>${schedule.missedAt ? '<p class="notice">错过计划，未执行</p>' : ""}${schedule.lastTaskId ? `<button data-task="${schedule.lastTaskId}">查看上次结果</button>` : ""}<div class="actions"><button data-edit-schedule="${schedule.id}">编辑</button><button data-toggle-schedule="${schedule.id}">${schedule.enabled ? "暂停计划" : "重新启用"}</button><button data-delete-schedule="${schedule.id}" class="danger">删除</button></div></section>`).join("") || '<div class="empty">还没有安排定时任务。</div>'}</div></div>`; }
 function updateTaskChat(immediate = false): void {
   const task = taskData.get(selected);
@@ -452,8 +459,8 @@ function render(preserve = true): void {
   taskData.select(selected);
   const task = selected && taskData.get(selected);
   if (task && ["tasks", "history"].includes(view)) content = taskDetail(task);
-  else if (view === "tasks" && selected && data.tasks.some(task => task.id === selected)) content = `<div class="loading" role="status">${e(taskData.error || "正在读取任务…")}${taskData.error ? '<button data-action="retry-load">重新读取</button>' : ""}</div>`;
-  else if (view === "tasks") content = `${toolbar("新任务", "任务与浏览器，一处协同", `<span class="workspace-status"><span class="task-status-dot ${data.tasks.some(task => task.status === "running") ? "running" : ""}"></span>${data.tasks.filter(task => task.status === "running").length ? `${data.tasks.filter(task => task.status === "running").length} 个任务运行中` : "准备就绪"}</span>`)}${composer()}`;
+  else if (view === "tasks" && selected && data.tasks.some(task => task.id === selected)) content = toolbar("任务", "") + taskLoadState(taskData.error, true);
+  else if (view === "tasks") content = `${toolbar("新任务", "任务与浏览器，一处协同", `<span class="workspace-status ${!data.settings.hasApiKey ? "needs-setup" : ""}"><span class="task-status-dot ${data.tasks.some(task => task.status === "running") ? "running" : ""}"></span>${data.tasks.filter(task => task.status === "running").length ? `${data.tasks.filter(task => task.status === "running").length} 个任务运行中` : !data.settings.hasApiKey ? "尚未配置模型" : "无运行任务"}</span>`)}${composer()}`;
   else if (view === "materials") content = materials();
   else if (view === "usage") content = toolbar("Token 消耗", "Usage") + tokenUsagePage(data, usageSource);
   else if (view === "settings") content = settings();
@@ -983,7 +990,7 @@ const taskData = new TaskData(api, kind => {
   if ((kind === "detail" || kind === "stream") && old && workspace && !isAtTaskLatest(workspace, 64)) unseenMessages.add(selected);
   if (taskData.list) data = { ...taskData.list, streams: taskData.stream && selected ? { [selected]: taskData.stream } : {} };
   if (selected && data && !data.tasks.some(task => task.id === selected)) { rememberForms(); selected = ""; }
-  initialLoadError = taskData.error;
+  initialLoadError = taskData.error ? taskErrorMessage(taskData.error) : "";
   if (kind === "stream") { updateTaskChat(); updateJumpLatest(); return; }
   if (kind === "list" && search.trim()) scheduleSearch(false);
   if (composing) updateTaskChat();
@@ -991,9 +998,9 @@ const taskData = new TaskData(api, kind => {
 });
 window.addEventListener("beforeunload", () => taskData.dispose());
 async function loadSnapshot(): Promise<void> {
-  if (!data) root.innerHTML = '<p class="loading" role="status">正在读取工作台…</p>';
+  if (!data) renderStartup();
   try { await taskData.refresh(); initialLoadError = ""; render(); if (!selected && view === "tasks") document.getElementById("prompt")?.focus(); }
-  catch (error) { initialLoadError = String(error); if (!data) root.innerHTML = `<div class="loading" role="alert">无法打开工作台：${e(initialLoadError)}<button type="button" data-action="retry-load">重新读取</button></div>`; else showPending(); }
+  catch (error) { initialLoadError = taskErrorMessage(error); if (!data) renderStartup(initialLoadError); else showPending(); }
   finally { workspaceRendered(); }
 }
 const applyBrowserConnections = (snapshot: BrowserConnectionSnapshot) => {

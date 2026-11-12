@@ -631,7 +631,7 @@ test("AgentOverlayManager activates the strip menu in the clicked native window"
 
 test("main process keeps agent control UI inside the web page", async () => {
   const source = await readFile(path.join(__dirname, "..", "src", "main", "main.ts"), "utf8");
-  assert.match(source, /createProfileManager\(broadcastAgentTakeover, revealAgentOverlayProfile\)/);
+  assert.match(source, /createProfileManager\(broadcastAgentTakeover, revealAgentOverlayProfile[,)]/);
   assert.doesNotMatch(source, /createAgentLockWindow/);
   assert.doesNotMatch(source, /agentLockWindows/);
   assert.doesNotMatch(source, /FrontmostAppMonitor/);

@@ -626,6 +626,7 @@ export interface AgentIntegrationDiagnostic {
 }
 
 export interface AppState {
+  defaultProfile?: import("./default-targets").DefaultProfile | null;
   platform?: NodeJS.Platform;
   appTitle: string;
   dataDir: string;
@@ -1103,10 +1104,7 @@ export interface ProfileManagerApi {
   // 启用/移除会话识别 shell 集成（~/.zshenv 托管块），返回刷新后的完整状态。
   setShellIntegrationEnabled(enabled: boolean): Promise<AppState>;
   inspectAgentIntegration(): Promise<AgentIntegrationDiagnostic>;
-  readBrowserPreferences(): Promise<import("./browser-preferences").BrowserPreferencesSnapshot>;
-  readControlPreferences(domain: import("./control-preferences").ControlPreferencesDomain): Promise<import("./control-preferences").ControlPreferencesSnapshot>;
-  writeControlPreferences(request: import("./control-preferences").ControlPreferencesUpdate): Promise<import("./control-preferences").ControlPreferencesSnapshot>;
-  writeBrowserPreferences(request: import("./browser-preferences").BrowserPreferencesUpdate): Promise<import("./browser-preferences").BrowserPreferencesSnapshot>;
+  setDefaultProfile(id: string | null): Promise<AppState>;
   setAgentWrapperEnabled(tool: BrowserDriverKind, enabled: boolean): Promise<AgentIntegrationDiagnostic>;
   setAgentSkillEnabled(tool: BrowserDriverKind, enabled: boolean): Promise<AgentIntegrationDiagnostic>;
   setProfilePilotCliEnabled(enabled: boolean): Promise<AgentIntegrationDiagnostic>;

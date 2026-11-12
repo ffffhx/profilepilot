@@ -66,7 +66,7 @@ export const desktopWaitConditionSchema = z.object({
 
 const commandFields = {
   status: ['session'], doctor: ['session', 'windowId'], windows: ['session'],
-  claim: ['session', 'windowId'], select: ['session', 'windowId'], observe: ['session'],
+  claim: ['session', 'windowId', 'mode'], select: ['session', 'windowId'], observe: ['session'],
   screenshot: ['session', 'screenshotOnly'], wait: ['session', 'condition', 'timeoutMs', 'intervalMs'], action: ['session', 'params', 'requestId', 'observeAfter'],
   receipt: ['session', 'requestId'], handoff: ['session'], resume: ['session'], complete: ['session', 'requireActive'], release: ['session']
 } satisfies Record<string, string[]>;
@@ -75,6 +75,7 @@ export const desktopCommandSchema = z.object({
   action: z.literal('desktop'),
   method: z.enum(['status', 'doctor', 'windows', 'claim', 'select', 'observe', 'screenshot', 'wait', 'action', 'receipt', 'handoff', 'resume', 'complete', 'release']),
   session: sessionName.optional(), windowId: desktopWindowIdSchema.optional(),
+  mode: z.enum(['interactive', 'background']).optional(),
   params: desktopActionSchema.optional(), requestId: z.string().uuid().optional(),
   screenshotOnly: z.boolean().optional(), observeAfter: z.boolean().optional(), requireActive: z.boolean().optional(),
   condition: desktopWaitConditionSchema.optional(), timeoutMs: z.number().int().min(100).max(20000).optional(), intervalMs: z.number().int().min(100).max(2000).optional()

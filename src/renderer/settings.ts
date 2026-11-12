@@ -1,4 +1,5 @@
 import type { StartupSettings } from "../shared/startup-settings";
+import type { AppUpdateState } from '../shared/app-update';
 import { profileApi } from "./api";
 import { workspaceSwitcher, workspaceIdentityBar, refreshWorkspaceSwitcher } from "./workspace-switcher";
 import { onWorkspaceVisibilityChanged, workspaceHidden } from "./workspace-lifecycle";
@@ -8,6 +9,13 @@ const root = document.getElementById("settings")!;
 root.innerHTML = `${workspaceSwitcher("settings")}${workspaceIdentityBar()}
   <header class="settings-header"><h1>设置</h1><p>管理 ProfilePilot 的全局偏好</p></header>
   <main class="global-settings">
+    <section aria-labelledby="app-update-heading">
+      <h2 id="app-update-heading">版本与更新</h2>
+      <div class="setting-card"><div class="setting-row">
+        <div class="setting-copy"><h3 id="app-version">ProfilePilot</h3><p id="app-update-status" role="status">读取版本中…</p></div>
+        <button type="button" class="settings-update-button" id="app-update-button">检查更新</button>
+      </div></div>
+    </section>
     <section aria-labelledby="startup-heading">
       <h2 id="startup-heading">启动</h2>
       <div class="setting-card">
@@ -46,6 +54,23 @@ root.innerHTML = `${workspaceSwitcher("settings")}${workspaceIdentityBar()}
       </div>
     </section>
   </main>`;
+
+async function renderAppUpdate(): Promise<void> {
+  try {
+    const state: AppUpdateState = await window.appUpdate.status();
+    document.getElementById('app-version')!.textContent = `ProfilePilot ${state.version} · ${state.channel === 'development' ? '开发版' : '正式版'}${state.commit ? ` · ${state.commit.slice(0, 8)}` : ''}`;
+    document.getElementById('app-update-status')!.textContent = state.error || (state.channel === 'development' ? '使用本地代码构建，线上正式版不会覆盖此版本。'
+      : state.phase === 'downloading' ? `正在下载 ${Math.floor(state.percent || 0)}%` : state.phase === 'checking' ? '正在检查更新…'
+      : state.phase === 'downloaded' ? '更新已下载，可以安装并重启。' : state.nextVersion ? `发现新版本 ${state.nextVersion}` : '自动检查新版本，由你选择安装时间。');
+    const button = document.getElementById('app-update-button') as HTMLButtonElement;
+    button.disabled = ['checking', 'downloading', 'installing'].includes(state.phase);
+    button.textContent = state.channel === 'development' ? '开发版说明' : state.phase === 'downloaded' ? '安装更新' : '检查更新';
+  } catch (error) { document.getElementById('app-update-status')!.textContent = String(error); }
+}
+document.getElementById('app-update-button')!.addEventListener('click', () => void window.appUpdate.open().finally(renderAppUpdate));
+void renderAppUpdate();
+const updateTimer = setInterval(() => { if (!document.hidden) void renderAppUpdate(); }, 1500);
+window.addEventListener('pagehide', () => clearInterval(updateTimer), { once: true });
 
 const experiments = [
   { name: "agent", enabled: experimentalAgentEnabled, set: setExperimentalAgentEnabled },

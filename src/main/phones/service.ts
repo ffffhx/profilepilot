@@ -5,12 +5,15 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { PHONE_PROTOCOL, phoneAppConnected, type PhoneDevice, type PhonesSnapshot, type PhoneSessionState, type PhoneAction, type PhoneActionInput, type PhoneActionResult } from "../../shared/phones";
 import { groupPhoneDevices } from "../../shared/phone-devices";
+import { defaultPhoneStatus } from "../../shared/default-targets";
+import { DefaultTargetStore } from "../default-targets";
 import { phoneReadiness, type PhoneRuntimeEvidence } from "../../shared/phone-readiness";
 import type { PhoneSetting } from "../../shared/phones";
 import type { PhoneScreenFrame } from "../../shared/phones";
 import { Adb, parseAdbDevices, deviceShell, phoneRequest, validateDeviceId, type AdbRunner } from "./adb";
 import { readCompanion, verifyCompanionApk } from "./companion";
 import { phoneActionSchema, isPhoneRead } from "./actions";
+import { observeAfterAction } from '../action-feedback';
 import { discoverWireless, pairWireless, connectWireless, wirelessCandidates, wirelessAddress, probeWireless, type VerifiedWirelessEndpoint } from "./wireless";
 import { discoverNearbyApps } from "./lan-discovery";
 import { WirelessFailure, sanitizeWirelessOutput } from "./wireless-diagnostics";
@@ -294,8 +297,26 @@ export class PhonesService {
     }
     devices.push(...registered.filter(c => !matched.has(c.registration!.deviceId)));
     devices.push(...this.iphones.devices());
-    return { devices, adbAvailable: this.adbAvailable, error: this.error, computer: this.computer,
+    const savedDefault = new DefaultTargetStore(this.options.root).phone();
+    const defaultDevice = defaultPhoneStatus(devices, savedDefault);
+    if (savedDefault) savedDefault.name = devices.find(device => device.id === defaultDevice.deviceId)?.name || savedDefault.name;
+    return { devices, defaultDevice, adbAvailable: this.adbAvailable, error: this.error, computer: this.computer,
       companionApp: { packageName: this.companion.packageName, name: this.companion.name, variant: this.companion.variant } };
+  }
+  setDefault(id: string | null): PhonesSnapshot {
+    const defaults = new DefaultTargetStore(this.options.root);
+    if (id === null) defaults.setPhone(null);
+    else {
+      const device = this.snapshot().devices.find(item => item.id === id);
+      if (!device || device.transport === "cloud") throw new Error("请选择可控制的手机设备。");
+      if (["wifi", "emulator"].includes(device.transport) && !device.hardwareId && !device.state?.statusDeviceId)
+        throw new Error("请先连接设备并确认稳定的设备身份，再设为默认设备；临时端口不能作为默认目标。");
+      defaults.setPhone({ id: device.id, name: device.name, hardwareId: device.hardwareId,
+        statusDeviceId: device.state?.statusDeviceId || device.registration?.deviceId,
+        udid: device.iphone?.udid });
+    }
+    this.changed();
+    return this.snapshot();
   }
   cloudPair(url?: string) { return this.cloud.pair(url); }
   forgetInternet(id: string) {
@@ -415,7 +436,7 @@ export class PhonesService {
     return this.snapshot().devices.find(device => device.id === parsed.id)!;
   }
   async basicPerform(input: PhoneActionInput): Promise<PhoneActionResult> {
-    const parsed = z.object({ id: z.string(), sessionId: z.string().min(1), generation: z.number().int().nonnegative(), requestId: z.string().uuid(), action: phoneActionSchema }).strict().parse(input);
+    const parsed = z.object({ id: z.string(), sessionId: z.string().min(1), generation: z.number().int().nonnegative(), requestId: z.string().uuid(), action: phoneActionSchema, observeAfter: z.boolean().optional() }).strict().parse(input);
     if (this.closed) throw new Error("手机服务正在退出。");
     if (this.captureRoutes(parsed.id).some(route => this.actions.has(route.id) || this.operations.has(route.id))) throw new Error("手机上一项操作尚未结束。");
     this.connected(parsed.id);
@@ -1339,7 +1360,7 @@ export class PhonesService {
   async perform(input: PhoneActionInput): Promise<PhoneActionResult> {
     if (input.id.startsWith("iphone-")) return this.iphones.perform(input);
     this.assertNoBasic();
-    const { id, sessionId, generation, requestId, action } = z.object({ id: z.string(), sessionId: z.string().min(1).max(100), generation: z.number().int().nonnegative(), requestId: z.string().uuid(), action: phoneActionSchema }).strict().parse(input);
+    const { id, sessionId, generation, requestId, action, observeAfter } = z.object({ id: z.string(), sessionId: z.string().min(1).max(100), generation: z.number().int().nonnegative(), requestId: z.string().uuid(), action: phoneActionSchema, observeAfter: z.boolean().optional() }).strict().parse(input);
     const device = this.connected(id);
     if (device.companion !== "ready" || this.reconcile.has(id)) throw phoneFailure("PHONE_CONNECTION_REQUIRED", "手机连接需要重新确认，请等待状态同步后核查会话。");
     if (this.closed || this.captureRoutes(id).some(route => this.operations.has(route.id) || this.actions.has(route.id))) throw phoneFailure("PHONE_TARGET_BUSY", "手机正在处理操作或交接控制权。");
@@ -1351,6 +1372,24 @@ export class PhonesService {
       if (!["viewing", "controlling"].includes(state.phase)) throw phoneFailure("PHONE_SESSION_ENDED", "手机已结束或断开，不能继续操作。");
       if (state.mode === "view" && !isPhoneRead(action.kind)) throw phoneFailure("PHONE_PERMISSION_REQUIRED", "当前为仅查看会话，不能操作手机。");
       const response = await this.rpc(id, "action", { instanceId: state.instanceId, sessionId, generation, requestId, action });
+      if (observeAfter && !isPhoneRead(action.kind)) {
+        const route = this.routes.get(id);
+        const check = () => {
+          const current = device.state;
+          if (this.closed || this.routes.get(id) !== route || !current || current.instanceId !== state.instanceId || current.sessionId !== sessionId || current.generation !== generation || current.phase !== 'controlling')
+            throw phoneFailure('PHONE_SESSION_STALE', '操作后手机控制状态已改变。');
+        };
+        const feedback = await observeAfterAction({ check, errorCode: 'PHONE_OBSERVATION_FAILED', invalidate: () => {},
+          observe: async () => {
+            const observed = await this.rpc(id, 'action', { instanceId: state.instanceId, sessionId, generation, requestId: randomUUID(), action: { kind: 'snapshot' } });
+            const tree = observed.result as { nodes?: unknown[] };
+            if (!tree || !Array.isArray(tree.nodes)) throw phoneFailure('PHONE_OBSERVATION_FAILED', '手机未返回有效控件树。');
+            return { kind: 'accessibility', capturedAt: this.now(), ...tree,
+              completeness: 'bounded', limits: { maxNodes: 400, maxDepth: 25 }, ...(tree.nodes.length >= 400 ? { truncated: true } : {}) };
+          }
+        });
+        return { state: structuredClone(device.state || response.state), result: response.result, ...feedback };
+      }
       return { state: response.state, result: response.result };
     } catch (error) { this.device(id).error = (error as Error).message; throw error; }
     finally { this.actions.delete(id); this.changed(); }
@@ -1554,11 +1593,11 @@ export class PhonesService {
     if (!state || state.instanceId !== owner.instanceId || state.sessionId !== owner.sessionId) throw phoneFailure("PHONE_SESSION_STALE", "手机已切换会话，不能沿用旧 ADB 任务。");
     return structuredClone({ ...device, state });
   }
-  async performWrapper(lease: string, generation: number, action: PhoneAction, requestId: string): Promise<PhoneActionResult> {
+  async performWrapper(lease: string, generation: number, action: PhoneAction, requestId: string, observeAfter = false): Promise<PhoneActionResult> {
     const owner = this.wrapper(lease);
     // The caller captures generation before submitting the action. Pausing and
     // resuming while that request is in flight must invalidate it, not rebase it.
-    const input = { id: owner.id, sessionId: owner.sessionId, generation, requestId, action };
+    const input = { id: owner.id, sessionId: owner.sessionId, generation, requestId, action, observeAfter };
     return owner.backend === "basic" ? this.basicPerform(input) : this.perform(input);
   }
   private claimFollowCapture(owner: { id: string; visualFollow?: boolean }): void {

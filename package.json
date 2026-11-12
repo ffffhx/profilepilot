@@ -30,7 +30,7 @@
     "start": "npm run start:independent",
     "start:foreground": "npm run build && electron .",
     "start:independent": "npm run build && node scripts/start-independent.mjs",
-    "dev": "npm run build && electron .",
+    "dev": "node scripts/dev.mjs",
     "check": "tsc --noEmit",
     "pack": "npm run build && electron-builder --dir --publish never",
     "dist": "npm run build && electron-builder --publish never",
@@ -225,9 +225,8 @@
     },
     "publish": [
       {
-        "provider": "github",
-        "owner": "ffffhx",
-        "repo": "profilepilot"
+        "provider": "generic",
+        "url": "https://github.com/ffffhx/profilepilot/releases/download/desktop-latest"
       }
     ],
     "beforePack": "scripts/verify-browser-runtime.cjs",
@@ -254,6 +253,7 @@
     "@streamdown/code": "^1.1.1",
     "agent-session-core": "^0.1.1",
     "ai": "7.0.107",
+    "electron-updater": "6.8.12",
     "exceljs": "^4.4.0",
     "extract-zip": "^2.0.1",
     "fast-xml-parser": "^5.11.2",

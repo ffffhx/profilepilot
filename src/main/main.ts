@@ -17,6 +17,7 @@ import { registerLocalApps } from "./local-apps/ipc";
 import { registerDesktop } from "./desktop/ipc";
 import { registerGpui } from "./gpui/ipc";
 import { WindowsInputRuntime, closeInputControl } from "./desktop/input-runtime";
+import { initializeAppUpdates, finishRequestedAppUpdate } from './app-update';
 import { createRuntimeDesktopAdmission, createWindowsDesktopDiscovery } from "./desktop/runtime-admission";
 import type { WindowsControlSample } from "./windows-platform";
 import { closeWindowsSampler } from "./windows-sampler";
@@ -70,8 +71,6 @@ import { defaultDataDir } from "./fs-util";
 import { StartupSettingsManager, createTestLoginItemApi } from "./startup-settings";
 import { ShutdownCoordinator } from "./shutdown-coordinator";
 import { ensureClaudeInstructionShell, readGlobalInstructions, undoGlobalInstruction, writeGlobalInstruction } from "./global-instructions";
-import { readBrowserPreferences, writeBrowserPreferences } from "./browser-preferences";
-import { readControlPreferences, writeControlPreferences } from "./control-preferences";
 import {
   inspectAgentIntegration,
   refreshAgentBrowserWrapperIfInstalled,
@@ -1470,7 +1469,6 @@ function createMainWindow(): void {
                 const globalInstructions = await window.profileManager.readGlobalInstructions();
                 smokeResult.globalInstructionFiles = globalInstructions.files.map((file) => file.fileName);
                 smokeResult.globalInstructionHasContent = globalInstructions.files.some((file) => file.exists && file.content.length > 0);
-                // Control preference editing is covered by e2e-control-preferences.mjs in the Tools workspace.
                 const syncAccountButton = document.querySelector('[data-action="run-sync"]');
                 if (syncAccountButton instanceof HTMLButtonElement && !syncAccountButton.disabled) {
                   syncAccountButton.click();
@@ -1892,10 +1890,11 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.handle(IPC_CHANNELS.inspectAgentIntegration, async () => inspectAgentIntegration());
-  ipcMain.handle(IPC_CHANNELS.readBrowserPreferences, async () => readBrowserPreferences());
-  ipcMain.handle(IPC_CHANNELS.readControlPreferences, async (_event, domain) => readControlPreferences(domain));
-  ipcMain.handle(IPC_CHANNELS.writeControlPreferences, async (_event, request) => writeControlPreferences(request));
-  ipcMain.handle(IPC_CHANNELS.writeBrowserPreferences, async (_event, request) => writeBrowserPreferences(request));
+  ipcMain.handle(IPC_CHANNELS.setDefaultProfile, async (_event, id: string | null): Promise<AppState> => {
+    if (id !== null && typeof id !== "string") throw new Error("Profile ID 无效。");
+    await profileManager.setDefaultProfile(id);
+    return updatedAppState();
+  });
 
   ipcMain.handle(
     IPC_CHANNELS.setAgentWrapperEnabled,
@@ -2233,6 +2232,13 @@ if (!app.requestSingleInstanceLock()) {
   app.whenReady().then(async () => {
     writeDiagnosticLog("info", "app", "app.ready", "Electron 已就绪");
     const isolatedStartupTest = IS_ELECTRON_SMOKE_TEST || IS_E2E_DRIVER_TEST || IS_BACKGROUND_E2E;
+    initializeAppUpdates();
+    if (!app.isPackaged && !isolatedStartupTest && process.env.PROFILEPILOT_DEV_WATCH !== '0') {
+      require(path.join(app.getAppPath(), 'scripts/development-runtime.cjs')).install({
+        app, webContents: require('electron').webContents, root: app.getAppPath(),
+        onError: (error: Error) => console.error('[development]', error)
+      });
+    }
     startupSettingsManager = new StartupSettingsManager(
       path.join(process.env.CPM_DATA_DIR || defaultDataDir(), "startup-settings.json"),
       isolatedStartupTest ? createTestLoginItemApi() : app,
@@ -2252,6 +2258,7 @@ if (!app.requestSingleInstanceLock()) {
       await refreshAgentBrowserWrapperIfInstalled().catch((error) => {
         console.warn(`[shell-integration] 刷新 agent-browser wrapper 失败：${error instanceof Error ? error.message : String(error)}`);
       });
+      let lifecycleRequested = false;
       managementServer = await startProfilePilotManagementServer({
         profileManager,
         getTaskService: () => taskService,
@@ -2260,6 +2267,17 @@ if (!app.requestSingleInstanceLock()) {
         getLocalAppsService: () => localAppsService,
         getGpuiService: () => gpuiService,
         appVersion: app.getVersion(),
+        appLifecycle: {
+          status: () => ({channel: app.isPackaged ? 'stable' : 'development', sourceRoot: app.isPackaged ? null : app.getAppPath(), watching: !app.isPackaged && process.env.PROFILEPILOT_DEV_WATCH !== '0'}),
+          request: method => {
+            if (lifecycleRequested) throw new Error('应用正在退出或重启，请先检查进程状态。');
+            lifecycleRequested = true;
+            setImmediate(() => {
+              if (method === 'restart') app.relaunch({args: [...process.argv.slice(1).filter(value => value !== '--background'), '--background']});
+              app.quit();
+            });
+          }
+        },
         onMutation: () => scheduleAppStateBroadcast(0)
       }).catch((error) => {
         console.error(`[management-cli] 启动失败：${error instanceof Error ? error.message : String(error)}`);
@@ -2380,7 +2398,7 @@ const shutdown = new ShutdownCoordinator({
     { name: "management-server", run: async () => { await managementServer?.close(); managementServer = null; } }
   ],
   log: (level, event, message, details) => writeDiagnosticLog(level, "app", event, message, details),
-  requestQuit: () => app.quit(),
+  requestQuit: () => { if (!finishRequestedAppUpdate(shutdown.clean)) app.quit(); },
   // app.exit bypasses Electron's cancellable quit hooks. Leave runtime-state
   // unclean on this path so the next start reports unfinished cleanup honestly.
   forceExit: () => app.exit(1)

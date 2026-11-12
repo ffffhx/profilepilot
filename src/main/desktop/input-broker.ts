@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { backgroundTargetSchema, sameBackgroundTarget, type BackgroundTarget } from './input-observer';
 import type { EventEmitter } from 'node:events';
 import type { Readable, Writable } from 'node:stream';
 import { TextDecoder } from 'node:util';
@@ -58,6 +59,7 @@ export interface WindowsInputBrokerOptions {
 }
 interface BrowserEntry { pids: number[]; callbacks: InputBrokerBrowserCallbacks; }
 interface ArmRequest {
+  backgroundTarget?: BackgroundTarget;
   generation: string; marker: string; epoch?: string; sent: boolean; transmitted: boolean;
   promise: Promise<DesktopObserverSubscription>;
   resolve(value: DesktopObserverSubscription): void; reject(error: Error): void;
@@ -156,14 +158,14 @@ export class WindowsInputBroker {
       }
     };
   }
-  arm(generation: string, marker: string): Promise<DesktopObserverSubscription> {
-    try { this.assertOpen(); if (!validIdentity(generation)) throw fault('invalid_generation', 'DESKTOP_BAD_REQUEST'); marker = normalizeMarker(marker); }
+  arm(generation: string, marker: string, backgroundTarget?: BackgroundTarget): Promise<DesktopObserverSubscription> {
+    try { this.assertOpen(); if (!validIdentity(generation)) throw fault('invalid_generation', 'DESKTOP_BAD_REQUEST'); marker = normalizeMarker(marker); if (backgroundTarget) backgroundTarget = backgroundTargetSchema.parse(backgroundTarget); }
     catch (error) { return Promise.reject(error); }
-    if (this.pendingArm?.generation === generation && this.pendingArm.marker === marker) return this.pendingArm.promise;
+    if (this.pendingArm?.generation === generation && this.pendingArm.marker === marker && sameBackgroundTarget(this.pendingArm.backgroundTarget, backgroundTarget)) return this.pendingArm.promise;
     if (this.pendingArm) return Promise.reject(fault('arm_in_progress', 'DESKTOP_INPUT_OBSERVER_BUSY'));
     const current = this.observer.snapshot().desktop;
     if (this.generations.has(generation)) {
-      if (current?.generation === generation && current.phase === 'ready' && this.generations.get(generation) === marker && this.desktopWanted) return Promise.resolve(current);
+      if (current?.generation === generation && current.phase === 'ready' && this.generations.get(generation) === marker && sameBackgroundTarget(current.backgroundTarget, backgroundTarget) && this.desktopWanted) return Promise.resolve(current);
       return Promise.reject(fault('generation_cannot_be_reused', 'DESKTOP_BAD_REQUEST'));
     }
     // Keep a ready predecessor armed. The observer emits REARM so native can
@@ -172,7 +174,7 @@ export class WindowsInputBroker {
     let resolve!: ArmRequest['resolve'], reject!: ArmRequest['reject'];
     const promise = new Promise<DesktopObserverSubscription>((yes, no) => { resolve = yes; reject = no; });
     this.generations.set(generation, marker); this.desktopWanted = true;
-    this.pendingArm = { generation, marker, promise, resolve, reject, sent: false, transmitted: false };
+    this.pendingArm = { generation, marker, backgroundTarget, promise, resolve, reject, sent: false, transmitted: false };
     this.reconcile(); this.startArm();
     return promise;
   }
@@ -319,7 +321,7 @@ export class WindowsInputBroker {
     request.timer = this.clock.setTimeout(() => {
       if (this.pendingArm === request) this.fail(record, 'unavailable');
     }, this.timing.armTimeoutMs);
-    try { this.observer.observeDesktop(request.generation, request.marker); }
+    try { this.observer.observeDesktop(request.generation, request.marker, request.backgroundTarget); }
     catch { this.fail(record, 'unavailable'); }
   }
   private rejectArm(error: Error) {
@@ -349,9 +351,11 @@ export class WindowsInputBroker {
   private send(command: InputObserverCommand) {
     const record = this.child;
     if (!record || record.exitSeen || !this.live(record) || record.phase !== 'ready' || record.epoch !== command.epoch) throw fault('send_failed');
+    const scope = (command.type === 'desktop-arm' || command.type === 'desktop-rearm') && command.backgroundTarget
+      ? ` BACKGROUND ${command.backgroundTarget.pid} ${command.backgroundTarget.window}` : '';
     const text = command.type === 'browser-config' ? 'SET' + (command.pids.length ? ' ' + command.pids.join(' ') : '') + '\n'
-      : command.type === 'desktop-arm' ? `ARM ${command.epoch} ${command.generation} ${command.marker}\n`
-        : command.type === 'desktop-rearm' ? `REARM ${command.epoch} ${command.previousGeneration} ${command.generation} ${command.marker}\n`
+      : command.type === 'desktop-arm' ? `ARM ${command.epoch} ${command.generation} ${command.marker}${scope}\n`
+        : command.type === 'desktop-rearm' ? `REARM ${command.epoch} ${command.previousGeneration} ${command.generation} ${command.marker}${scope}\n`
         : `DISARM ${command.epoch} ${command.generation}\n`;
     if (record.queuedBytes + record.process.stdin.writableLength + Buffer.byteLength(text) > MAX_WRITE_BYTES) {
       this.fail(record, 'overflow'); throw fault('send_failed');

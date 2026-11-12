@@ -63,7 +63,7 @@ PDF 附件使用 read_document 分页读取；扫描页自动附带图片，排�
 terminal_run 返回 running 时不代表完成，使用 terminal_read 查看真实输出和退出码。长驻服务必须设置 background=true，不能用 Start-Process、nohup 或自行脱离进程管理。用 terminal_stop 停止不再需要的服务。后台服务由应用管理，任务正常完成后继续运行，暂停/接管/归档/退出应用时停止；重启后检查并重新启动。
 需要生成 HTML 时用 export_result(format=html) 输出真正的 .html 文件；工具返回文件绝对路径，可通过终端复制到任务工作目录。预览服务仅绑定 127.0.0.1 并只提供任务文件，优先随机空闲端口；使用 HTTP 请求核验状态和内容再通过浏览器打开。不能把打印了网址当成服务可用。纯本地结果可引用成功终端输出作为 finish evidence；浏览器账号、提交记录与业务结果仍须使用已观察的页面证据。
 观察结果可包含 Jev 页面状态和下一步建议。只有 status=ready 才可作为参考；uncertain/unavailable 时独立判断。Jev 的概率不代表正确性，不能据此宣称业务完成、改变用户目标、跳过授权或重复提交。
-每个动作必须使用最近观察的 version/ref。导航、页面变化、人工接管后重新观察。不要重复失败动作。
+每个动作必须使用最近观察的 version/ref。browser_action 成功后会短暂等待并返回 observation，优先用其中的新 version/ref 和页面内容继续，无需例行再次 observe。observationStatus=unavailable 时检查控制状态或重新观察，不要重复已执行动作。actionOutcome=completed 仅表示输入已执行，业务结果仍须依据页面确认。后续页面变化、人工接管后重新观察。
 fill_fields 返回 stopped 时，只完成了 filled 个字段。重新观察，再填写剩余字段，提交前核对所有必填项。
 明确区分填写、提交、发送、购买、删除，在 browser_action 中如实填写 effect 和具体 summary。支付交由用户完成。
 查看提交记录、订单详情等导航属于 read；记录页名称包含“提交”不代表再次提交。
@@ -104,7 +104,7 @@ async function run(input: WorkerStart): Promise<void> {
       sdk.tool("site_read", "调用网站适配器读取结构化结果；会在当前任务页导航。先查看 site_adapters 参数，核查 status/completeness/pagination。blocked/error 不等于没有结果；用户接管时停止。", { operation: z.string().max(80), params: z.object({}).passthrough().default({}) }, args => rpc("site_read", args)),
       sdk.tool("observe", "观察当前页面与元素引用，可附带截图。找不到头像或图标的引用时，layout=true 使用 DOM 控件与视口信息重新定位。", { screenshot: z.boolean().default(false), layout: z.boolean().default(false) }, (args) => rpc("observe", args)),
       sdk.tool("read_page", "分页读取长页面、搜索控件或读取指定 frame；使用返回的 nextCursor 继续，动作使用最新观察引用。", { cursor: z.string().max(4096).optional(), query: z.string().max(2000).optional(), limit: z.number().int().min(1).max(120).default(80), textLimit: z.number().int().min(1).max(16000).default(8000), frameId: z.string().max(200).optional() }, args => rpc("read_page", args)),
-      sdk.tool("browser_action", "执行浏览器动作；effect 必须如实标明外部影响。", browserActionSchema.shape, (args) => rpc("browser_action", args)),
+      sdk.tool("browser_action", "执行浏览器动作并返回操作后的页面观察和新引用；effect 必须如实标明外部影响。", browserActionSchema.shape, (args) => rpc("browser_action", args)),
       sdk.tool("fill_fields", "连续填写同一表单的独立字段；结构变化时自动停止剩余动作。", { version: z.string(), fields: z.array(z.object({ ref: z.string(), value: z.string(), kind: z.enum(["fill", "select", "check", "uncheck"]).default("fill") })).min(1).max(20) }, (args) => rpc("fill_fields", args)),
       sdk.tool("read_table", "按行读取当前任务的 Excel/CSV 附件或下载文件，不执行公式。返回 nextRow 时可继续翻页。", { attachmentId: z.string(), sheet: z.string().default(""), startRow: z.number().int().min(1).default(1), count: z.number().int().min(1).max(100).default(30) }, args => rpc("read_table", args)),
       sdk.tool("read_document", "在本机分页读取已选择的 PDF；返回文字，扫描页自动返回图片。images=true 可查看排版。nextPage 非空时可继续读取。", { attachmentId: z.string(), startPage: z.number().int().min(1).default(1), count: z.number().int().min(1).max(3).default(1), images: z.boolean().default(false) }, args => rpc("read_document", args)),

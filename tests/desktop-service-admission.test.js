@@ -8,7 +8,7 @@ const other = { ...target, id: 'c'.repeat(32), pid: 20 };
 const version = 'b'.repeat(32);
 const command = (method, extra = {}) => ({ action: 'desktop', method, session: 'task', ...extra });
 const claim = service => service.execute(command('claim', { windowId: target.id }));
-const action = () => command('action', { requestId: randomUUID(), params: { version, ref: 'e1', kind: 'invoke' } });
+const action = () => command('action', { requestId: randomUUID(), observeAfter: false, params: { version, ref: 'e1', kind: 'invoke' } });
 const decision = status => ({ status, reason: 'fixture', matches: [], gaps: [] });
 function fixture() {
   let admit = async () => decision('unmanaged');

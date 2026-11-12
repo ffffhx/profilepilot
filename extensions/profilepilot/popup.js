@@ -1,11 +1,21 @@
 const $ = selector => document.querySelector(selector);
 const setupId = new URLSearchParams(location.hash.slice(1)).get('setup');
 let invitation, currentWindowId, polling = false, busy = false, generation = 0;
+const connectionDiagnostics = globalThis.ProfilePilotConnectionDiagnostics;
+let workerReadFailure;
 
 function showError(error) { $('#error').textContent = error?.message || String(error); $('#error').hidden = false; }
 function clearError() { $('#error').hidden = true; }
 async function request(method, data = {}) {
-  const response = await chrome.runtime.sendMessage({ method, ...data });
+  let timer;
+  // Bound only the read probe. Never time out/replay a user mutation here.
+  let response;
+  try {
+    const sending = chrome.runtime.sendMessage({ method, ...data });
+    response = method === 'state' ? await Promise.race([sending, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('diagnostic state timeout')), 4000);
+    })]) : await sending;
+  } finally { clearTimeout(timer); }
   if (!response || response.error) throw new Error(response?.error || '扩展未响应，请重新打开插件。');
   return response.result;
 }
@@ -46,22 +56,52 @@ async function pollState() {
     // A local worker read only: opening this view never reconnects, claims a
     // page, reads page content or waits for the desktop's task service.
     const state = await request('state');
+    if (workerReadFailure) { void connectionDiagnostics?.record('popup-recovered'); workerReadFailure = undefined; }
     if (version === generation) render(state);
   } catch (error) {
+    const detail = connectionDiagnostics?.errorInfo(error);
+    const signature = detail?.errorKind || 'unclassified';
+    if (workerReadFailure !== signature) void connectionDiagnostics?.record('popup-unreachable', detail);
+    workerReadFailure = signature;
     if (version === generation) {
       $('#connection-state').hidden = false;
       $('#connection-label').textContent = '状态暂不可用';
       $('#connection-label').className = 'connection-label';
-      $('#connection-note').textContent = error.message;
+      $('#connection-note').textContent = '无法读取扩展后台状态。请先导出连接诊断，并保留扩展管理页中的错误，再尝试重新加载。';
       $('#controlled-tab').hidden = true;
       $('#status').textContent = '连接状态暂不可用';
     }
   } finally { polling = false; }
 }
-function setBusy(value) {
+$('#export-diagnostics')?.addEventListener('click', async () => {
+  const button = $('#export-diagnostics'), note = $('#diagnostics-note');
+  if (button.disabled) return;
+  button.disabled = true; button.textContent = '正在导出…'; note.textContent = '';
+  try {
+    if (!connectionDiagnostics) throw new Error('诊断模块未加载，请保留扩展管理页中的错误。');
+    const report = await connectionDiagnostics.report();
+    let saved;
+    try { saved = (await chrome.storage.local.get('connection')).connection; }
+    catch { report.storageAvailable = false; }
+    report.current = { extensionVersion: chrome.runtime.getManifest().version, paired: Boolean(saved),
+      pairingKnown: report.storageAvailable,
+      ...(Number.isInteger(saved?.port) ? { port: saved.port } : {}), workerReadFailure: workerReadFailure || null };
+    await chrome.downloads.download({ url: 'data:application/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(report, null, 2)),
+      filename: 'profilepilot-connection-diagnostics-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json', saveAs: false });
+    note.textContent = report.storageAvailable ? '诊断文件已开始下载。' : '已开始下载；本地日志存储不可用，记录可能不完整。';
+  } catch (error) { note.textContent = error.message || '诊断导出失败，请保留扩展管理页中的错误。'; }
+  finally { button.disabled = false; button.textContent = '导出连接诊断'; }
+});
+function setBusy(value, action = 'connect') {
   busy = value;
   $('#connect-submit').disabled = value;
   $('#reconnect').disabled = value;
+  $('#code').readOnly = value;
+  $('#connect').setAttribute('aria-busy', String(value && action === 'connect'));
+  $('#reconnect').setAttribute('aria-busy', String(value && action === 'reconnect'));
+  $('#connect-submit').textContent = value && action === 'connect' ? '正在连接…' : '连接浏览器服务';
+  $('#reconnect').textContent = value && action === 'reconnect' ? '正在重新连接…' : '重新连接';
+  if (value) $('#status').textContent = action === 'reconnect' ? '正在重新连接浏览器服务…' : '正在连接浏览器服务…';
 }
 $('#connect').addEventListener('submit', async event => {
   event.preventDefault();
@@ -77,7 +117,7 @@ $('#connect').addEventListener('submit', async event => {
 });
 $('#reconnect').onclick = async () => {
   if (busy) return;
-  clearError(); setBusy(true); generation++;
+  clearError(); setBusy(true, 'reconnect'); generation++;
   try { render(await request('reconnect')); } catch (error) { showError(error); }
   finally { setBusy(false); }
 };

@@ -304,15 +304,27 @@ body.mini-mode #app,
   cursor: pointer;
 }
 
-.mini-loading {
+.mini-state {
   display: grid;
   width: 100%;
-  height: 100%;
+  min-height: 112px;
+  align-content: center;
   place-items: center;
+  gap: 8px;
+  padding: 14px;
   color: var(--muted);
-  font-family: var(--font-mono);
   font-size: 12px;
-  text-transform: uppercase;
+  line-height: 1.5;
+  text-align: center;
+}
+
+.mini-state strong { color: var(--text); font-size: 13px; }
+.mini-state p {
+  max-width: 100%;
+  max-height: 120px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  margin: 0;
 }
 
 .mini-shell {
@@ -422,7 +434,7 @@ body.mini-collapsing .mini-shell {
   line-height: 1;
 }
 
-.mini-titlebar span {
+.mini-brand-text > span {
   display: block;
   margin-top: 3px;
   color: var(--muted);
@@ -1180,10 +1192,13 @@ h3 {
 }
 
 /* 定宽操作按钮放不下“xx中…”加载文案，加载态只保留 spinner */
-.profile-actions > .action-button.loading span:not(.inline-spinner),
-.profile-actions > .action-tooltip > .action-button.loading span:not(.inline-spinner) {
+.profile-actions > .action-button.loading .button-label-text,
+.profile-actions > .action-tooltip > .action-button.loading .button-label-text {
   display: none;
 }
+
+.profile-actions > .action-button .button-label,
+.profile-actions > .action-tooltip > .action-button .button-label { width: 100%; min-width: 0; }
 
 .profile-actions > .action-button.loading .inline-spinner,
 .profile-actions > .action-tooltip > .action-button.loading .inline-spinner {
@@ -8184,7 +8199,7 @@ button:hover:not(:disabled) {
   height: 52px;
   place-items: center;
   border: 1px solid var(--line-strong);
-  background: #0a151b;
+  background: var(--accent-soft);
   clip-path: polygon(50% 0, 92% 16%, 86% 72%, 50% 100%, 14% 72%, 8% 16%);
 }
 
@@ -8198,7 +8213,6 @@ button:hover:not(:disabled) {
 .input-guard-permission.ready .input-guard-mark {
   border-color: var(--accent-bright);
   background: var(--accent-soft);
-  box-shadow: 0 0 16px rgba(56, 225, 160, 0.14);
 }
 
 .input-guard-permission.ready .input-guard-mark span {
@@ -8223,34 +8237,26 @@ button:hover:not(:disabled) {
   min-width: 0;
 }
 
-.input-guard-copy > span {
-  display: block;
-  color: var(--info-bright);
-  font-family: var(--font-mono);
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.13em;
-}
-
 .input-guard-copy > strong {
   display: block;
-  margin-top: 4px;
-  font-family: "Chakra Petch", var(--font-display);
+  margin-top: 0;
+  font-family: var(--font);
   font-size: 14px;
 }
 
 .input-guard-copy > p {
   margin: 4px 0 0;
   color: var(--muted);
-  font-size: 10px;
-  line-height: 1.5;
+  font-size: 13px;
+  line-height: 1.7;
 }
 
 .input-guard-copy > small {
   display: block;
   margin-top: 4px;
   color: var(--muted);
-  font-size: 9px;
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .input-guard-copy code {
@@ -8273,10 +8279,10 @@ button:hover:not(:disabled) {
 .input-guard-controls em {
   width: 100%;
   color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 9px;
+  font-family: var(--font);
+  font-size: 12px;
   font-style: normal;
-  letter-spacing: 0.09em;
+  letter-spacing: 0;
   text-align: right;
 }
 
@@ -8293,9 +8299,9 @@ button:hover:not(:disabled) {
 }
 
 .input-guard-controls button {
-  min-height: 30px;
+  min-height: 36px;
   padding: 5px 9px;
-  font-size: 10px;
+  font-size: 13px;
 }
 
 .onboarding-actions {
@@ -9234,3 +9240,6 @@ button:hover:not(:disabled) {
     transition: none;
   }
 }
+
+.default-target-note { color: var(--muted); font-size: 13px; line-height: 1.7; }
+.agent-default-badge { border-radius: 5px; padding: 2px 6px; background: var(--accent-soft); color: var(--accent); font-size: 11px; white-space: nowrap; }

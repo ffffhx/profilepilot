@@ -11,7 +11,7 @@ const tab = (workspace: WorkspaceId, title: string, description: string): GuideS
 });
 const steps: GuideStep[] = [
   tab("browser", "控制台：选择要控制的设备或应用", "在顶部切换浏览器 Profiles、Electron 应用与 Android 设备。控制台会记住你上次使用的分类。"),
-  { id: "browser-new", workspace: "browser", selector: '.account-sync-panel [data-action="open-agent-browser-setup"]', side: "top", title: "从这里创建 Agent 浏览器", description: "选择一个已有 Profile 作为来源，创建独立的 Agent 浏览器。如果想用平时已登录的 Chrome，可以到「配套工具」连接浏览器扩展。" },
+  { id: "browser-new", workspace: "browser", selector: '[data-action="new-profile"]', side: "top", title: "创建独立浏览器 Profile", description: "为日常工作或 Agent 创建独立 Profile，分别保存登录状态和插件。要连接已登录的日常 Chrome，可到「配套工具」安装浏览器扩展。" },
   { id: "browser-profiles", workspace: "browser", selector: ".profiles-section-head", side: "bottom", title: "在这里选择你的浏览器", description: "从下方列表选择需要的 Profile，查看连接状态、启动浏览器或管理配置。" },
   { id: "phones-tab", workspace: "phones", selector: '[data-pc-view="phones"]', title: "手机设备：管理 Android 和 iPhone", description: "点击设备名称查看连接状态。Android 支持 USB、Wi-Fi 和模拟器，iPhone 使用签名后的 WebDriverAgent 控制组件。" },
   { id: "phone-connect", workspace: "phones", selector: '.phone-list-tools [data-action="add-device"]', side: "bottom", title: "先添加一台设备", description: "选择 Android 或 iPhone，按指引完成连接。iPhone 可以先准备电脑端工具，连接并签名后再开始查看或控制会话。" },

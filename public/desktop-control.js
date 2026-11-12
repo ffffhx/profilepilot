@@ -25,7 +25,7 @@ function render(state) {
     const preparing = state.inputObservation?.phase === 'arming';
     document.getElementById('stop-shortcut').textContent = state.stopShortcutAvailable ? 'Ctrl + Alt + Esc' : '请点击停止按钮';
     document.getElementById('control-state').textContent = !owner ? '已结束' : preparing ? '正在准备控制' : state.inputObservation?.phase === 'pending' ? '等待重新读取窗口' : owner.state === 'active' ? '正在控制' : '已暂停';
-    document.getElementById('control-task').textContent = owner ? owner.name + ' · ' + owner.window.title : '';
+    document.getElementById('control-task').textContent = owner ? (owner.mode === 'background' ? '后台语义 · ' : '前台交互 · ') + owner.name + ' · ' + owner.window.title : '';
     const reason = document.getElementById('control-reason');
     reason.textContent = owner?.state === 'paused' ? state.inputObservation?.message || '' : '';
     reason.hidden = !reason.textContent;

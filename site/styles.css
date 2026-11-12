@@ -65,7 +65,7 @@
   --info-bright: #92cdff;
   --info-soft: rgba(95, 182, 255, 0.1);
   --info-line: rgba(95, 182, 255, 0.34);
-  --focus: rgba(56, 225, 160, 0.3);
+  --focus: #6ff2c0;
   --glow-accent: 0 0 18px rgba(56, 225, 160, 0.22);
   --shadow: 0 30px 80px rgba(2, 6, 9, 0.6);
   --display: "Chakra Petch", "PingFang SC", -apple-system, "Segoe UI", sans-serif;
@@ -87,11 +87,12 @@
 
 html {
   scroll-behavior: smooth;
+  scroll-padding-top: 90px;
 }
 
 body {
   margin: 0;
-  min-width: 320px;
+  min-width: 0;
   background:
     radial-gradient(1200px 520px at 14% -6%, rgba(56, 225, 160, 0.08), transparent 60%),
     radial-gradient(1000px 480px at 94% 4%, rgba(95, 182, 255, 0.06), transparent 58%),
@@ -118,7 +119,8 @@ button {
 }
 
 button:focus-visible,
-a:focus-visible {
+a:focus-visible,
+[role="tabpanel"]:focus-visible {
   outline: 3px solid var(--focus);
   outline-offset: 3px;
   border-radius: 4px;
@@ -259,6 +261,7 @@ h3 {
   font-size: 14px;
   font-weight: 750;
   padding: 9px 16px;
+  white-space: nowrap;
   box-shadow: var(--glow-accent);
   transition:
     box-shadow 0.16s ease,
@@ -1433,7 +1436,8 @@ h3 {
 
 @media (max-width: 720px) {
   .topbar {
-    grid-template-columns: auto 1fr;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 12px;
   }
 
   .nav-links {
@@ -1492,4 +1496,13 @@ h3 {
     flex: 0 0 auto;
     margin-bottom: 0;
   }
+}
+
+@media (max-width: 480px) {
+  .topbar-actions { gap: 0; }
+  .nav-github { display: none; }
+  .nav-cta { padding-inline: 12px; font-size: 12px; }
+  .workflow-tabs > button { min-height: 44px; }
+  .terminal-bar button { min-height: 40px; }
+  .hero h1 { font-size: clamp(34px, 10vw, 44px); }
 }

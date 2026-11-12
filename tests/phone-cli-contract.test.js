@@ -18,6 +18,20 @@ function harness(reply = async () => ({ ok: true, data: {} })) {
   return h;
 }
 
+test('phone no-observe is explicit and image feedback stays compact even when saving fails', async t => {
+  const {savePhoneFeedbackImage}=loadCli('src/main/phones/action-feedback.ts');
+  const h=harness(),params={id:'PHONE',sessionId:'s',generation:1,requestId:randomUUID(),action:{kind:'key',key:'home'}};
+  assert.equal(await h.run(['action','--params-stdin','--no-observe'],JSON.stringify(params)),0);
+  assert.equal(h.calls[0].params.observeAfter,false);
+  const home=fs.mkdtempSync(path.join(os.tmpdir(),'phone-feedback-'));t.after(()=>fs.rmSync(home,{recursive:true,force:true}));
+  const input={state:{},result:{accepted:true},actionOutcome:'completed',observationStatus:'available',nextStep:'use-observation',observation:{kind:'screenshot',mime:'image/png',base64:Buffer.from('pixels').toString('base64'),width:1,height:1}};
+  const saved=await savePhoneFeedbackImage(input,undefined,home);
+  assert.equal(saved.observation.base64,undefined);assert.equal(fs.readFileSync(saved.observation.path,'utf8'),'pixels');
+  const failed=await savePhoneFeedbackImage(input,saved.observation.path,home);
+  assert.equal(failed.actionOutcome,'completed');assert.equal(failed.observationStatus,'unavailable');
+  assert.equal(failed.observation,undefined);assert.equal(fs.readFileSync(saved.observation.path,'utf8'),'pixels');
+});
+
 test('phone schema and scoped help are local, concise and describe the same accepted JSON input', async () => {
   const h = harness();
   assert.equal(await h.run(['schema', 'action']), 0);

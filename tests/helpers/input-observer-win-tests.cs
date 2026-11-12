@@ -337,6 +337,36 @@ public static class InputObserverWindowsTests {
             Assert(state.Browser.Count == 0 && !state.Browser.Mouse(0x201, 1, 10).Suppress, "unverified geometry blocked input");
             state.Arm(Arm(), () => true); Only(output, "desktop-armed"); Assert(state.KeyboardNeeded, "DPI changed activity observation");
         });
+        Check("background ARM binds a bounded process and window and echoes its scope", () => {
+            var command=InputCommand.Parse("ARM e bg 1234 BACKGROUND 42 8765");
+            Assert(command.Kind=="ARM" && command.BackgroundPid==42 && command.BackgroundWindow==8765,"scope lost");
+            var output=new BoundedOutputQueue();var state=new InputObserverProtocol(output);
+            state.Arm(command,()=>true);var ack=Only(output,"desktop-armed");
+            Assert(ack.BackgroundPid==42 && ack.BackgroundWindow==8765,"unscoped acknowledgement");Samples.Add(ack.WireValue());
+            foreach(string suffix in new[]{"BACKGROUND 0 2","BACKGROUND 2 0","BACKGROUND 2 -1","BACKGROUND 2 9223372036854775808","BACKGROUND 2 3 extra"})
+                Assert(InputCommand.Parse("ARM e bg 1234 "+suffix).Kind=="INVALID","bad scope accepted");
+        });
+        Check("background ignores unrelated input but target input latches takeover", () => {
+            var output=new BoundedOutputQueue();var state=new InputObserverProtocol(output);
+            state.Arm(InputCommand.Parse("ARM e bg 1234 BACKGROUND 42 8765"),()=>true);Drain(output);
+            foreach(string kind in new[]{"keyboard","pointer","button","wheel"})Assert(!state.Activity(kind,false,0,false) && state.KeyboardNeeded,"unrelated input paused task");
+            Assert(output.Count==0,"unrelated input leaked");
+            Assert(state.Activity("button",false,0,true) && !state.KeyboardNeeded,"target input did not pause");Only(output,"input-activity");
+            Assert(!state.Activity("keyboard",false,0,false) && !state.KeyboardNeeded,"pause automatically cleared");
+        });
+        Check("interactive still yields to unrelated input and target activation pauses background", () => {
+            var output=new BoundedOutputQueue();var state=new InputObserverProtocol(output);
+            state.Arm(Arm("interactive",1234,"e"),()=>true);Drain(output);Assert(state.Activity("keyboard",false,0,false),"interactive lost global guard");Drain(output);
+            state.Arm(InputCommand.Parse("ARM e bg 1234 BACKGROUND 42 8765"),()=>true);Drain(output);
+            state.Fail("target_active");var fault=Only(output,"observer-fault");Assert(fault.Reason=="target_active" && !state.KeyboardNeeded,"foreground did not pause");Samples.Add(fault.WireValue());
+        });
+        Check("background REARM updates scope atomically and refuses changed duplicate", () => {
+            var output=new BoundedOutputQueue();var state=new InputObserverProtocol(output);
+            state.Arm(InputCommand.Parse("ARM e bg 1234 BACKGROUND 42 8765"),()=>true);Drain(output);
+            state.Rearm(InputCommand.Parse("REARM e bg bg2 5678 BACKGROUND 43 8766"));
+            var ack=Only(output,"desktop-armed");Assert(ack.BackgroundPid==43 && ack.BackgroundWindow==8766,"scope retained");
+            state.Arm(InputCommand.Parse("ARM e bg2 5678 BACKGROUND 44 8766"),()=>true);var refusal=Only(output,"status");Assert(refusal.Status=="invalid-command","duplicate changed scope");
+        });
         Console.WriteLine(new JavaScriptSerializer().Serialize(new { ok = true, checks = Checks, messages = Samples }));
         return 0;
     }

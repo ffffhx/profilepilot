@@ -243,11 +243,12 @@ export class NativeExtensionInstaller implements NativeInstallDriver {
       // marker distinguishes it from a genuine developer-mode installation.
       // Use this extension's own initialized worker. The CDP storage domain can
       // race worker registration and rejects even a just-attached worker host.
+      const workerScript = JSON.parse(await readFile(path.join(extensionPath, 'manifest.json'), 'utf8')).background.service_worker;
       let workerId: string | undefined;
       for (let attempt = 0; attempt < 100 && !workerId; attempt++) {
         signal.throwIfAborted();
         const targets = await client.send<{ targetInfos: Array<{ targetId: string; type: string; url: string }> }>("Target.getTargets");
-        workerId = targets.targetInfos.find(t => t.type === "service_worker" && t.url === `chrome-extension://${loaded.id}/background.js`)?.targetId;
+        workerId = targets.targetInfos.find(t => t.type === "service_worker" && t.url === `chrome-extension://${loaded.id}/${workerScript}`)?.targetId;
         if (!workerId) await pause(100, signal);
       }
       if (!workerId) throw new Error("扩展已安装，但后台服务未启动。请检查 Chrome 扩展管理页中的错误并重试。");

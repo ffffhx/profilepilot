@@ -2,30 +2,32 @@
    Stable gutters reserve classic Windows/macOS scrollbars; overlay scrollbars
    keep their native behavior. All three panes use document scrolling. */
 html.workspace-layout { scrollbar-gutter:stable; scrollbar-width:thin; scrollbar-color:var(--line-strong) transparent; }
-.workspace-layout :is(.browser-workspace,.pc-apps-shell),.workspace-layout #phones .phone-console { width:auto; max-width:none; min-height:calc(100dvh - var(--workspace-topbar-height)); height:auto; overflow:visible; margin:0; padding:0 18px 28px; background:var(--panel); color:var(--ink); --line:inherit; --muted:inherit; --success:inherit; }
-.pc-control-tabs { display:flex; align-items:center; gap:12px; padding:0; margin:0 0 18px; border-bottom:1px solid var(--line); overflow-x:auto; }
+.workspace-layout :is(.browser-workspace,.pc-apps-shell,.gpui-shell,.desktop-shell),.workspace-layout #phones .phone-console { width:auto; max-width:none; min-height:calc(100dvh - var(--workspace-topbar-height)); height:auto; overflow:visible; margin:0; padding:0 24px 32px; background:var(--panel); color:var(--ink); --line:inherit; --muted:inherit; --success:inherit; }
+.pc-control-tabs { display:flex; align-items:center; gap:4px; padding:0; margin:0 0 24px; border-bottom:1px solid var(--line); overflow-x:auto; scrollbar-width:thin; }
 .pc-control-tabs a { display:inline-flex; align-items:center; justify-content:center; gap:8px; min-height:44px; padding:10px 16px; border:0; border-bottom:2px solid transparent; border-radius:0; color:var(--muted); text-decoration:none; font-size:14px; font-weight:600; line-height:1.5; white-space:nowrap; }
 .pc-control-tabs a .icon { width:17px; height:17px; }
 .pc-control-tabs a:hover { color:var(--accent); background:var(--panel-soft); }
 .pc-control-tabs a[aria-current=page] { color:var(--accent); background:transparent; border-bottom-color:var(--accent); }
 .pc-control-tabs a:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
 /* Console tabs share their header and native Windows/macOS titlebar clearance. */
-.workspace-layout :is(.browser-workspace,.pc-apps-shell,.phone-console) > .pc-control-header { display:flex; flex-direction:row; align-items:center; justify-content:space-between; flex-wrap:nowrap; gap:16px; height:88px; min-height:88px; margin:0 0 12px; padding:0 5px; border:0; background:transparent; }
+.workspace-layout :is(.browser-workspace,.pc-apps-shell,.phone-console,.gpui-shell,.desktop-shell,.tools-workspace) > .pc-control-header { display:flex; flex-direction:row; align-items:center; justify-content:space-between; flex-wrap:nowrap; gap:16px; height:96px; min-height:96px; margin:0 0 8px; padding:0; border:0; background:transparent; }
 .workspace-layout .pc-control-brand { display:flex; flex-direction:column; align-items:flex-start; gap:7px; min-width:0; }
-.workspace-layout .pc-control-brand h1 { margin:0; color:var(--ink); font:700 28px/1.2 var(--font); letter-spacing:-.6px; white-space:nowrap; }
-.workspace-layout .pc-control-brand p { margin:0; color:var(--muted); font:400 12px/1.55 var(--font); letter-spacing:0; white-space:nowrap; }
+.workspace-layout .pc-control-brand h1 { margin:0; color:var(--ink); font:650 26px/1.3 var(--font); letter-spacing:-.5px; white-space:nowrap; }
+.workspace-layout .pc-control-brand p { margin:0; color:var(--muted); font:400 13px/1.55 var(--font); letter-spacing:0; white-space:nowrap; }
 .pc-control-actions { display:flex; align-items:center; gap:8px; }
+.workspace-layout .pc-control-header :is(.pc-control-actions,.header-actions)>button { min-height:36px; padding:7px 12px; font:500 13px/1.5 var(--font); }
 @media(max-width:950px) {
   .workspace-layout .pc-control-brand { gap:7px; }
-  .workspace-layout .pc-control-brand p { font-size:12px; }
+  .workspace-layout .pc-control-brand p { font-size:13px; }
 }
 @media(max-width:900px) {
   .workspace-layout .pc-control-brand p { display:none; }
+  .pc-control-tabs a { font-size:13px; padding-inline:12px; gap:6px; }
 }
 @media(max-width:680px) {
   .pc-control-tabs a { padding-inline:12px; }
 }
 @media(max-width:650px) {
-  .workspace-layout :is(.browser-workspace,.pc-apps-shell),.workspace-layout #phones .phone-console { padding-inline:12px; }
-  .workspace-layout .pc-control-brand h1 { font-size:28px; }
+  .workspace-layout :is(.browser-workspace,.pc-apps-shell,.gpui-shell,.desktop-shell),.workspace-layout #phones .phone-console { padding-inline:16px; }
+  .workspace-layout .pc-control-brand h1 { font-size:24px; }
 }

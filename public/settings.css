@@ -1,17 +1,17 @@
 * { box-sizing:border-box; }
 body { margin:0; font:14px/1.5 "Microsoft YaHei UI","PingFang SC",sans-serif; }
 button { font:inherit; cursor:pointer; }
-.settings-header { padding:20px 24px; border-bottom:1px solid var(--line); }
-.settings-header h1 { margin:0; font-size:30px; line-height:1.4; }
-.settings-header p { margin:5px 0 0; color:var(--muted); }
+.settings-header { min-height:96px; padding:20px 24px; border-bottom:1px solid var(--line); }
+.settings-header h1 { margin:0; font-size:26px; font-weight:650; line-height:1.3; }
+.settings-header p { margin:7px 0 0; color:var(--muted); font-size:13px; }
 .global-settings { max-width:960px; padding:28px 24px; }
-.global-settings h2 { margin:0 0 14px; font-size:18px; }
+.global-settings h2 { margin:0 0 14px; font-size:16px; font-weight:600; }
 .global-settings section + section { margin-top:32px; }
 .setting-card { padding:22px; border:1px solid var(--line); border-radius:8px; background:var(--panel); }
 .setting-card + .setting-card { margin-top:14px; }
 .setting-row { display:flex; align-items:center; justify-content:space-between; gap:24px; }
 .setting-copy h3 { margin:0 0 6px; font-size:16px; }
-.setting-copy p { margin:0; color:var(--muted); }
+.setting-copy p { margin:0; color:var(--muted); font-size:13px; line-height:1.7; }
 .setting-control { display:flex; align-items:center; gap:12px; flex-shrink:0; }
 #startup-status { color:var(--muted); min-width:4em; text-align:right; }
 #startup-status[data-state="enabled"] { color:var(--success); }
@@ -33,3 +33,16 @@ button { font:inherit; cursor:pointer; }
   .setting-row { align-items:flex-start; flex-direction:column; gap:18px; }
 }
 @media(prefers-reduced-motion:reduce) { .setting-switch::after { transition:none; } }
+:root .settings-update-button {
+  padding: 10px 16px;
+  border: 1px solid #cbdcf4;
+  border-radius: 8px;
+  background: #fff;
+  color: #12355c;
+  font: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+:root .settings-update-button:hover { background: #edf5ff; }
+:root .settings-update-button:focus-visible { outline: 2px solid #1554f6; outline-offset: 3px; }
+:root .settings-update-button:disabled { opacity: .6; cursor: wait; }

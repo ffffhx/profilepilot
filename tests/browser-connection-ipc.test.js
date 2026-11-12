@@ -18,6 +18,7 @@ test('browser IPC and connection notifications work without loading task history
   class Client {
     constructor(_root, callback) { changed = callback; }
     states() { return states; } installationStates() { return []; }
+    serviceState() { return { status: 'connected' }; }
     async pair(id) { calls.push(['pair', id]); return { code: 'fixture', expiresAt: 'later' }; }
     async request(...args) { calls.push(args); return { tabs: [] }; }
     async revealExtension() { calls.push(['reveal']); }
@@ -31,7 +32,7 @@ test('browser IPC and connection notifications work without loading task history
     module, module.exports, path.dirname(filename), { env: { ...process.env, CPM_DATA_DIR: root } });
   module.exports.registerBrowserConnection({ getState: async () => ({ profiles: [{ id: 'native:Default', source: 'native', name: 'Chrome' }] }) }, () => canPair);
   const event = { senderFrame: { url: pathToFileURL(path.resolve('public/index.html')).href } };
-  assert.deepEqual(await handler(event, 'snapshot'), { nativeBrowsers: states, nativeInstallations: [] });
+  assert.deepEqual(await handler(event, 'snapshot'), { nativeBrowsers: states, nativeInstallations: [], nativeService: { status: 'connected' } });
   assert.equal((await handler(event, 'pairNativeBrowser', 'native:Default')).code, 'fixture');
   await handler(event, 'getNativeLiveView', 'native:Default');
   await handler(event, 'openNativeExtensionFolder');

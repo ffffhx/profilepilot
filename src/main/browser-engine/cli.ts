@@ -39,7 +39,8 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
   else if (command.json || !response.success) process.stdout.write(JSON.stringify(response) + "\n");
   else {
     const data = response.data as any;
-    const value = data?.snapshot ?? data?.text ?? data?.title ?? data?.url ?? data?.path ?? data?.result ?? data;
+    // Action feedback must survive the legacy plain-text renderer too.
+    const value = data?.actionOutcome ? data : data?.snapshot ?? data?.text ?? data?.title ?? data?.url ?? data?.path ?? data?.result ?? data;
     process.stdout.write((typeof value === "string" ? value : JSON.stringify(value)) + "\n");
   }
   return response.success ? (response.data as any)?.failed ? 1 : 0 : response.code === "BROWSER_INVALID_ARGUMENTS" ? 64 : 1;

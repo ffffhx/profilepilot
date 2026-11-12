@@ -12,6 +12,8 @@ import { NativeControlError, nativeFailurePayload } from "../native-control/erro
 import { nativeExtensionReady, NATIVE_EXTENSION_UPDATE_MESSAGE } from "./native-compatibility";
 import { parseDebuggerDiagnostic } from "../../shared/debugger-diagnostic";
 import { writeControlTrace } from "../control-trace";
+import { BROWSER_SERVICE_VERSION } from "../browser-service/connection";
+import { ExtensionConnectionJournal } from '../extension-connection-diagnostics';
 
 interface Pairing { token: string; expiresAt: number; }
 interface Connection {
@@ -57,10 +59,12 @@ export class NativeBrowserBridge {
   private nextId = 0;
   private generation = 0;
   private port = 0;
+  private readonly connectionJournal: ExtensionConnectionJournal;
   private timer?: NodeJS.Timeout;
   private starting?: Promise<void>;
   private authorizing = new Map<string, Promise<{ url: string; expiresAt: string }>>();
   constructor(private readonly root: string, private readonly secrets: SecretStore) {
+    this.connectionJournal = new ExtensionConnectionJournal(root);
     this.control = new NativeControlService(this, root);
     this.server.on("upgrade", (req, socket, head) => {
       if (req.headers.origin !== `chrome-extension://${NATIVE_EXTENSION_ID}` || req.url !== "/profilepilot" || req.headers.host !== `127.0.0.1:${this.port}`) { socket.destroy(); return; }
@@ -94,13 +98,17 @@ export class NativeBrowserBridge {
         await listen(0);
       }
       this.port = (this.server.address() as { port: number }).port;
+      this.connectionJournal.record('service-start', { port: this.port });
       writeFileSync(file, JSON.stringify({ port: this.port }), { mode: 0o600 });
       const discovery = path.join(this.root, 'native-control.json');
       const temporary = `${discovery}.${process.pid}.tmp`;
-      writeFileSync(temporary, JSON.stringify({ version: 1, port: this.port, token: this.controlToken, pid: process.pid, ...(this.serviceHandler ? { service: 'browser', serviceVersion: 1 } : {}) }), { mode: 0o600 });
+      writeFileSync(temporary, JSON.stringify({ version: 1, port: this.port, token: this.controlToken, pid: process.pid, ...(this.serviceHandler ? { service: 'browser', serviceVersion: BROWSER_SERVICE_VERSION } : {}) }), { mode: 0o600 });
       renameSync(temporary, discovery);
       this.timer = setInterval(() => {
-        for (const c of this.connections.values()) if (Date.now() - c.lastSeen > 45000) c.peer.close(4000, "Extension heartbeat expired");
+        for (const c of this.connections.values()) if (Date.now() - c.lastSeen > 45000) {
+          this.connectionJournal.record('heartbeat-timeout', { elapsedMs: Date.now() - c.lastSeen, port: this.port }, c.state.profileId);
+          c.peer.close(4000, "Extension heartbeat expired");
+        }
       }, 15000); this.timer.unref();
     })();
   }
@@ -180,11 +188,13 @@ export class NativeBrowserBridge {
     }
     const connection: Connection = { peer, state: { profileId, connected: true, taskTabs: false, ownership: "user" }, generation: ++this.generation, lastSeen: Date.now(), pending: new Map() };
     this.connections.set(profileId, connection);
+    this.connectionJournal.record('transport-connected', { port: this.port }, profileId);
     peer.onText = text => {
       try { this.receive(connection, JSON.parse(text)); } catch { peer.close(4002, "Invalid message"); }
     };
     peer.onClose = () => {
       if (this.connections.get(profileId) !== connection) return;
+      this.connectionJournal.record('transport-closed', { port: this.port, elapsedMs: Date.now() - connection.lastSeen }, profileId);
       this.connections.delete(profileId);
       for (const p of connection.pending.values()) { clearTimeout(p.timer); p.reject(new Error("扩展连接中断；操作结果需要重新核查。")); }
       connection.pending.clear();
@@ -196,6 +206,11 @@ export class NativeBrowserBridge {
   private receive(connection: Connection, message: any): void {
     connection.lastSeen = Date.now();
     const profileId = connection.state.profileId;
+    if (message?.type === 'connectionDiagnostics') {
+      // Only authenticated extension metadata enters this journal.
+      this.connectionJournal.ingest(Array.isArray(message.events) ? message.events.filter((row: any) => row?.source === 'worker' || row?.source === 'popup') : [], profileId);
+      return;
+    }
     if (message?.type === "heartbeat") { connection.peer.sendText('{"type":"heartbeat"}'); return; }
     if (message?.type === "debuggerDiagnostic") {
       const diagnostic = parseDebuggerDiagnostic(message.diagnostic);
@@ -257,6 +272,7 @@ export class NativeBrowserBridge {
     delete this.tokens[profileId]; this.pairings.delete(profileId); this.secrets.write(this.tokens);
   }
   close(): void {
+    this.connectionJournal.record('service-stopping', { port: this.port });
     this.control.close();
     const file = path.join(this.root, "native-control.json");
     try { if (JSON.parse(readFileSync(file, "utf8")).token === this.controlToken) rmSync(file); } catch {}

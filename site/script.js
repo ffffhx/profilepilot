@@ -37,12 +37,12 @@ const workflows = {
   },
   "cdp": {
     "index": "04",
-    "title": "从 Android 手机继续处理任务",
-    "copy": "安装配套 APK 并与电脑配对，在手机上发任务、查看结果和处理确认；电脑需要保持运行并能从手机访问。",
+    "title": "准备 Android 的连接与权限",
+    "copy": "安装配套 APK，按手机上的提示准备连接、无障碍与悬浮提示。在电脑端选择设备、发起控制，手机上可随时暂停或停止。",
     "nodes": [
       "安装 APK",
-      "配对电脑",
-      "移动协作"
+      "准备权限",
+      "电脑端控制"
     ]
   }
 };
@@ -55,11 +55,13 @@ function syncTopbar() {
 }
 
 function setWorkflow(key) {
-  const data = workflows[key] || workflows.native;
+  key = Object.hasOwn(workflows, key) ? key : 'native';
+  const data = workflows[key];
   workflowButtons.forEach((button) => {
     const active = button.dataset.workflow === key;
     button.classList.toggle("active", active);
     button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
   });
 
   if (workflowCopy) {
@@ -69,6 +71,7 @@ function setWorkflow(key) {
       <p>${data.copy}</p>
     `;
   }
+  document.getElementById('workflow-panel')?.setAttribute('aria-labelledby', 'workflow-tab-' + key);
 
   if (workflowVisual) {
     workflowVisual.innerHTML = data.nodes
@@ -81,8 +84,18 @@ function setWorkflow(key) {
   }
 }
 
-workflowButtons.forEach((button) => {
+workflowButtons.forEach((button, index) => {
   button.addEventListener("click", () => setWorkflow(button.dataset.workflow || "native"));
+  button.addEventListener('keydown', event => {
+    const next = event.key === 'ArrowRight' ? (index + 1) % workflowButtons.length
+      : event.key === 'ArrowLeft' ? (index - 1 + workflowButtons.length) % workflowButtons.length
+      : event.key === 'Home' ? 0 : event.key === 'End' ? workflowButtons.length - 1 : -1;
+    if (next < 0) return;
+    event.preventDefault();
+    const target = workflowButtons[next];
+    setWorkflow(target.dataset.workflow || 'native');
+    target.focus();
+  });
 });
 
 copyButtons.forEach((copyButton) => {

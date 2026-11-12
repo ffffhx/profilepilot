@@ -33,10 +33,40 @@ function harness(t, appPhase) {
     return {ok:true,state:structuredClone(h.appState)};
   }});
   h.state = () => h.service.snapshot().devices.find(d=>d.id===h.id).basic;
-  h.start = (mode='control') => h.service.basicStart(h.id,mode,'Test','basic test');
+  h.start = async (mode='control') => { await h.service.refresh(); return h.service.basicStart(h.id,mode,'Test','basic test'); };
   h.action = (action, overrides={}) => { const state = h.state(); return h.service.basicPerform({id:h.id,sessionId:state.sessionId,generation:state.generation,requestId:randomUUID(),action,...overrides}); };
   t.after(async()=>{await h.service.close();fs.rmSync(root,{recursive:true,force:true});}); return h;
 }
+
+test('external basic input returns a new screenshot for the next coordinate input', async t => {
+  const { executePhoneCommand } = loadCli('src/main/phones/management.ts');
+  const h = harness(t); await h.start(); await h.action({kind:'screenshot'});
+  const input = () => ({action:'phone',method:'basic-action',params:{id:h.id,sessionId:h.state().sessionId,generation:h.state().generation,requestId:randomUUID(),action:{kind:'tap',x:10,y:20}}});
+  const started = Date.now(), result = await executePhoneCommand(input(), h.service);
+  assert.ok(Date.now() - started >= 450);
+  assert.equal(result.actionOutcome,'completed'); assert.equal(result.observationStatus,'available');
+  assert.equal(result.observation.kind,'screenshot'); assert.equal(result.observation.width,1080);
+  assert.equal(result.observation.base64,h.png.toString('base64'));
+  await executePhoneCommand(input(),h.service);
+  assert.equal(h.calls.filter(a=>a[3] === "'input' 'tap' '10' '20'").length,2);
+});
+
+test('basic post-input capture failure preserves completion and invalidates coordinates', async t => {
+  const h=harness(t); await h.start(); await h.action({kind:'screenshot'});
+  h.screenshotHook=()=>{throw new Error('capture unavailable');};
+  const result=await h.action({kind:'tap',x:10,y:20},{observeAfter:true});
+  assert.equal(result.actionOutcome,'completed'); assert.equal(result.observationStatus,'unavailable');
+  await assert.rejects(h.action({kind:'tap',x:10,y:20}),/先刷新/);
+  assert.equal(h.calls.filter(a=>a[3] === "'input' 'tap' '10' '20'").length,1);
+});
+
+test('takeover during basic settle prevents post-input capture', async t => {
+  const h=harness(t);await h.start();
+  h.inputHook=()=>{setTimeout(()=>h.service.basicControl(h.id,'pause'),20);return '';};
+  const result=await h.action({kind:'key',key:'home'},{observeAfter:true});
+  assert.equal(result.actionOutcome,'completed');assert.equal(result.observationStatus,'unavailable');
+  assert.equal(h.calls.some(a=>a.includes('screencap')),false);assert.equal(h.state().phase,'paused');
+});
 
 test('basic control works without a paired companion and never installs/launches an APK', async t=>{
   const h=harness(t), started=await h.start();
@@ -70,7 +100,7 @@ test('desktop video retains its basic lease during its own screenshot and input,
 });
 
 test('video cannot attach to an external task even with its current basic session identity',async t=>{
-  const h=harness(t);await h.service.basicStart(h.id,'view','Agent','external','external');
+  const h=harness(t);await h.service.refresh();await h.service.basicStart(h.id,'view','Agent','external','external');
   const lease={sessionId:h.state().sessionId,generation:h.state().generation};
   await assert.rejects(h.service.startScreenVideo(h.id,new AbortController().signal,lease),/手机任务正在使用画面/);
 });

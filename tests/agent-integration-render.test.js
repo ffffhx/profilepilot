@@ -71,7 +71,7 @@ test("onboarding shows a completed Input Guard safety checkpoint without another
   const html = renderer.renderOnboardingModal();
 
   assert.match(html, /点击保护已授权/);
-  assert.match(html, /PROTECTED/);
+  assert.match(html, /已授权/);
   assert.doesNotMatch(html, /data-action="request-input-guard-permission"/);
   assert.doesNotMatch(html, /data-action="open-input-guard-settings"/);
 });
@@ -88,11 +88,11 @@ test("onboarding skips the macOS-only Input Guard checkpoint on other platforms"
   const html = renderer.renderOnboardingModal();
 
   assert.match(html, /当前系统无需授权/);
-  assert.match(html, /NOT REQUIRED/);
+  assert.match(html, /无需授权/);
   assert.doesNotMatch(html, /data-action="request-input-guard-permission"/);
 });
 
-test("one visible setup action keeps the CLI card compact without expandable details", () => {
+test("one visible setup action keeps the CLI card compact with collapsible command details", () => {
   const inputGuard = permission(false, true);
   const diagnostic = diagnosticWith({
     managementCli: managementCli(true, false),
@@ -102,7 +102,7 @@ test("one visible setup action keeps the CLI card compact without expandable det
   const html = renderer.renderAgentIntegrationPanel();
 
   assert.match(html, /id="management-cli-title">ProfilePilot CLI/);
-  assert.match(html, /<section id="tools-cli-card"/);
+  assert.match(html, /<details id="tools-cli-card"/);
   assert.equal((html.match(/data-action="install-profilepilot-cli"/g) || []).length, 1);
   assert.doesNotMatch(html, /tools-cli-details|tools-guide-details|tools-gateway-details|agent-tool-grid|ppilot browser --cdp|ppilot profile list/);
   assert.doesNotMatch(html, /data-action="(?:remove-profilepilot-cli|install-agent-wrapper|install-agent-skill)"/);
@@ -151,7 +151,7 @@ test("tools cards follow the selected Profile and report stale installations", (
     })
   });
   let html = renderer.renderAgentIntegrationPanel();
-  assert.match(html, /尚未连接/);
+  assert.match(html, /尚未配对/);
   assert.equal((html.match(/需要更新/g) || []).length, 1);
   assert.doesNotMatch(html, /class="browser-extension-panel ready"|已就绪/);
 

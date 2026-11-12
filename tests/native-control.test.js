@@ -174,7 +174,8 @@ test('direct service keeps versioned observe/action flow, deduplicates requests,
   const calls = [];
   const bridge = { states: () => [state], onEvent: fn => { listener = fn; return () => {}; }, request: async (_profile, method, p) => { calls.push(method); if (method === 'claim') Object.assign(state, { ownership: 'agent', ownerSessionId: p.sessionId }); if (method === 'control') state.ownership = p.action === 'resume' ? 'agent' : 'user'; return {}; } };
   const service = new NativeControlService(bridge, os.tmpdir());
-  service.browser.observe = async () => ({ version: 'v1', snapshot: 'fixture' });
+  let observations = 0;
+  service.browser.observe = async () => ({ version: `v${++observations}`, snapshot: 'fixture' });
   service.browser.execute = async () => { calls.push('execute'); return 'done'; };
   const request = (method, params = {}, extra = {}) => service.request({ requestId: randomUUID(), method, params, sessionId: 'direct', ...extra });
   await request('claim');
@@ -184,15 +185,49 @@ test('direct service keeps versioned observe/action flow, deduplicates requests,
   const obs = await request('observe'); assert.equal(obs.version, 'v1');
   await assert.rejects(request('action', { kind: 'click', version: 'old' }), /version/);
   const command = { requestId: 'same', method: 'action', sessionId: 'direct', params: { kind: 'click', ref: 'e1', version: 'v1' } };
-  assert.equal(await service.request(command), 'done'); assert.equal(await service.request(command), 'done');
+  const completed = await service.request(command);
+  assert.equal(completed.result, 'done'); assert.equal(completed.actionOutcome, 'completed');
+  assert.equal(completed.observationStatus, 'available'); assert.equal(completed.observation.version, 'v2');
+  assert.deepEqual(await service.request(command), completed);
+  assert.equal(observations, 2, 'a duplicate returns the original receipt without another action or observation');
   assert.equal(calls.filter(c => c === 'execute').length, 1);
   await assert.rejects(service.request({ ...command, params: {} }), /requestId/);
   await assert.rejects(request('action', { kind: 'click', version: 'v1' }), /version/);
+  const next = await request('action', { kind: 'click', ref: 'e1', version: completed.observation.version });
+  assert.equal(next.observation.version, 'v3', 'returned version can be used without a separate observe');
   await request('observe'); state.ownership = 'user'; listener({ type: 'state', profileId: state.profileId, state });
   await assert.rejects(request('observe'), /接管/);
   assert.equal(calls.includes('control'), false);
   state.connected = false; await assert.rejects(request('observe'), /断线/);
   service.close();
+});
+
+test('direct actions preserve completion when observing fails or control changes', async t => {
+  for (const reason of ['read-failed', 'handoff']) {
+    const state = { profileId: 'native:fixture', connected: true, ownership: 'user', taskTabs: true,
+      extensionVersion: '0.2.0', capabilities: [...NATIVE_REQUIRED_CAPABILITIES] };
+    let listener, inputs = 0, reads = 0;
+    const bridge = { states: () => [state], onEvent: fn => { listener = fn; return () => {}; },
+      request: async (_profile, method, params) => {
+        if (method === 'claim') Object.assign(state, { ownership: 'agent', ownerSessionId: params.sessionId });
+        return {};
+      } };
+    const service = new NativeControlService(bridge, os.tmpdir()); t.after(() => service.close());
+    service.browser.observe = async () => { reads++; if (reads > 1) throw new Error('read failed'); return { version: 'v1', snapshot: 'fixture' }; };
+    service.browser.execute = async () => {
+      inputs++;
+      if (reason === 'handoff') { state.ownership = 'user'; listener({ type: 'state', profileId: state.profileId, state }); }
+      return 'done';
+    };
+    const request = (method, params = {}) => service.request({ requestId: randomUUID(), method, params, sessionId: 'feedback-test' });
+    await request('claim'); await request('observe');
+    const result = await request('action', { kind: 'click', ref: 'e1', version: 'v1' });
+    assert.equal(result.actionOutcome, 'completed'); assert.equal(result.observationStatus, 'unavailable');
+    assert.equal(result.observation, undefined); assert.equal(inputs, 1);
+    assert.equal(reads, reason === 'handoff' ? 1 : 2);
+    await assert.rejects(request('action', { kind: 'click', ref: 'e1', version: 'v1' }));
+    assert.equal(inputs, 1, 'stale refs or handoff cannot replay input');
+  }
 });
 
 test('CLI errors give stable actionable exit codes without leaking discovery secrets', () => {

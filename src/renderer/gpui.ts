@@ -1,19 +1,21 @@
 import type { GpuiApp, GpuiStatus } from '../shared/gpui';
 import { workspaceIdentityBar, workspaceSwitcher, refreshWorkspaceSwitcher } from './workspace-switcher';
 import { pcControlTabs } from './pc-control';
+import { renderButtonLabel, setButtonLoading } from './button-label';
 
 const api = window.gpuiControl;
 document.getElementById('gpui')!.innerHTML = `${workspaceSwitcher('gpui') + workspaceIdentityBar()}
-  <div class="gpui-shell"><header class="gpui-header"><div><h1>控制台</h1><p class="muted">查看 GPUI 应用实例、连接和控制状态</p></div><button id="gpui-refresh">刷新连接</button></header>
+  <div class="gpui-shell"><header class="gpui-header pc-control-header"><div class="pc-control-brand"><h1>控制台</h1><p>查看 GPUI 应用实例、连接和控制状态</p></div><div class="pc-control-actions"><button id="gpui-refresh">${renderButtonLabel(false, '刷新连接', '刷新中…')}</button></div></header>
   ${pcControlTabs('gpui')}
   <p id="gpui-error" role="alert" hidden></p>
-  <div class="gpui-panels"><section class="gpui-panel"><h2>可连接的应用</h2><div id="gpui-apps"><p class="muted">正在发现…</p></div></section>
-    <section class="gpui-panel"><h2>控制会话</h2><div id="gpui-sessions"></div></section>
-  </div><section class="gpui-panel gpui-card"><h2>调试后端</h2><p id="gpui-backend" class="muted"></p><button id="gpui-configure">选择后端</button><p class="muted">应用需要接入 gpui-mcp 调试桥。控制状态显示在目标窗口右下角，不另开弹窗。可在此页或托盘接管、停止。</p><p class="muted">点击目标窗口会自动暂停。键盘输入前请先点击接管；暂停后只有你明确交还控制才能恢复。</p></section>
+  <main class="gpui-panels"><section class="gpui-panel"><h2>可连接的应用</h2><div id="gpui-apps" aria-busy="true"><p class="gpui-empty" role="status">正在发现已接入的应用…</p></div></section>
+    <section class="gpui-panel"><h2>控制会话</h2><div id="gpui-sessions"><p class="gpui-empty" role="status">正在读取控制状态…</p></div></section>
+  </main><details class="gpui-backend-details"><summary>调试后端与使用说明</summary><div class="gpui-backend-body"><p id="gpui-backend" class="muted"></p><button id="gpui-configure">选择后端</button><p class="muted">应用需要接入 gpui-mcp 调试桥。控制状态显示在目标窗口右下角，不另开弹窗。可在此页或托盘接管、停止。</p><p class="muted">点击目标窗口会自动暂停。键盘输入前请先点击接管；暂停后只有你明确交还控制才能恢复。</p></div></details>
   <p id="gpui-chat-return" class="muted">你也可以在聊天中明确告诉 Agent“交还控制，继续调试”，由 Agent 通过 CLI 恢复当前会话，无需再回此页点击。</p>
   </div>`;
 refreshWorkspaceSwitcher();
 const get = (id: string) => document.getElementById(id)!;
+let refreshing = false, loaded = false, backendShown = false;
 function error(cause?: unknown) {
   const element = get('gpui-error'); element.hidden = !cause;
   element.textContent = cause ? String(cause instanceof Error ? cause.message : cause).replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '') : '';
@@ -24,7 +26,7 @@ function text(tag: string, value: string, className?: string) {
 }
 function render(state: GpuiStatus) {
   const list = get('gpui-sessions'); list.replaceChildren();
-  if (!state.sessions.length) list.append(text('p', '当前没有控制会话', 'muted'));
+  if (!state.sessions.length) list.append(text('p', '当前没有控制会话。Agent 连接应用后，会在这里显示控制状态。', 'gpui-empty'));
   for (const session of state.sessions) {
     const card = text('article', '', 'gpui-card'), title = text('h3', session.app.app_name);
     title.append(text('span', { preparing: '准备连接', active: 'Agent 控制中', paused: '用户控制 / 已暂停' }[session.state], 'gpui-state ' + session.state));
@@ -41,10 +43,11 @@ function render(state: GpuiStatus) {
     card.append(controls); list.append(card);
   }
   get('gpui-backend').textContent = state.backend || '尚未配置。请选择本机 gpui-mcp 可执行文件。';
+  if (!backendShown) { document.querySelector<HTMLDetailsElement>('.gpui-backend-details')!.open = !state.backend; backendShown = true; }
 }
 function apps(items: GpuiApp[]) {
   const list = get('gpui-apps'); list.replaceChildren();
-  if (!items.length) list.append(text('p', '没有发现已接入调试桥的应用。请启动应用的调试构建，然后刷新。', 'muted'));
+  if (!items.length) list.append(text('p', '没有发现已接入调试桥的应用。请启动应用的调试构建，然后刷新连接。', 'gpui-empty'));
   for (const app of items) {
     const card = text('article', '', 'gpui-card');
     card.append(text('h3', app.app_name), text('p', app.app_id + ' · PID ' + app.pid, 'muted'), text('code', 'ppilot gpui claim --target ' + app.target_id + ' --session gpui-' + app.pid));
@@ -52,7 +55,18 @@ function apps(items: GpuiApp[]) {
   }
 }
 async function refresh() {
-  try { error(); render(await api.status()); apps((await api.apps()).apps); } catch (cause) { error(cause); get('gpui-apps').textContent = '连接暂不可用，请检查后端与应用调试桥。'; }
+  if (refreshing) return;
+  refreshing = true;
+  const button = get('gpui-refresh') as HTMLButtonElement;
+  button.disabled = true; setButtonLoading(button, true); get('gpui-apps').setAttribute('aria-busy', 'true');
+  try { error(); render(await api.status()); apps((await api.apps()).apps); loaded = true; }
+  catch (cause) {
+    error(cause);
+    if (!loaded) {
+      get('gpui-apps').replaceChildren(text('p', '连接暂不可用。展开下方使用说明检查后端与应用调试桥，再刷新连接。', 'gpui-empty'));
+      get('gpui-sessions').replaceChildren(text('p', '暂时无法读取控制会话。', 'gpui-empty'));
+    }
+  } finally { refreshing = false; button.disabled = false; setButtonLoading(button, false); get('gpui-apps').setAttribute('aria-busy', 'false'); }
 }
 get('gpui-refresh').onclick = refresh;
 get('gpui-configure').onclick = async () => { try { const state = await api.configure(); if (state) await refresh(); } catch (cause) { error(cause); } };

@@ -6,6 +6,7 @@ import { experimentalProxyRoutingEnabled } from "../experimental-features";
 import type { AgentActivity, BifrostRuleDestination, BifrostSnapshot, CdpClientInfo, ExternalChromeInstance, ProfileReadinessReceipt, PublicProfile, SystemProxyRoute } from "../../shared/types";
 import { renderLiveViewSection } from "./live-view";
 import { profileAvatar } from "./profile-avatar";
+import { nativeConnectionPresentation } from "../native-connection-presentation";
 import { NATIVE_CDP_UNSUPPORTED_NOTE, agentActivityLeadText, agentActivityProgressText, agentActivityTooltipText, agentBrowserOccupancyClient, cdpClientToolSummary, cdpLaunchButtonTitle, cdpPortLabel, cdpSessionText, contentionNotice, contentionNoticeShort, deleteButtonTitle, escapeHtml, focusButtonTitle, formatDate, formatRelativeTime, gatewayControlClient, gatewayUserHasControl, launchButtonTitle, listeningPortsNote, liveAddrLabel, prettyCdpClientLabel, profileAgentBrowserReserved, profileAgentControlClients, profileStatusLabel, profileUserHasControl, renderButtonLabel, sourceDetail, truncateText } from "../util";
 
 interface ConnectionActivityModel {
@@ -22,10 +23,16 @@ interface ProfileRootGroup {
 
 // 受管 Profile 表格与外部实例放进同一个框：它们本质都是 Profile，只是
 // 来源不同；外部实例仍只读（仅显示/关闭），用框内分隔段和类型标签区分。
+export function renderProfileDefaultNote(profiles: PublicProfile[]): string {
+  const saved = store.state?.defaultProfile;
+  const target = saved && profiles.find(profile => profile.id === saved.id);
+  return `<p class="default-target-note">${saved ? `默认 Profile：<strong>${escapeHtml(target?.name || saved.name)}</strong>${!target ? ' · 当前不可用，请重新选择或清除默认设置。' : ' · 未指定目标的新任务优先使用。'} <button type="button" data-action="clear-default-profile" ${store.busy ? "disabled" : ""}>清除默认</button>` : '可在 Profile 的“更多”菜单中设置默认 Profile。'}</p>`;
+}
+
 export function renderProfilesPanel(profiles: PublicProfile[], externalInstances: ExternalChromeInstance[]): string {
   const profileGroups = groupProfilesByUserDataDir(sortByMainOrder(profiles));
-
   return `
+    ${renderProfileDefaultNote(profiles)}
     <div class="profiles-table-wrap overflow-visible border-solid border border-line rounded-xl bg-panel [box-shadow:inset_0_1px_0_rgba(255,255,255,0.04),0_18px_44px_rgba(2,6,9,0.35)]">
       <table class="profiles-table w-full border-collapse table-fixed">
         <colgroup>
@@ -184,10 +191,11 @@ export function renderProfileRow(profile: PublicProfile, isFirstInGroup = false,
             <span class="status-dot w-[9px] h-[9px] flex-[0_0_auto] rounded-full bg-line-strong ${busyKind ? "loading" : profile.running ? "running" : profile.source === "native" ? "native" : ""}"></span>
             <span class="profile-name block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[15px] font-[650] leading-[1.25]">${escapeHtml(profile.name)}</span>
             <span class="profile-name-badges">
+              ${store.state?.defaultProfile?.id === profile.id ? '<span class="agent-default-badge">默认</span>' : ""}
               ${
                 profile.source === "isolated"
                   ? `<button type="button" class="agent-access-toggle ${profile.agentAccessDisabled ? "blocked" : "allowed"} ${agentSettingsSaving ? "loading" : ""}" data-action="toggle-agent-access" data-id="${profile.id}" aria-pressed="${profile.agentAccessDisabled ? "true" : "false"}" aria-label="${profile.agentAccessDisabled ? `允许 Agent 连接 ${escapeHtml(profile.name)}` : `禁止 Agent 连接 ${escapeHtml(profile.name)}`}" title="${profile.agentAccessDisabled ? "当前禁止 Agent 连接；点击允许" : "当前允许 Agent 连接；点击禁止"}" ${store.busy ? "disabled" : ""}>
-                      ${renderButtonLabel(agentSettingsSaving, profile.agentAccessDisabled ? "NO AGENT" : "AGENT ON", "…")}
+                      ${renderButtonLabel(agentSettingsSaving, profile.agentAccessDisabled ? "Agent 已禁用" : "允许 Agent", "保存中")}
                     </button>`
                   : ""
               }
@@ -203,7 +211,7 @@ export function renderProfileRow(profile: PublicProfile, isFirstInGroup = false,
         </span>
       </td>
       <td>
-        <span class="registry-connection-summary">${profile.source === "native" ? store.nativeExtensionBrowsers?.find(item => item.profileId === profile.id)?.connected ? "扩展已连接" : store.nativeExtensionBrowsers ? "待连接" : "检测中…" : profile.cdpPort || profile.fixedCdpPort ? "Gateway" : "待连接"}</span>
+        <span class="registry-connection-summary">${profile.source === "native" ? store.nativeExtensionError ? "检测失败" : store.nativeExtensionBrowsers ? escapeHtml(nativeConnectionPresentation(store.nativeExtensionBrowsers.find(item => item.profileId === profile.id), store.nativeExtensionService).label) : "检测中…" : profile.cdpPort || profile.fixedCdpPort ? "Gateway" : "待连接"}</span>
       </td>
       <td>
         <span class="registry-proxy-summary">${profile.directConnection ? "直连" : profile.upstreamProxy ? "指定代理" : profile.bifrostProxy ? "Bifrost" : "系统代理"}</span>
@@ -660,7 +668,7 @@ export function renderProfileActions(profile: PublicProfile): string {
         ? "保存中…"
         : "";
   const primaryLoading = baseBusy || Boolean(menuOpBusyLabel);
-  const primaryLoadingLabel = menuOpBusyLabel || (running ? "显示中…" : preferCdp ? "CDP 启动中…" : "启动中…");
+  const primaryLoadingLabel = menuOpBusyLabel || (running ? "显示中…" : "启动中…");
 
   const hasTakeoverAction = Boolean(takeoverButton);
   const baseActionClass = hasTakeoverAction ? "profile-window-action" : "profile-primary-action";
@@ -690,6 +698,7 @@ export function renderProfileActions(profile: PublicProfile): string {
                       ${renderButtonLabel(launchingCdp, "CDP 启动", "启动中…")}
                     </button>`
               }
+              <button type="button" data-action="set-default-profile" data-id="${profile.id}" ${store.busy ? "disabled" : ""}>${store.state?.defaultProfile?.id === profile.id ? "取消默认 Profile" : "设为默认 Profile"}</button>
               <button type="button" class="menu-warn ${closing ? "loading" : ""}" data-action="close-profile" data-id="${profile.id}" ${store.busy || !profile.running ? "disabled" : ""}>
                 ${renderButtonLabel(closing, "关闭", "关闭中…")}
               </button>
@@ -757,9 +766,11 @@ function renderQuickLaunchShortcutRow(profile: PublicProfile): string {
 
 export function renderEmpty(): string {
   return `
-    <div class="empty-state">
-      <strong>还没有 Profile</strong>
+    <div class="registry-state">
+      <h3>创建第一个浏览器 Profile</h3>
+      <p>独立保存登录状态与插件，为日常工作或 Agent 准备专用浏览器。</p>
       <button type="button" class="primary" data-action="new-profile">新建独立 Profile</button>
+      <button type="button" class="registry-help" data-action="open-onboarding">连接已有 Chrome 的方法</button>
     </div>
   `;
 }

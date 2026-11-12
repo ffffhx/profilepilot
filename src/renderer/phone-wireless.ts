@@ -1,3 +1,4 @@
+import { renderButtonLabel, setButtonLoading } from "./button-label";
 import type { PhoneDevice, PhoneNearbyApp, PhoneWirelessDiscovery, PhoneWirelessService } from "../shared/phones";
 
 const escape = (value: string) => value.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
@@ -34,7 +35,7 @@ export function openPhoneWireless(onConnected: (device: PhoneDevice, prepare: bo
       <div class="wireless-body">${step === 0 ? `
         <h3>自动连接这台手机</h3><p>读取手机最新上报的地址，查找无线调试端口并验证连接。手机和电脑需在同一局域网。</p>
         <p class="wireless-note">连接不会开始控制，也不会恢复暂停的会话。</p>
-        <div class="wireless-footer"><button data-manual>手动连接</button><button data-first-pair>首次配对</button><button class="primary" data-auto type="submit">重新查找并连接</button></div>` : step === 1 ? `
+        <div class="wireless-footer"><button data-manual>手动连接</button><button data-first-pair>首次配对</button><button class="primary" data-auto type="submit">${renderButtonLabel(false, "重新查找并连接", "正在查找并连接…")}</button></div>` : step === 1 ? `
         <h3>附近的 ProfilePilot 设备</h3><p>手机打开 ProfilePilot → 添加到电脑 → 开启「允许局域网发现」，并连接同一局域网。无需先开启无线调试；电脑也可以接入同一路由器的网线。</p>
         <div class="wireless-discovery wireless-nearby"><button type="button" data-scan>重新扫描</button><span data-discovery-status role="status">正在扫描…</span><div data-apps></div><div data-services></div></div>
         <div data-selected-app hidden></div>
@@ -43,10 +44,10 @@ export function openPhoneWireless(onConnected: (device: PhoneDevice, prepare: bo
         <div class="wireless-footer"><button data-direct>已配对，直接连接</button><button data-next>手动输入配对信息</button></div>` : step === 2 ? `
         <h3>输入手机配对弹窗中的信息</h3><p>配对地址来自「使用配对码配对」弹窗，配对码仅用于本次连接。</p>
         <div class="wireless-discovery"><button type="button" data-scan>查找附近设备</button><span data-discovery-status role="status"></span><div data-services></div></div>
-        <form data-pair-form><label>配对地址<input name="pairAddress" placeholder="192.168.1.8:37123" value="${escape(address)}" maxlength="80" required spellcheck="false" autocomplete="off"></label><label>6 位配对码<input name="pairCode" type="password" inputmode="numeric" pattern="[0-9]{6}" minlength="6" maxlength="6" autocomplete="off" required placeholder="手机显示的 6 位数字"></label><p class="wireless-note">配对码关闭弹窗后可能失效；配对失败时请重新查看。</p><div class="wireless-footer"><button type="button" data-back>上一步</button><button class="primary" type="submit">配对这台手机</button></div></form>` : step === 3 ? `
+        <form data-pair-form><label>配对地址<input name="pairAddress" placeholder="192.168.1.8:37123" value="${escape(address)}" maxlength="80" required spellcheck="false" autocomplete="off"></label><label>6 位配对码<input name="pairCode" type="password" inputmode="numeric" pattern="[0-9]{6}" minlength="6" maxlength="6" autocomplete="off" required placeholder="手机显示的 6 位数字"></label><p class="wireless-note">配对码关闭弹窗后可能失效；配对失败时请重新查看。</p><div class="wireless-footer"><button type="button" data-back>上一步</button><button class="primary" type="submit">${renderButtonLabel(false, "配对这台手机", "正在配对…")}</button></div></form>` : step === 3 ? `
         <div class="wireless-result">${paired ? "✓ 配对成功" : "连接已配对的手机"}</div><h3>填写无线调试主页面的连接地址</h3><p>关闭手机的配对码弹窗，回到「无线调试」主页面，查看「IP 地址和端口」。</p><p class="wireless-port-tip">连接端口通常与刚才的配对端口不同。</p>
         <div class="wireless-discovery"><button type="button" data-scan>查找可连接设备</button><span data-discovery-status role="status"></span><div data-services></div></div>
-        <form data-connect-form><label>连接地址<input name="connectAddress" placeholder="192.168.1.8:40235" value="${escape(address)}" maxlength="80" required spellcheck="false" autocomplete="off"></label><div class="wireless-footer"><button type="button" data-back>返回配对</button><button class="primary" type="submit">连接手机</button></div></form>` : `
+        <form data-connect-form><label>连接地址<input name="connectAddress" placeholder="192.168.1.8:40235" value="${escape(address)}" maxlength="80" required spellcheck="false" autocomplete="off"></label><div class="wireless-footer"><button type="button" data-back>返回配对</button><button class="primary" type="submit">${renderButtonLabel(false, "连接手机", "正在连接…")}</button></div></form>` : `
         <div class="wireless-result">✓ 无线设备已连接</div><h3>${escape(connected!.name)}</h3><p>${escape(connected!.id)}</p><p>现在可以完成连接，在设备页选择免安装查看或控制。也可安装手机 App，获得控件识别、中文填写和手机端暂停等功能。</p><p class="wireless-note">更换网络或重新开启无线调试后，端口可能变化。届时可选择「已配对，直接连接」，填写手机最新显示的连接地址。</p><div class="wireless-footer"><button data-finish>完成</button><button data-prepare>安装并连接 App</button></div>`}
         <div class="wireless-error" role="alert" hidden></div><details class="wireless-help"><summary>找不到设备或连接失败？</summary><p>请更新并打开手机 ProfilePilot，确认两端在同一局域网。App 被强行停止或系统休眠时，请重新打开。访客 Wi-Fi、公司网络的设备隔离可能阻止发现；旧版 App 可开启无线调试后扫描，或手动输入地址。</p><p>Windows 检查专用网络防火墙；macOS 检查防火墙与本地网络权限。若 ADB 不支持配对，请更新 Android Platform Tools。</p></details></div>`;
     dialog.querySelector("[data-close]")!.addEventListener("click", dismiss);
@@ -152,8 +153,8 @@ export function openPhoneWireless(onConnected: (device: PhoneDevice, prepare: bo
   async function work(action: () => Promise<void>): Promise<void> {
     busy = true; stopScan();
     const submit = dialog.querySelector<HTMLButtonElement>('button[type="submit"]');
-    const submitLabel = submit?.textContent;
-    if (submit) submit.textContent = step === 2 ? "正在配对…" : step === 0 ? "正在查找并验证连接…" : "正在连接…";
+
+    if (submit) setButtonLoading(submit, true);
     dialog.querySelector<HTMLElement>(".wireless-error")!.hidden = true;
     dialog.querySelectorAll<HTMLInputElement | HTMLButtonElement>("input,button").forEach(element => element.disabled = true);
     dialog.setAttribute("aria-busy", "true");
@@ -161,7 +162,7 @@ export function openPhoneWireless(onConnected: (device: PhoneDevice, prepare: bo
     catch (error) { if (dialog.isConnected) showWirelessFailure(dialog.querySelector<HTMLElement>(".wireless-error")!, error); }
     finally {
       busy = false; dialog.removeAttribute("aria-busy");
-      if (submit?.isConnected) submit.textContent = submitLabel || "重试";
+      if (submit?.isConnected) setButtonLoading(submit, false);
       dialog.querySelectorAll<HTMLInputElement | HTMLButtonElement>("input,button").forEach(element => element.disabled = element.dataset.unreachable === "true");
     }
   }

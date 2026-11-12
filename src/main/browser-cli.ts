@@ -1,5 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { DefaultTargetStore } from "./default-targets";
+import { defaultDataDir } from "./fs-util";
 import { runAgentBrowserWrapper, sessionFromAgentBrowserArgs } from "./agent-browser-wrapper";
 import { bundledBrowserExecutable } from "./tasks/browser-runtime";
 import { main as runExtensionCli, nativeControlError, nativeControlHelp } from "./native-control/cli";
@@ -17,6 +19,8 @@ export const browserCliHelp = `ppilot browser CLI (model invocation only for cap
 One CLI, two connections. Connection options go BEFORE the command.
 
 Profile management (desktop app required):
+  ppilot browser default [--json]          Read saved default without starting the App
+  ppilot browser profile default [NAME|ID|--clear] [--json]
   ppilot browser profile list [--json]
   ppilot browser profile get <NAME|ID> [--json]
   ppilot browser profile create --name NAME [--json]
@@ -147,6 +151,11 @@ export async function runBrowserCli(
       const help = browserCommandHelp(route.connection, narrowHelp);
       if (!help) invalid(`${route.connection} 连接没有 ${narrowHelp} 的命令说明；运行 ppilot browser --connection ${route.connection} schema 查看可用命令。`);
       io.stdout.write(help); return 0;
+    }
+    if (command === "default") {
+      if (tail.some(arg => arg !== "--json")) invalid("用法：ppilot browser default [--json]。设置默认 Profile 请使用浏览器页面或 profile default。");
+      io.stdout.write(JSON.stringify({ ok: true, result: { saved: new DefaultTargetStore(env.CPM_DATA_DIR || defaultDataDir()).profile() } }) + "\n");
+      return 0;
     }
     if (command === "xianyu") return await runXianyuCli(route, io, env);
     if (command === "sites") {

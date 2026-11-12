@@ -40,6 +40,7 @@ const until = async (fn, description, timeout = 45000) => {
 async function startChrome(url) {
   await rm(path.join(chromeData, 'DevToolsActivePort'), { force: true });
   child = spawn(getDirectChromeCommand(), [`--user-data-dir=${chromeData}`, ...manual ? [] : ['--headless=new'], '--no-first-run', '--no-default-browser-check', '--remote-debugging-port=0', url], { windowsHide: true, stdio: 'ignore' });
+  await writeFile(path.join(output, 'runtime.json'), JSON.stringify({ purpose: 'isolated extension lifecycle verification', pid: child.pid, chromeData, root }, null, 2));
   const failed = new Promise((_, reject) => child.once('error', reject));
   endpoint = await Promise.race([failed, until(async () => { try { return parseNativeDebugEndpoint(await readFile(path.join(chromeData, 'DevToolsActivePort'), 'utf8')); } catch { return undefined; } }, 'Isolated Chrome startup timed out')]);
   client = await CdpBrowserClient.connect(endpoint, 10000);
@@ -87,10 +88,50 @@ try {
     client = await CdpBrowserClient.connect(endpoint, 5000);
   }
   await pair(invitation); evidence.checks.push('initial-install-and-pair'); console.log('PASS initial install and pairing');
+  await until(async () => {
+    try { return JSON.parse(await readFile(path.join(root, 'bridge/control-diagnostics/extension-connections.json'), 'utf8')).events.some(row => row.event === 'authenticated'); }
+    catch { return false; }
+  }, 'Extension diagnostics did not reach the service');
+  evidence.checks.push('worker-diagnostics-upload');
   // App restart: retain only the same protected credential store and listener file.
   await closeBridge(); await startBridge();
   await until(() => bridge.states().some(s => s.connected && s.extensionVersion), 'Extension did not reconnect after app restart', 60000);
   evidence.checks.push('app-restart-without-repair-or-confirmation'); console.log('PASS app restart automatically reconnects');
+  const journal = JSON.parse(await readFile(path.join(root, 'bridge/control-diagnostics/extension-connections.json'), 'utf8'));
+  assert.equal(journal.events.filter(row => row.event === 'service-start').length, 2);
+  assert.ok(journal.events.some(row => row.event === 'socket-close'));
+  assert.ok(!JSON.stringify(journal).includes(saved['native:Default']));
+  evidence.checks.push('diagnostics-survive-service-restart');
+  if (!manual) {
+    const popup = (await client.send('Target.getTargets')).targetInfos.find(t => t.url.startsWith(`chrome-extension://${NATIVE_EXTENSION_ID}/popup.html`));
+    const { sessionId: popupSession } = await client.send('Target.attachToTarget', { targetId: popup.targetId, flatten: true });
+    const evaluate = expression => client.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }, 10000, popupSession).then(reply => {
+      if (reply.exceptionDetails) throw Error(reply.exceptionDetails.text); return reply.result?.value;
+    });
+    await evaluate(`globalThis.originalDiagnosticSendMessage = chrome.runtime.sendMessage; chrome.runtime.sendMessage = async () => { throw Error('Could not establish connection. Receiving end does not exist.'); }; window.dispatchEvent(new Event('focus'));`);
+    await until(() => evaluate(`document.querySelector('#connection-label').textContent === '状态暂不可用'`), 'Missing worker state not shown');
+    // 210 CSS pixels also covers the 420px popup at 200% browser zoom.
+    for (const width of [420, 320, 210]) {
+      await client.send('Emulation.setDeviceMetricsOverride', { width, height: 600, deviceScaleFactor: 1, mobile: false }, 5000, popupSession);
+      const layout = await evaluate(`({width:innerWidth,scrollWidth:document.body.scrollWidth,text:document.querySelector('#connection-note').textContent,button:document.querySelector('#export-diagnostics').getBoundingClientRect().width})`);
+      assert.ok(layout.scrollWidth <= layout.width && layout.button > 0); assert.match(layout.text, /导出连接诊断/);
+      const shot = await client.send('Page.captureScreenshot', { format: 'png' }, 5000, popupSession);
+      await writeFile(path.join(output, `diagnostics-offline-${width}.png`), Buffer.from(shot.data, 'base64'));
+    }
+    const downloads = path.join(root, 'downloads'); await mkdir(downloads);
+    await client.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: downloads });
+    await evaluate(`document.querySelector('#export-diagnostics').click()`);
+    await until(() => evaluate(`document.querySelector('#diagnostics-note').textContent.includes('已开始下载')`), 'Offline diagnostics export failed');
+    const { readdir } = await import('node:fs/promises');
+    const filename = await until(async () => (await readdir(downloads)).find(name => name.endsWith('.json')), 'Export did not finish');
+    const report = JSON.parse(await readFile(path.join(downloads, filename), 'utf8'));
+    assert.equal(report.current.workerReadFailure, 'receiver-missing');
+    assert.ok(report.events.some(row => row.event === 'popup-unreachable'));
+    assert.ok(!JSON.stringify(report).includes(saved['native:Default']));
+    await writeFile(path.join(output, 'exported-diagnostics.json'), JSON.stringify(report, null, 2));
+    await evaluate(`chrome.runtime.sendMessage = globalThis.originalDiagnosticSendMessage; delete globalThis.originalDiagnosticSendMessage; window.dispatchEvent(new Event('focus'));`);
+    evidence.checks.push('offline-popup-export-and-responsive-layout'); console.log('PASS diagnostics export works without worker messaging');
+  }
   const beforeReload = saved['native:Default'];
   if (manual) {
     await bridge.request('native:Default', 'extension.reload', {});
@@ -166,6 +207,7 @@ finally {
   if (client || child?.exitCode === null) await closeChrome().catch(() => { if (child?.exitCode === null) child.kill(); });
   if (bridge) bridge.close(); fixture.closeAllConnections(); fixture.close();
   await rm(path.join(output, 'manual-runtime.json'), { force: true });
+  await writeFile(path.join(output, 'runtime.json'), JSON.stringify({ purpose: 'isolated extension lifecycle verification', pid: child?.pid, chromeData, root, stopped: child?.exitCode !== null }, null, 2));
   if (!path.resolve(root).startsWith(path.resolve(os.tmpdir()) + path.sep)) throw Error('Refusing cleanup outside test root');
   await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }).catch(() => console.warn('Test-only cleanup deferred:', root));
 }

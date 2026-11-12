@@ -13,9 +13,13 @@ Use `ppilot remote --help` for the installed command contract. This entry direct
 
 - `profiles` lists the target's exact Profile IDs and readiness. `profile` manages only the target's manageable isolated Profiles. Ordinary start does not enable a missing Agent connection. Delete a specific Profile only when the user requested it, with `--yes`.
 - `apps` lists registered Electron IDs. Use that exact ID with `browser open --profile <id>`; never copy or expose raw CDP endpoints. Native Chrome requires an observed `--tab <id>` or a deliberate `--new-tab`.
-- `browser observe --browser <browserId>` reads the selected remote page. `browser action --browser <browserId> --params-file <file>` accepts the common JSON action `{kind, version, ref, value}`; uploaded file paths refer to the **remote** computer. Reobserve after each action. Browser IDs and page refs come only from this session's replies.
+- `browser observe --browser <browserId>` reads the selected remote page. `browser action --browser <browserId> --params-file <file>` accepts the common JSON action `{kind, version, ref, value}`; uploaded file paths refer to the **remote** computer. Actions normally return the resulting observation in the same response. Browser IDs and page refs come only from this session's replies.
 - `windows` lists the remote interactive desktop. `window observe --window <id>` returns UI Automation refs and supported actions. `window action --params-file <file>` accepts the observed `version`, `ref`, and `kind`, such as `invoke` or `set_value` with `value`. Native keyboard/pointer actions may activate the remote window. Locked and higher-privilege windows may be unavailable.
 - `window screenshot --window <id> [--output <path>]` saves an image on the **controlling** computer and returns its path. Inspect that image before coordinate input. Map image pixels to returned `windowWidth`/`windowHeight`; prefer observed controls where available.
+
+## Action feedback
+
+`browser action`, `browser navigate` and `window action` return the resulting observation when available. Reuse feedback from newer remote services without another wait/read; otherwise wait 500 ms and observe the exact same browser/window in the same lease. Window action JSON must contain the observed `windowId`. `--no-observe` skips the local follow-up (feedback already supplied by the target is retained). `actionOutcome: "completed"` with `observationStatus: "unavailable"` means check control and read again, never repeat input. The wait is not proof of business completion or a transient-dialog history. This host-side fallback cannot capture a notification that disappeared before the remote action reply arrived.
 
 ## Stops and uncertain outcomes
 

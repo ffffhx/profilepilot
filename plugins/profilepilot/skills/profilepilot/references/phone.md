@@ -2,7 +2,7 @@
 
 For iPhone real devices, use [the iPhone reference](iphone.md). The Android instructions below do not apply to iOS.
 
-Read `local/phone-control.md` beside the skill entrypoint if it exists. If it is absent, read `templates/phone-control.md` instead; it holds the generic defaults for background operation, user takeover and confirmation timing. Apply the user's preferred device, view/control mode and confirmation rules within the current task's authorization. These preferences are Agent instructions, not permission toggles; they cannot enable USB debugging or accessibility, authorize a new device, or resume a paused session.
+Read `ppilot phone default` when the user has not specified a device. The phone page stores this default, including a stable device identity where available. Confirm `available` and use its current `deviceId`; `--device default` resolves that same saved target for ordinary CLI commands and fails when it is unavailable. Explicit `--device ID` always wins. A task authorization determines view/control mode; the default setting grants no permissions and cannot resume a paused session. Keep the target and session fixed during the task.
 
 Phone control needs the ProfilePilot desktop app running and either an authorized ADB connection or an explicitly paired Internet control connection. App mode additionally needs the Android companion connected with its required permissions. `ppilot phone connect` automatically pairs the companion over the system-authorized debugging connection; there is no extra App confirmation. Users confirm Android USB/wireless debugging authorization; accessibility setup can use the explicitly authorized recovery command below. An explicitly selected basic mode needs no phone App. Set up the connection with `ppilot phone`; the desktop **手机** workspace is also available. Keep browser and phone task lifecycles separate.
 
@@ -107,6 +107,8 @@ Run `ppilot phone --help` for the installed command reference. Use `ppilot phone
   "action": { "kind": "snapshot" }
 }
 ```
+
+Ordinary CLI input defaults to a 500 ms wait followed by an observation in the same response. `data.actionOutcome: "completed"` confirms input; `data.observationStatus: "available"` supplies `data.observation`. Android App returns its bounded accessibility tree (up to 400 nodes and depth 25); basic mode returns a fresh PNG path with width/height, usable for the next coordinate input. Basic images are saved under `~/.profilepilot/phone/artifacts/` or an unused `--output` path. This is a current sample, not complete history or proof that asynchronous work finished. `observationStatus: "unavailable"` means check control and read again, never replay input. `--no-observe` or JSON `observeAfter: false` skips this feedback. Read actions do not add another read. Flows, the ADB wrapper and live/continuous controls manage their own timing without a snapshot after each low-level input.
 
 Read `sessionId` and `generation` from the current `list` response and generate a new UUID per new action. Supported action kinds are `snapshot`, `screenshot`, `tap`, `swipe`, `text`, `key`, `find`, `click`, `fill` and `scroll`. Screenshot output can be saved with `--output screen.jpg`; text replaces the focused input using Android accessibility. Inspect the current screen before selecting coordinates. View mode rejects input.
 

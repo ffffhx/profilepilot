@@ -3,6 +3,8 @@ import type { DebuggerDiagnostic } from "./debugger-diagnostic";
 
 export interface NativeBrowserState {
   taskTabs?: boolean;
+  extensionVersion?: string;
+  capabilities?: string[];
   /** Extension worker identity plus its latest stop generation. */
   controlGeneration?: string;
   tabId?: number;
@@ -18,9 +20,15 @@ export interface NativeBrowserState {
   url?: string;
 }
 
+export interface NativeBrowserServiceState {
+  status: "idle" | "connecting" | "connected" | "disconnected";
+  error?: string;
+}
+
 export interface BrowserConnectionSnapshot {
   nativeBrowsers: NativeBrowserState[];
   nativeInstallations: Array<{ profileId: string; stage: string; message: string }>;
+  nativeService?: NativeBrowserServiceState;
 }
 
 export interface BrowserConnectionApi {

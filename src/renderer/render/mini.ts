@@ -125,7 +125,24 @@ export function renderMini(): void {
   if (!store.state) {
     lastMiniPanelHtml = "";
     appRoot.className = "mini-root mini-root-panel";
-    appRoot.innerHTML = '<div class="mini-shell"><div class="mini-loading">Loading...</div></div>';
+    const failed = Boolean(store.profileLoadError) && !isBusyAction("refresh");
+    patchBrowserDom(appRoot, `<div class="mini-shell">
+      <header class="mini-titlebar">
+        <div class="mini-brand"><strong>ProfilePilot</strong></div>
+        <div class="mini-window-actions">
+          <button type="button" data-action="toggle-mini-panel" title="收起为悬浮图标">收起</button>
+          <button type="button" class="mini-panel-close" data-action="hide-mini-window" title="关闭悬浮窗">关闭</button>
+        </div>
+      </header>
+      <main class="mini-profile-list">
+        <div class="mini-state" role="${failed ? "alert" : "status"}">
+          <strong>${failed ? "无法读取浏览器列表" : "正在读取浏览器列表…"}</strong>
+          <p>${failed ? escapeHtml(store.profileLoadError) : "读取完成后会显示可用的 Profile。"}</p>
+          ${failed ? `<button type="button" data-action="refresh" ${store.busy ? "disabled" : ""}>重新加载</button>` : ""}
+        </div>
+      </main>
+    </div>`);
+    window.requestAnimationFrame(adjustMiniPanelHeight);
     return;
   }
 
@@ -162,7 +179,7 @@ export function renderMini(): void {
         ${
           profiles.length
             ? profiles.map(renderMiniProfileCard).join("")
-            : '<div class="mini-empty">还没有 Profile</div>'
+            : '<div class="mini-empty mini-state"><strong>还没有 Profile</strong><p>在主窗口创建或连接浏览器 Profile。</p><button type="button" data-action="show-main-window">打开主窗口</button></div>'
         }
       </main>
       ${

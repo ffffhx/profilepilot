@@ -1,4 +1,7 @@
 const messages: Record<string, string> = {
+  DESKTOP_BACKGROUND_ACTION_DENIED: '后台语义模式禁止此操作；只允许控件的 invoke、set_value、toggle、select、expand、collapse、scroll，不会回退到物理输入。',
+  DESKTOP_BACKGROUND_TARGET_ACTIVE: '目标应用正在前台，后台控制已暂停。请切换到其他应用，并在愿意继续时交还控制。',
+  DESKTOP_MODE_CONFLICT: '当前会话的控制模式不可更改。请保留当前模式，或结束会话后明确创建新任务。',
   DESKTOP_CONTROL_NOTICE_UNAVAILABLE: '桌面控制提示条尚未确认加载并显示，不能开始或恢复控制。请检查 ProfilePilot 窗口后再明确交还控制。',
   DESKTOP_USER_IN_CONTROL: '桌面控制已暂停或控制权已变化。请用 desktop status 检查原因；获准继续并明确交还控制后，重新观察再操作。',
   DESKTOP_SESSION_ENDED: '当前桌面会话已结束或不再有效。请检查 desktop status；新任务应使用新的会话名。',
@@ -37,6 +40,7 @@ const messages: Record<string, string> = {
 export const desktopErrorMessage = (code: string): string => messages[code] || code;
 
 const pauseMessages: Record<string, string> = {
+  target_active: '目标应用正在前台，后台任务已暂停。使用其他应用后，可以明确交还控制。',
   user_takeover: '控制已交还给你。需要继续时，可以交还控制。',
   physical_input: '检测到键盘或鼠标操作，控制已暂停。需要继续时，可以交还控制。',
   external_input: '检测到来源未确认的模拟输入，控制已暂停。请先检查窗口状态。',

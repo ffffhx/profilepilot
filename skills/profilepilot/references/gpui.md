@@ -12,12 +12,11 @@ For preparation, `ppilot gpui doctor --target TARGET_ID --session TASK` reports 
 ppilot gpui claim --target TARGET_ID --session TASK
 ppilot gpui snapshot --session TASK
 ppilot gpui call --session TASK --tool click_element --params-file click.json --observation UUID
-ppilot gpui snapshot --session TASK
 ppilot gpui call --session TASK --tool screenshot --output ABSOLUTE_NEW_FILE.png
 ppilot gpui complete --session TASK
 ```
 
-Use UTF-8 JSON files for arguments, including Chinese text. Element input uses stable IDs from the latest snapshot. Every mutation consumes its observation UUID. Inspect bounds, role, state and label before acting; stale observations are rejected. Prefer `set_text` with `{ "id": "input-id", "text": "..." }`; keyboard syntax follows GPUI (`ctrl-a`, `enter`, etc.). Use `get_logs`, `get_frame_report`, `record_performance` and `highlight_elements` for debugging. `record_performance` accepts `duration_ms` up to 10000. The exact supported list is in CLI help.
+Use UTF-8 JSON files for arguments, including Chinese text. Element input uses stable IDs from the latest snapshot. Every mutation consumes its observation UUID. Ordinary input waits 500 ms and returns a fresh tree in `observation.tree`; pass `observation.version` to the next call’s `--observation`. No separate snapshot is normally needed. Use `--no-observe` to skip. Debug mutations still require a fresh `snapshot` afterward. `actionOutcome: "completed"` with `observationStatus: "unavailable"` confirms input but not a usable read; check control and read again without replaying input. The wait does not guarantee asynchronous completion or preserve transient-event history. Inspect bounds, role, state and label before acting; stale observations are rejected. Prefer `set_text` with `{ "id": "input-id", "text": "..." }`; keyboard syntax follows GPUI (`ctrl-a`, `enter`, etc.). Use `get_logs`, `get_frame_report`, `record_performance` and `highlight_elements` for debugging. `record_performance` accepts `duration_ms` up to 10000. The exact supported list is in CLI help.
 
 `handoff` pauses and preserves ownership. A clear instruction in the current conversation to return control authorizes `return-control` for that same target and session without another permission question.
 

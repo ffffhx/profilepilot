@@ -1,5 +1,7 @@
 .phone-emulator-dialog { width:min(740px,calc(100vw - 36px)); max-height:calc(100dvh - 40px); overflow:auto; }
 .phone-emulator-dialog>header { align-items:flex-start; }
+/* Errors and installation progress must not recenter the whole dialog. */
+.phone-emulator-dialog { margin-block-start:clamp(24px,7dvh,64px); max-height:calc(100dvh - clamp(24px,7dvh,64px) - 24px); scrollbar-gutter:stable; }
 .phone-emulator-dialog>header p { margin:8px 0 0; color:var(--muted); font-size:13px; line-height:1.6; }
 .emulator-tabs { display:flex; gap:8px; margin:18px 0; border-bottom:1px solid var(--line); }
 .emulator-tabs button { border:0; border-radius:0; padding:10px 16px; color:var(--muted); }

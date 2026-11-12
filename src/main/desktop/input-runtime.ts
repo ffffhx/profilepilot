@@ -36,9 +36,9 @@ export class WindowsInputRuntime {
       if (this.desktop !== binding || binding.detaching) throw Object.assign(new Error('Desktop input subscription has ended.'), { code: 'DESKTOP_INPUT_OBSERVER_CANCELLED' });
     };
     return {
-      arm: (generation, marker) => {
+      arm: (generation, marker, backgroundTarget) => {
         try { current(); } catch (error) { return Promise.reject(error); }
-        return this.broker.arm(generation, marker);
+        return this.broker.arm(generation, marker, backgroundTarget);
       },
       disarm: generation => {
         // Only this binding can own the broker's single desktop slot. The

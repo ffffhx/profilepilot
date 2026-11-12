@@ -28,7 +28,7 @@ export function openIphoneAdd(onAdded: (device: PhoneDevice) => void): void {
       <div class="iphone-setup-actions"><button class="primary" data-do="connect" data-needs-device>启动并添加 iPhone</button><button data-do="cancel" data-needs-device>停止 USB 连接</button></div><p data-usb-status role="status"></p>
       <p>连接后可单独开始查看或操作会话。</p>
     </section>
-    <p role="alert" data-setup-error hidden></p><p data-progress role="status"></p>
+    <div class="iphone-setup-feedback"><p role="alert" data-setup-error hidden></p><p data-progress role="status"></p></div>
     <details class="iphone-setup-step"><summary>高级：连接已运行的控制地址</summary>
     <form><label>设备名称<input name="name" aria-label="iPhone 名称" value="iPhone" maxlength="80" required></label>
     <label>控制地址<input name="endpoint" aria-label="iPhone 控制地址" type="url" value="http://127.0.0.1:8100" required></label>

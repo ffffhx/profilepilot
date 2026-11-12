@@ -1,6 +1,6 @@
 # ppilot phone: iPhone real devices
 
-Read personal `local/phone-control.md` (or the shipped phone template). Use ProfilePilot's desktop app and `ppilot phone` throughout. Select the real USB UDID from `iphone devices`, then use the `iphone-…` device ID returned after connection for ordinary phone commands. Do not substitute an Android serial or a Chrome emulated iPhone.
+Use the requested device or the available saved default from `ppilot phone default`. Use ProfilePilot's desktop app and `ppilot phone` throughout. Select the real USB UDID from `iphone devices`, preserve signing and connection settings on that device, then use the returned `iphone-?` device ID for ordinary phone commands. Do not substitute an Android serial or a Chrome emulated iPhone.
 
 ## First connection
 
@@ -54,6 +54,8 @@ Use `--mode control` only within the user's authorized scope. Actions use the re
 ```
 
 Supported: `screenshot`, `snapshot` (WDA JSON accessibility tree), `find`, `tap`, `swipe`, `text`, `click`, `fill`, `scroll`, and `key` with `home`. Screenshot coordinates are physical pixels; ProfilePilot converts to iOS logical points. Refresh the screenshot before coordinate input and after each input. A rotated/stale frame is rejected. Selector fields: `resourceId`/`description` map to accessibility name, `text` to label, `className` to type, and `enabled`; input requires one exact visible match.
+
+Ordinary CLI input waits 500 ms and returns a fresh WDA JSON tree in `data.observation.tree`, with `actionOutcome: "completed"` and `observationStatus: "available"`. This tree supports selector reasoning; it does not refresh the screenshot needed for pixel coordinates. Use `--no-observe` or JSON `observeAfter: false` to skip. If observation fails, `observationStatus: "unavailable"` preserves confirmed input: check control/read again without repeating the action. The wait is a current sample, not a guarantee of asynchronous completion or transient-event capture.
 
 Pause/stop are host-side. iPhone has no ProfilePilot Android overlay, hardware-input takeover detection, Android back/recents keys, ADB/APK access or Android companion permissions. A user who wants to operate the phone should pause from the computer first. Do not use Android-only wrapper/flow/follow/camera commands for iPhone. Current preview uses consecutive PNG frames, not a video stream.
 

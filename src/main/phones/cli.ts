@@ -12,11 +12,15 @@ import { runIphoneCli } from "./iphone-cli";
 import { runInternetPhoneCli } from "./internet-cli";
 import { phoneErrorResult, phoneExitCode, phoneResponseError, phoneFailure } from "./errors";
 import { readPhoneParams } from "./cli-input";
+import { savePhoneFeedbackImage } from './action-feedback';
+import type { PhoneActionResult } from '../../shared/phones';
 import { phoneBooleanFlags, phoneCommandFlags, phoneGroupFlags, phoneCommandContract, phoneCommandHelp, phoneActionParamsSchema, phoneHostParamsSchema } from "./cli-contract";
 
 export const phoneHelp = `ppilot phone CLI · 手机控制
 
 ppilot phone list
+ppilot phone default [--device <设备ID> | --clear]
+ppilot phone readiness --device default
 ppilot phone internet status
 ppilot phone internet configure --params-file <启用和HTTPS地址JSON>
 ppilot phone internet pair --output <新配对文件>
@@ -207,6 +211,19 @@ export async function runPhoneCli(args: string[], request: (command: ProfilePilo
     const backend = flags.get("--backend") || "app";
     if (!["app", "basic"].includes(backend)) throw new Error("--backend 必须为 app 或 basic。");
     for (const key of flags.keys()) if (!allowed[method].includes(key)) throw new Error(`${method} 不支持 ${key}`);
+    if (method === "default") {
+      if (flags.has("--clear") && flags.has("--device")) throw new Error("--clear 和 --device 只能选择一个。");
+      const response = await dispatch({ action: "phone", method, params: flags.has("--clear") ? { id: null } : flags.has("--device") ? { id: flags.get("--device") } : {} });
+      io.stdout.write(JSON.stringify(response, null, 2) + "\n"); return response.ok ? 0 : 1;
+    }
+    if (flags.get("--device") === "default") {
+      const response = await dispatch({ action: "phone", method: "default" });
+      if (!response.ok) { io.stderr.write(JSON.stringify(response) + "\n"); return 1; }
+      const target = response.data as import("../../shared/default-targets").DefaultPhoneStatus;
+      if (!target?.saved) throw new Error("尚未设置默认设备，请在手机页面设置或明确指定 --device。");
+      if (!target.available || !target.deviceId) throw new Error(`默认设备“${target.saved.name}”未连接，请先连接该设备；不会自动选择其他手机。`);
+      flags.set("--device", target.deviceId);
+    }
     if (method === "exec") return await executeAdbCli(flags, dispatch, io, input);
     if (method === "app") return await phoneAppCli(flags, dispatch, io, input);
     if (method === "install") {
@@ -296,9 +313,15 @@ export async function runPhoneCli(args: string[], request: (command: ProfilePilo
           typeof p.id !== "string" || !Number.isInteger(p.generation) || typeof p.requestId !== "string") {
         throw Object.assign(new Error("action 需要成功 start/list 返回的 id、sessionId、generation 和新的 requestId；start 失败时停止后续调用，先运行 phone readiness。"), { code: "PHONE_INVALID_REQUEST" });
       }
+      if (flags.has('--no-observe')) p.observeAfter = false;
+      const kind = (p.action as { kind: string }).kind;
+      if (flags.has('--output') && kind !== 'screenshot' && !(backend === 'basic' && p.observeAfter !== false && !['snapshot', 'find'].includes(kind)))
+        throw phoneFailure('PHONE_INVALID_REQUEST', '--output 需要 screenshot，或开启自动观察的 basic 输入动作。');
     }
     const response = await dispatch({ action: "phone", method: requestMethod === "readiness" ? requestMethod : backend === "basic" ? `basic-${requestMethod}` : requestMethod === "inspect" ? "package-info" : requestMethod, params });
-    if (response.ok && flags.has("--output")) {
+    if (response.ok && (response.data as PhoneActionResult)?.actionOutcome === 'completed') {
+      response.data = await savePhoneFeedbackImage(response.data as PhoneActionResult, flags.get('--output'));
+    } else if (response.ok && flags.has("--output")) {
       const data = response.data as { result?: { base64?: string; mime?: string }; state?: unknown };
       if (!["image/jpeg", "image/png"].includes(data.result?.mime || "") || typeof data.result?.base64 !== "string") throw new Error("此操作未返回截图。");
       await fs.writeFile(flags.get("--output")!, Buffer.from(data.result.base64, "base64"));

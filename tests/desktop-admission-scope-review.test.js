@@ -154,7 +154,8 @@ test('cost boundary: only concurrent reads share the in-flight discovery operati
 
 test('freshness boundary: slow collection retains its original timestamp and is rejected when already stale', async () => {
   let now = 100;
-  const decide = runtimeFactory()(runtimeOptions({ now: () => now,
+  // Isolate stale evidence from the separately tested caller deadline.
+  const decide = runtimeFactory()(runtimeOptions({ now: () => now, timeoutMs: 10000,
     catalog: async () => { now += 7000; return emptyCatalog(); } }));
   const decision = await decide(target);
   assert.equal(decision.status, 'unknown');

@@ -16,6 +16,8 @@ namespace ProfilePilot.InputObservation {
     public sealed class InputCommand {
         public string Kind, Epoch, Generation, PreviousGeneration;
         public ulong Marker;
+        public uint BackgroundPid;
+        public long BackgroundWindow;
         public uint[] Pids = new uint[0], FailedPids = new uint[0];
         public static bool Identity(string value) {
             return !String.IsNullOrEmpty(value) && value.Length <= 100 && value.All(c => c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '_' || c == ':' || c == '-');
@@ -23,6 +25,14 @@ namespace ProfilePilot.InputObservation {
         public static InputCommand Parse(string line) {
             if (line == null || line.Length > 4096 || line.Any(c => c > 127 || c < 32 && c != '\t')) return new InputCommand { Kind = "INVALID" };
             string[] parts = line.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
+            if ((parts.Length==7 && parts[0]=="ARM") || (parts.Length==8 && parts[0]=="REARM")) {
+                int count=parts.Length-3;uint pid;long window;
+                if(parts[count]!="BACKGROUND" || !UInt32.TryParse(parts[count+1],NumberStyles.None,CultureInfo.InvariantCulture,out pid) || pid==0
+                    || !Int64.TryParse(parts[count+2],NumberStyles.None,CultureInfo.InvariantCulture,out window) || window<=0)return new InputCommand {Kind="INVALID"};
+                var scoped=Parse(String.Join(" ",parts.Take(count)));
+                if(scoped.Kind!="ARM" && scoped.Kind!="REARM")return new InputCommand {Kind="INVALID"};
+                scoped.BackgroundPid=pid;scoped.BackgroundWindow=window;return scoped;
+            }
             if (parts.Length == 1 && String.Equals(parts[0], "QUIT", StringComparison.OrdinalIgnoreCase)) return new InputCommand { Kind = "QUIT" };
             if (parts.Length > 0 && String.Equals(parts[0], "SET", StringComparison.OrdinalIgnoreCase)) {
                 if (parts.Length > 257) return new InputCommand { Kind = "INVALID" };
@@ -75,6 +85,8 @@ namespace ProfilePilot.InputObservation {
     public sealed class OutputRecord {
         public string Type, Status, Epoch, Generation, Kind, Reason, Phase;
         public ulong Sequence, Marker;
+        public uint BackgroundPid;
+        public long BackgroundWindow;
         public bool Injected, HasWindow;
         public uint Pid;
         public int? ActiveCount;
@@ -85,7 +97,11 @@ namespace ProfilePilot.InputObservation {
         // No owner identity, paths, token information or free-form error text.
         public static object InstanceGateFailure(int error) { return new { type = "startup-failure", stage = "instance-gate", win32Error = unchecked((uint)error) }; }
         public object WireValue() {
-            if (Type == "desktop-armed") return new { type = Type, epoch = Epoch, generation = Generation, sequence = Sequence.ToString(CultureInfo.InvariantCulture) };
+            if (Type == "desktop-armed") {
+                var armed=new Dictionary<string,object>{{"type",Type},{"epoch",Epoch},{"generation",Generation},{"sequence",Sequence.ToString(CultureInfo.InvariantCulture)}};
+                if(BackgroundPid!=0)armed["backgroundTarget"]=new{pid=BackgroundPid,window=BackgroundWindow.ToString(CultureInfo.InvariantCulture)};
+                return armed;
+            }
             if (Type == "observer-fault") return new { type = Type, epoch = Epoch, generation = Generation, reason = Reason };
             if (Type == "input-activity") {
                 var value = new Dictionary<string, object> { { "type", Type }, { "epoch", Epoch }, { "generation", Generation },
@@ -171,6 +187,8 @@ namespace ProfilePilot.InputObservation {
         string epoch, generation;
         ulong marker, sequence;
         bool active, latched;
+        public uint BackgroundPid {get;private set;}
+        public long BackgroundWindow {get;private set;}
         public readonly BrowserGuardState Browser = new BrowserGuardState();
         public bool ShutdownRequested { get; private set; }
         public bool KeyboardNeeded { get { return active && !latched && !ShutdownRequested; } }
@@ -204,11 +222,12 @@ namespace ProfilePilot.InputObservation {
             if (generations.Contains(command.Generation)) {
                 // An exact live duplicate may repeat the acknowledgement. A
                 // paused/disarmed generation can never be armed a second time.
-                if (generation == command.Generation && marker == command.Marker && KeyboardNeeded) Acknowledge();
+                if (generation == command.Generation && marker == command.Marker && BackgroundPid==command.BackgroundPid && BackgroundWindow==command.BackgroundWindow && KeyboardNeeded) Acknowledge();
                 else Status("invalid-command");
                 return;
             }
             epoch = command.Epoch; generation = command.Generation; marker = command.Marker; active = false; latched = false;
+            BackgroundPid=command.BackgroundPid;BackgroundWindow=command.BackgroundWindow;
             if (generations.Count >= GenerationLimit || !markers.Contains(marker) && markers.Count >= MarkerLimit) { Fail("unavailable"); return; }
             generations.Add(generation);
             bool installed;
@@ -216,7 +235,7 @@ namespace ProfilePilot.InputObservation {
             if (!installed) { Fail("unavailable"); return; }
             RegisterMarker(marker); active = true; Acknowledge();
         }
-        void Acknowledge() { Publish(new OutputRecord { Type = "desktop-armed", Epoch = epoch, Generation = generation, Sequence = sequence }); }
+        void Acknowledge() { Publish(new OutputRecord { Type = "desktop-armed", Epoch = epoch, Generation = generation, Sequence = sequence, BackgroundPid=BackgroundPid, BackgroundWindow=BackgroundWindow }); }
         public void Rearm(InputCommand command) {
             // Runs on the same thread as hook callbacks. Input observed before
             // this command latches the predecessor and forbids replacement;
@@ -233,14 +252,16 @@ namespace ProfilePilot.InputObservation {
                 return;
             }
             generations.Add(command.Generation); RegisterMarker(command.Marker);
+            BackgroundPid=command.BackgroundPid;BackgroundWindow=command.BackgroundWindow;
             generation = command.Generation; marker = command.Marker; Acknowledge();
         }
         public void Disarm(InputCommand command) {
             if (command.Epoch != epoch || command.Generation != generation) return;
             active = false; latched = true;
         }
-        public bool Activity(string kind, bool injected, ulong extraInfo) {
+        public bool Activity(string kind, bool injected, ulong extraInfo, bool relevant = true) {
             if (!KeyboardNeeded) return false;
+            if(BackgroundPid!=0 && !relevant)return false;
             // Actual x64 Windows mouse delivery can retain only 32 bits of
             // dwExtraInfo. The sender uses a separate nonzero 32-bit pointer
             // marker; keyboard markers remain full-width. Compare the received
@@ -299,6 +320,43 @@ namespace ProfilePilot.InputObservation {
         [StructLayout(LayoutKind.Sequential)] struct KeyboardData { public uint Vk, Scan, Flags, Time; public UIntPtr Extra; }
         [StructLayout(LayoutKind.Sequential)] struct Message { public IntPtr Window; public uint Id; public UIntPtr WParam; public IntPtr LParam; public uint Time; public Point Point; public uint Private; }
         delegate IntPtr HookCallback(int code, IntPtr message, IntPtr data);
+        delegate void WinEventCallback(IntPtr hook,uint evt,IntPtr window,int obj,int child,uint thread,uint time);
+        [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] static extern bool IsWindow(IntPtr window);
+        [DllImport("user32.dll")] static extern IntPtr SetWinEventHook(uint min,uint max,IntPtr module,WinEventCallback callback,uint process,uint thread,uint flags);
+        [DllImport("user32.dll")] static extern bool UnhookWinEvent(IntPtr hook);
+        static IntPtr foregroundHook;
+        static readonly WinEventCallback ForegroundCallback=(hook,evt,window,obj,child,thread,time)=>{try{CheckBackgroundForeground();}catch{Protocol.Fail("unavailable");Wake();}};
+        static bool BackgroundWindowValid(){
+            if(Protocol.BackgroundPid==0)return true;
+            var window=new IntPtr(Protocol.BackgroundWindow);uint pid;
+            return IsWindow(window) && GetWindowThreadProcessId(window,out pid)!=0 && pid==Protocol.BackgroundPid;
+        }
+        static uint WindowPid(IntPtr window){uint pid;return window!=IntPtr.Zero && GetWindowThreadProcessId(window,out pid)!=0?pid:0;}
+        static void CheckBackgroundForeground(){
+            if(!Protocol.KeyboardNeeded || Protocol.BackgroundPid==0)return;
+            uint pid=WindowPid(GetForegroundWindow());
+            if(!BackgroundWindowValid() || pid==0){Protocol.Fail("unavailable");Wake();}
+            else if(pid==Protocol.BackgroundPid){Protocol.Fail("target_active");Wake();}
+        }
+        static bool RelevantBackgroundInput(IntPtr pointerWindow,bool pointerInput){
+            if(Protocol.BackgroundPid==0)return true;
+            if(!BackgroundWindowValid())return true;
+            uint foreground=WindowPid(GetForegroundWindow());
+            if(foreground==0 || foreground==Protocol.BackgroundPid)return true;
+            if(pointerWindow==IntPtr.Zero)return pointerInput;
+            uint pointer=WindowPid(GetAncestor(pointerWindow,2));
+            return pointer==0 || pointer==Protocol.BackgroundPid;
+        }
+        static bool RelevantBackgroundMouse(MouseData mouse){
+            if(Protocol.BackgroundPid==0 || !Protocol.KeyboardNeeded)return true;
+            IntPtr previous=SetThreadDpiAwarenessContext(new IntPtr(-4));
+            if(previous==IntPtr.Zero)throw new InvalidOperationException("Pointer DPI context unavailable");
+            try {
+                if(!AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(),new IntPtr(-4)))throw new InvalidOperationException("Pointer DPI context unconfirmed");
+                return RelevantBackgroundInput(WindowFromPoint(mouse.Point),true);
+            } finally {SetThreadDpiAwarenessContext(previous);}
+        }
         [DllImport("user32.dll", SetLastError = true)] static extern IntPtr SetWindowsHookEx(int id, HookCallback callback, IntPtr module, uint thread);
         [DllImport("user32.dll")] static extern bool UnhookWindowsHookEx(IntPtr hook);
         [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr hook, int code, IntPtr message, IntPtr data);
@@ -374,11 +432,14 @@ namespace ProfilePilot.InputObservation {
         static bool InstallKeyboard() {
             // A replacement generation can reuse this one hook on the same
             // message thread. Never install a second hook over a live handle.
+            if(foregroundHook==IntPtr.Zero)foregroundHook=SetWinEventHook(3,3,IntPtr.Zero,ForegroundCallback,0,0,0);
+            if(foregroundHook==IntPtr.Zero)return false;
             if (keyboardHook != IntPtr.Zero) return true;
             keyboardHook = SetWindowsHookEx(KeyboardHook, KeyboardCallback, GetModuleHandle(null), 0);
             return keyboardHook != IntPtr.Zero;
         }
         static bool RemoveKeyboard() {
+            if(foregroundHook!=IntPtr.Zero){if(!UnhookWinEvent(foregroundHook))return false;foregroundHook=IntPtr.Zero;}
             if (keyboardHook == IntPtr.Zero) return true;
             if (!UnhookWindowsHookEx(keyboardHook)) return false;
             keyboardHook = IntPtr.Zero; return true;
@@ -396,6 +457,7 @@ namespace ProfilePilot.InputObservation {
                 else if (command.Kind == "DISARM") Protocol.Disarm(command);
                 else Protocol.Status(command.Kind == "INVALID_PID" ? "invalid-pid" : "invalid-command");
             }
+            CheckBackgroundForeground();
             if (!Protocol.KeyboardNeeded && !RemoveKeyboard()) { Protocol.Fail("unavailable"); Stop(); }
             if (Protocol.ShutdownRequested) Stop();
         }
@@ -441,7 +503,7 @@ namespace ProfilePilot.InputObservation {
                 int message = messageValue.ToInt32();
                 // Observe before legacy suppression: a guarded browser click
                 // must still pause an unrelated desktop generation.
-                if (Protocol.Activity(MouseKind(message), (mouse.Flags & 3) != 0, mouse.Extra.ToUInt64())) Wake();
+                if (Protocol.Activity(MouseKind(message), (mouse.Flags & 3) != 0, mouse.Extra.ToUInt64(), RelevantBackgroundMouse(mouse))) Wake();
                 if (Protocol.ShutdownRequested) { Stop(); return CallNextHookEx(mouseHook, code, messageValue, data); }
                 if (Protocol.Browser.Count == 0) return CallNextHookEx(mouseHook, code, messageValue, data);
                 bool suppress=BrowserMouse(mouse,message);
@@ -457,7 +519,7 @@ namespace ProfilePilot.InputObservation {
             if (code < 0) return CallNextHookEx(keyboardHook, code, message, data);
             try {
                 var keyboard = (KeyboardData)Marshal.PtrToStructure(data, typeof(KeyboardData));
-                if (Protocol.Activity("keyboard", (keyboard.Flags & 0x12) != 0, keyboard.Extra.ToUInt64())) Wake();
+                if (Protocol.Activity("keyboard", (keyboard.Flags & 0x12) != 0, keyboard.Extra.ToUInt64(), RelevantBackgroundInput(IntPtr.Zero,false))) Wake();
                 if (Protocol.ShutdownRequested) Stop();
             } catch { Protocol.Fail("unavailable"); Stop(); }
             // Desktop observation never swallows keyboard input.

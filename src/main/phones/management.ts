@@ -11,6 +11,14 @@ export async function executePhoneCommand(command: PhoneManagementCommand, servi
   }
 }
 async function executeValidatedPhoneCommand(command: PhoneManagementCommand, service: PhonesService, source: PhoneCommandSource): Promise<unknown> {
+  const actionInput = () => {
+    const p = z.object({ id: z.string(), sessionId: z.string(), generation: z.number().int().nonnegative(), requestId: z.string().uuid(), action: phoneActionSchema, observeAfter: z.boolean().optional() }).strict().parse(command.params);
+    return { ...p, observeAfter: p.observeAfter ?? source === 'external' };
+  };
+  if (command.method === "default") {
+    const params = z.object({ id: z.string().min(1).nullable().optional() }).strict().parse(command.params || {});
+    return params.id === undefined ? service.snapshot().defaultDevice : service.setDefault(params.id);
+  }
   if (command.method === "internet-configure") return service.internet.configure(command.params);
   if (command.method === "internet-status" || command.method === "internet-pair") {
     z.object({}).strict().parse(command.params || {});
@@ -52,7 +60,7 @@ async function executeValidatedPhoneCommand(command: PhoneManagementCommand, ser
     if (command.method === "connect") { const p = z.object({ id: z.string(), update: z.boolean().optional() }).strict().parse(command.params); return service.iphones.connect(p.id); }
     if (command.method === "disconnect") return service.iphones.disconnect(idOnly());
     if (command.method === "start") return service.iphones.start(command.params);
-    if (command.method === "action") return service.iphones.perform(command.params as any);
+    if (command.method === "action") return service.iphones.perform(actionInput());
     if (["pause", "resume", "stop"].includes(command.method)) {
       const p = z.object({ id: z.string(), expected: z.object({ sessionId: z.string(), generation: z.number().int().nonnegative() }).strict().optional() }).strict().parse(command.params);
       return service.iphones.control(p.id, command.method as "pause" | "resume" | "stop", p.expected);
@@ -118,7 +126,7 @@ async function executeValidatedPhoneCommand(command: PhoneManagementCommand, ser
     const p = z.object({ id: z.string(), mode: z.enum(["view", "control"]).default("control"), controller: z.string().default("本机用户"), task: z.string().default("") }).strict().parse(command.params);
     return service.basicStart(p.id, p.mode, p.controller, p.task, source);
   }
-  if (command.method === "basic-action") return service.basicPerform(z.object({ id: z.string(), sessionId: z.string(), generation: z.number(), requestId: z.string(), action: phoneActionSchema }).strict().parse(command.params));
+  if (command.method === "basic-action") return service.basicPerform(actionInput());
   if (command.method === "basic-mode") return service.basicSetMode(z.object({ id: z.string(), sessionId: z.string(), generation: z.number(), mode: z.enum(["view", "control"]) }).strict().parse(command.params));
   if (["basic-pause", "basic-resume", "basic-stop"].includes(command.method)) {
     const { id } = z.object({ id: z.string() }).strict().parse(command.params);
@@ -156,8 +164,8 @@ async function executeValidatedPhoneCommand(command: PhoneManagementCommand, ser
     return service.startWrapper(p.id, p.mode, p.controller, p.task, p.backend);
   }
   if (method === "wrapper-action") {
-    const p = z.object({ lease: z.string().uuid(), generation: z.number().int().nonnegative(), action: phoneActionSchema, requestId: z.string().uuid() }).strict().parse(command.params);
-    return service.performWrapper(p.lease, p.generation, p.action, p.requestId);
+    const p = z.object({ lease: z.string().uuid(), generation: z.number().int().nonnegative(), action: phoneActionSchema, requestId: z.string().uuid(), observeAfter: z.boolean().optional() }).strict().parse(command.params);
+    return service.performWrapper(p.lease, p.generation, p.action, p.requestId, p.observeAfter ?? source === 'external');
   }
   if (method.startsWith("wrapper-")) {
     const { lease } = z.object({ lease: z.string().uuid() }).strict().parse(command.params);
@@ -193,7 +201,7 @@ async function executeValidatedPhoneCommand(command: PhoneManagementCommand, ser
     const input = z.object({ id: z.string(), setting: z.enum(["accessibility", "overlay", "notifications", "developerOptions", "usbDebugging", "wirelessDebugging"]) }).strict().parse(command.params);
     return service.openSettings(input.id, input.setting);
   }
-  if (method === "action") return service.perform(z.object({ id: z.string(), sessionId: z.string(), generation: z.number(), requestId: z.string(), action: phoneActionSchema }).strict().parse(command.params));
+  if (method === "action") return service.perform(actionInput());
   if (method === "rename") { const input = z.object({ id: z.string(), name: z.string() }).strict().parse(command.params); await service.rename(input.id, input.name); return service.snapshot(); }
   if (method === "start") { const input = z.object({ id: z.string(), mode: z.enum(["view", "control"]).default("control"), controller: z.string().default("本机用户"), task: z.string().default(""), keepScreenOn: z.boolean().default(true) }).strict().parse(command.params); return service.start(input.id, input.mode, input.controller, input.task, source, input.keepScreenOn); }
   const { id } = z.object({ id: z.string() }).strict().parse(command.params);

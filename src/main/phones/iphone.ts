@@ -10,6 +10,7 @@ import { IphoneTools, iphoneUdid } from "./iphone-tools";
 import { IphoneUsb, iphoneBundleId } from "./iphone-usb";
 import type { IphoneUsbStatus } from "../../shared/iphones";
 import { IphoneSigning } from "./iphone-signing";
+import { observeAfterAction } from '../action-feedback';
 
 const savedSchema = iphoneAddSchema.extend({ id: z.string().uuid(), fingerprint: z.string().uuid().optional(), udid: iphoneUdid.optional(), bundleId: iphoneBundleId.optional() });
 type Saved = z.infer<typeof savedSchema>;
@@ -17,7 +18,7 @@ type Frame = { width: number; height: number; pointsWidth: number; pointsHeight:
 type Entry = { saved: Saved; device: PhoneDevice; remoteSession?: string; requests: Set<string>; pending?: AbortController; probing?: Promise<PhoneDevice>; frame?: Frame; disconnected?: boolean; stopping?: boolean };
 const active = (entry: Entry) => !!entry.device.state && !["idle", "stopped", "disconnected"].includes(entry.device.state.phase);
 const sizeSchema = z.object({ width: z.number().positive().max(20000), height: z.number().positive().max(20000) });
-const actionSchema = z.object({ id: z.string(), sessionId: z.string().min(1), generation: z.number().int().nonnegative(), requestId: z.string().uuid(), action: phoneActionSchema }).strict();
+const actionSchema = z.object({ id: z.string(), sessionId: z.string().min(1), generation: z.number().int().nonnegative(), requestId: z.string().uuid(), action: phoneActionSchema, observeAfter: z.boolean().optional() }).strict();
 
 /** Host-owned iPhone sessions. Persist endpoints only, never control authority. */
 export class IphonesService {
@@ -266,7 +267,18 @@ export class IphonesService {
           result = { accepted: true };
         }
       }
-      state.lastAction = action.kind; return { state: structuredClone(state), result };
+      state.lastAction = action.kind;
+      if (p.observeAfter && !read) {
+        const feedback = await observeAfterAction({ check, errorCode: 'PHONE_OBSERVATION_FAILED', invalidate: () => { entry.frame = undefined; },
+          observe: async () => {
+            const tree = await call('/source?format=json');
+            if (!tree || typeof tree !== 'object') throw new Error('iPhone 未返回有效页面树。');
+            return { kind: 'accessibility', capturedAt: this.now(), tree };
+          }
+        });
+        return { state: structuredClone(state), result, ...feedback };
+      }
+      return { state: structuredClone(state), result };
     } catch (error) {
       if (sentInput && state.generation === p.generation) this.invalidate(entry, "paused");
       throw error;

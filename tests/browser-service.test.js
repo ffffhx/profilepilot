@@ -90,6 +90,21 @@ test('desktop disconnect/reconnect preserves CLI ownership, pairing and operatio
   await until(f.stopped, 'idle service can be explicitly stopped');
 });
 
+test('desktop snapshots distinguish a live service with an offline extension from a lost service stream', async t => {
+  const f = await fixture(t), extension = await f.connectExtension();
+  const desktop = await f.desktop();
+  assert.equal(desktop.serviceState().status, 'connected');
+  extension.peer.close();
+  await until(() => desktop.states()[0]?.connected === false, 'extension disconnection should reach desktop');
+  assert.equal(desktop.serviceState().status, 'connected', 'extension loss does not imply a service outage');
+  for (const stream of f.host.clients.values()) stream.destroy();
+  await until(() => desktop.serviceState().status === 'disconnected', 'service stream loss should be explicit');
+  assert.ok(desktop.serviceState().error);
+  await desktop.start();
+  assert.deepEqual(desktop.serviceState(), { status: 'connected' });
+  assert.equal(desktop.states()[0].connected, false, 'service recovery must not fabricate extension recovery');
+});
+
 test('App disconnect hands back only its own session; a late claim cannot leave the browser running', { timeout: 10000 }, async t => {
   const f = await fixture(t), extension = await f.connectExtension();
   const desktop = await f.desktop();

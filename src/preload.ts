@@ -1,5 +1,10 @@
 import { BROWSER_CONNECTION_CHANNEL, BROWSER_CONNECTION_CHANGED, type BrowserConnectionApi, type BrowserConnectionSnapshot } from "./shared/browser-connection";
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
+import { APP_UPDATE_CHANNEL, type AppUpdateApi } from './shared/app-update';
+contextBridge.exposeInMainWorld('appUpdate', {
+  status: () => ipcRenderer.invoke(APP_UPDATE_CHANNEL, 'status'),
+  open: () => ipcRenderer.invoke(APP_UPDATE_CHANNEL, 'open')
+} satisfies AppUpdateApi);
 import { IPC_CHANNELS } from "./shared/ipc";
 import { LOCAL_APPS_CHANNEL, type LocalAppsApi } from "./shared/local-apps";
 import { DESKTOP_CHANNEL, DESKTOP_CHANGED, type DesktopApi, type DesktopStatus, type DesktopReturnExpectation } from "./shared/desktop";
@@ -184,10 +189,7 @@ const profileManagerApi: ProfileManagerApi = {
     ipcRenderer.invoke(IPC_CHANNELS.setShellIntegrationEnabled, enabled),
   inspectAgentIntegration: (): Promise<AgentIntegrationDiagnostic> =>
     ipcRenderer.invoke(IPC_CHANNELS.inspectAgentIntegration),
-  readBrowserPreferences: () => ipcRenderer.invoke(IPC_CHANNELS.readBrowserPreferences),
-  readControlPreferences: domain => ipcRenderer.invoke(IPC_CHANNELS.readControlPreferences, domain),
-  writeControlPreferences: request => ipcRenderer.invoke(IPC_CHANNELS.writeControlPreferences, request),
-  writeBrowserPreferences: request => ipcRenderer.invoke(IPC_CHANNELS.writeBrowserPreferences, request),
+  setDefaultProfile: id => ipcRenderer.invoke(IPC_CHANNELS.setDefaultProfile, id),
   setAgentWrapperEnabled: (tool, enabled): Promise<AgentIntegrationDiagnostic> =>
     ipcRenderer.invoke(IPC_CHANNELS.setAgentWrapperEnabled, tool, enabled),
   setAgentSkillEnabled: (tool, enabled): Promise<AgentIntegrationDiagnostic> =>
@@ -403,6 +405,7 @@ const phonesApi: PhonesApi = {
   videoStop: streamId => ipcRenderer.invoke(PHONE_CHANNEL, "video-stop", { streamId }),
   openSettings: (id, setting) => ipcRenderer.invoke(PHONE_CHANNEL, "settings", { id, setting }),
   rename: (id, name) => ipcRenderer.invoke(PHONE_CHANNEL, "rename", { id, name }),
+  setDefault: id => ipcRenderer.invoke(PHONE_CHANNEL, "default", { id }),
   start: (id, mode, controller, task, keepScreenOn) => ipcRenderer.invoke(PHONE_CHANNEL, "start", { id, mode, controller, task, ...(keepScreenOn === undefined ? {} : { keepScreenOn }) }),
   control: (id, command, expected) => ipcRenderer.invoke(PHONE_CHANNEL, command, expected ? { id, expected } : { id }),
   wake: id => ipcRenderer.invoke(PHONE_CHANNEL, "wake", { id }),

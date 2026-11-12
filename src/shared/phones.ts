@@ -84,6 +84,7 @@ export interface PhoneDevice {
   error: string;
 }
 export interface PhonesSnapshot {
+  defaultDevice?: import("./default-targets").DefaultPhoneStatus;
   devices: PhoneDevice[]; adbAvailable: boolean; error: string; computer: string;
   companionApp?: { packageName: string; name: string; variant: "debug" | "release" };
 }
@@ -107,11 +108,12 @@ export type PhoneAction =
   | { kind: "find" | "click"; selector: PhoneSelector }
   | { kind: "fill"; selector: PhoneSelector; text: string }
   | { kind: "scroll"; selector: PhoneSelector; direction: "forward" | "backward" };
-export interface PhoneActionInput { id: string; sessionId: string; generation: number; requestId: string; action: PhoneAction; }
-export interface PhoneActionResult { state: PhoneSessionState; result: unknown; }
+export interface PhoneActionInput { id: string; sessionId: string; generation: number; requestId: string; action: PhoneAction; observeAfter?: boolean; }
+export interface PhoneActionResult { state: PhoneSessionState; result: unknown; actionOutcome?: 'completed'; observationStatus?: 'available' | 'unavailable'; observation?: unknown; observationError?: { code: string; message: string }; nextStep?: string; }
 export interface PhoneBasicModeInput { id: string; sessionId: string; generation: number; mode: "view" | "control"; }
 export type PhoneSetting = "accessibility" | "overlay" | "notifications" | "developerOptions" | "usbDebugging" | "wirelessDebugging";
 export interface PhonesApi {
+  setDefault(id: string | null): Promise<PhonesSnapshot>;
   iphoneSetup(): Promise<import("./iphones").IphoneToolsStatus>;
   iphoneDoctor(): Promise<import("./iphones").IphoneToolsStatus>;
   iphonePrepareWda(): Promise<import("./iphones").IphoneWdaArtifact>;

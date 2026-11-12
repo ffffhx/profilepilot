@@ -25,6 +25,7 @@ import { agentControlNoticePaths, errorMessage, externalUserDataDirFromProfileId
 import { normalizeMiniProfileIds, normalizeProfileOrder } from "./profile-layout";
 import { ProfileRuntimeMaintenance } from "./profile-maintenance";
 import { ProfileManagerError } from "./profile-manager-error";
+import { DefaultTargetStore } from "./default-targets";
 import type { InputGuardFactory } from "./input-guard";
 import { ProfileStateReader, type CollectedProfileState, type ControlAdmissionState } from "./profile-state";
 import type { WindowsControlSample } from './windows-platform';
@@ -722,6 +723,14 @@ export class ProfileManager {
 
   // 持久化主窗口 Profile 表格的拖拽排序。传入的是期望的完整显示顺序（可只含一部分，
   // 未列出的 Profile 展示时排在后面、保持自然顺序）。语义与 setMiniProfileOrder 一致。
+  async setDefaultProfile(id: string | null): Promise<void> {
+    const defaults = new DefaultTargetStore(this.dataDir);
+    if (id === null) { defaults.setProfile(null); return; }
+    const profile = (await this.getState()).profiles.find(item => item.id === id);
+    if (!profile) throw new ProfileManagerError("没有找到这个 Profile。", "PROFILE_NOT_FOUND");
+    defaults.setProfile({ id: profile.id, name: profile.name });
+  }
+
   async setMainProfileOrder(ids: string[]): Promise<void> {
     const state = await this.getState();
     const validProfileIds = new Set(state.profiles.map((profile) => profile.id));

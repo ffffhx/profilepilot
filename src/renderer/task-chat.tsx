@@ -13,6 +13,7 @@ import { draftKey, messageDelivery, messageKeyAction, type MessageDraft, type Me
 import { isAtTaskLatest, scrollToTaskLatest, syncTaskScrollInsets } from "./task-interaction-dom";
 import { renderTaskEvents } from "./task-events";
 import { ChatRowCache, taskChatRows, type ChatRow } from "./task-chat-model";
+import { taskErrorMessage } from "./task-errors";
 
 export interface TaskChatProps {
   task: BrowserTask; stream?: TaskStream; drafts: MessageDrafts; attachments: TaskAttachment[]; settings: TaskSettings;
@@ -89,7 +90,7 @@ function ChatComposer({ runtime }: { runtime: ReturnType<typeof useExternalStore
       await deliverDraft(props);
       runtime.thread.composer.setText(drafts.get(key).text);
       refresh(v => v + 1);
-    } catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)); }
+    } catch (failure) { setError(taskErrorMessage(failure)); }
     finally { lock.current = false; setSending(false); }
   };
   const compact = TERMINAL_TASKS.has(task.status) && !task.pending && !task.messageQueue?.length;

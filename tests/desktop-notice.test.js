@@ -155,6 +155,7 @@ test('show failure during an executed action notification preserves its successf
     await f.claim(); f.mode.afterAction = () => { f.mode.show = 'throw'; };
     const request = { action: 'desktop', method: 'action', session: 'notice-test', requestId: randomUUID(), params: { kind: 'invoke', ref: 'e1', version: 'c'.repeat(32) } };
     const result = await f.service.execute(request); assert.equal(result.executed, true); assert.equal(result.requiresObservation, true);
+    assert.equal(result.observationStatus, 'unavailable'); assert.equal(result.observation, undefined);
     assert.equal(f.service.status().inputObservation.reason, 'notice_unavailable'); assert.deepEqual(await f.service.execute(request), result);
     assert.equal(f.drivers.reduce((count, driver) => count + driver.actions, 0), 1);
   } finally { await f.close(); }

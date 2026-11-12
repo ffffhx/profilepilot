@@ -1,4 +1,4 @@
-export const ENGINE_VERSION = "1.2.0";
+export const ENGINE_VERSION = "1.3.0";
 export class EngineError extends Error {
   constructor(message: string, readonly code = "BROWSER_ENGINE_ERROR") { super(message); }
 }
@@ -9,6 +9,7 @@ export interface EngineCommand {
   timeout: number;
   endpoint?: string;
   noAutoDialog?: boolean;
+  observeAfterAction?: boolean;
 }
 
 /** Prefix parsing stops at the verb: fill/eval payloads are never CLI flags. */
@@ -31,6 +32,7 @@ export function parseEngineCommand(input: string[], env = process.env): EngineCo
       case "--cdp": command.endpoint = value(); break;
       case "--timeout": command.timeout = positiveNumber(value(), "timeout"); break;
       case "--json": command.json = true; break;
+      case "--no-observe": command.observeAfterAction = false; break;
       case "--no-auto-dialog":
         command.noAutoDialog = split >= 0 ? value() !== "false" : ["true", "false"].includes(input[i + 1]) ? input[++i] === "true" : true;
         break;
@@ -89,6 +91,8 @@ export function splitCommand(line: string): string[] {
 
 export const engineHelp = `ProfilePilot TypeScript browser engine ${ENGINE_VERSION}
 Use ppilot browser --session TASK --cdp LOGICAL_PORT COMMAND
+Page actions wait 500 ms and include a fresh observation. --no-observe skips
+this feedback when a higher-level caller observes after a composite operation.
 
 open URL | back | forward | reload
 snapshot [-i] [-c] [-d DEPTH] [-s SELECTOR]

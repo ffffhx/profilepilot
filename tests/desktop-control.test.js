@@ -163,7 +163,7 @@ for (const coordinateInputAvailable of [false, undefined, null, 'true']) test(`c
   } finally { service.close(); }
 });
 
-test('action with observation returns a next version; receipt lookup never repeats input or reads', async () => {
+test('action defaults to a delayed next observation; receipt lookup never repeats input or reads', async () => {
   let reads = 0, inputs = 0;
   const f = fixture({ request: async op => {
     if (op === 'windows') return { windows: [target] };
@@ -172,10 +172,14 @@ test('action with observation returns a next version; receipt lookup never repea
   } });
   try {
     await claim(f.service);
-    const action = command('action', { observeAfter: true, requestId: randomUUID(), params: { version, kind: 'invoke', ref: 'e1' } });
+    const action = command('action', { requestId: randomUUID(), params: { version, kind: 'invoke', ref: 'e1' } });
+    const started = Date.now();
     const result = await f.service.execute(action);
+    assert.ok(Date.now() - started >= 450);
+    assert.equal(result.actionOutcome, 'completed'); assert.equal(result.observationStatus, 'available');
     assert.equal(result.executed, true); assert.equal(result.requiresObservation, false); assert.equal(result.observation.version, version);
     assert.deepEqual(await f.service.execute(action), result);
+    assert.deepEqual(await f.service.execute({ ...action, observeAfter: true }), result);
     assert.equal(inputs, 1); assert.equal(reads, 1);
     await assert.rejects(f.service.execute({ ...action, observeAfter: false }), { code: 'DESKTOP_REQUEST_CHANGED' });
   } finally { f.service.close(); }

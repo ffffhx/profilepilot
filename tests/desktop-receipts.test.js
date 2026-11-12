@@ -7,7 +7,7 @@ const { runDesktopCli } = loadCli('src/main/desktop/cli.ts');
 const target = { id: 'a'.repeat(32), title: 'Fixture', process: 'fixture', pid: 1, className: 'Form' };
 const version = 'b'.repeat(32);
 const command = (method, extra = {}) => ({ action: 'desktop', method, session: 'receipt-test', ...extra });
-const action = requestId => command('action', { requestId, params: { version, ref: 'e1', kind: 'invoke' } });
+const action = requestId => command('action', { requestId, observeAfter: false, params: { version, ref: 'e1', kind: 'invoke' } });
 function fixture(request) {
   let clock = 100, calls = 0;
   const service = new DesktopService({ platform: 'win32', allowUnobservedTestDriver: true, available: () => true, now: () => clock, driver: () => ({ close() {}, async request(op, params) {

@@ -1,6 +1,7 @@
 import { dateFormatter, store } from "./state";
 import type { AgentActivity, CdpClientInfo, CdpPortSuggestion, ProfileExtensionInfo, PublicProfile } from "../shared/types";
 import type { BusyProgressStep } from "./types";
+export { renderButtonLabel } from "./button-label";
 
 export function renderBusyBanner(): string {
   if (!store.busyState) {
@@ -16,7 +17,7 @@ export function renderBusyBanner(): string {
   `;
 }
 
-export function renderOperationProgress(key: string, title: string): string {
+export function renderOperationProgress(key: string, title: string, controls = ""): string {
   const activeBusyState = store.busyState?.key === key ? store.busyState : null;
   if (!activeBusyState) {
     return "";
@@ -33,6 +34,7 @@ export function renderOperationProgress(key: string, title: string): string {
         ${activeBusyState.stepIndex && activeBusyState.stepCount ? `<em data-busy-count>${activeBusyState.stepIndex}/${activeBusyState.stepCount}</em>` : ""}
       </div>
       ${activeBusyState.steps?.length ? renderOperationProgressSteps(activeBusyState.steps) : ""}
+      ${controls ? `<div class="operation-progress-actions">${controls}</div>` : ""}
     </div>
   `;
 }
@@ -52,14 +54,6 @@ export function renderOperationProgressSteps(steps: BusyProgressStep[]): string 
         .join("")}
     </ol>
   `;
-}
-
-export function renderButtonLabel(isLoading: boolean, idleLabel: string, loadingLabel: string): string {
-  if (!isLoading) {
-    return escapeHtml(idleLabel);
-  }
-
-  return `<span class="inline-spinner" aria-hidden="true"></span><span>${escapeHtml(loadingLabel)}</span>`;
 }
 
 export function formatCdpPortSuggestionNote(suggestion: CdpPortSuggestion): string {

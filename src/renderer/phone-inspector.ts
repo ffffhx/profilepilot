@@ -48,7 +48,9 @@ export function createPhoneInspector(container: HTMLElement) {
     refreshButton.disabled = !ready() || busy || pending;
     const status = workspaceHidden() ? "画面更新已暂停" : !ready() ? hint() : busy ? "正在处理手机操作，稍后继续更新画面" : failure ? `画面更新失败，正在重试：${failure}`
       : capturedAt ? video.active ? "实时预览 · 点击放大" : `连续预览${previewFps ? ` · ${Math.min(2, previewFps).toFixed(1)} 帧/秒` : ""}` : "正在获取手机画面…";
-    find<HTMLElement>(".phone-inspector-caption").textContent = status;
+    const caption = find<HTMLElement>(".phone-inspector-caption");
+    caption.textContent = status;
+    caption.hidden = !capturedAt && status === hint();
     if (enlarged) {
       enlarged.caption.textContent = status;
       enlarged.image.hidden = !capturedAt || videoPainted;

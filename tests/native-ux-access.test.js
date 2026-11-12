@@ -3,11 +3,11 @@ const assert = require('node:assert/strict');
 const { readFileSync } = require('node:fs');
 const Module = require('node:module');
 const path = require('node:path');
-const { transformSync } = require('esbuild');
+const { buildSync } = require('esbuild');
 function sourceModule(file) {
   const filename = path.resolve(file), compiled = new Module(filename, module);
   compiled.filename = filename; compiled.paths = Module._nodeModulePaths(path.dirname(filename));
-  compiled._compile(transformSync(readFileSync(filename, 'utf8'), { loader: 'ts', format: 'cjs', target: 'node20' }).code, filename);
+  compiled._compile(buildSync({ entryPoints: [filename], bundle: true, platform: 'node', format: 'cjs', target: 'node20', write: false }).outputFiles[0].text, filename);
   return compiled.exports;
 }
 const { nativeBrowserAccess, normalizeNativeAccess } = sourceModule('src/main/tasks/native-access.ts');

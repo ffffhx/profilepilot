@@ -50,8 +50,10 @@ export type ManagementTaskSummary = Pick<ManagementTask,
 export interface ManagementTaskPage { task: ManagementTask; events: TaskEvent[]; cursor: number; hasMore: boolean; stream?: TaskStream; revision?: number; reset?: boolean; }
 
 export type ProfilePilotManagementCommand = ProfilePilotTaskCommand | PhoneManagementCommand | DesktopCommand | LocalAppManagementCommand | GpuiCommand
+  | { action: "app"; method: "status" | "quit" | "restart" }
   | { action: "ping" }
   | { action: "profile.list" }
+  | { action: "profile.default"; selector?: string | null }
   | { action: "profile.get"; selector: string }
   | { action: "profile.create"; name: string }
   | { action: "profile.rename"; selector: string; name: string }

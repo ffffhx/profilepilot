@@ -6,14 +6,15 @@ const lifecycle = Object.fromEntries(["status", "handoff", "resume", "complete",
   usage: command, description: command === "status" ? "读取连接、任务和控制权。" : "保持原任务会话；resume 必须由用户明确交还控制后调用。"
 }])) as Record<string, CommandContract>;
 const common: Record<string, CommandContract> = {
+  default: { usage: "default [--json]", description: "读取浏览器页面保存的默认 Profile；不会启动应用或授予控制权限。", note: "用户本次指定的目标和已有任务会话优先；默认目标不可用时停止，不选择其他 Profile。" },
   ...lifecycle,
   schema: { usage: "schema [COMMAND]", description: "本地输出当前连接的命令契约；不会连接或操作浏览器。" },
   capabilities: { usage: "capabilities [COMMAND]", description: "本地输出当前连接的能力契约；实际准备状态请运行 doctor。" },
   observe: { usage: "observe [--output PNG_PATH]", description: "读取当前页面及 version/ref。", input: browserContract.operations.observe, note: "可选截图失败时检查 partialResult / availability；不得使用旧图片。" },
   action: { usage: "action --params-file ACTION.json | action --params-stdin", description: "使用最近观察的 version/ref 操作；不会自动重放。", input: browserContract.operations.action, example: '{"kind":"click","version":"FROM_OBSERVE","ref":"e1"}' },
   open: { usage: "open URL", description: "在当前任务页打开 HTTP/HTTPS 地址。" },
-  doctor: { usage: "doctor", description: "只读检查当前路由的连接与控制准备状态。" },
-  readiness: { usage: "readiness", description: "只读检查当前路由的连接与控制准备状态。" },
+  doctor: { usage: "doctor", description: "只读检查当前路由的连接与控制准备状态。", note: "扩展连接返回 connectionDiagnostics 历史证据和日志路径。离线时从扩展弹窗导出连接诊断；无法读取版本不表示需要更新，缺少日志不表示崩溃。" },
+  readiness: { usage: "readiness", description: "只读检查当前路由的连接与控制准备状态。", note: "扩展离线或尚未上报时，版本与能力尚无法确认；不据此判定需要更新。" },
   cdp: { usage: "cdp METHOD --params-file PARAMS.json", description: "在已授权的目标内执行 CDP；先检查实际协议能力。", note: "不确定写操作结果时检查状态，不重放。" }
 };
 const extension: Record<string, CommandContract> = {

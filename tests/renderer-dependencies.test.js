@@ -21,7 +21,7 @@ test('renderer runtime dependencies are acyclic and presentation does not import
     });
     edges.set(file, deps);
     if (file.startsWith(path.join(root, 'render') + path.sep)) {
-      for (const name of ['busy', 'confirm', 'control-preferences', 'state-actions', 'main']) {
+      for (const name of ['busy', 'confirm', 'state-actions', 'main']) {
         assert.ok(!deps.includes(path.join(root, name + '.ts')), `${path.relative(root,file)} imports controller ${name}`);
       }
     }

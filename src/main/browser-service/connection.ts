@@ -4,7 +4,8 @@ import path from 'node:path';
 import { defaultDataDir } from '../fs-util';
 import { NativeControlError } from '../native-control/errors';
 
-export const BROWSER_SERVICE_VERSION = 1;
+// v2 adds post-action observation receipts; do not silently reuse a v1 daemon.
+export const BROWSER_SERVICE_VERSION = 2;
 export interface BrowserServiceConnection {
   version: number; port: number; token: string; pid: number;
   service?: string; serviceVersion?: number;

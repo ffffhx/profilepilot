@@ -41,7 +41,7 @@ async function setup(t, options = {}) {
       calls.push({ method, params, sessionId });
       switch (method) {
         case 'Browser.getVersion': return { product: `Chrome/${options.major || 153}.0.0.0` };
-        case 'Target.getTargets': return { targetInfos: [{ type: 'page', targetId: 'invitation', url: options.missingPage ? 'https://example.test' : url }, { type: 'page', targetId: 'user-work', url: 'https://example.test' }, { type: 'service_worker', targetId: 'extension-worker', url: `chrome-extension://${extensionId}/background.js` }] };
+        case 'Target.getTargets': return { targetInfos: [{ type: 'page', targetId: 'invitation', url: options.missingPage ? 'https://example.test' : url }, { type: 'page', targetId: 'user-work', url: 'https://example.test' }, { type: 'service_worker', targetId: 'extension-worker', url: `chrome-extension://${extensionId}/${JSON.parse(await fs.readFile(path.join(source, 'manifest.json'))).background.service_worker}` }] };
         case 'Target.createTarget': return { targetId: 'verification' };
         case 'Target.attachToTarget': return { sessionId: params.targetId + '-session' };
         case 'Runtime.evaluate':

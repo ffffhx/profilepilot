@@ -1,9 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { backgroundDesktopActions } from '../../shared/desktop';
+import { backgroundTargetSchema, sameBackgroundTarget, type BackgroundTarget } from './input-observer';
 import { existsSync } from 'node:fs';
 import type { DesktopImage, DesktopObservation, DesktopStatus, DesktopWindow, DesktopWindowList, DesktopReturnExpectation } from '../../shared/desktop';
 import { desktopError, desktopExecutable, DesktopWorker, type DesktopDriver } from './worker';
 import { desktopCommandSchema, desktopWindowIdSchema as windowId, type DesktopCommand } from './schema';
 import { waitForDesktopCondition } from './wait';
+import { observeAfterAction } from '../action-feedback';
 import { desktopPauseMessage } from './errors';
 import type { DesktopAdmissionDecision } from './admission';
 import { describeInputObserverStartupFailure, inputObserverStartupErrorFailure, inputObserverStartupFailureSchema,
@@ -21,7 +24,7 @@ type Session = NonNullable<DesktopStatus['session']> & {
   driver: DesktopDriver; revision: number; coordinateVersion?: string; input?: InputBinding; freshReadRequired?: boolean;
 };
 export interface DesktopServiceInputObserver {
-  arm(generation: string, marker: string): Promise<DesktopObserverSubscription>;
+  arm(generation: string, marker: string, backgroundTarget?: BackgroundTarget): Promise<DesktopObserverSubscription>;
   disarm(generation: string): void;
   snapshot(): { connected: boolean; epoch: string | null; desktop: DesktopObserverSubscription | null };
   // Detach only this service's subscription/callback; never dispose the shared
@@ -89,7 +92,7 @@ export class DesktopService {
     return { supported, available, platform: this.platform, stopShortcutAvailable: this.options.stopShortcutAvailable?.() ?? false,
       reason: this.closed ? '桌面服务已关闭。' : !supported ? '本机桌面控制目前支持 Windows；macOS 暂未提供原生桌面驱动。' : !available ? '桌面控制组件尚未安装，请更新 ProfilePilot。' : undefined,
       inputObservation: this.observationStatus(),
-      session: owner ? { name: owner.name, window: { ...owner.window }, state: owner.state, expiresAt: owner.expiresAt, revision: owner.revision } : null };
+      session: owner ? { name: owner.name, window: { ...owner.window }, mode: owner.mode || 'interactive', state: owner.state, expiresAt: owner.expiresAt, revision: owner.revision } : null };
   }
   private observationStatus(): DesktopStatus['inputObservation'] {
     const input = this.owner?.input;
@@ -162,7 +165,7 @@ export class DesktopService {
   }
   private pauseForOperationFailure(owner: Session, revision: number, error: unknown) {
     const reasons: Record<string, string> = { DESKTOP_OUTCOME_UNKNOWN: 'outcome_unknown',
-      DESKTOP_DESKTOP_LOCKED: 'desktop_locked', DESKTOP_DRIVER_STOP_UNCONFIRMED: 'driver_stop_unconfirmed' };
+      DESKTOP_DESKTOP_LOCKED: 'desktop_locked', DESKTOP_DRIVER_STOP_UNCONFIRMED: 'driver_stop_unconfirmed', DESKTOP_BACKGROUND_TARGET_ACTIVE: 'target_active' };
     const reason = reasons[(error as { code?: string })?.code || ''];
     if (reason && this.owner === owner && owner.revision === revision) this.pauseForFailure(owner, reason);
   }
@@ -192,7 +195,8 @@ export class DesktopService {
     let snapshot;
     try { snapshot = this.inputObserver.snapshot(); } catch { this.pauseOwner(owner, 'unavailable', 'unknown'); throw desktopError('DESKTOP_INPUT_OBSERVER_UNAVAILABLE'); }
     if (!snapshot.connected || snapshot.epoch !== input.epoch || snapshot.desktop?.generation !== input.generation
-      || snapshot.desktop.epoch !== input.epoch || snapshot.desktop.phase !== 'ready') {
+      || snapshot.desktop.epoch !== input.epoch || snapshot.desktop.phase !== 'ready'
+      || !sameBackgroundTarget(snapshot.desktop.backgroundTarget, this.backgroundTarget(owner))) {
       this.pauseOwner(owner, snapshot.desktop?.reason || 'unavailable', snapshot.desktop?.certainty || 'unknown');
       throw desktopError('DESKTOP_USER_IN_CONTROL');
     }
@@ -237,6 +241,14 @@ export class DesktopService {
         }
         if (controller.signal.aborted || !this.bindingCurrent(owner, input)) throw desktopError('DESKTOP_USER_IN_CONTROL');
       }
+      const backgroundTarget = this.backgroundTarget(owner);
+      if (backgroundTarget) {
+        await owner.driver.request('windows', {});
+        if (!this.bindingCurrent(owner, input)) throw desktopError('DESKTOP_USER_IN_CONTROL');
+        const policy = await owner.driver.request('control.background', { windowId: owner.window.id });
+        if (!this.bindingCurrent(owner, input)) throw desktopError('DESKTOP_USER_IN_CONTROL');
+        if (policy?.mode !== 'background' || !sameBackgroundTarget(policy.backgroundTarget, backgroundTarget)) throw desktopError('DESKTOP_INPUT_OBSERVER_UNAVAILABLE');
+      }
       if (!this.inputObserver) {
         input.phase = 'ready'; owner.state = 'active'; this.changed();
         if (!this.bindingCurrent(owner, input) || owner.state !== 'active') throw desktopError('DESKTOP_USER_IN_CONTROL');
@@ -255,14 +267,15 @@ export class DesktopService {
         }
         if (!this.bindingCurrent(owner, input)) throw desktopError('DESKTOP_USER_IN_CONTROL');
       }
-      const acknowledged = await this.inputObserver.arm(input.generation, marker);
+      const acknowledged = await this.inputObserver.arm(input.generation, marker, backgroundTarget);
       if (!this.bindingCurrent(owner, input)) throw desktopError('DESKTOP_USER_IN_CONTROL');
       // ACK describes one instant. An activity frame in the same stdout chunk
       // can already have paused it before this promise continuation runs.
       const fresh = this.inputObserver.snapshot();
       if (!fresh.connected || acknowledged.phase !== 'ready' || acknowledged.generation !== input.generation
         || fresh.epoch !== acknowledged.epoch || fresh.desktop?.epoch !== acknowledged.epoch
-        || fresh.desktop.generation !== input.generation || fresh.desktop.phase !== 'ready') {
+        || fresh.desktop.generation !== input.generation || fresh.desktop.phase !== 'ready'
+        || !sameBackgroundTarget(acknowledged.backgroundTarget, backgroundTarget) || !sameBackgroundTarget(fresh.desktop.backgroundTarget, backgroundTarget)) {
         this.pauseOwner(owner, fresh.desktop?.reason || 'unavailable', fresh.desktop?.certainty || 'unknown');
         throw desktopError('DESKTOP_INPUT_OBSERVER_UNAVAILABLE');
       }
@@ -274,7 +287,7 @@ export class DesktopService {
       // diagnostic. Arbitrary error.reason/message/details are not evidence.
       const failure = inputObserverStartupErrorFailure(error);
       const diagnostic = failure && describeInputObserverStartupFailure(failure);
-      if (this.bindingCurrent(owner, input)) this.pauseOwner(owner, (error as any)?.code === 'DESKTOP_CONTROL_NOTICE_UNAVAILABLE' ? 'notice_unavailable' : diagnostic?.reason || 'unavailable', 'unknown');
+      if (this.bindingCurrent(owner, input)) this.pauseOwner(owner, (error as any)?.code === 'DESKTOP_CONTROL_NOTICE_UNAVAILABLE' ? 'notice_unavailable' : (error as any)?.code === 'DESKTOP_BACKGROUND_TARGET_ACTIVE' ? 'target_active' : diagnostic?.reason || 'unavailable', 'unknown');
       if (failure && diagnostic) throw Object.assign(desktopError(diagnostic.code), {
         details: { inputObserver: { stage: failure.stage, win32Error: failure.win32Error } }
       });
@@ -282,6 +295,12 @@ export class DesktopService {
       if (!(error as any)?.code) throw Object.assign(desktopError('DESKTOP_INPUT_OBSERVER_UNAVAILABLE'), { cause: error });
       throw error;
     }
+  }
+  private backgroundTarget(owner: Session): BackgroundTarget | undefined {
+    if (owner.mode !== 'background') return undefined;
+    const parsed = backgroundTargetSchema.safeParse({ pid: owner.window.pid, window: owner.window.nativeHandle });
+    if (!parsed.success) throw desktopError('DESKTOP_WINDOW_CHANGED');
+    return parsed.data;
   }
   private replaceReadDriver(owner: Session): boolean {
     const revision = ++owner.revision;
@@ -460,7 +479,7 @@ export class DesktopService {
       this.check(command.session, false);
       if (!command.params || !command.requestId) throw desktopError('DESKTOP_BAD_REQUEST', 'action 需要操作参数和 requestId。');
       const key = command.session + ':' + command.requestId;
-      const hash = createHash('sha256').update(JSON.stringify({ params: command.params, observeAfter: Boolean(command.observeAfter) })).digest('hex');
+      const hash = createHash('sha256').update(JSON.stringify({ params: command.params, observeAfter: command.observeAfter !== false })).digest('hex');
       const previous = this.receipts.get(key);
       if (previous) {
         if (previous.hash !== hash) throw desktopError('DESKTOP_REQUEST_CHANGED', '相同 requestId 不得提交不同操作。');
@@ -511,6 +530,7 @@ export class DesktopService {
     this.assertOwner(owner, revision, driver, target);
     if (observed.image) {
       observed.image = await this.capture(owner.window, observed.image);
+      if (owner.mode === 'background') observed.image.coordinateInputAvailable = false;
       this.assertOwner(owner, revision, driver, target);
       if (observed.image.coordinateInputAvailable === true) owner.coordinateVersion = observed.version;
     }
@@ -528,6 +548,7 @@ export class DesktopService {
           if (this.owner.name !== command.session) throw desktopError('DESKTOP_CONTROL_BUSY', '桌面正在由其他任务使用。');
           this.check(command.session);
           if (command.windowId && command.windowId !== this.owner.window.id) throw desktopError('DESKTOP_WINDOW_CHANGED', '更换窗口需要显式 select。');
+          if (command.mode && command.mode !== (this.owner.mode || 'interactive')) throw desktopError('DESKTOP_MODE_CONFLICT');
           return this.status();
         }
         if (!command.windowId) throw desktopError('DESKTOP_BAD_REQUEST', 'claim 需要 windows 返回的 --window ID。');
@@ -538,7 +559,7 @@ export class DesktopService {
         await this.checkAdmission(window);
         this.ready();
         if (this.generation !== generation) throw desktopError('DESKTOP_USER_IN_CONTROL', '用户已停止或接管，未开始控制。');
-        const owner = this.owner = { name: command.session!, window: { ...window }, state: 'paused' as const, expiresAt: this.now() + 300_000, driver: this.createDriver(), revision: 0 };
+        const owner = this.owner = { name: command.session!, window: { ...window }, mode: command.mode || 'interactive', state: 'paused' as const, expiresAt: this.now() + 300_000, driver: this.createDriver(), revision: 0 };
         await this.armOwner(owner); return this.status();
       }
       const explicitRead = command.method === 'observe' || command.method === 'screenshot' || command.method === 'wait';
@@ -586,23 +607,35 @@ export class DesktopService {
           result = await this.observe(owner, revision, driver, command.method === 'screenshot', command.screenshotOnly);
         } else {
           const params = command.params!;
+          if (owner.mode === 'background' && !(backgroundDesktopActions as readonly string[]).includes(params.kind)) throw desktopError('DESKTOP_BACKGROUND_ACTION_DENIED');
           await this.checkAdmission(owner.window, owner, revision);
           this.assertOwner(owner, revision, driver, targetId);
           if (owner.freshReadRequired) throw desktopError('DESKTOP_FRESH_OBSERVATION_REQUIRED');
           if (pointerKinds.includes(params.kind) && (!params.ref || params.kind === 'drag') && owner.coordinateVersion !== params.version) throw desktopError('DESKTOP_SCREENSHOT_REQUIRED', '这次观察没有可用于坐标输入的窗口画面，请使用控件引用或重新截图。');
           owner.coordinateVersion = undefined;
           result = await driver.request('window.action', params);
-          if (command.observeAfter) {
-            // Input succeeded. Failure of this optional read must not imply that
-            // the input failed, or invite the caller to repeat its side effects.
-            try {
-              const observation = await this.observe(owner, revision, driver, false);
-              result = { ...result as object, requiresObservation: false, observation };
-            } catch (error) {
-              this.recoverReadDriver(owner, revision, error);
-              this.pauseForOperationFailure(owner, revision, error);
-              return { ...result as object, requiresObservation: true, observationError: { code: (error as any).code || 'DESKTOP_OBSERVATION_FAILED', message: (error as Error).message } };
+          if (command.observeAfter !== false) {
+            let feedback = await observeAfterAction({
+              check: () => this.assertOwner(owner, revision, driver, targetId),
+              observe: () => this.observe(owner, revision, driver, false),
+              errorCode: 'DESKTOP_OBSERVATION_FAILED',
+              invalidate: error => {
+                owner.freshReadRequired = true; owner.coordinateVersion = undefined;
+                this.recoverReadDriver(owner, revision, error);
+                this.pauseForOperationFailure(owner, revision, error);
+              }
+            });
+            this.changed();
+            // Notification delivery can revoke control synchronously. Keep
+            // the executed receipt, but never return its observation as usable.
+            if (feedback.observationStatus === 'available') {
+              try { this.assertOwner(owner, revision, driver, targetId); }
+              catch {
+                feedback = { actionOutcome: 'completed', observationStatus: 'unavailable', nextStep: 'observe-or-check-control',
+                  observationError: { code: 'DESKTOP_USER_IN_CONTROL', message: '输入已完成，但控制权已变化；返回的观察不能用于继续操作。' } };
+              }
             }
+            return { ...result as object, ...feedback, requiresObservation: feedback.observationStatus !== 'available' };
           }
         }
       } catch (error) {

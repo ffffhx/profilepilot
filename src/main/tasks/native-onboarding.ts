@@ -10,7 +10,7 @@ export class NativeOnboarding {
   constructor(private extensionId: string) {}
   configure(driver: NativeInstallDriver, changed: () => void): void { this.driver?.setMaintenanceListener?.(() => {}); this.driver = driver; this.changed = changed; driver.setMaintenanceListener?.(changed); }
   pending(profileId: string): { url: string; expiresAt: string } | undefined {
-    const ticket = [...this.tickets.values()].find(t => t.profileId === profileId && t.expiresAt > Date.now() && !["connected", "cancelled"].includes(t.progress.stage));
+    const ticket = [...this.tickets.values()].find(t => t.profileId === profileId && !t.delivered && t.expiresAt > Date.now() && !["connected", "cancelled"].includes(t.progress.stage));
     return ticket && { url: ticket.url, expiresAt: new Date(ticket.expiresAt).toISOString() };
   }
   states() {

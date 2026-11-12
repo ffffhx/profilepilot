@@ -53,6 +53,33 @@ async function fixture(t) {
   return h;
 }
 
+test('iPhone acknowledged input returns one WDA tree; no-observe and reads remain single operations', async t => {
+  const h=await fixture(t);await h.start();
+  const result=await h.action({kind:'text',text:'hello'},{observeAfter:true});
+  assert.equal(result.actionOutcome,'completed');assert.equal(result.observationStatus,'available');
+  assert.equal(result.observation.tree.children[0].label,'设置');
+  assert.equal(h.calls.filter(c=>c.route.endsWith('/source?format=json')).length,1);
+  await h.action({kind:'text',text:'next'},{observeAfter:false});
+  await h.action({kind:'snapshot'},{observeAfter:true});
+  assert.equal(h.calls.filter(c=>c.route.endsWith('/source?format=json')).length,2);
+  assert.equal(h.calls.filter(c=>c.route.endsWith('/wda/keys')).length,2);
+});
+
+test('iPhone source failure and takeover preserve completed input', async t => {
+  const h=await fixture(t);await h.start();
+  const request=h.service.request;
+  h.service.request=async(...args)=>{if(String(args[1]).includes('/source'))throw Error('read unavailable');return request(...args);};
+  const failed=await h.action({kind:'text',text:'once'},{observeAfter:true});
+  assert.equal(failed.actionOutcome,'completed');assert.equal(failed.observationStatus,'unavailable');
+  h.service.request=request;
+  // Pause after the WDA input has acknowledged, during the shared wait.
+  h.hold=({reply})=>{reply(null);setTimeout(()=>{void h.service.control(h.device.id,'pause');},20);};
+  const paused=await h.action({kind:'text',text:'twice'},{observeAfter:true});
+  assert.equal(paused.actionOutcome,'completed');assert.equal(paused.observationStatus,'unavailable');
+  assert.equal(h.calls.filter(c=>c.route.endsWith('/wda/keys')).length,2);
+  assert.equal(h.state().phase,'paused');
+});
+
 test('WDA HTTP protocol fixture: connection is read-only; screenshot pixels convert to iPhone points for input', async t => {
   const h = await fixture(t);
   assert.equal(h.device.platform, 'ios'); assert.equal(h.device.iphone.osVersion, '18.7.8');

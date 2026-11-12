@@ -106,7 +106,9 @@ export class WrapperBrowser implements BrowserAdapter {
       const env: NodeJS.ProcessEnv = { ...process.env, ELECTRON_RUN_AS_NODE: "1", PROFILEPILOT_AGENT_BROWSER_REAL: bundledBrowserExecutable() };
       delete env.CLAUDECODE;
       execFile(process.execPath, [path.join(__dirname, "../profilepilot-agent-browser-wrapper.cjs"),
-        "--session", task.sessionId, "--cdp", String(task.port), "--json", ...args],
+        // TaskService observes after the complete logical action. In particular,
+        // Windows scroll/paint preparation must not consume the click's refs.
+        "--session", task.sessionId, "--cdp", String(task.port), "--json", "--no-observe", ...args],
       { env, windowsHide: true, timeout: 45000, maxBuffer: 6 * 1024 * 1024, encoding: "utf8" },
       (error, stdout, stderr) => {
         if (error) {

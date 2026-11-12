@@ -8,6 +8,7 @@ const net = require('node:net');
 const { spawn } = require('node:child_process');
 const { buildSync } = require('esbuild');
 const { loadCli } = require('./cli-test-build.cjs');
+const { BROWSER_SERVICE_VERSION } = loadCli('src/main/browser-service/connection.ts');
 const { browserGatewaySocketPath, BROWSER_GATEWAY_PROTOCOL_VERSION } = loadCli('src/main/browser-gateway-client.ts');
 const { writeAgentBrowserRuntimeProfilesSync } = loadCli('src/main/agent-browser-lease.ts');
 const { ENGINE_VERSION } = loadCli('src/main/browser-engine/arguments.ts');
@@ -26,7 +27,7 @@ async function fixture(t) {
   const server = http.createServer((req, res) => {
     const chunks = []; req.on('data', chunk => chunks.push(chunk)); req.on('end', () => {
       const command = JSON.parse(Buffer.concat(chunks)); let response;
-      if (req.url === '/native-service') response = { ok: true, result: { service: 'browser', version: 1, pid: process.pid, root } };
+      if (req.url === '/native-service') response = { ok: true, result: { service: 'browser', version: BROWSER_SERVICE_VERSION, pid: process.pid, root } };
       else if (req.url === '/native-control') {
         nativeRequests.push(command);
         response = failure ? { ok: false, requestId: command.requestId, code: 'NATIVE_USER_IN_CONTROL', error: 'private error body', recovery: controlRecovery('NATIVE_USER_IN_CONTROL') }
@@ -43,7 +44,7 @@ async function fixture(t) {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const record = { version: ENGINE_VERSION, pid: process.pid, port: server.address().port, token: 'a'.repeat(64), session, root: engineRoot };
   fs.writeFileSync(path.join(engineRoot, session + '.engine.json'), JSON.stringify(record));
-  fs.writeFileSync(path.join(root, 'native-control.json'), JSON.stringify({ version: 1, port: record.port, token: record.token, pid: process.pid, service: 'browser', serviceVersion: 1 }));
+  fs.writeFileSync(path.join(root, 'native-control.json'), JSON.stringify({ version: 1, port: record.port, token: record.token, pid: process.pid, service: 'browser', serviceVersion: BROWSER_SERVICE_VERSION }));
   writeAgentBrowserRuntimeProfilesSync([{ profileId: 'trace-fixture', profileName: 'Trace fixture', cdpPort: 9223, running: true }], root);
   const gateway = net.createServer(socket => {
     let text = ''; socket.setEncoding('utf8'); socket.on('data', chunk => {

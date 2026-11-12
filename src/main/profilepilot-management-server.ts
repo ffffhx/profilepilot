@@ -37,7 +37,7 @@ const CLOSE_TIMEOUT_MS = 2_000;
 
 type ManagementProfileManager = Pick<
   ProfileManager,
-  "getState" | "createProfile" | "renameProfile" | "configureProfileBrowser" | "launchProfile" | "closeProfile" | "deleteProfile"
+  "getState" | "setDefaultProfile" | "createProfile" | "renameProfile" | "configureProfileBrowser" | "launchProfile" | "closeProfile" | "deleteProfile"
 >;
 
 export interface ProfilePilotManagementServerOptions {
@@ -50,6 +50,7 @@ export interface ProfilePilotManagementServerOptions {
   homeDir?: string;
   env?: NodeJS.ProcessEnv;
   appVersion?: string;
+  appLifecycle?: { status(): Record<string, unknown>; request(method: "quit" | "restart"): void };
   onMutation?: () => void;
 }
 
@@ -164,9 +165,17 @@ export async function startProfilePilotManagementServer(
 
 export async function executeProfilePilotManagementCommand(
   command: ProfilePilotManagementCommand,
-  options: Pick<ProfilePilotManagementServerOptions, "profileManager" | "appVersion" | "onMutation" | "getTaskService" | "getPhoneService" | "getDesktopService" | "getLocalAppsService" | "getGpuiService">
+  options: Pick<ProfilePilotManagementServerOptions, "profileManager" | "appVersion" | "appLifecycle" | "onMutation" | "getTaskService" | "getPhoneService" | "getDesktopService" | "getLocalAppsService" | "getGpuiService">
 ): Promise<unknown> {
   if (typeof command?.action !== "string") throw new ProfileManagerError("管理请求缺少 command。", "MANAGEMENT_COMMAND_REQUIRED");
+  if (command.action === "app") {
+    if (!["status", "quit", "restart"].includes(command.method)) throw new ProfileManagerError("不支持的应用命令。", "APP_COMMAND_INVALID");
+    if (!options.appLifecycle) throw new ProfileManagerError("当前应用未提供退出/重启接口，请先正常退出旧版并重新启动。", "APP_LIFECYCLE_UNAVAILABLE");
+    const status = {pid: process.pid, ...options.appLifecycle.status()};
+    if (command.method === "status") return status;
+    options.appLifecycle.request(command.method);
+    return {...status, accepted: true, operation: command.method};
+  }
   if (command.action === "gpui") {
     const service = options.getGpuiService?.();
     if (!service) throw new ProfileManagerError("GPUI 服务尚未就绪，请更新并重启 ProfilePilot。", "GPUI_UNAVAILABLE");
@@ -195,7 +204,7 @@ export async function executeProfilePilotManagementCommand(
     if (!service) throw new ProfileManagerError("Agent 服务尚未就绪，请稍后重试。", "TASK_SERVICE_UNAVAILABLE");
     return executeTaskManagementCommand(parsed, service, async selector => resolveProfile(await options.profileManager.getState(), selector).id);
   }
-  if (!["ping", "profile.list", "profile.get", "profile.create", "profile.rename", "profile.configure", "profile.start", "profile.stop", "profile.delete"].includes(command.action)) {
+  if (!["ping", "profile.list", "profile.default", "profile.get", "profile.create", "profile.rename", "profile.configure", "profile.start", "profile.stop", "profile.delete"].includes(command.action)) {
     throw new ProfileManagerError("未知的管理命令。", "MANAGEMENT_COMMAND_UNKNOWN");
   }
   if (command.action === "ping") {
@@ -209,9 +218,19 @@ export async function executeProfilePilotManagementCommand(
   }
 
   const manager = options.profileManager;
+  if (command.action === "profile.default") {
+    if (command.selector !== undefined) {
+      if (command.selector !== null && typeof command.selector !== "string") throw new Error("Profile 名称或 ID 无效。");
+      await manager.setDefaultProfile(command.selector === null ? null : resolveProfile(await manager.getState(), command.selector).id);
+      options.onMutation?.();
+    }
+    const state = await manager.getState();
+    const profile = state.profiles.find(item => item.id === state.defaultProfile?.id);
+    return { saved: state.defaultProfile || null, profile: profile ? toManagementProfile(profile, options.getTaskService?.()?.profileAvailability(profile.id)) : null };
+  }
   if (command.action === "profile.list") {
     const state = await manager.getState();
-    return { profiles: state.profiles.map(profile => toManagementProfile(profile, options.getTaskService?.()?.profileAvailability(profile.id))) };
+    return { defaultProfile: state.defaultProfile || null, profiles: state.profiles.map(profile => ({ ...toManagementProfile(profile, options.getTaskService?.()?.profileAvailability(profile.id)), is_agent_default: profile.id === state.defaultProfile?.id })) };
   }
   if (command.action === "profile.get") {
     const state = await manager.getState();

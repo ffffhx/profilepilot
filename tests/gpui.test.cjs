@@ -37,6 +37,51 @@ function fixture(t) {
   return { service, execute, apps, nodes, calls, clients, guards, options, setFail: name => failTool = name, occupy: () => occupied = true,
     defer(name) { let resolve; pending = { name, promise: new Promise(r => resolve = r) }; return () => { resolve(); pending = undefined; }; } };
 }
+test('default GPUI feedback yields a usable next observation without a separate snapshot', async t => {
+  const f=fixture(t);await f.execute('claim',{target:'app-1'});
+  const initial=await f.execute('snapshot'), started=Date.now();
+  const first=await f.execute('call',{tool:'click_element',params:{id:'button'},observation:initial.observation});
+  assert.ok(Date.now()-started>=450);
+  assert.equal(first.actionOutcome,'completed');assert.equal(first.observationStatus,'available');
+  assert.notEqual(first.observation.version,initial.observation);assert.equal(first.observation.tree.nodes.button.label,'Add');
+  const second=await f.execute('call',{tool:'click_element',params:{id:'button'},observation:first.observation.version});
+  assert.equal(second.observationStatus,'available');
+  assert.equal(f.calls.filter(c=>c.name==='click_element').length,2);
+});
+
+test('GPUI post-input read failure discards refs without replaying input', async t => {
+  const f=fixture(t);await f.execute('claim',{target:'app-1'});const initial=await f.execute('snapshot');
+  const client=f.clients.at(-1), call=client.call.bind(client);
+  client.call=async(name,args)=>{const result=await call(name,args);if(name==='click_element')f.setFail('get_ui_tree');return result;};
+  const result=await f.execute('call',{tool:'click_element',params:{id:'button'},observation:initial.observation});
+  assert.equal(result.actionOutcome,'completed');assert.equal(result.observationStatus,'unavailable');
+  assert.equal(result.observation,undefined);assert.equal(result.requiresObservation,true);
+  assert.equal(f.calls.filter(c=>c.name==='click_element').length,1);
+  await assert.rejects(f.execute('call',{tool:'click_element',params:{id:'button'},observation:initial.observation}),{code:'GPUI_STALE_OBSERVATION'});
+});
+
+test('GPUI takeover during settle cancels feedback; opt-out does not request a post-input tree', async t => {
+  const f=fixture(t);await f.execute('claim',{target:'app-1'});let initial=await f.execute('snapshot');
+  const before=f.calls.length;
+  const skipped=await f.execute('call',{tool:'click_element',params:{id:'button'},observation:initial.observation,observeAfter:false});
+  assert.equal(skipped.requiresObservation,true);
+  assert.deepEqual(f.calls.slice(before).map(c=>c.name),['get_ui_tree','click_element']);
+  initial=await f.execute('snapshot');
+  const client=f.clients.at(-1),call=client.call.bind(client);
+  client.call=async(name,args)=>{const result=await call(name,args);if(name==='click_element')setTimeout(()=>f.guards[0].onClick({pid:1}),20);return result;};
+  const result=await f.execute('call',{tool:'click_element',params:{id:'button'},observation:initial.observation});
+  assert.equal(result.actionOutcome,'completed');assert.equal(result.observationStatus,'unavailable');
+  assert.equal(f.service.status().sessions[0].state,'paused');
+});
+
+test('GPUI CLI forwards no-observe only for call', async () => {
+  let command;const io={stdout:{write(){}},stderr:{write(){}}};
+  const request=async c=>{command=c;return {ok:true,data:{}};};
+  assert.equal(await runGpuiCli(['call','--session','task','--tool','keyboard','--no-observe'],request,io),0);
+  assert.equal(command.observeAfter,false);
+  assert.equal(await runGpuiCli(['snapshot','--session','task','--no-observe'],request,io),2);
+});
+
 test('two GPUI instances retain independent selection; observation is consumed once', async t => {
   const f = fixture(t); await f.execute('claim', { target: 'app-1' }); await f.execute('claim', { target: 'app-2', session: 'other' });
   const { observation } = await f.execute('snapshot');

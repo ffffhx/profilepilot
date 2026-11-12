@@ -13,6 +13,9 @@ Use `ppilot desktop schema action` or `ppilot desktop action --help` for the cur
    window from the returned title, process and ID, without changing computers.
 2. `ppilot desktop claim --session TASK --window ID` acquires one desktop owner.
    An occupied/paused session cannot be replaced to bypass user control.
+   Add `--mode background` for concurrent use with a person working in other
+   applications. The mode is fixed for the session, including select/resume and
+   driver recovery. Omission retains `interactive` for existing callers.
 3. `ppilot desktop observe --session TASK` returns UI Automation controls and a
    version. Use observed refs and supported actions, preferring semantic actions.
    Check `truncated` and `gaps`: provider failures or traversal limits mean the
@@ -20,8 +23,9 @@ Use `ppilot desktop schema action` or `ppilot desktop action --help` for the cur
 4. `ppilot desktop action --session TASK --params-file action.json` accepts e.g.
    `{"version":"observed version","ref":"e1","kind":"invoke"}` or `set_value`
    with `value`. PowerShell and macOS shells must use UTF-8 JSON files/stdin.
-5. Every input consumes the observation. Reobserve before the next action, or
-   add `--observe` to return a new UIA observation after that one action.
+5. Every input consumes the observation. By default the action returns a new
+   UIA observation after a 500 ms wait; use its version for the next action.
+   With `--no-observe`, explicitly reobserve before further input.
    `select --session TASK --window ID` explicitly selects another observed window
    and invalidates old refs; use it for a newly opened native dialog.
 6. Finish using `complete --session TASK --require-active`; cancel using `release`.
@@ -29,6 +33,32 @@ Use `ppilot desktop schema action` or `ppilot desktop action --help` for the cur
    lost its observer, even if an earlier status read showed active. Do not start
    another task after that refusal. Plain `complete` retains its earlier behavior
    and can end a paused session; `release` remains available for cleanup.
+
+## Background semantic mode
+
+`claim --session TASK --window ID --mode background` permits only `invoke`,
+`set_value`, `toggle`, `select`, `expand`, `collapse`, and UIA `scroll`. The native
+driver enforces the policy too. Physical clicks (including ref clicks), pointer
+movement, drag, wheel, typing, shortcuts, focus and window-state changes are
+rejected before dispatch. Taskbar/tray `invoke` is rejected because its route
+uses physical input. There is no automatic physical fallback or mode upgrade.
+Use `set_value` to replace text, not `type_text`.
+
+Input in other applications does not pause the background session. Foreground
+activation of the target process, or keyboard/pointer activity directed to it,
+pauses it; another window of the same process is conservatively included. Start
+while using another app, and explicitly return control after a target takeover.
+Manual takeover/stop, cross-route ownership, helper failure and unknown-result
+protections still apply. A background session does not make simultaneous edits
+to the same application safe.
+
+The driver never calls a physical fallback, but an application's accessibility
+provider can itself open a dialog or activate a window. Detected target
+activation pauses control; a dispatched action can already have taken effect.
+Inspect its receipt and current state, never replay it or restore the user's
+focus automatically. This is a shared-desktop policy, not OS-level isolation.
+
+## Ownership and observation
 
 Desktop admission also checks known browser and Electron ownership by PID
 association. An active session remains occupied after user takeover or while its
@@ -56,8 +86,8 @@ claiming or pausing a session. An unknown diagnosis does not authorize input.
 Its input-state evidence reports held keys, pointer capture and unreadable
 conditions. These samples do not identify every physical human input.
 Desktop control separately requires `status.inputObservation` to reach `ready`
-after the shared Windows observer acknowledges the current driver. `arming`
-and `pending` do not authorize input. Observed non-injected input or an injected
+after the shared Windows observer acknowledges the current driver and mode. `arming`
+and `pending` do not authorize input. In interactive mode, observed non-injected input or an injected
 event that does not match the driver's registered marker pauses control; helper
 loss also pauses it. This is not authentication or proof of continuous hardware
 coverage: another hook or Windows hook removal can prevent observation, and
@@ -139,14 +169,18 @@ fixed short duration; cross-window drags are not supported. Pointer modifiers,
 custom drag durations, arbitrary key holds, and action batches are not exposed
 by this interface.
 
-`action --session TASK --params-file action.json --observe` runs exactly one
-action and then reads fresh UIA state, without taking a screenshot. On success,
+`action --session TASK --params-file action.json` runs exactly one action,
+waits 500 ms, and reads fresh UIA state by default, without taking a screenshot.
+Use `--no-observe` to opt out; `--observe` remains a compatibility alias. On success,
 `result.observation` contains the next version and controls, and
 `result.requiresObservation` is false. It is ready for a next semantic action;
 get a new screenshot before coordinate input. If the input succeeded but the
 following observation failed, the command returns `ok: true`, `executed: true`,
-`requiresObservation: true`, and `observationError: {code, message}` inside
+`requiresObservation: true`, `actionOutcome: "completed"`,
+`observationStatus: "unavailable"`, and `observationError: {code, message}` inside
 `result`. Inspect state and retry the read, never the already executed input.
+On success, `observationStatus` is `available`. The short wait does not prove
+business completion or capture every transient dialog; use `wait` for known conditions.
 
 An action returning successfully does not prove that an asynchronous save,
 dialog or other visible effect has finished. Use a separate read-only wait:

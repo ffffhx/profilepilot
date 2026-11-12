@@ -47,10 +47,12 @@ test('direct observations omit internal guards but retain exact links and server
       { ref: 'e1', kind: 'click', role: 'link', label: 'Release', href: 'https://example.test/releases?version=2#notes',
         dom: { tag: 'A', search: false } }
     ] } };
-  service.browser.observe = async () => observation;
+  let nextObservation = observation;
+  service.browser.observe = async () => nextObservation;
   service.browser.execute = async task => {
     assert.equal(task.observation.fast.guard, guard);
     assert.equal(task.observation.fast.native.localGuard, guard);
+    nextObservation = { ...observation, version: 'version-2' };
     return 'verified';
   };
   const result = await request('observe');
@@ -60,7 +62,9 @@ test('direct observations omit internal guards but retain exact links and server
   assert.equal(result.fast.candidates[0].href, observation.fast.candidates[0].href);
   assert.equal(result.page.nextCursor, 'next-page');
   assert.ok(JSON.stringify(result).length < 1000);
-  assert.equal(await request('action', { kind: 'click', ref: 'e1', version: result.version }), 'verified');
+  const action = await request('action', { kind: 'click', ref: 'e1', version: result.version });
+  assert.equal(action.result, 'verified'); assert.equal(action.observation.version, 'version-2');
+  assert.doesNotMatch(JSON.stringify(action), /private DOM guard|localGuard/);
   await assert.rejects(request('action', { kind: 'click', ref: 'e1', version: result.version }), error => error.code === 'NATIVE_OBSERVATION_STALE');
 });
 
@@ -84,7 +88,9 @@ test('compact observations retain ambiguous destructive button semantics without
   assert.equal(result.fast.candidates[0].dom, undefined);
   assert.doesNotMatch(JSON.stringify(result), /private-guard|private-local-guard/);
   result.fast.candidates[0].semantics.effect = 'read';
-  assert.equal(await request('action', { kind: 'click', ref: 'e1', version: result.version }), 'verified');
+  const action = await request('action', { kind: 'click', ref: 'e1', version: result.version });
+  assert.equal(action.result, 'verified');
+  assert.doesNotMatch(JSON.stringify(action), /private-guard|private-local-guard/);
 });
 
 test('semantic navigation clears old read state on success and on committed error documents', async t => {

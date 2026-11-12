@@ -551,7 +551,8 @@ details.task-context-tools p { font-size: var(--task-label-size); overflow-wrap:
 .task-state h2, .task-state h3 { margin-bottom: 8px; font-size: 1rem; }
 .task-state p { color: var(--muted); margin-bottom: 12px; }
 .task-stream > .task-state { display: inline-flex; margin: 0 0 8px; padding: 2px 8px; font-size: var(--task-label-size); color: var(--muted); }
-.task-operation-status { display: grid; gap: 8px; margin: 10px var(--task-gutter); padding: 0; border: 0; background: transparent; font-size: var(--task-control-size); }
+.task-operation-status { position: fixed; right: 18px; bottom: 18px; z-index: 25; display: grid; gap: 8px; width: min(440px,calc(100vw - 36px)); max-height: min(320px,45dvh); overflow: auto; margin: 0; padding: 0; border: 0; background: transparent; font-size: var(--task-control-size); pointer-events: none; }
+.task-operation-status > * { pointer-events: auto; box-shadow: 0 6px 24px #20324c1a; }
 .task-operation-status:empty { display: none; }
 .task-operation-status > .task-state { margin: 0; }
 .task-operation-status > .operation-error { padding: 14px 16px; border: 1px solid var(--danger); border-radius: 10px; }

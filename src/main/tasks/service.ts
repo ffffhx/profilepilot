@@ -1,4 +1,5 @@
 import { TaskListFeed } from "./feed";
+import { observeAfterBrowserAction } from "../browser-action-feedback";
 import { listSiteAdapters, planSiteAdapter } from "../site-adapters/catalog";
 import { fork, type ChildProcess } from "node:child_process";
 import { mergeCostRecords } from "../../shared/task-cost";
@@ -798,7 +799,10 @@ export class TaskService {
         } else await this.perform(task, run, action);
         count++;
       }
-      return textResult({ filled: count, instruction: "请重新观察填写结果。" });
+      const observation = task.observation;
+      return textResult({ filled: count, observationStatus: observation ? 'available' : 'unavailable',
+        observation: observation ? { ...observation, fast: observation.fast ? { candidates: observation.fast.candidates } : undefined } : undefined,
+        instruction: observation ? '使用返回的观察核对填写结果。' : '字段操作已执行；请重新观察，不要直接重复填写。' });
     }
     if (name === "verify_account") {
       const { account, evidence } = z.object({ account: z.string().min(1).max(200), evidence: z.string().min(3).max(1000) }).parse(args);
@@ -936,16 +940,49 @@ export class TaskService {
     task.receipts.push(receipt); task.usage.actions++;
     task.execution = { engine: run.driver ? "jev" : "model", activity: action.summary, reason: task.execution?.reason, at: now() };
     this.store.event(task, "action", action.summary); this.publish(task);
+    let result: string;
     try {
-      const result = await this.browserForTask(task).execute(task, action);
+      result = await this.browserForTask(task).execute(task, action);
       Object.assign(receipt, { status: "executed", result: result.slice(0, 8000) });
       task.observation = undefined;
-      this.publish(task); return result;
     } catch (error) {
       Object.assign(receipt, { status: "uncertain", result: String(error) });
       if (serious(action.effect)) task.needsReconciliation = true;
       task.observation = undefined; this.publish(task); throw error;
     }
+    // Observation failures must not turn a completed input into an uncertain
+    // input receipt. In particular, never submit/send again just to get a snapshot.
+    let acknowledgement: unknown = result, alreadySettled = false;
+    try {
+      const parsed = JSON.parse(result);
+      if (parsed?.actionOutcome === 'completed' && parsed.observationStatus) {
+        alreadySettled = true;
+        const { observation, observationStatus, observationError, nextStep, ...rest } = parsed;
+        acknowledgement = rest;
+      }
+    } catch { /* Older/custom adapters return plain text. */ }
+    const browser = this.browserForTask(task);
+    const feedback = await observeAfterBrowserAction({
+      settleMs: alreadySettled ? 0 : undefined,
+      check: () => this.assertRunning(task, run),
+      observe: async () => {
+        const observation = browser.observeFast ? await browser.observeFast(task) : await browser.observe(task);
+        const access = nativeBrowserAccess(task, { effect: 'read' }, observation.url);
+        if (!access.allowed) throw new Error(access.reason || '该站点已被禁止访问。');
+        return observation;
+      },
+      invalidate: () => { task.observation = undefined; }
+    });
+    if (feedback.observation) {
+      task.observation = feedback.observation;
+      const { version, at, url, title, snapshot } = feedback.observation;
+      task.evidencePages = [...(task.evidencePages || []), { version, at, url, title, snapshot: snapshot.slice(0, 60000) }].slice(-16);
+    }
+    this.publish(task);
+    const observation = feedback.observation;
+    return JSON.stringify({ result: acknowledgement, ...feedback,
+      observation: observation ? { ...observation, fast: observation.fast ? { candidates: observation.fast.candidates } : undefined,
+        screenshotDataUrl: undefined, screenshotPath: undefined } : undefined });
   }
   private async assessPage(task: BrowserTask, run: Run, observation: BrowserObservation): Promise<void> {
     if (!this.store.data.settings.jevEnabled || this.store.data.settings.jevMode === "driver") return;

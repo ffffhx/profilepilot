@@ -5,7 +5,6 @@ import { positionProfileMenu } from "../profile-menu-layout";
 import { refreshSelectedBrowserPreview } from "./live-view";
 import { isBusyAction, renderToastBody } from "./busy-view";
 import { renderConfirmModal } from "./confirm";
-import { renderControlPreferencesModal } from "./control-preferences";
 import { renderSyncPanel } from "./account-sync";
 import { renderAgentIntegrationPanel, renderOnboardingModal } from "./agent-integration";
 import { renderClonePoolModal } from "./clone-pool";
@@ -13,7 +12,7 @@ import { renderLiveZoomModal } from "./live-view";
 import { renderMini } from "./mini";
 import { renderBrowserInspector } from "./browser-workspace";
 import { renderBifrostProxyModal, renderCdpModal, renderCloneTagModal, renderExtensionMigrationModal, renderGlobalInstructionsModal, renderNewModal, renderRenameModal } from "./modals";
-import { renderEmpty, renderExternalDetailsModal, renderProfileDetailsModal, renderProfilesPanel } from "./profiles";
+import { renderEmpty, renderExternalDetailsModal, renderProfileDefaultNote, renderProfileDetailsModal, renderProfilesPanel } from "./profiles";
 import { appRoot, store } from "../state";
 import { escapeHtml, renderBusyBanner, renderButtonLabel } from "../util";
 
@@ -50,13 +49,9 @@ export function render(): void {
   // form whose unsubmitted values and focus live in the current document.
   renderToast();
 
-  if (!store.state && store.workspace !== "tools") {
-    lastMainHtml = "";
-    appRoot.innerHTML = '<div class="app-loading p-8 text-muted font-mono text-[13px] tracking-[0.04em]">正在载入…</div>';
-    return;
-  }
-
   const profiles = store.state?.profiles || [];
+  const externalInstances = store.state?.externalInstances || [];
+  const hasProfiles = profiles.length > 0 || externalInstances.length > 0;
   const profileDetailsId = store.modal?.kind === "profile-details" ? store.modal.profileId : null;
   const externalDetailsDir = store.modal?.kind === "external-details" ? store.modal.userDataDir : null;
   const profileDetailsProfile = profileDetailsId
@@ -72,27 +67,29 @@ export function render(): void {
     ? `${runningProfiles.length} 个 Profile 正在运行`
     : "当前没有正在运行的 Profile";
   const refreshing = isBusyAction("refresh");
-  const busyHasEmbeddedProgress = store.busyState?.key === "account-sync" || store.busyState?.key === "migrate-extensions";
+  const busyHasEmbeddedProgress = ["account-sync", "migrate-extensions", "clone-profiles", "refresh-clones", "launch-clones"].includes(store.busyState?.key || "");
 
   if (store.selectedExternalDir && !store.state?.externalInstances.some(instance => instance.userDataDir === store.selectedExternalDir)) store.selectedExternalDir = null;
-  if (!store.selectedExternalDir && profiles.length && !profiles.some(profile => profile.id === store.selectedId)) store.selectedId = profiles[0].id;
-  const modalKey = store.modal ? [store.modal.kind, "profileId" in store.modal ? store.modal.profileId : "", store.modal.kind === "control-preferences" ? store.modal.activeTab : ""].join(":") : "";
+  if (!store.selectedExternalDir && profiles.length && !profiles.some(profile => profile.id === store.selectedId))
+    store.selectedId = store.state?.defaultProfile ? profiles.find(profile => profile.id === store.state?.defaultProfile?.id)?.id || null : profiles[0].id;
+  const modalKey = store.modal ? [store.modal.kind, "profileId" in store.modal ? store.modal.profileId : ""].join(":") : "";
   const html = `
     ${workspaceSwitcher(store.workspace === "tools" ? "tools" : "browser")}
     ${workspaceIdentityBar()}
     ${store.workspace === "tools" ? `
     <div class="shell tools-workspace">
       <a class="skip-link" href="#main-content">跳到配套工具</a>
-      <header class="app-header">
-        <div class="browser-workspace-brand"><h1>配套工具</h1><p>连接浏览器，准备 Agent 工作环境</p></div>
+      <header class="app-header pc-control-header">
+        <div class="pc-control-brand"><h1>配套工具</h1><p>连接浏览器，准备 Agent 工作环境</p></div>
         <div class="header-actions">
           <button type="button" data-action="open-onboarding">连接指南</button>
-          <button class="primary" type="button" data-action="refresh-agent-integration" ${store.agentIntegrationLoading ? "disabled" : ""}>检查更新</button>
+          <button type="button" data-action="refresh-agent-integration" ${store.agentIntegrationLoading ? "disabled" : ""}>检查安装状态</button>
+          <button class="primary" type="button" data-action="check-app-update">检查更新</button>
         </div>
       </header>
       ${renderBusyBanner()}
       <main id="main-content">${renderAgentIntegrationPanel()}</main>
-    </div>` : !store.state ? "" : `
+    </div>` : `
     <div class="shell browser-workspace">
       <a class="skip-link" href="#main-content">跳到 Profile 列表</a>
       <header class="app-header pc-control-header">
@@ -110,12 +107,12 @@ export function render(): void {
       </section>
       <main id="main-content" class="browser-registry-layout">
         <section class="profiles-section">
-          <div class="profiles-section-head"><h2>Profiles</h2></div>
-          ${profiles.length || store.state.externalInstances.length ? renderProfilesPanel(profiles, store.state.externalInstances) : renderEmpty()}
+          <div class="profiles-section-head"><h2>浏览器 Profiles${store.state ? `<span class="profiles-count">${profiles.length + externalInstances.length}</span>` : ""}</h2>${hasProfiles ? `<button type="button" data-action="new-profile" ${store.busy ? "disabled" : ""}>新建 Profile</button>` : ""}</div>
+          ${!store.state ? renderProfileLoadState() : hasProfiles ? renderProfilesPanel(profiles, externalInstances) : `${store.state.defaultProfile ? renderProfileDefaultNote(profiles) : ""}${renderEmpty()}`}
         </section>
-        ${renderBrowserInspector(profiles.find(profile=>profile.id === store.selectedId), store.state.externalInstances.find(instance=>instance.userDataDir === store.selectedExternalDir))}
+        ${renderBrowserInspector(profiles.find(profile=>profile.id === store.selectedId), externalInstances.find(instance=>instance.userDataDir === store.selectedExternalDir))}
       </main>
-      ${renderSyncPanel(profiles)}
+      ${store.state && profiles.length ? renderSyncPanel(profiles) : ""}
     </div>`}
     ${store.modal ? `<div data-dom-key="modal:${escapeHtml(modalKey)}">` : ""}
     ${store.modal?.kind === "new" ? renderNewModal() : ""}
@@ -125,7 +122,6 @@ export function render(): void {
     ${store.modal?.kind === "clone-pool" ? renderClonePoolModal(profiles) : ""}
     ${store.modal?.kind === "clone-tag" ? renderCloneTagModal(store.modal.profileId) : ""}
     ${store.modal?.kind === "global-instructions" ? renderGlobalInstructionsModal() : ""}
-    ${store.modal?.kind === "control-preferences" ? renderControlPreferencesModal() : ""}
     ${store.modal?.kind === "onboarding" ? renderOnboardingModal() : ""}
     ${
       store.modal?.kind === "profile-details"
@@ -153,4 +149,11 @@ export function render(): void {
   refreshWorkspaceSwitcher();
   refreshSelectedBrowserPreview();
   positionProfileMenu();
+}
+
+function renderProfileLoadState(): string {
+  if (store.profileLoadError && !isBusyAction("refresh")) {
+    return `<div class="registry-state registry-error" role="alert"><h3>无法读取浏览器列表</h3><p>${escapeHtml(store.profileLoadError)}</p><button type="button" class="primary" data-action="refresh">重新加载</button></div>`;
+  }
+  return '<div class="registry-state" role="status" aria-live="polite"><span class="inline-spinner" aria-hidden="true"></span><h3>正在读取浏览器列表</h3><p>正在检查本机 Profile 和浏览器连接…</p></div>';
 }

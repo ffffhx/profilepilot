@@ -1,4 +1,5 @@
 import { phoneList, type PhoneListFilter } from "../shared/phone-list";
+import { phoneMatchesDefault } from "../shared/default-targets";
 import type { PhonesSnapshot } from "../shared/phones";
 import { taskIcon } from "./task-icons";
 const renderedMarkup = new WeakMap<Element, string>();
@@ -11,25 +12,33 @@ export function phoneListShell(): string {
       <div class="phone-list-tools"><button data-action="refresh" aria-label="刷新设备" title="刷新设备">${taskIcon("refresh")}</button><button class="primary" data-action="add-device">${taskIcon("plus")}添加设备</button></div></header>
     <div class="phone-list-filters" role="group" aria-label="按连接状态筛选">${([['all', '全部'], ['online', '已连接'], ['offline', '未连接']] as const).map(([filter, label]) => `<button data-phone-filter="${filter}" aria-pressed="${filter === 'all'}">${label}<span>0</span></button>`).join("")}</div>
     <div class="phone-table-wrap"><table class="phone-table" aria-label="手机设备列表"><colgroup><col class="phone-col-name"><col class="phone-col-connection"><col class="phone-col-status"><col class="phone-col-session"></colgroup><thead><tr><th scope="col">设备</th><th scope="col">连接方式</th><th scope="col">状态</th><th scope="col">当前会话</th></tr></thead><tbody></tbody></table></div>
-    <footer class="phone-list-footer"><span data-phone-total></span><span>点击连接后显示手机画面；断开后可随时重新连接</span></footer>
+    <p class="phone-default-note" data-phone-default></p><footer class="phone-list-footer"><span data-phone-total></span><span>点击连接后显示手机画面；断开后可随时重新连接</span></footer>
   </section><p class="phone-list-note">${taskIcon("shield")}控制过程中，你可以随时接管或停止。</p><button class="phone-text-button phone-download-entry" data-action="downloads">下载手机 App（可选）</button><p class="phone-error" data-phone-list-error role="alert" hidden></p>`;
 }
 
 export function renderPhoneList(root: HTMLElement, snapshot: PhonesSnapshot, state: { filter: PhoneListFilter; selected: string; loaded: boolean; busy: boolean }) {
   const { all, items, online } = phoneList(snapshot.devices, "", state.filter, state.selected);
   root.querySelectorAll("[data-phone-count]").forEach(node => node.textContent = String(all.length));
-  root.querySelector(".phone-online-count")!.textContent = `${online} 台已连接`;
+  root.querySelector(".phone-online-count")!.textContent = state.loaded && !snapshot.error ? `${online} 台已连接` : "";
+  root.querySelector<HTMLElement>(".phone-list-filters")!.hidden = !all.length;
+  root.querySelector<HTMLElement>(".phone-table thead")!.hidden = !all.length;
+  root.querySelector<HTMLElement>(".phone-list-footer")!.hidden = !all.length;
+  root.querySelector<HTMLElement>("[data-phone-default]")!.hidden = !all.length && !snapshot.defaultDevice?.saved;
   for (const button of root.querySelectorAll<HTMLButtonElement>("[data-phone-filter]")) {
     button.setAttribute("aria-pressed", String(button.dataset.phoneFilter === state.filter));
     button.querySelector("span")!.textContent = String(button.dataset.phoneFilter === "all" ? all.length : button.dataset.phoneFilter === "online" ? online : all.length - online);
   }
   root.querySelector("[data-phone-total]")!.textContent = state.filter !== "all" ? `显示 ${items.length} / ${all.length} 台设备` : `共 ${all.length} 台设备`;
+  const saved = snapshot.defaultDevice?.saved;
+  root.querySelector("[data-phone-default]")!.innerHTML = saved
+    ? `默认设备：<strong>${esc(saved.name)}</strong>${snapshot.defaultDevice?.available ? ' · 未指定目标的新任务优先使用。' : ' · 当前未连接，请连接该设备或重新选择。'} <button type="button" class="phone-text-button" data-action="clear-default-device" ${state.busy ? 'disabled' : ''}>清除默认</button>`
+    : '可在设备的“更多”菜单中设置默认设备。';
   const body = root.querySelector(".phone-table tbody")!;
   const html = items.length ? items.map(item => `<tr data-phone-row="${esc(item.id)}" data-selected="${item.id === state.selected}">
-    <td><button class="phone-device-link" data-action="select-device" data-device-id="${esc(item.id)}" aria-current="${item.id === state.selected}"><span class="phone-list-icon">${taskIcon(item.emulator ? "desktop" : "phone")}</span><span class="phone-device-copy"><strong title="${esc(item.name)}">${esc(item.name)}</strong><small>${item.kind}</small></span></button></td>
+    <td><button class="phone-device-link" data-action="select-device" data-device-id="${esc(item.id)}" aria-current="${item.id === state.selected}"><span class="phone-list-icon">${taskIcon(item.emulator ? "desktop" : "phone")}</span><span class="phone-device-copy"><strong title="${esc(item.name)}">${esc(item.name)}</strong>${snapshot.devices.some(device => device.id === item.id && phoneMatchesDefault(device, saved)) ? '<span class="phone-default-badge">默认</span>' : ""}<small>${item.kind}</small></span></button></td>
     <td><span class="phone-transport">${item.connection}</span></td><td><div class="phone-connection-cell"><span class="phone-list-status" data-tone="${item.tone}"><i></i>${esc(item.status)}</span>${item.available ? `<button class="phone-connection-button" data-action="${item.online ? "disconnect-phone" : "connect-phone"}" data-device-id="${esc(item.id)}" ${state.busy || item.pending || item.occupied ? "disabled" : ""} ${item.occupied ? 'title="请先结束当前会话"' : ""}>${item.online ? "断开" : "连接"}</button>` : ""}</div></td><td><div class="phone-session-cell"><span class="phone-session" title="${esc(item.session)}">${esc(item.session)}</span>${snapshot.devices.find(device => device.id === item.id)?.transport !== "cloud" ? `<button type="button" class="phone-menu-trigger" data-action="device-menu" data-device-id="${esc(item.id)}" aria-label="更多操作：${esc(item.name)}" title="更多" aria-haspopup="menu" aria-expanded="false" aria-controls="phone-device-menu" ${state.busy ? "disabled" : ""}>⋮</button>` : ""}</div></td>
     </tr>`).join("")
-    : `<tr><td colspan="4"><div class="phone-list-empty" role="status">${!state.loaded ? "正在读取设备…" : all.length ? '没有匹配的设备。<button class="phone-text-button" data-action="clear-filter">清除筛选</button>' : `${taskIcon("phone")}<h3>添加你的第一台设备</h3><p>连接 Android、iPhone 真机，或使用本机 Android 模拟器。</p><button class="primary" data-action="add-device">${taskIcon("plus")}添加设备</button>`}</div></td></tr>`;
+    : `<tr><td colspan="4"><div class="phone-list-empty" role="status">${!state.loaded ? '<span class="inline-spinner" aria-hidden="true"></span><h3>正在读取设备</h3><p>正在检查已登记的手机和本机连接…</p>' : snapshot.error && !all.length ? `<h3>无法读取设备列表</h3><p>${esc(snapshot.error)}</p><button class="primary" data-action="refresh" ${state.busy ? 'disabled' : ''}>${state.busy ? '正在重试…' : '重新加载'}</button>` : all.length ? '没有匹配的设备。<button class="phone-text-button" data-action="clear-filter">清除筛选</button>' : `${taskIcon("phone")}<h3>添加你的第一台设备</h3><p>连接 Android、iPhone 真机，或使用本机 Android 模拟器。</p><button class="primary" data-action="add-device">${taskIcon("plus")}添加设备</button>`}</div></td></tr>`;
   // Status events can arrive while a pointer targets a row. Unchanged rows keep
   // their DOM, and every action carries its own explicit device identity.
   if (renderedMarkup.get(body) !== html) {
@@ -40,7 +49,7 @@ export function renderPhoneList(root: HTMLElement, snapshot: PhonesSnapshot, sta
     if (identity) [...body.querySelectorAll<HTMLButtonElement>("button")].find(button => button.dataset.deviceId === identity.id && button.dataset.action === identity.action && button.getAttribute("aria-label") === identity.label)?.focus({ preventScroll: true });
   }
   const error = root.querySelector<HTMLElement>("[data-phone-list-error]")!;
-  error.hidden = !snapshot.error; error.textContent = snapshot.error;
+  error.hidden = !snapshot.error || !all.length; error.textContent = snapshot.error;
   const refresh = root.querySelector<HTMLButtonElement>('[data-action="refresh"]')!;
   refresh.disabled = state.busy;
 }

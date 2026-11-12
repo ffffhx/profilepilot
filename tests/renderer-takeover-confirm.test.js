@@ -548,6 +548,7 @@ test("renderer dedicated Bifrost rule action opens a Profile-scoped confirm", as
   });
 
   try {
+    const rendersBefore = harness.calls.renders;
     harness.click({
       action: "remove-profile-bifrost-rule",
       id: "p1",
@@ -564,7 +565,7 @@ test("renderer dedicated Bifrost rule action opens a Profile-scoped confirm", as
         ruleRef: "FlowPD-FE-BotStudio-BOE"
       }
     });
-    assert.equal(harness.calls.renders, 1);
+    assert.equal(harness.calls.renders - rendersBefore, 1);
   } finally {
     await harness.cleanup();
   }
@@ -574,6 +575,7 @@ test("renderer locked proxy toggle opens the close-and-configure confirmation", 
   const harness = loadMainHarness({ profile: profile({ running: true }) });
 
   try {
+    const rendersBefore = harness.calls.renders;
     harness.click({ action: "prepare-bifrost-proxy", id: "p1" });
 
     assert.deepEqual(harness.store.modal, {
@@ -583,7 +585,7 @@ test("renderer locked proxy toggle opens the close-and-configure confirmation", 
         profileId: "p1"
       }
     });
-    assert.equal(harness.calls.renders, 1);
+    assert.equal(harness.calls.renders - rendersBefore, 1);
   } finally {
     await harness.cleanup();
   }

@@ -170,7 +170,7 @@ function isProcessAlive(pid) {
   }
 }
 
-function runningProfilePilot(repoRoot) {
+export function runningProfilePilot(repoRoot) {
   const cliPath = path.join(repoRoot, "dist", "main", "profilepilot-cli.cjs");
   if (!existsSync(cliPath)) return null;
   const checked = spawnSync(process.execPath, [cliPath, "status", "--json"], {
@@ -234,7 +234,7 @@ async function launchOnPosix(executable, repoRoot, background) {
   return { pid: child.pid, method: process.platform === "darwin" ? "darwin-detached-session" : "posix-detached-session" };
 }
 
-export async function main() {
+export async function main({ requireDevelopment = false } = {}) {
   const background = process.argv.includes("--background");
   const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const executable = process.platform === "win32"
@@ -245,6 +245,9 @@ export async function main() {
   if (!existsSync(executable)) throw new Error(`找不到 Electron 可执行文件：${executable}`);
   const existingPid = runningProfilePilot(repoRoot);
   if (existingPid) {
+    if (requireDevelopment && !developmentProcess(repoRoot, existingPid)) {
+      throw new Error(`ProfilePilot (${existingPid}) 正在运行，但没有开启源码监听。请从应用菜单退出后重新运行 npm run dev；现有会话没有被中断。`);
+    }
     process.stdout.write(`${JSON.stringify({
       ok: true,
       platform: process.platform,
@@ -257,7 +260,15 @@ export async function main() {
   const launched = process.platform === "win32"
     ? await launchOnWindows(executable, repoRoot, background)
     : await launchOnPosix(executable, repoRoot, background);
+  if (requireDevelopment && !developmentProcess(repoRoot, launched.pid)) throw new Error('ProfilePilot 已启动，但源码监听尚未就绪。请查看 .tools/development-build.log。');
   process.stdout.write(`${JSON.stringify({ ok: true, platform: process.platform, executable, background, ...launched }, null, 2)}\n`);
+}
+
+export function developmentProcess(repoRoot, pid) {
+  try {
+    const runtime = JSON.parse(readFileSync(path.join(repoRoot, '.tools/development-runtime.json'), 'utf8'));
+    return runtime.pid === pid && path.resolve(runtime.root) === path.resolve(repoRoot) && isProcessAlive(pid);
+  } catch { return false; }
 }
 
 const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : "";

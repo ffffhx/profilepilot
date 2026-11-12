@@ -1,4 +1,5 @@
 import { phoneAppConnected, type PhoneDevice, type PhoneSetting, type PhonesSnapshot } from "../shared/phones";
+import { phoneMatchesDefault } from "../shared/default-targets";
 import { groupPhoneDevices } from "../shared/phone-devices";
 import { phoneConnectionPresentation, phoneEnhancementPresentation, phonePresentation, type PhoneRoutePresentation, type PhoneSettingRow } from "../shared/phone-presentation";
 import { workspaceIdentityBar, workspaceSwitcher, refreshWorkspaceSwitcher } from "./workspace-switcher";
@@ -51,7 +52,7 @@ root.querySelector(".phone-console-layout")!.append(iphonePane);
 const deviceMenu = document.createElement("div");
 deviceMenu.id = "phone-device-menu"; deviceMenu.className = "phone-device-menu"; deviceMenu.popover = "manual";
 deviceMenu.setAttribute("role", "menu"); deviceMenu.setAttribute("aria-label", "设备操作");
-deviceMenu.innerHTML = '<button type="button" role="menuitem" data-action="rename">修改名称</button><button type="button" role="menuitem" data-action="unlock-secret">解锁凭据</button>';
+deviceMenu.innerHTML = '<button type="button" role="menuitem" data-action="set-default-device">设为默认设备</button><button type="button" role="menuitem" data-action="rename">修改名称</button><button type="button" role="menuitem" data-action="unlock-secret">解锁凭据</button>';
 root.append(deviceMenu);
 let menuAnchor: HTMLButtonElement | undefined;
 function closeDeviceMenu(restoreFocus = false): void {
@@ -65,6 +66,7 @@ function openDeviceMenu(button: HTMLButtonElement): void {
   for (const item of deviceMenu.querySelectorAll<HTMLButtonElement>("button")) item.dataset.deviceId = button.dataset.deviceId;
   deviceMenu.querySelector<HTMLButtonElement>('[data-action="unlock-secret"]')!.hidden = device?.platform === "ios";
   deviceMenu.querySelector<HTMLButtonElement>('[data-action="unlock-secret"]')!.textContent = device?.unlockSecret?.saved ? "解锁凭据 · 已保存" : "解锁凭据";
+  deviceMenu.querySelector<HTMLButtonElement>('[data-action="set-default-device"]')!.textContent = device && phoneMatchesDefault(device, snapshot.defaultDevice?.saved) ? "取消默认设备" : "设为默认设备";
   const item = deviceMenu.querySelector<HTMLButtonElement>("button")!;
   deviceMenu.showPopover(); button.setAttribute("aria-expanded", "true");
   const bounds = button.getBoundingClientRect();
@@ -273,7 +275,7 @@ function options(device?: PhoneDevice): string {
 function render(): void {
   const groups = groupPhoneDevices(snapshot.devices, selected);
   const previous = selected;
-  const group = groups.find(item => item.routes.some(route => route.id === selected)) || (!drawer.open ? groups.find(item => item.device.connection === "device") || groups[0] : undefined);
+  const group = groups.find(item => item.routes.some(route => route.id === selected)) || (!drawer.open ? snapshot.defaultDevice?.saved ? groups.find(item => item.routes.some(route => phoneMatchesDefault(route, snapshot.defaultDevice?.saved))) : groups.find(item => item.device.connection === "device") || groups[0] : undefined);
   selected = group?.device.id || "";
   if (drawer.open && previous && !group) { drawer.close(); notice("这台设备已从列表移除。"); }
   if (selected) sessionStorage.setItem("phone-selected", selected);
@@ -281,7 +283,8 @@ function render(): void {
   renderPhoneList(root, snapshot, { filter, selected, loaded, busy });
   if (busy || !menuAnchor?.isConnected || document.hidden || window.workspacePane?.active === false) closeDeviceMenu();
   const device = current(), status = group && phoneConnectionPresentation(group), view = status?.view;
-  root.querySelector<HTMLElement>(".phone-inspector:not(.iphone-inspector)")!.hidden = device?.platform === "ios";
+  root.querySelector<HTMLElement>(".phone-console-layout")!.classList.toggle("is-empty", !device);
+  root.querySelector<HTMLElement>(".phone-inspector:not(.iphone-inspector)")!.hidden = !device || device.platform === "ios";
   inspector.update(device?.platform === "ios" ? undefined : device, busy);
   renderIphonePane(iphonePane, device);
   if (device?.platform === "ios") { wirelessDiscovery.update("", false); return; }
@@ -411,6 +414,7 @@ root.addEventListener("click", event => {
     void navigator.clipboard.writeText(phoneAppDownload(snapshot.companionApp?.variant).url).then(() => notice("下载链接已复制，可在手机浏览器中打开。")).catch(() => notice("复制失败，请使用右侧二维码下载。", true)); return;
   }
   if (busy) return;
+  if (action === "clear-default-device") { void run(async () => { snapshot = await window.phones.setDefault(null); }); return; }
   if (action === "device-menu") { openDeviceMenu(button); return; }
   if (action === "game-follow") { void openGameFollower(current()); return; }
   if (action === "add-device") { addDevice(); return; }
@@ -429,6 +433,11 @@ root.addEventListener("click", event => {
   if (action === "emulator") { emulator(); return; }
   if (action === "mobile") { void openMobileConnections?.(); return; }
   const device = current(); if (!device) return;
+  if (action === "set-default-device") {
+    closeDeviceMenu();
+    const id = phoneMatchesDefault(device, snapshot.defaultDevice?.saved) ? null : device.id;
+    void run(async () => { snapshot = await window.phones.setDefault(id); notice(id ? "已设为默认设备" : "已清除默认设备"); }); return;
+  }
   if (device.platform === "ios") {
     if (action === "rename") { rename(device); return; }
     void run(async () => {
@@ -503,5 +512,5 @@ function rename(device: PhoneDevice): void {
 window.phones.onChanged(value => { snapshot = value; loaded = true; render(); });
 document.addEventListener("visibilitychange", render);
 document.addEventListener("workspace-visibilitychange", render);
-void window.phones.snapshot().then(value => { snapshot = value; loaded = true; render(); }).catch(error => { loaded = true; render(); notice(error.message, true); });
+void window.phones.snapshot().then(value => { snapshot = value; loaded = true; render(); }).catch(error => { snapshot.error = error.message; loaded = true; render(); });
 window.setInterval(() => { if (!document.hidden && window.workspacePane?.active !== false) { render(); updateElapsed(); } }, 1000);

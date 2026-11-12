@@ -20,6 +20,7 @@ function load(name, platform, stubs = {}, clock = Date) {
   const module = { exports: {} };
   const requireStub = id => {
     if (Object.hasOwn(stubs, id)) return stubs[id];
+    if (id === './default-targets') return { DefaultTargetStore: class { profile() { return null; } } };
     if (id === './profile-process-change' || id === '../profile-process-change') return load('profile-process-change', platform);
     if (id === 'node:path') return platform === 'win32' ? path.win32 : path.posix;
     if (id === 'node:child_process') return { execFile: forbidden, spawn: forbidden };

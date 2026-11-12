@@ -182,7 +182,7 @@ function scrollFixture(horizontal = false, shadow = false) {
   return { ...f, target, panel, windowScrolls: () => windowScrolls };
 }
 
-const scrollResult = message => JSON.parse(message.match(/^滚动结果：(.*)；需要/)[1]);
+const scrollResult = message => JSON.parse(message.match(/^滚动结果：(.*)；/)[1]);
 
 test('ref scroll targets the nearest scroll container and reports movement and boundary without bubbling', async () => {
   const f = scrollFixture(), task = { observation: await f.browser.observe({}) }, ref = task.observation.fast.candidates[0].ref;

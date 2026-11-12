@@ -11,6 +11,8 @@ test("engine parses only global prefixes, preserving command text and Chinese pa
   assert.equal(parsed.timeout, 2000);
   assert.deepEqual(parsed.args, ["fill", "#name", "--cdp 1234 中文"]);
   assert.equal(parsed.endpoint, undefined);
+  assert.equal(parseEngineCommand(['--no-observe', 'scrollintoview', '@e1']).observeAfterAction, false);
+  assert.deepEqual(parseEngineCommand(['fill', '#name', '--no-observe']).args, ['fill', '#name', '--no-observe']);
   for (const args of [["--session", "../escape", "snapshot"], ["--timeout", "NaN"], ["--cdp"], ["--browser", "chrome"]])
     assert.throws(() => parseEngineCommand(args), error => error.code === "BROWSER_INVALID_ARGUMENTS");
   assert.deepEqual(splitCommand(`fill '#name' '$(must remain text) 中文'`), ["fill", "#name", "$(must remain text) 中文"]);

@@ -13,14 +13,14 @@ export const desktopCommands: ControlCliCommands = {
   status: { summary: '只读查询平台、组件与当前占用', options: ['--json', '--session'], example: ['status'] },
   windows: { summary: '只读发现真实窗口 ID', options: ['--json', '--session'], example: ['windows'] },
   doctor: { summary: '只读检查指定窗口和跨入口占用', options: ['--json', '--window', '--session'], example: ['doctor'] },
-  claim: { summary: '在授权范围内取得指定原生窗口控制', options: ['--json', '--session', '--window'], required: ['--session', '--window'], example: ['claim', '--session', 'TASK', '--window', 'WINDOW_ID_FROM_WINDOWS'] },
+  claim: { summary: '取得窗口控制；background 仅允许后台语义操作', options: ['--json', '--session', '--window', '--mode'], required: ['--session', '--window'], example: ['claim', '--session', 'TASK', '--window', 'WINDOW_ID_FROM_WINDOWS', '--mode', 'background'], notes: ['mode: interactive（默认）或 background；会话创建后不可更改。后台模式不切前台、不发送物理输入；使用目标应用时暂停，操作其他应用时继续。'] },
   select: { summary: '同一会话选择真实窗口', options: ['--json', '--session', '--window'], required: ['--session', '--window'], example: ['select', '--session', 'TASK', '--window', 'WINDOW_ID_FROM_WINDOWS'] },
   observe: { summary: '读取控件与新的观察版本', options: ['--json', '--session'], required: ['--session'], example: ['observe', '--session', 'TASK'] },
   screenshot: { summary: '保存截图和新观察版本', options: ['--json', '--session', '--output', '--image-only'], required: ['--session'], example: ['screenshot', '--session', 'TASK', '--output', './screen.png'] },
   wait: { summary: '只读等待精确匹配的控件', options: ['--json', '--session', '--name', '--role', '--automation-id', '--text', '--has-action', '--timeout-ms', '--interval-ms'], required: ['--session'], example: ['wait', '--session', 'TASK', '--name', '保存'], notes: ['至少一个匹配条件；timeout-ms 100–20000，interval-ms 100–2000；超时后重新观察。'] },
-  action: { summary: '使用当前 version 执行一次动作', options: ['--json', '--session', '--params-file', '--params-stdin', '--request-id', '--observe'], required: ['--session'], example: ['action', '--session', 'TASK', '--params-file', './action.json'],
+  action: { summary: '执行一次动作，等待并返回新观察', options: ['--json', '--session', '--params-file', '--params-stdin', '--request-id', '--observe', '--no-observe'], required: ['--session'], example: ['action', '--session', 'TASK', '--params-file', './action.json'],
     input: desktopActionJsonSchema(),
-    notes: ['params-file 与 params-stdin 二选一；JSON 例：{"kind":"invoke","ref":"e1","version":"FROM_OBSERVE"}。', '每种 kind 仅接受相关字段；坐标须来自本次截图，ref 与 x/y 不能并用。', 'set_value 需 value（允许空串）；type_text 非空最多 512 UTF-16 单元；press_key 需 keys；drag 需 toX/toY；wheel 需非零 delta；scroll 需非 NoAmount(2) 方向。', '动作成功后 --observe 获取新版本；观察失败不表示动作未执行。'] },
+    notes: ['params-file 与 params-stdin 二选一；JSON 例：{"kind":"invoke","ref":"e1","version":"FROM_OBSERVE"}。', '每种 kind 仅接受相关字段；坐标须来自本次截图，ref 与 x/y 不能并用。', 'set_value 需 value（允许空串）；type_text 非空最多 512 UTF-16 单元；press_key 需 keys；drag 需 toX/toY；wheel 需非零 delta；scroll 需非 NoAmount(2) 方向。', '动作成功后默认等待 500ms 并获取新版本；--no-observe 跳过。观察失败不表示动作未执行，不能重放动作。'] },
   receipt: { summary: '只读查询动作回执，不重放', options: ['--json', '--session', '--request-id'], required: ['--session', '--request-id'], example: ['receipt', '--session', 'TASK', '--request-id', 'UUID_FROM_ACTION'] },
   handoff: { summary: '交给用户', options: ['--json', '--session'], required: ['--session'], example: ['handoff', '--session', 'TASK'] },
   resume: { summary: '仅在用户明确交还后恢复原会话', options: ['--json', '--session'], required: ['--session'], example: ['resume', '--session', 'TASK'] },
@@ -32,6 +32,7 @@ export const desktopHelp = `ppilot desktop · 本机 Windows 桌面控制
   status | windows [--json]                       状态 / 当前桌面窗口
   doctor [--window ID]                            只读检查前台、权限及跨入口占用
   claim --session TASK --window ID                独占控制桌面，选择实际窗口
+        [--mode background|interactive]           后台语义 / 前台交互（默认），会话内不可更改
   select --session TASK --window ID               切换同一任务的目标窗口
   observe --session TASK                          读取 UI Automation 控件
   wait --session TASK --name NAME                 等待控件出现或状态文本变化
@@ -40,7 +41,7 @@ export const desktopHelp = `ppilot desktop · 本机 Windows 桌面控制
   screenshot --session TASK [--output FILE]        截图并返回最新观察版本
              [--image-only]                      跳过 UIA 控件遍历，只取画面
   action --session TASK --params-file FILE        执行操作（也支持 --params-stdin）
-         [--observe]                             成功后回传新的 UIA observation
+         [--no-observe]                          默认等待 500ms 并回传新的 UIA observation
   receipt --session TASK --request-id UUID        只读查询已保留回执（会话结束后也可查）
   handoff | resume --session TASK                 交给用户 / 用户明确交还后恢复
   complete | release --session TASK               完成 / 取消控制
@@ -58,17 +59,17 @@ press_key 支持 A-Z、0-9、F1-F12，以及 CTRL/CONTROL、ALT、SHIFT、ENTER�
 wheel 的 deltaX/deltaY 各限 -1200..1200，至少一个非零；120 表示一格，正 Y 向上，正 X 向右。
 有 captureRect 时：x = captureRect.x + 图片像素X * captureRect.width / image.width，y 同理。
 若 image.coordinateInputAvailable 为 false，请使用控件引用或 browser/electron 页面入口，不使用截图坐标。
-每次操作消耗观察版本；重新 observe 后再继续，或 action --observe 直接获取下一版本。
+每次操作消耗观察版本；action 默认回传下一版本，后续动作使用 observation.version。
 type_text 每次最多 512 个 UTF-16 单元且不接受未配对代理项；长文本优先使用控件支持的 set_value（最多 16384），或分段并重新观察。
 键盘逐字符组检查焦点仍不能保证应用异步处理期间永不改变焦点；中断后核对实际结果，不重放整段。
 inputObservation 的 arming/pending 状态不授权输入；检测到外部输入或观察器中断会暂停，只有明确交还后才能 resume。
---observe 读取失败仍返回 executed:true 和 observationError，不能因此重放操作。
+--observe 保留兼容；--no-observe 跳过自动观察。观察失败仍返回 actionOutcome:completed、observationStatus:unavailable 和 observationError，不能因此重放操作。
 wait 至少提供 name/role/automation-id/text/has-action 之一；--text '' 等待成功读到的空文本，密码 name/text 不参与匹配。
 wait 只匹配完整可读字段；检查 truncatedFields/textStatus，textSource 区分 Value 与 TextPattern；可读 Value 的 state.valueEvidence 为 unconfirmed 或 stateGaps 含 value_evidence 时不能用该引用输入。
 --has-action 检查控件实际报告的能力（包括 text），不代表当前可输入；text 不是 action kind。
 wait 超时上限 20000ms，返回 timedOut:true、requiresObservation:true（退出码 75）；可能没有最后观察。即使超时发生在两次读取之间，旧版本也不能继续操作，须重新 observe。
 wait 不重放输入；超时观察仅供核查。接管或停止会立即取消等待。
---request-id UUID 可查询相同操作的回执，不得更改参数或 --observe。返回的旧 observation 不能当作新画面。
+--request-id UUID 可查询相同操作的回执，不得更改参数或观察开关。返回的旧 observation 不能当作新画面。
 receipt 返回 pending/succeeded/failed，不触发输入或延长会话。回执丢失不表示动作未执行；应用重启或超过 256 条保留上限会丢失旧回执。
 默认闲置 5 分钟结束。应用的桌面控制条可随时接管/停止；status.stopShortcutAvailable 为 true 时 Ctrl+Alt+Esc 也可停止。
 暂停、超时或断线后先检查状态，不自动恢复或重复输入。macOS 暂不支持原生桌面控制。
@@ -84,8 +85,8 @@ export async function runDesktopCli(args: string[], request: Request, io: Pick<N
     const options = new Map<string, string | true>();
     for (let i = 1; i < args.length; i++) {
       const equals = args[i].indexOf('='), key = equals < 0 ? args[i] : args[i].slice(0, equals);
-      if (!['--session', '--window', '--output', '--params-file', '--params-stdin', '--request-id', '--json', '--image-only', '--observe', '--require-active', '--name', '--role', '--automation-id', '--text', '--has-action', '--timeout-ms', '--interval-ms'].includes(key) || options.has(key)) throw new Error('未知或重复参数：' + key);
-      if (['--json', '--params-stdin', '--image-only', '--observe', '--require-active'].includes(key)) {
+      if (!['--session', '--window', '--mode', '--output', '--params-file', '--params-stdin', '--request-id', '--json', '--image-only', '--observe', '--no-observe', '--require-active', '--name', '--role', '--automation-id', '--text', '--has-action', '--timeout-ms', '--interval-ms'].includes(key) || options.has(key)) throw new Error('未知或重复参数：' + key);
+      if (['--json', '--params-stdin', '--image-only', '--observe', '--no-observe', '--require-active'].includes(key)) {
         if (equals >= 0) throw new Error(key + ' 是布尔开关，不接受值。');
         options.set(key, true);
       } else {
@@ -97,6 +98,7 @@ export async function runDesktopCli(args: string[], request: Request, io: Pick<N
     if (!Object.hasOwn(desktopCommands, method)) throw new Error('未知桌面命令：' + method);
     const allowed = new Set(desktopCommands[method].options);
     for (const key of options.keys()) if (!allowed.has(key)) throw new Error(method + ' 不支持 ' + key);
+    if (options.has('--observe') && options.has('--no-observe')) throw new Error('--observe 与 --no-observe 不能同时使用。');
     let params: unknown;
     if (method === 'action') {
       if (options.has('--params-file') === options.has('--params-stdin')) throw new Error('请选择 --params-file 或 --params-stdin。');
@@ -122,9 +124,9 @@ export async function runDesktopCli(args: string[], request: Request, io: Pick<N
       ['name', '--name'], ['role', '--role'], ['automationId', '--automation-id'], ['text', '--text'], ['hasAction', '--has-action']
     ].filter(([, flag]) => options.has(flag)).map(([field, flag]) => [field, options.get(flag)])) : undefined;
     const command: DesktopCommand = desktopCommandSchema.parse({ action: 'desktop', method, session: options.get('--session'), windowId: options.get('--window'), params, condition,
-      timeoutMs: integerOption('--timeout-ms'), intervalMs: integerOption('--interval-ms'),
+      mode: options.get('--mode'), timeoutMs: integerOption('--timeout-ms'), intervalMs: integerOption('--interval-ms'),
       requestId: method === 'action' ? options.get('--request-id') || randomUUID() : method === 'receipt' ? options.get('--request-id') : undefined,
-      screenshotOnly: options.has('--image-only') || undefined, observeAfter: options.has('--observe') || undefined,
+      screenshotOnly: options.has('--image-only') || undefined, observeAfter: method === 'action' ? !options.has('--no-observe') : undefined,
       requireActive: options.has('--require-active') || undefined });
     if (!['status', 'windows', 'doctor'].includes(method) && !command.session) throw new Error('需要 --session 任务名。');
     if (['claim', 'select'].includes(method) && !command.windowId) throw new Error('需要 --window ID。');
@@ -138,7 +140,7 @@ export async function runDesktopCli(args: string[], request: Request, io: Pick<N
     }
     if (!response.ok) {
       const { code, message, details } = response.error; write({ ok: false, code, message, details, requestId: command.requestId });
-      return /BAD_REQUEST|INVALID_ARGUMENTS/.test(code) ? 2 : /PLATFORM_UNAVAILABLE|HELPER_MISSING|SERVICE_UNAVAILABLE/.test(code) ? 69 : /BUSY|STALE|CHANGED|ENDED|CONTROL|CONFLICT|UNKNOWN|UNCONFIRMED|LOCKED|UNAVAILABLE|INTERRUPTED|RESPONSE_TOO_LARGE|SCREENSHOT_REQUIRED|FRESH_OBSERVATION_REQUIRED|INPUT_OBSERVER_PENDING|FOCUS_REQUIRED|OCCLUDED|USER_STOPPED/.test(code) ? 75 : 1;
+      return /BAD_REQUEST|INVALID_ARGUMENTS/.test(code) ? 2 : /PLATFORM_UNAVAILABLE|HELPER_MISSING|SERVICE_UNAVAILABLE/.test(code) ? 69 : /BUSY|STALE|CHANGED|ENDED|CONTROL|CONFLICT|UNKNOWN|UNCONFIRMED|LOCKED|UNAVAILABLE|INTERRUPTED|RESPONSE_TOO_LARGE|SCREENSHOT_REQUIRED|FRESH_OBSERVATION_REQUIRED|INPUT_OBSERVER_PENDING|FOCUS_REQUIRED|OCCLUDED|USER_STOPPED|BACKGROUND_TARGET_ACTIVE/.test(code) ? 75 : 1;
     }
     const result = response.data as any;
     if (result?.image?.data) {

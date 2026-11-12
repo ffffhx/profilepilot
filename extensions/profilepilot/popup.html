@@ -28,6 +28,11 @@
     <small>请确认当前 Chrome Profile 与生成配对码时选择的 Profile 一致。</small>
     <button id="connect-submit" type="submit" class="primary">连接浏览器服务</button>
   </form>
+  <footer class="diagnostics-footer">
+    <button id="export-diagnostics" type="button">导出连接诊断</button>
+    <p id="diagnostics-note" role="status">仅记录连接过程，不含网页内容和配对码。</p>
+  </footer>
+  <script src="connection-diagnostics.js"></script>
   <script type="module" src="popup.js"></script>
 </body>
 </html>

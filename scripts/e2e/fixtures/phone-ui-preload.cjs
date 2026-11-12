@@ -36,6 +36,7 @@ contextBridge.exposeInMainWorld('phones', {
   autoConnectWireless: id => call('wireless-connect', {id}),
   pairWireless: (address, code) => call('wireless-pair', { address, code }),
   connectWireless: address => call('wireless-connect', { address }),
+  setDefault: id => call('default', { id }),
   rename: (id, name) => call('rename', { id, name }),
   start: (id, mode, controller, task) => call('start', { id, mode, controller, task }),
   control: (id, method) => call(method, { id }), perform: input => call('action', input),

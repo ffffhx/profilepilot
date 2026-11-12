@@ -5,6 +5,7 @@ import { taskIcon } from "./task-icons";
 import { confirmTaskAction } from "./task-confirm";
 import { pcControlTabs } from "./pc-control";
 import { workspaceHidden, onWorkspaceVisibilityChanged } from "./workspace-lifecycle";
+import { renderButtonLabel, setButtonLoading } from "./button-label";
 
 declare global { interface Window { localApps: LocalAppsApi; } }
 const api = window.localApps;
@@ -16,6 +17,7 @@ let search = "";
 let busy = false;
 let refreshing = false;
 let initialized = false;
+let initialLoadError = false;
 let detailKey = "";
 let listKey = "";
 let messageTimer: number;
@@ -68,7 +70,7 @@ function agentSummary(app: LocalAppView): string {
 function appRow(app: LocalAppView): string {
   const available = localAppAvailability(app), primary = primaryAction(app);
   return `<tr data-app-row="${escape(app.id)}" class="${selected === app.id ? "selected" : ""}">
-    <td><button class="app-pick" data-select="${escape(app.id)}" aria-current="${selected === app.id}" title="${escape(app.name)}">${appIcon(app, "app-list-icon")}<span class="app-label"><strong>${escape(app.name)}</strong></span></button></td>
+    <td><button class="app-pick" data-select="${escape(app.id)}" aria-current="${selected === app.id}" title="${escape(app.name)}">${appIcon(app, "app-list-icon")}<span class="app-label"><strong>${escape(app.name)}</strong>${app.agent?.sessionId ? `<small class="app-agent-compact">${escape(app.agent.name || "Agent")} · ${localAppAgentLabel(app)}</small>` : ""}</span></button></td>
     <td><span class="app-state ${app.runtime.status}"><span class="status-dot ${app.runtime.status}" aria-hidden="true"></span>${status(app)}</span></td>
     <td><span class="app-availability${available.ready ? " connected" : ""}">${available.ready ? taskIcon("check") : ""}${available.label}</span></td>
     <td>${agentSummary(app)}</td>
@@ -144,9 +146,13 @@ async function refreshPreview(force = false): Promise<void> {
 function render(): void {
   const filtered = apps.filter(app => app.name.toLowerCase().includes(search.toLowerCase()));
   root.querySelector(".app-count")!.textContent = String(apps.length);
-  const nextList = JSON.stringify([filtered, selected, busy]);
+  root.querySelector<HTMLElement>(".app-search-field")!.hidden = !apps.length;
+  root.querySelector<HTMLElement>(".pc-apps-layout")!.classList.toggle("is-empty", !apps.length);
+  const nextList = JSON.stringify([filtered, selected, busy, initialLoadError]);
   if (listKey !== nextList) {
-    root.querySelector(".app-list")!.innerHTML = `<table class="pc-apps-table" aria-label="Electron 应用列表"><colgroup><col class="app-col-name"><col class="app-col-status"><col class="app-col-connection"><col class="app-col-agent"><col class="app-col-actions"></colgroup><thead><tr><th scope="col">应用</th><th scope="col">运行状态</th><th scope="col">Agent 可用性</th><th scope="col">当前 Agent</th><th scope="col">操作</th></tr></thead><tbody>${filtered.length ? filtered.map(appRow).join("") : `<tr><td colspan="5" class="app-list-empty">${search ? "没有匹配的应用，试试其他关键词。" : "还没有添加应用，点击右上角「添加应用」开始。"}</td></tr>`}</tbody></table>`;
+    root.querySelector(".app-list")!.innerHTML = initialLoadError && !initialized ? '<div class="app-list-empty" role="alert"><h3>暂时无法读取应用</h3><p>请检查连接后重试。</p><button data-action="refresh">重新读取</button></div>' : filtered.length ? `<table class="pc-apps-table" aria-label="Electron 应用列表"><colgroup><col class="app-col-name"><col class="app-col-status"><col class="app-col-connection"><col class="app-col-agent"><col class="app-col-actions"></colgroup><thead><tr><th scope="col">应用</th><th scope="col">运行状态</th><th scope="col">Agent 可用性</th><th scope="col">当前 Agent</th><th scope="col">操作</th></tr></thead><tbody>${filtered.map(appRow).join("")}</tbody></table>`
+      : search ? `<div class="app-list-empty" role="status"><h3>没有匹配的应用</h3><p>试试其他关键词，或清除搜索查看所有应用。</p><button data-action="clear-search">清除搜索</button></div>`
+      : `<div class="app-list-empty" role="status"><span class="empty-app-icon" aria-hidden="true">${taskIcon("desktop")}</span><h3>添加你的第一个应用</h3><p>添加本地项目、已有 Electron 应用或后台服务，在这里查看运行与连接状态。</p><button class="primary" data-action="add">${taskIcon("plus")}添加应用</button></div>`;
     listKey = nextList;
   }
   const app = apps.find(item => item.id === selected);
@@ -155,12 +161,13 @@ function render(): void {
   if (detailKey !== nextDetail) {
     detailKey = nextDetail;
     const content = root.querySelector(".app-content")!;
+    (content as HTMLElement).hidden = !apps.length;
     content.setAttribute("data-current-app", app?.id || "");
     content.innerHTML = app ? `<header class="detail-heading"><div class="app-identity">${appIcon(app, "app-avatar")}<div><h2>${escape(app.name)}</h2><p>${app.mode === "service" ? "后台服务" : "桌面应用"}</p></div></div></header>
       <section class="app-preview">${renderPreview(app)}</section><section class="app-agent-details">${agentDetails(app)}</section>
       ${app.runtime.status === "failed" ? '<p class="app-status-notice">应用启动或运行异常，可在连接设置中检查启动方式。</p>' : ""}
       ${localAppAvailability(app).ready ? `<button class="app-show-window" data-action="show" ${busy ? "disabled" : ""}>${taskIcon("desktop")}显示应用窗口</button>` : ""}`
-      : `<section class="empty-state"><div class="empty-app-icon" aria-hidden="true">${taskIcon("desktop")}</div><h2>添加你的桌面应用</h2><p>从列表选择应用，查看画面和 Agent 状态。</p><button class="primary" data-action="add">${taskIcon("plus")}添加第一个应用</button></section>`;
+      : `<section class="empty-state"><h2>选择一个应用</h2><p>从列表选择应用，查看画面和 Agent 状态。</p></section>`;
   }
   refreshWorkspaceSwitcher(); void refreshPreview();
 }
@@ -170,13 +177,18 @@ async function refresh(): Promise<void> {
   try {
     if (!initialized) {
       apps = await api.list({ cached: true });
-      initialized = true;
+      initialized = true; initialLoadError = false;
       if (!apps.some(app => app.id === selected)) selected = apps[0]?.id || "";
       render();
     }
     const next = await api.list(); apps = next;
     if (!apps.some(app => app.id === selected)) selected = apps[0]?.id || "";
     render();
+  } catch (error) {
+    if (!initialized) {
+      initialLoadError = true; render();
+    }
+    throw error;
   } finally { refreshing = false; }
 }
 async function perform(action: () => Promise<unknown>, success?: string): Promise<void> {
@@ -214,7 +226,7 @@ function showConnection(app: LocalAppView): void {
   const dialog = document.createElement("dialog"); dialog.className = "app-connection-dialog";
   dialog.setAttribute("aria-labelledby", "connection-dialog-title");
   dialog.setAttribute("aria-describedby", "connection-dialog-description");
-  dialog.innerHTML = `<h2 id="connection-dialog-title">连接 ${escape(app.name)}</h2><p id="connection-dialog-description">正在尝试连接已有应用…</p><p class="connection-result" role="status" aria-live="polite"></p><footer><button data-close>取消</button><button data-settings>连接设置</button><button class="primary" data-check disabled>正在连接…</button></footer>`;
+  dialog.innerHTML = `<h2 id="connection-dialog-title">连接 ${escape(app.name)}</h2><p id="connection-dialog-description">正在尝试连接已有应用…</p><p class="connection-result" role="status" aria-live="polite"></p><footer><button data-close>取消</button><button data-settings>连接设置</button><button class="primary" data-check disabled>${renderButtonLabel(true, "重试连接", "连接中…")}</button></footer>`;
   document.body.append(dialog);
   const description = dialog.querySelector<HTMLElement>("#connection-dialog-description")!;
   const result = dialog.querySelector<HTMLElement>(".connection-result")!;
@@ -233,7 +245,7 @@ function showConnection(app: LocalAppView): void {
     const token = confirmationToken; confirmationToken = undefined;
     pending = true; busy = true; render();
     cancel.disabled = true; settings.disabled = true; button.disabled = true;
-    button.textContent = token ? "正在重启并连接…" : "正在连接…";
+    setButtonLoading(button, true);
     result.textContent = token ? "正在请求应用正常退出…" : "正在检查应用连接…";
     result.dataset.error = "false";
     const current = ++generation;
@@ -254,14 +266,15 @@ function showConnection(app: LocalAppView): void {
         confirmationToken = next.confirmationToken;
         description.textContent = `${app.name} 已在运行，但尚未开启界面连接。需要重启应用才能连接。`;
         result.textContent = "请先保存未保存的内容；重启会中断应用中的当前任务。确认后将正常退出应用，按连接设置重新启动并验证连接。";
-        button.textContent = "重启并连接";
+        button.innerHTML = renderButtonLabel(false, "重启并连接", "连接中…");
       }
     } catch (error) {
       description.textContent = "连接未完成。处理下面的问题后，可以重试连接。";
       result.textContent = errorText(error); result.dataset.error = "true";
-      button.textContent = "重试连接"; cancel.textContent = "关闭";
+      button.innerHTML = renderButtonLabel(false, "重试连接", "连接中…"); cancel.textContent = "关闭";
     } finally {
       clearInterval(timer); generation++; pending = false; busy = false;
+      setButtonLoading(button, false);
       cancel.disabled = false; button.disabled = false;
       await refresh().catch(error => message(errorText(error), true)); render();
       settings.disabled = apps.find(item => item.id === app.id)?.managed ?? app.managed;
@@ -292,7 +305,13 @@ root.addEventListener("click", event => {
   const action = button.dataset.action;
   if (action !== "more") closeMenu();
   if (action === "add") { showForm(); return; }
-  if (action === "refresh") { void perform(() => Promise.resolve(), "已检查运行状态"); return; }
+  if (action === "clear-search") { search = ""; (root.querySelector(".app-search") as HTMLInputElement).value = ""; render(); root.querySelector<HTMLInputElement>(".app-search")!.focus(); return; }
+  if (action === "refresh") {
+    if (busy) return;
+    busy = true; render();
+    void refresh().then(() => message("已检查运行状态")).catch(error => message(errorText(error), true)).finally(() => { busy = false; render(); });
+    return;
+  }
   const app = apps.find(item => item.id === selected); if (!app) return;
   if (action === "more") { openMenu(app, bounds!); return; }
   if (action === "connect") { showConnection(app); return; }
@@ -345,7 +364,7 @@ function showForm(app?: LocalAppView): void {
   // Hidden Electron windows can defer the native close event. Retire the form
   // immediately so the next edit cannot find a closed, stale dialog by id.
   const closeDialog = () => { dialog.close(); dispose(); };
-  dialog.innerHTML = `<form class="app-form"><h2 id="app-form-title">${app ? "连接设置" : "添加应用"}</h2><p class="form-description">配置应用的启动方式和 Agent 连接。</p>
+  dialog.innerHTML = `<form class="app-form"><header class="app-form-header"><div><h2 id="app-form-title">${app ? "连接设置" : "添加应用"}</h2><p class="form-description">配置应用的启动方式和 Agent 连接。</p></div><button type="button" data-close-form aria-label="关闭应用设置" title="关闭（Esc）">${taskIcon("close")}</button></header><div class="app-form-body">
     <label>应用名称<input name="name" maxlength="100" required placeholder="例如：我的桌面笔记" value="${escape(app?.name)}" autofocus></label>
     <label>管理方式<select name="mode"><option value="launch" ${!app || app.mode === "launch" ? "selected" : ""}>从项目启动</option><option value="attach" ${app?.mode === "attach" ? "selected" : ""}>连接已有应用</option><option value="service" ${app?.mode === "service" ? "selected" : ""}>后台服务（独立启动）</option></select></label>
     <div data-launch-fields><label>项目文件夹<div class="field-row"><input name="cwd" placeholder="选择包含 package.json 的项目文件夹" value="${escape(app?.cwd)}"><button type="button" data-browse>选择…</button></div></label>
@@ -359,7 +378,7 @@ function showForm(app?: LocalAppView): void {
   'remote-debugging-port',
   process.env.PROFILEPILOT_CDP_PORT || '9333'
 );</pre><p class="form-hint">主进程需要在 Electron 启动时传入 <code>--inspect=端口</code>。连接已有应用时，填写它实际使用的端口。</p></details>
-    <p class="form-error" role="alert" hidden></p><footer class="form-footer"><button type="button" data-cancel>取消</button><button type="submit" class="primary">保存应用</button></footer></form>`;
+    </div><footer class="form-footer"><p class="form-error" role="alert" hidden></p><div class="form-footer-actions"><button type="button" data-cancel>取消</button><button type="submit" class="primary">${renderButtonLabel(false, "保存应用", "保存中…")}</button></div></footer></form>`;
   document.body.append(dialog);
   const form = dialog.querySelector<HTMLFormElement>("form")!;
   const field = (name: string) => form.elements.namedItem(name) as HTMLInputElement;
@@ -380,6 +399,7 @@ function showForm(app?: LocalAppView): void {
   };
   field("mode").addEventListener("change", modeChanged); modeChanged();
   dialog.querySelector("[data-cancel]")!.addEventListener("click", closeDialog);
+  dialog.querySelector("[data-close-form]")!.addEventListener("click", closeDialog);
   dialog.querySelector("[data-browse]")!.addEventListener("click", () => {
     void api.pickDirectory().then(directory => { if (directory && dialog.isConnected) field("cwd").value = directory; }).catch(error => showError(error));
   });
@@ -401,10 +421,10 @@ function showForm(app?: LocalAppView): void {
       servicePort: field("servicePort").value ? Number(field("servicePort").value) : null,
       serviceProcess: field("serviceProcess").value, logPath: app?.logPath
     };
-    submit.disabled = true; submit.textContent = "正在保存…";
+    submit.disabled = true; setButtonLoading(submit, true);
     void api.save(input).then(async id => {
       selected = id; sessionStorage.setItem("local-app-selected", id); closeDialog(); await refresh(); message("应用配置已保存");
-    }).catch(showError).finally(() => { submit.disabled = false; submit.textContent = "保存应用"; });
+    }).catch(showError).finally(() => { submit.disabled = false; setButtonLoading(submit, false); });
   });
   dialog.addEventListener("cancel", event => { event.preventDefault(); closeDialog(); });
   dialog.addEventListener("close", dispose, { once: true });

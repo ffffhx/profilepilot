@@ -38,9 +38,6 @@ test("one bundled skill serves every old installation entry point", async t => {
   const links = [...source.matchAll(/\]\((references\/[^)]+)\)/g)].map(match => match[1]);
   assert.ok(links.length >= 6);
   for (const link of links) assert.ok(fs.statSync(path.join(root, link)).isFile(), link);
-  for (const name of ["browser-routing.md", "electron-control.md", "phone-control.md"]) {
-    assert.ok(fs.statSync(path.join(root, "templates", name)).isFile(), name);
-  }
   assert.equal(fs.existsSync(path.join(root, "local")), false, "personal policy is not shipped to other users");
 });
 
@@ -50,8 +47,7 @@ test("installation updates all references and preserves personal routing across 
   assert.equal(diagnostic.managedTargetCount, 3);
   assert.equal(diagnostic.upToDate, true);
   const target = diagnostic.targets[0].path;
-  // Generic defaults are installed as templates and never seeded as personal policy.
-  assert.ok(fs.existsSync(path.join(target, "templates", "browser-routing.md")));
+  // Shared rules ship in the Skill; no personal policy is created on installation.
   assert.equal(fs.existsSync(path.join(target, "local")), false);
   const policy = path.join(target, "local", "browser-routing.md");
   put(policy, "Default Profile uses @Chrome.");

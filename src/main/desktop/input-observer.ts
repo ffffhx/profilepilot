@@ -12,6 +12,10 @@ export function pointerInputMarker(value: string): string {
   return (low || source >> 32n).toString(16).padStart(16, '0');
 }
 const activityKind = z.enum(['keyboard', 'pointer', 'button', 'wheel']);
+export const backgroundTargetSchema = z.object({ pid: z.number().int().min(1).max(0xffffffff),
+  window: z.string().regex(/^[1-9][0-9]{0,18}$/).refine(value => BigInt(value) <= 9223372036854775807n) }).strict();
+export type BackgroundTarget = z.infer<typeof backgroundTargetSchema>;
+export const sameBackgroundTarget = (a?: BackgroundTarget, b?: BackgroundTarget) => a?.pid === b?.pid && a?.window === b?.window;
 const startupDetailsSchema = z.object({ stage: z.literal('instance-gate'), win32Error: z.number().int().min(0).max(0xffffffff) }).strict();
 export const inputObserverStartupFailureSchema = startupDetailsSchema.extend({ type: z.literal('startup-failure') }).strict();
 export type InputObserverStartupFailure = z.infer<typeof inputObserverStartupFailureSchema>;
@@ -35,20 +39,20 @@ export const isInputObserverStartupErrorCode = (code: unknown): boolean => typeo
 // No virtual key, scan code, text, character, or global coordinate field is
 // accepted. Unknown fields are rejected, never copied into state or callbacks.
 export const inputObserverMessageSchema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('desktop-armed'), epoch: identity, generation: identity, sequence }).strict(),
+  z.object({ type: z.literal('desktop-armed'), epoch: identity, generation: identity, sequence, backgroundTarget: backgroundTargetSchema.optional() }).strict(),
   z.object({ type: z.literal('input-activity'), epoch: identity, generation: identity, sequence,
     kind: activityKind, injected: z.boolean(), marker: markerValue.optional() }).strict(),
   z.object({ type: z.literal('observer-fault'), epoch: identity, generation: identity,
-    reason: z.enum(['overflow', 'unavailable']) }).strict()
+    reason: z.enum(['overflow', 'unavailable', 'target_active']) }).strict()
 ]);
 
 export type InputObserverCommand =
   | { type: 'browser-config'; epoch: string; revision: string; pids: number[] }
-  | { type: 'desktop-arm'; epoch: string; generation: string; marker: string }
-  | { type: 'desktop-rearm'; epoch: string; previousGeneration: string; generation: string; marker: string }
+  | { type: 'desktop-arm'; epoch: string; generation: string; marker: string; backgroundTarget?: BackgroundTarget }
+  | { type: 'desktop-rearm'; epoch: string; previousGeneration: string; generation: string; marker: string; backgroundTarget?: BackgroundTarget }
   | { type: 'desktop-disarm'; epoch: string; generation: string };
 export type InputObserverPauseReason = 'physical_input' | 'external_input' | 'helper_exited' | 'disconnected'
-  | 'helper_replaced' | 'overflow' | 'unavailable' | 'protocol_error' | 'send_failed' | InputObserverStartupReason;
+  | 'helper_replaced' | 'overflow' | 'unavailable' | 'protocol_error' | 'send_failed' | 'target_active' | InputObserverStartupReason;
 export interface InputObserverPause {
   epoch: string; generation: string; reason: InputObserverPauseReason; certainty: 'observed' | 'unknown';
   kind?: z.infer<typeof activityKind>; sequence?: string;
@@ -57,6 +61,7 @@ export interface InputObserverPause {
 export interface DesktopObserverSubscription {
   epoch: string; generation: string; phase: 'arming' | 'ready' | 'paused'; sequence?: string;
   previousGeneration?: string;
+  backgroundTarget?: BackgroundTarget;
   reason?: InputObserverPauseReason; certainty?: 'observed' | 'unknown';
 }
 export interface InputObserverSnapshot {
@@ -87,6 +92,7 @@ export class DesktopInputObserver {
     const state = this.desktop;
     const desktop: DesktopObserverSubscription | null = state ? {
       epoch: state.epoch, generation: state.generation, phase: state.phase,
+      ...(state.backgroundTarget ? { backgroundTarget: { ...state.backgroundTarget } } : {}),
       ...(state.phase === 'arming' && state.previousGeneration ? { previousGeneration: state.previousGeneration } : {}),
       ...(state.lastSequence >= 0n ? { sequence: state.lastSequence.toString() } : {}),
       ...(state.reason ? { reason: state.reason, certainty: state.certainty } : {})
@@ -117,24 +123,25 @@ export class DesktopInputObserver {
     identity.parse(id);
     if (this.browsers.delete(id)) { this.browserRevision++; this.sendBrowsers(); }
   }
-  observeDesktop(generation: string, marker: string): InputObserverSnapshot {
+  observeDesktop(generation: string, marker: string, backgroundTarget?: BackgroundTarget): InputObserverSnapshot {
     identity.parse(generation);
+    if (backgroundTarget) backgroundTarget = backgroundTargetSchema.parse(backgroundTarget);
     const normalizedMarker = registeredMarker.parse(marker);
     if (this.generations.has(generation)) {
-      if (this.connected && this.desktop?.epoch === this.epoch && this.desktop.generation === generation && this.desktop.marker === normalizedMarker) return this.snapshot();
+      if (this.connected && this.desktop?.epoch === this.epoch && this.desktop.generation === generation && this.desktop.marker === normalizedMarker && sameBackgroundTarget(this.desktop.backgroundTarget, backgroundTarget)) return this.snapshot();
       throw new Error('Desktop observer generations cannot be reused.');
     }
     if (!this.connected || !this.epoch) throw new Error('Desktop observer helper is not connected.');
     const previous = this.desktop?.phase === 'ready' && this.desktop.epoch === this.epoch ? this.desktop : null;
     this.generations.add(generation);
-    this.desktop = { epoch: this.epoch, generation, marker: normalizedMarker, phase: 'arming',
+    this.desktop = { epoch: this.epoch, generation, marker: normalizedMarker, phase: 'arming', ...(backgroundTarget ? { backgroundTarget: { ...backgroundTarget } } : {}),
       lastSequence: previous?.lastSequence ?? -1n, ...(previous ? { previousGeneration: previous.generation } : {}) };
     // A ready predecessor must remain armed until the helper atomically checks
     // its latch and registers the successor. Never close that observation gap
     // with DISARM followed by an unconditional ARM.
     this.send(previous
-      ? { type: 'desktop-rearm', epoch: this.epoch, previousGeneration: previous.generation, generation, marker: normalizedMarker }
-      : { type: 'desktop-arm', epoch: this.epoch, generation, marker: normalizedMarker });
+      ? { type: 'desktop-rearm', epoch: this.epoch, previousGeneration: previous.generation, generation, marker: normalizedMarker, ...(backgroundTarget ? { backgroundTarget } : {}) }
+      : { type: 'desktop-arm', epoch: this.epoch, generation, marker: normalizedMarker, ...(backgroundTarget ? { backgroundTarget } : {}) });
     return this.snapshot();
   }
   stopDesktop(generation: string): void {
@@ -172,12 +179,13 @@ export class DesktopInputObserver {
     if (message.epoch !== sourceEpoch || !state || state.epoch !== message.epoch) return false;
     const predecessor = state.phase === 'arming' && message.generation === state.previousGeneration;
     if (state.generation !== message.generation && !predecessor) return false;
-    if (message.type === 'observer-fault') { this.pause(state, message.reason, 'unknown'); return true; }
+    if (message.type === 'observer-fault') { this.pause(state, message.reason, message.reason === 'target_active' ? 'observed' : 'unknown'); return true; }
     if (state.phase === 'paused') return false;
     const nextSequence = BigInt(message.sequence);
     if (message.type === 'desktop-armed') {
       if (predecessor) return false;
       if (state.phase !== 'arming' || nextSequence < state.lastSequence) return false;
+      if (!sameBackgroundTarget(state.backgroundTarget, message.backgroundTarget)) return this.protocolFailure();
       this.markers.add(state.marker);
       this.pointerMarkers.add(pointerInputMarker(state.marker));
       state.lastSequence = nextSequence; state.phase = 'ready'; state.previousGeneration = undefined; return true;

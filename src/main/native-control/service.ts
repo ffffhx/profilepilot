@@ -13,6 +13,7 @@ import { nativeExtensionReady, NATIVE_EXTENSION_UPDATE_MESSAGE } from "../tasks/
 import { NativeExtensionUi } from './extension-ui';
 import { listSiteAdapters } from '../site-adapters/catalog';
 import { BrowserDebugSession, type DebugEvent } from '../browser-debug/session';
+import { observeAfterBrowserAction } from '../browser-action-feedback';
 
 interface Session {
   debug?: BrowserDebugSession;
@@ -308,21 +309,37 @@ export class NativeControlService {
       if (method === "site") return this.browser.siteAdapter(task, params, () => {
         if (session.ending || session.epoch !== epoch || this.sessions.get(task.sessionId) !== session) throw new NativeControlError("NATIVE_USER_IN_CONTROL", "会话已改变，网站适配读取停止。");
       });
+      const finishAction = async (result: unknown) => {
+        const feedbackEpoch = session.epoch;
+        const tabId = this.bridge.states().find(s => s.profileId === task.profileId)?.tabId;
+        const feedback = await observeAfterBrowserAction({
+          check: () => {
+            const current = this.bridge.states().find(s => s.profileId === task.profileId);
+            if (session.ending || this.sessions.get(task.sessionId) !== session || session.epoch !== feedbackEpoch ||
+                !current?.connected || current.ownerSessionId !== task.sessionId || current.ownership !== 'agent' || current.pausedByBrowser || current.tabId !== tabId)
+              throw new NativeControlError('NATIVE_USER_IN_CONTROL', '操作后的控制状态已改变。');
+          },
+          observe: () => this.browser.observe(task, false, false),
+          invalidate: () => this.browser.resetObservation(task)
+        });
+        if (feedback.observation) task.observation = feedback.observation;
+        return { result, ...feedback, observation: feedback.observation ? publicNativeObservation(feedback.observation) : undefined };
+      };
       if (method === "action" || method === "pointer") {
-        if (!task.observation || params.version !== task.observation.version) throw new NativeControlError("NATIVE_OBSERVATION_STALE", "动作必须携带最近 observe/read 的 version；动作、交还后请重新观察。");
+        if (!task.observation || params.version !== task.observation.version) throw new NativeControlError("NATIVE_OBSERVATION_STALE", "动作必须携带最近 observe/read 或动作返回的 observation.version；观察不可用或交还控制后请重新观察。");
         const observation = task.observation;
+        let result: unknown;
         try {
           if (method === "pointer") {
             const pointer = (this.browser as any).pointer;
             if (!pointer) throw new Error("当前执行器尚不支持坐标操作。");
-            return await pointer.call(this.browser, task, params);
-          }
-          if (params.kind === "upload" && params.files !== undefined) {
+            result = await pointer.call(this.browser, task, params);
+          } else if (params.kind === "upload" && params.files !== undefined) {
             const action = parseCommonBrowserAction(params);
-            return await this.browser.uploadFiles(task, action.ref!, action.files!);
-          }
-          return await this.browser.execute(task, { effect: "edit", summary: "外部 Agent 直接操作", ...params, version: observation.version });
+            result = await this.browser.uploadFiles(task, action.ref!, action.files!);
+          } else result = await this.browser.execute(task, { effect: "edit", summary: "外部 Agent 直接操作", ...params, version: observation.version });
         } finally { task.observation = undefined; }
+        return finishAction(result);
       }
       if (method === "screenshot") return this.browser.screenshot(task, params);
       if (['debug','network','console','errors','trace','profiler'].includes(method)) {
@@ -354,14 +371,15 @@ export class NativeControlService {
           if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) throw new NativeControlError("NATIVE_INVALID_REQUEST", "只支持不含凭据的 HTTP/HTTPS 页面。");
         }
         if (method === "switch" && (!Number.isSafeInteger(params.tabId) || params.tabId <= 0)) throw new NativeControlError("NATIVE_INVALID_REQUEST", "switch 需要有效的标签页编号。");
+        let result;
         try {
-          const result = await this.bridge.request(task.profileId, method, { ...params, sessionId: task.sessionId });
+          result = await this.bridge.request(task.profileId, method, { ...params, sessionId: task.sessionId });
           if (result?.errorText) throw new NativeControlError("NATIVE_BROWSER_ERROR", `导航失败：${result.errorText}`);
-          return result;
         } finally {
           // Even a failed navigation may commit Chrome's error document.
           this.browser.resetObservation(task);
         }
+        return { ...result, ...await finishAction(result) };
       }
       if (["tabs", "history", "cdp", "downloads.start", "downloads.search", "downloads.wait", "downloads.cancel", "downloads.disarm"].includes(method)) {
         if (!["tabs", "history", "downloads.search", "downloads.wait"].includes(method)) task.observation = undefined;

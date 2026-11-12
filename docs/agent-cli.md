@@ -8,7 +8,7 @@ ProfilePilot CLI 的命令名是 `ppilot`，提供 Profile 管理、浏览器操
 
 在桌面应用“配套工具”中点击“安装 ProfilePilot CLI”，同时安装命令工具和 Agent 使用指引（内部 skill ID 为 `profilepilot`）。更新时两者一起检查，已有 CLI 在应用启动时同步配套指引；详情中可查看各组件和客户端的状态。Windows 提供 `ppilot.ps1` / `ppilot.cmd` 启动器，macOS 使用 `ppilot` shell 启动器；安装后新开终端即可运行 `ppilot`。模型也可以在终端的 `/login`、`/config` 中配置。开发环境可用 `node dist/main/profilepilot-cli.cjs` 替代命令名（先执行 `npm run build`）。
 
-在“配套工具 → 控制偏好”中，通过“浏览器”和“手机”两个 Tab 编辑 Agent 的操作指引。切换 Tab 保留草稿，保存只作用于当前 Tab；可选择同步到其他 Agent。浏览器偏好继续使用 `local/browser-routing.md`，手机偏好使用 `local/phone-control.md`，Agent 按任务目标读取对应文件。偏好不代替设备授权或暂停/接管机制。
+在浏览器页面的 Profile“更多”菜单中设置默认 Profile，在手机页面的设备“更多”菜单中设置默认设备。CLI 与界面共用设置：`ppilot browser default --json`、`ppilot browser profile default --json` 和 `ppilot phone default` 可查询；`profile default <名称或ID>`、`phone default --device <ID>` 可设置，`--clear` 可清除。手机普通命令可用 `--device default` 解析当前设备 ID。用户当次指定的目标优先；默认目标不可用时提示处理，不自动换目标。后台操作、用户接管和会话规则统一由 Skill 说明，已有个人文件在更新时保留。
 
 还没保存过个人偏好时，使用 Agent 使用指引自带的 `templates/` 通用默认（后台操作、用户接管与确认时机），新安装即可生效。保存后写入 `local/` 下的同名文件，个人文件优先于模板；更新 ProfilePilot CLI 时模板随指引刷新，个人文件保留且不会被覆盖。
 
@@ -16,11 +16,17 @@ ProfilePilot CLI 的命令名是 `ppilot`，提供 Profile 管理、浏览器操
 
 ## 控制命令发现与恢复
 
+浏览器扩展诊断使用 `ppilot browser --profile PROFILE_ID doctor`。工具端服务、扩展连接、版本能力与任务控制权分别报告：离线或尚未上报状态时，版本与能力标为尚无法确认，不据此要求更新；收到实际版本与能力且不兼容时才提示更新。安装配对成功是历史结果，不代表扩展当前在线。
+
 使用 `ppilot <入口> schema <命令>` 或 `ppilot <入口> <命令> --help` 查询窄范围契约，例如 `ppilot phone schema action`、`ppilot desktop action --help`。浏览器需按实际连接选择 `--connection extension|gateway`；不同路由的专属命令不要混用。JSON 文件与 stdin 都接受 UTF-8 BOM；手机支持 `--params-stdin`，不能与 `--params-file` 同时使用。PowerShell 的元素引用写作 `'@e123'`。
 
 `ppilot doctor --route electron|desktop|gpui --session TASK` 返回推荐入口、可用操作、控制权状态和下一条命令，也可通过 `--electron NAME_OR_ID`、`--window ID`、`--gpui TARGET_ID` 指定实际目标。Electron `register` 只登记；连接准备使用 `inspect`/`connect`，不会因未登记自动改走桌面控制。足够完成任务的专用 Skill/API 仍优先。
 
 手机恢复结果区分参数错误、未满足前置条件、会话占用、用户接管和在途结果未知。`not-executed` 表示本次操作未发送执行；`unknown` 要先核查结果。浏览器 `NATIVE_FRAME_SESSION_STALE` 与元素过期分开：观察允许一次同目标只读缓存重建，不重放动作或自动交还用户控制权。
+
+浏览器和 Electron 页面动作执行成功后，默认等待 500 ms，再在同一次响应中返回 `actionOutcome: completed`、`observationStatus` 和新的 `observation`。下一步直接使用其中的 `version`、元素引用和页面内容，无需固定追加一次 `observe`。扩展连接保留当前 frame/分页范围及后续读取游标；Gateway 使用当前 frame 的语义快照。等待不代表异步业务已经完成，也不保存弹窗历史；结果尚未出现时仍可按需等待或读取。若观察失败或用户接管，返回 `observationStatus: unavailable`，动作仍标记为已执行，不能为获取快照而重复动作。纯读取、底层 CDP/eval、控制权交接和关闭操作不附加页面观察。
+
+desktop、phone（Android App/basic/iPhone）和 GPUI 的普通输入也默认等待 500 ms 并返回 `actionOutcome`、`observationStatus`、`observation`。desktop 返回 UIA 树及版本；Android App 返回有数量/深度上限的无障碍树；basic 返回 PNG 文件路径及尺寸；iPhone 返回 WDA 树；GPUI 返回树及 `observation.version`。树观察不能替代 desktop/iPhone 坐标输入所需的新截图。各入口支持 `--no-observe`；phone JSON 也可设置 `observeAfter: false`。流程执行、ADB 协议适配及连续跟随控制自行管理观察时机，不在每次底层输入后加等待。Remote 优先使用目标端已有反馈，否则同一会话等待并读取同一目标；其 `--no-observe` 只跳过本机追加读取。所有入口都保留“动作完成、观察失败”的区别，不因读取失败重放输入；短等待不能保证捕获瞬时弹窗或等待异步业务完成。
 
 ## 使用统计
 

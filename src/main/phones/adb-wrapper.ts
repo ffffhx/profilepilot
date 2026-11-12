@@ -107,7 +107,7 @@ export async function runAdbCli(args: string[], request: Request, io: IO = proce
       return await streamAdb(parsed.args, lease, state.generation, request, io, { output: parsed.output, input: parsed.input, timeoutMs: parsed.timeoutMs, stdin });
     }
     if (parsed.kind !== "action") fail("不支持此 ADB 命令。");
-    const response = await call<PhoneActionResult>(request, "wrapper-action", { lease, generation: state.generation, requestId: randomUUID(), action: parsed.action });
+    const response = await call<PhoneActionResult>(request, "wrapper-action", { lease, generation: state.generation, requestId: randomUUID(), action: parsed.action, observeAfter: false });
     if (parsed.action.kind === "screenshot") {
       const result = response.result as { mime?: string; base64?: string; width?: number; height?: number };
       if (result?.mime !== "image/png" || typeof result.base64 !== "string") fail("手机尚不支持原始 PNG 截图，请在手机工作区更新配套 App。");

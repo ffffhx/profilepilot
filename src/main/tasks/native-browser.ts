@@ -187,7 +187,7 @@ export class NativeBrowser implements BrowserAdapter {
     } else if (action.kind === "download") {
       return JSON.stringify(await this.download(task, { ref: action.ref, filename: action.value }));
     }
-    return "操作已执行；请重新观察确认结果。";
+    return "操作已执行；请根据页面观察确认结果。";
   }
   private async assertFresh(task: BrowserTask): Promise<void> {
     await this.fast.assertFresh(task);
@@ -204,7 +204,7 @@ export class NativeBrowser implements BrowserAdapter {
     if (!objectId) throw new NativeControlError("NATIVE_OBSERVATION_STALE", "上传控件已失效，请重新观察。");
     try { await this.raw(task, "DOM.setFileInputFiles", { objectId, files }, frame.session); }
     finally { await this.raw(task, "Runtime.releaseObject", { objectId }, frame.session).catch(() => {}); }
-    return "文件已选择；请重新观察核查文件名和上传结果。";
+    return "文件已选择；请根据页面观察核查文件名和上传结果。";
   }
   async download(task: BrowserTask, input: NativeDownloadInput): Promise<{ download: NativeDownloadItem; file?: import("../../shared/tasks").TaskAttachment }> {
     const operation = input.operation || "start", timeoutMs = input.timeoutMs ?? 60000;
@@ -251,7 +251,7 @@ export class NativeBrowser implements BrowserAdapter {
     if (!viewport || !Number.isFinite(input.x) || !Number.isFinite(input.y) || input.x < 0 || input.y < 0 || input.x >= viewport.width || input.y >= viewport.height) throw new Error("指针坐标超出截图视口。");
     await this.request(task, "preparePointer");
     await this.fast.pointer(task, input, visual, (task.observation?.fast as any)?.captureState);
-    return "指针操作已执行；请重新观察确认结果。";
+    return "指针操作已执行；请根据页面观察确认结果。";
   }
   dispose(): void { this.stopEvents(); }
   controlGeneration(task: BrowserTask): string {

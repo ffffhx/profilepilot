@@ -61,6 +61,26 @@ test('browser diagnostics distinguish incompatible, stale, occupied and technica
   assert.equal(report.observationVerified, false);
 });
 
+test('offline and not-yet-advertised extensions have unknown compatibility, not an update requirement', () => {
+  for (const profile of [
+    { profileId: 'native:Default', connected: false },
+    { profileId: 'native:Default', connected: true },
+    { profileId: 'native:Default', connected: true, extensionVersion: '0.2.17' },
+    { profileId: 'native:Default', connected: true, capabilities: [] },
+    { profileId: 'native:Default', connected: false, extensionVersion: '0.1.0', capabilities: [] }
+  ]) {
+    const report = browserReadiness({ profiles: [profile] }, '0.2.17')[0];
+    const capability = report.checks.find(check => check.id === 'capabilities');
+    assert.equal(capability.status, 'warning');
+    assert.match(capability.message, /尚无法确认/);
+    assert.doesNotMatch(JSON.stringify(report.checks), /不兼容|更新指定/);
+    assert.equal(report.readyToClaim, false);
+    if (!profile.connected) assert.match(report.checks.find(check => check.id === 'connection').nextStep, /connectionDiagnostics/);
+  }
+  const incompatible = browserReadiness({ profiles: [{ profileId: 'native:Default', connected: true, extensionVersion: '0.1.0', capabilities: [] }] }, '0.2.17')[0];
+  assert.equal(incompatible.checks.find(check => check.id === 'capabilities').status, 'error');
+});
+
 test('doctor checks the live service and wait-control observes release without claiming or resuming', async t => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'browser readiness 空格 ')); t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const calls = []; let owner = 'other';

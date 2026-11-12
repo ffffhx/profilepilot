@@ -9,6 +9,21 @@ import { EngineTransport } from "./transport";
 import { parseCommonBrowserAction } from "../../shared/browser-contract";
 import { BrowserDebugSession } from '../browser-debug/session';
 import { parseDebugArgs } from '../browser-debug/arguments';
+import { observeAfterBrowserAction } from '../browser-action-feedback';
+
+const OBSERVE_AFTER_COMMAND = new Set(['action', 'open', 'goto', 'navigate', 'back', 'forward', 'reload',
+  'click', 'dblclick', 'hover', 'focus', 'fill', 'type', 'check', 'uncheck', 'select', 'scrollintoview',
+  'scrollinto', 'upload', 'press', 'key', 'keyboard', 'scroll', 'drag', 'dialog']);
+
+export function commandNeedsObservation(args: string[]): boolean {
+  if (OBSERVE_AFTER_COMMAND.has(args[0])) return true;
+  if (args[0] === 'find') return OBSERVE_AFTER_COMMAND.has(args[args[1] === 'nth' ? 4 : 3]);
+  if (args[0] === 'tab' || args[0] === 'tabs') return !!args[1] && !['list', 'close'].includes(args[1]);
+  if (args[0] === 'window') return args[1] === 'new';
+  if (args[0] === 'frame') return true;
+  if (args[0] === 'mouse') return ['move', 'up', 'wheel'].includes(args[1]);
+  return args[0] === 'clipboard' && args[1] === 'paste';
+}
 
 export class BrowserEngine {
   connectionStage = "disconnected";
@@ -30,9 +45,11 @@ export class BrowserEngine {
   private debugSessionId?: string;
   private debugTarget?: string;
   private debugAllowed = true;
-  invalidateReferences(): void { this.references.clear(); this.debugAllowed=false;this.debug?.suspend('control-changed'); }
+  private controlEpoch = 0;
+  invalidateReferences(): void { this.controlEpoch++; this.references.clear(); this.debugAllowed=false;this.debug?.suspend('control-changed'); }
 
   async disconnect(): Promise<void> {
+    this.controlEpoch++;
     this.connectionStage = "disconnected";
     this.debug?.suspend('disconnected');this.debug=undefined;this.debugSessionId=undefined;this.debugTarget=undefined;this.debugAllowed=false;
     const browser = this.browser;
@@ -140,10 +157,26 @@ export class BrowserEngine {
     return this.references.locator(page, frame, selector);
   }
   async execute(command: EngineCommand): Promise<any> {
+    const data = await this.withCommandTimeout(() => this.executeCommand(command), command.args[0] === 'connect' ? Math.max(35000, command.timeout) : command.timeout);
+    if (command.observeAfterAction === false || !commandNeedsObservation(command.args)) return data;
+    const epoch = this.controlEpoch;
+    const feedback = await observeAfterBrowserAction({
+      check: () => { if (epoch !== this.controlEpoch) throw new EngineError('Control changed after input', 'BROWSER_USER_IN_CONTROL'); },
+      observe: () => this.withCommandTimeout(async () => {
+        await this.transport!.request('Browser.getVersion');
+        if (this.page && this.dialogs.has(this.page)) throw new EngineError('A native dialog is pending', 'BROWSER_DIALOG_PENDING');
+        const observation = await this.observeCommon([]);
+        await this.transport!.request('Browser.getVersion');
+        return observation;
+      }, 8000),
+      invalidate: () => this.references.clear()
+    });
+    return { ...data, ...feedback };
+  }
+  private async withCommandTimeout<T>(operation: () => Promise<T>, timeout: number): Promise<T> {
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = command.args[0] === "connect" ? Math.max(35000, command.timeout) : command.timeout;
     try {
-      return await Promise.race([this.executeCommand(command), new Promise((_, reject) => {
+      return await Promise.race([operation(), new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
           const stage = this.connectionStage;
           // Cancel pending CDP actions before allowing another queued command.

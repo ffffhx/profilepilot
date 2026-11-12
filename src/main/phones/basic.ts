@@ -3,6 +3,7 @@ import type { PhoneActionInput, PhoneActionResult, PhoneBasicModeInput, PhoneSes
 import { deviceShell, type AdbRunner } from "./adb";
 import { captureAdbScreen } from "./screenshot";
 import { phoneFailure } from "./errors";
+import { observeAfterAction } from '../action-feedback';
 
 type Session = { state: PhoneSessionState; requests: Set<string>; pending?: AbortController; frame?: { width: number; height: number; at: number } };
 const occupied = (state: PhoneSessionState) => !["stopped", "disconnected"].includes(state.phase);
@@ -88,7 +89,18 @@ export class BasicPhoneControl {
         if (/Exception|Error:|Permission denied/i.test(output)) throw new Error("手机拒绝执行输入，请检查系统的 USB 调试安全设置。");
         result = { accepted: true };
       }
-      state.lastAction = action.kind; return { state: structuredClone(state), result };
+      state.lastAction = action.kind;
+      if (input.observeAfter && action.kind !== 'screenshot') {
+        const feedback = await observeAfterAction({ check, errorCode: 'PHONE_OBSERVATION_FAILED', invalidate: () => { session.frame = undefined; },
+          observe: async () => {
+            const { png, width, height } = await captureAdbScreen(this.adb, id, abort.signal, check); check();
+            session.frame = { width, height, at: this.now() };
+            return { kind: 'screenshot', capturedAt: this.now(), mime: 'image/png', base64: png.toString('base64'), width, height };
+          }
+        });
+        return { state: structuredClone(state), result, ...feedback };
+      }
+      return { state: structuredClone(state), result };
     } catch (error) {
       // An uncertain input is never retried and requires an explicit resume.
       if (action.kind !== "screenshot" && state.generation === generation) this.control(id, "pause");

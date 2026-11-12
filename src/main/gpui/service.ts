@@ -6,13 +6,14 @@ import type { GpuiApp, GpuiSession, GpuiStatus } from '../../shared/gpui';
 import type { InputGuardController, InputGuardFactory } from '../input-guard';
 import { GpuiMcpClient, gpuiError, toolData, type GpuiBackend } from './mcp';
 import type { GpuiIndicator } from './indicator';
+import { observeAfterAction } from '../action-feedback';
 
 const sessionName = z.string().regex(/^[a-zA-Z0-9._:-]{1,100}$/);
 export const gpuiCommandSchema = z.object({
   action: z.literal('gpui'), method: z.enum(['status', 'list', 'schema', 'configure', 'claim', 'snapshot', 'call', 'handoff', 'return-control', 'resume', 'complete', 'release']),
   session: sessionName.optional(), target: z.string().min(1).max(250).optional(), backend: z.string().max(4096).optional(),
   tool: z.string().min(1).max(100).optional(), params: z.record(z.string(), z.unknown()).optional(), observation: z.string().uuid().optional(),
-  pauseId: z.string().uuid().optional()
+  pauseId: z.string().uuid().optional(), observeAfter: z.boolean().optional()
 }).strict();
 export type GpuiCommand = z.infer<typeof gpuiCommandSchema>;
 const appSchema = z.object({ target_id: z.string().min(1).max(250), app_id: z.string(), app_name: z.string(), pid: z.number().int().positive().safe(), capabilities: z.unknown().optional() });
@@ -230,6 +231,22 @@ export class GpuiService {
         record.observation = undefined; record.nodes = undefined;
       }
       const result = await client.call(cmd.tool, params);
+      if (inputTools.has(cmd.tool) && cmd.observeAfter !== false) {
+        const feedback = await observeAfterAction({
+          check: () => this.assertUnchanged(record, epoch),
+          observe: async () => {
+            const tree = toolData(await client.call('get_ui_tree'));
+            if (!tree?.nodes || typeof tree.nodes !== 'object' || Array.isArray(tree.nodes)) throw gpuiError('GPUI_PROTOCOL_ERROR', 'GPUI 元素树格式无效。');
+            this.assertUnchanged(record, epoch);
+            record.observation = randomUUID(); record.nodes = tree.nodes;
+            record.view.lastUsed = Date.now();
+            return { version: record.observation, target: record.view.app.target_id, tree };
+          },
+          invalidate: () => { record.observation = undefined; record.nodes = undefined; },
+          errorCode: 'GPUI_OBSERVATION_FAILED'
+        });
+        return { target: record.view.app.target_id, tool: cmd.tool, result, ...feedback, requiresObservation: feedback.observationStatus !== 'available' };
+      }
       this.assertUnchanged(record, epoch); record.view.lastUsed = Date.now();
       return { target: record.view.app.target_id, tool: cmd.tool, result, ...(mutating ? { requiresObservation: true } : {}) };
     } catch (error) {

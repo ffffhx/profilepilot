@@ -6,6 +6,8 @@ const { mkdtempSync, writeFileSync, rmSync } = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { buildSync } = require('esbuild');
+const { loadCli } = require('./cli-test-build.cjs');
+const { BROWSER_SERVICE_VERSION } = loadCli('src/main/browser-service/connection.ts');
 const directory = mkdtempSync(path.join(os.tmpdir(), 'ppilot-browser-route-'));
 const bundle = path.join(directory, 'profilepilot-cli.cjs');
 buildSync({ entryPoints: ['src/main/profilepilot-cli.ts'], outfile: bundle, bundle: true, platform: 'node', format: 'cjs', logLevel: 'silent' });
@@ -21,11 +23,11 @@ function invoke(args, root = directory) {
 async function server(t, handler) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'ppilot-browser-service-'));
   const instance = http.createServer((req, res) => {
-    if (req.url === '/native-service') { req.resume(); res.end(JSON.stringify({ ok: true, result: { service: 'browser', version: 1, pid: process.pid, root } })); }
+    if (req.url === '/native-service') { req.resume(); res.end(JSON.stringify({ ok: true, result: { service: 'browser', version: BROWSER_SERVICE_VERSION, pid: process.pid, root } })); }
     else handler(req, res);
   });
   await new Promise(resolve => instance.listen(0, '127.0.0.1', resolve));
-  writeFileSync(path.join(root, 'native-control.json'), JSON.stringify({ version: 1, port: instance.address().port, token: 'a'.repeat(64), pid: process.pid, service: 'browser', serviceVersion: 1 }));
+  writeFileSync(path.join(root, 'native-control.json'), JSON.stringify({ version: 1, port: instance.address().port, token: 'a'.repeat(64), pid: process.pid, service: 'browser', serviceVersion: BROWSER_SERVICE_VERSION }));
   t.after(async () => { await new Promise(resolve => instance.close(resolve)); rmSync(root, { recursive: true, force: true }); });
   return root;
 }

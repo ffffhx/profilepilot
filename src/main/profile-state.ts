@@ -1,4 +1,5 @@
 import { app } from "electron";
+import { DefaultTargetStore } from "./default-targets";
 import { promises as fs } from 'node:fs';
 import path from "node:path";
 import { normalizeQuickLaunchShortcuts } from "../shared/quick-launch-shortcut";
@@ -251,7 +252,10 @@ export class ProfileStateReader {
       profile.quickLaunchShortcut = shortcuts[profile.id] ?? null;
     });
 
+    const defaultProfile = new DefaultTargetStore(this.input.dataDir).profile();
+    if (defaultProfile) defaultProfile.name = displayProfiles.find(profile => profile.id === defaultProfile.id)?.name || defaultProfile.name;
     const state: AppState = {
+      defaultProfile,
       platform: process.platform,
       appTitle: "ProfilePilot",
       dataDir: this.input.dataDir,

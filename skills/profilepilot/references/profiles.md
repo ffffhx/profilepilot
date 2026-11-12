@@ -4,6 +4,10 @@ Use the installed ProfilePilot CLI (`ppilot`) against the running ProfilePilot a
 
 ```sh
 ppilot status --json
+ppilot browser default --json
+ppilot browser profile default --json
+ppilot browser profile default "EXACT_PROFILE_ID" --json
+ppilot browser profile default --clear --json
 ppilot browser profile list --json
 ppilot browser profile get "EXACT_PROFILE_ID" --json
 ppilot browser profile create --name "Research" --json
@@ -12,6 +16,8 @@ ppilot browser profile configure "isolated:ID" --hide-automation on --json
 ppilot browser profile start "isolated:ID" --json
 ppilot browser profile stop "isolated:ID" --json
 ```
+
+The browser page and CLI share one default Profile. `browser default` reads the saved choice without starting the desktop app; `profile default` queries its live management record or sets/clears it. `profile list` includes `defaultProfile` and `is_agent_default`. Setting a default is available for system and managed Profiles and does not change Chrome's system default or grant Agent access. An explicit target or existing session wins; unavailable defaults never authorize switching to another Profile.
 
 List before selecting and use exact IDs when names repeat. Mutate only records with `manageable: true`; system and sub Profiles are query-only in this management API. This restriction does not prevent page control through their connected extension.
 

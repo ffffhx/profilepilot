@@ -181,7 +181,7 @@ test("Profile Registry keeps six columns and shows current Agent activity in the
   assert.match(html, /Gateway[\s\S]*系统代理[\s\S]*正在读取系统代理[\s\S]*class="profile-port"[^>]*>9223<\/span>/);
   assert.match(details, /当前 Agent[\s\S]*Codex 正在驱动[\s\S]*coze-test-account-cli/);
   assert.match(details, /profile-activity-track driving">\s*<span class="profile-activity-signal" aria-hidden="true"><\/span>\s*<span class="profile-activity-main action-tooltip"/);
-  assert.match(html, /profile-primary-action[\s\S]*>\s*接管\s*<\/button>[\s\S]*profile-window-action[\s\S]*aria-label="显示"[\s\S]*>\s*↗\s*<\/button>[\s\S]*profile-menu-action[\s\S]*role="menu"/);
+  assert.match(html, /profile-primary-action[\s\S]*data-action="takeover-agent"[\s\S]*button-label-idle" aria-hidden="false">接管<\/span>[\s\S]*profile-window-action[\s\S]*aria-label="显示"[\s\S]*button-label-idle" aria-hidden="false">↗<\/span>[\s\S]*profile-menu-action[\s\S]*role="menu"/);
   assert.doesNotMatch(html, /profile-details-action/);
 });
 
@@ -229,7 +229,7 @@ test("Profile Registry preserves the configured port, empty inspector activity a
 
   assert.match(html, /class="profile-port pending"[^>]*>9226<small>待启动<\/small><\/span>/);
   assert.match(inspector.renderBrowserInspector(configured), /profile-activity-empty">—<\/span>/);
-  assert.match(html, /profile-primary-action[\s\S]*aria-label="启动"[\s\S]*>\s*启动\s*<\/button>/);
+  assert.match(html, /profile-primary-action[\s\S]*aria-label="启动"[\s\S]*button-label-idle" aria-hidden="false">启动<\/span>/);
   assert.match(html, /aria-label="更多"[\s\S]*>⋮<\/button>/);
   assert.doesNotMatch(html, /data-action="open-profile-details"/);
 });
@@ -281,7 +281,8 @@ test("Profile Registry launching status is scoped to the target Profile", () => 
   }));
 
   assert.doesNotMatch(html, /aria-busy="true"/);
-  assert.doesNotMatch(html, /启动中/);
+  assert.doesNotMatch(html, /button-label" data-loading="true"/);
+  assert.match(html, /button-label-loading" aria-hidden="true"/);
   assert.match(html, /state-pill[\s\S]*未运行/);
 });
 
@@ -297,7 +298,7 @@ test("Profile Registry exposes the Agent access switch inline and uses the name 
   const row = renderer.renderProfileRow(configured);
   const details = renderer.renderDetails(configured, false);
 
-  assert.match(row, /data-action="toggle-agent-access"[^>]*aria-pressed="true"[^>]*>[\s\S]*NO AGENT[\s\S]*<\/button>/);
+  assert.match(row, /data-action="toggle-agent-access"[^>]*aria-pressed="true"[^>]*>[\s\S]*Agent 已禁用[\s\S]*<\/button>/);
   assert.match(inspector.renderBrowserInspector(configured), /profile-activity-empty agent-disabled">Agent 已禁用<\/span>/);
   assert.doesNotMatch(row, /configure-agent-settings|Agent 使用设置|>TIP</);
   assert.match(details, /Agent 访问[\s\S]*禁止连接[\s\S]*AI 选择提示[\s\S]*9223端口profile/);

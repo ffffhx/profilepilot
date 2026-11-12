@@ -2,7 +2,6 @@ import { onViewInvalidated } from "./view-events";
 import { installQuickLaunchRecorder } from "./quick-launch-recorder";
 import { profileApi } from "./api";
 import { workspaceHidden, onWorkspaceVisibilityChanged, navigateWorkspace } from "./workspace-lifecycle";
-import { controlPreferencesDomains, leaveControlPreferences, openControlPreferences, saveControlPreferences, switchControlPreferencesTab, updateControlPreferencesDraft } from "./control-preferences";
 import { profilePilotSetupState } from "../shared/profilepilot-setup";
 import { applyNativeExtensionSnapshot, refreshNativeExtensionStatus } from "./state-actions";
 import { activateBusyStep, busyStepsKey, emphasizeName, focusProfileFromUi, handleToastAction, setToast, updateBusyProgressDom, updateBusyState, withBusy } from "./busy";
@@ -474,23 +473,6 @@ appRoot.addEventListener("click", (event) => {
     requestLiveViewNow(profileId);
     return;
   }
-  if (action === "open-control-preferences") {
-    void openControlPreferences();
-    return;
-  }
-  if (action === "save-control-preferences") { void saveControlPreferences(); return; }
-  if (action === "switch-control-preferences-tab") {
-    const domain = actionTarget.dataset.preferencesTab;
-    if (domain === "browser" || domain === "electron" || domain === "phone") switchControlPreferencesTab(domain);
-    return;
-  }
-  if (action === "reload-control-preferences") { leaveControlPreferences("reload"); return; }
-  if (action === "discard-control-preferences" && store.modal?.kind === "control-preferences") {
-    leaveControlPreferences(store.modal.discard || "close", true); return;
-  }
-  if (action === "keep-control-preferences" && store.modal?.kind === "control-preferences") {
-    store.modal.discard = false; render(); document.getElementById("control-preferences-editor")?.focus(); return;
-  }
   if (action === "connect-browser-extension") {
     const profileId = store.nativeExtensionProfileId;
     if (!profileId || !store.state?.profiles.some(profile => profile.id === profileId && profile.source === "native")) {
@@ -512,9 +494,7 @@ appRoot.addEventListener("click", (event) => {
   }
 
   if (action === "refresh-browser-extension") {
-    void withBusy(async () => {
-      await Promise.all([loadState(), refreshNativeExtensionStatus()]);
-    }, undefined, { key: "refresh-browser-extension", message: "正在检测浏览器扩展连接…" });
+    void refreshNativeExtensionStatus(true);
     return;
   }
 
@@ -550,6 +530,11 @@ appRoot.addEventListener("click", (event) => {
 
   if (action === "refresh-agent-integration") {
     void refreshAgentIntegrationDiagnostic().catch((error: unknown) => setToast(formatErrorMessage(error), "error"));
+    return;
+  }
+
+  if (action === 'check-app-update') {
+    void window.appUpdate.open().catch((error: unknown) => setToast(formatErrorMessage(error), 'error'));
     return;
   }
 
@@ -680,6 +665,14 @@ appRoot.addEventListener("click", (event) => {
     return;
   }
 
+  // Recovery must remain usable when the initial Profile scan failed.
+  if (action === "refresh") {
+    void withBusy(() => loadState(), "已刷新", {
+      key: "refresh",
+      message: "正在刷新 Profile 状态…"
+    });
+    return;
+  }
   if (!store.state) return;
   const id = actionTarget.dataset.id || null;
   if (!experimentalProxyRoutingEnabled() && ["configure-bifrost-proxy", "prepare-bifrost-proxy", "refresh-bifrost-snapshot",
@@ -1426,14 +1419,6 @@ appRoot.addEventListener("click", (event) => {
     return;
   }
 
-  if (action === "refresh") {
-    void withBusy(() => loadState(), "已刷新", {
-      key: "refresh",
-      message: "正在刷新 Profile 状态…"
-    });
-    return;
-  }
-
   if (action === "toggle-mini-pinned") {
     const next = !store.miniPanelPinned;
     store.miniPanelPinned = next;
@@ -1555,6 +1540,15 @@ appRoot.addEventListener("click", (event) => {
     return;
   }
 
+  if (action === "clear-default-profile" || action === "set-default-profile" && id) {
+    const next = action === "clear-default-profile" || store.state?.defaultProfile?.id === id ? null : id!;
+    store.openProfileMenuId = null;
+    void withBusy(async () => {
+      store.state = await profileApi().setDefaultProfile(next);
+      setToast(next ? "已设为默认 Profile" : "已清除默认 Profile");
+    });
+    return;
+  }
   if (action === "rename-profile" && id) {
     const profile = store.state.profiles.find((item) => item.id === id);
     if (!profile) {
@@ -2090,14 +2084,6 @@ appRoot.addEventListener("change", (event) => {
 });
 
 appRoot.addEventListener("input", (event) => {
-  if (event.target instanceof HTMLTextAreaElement && event.target.id === "control-preferences-editor") {
-    updateControlPreferencesDraft(event.target.value); return;
-  }
-  if (event.target instanceof HTMLInputElement && event.target.matches("[data-control-preferences-sync]") && store.modal?.kind === "control-preferences") {
-    const editor = store.modal.editors[store.modal.activeTab];
-    editor.syncAll = event.target.checked;
-    updateControlPreferencesDraft(editor.draft); return;
-  }
   const bifrostTarget = event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement
     ? event.target
     : null;
@@ -2147,24 +2133,6 @@ appRoot.addEventListener("dblclick", (event) => {
 });
 
 appRoot.addEventListener("keydown", (event) => {
-  if (store.modal?.kind === "control-preferences") {
-    if (event.isComposing) return;
-    if (event.target instanceof HTMLElement && event.target.matches('[data-preferences-tab]') && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
-      event.preventDefault();
-      const tabs = controlPreferencesDomains;
-      const index = tabs.indexOf(store.modal.activeTab);
-      const next = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : (index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
-      switchControlPreferencesTab(tabs[next]);
-      return;
-    }
-    if (event.key === "Escape") { event.preventDefault(); leaveControlPreferences("close"); return; }
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") { event.preventDefault(); void saveControlPreferences(); return; }
-    if (event.key === "Tab") {
-      const controls = [...appRoot.querySelectorAll<HTMLElement>('.control-preferences-modal button:not(:disabled):not([tabindex="-1"]), .control-preferences-modal textarea:not(:disabled), .control-preferences-modal input:not(:disabled), .control-preferences-modal summary')];
-      const next = event.shiftKey ? controls.at(-1) : controls[0];
-      if (document.activeElement === (event.shiftKey ? controls[0] : controls.at(-1))) { event.preventDefault(); next?.focus(); }
-    }
-  }
   if (
     event.key === "Escape" &&
     (store.modal?.kind === "live-zoom" ||
@@ -2439,9 +2407,7 @@ appRoot.addEventListener("submit", (event) => {
   });
 });
 
-if (store.viewMode === "mini") {
-  render();
-}
+render();
 
 if (store.viewMode === "main") {
   const unsubscribeNativeExtension = window.browserConnection.onChanged(applyNativeExtensionSnapshot);
@@ -2465,7 +2431,7 @@ loadState(true)
       setToast(formatErrorMessage(error), "error");
       return;
     }
-    appRoot.innerHTML = `<div class="app-loading p-8 text-muted font-mono text-[13px] tracking-[0.08em] uppercase">${escapeHtml(formatErrorMessage(error))}</div>`;
+    render();
   });
 
 if (store.viewMode === "mini") {

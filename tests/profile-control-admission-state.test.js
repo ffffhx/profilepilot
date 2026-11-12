@@ -20,6 +20,7 @@ function load(name, platform = 'win32', stubs = {}, environment = {}) {
     execPath: platform === 'win32' ? 'C:\\ProfilePilot\\app.exe' : '/ProfilePilot.app/Contents/MacOS/ProfilePilot' };
   const requireStub = id => {
     if (Object.hasOwn(stubs, id)) return stubs[id];
+    if (id === './default-targets') return { DefaultTargetStore: class { profile() { return null; } } };
     if (id === './profile-process-change' || id === '../profile-process-change') return load('profile-process-change', platform);
     if (id === './windows-sampler-protocol') return load('windows-sampler-protocol', platform);
     if (id === 'node:path') return platform === 'win32' ? path.win32 : path.posix;

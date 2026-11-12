@@ -37,6 +37,7 @@ const server = http.createServer((req, res) => {
     <h1>TypeScript engine</h1><label>Name<input id="name"></label><label>Password<input type="password"></label>
     <button id="increment" onclick="document.querySelector('#count').textContent=Number(document.querySelector('#count').textContent)+1">Increment</button>
     <output id="count">0</output><button disabled>Disabled button</button>
+    <button id="save" onclick="setTimeout(()=>{document.querySelector('#feedback').textContent='Saved successfully';setTimeout(()=>document.querySelector('#feedback').textContent='',3000)},150)">Save</button><div id="feedback" role="status"></div>
     <label>Agree<input id="agree" type="checkbox"></label><select id="city"><option>Shanghai</option><option>Beijing</option></select>
     <input id="file" type="file"><a id="download" href="/file" download>Download</a>
     <iframe id="frame" src="/frame"></iframe>${process.argv.includes("--electron") ? "" : `<iframe id="cross-frame" src="http://localhost:${server.address().port}/frame"></iframe>`}<div id="shadow"></div>
@@ -110,8 +111,20 @@ try {
   assert.match(snapshot.snapshot, /Increment/);
   const ref = snapshot.snapshot.match(/button "Increment".*?\[ref=(e\d+)\]/)?.[1];
   assert.ok(ref, snapshot.snapshot);
-  await command(["click", `@${ref}`]);
+  const clicked = await command(["click", `@${ref}`]);
+  assert.equal(clicked.observationStatus, 'available');
+  assert.match(clicked.observation.snapshot, /Increment/);
   assert.equal((await command(["get", "text", "#count"])).text, "1");
+  const saveRef = clicked.observation.fast.candidates.find(c => c.label === 'Save').ref;
+  const saved = (await command(['action', '--params', JSON.stringify({ kind: 'click', version: clicked.observation.version, ref: saveRef })])).result;
+  assert.equal(saved.observationStatus, 'available');
+  assert.match(saved.observation.snapshot, /Saved successfully/);
+  assert.notEqual(saved.observation.version, clicked.observation.version);
+  const nextName = saved.observation.fast.candidates.find(c => c.role === 'textbox' && c.label === 'Name').ref;
+  const filled = (await command(['action', '--params', JSON.stringify({ kind: 'fill', version: saved.observation.version, ref: nextName, value: 'next action without observe' })])).result;
+  assert.equal(filled.observationStatus, 'available');
+  assert.equal((await command(['get', 'value', '#name'])).value, 'next action without observe');
+  console.log('PASS delayed transient feedback and consecutive actions using returned observation/version/refs');
   await command(["fill", "#name", "中文 TS --connection extension"]);
   assert.equal((await command(["get", "value", "#name"])).value, "中文 TS --connection extension");
   await command(["check", "#agree"]);

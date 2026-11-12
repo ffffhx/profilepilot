@@ -20,7 +20,9 @@ Replace `native:Default` and `123` with actual status/tabs results. Choose a uni
 
 ## Observe and act
 
-`observe` returns DOM, element refs and a `version`. Internal guards remain in the independent browser service; the CLI returns public page data and usable refs with the same action/version contract. Use those returned values, then observe again after each action. Save JSON to a UTF-8 file (with or without BOM) on either Windows or macOS:
+Keep the user's foreground window and active tab unchanged unless the requested interaction explicitly needs them. Select the Agent's target by tab ID through supported commands; do not assume that a command named switch/select only changes the Agent target. Check its contract before using it, and do not activate a visible tab merely to read, interact or capture it. If a capability requires foreground activation, follow the [foreground-preservation rules](../SKILL.md) and explain that specific requirement before proceeding.
+
+`observe` returns DOM, element refs and a `version`. Internal guards remain in the independent browser service; the CLI returns public page data and usable refs with the same action/version contract. Successful page actions, pointer operations and open/newTab/switch wait 500 ms and return `actionOutcome: completed`, `observationStatus` and a fresh `observation`. Use its version/refs for the next action without another observe. The observation retains the selected frame/range and pagination; read further only as needed. If observation is unavailable, check control or observe again, without repeating the completed input. This is a current-page observation, not proof of business success or a history of transient messages. Save JSON to a UTF-8 file (with or without BOM) on either Windows or macOS:
 
 Each `fast.candidates[].semantics` retains known effects, Enter effects, search/menu/toggle/download flags and command names so callers can distinguish controls with ambiguous labels. Exact links and pagination metadata remain available.
 
@@ -49,6 +51,12 @@ Use `open URL`, `switch TAB_ID` and `newTab` with the same `--session`. Ordinary
 `open --params-file navigation.json` accepts `{"url":"https://example.com/?q=AI&sort=new"}`; `switch --params-file tab.json` accepts `{"tabId":123}`. An explicit positional URL or tab ID overrides the corresponding JSON field.
 
 ## Debugging and downloads
+
+Connection diagnostics distinguish the local service, extension transport,
+compatibility and task ownership. An offline extension or missing advertisement
+means compatibility is unconfirmed, not an update requirement. Recheck after
+connection; recommend an update only when the live version/capabilities show
+incompatibility. A successful installation receipt does not prove it is online.
 
 See [Network, Console and performance inspection](browser-debug.md) for request
 filters, retained bodies/HAR, iframe capture, mocks and performance recording.

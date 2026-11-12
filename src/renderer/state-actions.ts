@@ -29,7 +29,7 @@ export function applyState(state: AppState): void {
   }
 
   if (!profiles.some((profile) => profile.id === store.selectedId)) {
-    store.selectedId = store.state.currentProfile?.id || profiles[0]?.id || null;
+    store.selectedId = (store.state.defaultProfile ? profiles.find(profile => profile.id === store.state?.defaultProfile?.id)?.id || null : store.state.currentProfile?.id || profiles[0]?.id || null);
   }
   if (store.openProfileMenuId && !profiles.some((profile) => profile.id === store.openProfileMenuId)) {
     store.openProfileMenuId = null;
@@ -88,20 +88,29 @@ let nativeExtensionRevision = 0;
 export function applyNativeExtensionSnapshot(snapshot: BrowserConnectionSnapshot): void {
   nativeExtensionRevision += 1;
   store.nativeExtensionBrowsers = snapshot.nativeBrowsers || [];
+  store.nativeExtensionService = snapshot.nativeService;
   store.nativeExtensionInstallations = snapshot.nativeInstallations || [];
   store.nativeExtensionError = null;
   render();
 }
 
-export async function refreshNativeExtensionStatus(): Promise<void> {
+export async function refreshNativeExtensionStatus(refreshProfiles = false): Promise<void> {
   if (store.nativeExtensionLoading) return;
   store.nativeExtensionLoading = true;
   store.nativeExtensionError = null;
   render();
   const revision = nativeExtensionRevision;
   try {
-    const snapshot = await window.browserConnection.snapshot();
-    if (revision === nativeExtensionRevision) applyNativeExtensionSnapshot(snapshot);
+    // Keep progress local to the extension card until both reads finish.
+    // loadState reports its own error; a failed scan must not discard a valid connection.
+    const [connection] = await Promise.allSettled([
+      window.browserConnection.snapshot(),
+      refreshProfiles ? loadState() : Promise.resolve()
+    ]);
+    if (revision === nativeExtensionRevision) {
+      if (connection.status === "fulfilled") applyNativeExtensionSnapshot(connection.value);
+      else store.nativeExtensionError = formatErrorMessage(connection.reason);
+    }
   } catch (error) {
     if (revision === nativeExtensionRevision) store.nativeExtensionError = formatErrorMessage(error);
   } finally {

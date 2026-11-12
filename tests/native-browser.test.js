@@ -110,6 +110,20 @@ test('extension origin, short-lived pairing, persistence, duplicate connections 
   } finally { client?.close(); duplicate?.close(); bridge?.close(); assert.ok(root.startsWith(os.tmpdir() + path.sep)); rmSync(root, { recursive: true, force: true }); }
 });
 
+test('requesting another connection after the extension consumed its invitation issues a usable link', async t => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'pp-native-renew-'));
+  const bridge = new NativeBrowserBridge(root, { read: () => ({}), write: () => {} });
+  t.after(() => { bridge.close(); assert.ok(root.startsWith(os.tmpdir() + path.sep)); rmSync(root, { recursive: true, force: true }); });
+  const first = await bridge.authorize('native:Default', 'Daily Chrome');
+  const pair = url => fetch(url + '/pair', { method: 'POST', headers: { Origin: `chrome-extension://${NATIVE_EXTENSION_ID}` } });
+  assert.equal((await pair(first.url)).status, 200);
+  assert.equal((await pair(first.url)).status, 403, 'a consumed ticket stays single-use');
+  const renewed = await bridge.authorize('native:Default', 'Daily Chrome');
+  assert.notEqual(renewed.url, first.url, 'reapplying must not return the consumed ticket');
+  assert.equal((await pair(renewed.url)).status, 200);
+  assert.equal((await pair(first.url)).status, 410, 'the previous invitation is invalidated');
+});
+
 test('legacy and modern handshakes distinguish readiness without losing pairing or ownership', { timeout: 10000 }, async t => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'pp-native-handshake-'));
   const profileId = 'native:Legacy', token = randomBytes(32).toString('hex');
@@ -525,6 +539,35 @@ test('automatic pairing only accepts the top-level loopback invitation and leave
   assert.equal((await ext.state()).connected, false);
   assert.deepEqual(ext.calls, [], 'detection must not attach to a user tab');
 });
+test('duplicate onboarding messages share one credential delivery and retry a failed tab redirect', async t => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'pp-native-onboarding-race-'));
+  const bridge = new NativeBrowserBridge(root, { read: () => ({}), write: () => {} });
+  t.after(() => { bridge.close(); assert.ok(root.startsWith(os.tmpdir() + path.sep)); rmSync(root, { recursive: true, force: true }); });
+  const { url } = await bridge.authorize('native:Default', 'Daily Chrome');
+  let requests = 0;
+  const storage = { local: {}, session: {} };
+  const fetcher = (url, options) => {
+    requests++;
+    return fetch(url, { ...options, headers: { Origin: `chrome-extension://${NATIVE_EXTENSION_ID}` } });
+  };
+  const ext = await extension(fetcher, 1, storage);
+  const sender = { id: NATIVE_EXTENSION_ID, url, frameId: 0, tab: { id: 9, incognito: false } };
+  const send = (worker, tabId = 9) => new Promise(resolve => worker.message({ method: 'onboarding' }, { ...sender, tab: { ...sender.tab, id: tabId } }, resolve));
+  ext.chrome.tabs.update = async () => { throw new Error('Tab closed during setup'); };
+  const replies = await Promise.all([send(ext), send(ext)]);
+  assert.equal(requests, 1, 'declarative and startup injection must not consume the ticket twice');
+  for (const reply of replies) assert.equal(reply.error, 'Tab closed during setup');
+  // A Chrome worker restart must retain the delivered invitation until confirmation.
+  const restarted = await extension(fetcher, 1, storage);
+  let destination;
+  restarted.chrome.tabs.update = async (id, options) => { destination = { id, ...options }; };
+  assert.equal((await send(restarted, 10)).error, undefined);
+  assert.equal(requests, 1, 'retry uses extension session storage, never a second credential delivery');
+  assert.equal(destination.id, 10);
+  assert.match(destination.url, /popup\.html#setup=/);
+  assert.equal((await restarted.state()).connected, false, 'Profile confirmation remains explicit');
+});
+
 test('extension enforces session scope, handoff and browser stop while allowing full Chrome-supported CDP', async () => {
   const ext = await extension(); ext.select(7);
   await ext.handle('claim', { sessionId: 'one' });

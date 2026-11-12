@@ -172,7 +172,7 @@ function frameFixture(workspace = 'desktop', owned = true) {
   const { workspaceRoute } = loadCli('src/shared/workspaces.ts');
   const events = [], listeners = new Map(); let notify, removed = 0, subscribed = 0;
   const parent = { location: { href: url('workspace.html') }, workspaceHost: { owns: () => owned } };
-  for (const name of ['profileManager', 'browserConnection', 'tasks', 'localApps', 'phones', 'mobile']) parent[name] = {};
+  for (const name of ['profileManager', 'browserConnection', 'tasks', 'localApps', 'phones', 'mobile', 'gpuiControl']) parent[name] = {};
   parent.desktopControl = { status: async () => status(false), onChanged(listener) { subscribed++; notify = listener; return () => { removed++; }; } };
   const window = { parent, addEventListener: (name, listener) => listeners.set(name, listener) };
   const document = { hidden: true, documentElement: { classList: { add() {} }, dataset: {} },

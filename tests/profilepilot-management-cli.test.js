@@ -26,6 +26,23 @@ test("browser profile commands retain the management API and legacy aliases", ()
   assert.equal(parseProfilePilotCliArgs(['browser', 'profile', 'delete', 'isolated:test']).command.confirmed, false);
 });
 
+test("default Profile commands use the UI setting and retain missing targets", async () => {
+  const state = { profiles: [{ id: 'native:Default', name: 'Daily', source: 'native' }, { id: 'isolated:work', name: 'Work', source: 'isolated' }], defaultProfile: null };
+  const manager = { getState: async () => state, setDefaultProfile: async id => { state.defaultProfile = id === null ? null : { id, name: state.profiles.find(p => p.id === id).name }; } };
+  const execute = args => executeProfilePilotManagementCommand(parseProfilePilotCliArgs(['browser', 'profile', 'default', ...args]).command, { profileManager: manager });
+  assert.equal((await execute([])).saved, null);
+  assert.equal((await execute(['native:Default'])).saved.id, 'native:Default', 'system Profiles support setting an Agent default');
+  let listing = await executeProfilePilotManagementCommand({ action: 'profile.list' }, { profileManager: manager });
+  assert.equal(listing.profiles[0].is_agent_default, true);
+  await execute(['Work']);
+  listing = await executeProfilePilotManagementCommand({ action: 'profile.list' }, { profileManager: manager });
+  assert.deepEqual(listing.profiles.map(p => p.is_agent_default), [false, true]);
+  state.profiles.pop();
+  assert.equal((await execute([])).saved.id, 'isolated:work');
+  assert.equal((await execute([])).profile, null);
+  assert.equal((await execute(['--clear'])).saved, null);
+});
+
 test("profile readiness distinguishes a legacy extension and refreshes after upgrade", async () => {
   const { nativeProfileAvailability, NATIVE_REQUIRED_CAPABILITIES } = require('../dist/main/tasks/native-compatibility');
   const manager = fakeProfileManager();

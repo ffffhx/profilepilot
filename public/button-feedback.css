@@ -1,0 +1,15 @@
+/* Reserve both button states, including spinner, before an operation starts. */
+.button-label { display: inline-grid; grid-template-columns: minmax(0,1fr); place-items: center; vertical-align: middle; min-width: 0; max-width: 100%; }
+.button-label > span { grid-area: 1 / 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px; white-space: nowrap; }
+.button-label[data-loading="false"] > .button-label-loading,
+.button-label[data-loading="true"] > .button-label-idle { visibility: hidden; }
+.inline-spinner { display: inline-block; width: 14px; height: 14px; flex: 0 0 14px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: button-spin .8s linear infinite; }
+.button-label[data-loading="false"] .inline-spinner { animation: none; }
+@keyframes button-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .inline-spinner { animation: none; } }
+
+/* Transient progress must not insert a row above the page the user is using. */
+.workspace-layout #app .busy-banner { position: fixed; inset: auto 18px 18px auto; z-index: 35; width: max-content; max-width: calc(100% - 36px); margin: 0; pointer-events: none; box-shadow: 0 6px 24px #20324c1a; }
+.workspace-layout #app .operation-progress { position: fixed; inset: auto 18px 18px auto; z-index: 35; width: min(480px,calc(100% - 36px)); max-height: 45dvh; overflow: auto; margin: 0; background: var(--panel); border-color: var(--accent-line); box-shadow: 0 6px 24px #20324c1a; }
+.operation-progress-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+:root.workspace-layout:not(.mini-document), .workspace-layout .modal { scrollbar-gutter: stable; }

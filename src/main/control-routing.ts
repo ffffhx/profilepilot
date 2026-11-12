@@ -51,7 +51,7 @@ export function desktopRouting(report: any, session?: string, windowId?: string)
     '跨入口控制证据尚未允许此窗口；按 admission 的 matches/gaps 处理，不能切换工具绕过。', { availableOperations: ['status', 'doctor'] });
   if (status.inputObservation?.available !== true) return guidance('desktop', 'repair-required', diagnostic,
     '输入接管观察器未就绪；窗口可发现不代表可控制。', { availableOperations: ['status', 'doctor', 'windows'] });
-  if (owner && owner.name === session && owner.state === 'active' && status.inputObservation?.phase === 'active') return guidance('desktop', 'ready',
+  if (owner && owner.name === session && owner.state === 'active' && status.inputObservation?.phase === 'ready') return guidance('desktop', 'ready',
     ['desktop', 'observe', '--session', session!], '保持原桌面会话；先观察再输入。', { availableOperations: ['observe', 'screenshot', 'action', 'wait', 'receipt', 'handoff', 'complete'] });
   if (owner) return guidance('desktop', 'repair-required', diagnostic, '原会话的输入观察器正在准备或结果待核查；保持原会话，不重新 claim。', { availableOperations: ['status', 'doctor'] });
   if (!windowId || !session) return guidance('desktop', 'discover', ['desktop', 'windows'],

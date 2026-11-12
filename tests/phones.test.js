@@ -33,6 +33,63 @@ function harness(t) {
   } });
   return h;
 }
+test('external Android actions return a delayed bounded tree; reads and internal controls do not add reads', async t => {
+  const h=harness(t);t.after(()=>h.service.close());
+  await h.service.refresh();const device=await h.service.start(h.id,'control','Test','feedback');
+  let label='pending';
+  h.hook=(method,body)=>{
+    if(method==='action' && body.action.kind==='key') setTimeout(()=>{label='Saved';},30);
+    if(method==='action' && body.action.kind==='snapshot') return {ok:true,state:structuredClone(h.state),result:{nodes:[{text:label}]}};
+  };
+  const params=action=>({id:h.id,sessionId:device.state.sessionId,generation:device.state.generation,requestId:randomUUID(),action});
+  const result=await executePhoneCommand({action:'phone',method:'action',params:params({kind:'key',key:'home'})},h.service);
+  assert.equal(result.actionOutcome,'completed');assert.equal(result.observationStatus,'available');
+  assert.equal(result.observation.nodes[0].text,'Saved');assert.equal(result.observation.completeness,'bounded');
+  assert.deepEqual(result.observation.limits,{maxNodes:400,maxDepth:25});
+  assert.deepEqual(h.calls.filter(c=>c[0]==='action').map(c=>c[1].action.kind),['key','snapshot']);
+  h.calls.length=0;
+  await executePhoneCommand({action:'phone',method:'action',params:params({kind:'snapshot'})},h.service);
+  await executePhoneCommand({action:'phone',method:'action',params:params({kind:'key',key:'home'})},h.service,'desktop');
+  await executePhoneCommand({action:'phone',method:'action',params:{...params({kind:'key',key:'home'}),observeAfter:false}},h.service);
+  assert.deepEqual(h.calls.filter(c=>c[0]==='action').map(c=>c[1].action.kind),['snapshot','key','key']);
+});
+
+test('Android observation failure or takeover retains acknowledged input without a replay', async t => {
+  for(const scenario of ['read-failure','takeover']) {
+    const h=harness(t);t.after(()=>h.service.close());await h.service.refresh();const device=await h.service.start(h.id,'control','Test','feedback');
+    h.hook=(method,body)=>{
+      if(method==='action' && body.action.kind==='key' && scenario==='takeover') setTimeout(()=>{void h.service.control(h.id,'pause');},20);
+      if(method==='action' && body.action.kind==='snapshot') throw Error('read failed');
+    };
+    const result=await executePhoneCommand({action:'phone',method:'action',params:{id:h.id,sessionId:device.state.sessionId,generation:device.state.generation,requestId:randomUUID(),action:{kind:'key',key:'home'}}},h.service);
+    assert.equal(result.actionOutcome,'completed');assert.equal(result.observationStatus,'unavailable');assert.equal(result.observation,undefined);
+    assert.equal(h.calls.filter(c=>c[0]==='action' && c[1].action.kind==='key').length,1);
+    assert.equal(h.calls.filter(c=>c[0]==='action' && c[1].action.kind==='snapshot').length,scenario==='takeover'?0:1);
+  }
+});
+
+test('default phone selection is durable, shared with CLI, and preserves session ownership', async t => {
+  const h = harness(t); await h.service.refresh();
+  const before = structuredClone(h.service.snapshot().devices[0].state);
+  h.calls.length = 0;
+  const selected = await executePhoneCommand({ action: 'phone', method: 'default', params: { id: h.id } }, h.service, 'desktop');
+  assert.equal(selected.defaultDevice.deviceId, h.id);
+  const queried = await executePhoneCommand({ action: 'phone', method: 'default' }, h.service);
+  assert.equal(queried.saved.id, h.id);
+  assert.equal(queried.available, true);
+  assert.deepEqual(h.service.snapshot().devices[0].state, before);
+  assert.deepEqual(h.calls, [], 'changing the default does not connect, pause or start anything');
+  const restarted = new PhonesService(h.service.options);
+  try {
+    assert.equal(restarted.snapshot().defaultDevice.saved.id, h.id);
+    assert.equal(restarted.snapshot().defaultDevice.available, false);
+    assert.throws(() => restarted.setDefault('missing'), /请选择/);
+    assert.equal(restarted.snapshot().defaultDevice.saved.id, h.id);
+    restarted.setDefault(null);
+    assert.equal((await executePhoneCommand({ action: 'phone', method: 'default' }, h.service)).saved, null);
+  } finally { await restarted.close(); await h.service.close(); }
+});
+
 test('App disconnect persists across polls and restart until an explicit connection', async t => {
   const h = harness(t); h.installed = true; await h.service.refresh();
   const disconnected = await executePhoneCommand({ action: 'phone', method: 'disconnect', params: { id: h.id } }, h.service, 'desktop');

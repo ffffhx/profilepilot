@@ -19,7 +19,6 @@ function fixture(t) {
     "../workspace-switcher": { workspaceSwitcher: () => '<button data-workspace-trigger>配套工具</button>', workspaceIdentityBar: () => '<div class="workspace-identity"></div>', refreshWorkspaceSwitcher() {} },
     "./busy-view": { isBusyAction: () => false, renderToastBody: value => value },
     "./confirm": emptyRenderers,
-    "./control-preferences": emptyRenderers,
     "./dom": { patchBrowserDom: (root, markup) => { root.innerHTML = markup; } },
     "../util": { escapeHtml: value => String(value), renderBusyBanner: () => "", renderButtonLabel: (loading, idle, busy) => loading ? busy : idle },
     "./account-sync": emptyRenderers, "./clone-pool": emptyRenderers,

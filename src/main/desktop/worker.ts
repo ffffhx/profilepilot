@@ -14,7 +14,7 @@ export interface DesktopDriver {
   request(operation: string, params: Record<string, unknown>): Promise<any>;
   close(): void | Promise<void>;
 }
-const readOperations = new Set(['windows', 'diagnostics', 'window.observe', 'window.screenshot']);
+const readOperations = new Set(['windows', 'diagnostics', 'window.observe', 'window.screenshot', 'control.background']);
 function interrupted(operation: string): Error {
   return Object.assign(desktopError(readOperations.has(operation) ? 'DESKTOP_READ_INTERRUPTED' : 'DESKTOP_OUTCOME_UNKNOWN'), {
     details: { operation, ...(readOperations.has(operation) ? { inputDispatched: false } : {}) }

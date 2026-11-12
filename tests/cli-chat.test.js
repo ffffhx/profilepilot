@@ -43,7 +43,7 @@ function fixture(t, options = {}) {
     if (responses.has(command.action)) return responses.get(command.action)(command);
     let data = {};
     switch (command.action) {
-      case 'profile.list': data = { profiles }; break;
+      case 'profile.list': data = { profiles, defaultProfile: { id: 'profile-a', name: 'Browser A' } }; break;
       case 'profile.get': data = { profile: profiles.find(profile => profile.id === command.selector) }; break;
       case 'task.settings.get': data = { settings }; break;
       case 'task.settings.update': Object.assign(settings, command.input); data = { settings: { ...settings, apiKey: undefined } }; break;

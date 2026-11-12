@@ -22,7 +22,7 @@ test('native shared observer protocol, retention, privacy and browser policy are
   ], { cwd: root, windowsHide: true, timeout: 20000, encoding: 'utf8' });
   const result = JSON.parse(execFileSync(executable, [], { windowsHide: true, timeout: 10000, encoding: 'utf8' }));
   assert.equal(result.ok, true);
-  assert.equal(result.checks.length, 44);
+  assert.equal(result.checks.length, 48);
   for (const message of result.messages) {
     const schema = message.type === 'startup-failure' ? inputObserverStartupFailureSchema : inputObserverMessageSchema;
     assert.equal(schema.safeParse(message).success, true, JSON.stringify(message));

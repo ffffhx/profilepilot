@@ -4,6 +4,57 @@ import type { DesktopStatus } from '../../shared/desktop';
 import { desktopErrorMessage } from './errors';
 
 const unavailable = () => Object.assign(new Error(desktopErrorMessage('DESKTOP_CONTROL_NOTICE_UNAVAILABLE')), { code: 'DESKTOP_CONTROL_NOTICE_UNAVAILABLE' });
+export type NoticeRect = { x: number; y: number; width: number; height: number };
+function rectOverlapArea(a: NoticeRect, b: NoticeRect): number {
+  const xOverlap = Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x));
+  const yOverlap = Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
+  return xOverlap * yOverlap;
+}
+/** Choose a workArea corner that avoids occluding target window caption controls and headers. */
+export function computeNoticePosition(
+  workArea: NoticeRect,
+  noticeSize: { width: number; height: number },
+  targetBounds?: NoticeRect | null,
+  platform: string = process.platform
+): { x: number; y: number; corner: 'top-right' | 'bottom-left' | 'bottom-right' | 'top-left' } {
+  const margin = 16;
+  const maxX = Math.max(workArea.x, workArea.x + workArea.width - noticeSize.width);
+  const maxY = Math.max(workArea.y, workArea.y + workArea.height - noticeSize.height);
+  const clampX = (x: number) => Math.min(maxX, Math.max(workArea.x, Math.round(x)));
+  const clampY = (y: number) => Math.min(maxY, Math.max(workArea.y, Math.round(y)));
+  const candidates: Array<{ corner: 'top-right' | 'bottom-left' | 'bottom-right' | 'top-left'; x: number; y: number }> = [
+    { corner: 'top-right', x: clampX(workArea.x + workArea.width - noticeSize.width - margin), y: clampY(workArea.y + margin) },
+    { corner: 'bottom-left', x: clampX(workArea.x + margin), y: clampY(workArea.y + workArea.height - noticeSize.height - margin) },
+    { corner: 'bottom-right', x: clampX(workArea.x + workArea.width - noticeSize.width - margin), y: clampY(workArea.y + workArea.height - noticeSize.height - margin) },
+    { corner: 'top-left', x: clampX(workArea.x + margin), y: clampY(workArea.y + margin) }
+  ];
+  if (!targetBounds || !Number.isFinite(targetBounds.width) || !Number.isFinite(targetBounds.height) || targetBounds.width <= 0 || targetBounds.height <= 0) {
+    return candidates[0];
+  }
+  const headerZone: NoticeRect = {
+    x: targetBounds.x,
+    y: targetBounds.y,
+    width: targetBounds.width,
+    height: Math.min(120, targetBounds.height)
+  };
+  const captionControlsZone: NoticeRect = platform === 'darwin'
+    ? { x: targetBounds.x, y: targetBounds.y, width: Math.min(160, targetBounds.width), height: Math.min(80, targetBounds.height) }
+    : { x: Math.max(targetBounds.x, targetBounds.x + targetBounds.width - 220), y: targetBounds.y, width: Math.min(220, targetBounds.width), height: Math.min(80, targetBounds.height) };
+  let best = candidates[0];
+  let bestScore = Number.POSITIVE_INFINITY;
+  for (const candidate of candidates) {
+    const box: NoticeRect = { x: candidate.x, y: candidate.y, width: noticeSize.width, height: noticeSize.height };
+    const score = rectOverlapArea(box, captionControlsZone) * 100
+      + rectOverlapArea(box, headerZone) * 10
+      + rectOverlapArea(box, targetBounds);
+    if (score < bestScore) {
+      bestScore = score;
+      best = candidate;
+      if (score === 0) break;
+    }
+  }
+  return best;
+}
 export function noticeOwnerKey(status: DesktopStatus): string | null {
   return status.session && status.inputObservation.generation ? JSON.stringify([status.session.name, status.inputObservation.generation]) : null;
 }
@@ -16,12 +67,14 @@ type NoticeRecord = {
 export interface DesktopNoticeOptions {
   file: string; create(): BrowserWindow; status(): DesktopStatus;
   onUnavailable(): void; onUserClose(): void; diagnostic(error: unknown): void;
+  reposition?(window: BrowserWindow, status: DesktopStatus): void;
   timeoutMs?: number;
 }
 
 // One UI component, with one attempt per owner/input generation. Failures are
 // latched before notifying the service because that notification re-enters update.
 export class DesktopControlNotice {
+  static computePosition = computeNoticePosition;
   private record?: NoticeRecord;
   private failedKey?: string;
   private closing = false;
@@ -57,6 +110,9 @@ export class DesktopControlNotice {
   }
   private show(record: NoticeRecord) {
     if (!this.current(record) || this.destroyed(record)) throw unavailable();
+    if (this.options.reposition) {
+      try { this.options.reposition(record.window!, this.options.status()); } catch (error) { this.log(error); }
+    }
     record.window!.showInactive();
     if (!this.current(record) || record.phase === 'failed' || this.destroyed(record) || !record.window!.isVisible()) throw unavailable();
   }

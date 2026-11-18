@@ -1,31 +1,38 @@
 import { runWindowsPowerShell } from "../windows-platform";
 
+export interface EmulatorWindowPlacementResult {
+  elevatedWindowPlacementSkipped?: boolean;
+  warning?: string;
+}
+
+const ELEVATED_PLACEMENT_WARNING = "模拟器正以管理员权限运行，窗口已在屏幕内可见，已跳过自动缩放归位。";
+
 /** Qt can restore an emulator above the desktop after Windows DPI scaling.
  * Fit only the selected AVD, then leave its window under user control.
  * macOS uses the emulator's native window placement and never runs this helper.
  */
-export async function ensureEmulatorWindowVisible(launcherPid: number, name: string, platform = process.platform): Promise<void> {
-  if (platform !== "win32") return;
+export async function ensureEmulatorWindowVisible(launcherPid: number, name: string, platform = process.platform): Promise<EmulatorWindowPlacementResult> {
+  if (platform !== "win32") return {};
   if (!Number.isSafeInteger(launcherPid) || launcherPid <= 0 || !/^[\w.-]{1,200}$/.test(name)) throw new Error("Invalid emulator window target");
-  await fitEmulatorWindow(launcherPid, name, 0);
+  return fitEmulatorWindow(launcherPid, name, 0);
 }
 
 /** Reopening an existing AVD must also recover a window left off-screen by Qt. */
-export async function ensureRunningEmulatorWindowVisible(name: string, id: string, platform = process.platform): Promise<void> {
-  if (platform !== "win32") return;
+export async function ensureRunningEmulatorWindowVisible(name: string, id: string, platform = process.platform): Promise<EmulatorWindowPlacementResult> {
+  if (platform !== "win32") return {};
   const match = /^emulator-(\d{4,5})$/.exec(id);
   const port = Number(match?.[1]);
   if (!/^[\w.-]{1,200}$/.test(name) || !match || port < 1024 || port > 65535) throw new Error("Invalid emulator window target");
-  await fitEmulatorWindow(0, name, port);
+  return fitEmulatorWindow(0, name, port);
 }
 
-export async function ensureTencentEmulatorWindowVisible(pid: number, platform = process.platform): Promise<void> {
-  if (platform !== "win32") return;
+export async function ensureTencentEmulatorWindowVisible(pid: number, platform = process.platform): Promise<EmulatorWindowPlacementResult> {
+  if (platform !== "win32") return {};
   if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error("Invalid emulator window target");
-  await fitEmulatorWindow(pid, "Tencent_GameLoop", 0);
+  return fitEmulatorWindow(pid, "Tencent_GameLoop", 0);
 }
 
-async function fitEmulatorWindow(launcherPid: number, name: string, port: number): Promise<void> {
+async function fitEmulatorWindow(launcherPid: number, name: string, port: number): Promise<EmulatorWindowPlacementResult> {
   const script = String.raw`
 $ErrorActionPreference = 'Stop'
 Add-Type @'
@@ -51,7 +58,7 @@ public static class ProfilePilotEmulatorWindow {
   [DllImport("user32.dll")] static extern uint GetDpiForWindow(IntPtr window);
   [DllImport("user32.dll", SetLastError=true)] static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
 
-  // 0: not created yet; 1: already fits; 2: correction requested; 3: minimized; 4: user dragging.
+  // 0: not created yet; 1: already fits; 2: correction requested; 3: minimized; 4: user dragging; 5: elevated & visible on screen.
   public static int Fit(int[] processes, string name, int port) {
     var previousDpi = SetThreadDpiAwarenessContext(new IntPtr(-4));
     try {
@@ -80,21 +87,31 @@ public static class ProfilePilotEmulatorWindow {
       int width = rect.right - rect.left, height = rect.bottom - rect.top;
       if (width <= 0 || height <= 0) return 0;
       double dpi = Math.Max(96, GetDpiForWindow(target)) / 96.0;
-      int margin = (int)Math.Ceiling(20 * dpi), toolbar = (int)Math.Ceiling(64 * dpi);
+      bool isTencent = name == "Tencent_GameLoop";
+      int margin = (int)Math.Ceiling(20 * dpi), toolbar = isTencent ? 0 : (int)Math.Ceiling(64 * dpi);
+      int border = isTencent ? (int)Math.Ceiling(12 * dpi) : 0;
       var work = info.work;
-      if (rect.left >= work.left && rect.top >= work.top && rect.right + toolbar <= work.right && rect.bottom <= work.bottom) return 1;
+      if (rect.left >= work.left - border && rect.top >= work.top - border && rect.right + toolbar <= work.right + border && rect.bottom <= work.bottom + border) return 1;
       // Both rectangles are physical pixels on the same monitor, including at
       // 125/150% scaling and on displays with a negative desktop origin.
       int availableWidth = work.right - work.left - 2 * margin - toolbar;
       int availableHeight = work.bottom - work.top - 2 * margin;
       if (availableWidth <= 0 || availableHeight <= 0) return 0;
       double scale = Math.Min(1.0, Math.Min((double)availableWidth / width, (double)availableHeight / height));
-      width = Math.Max(1, (int)Math.Floor(width * scale));
-      height = Math.Max(1, (int)Math.Floor(height * scale));
-      int x = Math.Max(work.left + margin, Math.Min(rect.left, work.right - margin - toolbar - width));
-      int y = Math.Max(work.top + margin, Math.Min(rect.top, work.bottom - margin - height));
+      int nextWidth = Math.Max(1, (int)Math.Floor(width * scale));
+      int nextHeight = Math.Max(1, (int)Math.Floor(height * scale));
+      int x = Math.Max(work.left + margin, Math.Min(rect.left, work.right - margin - toolbar - nextWidth));
+      int y = Math.Max(work.top + margin, Math.Min(rect.top, work.bottom - margin - nextHeight));
       // Preserve focus/z-order. The companion toolbar follows Qt's move event.
-      if (!SetWindowPos(target, IntPtr.Zero, x, y, width, height, 0x4014)) throw new Win32Exception(Marshal.GetLastWin32Error());
+      if (!SetWindowPos(target, IntPtr.Zero, x, y, nextWidth, nextHeight, 0x4014)) {
+        int err = Marshal.GetLastWin32Error();
+        int visW = Math.Min(rect.right, work.right) - Math.Max(rect.left, work.left);
+        int visH = Math.Min(rect.bottom, work.bottom) - Math.Max(rect.top, work.top);
+        bool titleVisible = rect.top >= work.top - (int)Math.Ceiling(16 * dpi) && rect.top <= work.bottom - (int)Math.Ceiling(32 * dpi);
+        bool bodyVisible = visW >= Math.Min(width, (int)Math.Ceiling(200 * dpi)) && visH >= Math.Min(height, (int)Math.Ceiling(120 * dpi));
+        if (err == 5 && titleVisible && bodyVisible) return 5;
+        throw new Win32Exception(err);
+      }
       return 2;
     } finally {
       if (previousDpi != IntPtr.Zero) SetThreadDpiAwarenessContext(previousDpi);
@@ -127,6 +144,7 @@ while ($elapsed.ElapsedMilliseconds -lt 20000) {
   }
   $state = [ProfilePilotEmulatorWindow]::Fit([int[]]@($targets), $name, $port)
   if ($state -eq 3) { exit 0 }
+  if ($state -eq 5) { Write-Output 'ELEVATED_VISIBLE'; exit 0 }
   if ($state -eq 1) {
     if ($stableSince -lt 0) { $stableSince = $elapsed.ElapsedMilliseconds }
     if ($elapsed.ElapsedMilliseconds - $stableSince -ge 2000) { exit 0 }
@@ -136,5 +154,9 @@ while ($elapsed.ElapsedMilliseconds -lt 20000) {
 }
 throw 'The emulator window did not become visible within the startup timeout.'
 `;
-  await runWindowsPowerShell(script, { timeout: 25000, maxBuffer: 128 * 1024 });
+  const output = await runWindowsPowerShell(script, { timeout: 25000, maxBuffer: 128 * 1024 });
+  if (output.includes("ELEVATED_VISIBLE")) {
+    return { elevatedWindowPlacementSkipped: true, warning: ELEVATED_PLACEMENT_WARNING };
+  }
+  return {};
 }

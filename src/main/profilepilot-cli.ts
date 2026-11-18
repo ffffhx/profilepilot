@@ -231,6 +231,22 @@ export function parseProfilePilotCliArgs(args: string[]): ParsedCliCommand {
     if (positionals.length !== 2 || !["status", "quit", "restart"].includes(verb)) throw new Error("用法：ppilot app <status|quit|restart> [--json]。");
     return {json, command: {action: "app", method: verb as "status" | "quit" | "restart"}};
   }
+  if (noun === "schedule" || noun === "schedules") {
+    if (verb === "list" && positionals.length === 2) return { json, command: { action: "schedule.list" } };
+    if (verb === "delete" && positionals.length === 3) {
+      if (!yes) throw new Error("schedule delete 需要显式传入 --yes。");
+      return { json, command: { action: "schedule.delete", id: requiredValue(positionals[2], "schedule delete 需要定时任务 ID") } };
+    }
+    throw new Error("用法：ppilot schedule <list|delete <ID> --yes> [--json]。");
+  }
+  if (noun === "template" || noun === "templates") {
+    if (verb === "list" && positionals.length === 2) return { json, command: { action: "template.list" } };
+    throw new Error("用法：ppilot template list [--json]。");
+  }
+  if (noun === "material" || noun === "materials") {
+    if (verb === "list" && positionals.length === 2) return { json, command: { action: "material.list" } };
+    throw new Error("用法：ppilot material list [--json]。");
+  }
   if ((noun !== "profile" && noun !== "profiles") || !verb) {
     throw new Error("用法错误：请使用 profile <list|get|create|rename|configure|start|stop|delete>。");
   }
@@ -263,12 +279,32 @@ export function parseProfilePilotCliArgs(args: string[]): ParsedCliCommand {
     } };
   }
   if (verb === "create") {
-    const name = positionals[2] === "--name" && positionals.length === 4
-      ? positionals[3]
-      : positionals.length === 3
-        ? positionals[2]
-        : undefined;
-    return { json, command: { action: "profile.create", name: requiredValue(name, "create 需要 --name <名称>") } };
+    const rest = positionals.slice(2);
+    let name: string | undefined;
+    let browserKind: import("../shared/types").BrowserKind | undefined;
+    for (let i = 0; i < rest.length; i++) {
+      if (rest[i] === "--name") {
+        name = rest[++i];
+      } else if (rest[i] === "--browser") {
+        const candidate = rest[++i];
+        if (!["chrome", "edge", "brave", "chromium"].includes(String(candidate))) {
+          throw new Error("--browser 只支持 chrome、edge、brave 或 chromium。");
+        }
+        browserKind = candidate as import("../shared/types").BrowserKind;
+      } else if (!rest[i].startsWith("--") && name === undefined) {
+        name = rest[i];
+      } else {
+        throw new Error("create 用法：profile create --name <名称> [--browser chrome|edge|brave|chromium]");
+      }
+    }
+    return {
+      json,
+      command: {
+        action: "profile.create",
+        name: requiredValue(name, "create 需要 --name <名称>"),
+        ...(browserKind ? { browserKind } : {})
+      }
+    };
   }
   if (verb === "rename") {
     if (positionals.length !== 4) throw new Error("rename 需要 Profile 名称或 ID，以及新名称。");
@@ -670,6 +706,9 @@ function formatHumanSuccess(response: ProfilePilotManagementResponse, action?: P
     const deleted = data.deleted_profile as Record<string, unknown>;
     return `已删除 Profile“${String(deleted?.name || "") }”${data.recoverable ? "，数据已移入废纸篓" : ""}。\n`;
   }
+  if (action === "schedule.list" || action === "schedule.delete" || action === "template.list" || action === "material.list") {
+    return `${JSON.stringify(data, null, 2)}\n`;
+  }
   const profile = data.profile as Record<string, unknown>;
   const changed = data.changed === false ? "无需变更" : "完成";
   return `${changed}：${formatProfile(profile)}\n`;
@@ -697,13 +736,16 @@ function helpText(): string {
   ppilot browser --help                       浏览器命令与会话说明
   ppilot browser profile <操作>               Profile 查询、创建、重命名、配置、启动、停止、删除
   ppilot electron --help                      Electron 应用窗口控制与会话说明
-  ppilot desktop --help                       本机 Windows 桌面、原生窗口与控件
+  ppilot desktop --help                       本机 Windows / macOS 桌面、原生窗口与控件
   ppilot gpui --help                          GPUI 应用元素树、交互、截图与性能调试
   ppilot remote --help                        远程电脑、浏览器、Electron 与 Windows 控件
-  ppilot phone --help                         ppilot phone CLI：设备、会话与手机控制
+  ppilot phone --help                         ppilot phone CLI：Android / iPhone 设备、会话与手机控制
   ppilot phone wrap --help                    为脚本或工具建立手机控制会话
   ppilot phone adb --help                     ADB 兼容命令
   ppilot <run|chat|list|show|watch|reply|resume|pause|cancel|takeover|send> [参数]
+  ppilot schedule <list|delete <ID> --yes> [--json]
+  ppilot template list [--json]
+  ppilot material list [--json]
   ppilot chat --help
   ppilot status [--json]
   ppilot app <status|quit|restart> [--json]
@@ -715,7 +757,7 @@ function helpText(): string {
   ppilot browser profile default [名称|ID|--clear] [--json]
   ppilot browser profile list [--json]
   ppilot browser profile get <名称|ID> [--json]
-  ppilot browser profile create --name <名称> [--json]
+  ppilot browser profile create --name <名称> [--browser chrome|edge|brave|chromium] [--json]
   ppilot browser profile rename <名称|ID> <新名称> [--json]
   ppilot browser profile configure <名称|ID> --hide-automation <on|off> [--json]
   ppilot browser profile start <名称|ID> [--json]

@@ -1,0 +1,531 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ProfilePilot · 推广材料包</title><link rel="stylesheet" href="launch.css"></head><body><a class="skip" href="#main">跳到正文</a><header><a class="brand" href="#"><img src="../../public/assets/profilepilot-mark.svg" alt="">ProfilePilot</a><nav aria-label="材料导航"><a href="#copy">文案</a><a href="#images">配图</a><a href="#store-submission">商店</a><a href="#release-readiness">发布状态</a></nav></header><main id="main"><div class="intro"><p class="date">2026.11.15 · 本地交付 · 尚未对外发布</p><h1>视频之外，<br>把发布要用的东西准备好。</h1><p class="lede">文案、图文素材、上手指南、商店材料和反馈入口，都放在这里。你可以直接查看、复制或整包下载。</p><div class="actions"><a class="primary" href="../../artifacts/promotion-launch/ProfilePilot-launch-kit.zip" download>下载完整材料包</a><a href="../../site/start.html">查看中英文上手页 ↗</a><a href="/">预览新版官网 ↗</a></div></div><p class="status"><strong>发布前还有实际条件：</strong>新版下载包验证、商店账号与正式 ID、最终运行截图、macOS 和新用户试用。对应材料已备，尚未发生的结果没有填成完成。<a href="#release-readiness">查看记录</a>。</p><section id="copy"><h2>直接复制的 X 文案</h2><p>英文串共六条，中文一条；每条均已按 280 字符上限核验。</p><details class="tweet"><summary>英文 1<span>179 / 280</span></summary><p id="en-1">I built ProfilePilot for my existing coding agent: read signed-in websites, compare listings, and check local apps. One CLI connects Chrome, Electron and Android. MIT open source.</p><button data-copy="en-1" type="button">复制这条</button><a href="copy/x-en-1.txt" download>下载文本</a></details><details class="tweet"><summary>英文 2<span>218 / 280</span></summary><p id="en-2">The current source includes structured reads for 9 sites, including Xianyu and Xiaohongshu. Read listings and details, keep source links, and flag missing information. These experimental adapters have different limits.</p><button data-copy="en-2" type="button">复制这条</button><a href="copy/x-en-2.txt" download>下载文本</a></details><details class="tweet"><summary>英文 3<span>192 / 280</span></summary><p id="en-3">Different agents can use different Profiles or independent apps. An occupied Profile has an owner; a second agent cannot silently take it over. Pause for a manual step, then hand control back.</p><button data-copy="en-3" type="button">复制这条</button><a href="copy/x-en-3.txt" download>下载文本</a></details><details class="tweet"><summary>英文 4<span>206 / 280</span></summary><p id="en-4">browser-use and agent-browser already support real-browser workflows and multiple sessions. ProfilePilot is worth trying for its ready-made site reads, local target management and Android workflow together.</p><button data-copy="en-4" type="button">复制这条</button><a href="copy/x-en-4.txt" download>下载文本</a></details><details class="tweet"><summary>英文 5<span>201 / 280</span></summary><p id="en-5">Keep your coding agent. ProfilePilot's control commands do not run a second model loop. Local records stay on your machine; page content and screenshots you give the agent may go to its model provider.</p><button data-copy="en-5" type="button">复制这条</button><a href="copy/x-en-5.txt" download>下载文本</a></details><details class="tweet"><summary>英文 6<span>208 / 280</span></summary><p id="en-6">Early project; the Chrome extension currently needs manual loading. I'd love feedback on one real task, from setup to the final result. Check the release notes before installing. Code: https://github.com/ffffhx/profilepilot</p><button data-copy="en-6" type="button">复制这条</button><a href="copy/x-en-6.txt" download>下载文本</a></details><details class="tweet"><summary>中文单条<span>210 / 280</span></summary><p id="zh">做了个给 Claude Code / Codex 用的开源工具 ProfilePilot。内置闲鱼、小红书等网站读取；不同 Agent 可在不同 Profile / 应用里工作。一个 CLI 连接 Chrome、Electron、安卓。想找人试一次真实任务：
+https://github.com/ffffhx/profilepilot</p><button data-copy="zh" type="button">复制这条</button><a href="copy/x-zh.txt" download>下载文本</a></details></section><section class="document" id="channel-copy"><div class="section-head"><h2>渠道文案与常见回复</h2><a href="channel-copy.md" download>下载 Markdown</a><button data-copy="source-channel-copy" type="button">复制全文</button></div><details><summary>展开内容</summary><div class="prose"><h1>发布文案</h1>
+<p>准备日期：2026-11-15。以下是可复制的正文；未代发。正式招募前，先用更新后的下载包完成首次任务。现有下载资产仍停留在 10 月 9 日，本文描述当前源码能力。扩展商店状态按发帖当天更新。</p>
+<h2>V2EX</h2>
+<p>标题：做了个给 Claude Code / Codex 用的工具，读取闲鱼、小红书，也能连接安卓</p>
+<p>大家好，分享一个自己在做的 MIT 开源项目 <strong>ProfilePilot</strong>。</p>
+<p>它给 Claude Code、Codex 等已有 Agent 提供一套本地 CLI：连接已登录的 Chrome、本地 Electron 应用和安卓手机。</p>
+<p>browser-use、agent-browser 已经很好用了，也有复用登录态和多会话的办法。我做这个项目，主要想把自己反复用到的任务准备得更直接一些。</p>
+<p>比如找闲鱼商品。告诉 Agent 规格、预算、排除条件，再让它搜索候选、核对详情，整理标题、挂牌价、原链接，以及还需要确认的信息。之后再次采样，可以比较自己的采样记录；它不能凭空补出过去一年的价格。</p>
+<p>当前源码内置 9 个站点、21 项读取操作，包括闲鱼、小红书、B站、BOSS 等。各站能力不同：小红书评论只包括实际加载的部分，YouTube 字幕需要视频本身已有字幕。无结果、读取失败和只读到部分内容也要区分。</p>
+<p>另一个重点是目标管理。不同 Agent 可以分别使用不同 Profile 或独立应用。一个查资料，一个检查本地项目；同一 Profile 被占用时会提示，不能直接抢走。需要我登录或处理页面时，可以接管，之后再交还。</p>
+<p>浏览器、Electron 和安卓分别走 <code>ppilot browser</code>、<code>ppilot electron</code>、<code>ppilot phone</code>，配套提供 Skill。日常 Chrome 通过扩展连接；外部浏览器控制不需要桌面管理窗口一直打开，也不会额外启动一套模型循环。</p>
+<p>这还是早期项目。桌面端有 Windows / macOS，扩展目前按引导手动加载，商店进度以项目说明为准。本地 Profile 和记录在电脑上，但交给 Agent 的页面内容、截图可能发送到你选用的模型服务。</p>
+<p>如果你已经有顺手的工具，可以先试一次站点读取或网页加安卓的任务，看看这些现成流程是否有帮助。我尤其想了解：第一次安装卡在哪里，以及最后结果有没有真的完成你的任务。</p>
+<p>项目：<a href="https://github.com/ffffhx/profilepilot">https://github.com/ffffhx/profilepilot</a></p>
+<p>欢迎贴一个可公开的任务描述。反馈请附系统、App / CLI / 扩展版本和出错步骤，不要附配对码、Cookie 或私人页面。</p>
+<h2>X 英文串</h2>
+<p>每段单独发布，顺序回复上一条。配图用 social-cover.png 或 first-task.png；不依赖视频。链接按 23 字符、其他字符按 X 加权规则保守核验，报告见 validation.json。</p>
+<!-- tweet:en-1 -->
+<p>I built ProfilePilot for my existing coding agent: read signed-in websites, compare listings, and check local apps. One CLI connects Chrome, Electron and Android. MIT open source.</p>
+<!-- /tweet --><!-- tweet:en-2 -->
+<p>The current source includes structured reads for 9 sites, including Xianyu and Xiaohongshu. Read listings and details, keep source links, and flag missing information. These experimental adapters have different limits.</p>
+<!-- /tweet --><!-- tweet:en-3 -->
+<p>Different agents can use different Profiles or independent apps. An occupied Profile has an owner; a second agent cannot silently take it over. Pause for a manual step, then hand control back.</p>
+<!-- /tweet --><!-- tweet:en-4 -->
+<p>browser-use and agent-browser already support real-browser workflows and multiple sessions. ProfilePilot is worth trying for its ready-made site reads, local target management and Android workflow together.</p>
+<!-- /tweet --><!-- tweet:en-5 -->
+<p>Keep your coding agent. ProfilePilot&#39;s control commands do not run a second model loop. Local records stay on your machine; page content and screenshots you give the agent may go to its model provider.</p>
+<!-- /tweet --><!-- tweet:en-6 -->
+<p>Early project; the Chrome extension currently needs manual loading. I&#39;d love feedback on one real task, from setup to the final result. Check the release notes before installing. Code: <a href="https://github.com/ffffhx/profilepilot">https://github.com/ffffhx/profilepilot</a></p>
+<!-- /tweet --><h2>X 中文单条</h2>
+<!-- tweet:zh -->
+<p>做了个给 Claude Code / Codex 用的开源工具 ProfilePilot。内置闲鱼、小红书等网站读取；不同 Agent 可在不同 Profile / 应用里工作。一个 CLI 连接 Chrome、Electron、安卓。想找人试一次真实任务：
+<a href="https://github.com/ffffhx/profilepilot">https://github.com/ffffhx/profilepilot</a></p>
+<!-- /tweet --><h2>小红书</h2>
+<p>标题：给现有 AI 接上闲鱼和安卓</p>
+<p>正文：</p>
+<p>平时已经在用 Claude Code / Codex，我想让它们再帮我处理一些网页和手机上的事，于是做了 ProfilePilot。</p>
+<p>拿闲鱼找内存举例：先说清规格和预算，让 Agent 搜索候选、核对详情，再把“描述符合”“不符合”“信息不足”分开，保留挂牌价和原链接。单条还是套装、是否维修过，没有证据就继续标成待确认，不能当成已经验证的商品。</p>
+<p>它也有小红书等站点的读取能力。不同 Agent 可以放在不同 Profile / 独立应用里工作，互相不接管对方的目标；需要我操作时可以暂停接手。</p>
+<p>图片是一份使用流程图解，示意字段不代表真实商品或实测成绩。当前是早期项目，网站读取仍在实验阶段；扩展按引导手动加载。项目 MIT 开源，在 GitHub 搜索 ffffhx/profilepilot 可以看到安装说明和进度。</p>
+<p>我更想知道：你最想交给 Agent 的一个具体任务是什么？</p>
+<p>#AI工具 #ClaudeCode #Codex #开源项目 #效率工具</p>
+<p>图片顺序：01 接入已有 Agent → 02 写清筛选条件 → 03 结果保留证据 → 04 分开管理目标 → 05 接管与交还 → 06 首次上手。六张均为 1080×1440 图解，不伪装运行实录。</p>
+<h2>常见回复</h2>
+<p><strong>为什么不用 browser-use / agent-browser？</strong></p>
+<p>都可以，也不用为了 Star 数换工具。ProfilePilot 更想解决的是现成中文站点读取、本地目标管理和安卓协作。多会话、登录态、CLI 本身都不是独有功能；建议用你自己的任务试一次。</p>
+<p><strong>更快或更省 token 吗？</strong></p>
+<p>还没有三方同条件的数据，所以目前不做排名。比较协议已准备，会同时记录失败、人工介入和实际模型用量。</p>
+<p><strong>能在同一个 Profile 的多个标签页同时跑吗？</strong></p>
+<p>这里说的并行是不同 Profile / 独立应用。同一受控 Profile 保持一个控制会话；多个 Agent 不能同时操作同一部手机或共享桌面鼠标。</p>
+<p><strong>会上传账号吗？</strong></p>
+<p>Profile 与本地记录在本机。Agent 为完成任务读取的网页内容、截图和结果可能发送给你使用的模型服务。请查看扩展隐私说明并按任务范围授权，不能把“本地工具”理解为“所有数据永不离机”。</p>
+<p><strong>不配置模型能用吗？</strong></p>
+<p>使用已有外部 Agent 时，控制命令本身不再启动模型循环。内置 Agent 是另外一条可选路径，首次上手不要求使用它。</p>
+<p><strong>商店里能装了吗？</strong></p>
+<p>目前未确认 Chrome Web Store 上线状态，先按当前安装说明手动加载。只有后台实际发布后，才替换成真实商店链接。</p>
+</div></details><textarea id="source-channel-copy" hidden># 发布文案
+
+准备日期：2026-11-15。以下是可复制的正文；未代发。正式招募前，先用更新后的下载包完成首次任务。现有下载资产仍停留在 10 月 9 日，本文描述当前源码能力。扩展商店状态按发帖当天更新。
+
+## V2EX
+
+标题：做了个给 Claude Code / Codex 用的工具，读取闲鱼、小红书，也能连接安卓
+
+大家好，分享一个自己在做的 MIT 开源项目 **ProfilePilot**。
+
+它给 Claude Code、Codex 等已有 Agent 提供一套本地 CLI：连接已登录的 Chrome、本地 Electron 应用和安卓手机。
+
+browser-use、agent-browser 已经很好用了，也有复用登录态和多会话的办法。我做这个项目，主要想把自己反复用到的任务准备得更直接一些。
+
+比如找闲鱼商品。告诉 Agent 规格、预算、排除条件，再让它搜索候选、核对详情，整理标题、挂牌价、原链接，以及还需要确认的信息。之后再次采样，可以比较自己的采样记录；它不能凭空补出过去一年的价格。
+
+当前源码内置 9 个站点、21 项读取操作，包括闲鱼、小红书、B站、BOSS 等。各站能力不同：小红书评论只包括实际加载的部分，YouTube 字幕需要视频本身已有字幕。无结果、读取失败和只读到部分内容也要区分。
+
+另一个重点是目标管理。不同 Agent 可以分别使用不同 Profile 或独立应用。一个查资料，一个检查本地项目；同一 Profile 被占用时会提示，不能直接抢走。需要我登录或处理页面时，可以接管，之后再交还。
+
+浏览器、Electron 和安卓分别走 `ppilot browser`、`ppilot electron`、`ppilot phone`，配套提供 Skill。日常 Chrome 通过扩展连接；外部浏览器控制不需要桌面管理窗口一直打开，也不会额外启动一套模型循环。
+
+这还是早期项目。桌面端有 Windows / macOS，扩展目前按引导手动加载，商店进度以项目说明为准。本地 Profile 和记录在电脑上，但交给 Agent 的页面内容、截图可能发送到你选用的模型服务。
+
+如果你已经有顺手的工具，可以先试一次站点读取或网页加安卓的任务，看看这些现成流程是否有帮助。我尤其想了解：第一次安装卡在哪里，以及最后结果有没有真的完成你的任务。
+
+项目：https://github.com/ffffhx/profilepilot
+
+欢迎贴一个可公开的任务描述。反馈请附系统、App / CLI / 扩展版本和出错步骤，不要附配对码、Cookie 或私人页面。
+
+## X 英文串
+
+每段单独发布，顺序回复上一条。配图用 social-cover.png 或 first-task.png；不依赖视频。链接按 23 字符、其他字符按 X 加权规则保守核验，报告见 validation.json。
+
+&lt;!-- tweet:en-1 -->
+I built ProfilePilot for my existing coding agent: read signed-in websites, compare listings, and check local apps. One CLI connects Chrome, Electron and Android. MIT open source.
+&lt;!-- /tweet -->
+
+&lt;!-- tweet:en-2 -->
+The current source includes structured reads for 9 sites, including Xianyu and Xiaohongshu. Read listings and details, keep source links, and flag missing information. These experimental adapters have different limits.
+&lt;!-- /tweet -->
+
+&lt;!-- tweet:en-3 -->
+Different agents can use different Profiles or independent apps. An occupied Profile has an owner; a second agent cannot silently take it over. Pause for a manual step, then hand control back.
+&lt;!-- /tweet -->
+
+&lt;!-- tweet:en-4 -->
+browser-use and agent-browser already support real-browser workflows and multiple sessions. ProfilePilot is worth trying for its ready-made site reads, local target management and Android workflow together.
+&lt;!-- /tweet -->
+
+&lt;!-- tweet:en-5 -->
+Keep your coding agent. ProfilePilot's control commands do not run a second model loop. Local records stay on your machine; page content and screenshots you give the agent may go to its model provider.
+&lt;!-- /tweet -->
+
+&lt;!-- tweet:en-6 -->
+Early project; the Chrome extension currently needs manual loading. I'd love feedback on one real task, from setup to the final result. Check the release notes before installing. Code: https://github.com/ffffhx/profilepilot
+&lt;!-- /tweet -->
+
+## X 中文单条
+
+&lt;!-- tweet:zh -->
+做了个给 Claude Code / Codex 用的开源工具 ProfilePilot。内置闲鱼、小红书等网站读取；不同 Agent 可在不同 Profile / 应用里工作。一个 CLI 连接 Chrome、Electron、安卓。想找人试一次真实任务：
+https://github.com/ffffhx/profilepilot
+&lt;!-- /tweet -->
+
+## 小红书
+
+标题：给现有 AI 接上闲鱼和安卓
+
+正文：
+
+平时已经在用 Claude Code / Codex，我想让它们再帮我处理一些网页和手机上的事，于是做了 ProfilePilot。
+
+拿闲鱼找内存举例：先说清规格和预算，让 Agent 搜索候选、核对详情，再把“描述符合”“不符合”“信息不足”分开，保留挂牌价和原链接。单条还是套装、是否维修过，没有证据就继续标成待确认，不能当成已经验证的商品。
+
+它也有小红书等站点的读取能力。不同 Agent 可以放在不同 Profile / 独立应用里工作，互相不接管对方的目标；需要我操作时可以暂停接手。
+
+图片是一份使用流程图解，示意字段不代表真实商品或实测成绩。当前是早期项目，网站读取仍在实验阶段；扩展按引导手动加载。项目 MIT 开源，在 GitHub 搜索 ffffhx/profilepilot 可以看到安装说明和进度。
+
+我更想知道：你最想交给 Agent 的一个具体任务是什么？
+
+#AI工具 #ClaudeCode #Codex #开源项目 #效率工具
+
+图片顺序：01 接入已有 Agent → 02 写清筛选条件 → 03 结果保留证据 → 04 分开管理目标 → 05 接管与交还 → 06 首次上手。六张均为 1080×1440 图解，不伪装运行实录。
+
+## 常见回复
+
+**为什么不用 browser-use / agent-browser？**
+
+都可以，也不用为了 Star 数换工具。ProfilePilot 更想解决的是现成中文站点读取、本地目标管理和安卓协作。多会话、登录态、CLI 本身都不是独有功能；建议用你自己的任务试一次。
+
+**更快或更省 token 吗？**
+
+还没有三方同条件的数据，所以目前不做排名。比较协议已准备，会同时记录失败、人工介入和实际模型用量。
+
+**能在同一个 Profile 的多个标签页同时跑吗？**
+
+这里说的并行是不同 Profile / 独立应用。同一受控 Profile 保持一个控制会话；多个 Agent 不能同时操作同一部手机或共享桌面鼠标。
+
+**会上传账号吗？**
+
+Profile 与本地记录在本机。Agent 为完成任务读取的网页内容、截图和结果可能发送给你使用的模型服务。请查看扩展隐私说明并按任务范围授权，不能把“本地工具”理解为“所有数据永不离机”。
+
+**不配置模型能用吗？**
+
+使用已有外部 Agent 时，控制命令本身不再启动模型循环。内置 Agent 是另外一条可选路径，首次上手不要求使用它。
+
+**商店里能装了吗？**
+
+目前未确认 Chrome Web Store 上线状态，先按当前安装说明手动加载。只有后台实际发布后，才替换成真实商店链接。
+</textarea></section><section id="images"><h2>配图可直接下载</h2><p>社交封面和首次任务图；六张小红书流程图均为 1080 × 1440。图中没有虚构商品或测试成绩。</p><div class="wide-images"><figure><a href="assets/social-cover.png" target="_blank"><img src="assets/social-cover.png" alt="ProfilePilot 社交封面" loading="lazy"></a><figcaption><a href="assets/social-cover.png" download>下载社交封面</a></figcaption></figure><figure><a href="assets/first-task.png" target="_blank"><img src="assets/first-task.png" alt="首次任务上手步骤" loading="lazy"></a><figcaption><a href="assets/first-task.png" download>下载上手步骤图</a></figcaption></figure></div><div class="gallery"><figure><a href="assets/xhs-01.png" target="_blank"><img src="assets/xhs-01.png" alt="流程图解 1：接入已有 Agent" loading="lazy"></a><figcaption><a href="assets/xhs-01.png" download>下载第 1 张</a></figcaption></figure><figure><a href="assets/xhs-02.png" target="_blank"><img src="assets/xhs-02.png" alt="流程图解 2：写清筛选条件" loading="lazy"></a><figcaption><a href="assets/xhs-02.png" download>下载第 2 张</a></figcaption></figure><figure><a href="assets/xhs-03.png" target="_blank"><img src="assets/xhs-03.png" alt="流程图解 3：结果保留证据" loading="lazy"></a><figcaption><a href="assets/xhs-03.png" download>下载第 3 张</a></figcaption></figure><figure><a href="assets/xhs-04.png" target="_blank"><img src="assets/xhs-04.png" alt="流程图解 4：分开管理目标" loading="lazy"></a><figcaption><a href="assets/xhs-04.png" download>下载第 4 张</a></figcaption></figure><figure><a href="assets/xhs-05.png" target="_blank"><img src="assets/xhs-05.png" alt="流程图解 5：人工接管与交还" loading="lazy"></a><figcaption><a href="assets/xhs-05.png" download>下载第 5 张</a></figcaption></figure><figure><a href="assets/xhs-06.png" target="_blank"><img src="assets/xhs-06.png" alt="流程图解 6：第一次任务" loading="lazy"></a><figcaption><a href="assets/xhs-06.png" download>下载第 6 张</a></figcaption></figure></div></section><section class="document" id="store-submission"><div class="section-head"><h2>扩展商店提交材料</h2><a href="store-submission.md" download>下载 Markdown</a><button data-copy="source-store-submission" type="button">复制全文</button></div><details><summary>展开内容</summary><div class="prose"><h1>Chrome Web Store 提交包</h1>
+<p>这是准备材料，不代表已提交审核。当前 ZIP 为 0.2.18，开发 ID 为 gmdaabnoocjlpimglalnbegfdaklfnaj。必须先取得真实商店 item ID 和公钥，再核对开发扩展与应用端固定 ID，不能把开发 ID 自动视为商店 ID。</p>
+<h2>已备文件</h2>
+<ul>
+<li><code>store/description.zh-CN.txt</code>：名称、简述、单一用途和详细说明。</li>
+<li><code>store/permissions.zh-CN.json</code>：与当前 manifest 逐项对应的十项权限及 host 权限理由。</li>
+<li><code>store/privacy.zh-CN.md</code>：当前隐私说明副本。</li>
+<li><code>store/icon-128.png</code>、<code>store/promo-small.png</code>（440×280）、<code>store/promo-marquee.png</code>（1400×560）。宣传图仅呈现品牌，不作为功能截图。</li>
+<li><code>store/profilepilot-extension-0.2.18.zip</code>、SHA256、<code>validation.json</code>：可重现的扩展包和静态校验记录。</li>
+</ul>
+<p>SHA256：<code>a137a269ae301c2f30f7c7da291174c58e2971c94534a016bb42293249576ec1</code>。</p>
+<p>商店至少要求一张功能截图，尺寸为 1280×800 或 640×400；当前没有把图解或旧配对截图冒充最终运行截图。准备好兼容下载版和正式 ID 后，在无私人数据的测试页拍摄连接与受控标签页状态、人工接管状态。<a href="https://developer.chrome.com/docs/webstore/images">图片要求</a>；简述上限 132 字符，manifest 必须位于 ZIP 根目录。<a href="https://developer.chrome.com/docs/webstore/prepare">扩展准备要求</a></p>
+<h2>审核人员操作说明</h2>
+<ol>
+<li>从项目 Release 安装与扩展兼容的桌面版本，记录实际版本和下载链接。当前公开资产尚待更新，不填写虚构版本号。</li>
+<li>选择一个无私人数据的测试 Chrome Profile，加载这份扩展，并按“配套工具”的浏览器连接引导配对。CLI 和 Skill 从同一入口安装；外部 CLI 检查不需要配置模型账号。</li>
+<li>运行 <code>ppilot browser status</code>，从返回中取得实际 Profile ID，再运行 <code>ppilot browser --profile &lt;实际ID&gt; tabs</code>。占位符必须替换，不能复制默认 ID 当成已发现目标。</li>
+<li>运行 <code>ppilot browser --profile &lt;实际ID&gt; --session store-review --new-tab claim</code>，再运行 <code>ppilot browser --session store-review open https://example.com</code>。</li>
+<li>运行 <code>ppilot browser --session store-review observe</code>，核对页面标题、内容与扩展中的受控标签页。运行 <code>ppilot browser --session store-review screenshot --output review.png</code> 保存结果。</li>
+<li>运行 <code>ppilot browser --session store-review handoff</code>，核对后续动作被拒绝。由审核人员明确交还后，运行同一会话的 <code>resume</code>，重新 <code>observe</code>。不通过另一个会话绕过暂停。</li>
+<li>运行 <code>ppilot browser --session store-review complete</code>，核对控制权释放。使用自己创建的测试历史与下载文件补验 history / downloads；不要读取私人历史或下载资料。</li>
+<li>关闭并重新启动 Chrome、浏览器服务，核对配对保留、重连和任务状态。分别记录 Windows、macOS 结果。</li>
+</ol>
+<h2>隐私和数据申报</h2>
+<p>拟用公开地址：<a href="https://ffffhx.github.io/profilepilot/site/extension-privacy.html">https://ffffhx.github.io/profilepilot/site/extension-privacy.html</a> 。本地页面已备；2026-11-15 直接 HTTP 核验返回 404。需要随官网部署后再确认公网 HTTPS 可访问且内容与本包一致，不能将此地址作为已经上线的隐私页提交。</p>
+<p>扩展代码随 ZIP 分发；通过已配对本机服务接收命令，CDP Runtime.evaluate 可执行来自本机应用或外部 Agent 的网页脚本。不要因为传输地址是 localhost 就直接申报“不使用远程代码”。后台需如实说明 Debugger API 路径，并依据 <a href="https://developer.chrome.com/docs/webstore/program-policies/mv3-requirements">MV3 政策</a> 的有条件例外逐项核对。</p>
+<p>数据声明必须覆盖实际处理的网页内容、浏览记录、用户操作及可能涉及的个人信息。没有发布者遥测服务器不等于不处理用户数据。完整身份迁移、权限和审核说明见 <a href="../native-extension-store.md">商店准备文档</a>。</p>
+<h2>提交前仍需完成</h2>
+<p>开发者账号与费用由账号持有人处理；建立草稿并核对 item ID / key；从新下载包完成 Windows / macOS 连接测试；拍摄最终真实截图；验证公开隐私地址；按实际后台问题填写数据申报。以上条件满足后才提交，当前没有代为购买、上传或发布。</p>
+</div></details><textarea id="source-store-submission" hidden># Chrome Web Store 提交包
+
+这是准备材料，不代表已提交审核。当前 ZIP 为 0.2.18，开发 ID 为 gmdaabnoocjlpimglalnbegfdaklfnaj。必须先取得真实商店 item ID 和公钥，再核对开发扩展与应用端固定 ID，不能把开发 ID 自动视为商店 ID。
+
+## 已备文件
+
+- `store/description.zh-CN.txt`：名称、简述、单一用途和详细说明。
+- `store/permissions.zh-CN.json`：与当前 manifest 逐项对应的十项权限及 host 权限理由。
+- `store/privacy.zh-CN.md`：当前隐私说明副本。
+- `store/icon-128.png`、`store/promo-small.png`（440×280）、`store/promo-marquee.png`（1400×560）。宣传图仅呈现品牌，不作为功能截图。
+- `store/profilepilot-extension-0.2.18.zip`、SHA256、`validation.json`：可重现的扩展包和静态校验记录。
+
+SHA256：`a137a269ae301c2f30f7c7da291174c58e2971c94534a016bb42293249576ec1`。
+
+商店至少要求一张功能截图，尺寸为 1280×800 或 640×400；当前没有把图解或旧配对截图冒充最终运行截图。准备好兼容下载版和正式 ID 后，在无私人数据的测试页拍摄连接与受控标签页状态、人工接管状态。[图片要求](https://developer.chrome.com/docs/webstore/images)；简述上限 132 字符，manifest 必须位于 ZIP 根目录。[扩展准备要求](https://developer.chrome.com/docs/webstore/prepare)
+
+## 审核人员操作说明
+
+1. 从项目 Release 安装与扩展兼容的桌面版本，记录实际版本和下载链接。当前公开资产尚待更新，不填写虚构版本号。
+2. 选择一个无私人数据的测试 Chrome Profile，加载这份扩展，并按“配套工具”的浏览器连接引导配对。CLI 和 Skill 从同一入口安装；外部 CLI 检查不需要配置模型账号。
+3. 运行 `ppilot browser status`，从返回中取得实际 Profile ID，再运行 `ppilot browser --profile &lt;实际ID> tabs`。占位符必须替换，不能复制默认 ID 当成已发现目标。
+4. 运行 `ppilot browser --profile &lt;实际ID> --session store-review --new-tab claim`，再运行 `ppilot browser --session store-review open https://example.com`。
+5. 运行 `ppilot browser --session store-review observe`，核对页面标题、内容与扩展中的受控标签页。运行 `ppilot browser --session store-review screenshot --output review.png` 保存结果。
+6. 运行 `ppilot browser --session store-review handoff`，核对后续动作被拒绝。由审核人员明确交还后，运行同一会话的 `resume`，重新 `observe`。不通过另一个会话绕过暂停。
+7. 运行 `ppilot browser --session store-review complete`，核对控制权释放。使用自己创建的测试历史与下载文件补验 history / downloads；不要读取私人历史或下载资料。
+8. 关闭并重新启动 Chrome、浏览器服务，核对配对保留、重连和任务状态。分别记录 Windows、macOS 结果。
+
+## 隐私和数据申报
+
+拟用公开地址：https://ffffhx.github.io/profilepilot/site/extension-privacy.html 。本地页面已备；2026-11-15 直接 HTTP 核验返回 404。需要随官网部署后再确认公网 HTTPS 可访问且内容与本包一致，不能将此地址作为已经上线的隐私页提交。
+
+扩展代码随 ZIP 分发；通过已配对本机服务接收命令，CDP Runtime.evaluate 可执行来自本机应用或外部 Agent 的网页脚本。不要因为传输地址是 localhost 就直接申报“不使用远程代码”。后台需如实说明 Debugger API 路径，并依据 [MV3 政策](https://developer.chrome.com/docs/webstore/program-policies/mv3-requirements) 的有条件例外逐项核对。
+
+数据声明必须覆盖实际处理的网页内容、浏览记录、用户操作及可能涉及的个人信息。没有发布者遥测服务器不等于不处理用户数据。完整身份迁移、权限和审核说明见 [商店准备文档](../native-extension-store.md)。
+
+## 提交前仍需完成
+
+开发者账号与费用由账号持有人处理；建立草稿并核对 item ID / key；从新下载包完成 Windows / macOS 连接测试；拍摄最终真实截图；验证公开隐私地址；按实际后台问题填写数据申报。以上条件满足后才提交，当前没有代为购买、上传或发布。
+</textarea></section><section class="document" id="pilot-and-measurement"><div class="section-head"><h2>试用邀请与记录方法</h2><a href="pilot-and-measurement.md" download>下载 Markdown</a><button data-copy="source-pilot-and-measurement" type="button">复制全文</button></div><details><summary>展开内容</summary><div class="prose"><h1>第一轮试用执行包</h1>
+<p>招募对象：已使用 Claude Code／Codex、有真实网页任务的开发者。首轮邀请 5–10 人，Windows、macOS Apple Silicon 与 Intel 尽量都有。以下邀请稿未发送。</p>
+<h2>邀请稿</h2>
+<p>我在做 ProfilePilot，让现有 Agent 读取已登录的 Chrome、部分中文网站，并连接 Electron 和安卓。想请你从安装开始，试一个你确实需要的只读任务。大约预留 15–20 分钟；不要求成功，也不用给好评。最有帮助的是告诉我：哪一步看不懂、是否需要人帮忙、最终结果是否能核对。可以只分享脱敏步骤，不需要提供账号或原始日志。你愿意的话，我发安装说明和反馈入口。</p>
+<h2>每位试用者的流程</h2>
+<ol>
+<li>记录系统、芯片、Chrome、App、CLI、扩展和 Agent 版本，以及是否已有登录态。</li>
+<li>从公开下载链接开始计时，独立完成安装、扩展配对、CLI／Skill 安装。记录每个卡点及人工帮助次数。</li>
+<li>由试用者选择一个只读任务。提前写出成功标准，不能由工具的 ok 回包代替核对。</li>
+<li>检查结果与原链接、连接目标、会话是否结束；记录成功／部分／失败／阻塞。</li>
+<li>七天后，经试用者同意再询问是否再次使用、用了什么任务、有没有新的卡点。</li>
+</ol>
+<p>不要为降低用时替试用者预先配好环境。5 分钟只是设计目标，不作为已验证宣传成绩。</p>
+<h2>Windows 和 macOS 分开记录</h2>
+<p>两边都检查中文／空格路径、PATH、持久扩展目录、Chrome 重启、升级后配对保留。Windows 额外检查 PowerShell 中文和参数、Android USB 驱动；macOS 记录芯片、安装与签名提示、真实设备连接。没有 macOS 真机记录就填「未验证」。不把模拟器或 Windows mock 当成真机通过。</p>
+<h2>四项观察指标</h2>
+<ul>
+<li>连接完成率 = 实际完成连接的人数 / 已开始安装的人数。</li>
+<li>首次任务成功率 = 按预定标准核对通过的人数 / 已尝试首次任务的人数。部分完成和阻塞单列。</li>
+<li>七日复用率 = 确认七日内再次使用的人数 / 已满七日且有回访结果的人数；另报失访人数。</li>
+<li>重复卡点 = 相同问题影响的人数与出现的步骤；优先修复影响首次成功的问题。</li>
+</ul>
+<p>小样本报告同时写分子、分母，不只报百分比。无遥测时使用自愿反馈，不用 Star 或下载次数推测实际留存。</p>
+<h2>发布顺序</h2>
+<p>下载版验证完成后，先在一个开发者社区发布并集中答疑；收集一轮卡点、修复后再发 X；最后选择一个已核对的真实任务发小红书图文。视频由项目作者自行安排，不再作为本包的交付内容。渠道之间留出处理反馈的时间，不承诺流量或所谓最佳时段。</p>
+<p>空白记录表见 pilot.csv、feedback.csv、release-queue.csv。没有填入虚构用户和指标。</p>
+</div></details><textarea id="source-pilot-and-measurement" hidden># 第一轮试用执行包
+
+招募对象：已使用 Claude Code／Codex、有真实网页任务的开发者。首轮邀请 5–10 人，Windows、macOS Apple Silicon 与 Intel 尽量都有。以下邀请稿未发送。
+
+## 邀请稿
+
+我在做 ProfilePilot，让现有 Agent 读取已登录的 Chrome、部分中文网站，并连接 Electron 和安卓。想请你从安装开始，试一个你确实需要的只读任务。大约预留 15–20 分钟；不要求成功，也不用给好评。最有帮助的是告诉我：哪一步看不懂、是否需要人帮忙、最终结果是否能核对。可以只分享脱敏步骤，不需要提供账号或原始日志。你愿意的话，我发安装说明和反馈入口。
+
+## 每位试用者的流程
+
+1. 记录系统、芯片、Chrome、App、CLI、扩展和 Agent 版本，以及是否已有登录态。
+2. 从公开下载链接开始计时，独立完成安装、扩展配对、CLI／Skill 安装。记录每个卡点及人工帮助次数。
+3. 由试用者选择一个只读任务。提前写出成功标准，不能由工具的 ok 回包代替核对。
+4. 检查结果与原链接、连接目标、会话是否结束；记录成功／部分／失败／阻塞。
+5. 七天后，经试用者同意再询问是否再次使用、用了什么任务、有没有新的卡点。
+
+不要为降低用时替试用者预先配好环境。5 分钟只是设计目标，不作为已验证宣传成绩。
+
+## Windows 和 macOS 分开记录
+
+两边都检查中文／空格路径、PATH、持久扩展目录、Chrome 重启、升级后配对保留。Windows 额外检查 PowerShell 中文和参数、Android USB 驱动；macOS 记录芯片、安装与签名提示、真实设备连接。没有 macOS 真机记录就填「未验证」。不把模拟器或 Windows mock 当成真机通过。
+
+## 四项观察指标
+
+- 连接完成率 = 实际完成连接的人数 / 已开始安装的人数。
+- 首次任务成功率 = 按预定标准核对通过的人数 / 已尝试首次任务的人数。部分完成和阻塞单列。
+- 七日复用率 = 确认七日内再次使用的人数 / 已满七日且有回访结果的人数；另报失访人数。
+- 重复卡点 = 相同问题影响的人数与出现的步骤；优先修复影响首次成功的问题。
+
+小样本报告同时写分子、分母，不只报百分比。无遥测时使用自愿反馈，不用 Star 或下载次数推测实际留存。
+
+## 发布顺序
+
+下载版验证完成后，先在一个开发者社区发布并集中答疑；收集一轮卡点、修复后再发 X；最后选择一个已核对的真实任务发小红书图文。视频由项目作者自行安排，不再作为本包的交付内容。渠道之间留出处理反馈的时间，不承诺流量或所谓最佳时段。
+
+空白记录表见 pilot.csv、feedback.csv、release-queue.csv。没有填入虚构用户和指标。
+</textarea></section><section class="document" id="comparison-protocol"><div class="section-head"><h2>三方比较协议</h2><a href="comparison-protocol.md" download>下载 Markdown</a><button data-copy="source-comparison-protocol" type="button">复制全文</button></div><details><summary>展开内容</summary><div class="prose"><h1>三方比较：执行协议与记录表</h1>
+<p>目标是判断任务适配程度，不预设赢家。当前没有完成 browser-use、agent-browser、ProfilePilot 的同条件比较，不发布速度、成功率或 token 优势数字。</p>
+<h2>固定条件</h2>
+<p>记录三款工具版本、对应官方入口、同一 Agent／模型版本、系统、Chrome 版本、网络、页面数据、登录前提、任务输入与截止条件。browser-use 使用面向外部 Agent 的 CLI 路径，不能拿它额外的 Python Agent 模型循环与另两者直接比较。每项任务预登记三次；保留失败及人工介入，不能仅选择最好一次。</p>
+<h2>分开比较的任务</h2>
+<table>
+<thead>
+<tr>
+<th>任务</th>
+<th>输入与限制</th>
+<th>成功标准</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>通用网页</td>
+<td>同一公开仓库页面，查找 Windows 安装文件；不下载安装</td>
+<td>名称、原链接与实际页面一致，说明证据日期，会话结束</td>
+</tr>
+<tr>
+<td>专用站点</td>
+<td>相同登录条件、相同闲鱼规格和预算，最多读取 10 条候选、5 条详情；不联系或购买</td>
+<td>原链接可核对，单条／套装有证据，待确认与排除分开；记录筛选是否生效和部分结果</td>
+</tr>
+<tr>
+<td>多目标协作</td>
+<td>两个明确分离的 Profile，分别完成同一只读任务；再尝试进入已占用目标</td>
+<td>独立任务均完成；占用被明确拒绝，原任务不受影响；结束后无残留控制会话</td>
+</tr>
+</tbody></table>
+<p>站点适配任务单独报告：现成适配减少的准备工作可以计入，但不能将该结果推广为所有网页任务都更快。不同工具支持范围不一时填「不适用／未配置」，不能直接当作任务失败。</p>
+<h2>记录与评分</h2>
+<p>记录业务结果、准备用时、执行总用时、人工介入次数、失败／阻塞原因、模型提供方实际返回的 token 用量及证据路径。模型未报告用量时填空，不估算为 0。用时至少区分首次安装与已连接运行。</p>
+<p>现有基准集在 benchmarks/agent-tasks；其中 synthetic、live-site、recovery 分开计分。目前没有两款竞品的现成适配器，本协议和 comparison-runs.csv 是执行准备，不是已跑完的测评。</p>
+<p>依据：<a href="https://docs.browser-use.com/open-source/browser-use-cli">https://docs.browser-use.com/open-source/browser-use-cli</a> 、<a href="https://agent-browser.dev/sessions">https://agent-browser.dev/sessions</a> 、<a href="https://agent-browser.dev/cdp-mode">https://agent-browser.dev/cdp-mode</a> 。执行前重新核对实际版本的官方帮助。</p>
+</div></details><textarea id="source-comparison-protocol" hidden># 三方比较：执行协议与记录表
+
+目标是判断任务适配程度，不预设赢家。当前没有完成 browser-use、agent-browser、ProfilePilot 的同条件比较，不发布速度、成功率或 token 优势数字。
+
+## 固定条件
+
+记录三款工具版本、对应官方入口、同一 Agent／模型版本、系统、Chrome 版本、网络、页面数据、登录前提、任务输入与截止条件。browser-use 使用面向外部 Agent 的 CLI 路径，不能拿它额外的 Python Agent 模型循环与另两者直接比较。每项任务预登记三次；保留失败及人工介入，不能仅选择最好一次。
+
+## 分开比较的任务
+
+| 任务 | 输入与限制 | 成功标准 |
+| --- | --- | --- |
+| 通用网页 | 同一公开仓库页面，查找 Windows 安装文件；不下载安装 | 名称、原链接与实际页面一致，说明证据日期，会话结束 |
+| 专用站点 | 相同登录条件、相同闲鱼规格和预算，最多读取 10 条候选、5 条详情；不联系或购买 | 原链接可核对，单条／套装有证据，待确认与排除分开；记录筛选是否生效和部分结果 |
+| 多目标协作 | 两个明确分离的 Profile，分别完成同一只读任务；再尝试进入已占用目标 | 独立任务均完成；占用被明确拒绝，原任务不受影响；结束后无残留控制会话 |
+
+站点适配任务单独报告：现成适配减少的准备工作可以计入，但不能将该结果推广为所有网页任务都更快。不同工具支持范围不一时填「不适用／未配置」，不能直接当作任务失败。
+
+## 记录与评分
+
+记录业务结果、准备用时、执行总用时、人工介入次数、失败／阻塞原因、模型提供方实际返回的 token 用量及证据路径。模型未报告用量时填空，不估算为 0。用时至少区分首次安装与已连接运行。
+
+现有基准集在 benchmarks/agent-tasks；其中 synthetic、live-site、recovery 分开计分。目前没有两款竞品的现成适配器，本协议和 comparison-runs.csv 是执行准备，不是已跑完的测评。
+
+依据：https://docs.browser-use.com/open-source/browser-use-cli 、https://agent-browser.dev/sessions 、https://agent-browser.dev/cdp-mode 。执行前重新核对实际版本的官方帮助。
+</textarea></section><section class="document" id="repository-metadata"><div class="section-head"><h2>仓库介绍与英文入口</h2><a href="repository-metadata.md" download>下载 Markdown</a><button data-copy="source-repository-metadata" type="button">复制全文</button></div><details><summary>展开内容</summary><div class="prose"><h1>仓库与英文入口</h1>
+<p>以下为准备好的设置值，未修改远程仓库设置。</p>
+<h2>Description</h2>
+<p>Local CLI for coding agents: signed-in Chrome, Electron and Android, with structured site reads and per-target control sessions.</p>
+<h2>Website</h2>
+<p><a href="https://ffffhx.github.io/profilepilot/">https://ffffhx.github.io/profilepilot/</a></p>
+<p>新版首页和中英文上手页已在本地完成，官网需单独手动部署。部署后英文入口为 <a href="https://ffffhx.github.io/profilepilot/site/start.html#english">https://ffffhx.github.io/profilepilot/site/start.html#english</a> 。</p>
+<h2>Topics</h2>
+<p>agent-tools, browser-automation, chrome-extension, electron, android, cli, local-first, typescript, codex, claude-code</p>
+<h2>英文简介</h2>
+<p>ProfilePilot connects your existing coding agent to signed-in Chrome, local Electron apps and Android devices. It provides a CLI, bundled agent instructions, experimental site-specific reads, and control sessions tied to explicit targets. Different agents may work on different Profiles or independent apps. Page content given to an agent may be sent to its model provider.</p>
+<h2>README 上手段落替换稿</h2>
+<p>按项目要求，尚未修改 README.md。下面内容可在明确允许修改 README 后替换首次使用的引导；无需重新编写。</p>
+<ol>
+<li>从 GitHub Releases 下载对应系统和芯片架构的桌面版本，查看该版本说明。</li>
+<li>在“配套工具”连接你的 Chrome Profile。尚无商店链接时，按应用显示的固定目录加载扩展并配对。</li>
+<li>从同一入口安装 ProfilePilot CLI 和配套 Skill，重新打开终端，运行 <code>ppilot --version</code> 与 <code>ppilot browser status</code>。</li>
+<li>在你已有的 Claude Code / Codex 中发送：请读取 ProfilePilot Skill，检查默认 Profile、连接和占用，只读我指定的页面，整理三条要点及原链接，完成后结束会话。</li>
+</ol>
+<p>当前新版路径已落实在官网与 <code>site/start.html</code>。CLI 顶层内置对话帮助没有在这次推广材料任务中调整；可直接使用清楚标注的 <code>ppilot browser</code> 命令。</p>
+</div></details><textarea id="source-repository-metadata" hidden># 仓库与英文入口
+
+以下为准备好的设置值，未修改远程仓库设置。
+
+## Description
+
+Local CLI for coding agents: signed-in Chrome, Electron and Android, with structured site reads and per-target control sessions.
+
+## Website
+
+https://ffffhx.github.io/profilepilot/
+
+新版首页和中英文上手页已在本地完成，官网需单独手动部署。部署后英文入口为 https://ffffhx.github.io/profilepilot/site/start.html#english 。
+
+## Topics
+
+agent-tools, browser-automation, chrome-extension, electron, android, cli, local-first, typescript, codex, claude-code
+
+## 英文简介
+
+ProfilePilot connects your existing coding agent to signed-in Chrome, local Electron apps and Android devices. It provides a CLI, bundled agent instructions, experimental site-specific reads, and control sessions tied to explicit targets. Different agents may work on different Profiles or independent apps. Page content given to an agent may be sent to its model provider.
+
+## README 上手段落替换稿
+
+按项目要求，尚未修改 README.md。下面内容可在明确允许修改 README 后替换首次使用的引导；无需重新编写。
+
+1. 从 GitHub Releases 下载对应系统和芯片架构的桌面版本，查看该版本说明。
+2. 在“配套工具”连接你的 Chrome Profile。尚无商店链接时，按应用显示的固定目录加载扩展并配对。
+3. 从同一入口安装 ProfilePilot CLI 和配套 Skill，重新打开终端，运行 `ppilot --version` 与 `ppilot browser status`。
+4. 在你已有的 Claude Code / Codex 中发送：请读取 ProfilePilot Skill，检查默认 Profile、连接和占用，只读我指定的页面，整理三条要点及原链接，完成后结束会话。
+
+当前新版路径已落实在官网与 `site/start.html`。CLI 顶层内置对话帮助没有在这次推广材料任务中调整；可直接使用清楚标注的 `ppilot browser` 命令。
+</textarea></section><section class="document" id="release-readiness"><div class="section-head"><h2>已完成与待发布事项</h2><a href="release-readiness.md" download>下载 Markdown</a><button data-copy="source-release-readiness" type="button">复制全文</button></div><details><summary>展开内容</summary><div class="prose"><h1>发布核查记录</h1>
+<p>核查日期：2026-11-15。以下区分本地完成和对外状态，不代表已经发布。</p>
+<h2>本地已完成</h2>
+<ul>
+<li>首页改为“连接扩展 → 安装 CLI 与 Skill → 使用已有 Agent”，补齐站点能力范围、中英文上手页、首次任务和三个可复制任务。</li>
+<li>V2EX、X 英文串、X 中文单条、小红书图文正文及常见问题答复。</li>
+<li>社交封面、上手图、小红书六张流程图、商店宣传图与当前扩展 ZIP；图解标注为图解，不替代真实任务证据。</li>
+<li>首次使用与网站读取反馈表单，试用邀请稿、跨系统验收表、空白记录表和三方比较协议。</li>
+<li>发布流程失败的三项测试已修正；24 项相关测试在当前 Windows 工作区通过。</li>
+</ul>
+<h2>发布流水线修复</h2>
+<p>最近失败运行：<a href="https://github.com/ffffhx/profilepilot/actions/runs/43203287346">43203287346</a>。Windows 测试失败，macOS 作业随后取消，发布步骤跳过。</p>
+<ol>
+<li><code>desktop-window-state.test.js</code> 的源码片段依赖 LF。Windows CRLF 下未匹配到分支，误报 UIA 调用次数为零。读取后统一换行，并检查分支边界。</li>
+<li><code>shell-integration.test.js</code> 把 CLI 版本固定成 0.1.0，发布自动升级版本后失败。改为对照当前 package.json。</li>
+<li>冻结的性能基准脚本按字节验证哈希，Windows checkout 换行转换使哈希变化。<code>.gitattributes</code> 对该文件固定 LF，保持原始基准内容与预期哈希。</li>
+</ol>
+<p>验证：<code>node --test tests/desktop-window-state.test.js tests/windows-sampler-harness.test.js tests/shell-integration.test.js</code>，24 通过、0 失败。未执行完整 CI 或 macOS 真机验证。这些是测试与检出规则修复，未修改各 CLI 的控制行为。</p>
+<h2>材料与网页验收</h2>
+<ul>
+<li>本地 53 个页面、文件、配图及字体链接返回 200。</li>
+<li>新首页、上手页与材料包检查了 1440 宽桌面和 390 宽手机视口；正文没有横向溢出，长表格在自己的容器内滚动。</li>
+<li>官网四个流程页签的选中状态、标题与 ARIA 关联一致；上手页五个复制按钮传给剪贴板接口的文字与相应任务一致。复制测试替换了页面内的写入接口，没有改写用户剪贴板；未将此当作系统剪贴板端到端验证。</li>
+<li>X 的六条英文与一条中文分别通过字符上限检查；静态 PNG 尺寸、扩展资源与 manifest 权限对应关系已核对。</li>
+<li>GitHub 工作流与反馈表单 YAML 解析通过，网页及材料脚本语法检查通过。</li>
+<li>样式扫描已运行。首页按根路径部署，扫描器误解析为 site/site/styles.css；部分旧主题装饰与渐变触发提示。以实际浏览器截图、计算样式和宽度核对新增内容，未把扫描提示全部清零当作交付条件。</li>
+</ul>
+<h2>仍需外部条件</h2>
+<table>
+<thead>
+<tr>
+<th>项目</th>
+<th>当前事实</th>
+<th>放行条件</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>下载版</td>
+<td>latest 的桌面资产仍为 2026-10-09</td>
+<td>提交经检查的修复，远程 CI 通过，并从新下载包复现首次任务</td>
+</tr>
+<tr>
+<td>官网</td>
+<td>新版在本地预览，未部署；拟用扩展隐私页当前返回 404</td>
+<td>单独授权手动 deploy-pages.yml 后验证线上链接与缓存</td>
+</tr>
+<tr>
+<td>Chrome Web Store</td>
+<td>已有 ZIP 和文案，账号、真实 item ID 与审核结果未确认</td>
+<td>注册账号，建立草稿，对齐 ID / key，完成真实运行截图与跨系统连接核验，再提交</td>
+</tr>
+<tr>
+<td>新用户试用</td>
+<td>邀请与记录表已备，没有伪造试用者或成绩</td>
+<td>获得邀请发送授权及参与者，自下载安装并按表记录</td>
+</tr>
+<tr>
+<td>macOS</td>
+<td>已列平台差异，暂无此次真机记录</td>
+<td>Apple Silicon / Intel 按适用下载包实际执行</td>
+</tr>
+<tr>
+<td>三方比较</td>
+<td>有协议和空白表，没有比较结论</td>
+<td>固定工具、模型、任务和条件，实际跑完，保留失败</td>
+</tr>
+<tr>
+<td>README / 仓库设置</td>
+<td>已备替换稿和设置值</td>
+<td>README 需明确修改指示；远程元信息变更与公开帖子尚未执行</td>
+</tr>
+</tbody></table>
+<p>视频由项目作者自行处理，已从本轮交付中移出。不依赖视频也可使用本材料包发布文字与图解，但不能把图解当作实录证明。</p>
+<h2>发布顺序</h2>
+<p>先验证新下载版与首次任务 → 邀请少量试用者 → 修正重复阻塞 → 发布 V2EX 文章 → 用同一事实口径发 X → 发布小红书图文。每条发布后的真实 URL 和反馈记录在 release-queue.csv，不预填为“已发布”。</p>
+</div></details><textarea id="source-release-readiness" hidden># 发布核查记录
+
+核查日期：2026-11-15。以下区分本地完成和对外状态，不代表已经发布。
+
+## 本地已完成
+
+- 首页改为“连接扩展 → 安装 CLI 与 Skill → 使用已有 Agent”，补齐站点能力范围、中英文上手页、首次任务和三个可复制任务。
+- V2EX、X 英文串、X 中文单条、小红书图文正文及常见问题答复。
+- 社交封面、上手图、小红书六张流程图、商店宣传图与当前扩展 ZIP；图解标注为图解，不替代真实任务证据。
+- 首次使用与网站读取反馈表单，试用邀请稿、跨系统验收表、空白记录表和三方比较协议。
+- 发布流程失败的三项测试已修正；24 项相关测试在当前 Windows 工作区通过。
+
+## 发布流水线修复
+
+最近失败运行：[43203287346](https://github.com/ffffhx/profilepilot/actions/runs/43203287346)。Windows 测试失败，macOS 作业随后取消，发布步骤跳过。
+
+1. `desktop-window-state.test.js` 的源码片段依赖 LF。Windows CRLF 下未匹配到分支，误报 UIA 调用次数为零。读取后统一换行，并检查分支边界。
+2. `shell-integration.test.js` 把 CLI 版本固定成 0.1.0，发布自动升级版本后失败。改为对照当前 package.json。
+3. 冻结的性能基准脚本按字节验证哈希，Windows checkout 换行转换使哈希变化。`.gitattributes` 对该文件固定 LF，保持原始基准内容与预期哈希。
+
+验证：`node --test tests/desktop-window-state.test.js tests/windows-sampler-harness.test.js tests/shell-integration.test.js`，24 通过、0 失败。未执行完整 CI 或 macOS 真机验证。这些是测试与检出规则修复，未修改各 CLI 的控制行为。
+
+## 材料与网页验收
+
+- 本地 53 个页面、文件、配图及字体链接返回 200。
+- 新首页、上手页与材料包检查了 1440 宽桌面和 390 宽手机视口；正文没有横向溢出，长表格在自己的容器内滚动。
+- 官网四个流程页签的选中状态、标题与 ARIA 关联一致；上手页五个复制按钮传给剪贴板接口的文字与相应任务一致。复制测试替换了页面内的写入接口，没有改写用户剪贴板；未将此当作系统剪贴板端到端验证。
+- X 的六条英文与一条中文分别通过字符上限检查；静态 PNG 尺寸、扩展资源与 manifest 权限对应关系已核对。
+- GitHub 工作流与反馈表单 YAML 解析通过，网页及材料脚本语法检查通过。
+- 样式扫描已运行。首页按根路径部署，扫描器误解析为 site/site/styles.css；部分旧主题装饰与渐变触发提示。以实际浏览器截图、计算样式和宽度核对新增内容，未把扫描提示全部清零当作交付条件。
+
+## 仍需外部条件
+
+| 项目 | 当前事实 | 放行条件 |
+| --- | --- | --- |
+| 下载版 | latest 的桌面资产仍为 2026-10-09 | 提交经检查的修复，远程 CI 通过，并从新下载包复现首次任务 |
+| 官网 | 新版在本地预览，未部署；拟用扩展隐私页当前返回 404 | 单独授权手动 deploy-pages.yml 后验证线上链接与缓存 |
+| Chrome Web Store | 已有 ZIP 和文案，账号、真实 item ID 与审核结果未确认 | 注册账号，建立草稿，对齐 ID / key，完成真实运行截图与跨系统连接核验，再提交 |
+| 新用户试用 | 邀请与记录表已备，没有伪造试用者或成绩 | 获得邀请发送授权及参与者，自下载安装并按表记录 |
+| macOS | 已列平台差异，暂无此次真机记录 | Apple Silicon / Intel 按适用下载包实际执行 |
+| 三方比较 | 有协议和空白表，没有比较结论 | 固定工具、模型、任务和条件，实际跑完，保留失败 |
+| README / 仓库设置 | 已备替换稿和设置值 | README 需明确修改指示；远程元信息变更与公开帖子尚未执行 |
+
+视频由项目作者自行处理，已从本轮交付中移出。不依赖视频也可使用本材料包发布文字与图解，但不能把图解当作实录证明。
+
+## 发布顺序
+
+先验证新下载版与首次任务 → 邀请少量试用者 → 修正重复阻塞 → 发布 V2EX 文章 → 用同一事实口径发 X → 发布小红书图文。每条发布后的真实 URL 和反馈记录在 release-queue.csv，不预填为“已发布”。
+</textarea></section><section><h2>安装包与空白记录表</h2><ul><li><a href="store/profilepilot-extension-0.2.18.zip" download>扩展 0.2.18 ZIP</a> · <a href="store/validation.json">打包校验</a></li><li><a href="store/description.zh-CN.txt">商店文案</a> · <a href="store/permissions.zh-CN.json">权限理由</a> · <a href="store/privacy.zh-CN.md">隐私说明</a></li><li><a href="store/promo-small.png" download>440 × 280 宣传图</a> · <a href="store/promo-marquee.png" download>1400 × 560 宣传图</a> · <a href="store/icon-128.png" download>128 图标</a></li><li><a href="pilot.csv" download>试用记录 CSV</a> · <a href="feedback.csv" download>反馈 CSV</a> · <a href="comparison-runs.csv" download>比较记录 CSV</a> · <a href="release-queue.csv" download>发布队列 CSV</a></li><li><a href="../../.github/ISSUE_TEMPLATE/first-task.yml">首次使用反馈表单</a> · <a href="../../.github/ISSUE_TEMPLATE/site-read.yml">站点读取反馈表单</a></li></ul></section><footer>没有代发帖子、发送邀请、购买账号或部署官网。视频由你自行安排。<a href="../promotion-plan.html">查看原推广方案</a></footer></main><div id="copy-status" role="status" aria-live="polite"></div><script src="launch.js"></script></body></html>

@@ -54,11 +54,78 @@ export async function readSitePage(plan: SitePlan): Promise<SiteResult> {
       for (const [k, child] of Object.entries(v)) if (k !== key && child && typeof child === "object") pending.push(child); }
     return found;
   };
+  const readPath = (obj: any, dotPath?: string): any => {
+    if (!dotPath) return obj;
+    return dotPath.split(".").reduce((cur, part) => (cur && typeof cur === "object" ? cur[part] : undefined), obj);
+  };
+  const interpolateEndpoint = (tpl: string) =>
+    tpl.replace(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g, (_m, k: string) =>
+      p[k] === undefined || p[k] === null ? "" : encodeURIComponent(String(p[k])));
   try {
     access(location.origin);
     if (!plan.hosts.includes(location.hostname) || location.protocol !== "https:") fail("ORIGIN_MISMATCH", "当前页面已离开适配器网站；停止读取。");
     if (/passport|\/sorry|\/antispider/i.test(location.pathname) || !plan.reuseOrigin && /\/signin|\/login/.test(location.pathname)) fail("ACCESS_BLOCKED", "当前页面要求登录或验证。");
-    if (op === "boss.search") {
+    if (plan.externalExtractor) {
+      const ext = plan.externalExtractor;
+      if (ext.kind === "dom") {
+        result.source.method = "dom";
+        if (ext.blockedPattern && new RegExp(ext.blockedPattern, "i").test(document.body?.innerText || "")) {
+          fail("ACCESS_BLOCKED", "页面提示需要登录或完成验证。");
+        }
+        const roots = ext.itemsSelector && ext.itemsSelector !== "document"
+          ? [...document.querySelectorAll(ext.itemsSelector)]
+          : [document.documentElement || document.body];
+        if (!roots.length) {
+          if (ext.emptySelector && document.querySelector(ext.emptySelector)) {
+            result.status = "empty";
+            return result;
+          }
+          fail("SCHEMA_CHANGED", "未匹配到外部适配器指定的列表节点或明确空状态。");
+        }
+        const extractField = (node: any, spec: string | { selector?: string; attr?: string; mode?: string }) => {
+          const cfg = typeof spec === "string" ? { selector: spec, mode: "text" } : spec;
+          const el = cfg.selector ? node?.querySelector?.(cfg.selector) : node;
+          if (!el) return null;
+          if (cfg.attr) {
+            const rawAttr = el.getAttribute?.(cfg.attr);
+            return cfg.mode === "href" ? href(rawAttr) : rawAttr ?? null;
+          }
+          if (cfg.mode === "href") return href(el.getAttribute?.("href") ?? el.href);
+          if (cfg.mode === "html") return String(el.innerHTML || "").trim();
+          const rawText = String(el.textContent || "").trim();
+          if (cfg.mode === "number") {
+            const n = Number(rawText.replace(/[^\d.-]/g, ""));
+            return Number.isFinite(n) ? n : null;
+          }
+          return rawText;
+        };
+        list(roots.map((node) => {
+          const item: Record<string, unknown> = {};
+          for (const [fieldKey, fieldSpec] of Object.entries(ext.fields)) {
+            item[fieldKey] = extractField(node, fieldSpec);
+          }
+          return item;
+        }));
+        const more = ext.nextPageSelector ? Boolean(document.querySelector(ext.nextPageSelector)) : false;
+        pageMore(more, more && typeof p.page === "number" ? { ...p, page: p.page + 1 } : null);
+      } else {
+        result.source.method = "browser-fetch";
+        const payload = await fetchJson(interpolateEndpoint(ext.endpoint));
+        const rawItems = ext.itemsPath ? readPath(payload, ext.itemsPath) : payload;
+        const arr = Array.isArray(rawItems) ? rawItems : rawItems && typeof rawItems === "object" ? [rawItems] : fail("SCHEMA_CHANGED", "外部适配器接口未返回可读取的数据结构。");
+        list(arr.map((row: any) => {
+          if (!ext.fields || !Object.keys(ext.fields).length) return row && typeof row === "object" ? row : { value: row };
+          const mapped: Record<string, unknown> = {};
+          for (const [fieldKey, fieldPath] of Object.entries(ext.fields)) {
+            mapped[fieldKey] = readPath(row, fieldPath) ?? null;
+          }
+          return mapped;
+        }));
+        const hasMoreVal = ext.hasMorePath ? readPath(payload, ext.hasMorePath) : false;
+        const more = typeof hasMoreVal === "boolean" ? hasMoreVal : Boolean(hasMoreVal);
+        pageMore(more, more && typeof p.page === "number" ? { ...p, page: p.page + 1 } : null);
+      }
+    } else if (op === "boss.search") {
       const d = checkCode(await fetchJson(endpoint("/wapi/zpgeek/search/joblist.json", { scene: 1, query: p.query, city: p.city, page: p.page, pageSize: p.limit })));
       const jobs = array(d.zpData?.jobList);
       list(jobs.map(j => ({ id: String(j.encryptJobId), securityId: j.securityId, title: text(j.jobName), salary: j.salaryDesc,

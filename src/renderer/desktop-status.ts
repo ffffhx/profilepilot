@@ -1,5 +1,10 @@
 import type { DesktopApi, DesktopStatus } from '../shared/desktop';
 
+export function formatDesktopStopShortcut(platform?: string): string {
+  const effective = platform || (typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform) ? 'darwin' : 'win32');
+  return effective === 'darwin' ? 'Cmd+Option+Esc' : 'Ctrl+Alt+Esc';
+}
+
 // Push changes invalidate in-flight reads so a stale active reply cannot
 // overwrite a takeover/stop that arrived while that read was pending.
 export function followDesktopStatus(api: Pick<DesktopApi, 'status' | 'onChanged'>,

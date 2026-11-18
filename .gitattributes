@@ -1,0 +1,2 @@
+# Keep the frozen performance baseline byte-identical on Windows and macOS.
+scripts/e2e/windows-sampler-legacy-platform.ts text eol=lf

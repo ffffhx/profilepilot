@@ -1,6 +1,10 @@
 import { existsSync } from "node:fs";
+import http from "node:http";
+import https from "node:https";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import tls from "node:tls";
 import type {
   BifrostActiveRuleInfo,
   BifrostPortBindingInfo,
@@ -10,7 +14,7 @@ import type {
   ProfileUpstreamProxyConfig
 } from "../shared/types";
 import { ProfileManagerError } from "./profile-manager-error";
-import { normalizeProxyEndpoint, parseProxyEndpoint, probeTcp } from "./proxy-health";
+import { normalizeProxyEndpoint, parseProxyEndpoint, probeTcp, type ParsedProxyEndpoint } from "./proxy-health";
 import { spawnPortableCommand } from "./portable-command";
 
 const BIFROST_COMMAND_TIMEOUT_MS = 6_000;
@@ -146,20 +150,43 @@ function normalizeBypassList(value: unknown): string | null {
   return entries.length ? entries.join(",") : null;
 }
 
-export function bifrostProxyChromeArgs(config: ProfileBifrostProxyConfig | null | undefined): string[] {
-  return config ? [`--proxy-server=http://127.0.0.1:${config.listenerPort}`] : [];
+export const PROXY_LEAK_PROTECTION_CHROME_ARGS = [
+  "--disable-quic",
+  "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"
+] as const;
+
+export interface ProxyAuthForwarderHandle {
+  host: "127.0.0.1";
+  port: number;
+  serverUrl: string;
+  close: () => Promise<void>;
 }
 
-// 直连上游模式的 Chrome 参数：--proxy-server 指向上游入口，可选 --proxy-bypass-list。
-export function upstreamProxyChromeArgs(config: ProfileUpstreamProxyConfig | null | undefined): string[] {
+const activeProxyAuthForwarders = new Map<string, Promise<ProxyAuthForwarderHandle>>();
+
+export function bifrostProxyChromeArgs(config: ProfileBifrostProxyConfig | null | undefined): string[] {
+  return config
+    ? [`--proxy-server=http://127.0.0.1:${config.listenerPort}`, ...PROXY_LEAK_PROTECTION_CHROME_ARGS]
+    : [];
+}
+
+// 直连上游模式的 Chrome 参数：--proxy-server 指向上游入口，可选 --proxy-bypass-list，附带防 UDP/QUIC 泄漏参数。
+export function upstreamProxyChromeArgs(
+  config: ProfileUpstreamProxyConfig | null | undefined,
+  overrideServer?: string
+): string[] {
   if (!config) return [];
   const parsed = parseProxyEndpoint(config.server);
   if (!parsed) return [];
-  const server = parsed.scheme === "http" ? `${parsed.host}:${parsed.port}` : `${parsed.scheme}://${parsed.host}:${parsed.port}`;
+  const chromeScheme = parsed.scheme === "socks5h" ? "socks5" : parsed.scheme;
+  const server =
+    overrideServer ||
+    (chromeScheme === "http" ? `${parsed.host}:${parsed.port}` : `${chromeScheme}://${parsed.host}:${parsed.port}`);
   const args = [`--proxy-server=${server}`];
   if (config.bypassList) {
     args.push(`--proxy-bypass-list=${config.bypassList}`);
   }
+  args.push(...PROXY_LEAK_PROTECTION_CHROME_ARGS);
   return args;
 }
 
@@ -168,11 +195,405 @@ export function directConnectionChromeArgs(enabled: boolean | null | undefined):
   return enabled ? ["--no-proxy-server"] : [];
 }
 
-// 启动前对直连上游做 TCP 探活；不可达抛 UPSTREAM_PROXY_UNREACHABLE，与 Bifrost 逃生口共享错误处理。
+// 启动前对直连上游做 TCP 探活；含账号密码时启动本机 loopback 认证转发器并注入 Proxy-Authorization。
 export async function ensureUpstreamProxy(config: ProfileUpstreamProxyConfig): Promise<string[]> {
   const validated = validateUpstreamProxyConfig(config);
   await assertUpstreamReachable(validated.server);
+  const parsed = parseProxyEndpoint(validated.server);
+  if (parsed && (parsed.username !== undefined || parsed.password !== undefined)) {
+    const forwarder = await ensureProxyAuthForwarder(parsed);
+    return upstreamProxyChromeArgs(validated, `127.0.0.1:${forwarder.port}`);
+  }
   return upstreamProxyChromeArgs(validated);
+}
+
+export async function ensureProxyAuthForwarder(
+  endpointInput: string | ParsedProxyEndpoint
+): Promise<ProxyAuthForwarderHandle> {
+  const parsed = typeof endpointInput === "string" ? parseProxyEndpoint(endpointInput) : endpointInput;
+  if (!parsed) {
+    throw new ProfileManagerError("上游代理地址无法解析，无法建立认证转发。", "INVALID_UPSTREAM_PROXY");
+  }
+  const cacheKey = normalizeProxyEndpoint(
+    `${parsed.scheme}://${encodeURIComponent(parsed.username || "")}${parsed.password ? `:${encodeURIComponent(parsed.password)}` : ""}@${parsed.host}:${parsed.port}`
+  ) || `${parsed.scheme}://${parsed.host}:${parsed.port}`;
+
+  const existing = activeProxyAuthForwarders.get(cacheKey);
+  if (existing) {
+    return existing;
+  }
+
+  const creating = startProxyAuthForwarder(parsed, () => {
+    activeProxyAuthForwarders.delete(cacheKey);
+  });
+  activeProxyAuthForwarders.set(cacheKey, creating);
+  try {
+    return await creating;
+  } catch (error) {
+    activeProxyAuthForwarders.delete(cacheKey);
+    throw error;
+  }
+}
+
+export async function closeAllProxyAuthForwarders(): Promise<void> {
+  const handles = await Promise.allSettled([...activeProxyAuthForwarders.values()]);
+  activeProxyAuthForwarders.clear();
+  await Promise.all(
+    handles.map((entry) => (entry.status === "fulfilled" ? entry.value.close().catch(() => undefined) : Promise.resolve()))
+  );
+}
+
+function startProxyAuthForwarder(
+  upstream: ParsedProxyEndpoint,
+  onClosed: () => void
+): Promise<ProxyAuthForwarderHandle> {
+  const upstreamHost = upstream.host.replace(/^\[|\]$/g, "");
+  const authHeader = `Basic ${Buffer.from(`${upstream.username || ""}:${upstream.password || ""}`, "utf8").toString("base64")}`;
+  const isSocks = upstream.scheme === "socks5" || upstream.scheme === "socks5h";
+  const sockets = new Set<net.Socket>();
+
+  const trackSocket = (socket: net.Socket): void => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+  };
+
+  const server = http.createServer((clientReq, clientRes) => {
+    if (clientReq.socket) trackSocket(clientReq.socket);
+    const failResponse = (statusCode = 502, message = "Bad Gateway"): void => {
+      if (!clientRes.headersSent) {
+        clientRes.writeHead(statusCode, { "Content-Type": "text/plain; charset=utf-8" });
+      }
+      if (!clientRes.writableEnded) {
+        clientRes.end(message);
+      }
+    };
+
+    if (isSocks) {
+      let targetUrl: URL;
+      try {
+        targetUrl = new URL(clientReq.url || "");
+      } catch {
+        failResponse(400, "Invalid target URL");
+        return;
+      }
+      const targetPort = Number(targetUrl.port || (targetUrl.protocol === "https:" ? 443 : 80));
+      const targetHost = targetUrl.hostname.replace(/^\[|\]$/g, "");
+      void connectSocks5Tunnel(upstreamHost, upstream.port, upstream.username || "", upstream.password || "", targetHost, targetPort)
+        .then((tunnel) => {
+          trackSocket(tunnel);
+          const agent = new http.Agent({ keepAlive: false });
+          (agent as unknown as { createConnection: () => net.Socket }).createConnection = () => tunnel;
+          const forwardHeaders = { ...clientReq.headers };
+          delete forwardHeaders["proxy-authorization"];
+          delete forwardHeaders["proxy-connection"];
+          const proxyReq = (targetUrl.protocol === "https:" ? https : http).request(
+            {
+              protocol: targetUrl.protocol,
+              hostname: targetHost,
+              port: targetPort,
+              method: clientReq.method,
+              path: `${targetUrl.pathname || "/"}${targetUrl.search || ""}`,
+              headers: forwardHeaders,
+              agent: targetUrl.protocol === "https:" ? undefined : agent,
+              ...(targetUrl.protocol === "https:"
+                ? { createConnection: () => tls.connect({ socket: tunnel, servername: targetHost }) }
+                : {})
+            },
+            (proxyRes) => {
+              clientRes.writeHead(proxyRes.statusCode || 502, proxyRes.headers);
+              proxyRes.pipe(clientRes);
+            }
+          );
+          proxyReq.on("error", () => {
+            tunnel.destroy();
+            failResponse(502, "Upstream SOCKS5 request failed");
+          });
+          clientReq.on("error", () => {
+            proxyReq.destroy();
+            tunnel.destroy();
+          });
+          clientReq.pipe(proxyReq);
+        })
+        .catch(() => failResponse(502, "Upstream SOCKS5 tunnel failed"));
+      return;
+    }
+
+    const headers: http.OutgoingHttpHeaders = {
+      ...clientReq.headers,
+      "proxy-authorization": authHeader
+    };
+    const transport = upstream.scheme === "https" ? https : http;
+    const upstreamReq = transport.request(
+      {
+        host: upstreamHost,
+        port: upstream.port,
+        method: clientReq.method,
+        path: clientReq.url,
+        headers
+      },
+      (upstreamRes) => {
+        clientRes.writeHead(upstreamRes.statusCode || 502, upstreamRes.headers);
+        upstreamRes.pipe(clientRes);
+      }
+    );
+    upstreamReq.on("error", () => failResponse(502, "Upstream proxy request failed"));
+    clientReq.on("error", () => upstreamReq.destroy());
+    clientReq.pipe(upstreamReq);
+  });
+
+  server.on("connect", (req, clientSocket, head) => {
+    const netClient = clientSocket as net.Socket;
+    trackSocket(netClient);
+    netClient.on("error", () => netClient.destroy());
+
+    const rawTarget = String(req.url || "");
+    const lastColon = rawTarget.lastIndexOf(":");
+    const targetHost = (lastColon > 0 ? rawTarget.slice(0, lastColon) : rawTarget).replace(/^\[|\]$/g, "");
+    const targetPort = lastColon > 0 ? Number(rawTarget.slice(lastColon + 1)) : 443;
+    if (!targetHost || !Number.isInteger(targetPort) || targetPort < 1 || targetPort > 65535) {
+      netClient.end("HTTP/1.1 400 Bad Request\r\n\r\n");
+      return;
+    }
+
+    if (isSocks) {
+      void connectSocks5Tunnel(upstreamHost, upstream.port, upstream.username || "", upstream.password || "", targetHost, targetPort)
+        .then((upstreamSocket) => {
+          trackSocket(upstreamSocket);
+          upstreamSocket.on("error", () => {
+            netClient.destroy();
+            upstreamSocket.destroy();
+          });
+          netClient.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+          if (head && head.length > 0) {
+            upstreamSocket.write(head);
+          }
+          upstreamSocket.pipe(netClient);
+          netClient.pipe(upstreamSocket);
+        })
+        .catch(() => {
+          if (!netClient.destroyed) {
+            netClient.end("HTTP/1.1 502 Bad Gateway\r\n\r\n");
+          }
+        });
+      return;
+    }
+
+    const upstreamSocket: net.Socket =
+      upstream.scheme === "https"
+        ? tls.connect({ host: upstreamHost, port: upstream.port, servername: upstreamHost })
+        : net.connect(upstream.port, upstreamHost);
+    trackSocket(upstreamSocket);
+
+    let settled = false;
+    let headerBuf = Buffer.alloc(0);
+
+    const cleanupError = (): void => {
+      if (!settled) {
+        settled = true;
+        if (!netClient.destroyed) {
+          netClient.end("HTTP/1.1 502 Bad Gateway\r\n\r\n");
+        }
+      }
+      netClient.destroy();
+      upstreamSocket.destroy();
+    };
+
+    upstreamSocket.on("error", cleanupError);
+
+    const onConnectEstablished = (): void => {
+      const hostHeader = req.headers.host || rawTarget;
+      upstreamSocket.write(
+        `CONNECT ${rawTarget} HTTP/1.1\r\n` +
+          `Host: ${hostHeader}\r\n` +
+          `Proxy-Authorization: ${authHeader}\r\n` +
+          `Proxy-Connection: keep-alive\r\n\r\n`
+      );
+    };
+
+    if (upstream.scheme === "https") {
+      upstreamSocket.once("secureConnect", onConnectEstablished);
+    } else {
+      upstreamSocket.once("connect", onConnectEstablished);
+    }
+
+    const onData = (chunk: Buffer): void => {
+      headerBuf = Buffer.concat([headerBuf, chunk]);
+      const headerEnd = headerBuf.indexOf("\r\n\r\n");
+      if (headerEnd === -1) {
+        if (headerBuf.length > 32 * 1024) {
+          upstreamSocket.off("data", onData);
+          cleanupError();
+        }
+        return;
+      }
+      upstreamSocket.off("data", onData);
+      settled = true;
+      const headerText = headerBuf.subarray(0, headerEnd).toString("latin1");
+      const remainder = headerBuf.subarray(headerEnd + 4);
+      const statusLine = headerText.split("\r\n")[0] || "";
+      const statusMatch = statusLine.match(/^HTTP\/1\.[01]\s+(\d{3})/i);
+      const statusCode = statusMatch ? Number(statusMatch[1]) : 502;
+      if (statusCode !== 200) {
+        netClient.end(`HTTP/1.1 ${statusCode} Proxy Tunnel Rejected\r\n\r\n`);
+        upstreamSocket.destroy();
+        return;
+      }
+      netClient.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      if (remainder.length > 0) {
+        netClient.write(remainder);
+      }
+      if (head && head.length > 0) {
+        upstreamSocket.write(head);
+      }
+      upstreamSocket.pipe(netClient);
+      netClient.pipe(upstreamSocket);
+    };
+    upstreamSocket.on("data", onData);
+  });
+
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      server.unref();
+      const address = server.address() as net.AddressInfo;
+      let closed = false;
+      const close = (): Promise<void> => {
+        if (closed) return Promise.resolve();
+        closed = true;
+        onClosed();
+        for (const s of sockets) s.destroy();
+        sockets.clear();
+        return new Promise((res) => server.close(() => res()));
+      };
+      server.once("close", () => {
+        if (!closed) {
+          closed = true;
+          onClosed();
+        }
+      });
+      resolve({
+        host: "127.0.0.1",
+        port: address.port,
+        serverUrl: `http://127.0.0.1:${address.port}`,
+        close
+      });
+    });
+  });
+}
+
+function connectSocks5Tunnel(
+  proxyHost: string,
+  proxyPort: number,
+  username: string,
+  password: string,
+  targetHost: string,
+  targetPort: number
+): Promise<net.Socket> {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(proxyPort, proxyHost);
+    let settled = false;
+    let buffer = Buffer.alloc(0);
+    let stage: "greeting" | "auth" | "connect" = "greeting";
+
+    const fail = (err: Error): void => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      reject(err);
+    };
+
+    const timer = setTimeout(() => fail(new Error("SOCKS5 handshake timeout")), 8_000);
+    timer.unref?.();
+
+    const sendConnect = (): void => {
+      stage = "connect";
+      const hostBytes = Buffer.from(targetHost, "utf8");
+      if (hostBytes.length > 255) {
+        fail(new Error("Target hostname too long for SOCKS5"));
+        return;
+      }
+      const req = Buffer.alloc(4 + 1 + hostBytes.length + 2);
+      req[0] = 0x05;
+      req[1] = 0x01; // CONNECT
+      req[2] = 0x00;
+      req[3] = 0x03; // DOMAINNAME (remote DNS resolution, safe for socks5 & socks5h)
+      req[4] = hostBytes.length;
+      hostBytes.copy(req, 5);
+      req.writeUInt16BE(targetPort, 5 + hostBytes.length);
+      socket.write(req);
+    };
+
+    socket.once("error", fail);
+    socket.once("close", () => fail(new Error("SOCKS5 socket closed during handshake")));
+    socket.once("connect", () => {
+      const hasAuth = Boolean(username || password);
+      socket.write(hasAuth ? Buffer.from([0x05, 0x02, 0x00, 0x02]) : Buffer.from([0x05, 0x01, 0x00]));
+    });
+
+    const onData = (chunk: Buffer): void => {
+      buffer = Buffer.concat([buffer, chunk]);
+      while (buffer.length >= 2) {
+        if (stage === "greeting") {
+          if (buffer[0] !== 0x05) return fail(new Error("Invalid SOCKS5 version"));
+          const method = buffer[1];
+          buffer = buffer.subarray(2);
+          if (method === 0x00) {
+            sendConnect();
+          } else if (method === 0x02) {
+            stage = "auth";
+            const uBytes = Buffer.from(username, "utf8");
+            const pBytes = Buffer.from(password, "utf8");
+            if (uBytes.length > 255 || pBytes.length > 255) return fail(new Error("SOCKS5 credentials exceed 255 bytes"));
+            const authReq = Buffer.concat([
+              Buffer.from([0x01, uBytes.length]),
+              uBytes,
+              Buffer.from([pBytes.length]),
+              pBytes
+            ]);
+            socket.write(authReq);
+          } else {
+            return fail(new Error("SOCKS5 authentication method rejected"));
+          }
+          continue;
+        }
+        if (stage === "auth") {
+          if (buffer[1] !== 0x00) return fail(new Error("SOCKS5 username/password authentication failed"));
+          buffer = buffer.subarray(2);
+          sendConnect();
+          continue;
+        }
+        if (stage === "connect") {
+          if (buffer.length < 4) return;
+          if (buffer[0] !== 0x05 || buffer[1] !== 0x00) {
+            return fail(new Error(`SOCKS5 CONNECT failed with code ${buffer[1]}`));
+          }
+          const atyp = buffer[3];
+          let replyLen = 0;
+          if (atyp === 0x01) replyLen = 4 + 4 + 2;
+          else if (atyp === 0x04) replyLen = 4 + 16 + 2;
+          else if (atyp === 0x03) {
+            if (buffer.length < 5) return;
+            replyLen = 4 + 1 + buffer[4] + 2;
+          } else {
+            return fail(new Error("Unknown SOCKS5 address type"));
+          }
+          if (buffer.length < replyLen) return;
+          const leftover = buffer.subarray(replyLen);
+          clearTimeout(timer);
+          socket.off("data", onData);
+          socket.off("error", fail);
+          settled = true;
+          if (leftover.length > 0) {
+            socket.unshift(leftover);
+          }
+          resolve(socket);
+          return;
+        }
+      }
+    };
+    socket.on("data", onData);
+  });
 }
 
 export async function ensureBifrostMainProxy(
@@ -210,7 +631,8 @@ async function assertUpstreamReachable(endpoint: string): Promise<void> {
   if (!parsed) {
     throw new ProfileManagerError(`上游代理地址无法解析：${endpoint}`, "INVALID_UPSTREAM_PROXY");
   }
-  if (!(await probeTcp(parsed.host, parsed.port))) {
+  const probeHost = parsed.host.replace(/^\[|\]$/g, "");
+  if (!(await probeTcp(probeHost, parsed.port))) {
     throw new ProfileManagerError(
       `上游代理 ${parsed.host}:${parsed.port} 当前不可达。请确认 Clash Verge（或对应代理）已开启并在该端口监听。`,
       "UPSTREAM_PROXY_UNREACHABLE"
@@ -636,7 +1058,7 @@ async function probeUpstreamEndpoints(endpoints: string[]): Promise<Record<strin
   const results = await Promise.all(
     normalized.map(async (endpoint) => {
       const parsed = parseProxyEndpoint(endpoint)!;
-      return [endpoint, await probeTcp(parsed.host, parsed.port)] as const;
+      return [endpoint, await probeTcp(parsed.host.replace(/^\[|\]$/g, ""), parsed.port)] as const;
     })
   );
   return Object.fromEntries(results);
@@ -854,17 +1276,34 @@ export function resolveBifrostBinary(env: NodeJS.ProcessEnv): string {
     return env.BIFROST_BINARY.trim();
   }
 
-  const executable = process.platform === "win32" ? "bifrost.exe" : "bifrost";
-  const pathBinary = executableFromPath(executable, env.PATH);
+  const isWin = process.platform === "win32";
+  const executable = isWin ? "bifrost.exe" : "bifrost";
+  const pathValue = env.PATH ?? env.Path ?? env.path;
+  const pathBinary =
+    executableFromPath(executable, pathValue) ||
+    (isWin ? executableFromPath("bifrost.cmd", pathValue) : null);
   if (pathBinary) {
     return pathBinary;
   }
+
+  const home = os.homedir();
+  const appData = env.APPDATA?.trim() || (isWin ? path.join(home, "AppData", "Roaming") : "");
+  const localAppData = env.LOCALAPPDATA?.trim() || (isWin ? path.join(home, "AppData", "Local") : "");
+  const userProfile = env.USERPROFILE?.trim() || (isWin ? home : "");
+
+  const windowsCandidates = [
+    ...(appData ? [path.join(appData, "npm", "bifrost.exe"), path.join(appData, "npm", "bifrost.cmd")] : []),
+    ...(localAppData ? [path.join(localAppData, "Microsoft", "WinGet", "Links", "bifrost.exe")] : []),
+    ...(userProfile ? [path.join(userProfile, "scoop", "shims", "bifrost.exe"), path.join(userProfile, "scoop", "shims", "bifrost.cmd")] : [])
+  ];
+
   const candidates = [
     ...(process.platform === "darwin"
       ? ["/Applications/Bifrost.app/Contents/Resources/resources/bin/bifrost"]
       : []),
-    path.join(os.homedir(), ".local", "bin", executable),
-    path.join(os.homedir(), "bin", executable),
+    ...windowsCandidates,
+    path.join(home, ".local", "bin", executable),
+    path.join(home, "bin", executable),
     "/opt/homebrew/bin/bifrost",
     "/usr/local/bin/bifrost"
   ];
@@ -941,10 +1380,18 @@ async function tryRunBifrost(binary: string, args: string[], env: NodeJS.Process
 }
 
 function withBifrostPath(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const home = os.homedir();
+  const isWin = process.platform === "win32";
+  const appData = env.APPDATA?.trim() || (isWin ? path.join(home, "AppData", "Roaming") : "");
+  const localAppData = env.LOCALAPPDATA?.trim() || (isWin ? path.join(home, "AppData", "Local") : "");
+  const userProfile = env.USERPROFILE?.trim() || (isWin ? home : "");
   const pathEntries = [
-    env.PATH || "",
-    path.join(os.homedir(), ".local", "bin"),
-    path.join(os.homedir(), "bin"),
+    env.PATH ?? env.Path ?? env.path ?? "",
+    ...(appData ? [path.join(appData, "npm")] : []),
+    ...(localAppData ? [path.join(localAppData, "Microsoft", "WinGet", "Links")] : []),
+    ...(userProfile ? [path.join(userProfile, "scoop", "shims")] : []),
+    path.join(home, ".local", "bin"),
+    path.join(home, "bin"),
     "/opt/homebrew/bin",
     "/usr/local/bin"
   ];

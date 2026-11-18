@@ -1,0 +1,1 @@
+browser-use and agent-browser already support real-browser workflows and multiple sessions. ProfilePilot is worth trying for its ready-made site reads, local target management and Android workflow together.

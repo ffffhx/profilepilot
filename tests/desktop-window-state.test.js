@@ -33,8 +33,11 @@ test('CLI window state outcome unknown is not retried', async () => {
   assert.match(desktopHelp, /restore.*minimize.*maximize/); assert.match(desktopHelp, /Normal/);
 });
 test('native window route has one UIA dispatch and no foreground or Win32 mutation fallback', () => {
-  const source = fs.readFileSync(path.resolve(__dirname, '../native/desktop/windows.cs'), 'utf8');
-  const branch = source.slice(source.indexOf('if(windowPattern!=null){\n                int desired='), source.indexOf('}else if(kind=="invoke"'));
+  const source = fs.readFileSync(path.resolve(__dirname, '../native/desktop/windows.cs'), 'utf8').replace(/\r\n/g, '\n');
+  const start = source.indexOf('if(windowPattern!=null){\n                int desired=');
+  const end = source.indexOf('}else if(kind=="invoke"', start);
+  assert.ok(start >= 0 && end > start, 'the native window-state dispatch branch must exist');
+  const branch = source.slice(start, end);
   assert.equal((branch.match(/SetWindowVisualState\(/g) || []).length, 1);
   assert.doesNotMatch(branch, /Activate\(|ShowWindow|SetForegroundWindow|SendInput|AttachThreadInput/);
   const confirmation = source.slice(source.indexOf('void ConfirmWindowState('), source.indexOf('object Action('));

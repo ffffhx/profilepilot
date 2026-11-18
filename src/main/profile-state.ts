@@ -9,7 +9,7 @@ import { isAgentOverlayClient } from "./agent-overlay";
 import { type GatewayControlResponse } from "./browser-gateway-client";
 import { makeCdpUrl, requestCdpTargets } from "./cdp-client";
 import { resolveCdpContention } from "./cdp-contention";
-import { frontmostMacProcessId, getDirectChromeCommand, makeIsolatedProfileId, makeIsolatedSubProfileId, makeNativeProfileId, nativeChromeUserDataDir, readIsolatedProfileUserName, resolveIsolatedProfileDataPath, scanChromeProfilesInDir, scanNativeChromeProfiles } from "./chrome-launch";
+import { frontmostMacProcessId, getDirectChromeCommand, makeIsolatedProfileId, makeIsolatedSubProfileId, makeNativeProfileId, nativeChromeUserDataDir, normalizeBrowserKind, readIsolatedProfileUserName, resolveIsolatedProfileDataPath, scanChromeProfilesInDir, scanNativeChromeProfiles } from "./chrome-launch";
 import { isSameFilesystemPath, isSafePathSegment } from "./fs-util";
 import { RuntimeProfile } from "./internal-types";
 import { addRuntimeProcess, attachListeningPorts, createControlRuntimeScan, emptyRuntimeProfile, findExternalChromeInstances, getCdpClientsByPort, getOpenProfilePidsByPath, isGoogleChromeMainProcess, isImplicitDefaultChromeProcess, listRuntimeProcesses, makeNativeRuntimeKey, mergeRuntimeProfiles, parseProfileDirectoryFlag, parseUserDataDirFlag, type RuntimeScanOptions, type ControlDiscovery } from "./process-scan";
@@ -31,6 +31,13 @@ export interface ControlAdmissionState {
 function controlProfile(profile: ControlAdmissionProfile): ControlAdmissionProfile {
   const { id, source, pids, browserPids, cdpPort, fixedCdpPort, gatewayControl, agentBrowserOccupancy, cdpClients } = profile;
   return { id, source, pids, browserPids, cdpPort, fixedCdpPort, gatewayControl, agentBrowserOccupancy, cdpClients };
+}
+
+function safeNormalizeBrowserKind(value: StoredProfile["browserKind"]): PublicProfile["browserKind"] {
+  if (typeof normalizeBrowserKind === "function") {
+    return normalizeBrowserKind(value);
+  }
+  return value === "edge" || value === "brave" || value === "chromium" ? value : "chrome";
 }
 
 interface ProfileStateInput {
@@ -421,6 +428,7 @@ export class ProfileStateReader {
       id: makeNativeProfileId(profile.dirName),
       avatarDataUrl: profile.avatarDataUrl,
       source: "native",
+      browserKind: "chrome",
       // 默认 Profile 统一显示为“系统默认 Profile”（除非用户在本工具里手动重命名过）；
       // 其它系统 Profile 仍沿用 Chrome 自己的名字。
       name:
@@ -478,6 +486,7 @@ export class ProfileStateReader {
 
     return {
       ...this.toIsolatedControlProfile(profile, runtime),
+      browserKind: safeNormalizeBrowserKind(profile.browserKind),
       avatarDataUrl: await readProfileAvatar(profileDataPath),
       name: profile.name,
       dirName: profile.dirName,
@@ -572,6 +581,7 @@ export class ProfileStateReader {
       id: makeIsolatedSubProfileId(parent.id, sub.dirName),
       avatarDataUrl: sub.avatarDataUrl,
       source: "isolated-sub",
+      browserKind: safeNormalizeBrowserKind(parent.browserKind),
       name: sub.name,
       dirName: sub.dirName,
       path: sub.path,

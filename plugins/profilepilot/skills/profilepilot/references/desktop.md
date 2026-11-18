@@ -1,11 +1,12 @@
-# ppilot desktop: local Windows control
+# ppilot desktop: local Windows & macOS control
 
 Desktop interaction is a fallback under the routing rule in [SKILL.md](../SKILL.md).
 When that rule permits it, use `ppilot desktop` for this computer's native Windows
-desktop and application windows, including system dialogs outside page interfaces.
-ProfilePilot owns and bundles the native driver. Only the ProfilePilot app and
+or macOS desktop and application windows, including system dialogs outside page interfaces.
+ProfilePilot owns and bundles the native driver (`ProfilePilot.Desktop.exe` on Windows,
+`profilepilot-desktop-mac` via ScreenCaptureKit + Accessibility on macOS). Only the ProfilePilot app and
 CLI are required; no ClipRelay, remote connection, MCP, administrator rights or
-separately installed service is needed. macOS currently reports unsupported.
+separately installed service is needed.
 
 Use `ppilot desktop schema action` or `ppilot desktop action --help` for the current command's inputs. The action schema comes from the actual validator, including per-kind fields; runtime ownership and observation checks still apply. `ppilot desktop doctor --window ACTUAL_ID --session TASK` returns current readiness and the next command without claiming or resuming control.
 
@@ -44,10 +45,11 @@ rejected before dispatch. Taskbar/tray `invoke` is rejected because its route
 uses physical input. There is no automatic physical fallback or mode upgrade.
 Use `set_value` to replace text, not `type_text`.
 
-Input in other applications does not pause the background session. Foreground
-activation of the target process, or keyboard/pointer activity directed to it,
-pauses it; another window of the same process is conservatively included. Start
-while using another app, and explicitly return control after a target takeover.
+Input in other applications does not pause the background session. Pure semantic
+accessibility actions (`invoke`, `set_value`, `toggle`, `select`, `expand`,
+`collapse`, `scroll`) do not move the cursor and are permitted even if the target
+window is already in the foreground; physical user mouse/keyboard activity pauses
+the session immediately. Explicitly return control after a user takeover.
 Manual takeover/stop, cross-route ownership, helper failure and unknown-result
 protections still apply. A background session does not make simultaneous edits
 to the same application safe.
@@ -105,18 +107,16 @@ try to solve foreground restrictions by elevating ProfilePilot.
 image and returns a fresh version. `--image-only` skips UIA traversal and returns
 `elements: []`, `gaps: ["uia_skipped"]`, and `truncated: false`; it does not mean
 the window has no controls. Omit the flag when both an image and UIA refs are
-needed. Inspect the image before coordinate input. Coordinates are
-relative to the window in original physical pixels. With `image.captureRect`,
-map image pixels using `x = captureRect.x + pixelX * captureRect.width / image.width`
-and the equivalent formula for y. Otherwise scale to `windowWidth/windowHeight`.
-Round to integers and keep every point within the selected window. Apply the
-same mapping to drag endpoints. Moving/resizing or an overlapping window can
+needed. Inspect the image before coordinate input. Pass `"coordSpace": "image"`
+(or `"normalized"` for `0..1000`) in the action JSON so the server automatically
+maps screenshot pixels through `image.captureRect` to physical window coordinates
+(default `"coordSpace": "physical"` uses raw window physical pixels). Moving/resizing or an overlapping window can
 invalidate coordinate input; refresh state instead of using old coordinates.
 Check `image.coordinateInputAvailable`. External Chromium compositor captures
 report false because their border cropping differs from native input coordinates;
 use observed controls or the dedicated browser/Electron route for those windows.
-The native WGC source currently also reports false: `candidateCaptureRect` is
-diagnostic evidence, never a coordinate authorization. Unsupported WGC APIs may
+Qualified Windows Graphics Capture (WGC) frames aligned via `DWMWA_EXTENDED_FRAME_BOUNDS`
+report `coordinateInputAvailable: true` with an exact `captureRect`. Unsupported WGC APIs may
 fall back explicitly; protection, cancellation, timeout or changed geometry must
 remain capture failures.
 `physicalPixelsAvailable` describes the native coordinate environment; it does

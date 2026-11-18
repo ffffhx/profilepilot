@@ -1,7 +1,7 @@
-import type { BrowserTask, TaskTokenRecord, ModelTokenUsage } from "./tasks";
+import type { BrowserTask, TaskTokenRecord, ModelTokenUsage, TaskCostRecord } from "./tasks";
 import { mergeCostRecords } from "./task-cost";
 
-export type TokenSource = "all" | "model" | "jev" | "helper";
+export type TokenSource = "all" | "model" | "jev" | "helper" | "review";
 const count = (value: number | undefined): number => Number.isSafeInteger(value) && value! >= 0 ? value! : 0;
 
 export function mergeModelTokens(previous: ModelTokenUsage[], incoming: unknown): ModelTokenUsage[] {
@@ -41,6 +41,9 @@ export function updateTokenRecords(previous: TaskTokenRecord[], tasks: BrowserTa
       helperOutputTokens: count(u.helper?.outputTokens),
     };
     const old = records.get(task.id);
+    if (old?.label) next.label = old.label;
+    if (old?.reviewInputTokens) next.reviewInputTokens = old.reviewInputTokens;
+    if (old?.reviewOutputTokens) next.reviewOutputTokens = old.reviewOutputTokens;
     next.costRecords = mergeCostRecords(old?.costRecords || [], task.costRecords || []);
     const taskCost = Number.isFinite(u.costUsd) && u.costUsd >= 0 ? u.costUsd : 0;
     // A verified pricing repair can reduce a previously inflated estimate.
@@ -56,12 +59,39 @@ export function updateTokenRecords(previous: TaskTokenRecord[], tasks: BrowserTa
   return [...records.values()];
 }
 
+export function recordReviewTokenUsage(
+  previous: TaskTokenRecord[],
+  entry: { reportId: string; kind: "daily" | "weekly"; model: string; inputTokens: number; outputTokens: number; charge?: TaskCostRecord; at: string }
+): TaskTokenRecord[] {
+  const records = new Map(previous.map(record => [record.taskId, record]));
+  const key = `review:${entry.reportId}`;
+  const old = records.get(key);
+  const next: TaskTokenRecord = {
+    taskId: key,
+    label: entry.kind === "daily" ? "每日复盘" : "每周整理",
+    createdAt: old?.createdAt || entry.at,
+    updatedAt: entry.at,
+    inputTokens: old?.inputTokens || 0,
+    outputTokens: old?.outputTokens || 0,
+    jevInputTokens: old?.jevInputTokens || 0,
+    helperInputTokens: old?.helperInputTokens || 0,
+    helperOutputTokens: old?.helperOutputTokens || 0,
+    reviewInputTokens: (old?.reviewInputTokens || 0) + count(entry.inputTokens),
+    reviewOutputTokens: (old?.reviewOutputTokens || 0) + count(entry.outputTokens),
+    modelNames: [...new Set([...(old?.modelNames || []), ...(entry.model.trim() ? [entry.model.trim()] : [])])],
+    costRecords: entry.charge ? mergeCostRecords(old?.costRecords || [], [entry.charge]) : (old?.costRecords || [])
+  };
+  records.set(key, next);
+  return [...records.values()];
+}
+
 export function tokenTotals(records: TaskTokenRecord[], source: TokenSource = "all"): { input: number; output: number; total: number } {
   let input = 0, output = 0;
   for (const r of records) {
     if (source === "all" || source === "model") { input += count(r.inputTokens); output += count(r.outputTokens); }
     if (source === "all" || source === "jev") input += count(r.jevInputTokens);
     if (source === "all" || source === "helper") { input += count(r.helperInputTokens); output += count(r.helperOutputTokens); }
+    if (source === "all" || source === "review") { input += count(r.reviewInputTokens); output += count(r.reviewOutputTokens); }
   }
   return { input, output, total: input + output };
 }

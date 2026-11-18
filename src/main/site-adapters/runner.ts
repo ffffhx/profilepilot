@@ -8,6 +8,8 @@ import { runXianyuAdapter } from "./xianyu";
 export interface SiteTransport {
   /** Cache identity includes the selected Profile/session and control generation. */
   cacheScope?: string;
+  homeDir?: string;
+  adaptersDir?: string;
   evaluate(expression: string): Promise<any>;
   open(url: string): Promise<unknown>;
   /** Called before every transport step, including after navigation. */
@@ -16,8 +18,11 @@ export interface SiteTransport {
 }
 type SitePlanAccess = { allowedOrigins?: string[]; blockedOrigins?: string[] };
 export async function runSiteAdapter(input: SiteInput, transport: SiteTransport): Promise<SiteResult> {
-  if (input?.operation?.startsWith("xianyu.")) return runXianyuAdapter(input, transport);
-  const plan = planSiteAdapter(input), start = Date.now(); let calls = 0;
+  const plan = planSiteAdapter(input, { homeDir: transport.homeDir, adaptersDir: transport.adaptersDir });
+  if (!plan.externalExtractor && plan.operation.startsWith("xianyu.")) {
+    return runXianyuAdapter({ operation: plan.operation, params: plan.params }, transport);
+  }
+  const start = Date.now(); let calls = 0;
   plan.access = transport.access;
   const evaluate = async (expression: string) => { transport.check?.(plan.url); calls++; return transport.evaluate(expression); };
   transport.check?.(plan.url);

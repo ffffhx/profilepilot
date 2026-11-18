@@ -20,9 +20,10 @@ function interrupted(operation: string): Error {
     details: { operation, ...(readOperations.has(operation) ? { inputDispatched: false } : {}) }
   });
 }
-export function desktopExecutable(): string {
-  const packaged = path.join(process.resourcesPath || '', 'native', 'ProfilePilot.Desktop.exe');
-  return existsSync(packaged) ? packaged : path.resolve(__dirname, '../../native/ProfilePilot.Desktop.exe');
+export function desktopExecutable(platform: string = process.platform): string {
+  const binary = platform === 'darwin' ? 'profilepilot-desktop-mac' : 'ProfilePilot.Desktop.exe';
+  const packaged = path.join(process.resourcesPath || '', 'native', binary);
+  return existsSync(packaged) ? packaged : path.resolve(__dirname, '../../native', binary);
 }
 export class DesktopWorker implements DesktopDriver {
   // An observer hint, never an authentication token. Keep it stable across this
@@ -51,7 +52,10 @@ export class DesktopWorker implements DesktopDriver {
       if (!existsSync(this.executable)) throw desktopError('DESKTOP_HELPER_MISSING', '缺少桌面控制组件，请更新 ProfilePilot。');
       // Windows locks running executables. A content-addressed runtime copy lets
       // the next build/update replace its bundled helper without killing sessions.
-      const executable = nativeRuntimeCopy(this.executable, 'profilepilot-desktop-runtime');
+      // On macOS, spawn the native binary in-place to preserve TCC attribution.
+      const executable = (process.platform === 'win32' || this.executable.toLowerCase().endsWith('.exe'))
+        ? nativeRuntimeCopy(this.executable, 'profilepilot-desktop-runtime')
+        : this.executable;
       const child = this.process = this.spawnProcess(executable, ['--input-marker', this.inputMarker], { windowsHide: true, stdio: 'pipe' }) as ChildProcessWithoutNullStreams;
       // Install process handlers before touching streams: failed spawns may not
       // provide pipes, and their first error is the evidence that no PID exists.

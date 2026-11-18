@@ -6,10 +6,10 @@ import { readBrowserServiceConnection, serviceRequest } from '../browser-service
 import { defaultDataDir } from '../fs-util';
 import type { GatewayProfileBinding } from '../browser-gateway-control';
 import type { NativeBrowserState } from '../../shared/browser-connection';
-import { createDesktopAdmission, type DesktopAdmissionReadContext, type AdmissionSnapshot, type DesktopAdmissionCatalog, type AdmissionLocalApp, type DesktopAdmissionGateway, type DesktopAdmissionApps } from './admission';
+import { createDesktopAdmission, isNonChromiumNativeDesktopTarget, type DesktopAdmissionReadContext, type AdmissionSnapshot, type DesktopAdmissionCatalog, type AdmissionLocalApp, type DesktopAdmissionGateway, type DesktopAdmissionApps } from './admission';
 import type { DesktopAppControlConfig, DesktopAppsControlSnapshot } from './apps-discovery';
 import { buildDesktopAppsControlFromSample } from './apps-discovery';
-import { collectWindowsControlSample, type WindowsControlSample } from '../windows-platform';
+import { collectWindowsControlSample, collectCachedWindowsControlSample, type WindowsControlSample } from '../windows-platform';
 import { readProfileProcessChangeError, type ProfileProcessChangeDiagnostic } from '../profile-process-change';
 import type { WindowsSamplerReadContext } from '../windows-sampler';
 
@@ -73,24 +73,45 @@ interface RuntimeDesktopAdmissionCommon {
 }
 export type RuntimeDesktopAdmissionOptions = RuntimeDesktopAdmissionCommon & (LegacyDiscoveryOptions | SharedDiscoveryOptions);
 
+const isFastNativeTarget = (target: DesktopAdmissionReadContext['target']): boolean =>
+  typeof isNonChromiumNativeDesktopTarget === 'function' && isNonChromiumNativeDesktopTarget(target);
+
 export function createWindowsDesktopDiscovery(options: {
   catalog: (sample: Promise<WindowsControlSample>) => Promise<DesktopAdmissionCatalog>;
   apps: (sample: Promise<WindowsControlSample>) => Promise<readonly (AdmissionLocalApp & DesktopAppControlConfig)[]>;
   sample?: (context?: WindowsSamplerReadContext) => Promise<WindowsControlSample>;
   onRetry?: (evidence: DesktopDiscoveryRetryEvidence) => void;
 }): (context?: DesktopDiscoveryContext) => DesktopDiscoveryRound {
-  const readRound = (context?: WindowsSamplerReadContext) => {
+  const readRound = (context?: WindowsSamplerReadContext, fastNative = false, forceFreshSample = false) => {
     // Start in this synchronous turn after the caller's budget check. Deferring
     // the factory to another microtask could start sample 2 after an abort.
     let sample: Promise<WindowsControlSample>;
-    try { sample = Promise.resolve((options.sample || collectWindowsControlSample)(context)); }
+    const defaultSampler = !fastNative || forceFreshSample || typeof collectCachedWindowsControlSample !== 'function'
+      ? collectWindowsControlSample
+      : (ctx?: WindowsSamplerReadContext) => collectCachedWindowsControlSample(ctx);
+    try { sample = Promise.resolve((options.sample || defaultSampler)(context)); }
     catch (error) { sample = Promise.reject(error); }
     // A registry error or empty apps list can finish before the process query.
     // Observe rejection immediately without changing the original promise.
     void sample.catch(() => undefined);
     return {
       sample,
-      catalog: Promise.resolve().then(() => options.catalog(sample)),
+      catalog: fastNative
+        ? sample.then((value): DesktopAdmissionCatalog => {
+            if (value.snapshot.processesComplete === false) throw new Error('PROFILE_PROCESS_SCAN_INCOMPLETE');
+            return {
+              profiles: [],
+              externalInstances: [],
+              discovery: {
+                snapshotId: value.snapshotId,
+                capturedAt: value.capturedAt,
+                complete: true,
+                processPids: value.snapshot.processes.map(row => row.pid),
+                scopedGaps: []
+              }
+            };
+          })
+        : Promise.resolve().then(() => options.catalog(sample)),
       apps: Promise.resolve().then(() => options.apps(sample)).then(async applications => {
         try { return { applications, control: buildDesktopAppsControlFromSample(applications, await sample) }; }
         // Failed optional route evidence must retain known worker/app PIDs.
@@ -119,12 +140,13 @@ export function createWindowsDesktopDiscovery(options: {
   };
   return context => {
     const originalContexts = [context?.catalog, context?.apps].filter((value): value is DesktopAdmissionReadContext => !!value);
+    const fastNative = originalContexts.length > 0 && originalContexts.every(value => isFastNativeTarget(value.target));
     const readContext: WindowsSamplerReadContext | undefined = originalContexts.length ? {
       deadlineAt: Math.min(...originalContexts.map(value => value.deadlineAt)),
       now: () => Math.max(...originalContexts.map(value => value.now())),
       signal: AbortSignal.any(originalContexts.map(value => value.signal))
     } : undefined;
-    const first = readRound(readContext);
+    const first = readRound(readContext, fastNative, false);
     // Existing direct collectors without the caller's real timeout keep their
     // single read. Never invent an additional deadline or retry budget here.
     if (!context) return first;
@@ -160,7 +182,7 @@ export function createWindowsDesktopDiscovery(options: {
       // Both original collect contexts remain attached even when another caller
       // joins pendingDiscovery. This check never starts a scan after timeout.
       if (expired()) { finish(1, 'deadline'); return timeout(values); }
-      const second = readRound(readContext);
+      const second = readRound(readContext, fastNative, true);
       notify({ ...history, phase: 'started', attempts: 2 });
       const retried = await settled(second);
       if (expired()) { finish(2, 'deadline', undefined, retried[2]); return timeout(retried); }
@@ -216,6 +238,27 @@ function shareAdmissionRead<T>(request: Promise<T>): (context: DesktopAdmissionR
   });
 }
 
+function filterUnrelatedUnresolvedAppsForNativeTarget(value: DesktopAdmissionApps, targetPid: number): DesktopAdmissionApps {
+  const control = value.control;
+  if (control && (control.complete !== true || (control.gaps && control.gaps.length > 0))) return value;
+  const controlById = new Map((control?.applications || []).map(row => [row.id, row]));
+  const applications = value.applications.filter(app => {
+    if (!app || !app.runtime) return true;
+    if (app.runtime.pid === targetPid) return true;
+    if (app.runtime.pid !== null || app.runtime.status === 'stopped' || app.runtime.status === 'failed') return true;
+    // Unresolved app (runtime.pid === null): keep only if it is an anonymous
+    // attach CDP app with an active TCP listener (or candidate matching targetPid).
+    const controlRow = controlById.get(app.id);
+    if (controlRow) {
+      if (controlRow.candidatePids?.includes(targetPid)) return true;
+      if (controlRow.mode === 'attach' && controlRow.identity === 'none' && (controlRow.listeners?.length || 0) > 0) return true;
+    }
+    return false;
+  });
+  if (applications.length === value.applications.length) return value;
+  return control ? { applications, control } : { applications };
+}
+
 export function createRuntimeDesktopAdmission(options: RuntimeDesktopAdmissionOptions) {
   const now = options.now || Date.now;
   // A timed-out OS process scan cannot be synchronously cancelled. Share it
@@ -262,30 +305,86 @@ export function createRuntimeDesktopAdmission(options: RuntimeDesktopAdmissionOp
     });
     return round;
   };
+  const sampledCatalog = options.discovery ? undefined : sampled(options.catalog);
+  const sampledApps = options.discovery ? undefined : sampled(async (): Promise<DesktopAdmissionApps> => {
+    const applications = await options.apps!();
+    if (!options.appsControl) return { applications };
+    try { return { applications, control: await options.appsControl(applications) }; }
+    // Optional evidence failing cannot erase already identified apps or turn
+    // an unknown route into an idle one. Unknown PID rows remain fail-closed.
+    catch { return { applications }; }
+  });
+  const sampledGateway = sampled(async (): Promise<DesktopAdmissionGateway> => {
+    const response = gatewaySchema.parse(await (options.gateway || (() => requestBrowserGateway({ action: 'status' }, { timeoutMs: 2000 })))());
+    return { profiles: response.state.profiles as GatewayProfileBinding[], ports: response.ports };
+  });
+  const sampledNative = sampled(async (): Promise<readonly NativeBrowserState[]> => {
+    const snapshot = await (options.native || (async () => {
+      // Match the desktop browser adapter's root. Reading the discovery file
+      // and snapshot is deliberately distinct from ensureBrowserService().
+      const root = path.join(process.env.CPM_DATA_DIR || defaultDataDir(), 'browser-tasks');
+      const connection = readBrowserServiceConnection(root);
+      if (!connection) throw new Error('Browser service discovery unavailable');
+      return (await serviceRequest(connection, 'snapshot', [], 2000)).result;
+    }))();
+    return nativeSchema.parse(snapshot).states;
+  });
   return createDesktopAdmission({
-    catalog: options.discovery ? context => expiredRead(context) ? Promise.reject(new Error('provider_timeout')) : discoveryRound('catalog', context).catalog(context) : sampled(options.catalog),
-    apps: options.discovery ? context => expiredRead(context) ? Promise.reject(new Error('provider_timeout')) : discoveryRound('apps', context).apps(context) : sampled(async (): Promise<DesktopAdmissionApps> => {
-      const applications = await options.apps!();
-      if (!options.appsControl) return { applications };
-      try { return { applications, control: await options.appsControl(applications) }; }
-      // Optional evidence failing cannot erase already identified apps or turn
-      // an unknown route into an idle one. Unknown PID rows remain fail-closed.
-      catch { return { applications }; }
-    }),
-    gateway: sampled(async (): Promise<DesktopAdmissionGateway> => {
-      const response = gatewaySchema.parse(await (options.gateway || (() => requestBrowserGateway({ action: 'status' }, { timeoutMs: 2000 })))());
-      return { profiles: response.state.profiles as GatewayProfileBinding[], ports: response.ports };
-    }),
-    native: sampled(async (): Promise<readonly NativeBrowserState[]> => {
-      const snapshot = await (options.native || (async () => {
-        // Match the desktop browser adapter's root. Reading the discovery file
-        // and snapshot is deliberately distinct from ensureBrowserService().
-        const root = path.join(process.env.CPM_DATA_DIR || defaultDataDir(), 'browser-tasks');
-        const connection = readBrowserServiceConnection(root);
-        if (!connection) throw new Error('Browser service discovery unavailable');
-        return (await serviceRequest(connection, 'snapshot', [], 2000)).result;
-      }))();
-      return nativeSchema.parse(snapshot).states;
-    })
+    catalog: options.discovery
+      ? context => expiredRead(context) ? Promise.reject(new Error('provider_timeout')) : discoveryRound('catalog', context).catalog(context)
+      : async context => {
+          if (expiredRead(context)) throw new Error('provider_timeout');
+          if (isFastNativeTarget(context.target)) {
+            const capturedAt = now();
+            return {
+              state: 'ready' as const,
+              capturedAt,
+              value: {
+                profiles: [],
+                externalInstances: [],
+                discovery: {
+                  snapshotId: randomUUID(),
+                  capturedAt,
+                  complete: true,
+                  processPids: [context.target!.pid!],
+                  scopedGaps: []
+                }
+              }
+            };
+          }
+          return sampledCatalog!(context);
+        },
+    apps: async context => {
+      if (expiredRead(context)) throw new Error('provider_timeout');
+      const result = options.discovery
+        ? await discoveryRound('apps', context).apps(context)
+        : await sampledApps!(context);
+      if (result.state === 'ready' && isFastNativeTarget(context.target) && context.target?.pid) {
+        return { ...result, value: filterUnrelatedUnresolvedAppsForNativeTarget(result.value, context.target.pid) };
+      }
+      return result;
+    },
+    gateway: async context => {
+      if (expiredRead(context)) throw new Error('provider_timeout');
+      try {
+        return await sampledGateway(context);
+      } catch (error) {
+        if (isFastNativeTarget(context.target) && !expiredRead(context) && (error as Error)?.message !== 'provider_timeout') {
+          return { state: 'ready' as const, capturedAt: now(), value: { profiles: [], ports: [] } };
+        }
+        throw error;
+      }
+    },
+    native: async context => {
+      if (expiredRead(context)) throw new Error('provider_timeout');
+      try {
+        return await sampledNative(context);
+      } catch (error) {
+        if (isFastNativeTarget(context.target) && !expiredRead(context) && (error as Error)?.message !== 'provider_timeout') {
+          return { state: 'ready' as const, capturedAt: now(), value: [] };
+        }
+        throw error;
+      }
+    }
   }, { now, timeoutMs: options.timeoutMs ?? 5000, maxAgeMs: options.maxAgeMs ?? 6000, discoveryFirst: true, controlMaxAgeMs: 2500 });
 }

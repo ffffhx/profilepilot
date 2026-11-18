@@ -211,7 +211,11 @@ test("validated Bifrost config builds isolated listener and Chrome args", () => 
     "--rule", "shared-auth",
     "--group-rule", "7152084678483132446/team-rule"
   ]);
-  assert.deepEqual(bifrostProxyChromeArgs(config), ["--proxy-server=http://127.0.0.1:18888"]);
+  assert.deepEqual(bifrostProxyChromeArgs(config), [
+    "--proxy-server=http://127.0.0.1:18888",
+    "--disable-quic",
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"
+  ]);
 });
 
 test("validated Bifrost config rejects a dedicated view with every managed rule paused", () => {
@@ -305,7 +309,11 @@ test("ensureProfileBifrostProxy binds a brand-new isolated listener", async () =
   const fake = makeFakeBifrost({ statusJson: RUNNING_STATUS, portShowExit: 1 });
   try {
     const args = await ensureProfileBifrostProxy("profile-a", STATE_MACHINE_CONFIG, fake.env);
-    assert.deepEqual(args, ["--proxy-server=http://127.0.0.1:18888"]);
+    assert.deepEqual(args, [
+      "--proxy-server=http://127.0.0.1:18888",
+      "--disable-quic",
+      "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"
+    ]);
     assert.deepEqual(fake.calls(), [
       "status --format json",
       "port show 18888",
@@ -324,7 +332,11 @@ test("ensureProfileBifrostProxy updates an existing binding owned by the same Pr
   });
   try {
     const args = await ensureProfileBifrostProxy("profile-a", STATE_MACHINE_CONFIG, fake.env);
-    assert.deepEqual(args, ["--proxy-server=http://127.0.0.1:18888"]);
+    assert.deepEqual(args, [
+      "--proxy-server=http://127.0.0.1:18888",
+      "--disable-quic",
+      "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"
+    ]);
     assert.deepEqual(fake.calls(), [
       "status --format json",
       "port show 18888",
@@ -407,7 +419,11 @@ test("ProfilePilot can start Bifrost daemon, restore the listener, and then inje
   try {
     await startBifrostIfNeeded(fake.env);
     const args = await ensureProfileBifrostProxy("profile-a", STATE_MACHINE_CONFIG, fake.env);
-    assert.deepEqual(args, ["--proxy-server=http://127.0.0.1:18888"]);
+    assert.deepEqual(args, [
+      "--proxy-server=http://127.0.0.1:18888",
+      "--disable-quic",
+      "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"
+    ]);
     assert.deepEqual(fake.calls(), [
       "status --format json",
       "start --daemon",
@@ -490,11 +506,15 @@ test("validateUpstreamProxyConfig throws on invalid server, keeps bypass optiona
 
 test("upstreamProxyChromeArgs emits proxy-server (scheme-stripped for http) and optional bypass", () => {
   assert.deepEqual(upstreamProxyChromeArgs({ server: "http://127.0.0.1:7897" }), [
-    "--proxy-server=127.0.0.1:7897"
+    "--proxy-server=127.0.0.1:7897",
+    "--disable-quic",
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"
   ]);
   assert.deepEqual(upstreamProxyChromeArgs({ server: "socks5://127.0.0.1:7891", bypassList: "localhost,*.local" }), [
     "--proxy-server=socks5://127.0.0.1:7891",
-    "--proxy-bypass-list=localhost,*.local"
+    "--proxy-bypass-list=localhost,*.local",
+    "--disable-quic",
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"
   ]);
   assert.deepEqual(upstreamProxyChromeArgs(null), []);
 });

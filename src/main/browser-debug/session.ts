@@ -80,11 +80,23 @@ export class BrowserDebugSession {
     recording:this.har?{active:this.har.active,entries:this.har.entries.length,omitted:this.har.omitted,reasons:[...this.har.reasons]}:undefined,
     tracing:this.trace?{active:this.trace.active,events:this.trace.events.length,dropped:this.trace.dropped,complete:this.trace.complete,reason:this.trace.reason}:undefined}; }
   suspend(reason:string):void {
+    const wasActive=this.active;
+    const previousTargets=[...this.targets];
     this.active=false; this.generation++; this.targets.clear(); this.parents.clear(); this.frameTargets.clear(); this.routes=[];
     for(const r of this.current.values())if(r.state==='pending'){r.state='interrupted';r.failure=reason;}
     this.current.clear();
     if(this.har?.active){this.har.active=false;this.har.reasons.push(reason);}
     if(this.trace?.active){this.trace.active=false;this.trace.complete=false;this.trace.reason=reason;this.trace.done?.();}
+    if(wasActive&&reason!=='disconnected'&&reason!=='debug-stopped'&&previousTargets.length){
+      for(const session of previousTargets){
+        this.background(async()=>{
+          this.transport.check();
+          await this.send('Fetch.disable',{},session).catch(()=>undefined);
+          await this.send('Target.setAutoAttach',{autoAttach:true,waitForDebuggerOnStart:false,flatten:true,filter:[{type:'iframe',exclude:false},{exclude:true}]},session);
+          await this.send('Runtime.runIfWaitingForDebugger',{},session).catch(()=>undefined);
+        });
+      }
+    }
   }
   private async flush():Promise<void> {
     // A finite batch of network/iframe follow-ups; later events are another batch.
@@ -93,7 +105,20 @@ export class BrowserDebugSession {
   private requestKey(session:string,id:string):string{return `${session}\0${id}`;}
   event(event:DebugEvent):void {
     const session=event.sessionId || '',p=event.params || {},method=event.method;
-    if(!this.active || !this.targets.has(session))return;
+    if(!this.active || !this.targets.has(session)){
+      if(method==='Fetch.requestPaused'&&p.requestId){
+        this.background(async()=>{
+          this.transport.check();
+          await this.send('Fetch.continueRequest',{requestId:p.requestId},session);
+        });
+      }else if(method==='Target.attachedToTarget'&&p.waitingForDebugger===true&&p.sessionId){
+        this.background(async()=>{
+          this.transport.check();
+          await this.send('Runtime.runIfWaitingForDebugger',{},p.sessionId);
+        });
+      }
+      return;
+    }
     if(method==='Target.attachedToTarget' && p.targetInfo?.type==='iframe'){
       if(!this.targets.has(p.sessionId)){this.targets.add(p.sessionId);this.parents.set(p.sessionId,session);this.frameTargets.set(p.sessionId,p.targetInfo.targetId);const generation=this.generation;this.background(()=>this.initialize(p.sessionId,generation,p.waitingForDebugger===true));}return;
     }
@@ -270,7 +295,10 @@ export class BrowserDebugSession {
     else await this.send('Fetch.disable',{},session);
   }
   private async routeRequest(p:any,session:string,generation:number):Promise<void>{
-    if(!this.active||generation!==this.generation)return;
+    if(!this.active||generation!==this.generation){
+      if(p?.requestId){this.transport.check();await this.send('Fetch.continueRequest',{requestId:p.requestId},session);}
+      return;
+    }
     const route=[...this.routes].reverse().find(r=>r.match.test(p.request?.url||'')&&(!r.types.length||r.types.includes(String(p.resourceType).toLowerCase())));
     if(!route){await this.send('Fetch.continueRequest',{requestId:p.requestId},session);return;}
     if(route.action==='abort')await this.send('Fetch.failRequest',{requestId:p.requestId,errorReason:'BlockedByClient'},session);

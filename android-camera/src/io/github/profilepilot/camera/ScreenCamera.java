@@ -104,7 +104,9 @@ public final class ScreenCamera implements AutoCloseable {
     }
     private void authorize() throws Exception {
         if (closed) throw new IOException(failure == null ? "屏幕摄像头已停止" : failure);
-        HttpURLConnection connection = (HttpURLConnection) new URL("http://127.0.0.1:18761/camera").openConnection();
+        int port = lease.optInt("port", 18761);
+        if (port < 1 || port > 65535) port = 18761;
+        HttpURLConnection connection = (HttpURLConnection) new URL("http://127.0.0.1:" + port + "/camera").openConnection();
         connection.setConnectTimeout(1200); connection.setReadTimeout(1200); connection.setRequestMethod("POST");
         connection.setDoOutput(true); connection.setRequestProperty("Authorization", "Bearer " + lease.getString("token"));
         connection.setRequestProperty("Content-Type", "application/json");

@@ -82,6 +82,8 @@ export interface PhoneDevice {
   confirmedAt: number | null;
   pending: string | null;
   error: string;
+  elevatedWindowPlacementSkipped?: boolean;
+  warning?: string;
 }
 export interface PhonesSnapshot {
   defaultDevice?: import("./default-targets").DefaultPhoneStatus;
@@ -94,7 +96,9 @@ export interface PhoneVideoSession { sessionId: string; generation: number; }
 export interface PhoneWirelessService { name: string; kind: "pairing" | "connect"; address: string; source?: "phone" | "mdns" | "adb"; reachable?: boolean; reason?: string; }
 export interface PhoneNearbyApp { id: string; deviceId?: string; name: string; ip: string; version: string; variant: "debug" | "release"; wirelessDebugging: "enabled" | "disabled" | "unconfirmed"; }
 export interface PhoneWirelessDiscovery { services: PhoneWirelessService[]; error: string; apps?: PhoneNearbyApp[]; appError?: string; phoneIps?: string[]; diagnostic?: { diagnosticId: string; stage: string; reason: string }; }
+export type PhoneKeyName = "back" | "home" | "recents" | "enter" | "search" | "backspace" | "delete" | "tab" | "escape";
 export interface PhoneSelector {
+  ref?: string;
   resourceId?: string; text?: string; description?: string; className?: string; packageName?: string;
   enabled?: boolean; checked?: boolean; editable?: boolean; clickable?: boolean; scrollable?: boolean;
 }
@@ -102,7 +106,7 @@ export type PhoneAction =
   | { kind: "tap"; x: number; y: number }
   | { kind: "swipe"; x: number; y: number; toX: number; toY: number; duration?: number }
   | { kind: "text"; text: string }
-  | { kind: "key"; key: "back" | "home" | "recents" }
+  | { kind: "key"; key: PhoneKeyName }
   | { kind: "snapshot" }
   | { kind: "screenshot"; format?: "png" }
   | { kind: "find" | "click"; selector: PhoneSelector }

@@ -1,0 +1,2 @@
+做了个给 Claude Code / Codex 用的开源工具 ProfilePilot。内置闲鱼、小红书等网站读取；不同 Agent 可在不同 Profile / 应用里工作。一个 CLI 连接 Chrome、Electron、安卓。想找人试一次真实任务：
+https://github.com/ffffhx/profilepilot

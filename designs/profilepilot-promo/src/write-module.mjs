@@ -1,0 +1,10 @@
+import fs from 'node:fs';
+import {spawnSync} from 'node:child_process';
+const root='designs/profilepilot-promo';
+const names=process.argv.slice(2);
+if(names.filter(n=>n.startsWith('scene-')).length>1) throw new Error('One scene per write');
+const batch=names.map(name=>({op:'set',path:'modules/'+name,data:{kind:name.endsWith('.css')?'css':name.endsWith('.json')?'json':'js',text:fs.readFileSync(root+'/src/'+name,'utf8')}}));
+const file=root+'/src/write-batch.json';
+fs.writeFileSync(file,JSON.stringify(batch));
+const r=spawnSync(process.execPath,['C:/Users/aa182/.codex/skills/claude-motion/scripts/artifact.mjs','write-db',root,file],{stdio:'inherit'});
+process.exitCode=r.status??1;

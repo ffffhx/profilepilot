@@ -1,9 +1,17 @@
 import type { StartupSettings } from "./startup-settings";
 
+export type BrowserKind = "chrome" | "edge" | "brave" | "chromium";
+
+export interface CreateProfileInput {
+  name: string;
+  browserKind?: BrowserKind;
+}
+
 export interface StoredProfile {
   id: string;
   name: string;
   dirName: string;
+  browserKind?: BrowserKind;
   createdAt: string;
   lastLaunchedAt: string | null;
   lastCdpPort?: number | null;
@@ -460,6 +468,7 @@ export interface PublicProfile {
   avatarDataUrl?: string | null;
   id: string;
   source: ProfileSource;
+  browserKind?: BrowserKind;
   name: string;
   dirName: string;
   path: string;
@@ -1052,7 +1061,7 @@ export interface ProfileManagerApi {
   getInitialState(): Promise<AppState>;
   onStateChanged(listener: (state: AppState) => void): () => void;
   getTakeoverHistory(): Promise<AgentTakeoverEvent[]>;
-  createProfile(name: string): Promise<AppState>;
+  createProfile(input: string | CreateProfileInput): Promise<AppState>;
   renameProfile(id: string, name: string): Promise<AppState>;
   launchProfile(id: string, options?: LaunchProfileOptions): Promise<AppState>;
   launchProfileWithCdp(id: string, port?: number | null, options?: LaunchProfileOptions): Promise<AppState>;

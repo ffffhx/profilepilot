@@ -85,9 +85,35 @@ function invalid(message: string): never {
   throw Object.assign(new Error(message), { code: "BROWSER_CLI_INVALID_ARGUMENTS" });
 }
 
+const HOISTABLE_ROUTING_VERBS = new Set([
+  "status", "readiness", "doctor", "complete", "release", "resume", "handoff", "wait-control", "tabs", "profiles"
+]);
+
+function hoistSafeTrailingRoutingFlags(input: string[]): string[] {
+  if (!input.length || input[0].startsWith("-")) return input;
+  if (!HOISTABLE_ROUTING_VERBS.has(input[0])) return input;
+  const verb = input[0];
+  const leading: string[] = [];
+  const rest: string[] = [];
+  for (let i = 1; i < input.length; i++) {
+    const arg = input[i];
+    const name = arg.split("=", 1)[0];
+    if (["--session", "--cdp", "--profile", "--connection"].includes(name)) {
+      leading.push(arg);
+      if (!arg.includes("=") && i + 1 < input.length && !input[i + 1].startsWith("--")) {
+        leading.push(input[++i]);
+      }
+      continue;
+    }
+    rest.push(arg);
+  }
+  return leading.length ? [...leading, verb, ...rest] : input;
+}
+
 // Only routing options before the verb belong to us. Text, JS, JSON and URLs
 // after the verb are opaque driver arguments, even when they look like flags.
-export function parseBrowserCliRoute(input: string[]): { connection: "extension" | "gateway"; args: string[]; commandIndex: number; port?: number; help: boolean; explicit: boolean } {
+export function parseBrowserCliRoute(rawInput: string[]): { connection: "extension" | "gateway"; args: string[]; commandIndex: number; port?: number; help: boolean; explicit: boolean } {
+  const input = hoistSafeTrailingRoutingFlags(rawInput);
   const args: string[] = [];
   let connection: "extension" | "gateway" | undefined;
   let port: number | undefined;

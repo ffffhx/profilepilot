@@ -1,33 +1,81 @@
-import type { AppState } from "../shared/types";
+import type { AppState, GatewayProfileControlState } from "../shared/types";
 import { AgentOverlayManager, isAgentOverlayClient } from "./agent-overlay";
 import { type GatewayControlResponse } from "./browser-gateway-client";
 import { agentControlStatusForClients, gatewayControlClient, gatewayControlsByPort, gatewayOverlayClients, gatewayOverlayControl, gatewayProfilesFromResponse, makeExternalProfileId, positiveInteger } from "./profile-connections";
+
+function collectControlledTargetIds(
+  control: GatewayProfileControlState | null | undefined,
+  rawProfile?: Record<string, unknown>
+): string[] {
+  const ids = new Set<string>();
+  const add = (value: unknown) => {
+    if (typeof value === "string" && value.trim()) {
+      ids.add(value.trim());
+    }
+  };
+  add(control?.agentTarget?.targetId);
+  if (rawProfile && typeof rawProfile === "object") {
+    add(rawProfile.targetId);
+    const rawAgentTarget = rawProfile.agentTarget;
+    if (rawAgentTarget && typeof rawAgentTarget === "object") {
+      add((rawAgentTarget as Record<string, unknown>).targetId);
+    }
+    const sessions = rawProfile.sessions;
+    if (sessions && typeof sessions === "object") {
+      for (const entry of Object.values(sessions as Record<string, unknown>)) {
+        if (!entry || typeof entry !== "object") {
+          continue;
+        }
+        const record = entry as Record<string, unknown>;
+        add(record.targetId);
+        if (record.agentTarget && typeof record.agentTarget === "object") {
+          add((record.agentTarget as Record<string, unknown>).targetId);
+        }
+      }
+    }
+  }
+  return [...ids];
+}
+
 export async function profileOverlayInput(state: AppState, gatewayStatus: GatewayControlResponse | null): Promise<Parameters<AgentOverlayManager["sync"]>[0]> {
     const { profiles, externalInstances } = state;
     const gatewayControlByPort = gatewayControlsByPort(gatewayStatus);
+    const rawGatewayProfileByPort = new Map<number, Record<string, unknown>>();
+    for (const rawProfile of gatewayProfilesFromResponse(gatewayStatus || { ok: true })) {
+      const port = Number(rawProfile.publicPort);
+      if (Number.isInteger(port) && port > 0) {
+        rawGatewayProfileByPort.set(port, rawProfile);
+      }
+    }
     const profileAgentOverlayCandidates = await Promise.all(
       profiles
         .filter((profile) => profile.cdpPort !== null && profile.cdpUrl)
         .map(async (profile) => {
+          const port = profile.cdpPort as number;
           const clients = gatewayOverlayClients(profile);
-          const control = profile.gatewayControl
-            ? gatewayOverlayControl(profile.gatewayControl)
+          const effectiveGatewayControl = profile.gatewayControl || gatewayControlByPort.get(port) || null;
+          const control = effectiveGatewayControl
+            ? gatewayOverlayControl(effectiveGatewayControl)
             : await agentControlStatusForClients(clients);
+          const rawProfile = rawGatewayProfileByPort.get(port);
           return {
-            port: profile.cdpPort as number,
+            port,
             profileId: profile.id,
             profileName: profile.name,
             headless: false,
             browserPids: profile.browserPids || [],
             controlPaused: control.paused,
-            pendingUserAction: profile.gatewayControl?.pendingUserAction || control.pendingUserAction,
+            pendingUserAction: effectiveGatewayControl?.pendingUserAction || control.pendingUserAction,
             agentOffline: control.agentOffline,
             driverReconnecting: Boolean(
-              profile.gatewayControl &&
-              (profile.gatewayControl.driverState === "connecting" || profile.gatewayControl.driverState === "reconnecting")
+              effectiveGatewayControl &&
+              (effectiveGatewayControl.driverState === "connecting" || effectiveGatewayControl.driverState === "reconnecting")
             ),
             controlSince: control.controlSince,
-            agentTarget: profile.gatewayControl?.agentTarget || null,
+            agentTarget: effectiveGatewayControl?.agentTarget || null,
+            ...(effectiveGatewayControl
+              ? { controlledTargetIds: collectControlledTargetIds(effectiveGatewayControl, rawProfile) }
+              : {}),
             clients
           };
         })
@@ -69,6 +117,7 @@ export async function profileOverlayInput(state: AppState, gatewayStatus: Gatewa
           agentOffline: state.agentOffline,
           driverReconnecting: control.driverState === "connecting" || control.driverState === "reconnecting",
           controlSince: state.controlSince, agentTarget: control.agentTarget,
+          controlledTargetIds: collectControlledTargetIds(control, profile),
           clients: client ? [client] : []
         }];
       });

@@ -1,0 +1,1 @@
+Different agents can use different Profiles or independent apps. An occupied Profile has an owner; a second agent cannot silently take it over. Pause for a manual step, then hand control back.

@@ -9,8 +9,9 @@ import { fileURLToPath } from "node:url";
 import { isWorkspaceShell } from "../workspace-shell";
 import { IPC_CHANNELS } from "../../shared/ipc";
 import { z } from "zod";
+import { REVIEW_METHODS } from "../../shared/review";
 import { taskLinkUrl } from "../../shared/task-link";
-import { TASK_CHANNEL, TASK_CHANGED, TASK_STREAM, TASK_PREVIEW, TERMINAL_TASKS, jevProviderFor, type JevProvider, type TaskSchedule } from "../../shared/tasks";
+import { TASK_CHANNEL, TASK_CHANGED, TASK_STREAM, TASK_PREVIEW, TERMINAL_TASKS, DEVICE_ONLY_PROFILE_ID, DEVICE_ONLY_PROFILE_NAME, jevProviderFor, type JevProvider } from "../../shared/tasks";
 import { TaskPreviewStream } from "./preview";
 import type { ProfileManager } from "../profile-manager";
 import { defaultDataDir } from "../fs-util";
@@ -61,7 +62,7 @@ export function registerTaskService(profileManager: ProfileManager, native: Brow
   const detailCursors = new WeakMap<Electron.WebContents, TaskDetailCursor>();
   const broadcast = (value: import("../../shared/tasks").TaskListUpdate) => { for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send(TASK_CHANGED, value); };
   const saveSettings = (patch: Partial<import("../../shared/tasks").TaskSettings> & { apiKey?: string }): void => {
-    const input = z.object({ model: z.string().trim().min(1).max(200), baseUrl: z.string().url(), authMode: z.enum(["apiKey", "bearer"]).optional(), maxConcurrent: z.number().int().min(1).max(6), retentionDays: z.number().int().min(1).max(3650), saveScreenshots: z.boolean(), notifications: z.boolean(), apiKey: z.string().max(1000).optional() }).partial().parse(patch);
+    const input = z.object({ model: z.string().trim().min(1).max(200), baseUrl: z.string().url(), authMode: z.enum(["apiKey", "bearer"]).optional(), maxConcurrent: z.number().int().min(1).max(6), retentionDays: z.number().int().min(1).max(3650), saveScreenshots: z.boolean(), notifications: z.boolean(), customInputUsdPerMillion: z.number().min(0).max(10000).optional(), customOutputUsdPerMillion: z.number().min(0).max(10000).optional(), apiKey: z.string().max(1000).optional() }).partial().parse(patch);
     const endpoint = new URL(input.baseUrl || store.data.settings.baseUrl);
     if (endpoint.origin !== new URL(store.data.settings.baseUrl).origin && !input.apiKey?.trim() && existsSync(vaultPath)) throw new Error("切换模型服务时请输入新服务的 API 密钥，避免将原密钥发送给其他服务。");
     if (endpoint.username || endpoint.password || endpoint.search || endpoint.hash || !(endpoint.protocol === "https:" || (endpoint.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(endpoint.hostname)))) throw new Error("模型地址需要 HTTPS，本机服务可使用 HTTP；不能包含凭据或查询参数。");
@@ -83,12 +84,14 @@ export function registerTaskService(profileManager: ProfileManager, native: Brow
     closeBrowser: () => { detachNative(); native.configureUi(undefined); },
     browser: new RoutedBrowser(new WrapperBrowser(path.join(root, "artifacts")), new NativeBrowser(native, path.join(root, "artifacts"))), apiKey, jevApiKey,
     profileName: async (id) => {
+      if (id === DEVICE_ONLY_PROFILE_ID) return DEVICE_ONLY_PROFILE_NAME;
       const profile = (await profileManager.getState()).profiles.find((entry) => entry.id === id);
       if (!profile) throw new Error("请选择有效的浏览器 Profile。");
       if (profile.source !== "native" && (profile.source !== "isolated" || profile.agentAccessDisabled)) throw new Error("请选择允许 Agent 连接的独立 Profile。");
       return profile.name;
     },
     prepareProfile: async (id) => {
+      if (id === DEVICE_ONLY_PROFILE_ID) throw new Error("当前任务未绑定浏览器 Profile；请使用手机、桌面、本机应用或本地文件与终端工具，或新建绑定浏览器的任务。");
       const profile = (await profileManager.getState()).profiles.find(p => p.id === id);
       if (!profile) throw new Error("Profile 不存在。");
       if (profile.source === "native") {
@@ -144,8 +147,17 @@ export function registerTaskService(profileManager: ProfileManager, native: Brow
     try { source = fileURLToPath(url.split("?")[0]); } catch { throw new Error("任务接口只能由本地桌面界面调用。"); }
     const publicDir = path.resolve(__dirname, "../../../public");
     const shellFrame = isWorkspaceShell(url, path.resolve(__dirname, "../../../public")) && event.senderFrame === event.sender?.mainFrame;
-    if (!shellFrame && !["tasks.html", "index.html", "tools.html"].some((name) => path.resolve(source) === path.join(publicDir, name))) throw new Error("不允许此页面调用任务接口。");
+    const settingsReview = path.resolve(source) === path.join(publicDir, "settings.html") && REVIEW_METHODS.includes(method);
+    if (!settingsReview && !shellFrame && !["tasks.html", "index.html", "tools.html"].some((name) => path.resolve(source) === path.join(publicDir, name))) throw new Error("不允许此页面调用任务接口。");
     switch (method) {
+      case "reviewSnapshot": return service.reviews.snapshot();
+      case "reviewConfigure": return service.reviews.configure(args[0]);
+      case "reviewRun": return service.reviews.run(z.enum(["daily", "weekly"]).parse(args[0]));
+      case "reviewReport": return service.reviews.report(idSchema.parse(args[0]));
+      case "reviewFeedback": return service.reviews.feedback(idSchema.parse(args[0]), z.string().regex(/^[a-f0-9]{24}$/).parse(args[1]), z.enum(["accepted", "dismissed", "existing", "pending"]).parse(args[2]), z.string().max(1000).optional().parse(args[3]));
+      case "reviewExportWorkflow": return service.reviews.exportWorkflow(idSchema.parse(args[0]), z.string().regex(/^[a-f0-9]{24}$/).parse(args[1]));
+      case "reviewSaveAsTemplate":
+      case "reviewSaveWorkflowTemplate": return service.reviews.saveAsTemplate(idSchema.parse(args[0]), z.string().regex(/^[a-f0-9]{24}$/).parse(args[1]));
       case "watchPreview": {
         const id = z.string().uuid().nullable().parse(args[0]);
         const sender = event.sender;
@@ -200,7 +212,7 @@ export function registerTaskService(profileManager: ProfileManager, native: Brow
       case "writeMemory":
       case "deleteMemory": {
         const profileId = z.string().min(1).max(200).parse(args[0]);
-        if (!store.data.tasks.some(task => task.profileId === profileId) && !(await profileManager.getState()).profiles.some(profile => profile.id === profileId)) throw new Error("Profile 不存在。");
+        if (profileId !== DEVICE_ONLY_PROFILE_ID && !store.data.tasks.some(task => task.profileId === profileId) && !(await profileManager.getState()).profiles.some(profile => profile.id === profileId)) throw new Error("Profile 不存在。");
         if (method === "getMemory") return service.getMemory(profileId);
         if (method === "setMemoryEnabled") return service.setMemoryEnabled(profileId, z.boolean().parse(args[1]));
         const name = z.string().min(1).max(110).parse(args[1]);
@@ -209,6 +221,7 @@ export function registerTaskService(profileManager: ProfileManager, native: Brow
       }
       case "focusTaskBrowser": {
         const task = store.get(idSchema.parse(args[0]));
+        if (task.profileId === DEVICE_ONLY_PROFILE_ID) throw new Error("当前任务未绑定浏览器。");
         if (isNativeTask(task)) await native.request(task.profileId, "focus", { sessionId: task.sessionId });
         else await profileManager.focusProfile(task.profileId);
         return;
@@ -224,6 +237,10 @@ export function registerTaskService(profileManager: ProfileManager, native: Brow
       case "permissions": return service.permissions(idSchema.parse(args[0]), z.union([idSchema, z.literal("all")]).optional().parse(args[1]));
       case "setLimits": return service.setLimits(idSchema.parse(args[0]), args[1]);
       case "setModel": return service.setModel(idSchema.parse(args[0]), z.string().trim().min(1).max(200).parse(args[1]));
+      case "setMode": return service.setMode(idSchema.parse(args[0]), z.enum(["manual", "plan", "acceptEdits"]).parse(args[1]), z.string().trim().min(1).max(200).optional().parse(args[2]));
+      case "compact": return service.compactConversation(idSchema.parse(args[0]), z.string().max(5000).optional().parse(args[1] ?? ""));
+      case "fork": return service.forkConversation(idSchema.parse(args[0]), z.string().trim().min(1).max(120).optional().parse(args[1]), idSchema.optional().parse(args[2]));
+      case "rewind": return service.rewindConversation(idSchema.parse(args[0]), idSchema.parse(args[1]));
       case "saveMaterial": {
         const data = z.object({ id: idSchema.optional(), name: z.string().trim().min(1).max(100), scope: z.string().max(300).default(""), content: z.string().trim().min(1).max(60000) }).parse(args[0]);
         const previous = store.data.materials.find((item) => item.id === data.id);
@@ -280,16 +297,8 @@ export function registerTaskService(profileManager: ProfileManager, native: Brow
         const page = z.enum(["keys", "billing"]).parse(args[0]);
         return shell.openExternal(jevProviderFor(store.data.settings) === "typesafe" ? JEV_CONSOLE_URL : page === "keys" ? JEV_KEYS_URL : JEV_BILLING_URL);
       }
-      case "saveSchedule": {
-        const input = z.object({ id: idSchema.optional(), name: z.string().trim().min(1).max(100), task: createTaskSchema, at: z.string().datetime(), timezone: z.string().min(1).max(100), repeat: z.enum(["once", "daily"]), enabled: z.boolean() }).parse(args[0]);
-        new Intl.DateTimeFormat("zh-CN", { timeZone: input.timezone });
-        if (input.enabled && Date.parse(input.at) <= Date.now()) throw new Error("请选择未来的执行时间。");
-        const previous = store.data.schedules.find(schedule => schedule.id === input.id);
-        if (input.id && !previous) throw new Error("计划不存在。");
-        const schedule: TaskSchedule = { ...previous, ...input, id: input.id || randomUUID(), missedAt: previous?.at === input.at ? previous.missedAt : undefined };
-        store.data.schedules = [schedule, ...store.data.schedules.filter((value) => value.id !== schedule.id)]; service.publish([]); return schedule;
-      }
-      case "deleteSchedule": { const id = idSchema.parse(args[0]); store.data.schedules = store.data.schedules.filter((entry) => entry.id !== id); service.publish([]); return; }
+      case "saveSchedule": return service.saveSchedule(args[0]);
+      case "deleteSchedule": { service.deleteSchedule(idSchema.parse(args[0])); return; }
       case "saveTemplate": {
         const input = z.object({ id: idSchema.optional(), name: z.string().trim().min(1).max(100), task: createTaskSchema }).parse(args[0]);
         if (input.id && !store.data.templates.some(template => template.id === input.id)) throw new Error("模板不存在。");

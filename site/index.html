@@ -5,9 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="让 AI 使用你已登录的 Chrome，管理本地应用与 Android 手机。在桌面与终端发起任务，手机端准备连接与权限，随时暂停或接管。"
+      content="给 Claude Code、Codex 使用的本地工具。读取闲鱼、小红书等网站，连接已登录 Chrome、Electron 与 Android，分别管理不同目标的控制会话。"
     />
-    <title>ProfilePilot - 浏览器、桌面与 Android 的 AI 工作区</title>
+    <title>ProfilePilot — 给你的 Agent 接上浏览器和安卓</title>
+    <meta property="og:title" content="ProfilePilot — 给你的 Agent 接上浏览器和安卓" />
+    <meta property="og:description" content="网站读取、不同目标的会话管理、Chrome / Electron / Android，一个本地 CLI。" />
+    <meta property="og:image" content="https://ffffhx.github.io/profilepilot/site/assets/social-cover.png" />
+    <meta name="twitter:card" content="summary_large_image" />
     <link rel="icon" href="public/assets/profilepilot-mark.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="site/styles.css" />
   </head>
@@ -41,27 +45,27 @@
         </div>
 
         <div class="hero-copy">
-          <h1 id="hero-title">ProfilePilot</h1>
+          <h1 id="hero-title">把网页任务，交给你正在用的 Agent。</h1>
           <p class="hero-lede">
-            让 AI 沿用你的 Chrome 登录状态，连接本地应用与 Android 手机。在一个工作区里发起任务、查看执行过程和结果，随时暂停或接管。
+            给 Claude Code、Codex 接上已登录的 Chrome、Electron 和安卓。内置闲鱼、小红书等网站读取；不同 Agent 使用不同 Profile／应用，各自处理自己的任务。
           </p>
           <div class="hero-actions">
-            <a class="button primary" href="#download">选择你的版本</a>
-            <a class="button secondary" href="https://github.com/ffffhx/profilepilot">GitHub / Star</a>
-            <a class="button secondary" href="#workflows">查看工作流</a>
+            <a class="button primary" href="site/start.html">开始第一次任务</a>
+            <a class="button secondary" href="https://github.com/ffffhx/profilepilot">查看源代码</a>
+            <a class="button secondary" href="#site-reads">查看站点能力</a>
           </div>
           <dl class="proof-strip" aria-label="ProfilePilot 关键承诺">
             <div>
-              <dt>0</dt>
-              <dd>强制云同步</dd>
+              <dt>网站读取</dt>
+              <dd>候选、原链接与待确认项</dd>
             </div>
             <div>
-              <dt>1</dt>
-              <dd>真实 Chrome 入口</dd>
+              <dt>独立目标</dt>
+              <dd>不同 Profile／应用分开工作</dd>
             </div>
             <div>
-              <dt>∞</dt>
-              <dd>隔离测试 Profile</dd>
+              <dt>人工接管</dt>
+              <dd>暂停、处理后再交还</dd>
             </div>
           </dl>
         </div>
@@ -70,13 +74,13 @@
       <section class="section workflow-section" id="workflows">
         <div class="section-head">
           <h2>从连接浏览器，到完成第一个任务。</h2>
-          <p>新手引导会逐步高亮真实的 Tab 和按钮，说明每个入口的作用。先连接浏览器，再配置模型，回到 Agent 描述目标。</p>
+          <p>安装桌面版 → 连接 Chrome 扩展 → 安装 CLI 与 Skill → 在已有 Agent 中描述目标。外部控制命令本身不额外调用模型。</p>
         </div>
 
         <div class="workflow-tabs" role="tablist" aria-label="ProfilePilot 工作流">
           <button class="active" id="workflow-tab-native" type="button" role="tab" aria-selected="true" aria-controls="workflow-panel" tabindex="0" data-workflow="native">连接浏览器</button>
-          <button id="workflow-tab-extensions" type="button" role="tab" aria-selected="false" aria-controls="workflow-panel" tabindex="-1" data-workflow="extensions">创建任务</button>
-          <button id="workflow-tab-account" type="button" role="tab" aria-selected="false" aria-controls="workflow-panel" tabindex="-1" data-workflow="account">本地应用</button>
+          <button id="workflow-tab-extensions" type="button" role="tab" aria-selected="false" aria-controls="workflow-panel" tabindex="-1" data-workflow="extensions">安装 CLI / Skill</button>
+          <button id="workflow-tab-account" type="button" role="tab" aria-selected="false" aria-controls="workflow-panel" tabindex="-1" data-workflow="account">第一次任务</button>
           <button id="workflow-tab-cdp" type="button" role="tab" aria-selected="false" aria-controls="workflow-panel" tabindex="-1" data-workflow="cdp">连接手机</button>
         </div>
 
@@ -98,24 +102,24 @@
 
       <section class="section feature-section" id="features">
         <div class="section-head compact">
-          <h2>浏览器、项目与手机，各有清楚的入口。</h2>
-          <p>桌面负责执行与管理，CLI 为外部 Agent 提供控制入口；Android App 帮你准备手机连接与权限。</p>
+          <h2>把反复准备的步骤，变成现成入口。</h2>
+          <p>用具体任务判断是否适合你：网站资料整理、多个本地目标，以及网页到安卓的验收。</p>
         </div>
         <div class="feature-grid">
-          <article><span class="feature-index">A</span><h3>Agent 任务</h3><p>描述目标、补充文件，查看执行过程和结果；常用任务可保存为模板或安排定时执行。</p></article>
-          <article><span class="feature-index">B</span><h3>浏览器环境</h3><p>管理日常 Chrome 和独立 Profile，查看连接状态，按需同步账号数据与扩展。</p></article>
+          <article><span class="feature-index">A</span><h3>现成的网站读取</h3><p>闲鱼可筛选候选、核对商品详情并整理带来源的报告；小红书可读笔记与已加载评论。</p></article>
+          <article><span class="feature-index">B</span><h3>不同目标分别工作</h3><p>不同 Agent 使用不同 Profile／应用。同一个 Profile 已被占用时提示冲突，保留当前会话的归属。</p></article>
           <article><span class="feature-index">C</span><h3>本地应用</h3><p>登记开发项目和后台服务，集中查看启动状态、端口与日志，连接支持调试的 Electron 应用。</p></article>
           <article><span class="feature-index">D</span><h3>Android 手机</h3><p>通过 USB 或 Wi-Fi 查看、控制 Android；手机 App 集中展示连接状态、权限准备，以及暂停和停止控制的入口。</p></article>
-          <article><span class="feature-index">E</span><h3>CLI 与外部 Agent</h3><p>在配套工具中安装 ppilot 和使用指引，从终端对话或让外部 Agent 操作浏览器与手机。</p></article>
-          <article><span class="feature-index">F</span><h3>逐步高亮引导</h3><p>框住真实 Tab、按钮和内容，在旁边说明用途。支持上一步、下一步、跳过与随时重新打开。</p></article>
+          <article><span class="feature-index">E</span><h3>沿用你的 Agent</h3><p>在配套工具中一起安装 ppilot 与 Skill。直接控制命令不再启动一套模型循环，继续使用你的编程 Agent。</p></article>
+          <article><span class="feature-index">F</span><h3>需要时接过来</h3><p>登录或处理人工步骤时暂停接管；明确交还后重新观察再继续。结果不明的操作不会自动重放。</p></article>
         </div>
       </section>
 
       <section class="compare-section" id="compare">
-        <div class="compare-copy"><h2>选好工作环境，再说出你的目标。</h2><p>内置 Agent 的模型在左下角「设置」中配置。只需要直接控制工具时，也可以使用 CLI 和你自己的 Agent。</p></div>
+        <div class="compare-copy"><h2>先用一个只读任务，走通整个过程。</h2><p>在你已有的 Agent 中使用 ProfilePilot Skill，先检查默认目标和占用，再读取指定网页。<a href="site/start.html">查看中英文上手说明和任务示例</a></p></div>
         <div class="compare-table" role="table" aria-label="使用场景与连接入口">
           <div class="compare-row head" role="row"><span role="columnheader">你想做什么</span><span role="columnheader">入口</span><span role="columnheader">准备工作</span><span role="columnheader">接下来</span></div>
-          <div class="compare-row" role="row"><span role="cell">使用日常浏览器</span><span role="cell">配套工具</span><span role="cell">选择 Chrome Profile，连接扩展</span><span role="cell">回到 Agent 发起任务</span></div>
+          <div class="compare-row" role="row"><span role="cell">使用日常浏览器</span><span role="cell">配套工具</span><span role="cell">连接扩展，安装 CLI / Skill</span><span role="cell">在已有 Agent 中描述任务</span></div>
           <div class="compare-row" role="row"><span role="cell">独立环境测试</span><span role="cell">浏览器</span><span role="cell">新建独立 Profile，按需准备账号</span><span role="cell">交给 Agent 或人工测试</span></div>
           <div class="compare-row" role="row"><span role="cell">管理本地项目</span><span role="cell">本地应用</span><span role="cell">添加项目目录与启动命令</span><span role="cell">启动、查看状态与日志</span></div>
           <div class="compare-row" role="row"><span role="cell">连接 Android 手机</span><span role="cell">手机设备</span><span role="cell">连接 USB 或 Wi-Fi，按需安装配套 App</span><span role="cell">准备权限，在电脑端查看与控制</span></div>
@@ -142,10 +146,19 @@
         </div>
       </section>
 
+      <section class="section" id="site-reads">
+        <div class="section-head"><h2>先从你常用的网站试起。</h2><p>当前源码提供 9 个站点、21 项结构化读取操作。每站能力不同，登录状态和页面变化会影响可用性。运行 <code>ppilot browser sites</code> 查看已安装版本的目录。</p></div>
+        <div class="site-capabilities">
+          <dl><dt>闲鱼</dt><dd>搜索、详情、地区；按条件整理候选、排除项与待确认项。</dd><dt>小红书</dt><dd>搜索、笔记详情、已加载评论。</dd><dt>Bilibili / YouTube</dt><dd>B站搜索、详情、评论；YouTube 搜索、详情与已有字幕。</dd><dt>BOSS / 知乎 / 什么值得买</dt><dd>岗位搜索与详情、知乎搜索与热榜、优惠搜索。</dd><dt>Reddit / 微信文章</dt><dd>帖子与评论树；搜狗微信搜索与文章正文。</dd></dl>
+          <div><h3>已有 browser-use 或 agent-browser？</h3><p>它们也能复用登录态和运行多会话。ProfilePilot 更值得你试的，是这些现成网站操作、不同本地目标的管理，以及安卓工作流能否减少自己的准备工作。</p><p>这里没有三方同条件的速度或成功率排名。<a href="https://github.com/ffffhx/profilepilot/blob/main/docs/promotion-plan.md">查看能力比较与依据</a></p><p><a class="button secondary" href="site/start.html#examples">复制一个任务示例</a></p></div>
+        </div>
+      </section>
+
       <section class="download-section" id="download">
         <div class="install-copy">
           <h2>从官网直接下载 ProfilePilot。</h2>
-          <p>安装包发布在 GitHub Release。支持 macOS、Windows，以及 Android 11 或以上的手机。Android App 用于连接与权限准备，任务在电脑端发起。</p>
+          <p>桌面安装包提供 macOS 与 Windows 版本；安卓配套 App 支持 Android 11 及以上。安装后按<a href="site/start.html">上手指引</a>连接扩展，再让已有 Agent 完成第一次任务。</p>
+          <p>扩展目前按连接页引导手动加载。下载前请核对 Release 的版本说明；本页描述的是当前源码能力，不保证旧下载包包含全部功能。</p>
         </div>
         <div class="download-panel" aria-label="ProfilePilot 下载链接">
           <a class="download-card primary" href="https://github.com/ffffhx/profilepilot/releases/latest/download/ProfilePilot-mac-arm64.dmg">

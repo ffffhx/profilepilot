@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { Readable } from "node:stream";
 import { parseBrowserCliRoute, runBrowserCli } from "./browser-cli";
 import { browserGatewayRoot } from "./browser-gateway-client";
 import { engineHelp } from "./browser-engine/arguments";
@@ -9,14 +10,16 @@ import type { ProfilePilotManagementResponse } from "./profilepilot-management-p
 import { commandGuidance, handleControlCliDiscovery, type ControlCliCommands } from './control-cli-contract';
 import { z } from 'zod';
 import { electronRouting } from './control-routing';
+import { controlRecovery } from '../shared/control-recovery';
 
 export const electronCommands: ControlCliCommands = {
   list: { summary: '列出已接入应用；--all 查询全部登记及实际状态', options: ['--json', '--all'], example: ['list', '--all'] },
   inspect: { summary: '只读检查实际应用身份、连接和占用', options: ['--json', '--session'], example: ['inspect', 'NAME_OR_ID_FROM_LIST'], notes: ['名称不唯一时使用 list --all 的真实 ID；--session 只用于判断本任务的控制权。'] },
   doctor: { summary: 'inspect 的只读诊断别名', options: ['--json', '--session'], example: ['doctor', 'NAME_OR_ID_FROM_LIST'] },
+  logs: { summary: '只读查看本地应用托管进程的输出日志', options: ['--json', '--tail', '--grep'], example: ['logs', 'NAME_OR_ID_FROM_LIST', '--tail', '100'], notes: ['仅对 launch / service 托管进程返回最近日志；--tail 范围 1–5000。'] },
   connect: { summary: '准备已登记应用连接，不取得其他任务的控制权', options: ['--json', '--confirmation-token'], example: ['connect', 'NAME_OR_ID_FROM_LIST'], notes: ['重启仅接受上次返回且获用户授权的确认令牌；结果未知时先 inspect。'] },
-  configure: { summary: '通过受支持入口修正已登记应用启动路径', options: ['--json', '--params-file'], required: ['--params-file'], example: ['configure', 'NAME_OR_ID_FROM_LIST', '--params-file', './connection.json'], input: { ...z.toJSONSchema(electronConfigurationSchema, { io: 'input' }), minProperties: 1 }, notes: ['使用本机实际路径；原生端口和 Agent 逻辑端口不能混用。'] },
-  register: { summary: '登记此前未接入的 Electron 应用；不启动、不连接、不控制', options: ['--json', '--params-file'], required: ['--params-file'], example: ['register', '--params-file', './electron.json'],
+  configure: { summary: '通过受支持入口修正已登记应用启动路径', options: ['--json', '--params', '--params-file', '--params-stdin'], example: ['configure', 'NAME_OR_ID_FROM_LIST', '--params-file', './connection.json'], input: { ...z.toJSONSchema(electronConfigurationSchema, { io: 'input' }), minProperties: 1 }, notes: ['使用本机实际路径；原生端口和 Agent 逻辑端口不能混用。'] },
+  register: { summary: '登记此前未接入的 Electron 应用；不启动、不连接、不控制', options: ['--json', '--params', '--params-file', '--params-stdin'], example: ['register', '--params-file', './electron.json'],
     input: z.toJSONSchema(electronRegistrationSchema, { io: 'input' }),
     notes: ['端口必须从实际启动配置/本机发现确认且互不冲突，不能复制示例端口。launch 需本机已有 cwd 和启动命令；attach 连接用户指定的已有调试入口。', '名称已存在时拒绝新增；使用 inspect/configure 保留已有登记和会话。'] }
 };
@@ -46,6 +49,7 @@ export const electronCliHelp = `ppilot electron · Electron 应用控制
   ppilot electron list --all [--json]                   查询全部登记及实时连接状态
   ppilot electron inspect NAME_OR_ID [--json]           检查应用进程、调试连接和控制权
   ppilot electron doctor NAME_OR_ID [--session TASK]    按当前任务判断可用性
+  ppilot electron logs NAME_OR_ID [--tail 100] [--grep 关键词] 查看托管进程输出日志
   ppilot electron register --params-file FILE          登记新目标，不启动或连接
   ppilot electron schema [COMMAND]                     查询命令参数与最小示例
   ppilot electron connect NAME_OR_ID [--json]           连接已有应用；已停止时按登记启动
@@ -69,12 +73,30 @@ Gateway 限制新建和关闭应用窗口。接管、暂停、冲突及会话结
 
 `;
 
+function normalizeManagementInput(input: string[]): string[] {
+  const leading: string[] = [];
+  let i = 0;
+  while (i < input.length && input[i].startsWith("--") && input[i] !== "--help") {
+    if (input[i] === "--json") { leading.push(input[i]); i++; continue; }
+    if (input[i] === "--session" && i + 1 < input.length && !input[i + 1].startsWith("-")) {
+      leading.push(input[i], input[++i]); i++; continue;
+    }
+    break;
+  }
+  const verb = input[i];
+  if (leading.length && verb && (["inspect", "doctor", "connect", "configure", "register", "logs"].includes(verb) || (verb === "list" && input.includes("--all")))) {
+    return [verb, ...input.slice(i + 1), ...leading];
+  }
+  return input;
+}
+
 export async function runElectronCli(
-  input: string[], io: Pick<NodeJS.Process, "stdout" | "stderr"> = process,
+  rawInput: string[], io: Pick<NodeJS.Process, "stdout" | "stderr"> = process,
   env: NodeJS.ProcessEnv = process.env,
-  runtime: { targets?: () => ElectronTarget[]; browser?: typeof runBrowserCli;
+  runtime: { targets?: () => ElectronTarget[]; browser?: typeof runBrowserCli; stdin?: Readable;
     request?: (command: LocalAppManagementCommand) => Promise<ProfilePilotManagementResponse> } = {}
 ): Promise<number> {
+  const input = normalizeManagementInput(rawInput);
   try {
     const schemaTarget = ['schema', 'capabilities', 'help'].includes(input[0]) ? input[1] : input[0];
     if (schemaTarget && Object.hasOwn(electronCommands, schemaTarget) && handleControlCliDiscovery('electron', input, electronCommands, io)) return 0;
@@ -82,15 +104,15 @@ export async function runElectronCli(
       if (handleControlCliDiscovery('electron', input, electronCommands, io)) return 0;
     }
     if (!input.includes("--help") && !input.includes("-h") &&
-      (["inspect", "doctor", "connect", "configure", "register"].includes(input[0]) || input[0] === "list" && input.includes("--all"))) {
+      (["inspect", "doctor", "connect", "configure", "register", "logs"].includes(input[0]) || input[0] === "list" && input.includes("--all"))) {
       const sessionIndex = input.indexOf('--session');
       const session = sessionIndex >= 0 ? input[sessionIndex + 1] : undefined;
-      const command = parseManagementArgs(input);
+      const command = await parseManagementArgs(input, runtime.stdin || process.stdin);
       if (!runtime.request) throw new Error("本地应用管理入口不可用，请通过 ppilot electron 运行。");
       try {
         const response = await runtime.request(command);
         if (!response.ok) {
-          io.stderr.write(JSON.stringify({ ok: false, ...response.error, ...(response.error.code === 'LOCAL_APP_NOT_FOUND' ? { routing: electronRouting() } : {}), guidance: commandGuidance('electron', input[0], electronCommands) }) + "\n");
+          io.stderr.write(JSON.stringify({ ok: false, ...response.error, recovery: controlRecovery(response.error.code), ...(response.error.code === 'LOCAL_APP_NOT_FOUND' ? { routing: electronRouting() } : {}), guidance: commandGuidance('electron', input[0], electronCommands) }) + "\n");
           return 1;
         }
         const result = response.data as { status?: string; app?: unknown; apps?: unknown[] };
@@ -100,7 +122,7 @@ export async function runElectronCli(
       } catch (error) {
         io.stderr.write(JSON.stringify({ ok: false, code: "LOCAL_APP_MANAGEMENT_UNAVAILABLE",
           error: error instanceof Error ? error.message : String(error),
-          recovery: "请检查 ProfilePilot 状态；connect 结果未知时先 inspect，不自动重放。" }) + "\n");
+          recovery: controlRecovery("LOCAL_APP_MANAGEMENT_UNAVAILABLE") }) + "\n");
         return 69;
       }
     }
@@ -141,17 +163,21 @@ export async function runElectronCli(
     }
     return await (runtime.browser || runBrowserCli)(["--connection", "gateway", ...route.args], io, env);
   } catch (error) {
-    io.stderr.write(JSON.stringify({ ok: false, code: "ELECTRON_CLI_INVALID_ARGUMENTS", error: error instanceof Error ? error.message : String(error), guidance: commandGuidance('electron', input[0], electronCommands) }) + "\n");
+    io.stderr.write(JSON.stringify({ ok: false, code: "ELECTRON_CLI_INVALID_ARGUMENTS", error: error instanceof Error ? error.message : String(error), recovery: controlRecovery("ELECTRON_CLI_INVALID_ARGUMENTS"), guidance: commandGuidance('electron', input[0], electronCommands) }) + "\n");
     return 64;
   }
 }
 
-function parseManagementArgs(args: string[]): LocalAppManagementCommand {
+async function parseManagementArgs(args: string[], stdin: Readable): Promise<LocalAppManagementCommand> {
   const [verb, ...rest] = args;
   const method = verb === 'doctor' ? 'inspect' : verb;
   const values: string[] = [];
   let confirmationToken: string | undefined;
+  let paramsInline: string | undefined;
   let paramsFile: string | undefined;
+  let paramsStdin = false;
+  let tailLines: number | undefined;
+  let grep: string | undefined;
   let json = false, all = false;
   let session: string | undefined;
   for (let i = 0; i < rest.length; i++) {
@@ -163,9 +189,29 @@ function parseManagementArgs(args: string[]): LocalAppManagementCommand {
       if (!session || !/^[A-Za-z0-9._:-]{1,100}$/.test(session)) throw new Error('--session 需要有效的任务名称。');
       continue;
     }
+    if (arg === "--tail" && method === "logs" && tailLines === undefined) {
+      const val = rest[++i];
+      if (!val || !/^\d+$/.test(val) || Number(val) < 1 || Number(val) > 5000) throw new Error("--tail 需要 1–5000 的整数。");
+      tailLines = Number(val);
+      continue;
+    }
+    if (arg === "--grep" && method === "logs" && grep === undefined) {
+      grep = rest[++i];
+      if (!grep || grep.startsWith("--")) throw new Error("--grep 需要检索词。");
+      continue;
+    }
+    if (arg === "--params" && ['configure', 'register'].includes(method) && paramsInline === undefined) {
+      paramsInline = rest[++i];
+      if (!paramsInline) throw new Error("--params 需要 UTF-8 JSON 字符串。");
+      continue;
+    }
     if (arg === "--params-file" && ['configure', 'register'].includes(method) && !paramsFile) {
       paramsFile = rest[++i];
       if (!paramsFile || paramsFile.startsWith("--")) throw new Error("--params-file 需要 UTF-8 JSON 文件路径。");
+      continue;
+    }
+    if (arg === "--params-stdin" && ['configure', 'register'].includes(method) && !paramsStdin) {
+      paramsStdin = true;
       continue;
     }
     if (arg === "--confirmation-token" && method === "connect" && !confirmationToken) {
@@ -178,15 +224,31 @@ function parseManagementArgs(args: string[]): LocalAppManagementCommand {
     values.push(arg);
   }
   if (method === "list" && all && !values.length) return { action: "local-app", method: "list" };
-  if (method === 'register' && !values.length && paramsFile) {
-    const input = electronRegistrationSchema.parse(JSON.parse(readFileSync(paramsFile, 'utf8').replace(/^\uFEFF/, '')));
-    return { action: 'local-app', method: 'register', input };
+  if (method === "logs" && values.length === 1 && values[0].trim()) {
+    return { action: "local-app", method: "logs", selector: values[0], ...(tailLines ? { tailLines } : {}), ...(grep ? { grep } : {}) };
   }
-  if (method === "configure" && values.length === 1 && values[0].trim() && paramsFile) {
-    const input: unknown = JSON.parse(readFileSync(paramsFile, "utf8").replace(/^\uFEFF/, ""));
-    return { action: 'local-app', method: 'configure', selector: values[0], input: electronConfigurationSchema.parse(input) };
+  if (['configure', 'register'].includes(method)) {
+    const sources = Number(paramsInline !== undefined) + Number(Boolean(paramsFile)) + Number(paramsStdin);
+    if (sources !== 1) throw new Error("请选择且仅选择一种参数来源：--params、--params-file 或 --params-stdin。");
+    let rawJson = "";
+    if (paramsInline !== undefined) {
+      rawJson = paramsInline;
+    } else if (paramsFile) {
+      rawJson = readFileSync(paramsFile, "utf8");
+    } else {
+      const chunks: Buffer[] = []; let size = 0;
+      for await (const chunk of stdin) { const bytes = Buffer.from(chunk); size += bytes.length; if (size > 65536) throw new Error("参数超过 64 KiB。"); chunks.push(bytes); }
+      rawJson = Buffer.concat(chunks).toString("utf8");
+    }
+    const parsedJson: unknown = JSON.parse(rawJson.replace(/^\uFEFF/, ""));
+    if (method === 'register' && !values.length) {
+      return { action: 'local-app', method: 'register', input: electronRegistrationSchema.parse(parsedJson) };
+    }
+    if (method === "configure" && values.length === 1 && values[0].trim()) {
+      return { action: 'local-app', method: 'configure', selector: values[0], input: electronConfigurationSchema.parse(parsedJson) };
+    }
   }
   if ((method === "connect" || method === "inspect") && values.length === 1 && values[0].trim())
     return { action: "local-app", method, selector: values[0], ...(confirmationToken ? { confirmationToken } : {}) };
-  throw new Error("用法：ppilot electron list --all | inspect NAME_OR_ID | connect NAME_OR_ID [--confirmation-token TOKEN]");
+  throw new Error("用法：ppilot electron list --all | inspect NAME_OR_ID | logs NAME_OR_ID | connect NAME_OR_ID [--confirmation-token TOKEN]");
 }

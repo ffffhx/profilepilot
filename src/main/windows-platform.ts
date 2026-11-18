@@ -1,14 +1,16 @@
 import os from "node:os";
 import path from "node:path";
+import fs from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { sampleWindowsProcesses, sampleWindowsFileLocks, type WindowsSamplerReadContext } from './windows-sampler';
 import { WINDOWS_SAMPLER_LIMITS, validateWindowsSamplerRequest, type WindowsSamplerIdentityReason } from './windows-sampler-protocol';
 import { profileFileProcessChanged } from './profile-process-change';
 
 const execFileAsync = promisify(execFile);
 const SNAPSHOT_TTL_MS = 750;
+const CONTROL_SAMPLE_TTL_MS = 1500;
 
 export interface WindowsProcessInfo {
   pid: number;
@@ -136,7 +138,41 @@ interface CachedWindowsSnapshot {
   promise: Promise<WindowsSystemSnapshot>;
 }
 
+interface CachedWindowsControlSample {
+  expiresAt: number;
+  promise: Promise<WindowsControlSample>;
+}
+
 let snapshotCache: CachedWindowsSnapshot | null = null;
+let controlSampleCache: CachedWindowsControlSample | null = null;
+
+/** Short-TTL (1.5s) cached Windows control sample for rapid desktop admission reads.
+ * Cleared immediately by invalidateWindowsSystemSnapshot() / invalidateProcessRuntime(). */
+export async function collectCachedWindowsControlSample(
+  context: WindowsSamplerReadContext = createWindowsReadContext(),
+  options: { force?: boolean; ttlMs?: number } = {}
+): Promise<WindowsControlSample> {
+  if (process.platform !== 'win32') throw new Error('PROFILE_WINDOWS_SAMPLE_UNSUPPORTED');
+  requireReadBudget(context);
+  const ttlMs = options.ttlMs ?? CONTROL_SAMPLE_TTL_MS;
+  const currentNow = context.now();
+  if (!options.force && controlSampleCache && controlSampleCache.expiresAt > currentNow) {
+    const cached = await controlSampleCache.promise;
+    requireReadBudget(context);
+    if (currentNow - cached.capturedAt <= ttlMs) return cached;
+  }
+  const promise = collectWindowsControlSample(context).then(sample => {
+    if (controlSampleCache?.promise === promise) {
+      controlSampleCache.expiresAt = context.now() + ttlMs;
+    }
+    return sample;
+  }).catch(error => {
+    if (controlSampleCache?.promise === promise) controlSampleCache = null;
+    throw error;
+  });
+  if (!options.force) controlSampleCache = { expiresAt: Infinity, promise };
+  return promise;
+}
 
 export function windowsPowerShellExecutable(env: NodeJS.ProcessEnv = process.env): string {
   const systemRoot = env.SystemRoot || env.SYSTEMROOT || "C:\\Windows";
@@ -164,6 +200,7 @@ export async function runWindowsPowerShell(
 
 export function invalidateWindowsSystemSnapshot(): void {
   snapshotCache = null;
+  controlSampleCache = null;
 }
 
 export async function getWindowsSystemSnapshot(force = false): Promise<WindowsSystemSnapshot> {
@@ -379,8 +416,150 @@ export function parseWindowsSystemSnapshot(input: string): WindowsSystemSnapshot
   return { processes, tcp, processesComplete };
 }
 
+const WINDOWS_WINDOW_HELPER_CS = String.raw`
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Threading;
+
+public static class ProfilePilotWindowHelper {
+  private const int SW_RESTORE = 9;
+  private const uint WM_CLOSE = 0x0010;
+  private delegate bool EnumWindowsProc(IntPtr window, IntPtr parameter);
+  [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+  [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr parameter);
+  [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
+  [DllImport("user32.dll")] private static extern bool IsIconic(IntPtr window);
+  [DllImport("user32.dll")] private static extern bool ShowWindowAsync(IntPtr window, int command);
+  [DllImport("user32.dll")] private static extern bool SetForegroundWindow(IntPtr window);
+  [DllImport("user32.dll", SetLastError = true)] private static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+
+  private static HashSet<int> ParsePids(string[] args) {
+    var set = new HashSet<int>();
+    for (int i = 1; i < args.Length; i++) {
+      int pid;
+      if (int.TryParse(args[i], out pid) && pid > 0) set.Add(pid);
+    }
+    return set;
+  }
+
+  private static bool WaitForForeground(HashSet<int> targets, int timeoutMs) {
+    var elapsed = Stopwatch.StartNew();
+    while (true) {
+      var fg = GetForegroundWindow();
+      uint fgPid;
+      if (fg != IntPtr.Zero && GetWindowThreadProcessId(fg, out fgPid) != 0 && targets.Contains((int)fgPid)) return true;
+      if (elapsed.ElapsedMilliseconds >= timeoutMs) return false;
+      Thread.Sleep(20);
+    }
+  }
+
+  public static int Main(string[] args) {
+    if (args.Length == 0) return 2;
+    string op = args[0];
+    if (op == "foreground") {
+      uint pid = 0;
+      IntPtr fg = GetForegroundWindow();
+      if (fg != IntPtr.Zero) GetWindowThreadProcessId(fg, out pid);
+      Console.WriteLine(pid.ToString());
+      return 0;
+    }
+    var targets = ParsePids(args);
+    if (targets.Count == 0) {
+      Console.WriteLine(op == "close" ? "0" : "false");
+      return 0;
+    }
+    if (op == "focus") {
+      if (WaitForForeground(targets, 0)) { Console.WriteLine("true"); return 0; }
+      IntPtr candidate = IntPtr.Zero;
+      EnumWindows(delegate(IntPtr w, IntPtr p) {
+        uint pid;
+        GetWindowThreadProcessId(w, out pid);
+        if (targets.Contains((int)pid) && IsWindowVisible(w)) { candidate = w; return false; }
+        return true;
+      }, IntPtr.Zero);
+      if (candidate == IntPtr.Zero) { Console.WriteLine("false"); return 0; }
+      if (IsIconic(candidate)) ShowWindowAsync(candidate, SW_RESTORE);
+      SetForegroundWindow(candidate);
+      Console.WriteLine(WaitForForeground(targets, 750) ? "true" : "false");
+      return 0;
+    }
+    if (op == "close") {
+      int count = 0;
+      EnumWindows(delegate(IntPtr w, IntPtr p) {
+        uint pid;
+        GetWindowThreadProcessId(w, out pid);
+        if (targets.Contains((int)pid) && PostMessage(w, WM_CLOSE, IntPtr.Zero, IntPtr.Zero)) count++;
+        return true;
+      }, IntPtr.Zero);
+      Console.WriteLine(count.ToString());
+      return 0;
+    }
+    return 2;
+  }
+}
+`;
+
+let windowHelperPromise: Promise<string | null> | null = null;
+
+async function ensureWindowsWindowHelper(): Promise<string | null> {
+  if (process.platform !== "win32") return null;
+  if (windowHelperPromise) return windowHelperPromise;
+  windowHelperPromise = (async () => {
+    try {
+      const hash = createHash("sha256").update(WINDOWS_WINDOW_HELPER_CS).digest("hex").slice(0, 16);
+      const dir = path.join(os.tmpdir(), "profilepilot-native-helpers");
+      const exePath = path.join(dir, `ProfilePilot.WinWindowHelper.${hash}.exe`);
+      if (fs.existsSync(exePath)) return exePath;
+      const winDir = process.env.WINDIR || process.env.SystemRoot || "C:\\Windows";
+      const cscCandidates = [
+        path.join(winDir, "Microsoft.NET", "Framework64", "v4.0.30319", "csc.exe"),
+        path.join(winDir, "Microsoft.NET", "Framework", "v4.0.30319", "csc.exe")
+      ];
+      const csc = cscCandidates.find(candidate => fs.existsSync(candidate));
+      if (!csc) return null;
+      await fs.promises.mkdir(dir, { recursive: true });
+      const id = randomUUID();
+      const srcPath = path.join(dir, `helper-${id}.cs`);
+      const tmpExe = path.join(dir, `helper-${id}.exe`);
+      try {
+        await fs.promises.writeFile(srcPath, WINDOWS_WINDOW_HELPER_CS, "utf8");
+        await execFileAsync(csc, ["/nologo", "/optimize+", "/target:exe", `/out:${tmpExe}`, srcPath], {
+          windowsHide: true,
+          timeout: 8_000
+        });
+        try {
+          await fs.promises.rename(tmpExe, exePath);
+        } catch {
+          if (!fs.existsSync(exePath)) return null;
+        }
+        return exePath;
+      } finally {
+        await fs.promises.unlink(srcPath).catch(() => {});
+        await fs.promises.unlink(tmpExe).catch(() => {});
+      }
+    } catch {
+      windowHelperPromise = null;
+      return null;
+    }
+  })();
+  return windowHelperPromise;
+}
+
 export async function windowsForegroundProcessId(): Promise<number | null> {
   if (process.platform !== "win32") return null;
+  const helper = await ensureWindowsWindowHelper();
+  if (helper) {
+    try {
+      const { stdout } = await execFileAsync(helper, ["foreground"], { windowsHide: true, encoding: "utf8", timeout: 2_000 });
+      const pid = Number(String(stdout).trim());
+      return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+    } catch {
+      // Fall through to PowerShell fallback if helper execution fails.
+    }
+  }
   const script = String.raw`
 Add-Type @'
 using System;
@@ -406,6 +585,15 @@ if ($window -ne [IntPtr]::Zero) { [void][ProfilePilotForegroundWindow]::GetWindo
 export async function focusWindowsProcess(pids: number[]): Promise<boolean> {
   const targets = normalizedPids(pids);
   if (process.platform !== "win32" || !targets.length) return false;
+  const helper = await ensureWindowsWindowHelper();
+  if (helper) {
+    try {
+      const { stdout } = await execFileAsync(helper, ["focus", ...targets.map(String)], { windowsHide: true, encoding: "utf8", timeout: 2_500 });
+      if (String(stdout).trim().toLowerCase() === "true") return true;
+    } catch {
+      // Fall through to PowerShell AppActivate fallback if needed.
+    }
+  }
   const script = String.raw`
 Add-Type -AssemblyName Microsoft.VisualBasic
 Add-Type @'
@@ -481,6 +669,17 @@ foreach ($targetPid in $targets) {
 export async function requestWindowsProcessClose(pids: number[]): Promise<boolean> {
   const targets = normalizedPids(pids);
   if (process.platform !== "win32" || !targets.length) return false;
+  const helper = await ensureWindowsWindowHelper();
+  if (helper) {
+    try {
+      const { stdout } = await execFileAsync(helper, ["close", ...targets.map(String)], { windowsHide: true, encoding: "utf8", timeout: 3_000 });
+      const count = Number(String(stdout).trim());
+      invalidateWindowsSystemSnapshot();
+      return Number.isFinite(count) && count > 0;
+    } catch {
+      // Fall through to PowerShell fallback if helper execution fails.
+    }
+  }
   const script = String.raw`
 Add-Type @'
 using System;

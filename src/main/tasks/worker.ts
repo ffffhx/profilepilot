@@ -3,12 +3,13 @@ import { usageCharge } from "../../shared/task-cost";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { z } from "zod";
-import type { BrowserTask, TaskSettings } from "../../shared/tasks";
+import { DEVICE_ONLY_PROFILE_ID, type BrowserTask, type TaskSettings } from "../../shared/tasks";
 import { browserActionSchema } from "./browser";
 import { providerEnvironment } from "./provider";
 import { sdkExecutable } from "./runtime";
 import { terminalRunSchema, terminalReadSchema, terminalStopSchema } from "./terminal";
-import { DEEPSEEK_PRICE_VERSION, HOST_PRICING_ENV, providerPricing } from "./pricing";
+import { phoneControlSchema, desktopControlSchema, electronControlSchema } from "./device-tools";
+import { HOST_PRICING_ENV, managedPriceVersion, providerPricing } from "./pricing";
 import { taskModelContext } from "./model-context";
 import { SdkTaskHistory } from "./sdk-history";
 import { nativeBrowserAccess } from "./native-access";
@@ -79,10 +80,14 @@ plan 更新用户可读步骤；有批量项目时逐项 update_item，独立失
 检索与总结必须区分页面原文、推算和未核实说法。相对时间仍标为相对时间；仅对实际计算过的对应帖子报告 ID 推算时间，不得推广到整份结果。只能把实际生效的筛选/排序写入方法说明；总结前核对上一轮输出和原帖来源，不补入未选条目或未验证事实。除用户要求导出或任务需要文件交付外，检索整理直接在聊天回答，无需创建文件。
 历史 assistant 回复和“上次执行结果”的概括可能有错，不能视为原始证据；继续对话时不要把以前的推断升级为事实。特别是发布时间：若既有上下文没有逐条对应的计算记录，只能保留页面原先显示的时间并说明无法统一核实，不能概括成“X 的结果都经过 ID 推算且在 24 小时内”。纠正历史概括时不需要违反用户禁止浏览器的要求。
 纯问答、改写、解释或比较已有结果且用户没有要求外部操作时直接回答，调用 finish(status="completed",responseOnly=true,evidence=[],remaining=[]) 标为已回答。本轮访问过浏览器（包括观察、读页面、列标签）、执行终端或写文件时不能使用纯回答完成。历史有待核查外部操作也允许本轮回答，后端会保留 needsReconciliation、回执、批量项目，并在 result.remaining 列出历史待核查事项；回答完成不代表外部任务核实成功。严格遵守本轮禁止浏览器、终端或文件的约束，即使历史目标要求浏览器也不能擅自补做。不要为纯问答制造证据，不要调用 echo、浏览器、reconcile 或写文件来满足旧状态。遇到归档错误时报告错误，不要违背用户的禁止操作要求。
-外部任务没有证据时报告 partial 和 remaining；操作结果不明要标记 uncertain。你的解释不能代替外部任务的验证证据。`;
+外部任务没有证据时报告 partial 和 remaining；操作结果不明要标记 uncertain。你的解释不能代替外部任务的验证证据。
+你还可以按任务需要使用多端设备工具：phone_control（已连接的 Android/iPhone 手机或模拟器，先 list/readiness 与 start 建立会话再 snapshot/click/fill/scroll）、desktop_control（本机桌面窗口，默认 mode="background" 后台观察与控件调用，不抢用户焦点）、electron_control（已接入的本机 Electron 应用，优先 snapshot 获取语义引用）。任何设备由用户或其他控制者占用时禁止强抢控制权；完成证据可逐字引用设备快照、页面快照或终端验证输出。`;
 
 export function taskSystemPrompt(task: BrowserTask): string {
   let prompt = TASK_SYSTEM_PROMPT + "\n" + COLLABORATION_PROMPT;
+  if (task.profileId === DEVICE_ONLY_PROFILE_ID) {
+    prompt += "\n当前任务处于“不绑定浏览器”模式：不要调用浏览器工具（observe/read_page/browser_action/fill_fields/tabs/site_read），请通过 phone_control、desktop_control、electron_control、文件工具或 terminal_run 完成任务。";
+  }
   if (nativeBrowserAccess(task, { effect: "edit" }).fullAccess) {
     prompt = prompt.replace("支付交由用户完成。", "系统 Chrome 已开启默认浏览器访问：按用户当前任务的明确授权执行浏览器动作，不因提交、发送、购买或支付的动作类型额外要求逐次确认。默认浏览器权限不能扩大用户任务目标，也不授权无关的购买或支付。");
     prompt += "\n当前系统 Chrome 无需额外逐次浏览器确认；站点限制、用户停止/接管、操作结果核查仍必须遵守。终端命令仍按工具返回的确认要求处理。";
@@ -113,6 +118,9 @@ async function run(input: WorkerStart): Promise<void> {
       sdk.tool("terminal_read", "查看当前任务终端进程状态、退出码和最新输出（超过上限时保留尾部）。", terminalReadSchema.shape, args => rpc("terminal_read", args)),
       sdk.tool("terminal_stop", "停止当前任务的终端进程及其子进程，例如不再需要的本地网页服务。", terminalStopSchema.shape, args => rpc("terminal_stop", args)),
       sdk.tool("register_outputs", "登记当前任务终端工作目录内已生成的 HTML、PNG、SVG、CSV、JSON 等产物，供界面预览和下载。paths 是工作目录中的相对路径；需要互相引用的文件应一并登记。", { paths: z.array(z.string()).min(1).max(20) }, args => rpc("register_outputs", args)),
+      sdk.tool("phone_control", "发现并控制已连接的 Android/iPhone 手机或模拟器（list/readiness/start/snapshot/screenshot/click/fill/scroll/tap/swipe/text/key/pause/resume/stop）。操作前先 list 并 start 建立当前任务会话；其他控制者占用时禁止抢夺。", phoneControlSchema.shape, args => rpc("phone_control", args)),
+      sdk.tool("desktop_control", "观察并控制本机桌面原生窗口（status/windows/claim/select/observe/screenshot/action/handoff/resume/complete/release）。默认使用 background 模式后台观察与操作，避免抢占用户前台窗口焦点。", desktopControlSchema.shape, args => rpc("desktop_control", args)),
+      sdk.tool("electron_control", "发现并控制已接入的本机 Electron 应用（list/inspect/connect/logs/snapshot/screenshot/click/fill/press/scroll/handoff/complete）。优先使用 snapshot 获取语义引用，后台执行不抢前台。", electronControlSchema.shape, args => rpc("electron_control", args)),
       sdk.tool("tabs", "列出浏览器标签页。", {}, (args) => rpc("tabs", args)),
       sdk.tool("verify_account", "记录页面中可见的当前登录账号。", { account: z.string(), evidence: z.string() }, (args) => rpc("verify_account", args)),
       sdk.tool("reconcile", "中断恢复后，用已观察的记录页或回执核查此前操作。", { receiptId: z.string(), outcome: z.enum(["completed", "not_completed", "uncertain"]), evidence: z.string() }, (args) => rpc("reconcile", args)),
@@ -233,7 +241,7 @@ async function run(input: WorkerStart): Promise<void> {
       if (message.type === "assistant") {
         if (!input.test && !message.error) {
           const charge = usageCharge(`model:${message.session_id}:${message.message.id}`, "model", message.message.model,
-            input.settings.baseUrl, queryStarted, Date.now(), message.message.usage);
+            input.settings.baseUrl, queryStarted, Date.now(), message.message.usage, input.settings);
           if (charge) send({ kind: "cost", charge });
         }
         const text = message.message.content.filter(block => block.type === "text").map(block => block.text).join("");
@@ -250,7 +258,7 @@ async function run(input: WorkerStart): Promise<void> {
         send({ kind: "result", success: message.subtype === "success" && !message.is_error,
           result: message.subtype === "success" ? message.result : message.errors.join("\n"),
           costUsd: message.total_cost_usd,
-          priceVersion: pricing && usage.length && usage.every(model => model.costBasis === "managed") ? DEEPSEEK_PRICE_VERSION : undefined,
+          priceVersion: pricing && usage.length && usage.every(model => model.costBasis === "managed") ? managedPriceVersion(input.settings) : undefined,
           cachedInputTokens: usage.reduce((sum, model) => sum + model.cacheReadInputTokens, 0),
           budgetExceeded: message.subtype === "error_max_budget_usd",
           modelTokenUsage: Object.entries(message.modelUsage || {}).map(([model, u]) => ({ model,

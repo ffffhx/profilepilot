@@ -177,7 +177,26 @@ async function readCredential(io: Pick<NodeJS.Process, "stdout" | "stderr">, inp
   return value(Buffer.concat(chunks).toString("utf8").split(/\r?\n/)[0]);
 }
 
-export async function runPhoneCli(args: string[], request: (command: ProfilePilotManagementCommand) => Promise<ProfilePilotManagementResponse>, io: Pick<NodeJS.Process, "stdout" | "stderr">, input: Readable = process.stdin): Promise<number> {
+function normalizePhoneArgs(args: string[]): string[] {
+  const leading: string[] = [];
+  let i = 0;
+  while (i < args.length && args[i].startsWith("--") && args[i] !== "--help") {
+    const arg = args[i];
+    if (arg === "--json") { leading.push(arg); i++; continue; }
+    if (["--device", "--backend"].includes(arg) && i + 1 < args.length && !args[i + 1].startsWith("--")) {
+      leading.push(arg, args[++i]);
+      i++;
+      continue;
+    }
+    break;
+  }
+  return leading.length && i < args.length && !args[i].startsWith("-")
+    ? [args[i], ...leading, ...args.slice(i + 1)]
+    : args;
+}
+
+export async function runPhoneCli(rawArgs: string[], request: (command: ProfilePilotManagementCommand) => Promise<ProfilePilotManagementResponse>, io: Pick<NodeJS.Process, "stdout" | "stderr">, input: Readable = process.stdin): Promise<number> {
+  const args = normalizePhoneArgs(rawArgs);
   if (!args.length || ["--help", "-h"].includes(args[0])) { io.stdout.write(phoneHelp); return 0; }
   let dispatching = false;
   const dispatch = (command: ProfilePilotManagementCommand) => { dispatching = true; return request(command); };

@@ -1,3 +1,5 @@
+import { timingSafeEqual } from "node:crypto";
+
 // Raw Bridge is a deliberately bounded API, not a forward-compatible CDP
 // tunnel. New protocol methods require review before they become callable.
 const RAW_ALLOWED_METHODS = new Set([
@@ -41,14 +43,20 @@ export const AGENT_DENIED_TARGET_METHODS = new Set([
 ]);
 
 // Native Chrome window geometry remains authoritative. Drivers receive a
-// compatible virtual response for commands that would corrupt that geometry.
+// compatible virtual response for commands that would resize the OS window.
+// Tab-scoped Emulation overrides (setDeviceMetricsOverride / touch / UA) are
+// permitted on controlled target sessions and cleared when the session ends.
 export const AGENT_VIRTUALIZED_VIEWPORT_METHODS = new Set([
   "Browser.setContentsSize",
   "Browser.setWindowBounds",
-  "Emulation.setDeviceMetricsOverride",
-  "Emulation.setTouchEmulationEnabled",
-  "Emulation.setUserAgentOverride",
   "Emulation.setVisibleSize"
+]);
+
+export const AGENT_SCOPED_EMULATION_METHODS = new Set([
+  "Emulation.setDeviceMetricsOverride",
+  "Emulation.clearDeviceMetricsOverride",
+  "Emulation.setTouchEmulationEnabled",
+  "Emulation.setUserAgentOverride"
 ]);
 
 // Rust's canonicalize() produces extended Windows paths. Chromium's download
@@ -124,6 +132,44 @@ export const GATEWAY_DEVICE_PRESETS: Readonly<Record<string, GatewayDevicePreset
     platform: "iPhone"
   })
 });
+
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+export function isLoopbackHostHeader(hostHeader: string | undefined): boolean {
+  if (typeof hostHeader !== "string" || !hostHeader.trim()) return false;
+  const trimmed = hostHeader.trim().toLowerCase();
+  if (trimmed.startsWith("[")) {
+    const end = trimmed.indexOf("]");
+    if (end < 0) return false;
+    const host = trimmed.slice(0, end + 1);
+    const rest = trimmed.slice(end + 1);
+    if (rest && !/^:\d{1,5}$/.test(rest)) return false;
+    if (rest) {
+      const port = Number(rest.slice(1));
+      if (!Number.isInteger(port) || port < 1 || port > 65535) return false;
+    }
+    return LOOPBACK_HOSTS.has(host);
+  }
+  const firstColon = trimmed.indexOf(":");
+  if (firstColon >= 0 && trimmed.indexOf(":", firstColon + 1) >= 0) return false;
+  const host = firstColon >= 0 ? trimmed.slice(0, firstColon) : trimmed;
+  const portText = firstColon >= 0 ? trimmed.slice(firstColon + 1) : "";
+  if (portText) {
+    if (!/^\d{1,5}$/.test(portText)) return false;
+    const port = Number(portText);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return false;
+  }
+  return LOOPBACK_HOSTS.has(host);
+}
+
+export function timingSafeSecretEqual(actual: unknown, expected: unknown): boolean {
+  if (typeof actual !== "string" || typeof expected !== "string" || !actual || !expected) {
+    return false;
+  }
+  const actualBuffer = Buffer.from(actual, "utf8");
+  const expectedBuffer = Buffer.from(expected, "utf8");
+  return actualBuffer.length === expectedBuffer.length && timingSafeEqual(actualBuffer, expectedBuffer);
+}
 
 export function isRawCdpMethodAllowed(method: string): boolean {
   const normalized = String(method || "").trim();

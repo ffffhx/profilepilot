@@ -9,9 +9,9 @@ const actionFields = {
   invoke: ['ref'], set_value: ['ref', 'value'], toggle: ['ref'], select: ['ref'],
   expand: ['ref'], collapse: ['ref'], scroll: ['ref', 'horizontal', 'vertical'], focus: ['ref'],
   restore: ['ref'], minimize: ['ref'], maximize: ['ref'],
-  click: ['ref', 'x', 'y', 'button'], double_click: ['ref', 'x', 'y', 'button'],
-  move: ['ref', 'x', 'y'], drag: ['ref', 'x', 'y', 'toX', 'toY', 'button'],
-  wheel: ['ref', 'x', 'y', 'deltaX', 'deltaY'], type_text: ['ref', 'value'], press_key: ['ref', 'keys']
+  click: ['ref', 'x', 'y', 'button', 'coordSpace'], double_click: ['ref', 'x', 'y', 'button', 'coordSpace'],
+  move: ['ref', 'x', 'y', 'coordSpace'], drag: ['ref', 'x', 'y', 'toX', 'toY', 'button', 'coordSpace'],
+  wheel: ['ref', 'x', 'y', 'deltaX', 'deltaY', 'coordSpace'], type_text: ['ref', 'value'], press_key: ['ref', 'keys']
 } satisfies Record<string, string[]>;
 
 // Keep a common object type for the service while rejecting fields that a
@@ -23,6 +23,7 @@ export const desktopActionSchema = z.object({
   keys: z.array(z.string().min(1).max(20)).min(1).max(5).optional(),
   horizontal: z.number().int().min(0).max(4).optional(), vertical: z.number().int().min(0).max(4).optional(),
   x: coordinate.optional(), y: coordinate.optional(), toX: coordinate.optional(), toY: coordinate.optional(),
+  coordSpace: z.enum(['image', 'normalized', 'physical']).optional(),
   deltaX: z.number().int().min(-1200).max(1200).optional(), deltaY: z.number().int().min(-1200).max(1200).optional(),
   button: z.enum(['left', 'right', 'middle']).optional()
 }).strict().superRefine((action, ctx) => {
@@ -35,7 +36,14 @@ export const desktopActionSchema = z.object({
   if (pointerKinds.has(action.kind)) {
     if (action.ref !== undefined) {
       if (action.x !== undefined || action.y !== undefined) invalid('ref', 'ref 与 x/y 不能同时使用。');
+      if (action.kind !== 'drag' && action.coordSpace !== undefined) invalid('coordSpace', '使用 ref 时不支持 coordSpace。');
     } else if (action.x === undefined || action.y === undefined) invalid('x', '指针操作需要 ref 或完整的 x/y。');
+  }
+  if (action.coordSpace === 'normalized') {
+    for (const field of ['x', 'y', 'toX', 'toY'] as const) {
+      const value = action[field];
+      if (value !== undefined && (value < 0 || value > 1000)) invalid(field, 'normalized 坐标必须在 0..1000 范围内。');
+    }
   }
   if (action.kind === 'drag' && (action.toX === undefined || action.toY === undefined)) invalid('toX', 'drag 需要完整的 toX/toY。');
   if (action.kind === 'wheel' && !(action.deltaX || action.deltaY)) invalid('deltaY', 'wheel 需要非零 deltaX/deltaY。');
@@ -108,7 +116,7 @@ export function desktopActionJsonSchema() {
     const required = ['version', 'kind', ...(referenceKinds.has(kind) ? ['ref'] : []),
       ...(['set_value', 'type_text'].includes(kind) ? ['value'] : []), ...(kind === 'press_key' ? ['keys'] : []), ...(kind === 'drag' ? ['toX', 'toY'] : [])];
     const branches: unknown[] = [];
-    if (pointerKinds.has(kind)) branches.push({ oneOf: [{ required: ['ref'], not: { anyOf: [{ required: ['x'] }, { required: ['y'] }] } }, { required: ['x', 'y'], not: { required: ['ref'] } }] });
+    if (pointerKinds.has(kind)) branches.push({ oneOf: [{ required: ['ref'], not: { anyOf: [{ required: ['x'] }, { required: ['y'] }, ...(kind !== 'drag' ? [{ required: ['coordSpace'] }] : [])] } }, { required: ['x', 'y'], not: { required: ['ref'] } }] });
     if (kind === 'wheel') branches.push({ anyOf: ['deltaX', 'deltaY'].map(field => ({ required: [field], properties: { [field]: { not: { const: 0 } } } })) });
     if (kind === 'scroll') branches.push({ anyOf: ['horizontal', 'vertical'].map(field => ({ required: [field], properties: { [field]: { enum: [0, 1, 3, 4] } } })) });
     const selected = Object.fromEntries(['version', 'kind', ...fields].map(field => [field, properties[field]]));

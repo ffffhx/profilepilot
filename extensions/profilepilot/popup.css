@@ -18,13 +18,24 @@ body.authorization-page { width: min(480px, 100%); max-height: calc(100vh - 48px
 h1, h2, p { margin: 0; }
 h1 { font-size: 21px; font-weight: 700; line-height: 1.2; letter-spacing: -.5px; }
 h2 { font-size: 14px; font-weight: 600; }
-button, textarea { font: inherit; color: inherit; }
+button, textarea, select { font: inherit; color: inherit; }
 button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 34px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 7px; background: #fff; font-size: 12px; font-weight: 600; line-height: 1.4; cursor: pointer; }
 button:hover:not(:disabled) { border-color: #a4c3f3; background: #f4f8ff; }
-button:disabled { opacity: .55; cursor: default; }
-button:focus-visible, textarea:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+button:disabled, select:disabled { opacity: .55; cursor: default; }
+button:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
 .primary { background: var(--blue); border-color: var(--blue); color: #fff; }
 .primary:hover:not(:disabled) { background: #0954d5; border-color: #0954d5; }
+.danger-outline { color: #b52e45; border-color: #efc4cc; background: #fff; }
+.danger-outline:hover:not(:disabled) { border-color: #db8b9a; background: #fff5f7; }
+.temp-install-banner { display: grid; gap: 8px; margin-top: 12px; padding: 10px 12px; border: 1px solid #f0d7a7; border-radius: 8px; background: #fff9ec; }
+.temp-install-text { font-size: 12px; color: #7a520d; }
+.site-access-card { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: #fafcff; }
+.site-access-copy { display: grid; min-width: 0; }
+.site-access-copy label { font-size: 12px; font-weight: 600; }
+.site-access-origin { font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+.site-access-card select { flex-shrink: 0; min-height: 32px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: #fff; font-size: 12px; font-weight: 600; }
+.security-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.security-actions button { flex: 1 1 auto; }
 .icon { width: 18px; height: 18px; flex-shrink: 0; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .app-header, .brand, .section-heading { display: flex; align-items: center; }
 .app-header { justify-content: space-between; gap: 10px; min-height: 58px; }

@@ -1078,22 +1078,21 @@ export function formatProfileLeaseConflict(
   });
   const recommended = alternatives[0] || null;
   const action = recommended
-    ? `自动切换候选 Profile 时发生并发竞争；不要重试端口 ${lease.cdpPort}。当前可再次执行 recommended_command，wrapper 会继续自动选择可用 Profile。`
+    ? `停手：不会静默切换到其他 Profile；请不要直接重试同一受控标签页或独占端口 ${lease.cdpPort}。如需切换，请显式选择 recommended_command；如需在同 Profile 并发独立标签页，请显式传入 --isolated-tab 或不同的 --target <targetId>。`
     : `停手：不要重试端口 ${lease.cdpPort}；当前没有空闲 Profile，请让用户启动或释放另一个 Profile。`;
   return `${JSON.stringify(
     {
       source: "ProfilePilot",
       error_code: "PROFILE_ALREADY_IN_USE",
       recovery: controlRecovery("PROFILE_LEASE_CONFLICT"),
-      // wrapper 已尝试过当前快照中的候选；只有候选耗尽或并发竞争失败时才会进入此 hard-stop。
       hard_stop: true,
       blocked_profile_hard_stop: true,
       retryable_with_alternative_profile: Boolean(recommended),
       requires_user_confirmation: false,
       message: `${lease.profileName} 已被另一个 agent-browser Session 占用`,
       action,
-      auto_switch_allowed: Boolean(recommended),
-      auto_switch_strategy: recommended ? "reuse_current_session_then_lowest_available_port" : null,
+      auto_switch_allowed: false,
+      auto_switch_strategy: null,
       recommended_profile_id: recommended?.profile_id || null,
       recommended_profile_name: recommended?.profile_name || null,
       recommended_cdp_port: recommended?.cdp_port || null,
@@ -1201,35 +1200,37 @@ export function acquireProfileLeaseForCommandWithAutomaticSwitch(
   env: NodeJS.ProcessEnv = process.env
 ): AgentBrowserCommandLeaseResolution {
   const lease = acquireProfileLeaseForCommand(args, env);
-  if (!lease || lease.ok || env.PROFILEPILOT_BROWSER_CLI === "1") {
-    return { args, lease, automaticSwitch: null };
-  }
-  const requestedSession = sessionFromAgentBrowserArgs(args, env);
-  const homeDir = gatewayHome(env);
-  const candidates = findAvailableAgentBrowserProfileCandidatesSync({
-    excludedPort: lease.lease.cdpPort,
-    requestedSession,
-    env
-  }, homeDir).sort(
-    (left, right) =>
-      Number(right.alreadyOwnedBySession) - Number(left.alreadyOwnedBySession) ||
-      left.cdpPort - right.cdpPort
-  );
-  for (const candidate of candidates) {
-    const switchedArgs = replaceCdpPortInAgentBrowserArgs(args, candidate.cdpPort);
-    const switchedLease = acquireProfileLeaseForCommand(switchedArgs, env);
-    if (switchedLease?.ok) {
-      return {
-        args: switchedArgs,
-        lease: switchedLease,
-        automaticSwitch: {
-          from: lease.lease,
-          to: candidate
-        }
-      };
-    }
-  }
   return { args, lease, automaticSwitch: null };
+}
+
+interface GatewaySharingOptions {
+  targetId?: string;
+  allocateTab?: boolean;
+  allowSharedProfile?: boolean;
+  exclusive?: boolean;
+}
+
+function extractGatewaySharingOptions(args: string[]): GatewaySharingOptions {
+  const targetId = optionValue(args, "--target")?.trim() || undefined;
+  const allocateTab = args.includes("--isolated-tab") || args.includes("--allocate-tab");
+  const allowSharedProfile = allocateTab || args.includes("--shared-profile");
+  const exclusive = args.includes("--exclusive");
+  return {
+    ...(targetId ? { targetId } : {}),
+    ...(allocateTab ? { allocateTab: true } : {}),
+    ...(allowSharedProfile ? { allowSharedProfile: true } : {}),
+    ...(exclusive ? { exclusive: true } : {})
+  };
+}
+
+function stripGatewaySharingFlags(args: string[]): string[] {
+  return args.filter(
+    (arg) =>
+      arg !== "--isolated-tab" &&
+      arg !== "--allocate-tab" &&
+      arg !== "--shared-profile" &&
+      arg !== "--exclusive"
+  );
 }
 
 function acquireProfileLeaseForCommand(
@@ -1253,6 +1254,7 @@ function acquireProfileLeaseForCommand(
   }
   assertConfiguredAgentAccessAllowedSync(cdpPort, env, homeDir);
   const target = resolveAgentBrowserProfileTargetSync(cdpPort, env, homeDir);
+  const sharing = extractGatewaySharingOptions(args);
   const acquisition = acquireAgentBrowserProfileLeaseSync({
     cdpPort,
     session,
@@ -1260,6 +1262,7 @@ function acquireProfileLeaseForCommand(
     daemonPid: readAgentBrowserDaemonPidSync(homeDir, session),
     profileId: target.profileId,
     profileName: target.profileName,
+    ...sharing,
     agent: inferAgentFromSession(session),
     project: projectFromEnv(env),
     branch: branchFromEnv(env),
@@ -1278,6 +1281,7 @@ function renewProfileLeaseAfterSuccess(
 ): void {
   const homeDir = gatewayHome(env);
   const target = resolveAgentBrowserProfileTargetSync(context.cdpPort, env, homeDir);
+  const sharing = extractGatewaySharingOptions(args);
   acquireAgentBrowserProfileLeaseSync({
     cdpPort: context.cdpPort,
     session: context.session,
@@ -1285,6 +1289,7 @@ function renewProfileLeaseAfterSuccess(
     daemonPid: readAgentBrowserDaemonPidSync(homeDir, context.session),
     profileId: target.profileId,
     profileName: target.profileName,
+    ...sharing,
     agent: inferAgentFromSession(context.session),
     project: projectFromEnv(env),
     branch: branchFromEnv(env),
@@ -1325,13 +1330,24 @@ async function readGatewayAgentActivity(
     // activity verification starts as soon as the route moves to the current daemon.
     return { supported: false, activity: null };
   }
-  const profile = gatewayProfiles(status).find((candidate) => (
-    Number(candidate.publicPort) === context.cdpPort &&
-    candidate.ownerSessionId === context.session &&
-    candidate.daemonInstanceId === daemonInstanceId &&
-    candidate.connectionActive === true
-  ));
-  const activity = profile?.agentActivity;
+  const profile = gatewayProfiles(status).find((candidate) => {
+    if (Number(candidate.publicPort) !== context.cdpPort || candidate.connectionActive !== true) {
+      return false;
+    }
+    if (candidate.ownerSessionId === context.session && candidate.daemonInstanceId === daemonInstanceId) {
+      return true;
+    }
+    const sessions = candidate.sessions && typeof candidate.sessions === "object"
+      ? candidate.sessions as Record<string, Record<string, unknown>>
+      : undefined;
+    return sessions?.[context.session]?.daemonInstanceId === daemonInstanceId;
+  });
+  const sessionActivities = profile?.sessionActivities && typeof profile.sessionActivities === "object"
+    ? profile.sessionActivities as Record<string, unknown>
+    : undefined;
+  const activity = profile?.ownerSessionId === context.session
+    ? profile?.agentActivity
+    : sessionActivities?.[context.session] ?? profile?.agentActivity;
   if (!activity || typeof activity !== "object" || Array.isArray(activity)) {
     return { supported: true, activity: null };
   }
@@ -1432,7 +1448,10 @@ async function runProfilePilotInternalCommand(
   if (action === "status") {
     try {
       const response = await requestBrowserGateway({ action: "status" }, { homeDir, timeoutMs: 3_000 });
-      const profile = gatewayProfiles(response).find((candidate) => candidate.ownerSessionId === session) || null;
+      const profile = gatewayProfiles(response).find((candidate) =>
+        candidate.ownerSessionId === session ||
+        Boolean(candidate.sessions && typeof candidate.sessions === "object" && session in (candidate.sessions as Record<string, unknown>))
+      ) || null;
       process.stdout.write(`${JSON.stringify({
         source: "ProfilePilot Gateway",
         ok: true,
@@ -2473,6 +2492,7 @@ export async function prepareGatewayTransport(
   }
 
   assertManagedGatewayLaunchOptions(args);
+  const sharing = extractGatewaySharingOptions(args);
   const gatewayChildEnv = managedGatewayAgentBrowserEnv(env);
   const daemonInstanceId = readOrCreateBrowserGatewayDaemonIdentity(sessionId, homeDir);
   let acquire = await requestBrowserGateway({
@@ -2483,6 +2503,7 @@ export async function prepareGatewayTransport(
     daemonPid: readAgentBrowserDaemonPidSync(homeDir, sessionId),
     driverKind: "agent-browser",
     driverLabel: env.PROFILEPILOT_BROWSER_CLI === "1" ? "ppilot browser CLI" : "agent-browser",
+    ...sharing,
     agent: inferAgentFromSession(sessionId),
     project: projectFromEnv(env),
     branch: branchFromEnv(env)
@@ -2493,7 +2514,7 @@ export async function prepareGatewayTransport(
   args = dialogSetting.args;
   const command = agentBrowserCommandName(args);
   if (command === "connect") {
-    return replaceConnectTarget(stripCdpOption(args), webSocketUrl);
+    return replaceConnectTarget(stripGatewaySharingFlags(stripCdpOption(args)), webSocketUrl);
   }
   if (acquire.connectionActive !== true) {
     let lastConnectError: Error | undefined;
@@ -2532,6 +2553,7 @@ export async function prepareGatewayTransport(
         daemonPid: readAgentBrowserDaemonPidSync(homeDir, sessionId),
         driverKind: "agent-browser",
         driverLabel: env.PROFILEPILOT_BROWSER_CLI === "1" ? "ppilot browser CLI" : "agent-browser",
+        ...sharing,
         agent: inferAgentFromSession(sessionId),
         project: projectFromEnv(env),
         branch: branchFromEnv(env)
@@ -2573,6 +2595,7 @@ export async function prepareGatewayTransport(
       daemonPid: readAgentBrowserDaemonPidSync(homeDir, sessionId),
       driverKind: "agent-browser",
       driverLabel: env.PROFILEPILOT_BROWSER_CLI === "1" ? "ppilot browser CLI" : "agent-browser",
+      ...sharing,
       agent: inferAgentFromSession(sessionId),
       project: projectFromEnv(env),
       branch: branchFromEnv(env)
@@ -2583,7 +2606,7 @@ export async function prepareGatewayTransport(
   }
   // Bind the real CLI explicitly as well as the Gateway. Shell shims and
   // environment defaults must not redirect the operation to another daemon.
-  const stripped = stripCdpOption(args);
+  const stripped = stripGatewaySharingFlags(stripCdpOption(args));
   return optionValue(stripped, "--session") === undefined
     ? ["--session", sessionId, ...stripped]
     : stripped;
@@ -2595,7 +2618,10 @@ function assertSessionIsNotBoundToAnotherGatewayProfile(
   requestedPort: number
 ): void {
   const binding = gatewayProfiles(status).find(
-    (profile) => profile.ownerSessionId === sessionId && Number(profile.publicPort) !== requestedPort
+    (profile) => (
+      profile.ownerSessionId === sessionId ||
+      Boolean(profile.sessions && typeof profile.sessions === "object" && sessionId in (profile.sessions as Record<string, unknown>))
+    ) && Number(profile.publicPort) !== requestedPort
   );
   if (!binding) return;
   const boundPort = Number(binding.publicPort);
@@ -2687,7 +2713,10 @@ async function gatewaySessionProfile(
     if (persistedGatewayOwnsSession(homeDir, sessionId)) throw error;
     return null;
   }
-  return gatewayProfiles(status).find((profile) => profile.ownerSessionId === sessionId) || null;
+  return gatewayProfiles(status).find((profile) =>
+    profile.ownerSessionId === sessionId ||
+    Boolean(profile.sessions && typeof profile.sessions === "object" && sessionId in (profile.sessions as Record<string, unknown>))
+  ) || null;
 }
 
 async function runGatewayRawCdp(
@@ -2816,7 +2845,10 @@ function persistedGatewayOwnsPort(homeDir: string, publicPort: number): boolean 
 }
 
 function persistedGatewayOwnsSession(homeDir: string, sessionId: string): boolean {
-  return persistedGatewayProfiles(homeDir).some((profile) => profile.ownerSessionId === sessionId);
+  return persistedGatewayProfiles(homeDir).some((profile) =>
+    profile.ownerSessionId === sessionId ||
+    Boolean(profile.sessions && typeof profile.sessions === "object" && sessionId in (profile.sessions as Record<string, unknown>))
+  );
 }
 
 function persistedGatewayProfiles(homeDir: string): Array<Record<string, unknown>> {

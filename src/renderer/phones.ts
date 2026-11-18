@@ -18,6 +18,7 @@ import { createPhoneInspector } from "./phone-inspector";
 import { openScreenCamera } from "./screen-camera";
 import { openGameFollower } from "./game-follow";
 import { openIphoneAdd, openIphoneScreen, renderIphonePane } from "./iphone";
+import { experimentalGameFollowEnabled, experimentalScreenCameraEnabled, onExperimentalFeaturesChanged } from "./experimental-features";
 
 const root = document.getElementById("phones")!;
 const esc = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
@@ -41,11 +42,15 @@ let filter: PhoneListFilter = "all", detailIdentity = "";
 let drawerReturnId = "";
 const wirelessDiscovery = new PhoneWirelessDiscoveryMonitor(id => window.phones.discoverWireless(id), render);
 
-root.innerHTML = `${workspaceSwitcher("phones")}${workspaceIdentityBar()}<main class="phone-shell phone-console"><header class="pc-control-header"><div class="pc-control-brand"><h1>控制台</h1><p>管理浏览器、桌面应用与 Android 设备</p></div></header>${pcControlTabs("phones")}<div class="phone-console-layout"><div class="phone-registry-column">${phoneListShell()}</div><aside class="phone-inspector" aria-label="手机画面与会话"></aside></div><button class="phone-text-button phone-mobile-entry-link" data-action="mobile" hidden>用手机管理电脑任务 →</button></main>
+root.innerHTML = `${workspaceSwitcher("phones")}${workspaceIdentityBar()}<main class="phone-shell phone-console"><header class="pc-control-header"><div class="pc-control-brand"><h1>控制台</h1><p>管理浏览器、桌面应用与 Android 设备</p></div></header>${pcControlTabs("phones")}<div class="phone-console-layout"><div class="phone-registry-column">${phoneListShell()}</div><aside class="phone-inspector" aria-label="手机画面与会话"></aside></div><button class="phone-text-button phone-mobile-entry-link" data-action="mobile" hidden>用手机管理电脑任务（支持 iPhone / Android 浏览器扫码即用） →</button></main>
   <dialog class="phone-details" aria-labelledby="phone-details-title"><header class="phone-details-top"><span>设备详情</span><button data-action="close-details" aria-label="关闭设备详情">${taskIcon("close")}</button></header><div class="phone-details-scroll"><div class="phone-details-identity"></div><div class="phone-content" aria-busy="true"></div></div></dialog>`;
 const drawer = root.querySelector<HTMLDialogElement>(".phone-details")!;
 root.querySelector(".pc-control-brand p")!.textContent = "管理浏览器、桌面应用与 Android / iPhone 设备";
-root.querySelector(".pc-control-header")!.insertAdjacentHTML("beforeend", '<button class="phone-text-button" data-action="game-follow">视觉跟随</button>');
+root.querySelector(".pc-control-header")!.insertAdjacentHTML("beforeend", '<button class="phone-text-button" data-action="game-follow" hidden>队友跟随</button>');
+const gameFollowButton = root.querySelector<HTMLButtonElement>('[data-action="game-follow"]')!;
+const syncExperimentalControls = () => { gameFollowButton.hidden = !experimentalGameFollowEnabled(); };
+syncExperimentalControls();
+onExperimentalFeaturesChanged(() => { syncExperimentalControls(); key = ""; render(); });
 const inspector = createPhoneInspector(root.querySelector<HTMLElement>(".phone-inspector")!);
 const iphonePane = document.createElement("aside"); iphonePane.className = "phone-inspector iphone-inspector"; iphonePane.hidden = true;
 root.querySelector(".phone-console-layout")!.append(iphonePane);
@@ -269,10 +274,11 @@ function options(device?: PhoneDevice): string {
     ${device?.transport === "registered" ? '<button class="phone-text-button" data-action="registration-forget">移除此设备</button>' : ""}
     <button class="phone-text-button" data-action="add-device">添加其他设备</button>
     <button class="phone-text-button" data-action="emulator">使用本机模拟器</button>
-    ${openMobileConnections ? '<button class="phone-text-button" data-action="mobile">用手机管理电脑任务</button>' : ""}
+    ${openMobileConnections ? '<button class="phone-text-button" data-action="mobile">用手机管理电脑任务（免装 App 扫码即用）</button>' : ""}
   </div></details>`;
 }
 function render(): void {
+  syncExperimentalControls();
   const groups = groupPhoneDevices(snapshot.devices, selected);
   const previous = selected;
   const group = groups.find(item => item.routes.some(route => route.id === selected)) || (!drawer.open ? snapshot.defaultDevice?.saved ? groups.find(item => item.routes.some(route => phoneMatchesDefault(route, snapshot.defaultDevice?.saved))) : groups.find(item => item.device.connection === "device") || groups[0] : undefined);
@@ -416,7 +422,7 @@ root.addEventListener("click", event => {
   if (busy) return;
   if (action === "clear-default-device") { void run(async () => { snapshot = await window.phones.setDefault(null); }); return; }
   if (action === "device-menu") { openDeviceMenu(button); return; }
-  if (action === "game-follow") { void openGameFollower(current()); return; }
+  if (action === "game-follow") { if (!experimentalGameFollowEnabled()) return; void openGameFollower(current()); return; }
   if (action === "add-device") { addDevice(); return; }
   if (action === "refresh") { void run(async () => { snapshot = await window.phones.snapshot(); loaded = true; }); return; }
   if (action === "refresh-phone-screen") { void inspector.refresh(true); return; }
@@ -459,7 +465,7 @@ root.addEventListener("click", event => {
   if (action === "disconnect-phone") {
     void run(async () => { await window.phones.disconnect(device.id); notice("已断开；手机端将在数秒内更新连接状态。"); }); return;
   }
-  if (action === "screen-camera") { void openScreenCamera(device); return; }
+  if (action === "screen-camera") { if (!experimentalScreenCameraEnabled() && !device.screenCamera?.active) return; void openScreenCamera(device); return; }
   if (button.dataset.phoneBasicCommand) { void run(() => window.phones.basicControl(device.id, button.dataset.phoneBasicCommand as "pause" | "resume" | "stop")); return; }
   if (action === "inspect-app") { void run(() => window.phones.inspect(device.id)); return; }
   if (action === "enlarge-phone-screen") {

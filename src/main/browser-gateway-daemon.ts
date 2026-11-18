@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { accessSync, chmodSync, constants as fsConstants, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import net, { type Socket } from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -11,6 +11,7 @@ import {
   type GatewayProfileBinding
 } from "./browser-gateway-control";
 import {
+  browserGatewayControlTokenPath,
   browserGatewayRoot,
   BROWSER_GATEWAY_PROTOCOL_VERSION,
   browserGatewaySecretPath,
@@ -18,6 +19,7 @@ import {
   type GatewayControlRequest,
   type GatewayControlResponse
 } from "./browser-gateway-client";
+import { timingSafeSecretEqual } from "./browser-gateway-policy";
 import {
   createBrowserGatewayDriverLifecycle,
   type BrowserGatewayDriverLifecycle
@@ -42,6 +44,7 @@ export interface BrowserGatewayDaemonOptions {
   agentCommandQuiesceTimeoutMs?: number;
   driverReconnectGraceMs?: number;
   driverLifecycle?: BrowserGatewayDriverLifecycle;
+  allowTestBrowserExecutable?: boolean;
 }
 
 interface ManagedGatewayProfile {
@@ -65,6 +68,8 @@ export class BrowserGatewayDaemon {
   private readonly pidPath: string;
   private readonly lockPath: string;
   private readonly internalSecret: string;
+  private readonly controlToken: string;
+  private readonly allowTestBrowserExecutable: boolean;
   private readonly managedProfilesPath: string;
   private readonly managedProfiles = new Map<number, ManagedGatewayProfile>();
   private readonly control: BrowserGatewayControlPlane;
@@ -104,9 +109,13 @@ export class BrowserGatewayDaemon {
       ? Math.floor(Number(options.driverReconnectGraceMs))
       : DEFAULT_DRIVER_RECONNECT_GRACE_MS;
     this.driverLifecycle = options.driverLifecycle || createBrowserGatewayDriverLifecycle(homeDir);
-    mkdirSync(this.root, { recursive: true });
+    this.allowTestBrowserExecutable = options.allowTestBrowserExecutable ?? (
+      process.env.PROFILEPILOT_ALLOW_TEST_BROWSER_EXECUTABLE === "1" || Boolean(options.focusProfileWindow)
+    );
+    mkdirSync(this.root, { recursive: true, mode: 0o700 });
     this.loadManagedProfiles();
     this.internalSecret = loadOrCreateSecret(browserGatewaySecretPath(homeDir));
+    this.controlToken = loadOrCreateSecret(browserGatewayControlTokenPath(homeDir));
     let gatewayRef: BrowserGatewayServer | null = null;
     this.control = new BrowserGatewayControlPlane({
       homeDir,
@@ -192,6 +201,15 @@ export class BrowserGatewayDaemon {
       handled = true;
       try {
         const request = JSON.parse(buffer.slice(0, boundary)) as GatewayControlRequest;
+        if (!timingSafeSecretEqual(request.authToken, this.controlToken)) {
+          writeControlResponse(socket, {
+            ok: false,
+            error_code: "GATEWAY_UNAUTHORIZED",
+            message: "Gateway 控制通道鉴权失败",
+            hard_stop: true
+          });
+          return;
+        }
         if (request.action === "subscribe") {
           this.addSubscriber(socket);
           return;
@@ -237,6 +255,14 @@ export class BrowserGatewayDaemon {
 
   private async handleRequest(text: string): Promise<GatewayControlResponse> {
     const request = JSON.parse(text) as GatewayControlRequest;
+    if (!timingSafeSecretEqual(request.authToken, this.controlToken)) {
+      return {
+        ok: false,
+        error_code: "GATEWAY_UNAUTHORIZED",
+        message: "Gateway 控制通道鉴权失败",
+        hard_stop: true
+      };
+    }
     if (this.shutdownRequested && request.action !== "ping" && request.action !== "status" && request.action !== "shutdown") {
       return { ok: false, error_code: "GATEWAY_SHUTTING_DOWN", message: "ProfilePilot Gateway 正在退出" };
     }
@@ -245,28 +271,43 @@ export class BrowserGatewayDaemon {
     }
     if (request.action === "status") {
       const snapshot = this.control.snapshot();
-      const profiles = await Promise.all(snapshot.profiles.map(async (profile) => ({
-        ...profile,
-        connectionActive: Boolean(
-          profile.ownerSessionId &&
-          profile.daemonInstanceId &&
+      const profiles = await Promise.all(snapshot.profiles.map(async (profile) => {
+        const members = collectProfileMembers(profile);
+        const anyConnected = members.some((member) =>
           this.gateway.hasActiveAgentConnection(
             profile.publicPort,
-            profile.ownerSessionId,
-            profile.daemonInstanceId
+            member.sessionId,
+            member.daemonInstanceId
           )
-        ),
-        agentActivity: profile.ownerSessionId && profile.daemonInstanceId
-          ? this.gateway.getAgentActivity(
-              profile.publicPort,
-              profile.ownerSessionId,
-              profile.daemonInstanceId
+        );
+        const sessionActivities = profile.sessions
+          ? Object.fromEntries(
+              members.map((member) => [
+                member.sessionId,
+                this.gateway.getAgentActivity(
+                  profile.publicPort,
+                  member.sessionId,
+                  member.daemonInstanceId
+                )
+              ])
             )
-          : null,
-        agentTarget: profile.ownerSessionId
-          ? await this.gateway.getAgentTarget(profile.publicPort, profile.ownerSessionId).catch(() => null)
-          : null
-      })));
+          : undefined;
+        return {
+          ...profile,
+          connectionActive: anyConnected,
+          agentActivity: profile.ownerSessionId && profile.daemonInstanceId
+            ? this.gateway.getAgentActivity(
+                profile.publicPort,
+                profile.ownerSessionId,
+                profile.daemonInstanceId
+              )
+            : null,
+          ...(sessionActivities ? { sessionActivities } : {}),
+          agentTarget: profile.ownerSessionId
+            ? await this.gateway.getAgentTarget(profile.publicPort, profile.ownerSessionId).catch(() => null)
+            : null
+        };
+      }));
       return {
         ok: true,
         protocolVersion: BROWSER_GATEWAY_PROTOCOL_VERSION,
@@ -283,20 +324,32 @@ export class BrowserGatewayDaemon {
     }
     if (request.action === "activate-agent-target") {
       const profile = this.control.getProfile(request.publicPort);
-      if (!profile?.ownerSessionId || profile.sessionStatus !== "active") {
+      const requestedSessionId = typeof request.sessionId === "string" && request.sessionId.trim()
+        ? request.sessionId.trim()
+        : profile?.ownerSessionId;
+      const hasSessionOnProfile = Boolean(
+        requestedSessionId &&
+        profile &&
+        (profile.ownerSessionId === requestedSessionId || Boolean(profile.sessions?.[requestedSessionId]))
+      );
+      if (!profile || !requestedSessionId || !hasSessionOnProfile || profile.sessionStatus !== "active") {
         return {
           ok: false,
           error_code: "AGENT_TARGET_NOT_FOUND",
           message: "当前 Profile 没有活跃的 Agent Session"
         };
       }
-      const expectedSessionId = profile.ownerSessionId;
+      const expectedSessionId = requestedSessionId;
       const expectedGeneration = profile.controlGeneration;
       return this.withSessionControlLock(expectedSessionId, async () => {
         const current = this.control.getProfile(request.publicPort);
+        const stillHasSession = Boolean(
+          current &&
+          (current.ownerSessionId === expectedSessionId || Boolean(current.sessions?.[expectedSessionId]))
+        );
         if (
           !current ||
-          current.ownerSessionId !== expectedSessionId ||
+          !stillHasSession ||
           current.sessionStatus !== "active" ||
           current.controlGeneration !== expectedGeneration
         ) {
@@ -331,7 +384,7 @@ export class BrowserGatewayDaemon {
           if (!managed.electronCdpPort || managed.profileId !== request.profileId) throw new Error("此端口不属于该 Electron 应用。");
           const profile = this.control.getProfile(request.publicPort);
           if (profile?.ownerSessionId && profile.sessionStatus === "active") {
-            await this.withSessionControlLock(profile.ownerSessionId, () => this.handleSessionControl({ action: "control", sessionId: profile.ownerSessionId!, command: "stop" }));
+            await this.withSessionControlLock(profile.ownerSessionId, () => this.handleSessionControl({ action: "control", sessionId: profile.ownerSessionId!, command: "stop", allSessions: true }));
             this.driverLifecycle.sessionStopped(profile, "electron-detached");
           }
           this.cancelDriverReconnectForPort(request.publicPort);
@@ -377,13 +430,16 @@ export class BrowserGatewayDaemon {
           stoppedSessionId
         };
       }
+      const validatedExecutable = validateBrowserLaunchExecutable(request.executable, {
+        allowTestExecutable: this.allowTestBrowserExecutable
+      });
       // A persisted control record without a live route is from a previous Gateway/Chrome
       // lifetime. Never revive its old Agent ownership against a newly launched browser.
       if (this.control.getProfile(request.publicPort)) {
         this.control.unregisterProfile(request.publicPort);
       }
       const transport = ChromePipeTransport.launch({
-        executable: request.executable,
+        executable: validatedExecutable,
         args: request.args,
         env: request.env ? { ...process.env, ...request.env } : process.env,
         cwd: request.cwd
@@ -452,14 +508,57 @@ export class BrowserGatewayDaemon {
           `Profile“${managed.profileName}”已禁止 Agent 连接`
         );
       }
-      const acquired = this.control.acquire(request);
+      let acquired = this.control.acquire(request);
+      if (
+        acquired.profile.ownerSessionId &&
+        !acquired.profile.targetId &&
+        acquired.profile.sessions &&
+        Object.keys(acquired.profile.sessions).length > 1
+      ) {
+        const primaryTarget = await this.gateway.getAgentTarget(
+          request.publicPort,
+          acquired.profile.ownerSessionId
+        ).catch(() => null);
+        if (primaryTarget?.targetId) {
+          this.control.setSessionTarget(acquired.profile.ownerSessionId, primaryTarget.targetId);
+        }
+      }
+      const shouldAllocateTab = !acquired.claims.targetId && (
+        request.allocateTab === true ||
+        (acquired.profile.ownerSessionId !== request.sessionId && request.allowSharedProfile === true)
+      );
+      if (shouldAllocateTab) {
+        const allocatedTargetId = await this.gateway.allocateSessionTab(
+          request.publicPort,
+          request.sessionId
+        ).catch(() => null);
+        if (allocatedTargetId) {
+          acquired = this.control.bindAllocatedTarget(
+            request.sessionId,
+            request.daemonInstanceId,
+            allocatedTargetId
+          );
+        }
+      }
+      if (acquired.claims.targetId) {
+        this.gateway.assignSessionTarget(
+          request.publicPort,
+          request.sessionId,
+          acquired.claims.targetId
+        );
+      }
       const connectionActive = this.gateway.hasActiveAgentConnection(
         request.publicPort,
         request.sessionId,
         request.daemonInstanceId
       );
       if (!connectionActive) {
-        this.beginDriverReconnect(acquired.profile, "driver-connect-pending");
+        this.beginDriverReconnectForSession(
+          acquired.profile,
+          request.sessionId,
+          request.daemonInstanceId,
+          "driver-connect-pending"
+        );
       }
       return {
         ok: true,
@@ -544,12 +643,16 @@ export class BrowserGatewayDaemon {
   private async handleSessionControl(
     request: Extract<GatewayControlRequest, { action: "control" }>
   ): Promise<GatewayControlResponse> {
-    const sessionProfile = this.control.snapshot().profiles.find(
-      (profile) => profile.ownerSessionId === request.sessionId
-    );
+    const sessionProfile = this.control.getProfileForSession(request.sessionId);
     const wasAgentControlled = Boolean(
       sessionProfile?.sessionStatus === "active" && sessionProfile.ownership === "agent"
     );
+    const allProfileSessionIds = sessionProfile
+      ? collectProfileMembers(sessionProfile).map((member) => member.sessionId)
+      : [request.sessionId];
+    const targetSessionIds = request.command === "takeover" || request.allSessions === true
+      ? allProfileSessionIds
+      : [request.sessionId];
     const preserveDeviceEmulation = Boolean(
       request.command === "takeover" &&
       request.preserveDeviceEmulation === true &&
@@ -560,38 +663,39 @@ export class BrowserGatewayDaemon {
         request.sessionId
       )
     );
-    let executionQuiesced = false;
+    const quiescedSessionIds: string[] = [];
     let forcedAgentDisconnects = 0;
     if (request.command === "takeover" && wasAgentControlled && sessionProfile) {
-      // 先在 Gateway 执行面封锁新命令，再等已发往 Chrome 的命令收敛。
-      // 这样任何驱动即使没有本地通知机制，也不会和用户并发操作。
-      const quiesced = await this.gateway.quiesceAgentSession(
-        sessionProfile.publicPort,
-        request.sessionId,
-        this.agentCommandQuiesceTimeoutMs
-      );
-      if (!quiesced) {
-        // User takeover has priority after the graceful deadline. A permanently
-        // pending CDP request must not keep Input Guard locked forever; closing
-        // the driver WebSocket detaches its CDP sessions before ownership flips.
-        forcedAgentDisconnects = this.gateway.disconnectAgentSession(
+      // 先在 Gateway 执行面封锁所有活跃 Session 的新命令，再等已发往 Chrome 的命令收敛。
+      // Profile 级用户接管暂停全部活跃标签页 Session，确保不会和用户并发操作。
+      for (const sid of targetSessionIds) {
+        const quiesced = await this.gateway.quiesceAgentSession(
           sessionProfile.publicPort,
-          request.sessionId,
-          "AGENT_TAKEOVER_QUIESCE_TIMEOUT"
+          sid,
+          this.agentCommandQuiesceTimeoutMs
         );
+        quiescedSessionIds.push(sid);
+        if (!quiesced) {
+          forcedAgentDisconnects += this.gateway.disconnectAgentSession(
+            sessionProfile.publicPort,
+            sid,
+            "AGENT_TAKEOVER_QUIESCE_TIMEOUT"
+          );
+        }
       }
-      executionQuiesced = true;
     }
     if (
       request.command !== "return" &&
-      !preserveDeviceEmulation &&
       sessionProfile?.sessionStatus === "active" &&
       sessionProfile.ownership === "agent"
     ) {
-      await this.gateway.clearDeviceEmulationForSession(
-        sessionProfile.publicPort,
-        request.sessionId
-      );
+      for (const sid of targetSessionIds) {
+        if (preserveDeviceEmulation && sid === request.sessionId) continue;
+        await this.gateway.clearDeviceEmulationForSession(
+          sessionProfile.publicPort,
+          sid
+        );
+      }
     }
     let profile: GatewayProfileBinding;
     try {
@@ -601,7 +705,7 @@ export class BrowserGatewayDaemon {
           ? this.control.delegateToUser(request.sessionId, "agent_complete")
           : request.command === "return"
             ? this.control.returnToAgent(request.sessionId)
-            : this.control.stopSession(request.sessionId);
+            : this.control.stopSession(request.sessionId, { allSessions: request.allSessions === true });
     } catch (error) {
       if (preserveDeviceEmulation && sessionProfile) {
         this.gateway.cancelDeviceEmulationUserHandoff(
@@ -609,23 +713,41 @@ export class BrowserGatewayDaemon {
           request.sessionId
         );
       }
-      if (executionQuiesced && sessionProfile) {
-        this.gateway.cancelAgentQuiesce(sessionProfile.publicPort, request.sessionId);
+      if (quiescedSessionIds.length > 0 && sessionProfile) {
+        for (const sid of quiescedSessionIds) {
+          this.gateway.cancelAgentQuiesce(sessionProfile.publicPort, sid);
+        }
       }
       throw error;
     }
-    this.cancelDriverReconnect(request.sessionId);
-    if (profile.sessionStatus === "stopped" && sessionProfile) {
-      this.gateway.clearAgentTarget(sessionProfile.publicPort, request.sessionId);
-    } else if (request.command === "return" && profile.ownerSessionId && profile.daemonInstanceId) {
-      if (this.gateway.hasActiveAgentConnection(
-        profile.publicPort,
-        profile.ownerSessionId,
-        profile.daemonInstanceId
-      )) {
-        profile = this.control.markAgentConnected(profile.ownerSessionId, profile.daemonInstanceId);
-      } else {
-        this.beginDriverReconnect(profile, "control-return");
+    for (const sid of targetSessionIds) {
+      this.cancelDriverReconnect(sid);
+    }
+    if ((request.command === "stop" || request.command === "complete") && sessionProfile) {
+      for (const sid of targetSessionIds) {
+        this.gateway.disconnectAgentSession(sessionProfile.publicPort, sid, "AGENT_TASK_STOPPED");
+        this.gateway.clearAgentTarget(sessionProfile.publicPort, sid);
+      }
+    } else if (profile.sessionStatus === "stopped" && sessionProfile) {
+      for (const sid of allProfileSessionIds) {
+        this.gateway.clearAgentTarget(sessionProfile.publicPort, sid);
+      }
+    } else if (request.command === "return") {
+      for (const member of collectProfileMembers(profile)) {
+        if (this.gateway.hasActiveAgentConnection(
+          profile.publicPort,
+          member.sessionId,
+          member.daemonInstanceId
+        )) {
+          profile = this.control.markAgentConnected(member.sessionId, member.daemonInstanceId);
+        } else {
+          this.beginDriverReconnectForSession(
+            profile,
+            member.sessionId,
+            member.daemonInstanceId,
+            "control-return"
+          );
+        }
       }
     }
 
@@ -684,11 +806,11 @@ export class BrowserGatewayDaemon {
     daemonInstanceId: string
   ): void {
     const profile = this.control.getProfile(publicPort);
-    if (
-      !profile ||
-      profile.ownerSessionId !== sessionId ||
-      profile.daemonInstanceId !== daemonInstanceId
-    ) {
+    if (!profile) return;
+    const isPrimary = profile.ownerSessionId === sessionId && profile.daemonInstanceId === daemonInstanceId;
+    const secondary = profile.sessions?.[sessionId];
+    const isSecondary = Boolean(secondary && secondary.daemonInstanceId === daemonInstanceId);
+    if (!isPrimary && !isSecondary) {
       return;
     }
     if (profile.sessionStatus !== "active" || profile.ownership !== "agent") {
@@ -699,12 +821,13 @@ export class BrowserGatewayDaemon {
       });
       return;
     }
+    const previousDriverState = isPrimary ? profile.driverState : secondary?.driverState;
     if (active) {
-      const recoveredFromDisconnect = profile.driverState === "reconnecting";
+      const recoveredFromDisconnect = previousDriverState === "reconnecting";
       this.cancelDriverReconnect(sessionId);
       try {
         const connected = this.control.markAgentConnected(sessionId, daemonInstanceId);
-        if (recoveredFromDisconnect) {
+        if (recoveredFromDisconnect && isPrimary) {
           this.driverLifecycle.connected(connected);
         }
         this.publishControlEvent({
@@ -720,7 +843,7 @@ export class BrowserGatewayDaemon {
     if (this.gateway.hasActiveAgentConnection(publicPort, sessionId, daemonInstanceId)) {
       return;
     }
-    this.beginDriverReconnect(profile, "agent-disconnected");
+    this.beginDriverReconnectForSession(profile, sessionId, daemonInstanceId, "agent-disconnected");
     const reconnecting = this.control.getProfile(publicPort);
     if (reconnecting) {
       this.publishControlEvent({
@@ -731,9 +854,12 @@ export class BrowserGatewayDaemon {
     }
   }
 
-  private beginDriverReconnect(profile: GatewayProfileBinding, reason: string): void {
-    const sessionId = profile.ownerSessionId;
-    const daemonInstanceId = profile.daemonInstanceId;
+  private beginDriverReconnectForSession(
+    profile: GatewayProfileBinding,
+    sessionId: string,
+    daemonInstanceId: string,
+    reason: string
+  ): void {
     if (
       !sessionId ||
       !daemonInstanceId ||
@@ -762,7 +888,7 @@ export class BrowserGatewayDaemon {
     } catch {
       return;
     }
-    if (reconnecting.driverState === "reconnecting") {
+    if (reconnecting.ownerSessionId === sessionId && reconnecting.driverState === "reconnecting") {
       this.driverLifecycle.reconnecting(reconnecting, reconnectDeadlineAt);
     }
     const timer = setTimeout(() => {
@@ -797,9 +923,12 @@ export class BrowserGatewayDaemon {
   ): Promise<void> {
     await this.withSessionControlLock(sessionId, async () => {
       const profile = this.control.getProfileForSession(sessionId);
+      const memberDaemonId = profile?.ownerSessionId === sessionId
+        ? profile.daemonInstanceId
+        : profile?.sessions?.[sessionId]?.daemonInstanceId;
       if (
         !profile ||
-        profile.daemonInstanceId !== daemonInstanceId ||
+        memberDaemonId !== daemonInstanceId ||
         profile.sessionStatus !== "active" ||
         profile.ownership !== "agent"
       ) {
@@ -813,9 +942,12 @@ export class BrowserGatewayDaemon {
       }
 
       this.cancelDriverReconnect(sessionId);
+      const wasPrimary = profile.ownerSessionId === sessionId;
       const stopped = this.control.stopSession(sessionId);
       this.gateway.clearAgentTarget(profile.publicPort, sessionId);
-      this.driverLifecycle.sessionStopped(profile, "reconnect-exhausted");
+      if (wasPrimary) {
+        this.driverLifecycle.sessionStopped(profile, "reconnect-exhausted");
+      }
       this.publishControlEvent({
         type: "connection-updated",
         profile: stopped,
@@ -841,7 +973,8 @@ export class BrowserGatewayDaemon {
       await this.handleSessionControl({
         action: "control",
         sessionId,
-        command: "stop"
+        command: "stop",
+        allSessions: true
       });
       this.driverLifecycle.sessionStopped(current, "agent-access-disabled");
     });
@@ -1010,15 +1143,225 @@ function errorResponse(error: unknown): GatewayControlResponse {
   };
 }
 
+function collectProfileMembers(
+  profile: GatewayProfileBinding
+): Array<{ sessionId: string; daemonInstanceId: string }> {
+  const members = new Map<string, { sessionId: string; daemonInstanceId: string }>();
+  if (profile.sessionStatus !== "active") return [];
+  if (profile.ownerSessionId && profile.daemonInstanceId) {
+    members.set(profile.ownerSessionId, {
+      sessionId: profile.ownerSessionId,
+      daemonInstanceId: profile.daemonInstanceId
+    });
+  }
+  if (profile.sessions) {
+    for (const entry of Object.values(profile.sessions)) {
+      if (entry.sessionId && entry.daemonInstanceId) {
+        members.set(entry.sessionId, {
+          sessionId: entry.sessionId,
+          daemonInstanceId: entry.daemonInstanceId
+        });
+      }
+    }
+  }
+  return [...members.values()];
+}
+
+const FORBIDDEN_EXECUTABLE_EXTENSIONS = new Set([
+  ".bat",
+  ".cmd",
+  ".ps1",
+  ".psm1",
+  ".vbs",
+  ".vbe",
+  ".js",
+  ".cjs",
+  ".mjs",
+  ".jse",
+  ".wsf",
+  ".wsh",
+  ".hta",
+  ".sh",
+  ".bash",
+  ".zsh",
+  ".py",
+  ".pl",
+  ".rb",
+  ".jar",
+  ".scr",
+  ".pif",
+  ".com",
+  ".msi",
+  ".dll"
+]);
+
+const FORBIDDEN_INTERPRETER_BASENAMES = new Set([
+  "cmd",
+  "powershell",
+  "pwsh",
+  "sh",
+  "bash",
+  "zsh",
+  "fish",
+  "dash",
+  "ksh",
+  "csh",
+  "tcsh",
+  "wscript",
+  "cscript",
+  "mshta",
+  "rundll32",
+  "regsvr32",
+  "osascript",
+  "open",
+  "start",
+  "explorer",
+  "xdg-open",
+  "python",
+  "python3",
+  "perl",
+  "ruby",
+  "php",
+  "java",
+  "javaw",
+  "curl",
+  "wget",
+  "nc",
+  "ncat",
+  "socat",
+  "busybox",
+  "env",
+  "nohup"
+]);
+
+const ALLOWED_BROWSER_BASENAME_PATTERN = /^(?:google[- ]chrome|chromium|chrome|msedge|microsoft[- ]edge|brave(?:[- ]browser)?|vivaldi|arc|opera|thorium|helium|(?:naver[- ])?whale|headless[_-]shell|chrome[- ]headless[- ]shell|ungoogled[- ]chromium)(?:[- ](?:stable|beta|dev|canary|nightly|unstable|for[- ]testing|browser))?$/i;
+
+export interface ValidateBrowserExecutableOptions {
+  allowTestExecutable?: boolean;
+  platform?: NodeJS.Platform;
+  checkFilesystem?: boolean;
+}
+
+export function validateBrowserLaunchExecutable(
+  executable: string,
+  options: ValidateBrowserExecutableOptions = {}
+): string {
+  const platform = options.platform || process.platform;
+  const pathImpl = platform === "win32" ? path.win32 : path.posix;
+  if (typeof executable !== "string" || !executable.trim() || executable.includes("\0")) {
+    throw new BrowserGatewayControlError("GATEWAY_INVALID_EXECUTABLE", "浏览器可执行文件路径不能为空");
+  }
+  const trimmed = executable.trim();
+  const isRootlessWinDriveRelative = platform === "win32" && /^\\[^\\]/.test(trimmed);
+  if (!pathImpl.isAbsolute(trimmed) || isRootlessWinDriveRelative) {
+    throw new BrowserGatewayControlError(
+      "GATEWAY_INVALID_EXECUTABLE",
+      `浏览器可执行文件必须使用绝对路径：${trimmed}`
+    );
+  }
+  const allowTestExecutable = options.allowTestExecutable === true ||
+    process.env.PROFILEPILOT_ALLOW_TEST_BROWSER_EXECUTABLE === "1";
+  const base = pathImpl.basename(trimmed);
+  const ext = pathImpl.extname(base).toLowerCase();
+  const isAllowedTestScript = allowTestExecutable && (ext === ".js" || ext === ".mjs" || ext === ".cjs");
+  if (!base || (FORBIDDEN_EXECUTABLE_EXTENSIONS.has(ext) && !isAllowedTestScript)) {
+    throw new BrowserGatewayControlError(
+      "GATEWAY_INVALID_EXECUTABLE",
+      `禁止将脚本或解释器作为浏览器启动：${base || trimmed}`
+    );
+  }
+  const stem = (ext === ".exe" ? base.slice(0, -4) : base).trim().toLowerCase();
+  if (!stem || FORBIDDEN_INTERPRETER_BASENAMES.has(stem)) {
+    throw new BrowserGatewayControlError(
+      "GATEWAY_INVALID_EXECUTABLE",
+      `禁止将系统解释器或命令壳作为浏览器启动：${base}`
+    );
+  }
+
+  const isAllowedTestBinary = allowTestExecutable && (
+    stem === "node" ||
+    stem === "electron" ||
+    isAllowedTestScript ||
+    path.resolve(trimmed) === path.resolve(process.execPath)
+  );
+  if (!ALLOWED_BROWSER_BASENAME_PATTERN.test(stem) && !isAllowedTestBinary) {
+    throw new BrowserGatewayControlError(
+      "GATEWAY_INVALID_EXECUTABLE",
+      `不受信任的浏览器可执行文件：${base}`
+    );
+  }
+
+  if (options.checkFilesystem !== false) {
+    let stat;
+    try {
+      stat = statSync(trimmed);
+    } catch {
+      throw new BrowserGatewayControlError(
+        "GATEWAY_INVALID_EXECUTABLE",
+        `浏览器可执行文件不存在：${trimmed}`
+      );
+    }
+    if (!stat.isFile()) {
+      throw new BrowserGatewayControlError(
+        "GATEWAY_INVALID_EXECUTABLE",
+        `浏览器可执行文件路径不是文件：${trimmed}`
+      );
+    }
+    if (platform !== "win32") {
+      try {
+        accessSync(trimmed, fsConstants.X_OK);
+      } catch {
+        throw new BrowserGatewayControlError(
+          "GATEWAY_INVALID_EXECUTABLE",
+          `浏览器可执行文件缺少执行权限：${trimmed}`
+        );
+      }
+    }
+  }
+  return trimmed;
+}
+
 function loadOrCreateSecret(filePath: string): string {
   try {
     const value = readFileSync(filePath, "utf8").trim();
-    if (value) return value;
+    if (value) {
+      if (process.platform !== "win32") {
+        try {
+          chmodSync(filePath, 0o600);
+        } catch {
+          // Best effort on filesystems without POSIX permissions.
+        }
+      }
+      return value;
+    }
   } catch {
-    // Create below.
+    // Create atomically below.
   }
   const secret = randomBytes(32).toString("base64url");
-  writeFileSync(filePath, `${secret}\n`, { mode: 0o600 });
+  mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  const temporary = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(temporary, `${secret}\n`, { mode: 0o600 });
+  try {
+    renameSync(temporary, filePath);
+  } catch (error) {
+    rmSync(temporary, { force: true });
+    const reread = (() => {
+      try {
+        return readFileSync(filePath, "utf8").trim();
+      } catch {
+        return "";
+      }
+    })();
+    if (reread) return reread;
+    throw error;
+  }
+  if (process.platform !== "win32") {
+    try {
+      chmodSync(filePath, 0o600);
+    } catch {
+      // Best effort on filesystems without POSIX permissions.
+    }
+  }
   return secret;
 }
 

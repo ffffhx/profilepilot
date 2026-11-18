@@ -5,7 +5,7 @@ const { controlRecovery, parseControlRecovery } = loadCli('src/shared/control-re
 const { NativeControlError, nativeFailurePayload } = loadCli('src/main/native-control/errors.ts');
 
 test('recovery preserves uncertain execution and never automatically replays an interrupted input', () => {
-  for (const code of ['NATIVE_TIMEOUT_UNCERTAIN', 'NATIVE_DISCONNECTED', 'NATIVE_DEBUGGER_DETACHED', 'NATIVE_DEBUGGER_RECOVERED', 'PHONE_REJECTED']) {
+  for (const code of ['NATIVE_TIMEOUT_UNCERTAIN', 'NATIVE_COMMAND_TIMEOUT', 'NATIVE_DISCONNECTED', 'NATIVE_DEBUGGER_DETACHED', 'NATIVE_DEBUGGER_RECOVERED', 'PHONE_REJECTED']) {
     const result = controlRecovery(code);
     assert.equal(result.actionOutcome, 'unknown'); assert.equal(result.automaticReplay, false);
   }
@@ -14,6 +14,14 @@ test('recovery preserves uncertain execution and never automatically replays an 
   assert.equal(controlRecovery('NATIVE_OBSERVATION_STALE').actionOutcome, 'not-executed');
   assert.equal(controlRecovery('NATIVE_DEBUGGER_RECOVERED').requiresUser, false);
   assert.equal(controlRecovery('NATIVE_DEBUGGER_RECOVERED').nextStep, 'reobserve');
+});
+
+test('command timeout requests reconciliation without user handoff or action replay', () => {
+  const payload = nativeFailurePayload(new NativeControlError('NATIVE_COMMAND_TIMEOUT', 'timed out'));
+  assert.equal(payload.recovery.requiresUser, false);
+  assert.equal(payload.recovery.nextStep, 'reobserve');
+  assert.equal(payload.recovery.actionOutcome, 'unknown');
+  assert.equal(payload.recovery.automaticReplay, false);
 });
 
 test('validated recovery survives JSON transport with request correlation', () => {

@@ -1,5 +1,7 @@
 import net from "node:net";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { LocalAppConfig, LocalAppRuntime } from "../../shared/local-apps";
 
 export interface LocalAppWorkerRecord {
@@ -50,22 +52,84 @@ export function workerRequest(record: LocalAppWorkerRecord, action: "status" | "
   });
 }
 
+export function buildMacDeveloperPath(env: NodeJS.ProcessEnv = process.env): string {
+  const home = env.HOME || os.homedir();
+  const candidates: string[] = [];
+  if (home) {
+    const nvmVersionsDir = path.posix.join(home, ".nvm/versions/node");
+    try {
+      if (fs.existsSync(nvmVersionsDir)) {
+        const versions = fs.readdirSync(nvmVersionsDir, { withFileTypes: true })
+          .filter(entry => entry.isDirectory())
+          .map(entry => entry.name)
+          .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+        for (const version of versions) {
+          candidates.push(path.posix.join(nvmVersionsDir, version, "bin"));
+        }
+      }
+    } catch { /* ignore unreadable nvm dir */ }
+    candidates.push(
+      path.posix.join(home, ".local/share/fnm/aliases/default/bin"),
+      path.posix.join(home, ".local/share/fnm"),
+      path.posix.join(home, ".volta/bin"),
+      path.posix.join(home, ".bun/bin")
+    );
+  }
+  candidates.push("/opt/homebrew/bin", "/usr/local/bin");
+  const current = (env.PATH || "/usr/bin:/bin:/usr/sbin:/sbin").split(":").filter(Boolean);
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  for (const dir of [...candidates, ...current]) {
+    if (!dir || seen.has(dir)) continue;
+    seen.add(dir);
+    merged.push(dir);
+  }
+  return merged.join(":");
+}
+
 export function launchCommand(config: LocalAppConfig, platform = process.platform, env = process.env): { executable: string; args: string[] } {
   const command = config.command.replaceAll("{cdpPort}", String(config.cdpPort ?? "")).replaceAll("{inspectPort}", String(config.inspectPort ?? ""));
   if (platform === "win32") {
     return { executable: env.ComSpec || env.COMSPEC || "cmd.exe", args: ["/d", "/s", "/c", `"${command}"`] };
   }
+  if (platform === "darwin" && env !== process.env && !Object.isFrozen(env)) {
+    env.PATH = buildMacDeveloperPath(env);
+  }
   // Login shell loads the developer's Node/version-manager PATH on macOS.
   return { executable: env.SHELL || "/bin/sh", args: ["-lc", command] };
 }
 
-export function parseEnvironment(value: string): Record<string, string> {
+function unquoteEnvValue(raw: string): string {
+  if (raw.length >= 2) {
+    if ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))) {
+      return raw.slice(1, -1);
+    }
+  }
+  return raw;
+}
+
+export function parseEnvironment(value: string, options?: string | { cwd?: string }): Record<string, string> {
   const result: Record<string, string> = Object.create(null);
+  const cwd = typeof options === "string" ? options : options?.cwd;
+  if (cwd) {
+    const dotEnvPath = path.join(cwd, ".env");
+    try {
+      if (fs.existsSync(dotEnvPath) && fs.statSync(dotEnvPath).isFile()) {
+        const dotEnvContent = fs.readFileSync(dotEnvPath, "utf8");
+        for (const line of dotEnvContent.split(/\r?\n/)) {
+          if (!line.trim() || line.trimStart().startsWith("#")) continue;
+          const match = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+          if (!match) continue;
+          result[match[1]] = unquoteEnvValue(match[2]);
+        }
+      }
+    } catch { /* ignore unreadable .env */ }
+  }
   for (const line of value.split(/\r?\n/)) {
     if (!line.trim() || line.trimStart().startsWith("#")) continue;
-    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+    const match = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
     if (!match) throw new Error("环境变量请按每行 NAME=value 填写。");
-    result[match[1]] = match[2];
+    result[match[1]] = unquoteEnvValue(match[2]);
   }
   return result;
 }

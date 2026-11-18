@@ -38,31 +38,97 @@ export function muxExchange(socket: net.Socket, message: Record<string, any>): P
 }
 
 export interface IphoneForward { endpoint: string; close(): Promise<void>; }
-/** Resolve the exact USB serial for EVERY connection; DeviceIDs can be reused after unplugging. */
-export async function forwardIphone(udid: string, open: Dial = dial): Promise<IphoneForward> {
+export interface IphoneForwardOptions { cacheTtlMs?: number; now?: () => number; }
+
+/** Resolve the exact USB serial with optional short-lived caching (default 5s on system usbmuxd). */
+export async function forwardIphone(udid: string, open: Dial = dial, options: IphoneForwardOptions = {}): Promise<IphoneForward> {
   iphoneUdid.parse(udid);
+  const cacheTtlMs = options.cacheTtlMs ?? (open === dial ? 5000 : 0);
+  const now = options.now ?? Date.now;
+  let cachedDevice: { id: number; at: number } | undefined;
+  let pendingLookup: Promise<number> | undefined;
   const sockets = new Set<net.Socket>(); let stopped = false;
   const track = (socket: net.Socket) => { sockets.add(socket); socket.once("close", () => sockets.delete(socket)); socket.on("error", () => {}); return socket; };
-  const server = net.createServer({ pauseOnConnect: true }, socket => {
-    track(socket);
-    void (async () => {
+
+  const lookupDeviceId = async (forceRefresh = false): Promise<number> => {
+    if (!forceRefresh && cacheTtlMs > 0 && cachedDevice && now() - cachedDevice.at < cacheTtlMs) {
+      return cachedDevice.id;
+    }
+    if (!forceRefresh && pendingLookup) return pendingLookup;
+    const work = (async () => {
       const query = track(open());
       const result = await muxExchange(query, { MessageType: "ListDevices" }).finally(() => query.destroy());
       const list = z.object({ DeviceList: z.array(z.object({ DeviceID: z.number().int().positive(), Properties: z.object({ SerialNumber: z.string(), ConnectionType: z.string() }) })).max(100) }).parse(result);
       const devices = list.DeviceList.filter(item => item.Properties.SerialNumber === udid && item.Properties.ConnectionType === "USB");
-      if (stopped || socket.destroyed || devices.length !== 1) throw new Error("所选 iPhone USB 连接已断开。");
-      const remote = track(open()); socket.once("close", () => remote.destroy()); remote.once("close", () => socket.destroy());
-      // usbmuxd represents the destination port in network byte order inside an integer.
-      const connected = z.object({ Number: z.literal(0) }).parse(await muxExchange(remote, { MessageType: "Connect", DeviceID: devices[0].DeviceID, PortNumber: ((8100 & 255) << 8) | (8100 >> 8) }));
-      if (stopped || socket.destroyed || connected.Number !== 0) throw new Error("USB 转发已结束。");
-      remote.setTimeout(30000, () => remote.destroy()); socket.setTimeout(30000, () => socket.destroy());
-      socket.pipe(remote).pipe(socket); remote.resume(); socket.resume();
+      if (stopped || devices.length !== 1) {
+        cachedDevice = undefined;
+        throw new Error("所选 iPhone USB 连接已断开。");
+      }
+      const id = devices[0].DeviceID;
+      if (cacheTtlMs > 0) cachedDevice = { id, at: now() };
+      return id;
+    })();
+    const tracked: Promise<number> = work.finally(() => {
+      if (pendingLookup === tracked) pendingLookup = undefined;
+    });
+    pendingLookup = tracked;
+    return tracked;
+  };
+
+  const server = net.createServer({ pauseOnConnect: true }, socket => {
+    track(socket);
+    socket.setNoDelay(true);
+    socket.setKeepAlive(true, 10000);
+    void (async () => {
+      let deviceId = await lookupDeviceId(false);
+      if (stopped || socket.destroyed) throw new Error("所选 iPhone USB 连接已断开。");
+      const connectOnce = async (targetDeviceId: number) => {
+        const remote = track(open());
+        remote.setNoDelay(true);
+        remote.setKeepAlive(true, 10000);
+        try {
+          // usbmuxd represents the destination port in network byte order inside an integer.
+          const reply = await muxExchange(remote, { MessageType: "Connect", DeviceID: targetDeviceId, PortNumber: ((8100 & 255) << 8) | (8100 >> 8) });
+          const connected = z.object({ Number: z.number().int() }).parse(reply);
+          if (stopped || socket.destroyed || connected.Number !== 0) {
+            remote.destroy();
+            return undefined;
+          }
+          return remote;
+        } catch (error) {
+          remote.destroy();
+          throw error;
+        }
+      };
+      let remote: net.Socket | undefined;
+      try {
+        remote = await connectOnce(deviceId);
+      } catch {
+        cachedDevice = undefined;
+      }
+      if (!remote && cacheTtlMs > 0 && !stopped && !socket.destroyed) {
+        cachedDevice = undefined;
+        deviceId = await lookupDeviceId(true);
+        remote = await connectOnce(deviceId);
+      }
+      if (!remote || stopped || socket.destroyed) {
+        cachedDevice = undefined;
+        throw new Error("USB 转发已结束。");
+      }
+      const upstream = remote;
+      socket.once("close", () => upstream.destroy());
+      upstream.once("close", () => socket.destroy());
+      upstream.setTimeout(30000, () => upstream.destroy());
+      socket.setTimeout(30000, () => socket.destroy());
+      socket.pipe(upstream).pipe(socket);
+      upstream.resume();
+      socket.resume();
     })().catch(() => socket.destroy());
   });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", () => { server.off("error", reject); resolve(); }); });
   server.on("error", () => { for (const socket of sockets) socket.destroy(); });
   return { endpoint: `http://127.0.0.1:${(server.address() as net.AddressInfo).port}`, close: async () => {
-    if (stopped) return; stopped = true;
+    if (stopped) return; stopped = true; cachedDevice = undefined;
     for (const socket of sockets) socket.destroy();
     await new Promise<void>(resolve => server.close(() => resolve()));
   } };

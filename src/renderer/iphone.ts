@@ -7,7 +7,7 @@ export function openIphoneAdd(onAdded: (device: PhoneDevice) => void): void {
   const dialog = document.createElement("dialog"); dialog.className = "phone-connect-dialog phone-add-dialog"; dialog.setAttribute("aria-label", "添加 iPhone");
   dialog.classList.add("iphone-setup-dialog");
   dialog.innerHTML = `<header><h2>连接 iPhone 真机</h2><button data-close aria-label="关闭">×</button></header>
-    <p>Windows / macOS · iOS 18 及以上。首次使用需要数据线、开发者模式和已签名的控制组件。</p>
+    <p>Windows / macOS · iOS 15–18+。首次使用需要数据线、开发者模式和已签名的控制组件。</p>
     <section class="iphone-setup-step"><h3>1. 准备电脑</h3><p data-tools-status role="status">正在检查连接工具…</p>
       <div class="iphone-setup-actions"><button data-do="setup">准备 USB 工具</button><button data-do="driver">Apple 设备驱动</button><button data-do="refresh">刷新设备</button></div>
     </section>
@@ -22,7 +22,9 @@ export function openIphoneAdd(onAdded: (device: PhoneDevice) => void): void {
       <div data-windows-signing><p>没有 Mac：在 Sideloadly 中选择上述安装包，由你本人登录 Apple ID 并安装一次，然后在这里补全内部测试包的签名。</p>
         <div class="iphone-setup-actions"><button data-do="signer">打开 Sideloadly 官网</button><button data-do="signing-setup">准备 Windows 签名工具</button><button data-do="sign" data-needs-device>补全签名并安装</button></div>
         <p>签名工具需要 Python 3.11+。补签会使用本机 Sideloadly 开发证书和手机上的有效描述文件；Apple 登录由你在 Sideloadly 中完成。免费签名到期后需再次签名。</p>
-      </div><p data-mac-signing hidden>在 Xcode 中为你的设备签名安装 WebDriverAgent，也可导入完整签名的 IPA。</p>
+      </div><div data-mac-signing hidden><p>macOS 本机自动签名：使用钥匙串中的 Apple Development 证书与本机描述文件直接签名并安装 WebDriverAgent，也可导入已签名 IPA。</p>
+        <div class="iphone-setup-actions"><button data-do="signing-setup">检查本机签名环境</button><button data-do="sign" data-needs-device>本机自动签名并安装</button></div>
+      </div>
     </details>
     <section class="iphone-setup-step"><h3>4. 启动 USB 连接</h3><label>控制组件 bundle ID（通常无需填写）<input data-bundle aria-label="WebDriverAgent bundle ID" placeholder="自动识别已安装的控制组件"></label>
       <div class="iphone-setup-actions"><button class="primary" data-do="connect" data-needs-device>启动并添加 iPhone</button><button data-do="cancel" data-needs-device>停止 USB 连接</button></div><p data-usb-status role="status"></p>
@@ -72,7 +74,7 @@ export function openIphoneAdd(onAdded: (device: PhoneDevice) => void): void {
         case "show": await window.phones.iphoneShowArtifact(); break;
         case "devmode": progress.textContent = (await window.phones.iphoneRevealDeveloperMode(devices.value)).nextStep; return;
         case "install": { const ipa = await window.phones.iphoneSelectFile("ipa"); if (ipa) { progress.textContent = (await window.phones.iphoneInstallSigned(devices.value, ipa)).nextStep; return; } break; }
-        case "signing-setup": await window.phones.iphoneSigningSetup(); progress.textContent = "Windows 签名工具已准备。完成 Sideloadly 首次安装后，点击「补全签名并安装」。"; return;
+        case "signing-setup": await window.phones.iphoneSigningSetup(); progress.textContent = "签名环境已就绪。现在可点击签名并安装控制组件。"; return;
         case "sign": { const result = await window.phones.iphoneSignSideloadly(devices.value, bundle()); dialog.querySelector<HTMLInputElement>("[data-bundle]")!.value = result.bundleId; progress.textContent = `${result.nextStep} 签名有效期至 ${new Date(result.expiresAt).toLocaleString()}。`; return; }
         case "connect": await window.phones.iphoneUsbStart({ udid: devices.value, bundleId: bundle() }); requested = devices.value; await poll(); break;
         case "cancel": requested = undefined; await window.phones.iphoneUsbStop(devices.value); await poll(); break;

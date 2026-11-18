@@ -94,21 +94,46 @@ test('unscoped acknowledgement cannot authorize background work', async () => {
     assert.equal(f.calls.filter(c => c.operation === 'window.action').length, 0);
   } finally { await f.service.close(); }
 });
-test('target activation pauses background and requires explicit return', async () => {
+test('background mode allows pure semantic UIA/AX actions even when target window is foreground, while pausing immediately on real physical user input', async () => {
   const f = fixture();
   try {
     const state = await f.claim();
-    f.observer().receive('epoch', { type: 'observer-fault', epoch: 'epoch', generation: state.inputObservation.generation, reason: 'target_active' });
+    for (const params of [
+      { kind: 'invoke' },
+      { kind: 'set_value', value: 'hello' },
+      { kind: 'toggle' },
+      { kind: 'select' },
+      { kind: 'expand' },
+      { kind: 'collapse' },
+      { kind: 'scroll', vertical: 3 }
+    ]) {
+      await f.read();
+      const res = await f.action(params);
+      assert.equal(res.executed, true, params.kind);
+    }
+    f.observer().receive('epoch', {
+      type: 'input-activity',
+      epoch: 'epoch',
+      generation: state.inputObservation.generation,
+      sequence: '1',
+      kind: 'keyboard',
+      injected: false
+    });
     assert.equal(f.service.status().session.state, 'paused');
-    assert.equal(f.service.status().inputObservation.reason, 'target_active');
+    assert.equal(f.service.status().inputObservation.reason, 'physical_input');
     await assert.rejects(f.read(), { code: 'DESKTOP_USER_IN_CONTROL' });
   } finally { await f.service.close(); }
 });
-test('interactive remains the default and macOS never advertises an available native mode', async () => {
+test('interactive remains the default; macOS supports desktop modes while linux reports unsupported', async () => {
   const f = fixture();
   try { assert.equal((await f.service.execute(command('claim', { windowId: first.id }))).session.mode, 'interactive'); assert.equal(f.arms[0].backgroundTarget, undefined); }
   finally { await f.service.close(); }
   const mac = fixture({ platform: 'darwin' });
-  try { assert.equal(mac.service.status().supported, false); await assert.rejects(mac.claim(), { code: 'DESKTOP_PLATFORM_UNAVAILABLE' }); }
-  finally { await mac.service.close(); }
+  try {
+    assert.equal(mac.service.status().supported, true);
+    assert.equal((await mac.claim()).session.mode, 'background');
+  } finally { await mac.service.close(); }
+  const linux = fixture({ platform: 'linux' });
+  try { assert.equal(linux.service.status().supported, false); await assert.rejects(linux.claim(), { code: 'DESKTOP_PLATFORM_UNAVAILABLE' }); }
+  finally { await linux.service.close(); }
 });

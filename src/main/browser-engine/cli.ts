@@ -29,7 +29,13 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
     else if (["-b", "--base64"].includes(command.args[1])) command.args = ["eval", Buffer.from(command.args[2] || "", "base64").toString("utf8")];
   }
   if (command.args[0] === "batch" && command.args.includes("--stdin")) {
-    command.args = ["batch", "--commands-json", readFileSync(0, "utf8"), ...(command.args.includes("--bail") ? ["--bail"] : [])];
+    command.args = [
+      "batch",
+      "--commands-json",
+      readFileSync(0, "utf8"),
+      ...(command.args.includes("--bail") ? ["--bail"] : []),
+      ...(command.args.includes("--observe-each") ? ["--observe-each"] : [])
+    ];
   }
   const response = await sendEngineCommand(command);
   traceReceipt(response, command.args);

@@ -1,12 +1,14 @@
 import { z } from "zod";
 import { createHash } from "node:crypto";
-import type { BrowserTask, TaskEvent } from "../../shared/tasks";
+import { DEVICE_ONLY_PROFILE_ID, isDeviceOnlyProfile, type BrowserTask, type TaskEvent } from "../../shared/tasks";
+import { findTaskHit } from "../../shared/task-search";
 import { ProfileManagerError } from "../profile-manager-error";
 import type { ManagementTask, ManagementTaskPage, ManagementTaskSummary, ProfilePilotTaskCommand } from "../profilepilot-management-protocol";
 import type { TaskService } from "./service";
 import { createTaskSchema, nativeAccessSchema } from "./store";
 import { contextDescription } from "./conversation";
 import { normalizeNativeAccess } from "./native-access";
+import { reviewSettingsPatchSchema } from "../review/service";
 
 // Leave room for the protocol envelope, JSON escaping, and event pagination.
 const TASK_BYTES = 256 * 1024;
@@ -14,44 +16,165 @@ const PAGE_BYTES = 768 * 1024;
 const uuid = z.string().uuid();
 const cursor = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const messageFields = { requestId: z.string().min(1).max(200).optional(), attachmentIds: z.array(uuid).max(50).optional() };
+const taskInputBodySchema = createTaskSchema.omit({ profileId: true }).extend({
+  materialIds: z.array(z.string().min(1).max(200)).max(50).optional(),
+  attachmentIds: z.array(z.string().min(1).max(200)).max(50).optional(),
+  limits: createTaskSchema.shape.limits.removeDefault().strict().optional(),
+  grant: createTaskSchema.shape.grant.unwrap().strict().optional()
+}).strict();
+const scheduleTaskBodySchema = taskInputBodySchema.extend({
+  profileId: z.string().trim().min(1).max(200).optional()
+}).strict();
+const scheduleSavePayloadSchema = z.object({
+  id: uuid.optional(),
+  name: z.string().trim().min(1).max(100),
+  profile: z.string().trim().min(1).max(200).optional(),
+  task: scheduleTaskBodySchema,
+  at: z.string().datetime(),
+  timezone: z.string().min(1).max(100),
+  repeat: z.enum(["once", "daily", "weekdays", "weekly"]).default("once"),
+  catchUpPolicy: z.enum(["skip", "run_within_window"]).optional(),
+  enabled: z.boolean().default(true)
+}).strict();
+const scheduleSaveFields = {
+  input: scheduleSavePayloadSchema.optional(),
+  id: uuid.optional(),
+  name: z.string().trim().min(1).max(100).optional(),
+  profile: z.string().trim().min(1).max(200).optional(),
+  task: scheduleTaskBodySchema.optional(),
+  at: z.string().datetime().optional(),
+  timezone: z.string().min(1).max(100).optional(),
+  repeat: z.enum(["once", "daily", "weekdays", "weekly"]).optional(),
+  catchUpPolicy: z.enum(["skip", "run_within_window"]).optional(),
+  enabled: z.boolean().optional()
+};
 const commandSchema = z.discriminatedUnion("action", [
-  z.object({ action: z.literal("task.create"), profile: z.string().trim().min(1).max(200), input: createTaskSchema.omit({ profileId: true }).extend({
-    materialIds: z.array(z.string().min(1).max(200)).max(50).optional(),
-    attachmentIds: z.array(z.string().min(1).max(200)).max(50).optional(),
-    limits: createTaskSchema.shape.limits.removeDefault().strict().optional(),
-    grant: createTaskSchema.shape.grant.unwrap().strict().optional()
-  }).strict() }).strict(),
+  z.object({ action: z.literal("task.review.status") }).strict(),
+  z.object({ action: z.literal("task.review.configure"), input: reviewSettingsPatchSchema }).strict(),
+  z.object({ action: z.literal("task.review.run"), kind: z.enum(["daily", "weekly"]) }).strict(),
+  z.object({ action: z.literal("task.review.report"), id: uuid }).strict(),
+  z.object({ action: z.literal("task.review.feedback"), id: uuid, findingId: z.string().regex(/^[a-f0-9]{24}$/), value: z.enum(["accepted", "dismissed", "existing", "pending"]), note: z.string().max(1000).optional() }).strict(),
+  z.object({ action: z.literal("task.review.save_template"), id: uuid, findingId: z.string().regex(/^[a-f0-9]{24}$/) }).strict(),
+  z.object({ action: z.literal("task.create"), profile: z.string().trim().min(1).max(200).default(DEVICE_ONLY_PROFILE_ID), input: taskInputBodySchema }).strict(),
   z.object({ action: z.literal("task.list"), limit: z.number().int().min(1).max(100).optional(), offset: cursor.optional() }).strict(),
   z.object({ action: z.literal("task.get"), id: uuid, after: cursor.optional(), revision: cursor.optional(), limit: z.number().int().min(1).max(200).optional() }).strict(),
+  z.object({ action: z.literal("task.detail"), id: uuid, after: cursor.optional(), revision: cursor.optional(), limit: z.number().int().min(1).max(200).optional() }).strict(),
+  z.object({ action: z.literal("task.search"), query: z.string().trim().min(1).max(1000), limit: z.number().int().min(1).max(100).optional() }).strict(),
   z.object({ action: z.literal("task.control"), id: uuid, control: z.enum(["pause", "resume", "takeover", "cancel", "steer", "queue"]), message: z.string().max(30000).optional(), ...messageFields }).strict(),
   z.object({ action: z.literal("task.reply"), id: uuid, decisionId: uuid, answer: z.string().max(30000), approved: z.boolean().optional(), scope: z.enum(["once", "session"]).optional(), ...messageFields }).strict(),
   z.object({ action: z.literal("task.queue"), id: uuid, removeId: z.string().min(1).max(200).optional() }).strict(),
   z.object({ action: z.literal("task.limits"), id: uuid, limits: createTaskSchema.shape.limits.removeDefault().partial().strict() }).strict(),
   z.object({ action: z.literal("task.settings.get") }).strict(),
-  z.object({ action: z.literal("task.settings.update"), input: z.object({ model: z.string().trim().min(1).max(200), baseUrl: z.string().url().max(2000), apiKey: z.string().max(1000), authMode: z.enum(["apiKey", "bearer"]), maxConcurrent: z.number().int().min(1).max(6), retentionDays: z.number().int().min(1).max(3650), saveScreenshots: z.boolean(), notifications: z.boolean() }).partial().strict() }).strict(),
+  z.object({ action: z.literal("task.settings.update"), input: z.object({ model: z.string().trim().min(1).max(200), baseUrl: z.string().url().max(2000), apiKey: z.string().max(1000), authMode: z.enum(["apiKey", "bearer"]), maxConcurrent: z.number().int().min(1).max(6), retentionDays: z.number().int().min(1).max(3650), saveScreenshots: z.boolean(), notifications: z.boolean(), customInputUsdPerMillion: z.number().min(0).max(10000), customOutputUsdPerMillion: z.number().min(0).max(10000) }).partial().strict() }).strict(),
   z.object({ action: z.literal("task.models") }).strict(),
   z.object({ action: z.literal("task.connection.test") }).strict(),
   z.object({ action: z.literal("task.attachments.import"), paths: z.array(z.string().min(1).max(4096)).min(1).max(50), id: uuid.optional() }).strict(),
-  z.object({ action: z.literal("task.metadata"), id: uuid, title: z.string().trim().min(1).max(120) }).strict(),
+  z.object({ action: z.literal("task.metadata"), id: uuid, title: z.string().trim().min(1).max(120).optional(), pinned: z.boolean().optional(), archived: z.boolean().optional() }).strict(),
+  z.object({ action: z.literal("task.archive"), id: uuid, archived: z.boolean().default(true) }).strict(),
+  z.object({ action: z.literal("task.pin"), id: uuid, pinned: z.boolean().default(true) }).strict(),
+  z.object({ action: z.literal("task.delete"), id: uuid }).strict(),
   z.object({ action: z.literal("task.fork"), id: uuid, title: z.string().trim().min(1).max(120).optional(), eventId: uuid.optional() }).strict(),
   z.object({ action: z.literal("task.rewind"), id: uuid, eventId: uuid }).strict(),
   z.object({ action: z.literal("task.compact"), id: uuid, instructions: z.string().max(5000).optional() }).strict(),
   z.object({ action: z.literal("task.mode"), id: uuid, mode: z.enum(["manual", "plan", "acceptEdits"]), model: z.string().trim().min(1).max(200).optional() }).strict(),
   z.object({ action: z.literal("task.model"), id: uuid, model: z.string().trim().min(1).max(200) }).strict(),
   z.object({ action: z.literal("task.permissions"), id: uuid, revokeId: z.union([uuid, z.literal("all")]).optional() }).strict(),
-  z.object({ action: z.literal("task.status"), id: uuid }).strict()
+  z.object({ action: z.literal("task.status"), id: uuid }).strict(),
+  z.object({ action: z.literal("schedule.list") }).strict(),
+  z.object({ action: z.literal("task.schedule.list") }).strict(),
+  z.object({ action: z.literal("schedule.save"), ...scheduleSaveFields }).strict(),
+  z.object({ action: z.literal("task.schedule.save"), ...scheduleSaveFields }).strict(),
+  z.object({ action: z.literal("schedule.delete"), id: uuid }).strict(),
+  z.object({ action: z.literal("task.schedule.delete"), id: uuid }).strict(),
+  z.object({ action: z.literal("template.list") }).strict(),
+  z.object({ action: z.literal("task.template.list") }).strict(),
+  z.object({ action: z.literal("material.list") }).strict(),
+  z.object({ action: z.literal("task.material.list") }).strict()
 ]);
 
-export function parseTaskManagementCommand(input: unknown): ProfilePilotTaskCommand {
-  try { return commandSchema.parse(input); }
+export type ExtendedTaskManagementCommand = ProfilePilotTaskCommand | z.infer<typeof commandSchema>;
+
+export function parseTaskManagementCommand(input: unknown): ExtendedTaskManagementCommand {
+  try {
+    const parsed = commandSchema.parse(input);
+    if (parsed.action === "task.metadata" && parsed.title === undefined && parsed.pinned === undefined && parsed.archived === undefined) {
+      throw new Error("empty metadata");
+    }
+    if (parsed.action === "schedule.save" || parsed.action === "task.schedule.save") {
+      const { action, input: nested, ...flat } = parsed;
+      if (nested && Object.values(flat).some(v => v !== undefined)) throw new Error("ambiguous schedule payload");
+      const normalized = scheduleSavePayloadSchema.parse(nested ?? flat);
+      return { action, input: normalized };
+    }
+    return parsed;
+  }
   catch { throw new ProfileManagerError("任务命令参数无效，请检查 ID、参数名称及长度或分页范围。", "TASK_COMMAND_INVALID"); }
 }
 
 export async function executeTaskManagementCommand(
-  command: ProfilePilotTaskCommand,
+  command: ExtendedTaskManagementCommand,
   service: TaskService,
   resolveProfileId: (selector: string) => Promise<string>
 ): Promise<unknown> {
+  if (command.action === "task.review.status") return service.reviews.snapshot();
+  if (command.action === "task.review.configure") return service.reviews.configure(command.input);
+  if (command.action === "task.review.report") return service.reviews.report(command.id);
+  if (command.action === "task.review.feedback") return service.reviews.feedback(command.id, command.findingId, command.value, command.note);
+  if (command.action === "task.review.save_template") return { template: service.reviews.saveAsTemplate(command.id, command.findingId) };
+  if (command.action === "task.review.run") {
+    if (service.reviews.snapshot().running) throw new Error("已有复盘正在进行，请读取状态等待完成。");
+    // Analysis outlives one socket request. Reconcile through status/report;
+    // a transport timeout never launches a second analysis automatically.
+    void service.reviews.run(command.kind).catch(() => {});
+    return service.reviews.snapshot();
+  }
+  if (command.action === "schedule.list" || command.action === "task.schedule.list") {
+    return { schedules: structuredClone(service.store.data.schedules) };
+  }
+  if (command.action === "schedule.save" || command.action === "task.schedule.save") {
+    const rawPayload = "input" in command && command.input ? command.input : scheduleSavePayloadSchema.parse((() => {
+      const { action: _action, ...rest } = command as Record<string, unknown>;
+      return rest;
+    })());
+    const selector = rawPayload.profile ?? rawPayload.task.profileId ?? DEVICE_ONLY_PROFILE_ID;
+    const profileId = isDeviceOnlyProfile(selector) ? DEVICE_ONLY_PROFILE_ID : await resolveProfileId(selector);
+    const { profile: _profile, ...scheduleRest } = rawPayload;
+    const schedule = service.saveSchedule({
+      ...scheduleRest,
+      task: { ...rawPayload.task, profileId }
+    });
+    return { schedule };
+  }
+  if (command.action === "schedule.delete" || command.action === "task.schedule.delete") {
+    service.deleteSchedule(command.id);
+    return { deleted: true, id: command.id };
+  }
+  if (command.action === "template.list" || command.action === "task.template.list") {
+    service.store.refreshCatalog();
+    const meta = service.store.listMetadata();
+    return { templates: structuredClone(meta.templates), skills: structuredClone(meta.skills || []) };
+  }
+  if (command.action === "material.list" || command.action === "task.material.list") {
+    return {
+      materials: service.store.data.materials.map(({ id, name, scope, version, updatedAt }) => ({ id, name, scope, version, updatedAt }))
+    };
+  }
+  if (command.action === "task.search") {
+    const query = command.query.trim();
+    const normalizedQuery = query.normalize("NFKC").toLocaleLowerCase();
+    const results = service.store.data.tasks.flatMap(task => {
+      const hit = findTaskHit(task, query);
+      if (!hit) return [];
+      const index = hit.text.normalize("NFKC").toLocaleLowerCase().indexOf(normalizedQuery);
+      const from = Math.max(0, index - 40);
+      return [{
+        taskId: task.id,
+        hit: { ...hit, text: hit.text.slice(from, from + query.length + 180) },
+        task: toManagementTaskSummary(task, service.runs.has(task.id))
+      }];
+    }).slice(0, command.limit ?? 30);
+    return { results, total: results.length };
+  }
   if (command.action === "task.settings.get") return { settings: structuredClone(service.store.data.settings) };
   if (command.action === "task.settings.update") {
     if (!service.dependencies.saveSettings) throw new Error("当前服务不支持保存模型设置。");
@@ -68,7 +191,7 @@ export async function executeTaskManagementCommand(
   }
   if (command.action === "task.attachments.import") return { attachments: service.importAttachmentPaths(command.paths, command.id) };
   if (command.action === "task.create") {
-    const profileId = await resolveProfileId(command.profile);
+    const profileId = isDeviceOnlyProfile(command.profile) ? DEVICE_ONLY_PROFILE_ID : await resolveProfileId(command.profile);
     const task = await service.create(createTaskSchema.parse({ ...command.input, profileId }));
     return { task: toManagementTask(task, service.runs.has(task.id)) };
   }
@@ -89,7 +212,7 @@ export async function executeTaskManagementCommand(
   }
   const task = service.store.data.tasks.find(task => task.id === command.id);
   if (!task) throw new ProfileManagerError("任务不存在。", "TASK_NOT_FOUND");
-  if (command.action === "task.get") {
+  if (command.action === "task.get" || command.action === "task.detail") {
     const revision = task.historyRevision || 0;
     const reset = command.revision !== undefined && command.revision !== revision || (command.after || 0) > task.events.length;
     const after = reset ? 0 : command.after ?? 0;
@@ -111,7 +234,19 @@ export async function executeTaskManagementCommand(
   }
   if (command.action === "task.status") return { task: toManagementTask(task, service.runs.has(task.id)), processes: service.terminal.list(task.id),
     subagents: task.agentActivities || [], relatedTasks: service.store.data.tasks.filter(other => other.sourceTaskId === task.id).map(other => toManagementTaskSummary(other, service.runs.has(other.id))), context: contextDescription(task) };
-  if (command.action === "task.metadata") await service.updateTaskMetadata(task.id, { title: command.title });
+  if (command.action === "task.delete") {
+    service.deleteTask(task.id);
+    return { deleted: true, id: task.id };
+  }
+  if (command.action === "task.archive") {
+    await service.updateTaskMetadata(task.id, { archived: command.archived });
+    return { task: toManagementTask(task, service.runs.has(task.id)), archived: Boolean(task.archivedAt) };
+  }
+  if (command.action === "task.pin") {
+    await service.updateTaskMetadata(task.id, { pinned: command.pinned });
+    return { task: toManagementTask(task, service.runs.has(task.id)), pinned: Boolean(task.pinnedAt) };
+  }
+  if (command.action === "task.metadata") await service.updateTaskMetadata(task.id, { title: command.title, ...("pinned" in command && command.pinned !== undefined ? { pinned: command.pinned } : {}), ...("archived" in command && command.archived !== undefined ? { archived: command.archived } : {}) });
   else if (command.action === "task.fork") return { task: toManagementTask(service.forkConversation(task.id, command.title, command.eventId), false) };
   else if (command.action === "task.rewind") { const draft = service.rewindConversation(task.id, command.eventId); return { task: toManagementTask(task, false), draft }; }
   else if (command.action === "task.compact") { const result = await service.compactConversation(task.id, command.instructions); return { task: toManagementTask(task, false), ...result }; }

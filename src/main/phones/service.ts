@@ -391,14 +391,14 @@ export class PhonesService {
   private assertNoBasic(): void {
     if (this.basicStarting || this.basic.active) throw phoneFailure("PHONE_SESSION_CONFLICT", "请先结束免安装控制，再连接 App 或开始 App 会话。");
   }
-  private async authorizeCamera(input: ScreenCameraLease): Promise<{ instanceId: string; token: string }> {
+  private async authorizeCamera(input: ScreenCameraLease): Promise<{ instanceId: string; token: string; port: number }> {
     this.assertNoBasic();
     const device = this.connected(input.id);
     if (device.transport === "internet") throw phoneFailure("PHONE_OPERATION_UNSUPPORTED", "此版本外网连接不支持虚拟摄像头。");
     if (this.closed || this.operations.has(input.id) || this.reconcile.has(input.id) || device.companion !== "ready") throw new Error("手机连接或控制状态已改变，请先确认手机会话");
     const { state } = await this.rpc(input.id, "sync");
     if (state.sessionId !== input.sessionId || state.generation !== input.generation || state.mode !== "control" || !["controlling", "executing"].includes(state.phase)) throw new Error("屏幕摄像头需要当前有效的手机控制会话；暂停后请重新开启摄像头");
-    return { instanceId: state.instanceId, token: this.routes.get(input.id)!.token };
+    return { instanceId: state.instanceId, token: this.routes.get(input.id)!.token, port: this.companion.port };
   }
   async cameraProbe(id: string) { if (this.connected(id).transport === "internet") throw phoneFailure("PHONE_OPERATION_UNSUPPORTED", "此版本外网连接不支持虚拟摄像头。"); return this.screenCamera.probe(id); }
   async cameraStart(input: ScreenCameraStart) { return this.screenCamera.start(input); }
@@ -451,13 +451,19 @@ export class PhonesService {
     try {
       if (!(await this.emulators.list()).includes(name)) throw new Error("模拟器不存在，请重新选择虚拟设备。");
       const local = await this.emulators.connectLocal?.(name);
+      const attachPlacement = (connected: PhoneDevice): PhoneDevice => {
+        const placement = this.emulators.consumePlacementWarning?.();
+        return placement?.elevatedWindowPlacementSkipped
+          ? { ...connected, elevatedWindowPlacementSkipped: true, warning: placement.warning }
+          : connected;
+      };
       if (local) {
         if (!/^127\.0\.0\.1:\d{4,5}$/.test(local)) throw new Error("本机模拟器连接地址无效");
         const output = await this.adb.run(["connect", local], 10000);
         if (!/connected to|already connected/i.test(output)) throw new Error("本机模拟器尚未连接");
         await this.refresh();
         if (this.devices.get(local)?.connection !== "device") await this.refresh();
-        return this.connected(local);
+        return attachPlacement(this.connected(local));
       }
       const find = async () => {
         const candidates = parseAdbDevices(await this.adb.run(["devices", "-l"])).filter(device => device.transport === "emulator");
@@ -482,7 +488,7 @@ export class PhonesService {
       // refresh() can join a desktop poll begun before this AVD connected.
       // Finish that poll and obtain one current snapshot before reporting failure.
       if (this.devices.get(found.id)?.connection !== "device") await this.refresh();
-      return this.connected(found.id);
+      return attachPlacement(this.connected(found.id));
     } finally { this.emulatorBusy = false; }
   }
   private persist(): void {
@@ -1200,9 +1206,10 @@ export class PhonesService {
       if (["viewing", "controlling", "executing", "paused"].includes(state.phase)) throw phoneFailure("PHONE_SESSION_CONFLICT", "手机已有会话，请继续该会话或先结束。");
       if (state.readiness?.unlocked === false) throw phoneFailure("PHONE_SCREEN_LOCKED", "请先解锁手机。");
       const readiness = phoneReadiness({ ...this.device(id), state, companion: "ready" });
-      if (!readiness.readyToStart) throw phoneFailure(readiness.checks.some(c => c.status === "blocked" && ["overlay", "notifications"].includes(c.id)) ? "PHONE_USER_PERMISSION_REQUIRED"
-        : readiness.checks.some(c => c.status === "blocked" && c.id === "accessibility") ? "PHONE_PERMISSION_REQUIRED" : "PHONE_NOT_READY",
-        readiness.checks.filter(c => c.status === "blocked").map(c => c.message).join(" "), "not-executed", readiness);
+      const blocked = readiness.checks.filter(c => c.status === "blocked" && (input.mode === "control" || c.id !== "overlay"));
+      if (blocked.length) throw phoneFailure(blocked.some(c => ["overlay", "notifications"].includes(c.id)) ? "PHONE_USER_PERMISSION_REQUIRED"
+        : blocked.some(c => c.id === "accessibility") ? "PHONE_PERMISSION_REQUIRED" : "PHONE_NOT_READY",
+        blocked.map(c => c.message).join(" "), "not-executed", readiness);
       const started = await this.rpc(id, "start", { ...input, instanceId: state.instanceId, generation: state.generation, sessionId: randomUUID(), computer: this.computer });
       if (source === "external") this.ownTaskCapture(id, started.state, "app");
     }); return this.snapshot().devices.find(device => device.id === id)!;

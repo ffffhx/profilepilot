@@ -3,6 +3,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -421,6 +422,17 @@ static bool connect_socket_stdio(const char *socket_path) {
   const int bind_result = bind(server, (struct sockaddr *)&address, sizeof(address));
   umask(previous_mask);
   if (bind_result < 0 || chmod(socket_path, 0600) < 0 || listen(server, 1) < 0) {
+    close(server);
+    unlink(socket_path);
+    return false;
+  }
+
+  struct pollfd accept_poll = {.fd = server, .events = POLLIN, .revents = 0};
+  int poll_result = 0;
+  do {
+    poll_result = poll(&accept_poll, 1, 10000);
+  } while (poll_result < 0 && errno == EINTR);
+  if (poll_result <= 0) {
     close(server);
     unlink(socket_path);
     return false;

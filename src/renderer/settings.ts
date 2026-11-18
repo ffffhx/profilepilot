@@ -1,9 +1,10 @@
 import type { StartupSettings } from "../shared/startup-settings";
+import { mountReviewSettings } from "./review-settings";
 import type { AppUpdateState } from '../shared/app-update';
 import { profileApi } from "./api";
 import { workspaceSwitcher, workspaceIdentityBar, refreshWorkspaceSwitcher } from "./workspace-switcher";
 import { onWorkspaceVisibilityChanged, workspaceHidden } from "./workspace-lifecycle";
-import { experimentalAgentEnabled, setExperimentalAgentEnabled, experimentalProxyRoutingEnabled, setExperimentalProxyRoutingEnabled, onExperimentalFeaturesChanged } from "./experimental-features";
+import { experimentalAgentEnabled, setExperimentalAgentEnabled, experimentalProxyRoutingEnabled, setExperimentalProxyRoutingEnabled, experimentalGpuiEnabled, setExperimentalGpuiEnabled, experimentalDesktopEnabled, setExperimentalDesktopEnabled, experimentalGameFollowEnabled, setExperimentalGameFollowEnabled, experimentalScreenCameraEnabled, setExperimentalScreenCameraEnabled, onExperimentalFeaturesChanged } from "./experimental-features";
 
 const root = document.getElementById("settings")!;
 root.innerHTML = `${workspaceSwitcher("settings")}${workspaceIdentityBar()}
@@ -30,11 +31,34 @@ root.innerHTML = `${workspaceSwitcher("settings")}${workspaceIdentityBar()}
       </div>
       <button type="button" class="settings-refresh" data-action="refresh-startup">刷新状态</button>
     </section>
+    <section id="console-modules" aria-labelledby="console-modules-heading">
+      <h2 id="console-modules-heading">控制台模块</h2>
+      <div class="setting-card">
+        <div class="setting-row">
+          <div class="setting-copy"><h3 id="experimental-gpui-label">GPUI 应用</h3><p id="experimental-gpui-description">默认关闭。开启后在控制台显示 GPUI 应用，用于连接和调试已接入的应用。</p></div>
+          <div class="setting-control">
+            <span id="experimental-gpui-status" role="status" aria-live="polite"></span>
+            <button type="button" class="setting-switch" role="switch" data-action="toggle-experimental-gpui" aria-checked="false" aria-labelledby="experimental-gpui-label" aria-describedby="experimental-gpui-description experimental-gpui-status experimental-gpui-note"></button>
+          </div>
+        </div>
+        <p id="experimental-gpui-note" class="setting-note" role="alert" hidden></p>
+      </div>
+      <div class="setting-card">
+        <div class="setting-row">
+          <div class="setting-copy"><h3 id="experimental-desktop-label">Windows 桌面</h3><p id="experimental-desktop-description">默认关闭。开启后在控制台显示 Windows 桌面，用于查看和控制本机窗口；仅支持 Windows。</p></div>
+          <div class="setting-control">
+            <span id="experimental-desktop-status" role="status" aria-live="polite"></span>
+            <button type="button" class="setting-switch" role="switch" data-action="toggle-experimental-desktop" aria-checked="false" aria-labelledby="experimental-desktop-label" aria-describedby="experimental-desktop-description experimental-desktop-status experimental-desktop-note"></button>
+          </div>
+        </div>
+        <p id="experimental-desktop-note" class="setting-note" role="alert" hidden></p>
+      </div>
+    </section>
     <section id="experimental-features" aria-labelledby="experimental-heading">
       <h2 id="experimental-heading">实验性功能</h2>
       <div class="setting-card">
         <div class="setting-row">
-          <div class="setting-copy"><h3 id="experimental-agent-label">Agent（实验性）</h3><p id="experimental-agent-description">任务与对话功能仍在完善，默认隐藏。开启后在左侧显示 Agent。</p></div>
+          <div class="setting-copy"><h3 id="experimental-agent-label">Agent（实验性）</h3><p id="experimental-agent-description">默认开启，可在左侧显示或隐藏 Agent 工作区。</p></div>
           <div class="setting-control">
             <span id="experimental-agent-status" role="status" aria-live="polite"></span>
             <button type="button" class="setting-switch" role="switch" data-action="toggle-experimental-agent" aria-checked="false" aria-labelledby="experimental-agent-label" aria-describedby="experimental-agent-description experimental-agent-status experimental-agent-note"></button>
@@ -51,6 +75,26 @@ root.innerHTML = `${workspaceSwitcher("settings")}${workspaceIdentityBar()}
           </div>
         </div>
         <p id="experimental-proxy-routing-note" class="setting-note" role="alert" hidden></p>
+      </div>
+      <div class="setting-card">
+        <div class="setting-row">
+          <div class="setting-copy"><h3 id="experimental-game-follow-label">队友跟随（实验性）</h3><p id="experimental-game-follow-description">默认关闭。开启后在手机设备中显示“队友跟随”，通过本机小地图识别沿可行路线跟随指定队友。</p></div>
+          <div class="setting-control">
+            <span id="experimental-game-follow-status" role="status" aria-live="polite"></span>
+            <button type="button" class="setting-switch" role="switch" data-action="toggle-experimental-game-follow" aria-checked="false" aria-labelledby="experimental-game-follow-label" aria-describedby="experimental-game-follow-description experimental-game-follow-status experimental-game-follow-note"></button>
+          </div>
+        </div>
+        <p id="experimental-game-follow-note" class="setting-note" role="alert" hidden></p>
+      </div>
+      <div class="setting-card">
+        <div class="setting-row">
+          <div class="setting-copy"><h3 id="experimental-screen-camera-label">屏幕摄像头（实验性）</h3><p id="experimental-screen-camera-description">默认关闭。开启后在手机设备中显示“屏幕摄像头”，让手机扫码 App 读取电脑窗口画面。</p></div>
+          <div class="setting-control">
+            <span id="experimental-screen-camera-status" role="status" aria-live="polite"></span>
+            <button type="button" class="setting-switch" role="switch" data-action="toggle-experimental-screen-camera" aria-checked="false" aria-labelledby="experimental-screen-camera-label" aria-describedby="experimental-screen-camera-description experimental-screen-camera-status experimental-screen-camera-note"></button>
+          </div>
+        </div>
+        <p id="experimental-screen-camera-note" class="setting-note" role="alert" hidden></p>
       </div>
     </section>
   </main>`;
@@ -69,12 +113,16 @@ async function renderAppUpdate(): Promise<void> {
 }
 document.getElementById('app-update-button')!.addEventListener('click', () => void window.appUpdate.open().finally(renderAppUpdate));
 void renderAppUpdate();
-const updateTimer = setInterval(() => { if (!document.hidden) void renderAppUpdate(); }, 1500);
+const updateTimer = setInterval(() => { if (!document.hidden && !workspaceHidden()) void renderAppUpdate(); }, 1500);
 window.addEventListener('pagehide', () => clearInterval(updateTimer), { once: true });
 
 const experiments = [
   { name: "agent", enabled: experimentalAgentEnabled, set: setExperimentalAgentEnabled },
-  { name: "proxy-routing", enabled: experimentalProxyRoutingEnabled, set: setExperimentalProxyRoutingEnabled }
+  { name: "proxy-routing", enabled: experimentalProxyRoutingEnabled, set: setExperimentalProxyRoutingEnabled },
+  { name: "game-follow", enabled: experimentalGameFollowEnabled, set: setExperimentalGameFollowEnabled },
+  { name: "screen-camera", enabled: experimentalScreenCameraEnabled, set: setExperimentalScreenCameraEnabled },
+  { name: "gpui", enabled: experimentalGpuiEnabled, set: setExperimentalGpuiEnabled },
+  { name: "desktop", enabled: experimentalDesktopEnabled, set: setExperimentalDesktopEnabled }
 ];
 function renderExperiments(): void {
   for (const experiment of experiments) {
@@ -134,9 +182,10 @@ async function update(enabled?: boolean): Promise<void> {
 
 toggle.addEventListener("click", () => { if (settings?.supported) void update(!settings.enabled); });
 refresh.addEventListener("click", () => void update());
-onWorkspaceVisibilityChanged(() => { if (!workspaceHidden()) void update(); });
+onWorkspaceVisibilityChanged(() => { if (!workspaceHidden()) { void update(); void renderAppUpdate(); } });
 window.addEventListener("focus", () => { if (!workspaceHidden()) void update(); });
 // The shell owns native focus while this page is embedded in its iframe.
 if (window.parent !== window) window.parent.addEventListener("focus", () => { if (!workspaceHidden()) void update(); });
 refreshWorkspaceSwitcher();
 void update();
+mountReviewSettings(root.querySelector<HTMLElement>(".global-settings")!);

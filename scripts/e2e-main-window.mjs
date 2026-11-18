@@ -202,7 +202,7 @@ function verifyMainWindowSmoke(smoke, homeDir) {
 
   assert.deepEqual(smoke.statusLabels, ["已管理", "运行中"]);
   assert.equal(smoke.statusValues.length, 2, "status strip should show managed and running counts");
-  assert.equal(smoke.accountSyncTitle, "同步");
+  assert.equal(smoke.accountSyncTitle, "Profile 同步");
   assert.ok(smoke.buttonCount >= 10, "main window should render its primary controls");
   assert.ok(smoke.shellWidthRatio >= 0.9 && smoke.shellWidthRatio <= 1, "main shell should fill the space beside the workspace rail");
   assert.equal(

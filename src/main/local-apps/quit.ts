@@ -12,7 +12,7 @@ export async function requestAppQuit(pid: number): Promise<boolean> {
   if (process.platform !== "darwin") return false;
   try {
     const { stdout } = await execute("/usr/bin/osascript", ["-l", "JavaScript", "-e",
-      `ObjC.import('AppKit'); var app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(${pid}); app.isNil() ? false : Boolean(app.terminate);`
+      `ObjC.import('AppKit'); var app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(${pid}); app.isNil() ? false : Boolean(app.terminate());`
     ], { timeout: 4000 });
     return stdout.trim() === "true";
   } catch { return false; }

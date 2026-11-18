@@ -1,7 +1,7 @@
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { appendFile, mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { watch } from "node:fs";
 import { spawn } from "node:child_process";
@@ -14,6 +14,30 @@ import { writeControlTrace } from "../control-trace";
 interface ServiceRecord { version: string; pid: number; port: number; token: string; session: string; root: string }
 export interface EngineResponse { success: boolean; data?: unknown; error?: string; code?: string; recovery?: ControlRecovery; requestId?: string; partialResult?: unknown }
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
+function isLoopbackHostHeader(hostHeader: string | undefined): boolean {
+  if (!hostHeader) return false;
+  const trimmed = hostHeader.trim().toLowerCase();
+  if (trimmed.startsWith("[")) {
+    const end = trimmed.indexOf("]");
+    if (end < 0) return false;
+    const host = trimmed.slice(0, end + 1);
+    const rest = trimmed.slice(end + 1);
+    if (rest && !/^:\d{1,5}$/.test(rest)) return false;
+    return LOOPBACK_HOSTS.has(host);
+  }
+  const colon = trimmed.indexOf(":");
+  const host = colon >= 0 ? trimmed.slice(0, colon) : trimmed;
+  const port = colon >= 0 ? trimmed.slice(colon + 1) : "";
+  if (port && !/^\d{1,5}$/.test(port)) return false;
+  return LOOPBACK_HOSTS.has(host);
+}
+function isBearerAuthorized(authorization: string | undefined, expectedToken: string): boolean {
+  if (typeof authorization !== "string" || !authorization.startsWith("Bearer ")) return false;
+  const provided = Buffer.from(authorization.slice("Bearer ".length), "utf8");
+  const expected = Buffer.from(expectedToken, "utf8");
+  return provided.length === expected.length && timingSafeEqual(provided, expected);
+}
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 export const engineRoot = (env = process.env) => path.resolve(env.AGENT_BROWSER_SOCKET_DIR || path.join(env.HOME || os.homedir(), ".agent-browser"));
 function recordPath(root: string, session: string) { return path.join(root, `${session}.engine.json`); }
@@ -111,7 +135,7 @@ export async function serveEngine(root: string, session: string): Promise<void> 
   let record: ServiceRecord;
   const server = http.createServer(async (req, res) => {
     const respond = (status: number, body: unknown) => { if (!res.destroyed) { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(body)); } };
-    if (req.method !== "POST" || req.url !== "/command" || req.headers.authorization !== `Bearer ${token}`) { respond(403, { success: false }); req.resume(); return; }
+    if (req.method !== "POST" || req.url !== "/command" || req.headers.origin || !isLoopbackHostHeader(req.headers.host) || !isBearerAuthorized(req.headers.authorization, token)) { respond(403, { success: false }); req.resume(); return; }
     try {
       const chunks: Buffer[] = []; let size = 0;
       for await (const chunk of req) { size += chunk.length; if (size > 8 * 1024 * 1024) throw new EngineError("Command too large"); chunks.push(Buffer.from(chunk)); }

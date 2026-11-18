@@ -33,6 +33,7 @@ import type {
   AgentTakeoverEvent,
   CloneProfilesRequest,
   CloneProfilesResult,
+  CreateProfileInput,
   RefreshClonesResult,
   RecycleIdleClonesResult,
   LaunchClonesResult,
@@ -742,7 +743,7 @@ function showMiniOutsideClickWindows(): void {
         preload: path.join(__dirname, "../preload.js"),
         contextIsolation: true,
         nodeIntegration: false,
-        sandbox: false
+        sandbox: true
       }
     });
 
@@ -861,7 +862,7 @@ async function createMiniWindow(): Promise<BrowserWindow> {
       preload: path.join(__dirname, "../preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: true
     }
   });
 
@@ -1325,7 +1326,7 @@ function createMainWindow(): void {
       zoomFactor: UI_ZOOM_FACTOR,
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: true
     }
   });
   mainWindow = windowRef;
@@ -1699,8 +1700,8 @@ function registerIpcHandlers(): void {
   });
   ipcMain.handle(IPC_CHANNELS.getTakeoverHistory, async (): Promise<AgentTakeoverEvent[]> => profileManager.getTakeoverHistory());
 
-  ipcMain.handle(IPC_CHANNELS.createProfile, async (_event, name: string): Promise<AppState> => {
-    await profileManager.createProfile(name);
+  ipcMain.handle(IPC_CHANNELS.createProfile, async (_event, input: string | CreateProfileInput): Promise<AppState> => {
+    await profileManager.createProfile(input);
     return updatedAppState();
   });
 

@@ -131,10 +131,19 @@ test('unknown input outcome pauses ownership and keeps the rejected receipt', as
     await assert.rejects(f.service.execute(action), { code: 'DESKTOP_OUTCOME_UNKNOWN' }); assert.equal(inputs, 1);
   } finally { f.service.close(); }
 });
-test('macOS reports unsupported without starting a native Windows driver', async () => {
-  const service = new DesktopService({ platform: 'darwin', driver: () => ({ close() {}, request() { throw new Error('must not run'); } }) });
+test('unsupported platforms report unsupported without starting a native driver, while macOS is supported', async () => {
+  const service = new DesktopService({ platform: 'linux', driver: () => ({ close() {}, request() { throw new Error('must not run'); } }) });
   try { assert.equal(service.status().supported, false); await assert.rejects(service.execute(command('windows')), { code: 'DESKTOP_PLATFORM_UNAVAILABLE' }); }
   finally { service.close(); }
+  const mac = new DesktopService({ platform: 'darwin', available: () => true, driver: () => ({ close() {}, async request(op) {
+    if (op === 'windows') return { windows: [target] };
+    return { windowId: target.id, version, elements: [] };
+  } }) });
+  try {
+    assert.equal(mac.status().supported, true);
+    assert.equal(mac.status().available, true);
+    assert.equal((await mac.execute(command('windows'))).windows.length, 1);
+  } finally { mac.close(); }
 });
 test('desktop CLI preserves Unicode JSON and uses ProfilePilot management; invalid parameters never dispatch', async () => {
   const calls = []; let output = '';

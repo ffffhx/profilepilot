@@ -6,7 +6,13 @@ export interface MobileSnapshot {
   port: number; endpoints: string[]; advertisedUrl: string; fingerprint: string;
   devices: MobileDevice[]; error: string;
 }
-export interface MobilePairing { uri: string; qr: string; expiresAt: string; }
+export interface MobilePairing {
+  uri: string;
+  webPairUrl: string;
+  qr: string;
+  webQr?: string;
+  expiresAt: string;
+}
 export interface MobileApi {
   snapshot(): Promise<MobileSnapshot>;
   configure(input: { enabled: boolean; advertisedUrl?: string }): Promise<MobileSnapshot>;

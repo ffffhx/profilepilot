@@ -1,6 +1,5 @@
 export function agentOverlayBootstrapScript(): string {
   return String.raw`(() => {
-  const TERMINAL_STOP_KEY = "__ppAgentOverlayTerminalStopUntil";
   try {
     if (window.top !== window.self) {
       return;
@@ -8,16 +7,8 @@ export function agentOverlayBootstrapScript(): string {
   } catch {
     return;
   }
-  try {
-    const terminalStopUntil = Number(window.sessionStorage.getItem(TERMINAL_STOP_KEY));
-    if (Number.isFinite(terminalStopUntil) && terminalStopUntil > Date.now()) {
-      return;
-    }
-    if (terminalStopUntil) {
-      window.sessionStorage.removeItem(TERMINAL_STOP_KEY);
-    }
-  } catch {
-    // Opaque origins may deny sessionStorage; main-process script removal remains authoritative.
+  if (globalThis.__ppAgentOverlayTerminalStopped === true) {
+    return;
   }
   if (window.__ppAgentOverlayInstalled) {
     return;
@@ -25,7 +16,6 @@ export function agentOverlayBootstrapScript(): string {
   window.__ppAgentOverlayInstalled = true;
 
   const SIGNAL_NAME = "__ppAgentOverlaySignal";
-  const STORAGE_KEY = "__ppAgentOverlayPosition";
   const HUD_INSET_PX = 16;
   const HUD_COLLISION_MARGIN_PX = 12;
   const HUD_CORNERS = ["top-left", "top-right", "bottom-left", "bottom-right"];
@@ -155,7 +145,8 @@ export function agentOverlayBootstrapScript(): string {
   ]);
   const state = cloneStateDefaults();
   let moreOpen = false;
-  let hudCorner = readHudCorner();
+  let hudCorner = "bottom-right";
+  let mountScheduled = false;
   let heartbeatTimer = null;
   let lastUpdateReceivedAt = Date.now();
   let stopConfirmTimer = null;
@@ -193,12 +184,32 @@ export function agentOverlayBootstrapScript(): string {
   let hudAvoidListener = null;
   let stopConfirmKind = "";
 
+  function isHostConnected() {
+    return Boolean(host && (host.isConnected || host.parentNode === document.body || host.parent === document.body));
+  }
+
+  function scheduleMountWhenReady() {
+    if (tearingDown || host || mountScheduled) {
+      return;
+    }
+    mountScheduled = true;
+    const retry = () => {
+      mountScheduled = false;
+      mount();
+    };
+    if (document.readyState === "loading" && typeof document.addEventListener === "function") {
+      document.addEventListener("DOMContentLoaded", () => setTimeout(retry, 0), { once: true });
+      return;
+    }
+    setTimeout(retry, 50);
+  }
+
   function mount() {
     if (tearingDown || host) {
       return;
     }
-    if (!document.documentElement) {
-      setTimeout(mount, 50);
+    if (!document.body || document.readyState === "loading") {
+      scheduleMountWhenReady();
       return;
     }
     host = document.createElement("div");
@@ -282,7 +293,7 @@ export function agentOverlayBootstrapScript(): string {
     window.addEventListener("keydown", escapeKeyListener, true);
     host.addEventListener(HUD_AVOID_EVENT, hudAvoidListener);
 
-    document.documentElement.appendChild(host);
+    document.body.appendChild(host);
     applyHudCorner(hudCorner);
     setupHostReconnectTracking();
     setupReducedMotionTracking();
@@ -519,11 +530,11 @@ export function agentOverlayBootstrapScript(): string {
 
   function setupHostReconnectTracking() {
     cleanupHostReconnectTracking();
-    if (typeof MutationObserver !== "function" || !document.documentElement) {
+    if (typeof MutationObserver !== "function" || !document.body) {
       return;
     }
     hostObserver = new MutationObserver((mutations) => {
-      if (!host || host.isConnected) {
+      if (!host || isHostConnected()) {
         return;
       }
       for (const mutation of mutations) {
@@ -537,7 +548,10 @@ export function agentOverlayBootstrapScript(): string {
       scheduleHostReconnect();
     });
     try {
-      hostObserver.observe(document.documentElement, { childList: true });
+      hostObserver.observe(document.body, { childList: true });
+      if (document.documentElement) {
+        hostObserver.observe(document.documentElement, { childList: true });
+      }
     } catch {
       hostObserver = null;
     }
@@ -565,8 +579,15 @@ export function agentOverlayBootstrapScript(): string {
   }
 
   function ensureHostConnected() {
-    if (tearingDown || !host || !document.documentElement || host.isConnected) {
-      return Boolean(host && host.isConnected);
+    if (tearingDown || !host) {
+      return false;
+    }
+    if (isHostConnected()) {
+      return true;
+    }
+    if (!document.body || document.readyState === "loading") {
+      scheduleHostReconnect();
+      return false;
     }
     const now = Date.now();
     if (hostReattachBlockedUntil > now) {
@@ -583,7 +604,7 @@ export function agentOverlayBootstrapScript(): string {
       return false;
     }
     try {
-      document.documentElement.appendChild(host);
+      document.body.appendChild(host);
       applyHudCorner(hudCorner);
       return true;
     } catch {
@@ -776,13 +797,7 @@ export function agentOverlayBootstrapScript(): string {
       stopConfirmTimer = setTimeout(resetStopConfirm, STOP_CONFIRM_MS);
       return;
     }
-    try {
-      // Suppress leaked/late future-document bootstraps until a later real Agent Session
-      // explicitly clears this tab-scoped marker before installing its own bootstrap.
-      window.sessionStorage.setItem(TERMINAL_STOP_KEY, String(Number.MAX_SAFE_INTEGER));
-    } catch {
-      // Main-process script removal still handles pages without sessionStorage.
-    }
+    globalThis.__ppAgentOverlayTerminalStopped = true;
     signal("stop", { stopAll: true, reason: "user_stop" });
     // The binding call has been dispatched; run the full teardown so the host observer cannot
     // reattach the box while Gateway/daemon teardown settles.
@@ -812,9 +827,28 @@ export function agentOverlayBootstrapScript(): string {
     updateStopButton();
   }
 
+  function getViewportScreenGeometry() {
+    const screenX = finiteNumber(window.screenX ?? window.screenLeft) ?? 0;
+    const screenY = finiteNumber(window.screenY ?? window.screenTop) ?? 0;
+    const innerWidth = positiveFiniteNumber(window.innerWidth) || 0;
+    const innerHeight = positiveFiniteNumber(window.innerHeight) || 0;
+    const outerWidth = positiveFiniteNumber(window.outerWidth) || innerWidth;
+    const outerHeight = positiveFiniteNumber(window.outerHeight) || innerHeight;
+    const devicePixelRatio = positiveFiniteNumber(window.devicePixelRatio || 1) || 1;
+    return {
+      screenX,
+      screenY,
+      outerWidth,
+      outerHeight,
+      innerWidth,
+      innerHeight,
+      devicePixelRatio
+    };
+  }
+
   // Input Guard 在 Windows/macOS 原生层先吞掉真实点击，再把同一次按下/抬起的全局坐标和
   // 事件发生时的原生窗口边界交回来。这里不缓存按钮屏幕坐标：每次都用当前页面
-  // viewport、页面缩放和按钮 rect 即时换算；任何字段不完整或布局变化都返回 null。
+  // viewport、页面缩放、物理像素/DIP 自适应比例以及 Windows DWM 隐形边框即时换算。
   function guardProbe(payload) {
     if (
       tearingDown ||
@@ -829,11 +863,12 @@ export function agentOverlayBootstrapScript(): string {
     const down = normalizeGuardPoint(payload.down);
     const up = normalizeGuardPoint(payload.up);
     const displayScale = positiveFiniteNumber(payload.displayScale);
-    const innerWidth = positiveFiniteNumber(window.innerWidth);
-    const innerHeight = positiveFiniteNumber(window.innerHeight);
-    const outerWidth = positiveFiniteNumber(window.outerWidth);
-    const outerHeight = positiveFiniteNumber(window.outerHeight);
-    const devicePixelRatio = positiveFiniteNumber(window.devicePixelRatio || 1);
+    const geometry = getViewportScreenGeometry();
+    const innerWidth = geometry.innerWidth;
+    const innerHeight = geometry.innerHeight;
+    const outerWidth = geometry.outerWidth;
+    const outerHeight = geometry.outerHeight;
+    const devicePixelRatio = geometry.devicePixelRatio;
     if (
       !nativeWindow ||
       !down ||
@@ -854,7 +889,8 @@ export function agentOverlayBootstrapScript(): string {
       displayScale,
       devicePixelRatio,
       innerWidth,
-      innerHeight
+      innerHeight,
+      outerWidth
     );
     const upClient = guardClientPoint(
       up,
@@ -862,7 +898,8 @@ export function agentOverlayBootstrapScript(): string {
       displayScale,
       devicePixelRatio,
       innerWidth,
-      innerHeight
+      innerHeight,
+      outerWidth
     );
     if (!downClient || !upClient) {
       return null;
@@ -897,7 +934,7 @@ export function agentOverlayBootstrapScript(): string {
       roundGuardMetric(rect.right),
       roundGuardMetric(rect.bottom)
     ]);
-    return { action: downAction, signature };
+    return { action: downAction, signature, screenGeometry: geometry };
   }
 
   function guardActivate(payload, expectedSignature) {
@@ -915,9 +952,7 @@ export function agentOverlayBootstrapScript(): string {
     return true;
   }
 
-  function guardClientPoint(point, nativeWindow, displayScale, devicePixelRatio, innerWidth, innerHeight) {
-    const localOuterX = point.x - nativeWindow.x;
-    const localOuterY = point.y - nativeWindow.y;
+  function guardClientPoint(point, nativeWindow, displayScale, devicePixelRatio, innerWidth, innerHeight, outerWidth) {
     const viewport = window.visualViewport;
     const viewportScale = viewport && positiveFiniteNumber(viewport.scale) ? viewport.scale : 1;
     const offsetLeft = viewport && Number.isFinite(viewport.offsetLeft) ? viewport.offsetLeft : 0;
@@ -926,19 +961,53 @@ export function agentOverlayBootstrapScript(): string {
     if (!Number.isFinite(browserZoom) || browserZoom < 0.25 || browserZoom > 5) {
       return null;
     }
-    const contentWidth = innerWidth * browserZoom;
-    const topChrome = nativeWindow.height - innerHeight * browserZoom;
-    const geometryTolerance = Math.max(4, browserZoom * 2);
-    if (
-      Math.abs(contentWidth - nativeWindow.width) > geometryTolerance ||
-      topChrome < -geometryTolerance ||
-      topChrome > nativeWindow.height
-    ) {
+    const contentDipW = innerWidth * browserZoom;
+    const contentDipH = innerHeight * browserZoom;
+    const minBorderSlack = -Math.max(6, browserZoom * 4);
+    const maxHorizBorderDip = Math.max(36, browserZoom * 24);
+
+    // Windows InputObserver runs in Per-Monitor-Aware-V2 physical pixels and GetWindowRect
+    // includes ~7-8 DIP DWM invisible resize borders on left/right/bottom; macOS reports DIPs.
+    const diffDip = nativeWindow.width - contentDipW;
+    const dipValid = diffDip >= minBorderSlack && diffDip <= maxHorizBorderDip;
+    const hasScaledCandidate = Math.abs(displayScale - 1) > 0.01;
+    const diffPhys = hasScaledCandidate ? (nativeWindow.width / displayScale) - contentDipW : Infinity;
+    const physValid = hasScaledCandidate && diffPhys >= minBorderSlack && diffPhys <= maxHorizBorderDip;
+
+    let coordScale = 1;
+    if (physValid && !dipValid) {
+      coordScale = displayScale;
+    } else if (dipValid && !physValid) {
+      coordScale = 1;
+    } else if (physValid && dipValid) {
+      const refOuterW = positiveFiniteNumber(outerWidth) || contentDipW;
+      const errDip = Math.abs(nativeWindow.width - refOuterW);
+      const errPhys = Math.abs((nativeWindow.width / displayScale) - refOuterW);
+      coordScale = errPhys < errDip ? displayScale : 1;
+    } else {
       return null;
     }
+
+    const winDipX = nativeWindow.x / coordScale;
+    const winDipY = nativeWindow.y / coordScale;
+    const winDipW = nativeWindow.width / coordScale;
+    const winDipH = nativeWindow.height / coordScale;
+    const ptDipX = point.x / coordScale;
+    const ptDipY = point.y / coordScale;
+
+    const horizBorderDip = Math.max(0, winDipW - contentDipW);
+    const leftBorderDip = horizBorderDip > 1.5 ? horizBorderDip / 2 : 0;
+    const bottomBorderDip = horizBorderDip > 2
+      ? Math.min(leftBorderDip, Math.max(0, winDipH - contentDipH))
+      : 0;
+    const topChromeDip = winDipH - contentDipH - bottomBorderDip;
+    if (topChromeDip < minBorderSlack || topChromeDip > winDipH) {
+      return null;
+    }
+
     const pointScale = browserZoom * viewportScale;
-    const clientX = offsetLeft + localOuterX / pointScale;
-    const clientY = offsetTop + (localOuterY - Math.max(0, topChrome)) / pointScale;
+    const clientX = offsetLeft + (ptDipX - winDipX - leftBorderDip) / pointScale;
+    const clientY = offsetTop + (ptDipY - winDipY - Math.max(0, topChromeDip)) / pointScale;
     if (
       !Number.isFinite(clientX) ||
       !Number.isFinite(clientY) ||
@@ -1041,15 +1110,6 @@ export function agentOverlayBootstrapScript(): string {
     }
   }
 
-  function readHudCorner() {
-    try {
-      const parsed = JSON.parse(sessionStorage.getItem(STORAGE_KEY) || "null");
-      return parsed && HUD_CORNERS.includes(parsed.corner) ? parsed.corner : "bottom-right";
-    } catch {
-      return "bottom-right";
-    }
-  }
-
   function applyHudCorner(corner) {
     if (!host) {
       return false;
@@ -1063,11 +1123,7 @@ export function agentOverlayBootstrapScript(): string {
   }
 
   function persistHudCorner() {
-    try {
-      sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ corner: hudCorner }));
-    } catch {
-      // sessionStorage may be disabled.
-    }
+    // Ephemeral in-memory HUD corner only; never write to web storage.
   }
 
   function avoidHudForRect(input) {
@@ -1394,6 +1450,14 @@ export function agentOverlayBootstrapScript(): string {
     }
   };
 
+  window.__ppAgentOverlayScreenGeometry = () => {
+    try {
+      return getViewportScreenGeometry();
+    } catch {
+      return null;
+    }
+  };
+
   window.__ppAgentOverlayGuardProbe = (payload) => {
     try {
       return guardProbe(payload);
@@ -1449,6 +1513,7 @@ export function agentOverlayBootstrapScript(): string {
     delete window.__ppAgentOverlayUpdate;
     delete window.__ppAgentOverlayHighlightAt;
     delete window.__ppAgentOverlayAvoidRect;
+    delete window.__ppAgentOverlayScreenGeometry;
     delete window.__ppAgentOverlayGuardProbe;
     delete window.__ppAgentOverlayGuardActivate;
     delete window.__ppAgentOverlayTeardown;

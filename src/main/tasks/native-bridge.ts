@@ -26,8 +26,35 @@ export interface NativeBrowserTransport {
   onEvent(listener: (event: NativeEvent) => void): () => void;
   request(profileId: string, method: string, params?: Record<string, unknown>, timeoutMs?: number): Promise<any>;
 }
-export type NativeEvent = { profileId: string; sessionId?: string; cdpSessionId?: string; tabId?: number; type: "state" | "cdp" | "disconnected"; method?: string; params?: any; state?: NativeBrowserState };
-export type NativeConnectionState = NativeBrowserState & { extensionVersion?: string; installationType?: string; installationMode?: string; capabilities?: string[] };
+export interface NativeDialogPending {
+  type: string;
+  message: string;
+  defaultPrompt?: string;
+  url?: string;
+  hasBrowserHandler?: boolean;
+  openedAt?: number;
+}
+export interface NativeSessionConnectionState {
+  sessionId: string;
+  tabId?: number;
+  tabs?: number[];
+  ownership: "agent" | "user";
+  pausedByBrowser?: boolean;
+  controlGeneration?: string;
+  controlIssue?: { code: string; message: string };
+  dialogPending?: NativeDialogPending;
+  tabTitle?: string;
+  url?: string;
+}
+export type NativeEvent = { profileId: string; sessionId?: string; cdpSessionId?: string; tabId?: number; type: "state" | "cdp" | "disconnected"; method?: string; params?: any; state?: NativeConnectionState };
+export type NativeConnectionState = NativeBrowserState & {
+  extensionVersion?: string;
+  installationType?: string;
+  installationMode?: string;
+  capabilities?: string[];
+  dialogPending?: NativeDialogPending;
+  sessions?: NativeSessionConnectionState[];
+};
 const equalSecret = (a: string, b: string): boolean => { const left = Buffer.from(a), right = Buffer.from(b); return left.length === right.length && timingSafeEqual(left, right); };
 export const NATIVE_EXTENSION_ID = "gmdaabnoocjlpimglalnbegfdaklfnaj";
 
@@ -115,7 +142,7 @@ export class NativeBrowserBridge {
   async pair(profileId: string): Promise<{ code: string; expiresAt: string }> {
     if (!/^native:[^/\\]{1,100}$/.test(profileId) || ['.', '..'].includes(profileId.slice(7))) throw new Error('系统 Profile 无效。');
     await this.start();
-    if (this.connections.get(profileId)?.state.ownerSessionId) throw new Error("请先结束此浏览器上的任务，再重新配对。");
+    if (this.connections.get(profileId)?.state.ownerSessionId || (this.connections.get(profileId)?.state as NativeConnectionState | undefined)?.sessions?.length) throw new Error("请先结束此浏览器上的任务，再重新配对。");
     const pairing = { token: randomBytes(32).toString("hex"), expiresAt: Date.now() + 5 * 60000 };
     this.pairings.set(profileId, pairing);
     const code = Buffer.from(JSON.stringify({ version: 1, port: this.port, profileId, token: pairing.token })).toString("base64url");
@@ -225,11 +252,47 @@ export class NativeBrowserBridge {
     if (message?.type === "state") {
       const state = message.state;
       if (!state || !["agent", "user"].includes(state.ownership)) throw new Error("Invalid state");
+      const parseDialog = (raw: any): NativeDialogPending | undefined =>
+        raw && typeof raw === "object" && typeof raw.type === "string"
+          ? {
+              type: raw.type.slice(0, 32),
+              message: typeof raw.message === "string" ? raw.message.slice(0, 2000) : "",
+              ...(typeof raw.defaultPrompt === "string" ? { defaultPrompt: raw.defaultPrompt.slice(0, 1000) } : {}),
+              ...(typeof raw.url === "string" ? { url: raw.url.slice(0, 2000) } : {}),
+              ...(typeof raw.hasBrowserHandler === "boolean" ? { hasBrowserHandler: raw.hasBrowserHandler } : {}),
+              ...(Number.isFinite(raw.openedAt) ? { openedAt: Number(raw.openedAt) } : {})
+            }
+          : undefined;
+      const sessions: NativeSessionConnectionState[] | undefined = Array.isArray(state.sessions)
+        ? state.sessions
+            .filter((item: any) => item && typeof item.sessionId === "string" && ["agent", "user"].includes(item.ownership))
+            .slice(0, 64)
+            .map((item: any) => ({
+              sessionId: item.sessionId.slice(0, 200),
+              tabId: Number.isSafeInteger(item.tabId) ? item.tabId : undefined,
+              tabs: Array.isArray(item.tabs) ? item.tabs.filter(Number.isSafeInteger).slice(0, 128) : undefined,
+              ownership: item.ownership,
+              pausedByBrowser: item.pausedByBrowser === true,
+              controlGeneration:
+                typeof item.controlGeneration === "string" && /^[a-z0-9-]{1,80}:[0-9]{1,16}$/i.test(item.controlGeneration)
+                  ? item.controlGeneration
+                  : undefined,
+              controlIssue:
+                item.ownership === "user" && /^NATIVE_[A-Z_]{1,64}$/.test(item.controlIssue?.code) && typeof item.controlIssue?.message === "string"
+                  ? { code: item.controlIssue.code, message: item.controlIssue.message.slice(0, 1000) }
+                  : undefined,
+              dialogPending: parseDialog(item.dialogPending),
+              tabTitle: typeof item.tabTitle === "string" ? item.tabTitle.slice(0, 300) : undefined,
+              url: typeof item.url === "string" ? item.url.slice(0, 2000) : undefined
+            }))
+        : undefined;
       connection.state = { profileId, connected: true, extensionVersion: typeof state.extensionVersion === "string" ? state.extensionVersion.slice(0, 40) : undefined, installationType: typeof state.installationType === "string" ? state.installationType.slice(0, 40) : undefined, installationMode: typeof state.installationMode === "string" ? state.installationMode.slice(0, 40) : undefined, capabilities: Array.isArray(state.capabilities) ? state.capabilities.filter((s: unknown) => typeof s === "string").slice(0, 30) : undefined, taskTabs: false, pausedByBrowser: state.pausedByBrowser === true, tabId: Number.isSafeInteger(state.tabId) ? state.tabId : undefined, ownership: state.ownership, ownerSessionId: typeof state.sessionId === "string" ? state.sessionId : undefined,
         controlGeneration: typeof state.controlGeneration === "string" && /^[a-z0-9-]{1,80}:[0-9]{1,16}$/i.test(state.controlGeneration) ? state.controlGeneration : undefined,
         controlIssue: state.ownership === "user" && /^NATIVE_[A-Z_]{1,64}$/.test(state.controlIssue?.code) && typeof state.controlIssue?.message === "string"
           ? { code: state.controlIssue.code, message: state.controlIssue.message.slice(0, 1000) } : undefined,
         debuggerDiagnostic: parseDebuggerDiagnostic(state.debuggerDiagnostic),
+        dialogPending: parseDialog(state.dialogPending),
+        ...(sessions !== undefined ? { sessions } : {}),
         tabTitle: typeof state.tabTitle === "string" ? state.tabTitle.slice(0, 300) : undefined, url: typeof state.url === "string" ? state.url.slice(0, 2000) : undefined } as NativeConnectionState;
       connection.state.taskTabs = nativeExtensionReady({ ...connection.state, taskTabs: state.taskTabs });
       if (connection.state.taskTabs) this.onboarding.connected(profileId);

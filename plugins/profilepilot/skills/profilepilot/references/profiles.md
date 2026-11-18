@@ -10,7 +10,7 @@ ppilot browser profile default "EXACT_PROFILE_ID" --json
 ppilot browser profile default --clear --json
 ppilot browser profile list --json
 ppilot browser profile get "EXACT_PROFILE_ID" --json
-ppilot browser profile create --name "Research" --json
+ppilot browser profile create --name "Research" [--browser chrome|edge|brave|chromium] --json
 ppilot browser profile rename "isolated:ID" "Research 2" --json
 ppilot browser profile configure "isolated:ID" --hide-automation on --json
 ppilot browser profile start "isolated:ID" --json

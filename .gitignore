@@ -7,6 +7,7 @@ release/
 .cpm-data/
 release-win-debug/
 test-results/
+test-results-*.log
 artifacts/
 tmp/
 Microsoft/

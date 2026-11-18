@@ -28,7 +28,7 @@ export interface CameraWorker {
 }
 export interface CameraOptions {
   adb: AdbRunner; root: string; dexPath: string; capture?: CameraCapture;
-  authorize(input: { id: string; sessionId: string; generation: number }): Promise<{ instanceId: string; token: string }>;
+  authorize(input: { id: string; sessionId: string; generation: number }): Promise<{ instanceId: string; token: string; port?: number }>;
   spawnWorker?: (id: string, remote: string) => CameraWorker;
   changed?: () => void;
 }
@@ -135,8 +135,8 @@ export class ScreenCamera {
       worker = await this.prepareWorker(input.id);
       this.startingWorker = worker;
       if (version !== this.version) throw new Error("屏幕摄像头启动已取消");
-      await this.options.authorize(input);
-      const result = await worker.request("start", { lease: { ...lease, sessionId: input.sessionId, generation: input.generation } });
+      const currentLease = await this.options.authorize(input);
+      const result = await worker.request("start", { lease: { port: 18761, ...lease, ...currentLease, sessionId: input.sessionId, generation: input.generation } });
       if (version !== this.version) throw new Error("屏幕摄像头启动已取消");
       this.worker = worker;
       const state: ScreenCameraState = { ...input, ...result, active: true, error: "" };

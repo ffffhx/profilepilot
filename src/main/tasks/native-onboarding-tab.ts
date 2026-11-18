@@ -1,3 +1,6 @@
+import { existsSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { execFileAsync } from "../fs-util";
 import { toAppleScriptString } from "../chrome-launch";
 import { runWindowsPowerShell } from "../windows-platform";
@@ -7,6 +10,50 @@ const pages: Record<OnboardingChromePage, string> = {
   extensions: "chrome://extensions/",
   debugging: "chrome://inspect/#remote-debugging"
 };
+
+export const MAC_CHROMIUM_BROWSER_APPS = [
+  "Google Chrome",
+  "Microsoft Edge",
+  "Brave Browser",
+  "Chromium",
+  "Arc",
+  "Vivaldi"
+] as const;
+
+export const WINDOWS_CHROMIUM_BROWSER_PROCESSES = [
+  "chrome",
+  "msedge",
+  "brave",
+  "chromium",
+  "arc",
+  "vivaldi"
+] as const;
+
+function installedMacChromiumApps(
+  env: NodeJS.ProcessEnv = process.env,
+  homeDir = os.homedir(),
+  fileExists: (candidate: string) => boolean = existsSync
+): string[] {
+  const primary = env.CHROME_APP_NAME?.trim() || "Google Chrome";
+  const discovered = [primary];
+  for (const appName of [
+    env.EDGE_APP_NAME?.trim() || "Microsoft Edge",
+    env.BRAVE_APP_NAME?.trim() || "Brave Browser",
+    env.CHROMIUM_APP_NAME?.trim() || "Chromium",
+    "Arc",
+    "Vivaldi"
+  ]) {
+    if (discovered.includes(appName)) continue;
+    const candidates = [
+      path.posix.join("/Applications", `${appName}.app`),
+      path.posix.join(homeDir.replace(/\\/g, "/"), "Applications", `${appName}.app`)
+    ];
+    if (candidates.some((candidate) => fileExists(candidate))) {
+      discovered.push(appName);
+    }
+  }
+  return discovered;
+}
 
 // Chrome filters these internal URLs out of command-line launches on both
 // Windows and macOS. Create a native Chrome tab next to the invitation, then
@@ -30,8 +77,16 @@ export async function openNativeOnboardingTab(invitation: string | undefined, pa
   }
 }
 
-function macOnboardingTabScript(invitation: string, url: string): string {
-  return `tell application ${toAppleScriptString(process.env.CHROME_APP_NAME || "Google Chrome")}
+export function macOnboardingTabScript(
+  invitation: string,
+  url: string,
+  appNames: readonly string[] = installedMacChromiumApps()
+): string {
+  const uniqueApps = [...new Set(appNames.filter(Boolean))];
+  const targets = uniqueApps.length ? uniqueApps : [process.env.CHROME_APP_NAME || "Google Chrome"];
+  const blocks = targets.map((appName, index) => {
+    const appLiteral = toAppleScriptString(appName);
+    const body = `tell application ${appLiteral}
   repeat with targetWindow in windows
     repeat with sourceIndex from 1 to count of tabs of targetWindow
       if URL of tab sourceIndex of targetWindow is ${toAppleScriptString(invitation)} then
@@ -45,12 +100,22 @@ function macOnboardingTabScript(invitation: string, url: string): string {
       end if
     end repeat
   end repeat
-  error "Connection tab not found"
 end tell`;
+    if (targets.length === 1 && index === 0) {
+      return body;
+    }
+    return `if application ${appLiteral} is running then
+  try
+${body.split("\n").map((line) => `    ${line}`).join("\n")}
+  end try
+end if`;
+  });
+  return `${blocks.join("\n")}\nerror "Connection tab not found"`;
 }
 
-function windowsOnboardingTabScript(invitation: string, url: string): string {
+export function windowsOnboardingTabScript(invitation: string, url: string): string {
   // Values are restricted above to literal loopback invitations and fixed URLs.
+  const processLiterals = WINDOWS_CHROMIUM_BROWSER_PROCESSES.map((name) => `'${name}'`).join(", ");
   return String.raw`
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient
@@ -66,22 +131,26 @@ public static class OnboardingChromeWindow {
 '@
 $invitation = '${invitation}'
 $targetUrl = '${url}'
+$supportedBrowsers = @(${processLiterals})
 $window = [OnboardingChromeWindow]::GetForegroundWindow()
 $chromePid = [uint32]0
 [void][OnboardingChromeWindow]::GetWindowThreadProcessId($window, [ref]$chromePid)
 $foregroundProcess = (Get-Process -Id $chromePid).ProcessName
-if ($foregroundProcess -ne 'chrome') { throw ('Chrome is not foreground: ' + $foregroundProcess) }
+if ($foregroundProcess.ToLowerInvariant() -notin $supportedBrowsers) { throw ('Chrome is not foreground: ' + $foregroundProcess) }
 $root = [System.Windows.Automation.AutomationElement]::FromHandle($window)
 $condition = [System.Windows.Automation.PropertyCondition]::new(
   [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
   [System.Windows.Automation.ControlType]::Edit)
 function Find-Address([string]$expected) {
+  $trimmedExpected = $expected.TrimEnd('/')
+  $internalSuffix = if ($trimmedExpected.StartsWith('chrome://')) { $trimmedExpected.Substring(9) } else { $null }
   $edits = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $condition)
   foreach ($edit in $edits) {
     $pattern = $null
     if ($edit.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) {
       $value = $pattern.Current.Value.TrimEnd('/')
-      if ($value -ceq $expected.TrimEnd('/') -or ('http://' + $value) -ceq $expected.TrimEnd('/')) { return $edit }
+      if ($value -ceq $trimmedExpected -or ('http://' + $value) -ceq $trimmedExpected) { return $edit }
+      if ($null -ne $internalSuffix -and $value -match '^(chrome|edge|brave|chromium|arc|vivaldi)://(.+)$' -and $Matches[2] -ceq $internalSuffix) { return $edit }
     }
   }
   return $null

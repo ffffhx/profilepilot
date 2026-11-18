@@ -2,7 +2,7 @@ const topbar = document.querySelector("[data-topbar]");
 const workflowButtons = document.querySelectorAll("[data-workflow]");
 const workflowCopy = document.querySelector("[data-workflow-copy]");
 const workflowVisual = document.querySelector("[data-workflow-visual]");
-const copyButtons = document.querySelectorAll("[data-copy-command]");
+const copyButtons = document.querySelectorAll("[data-copy-command], [data-copy-target]");
 
 const workflows = {
   "native": {
@@ -17,22 +17,22 @@ const workflows = {
   },
   "extensions": {
     "index": "02",
-    "title": "配置模型，描述要完成的目标",
-    "copy": "在设置中配置模型服务，回到 Agent 选择浏览器，描述目标与预期结果，随时查看进度、补充要求或接管。",
+    "title": "把 CLI 和 Skill 一起装好",
+    "copy": "在「配套工具」安装 ProfilePilot CLI 与 Agent 使用指引。重开终端，运行 ppilot browser status 核对连接；已有 Claude Code 或 Codex 就可继续使用。",
     "nodes": [
-      "配置模型",
-      "描述目标",
-      "跟进结果"
+      "安装 CLI / Skill",
+      "重开终端",
+      "检查连接"
     ]
   },
   "account": {
     "index": "03",
-    "title": "把开发项目和后台服务放在一起",
-    "copy": "添加项目目录和启动命令，集中启动应用、查看端口与日志。支持调试的 Electron 应用可以连接 Agent。",
+    "title": "先总结一个你指定的网页",
+    "copy": "让已有 Agent 读取 ProfilePilot Skill，确认默认目标和控制权，只读指定页面，给出标题、三条要点与原链接，结束后释放会话。",
     "nodes": [
-      "添加项目",
-      "启动应用",
-      "查看日志"
+      "读取 Skill",
+      "总结指定页",
+      "核对并结束"
     ]
   },
   "cdp": {
@@ -100,7 +100,7 @@ workflowButtons.forEach((button, index) => {
 
 copyButtons.forEach((copyButton) => {
   copyButton.addEventListener("click", async () => {
-    const command = copyButton.dataset.copyCommand || "";
+    const command = copyButton.dataset.copyCommand || document.getElementById(copyButton.dataset.copyTarget || '')?.textContent || "";
     const defaultLabel = copyButton.textContent || "复制";
     const copyWithFallback = () => {
       const textarea = document.createElement("textarea");

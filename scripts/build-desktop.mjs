@@ -1,12 +1,62 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { desktopSourceFiles } from './desktop-source-files.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-if (process.platform !== 'win32') {
+const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+const writeAtomic = (file, value) => {
+  const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  try { writeFileSync(temporary, value, { flag: 'wx' }); renameSync(temporary, file); }
+  finally { rmSync(temporary, { force: true }); }
+};
+const inputs = files => files.map(file => ({ name: path.basename(file), sha256: hash(readFileSync(file)) }));
+
+if (process.platform === 'darwin') {
+  console.log('Desktop control: Windows helper is not required on this platform.');
+  const isRealMacHost = path.sep === '/';
+  const source = path.join(root, 'native', 'desktop-mac.swift');
+  const destination = path.join(root, 'dist', 'native', 'profilepilot-desktop-mac');
+  if (isRealMacHost && existsSync(source)) {
+    const compilerIdentity = (() => {
+      try {
+        return execFileSync('xcrun', ['swiftc', '--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10000 }).trim();
+      } catch {
+        throw new Error('Xcode Command Line Tools (xcrun swiftc) are required to build native/desktop-mac.swift.');
+      }
+    })();
+    const args = ['swiftc', '-O', source, '-o'];
+    const buildId = hash(JSON.stringify({
+      format: 'desktop-mac-v1-swift',
+      compilerIdentity,
+      options: ['swiftc', '-O'],
+      sources: inputs([source])
+    }));
+    const outputDigestPath = destination + '.output.sha256';
+    let cached = false;
+    if (existsSync(destination) && existsSync(destination + '.sha256') && existsSync(outputDigestPath)) {
+      const outputDigest = readFileSync(outputDigestPath, 'utf8');
+      cached = readFileSync(destination + '.sha256', 'utf8') === buildId
+        && /^[a-f0-9]{64}$/.test(outputDigest) && hash(readFileSync(destination)) === outputDigest;
+    }
+    if (!cached) {
+      mkdirSync(path.dirname(destination), { recursive: true });
+      const temporary = `${destination}.${process.pid}.tmp`;
+      try {
+        execFileSync('xcrun', [...args, temporary], { cwd: root, stdio: 'pipe', timeout: 60000 });
+        chmodSync(temporary, 0o755);
+        const outputDigest = hash(readFileSync(temporary));
+        renameSync(temporary, destination);
+        writeAtomic(outputDigestPath, outputDigest);
+        writeAtomic(destination + '.sha256', buildId);
+      } finally { rmSync(temporary, { force: true }); }
+    }
+    console.log('Desktop control: macOS helper ready (profilepilot-desktop-mac).');
+  }
+} else if (process.platform !== 'win32') {
   console.log('Desktop control: Windows helper is not required on this platform.');
 } else {
   const { resolveWindowsWinrtReferences } = await import('./windows-winrt-contracts.mjs');
@@ -21,13 +71,6 @@ if (process.platform !== 'win32') {
   ];
   const options = ['/nologo', '/codepage:65001', '/target:exe', '/platform:x64', '/optimize+'];
   const destination = path.join(root, 'dist', 'native', 'ProfilePilot.Desktop.exe');
-  const hash = bytes => createHash('sha256').update(bytes).digest('hex');
-  const writeAtomic = (file, value) => {
-    const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
-    try { writeFileSync(temporary, value, { flag: 'wx' }); renameSync(temporary, file); }
-    finally { rmSync(temporary, { force: true }); }
-  };
-  const inputs = files => files.map(file => ({ name: path.basename(file), sha256: hash(readFileSync(file)) }));
   const buildId = hash(JSON.stringify({
     format: 'desktop-v2-x64-wgc', options,
     sdk: { version: sdk.version, packageSha256: sdk.packageSha256 },

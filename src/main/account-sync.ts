@@ -288,7 +288,11 @@ export async function latestPathMtimeMs(
 
 export function isAccountSyncComparablePath(candidatePath: string): boolean {
   const name = path.basename(candidatePath);
-  return name !== "LOCK" && !isAccountSyncWorkArtifactName(name);
+  return name !== "LOCK" && !isSqliteSharedMemoryArtifactName(name) && !isAccountSyncWorkArtifactName(name);
+}
+
+export function isSqliteSharedMemoryArtifactName(name: string): boolean {
+  return name.toLowerCase().endsWith("-shm");
 }
 
 export function accountSyncCopySpecs(): AccountSyncPathSpec[] {
@@ -299,30 +303,24 @@ export function accountSyncCopySpecs(): AccountSyncPathSpec[] {
     { label: "历史记录和下载记录", relativePath: "History" },
     { label: "历史记录和下载记录 journal", relativePath: "History-journal" },
     { label: "历史记录和下载记录 WAL", relativePath: "History-wal" },
-    { label: "历史记录和下载记录 SHM", relativePath: "History-shm" },
     { label: "下载服务数据", relativePath: "Download Service" },
     { label: "浏览器设置和主题", relativePath: "Preferences" },
     { label: "受保护浏览器设置", relativePath: "Secure Preferences" },
     { label: "快捷方式", relativePath: "Shortcuts" },
     { label: "快捷方式 journal", relativePath: "Shortcuts-journal" },
     { label: "快捷方式 WAL", relativePath: "Shortcuts-wal" },
-    { label: "快捷方式 SHM", relativePath: "Shortcuts-shm" },
     { label: "常用网站", relativePath: "Top Sites" },
     { label: "常用网站 journal", relativePath: "Top Sites-journal" },
     { label: "常用网站 WAL", relativePath: "Top Sites-wal" },
-    { label: "常用网站 SHM", relativePath: "Top Sites-shm" },
     { label: "网站图标", relativePath: "Favicons" },
     { label: "网站图标 journal", relativePath: "Favicons-journal" },
     { label: "网站图标 WAL", relativePath: "Favicons-wal" },
-    { label: "网站图标 SHM", relativePath: "Favicons-shm" },
     { label: "Cookies", relativePath: "Cookies" },
     { label: "Cookies journal", relativePath: "Cookies-journal" },
     { label: "Cookies WAL", relativePath: "Cookies-wal" },
-    { label: "Cookies SHM", relativePath: "Cookies-shm" },
     { label: "Network Cookies", relativePath: path.join("Network", "Cookies") },
     { label: "Network Cookies journal", relativePath: path.join("Network", "Cookies-journal") },
     { label: "Network Cookies WAL", relativePath: path.join("Network", "Cookies-wal") },
-    { label: "Network Cookies SHM", relativePath: path.join("Network", "Cookies-shm") },
     { label: "Local Storage", relativePath: "Local Storage" },
     { label: "Session Storage", relativePath: "Session Storage" },
     { label: "IndexedDB", relativePath: "IndexedDB" },
@@ -333,8 +331,10 @@ export function accountSyncCopySpecs(): AccountSyncPathSpec[] {
     { label: "Databases", relativePath: "databases" },
     { label: "Web Data", relativePath: "Web Data" },
     { label: "Web Data journal", relativePath: "Web Data-journal" },
+    { label: "Web Data WAL", relativePath: "Web Data-wal" },
     { label: "Account Web Data", relativePath: "Account Web Data" },
     { label: "Account Web Data journal", relativePath: "Account Web Data-journal" },
+    { label: "Account Web Data WAL", relativePath: "Account Web Data-wal" },
     { label: "Accounts", relativePath: "Accounts" },
     { label: "Sync Data", relativePath: "Sync Data" },
     { label: "Sync App Settings", relativePath: "Sync App Settings" },
@@ -343,10 +343,8 @@ export function accountSyncCopySpecs(): AccountSyncPathSpec[] {
     { label: "Trust Tokens journal", relativePath: "Trust Tokens-journal" },
     { label: "DIPS", relativePath: "DIPS" },
     { label: "DIPS WAL", relativePath: "DIPS-wal" },
-    { label: "DIPS SHM", relativePath: "DIPS-shm" },
     { label: "SharedStorage", relativePath: "SharedStorage" },
     { label: "SharedStorage WAL", relativePath: "SharedStorage-wal" },
-    { label: "SharedStorage SHM", relativePath: "SharedStorage-shm" },
     { label: "GCM Store", relativePath: "GCM Store" },
     { label: "Network Persistent State", relativePath: "Network Persistent State" },
     { label: "Transport Security", relativePath: "TransportSecurity" }
@@ -641,7 +639,7 @@ export function getJsonPropertyParent(
 
 export function shouldCopyAccountSyncPathEntry(sourceRootPath: string, candidatePath: string): boolean {
   const name = path.basename(candidatePath);
-  if (name === "LOCK" || isAccountSyncWorkArtifactName(name)) {
+  if (name === "LOCK" || isSqliteSharedMemoryArtifactName(name) || isAccountSyncWorkArtifactName(name)) {
     return false;
   }
   if (isAccountSyncServiceWorkerCachePath(sourceRootPath, candidatePath)) {
@@ -935,4 +933,351 @@ export function isAccountSyncWorkArtifactName(name: string): boolean {
 
 export function accountSyncRecordKey(sourceProfileId: string, targetProfileId: string): string {
   return `${sourceProfileId}::${targetProfileId}`;
+}
+
+export interface ChromeCookieRecord {
+  name: string;
+  value: string;
+  domain: string;
+  hostOnly?: boolean;
+  path?: string;
+  secure?: boolean;
+  httpOnly?: boolean;
+  sameSite?: string;
+  session?: boolean;
+  expirationDate?: number;
+  expires?: number;
+  storeId?: string;
+  partitionKey?: { topLevelSite?: string; hasCrossSiteAncestors?: boolean } | string | null;
+}
+
+export interface CdpCookiePartitionKey {
+  topLevelSite: string;
+  hasCrossSiteAncestors: boolean;
+}
+
+export interface CdpCookieParam {
+  name: string;
+  value: string;
+  url?: string;
+  domain?: string;
+  path?: string;
+  secure?: boolean;
+  httpOnly?: boolean;
+  sameSite?: "Strict" | "Lax" | "None";
+  expires?: number;
+  partitionKey?: CdpCookiePartitionKey | string;
+}
+
+export interface CdpCookieRecord {
+  name: string;
+  value: string;
+  domain: string;
+  path?: string;
+  expires?: number;
+  session?: boolean;
+  httpOnly?: boolean;
+  secure?: boolean;
+  sameSite?: "Strict" | "Lax" | "None" | string;
+  partitionKey?: { topLevelSite?: string; hasCrossSiteAncestors?: boolean } | string;
+  partitionKeyOpaque?: boolean;
+}
+
+export interface ChromeCookieSetDetails {
+  url: string;
+  name: string;
+  value: string;
+  domain?: string;
+  path?: string;
+  secure?: boolean;
+  httpOnly?: boolean;
+  sameSite?: "no_restriction" | "lax" | "strict" | "unspecified";
+  expirationDate?: number;
+  storeId?: string;
+  partitionKey?: { topLevelSite: string; hasCrossSiteAncestors?: boolean };
+}
+
+export interface StagedCookieCipher {
+  isEncryptionAvailable(): boolean;
+  encryptString(plainText: string): Buffer;
+  decryptString(encrypted: Buffer): string;
+}
+
+export function buildCookieUrl(domain: string, cookiePath = "/", secure = false): string {
+  const host = String(domain || "").trim().replace(/^\.+/, "");
+  const normalizedPath = cookiePath && cookiePath.startsWith("/") ? cookiePath : `/${cookiePath || ""}`;
+  return `${secure ? "https" : "http"}://${host}${normalizedPath}`;
+}
+
+export function normalizeCdpSameSite(value: unknown): "Strict" | "Lax" | "None" | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "no_restriction" || normalized === "none") return "None";
+  if (normalized === "lax") return "Lax";
+  if (normalized === "strict") return "Strict";
+  return undefined;
+}
+
+export function normalizeChromeSameSite(
+  value: unknown
+): "no_restriction" | "lax" | "strict" | "unspecified" | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "none" || normalized === "no_restriction") return "no_restriction";
+  if (normalized === "lax") return "lax";
+  if (normalized === "strict") return "strict";
+  if (normalized === "unspecified") return "unspecified";
+  return undefined;
+}
+
+function normalizePartitionKeyToCdp(
+  partitionKey: unknown
+): CdpCookiePartitionKey | undefined {
+  if (typeof partitionKey === "string") {
+    const topLevelSite = partitionKey.trim();
+    return topLevelSite ? { topLevelSite, hasCrossSiteAncestors: false } : undefined;
+  }
+  if (isRecord(partitionKey) && typeof partitionKey.topLevelSite === "string") {
+    const topLevelSite = partitionKey.topLevelSite.trim();
+    if (!topLevelSite) return undefined;
+    return {
+      topLevelSite,
+      hasCrossSiteAncestors: Boolean(partitionKey.hasCrossSiteAncestors)
+    };
+  }
+  return undefined;
+}
+
+export function chromeCookieToCdpCookieParam(cookie: ChromeCookieRecord): CdpCookieParam | null {
+  if (!cookie || typeof cookie.name !== "string" || typeof cookie.value !== "string") {
+    return null;
+  }
+  const rawDomain = typeof cookie.domain === "string" ? cookie.domain.trim() : "";
+  const cleanHost = rawDomain.replace(/^\.+/, "");
+  if (!cleanHost) {
+    return null;
+  }
+
+  const isHostPrefix = cookie.name.startsWith("__Host-");
+  const isSecurePrefix = cookie.name.startsWith("__Secure-");
+  const secure = Boolean(cookie.secure) || isHostPrefix || isSecurePrefix;
+  const cookiePath = isHostPrefix ? "/" : cookie.path && cookie.path.startsWith("/") ? cookie.path : `/${cookie.path || ""}`;
+  const isHostOnly = isHostPrefix || cookie.hostOnly === true || (!rawDomain.startsWith(".") && cookie.hostOnly !== false);
+
+  const param: CdpCookieParam = {
+    name: cookie.name,
+    value: cookie.value,
+    url: buildCookieUrl(cleanHost, cookiePath, secure),
+    path: cookiePath,
+    secure,
+    httpOnly: Boolean(cookie.httpOnly)
+  };
+
+  if (!isHostOnly) {
+    param.domain = rawDomain.startsWith(".") ? rawDomain : `.${cleanHost}`;
+  }
+
+  const sameSite = normalizeCdpSameSite(cookie.sameSite);
+  if (sameSite) {
+    param.sameSite = sameSite;
+  }
+
+  const rawExpires =
+    typeof cookie.expirationDate === "number" && Number.isFinite(cookie.expirationDate)
+      ? cookie.expirationDate
+      : typeof cookie.expires === "number" && Number.isFinite(cookie.expires)
+        ? cookie.expires
+        : undefined;
+  if (!cookie.session && rawExpires !== undefined && rawExpires > 0) {
+    param.expires = rawExpires;
+  }
+
+  const partitionKey = normalizePartitionKeyToCdp(cookie.partitionKey);
+  if (partitionKey) {
+    param.partitionKey = partitionKey;
+  }
+
+  return param;
+}
+
+export function cdpCookieToChromeCookieDetails(cookie: CdpCookieRecord): ChromeCookieSetDetails | null {
+  if (!cookie || typeof cookie.name !== "string" || typeof cookie.value !== "string") {
+    return null;
+  }
+  if (cookie.partitionKeyOpaque === true) {
+    return null;
+  }
+  const rawDomain = typeof cookie.domain === "string" ? cookie.domain.trim() : "";
+  const cleanHost = rawDomain.replace(/^\.+/, "");
+  if (!cleanHost) {
+    return null;
+  }
+
+  const isHostPrefix = cookie.name.startsWith("__Host-");
+  const isSecurePrefix = cookie.name.startsWith("__Secure-");
+  const secure = Boolean(cookie.secure) || isHostPrefix || isSecurePrefix;
+  const cookiePath = isHostPrefix ? "/" : cookie.path && cookie.path.startsWith("/") ? cookie.path : `/${cookie.path || ""}`;
+  const details: ChromeCookieSetDetails = {
+    url: buildCookieUrl(cleanHost, cookiePath, secure),
+    name: cookie.name,
+    value: cookie.value,
+    path: cookiePath,
+    secure,
+    httpOnly: Boolean(cookie.httpOnly)
+  };
+
+  if (!isHostPrefix && rawDomain.startsWith(".")) {
+    details.domain = rawDomain;
+  }
+
+  const sameSite = normalizeChromeSameSite(cookie.sameSite);
+  if (sameSite) {
+    details.sameSite = sameSite;
+  }
+
+  if (!cookie.session && typeof cookie.expires === "number" && Number.isFinite(cookie.expires) && cookie.expires > 0) {
+    details.expirationDate = cookie.expires;
+  }
+
+  const partitionKey = normalizePartitionKeyToCdp(cookie.partitionKey);
+  if (partitionKey) {
+    details.partitionKey = partitionKey;
+  }
+
+  return details;
+}
+
+export function filterCookiesByDomains<T extends { domain?: string }>(
+  cookies: readonly T[],
+  domains?: readonly string[] | null
+): T[] {
+  if (!Array.isArray(domains) || domains.length === 0) {
+    return [...cookies];
+  }
+  const normalizedFilters = domains
+    .map((domain) => String(domain || "").trim().toLowerCase().replace(/^\.+/, ""))
+    .filter(Boolean);
+  if (normalizedFilters.length === 0) {
+    return [...cookies];
+  }
+  return cookies.filter((cookie) => {
+    const cookieHost = String(cookie.domain || "")
+      .trim()
+      .toLowerCase()
+      .replace(/^\.+/, "");
+    if (!cookieHost) return false;
+    return normalizedFilters.some(
+      (filterHost) => cookieHost === filterHost || cookieHost.endsWith(`.${filterHost}`)
+    );
+  });
+}
+
+export function normalizeStagedCookieProfileKey(profileId: string): string {
+  const stripped = String(profileId || "").trim().replace(/^isolated:/, "");
+  const safe = stripped.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^_+|_+$/g, "");
+  if (!safe) {
+    throw new ProfileManagerError("无效的 Staged Cookies Profile ID。", "INVALID_PROFILE_ID");
+  }
+  return safe;
+}
+
+export function stagedCookiesFilePath(dataDir: string, profileId: string): string {
+  return path.join(dataDir, "staged-cookies", `${normalizeStagedCookieProfileKey(profileId)}.json`);
+}
+
+interface StagedCookieEnvelope {
+  version: 1;
+  encrypted: boolean;
+  createdAt: string;
+  payload?: string;
+  cookies?: CdpCookieParam[];
+}
+
+export async function writeStagedCookies(
+  dataDir: string,
+  profileId: string,
+  cookies: readonly CdpCookieParam[],
+  cipher?: StagedCookieCipher | null
+): Promise<string> {
+  const filePath = stagedCookiesFilePath(dataDir, profileId);
+  const dirPath = path.dirname(filePath);
+  await fs.mkdir(dirPath, { recursive: true, mode: 0o700 });
+
+  const canEncrypt = Boolean(cipher && cipher.isEncryptionAvailable());
+  const envelope: StagedCookieEnvelope = canEncrypt
+    ? {
+        version: 1,
+        encrypted: true,
+        createdAt: new Date().toISOString(),
+        payload: cipher!.encryptString(JSON.stringify(cookies)).toString("base64")
+      }
+    : {
+        version: 1,
+        encrypted: false,
+        createdAt: new Date().toISOString(),
+        cookies: [...cookies]
+      };
+
+  const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  const serialized = `${JSON.stringify(envelope, null, 2)}\n`;
+  try {
+    await fs.writeFile(tempPath, serialized, { encoding: "utf8", mode: 0o600 });
+    await fs.chmod(tempPath, 0o600).catch(() => undefined);
+    await fs.rename(tempPath, filePath);
+    await fs.chmod(filePath, 0o600).catch(() => undefined);
+  } finally {
+    await fs.rm(tempPath, { force: true }).catch(() => undefined);
+  }
+  return filePath;
+}
+
+export async function readStagedCookies(
+  dataDir: string,
+  profileId: string,
+  cipher?: StagedCookieCipher | null
+): Promise<CdpCookieParam[] | null> {
+  const filePath = stagedCookiesFilePath(dataDir, profileId);
+  let raw: string;
+  try {
+    raw = await fs.readFile(filePath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+
+  const parsed = JSON.parse(raw) as Partial<StagedCookieEnvelope>;
+  if (!isRecord(parsed) || parsed.version !== 1) {
+    throw new ProfileManagerError("暂存的 Cookies 格式无效。", "INVALID_STAGED_COOKIES");
+  }
+
+  if (parsed.encrypted === true) {
+    if (!cipher || !cipher.isEncryptionAvailable() || typeof parsed.payload !== "string") {
+      throw new ProfileManagerError("无法解密暂存的 Cookies（safeStorage 不可用）。", "STAGED_COOKIES_DECRYPT_UNAVAILABLE");
+    }
+    const decrypted = cipher.decryptString(Buffer.from(parsed.payload, "base64"));
+    const cookies = JSON.parse(decrypted) as unknown;
+    return Array.isArray(cookies) ? (cookies as CdpCookieParam[]) : [];
+  }
+
+  return Array.isArray(parsed.cookies) ? (parsed.cookies as CdpCookieParam[]) : [];
+}
+
+export async function consumeStagedCookies(
+  dataDir: string,
+  profileId: string,
+  inject: (cookies: CdpCookieParam[]) => Promise<void>,
+  cipher?: StagedCookieCipher | null
+): Promise<number> {
+  const filePath = stagedCookiesFilePath(dataDir, profileId);
+  const cookies = await readStagedCookies(dataDir, profileId, cipher);
+  if (cookies === null) {
+    return 0;
+  }
+  if (cookies.length > 0) {
+    await inject(cookies);
+  }
+  await fs.rm(filePath, { force: true });
+  return cookies.length;
 }

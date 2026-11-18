@@ -64,11 +64,10 @@ namespace ProfilePilot.Desktop {
         void CheckBackground(){
             if(backgroundTarget==null)return;
             AutomationJson.Require(Valid(backgroundTarget),"DESKTOP_WINDOW_CHANGED");
-            uint pid=0;IntPtr foreground=GetForegroundWindow();
-            AutomationJson.Require(foreground!=IntPtr.Zero && GetWindowThreadProcessId(foreground,out pid)!=0,"DESKTOP_BACKGROUND_TARGET_ACTIVE");
-            AutomationJson.Require(pid!=(uint)backgroundTarget.Pid,"DESKTOP_BACKGROUND_TARGET_ACTIVE");
         }
         Rect imageBounds;
+        int lastImageWidth,lastImageHeight;
+        WgcRectangle lastCaptureRect;
         bool physicalCoordinates;
         readonly UIntPtr inputMarker;
         public AutomationWindows():this(DesktopHost.InputMarker(new string[0])){}
@@ -347,27 +346,34 @@ namespace ProfilePilot.Desktop {
                         string processName=process.ProcessName;
                         if(!Valid(target)){gaps.Add("window_changed");return true;}
                         targets[id]=target;
-                        list.Add(new {id,title=title.Length>0?title.ToString():className.ToString(),className=className.ToString(),process=processName,pid,nativeHandle=handle.ToInt64().ToString(),enabled,minimized,ownerNativeHandle=owner==IntPtr.Zero?null:owner.ToInt64().ToString()});
+                        list.Add(new {id,title=title.Length>0?title.ToString():className.ToString(),className=className.ToString(),process=processName,pid,nativeHandle=handle.ToInt64().ToString(),bounds=new{x=bounds.Left,y=bounds.Top,width=bounds.Right-bounds.Left,height=bounds.Bottom-bounds.Top},enabled,minimized,ownerNativeHandle=owner==IntPtr.Zero?null:owner.ToInt64().ToString()});
                     }
                 }catch{gaps.Add("window_unavailable");}return true;
             },IntPtr.Zero);
             if(!enumerated && !stopped)gaps.Add("window_enumeration_failed");
             CheckControl();return new {windows=list,truncated=gaps.Count>0,gaps=gaps.OrderBy(x=>x).ToArray()};
         }
+        static bool IsPrunableLayoutContainer(ElementSnapshot snapshot,bool isRoot){
+            return !isRoot && !snapshot.Password && !snapshot.Focused &&
+                (snapshot.Role=="Pane" || snapshot.Role=="Group" || snapshot.Role=="Custom") &&
+                String.IsNullOrWhiteSpace(snapshot.Name) && String.IsNullOrWhiteSpace(snapshot.Text) &&
+                snapshot.State.ValueStatus=="unsupported" && String.IsNullOrWhiteSpace(snapshot.AutomationId) &&
+                snapshot.State.Complete && (snapshot.Actions==null || snapshot.Actions.Length==0);
+        }
         object Observe(Dictionary<string,object> p,bool screenshot){
             AutomationJson.Fields(p,"windowId,screenshot,screenshotOnly");string id=AutomationJson.Text(p,"windowId");Target target;
             bool screenshotOnly=AutomationJson.Flag(p,"screenshotOnly");AutomationJson.Require(!screenshotOnly || screenshot);
             AutomationJson.Require(targets.TryGetValue(id,out target) && Valid(target),"DESKTOP_WINDOW_CHANGED");
             if(backgroundTarget!=null)AutomationJson.Require(id==backgroundWindowId,"DESKTOP_WINDOW_CHANGED");
-            selected=null;elements.Clear();version=Guid.NewGuid().ToString("N");imageReady=false;
-            var nodes=new List<object>();var gaps=new HashSet<string>();var queue=new Queue<Tuple<AutomationElement,int,int>>();
+            selected=null;elements.Clear();version=Guid.NewGuid().ToString("N");imageReady=false;lastImageWidth=0;lastImageHeight=0;lastCaptureRect=null;
+            var nodes=new List<object>();var gaps=new HashSet<string>();var queue=new Queue<Tuple<AutomationElement,int,int,bool>>();
             var watch=Stopwatch.StartNew();int textBudget=32768;
             // Check between provider calls, including sibling traversal. A
             // synchronous UIA provider call itself can still exceed this budget.
             Action checkpoint=()=>{CheckControl();if(watch.ElapsedMilliseconds>=4000)throw new ObservationBudgetException();};
             try{
             if(screenshotOnly)gaps.Add("uia_skipped");
-            else try{checkpoint();queue.Enqueue(Tuple.Create(AutomationElement.FromHandle(target.Handle),0,-1));checkpoint();}
+            else try{checkpoint();queue.Enqueue(Tuple.Create(AutomationElement.FromHandle(target.Handle),0,-1,true));checkpoint();}
             catch(ElementNotAvailableException){gaps.Add("uia_element_unavailable");}
             catch(InvalidOperationException){gaps.Add("uia_provider_error");}
             catch(COMException){gaps.Add("uia_provider_error");}
@@ -378,27 +384,31 @@ namespace ProfilePilot.Desktop {
                 checkpoint();
                 try{
                 var item=queue.Dequeue();var element=item.Item1;int limit=Math.Min(4096,textBudget);
-                IntPtr rootHandle=item.Item3==-1?target.Handle:IntPtr.Zero;
+                IntPtr rootHandle=item.Item4?target.Handle:IntPtr.Zero;
                 var snapshot=ReadSnapshot(element,limit,checkpoint,rootHandle);
                 if(backgroundTarget!=null)snapshot.Actions=snapshot.Actions.Where(action=>action=="text" || BackgroundAction(action)).ToArray();
-                // UIA subtrees in Chromium and hosted Windows apps may be owned
-                // by renderer processes. Scope by the observed window ancestry.
-                string reference="e"+nodes.Count;int index=nodes.Count;
-                if(LimitDisplayText(snapshot,limit))gaps.Add("text_limit");textBudget-=snapshot.Text.Length;
-                if(snapshot.Name!=null && snapshot.Name.Length>512)gaps.Add("name_limit");
-                if(snapshot.AutomationId!=null && snapshot.AutomationId.Length>256)gaps.Add("automation_id_limit");
-                if(!snapshot.State.Complete)gaps.Add("uia_state_unavailable");
-                if(snapshot.State.Window.Status=="unavailable")gaps.Add("uia_window_state_unavailable");
-                nodes.Add(snapshot.Output(reference,item.Item3));
-                // Output and fingerprint use this same collected snapshot; no
-                // second read can silently attach a newer state to an old node.
-                elements[reference]=new Element{Value=element,Fingerprint=Fingerprint(snapshot),RootHandle=rootHandle,Window=snapshot.State.Window,ObservedIconic=snapshot.WindowIconic,RuntimeId=snapshot.RuntimeId};
+                bool prune=IsPrunableLayoutContainer(snapshot,item.Item4);
+                int parentForChildren=item.Item3;
+                if(!prune){
+                    // UIA subtrees in Chromium and hosted Windows apps may be owned
+                    // by renderer processes. Scope by the observed window ancestry.
+                    string reference="e"+nodes.Count;int index=nodes.Count;parentForChildren=index;
+                    if(LimitDisplayText(snapshot,limit))gaps.Add("text_limit");textBudget-=snapshot.Text.Length;
+                    if(snapshot.Name!=null && snapshot.Name.Length>512)gaps.Add("name_limit");
+                    if(snapshot.AutomationId!=null && snapshot.AutomationId.Length>256)gaps.Add("automation_id_limit");
+                    if(!snapshot.State.Complete)gaps.Add("uia_state_unavailable");
+                    if(snapshot.State.Window.Status=="unavailable")gaps.Add("uia_window_state_unavailable");
+                    nodes.Add(snapshot.Output(reference,item.Item3));
+                    // Output and fingerprint use this same collected snapshot; no
+                    // second read can silently attach a newer state to an old node.
+                    elements[reference]=new Element{Value=element,Fingerprint=Fingerprint(snapshot),RootHandle=rootHandle,Window=snapshot.State.Window,ObservedIconic=snapshot.WindowIconic,RuntimeId=snapshot.RuntimeId};
+                }
                 if(!snapshot.Password){
                     checkpoint();var child=TreeWalker.ControlViewWalker.GetFirstChild(element);checkpoint();int count=0;
-                    if(item.Item2>=20){if(child!=null)gaps.Add("depth_limit");}
+                    if(item.Item2>=32){if(child!=null)gaps.Add("depth_limit");}
                     else{
-                        while(child!=null && count<256 && queue.Count<1024){checkpoint();queue.Enqueue(Tuple.Create(child,item.Item2+1,index));count++;child=TreeWalker.ControlViewWalker.GetNextSibling(child);checkpoint();}
-                        if(child!=null){if(count>=256)gaps.Add("children_limit");if(queue.Count>=1024)gaps.Add("queue_limit");}
+                        while(child!=null && count<256 && queue.Count<2048){checkpoint();queue.Enqueue(Tuple.Create(child,item.Item2+1,parentForChildren,false));count++;child=TreeWalker.ControlViewWalker.GetNextSibling(child);checkpoint();}
+                        if(child!=null){if(count>=256)gaps.Add("children_limit");if(queue.Count>=2048)gaps.Add("queue_limit");}
                     }
                 }
                 }catch(ElementNotAvailableException){gaps.Add("uia_element_unavailable");}
@@ -473,14 +483,29 @@ namespace ProfilePilot.Desktop {
             AutomationJson.Require(captured.Success && captured.Jpeg!=null && captured.Jpeg.Length>0,"DESKTOP_SCREENSHOT_UNAVAILABLE");
             AutomationJson.Require(geometry!=null && geometry.Window!=null && geometry.Window.X==outer.Left && geometry.Window.Y==outer.Top && geometry.Window.Width==outer.Right-outer.Left && geometry.Window.Height==outer.Bottom-outer.Top,"DESKTOP_WINDOW_CHANGED");
             AutomationJson.Require(captured.Width>0 && captured.Height>0 && captured.Width<=1600 && captured.Height<=1600 && captured.Jpeg.Length<=2200000,"DESKTOP_SCREENSHOT_UNAVAILABLE");
-            // The prototype's coordinate authority remains false until the
-            // integrated App/image/action path is separately qualified.
-            return new {mimeType="image/jpeg",data=Convert.ToBase64String(captured.Jpeg),width=captured.Width,height=captured.Height,
-                windowWidth=outer.Right-outer.Left,windowHeight=outer.Bottom-outer.Top,windowX=outer.Left,windowY=outer.Top,
-                coordinateInputAvailable=false,source="windows-graphics-capture",captureState=state.Output(),
-                captureDiagnostics=new {status=captured.Status,geometryStatus=captured.GeometryStatus,colorMode=captured.ColorMode,
+            int outerWidth=outer.Right-outer.Left,outerHeight=outer.Bottom-outer.Top;
+            bool coordOk=captured.CoordinateInputAvailable && state!=null && state.Dpi.HasValue && state.Dpi.Value>0 &&
+                captured.CaptureRect.X>=0 && captured.CaptureRect.Y>=0 &&
+                captured.CaptureRect.Width>0 && captured.CaptureRect.Height>0 &&
+                (long)captured.CaptureRect.X+captured.CaptureRect.Width<=outerWidth &&
+                (long)captured.CaptureRect.Y+captured.CaptureRect.Height<=outerHeight;
+            var output=new Dictionary<string,object>{
+                {"mimeType","image/jpeg"},{"data",Convert.ToBase64String(captured.Jpeg)},
+                {"width",captured.Width},{"height",captured.Height},
+                {"windowWidth",outerWidth},{"windowHeight",outerHeight},
+                {"windowX",outer.Left},{"windowY",outer.Top},
+                {"coordinateInputAvailable",coordOk},
+                {"source","windows-graphics-capture"},
+                {"captureState",state.Output()},
+                {"captureDiagnostics",new {status=captured.Status,geometryStatus=captured.GeometryStatus,colorMode=captured.ColorMode,
                     contentWidth=captured.ContentWidth,contentHeight=captured.ContentHeight,frameTimestampTicks=captured.FrameTimestampTicks.ToString(),
-                    elapsedMs=captured.ElapsedMs,candidateCaptureRect=captured.CandidateCaptureRect}};
+                    elapsedMs=captured.ElapsedMs,candidateCaptureRect=captured.CandidateCaptureRect}}
+            };
+            if(coordOk){
+                output["physicalPixelsAvailable"]=true;
+                output["captureRect"]=new {x=captured.CaptureRect.X,y=captured.CaptureRect.Y,width=captured.CaptureRect.Width,height=captured.CaptureRect.Height};
+            }
+            return output;
         }
         static string WgcFallbackReason(WgcCaptureResult captured){
             if(captured!=null && !captured.Success && (captured.Status=="unsupported_api" || captured.Status=="unsupported_capture" || captured.Status=="device_unsupported"))return "windows_graphics_capture_"+captured.Status;
@@ -499,7 +524,12 @@ namespace ProfilePilot.Desktop {
             if(chromium){
                 var captured=WgcWindowCapture.Capture(target.Handle,()=>!Allowed());
                 CheckCaptureSnapshot(target,before);
-                if(captured.Success)return WgcImage(captured,r,before);
+                if(captured.Success){
+                    if(!physicalCoordinates || backgroundTarget!=null)captured.CoordinateQualified=false;
+                    var formatted=WgcImage(captured,r,before);
+                    if(captured.CoordinateInputAvailable){lastImageWidth=captured.Width;lastImageHeight=captured.Height;lastCaptureRect=captured.CaptureRect;}
+                    return formatted;
+                }
                 fallbackReason=WgcFallbackReason(captured);
             }
             using(var bitmap=new Bitmap(width,height)){
@@ -511,7 +541,9 @@ namespace ProfilePilot.Desktop {
                 using(var bytes=new MemoryStream()){
                     output.Save(bytes,ImageFormat.Jpeg);AutomationJson.Require(bytes.Length<=2200000,"DESKTOP_SCREENSHOT_TOO_LARGE");
                     string data=Convert.ToBase64String(bytes.ToArray());CheckCaptureSnapshot(target,before);
-                    return new {mimeType="image/jpeg",data,width=output.Width,height=output.Height,windowWidth=width,windowHeight=height,windowX=r.Left,windowY=r.Top,captureRect=new{x=0,y=0,width,height},physicalPixelsAvailable=physicalCoordinates,coordinateInputAvailable=!chromium && physicalCoordinates,source="native-window",captureFallback=fallbackReason,captureState=before.Output()};
+                    bool coordAvailable=!chromium && physicalCoordinates && backgroundTarget==null;
+                    if(coordAvailable){lastImageWidth=output.Width;lastImageHeight=output.Height;lastCaptureRect=new WgcRectangle{X=0,Y=0,Width=width,Height=height};}
+                    return new {mimeType="image/jpeg",data,width=output.Width,height=output.Height,windowWidth=width,windowHeight=height,windowX=r.Left,windowY=r.Top,captureRect=new{x=0,y=0,width,height},physicalPixelsAvailable=physicalCoordinates,coordinateInputAvailable=coordAvailable,source="native-window",captureFallback=fallbackReason,captureState=before.Output()};
                 }
             }
         }
@@ -655,13 +687,35 @@ namespace ProfilePilot.Desktop {
             }
             ConfirmPointer(point,bounds,desktop);
         }
+        static int ClampCoord(int mapped,int offset,int span){int upper=Math.Max(offset,offset+span-1);return Math.Min(upper,Math.Max(offset,mapped));}
+        Point MapCoordinatePoint(int rawX,int rawY,string coordSpace,Rect bounds){
+            int winW=bounds.Right-bounds.Left,winH=bounds.Bottom-bounds.Top;
+            if(String.IsNullOrEmpty(coordSpace) || coordSpace=="physical"){
+                AutomationJson.Require(rawX>=0 && rawY>=0 && rawX<winW && rawY<winH);
+                return new Point(bounds.Left+rawX,bounds.Top+rawY);
+            }
+            if(coordSpace=="image"){
+                AutomationJson.Require(lastCaptureRect!=null && lastImageWidth>0 && lastImageHeight>0,"DESKTOP_SCREENSHOT_REQUIRED");
+                AutomationJson.Require(rawX>=0 && rawX<=lastImageWidth && rawY>=0 && rawY<=lastImageHeight);
+                int rx=ClampCoord((int)Math.Round(lastCaptureRect.X+(double)rawX*lastCaptureRect.Width/lastImageWidth),lastCaptureRect.X,lastCaptureRect.Width);
+                int ry=ClampCoord((int)Math.Round(lastCaptureRect.Y+(double)rawY*lastCaptureRect.Height/lastImageHeight),lastCaptureRect.Y,lastCaptureRect.Height);
+                return new Point(bounds.Left+rx,bounds.Top+ry);
+            }
+            if(coordSpace=="normalized"){
+                AutomationJson.Require(rawX>=0 && rawX<=1000 && rawY>=0 && rawY<=1000);
+                var rect=lastCaptureRect??new WgcRectangle{X=0,Y=0,Width=winW,Height=winH};
+                int rx=ClampCoord((int)Math.Round(rect.X+(double)rawX*rect.Width/1000.0),rect.X,rect.Width);
+                int ry=ClampCoord((int)Math.Round(rect.Y+(double)rawY*rect.Height/1000.0),rect.Y,rect.Height);
+                return new Point(bounds.Left+rx,bounds.Top+ry);
+            }
+            throw new AutomationFault("DESKTOP_BAD_REQUEST");
+        }
         Point PointerPoint(Dictionary<string,object> p,Element element,Rect bounds){
             if(element!=null){var r=element.Value.Current.BoundingRectangle;return new Point((int)(r.X+r.Width/2),(int)(r.Y+r.Height/2));}
             AutomationJson.Require(imageReady,"DESKTOP_SCREENSHOT_REQUIRED");
             AutomationJson.Require(SameRect(bounds,imageBounds),"DESKTOP_WINDOW_CHANGED");
             int x=AutomationJson.Number(p,"x",-1),y=AutomationJson.Number(p,"y",-1);
-            AutomationJson.Require(x>=0 && y>=0 && x<bounds.Right-bounds.Left && y<bounds.Bottom-bounds.Top);
-            return new Point(bounds.Left+x,bounds.Top+y);
+            return MapCoordinatePoint(x,y,AutomationJson.Text(p,"coordSpace","physical"),bounds);
         }
         void CheckPointer(Point point,Rect expected){
             CheckControl();Rect current;
@@ -678,13 +732,32 @@ namespace ProfilePilot.Desktop {
                 targetCapture=state.TargetQueue==null?null:state.TargetQueue.Capture.ToInt64().ToString(),
                 elapsedMs=(state.CompletedTimestamp-state.StartedTimestamp)*1000.0/Stopwatch.Frequency};
         }
-        void CheckInitialInput(Dictionary<string,object> p,string kind){
-            int[] keys=new int[0];
-            if(kind=="press_key")keys=((object[])p["keys"]).Cast<string>().Select(key=>(int)KeyCode(key)).Where(key=>key!=16 && key!=17 && key!=18).Distinct().ToArray();
+        static bool TargetIntegrityCompatible(Target target){
+            if(target==null || target.Handle==IntPtr.Zero || target.Pid<=0)return false;
+            int sourcePid;using(var current=Process.GetCurrentProcess())sourcePid=current.Id;
+            var source=DesktopDiagnostics.ProcessIntegrity(sourcePid);
+            var dest=DesktopDiagnostics.ProcessIntegrity(target.Pid);
+            return source.rid.HasValue && dest.rid.HasValue && (source.rid.Value>=dest.rid.Value || source.uiAccess==true);
+        }
+        static int[] ActionProbedKeys(Dictionary<string,object> p,string kind){
+            if(kind=="press_key")return ((object[])p["keys"]).Cast<string>().Select(key=>(int)KeyCode(key)).Where(key=>key!=16 && key!=17 && key!=18).Distinct().ToArray();
+            return new int[0];
+        }
+        void CheckInitialInput(Dictionary<string,object> p,string kind,bool activateNormalTargetFromElevatedForeground=false){
+            int[] keys=ActionProbedKeys(p,kind);
             // Generic modifier aliases are already covered by both exact sides
             // in ProtectedKeyCodes. Nothing has been pressed by this action yet.
             var state=DesktopInputState.Read(selected.Handle,keys);
             var decision=DesktopInputState.Evaluate(state);
+            if(!decision.Allowed && activateNormalTargetFromElevatedForeground &&
+                state.Foreground!=selected.Handle && state.DownKeys.Length==0 &&
+                (decision.Gaps&DesktopInputState.Gap.ForegroundIntegrityHigher)!=0 &&
+                (decision.Gaps&~DesktopInputState.Gap.ForegroundIntegrityHigher)==DesktopInputState.Gap.None &&
+                TargetIntegrityCompatible(selected) && CanActivateForClick(selected)){
+                Activate(selected,kind=="type_text" || kind=="press_key" || kind=="wheel");
+                state=DesktopInputState.Read(selected.Handle,keys);
+                decision=DesktopInputState.Evaluate(state);
+            }
             if(decision.Allowed)return;
             var details=DesktopDiagnostics.Snapshot(selected.Handle,selectedId);
             details["inputState"]=InputStateDetails(state,decision);
@@ -700,10 +773,10 @@ namespace ProfilePilot.Desktop {
                     allowed+=",ref";requiresRef=true;break;
                 case "set_value":allowed+=",ref,value";requiresRef=true;break;
                 case "scroll":allowed+=",ref,horizontal,vertical";requiresRef=true;break;
-                case "click":case "double_click":allowed+=",ref,x,y,button";pointer=true;break;
-                case "move":allowed+=",ref,x,y";pointer=true;break;
-                case "drag":allowed+=",ref,x,y,toX,toY,button";pointer=true;break;
-                case "wheel":allowed+=",ref,x,y,deltaX,deltaY";pointer=true;break;
+                case "click":case "double_click":allowed+=",ref,x,y,button,coordSpace";pointer=true;break;
+                case "move":allowed+=",ref,x,y,coordSpace";pointer=true;break;
+                case "drag":allowed+=",ref,x,y,toX,toY,button,coordSpace";pointer=true;break;
+                case "wheel":allowed+=",ref,x,y,deltaX,deltaY,coordSpace";pointer=true;break;
                 case "type_text":allowed+=",ref,value";break;
                 case "press_key":allowed+=",ref,keys";break;
                 default:throw new AutomationFault("DESKTOP_BAD_REQUEST");
@@ -714,9 +787,15 @@ namespace ProfilePilot.Desktop {
             bool hasRef=p.ContainsKey("ref"),hasX=p.ContainsKey("x"),hasY=p.ContainsKey("y");
             if(hasRef){string reference=AutomationJson.Text(p,"ref");AutomationJson.Require(reference.Length>1 && reference[0]=='e' && reference.Skip(1).All(c=>c>='0' && c<='9'));}
             if(requiresRef)AutomationJson.Require(hasRef);
-            if(pointer){AutomationJson.Require(hasX==hasY && hasRef!=(hasX && hasY));}
+            if(pointer){
+                AutomationJson.Require(hasX==hasY && hasRef!=(hasX && hasY));
+                if(hasRef && kind!="drag")AutomationJson.Require(!p.ContainsKey("coordSpace"));
+            }
+            string coordSpace=p.ContainsKey("coordSpace")?AutomationJson.Text(p,"coordSpace"):"physical";
+            AutomationJson.Require(coordSpace=="physical" || coordSpace=="image" || coordSpace=="normalized");
+            int maxCoord=coordSpace=="normalized"?1000:8191;
             foreach(string coordinate in new[]{"x","y","toX","toY"})if(p.ContainsKey(coordinate)){
-                int value=AutomationJson.Number(p,coordinate);AutomationJson.Require(value>=0 && value<=8191);
+                int value=AutomationJson.Number(p,coordinate);AutomationJson.Require(value>=0 && value<=maxCoord);
             }
             if(kind=="drag")AutomationJson.Require(p.ContainsKey("toX") && p.ContainsKey("toY"));
             if(p.ContainsKey("button")){string button=AutomationJson.Text(p,"button");AutomationJson.Require(button=="left" || button=="right" || button=="middle");}
@@ -806,7 +885,7 @@ namespace ProfilePilot.Desktop {
             }
             bool physical=kind=="click" || kind=="double_click" || kind=="move" || kind=="drag" || kind=="wheel" || kind=="type_text" || kind=="press_key";
             if(backgroundTarget!=null){AutomationJson.Require(!physical && selectedId==backgroundWindowId,"DESKTOP_BACKGROUND_ACTION_DENIED");CheckBackground();}
-            if(physical)CheckInitialInput(p,kind);
+            if(physical)CheckInitialInput(p,kind,true);
             CheckControl();
             version=""; // Consume BEFORE input. An unknown result cannot replay this observation.
             bool inputStarted=false;Exception failure=null;var deliveryFailures=new List<object>();Dictionary<string,object> windowState=null;
@@ -846,8 +925,7 @@ namespace ProfilePilot.Desktop {
                     if(kind=="drag"){
                         AutomationJson.Require(imageReady,"DESKTOP_SCREENSHOT_REQUIRED");AutomationJson.Require(SameRect(bounds,imageBounds),"DESKTOP_WINDOW_CHANGED");
                         int toX=AutomationJson.Number(p,"toX",-1),toY=AutomationJson.Number(p,"toY",-1);
-                        AutomationJson.Require(toX>=0 && toY>=0 && toX<bounds.Right-bounds.Left && toY<bounds.Bottom-bounds.Top);
-                        end=new Point(bounds.Left+toX,bounds.Top+toY);
+                        end=MapCoordinatePoint(toX,toY,AutomationJson.Text(p,"coordSpace","physical"),bounds);
                     }
                     // Validate both endpoints before consuming any mouse input.
                     AbsolutePointer(point,desktop);AbsolutePointer(end,desktop);

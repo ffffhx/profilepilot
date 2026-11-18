@@ -57,6 +57,8 @@ ppilot browser [--profile native:Default] [--session NAME] METHOD [--params JSON
   pointer --params JSON          Coordinates from a screenshot observation
   screenshot [--output PATH]     PNG capture
   open URL | switch ID | newTab [URL]   Select or create a page
+  dialog [accept|dismiss]        Handle pending JS alert/confirm/prompt dialog
+  cookies.export | cookies.import  Protocol-level decrypted cookie sync
   cdp METHOD --params JSON       Full Chrome-supported CDP, --cdp-session ID for OOPIF
   extension-ui connect          Current tab's extension UI; params {extensionId}
   extension-ui status|observe    Chrome approval status / versioned button refs
@@ -124,7 +126,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   const flag = (name: string): string | undefined => { const index = args.indexOf(name); if (index < 0) return; if (!args[index + 1] || args[index + 1].startsWith("--")) invalidInput(`${name} 需要参数。`); return args.splice(index, 2)[1]; };
   const boolean = (name: string): boolean => { const index = args.indexOf(name); if (index < 0) return false; args.splice(index, 1); return true; };
   const profileId = flag("--profile"), sessionId = flag("--session"), root = flag("--root"), requestId = flag("--request-id") || randomUUID();
-  const output = flag("--output"), cdpSessionId = flag("--cdp-session"), tabId = flag("--tab"), newTab = boolean("--new-tab");
+  const output = flag("--output"), cdpSessionId = flag("--cdp-session"), tabId = flag("--tab"), newTab = boolean("--new-tab"), activeTab = boolean("--active-tab");
   const controller = flag("--controller"), task = flag("--task");
   const inline = flag("--params"), file = flag("--params-file"), stdin = boolean("--params-stdin");
   boolean("--json"); // Extension responses are always JSON; match Gateway's output flag.
@@ -142,7 +144,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   if (!isNativeControlMethod(method) && !controlAlias) invalidInput(method ? extensionCommandHint(method) || `未知浏览器方法：${method}。运行 ppilot browser --connection extension schema 查看可用命令。` : "需要浏览器方法；运行 ppilot browser --help 查看用法。");
   if (!/^[\w.-]{1,128}$/.test(requestId)) invalidInput("requestId 必须是 1–128 个字母、数字、下划线、连字符或点。");
   if (output && !["screenshot", "observe",...debugMethods].includes(method!)) invalidInput("--output 仅支持截图或调试导出。");
-  const positional = ["open", "newTab", "switch", "cdp", "extension-ui"].includes(method!) && args[0] && !args[0].startsWith("--") ? args.shift() : undefined;
+  const positional = ["open", "newTab", "switch", "cdp", "extension-ui", "dialog"].includes(method!) && args[0] && !args[0].startsWith("--") ? args.shift() : undefined;
   let params = readParams(inline, file, stdin);
   if(debugMethods.includes(method!)){params=parseDebugArgs(method!,args,params);if(output)params.path=output;args.length=0;}
   if (args.length) invalidInput(`未知参数：${args.join(" ")}。运行 ppilot browser ${method} --help 查看当前连接的用法。`);
@@ -169,10 +171,17 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     let url: URL;
     try { url = new URL(params.url); } catch { invalidInput(`${method} 需要有效 URL；使用 ${method} URL 或 params 中的 url。`); }
     if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) invalidInput(`${method} 只支持不含凭据的 HTTP/HTTPS 页面。`);
+  } else if (method === "dialog" && positional !== undefined) {
+    if (!["accept", "dismiss"].includes(positional)) invalidInput("dialog 参数必须是 accept 或 dismiss。");
+    params.accept = positional === "accept";
   } else if (method === "switch" && positional !== undefined) params.tabId = positiveTabId(positional);
   if (tabId !== undefined) params.tabId = positiveTabId(tabId);
   if (method === "switch" || params.tabId !== undefined) params.tabId = positiveTabId(params.tabId);
   if (newTab) params.newTab = true;
+  if (activeTab) params.activeTab = true;
+  if (method === "claim" && params.tabId === undefined && params.newTab === undefined && !params.activeTab && !params.useCurrentTab) {
+    params.newTab = true;
+  }
   await ensureBrowserService(root);
   const result = await requestNativeControl({ requestId, method, profileId, sessionId, params }, root);
   if (output && method === "observe") {

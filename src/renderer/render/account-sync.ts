@@ -3,11 +3,32 @@ import { store } from "../state";
 import type { PublicProfile } from "../../shared/types";
 import { escapeHtml, formatDate, isWindowsCrossDataDirAccountSyncUnsupported, profileStatusLabel, renderButtonLabel, renderOperationProgress, sourceLabel } from "../util";
 
+export function isAccountSyncBlockedInUi(
+  platform: string | undefined,
+  source: PublicProfile | null,
+  target: PublicProfile | null
+): boolean {
+  if (!source || !target) {
+    return false;
+  }
+  if (source.source === "isolated" && target.source === "isolated") {
+    return false;
+  }
+  if (
+    source.source === "native" &&
+    target.source === "isolated" &&
+    store.nativeExtensionBrowsers?.some((item) => item.profileId === source.id && item.connected)
+  ) {
+    return false;
+  }
+  return isWindowsCrossDataDirAccountSyncUnsupported(platform, source, target);
+}
+
 // 合并同步面板：可迁移的 Profile 数据 + 插件共用一对源/目标 Profile，
 // 默认两项都同步，也可以只勾其中一项。
 export function renderSyncPanel(profiles: PublicProfile[]): string {
   if (profiles.length < 2) {
-    return `<section class="account-sync-panel sync-unavailable"><div><h2>Profile 同步</h2><p>有两个 Profile 后，可以在它们之间同步数据与插件。</p></div><button type="button" data-action="open-agent-browser-setup" ${store.busy ? "disabled" : ""}>创建 Agent 浏览器</button></section>`;
+    return `<section class="account-sync-panel sync-unavailable" data-account-sync><div><h2>Profile 同步</h2><p>有两个 Profile 后，可以在它们之间同步数据与插件。</p></div><button type="button" data-action="open-agent-browser-setup" ${store.busy ? "disabled" : ""}>创建 Agent 浏览器</button></section>`;
   }
   const sourceId = store.accountSyncSourceId || profiles[0]?.id || "";
   const sourceProfile = profiles.find((profile) => profile.id === sourceId) || null;
@@ -19,7 +40,7 @@ export function renderSyncPanel(profiles: PublicProfile[]): string {
   const runningBlocker = targetProfile?.running ? targetProfile : null;
   const partAccount = store.syncAccountPart;
   const partExtensions = store.syncExtensionsPart;
-  const accountSyncUnsupported = isWindowsCrossDataDirAccountSyncUnsupported(store.state?.platform, sourceProfile, targetProfile);
+  const accountSyncUnsupported = isAccountSyncBlockedInUi(store.state?.platform, sourceProfile, targetProfile);
   const effectiveAccountPart = partAccount && !accountSyncUnsupported;
   const canSync = Boolean(sourceProfile && targetProfile && sourceProfile.id !== targetProfile.id) && (effectiveAccountPart || partExtensions);
   const syncingAccount = isBusyAction("account-sync");

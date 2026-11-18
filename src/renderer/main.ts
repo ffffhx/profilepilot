@@ -8,6 +8,7 @@ import { activateBusyStep, busyStepsKey, emphasizeName, focusProfileFromUi, hand
 import { closeModalFromUi, executeAgentTakeoverConfirm, executeBifrostStartAndLaunch, executeConfirmIntent } from "./confirm";
 import { normalizeProxyServerInput } from "./proxy";
 import { experimentalProxyRoutingEnabled, onExperimentalFeaturesChanged } from "./experimental-features";
+import { isAccountSyncBlockedInUi } from "./render/account-sync";
 import { clampCloneCount } from "./render/clone-pool";
 import { isExtensionMigrationActionItem } from "./render/extensions";
 import { focusLiveTab, openLiveZoom, refreshLiveViewNow, requestLiveViewNow, startLiveViewLoop, toggleLiveScreenshot } from "./render/live-view";
@@ -17,8 +18,8 @@ import { renderGlobalInstructionDiff } from "./render/modals";
 import { render } from "./render/render-root";
 import { applyState, invalidateExtensionMigrationDiff, loadState, markOnboardingSeen, refreshAgentIntegrationDiagnostic, refreshExtensionMigrationDiff, refreshGlobalInstructions, refreshProfileReadiness, repairClaudeInstructionShell, requestInputGuardPermission, saveGlobalInstruction, setMigrationSource, undoGlobalInstruction } from "./state-actions";
 import { appRoot, store } from "./state";
-import type { AgentOverlayRevealEvent, AgentTakeoverEvent, AppState, BrowserDriverKind, ProfileProxyConfig } from "../shared/types";
-import { deleteButtonTitle, escapeHtml, formatErrorMessage, isWindowsCrossDataDirAccountSyncUnsupported, profileAgentControlClients } from "./util";
+import type { AgentOverlayRevealEvent, AgentTakeoverEvent, AppState, BrowserDriverKind, BrowserKind, ProfileProxyConfig } from "../shared/types";
+import { deleteButtonTitle, escapeHtml, formatErrorMessage, profileAgentControlClients } from "./util";
 
 onViewInvalidated(render);
 
@@ -1113,8 +1114,8 @@ appRoot.addEventListener("click", (event) => {
     }
     const sourceProfile = profiles.find((profile) => profile.id === sourceId) || null;
     const targetProfile = profiles.find((profile) => profile.id === targetId) || null;
-    if (isWindowsCrossDataDirAccountSyncUnsupported(store.state.platform, sourceProfile, targetProfile)) {
-      setToast("Windows 无法在不同 user-data-dir 之间可靠复制登录态；请只同步插件，或在独立 Agent 浏览器中登录一次。", "error");
+    if (isAccountSyncBlockedInUi(store.state.platform, sourceProfile, targetProfile)) {
+      setToast("Windows 无法在未连接伴生扩展的系统 Profile 与独立 Profile 之间复制登录态；请先连接扩展或只同步插件。", "error");
       return;
     }
     store.accountSyncDiff = null;
@@ -1163,7 +1164,7 @@ appRoot.addEventListener("click", (event) => {
       setToast("请选择两个不同的 Profile", "error");
       return;
     }
-    const accountSyncUnsupported = isWindowsCrossDataDirAccountSyncUnsupported(
+    const accountSyncUnsupported = isAccountSyncBlockedInUi(
       store.state.platform,
       sourceProfile,
       targetProfile
@@ -2395,9 +2396,16 @@ appRoot.addEventListener("submit", (event) => {
 
   const data = new FormData(createForm as HTMLFormElement);
   const name = String(data.get("name") || "").trim();
+  const rawBrowserKind = String(data.get("browserKind") || "chrome").trim();
+  const browserKind: BrowserKind =
+    rawBrowserKind === "edge" || rawBrowserKind === "brave" || rawBrowserKind === "chromium"
+      ? rawBrowserKind
+      : "chrome";
 
   void withBusy(async () => {
-    const nextState = await profileApi().createProfile(name);
+    const nextState = await profileApi().createProfile(
+      browserKind === "chrome" ? name : { name, browserKind }
+    );
     store.state = nextState;
     store.selectedId = store.state.profiles[0]?.id || null;
     store.modal = null;

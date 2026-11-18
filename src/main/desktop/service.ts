@@ -14,6 +14,39 @@ import { describeInputObserverStartupFailure, inputObserverStartupErrorFailure, 
 export { desktopActionSchema, desktopCommandSchema, type DesktopCommand } from './schema';
 
 const pointerKinds = ['click', 'double_click', 'move', 'drag', 'wheel'];
+export type DesktopCoordinateGeometry = {
+  imageWidth: number; imageHeight: number; windowWidth: number; windowHeight: number;
+  captureRect: { x: number; y: number; width: number; height: number };
+};
+export function mapDesktopActionCoordinates<T extends Record<string, any>>(params: T, geometry: DesktopCoordinateGeometry | undefined): Omit<T, 'coordSpace'> {
+  if (!params.coordSpace) return params;
+  const { coordSpace, ...rest } = params as T & { coordSpace: 'image' | 'normalized' | 'physical' };
+  const scale = (raw: number | undefined, axis: 'x' | 'y'): number | undefined => {
+    if (raw === undefined) return undefined;
+    if (coordSpace === 'physical') {
+      if (geometry) {
+        const limit = axis === 'x' ? geometry.windowWidth : geometry.windowHeight;
+        if (raw < 0 || (limit > 0 && raw >= limit)) throw desktopError('DESKTOP_BAD_REQUEST', '物理像素坐标超出窗口范围。');
+      }
+      return raw;
+    }
+    if (!geometry) throw desktopError('DESKTOP_SCREENSHOT_REQUIRED', '缺少用于坐标换算的截图尺寸信息，请重新截图。');
+    const maxInput = coordSpace === 'normalized' ? 1000 : (axis === 'x' ? geometry.imageWidth : geometry.imageHeight);
+    if (maxInput <= 0) throw desktopError('DESKTOP_SCREENSHOT_REQUIRED', '缺少用于坐标换算的截图尺寸信息，请重新截图。');
+    if (raw < 0 || raw > maxInput) throw desktopError('DESKTOP_BAD_REQUEST', coordSpace === 'normalized' ? 'normalized 坐标必须在 0..1000 范围内。' : '图像像素坐标超出截图尺寸范围。');
+    const offset = axis === 'x' ? geometry.captureRect.x : geometry.captureRect.y;
+    const span = axis === 'x' ? geometry.captureRect.width : geometry.captureRect.height;
+    const mapped = Math.round(offset + (raw * span) / maxInput);
+    const upper = Math.max(offset, offset + span - 1);
+    return Math.min(upper, Math.max(offset, mapped));
+  };
+  const out: Record<string, any> = { ...rest };
+  if (rest.x !== undefined) out.x = scale(rest.x, 'x');
+  if (rest.y !== undefined) out.y = scale(rest.y, 'y');
+  if (rest.toX !== undefined) out.toX = scale(rest.toX, 'x');
+  if (rest.toY !== undefined) out.toY = scale(rest.toY, 'y');
+  return out as Omit<T, 'coordSpace'>;
+}
 type InputBinding = {
   generation: string; previousGeneration?: string; epoch?: string;
   phase: 'arming' | 'ready' | 'pending' | 'paused'; reason?: string; certainty?: 'observed' | 'unknown';
@@ -21,7 +54,7 @@ type InputBinding = {
   noticePreparation?: AbortController;
 };
 type Session = NonNullable<DesktopStatus['session']> & {
-  driver: DesktopDriver; revision: number; coordinateVersion?: string; input?: InputBinding; freshReadRequired?: boolean;
+  driver: DesktopDriver; revision: number; coordinateVersion?: string; coordinateGeometry?: DesktopCoordinateGeometry; input?: InputBinding; freshReadRequired?: boolean;
 };
 export interface DesktopServiceInputObserver {
   arm(generation: string, marker: string, backgroundTarget?: BackgroundTarget): Promise<DesktopObserverSubscription>;
@@ -74,29 +107,32 @@ export class DesktopService {
   constructor(private options: DesktopServiceOptions = {}) {
     this.platform = options.platform || process.platform;
     this.now = options.now || Date.now;
-    this.createDriver = options.driver || (() => new DesktopWorker());
+    this.createDriver = options.driver || (() => new DesktopWorker(desktopExecutable(this.platform)));
     this.unobservedTestDriver = options.allowUnobservedTestDriver === true && typeof options.driver === 'function';
     if (options.allowUnobservedTestDriver && !options.driver) throw desktopError('DESKTOP_BAD_REQUEST', 'Unobserved tests require an explicit fake driver.');
-    if (this.platform === 'win32' && options.inputObserver) {
+    if ((this.platform === 'win32' || this.platform === 'darwin') && options.inputObserver) {
       try { this.inputObserver = options.inputObserver(event => this.observerPaused(event)); }
       catch { /* Catalog reads remain available; control fails closed below. */ }
     }
     this.catalog = this.createDriver();
     this.timer = setInterval(() => this.expire(), 1000); this.timer.unref();
   }
+  private hasImplicitMacObservation(): boolean {
+    return this.platform === 'darwin' && !this.options.inputObserver && !this.unobservedTestDriver;
+  }
   status(): DesktopStatus {
     this.expire();
-    const supported = this.platform === 'win32';
-    const available = !this.closed && supported && (this.options.available?.() ?? existsSync(desktopExecutable()));
+    const supported = this.platform === 'win32' || this.platform === 'darwin';
+    const available = !this.closed && supported && (this.options.available?.() ?? existsSync(desktopExecutable(this.platform)));
     const owner = this.owner;
     return { supported, available, platform: this.platform, stopShortcutAvailable: this.options.stopShortcutAvailable?.() ?? false,
-      reason: this.closed ? '桌面服务已关闭。' : !supported ? '本机桌面控制目前支持 Windows；macOS 暂未提供原生桌面驱动。' : !available ? '桌面控制组件尚未安装，请更新 ProfilePilot。' : undefined,
+      reason: this.closed ? '桌面服务已关闭。' : !supported ? '本机桌面控制目前仅支持 Windows 和 macOS。' : !available ? '桌面控制组件尚未安装，请更新 ProfilePilot。' : undefined,
       inputObservation: this.observationStatus(),
       session: owner ? { name: owner.name, window: { ...owner.window }, mode: owner.mode || 'interactive', state: owner.state, expiresAt: owner.expiresAt, revision: owner.revision } : null };
   }
   private observationStatus(): DesktopStatus['inputObservation'] {
     const input = this.owner?.input;
-    if (!this.inputObserver) return { available: false, phase: 'unavailable', reason: 'observer_unavailable',
+    if (!this.inputObserver && !this.hasImplicitMacObservation()) return { available: false, phase: 'unavailable', reason: 'observer_unavailable',
       ...(this.unobservedTestDriver ? { unobservedTestDriver: true as const } : {}) };
     return { available: true, phase: input?.phase || 'idle', ...(input ? { generation: input.generation,
       ...(input.epoch ? { epoch: input.epoch } : {}), ...(input.reason ? { reason: input.reason } : {}),
@@ -104,7 +140,7 @@ export class DesktopService {
       ...(input.certainty ? { certainty: input.certainty } : {}) } : {}) };
   }
   private requireObserver() {
-    if (!this.inputObserver && !this.unobservedTestDriver) throw desktopError('DESKTOP_INPUT_OBSERVER_UNAVAILABLE');
+    if (!this.inputObserver && !this.unobservedTestDriver && !this.hasImplicitMacObservation()) throw desktopError('DESKTOP_INPUT_OBSERVER_UNAVAILABLE');
   }
   private disarm(input: InputBinding | undefined) {
     input?.noticePreparation?.abort();
@@ -152,7 +188,7 @@ export class DesktopService {
   private pauseOwner(owner: Session, reason: string, certainty: 'observed' | 'unknown', notify = true) {
     if (this.owner !== owner) return;
     // Invalidate synchronously before cancellation or callbacks can re-enter.
-    this.generation++; owner.revision++; owner.state = 'paused'; owner.coordinateVersion = undefined; owner.freshReadRequired = true;
+    this.generation++; owner.revision++; owner.state = 'paused'; owner.coordinateVersion = undefined; owner.coordinateGeometry = undefined; owner.freshReadRequired = true;
     if (owner.input) { owner.input.phase = 'paused'; owner.input.reason = reason; owner.input.certainty = certainty; }
     this.waiting?.abort(); this.closeDriver(owner.driver); this.disarm(owner.input);
     if (notify) this.changed();
@@ -188,7 +224,14 @@ export class DesktopService {
       && this.generation === input.serviceGeneration && owner.driver === input.driver && owner.window.id === input.windowId;
   }
   private assertObserved(owner: Session) {
-    this.requireObserver(); if (!this.inputObserver) return;
+    this.requireObserver();
+    if (!this.inputObserver) {
+      if (this.unobservedTestDriver) return;
+      const input = owner.input;
+      if (!input || input.phase === 'pending' || input.phase === 'arming') throw desktopError('DESKTOP_INPUT_OBSERVER_PENDING');
+      if (!this.bindingCurrent(owner, input) || owner.state !== 'active' || input.phase !== 'ready') throw desktopError('DESKTOP_USER_IN_CONTROL');
+      return;
+    }
     const input = owner.input;
     if (!input || input.phase === 'pending' || input.phase === 'arming') throw desktopError('DESKTOP_INPUT_OBSERVER_PENDING');
     if (!this.bindingCurrent(owner, input) || owner.state !== 'active' || input.phase !== 'ready') throw desktopError('DESKTOP_USER_IN_CONTROL');
@@ -208,7 +251,7 @@ export class DesktopService {
     const input: InputBinding = { generation: 'desktop-' + randomUUID(),
       ...((old?.phase === 'ready' || old?.phase === 'pending') ? { previousGeneration: old.generation } : {}),
       phase: 'arming', revision: owner.revision, serviceGeneration: this.generation, driver: owner.driver, windowId: owner.window.id };
-    owner.input = input; owner.state = 'paused'; owner.coordinateVersion = undefined;
+    owner.input = input; owner.state = 'paused'; owner.coordinateVersion = undefined; owner.coordinateGeometry = undefined;
     this.changed();
     if (!this.bindingCurrent(owner, input)) throw desktopError('DESKTOP_USER_IN_CONTROL');
     try {
@@ -304,7 +347,7 @@ export class DesktopService {
   }
   private replaceReadDriver(owner: Session): boolean {
     const revision = ++owner.revision;
-    owner.coordinateVersion = undefined; owner.freshReadRequired = true;
+    owner.coordinateVersion = undefined; owner.coordinateGeometry = undefined; owner.freshReadRequired = true;
     this.closeDriver(owner.driver);
     if (this.owner !== owner || owner.revision !== revision || owner.state !== 'active') return false;
     owner.driver = this.createDriver();
@@ -320,7 +363,7 @@ export class DesktopService {
     const owner = this.owner; this.owner = undefined;
     this.generation++;
     if (owner) {
-      owner.revision++; owner.state = 'paused'; owner.coordinateVersion = undefined;
+      owner.revision++; owner.state = 'paused'; owner.coordinateVersion = undefined; owner.coordinateGeometry = undefined;
       this.ended.add(owner.name); this.waiting?.abort(); this.closeDriver(owner.driver); this.disarm(owner.input); this.changed();
     } else this.waiting?.abort();
   }
@@ -376,7 +419,7 @@ export class DesktopService {
       if (this.owner !== owner || this.generation !== generation || owner.revision !== revision || owner.window.id !== target || owner.driver !== previousDriver) throw desktopError('DESKTOP_USER_IN_CONTROL');
       if (owner.state === 'paused') {
         const nextRevision = ++owner.revision;
-        owner.coordinateVersion = undefined; owner.freshReadRequired = true;
+        owner.coordinateVersion = undefined; owner.coordinateGeometry = undefined; owner.freshReadRequired = true;
         this.closeDriver(owner.driver);
         if (this.owner !== owner || owner.revision !== nextRevision || this.generation !== generation) throw desktopError('DESKTOP_USER_IN_CONTROL');
         owner.driver = this.createDriver();
@@ -525,14 +568,31 @@ export class DesktopService {
     this.assertOwner(owner, revision, driver, target);
     await driver.request('windows', {});
     this.assertOwner(owner, revision, driver, target);
-    owner.coordinateVersion = undefined;
+    owner.coordinateVersion = undefined; owner.coordinateGeometry = undefined;
     const observed = await driver.request(screenshot ? 'window.screenshot' : 'window.observe', { windowId: owner.window.id, ...(screenshot ? { screenshotOnly } : {}) }) as DesktopObservation;
     this.assertOwner(owner, revision, driver, target);
     if (observed.image) {
       observed.image = await this.capture(owner.window, observed.image);
       if (owner.mode === 'background') observed.image.coordinateInputAvailable = false;
       this.assertOwner(owner, revision, driver, target);
-      if (observed.image.coordinateInputAvailable === true) owner.coordinateVersion = observed.version;
+      if (observed.image.coordinateInputAvailable === true) {
+        owner.coordinateVersion = observed.version;
+        const imgW = Number(observed.image.width), imgH = Number(observed.image.height);
+        const winW = Number(observed.image.windowWidth), winH = Number(observed.image.windowHeight);
+        const rect = observed.image.captureRect;
+        if (Number.isFinite(imgW) && imgW > 0 && Number.isFinite(imgH) && imgH > 0) {
+          const cw = rect && Number.isFinite(rect.width) && rect.width > 0 ? rect.width : (Number.isFinite(winW) && winW > 0 ? winW : imgW);
+          const ch = rect && Number.isFinite(rect.height) && rect.height > 0 ? rect.height : (Number.isFinite(winH) && winH > 0 ? winH : imgH);
+          const cx = rect && Number.isFinite(rect.x) ? rect.x : 0;
+          const cy = rect && Number.isFinite(rect.y) ? rect.y : 0;
+          owner.coordinateGeometry = {
+            imageWidth: imgW, imageHeight: imgH,
+            windowWidth: Number.isFinite(winW) && winW > 0 ? winW : cx + cw,
+            windowHeight: Number.isFinite(winH) && winH > 0 ? winH : cy + ch,
+            captureRect: { x: cx, y: cy, width: cw, height: ch }
+          };
+        }
+      }
     }
     owner.freshReadRequired = false;
     return observed;
@@ -591,7 +651,7 @@ export class DesktopService {
               // The returned observation is historical even when the timeout
               // falls between completed reads. Require a new explicit read
               // before any ref or coordinate input can use that evidence.
-              owner.freshReadRequired = true; owner.coordinateVersion = undefined;
+              owner.freshReadRequired = true; owner.coordinateVersion = undefined; owner.coordinateGeometry = undefined;
             }
             if (waited.pendingRead) {
               // A deadline must also stop a blocked read. Retire that helper
@@ -612,15 +672,16 @@ export class DesktopService {
           this.assertOwner(owner, revision, driver, targetId);
           if (owner.freshReadRequired) throw desktopError('DESKTOP_FRESH_OBSERVATION_REQUIRED');
           if (pointerKinds.includes(params.kind) && (!params.ref || params.kind === 'drag') && owner.coordinateVersion !== params.version) throw desktopError('DESKTOP_SCREENSHOT_REQUIRED', '这次观察没有可用于坐标输入的窗口画面，请使用控件引用或重新截图。');
-          owner.coordinateVersion = undefined;
-          result = await driver.request('window.action', params);
+          const resolvedParams = pointerKinds.includes(params.kind) ? mapDesktopActionCoordinates(params, owner.coordinateGeometry) : params;
+          owner.coordinateVersion = undefined; owner.coordinateGeometry = undefined;
+          result = await driver.request('window.action', resolvedParams);
           if (command.observeAfter !== false) {
             let feedback = await observeAfterAction({
               check: () => this.assertOwner(owner, revision, driver, targetId),
               observe: () => this.observe(owner, revision, driver, false),
               errorCode: 'DESKTOP_OBSERVATION_FAILED',
               invalidate: error => {
-                owner.freshReadRequired = true; owner.coordinateVersion = undefined;
+                owner.freshReadRequired = true; owner.coordinateVersion = undefined; owner.coordinateGeometry = undefined;
                 this.recoverReadDriver(owner, revision, error);
                 this.pauseForOperationFailure(owner, revision, error);
               }

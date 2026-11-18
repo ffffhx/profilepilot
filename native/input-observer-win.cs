@@ -292,16 +292,31 @@ namespace ProfilePilot.InputObservation {
     // Window queries below are limited to the pointer hit/root and its geometry
     // for existing browser subscribers; no window enumeration/UIA runs here.
     public static class InputObserverInstanceGate {
-        // Fixed across App data directories, builds and integrity levels. Local
-        // names are scoped to the interactive Windows logon session.
+        // Fixed across App data directories, builds and integrity levels unless
+        // explicitly scoped via --mutex or PROFILEPILOT_INPUT_OBSERVER_MUTEX.
         public const string Name = @"Local\ProfilePilot.InputObserver";
+        static string configuredName;
+        public static bool ValidMutexName(string value) {
+            return !String.IsNullOrWhiteSpace(value) && value.Trim().Length <= 200 && value.IndexOf('\0') < 0;
+        }
+        public static void ConfigureMutex(string value) {
+            if (!ValidMutexName(value)) throw new ArgumentException("Invalid mutex name");
+            configuredName = value.Trim();
+        }
+        public static string EffectiveName {
+            get {
+                if (!String.IsNullOrEmpty(configuredName)) return configuredName;
+                string env = Environment.GetEnvironmentVariable("PROFILEPILOT_INPUT_OBSERVER_MUTEX");
+                return ValidMutexName(env) ? env.Trim() : Name;
+            }
+        }
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         static extern IntPtr CreateMutexW(IntPtr attributes, bool initialOwner, string name);
         [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
         static IntPtr lifetimeHandle;
         public static bool TryEnter(out int error) {
             if (lifetimeHandle != IntPtr.Zero) { error = 183; return false; }
-            IntPtr handle = CreateMutexW(IntPtr.Zero, false, Name);
+            IntPtr handle = CreateMutexW(IntPtr.Zero, false, EffectiveName);
             error = Marshal.GetLastWin32Error();
             if (handle == IntPtr.Zero) return false;
             if (error == 183) { CloseHandle(handle); return false; }
@@ -314,48 +329,74 @@ namespace ProfilePilot.InputObservation {
 
     public static class InputObserverWindowsHost {
         const int MouseHook = 14, KeyboardHook = 13, WorkMessage = 0x8001, QuitMessage = 0x12;
+        const uint TimerMessage = 0x0113;
+        const double MouseMoveHitIntervalMs = 25.0;
+        const int MouseMoveHitDeltaPx = 4;
         [StructLayout(LayoutKind.Sequential)] struct Point { public int X, Y; }
         [StructLayout(LayoutKind.Sequential)] struct Rect { public int Left, Top, Right, Bottom; }
         [StructLayout(LayoutKind.Sequential)] struct MouseData { public Point Point; public uint Data, Flags, Time; public UIntPtr Extra; }
         [StructLayout(LayoutKind.Sequential)] struct KeyboardData { public uint Vk, Scan, Flags, Time; public UIntPtr Extra; }
         [StructLayout(LayoutKind.Sequential)] struct Message { public IntPtr Window; public uint Id; public UIntPtr WParam; public IntPtr LParam; public uint Time; public Point Point; public uint Private; }
         delegate IntPtr HookCallback(int code, IntPtr message, IntPtr data);
-        delegate void WinEventCallback(IntPtr hook,uint evt,IntPtr window,int obj,int child,uint thread,uint time);
         [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
         [DllImport("user32.dll")] static extern bool IsWindow(IntPtr window);
-        [DllImport("user32.dll")] static extern IntPtr SetWinEventHook(uint min,uint max,IntPtr module,WinEventCallback callback,uint process,uint thread,uint flags);
-        [DllImport("user32.dll")] static extern bool UnhookWinEvent(IntPtr hook);
-        static IntPtr foregroundHook;
-        static readonly WinEventCallback ForegroundCallback=(hook,evt,window,obj,child,thread,time)=>{try{CheckBackgroundForeground();}catch{Protocol.Fail("unavailable");Wake();}};
+        [DllImport("user32.dll", SetLastError = true)] static extern UIntPtr SetTimer(IntPtr window, UIntPtr id, uint elapsedMs, IntPtr callback);
+        [DllImport("user32.dll")] static extern bool KillTimer(IntPtr window, UIntPtr id);
+        static long lastMoveHitTimestamp;
+        static Point lastMoveHitPoint;
+        static IntPtr cachedMoveRootWindow;
+        static uint cachedMoveRootPid;
+        static bool hasCachedMoveHit;
         static bool BackgroundWindowValid(){
             if(Protocol.BackgroundPid==0)return true;
             var window=new IntPtr(Protocol.BackgroundWindow);uint pid;
             return IsWindow(window) && GetWindowThreadProcessId(window,out pid)!=0 && pid==Protocol.BackgroundPid;
         }
         static uint WindowPid(IntPtr window){uint pid;return window!=IntPtr.Zero && GetWindowThreadProcessId(window,out pid)!=0?pid:0;}
-        static void CheckBackgroundForeground(){
+        static void CheckBackgroundWindow(){
             if(!Protocol.KeyboardNeeded || Protocol.BackgroundPid==0)return;
-            uint pid=WindowPid(GetForegroundWindow());
-            if(!BackgroundWindowValid() || pid==0){Protocol.Fail("unavailable");Wake();}
-            else if(pid==Protocol.BackgroundPid){Protocol.Fail("target_active");Wake();}
+            if(!BackgroundWindowValid()){Protocol.Fail("unavailable");Wake();}
         }
-        static bool RelevantBackgroundInput(IntPtr pointerWindow,bool pointerInput){
+        static void ResolvePointerRootWindow(Point point, int message, out IntPtr rootWindow, out uint rootPid) {
+            long nowTicks = Stopwatch.GetTimestamp();
+            if (message == 0x200 && hasCachedMoveHit) {
+                double elapsedMs = (nowTicks - lastMoveHitTimestamp) * 1000.0 / Stopwatch.Frequency;
+                int dx = Math.Abs(point.X - lastMoveHitPoint.X), dy = Math.Abs(point.Y - lastMoveHitPoint.Y);
+                if (elapsedMs < MouseMoveHitIntervalMs || (dx < MouseMoveHitDeltaPx && dy < MouseMoveHitDeltaPx)) {
+                    rootWindow = cachedMoveRootWindow;
+                    rootPid = cachedMoveRootPid;
+                    return;
+                }
+            }
+            IntPtr previous = SetThreadDpiAwarenessContext(new IntPtr(-4));
+            if (previous == IntPtr.Zero) throw new InvalidOperationException("Pointer DPI context unavailable");
+            try {
+                if (!AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(), new IntPtr(-4))) throw new InvalidOperationException("Pointer DPI context unconfirmed");
+                IntPtr hit = WindowFromPoint(point);
+                rootWindow = hit == IntPtr.Zero ? IntPtr.Zero : GetAncestor(hit, 2);
+                rootPid = WindowPid(rootWindow);
+                lastMoveHitTimestamp = nowTicks;
+                lastMoveHitPoint = point;
+                cachedMoveRootWindow = rootWindow;
+                cachedMoveRootPid = rootPid;
+                hasCachedMoveHit = true;
+            } finally {
+                SetThreadDpiAwarenessContext(previous);
+            }
+        }
+        static bool RelevantBackgroundInput(uint pointerRootPid, bool hasPointerRoot, bool pointerInput){
             if(Protocol.BackgroundPid==0)return true;
             if(!BackgroundWindowValid())return true;
             uint foreground=WindowPid(GetForegroundWindow());
             if(foreground==0 || foreground==Protocol.BackgroundPid)return true;
-            if(pointerWindow==IntPtr.Zero)return pointerInput;
-            uint pointer=WindowPid(GetAncestor(pointerWindow,2));
-            return pointer==0 || pointer==Protocol.BackgroundPid;
+            if(!hasPointerRoot)return pointerInput;
+            return pointerRootPid==0 || pointerRootPid==Protocol.BackgroundPid;
         }
-        static bool RelevantBackgroundMouse(MouseData mouse){
+        static bool RelevantBackgroundMouse(MouseData mouse, int message){
             if(Protocol.BackgroundPid==0 || !Protocol.KeyboardNeeded)return true;
-            IntPtr previous=SetThreadDpiAwarenessContext(new IntPtr(-4));
-            if(previous==IntPtr.Zero)throw new InvalidOperationException("Pointer DPI context unavailable");
-            try {
-                if(!AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(),new IntPtr(-4)))throw new InvalidOperationException("Pointer DPI context unconfirmed");
-                return RelevantBackgroundInput(WindowFromPoint(mouse.Point),true);
-            } finally {SetThreadDpiAwarenessContext(previous);}
+            IntPtr rootWindow; uint rootPid;
+            ResolvePointerRootWindow(mouse.Point, message, out rootWindow, out rootPid);
+            return RelevantBackgroundInput(rootPid, rootWindow != IntPtr.Zero, true);
         }
         [DllImport("user32.dll", SetLastError = true)] static extern IntPtr SetWindowsHookEx(int id, HookCallback callback, IntPtr module, uint thread);
         [DllImport("user32.dll")] static extern bool UnhookWindowsHookEx(IntPtr hook);
@@ -432,17 +473,35 @@ namespace ProfilePilot.InputObservation {
         static bool InstallKeyboard() {
             // A replacement generation can reuse this one hook on the same
             // message thread. Never install a second hook over a live handle.
-            if(foregroundHook==IntPtr.Zero)foregroundHook=SetWinEventHook(3,3,IntPtr.Zero,ForegroundCallback,0,0,0);
-            if(foregroundHook==IntPtr.Zero)return false;
             if (keyboardHook != IntPtr.Zero) return true;
             keyboardHook = SetWindowsHookEx(KeyboardHook, KeyboardCallback, GetModuleHandle(null), 0);
             return keyboardHook != IntPtr.Zero;
         }
         static bool RemoveKeyboard() {
-            if(foregroundHook!=IntPtr.Zero){if(!UnhookWinEvent(foregroundHook))return false;foregroundHook=IntPtr.Zero;}
             if (keyboardHook == IntPtr.Zero) return true;
             if (!UnhookWindowsHookEx(keyboardHook)) return false;
             keyboardHook = IntPtr.Zero; return true;
+        }
+        static void VerifyAndRefreshHooks() {
+            if (Interlocked.CompareExchange(ref stopRequested, 0, 0) != 0 || Protocol.ShutdownRequested) return;
+            IntPtr module = GetModuleHandle(null);
+            IntPtr nextMouse = SetWindowsHookEx(MouseHook, MouseCallback, module, 0);
+            if (nextMouse != IntPtr.Zero) {
+                if (mouseHook != IntPtr.Zero) UnhookWindowsHookEx(mouseHook);
+                mouseHook = nextMouse;
+            } else if (mouseHook == IntPtr.Zero) {
+                Protocol.Fail("unavailable"); Stop(); return;
+            }
+            if (Protocol.KeyboardNeeded) {
+                IntPtr nextKeyboard = SetWindowsHookEx(KeyboardHook, KeyboardCallback, module, 0);
+                if (nextKeyboard != IntPtr.Zero) {
+                    if (keyboardHook != IntPtr.Zero) UnhookWindowsHookEx(keyboardHook);
+                    keyboardHook = nextKeyboard;
+                } else if (keyboardHook == IntPtr.Zero) {
+                    Protocol.Fail("unavailable"); Stop(); return;
+                }
+            }
+            CheckBackgroundWindow();
         }
         static void ProcessCommands() {
             if (Interlocked.CompareExchange(ref commandOverflow, 0, 0) != 0) { Protocol.OverflowAndStop(); Stop(); return; }
@@ -457,7 +516,7 @@ namespace ProfilePilot.InputObservation {
                 else if (command.Kind == "DISARM") Protocol.Disarm(command);
                 else Protocol.Status(command.Kind == "INVALID_PID" ? "invalid-pid" : "invalid-command");
             }
-            CheckBackgroundForeground();
+            CheckBackgroundWindow();
             if (!Protocol.KeyboardNeeded && !RemoveKeyboard()) { Protocol.Fail("unavailable"); Stop(); }
             if (Protocol.ShutdownRequested) Stop();
         }
@@ -470,18 +529,14 @@ namespace ProfilePilot.InputObservation {
             } catch (EntryPointNotFoundException) { return false; }
         }
         static bool BrowserMouse(MouseData mouse,int message) {
-            // Windows can invoke the LL callback under a different DPI context
-            // from the message loop that installed it. Establish PMv2 around
-            // every hit test and rectangle query, then restore before chaining
-            // to another hook. A one-time startup check is insufficient.
-            IntPtr previous=SetThreadDpiAwarenessContext(new IntPtr(-4));
-            if(previous==IntPtr.Zero)throw new InvalidOperationException("Pointer DPI context unavailable");
-            try {
-                if(!AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(),new IntPtr(-4)))throw new InvalidOperationException("Pointer DPI context unconfirmed");
-                IntPtr window = GetAncestor(WindowFromPoint(mouse.Point), 2); uint pid = 0;
-                if (window != IntPtr.Zero) GetWindowThreadProcessId(window, out pid);
-                MouseDecision decision = Protocol.Browser.Mouse(message, pid, window.ToInt64());
-                if (decision.Emit) {
+            IntPtr window; uint pid;
+            ResolvePointerRootWindow(mouse.Point, message, out window, out pid);
+            MouseDecision decision = Protocol.Browser.Mouse(message, pid, window.ToInt64());
+            if (decision.Emit) {
+                IntPtr previous=SetThreadDpiAwarenessContext(new IntPtr(-4));
+                if(previous==IntPtr.Zero)throw new InvalidOperationException("Pointer DPI context unavailable");
+                try {
+                    if(!AreDpiAwarenessContextsEqual(GetThreadDpiAwarenessContext(),new IntPtr(-4)))throw new InvalidOperationException("Pointer DPI context unconfirmed");
                     Rect bounds = new Rect(); IntPtr owner = new IntPtr(decision.Window);
                     bool hasBounds = owner != IntPtr.Zero && GetWindowRect(owner, out bounds);
                     if (!hasBounds) bounds = new Rect();
@@ -492,9 +547,9 @@ namespace ProfilePilot.InputObservation {
                         Timestamp = (long)(Stopwatch.GetTimestamp() * (1000000000.0 / Stopwatch.Frequency)),
                         HasWindow = hasBounds && bounds.Right > bounds.Left && bounds.Bottom > bounds.Top,
                         WindowX = bounds.Left, WindowY = bounds.Top, Width = bounds.Right - bounds.Left, Height = bounds.Bottom - bounds.Top });
-                }
-                return decision.Suppress;
-            } finally { SetThreadDpiAwarenessContext(previous); }
+                } finally { SetThreadDpiAwarenessContext(previous); }
+            }
+            return decision.Suppress;
         }
         static IntPtr Mouse(int code, IntPtr messageValue, IntPtr data) {
             if (code < 0) return CallNextHookEx(mouseHook, code, messageValue, data);
@@ -503,7 +558,7 @@ namespace ProfilePilot.InputObservation {
                 int message = messageValue.ToInt32();
                 // Observe before legacy suppression: a guarded browser click
                 // must still pause an unrelated desktop generation.
-                if (Protocol.Activity(MouseKind(message), (mouse.Flags & 3) != 0, mouse.Extra.ToUInt64(), RelevantBackgroundMouse(mouse))) Wake();
+                if (Protocol.Activity(MouseKind(message), (mouse.Flags & 3) != 0, mouse.Extra.ToUInt64(), RelevantBackgroundMouse(mouse, message))) Wake();
                 if (Protocol.ShutdownRequested) { Stop(); return CallNextHookEx(mouseHook, code, messageValue, data); }
                 if (Protocol.Browser.Count == 0) return CallNextHookEx(mouseHook, code, messageValue, data);
                 bool suppress=BrowserMouse(mouse,message);
@@ -519,7 +574,7 @@ namespace ProfilePilot.InputObservation {
             if (code < 0) return CallNextHookEx(keyboardHook, code, message, data);
             try {
                 var keyboard = (KeyboardData)Marshal.PtrToStructure(data, typeof(KeyboardData));
-                if (Protocol.Activity("keyboard", (keyboard.Flags & 0x12) != 0, keyboard.Extra.ToUInt64(), RelevantBackgroundInput(IntPtr.Zero,false))) Wake();
+                if (Protocol.Activity("keyboard", (keyboard.Flags & 0x12) != 0, keyboard.Extra.ToUInt64(), RelevantBackgroundInput(0, false, false))) Wake();
                 if (Protocol.ShutdownRequested) Stop();
             } catch { Protocol.Fail("unavailable"); Stop(); }
             // Desktop observation never swallows keyboard input.
@@ -540,19 +595,23 @@ namespace ProfilePilot.InputObservation {
             Message ignored; PeekMessage(out ignored, IntPtr.Zero, 0, 0, 0); // Queue exists before EOF/QUIT can be posted.
             Protocol = new InputObserverProtocol(new SignallingOutput(), 0, EstablishPhysicalBrowserGeometry());
             var writer = new Thread(WriteOutput) { IsBackground = true, Name = "ProfilePilot input observer output" }; writer.Start();
+            UIntPtr watchdogTimer = UIntPtr.Zero;
             try {
                 mouseHook = SetWindowsHookEx(MouseHook, MouseCallback, GetModuleHandle(null), 0);
                 if (mouseHook == IntPtr.Zero) { Protocol.Status("hook-create-failed"); return 2; }
+                watchdogTimer = SetTimer(IntPtr.Zero, UIntPtr.Zero, 2000, IntPtr.Zero);
                 Protocol.Status("ready");
                 var reader = new Thread(ReadCommands) { IsBackground = true, Name = "ProfilePilot input observer commands" }; reader.Start();
                 Message message; int result = 0;
                 while (Interlocked.CompareExchange(ref stopRequested, 0, 0) == 0 && (result = GetMessage(out message, IntPtr.Zero, 0, 0)) > 0) {
                     if (message.Id == WorkMessage) ProcessCommands();
+                    else if (message.Id == TimerMessage && message.Window == IntPtr.Zero) VerifyAndRefreshHooks();
                     else { TranslateMessage(ref message); DispatchMessage(ref message); }
                 }
                 if (result < 0) { Protocol.Fail("unavailable"); return 2; }
                 return Protocol.ShutdownRequested ? 2 : 0;
             } finally {
+                if (watchdogTimer != UIntPtr.Zero) KillTimer(IntPtr.Zero, watchdogTimer);
                 RemoveKeyboard(); if (mouseHook != IntPtr.Zero) UnhookWindowsHookEx(mouseHook); mouseHook = IntPtr.Zero;
                 Interlocked.Exchange(ref writerDone, 1); OutputReady.Set(); writer.Join(200);
                 // The writer/reader are background threads. A blocked owner pipe
@@ -564,8 +623,12 @@ namespace ProfilePilot.InputObservation {
     public static class InputObserverWindowsProgram {
         [MTAThread] public static int Main(string[] args) {
             // An explicit switch prevents accidental execution during inspection.
-            if (args.Length != 1 || args[0] != "--stdio-observer") return 2;
-            return InputObserverWindowsHost.Run();
+            if (args.Length == 1 && args[0] == "--stdio-observer") return InputObserverWindowsHost.Run();
+            if (args.Length == 3 && args[0] == "--stdio-observer" && args[1] == "--mutex" && InputObserverInstanceGate.ValidMutexName(args[2])) {
+                InputObserverInstanceGate.ConfigureMutex(args[2]);
+                return InputObserverWindowsHost.Run();
+            }
+            return 2;
         }
     }
 }

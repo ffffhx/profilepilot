@@ -9,7 +9,7 @@ import { ProfilePilotSignal, SIGNAL_CATALOG } from "./agent-signals";
 import { type GatewayControlResponse } from "./browser-gateway-client";
 import { isRecord, writeJsonFileAtomic } from "./fs-util";
 import { RuntimeProfile } from "./internal-types";
-import { resolveCanonicalSessionIdentity } from "./session-identity";
+import { parseNativeSessionId, resolveCanonicalSessionIdentity } from "./session-identity";
 
 const AGENT_CONTROL_WAITER_OFFLINE_GRACE_MS = 30_000;
 const AGENT_BROWSER_STALE_DISCONNECT_MS = 2 * 60_000;
@@ -74,11 +74,66 @@ export function isManagedBrowserDriverClient(client: CdpClientInfo): boolean {
 }
 
 export function shouldAutoDisconnectStaleAgentBrowserClient(client: CdpClientInfo, now = Date.now()): boolean {
-  if (!client.label.toLowerCase().startsWith("agent-browser")) {
+  if (!isManagedBrowserDriverClient(client)) {
     return false;
   }
 
-  if (typeof client.note === "string" && /残留连接|近期无活跃会话/.test(client.note)) {
+  // Known .claude/.codex project-directory daemons where all transcripts in that
+  // directory have gone inactive (no lastActive timestamp, explicit directory note).
+  if (
+    client.label.trim().toLowerCase() === "agent-browser" &&
+    !client.lastActive &&
+    typeof client.note === "string" &&
+    /(?:专属|共享) daemon：该目录下近期无活跃会话/.test(client.note)
+  ) {
+    return true;
+  }
+
+  // Otherwise only auto-disconnect when a known Claude/Codex session ID (cc-<uuid> / cx-<uuid>)
+  // is explicitly proven terminated/archived AND idle beyond grace period.
+  // Never kill external agents (Antigravity, Cursor, Windsurf, custom scripts, etc.)
+  // merely because no .claude/.codex log was found ("近期无活跃会话" / "可能是会话结束后的残留连接").
+  const nativeSession = parseNativeSessionId(client.session);
+  if (!nativeSession) {
+    return false;
+  }
+
+  const lastActiveAt = typeof client.lastActive === "string" ? Date.parse(client.lastActive) : Number.NaN;
+  if (!Number.isFinite(lastActiveAt) || now - lastActiveAt < AGENT_BROWSER_STALE_DISCONNECT_MS) {
+    return false;
+  }
+
+  const extended = client as CdpClientInfo & {
+    sessionTerminated?: boolean;
+    sessionArchived?: boolean;
+    sessionStatus?: string;
+    sessionState?: string;
+  };
+  if (
+    extended.sessionTerminated === true ||
+    extended.sessionArchived === true ||
+    extended.sessionStatus === "terminated" ||
+    extended.sessionStatus === "archived" ||
+    extended.sessionStatus === "stopped" ||
+    extended.sessionState === "terminated" ||
+    extended.sessionState === "archived"
+  ) {
+    return true;
+  }
+
+  if (
+    Array.isArray(client.sessionRepresentations) &&
+    client.sessionRepresentations.length > 0 &&
+    client.sessionRepresentations.every((rep) => /[\\/]archived_sessions[\\/]/i.test(rep.filePath))
+  ) {
+    return true;
+  }
+
+  if (
+    typeof client.note === "string" &&
+    !/可能是会话结束后的残留连接|近期无活跃会话/.test(client.note) &&
+    /(?:会话已结束|会话已归档|已终止|\bterminated\b|\barchived\b)/i.test(client.note)
+  ) {
     return true;
   }
 

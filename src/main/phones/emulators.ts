@@ -2,7 +2,7 @@ import { execFile, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { ensureEmulatorWindowVisible, ensureRunningEmulatorWindowVisible } from "./emulator-window";
+import { ensureEmulatorWindowVisible, ensureRunningEmulatorWindowVisible, type EmulatorWindowPlacementResult } from "./emulator-window";
 import { androidSdkRoots } from "./android-paths";
 import { TencentEmulator, TENCENT_EMULATOR } from "./tencent-emulator";
 import { ensureAvdMemoryAvailable } from "./emulator-memory";
@@ -12,6 +12,7 @@ export interface EmulatorRuntime {
   launch(name: string): Promise<void>;
   ensureVisible(name: string, id: string): Promise<void>;
   connectLocal?(name: string): Promise<string | undefined>;
+  consumePlacementWarning?(): EmulatorWindowPlacementResult | undefined;
 }
 
 function placementError(error: unknown, fallback: string): Error {
@@ -32,9 +33,21 @@ export function findEmulator(env = process.env, platform = process.platform): st
 
 export class AndroidEmulators implements EmulatorRuntime {
   private tencent = new TencentEmulator();
-  constructor(private overrideExecutable?: string, private fitWindow = ensureEmulatorWindowVisible,
-    private fitRunningWindow = ensureRunningEmulatorWindowVisible, private checkMemory = ensureAvdMemoryAvailable) {}
+  private lastPlacement?: EmulatorWindowPlacementResult;
+  constructor(
+    private overrideExecutable?: string,
+    private fitWindow: (launcherPid: number, name: string, platform?: NodeJS.Platform) => Promise<EmulatorWindowPlacementResult | void> = ensureEmulatorWindowVisible,
+    private fitRunningWindow: (name: string, id: string, platform?: NodeJS.Platform) => Promise<EmulatorWindowPlacementResult | void> = ensureRunningEmulatorWindowVisible,
+    private checkMemory = ensureAvdMemoryAvailable
+  ) {}
   private get executable(): string { return this.overrideExecutable || findEmulator(); }
+
+  consumePlacementWarning(): EmulatorWindowPlacementResult | undefined {
+    const warning = this.lastPlacement;
+    this.lastPlacement = undefined;
+    return warning?.elevatedWindowPlacementSkipped ? warning : undefined;
+  }
+
   async list(): Promise<string[]> {
     const tencent = !this.overrideExecutable && await this.tencent.executable() ? [TENCENT_EMULATOR] : [];
     return new Promise((resolve, reject) => {
@@ -49,9 +62,13 @@ export class AndroidEmulators implements EmulatorRuntime {
     });
   }
   async connectLocal(name: string): Promise<string | undefined> {
-    return name === TENCENT_EMULATOR && !this.overrideExecutable ? this.tencent.connect() : undefined;
+    if (name !== TENCENT_EMULATOR || this.overrideExecutable) return undefined;
+    const address = await this.tencent.connect();
+    this.lastPlacement = this.tencent.consumePlacementWarning();
+    return address;
   }
   async launch(name: string): Promise<void> {
+    this.lastPlacement = undefined;
     // Only launch a configured AVD; never interpret a device name as shell code.
     if (!(await this.list()).includes(name)) throw new Error("模拟器不存在，请重新选择虚拟设备。");
     await this.checkMemory(name);
@@ -69,11 +86,18 @@ export class AndroidEmulators implements EmulatorRuntime {
       });
     } finally { fs.closeSync(output); }
     // Keep the emulator alive on failure, but don't report a clipped preview as ready.
-    try { await this.fitWindow(pid, name); }
+    try {
+      const placement = await this.fitWindow(pid, name);
+      if (placement?.elevatedWindowPlacementSkipped) this.lastPlacement = placement;
+    }
     catch (error) { throw placementError(error, `未能确认模拟器窗口完整可见。若模拟器仍在运行，请再次使用“启动 / 连接模拟器”自动归位；若已退出，请检查启动日志：${log}`); }
   }
   async ensureVisible(name: string, id: string): Promise<void> {
-    try { await this.fitRunningWindow(name, id); }
+    this.lastPlacement = undefined;
+    try {
+      const placement = await this.fitRunningWindow(name, id);
+      if (placement?.elevatedWindowPlacementSkipped) this.lastPlacement = placement;
+    }
     catch (error) { throw placementError(error, "未能将模拟器窗口移回屏幕内。请结束拖拽后，再次使用“启动 / 连接模拟器”。"); }
   }
 }

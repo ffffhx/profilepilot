@@ -8,7 +8,9 @@ export type LocalAppManagementCommand =
   | { action: "local-app"; method: "register"; input: ElectronRegistration }
   | { action: "local-app"; method: "inspect"; selector: string }
   | { action: "local-app"; method: "connect"; selector: string; confirmationToken?: string }
-  | { action: "local-app"; method: "configure"; selector: string; input: { command?: string; cwd?: string } };
+  | { action: "local-app"; method: "configure"; selector: string; input: { command?: string; cwd?: string } }
+  | { action: "local-app"; method: "start" | "stop" | "restart"; selector: string }
+  | { action: "local-app"; method: "logs"; selector: string; tailLines?: number; grep?: string };
 
 const selector = z.string().trim().min(1).max(200);
 export const electronRegistrationSchema = z.object({
@@ -26,7 +28,13 @@ const commandSchema = z.discriminatedUnion("method", [
   z.object({ action: z.literal("local-app"), method: z.literal("inspect"), selector }).strict(),
   z.object({ action: z.literal("local-app"), method: z.literal("connect"), selector, confirmationToken: z.string().uuid().optional() }).strict(),
   z.object({ action: z.literal("local-app"), method: z.literal("configure"), selector,
-    input: electronConfigurationSchema }).strict()
+    input: electronConfigurationSchema }).strict(),
+  z.object({ action: z.literal("local-app"), method: z.literal("start"), selector }).strict(),
+  z.object({ action: z.literal("local-app"), method: z.literal("stop"), selector }).strict(),
+  z.object({ action: z.literal("local-app"), method: z.literal("restart"), selector }).strict(),
+  z.object({ action: z.literal("local-app"), method: z.literal("logs"), selector,
+    tailLines: z.number().int().min(1).max(5000).optional(),
+    grep: z.string().max(512).optional() }).strict()
 ]);
 
 // Configuration contains environment variables and arbitrary launch commands.
@@ -41,7 +49,9 @@ function publicApp(app: LocalAppView) {
 }
 
 export async function executeLocalAppManagementCommand(
-  input: unknown, service: Pick<LocalAppsService, "snapshot" | "list" | "connect" | "get" | "save" | "syncAgents">
+  input: unknown,
+  service: Pick<LocalAppsService, "snapshot" | "list" | "connect" | "get" | "save" | "syncAgents">
+    & Partial<Pick<LocalAppsService, "start" | "stop" | "restart" | "logs">>
 ) {
   const parsed = commandSchema.safeParse(input);
   if (!parsed.success) throw new ProfileManagerError("本地应用命令参数无效。", "LOCAL_APP_INVALID_ARGUMENTS");
@@ -62,6 +72,20 @@ export async function executeLocalAppManagementCommand(
     : "未找到已登记应用，请用 ppilot electron list --all 核对名称或 ID。",
   matches.length ? "LOCAL_APP_AMBIGUOUS" : "LOCAL_APP_NOT_FOUND");
   const id = matches[0].id;
+  if (command.method === "logs") {
+    if (!service.logs) throw new ProfileManagerError("当前服务不支持读取日志。", "LOCAL_APP_SERVICE_UNAVAILABLE");
+    return {
+      id: `local-app:${id}`,
+      logs: service.logs(id, { tailLines: command.tailLines, grep: command.grep })
+    };
+  }
+  if (command.method === "start" || command.method === "stop" || command.method === "restart") {
+    const lifecycle = service[command.method];
+    if (!lifecycle) throw new ProfileManagerError("当前服务不支持生命周期操作。", "LOCAL_APP_SERVICE_UNAVAILABLE");
+    await lifecycle.call(service, id);
+    const app = (await service.list()).find(item => item.id === id);
+    return { status: command.method, app: app ? publicApp(app) : null };
+  }
   if (command.method === "configure") {
     await service.syncAgents();
     const current = (await service.list()).find(app => app.id === id);

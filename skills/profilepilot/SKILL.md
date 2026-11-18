@@ -1,6 +1,6 @@
 ---
 name: profilepilot
-description: "Control browsers, Electron apps, the local Windows desktop, Android phones, or remote computers with ProfilePilot CLI. Use ppilot browser for Chrome and Profile management, ppilot electron for local Electron apps, ppilot desktop for Windows windows and native dialogs, ppilot phone for Android, and ppilot remote for ClipRelay-connected computers. Honor saved target defaults and user takeover."
+description: "Control browsers (Chrome/Edge/Brave/Chromium), Electron apps, the local Windows or macOS desktop, Android or iPhone phones, instrumented GPUI apps, or remote computers with ProfilePilot CLI. Use ppilot browser for browser and Profile management, ppilot electron for local Electron apps, ppilot desktop for Windows/macOS windows and native dialogs, ppilot phone for Android/iPhone, ppilot gpui for GPUI apps, and ppilot remote for ClipRelay-connected computers. Honor saved target defaults and user takeover."
 ---
 
 # ProfilePilot CLI — Agent 使用指引
@@ -19,7 +19,7 @@ For instrumented GPUI native applications, read [ppilot gpui: GPUI debugging](re
 
 Desktop interaction is a fallback: use it only when the user explicitly requests desktop control, or after verifying that the other applicable CLI, API, browser, and Electron routes cannot complete the required operation. Before switching, state which routes were checked and the specific limitation; a failed attempt alone is not sufficient.
 
-For this computer's native Windows desktop or system dialogs, read [ppilot desktop: local Windows control](references/desktop.md) and use `ppilot desktop`. ProfilePilot supplies its own native driver and control UI; ClipRelay is not required. Browser pages and Electron page content keep their dedicated routes. The native desktop driver currently supports Windows, not macOS.
+For this computer's native Windows or macOS desktop or system dialogs, read [ppilot desktop: local Windows & macOS control](references/desktop.md) and use `ppilot desktop`. ProfilePilot supplies its own native driver (`ProfilePilot.Desktop.exe` on Windows, `profilepilot-desktop-mac` on macOS) and control UI; ClipRelay is not required. Browser pages and Electron page content keep their dedicated routes.
 
 For another computer, read [ppilot remote: computer control](references/remote.md) and use `ppilot remote`. Select the exact discovered device before reading its Profiles or windows. The local `ppilot browser` and `ppilot profile` commands target this computer; they are not substitutes for a remote target. ClipRelay's installed application supplies the connection background service; MCP setup is optional.
 

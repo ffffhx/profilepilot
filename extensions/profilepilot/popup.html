@@ -13,6 +13,10 @@
     <div id="status" class="sr-only" role="status">正在读取连接状态…</div>
   </section>
   <p id="error" role="alert" hidden></p>
+  <div id="temp-install-notice" class="temp-install-banner" hidden>
+    <p class="temp-install-text">当前处于临时安装模式，浏览器重启或重载后可能停用扩展。</p>
+    <button id="clear-temp-install-btn" type="button">已改为持久安装，清除临时标记</button>
+  </div>
   <main id="controlled-tab" hidden>
     <div class="section-heading"><h2>当前控制的标签页</h2><span id="control-state" class="control-state"></span></div>
     <div class="page-card">
@@ -20,6 +24,22 @@
       <div class="page-copy"><p id="page-title"></p><p id="page-domain" hidden></p><p id="page-note" hidden></p></div>
     </div>
   </main>
+  <section id="site-access-section" class="site-access-card" aria-label="当前站点权限" hidden>
+    <div class="site-access-copy">
+      <label for="site-access-select">当前站点权限</label>
+      <span id="site-access-origin" class="site-access-origin"></span>
+    </div>
+    <select id="site-access-select">
+      <option value="allow">允许</option>
+      <option value="confirm">逐次确认</option>
+      <option value="block">禁止此站点</option>
+    </select>
+  </section>
+  <section id="security-controls" class="security-actions" aria-label="控制与安全操作" hidden>
+    <button id="pause-takeover-btn" type="button" class="primary" hidden>暂停并接管</button>
+    <button id="return-control-btn" type="button" class="primary" hidden>交还控制</button>
+    <button id="disconnect-browser-btn" type="button" class="danger-outline">断开浏览器连接</button>
+  </section>
   <button id="reconnect" type="button" hidden>重新连接</button>
   <form id="connect" class="connect-form" hidden>
     <h2>连接当前浏览器</h2>

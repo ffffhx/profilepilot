@@ -31,8 +31,53 @@ const extension: Record<string, CommandContract> = {
 const gateway: Record<string, CommandContract> = {
   ...common,
   cdp: { usage: "cdp call METHOD [--target TARGET_ID] [--params JSON | --params-stdin]", description: "在当前授权 Gateway 目标内执行受限 CDP。", note: "运行 cdp capabilities 查看允许的协议域；不确定写操作结果时检查状态，不重放。" },
-  snapshot: { usage: "snapshot [-i] [-c] [-d DEPTH] [-s SELECTOR]", description: "读取当前目标的元素引用；导航或新快照后引用需重新读取。" },
-  screenshot: { usage: "screenshot [PNG_PATH] [--full] [--annotate]", description: "保存当前页面截图。" },
+  snapshot: { usage: "snapshot [-i] [-c] [--delta] [-d DEPTH] [-s SELECTOR]", description: "读取当前目标的结构化元素引用；-i 保留含可交互后代的地标/容器结构，--delta 返回与上一次快照的紧凑差异。" },
+  screenshot: { usage: "screenshot [PNG_PATH] [--full] [--annotate]", description: "保存当前页面截图；--annotate 使用 CSP 安全的 Shadow DOM + adoptedStyleSheets 标注引用。" },
+  read: {
+    usage: "read [--query TEXT] [--cursor N] [--limit N] [--text-limit N] | read --params-file READ.json",
+    description: "按查询条件、控件分页与文本上限读取当前授权页面或 frame。",
+    input: { query: "可选过滤关键词", cursor: "可选分页起始游标（整数）", limit: "可选控件条数上限（默认 50）", textLimit: "可选正文字符数上限（默认 16000）" }
+  },
+  pointer: {
+    usage: "pointer <click|dblclick|move|down|up|wheel|drag> X Y [END_X END_Y] | pointer --params-file POINTER.json",
+    description: "在当前授权页面按视口坐标执行指针动作。",
+    input: { kind: "click | dblclick | move | down | up | wheel | drag", x: "number", y: "number", toX: "number (drag)", toY: "number (drag)", deltaX: "number (wheel)", deltaY: "number (wheel)", button: "left | right | middle (optional)" }
+  },
+  dialog: {
+    usage: "dialog [status] | dialog accept [PROMPT_TEXT] | dialog dismiss",
+    description: "查看最近/挂起的原生 JS 弹窗（alert/confirm/prompt/beforeunload），或显式接受/关闭挂起弹窗。",
+    input: { action: "status | accept | dismiss", promptText: "可选 prompt 输入文本" }
+  },
+  network: {
+    usage: "network requests [--filter URL --type fetch,xhr --method POST --status 4xx --failed --since N --limit N] | network request ID [--offset N --text-limit N --no-body] | network clear | network route URL [--abort|--body TEXT] | network unroute [URL] | network routes | network har start|stop [PATH]",
+    description: "在当前授权目标内查询网络请求、录制 HAR 或设置请求拦截规则。",
+    input: { action: "requests | request | clear | route | unroute | routes | har" }
+  },
+  debug: {
+    usage: "debug [start|status|stop] [--domains Network,Runtime,Log,Performance]",
+    description: "管理当前授权标签页的调试采集生命周期（暂停/切换时自动解除 Fetch 与新 iframe 断点拦截）。",
+    input: { action: "start | status | stop", domains: "Network | Runtime | Log | Performance" }
+  },
+  profiler: {
+    usage: "profiler start | profiler stop [PATH]",
+    description: "采集当前授权目标的 CDP 性能火焰图 JSON（与 trace 性能采集同源）。",
+    input: { action: "start | stop", path: "可选输出文件路径" }
+  },
+  console: {
+    usage: "console [--filter TEXT] [--level LEVEL] [--since CURSOR] [--limit N] [--details] [--clear]",
+    description: "分页读取当前授权目标的控制台日志。",
+    input: { filter: "可选文本过滤", level: "可选日志级别", since: "可选增量游标", limit: "可选条数上限", clear: "boolean" }
+  },
+  errors: {
+    usage: "errors [--filter TEXT] [--since CURSOR] [--limit N] [--clear]",
+    description: "分页读取当前授权目标的未捕获异常与错误日志。",
+    input: { filter: "可选文本过滤", since: "可选增量游标", limit: "可选条数上限", clear: "boolean" }
+  },
+  trace: {
+    usage: "trace start | trace stop [ZIP_PATH]",
+    description: "录制或保存 Playwright/CDP 执行轨迹。",
+    input: { action: "start | stop", path: "可选输出路径" }
+  },
   tab: { usage: "tab list | tab new [URL] | tab close [ID] | tab ID", description: "管理当前授权连接中的标签页。" },
   get: { usage: "get text|html|value|count|box|styles SELECTOR | get attr SELECTOR ATTRIBUTE | get title|url", description: "读取当前目标的页面或元素属性。", example: "get attr '@e1' href" },
   click: { usage: "click SELECTOR [--new-tab]", description: "点击最近 snapshot 的引用或明确选择器。", example: "click '@e1'" },
@@ -40,7 +85,15 @@ const gateway: Record<string, CommandContract> = {
   fill: { usage: "fill SELECTOR TEXT", description: "替换输入框文本，允许空字符串。", example: "fill '@e1' '中文文本'" },
   eval: { usage: "eval JAVASCRIPT | eval --stdin", description: "在当前授权页面执行 JavaScript。" }
 };
-export function browserRouteCommands(connection: BrowserConnection): Record<string, CommandContract> { return connection === "extension" ? extension : gateway; }
+export const commandSchema: Record<BrowserConnection, Record<string, CommandContract>> = {
+  extension,
+  gateway
+};
+export function getCommandSchema(connection: BrowserConnection, command?: string): CommandContract | Record<string, CommandContract> | undefined {
+  const table = commandSchema[connection];
+  return command ? table[command] : table;
+}
+export function browserRouteCommands(connection: BrowserConnection): Record<string, CommandContract> { return commandSchema[connection]; }
 export function browserCommandHelp(connection: BrowserConnection, command: string): string | undefined {
   const spec = browserRouteCommands(connection)[command];
   if (!spec) return;

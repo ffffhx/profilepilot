@@ -1,0 +1,1 @@
+Early project; the Chrome extension currently needs manual loading. I'd love feedback on one real task, from setup to the final result. Check the release notes before installing. Code: https://github.com/ffffhx/profilepilot

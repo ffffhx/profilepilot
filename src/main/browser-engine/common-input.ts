@@ -6,7 +6,16 @@ import { parseCommonBrowserAction } from "../../shared/browser-contract";
 /** Resolve files in the caller's cwd, not the persistent engine's startup cwd. */
 export function normalizeCommonInput(args: string[], cwd = process.cwd(), stdin = () => readFileSync(0, "utf8")): string[] {
   const verb = args[0];
-  if (!["observe", "action"].includes(verb)) return args;
+  const hasJsonParamFlag = args.slice(1).some((arg) =>
+    arg === "--params" ||
+    arg === "--params-file" ||
+    arg === "--params-stdin" ||
+    arg.startsWith("--params=") ||
+    arg.startsWith("--params-file=")
+  );
+  if (!["observe", "action"].includes(verb) && !(["read", "pointer"].includes(verb) && hasJsonParamFlag)) {
+    return args;
+  }
   let payload: string | undefined, output: string | undefined;
   const invalid = (reason: string): never => { throw new EngineError(reason, "BROWSER_INVALID_ARGUMENTS"); };
   for (let i = 1; i < args.length; i++) {
@@ -24,12 +33,16 @@ export function normalizeCommonInput(args: string[], cwd = process.cwd(), stdin 
     } else if (flag === "--output" && verb === "observe") output = path.resolve(cwd, value());
     else invalid(`不支持 ${verb} 参数 ${flag}。`);
   }
-  if (verb === "action" && payload === undefined) invalid("action 需要 --params-file、--params-stdin 或 --params。");
+  if ((verb === "action" || verb === "pointer") && payload === undefined) invalid(`${verb} 需要 --params-file、--params-stdin 或 --params。`);
   if ((payload?.length || 0) > 4 * 1024 * 1024) invalid("JSON 输入过大。");
   let input: any;
   try { input = JSON.parse((payload || "{}").replace(/^\uFEFF/, "")); } catch { invalid("参数必须是有效的 UTF-8 JSON。"); }
   if (verb === "action") input = parseCommonBrowserAction(input);
-  else if (!input || typeof input !== "object" || Array.isArray(input) ||
-    Object.keys(input).some(key => key !== "screenshot") || (input.screenshot !== undefined && typeof input.screenshot !== "boolean")) invalid("observe 仅接受可选的布尔值 screenshot。");
+  else if (verb === "observe") {
+    if (!input || typeof input !== "object" || Array.isArray(input) ||
+      Object.keys(input).some(key => key !== "screenshot") || (input.screenshot !== undefined && typeof input.screenshot !== "boolean")) invalid("observe 仅接受可选的布尔值 screenshot。");
+  } else if (!input || typeof input !== "object" || Array.isArray(input)) {
+    invalid(`${verb} 参数必须是 JSON 对象。`);
+  }
   return [verb, "--params", JSON.stringify(input), ...(output ? ["--output", output] : [])];
 }

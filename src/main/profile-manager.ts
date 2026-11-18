@@ -1,25 +1,26 @@
-import { app, shell } from "electron";
+import { app, safeStorage, shell } from "electron";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { normalizeQuickLaunchShortcut, normalizeQuickLaunchShortcuts } from "../shared/quick-launch-shortcut";
-import type { AccountSyncCopiedItem, AccountSyncDiffResult, AccountSyncRecord, AccountSyncRequest, AccountSyncResult, AccountSyncSkippedItem, AgentControlNotice, AgentControlNoticeReason, AgentOverlayRevealEvent, AgentTakeoverEvent, AppState, BifrostSnapshot, CdpClientInfo, CdpPortSuggestion, CloneProfilesRequest, CloneProfilesResult, ClonedProfileInfo, DeleteProfileOptions, DeleteProfileResult, ExtensionDeleteResult, ExtensionMigrationCopiedExtension, ExtensionMigrationDataCopy, ExtensionMigrationDiffItem, ExtensionMigrationDiffResult, ExtensionMigrationLoadedExtension, ExtensionMigrationManualLoadExtension, ExtensionMigrationRequest, ExtensionMigrationResult, ExtensionMigrationSkippedExtension, ExtensionScanResult, ExternalChromeInstance, LaunchClonesResult, LaunchProfileOptions, OperationPauseSignal, OperationProgressUpdate, ProfileAgentSettings, ProfileBifrostProxyConfig, ProfileExtensionInfo, ProfileProxyConfig, PublicProfile, RecycleIdleClonesResult, RefreshClonesResult, Registry, StoredMigratedExtension, StoredProfile, TakeoverAgentConnectionsResult } from "../shared/types";
-import { accountSyncCopySpecs, accountSyncDataScore, accountSyncRecordKey, applyAccountSyncRecordBaseline, assertAccountSyncDiskSpace, collectAccountSyncPathStats, copyAccountSyncPath, copyWindowsLegacyOsCryptKey, inspectAccountLocalStateDiff, inspectAccountSyncPathDiff, mergeAccountLocalStateValues, prepareAccountSyncPreferences, pruneServiceWorkerCacheStorage, recoverInterruptedAccountSyncArtifactsForProfile, shouldApplyAccountDiffItem, snapshotAccountSyncExtensionPreferences, snapshotAccountSyncSourceFingerprints, summarizeAccountSyncDiff } from "./account-sync";
+import type { AccountSyncCopiedItem, AccountSyncDiffResult, AccountSyncRecord, AccountSyncRequest, AccountSyncResult, AccountSyncSkippedItem, AgentControlNotice, AgentControlNoticeReason, AgentOverlayRevealEvent, AgentTakeoverEvent, AppState, BifrostSnapshot, BrowserKind, CdpClientInfo, CdpPortSuggestion, CloneProfilesRequest, CloneProfilesResult, ClonedProfileInfo, CreateProfileInput, DeleteProfileOptions, DeleteProfileResult, ExtensionDeleteResult, ExtensionMigrationCopiedExtension, ExtensionMigrationDataCopy, ExtensionMigrationDiffItem, ExtensionMigrationDiffResult, ExtensionMigrationLoadedExtension, ExtensionMigrationManualLoadExtension, ExtensionMigrationRequest, ExtensionMigrationResult, ExtensionMigrationSkippedExtension, ExtensionScanResult, ExternalChromeInstance, LaunchClonesResult, LaunchProfileOptions, OperationPauseSignal, OperationProgressUpdate, ProfileAgentSettings, ProfileBifrostProxyConfig, ProfileExtensionInfo, ProfileProxyConfig, PublicProfile, RecycleIdleClonesResult, RefreshClonesResult, Registry, StoredMigratedExtension, StoredProfile, TakeoverAgentConnectionsResult } from "../shared/types";
+import { accountSyncCopySpecs, accountSyncDataScore, accountSyncRecordKey, applyAccountSyncRecordBaseline, assertAccountSyncDiskSpace, chromeCookieToCdpCookieParam, collectAccountSyncPathStats, consumeStagedCookies, copyAccountSyncPath, copyWindowsLegacyOsCryptKey, filterCookiesByDomains, inspectAccountLocalStateDiff, inspectAccountSyncPathDiff, mergeAccountLocalStateValues, prepareAccountSyncPreferences, pruneServiceWorkerCacheStorage, recoverInterruptedAccountSyncArtifactsForProfile, shouldApplyAccountDiffItem, snapshotAccountSyncExtensionPreferences, snapshotAccountSyncSourceFingerprints, stagedCookiesFilePath, summarizeAccountSyncDiff, writeStagedCookies, type CdpCookieParam, type CdpCookieRecord, type ChromeCookieRecord, type StagedCookieCipher } from "./account-sync";
 import { releaseAgentBrowserProfileLeaseSync, releaseAgentBrowserProfileLeasesForSessionSync, setAgentBrowserProfileLeasesDelegatedSync } from "./agent-browser-lease";
 import { agentBrowserSessionActivityPaths, clearAgentBrowserCommandStateSync, clearAgentBrowserControlWaitStateSync, waitForAgentBrowserCommandSettled } from "./agent-browser-session";
 import { AgentOverlayManager, type AgentOverlayCompleteRequest, type AgentOverlayResumeRequest, type AgentOverlayRevealRequest, type AgentOverlayStopRequest } from "./agent-overlay";
 import { resolveSignal } from "./agent-signals";
 import { canHotUpdateProfileBifrostProxy, destroyProfileBifrostProxy, directConnectionChromeArgs, disableBifrostRule as disableMainBifrostRule, ensureBifrostMainProxy, ensureProfileBifrostProxy, getBifrostSnapshot as readBifrostSnapshot, startBifrostIfNeeded, validateBifrostProxyConfig, validateUpstreamProxyConfig, type BifrostRuleReference } from "./bifrost-proxy";
 import { clearBrowserGatewayDaemonIdentity, ensureBrowserGatewayDaemon, requestBrowserGateway, type GatewayControlResponse } from "./browser-gateway-client";
-import { describePortOwner, findAvailableCdpPort, isPortAvailable, normalizeCdpPortInput, waitForCdp } from "./cdp-client";
+import { CdpBrowserClient, describePortOwner, findAvailableCdpPort, isPortAvailable, normalizeCdpPortInput, requestCdpVersionInfo, waitForCdp } from "./cdp-client";
 import { appendUniqueExtraUrls, bringCdpPageToFront, closeFreshBlankPagesOverCdp, loadUnpackedExtensionsOverCdp, snapshotPageTargetIds, snapshotRestorableTabUrls } from "./cdp-page";
-import { focusProfileWindow, getDirectChromeCommand, isAnyMacProcessFrontmost, launchChrome, launchDetached, makeIsolatedProfileId, makeIsolatedSubProfileId, makeNativeProfileId, nativeChromeUserDataDir, openChromeUrl, parseProfileId, removeNativeProfileFromLocalState, removeProfileFromLocalStateIn, resolveIsolatedProfileDataPath, scanNativeChromeProfiles } from "./chrome-launch";
-import { canAutoLoadUnpackedExtensions, canLoadLocalExtensionViaCdp, canPersistExtensionInstall, copyExtensionDataPath, copyExtensionPackageToProfile, extensionDataDiffers, getMigratedExtensionLaunchPlan, getProtectedDeveloperModeRecord, inspectExtensionMigrationItem, isExtensionMigrationActionItem, isManualLoadSkipReason, isProfileRelativeExtensionSetting, makeStoredMigratedExtensionId, manualLoadExtensionReason, readProtectedExtensionInstallRecord, removeExtensionReferencesFromProfilePreferences, summarizeExtensionMigrationDiff, writeProtectedExtensionInstallRecord } from "./extension-migration";
+import { browserKindDisplayName, cleanStaleSingletonLocks, focusProfileWindow, getDirectChromeCommand, isAnyMacProcessFrontmost, launchBrowser, launchChrome, launchDetached, makeIsolatedProfileId, makeIsolatedSubProfileId, makeNativeProfileId, nativeChromeUserDataDir, normalizeBrowserKind, openChromeUrl, parseProfileId, removeNativeProfileFromLocalState, removeProfileFromLocalStateIn, resolveBrowserExecutable, resolveIsolatedProfileDataPath, scanNativeChromeProfiles } from "./chrome-launch";
+import { canAutoLoadUnpackedExtensions, canLoadLocalExtensionViaCdp, canPersistExtensionInstall, copyExtensionDataPath, copyExtensionPackageToProfile, extensionDataDiffers, getMigratedExtensionLaunchPlan, getProtectedDeveloperModeRecord, hasSecurePreferencesSuperMac, inspectExtensionMigrationItem, isExtensionMigrationActionItem, isManualLoadSkipReason, isProfileRelativeExtensionSetting, makeStoredMigratedExtensionId, manualLoadExtensionReason, readProtectedExtensionInstallRecord, removeExtensionReferencesFromProfilePreferences, summarizeExtensionMigrationDiff, writeProtectedExtensionInstallRecord } from "./extension-migration";
 import { extensionDeleteRelativePaths, isLikelyExtensionId, scanProfileExtensions } from "./extension-scan";
 import { copyPath, throwIfAborted, waitIfPaused } from "./fs-copy";
-import { chromeProfileDirName, defaultDataDir, execFileAsync, exists, isProcessGoneError, isSafePathSegment, isSameFilesystemPath, makePathSegment, makeSlug, normalizeAccountSyncRecords, normalizeNativeProfileMetadata, normalizeProfile, normalizeProfileName, normalizeSafeRelativePath, shouldCopyLocalExtensionPackagePath, sleep, uniqueStrings } from "./fs-util";
+import { chromeProfileDirName, defaultDataDir, execFileAsync, exists, isProcessGoneError, isRecord, isSafePathSegment, isSameFilesystemPath, makePathSegment, makeSlug, normalizeAccountSyncRecords, normalizeNativeProfileMetadata, normalizeProfile, normalizeProfileName, normalizeSafeRelativePath, shouldCopyLocalExtensionPackagePath, sleep, uniqueStrings } from "./fs-util";
 import { AccountSyncCopyPlan, AccountSyncDataLocation, ProfileRef, ProfileRestartPlan } from "./internal-types";
+import { nativeControlRoot, requestNativeControl } from "./native-control/cli";
 import { emptyRuntimeProfile, findExternalChromeInstances, getCdpClientsByPort, getChromeProcessPids, isChromeRunning } from "./process-scan";
 import { agentControlNoticePaths, errorMessage, externalUserDataDirFromProfileId, filterCdpDriverClients, gatewayControlClient, gatewayControlsByPort, gatewayProfilesFromResponse, inferAgentNameForTakeover, isAgentDrivenCdpClient, isManagedBrowserDriverClient, makeAgentControlNotice, makeExternalProfileId, mergeGatewayControlClient, normalizeAgentControlNoticeReason, normalizePidFilter, normalizeSessionFilter, normalizeTakeoverHistory, persistedGatewayOwnsSession, safeAgentBrowserSessionName, shouldTerminateAgentControlReason, takeoverFailureMessage, uniqueCdpClientsByPid, writeAgentControlNoticeFile } from "./profile-connections";
 import { normalizeMiniProfileIds, normalizeProfileOrder } from "./profile-layout";
@@ -67,6 +68,10 @@ interface ProfileManagerEvents {
 
 export interface ProfileManagerOptions {
   inputGuardFactory?: InputGuardFactory;
+  cookieCipher?: StagedCookieCipher | null;
+  exportExtensionCookies?: (profileId: string, domains?: string[]) => Promise<ChromeCookieRecord[] | null>;
+  exportCdpCookies?: (cdpPort: number, domains?: string[]) => Promise<CdpCookieRecord[] | null>;
+  injectCdpCookies?: (cdpPort: number, cookies: CdpCookieParam[]) => Promise<void>;
 }
 
 interface TakeoverTarget {
@@ -190,6 +195,10 @@ export class ProfileManager {
   private readonly stateReader: ProfileStateReader;
   private readonly runtimeMaintenance: ProfileRuntimeMaintenance;
   private readonly agentOverlayManager: AgentOverlayManager;
+  private readonly cookieCipher: StagedCookieCipher | null;
+  private readonly customExportExtensionCookies?: ProfileManagerOptions["exportExtensionCookies"];
+  private readonly customExportCdpCookies?: ProfileManagerOptions["exportCdpCookies"];
+  private readonly customInjectCdpCookies?: ProfileManagerOptions["injectCdpCookies"];
   // 防止同一 Profile 被并发启动（两次快速点击各自通过“未运行”检查后同时拉起 Chrome）。
   private readonly inFlightLaunches = new Set<string>();
   // 防止同一 Profile 被并发删除（并发删除时回滚会把对方已删的条目错误恢复，造成 registry 与磁盘不一致）。
@@ -212,6 +221,10 @@ export class ProfileManager {
   ) {
     this.profilesDir = path.join(dataDir, "profiles");
     this.registryPath = path.join(dataDir, "profiles.json");
+    this.cookieCipher = options.cookieCipher !== undefined ? options.cookieCipher : electronSafeStorageCipher();
+    this.customExportExtensionCookies = options.exportExtensionCookies;
+    this.customExportCdpCookies = options.exportCdpCookies;
+    this.customInjectCdpCookies = options.injectCdpCookies;
     this.agentOverlayManager = new AgentOverlayManager({
       inputGuardFactory: options.inputGuardFactory,
       // 控制权提示是本产品的中文操作协议，不在 app.ready 之前读取 Electron locale，
@@ -302,8 +315,12 @@ export class ProfileManager {
     return this.runtimeMaintenance.refresh();
   }
 
-  async createProfile(nameInput: string): Promise<StoredProfile> {
-    const name = normalizeProfileName(nameInput);
+  async createProfile(input: string | CreateProfileInput, browserKindInput?: BrowserKind): Promise<StoredProfile> {
+    const rawName = typeof input === "string" ? input : input?.name;
+    const browserKind = normalizeBrowserKind(
+      browserKindInput ?? (typeof input === "object" && input !== null ? input.browserKind : undefined)
+    );
+    const name = normalizeProfileName(rawName);
 
     await this.ensureStore();
     const id = randomUUID();
@@ -313,6 +330,7 @@ export class ProfileManager {
       id,
       name,
       dirName,
+      browserKind,
       createdAt: now,
       lastLaunchedAt: null
     };
@@ -399,7 +417,10 @@ export class ProfileManager {
     const registry = await this.loadRegistry();
     const parent = this.findIsolatedProfile(registry, parentId);
     const userDataDir = this.isolatedProfilePath(parent);
-    await launchChrome([`--user-data-dir=${userDataDir}`, `--profile-directory=${dirName}`, "--no-first-run"]);
+    await launchBrowser(
+      [`--user-data-dir=${userDataDir}`, `--profile-directory=${dirName}`, "--no-first-run"],
+      normalizeBrowserKind(parent.browserKind)
+    );
   }
 
   async launchProfileWithCdp(profileId: string, portInput?: number | null, options: LaunchProfileOptions = {}): Promise<void> {
@@ -1482,7 +1503,7 @@ export class ProfileManager {
     if (process.platform !== "darwin" && process.platform !== "win32") {
       return false;
     }
-    const command = getDirectChromeCommand();
+    const command = resolveBrowserExecutable(normalizeBrowserKind(profile.browserKind));
     if (!command) {
       return false;
     }
@@ -1700,11 +1721,16 @@ export class ProfileManager {
     if (!sourceProfile || !targetProfile) {
       throw new ProfileManagerError("没有找到源 Profile 或目标 Profile。", "PROFILE_NOT_FOUND");
     }
+    const allowCrossDataDir = Boolean(
+      executionOptions.allowWindowsCrossDataDir ||
+      (sourceProfile.source === "isolated" && targetProfile.source === "isolated") ||
+      (sourceProfile.source === "native" && targetProfile.source === "isolated" && (await this.canExportExtensionCookies(sourceProfile.id)))
+    );
     assertWindowsAccountSyncSupported(
       process.platform,
       sourceProfile,
       targetProfile,
-      Boolean(executionOptions.allowWindowsCrossDataDir)
+      allowCrossDataDir
     );
 
     const sourceLocation = await this.resolveAccountSyncLocation(sourceProfile, false);
@@ -1942,6 +1968,10 @@ export class ProfileManager {
         return false;
       }
 
+      if (await hasSecurePreferencesSuperMac(targetProfileDataPath)) {
+        return false;
+      }
+
       const installRecord = await readProtectedExtensionInstallRecord(sourceProfileDataPath, extension.id);
       if (!installRecord) {
         return false;
@@ -1955,7 +1985,10 @@ export class ProfileManager {
 
       const developerModeRecord = extension.fromWebStore ? null : await getProtectedDeveloperModeRecord(targetProfileDataPath);
       await removeExtensionReferencesFromProfilePreferences(targetProfileDataPath, extension.id);
-      await writeProtectedExtensionInstallRecord(targetProfileDataPath, extension.id, installRecord, developerModeRecord);
+      const wrote = await writeProtectedExtensionInstallRecord(targetProfileDataPath, extension.id, installRecord, developerModeRecord);
+      if (!wrote) {
+        return false;
+      }
       await this.removeMigratedExtensionReference(targetProfile, extension.id);
 
       copiedExtensions.push({
@@ -2249,12 +2282,92 @@ export class ProfileManager {
     if (!sourceProfile || !targetProfile) {
       throw new ProfileManagerError("没有找到源 Profile 或目标 Profile。", "PROFILE_NOT_FOUND");
     }
+    const protocolCookies =
+      targetProfile.source === "isolated" ? await this.exportCookiesFromSourceProtocol(sourceProfile) : null;
+    const allowCrossDataDir = Boolean(
+      executionOptions.allowWindowsCrossDataDir ||
+      (sourceProfile.source === "isolated" && targetProfile.source === "isolated") ||
+      protocolCookies !== null
+    );
     assertWindowsAccountSyncSupported(
       process.platform,
       sourceProfile,
       targetProfile,
-      Boolean(executionOptions.allowWindowsCrossDataDir)
+      allowCrossDataDir
     );
+
+    const isWindowsNativeProtocolSync =
+      process.platform === "win32" && sourceProfile.source === "native" && protocolCookies !== null;
+    const skipCookieFiles = Boolean(isWindowsNativeProtocolSync || (protocolCookies !== null && sourceProfile.running));
+    const cookieRelativePaths = new Set<string>([
+      "Cookies",
+      "Cookies-journal",
+      "Cookies-wal",
+      path.join("Network", "Cookies"),
+      path.join("Network", "Cookies-journal"),
+      path.join("Network", "Cookies-wal")
+    ]);
+
+    const sourceLocation = await this.resolveAccountSyncLocation(sourceProfile, false);
+    const accountDiff = await this.inspectAccountSyncDiff(request, {
+      ...executionOptions,
+      allowWindowsCrossDataDir: allowCrossDataDir
+    });
+    const accountDiffByPath = new Map(accountDiff.items.map((item) => [item.relativePath, item]));
+    const hasDiskSourceItems = accountDiff.items.some((item) => item.status !== "source_missing");
+    if (!hasDiskSourceItems && !protocolCookies) {
+      throw new ProfileManagerError("源 Profile 里没有找到可同步的账号数据。", "ACCOUNT_SYNC_SOURCE_EMPTY");
+    }
+
+    const copySpecs = isWindowsNativeProtocolSync
+      ? [...WINDOWS_NATIVE_AGENT_TEMPLATE_SPECS]
+      : accountSyncCopySpecs();
+    const localStateDiff = isWindowsNativeProtocolSync ? null : accountDiffByPath.get("Local State") || null;
+    const shouldMergeLocalState = shouldApplyAccountDiffItem(localStateDiff, onlyChanged);
+    const hasPlannedDiskWrites =
+      shouldMergeLocalState ||
+      copySpecs.some((spec) => {
+        if (skipCookieFiles && cookieRelativePaths.has(spec.relativePath)) return false;
+        const diffItem = accountDiffByPath.get(spec.relativePath) || null;
+        return shouldApplyAccountDiffItem(diffItem, onlyChanged);
+      });
+
+    // Target is already running on Gateway and no disk SQLite overwrite is needed:
+    // inject protocol cookies immediately via CDP Storage.setCookies without closing target.
+    if (targetProfile.running && targetProfile.cdpPort !== null && protocolCookies !== null && !hasPlannedDiskWrites) {
+      throwIfAborted(abortSignal);
+      await waitIfPaused(pauseSignal, abortSignal);
+      report(`正在通过协议向 ${targetProfile.name} 实时注入 Cookies…`, "注入 Cookies", 5);
+      if (protocolCookies.cookies.length > 0) {
+        await this.injectCookiesOverCdp(targetProfile.cdpPort, protocolCookies.cookies);
+      }
+      await fs.rm(stagedCookiesFilePath(this.dataDir, targetProfile.id), { force: true }).catch(() => undefined);
+      const copiedItems: AccountSyncCopiedItem[] = [
+        {
+          label: "协议级 Cookies 同步",
+          relativePath: protocolCookies.via === "extension" ? "Protocol / chrome.cookies" : "Protocol / Storage.getCookies"
+        }
+      ];
+      const skippedItems: AccountSyncSkippedItem[] = [];
+      await this.recordAccountSync({
+        sourceProfileId,
+        targetProfileId,
+        syncedAt: new Date().toISOString(),
+        copiedCount: copiedItems.length,
+        skippedCount: skippedItems.length,
+        launchedTarget: false,
+        sourceFingerprints: await snapshotAccountSyncSourceFingerprints(sourceLocation)
+      });
+      return {
+        sourceProfileId,
+        targetProfileId,
+        copiedItems,
+        skippedItems,
+        launchedTarget: false,
+        restoredTargetTabs: 0,
+        state: await this.getState()
+      };
+    }
 
     const targetRestartPlan =
       targetProfile.running && launchTarget ? await this.captureProfileRestartPlan(targetProfile) : null;
@@ -2263,25 +2376,26 @@ export class ProfileManager {
       await this.closeProfileIfRunning(targetProfileId);
     }
 
-    const sourceLocation = await this.resolveAccountSyncLocation(sourceProfile, false);
     const targetLocation = await this.resolveAccountSyncLocation(targetProfile, true);
     await recoverInterruptedAccountSyncArtifactsForProfile(targetLocation.profilePath);
-    const accountDiff = await this.inspectAccountSyncDiff(request, executionOptions);
-    const accountDiffByPath = new Map(accountDiff.items.map((item) => [item.relativePath, item]));
-    if (!accountDiff.items.some((item) => item.status !== "source_missing")) {
-      throw new ProfileManagerError("源 Profile 里没有找到可同步的账号数据。", "ACCOUNT_SYNC_SOURCE_EMPTY");
-    }
 
     report(`已确认覆盖 ${targetProfile.name}，正在准备复制账号数据…`, "确认覆盖", 2);
     const copiedItems: AccountSyncCopiedItem[] = [];
     const skippedItems: AccountSyncSkippedItem[] = [];
-    const copySpecs = accountSyncCopySpecs();
     const targetExtensionPreferences = await snapshotAccountSyncExtensionPreferences(targetLocation.profilePath);
     const copyPlans: AccountSyncCopyPlan[] = [];
 
     for (const [index, spec] of copySpecs.entries()) {
       throwIfAborted(abortSignal);
       await waitIfPaused(pauseSignal, abortSignal);
+      if (skipCookieFiles && cookieRelativePaths.has(spec.relativePath)) {
+        skippedItems.push({
+          label: spec.label,
+          relativePath: spec.relativePath,
+          reason: "已改用协议级解密 Cookies 同步，跳过原始加密 Cookie 文件"
+        });
+        continue;
+      }
       const itemPosition = `${index + 1}/${copySpecs.length}`;
       report(`正在预估账号数据大小 ${itemPosition}：${spec.label}…`, "磁盘预检测", 3);
       const sourcePath = path.join(sourceLocation.profilePath, spec.relativePath);
@@ -2334,8 +2448,6 @@ export class ProfileManager {
     throwIfAborted(abortSignal);
     await waitIfPaused(pauseSignal, abortSignal);
     report("正在写入浏览器账号状态…", "写入浏览器状态", 5);
-    const localStateDiff = accountDiffByPath.get("Local State") || null;
-    const shouldMergeLocalState = shouldApplyAccountDiffItem(localStateDiff, onlyChanged);
     const localStateMerged = shouldMergeLocalState
       ? await mergeAccountLocalStateValues(sourceLocation, targetLocation)
       : false;
@@ -2344,7 +2456,7 @@ export class ProfileManager {
         label: "浏览器账号状态",
         relativePath: "Local State"
       });
-    } else {
+    } else if (!isWindowsNativeProtocolSync) {
       skippedItems.push({
         label: "浏览器账号状态",
         relativePath: "Local State",
@@ -2354,7 +2466,7 @@ export class ProfileManager {
 
     const legacyEncryptionKeyCopied =
       process.platform === "win32" &&
-      executionOptions.copyWindowsLegacyEncryptionKey &&
+      executionOptions.copyWindowsLegacyEncryptionKey !== false &&
       sourceProfile.source === "isolated" &&
       targetProfile.source === "isolated"
         ? await copyWindowsLegacyOsCryptKey(sourceLocation, targetLocation)
@@ -2363,6 +2475,14 @@ export class ProfileManager {
       copiedItems.push({
         label: "Windows DPAPI 加密密钥",
         relativePath: "Local State / os_crypt.encrypted_key"
+      });
+    }
+
+    if (protocolCookies !== null) {
+      await writeStagedCookies(this.dataDir, targetProfile.id, protocolCookies.cookies, this.cookieCipher);
+      copiedItems.push({
+        label: "协议级 Cookies 同步",
+        relativePath: protocolCookies.via === "extension" ? "Protocol / chrome.cookies" : "Protocol / Storage.getCookies"
       });
     }
 
@@ -2394,6 +2514,14 @@ export class ProfileManager {
       report("正在刷新同步结果…", "完成", 6);
     }
 
+    const finalState = await this.getState();
+    if (protocolCookies !== null) {
+      const updatedTarget = finalState.profiles.find((profile) => profile.id === targetProfileId);
+      if (updatedTarget?.running && updatedTarget.cdpPort !== null) {
+        await this.consumeStagedCookiesOverCdp(targetProfile.id, updatedTarget.cdpPort);
+      }
+    }
+
     await this.recordAccountSync({
       sourceProfileId,
       targetProfileId,
@@ -2411,7 +2539,7 @@ export class ProfileManager {
       skippedItems,
       launchedTarget,
       restoredTargetTabs,
-      state: await this.getState()
+      state: finalState
     };
   }
 
@@ -2534,7 +2662,10 @@ export class ProfileManager {
         const name = nextUniqueCloneName(prefix, usedNames);
         usedNames.add(name);
         report(`正在创建副本 ${i + 1}/${count}：${name}…`, i + 1);
-        const createdProfile = await this.createProfile(name);
+        const createdProfile = await this.createProfile({
+          name,
+          browserKind: normalizeBrowserKind(source.browserKind)
+        });
         const targetId = makeIsolatedProfileId(createdProfile.id);
         try {
           if (mode === "windows-native-template") {
@@ -2546,6 +2677,10 @@ export class ProfileManager {
               abortSignal,
               pauseSignal
             );
+            const protocolCookies = await this.exportCookiesFromSourceProtocol(source);
+            if (protocolCookies !== null) {
+              await writeStagedCookies(this.dataDir, createdProfile.id, protocolCookies.cookies, this.cookieCipher);
+            }
           } else {
             report(`正在为 ${name} 复制 Profile 数据（${i + 1}/${count}）…`, i + 1);
             await this.syncAccount(
@@ -2925,6 +3060,7 @@ export class ProfileManager {
   ): Promise<number | null> {
     const profilePath = this.isolatedProfilePath(profile);
     await fs.mkdir(profilePath, { recursive: true });
+    const browserKind = normalizeBrowserKind(profile.browserKind);
     const launchPlan = await getMigratedExtensionLaunchPlan(profile);
     // bypassProxy 是代理不可用时的一次性直连逃生口：显式绕过系统代理，不改已保存配置。
     const proxyArgs = options.bypassProxy
@@ -2934,6 +3070,10 @@ export class ProfileManager {
     const shouldStartCdp = Boolean(options.forceCdp || needsRuntimeCdp);
     let cdpPort: number | null = null;
     const cdpArgs: string[] = [];
+    if (needsRuntimeCdp) {
+      // Chrome 137+ requires --enable-unsafe-extension-debugging to permit Extensions.loadUnpacked over CDP.
+      cdpArgs.push("--enable-unsafe-extension-debugging");
+    }
 
     if (shouldStartCdp) {
       const preferredPort = options.cdpPort ?? profile.lastCdpPort ?? 9222;
@@ -2946,11 +3086,13 @@ export class ProfileManager {
       }
       const preferredGatewayProfile = await this.gatewayProfileForPort(preferredPort);
       if (preferredGatewayProfile?.profileId === makeIsolatedProfileId(profile.id)) {
+        await this.consumeStagedCookiesOverCdp(profile.id, preferredPort);
         return preferredPort;
       }
       cdpPort = options.cdpPort ?? (await findAvailableUnreservedCdpPort(preferredPort, reserved));
       const existingGatewayProfile = await this.gatewayProfileForPort(cdpPort);
       if (existingGatewayProfile?.profileId === makeIsolatedProfileId(profile.id)) {
+        await this.consumeStagedCookiesOverCdp(profile.id, cdpPort);
         return cdpPort;
       }
       if (!(await isPortAvailable(cdpPort))) {
@@ -2963,6 +3105,14 @@ export class ProfileManager {
     const profileDataPath = await resolveIsolatedProfileDataPath(profilePath);
     await pruneServiceWorkerCacheStorage(profileDataPath).catch(() => false);
 
+    // Clean stale SingletonLock/SingletonSocket/SingletonCookie right before launching
+    // when process-scan confirms zero running PIDs for this isolated profile.
+    const runtimeBeforeLaunch =
+      (await this.stateReader.getRuntime([profilePath], [])).get(profilePath) || emptyRuntimeProfile();
+    if (runtimeBeforeLaunch.pids.length === 0) {
+      await cleanStaleSingletonLocks(profilePath);
+    }
+
     const chromeArgs = [
       `--user-data-dir=${profilePath}`,
       "--no-first-run",
@@ -2973,9 +3123,12 @@ export class ProfileManager {
       ...(options.urls || [])
     ];
     if (cdpPort !== null) {
-      const executable = getDirectChromeCommand();
+      const executable = resolveBrowserExecutable(browserKind);
       if (!executable) {
-        throw new ProfileManagerError("找不到可供 Gateway 启动的 Chrome 二进制。", "CHROME_NOT_FOUND");
+        throw new ProfileManagerError(
+          `找不到可供 Gateway 启动的 ${browserKindDisplayName(browserKind)} 二进制。`,
+          browserKind === "chrome" ? "CHROME_NOT_FOUND" : "BROWSER_NOT_FOUND"
+        );
       }
       await ensureBrowserGatewayDaemon();
       await requestBrowserGateway({
@@ -2988,11 +3141,12 @@ export class ProfileManager {
         args: chromeArgs
       }, { timeoutMs: 8_000 });
     } else {
-      await launchChrome(chromeArgs);
+      await launchBrowser(chromeArgs, browserKind);
     }
 
     if (cdpPort !== null) {
       await waitForCdp(cdpPort, 6000);
+      await this.consumeStagedCookiesOverCdp(profile.id, cdpPort);
       if (launchPlan.runtimeLoadPaths.length) {
         await loadUnpackedExtensionsOverCdp(cdpPort, launchPlan.runtimeLoadPaths);
       }
@@ -3148,6 +3302,7 @@ export class ProfileManager {
     if (storedProfile.bifrostProxy) {
       await destroyProfileBifrostProxy(storedProfile.id, storedProfile.bifrostProxy.listenerPort);
     }
+    await fs.rm(stagedCookiesFilePath(this.dataDir, storedProfile.id), { force: true }).catch(() => undefined);
 
     return {
       deletedProfile: publicProfile,
@@ -3290,7 +3445,15 @@ export class ProfileManager {
     try {
       const raw = await fs.readFile(this.registryPath, "utf8");
       const parsed = JSON.parse(raw) as Partial<Registry>;
-      const normalizedProfiles = Array.isArray(parsed.profiles) ? parsed.profiles.map(normalizeProfile) : [];
+      const normalizedProfiles = Array.isArray(parsed.profiles)
+        ? parsed.profiles.map((rawItem) => {
+            const normalized = normalizeProfile(rawItem);
+            if (normalized && isRecord(rawItem) && rawItem.browserKind !== undefined) {
+              normalized.browserKind = normalizeBrowserKind(rawItem.browserKind);
+            }
+            return normalized;
+          })
+        : [];
       if (strict && (!Array.isArray(parsed.profiles) || normalizedProfiles.some(profile => !profile) ||
         new Set(normalizedProfiles.map(profile => profile?.id)).size !== normalizedProfiles.length ||
         new Set(normalizedProfiles.map(profile => profile?.dirName)).size !== normalizedProfiles.length)) throw new Error('PROFILE_REGISTRY_INCOMPLETE');
@@ -3637,6 +3800,151 @@ export class ProfileManager {
       throw new ProfileManagerError("无法结束这个驱动连接对应的进程，请手动处理。", "CDP_CLIENT_DISCONNECT_FAILED");
     }
   }
+
+  private async canExportExtensionCookies(profileId: string): Promise<boolean> {
+    if (this.customExportExtensionCookies) {
+      const cookies = await this.customExportExtensionCookies(profileId).catch(() => null);
+      return cookies !== null;
+    }
+    try {
+      const status = await requestNativeControl(
+        { requestId: `cookie-probe-${randomUUID()}`, method: "status" },
+        nativeControlRoot(),
+        2_500
+      );
+      const profiles = Array.isArray(status?.profiles) ? status.profiles : [];
+      const match = profiles.find((entry: unknown) => isRecord(entry) && entry.profileId === profileId);
+      return Boolean(match && match.connected === true);
+    } catch {
+      return false;
+    }
+  }
+
+  private async exportExtensionCookiesFromProfile(
+    profileId: string,
+    domains?: string[]
+  ): Promise<ChromeCookieRecord[] | null> {
+    if (this.customExportExtensionCookies) {
+      const cookies = await this.customExportExtensionCookies(profileId, domains);
+      return cookies ? filterCookiesByDomains(cookies, domains) : null;
+    }
+    try {
+      const response = await requestNativeControl(
+        {
+          requestId: `cookies-export-${randomUUID()}`,
+          profileId,
+          method: "cookies.export",
+          params: domains?.length ? { domains } : {}
+        },
+        nativeControlRoot(),
+        15_000
+      );
+      const rawCookies = Array.isArray(response?.cookies)
+        ? response.cookies
+        : Array.isArray(response)
+          ? response
+          : null;
+      return rawCookies ? filterCookiesByDomains(rawCookies as ChromeCookieRecord[], domains) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async exportCdpCookiesFromPort(
+    cdpPort: number,
+    domains?: string[]
+  ): Promise<CdpCookieRecord[] | null> {
+    if (this.customExportCdpCookies) {
+      const cookies = await this.customExportCdpCookies(cdpPort, domains);
+      return cookies ? filterCookiesByDomains(cookies, domains) : null;
+    }
+    let client: CdpBrowserClient | null = null;
+    try {
+      const version = await requestCdpVersionInfo(cdpPort);
+      if (!version.webSocketDebuggerUrl) {
+        return null;
+      }
+      client = await CdpBrowserClient.connect(version.webSocketDebuggerUrl, 5_000);
+      const response = await client.send<{ cookies?: CdpCookieRecord[] }>("Storage.getCookies", {}, 10_000);
+      const cookies = Array.isArray(response?.cookies) ? response.cookies : [];
+      return filterCookiesByDomains(cookies, domains);
+    } catch {
+      return null;
+    } finally {
+      client?.close();
+    }
+  }
+
+  private async exportCookiesFromSourceProtocol(
+    sourceProfile: PublicProfile
+  ): Promise<{ cookies: CdpCookieParam[]; via: "extension" | "cdp" } | null> {
+    if (sourceProfile.source === "native") {
+      const exported = await this.exportExtensionCookiesFromProfile(sourceProfile.id);
+      if (!exported) return null;
+      const cookies = exported
+        .map((cookie) => chromeCookieToCdpCookieParam(cookie))
+        .filter((cookie): cookie is CdpCookieParam => cookie !== null);
+      return { cookies, via: "extension" };
+    }
+    if (sourceProfile.cdpPort !== null) {
+      const exported = await this.exportCdpCookiesFromPort(sourceProfile.cdpPort);
+      if (!exported) return null;
+      const cookies = exported
+        .map((cookie) => chromeCookieToCdpCookieParam(cookie as unknown as ChromeCookieRecord))
+        .filter((cookie): cookie is CdpCookieParam => cookie !== null);
+      return { cookies, via: "cdp" };
+    }
+    return null;
+  }
+
+  private async injectCookiesOverCdp(cdpPort: number, cookies: CdpCookieParam[]): Promise<void> {
+    if (!cookies.length) return;
+    if (this.customInjectCdpCookies) {
+      await this.customInjectCdpCookies(cdpPort, cookies);
+      return;
+    }
+    const version = await requestCdpVersionInfo(cdpPort);
+    if (!version.webSocketDebuggerUrl) {
+      throw new ProfileManagerError("无法获取目标 Gateway 浏览器的 CDP WebSocket 地址。", "CDP_WEBSOCKET_MISSING");
+    }
+    const client = await CdpBrowserClient.connect(version.webSocketDebuggerUrl, 5_000);
+    try {
+      await client.send("Storage.setCookies", { cookies }, 15_000);
+    } finally {
+      client.close();
+    }
+  }
+
+  private async consumeStagedCookiesOverCdp(profileId: string, cdpPort: number): Promise<number> {
+    return consumeStagedCookies(
+      this.dataDir,
+      profileId,
+      (cookies) => this.injectCookiesOverCdp(cdpPort, cookies),
+      this.cookieCipher
+    );
+  }
+}
+
+function electronSafeStorageCipher(): StagedCookieCipher | null {
+  if (
+    !safeStorage ||
+    typeof safeStorage.isEncryptionAvailable !== "function" ||
+    typeof safeStorage.encryptString !== "function" ||
+    typeof safeStorage.decryptString !== "function"
+  ) {
+    return null;
+  }
+  return {
+    isEncryptionAvailable: () => {
+      try {
+        return safeStorage.isEncryptionAvailable();
+      } catch {
+        return false;
+      }
+    },
+    encryptString: (plainText: string) => safeStorage.encryptString(plainText),
+    decryptString: (encrypted: Buffer) => safeStorage.decryptString(encrypted)
+  };
 }
 
 export function createProfileManager(
@@ -3659,10 +3967,13 @@ export function cloneProfileMode(
 
 export function isWindowsCrossDataDirAccountSyncUnsupported(
   platform: NodeJS.Platform,
-  source: Pick<PublicProfile, "userDataDir">,
-  target: Pick<PublicProfile, "userDataDir">
+  source: Pick<PublicProfile, "userDataDir"> & { source?: PublicProfile["source"] },
+  target: Pick<PublicProfile, "userDataDir"> & { source?: PublicProfile["source"] }
 ): boolean {
   if (platform !== "win32") {
+    return false;
+  }
+  if (source.source === "isolated" && target.source === "isolated") {
     return false;
   }
   const sourceDir = path.win32.resolve(source.userDataDir).toLowerCase();

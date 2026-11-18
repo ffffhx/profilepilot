@@ -171,6 +171,19 @@ export function computeMainReorder(
   return nextGroups.flatMap((group) => group.memberIds);
 }
 
+function profileBrowserKindBadge(profile: PublicProfile): string {
+  switch (profile.browserKind) {
+    case "edge":
+      return '<span class="slot-badge" title="Microsoft Edge 内核">Edge</span>';
+    case "brave":
+      return '<span class="slot-badge" title="Brave Browser 内核">Brave</span>';
+    case "chromium":
+      return '<span class="slot-badge" title="Chromium 内核">Chromium</span>';
+    default:
+      return "";
+  }
+}
+
 export function renderProfileRow(profile: PublicProfile, isFirstInGroup = false, lastInGroup = false): string {
   const selected = profile.id === store.selectedId;
   const agentSettingsSaving = isBusyAction("save-agent-settings", { profileId: profile.id });
@@ -192,6 +205,7 @@ export function renderProfileRow(profile: PublicProfile, isFirstInGroup = false,
             <span class="profile-name block min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[15px] font-[650] leading-[1.25]">${escapeHtml(profile.name)}</span>
             <span class="profile-name-badges">
               ${store.state?.defaultProfile?.id === profile.id ? '<span class="agent-default-badge">默认</span>' : ""}
+              ${profileBrowserKindBadge(profile)}
               ${
                 profile.source === "isolated"
                   ? `<button type="button" class="agent-access-toggle ${profile.agentAccessDisabled ? "blocked" : "allowed"} ${agentSettingsSaving ? "loading" : ""}" data-action="toggle-agent-access" data-id="${profile.id}" aria-pressed="${profile.agentAccessDisabled ? "true" : "false"}" aria-label="${profile.agentAccessDisabled ? `允许 Agent 连接 ${escapeHtml(profile.name)}` : `禁止 Agent 连接 ${escapeHtml(profile.name)}`}" title="${profile.agentAccessDisabled ? "当前禁止 Agent 连接；点击允许" : "当前允许 Agent 连接；点击禁止"}" ${store.busy ? "disabled" : ""}>

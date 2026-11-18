@@ -6,12 +6,35 @@ import { z } from "zod";
 import type { BrowserTask, TaskAttachment } from "../../shared/tasks";
 import { canReadTaskSkill } from "./skills";
 
+const WORKBOOK_CACHE_TTL_MS = 60_000;
+const MAX_CACHED_WORKBOOKS = 8;
+interface CachedWorkbook {
+  mtimeMs: number;
+  size: number;
+  expiresAt: number;
+  workbook: any;
+}
+const workbookCache = new Map<string, CachedWorkbook>();
+let workbookCacheHits = 0;
+let workbookCacheMisses = 0;
+
+function canonicalPath(value: string): string {
+  const resolved = realpathSync(value);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+export function clearTaskTableCache(): void {
+  workbookCache.clear();
+  workbookCacheHits = 0;
+  workbookCacheMisses = 0;
+}
+
+export function taskTableCacheStats(): { hits: number; misses: number; size: number } {
+  return { hits: workbookCacheHits, misses: workbookCacheMisses, size: workbookCache.size };
+}
+
 export function canReadTaskFile(task: BrowserTask, file: string): boolean {
-  const canonical = (value: string): string => {
-    const resolved = realpathSync(value);
-    return process.platform === "win32" ? resolved.toLowerCase() : resolved;
-  };
-  try { const target = canonical(file); return [...task.attachments, ...(task.outputs || [])].some(entry => { try { return canonical(entry.path) === target; } catch { return false; } }); }
+  try { const target = canonicalPath(file); return [...task.attachments, ...(task.outputs || [])].some(entry => { try { return canonicalPath(entry.path) === target; } catch { return false; } }); }
   catch { return false; }
 }
 export function taskFile(task: BrowserTask, id: string): TaskAttachment {
@@ -90,14 +113,40 @@ export async function readTaskDocument(task: BrowserTask, value: unknown): Promi
     return { content: [{ type: "text", text: JSON.stringify({ name: file.name, totalPages: document.numPages, nextPage: end < document.numPages ? end + 1 : null, pages }) }, ...images] };
   } finally { await loading.destroy(); }
 }
-export async function readTaskTable(task: BrowserTask, value: unknown): Promise<unknown> {
+
+async function loadCachedWorkbook(filePath: string, fileName: string, nowMs = Date.now()): Promise<any> {
+  if (!/\.(xlsx|csv)$/i.test(fileName)) throw new Error("支持 XLSX 和 CSV；PDF 请使用 read_document，图片和文本使用 Read。");
+  const key = canonicalPath(filePath);
+  const info = statSync(filePath);
+  for (const [entryKey, entry] of workbookCache) {
+    if (entry.expiresAt <= nowMs) workbookCache.delete(entryKey);
+  }
+  const existing = workbookCache.get(key);
+  if (existing && existing.mtimeMs === info.mtimeMs && existing.size === info.size && existing.expiresAt > nowMs) {
+    workbookCacheHits++;
+    // Maintain LRU order while honoring the original 60s TTL window.
+    workbookCache.delete(key);
+    workbookCache.set(key, existing);
+    return existing.workbook;
+  }
+  workbookCacheMisses++;
+  const excelMod: any = await import("exceljs");
+  const WorkbookCtor = excelMod.Workbook || excelMod.default?.Workbook;
+  const workbook = new WorkbookCtor();
+  if (/\.xlsx$/i.test(fileName)) await workbook.xlsx.readFile(filePath);
+  else await workbook.csv.readFile(filePath);
+  if (workbookCache.size >= MAX_CACHED_WORKBOOKS) {
+    const oldest = workbookCache.keys().next().value;
+    if (oldest !== undefined) workbookCache.delete(oldest);
+  }
+  workbookCache.set(key, { mtimeMs: info.mtimeMs, size: info.size, expiresAt: nowMs + WORKBOOK_CACHE_TTL_MS, workbook });
+  return workbook;
+}
+
+export async function readTaskTable(task: BrowserTask, value: unknown, nowMs = Date.now()): Promise<unknown> {
   const input = z.object({ attachmentId: z.string(), sheet: z.string().default(""), startRow: z.number().int().min(1).default(1), count: z.number().int().min(1).max(100).default(30) }).parse(value);
   const file = taskFile(task, input.attachmentId);
-  const Excel = await import("exceljs");
-  const workbook = new Excel.Workbook();
-  if (/\.xlsx$/i.test(file.name)) await workbook.xlsx.readFile(file.path);
-  else if (/\.csv$/i.test(file.name)) await workbook.csv.readFile(file.path);
-  else throw new Error("支持 XLSX 和 CSV；PDF 请使用 read_document，图片和文本使用 Read。");
+  const workbook = await loadCachedWorkbook(file.path, file.name, nowMs);
   const sheet = input.sheet ? workbook.getWorksheet(input.sheet) : workbook.worksheets[0];
   if (!sheet) throw new Error("工作表不存在。");
   const rows: string[][] = []; let characters = 0;
@@ -109,7 +158,7 @@ export async function readTaskTable(task: BrowserTask, value: unknown): Promise<
     rows.push(row); characters += length;
   }
   const next = input.startRow + rows.length;
-  return { sheets: workbook.worksheets.map(sheet => sheet.name), sheet: sheet.name, totalRows: sheet.rowCount,
+  return { sheets: workbook.worksheets.map((ws: any) => ws.name), sheet: sheet.name, totalRows: sheet.rowCount,
     totalColumns: sheet.columnCount, includedColumns: Math.min(sheet.columnCount, 100), startRow: input.startRow,
     nextRow: next <= sheet.rowCount ? next : null, rows };
 }

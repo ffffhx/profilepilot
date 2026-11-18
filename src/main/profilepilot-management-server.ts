@@ -198,11 +198,14 @@ export async function executeProfilePilotManagementCommand(
     if (!service) throw new ProfileManagerError("手机服务尚未就绪。", "PHONE_SERVICE_UNAVAILABLE");
     return executePhoneCommand(command, service);
   }
-  if (command.action.startsWith("task.")) {
+  if (command.action.startsWith("task.") || ["schedule.list", "schedule.save", "schedule.delete", "template.list", "material.list"].includes(command.action)) {
     const parsed = parseTaskManagementCommand(command);
     const service = options.getTaskService?.();
     if (!service) throw new ProfileManagerError("Agent 服务尚未就绪，请稍后重试。", "TASK_SERVICE_UNAVAILABLE");
-    return executeTaskManagementCommand(parsed, service, async selector => resolveProfile(await options.profileManager.getState(), selector).id);
+    return executeTaskManagementCommand(parsed, service, async selector => {
+      if (selector === "__device__" || selector === "none") return "__device__";
+      return resolveProfile(await options.profileManager.getState(), selector).id;
+    });
   }
   if (!["ping", "profile.list", "profile.default", "profile.get", "profile.create", "profile.rename", "profile.configure", "profile.start", "profile.stop", "profile.delete"].includes(command.action)) {
     throw new ProfileManagerError("未知的管理命令。", "MANAGEMENT_COMMAND_UNKNOWN");
@@ -238,7 +241,9 @@ export async function executeProfilePilotManagementCommand(
     return { profile: toManagementProfile(profile, options.getTaskService?.()?.profileAvailability(profile.id)) };
   }
   if (command.action === "profile.create") {
-    const created = await manager.createProfile(command.name);
+    const created = command.browserKind
+      ? await manager.createProfile({ name: command.name, browserKind: command.browserKind })
+      : await manager.createProfile(command.name);
     const state = await manager.getState();
     const profile = resolveCreatedProfile(state, created);
     options.onMutation?.();

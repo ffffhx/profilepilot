@@ -19,6 +19,17 @@ const freePort = () => new Promise<number>((resolve, reject) => {
   server.listen(0, "127.0.0.1", () => { const port = (server.address() as net.AddressInfo).port; server.close(() => resolve(port)); });
 });
 
+export function parseIosVersion(version?: string): { major: number; minor: number; tunnelMode: "userspace" | "kernel" | "none" } {
+  const parts = String(version || "").trim().split(".").map(part => Number(part));
+  const major = parts[0];
+  const minor = Number.isInteger(parts[1]) ? parts[1] : 0;
+  if (!version || !Number.isInteger(major) || major < 15) {
+    throw new Error("自动 USB 连接需要 iOS 15 及以上版本；更早系统请在启动 WDA 后使用手动控制地址。");
+  }
+  const tunnelMode = major >= 18 || (major === 17 && minor >= 4) ? "userspace" : major === 17 ? "kernel" : "none";
+  return { major, minor, tunnelMode };
+}
+
 /** Per-device, explicitly started USB jobs. Never use/stop the global go-ios agent. */
 export class IphoneUsb {
   private jobs = new Map<string, Job>();
@@ -70,7 +81,7 @@ export class IphoneUsb {
   private async run(job: Job, input: Input): Promise<void> {
     const device = (await this.tools.devices()).find(item => item.udid === input.udid); this.check(job);
     if (!device || device.error) throw new Error(device?.error || "没有找到所选 iPhone，请用数据线连接、解锁并信任电脑。");
-    if (Number(device.version?.split(".")[0]) < 18 || !device.version) throw new Error("自动 USB 连接目前面向 iOS 18 及以上；其他版本可在启动 WDA 后使用手动控制地址。");
+    const { tunnelMode } = parseIosVersion(device.version);
     job.state.name = input.name || device.name.slice(0, 80);
     job.forward = await this.forward(input.udid); this.check(job); job.state.endpoint = job.forward.endpoint;
     const existing = await this.request(job.forward.endpoint, "/status", "GET", undefined, AbortSignal.any([job.abort.signal, AbortSignal.timeout(2000)])).catch(() => undefined); this.check(job);
@@ -83,18 +94,24 @@ export class IphoneUsb {
       const app = input.bundleId ? candidates.find(app => app.CFBundleIdentifier === input.bundleId) : candidates.length === 1 ? candidates[0] : undefined;
       if (!app) throw new Error(candidates.length > 1 ? "手机有多个 WebDriverAgent，请填写要使用的 bundle ID。" : "未找到签名后的 WebDriverAgent。请先在「准备控制组件」中准备、签名并安装，然后重试。");
       job.state.bundleId = iphoneBundleId.parse(app.CFBundleIdentifier);
-      const tunnelPort = await freePort(); this.check(job);
-      const common = [`--udid=${input.udid}`, `--tunnel-info-host=127.0.0.1`, `--tunnel-info-port=${tunnelPort}`];
-      const pairing = path.join(this.tools.directory, "pairing", input.udid); await fs.mkdir(pairing, { recursive: true });
-      this.phase(job, "tunnel", "正在建立 iPhone 开发者隧道，请留意手机上的信任提示…");
-      this.child(job, ["tunnel", "start", "--userspace", `--pair-record-path=${pairing}`, ...common]);
-      const deadline = Date.now() + 45000; let ready = false;
-      while (!ready && Date.now() < deadline) {
-        this.check(job);
-        try { const tunnels = parseGoIosJson(await this.tools.run(["tunnel", "ls", ...common], 3000)); ready = Array.isArray(tunnels) && tunnels.some(item => (item.udid || item.Udid) === input.udid); } catch { /* Agent may still be pairing. */ }
-        if (!ready) await delay(750, undefined, { signal: job.abort.signal });
+      let common = [`--udid=${input.udid}`];
+      if (tunnelMode !== "none") {
+        const tunnelPort = await freePort(); this.check(job);
+        common = [`--udid=${input.udid}`, `--tunnel-info-host=127.0.0.1`, `--tunnel-info-port=${tunnelPort}`];
+        const pairing = path.join(this.tools.directory, "pairing", input.udid); await fs.mkdir(pairing, { recursive: true });
+        this.phase(job, "tunnel", "正在建立 iPhone 开发者隧道，请留意手机上的信任提示…");
+        const tunnelArgs = tunnelMode === "userspace"
+          ? ["tunnel", "start", "--userspace", `--pair-record-path=${pairing}`, ...common]
+          : ["tunnel", "start", `--pair-record-path=${pairing}`, ...common];
+        this.child(job, tunnelArgs);
+        const deadline = Date.now() + 45000; let ready = false;
+        while (!ready && Date.now() < deadline) {
+          this.check(job);
+          try { const tunnels = parseGoIosJson(await this.tools.run(["tunnel", "ls", ...common], 3000)); ready = Array.isArray(tunnels) && tunnels.some(item => (item.udid || item.Udid) === input.udid); } catch { /* Agent may still be pairing. */ }
+          if (!ready) await delay(750, undefined, { signal: job.abort.signal });
+        }
+        if (!ready) throw new Error("iPhone 隧道未就绪，请解锁手机、确认信任并开启开发者模式。");
       }
-      if (!ready) throw new Error("iPhone 隧道未就绪，请解锁手机、确认信任并开启开发者模式。");
       this.phase(job, "image", "正在准备 iOS 开发者镜像，首次连接需要下载…");
       await this.operation(job, ["image", "auto", `--basedir=${path.join(this.tools.directory, "images")}`, ...common], 180000);
       this.phase(job, "runner", "正在启动 WebDriverAgent，请保持手机解锁…");

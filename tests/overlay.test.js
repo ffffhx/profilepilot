@@ -364,15 +364,15 @@ test("agent overlay bootstrap script has static safety hooks and valid syntax", 
   assert.match(script, /if \(!host\) \{[\s\S]*?mount\(\)/);
   assert.match(script, /startHeartbeat\(\);\s*\}\)\(\);$/);
   assert.doesNotMatch(script, /\n  mount\(\);\s*\}\)\(\);$/);
-  assert.match(script, /__ppAgentOverlayTerminalStopUntil/);
-  assert.match(script, /sessionStorage\.setItem\(TERMINAL_STOP_KEY/);
-  assert.match(script, /sessionStorage\.getItem\(TERMINAL_STOP_KEY\)/);
+  assert.match(script, /globalThis\.__ppAgentOverlayTerminalStopped === true/);
+  assert.match(script, /globalThis\.__ppAgentOverlayTerminalStopped = true/);
+  assert.doesNotMatch(script, /sessionStorage/);
   assert.ok(
     script.indexOf('signal("stop", { stopAll: true, reason: "user_stop" });') < script.indexOf("window.__ppAgentOverlayTeardown ="),
     "terminal stop dispatches the binding before fully tearing down its current overlay"
   );
   const terminalStopBranch = script.slice(
-    script.indexOf("// Suppress leaked/late future-document bootstraps"),
+    script.indexOf("globalThis.__ppAgentOverlayTerminalStopped = true;"),
     script.indexOf("\n  function updateStopButton()")
   );
   assert.doesNotMatch(
@@ -1535,7 +1535,7 @@ test("AgentOverlayManager supports injection, takeover, return, and cleanup on C
   const terminalMarkerClears = () => calls.filter((call) =>
     call.sessionId === "extension-target-session" &&
     call.method === "Runtime.evaluate" &&
-    String(call.params.expression).includes('sessionStorage.removeItem("__ppAgentOverlayTerminalStopUntil")')
+    String(call.params.expression).includes("delete globalThis.__ppAgentOverlayTerminalStopped")
   ).length;
   assert.equal(terminalMarkerClears(), 1);
   await manager.initializePageSession(state, page, "extension-target-session");
@@ -1629,7 +1629,7 @@ test("AgentOverlayManager rebuilds an isolated world after all known contexts fa
   assert.equal(page.activeContextId, 42);
   assert.equal(page.isolatedContextIds.has(42), true);
   assert.equal(
-    evaluationExpressions.some((expression) => expression.includes('sessionStorage.removeItem("__ppAgentOverlayTerminalStopUntil")')),
+    evaluationExpressions.some((expression) => expression.includes("delete globalThis.__ppAgentOverlayTerminalStopped")),
     true,
     "active Session recovery must clear a late terminal marker before rebuilding the control box"
   );

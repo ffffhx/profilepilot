@@ -10,7 +10,14 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { driverProcessSnapshot, isDriverProcess, temporaryBrowserChildren, retiredPortOwner } from "./agent-browser-process-cleanup";
+import {
+  driverProcessSnapshot,
+  isDriverProcess,
+  isRecordedPidAlive,
+  readRecordedSessionDaemonPid,
+  temporaryBrowserChildren,
+  retiredPortOwner
+} from "./agent-browser-process-cleanup";
 import type {
   AgentBrowserProfileOccupancy,
   ProfileBifrostProxyConfig,
@@ -34,12 +41,29 @@ const GATEWAY_STATE_VERSION = 1;
 export const AGENT_BROWSER_PROFILE_LEASE_PENDING_TTL_MS = 90_000;
 export const AGENT_BROWSER_PROFILE_LEASE_TTL_MS = 30 * 60_000;
 
+export interface AgentBrowserSharedSessionLease {
+  session: string;
+  holderPid: number;
+  daemonPid?: number;
+  targetId?: string;
+  agent?: string;
+  project?: string;
+  branch?: string;
+  command?: string;
+  acquiredAt: string;
+  updatedAt: string;
+  expiresAt: string;
+}
+
 export interface AgentBrowserProfileLease {
   version: 1;
   cdpPort: number;
   profileId: string;
   profileName: string;
   session: string;
+  targetId?: string;
+  exclusive?: boolean;
+  sharedSessions?: Record<string, AgentBrowserSharedSessionLease>;
   agent?: string;
   project?: string;
   branch?: string;
@@ -60,6 +84,10 @@ export interface AcquireAgentBrowserProfileLeaseInput {
   daemonPid?: number;
   profileId?: string;
   profileName?: string;
+  targetId?: string;
+  allocateTab?: boolean;
+  allowSharedProfile?: boolean;
+  exclusive?: boolean;
   agent?: string;
   project?: string;
   branch?: string;
@@ -242,7 +270,12 @@ export function listAgentBrowserProfileCatalogSync(
     .filter((profile) => profile.cdpPort !== input.excludedPort)
     .map((profile): AgentBrowserProfileCatalogEntry => {
       const occupancy = readActiveAgentBrowserProfileOccupancySync(profile.cdpPort, homeDir, now);
-      const alreadyOwnedBySession = Boolean(occupancy && requestedSession && occupancy.session === requestedSession);
+      const existingLease = occupancy ? readAgentBrowserProfileLeaseSync(profile.cdpPort, homeDir) : null;
+      const alreadyOwnedBySession = Boolean(
+        occupancy &&
+        requestedSession &&
+        (occupancy.session === requestedSession || Boolean(existingLease?.sharedSessions?.[requestedSession]))
+      );
       const unavailableReason = profile.agentAccessDisabled
         ? "agent_access_disabled" as const
         : occupancy && !alreadyOwnedBySession
@@ -295,21 +328,111 @@ export function acquireAgentBrowserProfileLeaseSync(
 
   return withLeaseMutexSync(homeDir, cdpPort, () => {
     const leasePath = agentBrowserProfileLeasePath(homeDir, cdpPort);
-    const existing = readAgentBrowserProfileLeaseFileSync(leasePath);
-    if (existing && existing.session !== session && isAgentBrowserProfileLeaseActive(existing, now, homeDir)) {
-      return { ok: false, status: "conflict", lease: existing };
+    let existing = readAgentBrowserProfileLeaseFileSync(leasePath);
+    const activeShared = pruneActiveSharedSessions(existing?.sharedSessions, now);
+    if (existing && !isPrimaryLeaseHolderActive(existing, now, homeDir) && Object.keys(activeShared).length > 0) {
+      existing = promoteSharedSessionToPrimary(existing, activeShared);
+    }
+    const existingActive = Boolean(existing && isAgentBrowserProfileLeaseActive(existing, now, homeDir));
+    const requestedTargetId = nonEmptyString(input.targetId);
+
+    if (existing && existingActive && existing.session !== session) {
+      const shareRequested = Boolean(
+        requestedTargetId ||
+        input.allocateTab === true ||
+        input.allowSharedProfile === true ||
+        activeShared[session]
+      );
+      const anyExclusive = input.exclusive === true || existing.exclusive === true || Boolean(existing.delegatedToUser);
+      if (!shareRequested || anyExclusive) {
+        return { ok: false, status: "conflict", lease: existing };
+      }
+      if (requestedTargetId) {
+        const primaryConflict = existing.targetId === requestedTargetId;
+        const secondaryConflict = Object.values(activeShared).some(
+          (entry) => entry.session !== session && entry.targetId && entry.targetId === requestedTargetId
+        );
+        if (primaryConflict || secondaryConflict) {
+          return { ok: false, status: "conflict", lease: existing };
+        }
+      }
+      const previousMember = activeShared[session];
+      const memberDaemonPid = normalizePid(input.daemonPid) || previousMember?.daemonPid;
+      const at = new Date(now).toISOString();
+      const memberEntry: AgentBrowserSharedSessionLease = {
+        session,
+        holderPid,
+        ...(memberDaemonPid ? { daemonPid: memberDaemonPid } : {}),
+        ...(requestedTargetId || previousMember?.targetId
+          ? { targetId: requestedTargetId || previousMember?.targetId }
+          : {}),
+        ...(nonEmptyString(input.agent) || inferAgentFromSession(session) || previousMember?.agent
+          ? { agent: nonEmptyString(input.agent) || inferAgentFromSession(session) || previousMember?.agent }
+          : {}),
+        ...(nonEmptyString(input.project) || previousMember?.project
+          ? { project: nonEmptyString(input.project) || previousMember?.project }
+          : {}),
+        ...(nonEmptyString(input.branch) || previousMember?.branch
+          ? { branch: nonEmptyString(input.branch) || previousMember?.branch }
+          : {}),
+        ...(nonEmptyString(input.command) || previousMember?.command
+          ? { command: nonEmptyString(input.command) || previousMember?.command }
+          : {}),
+        acquiredAt: previousMember?.acquiredAt || at,
+        updatedAt: at,
+        expiresAt: new Date(
+          now + (memberDaemonPid ? AGENT_BROWSER_PROFILE_LEASE_TTL_MS : AGENT_BROWSER_PROFILE_LEASE_PENDING_TTL_MS)
+        ).toISOString()
+      };
+      const sharedLease: AgentBrowserProfileLease = {
+        ...existing,
+        sharedSessions: {
+          ...activeShared,
+          [session]: memberEntry
+        },
+        updatedAt: at
+      };
+      writeJsonFileAtomicSync(leasePath, sharedLease);
+      return {
+        ok: true,
+        status: previousMember ? "renewed" : "acquired",
+        lease: sharedLease
+      };
     }
 
     const sameOwner = existing?.session === session;
+    if (sameOwner && requestedTargetId && Object.keys(activeShared).length > 0) {
+      const secondaryConflict = Object.values(activeShared).some(
+        (entry) => entry.session !== session && entry.targetId && entry.targetId === requestedTargetId
+      );
+      if (secondaryConflict && existing) {
+        return { ok: false, status: "conflict", lease: existing };
+      }
+    }
+    if (sameOwner && input.exclusive === true && Object.keys(activeShared).length > 0 && existing) {
+      return { ok: false, status: "conflict", lease: existing };
+    }
     const target = resolveAgentBrowserProfileTargetSync(cdpPort, process.env, homeDir);
     const daemonPid = normalizePid(input.daemonPid) || (sameOwner ? existing?.daemonPid : undefined);
     const at = new Date(now).toISOString();
+    const resolvedTargetId = requestedTargetId || (sameOwner ? existing?.targetId : undefined);
+    const resolvedExclusive = input.exclusive === true
+      ? true
+      : input.exclusive === false
+        ? undefined
+        : sameOwner
+          ? existing?.exclusive
+          : undefined;
+    const remainingShared = sameOwner ? activeShared : {};
     const lease: AgentBrowserProfileLease = {
       version: LEASE_VERSION,
       cdpPort,
       profileId: nonEmptyString(input.profileId) || (sameOwner ? existing?.profileId : undefined) || target.profileId,
       profileName: nonEmptyString(input.profileName) || (sameOwner ? existing?.profileName : undefined) || target.profileName,
       session,
+      ...(resolvedTargetId ? { targetId: resolvedTargetId } : {}),
+      ...(resolvedExclusive ? { exclusive: true } : {}),
+      ...(Object.keys(remainingShared).length > 0 ? { sharedSessions: remainingShared } : {}),
       holderPid,
       acquiredAt: sameOwner && existing ? existing.acquiredAt : at,
       updatedAt: at,
@@ -373,7 +496,9 @@ export function findAgentBrowserProfileLeaseForSessionSync(
       const match = name.match(LEASE_FILE_RE);
       return match ? readAgentBrowserProfileLeaseFileSync(path.join(agentBrowserProfileLeaseDir(homeDir), name)) : null;
     })
-    .filter((lease): lease is AgentBrowserProfileLease => Boolean(lease && lease.session === session))
+    .filter((lease): lease is AgentBrowserProfileLease => Boolean(
+      lease && (lease.session === session || Boolean(lease.sharedSessions?.[session]))
+    ))
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0] || null;
 }
 
@@ -390,8 +515,31 @@ export function releaseAgentBrowserProfileLeaseSync(
   return withLeaseMutexSync(homeDir, port, () => {
     const leasePath = agentBrowserProfileLeasePath(homeDir, port);
     const lease = readAgentBrowserProfileLeaseFileSync(leasePath);
-    if (!lease || lease.session !== session) {
+    if (!lease) {
       return false;
+    }
+    const activeShared = pruneActiveSharedSessions(lease.sharedSessions, Date.now());
+    if (lease.session !== session) {
+      if (!lease.sharedSessions?.[session]) {
+        return false;
+      }
+      delete activeShared[session];
+      const nextLease: AgentBrowserProfileLease = {
+        ...lease,
+        updatedAt: new Date().toISOString()
+      };
+      if (Object.keys(activeShared).length > 0) {
+        nextLease.sharedSessions = activeShared;
+      } else {
+        delete nextLease.sharedSessions;
+      }
+      writeJsonFileAtomicSync(leasePath, nextLease);
+      return true;
+    }
+    if (Object.keys(activeShared).length > 0) {
+      const promoted = promoteSharedSessionToPrimary(lease, activeShared);
+      writeJsonFileAtomicSync(leasePath, promoted);
+      return true;
     }
     rmSync(leasePath, { force: true });
     return true;
@@ -451,7 +599,7 @@ export function setAgentBrowserProfileLeasesDelegatedSync(
     withLeaseMutexSync(homeDir, port, () => {
       const leasePath = agentBrowserProfileLeasePath(homeDir, port);
       const lease = readAgentBrowserProfileLeaseFileSync(leasePath);
-      if (!lease || lease.session !== session) return;
+      if (!lease || (lease.session !== session && !lease.sharedSessions?.[session])) return;
       writeJsonFileAtomicSync(leasePath, {
         ...lease,
         delegatedToUser,
@@ -512,24 +660,28 @@ export function retireAgentBrowserSessionSync(
   }
   const agentBrowserDir = path.join(homeDir, ".agent-browser");
   const pidPath = path.join(agentBrowserDir, `${session}.pid`);
+  const recorded = readRecordedSessionDaemonPid(agentBrowserDir, session);
   const pidFromFile = readPidFileSync(pidPath);
-  let daemonPid = normalizePid(knownDaemonPid) || pidFromFile;
+  let daemonPid = normalizePid(knownDaemonPid) || recorded.pid || pidFromFile;
   try {
-    // A dead Windows driver may leave an inherited listener without a PID file.
-    // Use its port only when the owning PID is already dead, never adopt a live PID.
+    // Only inspect a TCP listener port on Windows when no recorded PID file exists at all.
     if (!daemonPid) {
-      const owner = retiredPortOwner(Number(readFileSync(path.join(agentBrowserDir, `${session}.port`), "utf8")));
+      const portRaw = Number(readFileSync(path.join(agentBrowserDir, `${session}.port`), "utf8"));
+      const owner = retiredPortOwner(portRaw, recorded.pid);
       if (owner && !isProcessAlive(owner)) daemonPid = owner;
     }
   } catch { /* Missing sidecar or unavailable inspection: do not guess ownership. */ }
 
-  if (daemonPid) {
+  // Fast path: check recorded PID liveness via process.kill(pid, 0) FIRST so we never
+  // spawn synchronous powershell.exe Get-CimInstance when no live daemon PID exists.
+  const daemonAlive = Boolean(daemonPid && isRecordedPidAlive(daemonPid));
+  if (daemonPid && daemonAlive) {
     try {
-      const rows = driverProcessSnapshot();
+      const rows = driverProcessSnapshot(daemonPid);
       const parent = rows.find(p => p.pid === daemonPid);
       if ((pidFromFile && pidFromFile !== daemonPid) || (parent && !isDriverProcess(parent))) return false;
       for (const candidate of temporaryBrowserChildren(rows, daemonPid)) {
-        const current = driverProcessSnapshot();
+        const current = driverProcessSnapshot(daemonPid);
         if (!temporaryBrowserChildren(current, daemonPid).some(p => p.pid === candidate.pid && p.command === candidate.command)) continue;
         process.kill(candidate.pid, "SIGTERM");
         if (!waitUntilProcessGoneSync(candidate.pid, 1500)) return false;
@@ -537,7 +689,7 @@ export function retireAgentBrowserSessionSync(
     } catch { return false; }
   }
 
-  if (daemonPid && isProcessAlive(daemonPid)) {
+  if (daemonPid && isRecordedPidAlive(daemonPid)) {
     // pid 文件指向了别的 daemon，或 PID 已被非 agent-browser 进程复用时绝不误杀。
     if ((pidFromFile && pidFromFile !== daemonPid) || !isAgentBrowserProcess(daemonPid)) {
       return false;
@@ -574,19 +726,18 @@ export function retireAgentBrowserSessionSync(
   return true;
 }
 
-export function isAgentBrowserProfileLeaseActive(
+function isPrimaryLeaseHolderActive(
   lease: AgentBrowserProfileLease,
-  now = Date.now(),
-  homeDir = os.homedir()
+  now: number,
+  homeDir: string
 ): boolean {
   if (lease.delegatedToUser) {
-    // 委托给用户的租约没有时间过期，但 Gateway 才是当前 Profile↔Session 所有权的权威。
-    // Gateway 进程活着且状态文件有效时，如果该端口已没有 active owner，说明这是上一次
-    // Gateway 生命周期遗留的 lease；继续永久保留会把所有备用 Profile 逐渐耗尽。
-    // Gateway 不可用时保持保守：仍视为 active，避免仅凭缺文件抢走用户正在操作的 Profile。
     const gatewayOwnership = readGatewayActiveOwnershipSync(lease.cdpPort, homeDir);
     if (gatewayOwnership !== undefined) {
-      return gatewayOwnership?.ownerSessionId === lease.session;
+      return Boolean(gatewayOwnership && (
+        gatewayOwnership.ownerSessionId === lease.session ||
+        gatewayOwnership.sessionIds.includes(lease.session)
+      ));
     }
     return true;
   }
@@ -600,8 +751,74 @@ export function isAgentBrowserProfileLeaseActive(
   return lease.daemonPid ? isProcessAlive(lease.daemonPid) : true;
 }
 
+export function isAgentBrowserProfileLeaseActive(
+  lease: AgentBrowserProfileLease,
+  now = Date.now(),
+  homeDir = os.homedir()
+): boolean {
+  if (isPrimaryLeaseHolderActive(lease, now, homeDir)) {
+    return true;
+  }
+  return Object.keys(pruneActiveSharedSessions(lease.sharedSessions, now)).length > 0;
+}
+
+function pruneActiveSharedSessions(
+  sharedSessions: Record<string, AgentBrowserSharedSessionLease> | undefined,
+  now: number
+): Record<string, AgentBrowserSharedSessionLease> {
+  const active: Record<string, AgentBrowserSharedSessionLease> = {};
+  if (!sharedSessions) return active;
+  for (const [key, entry] of Object.entries(sharedSessions)) {
+    const session = safeSessionName(entry?.session || key);
+    const holderPid = normalizePid(Number(entry?.holderPid));
+    if (!session || !holderPid) continue;
+    if (isProcessAlive(holderPid)) {
+      active[session] = entry;
+      continue;
+    }
+    const expiresAt = Date.parse(entry.expiresAt);
+    if (!Number.isFinite(expiresAt) || expiresAt <= now) continue;
+    const daemonPid = normalizePid(Number(entry.daemonPid));
+    if (!daemonPid || isProcessAlive(daemonPid)) {
+      active[session] = entry;
+    }
+  }
+  return active;
+}
+
+function promoteSharedSessionToPrimary(
+  lease: AgentBrowserProfileLease,
+  activeShared: Record<string, AgentBrowserSharedSessionLease>
+): AgentBrowserProfileLease {
+  const [firstKey, ...restKeys] = Object.keys(activeShared);
+  const promoted = activeShared[firstKey];
+  const remaining: Record<string, AgentBrowserSharedSessionLease> = {};
+  for (const key of restKeys) remaining[key] = activeShared[key];
+  const next: AgentBrowserProfileLease = {
+    version: LEASE_VERSION,
+    cdpPort: lease.cdpPort,
+    profileId: lease.profileId,
+    profileName: lease.profileName,
+    session: promoted.session,
+    ...(promoted.targetId ? { targetId: promoted.targetId } : {}),
+    ...(remaining && Object.keys(remaining).length > 0 ? { sharedSessions: remaining } : {}),
+    ...(promoted.agent ? { agent: promoted.agent } : {}),
+    ...(promoted.project ? { project: promoted.project } : {}),
+    ...(promoted.branch ? { branch: promoted.branch } : {}),
+    ...(promoted.command ? { command: promoted.command } : {}),
+    holderPid: promoted.holderPid,
+    ...(promoted.daemonPid ? { daemonPid: promoted.daemonPid } : {}),
+    ...(lease.delegatedToUser ? { delegatedToUser: true } : {}),
+    acquiredAt: promoted.acquiredAt,
+    updatedAt: new Date().toISOString(),
+    expiresAt: promoted.expiresAt
+  };
+  return next;
+}
+
 interface GatewayActiveOwnership {
   ownerSessionId: string;
+  sessionIds: string[];
   publicPort: number;
 }
 
@@ -621,6 +838,7 @@ function readGatewayActiveOwnershipSync(
       profiles?: Array<{
         publicPort?: unknown;
         ownerSessionId?: unknown;
+        sessions?: Record<string, unknown>;
         sessionStatus?: unknown;
         chromePid?: unknown;
       }>;
@@ -638,7 +856,14 @@ function readGatewayActiveOwnershipSync(
     const ownerSessionId = active
       ? safeSessionName(typeof active.ownerSessionId === "string" ? active.ownerSessionId : undefined)
       : undefined;
-    return active && ownerSessionId ? { ownerSessionId, publicPort: cdpPort } : null;
+    if (!active || !ownerSessionId) return null;
+    const sessionIds = [
+      ownerSessionId,
+      ...(active.sessions && typeof active.sessions === "object"
+        ? Object.keys(active.sessions).map((id) => safeSessionName(id)).filter((id): id is string => Boolean(id))
+        : [])
+    ];
+    return { ownerSessionId, sessionIds: [...new Set(sessionIds)], publicPort: cdpPort };
   } catch {
     return undefined;
   }
@@ -825,6 +1050,44 @@ function normalizeLease(input: Partial<AgentBrowserProfileLease>): AgentBrowserP
   };
   const daemonPid = normalizePid(Number(input.daemonPid));
   if (daemonPid) lease.daemonPid = daemonPid;
+  const targetId = nonEmptyString(input.targetId);
+  if (targetId) lease.targetId = targetId;
+  if (input.exclusive === true) lease.exclusive = true;
+  if (input.sharedSessions && typeof input.sharedSessions === "object" && !Array.isArray(input.sharedSessions)) {
+    const shared: Record<string, AgentBrowserSharedSessionLease> = {};
+    for (const [key, rawEntry] of Object.entries(input.sharedSessions)) {
+      const entry = rawEntry as Partial<AgentBrowserSharedSessionLease> | undefined;
+      const memberSession = safeSessionName(entry?.session || key);
+      const memberHolderPid = normalizePid(Number(entry?.holderPid));
+      const memberAcquiredAt = nonEmptyString(entry?.acquiredAt);
+      const memberUpdatedAt = nonEmptyString(entry?.updatedAt);
+      const memberExpiresAt = nonEmptyString(entry?.expiresAt);
+      if (!memberSession || !memberHolderPid || !memberAcquiredAt || !memberUpdatedAt || !memberExpiresAt) continue;
+      const normalizedEntry: AgentBrowserSharedSessionLease = {
+        session: memberSession,
+        holderPid: memberHolderPid,
+        acquiredAt: memberAcquiredAt,
+        updatedAt: memberUpdatedAt,
+        expiresAt: memberExpiresAt
+      };
+      const memberDaemonPid = normalizePid(Number(entry?.daemonPid));
+      if (memberDaemonPid) normalizedEntry.daemonPid = memberDaemonPid;
+      const memberTargetId = nonEmptyString(entry?.targetId);
+      if (memberTargetId) normalizedEntry.targetId = memberTargetId;
+      const memberAgent = nonEmptyString(entry?.agent);
+      if (memberAgent) normalizedEntry.agent = memberAgent;
+      const memberProject = nonEmptyString(entry?.project);
+      if (memberProject) normalizedEntry.project = memberProject;
+      const memberBranch = nonEmptyString(entry?.branch);
+      if (memberBranch) normalizedEntry.branch = memberBranch;
+      const memberCommand = nonEmptyString(entry?.command);
+      if (memberCommand) normalizedEntry.command = memberCommand;
+      shared[memberSession] = normalizedEntry;
+    }
+    if (Object.keys(shared).length > 0) {
+      lease.sharedSessions = shared;
+    }
+  }
   if (input.delegatedToUser === true) lease.delegatedToUser = true;
   const agent = nonEmptyString(input.agent);
   if (agent) lease.agent = agent;
@@ -962,8 +1225,9 @@ function readPidFileSync(filePath: string): number | undefined {
 }
 
 function isAgentBrowserProcess(pid: number): boolean {
+  if (!isRecordedPidAlive(pid)) return false;
   try {
-    const entry = driverProcessSnapshot().find(p => p.pid === pid);
+    const entry = driverProcessSnapshot(pid).find(p => p.pid === pid);
     return !!entry && isDriverProcess(entry);
   } catch {
     return false;

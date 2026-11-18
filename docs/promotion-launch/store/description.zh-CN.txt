@@ -1,0 +1,22 @@
+名称：ProfilePilot 浏览器连接。
+
+简短说明：连接当前 Chrome Profile，操作现有或新建页面，提供侧边任务、调试、历史和下载。
+
+单一用途：将用户选择的 Chrome Profile 连接到本机 ProfilePilot 浏览器服务，让用户授权的 Agent 读取和操作网页，并让用户查看连接状态、暂停或接管浏览器任务。
+
+详细说明：
+
+ProfilePilot 浏览器连接将你当前的 Chrome Profile 连接到电脑上的 ProfilePilot 浏览器服务，让你授权的 Agent 沿用已有页面和登录状态完成网页任务。
+
+- 读取网页内容、获取截图、填写表单和操作页面。
+- 按请求查询浏览历史、处理任务下载和获取网页调试信息。
+- 在扩展弹窗或侧边栏查看连接状态和受控标签页，通过任务标签组识别任务状态。
+- 通过 ProfilePilot 暂停、停止或接管任务；支持站点范围限制。
+
+使用前需要安装 ProfilePilot CLI 或桌面应用，并将扩展与同一台电脑上的浏览器服务配对。CLI 会自动启动独立浏览器服务，外部 Agent 使用 CLI 时不要求桌面窗口一直打开。使用桌面内置 AI 任务时，需要配置模型服务。
+
+扩展通过本机回环地址连接浏览器服务。任务所需的页面内容、截图和结果可能经桌面应用或外部 Agent 发送到用户选用的模型服务；具体数据使用见隐私说明。扩展不能绕过 Chrome 内部页面、浏览器安全页面和系统对话框的限制。
+
+项目与安装说明：https://github.com/ffffhx/profilepilot
+
+支持与问题反馈：https://github.com/ffffhx/profilepilot/issues

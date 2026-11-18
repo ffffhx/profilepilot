@@ -106,7 +106,10 @@ export function registerLocalApps(profileManager: ProfileManager): LocalAppsServ
         if (!windows) throw new Error("应用尚未连接，请先连接应用。");
         return windows.show(config);
       }
-      case "logs": return service.logs(id);
+      case "logs": {
+        const logOptions = z.object({ tailLines: z.number().int().min(1).max(5000).optional(), grep: z.string().max(512).optional() }).strict().optional().parse(args[1]);
+        return service.logs(id, logOptions);
+      }
       case "agentControl": return controlAgent(id, z.enum(["takeover", "return", "stop"]).parse(args[1]));
       case "openDirectory": {
         const directory = service.get(id).cwd;

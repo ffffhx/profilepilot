@@ -20,6 +20,147 @@ const active = (entry: Entry) => !!entry.device.state && !["idle", "stopped", "d
 const sizeSchema = z.object({ width: z.number().positive().max(20000), height: z.number().positive().max(20000) });
 const actionSchema = z.object({ id: z.string(), sessionId: z.string().min(1), generation: z.number().int().nonnegative(), requestId: z.string().uuid(), action: phoneActionSchema, observeAfter: z.boolean().optional() }).strict();
 
+export interface IphoneCompactRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface IphoneCompactElement {
+  ref: string;
+  type: string;
+  name?: string;
+  label?: string;
+  value?: string;
+  enabled: boolean;
+  rect?: IphoneCompactRect;
+}
+
+const WRAPPER_TYPES = new Set(["Other", "Group", "Window", "LayoutArea", "LayoutItem"]);
+const INTERACTIVE_IOS_TYPES = new Set([
+  "Button", "TextField", "SecureTextField", "SearchField", "TextView",
+  "Switch", "Slider", "Toggle", "Link", "Cell", "Tab", "SegmentedControl",
+  "PickerWheel", "Stepper", "MenuItem", "Key", "ScrollView", "Table",
+  "CollectionView", "WebView", "PageIndicator"
+]);
+
+function normalizeBool(value: unknown, fallback = true): boolean {
+  if (typeof value === "boolean") return value;
+  if (value === "1" || value === 1 || value === "true") return true;
+  if (value === "0" || value === 0 || value === "false") return false;
+  return fallback;
+}
+
+function normalizeRect(raw: unknown): IphoneCompactRect | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as Record<string, unknown>;
+  const x = Number(r.x), y = Number(r.y), width = Number(r.width), height = Number(r.height);
+  if (![x, y, width, height].every(Number.isFinite) || width < 0 || height < 0) return undefined;
+  return { x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) };
+}
+
+/** Prune XCTest /source?format=json into compact @e1, @e2 elements + tree summary while preserving root tree shape. */
+export function compactIphoneSource(raw: unknown, maxElements = 800, maxDepth = 70): {
+  tree: Record<string, any>;
+  elements: IphoneCompactElement[];
+  summary: string;
+} {
+  if (!raw || typeof raw !== "object") {
+    return { tree: {}, elements: [], summary: "" };
+  }
+  const elements: IphoneCompactElement[] = [];
+  const summaryLines: string[] = [];
+  let counter = 0;
+
+  const visit = (node: Record<string, any>, depth: number, isRoot: boolean): Record<string, any>[] => {
+    if (!node || typeof node !== "object" || depth > maxDepth) return [];
+    const visible = normalizeBool(node.isVisible ?? node.visible, true);
+    if (!visible && !isRoot) return [];
+    const type = String(node.type || "Other").replace(/^XCUIElementType/, "");
+    const isSecure = type === "SecureTextField";
+    const name = typeof node.name === "string" && node.name.trim() ? node.name.slice(0, 500) : undefined;
+    const label = isSecure ? "[密码]" : (typeof node.label === "string" && node.label.trim() ? node.label.slice(0, 500) : undefined);
+    const rawVal = isSecure ? (node.value ? "[密码]" : undefined) : (typeof node.value === "string" && node.value.trim() ? node.value.slice(0, 500) : undefined);
+    const enabled = normalizeBool(node.isEnabled ?? node.enabled, true);
+    const rect = normalizeRect(node.rect);
+
+    const rawChildren = Array.isArray(node.children) ? node.children : [];
+    const compactedChildren: Record<string, any>[] = [];
+    if (!isSecure) {
+      for (const child of rawChildren) {
+        if (elements.length >= maxElements) break;
+        compactedChildren.push(...visit(child, depth + 1, false));
+      }
+    }
+
+    const hasSemantics = Boolean(name || label || rawVal) || INTERACTIVE_IOS_TYPES.has(type);
+    if (!isRoot && WRAPPER_TYPES.has(type) && !hasSemantics) {
+      // Prune empty non-interactive wrapper nodes while promoting meaningful descendants.
+      return compactedChildren;
+    }
+
+    const out: Record<string, any> = { type };
+    if (!isRoot && hasSemantics && elements.length < maxElements) {
+      const ref = `@e${++counter}`;
+      out.ref = ref;
+      const elem: IphoneCompactElement = {
+        ref,
+        type,
+        ...(name !== undefined ? { name } : {}),
+        ...(label !== undefined ? { label } : {}),
+        ...(rawVal !== undefined ? { value: rawVal } : {}),
+        enabled,
+        ...(rect ? { rect } : {})
+      };
+      elements.push(elem);
+      if (summaryLines.length < maxElements) {
+        const parts = [`${ref} [${type}]`];
+        if (label) parts.push(JSON.stringify(label));
+        else if (rawVal) parts.push(`val=${JSON.stringify(rawVal)}`);
+        if (name && name !== label) parts.push(`(name=${name})`);
+        if (!enabled) parts.push("[disabled]");
+        summaryLines.push(parts.join(" "));
+      }
+    }
+    if (name !== undefined) out.name = name;
+    if (label !== undefined) out.label = label;
+    if (rawVal !== undefined) out.value = rawVal;
+    if (!enabled) out.enabled = false;
+    if (rect) out.rect = rect;
+    if (compactedChildren.length > 0) out.children = compactedChildren;
+    return [out];
+  };
+
+  const roots = visit(raw as Record<string, any>, 0, true);
+  const tree = roots[0] || { type: "Application" };
+  return { tree, elements, summary: summaryLines.join("\n") };
+}
+
+function selectorMatchesCompactElement(selector: PhoneSelector, element: IphoneCompactElement): boolean {
+  if (selector.ref !== undefined) {
+    const normalized = selector.ref.startsWith("@") ? selector.ref : `@${selector.ref}`;
+    if (element.ref !== normalized) return false;
+  }
+  if (selector.resourceId !== undefined && (element.name || "") !== selector.resourceId) return false;
+  if (selector.description !== undefined && (element.label || "") !== selector.description) return false;
+  if (selector.text !== undefined && (element.label || element.value || "") !== selector.text) return false;
+  if (selector.className !== undefined) {
+    const cleanClass = selector.className.replace(/^XCUIElementType/, "");
+    if (element.type !== cleanClass && `XCUIElementType${element.type}` !== selector.className) return false;
+  }
+  if (selector.enabled !== undefined && element.enabled !== selector.enabled) return false;
+  return true;
+}
+
+const IOS_KEY_CHARS: Partial<Record<string, string>> = {
+  enter: "\n",
+  search: "\n",
+  backspace: "\b",
+  delete: "\u007f",
+  tab: "\t"
+};
+
 /** Host-owned iPhone sessions. Persist endpoints only, never control authority. */
 export class IphonesService {
   readonly tools: IphoneTools;
@@ -159,7 +300,7 @@ export class IphonesService {
     return structuredClone(entry.device);
   }
   async forget(id: string): Promise<void> {
-    const entry = this.entry(id); await this.disconnect(id); this.entries.delete(id); this.persist(); this.changed();
+    this.entry(id); await this.disconnect(id); this.entries.delete(id); this.persist(); this.changed();
   }
   rename(id: string, name: string): PhoneDevice {
     const entry = this.entry(id); entry.saved.name = z.string().trim().min(1).max(80).parse(name); entry.device.name = entry.saved.name; this.persist(); this.changed(); return structuredClone(entry.device);
@@ -221,7 +362,9 @@ export class IphonesService {
     if (entry.requests.size >= 4096) throw new Error("本次会话操作数已达上限，请结束后重新开始。");
     const action = p.action, read = isPhoneRead(action.kind);
     if (!read && state.mode !== "control") throw new Error("仅查看会话不能操作 iPhone。");
-    if (action.kind === "key" && action.key !== "home") throw new Error("iPhone 不提供 Android 返回/最近应用键；请使用页面控件或手势。");
+    if (action.kind === "key" && action.key !== "home" && !IOS_KEY_CHARS[action.key]) {
+      throw new Error("iPhone 不提供 Android 返回/最近应用键；请使用页面控件或手势。");
+    }
     const abort = new AbortController(); entry.pending = abort; entry.requests.add(p.requestId);
     const remote = entry.remoteSession;
     const check = () => { if (this.closed || abort.signal.aborted || state.generation !== p.generation || !["viewing", "controlling"].includes(state.phase)) throw new Error("iPhone 会话已改变，本次操作不会继续或重放。"); };
@@ -233,16 +376,18 @@ export class IphonesService {
       let result: unknown;
       if (action.kind === "screenshot") {
         entry.frame = undefined;
-        const before = sizeSchema.parse(await call("/window/size"));
+        const size = sizeSchema.parse(await call("/window/size"));
         const base64 = z.string().max(34 * 1024 * 1024).regex(/^[A-Za-z0-9+/]+={0,2}$/).parse(await call("/screenshot"));
         const info = inspectScreenPng(Buffer.from(base64, "base64"));
         if (!info.complete) throw new Error("iPhone 截图不完整，请重新观察。");
-        const after = sizeSchema.parse(await call("/window/size"));
-        if (before.width !== after.width || before.height !== after.height || Math.abs(info.width / info.height - after.width / after.height) > 0.03) throw new Error("iPhone 屏幕方向已变化，请重新截图。");
-        entry.frame = { width: info.width, height: info.height, pointsWidth: after.width, pointsHeight: after.height, at: this.now() };
+        if (Math.abs(info.width / info.height - size.width / size.height) > 0.03) throw new Error("iPhone 屏幕方向已变化，请重新截图。");
+        entry.frame = { width: info.width, height: info.height, pointsWidth: size.width, pointsHeight: size.height, at: this.now() };
         result = { mime: "image/png", base64, width: info.width, height: info.height };
-      } else if (action.kind === "snapshot") result = await call("/source?format=json");
-      else if (action.kind === "tap" || action.kind === "swipe") {
+      } else if (action.kind === "snapshot") {
+        const rawSource = await call("/source?format=json");
+        const compacted = compactIphoneSource(rawSource);
+        result = { ...compacted.tree, tree: compacted.tree, elements: compacted.elements, summary: compacted.summary };
+      } else if (action.kind === "tap" || action.kind === "swipe") {
         const frame = entry.frame;
         if (!frame || this.now() - frame.at > 30000) throw new Error("请先刷新 iPhone 画面，再点击或滑动。");
         const current = sizeSchema.parse(await call("/window/size"));
@@ -252,9 +397,70 @@ export class IphonesService {
         if (action.kind === "tap") await write("/wda/tap", from);
         else { const to = point(action.toX, action.toY); await write("/wda/dragfromtoforduration", { fromX: from.x, fromY: from.y, toX: to.x, toY: to.y, duration: (action.duration || 350) / 1000 }); }
         result = { accepted: true };
-      } else if (action.kind === "key") { await write("/wda/pressButton", { name: "home" }); result = { accepted: true }; }
-      else if (action.kind === "text") { await write("/wda/keys", { value: Array.from(action.text) }); result = { accepted: true }; }
-      else {
+      } else if (action.kind === "key") {
+        if (action.key === "home") await write("/wda/pressButton", { name: "home" });
+        else await write("/wda/keys", { value: [IOS_KEY_CHARS[action.key]!] });
+        result = { accepted: true };
+      } else if (action.kind === "text") {
+        await write("/wda/keys", { value: Array.from(action.text) });
+        result = { accepted: true };
+      } else if (action.selector.ref !== undefined) {
+        for (const unsupported of ["packageName", "checked", "editable", "clickable", "scrollable"] as const) {
+          if (action.selector[unsupported] !== undefined) throw new Error(`iPhone 不支持 ${unsupported} 定位条件；请使用 ref、resourceId、text、description、className 或 enabled。`);
+        }
+        const compacted = compactIphoneSource(await call("/source?format=json"));
+        const matches = compacted.elements.filter(elem => selectorMatchesCompactElement(action.selector, elem));
+        if (action.kind === "find") {
+          result = { count: matches.length, matches };
+        } else {
+          if (matches.length !== 1) throw new Error("未找到匹配的 iPhone 控件引用，请重新观察页面。");
+          const target = matches[0];
+          if (!target.enabled) throw new Error("目标 iPhone 控件已禁用。");
+          const wdaType = `XCUIElementType${target.type}`;
+          const clauses = ["visible == true", `type == ${JSON.stringify(wdaType)}`];
+          if (target.name) clauses.push(`name == ${JSON.stringify(target.name)}`);
+          if (target.label && target.label !== "[密码]") clauses.push(`label == ${JSON.stringify(target.label)}`);
+          const found = z.array(z.record(z.string(), z.unknown())).max(1000).parse(
+            await call("/elements", "POST", { using: "predicate string", value: clauses.join(" AND ") }).catch(() => [])
+          );
+          let elementId: string | undefined;
+          const extractId = (item: Record<string, unknown>) => {
+            const val = item["element-6066-11e4-a52e-4f735466cecf"] || item.ELEMENT;
+            return typeof val === "string" && /^[A-Za-z0-9-]{1,100}$/.test(val) ? val : undefined;
+          };
+          if (found.length === 1) {
+            elementId = extractId(found[0]);
+          } else if (found.length > 1 && target.rect) {
+            for (const candidate of found) {
+              const id = extractId(candidate);
+              if (!id) continue;
+              const r = normalizeRect(await call(`/element/${id}/rect`).catch(() => undefined));
+              if (r && Math.abs(r.x - target.rect.x) <= 2 && Math.abs(r.y - target.rect.y) <= 2) {
+                elementId = id;
+                break;
+              }
+            }
+          }
+          if (action.kind === "click") {
+            if (elementId) await write(`/element/${elementId}/click`, {});
+            else if (target.rect && target.rect.width > 0 && target.rect.height > 0) {
+              await write("/wda/tap", { x: target.rect.x + target.rect.width / 2, y: target.rect.y + target.rect.height / 2 });
+            } else throw new Error("无法解析 iPhone 控件点击位置，请重新观察页面。");
+          } else if (action.kind === "fill") {
+            if (elementId) {
+              await write(`/element/${elementId}/clear`, {});
+              if (action.text) await write(`/element/${elementId}/value`, { value: Array.from(action.text) });
+            } else if (target.rect && target.rect.width > 0 && target.rect.height > 0) {
+              await write("/wda/tap", { x: target.rect.x + target.rect.width / 2, y: target.rect.y + target.rect.height / 2 });
+              if (action.text) await write("/wda/keys", { value: Array.from(action.text) });
+            } else throw new Error("无法定位 iPhone 输入框，请重新观察页面。");
+          } else {
+            if (!elementId) throw new Error("iPhone 滚动需要唯一原生元素匹配。");
+            await write(`/wda/element/${elementId}/scroll`, { direction: action.direction === "forward" ? "down" : "up" });
+          }
+          result = { accepted: true };
+        }
+      } else {
         const elements = z.array(z.record(z.string(), z.unknown())).max(1000).parse(await call("/elements", "POST", { using: "predicate string", value: iphonePredicate(action.selector) }));
         if (action.kind === "find") result = { count: elements.length, matches: elements };
         else {
@@ -271,9 +477,10 @@ export class IphonesService {
       if (p.observeAfter && !read) {
         const feedback = await observeAfterAction({ check, errorCode: 'PHONE_OBSERVATION_FAILED', invalidate: () => { entry.frame = undefined; },
           observe: async () => {
-            const tree = await call('/source?format=json');
-            if (!tree || typeof tree !== 'object') throw new Error('iPhone 未返回有效页面树。');
-            return { kind: 'accessibility', capturedAt: this.now(), tree };
+            const rawTree = await call('/source?format=json');
+            if (!rawTree || typeof rawTree !== 'object') throw new Error('iPhone 未返回有效页面树。');
+            const compacted = compactIphoneSource(rawTree);
+            return { kind: 'accessibility', capturedAt: this.now(), tree: compacted.tree, elements: compacted.elements, summary: compacted.summary };
           }
         });
         return { state: structuredClone(state), result, ...feedback };
@@ -295,9 +502,13 @@ export class IphonesService {
 export function iphonePredicate(selector: PhoneSelector): string {
   for (const key of ["packageName", "checked", "editable", "clickable", "scrollable"] as const)
     if (selector[key] !== undefined) throw new Error(`iPhone 不支持 ${key} 定位条件；请使用 resourceId、text、description、className 或 enabled。`);
-  const clauses = ["visible == true"];
-  for (const [key, attribute] of [["resourceId", "name"], ["description", "name"], ["text", "label"], ["className", "type"]] as const)
-    if (selector[key] !== undefined) clauses.push(`${attribute} == ${JSON.stringify(selector[key])}`);
+  const clauses: string[] = ["visible == true"];
+  for (const [key, attribute] of [["resourceId", "name"], ["description", "label"], ["text", "label"], ["className", "type"]] as const) {
+    if (selector[key] !== undefined) {
+      const clause = `${attribute} == ${JSON.stringify(selector[key])}`;
+      if (!clauses.includes(clause)) clauses.push(clause);
+    }
+  }
   if (selector.enabled !== undefined) clauses.push(`enabled == ${selector.enabled}`);
   if (clauses.length === 1) throw new Error("iPhone 定位条件不能为空。");
   return clauses.join(" AND ");

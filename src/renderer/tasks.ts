@@ -10,8 +10,8 @@ import { installSidebarResize, sidebarResizeHandle } from "./sidebar-resize";
 import { tokenUsagePage } from "./task-token-usage";
 import type { TokenSource } from "../shared/task-token-usage";
 let usageSource: TokenSource = "all";
-import type { TaskApi, TaskListSnapshot, TaskSummary, TaskStream, TaskSearchHit, BrowserTask, TaskStatus, CreateTaskInput, JevProvider } from "../shared/tasks";
-import { TERMINAL_TASKS, jevProviderFor } from "../shared/tasks";
+import type { TaskApi, TaskListSnapshot, TaskSummary, TaskStream, TaskSearchHit, BrowserTask, TaskStatus, CreateTaskInput, JevProvider, ScheduleRepeat, ScheduleCatchUpPolicy, TaskPermissionMode } from "../shared/tasks";
+import { TERMINAL_TASKS, DEVICE_ONLY_PROFILE_ID, jevProviderFor } from "../shared/tasks";
 import { zonedLocalToIso } from "../shared/task-time";
 import type { AppState } from "../shared/types";
 import { taskProfileAvailability } from "./task-profile-availability";
@@ -158,7 +158,7 @@ try {
   sessionStorage.removeItem("profilepilot-agent-workspace");
   if (saved) {
     restoringWorkspace = true;
-    view = ["tasks", "history"].includes(saved.view) ? saved.view : "tasks";
+    view = ["tasks", "history", "materials", "templates", "schedules", "usage"].includes(saved.view) ? saved.view : "tasks";
     selected = typeof saved.selected === "string" ? saved.selected : "";
     formDraft = saved.formDraft; selectedFiles = saved.selectedFiles || []; editTemplate = saved.editTemplate || "";
     if (saved.fields) pageDrafts.set(draftKey("", "create-task"), saved.fields);
@@ -233,6 +233,7 @@ function commandMenu(): void {
   const task = taskData.get(selected);
   const commands: WorkbenchCommand[] = [
     { id: "new", label: "新任务", hint: `${platformModifier}+Shift+O`, run: click('[data-nav="tasks"]') },
+    { id: "materials", label: "资料与附件", run: click('[data-nav="materials"]') },
     { id: "search", label: "搜索全部对话与结果", run: () => { rememberForms(); view = "history"; selected = ""; showAttention = false; render(false); document.getElementById("history-search")?.focus(); } },
     { id: "attention", label: "需要处理与完成未读", run: click('[data-action="attention"]') },
     { id: "input", label: "聚焦消息输入框", run: () => focusComposer() },
@@ -240,7 +241,7 @@ function commandMenu(): void {
     { id: "latest", label: "回到最新消息", run: jumpLatest },
     { id: "settings", label: "Agent 设置与外观", run: click('[data-nav="settings"]') }
   ];
-  if (task) commands.push(...["pause", "resume", "cancel", "takeover"].filter(action => root.querySelector(`[data-control="${action}"]`)).map(action => ({ id: action, label: ({ pause: "暂停任务", resume: "继续任务", cancel: "停止任务", takeover: "接管浏览器" })[action]!, disabled: !!root.querySelector<HTMLButtonElement>(`[data-control="${action}"]`)?.disabled, run: click(`[data-control="${action}"]`) })), { id: "export", label: "导出 Markdown", run: click('[data-action="export-readable"]') }, { id: "session", label: "会话模型、限制与授权", run: click('[data-action="session-settings"]') });
+  if (task) commands.push(...["pause", "resume", "cancel", "takeover"].filter(action => root.querySelector(`[data-control="${action}"]`)).map(action => ({ id: action, label: ({ pause: "暂停任务", resume: "继续任务", cancel: "停止任务", takeover: "接管浏览器" })[action]!, disabled: !!root.querySelector<HTMLButtonElement>(`[data-control="${action}"]`)?.disabled, run: click(`[data-control="${action}"]`) })), { id: "compact", label: "压缩上下文", disabled: ["running", "queued"].includes(task.status), run: click('[data-action="compact-task"]') }, { id: "fork", label: "分支对话", disabled: ["running", "queued"].includes(task.status), run: click('[data-action="fork-task"]') }, { id: "export", label: "导出 Markdown", run: click('[data-action="export-readable"]') }, { id: "session", label: "会话模型、模式、限制与授权", run: click('[data-action="session-settings"]') });
   if (task?.pending) commands.push({ id: "answer", label: "处理当前等待事项", hint: task.pending.title, run: () => focusComposer(true) });
   commands.push(...data.tasks.filter(item => !item.archivedAt).map(item => ({ id: `task-${item.id}`, label: `切换任务：${item.title}`, hint: `${item.profileName} · ${statusNames[item.status]}`, run: () => openTask(item.id) })));
   showCommands(commands, platformModifier);
@@ -306,11 +307,13 @@ async function manageTask(id: string, action: TaskMenuAction): Promise<void> {
   }, false, `task:${id}`, "更新任务记录");
 }
 function taskProfiles() { return profiles?.profiles.filter(profile => profile.source === "native" || profile.source === "isolated" && !profile.agentAccessDisabled) || []; }
-function profileOptions(selectedId = "", scheduled = false): string {
-  return profiles ? taskProfiles().map(profile => {
+function profileOptions(selectedId = "", _scheduled = false): string {
+  const deviceOption = `<option value="${DEVICE_ONLY_PROFILE_ID}" data-label="不绑定浏览器" data-description="操作手机 / 桌面 / 本地应用" ${selectedId === DEVICE_ONLY_PROFILE_ID ? "selected" : ""}>不绑定浏览器（操作手机 / 桌面 / 本地应用）</option>`;
+  const browserOptions = profiles ? taskProfiles().map(profile => {
     const status = taskProfileAvailability(profile, data.tasks, browserData.nativeBrowsers);
     return `<option value="${e(profile.id)}" data-label="${e(profile.name)}" data-description="${e(status.label)}${profile.source === "native" ? " · 系统 Chrome 扩展" : ""}"  ${profile.id === selectedId ? "selected" : ""}>${e(profile.name)}${profile.source === "native" ? " · 系统 Chrome 扩展" : ""} — ${status.label}</option>`;
-  }).join("") : `<option value="" disabled>${profilesError ? "浏览器列表读取失败" : "正在读取浏览器列表…"}</option>`;
+  }).join("") : `<option value="" disabled>${profilesError ? "浏览器列表读取失败（仍可选择不绑定浏览器）" : "正在读取浏览器列表…"}</option>`;
+  return `${deviceOption}${browserOptions}`;
 }
 function profileAvailabilityHint(id: string): string {
   const candidates = taskProfiles();
@@ -337,7 +340,7 @@ function taskSidebarToggle(): string {
   return `<button id="task-sidebar-toggle" type="button" class="icon-button sidebar-toggle" data-action="toggle-sidebar" aria-controls="task-sidebar" aria-label="${label}" aria-expanded="${!collapsed}" title="${label}">${icon("sidebar")}</button>`;
 }
 function nav(): string {
-  const links = [["templates", "template", "任务模板"], ["schedules", "clock", "定时任务"], ["history", "history", "全部任务"]] as const;
+  const links = [["materials", "folder", "资料与附件"], ["templates", "template", "任务模板"], ["schedules", "clock", "定时任务"], ["history", "history", "全部任务"]] as const;
   return `<aside id="task-sidebar" class="sidebar${narrowSidebarOpen ? " task-sidebar-visible" : ""}" aria-label="任务侧栏">
     ${sidebarResizeHandle("tasks", "task-sidebar", "调整任务侧栏宽度")}
     <div class="task-sidebar-heading"><h1>Agent<span aria-hidden="true">.</span></h1></div>
@@ -352,13 +355,13 @@ function nav(): string {
     <div class="sidebar-footer"><button class="nav-item ${view === "settings" ? "active" : ""}" data-nav="settings" title="Agent 设置">${icon("settings")}<span>Agent 设置</span></button></div>
   </aside>`;
 }
-function formExtras(label = "任务选项", open = false): string { return `<details class="details" ${open ? "open" : ""}><summary>${label} <span class="details-hint">资料、授权与运行限制</span></summary><div class="field"><label>模板名称（保存模板时使用）</label><input name="templateName" placeholder="留空则使用任务描述"></div><div class="grid-two"><div><label>使用已保存的资料</label>${data.materials.length ? data.materials.map((material) => `<label><input type="checkbox" name="material" value="${e(material.id)}">${e(material.name)} · v${material.version}</label>`).join("") : '<small>尚未添加资料，可在“资料”中保存。</small>'}</div><div><label>选择附件库中的文件</label>${data.attachments.map(file => `<label><input type="checkbox" name="attachment" value="${e(file.id)}" ${selectedFiles.includes(file.id) ? "checked" : ""}>${e(file.name)}</label>`).join("") || "<small>可先添加附件。</small>"}<br><label for="authorization">操作授权范围</label><textarea id="authorization" name="authorization" placeholder="例如：填写后让我确认再提交"></textarea></div></div><div class="field"><label for="grant-origin">允许自动执行的网站来源（可选）</label><input id="grant-origin" name="grantOrigin" type="url" placeholder="https://example.com"><small>系统 Chrome 未收紧权限时默认直接执行；以下额度用于其他连接或需要确认的模式。</small><div class="actions"><label><input type="checkbox" name="grantEffect" value="submit">允许提交 / 保存</label><label><input type="checkbox" name="grantEffect" value="send">允许发送</label><label><input type="checkbox" name="grantEffect" value="delete">允许删除</label></div><label>最多自动执行次数</label><input name="grantMax" type="number" min="1" max="500" value="10"><br><br><label for="items">批量项目（每行一项，可留空）</label><textarea id="items" name="items" placeholder="公司 / 岗位 / 链接，或逐项填写要求"></textarea></div><div class="grid-three"><div><label>时间上限（分钟）</label><input name="minutes" type="number" min="1" max="1440" value="30"></div><div><label>操作次数上限</label><input name="actions" type="number" min="1" max="10000" value="200"></div><div><label>主模型估算费用上限（USD）</label><input name="budgetUsd" type="number" min="0.01" max="1000" step="0.01" value="5"></div></div></details>`; }
+function formExtras(label = "任务选项", open = false): string { return `<details class="details" ${open ? "open" : ""}><summary>${label} <span class="details-hint">资料、授权与运行限制</span></summary><div class="grid-two"><div class="field"><label>模板名称（保存模板时使用）</label><input name="templateName" placeholder="留空则使用任务描述"></div><div class="field"><label for="task-mode">执行权限模式</label><select id="task-mode" name="mode"><option value="">默认执行（普通编辑免确认）</option><option value="manual">逐步确认（变更动作需批准）</option><option value="plan">只读规划（仅观察与计划）</option></select></div></div><div class="grid-two"><div><label>使用已保存的资料</label>${data.materials.length ? data.materials.map((material) => `<label><input type="checkbox" name="material" value="${e(material.id)}">${e(material.name)} · v${material.version}</label>`).join("") : '<small>尚未添加资料，可在“资料与附件”中保存。</small>'}</div><div><label>选择附件库中的文件</label>${data.attachments.map(file => `<label><input type="checkbox" name="attachment" value="${e(file.id)}" ${selectedFiles.includes(file.id) ? "checked" : ""}>${e(file.name)}</label>`).join("") || "<small>可先添加附件。</small>"}<br><label for="authorization">操作授权范围</label><textarea id="authorization" name="authorization" placeholder="例如：填写后让我确认再提交"></textarea></div></div><div class="field"><label for="grant-origin">允许自动执行的网站来源（可选）</label><input id="grant-origin" name="grantOrigin" type="url" placeholder="https://example.com"><small>系统 Chrome 未收紧权限时默认直接执行；以下额度用于其他连接或需要确认的模式。</small><div class="actions"><label><input type="checkbox" name="grantEffect" value="submit">允许提交 / 保存</label><label><input type="checkbox" name="grantEffect" value="send">允许发送</label><label><input type="checkbox" name="grantEffect" value="delete">允许删除</label></div><label>最多自动执行次数</label><input name="grantMax" type="number" min="1" max="500" value="10"><br><br><label for="items">批量项目（每行一项，可留空）</label><textarea id="items" name="items" placeholder="公司 / 岗位 / 链接，或逐项填写要求"></textarea></div><div class="grid-three"><div><label>时间上限（分钟）</label><input name="minutes" type="number" min="1" max="1440" value="30"></div><div><label>操作次数上限</label><input name="actions" type="number" min="1" max="10000" value="200"></div><div><label>主模型估算费用上限（USD）</label><input name="budgetUsd" type="number" min="0.01" max="1000" step="0.01" value="5"></div></div></details>`; }
 function composer(): string {
   const shortcut = "Enter";
   return `<div class="compose"><form id="create-task" class="composer task-composer" data-draft-key="${e(draftKey("", "create-task"))}"><div class="compose-scroll" tabindex="-1" aria-label="任务内容"><div class="compose-intro"><h2>${creatingTemplate ? "新建任务模板" : "今天，想完成什么？"}</h2><p>${creatingTemplate ? "填写模板名称和任务内容，保存后即可重复使用。" : "告诉 Agent 你的目标，剩下的一起完成。"}</p></div>
     ${!data.settings.hasApiKey ? '<div class="notice setup-notice"><span>连接模型服务，即可开始第一个任务。</span><button type="button" data-nav="settings" data-focus="model">前往设置 →</button></div>' : ""}
     ${skillForm(formDraft?.skill, data.skills || [])}
-    <div class="compose-template-settings" ${creatingTemplate || editTemplate || formDraft?.skill ? "" : "hidden"}>${formExtras("模板设置", creatingTemplate)}</div>
+    <div class="compose-template-settings">${formExtras(creatingTemplate || editTemplate ? "模板设置" : "任务选项", Boolean(creatingTemplate || editTemplate))}</div>
     ${nativeTaskOptions()}
     ${data.tasks.some(task => !TERMINAL_TASKS.has(task.status)) ? `<section class="home-active"><h2>正在进行</h2>${rows(data.tasks.filter(task => !TERMINAL_TASKS.has(task.status)))}</section>` : ""}
     </div><div class="compose-dock"><div class="compose-input-shell"><label for="prompt" class="sr-only">告诉我你想完成什么</label><textarea id="prompt" name="prompt" data-editor-key="${e(draftKey("", "create-task"))}" data-autogrow data-autogrow-min="44" aria-describedby="task-compose-shortcuts" required placeholder="${creatingTemplate ? "描述这个模板要完成的任务…" : "让浏览器帮你完成一件事…"}" rows="1">${e(messageDrafts.get(draftKey("", "create-task")).text)}</textarea><span id="task-compose-shortcuts" class="sr-only">${e(newlineHint)}</span>
@@ -394,10 +397,15 @@ function toggleTaskInspector(): void {
   }
   mountTaskPreview();
 }
+function taskSessionActions(task: BrowserTask): string {
+  const busy = ["running", "queued"].includes(task.status);
+  const currentMode = task.mode || "acceptEdits";
+  return `<select class="task-mode-select" data-task-mode="${e(task.id)}" aria-label="执行权限模式" ${busy ? "disabled" : ""}><option value="acceptEdits" ${currentMode === "acceptEdits" ? "selected" : ""}>默认执行</option><option value="manual" ${currentMode === "manual" ? "selected" : ""}>逐步确认</option><option value="plan" ${currentMode === "plan" ? "selected" : ""}>只读规划</option></select><button type="button" data-action="compact-task" ${busy ? "disabled" : ""} title="将较早历史压缩为摘要以节省上下文">压缩上下文</button><button type="button" data-action="fork-task" ${busy ? "disabled" : ""} title="从当前会话创建独立分支对话">分支对话</button>`;
+}
 function taskDetail(task: BrowserTask): string {
   const hit = searchTerm.trim() ? searchHits.get(task.id) : undefined;
   const evidence = hit?.id === "task-evidence" ? `<section id="task-evidence" class="panel"><h3>匹配的页面证据</h3><p class="material-body">${e(hit.text)}</p></section>` : "";
-  return `<header id="task-context" class="thread-heading">${taskSidebarToggle()}<h2 title="${e(task.title)}">${e(task.title)}</h2><span class="pill ${task.status}">${e(statusNames[task.status])}</span><div class="header-actions">${taskQuickControls(task)}${inspectorToggle()}${historyActions()}</div></header>` + evidence + workbenchThread(task, { drafts: messageDrafts, attachments: data.attachments, settings: data.settings, hint: newlineHint, status: statusNames[task.status], inspector: inspectorOpen, stream: data.streams?.[task.id], replyError: task.pending ? replyErrors.get(task.pending.id) : undefined });
+  return `<header id="task-context" class="thread-heading">${taskSidebarToggle()}<h2 title="${e(task.title)}">${e(task.title)}</h2><span class="pill ${task.status}">${e(statusNames[task.status])}</span><div class="header-actions">${taskQuickControls(task)}${taskSessionActions(task)}${inspectorToggle()}${historyActions()}</div></header>` + evidence + workbenchThread(task, { drafts: messageDrafts, attachments: data.attachments, settings: data.settings, hint: newlineHint, status: statusNames[task.status], inspector: inspectorOpen, stream: data.streams?.[task.id], replyError: task.pending ? replyErrors.get(task.pending.id) : undefined });
 }
 
 function materials(): string {
@@ -421,7 +429,8 @@ function jevSettings(): string {
     <div class="actions"><button type="button" data-action="jev-billing">充值 / 查看余额 ↗</button><button type="button" data-action="jev-keys">创建 API Key ↗</button></div></form>`;
 }
 function settings(): string { const s = data.settings; return `${toolbar("Agent 设置", "Agent & privacy", '<button class="primary return-agent" data-action="return-agent">← 返回 Agent 对话</button>')}<div class="settings-wrap">${appearanceControls()}<section class="panel"><div class="panel-header"><h2>长期记忆</h2><button type="button" data-action="memory">管理记忆</button></div><p class="muted">同一 Profile 的任务共享稳定偏好和已确认的信息。可按 Profile 停用，或查看、编辑和删除记忆。</p></section>${nativeBrowserSettings(profiles?.profiles || [], browserData.nativeBrowsers || [], nativePairing, nativeAuthorization, browserData.nativeInstallations || [], browserData.nativeService)}<form id="settings-form"><section class="panel"><h2>模型服务</h2><p class="muted">使用 API 密钥连接。任务所需的网页、资料和附件信息会发送给你配置的模型服务。</p><div class="field"><label for="model">模型名称</label><input id="model" name="model" value="${e(s.model)}" required></div><div class="field"><label for="baseUrl">API 地址</label><input id="baseUrl" name="baseUrl" value="${e(s.baseUrl)}" required type="url"></div><div class="field"><label for="authMode">鉴权方式</label><select id="authMode" name="authMode"><option value="" ${!s.authMode ? "selected" : ""}>自动选择</option><option value="apiKey" ${s.authMode === "apiKey" ? "selected" : ""}>API Key（x-api-key）</option><option value="bearer" ${s.authMode === "bearer" ? "selected" : ""}>Bearer Token</option></select></div><div class="field"><label for="apiKey">API 密钥 · ${s.hasApiKey ? "已由系统安全存储保护，留空保留" : "尚未配置"}</label><input id="apiKey" name="apiKey" type="password" autocomplete="new-password" placeholder="输入密钥后保存"></div><div class="actions"><button class="primary">保存设置</button><button type="button" data-action="test-connection">测试连接</button><button type="button" data-action="clear-key" class="danger">删除密钥</button></div></section><section class="panel"><h2>运行与记录</h2><div class="grid-two"><div class="field"><label>不同 Profile 的并发任务数</label><input name="maxConcurrent" type="number" min="1" max="6" value="${s.maxConcurrent}"></div><p class="muted">历史会话和产物会保留，直到你显式删除任务。关闭窗口后任务留在后台；退出应用会停止任务服务。</p></div><label><input name="saveScreenshots" type="checkbox" ${s.saveScreenshots ? "checked" : ""}>按需保存页面截图（可能包含个人信息）</label><label><input name="notifications" type="checkbox" ${s.notifications ? "checked" : ""}>需要处理或任务结束时发送桌面通知</label></section></form>${jevSettings()}<section class="panel"><h2>诊断导出</h2><p class="muted">仅导出任务状态、时间、用量及动作类型，不包含密钥、对话、网页内容、个人资料或附件路径。</p><button data-action="export-diagnostics">导出脱敏诊断</button></section></div>`; }
-function schedules(): string { return `${toolbar("定时任务", "Schedules")}<div class="notice">仅在本机应用运行时执行。错过计划会标记未执行，不会自动补交。执行时间按所选时区显示。</div><div class="grid-two"><form id="schedule-form" class="panel"><h2>${editSchedule ? "编辑计划" : "安排任务"}</h2><div class="field"><label>任务名称</label><input name="name" required></div><div class="field"><label>操作要求</label><textarea name="prompt" required></textarea></div><div class="field"><label>使用浏览器</label><select name="profileId" aria-describedby="schedule-profile-availability" required><option value="">选择浏览器</option>${profileOptions("", true)}</select>${profileAvailabilityHint("schedule-profile-availability")}</div><div class="field"><label>执行时间（按下方时区）</label><input name="at" type="datetime-local" required></div><div class="grid-two"><div class="field"><label>时区</label><input name="timezone" value="${e(Intl.DateTimeFormat().resolvedOptions().timeZone)}" required></div><div class="field"><label>重复</label><select name="repeat"><option value="once">仅一次</option><option value="daily">每天</option></select></div></div>${formExtras()}<button class="primary">保存计划</button>${editSchedule ? '<button type="button" data-action="clear-schedule">取消编辑</button>' : ""}</form><div>${data.schedules.map((schedule) => `<section class="panel"><div class="panel-header"><h2>${e(schedule.name)}</h2><span class="pill">${schedule.enabled ? "已启用" : "已停用"}</span></div><p>${e(schedule.task.prompt)}</p><p class="muted">${e(new Date(schedule.at).toLocaleString("zh-CN", { timeZone: schedule.timezone }))} · ${e(schedule.timezone)}<br>${schedule.repeat === "daily" ? "每天" : "仅一次"}</p>${schedule.missedAt ? '<p class="notice">错过计划，未执行</p>' : ""}${schedule.lastTaskId ? `<button data-task="${schedule.lastTaskId}">查看上次结果</button>` : ""}<div class="actions"><button data-edit-schedule="${schedule.id}">编辑</button><button data-toggle-schedule="${schedule.id}">${schedule.enabled ? "暂停计划" : "重新启用"}</button><button data-delete-schedule="${schedule.id}" class="danger">删除</button></div></section>`).join("") || '<div class="empty">还没有安排定时任务。</div>'}</div></div>`; }
+const repeatNames: Record<ScheduleRepeat, string> = { once: "仅一次", daily: "每天", weekdays: "工作日", weekly: "每周" };
+function schedules(): string { return `${toolbar("定时任务", "Schedules")}<div class="notice">仅在本机应用运行时执行。可选择“跳过错过时间”或“唤醒后补跑（6 小时内）”。执行时间按所选时区显示。</div><div class="grid-two"><form id="schedule-form" class="panel"><h2>${editSchedule ? "编辑计划" : "安排任务"}</h2><div class="field"><label>任务名称</label><input name="name" required></div><div class="field"><label>操作要求</label><textarea name="prompt" required></textarea></div><div class="field"><label>使用浏览器 / 设备模式</label><select name="profileId" aria-describedby="schedule-profile-availability" required><option value="">选择浏览器或设备模式</option>${profileOptions("", true)}</select>${profileAvailabilityHint("schedule-profile-availability")}</div><div class="field"><label>执行时间（按下方时区）</label><input name="at" type="datetime-local" required></div><div class="grid-three"><div class="field"><label>时区</label><input name="timezone" value="${e(Intl.DateTimeFormat().resolvedOptions().timeZone)}" required></div><div class="field"><label>重复</label><select name="repeat"><option value="once">仅一次</option><option value="daily">每天</option><option value="weekdays">工作日</option><option value="weekly">每周</option></select></div><div class="field"><label>错过计划时</label><select name="catchUpPolicy"><option value="skip">跳过错过时间</option><option value="run_within_window">唤醒后补跑（6 小时内）</option></select></div></div>${formExtras()}<button class="primary">保存计划</button>${editSchedule ? '<button type="button" data-action="clear-schedule">取消编辑</button>' : ""}</form><div>${data.schedules.map((schedule) => `<section class="panel"><div class="panel-header"><h2>${e(schedule.name)}</h2><span class="pill">${schedule.enabled ? "已启用" : "已停用"}</span></div><p>${e(schedule.task.prompt)}</p><p class="muted">${e(new Date(schedule.at).toLocaleString("zh-CN", { timeZone: schedule.timezone }))} · ${e(schedule.timezone)}<br>${repeatNames[schedule.repeat] || "仅一次"} · ${schedule.catchUpPolicy === "run_within_window" ? "唤醒后补跑（6 小时内）" : "跳过错过时间"}</p>${schedule.missedAt ? '<p class="notice">错过计划，未执行</p>' : ""}${schedule.lastTaskId ? `<button data-task="${schedule.lastTaskId}">查看上次结果</button>` : ""}<div class="actions"><button data-edit-schedule="${schedule.id}">编辑</button><button data-toggle-schedule="${schedule.id}">${schedule.enabled ? "暂停计划" : "重新启用"}</button><button data-delete-schedule="${schedule.id}" class="danger">删除</button></div></section>`).join("") || '<div class="empty">还没有安排定时任务。</div>'}</div></div>`; }
 function updateTaskChat(immediate = false): void {
   const task = taskData.get(selected);
   if (!task || !document.getElementById("task-chat")) { taskChat.dispose(); return; }
@@ -474,19 +483,12 @@ function render(preserve = true): void {
   taskMenus.refresh();
   const inspector = root.querySelector(".thread-inspector"); if (inspector && preserve) inspector.scrollTop = inspectorScroll;
   mountTaskPreview();
-  if (!profiles) {
-    root.querySelectorAll<HTMLSelectElement>('select[name="profileId"]').forEach(select => {
-      select.disabled = true;
-      select.options[0].textContent = profilesError ? "浏览器列表读取失败" : "正在读取浏览器列表…";
-    });
-    root.querySelectorAll<HTMLButtonElement>("#create-task button.primary, #schedule-form button.primary").forEach(button => button.disabled = true);
-    if (profilesError) {
-      const notice = document.createElement("div");
-      notice.className = "notice";
-      notice.innerHTML = '浏览器列表读取失败。<button type="button">重新读取</button>';
-      notice.querySelector("button")!.addEventListener("click", () => { void loadProfiles(); });
-      root.querySelector(".workspace")!.prepend(notice);
-    }
+  if (!profiles && profilesError) {
+    const notice = document.createElement("div");
+    notice.className = "notice";
+    notice.innerHTML = '浏览器列表读取失败（仍可选择“不绑定浏览器”操作本机设备）。<button type="button">重新读取</button>';
+    notice.querySelector("button")!.addEventListener("click", () => { void loadProfiles(); });
+    root.querySelector(".workspace")!.prepend(notice);
   }
   if (!preserve && view === "tasks" && formDraft) {
     const form = root.querySelector<HTMLFormElement>("#create-task");
@@ -499,7 +501,7 @@ function render(preserve = true): void {
       populateTaskForm(form, schedule.task);
       const parts = new Intl.DateTimeFormat("sv-SE", { timeZone: schedule.timezone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(schedule.at));
       const value = (type: string): string => parts.find(part => part.type === type)?.value || "";
-      const fields = { name: schedule.name, timezone: schedule.timezone, repeat: schedule.repeat, at: `${value("year")}-${value("month")}-${value("day")}T${value("hour")}:${value("minute")}` };
+      const fields = { name: schedule.name, timezone: schedule.timezone, repeat: schedule.repeat, catchUpPolicy: schedule.catchUpPolicy || "skip", at: `${value("year")}-${value("month")}-${value("day")}T${value("hour")}:${value("minute")}` };
       for (const [name, value] of Object.entries(fields)) (form.elements.namedItem(name) as HTMLInputElement).value = value;
     }
   }
@@ -555,7 +557,7 @@ function populateTaskForm(form: HTMLFormElement, input: CreateTaskInput): void {
   if (nativeTarget) nativeTarget.value = input.nativeTarget?.newTab ? "new" : "current";
   const nativeConfirm = form.elements.namedItem("nativeConfirmActions") as HTMLInputElement | null;
   if (nativeConfirm) nativeConfirm.checked = input.nativeAccess?.confirmActions === true;
-  const values: Record<string, string | number | undefined> = { prompt: input.prompt, profileId: input.profileId, authorization: input.authorization, items: input.items?.join("\n"), minutes: input.limits?.minutes, actions: input.limits?.actions, budgetUsd: input.limits?.budgetUsd, grantOrigin: input.grant?.origin, grantMax: input.grant?.maxActions };
+  const values: Record<string, string | number | undefined> = { prompt: input.prompt, profileId: input.profileId, mode: input.mode || "", authorization: input.authorization, items: input.items?.join("\n"), minutes: input.limits?.minutes, actions: input.limits?.actions, budgetUsd: input.limits?.budgetUsd, grantOrigin: input.grant?.origin, grantMax: input.grant?.maxActions };
   for (const [name, value] of Object.entries(values)) { const field = form.elements.namedItem(name) as HTMLInputElement | null; if (field && value !== undefined && !field.hasAttribute("data-editor-key") && field.value !== String(value)) field.value = String(value); }
   form.querySelectorAll<HTMLInputElement>("[name=material],[name=attachment],[name=grantEffect]").forEach(field => {
     const values: string[] = field.name === "material" ? input.materialIds || [] : field.name === "attachment" ? input.attachmentIds || [] : input.grant?.effects || [];
@@ -564,7 +566,9 @@ function populateTaskForm(form: HTMLFormElement, input: CreateTaskInput): void {
 }
 function formInput(form: HTMLFormElement): CreateTaskInput {
   const f = new FormData(form);
-  return { skill: skillFromForm(f) || (form.id === "schedule-form" ? data.schedules.find(item => item.id === editSchedule)?.task.skill : undefined), ...nativeTaskInput(f), prompt: String(f.get("prompt") || ""), profileId: String(f.get("profileId") || ""), authorization: String(f.get("authorization") || ""), materialIds: f.getAll("material").map(String), attachmentIds: [...new Set([...selectedFiles, ...f.getAll("attachment").map(String)])],
+  const modeValue = String(f.get("mode") || "").trim();
+  const mode = (["manual", "plan", "acceptEdits"].includes(modeValue) ? modeValue : undefined) as TaskPermissionMode | undefined;
+  return { skill: skillFromForm(f) || (form.id === "schedule-form" ? data.schedules.find(item => item.id === editSchedule)?.task.skill : undefined), ...nativeTaskInput(f), ...(mode ? { mode } : {}), prompt: String(f.get("prompt") || ""), profileId: String(f.get("profileId") || ""), authorization: String(f.get("authorization") || ""), materialIds: f.getAll("material").map(String), attachmentIds: [...new Set([...selectedFiles, ...f.getAll("attachment").map(String)])],
     grant: f.get("grantOrigin") ? { origin: String(f.get("grantOrigin")), effects: f.getAll("grantEffect").map(String) as Array<"submit" | "send" | "delete">, maxActions: Number(f.get("grantMax")) } : undefined,
     items: String(f.get("items") || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean),
     limits: { minutes: Number(f.get("minutes")), actions: Number(f.get("actions")), budgetUsd: Number(f.get("budgetUsd")) } };
@@ -584,7 +588,7 @@ function showFieldError(field: HTMLInputElement, focus: boolean): void {
   let error = document.getElementById(id);
   if (!error) { error = document.createElement("p"); error.id = id; error.className = "field-error"; error.setAttribute("role", "alert"); anchor.after(error); }
   error.textContent = field.validity.valueMissing ? "请填写此项。" : field.validationMessage;
-  if (field.name === "profileId" && field.validity.valueMissing) error.textContent = "请选择一个空闲浏览器。";
+  if (field.name === "profileId" && field.validity.valueMissing) error.textContent = "请选择浏览器或“不绑定浏览器”模式。";
   control.setAttribute("aria-invalid", "true");
   control.setAttribute("aria-describedby", id);
   if (focus && !validationFocusQueued) {
@@ -656,7 +660,7 @@ root.addEventListener("click", async (event) => {
   }
   if (d.revokePermission) { const id = selected; void act(() => api.permissions(id, d.revokePermission), false, `task:${id}`, "撤销会话授权"); return; }
   if (d.action === "export-readable") { const id = selected; void act(async () => { const path = await api.exportData("task-markdown", id); if (path) toast(`已导出：${path}`); }, false, `task:${id}`, "导出可读任务记录"); return; }
-  if (d.usageSource && ["all", "model", "jev", "helper"].includes(d.usageSource)) { usageSource = d.usageSource as TokenSource; render(); root.querySelector<HTMLButtonElement>(`[data-usage-source="${usageSource}"]`)?.focus({ preventScroll: true }); return; }
+  if (d.usageSource && ["all", "model", "jev", "helper", "review"].includes(d.usageSource)) { usageSource = d.usageSource as TokenSource; render(); root.querySelector<HTMLButtonElement>(`[data-usage-source="${usageSource}"]`)?.focus({ preventScroll: true }); return; }
   if (d.action === "preset-deepseek") {
     const form = document.getElementById("settings-form") as HTMLFormElement;
     const set = (name: string, value: string) => { (form.elements.namedItem(name) as HTMLInputElement | HTMLSelectElement).value = value; };
@@ -771,6 +775,20 @@ root.addEventListener("click", async (event) => {
     if (d.deleteSchedule) { await api.deleteSchedule(d.deleteSchedule); if (editSchedule === d.deleteSchedule) { forgetForm("schedule-form"); editSchedule = ""; render(false); } toast("定时任务已删除。"); }
     if (d.toggleSchedule) { const schedule = data.schedules.find((item) => item.id === d.toggleSchedule)!; await api.saveSchedule({ ...schedule, enabled: !schedule.enabled }); }
     switch (d.action) {
+      case "compact-task": {
+        if (typeof api.compact !== "function") throw new Error("当前桌面桥接尚未加载压缩上下文接口，请重启应用后重试。");
+        toast("正在压缩对话上下文…");
+        const compacted = await api.compact(targetTask);
+        toast(`上下文已压缩（${compacted.beforeCharacters} → ${compacted.afterCharacters} 字）。`);
+        break;
+      }
+      case "fork-task": {
+        if (typeof api.fork !== "function") throw new Error("当前桌面桥接尚未加载分支对话接口，请重启应用后重试。");
+        const branch = await api.fork(targetTask);
+        selected = branch.id; view = "tasks";
+        toast("已从当前会话创建分支对话。");
+        break;
+      }
       case "retry-items": { const ids = [...root.querySelectorAll<HTMLInputElement>("[name=retryItem]:checked")].map(input => input.value); const task = await api.retryItems(targetTask, ids); if (selected === targetTask) { selected = task.id; view = "tasks"; } break; }
       case "save-template": { const form = root.querySelector<HTMLFormElement>("#create-task")!; const task = formInput(form); const name = String(new FormData(form).get("templateName") || task.prompt.slice(0, 48)); const savingDraft = formDraft; const saved = await api.saveTemplate({ id: editTemplate || undefined, name, task }); if (formDraft === savingDraft) { editTemplate = saved.id; formDraft = saved.task; creatingTemplate = false; } toast("模板已保存，可在任务模板中重复使用。"); break; }
       case "save-task-template": { const task = taskData.get(targetTask)!; await api.saveTemplate({ name: task.title, task: { skill: task.skill ? { id: task.skill.id, parameters: task.skill.parameters } : undefined, prompt: task.prompt, profileId: task.profileId, nativeTarget: task.nativeTarget, nativeAccess: task.nativeAccess, authorization: task.authorization, materialIds: task.materials.map(item => item.id), attachmentIds: task.attachments.map(item => item.id), items: task.items.map(item => item.label), limits: task.limits, grant: task.grant } }); toast("已保存为任务模板。"); break; }
@@ -887,9 +905,21 @@ root.addEventListener("submit", (event) => {
   event.preventDefault(); const form = event.target as HTMLFormElement; const values = new FormData(form);
   if (form.id === "create-task" && creatingTemplate) { form.querySelector<HTMLButtonElement>(".save-template-primary")?.click(); return; }
   if (["create-task", "reply-task", "steer-task"].includes(form.id)) { submitMessage(form, (event as SubmitEvent).submitter); return; }
-  if (form.id === "task-limits-form" || form.id === "task-model-form") {
+  if (form.id === "task-limits-form" || form.id === "task-model-form" || form.id === "task-mode-form") {
     const id = form.dataset.taskId!;
-    void act(() => form.id === "task-model-form" ? api.setModel(id, String(values.get("model"))) : api.setLimits(id, { minutes: Number(values.get("minutes")), actions: Number(values.get("actions")), budgetUsd: Number(values.get("budgetUsd")) }), false, `task:${id}`, "更新会话设置"); return;
+    void act(async () => {
+      if (form.id === "task-mode-form") {
+        if (typeof api.setMode !== "function") throw new Error("当前桌面桥接尚未加载权限模式接口，请重启应用后重试。");
+        await api.setMode(id, String(values.get("mode")) as TaskPermissionMode);
+        toast("执行权限模式已更新。");
+      } else if (form.id === "task-model-form") {
+        await api.setModel(id, String(values.get("model")));
+        toast("会话模型已更新。");
+      } else {
+        await api.setLimits(id, { minutes: Number(values.get("minutes")), actions: Number(values.get("actions")), budgetUsd: Number(values.get("budgetUsd")) });
+        toast("运行上限已更新。");
+      }
+    }, false, `task:${id}`, "更新会话设置"); return;
   }
   void act(async () => {
     if (form.id === "material-form") { await api.saveMaterial({ id: editMaterial || undefined, name: String(values.get("name")), scope: String(values.get("scope")), content: String(values.get("content")) }); forgetForm("material-form"); form.reset(); editMaterial = ""; render(false); toast("资料已保存。"); }
@@ -900,7 +930,7 @@ root.addEventListener("submit", (event) => {
       forgetForm("jev-settings-form"); toast("Jev 设置已保存。");
     }
     if (form.id === "settings-form") { await api.saveSettings({ model: String(values.get("model")), baseUrl: String(values.get("baseUrl")), authMode: (String(values.get("authMode") || "") || undefined) as "apiKey" | "bearer" | undefined, apiKey: values.get("apiKey") ? String(values.get("apiKey")) : undefined, maxConcurrent: Number(values.get("maxConcurrent")), saveScreenshots: values.has("saveScreenshots"), notifications: values.has("notifications") }); (form.elements.namedItem("apiKey") as HTMLInputElement).value = ""; modelCatalogs.clear(); forgetForm("settings-form"); toast("设置已保存。"); }
-    if (form.id === "schedule-form") { await api.saveSchedule({ id: editSchedule || undefined, name: String(values.get("name")), task: formInput(form), at: zonedLocalToIso(String(values.get("at")), String(values.get("timezone"))), timezone: String(values.get("timezone")), repeat: String(values.get("repeat")) as "once" | "daily", enabled: true }); forgetForm("schedule-form"); pageFiles.delete("schedules"); editSchedule = ""; selectedFiles = []; render(false); toast("计划已保存。"); }
+    if (form.id === "schedule-form") { await api.saveSchedule({ id: editSchedule || undefined, name: String(values.get("name")), task: formInput(form), at: zonedLocalToIso(String(values.get("at")), String(values.get("timezone"))), timezone: String(values.get("timezone")), repeat: String(values.get("repeat")) as ScheduleRepeat, catchUpPolicy: String(values.get("catchUpPolicy") || "skip") as ScheduleCatchUpPolicy, enabled: true }); forgetForm("schedule-form"); pageFiles.delete("schedules"); editSchedule = ""; selectedFiles = []; render(false); toast("计划已保存。"); }
 
   });
 });
@@ -947,6 +977,16 @@ root.addEventListener("change", event => {
     document.documentElement.dataset[theme ? "taskTheme" : "taskFontSize"] = select.value;
     try { localStorage.setItem(theme ? "profilepilot-workspace-theme" : "profilepilot-task-font-size", select.value); } catch { /* Current appearance still applies. */ }
     root.querySelectorAll<HTMLTextAreaElement>("textarea[data-autogrow]").forEach(autoGrow); const workspace = root.querySelector<HTMLElement>(".workspace"); if (workspace) syncTaskScrollInsets(workspace); return;
+  }
+  if (select.dataset.taskMode) {
+    const id = select.dataset.taskMode;
+    const mode = select.value as TaskPermissionMode;
+    void act(async () => {
+      if (typeof api.setMode !== "function") throw new Error("当前桌面桥接尚未加载权限模式接口，请重启应用后重试。");
+      await api.setMode(id, mode);
+      toast("执行权限模式已更新。");
+    }, false, `task:${id}`, "更新执行权限模式");
+    return;
   }
   if (select.name === "sendMode" && select.form) { messageDrafts.set(messageFormKey(select.form), { mode: select.value === "steer" ? "steer" : "queue" }); return; }
   if (select.name === "profileId") updateNativeOptions();

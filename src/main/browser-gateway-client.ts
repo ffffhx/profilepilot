@@ -13,7 +13,7 @@ const DEFAULT_TIMEOUT_MS = 3_000;
 // Replace an older idle daemon, while preserving pipes for open user browsers.
 export const BROWSER_GATEWAY_PROTOCOL_VERSION = 19;
 
-export type GatewayControlRequest =
+export type GatewayControlRequestBody =
   | { action: "ping" }
   | { action: "subscribe" }
   | { action: "attach-electron"; profileId: string; profileName: string; publicPort: number; backendPort: number }
@@ -46,6 +46,10 @@ export type GatewayControlRequest =
       driverKind?: GatewayDriverKind;
       driverLabel?: string;
       restartNonce?: string;
+      targetId?: string;
+      allocateTab?: boolean;
+      allowSharedProfile?: boolean;
+      exclusive?: boolean;
       agent?: string;
       project?: string;
       branch?: string;
@@ -54,6 +58,7 @@ export type GatewayControlRequest =
       action: "control";
       sessionId: string;
       command: "takeover" | "complete" | "return" | "stop";
+      allSessions?: boolean;
       pendingUserAction?: string;
       revealAgentTarget?: boolean;
       preserveDeviceEmulation?: boolean;
@@ -95,9 +100,13 @@ export type GatewayControlRequest =
       targetId?: string;
     }
   | { action: "status" }
-  | { action: "activate-agent-target"; publicPort: number }
+  | { action: "activate-agent-target"; publicPort: number; sessionId?: string }
   | { action: "unregister-profile"; publicPort: number; closeChrome?: boolean }
   | { action: "shutdown" };
+
+export type GatewayControlRequest = GatewayControlRequestBody & {
+  authToken?: string;
+};
 
 export interface GatewayControlResponse {
   ok: boolean;
@@ -133,6 +142,19 @@ export function browserGatewaySocketPath(homeDir = os.homedir()): string {
 
 export function browserGatewaySecretPath(homeDir = os.homedir()): string {
   return path.join(browserGatewayRoot(homeDir), "internal.secret");
+}
+
+export function browserGatewayControlTokenPath(homeDir = os.homedir()): string {
+  return path.join(browserGatewayRoot(homeDir), "control.token");
+}
+
+export function readBrowserGatewayControlToken(homeDir = os.homedir()): string | null {
+  try {
+    const value = readFileSync(browserGatewayControlTokenPath(homeDir), "utf8").trim();
+    return value || null;
+  } catch {
+    return null;
+  }
 }
 
 export function browserGatewayDaemonIdentityPath(sessionId: string, homeDir = os.homedir()): string {
@@ -226,7 +248,11 @@ export function requestBrowserGateway(
         finish(gatewayClientError("GATEWAY_INVALID_RESPONSE", error instanceof Error ? error.message : String(error)));
       }
     });
-    socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
+    socket.once("connect", () => {
+      const authToken = request.authToken ?? readBrowserGatewayControlToken(homeDir);
+      const wireRequest = authToken ? { ...request, authToken } : request;
+      socket.write(`${JSON.stringify(wireRequest)}\n`);
+    });
   });
 }
 
@@ -264,7 +290,11 @@ export function subscribeBrowserGatewayEvents(
   };
 
   socket.setEncoding("utf8");
-  socket.once("connect", () => socket.write(`${JSON.stringify({ action: "subscribe" })}\n`));
+  socket.once("connect", () => {
+    const authToken = readBrowserGatewayControlToken(homeDir);
+    const wireRequest = authToken ? { action: "subscribe", authToken } : { action: "subscribe" };
+    socket.write(`${JSON.stringify(wireRequest)}\n`);
+  });
   socket.on("data", (chunk) => {
     buffer += chunk;
     if (buffer.length > 4 * 1024 * 1024) {

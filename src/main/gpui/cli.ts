@@ -1,10 +1,12 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import type { Readable } from 'node:stream';
 import type { ProfilePilotManagementCommand, ProfilePilotManagementResponse } from '../profilepilot-management-protocol';
 import { gpuiCommandSchema, gpuiAllowedTools } from './service';
 import { z } from 'zod';
 import { commandGuidance, handleControlCliDiscovery, type ControlCliCommands } from '../control-cli-contract';
 import { gpuiRouting } from '../control-routing';
+import { controlRecovery } from '../../shared/control-recovery';
 
 export const gpuiCommands: ControlCliCommands = {
   list: { summary: '只读发现已接入调试桥的 GPUI 实例', options: ['--json'], example: ['list'] },
@@ -13,7 +15,7 @@ export const gpuiCommands: ControlCliCommands = {
   configure: { summary: '配置实际 gpui-mcp 后端路径', options: ['--json', '--backend'], required: ['--backend'], example: ['configure', '--backend', 'ABSOLUTE_BACKEND_PATH'], notes: ['Windows 使用 .exe，macOS 使用本机可执行文件；不照抄另一平台路径。'] },
   claim: { summary: '选择已发现的真实实例', options: ['--json', '--target', '--session'], required: ['--target', '--session'], example: ['claim', '--target', 'TARGET_ID_FROM_LIST', '--session', 'TASK'] },
   snapshot: { summary: '读取元素树与新 observation', options: ['--json', '--session'], required: ['--session'], example: ['snapshot', '--session', 'TASK'] },
-  call: { summary: '调用 GPUI 工具；输入后默认返回新观察', options: ['--json', '--session', '--tool', '--params-file', '--observation', '--output', '--no-observe'], required: ['--session', '--tool'], example: ['call', '--session', 'TASK', '--tool', 'get_element', '--params-file', './element.json'],
+  call: { summary: '调用 GPUI 工具；输入后默认返回新观察', options: ['--json', '--session', '--tool', '--params', '--params-file', '--params-stdin', '--observation', '--output', '--no-observe'], required: ['--session', '--tool'], example: ['call', '--session', 'TASK', '--tool', 'get_element', '--params-file', './element.json'],
     input: z.toJSONSchema(gpuiCommandSchema.shape.params.unwrap(), { io: 'input' }),
     notes: ['先用 ppilot gpui schema TOOL_NAME 读取已安装后端的实际参数 schema；例如 ppilot gpui schema click_element。此只读查询不选择实例或取得控制权。', '只读：ping/get_element/get_element_bounds/find_elements/screenshot/screenshot_element/screenshot_region/get_logs/get_frame_report/get_frame_stats/get_performance_report/list_app_commands/get_text_info/get_value/get_element_state。', '输入：click_element/double_click_element/hover_element/drag_element/focus_element/keyboard/type_text/set_text/set_value/scroll；调试：highlight_elements/clear_highlights/record_performance。输入及调试必须提供最新 --observation。', '参数文件 UTF-8（兼容 BOM），最大 64 KiB；--output 保存 PNG，文件已存在时不覆盖。'] },
   handoff: { summary: '交给用户并保留会话', options: ['--json', '--session'], required: ['--session'], example: ['handoff', '--session', 'TASK'] },
@@ -51,13 +53,34 @@ get_performance_report、list_app_commands、get_text_info、get_value、get_ele
 超时 / 断线 / 接管后的在途操作可能已执行，不自动重放。退出码 75 表示需核查。
 任意未接入调试桥的 GPUI 应用不会被发现。接入说明见 docs/gpui-debug.md。
 `;
+function normalizeGpuiArgs(args: string[]): string[] {
+  const leading: string[] = [];
+  let i = 0;
+  while (i < args.length && args[i].startsWith('--') && args[i] !== '--help') {
+    const arg = args[i];
+    const name = arg.split('=', 1)[0];
+    if (name === '--json') { leading.push(arg); i++; continue; }
+    if (['--session', '--target'].includes(name)) {
+      leading.push(arg);
+      if (!arg.includes('=') && i + 1 < args.length && !args[i + 1].startsWith('-')) leading.push(args[++i]);
+      i++;
+      continue;
+    }
+    break;
+  }
+  return leading.length && i < args.length && !args[i].startsWith('-')
+    ? [args[i], ...leading, ...args.slice(i + 1)]
+    : args;
+}
+
 type Request = (command: ProfilePilotManagementCommand) => Promise<ProfilePilotManagementResponse>;
-export async function runGpuiCli(args: string[], request: Request, io: Pick<NodeJS.Process, 'stdout' | 'stderr'> = process): Promise<number> {
+export async function runGpuiCli(rawArgs: string[], request: Request, io: Pick<NodeJS.Process, 'stdout' | 'stderr'> = process, input: Readable = process.stdin): Promise<number> {
+  const args = normalizeGpuiArgs(rawArgs);
   try {
     if (args[0] === 'schema' && args[1] && gpuiAllowedTools.includes(args[1])) {
       if (args.slice(2).some(arg => arg !== '--json') || args.filter(arg => arg === '--json').length > 1) throw new Error('工具 schema 仅接受 TOOL_NAME 和 --json。');
       const response = await request({ action: 'gpui', method: 'schema', tool: args[1] });
-      if (!response.ok) { io.stderr.write(JSON.stringify({ ok: false, ...response.error }) + '\n'); return 69; }
+      if (!response.ok) { io.stderr.write(JSON.stringify({ ok: false, ...response.error, recovery: controlRecovery(response.error.code) }) + '\n'); return 69; }
       io.stdout.write(JSON.stringify({ ok: true, result: response.data }) + '\n'); return 0;
     }
     if (handleControlCliDiscovery('gpui', args, gpuiCommands, io)) return 0;
@@ -69,8 +92,8 @@ export async function runGpuiCli(args: string[], request: Request, io: Pick<Node
       if (args[i] === '--json' && !json) { json = true; continue; }
       const match = /^--([a-z-]+)(?:=(.*))?$/s.exec(args[i]);
       if (!match || !permitted[method].includes(match[1]) || values.has(match[1])) throw new Error('未知或重复参数：' + args[i]);
-      if (match[1] === 'no-observe') {
-        if (match[2] !== undefined) throw new Error('--no-observe 不接受值。');
+      if (match[1] === 'no-observe' || match[1] === 'params-stdin') {
+        if (match[2] !== undefined) throw new Error(`--${match[1]} 不接受值。`);
         values.set(match[1], 'true'); continue;
       }
       const value = match[2] ?? args[++i];
@@ -80,23 +103,33 @@ export async function runGpuiCli(args: string[], request: Request, io: Pick<Node
     for (const required of gpuiCommands[method].required || []) if (!values.has(required.slice(2))) throw new Error('需要参数：' + required);
     if (method === 'doctor') {
       const statusResponse = await request({ action: 'gpui', method: 'status' });
-      if (!statusResponse.ok) { io.stderr.write(JSON.stringify({ ok: false, ...statusResponse.error }) + '\n'); return 69; }
+      if (!statusResponse.ok) { io.stderr.write(JSON.stringify({ ok: false, ...statusResponse.error, recovery: controlRecovery(statusResponse.error.code) }) + '\n'); return 69; }
       const listing = await request({ action: 'gpui', method: 'list' });
       const status = statusResponse.data, apps = listing.ok ? (listing.data as any)?.apps || [] : [];
       const routing = gpuiRouting(status, apps, values.get('target'), values.get('session'));
       io.stdout.write(JSON.stringify({ ok: true, result: { status, apps, ...(listing.ok ? {} : { discoveryError: listing.error }) }, routing }) + '\n'); return 0;
     }
     let params: Record<string, unknown> | undefined;
-    if (values.has('params-file')) {
+    const paramSources = Number(values.has('params')) + Number(values.has('params-file')) + Number(values.has('params-stdin'));
+    if (paramSources > 1) throw new Error('请选择且仅选择一种参数来源：--params、--params-file 或 --params-stdin。');
+    if (values.has('params')) {
+      const raw = values.get('params')!;
+      if (Buffer.byteLength(raw, 'utf8') > 65536) throw new Error('参数超过 64 KiB。');
+      params = JSON.parse(raw.replace(/^\uFEFF/, ''));
+    } else if (values.has('params-file')) {
       const file = values.get('params-file')!;
       if ((await fs.stat(file)).size > 65536) throw new Error('参数文件超过 64 KiB。');
       params = JSON.parse((await fs.readFile(file, 'utf8')).replace(/^\uFEFF/, ''));
+    } else if (values.has('params-stdin')) {
+      const chunks: Buffer[] = []; let size = 0;
+      for await (const chunk of input) { const bytes = Buffer.from(chunk); size += bytes.length; if (size > 65536) throw new Error('参数超过 64 KiB。'); chunks.push(bytes); }
+      params = JSON.parse(Buffer.concat(chunks).toString('utf8').replace(/^\uFEFF/, ''));
     }
     const command = gpuiCommandSchema.parse({ action: 'gpui', method, session: values.get('session'), target: values.get('target'), backend: values.get('backend'), tool: values.get('tool'), observation: values.get('observation'), params, pauseId: values.get('pause-id'), observeAfter: values.has('no-observe') ? false : undefined });
     if (values.has('output') && !['screenshot', 'screenshot_element', 'screenshot_region'].includes(command.tool || '')) throw new Error('--output 只用于截图工具；输入动作默认返回语义树。');
     const response = await request(command);
     if (!response.ok) {
-      io.stderr.write(JSON.stringify(response.error) + '\n');
+      io.stderr.write(JSON.stringify({ ok: false, ...response.error, recovery: controlRecovery(response.error.code) }) + '\n');
       return /PAUSED|OCCUPIED|STALE|UNKNOWN|INTERRUPTED|DISCONNECTED|BUSY/.test(response.error.code) ? 75 : /UNAVAILABLE/.test(response.error.code) ? 69 : 1;
     }
     const data = response.data as any;
@@ -107,6 +140,6 @@ export async function runGpuiCli(args: string[], request: Request, io: Pick<Node
       await fs.writeFile(output, Buffer.from(image.data, 'base64'), { flag: 'wx' });
       image.data = undefined; image.path = output;
     }
-    io.stdout.write(JSON.stringify(method === 'status' ? { ...data, routing: gpuiRouting(data, [], undefined, undefined) } : data, null, json ? undefined : 2) + '\n'); return 0;
-  } catch (error) { io.stderr.write(JSON.stringify({ code: 'GPUI_CLI_ERROR', message: (error as Error).message, guidance: commandGuidance('gpui', args[0], gpuiCommands) }) + '\n'); return 2; }
+    io.stdout.write(JSON.stringify(method === 'status' ? { ok: true, ...data, routing: gpuiRouting(data, [], undefined, undefined) } : { ok: true, ...data }, null, json ? undefined : 2) + '\n'); return 0;
+  } catch (error) { io.stderr.write(JSON.stringify({ ok: false, code: 'GPUI_CLI_INVALID_ARGUMENTS', message: (error as Error).message, recovery: controlRecovery('GPUI_CLI_INVALID_ARGUMENTS'), guidance: commandGuidance('gpui', args[0], gpuiCommands) }) + '\n'); return 2; }
 }

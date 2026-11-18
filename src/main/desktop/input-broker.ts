@@ -122,8 +122,8 @@ export class WindowsInputBroker {
     };
     this.timing = { startupTimeoutMs: options.startupTimeoutMs ?? 2000, armTimeoutMs: options.armTimeoutMs ?? 2000,
       browserConfigTimeoutMs: options.browserConfigTimeoutMs ?? 2000,
-      drainTimeoutMs: options.drainTimeoutMs ?? 1000, stopTimeoutMs: options.stopTimeoutMs ?? 750,
-      killTimeoutMs: options.killTimeoutMs ?? 750, restartDelayMs: options.restartDelayMs ?? 1000 };
+      drainTimeoutMs: options.drainTimeoutMs ?? 1000, stopTimeoutMs: options.stopTimeoutMs ?? 2500,
+      killTimeoutMs: options.killTimeoutMs ?? 2500, restartDelayMs: options.restartDelayMs ?? 1000 };
     for (const value of Object.values(this.timing)) if (!Number.isSafeInteger(value) || value < 1 || value > 30000) throw new Error('Input broker deadlines must be 1..30000 ms.');
     this.observer = new DesktopInputObserver({ send: command => this.send(command), onPause: event => this.onObserverPause(event) });
   }

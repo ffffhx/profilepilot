@@ -12,7 +12,8 @@
     "plugin:sync": "node scripts/package-codex-plugin.mjs --sync",
     "plugin:check": "node scripts/package-codex-plugin.mjs --check && node --test tests/codex-plugin-package.test.mjs",
     "plugin:pack": "node scripts/package-codex-plugin.mjs --pack",
-    "build": "node scripts/build-phone-video.mjs --check && npm run build:input-guard && npm run build:input-observer && npm run build:desktop && npm run build:windows-sampler && npm run build:phone-wrapper && tsc && npm run build:browser-engine && npm run bundle:agent-browser-wrapper && npm run bundle:profilepilot-cli && npm run bundle:renderer && npm run build:css && node scripts/build-control-manifest.mjs",
+    "build": "node scripts/build-phone-video.mjs --check && npm run build:input-guard && npm run build:input-observer && npm run build:desktop && npm run build:windows-sampler && npm run build:phone-wrapper && tsc && npm run bundle:preload && npm run build:browser-engine && npm run bundle:agent-browser-wrapper && npm run bundle:profilepilot-cli && npm run bundle:renderer && npm run build:css && node scripts/build-control-manifest.mjs",
+    "bundle:preload": "esbuild src/preload.ts --bundle --platform=node --external:electron --format=cjs --target=node22 --outfile=dist/preload.js --log-level=warning",
     "build:windows-sampler": "node scripts/build-windows-sampler.mjs --production",
     "build:desktop": "node scripts/build-desktop.mjs",
     "build:input-observer": "node scripts/build-input-observer.mjs --production",
@@ -45,7 +46,7 @@
     "e2e:background": "npm run build && node scripts/e2e-main-window.mjs && node scripts/e2e-background-ui.mjs && node scripts/e2e-sync-copy.mjs && node scripts/e2e-visual-regression.mjs && node scripts/e2e-overlay-smoke.mjs",
     "e2e:desktop": "npm run build && node scripts/e2e-desktop-ui.mjs && node scripts/e2e-gateway-control.mjs && node scripts/e2e-mini-window.mjs && node scripts/e2e-input-guard.mjs",
     "e2e:full": "npm run e2e:background && npm run e2e:desktop && npm run e2e:bifrost",
-    "e2e:workspace-recovery": "npm run build && tsc && node scripts/e2e-workspace-recovery.mjs",
+    "e2e:workspace-recovery": "npm run build && node scripts/e2e-workspace-recovery.mjs",
     "e2e:main-window": "npm run build && node scripts/e2e-main-window.mjs",
     "e2e:desktop-ui": "npm run build && node scripts/e2e-desktop-ui.mjs",
     "e2e:mini": "npm run build && node scripts/e2e-mini-window.mjs",
@@ -142,6 +143,14 @@
           "to": "native/ProfilePilot Input Guard.app"
         },
         {
+          "from": "dist/native/profilepilot-desktop-mac",
+          "to": "native/profilepilot-desktop-mac"
+        },
+        {
+          "from": "native/gpui",
+          "to": "native/gpui"
+        },
+        {
           "from": "extensions/profilepilot",
           "to": "profilepilot-extension"
         },
@@ -199,6 +208,10 @@
         {
           "from": "native/input-guard-win.ps1",
           "to": "native/input-guard-win.ps1"
+        },
+        {
+          "from": "native/gpui",
+          "to": "native/gpui"
         },
         {
           "from": "extensions/profilepilot",

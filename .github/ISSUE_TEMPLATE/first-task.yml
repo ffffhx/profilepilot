@@ -1,0 +1,52 @@
+name: 首次使用反馈 / First task feedback
+description: 告诉我们安装、连接或第一次任务卡在哪里。
+title: "[首次使用] "
+body:
+  - type: markdown
+    attributes:
+      value: "请勿提交配对码、令牌、Cookie、账号密码或未脱敏页面。这里是公开反馈。"
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 操作系统 / OS
+      options: [Windows x64, macOS Apple Silicon, macOS Intel, Other]
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: App、CLI 与扩展版本
+      description: 可以粘贴 ppilot --version，并填写扩展管理页显示的版本。
+    validations:
+      required: true
+  - type: dropdown
+    id: stage
+    attributes:
+      label: 进行到哪一步？
+      options: [下载安装, 扩展加载与配对, CLI 或 Skill 安装, 第一次网页任务, Electron 任务, Android 任务, 人工接管与交还]
+    validations:
+      required: true
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: 实际结果
+      options: [完成且已核对, 部分完成, 失败或被阻塞, 尚未开始]
+    validations:
+      required: true
+  - type: textarea
+    id: task
+    attributes:
+      label: 想完成什么？实际发生了什么？
+      description: 提供最少复现步骤、预期结果和实际结果。链接应可公开。
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 错误码与脱敏证据（可选）
+      description: 不需要上传整个日志目录；保留与本次问题有关的最小片段。
+  - type: input
+    id: help
+    attributes:
+      label: 大约用时与人工帮助次数（可选）
+      placeholder: 例如：连接用了 8 分钟，询问维护者 1 次

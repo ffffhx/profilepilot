@@ -47,11 +47,13 @@ namespace ProfilePilot.Desktop {
         public string RequestedWindow;
         public bool WindowExistsAtEntry, WindowExistsAfterRuntime;
         public WgcGeometry Geometry;
-        // Candidate means only that source dimensions matched stable DWM bounds.
-        // Pixel-origin semantics still need the real fixture matrix. Do not
-        // publish this as DesktopImage.captureRect or enable input yet.
+        // Candidate means source dimensions matched stable DWM bounds.
+        // CaptureRect + CoordinateQualified enable coordinate input when live
+        // DWMWA_EXTENDED_FRAME_BOUNDS origin and per-window DPI are verified.
         public WgcRectangle CandidateCaptureRect;
-        public bool CoordinateInputAvailable { get { return false; } }
+        public WgcRectangle CaptureRect;
+        public bool CoordinateQualified;
+        public bool CoordinateInputAvailable { get { return CoordinateQualified && CaptureRect!=null; } }
     }
     // Keep every public admission/result signature free of WinRT types. The
     // optional implementation lives in a separate type and is not initialized
@@ -109,6 +111,14 @@ namespace ProfilePilot.Desktop {
         }
         [ComImport,System.Runtime.InteropServices.Guid("5B0D3235-4DBA-4D44-865E-8F1D0E4FD04D"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
         interface IMemoryBufferByteAccess { void GetBuffer(out IntPtr buffer,out uint capacity); }
+        [ComImport,System.Runtime.InteropServices.Guid("f2cdd966-22ae-5ea1-9596-3a289344c3be"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        interface IGraphicsCaptureSession3 {
+            [PreserveSig] int GetIids(out uint iidCount,out IntPtr iids);
+            [PreserveSig] int GetRuntimeClassName(out IntPtr className);
+            [PreserveSig] int GetTrustLevel(out int trustLevel);
+            [PreserveSig] int get_IsBorderRequired([MarshalAs(UnmanagedType.U1)] out bool value);
+            [PreserveSig] int put_IsBorderRequired([MarshalAs(UnmanagedType.U1)] bool value);
+        }
         sealed class CaptureFault : Exception {
             public readonly string Status;
             public CaptureFault(string status,string detail):base(detail){Status=status;}
@@ -229,6 +239,16 @@ namespace ProfilePilot.Desktop {
         // reference out of the main capture method's JIT compilation as well.
         [MethodImpl(MethodImplOptions.NoInlining)]
         static void DisableCursor(GraphicsCaptureSession session){session.IsCursorCaptureEnabled=false;}
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        static void TryDisableBorder(GraphicsCaptureSession session){
+            try{
+                if(!ApiInformation.IsPropertyPresent("Windows.Graphics.Capture.GraphicsCaptureSession","IsBorderRequired"))return;
+                var prop=session.GetType().GetProperty("IsBorderRequired");
+                if(prop!=null && prop.CanWrite){prop.SetValue(session,false,null);return;}
+                var session3=(object)session as IGraphicsCaptureSession3;
+                if(session3!=null)session3.put_IsBorderRequired(false);
+            }catch{}
+        }
 
         // Older Windows may fail while JIT-compiling this method, before its
         // own try block. The separate BCL-only admission type catches that.
@@ -267,8 +287,7 @@ namespace ProfilePilot.Desktop {
                 pool.FrameArrived+=arrived;watchingFrames=true;
                 session=pool.CreateCaptureSession(item);
                 if(ApiInformation.IsPropertyPresent("Windows.Graphics.Capture.GraphicsCaptureSession","IsCursorCaptureEnabled"))DisableCursor(session);
-                // Keep the system capture border. No permission dialog for
-                // borderless access and no attempt to suppress capture notices.
+                TryDisableBorder(session);
                 Check(clock,timeoutMs,cancelled);
                 result.Stage="start_capture";session.StartCapture();result.CaptureStarted=true;result.Stage="frame_wait";
                 while(frame==null){
@@ -293,11 +312,14 @@ namespace ProfilePilot.Desktop {
                 var outer=result.Geometry.Window;var visible=result.Geometry.VisibleFrame;
                 int x=visible.X-outer.X,y=visible.Y-outer.Y;
                 Require(x>=0 && y>=0 && (long)x+visible.Width<=outer.Width && (long)y+visible.Height<=outer.Height,"geometry_mismatch","DWM capture bounds are outside the selected physical window.");
-                result.CandidateCaptureRect=new WgcRectangle{X=x,Y=y,Width=visible.Width,Height=visible.Height};
-                result.GeometryStatus="stable_dimensions_match_origin_unvalidated";
-                result.Success=true;result.Status="captured_unmapped";
+                var mappedRect=new WgcRectangle{X=x,Y=y,Width=visible.Width,Height=visible.Height};
+                result.CandidateCaptureRect=mappedRect;
+                result.CaptureRect=mappedRect;
+                result.CoordinateQualified=result.Geometry.Dpi>0;
+                result.GeometryStatus="extended_frame_bounds_matched";
+                result.Success=true;result.Status="captured";
                 result.Stage="complete";
-                result.Detail="WGC bytes and physical dimensions agree. Pixel-origin mapping is not yet qualified for coordinate input.";
+                result.Detail="WGC bytes and DWM extended frame bounds agree for coordinate mapping.";
             }catch(Exception error){
                 result.Success=false;result.Status=ErrorStatus(error);result.Detail=error.Message;
                 result.HResult="0x"+unchecked((uint)error.HResult).ToString("X8");result.Jpeg=null;

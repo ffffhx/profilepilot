@@ -34,6 +34,7 @@ export interface DesktopAdmissionReadContext {
   readonly deadlineAt: number;
   readonly now: () => number;
   readonly signal: AbortSignal;
+  readonly target?: Readonly<Partial<Pick<DesktopWindow, 'pid' | 'className' | 'process'>>>;
 }
 export type DesktopAdmissionProviders = { [K in keyof DesktopAdmissionSnapshots]: (context: DesktopAdmissionReadContext) => DesktopAdmissionSnapshots[K] | Promise<DesktopAdmissionSnapshots[K]> };
 export interface DesktopAdmissionMatch {
@@ -65,6 +66,19 @@ type Read<T> = { value?: T; fresh: boolean; gap?: string };
 type Relation = { id: string; profiles: AdmissionProfile[]; apps: AdmissionLocalApp[]; external: AdmissionExternal[]; gateway: GatewayProfileBinding[] };
 const sources: Source[] = ['catalog', 'gateway', 'native', 'apps'];
 const positive = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) > 0;
+const CHROMIUM_OR_ELECTRON_PROCESS_RE = /^(?:chrome|google chrome(?: canary)?|msedge|msedgewebview2|microsoft edge|brave|brave browser|vivaldi|opera|arc|chromium|electron|profilepilot)(?:\.exe)?$/i;
+
+/** True strictly when both window className and process name are present and neither belongs to Chromium/Electron/ProfilePilot. */
+export function isNonChromiumNativeDesktopTarget(
+  target: Partial<Pick<DesktopWindow, 'pid' | 'className' | 'process'>> | null | undefined
+): boolean {
+  if (!target || !positive(target.pid)) return false;
+  if (typeof target.className !== 'string' || !target.className.trim()) return false;
+  if (target.className.trim().startsWith('Chrome_WidgetWin')) return false;
+  if (typeof target.process !== 'string' || !target.process.trim()) return false;
+  if (CHROMIUM_OR_ELECTRON_PROCESS_RE.test(target.process.trim())) return false;
+  return true;
+}
 const port = (value: unknown): value is number => positive(value) && value <= 65535;
 const text = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0;
 const owner = (value: unknown): value is 'agent' | 'user' => value === 'agent' || value === 'user';
@@ -366,15 +380,25 @@ export function evaluateDesktopAdmission(
 export function createDesktopAdmission(
   providers: DesktopAdmissionProviders,
   options: { now?: () => number; maxAgeMs?: number; timeoutMs?: number; discoveryFirst?: boolean; controlMaxAgeMs?: number } = {}
-): (target: Pick<DesktopWindow, 'pid'>) => Promise<DesktopAdmissionDecision> {
+): (target: Pick<DesktopWindow, 'pid'> & Partial<Pick<DesktopWindow, 'className' | 'process'>>) => Promise<DesktopAdmissionDecision> {
   const lastKnown = new Map<Source, unknown>(), now = options.now ?? Date.now;
   const timeout = options.timeoutMs ?? 2500;
   if (!Number.isFinite(timeout) || timeout < 1 || timeout > 30000) throw new Error('Invalid desktop admission timeout.');
-  async function collect<K extends Source>(name: K): Promise<DesktopAdmissionSnapshots[K]> {
+  async function collect<K extends Source>(name: K, target?: Pick<DesktopWindow, 'pid'> & Partial<Pick<DesktopWindow, 'className' | 'process'>>): Promise<DesktopAdmissionSnapshots[K]> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let snapshot: DesktopAdmissionSnapshots[K];
     const controller = new AbortController();
-    const context: DesktopAdmissionReadContext = Object.freeze({ deadlineAt: now() + timeout, now, signal: controller.signal });
+    const targetInfo = target && typeof target === 'object' ? Object.freeze({
+      pid: target.pid,
+      ...(typeof target.className === 'string' ? { className: target.className } : {}),
+      ...(typeof target.process === 'string' ? { process: target.process } : {})
+    }) : undefined;
+    const context: DesktopAdmissionReadContext = Object.freeze({
+      deadlineAt: now() + timeout,
+      now,
+      signal: controller.signal,
+      ...(targetInfo ? { target: targetInfo } : {})
+    });
     try {
       snapshot = await Promise.race([
         Promise.resolve().then(() => providers[name](context)),
@@ -408,11 +432,11 @@ export function createDesktopAdmission(
       // Process discovery can take seconds. Sample ownership after it completes
       // so an early idle result is not carried through that delay. This narrows
       // the observation window; it still does not reserve either control route.
-      const [catalog, apps] = await Promise.all([collect('catalog'), collect('apps')]);
-      const [gateway, native] = await Promise.all([collect('gateway'), collect('native')]);
+      const [catalog, apps] = await Promise.all([collect('catalog', target), collect('apps', target)]);
+      const [gateway, native] = await Promise.all([collect('gateway', target), collect('native', target)]);
       snapshots = { catalog, gateway, native, apps };
     } else {
-      const [catalog, gateway, native, apps] = await Promise.all(sources.map(name => collect(name)));
+      const [catalog, gateway, native, apps] = await Promise.all(sources.map(name => collect(name, target)));
       snapshots = { catalog, gateway, native, apps } as DesktopAdmissionSnapshots;
     }
     return evaluateDesktopAdmission(target, snapshots, { now: now(), maxAgeMs: options.maxAgeMs, controlMaxAgeMs: options.controlMaxAgeMs });

@@ -1,0 +1,98 @@
+{
+  "generatedOn": "2026-11-15",
+  "tweets": [
+    {
+      "id": "en-1",
+      "weight": 179,
+      "limit": 280
+    },
+    {
+      "id": "en-2",
+      "weight": 218,
+      "limit": 280
+    },
+    {
+      "id": "en-3",
+      "weight": 192,
+      "limit": 280
+    },
+    {
+      "id": "en-4",
+      "weight": 206,
+      "limit": 280
+    },
+    {
+      "id": "en-5",
+      "weight": 201,
+      "limit": 280
+    },
+    {
+      "id": "en-6",
+      "weight": 208,
+      "limit": 280
+    },
+    {
+      "id": "zh",
+      "weight": 210,
+      "limit": 280
+    }
+  ],
+  "dimensions": [
+    {
+      "file": "assets/social-cover.png",
+      "width": 1200,
+      "height": 630
+    },
+    {
+      "file": "assets/first-task.png",
+      "width": 1600,
+      "height": 900
+    },
+    {
+      "file": "assets/xhs-01.png",
+      "width": 1080,
+      "height": 1440
+    },
+    {
+      "file": "assets/xhs-02.png",
+      "width": 1080,
+      "height": 1440
+    },
+    {
+      "file": "assets/xhs-03.png",
+      "width": 1080,
+      "height": 1440
+    },
+    {
+      "file": "assets/xhs-04.png",
+      "width": 1080,
+      "height": 1440
+    },
+    {
+      "file": "assets/xhs-05.png",
+      "width": 1080,
+      "height": 1440
+    },
+    {
+      "file": "assets/xhs-06.png",
+      "width": 1080,
+      "height": 1440
+    },
+    {
+      "file": "store/promo-small.png",
+      "width": 440,
+      "height": 280
+    },
+    {
+      "file": "store/promo-marquee.png",
+      "width": 1400,
+      "height": 560
+    }
+  ],
+  "extensionVersion": "0.2.18",
+  "published": false,
+  "notes": [
+    "Graphics are explanatory illustrations, not runtime proof.",
+    "Release, store identity, real screenshots and macOS pilot remain gates."
+  ]
+}

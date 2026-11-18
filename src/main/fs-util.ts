@@ -1,4 +1,5 @@
 import { execFile, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -231,10 +232,58 @@ export async function readJsonFile<T>(filePath: string): Promise<T | null> {
   }
 }
 
+const RETRYABLE_RENAME_ERROR_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
+const RENAME_RETRY_BACKOFF_MS = [15, 30, 45, 60] as const;
+
+function isRetryableRenameError(error: unknown): boolean {
+  const code = typeof error === "object" && error !== null && "code" in error ? String(error.code) : "";
+  return RETRYABLE_RENAME_ERROR_CODES.has(code);
+}
+
+export async function renameWithWindowsRetry(
+  fromPath: string,
+  toPath: string,
+  backoffMs: readonly number[] = RENAME_RETRY_BACKOFF_MS
+): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await fs.rename(fromPath, toPath);
+      return;
+    } catch (error) {
+      if (attempt >= backoffMs.length || !isRetryableRenameError(error)) {
+        throw error;
+      }
+      await sleep(backoffMs[attempt]);
+    }
+  }
+}
+
+export async function writeTextFileAtomic(filePath: string, content: string): Promise<void> {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const tmpPath = `${filePath}.tmp-${process.pid}-${randomUUID()}`;
+  let handle: fs.FileHandle | undefined;
+  let renamed = false;
+  try {
+    handle = await fs.open(tmpPath, "w");
+    await handle.writeFile(content, "utf8");
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await renameWithWindowsRetry(tmpPath, filePath);
+    renamed = true;
+  } finally {
+    if (handle) {
+      await handle.close().catch(() => undefined);
+    }
+    if (!renamed) {
+      await fs.rm(tmpPath, { force: true }).catch(() => undefined);
+    }
+  }
+}
+
 export async function writeJsonFileAtomic(filePath: string, value: unknown): Promise<void> {
-  const tmpPath = `${filePath}.tmp-${Date.now()}`;
-  await fs.writeFile(tmpPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-  await fs.rename(tmpPath, filePath);
+  const serialized = `${JSON.stringify(value, null, 2)}\n`;
+  await writeTextFileAtomic(filePath, serialized);
 }
 
 export async function isSameFilesystemPath(pathA: string, pathB: string): Promise<boolean> {

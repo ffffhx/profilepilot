@@ -91,7 +91,10 @@ export class IphoneTools {
     const content = await downloadVerified(`https://github.com/danielpaulus/go-ios/releases/download/v${GO_IOS_VERSION}/${archive.name}`, archive.sha256, this.fetcher);
     await fs.writeFile(zip, content);
     await extractZip(zip, { dir: this.directory });
-    if (this.platform === "darwin") await fs.chmod(this.executable(), 0o755);
+    if (this.platform === "darwin") {
+      await fs.chmod(this.executable(), 0o755);
+      await exec("xattr", ["-dr", "com.apple.quarantine", this.directory], { timeout: 5000 }).catch(() => {});
+    }
     const status = await this.doctor();
     if (!status.installed) throw new Error(status.error || "iPhone 连接工具未通过版本检查。");
     return status;

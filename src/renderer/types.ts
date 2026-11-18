@@ -1,4 +1,5 @@
-import type { BifrostSnapshot, CdpPortSuggestion } from "../shared/types";
+import type { BifrostSnapshot, BrowserKind, CdpPortSuggestion, CreateProfileInput } from "../shared/types";
+export type { BrowserKind, CreateProfileInput };
 
 export type ConfirmIntent =
   | {

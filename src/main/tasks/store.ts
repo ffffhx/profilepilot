@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
-import type { BrowserTask, CreateTaskInput, TaskSnapshot, TaskEvent } from "../../shared/tasks";
+import { DEVICE_ONLY_PROFILE_ID, type BrowserTask, type CreateTaskInput, type TaskSnapshot, type TaskEvent } from "../../shared/tasks";
 import { taskModelText } from "../../shared/task-model";
 import { updateTokenRecords } from "../../shared/task-token-usage";
 import { legacyCostCorrection } from "./cost-accounting";
@@ -24,7 +24,7 @@ export const createTaskSchema = z.object({
   nativeTarget: z.object({ tabId: z.number().int().positive().optional(), newTab: z.boolean().optional() }).strict().refine(value => !(value.newTab && value.tabId !== undefined), "新标签页不能同时指定既有标签页编号。").optional(),
   nativeAccess: nativeAccessSchema.optional(),
   mode: z.enum(["manual", "plan", "acceptEdits"]).optional(), model: z.string().trim().min(1).max(200).optional(),
-  prompt: text, profileId: z.string().min(1).max(200), authorization: z.string().max(5000).default(""),
+  prompt: text, profileId: z.string().min(1).max(200).default(DEVICE_ONLY_PROFILE_ID), authorization: z.string().max(5000).default(""),
   materialIds: z.array(z.string()).max(50).default([]), attachmentIds: z.array(z.string()).max(50).default([]),
   items: z.array(z.string().trim().min(1).max(3000)).max(500).default([]),
   grant: z.object({ origin: z.string().url().transform((value) => {

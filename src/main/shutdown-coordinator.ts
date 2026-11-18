@@ -1,21 +1,32 @@
 export interface ShutdownStage {
   name: string;
+  order?: number;
+  after?: string | readonly string[];
   run(): void | Promise<void>;
 }
 
-interface ShutdownOptions {
+export interface ShutdownOptions {
   stages: ShutdownStage[];
   log(level: "info" | "error", event: string, message: string, details: Record<string, unknown>): void;
   requestQuit(): void;
   forceExit(): void;
   cleanupTimeoutMs?: number;
   quitTimeoutMs?: number;
+  sequential?: boolean;
 }
+
+const DEFAULT_STAGE_DEPENDENCIES: Readonly<Record<string, readonly string[]>> = {
+  // Task shutdown hands off active sessions over browserConnection; keep transport
+  // alive until task persistence and handoff settle.
+  "browser-connection": ["tasks-save-and-handoff"]
+};
+
+type StageStatus = "pending" | "running" | "done" | "error" | "timeout";
 
 /** Keep both asynchronous cleanup and Electron's second quit attempt bounded. */
 export class ShutdownCoordinator {
   private phase: "idle" | "cleaning" | "quitting" | "forced" | "finished" = "idle";
-  private readonly stages = new Map<string, "running" | "done" | "error" | "timeout">();
+  private readonly stages = new Map<string, StageStatus>();
   private started = 0;
   private timer?: NodeJS.Timeout;
   private failed = false;
@@ -41,21 +52,7 @@ export class ShutdownCoordinator {
     // Arm before invoking any cleanup. A rejected/synchronous stage must never
     // short-circuit the other stages or bypass saving/returning browser control.
     this.timer = setTimeout(() => this.force("cleanup"), timeoutMs);
-    const pending = this.options.stages.map(stage => {
-      this.stages.set(stage.name, "running");
-      this.log("info", "app.shutdown.stage.begin", "开始退出清理", { stage: stage.name });
-      const began = Date.now();
-      return Promise.resolve().then(() => stage.run()).then(() => {
-        if (this.phase !== "cleaning") return;
-        this.stages.set(stage.name, "done");
-        this.log("info", "app.shutdown.stage.done", "退出清理已完成", { stage: stage.name, duration_ms: Date.now() - began });
-      }, error => {
-        if (this.phase !== "cleaning") return;
-        this.failed = true;
-        this.stages.set(stage.name, "error");
-        this.log("error", "app.shutdown.stage.error", "退出清理失败，其它清理将继续", { stage: stage.name, duration_ms: Date.now() - began, error });
-      });
-    });
+    const pending = this.launchOrderedStages();
     void Promise.all(pending).then(() => {
       if (this.phase !== "cleaning") return;
       clearTimeout(this.timer);
@@ -73,6 +70,92 @@ export class ShutdownCoordinator {
           this.force("electron-quit-error");
         }
       });
+    });
+  }
+
+  private launchOrderedStages(): Array<Promise<void>> {
+    const entries = this.options.stages.map((stage, index) => ({
+      stage,
+      order: this.options.sequential ? index : (stage.order ?? 0)
+    }));
+    const byName = new Map(entries.map((entry) => [entry.stage.name, entry]));
+    const sortedOrders = [...new Set(entries.map((entry) => entry.order))].sort((a, b) => a - b);
+    const prevOrder = new Map<number, number>();
+    for (let i = 1; i < sortedOrders.length; i += 1) {
+      prevOrder.set(sortedOrders[i], sortedOrders[i - 1]);
+    }
+
+    const depsByName = new Map<string, string[]>();
+    const reaches = (start: string, goal: string): boolean => {
+      const seen = new Set<string>();
+      const stack = [start];
+      while (stack.length > 0) {
+        const current = stack.pop()!;
+        if (current === goal) return true;
+        if (seen.has(current)) continue;
+        seen.add(current);
+        for (const next of depsByName.get(current) ?? []) stack.push(next);
+      }
+      return false;
+    };
+
+    for (const entry of entries) {
+      const { stage, order } = entry;
+      const deps: string[] = [];
+      const previousTier = prevOrder.get(order);
+      if (previousTier !== undefined) {
+        for (const candidate of entries) {
+          if (candidate.order === previousTier && candidate.stage.name !== stage.name) {
+            deps.push(candidate.stage.name);
+          }
+        }
+      }
+      const rawAfter = stage.after !== undefined
+        ? (typeof stage.after === "string" ? [stage.after] : stage.after)
+        : (!this.options.sequential && stage.order === undefined ? (DEFAULT_STAGE_DEPENDENCIES[stage.name] ?? []) : []);
+      for (const dep of rawAfter) {
+        if (dep !== stage.name && byName.has(dep) && !deps.includes(dep) && !reaches(dep, stage.name)) {
+          deps.push(dep);
+        }
+      }
+      depsByName.set(stage.name, deps);
+      if (deps.length > 0) {
+        this.stages.set(stage.name, "pending");
+      }
+    }
+
+    const promises = new Map<string, Promise<void>>();
+    const ensureScheduled = (name: string): Promise<void> => {
+      const existing = promises.get(name);
+      if (existing) return existing;
+      const entry = byName.get(name)!;
+      const deps = depsByName.get(name) ?? [];
+      const task = deps.length === 0
+        ? this.executeStage(entry.stage)
+        : Promise.all(deps.map((dep) => ensureScheduled(dep))).then(() => {
+            if (this.phase !== "cleaning") return;
+            return this.executeStage(entry.stage);
+          });
+      promises.set(name, task);
+      return task;
+    };
+
+    return entries.map((entry) => ensureScheduled(entry.stage.name));
+  }
+
+  private executeStage(stage: ShutdownStage): Promise<void> {
+    this.stages.set(stage.name, "running");
+    this.log("info", "app.shutdown.stage.begin", "开始退出清理", { stage: stage.name });
+    const began = Date.now();
+    return Promise.resolve().then(() => stage.run()).then(() => {
+      if (this.phase !== "cleaning") return;
+      this.stages.set(stage.name, "done");
+      this.log("info", "app.shutdown.stage.done", "退出清理已完成", { stage: stage.name, duration_ms: Date.now() - began });
+    }, error => {
+      if (this.phase !== "cleaning") return;
+      this.failed = true;
+      this.stages.set(stage.name, "error");
+      this.log("error", "app.shutdown.stage.error", "退出清理失败，其它清理将继续", { stage: stage.name, duration_ms: Date.now() - began, error });
     });
   }
 

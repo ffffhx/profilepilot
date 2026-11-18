@@ -11,6 +11,19 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 const same = (a, b) => !!a && !!b && a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 const requireValue = (condition, message = 'Invalid request', status = 400) => { if (!condition) throw Object.assign(new Error(message), { status }); };
 
+export const DEFAULT_CHANNEL_TTL_MS = 30 * 86400000;
+export const DEFAULT_MAX_CHANNELS = 1024;
+
+export function isAllowedStatusIpv4(value) {
+  if (typeof value !== 'string' || !isIPv4(value)) return false;
+  const [first, second] = value.split('.').map(Number);
+  return first === 10
+    || first === 172 && second >= 16 && second <= 31
+    || first === 192 && second === 168
+    || first === 169 && second === 254
+    || first === 100 && second >= 64 && second <= 127;
+}
+
 export function validateReport(input) {
   requireValue(input && typeof input === 'object');
   requireValue(uuid.test(input.deviceId) && typeof input.name === 'string' && input.name.length > 0 && input.name.length <= 80);
@@ -42,12 +55,7 @@ export function validateReport(input) {
   }
   if (input.readiness.network !== undefined) {
     const network = input.readiness.network;
-    const local = value => {
-      if (typeof value !== 'string' || !isIPv4(value)) return false;
-      const [a, b] = value.split('.').map(Number);
-      return a === 10 || a === 172 && b >= 16 && b <= 31 || a === 192 && b === 168 || a === 169 && b === 254;
-    };
-    requireValue(network && Array.isArray(network.wifiIpv4) && network.wifiIpv4.length <= 8 && network.wifiIpv4.every(local));
+    requireValue(network && Array.isArray(network.wifiIpv4) && network.wifiIpv4.length <= 8 && network.wifiIpv4.every(isAllowedStatusIpv4));
     requireValue(Array.isArray(network.adbEndpoints) && network.adbEndpoints.length <= 8);
     const adbEndpoints = network.adbEndpoints.map(endpoint => {
       requireValue(endpoint && typeof endpoint.address === 'string');
@@ -62,7 +70,13 @@ export function validateReport(input) {
   return { deviceId: input.deviceId, name: input.name, permissions, readiness };
 }
 
-export function createStatusServer({ root, now = Date.now, trustedProxy = false } = {}) {
+export function createStatusServer({
+  root,
+  now = Date.now,
+  trustedProxy = false,
+  maxChannels = DEFAULT_MAX_CHANNELS,
+  channelTtlMs = DEFAULT_CHANNEL_TTL_MS
+} = {}) {
   const file = root && path.join(root, 'channels.json');
   if (root) fs.mkdirSync(root, { recursive: true, mode: 0o700 });
   const channels = new Map(file && fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, 'utf8')) : []);
@@ -76,14 +90,43 @@ export function createStatusServer({ root, now = Date.now, trustedProxy = false 
     if (!entry || entry.until <= now()) { entry = { count: 0, until: now() + period }; limits.set(key, entry); }
     requireValue(++entry.count <= max, 'Too many requests', 429);
   };
+  const activityTimestamp = channel => channel.lastActiveAt ?? channel.createdAt ?? 0;
   const clean = () => {
     let dirty = false;
-    for (const [id, c] of channels) if ((!c.writer || c.codeHash && !c.reader) && c.expires <= now()) {
-      channels.delete(id); reports.delete(id); dirty = true;
+    const current = now();
+    for (const [id, c] of channels) {
+      const unclaimedExpired = (!c.writer || c.codeHash && !c.reader) && c.expires <= current;
+      const ttlExpired = current - activityTimestamp(c) > channelTtlMs;
+      if (unclaimedExpired || ttlExpired) {
+        channels.delete(id); reports.delete(id); dirty = true;
+      }
     }
-    for (const [id, item] of reports) if (now() - item.at > 86400000) reports.delete(id);
-    for (const [key, entry] of limits) if (entry.until <= now()) limits.delete(key);
+    for (const [id, item] of reports) if (current - item.at > 86400000) reports.delete(id);
+    for (const [key, entry] of limits) if (entry.until <= current) limits.delete(key);
     if (dirty) persist();
+  };
+  const ensureCapacity = () => {
+    clean();
+    if (channels.size < maxChannels) return;
+    requireValue(maxChannels > 0, 'Service capacity reached', 503);
+    let dirty = false;
+    while (channels.size >= maxChannels) {
+      let victimId = null;
+      let victimPaired = true;
+      let victimAt = Infinity;
+      for (const [id, c] of channels) {
+        const paired = !!(c.writer && c.reader);
+        const at = activityTimestamp(c);
+        // Prefer evicting unclaimed channels first; otherwise evict the LRU paired channel.
+        if (victimId === null || (!paired && victimPaired) || (paired === victimPaired && at < victimAt)) {
+          victimId = id; victimPaired = paired; victimAt = at;
+        }
+      }
+      if (victimId === null) break;
+      channels.delete(victimId); reports.delete(victimId); dirty = true;
+    }
+    if (dirty) persist();
+    requireValue(channels.size < maxChannels, 'Service capacity reached', 503);
   };
   const timer = setInterval(clean, 60000); timer.unref();
   const server = http.createServer({ requestTimeout: 10000, headersTimeout: 10000, maxHeaderSize: 4096 }, async (req, res) => {
@@ -99,38 +142,46 @@ export function createStatusServer({ root, now = Date.now, trustedProxy = false 
       requireValue(input && uuid.test(input.id));
       const credential = /^Bearer ([a-f0-9]{64})$/.exec(req.headers.authorization || '')?.[1];
       requireValue(credential, 'Unauthorized', 401);
-      const digest = hash(credential), channel = channels.get(input.id);
+      const current = now();
+      const digest = hash(credential);
+      let channel = channels.get(input.id);
+      if (channel && current - activityTimestamp(channel) > channelTtlMs) {
+        channels.delete(input.id); reports.delete(input.id); persist(); channel = undefined;
+      }
       if (req.url === '/v1/device-code-create') {
         const report = validateReport(input.report);
         if (channel) requireValue(same(channel.writer, digest) && channel.deviceId === report.deviceId && !channel.reader, 'Device code already used', 409);
-        else { limit('create:' + address, 12, 3600000); clean(); requireValue(channels.size < 256, 'Service capacity reached', 503); }
+        else { limit('create:' + address, 12, 3600000); ensureCapacity(); }
         const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
         let code;
         do { code = Array.from({ length: 12 }, () => alphabet[randomInt(alphabet.length)]).join(''); }
         while ([...channels.values()].some(c => c.codeHash === hash(code)));
-        const expires = now() + 600000;
-        channels.set(input.id, { writer: digest, deviceId: report.deviceId, codeHash: hash(code), expires, createdAt: now() });
-        reports.set(input.id, { report, at: now() }); persist();
+        const expires = current + 600000;
+        channels.set(input.id, { writer: digest, deviceId: report.deviceId, codeHash: hash(code), expires, createdAt: current, lastActiveAt: current });
+        reports.set(input.id, { report, at: current }); persist();
         send(200, { code, expires }); return;
       }
       if (req.url === '/v1/device-code-add') {
         limit('code:' + address, 12, 60000);
         requireValue(typeof input.code === 'string' && /^[A-HJ-NP-Z2-9]{12}$/.test(input.code), 'Invalid device code');
-        const entry = [...channels].find(([, c]) => c.codeHash === hash(input.code));
-        requireValue(entry && entry[1].expires > now(), 'Device code expired or unavailable', 404);
+        const entry = [...channels].find(([, c]) => c.codeHash === hash(input.code) && current - activityTimestamp(c) <= channelTtlMs);
+        requireValue(entry && entry[1].expires > current, 'Device code expired or unavailable', 404);
         const [id, target] = entry;
         requireValue(!target.reader || same(target.reader, digest), 'Device code already used', 409);
-        target.reader = digest; persist();
+        target.reader = digest; target.lastActiveAt = current; persist();
         const item = reports.get(id);
-        send(200, { id, deviceId: target.deviceId, name: item?.report.name || 'Android 手机', paired: true, report: item?.report || null, ageMs: item ? Math.max(0, now() - item.at) : null }); return;
+        send(200, { id, deviceId: target.deviceId, name: item?.report.name || 'Android 手机', paired: true, report: item?.report || null, ageMs: item ? Math.max(0, current - item.at) : null }); return;
       }
       if (req.url === '/v1/create') {
         requireValue(token.test(input.pairToken));
-        if (channel) { requireValue(same(channel.reader, digest), 'Unauthorized', 401); send(200, { expires: channel.expires }); return; }
-        limit('create:' + address, 12, 3600000); clean();
-        requireValue(channels.size < 256, 'Service capacity reached', 503);
-        const expires = now() + 180000;
-        channels.set(input.id, { reader: digest, pair: hash(input.pairToken), expires, createdAt: now() }); persist();
+        if (channel) {
+          requireValue(same(channel.reader, digest), 'Unauthorized', 401);
+          channel.lastActiveAt = current; persist();
+          send(200, { expires: channel.expires }); return;
+        }
+        limit('create:' + address, 12, 3600000); ensureCapacity();
+        const expires = current + 180000;
+        channels.set(input.id, { reader: digest, pair: hash(input.pairToken), expires, createdAt: current, lastActiveAt: current }); persist();
         send(200, { expires }); return;
       }
       requireValue(channel, 'Channel unavailable', 404);
@@ -141,20 +192,23 @@ export function createStatusServer({ root, now = Date.now, trustedProxy = false 
       if (req.url === '/v1/claim') {
         requireValue(token.test(input.writeToken) && uuid.test(input.deviceId));
         const writer = hash(input.writeToken);
-        requireValue(same(channel.pair, digest) && (channel.writer ? same(channel.writer, writer) && channel.deviceId === input.deviceId : channel.expires > now()), 'Pairing expired or already used', 403);
-        channel.writer = writer; channel.deviceId = input.deviceId; persist(); send(200, { ok: true }); return;
+        requireValue(same(channel.pair, digest) && (channel.writer ? same(channel.writer, writer) && channel.deviceId === input.deviceId : channel.expires > current), 'Pairing expired or already used', 403);
+        channel.writer = writer; channel.deviceId = input.deviceId; channel.lastActiveAt = current; persist(); send(200, { ok: true }); return;
       }
       if (req.url === '/v1/report') {
         requireValue(same(channel.writer, digest), 'Unauthorized', 401);
         limit('report:' + input.id, 30, 60000);
         const report = validateReport(input.report); requireValue(report.deviceId === channel.deviceId, 'Device changed', 403);
-        requireValue(!channel.codeHash || channel.reader || channel.expires > now(), 'Device code expired', 404);
-        reports.set(input.id, { report, at: now() }); send(200, { ok: true, paired: !!channel.reader }); return;
+        requireValue(!channel.codeHash || channel.reader || channel.expires > current, 'Device code expired', 404);
+        channel.lastActiveAt = current; persist();
+        reports.set(input.id, { report, at: current }); send(200, { ok: true, paired: !!channel.reader }); return;
       }
       requireValue(same(channel.reader, digest), 'Unauthorized', 401);
       if (req.url === '/v1/status') {
+        if (current - activityTimestamp(channel) >= 3600000) { channel.lastActiveAt = current; persist(); }
+        else channel.lastActiveAt = current;
         const item = reports.get(input.id);
-        send(200, { paired: !!channel.writer, report: item?.report || null, ageMs: item ? Math.max(0, now() - item.at) : null }); return;
+        send(200, { paired: !!channel.writer, report: item?.report || null, ageMs: item ? Math.max(0, current - item.at) : null }); return;
       }
       if (req.url === '/v1/revoke') { channels.delete(input.id); reports.delete(input.id); persist(); send(200, { ok: true }); return; }
       throw Object.assign(new Error('Invalid endpoint'), { status: 404 });

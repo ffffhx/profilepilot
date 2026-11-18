@@ -2,7 +2,7 @@ import { workspacePages, workspaceRoute, workspaceNavigationId, type WorkspaceId
 import { workspaceSwitcher, workspaceIdentityBar, refreshWorkspaceSwitcher } from "./workspace-switcher";
 import { createWorkspaceGuide } from "./workspace-guide";
 import "./workspace-lifecycle";
-import { experimentalAgentEnabled, onExperimentalFeaturesChanged } from "./experimental-features";
+import { experimentalWorkspaceEnabled, onExperimentalFeaturesChanged } from "./experimental-features";
 
 type Page = { id: WorkspaceId; frame: HTMLIFrameElement; ready: boolean; search: string; timer?: number; failed?: boolean };
 const pages = new Map<WorkspaceId, Page>();
@@ -14,10 +14,10 @@ const consolePreference = "profilepilot-console-tab";
 let lastConsole: WorkspaceId = "browser";
 try {
   const saved = localStorage.getItem(consolePreference) as WorkspaceId;
-  if (["browser", "local-apps", "phones", "desktop", "gpui"].includes(saved)) lastConsole = saved;
+  if (["browser", "local-apps", "phones", "desktop", "gpui"].includes(saved) && experimentalWorkspaceEnabled(saved)) lastConsole = saved;
 } catch { /* The console still works without persistent storage. */ }
 if (requested === "browser") requested = lastConsole;
-if (requested === "agent" && !experimentalAgentEnabled()) requested = "browser";
+if (!experimentalWorkspaceEnabled(requested)) requested = "browser";
 let active: Page | undefined;
 const agentZoomPreference = "profilepilot-agent-zoom";
 let agentZoom = 100;
@@ -86,7 +86,7 @@ function fail(page: Page): void {
 function navigate(href: string): boolean {
   const route = workspaceRoute(href, location.href);
   if (!route) return false;
-  if (route.id === "agent" && !experimentalAgentEnabled()) return navigate(workspacePages.settings.file + "#experimental-features");
+  if (!experimentalWorkspaceEnabled(route.id)) return navigate(workspacePages.settings.file + (route.id === "agent" ? "#experimental-features" : "#console-modules"));
   requested = route.id;
   let page = pages.get(route.id);
   if (!page) {
@@ -154,7 +154,12 @@ window.desktopWindow?.onAgentZoom?.(command => {
   try { localStorage.setItem(agentZoomPreference, String(agentZoom)); } catch { /* Keep the current zoom in memory. */ }
 });
 onExperimentalFeaturesChanged(() => {
-  if (!experimentalAgentEnabled() && requested === "agent") { guide.close(); navigate(workspacePages.browser.file); }
+  if (!experimentalWorkspaceEnabled(lastConsole)) {
+    lastConsole = "browser";
+    try { localStorage.setItem(consolePreference, lastConsole); } catch { /* Keep the available tab in memory. */ }
+    document.querySelectorAll<HTMLAnchorElement>('.workspace-link[data-workspace="browser"], .workspace-logo').forEach(link => link.href = `./${workspacePages.browser.file}`);
+  }
+  if (!experimentalWorkspaceEnabled(requested)) { guide.close(); navigate(workspacePages.browser.file); }
 });
 navigate(workspacePages[requested].file);
 document.documentElement.dataset.workspaceShellReady = "true";

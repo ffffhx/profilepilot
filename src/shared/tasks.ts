@@ -10,7 +10,7 @@ export interface TaskEvent { id: string; at: string; kind: "user" | "assistant" 
 export type TaskPermissionMode = "manual" | "plan" | "acceptEdits";
 export interface NativeAccessPolicy { allowedOrigins?: string[]; blockedOrigins?: string[]; confirmActions?: boolean; }
 export interface NativeTaskTarget { tabId?: number; newTab?: boolean; }
-export interface TaskPermissionRule { id: string; kind: "browser" | "terminal"; scope: string; label: string; createdAt: string; }
+export interface TaskPermissionRule { id: string; kind: "browser" | "terminal" | "device"; scope: string; label: string; createdAt: string; }
 export interface TaskStream { id: string; text: string; updatedAt: string; }
 export interface TaskStreamUpdate { taskId: string; stream: TaskStream; }
 export interface TaskMessageOptions { requestId?: string; attachmentIds?: string[]; }
@@ -60,8 +60,9 @@ export interface TaskDecision {
   id: string; kind: "question" | "confirmation" | "handoff"; title: string;
   details: string; action?: BrowserAction; observationVersion?: string; createdAt: string;
   terminal?: { command: string; summary: string; runtime: "shell" | "node"; cwd: string; background: boolean; timeout_ms: number; yield_ms: number };
+  deviceTool?: { name: "phone_control" | "desktop_control" | "electron_control"; args: Record<string, unknown>; summary: string };
   exportResult?: { name: string; format: "csv" | "json" | "markdown" | "html"; columns: string[]; rows: Array<Array<string | number | boolean | null>>; text: string };
-  permissionScope?: { kind: "browser" | "terminal"; scope: string; label: string };
+  permissionScope?: { kind: "browser" | "terminal" | "device"; scope: string; label: string };
 }
 export interface TaskReceipt {
   id: string; at: string; action: BrowserAction; status: "started" | "executed" | "uncertain";
@@ -116,18 +117,27 @@ export interface BrowserTask {
   grant?: ExecutionGrant;
   outputs?: TaskAttachment[];
 }
+export const DEVICE_ONLY_PROFILE_ID = "__device__";
+export const DEVICE_ONLY_PROFILE_NAME = "不绑定浏览器";
+export function isDeviceOnlyProfile(profileId?: string | null): boolean {
+  const normalized = typeof profileId === "string" ? profileId.trim() : "";
+  return !normalized || normalized === DEVICE_ONLY_PROFILE_ID || normalized === "none";
+}
 export interface CreateTaskInput {
   skill?: TaskSkillSelection;
-  nativeTarget?: NativeTaskTarget; nativeAccess?: NativeAccessPolicy;
+  nativeTarget?: NativeTaskTarget; nativeAccess?: NativeTaskAccessPolicyAlias;
   mode?: TaskPermissionMode; model?: string;
-  prompt: string; profileId: string; authorization?: string; materialIds?: string[];
+  prompt: string; profileId?: string; authorization?: string; materialIds?: string[];
   attachmentIds?: string[]; items?: string[]; limits?: Partial<BrowserTask["limits"]>;
   grant?: Omit<ExecutionGrant, "used">;
 }
+type NativeTaskAccessPolicyAlias = NativeAccessPolicy;
 export interface TaskMetadataInput { title?: string; pinned?: boolean; archived?: boolean; }
+export type ScheduleRepeat = "once" | "daily" | "weekdays" | "weekly";
+export type ScheduleCatchUpPolicy = "skip" | "run_within_window";
 export interface TaskSchedule {
   id: string; name: string; task: CreateTaskInput; at: string; timezone: string;
-  repeat: "once" | "daily"; enabled: boolean; lastRunAt?: string; lastTaskId?: string; missedAt?: string;
+  repeat: ScheduleRepeat; catchUpPolicy?: ScheduleCatchUpPolicy; enabled: boolean; lastRunAt?: string; lastTaskId?: string; missedAt?: string;
 }
 export interface TaskTemplate { id: string; name: string; task: CreateTaskInput; updatedAt: string; }
 export type JevProvider = "typesafe" | "vercel";
@@ -137,6 +147,8 @@ export interface TaskSettings {
   saveScreenshots: boolean; notifications: boolean; hasApiKey: boolean;
   jevEnabled?: boolean; hasJevApiKey?: boolean; jevProvider?: JevProvider;
   jevMode?: "driver" | "advisory";
+  customInputUsdPerMillion?: number;
+  customOutputUsdPerMillion?: number;
 }
 export function jevProviderFor(settings: TaskSettings): JevProvider {
   return settings.jevProvider || (settings.hasJevApiKey ? "vercel" : "typesafe");
@@ -178,17 +190,27 @@ export interface TaskTokenRecord {
   sdkCostUsd?: number;
   models?: ModelTokenUsage[];
   modelNames?: string[];
+  label?: string;
   taskId: string; createdAt: string; updatedAt: string;
   inputTokens: number; outputTokens: number;
   jevInputTokens: number; helperInputTokens: number; helperOutputTokens: number;
+  reviewInputTokens?: number; reviewOutputTokens?: number;
 }
 export interface ModelTokenUsage { model: string; inputTokens: number; outputTokens: number; }
 export interface TaskCostRecord {
-  id: string; source: "model" | "helper"; model: string; at: string;
+  id: string; source: "model" | "helper" | "review"; model: string; at: string;
   inputTokens: number; outputTokens: number;
   estimate?: { currency: "CNY" | "USD"; min: number; max: number; basis: string; priceDate: string };
 }
 export interface TaskApi {
+  reviewSnapshot(): Promise<import("./review").ReviewSnapshot>;
+  reviewConfigure(input: Partial<Omit<import("./review").ReviewSettings, "enabledAt">>): Promise<import("./review").ReviewSnapshot>;
+  reviewRun(kind: import("./review").ReviewKind): Promise<import("./review").ReviewReport>;
+  reviewReport(id: string): Promise<import("./review").ReviewReport>;
+  reviewFeedback(reportId: string, findingId: string, value: import("./review").ReviewFeedback, note?: string): Promise<import("./review").ReviewSnapshot>;
+  reviewExportWorkflow(reportId: string, findingId: string): Promise<{ path: string; content: string }>;
+  reviewSaveAsTemplate?(reportId: string, findingId: string): Promise<TaskTemplate>;
+  reviewSaveWorkflowTemplate?(reportId: string, findingId: string): Promise<TaskTemplate>;
   getMemory(profileId: string): Promise<ProfileMemorySnapshot>;
   setMemoryEnabled(profileId: string, enabled: boolean): Promise<ProfileMemorySnapshot>;
   writeMemory(profileId: string, name: string, content: string, revision: string | null): Promise<ProfileMemorySnapshot>;
@@ -211,6 +233,10 @@ export interface TaskApi {
   permissions(id: string, revokeId?: string): Promise<TaskPermissionRule[]>;
   setLimits(id: string, limits: Partial<BrowserTask["limits"]>): Promise<void>;
   setModel(id: string, model: string): Promise<void>;
+  setMode?(id: string, mode: TaskPermissionMode, model?: string): Promise<void>;
+  compact?(id: string, instructions?: string): Promise<{ beforeCharacters: number; afterCharacters: number }>;
+  fork?(id: string, title?: string, eventId?: string): Promise<BrowserTask>;
+  rewind?(id: string, eventId: string): Promise<string>;
   previewArtifact(id: string, taskId?: string): Promise<TaskArtifactPreview>;
   saveMaterial(input: Partial<PersonalMaterial>): Promise<PersonalMaterial>;
   deleteMaterial(id: string): Promise<void>;

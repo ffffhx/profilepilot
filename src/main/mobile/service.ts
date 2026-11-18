@@ -2,12 +2,15 @@ import https from "node:https";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createHash, randomBytes, randomUUID, timingSafeEqual, X509Certificate } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, openSync, fsyncSync, closeSync, statSync } from "node:fs";
+import { isIPv4 } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
 import type { MobileDevice, MobilePairing, MobileSnapshot } from "../../shared/mobile";
+import { DEVICE_ONLY_PROFILE_ID } from "../../shared/tasks";
 import type { TaskService } from "../tasks/service";
 import { executeTaskManagementCommand, parseTaskManagementCommand } from "../tasks/management";
+import { serveMobilePwaAsset } from "./pwa";
 
 export interface MobileProfile { id: string; name: string; source: string; ready: boolean; reason?: string; }
 interface SavedDevice extends MobileDevice { tokenHash: string; }
@@ -22,8 +25,32 @@ const uuid = z.string().uuid();
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 const same = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
 const fail = (message: string, code = "MOBILE_REQUEST_INVALID") => Object.assign(new Error(message), { code });
-const reads = new Set(["sync", "task.list", "task.get", "task.models", "task.artifact"]);
+const reads = new Set(["sync", "task.list", "task.get", "task.detail", "task.models", "task.artifact"]);
 const permitted = new Set([...reads, "task.create", "task.control", "task.reply", "task.metadata", "device.disconnect"]);
+
+export function isAllowedMobileIpv4(address: string): boolean {
+  if (!isIPv4(address)) return false;
+  const [first, second] = address.split(".").map(Number);
+  if (first === 127 || first === 0 || (first === 169 && second === 254)) return false;
+  return first === 10
+    || first === 172 && second >= 16 && second <= 31
+    || first === 192 && second === 168
+    || first === 100 && second >= 64 && second <= 127
+    || first < 224;
+}
+
+function isSameHttpsOrigin(request: IncomingMessage): boolean {
+  const origin = request.headers.origin;
+  if (!origin) return request.headers["sec-fetch-site"] !== "cross-site";
+  if (request.headers["sec-fetch-site"] === "cross-site") return false;
+  try {
+    const parsed = new URL(origin);
+    const hostHeader = String(request.headers.host || "").trim().toLowerCase();
+    return parsed.protocol === "https:" && Boolean(hostHeader) && parsed.host.toLowerCase() === hostHeader;
+  } catch {
+    return false;
+  }
+}
 
 export function mobileEndpoint(value: string): string {
   const url = new URL(value);
@@ -37,7 +64,7 @@ function atomicJson(file: string, value: unknown): void {
   renameSync(tmp, file);
 }
 
-/** A separate, narrow network API; the desktop IPC and management socket stay private. */
+/** A separate, narrow network API + same-origin responsive PWA workbench; desktop IPC stays private. */
 export class MobileService {
   private saved: Saved;
   private readonly file: string;
@@ -60,10 +87,32 @@ export class MobileService {
   private persist(): void { atomicJson(this.file, this.saved); }
   private changed(): void { this.options.changed?.(this.snapshot()); }
   snapshot(): MobileSnapshot {
-    const addresses = new Set<string>();
-    if (this.saved.port > 0) for (const entries of Object.values(os.networkInterfaces())) for (const entry of entries || []) if (entry.family === "IPv4" && !entry.internal && !entry.address.startsWith("169.254.")) addresses.add(`https://${entry.address}:${this.saved.port}`);
-    if (this.saved.advertisedUrl) addresses.add(this.saved.advertisedUrl);
-    return { enabled: this.saved.enabled, listening: !!this.server?.listening, computerId: this.saved.id, computerName: this.computerName, port: this.saved.port, endpoints: [...addresses], advertisedUrl: this.saved.advertisedUrl, fingerprint: this.fingerprint, devices: this.saved.devices.map(({ tokenHash: _, ...device }) => ({ ...device })), error: this.error };
+    const addresses: string[] = [];
+    if (this.saved.port > 0) {
+      const candidates: string[] = [];
+      for (const entries of Object.values(os.networkInterfaces())) {
+        for (const entry of entries || []) {
+          if (entry.family === "IPv4" && !entry.internal && isAllowedMobileIpv4(entry.address)) {
+            candidates.push(entry.address);
+          }
+        }
+      }
+      candidates.sort((a, b) => {
+        const rank = (ip: string) => {
+          const [first, second] = ip.split(".").map(Number);
+          if (first === 192 && second === 168 || first === 10 || first === 172 && second >= 16 && second <= 31) return 0;
+          if (first === 100 && second >= 64 && second <= 127) return 1;
+          return 2;
+        };
+        return rank(a) - rank(b);
+      });
+      for (const ip of candidates) {
+        const endpoint = `https://${ip}:${this.saved.port}`;
+        if (!addresses.includes(endpoint)) addresses.push(endpoint);
+      }
+    }
+    if (this.saved.advertisedUrl && !addresses.includes(this.saved.advertisedUrl)) addresses.push(this.saved.advertisedUrl);
+    return { enabled: this.saved.enabled, listening: !!this.server?.listening, computerId: this.saved.id, computerName: this.computerName, port: this.saved.port, endpoints: addresses, advertisedUrl: this.saved.advertisedUrl, fingerprint: this.fingerprint, devices: this.saved.devices.map(({ tokenHash: _, ...device }) => ({ ...device })), error: this.error };
   }
   async start(): Promise<void> {
     if (!this.saved.enabled || this.closed || this.server?.listening) return;
@@ -105,8 +154,13 @@ export class MobileService {
     this.pairs.clear(); this.pairs.set(hash(token), { expires });
     const params = new URLSearchParams({ v: "1", id: this.saved.id, name: this.computerName, url, fp: this.fingerprint, token });
     const uri = `profilepilot://pair?${params}`;
+    const webPairUrl = `${url}/#pair=${token}&name=${encodeURIComponent(this.computerName)}`;
     const QRCode = (await import("qrcode")).default;
-    return { uri, qr: await QRCode.toDataURL(uri, { width: 320, margin: 2, errorCorrectionLevel: "M" }), expiresAt: new Date(expires).toISOString() };
+    const [qr, webQr] = await Promise.all([
+      QRCode.toDataURL(uri, { width: 320, margin: 2, errorCorrectionLevel: "M" }),
+      QRCode.toDataURL(webPairUrl, { width: 320, margin: 2, errorCorrectionLevel: "M" })
+    ]);
+    return { uri, webPairUrl, qr, webQr, expiresAt: new Date(expires).toISOString() };
   }
   revoke(id: string): MobileSnapshot {
     uuid.parse(id); this.saved.devices = this.saved.devices.filter(device => device.id !== id);
@@ -138,9 +192,18 @@ export class MobileService {
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     try {
       if (!this.saved.enabled || this.closed) throw fail("移动版连接已关闭。", "MOBILE_DISABLED");
-      // Native clients only. Browser origins never receive cross-origin access to this API.
-      if (request.headers.origin || request.method !== "POST" || !["/v1/pair", "/v1/request"].includes(request.url || "")) throw fail("请求入口无效。");
-      if (request.url === "/v1/pair") {
+      const pathname = (request.url || "/").split("?")[0];
+      if (request.method === "GET" || request.method === "HEAD") {
+        this.limit(`pwa:${request.socket.remoteAddress}`, 120);
+        if (serveMobilePwaAsset(pathname, request.method, response, this.computerName)) return;
+        this.send(response, this.failure(fail("请求入口无效。")), 404);
+        return;
+      }
+      // Native clients have no Origin header; browser PWA clients must match this exact HTTPS Host.
+      if (!isSameHttpsOrigin(request) || request.method !== "POST" || !["/v1/pair", "/v1/request", "/v1/rpc"].includes(pathname)) {
+        throw fail("请求入口无效。");
+      }
+      if (pathname === "/v1/pair") {
         this.limit(`pair:${request.socket.remoteAddress}`, 12);
         const input = z.object({ token: z.string().regex(/^[a-f0-9]{64}$/), clientId: uuid, name: z.string().trim().min(1).max(80) }).strict().parse(await this.body(request));
         const pair = this.pairs.get(hash(input.token));
@@ -223,14 +286,16 @@ export class MobileService {
     if (command.action === "task.list") {
       const input = z.object({ action: z.literal("task.list"), offset: z.number().int().nonnegative().optional(), limit: z.number().int().min(1).max(100).optional() }).strict().parse(command);
       const tasks = service.store.data.tasks.filter(task => !task.archivedAt).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-      return { tasks: tasks.slice(input.offset || 0, (input.offset || 0) + (input.limit || 50)).map(task => ({ id: task.id, title: task.title, profileName: task.profileName, status: task.status, updatedAt: task.updatedAt })), total: tasks.length };
+      return { tasks: tasks.slice(input.offset || 0, (input.offset || 0) + (input.limit || 50)).map(task => ({ id: task.id, title: task.title, profileName: task.profileName, status: task.status, updatedAt: task.updatedAt, ...(task.pending ? { pending: { id: task.pending.id, kind: task.pending.kind, title: task.pending.title } } : {}) })), total: tasks.length };
     }
-    const parsed = parseTaskManagementCommand(command);
+    const normalizedCommand = command.action === "task.detail" ? { ...command, action: "task.get" } : command;
+    const parsed = parseTaskManagementCommand(normalizedCommand);
     // Keep credentials, PC-local file imports and settings outside the mobile API.
     if (!["task.create", "task.list", "task.get", "task.models", "task.control", "task.reply", "task.metadata"].includes(parsed.action)) throw fail("移动版不支持此操作。");
     const data = await executeTaskManagementCommand(parsed, service, async id => {
-      const profile = (await this.options.profiles()).find(item => item.id === id);
       if (!this.saved.devices.includes(device) || !device.canControl) throw fail("此手机的操作授权已撤销。", "MOBILE_UNAUTHORIZED");
+      if (id === DEVICE_ONLY_PROFILE_ID) return DEVICE_ONLY_PROFILE_ID;
+      const profile = (await this.options.profiles()).find(item => item.id === id);
       if (!profile) throw fail("请选择当前电脑上的 Profile。");
       if (!profile.ready) throw fail(profile.reason || "此 Profile 暂不可用于任务。");
       return id;

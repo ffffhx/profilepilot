@@ -9,6 +9,7 @@ import type {
   GlobalInstructionUpdateRequest,
   GlobalInstructionsSnapshot
 } from "../shared/types";
+import { writeTextFileAtomic } from "./fs-util";
 import { ProfileManagerError } from "./profile-manager-error";
 
 const GLOBAL_INSTRUCTION_SOURCES: Array<{
@@ -44,14 +45,22 @@ export const CODEX_AGENTS_PATH = GLOBAL_INSTRUCTION_SOURCES[0].path;
 export const CLAUDE_INSTRUCTION_PATH = GLOBAL_INSTRUCTION_SOURCES[1].path;
 const INSTRUCTION_HISTORY_DIR = path.join(os.homedir(), ".profilepilot", "instruction-history");
 
-export function claudeInstructionShellContent(): string {
+export function formatClaudeInstructionReference(targetPath = CODEX_AGENTS_PATH): string {
+  const normalized = targetPath.replace(/\\/g, "/");
+  return /[\s"]/.test(normalized)
+    ? `@"${normalized.replace(/"/g, '\\"')}"`
+    : `@${normalized}`;
+}
+
+export function claudeInstructionShellContent(targetPath = CODEX_AGENTS_PATH): string {
+  const normalized = targetPath.replace(/\\/g, "/");
   return [
     "# Claude 全局指令",
     "",
     "> 这个文件只做引用壳，不直接维护规则。请编辑：",
-    `> \`${CODEX_AGENTS_PATH}\``,
+    `> \`${normalized}\``,
     "",
-    `@${CODEX_AGENTS_PATH}`,
+    formatClaudeInstructionReference(targetPath),
     ""
   ].join("\n");
 }
@@ -295,17 +304,6 @@ async function pruneInstructionBackups(id: GlobalInstructionFileId, keep: number
   await Promise.all(
     entries.slice(keep).map((name) => fs.rm(path.join(INSTRUCTION_HISTORY_DIR, name), { force: true }))
   );
-}
-
-async function writeTextFileAtomic(filePath: string, content: string): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  const tmpPath = `${filePath}.profilepilot-tmp-${process.pid}-${Date.now()}`;
-  try {
-    await fs.writeFile(tmpPath, content, "utf8");
-    await fs.rename(tmpPath, filePath);
-  } finally {
-    await fs.rm(tmpPath, { force: true }).catch(() => undefined);
-  }
 }
 
 function isClaudeInstructionShell(content: string): boolean {

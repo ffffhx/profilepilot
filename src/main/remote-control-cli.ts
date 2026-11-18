@@ -5,15 +5,32 @@ import { randomUUID } from "node:crypto";
 import type { Readable } from "node:stream";
 import { RemoteControlConnection, RemoteSessionStore, remoteError, type RemoteSession } from "./remote-control-client";
 import { observeAfterAction } from './action-feedback';
+import { commandGuidance, handleControlCliDiscovery, type ControlCliCommands } from './control-cli-contract';
+import { controlRecovery } from '../shared/control-recovery';
+
+export const remoteCommands: ControlCliCommands = {
+  devices: { summary: '只读列出可发现及已配对的远程电脑', options: ['--json'], example: ['devices'] },
+  sessions: { summary: '只读列出本机保存的远程 CLI 会话（不含凭据）', options: ['--json'], example: ['sessions'] },
+  connect: { summary: '与指定远程设备建立限时会话', options: ['--json', '--lease-seconds'], example: ['connect', 'DEVICE_ID_FROM_DEVICES', '--lease-seconds', '300'] },
+  status: { summary: '只读核对远程会话状态', options: ['--json', '--session', '--request-id'], required: ['--session'], example: ['status', '--session', 'SESSION_ID'] },
+  disconnect: { summary: '释放远程控制会话', options: ['--json', '--session'], required: ['--session'], example: ['disconnect', '--session', 'SESSION_ID'] },
+  profiles: { summary: '只读查询远端电脑的浏览器 Profile 列表', options: ['--json', '--session'], required: ['--session'], example: ['profiles', '--session', 'SESSION_ID'] },
+  apps: { summary: '只读查询远端电脑的应用列表', options: ['--json', '--session'], required: ['--session'], example: ['apps', '--session', 'SESSION_ID'] },
+  windows: { summary: '只读查询远端电脑的窗口列表', options: ['--json', '--session'], required: ['--session'], example: ['windows', '--session', 'SESSION_ID'] },
+  profile: { summary: '管理远端电脑的独立浏览器 Profile', options: ['--json', '--session', '--profile', '--name', '--hide-automation', '--yes'], required: ['--session'], example: ['profile', 'get', '--session', 'SESSION_ID', '--profile', 'PROFILE_ID'] },
+  browser: { summary: '操作远端受控浏览器页面（open/observe/tabs/navigate/action/handoff/resume/close）', options: ['--json', '--session', '--profile', '--browser', '--tab', '--new-tab', '--url', '--params', '--params-file', '--params-stdin', '--no-observe', '--request-id'], required: ['--session'], example: ['browser', 'observe', '--session', 'SESSION_ID', '--browser', 'BROWSER_ID'] },
+  window: { summary: '操作远端电脑桌面窗口（observe/screenshot/action）', options: ['--json', '--session', '--window', '--output', '--params', '--params-file', '--params-stdin', '--no-observe', '--request-id'], required: ['--session'], example: ['window', 'observe', '--session', 'SESSION_ID', '--window', 'WINDOW_ID'] }
+};
 
 type Io = { stdout: { write(value: string): unknown }; stderr: { write(value: string): unknown } };
 export interface RemoteCliRuntime { homeDir?: string; env?: NodeJS.ProcessEnv; stdin?: Readable; }
 export interface RemoteCommand {
   kind: "devices" | "connect" | "sessions" | "disconnect" | "execute";
   json: boolean; session?: string; deviceId?: string; leaseSeconds?: number; operation?: string;
-  params: Record<string, unknown>; paramsFile?: string; paramsStdin?: boolean; requestId?: string; output?: string; observeAfter?: boolean;
+  params: Record<string, unknown>; paramsInline?: string; paramsFile?: string; paramsStdin?: boolean; requestId?: string; output?: string; observeAfter?: boolean;
 }
 export const remoteCliHelp = () => `ProfilePilot 远程控制：ppilot remote <命令>
+  schema [命令]                               查询本地命令契约与参数说明
   devices [--json]                            列出可发现及已配对电脑
   connect <设备ID> [--lease-seconds 60..1800]   建立会话，默认闲置 300 秒后释放
   sessions                                   列出本机保存的 CLI 会话（不含凭据）
@@ -43,7 +60,7 @@ browser action/navigate 和 window action 默认附带操作后的观察；目�
 export function parseRemoteCliArgs(args: string[]): RemoteCommand {
   const words: string[] = [], options = new Map<string, string | true>();
   const booleans = new Set(["json", "new-tab", "yes", "params-stdin", "no-observe"]);
-  const known = new Set([...booleans, "session", "browser", "profile", "window", "tab", "url", "name", "hide-automation", "lease-seconds", "params-file", "request-id", "output"]);
+  const known = new Set([...booleans, "session", "browser", "profile", "window", "tab", "url", "name", "hide-automation", "lease-seconds", "params", "params-file", "request-id", "output"]);
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (!arg.startsWith("--")) { words.push(arg); continue; }
@@ -95,14 +112,14 @@ export function parseRemoteCliArgs(args: string[]): RemoteCommand {
         else { parsed.params.url = requireOption("url"); if (options.has("new-tab")) parsed.params.newTab = true; }
       }
       if (verb === "tab-close") { allowed.push("tab"); parsed.params.tabId = tab(); }
-      if (verb === "action") allowed.push("params-file", "params-stdin");
+      if (verb === "action") allowed.push("params", "params-file", "params-stdin");
       if (verb === 'action' || verb === 'navigate') allowed.push('no-observe');
       break;
     }
     case "window":
       exactWords(2); if (!["observe", "screenshot", "action"].includes(words[1])) bad("不支持这个窗口命令。");
       parsed.operation = "window." + words[1];
-      if (words[1] === "action") allowed.push("params-file", "params-stdin", "no-observe");
+      if (words[1] === "action") allowed.push("params", "params-file", "params-stdin", "no-observe");
       else { allowed.push("window", "output"); parsed.params.windowId = requireOption("window"); parsed.output = get("output"); if (parsed.output) parsed.params.screenshot = true; }
       break;
     default: bad("请选择 remote 命令，运行 ppilot remote --help 查看用法。");
@@ -112,8 +129,9 @@ export function parseRemoteCliArgs(args: string[]): RemoteCommand {
     parsed.session = requireOption("session"); if (!/^[a-f0-9]{32}$/.test(parsed.session)) bad("会话 ID 必须来自 connect 返回值。");
   }
   if (parsed.operation?.endsWith(".action")) {
-    if (options.has("params-file") === options.has("params-stdin")) bad("请选择一种动作 JSON 输入：--params-file 或 --params-stdin。");
-    parsed.paramsFile = get("params-file"); parsed.paramsStdin = options.has("params-stdin");
+    const sources = Number(options.has("params")) + Number(options.has("params-file")) + Number(options.has("params-stdin"));
+    if (sources !== 1) bad("请选择且仅选择一种动作 JSON 输入：--params、--params-file 或 --params-stdin。");
+    parsed.paramsInline = get("params"); parsed.paramsFile = get("params-file"); parsed.paramsStdin = options.has("params-stdin");
   }
   parsed.requestId = get("request-id");
   parsed.observeAfter = !options.has('no-observe');
@@ -123,7 +141,10 @@ export function parseRemoteCliArgs(args: string[]): RemoteCommand {
 
 async function readAction(command: RemoteCommand, input: Readable) {
   let text: string;
-  if (command.paramsFile) {
+  if (command.paramsInline !== undefined) {
+    if (Buffer.byteLength(command.paramsInline, "utf8") > 49152) throw remoteError("REMOTE_INVALID_ARGUMENTS", "动作参数需要小于 48 KiB。");
+    text = command.paramsInline;
+  } else if (command.paramsFile) {
     const stat = await fs.stat(command.paramsFile);
     if (!stat.isFile() || stat.size > 49152) throw remoteError("REMOTE_INVALID_ARGUMENTS", "动作文件需要小于 48 KiB。");
     text = await fs.readFile(command.paramsFile, "utf8");
@@ -216,7 +237,15 @@ export async function saveRemoteFeedbackImages(result: any, command: RemoteComma
 }
 
 export async function runRemoteCli(args: string[], io: Io = process, runtime: RemoteCliRuntime = {}): Promise<number> {
-  if (!args.length || args.includes("--help") || args.includes("-h")) { io.stdout.write(remoteCliHelp()); return 0; }
+  if (['schema', 'capabilities'].includes(args[0]) || (args[0] && Object.hasOwn(remoteCommands, args[0]) && (args.includes('--help') || args.includes('-h'))) || (args[0] === 'help' && args[1])) {
+    try {
+      if (handleControlCliDiscovery('remote', args, remoteCommands, io as unknown as Pick<NodeJS.Process, 'stdout' | 'stderr'>)) return 0;
+    } catch (error) {
+      io.stdout.write(JSON.stringify({ ok: false, code: 'REMOTE_INVALID_ARGUMENTS', message: error instanceof Error ? error.message : String(error), recovery: controlRecovery('REMOTE_INVALID_ARGUMENTS'), guidance: commandGuidance('remote', args[1] || args[0], remoteCommands) }, null, 2) + "\n");
+      return 2;
+    }
+  }
+  if (!args.length || args.includes("--help") || args.includes("-h") || args[0] === "help") { io.stdout.write(remoteCliHelp()); return 0; }
   const home = runtime.homeDir || os.homedir(), store = new RemoteSessionStore(home), connection = new RemoteControlConnection(runtime.env);
   let command: RemoteCommand | undefined, saved: RemoteSession | undefined;
   const write = (value: unknown) => io.stdout.write(JSON.stringify(value, null, command?.json ? undefined : 2) + "\n");
@@ -248,7 +277,8 @@ export async function runRemoteCli(args: string[], io: Io = process, runtime: Re
   } catch (cause) {
     const error = cause as Error & { code?: string; requestId?: string };
     if (command?.session && error.code === "AUTOMATION_CLI_SESSION_ENDED") await store.remove(command.session).catch(() => {});
-    write({ ok: false, code: error.code || "REMOTE_FAILED", message: error.message, requestId: error.requestId || command?.requestId });
+    const code = error.code || "REMOTE_FAILED";
+    write({ ok: false, code, message: error.message, requestId: error.requestId || command?.requestId, recovery: controlRecovery(code), ...(code === "REMOTE_INVALID_ARGUMENTS" ? { guidance: commandGuidance('remote', args[0], remoteCommands) } : {}) });
     if (error.code === "REMOTE_INVALID_ARGUMENTS" || error instanceof SyntaxError) return 2;
     if (["REMOTE_APP_NOT_RUNNING", "REMOTE_UPDATE_REQUIRED", "REMOTE_PLATFORM_UNAVAILABLE"].includes(error.code || "")) return 69;
     if (/UNKNOWN|STALE|STOPPED|ENDED|UNPAIRED|ROUTE_CHANGED|CONTROL_BUSY|SESSION_NOT_FOUND|OBSERVATION/.test(error.code || "")) return 75;

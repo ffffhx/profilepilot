@@ -1,6 +1,7 @@
 export const NATIVE_CONTROL_METHODS = [
   "status", "tabs", "claim", "observe", "read", "action", "pointer", "screenshot",
-  "open", "switch", "newTab", "cdp", "debug", "network", "console", "errors", "trace", "profiler", "events", "history", "download", "control", "sites", "site",
+  "open", "switch", "newTab", "dialog", "cdp", "debug", "network", "console", "errors", "trace", "profiler", "events", "history", "download", "control", "sites", "site",
+  "cookies.export", "cookies.import",
   "extension-ui", "extension.reload", "downloads.start", "downloads.search", "downloads.wait", "downloads.cancel", "downloads.disarm"
 ] as const;
 

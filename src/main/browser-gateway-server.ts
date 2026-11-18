@@ -14,17 +14,22 @@ import type { GatewayCdpBackend } from "./browser-gateway-transport";
 import { GatewayWebSocketPeer } from "./browser-gateway-websocket";
 import {
   AGENT_DENIED_TARGET_METHODS,
+  AGENT_SCOPED_EMULATION_METHODS,
   AGENT_VIRTUALIZED_VIEWPORT_METHODS,
   chromiumDownloadParams,
   GATEWAY_DEVICE_PRESETS,
   isAgentTargetActivityMethod,
   isAgentTargetInteractionMethod,
-  isRawCdpMethodAllowed
+  isLoopbackHostHeader,
+  isRawCdpMethodAllowed,
+  timingSafeSecretEqual
 } from "./browser-gateway-policy";
 
 export {
   GATEWAY_DEVICE_PRESETS,
-  isRawCdpMethodAllowed
+  isLoopbackHostHeader,
+  isRawCdpMethodAllowed,
+  timingSafeSecretEqual
 } from "./browser-gateway-policy";
 const MAX_PENDING_REQUESTS = 10_000;
 const MAX_PARKED_EVENTS = 20_000;
@@ -93,6 +98,7 @@ interface GatewayConnection {
   quiescing: boolean;
   parked: boolean;
   downloadBehaviorOverridden?: boolean;
+  emulatedCdpSessions: Map<string, { metrics?: boolean; touch?: boolean; userAgent?: boolean }>;
   parkedEvents: string[];
   parkedEventBytes: number;
   agentCdpGeneration: number;
@@ -409,6 +415,28 @@ export class BrowserGatewayServer {
     if (route) this.clearSessionTarget(route, sessionId);
   }
 
+  assignSessionTarget(publicPort: number, sessionId: string, targetId: string): void {
+    const route = this.routes.get(publicPort);
+    if (!route || !targetId) return;
+    const intent = this.beginSessionTargetIntent(route, sessionId);
+    this.setSessionTargetIfCurrentIntent(route, sessionId, targetId, intent, "gateway:assigned-target");
+  }
+
+  async allocateSessionTab(publicPort: number, sessionId: string, timeoutMs = 5_000): Promise<string | null> {
+    const route = this.routes.get(publicPort);
+    if (!route || route.kind === "electron") return null;
+    const result = await this.sendRaw(
+      route,
+      "Target.createTarget",
+      { url: "about:blank", background: true },
+      timeoutMs
+    ) as { targetId?: unknown } | null;
+    const targetId = typeof result?.targetId === "string" ? result.targetId : "";
+    if (!targetId) return null;
+    this.assignSessionTarget(publicPort, sessionId, targetId);
+    return targetId;
+  }
+
   prepareDeviceEmulationUserHandoff(publicPort: number, sessionId: string): boolean {
     const route = this.routes.get(publicPort);
     if (!route?.deviceEmulationBySession.has(sessionId)) return false;
@@ -421,9 +449,29 @@ export class BrowserGatewayServer {
   }
 
   handleControlEvent(event: GatewayControlEvent): void {
-    if (event.type !== "connections-revoked") return;
     const route = this.routes.get(event.profile.publicPort);
     if (!route) return;
+    if (
+      event.type === "profile-updated" &&
+      event.reason === "session-stopped" &&
+      event.profile.sessionStatus === "active"
+    ) {
+      for (const connection of [...route.connections]) {
+        if (connection.identity.kind !== "agent" || connection.identity.profileId !== event.profile.profileId) {
+          continue;
+        }
+        const stillMember = event.profile.ownerSessionId === connection.identity.sessionId ||
+          Boolean(event.profile.sessions?.[connection.identity.sessionId]);
+        if (!stillMember) {
+          const actions = this.takeScopedEmulationCleanupThunks(route, connection);
+          void Promise.allSettled(actions.map((fn) => fn())).finally(() => {
+            connection.peer.close(4003, "session-stopped");
+          });
+        }
+      }
+      return;
+    }
+    if (event.type !== "connections-revoked") return;
     const preserveDeviceEmulation =
       event.reason === "user_takeover" &&
       Boolean(event.profile.ownerSessionId) &&
@@ -432,6 +480,12 @@ export class BrowserGatewayServer {
       );
     if (event.reason !== "user-return" && !preserveDeviceEmulation) {
       void this.clearAllDeviceEmulations(route);
+      for (const connection of route.connections) {
+        if (connection.identity.kind === "agent" && connection.emulatedCdpSessions.size > 0) {
+          const actions = this.takeScopedEmulationCleanupThunks(route, connection);
+          void Promise.allSettled(actions.map((fn) => fn()));
+        }
+      }
     }
     if (event.reason === "user-return") {
       // Takeover rendering and overlay work use short-lived trusted page
@@ -449,10 +503,11 @@ export class BrowserGatewayServer {
         connection.identity.kind === "agent" &&
         connection.identity.profileId === event.profile.profileId
       ) {
-        // All supported Gateway drivers are safe to keep physically connected
-        // while parked: commands are rejected before reaching Chrome and browser
-        // events are buffered until control returns.
-        const resumable = event.profile.driverKind === "agent-browser";
+        const secondaryMember = event.profile.sessions?.[connection.identity.sessionId];
+        const memberDriverKind = event.profile.ownerSessionId === connection.identity.sessionId
+          ? event.profile.driverKind
+          : secondaryMember?.driverKind || event.profile.driverKind;
+        const resumable = memberDriverKind === "agent-browser";
         if (resumable && event.reason === "user_takeover") {
           connection.quiescing = false;
           connection.parked = true;
@@ -460,13 +515,19 @@ export class BrowserGatewayServer {
           connection.parkedEventBytes = 0;
           continue;
         }
+        const isCurrentMember = (
+          event.profile.ownerSessionId === connection.identity.sessionId &&
+          event.profile.daemonInstanceId === connection.identity.daemonInstanceId
+        ) || Boolean(
+          secondaryMember &&
+          secondaryMember.daemonInstanceId === connection.identity.daemonInstanceId
+        );
         if (
           resumable &&
           event.reason === "user-return" &&
           event.profile.sessionStatus === "active" &&
           event.profile.ownership === "agent" &&
-          event.profile.ownerSessionId === connection.identity.sessionId &&
-          event.profile.daemonInstanceId === connection.identity.daemonInstanceId
+          isCurrentMember
         ) {
           connection.identity.controlGeneration = event.profile.controlGeneration;
           connection.quiescing = false;
@@ -515,7 +576,7 @@ export class BrowserGatewayServer {
     if (route.kind === "electron" && input.method === "Target.createTarget") {
       throw new Error("Electron 自动化仅操作已有窗口；请从应用中打开新窗口。");
     }
-    if (AGENT_VIRTUALIZED_VIEWPORT_METHODS.has(input.method)) {
+    if (AGENT_VIRTUALIZED_VIEWPORT_METHODS.has(input.method) || AGENT_SCOPED_EMULATION_METHODS.has(input.method)) {
       return {};
     }
     if (input.method === "Target.createTarget") {
@@ -547,6 +608,7 @@ export class BrowserGatewayServer {
       const targetId = typeof input.params?.targetId === "string"
         ? input.params.targetId
         : typeof input.targetId === "string" ? input.targetId : "";
+      this.assertSessionCanUseTarget(route, input.sessionId, targetId);
       const intent = this.beginSessionTargetIntent(route, input.sessionId);
       try {
         await this.assertPageTarget(route, targetId, timeoutMs);
@@ -565,6 +627,12 @@ export class BrowserGatewayServer {
       }
     }
     if (!rawMethodNeedsTarget(input.method)) {
+      if (
+        (input.method === "Target.attachToTarget" || input.method === "Target.closeTarget") &&
+        typeof input.params?.targetId === "string"
+      ) {
+        this.assertSessionCanUseTarget(route, input.sessionId, input.params.targetId);
+      }
       const intent = input.method === "Target.attachToTarget"
         ? this.beginSessionTargetIntent(route, input.sessionId)
         : undefined;
@@ -617,6 +685,7 @@ export class BrowserGatewayServer {
     const targetId =
       configuredTargetId ||
       (await this.resolveDefaultPageTarget(route, timeoutMs, input.sessionId));
+    this.assertSessionCanUseTarget(route, input.sessionId, targetId);
     if (configuredTargetId && input.method !== "Page.bringToFront") {
       await this.assertPageTarget(route, targetId, timeoutMs);
     }
@@ -908,7 +977,13 @@ export class BrowserGatewayServer {
     const result = await this.sendRaw(route, "Target.getTargets", {}, timeoutMs) as {
       targetInfos?: Array<Record<string, unknown>>;
     };
-    const target = (result.targetInfos || []).find((candidate) => (candidate.type === "page" || route.kind === "electron" && candidate.type === "webview") && typeof candidate.targetId === "string");
+    const candidates = (result.targetInfos || []).filter(
+      (candidate) => (candidate.type === "page" || route.kind === "electron" && candidate.type === "webview") && typeof candidate.targetId === "string"
+    );
+    const unowned = candidates.find(
+      (candidate) => !this.findConflictingTargetOwner(route, sessionId, String(candidate.targetId))
+    );
+    const target = unowned || candidates[0];
     if (!target?.targetId) {
       const error = new Error("当前没有可供 Raw CDP 操作的页面") as Error & { code?: string };
       error.code = "RAW_CDP_TARGET_NOT_FOUND";
@@ -959,6 +1034,20 @@ export class BrowserGatewayServer {
   }
 
   private async handleHttp(publicPort: number, request: IncomingMessage, response: ServerResponse): Promise<void> {
+    if (request.headers.origin) {
+      writeJson(response, 403, {
+        error_code: "GATEWAY_ORIGIN_FORBIDDEN",
+        message: "禁止携带 Origin 的浏览器请求访问 Gateway"
+      });
+      return;
+    }
+    if (!isLoopbackHostHeader(request.headers.host)) {
+      writeJson(response, 403, {
+        error_code: "GATEWAY_HOST_FORBIDDEN",
+        message: "禁止非本地 Host 请求访问 Gateway"
+      });
+      return;
+    }
     if (!this.isInternalRequest(request)) {
       writeJson(response, 401, { error_code: "GATEWAY_TICKET_REQUIRED", message: "需要 ProfilePilot Gateway Ticket" });
       return;
@@ -1027,6 +1116,24 @@ export class BrowserGatewayServer {
   }
 
   private async handleUpgrade(route: GatewayRoute, request: IncomingMessage, socket: Socket, head: Buffer): Promise<void> {
+    if (request.headers.origin) {
+      rejectUpgrade(socket, 403, JSON.stringify({
+        source: "ProfilePilot Gateway",
+        error_code: "GATEWAY_ORIGIN_FORBIDDEN",
+        hard_stop: true,
+        message: "禁止携带 Origin 的浏览器连接访问 Gateway"
+      }));
+      return;
+    }
+    if (!isLoopbackHostHeader(request.headers.host)) {
+      rejectUpgrade(socket, 403, JSON.stringify({
+        source: "ProfilePilot Gateway",
+        error_code: "GATEWAY_HOST_FORBIDDEN",
+        hard_stop: true,
+        message: "禁止非本地 Host 连接访问 Gateway"
+      }));
+      return;
+    }
     const url = new URL(request.url || "/", `http://${this.host}:${route.publicPort}`);
     const pageMatch = url.pathname.match(/^\/devtools\/page\/([^/]+)$/);
     if (url.pathname !== "/devtools/browser/gateway" && !pageMatch) {
@@ -1116,12 +1223,16 @@ export class BrowserGatewayServer {
       reconnecting,
       quiescing: false,
       parked: false,
+      emulatedCdpSessions: new Map(),
       parkedEvents: [],
       parkedEventBytes: 0,
       agentCdpGeneration: 0
     };
     route.connections.add(connection);
     if (identity.kind === "agent") {
+      if (identity.targetId && !route.targetBySession.has(identity.sessionId)) {
+        this.assignSessionTarget(route.publicPort, identity.sessionId, identity.targetId);
+      }
       this.options.onAgentConnectionChange?.(route.publicPort, true, identity);
     }
     peer.onText = (message) => {
@@ -1139,6 +1250,7 @@ export class BrowserGatewayServer {
       if (connection.downloadBehaviorOverridden) {
         cleanupActions.push(() => this.sendRaw(route, "Browser.setDownloadBehavior", { behavior: "default", eventsEnabled: false }, 2_000));
       }
+      cleanupActions.push(...this.takeScopedEmulationCleanupThunks(route, connection));
       for (const [id, pending] of route.pending) {
         if (pending.connection !== connection) continue;
         if (pending.internalAttachTargetId) {
@@ -1281,6 +1393,59 @@ export class BrowserGatewayServer {
         this.sendClientResponse(connection, downstreamId, { result: {} }, clientSessionId);
         return;
       }
+      if (AGENT_SCOPED_EMULATION_METHODS.has(method)) {
+        if (method === "Emulation.setDeviceMetricsOverride" && params.__profilepilotExplicitViewport !== true) {
+          this.sendClientResponse(connection, downstreamId, { result: {} }, clientSessionId);
+          return;
+        }
+        if (!clientSessionId) {
+          this.sendClientResponse(connection, downstreamId, {
+            error: {
+              code: -32602,
+              message: `${method} requires a target CDP sessionId`
+            }
+          });
+          return;
+        }
+        if (method === "Emulation.setDeviceMetricsOverride") {
+          const { __profilepilotExplicitViewport: _ignore, ...cleanParams } = params;
+          message = { ...message, params: cleanParams };
+        }
+        const entry = connection.emulatedCdpSessions.get(clientSessionId) || {};
+        if (method === "Emulation.setDeviceMetricsOverride") entry.metrics = true;
+        else if (method === "Emulation.clearDeviceMetricsOverride") entry.metrics = false;
+        else if (method === "Emulation.setTouchEmulationEnabled") entry.touch = Boolean(params.enabled);
+        else if (method === "Emulation.setUserAgentOverride") entry.userAgent = Boolean(params.userAgent);
+        if (entry.metrics || entry.touch || entry.userAgent) {
+          connection.emulatedCdpSessions.set(clientSessionId, entry);
+        } else {
+          connection.emulatedCdpSessions.delete(clientSessionId);
+        }
+      }
+      if (method === "Target.detachFromTarget" && typeof params.sessionId === "string") {
+        const detachSessionId = params.sessionId;
+        const emuFlags = connection.emulatedCdpSessions.get(detachSessionId);
+        if (emuFlags) {
+          connection.emulatedCdpSessions.delete(detachSessionId);
+          await this.clearEmulationFlagsOnSession(route, detachSessionId, emuFlags, 1_500);
+        }
+      }
+      if (method === "Target.closeTarget" && typeof params.targetId === "string" && params.targetId) {
+        const conflictingOwner = this.findConflictingTargetOwner(
+          route,
+          connection.identity.sessionId,
+          params.targetId
+        );
+        if (conflictingOwner) {
+          this.sendClientResponse(connection, downstreamId, {
+            error: {
+              code: -32000,
+              message: `PROFILE_LEASE_CONFLICT: 标签页 ${params.targetId} 已由 Session ${conflictingOwner} 控制`
+            }
+          }, clientSessionId);
+          return;
+        }
+      }
       if (
         clientSessionId &&
         method !== "Page.bringToFront" &&
@@ -1291,7 +1456,7 @@ export class BrowserGatewayServer {
         )
       ) {
         const targetId = route.targetByCdpSession.get(clientSessionId)?.pageTargetId;
-        if (targetId) {
+        if (targetId && !this.findConflictingTargetOwner(route, connection.identity.sessionId, targetId)) {
           const activityIntent = this.beginSessionTargetIntent(route, connection.identity.sessionId);
           this.setSessionTargetIfCurrentIntent(
             route,
@@ -1308,6 +1473,7 @@ export class BrowserGatewayServer {
           const targetId = method === "Target.activateTarget"
             ? typeof params.targetId === "string" ? params.targetId : ""
             : this.targetForCdpSession(route, connection, message);
+          this.assertSessionCanUseTarget(route, connection.identity.sessionId, targetId);
           await this.assertPageTarget(route, targetId, 5_000);
           this.control.assertConnectionCanSend(connection.identity);
           this.setSessionTargetIfCurrentIntent(
@@ -1323,7 +1489,7 @@ export class BrowserGatewayServer {
           this.sendClientResponse(connection, downstreamId, {
             error: {
               code: -32000,
-              message: error instanceof Error ? error.message : String(error || "Target activation failed")
+              message: error instanceof Error ? `${errorCode(error)}: ${error.message}` : String(error || "Target activation failed")
             }
           }, clientSessionId);
         }
@@ -1333,6 +1499,22 @@ export class BrowserGatewayServer {
         message = { ...message, params: agentBackgroundTargetParams(params) };
         targetIntent = this.beginSessionTargetIntent(route, connection.identity.sessionId);
       } else if (method === "Target.attachToTarget") {
+        if (typeof params.targetId === "string" && params.targetId) {
+          const conflictingOwner = this.findConflictingTargetOwner(
+            route,
+            connection.identity.sessionId,
+            params.targetId
+          );
+          if (conflictingOwner) {
+            this.sendClientResponse(connection, downstreamId, {
+              error: {
+                code: -32000,
+                message: `PROFILE_LEASE_CONFLICT: 标签页 ${params.targetId} 已由 Session ${conflictingOwner} 控制`
+              }
+            }, clientSessionId);
+            return;
+          }
+        }
         // Flattened sessions keep every command visible to the Gateway instead
         // of tunnelling opaque payloads through Target.sendMessageToTarget.
         message = { ...message, params: { ...params, flatten: true } };
@@ -1386,13 +1568,46 @@ export class BrowserGatewayServer {
     if (
       connection.identity.kind === "agent" &&
       method === "Input.dispatchMouseEvent" &&
-      params.type === "mousePressed"
+      (params.type === "mousePressed" || params.type === "mouseMoved" || params.type === "mouseWheel")
     ) {
-      this.queueOverlayAvoidance(
+      await this.queueOverlayAvoidance(
         route,
         connection.targetSessionId || clientSessionId,
         params
       );
+      try {
+        this.control.assertConnectionCanSend(connection.identity);
+      } catch (error) {
+        if (attachTargetId) this.decrementConnectionAttachTarget(connection, attachTargetId);
+        if (targetIntent !== undefined) {
+          this.retireSessionTargetIntent(route, connection.identity.sessionId, targetIntent);
+        }
+        if (connection.parked || connection.quiescing) {
+          this.sendClientResponse(connection, downstreamId, {
+            error: { code: -32000, message: `${errorCode(error)}: ProfilePilot 已暂停该驱动连接` }
+          }, clientSessionId);
+        } else {
+          connection.peer.close(4003, errorCode(error));
+        }
+        return;
+      }
+      if (connection.quiescing || connection.parked || !route.connections.has(connection)) {
+        if (attachTargetId) this.decrementConnectionAttachTarget(connection, attachTargetId);
+        if (targetIntent !== undefined) {
+          this.retireSessionTargetIntent(route, connection.identity.sessionId, targetIntent);
+        }
+        if (route.connections.has(connection)) {
+          this.sendClientResponse(connection, downstreamId, {
+            error: {
+              code: -32000,
+              message: connection.parked
+                ? "AGENT_USER_IN_CONTROL: 用户正在操作浏览器，请等待 ProfilePilot 交还控制权"
+                : "AGENT_HANDOFF_IN_PROGRESS: ProfilePilot 正在安全接管浏览器"
+            }
+          }, clientSessionId);
+        }
+        return;
+      }
     }
     const backendId = route.nextBackendId++;
     route.pending.set(backendId, {
@@ -1701,6 +1916,7 @@ export class BrowserGatewayServer {
     const previousTargetId = route.targetBySession.get(sessionId);
     if (previousTargetId === targetId) return;
     route.targetBySession.set(sessionId, targetId);
+    this.control.setSessionTarget(sessionId, targetId);
     this.options.onAgentTargetChange?.(route.publicPort, {
       sessionId,
       previousTargetId: previousTargetId || null,
@@ -1748,6 +1964,7 @@ export class BrowserGatewayServer {
     if (route.targetIntentBySession.get(sessionId) === expectedCommitIntent) {
       route.targetIntentBySession.delete(sessionId);
     }
+    this.control.setSessionTarget(sessionId, null);
     this.options.onAgentTargetChange?.(route.publicPort, {
       sessionId,
       previousTargetId: expectedTargetId,
@@ -1761,6 +1978,7 @@ export class BrowserGatewayServer {
     route.targetCommitIntentBySession.delete(sessionId);
     const previousTargetId = route.targetBySession.get(sessionId);
     if (!route.targetBySession.delete(sessionId)) return;
+    this.control.setSessionTarget(sessionId, null);
     this.options.onAgentTargetChange?.(route.publicPort, {
       sessionId,
       previousTargetId: previousTargetId || null,
@@ -1777,6 +1995,13 @@ export class BrowserGatewayServer {
     pageTargetId?: string | null
   ): GatewayCdpSessionBinding {
     const previous = route.targetByCdpSession.get(cdpSessionId);
+    if (
+      previous &&
+      previous.connectionId !== connection.id &&
+      [...route.connections].some((candidate) => candidate.id === previous.connectionId)
+    ) {
+      return previous;
+    }
     const sameBinding = previous?.targetId === targetId && previous.connectionId === connection.id &&
       previous.agentSessionId === connection.identity.sessionId;
     if (previous) {
@@ -1877,6 +2102,9 @@ export class BrowserGatewayServer {
       : targetInfo?.type === "iframe" && parent?.connectionId === connection.id && parent.agentSessionId === connection.identity.sessionId
         ? parent.pageTargetId
         : null;
+    if (pageTargetId && this.findConflictingTargetOwner(route, connection.identity.sessionId, pageTargetId)) {
+      return;
+    }
     // An unparented iframe/worker is not a tab. Keep the existing affinity if
     // its owning page cannot be established; never select an arbitrary page.
     this.bindCdpSession(route, connection, cdpSessionId, targetId, pageTargetId);
@@ -1984,9 +2212,13 @@ export class BrowserGatewayServer {
 
   private assertDelegatedSession(publicPort: number, sessionId: string, controlGeneration: number): void {
     const profile = this.control.getProfile(publicPort);
+    const hasSession = Boolean(
+      profile &&
+      (profile.ownerSessionId === sessionId || Boolean(profile.sessions?.[sessionId]))
+    );
     if (
       !profile ||
-      profile.ownerSessionId !== sessionId ||
+      !hasSession ||
       profile.sessionStatus !== "active" ||
       profile.ownership !== "user" ||
       profile.controlGeneration !== controlGeneration
@@ -2000,9 +2232,13 @@ export class BrowserGatewayServer {
 
   private assertActiveSession(publicPort: number, sessionId: string, controlGeneration: number): void {
     const profile = this.control.getProfile(publicPort);
+    const hasSession = Boolean(
+      profile &&
+      (profile.ownerSessionId === sessionId || Boolean(profile.sessions?.[sessionId]))
+    );
     if (
       !profile ||
-      profile.ownerSessionId !== sessionId ||
+      !hasSession ||
       profile.sessionStatus !== "active" ||
       profile.controlGeneration !== controlGeneration
     ) {
@@ -2129,10 +2365,12 @@ export class BrowserGatewayServer {
     const current = route.deviceEmulationBySession.get(state.sessionId);
     if (current !== state || current.cdpSessionId) return;
     const profile = this.control.getProfile(route.publicPort);
+    const memberDaemonId = profile?.ownerSessionId === state.sessionId
+      ? profile.daemonInstanceId
+      : profile?.sessions?.[state.sessionId]?.daemonInstanceId;
     if (
       !profile ||
-      profile.ownerSessionId !== state.sessionId ||
-      profile.daemonInstanceId !== state.daemonInstanceId ||
+      memberDaemonId !== state.daemonInstanceId ||
       profile.sessionStatus !== "active" ||
       profile.ownership !== "agent"
     ) {
@@ -2280,19 +2518,18 @@ export class BrowserGatewayServer {
     });
   }
 
-  private queueOverlayAvoidance(
+  private async queueOverlayAvoidance(
     route: GatewayRoute,
     sessionId: string | undefined,
     params: Record<string, unknown>
-  ): void {
+  ): Promise<void> {
     const x = Number(params.x);
     const y = Number(params.y);
     if (!sessionId || !Number.isFinite(x) || !Number.isFinite(y) || route.pending.size >= MAX_PENDING_REQUESTS - 1) {
       return;
     }
-    // Keep this in the same backend command queue as the click, but do not await
-    // its response. Chrome receives the tiny hit-test/evasion script first, so
-    // the click itself incurs no extra network round trip.
+    const resolved = await this.resolveTopLevelPageSessionForAvoidance(route, sessionId);
+    if (!resolved) return;
     const expression = `(() => {
       const host = document.getElementById("__pp-agent-overlay");
       if (!host) return false;
@@ -2316,13 +2553,117 @@ export class BrowserGatewayServer {
       }));
       return true;
     })()`;
-    void this.sendRaw(
-      route,
-      "Runtime.evaluate",
-      { expression, awaitPromise: false, returnByValue: false },
-      750,
-      sessionId
-    ).catch(() => undefined);
+    const timeoutMs = params.type === "mouseMoved" ? 350 : 750;
+    try {
+      await this.sendRaw(
+        route,
+        "Runtime.evaluate",
+        { expression, awaitPromise: false, returnByValue: false },
+        timeoutMs,
+        resolved.cdpSessionId
+      ).catch(() => undefined);
+    } finally {
+      if (resolved.ephemeral) {
+        await this.detachInternalTarget(route, resolved.cdpSessionId, 500).catch(() => undefined);
+      }
+    }
+  }
+
+  private async resolveTopLevelPageSessionForAvoidance(
+    route: GatewayRoute,
+    sessionId: string
+  ): Promise<{ cdpSessionId: string; ephemeral: boolean } | null> {
+    const binding = route.targetByCdpSession.get(sessionId);
+    if (!binding || !binding.pageTargetId || binding.targetId === binding.pageTargetId) {
+      return { cdpSessionId: sessionId, ephemeral: false };
+    }
+    for (const [candidateSessionId, candidateBinding] of route.targetByCdpSession) {
+      if (
+        candidateBinding.targetId === binding.pageTargetId &&
+        candidateBinding.connectionId === binding.connectionId
+      ) {
+        return { cdpSessionId: candidateSessionId, ephemeral: false };
+      }
+    }
+    for (const [candidateSessionId, candidateBinding] of route.targetByCdpSession) {
+      if (candidateBinding.targetId === binding.pageTargetId) {
+        return { cdpSessionId: candidateSessionId, ephemeral: false };
+      }
+    }
+    const attached = await this.attachInternalTarget(route, binding.pageTargetId, 500).catch(() => null) as {
+      sessionId?: unknown;
+    } | null;
+    const ephemeralSessionId = typeof attached?.sessionId === "string" ? attached.sessionId : "";
+    return ephemeralSessionId ? { cdpSessionId: ephemeralSessionId, ephemeral: true } : null;
+  }
+
+  private findConflictingTargetOwner(
+    route: GatewayRoute,
+    sessionId: string,
+    targetId: string
+  ): string | null {
+    if (!targetId) return null;
+    const profile = this.control.getProfile(route.publicPort);
+    if (!profile || profile.sessionStatus !== "active") return null;
+    const isActiveMember = (candidateSessionId: string): boolean => (
+      profile.ownerSessionId === candidateSessionId ||
+      Boolean(profile.sessions?.[candidateSessionId])
+    );
+    for (const [otherSessionId, otherTargetId] of route.targetBySession) {
+      if (otherSessionId !== sessionId && otherTargetId === targetId && isActiveMember(otherSessionId)) {
+        return otherSessionId;
+      }
+    }
+    if (profile.ownerSessionId && profile.ownerSessionId !== sessionId && profile.targetId === targetId) {
+      return profile.ownerSessionId;
+    }
+    if (profile.sessions) {
+      for (const entry of Object.values(profile.sessions)) {
+        if (entry.sessionId !== sessionId && entry.targetId === targetId) {
+          return entry.sessionId;
+        }
+      }
+    }
+    return null;
+  }
+
+  private assertSessionCanUseTarget(route: GatewayRoute, sessionId: string, targetId: string): void {
+    const owner = this.findConflictingTargetOwner(route, sessionId, targetId);
+    if (owner) {
+      throw new BrowserGatewayControlError(
+        "PROFILE_LEASE_CONFLICT",
+        `标签页 ${targetId} 已由 Session ${owner} 控制`
+      );
+    }
+  }
+
+  private takeScopedEmulationCleanupThunks(
+    route: GatewayRoute,
+    connection: GatewayConnection
+  ): Array<() => Promise<unknown>> {
+    if (connection.emulatedCdpSessions.size === 0) return [];
+    const entries = [...connection.emulatedCdpSessions.entries()];
+    connection.emulatedCdpSessions.clear();
+    return entries.map(([cdpSessionId, flags]) => () =>
+      this.clearEmulationFlagsOnSession(route, cdpSessionId, flags, 2_000)
+    );
+  }
+
+  private async clearEmulationFlagsOnSession(
+    route: GatewayRoute,
+    cdpSessionId: string,
+    flags: { metrics?: boolean; touch?: boolean; userAgent?: boolean },
+    timeoutMs: number
+  ): Promise<void> {
+    if (flags.metrics) {
+      await this.sendRaw(route, "Emulation.clearDeviceMetricsOverride", {}, timeoutMs, cdpSessionId).catch(() => undefined);
+    }
+    if (flags.userAgent) {
+      await this.sendRaw(route, "Emulation.setUserAgentOverride", { userAgent: "" }, timeoutMs, cdpSessionId).catch(() => undefined);
+    }
+    if (flags.touch) {
+      await this.sendRaw(route, "Emulation.setTouchEmulationEnabled", { enabled: false }, timeoutMs, cdpSessionId).catch(() => undefined);
+    }
   }
 
   private rejectPending(route: GatewayRoute, error: Error): void {
@@ -2353,7 +2694,9 @@ export class BrowserGatewayServer {
   }
 
   private isInternalRequest(request: IncomingMessage): boolean {
-    return request.headers["x-profilepilot-internal"] === this.options.internalSecret;
+    const rawHeader = request.headers["x-profilepilot-internal"];
+    const actual = Array.isArray(rawHeader) ? rawHeader[0] : rawHeader;
+    return timingSafeSecretEqual(actual, this.options.internalSecret);
   }
 }
 

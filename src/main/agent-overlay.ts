@@ -39,6 +39,7 @@ export interface AgentOverlayPortInput {
   driverReconnecting?: boolean;
   controlSince?: string;
   agentTarget?: GatewayAgentTarget | null;
+  controlledTargetIds?: string[];
   clients: CdpClientInfo[];
 }
 
@@ -240,8 +241,19 @@ interface PortOverlay {
   targetRequest: Promise<CdpTargetListEntry[] | null> | null;
   targetCacheGeneration: number;
   agentTarget: GatewayAgentTarget | null;
+  controlledTargetIds?: string[];
   autoFollowAgent: boolean;
   targetActivationInFlight: boolean;
+}
+
+export interface OverlayViewportScreenGeometry {
+  screenX: number;
+  screenY: number;
+  outerWidth: number;
+  outerHeight: number;
+  innerWidth: number;
+  innerHeight: number;
+  devicePixelRatio: number;
 }
 
 interface GuardProbeResult {
@@ -331,6 +343,7 @@ export class AgentOverlayManager {
       if (next) {
         const previousSession = primaryAgentSession(state.clients);
         const previousTargetId = state.agentTarget?.targetId || null;
+        const previousControlledKey = (state.controlledTargetIds || []).join("\0");
         state.profileId = next.profileId;
         state.profileName = next.profileName;
         state.browserPids = normalizeBrowserPids(next.browserPids);
@@ -341,8 +354,19 @@ export class AgentOverlayManager {
         state.driverReconnecting = Boolean(next.driverReconnecting);
         state.controlSince = next.controlSince;
         state.agentTarget = next.agentTarget || null;
+        state.controlledTargetIds = next.controlledTargetIds
+          ? [...new Set(next.controlledTargetIds.filter(Boolean))]
+          : undefined;
+        const nextTargetId = state.agentTarget?.targetId || null;
+        const nextControlledKey = (state.controlledTargetIds || []).join("\0");
         this.syncSessionStarts(state, now);
         this.syncDelegatedControl(state, Boolean(next.controlPaused), now);
+        if (
+          state.browserClient &&
+          (nextTargetId !== previousTargetId || nextControlledKey !== previousControlledKey)
+        ) {
+          void this.syncPortTargets(state).catch(() => undefined);
+        }
         if (previousSession !== primaryAgentSession(next.clients) || next.controlPaused) {
           state.autoFollowAgent = false;
         } else if (
@@ -398,6 +422,9 @@ export class AgentOverlayManager {
           targetCacheGeneration: 0,
           sessionStartedAt: new Map(),
           agentTarget: next.agentTarget || null,
+          controlledTargetIds: next.controlledTargetIds
+            ? [...new Set(next.controlledTargetIds.filter(Boolean))]
+            : undefined,
           autoFollowAgent: false,
           targetActivationInFlight: false
         };
@@ -414,6 +441,12 @@ export class AgentOverlayManager {
         state.driverReconnecting = Boolean(next.driverReconnecting);
         state.controlSince = next.controlSince;
         state.agentTarget = next.agentTarget || null;
+        state.controlledTargetIds = next.controlledTargetIds
+          ? [...new Set(next.controlledTargetIds.filter(Boolean))]
+          : undefined;
+        state.controlledTargetIds = next.controlledTargetIds
+          ? [...new Set(next.controlledTargetIds.filter(Boolean))]
+          : undefined;
         this.syncSessionStarts(state, now);
         this.syncDelegatedControl(state, Boolean(next.controlPaused), now);
       }
@@ -590,19 +623,7 @@ export class AgentOverlayManager {
           );
           const hadOverlayHost = hostBefore.result?.value === true;
           if (!hadOverlayHost) {
-            if (!shouldContinue()) {
-              return false;
-            }
-            await client.send(
-              "Runtime.evaluate",
-              {
-                expression: 'try { sessionStorage.setItem("__ppAgentOverlayTerminalStopUntil", String(Number.MAX_SAFE_INTEGER)); } catch {} true',
-                awaitPromise: false,
-                returnByValue: true
-              },
-              2500
-            );
-            return true;
+            return shouldContinue();
           }
 
           const frameTree = await client.send<{ frameTree?: unknown }>("Page.getFrameTree", {}, 2500);
@@ -630,7 +651,7 @@ export class AgentOverlayManager {
             const cleanup = await client.send<{ result?: { value?: unknown } }>(
               "Runtime.evaluate",
               {
-                expression: '(() => { try { sessionStorage.setItem("__ppAgentOverlayTerminalStopUntil", String(Number.MAX_SAFE_INTEGER)); } catch {} const teardown = globalThis.__ppAgentOverlayTeardown; if (typeof teardown !== "function") return false; teardown(); return true; })()',
+                expression: '(() => { globalThis.__ppAgentOverlayTerminalStopped = true; const teardown = globalThis.__ppAgentOverlayTeardown; if (typeof teardown !== "function") return false; teardown(); return true; })()',
                 awaitPromise: false,
                 returnByValue: true,
                 contextId: overlayContextId
@@ -646,7 +667,7 @@ export class AgentOverlayManager {
           const hostAfter = await client.send<{ result?: { value?: unknown } }>(
             "Runtime.evaluate",
             {
-              expression: '(() => { try { sessionStorage.setItem("__ppAgentOverlayTerminalStopUntil", String(Number.MAX_SAFE_INTEGER)); } catch {} document.getElementById("__pp-agent-overlay")?.remove(); return !document.getElementById("__pp-agent-overlay"); })()',
+              expression: '(() => { document.getElementById("__pp-agent-overlay")?.remove(); return !document.getElementById("__pp-agent-overlay"); })()',
               awaitPromise: false,
               returnByValue: true
             },
@@ -755,18 +776,28 @@ export class AgentOverlayManager {
     if (!client || !this.isInputGuardPort(state) || !this.isActivePage(state, page) || !page.sessionId) {
       return null;
     }
-    const browserWindow = await client.send<CdpBrowserWindowResult>(
-      "Browser.getWindowForTarget",
-      { targetId: page.targetId },
-      2500
-    );
-    const windowId = positiveIntegerValue(browserWindow.windowId);
-    if (
-      !windowId ||
-      browserWindow.bounds?.windowState === "minimized" ||
-      !cdpWindowMatchesInputGuardBounds(browserWindow.bounds, click.window)
-    ) {
-      return null;
+    let windowId: number | null = null;
+    let cdpWindowUnsupported = false;
+    try {
+      const browserWindow = await client.send<CdpBrowserWindowResult>(
+        "Browser.getWindowForTarget",
+        { targetId: page.targetId },
+        2500
+      );
+      windowId = positiveIntegerValue(browserWindow.windowId);
+      if (
+        !windowId ||
+        browserWindow.bounds?.windowState === "minimized" ||
+        !matchesOverlayWindowBounds(browserWindow.bounds, click.window, click.displayScale)
+      ) {
+        return null;
+      }
+    } catch (error) {
+      if (!isUnsupportedGetWindowForTargetError(error)) {
+        return null;
+      }
+      cdpWindowUnsupported = true;
+      windowId = positiveIntegerValue(click.windowId) || 1;
     }
 
     const payload = safeJson(inputGuardClickPayload(click));
@@ -789,6 +820,16 @@ export class AgentOverlayManager {
       }
       const value = result.result?.value;
       if (!isRecord(value)) {
+        continue;
+      }
+      if (
+        cdpWindowUnsupported &&
+        !matchesViewportScreenGeometry(
+          parseOverlayViewportScreenGeometry(value.screenGeometry),
+          click.window,
+          click.displayScale
+        )
+      ) {
         continue;
       }
       const action = stringValue(value.action);
@@ -996,15 +1037,27 @@ export class AgentOverlayManager {
         return;
       }
 
+      const controlledIds = new Set<string>(
+        [
+          ...(state.controlledTargetIds || []),
+          ...(state.agentTarget?.targetId ? [state.agentTarget.targetId] : [])
+        ].filter(Boolean)
+      );
+      const restrictToControlled = controlledIds.size > 0 || state.controlledTargetIds !== undefined;
+
       const wanted = new Map<string, CdpTargetListEntry>();
       for (const target of targets) {
         if (!isInjectableTarget(target)) {
           continue;
         }
         const key = targetKey(target);
-        if (key) {
-          wanted.set(key, target);
+        if (!key) {
+          continue;
         }
+        if (restrictToControlled && !controlledIds.has(key)) {
+          continue;
+        }
+        wanted.set(key, target);
       }
 
       for (const [targetId, page] of [...state.pages]) {
@@ -1253,21 +1306,8 @@ export class AgentOverlayManager {
       if (!this.isActivePage(state, page) || state.browserClient !== client || page.sessionId !== sessionId) {
         return;
       }
-      if (!page.terminalMarkerCleared) {
-        await client.send(
-          "Runtime.evaluate",
-          {
-            expression: 'try { sessionStorage.removeItem("__ppAgentOverlayTerminalStopUntil"); } catch {}',
-            awaitPromise: false
-          },
-          5000,
-          sessionId
-        );
-        if (!this.isActivePage(state, page) || state.browserClient !== client || page.sessionId !== sessionId) {
-          return;
-        }
-        page.terminalMarkerCleared = true;
-      }
+      const shouldClearTerminalStop = !page.terminalMarkerCleared;
+      page.terminalMarkerCleared = true;
       await client.send("Runtime.addBinding", { name: BINDING_NAME, executionContextName: OVERLAY_WORLD_NAME }, 5000, sessionId);
       if (!this.isActivePage(state, page) || state.browserClient !== client || page.sessionId !== sessionId) {
         return;
@@ -1300,7 +1340,10 @@ export class AgentOverlayManager {
         throw new Error("Chrome did not create an overlay isolated world.");
       }
       this.rememberIsolatedContext(page, contextId, page.mainFrameId);
-      await client.send("Runtime.evaluate", { expression: this.script, awaitPromise: false, contextId }, 5000, sessionId);
+      const bootstrapExpression = shouldClearTerminalStop
+        ? `delete globalThis.__ppAgentOverlayTerminalStopped;\n${this.script}`
+        : this.script;
+      await client.send("Runtime.evaluate", { expression: bootstrapExpression, awaitPromise: false, contextId }, 5000, sessionId);
       if (!this.isActivePage(state, page) || state.browserClient !== client || page.sessionId !== sessionId) {
         return;
       }
@@ -1850,21 +1893,6 @@ export class AgentOverlayManager {
     page.recoveringContext = true;
     page.lastContextRecoveryAt = now;
     try {
-      // A terminal stop marker can win a race after the first initialization. If the
-      // Gateway still has an active Session (including reconnecting), clear it again
-      // before rebuilding; otherwise the bootstrap exits early forever and no box appears.
-      await client.send(
-        "Runtime.evaluate",
-        {
-          expression: 'try { sessionStorage.removeItem("__ppAgentOverlayTerminalStopUntil"); } catch {}',
-          awaitPromise: false
-        },
-        3000,
-        sessionId
-      );
-      if (!this.isActivePage(state, page) || state.browserClient !== client || page.sessionId !== sessionId) {
-        return;
-      }
       page.terminalMarkerCleared = true;
       if (!page.mainFrameId) {
         page.mainFrameId = await this.mainFrameIdForSession(client, sessionId);
@@ -1886,7 +1914,16 @@ export class AgentOverlayManager {
         return;
       }
       this.rememberIsolatedContext(page, contextId, page.mainFrameId);
-      await client.send("Runtime.evaluate", { expression: this.script, awaitPromise: false, contextId }, 5000, sessionId);
+      await client.send(
+        "Runtime.evaluate",
+        {
+          expression: `delete globalThis.__ppAgentOverlayTerminalStopped;\n${this.script}`,
+          awaitPromise: false,
+          contextId
+        },
+        5000,
+        sessionId
+      );
       if (!this.isActivePage(state, page) || state.browserClient !== client || page.sessionId !== sessionId) {
         return;
       }
@@ -2015,19 +2052,23 @@ export class AgentOverlayManager {
     }
     const pages = [...state.pages.values()];
     await Promise.allSettled(
-      pages.map((page) => {
+      pages.flatMap((page) => {
         const sessionId = page.sessionId;
         if (!sessionId) {
-          return Promise.resolve();
+          return [];
         }
-        return client.send(
-          "Runtime.evaluate",
-          {
-            expression: 'try { sessionStorage.setItem("__ppAgentOverlayTerminalStopUntil", String(Number.MAX_SAFE_INTEGER)); } catch {}',
-            awaitPromise: false
-          },
-          2000,
-          sessionId
+        const contextIds = this.contextIdsForPage(page);
+        return contextIds.map((contextId) =>
+          client.send(
+            "Runtime.evaluate",
+            {
+              expression: "globalThis.__ppAgentOverlayTerminalStopped = true;",
+              awaitPromise: false,
+              contextId
+            },
+            2000,
+            sessionId
+          )
         );
       })
     );
@@ -2386,9 +2427,47 @@ function inputGuardClickPayload(click: InputGuardClick): {
   };
 }
 
-function cdpWindowMatchesInputGuardBounds(
+function isUnsupportedGetWindowForTargetError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error || "");
+  return /(-32601|wasn't found|method not found|not implemented|not supported|getWindowForTarget)/i.test(message);
+}
+
+function parseOverlayViewportScreenGeometry(value: unknown): OverlayViewportScreenGeometry | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const screenX = numberValue(value.screenX);
+  const screenY = numberValue(value.screenY);
+  const outerWidth = numberValue(value.outerWidth);
+  const outerHeight = numberValue(value.outerHeight);
+  const innerWidth = numberValue(value.innerWidth);
+  const innerHeight = numberValue(value.innerHeight);
+  const devicePixelRatio = numberValue(value.devicePixelRatio);
+  if (
+    screenX === null ||
+    screenY === null ||
+    innerWidth === null ||
+    innerHeight === null ||
+    innerWidth <= 0 ||
+    innerHeight <= 0
+  ) {
+    return null;
+  }
+  return {
+    screenX,
+    screenY,
+    outerWidth: outerWidth && outerWidth > 0 ? outerWidth : innerWidth,
+    outerHeight: outerHeight && outerHeight > 0 ? outerHeight : innerHeight,
+    innerWidth,
+    innerHeight,
+    devicePixelRatio: devicePixelRatio && devicePixelRatio > 0 ? devicePixelRatio : 1
+  };
+}
+
+export function matchesOverlayWindowBounds(
   bounds: CdpBrowserWindowResult["bounds"],
-  nativeBounds: InputGuardWindowBounds
+  nativeBounds: InputGuardWindowBounds,
+  displayScale = 1
 ): boolean {
   const left = numberValue(bounds?.left);
   const top = numberValue(bounds?.top);
@@ -2397,13 +2476,148 @@ function cdpWindowMatchesInputGuardBounds(
   if (left === null || top === null || width === null || height === null || width <= 0 || height <= 0) {
     return false;
   }
-  const epsilon = 4;
-  return (
-    Math.abs(left - nativeBounds.x) <= epsilon &&
-    Math.abs(top - nativeBounds.y) <= epsilon &&
-    Math.abs(width - nativeBounds.width) <= epsilon &&
-    Math.abs(height - nativeBounds.height) <= epsilon
-  );
+  if (!(nativeBounds.width > 0) || !(nativeBounds.height > 0)) {
+    return false;
+  }
+  const posEpsilon = 12;
+  const sizeEpsilon = 20;
+  const scales = Number.isFinite(displayScale) && displayScale > 0 && Math.abs(displayScale - 1) > 0.01
+    ? [1, displayScale]
+    : [1];
+  return scales.some((scale) => {
+    const natX = nativeBounds.x / scale;
+    const natY = nativeBounds.y / scale;
+    const natW = nativeBounds.width / scale;
+    const natH = nativeBounds.height / scale;
+    return (
+      Math.abs(left - natX) <= posEpsilon &&
+      Math.abs(top - natY) <= posEpsilon &&
+      Math.abs(width - natW) <= sizeEpsilon &&
+      Math.abs(height - natH) <= sizeEpsilon
+    );
+  });
+}
+
+export function matchesViewportScreenGeometry(
+  geometry: OverlayViewportScreenGeometry | null,
+  nativeBounds: InputGuardWindowBounds,
+  displayScale = 1
+): boolean {
+  if (!geometry || !(nativeBounds.width > 0) || !(nativeBounds.height > 0)) {
+    return false;
+  }
+  const normalizedScale = Number.isFinite(displayScale) && displayScale > 0 ? displayScale : 1;
+  const browserZoom = geometry.devicePixelRatio / normalizedScale;
+  if (!Number.isFinite(browserZoom) || browserZoom < 0.25 || browserZoom > 5) {
+    return false;
+  }
+  const contentDipW = geometry.innerWidth * browserZoom;
+  const contentDipH = geometry.innerHeight * browserZoom;
+  const scales = Math.abs(normalizedScale - 1) > 0.01 ? [1, normalizedScale] : [1];
+  return scales.some((scale) => {
+    const natX = nativeBounds.x / scale;
+    const natY = nativeBounds.y / scale;
+    const natW = nativeBounds.width / scale;
+    const natH = nativeBounds.height / scale;
+    const posMatches =
+      Math.abs(geometry.screenX - natX) <= 16 &&
+      Math.abs(geometry.screenY - natY) <= 16;
+    if (!posMatches) {
+      return false;
+    }
+    const widthMatches =
+      (geometry.outerWidth > 0 && Math.abs(geometry.outerWidth - natW) <= 24) ||
+      (natW - contentDipW >= -8 && natW - contentDipW <= 36);
+    const heightMatches =
+      (geometry.outerHeight > 0 && Math.abs(geometry.outerHeight - natH) <= 24) ||
+      (natH - contentDipH >= -8 && natH - contentDipH <= 180);
+    return widthMatches && heightMatches;
+  });
+}
+
+export function resolveOverlayGuardClientPoint(input: {
+  point: { x: number; y: number };
+  nativeWindow: InputGuardWindowBounds;
+  displayScale: number;
+  devicePixelRatio: number;
+  innerWidth: number;
+  innerHeight: number;
+  outerWidth?: number;
+  viewportScale?: number;
+  offsetLeft?: number;
+  offsetTop?: number;
+}): { x: number; y: number } | null {
+  const { point, nativeWindow } = input;
+  const displayScale = Number.isFinite(input.displayScale) && input.displayScale > 0 ? input.displayScale : 1;
+  const devicePixelRatio = Number.isFinite(input.devicePixelRatio) && input.devicePixelRatio > 0 ? input.devicePixelRatio : 1;
+  const innerWidth = input.innerWidth;
+  const innerHeight = input.innerHeight;
+  if (!(innerWidth > 0) || !(innerHeight > 0) || !(nativeWindow.width > 0) || !(nativeWindow.height > 0)) {
+    return null;
+  }
+  const viewportScale = input.viewportScale && input.viewportScale > 0 ? input.viewportScale : 1;
+  const offsetLeft = Number.isFinite(input.offsetLeft) ? (input.offsetLeft as number) : 0;
+  const offsetTop = Number.isFinite(input.offsetTop) ? (input.offsetTop as number) : 0;
+  const browserZoom = devicePixelRatio / displayScale;
+  if (!Number.isFinite(browserZoom) || browserZoom < 0.25 || browserZoom > 5) {
+    return null;
+  }
+  const contentDipW = innerWidth * browserZoom;
+  const contentDipH = innerHeight * browserZoom;
+  const minBorderSlack = -Math.max(6, browserZoom * 4);
+  const maxHorizBorderDip = Math.max(36, browserZoom * 24);
+
+  const diffDip = nativeWindow.width - contentDipW;
+  const dipValid = diffDip >= minBorderSlack && diffDip <= maxHorizBorderDip;
+  const hasScaledCandidate = Math.abs(displayScale - 1) > 0.01;
+  const diffPhys = hasScaledCandidate ? (nativeWindow.width / displayScale) - contentDipW : Number.POSITIVE_INFINITY;
+  const physValid = hasScaledCandidate && diffPhys >= minBorderSlack && diffPhys <= maxHorizBorderDip;
+
+  let coordScale = 1;
+  if (physValid && !dipValid) {
+    coordScale = displayScale;
+  } else if (dipValid && !physValid) {
+    coordScale = 1;
+  } else if (physValid && dipValid) {
+    const refOuterW = input.outerWidth && input.outerWidth > 0 ? input.outerWidth : contentDipW;
+    const errDip = Math.abs(nativeWindow.width - refOuterW);
+    const errPhys = Math.abs((nativeWindow.width / displayScale) - refOuterW);
+    coordScale = errPhys < errDip ? displayScale : 1;
+  } else {
+    return null;
+  }
+
+  const winDipX = nativeWindow.x / coordScale;
+  const winDipY = nativeWindow.y / coordScale;
+  const winDipW = nativeWindow.width / coordScale;
+  const winDipH = nativeWindow.height / coordScale;
+  const ptDipX = point.x / coordScale;
+  const ptDipY = point.y / coordScale;
+
+  const horizBorderDip = Math.max(0, winDipW - contentDipW);
+  const leftBorderDip = horizBorderDip > 1.5 ? horizBorderDip / 2 : 0;
+  const bottomBorderDip = horizBorderDip > 2
+    ? Math.min(leftBorderDip, Math.max(0, winDipH - contentDipH))
+    : 0;
+  const topChromeDip = winDipH - contentDipH - bottomBorderDip;
+  if (topChromeDip < minBorderSlack || topChromeDip > winDipH) {
+    return null;
+  }
+
+  const pointScale = browserZoom * viewportScale;
+  const clientX = offsetLeft + (ptDipX - winDipX - leftBorderDip) / pointScale;
+  const clientY = offsetTop + (ptDipY - winDipY - Math.max(0, topChromeDip)) / pointScale;
+  if (
+    !Number.isFinite(clientX) ||
+    !Number.isFinite(clientY) ||
+    clientX < 0 ||
+    clientY < 0 ||
+    clientX > innerWidth ||
+    clientY > innerHeight
+  ) {
+    return null;
+  }
+  return { x: clientX, y: clientY };
 }
 
 function agentControlReasonValue(value: unknown): AgentControlNoticeReason | null {

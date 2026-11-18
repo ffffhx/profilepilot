@@ -58,11 +58,17 @@ final class WirelessNetwork {
         if (properties == null) continue;
         for (LinkAddress link : properties.getLinkAddresses()) {
           java.net.InetAddress ip = link.getAddress();
-          if (ip instanceof Inet4Address && (ip.isSiteLocalAddress() || ip.isLinkLocalAddress()) && values.size() < 8) values.add(ip.getHostAddress());
+          if (ip instanceof Inet4Address && isLocalOrCgnat((Inet4Address) ip) && values.size() < 8) values.add(ip.getHostAddress());
         }
       }
     } catch (RuntimeException ignored) { }
     return values;
+  }
+  private static boolean isLocalOrCgnat(Inet4Address ip) {
+    if (ip.isSiteLocalAddress() || ip.isLinkLocalAddress()) return true;
+    byte[] raw = ip.getAddress();
+    int first = raw[0] & 0xff, second = raw[1] & 0xff;
+    return first == 100 && second >= 64 && second <= 127;
   }
   static JSONObject snapshot(Context context) throws JSONException {
     Set<String> ips = wifiAddresses(context);

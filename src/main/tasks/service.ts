@@ -1,4 +1,5 @@
 import { TaskListFeed } from "./feed";
+import { ReviewService } from "../review/service";
 import { observeAfterBrowserAction } from "../browser-action-feedback";
 import { listSiteAdapters, planSiteAdapter } from "../site-adapters/catalog";
 import { fork, type ChildProcess } from "node:child_process";
@@ -7,11 +8,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, existsSync, copyFileSync, statSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
-import { TERMINAL_TASKS, hasTaskBrowser, jevProviderFor, type BrowserTask, type BrowserAction, type BrowserObservation, type JevAssessment, type CreateTaskInput, type TaskSnapshot, type TaskMetadataInput } from "../../shared/tasks";
+import { TERMINAL_TASKS, DEVICE_ONLY_PROFILE_ID, DEVICE_ONLY_PROFILE_NAME, hasTaskBrowser, jevProviderFor, type BrowserTask, type BrowserAction, type BrowserObservation, type JevAssessment, type CreateTaskInput, type TaskSnapshot, type TaskMetadataInput, type TaskSchedule } from "../../shared/tasks";
 import { browserActionSchema, effectiveEffect, type BrowserAdapter } from "./browser";
-import { TaskStore, now } from "./store";
+import { executeDeviceTool, isMutatingDeviceTool, devicePermissionScope, type DeviceCliRunner } from "./device-tools";
+import { TaskStore, createTaskSchema, now } from "./store";
 import { nativeBrowserAccess } from "./native-access";
-import { nextDailyOccurrence } from "../../shared/task-time";
+import { nextScheduleOccurrence, nextUpcomingOccurrence } from "../../shared/task-time";
 import { authorizeTaskRead, readTaskDocument, readTaskTable, writeTaskResult, registerTaskOutputs } from "./files";
 import { evaluateJevPage, jevPageState, JEV_MAX_CALLS, jevModel } from "./jev";
 import { runJevDriver } from "./jev-driver";
@@ -49,10 +51,13 @@ export interface TaskServiceDependencies {
   closePreview?(): void;
   closeBrowser?(): void;
   worker?: (task: BrowserTask, start: Record<string, unknown>) => ChildProcess;
+  deviceRunner?: DeviceCliRunner;
+  clock?: () => number;
   controlWaitMs?: number;
 }
 interface Run {
   externalAction?: boolean; browserAccessed?: boolean; actionsAtStart?: number;
+  inlineScreenshots?: number;
   child?: ChildProcess; started: number; stopped: boolean; timer?: NodeJS.Timeout;
   chain: Promise<unknown>; repeat: string; repeatCount: number; ending?: Promise<void>; starting?: Promise<void>; resumeAfterStop?: boolean;
   browserRelease?: Promise<void>;
@@ -66,6 +71,19 @@ interface Run {
 }
 const textResult = (value: unknown, isError = false): any => ({ isError, content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value) }] });
 const serious = (effect: string): boolean => ["submit", "send", "purchase", "delete"].includes(effect);
+export const MAX_INLINE_SCREENSHOTS_PER_RUN = 6;
+export const SCHEDULE_GRACE_WINDOW_MS = 5 * 60_000;
+export const SCHEDULE_CATCH_UP_WINDOW_MS = 6 * 60 * 60_000;
+export const saveScheduleSchema = z.object({
+  id: z.string().uuid().optional(),
+  name: z.string().trim().min(1).max(100),
+  task: createTaskSchema,
+  at: z.string().datetime(),
+  timezone: z.string().min(1).max(100),
+  repeat: z.enum(["once", "daily", "weekdays", "weekly"]),
+  catchUpPolicy: z.enum(["skip", "run_within_window"]).optional(),
+  enabled: z.boolean()
+});
 
 export class TaskService {
   readonly runs = new Map<string, Run>();
@@ -74,6 +92,7 @@ export class TaskService {
   private readonly contextWorkers = new Map<string, { cancel(): void }>();
   readonly terminal: TaskTerminal;
   readonly memory: ProfileMemory;
+  readonly reviews: ReviewService;
   private ticking = false;
   private timer?: NodeJS.Timeout;
   private closed = false;
@@ -105,6 +124,27 @@ export class TaskService {
   constructor(readonly store: TaskStore, readonly dependencies: TaskServiceDependencies) {
     this.listFeed = new TaskListFeed(() => ({ tasks: store.data.tasks, metadata: store.listMetadata() }));
     this.memory = new ProfileMemory(store.root);
+    this.reviews = new ReviewService(store.root, {
+      tasks: () => store.data.tasks,
+      settings: () => store.data.settings,
+      apiKey: dependencies.apiKey,
+      notify: (title, message) => dependencies.notify(title, message),
+      onUsage: entry => {
+        store.data.tokenRecords = recordReviewTokenUsage(store.data.tokenRecords || [], entry);
+        this.publish([]);
+      },
+      saveTemplate: input => {
+        const template = {
+          id: randomUUID(),
+          name: input.name.trim().slice(0, 100) || "复盘工作流模板",
+          task: createTaskSchema.parse(input.task),
+          updatedAt: now()
+        };
+        store.data.templates = [template, ...store.data.templates];
+        this.publish([]);
+        return template;
+      }
+    });
     this.terminal = new TaskTerminal(store.root, (id, result) => {
       const task = store.data.tasks.find(task => task.id === id);
       if (!task) return;
@@ -139,6 +179,7 @@ export class TaskService {
     return this.getMemory(profileId);
   }
   start(): void {
+    this.reviews.start();
     this.syncControlReceivers();
     this.timer = setInterval(() => { void this.tick(); }, 3000);
     this.timer.unref();
@@ -277,8 +318,9 @@ export class TaskService {
   }
   async create(input: CreateTaskInput, nativeRequest?: NonNullable<BrowserTask["nativeUiRequests"]>[number]): Promise<BrowserTask> {
     if (this.closed) throw new Error("应用正在退出，无法创建任务。");
-    const name = await this.dependencies.profileName(input.profileId);
-    const task = this.store.create(input, name, nativeRequest);
+    const profileId = input.profileId === undefined ? DEVICE_ONLY_PROFILE_ID : input.profileId;
+    const name = profileId === DEVICE_ONLY_PROFILE_ID ? DEVICE_ONLY_PROFILE_NAME : await this.dependencies.profileName(profileId);
+    const task = this.store.create({ ...input, profileId }, name, nativeRequest);
     this.publish(task); void this.tick(); return task;
   }
   async retryItems(id: string, itemIds: string[]): Promise<BrowserTask> {
@@ -289,7 +331,7 @@ export class TaskService {
     const items = ids.map(id => source.items.find(item => item.id === id));
     if (!items.length || items.some(item => !item || item.status === "completed")) throw new Error("请选择尚未完成的项目。");
     if (source.attachments.some(file => !existsSync(file.path))) throw new Error("原任务的附件已删除，请新建任务并重新选择附件。");
-    const name = await this.dependencies.profileName(source.profileId);
+    const name = source.profileId === DEVICE_ONLY_PROFILE_ID ? (source.profileName || DEVICE_ONLY_PROFILE_NAME) : await this.dependencies.profileName(source.profileId);
     const task = this.store.create({ prompt: source.prompt, profileId: source.profileId, authorization: source.authorization, mode: source.mode, model: source.model, nativeAccess: source.nativeAccess, limits: source.limits, items: items.map(item => item!.label) }, name);
     task.sourceTaskId = source.id;
     task.skill = source.skill ? structuredClone(source.skill) : undefined;
@@ -462,7 +504,7 @@ export class TaskService {
       }
       for (const task of this.store.data.tasks.slice().reverse()) {
         if (task.status !== "queued" || this.archiving.has(task.id) || this.runs.size >= this.store.data.settings.maxConcurrent) continue;
-        const occupied = this.store.data.tasks.some((other) => other.id !== task.id && other.profileId === task.profileId &&
+        const occupied = task.profileId !== DEVICE_ONLY_PROFILE_ID && this.store.data.tasks.some((other) => other.id !== task.id && other.profileId === task.profileId &&
           (this.runs.has(other.id) || other.pending?.kind === "handoff" || (["running", "waiting_user", "paused"].includes(other.status) && hasTaskBrowser(other) && other.browserLeaseAttempted !== false)));
         if (!occupied) this.launch(task);
       }
@@ -493,8 +535,9 @@ export class TaskService {
     if (!key) throw new Error("请在设置中配置模型 API 密钥并测试连接。");
     if (task.usage.elapsedMs >= task.limits.minutes * 60000 || task.usage.actions >= task.limits.actions || task.usage.costUsd >= task.limits.budgetUsd) throw new Error("任务已达到运行限制。可在新的任务中调整限制后继续处理剩余工作。");
     const request = latestUserRequest(task);
-    task.browserLeaseAttempted ??= hasTaskBrowser(task);
-    if (hasBrowserRequest(request) && !deferBrowserDriver(request)) await this.prepareBrowser(task, run);
+    const deviceOnly = task.profileId === DEVICE_ONLY_PROFILE_ID;
+    task.browserLeaseAttempted ??= !deviceOnly && hasTaskBrowser(task);
+    if (!deviceOnly && hasBrowserRequest(request) && !deferBrowserDriver(request)) await this.prepareBrowser(task, run);
     if (run.stopped) return void this.endRun(task, run);
     task.observation = undefined;
     run.timer = setTimeout(() => {
@@ -514,7 +557,7 @@ export class TaskService {
         this.publish(task);
       });
     }, Math.max(1000, task.limits.minutes * 60000 - task.usage.elapsedMs));
-    if (this.store.data.settings.jevEnabled && this.store.data.settings.jevMode === "driver" && this.dependencies.browser.observeFast) {
+    if (!deviceOnly && this.store.data.settings.jevEnabled && this.store.data.settings.jevMode === "driver" && this.dependencies.browser.observeFast) {
       const jevKey = this.dependencies.jevApiKey?.() || "";
       if (jevKey) {
         run.driver = true; run.driverAbort = new AbortController();
@@ -552,7 +595,7 @@ export class TaskService {
     mkdirSync(cwd, { recursive: true, mode: 0o700 });
     const settings = { ...structuredClone(this.store.data.settings), model: task.model || this.store.data.settings.model };
     recordTaskModel(task, settings);
-    const memory = this.store.data.memoryPolicies?.[task.profileId]?.enabled !== false
+    const memory = !deviceOnly && this.store.data.memoryPolicies?.[task.profileId]?.enabled !== false
       ? { directory: this.memory.directory(task.profileId), writable: !["plan", "manual"].includes(task.mode || "") } : undefined;
     // SDK loads MEMORY.md before invoking any tool hook. Validate existing
     // memory files as well, so that startup cannot follow a replaced link.
@@ -668,7 +711,15 @@ export class TaskService {
   private assertRunning(task: BrowserTask, run: Run): void {
     if (run.stopped || run.ending || this.runs.get(task.id) !== run || task.status !== "running") throw new Error("任务当前已停止或等待用户，不得继续执行操作。");
   }
+  private canAttachInlineScreenshot(run: Run): boolean {
+    const next = (run.inlineScreenshots || 0) + 1;
+    run.inlineScreenshots = next;
+    return next <= MAX_INLINE_SCREENSHOTS_PER_RUN;
+  }
   private async prepareBrowser(task: BrowserTask, run: Run): Promise<void> {
+    if (task.profileId === DEVICE_ONLY_PROFILE_ID) {
+      throw new Error("当前任务未绑定浏览器 Profile；请使用 phone_control、desktop_control、electron_control 或本地文件与终端工具，或新建绑定浏览器的任务。");
+    }
     const profile = await this.dependencies.prepareProfile(task.profileId);
     this.assertRunning(task, run);
     task.browserLeaseAttempted ??= hasTaskBrowser(task);
@@ -685,6 +736,52 @@ export class TaskService {
       this.store.data.memoryPolicies?.[task.profileId]?.enabled !== false && this.memory.authorize(task.profileId, args.path, "Read", false)) };
     if (name === "authorize_memory") return { allowed: typeof args.path === "string" && this.store.data.memoryPolicies?.[task.profileId]?.enabled !== false &&
       this.memory.authorize(task.profileId, args.path, args.tool, !["plan", "manual"].includes(task.mode || ""), args.input) };
+    if (name === "phone_control" || name === "desktop_control" || name === "electron_control") {
+      const mutating = isMutatingDeviceTool(name, args);
+      if (task.mode === "plan" && mutating) {
+        return textResult("当前为 plan 模式，仅可查询与观察设备状态，禁止执行设备控制动作。请请求用户切换模式后再执行变更。", true);
+      }
+      const permissionScope = devicePermissionScope(name, args);
+      if (task.mode === "manual" && mutating && !hasSessionPermission(task, permissionScope)) {
+        task.pending = {
+          id: randomUUID(),
+          kind: "confirmation",
+          title: permissionScope.label,
+          details: JSON.stringify(args ?? {}, null, 2),
+          deviceTool: { name, args: (args && typeof args === "object" ? args : {}) as Record<string, unknown>, summary: permissionScope.label },
+          permissionScope,
+          createdAt: now()
+        };
+        task.status = "waiting_user"; this.publish(task); this.stopWorker(run);
+        return textResult("设备控制动作尚未执行，等待用户确认。停止后续操作。");
+      }
+      if (mutating && task.usage.actions >= task.limits.actions) {
+        return textResult("任务达到操作次数上限，请报告已有结果。", true);
+      }
+      if (mutating) {
+        task.usage.actions++;
+        run.externalAction = true;
+      }
+      task.execution = { engine: "model", activity: `正在调用 ${name}`, at: now() }; this.publish(task, true);
+      const res = await executeDeviceTool(task, name, args, {
+        artifactRoot: path.join(this.store.root, "artifacts"),
+        runner: this.dependencies.deviceRunner,
+        canAttachScreenshot: () => this.canAttachInlineScreenshot(run)
+      });
+      this.assertRunning(task, run);
+      if (mutating) this.store.event(task, "action", res.summary);
+      if (res.snapshotText) {
+        task.evidencePages = [...(task.evidencePages || []), {
+          version: randomUUID(),
+          at: now(),
+          url: `device://${name}`,
+          title: res.summary,
+          snapshot: res.snapshotText.slice(0, 60000)
+        }].slice(-16);
+      }
+      this.publish(task);
+      return { isError: res.isError, content: res.content };
+    }
     if (name === "terminal_run") {
       const input = terminalRunSchema.parse(args);
       validateTerminalSource(input);
@@ -770,7 +867,13 @@ export class TaskService {
       const content: any[] = [{ type: "text", text: JSON.stringify({ ...observation,
         fast: observation.fast ? { candidates: observation.fast.candidates } : undefined,
         screenshotDataUrl: undefined, screenshotPath: undefined, resumeContext: task.resumeContext }) }];
-      if (observation.screenshotDataUrl) content.push({ type: "image", mimeType: "image/png", data: observation.screenshotDataUrl.split(",")[1] });
+      if (observation.screenshotDataUrl) {
+        if (this.canAttachInlineScreenshot(run)) {
+          content.push({ type: "image", mimeType: "image/png", data: observation.screenshotDataUrl.split(",")[1] });
+        } else {
+          content.push({ type: "text", text: `[本轮连续观察截图已超过 ${MAX_INLINE_SCREENSHOTS_PER_RUN} 张上限，已省略图像字节以节省上下文与内存；请使用上方页面文字与控件快照继续]` });
+        }
+      }
       if (!this.store.data.settings.saveScreenshots) { observation.screenshotDataUrl = undefined; observation.screenshotPath = undefined; }
       task.observation = observation;
       const { version, at, url, title, snapshot } = observation;
@@ -1221,6 +1324,33 @@ export class TaskService {
       finally { if (this.runs.get(id) === run) this.runs.delete(id); }
       if (this.store.get(id).status !== "running") { this.publish(task); return; }
     }
+    if (pending.kind === "confirmation" && approved && pending.deviceTool) {
+      if (task.mode === "plan") throw new Error("plan 模式不允许执行设备控制动作。");
+      if (task.usage.actions >= task.limits.actions) throw new Error("任务已达到操作次数上限。");
+      this.commitTask(task, () => { recordResponse(); remember(); task.status = "running"; task.pending = undefined; task.usage.actions++; });
+      const run: Run = { started: Date.now(), stopped: false, chain: Promise.resolve(), repeat: "", repeatCount: 0 };
+      this.runs.set(id, run);
+      try {
+        run.chain = executeDeviceTool(task, pending.deviceTool.name, pending.deviceTool.args, {
+          artifactRoot: path.join(this.store.root, "artifacts"),
+          runner: this.dependencies.deviceRunner
+        }).then(res => {
+          this.store.event(task, "system", `用户已批准设备操作（${res.summary}）：${String(res.content?.[0]?.text || "").slice(0, 12000)}`);
+          if (res.snapshotText) {
+            task.evidencePages = [...(task.evidencePages || []), {
+              version: randomUUID(),
+              at: now(),
+              url: `device://${pending.deviceTool!.name}`,
+              title: res.summary,
+              snapshot: res.snapshotText.slice(0, 60000)
+            }].slice(-16);
+          }
+        });
+        await run.chain;
+      } catch (error) { this.store.event(task, "error", String(error)); }
+      finally { if (this.runs.get(id) === run) this.runs.delete(id); }
+      if (this.store.get(id).status !== "running") { this.publish(task); return; }
+    }
     if (pending.kind === "confirmation" && approved && pending.exportResult) {
       if (task.mode === "plan") throw new Error("plan 模式不允许创建结果文件。");
       const file = writeTaskResult(task, path.join(this.store.root, "artifacts"), pending.exportResult);
@@ -1356,23 +1486,55 @@ export class TaskService {
     interruptReceipts(task);
   }
   private notify(task: BrowserTask, body: string): void { if (this.store.data.settings.notifications) this.dependencies.notify(task.title, body.slice(0, 160), task.id); }
+  saveSchedule(rawInput: unknown, nowMs = this.dependencies.clock?.() ?? Date.now()): TaskSchedule {
+    const input = saveScheduleSchema.parse(rawInput);
+    new Intl.DateTimeFormat("zh-CN", { timeZone: input.timezone });
+    const previous = this.store.data.schedules.find(schedule => schedule.id === input.id);
+    if (input.id && !previous) throw new Error("计划不存在。");
+    let at = input.at;
+    if (input.enabled && Date.parse(at) <= nowMs) {
+      if (previous) at = nextUpcomingOccurrence(at, input.timezone, input.repeat, nowMs);
+      else throw new Error("请选择未来的执行时间。");
+    }
+    const schedule: TaskSchedule = {
+      ...previous,
+      ...input,
+      at,
+      id: input.id || randomUUID(),
+      missedAt: previous?.at === at && !input.enabled ? previous.missedAt : undefined
+    };
+    this.store.data.schedules = [schedule, ...this.store.data.schedules.filter(value => value.id !== schedule.id)];
+    this.publish([]);
+    return schedule;
+  }
+  deleteSchedule(id: string): void {
+    z.string().uuid().parse(id);
+    this.store.data.schedules = this.store.data.schedules.filter(entry => entry.id !== id);
+    this.publish([]);
+  }
   private async scheduleDue(): Promise<void> {
+    const nowMs = this.dependencies.clock?.() ?? Date.now();
     for (const schedule of this.store.data.schedules) {
-      if (!schedule.enabled || Date.parse(schedule.at) > Date.now()) continue;
+      if (!schedule.enabled || Date.parse(schedule.at) > nowMs) continue;
       const changed: BrowserTask[] = [];
-      if (Date.now() - Date.parse(schedule.at) > 5 * 60000) {
+      const delayMs = nowMs - Date.parse(schedule.at);
+      const allowedWindowMs = schedule.catchUpPolicy === "run_within_window" ? SCHEDULE_CATCH_UP_WINDOW_MS : SCHEDULE_GRACE_WINDOW_MS;
+      if (delayMs > allowedWindowMs) {
         schedule.missedAt = now();
         this.dependencies.notify(schedule.name, "错过计划时间，未自动执行。请在定时任务中重新安排。");
       } else {
         try {
           const task = await this.create(schedule.task);
-          task.scheduledBy = schedule.id; schedule.lastTaskId = task.id; schedule.lastRunAt = now();
+          task.scheduledBy = schedule.id;
+          schedule.lastTaskId = task.id;
+          schedule.lastRunAt = now();
+          schedule.missedAt = undefined;
           changed.push(task);
         } catch (error) { schedule.missedAt = now(); this.dependencies.notify(schedule.name, String(error)); }
       }
       if (schedule.repeat === "once") schedule.enabled = false;
       else {
-        schedule.at = nextDailyOccurrence(schedule.at, schedule.timezone);
+        schedule.at = nextScheduleOccurrence(schedule.at, schedule.timezone, schedule.repeat, nowMs);
       }
       this.publish(changed);
     }
@@ -1436,6 +1598,7 @@ export class TaskService {
   }
   close(): Promise<void> {
     if (this.closing) return this.closing;
+    const reviewsClosing = this.reviews.close();
     this.closed = true; if (this.timer) clearInterval(this.timer);
     if (this.broadcastTimer) { clearTimeout(this.broadcastTimer); this.broadcastTimer = undefined; }
     if (this.streamTimer) { clearTimeout(this.streamTimer); this.streamTimer = undefined; }
@@ -1484,6 +1647,7 @@ export class TaskService {
       }));
       for (const result of settled) if (result.status === "rejected") failures.push(result.reason);
       try { this.publish(closingTasks); } catch (error) { failures.push(error); }
+      try { await reviewsClosing; } catch (error) { failures.push(error); }
       try { this.store.close(); } catch (error) { failures.push(error); }
       try { this.dependencies.closeBrowser?.(); } catch (error) { failures.push(error); }
       if (failures.length) throw new AggregateError(failures, "任务服务退出时出现错误；已尝试停止进程、保存状态并释放浏览器。");
@@ -1496,4 +1660,4 @@ export function workerEnvironment(): NodeJS.ProcessEnv {
   const allowed = /^(PATH|Path|PATHEXT|SystemRoot|SYSTEMROOT|WINDIR|COMSPEC|ComSpec|TEMP|TMP|TMPDIR|HOME|USERPROFILE|APPDATA|LOCALAPPDATA|LANG|LC_.*|HTTPS?_PROXY|https?_proxy|NO_PROXY|no_proxy)$/;
   return { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => allowed.test(key))), ELECTRON_RUN_AS_NODE: "1" };
 }
-import { mergeModelTokens } from "../../shared/task-token-usage";
+import { mergeModelTokens, recordReviewTokenUsage } from "../../shared/task-token-usage";

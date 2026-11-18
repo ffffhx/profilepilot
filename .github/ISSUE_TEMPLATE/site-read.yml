@@ -1,0 +1,30 @@
+name: 网站读取问题 / Site read issue
+description: 区分结果为空、读取不完整、字段错误和登录阻塞。
+title: "[站点读取] "
+body:
+  - type: input
+    id: operation
+    attributes:
+      label: 站点操作与版本
+      placeholder: 例如 xianyu.search，CLI 版本与扩展版本
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: 问题类型
+      options: [结果为空, 读取不完整, 字段或来源不匹配, 筛选条件未生效, 登录或验证阻塞, 其他]
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 最少复现步骤与预期结果
+      description: 公开页面链接、筛选条件和脱敏输出。不要附 Cookie、令牌或配对信息。
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 实际页面与工具结果的差异
+      description: 指明哪一个字段或原链接无法核对，保留 partial、空结果和错误状态。

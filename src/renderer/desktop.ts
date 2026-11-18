@@ -10,7 +10,7 @@ const root = document.getElementById('desktop')!;
 const api = window.desktopControl;
 root.innerHTML = `${workspaceSwitcher('desktop')}${workspaceIdentityBar()}
   <div class="desktop-shell">
-    <header class="desktop-header pc-control-header"><div class="pc-control-brand"><h1>控制台</h1><p>查看 Windows 窗口，让 Agent 操作本机桌面</p></div><div class="pc-control-actions"><button id="desktop-refresh">${renderButtonLabel(false, '刷新窗口', '刷新中…')}</button></div></header>
+    <header class="desktop-header pc-control-header"><div class="pc-control-brand"><h1>控制台</h1><p>查看桌面窗口，让 Agent 操作本机桌面</p></div><div class="pc-control-actions"><button id="desktop-refresh">${renderButtonLabel(false, '刷新窗口', '刷新中…')}</button></div></header>
     ${pcControlTabs('desktop')}
     <div id="desktop-session" hidden><div class="desktop-session-summary"><span></span><p id="desktop-pause-reason" hidden></p></div><button data-control="takeover">接管</button><button data-control="return">交还控制</button><button data-control="stop">停止</button></div>
     <p id="desktop-error" role="alert" hidden></p>

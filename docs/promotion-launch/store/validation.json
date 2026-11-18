@@ -1,0 +1,95 @@
+{
+  "version": "0.2.18",
+  "extensionId": "gmdaabnoocjlpimglalnbegfdaklfnaj",
+  "published": false,
+  "storeIdDeclared": null,
+  "permissions": [
+    "debugger",
+    "tabs",
+    "tabGroups",
+    "storage",
+    "alarms",
+    "history",
+    "downloads",
+    "sidePanel",
+    "contextMenus",
+    "scripting"
+  ],
+  "hostPermissions": [
+    "<all_urls>"
+  ],
+  "files": [
+    {
+      "name": "background-entry.js",
+      "bytes": 133,
+      "sha256": "65bb91f97875e5305c173c3b4c94f0dfd52110154f60e7384ed4566ff2681bf8"
+    },
+    {
+      "name": "background.js",
+      "bytes": 86448,
+      "sha256": "cb6df1d9f7fc1df995bf0b29a5fbbfe0a7ee314b39aac3e461921c2c14261078"
+    },
+    {
+      "name": "connection-diagnostics.js",
+      "bytes": 5223,
+      "sha256": "ef7859e97c15fce6bcc99b3f25dfc24fc84264f5eb989255b6e864d274c0ba45"
+    },
+    {
+      "name": "frame-guard.js",
+      "bytes": 3968,
+      "sha256": "d21155977d904413eb093bd18ab772916a68f8070eda69c7d61b479159353c53"
+    },
+    {
+      "name": "icons/icon-128.png",
+      "bytes": 8502,
+      "sha256": "3945f3511069fd4060b09fdfddc9cb8c881b0bc218e481eeec82b7592898e284"
+    },
+    {
+      "name": "icons/icon-16.png",
+      "bytes": 695,
+      "sha256": "e0c8f4736ec4318b84f420f85b293e4106f39232957e5b61d50dd1992791921b"
+    },
+    {
+      "name": "icons/icon-32.png",
+      "bytes": 1484,
+      "sha256": "27478abc68e56faaf51c15af9a18efe464ad34cce745c295dd3ab7be3bca70dd"
+    },
+    {
+      "name": "icons/icon-48.png",
+      "bytes": 2412,
+      "sha256": "8cddcc6a9763743f61ec7f5c87b50341c1e58c8b97467ea3a71f9b5e689167b6"
+    },
+    {
+      "name": "manifest.json",
+      "bytes": 1765,
+      "sha256": "4588ec2522a54e0caff011df470d47825bfddf6e6e73bb9121a5ecbab57bd32a"
+    },
+    {
+      "name": "onboarding.js",
+      "bytes": 557,
+      "sha256": "00033a2b189b82372b32d93f699cb831340e8c2c17e311587576da414a8bca2d"
+    },
+    {
+      "name": "popup.css",
+      "bytes": 5250,
+      "sha256": "1f17a497b835173b4bc24657c5acc61d342066075dceb6bfa6c115c09d7af0ba"
+    },
+    {
+      "name": "popup.html",
+      "bytes": 2433,
+      "sha256": "aed1ff550bbb8bd845c63437caa5193e661650836a16fe001f465acfd4947736"
+    },
+    {
+      "name": "popup.js",
+      "bytes": 9206,
+      "sha256": "b3248b0a31d17e3054899960a8e8b32135a26406bcda8666a12293470cacf861"
+    },
+    {
+      "name": "sidepanel.html",
+      "bytes": 2649,
+      "sha256": "7d143498eb29e534a962d62e77757f131b8be0808f8c65846474b17e307b3c90"
+    }
+  ],
+  "zip": "profilepilot-extension-0.2.18.zip",
+  "sha256": "a137a269ae301c2f30f7c7da291174c58e2971c94534a016bb42293249576ec1"
+}

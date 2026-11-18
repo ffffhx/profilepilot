@@ -1,9 +1,32 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
+const Module = require("node:module");
 const os = require("node:os");
 const path = require("node:path");
-const { execFileSync } = require("node:child_process");
+const { execFileSync, spawnSync } = require("node:child_process");
 const test = require("node:test");
+const { buildSync } = require("esbuild");
+
+const repoRoot = path.resolve(__dirname, "..");
+const compiledShellSource = buildSync({
+  entryPoints: [path.join(repoRoot, "src/main/shell-integration.ts")],
+  bundle: true,
+  packages: "external",
+  platform: "node",
+  format: "cjs",
+  target: "node22",
+  write: false,
+  logLevel: "silent"
+}).outputFiles[0].text;
+
+function loadShellIntegration() {
+  const virtualPath = path.join(repoRoot, "dist/main/shell-integration.js");
+  const instance = new Module(virtualPath, module);
+  instance.filename = virtualPath;
+  instance.paths = Module._nodeModulePaths(path.dirname(virtualPath));
+  instance._compile(compiledShellSource, virtualPath);
+  return instance.exports;
+}
 
 test("startup removes retired managed launchers on both platforms and preserves custom files", async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "profilepilot-retired-wrappers-"));
@@ -12,9 +35,7 @@ test("startup removes retired managed launchers on both platforms and preserves 
   process.env.HOME = home;
   if (process.platform === "win32") process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH = "";
   try {
-    const modulePath = require.resolve("../dist/main/shell-integration.js");
-    delete require.cache[modulePath];
-    const shell = require(modulePath);
+    const shell = loadShellIntegration();
     const directory = path.join(home, ".profilepilot", "bin");
     fs.mkdirSync(directory, { recursive: true });
     const retiredFiles = [];
@@ -63,9 +84,7 @@ test("agent-browser installs and refreshes its Wrapper", async () => {
   if (process.platform === "win32") process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH = "";
 
   try {
-    const modulePath = require.resolve("../dist/main/shell-integration.js");
-    delete require.cache[modulePath];
-    const shell = require(modulePath);
+    const shell = loadShellIntegration();
 
     let diagnostic = await shell.inspectAgentIntegration();
     for (const retired of ["playwright-cli", "chrome-devtools-mcp"]) {
@@ -113,6 +132,43 @@ test("agent-browser installs and refreshes its Wrapper", async () => {
       assert.match(zshenv, /export PATH="\$PROFILEPILOT_AGENT_BROWSER_BIN_DIR:\$PATH"/);
     } else {
       assert.match(process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH, /\.profilepilot\\bin/i);
+      const psLauncher = path.join(path.dirname(agentWrapper.launcherPath), "agent-browser.ps1");
+      assert.equal(fs.existsSync(psLauncher), true);
+      fs.unlinkSync(psLauncher);
+      assert.equal((await shell.inspectAgentIntegration()).wrappers.find((item) => item.key === "agent-browser").launcherInstalled, false);
+      assert.equal(await shell.refreshAgentBrowserWrapperIfInstalled(), true);
+      assert.equal(fs.existsSync(psLauncher), true);
+      assert.equal((await shell.inspectAgentIntegration()).wrappers.find((item) => item.key === "agent-browser").launcherInstalled, true);
+
+      const workDir = fs.mkdtempSync(path.join(home, "ps-cwd-"));
+      const echoWrapper = path.join(home, "echo-agent-browser-wrapper.cjs");
+      fs.writeFileSync(
+        echoWrapper,
+        "console.log(JSON.stringify({ argv: process.argv.slice(2), session: process.env.AGENT_BROWSER_SESSION }));\n",
+        "utf8"
+      );
+      const powershellExe = path.join(process.env.SystemRoot || "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+      const psCommand = "agent-browser eval '({id}, e.outerHTML)' 'a > unintended-file.txt'; exit $LASTEXITCODE";
+      const psRun = spawnSync(
+        powershellExe,
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", Buffer.from(psCommand, "utf16le").toString("base64")],
+        {
+          cwd: workDir,
+          encoding: "utf8",
+          windowsHide: true,
+          env: {
+            ...process.env,
+            HOME: home,
+            PATH: `${path.dirname(psLauncher)}${path.delimiter}${process.env.PATH || ""}`,
+            CODEX_THREAD_ID: "ps-wrapper-check",
+            PROFILEPILOT_AGENT_BROWSER_WRAPPER: echoWrapper,
+            PROFILEPILOT_NODE_RUNTIME: process.execPath
+          }
+        }
+      );
+      assert.equal(psRun.status, 0, psRun.stderr);
+      assert.deepEqual(JSON.parse(psRun.stdout.trim()).argv, ["eval", "({id}, e.outerHTML)", "a > unintended-file.txt"]);
+      assert.equal(fs.existsSync(path.join(workDir, "unintended-file.txt")), false, "PowerShell entry must not route > through cmd.exe");
     }
 
     const { execPortableCommandSync } = require("../dist/main/portable-command.js");
@@ -133,6 +189,9 @@ test("agent-browser installs and refreshes its Wrapper", async () => {
     diagnostic = await shell.setAgentWrapperEnabled("agent-browser", false);
     assert.equal(fs.existsSync(agentWrapper.wrapperPath), false);
     assert.equal(fs.existsSync(agentWrapper.launcherPath), false);
+    if (process.platform === "win32") {
+      assert.equal(fs.existsSync(path.join(path.dirname(agentWrapper.launcherPath), "agent-browser.ps1")), false);
+    }
     assert.equal(diagnostic.shellIntegration.installed, false, "last Wrapper removal also removes the managed shell route");
   } finally {
     for (const key of keys) {
@@ -153,9 +212,7 @@ test("compatibility launcher installs from the bundled TS engine with no global 
   process.env.PATH = path.join(home, "empty-bin");
   fs.mkdirSync(process.env.PATH, { recursive: true });
   try {
-    const modulePath = require.resolve("../dist/main/shell-integration.js");
-    delete require.cache[modulePath];
-    const { setAgentWrapperEnabled } = require(modulePath);
+    const { setAgentWrapperEnabled } = loadShellIntegration();
     const result = await setAgentWrapperEnabled("agent-browser", true);
     assert.equal(result.wrappers.find(item => item.key === "agent-browser").launcherInstalled, true);
   } finally {
@@ -176,9 +233,7 @@ test("ProfilePilot CLI installs, updates and removes its bundled instructions to
   process.env.HOME = home;
   if (process.platform === "win32") process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH = "";
   try {
-    const modulePath = require.resolve("../dist/main/shell-integration.js");
-    delete require.cache[modulePath];
-    const shell = require(modulePath);
+    const shell = loadShellIntegration();
 
     let diagnostic = await shell.inspectAgentIntegration();
     assert.equal(diagnostic.managementCli.installed, false);
@@ -227,7 +282,7 @@ test("ProfilePilot CLI installs, updates and removes its bundled instructions to
         encoding: "utf8",
         env: { HOME: home, PATH: "/usr/bin:/bin", PROFILEPILOT_NODE_RUNTIME: process.execPath }
       }).trim(),
-      "0.1.0"
+      require("../package.json").version
     );
 
     if (process.platform !== "win32") {
@@ -290,8 +345,7 @@ test("unified setup recovers a failed guide update and preserves external guides
   process.env.HOME = home;
   if (process.platform === "win32") process.env.PROFILEPILOT_TEST_WINDOWS_USER_PATH = "";
   try {
-    delete require.cache[require.resolve("../dist/main/shell-integration.js")];
-    const shell = require("../dist/main/shell-integration.js");
+    const shell = loadShellIntegration();
     let diagnostic = await shell.setProfilePilotCliEnabled(true);
     const target = diagnostic.managementCli.skill.targets[0].path;
     const guide = path.join(target, "references/agent-browser.md");
@@ -342,9 +396,7 @@ test("agent integration diagnostics report the bundled TS engine without a globa
     process.env.HOME = home;
     process.env.PATH = bin;
     delete process.env.PROFILEPILOT_AGENT_BROWSER_REAL;
-    const modulePath = require.resolve("../dist/main/shell-integration.js");
-    delete require.cache[modulePath];
-    const { inspectAgentIntegration } = require(modulePath);
+    const { inspectAgentIntegration } = loadShellIntegration();
     const diagnostic = await inspectAgentIntegration();
 
     assert.equal(diagnostic.ready, false);

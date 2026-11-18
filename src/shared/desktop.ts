@@ -1,9 +1,11 @@
 export const DESKTOP_CHANNEL = 'desktop:request';
 export const DESKTOP_CHANGED = 'desktop:changed';
 export type DesktopMode = 'interactive' | 'background';
+export type DesktopCoordSpace = 'image' | 'normalized' | 'physical';
 export const backgroundDesktopActions = ['invoke', 'set_value', 'toggle', 'select', 'expand', 'collapse', 'scroll'] as const;
 export interface DesktopWindow {
   id: string; title: string; process: string; pid: number; className: string; nativeHandle?: string;
+  bounds?: { x: number; y: number; width: number; height: number };
   /** Fresh catalog samples; ownership is a Win32 window relation, not control permission or proof of modality. */
   enabled?: boolean; minimized?: boolean; ownerNativeHandle?: string | null;
 }

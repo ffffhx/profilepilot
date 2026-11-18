@@ -16,6 +16,11 @@ export const PROFILEPILOT_PHONE_MAX_RESPONSE_BYTES = 9 * 1024 * 1024;
 export const PROFILEPILOT_PHONE_BASIC_MAX_RESPONSE_BYTES = 33 * 1024 * 1024;
 
 export type ProfilePilotTaskCommand =
+  | { action: "task.review.status" }
+  | { action: "task.review.configure"; input: Partial<Omit<import("../shared/review").ReviewSettings, "enabledAt">> }
+  | { action: "task.review.run"; kind: import("../shared/review").ReviewKind }
+  | { action: "task.review.report"; id: string }
+  | { action: "task.review.feedback"; id: string; findingId: string; value: import("../shared/review").ReviewFeedback; note?: string }
   | { action: "task.create"; profile: string; input: Omit<CreateTaskInput, "profileId"> }
   | { action: "task.list"; limit?: number; offset?: number }
   | { action: "task.get"; id: string; after?: number; limit?: number; revision?: number }
@@ -35,7 +40,11 @@ export type ProfilePilotTaskCommand =
   | { action: "task.mode"; id: string; mode: TaskPermissionMode; model?: string }
   | { action: "task.model"; id: string; model: string }
   | { action: "task.permissions"; id: string; revokeId?: string }
-  | { action: "task.status"; id: string };
+  | { action: "task.status"; id: string }
+  | { action: "schedule.list" }
+  | { action: "schedule.delete"; id: string }
+  | { action: "template.list" }
+  | { action: "material.list" };
 
 export type ManagementTask = Pick<BrowserTask,
   "id" | "title" | "prompt" | "profileId" | "profileName" | "status" | "createdAt" | "updatedAt" |
@@ -55,7 +64,7 @@ export type ProfilePilotManagementCommand = ProfilePilotTaskCommand | PhoneManag
   | { action: "profile.list" }
   | { action: "profile.default"; selector?: string | null }
   | { action: "profile.get"; selector: string }
-  | { action: "profile.create"; name: string }
+  | { action: "profile.create"; name: string; browserKind?: import("../shared/types").BrowserKind }
   | { action: "profile.rename"; selector: string; name: string }
   | { action: "profile.configure"; selector: string; hideAutomation: boolean }
   | { action: "profile.start"; selector: string }

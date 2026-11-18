@@ -69,10 +69,14 @@ export class BasicPhoneControl {
       command = action.kind === "tap" ? ["input", "tap", String(action.x), String(action.y)]
         : ["input", "swipe", String(action.x), String(action.y), String(action.toX), String(action.toY), String(action.duration || 350)];
     } else if (action.kind === "key") {
-      command = ["input", "keyevent", { back: "4", home: "3", recents: "187" }[action.key]];
+      const keycodes: Record<typeof action.key, string> = {
+        back: "4", home: "3", recents: "187",
+        enter: "66", search: "84", backspace: "67", delete: "112", tab: "61", escape: "111"
+      };
+      command = ["input", "keyevent", keycodes[action.key]];
     } else if (action.kind === "text") {
       if (!/^[\x20-\x7e]+$/.test(action.text) || action.text.includes("%s")) throw new Error("免安装模式仅支持基础英文、数字和符号输入；中文与精确填写请使用手机 App。");
-      command = ["input", "text", action.text.replaceAll(" ", "%s")];
+      command = ["input", "text", action.text.replace(/%(?=s)/g, "%%").replaceAll(" ", "%s")];
     } else if (action.kind !== "screenshot") throw new Error("控件识别和按控件操作需要手机 App；免安装模式支持截图、坐标点击、滑动和导航键。");
     const abort = new AbortController(); session.pending = abort; session.requests.add(requestId);
     const check = () => { if (abort.signal.aborted || state.generation !== generation || state.sessionId !== sessionId) throw new Error("手机会话已改变，本次结果已丢弃；不会重放操作。"); };

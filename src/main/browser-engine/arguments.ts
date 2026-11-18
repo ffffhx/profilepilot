@@ -95,14 +95,17 @@ Page actions wait 500 ms and include a fresh observation. --no-observe skips
 this feedback when a higher-level caller observes after a composite operation.
 
 open URL | back | forward | reload
-snapshot [-i] [-c] [-d DEPTH] [-s SELECTOR]
+snapshot [-i] [-c] [--delta] [-d DEPTH] [-s SELECTOR]
+read [--query TEXT] [--cursor N] [--limit N] [--text-limit N] | read --params-file READ.json
 click SELECTOR [--new-tab] | dblclick SELECTOR | hover SELECTOR | focus SELECTOR
 fill SELECTOR TEXT | type SELECTOR TEXT | select SELECTOR VALUE...
 check SELECTOR | uncheck SELECTOR | upload SELECTOR FILE...
 press KEY | keydown KEY | keyup KEY | keyboard type|inserttext TEXT
+pointer click|dblclick|move|down|up|wheel|drag X Y [END_X END_Y] | pointer --params-file POINTER.json
 mouse move X Y | mouse down|up [BUTTON] | mouse wheel DY [DX]
 scroll up|down|left|right [PX] [--selector SELECTOR]
 scrollintoview SELECTOR | drag SOURCE TARGET
+dialog [status] | dialog accept [PROMPT_TEXT] | dialog dismiss
 get text|html|value|attr|count|box|styles SELECTOR [ATTRIBUTE]
 get title|url | is visible|enabled|checked SELECTOR
 find role|text|label|placeholder|alt|title|testid QUERY ACTION [VALUE]

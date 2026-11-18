@@ -309,10 +309,20 @@ test('test bypass is explicit, needs an injected driver and is absent on an ordi
   try { await service.execute(cmd('claim', { windowId: target.id })); assert.equal(service.status().inputObservation.unobservedTestDriver, true); }
   finally { service.close(); }
 });
-test('macOS does not instantiate an observer factory or issue Windows requests', async () => {
-  let factories = 0; const f = fixture({ platform: 'darwin', observerFactory() { factories++; throw new Error('must not run'); } });
+test('unsupported platform does not instantiate an observer factory, while macOS works cleanly without WindowsInputBroker', async () => {
+  let factories = 0; const f = fixture({ platform: 'linux', observerFactory() { factories++; throw new Error('must not run'); } });
   try { await assert.rejects(f.claim(), { code: 'DESKTOP_PLATFORM_UNAVAILABLE' }); assert.equal(factories, 0); assert.equal(f.calls.length, 0); }
   finally { f.service.close(); }
+  const mac = fixture({ platform: 'darwin', noObserver: true });
+  try {
+    assert.equal(mac.service.status().supported, true);
+    assert.equal(mac.service.status().inputObservation.available, true);
+    const claimed = await mac.claim();
+    assert.equal(claimed.session.state, 'active');
+    assert.equal(claimed.inputObservation.phase, 'ready');
+    await mac.read();
+    assert.equal((await mac.service.execute(action())).executed, true);
+  } finally { mac.service.close(); }
 });
 test('claim reserves a paused arming owner and serializes concurrent transitions until its actual marker ACK', async () => {
   const f = fixture(); f.observer.auto = false;

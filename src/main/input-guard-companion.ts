@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import {
   cpSync,
@@ -265,7 +265,10 @@ class InputGuardCompanionProcess extends EventEmitter implements InputGuardProce
   private readonly socketPath: string;
   private readonly launcher: ReturnType<typeof spawn>;
   private socket: net.Socket | null = null;
+  private pendingSocket: net.Socket | null = null;
+  private connectTimer: NodeJS.Timeout | null = null;
   private stopped = false;
+  private launcherExited = false;
   private emittedExit = false;
   private readonly connectDeadline = Date.now() + 5000;
 
@@ -282,22 +285,77 @@ class InputGuardCompanionProcess extends EventEmitter implements InputGuardProce
     );
     this.launcher.stdout?.pipe(this.stderr, { end: false });
     this.launcher.stderr?.pipe(this.stderr, { end: false });
-    this.launcher.on("error", (error) => this.emit("error", error));
+    this.launcher.on("error", (error) => {
+      this.launcherExited = true;
+      this.emit("error", error);
+    });
     this.launcher.on("exit", (code, signal) => {
+      this.launcherExited = true;
       this.cleanup();
       this.emitExit(code, signal);
     });
-    setTimeout(() => this.connect(), 10).unref?.();
+    this.connectTimer = setTimeout(() => {
+      this.connectTimer = null;
+      this.connect();
+    }, 10);
+    this.connectTimer.unref?.();
   }
 
   kill(signal: NodeJS.Signals = "SIGTERM"): boolean {
+    const hadConnectedSocket = Boolean(this.socket && !this.socket.destroyed);
     this.stopped = true;
-    if (this.socket && !this.socket.destroyed) {
-      this.socket.end("QUIT\n");
+    if (this.connectTimer) {
+      clearTimeout(this.connectTimer);
+      this.connectTimer = null;
     }
+    if (hadConnectedSocket) {
+      this.socket!.end("QUIT\n");
+      const killed = this.launcher.kill(signal);
+      this.cleanup();
+      return killed;
+    }
+    // Early kill before socket connect: `/usr/bin/open` only waits on LaunchServices
+    // and killing `open` alone orphans `ProfilePilot Input Guard` blocked on `accept()`.
+    // Drain the pending Unix socket with QUIT and target the unique `--socket` arg.
+    this.terminateUnconnectedCompanion(signal);
     const killed = this.launcher.kill(signal);
-    this.cleanup();
+    if (!this.stdin.destroyed) {
+      this.stdin.destroy();
+    }
     return killed;
+  }
+
+  private terminateUnconnectedCompanion(signal: NodeJS.Signals): void {
+    const socketPath = this.socketPath;
+    if (this.pendingSocket && !this.pendingSocket.destroyed) {
+      this.pendingSocket.destroy();
+      this.pendingSocket = null;
+    }
+    const deadline = Date.now() + 1200;
+    const trySendQuit = () => {
+      const probe = net.createConnection({ path: socketPath });
+      probe.once("connect", () => {
+        probe.end("QUIT\n", () => {
+          probe.destroy();
+          rmSync(socketPath, { force: true });
+        });
+      });
+      probe.once("error", (error: NodeJS.ErrnoException) => {
+        probe.destroy();
+        if (Date.now() < deadline && (error.code === "ENOENT" || error.code === "ECONNREFUSED")) {
+          const retry = setTimeout(trySendQuit, 40);
+          retry.unref?.();
+          return;
+        }
+        execFile("/usr/bin/pkill", [`-${signal.replace(/^SIG/, "") || "TERM"}`, "-f", `--socket ${socketPath}`], () => {
+          rmSync(socketPath, { force: true });
+        });
+      });
+    };
+    trySendQuit();
+    if (!this.launcherExited) {
+      execFile("/usr/bin/pkill", ["-TERM", "-f", `--socket ${socketPath}`], () => {});
+    }
   }
 
   private connect(): void {
@@ -305,23 +363,35 @@ class InputGuardCompanionProcess extends EventEmitter implements InputGuardProce
       return;
     }
     const socket = net.createConnection({ path: this.socketPath });
+    this.pendingSocket = socket;
     const onError = (error: NodeJS.ErrnoException) => {
+      if (this.pendingSocket === socket) this.pendingSocket = null;
       socket.destroy();
       if (
         !this.stopped &&
         Date.now() < this.connectDeadline &&
         (error.code === "ENOENT" || error.code === "ECONNREFUSED")
       ) {
-        setTimeout(() => this.connect(), 40).unref?.();
+        this.connectTimer = setTimeout(() => {
+          this.connectTimer = null;
+          this.connect();
+        }, 40);
+        this.connectTimer.unref?.();
         return;
       }
-      this.emit("error", error);
+      if (!this.stopped) {
+        this.emit("error", error);
+      }
     };
     socket.once("error", onError);
     socket.once("connect", () => {
+      if (this.pendingSocket === socket) this.pendingSocket = null;
       socket.off("error", onError);
       if (this.stopped) {
-        socket.destroy();
+        socket.end("QUIT\n", () => {
+          socket.destroy();
+          rmSync(this.socketPath, { force: true });
+        });
         return;
       }
       this.socket = socket;
@@ -336,10 +406,19 @@ class InputGuardCompanionProcess extends EventEmitter implements InputGuardProce
   }
 
   private cleanup(): void {
+    const hadConnected = Boolean(this.socket);
     this.stopped = true;
+    if (this.connectTimer) {
+      clearTimeout(this.connectTimer);
+      this.connectTimer = null;
+    }
+    this.pendingSocket?.destroy();
+    this.pendingSocket = null;
     this.socket?.destroy();
     this.socket = null;
-    rmSync(this.socketPath, { force: true });
+    if (hadConnected) {
+      rmSync(this.socketPath, { force: true });
+    }
     if (!this.stdin.destroyed) {
       this.stdin.destroy();
     }

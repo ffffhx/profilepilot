@@ -109,7 +109,10 @@ export class PhoneVideoStream {
             const line = tail.slice(0, end).trimEnd(); tail = tail.slice(end + 1);
             if (!line.startsWith("PPV1 ")) continue;
             const item = JSON.parse(line.slice(5));
-            if (item.type === "error") throw new Error("当前手机暂不支持实时视频，已切换为连续预览。");
+            if (item.type === "error") {
+              const detail = typeof item.message === "string" && item.message.trim() ? `（${item.message.trim().slice(0, 160)}）` : "";
+              throw new Error(`当前手机暂不支持实时视频${detail}，已切换为连续预览。`);
+            }
             if (item.type !== "frame") continue;
             this.guard(); this.signal.throwIfAborted();
             if (!/^avc1\.[0-9a-f]{6}$/i.test(item.codec) || typeof item.key !== "boolean" || !Number.isSafeInteger(item.timestamp)

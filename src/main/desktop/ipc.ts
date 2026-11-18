@@ -7,16 +7,50 @@ import { isWorkspaceShell } from '../workspace-shell';
 import { writeDiagnosticLog } from '../diagnostic-log';
 import { DesktopService, type DesktopServiceOptions } from './service';
 import { captureDesktopWindow } from './capture';
-import { DesktopControlNotice } from './notice';
+import { DesktopControlNotice, computeNoticePosition, type NoticeRect } from './notice';
 
 export function registerDesktop(options: Pick<DesktopServiceOptions, 'admission' | 'inputObserver'> = {}): DesktopService {
   let notice: DesktopControlNotice | undefined;
   let closing = false;
   let stopShortcutAvailable = false;
+  let shortcutRegistered = false;
+  const stopShortcut = process.platform === 'darwin' ? 'CommandOrControl+Alt+Escape' : 'Control+Alt+Escape';
   const root = path.resolve(__dirname, '../../../public');
   const diagnostic = (event: string, message: string, error: unknown) => {
     try { writeDiagnosticLog('error', 'desktop', event, message, { error }); }
     catch { /* Diagnostic teardown must not interrupt the remaining cleanup. */ }
+  };
+  const syncStopShortcut = (hasSession: boolean) => {
+    if (closing || (process.platform !== 'win32' && process.platform !== 'darwin') || process.env.CPM_ELECTRON_SMOKE_TEST === '1') return;
+    if (hasSession) {
+      if (!shortcutRegistered) {
+        try {
+          shortcutRegistered = Boolean(globalShortcut.register(stopShortcut, () => service.control('stop')));
+          stopShortcutAvailable = shortcutRegistered;
+        } catch (error) {
+          shortcutRegistered = false; stopShortcutAvailable = false;
+          diagnostic('desktop.shortcut.unavailable', '桌面停止快捷键注册失败。', error);
+        }
+      }
+    } else if (shortcutRegistered) {
+      shortcutRegistered = false; stopShortcutAvailable = false;
+      try { globalShortcut.unregister(stopShortcut); }
+      catch (error) { diagnostic('desktop.shortcut.unavailable', '桌面停止快捷键注销失败。', error); }
+    }
+  };
+  const positionForTarget = (targetBounds?: NoticeRect | null) => {
+    const display = targetBounds && typeof (screen as any).getDisplayMatching === 'function'
+      ? screen.getDisplayMatching(targetBounds)
+      : screen.getPrimaryDisplay();
+    const area = display?.workArea || screen.getPrimaryDisplay().workArea;
+    const calc = typeof computeNoticePosition === 'function'
+      ? computeNoticePosition
+      : typeof (DesktopControlNotice as any)?.computePosition === 'function'
+        ? (DesktopControlNotice as any).computePosition
+        : undefined;
+    return calc
+      ? calc(area, { width: 390, height: 200 }, targetBounds, process.platform)
+      : { x: area.x + area.width - 406, y: area.y + 16 };
   };
   const trusted = (url: string) => {
     try {
@@ -26,19 +60,23 @@ export function registerDesktop(options: Pick<DesktopServiceOptions, 'admission'
   };
   const update = (status: DesktopStatus) => {
     if (closing) return;
+    syncStopShortcut(Boolean(status.session));
+    const broadcastStatus = typeof status.stopShortcutAvailable === 'boolean' && status.stopShortcutAvailable !== stopShortcutAvailable
+      ? { ...status, stopShortcutAvailable }
+      : status;
     // Covered Chromium windows can throttle timers. Deliver control changes
     // directly to our local documents; polling remains a recovery fallback.
     try {
       for (const window of BrowserWindow.getAllWindows()) {
         try {
-          if (!window.isDestroyed() && trusted(window.webContents.getURL())) window.webContents.send(DESKTOP_CHANGED, status);
+          if (!window.isDestroyed() && trusted(window.webContents.getURL())) window.webContents.send(DESKTOP_CHANGED, broadcastStatus);
         } catch { /* A renderer may finish closing during notification. */ }
       }
       if (status.session?.window.pid === process.pid) app.setAccessibilitySupportEnabled(true);
     } catch (error) { diagnostic('desktop.notice.unavailable', '桌面状态通知暂不可用。', error); }
     // Preparation owns construction. Ordinary state broadcasts cannot throw a
     // BrowserWindow/load error through an already executed action's receipt.
-    try { notice?.update(status); }
+    try { notice?.update(broadcastStatus); }
     catch (error) { diagnostic('desktop.notice.unavailable', '桌面控制条状态更新失败。', error); }
   };
   const service = new DesktopService({ ...options, onChanged: update, capture: captureDesktopWindow, stopShortcutAvailable: () => stopShortcutAvailable,
@@ -46,9 +84,14 @@ export function registerDesktop(options: Pick<DesktopServiceOptions, 'admission'
   notice = new DesktopControlNotice({ file: path.join(root, 'desktop-control.html'), status: () => service.status(),
     onUnavailable: () => { service.noticeUnavailable(); }, onUserClose: () => { service.control('takeover'); },
     diagnostic: error => diagnostic('desktop.notice.unavailable', '桌面控制条已关闭或暂不可用。', error),
+    reposition: (window, currentStatus) => {
+      const pos = positionForTarget(currentStatus.session?.window?.bounds);
+      if (typeof (window as any).setPosition === 'function') window.setPosition(pos.x, pos.y, false);
+      else if (typeof (window as any).setBounds === 'function') window.setBounds({ x: pos.x, y: pos.y, width: 390, height: 200 }, false);
+    },
     create: () => {
-      const area = screen.getPrimaryDisplay().workArea;
-      const created = new BrowserWindow({ width: 390, height: 200, x: area.x + area.width - 406, y: area.y + 16,
+      const pos = positionForTarget(service.status().session?.window?.bounds);
+      const created = new BrowserWindow({ width: 390, height: 200, x: pos.x, y: pos.y,
         show: false, frame: false, resizable: false, alwaysOnTop: true, skipTaskbar: true,
         title: 'ProfilePilot · 桌面控制', backgroundColor: '#ffffff',
         // Readiness and stop/takeover feedback must remain responsive while the
@@ -90,7 +133,9 @@ export function registerDesktop(options: Pick<DesktopServiceOptions, 'admission'
     if (method === 'preview') return service.preview(z.string().regex(/^[a-f0-9]{32}$/).parse(arg));
     throw new Error('未知桌面操作。');
   });
-  if (process.platform === 'win32' && process.env.CPM_ELECTRON_SMOKE_TEST !== '1') stopShortcutAvailable = globalShortcut.register('Control+Alt+Escape', () => service.control('stop'));
+  // Register the global stop shortcut ONLY while an active desktop session exists
+  // so idle ProfilePilot instances never intercept Escape chords globally.
+  syncStopShortcut(Boolean(service.status().session));
   app.once('will-quit', () => {
     closing = true;
     const current = notice; notice = undefined;
@@ -100,7 +145,8 @@ export function registerDesktop(options: Pick<DesktopServiceOptions, 'admission'
       try { current?.close(); }
       catch (error) { diagnostic('desktop.notice.unavailable', '桌面控制条关闭状态尚未确认。', error); }
     } finally {
-      try { globalShortcut.unregister('Control+Alt+Escape'); }
+      shortcutRegistered = false; stopShortcutAvailable = false;
+      try { globalShortcut.unregister(stopShortcut); }
       catch (error) { diagnostic('desktop.shutdown.unconfirmed', '桌面停止快捷键注销状态尚未确认。', error); }
     }
   });

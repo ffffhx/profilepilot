@@ -239,6 +239,29 @@ export class LocalAppsService {
     const reserved = await this.reservedPorts();
     if ([config.cdpPort, config.inspectPort, config.agentPort].some(p => p && reserved.has(p))) throw new Error("连接端口已被浏览器 Profile 使用，请在连接设置中更换端口。");
   }
+  private async waitForServiceReady(config: LocalAppConfig): Promise<void> {
+    const deadline = Date.now() + 20_000;
+    while (Date.now() < deadline) {
+      if ((await this.inspect(config)).runtime.serviceReady) return;
+      await new Promise(resolve => setTimeout(resolve, 750));
+    }
+    throw new Error("启动命令已执行，但尚未发现匹配的服务进程和监听端口，请检查启动命令、进程识别路径与服务端口。");
+  }
+  private async assertPortFree(portNumber: number): Promise<void> {
+    for (const host of ["127.0.0.1", "::1"] as const) {
+      await new Promise<void>((resolve, reject) => {
+        const server = net.createServer();
+        server.once("error", (error: NodeJS.ErrnoException) => {
+          if (host === "::1" && (error.code === "EADDRNOTAVAIL" || error.code === "EAFNOSUPPORT")) {
+            resolve();
+            return;
+          }
+          reject(new Error(`端口 ${portNumber} 已被占用，请停止占用程序或更换调试端口。`));
+        });
+        server.listen({ port: portNumber, host, ...(host === "::1" ? { ipv6Only: true } : {}) }, () => server.close(() => resolve()));
+      });
+    }
+  }
   async start(id: string): Promise<void> {
     await this.exclusive(id, async () => {
       const config = this.get(id);
@@ -248,21 +271,16 @@ export class LocalAppsService {
       if (view.runtime.status === "running") return;
       if (!view.controls.start) throw new Error("当前无法确认应用已停止，请先检查应用状态，避免重复启动。");
       await this.launch(id);
-      if (config.mode === "service") {
-        const deadline = Date.now() + 20_000;
-        while (Date.now() < deadline) {
-          if ((await this.inspect(config)).runtime.serviceReady) return;
-          await new Promise(resolve => setTimeout(resolve, 750));
-        }
-        throw new Error("启动命令已执行，但尚未发现匹配的服务进程和监听端口，请检查启动命令、进程识别路径与服务端口。");
-      }
+      if (config.mode === "service") await this.waitForServiceReady(config);
     });
   }
   async stop(id: string): Promise<void> { await this.exclusive(id, () => this.halt(id)); }
   async restart(id: string): Promise<void> {
     await this.exclusive(id, async () => {
-      if (!(await this.inspect(this.get(id))).controls.restart) throw new Error("此应用由外部管理或状态尚未确认，请使用应用自己的入口重启。");
+      const config = this.get(id);
+      if (!(await this.inspect(config)).controls.restart) throw new Error("此应用由外部管理或状态尚未确认，请使用应用自己的入口重启。");
       await this.halt(id); await this.launch(id);
+      if (config.mode === "service") await this.waitForServiceReady(config);
     });
   }
   private async launch(id: string): Promise<void> {
@@ -274,11 +292,7 @@ export class LocalAppsService {
     const reserved = await this.reservedPorts();
     for (const p of [config.cdpPort, config.inspectPort, config.servicePort]) if (p) {
       if (reserved.has(p)) throw new Error(`端口 ${p} 已被浏览器 Profile 使用。`);
-      await new Promise<void>((resolve, reject) => {
-        const server = net.createServer();
-        server.once("error", () => reject(new Error(`端口 ${p} 已被占用，请停止占用程序或更换调试端口。`)));
-        server.listen(p, "127.0.0.1", () => server.close(() => resolve()));
-      });
+      await this.assertPortFree(p);
     }
     const token = randomUUID();
     const socket = process.platform === "win32" ? `\\\\.\\pipe\\pp-local-${token}` : path.join(process.platform === "darwin" ? "/tmp" : os.tmpdir(), `pp-app-${token}.sock`);
@@ -309,17 +323,31 @@ export class LocalAppsService {
     throw new Error(spawnError?.message || "应用启动超时，请检查项目启动命令和依赖。");
   }
   private async halt(id: string): Promise<void> {
-    if (this.get(id).mode !== "launch") throw new Error("已有应用由外部管理，不能从此处停止。");
+    const config = this.get(id);
+    if (config.mode === "attach") throw new Error("已有应用由外部管理，不能从此处停止。");
     const record = this.record(id);
-    const view = await this.inspect(this.get(id));
+    const view = await this.inspect(config);
     if (!view.controls.stop) {
       if (["stopped", "failed"].includes(view.runtime.status)) return;
       throw new Error("此应用由外部管理或管理连接不可用，请使用应用自己的入口停止。");
     }
     if (!record) return;
-    await this.gateway?.detach(this.get(id));
+    await this.gateway?.detach(config);
     await workerRequest(record, "stop", 12_000);
     invalidateProcessRuntime();
+    if (config.mode === "service" && config.servicePort) {
+      const deadline = Date.now() + 2000;
+      while (Date.now() < deadline) {
+        invalidateProcessRuntime();
+        try {
+          if ((await this.inspect(config)).controls.start) {
+            await this.assertPortFree(config.servicePort);
+            break;
+          }
+        } catch { /* port or descendant still releasing */ }
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    }
   }
   syncAgents(): Promise<void> {
     if (!this.gateway) return Promise.resolve();
@@ -369,14 +397,29 @@ export class LocalAppsService {
       this.agentStates.set(config.id, state);
     } catch (error) { this.agentStates.set(config.id, { connected: false, error: (error as Error).message }); }
   }
-  logs(id: string): string {
+  logs(id: string, options?: { tailLines?: number; grep?: string }): string {
     const config = this.get(id); const file = config.mode === "service" && config.logPath ? config.logPath : this.file(id, "log");
     if (!fs.existsSync(file)) return "";
     const descriptor = fs.openSync(file, "r");
     try {
       const size = fs.fstatSync(descriptor).size; const count = Math.min(size, 128 * 1024);
       const buffer = Buffer.alloc(count); fs.readSync(descriptor, buffer, 0, count, size - count);
-      return buffer.toString("utf8").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+      let start = 0;
+      while (start < buffer.length && (buffer[start] & 0b1100_0000) === 0b1000_0000) start++;
+      const cleaned = buffer.subarray(start).toString("utf8").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+      if (!options || (options.tailLines === undefined && options.grep === undefined)) return cleaned;
+      if (!cleaned) return "";
+      const hadTrailingNewline = cleaned.endsWith("\n");
+      let lines = (hadTrailingNewline ? cleaned.slice(0, -1) : cleaned).split(/\r?\n/);
+      if (options.grep !== undefined && options.grep !== "") {
+        lines = lines.filter(line => line.includes(options.grep!));
+      }
+      if (options.tailLines !== undefined) {
+        const limit = Math.max(1, Math.floor(options.tailLines));
+        lines = lines.slice(-limit);
+      }
+      if (!lines.length) return "";
+      return lines.join("\n") + (hadTrailingNewline ? "\n" : "");
     } finally { fs.closeSync(descriptor); }
   }
   async debuggerUrl(id: string, kind: "renderer" | "main", targetId: string): Promise<string> {

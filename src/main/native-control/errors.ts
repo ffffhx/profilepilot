@@ -41,7 +41,7 @@ export function nativeControlError(error: unknown): { code: string; message: str
   return { code, message, recovery,
     ...(detail?.partialResult !== undefined ? { partialResult: detail.partialResult } : {}),
     ...(detail?.requestId ? { requestId: detail.requestId } : {}), ...(detail?.sessionId ? { sessionId: detail.sessionId } : {}),
-    exitCode: ["NATIVE_USER_IN_CONTROL", "NATIVE_SESSION_CONFLICT", "NATIVE_OBSERVATION_STALE", "NATIVE_FRAME_SESSION_STALE", "NATIVE_TIMEOUT_UNCERTAIN"].includes(code) ? 75 : code === "NATIVE_DISCONNECTED" ? 69 : code === "NATIVE_INVALID_REQUEST" ? 64 : 1 };
+    exitCode: ["NATIVE_USER_IN_CONTROL", "NATIVE_SESSION_CONFLICT", "NATIVE_OBSERVATION_STALE", "NATIVE_FRAME_SESSION_STALE", "NATIVE_TIMEOUT_UNCERTAIN", "NATIVE_COMMAND_TIMEOUT"].includes(code) ? 75 : code === "NATIVE_DISCONNECTED" ? 69 : code === "NATIVE_INVALID_REQUEST" ? 64 : 1 };
 }
 
 export function nativeFailurePayload(error: unknown) {

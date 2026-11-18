@@ -300,6 +300,16 @@ export function renderNewModal(): string {
           <label for="profile-name">名称</label>
           <input id="profile-name" name="name" type="text" maxlength="80" autocomplete="off" required />
         </div>
+        <div class="field grid gap-2 my-[18px]">
+          <label for="profile-browser-kind">浏览器内核</label>
+          <select id="profile-browser-kind" name="browserKind" ${store.busy ? "disabled" : ""}>
+            <option value="chrome" selected>Google Chrome（默认）</option>
+            <option value="edge">Microsoft Edge</option>
+            <option value="brave">Brave Browser</option>
+            <option value="chromium">Chromium</option>
+          </select>
+          <span class="field-note text-muted text-[12px] leading-[1.45]">为该独立 Profile 选择 Chromium 内核（Chrome / Edge / Brave / Chromium）。</span>
+        </div>
         <div class="modal-actions">
           <button type="button" data-action="close-modal">取消</button>
           <button type="submit" class="primary ${creating ? "loading" : ""}" ${store.busy ? "disabled" : ""}>

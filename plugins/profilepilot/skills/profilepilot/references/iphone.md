@@ -4,7 +4,7 @@ Use the requested device or the available saved default from `ppilot phone defau
 
 ## First connection
 
-Windows and macOS support automatic USB preparation for iOS 18+. Windows requires Apple's device driver (Apple Devices). The user unlocks the phone, trusts the computer and enables Developer Mode. Never request the user's passcode or Apple password in chat.
+Windows and macOS support automatic USB preparation for iOS 15–18+ (`17.4+`/`18+` userspace tunnel, `17.0–17.3` CoreDevice tunnel, `15–16` developer image + `runwda`). Windows requires Apple's device driver (Apple Devices). The user unlocks the phone, trusts the computer and enables Developer Mode (iOS 16+). Never request the user's passcode or Apple password in chat.
 
 ```text
 ppilot phone iphone setup
@@ -25,7 +25,7 @@ ppilot phone iphone signing-setup
 ppilot phone iphone sign-sideloadly --udid <UDID>
 ```
 
-This explicit repair uses `%APPDATA%/Sideloadly/key.pem` and matching `cert-*.pem`, reads the WDA provisioning profile from that USB phone, checks device/bundle/certificate/expiry, then re-signs the full IPA and installs it. It never reads Apple login/session files. Temporary signing materials are deleted afterward. `signing-setup` needs Python 3.11+ and creates an isolated environment. If multiple WDA bundles match, select the user's intended `--bundle-id`; do not choose arbitrarily. Signing repair is currently Windows-only.
+This explicit repair uses `%APPDATA%/Sideloadly/key.pem` and matching `cert-*.pem` on Windows (or local `codesign` identities + provisioning profile on macOS), reads the WDA provisioning profile from that USB phone, checks device/bundle/certificate/expiry, then re-signs the full IPA and installs it. It never reads Apple login/session files. Temporary signing materials are deleted afterward. On Windows `signing-setup` needs Python 3.11+ and creates an isolated environment; on macOS native `security` + `codesign` are used directly. If multiple WDA bundles match, select the user's intended `--bundle-id`; do not choose arbitrarily.
 
 ```text
 ppilot phone iphone usb-start --udid <UDID>
@@ -53,7 +53,7 @@ Use `--mode control` only within the user's authorized scope. Actions use the re
 {"id":"iphone-…","sessionId":"…","generation":1,"requestId":"UUID","action":{"kind":"screenshot"}}
 ```
 
-Supported: `screenshot`, `snapshot` (WDA JSON accessibility tree), `find`, `tap`, `swipe`, `text`, `click`, `fill`, `scroll`, and `key` with `home`. Screenshot coordinates are physical pixels; ProfilePilot converts to iOS logical points. Refresh the screenshot before coordinate input and after each input. A rotated/stale frame is rejected. Selector fields: `resourceId`/`description` map to accessibility name, `text` to label, `className` to type, and `enabled`; input requires one exact visible match.
+Supported: `screenshot`, `snapshot` (pruned compact `@e1`/`@e2` elements + tree summary), `find`, `tap`, `swipe`, `text`, `click`, `fill`, `scroll`, and `key` (`home`, `enter`, `search`, `backspace`, `delete`, `tab`, `escape`). Screenshot coordinates are physical pixels; ProfilePilot converts to iOS logical points. Refresh the screenshot before coordinate input and after each input. A rotated/stale frame is rejected. Selector fields: `ref` (e.g. `"@e1"`), `resourceId` (maps to accessibility `name`), `description` / `text` (maps to `label` / `value`), `className` (maps to `type`), and `enabled`; input requires one exact visible match.
 
 Ordinary CLI input waits 500 ms and returns a fresh WDA JSON tree in `data.observation.tree`, with `actionOutcome: "completed"` and `observationStatus: "available"`. This tree supports selector reasoning; it does not refresh the screenshot needed for pixel coordinates. Use `--no-observe` or JSON `observeAfter: false` to skip. If observation fails, `observationStatus: "unavailable"` preserves confirmed input: check control/read again without repeating the action. The wait is a current sample, not a guarantee of asynchronous completion or transient-event capture.
 

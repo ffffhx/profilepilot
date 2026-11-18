@@ -1,8 +1,20 @@
 const $ = selector => document.querySelector(selector);
 const setupId = new URLSearchParams(location.hash.slice(1)).get('setup');
 let invitation, currentWindowId, polling = false, busy = false, generation = 0;
+let latestState, currentSiteOrigin = '';
 const connectionDiagnostics = globalThis.ProfilePilotConnectionDiagnostics;
 let workerReadFailure;
+
+function parseHttpOrigin(rawUrl) {
+  if (typeof rawUrl !== 'string' || !rawUrl) return '';
+  try {
+    const parsed = new URL(rawUrl);
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) return '';
+    return parsed.origin;
+  } catch {
+    return '';
+  }
+}
 
 function showError(error) { $('#error').textContent = error?.message || String(error); $('#error').hidden = false; }
 function clearError() { $('#error').hidden = true; }
@@ -20,14 +32,16 @@ async function request(method, data = {}) {
   return response.result;
 }
 function render(state) {
+  latestState = state;
+  const pairedView = Boolean(state.profileId) && !invitation;
   $('#profile-name').textContent = state.profileName || (state.profileId === 'native:Default' ? '系统默认 Profile' : state.profileId?.replace(/^native:/, '')) || '当前 Profile';
   $('#connection-state').hidden = false;
   $('#connection-label').textContent = state.connected ? '已连接' : state.profileId ? '未连接' : '尚未配对';
   $('#connection-label').className = 'connection-label' + (state.connected ? ' connected' : '');
   $('#connection-note').textContent = state.connectionError || (state.connected ? '浏览器服务正常' : state.profileId ? '打开 ProfilePilot 或运行 CLI 后会自动重连' : '配对后即可连接浏览器服务');
-  $('#connect').hidden = Boolean(state.profileId) && !invitation;
+  $('#connect').hidden = pairedView;
   $('#reconnect').hidden = !state.profileId || state.connected || Boolean(invitation);
-  $('#controlled-tab').hidden = !state.profileId || Boolean(invitation);
+  $('#controlled-tab').hidden = !pairedView;
 
   // The last tab can outlive its session. Only a live control session owns a
   // target; the active Chrome tab and historical conversations are unrelated.
@@ -46,6 +60,32 @@ function render(state) {
   $('#page-domain').hidden = !domain;
   $('#page-note').textContent = issue?.message || (hasTab ? controlling ? '' : '浏览器操作已暂停' : !state.connected ? '正在等待浏览器服务连接' : hasSession ? '等待 Agent 选择标签页' : 'Agent 开始控制后，标签页会显示在这里');
   $('#page-note').hidden = !$('#page-note').textContent;
+
+  const isTemporaryInstall = state.installation?.temporary === true || state.installationMode === 'temporary';
+  if ($('#temp-install-notice')) $('#temp-install-notice').hidden = !(pairedView && isTemporaryInstall);
+
+  currentSiteOrigin = parseHttpOrigin((hasTab ? state.url : '') || state.activeTabUrl || state.currentTab?.url || '');
+  if ($('#site-access-section')) {
+    const showSiteAccess = pairedView && Boolean(currentSiteOrigin);
+    $('#site-access-section').hidden = !showSiteAccess;
+    if (showSiteAccess) {
+      try { $('#site-access-origin').textContent = new URL(currentSiteOrigin).host; } catch { $('#site-access-origin').textContent = currentSiteOrigin; }
+      const accessCfg = state.access || {};
+      const blocked = Array.isArray(accessCfg.blockedOrigins) && accessCfg.blockedOrigins.includes(currentSiteOrigin);
+      $('#site-access-select').value = blocked ? 'block' : accessCfg.confirmActions === true ? 'confirm' : 'allow';
+    }
+  }
+
+  if ($('#security-controls')) {
+    const extSessions = Array.isArray(state.sessions) ? state.sessions : [];
+    const anyControlling = controlling || (Boolean(state.connected) && extSessions.some(s => s.ownership === 'agent' && !s.pausedByBrowser));
+    const anyPaused = (hasSession && !controlling) || (Boolean(state.connected) && extSessions.some(s => s.sessionId && (s.ownership === 'user' || s.pausedByBrowser)));
+    $('#security-controls').hidden = !pairedView;
+    if ($('#pause-takeover-btn')) $('#pause-takeover-btn').hidden = !(pairedView && anyControlling);
+    if ($('#return-control-btn')) $('#return-control-btn').hidden = !(pairedView && !anyControlling && anyPaused);
+    if ($('#disconnect-browser-btn')) $('#disconnect-browser-btn').hidden = !pairedView;
+  }
+
   $('#status').textContent = $('#connection-label').textContent + ' · ' + $('#control-state').textContent;
 }
 async function pollState() {
@@ -69,6 +109,9 @@ async function pollState() {
       $('#connection-label').className = 'connection-label';
       $('#connection-note').textContent = '无法读取扩展后台状态。请先导出连接诊断，并保留扩展管理页中的错误，再尝试重新加载。';
       $('#controlled-tab').hidden = true;
+      if ($('#temp-install-notice')) $('#temp-install-notice').hidden = true;
+      if ($('#site-access-section')) $('#site-access-section').hidden = true;
+      if ($('#security-controls')) $('#security-controls').hidden = true;
       $('#status').textContent = '连接状态暂不可用';
     }
   } finally { polling = false; }
@@ -97,12 +140,58 @@ function setBusy(value, action = 'connect') {
   $('#connect-submit').disabled = value;
   $('#reconnect').disabled = value;
   $('#code').readOnly = value;
+  for (const id of ['#pause-takeover-btn', '#return-control-btn', '#disconnect-browser-btn', '#site-access-select', '#clear-temp-install-btn']) {
+    if ($(id)) $(id).disabled = value;
+  }
   $('#connect').setAttribute('aria-busy', String(value && action === 'connect'));
   $('#reconnect').setAttribute('aria-busy', String(value && action === 'reconnect'));
   $('#connect-submit').textContent = value && action === 'connect' ? '正在连接…' : '连接浏览器服务';
   $('#reconnect').textContent = value && action === 'reconnect' ? '正在重新连接…' : '重新连接';
-  if (value) $('#status').textContent = action === 'reconnect' ? '正在重新连接浏览器服务…' : '正在连接浏览器服务…';
+  if (value && (action === 'connect' || action === 'reconnect')) {
+    $('#status').textContent = action === 'reconnect' ? '正在重新连接浏览器服务…' : '正在连接浏览器服务…';
+  }
 }
+async function runUiMutation(actionName, fn) {
+  if (busy) return;
+  clearError(); setBusy(true, actionName); generation++;
+  try {
+    const result = await fn();
+    if (result && typeof result === 'object' && ('connected' in result || 'profileId' in result)) render(result);
+    else render(await request('state'));
+  } catch (error) { showError(error); }
+  finally { setBusy(false, actionName); }
+}
+$('#pause-takeover-btn')?.addEventListener('click', () => runUiMutation('takeover', () => request('takeover')));
+$('#return-control-btn')?.addEventListener('click', () => runUiMutation('return', () => request('return')));
+$('#disconnect-browser-btn')?.addEventListener('click', () => runUiMutation('disconnect', () => request('disconnect')));
+$('#clear-temp-install-btn')?.addEventListener('click', () => runUiMutation('confirmPersistentInstallation', () => request('confirmPersistentInstallation', { confirmed: true })));
+$('#site-access-select')?.addEventListener('change', () => {
+  const origin = currentSiteOrigin;
+  if (!origin) return;
+  const mode = $('#site-access-select').value;
+  const prev = latestState?.access || {};
+  const blocked = new Set(Array.isArray(prev.blockedOrigins) ? prev.blockedOrigins : []);
+  const allowed = new Set(Array.isArray(prev.allowedOrigins) ? prev.allowedOrigins : []);
+  let confirmActions = Boolean(prev.confirmActions);
+  if (mode === 'block') {
+    blocked.add(origin);
+    allowed.delete(origin);
+  } else if (mode === 'confirm') {
+    blocked.delete(origin);
+    if (allowed.size > 0) allowed.add(origin);
+    confirmActions = true;
+  } else {
+    blocked.delete(origin);
+    if (allowed.size > 0) allowed.add(origin);
+    confirmActions = false;
+  }
+  void runUiMutation('setAccess', async () => {
+    const res = await request('setAccess', { blockedOrigins: [...blocked], allowedOrigins: [...allowed], confirmActions });
+    if (res && typeof res === 'object' && 'connected' in res) return res;
+    if (latestState && res?.access) latestState = { ...latestState, access: res.access };
+    return request('state');
+  });
+});
 $('#connect').addEventListener('submit', async event => {
   event.preventDefault();
   if (busy) return;

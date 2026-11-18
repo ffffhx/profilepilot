@@ -3,6 +3,7 @@ import { phonePresentation } from "../shared/phone-presentation";
 import { taskIcon } from "./task-icons";
 import { workspaceHidden } from "./workspace-lifecycle";
 import { PhoneVideoPreview } from "./phone-video";
+import { experimentalScreenCameraEnabled, onExperimentalFeaturesChanged } from "./experimental-features";
 
 const esc = (value: string) => value.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 
@@ -106,36 +107,47 @@ export function createPhoneInspector(container: HTMLElement) {
   });
   observer?.observe(screen);
   window.addEventListener?.("pagehide", () => { video.stop(); observer?.disconnect(); window.clearTimeout(refreshTimer); }, { once: true });
+  const update = (next: PhoneDevice | undefined, working: boolean) => {
+    if (enlarged && enlarged.deviceId !== next?.id) enlarged.dialog.close();
+    device = next; busy = working;
+    const state = session();
+    const nextKey = JSON.stringify([device?.id, device?.connection, connected(), device?.pending, device?.visualFollowActive, device?.taskCaptureActive, state?.instanceId, state?.sessionId, state?.generation, state?.phase, workspaceHidden()]);
+    if (nextKey !== key) { video.stop(); video.retry(); videoPainted = false; key = nextKey; generation++; capturedAt = 0; attemptedAt = 0; previousFrameAt = 0; previewFps = 0; captureMs = 0; failure = ""; image.removeAttribute("src"); }
+    container.dataset.deviceId = device?.id || "";
+    const name = device ? phonePresentation(device).displayName : "尚未选择设备";
+    html(".phone-inspector-heading", `<span class="phone-inspector-avatar">${taskIcon(device?.transport === "emulator" ? "desktop" : "phone")}</span><div><h2>${esc(name)}</h2><p>${device?.transport === "emulator" ? "本机模拟器" : "Android 设备"}</p></div>${device ? `<button data-action="details" data-device-id="${esc(device.id)}" title="设备设置" aria-label="设备设置">${taskIcon("settings")}</button>` : ""}`);
+    const awaitingUnlock = state?.phase === "paused" && state.pauseCause === "screen";
+    const label = !connected() ? "等待设备连接" : state ? state.phase === "paused" ? awaitingUnlock ? "等待解锁 · 解锁后自动继续" : "已暂停" : state.phase === "disconnected" ? "会话已断开" : state.mode === "control" ? "正在操作" : "正在查看" : ready() ? "可供 Agent 操作" : "等待设备就绪";
+    const isBasic = state === device?.basic;
+    const locked = device?.connection === "device" && device.state?.readiness?.unlocked === false;
+    const wake = !isBasic && (awaitingUnlock || locked) ? `<button data-action="wake" ${busy ? "disabled" : ""}>点亮屏幕</button>` : "";
+    const controls = state && device ? `<div class="phone-inspector-session-actions">${state.phase !== "disconnected" ? `<button ${isBasic ? `data-phone-basic-command="${state.phase === "paused" ? "resume" : "pause"}"` : `data-action="${state.phase === "paused" ? "resume" : "pause"}"`} ${busy ? "disabled" : ""}>${state.phase === "paused" ? "继续" : "暂停"}</button>` : ""}${wake}<button ${isBasic ? 'data-phone-basic-command="stop"' : 'data-action="stop"'} ${busy ? "disabled" : ""}>结束会话</button></div>` : "";
+    html(".phone-inspector-agent", `<h3>当前 Agent</h3>${state ? `<strong>${esc(state.controller || "本机用户")}</strong>` : ""}<p class="phone-inspector-session" data-connected="${ready()}"><i></i>${label}</p>${state?.task ? `<p>${esc(state.task)}</p>` : ""}${controls}`);
+    const occupied = !!state && ["viewing", "controlling", "executing", "paused"].includes(state.phase);
+    const connectionButton = device?.connection === "device" ? `<button data-action="${connected() ? "disconnect-phone" : "connect-phone"}" data-device-id="${esc(device.id)}" ${busy || device.pending || occupied ? "disabled" : ""} ${occupied ? 'title="请先结束当前会话"' : ""}>${connected() ? "断开" : "连接"}</button>` : "";
+    html(".phone-inspector-actions", (!device ? "" : device.connection !== "device" ? `<button data-action="${device.transport === "emulator" ? "emulator" : "details"}" data-device-id="${esc(device.id)}">${device.transport === "emulator" ? "启动模拟器" : "连接设置"}</button>`
+      : "") + connectionButton);
+    const actions = find<HTMLElement>(".phone-inspector-actions");
+    let camera = actions.querySelector<HTMLButtonElement>('[data-action="screen-camera"]');
+    const showCamera = !!device && connected() && (experimentalScreenCameraEnabled() || !!device.screenCamera?.active);
+    if (showCamera && device) {
+      if (!camera) { camera = document.createElement("button"); camera.dataset.action = "screen-camera"; actions.append(camera); }
+      const sdk = device.state?.readiness?.sdk;
+      const unsupportedSdk = !device.screenCamera?.active && typeof sdk === "number" && sdk > 0 && sdk < 36;
+      camera.hidden = false;
+      camera.textContent = device.screenCamera?.active ? "屏幕摄像头运行中" : "屏幕摄像头";
+      camera.disabled = busy || unsupportedSdk;
+      if (unsupportedSdk) camera.setAttribute("title", `屏幕摄像头需要 Android 16（SDK 36）或更高版本，当前设备为 SDK ${sdk}`);
+      else camera.removeAttribute("title");
+    } else if (camera) {
+      camera.hidden = true;
+    }
+    updateScreen(); void refresh();
+  };
+  onExperimentalFeaturesChanged(() => { if (device) update(device, busy); });
   return {
     refresh,
-    update(next: PhoneDevice | undefined, working: boolean) {
-      if (enlarged && enlarged.deviceId !== next?.id) enlarged.dialog.close();
-      device = next; busy = working;
-      const state = session();
-      const nextKey = JSON.stringify([device?.id, device?.connection, connected(), device?.pending, device?.visualFollowActive, device?.taskCaptureActive, state?.instanceId, state?.sessionId, state?.generation, state?.phase, workspaceHidden()]);
-      if (nextKey !== key) { video.stop(); video.retry(); videoPainted = false; key = nextKey; generation++; capturedAt = 0; attemptedAt = 0; previousFrameAt = 0; previewFps = 0; captureMs = 0; failure = ""; image.removeAttribute("src"); }
-      container.dataset.deviceId = device?.id || "";
-      const name = device ? phonePresentation(device).displayName : "尚未选择设备";
-      html(".phone-inspector-heading", `<span class="phone-inspector-avatar">${taskIcon(device?.transport === "emulator" ? "desktop" : "phone")}</span><div><h2>${esc(name)}</h2><p>${device?.transport === "emulator" ? "本机模拟器" : "Android 设备"}</p></div>${device ? `<button data-action="details" data-device-id="${esc(device.id)}" title="设备设置" aria-label="设备设置">${taskIcon("settings")}</button>` : ""}`);
-      const awaitingUnlock = state?.phase === "paused" && state.pauseCause === "screen";
-      const label = !connected() ? "等待设备连接" : state ? state.phase === "paused" ? awaitingUnlock ? "等待解锁 · 解锁后自动继续" : "已暂停" : state.phase === "disconnected" ? "会话已断开" : state.mode === "control" ? "正在操作" : "正在查看" : ready() ? "可供 Agent 操作" : "等待设备就绪";
-      const isBasic = state === device?.basic;
-      const locked = device?.connection === "device" && device.state?.readiness?.unlocked === false;
-      const wake = !isBasic && (awaitingUnlock || locked) ? `<button data-action="wake" ${busy ? "disabled" : ""}>点亮屏幕</button>` : "";
-      const controls = state && device ? `<div class="phone-inspector-session-actions">${state.phase !== "disconnected" ? `<button ${isBasic ? `data-phone-basic-command="${state.phase === "paused" ? "resume" : "pause"}"` : `data-action="${state.phase === "paused" ? "resume" : "pause"}"`} ${busy ? "disabled" : ""}>${state.phase === "paused" ? "继续" : "暂停"}</button>` : ""}${wake}<button ${isBasic ? 'data-phone-basic-command="stop"' : 'data-action="stop"'} ${busy ? "disabled" : ""}>结束会话</button></div>` : "";
-      html(".phone-inspector-agent", `<h3>当前 Agent</h3>${state ? `<strong>${esc(state.controller || "本机用户")}</strong>` : ""}<p class="phone-inspector-session" data-connected="${ready()}"><i></i>${label}</p>${state?.task ? `<p>${esc(state.task)}</p>` : ""}${controls}`);
-      const occupied = !!state && ["viewing", "controlling", "executing", "paused"].includes(state.phase);
-      const connectionButton = device?.connection === "device" ? `<button data-action="${connected() ? "disconnect-phone" : "connect-phone"}" data-device-id="${esc(device.id)}" ${busy || device.pending || occupied ? "disabled" : ""} ${occupied ? 'title="请先结束当前会话"' : ""}>${connected() ? "断开" : "连接"}</button>` : "";
-      html(".phone-inspector-actions", (!device ? "" : device.connection !== "device" ? `<button data-action="${device.transport === "emulator" ? "emulator" : "details"}" data-device-id="${esc(device.id)}">${device.transport === "emulator" ? "启动模拟器" : "连接设置"}</button>`
-        : "") + connectionButton);
-      if (device && connected()) {
-        const actions = find<HTMLElement>(".phone-inspector-actions");
-        let camera = actions.querySelector<HTMLButtonElement>('[data-action="screen-camera"]');
-        if (!camera) { camera = document.createElement("button"); camera.dataset.action = "screen-camera"; actions.append(camera); }
-        camera.textContent = device.screenCamera?.active ? "屏幕摄像头运行中" : "屏幕摄像头"; camera.disabled = busy;
-      }
-      updateScreen(); void refresh();
-    },
+    update,
     enlarge() {
       if (!capturedAt || !device || live()) return;
       const dialog = document.createElement("dialog"); dialog.className = "phone-image-dialog"; dialog.setAttribute("aria-label", "手机画面");

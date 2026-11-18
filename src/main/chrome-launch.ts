@@ -4,6 +4,7 @@ import { existsSync, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type {
+  BrowserKind,
   NativeChromeProfile,
   PublicProfile
 } from "../shared/types";
@@ -20,6 +21,118 @@ import {
   windowsForegroundProcessId
 } from "./windows-platform";
 import { spawnPortableCommand } from "./portable-command";
+
+const STALE_SINGLETON_LOCK_FILES = ["SingletonLock", "SingletonSocket", "SingletonCookie"] as const;
+
+export function normalizeBrowserKind(value: unknown): BrowserKind {
+  return value === "edge" || value === "brave" || value === "chromium" || value === "chrome" ? value : "chrome";
+}
+
+export function browserKindDisplayName(kind: BrowserKind = "chrome"): string {
+  switch (kind) {
+    case "edge":
+      return "Microsoft Edge";
+    case "brave":
+      return "Brave Browser";
+    case "chromium":
+      return "Chromium";
+    case "chrome":
+    default:
+      return "Google Chrome";
+  }
+}
+
+export function browserMacAppName(kind: BrowserKind = "chrome", env: NodeJS.ProcessEnv = process.env): string {
+  switch (kind) {
+    case "edge":
+      return env.EDGE_APP_NAME?.trim() || "Microsoft Edge";
+    case "brave":
+      return env.BRAVE_APP_NAME?.trim() || "Brave Browser";
+    case "chromium":
+      return env.CHROMIUM_APP_NAME?.trim() || "Chromium";
+    case "chrome":
+    default:
+      return env.CHROME_APP_NAME?.trim() || "Google Chrome";
+  }
+}
+
+function browserBinaryEnvOverride(kind: BrowserKind, env: NodeJS.ProcessEnv): string | null {
+  const raw =
+    kind === "edge"
+      ? env.EDGE_BINARY
+      : kind === "brave"
+        ? env.BRAVE_BINARY
+        : kind === "chromium"
+          ? env.CHROMIUM_BINARY
+          : env.CHROME_BINARY;
+  return raw?.trim() || null;
+}
+
+export async function cleanStaleSingletonLocks(profileDir: string): Promise<string[]> {
+  const removed: string[] = [];
+  for (const name of STALE_SINGLETON_LOCK_FILES) {
+    const candidate = path.join(profileDir, name);
+    try {
+      // SingletonLock on macOS/Linux is a dangling symlink (e.g. hostname-pid).
+      // fs.lstat detects dangling symlinks whereas fs.stat / fs.access returns ENOENT.
+      await fs.lstat(candidate);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+        continue;
+      }
+    }
+    try {
+      await fs.rm(candidate, { force: true });
+      removed.push(name);
+    } catch {
+      // Ignore transient removal error if already gone.
+    }
+  }
+  return removed;
+}
+
+export async function launchBrowser(
+  args: string[],
+  kind: BrowserKind = "chrome",
+  env: NodeJS.ProcessEnv = process.env
+): Promise<void> {
+  const normalizedKind = normalizeBrowserKind(kind);
+  if (normalizedKind === "chrome" && env === process.env) {
+    await launchChrome(args);
+    return;
+  }
+
+  const envBinary = browserBinaryEnvOverride(normalizedKind, env);
+  if (envBinary) {
+    launchDetached(envBinary, args);
+    return;
+  }
+
+  if (process.platform === "darwin") {
+    const executable = resolveBrowserExecutable(normalizedKind, env, "darwin");
+    if (!executable) {
+      const displayName = browserKindDisplayName(normalizedKind);
+      throw new ProfileManagerError(
+        `找不到 ${displayName}。请先安装 ${displayName}，或改用其他浏览器内核。`,
+        normalizedKind === "chrome" ? "CHROME_NOT_FOUND" : "BROWSER_NOT_FOUND"
+      );
+    }
+    await execFileAsync("open", ["-na", browserMacAppName(normalizedKind, env), "--args", ...args]);
+    return;
+  }
+
+  const executable = resolveBrowserExecutable(normalizedKind, env, process.platform);
+  if (!executable) {
+    const displayName = browserKindDisplayName(normalizedKind);
+    throw new ProfileManagerError(
+      normalizedKind === "chrome"
+        ? "找不到 Google Chrome。请安装 Chrome，或通过 CHROME_BINARY 指定 chrome.exe。"
+        : `找不到 ${displayName}。请先安装 ${displayName}，或改用其他浏览器内核。`,
+      normalizedKind === "chrome" ? "CHROME_NOT_FOUND" : "BROWSER_NOT_FOUND"
+    );
+  }
+  launchDetached(executable, args);
+}
 
 export async function launchChrome(args: string[]): Promise<void> {
   if (process.env.CHROME_BINARY) {
@@ -265,7 +378,7 @@ export async function hasRendererProcessForProfile(profilePath: string): Promise
 
     return stdout.split("\n").some((command) => {
       return (
-        command.includes("Google Chrome Helper (Renderer)") &&
+        /(?:Google Chrome|Chromium|Microsoft Edge|Brave Browser|Arc|Vivaldi).*Helper \(Renderer\)/.test(command) &&
         command.includes("--type=renderer") &&
         command.includes(`--user-data-dir=${profilePath}`)
       );
@@ -280,70 +393,172 @@ export async function requestIsolatedProfileWindow(profile: PublicProfile): Prom
     return;
   }
 
-  const command = getDirectChromeCommand();
+  const kind = normalizeBrowserKind(profile.browserKind);
+  const command = resolveBrowserExecutable(kind);
   if (!command) {
-    throw new ProfileManagerError("找不到可直接唤起窗口的 Chrome 二进制。", "FOCUS_PROFILE_FAILED");
+    throw new ProfileManagerError(
+      `找不到可直接唤起窗口的 ${browserKindDisplayName(kind)} 二进制。`,
+      "FOCUS_PROFILE_FAILED"
+    );
   }
 
   launchDetached(command, [`--user-data-dir=${profile.path}`, "--no-first-run"]);
 }
 
 export function getDirectChromeCommand(env: NodeJS.ProcessEnv = process.env): string | null {
-  if (env.CHROME_BINARY) {
-    return env.CHROME_BINARY;
+  return resolveBrowserExecutable("chrome", env);
+}
+
+export function resolveBrowserExecutable(
+  kind: BrowserKind = "chrome",
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+  homeDir = os.homedir(),
+  fileExists: (candidate: string) => boolean = existsSync
+): string | null {
+  const normalizedKind = normalizeBrowserKind(kind);
+  const override = browserBinaryEnvOverride(normalizedKind, env);
+  if (override) {
+    return override;
   }
 
-  if (process.platform === "win32") {
-    return resolveWindowsChromeExecutable(env);
+  if (platform === "win32") {
+    return resolveWindowsBrowserExecutable(normalizedKind, env, fileExists);
   }
-  if (process.platform === "darwin") {
-    const appName = env.CHROME_APP_NAME || "Google Chrome";
-    const command = `/Applications/${appName}.app/Contents/MacOS/${appName}`;
-    return existsSync(command) ? command : null;
+
+  if (platform === "darwin") {
+    const appName = browserMacAppName(normalizedKind, env);
+    const macCandidates = [
+      path.posix.join("/Applications", `${appName}.app`, "Contents", "MacOS", appName),
+      path.posix.join(homeDir.replace(/\\/g, "/"), "Applications", `${appName}.app`, "Contents", "MacOS", appName)
+    ];
+    return macCandidates.find((candidate) => fileExists(candidate)) || null;
   }
-  return executableFromPath("google-chrome", env) || executableFromPath("chromium", env);
+
+  const linuxExecutables: Record<BrowserKind, string[]> = {
+    chrome: ["google-chrome", "google-chrome-stable", "chromium"],
+    edge: ["microsoft-edge", "microsoft-edge-stable"],
+    brave: ["brave-browser", "brave"],
+    chromium: ["chromium", "chromium-browser"]
+  };
+  for (const name of linuxExecutables[normalizedKind]) {
+    const found = executableFromPath(name, env, platform, fileExists);
+    if (found) return found;
+  }
+  return null;
+}
+
+export function resolveWindowsBrowserExecutable(
+  kind: BrowserKind = "chrome",
+  env: NodeJS.ProcessEnv = process.env,
+  fileExists: (candidate: string) => boolean = existsSync
+): string | null {
+  const override = browserBinaryEnvOverride(kind, env);
+  if (override) return override;
+
+  const winPath = path.win32;
+  const localAppData = env.LOCALAPPDATA?.trim();
+  const programFiles = env.ProgramFiles?.trim();
+  const programFilesX86 = (env["ProgramFiles(x86)"] as string | undefined)?.trim();
+  const userProfile = env.USERPROFILE?.trim();
+
+  let candidates: Array<string | undefined | ""> = [];
+  let appPathExe = "";
+  let pathExecutables: string[] = [];
+
+  switch (kind) {
+    case "edge":
+      candidates = [
+        programFilesX86 && winPath.join(programFilesX86, "Microsoft", "Edge", "Application", "msedge.exe"),
+        programFiles && winPath.join(programFiles, "Microsoft", "Edge", "Application", "msedge.exe"),
+        localAppData && winPath.join(localAppData, "Microsoft", "Edge", "Application", "msedge.exe")
+      ];
+      appPathExe = "msedge.exe";
+      pathExecutables = ["msedge.exe"];
+      break;
+    case "brave":
+      candidates = [
+        localAppData && winPath.join(localAppData, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+        programFiles && winPath.join(programFiles, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+        programFilesX86 && winPath.join(programFilesX86, "BraveSoftware", "Brave-Browser", "Application", "brave.exe")
+      ];
+      appPathExe = "brave.exe";
+      pathExecutables = ["brave.exe"];
+      break;
+    case "chromium":
+      candidates = [
+        localAppData && winPath.join(localAppData, "Chromium", "Application", "chrome.exe"),
+        programFiles && winPath.join(programFiles, "Chromium", "Application", "chrome.exe"),
+        programFilesX86 && winPath.join(programFilesX86, "Chromium", "Application", "chrome.exe"),
+        userProfile && winPath.join(userProfile, "scoop", "apps", "chromium", "current", "chrome.exe")
+      ];
+      appPathExe = "";
+      pathExecutables = ["chromium.exe"];
+      break;
+    case "chrome":
+    default:
+      candidates = [
+        localAppData && winPath.join(localAppData, "Google", "Chrome", "Application", "chrome.exe"),
+        programFiles && winPath.join(programFiles, "Google", "Chrome", "Application", "chrome.exe"),
+        programFilesX86 && winPath.join(programFilesX86, "Google", "Chrome", "Application", "chrome.exe"),
+        localAppData && winPath.join(localAppData, "Google", "Chrome Beta", "Application", "chrome.exe")
+      ];
+      appPathExe = "chrome.exe";
+      pathExecutables = ["chrome.exe"];
+      break;
+  }
+
+  for (const candidate of candidates) {
+    if (candidate && fileExists(candidate)) return candidate;
+  }
+
+  if (appPathExe && process.platform === "win32" && fileExists === existsSync) {
+    for (const registryPath of [
+      `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\${appPathExe}`,
+      `HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\${appPathExe}`,
+      `HKLM\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\App Paths\\${appPathExe}`
+    ]) {
+      try {
+        const output = execFileSync("reg.exe", ["query", registryPath, "/ve"], {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+          windowsHide: true,
+          timeout: 1_500
+        });
+        const match = output.match(/REG_(?:EXPAND_)?SZ\s+(.+?)\s*$/im);
+        const value = match?.[1]?.trim().replace(/^"|"$/g, "");
+        if (value && fileExists(value)) return value;
+      } catch {
+        // Try the next registry hive or PATH.
+      }
+    }
+  }
+
+  for (const exe of pathExecutables) {
+    const found = executableFromPath(exe, env, "win32", fileExists);
+    if (found) return found;
+  }
+  return null;
 }
 
 export function resolveWindowsChromeExecutable(env: NodeJS.ProcessEnv = process.env): string | null {
-  if (env.CHROME_BINARY?.trim()) return env.CHROME_BINARY.trim();
-  const candidates = [
-    env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, "Google", "Chrome", "Application", "chrome.exe"),
-    env.ProgramFiles && path.join(env.ProgramFiles, "Google", "Chrome", "Application", "chrome.exe"),
-    env["ProgramFiles(x86)"] && path.join(env["ProgramFiles(x86)"] as string, "Google", "Chrome", "Application", "chrome.exe"),
-    env.LOCALAPPDATA && path.join(env.LOCALAPPDATA, "Google", "Chrome Beta", "Application", "chrome.exe")
-  ].filter((candidate): candidate is string => Boolean(candidate));
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) return candidate;
-  }
-  for (const registryPath of [
-    "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\chrome.exe",
-    "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\chrome.exe",
-    "HKLM\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\App Paths\\chrome.exe"
-  ]) {
-    try {
-      const output = execFileSync("reg.exe", ["query", registryPath, "/ve"], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-        windowsHide: true,
-        timeout: 1_500
-      });
-      const match = output.match(/REG_(?:EXPAND_)?SZ\s+(.+?)\s*$/im);
-      const value = match?.[1]?.trim().replace(/^"|"$/g, "");
-      if (value && existsSync(value)) return value;
-    } catch {
-      // Try the next registry hive or PATH.
-    }
-  }
-  return executableFromPath("chrome.exe", env);
+  return resolveWindowsBrowserExecutable("chrome", env);
 }
 
-function executableFromPath(executable: string, env: NodeJS.ProcessEnv): string | null {
+function executableFromPath(
+  executable: string,
+  env: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+  fileExists: (candidate: string) => boolean = existsSync
+): string | null {
   const value = env.PATH || env.Path || env.path || "";
-  for (const entry of value.split(path.delimiter)) {
+  const delimiter = platform === "win32" ? ";" : ":";
+  const pathImpl = platform === "win32" ? path.win32 : path.posix;
+  for (const entry of value.split(delimiter)) {
     const directory = entry.trim().replace(/^"|"$/g, "");
     if (!directory) continue;
-    const candidate = path.join(directory, executable);
-    if (existsSync(candidate)) return candidate;
+    const candidate = pathImpl.join(directory, executable);
+    if (fileExists(candidate)) return candidate;
   }
   return null;
 }
@@ -564,9 +779,14 @@ new Promise((resolve) => {
 }
 
 export async function readChromeMajorVersion(): Promise<number | null> {
+  return readBrowserMajorVersion("chrome");
+}
+
+export async function readBrowserMajorVersion(kind: BrowserKind = "chrome"): Promise<number | null> {
+  const normalizedKind = normalizeBrowserKind(kind);
   const versionOutputs: string[] = [];
 
-  const command = getDirectChromeCommand();
+  const command = resolveBrowserExecutable(normalizedKind);
   if (command) {
     const output = await readCommandVersion(command, ["--version"]);
     if (output) {
@@ -574,8 +794,8 @@ export async function readChromeMajorVersion(): Promise<number | null> {
     }
   }
 
-  if (!versionOutputs.length && process.platform === "darwin" && !process.env.CHROME_BINARY) {
-    const appName = process.env.CHROME_APP_NAME || "Google Chrome";
+  if (!versionOutputs.length && process.platform === "darwin" && !browserBinaryEnvOverride(normalizedKind, process.env)) {
+    const appName = browserMacAppName(normalizedKind, process.env);
     const plistPath = `/Applications/${appName}.app/Contents/Info.plist`;
     const output = await readCommandVersion("/usr/libexec/PlistBuddy", [
       "-c",
@@ -588,7 +808,7 @@ export async function readChromeMajorVersion(): Promise<number | null> {
   }
 
   for (const output of versionOutputs) {
-    const match = output.match(/(?:Chrome|Chromium)?\s*(\d+)(?:\.|$)/i);
+    const match = output.match(/(?:Chrome|Chromium|Edge|Brave)?\s*(\d+)(?:\.|$)/i);
     const version = match ? Number.parseInt(match[1], 10) : Number.NaN;
     if (Number.isFinite(version)) {
       return version;
@@ -718,20 +938,66 @@ export function nativeChromeLocalStatePath(): string {
   return path.join(nativeChromeUserDataDir(), "Local State");
 }
 
+export function nativeBrowserUserDataDir(
+  kind: BrowserKind = "chrome",
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+  homeDir = os.homedir()
+): string {
+  const normalizedKind = normalizeBrowserKind(kind);
+  if (normalizedKind === "chrome") {
+    const override = env.CPM_NATIVE_CHROME_USER_DATA_DIR?.trim();
+    if (override) {
+      return path.resolve(override);
+    }
+  }
+
+  if (platform === "darwin") {
+    const appSupport = path.posix.join(homeDir.replace(/\\/g, "/"), "Library", "Application Support");
+    switch (normalizedKind) {
+      case "edge":
+        return path.posix.join(appSupport, "Microsoft Edge");
+      case "brave":
+        return path.posix.join(appSupport, "BraveSoftware", "Brave-Browser");
+      case "chromium":
+        return path.posix.join(appSupport, "Chromium");
+      case "chrome":
+      default:
+        return path.posix.join(appSupport, "Google", "Chrome");
+    }
+  }
+
+  if (platform === "win32") {
+    const base = env.LOCALAPPDATA?.trim() || path.win32.join(homeDir, "AppData", "Local");
+    switch (normalizedKind) {
+      case "edge":
+        return path.win32.join(base, "Microsoft", "Edge", "User Data");
+      case "brave":
+        return path.win32.join(base, "BraveSoftware", "Brave-Browser", "User Data");
+      case "chromium":
+        return path.win32.join(base, "Chromium", "User Data");
+      case "chrome":
+      default:
+        return path.win32.join(base, "Google", "Chrome", "User Data");
+    }
+  }
+
+  const configRoot = env.XDG_CONFIG_HOME?.trim() || path.posix.join(homeDir.replace(/\\/g, "/"), ".config");
+  switch (normalizedKind) {
+    case "edge":
+      return path.posix.join(configRoot, "microsoft-edge");
+    case "brave":
+      return path.posix.join(configRoot, "BraveSoftware", "Brave-Browser");
+    case "chromium":
+      return path.posix.join(configRoot, "chromium");
+    case "chrome":
+    default:
+      return path.posix.join(configRoot, "google-chrome");
+  }
+}
+
 export function nativeChromeUserDataDir(): string {
-  const override = process.env.CPM_NATIVE_CHROME_USER_DATA_DIR?.trim();
-  if (override) {
-    return path.resolve(override);
-  }
-  if (process.platform === "darwin") {
-    return path.join(os.homedir(), "Library", "Application Support", "Google", "Chrome");
-  }
-
-  if (process.platform === "win32") {
-    return path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "Google", "Chrome", "User Data");
-  }
-
-  return path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "google-chrome");
+  return nativeBrowserUserDataDir("chrome");
 }
 
 export function parseProfileId(profileId: string): ProfileRef {

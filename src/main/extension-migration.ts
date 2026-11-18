@@ -143,15 +143,33 @@ export async function readProtectedDeveloperModeRecord(profilePath: string): Pro
   };
 }
 
+export function hasSuperMacInSecurePreferences(preferences: unknown): boolean {
+  if (!isRecord(preferences) || !isRecord(preferences.protection)) {
+    return false;
+  }
+  const superMac = preferences.protection.super_mac;
+  return typeof superMac === "string" && superMac.trim().length > 0;
+}
+
+export async function hasSecurePreferencesSuperMac(profilePath: string): Promise<boolean> {
+  const securePreferences = await readJsonFile<Record<string, unknown>>(path.join(profilePath, "Secure Preferences"));
+  return hasSuperMacInSecurePreferences(securePreferences);
+}
+
 export async function writeProtectedExtensionInstallRecord(
   profilePath: string,
   extensionId: string,
   installRecord: ProtectedExtensionInstallRecord,
   developerModeRecord: ProtectedDeveloperModeRecord | null
-): Promise<void> {
+): Promise<boolean> {
   const securePreferencesPath = path.join(profilePath, "Secure Preferences");
   const securePreferences =
     (await readJsonFile<Record<string, unknown>>(securePreferencesPath)) || ({} as Record<string, unknown>);
+  // Never mutate Secure Preferences when protection.super_mac is present:
+  // modifying protected trees invalidates super_mac and causes Chrome to wipe preferences on startup.
+  if (hasSuperMacInSecurePreferences(securePreferences)) {
+    return false;
+  }
   const extensions = ensureRecordProperty(securePreferences, "extensions");
   const settings = ensureRecordProperty(extensions, "settings");
   settings[extensionId] = cloneJsonValue(installRecord.setting);
@@ -175,6 +193,7 @@ export async function writeProtectedExtensionInstallRecord(
 
   await fs.mkdir(profilePath, { recursive: true });
   await writeJsonFileAtomic(securePreferencesPath, securePreferences);
+  return true;
 }
 
 export function ensureRecordProperty(parent: Record<string, unknown>, key: string): Record<string, unknown> {
@@ -398,6 +417,9 @@ export async function removeExtensionReferencesFromProfilePreferences(profilePat
       const filePath = path.join(profilePath, fileName);
       const preferences = await readJsonFile<Record<string, unknown>>(filePath);
       if (!preferences) {
+        return;
+      }
+      if (fileName === "Secure Preferences" && hasSuperMacInSecurePreferences(preferences)) {
         return;
       }
 

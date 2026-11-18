@@ -1501,7 +1501,7 @@ test("agent-browser wrapper ignores expired notices", () => {
   rmSync(home, { recursive: true, force: true });
 });
 
-test("ppilot browser keeps the requested target while legacy commands retain automatic switching", () => {
+test("ppilot browser and legacy commands fail fast on Profile conflict without silent automatic switching", () => {
   const home = makeTempHome();
   writeAgentBrowserRuntimeProfilesSync([
     {
@@ -1548,27 +1548,15 @@ test("ppilot browser keeps the requested target while legacy commands retain aut
     AGENT_BROWSER_SESSION: "cc-second"
   });
 
-  assert.equal(resolution.lease.ok, true);
-  assert.equal(resolution.lease.context.cdpPort, 9224);
-  assert.deepEqual(resolution.args, ["--cdp", "9224", "snapshot"]);
-  assert.equal(resolution.automaticSwitch.from.cdpPort, 9223);
-  assert.equal(resolution.automaticSwitch.to.cdpPort, 9224);
-  assert.equal(resolution.automaticSwitch.to.running, false);
-  assert.equal(readAgentBrowserProfileLeaseSync(9224, home).session, "cc-second");
-
-  const output = formatAutomaticProfileSwitch(resolution.automaticSwitch, resolution.args);
-  assert.match(output, /"event_code": "PROFILE_AUTO_SWITCHED"/);
-  assert.match(output, /"hard_stop": false/);
-  assert.match(output, /"requires_user_confirmation": false/);
-  assert.match(output, /"from_cdp_port": 9223/);
-  assert.match(output, /"cdp_port": 9224/);
-  assert.match(output, /"profile_started_on_demand": true/);
-  assert.match(output, /"command": "agent-browser --cdp 9224 snapshot"/);
+  assert.equal(resolution.lease.ok, false);
+  assert.equal(resolution.automaticSwitch, null);
+  assert.deepEqual(resolution.args, ["snapshot"]);
+  assert.equal(readAgentBrowserProfileLeaseSync(9224, home), null);
 
   rmSync(home, { recursive: true, force: true });
 });
 
-test("automatic Profile switch reuses the Profile already owned by the current Session", () => {
+test("explicit --cdp conflict fails fast even when the current Session owns another Profile", () => {
   const home = makeTempHome();
   writeAgentBrowserRuntimeProfilesSync([
     {
@@ -1607,10 +1595,9 @@ test("automatic Profile switch reuses the Profile already owned by the current S
     { HOME: home, AGENT_BROWSER_SESSION: "cx-requester" }
   );
 
-  assert.equal(resolution.lease.ok, true);
-  assert.equal(resolution.lease.context.cdpPort, 9225);
-  assert.deepEqual(resolution.args, ["--cdp", "9225", "snapshot"]);
-  assert.equal(resolution.automaticSwitch.to.alreadyOwnedBySession, true);
+  assert.equal(resolution.lease.ok, false);
+  assert.equal(resolution.automaticSwitch, null);
+  assert.deepEqual(resolution.args, ["--cdp", "9223", "snapshot"]);
   assert.equal(readAgentBrowserProfileLeaseSync(9224, home), null);
 
   rmSync(home, { recursive: true, force: true });

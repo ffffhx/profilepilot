@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Chrome 连接说明
+    url: https://github.com/ffffhx/profilepilot/blob/main/docs/system-chrome-onboarding.md
+    about: 安装扩展、固定目录、更新与重连

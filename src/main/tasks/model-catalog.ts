@@ -1,13 +1,15 @@
 import type { TaskSettings } from "../../shared/tasks";
-import { providerEnvironment } from "./provider";
+import { buildAnthropicMessagesUrl, providerEnvironment } from "./provider";
+
+export { buildAnthropicMessagesUrl };
 
 export async function listServiceModels(settings: TaskSettings, key: string): Promise<string[]> {
   if (!key) throw new Error("请先在模型服务设置中保存 API 密钥，也可以直接输入模型 ID。");
   const url = new URL(settings.baseUrl);
   if (url.username || url.password || url.search || url.hash || !(url.protocol === "https:" || (url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)))) throw new Error("模型服务地址无效，请检查设置。");
-  let prefix = url.pathname.replace(/\/$/, "").replace(/\/(?:messages|chat\/completions)$/, "");
-  if (["api.moonshot.cn", "api.moonshot.ai", "api.deepseek.com"].includes(url.hostname) && /^\/anthropic(?:\/v1)?$/.test(prefix)) prefix = "";
-  url.pathname = `${prefix}${/\/v\d+(?:beta)?$/.test(prefix) ? "" : "/v1"}/models`;
+  let prefix = url.pathname.replace(/\/+$/, "").replace(/\/(?:messages|chat\/completions)$/i, "");
+  if (["api.moonshot.cn", "api.moonshot.ai", "api.kimi.com", "api.deepseek.com"].includes(url.hostname) && /^\/anthropic(?:\/v1)?$/i.test(prefix)) prefix = "";
+  url.pathname = `${prefix}${/\/v\d+(?:beta)?$/i.test(prefix) ? "" : "/v1"}/models`;
   const env = providerEnvironment(settings, key, "");
   const headers: Record<string, string> = { "anthropic-version": "2023-06-01", ...(env.ANTHROPIC_AUTH_TOKEN ? { Authorization: `Bearer ${key}` } : { "x-api-key": key }) };
   // The DeepSeek catalog is OpenAI-compatible even when Messages uses x-api-key.

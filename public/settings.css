@@ -15,8 +15,8 @@ button { font:inherit; cursor:pointer; }
 .setting-control { display:flex; align-items:center; gap:12px; flex-shrink:0; }
 #startup-status { color:var(--muted); min-width:4em; text-align:right; }
 #startup-status[data-state="enabled"] { color:var(--success); }
-#experimental-features .setting-control [role="status"] { color:var(--muted); min-width:4em; text-align:right; }
-#experimental-features .setting-control [data-state="enabled"] { color:var(--success); }
+.global-settings .setting-control [role="status"] { color:var(--muted); min-width:4em; text-align:right; }
+.global-settings .setting-control [data-state="enabled"] { color:var(--success); }
 #startup-status[data-state="approval"],#startup-status[data-state="error"] { color:var(--warn); }
 .setting-switch { position:relative; width:46px; height:26px; padding:0; border:1px solid var(--line-strong); border-radius:20px; background:var(--muted); }
 .setting-switch::after { content:""; position:absolute; width:18px; height:18px; left:3px; top:3px; border-radius:50%; background:#fff; transition:transform .15s; }

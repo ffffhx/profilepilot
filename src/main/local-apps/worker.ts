@@ -5,6 +5,7 @@ import net from "node:net";
 import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import { atomicJson, idleRuntime, launchCommand, parseEnvironment, type LocalAppLaunch } from "./protocol";
+import { requestWindowsProcessClose } from "../windows-platform";
 
 async function main(): Promise<void> {
   const launchPath = process.argv[2];
@@ -59,17 +60,35 @@ async function main(): Promise<void> {
     if (stopping) return stopping;
     stopping = (async () => {
       if (!child?.pid || finished) return;
+      const targetPid = child.pid;
       runtime.status = "stopping"; persist();
       if (process.platform === "win32") {
-        await new Promise<void>((resolve, reject) => {
-          execFile("taskkill.exe", ["/PID", String(child!.pid), "/T", "/F"], { windowsHide: true, timeout: 8000 }, error => {
-            if (error && !finished) reject(new Error(`停止应用失败：${error.message}`)); else resolve();
-          });
+        // Attempt graceful termination first (WM_CLOSE + taskkill /T without /F)
+        // for up to 1.5s so databases and Electron apps flush state cleanly.
+        void requestWindowsProcessClose([targetPid]).catch(() => false);
+        await new Promise<void>(resolve => {
+          execFile("taskkill.exe", ["/PID", String(targetPid), "/T"], { windowsHide: true, timeout: 1500 }, () => resolve());
         });
+        const gracefulDeadline = Date.now() + 1500;
+        while (!finished && Date.now() < gracefulDeadline) {
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+        if (!finished) {
+          await new Promise<void>((resolve, reject) => {
+            execFile("taskkill.exe", ["/PID", String(targetPid), "/T", "/F"], { windowsHide: true, timeout: 8000 }, error => {
+              if (error && !finished) reject(new Error(`停止应用失败：${error.message}`)); else resolve();
+            });
+          });
+        }
       } else {
-        try { process.kill(-child.pid, "SIGTERM"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
-        await new Promise(resolve => setTimeout(resolve, 1200));
-        try { process.kill(-child.pid, "SIGKILL"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+        try { process.kill(-targetPid, "SIGTERM"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+        const gracefulDeadline = Date.now() + 1500;
+        while (!finished && Date.now() < gracefulDeadline) {
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+        if (!finished) {
+          try { process.kill(-targetPid, "SIGKILL"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+        }
       }
       const deadline = Date.now() + 3000;
       while (!finished && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
@@ -84,7 +103,7 @@ async function main(): Promise<void> {
   delete env.ELECTRON_RUN_AS_NODE;
   // Do not leak ProfilePilot's test hooks or app data routing into managed Electron apps.
   for (const key of Object.keys(env)) if (key.startsWith("CPM_") || key.startsWith("PROFILEPILOT_")) delete env[key];
-  Object.assign(env, parseEnvironment(input.config.environment));
+  Object.assign(env, parseEnvironment(input.config.environment, { cwd: input.config.cwd }));
   env.PROFILEPILOT_CDP_PORT = String(input.config.cdpPort ?? "");
   env.PROFILEPILOT_INSPECT_PORT = String(input.config.inspectPort ?? "");
   const invocation = launchCommand(input.config, process.platform, env);

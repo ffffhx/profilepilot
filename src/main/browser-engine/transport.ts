@@ -107,5 +107,6 @@ export class EngineTransport implements ConnectOverCDPTransport {
     try { const result=await this.request('Target.attachToTarget',{targetId,flatten:true});this.ownSessions.add(result.sessionId);return result.sessionId; }
     finally { this.attaching.delete(targetId); }
   }
+  isOpen(): boolean { return this.socket.readyState === WebSocket.OPEN; }
   close(): void { this.socket.close(); }
 }

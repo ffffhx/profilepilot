@@ -462,23 +462,47 @@ test('native pointer preparation stays in background, foreground is explicit, an
   assert.deepEqual(activated, [7]);
 });
 
-test('hung page reads release the queue, expired input is skipped and the original session can resume', { timeout: 2000 }, async () => {
+test('timed-out reads, navigation and input preserve the task, cancel queued input and allow fresh observation without resume', { timeout: 2000 }, async () => {
+  for (const method of ['Runtime.evaluate', 'Page.navigate', 'Input.insertText']) {
   const ext = await extension(fetch, 0.005); ext.select(7); await ext.connect();
   try {
     await ext.command({ id: 1, method: 'claim', params: { sessionId: 'one' } });
+    const generation = (await ext.state()).controlGeneration;
     let hang = true;
-    ext.chrome.debugger.sendCommand = async (_target, method) => { ext.calls.push(method); if (hang && method === 'Runtime.evaluate') return new Promise(() => {}); return {}; };
-    const reading = ext.command({ id: 2, method: 'cdp', params: { sessionId: 'one', method: 'Runtime.evaluate' } });
-    const expired = ext.command({ id: 3, method: 'cdp', params: { sessionId: 'one', method: 'Input.insertText' }, expiresAt: Date.now() - 1 });
-    assert.match((await reading).error, /无响应/);
-    assert.match((await expired).error, /请求已超时|已停止或接管/);
-    assert.equal(ext.calls.includes('Input.insertText'), false);
+    ext.chrome.debugger.sendCommand = async (_target, called) => { ext.calls.push(called); if (hang && called === method) return new Promise(() => {}); return {}; };
+    const reading = ext.command({ id: 2, method: 'cdp', params: { sessionId: 'one', method, params: { url: 'https://fixture.test/next' } } });
+    const queued = ext.command({ id: 3, method: 'cdp', params: { sessionId: 'one', method: 'Input.dispatchKeyEvent' } });
+    assert.equal((await reading).code, 'NATIVE_COMMAND_TIMEOUT');
+    assert.equal((await queued).code, 'NATIVE_OBSERVATION_STALE');
+    assert.equal(ext.calls.includes('Input.dispatchKeyEvent'), false);
+    assert.equal(ext.calls.filter(call => call === method).length, 1, 'never replay the timed-out command');
     assert.ok(ext.calls.includes('detach'));
-    assert.equal((await ext.state()).ownership, 'user');
+    const state = await ext.state();
+    assert.equal(state.ownership, 'agent'); assert.equal(state.pausedByBrowser, false);
+    assert.equal(state.controlIssue, undefined); assert.notEqual(state.controlGeneration, generation);
     hang = false;
-    assert.equal((await ext.command({ id: 4, method: 'control', params: { sessionId: 'one', action: 'resume', controlGeneration: (await ext.state()).controlGeneration } })).error, undefined);
     assert.equal((await ext.command({ id: 5, method: 'cdp', params: { sessionId: 'one', method: 'Runtime.evaluate' } })).error, undefined);
     assert.equal((await ext.state()).sessionId, 'one');
+  } finally { ext.close(); }
+  }
+});
+
+test('a timeout or late completion cannot undo a real user takeover', { timeout: 2000 }, async () => {
+  const ext = await extension(fetch, 0.005); ext.select(7); await ext.connect();
+  try {
+    await ext.command({ id: 1, method: 'claim', params: { sessionId: 'one' } });
+    let finish, started;
+    const sent = new Promise(resolve => { started = resolve; });
+    ext.chrome.debugger.sendCommand = async () => { started(); return new Promise(resolve => { finish = resolve; }); };
+    const reading = ext.command({ id: 2, method: 'cdp', params: { sessionId: 'one', method: 'Runtime.evaluate' } });
+    await sent; ext.detach();
+    const generation = (await ext.state()).controlGeneration;
+    assert.equal((await reading).code, 'NATIVE_TIMEOUT_UNCERTAIN');
+    finish({ result: { value: 'late' } }); await new Promise(resolve => setImmediate(resolve));
+    const state = await ext.state();
+    assert.equal(state.ownership, 'user'); assert.equal(state.pausedByBrowser, true);
+    assert.equal(state.controlGeneration, generation); assert.equal(state.controlIssue, undefined);
+    await assert.rejects(ext.handle('cdp', { sessionId: 'one', method: 'Runtime.evaluate' }), /用户正在/);
   } finally { ext.close(); }
 });
 
@@ -571,12 +595,16 @@ test('duplicate onboarding messages share one credential delivery and retry a fa
 test('extension enforces session scope, handoff and browser stop while allowing full Chrome-supported CDP', async () => {
   const ext = await extension(); ext.select(7);
   await ext.handle('claim', { sessionId: 'one' });
-  await assert.rejects(ext.handle('claim', { sessionId: 'two' }), /另一个任务/);
+  await assert.rejects(ext.handle('claim', { sessionId: 'two', tabId: 7 }), /另一个任务|占用/);
+  await ext.handle('claim', { sessionId: 'two', tabId: 9 });
+  await assert.rejects(ext.handle('switch', { sessionId: 'two', tabId: 7 }), /另一个任务|占用/);
+  await ext.handle('control', { sessionId: 'two', action: 'complete' });
   await ext.handle('switch', { sessionId: 'one', tabId: 8 });
   await ext.handle('switch', { sessionId: 'one', tabId: 7 });
   await ext.handle('cdp', { sessionId: 'one', method: 'Network.enable' });
   await assert.rejects(ext.handle('cdp', { sessionId: 'one', method: 'not a method' }), /无效/);
   await ext.handle('control', { sessionId: 'one', action: 'handoff' });
+  await assert.rejects(ext.handle('claim', { sessionId: 'three' }), /另一个任务|占用/);
   await assert.rejects(ext.handle('cdp', { sessionId: 'one', method: 'Input.insertText' }), /用户正在/);
   await assert.rejects(ext.handle('claim', { sessionId: 'one' }), /用户正在/);
   await ext.handle('control', { sessionId: 'one', action: 'resume', controlGeneration: (await ext.state()).controlGeneration }); ext.detach();

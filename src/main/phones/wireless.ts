@@ -7,9 +7,13 @@ import { WirelessFailure, wirelessEvidence, sanitizeWirelessOutput } from "./wir
 export function wirelessAddress(value: string): string {
   const match = value.trim().match(/^([0-9.]+):([0-9]{1,5})$/);
   if (!match || !isIPv4(match[1])) throw new Error("请输入手机显示的局域网 IPv4 地址和端口，例如 192.168.1.8:37123。");
-  const [a, b] = match[1].split(".").map(Number), port = Number(match[2]);
-  if (!(a === 10 || a === 172 && b >= 16 && b <= 31 || a === 192 && b === 168 || a === 169 && b === 254)
-      || port < 1 || port > 65535) throw new Error("请使用同一局域网中手机显示的地址和有效端口。");
+  const [first, second] = match[1].split(".").map(Number), port = Number(match[2]);
+  const allowed = first === 10
+    || first === 172 && second >= 16 && second <= 31
+    || first === 192 && second === 168
+    || first === 169 && second === 254
+    || first === 100 && second >= 64 && second <= 127;
+  if (!allowed || port < 1 || port > 65535) throw new Error("请使用同一局域网或 Tailscale 网络中手机显示的地址和有效端口。");
   return `${match[1]}:${port}`;
 }
 export const wirelessConnectSchema = z.object({ address: z.string().max(80).transform(wirelessAddress) }).strict();

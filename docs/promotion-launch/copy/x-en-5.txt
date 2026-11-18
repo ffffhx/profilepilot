@@ -1,0 +1,1 @@
+Keep your coding agent. ProfilePilot's control commands do not run a second model loop. Local records stay on your machine; page content and screenshots you give the agent may go to its model provider.

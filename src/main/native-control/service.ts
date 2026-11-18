@@ -1,7 +1,8 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { BrowserObservation, BrowserTask } from "../../shared/tasks";
-import type { NativeBrowserBridge, NativeEvent } from "../tasks/native-bridge";
+import type { NativeBrowserBridge, NativeBrowserTransport, NativeConnectionState, NativeEvent } from "../tasks/native-bridge";
 import { NativeBrowser } from "../tasks/native-browser";
 import type { DomCandidate } from "../tasks/fast-browser";
 import { NativeControlError, nativeControlError } from "./errors";
@@ -35,8 +36,9 @@ interface Session {
   lastMethod?: string;
   lastRequestId?: string;
 }
-interface Receipt { signature: string; result: Promise<unknown>; }
-const ACTION_RECEIPT_LIMIT = 10000;
+interface Receipt { signature: string; result: Promise<unknown>; settled: boolean; settledAt?: number; }
+export const ACTION_RECEIPT_LIMIT = 10000;
+export const ACTION_RECEIPT_TTL_MS = 15 * 60_000;
 const STATUS_RECEIPT_LIMIT = 256;
 
 /** Keep the complete observation server-side for freshness and effect checks.
@@ -58,13 +60,40 @@ export class NativeControlService {
   private readonly sessions = new Map<string, Session>();
   private readonly receipts = new Map<string, Receipt>();
   private readonly statusReceipts = new Map<string, Receipt>();
+  private readonly receiptLimit: number;
+  private readonly receiptTtlMs: number;
+  private readonly now: () => number;
+  private readonly activeSessionStorage = new AsyncLocalStorage<string>();
   private readonly events: Array<NativeEvent & { cursor: number; at: string }> = [];
   private cursor = 0;
   private eventBytes = 0;
   private readonly eventSizes: number[] = [];
   private readonly unsubscribe: () => void;
-  constructor(private readonly bridge: NativeBrowserBridge, private readonly root: string) {
-    this.browser = new NativeBrowser(bridge, path.join(root, "native-control-artifacts"));
+  constructor(
+    private readonly bridge: NativeBrowserBridge,
+    private readonly root: string,
+    options: { actionReceiptLimit?: number; receiptTtlMs?: number; now?: () => number } = {}
+  ) {
+    this.receiptLimit =
+      Number.isSafeInteger(options.actionReceiptLimit) && Number(options.actionReceiptLimit) > 0
+        ? Number(options.actionReceiptLimit)
+        : ACTION_RECEIPT_LIMIT;
+    this.receiptTtlMs =
+      Number.isFinite(options.receiptTtlMs) && Number(options.receiptTtlMs) >= 0
+        ? Number(options.receiptTtlMs)
+        : ACTION_RECEIPT_TTL_MS;
+    this.now = typeof options.now === "function" ? options.now : Date.now;
+    const scopedBridge: NativeBrowserTransport = {
+      states: () => {
+        const sid = this.activeSessionStorage.getStore();
+        return sid
+          ? bridge.states().map((state) => this.viewStateForSession(state, sid)!)
+          : bridge.states();
+      },
+      onEvent: (listener) => bridge.onEvent(listener),
+      request: (profileId, method, params, timeoutMs) => bridge.request(profileId, method, params, timeoutMs)
+    };
+    this.browser = new NativeBrowser(scopedBridge, path.join(root, "native-control-artifacts"));
     this.extensionUi = new NativeExtensionUi(bridge);
     this.unsubscribe = bridge.onEvent(event => {
       const entry = { ...event, cursor: ++this.cursor, at: new Date().toISOString() };
@@ -94,7 +123,48 @@ export class NativeControlService {
   close(): void { for(const session of this.sessions.values())session.debug?.suspend('service-closed'); this.unsubscribe(); this.extensionUi.close(); this.browser.dispose?.(); }
   hasSessions(): boolean { return this.sessions.size > 0; }
   ownsSession(profileId: string, sessionId: string): boolean { return this.sessions.get(sessionId)?.task.profileId === profileId; }
-  private updateControlState(session: Session, state: NativeEvent["state"]): void {
+  private viewStateForSession(state: NativeConnectionState | undefined, sessionId: string): NativeConnectionState | undefined {
+    if (!state) return undefined;
+    if (Array.isArray(state.sessions)) {
+      const entry = state.sessions.find(s => s.sessionId === sessionId);
+      if (entry) {
+        return {
+          ...state,
+          ownerSessionId: entry.sessionId,
+          ownership: entry.ownership,
+          pausedByBrowser: entry.pausedByBrowser === true,
+          controlGeneration: entry.controlGeneration ?? state.controlGeneration,
+          controlIssue: entry.controlIssue,
+          tabId: entry.tabId,
+          dialogPending: entry.dialogPending,
+          tabTitle: entry.tabTitle,
+          url: entry.url
+        };
+      }
+      return {
+        ...state,
+        ownerSessionId: state.ownerSessionId === sessionId ? undefined : (state.ownerSessionId || state.sessions[0]?.sessionId),
+        ownership: "user",
+        pausedByBrowser: false,
+        tabId: undefined,
+        controlGeneration: undefined,
+        controlIssue: undefined,
+        dialogPending: undefined
+      };
+    }
+    return state;
+  }
+  private evictCompletedReceipts(): void {
+    const now = this.now();
+    for (const [id, entry] of this.receipts) {
+      if (this.receipts.size < this.receiptLimit) break;
+      if (entry.settled && entry.settledAt !== undefined && now - entry.settledAt >= this.receiptTtlMs) {
+        this.receipts.delete(id);
+      }
+    }
+  }
+  private updateControlState(session: Session, rawState: NativeEvent["state"]): void {
+    const state = this.viewStateForSession(rawState, session.task.sessionId);
     if(session.frameTab!==state?.tabId)session.debugFrames?.clear();session.frameTab=state?.tabId;
     const next = { connected: state?.connected === true, owned: state?.ownerSessionId === session.task.sessionId,
       agent: state?.ownership === "agent", paused: state?.pausedByBrowser === true, generation: state?.controlGeneration };
@@ -116,27 +186,42 @@ export class NativeControlService {
     if (!command || typeof command !== "object" || !isNativeControlMethod(command.method)) return Promise.reject(new NativeControlError("NATIVE_INVALID_REQUEST", "需要有效的浏览器操作 method。"));
     if (command.params !== undefined && (!command.params || typeof command.params !== "object" || Array.isArray(command.params))) return Promise.reject(new NativeControlError("NATIVE_INVALID_REQUEST", "params 必须是 JSON 对象。"));
     if (command.method === "claim" && command.params?.newTab !== undefined && typeof command.params.newTab !== "boolean") return Promise.reject(new NativeControlError("NATIVE_INVALID_REQUEST", "claim 的 newTab 必须是 JSON 布尔值。"));
+    if (command.method === "claim" && command.params?.activeTab !== undefined && typeof command.params.activeTab !== "boolean") return Promise.reject(new NativeControlError("NATIVE_INVALID_REQUEST", "claim 的 activeTab 必须是 JSON 布尔值。"));
+    if (command.method === "claim" && command.params?.useCurrentTab !== undefined && typeof command.params.useCurrentTab !== "boolean") return Promise.reject(new NativeControlError("NATIVE_INVALID_REQUEST", "claim 的 useCurrentTab 必须是 JSON 布尔值。"));
     if (typeof command.requestId !== "string" || !/^[\w.-]{1,128}$/.test(command.requestId)) return Promise.reject(new NativeControlError("NATIVE_INVALID_REQUEST", "需要唯一 requestId。"));
     const signature = JSON.stringify(command);
-    const previous = this.receipts.get(command.requestId) || this.statusReceipts.get(command.requestId);
-    if (previous) return previous.signature === signature ? previous.result : Promise.reject(new Error("requestId 已被另一个请求使用。"));
+    const existingActionReceipt = this.receipts.get(command.requestId);
+    if (existingActionReceipt) {
+      if (existingActionReceipt.signature !== signature) return Promise.reject(new Error("requestId 已被另一个请求使用。"));
+      this.receipts.delete(command.requestId);
+      this.receipts.set(command.requestId, existingActionReceipt);
+      return existingActionReceipt.result;
+    }
+    const existingStatusReceipt = this.statusReceipts.get(command.requestId);
+    if (existingStatusReceipt) return existingStatusReceipt.signature === signature ? existingStatusReceipt.result : Promise.reject(new Error("requestId 已被另一个请求使用。"));
     // Status polling must not exhaust the permanent at-most-once action ledger.
-    // Only these side-effect-free snapshots may expire; action receipts never do.
+    // Only these side-effect-free snapshots may expire; action receipts evict LRU completed entries when full.
     if (command.method === "status") {
       const result = this.tracked(command);
-      this.statusReceipts.set(command.requestId, { signature, result });
+      const statusReceipt: Receipt = { signature, result, settled: false };
+      result.then(() => { statusReceipt.settled = true; }, () => { statusReceipt.settled = true; });
+      this.statusReceipts.set(command.requestId, statusReceipt);
       if (this.statusReceipts.size > STATUS_RECEIPT_LIMIT) this.statusReceipts.delete(this.statusReceipts.keys().next().value!);
       return result;
     }
     const recovery = command.method === "control" && ["handoff", "complete", "release"].includes(command.params?.action);
-    // Existing sessions must remain stoppable at the soft limit. Keep their
-    // recovery receipts too, so replay cannot stop a later same-name session.
-    if (this.receipts.size >= ACTION_RECEIPT_LIMIT && !recovery) return Promise.reject(new NativeControlError("NATIVE_REQUEST_CAPACITY", "本次应用运行的动作请求记录已满；仍可 status、handoff、complete 或 release，结束会话后请重启应用。"));
-    // An absent session cannot perform a control side effect. Report that actual
-    // state without adding unlimited rejected recovery IDs beyond the limit.
-    if (this.receipts.size >= ACTION_RECEIPT_LIMIT && recovery && !this.sessions.has(command.sessionId)) return this.tracked(command);
+    if (this.receipts.size >= this.receiptLimit) {
+      this.evictCompletedReceipts();
+    }
+    if (this.receipts.size >= this.receiptLimit && !recovery) return Promise.reject(new NativeControlError("NATIVE_REQUEST_CAPACITY", "本次应用运行的动作请求记录已满（在途请求达到上限）；仍可 status、handoff、complete 或 release。"));
+    if (this.receipts.size >= this.receiptLimit && recovery && !this.sessions.has(command.sessionId)) return this.tracked(command);
     const result = this.tracked(command);
-    this.receipts.set(command.requestId, { signature, result });
+    const receipt: Receipt = { signature, result, settled: false };
+    result.then(
+      () => { receipt.settled = true; receipt.settledAt = this.now(); },
+      () => { receipt.settled = true; receipt.settledAt = this.now(); }
+    );
+    this.receipts.set(command.requestId, receipt);
     return result;
   }
   private async tracked(command: any): Promise<unknown> {
@@ -168,13 +253,15 @@ export class NativeControlService {
     }
   }
   private sessionSnapshot(id: string, session: Session) {
-    const state = this.bridge.states().find(s => s.profileId === session.task.profileId);
+    const rawState = this.bridge.states().find(s => s.profileId === session.task.profileId);
+    const state = this.viewStateForSession(rawState, id);
     const pauseReason = !state?.connected ? "disconnected" : state.ownerSessionId !== id ? "owner-changed" :
       state.controlIssue?.code || (state.ownership === "user" || state.pausedByBrowser ? "user-control" : undefined);
-    return { sessionId: id, profileId: session.task.profileId, title: session.task.title, controller: session.controller,
+    return { sessionId: id, profileId: session.task.profileId, tabId: state?.tabId, title: session.task.title, controller: session.controller,
       source: session.source, startedAt: session.startedAt, lastActivityAt: session.lastActivityAt,
       idleMs: Math.max(0, Date.now() - Date.parse(session.lastActivityAt)), pendingRequests: session.pendingRequests,
       generation: session.epoch, ownership: state?.ownership, pauseReason,
+      ...(state?.dialogPending ? { dialogPending: state.dialogPending } : {}),
       lastMethod: session.lastMethod, lastRequestId: session.lastRequestId,
       extensionUi: this.extensionUi.status(id),
       ...(session.ending ? { ending: true } : {}),
@@ -199,7 +286,8 @@ export class NativeControlService {
       const profileId = this.profile(command.profileId), sessionId = command.sessionId || `direct-${randomUUID()}`;
       if (typeof sessionId !== "string" || !/^[\w.-]{1,160}$/.test(sessionId)) throw new Error("会话名称无效。");
       if (sessionId.startsWith("pp-task-")) throw new NativeControlError("NATIVE_INVALID_REQUEST", "pp-task- 是内置任务专用前缀，请为直接会话选择其他名称。");
-      if (!nativeExtensionReady(this.bridge.states().find(state => state.profileId === profileId)!)) {
+      const profileState = this.bridge.states().find(state => state.profileId === profileId)!;
+      if (!nativeExtensionReady(profileState)) {
         throw new NativeControlError("NATIVE_EXTENSION_UPDATE_REQUIRED", NATIVE_EXTENSION_UPDATE_MESSAGE);
       }
       const previous = this.sessions.get(sessionId);
@@ -207,10 +295,29 @@ export class NativeControlService {
       for (const key of ["controller", "task", "source"]) if (params[key] !== undefined && (typeof params[key] !== "string" || params[key].length > 256)) {
         throw new NativeControlError("NATIVE_INVALID_REQUEST", `claim 的 ${key} 必须是不超过 256 字的字符串。`);
       }
-      const owner = this.bridge.states().find(s => s.profileId === profileId)?.ownerSessionId;
-      if (owner && owner !== sessionId) {
-        const title = this.sessions.get(owner)?.task.title;
-        throw new NativeControlError("NATIVE_SESSION_CONFLICT", `此 Profile 已由任务 ${title || owner}（${owner}）占用。请查看 status 并等待原任务释放。`);
+      const supportsMultiSession = Boolean(profileState.capabilities?.includes("multiSession") || Array.isArray(profileState.sessions));
+      if (!supportsMultiSession) {
+        const owner = profileState.ownerSessionId;
+        if (owner && owner !== sessionId) {
+          const title = this.sessions.get(owner)?.task.title;
+          throw new NativeControlError("NATIVE_SESSION_CONFLICT", `此 Profile 已由任务 ${title || owner}（${owner}）占用。请查看 status 并等待原任务释放。`);
+        }
+      } else {
+        const activeExtSessions = profileState.sessions || [];
+        const userControlled = activeExtSessions.find(s => s.sessionId !== sessionId && (s.ownership === "user" || s.pausedByBrowser));
+        if (userControlled || (!activeExtSessions.length && profileState.ownerSessionId && profileState.ownerSessionId !== sessionId && profileState.ownership === "user")) {
+          const holder = userControlled?.sessionId || profileState.ownerSessionId!;
+          const title = this.sessions.get(holder)?.task.title;
+          throw new NativeControlError("NATIVE_SESSION_CONFLICT", `此 Profile 当前处于用户接管或暂停状态（${title || holder}）。请先交还或结束原任务。`);
+        }
+        if (params.tabId !== undefined) {
+          const requestedTab = Number(params.tabId);
+          const tabOwner = activeExtSessions.find(s => s.sessionId !== sessionId && (s.tabId === requestedTab || s.tabs?.includes(requestedTab)));
+          if (tabOwner) {
+            const title = this.sessions.get(tabOwner.sessionId)?.task.title;
+            throw new NativeControlError("NATIVE_SESSION_CONFLICT", `标签页 ${requestedTab} 已由任务 ${title || tabOwner.sessionId}（${tabOwner.sessionId}）占用。`);
+          }
+        }
       }
       const task = { id: randomUUID(), sessionId, title: params.task?.trim() || sessionId, profileId, browserConnection: "extension", status: "running", attachments: [], outputs: [] } as unknown as BrowserTask;
       // Reserve synchronously before any I/O; two claims cannot overwrite the
@@ -223,18 +330,31 @@ export class NativeControlService {
       this.updateControlState(session, this.bridge.states().find(s => s.profileId === profileId));
       this.sessions.set(sessionId, session);
       try {
-        await this.bridge.request(profileId, "claim", { sessionId, taskTitle: task.title, tabId: params.tabId, newTab: params.newTab === true });
+        await this.bridge.request(profileId, "claim", {
+          sessionId,
+          taskTitle: task.title,
+          ...(params.tabId !== undefined ? { tabId: params.tabId } : {}),
+          ...(params.newTab !== undefined ? { newTab: params.newTab } : {}),
+          ...(params.activeTab !== undefined ? { activeTab: params.activeTab } : {}),
+          ...(params.useCurrentTab !== undefined ? { useCurrentTab: params.useCurrentTab } : {})
+        });
         if (this.sessions.get(sessionId) !== session || session.ending) throw new NativeControlError("NATIVE_SESSION_CONFLICT", "此直接会话已结束或正在结束，请检查 status。");
-        this.updateControlState(session, this.bridge.states().find(s => s.profileId === profileId));
-        return { sessionId, profileId, state: this.bridge.states().find(s => s.profileId === profileId) };
+        const latestState = this.bridge.states().find(s => s.profileId === profileId);
+        this.updateControlState(session, latestState);
+        return { sessionId, profileId, state: this.viewStateForSession(latestState, sessionId) };
       } catch (error) {
         // Failed attach can still reserve the extension owner. Keep its local
         // identity so the caller can release/resume it explicitly.
-        if (this.sessions.get(sessionId) === session && !session.ending && this.bridge.states().find(s => s.profileId === profileId)?.ownerSessionId !== sessionId) this.sessions.delete(sessionId);
+        const errState = this.viewStateForSession(this.bridge.states().find(s => s.profileId === profileId), sessionId);
+        if (this.sessions.get(sessionId) === session && !session.ending && errState?.ownerSessionId !== sessionId) this.sessions.delete(sessionId);
+        if (error instanceof NativeControlError) throw error;
+        if (/已由另一个任务|占用/.test(String((error as Error)?.message || error))) {
+          throw new NativeControlError("NATIVE_SESSION_CONFLICT", String((error as Error)?.message || error));
+        }
         throw error;
       }
     }
-    if (["tabs", "history", "extension.reload"].includes(method) && !command.sessionId) return this.bridge.request(this.profile(command.profileId), method, params);
+    if (["tabs", "history", "extension.reload", "cookies.export", "cookies.import"].includes(method) && !command.sessionId) return this.bridge.request(this.profile(command.profileId), method, params);
     const session = this.sessions.get(command.sessionId);
     if (!session) throw new Error("直接会话不存在或浏览器服务已重启，请重新 claim；不会重放旧动作。");
     const task = session.task;
@@ -249,12 +369,12 @@ export class NativeControlService {
         // after failure without ever reopening this generation for new work.
         session.ending = true; session.epoch++; task.observation = undefined; session.debug?.suspend('session-ended');
         this.extensionUi.cancel(task.sessionId);
-        const result = (async () => {
+        const result = this.activeSessionStorage.run(task.sessionId, async () => {
           if (!this.bridge.states().find(s => s.profileId === task.profileId)?.connected) throw new NativeControlError("NATIVE_DISCONNECTED", "扩展断线，尚未确认会话结束；已保留会话身份。重连后请显式 complete 或 release，不会自动恢复或重放。");
           await this.browser.control(task, params.action);
           if (this.sessions.get(task.sessionId) === session) this.sessions.delete(task.sessionId);
-          return { state: this.bridge.states().find(s => s.profileId === task.profileId) };
-        })();
+          return { state: this.viewStateForSession(this.bridge.states().find(s => s.profileId === task.profileId), task.sessionId) };
+        });
         session.termination = result;
         try { return await result; }
         finally { if (session.termination === result) session.termination = undefined; }
@@ -263,12 +383,14 @@ export class NativeControlService {
     }
     // Bind permission before joining the service queue. The extension also
     // checks this original token, including if its newer state arrives late.
-    const resumeGeneration = method === "control" && params.action === "resume" && !session.ending ? this.browser.controlGeneration(task) : undefined;
+    const resumeGeneration = method === "control" && params.action === "resume" && !session.ending
+      ? this.activeSessionStorage.run(task.sessionId, () => this.browser.controlGeneration(task))
+      : undefined;
     const epoch = session.epoch;
-    const invoke = async (): Promise<unknown> => {
+    const invoke = (): Promise<unknown> => this.activeSessionStorage.run(task.sessionId, async (): Promise<unknown> => {
       if (this.sessions.get(task.sessionId) !== session || session.ending) throw new NativeControlError("NATIVE_SESSION_CONFLICT", "此直接会话已结束或正在结束，排队操作已取消；请检查 status。");
       if (session.epoch !== epoch) {
-        const state = this.bridge.states().find(s => s.profileId === task.profileId);
+        const state = this.viewStateForSession(this.bridge.states().find(s => s.profileId === task.profileId), task.sessionId);
         const code = !state?.connected ? "NATIVE_DISCONNECTED" : state.controlIssue?.code || "NATIVE_USER_IN_CONTROL";
         throw new NativeControlError(code, state?.controlIssue?.message || "控制状态已改变，排队操作未执行；请检查 status。",
           controlRecovery(code, { stage: "ownership", actionOutcome: "not-executed" }));
@@ -276,10 +398,11 @@ export class NativeControlService {
       if (method === "control") {
         task.observation = undefined;
         await this.browser.control(task, params.action, resumeGeneration);
-        this.updateControlState(session, this.bridge.states().find(s => s.profileId === task.profileId));
-        return { state: this.bridge.states().find(s => s.profileId === task.profileId) };
+        const latestState = this.bridge.states().find(s => s.profileId === task.profileId);
+        this.updateControlState(session, latestState);
+        return { state: this.viewStateForSession(latestState, task.sessionId) };
       }
-      const state = this.bridge.states().find(s => s.profileId === task.profileId);
+      const state = this.viewStateForSession(this.bridge.states().find(s => s.profileId === task.profileId), task.sessionId);
       if (!state?.connected) throw new NativeControlError("NATIVE_DISCONNECTED", "扩展断线；请检查 status，不会自动恢复或重放。");
       if (state.ownerSessionId !== task.sessionId) throw new NativeControlError("NATIVE_SESSION_CONFLICT", "浏览器会话已停止或所有者已改变，请检查 status。");
       if (state.ownership !== "agent" || state.pausedByBrowser) {
@@ -311,10 +434,10 @@ export class NativeControlService {
       });
       const finishAction = async (result: unknown) => {
         const feedbackEpoch = session.epoch;
-        const tabId = this.bridge.states().find(s => s.profileId === task.profileId)?.tabId;
+        const tabId = this.viewStateForSession(this.bridge.states().find(s => s.profileId === task.profileId), task.sessionId)?.tabId;
         const feedback = await observeAfterBrowserAction({
           check: () => {
-            const current = this.bridge.states().find(s => s.profileId === task.profileId);
+            const current = this.viewStateForSession(this.bridge.states().find(s => s.profileId === task.profileId), task.sessionId);
             if (session.ending || this.sessions.get(task.sessionId) !== session || session.epoch !== feedbackEpoch ||
                 !current?.connected || current.ownerSessionId !== task.sessionId || current.ownership !== 'agent' || current.pausedByBrowser || current.tabId !== tabId)
               throw new NativeControlError('NATIVE_USER_IN_CONTROL', '操作后的控制状态已改变。');
@@ -325,6 +448,23 @@ export class NativeControlService {
         if (feedback.observation) task.observation = feedback.observation;
         return { result, ...feedback, observation: feedback.observation ? publicNativeObservation(feedback.observation) : undefined };
       };
+      if (method === "dialog") {
+        const accept = typeof params.accept === "boolean"
+          ? params.accept
+          : params.action === "accept"
+            ? true
+            : params.action === "dismiss"
+              ? false
+              : undefined;
+        if (typeof accept !== "boolean") throw new NativeControlError("NATIVE_INVALID_REQUEST", "dialog 需要布尔值 accept 或 action: accept/dismiss。");
+        task.observation = undefined;
+        const dialogResult = await this.bridge.request(task.profileId, "dialog", {
+          sessionId: task.sessionId,
+          accept,
+          ...(typeof params.promptText === "string" ? { promptText: params.promptText } : {})
+        });
+        return finishAction(dialogResult);
+      }
       if (method === "action" || method === "pointer") {
         if (!task.observation || params.version !== task.observation.version) throw new NativeControlError("NATIVE_OBSERVATION_STALE", "动作必须携带最近 observe/read 或动作返回的 observation.version；观察不可用或交还控制后请重新观察。");
         const observation = task.observation;
@@ -346,7 +486,7 @@ export class NativeControlService {
         if(!state.capabilities?.includes('debugCapture'))throw new NativeControlError('NATIVE_EXTENSION_UPDATE_REQUIRED','Network 调试需要扩展 0.2.14+；请更新/重新加载 ProfilePilot 扩展后再试。');
         if (!session.debug) {
           const check = () => {
-            const now = this.bridge.states().find(s=>s.profileId===task.profileId);
+            const now = this.viewStateForSession(this.bridge.states().find(s=>s.profileId===task.profileId), task.sessionId);
             if (session.ending || this.sessions.get(task.sessionId)!==session || session.debugEpoch!==session.epoch || !now?.connected || now.ownerSessionId!==task.sessionId || now.ownership!=='agent' || now.pausedByBrowser || now.tabId!==session.debugTab)
               throw new NativeControlError('NATIVE_USER_IN_CONTROL','调试采集已停止；请检查控制状态。');
           };
@@ -381,15 +521,14 @@ export class NativeControlService {
         }
         return { ...result, ...await finishAction(result) };
       }
-      if (["tabs", "history", "cdp", "downloads.start", "downloads.search", "downloads.wait", "downloads.cancel", "downloads.disarm"].includes(method)) {
-        if (!["tabs", "history", "downloads.search", "downloads.wait"].includes(method)) task.observation = undefined;
+      if (["tabs", "history", "cdp", "cookies.export", "cookies.import", "downloads.start", "downloads.search", "downloads.wait", "downloads.cancel", "downloads.disarm"].includes(method)) {
+        if (!["tabs", "history", "cookies.export", "downloads.search", "downloads.wait"].includes(method)) task.observation = undefined;
         return this.bridge.request(task.profileId, method, { ...params, sessionId: task.sessionId }, method === "downloads.wait" ? Math.min(305000, (Number(params.timeoutMs) || 30000) + 3000) : 15000);
       }
       throw new NativeControlError("NATIVE_INVALID_REQUEST", `未知直接操作：${method}`);
-    };
-    // Stop/control must invalidate extension ownership immediately rather than
-    // queue behind a long read/download. Ordinary actions remain serialized.
-    if ((method === "control" && params.action !== "resume") || ["downloads.wait", "downloads.cancel", "downloads.search"].includes(method) || (method === "download" && ["wait", "cancel", "search"].includes(params.operation))) return invoke();
+    });
+    // Stop/control and dialog handling must not wait behind a blocked read/download.
+    if ((method === "control" && params.action !== "resume") || method === "dialog" || ["downloads.wait", "downloads.cancel", "downloads.search"].includes(method) || (method === "download" && ["wait", "cancel", "search"].includes(params.operation))) return invoke();
     const result = session.queue.then(invoke);
     session.queue = result.catch(() => {}); return result;
   }

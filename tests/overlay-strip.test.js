@@ -63,6 +63,7 @@ function fixture(initial = {}, { binding = true } = {}) {
     createElement: tag => new Element(tag), createElementNS: (_, tag) => new Element(tag),
     elementFromPoint: () => null
   };
+  document.documentElement.append(document.body);
   const storage = new Map();
   const window = new Element('window');
   Object.assign(window, {
@@ -72,17 +73,18 @@ function fixture(initial = {}, { binding = true } = {}) {
     innerWidth: 1000, innerHeight: 700, outerWidth: 1000, outerHeight: 800, devicePixelRatio: 1
   });
   if (binding) window.__ppAgentOverlaySignal = payload => signals.push(JSON.parse(payload));
-  vm.runInNewContext(agentOverlayBootstrapScript(), {
+  const sandbox = vm.createContext({
     window, document, sessionStorage: window.sessionStorage, navigator: { language: 'zh-CN' },
     setTimeout(fn, delay) { const id = ++timerId; timers.set(id, { fn, delay }); return id; },
     clearTimeout(id) { timers.delete(id); }, setInterval: () => ++timerId, clearInterval() {}
   });
+  vm.runInContext(agentOverlayBootstrapScript(), sandbox);
   const base = { locale: 'zh', session: 'strip-test', inputGuardState: 'active', ...initial };
   const update = data => window.__ppAgentOverlayUpdate({ ...base, ...data });
   update({});
   const find = selector => shadow.querySelector(selector);
   return {
-    window, document, shadow, signals, timers, storage, update, find,
+    window, document, shadow, signals, timers, storage, sandbox, update, find,
     click: selector => find(selector).click(),
     label: selector => find(selector).querySelector('.button-label').textContent,
     title: () => find('.title').textContent,
@@ -138,7 +140,8 @@ test('stop requires two clicks within the confirmation window and tears down aft
   assert.deepEqual(f.signals, [{ action: 'stop', reason: 'user_stop' }]);
   assert.equal(f.window.__ppAgentOverlayUpdate, undefined);
   assert.equal(f.find('.panel').isConnected, false);
-  assert.ok(Number(f.storage.get('__ppAgentOverlayTerminalStopUntil')) > Date.now());
+  assert.equal(f.sandbox.__ppAgentOverlayTerminalStopped, true);
+  assert.equal(f.storage.size, 0);
 });
 
 test('taken, pending user action and errors remain in the strip with original resume semantics', () => {

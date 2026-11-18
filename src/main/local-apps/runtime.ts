@@ -6,7 +6,7 @@ export type DebugState = "connected" | "offline" | "unknown";
 // Current evidence decides liveness. Discovering an external app never grants
 // stop/restart control; only its authenticated supervisor grants that ownership.
 export function resolveAppRuntime(config: LocalAppConfig, worker: LocalAppRuntime, process: LocalAppRuntime, debug: DebugState[]): Pick<LocalAppView, "runtime" | "managed" | "controls"> {
-  const managed = config.mode === "launch" && ["starting", "running", "stopping"].includes(worker.status);
+  const managed = config.mode !== "attach" && ["starting", "running", "stopping"].includes(worker.status);
   let runtime: LocalAppRuntime;
   if (managed && ["starting", "stopping"].includes(worker.status)) runtime = worker;
   else if (process.status === "running" || debug.includes("connected")) {

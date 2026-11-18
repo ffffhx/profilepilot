@@ -220,13 +220,34 @@ export class GpuiService {
         // Validate IDs and layout again immediately before dispatch, then consume the observation.
         const current = toolData(await client.call('get_ui_tree'));
         this.assertUnchanged(record, epoch);
-        if (['keyboard', 'type_text'].includes(cmd.tool) && JSON.stringify(record.nodes) !== JSON.stringify(current?.nodes)) {
-          record.observation = undefined; throw gpuiError('GPUI_STALE_OBSERVATION', '输入焦点或界面已变化，请重新 snapshot。');
+        if (!current?.nodes || typeof current.nodes !== 'object' || Array.isArray(current.nodes)) {
+          record.observation = undefined; throw gpuiError('GPUI_PROTOCOL_ERROR', 'GPUI 元素树格式无效。');
         }
-        const ids = ['id', 'from_id', 'to_id'].filter(key => params[key] !== undefined).map(key => params[key]);
-        if (Array.isArray(params.ids)) ids.push(...params.ids);
-        for (const id of ids) if (typeof id !== 'string' || !record.nodes || !Object.hasOwn(record.nodes, id) || JSON.stringify(record.nodes[id]) !== JSON.stringify(current?.nodes?.[id])) {
-          record.observation = undefined; throw gpuiError('GPUI_STALE_OBSERVATION', '目标元素已变化，请重新 snapshot。');
+        if (['keyboard', 'type_text'].includes(cmd.tool)) {
+          const appsData = toolData(await client.call('list_apps'));
+          this.assertUnchanged(record, epoch);
+          const currentApps = Array.isArray(appsData?.apps) ? appsData.apps : undefined;
+          const matchedApp = currentApps?.find((item: any) => item?.target_id === record.view.app.target_id);
+          if ((typeof current.pid === 'number' && current.pid !== record.view.app.pid)
+            || (typeof current.target_id === 'string' && current.target_id !== record.view.app.target_id)
+            || (currentApps && (!matchedApp || matchedApp.pid !== record.view.app.pid))) {
+            record.observation = undefined; throw gpuiError('GPUI_STALE_OBSERVATION', '输入焦点或目标应用已变化，请重新 snapshot。');
+          }
+          if (params.id !== undefined) {
+            const targetNode = typeof params.id === 'string' && Object.hasOwn(current.nodes, params.id)
+              ? (current.nodes as Record<string, any>)[params.id] : undefined;
+            const disabled = !targetNode || targetNode.enabled === false || targetNode.disabled === true
+              || targetNode.state?.enabled === false || targetNode.state?.disabled === true;
+            if (disabled) {
+              record.observation = undefined; throw gpuiError('GPUI_STALE_OBSERVATION', '目标输入元素不可用或已禁用，请重新 snapshot。');
+            }
+          }
+        } else {
+          const ids = ['id', 'from_id', 'to_id'].filter(key => params[key] !== undefined).map(key => params[key]);
+          if (Array.isArray(params.ids)) ids.push(...params.ids);
+          for (const id of ids) if (typeof id !== 'string' || !record.nodes || !Object.hasOwn(record.nodes, id) || JSON.stringify(record.nodes[id]) !== JSON.stringify(current?.nodes?.[id])) {
+            record.observation = undefined; throw gpuiError('GPUI_STALE_OBSERVATION', '目标元素已变化，请重新 snapshot。');
+          }
         }
         record.observation = undefined; record.nodes = undefined;
       }

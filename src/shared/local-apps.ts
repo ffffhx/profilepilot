@@ -86,7 +86,7 @@ export interface LocalAppsApi {
   connect(id: string, options?: { confirmationToken: string }): Promise<LocalAppConnectionResult>;
   preview(id: string): Promise<LocalAppPreview>;
   showWindow(id: string): Promise<void>;
-  logs(id: string): Promise<string>;
+  logs(id: string, options?: { tailLines?: number; grep?: string }): Promise<string>;
   pickDirectory(): Promise<string | null>;
   openDirectory(id: string): Promise<void>;
   openDebugger(id: string, kind: "renderer" | "main", targetId: string): Promise<void>;

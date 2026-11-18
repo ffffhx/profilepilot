@@ -1,0 +1,1 @@
+I built ProfilePilot for my existing coding agent: read signed-in websites, compare listings, and check local apps. One CLI connects Chrome, Electron and Android. MIT open source.

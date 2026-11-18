@@ -37,7 +37,8 @@ public final class ControlService extends Service {
     private final Runnable tick = new Runnable() { public void run() {
         session.expire();
         if (packages != null) packages.tick();
-        boolean ready = Settings.canDrawOverlays(ControlService.this) && getSystemService(NotificationManager.class).areNotificationsEnabled() && PhoneAccessibility.current != null;
+        boolean needOverlay = "control".equals(session.mode);
+        boolean ready = (!needOverlay || Settings.canDrawOverlays(ControlService.this)) && getSystemService(NotificationManager.class).areNotificationsEnabled() && PhoneAccessibility.current != null;
         if (ready && session.phase.equals("paused") && "screen".equals(session.pauseCause)
             && getSystemService(PowerManager.class).isInteractive() && !getSystemService(KeyguardManager.class).isKeyguardLocked()) {
             session.autoResume("手机已解锁，控制已继续");
@@ -162,12 +163,13 @@ public final class ControlService extends Service {
                     result.complete(success(null));
                 }
                 else if (method.equals("start")) {
-                    requireReady();
+                    String mode = input.getString("mode");
+                    requireReady(mode);
                     String computer = limited(input, "computer", 120);
                     if (!computer.equals(computerName)) throw new PhoneControlException("PHONE_PAIRING_REQUIRED", "控制电脑与配对记录不一致");
                     dispatched[0] = true;
                     PhoneAccessibility.current.resetFollowTouch();
-                    session.start(input.getString("instanceId"), input.getLong("generation"), input.getString("sessionId"), input.getString("mode"), computer, limited(input, "controller", 120), limited(input, "task", 500), System.currentTimeMillis());
+                    session.start(input.getString("instanceId"), input.getLong("generation"), input.getString("sessionId"), mode, computer, limited(input, "controller", 120), limited(input, "task", 500), System.currentTimeMillis());
                     peers.claim(peer);
                     session.keepScreenOn = input.optBoolean("keepScreenOn", true);
                     receipts.clear(); screenshots.clear(); followSequence = 0;
@@ -175,7 +177,7 @@ public final class ControlService extends Service {
                 } else if (method.equals("pause") || method.equals("resume") || method.equals("stop")) {
                     session.check(input.getString("instanceId"), input.getString("sessionId"), input.getLong("generation"));
                     dispatched[0] = true;
-                    if (method.equals("resume")) { requireReady(); session.resume(); }
+                    if (method.equals("resume")) { requireReady(session.mode); session.resume(); }
                     else if (method.equals("pause")) session.pause("电脑已暂停控制"); else session.stop("电脑已结束控制");
                     render(); result.complete(success(null));
                 } else if (method.equals("package-inspect")) {
@@ -224,7 +226,7 @@ public final class ControlService extends Service {
                     result.complete(success(new JSONObject().put("unlocked", !getSystemService(KeyguardManager.class).isKeyguardLocked())));
                 } else if (method.equals("follow")) follow(input, result, timing, dispatched);
                 else if (method.equals("screenshot-chunk")) {
-                    requireReady();
+                    requireReady(session.mode);
                     result.complete(success(screenshots.read(input.getString("instanceId"), input.getString("sessionId"),
                         input.getLong("generation"), input.getString("transferId"), input.getInt("offset")), timing));
                 }
@@ -255,9 +257,9 @@ public final class ControlService extends Service {
         worker.setDaemon(true); worker.start();
     }
     private void follow(JSONObject input, CompletableFuture<JSONObject> result, ControlTiming timing, boolean[] dispatched) throws Exception {
-        requireReady();
-        timing.mark("ready");
         String op = input.getString("op");
+        requireReady(op.equals("touch") ? "control" : session.mode);
+        timing.mark("ready");
         session.authorize(input.getString("instanceId"), input.getString("sessionId"), input.getLong("generation"), op.equals("touch"));
         if (op.equals("probe")) {
             result.complete(success(new JSONObject().put("protocol", 1).put("cameraFrameProvenance", 1)
@@ -317,7 +319,7 @@ public final class ControlService extends Service {
         boolean chunkedScreenshot = kind.equals("screenshot") && action.optString("format").equals("png")
             && ScreenshotTransfer.PROTOCOL.equals(input.optString("imageTransfer"));
         boolean isInput = !kind.equals("snapshot") && !kind.equals("screenshot") && !kind.equals("find");
-        requireReady();
+        requireReady(isInput ? "control" : session.mode);
         session.authorize(input.getString("instanceId"), input.getString("sessionId"), input.getLong("generation"), isInput);
         long generation = session.generation;
         receipts.put(requestId, new Receipt(fingerprint, result));
@@ -338,7 +340,10 @@ public final class ControlService extends Service {
         }));
     }
     private void requireReady() {
-        if (!Settings.canDrawOverlays(this)) throw new PhoneControlException("PHONE_USER_PERMISSION_REQUIRED", "请在手机开启顶部胶囊权限");
+        requireReady("control");
+    }
+    private void requireReady(String mode) {
+        if (!"view".equals(mode) && !Settings.canDrawOverlays(this)) throw new PhoneControlException("PHONE_USER_PERMISSION_REQUIRED", "请在手机开启顶部胶囊权限");
         if (!getSystemService(NotificationManager.class).areNotificationsEnabled()) throw new PhoneControlException("PHONE_USER_PERMISSION_REQUIRED", "请在手机开启控制状态通知");
         if (PhoneAccessibility.current == null) throw new PhoneControlException("PHONE_PERMISSION_REQUIRED", "请在手机启用 "+getString(R.string.accessibility_name)+"无障碍服务");
         if (getSystemService(KeyguardManager.class).isKeyguardLocked()) throw new PhoneControlException("PHONE_SCREEN_LOCKED", "请先解锁手机");
@@ -347,7 +352,7 @@ public final class ControlService extends Service {
         if (Looper.myLooper() != Looper.getMainLooper()) { main.post(() -> localControl(command)); return; }
         try {
             if (command.equals("resume")) {
-                requireReady();
+                requireReady(session.mode);
                 session.resumeFromPhone(session.instanceId, session.sessionId, session.generation);
             } else if (command.equals("stop")) session.stop("你已在手机结束控制");
             else if (command.equals("pause")) session.pause("你已接管，电脑控制已暂停");

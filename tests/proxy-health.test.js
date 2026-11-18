@@ -45,7 +45,9 @@ test("main and renderer accept explicit default ports without losing the port", 
     assert.equal(normalizeProxyServerInput(input), expected);
   }
   assert.equal(proxyServerUsesPort("https://localhost:443", 443), true);
-  for (const input of ["http://user:pass@host:8080", "http://host:8080/path", "http://host:8080?x=1"]) {
+  assert.equal(normalizeProxyEndpoint("http://user:pass@host:8080"), "http://user:pass@host:8080");
+  assert.equal(normalizeProxyServerInput("http://user:pass@host:8080"), "http://user:pass@host:8080");
+  for (const input of ["http://host:8080/path", "http://host:8080?x=1"]) {
     assert.equal(normalizeProxyEndpoint(input), null);
     assert.equal(normalizeProxyServerInput(input), null);
   }

@@ -12,7 +12,7 @@ export function inputObserverExecutable(): string {
 // Lazy factory only. Importing this module never installs hooks or starts a
 // process. The broker owns the child's protocol, deadlines and confirmed exit.
 export function spawnWindowsInputObserver(options: {
-  platform?: string; executable?: string; spawnProcess?: typeof spawn;
+  platform?: string; executable?: string; spawnProcess?: typeof spawn; mutexName?: string;
 } = {}): InputBrokerChild {
   if ((options.platform || process.platform) !== 'win32') {
     throw Object.assign(new Error('Windows input observation is unavailable on this platform.'), { code: 'DESKTOP_PLATFORM_UNAVAILABLE' });
@@ -22,5 +22,7 @@ export function spawnWindowsInputObserver(options: {
     throw Object.assign(new Error('The Windows input observer component is missing.'), { code: 'DESKTOP_INPUT_OBSERVER_UNAVAILABLE' });
   }
   const executable = nativeRuntimeCopy(source, 'profilepilot-input-observer-runtime');
-  return (options.spawnProcess || spawn)(executable, ['--stdio-observer'], { windowsHide: true, stdio: 'pipe' }) as InputBrokerChild;
+  const mutex = (options.mutexName ?? process.env.PROFILEPILOT_INPUT_OBSERVER_MUTEX)?.trim();
+  const args = mutex ? ['--stdio-observer', '--mutex', mutex] : ['--stdio-observer'];
+  return (options.spawnProcess || spawn)(executable, args, { windowsHide: true, stdio: 'pipe' }) as InputBrokerChild;
 }

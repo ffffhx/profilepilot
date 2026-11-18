@@ -20,6 +20,7 @@ import type {
   AgentTakeoverEvent,
   CloneProfilesRequest,
   CloneProfilesResult,
+  CreateProfileInput,
   RefreshClonesResult,
   RecycleIdleClonesResult,
   LaunchClonesResult,
@@ -98,7 +99,7 @@ const profileManagerApi: ProfileManagerApi = {
     return () => ipcRenderer.removeListener(IPC_CHANNELS.stateChanged, handler);
   },
   getTakeoverHistory: (): Promise<AgentTakeoverEvent[]> => ipcRenderer.invoke(IPC_CHANNELS.getTakeoverHistory),
-  createProfile: (name: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.createProfile, name),
+  createProfile: (input: string | CreateProfileInput): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.createProfile, input),
   renameProfile: (id: string, name: string): Promise<AppState> => ipcRenderer.invoke(IPC_CHANNELS.renameProfile, id, name),
   launchProfile: (id: string, options?: LaunchProfileOptions): Promise<AppState> =>
     ipcRenderer.invoke(IPC_CHANNELS.launchProfile, id, options ?? null),
@@ -282,6 +283,14 @@ const browserConnectionApi: BrowserConnectionApi = {
 };
 contextBridge.exposeInMainWorld("browserConnection", browserConnectionApi);
 const taskApi: TaskApi = {
+  reviewSnapshot: () => ipcRenderer.invoke(TASK_CHANNEL, "reviewSnapshot"),
+  reviewConfigure: input => ipcRenderer.invoke(TASK_CHANNEL, "reviewConfigure", input),
+  reviewRun: kind => ipcRenderer.invoke(TASK_CHANNEL, "reviewRun", kind),
+  reviewReport: id => ipcRenderer.invoke(TASK_CHANNEL, "reviewReport", id),
+  reviewFeedback: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "reviewFeedback", ...args),
+  reviewExportWorkflow: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "reviewExportWorkflow", ...args),
+  reviewSaveAsTemplate: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "reviewSaveAsTemplate", ...args),
+  reviewSaveWorkflowTemplate: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "reviewSaveWorkflowTemplate", ...args),
   openLink: url => ipcRenderer.invoke(TASK_CHANNEL, "openLink", url),
   focusTaskBrowser: id => ipcRenderer.invoke(TASK_CHANNEL, "focusTaskBrowser", id),
   watchPreview: id => ipcRenderer.invoke(TASK_CHANNEL, "watchPreview", id),
@@ -306,6 +315,10 @@ const taskApi: TaskApi = {
   permissions: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "permissions", ...args),
   setLimits: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "setLimits", ...args),
   setModel: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "setModel", ...args),
+  setMode: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "setMode", ...args),
+  compact: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "compact", ...args),
+  fork: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "fork", ...args),
+  rewind: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "rewind", ...args),
   previewArtifact: (...args) => ipcRenderer.invoke(TASK_CHANNEL, "previewArtifact", ...args),
   saveMaterial: (input) => ipcRenderer.invoke(TASK_CHANNEL, "saveMaterial", input),
   deleteMaterial: (id) => ipcRenderer.invoke(TASK_CHANNEL, "deleteMaterial", id),
@@ -345,7 +358,7 @@ const localAppsApi: LocalAppsApi = {
   connect: (id, options) => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "connect", id, options),
   preview: id => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "preview", id),
   showWindow: id => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "showWindow", id),
-  logs: id => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "logs", id),
+  logs: (id, options) => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "logs", id, options),
   pickDirectory: () => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "pickDirectory"),
   openDirectory: id => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "openDirectory", id),
   openDebugger: (id, kind, targetId) => ipcRenderer.invoke(LOCAL_APPS_CHANNEL, "openDebugger", id, kind, targetId),

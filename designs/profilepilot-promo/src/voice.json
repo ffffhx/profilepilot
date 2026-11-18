@@ -1,0 +1,27 @@
+{
+  "v": 1,
+  "lang": "zh",
+  "captions": false,
+  "gap": 0.45,
+  "scenes": [
+    {
+      "id": "hook",
+      "lines": [
+        "多个 Agent，各做各的任务。"
+      ]
+    },
+    {
+      "id": "parallel",
+      "lines": [
+        "不同 Profile／应用，各自并行。",
+        "同一目标占用时，停止并提示。"
+      ]
+    },
+    {
+      "id": "end",
+      "lines": [
+        "从一次真实任务开始。"
+      ]
+    }
+  ]
+}

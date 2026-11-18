@@ -13,12 +13,28 @@ const replySchema = z.object({ protocol: z.literal(protocol), type: z.literal("p
   variant: z.enum(["debug", "release"]), wirelessDebugging: z.enum(["enabled", "disabled", "unconfirmed"]) });
 const ipv4 = (value: string) => value.split(".").reduce((result, part) => (result * 256 + Number(part)) >>> 0, 0);
 const fromIpv4 = (value: number) => [24, 16, 8, 0].map(shift => (value >>> shift) & 255).join(".");
+function isCgnat(address: string): boolean {
+  const [first, second] = address.split(".").map(Number);
+  return first === 100 && second >= 64 && second <= 127;
+}
+function isLocalOrTailscaleIpv4(address: string): boolean {
+  const [first, second] = address.split(".").map(Number);
+  return first === 10
+    || first === 192 && second === 168
+    || first === 172 && second >= 16 && second <= 31
+    || first === 169 && second === 254
+    || first === 100 && second >= 64 && second <= 127;
+}
 export function discoveryInterfaces(interfaces: NodeJS.Dict<NetworkInterfaceInfo[]> = networkInterfaces()) {
-  return Object.values(interfaces).flatMap(values => values || []).filter(value => value.family === "IPv4" && !value.internal &&
-    /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|169\.254\.)/.test(value.address));
+  return Object.values(interfaces).flatMap(values => values || []).filter(value =>
+    value.family === "IPv4" && !value.internal && isLocalOrTailscaleIpv4(value.address));
 }
 export function discoveryReply(data: Buffer, address: string, nonce: string, interfaces = discoveryInterfaces()): PhoneNearbyApp | undefined {
-  if (data.length > 2048 || !interfaces.some(value => (ipv4(address) & ipv4(value.netmask)) === (ipv4(value.address) & ipv4(value.netmask)))) return;
+  const sameNetwork = interfaces.some(value => {
+    const mask = isCgnat(value.address) && value.netmask === "255.255.255.255" ? 0xffc00000 : ipv4(value.netmask);
+    return ((ipv4(address) & mask) >>> 0) === ((ipv4(value.address) & mask) >>> 0);
+  });
+  if (data.length > 2048 || !sameNetwork) return;
   try {
     const result = replySchema.parse(JSON.parse(data.toString("utf8")));
     if (result.nonce !== nonce) return;
@@ -50,9 +66,12 @@ export async function discoverNearbyApps(): Promise<{ apps: PhoneNearbyApp[]; ap
       if (finished) return;
       try { socket.setBroadcast(true); socket.setMulticastInterface(adapter.address); socket.setMulticastTTL(1); }
       catch { finish(); return; }
-      const broadcast = fromIpv4((ipv4(adapter.address) | ~ipv4(adapter.netmask)) >>> 0);
+      const targets = [PHONE_DISCOVERY_GROUP];
+      if (adapter.netmask !== "255.255.255.255") {
+        targets.push(fromIpv4((ipv4(adapter.address) | ~ipv4(adapter.netmask)) >>> 0));
+      }
       const send = () => {
-        for (const address of [PHONE_DISCOVERY_GROUP, broadcast]) {
+        for (const address of targets) {
           socket.send(request, PHONE_DISCOVERY_PORT, address, error => { if (!error) sent = true; });
         }
       };

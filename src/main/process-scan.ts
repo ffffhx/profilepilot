@@ -406,7 +406,7 @@ export async function getOpenProfilePidsByPath(profilePaths: string[], options: 
           const seen = new Set<number>();
           while (current && !seen.has(current.pid)) {
             seen.add(current.pid);
-            if (isGoogleChromeMainProcess(current.commandLine)) {
+            if (isChromiumBrowserMainProcess(current.commandLine)) {
               resolved.add(current.pid);
               break;
             }
@@ -851,40 +851,88 @@ export const GENERIC_DIR_SEGMENTS = new Set([
 ]);
 
 // 识别非本工具、非系统 Chrome 的 Chromium 系浏览器主进程（agent-browser、bb-browser 等
-// 工具会用自带的 Chrome for Testing / Chromium 加自管 user-data-dir 启动）。
-export function isChromiumBrowserMainProcess(command: string): boolean {
-  if (command.includes("--type=") || command.includes("chrome_crashpad_handler")) {
+// 工具会用自带的 Chrome for Testing / Chromium 加自管 user-data-dir 启动，以及隔离的 Edge/Brave/Arc/Vivaldi）。
+export function isChromiumBrowserMainProcess(
+  command: string,
+  platform: NodeJS.Platform = process.platform
+): boolean {
+  if (
+    !command ||
+    command.includes("--type=") ||
+    command.includes("crashpad_handler") ||
+    /Helper(?:\s*\([^)]+\))?\.app\/Contents\/MacOS\//.test(command)
+  ) {
     return false;
   }
 
-  if (process.platform === "darwin") {
-    return /\/Contents\/MacOS\/(Google Chrome( for Testing| Beta| Dev| Canary)?|Chromium|Microsoft Edge|Brave Browser)(\s|$)/.test(
+  if (platform === "darwin") {
+    return /\/Contents\/MacOS\/(Google Chrome( for Testing| Beta| Dev| Canary)?|Chromium|Microsoft Edge( Beta| Dev| Canary)?|Brave Browser( Beta| Nightly)?|Arc|Vivaldi)(\s|$)/.test(
       command
     );
   }
 
-  if (process.platform === "win32") {
-    return /(^|[\\/\s"])(chrome|msedge|brave|chromium)\.exe(?:"|\s|$)/i.test(command);
+  if (platform === "win32") {
+    return /(^|[\\/\s"])(chrome|msedge|brave|chromium|arc|vivaldi)\.exe(?:"|\s|$)/i.test(command);
   }
 
-  return isGoogleChromeMainProcess(command);
+  return /(^|\s)(\/\S+\/)?(google-chrome|google-chrome-stable|chromium|chromium-browser|chrome|microsoft-edge|microsoft-edge-stable|brave-browser|brave|vivaldi|vivaldi-stable)(\s|$)/.test(
+    command
+  );
 }
 
-export function parseExternalBrowserName(command: string): string {
-  if (process.platform === "win32") {
-    const match = command.match(/(?:^|[\\/\s"])(chrome|msedge|brave|chromium)\.exe(?:"|\s|$)/i);
-    const names: Record<string, string> = {
-      chrome: /Chrome for Testing/i.test(command) ? "Google Chrome for Testing" : "Google Chrome",
-      msedge: "Microsoft Edge",
-      brave: "Brave Browser",
-      chromium: "Chromium"
-    };
-    return match ? names[match[1].toLowerCase()] : "Chromium";
+export function isChromiumRendererProcess(
+  command: string,
+  platform: NodeJS.Platform = process.platform
+): boolean {
+  if (!command || !/--type=renderer(?:\s|$)/i.test(command)) {
+    return false;
   }
-  const match = command.match(
-    /\/Contents\/MacOS\/(Google Chrome( for Testing| Beta| Dev| Canary)?|Chromium|Microsoft Edge|Brave Browser)(\s|$)/
-  );
-  return match ? match[1] : "Chromium";
+  if (platform === "darwin") {
+    return /(?:Google Chrome|Chromium|Microsoft Edge|Brave Browser|Arc|Vivaldi).*Helper(?:\s*\(Renderer\))?/.test(command);
+  }
+  if (platform === "win32") {
+    return /(^|[\\/\s"])(chrome|msedge|brave|chromium|arc|vivaldi)\.exe(?:"|\s|$)/i.test(command);
+  }
+  return true;
+}
+
+export function parseExternalBrowserName(
+  command: string,
+  platform: NodeJS.Platform = process.platform
+): string {
+  if (platform === "win32") {
+    const match = command.match(/(?:^|[\\/\s"])(chrome|msedge|brave|chromium|arc|vivaldi)\.exe(?:"|\s|$)/i);
+    const exe = match?.[1]?.toLowerCase();
+    switch (exe) {
+      case "chrome":
+        if (/Chrome for Testing/i.test(command)) return "Google Chrome for Testing";
+        if (/[\\/]Chromium[\\/]/i.test(command)) return "Chromium";
+        return "Google Chrome";
+      case "msedge":
+        return "Microsoft Edge";
+      case "brave":
+        return "Brave Browser";
+      case "chromium":
+        return "Chromium";
+      case "arc":
+        return "Arc";
+      case "vivaldi":
+        return "Vivaldi";
+      default:
+        return "Chromium";
+    }
+  }
+  if (platform === "darwin") {
+    const match = command.match(
+      /\/Contents\/MacOS\/(Google Chrome( for Testing| Beta| Dev| Canary)?|Chromium|Microsoft Edge( Beta| Dev| Canary)?|Brave Browser( Beta| Nightly)?|Arc|Vivaldi)(\s|$)/
+    );
+    return match ? match[1] : "Chromium";
+  }
+  if (/microsoft-edge/i.test(command)) return "Microsoft Edge";
+  if (/brave/i.test(command)) return "Brave Browser";
+  if (/vivaldi/i.test(command)) return "Vivaldi";
+  if (/google-chrome/i.test(command)) return "Google Chrome";
+  return "Chromium";
 }
 
 // ps 输出不带引号，路径里可能有空格；取到下一个“ --flag”或行尾为止。
@@ -1048,7 +1096,7 @@ function windowsOpenProfilePids(profilePaths: string[], processes: readonly Wind
     const seen = new Set<number>();
     while (current && !seen.has(current.pid)) {
       seen.add(current.pid);
-      if (isGoogleChromeMainProcess(current.commandLine)) return current.pid;
+      if (isChromiumBrowserMainProcess(current.commandLine)) return current.pid;
       current = windowsParent(current, byPid, options);
     }
     return null;

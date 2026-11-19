@@ -2,7 +2,7 @@
 
 **执行更新（2026-11-15）：** 视频由作者自行制作。本轮非视频成果已整理到 [推广材料包](promotion-launch/index.html)：渠道文案、10 张配图、官网与中英文上手页、扩展提交材料、反馈表单和试用记录。发布测试的三处问题已在本地修复，相关 24 项测试通过；[完成项与发布前条件](promotion-launch/release-readiness.md)逐项记录。下文早期清单保留为策划依据，以材料包的状态和文案为准。
 
-更新于 2026-11-15。接续 [Claude 原文](https://claude.ai/artifact/ED7tdyEE9Zm3Pisg8Ly8Ee)，另有 [原稿存档](promotion-plan-claude-original.md)。本版已写入对 browser-use、agent-browser 的比较，并按用户确认，将并行定义为**不同 Profile／应用各自运行**。云端原文尚未回写。
+更新于 2026-11-15。接续 [Claude 原文](https://claude.ai/artifact/ED7tdyEE9Zm3Pisg8Ly8Ee)。本版已写入对 browser-use、agent-browser 的比较，并按用户确认，将并行定义为**不同 Profile／应用各自运行**。云端原文尚未回写。
 
 **建议主打：让已经在用 Claude Code／Codex 的人，直接完成自己电脑上的网页和手机任务。** 最值得展示的是网站适配带来的具体结果、多个独立目标的会话管理，以及浏览器、Electron、安卓的统一入口。开源、复用登录态、支持 CLI 和多会话都值得介绍，但不足以单独解释为什么选择 ProfilePilot。
 

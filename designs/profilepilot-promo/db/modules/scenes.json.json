@@ -1,4 +1,0 @@
-{
-  "kind": "json",
-  "text": "{\n  \"v\": 1,\n  \"stage\": \"final\",\n  \"look\": \"plain：白底深蓝的任务工作台。大字与独立轨道构成 15 秒风格样片，所有流程标注功能示意。\",\n  \"palettes\": [\n    [\n      \"#ffffff\",\n      \"#1558ed\",\n      \"#10244b\",\n      \"#207765\"\n    ]\n  ],\n  \"theirs\": 1,\n  \"width\": 1920,\n  \"height\": 1080,\n  \"fps\": 30,\n  \"background\": \"#ffffff\",\n  \"scenes\": [\n    {\n      \"id\": \"hook\",\n      \"name\": \"各做各的\",\n      \"dur\": 4,\n      \"desc\": \"任务从一个入口分流，标题交代多个 Agent 各自工作。\"\n    },\n    {\n      \"id\": \"parallel\",\n      \"name\": \"不同目标并行\",\n      \"dur\": 7,\n      \"desc\": \"三个任务沿三个独立目标推进，同一目标的额外请求停止。\"\n    },\n    {\n      \"id\": \"end\",\n      \"name\": \"从一个任务开始\",\n      \"dur\": 4,\n      \"desc\": \"Logo 与仓库入口，邀请从一次实际任务开始。\"\n    }\n  ]\n}"
-}

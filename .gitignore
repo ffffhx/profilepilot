@@ -27,6 +27,8 @@ __pycache__/
 .tools/consent-research/
 
 # Local development and verification output
+.impeccable/
+.tools/artifacts/
 .tools/*-runtime.json
 .tools/action-feedback-*-schema.json
 .tools/extension-status-review-*/

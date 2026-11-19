@@ -1,6 +1,6 @@
 # ProfilePilot CLI（`ppilot`）
 
-本机控制按目标分为四组：`ppilot browser`（浏览器）、`ppilot electron`（Electron 应用）、`ppilot desktop`（Windows 原生窗口和系统对话框）、`ppilot phone`（安卓手机）。`ppilot desktop` 不依赖 ClipRelay，macOS 暂不支持此入口；操作流程见[本机桌面控制指引](../skills/profilepilot/references/desktop.md)。配套工具中的 CLI 卡片可点击展开，查看各组用途和命令入口。
+本机控制按目标分为 `ppilot browser`（浏览器）、`ppilot electron`（Electron 应用）、`ppilot desktop`（Windows 与 macOS 原生窗口和系统对话框）、`ppilot phone`（Android 与 iPhone 设备）、`ppilot gpui`（GPUI 应用）及 `ppilot remote`（已连接远程设备）。`ppilot desktop` 不依赖 ClipRelay；操作流程见[本机桌面控制指引](../skills/profilepilot/references/desktop.md)。配套工具中的 CLI 卡片可点击展开，查看各组用途和命令入口。
 
 Profile 的增删改查、配置与启停归入 `ppilot browser profile <操作>`，例如 `ppilot browser profile list --json`。原来的 `ppilot profile <操作>` 保留兼容。Electron 使用 `ppilot electron list` 查询已接入 Gateway 的应用，再以 `ppilot electron --session TASK --cdp PORT snapshot -i` 操作其页面；PORT 必须是该应用的 Agent 逻辑端口。它与浏览器共用页面引擎和接管机制，但不会选择浏览器 Profile，也不包含原生菜单、托盘或系统对话框控制。
 

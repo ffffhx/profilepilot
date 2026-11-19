@@ -1,4 +1,0 @@
-{
-  "kind": "js",
-  "text": "window.W = {\n  mount(kit,id,tag='15 秒样片 · 功能示意') {\n    const root=kit.h('<div class=\"scene-root '+id+'-root\"><div class=\"ground\"></div><div class=\"brand\"><img src=\"'+kit.assets.url('profilepilot.png')+'\"><span>ProfilePilot</span></div><div class=\"tag\">'+kit.esc(tag)+'</div><div class=\"foot\">让 Agent 连接你的本地工作</div><div class=\"progress\"><i></i></div></div>');\n    kit.stage.append(root);\n    return root;\n  },\n  reveal(el,t,at=0,dist=25,dur=.7) {\n    const p=kit.eo(kit.seg(t,at,at+dur));\n    el.style.opacity=p;\n    el.style.transform='translateY('+((1-p)*dist)+'px)';\n  },\n  progress(root,t,start) {root.querySelector('.progress>i').style.transform='scaleX('+kit.clamp01((start+t)/15)+')';},\n  dot(svg,c,x,y){c.setAttribute('cx',x.toFixed(2));c.setAttribute('cy',y.toFixed(2));},\n  pathPoint(p,x0,y0,x1,y1,x2,y2){return [(1-p)*(1-p)*x0+2*(1-p)*p*x1+p*p*x2,(1-p)*(1-p)*y0+2*(1-p)*p*y1+p*p*y2];}\n};\n"
-}

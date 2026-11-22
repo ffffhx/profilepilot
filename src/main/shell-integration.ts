@@ -883,11 +883,13 @@ async function readWindowsUserPath(): Promise<string> {
 async function setWindowsIntegrationPathEnabled(enabled: boolean): Promise<void> {
   const current = await readWindowsUserPath();
   const managedEntries = windowsIntegrationPathEntries();
+  const staleEntries = await staleSandboxPathEntries(current);
   const remaining = current
     .split(";")
     .map((entry) => entry.trim())
     .filter(Boolean)
-    .filter((entry) => !managedEntries.some((managed) => sameWindowsPath(entry, managed)));
+    .filter((entry) => !managedEntries.some((managed) => sameWindowsPath(entry, managed)))
+    .filter((entry) => !staleEntries.some((stale) => sameWindowsPath(entry, stale)));
   const nextEntries = enabled ? [...managedEntries, ...remaining] : remaining;
   const next = nextEntries.join(";");
   if (Object.prototype.hasOwnProperty.call(process.env, "PROFILEPILOT_TEST_WINDOWS_USER_PATH")) {
@@ -943,6 +945,28 @@ async function setWindowsIntegrationPathEnabled(enabled: boolean): Promise<void>
 
 function windowsIntegrationPathEntries(): string[] {
   return [BIN_DIR_PATH, MANAGEMENT_CLI_BIN_DIR_PATH];
+}
+
+// A test or sandbox run can point HOME at a throwaway directory, so its managed
+// entries land in the user PATH and outlive the directory. Treat those dead
+// entries as garbage on every write instead of only removing the exact entries
+// the current installation manages; otherwise they accumulate run after run.
+async function staleSandboxPathEntries(pathValue: string): Promise<string[]> {
+  const tempRoot = path.win32.normalize(os.tmpdir()).replace(/[\\/]+$/, "").toLowerCase();
+  const candidates = pathValue
+    .split(";")
+    .map((entry) => entry.trim().replace(/^"|"$/g, ""))
+    .filter(Boolean)
+    .filter((entry) => {
+      const normalized = path.win32.normalize(entry).replace(/[\\/]+$/, "").toLowerCase();
+      if (!normalized.startsWith(`${tempRoot}\\`)) return false;
+      return /\\\.profilepilot[\\/](bin|cli-bin)$/.test(normalized);
+    });
+  const stale: string[] = [];
+  for (const entry of candidates) {
+    if (!(await isExecutable(entry))) stale.push(entry);
+  }
+  return stale;
 }
 
 function windowsPathIncludes(pathValue: string, candidate: string): boolean {

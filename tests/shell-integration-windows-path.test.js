@@ -1,4 +1,6 @@
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const test = require('node:test');
@@ -138,6 +140,32 @@ test('native Windows notification failure is surfaced without undoing installati
   const status = await shell.setShellIntegrationEnabled(true);
   assert.equal(status.installed, true);
   assert.match(status.warning, /Environment notification failed/);
+});
+
+test('dead sandbox PATH entries are dropped on the next write', onlyWindows, async t => {
+  restoreEnvironment(t);
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'profilepilot-wrapper-prerequisite-'));
+  const liveEntry = path.join(sandbox, '.profilepilot', 'bin');
+  fs.mkdirSync(liveEntry, { recursive: true });
+  const deadEntry = path.join(os.tmpdir(), 'profilepilot-wrapper-prerequisite-gone', '.profilepilot', 'cli-bin');
+  let current = [deadEntry, liveEntry, 'C:\\Keep'].join(';');
+  t.mock.method(windows, 'runWindowsPowerShell', async script => {
+    if (script.includes("OpenSubKey('Environment')")) return current;
+    if (script.includes("CreateSubKey('Environment')")) {
+      current = Buffer.from(script.match(/FromBase64String\('([^']+)'\)/)[1], 'base64').toString('utf8');
+      return '';
+    }
+    return '';
+  });
+  try {
+    assert.equal((await shell.setShellIntegrationEnabled(true)).installed, true);
+    const written = current.split(';');
+    assert.equal(written.includes(deadEntry), false, 'a dead sandbox entry is removed');
+    assert.equal(written.includes(liveEntry), true, 'a live sandbox entry the user may still use is kept');
+    assert.equal(written.at(-1), 'C:\\Keep');
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  }
 });
 
 test('Windows registry I/O preserves Unicode, quotes and expandable PATH entries', onlyWindows, async t => {

@@ -1,7 +1,7 @@
 // Uses Chrome's documented debugger transport. No ChatGPT runtime dependency.
 let socket, config, currentTab, sessionId, ownership = 'user', attached = false, pausedByBrowser = false;
-let heartbeat, preview = false, connecting, authenticated = false, connectionError = '', commandQueue = Promise.resolve();
-let controlEpoch = 0;
+let heartbeat, preview = false, connecting, authenticated = false, connectionError = '', commandQueue = Promise.resolve(), claimQueue = Promise.resolve();
+let controlEpoch = 0, globalControlEpoch = 0;
 let reconnectTimer, reconnectAttempt = 0, detachGraceTimer;
 const RECONNECT_BASE_MS = 500, RECONNECT_MAX_MS = 5000, DETACH_GRACE_MS = 15000;
 function clearReconnectSchedule() { if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = undefined; } }
@@ -148,19 +148,8 @@ function ownerSessionForTab(tabId, excludeSessionId) {
   if (!Number.isSafeInteger(tabId)) return undefined;
   return allActiveSessions().find(s => s.sessionId !== excludeSessionId && (s.currentTab === tabId || s.allowedTabs.has(tabId)));
 }
-function promoteNextPeerIfPrimaryIdle() {
-  if (sessionId || !peerSessions.size) return;
-  const [nextId, next] = peerSessions.entries().next().value;
-  peerSessions.delete(nextId);
-  sessionId = next.sessionId; currentTab = next.currentTab;
-  allowedTabs.clear(); for (const t of next.allowedTabs) allowedTabs.add(t);
-  ownership = next.ownership; attached = next.attached; pausedByBrowser = next.pausedByBrowser;
-  controlEpoch = next.controlEpoch; controlInstance = next.controlInstance; controlIssue = next.controlIssue;
-  preview = next.preview; extensionUi = next.extensionUi;
-  childSessions.clear(); for (const [k, v] of next.childSessions) childSessions.set(k, v);
-  debugFrameCapture = next.debugFrameCapture; debuggerRecovery = next.debuggerRecovery;
-  debuggerRecoverySerial = next.debuggerRecoverySerial; debuggerRecoveryBudget = next.debuggerRecoveryBudget;
-  debuggerDiagnostic = next.debuggerDiagnostic; frameGuardAttachPermit = next.frameGuardAttachPermit;
+function leadSession() {
+  return sessionId ? primarySession : (peerSessions.values().next().value || primarySession);
 }
 // Only tabs created for a task (or explicitly added during takeover) belong to
 // that task. Session storage cannot survive Chrome restart and stale tab IDs.
@@ -392,7 +381,8 @@ function requireOwner(expected) {
   return s;
 }
 async function state() {
-  const tab = currentTab ? await chrome.tabs.get(currentTab).catch(() => undefined) : undefined;
+  const lead = leadSession();
+  const tab = lead.currentTab ? await chrome.tabs.get(lead.currentTab).catch(() => undefined) : undefined;
   let activeTabUrl;
   if (chrome.tabs.query) {
     const activeTabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true }).catch(() => []);
@@ -400,7 +390,7 @@ async function state() {
     if (activeTab && !activeTab.incognito && usable(activeTab.url)) activeTabUrl = activeTab.url;
   }
   const sessionList = await Promise.all(allActiveSessions().map(async s => {
-    const sTab = s.currentTab === currentTab ? tab : (s.currentTab ? await chrome.tabs.get(s.currentTab).catch(() => undefined) : undefined);
+    const sTab = s.currentTab === lead.currentTab ? tab : (s.currentTab ? await chrome.tabs.get(s.currentTab).catch(() => undefined) : undefined);
     return {
       sessionId: s.sessionId,
       tabId: s.currentTab,
@@ -416,26 +406,26 @@ async function state() {
   }));
   return {
     connected: authenticated && socket?.readyState === WebSocket.OPEN,
-    extensionUi: Boolean(extensionUi),
+    extensionUi: allActiveSessions().some(s => Boolean(s.extensionUi)) || Boolean(extensionUi),
     taskTabs: true,
-    controlGeneration: controlGeneration(),
+    controlGeneration: lead.controlGeneration(),
     extensionVersion: chrome.runtime.getManifest?.().version || '0.2.0',
     installationType,
     installationMode,
     installation: { type: installationType, mode: installationMode, temporary: installationMode === 'temporary' },
     capabilities: ['debugCapture', 'extensionUi', 'liveView', 'tabs', 'cdp', 'cdpSessions', 'frameSessionSnapshot', 'history', 'downloads', 'sidePanel', 'taskGroups', 'cookies', 'dialogs', 'multiSession'],
     profileId: config?.profileId,
-    tabId: currentTab,
-    sessionId,
-    ownership,
+    tabId: lead.currentTab,
+    sessionId: lead.sessionId,
+    ownership: lead.ownership,
     tabTitle: tab?.title,
     url: tab?.url,
     activeTabUrl,
-    dialogPending: currentTab ? pendingDialogs.get(currentTab) : undefined,
+    dialogPending: lead.currentTab ? pendingDialogs.get(lead.currentTab) : undefined,
     sessions: sessionList,
-    pausedByBrowser,
-    controlIssue,
-    debuggerDiagnostic,
+    pausedByBrowser: lead.pausedByBrowser,
+    controlIssue: lead.controlIssue,
+    debuggerDiagnostic: lead.debuggerDiagnostic,
     connectionError,
     access
   };
@@ -757,7 +747,8 @@ async function saveSelection() {
   for (const s of allActiveSessions()) {
     if (s.sessionId) taskTabs.set(s.sessionId, { tabId: s.currentTab, tabs: [...s.allowedTabs] });
   }
-  await chrome.storage.session.set({ selection: { profileId: config?.profileId, tabId: currentTab, sessionId }, taskTabs: { profileId: config?.profileId, tasks: [...taskTabs] } });
+  const lead = leadSession();
+  await chrome.storage.session.set({ selection: { profileId: config?.profileId, tabId: lead.currentTab, sessionId: lead.sessionId }, taskTabs: { profileId: config?.profileId, tasks: [...taskTabs] } });
 }
 async function prepareTask(id, check, options = {}, s = primarySession) {
   if (typeof id !== 'string' || !id || id.length > 200) throw new Error('无效的任务会话。');
@@ -818,13 +809,14 @@ async function prepareTask(id, check, options = {}, s = primarySession) {
 }
 async function handle(method, p, check = () => {}) {
   if (method === 'control' && p.action === 'resume') {
-    const resumeTarget = findSession(p.sessionId) || primarySession;
+    const resumeTarget = findSession(p.sessionId) || leadSession();
     const transportCheck = check;
     check = () => {
       transportCheck();
       if (typeof p.controlGeneration !== 'string') throw new Error('请更新 ProfilePilot 应用以使用停止代次保护后再恢复任务。');
       if (p.controlGeneration !== resumeTarget.controlGeneration()) throw new Error('用户已停止或接管，排队恢复已取消。');
     };
+    check.bindSession = transportCheck.bindSession;
   }
   check();
   if (method === 'extension.reload') {
@@ -836,7 +828,10 @@ async function handle(method, p, check = () => {}) {
   }
   if (method === 'cookies.export') return exportCookies(p);
   if (method === 'cookies.import') return importCookies(p);
-  if (method === 'tabs' && !p.sessionId) return (await ordinaryTabs()).map(t => ({ id: String(t.id), title: t.title, url: t.url, active: t.active, current: t.id === currentTab, discarded: Boolean(t.discarded), frozen: Boolean(t.frozen), status: t.status }));
+  if (method === 'tabs' && !p.sessionId) {
+    const leadTab = leadSession().currentTab;
+    return (await ordinaryTabs()).map(t => ({ id: String(t.id), title: t.title, url: t.url, active: t.active, current: t.id === leadTab, discarded: Boolean(t.discarded), frozen: Boolean(t.frozen), status: t.status }));
+  }
   if (method === 'liveView') {
     const tabs = (await bounded(chrome.tabs.query({ windowType: 'normal' }), 1000, '预览标签页查询超时。')).filter(t => !t.incognito && !String(t.url || '').startsWith('chrome-extension://'));
     const focused = await bounded(chrome.windows.getLastFocused(), 1000, '预览窗口查询超时。').catch(() => null);
@@ -892,13 +887,14 @@ async function handle(method, p, check = () => {}) {
       const savedConflict = ownerSessionForTab(taskTabs.get(p.sessionId).tabId, p.sessionId);
       if (savedConflict) throw Object.assign(new Error(`标签页 ${taskTabs.get(p.sessionId).tabId} 已由另一个任务（${savedConflict.sessionId}）占用。`), { code: 'NATIVE_SESSION_CONFLICT' });
     }
-    const usePrimary = !sessionId || sessionId === p.sessionId;
-    const s = usePrimary ? primarySession : (existing || createPeerSession(p.sessionId));
-    if (!usePrimary) peerSessions.set(p.sessionId, s);
+    const usePrimary = !existing && !sessionId;
+    const s = existing || (usePrimary ? primarySession : createPeerSession(p.sessionId));
+    if (!existing && !usePrimary) peerSessions.set(p.sessionId, s);
+    check.bindSession?.(s);
     try {
       await prepareTask(p.sessionId, check, p, s); check();
     } catch (error) {
-      if (!usePrimary && !existing) peerSessions.delete(p.sessionId);
+      if (!existing && !usePrimary) peerSessions.delete(p.sessionId);
       throw error;
     }
     s.sessionId = p.sessionId; s.ownership = 'agent'; s.pausedByBrowser = false;
@@ -919,6 +915,7 @@ async function handle(method, p, check = () => {}) {
         s = !sessionId ? primarySession : createPeerSession(p.sessionId);
         if (createdPeer) peerSessions.set(p.sessionId, s);
       }
+      check.bindSession?.(s);
       try {
         await prepareTask(p.sessionId, check, {}, s); check();
       } catch (error) {
@@ -942,7 +939,6 @@ async function handle(method, p, check = () => {}) {
       if (s) {
         if (s === primarySession) {
           sessionId = undefined; await detach(primarySession); currentTab = undefined; allowedTabs.clear(); pausedByBrowser = false; controlIssue = undefined;
-          promoteNextPeerIfPrimaryIdle();
         } else {
           await detach(s); peerSessions.delete(p.sessionId);
         }
@@ -962,8 +958,8 @@ async function handle(method, p, check = () => {}) {
   }
   if (method === 'disconnect') { await disconnect(true); return {}; }
   if (method === 'focus') {
-    const s = p.sessionId ? findSession(p.sessionId) : primarySession;
-    const targetTab = s?.currentTab ?? (!p.sessionId ? currentTab : undefined);
+    const s = p.sessionId ? findSession(p.sessionId) : leadSession();
+    const targetTab = s?.currentTab;
     if (!targetTab) throw new Error('浏览器会话不匹配。');
     const tab = await chrome.tabs.update(targetTab, { active: true }); await chrome.windows.update(tab.windowId, { focused: true }); return {};
   }
@@ -1176,6 +1172,7 @@ async function openSidePanel(tabId) {
 }
 async function disconnect(forget = false) {
   connectionLog('disconnect-requested', { paired: Boolean(config), step: forget ? 'forget-pairing' : 'replace-connection' });
+  globalControlEpoch++;
   clearReconnectSchedule();
   clearDetachGrace();
   const sessionsToClose = allActiveSessions();
@@ -1242,6 +1239,7 @@ async function connect() {
       const expiresAt = Number.isFinite(message.expiresAt) ? message.expiresAt : Date.now() + 15000;
       const msgSessionId = typeof message.params?.sessionId === 'string' ? message.params.sessionId : undefined;
       if (message.method === 'disconnect') {
+        globalControlEpoch++;
         const active = allActiveSessions();
         if (!active.length) { ownership = 'user'; controlIssue = undefined; controlEpoch++; frameGuardAttachPermit = undefined; }
         for (const s of active) { s.ownership = 'user'; s.controlIssue = undefined; s.controlEpoch++; s.frameGuardAttachPermit = undefined; }
@@ -1249,19 +1247,27 @@ async function connect() {
         const target = findSession(msgSessionId);
         if (target) { target.ownership = 'user'; target.controlIssue = undefined; target.controlEpoch++; target.frameGuardAttachPermit = undefined; }
       }
-      const trackedSession = msgSessionId ? findSession(msgSessionId) : primarySession;
-      const epoch = trackedSession ? trackedSession.controlEpoch : controlEpoch;
+      const initialGlobalEpoch = globalControlEpoch;
+      let trackedSession = msgSessionId ? findSession(msgSessionId) : primarySession;
+      let epoch = trackedSession ? trackedSession.controlEpoch : undefined;
       const check = () => {
         if (socket !== ws || ws.readyState !== WebSocket.OPEN) throw new Error('扩展连接已改变，旧请求已取消。');
-        const currentSession = msgSessionId ? (findSession(msgSessionId) || trackedSession) : primarySession;
-        const currentEpoch = currentSession ? currentSession.controlEpoch : controlEpoch;
-        if (epoch !== currentEpoch) {
-          const stillAgent = currentSession ? (currentSession.ownership === 'agent' && !currentSession.pausedByBrowser) : (ownership === 'agent' && !pausedByBrowser);
+        if (globalControlEpoch !== initialGlobalEpoch) {
           throw Object.assign(new Error('控制状态已改变，排队操作已取消；请读取当前状态并重新观察。'),
-            { code: stillAgent ? 'NATIVE_OBSERVATION_STALE' : 'NATIVE_USER_IN_CONTROL' });
+            { code: 'NATIVE_USER_IN_CONTROL' });
+        }
+        const currentSession = msgSessionId ? (findSession(msgSessionId) || trackedSession) : primarySession;
+        if (epoch !== undefined) {
+          const currentEpoch = currentSession ? currentSession.controlEpoch : controlEpoch;
+          if (epoch !== currentEpoch) {
+            const stillAgent = currentSession ? (currentSession.ownership === 'agent' && !currentSession.pausedByBrowser) : (ownership === 'agent' && !pausedByBrowser);
+            throw Object.assign(new Error('控制状态已改变，排队操作已取消；请读取当前状态并重新观察。'),
+              { code: stillAgent ? 'NATIVE_OBSERVATION_STALE' : 'NATIVE_USER_IN_CONTROL' });
+          }
         }
         if (Date.now() >= expiresAt) throw new Error('请求已超时，未执行排队的浏览器操作。');
       };
+      check.bindSession = s => { trackedSession = s; epoch = s.controlEpoch; };
       // An explicit takeover invalidates queued input before awaiting earlier work.
       const execute = async () => {
         if (socket !== ws || ws.readyState !== WebSocket.OPEN) return;
@@ -1278,7 +1284,9 @@ async function connect() {
         message.method === 'cookies.import' ||
         (message.method === 'cdp' && message.params?.debugCapture === true && debugFollowups.has(message.params.method))
       ) void execute();
-      else {
+      else if (message.method === 'claim' && !trackedSession) {
+        claimQueue = claimQueue.then(execute);
+      } else {
         const queueOwner = msgSessionId ? findSession(msgSessionId) : undefined;
         if (queueOwner && queueOwner !== primarySession) queueOwner.commandQueue = queueOwner.commandQueue.then(execute);
         else commandQueue = commandQueue.then(execute);
@@ -1295,6 +1303,7 @@ async function connect() {
       uiPending.clear();
       const permanent = !config || event?.code === 4001 || event?.code === 4009;
       if (permanent) {
+        globalControlEpoch++;
         clearReconnectSchedule();
         clearDetachGrace();
         reconnectAttempt = 0;
@@ -1554,6 +1563,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   // Stop at receipt, before a slow UI request or queued command can execute.
   if (message.method === 'takeover' || (message.method === 'taskControl' && ['stop', 'takeover'].includes(message.action))) {
     clearDetachGrace();
+    if (!message.sessionId) globalControlEpoch++;
     const targets = message.sessionId ? [findSession(message.sessionId)].filter(Boolean) : allActiveSessions();
     if (!targets.length) {
       ownership = 'user'; controlIssue = undefined; controlEpoch++; frameGuardAttachPermit = undefined; groupState('paused'); void detach().then(publish);

@@ -267,3 +267,61 @@ test('debug protocol follow-ups can resolve an intercepted request while evaluat
   await new Promise(r=>setImmediate(r));assert.ok(w.messages.find(m=>m.id===104)?.error);
   unblock();await new Promise(r=>setImmediate(r));
 });
+
+test('multi-session peer claim succeeds over WebSocket even when primary controlEpoch > 0 and primary is busy, and survives primary release', async t => {
+  const w = await worker(); t.after(w.close);
+  const rpc = (id, method, params) => new Promise((resolve, reject) => {
+    const start = w.messages.length;
+    w.socket.receive({ id, method, params });
+    const poll = () => {
+      const msg = w.messages.slice(start).find(m => m.id === id);
+      if (msg) return msg.error ? reject(Object.assign(new Error(msg.error), { code: msg.code })) : resolve(msg.result);
+      setTimeout(poll, 5);
+    };
+    poll();
+  });
+
+  // Bump primary controlEpoch > 0 via an earlier session release, mimicking a real Chrome profile.
+  await rpc(201, 'claim', { sessionId: 'warmup', tabId: 7 });
+  await rpc(202, 'control', { sessionId: 'warmup', action: 'release' });
+  await rpc(203, 'claim', { sessionId: 'agent-a', tabId: 7 });
+  const stateAfterA = await w.state();
+  assert.ok(!stateAfterA.controlGeneration.endsWith(':0'), `expected primary controlEpoch > 0, got ${stateAfterA.controlGeneration}`);
+
+  // Block agent-a's commandQueue with an in-flight CDP call and concurrently claim tab 8 from agent-b.
+  let unblockA; const blockedA = new Promise(resolve => { unblockA = resolve; });
+  w.chrome.debugger.sendCommand = async (target, method) => {
+    w.calls.push([method, target.tabId]);
+    if (target.tabId === 7 && method === 'Runtime.evaluate') await blockedA;
+    return { tabId: target.tabId, method };
+  };
+  const pendingA = rpc(204, 'cdp', { sessionId: 'agent-a', method: 'Runtime.evaluate' });
+  await new Promise(r => setTimeout(r, 15));
+
+  // Peer claim must succeed immediately (no NATIVE_USER_IN_CONTROL and not stalled behind agent-a's queue).
+  await rpc(205, 'claim', { sessionId: 'agent-b', tabId: 8 });
+  const cdpB = await rpc(206, 'cdp', { sessionId: 'agent-b', method: 'Runtime.evaluate' });
+  assert.equal(cdpB.tabId, 8);
+
+  // Claiming a tab already owned by agent-a is rejected cleanly with NATIVE_SESSION_CONFLICT.
+  await assert.rejects(
+    rpc(207, 'claim', { sessionId: 'agent-c', tabId: 7 }),
+    err => err.code === 'NATIVE_SESSION_CONFLICT'
+  );
+
+  // Release primary agent-a while agent-b continues running without losing object identity or tab ownership.
+  unblockA();
+  await pendingA;
+  await rpc(208, 'control', { sessionId: 'agent-a', action: 'release' });
+  const stateAfterRelease = await w.state();
+  assert.equal(stateAfterRelease.sessionId, 'agent-b');
+  assert.equal(stateAfterRelease.tabId, 8);
+  assert.equal(stateAfterRelease.sessions.length, 1);
+  assert.equal(stateAfterRelease.sessions[0].sessionId, 'agent-b');
+
+  // agent-b still executes commands cleanly and can be released cleanly afterward.
+  const cdpB2 = await rpc(209, 'cdp', { sessionId: 'agent-b', method: 'Runtime.evaluate' });
+  assert.equal(cdpB2.tabId, 8);
+  await rpc(210, 'control', { sessionId: 'agent-b', action: 'release' });
+  assert.equal((await w.state()).sessions.length, 0);
+});

@@ -170,7 +170,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     if (typeof params.url !== "string") invalidInput(`${method} 需要字符串 URL；使用 ${method} URL 或 params 中的 url。`);
     let url: URL;
     try { url = new URL(params.url); } catch { invalidInput(`${method} 需要有效 URL；使用 ${method} URL 或 params 中的 url。`); }
-    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) invalidInput(`${method} 只支持不含凭据的 HTTP/HTTPS 页面。`);
+    if (!["http:", "https:", "chrome-extension:", "chrome:"].includes(url.protocol) || url.username || url.password) invalidInput(`${method} 只支持不含凭据的 HTTP/HTTPS、chrome-extension:// 或 chrome:// 页面。`);
   } else if (method === "dialog" && positional !== undefined) {
     if (!["accept", "dismiss"].includes(positional)) invalidInput("dialog 参数必须是 accept 或 dismiss。");
     params.accept = positional === "accept";

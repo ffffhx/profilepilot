@@ -4,7 +4,7 @@ import path from "node:path";
 import type { BrowserAction, BrowserObservation, BrowserTask } from "../../shared/tasks";
 import { browserActionSchema, type BrowserAdapter } from "./browser";
 import type { PageReadOptions } from "./fast-browser";
-import type { NativeBrowserTransport } from "./native-bridge";
+import type { NativeBrowserTransport, NativeConnectionState } from "./native-bridge";
 import { NATIVE_EXTENSION_UPDATE_MESSAGE } from "./native-compatibility";
 import { NativeControlError } from "../native-control/errors";
 import { runSiteAdapter, siteEvaluationValue } from "../site-adapters/runner";
@@ -17,13 +17,50 @@ export const isNativeTask = (task: BrowserTask): boolean => task.browserConnecti
 // The same task/approval pipeline is used by both transports. Native Chrome is
 // never launched with debugging flags and no browser credentials are copied.
 export class NativeBrowser implements BrowserAdapter {
+  private sessionState(task: BrowserTask): NativeConnectionState | undefined {
+    const state = this.bridge.states().find(s => s.profileId === task.profileId);
+    if (!state || !Array.isArray(state.sessions)) return state;
+    const entry = state.sessions.find(s => s.sessionId === task.sessionId);
+    if (entry) {
+      return {
+        ...state,
+        ownerSessionId: entry.sessionId,
+        ownership: entry.ownership,
+        pausedByBrowser: entry.pausedByBrowser === true,
+        controlGeneration: entry.controlGeneration ?? state.controlGeneration,
+        controlIssue: entry.controlIssue,
+        tabId: entry.tabId,
+        dialogPending: entry.dialogPending,
+        tabTitle: entry.tabTitle,
+        url: entry.url
+      };
+    }
+    const userControlled = state.sessions.find(s => s.ownership === "user" || s.pausedByBrowser);
+    if (userControlled) {
+      return {
+        ...state,
+        ownerSessionId: userControlled.sessionId,
+        ownership: userControlled.ownership,
+        pausedByBrowser: userControlled.pausedByBrowser === true,
+        controlGeneration: userControlled.controlGeneration ?? state.controlGeneration,
+        controlIssue: userControlled.controlIssue
+      };
+    }
+    return {
+      ...state,
+      ownerSessionId: undefined,
+      ownership: "user",
+      pausedByBrowser: false,
+      controlIssue: undefined
+    };
+  }
   async siteAdapter(task: BrowserTask, input: SiteInput, check?: (url: string) => void): Promise<SiteResult> {
     await this.claim(task);
-    const generation = this.bridge.states().find(s => s.profileId === task.profileId)?.controlGeneration;
+    const generation = this.sessionState(task)?.controlGeneration;
     this.resetObservation(task);
     const guard = (url: string) => {
       check?.(url);
-      const state = this.bridge.states().find(s => s.profileId === task.profileId);
+      const state = this.sessionState(task);
       if (!state?.connected) throw new NativeControlError("NATIVE_DISCONNECTED", "浏览器已断开，适配读取停止。");
       if (state.ownerSessionId !== task.sessionId) throw new NativeControlError("NATIVE_SESSION_CONFLICT", "会话控制权已改变，适配读取停止。");
       if (state.controlGeneration !== generation || state.ownership !== "agent" || state.pausedByBrowser) throw new NativeControlError("NATIVE_USER_IN_CONTROL", "用户接管后，适配读取停止；请显式交还后重试。");
@@ -40,7 +77,7 @@ export class NativeBrowser implements BrowserAdapter {
     this.stopEvents = bridge.onEvent(event => this.fast.event(event));
   }
   private async claim(task: BrowserTask): Promise<void> {
-    const state = this.bridge.states().find(s => s.profileId === task.profileId);
+    const state = this.sessionState(task);
     if (!state?.connected) throw new Error("系统 Chrome 扩展未连接，请先在扩展中连接此 Profile。");
     if (!state.taskTabs) throw new Error(NATIVE_EXTENSION_UPDATE_MESSAGE);
     if (state.ownerSessionId && state.ownerSessionId !== task.sessionId) throw new Error("这个 Profile 已由另一个任务占用。");
@@ -51,7 +88,7 @@ export class NativeBrowser implements BrowserAdapter {
     if (!state.ownerSessionId) await this.bridge.request(task.profileId, "claim", { sessionId: task.sessionId, taskTitle: task.title, ...task.nativeTarget });
   }
   syncTaskState(task: BrowserTask): void {
-    const state = this.bridge.states().find(s => s.profileId === task.profileId);
+    const state = this.sessionState(task);
     if (!state?.connected || state.ownerSessionId !== task.sessionId || !state.capabilities?.includes("taskGroups")) return;
     const params = { sessionId: task.sessionId, taskTitle: task.title, status: task.status, controlGeneration: state.controlGeneration };
     const stamp = JSON.stringify(params);
@@ -106,7 +143,7 @@ export class NativeBrowser implements BrowserAdapter {
         stable = stable !== false && JSON.stringify(await this.fast.visualState(task)) === JSON.stringify(visual);
         if (stable && captureState) stable = JSON.stringify(await this.fast.captureState(task)) === JSON.stringify(captureState);
       } catch (error) {
-        const state = this.bridge.states().find(s => s.profileId === task.profileId);
+        const state = this.sessionState(task);
         // Keep the successful DOM read when only the image is unavailable.
         // A real takeover, disconnect or session change still stops the task.
         if (!state?.connected || state.ownerSessionId !== task.sessionId || state.ownership !== "agent" || state.pausedByBrowser) throw error;
@@ -151,7 +188,7 @@ export class NativeBrowser implements BrowserAdapter {
     }
     if (action.kind === "open") {
       const url = new URL(action.value || "");
-      if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) throw new Error("只支持不含凭据的 HTTP/HTTPS 页面。");
+      if (!["http:", "https:", "chrome-extension:", "chrome:"].includes(url.protocol) || url.username || url.password) throw new Error("只支持不含凭据的 HTTP/HTTPS、chrome-extension:// 或 chrome:// 页面。");
       try {
         const result = await this.request(task, "open", { url: url.href });
         if (result.errorText) throw new Error(result.errorText);
@@ -255,14 +292,14 @@ export class NativeBrowser implements BrowserAdapter {
   }
   dispose(): void { this.stopEvents(); }
   controlGeneration(task: BrowserTask): string {
-    const state = this.bridge.states().find(s => s.profileId === task.profileId);
+    const state = this.sessionState(task);
     if (!state?.connected) throw new NativeControlError("NATIVE_DISCONNECTED", "扩展断线；请检查 status，不会自动恢复或重放。");
     if (!state.taskTabs || !state.controlGeneration) throw new NativeControlError("NATIVE_EXTENSION_UPDATE_REQUIRED", "当前扩展缺少停止代次保护，请更新并重新加载 ProfilePilot 扩展后再显式恢复任务；停止和结束仍可使用。");
     return state.controlGeneration;
   }
   async control(task: BrowserTask, action: "handoff" | "resume" | "complete" | "release", expectedGeneration?: string): Promise<void> {
     this.fast.forget(task);
-    const state = this.bridge.states().find(s => s.profileId === task.profileId);
+    const state = this.sessionState(task);
     // A disconnected extension already stopped input. Completing locally must not
     // reacquire it or unexpectedly resume Chrome on the next connection.
     if (!state?.connected && action !== "resume") return;
@@ -280,7 +317,7 @@ export class NativeBrowser implements BrowserAdapter {
       // They may time out after waking a usable but still loading renderer.
       // Retry only this explicit resume, once. Never replay a page action.
       if (action !== "resume" || !(error instanceof Error) || !error.message.includes("授权标签页正在从休眠恢复")) throw error;
-      const current = this.bridge.states().find(s => s.profileId === task.profileId);
+      const current = this.sessionState(task);
       if (!current?.connected || current.ownerSessionId !== task.sessionId) throw error;
       await request();
     }

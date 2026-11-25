@@ -12,6 +12,7 @@ import { writeControlTrace } from "../control-trace";
 import { isNativeControlMethod } from "./protocol";
 import { nativeExtensionReady, NATIVE_EXTENSION_UPDATE_MESSAGE } from "../tasks/native-compatibility";
 import { NativeExtensionUi } from './extension-ui';
+import { NativeBrowserCdpRouter, isPrivilegedBrowserUrl, parseAllowedBrowserUrl, type BrowserCdpRouterOptions } from './browser-cdp';
 import { listSiteAdapters } from '../site-adapters/catalog';
 import { BrowserDebugSession, type DebugEvent } from '../browser-debug/session';
 import { observeAfterBrowserAction } from '../browser-action-feedback';
@@ -57,6 +58,7 @@ export function publicNativeObservation(observation: BrowserObservation): unknow
 export class NativeControlService {
   private readonly browser: NativeBrowser;
   private readonly extensionUi: NativeExtensionUi;
+  private readonly browserCdp: NativeBrowserCdpRouter;
   private readonly sessions = new Map<string, Session>();
   private readonly receipts = new Map<string, Receipt>();
   private readonly statusReceipts = new Map<string, Receipt>();
@@ -72,7 +74,7 @@ export class NativeControlService {
   constructor(
     private readonly bridge: NativeBrowserBridge,
     private readonly root: string,
-    options: { actionReceiptLimit?: number; receiptTtlMs?: number; now?: () => number } = {}
+    options: { actionReceiptLimit?: number; receiptTtlMs?: number; now?: () => number; browserCdp?: BrowserCdpRouterOptions } = {}
   ) {
     this.receiptLimit =
       Number.isSafeInteger(options.actionReceiptLimit) && Number(options.actionReceiptLimit) > 0
@@ -83,6 +85,7 @@ export class NativeControlService {
         ? Number(options.receiptTtlMs)
         : ACTION_RECEIPT_TTL_MS;
     this.now = typeof options.now === "function" ? options.now : Date.now;
+    this.browserCdp = new NativeBrowserCdpRouter(options.browserCdp);
     const scopedBridge: NativeBrowserTransport = {
       states: () => {
         const sid = this.activeSessionStorage.getStore();
@@ -90,8 +93,40 @@ export class NativeControlService {
           ? bridge.states().map((state) => this.viewStateForSession(state, sid)!)
           : bridge.states();
       },
-      onEvent: (listener) => bridge.onEvent(listener),
-      request: (profileId, method, params, timeoutMs) => bridge.request(profileId, method, params, timeoutMs)
+      onEvent: (listener) => {
+        const unsubBridge = bridge.onEvent(listener);
+        const unsubCdp = this.browserCdp.onEvent(listener);
+        return () => { unsubBridge(); unsubCdp(); };
+      },
+      request: async (profileId, method, params = {}, timeoutMs) => {
+        const sid = (typeof params.sessionId === "string" ? params.sessionId : undefined) || this.activeSessionStorage.getStore();
+        if (sid && this.browserCdp.has(sid)) {
+          if (method === "cdp") {
+            return this.browserCdp.sendCdp(
+              sid,
+              String(params.method || ""),
+              (params.params as Record<string, unknown>) || {},
+              typeof params.cdpSessionId === "string" ? params.cdpSessionId : undefined,
+              timeoutMs
+            );
+          }
+          if (method === "preparePointer") return {};
+          if (method === "open") {
+            if (isPrivilegedBrowserUrl(params.url)) {
+              const tabId = this.viewStateForSession(bridge.states().find(s => s.profileId === profileId), sid)?.tabId ?? 1;
+              return this.browserCdp.open(profileId, sid, String(params.url), tabId);
+            }
+            await this.browserCdp.detach(sid);
+          }
+          if (method === "switch" || method === "closeTab") {
+            await this.browserCdp.detach(sid);
+          }
+        } else if (sid && method === "open" && isPrivilegedBrowserUrl(params.url)) {
+          const tabId = this.viewStateForSession(bridge.states().find(s => s.profileId === profileId), sid)?.tabId ?? 1;
+          return this.browserCdp.open(profileId, sid, String(params.url), tabId);
+        }
+        return bridge.request(profileId, method, params, timeoutMs);
+      }
     };
     this.browser = new NativeBrowser(scopedBridge, path.join(root, "native-control-artifacts"));
     this.extensionUi = new NativeExtensionUi(bridge);
@@ -120,15 +155,20 @@ export class NativeControlService {
       }
     });
   }
-  close(): void { for(const session of this.sessions.values())session.debug?.suspend('service-closed'); this.unsubscribe(); this.extensionUi.close(); this.browser.dispose?.(); }
+  close(): void { for(const session of this.sessions.values())session.debug?.suspend('service-closed'); this.unsubscribe(); this.extensionUi.close(); this.browserCdp.close(); this.browser.dispose?.(); }
   hasSessions(): boolean { return this.sessions.size > 0; }
   ownsSession(profileId: string, sessionId: string): boolean { return this.sessions.get(sessionId)?.task.profileId === profileId; }
   private viewStateForSession(state: NativeConnectionState | undefined, sessionId: string): NativeConnectionState | undefined {
     if (!state) return undefined;
+    const cdpTarget = this.browserCdp.targetInfo(sessionId);
+    const applyCdpTarget = (view: NativeConnectionState): NativeConnectionState =>
+      cdpTarget && view.ownerSessionId === sessionId
+        ? { ...view, url: cdpTarget.url, ...(cdpTarget.title ? { tabTitle: cdpTarget.title } : {}) }
+        : view;
     if (Array.isArray(state.sessions)) {
       const entry = state.sessions.find(s => s.sessionId === sessionId);
       if (entry) {
-        return {
+        return applyCdpTarget({
           ...state,
           ownerSessionId: entry.sessionId,
           ownership: entry.ownership,
@@ -139,7 +179,7 @@ export class NativeControlService {
           dialogPending: entry.dialogPending,
           tabTitle: entry.tabTitle,
           url: entry.url
-        };
+        });
       }
       return {
         ...state,
@@ -152,7 +192,7 @@ export class NativeControlService {
         dialogPending: undefined
       };
     }
-    return state;
+    return applyCdpTarget(state);
   }
   private evictCompletedReceipts(): void {
     const now = this.now();
@@ -177,9 +217,13 @@ export class NativeControlService {
     session.control = next;
     if (session.debug && (session.debugEpoch !== session.epoch || session.debugTab !== state?.tabId || !next.connected || !next.owned || !next.agent || next.paused)) {session.debug.suspend('control-or-tab-changed');session.debugFrames?.clear();}
     if(!next.connected||!next.owned||!next.agent||next.paused)session.debugFrames?.clear();
-    if (previous.generation !== undefined && previous.generation !== next.generation) this.extensionUi.cancel(session.task.sessionId);
+    if (previous.generation !== undefined && previous.generation !== next.generation) {
+      this.extensionUi.cancel(session.task.sessionId);
+      void this.browserCdp.detach(session.task.sessionId);
+    }
     if (!next.connected || !next.owned || !next.agent || next.paused) {
       session.task.observation = undefined; this.extensionUi.cancel(session.task.sessionId);
+      void this.browserCdp.detach(session.task.sessionId);
     }
   }
   request(command: any): Promise<unknown> {
@@ -264,6 +308,7 @@ export class NativeControlService {
       ...(state?.dialogPending ? { dialogPending: state.dialogPending } : {}),
       lastMethod: session.lastMethod, lastRequestId: session.lastRequestId,
       extensionUi: this.extensionUi.status(id),
+      ...(this.browserCdp.targetInfo(id) ? { browserCdpTarget: this.browserCdp.targetInfo(id) } : {}),
       ...(session.ending ? { ending: true } : {}),
       nextStep: session.ending ? "release" : pauseReason ? "inspect-state" : "continue-owned-session" };
   }
@@ -369,6 +414,7 @@ export class NativeControlService {
         // after failure without ever reopening this generation for new work.
         session.ending = true; session.epoch++; task.observation = undefined; session.debug?.suspend('session-ended');
         this.extensionUi.cancel(task.sessionId);
+        void this.browserCdp.detach(task.sessionId);
         const result = this.activeSessionStorage.run(task.sessionId, async () => {
           if (!this.bridge.states().find(s => s.profileId === task.profileId)?.connected) throw new NativeControlError("NATIVE_DISCONNECTED", "扩展断线，尚未确认会话结束；已保留会话身份。重连后请显式 complete 或 release，不会自动恢复或重放。");
           await this.browser.control(task, params.action);
@@ -379,7 +425,7 @@ export class NativeControlService {
         try { return await result; }
         finally { if (session.termination === result) session.termination = undefined; }
       }
-      if (params.action === "handoff") { session.epoch++; session.control.agent = false; session.debug?.suspend('user-control'); this.extensionUi.cancel(task.sessionId); }
+      if (params.action === "handoff") { session.epoch++; session.control.agent = false; session.debug?.suspend('user-control'); this.extensionUi.cancel(task.sessionId); void this.browserCdp.detach(task.sessionId); }
     }
     // Bind permission before joining the service queue. The extension also
     // checks this original token, including if its newer state arrives late.
@@ -458,11 +504,13 @@ export class NativeControlService {
               : undefined;
         if (typeof accept !== "boolean") throw new NativeControlError("NATIVE_INVALID_REQUEST", "dialog 需要布尔值 accept 或 action: accept/dismiss。");
         task.observation = undefined;
-        const dialogResult = await this.bridge.request(task.profileId, "dialog", {
-          sessionId: task.sessionId,
-          accept,
-          ...(typeof params.promptText === "string" ? { promptText: params.promptText } : {})
-        });
+        const dialogResult = this.browserCdp.has(task.sessionId)
+          ? await this.browserCdp.handleDialog(task.sessionId, accept, typeof params.promptText === "string" ? params.promptText : undefined)
+          : await this.bridge.request(task.profileId, "dialog", {
+              sessionId: task.sessionId,
+              accept,
+              ...(typeof params.promptText === "string" ? { promptText: params.promptText } : {})
+            });
         return finishAction(dialogResult);
       }
       if (method === "action" || method === "pointer") {
@@ -491,7 +539,11 @@ export class NativeControlService {
               throw new NativeControlError('NATIVE_USER_IN_CONTROL','调试采集已停止；请检查控制状态。');
           };
           session.debug = new BrowserDebugSession({check,send:(cdpMethod,cdpParams,cdpSessionId)=>{
-            check(); return this.bridge.request(task.profileId,'cdp',{sessionId:task.sessionId,method:cdpMethod,params:cdpParams,cdpSessionId,debugCapture:true});
+            check();
+            if (this.browserCdp.has(task.sessionId)) {
+              return this.browserCdp.sendCdp(task.sessionId, cdpMethod, (cdpParams as Record<string, unknown>) || {}, cdpSessionId);
+            }
+            return this.bridge.request(task.profileId,'cdp',{sessionId:task.sessionId,method:cdpMethod,params:cdpParams,cdpSessionId,debugCapture:true});
           }},path.join(this.root,'native-control-artifacts',task.sessionId));
         }
         session.debugEpoch=epoch;session.debugTab=state.tabId;
@@ -505,21 +557,37 @@ export class NativeControlService {
         return download.call(this.browser, task, params);
       }
       if (["open", "newTab", "switch"].includes(method)) {
+        let parsedUrl: URL | undefined;
         if (method === "open" || (method === "newTab" && params.url !== undefined)) {
-          let url: URL;
-          try { url = new URL(params.url); } catch { throw new NativeControlError("NATIVE_INVALID_REQUEST", "open 需要有效的 HTTP/HTTPS 网址。"); }
-          if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) throw new NativeControlError("NATIVE_INVALID_REQUEST", "只支持不含凭据的 HTTP/HTTPS 页面。");
+          parsedUrl = parseAllowedBrowserUrl(params.url, method);
         }
         if (method === "switch" && (!Number.isSafeInteger(params.tabId) || params.tabId <= 0)) throw new NativeControlError("NATIVE_INVALID_REQUEST", "switch 需要有效的标签页编号。");
         let result;
         try {
-          result = await this.bridge.request(task.profileId, method, { ...params, sessionId: task.sessionId });
-          if (result?.errorText) throw new NativeControlError("NATIVE_BROWSER_ERROR", `导航失败：${result.errorText}`);
+          if (parsedUrl && isPrivilegedBrowserUrl(parsedUrl.href)) {
+            result = await this.browserCdp.open(task.profileId, task.sessionId, parsedUrl.href, state.tabId ?? 1, { newTab: method === "newTab" });
+          } else {
+            if (this.browserCdp.has(task.sessionId)) {
+              await this.browserCdp.detach(task.sessionId);
+            }
+            result = await this.bridge.request(task.profileId, method, { ...params, sessionId: task.sessionId });
+            if (result?.errorText) throw new NativeControlError("NATIVE_BROWSER_ERROR", `导航失败：${result.errorText}`);
+          }
         } finally {
           // Even a failed navigation may commit Chrome's error document.
           this.browser.resetObservation(task);
         }
         return { ...result, ...await finishAction(result) };
+      }
+      if (method === "cdp" && this.browserCdp.has(task.sessionId)) {
+        task.observation = undefined;
+        return this.browserCdp.sendCdp(
+          task.sessionId,
+          String(params.method || ""),
+          (params.params as Record<string, unknown>) || {},
+          typeof params.cdpSessionId === "string" ? params.cdpSessionId : undefined,
+          15000
+        );
       }
       if (["tabs", "history", "cdp", "cookies.export", "cookies.import", "downloads.start", "downloads.search", "downloads.wait", "downloads.cancel", "downloads.disarm"].includes(method)) {
         if (!["tabs", "history", "cookies.export", "downloads.search", "downloads.wait"].includes(method)) task.observation = undefined;

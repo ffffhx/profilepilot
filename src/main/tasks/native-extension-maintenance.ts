@@ -2,7 +2,7 @@ import type { NativeInstallDriver } from "./native-installer";
 
 interface MaintenanceState {
   profileId: string; connected: boolean; extensionVersion?: string; installationType?: string; installationMode?: string;
-  ownerSessionId?: string; pausedByBrowser?: boolean;
+  ownerSessionId?: string; pausedByBrowser?: boolean; sessions?: Array<{ sessionId: string }>;
 }
 interface MaintenanceBridge {
   states(): MaintenanceState[];
@@ -48,7 +48,7 @@ export function startNativeExtensionMaintenance(driver: NativeInstallDriver, bri
         clearTimeout(waiting.get(state.profileId)); waiting.delete(state.profileId);
         driver.reportMaintenance?.(state.profileId);
       }
-      if (!state.connected || state.ownerSessionId || state.pausedByBrowser || state.installationMode === 'temporary' || state.installationType !== 'development' || !state.extensionVersion || !olderVersion(state.extensionVersion, expectedVersion)) continue;
+      if (!state.connected || state.ownerSessionId || (state.sessions && state.sessions.length > 0) || state.pausedByBrowser || state.installationMode === 'temporary' || state.installationType !== 'development' || !state.extensionVersion || !olderVersion(state.extensionVersion, expectedVersion)) continue;
       const key = `${state.profileId}:${state.extensionVersion}:${expectedVersion}`;
       if (attempted.has(key)) continue;
       attempted.add(key);

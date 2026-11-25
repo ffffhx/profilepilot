@@ -100,3 +100,39 @@ test('doctor checks the live service and wait-control observes release without c
   assert.equal(ready.available, true); assert.equal(ready.claimed, false); assert.equal(ready.resumed, false);
   assert.ok(calls.every(c => ['ping', 'status'].includes(c)));
 });
+
+test('browserReadiness and waitForBrowserControl recognize concurrent multiSession profiles', async t => {
+  const multiProfile = {
+    profileId: 'native:Default',
+    connected: true,
+    taskTabs: true,
+    extensionVersion: '0.2.20',
+    capabilities: [...NATIVE_REQUIRED_CAPABILITIES, 'multiSession'],
+    installationType: 'development',
+    ownerSessionId: 'agent-a',
+    ownership: 'agent',
+    sessions: [{ sessionId: 'agent-a', tabId: 11, tabs: [11], ownership: 'agent', pausedByBrowser: false }]
+  };
+  const forOther = browserReadiness({ profiles: [multiProfile], sessions: [{ sessionId: 'agent-a', title: 'Task A' }] }, '0.2.20', 'native:Default', 'agent-b')[0];
+  assert.equal(forOther.multiSession, true);
+  assert.equal(forOther.readyToClaim, true);
+  assert.equal(forOther.readyToObserve, false);
+
+  const forSelf = browserReadiness({ profiles: [multiProfile], sessions: [{ sessionId: 'agent-a', title: 'Task A' }] }, '0.2.20', 'native:Default', 'agent-a')[0];
+  assert.equal(forSelf.readyToObserve, true);
+  assert.equal(forSelf.readyToClaim, false);
+
+  const userTakeover = { ...multiProfile, ownership: 'user', sessions: [{ sessionId: 'agent-a', tabId: 11, tabs: [11], ownership: 'user', pausedByBrowser: false }] };
+  const blocked = browserReadiness({ profiles: [userTakeover] }, '0.2.20', 'native:Default', 'agent-b')[0];
+  assert.equal(blocked.readyToClaim, false);
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'browser-multi-')); t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const server = http.createServer(async (req, res) => {
+    for await (const _ of req) {}
+    res.end(JSON.stringify({ ok: true, result: { profiles: [multiProfile], sessions: [] } }));
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve)); t.after(() => new Promise(resolve => server.close(resolve)));
+  fs.writeFileSync(path.join(root, 'native-control.json'), JSON.stringify({ version: 1, pid: process.pid, port: server.address().port, token: 'b'.repeat(64) }));
+  const ready = await waitForBrowserControl({ root, profileId: 'native:Default', sessionId: 'agent-b', timeoutMs: 500 });
+  assert.equal(ready.available, true);
+});

@@ -9,7 +9,7 @@ import { RUNNING_CONTROL_BUILD } from '../runtime-identity';
 export class BrowserServiceHost {
   private sequence = 0;
   private clients = new Map<string, ServerResponse>();
-  private desktopSessions = new Map<string, Map<string, string>>();
+  private desktopSessions = new Map<string, Map<string, Set<string>>>();
   private ui = new Map<string, { clientId: string; resolve(value: unknown): void; reject(error: Error): void; timer: NodeJS.Timeout }>();
   private unsubscribe: () => void;
   private heartbeat: NodeJS.Timeout;
@@ -24,7 +24,14 @@ export class BrowserServiceHost {
   }
   private snapshot(sequence = this.sequence) {
     const states = this.bridge.states();
-    return { sequence, states, installations: this.bridge.installationStates(), directSessions: states.filter(s => s.ownerSessionId && this.bridge.isDirectSession(s.profileId, s.ownerSessionId)).map(s => `${s.profileId}\n${s.ownerSessionId}`) };
+    const directSessions = new Set<string>();
+    for (const s of states) {
+      if (s.ownerSessionId && this.bridge.isDirectSession(s.profileId, s.ownerSessionId)) directSessions.add(`${s.profileId}\n${s.ownerSessionId}`);
+      for (const entry of s.sessions || []) {
+        if (entry.sessionId && this.bridge.isDirectSession(s.profileId, entry.sessionId)) directSessions.add(`${s.profileId}\n${entry.sessionId}`);
+      }
+    }
+    return { sequence, states, installations: this.bridge.installationStates(), directSessions: [...directSessions] };
   }
   private publishEvent(event: NativeEvent): void {
     this.broadcast({ type: 'event', sequence: ++this.sequence, event, directSession: Boolean(event.sessionId && this.bridge.isDirectSession(event.profileId, event.sessionId)) });
@@ -76,7 +83,7 @@ export class BrowserServiceHost {
     if (method === 'revealExtension') return this.installer.revealExtension?.();
     if (method === 'disconnect') return this.bridge.disconnect(args[0]);
     if (method === 'stop') {
-      if (this.pendingClaims || this.bridge.hasSessions() || this.bridge.states().some(s => s.ownerSessionId)) throw new Error('仍有浏览器会话，请先 complete 或 release，再停止服务。');
+      if (this.pendingClaims || this.bridge.hasSessions() || this.bridge.states().some(s => s.ownerSessionId || (s.sessions && s.sessions.length > 0))) throw new Error('仍有浏览器会话，请先 complete 或 release，再停止服务。');
       this.stopping = true; this.bridge.stopAcceptingCommands();
       this.broadcast({ type: 'stopping' });
       setTimeout(this.shutdown, 100); return { stopped: true };
@@ -94,7 +101,12 @@ export class BrowserServiceHost {
       // A desktop connection can only drive its own pp-task-* sessions. The
       // direct CLI namespace remains owned by NativeControlService.
       if (params.sessionId && (typeof params.sessionId !== 'string' || !params.sessionId.startsWith('pp-task-'))) throw new Error('桌面请求不能操作外部 CLI 会话。');
-      if (params.sessionId) this.desktopSessions.get(clientId)!.set(profileId, params.sessionId);
+      if (params.sessionId) {
+        const clientMap = this.desktopSessions.get(clientId)!;
+        let profileSet = clientMap.get(profileId);
+        if (!profileSet) { profileSet = new Set(); clientMap.set(profileId, profileSet); }
+        profileSet.add(params.sessionId);
+      }
       if (command === 'claim') this.pendingClaims++;
       let result;
       try { result = await this.bridge.request(profileId, command, params, timeoutMs); }
@@ -111,13 +123,14 @@ export class BrowserServiceHost {
   }
   private async pauseDesktopOwner(profileId: string, sessionId: string): Promise<void> {
     const state = this.bridge.states().find(s => s.profileId === profileId);
-    if (state?.connected && state.ownerSessionId === sessionId && !this.bridge.isDirectSession(profileId, sessionId)) await this.bridge.request(profileId, 'control', { sessionId, action: 'handoff' }).catch(() => {});
+    const active = state?.ownerSessionId === sessionId || Boolean(state?.sessions?.some(e => e.sessionId === sessionId));
+    if (state?.connected && active && !this.bridge.isDirectSession(profileId, sessionId)) await this.bridge.request(profileId, 'control', { sessionId, action: 'handoff' }).catch(() => {});
   }
   private detach(clientId: string): void {
     this.clients.delete(clientId);
     for (const [id, pending] of this.ui) if (pending.clientId === clientId) { clearTimeout(pending.timer); pending.reject(new Error('App 已关闭；浏览器服务及 CLI 连接仍可使用。')); this.ui.delete(id); }
     const sessions = this.desktopSessions.get(clientId); this.desktopSessions.delete(clientId);
-    for (const [profileId, sessionId] of sessions || []) void this.pauseDesktopOwner(profileId, sessionId);
+    for (const [profileId, sessionIds] of sessions || []) for (const sessionId of sessionIds) void this.pauseDesktopOwner(profileId, sessionId);
   }
   private desktopUi(profileId: string, method: string, params: Record<string, unknown>): Promise<unknown> {
     const client = [...this.clients].at(-1);

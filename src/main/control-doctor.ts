@@ -59,16 +59,44 @@ export function browserReadiness(snapshot: any, expectedVersion?: string, profil
     add("extension-version", aligned ? "ok" : "warning", `实际扩展 ${versionKnown ? p.extensionVersion : "尚未确认"}；当前构建配套 ${expectedVersion || "未知"}。`, !versionKnown ? "待扩展连接并上报版本后重新检查。" : aligned ? undefined : "核对实际运行扩展版本，必要时通过安装入口加载配套版本；新于配套版本时检查兼容性。");
     add("installation", p.installationMode === "temporary" ? "warning" : p.installationType ? "ok" : "warning",
       p.installationMode === "temporary" ? "扩展为临时安装，重启 Chrome 后需重新验证；不会自动重载。" : `安装类型：${p.installationType || "尚未确认"}。`);
-    if (p.controlIssue) add("control", "error", p.controlIssue.message, controlRecovery(p.controlIssue.code).instruction);
-    else if (p.ownerSessionId) add("ownership", p.ownerSessionId === sessionId && p.ownership === "agent" && !p.pausedByBrowser ? "ok" : "warning",
+    const supportsMultiSession = Boolean(p.capabilities?.includes("multiSession") || Array.isArray(p.sessions));
+    const activeSessions: any[] = Array.isArray(p.sessions)
+      ? p.sessions
+      : (p.ownerSessionId ? [{ sessionId: p.ownerSessionId, ownership: p.ownership, pausedByBrowser: p.pausedByBrowser, controlIssue: p.controlIssue }] : []);
+    const selfSession = sessionId ? activeSessions.find(s => s.sessionId === sessionId) : undefined;
+    const userControlled = activeSessions.find(s => s.sessionId !== sessionId && (s.ownership === "user" || s.pausedByBrowser));
+    const activeIssue = selfSession?.controlIssue || (!supportsMultiSession ? p.controlIssue : userControlled?.controlIssue || (!activeSessions.length ? p.controlIssue : undefined));
+    if (activeIssue) add("control", "error", activeIssue.message, controlRecovery(activeIssue.code).instruction);
+    else if (supportsMultiSession) {
+      if (selfSession) {
+        add("ownership", selfSession.ownership === "agent" && !selfSession.pausedByBrowser ? "ok" : "warning",
+          `当前会话：${selfSession.sessionId}；控制者：${selfSession.ownership === "agent" ? "Agent" : "用户"}。`,
+          selfSession.ownership === "agent" && !selfSession.pausedByBrowser ? undefined : "检查暂停原因；明确交还后恢复并重新观察。");
+      } else if (userControlled) {
+        add("ownership", "warning",
+          `当前 Profile 处于用户接管或暂停状态（${userControlled.sessionId}）。`,
+          "请先交还控制或结束原任务后再 claim。");
+      } else if (activeSessions.length > 0) {
+        add("ownership", "ok",
+          `已有 ${activeSessions.length} 个并发会话（${activeSessions.map(s => s.sessionId).join("、")}），支持多会话并发 claim 独立标签页。`);
+      }
+    } else if (p.ownerSessionId) add("ownership", p.ownerSessionId === sessionId && p.ownership === "agent" && !p.pausedByBrowser ? "ok" : "warning",
       `占用会话：${p.ownerSessionId}；控制者：${p.ownership === "agent" ? "Agent" : "用户"}。`,
       p.ownerSessionId === sessionId ? "检查暂停原因；明确交还后恢复并重新观察。" : "查看 owner，等待原任务释放或明确交接。");
-    const usable = !!p.connected && compatible && !p.controlIssue;
+    const usable = !!p.connected && compatible && !activeIssue;
+    const readyToClaim = supportsMultiSession
+      ? usable && !selfSession && !userControlled
+      : usable && !p.ownerSessionId;
+    const readyToObserve = supportsMultiSession
+      ? Boolean(usable && selfSession && selfSession.ownership === "agent" && !selfSession.pausedByBrowser)
+      : usable && p.ownerSessionId === sessionId && p.ownership === "agent" && !p.pausedByBrowser;
     return { profileId: p.profileId, connected: !!p.connected, extensionVersion: p.extensionVersion || null,
       installationType: p.installationType || null, installationMode: p.installationMode || null, capabilities: p.capabilities || [],
+      multiSession: supportsMultiSession,
+      activeSessions: activeSessions.map(s => sessions.find(item => item.sessionId === s.sessionId) || { sessionId: s.sessionId, tabId: s.tabId, ownership: s.ownership }),
       owner: sessions.find(s => s.sessionId === p.ownerSessionId) || (p.ownerSessionId ? { sessionId: p.ownerSessionId, ownership: p.ownership } : null),
       debuggerDiagnostic: p.debuggerDiagnostic,
-      readyToClaim: usable && !p.ownerSessionId, readyToObserve: usable && p.ownerSessionId === sessionId && p.ownership === "agent" && !p.pausedByBrowser,
+      readyToClaim, readyToObserve,
       observationVerified: false, checks };
   });
 }
@@ -124,10 +152,25 @@ export async function waitForBrowserControl(options: ReturnType<typeof parseBrow
     const snapshot = await requestNativeControl({ requestId: randomUUID(), method: "status" }, options.root, 3000);
     const profile = snapshot.profiles.find((p: any) => p.profileId === options.profileId);
     if (!profile?.connected) throw new NativeControlError("NATIVE_DISCONNECTED", "等待期间目标扩展未连接，请检查 doctor。");
-    if (profile.controlIssue) throw new NativeControlError(profile.controlIssue.code, profile.controlIssue.message);
-    if (!profile.ownerSessionId || profile.ownerSessionId === options.sessionId && profile.ownership === "agent" && !profile.pausedByBrowser) return { available: true, profileId: options.profileId, claimed: false, resumed: false };
-    if (profile.ownerSessionId === options.sessionId && (profile.ownership !== "agent" || profile.pausedByBrowser)) throw new NativeControlError("NATIVE_USER_IN_CONTROL", "当前会话已交给用户，等待不会自动恢复控制。");
-    if (Date.now() >= deadline) throw new NativeControlError("NATIVE_SESSION_CONFLICT", `等待结束，目标仍由 ${profile.ownerSessionId} 占用；未执行 claim 或 resume。`);
+    const supportsMultiSession = Boolean(profile.capabilities?.includes("multiSession") || Array.isArray(profile.sessions));
+    if (supportsMultiSession) {
+      const activeSessions: any[] = Array.isArray(profile.sessions) ? profile.sessions : [];
+      const selfSession = options.sessionId ? activeSessions.find(s => s.sessionId === options.sessionId) : undefined;
+      if (selfSession) {
+        if (selfSession.controlIssue) throw new NativeControlError(selfSession.controlIssue.code, selfSession.controlIssue.message);
+        if (selfSession.ownership === "agent" && !selfSession.pausedByBrowser) return { available: true, profileId: options.profileId, claimed: false, resumed: false };
+        throw new NativeControlError("NATIVE_USER_IN_CONTROL", "当前会话已交给用户，等待不会自动恢复控制。");
+      }
+      const userControlled = activeSessions.find(s => s.ownership === "user" || s.pausedByBrowser);
+      if (!userControlled && !profile.controlIssue) return { available: true, profileId: options.profileId, claimed: false, resumed: false };
+      if (profile.controlIssue && !activeSessions.length) throw new NativeControlError(profile.controlIssue.code, profile.controlIssue.message);
+      if (Date.now() >= deadline) throw new NativeControlError("NATIVE_SESSION_CONFLICT", `等待结束，目标仍处于用户接管或暂停状态（${userControlled?.sessionId || profile.ownerSessionId}）；未执行 claim 或 resume。`);
+    } else {
+      if (profile.controlIssue) throw new NativeControlError(profile.controlIssue.code, profile.controlIssue.message);
+      if (!profile.ownerSessionId || profile.ownerSessionId === options.sessionId && profile.ownership === "agent" && !profile.pausedByBrowser) return { available: true, profileId: options.profileId, claimed: false, resumed: false };
+      if (profile.ownerSessionId === options.sessionId && (profile.ownership !== "agent" || profile.pausedByBrowser)) throw new NativeControlError("NATIVE_USER_IN_CONTROL", "当前会话已交给用户，等待不会自动恢复控制。");
+      if (Date.now() >= deadline) throw new NativeControlError("NATIVE_SESSION_CONFLICT", `等待结束，目标仍由 ${profile.ownerSessionId} 占用；未执行 claim 或 resume。`);
+    }
     await new Promise(resolve => setTimeout(resolve, Math.min(500, deadline - Date.now())));
   }
 }

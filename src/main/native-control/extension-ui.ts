@@ -52,6 +52,12 @@ export class NativeExtensionUi {
     if (this.connections.get(c.sessionId) !== c || c.abort.signal.aborted) failure('NATIVE_USER_IN_CONTROL', '扩展界面会话已停止。');
     const state = this.bridge.states().find(s => s.profileId === c.profileId);
     if (!state?.connected) failure('NATIVE_DISCONNECTED', 'ProfilePilot 扩展已断开。');
+    if (Array.isArray(state.sessions)) {
+      const entry = state.sessions.find(s => s.sessionId === c.sessionId);
+      if (!entry) failure('NATIVE_SESSION_CONFLICT', '当前任务已失去此 Profile 的控制权。');
+      if (entry.ownership !== 'agent' || entry.pausedByBrowser) failure('NATIVE_USER_IN_CONTROL', '用户已接管，扩展界面操作已停止。');
+      return;
+    }
     if (state.ownerSessionId !== c.sessionId) failure('NATIVE_SESSION_CONFLICT', '当前任务已失去此 Profile 的控制权。');
     if (state.ownership !== 'agent' || state.pausedByBrowser) failure('NATIVE_USER_IN_CONTROL', '用户已接管，扩展界面操作已停止。');
   }

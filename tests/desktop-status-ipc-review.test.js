@@ -62,7 +62,7 @@ function ipcFixture(options = {}) {
       return require(name);
     }
   });
-  container.exports.registerDesktop();
+  container.exports.registerDesktop({}, options.menuNotice);
   const request = (source, method, arg, subframe = false) => {
     const mainFrame = { url: source }, sender = windows.find(window => !window.destroyed && window.url.split('?')[0] === source.split('?')[0])?.webContents || { mainFrame };
     sender.mainFrame = mainFrame;
@@ -201,4 +201,23 @@ test('a different workspace cannot subscribe to desktop status and an unowned fr
   const other = frameFixture('browser'); other.window.desktopControl.onChanged(() => {}); assert.equal(other.subscribed, 0);
   await assert.rejects(other.window.desktopControl.status());
   assert.equal(frameFixture('desktop', false).window.desktopControl, undefined);
+});
+
+test('native menu prepares and releases control without creating a toolbar window', async () => {
+  const updates = [];
+  const f = ipcFixture({ menuNotice: s => updates.push(s.session?.name || null) });
+  await f.prepare();
+  assert.equal(f.windows.length, 0);
+  assert.equal(updates.at(-1), 'owned');
+  f.service.emit(status(false));
+  assert.equal(updates.at(-1), null);
+  f.quit();
+});
+
+test('an unavailable menu denies preparation and interrupts an active session', async () => {
+  const f = ipcFixture({ menuNotice: () => { throw new Error('Menu unavailable'); } });
+  await assert.rejects(f.prepare(), /Menu unavailable/);
+  assert.ok(f.controls.includes('notice-unavailable'));
+  assert.equal(f.windows.length, 0);
+  f.quit();
 });

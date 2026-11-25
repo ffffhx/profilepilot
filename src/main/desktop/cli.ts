@@ -72,7 +72,7 @@ wait 超时上限 20000ms，返回 timedOut:true、requiresObservation:true（�
 wait 不重放输入；超时观察仅供核查。接管或停止会立即取消等待。
 --request-id UUID 可查询相同操作的回执，不得更改参数或观察开关。返回的旧 observation 不能当作新画面。
 receipt 返回 pending/succeeded/failed，不触发输入或延长会话。回执丢失不表示动作未执行；应用重启或超过 256 条保留上限会丢失旧回执。
-默认闲置 5 分钟结束。应用的桌面控制条可随时接管/停止；status.stopShortcutAvailable 为 true 时 Ctrl+Alt+Esc（macOS 为 Cmd+Option+Esc / Ctrl+Alt+Esc）也可停止。
+默认闲置 5 分钟结束。macOS 从 ProfilePilot 菜单栏接管或停止，Windows 使用桌面控制条。status.stopShortcutAvailable 为 true 时也可用停止快捷键（macOS 为 Cmd+Option+Esc，Windows 为 Ctrl+Alt+Esc）。
 暂停、超时或断线后先检查状态，不自动恢复或重复输入。支持 Windows（UIA/WGC）与 macOS（Accessibility/ScreenCaptureKit）。
 退出码：0 成功，2 参数错误，69 服务不可用，75 控制权/旧观察/结果待核查，1 其他错误。
 `;

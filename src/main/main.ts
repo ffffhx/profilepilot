@@ -4,7 +4,7 @@ import { TASK_CHANNEL } from "../shared/tasks";
 import { normalizeQuickLaunchShortcut } from "../shared/quick-launch-shortcut";
 import { QuickLaunchShortcuts } from "./quick-launch-shortcuts";
 import { promises as fs, watch, type FSWatcher } from "node:fs";
-import { app, BrowserWindow, crashReporter, globalShortcut, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, session, shell, Tray, type IpcMainInvokeEvent, type Rectangle } from "electron";
+import { app, BrowserWindow, crashReporter, globalShortcut, ipcMain, Menu, nativeImage, nativeTheme, Notification, screen, session, shell, Tray, type IpcMainInvokeEvent, type MenuItemConstructorOptions, type Rectangle } from "electron";
 import path from "node:path";
 import { IPC_CHANNELS } from "../shared/ipc";
 import { isWorkspaceShell, protectWorkspaceShell } from "./workspace-shell";
@@ -21,6 +21,7 @@ import { initializeAppUpdates, finishRequestedAppUpdate } from './app-update';
 import { createRuntimeDesktopAdmission, createWindowsDesktopDiscovery } from "./desktop/runtime-admission";
 import type { WindowsControlSample } from "./windows-platform";
 import { closeWindowsSampler } from "./windows-sampler";
+import type { DesktopStatus } from "../shared/desktop";
 import type { DesktopService } from "./desktop/service";
 import { registerPhones } from "./phones/ipc";
 import type { PhonesService } from "./phones/service";
@@ -1239,9 +1240,43 @@ function createAppTray(): void {
       });
 
   appTray = new Tray(trayImage);
-  appTray.setToolTip(APP_TITLE);
+  updateAppTray();
+  appTray.on("click", () => {
+    if (process.platform !== "darwin" || !desktopService?.status().session) void showMainWindow();
+  });
+}
+
+let desktopTrayKey: string | undefined;
+function updateAppTray(status?: DesktopStatus): void {
+  const owner = status?.session;
+  if (!appTray || appTray.isDestroyed()) {
+    if (owner) throw new Error("ProfilePilot 菜单栏不可用。");
+    return;
+  }
+  const phase = status?.inputObservation.phase;
+  const title = !owner ? "" : phase === "arming" ? "准备控制" : owner.state === "active" ? "桌面控制中" : "控制已暂停";
+  const generation = status?.inputObservation.generation;
+  const target = owner && (owner.window.title || owner.window.process);
+  const key = JSON.stringify([title, target, owner?.name, owner?.mode, owner?.revision, generation, phase]);
+  if (key === desktopTrayKey) return;
+  const controls: MenuItemConstructorOptions[] = [];
+  if (owner && status) {
+    controls.push({ label: `${owner.mode === "background" ? "后台控制" : "交互控制"} · ${target}`, enabled: false },
+      { label: owner.name, enabled: false });
+    if (owner.state === "active" || phase === "arming" || phase === "pending") {
+      controls.push({ label: "接管桌面控制", click: () => { desktopService?.control("takeover"); } });
+    } else if (generation) {
+      const expected = { session: owner.name, revision: owner.revision, generation };
+      controls.push({ label: "交还桌面控制", click: () => {
+        void desktopService?.resume(expected).catch(error =>
+          writeDiagnosticLog("warn", "desktop", "desktop.tray.return_failed", "未能交还桌面控制。", { error }));
+      } });
+    }
+    controls.push({ label: "停止桌面控制", click: () => { desktopService?.control("stop"); } }, { type: "separator" });
+  }
   appTray.setContextMenu(
     Menu.buildFromTemplate([
+      ...controls,
       {
         label: "显示 ProfilePilot",
         click: () => {
@@ -1264,9 +1299,9 @@ function createAppTray(): void {
       }
     ])
   );
-  appTray.on("click", () => {
-    void showMainWindow();
-  });
+  if (process.platform === "darwin") appTray.setTitle(title);
+  appTray.setToolTip(owner ? `${APP_TITLE} · ${title} · ${target}` : APP_TITLE);
+  desktopTrayKey = key;
 }
 
 function createProgressReporter(
@@ -2314,7 +2349,7 @@ if (!app.requestSingleInstanceLock()) {
       const decision = await desktopAdmission(target);
       if (gpuiService?.reserved(target.pid)) return { status: 'occupied', reason: '目标由 GPUI 调试会话保留，请从 GPUI 页面接管或停止。', code: 'DESKTOP_TARGET_OCCUPIED', matches: [], gaps: [] };
       return decision;
-    } });
+    } }, process.platform === "darwin" && !IS_ELECTRON_SMOKE_TEST && !IS_E2E_DRIVER_TEST ? updateAppTray : undefined);
     gpuiService = registerGpui({ directory: path.join(process.env.CPM_DATA_DIR || defaultDataDir(), 'gpui'), guardFactory: windowsInputRuntime?.browserGuard,
       occupied: pid => desktopService?.status().session?.window.pid === pid,
       openPanel: async () => {

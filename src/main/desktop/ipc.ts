@@ -9,7 +9,8 @@ import { DesktopService, type DesktopServiceOptions } from './service';
 import { captureDesktopWindow } from './capture';
 import { DesktopControlNotice, computeNoticePosition, type NoticeRect } from './notice';
 
-export function registerDesktop(options: Pick<DesktopServiceOptions, 'admission' | 'inputObserver'> = {}): DesktopService {
+export function registerDesktop(options: Pick<DesktopServiceOptions, 'admission' | 'inputObserver'> = {},
+  menuNotice?: (status: DesktopStatus) => void): DesktopService {
   let notice: DesktopControlNotice | undefined;
   let closing = false;
   let stopShortcutAvailable = false;
@@ -76,12 +77,22 @@ export function registerDesktop(options: Pick<DesktopServiceOptions, 'admission'
     } catch (error) { diagnostic('desktop.notice.unavailable', '桌面状态通知暂不可用。', error); }
     // Preparation owns construction. Ordinary state broadcasts cannot throw a
     // BrowserWindow/load error through an already executed action's receipt.
-    try { notice?.update(broadcastStatus); }
-    catch (error) { diagnostic('desktop.notice.unavailable', '桌面控制条状态更新失败。', error); }
+    try {
+      if (menuNotice) menuNotice(broadcastStatus);
+      else notice?.update(broadcastStatus);
+    } catch (error) {
+      diagnostic('desktop.notice.unavailable', '桌面控制状态更新失败。', error);
+      if (menuNotice && status.session) service.noticeUnavailable();
+    }
   };
-  const service = new DesktopService({ ...options, onChanged: update, capture: captureDesktopWindow, stopShortcutAvailable: () => stopShortcutAvailable,
-    prepareControlNotice: signal => notice!.prepare(signal) });
-  notice = new DesktopControlNotice({ file: path.join(root, 'desktop-control.html'), status: () => service.status(),
+  const service: DesktopService = new DesktopService({ ...options, onChanged: update, capture: captureDesktopWindow, stopShortcutAvailable: () => stopShortcutAvailable,
+    prepareControlNotice: async signal => {
+      if (menuNotice) {
+        signal.throwIfAborted();
+        menuNotice(service.status());
+      } else await notice!.prepare(signal);
+    } });
+  if (!menuNotice) notice = new DesktopControlNotice({ file: path.join(root, 'desktop-control.html'), status: () => service.status(),
     onUnavailable: () => { service.noticeUnavailable(); }, onUserClose: () => { service.control('takeover'); },
     diagnostic: error => diagnostic('desktop.notice.unavailable', '桌面控制条已关闭或暂不可用。', error),
     reposition: (window, currentStatus) => {
@@ -109,7 +120,7 @@ export function registerDesktop(options: Pick<DesktopServiceOptions, 'admission'
     // can reuse it; nonce + exact WebContents still excludes old instances.
     if (toolbar && method === 'notice-unavailable') {
       const value = z.object({ documentNonce: z.string().uuid() }).strict().parse(arg);
-      notice!.documentUnavailable(event.sender, value.documentNonce); return;
+      notice?.documentUnavailable(event.sender, value.documentNonce); return;
     }
     if (toolbar && !notice?.acceptsToolbar(event.sender, method !== 'status' && method !== 'notice-ready' && method !== 'notice-unavailable' && !preparingControl)) throw new Error('这个桌面控制条已失效，请从当前 ProfilePilot 工作区检查控制状态。');
     if (toolbar && method === 'notice-ready') {

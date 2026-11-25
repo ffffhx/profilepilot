@@ -62,7 +62,7 @@ type PhoneIdentity = z.infer<typeof identitySchema>;
 type Route = { smsAck?: string; port: number; token: string; internetConnection?: string; success?: { sequence: number; at: number } };
 type InstallJob = { abort: AbortController; done?: Promise<void>; result: { status: "running" | "installed" | "awaiting-user" | "failed" | "interrupted"; jobId?: string; phase?: string; sha256: string; bytes: number; error?: string; code?: string; recovery?: ReturnType<typeof phoneErrorResult>["recovery"] } };
 export interface PhonesOptions {
-  receiveSms?(device: string, name: string, sms: unknown): string;
+  smsInbox?: Pick<import("./sms-inbox").SmsInbox, "receive" | "close">;
   iphoneRequest?: WdaRequest;
   iphoneFetch?: typeof fetch;
   root: string;
@@ -188,7 +188,7 @@ export class PhonesService {
       if (device) Object.assign(device, identity, { name: this.saved[id]?.name || identity.model });
       else this.devices.set(id, { ...identity, id, name: identity.model, connection: "missing", companion: "unavailable", state: null, confirmedAt: null, pending: null, error: "" });
     }
-    this.internet = new InternetPhoneHub({ receiveSms: options.receiveSms, root: options.root, computer: this.computer, pairingScheme: this.companion.pairingScheme,
+    this.internet = new InternetPhoneHub({ receiveSms: options.smsInbox?.receive.bind(options.smsInbox), root: options.root, computer: this.computer, pairingScheme: this.companion.pairingScheme,
       changed: () => this.changed(),
       connected: (id, name, connectionId) => { void this.internetConnected(id, name, connectionId).catch(() => {}); },
       disconnected: (id, connectionId) => {
@@ -822,7 +822,7 @@ export class PhonesService {
     const device = this.device(id);
     const reading = this.debugReadings.get(id);
     const ageMs = reading ? Math.max(0, this.now() - reading.at) : Infinity;
-    const smsSync = this.options.receiveSms && !route.internetConnection ? { receiveSms: true, smsAck: route.smsAck } : {};
+    const smsSync = this.options.smsInbox && !route.internetConnection ? { receiveSms: true, smsAck: route.smsAck } : {};
     const syncBody = { ...smsSync, transport: device.transport, ...(reading?.route === route && ageMs < 6000 ? { debugSettings: { ...reading.value, ageMs } } : {}) };
     const action = (body as { action?: { kind?: string; format?: string } })?.action;
     const screenshot = method === "action" && action?.kind === "screenshot" && action.format === "png";
@@ -890,7 +890,7 @@ export class PhonesService {
     if (method === "sync") {
       this.refreshDebugSettings(id, route);
       if (!route.internetConnection && response.sms && response.state.statusDeviceId) {
-        try { route.smsAck = this.options.receiveSms?.(response.state.statusDeviceId, device.name, response.sms); }
+        try { route.smsAck = this.options.smsInbox?.receive(response.state.statusDeviceId, device.name, response.sms); }
         catch { /* Retry an unconfirmed delivery on the next authenticated sync. */ }
       } else if (route.smsAck === syncBody.smsAck) route.smsAck = undefined;
     }
@@ -1874,6 +1874,7 @@ export class PhonesService {
       } finally { if (!route.internetConnection) await this.adb.run(["-s", id, "forward", "--remove", `tcp:${route.port}`]).catch(() => {}); }
     })); this.routes.clear();
     await this.internet.close();
+    this.options.smsInbox?.close();
     if (commandCleanupError) throw commandCleanupError;
   }
 }

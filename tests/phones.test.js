@@ -10,14 +10,14 @@ const { parseAdbDevices, deviceShell, validateDeviceId } = loadCli('src/main/pho
 const { runPhoneCli } = loadCli('src/main/phones/cli.ts');
 const { executePhoneCommand } = loadCli('src/main/phones/management.ts');
 
-function harness(t) {
+function harness(t, smsInbox) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pp-phone-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const token = 'a'.repeat(64), id = 'SERIAL-1', calls = [];
   fs.writeFileSync(path.join(root, 'devices.json'), JSON.stringify({ [id]: { token } }));
   const h = { id, root, calls, fail: false, installed: false, deviceOutput: `${id} device product:test model:Test_Phone usb:1`, hook: null,
     state: { protocol: 1, instanceId: 'instance-1', sessionId: null, generation: 0, phase: 'idle', mode: 'control', computer: 'pc', controller: '', task: '', startedAt: null, lastAction: '', permissions: { overlay: true, notifications: true, accessibility: true } } };
-  h.service = new PhonesService({ root, apkPath: path.join(root, 'phone.apk'), computer: 'pc', now: () => h.now ?? Date.now(), adb: { run: async args => {
+  h.service = new PhonesService({ root, smsInbox, apkPath: path.join(root, 'phone.apk'), computer: 'pc', now: () => h.now ?? Date.now(), adb: { run: async args => {
     calls.push(['adb', ...args]); if (args[0] === 'devices') return h.deviceOutput; if (args.includes('tcp:0')) return '18762';
     if (args[2] === 'shell' && args[3].startsWith("'settings' 'get' 'global'")) return h.debugHook ? h.debugHook(args[3]) : '';
     if (args[2] === 'shell' && args[3].includes("'pm' 'path'")) return h.installed ? 'package:/data/app/test/base.apk' : '';
@@ -822,6 +822,8 @@ test('phone IPC only allows local workspace main frames and restricts mutation t
   t.after(() => service.close());
   const url = page => pathToFileURL(path.resolve(__dirname, '../public', page)).href;
   const event = (url, subframe = false) => { const frame = { url }; return { senderFrame: frame, sender: { mainFrame: subframe ? {} : frame } }; };
+  assert.deepEqual(await handle(event(url('phones.html')), 'sms-inbox'), []);
+  await assert.rejects(handle(event(url('index.html')), 'sms-inbox'), /手机工作区/);
   assert.deepEqual((await handle(event(url('phones.html')), 'snapshot')).devices, []);
   assert.deepEqual((await handle(event(url('index.html')), 'snapshot')).devices, []);
   assert.deepEqual((await handle(event(url('workspace.html')), 'snapshot')).devices, []);
@@ -830,4 +832,31 @@ test('phone IPC only allows local workspace main frames and restricts mutation t
   await assert.rejects(handle(event(url('phones.html'), true), 'snapshot'), /仅供/);
   await assert.rejects(handle(event('https://example.com/phones.html'), 'snapshot'), /仅供/);
   await assert.rejects(handle(event(pathToFileURL(path.join(root, 'phones.html')).href), 'snapshot'), /仅供/);
+});
+
+test('local paired companion retries SMS until saved and excludes content from phone snapshots', async t => {
+  const saved = [];
+  let writable = false;
+  const h = harness(t, { receive(id, name, sms) {
+    if (!writable) throw Error('storage unavailable');
+    saved.push(sms.messageId);
+    return sms.messageId;
+  }, close() {} });
+  t.after(() => h.service.close());
+  const sms = { messageId: randomUUID(), message: 'SMS sync fixture' };
+  h.state.statusDeviceId = randomUUID();
+  h.hook = (method, body) => {
+    if (method === 'sync') {
+      assert.equal(body.receiveSms, true);
+      return { ok: true, state: h.state, ...(body.smsAck === sms.messageId ? {} : { sms }) };
+    }
+  };
+  await h.service.refresh();
+  assert.equal(saved.length, 0);
+  writable = true;
+  await h.service.refresh();
+  await h.service.refresh();
+  assert.ok(saved.includes(sms.messageId));
+  assert.ok(h.calls.some(([method, body]) => method === 'sync' && body.smsAck === sms.messageId));
+  assert.ok(!JSON.stringify(h.service.snapshot()).includes(sms.message));
 });

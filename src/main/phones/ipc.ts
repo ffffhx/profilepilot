@@ -1,4 +1,4 @@
-import { app, safeStorage, Notification, BrowserWindow, dialog, ipcMain, net, session, shell } from "electron";
+import { safeStorage, Notification, BrowserWindow, dialog, ipcMain, net, session, shell } from "electron";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { isWorkspaceShell } from "../workspace-shell";
@@ -28,8 +28,7 @@ export function registerPhones(root: string, apkPath: string, poll = true): Phon
     }
     if (Notification.isSupported()) new Notification({ title: "收到新短信", body: name + " · 在手机控制台的短信收件箱查看" }).show();
   });
-  app.once("will-quit", () => inbox.close());
-  const service = new PhonesService({ root, apkPath, receiveSms: (id, name, sms) => inbox.receive(id, name, sms), iphoneFetch: (input, init) => net.fetch(input instanceof URL ? input.href : input, init), cameraCapture: desktopCameraCapture(), androidSetup: new AndroidSetup({
+  const service = new PhonesService({ root, apkPath, smsInbox: inbox, iphoneFetch: (input, init) => net.fetch(input instanceof URL ? input.href : input, init), cameraCapture: desktopCameraCapture(), androidSetup: new AndroidSetup({
     fetch: (input, init) => net.fetch(input instanceof URL ? input.href : input, init),
     proxy: async () => {
       const route = (await session.defaultSession.resolveProxy("https://dl.google.com/android/repository/repository2-3.xml")).split(";")[0].trim();

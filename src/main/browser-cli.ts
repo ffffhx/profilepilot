@@ -13,6 +13,7 @@ import { browserContract, commonBrowserHelp } from "../shared/browser-contract";
 import { browserCommandHelp, browserRouteCommands } from "../shared/browser-command-contract";
 import { listSiteAdapters } from "./site-adapters/catalog";
 import { runGatewaySiteCli } from "./site-adapters/gateway-cli";
+import { installDefaultExtension } from "./native-control/install";
 import { runXianyuCli } from "./site-adapters/xianyu-cli";
 
 export const browserCliHelp = `ppilot browser CLI (model invocation only for captcha recognize)
@@ -44,6 +45,7 @@ Xianyu search, comparison and price tracking:
   ppilot browser xianyu --help
 
 Extension (default): existing signed-in Chrome tabs, independent browser service.
+  ppilot browser install [--json]           Install/connect ProfilePilot in Chrome Default (macOS)
   ppilot browser status
   ppilot browser --profile native:Default doctor
   ppilot browser --profile native:Default --session TASK wait-control --timeout 30000
@@ -177,6 +179,14 @@ export async function runBrowserCli(
       const help = browserCommandHelp(route.connection, narrowHelp);
       if (!help) invalid(`${route.connection} 连接没有 ${narrowHelp} 的命令说明；运行 ppilot browser --connection ${route.connection} schema 查看可用命令。`);
       io.stdout.write(help); return 0;
+    }
+    if (command === "install" && route.connection === "extension") {
+      if (route.args.some((arg, i) => i !== route.commandIndex && arg !== "--json")) {
+        invalid("用法：ppilot browser install [--json]。目标固定为本机 Chrome Default。");
+      }
+      const result = await installDefaultExtension(message => io.stderr.write(message + "\n"));
+      io.stdout.write(JSON.stringify({ ok: true, result }) + "\n");
+      return 0;
     }
     if (command === "default") {
       if (tail.some(arg => arg !== "--json")) invalid("用法：ppilot browser default [--json]。设置默认 Profile 请使用浏览器页面或 profile default。");

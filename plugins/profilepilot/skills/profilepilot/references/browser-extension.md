@@ -6,6 +6,8 @@ discover capabilities, then `site --params-file` in the same owned session.
 
 Use ProfilePilot Browser CLI (`ppilot browser`) when this route was selected. Page reads and actions send commands through the independent local browser service to the target Profile's extension, without invoking an additional model. Browser commands automatically start that service; the desktop App can remain closed. Install/connect the extension in the exact target Profile. Do not substitute `ppilot chat` or `ppilot run`, which start model-backed tasks.
 
+On macOS, run `ppilot browser install --json` when the user requests persistent installation into Google Chrome Default. It checks an existing installation, prepares the fixed directory and waits for Chrome installation and pairing. The user confirms the folder and pairing in Chrome.
+
 `ppilot browser connect --profile native:PROFILE_DIRECTORY` returns an installation/connection URL; open it in that exact Chrome Profile. `pair --profile native:PROFILE_DIRECTORY` returns a manual pairing code to paste into the extension. Do not print pairing codes into task logs or model-visible summaries. `service status` checks the service without launching it; `service start` starts it explicitly. `service stop` refuses while browser sessions still own Profiles. Never stop the shared service merely because one Agent finishes.
 
 ```sh

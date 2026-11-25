@@ -1,6 +1,5 @@
 import { existsSync, promises as fs } from "node:fs";
 import path from "node:path";
-import { app, shell } from "electron";
 import type {
   ExtensionDataPath,
   ProfileExtensionInfo,
@@ -193,7 +192,8 @@ export async function resolveManifestText(value: string, extensionPath: string, 
 export function uiLocaleCandidates(): string[] {
   let uiLocale = "";
   try {
-    uiLocale = app.getLocale() || "";
+    // The standalone Node CLI also reads extension settings from this module.
+    uiLocale = (require("electron") as typeof import("electron")).app.getLocale() || "";
   } catch {
     uiLocale = "";
   }

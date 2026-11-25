@@ -19,6 +19,7 @@ const common: Record<string, CommandContract> = {
 };
 const extension: Record<string, CommandContract> = {
   ...common,
+  install: { usage: "install [--json]", description: "macOS：为本机 Chrome Default 准备并打开持久安装，等待 Chrome 记录安装且扩展在线。首次加载及配对由用户确认。" },
   tabs: { usage: "tabs", description: "列出当前 Profile 已有标签页。" },
   claim: { usage: "claim [--tab ID | --new-tab] [--controller NAME] [--task TEXT]", description: "为本次任务取得所选 Profile 的控制权。", note: "会话占用或用户接管时停止；不得换 Profile 绕过。" },
   newTab: { usage: "newTab [URL]", description: "在当前任务中创建标签页，可指定 HTTP/HTTPS 地址。" },
@@ -97,7 +98,7 @@ export function browserRouteCommands(connection: BrowserConnection): Record<stri
 export function browserCommandHelp(connection: BrowserConnection, command: string): string | undefined {
   const spec = browserRouteCommands(connection)[command];
   if (!spec) return;
-  const prefix = connection === "extension" ? "ppilot browser --session TASK" : "ppilot browser --session TASK --cdp LOGICAL_PORT";
+  const prefix = command === "install" ? "ppilot browser" : connection === "extension" ? "ppilot browser --session TASK" : "ppilot browser --session TASK --cdp LOGICAL_PORT";
   return `${prefix} ${spec.usage}\n${spec.description}\n${spec.example ? `示例：${spec.example}\n` : ""}${spec.input ? `参数：${JSON.stringify(spec.input)}\n` : ""}${spec.note ? `${spec.note}\n` : ""}连接：${connection}。--json 可选。PowerShell 元素引用必须加引号，如 '@e1'。\n`;
 }
 export function extensionCommandHint(command: string): string | undefined {

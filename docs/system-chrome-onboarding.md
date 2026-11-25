@@ -4,6 +4,8 @@
 
 ## 持久安装
 
+macOS 上，Agent 可以直接运行 `ppilot browser install --json` 安装到 Google Chrome 的 `Default`。命令核对 Chrome 安装记录与服务连接，已就绪时直接返回。首次安装会打开对应的 Chrome 窗口；开启开发者模式后，若终端具有 macOS 自动化及辅助功能权限，命令会尝试预选固定扩展目录。用户在 Chrome 中确认选择，并在扩展里确认连接。系统权限不足时仍可在同一连接页完成加载。命令等待最多五分钟，成功以 stdout 的 JSON 为准；等待提示写入 stderr。
+
 正式渠道优先 Chrome Web Store。只有 PROFILEPILOT_EXTENSION_STORE_URL 配置为官方地址、路径末尾 ID 与应用一致时，连接页才显示商店入口。未配置时明确显示尚未上架商店，不编造商店链接。
 
 发布前的本地使用步骤：

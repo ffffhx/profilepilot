@@ -13,7 +13,7 @@
     "plugin:check": "node scripts/package-codex-plugin.mjs --check && node --test tests/codex-plugin-package.test.mjs",
     "plugin:pack": "node scripts/package-codex-plugin.mjs --pack",
     "build": "node scripts/build-phone-video.mjs --check && npm run build:input-guard && npm run build:input-observer && npm run build:desktop && npm run build:windows-sampler && npm run build:phone-wrapper && tsc && npm run bundle:preload && npm run build:browser-engine && npm run bundle:agent-browser-wrapper && npm run bundle:profilepilot-cli && npm run bundle:renderer && npm run build:css && node scripts/build-control-manifest.mjs",
-    "bundle:preload": "esbuild src/preload.ts --bundle --platform=node --external:electron --format=cjs --target=node22 --outfile=dist/preload.js --log-level=warning",
+    "bundle:preload": "esbuild src/workspace-preload.ts --bundle --platform=node --external:electron --format=cjs --target=node22 --outfile=dist/preload.js --log-level=warning",
     "build:windows-sampler": "node scripts/build-windows-sampler.mjs --production",
     "build:desktop": "node scripts/build-desktop.mjs",
     "build:input-observer": "node scripts/build-input-observer.mjs --production",

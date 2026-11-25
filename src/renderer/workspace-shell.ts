@@ -5,6 +5,7 @@ import "./workspace-lifecycle";
 import { experimentalWorkspaceEnabled, onExperimentalFeaturesChanged } from "./experimental-features";
 
 type Page = { id: WorkspaceId; frame: HTMLIFrameElement; ready: boolean; search: string; timer?: number; failed?: boolean };
+if (!window.profileManager || !window.desktopWindow) throw new Error("桌面预加载接口未就绪。");
 const pages = new Map<WorkspaceId, Page>();
 const container = document.getElementById("workspace-pages")!;
 const loading = document.getElementById("workspace-loading")!;

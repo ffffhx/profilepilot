@@ -27,7 +27,7 @@ function capture() {
 
 test("bundled preload.ts has zero relative requires and main.ts enables sandbox: true on all BrowserWindows", () => {
   const preloadOut = buildSync({
-    entryPoints: [path.join(repoRoot, "src/preload.ts")],
+    entryPoints: [path.join(repoRoot, "src/workspace-preload.ts")],
     bundle: true,
     platform: "node",
     external: ["electron"],

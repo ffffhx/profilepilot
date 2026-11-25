@@ -29,7 +29,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('browser-connection:request', () => ({ profiles: [], connections: [] }));
   ipcMain.handle('profiles:get-initial-state', () => { throw new Error('Fixture has no Profiles'); });
   const window = new BrowserWindow({ show: false, width: 1120, height: 760, webPreferences: {
-    preload: path.join(root, 'dist/preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: false
+    preload: path.join(root, 'dist/preload.js'), contextIsolation: true, nodeIntegration: false, sandbox: true, offscreen: process.platform === "darwin"
   }});
   protectWorkspaceShell(window);
   installWorkspaceDiagnostics(window);
@@ -56,8 +56,18 @@ app.whenReady().then(async () => {
     await until('document.documentElement.dataset.workspaceShellReady === "true"');
     assert.equal(await read('document.getElementById("workspace-startup").hidden'), true);
     assert.equal(await read('Boolean(document.getElementById("workspace-rail"))'), true);
+    await until(`document.querySelector('iframe[data-workspace="browser"]')?.dataset.active === "true" && document.getElementById("workspace-loading").hidden`);
     console.log(`PASS workspace ${scenario}${scenario === 'normal' ? '' : ' -> user retry -> ready'}`);
   }
+  // A failed preload must report the missing bridge before the pane timeout.
+  const noBridge = new BrowserWindow({ show: false, webPreferences: { sandbox: true } });
+  try {
+    await noBridge.loadFile(path.join(root, 'public/workspace.html'));
+    const message = await noBridge.webContents.executeJavaScript('document.getElementById("workspace-startup-status").textContent');
+    assert.match(message, /桌面接口加载失败/);
+    assert.equal(await noBridge.webContents.executeJavaScript('document.querySelectorAll("iframe").length'), 0);
+    console.log('PASS missing preload -> immediate recovery message');
+  } finally { noBridge.destroy(); }
   assert.equal(reloads, 2);
   assert.ok(reports.includes('script-load'));
   assert.ok(reports.includes('script-error'));

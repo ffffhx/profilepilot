@@ -14,6 +14,10 @@
     retry.hidden = false;
     window.desktopWindow?.reportStartupFailure?.(reason);
   };
+  if (!window.profileManager || !window.desktopWindow) {
+    status.textContent = "桌面接口加载失败，请从托盘菜单选择“重新加载界面”。";
+    return;
+  }
   const timer = setTimeout(() => fail("startup-timeout"), 10000);
   window.addEventListener("workspace-shell-ready", () => {
     ready = true;

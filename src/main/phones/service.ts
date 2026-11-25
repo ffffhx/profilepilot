@@ -59,9 +59,10 @@ const sessionSchema = z.object({
 type SavedPhone = { statusDeviceId?: string; token: string; name?: string; installedHash?: string; hardwareId?: string; model?: string; transport?: PhoneDevice["transport"] };
 const identitySchema = z.object({ hardwareId: z.string().regex(/^[a-zA-Z0-9_-]{1,200}$/), model: z.string().max(200), transport: z.enum(["usb", "wifi"]) });
 type PhoneIdentity = z.infer<typeof identitySchema>;
-type Route = { port: number; token: string; internetConnection?: string; success?: { sequence: number; at: number } };
+type Route = { smsAck?: string; port: number; token: string; internetConnection?: string; success?: { sequence: number; at: number } };
 type InstallJob = { abort: AbortController; done?: Promise<void>; result: { status: "running" | "installed" | "awaiting-user" | "failed" | "interrupted"; jobId?: string; phase?: string; sha256: string; bytes: number; error?: string; code?: string; recovery?: ReturnType<typeof phoneErrorResult>["recovery"] } };
 export interface PhonesOptions {
+  receiveSms?(device: string, name: string, sms: unknown): string;
   iphoneRequest?: WdaRequest;
   iphoneFetch?: typeof fetch;
   root: string;
@@ -187,7 +188,7 @@ export class PhonesService {
       if (device) Object.assign(device, identity, { name: this.saved[id]?.name || identity.model });
       else this.devices.set(id, { ...identity, id, name: identity.model, connection: "missing", companion: "unavailable", state: null, confirmedAt: null, pending: null, error: "" });
     }
-    this.internet = new InternetPhoneHub({ root: options.root, computer: this.computer, pairingScheme: this.companion.pairingScheme,
+    this.internet = new InternetPhoneHub({ receiveSms: options.receiveSms, root: options.root, computer: this.computer, pairingScheme: this.companion.pairingScheme,
       changed: () => this.changed(),
       connected: (id, name, connectionId) => { void this.internetConnected(id, name, connectionId).catch(() => {}); },
       disconnected: (id, connectionId) => {
@@ -821,7 +822,8 @@ export class PhonesService {
     const device = this.device(id);
     const reading = this.debugReadings.get(id);
     const ageMs = reading ? Math.max(0, this.now() - reading.at) : Infinity;
-    const syncBody = { transport: device.transport, ...(reading?.route === route && ageMs < 6000 ? { debugSettings: { ...reading.value, ageMs } } : {}) };
+    const smsSync = this.options.receiveSms && !route.internetConnection ? { receiveSms: true, smsAck: route.smsAck } : {};
+    const syncBody = { ...smsSync, transport: device.transport, ...(reading?.route === route && ageMs < 6000 ? { debugSettings: { ...reading.value, ageMs } } : {}) };
     const action = (body as { action?: { kind?: string; format?: string } })?.action;
     const screenshot = method === "action" && action?.kind === "screenshot" && action.format === "png";
     const capturedImage = screenshot || method === "follow" && (body as { op?: string })?.op === "frame";
@@ -847,7 +849,7 @@ export class PhonesService {
     }
     signal?.throwIfAborted();
     if (this.routes.get(id) !== route) throw phoneFailure("PHONE_DISCONNECTED", "手机连接已改变，请重新读取状态；不要重放输入。", method === "sync" ? "not-executed" : "unknown");
-    const parsed = z.object({ ok: z.boolean(), code: z.string().optional(), error: z.string().optional(), actionOutcome: z.enum(["not-executed", "completed", "unknown", "not-applicable"]).optional(), recovery: z.unknown().optional(), state: sessionSchema.optional(), result: z.unknown().optional() }).safeParse(raw);
+    const parsed = z.object({ sms: z.unknown().optional(), ok: z.boolean(), code: z.string().optional(), error: z.string().optional(), actionOutcome: z.enum(["not-executed", "completed", "unknown", "not-applicable"]).optional(), recovery: z.unknown().optional(), state: sessionSchema.optional(), result: z.unknown().optional() }).safeParse(raw);
     if (!parsed.success) throw phoneFailure("PHONE_RESPONSE_UNCERTAIN", "手机返回了无效响应，请核查当前状态，不重放操作。", method === "sync" ? "not-executed" : "unknown");
     const response = parsed.data;
     if (response.state) {
@@ -885,7 +887,13 @@ export class PhonesService {
     }
     if (!response.state) throw new Error("手机未返回控制状态。");
     if (sequence > (route.success?.sequence || 0)) route.success = { sequence, at: this.now() };
-    if (method === "sync") this.refreshDebugSettings(id, route);
+    if (method === "sync") {
+      this.refreshDebugSettings(id, route);
+      if (!route.internetConnection && response.sms && response.state.statusDeviceId) {
+        try { route.smsAck = this.options.receiveSms?.(response.state.statusDeviceId, device.name, response.sms); }
+        catch { /* Retry an unconfirmed delivery on the next authenticated sync. */ }
+      } else if (route.smsAck === syncBody.smsAck) route.smsAck = undefined;
+    }
     if (capturedImage) {
       const owner = body as { instanceId: string; sessionId: string; generation: number };
       return assembleScreenshot({ state: response.state, result: response.result },

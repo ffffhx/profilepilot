@@ -366,6 +366,12 @@ const localAppsApi: LocalAppsApi = {
 };
 contextBridge.exposeInMainWorld("localApps", localAppsApi);
 const phonesApi: PhonesApi = {
+  smsInbox: () => ipcRenderer.invoke(PHONE_CHANNEL, "sms-inbox"),
+  onSmsReceived(listener) {
+    const update = () => listener();
+    ipcRenderer.on("phone-sms-received", update);
+    return () => { ipcRenderer.removeListener("phone-sms-received", update); };
+  },
   iphoneSetup: () => ipcRenderer.invoke(PHONE_CHANNEL, "iphone-setup", {}),
   iphoneDoctor: () => ipcRenderer.invoke(PHONE_CHANNEL, "iphone-doctor", {}),
   iphonePrepareWda: () => ipcRenderer.invoke(PHONE_CHANNEL, "iphone-prepare-wda", {}),

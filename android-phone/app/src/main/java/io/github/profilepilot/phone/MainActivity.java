@@ -67,10 +67,18 @@ public final class MainActivity extends ComponentActivity {
   private final ActivityResultLauncher<ScanOptions> scanner=registerForActivityResult(
       new ScanContract(), result -> { if (result.getContents()!=null) pairLink(result.getContents()); });
 
+  private String smsRoute = "", smsPeer = "";
+  private final ActivityResultLauncher<String> smsPermission = registerForActivityResult(
+      new androidx.activity.result.contract.ActivityResultContracts.RequestPermission(), allowed -> {
+        if (allowed) enableSms(); else message("短信权限未开启。可在系统的应用权限中允许接收短信。");
+        smsRoute = ""; smsPeer = ""; showSmsSettings();
+      });
+
   @Override public void onCreate(Bundle state) {
     super.onCreate(state);
     store=new ComputerStore(this);
     if (state!=null) {
+      smsRoute=state.getString("smsRoute",""); smsPeer=state.getString("smsPeer","");
       permissionsExpanded=state.getBoolean("permissionsExpanded");
       lastPermissionCount=state.getInt("lastPermissionCount",-1);
       seenConnected=state.getBoolean("seenConnected");
@@ -146,6 +154,7 @@ public final class MainActivity extends ComponentActivity {
     LinearLayout registration=card(page,17);
     setting(registration,"phone","添加到电脑","同网自动发现 · 跨网络设备码",View.NO_ID,this::showDeviceRegistration);
     setting(registration,"wifi","外网控制","连接云端电脑 · 无需同一 Wi-Fi",View.NO_ID,this::showInternetControl);
+    setting(registration,"bell","短信同步","选择可以接收新短信的配对电脑",View.NO_ID,this::showSmsSettings);
     serviceError=text(page,"",12,RED,false); serviceError.setVisibility(View.GONE);
 
     permissionCount=heading(page,"权限准备","");
@@ -259,6 +268,7 @@ public final class MainActivity extends ComponentActivity {
       message("请先结束当前控制会话，再连接另一台电脑。"); return;
     }
     if (service!=null) stopService(new Intent(this,ControlService.class));
+    if (!token.equals(pairing().getString("token",""))) new SmsOutbox(this).configure("adb", "");
     pairing().edit().putString("token",token).putString("computer",computer).apply();
     seenConnected=false; dismissSheet();
     try { startForegroundService(new Intent(this,ControlService.class)); }
@@ -402,6 +412,7 @@ public final class MainActivity extends ComponentActivity {
     actionButton(content,"结束连接并更换",true,() -> {
       RecoverySettings recovery=new RecoverySettings(this); recovery.enabled(false); recovery.advanced(false);
       ControlService service=ControlService.current; if (service!=null) service.localControl("stop");
+      new SmsOutbox(this).configure("adb", "");
       stopService(new Intent(this,ControlService.class)); pairing().edit().remove("token").remove("computer").apply();
       store.statusEnabled(false); stopService(new Intent(this,StatusSyncService.class));
       seenConnected=false; dismissSheet(); if (settingsDialog!=null) settingsDialog.dismiss(); main.postDelayed(this::updateHome,150);
@@ -511,6 +522,50 @@ public final class MainActivity extends ComponentActivity {
       });
     });
   }
+  private String smsPairing(String route) {
+    if ("adb".equals(route)) return SmsOutbox.peer(pairing().getString("token",""));
+    JSONObject link = InternetPhoneSettings.link(this);
+    return "internet".equals(route) && link != null ? SmsOutbox.peer(link.optString("token")) : "";
+  }
+
+  private void enableSms() {
+    if (smsPeer.isEmpty() || !smsPeer.equals(smsPairing(smsRoute))) {
+      message("配对已改变，请重新选择电脑。"); return;
+    }
+    new SmsOutbox(this).configure(smsRoute, smsPeer);
+  }
+
+  private void showSmsSettings() {
+    LinearLayout content = showSheet("短信同步");
+    SmsOutbox sms = new SmsOutbox(this);
+    paragraph(content,"选择电脑后，新收到的普通短信将同步到其收件箱。离线时手机加密暂存最近 48 小时的最多 100 条短信。");
+    boolean paired = false;
+    for (String route : new String[]{"adb","internet"}) {
+      String peer = smsPairing(route);
+      if (peer.isEmpty()) continue;
+      paired = true;
+      String computer = "adb".equals(route) ? pairing().getString("computer","电脑") : InternetPhoneSettings.name(this);
+      boolean granted = sms.granted(route, peer);
+      info(content, computer, "adb".equals(route) ? "USB / Wi-Fi 配对" : "HTTPS 配对");
+      if (granted && !sms.permitted()) {
+        paragraph(content,"系统短信权限已关闭，当前未同步。");
+        actionButton(content,"检查短信权限",false,() -> startActivity(new Intent(
+            Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:" + getPackageName()))));
+      }
+      actionButton(content, granted ? "关闭同步并清空待发短信" : "向这台电脑同步新短信", !granted, () -> {
+        if (granted) { sms.configure(route, ""); showSmsSettings(); return; }
+        new AlertDialog.Builder(this).setTitle("向 " + computer + " 同步新短信？")
+            .setMessage("这台电脑将保存发送方、短信正文、接收时间和可用的 SIM 卡槽。")
+            .setNegativeButton("取消",null).setPositiveButton("允许",(dialog,which) -> {
+              smsRoute = route; smsPeer = peer;
+              if (!sms.permitted()) smsPermission.launch(Manifest.permission.RECEIVE_SMS);
+              else { enableSms(); smsRoute = ""; smsPeer = ""; showSmsSettings(); }
+            }).show();
+      });
+    }
+    if (!paired) paragraph(content,"请先在电脑的手机控制台连接 Android 配套 App，或在手机首页完成外网控制配对。");
+  }
+
   private void showInternetControl() {
     JSONObject link=InternetPhoneSettings.link(this);
     LinearLayout content=showSheet("外网控制");
@@ -769,6 +824,7 @@ public final class MainActivity extends ComponentActivity {
 
   @Override protected void onSaveInstanceState(Bundle state) {
     state.putBoolean("permissionsExpanded",permissionsExpanded); state.putInt("lastPermissionCount",lastPermissionCount);
+    state.putString("smsRoute",smsRoute); state.putString("smsPeer",smsPeer);
     state.putBoolean("seenConnected",seenConnected);
     super.onSaveInstanceState(state);
   }

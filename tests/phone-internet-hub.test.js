@@ -10,11 +10,11 @@ const { InternetPhoneHub, internetEndpoint } = loadCli('src/main/phones/internet
 const { InternetPhoneBroker } = loadCli('src/main/phones/internet-broker.ts');
 const token = () => randomBytes(32).toString('hex');
 
-async function fixture(t) {
+async function fixture(t, receiveSms) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pp-internet-'));
   let now = Date.now();
   const events = [];
-  const make = () => new InternetPhoneHub({ root, computer: 'Cloud PC', pairingScheme: 'profilepilot-dev', now: () => now,
+  const make = () => new InternetPhoneHub({ root, computer: 'Cloud PC', receiveSms, pairingScheme: 'profilepilot-dev', now: () => now,
     broker: new InternetPhoneBroker({ pollTimeoutMs: 30, requestTimeoutMs: 2000 }),
     connected: (id, name, epoch) => events.push({ event: 'connect', id, name, epoch }),
     disconnected: (id, epoch) => events.push({ event: 'disconnect', id, epoch }) });
@@ -127,4 +127,21 @@ test('public endpoint parsing rejects insecure URLs and embedded credentials', (
   assert.equal(internetEndpoint('https://cloud.example:18770/'), 'https://cloud.example:18770');
   for (const value of ['http://cloud.example', 'https://user:pass@cloud.example', 'https://cloud.example/path', 'https://cloud.example?token=secret', 'https://cloud.example/#fragment', 'https://cloud.example:0'])
     assert.throws(() => internetEndpoint(value));
+});
+
+test('only the authenticated current polling phone may deliver SMS and receive its receipt', async t => {
+  const deliveries = [];
+  const f = await fixture(t, (device, name, sms) => {
+    deliveries.push({ device, name, sms });
+    return sms.messageId;
+  });
+  const sms = { event: 'sms:received', messageId: randomUUID(), message: 'sample'.repeat(1500) };
+  assert.equal((await f.phone('/v1/connect')).receiveSms, true);
+  assert.equal((await f.phone('/v1/poll', { sms }, token())).status, 401);
+  assert.equal((await f.phone('/v1/poll', { sms, connectionId: randomUUID() })).ok, false);
+  assert.equal((await f.phone('/v1/poll', { sms, deviceId: randomUUID() })).ok, false);
+  assert.deepEqual(deliveries, []);
+  assert.equal((await f.phone('/v1/poll', { sms })).smsAck, sms.messageId);
+  assert.deepEqual(deliveries, [{ device: f.deviceId, name: 'Test phone', sms }]);
+  assert.ok(!JSON.stringify(f.hub.status()).includes(sms.message));
 });

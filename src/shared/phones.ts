@@ -117,6 +117,8 @@ export interface PhoneActionResult { state: PhoneSessionState; result: unknown; 
 export interface PhoneBasicModeInput { id: string; sessionId: string; generation: number; mode: "view" | "control"; }
 export type PhoneSetting = "accessibility" | "overlay" | "notifications" | "developerOptions" | "usbDebugging" | "wirelessDebugging";
 export interface PhonesApi {
+  smsInbox(): Promise<import("./phone-sms").PhoneSmsEntry[]>;
+  onSmsReceived(listener: () => void): () => void;
   setDefault(id: string | null): Promise<PhonesSnapshot>;
   iphoneSetup(): Promise<import("./iphones").IphoneToolsStatus>;
   iphoneDoctor(): Promise<import("./iphones").IphoneToolsStatus>;

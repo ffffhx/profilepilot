@@ -12,6 +12,7 @@ final class InternetPhoneClient implements Closeable {
   interface Handler { JSONObject handle(String method, JSONObject body, ControlTiming timing, java.util.function.BooleanSupplier valid) throws Exception; }
   private final JSONObject link;
   private final Handler handler;
+  private final SmsOutbox sms;
   private final Runnable lost;
   private volatile boolean closed;
   private volatile HttpsURLConnection current;
@@ -20,7 +21,8 @@ final class InternetPhoneClient implements Closeable {
   volatile String status = "正在连接云端电脑";
   volatile boolean connected;
 
-  InternetPhoneClient(JSONObject source, Handler handler, Runnable lost) throws Exception {
+  InternetPhoneClient(android.content.Context context, JSONObject source, Handler handler, Runnable lost) throws Exception {
+    sms = new SmsOutbox(context);
     link = new JSONObject(source.toString()); this.handler = handler; this.lost = lost;
     worker = new Thread(this::run, "phone-internet-control"); worker.setDaemon(true); worker.start();
   }
@@ -43,9 +45,20 @@ final class InternetPhoneClient implements Closeable {
       java.util.concurrent.atomic.AtomicBoolean live = new java.util.concurrent.atomic.AtomicBoolean(true);
       try {
         JSONObject identity = new JSONObject().put("deviceId", link.getString("deviceId")).put("connectionId", connectionId);
-        call("/v1/connect", identity, 10000); connected = true; failures = 0; status = "外网控制已连接";
+        boolean acceptsSms = call("/v1/connect", identity, 10000).optBoolean("receiveSms");
+        String smsPeer = SmsOutbox.peer(link.getString("token"));
+        connected = true; failures = 0; status = "外网控制已连接";
         while (!closed) {
-          JSONObject packet = call("/v1/poll", identity, 25000);
+          JSONObject poll = new JSONObject(identity.toString());
+          if (acceptsSms) {
+            try { poll.put("sms", sms.next("internet", smsPeer, "")); }
+            catch (Exception unavailable) { android.util.Log.w("ProfilePilotSms", "待同步短信暂不可用"); }
+          }
+          JSONObject packet = call("/v1/poll", poll, 25000);
+          if (poll.has("sms") && packet.optString("smsAck").equals(poll.getJSONObject("sms").getString("messageId"))) {
+            try { sms.next("internet", smsPeer, packet.getString("smsAck")); }
+            catch (Exception unavailable) { android.util.Log.w("ProfilePilotSms", "短信回执暂未保存"); }
+          }
           JSONObject command = packet.optJSONObject("command");
           if (command == null) continue;
           JSONObject result = receipts.get(command.optString("id"));

@@ -64,8 +64,17 @@ public final class ControlService extends Service {
         overlay = new ControlOverlay(this);
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(screenOff, new IntentFilter(Intent.ACTION_SCREEN_OFF), Context.RECEIVER_NOT_EXPORTED);
         else registerReceiver(screenOff, new IntentFilter(Intent.ACTION_SCREEN_OFF));
-        try { if (token.matches("[a-f0-9]{64}")) server = new PhoneServer(token, this::handle); }
-        catch (Exception error) { session.lastAction = "连接服务启动失败，请重试"; stopSelf(); return; }
+        if (token.matches("[a-f0-9]{64}")) try {
+            String smsPeer = SmsOutbox.peer(token);
+            server = new PhoneServer(token, (method, body, timing) -> {
+                JSONObject response = handle(method, body, timing);
+                if ("sync".equals(method) && body.optBoolean("receiveSms") && response.optBoolean("ok")) {
+                    try { response.put("sms", new SmsOutbox(this).next("adb", smsPeer, body.optString("smsAck"))); }
+                    catch (Exception unavailable) { android.util.Log.w("ProfilePilotSms", "待同步短信暂不可用"); }
+                }
+                return response;
+            });
+        } catch (Exception error) { session.lastAction = "连接服务启动失败，请重试"; stopSelf(); return; }
         main.post(tick);
         LanDiscovery.acquire(this);
     }
@@ -95,7 +104,7 @@ public final class ControlService extends Service {
         if (internet == null && link != null) {
             long epoch = ++internetEpoch;
             String peer = "internet:" + link.optString("serverId"), computer = link.optString("computer");
-            try { internet = new InternetPhoneClient(link,
+            try { internet = new InternetPhoneClient(this, link,
                 (method, body, timing, valid) -> handlePeer(peer, computer, epoch, method, body, timing, valid),
                 () -> main.post(() -> {
                     if (epoch == internetEpoch && peers.owns(peer)) {

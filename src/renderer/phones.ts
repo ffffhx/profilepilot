@@ -20,6 +20,8 @@ import { openGameFollower } from "./game-follow";
 import { openIphoneAdd, openIphoneScreen, renderIphonePane } from "./iphone";
 import { experimentalGameFollowEnabled, experimentalScreenCameraEnabled, onExperimentalFeaturesChanged } from "./experimental-features";
 
+import { attachSmsInbox } from "./phone-sms";
+
 const root = document.getElementById("phones")!;
 const esc = (value: unknown) => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 const shapes = {
@@ -47,6 +49,7 @@ root.innerHTML = `${workspaceSwitcher("phones")}${workspaceIdentityBar()}<main c
 const drawer = root.querySelector<HTMLDialogElement>(".phone-details")!;
 root.querySelector(".pc-control-brand p")!.textContent = "管理浏览器、桌面应用与 Android / iPhone 设备";
 root.querySelector(".pc-control-header")!.insertAdjacentHTML("beforeend", '<button class="phone-text-button" data-action="game-follow" hidden>队友跟随</button>');
+attachSmsInbox(root.querySelector<HTMLElement>(".pc-control-header")!);
 const gameFollowButton = root.querySelector<HTMLButtonElement>('[data-action="game-follow"]')!;
 const syncExperimentalControls = () => { gameFollowButton.hidden = !experimentalGameFollowEnabled(); };
 syncExperimentalControls();

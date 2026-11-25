@@ -1,8 +1,11 @@
-import { BrowserWindow, dialog, ipcMain, net, session, shell } from "electron";
+import { app, safeStorage, Notification, BrowserWindow, dialog, ipcMain, net, session, shell } from "electron";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { isWorkspaceShell } from "../workspace-shell";
 import { PHONE_CHANNEL, PHONE_CHANGED } from "../../shared/phones";
+import { SmsInbox } from "./sms-inbox";
+import { secureStorageAvailable } from "./secrets";
+import { readCompanion } from "./companion";
 import { PhonesService } from "./service";
 import { executePhoneCommand } from "./management";
 import { AndroidSetup } from "./android-setup";
@@ -12,7 +15,21 @@ import { z } from "zod";
 import type { PhoneVideoStream } from "./screen-video";
 
 export function registerPhones(root: string, apkPath: string, poll = true): PhonesService {
-  const service = new PhonesService({ root, apkPath, iphoneFetch: (input, init) => net.fetch(input instanceof URL ? input.href : input, init), cameraCapture: desktopCameraCapture(), androidSetup: new AndroidSetup({
+  const smsRoot = readCompanion(apkPath).variant === "debug" ? path.join(root, "development") : root;
+  const inbox = new SmsInbox(smsRoot, {
+    encrypt(value) {
+      if (!secureStorageAvailable()) throw new Error("系统安全存储暂不可用");
+      return safeStorage.encryptString(value);
+    },
+    decrypt: value => safeStorage.decryptString(value)
+  }, name => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed() && trusted(window.webContents.getURL(), true)) window.webContents.send("phone-sms-received");
+    }
+    if (Notification.isSupported()) new Notification({ title: "收到新短信", body: name + " · 在手机控制台的短信收件箱查看" }).show();
+  });
+  app.once("will-quit", () => inbox.close());
+  const service = new PhonesService({ root, apkPath, receiveSms: (id, name, sms) => inbox.receive(id, name, sms), iphoneFetch: (input, init) => net.fetch(input instanceof URL ? input.href : input, init), cameraCapture: desktopCameraCapture(), androidSetup: new AndroidSetup({
     fetch: (input, init) => net.fetch(input instanceof URL ? input.href : input, init),
     proxy: async () => {
       const route = (await session.defaultSession.resolveProxy("https://dl.google.com/android/repository/repository2-3.xml")).split(";")[0].trim();
@@ -29,6 +46,7 @@ export function registerPhones(root: string, apkPath: string, poll = true): Phon
     if (event.senderFrame !== event.sender.mainFrame || !trusted(url)) throw new Error("手机接口仅供 ProfilePilot 工作区使用。");
     if (method === "snapshot") return service.snapshot();
     if (!trusted(url, true)) throw new Error("请在手机工作区操作设备。");
+    if (method === "sms-inbox") return inbox.list();
     if (method === "iphone-select-file") {
       z.object({ kind: z.literal("ipa") }).strict().parse(params);
       const result = await dialog.showOpenDialog({ title: "选择已签名的 iPhone 控制组件", properties: ["openFile"], filters: [{ name: "iPhone IPA", extensions: ["ipa"] }] });

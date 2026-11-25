@@ -96,6 +96,7 @@ final class InternetPhoneSettings {
 
   static void forget(Context context) {
     synchronized (LOCK) {
+      new SmsOutbox(context).configure("internet", "");
       preferences(context).edit().remove("link").remove("pending").putBoolean("enabled", false).apply();
     }
   }

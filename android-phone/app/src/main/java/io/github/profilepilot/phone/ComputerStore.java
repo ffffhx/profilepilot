@@ -60,6 +60,21 @@ final class ComputerStore {
             cipher.doFinal(value.getBytes(StandardCharsets.UTF_8)), Base64.NO_WRAP);
   }
 
+  JSONArray readSmsQueue(SharedPreferences storage, String route) throws Exception {
+    synchronized (LOCK) {
+      return new JSONArray(decrypt(storage.getString("queue-" + route, "")));
+    }
+  }
+
+  void writeSmsQueue(SharedPreferences storage, String route, JSONArray queue) throws Exception {
+    synchronized (LOCK) {
+      SharedPreferences.Editor edit = storage.edit();
+      if (queue.length() == 0) edit.remove("queue-" + route);
+      else edit.putString("queue-" + route, encrypt(queue.toString()));
+      if (!edit.commit()) throw new java.io.IOException("无法更新待同步短信");
+    }
+  }
+
   JSONArray all() throws Exception {
     synchronized (LOCK) {
       return new JSONArray(decrypt(prefs.getString("computers", "")));

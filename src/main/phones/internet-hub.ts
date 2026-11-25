@@ -22,6 +22,7 @@ interface Options {
   computer: string;
   pairingScheme: string;
   changed?(): void;
+  receiveSms?(device: string, name: string, sms: unknown): string;
   connected?(id: string, name: string, connectionId: string): void;
   disconnected?(id: string, connectionId: string): void;
   now?: () => number;
@@ -233,7 +234,7 @@ export class InternetPhoneHub {
       const device = this.saved.devices.find(value => same(value.tokenHash, hash(token)));
       if (!device) throw Object.assign(internetFault("PHONE_PAIRING_REQUIRED", "外网配对已失效。"), { httpStatus: 401 });
       this.limit(`device:${device.id}`, 900);
-      const raw = await this.body(request, request.url === "/v1/result" ? 4 * 1024 * 1024 + 4096 : 4096);
+      const raw = await this.body(request, request.url === "/v1/result" ? 4 * 1024 * 1024 + 4096 : request.url === "/v1/poll" ? 512 * 1024 : 4096);
       if (request.url === "/v1/artifact") {
         const part = z.object({ deviceId: uuid, connectionId: uuid, artifactId: secret, offset: z.number().int().nonnegative() }).strict().parse(raw);
         const artifact = this.artifacts.get(part.artifactId);
@@ -253,7 +254,7 @@ export class InternetPhoneHub {
         } finally { await file.close(); }
         return;
       }
-      const input = z.object({ deviceId: uuid, connectionId: uuid, requestId: uuid.optional(), result: z.unknown().optional() }).strict().parse(raw);
+      const input = z.object({ deviceId: uuid, connectionId: uuid, requestId: uuid.optional(), result: z.unknown().optional(), sms: z.unknown().optional() }).strict().parse(raw);
       if (input.deviceId !== device.id) throw internetFault("PHONE_PAIRING_REQUIRED", "手机身份与配对记录不匹配。");
       const id = `internet-${device.id}`;
       if (request.url === "/v1/connect") {
@@ -263,7 +264,7 @@ export class InternetPhoneHub {
         this.broker.connect(id, input.connectionId);
         this.live.set(device.id, { connectionId: input.connectionId, seenAt: this.now() });
         if (fresh) this.options.connected?.(id, device.name, input.connectionId);
-        this.changed(); this.reply(response, 200, { ok: true, computer: this.options.computer }); return;
+        this.changed(); this.reply(response, 200, { ok: true, computer: this.options.computer, receiveSms: !!this.options.receiveSms }); return;
       }
       const live = this.live.get(device.id);
       if (!live || live.connectionId !== input.connectionId) throw internetFault("PHONE_CONNECTION_REQUIRED", "外网连接已改变，请重新连接并核对会话。");
@@ -276,10 +277,15 @@ export class InternetPhoneHub {
         this.broker.respond(id, input.connectionId, input.requestId, input.result);
         this.reply(response, 200, { ok: true }); return;
       }
+      let smsAck: string | undefined;
+      if (input.sms !== undefined && this.saved.devices.includes(device)) {
+        try { smsAck = this.options.receiveSms?.(device.id, device.name, input.sms); }
+        catch { /* Leave the SMS queued without interrupting the control connection. */ }
+      }
       const abort = new AbortController();
       const cancel = () => abort.abort();
       response.once("close", cancel);
-      try { this.reply(response, 200, { ok: true, command: await this.broker.poll(id, input.connectionId, abort.signal) }); }
+      try { this.reply(response, 200, { ok: true, smsAck, command: await this.broker.poll(id, input.connectionId, abort.signal) }); }
       finally { response.removeListener("close", cancel); }
     } catch (error) {
       const fault = error as { code?: string; httpStatus?: number; message?: string; actionOutcome?: string };

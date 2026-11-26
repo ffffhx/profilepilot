@@ -28,11 +28,11 @@ if (process.platform === 'darwin') {
         throw new Error('Xcode Command Line Tools (xcrun swiftc) are required to build native/desktop-mac.swift.');
       }
     })();
-    const args = ['swiftc', '-O', source, '-o'];
+    const compilerOptions = ['swiftc', '-parse-as-library', '-O'];
     const buildId = hash(JSON.stringify({
       format: 'desktop-mac-v1-swift',
       compilerIdentity,
-      options: ['swiftc', '-O'],
+      options: compilerOptions,
       sources: inputs([source])
     }));
     const outputDigestPath = destination + '.output.sha256';
@@ -46,7 +46,7 @@ if (process.platform === 'darwin') {
       mkdirSync(path.dirname(destination), { recursive: true });
       const temporary = `${destination}.${process.pid}.tmp`;
       try {
-        execFileSync('xcrun', [...args, temporary], { cwd: root, stdio: 'pipe', timeout: 60000 });
+        execFileSync('xcrun', [...compilerOptions, source, '-o', temporary], { cwd: root, stdio: 'pipe', timeout: 60000 });
         chmodSync(temporary, 0o755);
         const outputDigest = hash(readFileSync(temporary));
         renameSync(temporary, destination);

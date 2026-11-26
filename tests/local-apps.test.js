@@ -206,12 +206,20 @@ test('failed launch reports its exit code and logs and remains editable', { time
 
 test('native service registration matches process and listener without connecting, starting or stopping the existing service', { timeout: 20000 }, async () => {
   const temp = temporary(); let connections = 0;
-  const server = require('node:net').createServer(socket => { connections++; socket.end(); });
+  const server = require('node:net').createServer(socket => socket.destroy());
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  // Count connections originating in this service's process. Independent localhost
+  // discovery clients can probe the fixture while the integration suite runs.
+  const channel = require('node:diagnostics_channel').channel('net.client.socket');
+  const onClient = ({ socket }) => socket.once('connect', () => {
+    if (socket.remotePort === port && socket.remoteAddress === '127.0.0.1') connections++;
+  });
+  channel.subscribe(onClient);
   const service = new LocalAppsService(path.join(temp.root, 'store'));
   try {
     const logPath = path.join(temp.root, 'native.log'); fs.writeFileSync(logPath, 'native service log');
-    const config = input(temp.root, { mode: 'service', servicePort: server.address().port, serviceProcess: process.execPath, logPath, command: 'exit 9' });
+    const config = input(temp.root, { mode: 'service', servicePort: port, serviceProcess: process.execPath, logPath, command: 'exit 9' });
     await assert.rejects(service.save({ ...config, serviceProcess: 'relative.exe' }), /完整程序/);
     const id = await service.save(config);
     const state = (await service.list())[0];
@@ -227,5 +235,8 @@ test('native service registration matches process and listener without connectin
     await assert.rejects(service.start(id), /已被占用/);
     await service.remove(id);
     assert.equal(server.listening, true); assert.equal(connections, 0);
-  } finally { await new Promise(resolve => server.close(resolve)); temp.clean(); }
+  } finally {
+    channel.unsubscribe(onClient);
+    await new Promise(resolve => server.close(resolve)); temp.clean();
+  }
 });

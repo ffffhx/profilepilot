@@ -18,7 +18,7 @@ ppilot browser --profile native:Default --session research claim --tab 123
 ppilot browser --session research observe
 ```
 
-Replace `native:Default` and `123` with actual status/tabs results. Choose a unique session name and reuse it. Claim an explicit existing tab when known; `--new-tab` requests a new page. `connected: true` alone does not guarantee compatibility: a claim requires extension 0.2.0+ with current capabilities. For `NATIVE_EXTENSION_UPDATE_REQUIRED`, update/reload the extension, preserving pairing.
+Replace `native:Default` and `123` with actual status/tabs results. Choose a unique session name and reuse it. Claim an explicit existing tab when known; `--new-tab` requests a new page. Extensions with `multiSession` support allow multiple concurrent sessions/Agents to share one Profile on disjoint tabs (`--tab ID` or `--new-tab`); claiming a tab already owned by another session or claiming while the Profile is under user takeover returns `NATIVE_SESSION_CONFLICT`. `connected: true` alone does not guarantee compatibility: a claim requires extension 0.2.0+ with current capabilities. For `NATIVE_EXTENSION_UPDATE_REQUIRED`, update/reload the extension, preserving pairing.
 
 ## Observe and act
 

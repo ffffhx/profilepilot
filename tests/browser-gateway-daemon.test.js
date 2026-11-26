@@ -1290,6 +1290,23 @@ test("Gateway protects every registered port instead of special-casing 9223", as
   }
 });
 
+test("a competing Gateway leaves first-run credentials to the daemon lock owner", async () => {
+  const home = mkdtempSync(path.join(gatewayTempDir, "pp-gw-lock-"));
+  try {
+    const root = path.join(home, ".profilepilot", "gateway");
+    // The winning process holds the lock but hasn't published its PID or keys yet.
+    mkdirSync(path.join(root, "daemon.lock"), { recursive: true });
+    const contender = testGatewayDaemon(home);
+    await assert.rejects(contender.start(), /正在启动/);
+    await contender.stop();
+    assert.ok(existsSync(path.join(root, "daemon.lock")));
+    assert.equal(existsSync(path.join(root, "control.token")), false);
+    assert.equal(existsSync(path.join(root, "internal.secret")), false);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("parallel Gateway ensure calls converge on exactly one daemon", async () => {
   const home = mkdtempSync(path.join(gatewayTempDir, "profilepilot-gateway-ensure-"));
   const daemonScriptPath = path.join(__dirname, "..", "dist", "main", "browser-gateway-daemon.js");

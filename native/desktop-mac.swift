@@ -555,8 +555,8 @@ private final class MacDesktopDriver {
     private func observeWindow(_ params: [String: Any], forceScreenshot: Bool) throws -> [String: Any] {
         try ProtocolJson.requireFields(params, "windowId,screenshot,screenshotOnly,imageOnly,format")
         let id = try ProtocolJson.text(params, "windowId")
-        let screenshotOnly = (try ProtocolJson.flag(params, "screenshotOnly")) || (try ProtocolJson.flag(params, "imageOnly"))
-        let wantScreenshot = forceScreenshot || screenshotOnly || (try ProtocolJson.flag(params, "screenshot"))
+        let screenshotOnly = try ProtocolJson.flag(params, "screenshotOnly") || ProtocolJson.flag(params, "imageOnly")
+        let wantScreenshot = try forceScreenshot || screenshotOnly || ProtocolJson.flag(params, "screenshot")
         let format = try ProtocolJson.text(params, "format", fallback: "jpeg").lowercased()
         try ProtocolJson.require(format == "jpeg" || format == "jpg" || format == "png")
 

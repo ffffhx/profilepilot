@@ -15,7 +15,20 @@ test('Browser CLI validates before dispatch and preserves portable JSON inputs',
   fs.writeFileSync(cli, buildSync({ entryPoints: [path.resolve('src/main/profilepilot-cli.ts')], bundle: true, platform: 'node', format: 'cjs', write: false, logLevel: 'silent' }).outputFiles[0].contents);
   const requests = [];
   let browserReply = command => command;
-  const server = http.createServer((req, res) => { const chunks = []; req.on('data', chunk => chunks.push(chunk)); req.on('end', () => { const command = JSON.parse(Buffer.concat(chunks)); requests.push(command); res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ ok: true, result: req.url === '/native-service' ? { service: 'browser', version: BROWSER_SERVICE_VERSION, pid: process.pid, root } : browserReply(command) })); }); });
+  const server = http.createServer((req, res) => {
+    if (req.method !== 'POST') { res.writeHead(405, { Allow: 'POST' }).end(); return; }
+    const chunks = [];
+    req.on('data', chunk => chunks.push(chunk));
+    req.on('end', () => {
+      const command = JSON.parse(Buffer.concat(chunks));
+      requests.push(command);
+      const result = req.url === '/native-service'
+        ? { service: 'browser', version: BROWSER_SERVICE_VERSION, pid: process.pid, root }
+        : browserReply(command);
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ ok: true, result }));
+    });
+  });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   fs.writeFileSync(path.join(root, 'native-control.json'), JSON.stringify({ version: 1, port: server.address().port, token: 'a'.repeat(64), pid: process.pid, service: 'browser', serviceVersion: BROWSER_SERVICE_VERSION }));
   t.after(async () => { await new Promise(resolve => server.close(resolve)); fs.rmSync(root, { recursive: true, force: true }); });

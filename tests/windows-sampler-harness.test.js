@@ -107,14 +107,14 @@ test('frozen legacy baseline really calls PowerShell process/RM and dual-family 
   const metadata = JSON.parse(await fs.readFile(path.join(__dirname, '../scripts/e2e/windows-sampler-legacy-platform.json'), 'utf8'));
   assert.equal(createHash('sha256').update(source).digest('hex'), metadata.sha256);
   const file = 'C:\\owned\\nonce.txt';
-  const legacy = loadLegacySampler(source, segments, { execute: async (binary, args) => {
+  const legacy = loadLegacySampler(source, segments, { platform: 'win32', execute: async (binary, args) => {
     if (/WindowsSampler/i.test(binary)) { candidateCalls++; throw Error('Candidate forbidden'); }
-    if (path.basename(binary).toLowerCase() === 'netstat') {
+    if (path.win32.basename(binary).toLowerCase() === 'netstat') {
       const family = args.at(-1); calls.push('netstat.' + family);
       return { stdout: 'Active Connections\n  Proto  Local Address  Foreign Address  State  PID\n' + (family === 'tcp'
         ? '  TCP  127.0.0.1:22345  0.0.0.0:0  LISTENING  456\n' : '  TCP  [::1]:22346  [::]:0  LISTENING  456\n'), stderr: '' };
     }
-    assert.equal(path.basename(binary).toLowerCase(), 'powershell.exe'); assert.match(args.at(-1), /Add-Type/);
+    assert.equal(path.win32.basename(binary).toLowerCase(), 'powershell.exe'); assert.match(args.at(-1), /Add-Type/);
     if (args.at(-1).includes('ProfilePilotRestartManager')) {
       calls.push('powershell.rm'); return { stdout: JSON.stringify([{ path: file, pid: fixture.pid }]), stderr: '' };
     }

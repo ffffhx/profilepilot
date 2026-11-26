@@ -817,9 +817,11 @@ test('phone IPC only allows local workspace main frames and restricts mutation t
   instance.require = name => name === 'electron' ? { BrowserWindow: { getAllWindows: () => [] }, ipcMain: { handle: (_, callback) => handle = callback } } : Module.prototype.require.call(instance, name);
   instance._compile(bundle.outputFiles[0].text, source);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pp-phone-ipc-'));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const service = instance.exports.registerPhones(root, '', false);
-  t.after(() => service.close());
+  t.after(async () => {
+    await service.close();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
   const url = page => pathToFileURL(path.resolve(__dirname, '../public', page)).href;
   const event = (url, subframe = false) => { const frame = { url }; return { senderFrame: frame, sender: { mainFrame: subframe ? {} : frame } }; };
   assert.deepEqual(await handle(event(url('phones.html')), 'sms-inbox'), []);

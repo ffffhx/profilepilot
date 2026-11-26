@@ -30,7 +30,8 @@ test('status and screenshot timeouts explain recovery; input timeouts preserve u
 });
 
 test('phone screenshot crosses the authenticated CLI transport above 1 MiB', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pp-phone-response-'));
+  const temp = process.platform === 'win32' ? os.tmpdir() : '/tmp';
+  const root = fs.mkdtempSync(path.join(temp, 'pp-phone-response-'));
   const env = { PROFILEPILOT_MANAGEMENT_ROOT: root };
   let base64 = 'a'.repeat(1400000);
   const server = await startProfilePilotManagementServer({ homeDir: root, env, appVersion: base64, profileManager: {}, getPhoneService: () => ({ perform: async () => ({ state: {}, result: { mime: 'image/jpeg', base64 } }), performWrapper: async () => ({ state: {}, result: { mime: 'image/png', base64 } }), basicPerform: async () => ({ state: {}, result: { mime: 'image/png', base64 } }) }) });
@@ -48,7 +49,7 @@ test('phone screenshot crosses the authenticated CLI transport above 1 MiB', asy
     assert.equal(basic.ok, true); assert.equal(basic.data.result.base64.length, base64.length);
   } finally {
     await server.close();
-    assert.equal(path.dirname(root), path.resolve(os.tmpdir()));
+    assert.equal(path.dirname(root), path.resolve(temp));
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

@@ -84,10 +84,12 @@ export async function retireSamplerProcess({ identity, executable, close, closed
 // are exposed. Never resolve local imports to the current native candidate.
 export function loadLegacySampler(source, segments, options = {}) {
   const ts = require('typescript'), child = require('node:child_process'), original = options.execute || promisify(child.execFile);
+  const platform = options.platform ?? process.platform;
+  const legacyPath = platform === 'win32' ? path.win32 : path;
   const pending = new Set();
   const wrapped = (...args) => child.execFile(...args);
   wrapped[promisify.custom] = (...args) => {
-    const began = performance.now(), binary = path.basename(String(args[0])).toLowerCase();
+    const began = performance.now(), binary = legacyPath.basename(String(args[0])).toLowerCase();
     const operation = binary === 'netstat' || binary === 'netstat.exe' ? 'netstat.' + args[1].at(-1)
       : String(args[1]?.at(-1) || '').includes('ProfilePilotRestartManager') ? 'powershell.rm' : 'powershell.process';
     const running = (async () => {
@@ -103,8 +105,12 @@ export function loadLegacySampler(source, segments, options = {}) {
   }).outputText;
   const module = { exports: {} };
   const allowed = new Set(['node:os', 'node:path', 'node:child_process', 'node:util', 'node:crypto']);
-  vm.runInNewContext(transformed, { module, exports: module.exports, Buffer, process,
-    require: name => { check(allowed.has(name), 'SAMPLER_LEGACY_IMPORT_FORBIDDEN'); return name === 'node:child_process' ? { ...child, execFile: wrapped } : require(name); }
+  vm.runInNewContext(transformed, { module, exports: module.exports, Buffer, process: { env: process.env, platform },
+    require: name => {
+      check(allowed.has(name), 'SAMPLER_LEGACY_IMPORT_FORBIDDEN');
+      if (name === 'node:path') return legacyPath;
+      return name === 'node:child_process' ? { ...child, execFile: wrapped } : require(name);
+    }
   }, { filename: 'owned-legacy-windows-platform.cjs' });
   return { getWindowsSystemSnapshot: module.exports.getWindowsSystemSnapshot, findWindowsProcessesLockingPaths: module.exports.findWindowsProcessesLockingPaths,
     __samplerBenchmarkTcp: module.exports.__samplerBenchmarkTcp, __samplerBenchmarkSettle: () => Promise.allSettled([...pending]) };

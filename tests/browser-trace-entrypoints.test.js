@@ -15,7 +15,14 @@ const { ENGINE_VERSION } = loadCli('src/main/browser-engine/arguments.ts');
 const { controlRecovery } = loadCli('src/shared/control-recovery.ts');
 
 async function fixture(t) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pp-browser-trace-')), management = path.join(root, 'management');
+  // A macOS or Linux TMPDIR can exceed the Unix socket pathname limit.
+  const temp = process.platform === 'win32' ? os.tmpdir() : '/tmp';
+  const root = fs.mkdtempSync(path.join(temp, 'pp-browser-trace-')), management = path.join(root, 'management');
+  const listeners = [];
+  t.after(async () => {
+    await Promise.all(listeners.filter(listener => listener.listening).map(listener => new Promise(resolve => listener.close(resolve))));
+    fs.rmSync(root, { recursive: true, force: true });
+  });
   const cli = path.join(root, 'ppilot.cjs'), engine = path.join(root, 'profilepilot-browser-engine.cjs');
   for (const [entry, output] of [['src/main/profilepilot-cli.ts', cli], ['src/main/browser-engine/cli.ts', engine]]) {
     fs.writeFileSync(output, buildSync({ entryPoints: [path.resolve(entry)], bundle: true, platform: 'node', format: 'cjs', write: false, external: ['playwright-core'], logLevel: 'silent' }).outputFiles[0].contents);
@@ -25,6 +32,7 @@ async function fixture(t) {
   let failure = false, activity = 0, identity;
   const requests = [], nativeRequests = [];
   const server = http.createServer((req, res) => {
+    if (req.method !== 'POST') { res.writeHead(405, { Allow: 'POST' }).end(); return; }
     const chunks = []; req.on('data', chunk => chunks.push(chunk)); req.on('end', () => {
       const command = JSON.parse(Buffer.concat(chunks)); let response;
       if (req.url === '/native-service') response = { ok: true, result: { service: 'browser', version: BROWSER_SERVICE_VERSION, pid: process.pid, root } };
@@ -41,7 +49,8 @@ async function fixture(t) {
       res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(response));
     });
   });
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  listeners.push(server);
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   const record = { version: ENGINE_VERSION, pid: process.pid, port: server.address().port, token: 'a'.repeat(64), session, root: engineRoot };
   fs.writeFileSync(path.join(engineRoot, session + '.engine.json'), JSON.stringify(record));
   fs.writeFileSync(path.join(root, 'native-control.json'), JSON.stringify({ version: 1, port: record.port, token: record.token, pid: process.pid, service: 'browser', serviceVersion: BROWSER_SERVICE_VERSION }));
@@ -57,10 +66,10 @@ async function fixture(t) {
       socket.end(JSON.stringify(response) + '\n');
     });
   });
+  listeners.push(gateway);
   fs.mkdirSync(path.join(root, '.profilepilot', 'gateway'), { recursive: true });
   await new Promise((resolve, reject) => { gateway.once('error', reject); gateway.listen(browserGatewaySocketPath(root), resolve); });
   const env = { ...process.env, HOME: root, NODE_PATH: path.resolve('node_modules'), PROFILEPILOT_MANAGEMENT_ROOT: management, AGENT_BROWSER_SOCKET_DIR: engineRoot, PROFILEPILOT_CONTROL_TRACE_FD: undefined };
-  t.after(async () => { await Promise.all([new Promise(resolve => server.close(resolve)), new Promise(resolve => gateway.close(resolve))]); fs.rmSync(root, { recursive: true, force: true }); });
   const run = (args, input) => new Promise(resolve => {
     const child = spawn(process.execPath, [cli, '--task-kind', 'verification', '--task-id', 'private-task-value', 'browser', ...args], { env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '', stderr = ''; child.stdout.on('data', x => stdout += x); child.stderr.on('data', x => stderr += x); child.stdin.end(input);

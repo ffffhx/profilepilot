@@ -85,6 +85,7 @@ test('doctor checks the live service and wait-control observes release without c
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'browser readiness 空格 ')); t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const calls = []; let owner = 'other';
   const server = http.createServer(async (req, res) => {
+    if (req.method !== 'POST') { res.writeHead(405, { Allow: 'POST' }).end(); return; }
     let text = ''; for await (const c of req) text += c;
     const c = JSON.parse(text); calls.push(c.method);
     res.end(JSON.stringify({ ok: true, result: c.method === 'ping' ? { pid: process.pid, build: { buildId: 'old' } } : {

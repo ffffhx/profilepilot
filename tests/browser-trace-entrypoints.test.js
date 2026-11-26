@@ -25,6 +25,7 @@ async function fixture(t) {
   let failure = false, activity = 0, identity;
   const requests = [], nativeRequests = [];
   const server = http.createServer((req, res) => {
+    if (req.method !== 'POST') { res.writeHead(405, { Allow: 'POST' }).end(); return; }
     const chunks = []; req.on('data', chunk => chunks.push(chunk)); req.on('end', () => {
       const command = JSON.parse(Buffer.concat(chunks)); let response;
       if (req.url === '/native-service') response = { ok: true, result: { service: 'browser', version: BROWSER_SERVICE_VERSION, pid: process.pid, root } };

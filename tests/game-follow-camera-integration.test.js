@@ -142,10 +142,18 @@ test('weak worker proposals can select only id1 and require explicit opt-in and 
   }
 });
 
-test('viewport rejection or absence blocks camera movement while current full portraits remain usable', async t => {
+test('viewport rejection or absence blocks camera movement while current full portraits remain usable', { timeout: 15000 }, async t => {
+  // Each fixture frame represents fresh evidence. Advance time between inputs so
+  // worker scheduling on a busy runner cannot turn it into a stale-frame case.
+  t.mock.timers.enable({ apis: ['Date', 'setTimeout'] });
+  t.mock.method(performance, 'now', () => Date.now());
   for (const accepted of [undefined, false, true]) {
     const evidence = accepted === undefined ? {} : { cameraViewport: { accepted, reason: 'fixture' } };
     const h = harness(t, { nativeViewport: true, fullAt: 5,
+      touch: command => {
+        setImmediate(() => t.mock.timers.tick(450));
+        return { accepted: true, acceptedSequence: command.sequence };
+      },
       frames: [{}, {}, evidence, evidence, evidence, evidence],
       frameProof: h => {
         const touch = h.touches.at(-1), point = touch?.points.find(p => p.id === 1);

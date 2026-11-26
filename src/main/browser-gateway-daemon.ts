@@ -67,13 +67,12 @@ export class BrowserGatewayDaemon {
   private readonly socketPath: string;
   private readonly pidPath: string;
   private readonly lockPath: string;
-  private readonly internalSecret: string;
-  private readonly controlToken: string;
+  private controlToken = "";
   private readonly allowTestBrowserExecutable: boolean;
   private readonly managedProfilesPath: string;
   private readonly managedProfiles = new Map<number, ManagedGatewayProfile>();
   private readonly control: BrowserGatewayControlPlane;
-  private readonly gateway: BrowserGatewayServer;
+  private gateway!: BrowserGatewayServer;
   private readonly controlServer: net.Server;
   private readonly subscribers = new Set<Socket>();
   private readonly sessionControlQueues = new Map<string, Promise<void>>();
@@ -114,18 +113,19 @@ export class BrowserGatewayDaemon {
     );
     mkdirSync(this.root, { recursive: true, mode: 0o700 });
     this.loadManagedProfiles();
-    this.internalSecret = loadOrCreateSecret(browserGatewaySecretPath(homeDir));
-    this.controlToken = loadOrCreateSecret(browserGatewayControlTokenPath(homeDir));
-    let gatewayRef: BrowserGatewayServer | null = null;
     this.control = new BrowserGatewayControlPlane({
       homeDir,
       onEvent: (event) => {
-        gatewayRef?.handleControlEvent(event);
+        this.gateway?.handleControlEvent(event);
         this.publishControlEvent(event);
       }
     });
-    this.gateway = new BrowserGatewayServer(this.control, {
-      internalSecret: this.internalSecret,
+    this.controlServer = net.createServer((socket) => this.handleControlSocket(socket));
+  }
+
+  private createGateway(): BrowserGatewayServer {
+    return new BrowserGatewayServer(this.control, {
+      internalSecret: loadOrCreateSecret(browserGatewaySecretPath(this.homeDir)),
       onBackendClose: (publicPort) => {
         this.cancelDriverReconnectForPort(publicPort);
         void this.gateway.unregisterBackend(publicPort, false).finally(() => {
@@ -147,12 +147,19 @@ export class BrowserGatewayDaemon {
         }
       }
     });
-    gatewayRef = this.gateway;
-    this.controlServer = net.createServer((socket) => this.handleControlSocket(socket));
   }
 
   async start(): Promise<void> {
     this.acquireDaemonLock();
+    // Only the lock owner may initialize credentials. A competing process
+    // replacing control.token would lock clients out of the running daemon.
+    try {
+      this.controlToken = loadOrCreateSecret(browserGatewayControlTokenPath(this.homeDir));
+      this.gateway = this.createGateway();
+    } catch (error) {
+      this.cleanupFiles();
+      throw error;
+    }
     if (process.platform !== "win32") rmSync(this.socketPath, { force: true });
     await new Promise<void>((resolve, reject) => {
       this.controlServer.once("error", reject);
@@ -173,7 +180,7 @@ export class BrowserGatewayDaemon {
   }
 
   async stop(): Promise<void> {
-    if (this.shuttingDown) return;
+    if (this.shuttingDown || !this.gateway) return;
     this.shuttingDown = true;
     for (const reconnect of this.driverReconnectTimers.values()) clearTimeout(reconnect.timer);
     this.driverReconnectTimers.clear();
